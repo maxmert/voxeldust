@@ -48,11 +48,71 @@ use crate::{
 const STREAM_KIND_DATA: u8 = 0x00;
 const STREAM_KIND_ACK: u8 = 0x01;
 
+/// The role of an accepted uni stream (CA-1 S1). A pure classifier of the 1-byte `STREAM_KIND` tag so the ONE
+/// unified per-connection dispatcher has exactly one branch per role (HR5 per-arm coverage) and an unknown tag
+/// is a straight drop — never a mis-route. Replaces the two ad-hoc `kind[0] != STREAM_KIND_*` checks that lived
+/// in the (now-merged) `serve_data_stream` + `ack_reader_task`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamKind {
+    Data,
+    Ack,
+}
+
+/// Classify a `STREAM_KIND` tag byte. `None` ⇒ unknown tag (drop the stream wholesale, ledger untouched).
+fn stream_kind(tag: u8) -> Option<StreamKind> {
+    if tag == STREAM_KIND_DATA {
+        Some(StreamKind::Data)
+    } else if tag == STREAM_KIND_ACK {
+        Some(StreamKind::Ack)
+    } else {
+        None
+    }
+}
+
 /// Registry of this node's DIALED (outbound) connections, keyed by dest peer (latest-wins on redial ⇒
 /// bounded). [`MeshControl::drop_connections`] closes them all — the transient-blip lever (the endpoint
 /// stays bound), DISTINCT from [`MeshControl::kill`] (which closes the endpoint). Closing connection C
 /// tears down BOTH the DATA streams (this→peer) AND their reverse ACK stream on C, coherently.
 type ConnRegistry = Arc<Mutex<BTreeMap<NodeId, quinn::Connection>>>;
+
+/// CA-1 — the LEARNED-peer table (reply-on-connection). An UNBOOKED peer that dialed IN and whose return path
+/// this node learned from the first authenticated frame on its accepted connection. Keyed by the sender-asserted
+/// NodeId (latest-wins per NodeId; capped by `learned_peers_max`). DISTINCT from [`ConnRegistry`] (our DIALED
+/// connections, the `drop_connections` lever): a `LearnedConn` is an ACCEPTED connection we reply back over. Each
+/// entry carries the connection AND the per-connection ack watch receiver the accepted-conn dispatcher feeds, so
+/// a lazily-spawned learned lane retires its unacked window over that same connection.
+type LearnedPeers = Arc<Mutex<BTreeMap<NodeId, LearnedConn>>>;
+
+/// One learned inbound peer (CA-1): the held accepted connection + the ack receiver for the reply lane.
+#[derive(Clone)]
+struct LearnedConn {
+    conn: quinn::Connection,
+    ack_rx: watch::Receiver<Option<AckFrame>>,
+}
+
+/// The connection source for a `peer_writer` lane (CA-1). A BOOKED lane DIALS its static address on demand; a
+/// LEARNED lane NEVER dials — it adopts the held accepted connection the receive side recorded in `LearnedPeers`
+/// (its dispatcher + ack_egress are already owned by that connection's `serve_connection`).
+enum ConnSource {
+    Dial(SocketAddr),
+    Learned(LearnedPeers),
+}
+
+/// CA-1 — the context the accept-path dispatcher threads to the DATA reader so it can learn an unbooked dial-in
+/// peer's return connection on the first authenticated frame. Absent (`None`) on a DIALED connection's dispatcher
+/// (a dialer never learns — only the acceptor of an unbooked peer does).
+#[derive(Clone)]
+struct LearnCtx {
+    learned: LearnedPeers,
+    booked: Arc<BTreeSet<NodeId>>,
+    local: NodeId,
+    cap: usize,
+    /// The accepted connection to record (this dispatcher's own connection).
+    conn: quinn::Connection,
+    /// The per-connection ack receiver a learned lane subscribes to (paired with the dispatcher's `ack_out`).
+    ack_rx: watch::Receiver<Option<AckFrame>>,
+    stats: Arc<MeshStats>,
+}
 
 /// Mesh configuration — ONE struct, no inline literals at use sites.
 #[derive(Clone, Debug)]
@@ -81,7 +141,17 @@ pub struct MeshConfig {
     pub process_incarnation: u64,
     /// The at-least-once redelivery tuning (R-2b). `validate`d loud at `spawn_mesh` boot.
     pub reliability: MeshReliabilityTuning,
+    /// CA-1 — the cap on the LEARNED-peer table (reply-on-connection): how many distinct UNBOOKED dial-in peers
+    /// this node will remember return-connections for. Bounds a churn/flood memory vector on the trusted
+    /// static-roster tier (a new learned peer past the cap is rejected + counted via
+    /// [`MeshStats::learned_peers_rejected`], never silently). NOT deployable to a churny/untrusted peer tier
+    /// until M6 (RecvLedger eviction) lands — see DEFERRED.md. Default [`DEFAULT_LEARNED_PEERS_MAX`].
+    pub learned_peers_max: usize,
 }
+
+/// Default learned-peer table cap (CA-1). Generously above the static-roster tier; raise (or add per-peer
+/// stores) only with a real churn need + M6 eviction — never speculatively.
+pub const DEFAULT_LEARNED_PEERS_MAX: usize = 4096;
 
 /// Default per-lane unacked-retry-buffer ceiling (R-4' shed point; counted in R-2b). 4 MiB.
 pub const DEFAULT_RETRY_BUFFER_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -193,6 +263,7 @@ impl MeshConfig {
             redial_backoff_max: Duration::from_secs(5),
             process_incarnation,
             reliability: MeshReliabilityTuning::default(),
+            learned_peers_max: DEFAULT_LEARNED_PEERS_MAX,
         }
     }
 }
@@ -243,6 +314,10 @@ pub struct MeshStats {
     /// R-3'). A value stuck at 0 while reliable traffic flows is a DEAD ACK PATH alert (the ack never
     /// reached this peer's writer) — the retry buffer would then grow unbounded until the R-4' shed.
     pub reliable_acked: AtomicU64,
+    /// RECEIVER (CA-1): a new UNBOOKED dial-in peer was NOT learned because the learned-peer table is at
+    /// `learned_peers_max` (a churn/flood guard on the static-roster tier). Must stay ~0 on a fixed roster; a
+    /// nonzero value is a cap-too-low or peer-churn ALERT. Also warned loudly at the reject site.
+    pub learned_peers_rejected: AtomicU64,
 }
 
 /// A snapshot of the mesh counters (loads the atomics).
@@ -258,6 +333,7 @@ pub struct MeshStatsSnapshot {
     pub gap_drop: u64,
     pub reliable_shed: u64,
     pub reliable_acked: u64,
+    pub learned_peers_rejected: u64,
 }
 
 /// THE inbound-push chokepoint: applies the BoundedInbox overflow policy AND surfaces
@@ -736,6 +812,21 @@ pub struct MeshTransport {
     lanes: BTreeMap<NodeId, PeerLane>,
     inbox: SharedInbox,
     next_msg_id: u64,
+    /// CA-1 — the bundle needed to LAZILY spawn a learned reply lane in `send_durable` (reply-on-connection to
+    /// an unbooked dial-in peer). `stats` MUST be the SAME `Arc` `MeshControl::stats()` reads, or a learned
+    /// lane's `reliable_acked` would be invisible. All are cheap `Arc`/`Copy` clones of the `spawn_mesh` state.
+    handle: tokio::runtime::Handle,
+    endpoint: quinn::Endpoint,
+    learned: LearnedPeers,
+    stats: Arc<MeshStats>,
+    ledger: RecvLedger,
+    connections: ConnRegistry,
+    outbox: Option<SharedOutbox>,
+    incarnation: u64,
+    reliability: MeshReliabilityTuning,
+    backoff_min: Duration,
+    backoff_max: Duration,
+    outbound_capacity: usize,
 }
 
 /// Lifecycle handle: owns the endpoint (dropping closes it).
@@ -798,6 +889,7 @@ impl MeshControl {
             gap_drop: self.stats.gap_drop.load(Ordering::Relaxed),
             reliable_shed: self.stats.reliable_shed.load(Ordering::Relaxed),
             reliable_acked: self.stats.reliable_acked.load(Ordering::Relaxed),
+            learned_peers_rejected: self.stats.learned_peers_rejected.load(Ordering::Relaxed),
         }
     }
 }
@@ -859,6 +951,12 @@ pub fn spawn_mesh(
     // connection registry (the drop_connections blip lever), created ONCE and shared by every task.
     let ledger: RecvLedger = Arc::new(RwLock::new(BTreeMap::new()));
     let connections: ConnRegistry = Arc::new(Mutex::new(BTreeMap::new()));
+    // CA-1: the LEARNED-peer table (unbooked dial-in return connections) + the BOOKED set (authority split — a
+    // booked NodeId is never learned, so no learned lane can shadow a booked one). Created ONCE, shared by the
+    // accept path (which learns) + `MeshTransport` (which lazily spawns a learned lane on send).
+    let learned: LearnedPeers = Arc::new(Mutex::new(BTreeMap::new()));
+    let booked: Arc<BTreeSet<NodeId>> =
+        Arc::new(cfg.peers.keys().copied().filter(|&p| p != cfg.local).collect());
 
     // Accept loop: a Semaphore caps concurrently-served connections so a connection
     // flood cannot task-flood the node (TRANSPORT-4). Each connection serves BOTH
@@ -867,6 +965,10 @@ pub fn spawn_mesh(
     let accept_inbox = Arc::clone(&inbox);
     let accept_stats = Arc::clone(&stats);
     let accept_ledger = Arc::clone(&ledger);
+    let accept_learned = Arc::clone(&learned);
+    let accept_booked = Arc::clone(&booked);
+    let accept_local = cfg.local;
+    let accept_cap = cfg.learned_peers_max;
     let ack_flush = cfg.reliability.ack_idle_flush_interval;
     let permits = Arc::new(tokio::sync::Semaphore::new(
         cfg.max_inbound_connections.max(1),
@@ -879,12 +981,17 @@ pub fn spawn_mesh(
             let inbox = Arc::clone(&accept_inbox);
             let stats = Arc::clone(&accept_stats);
             let ledger = Arc::clone(&accept_ledger);
+            let learned = Arc::clone(&accept_learned);
+            let booked = Arc::clone(&accept_booked);
             tokio::spawn(async move {
                 let _permit = permit; // held for the connection's lifetime
                 let Ok(connection) = incoming.await else {
                     return; // handshake failed (foreign trust): drop, never serve
                 };
-                serve_connection(connection, inbox, stats, ledger, ack_flush).await;
+                serve_connection(
+                    connection, inbox, stats, ledger, ack_flush, learned, booked, accept_local, accept_cap,
+                )
+                .await;
             });
         }
     });
@@ -900,16 +1007,18 @@ pub fn spawn_mesh(
             endpoint: endpoint.clone(),
             local: cfg.local,
             dest: peer,
-            addr,
+            source: ConnSource::Dial(addr),
             rx,
             inbox: Arc::clone(&inbox),
             stats: Arc::clone(&stats),
+            ledger: Arc::clone(&ledger),
             backoff_min: cfg.redial_backoff_min,
             backoff_max: cfg.redial_backoff_max,
             incarnation: cfg.process_incarnation,
             connections: Arc::clone(&connections),
             reliability: cfg.reliability,
             outbox: outbox.clone(),
+            ack_rx_override: None, // booked: uses its own dialed-connection ack watch
         }));
         lanes.insert(peer, PeerLane { tx });
     }
@@ -918,8 +1027,20 @@ pub fn spawn_mesh(
         MeshTransport {
             local: cfg.local,
             lanes,
-            inbox,
+            inbox: Arc::clone(&inbox),
             next_msg_id: 0,
+            handle: handle.clone(),
+            endpoint: endpoint.clone(),
+            learned: Arc::clone(&learned),
+            stats: Arc::clone(&stats),
+            ledger: Arc::clone(&ledger),
+            connections: Arc::clone(&connections),
+            outbox: outbox.clone(),
+            incarnation: cfg.process_incarnation,
+            reliability: cfg.reliability,
+            backoff_min: cfg.redial_backoff_min,
+            backoff_max: cfg.redial_backoff_max,
+            outbound_capacity: cfg.outbound_capacity,
         },
         MeshControl {
             endpoint,
@@ -932,12 +1053,17 @@ pub fn spawn_mesh(
 /// Serve one accepted connection (the DATA-RECEIVER side): reliable uni streams (through the R-3'
 /// contiguity verdict) + unreliable datagrams into the shared inbox, AND the reverse cumulative-ACK stream
 /// back to the data sender ON THIS SAME connection (the directional-mesh topology — no AckRouter).
+#[allow(clippy::too_many_arguments)] // per-connection serve state threaded explicitly
 async fn serve_connection(
     connection: quinn::Connection,
     inbox: SharedInbox,
     stats: Arc<MeshStats>,
     ledger: RecvLedger,
     ack_flush: Duration,
+    learned: LearnedPeers,
+    booked: Arc<BTreeSet<NodeId>>,
+    local: NodeId,
+    learned_peers_max: usize,
 ) {
     // Per-connection ack coordination: the (peer,class) keys seen on THIS connection (all share one peer =
     // the dialer) + a wake signal. The data readers populate/notify; the ack-egress task snapshots + writes.
@@ -954,23 +1080,32 @@ async fn serve_connection(
         ack_flush,
     ));
 
-    // DATA streams: one reader task per accepted uni stream.
-    let stream_conn = connection.clone();
-    let stream_inbox = Arc::clone(&inbox);
-    let stream_stats = Arc::clone(&stats);
-    let stream_ledger = Arc::clone(&ledger);
-    let streams = tokio::spawn(async move {
-        while let Ok(recv) = stream_conn.accept_uni().await {
-            tokio::spawn(serve_data_stream(
-                recv,
-                Arc::clone(&stream_inbox),
-                Arc::clone(&stream_stats),
-                Arc::clone(&stream_ledger),
-                Arc::clone(&acked_keys),
-                Arc::clone(&ack_due),
-            ));
-        }
-    });
+    // CA-1 — the unified per-connection dispatcher (DATA + ACK) on this ACCEPTED connection, carrying the
+    // LearnCtx so its DATA reader learns an unbooked dial-in peer's return connection on the first frame. The
+    // per-connection ACK sink `acc_ack_tx` is fed by the dispatcher's ACK branch; a lazily-spawned learned lane
+    // (send_durable) subscribes to `acc_ack_rx` (stored in the LearnedConn) to retire its window over THIS
+    // connection. In the booked topology no learned lane exists and no ACK stream rides an accepted connection,
+    // so `acc_ack_rx` simply has no live consumer (harmless).
+    let (acc_ack_tx, acc_ack_rx) = watch::channel::<Option<AckFrame>>(None);
+    let learn = LearnCtx {
+        learned,
+        booked,
+        local,
+        cap: learned_peers_max,
+        conn: connection.clone(),
+        ack_rx: acc_ack_rx,
+        stats: Arc::clone(&stats),
+    };
+    let streams = tokio::spawn(dispatch_streams(
+        connection.clone(),
+        Arc::clone(&inbox),
+        Arc::clone(&stats),
+        Arc::clone(&ledger),
+        Arc::clone(&acked_keys),
+        Arc::clone(&ack_due),
+        acc_ack_tx,
+        Some(learn),
+    ));
 
     // Unreliable datagrams on the same connection (UNCHANGED hot path — byte-for-byte the R-1' split shape).
     while let Ok(datagram) = connection.read_datagram().await {
@@ -992,34 +1127,131 @@ async fn serve_connection(
     ack_task.abort();
 }
 
-/// Read ONE accepted uni stream: consume the 1-byte `STREAM_KIND` tag FIRST (before the framing loop, never
-/// inside `frame_payload`), then — for a DATA stream — run every frame through the contiguity verdict. An
-/// ACK stream misrouted here (acks are consumed by `peer_writer`'s ack-reader, not `serve_connection`) or an
-/// unknown tag or a torn stream is dropped WHOLESALE, never touching the ledger.
-async fn serve_data_stream(
+/// CA-1 S1 — the ONE unified per-connection uni-stream dispatcher. Runs on EVERY connection (accepted AND
+/// dialed): one `accept_uni` loop consumes the 1-byte `STREAM_KIND` tag and routes by role — DATA to
+/// [`serve_data_stream_body`] (the contiguity verdict into the node-wide ledger), ACK to [`drain_ack_stream`]
+/// (forwarded to the owning `peer_writer` via `ack_out`). This REPLACES the former split of a DATA-only accept
+/// loop in `serve_connection` and an ACK-only `ack_reader_task`: two `accept_uni` loops on one connection would
+/// RACE (quinn hands each incoming uni to exactly one waiter), so there must be exactly ONE loop per connection.
+#[allow(clippy::too_many_arguments)] // per-connection serve state threaded explicitly
+async fn dispatch_streams(
+    conn: quinn::Connection,
+    inbox: SharedInbox,
+    stats: Arc<MeshStats>,
+    ledger: RecvLedger,
+    acked_keys: Arc<Mutex<BTreeSet<(NodeId, MsgClass)>>>,
+    ack_due: Arc<Notify>,
+    ack_out: watch::Sender<Option<AckFrame>>,
+    learn: Option<LearnCtx>,
+) {
+    while let Ok(mut recv) = conn.accept_uni().await {
+        let mut kind = [0u8; 1];
+        if recv.read_exact(&mut kind).await.is_err() {
+            continue; // peer opened + finished, or a torn stream: clean silent close, try the next
+        }
+        match stream_kind(kind[0]) {
+            Some(StreamKind::Data) => {
+                tokio::spawn(serve_data_stream_body(
+                    recv,
+                    Arc::clone(&inbox),
+                    Arc::clone(&stats),
+                    Arc::clone(&ledger),
+                    Arc::clone(&acked_keys),
+                    Arc::clone(&ack_due),
+                    learn.clone(),
+                ));
+            }
+            Some(StreamKind::Ack) => {
+                tokio::spawn(drain_ack_stream(recv, ack_out.clone()));
+            }
+            None => continue, // unknown tag ⇒ drop the stream wholesale, ledger untouched
+        }
+    }
+}
+
+/// Consume the frames of ONE accepted DATA stream (the dispatcher already read + classified the tag). Each
+/// frame runs the contiguity verdict into the node-wide ledger and marks its `(peer,class)` ack-relevant —
+/// even a Dedup re-acks, so a lost ack is recovered when the sender replays until the cumulative ack advances.
+async fn serve_data_stream_body(
     mut recv: quinn::RecvStream,
     inbox: SharedInbox,
     stats: Arc<MeshStats>,
     ledger: RecvLedger,
     acked_keys: Arc<Mutex<BTreeSet<(NodeId, MsgClass)>>>,
     ack_due: Arc<Notify>,
+    learn: Option<LearnCtx>,
 ) {
-    let mut kind = [0u8; 1];
-    if recv.read_exact(&mut kind).await.is_err() {
-        return; // peer opened + finished, or a torn stream: clean silent close
-    }
-    if kind[0] != STREAM_KIND_DATA {
-        return; // an ACK stream never rides an accepted conn; unknown tag ⇒ drop, ledger untouched
-    }
+    let mut recorded = false;
     while let Some(frame) = read_one_reliable_frame(&mut recv).await {
         classify_and_deliver(&inbox, &stats, &ledger, &frame);
-        // Every DATA frame (even a Dedup) makes this (peer,class) ack-relevant and re-acks it — a lost ack
-        // is recovered because the sender replays until it sees the cumulative ack advance.
+        // CA-1 record site (accept path only): learn an UNBOOKED dial-in peer's return connection ONCE, on the
+        // first authenticated frame. A SEPARATE `learned.lock()` inside `learn_dial_in_peer` — NEVER nested in
+        // the ledger's inner Mutex (classify_and_deliver above obeys outer-read→inner→inbox and has fully
+        // returned here), preserving the global lock order.
+        if !recorded
+            && let Some(ctx) = &learn
+        {
+            recorded = true;
+            learn_dial_in_peer(ctx, frame.from);
+        }
         acked_keys
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((frame.from, frame.class));
         ack_due.notify_one();
+    }
+}
+
+/// CA-1 record site helper — record an UNBOOKED dial-in peer's return connection in `LearnedPeers`. AUTHORITY
+/// SPLIT: a BOOKED NodeId (or `local`) is NEVER learned, so a learned lane can never shadow a booked one nor be
+/// spoofed into existence for a booked id. Refresh iff the entry is ABSENT or its cached connection is DEAD
+/// (dead-conn eviction only). Past the cap: reject + count (loud), never silent.
+fn learn_dial_in_peer(ctx: &LearnCtx, from: NodeId) {
+    if from == ctx.local || ctx.booked.contains(&from) {
+        return; // authority split: never learn a booked/self id
+    }
+    // SPIFFE cross-check MARKER (M6): the shared cluster cert proves cluster-membership, NOT this NodeId — so the
+    // learned NodeId is sender-asserted (the SAME trust the receiver already grants every inbound frame). A
+    // per-node SPIFFE SAN check drops in HERE before trusting `from`. Release-present (log), NOT an authority gate.
+    if ctx.conn.peer_identity().is_none() {
+        tracing::warn!(
+            from = from.0,
+            "learned dial-in peer presented no peer_identity (SPIFFE cross-check point; sender-asserted NodeId)"
+        );
+    }
+    let mut t = ctx
+        .learned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match t.get(&from) {
+        Some(existing) if existing.conn.close_reason().is_none() => {} // live entry: keep (evict only on death)
+        Some(_) => {
+            t.insert(from, LearnedConn { conn: ctx.conn.clone(), ack_rx: ctx.ack_rx.clone() });
+        }
+        None if t.len() < ctx.cap => {
+            t.insert(from, LearnedConn { conn: ctx.conn.clone(), ack_rx: ctx.ack_rx.clone() });
+        }
+        None => {
+            ctx.stats.learned_peers_rejected.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                from = from.0,
+                cap = ctx.cap,
+                "learned-peer table FULL — rejecting a new dial-in peer (raise learned_peers_max; NOT \
+                 deployable to a churny tier until M6 RecvLedger eviction)"
+            );
+        }
+    }
+}
+
+/// Consume the frames of ONE accepted ACK stream (the dispatcher already read + classified the tag) and forward
+/// every decoded `AckFrame` to the owning `peer_writer` via the latest-wins watch. Returns when the watch
+/// receiver is gone (the writer dropped it) — an ACK stream on a connection with no local waiting writer (e.g.
+/// an accepted connection in the booked topology) drains harmlessly.
+async fn drain_ack_stream(mut recv: quinn::RecvStream, ack_out: watch::Sender<Option<AckFrame>>) {
+    while let Some(ack) = read_one_ack_frame(&mut recv).await {
+        if ack_out.send(Some(ack)).is_err() {
+            return; // the owning peer_writer's watch receiver is gone
+        }
     }
 }
 
@@ -1190,12 +1422,18 @@ async fn ack_egress(
 struct PeerWriter {
     endpoint: quinn::Endpoint,
     local: NodeId,
-    /// The peer this writer dials (the ConnRegistry key; latest-wins on redial).
+    /// The peer this lane targets (the `ConnRegistry` key for a Dial lane; the `LearnedPeers` key for a Learned
+    /// lane).
     dest: NodeId,
-    addr: SocketAddr,
+    /// CA-1: DIAL the static addr (booked) or adopt the held accepted connection (learned reply-on-connection).
+    source: ConnSource,
     rx: tokio::sync::mpsc::Receiver<OutFrame>,
     inbox: SharedInbox,
     stats: Arc<MeshStats>,
+    /// The node-wide receiver ledger (CA-1 S1): the DIALED connection now also runs the unified dispatcher, so
+    /// its inbound DATA classifies into the SAME shared ledger the accept path uses (the StaleEpoch cross-stream
+    /// cure requires ONE ledger Arc across both directions).
+    ledger: RecvLedger,
     backoff_min: Duration,
     backoff_max: Duration,
     /// This process's incarnation, stamped on every reliable frame this lane sends (R-2b).
@@ -1210,6 +1448,11 @@ struct PeerWriter {
     /// (`write_frame` retain + durable-before-send gate) and the ack path (`on_ack` release), so a retained
     /// durable row is released on the same store — no leak (LOW-4).
     outbox: Option<SharedOutbox>,
+    /// CA-1: a LEARNED lane consumes acks from the accepted connection's per-connection watch (fed by that
+    /// connection's dispatcher), because a learned lane never dials and thus has no dispatcher of its own to
+    /// forward acks. `None` for a booked lane (it uses its own freshly-created watch). Stage 3 makes this
+    /// re-assignable on a learned-connection refresh; Stage 2 captures it once (happy-path v1).
+    ack_rx_override: Option<watch::Receiver<Option<AckFrame>>>,
 }
 
 /// One peer's writer: drains its lane in FIFO order, dialing on demand, with
@@ -1226,8 +1469,21 @@ async fn peer_writer(mut w: PeerWriter) {
     // The reverse-ACK path (R-3'): a child ack-reader accept_uni's the peer's ACK stream on OUR dialed
     // connection and forwards each decoded AckFrame here via a latest-wins watch (a lost ack is superseded
     // by the next cumulative one — never a stale lower ack winning). Re-created per dial, aborted on drop.
-    let (ack_tx, mut ack_rx) = watch::channel::<Option<AckFrame>>(None);
-    let mut ack_reader: Option<JoinHandle<()>> = None;
+    // CA-1: a LEARNED lane's ack watch is fed SOLELY by the accepted connection's dispatcher — so a closed watch
+    // means that connection DIED (distinct from a booked lane, whose own `ack_tx` keeps the watch alive while the
+    // writer runs). The Err arm below uses this to terminate a learned lane instead of hot-spinning on it.
+    let is_learned = matches!(w.source, ConnSource::Learned(_));
+    let (ack_tx, ack_rx_own) = watch::channel::<Option<AckFrame>>(None);
+    // CA-1: a LEARNED lane subscribes to the ACCEPTED connection's ack watch (`ack_rx_override`, fed by that
+    // connection's own dispatcher); a BOOKED lane uses its own watch (`ack_rx_own`), fed by its DIALED
+    // connection's dispatcher. `ack_tx` is handed to the Dial arm's dispatcher only — a learned lane never spawns
+    // one, so `ack_tx` is inert for it.
+    let mut ack_rx = w.ack_rx_override.take().unwrap_or(ack_rx_own);
+    // CA-1 S1: the per-connection serve tasks spawned on each (re)dial — the unified dispatcher AND a symmetric
+    // ack_egress (so the DIALED connection also emits acks, not just reads them). Aborted + re-spawned on redial,
+    // drained on drop. Was a single `ack_reader` JoinHandle before the symmetric-serve refactor. A learned lane
+    // spawns NONE (the accepted connection's `serve_connection` owns its dispatcher + ack_egress).
+    let mut serve_tasks: Vec<JoinHandle<()>> = Vec::new();
     // R-4a retransmit timer: reusable, pinned. Disarmed = a far-future deadline the guard never polls; armed
     // by an error path, re-driven when it fires. This is what closes the idle-after-blip gap — a lane that
     // blips then goes quiet is re-driven off THIS clock, not off the next OutFrame.
@@ -1238,9 +1494,8 @@ async fn peer_writer(mut w: PeerWriter) {
         tokio::select! {
             biased; // 1) acks retire promptly  2) new sends  3) retransmit LAST
             changed = ack_rx.changed() => {
-                if changed.is_ok()
-                    && let Some(ack) = ack_rx.borrow_and_update().clone()
-                {
+                match changed {
+                    Ok(()) => if let Some(ack) = ack_rx.borrow_and_update().clone() {
                     // R-6d3a: lock the shared durable sink ONCE for the whole ack fan-out (LOW-4 — the SAME
                     // `Arc` `write_frame` retained on releases here). Release-through is STAGED only, no fsync
                     // in the ack path (a tombstone rides the next retain's submit / a future flush-tick; a
@@ -1273,19 +1528,42 @@ async fn peer_writer(mut w: PeerWriter) {
                             }
                         }
                     }
+                    }
+                    // CA-1 HIGH fix (learned-lane connection-death lifecycle): a closed ack watch on a LEARNED
+                    // lane means its accepted connection died (the dispatcher that solely owned our watch sender
+                    // was aborted). The lane can neither be acked nor redeliver over the dead conn, and it CANNOT
+                    // re-dial (NAT). Bounce any undelivered window LOUDLY (never a silent loss — the producer
+                    // re-drives, respawning a fresh learned lane over the peer's re-dialed connection via
+                    // send_durable's corpse-as-miss) then TERMINATE. This pre-empts the biased-select arm-1
+                    // busy-spin (Err is perpetually ready) AND the dead-lane re-bounce storm; RE-connection is
+                    // served by respawn. (Window-preserving in-place re-adopt is a ledgered refinement.) A BOOKED
+                    // lane holds its own `ack_tx`, so its watch never closes while the writer runs — no-op here.
+                    Err(_) if is_learned => {
+                        for (&class, lane) in &lanes {
+                            if lane.owes_redelivery()
+                                && let Some(msg_id) = lane.last_msg_id
+                            {
+                                push_inbox(
+                                    &w.inbox,
+                                    &w.stats,
+                                    Inbound::NodeUnreachable { to: w.dest, class, undelivered: msg_id },
+                                );
+                            }
+                        }
+                        break;
+                    }
+                    Err(_) => {} // booked: unreachable while the writer holds ack_tx — keep draining sends
                 }
-                // changed Err ⇒ every ack-reader Sender dropped; peer_writer still holds `ack_tx`, so this
-                // is effectively unreachable while the writer runs — keep draining sends regardless.
             }
             maybe = w.rx.recv() => {
                 let Some(frame) = maybe else { break };
                 let sent = write_frame(
                     &w.endpoint,
                     w.dest,
-                    w.addr,
+                    &w.source,
                     &mut connection,
                     &mut lanes,
-                    &mut ack_reader,
+                    &mut serve_tasks,
                     &ack_tx,
                     &w.connections,
                     w.local,
@@ -1294,6 +1572,9 @@ async fn peer_writer(mut w: PeerWriter) {
                     &frame,
                     &w.stats,
                     w.outbox.as_ref(),
+                    &w.inbox,
+                    &w.ledger,
+                    w.reliability.ack_idle_flush_interval,
                 )
                 .await;
                 match sent {
@@ -1310,7 +1591,7 @@ async fn peer_writer(mut w: PeerWriter) {
                         // `confirm_unreachable_after_retries` ⇒ ZERO bounce). The inline backoff `sleep`
                         // R-3' had is REMOVED (it blocked the whole select — acks/sends couldn't drain during
                         // backoff); the timer IS the non-blocking backoff clock now.
-                        handle_connection_drop(&mut connection, &mut ack_reader, &mut lanes);
+                        handle_connection_drop(&mut connection, &mut serve_tasks, &mut lanes);
                         retransmit.as_mut().reset(tokio::time::Instant::now() + backoff);
                         counting = true;
                         backoff = (backoff * 2).min(w.backoff_max);
@@ -1347,15 +1628,16 @@ async fn peer_writer(mut w: PeerWriter) {
                 let outcome = replay_lanes(
                     &w.endpoint,
                     w.dest,
-                    w.addr,
+                    &w.source,
                     &mut connection,
                     &mut lanes,
-                    &mut ack_reader,
+                    &mut serve_tasks,
                     &ack_tx,
                     &w.connections,
                     w.reliability,
                     &w.inbox,
                     &w.stats,
+                    &w.ledger,
                 )
                 .await;
                 match outcome {
@@ -1381,31 +1663,11 @@ async fn peer_writer(mut w: PeerWriter) {
             w.backoff_max,
         );
     }
-    // Loop exit = the per-peer channel closed = clean shutdown; abort the ack-reader, then lane streams drop
-    // here (quinn implicit-finish on the still-live connection, or no-op on an already-dead one).
-    if let Some(h) = ack_reader.take() {
+    // Loop exit = the per-peer channel closed = clean shutdown; abort the per-connection serve tasks (dispatcher
+    // + ack_egress), then lane streams drop here (quinn implicit-finish on the still-live connection, or no-op on
+    // an already-dead one).
+    for h in serve_tasks.drain(..) {
         h.abort();
-    }
-}
-
-/// The child ack-reader for one dialed connection (R-3'): the peer's `serve_connection` opens ONE reverse
-/// `STREAM_KIND_ACK` uni stream on THIS connection; accept it, consume the tag, and forward every decoded
-/// `AckFrame` to `peer_writer` via the latest-wins watch. Ends when the connection closes (peer gone /
-/// drop_connections) or `peer_writer` drops the watch.
-async fn ack_reader_task(connection: quinn::Connection, ack_tx: watch::Sender<Option<AckFrame>>) {
-    while let Ok(mut recv) = connection.accept_uni().await {
-        let mut kind = [0u8; 1];
-        if recv.read_exact(&mut kind).await.is_err() {
-            continue; // a torn/finished stream: try the next
-        }
-        if kind[0] != STREAM_KIND_ACK {
-            continue; // only ACK streams ride the dialed connection; ignore anything else
-        }
-        while let Some(ack) = read_one_ack_frame(&mut recv).await {
-            if ack_tx.send(Some(ack)).is_err() {
-                return; // peer_writer gone
-            }
-        }
     }
 }
 
@@ -1461,11 +1723,11 @@ fn rearm_retransmit(
 /// `confirm_and_maybe_bounce` on the timer replay path (a blip that recovers ⇒ zero bounce, the C2 inversion).
 fn handle_connection_drop(
     connection: &mut Option<quinn::Connection>,
-    ack_reader: &mut Option<JoinHandle<()>>,
+    serve_tasks: &mut Vec<JoinHandle<()>>,
     lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
 ) {
     *connection = None;
-    if let Some(h) = ack_reader.take() {
+    for h in serve_tasks.drain(..) {
         h.abort();
     }
     for lane in lanes.values_mut() {
@@ -1511,30 +1773,80 @@ fn confirm_and_maybe_bounce(
 async fn ensure_connection(
     endpoint: &quinn::Endpoint,
     dest: NodeId,
-    addr: SocketAddr,
+    source: &ConnSource,
     connection: &mut Option<quinn::Connection>,
     lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
-    ack_reader: &mut Option<JoinHandle<()>>,
+    serve_tasks: &mut Vec<JoinHandle<()>>,
     ack_tx: &watch::Sender<Option<AckFrame>>,
     connections: &ConnRegistry,
+    inbox: &SharedInbox,
+    stats: &Arc<MeshStats>,
+    ledger: &RecvLedger,
+    ack_flush: Duration,
 ) -> Result<(), ()> {
     if connection.is_some() {
         return Ok(());
     }
-    // SNI is pinned to the cluster-trust SAN; identity comes from mTLS, not DNS.
-    let conn = endpoint
-        .connect(addr, "localhost")
-        .map_err(|_| ())?
-        .await
-        .map_err(|_| ())?;
-    connections
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(dest, conn.clone());
-    if let Some(h) = ack_reader.take() {
-        h.abort();
-    }
-    *ack_reader = Some(tokio::spawn(ack_reader_task(conn.clone(), ack_tx.clone())));
+    let conn = match source {
+        // BOOKED: DIAL the static addr on demand. Register the connection (drop_connections lever), then run the
+        // unified dispatcher (DATA into the shared ledger; ACK forwarded to THIS writer's own `ack_tx`) AND a
+        // symmetric ack_egress on this DIALED connection (CA-1 S1 — so a connection is served identically
+        // regardless of who dialed it; without the dialer-side ack_egress a reverse DATA flow could never be
+        // acked back). Fresh per-connection acked_keys/ack_due, as the accept path builds. SNI is pinned to the
+        // cluster-trust SAN; identity comes from mTLS, not DNS.
+        ConnSource::Dial(addr) => {
+            let conn = endpoint
+                .connect(*addr, "localhost")
+                .map_err(|_| ())?
+                .await
+                .map_err(|_| ())?;
+            connections
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(dest, conn.clone());
+            for h in serve_tasks.drain(..) {
+                h.abort();
+            }
+            let acked_keys: Arc<Mutex<BTreeSet<(NodeId, MsgClass)>>> =
+                Arc::new(Mutex::new(BTreeSet::new()));
+            let ack_due = Arc::new(Notify::new());
+            serve_tasks.push(tokio::spawn(dispatch_streams(
+                conn.clone(),
+                Arc::clone(inbox),
+                Arc::clone(stats),
+                Arc::clone(ledger),
+                Arc::clone(&acked_keys),
+                Arc::clone(&ack_due),
+                ack_tx.clone(),
+                None, // a dialer never learns — only the acceptor of an unbooked peer does
+            )));
+            serve_tasks.push(tokio::spawn(ack_egress(
+                conn.clone(),
+                Arc::clone(ledger),
+                acked_keys,
+                ack_due,
+                ack_flush,
+            )));
+            conn
+        }
+        // LEARNED (CA-1 reply-on-connection): NEVER dial. Adopt the held accepted connection the receive side
+        // recorded — its dispatcher + ack_egress are already owned by that connection's `serve_connection`, and
+        // this learned lane's acks arrive via `ack_rx_override`. A missing/dead held connection ⇒ `Err` ⇒
+        // WriteFail::Down ⇒ the retransmit timer re-reads the table next fire (picks up a refreshed connection if
+        // the peer re-dialed in, or bounces once + terminates — Stage 3). No ConnRegistry insert (that is
+        // dial-side, for drop_connections), no serve-task spawn.
+        ConnSource::Learned(table) => {
+            let held = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&dest)
+                .map(|lc| lc.conn.clone());
+            match held {
+                Some(c) if c.close_reason().is_none() => c,
+                _ => return Err(()),
+            }
+        }
+    };
     *connection = Some(conn);
     for lane in lanes.values_mut() {
         lane.stream = None;
@@ -1580,25 +1892,30 @@ async fn replay_one_lane(
 async fn replay_lanes(
     endpoint: &quinn::Endpoint,
     dest: NodeId,
-    addr: SocketAddr,
+    source: &ConnSource,
     connection: &mut Option<quinn::Connection>,
     lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
-    ack_reader: &mut Option<JoinHandle<()>>,
+    serve_tasks: &mut Vec<JoinHandle<()>>,
     ack_tx: &watch::Sender<Option<AckFrame>>,
     connections: &ConnRegistry,
     reliability: MeshReliabilityTuning,
     inbox: &SharedInbox,
-    stats: &MeshStats,
+    stats: &Arc<MeshStats>,
+    ledger: &RecvLedger,
 ) -> ReplayOutcome {
     if ensure_connection(
         endpoint,
         dest,
-        addr,
+        source,
         connection,
         lanes,
-        ack_reader,
+        serve_tasks,
         ack_tx,
         connections,
+        inbox,
+        stats,
+        ledger,
+        reliability.ack_idle_flush_interval,
     )
     .await
     .is_err()
@@ -1635,7 +1952,7 @@ async fn replay_lanes(
     }
     if conn_died {
         // Drop the dead connection (now that the `conn` borrow has ended) so the next fire re-dials.
-        handle_connection_drop(connection, ack_reader, lanes);
+        handle_connection_drop(connection, serve_tasks, lanes);
     }
     if all_ok {
         ReplayOutcome::AllOk
@@ -1654,18 +1971,21 @@ async fn replay_lanes(
 async fn write_frame(
     endpoint: &quinn::Endpoint,
     dest: NodeId,
-    addr: SocketAddr,
+    source: &ConnSource,
     connection: &mut Option<quinn::Connection>,
     lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
-    ack_reader: &mut Option<JoinHandle<()>>,
+    serve_tasks: &mut Vec<JoinHandle<()>>,
     ack_tx: &watch::Sender<Option<AckFrame>>,
     connections: &ConnRegistry,
     local: NodeId,
     incarnation: u64,
     retry_cap: usize,
     frame: &OutFrame,
-    stats: &MeshStats,
+    stats: &Arc<MeshStats>,
     outbox: Option<&SharedOutbox>,
+    inbox: &SharedInbox,
+    ledger: &RecvLedger,
+    ack_flush: Duration,
 ) -> Result<(), WriteFail> {
     match frame.class.reliability() {
         Reliability::Reliable => {
@@ -1798,12 +2118,16 @@ async fn write_frame(
             ensure_connection(
                 endpoint,
                 dest,
-                addr,
+                source,
                 connection,
                 lanes,
-                ack_reader,
+                serve_tasks,
                 ack_tx,
                 connections,
+                inbox,
+                stats,
+                ledger,
+                ack_flush,
             )
             .await
             .map_err(|()| WriteFail::Down)?;
@@ -1868,12 +2192,16 @@ async fn write_frame(
             ensure_connection(
                 endpoint,
                 dest,
-                addr,
+                source,
                 connection,
                 lanes,
-                ack_reader,
+                serve_tasks,
                 ack_tx,
                 connections,
+                inbox,
+                stats,
+                ledger,
+                ack_flush,
             )
             .await
             .map_err(|()| WriteFail::Down)?;
@@ -1925,12 +2253,57 @@ impl Transport for MeshTransport {
         bytes: Bytes,
         durability: vd_sim::io::Durability,
     ) -> Result<MsgId, SendError> {
-        let Some(lane) = self.lanes.get(&to) else {
-            // An unknown destination is permanent back-pressure: the payload is
-            // returned, never silently dropped (the address book is config, and a
-            // misconfigured route must be loud at the caller).
-            return Err(SendError::QueueFull(bytes));
-        };
+        // CA-1: prefer a BOOKED (or already-spawned learned) lane that is LIVE. A present-but-CLOSED lane (a
+        // terminated learned lane, Stage 3) is a MISS — drop it + re-consult LearnedPeers so a re-learned peer
+        // re-spawns instead of hitting the corpse. A booked lane never closes (its writer runs while this
+        // MeshTransport holds the sender).
+        let live = self.lanes.get(&to).is_some_and(|l| !l.tx.is_closed());
+        if !live {
+            self.lanes.remove(&to);
+            // Reply-on-connection: if `to` is an UNBOOKED peer that dialed IN (learned its return connection),
+            // lazily spawn a learned reply lane over that held accepted connection — reusing the FULL
+            // ReliableLaneSender machinery (seq/epoch/replay/ack) so the receiver dedup ladder is satisfied. The
+            // learned lane subscribes to the accepted connection's ack watch (`ack_rx_override`) to retire its
+            // window. Else CA-2 loud back-pressure (a genuinely unknown destination — never a silent drop).
+            let learned_conn = self
+                .learned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&to)
+                .cloned();
+            let Some(lc) = learned_conn else {
+                return Err(SendError::QueueFull(bytes));
+            };
+            // The learned connection may have died since it was recorded (its entry is evicted only on the
+            // peer's re-dial). Do NOT spawn a lane over a dead connection — it would immediately terminate and
+            // drop this frame. Loud back-pressure instead; a re-dial refreshes the entry + a re-send respawns.
+            if lc.conn.close_reason().is_some() {
+                return Err(SendError::QueueFull(bytes));
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel::<OutFrame>(self.outbound_capacity);
+            self.handle.spawn(peer_writer(PeerWriter {
+                endpoint: self.endpoint.clone(),
+                local: self.local,
+                dest: to,
+                source: ConnSource::Learned(Arc::clone(&self.learned)),
+                rx,
+                inbox: Arc::clone(&self.inbox),
+                stats: Arc::clone(&self.stats),
+                ledger: Arc::clone(&self.ledger),
+                backoff_min: self.backoff_min,
+                backoff_max: self.backoff_max,
+                incarnation: self.incarnation,
+                connections: Arc::clone(&self.connections),
+                reliability: self.reliability,
+                outbox: self.outbox.clone(),
+                ack_rx_override: Some(lc.ack_rx),
+            }));
+            self.lanes.insert(to, PeerLane { tx });
+        }
+        let lane = self
+            .lanes
+            .get(&to)
+            .expect("a live booked or freshly-spawned learned lane is present after the CA-1 ensure");
         let msg_id = MsgId(self.next_msg_id);
         match lane.tx.try_send(OutFrame {
             to,
@@ -2920,25 +3293,172 @@ mod tests {
         assert_eq!(err, SendError::QueueFull(vec![7].into()));
     }
 
-    /// RED GUARD for CA-1 (deferred to M3). Today a peer is reachable only if it is in
-    /// the sender's static book (the CA-2 characterization above). The dev launcher
-    /// works around this by pre-seeding EVERY client's address into the gateway book
-    /// — the crutch this milestone fences (`client_book` in `vd-devcluster`). When
-    /// CA-1 lands, a peer that DIALS IN becomes replyable without being booked first;
-    /// this asserts exactly that, and fails by construction today (hence `#[ignore]`).
+    /// CA-1 reply-on-connection (Stage 1+2) — the headline gate. A does NOT book B; B books+dials A. Once B
+    /// sends (A LEARNS B's return connection on the first authenticated frame), A can reply to the UNBOOKED B
+    /// over that held accepted connection — DELIVERED (gate i) AND ACKED (gate ii: A's lazily-spawned learned
+    /// lane retires its window over the same connection's reverse path), with NO false `NodeUnreachable` at the
+    /// live B. Asymmetric ⇒ built by hand (not `cluster()`, which books everyone symmetrically).
     #[test]
-    #[ignore = "M3: reply-on-connection (CA-1) not yet implemented"]
     fn ca1_reply_on_connection_reaches_a_peer_not_in_the_book() {
         let rt = runtime();
         let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
-        let (mut nodes, _controls) = cluster(rt.handle(), &trust, 2, 4);
-        // The target behavior: reaching an UNBOOKED id succeeds once an inbound dial
-        // has taught the mesh that peer's return address. Today this is QueueFull.
-        let reply = nodes[0].send(NodeId(99), MsgClass::Control, vec![1].into());
-        assert!(
-            reply.is_ok(),
-            "CA-1: an inbound-dialed peer must be replyable without pre-booking",
-        );
+        let a = NodeId(1);
+        let b = NodeId(2);
+        // Reserve two ephemeral ports (bind + drop, as `cluster()` does) so quinn can bind them.
+        let sock_a = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve a");
+        let sock_b = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve b");
+        let addr_a = sock_a.local_addr().expect("addr a");
+        let addr_b = sock_b.local_addr().expect("addr b");
+        drop(sock_a);
+        drop(sock_b);
+        // A: EMPTY book (does not know B). B: books A (so B dials A).
+        let (mut ta, ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0),
+            None,
+        )
+        .expect("spawn A");
+        let book_b: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
+        let (mut tb, _ctl_b) = spawn_mesh(rt.handle(), &trust, &MeshConfig::new(b, addr_b, book_b, 64, 0), None)
+            .expect("spawn B");
+
+        // B → A over B's booked lane: A LEARNS B's return connection on this first authenticated frame.
+        tb.send(a, MsgClass::Control, vec![0xB].into())
+            .expect("B books A, so B->A is a normal booked send");
+        let got_a = wait_for(&mut ta, |g| {
+            g.iter()
+                .any(|m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == b && bytes[0] == 0xB))
+        });
+        assert!(!got_a.is_empty(), "A received B's first frame (and learned B)");
+
+        // A → B: B is UNBOOKED in A, but LEARNED ⇒ the send is Ok (a lazily-spawned learned lane), not QueueFull.
+        ta.send(b, MsgClass::Control, vec![0xA].into())
+            .expect("CA-1: an inbound-learned peer is replyable without pre-booking");
+
+        // GATE (i): B RECEIVES A's reply over the held (accepted-by-A / dialed-by-B) connection.
+        let got_b = wait_for(&mut tb, |g| {
+            g.iter()
+                .any(|m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == a && bytes[0] == 0xA))
+        });
+        assert!(!got_b.is_empty(), "CA-1 GATE (i): B received A's reply over the learned connection");
+
+        // GATE (ii): A's learned lane RETIRES its window (the round trip closes over the reverse-ack path) AND A
+        // never false-bounces `NodeUnreachable` at the LIVE B (which a broken reverse-ack path would do). The
+        // stats Arc is shared with `ctl_a`, so a wrong-Arc stall is distinguishable from a real dead-ack path.
+        let started = Instant::now();
+        loop {
+            if ctl_a.stats().reliable_acked >= 1 {
+                break;
+            }
+            let bounced = ta
+                .drain_inbound()
+                .into_iter()
+                .any(|m| matches!(m, Inbound::NodeUnreachable { to, .. } if to == b));
+            assert!(!bounced, "CA-1: A false-bounced NodeUnreachable at the LIVE learned peer B");
+            std::thread::sleep(Duration::from_millis(5));
+            assert!(
+                started.elapsed() < DEADLINE,
+                "CA-1 GATE (ii): A's learned lane never retired (reliable_acked stuck at 0)"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_kind_classifies_the_three_arms() {
+        // CA-1 pure classifier: DATA / ACK / unknown-drop (the dispatcher's three routing arms, HR5 per-arm).
+        assert_eq!(stream_kind(STREAM_KIND_DATA), Some(StreamKind::Data));
+        assert_eq!(stream_kind(STREAM_KIND_ACK), Some(StreamKind::Ack));
+        assert_eq!(stream_kind(0x7F), None);
+    }
+
+    #[test]
+    fn ca1_learned_lane_terminates_when_its_accepted_connection_dies() {
+        // HIGH-fix regression (post-impl review wf_5310c8fb): after A learns + replies to B over the held
+        // connection, KILLING B must make A's learned lane TERMINATE (loud-bounce + break), NOT hot-spin on a
+        // perpetually-Err ack watch. Observable: A.send(B) cleanly returns QueueFull within the deadline (the
+        // learned lane closed + the dead connection is refused a doomed respawn) and the test does not hang.
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let sock_a = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve a");
+        let sock_b = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve b");
+        let addr_a = sock_a.local_addr().expect("addr a");
+        let addr_b = sock_b.local_addr().expect("addr b");
+        drop(sock_a);
+        drop(sock_b);
+        let (mut ta, _ctl_a) =
+            spawn_mesh(rt.handle(), &trust, &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0), None)
+                .expect("spawn A");
+        let book_b: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
+        let (mut tb, ctl_b) = spawn_mesh(rt.handle(), &trust, &MeshConfig::new(b, addr_b, book_b, 64, 0), None)
+            .expect("spawn B");
+        tb.send(a, MsgClass::Control, vec![0xB].into()).expect("B->A");
+        wait_for(&mut ta, |g| {
+            g.iter().any(|m| matches!(m, Inbound::Wire { from, .. } if *from == b))
+        });
+        ta.send(b, MsgClass::Control, vec![0xA].into()).expect("A->B learned");
+        wait_for(&mut tb, |g| {
+            g.iter().any(|m| matches!(m, Inbound::Wire { from, .. } if *from == a))
+        });
+        // Kill B ⇒ A's accepted connection from B dies ⇒ A's learned lane's ack watch closes ⇒ it must TERMINATE.
+        ctl_b.kill();
+        let started = Instant::now();
+        loop {
+            if let Err(SendError::QueueFull(_)) = ta.send(b, MsgClass::Control, vec![0xA].into()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            assert!(
+                started.elapsed() < DEADLINE,
+                "A never returned QueueFull to the dead learned peer B — the learned lane wedged (hot-spin)?"
+            );
+        }
+    }
+
+    #[test]
+    fn ca1_learned_peers_table_cap_rejects_and_counts() {
+        // A has an EMPTY book + learned_peers_max = 1. B and C both book+dial A. A learns the FIRST, then
+        // REJECTS the second at the cap — counted LOUD (learned_peers_rejected), never silent.
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let (a, b, c) = (NodeId(1), NodeId(2), NodeId(3));
+        let sa = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve a");
+        let sb = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve b");
+        let sc = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve c");
+        let addr_a = sa.local_addr().expect("addr a");
+        let addr_b = sb.local_addr().expect("addr b");
+        let addr_c = sc.local_addr().expect("addr c");
+        drop(sa);
+        drop(sb);
+        drop(sc);
+        let mut cfg_a = MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0);
+        cfg_a.learned_peers_max = 1;
+        let (mut ta, ctl_a) = spawn_mesh(rt.handle(), &trust, &cfg_a, None).expect("spawn A");
+        let book: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
+        let (mut tb, _cb) =
+            spawn_mesh(rt.handle(), &trust, &MeshConfig::new(b, addr_b, book.clone(), 64, 0), None)
+                .expect("spawn B");
+        let (mut tc, _cc) = spawn_mesh(rt.handle(), &trust, &MeshConfig::new(c, addr_c, book, 64, 0), None)
+            .expect("spawn C");
+        let _ = (&mut tb, &mut tc); // held so their tasks live
+        tb.send(a, MsgClass::Control, vec![0xB].into()).expect("B->A");
+        tc.send(a, MsgClass::Control, vec![0xC].into()).expect("C->A");
+        wait_for(&mut ta, |g| {
+            g.iter().filter(|m| matches!(m, Inbound::Wire { .. })).count() >= 2
+        });
+        let started = Instant::now();
+        loop {
+            if ctl_a.stats().learned_peers_rejected >= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            assert!(
+                started.elapsed() < DEADLINE,
+                "learned_peers_rejected never incremented despite a 2nd distinct learned peer at cap=1"
+            );
+        }
     }
 
     #[test]

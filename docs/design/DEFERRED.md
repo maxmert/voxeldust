@@ -2021,6 +2021,128 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
      OWED/CA-1-gated — it lands WITH the CA-1 re-solicit egress, against the CORRECT dest-lane clock, with its own tests.
      This CLOSES the reachable-now R-6d4 arc (M+C+B+A+D+F2). NEXT: CA-1 (no-DNS peer addressing) — the last cloud
      precondition, which will also carry the L5 outbound addr re-plumb + this F2 numeric guard.**
+     **📐 CA-1 DESIGN ANALYSIS (4 workflows: wf_cbc28339 decomposition + trust/security, wf_f1bdd063 S1 mechanism,
+     wf_8b9e6320 Slice-1a unified-dispatcher; each 1 designer + adversarial opus lenses + adjudicator, read-only
+     Explore). NOT YET IMPLEMENTED — the design did NOT converge to SOUND_TO_IMPLEMENT; CA-1 is a DEEPER transport
+     re-architecture than "reply on a connection" sounded, and the analysis below is the running start. USER DECISIONS
+     already made (locked): M6 = cap the learned table + a not-churny-deployable gate (NOT full RecvLedger eviction);
+     trust = sender-asserted NodeId at the single-PSK tier + authority-split (a learned entry never shadows a booked
+     one) + a release-present SPIFFE cross-check marker; the S3 re-solicit egress = a NEW appended InterShardFlow
+     variant (never a repurposed no-op); NO new external dep (reuse ArcSwap for S2; io-prod learned table is
+     Arc<Mutex<BTreeMap<NodeId,quinn::Connection>>>); the real-cloud k3d proof is a SEPARATE deploy-readiness-gated
+     slice (loopback proofs first). Decomposition: S1 inbound reply-on-connection → S2 outbound L5 ArcSwap re-plumb +
+     MeshControl::update_peer_addr → S3 AwaitAdopt re-solicit egress (new InterShardFlow arm) → S4 the F2 dest-lane
+     numeric guard (only if a well-defined prod-default-passing bound derives from S3's cadence; else F2 stays inert).
+     THE HARD BLOCKER surfaced (VERIFIED line-by-line in mesh.rs): the mesh pins application stream ROLES to QUIC
+     ACCEPTOR-vs-DIALER, not connection-level bidirectionality — serve_connection (the DATA reader + ack_egress +
+     datagram reader) runs ONLY on ACCEPTED conns; a DIALER's only reader is ack_reader_task, which drops every
+     non-ACK stream. So (a) "reply on a held accepted connection" is WIRE-BROKEN both ways (reply DATA lands in the
+     dialer's ACK-only reader and is dropped; the acceptor's learned-lane ack-reader waits forever for an ACK stream
+     the dialer never opens ⇒ window never retires ⇒ false NodeUnreachable at a LIVE peer); (b) adding a second
+     accept_uni loop on one connection RACES (quinn hands each incoming uni stream to exactly one waiter
+     non-deterministically ⇒ DATA lands in the ACK loop and vice-versa). The FIX shape that IS sound: ONE unified
+     per-connection accept_uni dispatcher that reads the 1-byte STREAM_KIND tag and routes DATA→classify_and_deliver
+     (node-wide RecvLedger, StaleEpoch cross-stream cure intact) / ACK→the owning peer_writer, running on EVERY
+     connection. THE UNRESOLVED CRUX (why it did not converge): AckFrame/AckEntry carry NO NodeId (lib.rs), so an ACK
+     on an ACCEPTED connection cannot be routed to the right peer_writer by frame content — it needs a
+     learned-identity registry keyed by the first authenticated frame.from (NodeId→ack-watch), which is exactly 1b's
+     learned-peer machinery. Net: a "1a pure-refactor" (merge the two accept loops) has NO behavioral effect and NO
+     honest RED→GREEN gate in the both-booked topology (both directions already ride each side's OWN dialed conn,
+     served correctly today); the actual reply-over-accepted-connection behavior + the ACK-routing registry are
+     irreducibly 1b. So CA-1's real first unit is "unified dispatcher + learned-identity ACK registry + learned lane"
+     TOGETHER — a single larger deliberate transport slice, not a quick refactor prequel. This is a load-bearing
+     change to the R-3'→R-6 redelivery core (the most safety-critical component); it warrants a dedicated,
+     deliberate effort, not slice-by-slice quick wins. HELD for a user decision on investment level (defer to
+     deploy-readiness + do P4 now, vs commit to the CA-1 transport redesign now). The two RED guards
+     (ca1_reply_on_connection, l5_a_rescheduled_peer, both #[ignore]d) remain the flip-targets when it lands.
+     ►► USER CHOSE: commit to the CA-1 redesign NOW (full design→implement→review→gate rigor).**
+     **📐 CA-1-CORE DESIGN CONVERGED — SOUND-TO-IMPLEMENT blueprint (wf_bb68a021, the definitive consolidated pass;
+     1 designer + 3 adversarial opus lenses [R-3'-redelivery / ack-routing-architecture / coverage-lifecycle-scope]
+     + adjudicator). All lenses REVISE (not REJECT); architecture SETTLED; the adjudicator left 4 folded must-fixes
+     each with a concrete resolution ⇒ the blueprint below IS the implementation plan (the NEEDS_ANOTHER_ROUND label
+     is the conservative "confirm the fold" — the fold is fully specified here). ACK-ROUTING DECISION = Solution (C)
+     per-connection ack sink resolved at spawn (NOT (A) a NodeId→ack-watch registry keyed by sender-asserted
+     frame.from — that would route ACKs by spoofable identity + add a hot-path lock; NOT (B) a NodeId ACK-stream
+     header — an unneeded wire change, since the directional single-peer-per-connection topology makes the routing
+     key simply "which connection did this ACK arrive on"). BUNDLE (one landable io-prod slice, flips
+     ca1_reply_on_connection with an honest DELIVERY+reliable_acked-advances gate):
+     (1) UNIFIED DISPATCHER — add pure `enum StreamKind{Data,Ack}` + `fn stream_kind(u8)->Option<StreamKind>` (near
+     STREAM_KIND consts); ONE per-conn `dispatch_streams` accept_uni loop reads the 1-byte tag and spawns
+     `serve_data_stream_body` (DATA) or `drain_ack_stream` (ACK), unknown⇒drop. Replaces BOTH serve_connection's
+     DATA-only accept loop AND ack_reader_task (the VERIFIED two-accept_uni-loops-per-conn race cure: quinn hands
+     each uni to exactly one waiter). (2) MUST-FIX #1 SYMMETRIC ack_egress — factor `serve_any(conn,…,ack_out)`
+     called by BOTH the accept path AND the dial path (ensure_connection Dial arm), so EVERY connection creates its
+     own acked_keys+ack_due, spawns ack_egress, and runs the dispatcher. WITHOUT this the dialer never emits acks ⇒
+     A's reply reaches B but reliable_acked never advances (Gate ii unsatisfiable). ack_egress is already symmetric-
+     safe (keys (peer,class) from the node-wide ledger, per-entry incarnation, write outside select). Thread
+     inbox/stats/ledger into ensure_connection + write_frame + replay_lanes. Dialer datagram RX stays dropped ⇒
+     this slice is RELIABLE-uni reply-on-connection only (say "reliable-uni superset", not "behavioral superset").
+     (3) LEARNED LANE — `type LearnedPeers=Arc<Mutex<BTreeMap<NodeId,LearnedConn>>>`; `struct LearnedConn{conn,
+     ack_rx: watch::Receiver<Option<AckFrame>>}`. Record site in serve_data_stream_body on the FIRST frame whose
+     from != local AND NOT in `booked` (AUTHORITY SPLIT — a booked NodeId is never learned, no shadow lane), under
+     `learned_peers_max` (new MeshConfig field; loud `learned_peers_rejected` MeshStats counter + snapshot on cap);
+     `learned.lock()` is a SEPARATE statement OUTSIDE the inner ledger Mutex (lock order outer-read→inner→inbox —
+     the one hard code-review gate all lenses agreed on); REFRESH PREDICATE = insert iff !contains_key OR cached
+     conn.close_reason().is_some() (dead-conn eviction only); SPIFFE MARKER = read conn.peer_identity() + warn-if-
+     None (log only, NOT an authority check — the shared cluster cert can't bind NodeId; authority = booked-exclusion
+     + the mTLS channel). `enum ConnSource{Dial(SocketAddr),Learned{table,dest}}` replaces PeerWriter.addr;
+     ensure_connection Learned arm NEVER dials (adopts the freshest held conn, Err on absent/dead ⇒ Down⇒timer⇒
+     re-read = stale-send-at-most-once). (4) send_durable LAZY-SPAWN + MUST-FIX #4 corpse-lane — treat a
+     present-but-CLOSED lane as a MISS (get(&to).is_some_and(|l|!l.tx.is_closed())), remove the stale entry, consult
+     LearnedPeers, lazily spawn a Learned peer_writer (+insert PeerLane) else QueueFull. MeshTransport gains the
+     spawn bundle {handle, endpoint, learned, stats=Arc::clone of the SAME MeshControl Arc [else Gate ii false-
+     negatives], booked, incarnation, reliability, outbox, connections, backoff_min/max, outbound_capacity}. (5)
+     MUST-FIX #2 acc_ack_rx re-assignable — peer_writer gains `ack_rx_override: Option<Receiver>` (Some for a learned
+     lane, from LearnedConn.ack_rx); the Learned adopt re-reads BOTH conn+ack_rx on refresh; the select's changed()
+     future is re-created per iteration (no borrow held across an adopt). (6) DEAD-LEARNED-LANE single-bounce —
+     same-pass `break` when dest is absent-from-LearnedPeers AND the confirm bounce just fired (confirm_and_maybe_
+     bounce re-bounces every cycle, so termination must be same-pass); loop-exit closes the PeerLane ⇒ #4 re-consults.
+     Booked lanes NEVER terminate. R-3'/R-4 RE-CHECK: ledger keys (from,class) connection-agnostic; StaleEpoch/
+     contiguity per-(peer,class); ack_egress acks only its own acked_keys; on_ack incarnation/epoch guard — all
+     bodies lifted VERBATIM, hold. TESTS (Tier-B ≥90 regions, measure both coverage-io-prod + -hooks): stream_kind
+     3 arms (pure); runtime unknown-tag; ca1_reply_on_connection rewrite (NO book! macro — BTreeMap::from + the
+     cluster() reserve-port dance; A book EMPTY, B books A; assert B receives 0xA AND a_ctl reliable_acked≥1 AND NO
+     NodeUnreachable{to:b}); reply-on-RE-connection (B blip+re-dial+re-send ⇒ reliable_acked→2 on v2 — the acc_ack_rx
+     refresh gate); corpse-lane re-spawn; dead-lane ≥1 AND ≤1 bounce then QueueFull; cap-full reject (explicit);
+     authority-split (booked never learned). Existing mesh_redelivery/mesh_load/mesh_under_loss MUST stay green
+     (learned path dormant on booked clusters; dialer now a reliable-uni superset). NO new dep; HR1/HR3 preserved
+     (spawn_mesh sole MeshTransport ctor; frozen sim::io::Transport seam untouched). IMPLEMENTING IN TREE-GREEN
+     STAGES: dispatcher+serve_any symmetric refactor (existing tests green) → learned lane + send_durable lazy-spawn
+     + gate → RE-connection/corpse/dead-lane robustness. L5 outbound ArcSwap re-plumb (S2), the AwaitAdopt re-solicit
+     egress (S3, new InterShardFlow arm), and the F2 dest-lane numeric guard (S4) are the follow-on slices.**
+     **✅ CA-1 CORE (reply-on-connection) LANDED (Stages 1+2+3-HIGH) — the k3d no-DNS peer-addressing blocker is
+     CLEARED for the mesh. Implemented per the blueprint: (S1) the unified per-connection accept_uni dispatcher
+     (stream_kind DATA/ACK tag-routing) replacing serve_connection's DATA loop + the deleted ack_reader_task — the
+     two-accept_uni-loops-per-connection RACE eliminated — + symmetric ack_egress on EVERY connection (dialer now
+     emits acks too); (S2) LearnedPeers/LearnedConn + ConnSource{Dial,Learned}, the learn_dial_in_peer record site
+     (authority split = booked/self never learned; learned_peers_max cap + loud learned_peers_rejected counter;
+     SPIFFE marker; separate learned.lock() outside the ledger inner Mutex), ensure_connection Learned arm (adopt
+     held conn, never dial, Err on absent/dead), send_durable lazy-spawn with corpse-lane-as-miss + a dead-conn
+     pre-check + ack_rx_override; MeshTransport spawn bundle (stats the SAME Arc as MeshControl). ADVERSARIAL
+     POST-IMPL REVIEW (wf_5310c8fb, 3 read-only opus lenses) VERIFIED every R-3'/R-4/R-6 invariant PRESERVED (one
+     ledger Arc both directions — StaleEpoch cross-stream cure STRENGTHENED; contiguity, torn-ack cancel-safety,
+     epoch-bump, retransmit rearm, drop_connections/kill teardown [serve_tasks Vec aborts BOTH tasks], R-6d3a
+     durable-before-send gate all intact; lock order correct; no-dup-lane; HR1/HR3/no-dep/no-magic-number hold) AND
+     caught ONE HIGH the design+I both missed: a learned lane whose accepted connection DIES had its ack watch
+     close ⇒ changed()==Err perpetually ⇒ the biased unguarded select arm-1 starved the send+retransmit arms ⇒
+     hot-spin + wedge (latent — the happy-path gate keeps both ends alive). FIXED (S3-HIGH): on ack-watch-Err for a
+     LEARNED lane, loud-bounce any undelivered window then TERMINATE ⇒ send_durable respawns over the peer's
+     re-dialed connection — unifying the HIGH + Stage-3 #2 (RE-connection via respawn) + #4 (no bounce-storm). GATE
+     GREEN: io-prod 129 lib + all integration pass (0 failed, 0 ignored — the ca1_reply_on_connection gate is LIVE:
+     asymmetric A(empty-book)/B(books A), A learns B then replies over the held conn, DELIVERED + reliable_acked>=1
+     + no false NodeUnreachable; + ca1_learned_lane_terminates_when_its_accepted_connection_dies [the HIGH-fix
+     regression]; + ca1_learned_peers_table_cap_rejects_and_counts; + stream_kind 3-arm); clippy -D clean;
+     coverage-io-prod 95.06% + mesh.rs 95.09% (>= 90 floor). Tier-A (coverage-fast 100%) UNAFFECTED — CA-1 is
+     io-prod-only. OWED REFINEMENTS (ledgered, NOT correctness blockers — the terminate-and-respawn is fail-safe +
+     consistent with the NodeUnreachable-then-producer-redrive model): (a) window-preserving in-place re-adopt (keep
+     the unacked window across a learned-connection blip instead of terminate+producer-redrive — matches booked-lane
+     redelivery, an optimization); (b) M6 LearnedPeers eviction (a learned-then-vanished entry is resident until the
+     cap or a same-NodeId re-dial — bounded, static-roster-safe; M6 must cover LearnedPeers, not just RecvLedger);
+     (c) the deeper coverage of a few learn_dial_in_peer arms (already-live-keep / dead-evict) + a full
+     RE-connection respawn e2e; (d) LOW: dialer-side ack_egress opens one idle ACK stream per dialed conn in the
+     booked topology (lazy-open optimization). FOLLOW-ON SLICES: S2 (L5 outbound ArcSwap re-plumb + update_peer_addr,
+     flips l5_a_rescheduled_peer), S3 (AwaitAdopt re-solicit egress, new InterShardFlow arm), S4 (F2 dest-lane
+     numeric guard); then the real-cloud k3d CrashLoop/reschedule e2e; then P4 voxels.**
      **⚠️ k3d CLOUD test DE-SCOPED (review CRITICAL, D-12 BINDING): the mesh uses a static literal-IP peer book with NO DNS/
      service resolution — two k3d pods CANNOT address each other until CA-1 (reply-on-connection) lands. So R-6 proves M3 on a
      LOOPBACK CrashLoop test (R-6b, no pod network); the k3d StatefulSet+PVC + real-cloud CrashLoop/reschedule proof is a separate
