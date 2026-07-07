@@ -13,6 +13,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let env = EnvConfig::from_process_env();
     let local = env.node_id("VD_NODE_ID")?;
+    // Cloud-ready k3d Slice 2: the footgun preflight + resolved D-3, BEFORE `boot_mesh_and_replay` (the
+    // preflight must veto a manual incarnation / ephemeral escape before that resolves the durable M3 boot-
+    // counter). The shard holds no auth key ⇒ dev_pubkey = None.
+    // Stringify so a cloud footgun/incoherence prints its actionable Display guidance in `kubectl logs`.
+    let d3 = vd_bins::resolve_node_d3(&env, vd_io_prod::boot::NodeRole::Shard, None)
+        .map_err(|e| e.to_string())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -45,9 +51,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // its split-brain-safety (armed ⇒ a confirmation channel exists AND the grace spans >= 2 recheck
     // cycles, so a healthy holder never self-fences between on-time replies) is validated HERE at boot —
     // loud, never a silent mass-self-fence of healthy shards.
-    let realm_recheck_interval: u64 = env.parse("VD_REALM_RECHECK")?;
-    let self_fence_grace_ticks: u64 = env.parse_or("VD_SELF_FENCE_GRACE", 0)?;
-    vd_sim::directory::validate_self_fence_cadence(self_fence_grace_ticks, realm_recheck_interval)?;
+    // Cloud-ready k3d Slice 2: the node D-3 config comes from the shared resolver (footgun preflight +
+    // derived-or-inert D-3, run at the top before `boot_mesh_and_replay`). `d3.node_recheck` /
+    // `d3.node_self_fence_grace` REPLACE the old direct env reads + the inline `validate_self_fence_cadence`
+    // (which now runs inside `resolve_d3`). In DevTest these are the inert 0/0 (byte-identical to before).
+    let realm_recheck_interval: u64 = d3.node_recheck;
+    let self_fence_grace_ticks: u64 = d3.node_self_fence_grace;
     register_stub_shard(
         world,
         schedule,

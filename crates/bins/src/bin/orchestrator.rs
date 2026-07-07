@@ -23,7 +23,6 @@ use vd_core::{Fence, UniverseTick};
 #[cfg(feature = "store-test-hooks")]
 use vd_node::orchestrator::DirectoryRes;
 use vd_sim::capability::NodeKind;
-use vd_sim::directory::DirectoryTuning;
 use vd_wire::admin::AdminSnapshot;
 #[cfg(feature = "store-test-hooks")]
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
@@ -39,6 +38,15 @@ impl SnapshotSource for Published {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let env = EnvConfig::from_process_env();
+    // Cloud-ready k3d Slice 2: run the footgun preflight FIRST — before ANY durable action (the M3 boot-counter
+    // increment inside resolve_process_incarnation, the store open). DevTest = a no-op passthrough; Cloud fails
+    // LOUD on an ephemeral escape / a manual VD_PROCESS_INCARNATION / a missing-or-under-temp VD_STORE_DURABLE_
+    // ROOT. The orchestrator holds no auth key ⇒ dev_pubkey = None. `profile` threads into resolve_d3 below.
+    // Stringify so main's default `{:?}` print surfaces the actionable Display guidance (e.g. "cloud profile
+    // forbids VD_STORE_EPHEMERAL_OK …") in the pod's `kubectl logs`, never a bare Debug variant dump — the
+    // SAME operator-facing posture as `check_durable_path` below.
+    let profile =
+        vd_io_prod::boot::enforce_cloud_preflight(&env, None).map_err(|e| e.to_string())?;
     let local = env.node_id("VD_NODE_ID")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -86,53 +94,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
     };
     saga.validate()?;
-    // D-3 lease-liveness budget: the heartbeat/reaper/self-fence knobs, env-overridable per deployment,
-    // defaulting INERT (renew/reaper intervals 0 = pre-D-3 behavior). `validate` rejects a mis-tuned
-    // ordering chain at boot (a too-sparse renewal, or a self-fence grace that overlaps the orchestrator's
-    // reassign-after window = a split-brain window) — LOUD config error, never a silent liveness hole.
-    let d3 = DirectoryTuning::default();
-    let directory = DirectoryTuning {
-        lease_ttl_ticks: env.parse("VD_LEASE_TTL")?,
-        lease_renew_interval_ticks: env
-            .parse_or("VD_LEASE_RENEW_INTERVAL", d3.lease_renew_interval_ticks)?,
-        min_renews_before_lapse: env
-            .parse_or("VD_MIN_RENEWS_BEFORE_LAPSE", d3.min_renews_before_lapse)?,
-        self_fence_grace_ticks: env.parse_or("VD_SELF_FENCE_GRACE", d3.self_fence_grace_ticks)?,
-        max_self_fence_grace_ticks: env
-            .parse_or("VD_MAX_SELF_FENCE_GRACE", d3.max_self_fence_grace_ticks)?,
-        reaper_interval_ticks: env.parse_or("VD_REAPER_INTERVAL", d3.reaper_interval_ticks)?,
-        recovery_grace_ticks: env.parse_or("VD_RECOVERY_GRACE", d3.recovery_grace_ticks)?,
-    };
-    directory.validate()?;
-    // D-3 dead-vs-slow confirmation tuning. PROD-SAFE default `n = 3` (the CSCALE-1 margin: a single
-    // recoverable blip / idle-reap of a LIVE peer never confirms it dead) — DISTINCT from the dev/test
-    // `LivenessTuning::default()` (`n = 1`, kill-equivalent). `validate` rejects a 0 confirmation count
-    // or a window too tight to span the run at boot.
-    let liveness = vd_sim::saga::LivenessTuning {
-        n_consecutive_unreachable: env.parse_or("VD_LIVENESS_N", 3)?,
-        unreachable_window_ticks: env.parse_or(
-            "VD_LIVENESS_WINDOW",
-            vd_sim::saga::LivenessTuning::default().unreachable_window_ticks,
-        )?,
-        retry_delay_ticks_hint: env.parse_or(
-            "VD_LIVENESS_RETRY_HINT",
-            vd_sim::saga::LivenessTuning::default().retry_delay_ticks_hint,
-        )?,
-    };
-    liveness.validate()?;
-    // R-4c: the orchestrator is the ONE process holding BOTH the transport redial backoff (the mesh it just
-    // spawned) and the saga liveness window — cross-validate them LOUD. Nothing else asserts the two clocks
-    // are ordered: a `VD_LIVENESS_WINDOW` narrower than the GEOMETRIC backoff spread of the confirmation run
-    // lets `record_unreachable` reset the run before the n-th notice, so a genuinely-dead peer is NEVER
-    // confirmed dead (the never-confirm strand) — the coarse `validate()` linear check (a hand-entered
-    // `retry_delay_ticks_hint` disconnected from the real backoff) does NOT catch it.
+    // D-3 lease-liveness config (cloud-ready k3d Slice 2): ONE resolution (HR3) for this `profile`. DevTest =
+    // the INERT defaults (byte-identical to before — dev/test/in-process rigs unbroken); Cloud = the DERIVED
+    // active split-brain set (`DirectoryTuning::cloud` + `LivenessTuning::cloud`, whose window dominates the
+    // confirmed-dead run) + the inert-D-3 rejection. `resolve_d3` runs `directory.validate` +
+    // `liveness.validate` + `validate_against` (the R-4c cross-check, against the SAME DEFAULT redial backoff
+    // the mesh dials with — now shared consts, so `mesh_cfg`'s values equal them) + `validate_self_fence_cadence`
+    // internally — those individual validates MOVED there. `profile` was resolved by `enforce_cloud_preflight`
+    // at the top (before any durable action).
     let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
-    liveness.validate_against(
-        mesh_cfg.reliability.confirm_unreachable_after_retries,
-        mesh_cfg.redial_backoff_min,
-        mesh_cfg.redial_backoff_max,
+    let d3 = vd_io_prod::boot::resolve_d3(
+        &env,
+        profile,
+        vd_io_prod::boot::NodeRole::Orchestrator,
         tick_hz,
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
+    let directory = d3.directory;
+    let liveness = d3.liveness;
     // D-6 Slice D: the DURABLE redb Store (Store A — directory + saga WAL + clock ceiling). HR1: durable
     // state lives on a PERSISTENT volume keyed by path, NEVER under /tmp (the old /tmp/{shard_id} data-loss
     // bug). VD_STORE_PATH is REQUIRED (no silent in-memory fallback) and a temp path is REJECTED LOUD at

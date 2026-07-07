@@ -75,14 +75,21 @@ pub const SHARD: NodeId = NodeId(3);
 /// fencing it behind a dev/test compile guard is tracked for the prod-build phase.)
 pub const DEV_AUTH_SEED: [u8; 32] = [0x42; 32];
 
+/// The 32-byte DEV verifying key (derived once from [`DEV_AUTH_SEED`]). The gateway passes
+/// `Some(dev_auth_pubkey_bytes())` to `vd_io_prod::boot::enforce_cloud_preflight` so a cloud profile REFUSES
+/// to boot with the built-in dev key (cloud-ready k3d Slice 2). Passed by-value into io-prod (which cannot
+/// depend on vd-bins) to avoid a circular dependency.
+#[must_use]
+pub fn dev_auth_pubkey_bytes() -> [u8; 32] {
+    SigningKey::from_bytes(&DEV_AUTH_SEED)
+        .verifying_key()
+        .to_bytes()
+}
+
 /// The hex verifying key the gateway boots with (`VD_AUTH_PUBKEY`).
 #[must_use]
 pub fn dev_auth_pubkey_hex() -> String {
-    hex32_encode(
-        &SigningKey::from_bytes(&DEV_AUTH_SEED)
-            .verifying_key()
-            .to_bytes(),
-    )
+    hex32_encode(&dev_auth_pubkey_bytes())
 }
 
 /// The hex signing seed clients mint logins with (`VD_AUTH_SIGNING_KEY` in the
@@ -230,17 +237,9 @@ pub const BOOT_COUNTER_NAME: &str = "boot.counter";
 /// # Errors
 /// A present-but-non-boolean value.
 pub fn parse_bool_env(env: &EnvConfig, key: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    match env.string(key) {
-        Err(_) => Ok(false),
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" => Ok(true),
-            "0" | "false" | "no" | "" => Ok(false),
-            other => Err(format!(
-                "{key}={other:?} is not a boolean (use 1/true/yes or 0/false/no)"
-            )
-            .into()),
-        },
-    }
+    // DRY (Slice 2): the bool-parsing lives ONCE in `EnvConfig::bool`; this thin wrapper keeps the historic
+    // `Box<dyn Error>` signature its callers use.
+    env.bool(key).map_err(Into::into)
 }
 
 /// Resolve THE process incarnation stamped on every reliable frame (R-6a / M3), in precedence order:
@@ -346,6 +345,27 @@ pub fn open_node_outbox(
 /// # Errors
 /// A bad incarnation source; an unopenable/non-durable outbox path; a `spawn_mesh` failure; or a replay that
 /// hits a transient wedge.
+/// Cloud-ready k3d Slice 2 — the shared shard/gateway D-3 boot step (HR3: ONE place, so the two node bins
+/// cannot drift on the footgun preflight or the derived config). Runs `enforce_cloud_preflight` (fail-loud on
+/// ephemeral escapes / manual incarnation / a bad durable root / the dev auth key) then `resolve_d3`. MUST be
+/// called BEFORE [`boot_mesh_and_replay`] — the preflight has to veto a manual `VD_PROCESS_INCARNATION` /
+/// ephemeral boot-state escape BEFORE that resolves the M3 durable boot-counter (a durable action). The gateway
+/// passes `Some(dev_auth_pubkey_bytes())`; the shard passes `None` (it has no auth key). Returns the resolved
+/// D-3 config; the node reads `node_self_fence_grace` + `node_recheck` from it (the orchestrator's
+/// `directory`/`liveness` fields are inert for a node role and ignored).
+///
+/// # Errors
+/// Any cloud-profile violation or incoherent D-3 tuning (boxed, printed `Refusing to boot`).
+pub fn resolve_node_d3(
+    env: &EnvConfig,
+    role: vd_io_prod::boot::NodeRole,
+    dev_pubkey: Option<[u8; 32]>,
+) -> Result<vd_io_prod::boot::ResolvedD3, Box<dyn std::error::Error>> {
+    let profile = vd_io_prod::boot::enforce_cloud_preflight(env, dev_pubkey)?;
+    let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
+    vd_io_prod::boot::resolve_d3(env, profile, role, tick_hz)
+}
+
 pub fn boot_mesh_and_replay(
     env: &EnvConfig,
     runtime: &tokio::runtime::Handle,

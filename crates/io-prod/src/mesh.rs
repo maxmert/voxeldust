@@ -170,6 +170,13 @@ pub const DEFAULT_ACK_IDLE_FLUSH: Duration = Duration::from_millis(50);
 /// Default replays-before-a-hard-`NodeUnreachable`-bounce (R-4'): a transient blip costs ZERO bounce;
 /// only a peer that fails this many consecutive replays is declared unreachable.
 pub const DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES: u32 = 3;
+/// The peer-writer redial backoff bounds — the FIRST failed dial re-arms at `MIN`, each subsequent failure
+/// doubles, capped at `MAX`. ONE home (cloud-ready k3d Slice 2 hoisted these out of the inline `MeshConfig::new`
+/// literals) so the cloud liveness window (`LivenessTuning::cloud`, which must dominate the confirmed-dead run
+/// spread these bounds define — the R-4c cross-check) derives from the SAME source the mesh actually dials with.
+pub const DEFAULT_REDIAL_BACKOFF_MIN: Duration = Duration::from_millis(50);
+/// See [`DEFAULT_REDIAL_BACKOFF_MIN`].
+pub const DEFAULT_REDIAL_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 /// At-least-once redelivery tuning — the ONE config home for the redelivering transport (no inline
 /// literals at use sites). Plain (not `Serialize`): operational tuning, never persisted.
@@ -268,8 +275,8 @@ impl MeshConfig {
             outbound_capacity,
             inbound_capacity: inbound_capacity_for(outbound_capacity),
             max_inbound_connections: 256,
-            redial_backoff_min: Duration::from_millis(50),
-            redial_backoff_max: Duration::from_secs(5),
+            redial_backoff_min: DEFAULT_REDIAL_BACKOFF_MIN,
+            redial_backoff_max: DEFAULT_REDIAL_BACKOFF_MAX,
             process_incarnation,
             reliability: MeshReliabilityTuning::default(),
             learned_peers_max: DEFAULT_LEARNED_PEERS_MAX,

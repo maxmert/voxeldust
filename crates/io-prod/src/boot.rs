@@ -18,8 +18,21 @@
 //! and a crash before the rename completes only ever re-uses a value that was NEVER on the wire (safe).
 //!
 //! No new dependency (std-only). Not a frozen-`sim::io`-seam concern — the incarnation is a `MeshConfig` field.
+//!
+//! Cloud-ready k3d Slice 2 ALSO homes the CLOUD PROFILE here (the shared boot guards live in one place): the
+//! `VD_PROFILE=cloud` resolution, the derived-D-3 resolver (`resolve_d3`), and the footgun preflight
+//! (`enforce_cloud_preflight`) — a config MODE (HR3), never a per-shard-kind fork.
 
+use std::error::Error;
 use std::path::Path;
+
+use crate::mesh::{
+    DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES, DEFAULT_REDIAL_BACKOFF_MAX,
+    DEFAULT_REDIAL_BACKOFF_MIN,
+};
+use crate::runtime::EnvConfig;
+use vd_sim::directory::{DirectoryTuning, validate_self_fence_cadence};
+use vd_sim::saga::LivenessTuning;
 
 /// The 8-byte file magic (identifies a boot-counter sidecar; a foreign/short file is CORRUPT, never genesis).
 const MAGIC: [u8; 8] = *b"VDBOOT\0\0";
@@ -160,19 +173,309 @@ pub fn check_durable_path(
             }
         }
         None => {
-            let tmp = canon_lenient(&std::env::temp_dir());
-            let under_temp = probe.starts_with(&tmp)
-                || probe.starts_with("/tmp")
-                || probe.starts_with("/private/tmp");
-            if under_temp {
+            if is_under_temp(&probe) {
                 return Err(BootCounterError::Ephemeral {
                     path: path.display().to_string(),
-                    detail: format!("under a temp dir ({})", tmp.display()),
+                    detail: format!(
+                        "under a temp dir ({})",
+                        canon_lenient(&std::env::temp_dir()).display()
+                    ),
                 });
             }
         }
     }
     Ok(())
+}
+
+/// Whether an ALREADY-CANONICALIZED path resolves under a temp dir (`$TMPDIR` / `/tmp` / `/private/tmp`). The
+/// ONE temp-deny predicate — [`check_durable_path`]'s no-declared-root branch AND (cloud-ready k3d Slice 2)
+/// [`enforce_cloud_preflight`]'s `VD_STORE_DURABLE_ROOT` check both use it, so a durable-root that ITSELF
+/// canonicalizes under temp (a compliant-looking config that would re-open the ephemeral hole the allow-list
+/// is meant to close) is rejected the same way. Callers canonicalize (via `canon_lenient`) first.
+pub(crate) fn is_under_temp(canonical: &Path) -> bool {
+    let tmp = canon_lenient(&std::env::temp_dir());
+    canonical.starts_with(&tmp)
+        || canonical.starts_with("/tmp")
+        || canonical.starts_with("/private/tmp")
+}
+
+// ---- Cloud config profile (cloud-ready k3d Slice 2) --------------------------------------------
+
+/// The deployment profile a node boots under. `DevTest` (the default + every in-process rig + the process
+/// tests) keeps the INERT D-3 defaults — byte-identical to before this slice. `Cloud` SUPPLIES the derived
+/// ACTIVE split-brain config, REJECTS re-zeroing it, and drops dev footguns (all fail-loud at boot).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    DevTest,
+    Cloud,
+}
+
+/// Which server role is booting — the D-3 node-side self-fence knobs differ (a shard rechecks its Realm head,
+/// a gateway its Session head; the orchestrator has no node-side self-fence). A CONFIG axis (HR3), never a
+/// behavioral fork.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeRole {
+    Orchestrator,
+    Shard,
+    Gateway,
+}
+
+/// The resolved D-3 lease-liveness config: the orchestrator's `DirectoryTuning` + the transport-cross-checked
+/// `LivenessTuning` + the node-side self-fence grace/recheck. Produced by [`resolve_d3`], consumed by the bins.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedD3 {
+    pub directory: DirectoryTuning,
+    pub liveness: LivenessTuning,
+    pub node_self_fence_grace: u64,
+    pub node_recheck: u64,
+}
+
+/// A cloud-profile violation — fail-loud at boot (the `Refusing to boot` posture).
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CloudProfileError {
+    #[error("VD_PROFILE={0:?} is not a recognized profile (use `cloud`, `dev`, or `test`)")]
+    UnknownProfile(String),
+    #[error(
+        "cloud profile forbids {0} (a dev-only escape/footgun — a cloud pod must use the durable/persistent \
+         path, never an ephemeral one)"
+    )]
+    ForbiddenInCloud(&'static str),
+    #[error(
+        "cloud profile requires {0} to name a real persistent volume (absent/empty) — it is force-validated \
+         in cloud so its durable path uses the allow-list, catching a k8s emptyDir the temp deny-list cannot"
+    )]
+    MissingDurableRoot(&'static str),
+    #[error(
+        "cloud profile: {key} {path:?} is temp-TANGLED (canonicalizes UNDER a temp dir, or is an ANCESTOR of \
+         one — e.g. `/`) — not a real persistent volume; either would re-open the ephemeral hole the allow-list \
+         exists to close (a path under the root could still land inside temp)"
+    )]
+    DurableRootTempTangled { key: &'static str, path: String },
+    #[error(
+        "cloud profile refuses the built-in DEV auth verifying key (VD_AUTH_PUBKEY decodes to the dev key) — \
+         supply a real production key"
+    )]
+    DevAuthKey,
+    #[error(
+        "cloud profile requires an ACTIVE D-3 lease-liveness config, but {0} resolved to 0 (inert): a cluster \
+         with inert D-3 boots with NO split-brain protection (the DEFERRED.md:984 hole)"
+    )]
+    InertD3(&'static str),
+}
+
+/// Resolve the deployment [`Profile`] from `VD_PROFILE`: absent / `dev` / `test` / empty ⇒ [`Profile::DevTest`]
+/// (preserves every in-process rig + process-tier test, byte-identical); `cloud` ⇒ [`Profile::Cloud`]; any
+/// other present value is a LOUD error (never fail-OPEN into dev on a typo).
+///
+/// # Errors
+/// [`CloudProfileError::UnknownProfile`] on an unrecognized non-empty `VD_PROFILE`.
+pub fn resolve_profile(env: &EnvConfig) -> Result<Profile, CloudProfileError> {
+    match env.string("VD_PROFILE") {
+        Err(_) => Ok(Profile::DevTest),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "cloud" => Ok(Profile::Cloud),
+            "dev" | "test" | "" => Ok(Profile::DevTest),
+            _ => Err(CloudProfileError::UnknownProfile(v)),
+        },
+    }
+}
+
+/// Resolve the D-3 lease-liveness config for `role` given the `profile` + `tick_hz`.
+///
+/// In [`Profile::DevTest`] the fallback baseline is the INERT [`DirectoryTuning::default`] /
+/// [`LivenessTuning::default`] / node grace=0 / recheck=0 — behaviour-identical to before this slice. In
+/// [`Profile::Cloud`] the baseline is the DERIVED active set: [`DirectoryTuning::cloud`] +
+/// [`LivenessTuning::cloud`] (its window COMPUTED from the SAME [`DEFAULT_REDIAL_BACKOFF_MIN`] /
+/// [`DEFAULT_REDIAL_BACKOFF_MAX`] / [`DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES`] the mesh dials with — the
+/// R-4c cross-check) + node grace = the derived self-fence + node recheck = `tick_hz/2`. Any present `VD_*`
+/// env value OVERRIDES its baseline. EVERY resolved config is validated in BOTH profiles (an incoherent
+/// override fails loud); in cloud ONLY, an INERT resolution (a re-zeroed renew/reaper, or an inert node
+/// self-fence/recheck on a shard/gateway) is REJECTED — the crux of DEFERRED.md:984.
+///
+/// # Errors
+/// A boxed validation error (incoherent tuning) or [`CloudProfileError::InertD3`] (cloud + inert).
+pub fn resolve_d3(
+    env: &EnvConfig,
+    profile: Profile,
+    role: NodeRole,
+    tick_hz: u32,
+) -> Result<ResolvedD3, Box<dyn Error>> {
+    let (base_dir, base_live, base_node_grace, base_recheck) = match profile {
+        Profile::DevTest => (
+            DirectoryTuning::default(),
+            // The orchestrator (the ONLY consumer of `liveness`) shipped a PROD-SAFE `n = 3` default before
+            // this slice (CSCALE-1: a single recoverable blip toward a LIVE peer never confirms it dead) —
+            // NOT `LivenessTuning::default()`'s kill-equivalent `n = 1`. Preserve it so DevTest / the process
+            // tier stay byte-identical (finding 5). `VD_LIVENESS_*` still override below.
+            LivenessTuning {
+                n_consecutive_unreachable: 3,
+                ..LivenessTuning::default()
+            },
+            0u64,
+            0u64,
+        ),
+        Profile::Cloud => (
+            DirectoryTuning::cloud(tick_hz),
+            LivenessTuning::cloud(
+                tick_hz,
+                DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES,
+                DEFAULT_REDIAL_BACKOFF_MIN,
+                DEFAULT_REDIAL_BACKOFF_MAX,
+            ),
+            DirectoryTuning::cloud(tick_hz).self_fence_grace_ticks,
+            u64::from(tick_hz) / 2,
+        ),
+    };
+    let directory = DirectoryTuning {
+        // NOTE (review F2): the pre-slice orchestrator bin REQUIRED VD_LEASE_TTL (`parse`); this SHARED
+        // resolver defaults it (`parse_or`) because the shard/gateway roles never set it (a required parse
+        // would break their boot) and the CLOUD profile DERIVES it (`2*hz`) — so an absent VD_LEASE_TTL now
+        // yields the profile's coherent base (DevTest 100 / cloud 2*hz) rather than a boot error. In DevTest
+        // it is inert bookkeeping (the reaper is off), and every dev/process rig sets it explicitly.
+        lease_ttl_ticks: env.parse_or("VD_LEASE_TTL", base_dir.lease_ttl_ticks)?,
+        lease_renew_interval_ticks: env.parse_or(
+            "VD_LEASE_RENEW_INTERVAL",
+            base_dir.lease_renew_interval_ticks,
+        )?,
+        min_renews_before_lapse: env.parse_or(
+            "VD_MIN_RENEWS_BEFORE_LAPSE",
+            base_dir.min_renews_before_lapse,
+        )?,
+        self_fence_grace_ticks: env
+            .parse_or("VD_SELF_FENCE_GRACE", base_dir.self_fence_grace_ticks)?,
+        max_self_fence_grace_ticks: env.parse_or(
+            "VD_MAX_SELF_FENCE_GRACE",
+            base_dir.max_self_fence_grace_ticks,
+        )?,
+        reaper_interval_ticks: env
+            .parse_or("VD_REAPER_INTERVAL", base_dir.reaper_interval_ticks)?,
+        recovery_grace_ticks: env.parse_or("VD_RECOVERY_GRACE", base_dir.recovery_grace_ticks)?,
+    };
+    let liveness = LivenessTuning {
+        n_consecutive_unreachable: env
+            .parse_or("VD_LIVENESS_N", base_live.n_consecutive_unreachable)?,
+        unreachable_window_ticks: env
+            .parse_or("VD_LIVENESS_WINDOW", base_live.unreachable_window_ticks)?,
+        retry_delay_ticks_hint: env
+            .parse_or("VD_LIVENESS_RETRY_HINT", base_live.retry_delay_ticks_hint)?,
+    };
+    let node_self_fence_grace = env.parse_or("VD_SELF_FENCE_GRACE", base_node_grace)?;
+    let node_recheck = match role {
+        NodeRole::Shard => env.parse_or("VD_REALM_RECHECK", base_recheck)?,
+        NodeRole::Gateway => env.parse_or("VD_SESSION_RECHECK", base_recheck)?,
+        NodeRole::Orchestrator => base_recheck,
+    };
+
+    // Coherence — runs in BOTH profiles (dev inert passes vacuously; a cloud/override incoherence fails loud).
+    directory.validate()?;
+    liveness.validate()?;
+    liveness.validate_against(
+        DEFAULT_CONFIRM_UNREACHABLE_AFTER_RETRIES,
+        DEFAULT_REDIAL_BACKOFF_MIN,
+        DEFAULT_REDIAL_BACKOFF_MAX,
+        tick_hz,
+    )?;
+    validate_self_fence_cadence(node_self_fence_grace, node_recheck)?;
+
+    // Cloud ONLY: an inert resolution IS the split-brain hole (a cluster boots green with no protection) —
+    // reject it loud. This CANNOT live in `DirectoryTuning::validate` (which must stay vacuous-on-inert for
+    // dev); it is a PROFILE assertion on the resolved struct. Only the TWO knobs the validators above CANNOT
+    // catch are checked here: `lease_renew_interval == 0` makes `validate` short-circuit `active=false` (the
+    // whole D-3 goes vacuous — the exact green-boot hole), and `reaper_interval` is not part of any ordering
+    // check (an inert reaper never reassigns a dead owner). The node-side inert cases are ALREADY caught by
+    // the validators above and need no redundant check here: a `VD_SELF_FENCE_GRACE=0` fails
+    // `directory.validate` (SelfFenceWithinTtl, since cloud renew is active), and a `VD_REALM_RECHECK`/
+    // `VD_SESSION_RECHECK=0` fails `validate_self_fence_cadence` (NoConfirmationChannel).
+    if profile == Profile::Cloud {
+        if directory.lease_renew_interval_ticks == 0 {
+            return Err(CloudProfileError::InertD3("VD_LEASE_RENEW_INTERVAL").into());
+        }
+        if directory.reaper_interval_ticks == 0 {
+            return Err(CloudProfileError::InertD3("VD_REAPER_INTERVAL").into());
+        }
+    }
+    Ok(ResolvedD3 {
+        directory,
+        liveness,
+        node_self_fence_grace,
+        node_recheck,
+    })
+}
+
+/// The cloud footgun preflight — call ONCE per node at boot, BEFORE any durable/authoritative action. In
+/// [`Profile::DevTest`] a no-op passthrough. In [`Profile::Cloud`] it fails LOUD on: any ephemeral-store
+/// escape (`VD_STORE_EPHEMERAL_OK` / `VD_BOOT_STATE_EPHEMERAL_OK` / `VD_OUTBOX_EPHEMERAL_OK`) or a manual
+/// `VD_PROCESS_INCARNATION` (the durable monotone counter is mandatory in cloud); a missing/empty or
+/// under-temp `VD_STORE_DURABLE_ROOT`; and (gateway only, via `dev_pubkey = Some`) a `VD_AUTH_PUBKEY` that
+/// decodes to the built-in DEV verifying key. Returns the resolved [`Profile`] to thread into [`resolve_d3`].
+///
+/// Whether a canonicalized durable-root path is temp-TANGLED — it must be DISJOINT from the temp dir. Rejects
+/// a root UNDER temp (a temp path masquerading as durable — [`is_under_temp`]) AND a root that is an ANCESTOR
+/// of temp (e.g. `/`, whose allow-list `starts_with(root)` would admit a store/counter that itself lands in
+/// temp — finding 4). Both callers pass a `canon_lenient`-ed path.
+fn temp_tangled(root_canon: &Path) -> bool {
+    let tmp = canon_lenient(&std::env::temp_dir());
+    is_under_temp(root_canon) || tmp.starts_with(root_canon)
+}
+
+/// Require a cloud durable-root env var (`key`) to name a real persistent volume: present, non-empty, and
+/// temp-disjoint. The shared check for [`enforce_cloud_preflight`]'s store + boot-counter roots.
+///
+/// # Errors
+/// [`CloudProfileError::MissingDurableRoot`] (absent/empty) or [`CloudProfileError::DurableRootTempTangled`].
+fn require_durable_root(env: &EnvConfig, key: &'static str) -> Result<(), CloudProfileError> {
+    let root = env
+        .string(key)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(CloudProfileError::MissingDurableRoot(key))?;
+    if temp_tangled(&canon_lenient(Path::new(&root))) {
+        return Err(CloudProfileError::DurableRootTempTangled { key, path: root });
+    }
+    Ok(())
+}
+
+/// `dev_pubkey` is passed IN (the gateway supplies `Some(vd_bins::DEV_AUTH_PUBKEY_BYTES)`; orchestrator/shard
+/// pass `None`) to avoid an `io-prod → vd-bins` circular dependency.
+///
+/// # Errors
+/// [`CloudProfileError`] on any cloud violation; a boxed [`crate::runtime::ConfigError`] on a malformed value.
+pub fn enforce_cloud_preflight(
+    env: &EnvConfig,
+    dev_pubkey: Option<[u8; 32]>,
+) -> Result<Profile, Box<dyn Error>> {
+    let profile = resolve_profile(env)?;
+    if profile == Profile::Cloud {
+        for key in [
+            "VD_STORE_EPHEMERAL_OK",
+            "VD_BOOT_STATE_EPHEMERAL_OK",
+            "VD_OUTBOX_EPHEMERAL_OK",
+        ] {
+            if env.bool(key)? {
+                return Err(CloudProfileError::ForbiddenInCloud(key).into());
+            }
+        }
+        // The M3 durable monotone incarnation path is mandatory in cloud — an explicit override bypasses it.
+        if env.string("VD_PROCESS_INCARNATION").is_ok() {
+            return Err(CloudProfileError::ForbiddenInCloud("VD_PROCESS_INCARNATION").into());
+        }
+        // BOTH durable roots must name a real persistent volume (present, non-empty, temp-DISJOINT):
+        // - VD_STORE_DURABLE_ROOT: the redb store (directory + saga WAL + clock ceiling).
+        // - VD_BOOT_DURABLE_ROOT: the M3 monotone boot-counter (the split-brain incarnation ledger). In cloud
+        //   the manual VD_PROCESS_INCARNATION + every ephemeral escape are forbidden above, so this durable
+        //   counter is the MANDATORY, SOLE incarnation source — leaving it on an ephemeral emptyDir (which the
+        //   temp deny-list cannot catch, mounted under /var/lib/kubelet) is the same fail-open as the store
+        //   (finding 3). Forcing the root present flips `check_durable_path` into allow-list mode for it.
+        require_durable_root(env, "VD_STORE_DURABLE_ROOT")?;
+        require_durable_root(env, "VD_BOOT_DURABLE_ROOT")?;
+        if let Some(dev) = dev_pubkey {
+            // Compare DECODED bytes (case-robust); a malformed VD_AUTH_PUBKEY propagates loud, never passes.
+            if env.hex32("VD_AUTH_PUBKEY")? == dev {
+                return Err(CloudProfileError::DevAuthKey.into());
+            }
+        }
+    }
+    Ok(profile)
 }
 
 /// The durable monotone boot-counter.
@@ -439,6 +742,266 @@ mod tests {
             check_durable_path(escape, None, false),
             Err(BootCounterError::Ephemeral { .. })
         ));
+    }
+
+    // ---- Cloud config profile (cloud-ready k3d Slice 2) --------------------------------------
+    fn env_of(pairs: &[(&str, &str)]) -> EnvConfig {
+        EnvConfig::new(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        )
+    }
+    fn cloud_err(r: Result<Profile, Box<dyn Error>>) -> CloudProfileError {
+        *r.expect_err("expected a cloud-profile violation")
+            .downcast::<CloudProfileError>()
+            .expect("a CloudProfileError")
+    }
+
+    #[test]
+    fn resolve_profile_ladder() {
+        assert_eq!(
+            resolve_profile(&env_of(&[("VD_PROFILE", "cloud")])),
+            Ok(Profile::Cloud)
+        );
+        assert_eq!(
+            resolve_profile(&env_of(&[("VD_PROFILE", "CLOUD")])),
+            Ok(Profile::Cloud) // case-insensitive
+        );
+        assert_eq!(resolve_profile(&env_of(&[])), Ok(Profile::DevTest)); // absent ⇒ dev (rigs unbroken)
+        assert_eq!(
+            resolve_profile(&env_of(&[("VD_PROFILE", "dev")])),
+            Ok(Profile::DevTest)
+        );
+        assert_eq!(
+            resolve_profile(&env_of(&[("VD_PROFILE", "test")])),
+            Ok(Profile::DevTest)
+        );
+        assert_eq!(
+            resolve_profile(&env_of(&[("VD_PROFILE", "prod")])),
+            Err(CloudProfileError::UnknownProfile("prod".to_owned())) // typo never fails-open into dev
+        );
+    }
+
+    #[test]
+    fn cloud_preflight_rejects_ephemeral_escapes_and_manual_incarnation() {
+        let base = [
+            ("VD_PROFILE", "cloud"),
+            ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
+        ];
+        for key in [
+            "VD_STORE_EPHEMERAL_OK",
+            "VD_BOOT_STATE_EPHEMERAL_OK",
+            "VD_OUTBOX_EPHEMERAL_OK",
+            "VD_PROCESS_INCARNATION",
+        ] {
+            let mut pairs = base.to_vec();
+            pairs.push((key, "1"));
+            assert_eq!(
+                cloud_err(enforce_cloud_preflight(&env_of(&pairs), None)),
+                CloudProfileError::ForbiddenInCloud(key)
+            );
+        }
+        // Dev mode: the same escape is ALLOWED (no enforcement) — the dev/test path is unbroken.
+        assert_eq!(
+            enforce_cloud_preflight(&env_of(&[("VD_STORE_EPHEMERAL_OK", "1")]), None)
+                .expect("dev profile passes the escape through"),
+            Profile::DevTest
+        );
+    }
+
+    #[test]
+    fn cloud_preflight_requires_both_durable_roots_temp_disjoint() {
+        // The STORE root absent / whitespace-only → MissingDurableRoot(store).
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(
+                &env_of(&[("VD_PROFILE", "cloud")]),
+                None
+            )),
+            CloudProfileError::MissingDurableRoot("VD_STORE_DURABLE_ROOT")
+        );
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(
+                &env_of(&[("VD_PROFILE", "cloud"), ("VD_STORE_DURABLE_ROOT", "   ")]),
+                None
+            )),
+            CloudProfileError::MissingDurableRoot("VD_STORE_DURABLE_ROOT")
+        );
+        // A root that canonicalizes UNDER a temp dir re-opens the ephemeral hole → temp-tangled.
+        let tmp_root = std::env::temp_dir().join("vd-cloud-preflight-root");
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(
+                &env_of(&[
+                    ("VD_PROFILE", "cloud"),
+                    ("VD_STORE_DURABLE_ROOT", tmp_root.to_str().expect("utf8 path")),
+                ]),
+                None
+            )),
+            CloudProfileError::DurableRootTempTangled {
+                key: "VD_STORE_DURABLE_ROOT",
+                path: tmp_root.to_str().expect("utf8 path").to_owned(),
+            }
+        );
+        // Finding 4: a root that is an ANCESTOR of temp (`/`) would admit temp paths through the allow-list
+        // — the parent-of-temp case the old under-temp-only check missed → temp-tangled too.
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(
+                &env_of(&[("VD_PROFILE", "cloud"), ("VD_STORE_DURABLE_ROOT", "/")]),
+                None
+            )),
+            CloudProfileError::DurableRootTempTangled {
+                key: "VD_STORE_DURABLE_ROOT",
+                path: "/".to_owned(),
+            }
+        );
+        // Finding 3: a real STORE root but NO boot-counter root → the split-brain incarnation ledger could
+        // sit on an ephemeral emptyDir the deny-list cannot catch → MissingDurableRoot(boot).
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(
+                &env_of(&[
+                    ("VD_PROFILE", "cloud"),
+                    ("VD_STORE_DURABLE_ROOT", "/var/lib/vd")
+                ]),
+                None
+            )),
+            CloudProfileError::MissingDurableRoot("VD_BOOT_DURABLE_ROOT")
+        );
+        // BOTH roots present + non-temp → passes (orchestrator: no dev-key veto since dev_pubkey=None).
+        assert_eq!(
+            enforce_cloud_preflight(
+                &env_of(&[
+                    ("VD_PROFILE", "cloud"),
+                    ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
+                    ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
+                ]),
+                None
+            )
+            .expect("both roots present + non-temp → cloud"),
+            Profile::Cloud
+        );
+    }
+
+    #[test]
+    fn cloud_preflight_vetoes_the_dev_verifying_key_case_robust() {
+        let dev = [0x42u8; 32];
+        // UPPERCASE dev hex — the veto compares DECODED bytes, so hex case cannot bypass it (A2-#2).
+        let dev_hex_upper = crate::runtime::hex32_encode(&dev).to_uppercase();
+        let veto = [
+            ("VD_PROFILE", "cloud"),
+            ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
+            ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
+            ("VD_AUTH_PUBKEY", dev_hex_upper.as_str()),
+        ];
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(&env_of(&veto), Some(dev))),
+            CloudProfileError::DevAuthKey
+        );
+        // A real (different) key passes the veto.
+        let real_hex = crate::runtime::hex32_encode(&[0x99u8; 32]);
+        let ok = [
+            ("VD_PROFILE", "cloud"),
+            ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
+            ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
+            ("VD_AUTH_PUBKEY", real_hex.as_str()),
+        ];
+        assert_eq!(
+            enforce_cloud_preflight(&env_of(&ok), Some(dev)).expect("a real key passes the veto"),
+            Profile::Cloud
+        );
+    }
+
+    #[test]
+    fn cloud_resolve_d3_supplies_active_set_and_devtest_stays_inert() {
+        let e = env_of(&[("VD_PROFILE", "cloud")]);
+        let orch =
+            resolve_d3(&e, Profile::Cloud, NodeRole::Orchestrator, 50).expect("orch cloud d3");
+        assert_eq!(orch.directory.lease_renew_interval_ticks, 25); // ACTIVE — not the inert 0
+        assert_eq!(orch.directory.self_fence_grace_ticks, 150);
+        assert_eq!(orch.directory.max_self_fence_grace_ticks, 250); // 5*hz — the split-brain reassign budget
+        assert_eq!(orch.directory.reaper_interval_ticks, 10);
+        // The window is the run-spread floor (n·hint = 75), NOT the old SKEW-inflated 120 (finding 1: the
+        // window is not the split-brain margin — that lives in max_self_fence_grace_ticks above).
+        assert_eq!(orch.liveness.unreachable_window_ticks, 75);
+        assert_eq!(orch.liveness.n_consecutive_unreachable, 3);
+        let shard = resolve_d3(&e, Profile::Cloud, NodeRole::Shard, 50).expect("shard cloud d3");
+        assert_eq!(shard.node_self_fence_grace, 150);
+        assert_eq!(shard.node_recheck, 25); // hz/2 supplied (VD_REALM_RECHECK is a required parse in the bin)
+        // DevTest → the inert default (byte-identical to before this slice).
+        let dev =
+            resolve_d3(&env_of(&[]), Profile::DevTest, NodeRole::Orchestrator, 50).expect("dev d3");
+        assert_eq!(dev.directory.lease_renew_interval_ticks, 0);
+        assert_eq!(dev.node_self_fence_grace, 0);
+        // Finding 5: the DevTest orchestrator keeps the PROD-SAFE n=3 confirm-dead default (NOT
+        // LivenessTuning::default()'s kill-equivalent n=1) — byte-identical to the pre-slice orchestrator bin.
+        assert_eq!(dev.liveness.n_consecutive_unreachable, 3);
+    }
+
+    #[test]
+    fn cloud_resolve_d3_rejects_inert_or_incoherent_overrides() {
+        let inert = |pairs: &[(&str, &str)], role| {
+            *resolve_d3(&env_of(pairs), Profile::Cloud, role, 50)
+                .expect_err("expected a cloud-profile violation")
+                .downcast::<CloudProfileError>()
+                .expect("a CloudProfileError")
+        };
+        // renew=0 makes the whole D-3 vacuous (validate would PASS it) — THE DEFERRED.md:984 hole → InertD3.
+        assert_eq!(
+            inert(
+                &[("VD_PROFILE", "cloud"), ("VD_LEASE_RENEW_INTERVAL", "0")],
+                NodeRole::Orchestrator
+            ),
+            CloudProfileError::InertD3("VD_LEASE_RENEW_INTERVAL")
+        );
+        // reaper=0 → the orchestrator never reassigns a dead owner (no ordering check catches it) → InertD3.
+        assert_eq!(
+            inert(
+                &[("VD_PROFILE", "cloud"), ("VD_REAPER_INTERVAL", "0")],
+                NodeRole::Orchestrator
+            ),
+            CloudProfileError::InertD3("VD_REAPER_INTERVAL")
+        );
+        // An incoherent grace override (grace <= ttl) fails via directory.validate (a DIFFERENT error type,
+        // caught upstream — NOT InertD3).
+        assert!(
+            resolve_d3(
+                &env_of(&[("VD_PROFILE", "cloud"), ("VD_SELF_FENCE_GRACE", "50")]),
+                Profile::Cloud,
+                NodeRole::Orchestrator,
+                50
+            )
+            .is_err()
+        );
+        // A shard recheck=0 override fails via validate_self_fence_cadence (also caught upstream).
+        assert!(
+            resolve_d3(
+                &env_of(&[("VD_PROFILE", "cloud"), ("VD_REALM_RECHECK", "0")]),
+                Profile::Cloud,
+                NodeRole::Shard,
+                50
+            )
+            .is_err()
+        );
+        // A too-SMALL max override makes the reassign horizon RACE a THETA_MAX-throttled self-fence
+        // (2*150 = 300 >= ttl+max = 100+50) → SelfFenceRacesReassign via directory.validate (NOT InertD3).
+        let err = resolve_d3(
+            &env_of(&[("VD_PROFILE", "cloud"), ("VD_MAX_SELF_FENCE_GRACE", "50")]),
+            Profile::Cloud,
+            NodeRole::Orchestrator,
+            50,
+        )
+        .expect_err("a too-small max must be rejected");
+        assert_eq!(
+            err.downcast_ref::<vd_sim::directory::DirectoryTuningError>(),
+            Some(
+                &vd_sim::directory::DirectoryTuningError::SelfFenceRacesReassign {
+                    ttl: 100,
+                    grace: 150,
+                    max: 50,
+                    theta: vd_sim::directory::THETA_MAX,
+                }
+            )
+        );
     }
 
     #[test]

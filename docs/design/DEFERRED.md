@@ -988,7 +988,47 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     `BatchAdopted` to a dead/absent orch every tick INDEFINITELY** (finite test rigs bound it by run length; the
     double-crash wedge fix above removes the compounding orch-side loop). This is a COUPLED cloud prerequisite, not a
     free-standing nice-to-have: the `grace > 0` boot assertion must land WITH the split-brain lease-timing coherence
-    (`lease_ttl < grace <= lease_ttl + max`) on the deploy config validation — NOT a half-measure now; (3) the real-cloud
+    (`lease_ttl < grace <= lease_ttl + max`) on the deploy config validation — NOT a half-measure now.
+    **[Cloud-ready k3d Slice 2 — CLOSED for the cloud profile]** `VD_PROFILE=cloud` now makes `resolve_d3`
+    (`io-prod/src/boot.rs`) DERIVE an ACTIVE D-3 set (`DirectoryTuning::cloud` + `LivenessTuning::cloud`) AND REJECT
+    re-zeroing it, so the "shipped default is 0 / boots green with no split-brain protection" hole is gone whenever
+    the profile is cloud. **The split-brain reassign TIMING was ALSO fixed here** (an adversarial post-impl review +
+    an 8-agent design workflow, `wf_e392275a`/`wf_692089c5`; user chose "Strong-AND"): the pre-existing D-3 mechanism
+    the cloud profile ACTIVATES had a verified ~ttl→grace two-holder window because `should_reap` reassigned a lapsed
+    key at `lease_expires` (=ttl) while a holder self-fences at `grace > ttl` — the `+max` term was dead code. THE FIX:
+    (a) `should_reap` now gates on `now > lease_expires + max_self_fence_grace_ticks` (the `+max` is load-bearing) AND
+    on a PERSISTENT (monotone-latched) confirmed-dead signal — reassign happens only after the holder has PROVABLY
+    self-fenced (zero zombie window), and the latch (`LivenessTracker::is_latched_dead`, cleared on ack, empty on
+    rehydrate) survives the redial-backoff pulse so the ttl+max deadline never orphans; (b) `DirectoryTuning::cloud`
+    sizes `max = THETA_MAX*grace + M - ttl = 5·hz` so the reassign horizon `ttl+max` STRICTLY outlasts even a
+    `THETA_MAX`(=2)-CPU-throttled holder's self-fence (`THETA_MAX*grace < ttl+max`, `const`-asserted at hz∈{10,20,50}
+    + `validate()` re-checked); (c) the earlier `SKEW_FACTOR`-in-`unreachable_window` mechanism was INERT (the window
+    never enters `should_reap`) and is DROPPED — the window is now just `run_spread.max(n·hint)`. The node bins read
+    the derived grace/recheck via `vd_bins::resolve_node_d3` (the old direct `VD_*` reads + inline
+    `validate_self_fence_cadence` retired into the resolver). Findings 3/4/5 from the review also fixed:
+    `VD_BOOT_DURABLE_ROOT` (the M3 incarnation ledger) is now force-validated in cloud (was fail-open on an emptyDir);
+    the durable-root temp check rejects an ANCESTOR-of-temp root too; the DevTest orchestrator keeps its prod-safe
+    `n=3` confirm-dead (was silently regressing to `n=1`). **DEPLOYMENT REQUIREMENTS (USER-RATIFY):** the orchestrator
+    pod must run at Guaranteed QoS (a CPU reservation — the non-throttled reference frame); `THETA_MAX=2` is a policy
+    const to RATIFY against a throttled-pod load test (Slice 5/6); the failover latency for a dead shard is now the
+    full `ttl+max` = 7 s @50Hz (the Strong-AND price of the zero-zombie guarantee vs the OR fast-path's ~1.2 s) —
+    shrink `ttl` to reduce it while preserving the margin. **MARGIN-BUDGET assumption (post-impl review F1, MEDIUM,
+    NOT a shipped defect — the LAN config holds with wide headroom):** the enforced `THETA_MAX*grace < ttl+max` folds
+    THREE terms into its `hz` (1 s @50Hz) margin: self-fence GRANULARITY (`+THETA_MAX`, the holder fences at
+    `grace+1`), the renew/recheck ANCHOR DECOUPLING (`+renew_interval` = `hz/2`, since `lease_expires` tracks the
+    reply-less renew while `confirmed` tracks the recheck round-trip), and WALL-CLOCK LATENCY (RTT + renew jitter,
+    un-ticked). The tight DETERMINISTIC bound is `THETA_MAX*(grace+1) + renew_interval <= ttl+max` (@50Hz `327 <= 350`,
+    leaving 23 ticks ≈ 0.46 s one-way latency headroom — ample on a k3d LAN). It is DOCUMENTED (the `THETA_MAX` doc-
+    comment) but NOT yet code-enforced in `validate` (the shipped derivation satisfies it by construction, so no
+    footgun today); PROMOTE it into `validate` + RATIFY the wall-clock latency budget with the same throttled-pod load
+    test if a deployment ever tightens `max` toward `THETA_MAX*grace`. Also (F2, LOW): `VD_LEASE_TTL` moved from
+    required→defaulted in the shared `resolve_d3` (a shard/gateway never set it + cloud derives it) — inert in DevTest,
+    every rig sets it explicitly. **The RESIDUAL is FAIL-OPEN, not fail-safe:** a k8s manifest
+    that OMITS `VD_PROFILE=cloud` boots DevTest (inert D-3, NO split-brain protection) silently — so the **Slice-4
+    manifest DoD** is that EVERY server pod sets `VD_PROFILE=cloud` + BOTH durable roots (each footgun-arm is proven
+    fail-loud in a real binary by `crates/bins/tests/cloud_preflight_process.rs`, incl. the green-boot positive
+    control). DevTest stays intentionally inert (in-process rigs + the loopback process tier have no split-brain to
+    protect against); (3) the real-cloud
     k3d CrashLoop/reschedule e2e that exercises the `ReSolicitBatch` send-failure → confirm-dead path across a NAT'd
     reschedule (driven by CA-1 `update_peer_addr`); (4) SCALE refinements (idempotent + sheddable today, non-blocking):
     the dest re-drive is UNCONDITIONAL every `Arriving` tick, so it emits a duplicate `BatchAdopted` for the whole

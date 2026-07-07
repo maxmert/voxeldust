@@ -87,6 +87,27 @@ impl EnvConfig {
         self.parse::<u64>(key).map(NodeId)
     }
 
+    /// A boolean env flag: absent ⇒ `false`; `1`/`true`/`yes` ⇒ true; `0`/`false`/`no`/empty ⇒ false;
+    /// anything else is a LOUD [`ConfigError::Unparseable`] (a typo like `VD_FOO=treu` is never silently
+    /// treated as false). The ONE bool-parsing home (cloud-ready k3d Slice 2 — `vd_bins::parse_bool_env`
+    /// delegates here, and the cloud footgun preflight reads the ephemeral escapes through it).
+    ///
+    /// # Errors
+    /// [`ConfigError::Unparseable`] on a present-but-non-boolean value.
+    pub fn bool(&self, key: &str) -> Result<bool, ConfigError> {
+        match self.raw(key) {
+            Err(_) => Ok(false),
+            Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" => Ok(true),
+                "0" | "false" | "no" | "" => Ok(false),
+                _ => Err(ConfigError::Unparseable {
+                    key: key.to_owned(),
+                    value: v.to_owned(),
+                }),
+            },
+        }
+    }
+
     /// The peer address book: `"1=127.0.0.1:5001,2=127.0.0.1:5002"`.
     ///
     /// # Errors
