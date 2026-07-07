@@ -78,8 +78,9 @@ pub struct StubConfig {
     /// orchestrator's reassign window opens — the split-brain cure a partitioned holder needs (the
     /// reactive `realm_recheck` reply never arrives under partition). `0` = INERT (the pre-D-3 default).
     /// The holder's local copy of `DirectoryTuning::self_fence_grace_ticks`; the split-brain-safe timing
-    /// (`lease_ttl < grace <= lease_ttl + max_self_fence_grace`) is enforced orchestrator-side by
-    /// `DirectoryTuning::validate`. REQUIRES `realm_recheck_interval > 0` as the confirmation channel —
+    /// (`lease_ttl < grace` AND the THETA_MAX-scaled `THETA_MAX*grace < lease_ttl + max_self_fence_grace`, so
+    /// `should_reap`'s `ttl+max` reassign horizon outlasts even a throttled self-fence) is enforced
+    /// orchestrator-side by `DirectoryTuning::validate`. REQUIRES `realm_recheck_interval > 0` as the confirmation channel —
     /// the timer is inert without it (no round-trip ⇒ no `last_confirmed` ⇒ nothing to measure).
     pub self_fence_grace_ticks: u64,
 }
@@ -2475,9 +2476,10 @@ fn self_fence_drop_transients(owned: &mut OwnedTransients, stats: &mut StubStats
 /// D-3 Slice 5 — the PROACTIVE self-fence (fence rule 4, the partition cure). When this shard HOLDS its
 /// realm but has had no round-trip confirmation (`RealmConfirmedAt`) within `self_fence_grace_ticks` of
 /// its own `local_tick` — i.e. it is partitioned from the orchestrator, so the reactive `realm_recheck`
-/// reply never arrives — it HARD-STOPS its own authority BEFORE the orchestrator's reassign window
-/// opens (`lease_ttl + max_self_fence_grace`; the split-brain-safe ordering `lease_ttl < grace <=
-/// lease_ttl + max` is enforced orchestrator-side by `DirectoryTuning::validate`). The schedule runs
+/// reply never arrives — it HARD-STOPS its own authority BEFORE the orchestrator's reassign horizon
+/// opens (`should_reap` reaps only past `lease_expires + max_self_fence_grace`; the split-brain-safe
+/// ordering `lease_ttl < grace` with `THETA_MAX*grace < lease_ttl + max` is enforced orchestrator-side by
+/// `DirectoryTuning::validate`). The schedule runs
 /// this before the egress systems, so a holder that self-fences this tick drops its held transients and
 /// emits NO frames — two owners can never both reach clients. The reactive `realm_recheck` reply path
 /// (a reply showing a takeover) remains the prompt cure while the link is ALIVE; this is the only path

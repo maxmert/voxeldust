@@ -2184,7 +2184,7 @@ mod tests {
     }
 
     /// A D-3 Slice-5b config: the recheck channel + proactive self-fence both ARMED (rig-local values;
-    /// the split-brain-safe `ttl < grace <= ttl + max` ordering is validated orchestrator-side).
+    /// the split-brain-safe `ttl < grace` with `THETA_MAX*grace < ttl + max` ordering is validated orchestrator-side).
     fn self_fence_config() -> GatewayConfig {
         GatewayConfig {
             session_recheck_interval: 2,

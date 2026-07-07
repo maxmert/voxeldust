@@ -46,6 +46,43 @@ pub struct DirectoryTuning {
     pub recovery_grace_ticks: u64,
 }
 
+/// The CPU-throttle safety budget for the D-3 split-brain reassign ordering: the worst-case ratio of
+/// wall-elapsed time to a holder's accrued LOCAL ticks (≥ 1; `2` = a holder pinned at half its nominal
+/// tick rate by a k8s 50%-CPU cgroup for a whole reassign window). A throttled holder accrues its
+/// `self_fence_grace_ticks` LOCAL ticks — hence self-fences — `THETA_MAX`× later in wall-clock than a
+/// nominal one, while the (non-throttled) orchestrator's reassign deadline `lease_expires + max` counts
+/// universe ticks. The safety inequality `THETA_MAX * grace < ttl + max` (enforced by
+/// [`DirectoryTuning::validate`], consumed by `should_reap`) makes the orchestrator's reassign STRICTLY
+/// outlast even the slowest admissible holder's self-fence, so a key is never granted while the old holder
+/// still asserts authority (zero zombie window). A POLICY choice (a pod throttled worse than this for a
+/// whole reassign window is mis-provisioned and k8s liveness-fails first); RATIFY against a throttled-pod
+/// load test before locking. Deployment REQUIREMENT: the orchestrator pod runs at Guaranteed QoS (a CPU
+/// reservation), so it is the non-throttled reference frame — if IT throttled it would reassign LATER in
+/// wall-clock, which only WIDENS the margin.
+///
+/// MARGIN BUDGET (the terms the enforced `THETA_MAX*grace < ttl+max` folds into `ttl+max - THETA_MAX*grace`,
+/// = `hz` = 1 s @50Hz — a post-impl review, `wf` Explore, surfaced these as an assumption to STATE, not a
+/// shipped defect — the LAN config holds with wide headroom). Two deterministic terms + one wall-clock term
+/// eat into that budget: (1) SELF-FENCE GRANULARITY — the holder self-fences at `local - confirmed > grace`,
+/// i.e. after `grace+1` LOCAL ticks, up to `(grace+1)*THETA_MAX` universe (a `+THETA_MAX` term); (2) ANCHOR
+/// DECOUPLING — `lease_expires` is anchored to the reply-less `LeaseRenew`, but the holder's `confirmed`
+/// stamp to the recheck round-trip, so under partition `confirmed` can be up to one `renew_interval` (`hz/2`)
+/// newer than the renew the orchestrator last accepted, delaying the self-fence's universe completion by that
+/// much (a `+renew_interval` term); (3) WALL-CLOCK LATENCY — one-way RTT + renew jitter (un-ticked). The
+/// tight deterministic bound is thus `THETA_MAX*(grace+1) + renew_interval <= ttl+max`; @50Hz that is
+/// `2*151 + 25 = 327 <= 350`, leaving 23 ticks (~0.46 s one-way) of latency headroom — ample on a k3d LAN
+/// (sub-ms RTT). RATIFY the wall-clock budget WITH `THETA_MAX` against the throttled-pod load test; if a
+/// deployment tightens `max` toward `THETA_MAX*grace`, promote the tight bound into `validate` (it is not
+/// enforced today — the shipped derivation satisfies it by construction; see DEFERRED.md).
+pub const THETA_MAX: u64 = 2;
+
+/// `x` floored at 1 — a `const fn` max (`Ord::max` is not const-callable) used by [`DirectoryTuning::cloud`]
+/// so a low `tick_hz` never collapses a per-second cadence knob (`hz/2`, `hz/5`) to 0, which the cloud
+/// profile would otherwise reject as inert D-3.
+const fn floor1(x: u64) -> u64 {
+    if x == 0 { 1 } else { x }
+}
+
 /// A mis-tuned [`DirectoryTuning`] — rejected LOUD at boot (the bin calls `validate` after env read),
 /// never a silent lease-liveness misconfiguration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -67,11 +104,19 @@ pub enum DirectoryTuningError {
     )]
     SelfFenceWithinTtl { ttl: u64, grace: u64 },
     #[error(
-        "self_fence_grace_ticks ({grace}) must be <= lease_ttl_ticks ({ttl}) + \
-         max_self_fence_grace_ticks ({max}): the holder must finish self-fencing BEFORE the \
-         orchestrator's reassign-after window opens (no overlap = no split-brain)"
+        "THETA_MAX ({theta}) * self_fence_grace_ticks ({grace}) must be < lease_ttl_ticks ({ttl}) + \
+         max_self_fence_grace_ticks ({max}): the orchestrator reassigns a lapsed key only PAST \
+         lease_expires + max (universe ticks), so that deadline must STRICTLY outlast even the slowest \
+         admissible (THETA_MAX-throttled) holder's self-fence (grace LOCAL ticks ⇒ grace*THETA_MAX \
+         wall-clock) — else the orchestrator could grant the key while the old holder still asserts \
+         authority (a two-holder split-brain). Grow max_self_fence_grace_ticks or shrink the grace/ttl."
     )]
-    SelfFenceOutlivesReassign { ttl: u64, grace: u64, max: u64 },
+    SelfFenceRacesReassign {
+        ttl: u64,
+        grace: u64,
+        max: u64,
+        theta: u64,
+    },
 }
 
 impl Default for DirectoryTuning {
@@ -89,14 +134,92 @@ impl Default for DirectoryTuning {
 }
 
 impl DirectoryTuning {
+    /// The CLOUD lease-liveness set (cloud-ready k3d Slice 2) — a DERIVED coherent tuning keyed off `tick_hz`,
+    /// so it is ONE function of the tick rate, never scattered literals (no-magic-numbers). Targets, all as
+    /// wall-clock seconds × `tick_hz`: a partitioned owner keeps authority ≤ 2 s (`lease_ttl`), renews 4×/TTL
+    /// (survives losing 3 renewals), self-fences ≈ 3 s after its last confirmed round-trip, the orchestrator's
+    /// reassign-after slack is 1 s (`max`), the reaper sweeps 5×/s, recovery-grace is 4 s. Satisfies
+    /// [`DirectoryTuning::validate`] (the ordering proof + the `const` assertion below).
+    ///
+    /// DISTINCT from [`Default`](DirectoryTuning::default), which stays INERT (`renew=0` ⇒ the whole D-3 system
+    /// off) for dev/test/in-process rigs — the cloud profile SUPPLIES this ACTIVE set + rejects re-zeroing it
+    /// (`vd_io_prod::boot::resolve_d3`), closing the "boots green with no split-brain protection" hole.
+    ///
+    /// The split-brain SAFETY MARGIN LIVES HERE, in `max_self_fence_grace_ticks`. `should_reap` reassigns a
+    /// lapsed key only PAST `lease_expires + max` (universe ticks) — the load-bearing consumer of `+max`
+    /// (it is NOT dead code / a mere witness). A partitioned holder self-fences `grace` LOCAL ticks after
+    /// its last confirmation, i.e. up to `grace * THETA_MAX` wall-clock under a CPU throttle. Sizing
+    /// `max = THETA_MAX*grace + M - ttl` (M ≥ 1 tick slack) makes `ttl + max > THETA_MAX*grace`, so the
+    /// orchestrator's reassign STRICTLY outlasts the slowest admissible holder's self-fence — zero zombie
+    /// window. @50Hz: grace=150, THETA_MAX=2, ttl=100, M=hz ⇒ max = 300+50-100 = 250 = 5·hz; reassign
+    /// horizon ttl+max = 350 (7 s), margin (ttl+max) − THETA_MAX·grace = 50 (1 s). The evidence gate is a
+    /// SEPARATE concern: `should_reap` also requires the peer be PERSISTENTLY confirmed dead
+    /// (`LivenessTracker::is_latched_dead`, the monotone latch — NOT the [`LivenessTuning::cloud`] freshness
+    /// window, which only governs how long a confirmation RUN stays fresh, per finding-1's correction).
+    ///
+    /// `renew`/`reaper` floor at 1 (`.max(1)`) so a low `tick_hz` (`hz/2`, `hz/5`) never collapses a knob to
+    /// 0 — which the cloud profile rejects as inert (`resolve_d3` InertD3). Coherence holds down to hz≈5
+    /// (`renew*min ≤ ttl`); a lower hz fails `validate` LOUD at boot (never silent).
+    #[must_use]
+    pub const fn cloud(tick_hz: u32) -> DirectoryTuning {
+        let hz = tick_hz as u64;
+        DirectoryTuning {
+            lease_ttl_ticks: 2 * hz,                    // T_ttl = 2 s
+            lease_renew_interval_ticks: floor1(hz / 2), // ttl / 4 (floored ≥ 1)
+            min_renews_before_lapse: 4,
+            self_fence_grace_ticks: 3 * hz, // detect a partition ≈ 3 s
+            // The split-brain budget: THETA_MAX*grace + M - ttl (M = hz slack) = 5*hz. ttl+max = 7*hz is the
+            // `should_reap` reassign horizon; ttl+max > THETA_MAX*grace by hz (1 s) of positive margin.
+            max_self_fence_grace_ticks: 5 * hz,
+            reaper_interval_ticks: floor1(hz / 5), // ~5 sweeps/s (floored ≥ 1)
+            recovery_grace_ticks: 4 * hz,          // 4 s post-restart quiesce
+        }
+    }
+}
+
+/// Compile-time proof that the derived cloud set satisfies every [`DirectoryTuning::validate`] ordering at
+/// EVERY shipped tick rate `{10, 20, 50}` — a mis-derivation (esp. an integer-division floor collapsing a
+/// knob, or the split-brain inequality slipping at some hz) fails the BUILD, not a test (mirrors the DRY
+/// asserts in `vd-bins`). A PURE const block (const-evaluated, never codegen'd) so it adds no runtime region
+/// to cover; the runtime `validate()` is additionally exercised for cloud() across tick rates (incl. the
+/// low-hz `floor1` clamp) in the unit tests.
+const _: () = {
+    let hzs = [10u32, 20, 50];
+    let mut i = 0;
+    while i < hzs.len() {
+        let c = DirectoryTuning::cloud(hzs[i]);
+        assert!(
+            c.lease_renew_interval_ticks * c.min_renews_before_lapse as u64 <= c.lease_ttl_ticks,
+            "cloud renew cadence must fit the TTL (RenewTooSparse)"
+        );
+        assert!(
+            c.self_fence_grace_ticks > c.lease_ttl_ticks,
+            "cloud self-fence grace must exceed the TTL (SelfFenceWithinTtl)"
+        );
+        // The Strong-AND split-brain inequality: the reassign horizon (ttl+max) STRICTLY outlasts the slowest
+        // admissible (THETA_MAX-throttled) holder's self-fence (THETA_MAX*grace).
+        assert!(
+            THETA_MAX * c.self_fence_grace_ticks < c.lease_ttl_ticks + c.max_self_fence_grace_ticks,
+            "cloud reassign horizon must strictly outlast a THETA_MAX-throttled self-fence"
+        );
+        assert!(
+            c.lease_renew_interval_ticks != 0 && c.reaper_interval_ticks != 0,
+            "cloud D-3 knobs must never floor to 0 (inert)"
+        );
+        i += 1;
+    }
+};
+
+impl DirectoryTuning {
     /// Reject a mis-tuned lease-liveness budget at boot. Enforces the binding ordering chain so the
     /// heartbeat keeps live leases alive AND a holder always self-fences before the orchestrator
     /// reassigns (the no-split-brain invariant). An INERT renew interval (`0`) skips the renewal
     /// margin check — there is no heartbeat to under-provision.
     ///
     /// # Errors
-    /// [`DirectoryTuningError`] for a renewal too sparse to survive the TTL, or a self-fence grace
-    /// that is inside the TTL (too eager) or outlives the orchestrator's reassign-after window (overlap).
+    /// [`DirectoryTuningError`] for a renewal too sparse to survive the TTL, a self-fence grace inside the
+    /// TTL (too eager), or a `THETA_MAX`-throttled self-fence that RACES the orchestrator's `ttl+max`
+    /// reassign deadline (`THETA_MAX*grace >= ttl+max` — a possible split-brain overlap).
     pub fn validate(&self) -> Result<(), DirectoryTuningError> {
         // ALL D-3 checks are gated on the heartbeat being ACTIVE (`lease_renew_interval_ticks != 0`):
         // when inert (renewal off — the pre-D-3 default, every existing in-process rig, and the dev
@@ -121,13 +244,21 @@ impl DirectoryTuning {
                 grace: self.self_fence_grace_ticks,
             });
         }
+        // The Strong-AND split-brain ordering: `should_reap` reassigns a lapsed key only PAST
+        // `lease_expires + max` (universe ticks); that deadline must STRICTLY outlast even the slowest
+        // admissible (THETA_MAX-throttled) holder's self-fence (grace LOCAL ticks ⇒ grace*THETA_MAX
+        // wall-clock). Saturating so a pathological huge grace/max can never wrap into a false pass.
         if active
-            & (self.self_fence_grace_ticks > self.lease_ttl_ticks + self.max_self_fence_grace_ticks)
+            & (self.self_fence_grace_ticks.saturating_mul(THETA_MAX)
+                >= self
+                    .lease_ttl_ticks
+                    .saturating_add(self.max_self_fence_grace_ticks))
         {
-            return Err(DirectoryTuningError::SelfFenceOutlivesReassign {
+            return Err(DirectoryTuningError::SelfFenceRacesReassign {
                 ttl: self.lease_ttl_ticks,
                 grace: self.self_fence_grace_ticks,
                 max: self.max_self_fence_grace_ticks,
+                theta: THETA_MAX,
             });
         }
         Ok(())
@@ -884,17 +1015,79 @@ mod tests {
     #[test]
     fn directory_tuning_default_and_a_prod_config_validate() {
         assert_eq!(DirectoryTuning::default().validate(), Ok(()));
-        // A representative prod config: heartbeat every ttl/4, 4 renews fit the ttl exactly.
+        // A representative prod config: heartbeat every ttl/4, 4 renews fit the ttl exactly, and the reassign
+        // horizon ttl+max = 300 strictly outlasts a THETA_MAX-throttled self-fence (2*130 = 260 < 300).
         let prod = DirectoryTuning {
             lease_ttl_ticks: 100,
             lease_renew_interval_ticks: 25,
             min_renews_before_lapse: 4,
             self_fence_grace_ticks: 130,
-            max_self_fence_grace_ticks: 40,
+            max_self_fence_grace_ticks: 200,
             reaper_interval_ticks: 8,
             recovery_grace_ticks: 200,
         };
         assert_eq!(prod.validate(), Ok(()));
+    }
+
+    #[test]
+    fn cloud_tuning_is_derived_coherent_and_scales_with_tick_hz() {
+        // Slice 2: the DERIVED cloud set is ACTIVE (renew != 0, unlike the inert default) and satisfies every
+        // validate() ordering — exercising the ACTIVE branch the dev default leaves vacuous.
+        let c = DirectoryTuning::cloud(50);
+        assert_eq!(c.lease_ttl_ticks, 100);
+        assert_eq!(c.lease_renew_interval_ticks, 25);
+        assert_eq!(c.min_renews_before_lapse, 4);
+        assert_eq!(c.self_fence_grace_ticks, 150);
+        assert_eq!(c.max_self_fence_grace_ticks, 250); // 5*hz — the split-brain reassign budget (was hz)
+        assert_eq!(c.reaper_interval_ticks, 10);
+        assert_eq!(c.recovery_grace_ticks, 200);
+        assert_eq!(c.validate(), Ok(()));
+        assert_ne!(
+            c.lease_renew_interval_ticks, 0,
+            "cloud is ACTIVE — the whole point vs the inert default"
+        );
+        // renew*min == ttl (the heartbeat exactly fits the TTL).
+        assert_eq!(
+            c.lease_renew_interval_ticks * c.min_renews_before_lapse as u64,
+            c.lease_ttl_ticks
+        );
+        // The Strong-AND split-brain inequality holds with POSITIVE margin: the reassign horizon (ttl+max=350)
+        // STRICTLY outlasts a THETA_MAX-throttled self-fence (2*150=300), by exactly hz (1 s) @50Hz.
+        assert!(
+            THETA_MAX * c.self_fence_grace_ticks < c.lease_ttl_ticks + c.max_self_fence_grace_ticks
+        );
+        assert_eq!(
+            (c.lease_ttl_ticks + c.max_self_fence_grace_ticks)
+                - THETA_MAX * c.self_fence_grace_ticks,
+            50,
+        );
+        // Derived from tick_hz → coherent at EVERY shipped rate, including low-hz where the hz/5 reaper
+        // (and hz/2 renew) would otherwise floor to 0 (the `floor1` guard keeps them ≥ 1, never inert).
+        for hz in [10u32, 20, 50, 100, 144] {
+            let d = DirectoryTuning::cloud(hz);
+            assert_eq!(d.validate(), Ok(()), "cloud({hz}) must validate");
+            assert_ne!(
+                d.reaper_interval_ticks, 0,
+                "reaper must floor to >= 1 at hz={hz}"
+            );
+            assert_ne!(
+                d.lease_renew_interval_ticks, 0,
+                "renew must floor to >= 1 at hz={hz}"
+            );
+        }
+        // Exercise `floor1`'s CLAMP arm at runtime (the `{10,20,50}+` rates only hit the pass-through arm):
+        // at hz=4, hz/5 = 0 would be inert, so floor1 raises the reaper to 1 (the `if x == 0 { 1 }` region).
+        assert_eq!(DirectoryTuning::cloud(4).reaper_interval_ticks, 1);
+    }
+
+    #[test]
+    fn cloud_node_self_fence_cadence_is_coherent() {
+        // The node-side proactive self-fence uses the SAME grace + a hz/2 recheck; the cadence guard passes.
+        let c = DirectoryTuning::cloud(50);
+        assert_eq!(
+            validate_self_fence_cadence(c.self_fence_grace_ticks, 25),
+            Ok(())
+        );
     }
 
     #[test]
@@ -935,22 +1128,46 @@ mod tests {
     }
 
     #[test]
-    fn directory_tuning_rejects_a_self_fence_outliving_reassign() {
-        // grace 151 > ttl 100 + max 50 = 150: the holder could still be live when the orchestrator
-        // reassigns — a split-brain window. Gated on an active heartbeat, so set a valid renew interval.
-        let t = DirectoryTuning {
+    fn directory_tuning_rejects_a_self_fence_racing_the_reassign() {
+        // Strong-AND split-brain inequality: THETA_MAX(2) * grace must be STRICTLY < ttl + max. The
+        // zero-margin EQUALITY (2*150 == 100+200) is REJECTED — a THETA_MAX-throttled holder self-fences
+        // exactly as the orchestrator reassigns, no slack. Gated on an active heartbeat (renew != 0).
+        let racing = DirectoryTuning {
             lease_renew_interval_ticks: 10,
-            self_fence_grace_ticks: 151,
-            max_self_fence_grace_ticks: 50,
+            lease_ttl_ticks: 100,
+            self_fence_grace_ticks: 150,
+            max_self_fence_grace_ticks: 200,
             ..DirectoryTuning::default()
         };
         assert_eq!(
-            t.validate(),
-            Err(DirectoryTuningError::SelfFenceOutlivesReassign {
+            racing.validate(),
+            Err(DirectoryTuningError::SelfFenceRacesReassign {
                 ttl: 100,
-                grace: 151,
-                max: 50,
+                grace: 150,
+                max: 200,
+                theta: THETA_MAX,
             })
+        );
+        // ONE tick of positive margin (2*150 = 300 < 100 + 201 = 301) → accepted.
+        assert_eq!(
+            DirectoryTuning {
+                max_self_fence_grace_ticks: 201,
+                ..racing
+            }
+            .validate(),
+            Ok(())
+        );
+        // INERT (renew == 0) SUPPRESSES the guard even with numerically-racing graces — covers the
+        // `active & (...)` false arm (HR5): a dev/in-process default is never rejected for its inert D-3.
+        assert_eq!(
+            DirectoryTuning {
+                lease_renew_interval_ticks: 0,
+                self_fence_grace_ticks: 10_000,
+                max_self_fence_grace_ticks: 0,
+                ..DirectoryTuning::default()
+            }
+            .validate(),
+            Ok(())
         );
     }
 

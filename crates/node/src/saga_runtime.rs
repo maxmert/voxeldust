@@ -244,6 +244,13 @@ struct PendingReHome {
 struct UnreachEvidence {
     consecutive: u32,
     first_unreachable_tick: UniverseTick,
+    /// D-3 Strong-AND MONOTONE latch: set true the moment `consecutive` first reaches
+    /// `n_consecutive_unreachable`, and held true across subsequent window RESETS (the redial backoff
+    /// spaces late notices past the window, so the freshness-gated `is_confirmed_dead` PULSE expires long
+    /// before the `should_reap` reassign horizon). Cleared only by `record_ack` removing the whole entry.
+    /// This is what lets `should_reap` gate on `is_latched_dead` at `lease_expires + max` without the
+    /// pulse having expired — the split-brain deadline can never be defeated by a stale evidence run.
+    confirmed_dead_latched: bool,
 }
 
 /// D-3 the dead-vs-slow discriminator (the CSCALE-1 cure). Replaces the insert-only / never-cleared
@@ -273,20 +280,27 @@ impl LivenessTracker {
         let ev = self.seen.entry(node).or_insert(UnreachEvidence {
             consecutive: 0,
             first_unreachable_tick: now,
+            confirmed_dead_latched: false,
         });
         if now.0.saturating_sub(ev.first_unreachable_tick.0) > self.tuning.unreachable_window_ticks
         {
-            *ev = UnreachEvidence {
-                consecutive: 1,
-                first_unreachable_tick: now,
-            };
+            // A stale run RESETS its consecutive count + anchor — but the `confirmed_dead_latched` MONOTONE
+            // latch is deliberately PRESERVED (only `record_ack` clears it): the redial backoff makes late
+            // notices arrive past the window, so an ongoing partition resets its run repeatedly, yet a peer
+            // that once reached `n` stays confirmed dead for `should_reap`'s ttl+max horizon.
+            ev.consecutive = 1;
+            ev.first_unreachable_tick = now;
         } else {
             ev.consecutive = ev.consecutive.saturating_add(1);
         }
+        if ev.consecutive >= self.tuning.n_consecutive_unreachable {
+            ev.confirmed_dead_latched = true;
+        }
     }
 
-    /// ANY successful inbound from `node`: it is alive — clear its evidence (idempotent; the clear-on-ack
-    /// that makes a recoverable blip non-fatal).
+    /// ANY successful inbound from `node`: it is alive — clear its evidence, INCLUDING the monotone latch
+    /// (the whole entry is removed; idempotent). The clear-on-ack that makes a recoverable blip non-fatal
+    /// and un-latches a peer that came back.
     fn record_ack(&mut self, node: NodeId) {
         self.seen.remove(&node);
     }
@@ -302,6 +316,20 @@ impl LivenessTracker {
         let fresh = now.0.saturating_sub(ev.first_unreachable_tick.0)
             <= self.tuning.unreachable_window_ticks;
         enough & fresh
+    }
+
+    /// D-3 Strong-AND: is `node` PERSISTENTLY confirmed dead — the MONOTONE latch (set the first tick its
+    /// consecutive run reached `n`, held across window resets until a live inbound clears the whole entry).
+    /// Unlike [`is_confirmed_dead`](LivenessTracker::is_confirmed_dead) (a freshness-gated PULSE that expires
+    /// once the redial backoff spaces late notices past the window), the latch survives to `should_reap`'s
+    /// `lease_expires + max` reassign horizon — so the ttl+max split-brain deadline is never defeated by a
+    /// stale evidence run. RAM-only ⇒ empty on rehydrate (the D-6 mass-orphan freeze holds: a restarted
+    /// orchestrator latches nobody until fresh post-restart notices re-accrue). No freshness/`now` term —
+    /// the latch IS the persistence; the reassign-timing gate lives in `should_reap`.
+    fn is_latched_dead(&self, node: NodeId) -> bool {
+        self.seen
+            .get(&node)
+            .is_some_and(|ev| ev.confirmed_dead_latched)
     }
 
     /// Re-tune the discriminator (the prod config path sets it via `with_tunings`; a test scenario that
@@ -1700,28 +1728,40 @@ fn drop_applied_event(step_id: u32) -> SagaEvent {
     }
 }
 
-/// D-3 Slice 4: the CAP AND-gate deciding if a directory record may be REAPED. All THREE must hold (never
-/// OR): (1) the post-restart quiesce window has elapsed (a rebuilt orchestrator does not reap until its
-/// liveness evidence has had time to re-accrue); (2) the lease has LAPSED (necessary, NOT sufficient — a
-/// slow renewal is not a death); (3) the owner is CONFIRMED dead (the evidence-gated discriminator — not a
-/// single blip). The combination realizes the binding CAP choice: an orchestrator outage FREEZES recovery
-/// (the reaper only runs inside a live orchestrator, and the RAM tracker is empty on rehydrate so gate (3)
-/// is unsatisfiable until fresh notices re-accrue) — so an outage NEVER mass-orphans. Three monomorphic
-/// `if`s (HR5; no short-circuit `&&`); each corner is covered.
+/// D-3 Slice 4 + Strong-AND split-brain fix: the CAP AND-gate deciding if a directory record may be REAPED.
+/// All THREE must hold (never OR): (1) the post-restart quiesce window has elapsed (a rebuilt orchestrator
+/// does not reap until its liveness evidence has had time to re-accrue); (2) `now` is past the SPLIT-BRAIN
+/// DEADLINE `lease_expires + max_self_fence_grace_ticks` — the upper bound (across the two clock domains,
+/// sized by [`THETA_MAX`](vd_sim::directory::THETA_MAX) so it dominates a CPU-throttled holder's self-fence)
+/// on WHEN a partitioned holder has provably hard-stopped its own authority. This subsumes the lapse gate
+/// (a live lease has `lease_expires >= now`) and is the CORE FIX: the old gate reaped at `lease_expires`
+/// (=ttl), while a holder self-fences at `grace > ttl` — a verified ~ttl→grace two-holder split-brain
+/// window. Reaping only at ttl+max means the holder is PROVABLY self-fenced first (zero zombie window).
+/// (3) the owner is PERSISTENTLY confirmed dead — [`is_latched_dead`](LivenessTracker::is_latched_dead), the
+/// MONOTONE latch (NOT the freshness-gated `is_confirmed_dead` pulse, which expires far before ttl+max once
+/// the redial backoff spaces notices past the window). The evidence gate that (a) never reaps a slow-but-
+/// alive holder and (b) realizes the binding CAP choice: the RAM tracker is empty on rehydrate ⇒ nobody
+/// latched ⇒ an orchestrator outage FREEZES recovery, NEVER mass-orphans. Three monomorphic `if`s (HR5; no
+/// short-circuit `&&`); each corner is covered.
 #[must_use]
 fn should_reap(
     record: &OwnerRecord,
     now: UniverseTick,
     liveness: &LivenessTracker,
     quiesced_until: UniverseTick,
+    max_self_fence_grace_ticks: u64,
 ) -> bool {
     if now.0 < quiesced_until.0 {
         return false;
     }
-    if record.lease_expires.0 >= now.0 {
+    let reassign_after = record
+        .lease_expires
+        .0
+        .saturating_add(max_self_fence_grace_ticks);
+    if now.0 <= reassign_after {
         return false;
     }
-    if !liveness.is_confirmed_dead(record.authority.node(), now) {
+    if !liveness.is_latched_dead(record.authority.node()) {
         return false;
     }
     true
@@ -1760,11 +1800,14 @@ fn reap_lapsed_leases(runtime: &mut SagaRuntimeRes, dir: &mut DirectoryCore, now
     }
     runtime.last_reap_tick = now;
     let quiesced_until = runtime.liveness_quiesced_until;
-    // ONE pass over the lapsed-AND-confirmed-dead leases; collect per family, then act.
+    // The split-brain reassign deadline term (D-3 Strong-AND): `should_reap` reaps only PAST
+    // `lease_expires + max_self_fence_grace_ticks`, so a partitioned holder has provably self-fenced first.
+    let max_grace = dir.tuning().max_self_fence_grace_ticks;
+    // ONE pass over the past-deadline-AND-latched-dead leases; collect per family, then act.
     let mut to_revoke: Vec<(DirectoryKey, Fence)> = Vec::new();
     let mut to_rehome: Vec<PendingReHome> = Vec::new();
     for (key, record) in dir.entries() {
-        if !should_reap(record, now, &runtime.liveness, quiesced_until) {
+        if !should_reap(record, now, &runtime.liveness, quiesced_until, max_grace) {
             continue;
         }
         match key {
@@ -3277,26 +3320,114 @@ mod tests {
     }
 
     #[test]
-    fn should_reap_requires_quiesced_lapsed_and_confirmed_dead() {
-        // The CAP AND-gate: reap iff quiesce-elapsed AND lapsed AND confirmed-dead. Covers all 4 corners.
-        let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1
+    fn should_reap_requires_quiesced_past_deadline_and_latched_dead() {
+        // The Strong-AND CAP gate: reap iff quiesce-elapsed AND now PAST `lease_expires + max` AND
+        // PERSISTENTLY (latched) confirmed dead. Covers all corners incl the `<=` deadline boundary.
+        let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1 ⇒ latch on first notice
         let dead = NodeId(5);
-        liveness.record_unreachable(dead, UniverseTick(100)); // confirmed (n = 1)
-        let now = UniverseTick(100);
+        liveness.record_unreachable(dead, UniverseTick(100)); // latched (consecutive 1 >= n 1)
+        let now = UniverseTick(200);
         let quiesced = UniverseTick(50); // window elapsed (now >= quiesced)
-        // All three hold → reap (lapsed at 90 < now 100; dead confirmed; quiesce elapsed).
-        assert!(should_reap(&rec(dead, 90), now, &liveness, quiesced));
+        let max = 10u64; // reassign horizon = lease_expires + 10
+        // All three hold → reap (now 200 > lease_expires 90 + max 10 = 100; latched dead; quiesce elapsed).
+        assert!(should_reap(&rec(dead, 90), now, &liveness, quiesced, max));
         // (1) NOT past the quiesce freeze → no reap.
         assert!(!should_reap(
             &rec(dead, 90),
             now,
             &liveness,
-            UniverseTick(150)
+            UniverseTick(250),
+            max
         ));
-        // (2) NOT lapsed (lease_expires >= now) → no reap.
-        assert!(!should_reap(&rec(dead, 200), now, &liveness, quiesced));
-        // (3) NOT confirmed dead (a node with no unreachable evidence) → no reap.
-        assert!(!should_reap(&rec(NodeId(99), 90), now, &liveness, quiesced));
+        // (2a) NOT past the reassign deadline (now <= lease_expires + max) → no reap.
+        assert!(!should_reap(&rec(dead, 200), now, &liveness, quiesced, max));
+        // (2b) EXACTLY at the deadline (now == lease_expires + max = 200) → the `<=` still blocks (boundary).
+        assert!(!should_reap(&rec(dead, 190), now, &liveness, quiesced, max));
+        // (3) NOT latched dead (a node with no unreachable evidence) → no reap.
+        assert!(!should_reap(
+            &rec(NodeId(99), 90),
+            now,
+            &liveness,
+            quiesced,
+            max
+        ));
+    }
+
+    #[test]
+    fn confirmed_dead_latch_sets_at_n_and_survives_a_window_reset_until_ack() {
+        // The MONOTONE latch: set the tick consecutive reaches `n`, PRESERVED across a window reset (which
+        // expires the freshness-gated pulse), cleared only by a live inbound. This is what lets `should_reap`
+        // gate on it at the ttl+max horizon without the pulse having expired.
+        let tuning = LivenessTuning {
+            n_consecutive_unreachable: 3,
+            unreachable_window_ticks: 10,
+            retry_delay_ticks_hint: 2,
+        };
+        let mut lv = LivenessTracker::new(tuning);
+        let node = NodeId(5);
+        // Below n → not latched (and the pulse is not yet confirmed either).
+        lv.record_unreachable(node, UniverseTick(0));
+        lv.record_unreachable(node, UniverseTick(1));
+        assert!(!lv.is_latched_dead(node), "2 < n=3: not yet latched");
+        assert!(!lv.is_confirmed_dead(node, UniverseTick(1)));
+        // The 3rd consecutive within the window → LATCHED (the pulse is also true right now).
+        lv.record_unreachable(node, UniverseTick(2));
+        assert!(
+            lv.is_latched_dead(node),
+            "consecutive reached n=3 → latched"
+        );
+        assert!(lv.is_confirmed_dead(node, UniverseTick(2)));
+        // A notice FAR past the window RESETS the run (100 - 2 > window 10 ⇒ consecutive back to 1), so the
+        // PULSE expires — but the monotone latch stays set (the whole point).
+        lv.record_unreachable(node, UniverseTick(100));
+        assert!(
+            !lv.is_confirmed_dead(node, UniverseTick(100)),
+            "pulse expired: consecutive reset to 1 < n"
+        );
+        assert!(
+            lv.is_latched_dead(node),
+            "the monotone latch survives the reset"
+        );
+        // A live inbound CLEARS the whole entry → un-latched.
+        lv.record_ack(node);
+        assert!(!lv.is_latched_dead(node), "record_ack un-latches");
+    }
+
+    #[test]
+    fn should_reap_reaps_at_ttl_plus_max_after_the_pulse_expires_never_before() {
+        // The Strong-AND split-brain guarantee + attack-1 orphan cure, together: (a) the reassign deadline is
+        // `lease_expires + max` (NOT the old lapse@ttl that raced the holder's `grace` self-fence), so a
+        // lapsed+latched owner is NOT reaped anywhere in (lease_expires, lease_expires+max]; (b) at the horizon
+        // the freshness-gated PULSE has long expired, but the MONOTONE latch persists, so failover COMPLETES
+        // (the key IS reaped) — no permanent orphan.
+        let tuning = LivenessTuning {
+            n_consecutive_unreachable: 1,
+            unreachable_window_ticks: 10,
+            retry_delay_ticks_hint: 2,
+        };
+        let mut lv = LivenessTracker::new(tuning);
+        let dead = NodeId(5);
+        lv.record_unreachable(dead, UniverseTick(5)); // latched (n = 1)
+        let max = 250u64; // cloud @50Hz: reassign horizon = lease_expires + 250
+        let rec = rec(dead, 100); // lease_expires = 100 ⇒ horizon = 350
+        let quiesced = UniverseTick(0);
+        // NOT reaped at the OLD ttl-ish point (100) nor anywhere up to and including the horizon (350).
+        assert!(
+            !should_reap(&rec, UniverseTick(100), &lv, quiesced, max),
+            "old lapse@ttl must NOT reap"
+        );
+        assert!(!should_reap(&rec, UniverseTick(200), &lv, quiesced, max));
+        assert!(
+            !should_reap(&rec, UniverseTick(350), &lv, quiesced, max),
+            "not reaped AT the horizon (<=)"
+        );
+        // At horizon+1 the PULSE is long dead (351 - 5 = 346 ≫ window 10) ...
+        assert!(
+            !lv.is_confirmed_dead(dead, UniverseTick(351)),
+            "the pulse has expired"
+        );
+        // ... but the LATCH persists ⇒ should_reap reaps (failover completes, no orphan).
+        assert!(should_reap(&rec, UniverseTick(351), &lv, quiesced, max));
     }
 
     #[test]
@@ -4976,8 +5107,7 @@ mod tests {
                 step_id: vd_wire::intershard::TRANSIENT_BATCH_STEP,
             }))
         };
-        let mut inbox = InboundBox::default();
-        inbox.0 = vec![
+        let inbox = InboundBox(vec![
             // (1-false) a non-Saga-Wire inbound → skipped.
             Inbound::NodeUnreachable {
                 to: SOURCE,
@@ -4990,7 +5120,7 @@ mod tests {
             batch_adopted(TransferId(999)),
             // (all-true) a BatchAdopted for the PRESENT XFER saga → latch it.
             batch_adopted(XFER),
-        ];
+        ]);
         latch_adopted_from_inbox(&mut runtime, &inbox);
         assert!(
             runtime.sagas.get(&XFER).expect("saga present").dest_adopted,
@@ -5040,13 +5170,12 @@ mod tests {
             EpochId(1),
             anchor,
         );
-        let mut inbox = InboundBox::default();
-        inbox.0 = vec![flow_inbound(&InterShardFlow::TransferAck(
+        let inbox = InboundBox(vec![flow_inbound(&InterShardFlow::TransferAck(
             TransferAck::BatchAdopted {
                 transfer_id: XFER,
                 step_id: vd_wire::intershard::TRANSIENT_BATCH_STEP,
             },
-        ))];
+        ))]);
         latch_adopted_from_inbox(&mut runtime, &inbox); // the pre-scan pass drive_sagas runs FIRST
         let mut outbox = OutboundBox::default();
         scan_deadlines(&mut runtime, &mut dir, &mut outbox, EpochId(1), maturity);

@@ -203,6 +203,44 @@ impl LivenessTuning {
         }
         Ok(())
     }
+
+    /// The CLOUD dead-vs-slow set (cloud-ready k3d Slice 2).
+    ///
+    /// `unreachable_window_ticks` is DERIVED, never a literal: it is the transport redial-backoff run-spread
+    /// ([`transport_run_spread_ticks`], the SAME series [`validate_against`](LivenessTuning::validate_against)
+    /// cross-checks), floored at the linear [`validate`](LivenessTuning::validate) bound (`n * hint`). Its job
+    /// is to make a confirmation RUN reach `n` (so a peer LATCHES [`is_latched_dead`] before a stale reset), so
+    /// it must be ≥ the run-spread — no larger.
+    ///
+    /// IMPORTANT (finding-1 correction): the window is NOT the split-brain safety budget. `should_reap`
+    /// reassigns a lapsed key only PAST `lease_expires + max` (universe ticks), sized in
+    /// [`DirectoryTuning::cloud`](crate::directory::DirectoryTuning::cloud) so `ttl+max > THETA_MAX*grace` —
+    /// THAT is the two-clock-domain margin. Confirmed-dead PERSISTENCE to that reassign horizon comes from the
+    /// MONOTONE `is_latched_dead` latch, NOT this freshness window (the earlier design that inflated the window
+    /// by a `SKEW_FACTOR` to "dominate the self-fence" was inert — the window never enters `should_reap`).
+    /// `n = 3` (CSCALE-1: survives a transient blip). RE-SOLVES automatically if `n` / `confirm_retries` / the
+    /// backoff change. Pairs with [`DirectoryTuning::cloud`](crate::directory::DirectoryTuning::cloud).
+    ///
+    /// [`is_latched_dead`]: the monotone confirmed-dead latch consumed by `should_reap` (crate `vd-node`).
+    #[must_use]
+    pub fn cloud(
+        tick_hz: u32,
+        confirm_retries: u32,
+        backoff_min: Duration,
+        backoff_max: Duration,
+    ) -> LivenessTuning {
+        let n: u32 = 3;
+        let hint = (u64::from(tick_hz) / 2).max(1);
+        let run_spread =
+            transport_run_spread_ticks(confirm_retries, n, backoff_min, backoff_max, tick_hz);
+        LivenessTuning {
+            n_consecutive_unreachable: n,
+            // >= the redial run-spread (so a run reaches `n` and LATCHES before a stale reset), floored at
+            // the linear `validate` bound (`n * hint`) so both `validate` and `validate_against` pass.
+            unreachable_window_ticks: run_spread.max(hint.saturating_mul(u64::from(n))),
+            retry_delay_ticks_hint: hint,
+        }
+    }
 }
 
 /// R-4c: sum interval indices `[lo, hi)` (1-based, half-open) of the io-prod peer_writer redial series
@@ -2144,6 +2182,41 @@ mod tests {
         // A single notice (or zero) has no spread.
         assert_eq!(transport_run_spread_ticks(3, 1, min, max, 20), 0);
         assert_eq!(transport_run_spread_ticks(3, 0, min, max, 20), 0);
+    }
+
+    #[test]
+    fn cloud_liveness_window_is_derived_from_the_run_spread() {
+        // Slice 2 (finding-1 correction): the cloud window is COMPUTED (run_spread, floored at the linear
+        // validate bound n·hint) — never a literal, and NO LONGER inflated by a SKEW_FACTOR. Its only job is
+        // to let a confirmation RUN reach `n` (latching `is_latched_dead`) before a stale reset; the
+        // split-brain margin lives in DirectoryTuning (ttl+max vs THETA_MAX*grace), NOT here.
+        let (min, max) = (Duration::from_millis(50), Duration::from_secs(5));
+        let c = LivenessTuning::cloud(50, 3, min, max);
+        assert_eq!(c.n_consecutive_unreachable, 3);
+        assert_eq!(c.retry_delay_ticks_hint, 25); // hz/2
+        // run_spread(3,3,50ms,5s,50) == 60; n·hint = 3·25 = 75. window = max(60, 75) = 75 (the linear floor).
+        assert_eq!(c.unreachable_window_ticks, 75);
+        assert!(
+            c.unreachable_window_ticks >= transport_run_spread_ticks(3, 3, min, max, 50),
+            "the window must cover the run-spread so a run reaches n before a stale reset"
+        );
+        assert_eq!(c.validate(), Ok(()));
+        assert_eq!(c.validate_against(3, min, max, 50), Ok(()));
+        // RE-SOLVES (not a literal): a DEEP confirm budget makes run_spread exceed the floor, so the window
+        // == run_spread (the run_spread arm of the `.max`).
+        let deep = LivenessTuning::cloud(50, 8, min, max);
+        let deep_rs = transport_run_spread_ticks(8, 3, min, max, 50);
+        assert!(
+            deep_rs > 75,
+            "a deep confirm budget must out-spread the linear floor"
+        );
+        assert_eq!(deep.unreachable_window_ticks, deep_rs);
+        assert_eq!(deep.validate_against(8, min, max, 50), Ok(()));
+        // The LINEAR FLOOR arm of the `.max`: a shallow confirm budget makes run_spread < n·hint, so the
+        // window clamps UP to the floor (75) — both `.max` arms exercised (HR5).
+        let shallow = LivenessTuning::cloud(50, 1, min, max);
+        assert_eq!(shallow.unreachable_window_ticks, 75);
+        assert_eq!(shallow.validate(), Ok(()));
     }
 
     #[test]
