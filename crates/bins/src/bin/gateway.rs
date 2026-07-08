@@ -102,14 +102,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = node.step_tick();
         // Readiness = clock-synced AND session capacity available (the SAME quantity the admission gate
-        // rejects on). PARTITION-BLIND in S3 (documented; the shard-symmetric any-session-confirmed-within
-        // fix is a named S4 blocker). Read on the sim thread; the probe task reads the cell lock-free.
+        // rejects on) AND session-servicing live (S4: partition-aware — a fully directory-partitioned
+        // gateway self-de-routes once its Active sessions' confirmed round-trips freeze, the shard-symmetric
+        // closure of the S3 blind spot). Read on the sim thread; the probe task reads the cell lock-free.
         let local_tick = node.tick().0;
         let ready = {
             let world = node.world_mut();
             let clock_synced = world.resource::<FollowerState>().clock.is_some();
-            let session_count = world.resource::<GatewaySessions>().len();
-            vd_node::health::gateway_ready(clock_synced, session_count, max_sessions)
+            let sessions = world.resource::<GatewaySessions>();
+            let sessions_live = vd_node::health::gateway_sessions_live(
+                sessions.freshest_session_confirmed(),
+                local_tick,
+                self_fence_grace_ticks,
+            );
+            vd_node::health::gateway_ready(clock_synced, sessions.len(), max_sessions, sessions_live)
         };
         vd_io_prod::probe::publish_tick(&health, local_tick, ready);
         let _ = pacer.wait();

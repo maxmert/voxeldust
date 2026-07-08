@@ -1061,14 +1061,34 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     beat the grant — FIXED to `held & (is_confirmed_fresh | grace==0)` (now a true dual of `lease_self_fence_due`);
     (MED) `enforce_cloud_preflight` had NO `VD_PROBE_ADDR` requirement (the one cloud footgun that failed OPEN — a
     probe-less pod boots always-healthy) — FIXED with `CloudProfileError::MissingProbeAddr` + negative test; (LOW)
-    probe addrs now in the `cluster.env`/`vd-slot` contracts so S4 tooling never hand-derives probe ports. **STILL
-    OWED (S4/S5/S6):** (a) GATEWAY partition-aware readiness — `gateway_ready` is partition-BLIND in S3 (a
-    fully-partitioned gateway still reads Ready); the shard-symmetric `any_session_confirmed_within(grace)` fix is an
-    S4 blocker (NAMED in the `gateway_ready` doc). (b) The S4 manifest DoD: probe stanzas with `periodSeconds ×
-    failureThreshold` >> `stall_deadline` AND > drain time (a too-eager liveness must not restart a healthy-but-slow
-    node); `VD_PROFILE=cloud` + `VD_PROBE_ADDR` on every server pod; a NetworkPolicy admitting kubelet→probe while the
-    ops/admin surface stays gated; the orchestrator mesh Service `publishNotReadyAddresses` (a shard must dial it
-    while it is itself NotReady on cold start).
+    probe addrs now in the `cluster.env`/`vd-slot` contracts so S4 tooling never hand-derives probe ports.
+  - **[Cloud-ready k3d Slice 4a — GATEWAY partition-aware readiness | LANDED + review folded]** Closed the S3
+    NAMED blocker (gateway `gateway_ready` was partition-BLIND). `gateway_ready` gained a 4th arg `sessions_live`
+    = `vd_node::health::gateway_sessions_live(GatewaySessions::freshest_session_confirmed(), local_tick, grace)`,
+    the session-servicing analogue of the shard's `shard_authority_ready`/`RealmConfirmedAt`: a total
+    gateway↔orchestrator(directory) partition freezes every session's `confirmed_at`, so the freshest going stale
+    ⇒ the gateway can renew NO session lease ⇒ /readyz de-route. Inert `grace==0` (DevTest) ⇒ always live
+    (byte-identical). **The adversarial review (`wf_8261a0ea`) caught a real HIGH I FIXED:** an `Active`-only max
+    was DEAD for the exact total partition it targeted — the proactive self-fence (`self_fence_lapsed_sessions`)
+    fires at the SAME `local_tick - confirmed > grace` threshold EARLIER in the same `step_tick`, flipping every
+    session `Active → SelfFenced` before readiness samples, so the detector read `None` (falsely live). CURE:
+    `freshest_session_confirmed` maxes `confirmed_at` over `{Active ∪ SelfFenced}` (SelfFenced retains its frozen
+    confirmed = the partition evidence; a fresh Active still dominates so a healthy/partial-partition gateway stays
+    Ready), proven by the REAL-schedule rig test asserting `Some(1)` post-self-fence (not a hand-fed value).
+    GENERAL lesson: a readiness gate sampled after `step_tick` that shares a threshold with a self-fence must read
+    the POST-transition state. **RESIDUAL (acknowledged, ledgered):** the zero-session / pre-`Active`-only blind
+    spot — a gateway that never had an Active session (only in-flight logins, `confirmed_at`=0 sentinel excluded)
+    rests on `clock_synced` (orch→gw only; does NOT prove gw→orch mint capability). Proper cure = a
+    session-independent gateway↔orch directory heartbeat (the shard has `RealmConfirmedAt` even with 0 players; the
+    gateway lacks a standing key to recheck). Deferred past S4.
+  - **STILL OWED (S4 manifests / S5 / S6):** the S4 manifest DoD: probe stanzas with `periodSeconds ×
+    failureThreshold` >> `stall_deadline` AND `terminationGracePeriodSeconds` > drain time (a too-eager liveness must
+    not restart a healthy-but-slow node); `VD_PROFILE=cloud` + `VD_PROBE_ADDR` + both durable roots on every server
+    pod; the entrypoint DNS-resolve seeding `VD_PEERS` (SocketAddr-only, no k8s DNS names); a NetworkPolicy admitting
+    kubelet→probe while the ops/admin surface stays gated; the orchestrator mesh Service headless +
+    `publishNotReadyAddresses` (a shard must dial it while it is itself NotReady on cold start); StatefulSets +
+    volumeClaimTemplates for the per-node durable identity (redb/boot-counter/outbox); the mTLS bundle + real
+    non-dev auth key as Secrets; the `just k3d-*` bring-up/image-import/apply glue.
   - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
     SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
     adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT

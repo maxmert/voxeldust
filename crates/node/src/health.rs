@@ -134,14 +134,39 @@ pub fn shard_ready(clock_synced: bool, authority_ready: bool) -> bool {
     clock_synced & authority_ready
 }
 
-/// Gateway readiness = clock-synced AND session capacity available (readiness gates on the SAME quantity the
-/// admission gate rejects on). PARTITION-BLIND in S3 (the follower clock is monotone None→Some; a self-fenced
-/// session still counts toward `len()`), so a fully-partitioned gateway still reads Ready — the shard-symmetric
-/// partition-aware fix (`any_session_confirmed_within(grace)`) is a NAMED S4 blocker, stated here so no reader
-/// believes the gateway self-de-routes on partition. Bitwise `&` (HR5).
+/// Gateway session-servicing liveness (S4 — closes the S3 partition-blind gap). The gateway's directory path is
+/// proven live iff it has NO session carrying a meaningful confirmation, OR its FRESHEST session confirmation
+/// (`GatewaySessions::freshest_session_confirmed` — the max `Session::confirmed_at` over `Active` sessions,
+/// re-armed each recheck, AND `SelfFenced` sessions, frozen at the self-fence) is within `grace` LOCAL ticks. A
+/// TOTAL gateway↔orchestrator(directory) partition freezes EVERY session's confirmation in lock-step (the
+/// proactive self-fence flips them `Active → SelfFenced` at the SAME `> grace` threshold, retaining the frozen
+/// confirmed), so the freshest going stale ⇒ the gateway can renew NO session lease ⇒ de-route. `SelfFenced`
+/// MUST be in the max: the self-fence empties the `Active` set on the very de-route tick, so an `Active`-only
+/// input would read `None` (falsely live). A single client's session freezing does NOT trip this (another stays
+/// fresh and dominates the max) — the exact shard-symmetric [`is_confirmed_fresh`] gate. `None` (no Active/
+/// SelfFenced session) ⇒ live: a booting/idle gateway rests on `clock_synced` and self-corrects once a session
+/// attaches and its recheck freezes (the acknowledged zero-session blind spot). Inert `grace == 0` (dev /
+/// in-process, no partition concept) ⇒ live. Mirrors the armed/inert shape of [`shard_authority_ready`].
 #[must_use]
-pub fn gateway_ready(clock_synced: bool, session_count: usize, max_sessions: usize) -> bool {
-    clock_synced & (session_count < max_sessions)
+pub fn gateway_sessions_live(freshest_session_confirmed: Option<u64>, local_tick: u64, grace: u64) -> bool {
+    match freshest_session_confirmed {
+        None => true,
+        Some(confirmed) => is_confirmed_fresh(local_tick, confirmed, grace) | (grace == 0),
+    }
+}
+
+/// Gateway readiness = clock-synced AND session capacity available (the SAME quantity the admission gate
+/// rejects on) AND session-servicing live ([`gateway_sessions_live`] — a fully directory-partitioned gateway
+/// now self-de-routes once its Active sessions' confirmed round-trips freeze, the shard-symmetric closure of
+/// the S3 partition-blind gap). Bitwise `&` = one region, all operands always evaluated (HR5, no short-circuit).
+#[must_use]
+pub fn gateway_ready(
+    clock_synced: bool,
+    session_count: usize,
+    max_sessions: usize,
+    sessions_live: bool,
+) -> bool {
+    clock_synced & (session_count < max_sessions) & sessions_live
 }
 
 /// Assemble the [`HealthReport`] from the ops-plane inputs. `live = draining || fresh-heartbeat`: a DELIBERATE
@@ -278,15 +303,29 @@ mod tests {
     }
 
     #[test]
-    fn gateway_ready_capacity_boundary() {
-        // clock synced + under capacity → ready.
-        assert!(gateway_ready(true, 4, 5));
+    fn gateway_ready_capacity_and_sessions_live() {
+        // clock synced + under capacity + sessions live → ready.
+        assert!(gateway_ready(true, 4, 5, true));
         // at capacity → not ready (the `<` is strict — same as the admission gate).
-        assert!(!gateway_ready(true, 5, 5));
+        assert!(!gateway_ready(true, 5, 5, true));
         // over capacity → not ready.
-        assert!(!gateway_ready(true, 6, 5));
-        // clock not synced → not ready regardless of capacity.
-        assert!(!gateway_ready(false, 0, 5));
+        assert!(!gateway_ready(true, 6, 5, true));
+        // clock not synced → not ready regardless.
+        assert!(!gateway_ready(false, 0, 5, true));
+        // clock synced + under capacity but sessions NOT live (a directory partition) → NOT ready.
+        assert!(!gateway_ready(true, 4, 5, false));
+    }
+
+    #[test]
+    fn gateway_sessions_live_none_fresh_stale_inert() {
+        // No Active session → live (rests on clock_synced; self-corrects once a session attaches).
+        assert!(gateway_sessions_live(None, 100, 150));
+        // ARMED + freshest confirmed within grace (100-90=10 <= 150) → live.
+        assert!(gateway_sessions_live(Some(90), 100, 150));
+        // ARMED + freshest confirmed stale (200-10=190 > 150: EVERY session froze) → NOT live (de-route).
+        assert!(!gateway_sessions_live(Some(10), 200, 150));
+        // INERT (grace == 0, dev): live even with a stale-looking Some (no partition concept).
+        assert!(gateway_sessions_live(Some(10), 200, 0));
     }
 
     #[test]

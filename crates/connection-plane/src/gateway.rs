@@ -398,6 +398,35 @@ impl GatewaySessions {
         })
     }
 
+    /// D-3 / S4 — the local tick of the FRESHEST last-lease-round-trip confirmation (`Session::confirmed_at`)
+    /// over sessions that carry a meaningful one: `Active` (re-armed on each affirming `Session`-head recheck
+    /// reply) OR `SelfFenced` (FROZEN at the instant the proactive self-fence fired — the gateway's own
+    /// evidence it lost the directory path). `None` when no such session exists (only pre-`Active` logins, or
+    /// zero sessions). The gateway readiness partition detector — the session-servicing analogue of the
+    /// shard's `RealmConfirmedAt`, fed to `vd_node::health::gateway_sessions_live`.
+    ///
+    /// `SelfFenced` MUST be included: [`self_fence_lapsed_sessions`] fires at the SAME
+    /// `local_tick - confirmed > grace` threshold as the readiness de-route and runs EARLIER in the same tick,
+    /// so under a TOTAL partition it flips every session `Active → SelfFenced` BEFORE readiness is sampled — an
+    /// `Active`-only max would then read `None` and keep a fully-partitioned gateway falsely Ready. A still-fresh
+    /// `Active` session dominates the max, so a healthy gateway (or a partial partition where one session still
+    /// re-arms) stays Ready; the gateway de-routes only when the freshest over BOTH sets is stale (EVERY session
+    /// has frozen — a total directory partition). It re-becomes Ready once a fresh `Active` session attaches or
+    /// the frozen `SelfFenced` ghosts clear on connection-end.
+    #[must_use]
+    pub fn freshest_session_confirmed(&self) -> Option<u64> {
+        self.by_session
+            .values()
+            .filter(|s| {
+                matches!(
+                    s.phase,
+                    SessionPhase::Active { .. } | SessionPhase::SelfFenced
+                )
+            })
+            .map(|s| s.confirmed_at.0)
+            .max()
+    }
+
     /// The sessions subscribing to `shard` (the H2 reverse-index read the frame-fan iterates).
     /// Empty when no session subscribes to it. Returns owned ids so the caller can mutate the
     /// outbox while iterating; the set is ≤ S and only the subscribers, never all sessions.
@@ -2229,6 +2258,19 @@ mod tests {
             rig.world.resource::<GatewaySessions>().len(),
             1,
             "fenced, not removed (awaits connection-end / adoption)"
+        );
+        // S4 readiness de-route reachability (the review's exact concern): after the REAL schedule self-fences
+        // the last session out of `Active`, the partition detector must still SEE the frozen confirmed (via the
+        // now-SelfFenced session), not read `None`. An `Active`-only max would read `None` here and keep this
+        // fully-partitioned gateway falsely Ready. The frozen confirmed is tick 1 (armed at the attach); with
+        // local_tick 7 > confirmed 1 + grace 5, `vd_node::health::gateway_sessions_live(Some(1), 7, 5)` is NOT
+        // live (proven over the pure predicate in the vd-node health tests — the seam kept node-free here).
+        assert_eq!(
+            rig.world
+                .resource::<GatewaySessions>()
+                .freshest_session_confirmed(),
+            Some(1),
+            "the self-fenced session's frozen confirm is the reachable de-route signal (not None)"
         );
     }
 
@@ -4689,6 +4731,64 @@ mod tests {
             }],
             "the different transfer is handled fresh, not re-sent from the XFER journal"
         );
+    }
+
+    #[test]
+    fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
+        // A bare session in a given phase with a given confirmed_at tick (uses the module test consts).
+        fn sess(phase: SessionPhase, confirmed: u64) -> Session {
+            Session {
+                client: CLIENT,
+                account: AccountId(5),
+                fence: Fence(1),
+                phase,
+                next_sub: 0,
+                confirmed_at: TickId(confirmed),
+                negotiated_minor: 1,
+                transfer: None,
+                subs: BTreeMap::new(),
+                delivered: BTreeMap::new(),
+                hot: Arc::new(SessionHot {
+                    route: ArcSwap::from_pointee(RouteSnapshot {
+                        authority: SHARD,
+                        fence: Fence(1),
+                        cut: None,
+                    }),
+                    last_input_seq: AtomicU64::new(0),
+                    subs: ArcSwap::from_pointee(SubTable::default()),
+                }),
+            }
+        }
+        let mut sessions = GatewaySessions::default();
+        // Empty table → None (no session carries a meaningful confirmed_at).
+        assert_eq!(sessions.freshest_session_confirmed(), None);
+        // Only PRE-Active logins → None (their confirmed_at is the 0 sentinel, never a real round-trip),
+        // even though their values are large — they must not be able to de-route a long-running gateway.
+        sessions
+            .by_session
+            .insert(SessionId(1), sess(SessionPhase::AwaitingDirectory, 999));
+        sessions
+            .by_session
+            .insert(SessionId(2), sess(SessionPhase::AwaitingAttach, 888));
+        assert_eq!(sessions.freshest_session_confirmed(), None);
+        // ONLY a SelfFenced session (a totally-partitioned gateway that self-fenced its last session): the
+        // FROZEN confirmed is visible → Some(stale). This is the case an Active-only max wrongly read as None
+        // (falsely Ready). It is the de-route signal.
+        sessions
+            .by_session
+            .insert(SessionId(3), sess(SessionPhase::SelfFenced, 40));
+        assert_eq!(sessions.freshest_session_confirmed(), Some(40));
+        // Add fresh Active sessions → the MAX over {Active ∪ SelfFenced} picks the freshest Active (a healthy
+        // gateway stays Ready despite the lingering SelfFenced ghost); the pre-Active 999 stays excluded.
+        sessions.by_session.insert(
+            SessionId(4),
+            sess(SessionPhase::Active { entity: EntityId(1) }, 30),
+        );
+        sessions.by_session.insert(
+            SessionId(5),
+            sess(SessionPhase::Active { entity: EntityId(2) }, 50),
+        );
+        assert_eq!(sessions.freshest_session_confirmed(), Some(50));
     }
 
     // ---- Slice 1d.2a: the route-table reshape (sub registry + reverse index) ----
