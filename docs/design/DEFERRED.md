@@ -1100,13 +1100,16 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     apply,down,dod,all}` (context-pinned; k3d-validate = the offline author+static-validate path). The adversarial
     review (`wf_e5b6d490`, entrypoint-dns + code-changes CLEAN) folded 1 MEDIUM: VD_MAX_BUFFERED_INPUTS drifted to
     64 (the design misread the constant) — FIXED to 256 (== DEFAULT_MAX_BUFFERED_INPUTS / the DEV parity value).
-    **NOT YET LIVE (user chose author + static-validate + defer):** the live `just k3d-all` bring-up (build image →
-    k3d cluster create → image import → apply → assert 3/3 Ready + /metrics + cluster_bootstrapped) is deferred
-    behind an explicit run. Residuals (ledgered): NetworkPolicy is a no-op on k3d/flannel (declarative intent; reach
-    admin via port-forward); a peer reschedule to a new IP needs a `rollout restart` re-seed day-1 (update_peer_addr
-    is shipped, no auto-pusher wired); fsGroup-vs-local-path relabel could EACCES the boot-counter on first apply
-    (workaround: fsGroupChangePolicy OnRootMismatch). Owed by S5/S6: in-cluster agent-HR6 testing; the CA-1
-    CrashLoop/reschedule e2e.
+    **LIVE BRING-UP VALIDATED (`just k3d-all` on cluster `voxeldust-newsystem`, Jul 2026):** image built (178MB) +
+    imported, all 13 objects applied, ALL 3 pods `1/1 Running` with **0 restarts**, `/healthz`+`/readyz`=200 on every
+    pod, the SHARD holds its realm (`directory: authority=shard:node-3`) ⇒ bootstrapped, `/metrics` served. The
+    flagged residuals did NOT hit (no fsGroup/local-path EACCES — boot-counters wrote fine; no cold-start DNS
+    deadlock — publishNotReadyAddresses worked). ONE DoD-recipe bug found + FIXED live: `cluster_bootstrapped()` is a
+    Rust METHOD, not a serialized snapshot field, so `k3d-dod` now reads the directory for a `"authority":"shard:"`
+    entry (the real bootstrap signal). Residuals still ledgered: NetworkPolicy is a no-op on k3d/flannel (declarative;
+    reach admin via port-forward); a peer reschedule to a new IP needs a `rollout restart` re-seed day-1
+    (update_peer_addr is shipped, no auto-pusher). Owed by S5/S6: in-cluster agent-HR6 testing; the CA-1
+    CrashLoop/reschedule e2e (both now UNBLOCKED — the cluster is live).
   - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
     SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
     adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT

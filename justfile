@@ -302,14 +302,18 @@ k3d-dod:
     {{k}} port-forward svc/vd-orch 9100:9100 >/dev/null 2>&1 & pf=$!; trap 'kill $pf 2>/dev/null || true' EXIT
     sleep 2
     curl -sf http://127.0.0.1:9100/metrics >/dev/null || { echo "FAIL: /metrics unreachable"; exit 1; }
+    # "Bootstrapped" = a SHARD holds a realm (admin::AdminSnapshot::cluster_bootstrapped is a Rust method, NOT a
+    # serialized field — the snapshot JSON exposes `directory`/`leases`/`sagas`, so read the directory: a
+    # `"authority":"shard:..."` entry IS the bootstrap signal).
     for i in $(seq 1 30); do
         snap=$(curl -s http://127.0.0.1:9100/admin/snapshot)
-        if command -v jq >/dev/null 2>&1; then bs=$(printf '%s' "$snap" | jq -r .cluster_bootstrapped)
-        else bs=$(printf '%s' "$snap" | grep -o '"cluster_bootstrapped":[a-z]*' | cut -d: -f2); fi
-        [ "$bs" = "true" ] && { echo "DoD OK: 3/3 Ready, /metrics served, cluster_bootstrapped=true"; exit 0; }
-        echo "cluster_bootstrapped=$bs, retry $i"; sleep 2
+        if command -v jq >/dev/null 2>&1; then
+            bs=$(printf '%s' "$snap" | jq -r '[.directory[]? | select(.authority | startswith("shard:"))] | length > 0')
+        elif printf '%s' "$snap" | grep -q '"authority":[[:space:]]*"shard:'; then bs=true; else bs=false; fi
+        [ "$bs" = "true" ] && { echo "DoD OK: 3/3 Ready, /metrics served, a shard holds a realm (bootstrapped)"; exit 0; }
+        echo "no shard-held realm yet, retry $i"; sleep 2
     done
-    echo "DoD FAIL: not bootstrapped"; {{k}} get pods; exit 1
+    echo "DoD FAIL: not bootstrapped (no shard holds a realm)"; {{k}} get pods; {{k}} exec vd-shard-0 -- true 2>/dev/null; exit 1
 
 # The full LIVE bring-up (deferred; run explicitly). Requires VD_AUTH_PUBKEY_HEX exported.
 k3d-all: k3d-up k3d-load k3d-apply k3d-dod
