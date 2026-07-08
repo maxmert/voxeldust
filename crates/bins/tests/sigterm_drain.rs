@@ -69,6 +69,9 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         gateway,
         shard,
         admin: admin1,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     let mut orch1_child = KillOnDrop(Some(
         spawn_node(
@@ -149,6 +152,9 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         gateway,
         shard,
         admin: admin2,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     cluster.push(
         "vd-orchestrator-restart",

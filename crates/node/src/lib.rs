@@ -20,6 +20,7 @@
 
 pub mod app;
 pub mod follower;
+pub mod health;
 pub mod orchestrator;
 pub mod saga_runtime;
 pub mod tracer;

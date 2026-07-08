@@ -15,6 +15,10 @@ store-test-hooks = []
 [dependencies]
 vd-core = { workspace = true }
 vd-sim = { workspace = true }
+# S3: the io-prod probe HTTP glue (probe.rs) adapts vd-node's PURE, Tier-A health decision surface
+# (HealthReport / is_live / the per-role predicates). Cycle-safe: vd-node depends on vd-io-prod only as a
+# DEV-dependency (tests), so the normal lib graph io-prod → node → sim → wire → core has no cycle.
+vd-node = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
@@ -34,7 +38,6 @@ axum = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-vd-node = { workspace = true }
 proptest = { workspace = true } # R-6d4-A: the both-ends-restart replay proptest (dev-only)
 
 [lints]

@@ -40,6 +40,39 @@ pub fn install_shutdown_flag(
     use std::sync::atomic::{AtomicBool, Ordering};
     let flag = Arc::new(AtomicBool::new(false));
     let set = Arc::clone(&flag);
+    spawn_signal_watcher(runtime, move || set.store(true, Ordering::Relaxed));
+    flag
+}
+
+/// [`install_shutdown_flag`] + the S3 readiness DE-ROUTE. On the SIGTERM edge the SAME signal task, BEFORE it
+/// sets the flag, publishes NotReady+draining into the shared health cell (`probe::publish_draining`): `/readyz`
+/// goes 503 the instant SIGTERM arrives — the loop-head `!shutdown` check would otherwise SKIP the in-body
+/// health publish on the exit tick, keeping the pod Ready through termination — and `draining` keeps `/healthz`
+/// LIVE through the graceful final-fsync park (never a kubelet SIGKILL mid-write). The tick loop still polls the
+/// returned flag; `publish_tick` preserves `draining`, so it cannot un-drain in the one-tick race.
+#[must_use]
+pub fn install_shutdown_flag_with_health(
+    runtime: &tokio::runtime::Handle,
+    health: vd_io_prod::probe::HealthCell,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let flag = Arc::new(AtomicBool::new(false));
+    let set = Arc::clone(&flag);
+    spawn_signal_watcher(runtime, move || {
+        vd_io_prod::probe::publish_draining(&health);
+        set.store(true, Ordering::Relaxed);
+    });
+    flag
+}
+
+/// Spawn ONE task on the node's existing tokio runtime that awaits SIGTERM (the k8s pod-stop signal) or SIGINT
+/// (dev Ctrl-C) and runs `on_signal` once. If the SIGTERM handler cannot be installed (not the unix
+/// deploy/dev target) it degrades to Ctrl-C only — never a hard failure. Shared by the two shutdown installers.
+fn spawn_signal_watcher(
+    runtime: &tokio::runtime::Handle,
+    on_signal: impl FnOnce() + Send + 'static,
+) {
     runtime.spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -54,10 +87,28 @@ pub fn install_shutdown_flag(
                 let _ = ctrl_c.await;
             }
         }
-        // Relaxed is sufficient: the tick loop polls this single flag with no other ordering dependency.
-        set.store(true, Ordering::Relaxed);
+        on_signal();
     });
-    flag
+}
+
+/// S3: spawn the k8s probe HTTP server (`/healthz` + `/readyz`) on the node's existing tokio runtime — the
+/// sibling of [`install_shutdown_flag`], byte-identical to the orchestrator's admin spawn. Body-light,
+/// unauthenticated (a kubelet `httpGet` presents no token; access is NetworkPolicy-gated in S4). Binds a plain
+/// `TcpListener` + `axum::serve(probe_router(source))`; a bind failure is fatal (a probe-less pod would be
+/// silently un-restartable / never-Ready in k8s).
+pub fn spawn_probe_server(
+    runtime: &tokio::runtime::Handle,
+    addr: SocketAddr,
+    source: std::sync::Arc<dyn vd_io_prod::probe::HealthSource>,
+) {
+    runtime.spawn(async move {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .unwrap_or_else(|e| panic!("probe server failed to bind {addr}: {e}"));
+        axum::serve(listener, vd_io_prod::probe::probe_router(source))
+            .await
+            .expect("probe server");
+    });
 }
 
 // ---- node roster -------------------------------------------------------------
@@ -190,6 +241,11 @@ pub struct ClusterAddrs {
     pub gateway: SocketAddr,
     pub shard: SocketAddr,
     pub admin: SocketAddr,
+    /// The k8s /healthz+/readyz probe listeners (S3) — one per node (each needs its own kubelet-reachable
+    /// port). Named fields (no offset math), matching the existing style.
+    pub orchestrator_probe: SocketAddr,
+    pub gateway_probe: SocketAddr,
+    pub shard_probe: SocketAddr,
 }
 
 /// Format a peer address book as the `id=addr,…` string the nodes parse from
@@ -366,6 +422,34 @@ pub fn resolve_node_d3(
     vd_io_prod::boot::resolve_d3(env, profile, role, tick_hz)
 }
 
+/// S3: resolve the k8s probe server config, or `None` if `VD_PROBE_ADDR` is unset (the in-process/parity rigs
+/// stay byte-identical until they opt in — the dev cluster, the probe process test, and every cloud pod set
+/// it). `VD_PROBE_STALL_TICKS` overrides the wedge budget (defaults to [`ProbeTuning::DEFAULT`]); a present but
+/// `< 2` value fails LOUD via `validate()`. NOT folded into `resolve_d3` — a probe is a different concern with
+/// no inert/split-brain hazard, and it is meaningful in DevTest too (the process tests curl it).
+///
+/// # Errors
+/// A malformed `VD_PROBE_ADDR` / `VD_PROBE_STALL_TICKS`, or a stall budget `< 2`.
+pub fn resolve_probe(
+    env: &EnvConfig,
+) -> Result<Option<(SocketAddr, vd_node::health::ProbeTuning)>, Box<dyn std::error::Error>> {
+    let Ok(addr_str) = env.string("VD_PROBE_ADDR") else {
+        return Ok(None);
+    };
+    if addr_str.trim().is_empty() {
+        return Ok(None);
+    }
+    let addr: SocketAddr = env.parse("VD_PROBE_ADDR")?;
+    let tuning = vd_node::health::ProbeTuning {
+        stall_deadline_ticks: env.parse_or(
+            "VD_PROBE_STALL_TICKS",
+            vd_node::health::ProbeTuning::DEFAULT.stall_deadline_ticks,
+        )?,
+    };
+    tuning.validate()?;
+    Ok(Some((addr, tuning)))
+}
+
 pub fn boot_mesh_and_replay(
     env: &EnvConfig,
     runtime: &tokio::runtime::Handle,
@@ -446,6 +530,7 @@ pub fn orchestrator_env(
         ("VD_CLOCK_PEERS", format!("{},{}", GATEWAY.0, SHARD.0)),
         str_pair("VD_LEASE_TTL", p.lease_ttl),
         str_pair("VD_ADMIN_ADDR", a.admin),
+        str_pair("VD_PROBE_ADDR", a.orchestrator_probe),
         ("VD_STORE_PATH", store_path.to_owned()),
         ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
     ]
@@ -473,6 +558,7 @@ pub fn gateway_env(
         str_pair("VD_SESSION_SEED", p.session_seed),
         str_pair("VD_MAX_SESSIONS", p.max_sessions),
         str_pair("VD_MAX_BUFFERED_INPUTS", p.max_buffered_inputs),
+        str_pair("VD_PROBE_ADDR", a.gateway_probe),
     ]
 }
 
@@ -494,6 +580,7 @@ pub fn shard_env(a: &ClusterAddrs, p: &DevClusterParams) -> Vec<(&'static str, S
         str_pair("VD_INPUT_LOG_CAP", p.input_log_cap),
         str_pair("VD_REALM_RECHECK", p.realm_recheck),
         str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
+        str_pair("VD_PROBE_ADDR", a.shard_probe),
     ]
 }
 
@@ -735,6 +822,49 @@ pub fn admin_get_body(
     response
         .split_once("\r\n\r\n")
         .map(|(_, body)| body.to_owned())
+}
+
+/// S3: the graceful-drain LINGER (`VD_SHUTDOWN_LINGER_MS`, default 0 = no linger). After SIGTERM de-routes
+/// `/readyz` (503) on the shutdown edge, the bin sleeps this long in Terminating BEFORE its final drain +
+/// exit, so k8s removes the pod from the Service endpoints and any in-flight requests finish (connection
+/// draining) — the standard `preStop`-sleep pattern, here as an app-side knob so the de-route is observable
+/// AND traffic stops before the process goes away. Must stay well below `terminationGracePeriodSeconds`.
+///
+/// # Errors
+/// A malformed `VD_SHUTDOWN_LINGER_MS`.
+pub fn resolve_shutdown_linger(env: &EnvConfig) -> Result<Duration, Box<dyn std::error::Error>> {
+    Ok(Duration::from_millis(
+        env.parse_or("VD_SHUTDOWN_LINGER_MS", 0)?,
+    ))
+}
+
+/// One blocking HTTP/1.1 GET returning the numeric status code (`Some(200)` / `Some(503)` / `Some(404)`), or
+/// `None` on a connect/IO failure (a not-yet-bound or refused probe port). S3 needs this because
+/// [`admin_get_body`] collapses every non-200 to `None` and so cannot distinguish a Ready `/readyz` (200) from
+/// a NotReady one (503). ONE shared status-parsing client (HR3), used by the probe process test.
+#[must_use]
+pub fn http_get_status(
+    addr: SocketAddr,
+    path: &str,
+    read_timeout: Option<Duration>,
+) -> Option<u16> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(addr).ok()?;
+    if let Some(timeout) = read_timeout {
+        stream.set_read_timeout(Some(timeout)).ok()?;
+    }
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    // "HTTP/1.1 200 OK" → 200
+    response
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 // ---- RAII child guard --------------------------------------------------------

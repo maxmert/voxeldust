@@ -110,6 +110,9 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
         gateway,
         shard,
         admin: admin_addr,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     let mut cluster = Cluster::new(); // RAII-reaped
     cluster.push(

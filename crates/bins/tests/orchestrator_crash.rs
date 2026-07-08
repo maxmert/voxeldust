@@ -73,6 +73,9 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         gateway,
         shard,
         admin: admin1,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     let mut orch_env = orchestrator_env(&addrs1, &DEV, &store_str);
     orch_env.push(("VD_STORE_TEST_SENTINEL_SEED", SENTINEL_SEED.to_string()));
@@ -133,6 +136,9 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         gateway,
         shard,
         admin: admin2,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     cluster.push(
         "vd-orchestrator-restart",
@@ -227,6 +233,9 @@ fn grant_a_recovery_assertion_fails_against_a_fresh_store() {
         gateway,
         shard,
         admin: admin_addr,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     // NO shard ⇒ no realm is ever granted.
     let mut cluster = Cluster::new();

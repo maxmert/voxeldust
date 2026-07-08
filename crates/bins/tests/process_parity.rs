@@ -172,6 +172,9 @@ fn p1_parity_real_binaries_over_quic() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     let clients = [
         (NodeId(CLIENT_NODE_BASE), client_a_addr),

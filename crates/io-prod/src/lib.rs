@@ -39,6 +39,7 @@ pub mod admin;
 pub mod boot;
 pub mod mesh;
 pub mod outbox;
+pub mod probe;
 pub mod runtime;
 pub mod store;
 pub mod trust;

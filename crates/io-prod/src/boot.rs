@@ -257,6 +257,12 @@ pub enum CloudProfileError {
     )]
     DevAuthKey,
     #[error(
+        "cloud profile requires {0} to expose the k8s /healthz + /readyz probe surface (absent/empty) — \
+         without it kubelet cannot restart a wedged pod or de-route a not-ready one, so a broken pod boots \
+         SILENTLY always-healthy + always-ready (the one cloud footgun that otherwise fails OPEN)"
+    )]
+    MissingProbeAddr(&'static str),
+    #[error(
         "cloud profile requires an ACTIVE D-3 lease-liveness config, but {0} resolved to 0 (inert): a cluster \
          with inert D-3 boots with NO split-brain protection (the DEFERRED.md:984 hole)"
     )]
@@ -473,6 +479,18 @@ pub fn enforce_cloud_preflight(
             if env.hex32("VD_AUTH_PUBKEY")? == dev {
                 return Err(CloudProfileError::DevAuthKey.into());
             }
+        }
+        // The k8s probe surface is kubelet's ONLY handle to restart a wedged pod or de-route a not-ready one.
+        // Every other cloud footgun above fails LOUD; a probe-less cloud pod would fail OPEN (no listener ⇒ if
+        // the manifest also omits the probe stanza, k8s treats it always-healthy/always-ready). Require the
+        // addr present + non-empty here (its SocketAddr syntax is validated at bind by `resolve_probe`).
+        if env
+            .string("VD_PROBE_ADDR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_none()
+        {
+            return Err(CloudProfileError::MissingProbeAddr("VD_PROBE_ADDR").into());
         }
     }
     Ok(profile)
@@ -834,7 +852,10 @@ mod tests {
             cloud_err(enforce_cloud_preflight(
                 &env_of(&[
                     ("VD_PROFILE", "cloud"),
-                    ("VD_STORE_DURABLE_ROOT", tmp_root.to_str().expect("utf8 path")),
+                    (
+                        "VD_STORE_DURABLE_ROOT",
+                        tmp_root.to_str().expect("utf8 path")
+                    ),
                 ]),
                 None
             )),
@@ -867,17 +888,55 @@ mod tests {
             )),
             CloudProfileError::MissingDurableRoot("VD_BOOT_DURABLE_ROOT")
         );
-        // BOTH roots present + non-temp → passes (orchestrator: no dev-key veto since dev_pubkey=None).
+        // BOTH roots present + non-temp + a probe addr → passes (orchestrator: no dev-key veto, dev_pubkey=None).
         assert_eq!(
             enforce_cloud_preflight(
                 &env_of(&[
                     ("VD_PROFILE", "cloud"),
                     ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
                     ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
+                    ("VD_PROBE_ADDR", "0.0.0.0:9002"),
                 ]),
                 None
             )
-            .expect("both roots present + non-temp → cloud"),
+            .expect("both roots present + non-temp + probe addr → cloud"),
+            Profile::Cloud
+        );
+    }
+
+    #[test]
+    fn cloud_preflight_requires_a_probe_addr() {
+        // Cloud + both durable roots but NO VD_PROBE_ADDR → refuse to boot (else a probe-less pod comes up
+        // silently un-restartable / always-ready — the one cloud footgun that would otherwise fail OPEN).
+        let base = [
+            ("VD_PROFILE", "cloud"),
+            ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
+            ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
+        ];
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(&env_of(&base), None)),
+            CloudProfileError::MissingProbeAddr("VD_PROBE_ADDR")
+        );
+        // Whitespace-only is also rejected (an empty templated value).
+        let blank = [
+            ("VD_PROFILE", "cloud"),
+            ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
+            ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
+            ("VD_PROBE_ADDR", "  "),
+        ];
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(&env_of(&blank), None)),
+            CloudProfileError::MissingProbeAddr("VD_PROBE_ADDR")
+        );
+        // Present + non-empty → passes (dev/test profile never reaches this check).
+        let ok = [
+            ("VD_PROFILE", "cloud"),
+            ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
+            ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
+            ("VD_PROBE_ADDR", "0.0.0.0:9002"),
+        ];
+        assert_eq!(
+            enforce_cloud_preflight(&env_of(&ok), None).expect("a probe addr present → cloud"),
             Profile::Cloud
         );
     }
@@ -904,6 +963,7 @@ mod tests {
             ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
             ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
             ("VD_AUTH_PUBKEY", real_hex.as_str()),
+            ("VD_PROBE_ADDR", "0.0.0.0:9002"),
         ];
         assert_eq!(
             enforce_cloud_preflight(&env_of(&ok), Some(dev)).expect("a real key passes the veto"),

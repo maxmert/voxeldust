@@ -165,6 +165,9 @@ fn up_inner(
         gateway: loopback(ports.gateway),
         shard: loopback(ports.shard),
         admin: loopback(ports.admin),
+        orchestrator_probe: loopback(ports.probe_orchestrator),
+        gateway_probe: loopback(ports.probe_gateway),
+        shard_probe: loopback(ports.probe_shard),
     };
     // CA-1 CRUTCH (fenced; deferred to M3): seed every dev-control client's QUIC
     // addr into the gateway book so the gateway can route snapshots back (the mesh
@@ -215,7 +218,16 @@ fn up_inner(
         return Err(msg);
     }
 
-    write_env_contract(work, slot, addrs.gateway, addrs.admin, &trust_str)?;
+    write_env_contract(
+        work,
+        slot,
+        addrs.gateway,
+        addrs.admin,
+        addrs.orchestrator_probe,
+        addrs.gateway_probe,
+        addrs.shard_probe,
+        &trust_str,
+    )?;
     let _ = cluster.into_pids(); // disarm: children outlive us; runfile is the record
     println!("dev-cluster slot {slot} UP");
     println!("  gateway   {}", addrs.gateway);
@@ -386,24 +398,36 @@ fn record_pid(runfile: &mut std::fs::File, pid: u32) -> Result<(), String> {
     runfile.flush().map_err(|e| format!("flush runfile: {e}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_env_contract(
     work: &Path,
     slot: u16,
     gateway: SocketAddr,
     admin: SocketAddr,
+    orch_probe: SocketAddr,
+    gateway_probe: SocketAddr,
+    shard_probe: SocketAddr,
     trust_dir: &str,
 ) -> Result<(), String> {
     // Every value sh-quoted so a path with spaces/metacharacters can't word-split
-    // or inject when `client.sh` sources this.
+    // or inject when `client.sh` sources this. The three probe addrs are emitted so an S4 smoke /
+    // shell scenario reads /healthz + /readyz ports from THIS one contract, never re-deriving the
+    // DevPortScheme offsets by hand (the hand-computed-port hazard devproto forbids).
     let env = format!(
         "VD_SLOT={}\n\
          VD_GW_ADDR={}\n\
          VD_ADMIN_ADDR={}\n\
+         VD_ORCH_PROBE_ADDR={}\n\
+         VD_GW_PROBE_ADDR={}\n\
+         VD_SHARD_PROBE_ADDR={}\n\
          VD_TRUST_DIR={}\n\
          VD_AUTH_SIGNING_KEY={}\n",
         sh_quote(&slot.to_string()),
         sh_quote(&gateway.to_string()),
         sh_quote(&admin.to_string()),
+        sh_quote(&orch_probe.to_string()),
+        sh_quote(&gateway_probe.to_string()),
+        sh_quote(&shard_probe.to_string()),
         sh_quote(trust_dir),
         sh_quote(&vd_bins::dev_auth_signing_key_hex()),
     );

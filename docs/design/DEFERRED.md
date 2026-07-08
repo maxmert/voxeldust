@@ -1039,6 +1039,36 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     trimming at MMO scale, neither a correctness issue. **Also ledgered (prose):** the spec's "a single lost ack cannot
     strand the latch" is precise only POST-first-ack (the monotone latch needs one delivered ack EVER); the
     first-adopt-exactly-at-maturity-with-that-ack-lost corner is a strict sub-case of residual (1).
+  - **[Cloud-ready k3d Slice 3 — k8s liveness/readiness probes | LANDED + 3× adversarial review folded]** ONE
+    `probe_router` (`/healthz` + `/readyz`, bare status codes, HR3) served by ALL three bins, SEPARATE from the
+    auth-gated `admin_router` (HR1: an unauth kubelet `httpGet` presents no token; the bare code leaks no cluster
+    state). The PURE decision surface is Tier-A `vd_node::health` (100% region+branch — `is_live`,
+    `is_confirmed_fresh`, `shard_authority_ready`, `shard_ready`, `gateway_ready`, `orch_ready`, `health_report`,
+    `ProbeTuning`); the axum GLUE + the ONE `Instant::now` staleness ref is Tier-B `io-prod::probe` (`HealthSource`
+    trait injection = the per-role polymorphism, never a match-on-kind). LIVENESS is drain-safe (`draining | is_live`:
+    a SIGTERM-edge park stops the heartbeat but reads LIVE so kubelet never SIGKILLs mid-fsync) + wedge-detecting
+    (a frozen tick loop's stale heartbeat → 503 → restart). READINESS de-routes booting/clock-unsynced/
+    partitioned-self-fenced/session-full/draining. Orchestrator readiness is its OWN serving bit (NOT
+    `cluster_bootstrapped()` — that would cold-start-DEADLOCK). SIGTERM edge de-routes `/readyz` BEFORE the drain +
+    `VD_SHUTDOWN_LINGER_MS` preStop-park. Ports via `devproto` `PROBE_*_OFFSET` (4/5/6); addrs emitted into the
+    `cluster.env` + `vd-slot` contracts. Proven by `crates/bins/tests/probe_endpoints.rs` (converge-ready,
+    orch-alone-ready bootstrap, sigterm-de-route-stays-live, partitioned-shard-notready-stays-live). **3× adversarial
+    review (`wf_40ac2919`) folded 4 real defects:** (CRIT) `publish_tick` was a non-atomic load-then-`store` that
+    could CLOBBER a concurrently-set `draining` (signal task on another thread) → un-drain a terminating pod as its
+    FINAL state → routed live traffic to a dying pod + 503 mid-fsync — FIXED to `ArcSwap::rcu` (compare-and-retry ⇒
+    `draining` monotone), + a 4000-round race regression test; (HIGH) armed `shard_authority_ready` IGNORED `held`, so
+    a never-granted shard read Ready off the default `RealmConfirmedAt(0)` for its first `grace` ticks if clock-sync
+    beat the grant — FIXED to `held & (is_confirmed_fresh | grace==0)` (now a true dual of `lease_self_fence_due`);
+    (MED) `enforce_cloud_preflight` had NO `VD_PROBE_ADDR` requirement (the one cloud footgun that failed OPEN — a
+    probe-less pod boots always-healthy) — FIXED with `CloudProfileError::MissingProbeAddr` + negative test; (LOW)
+    probe addrs now in the `cluster.env`/`vd-slot` contracts so S4 tooling never hand-derives probe ports. **STILL
+    OWED (S4/S5/S6):** (a) GATEWAY partition-aware readiness — `gateway_ready` is partition-BLIND in S3 (a
+    fully-partitioned gateway still reads Ready); the shard-symmetric `any_session_confirmed_within(grace)` fix is an
+    S4 blocker (NAMED in the `gateway_ready` doc). (b) The S4 manifest DoD: probe stanzas with `periodSeconds ×
+    failureThreshold` >> `stall_deadline` AND > drain time (a too-eager liveness must not restart a healthy-but-slow
+    node); `VD_PROFILE=cloud` + `VD_PROBE_ADDR` on every server pod; a NetworkPolicy admitting kubelet→probe while the
+    ops/admin surface stays gated; the orchestrator mesh Service `publishNotReadyAddresses` (a shard must dial it
+    while it is itself NotReady on cold start).
   - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
     SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
     adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT

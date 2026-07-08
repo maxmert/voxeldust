@@ -72,6 +72,9 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     let client_book: Vec<(NodeId, SocketAddr)> = clients
         .iter()
@@ -250,6 +253,9 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     };
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);

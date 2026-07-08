@@ -258,9 +258,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut parked: Option<(TickPrologue, u64)> = None;
     #[cfg(feature = "store-test-hooks")]
     let mut sentinel_injected = false;
-    // Cloud-ready k3d Slice 1: SIGTERM/SIGINT flips this flag; the loop breaks to run the graceful drain
-    // below (flush the final parked outbox + let RedbStore::Drop join the off-tick writer for a final fsync).
-    let shutdown = vd_bins::install_shutdown_flag(runtime.handle());
+    // Cloud-ready k3d Slice 3: the k8s probe surface (a SEPARATE port from the topology-rich /admin+/metrics).
+    // Orchestrator readiness = its OWN serving capability (`orch_ready(true)` from the first tick), NOT the
+    // whole-cluster `cluster_bootstrapped()` latch — which would deadlock a cold-start orchestrator (a shard
+    // must dial IT to register) and stay Ready forever after every shard died. S4 note: the orchestrator's mesh
+    // Service must be headless / publishNotReadyAddresses so a shard can dial it before the cluster is warm.
+    let health = vd_io_prod::probe::new_health_cell();
+    let shutdown_linger = vd_bins::resolve_shutdown_linger(&env)?;
+    if let Some((probe_addr, probe_tuning)) = vd_bins::resolve_probe(&env)? {
+        vd_bins::spawn_probe_server(
+            runtime.handle(),
+            probe_addr,
+            Arc::new(vd_io_prod::probe::PublishedHealth::new(
+                Arc::clone(&health),
+                probe_tuning.stall_deadline(tick_hz),
+            )),
+        );
+    }
+    // Slice 1: SIGTERM/SIGINT flips this flag; the loop breaks to run the graceful drain below. The
+    // with-health variant ALSO de-routes (/readyz 503) on the shutdown edge + marks `draining` so /healthz
+    // stays LIVE through the final-fsync park (never a kubelet SIGKILL mid-write).
+    let shutdown =
+        vd_bins::install_shutdown_flag_with_health(runtime.handle(), Arc::clone(&health));
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         // Flush the PREVIOUS tick's outbox now that its batch is durable. The world outbox still holds only
         // that tick's sends (this runs before the next run_schedule refills it), so the defer is exact.
@@ -289,8 +308,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let prologue = node.run_schedule();
         parked = Some((prologue, durability.last_submitted()));
         cell.store(Arc::new(admin_snapshot(node.world_mut())));
+        // S3: publish the liveness heartbeat + readiness (orchestrator = own-serving, always ready once
+        // ticking). `publish_tick` preserves `draining` so a post-SIGTERM tick cannot re-route.
+        vd_io_prod::probe::publish_tick(&health, node.tick().0, vd_node::health::orch_ready(true));
         let _ = pacer.wait();
     }
+    // S3 drain LINGER (default 0): the shutdown edge already set /readyz=503; linger in Terminating so k8s
+    // de-routes + in-flight admin/mesh work settles before the final flush + exit (/healthz stays LIVE).
+    std::thread::sleep(shutdown_linger);
     // GRACEFUL DRAIN (Slice 1): the loop broke on SIGTERM/SIGINT. Flush the FINAL parked outbox — wait for
     // its batch to be durable, then send it. Best-effort: this egress is re-driven saga commands +
     // loss-tolerant ClockSync, so an unsent frame is recovery-covered on the peer's next need, but flushing

@@ -1,11 +1,13 @@
 //! The gateway binary: a thin shell over `vd-connection-plane` (the lib owns ALL
 //! session/route logic). Config → mesh → build_app → register → tick loop.
 
-use vd_connection_plane::gateway::{GatewayConfig, TransportTuning, register_gateway};
+use vd_connection_plane::gateway::{
+    GatewayConfig, GatewaySessions, TransportTuning, register_gateway,
+};
 use vd_io_prod::runtime::{EnvConfig, TickPacer};
 use vd_io_prod::trust::ClusterTrust;
 use vd_node::app::{NodeConfig, build_app};
-use vd_node::follower::register_clock_follower;
+use vd_node::follower::{FollowerState, register_clock_follower};
 use vd_sim::capability::NodeKind;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,6 +53,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // REPLACE the old direct env reads + the inline validate. In DevTest these are the inert 0/0.
     let session_recheck_interval: u64 = d3.node_recheck;
     let self_fence_grace_ticks: u64 = d3.node_self_fence_grace;
+    // Hoisted so the S3 readiness predicate gates on the SAME capacity the admission gate rejects on.
+    let max_sessions: usize = env.parse("VD_MAX_SESSIONS")?;
+    let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
     register_gateway(
         world,
         schedule,
@@ -64,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session_seed: env.parse("VD_SESSION_SEED")?,
             // The SAME VD_TICK_HZ that paces this node — relayed to clients via
             // UniverseRate so the render cursor tracks the cluster's rate (R1).
-            tick_hz: env.parse("VD_TICK_HZ")?,
+            tick_hz,
             // D-3 session-lease heartbeat cadence (the gateway's local copy). INERT (0) until D-3 is on.
             lease_renew_interval_ticks: env.parse_or("VD_LEASE_RENEW_INTERVAL", 0)?,
             // D-3 Slice 5b: session-head recheck cadence (the round-trip confirmation channel) + the
@@ -73,19 +78,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session_recheck_interval,
             self_fence_grace_ticks,
             tuning: TransportTuning {
-                max_sessions: env.parse("VD_MAX_SESSIONS")?,
+                max_sessions,
                 max_buffered_inputs: env.parse("VD_MAX_BUFFERED_INPUTS")?,
             },
         },
     );
-    let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
-    // Cloud-ready k3d Slice 1: poll a SIGTERM/SIGINT flag each tick so a routine pod-stop / gateway
-    // rolling-deploy drains cleanly instead of a hard SIGKILL crash-path.
-    let shutdown = vd_bins::install_shutdown_flag(runtime.handle());
+    let mut pacer = TickPacer::new(tick_hz);
+    // Cloud-ready k3d Slice 3: the k8s probe surface (see shard.rs). Slice 1 SIGTERM flag → the with-health
+    // variant so the shutdown EDGE de-routes + keeps /healthz LIVE through the gateway rolling-deploy drain.
+    let health = vd_io_prod::probe::new_health_cell();
+    let shutdown_linger = vd_bins::resolve_shutdown_linger(&env)?;
+    let shutdown = vd_bins::install_shutdown_flag_with_health(runtime.handle(), health.clone());
+    if let Some((probe_addr, probe_tuning)) = vd_bins::resolve_probe(&env)? {
+        vd_bins::spawn_probe_server(
+            runtime.handle(),
+            probe_addr,
+            std::sync::Arc::new(vd_io_prod::probe::PublishedHealth::new(
+                health.clone(),
+                probe_tuning.stall_deadline(tick_hz),
+            )),
+        );
+    }
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = node.step_tick();
+        // Readiness = clock-synced AND session capacity available (the SAME quantity the admission gate
+        // rejects on). PARTITION-BLIND in S3 (documented; the shard-symmetric any-session-confirmed-within
+        // fix is a named S4 blocker). Read on the sim thread; the probe task reads the cell lock-free.
+        let local_tick = node.tick().0;
+        let ready = {
+            let world = node.world_mut();
+            let clock_synced = world.resource::<FollowerState>().clock.is_some();
+            let session_count = world.resource::<GatewaySessions>().len();
+            vd_node::health::gateway_ready(clock_synced, session_count, max_sessions)
+        };
+        vd_io_prod::probe::publish_tick(&health, local_tick, ready);
         let _ = pacer.wait();
     }
+    // S3 drain LINGER: the shutdown edge already set /readyz=503; linger in Terminating (default 0) so k8s
+    // de-routes + in-flight requests finish before the process goes away (/healthz stays LIVE meanwhile).
+    std::thread::sleep(shutdown_linger);
     // GRACEFUL DRAIN: the gateway holds no un-fsynced durable state (its R-6d outbox — empty until it has a
     // producer-less flow — is fsync-before-send; sessions re-adopt via their ResumeTicket on reconnect). A
     // clean return drops `node`/`runtime`/`_control`, tearing down the endpoint + peer writers in order.

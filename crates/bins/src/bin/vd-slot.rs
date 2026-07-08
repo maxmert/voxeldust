@@ -65,6 +65,17 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
         ("VD_GW_ADDR", format!("{HOST}:{}", ports.gateway)),
         ("VD_SHARD_ADDR", format!("{HOST}:{}", ports.shard)),
         ("VD_ADMIN_ADDR", format!("{HOST}:{}", ports.admin)),
+        // The k8s probe (/healthz + /readyz) surfaces — so bash/S4 tooling reads the ports from this
+        // covered helper, never hand-computing the DevPortScheme probe offsets.
+        (
+            "VD_ORCH_PROBE_ADDR",
+            format!("{HOST}:{}", ports.probe_orchestrator),
+        ),
+        ("VD_GW_PROBE_ADDR", format!("{HOST}:{}", ports.probe_gateway)),
+        (
+            "VD_SHARD_PROBE_ADDR",
+            format!("{HOST}:{}", ports.probe_shard),
+        ),
     ];
     if let Some(agent) = agent {
         let devctl = ports.dev_control(agent).map_err(|e| e.to_string())?;

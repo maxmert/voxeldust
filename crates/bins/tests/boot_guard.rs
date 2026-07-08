@@ -20,6 +20,9 @@ fn addrs() -> ClusterAddrs {
         gateway: reserve_udp_addr(),
         shard: reserve_udp_addr(),
         admin: reserve_tcp_addr(),
+        orchestrator_probe: reserve_tcp_addr(),
+        gateway_probe: reserve_tcp_addr(),
+        shard_probe: reserve_tcp_addr(),
     }
 }
 

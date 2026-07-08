@@ -5,9 +5,9 @@
 use vd_io_prod::runtime::{EnvConfig, TickPacer};
 use vd_io_prod::trust::ClusterTrust;
 use vd_node::app::{NodeConfig, build_app};
-use vd_node::follower::register_clock_follower;
+use vd_node::follower::{FollowerState, register_clock_follower};
 use vd_sim::capability::NodeKind;
-use vd_sim::stub::{StubConfig, register_stub_shard};
+use vd_sim::stub::{RealmAuthority, RealmConfirmedAt, StubConfig, register_stub_shard};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -86,14 +86,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             snapshot_datagram_budget: snapshot_budget,
         },
     );
-    let mut pacer = TickPacer::new(env.parse("VD_TICK_HZ")?);
-    // Cloud-ready k3d Slice 1: poll a SIGTERM/SIGINT flag each tick so a routine pod-stop breaks the loop
-    // and drains cleanly instead of being a hard SIGKILL crash-path.
-    let shutdown = vd_bins::install_shutdown_flag(runtime.handle());
+    let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
+    let mut pacer = TickPacer::new(tick_hz);
+    // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its
+    // heartbeat + THIS shard's readiness) and the /healthz+/readyz HTTP task reads. Slice 1: the SIGTERM flag
+    // — now the with-health variant, so the shutdown EDGE de-routes (NotReady) instantly + marks `draining`
+    // (keeps /healthz LIVE through the drain, never a SIGKILL mid-fsync). The probe server binds iff
+    // VD_PROBE_ADDR is set (the in-process rigs stay byte-identical until they opt in).
+    let health = vd_io_prod::probe::new_health_cell();
+    let shutdown_linger = vd_bins::resolve_shutdown_linger(&env)?;
+    let shutdown = vd_bins::install_shutdown_flag_with_health(runtime.handle(), health.clone());
+    if let Some((probe_addr, probe_tuning)) = vd_bins::resolve_probe(&env)? {
+        vd_bins::spawn_probe_server(
+            runtime.handle(),
+            probe_addr,
+            std::sync::Arc::new(vd_io_prod::probe::PublishedHealth::new(
+                health.clone(),
+                probe_tuning.stall_deadline(tick_hz),
+            )),
+        );
+    }
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = node.step_tick();
+        // Readiness = clock-synced AND realm-authority-ready (confirmed-fresh under active D-3 so a
+        // partitioned shard self-de-routes via the frozen `RealmConfirmedAt`; authority-held when inert).
+        // Read on the sim thread; the probe HTTP task reads the published cell lock-free (HR1: own World only).
+        let local_tick = node.tick().0;
+        let ready = {
+            let world = node.world_mut();
+            let clock_synced = world.resource::<FollowerState>().clock.is_some();
+            let held = world.resource::<RealmAuthority>().0.is_some();
+            let confirmed = world.resource::<RealmConfirmedAt>().0.0;
+            vd_node::health::shard_ready(
+                clock_synced,
+                vd_node::health::shard_authority_ready(
+                    held,
+                    local_tick,
+                    confirmed,
+                    self_fence_grace_ticks,
+                ),
+            )
+        };
+        vd_io_prod::probe::publish_tick(&health, local_tick, ready);
         let _ = pacer.wait();
     }
+    // S3 drain LINGER (default 0): the shutdown edge already set /readyz=503; linger in Terminating so k8s
+    // de-routes before exit (/healthz stays LIVE meanwhile).
+    std::thread::sleep(shutdown_linger);
     // GRACEFUL DRAIN: the shard holds no un-fsynced durable state — its R-6d outbox is fsync-BEFORE-send and
     // any in-flight mesh send is recovery-covered by the outbox replay on restart. So a clean return
     // suffices: `node`, `runtime`, and `_control` drop, tearing down the endpoint + peer writers in order.
