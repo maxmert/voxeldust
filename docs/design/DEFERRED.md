@@ -1081,14 +1081,32 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     rests on `clock_synced` (orch→gw only; does NOT prove gw→orch mint capability). Proper cure = a
     session-independent gateway↔orch directory heartbeat (the shard has `RealmConfirmedAt` even with 0 players; the
     gateway lacks a standing key to recheck). Deferred past S4.
-  - **STILL OWED (S4 manifests / S5 / S6):** the S4 manifest DoD: probe stanzas with `periodSeconds ×
-    failureThreshold` >> `stall_deadline` AND `terminationGracePeriodSeconds` > drain time (a too-eager liveness must
-    not restart a healthy-but-slow node); `VD_PROFILE=cloud` + `VD_PROBE_ADDR` + both durable roots on every server
-    pod; the entrypoint DNS-resolve seeding `VD_PEERS` (SocketAddr-only, no k8s DNS names); a NetworkPolicy admitting
-    kubelet→probe while the ops/admin surface stays gated; the orchestrator mesh Service headless +
-    `publishNotReadyAddresses` (a shard must dial it while it is itself NotReady on cold start); StatefulSets +
-    volumeClaimTemplates for the per-node durable identity (redb/boot-counter/outbox); the mTLS bundle + real
-    non-dev auth key as Secrets; the `just k3d-*` bring-up/image-import/apply glue.
+  - **[Cloud-ready k3d Slice 4b — the k3d manifests | AUTHORED + static-validated + review folded]** `deploy/k3d/`
+    (00-namespace, 10-configmap, 20-networkpolicy, 30-orch, 40-gateway, 50-shard): 3 StatefulSets (per-pod
+    volumeClaimTemplates for the M3 boot-counter + the cloud-required store root — a Deployment/emptyDir would wipe
+    the monotone counter = the R-6a dedup-loss landmine), 3 headless Services ALL with `publishNotReadyAddresses:
+    true` (the cold-start cure — each pod's entrypoint resolves the OTHER two at its own boot, so a NotReady peer's
+    A-record must still publish). Cloud env in ONE ConfigMap (VD_PROFILE=cloud, **VD_TICK_HZ=50** + VD_TICK_DT=0.02
+    together, the durable roots; NO forbidden knob); the mTLS + real auth Secrets minted IMPERATIVELY by
+    `just k3d-secrets` (never in git). Probe stanzas satisfy the 3 inequalities at 50Hz (liveness 5×6=30s >>
+    stall_deadline 400ms; grace orch 30 / gw+shard 15 >= drain; readiness de-routes on the SIGTERM edge).
+    3 CODE CHANGES: (1) `docker/entrypoint.sh` + Dockerfile COPY — DNS-resolves the SocketAddr-only VD_PEERS from
+    the headless pod DNS (getent ahostsv4) then `exec`s the bin as PID 1 (SIGTERM drain path), with an empty-book
+    guard; the direct-bin docker smokes are unaffected (no ENTRYPOINT/CMD kept); (2) `vd_bins::validate_tick_pair`
+    (+ shard.rs wiring) — a RUNTIME `VD_TICK_DT == 1/VD_TICK_HZ` guard (the compile-time assert covers only the DEV
+    const; a ConfigMap retune of one-not-the-other would silently integrate at the wrong dt); (3) `vd-devcluster
+    gen-authkey` (+ `auth_keypair_hex_from_seed`) — mints a real Ed25519 pair from /dev/urandom (cloud vetoes the
+    dev 0x42 key); pubkey → gateway Secret, signing seed → clients out-of-band. `just k3d-{validate,up,load,secrets,
+    apply,down,dod,all}` (context-pinned; k3d-validate = the offline author+static-validate path). The adversarial
+    review (`wf_e5b6d490`, entrypoint-dns + code-changes CLEAN) folded 1 MEDIUM: VD_MAX_BUFFERED_INPUTS drifted to
+    64 (the design misread the constant) — FIXED to 256 (== DEFAULT_MAX_BUFFERED_INPUTS / the DEV parity value).
+    **NOT YET LIVE (user chose author + static-validate + defer):** the live `just k3d-all` bring-up (build image →
+    k3d cluster create → image import → apply → assert 3/3 Ready + /metrics + cluster_bootstrapped) is deferred
+    behind an explicit run. Residuals (ledgered): NetworkPolicy is a no-op on k3d/flannel (declarative intent; reach
+    admin via port-forward); a peer reschedule to a new IP needs a `rollout restart` re-seed day-1 (update_peer_addr
+    is shipped, no auto-pusher wired); fsGroup-vs-local-path relabel could EACCES the boot-counter on first apply
+    (workaround: fsGroupChangePolicy OnRootMismatch). Owed by S5/S6: in-cluster agent-HR6 testing; the CA-1
+    CrashLoop/reschedule e2e.
   - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
     SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
     adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT

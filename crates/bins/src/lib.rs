@@ -150,6 +150,20 @@ pub fn dev_auth_signing_key_hex() -> String {
     hex32_encode(&DEV_AUTH_SEED)
 }
 
+/// S4b (cloud-ready k3d): derive the `(verifying-key hex, signing-seed hex)` pair for a PRODUCTION session-auth
+/// key from a 32-byte `seed`. The verifying key → the gateway's `VD_AUTH_PUBKEY` / the `vd-auth` Secret (the
+/// cloud profile VETOES the built-in dev key, `boot::CloudProfileError::DevAuthKey`); the signing seed → the
+/// legitimate clients OUT-OF-BAND, NEVER a server Secret. PURE (the OS-CSPRNG read that supplies `seed` lives in
+/// the `vd-devcluster gen-authkey` tool) so it is unit-testable; feeding [`DEV_AUTH_SEED`] reproduces the dev key.
+#[must_use]
+pub fn auth_keypair_hex_from_seed(seed: &[u8; 32]) -> (String, String) {
+    let signing = SigningKey::from_bytes(seed);
+    (
+        hex32_encode(&signing.verifying_key().to_bytes()),
+        hex32_encode(seed),
+    )
+}
+
 // ---- operational parameters --------------------------------------------------
 
 /// Every operational knob a dev cluster is configured with — ONE typed struct
@@ -218,6 +232,51 @@ const _: () = assert!(
     },
     "DEV.tick_dt must equal 1/DEV.tick_hz (one tick period, two encodings)",
 );
+
+/// The tolerance for [`validate_tick_pair`] — matches the compile-time TICK-PAIR assert above.
+pub const TICK_DT_EPSILON: f64 = 1e-9;
+
+/// A `VD_TICK_DT` that does not match `1/VD_TICK_HZ` — rejected LOUD at shard boot. (Manual `Display`/`Error`
+/// impls: `vd-bins` does not depend on `thiserror`, and this keeps it out of the dep set.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TickPairError {
+    pub tick_hz: u32,
+    pub tick_dt: f64,
+    pub expected: f64,
+}
+
+impl std::fmt::Display for TickPairError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "VD_TICK_DT {} must equal 1/VD_TICK_HZ = {} (VD_TICK_HZ={}); they are ONE tick period expressed \
+             twice — a cloud ConfigMap that retunes one but not the other silently integrates motion at the \
+             wrong step",
+            self.tick_dt, self.expected, self.tick_hz
+        )
+    }
+}
+
+impl std::error::Error for TickPairError {}
+
+/// TICK-PAIR (RUNTIME): the shard reads `VD_TICK_DT` and `VD_TICK_HZ` as INDEPENDENT env vars, so the
+/// compile-time [`DEV`] assert above cannot catch a cloud ConfigMap that changes one without the other. This
+/// cross-checks the env-supplied pair at shard boot — a drift silently integrates the avatar's motion at the
+/// wrong `dt` (no crash) otherwise. `tick_hz.max(1)` mirrors `TickPacer::new`'s degenerate-0 floor.
+///
+/// # Errors
+/// [`TickPairError`] when `tick_dt` differs from `1/tick_hz` by more than [`TICK_DT_EPSILON`].
+pub fn validate_tick_pair(tick_hz: u32, tick_dt: f64) -> Result<(), TickPairError> {
+    let expected = 1.0 / f64::from(tick_hz.max(1));
+    if (tick_dt - expected).abs() > TICK_DT_EPSILON {
+        return Err(TickPairError {
+            tick_hz,
+            tick_dt,
+            expected,
+        });
+    }
+    Ok(())
+}
 
 /// DRAIN-BURST (compile-time): the gateway cut-buffer drain (`apply_commit`) pushes up to
 /// `max_buffered_inputs` frames to the dest in ONE tick; it MUST stay within the dest
@@ -963,6 +1022,39 @@ mod incarnation_tests {
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect::<BTreeMap<_, _>>(),
         )
+    }
+
+    #[test]
+    fn validate_tick_pair_accepts_matched_rejects_drift() {
+        // Matched: 50 Hz ⇔ 0.02 s.
+        assert_eq!(validate_tick_pair(50, 0.02), Ok(()));
+        assert_eq!(validate_tick_pair(20, 0.05), Ok(()));
+        assert_eq!(validate_tick_pair(10, 0.1), Ok(()));
+        // Drift: 50 Hz but a 20 Hz dt (the ConfigMap-retune-one-not-the-other footgun) → loud.
+        assert_eq!(
+            validate_tick_pair(50, 0.05),
+            Err(TickPairError {
+                tick_hz: 50,
+                tick_dt: 0.05,
+                expected: 0.02
+            })
+        );
+        // Within epsilon → accepted (float slack).
+        assert_eq!(validate_tick_pair(50, 0.02 + TICK_DT_EPSILON / 2.0), Ok(()));
+        // Degenerate tick_hz=0 floors to 1 (⇔ dt 1.0), mirroring TickPacer.
+        assert_eq!(validate_tick_pair(0, 1.0), Ok(()));
+    }
+
+    #[test]
+    fn auth_keypair_from_seed_is_deterministic_and_matches_dev() {
+        // The dev seed reproduces the dev key exactly (the derivation is the same SigningKey path).
+        let (pubkey, signing) = auth_keypair_hex_from_seed(&DEV_AUTH_SEED);
+        assert_eq!(pubkey, dev_auth_pubkey_hex());
+        assert_eq!(signing, dev_auth_signing_key_hex());
+        // A different seed → a different verifying key (a real gen-authkey key is NOT the vetoed dev key).
+        let (other_pubkey, other_signing) = auth_keypair_hex_from_seed(&[0x01u8; 32]);
+        assert_ne!(other_pubkey, pubkey);
+        assert_ne!(other_signing, signing);
     }
 
     #[test]

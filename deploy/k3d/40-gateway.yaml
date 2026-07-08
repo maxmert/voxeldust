@@ -1,0 +1,103 @@
+# S4b — the gateway: client admission + session ownership. StatefulSet (per-pod M3 boot-counter PVC + a
+# store-root PVC the cloud preflight requires of every node even though the gateway keeps no un-fsynced
+# durable state). Headless Service + publishNotReadyAddresses so the orch resolves it for the ClockSync
+# broadcast during cold start.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vd-gateway
+  namespace: voxeldust
+  labels: { app: vd, role: gateway }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: vd, role: gateway }
+  ports:
+    - { name: mesh, port: 9000, protocol: UDP, targetPort: mesh }
+    - { name: probe, port: 9002, protocol: TCP, targetPort: probe }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vd-gateway
+  namespace: voxeldust
+  labels: { app: vd, role: gateway }
+spec:
+  serviceName: vd-gateway
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: vd, role: gateway }
+  template:
+    metadata:
+      labels: { app: vd, role: gateway }
+    spec:
+      terminationGracePeriodSeconds: 15 # no un-fsynced durable state: drain is linger + teardown
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gateway
+          image: voxeldust-server:dev
+          imagePullPolicy: IfNotPresent
+          command: ["entrypoint.sh", "vd-gateway"]
+          envFrom:
+            - configMapRef: { name: vd-cluster-env }
+          env:
+            - { name: VD_NODE_ID, value: "2" }
+            - { name: VD_BIND, value: "0.0.0.0:9000" }
+            - { name: VD_PROBE_ADDR, value: "0.0.0.0:9002" }
+            - { name: VD_ORCH, value: "1" }
+            - { name: VD_SHARD, value: "3" }
+            - { name: VD_SESSION_SEED, value: "23" }
+            - { name: VD_MAX_SESSIONS, value: "8" }
+            - { name: VD_MAX_BUFFERED_INPUTS, value: "256" } # == TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS (the DEV/parity value); required (no code default)
+            - name: VD_AUTH_PUBKEY # a REAL non-dev key (cloud vetoes the 0x42 dev key); minted by `just k3d-secrets`
+              valueFrom:
+                secretKeyRef: { name: vd-auth, key: AUTH_PUBKEY }
+          ports:
+            - { name: mesh, containerPort: 9000, protocol: UDP }
+            - { name: probe, containerPort: 9002, protocol: TCP }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources: # Burstable (no un-fsynced durable state)
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "500m", memory: "384Mi" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: probe }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+            successThreshold: 1
+          readinessProbe:
+            httpGet: { path: /readyz, port: probe }
+            initialDelaySeconds: 5
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 3
+            successThreshold: 1
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/vd } # store root (empty day-1; the cloud preflight requires it)
+            - { name: boot, mountPath: /var/lib/vd-boot } # M3 boot-counter
+            - { name: trust, mountPath: /etc/vd/trust, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: trust, secret: { secretName: vd-mtls, defaultMode: 0400 } }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: { requests: { storage: 256Mi } }
+    - metadata: { name: boot }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: { requests: { storage: 64Mi } }

@@ -1,0 +1,23 @@
+# S4b — the shared cloud env every server pod reads via envFrom. Sets EXACTLY the cloud-profile-required
+# roots + the tick pair; NONE of the forbidden knobs (no VD_*_EPHEMERAL_OK, no VD_PROCESS_INCARNATION, no
+# D-3 knob — the cloud profile derives the active D-3 set from VD_TICK_HZ). VD_TICK_HZ and VD_TICK_DT are
+# BOTH here (one object) so a retune can't drift them across files; the shard also cross-checks the pair at
+# boot (vd_bins::validate_tick_pair).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vd-cluster-env
+  namespace: voxeldust
+  labels:
+    app: vd
+data:
+  VD_PROFILE: "cloud"
+  VD_TICK_HZ: "50"
+  VD_TICK_DT: "0.02" # == 1/50; kept beside VD_TICK_HZ so they retune together
+  VD_OUTBOUND_CAP: "256"
+  VD_TRUST_DIR: "/etc/vd/trust"
+  VD_STORE_DURABLE_ROOT: "/var/lib/vd"
+  VD_BOOT_DURABLE_ROOT: "/var/lib/vd-boot"
+  VD_BOOT_STATE_DIR: "/var/lib/vd-boot/state" # BootCounter create_dir_all's this under the boot PVC
+  VD_SHUTDOWN_LINGER_MS: "2000" # preStop drain linger; well below every terminationGracePeriodSeconds
+  VD_CLOCK_PEERS: "2,3" # IP-free NodeIds (gateway,shard); orch broadcasts ClockSync to these; gw/shard ignore it

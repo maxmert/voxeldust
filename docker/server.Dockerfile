@@ -43,8 +43,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /src/target/release/vd-orchestrator /usr/local/bin/vd-orchestrator
 COPY --from=builder /src/target/release/vd-gateway      /usr/local/bin/vd-gateway
 COPY --from=builder /src/target/release/vd-shard        /usr/local/bin/vd-shard
+# S4b: the k3d entrypoint. VD_PEERS is SocketAddr-ONLY (no k8s DNS names), so this DNS-resolves the three
+# headless-Service pod names to literal IPs, builds the id=IP:port book for the role, then `exec`s the bin
+# (so the bin is PID 1 and receives SIGTERM directly — the graceful-drain path). debian-slim ships sh + getent.
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
 # Non-root by default (k8s runAsNonRoot); PVC mounts get an fsGroup in the manifests (Slice 4).
 USER vd
 # Deliberately NO ENTRYPOINT/CMD: each workload's manifest sets
-#   command: ["vd-orchestrator" | "vd-gateway" | "vd-shard"]
+#   command: ["entrypoint.sh", "vd-orchestrator" | "vd-gateway" | "vd-shard"]  (local dev/docker-run may still
+#   invoke the bin directly with a literal VD_PEERS, bypassing entrypoint.sh — the image serves both).
 # so the one image serves every server role by command + env (HR3).

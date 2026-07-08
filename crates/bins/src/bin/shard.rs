@@ -57,6 +57,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (which now runs inside `resolve_d3`). In DevTest these are the inert 0/0 (byte-identical to before).
     let realm_recheck_interval: u64 = d3.node_recheck;
     let self_fence_grace_ticks: u64 = d3.node_self_fence_grace;
+    // S4b (cloud manifest guard): VD_TICK_DT and VD_TICK_HZ are INDEPENDENT env vars; a cloud ConfigMap that
+    // retunes one but not the other would silently integrate the avatar's motion at the wrong step (no crash).
+    // The compile-time TICK-PAIR assert guards only the DEV const — cross-check the env-supplied pair here.
+    let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
+    let tick_dt: f64 = env.parse("VD_TICK_DT")?;
+    vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
     register_stub_shard(
         world,
         schedule,
@@ -66,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 system_seed: realm_seed,
             },
             move_speed_mps: env.parse("VD_SPEED")?,
-            tick_dt_s: env.parse("VD_TICK_DT")?,
+            tick_dt_s: tick_dt,
             orchestrator: env.node_id("VD_ORCH")?,
             mint_seed: env.parse("VD_MINT_SEED")?,
             // Bounded in production: the input-conservation log is a metrics ring,
@@ -86,7 +92,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             snapshot_datagram_budget: snapshot_budget,
         },
     );
-    let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
     let mut pacer = TickPacer::new(tick_hz);
     // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its
     // heartbeat + THIS shard's readiness) and the /healthz+/readyz HTTP task reads. Slice 1: the SIGTERM flag

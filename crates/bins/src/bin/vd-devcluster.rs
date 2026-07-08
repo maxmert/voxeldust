@@ -52,7 +52,9 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("vd-devcluster: {msg}");
-            eprintln!("usage: vd-devcluster <up|down|status|env> --slot <N>  |  gen-trust <dir>");
+            eprintln!(
+                "usage: vd-devcluster <up|down|status|env> --slot <N>  |  gen-trust <dir>  |  gen-authkey"
+            );
             ExitCode::FAILURE
         }
     }
@@ -69,6 +71,12 @@ fn run(args: &[String]) -> Result<(), String> {
     if cmd == "gen-trust" {
         let dir = args.get(1).ok_or("gen-trust needs a <dir>")?;
         return gen_trust(Path::new(dir));
+    }
+    // `gen-authkey` mints a fresh PRODUCTION session-auth keypair (the cloud profile VETOES the built-in dev
+    // key). Prints VD_AUTH_PUBKEY (→ the gateway env / `vd-auth` Secret) + VD_AUTH_SIGNING_KEY (→ clients
+    // OUT-OF-BAND, never a server Secret). No slot; dispatch before the slot-based subcommands.
+    if cmd == "gen-authkey" {
+        return gen_authkey();
     }
     let slot = parse_slot(args)?;
     let ports = DevPortScheme::DEFAULT
@@ -94,6 +102,27 @@ fn gen_trust(dir: &Path) -> Result<(), String> {
         .write_der_dir(dir)
         .map_err(|e| format!("write trust: {e}"))?;
     println!("wrote ca.der/node.der/key.der to {}", dir.display());
+    Ok(())
+}
+
+/// Mint a fresh PRODUCTION Ed25519 session-auth keypair (the cloud profile vetoes the built-in dev key,
+/// `boot::CloudProfileError::DevAuthKey`). Reads the 32-byte seed from the OS CSPRNG (`/dev/urandom`; no new
+/// dependency — this is a Unix dev tool), derives the pair via [`vd_bins::auth_keypair_hex_from_seed`], and
+/// prints (stdout, machine-readable) `VD_AUTH_PUBKEY=<hex>` (→ the gateway env / `vd-auth` Secret) +
+/// `VD_AUTH_SIGNING_KEY=<hex>` (→ clients OUT-OF-BAND — NEVER a server Secret).
+fn gen_authkey() -> Result<(), String> {
+    use std::io::Read;
+    let mut seed = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut seed))
+        .map_err(|e| format!("read OS CSPRNG (/dev/urandom): {e}"))?;
+    let (pubkey_hex, signing_hex) = vd_bins::auth_keypair_hex_from_seed(&seed);
+    println!("VD_AUTH_PUBKEY={pubkey_hex}");
+    println!("VD_AUTH_SIGNING_KEY={signing_hex}");
+    eprintln!(
+        "gen-authkey: put VD_AUTH_PUBKEY in the gateway env / `vd-auth` Secret; deliver VD_AUTH_SIGNING_KEY \
+         to clients OUT-OF-BAND (never a server Secret)."
+    );
     Ok(())
 }
 

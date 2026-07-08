@@ -1,0 +1,100 @@
+# S4b — the orchestrator: the directory/clock/store authority. StatefulSet (stable pod-0 DNS + per-pod PVCs
+# for the redb store and the M3 boot-counter). The headless Service publishes NotReady addresses so a
+# cold-starting shard/gateway can resolve + dial it before it is itself Ready (the cold-start deadlock cure).
+apiVersion: v1
+kind: Service
+metadata:
+  name: vd-orch
+  namespace: voxeldust
+  labels: { app: vd, role: orch }
+spec:
+  clusterIP: None # headless — DNS returns the pod IP (a VIP would break QUIC/mTLS identity)
+  publishNotReadyAddresses: true # THE COLD-START CURE: publish the A-record while the pod is still NotReady
+  selector: { app: vd, role: orch }
+  ports:
+    - { name: mesh, port: 9000, protocol: UDP, targetPort: mesh }
+    - { name: admin, port: 9100, protocol: TCP, targetPort: admin }
+    - { name: probe, port: 9002, protocol: TCP, targetPort: probe }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vd-orch
+  namespace: voxeldust
+  labels: { app: vd, role: orch }
+spec:
+  serviceName: vd-orch
+  replicas: 1
+  podManagementPolicy: Parallel # all three boot concurrently; bootstrap is bidirectional + idempotent-retry
+  selector:
+    matchLabels: { app: vd, role: orch }
+  template:
+    metadata:
+      labels: { app: vd, role: orch }
+    spec:
+      terminationGracePeriodSeconds: 30 # >= the orch drain worst case (linger + bounded final fsync); see probe math
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001 # matches the Dockerfile `vd` user
+        runAsGroup: 10001
+        fsGroup: 10001 # group-chowns the local-path PV so uid 10001 can write
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: orch
+          image: voxeldust-server:dev
+          imagePullPolicy: IfNotPresent # k3d image import; never a registry pull
+          command: ["entrypoint.sh", "vd-orchestrator"] # DNS-resolve VD_PEERS then exec (HR3 role dispatch)
+          envFrom:
+            - configMapRef: { name: vd-cluster-env }
+          env:
+            - { name: VD_NODE_ID, value: "1" }
+            - { name: VD_BIND, value: "0.0.0.0:9000" }
+            - { name: VD_ADMIN_ADDR, value: "0.0.0.0:9100" }
+            - { name: VD_PROBE_ADDR, value: "0.0.0.0:9002" }
+            - { name: VD_EPOCH, value: "1" }
+            - { name: VD_RESERVE_CHUNK, value: "4096" }
+            - { name: VD_STORE_PATH, value: "/var/lib/vd/orchestrator.redb" }
+          ports:
+            - { name: mesh, containerPort: 9000, protocol: UDP }
+            - { name: admin, containerPort: 9100, protocol: TCP }
+            - { name: probe, containerPort: 9002, protocol: TCP }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # all writes go to the PVCs / the /tmp emptyDir; entrypoint only exports+exec
+            capabilities: { drop: [ALL] }
+          resources: # GUARANTEED QoS (requests==limits): the ONLY node holding un-fsynced durable state
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: probe }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6 # 5*6 = 30s >> stall_deadline 400ms (75x): never restart a slow-but-progressing node
+            successThreshold: 1
+          readinessProbe:
+            httpGet: { path: /readyz, port: probe }
+            initialDelaySeconds: 3
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 3
+            successThreshold: 1
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/vd } # redb store
+            - { name: boot, mountPath: /var/lib/vd-boot } # M3 boot-counter
+            - { name: trust, mountPath: /etc/vd/trust, readOnly: true }
+            - { name: tmp, mountPath: /tmp } # readOnlyRootFilesystem insurance
+      volumes:
+        - { name: trust, secret: { secretName: vd-mtls, defaultMode: 0400 } }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: { requests: { storage: 1Gi } }
+    - metadata: { name: boot }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: { requests: { storage: 64Mi } }

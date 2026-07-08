@@ -1,0 +1,7 @@
+# S4b (cloud-ready k3d) — the deployment namespace. Applied first (numeric-prefix order).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: voxeldust
+  labels:
+    app: vd

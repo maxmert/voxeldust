@@ -1,0 +1,83 @@
+# S4b — NetworkPolicies. NOTE (D3): k3d's default flannel CNI does NOT enforce NetworkPolicy, so these are
+# DECLARATIVE INTENT day-1 (the real isolation is the mesh mTLS + an isolated single-node cluster). Do NOT
+# port this to a shared/multi-tenant node without a policy-enforcing CNI (Calico/Cilium). Reach the unauth
+# /admin + /metrics via `kubectl port-forward` (the API/kubelet path), never a pod-network ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vd-default-deny
+  namespace: voxeldust
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vd-allow-probe
+  namespace: voxeldust
+spec:
+  podSelector:
+    matchLabels: { app: vd }
+  policyTypes: [Ingress]
+  ingress:
+    # kubelet has no pod identity, so `from` is empty (any) — the probe is a bodyless status code, no leak.
+    - ports:
+        - { port: 9002, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vd-allow-mesh
+  namespace: voxeldust
+spec:
+  podSelector:
+    matchLabels: { app: vd }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: vd }
+      ports:
+        - { port: 9000, protocol: UDP }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: vd }
+      ports:
+        - { port: 9000, protocol: UDP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vd-allow-dns
+  namespace: voxeldust
+spec:
+  podSelector:
+    matchLabels: { app: vd }
+  policyTypes: [Egress]
+  egress:
+    # the entrypoint getent needs CoreDNS (kube-system) to resolve the peer Service names.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vd-allow-admin
+  namespace: voxeldust
+spec:
+  # orch-only: the unauth topology /admin + /metrics, namespace-scoped ingress (still declarative on flannel).
+  podSelector:
+    matchLabels: { app: vd, role: orch }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: voxeldust }
+      ports:
+        - { port: 9100, protocol: TCP }

@@ -240,3 +240,76 @@ image-drain-smoke: image-build
     fi
     echo "FAIL: expected exit 0, got $code (137 = SIGKILL escalation ⇒ the drain did not exit within grace)"
     docker logs "$name" | tail -30; exit 1
+
+# Slice 4b: k3d deployment. The manifests live in deploy/k3d/*.yaml (numeric-prefix apply order); the two
+# Secrets (mTLS bundle + the production auth key) are minted IMPERATIVELY so no key.der / signing-seed ever
+# lands in git. All kubectl is context-pinned to the k3d cluster + namespace. `k3d-validate` is the D2
+# author+static-validate path (NO live cluster); `k3d-all` is the full LIVE bring-up (deferred behind an
+# explicit run per the "confirm it works" rule).
+k3d_cluster := env_var_or_default("VD_K3D_CLUSTER", "voxeldust")
+kctx        := "k3d-" + k3d_cluster
+kns         := "voxeldust"
+k           := "kubectl --context " + kctx + " -n " + kns
+
+# Static-validate the manifests WITHOUT a cluster (D2 path): kubeconform if present, else a client dry-run.
+k3d-validate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v kubeconform >/dev/null 2>&1; then
+        kubeconform -strict -summary -kubernetes-version 1.31.0 deploy/k3d/*.yaml
+    else
+        echo "kubeconform not found — falling back to 'kubectl apply --dry-run=client' (offline, schema-lite)"
+        kubectl apply --dry-run=client -f deploy/k3d/ >/dev/null && echo "client dry-run OK"
+    fi
+    sh -n docker/entrypoint.sh && echo "entrypoint.sh: sh -n OK"
+
+k3d-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k3d cluster list {{k3d_cluster}} >/dev/null 2>&1 && k3d cluster delete {{k3d_cluster}} || true
+    k3d cluster create {{k3d_cluster}} --wait --timeout 120s
+    kubectl --context {{kctx}} apply -f deploy/k3d/00-namespace.yaml
+
+# Build the server image (reuses image-build) + import it into the k3d node (never a registry pull).
+k3d-load: image-build
+    k3d image import {{server_image}} -c {{k3d_cluster}}
+
+# Mint the two Secrets from the dev tooling. VD_AUTH_PUBKEY_HEX must be exported from `gen-authkey` first.
+k3d-secrets:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+    cargo run -q -p vd-bins --bin vd-devcluster -- gen-trust "$T"
+    {{k}} create secret generic vd-mtls \
+        --from-file=ca.der="$T/ca.der" --from-file=node.der="$T/node.der" --from-file=key.der="$T/key.der" \
+        --dry-run=client -o yaml | {{k}} apply -f -
+    : "${VD_AUTH_PUBKEY_HEX:?export VD_AUTH_PUBKEY_HEX from: cargo run -p vd-bins --bin vd-devcluster -- gen-authkey}"
+    {{k}} create secret generic vd-auth --from-literal=AUTH_PUBKEY="$VD_AUTH_PUBKEY_HEX" \
+        --dry-run=client -o yaml | {{k}} apply -f -
+
+k3d-apply: k3d-secrets
+    {{k}} apply -f deploy/k3d/
+
+k3d-down:
+    k3d cluster delete {{k3d_cluster}} || true
+
+# DoD: 3/3 Ready, /metrics served, cluster_bootstrapped=true (a shard holds a realm).
+k3d-dod:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for s in vd-orch vd-gateway vd-shard; do {{k}} rollout status statefulset/$s --timeout=120s; done
+    {{k}} wait --for=condition=Ready pod -l app=vd --timeout=120s
+    {{k}} port-forward svc/vd-orch 9100:9100 >/dev/null 2>&1 & pf=$!; trap 'kill $pf 2>/dev/null || true' EXIT
+    sleep 2
+    curl -sf http://127.0.0.1:9100/metrics >/dev/null || { echo "FAIL: /metrics unreachable"; exit 1; }
+    for i in $(seq 1 30); do
+        snap=$(curl -s http://127.0.0.1:9100/admin/snapshot)
+        if command -v jq >/dev/null 2>&1; then bs=$(printf '%s' "$snap" | jq -r .cluster_bootstrapped)
+        else bs=$(printf '%s' "$snap" | grep -o '"cluster_bootstrapped":[a-z]*' | cut -d: -f2); fi
+        [ "$bs" = "true" ] && { echo "DoD OK: 3/3 Ready, /metrics served, cluster_bootstrapped=true"; exit 0; }
+        echo "cluster_bootstrapped=$bs, retry $i"; sleep 2
+    done
+    echo "DoD FAIL: not bootstrapped"; {{k}} get pods; exit 1
+
+# The full LIVE bring-up (deferred; run explicitly). Requires VD_AUTH_PUBKEY_HEX exported.
+k3d-all: k3d-up k3d-load k3d-apply k3d-dod
