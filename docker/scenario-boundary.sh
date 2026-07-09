@@ -1,7 +1,11 @@
 #!/bin/sh
-# S5a scenario #1 — boundary crossing (position delta). The FIRST agent-HR6 scenario: it proves the FULL
+# S5a scenario #1 — boundary crossing (position DISPLACEMENT). The FIRST agent-HR6 scenario: it proves the FULL
 # agent-operable loop end-to-end against the LIVE cluster, GPU-free:
-#   login -> inject +x input -> gateway -> shard AUTHORITATIVE sim -> snapshot -> the avatar's pos advances.
+#   login -> inject forward input -> gateway -> shard AUTHORITATIVE sim -> snapshot -> the avatar's pos advances.
+# The pass signal is the EUCLIDEAN DISPLACEMENT magnitude, NOT a single axis: the shared movement convention
+# (vd_core::kinematics::local_axes_from_movement) maps `move 1 0 0` (forward) to world -Z, so an x-only pos[0]
+# check would never see it. Magnitude == "the avatar moved past a threshold" == the honest boundary signal,
+# convention-agnostic (no hand-re-encoded axis drift — the sim owns the ONE movement convention).
 # In P1.5 (one realm, SystemSpace{1}) "crossing a boundary" == the authoritative position advances past a
 # threshold under injected input; the cross-REALM `location` flip is a NO-OP here (one realm) so it is logged
 # as a diagnostic ONLY, never a pass signal. (S5b walk-to + P2 transfers grow this into a real realm crossing.)
@@ -46,33 +50,36 @@ vdctl wait snapshots_applied ge 1 200 >/dev/null || { echo "[agent] FATAL no sna
 echo "[agent] ACTIVE + authority + first frame:" >&2
 vdctl state
 
-# 3) RECORD the OWN entity's start pos[0] (typed jq parse, own-entity-keyed — DevResponse is serde tag=resp,
-#    so the DevState is under .state; DevState fields are snake_case).
+# 3) RECORD the OWN entity's FULL start pos (typed jq parse, own-entity-keyed — DevResponse is serde tag=resp,
+#    so the DevState is under .state; DevState fields are snake_case). `.pos` is the [x,y,z] array; we track the
+#    Euclidean displacement magnitude from it (see the header — convention-agnostic).
 S0="$(vdctl state)"
 OWN="$(printf '%s' "$S0" | jq -r '.state.own_entity')"
-X0="$(printf '%s' "$S0" | jq -r --arg e "$OWN" '.state.entities[] | select(.entity==$e) | .pos[0]')"
+P0="$(printf '%s' "$S0" | jq -c --arg e "$OWN" '.state.entities[] | select(.entity==$e) | .pos')"
 LOC0="$(printf '%s' "$S0" | jq -r '.state.location')"
-echo "[agent] start own=$OWN pos.x=$X0 location=$LOC0 threshold=$THRESH" >&2
+echo "[agent] start own=$OWN pos=$P0 location=$LOC0 threshold=$THRESH" >&2
 
-# 4) INJECT +x ONCE. apply_input_action sets a LEVEL-HELD InputState (the sim integrates it every tick until
+# 4) INJECT forward ONCE. apply_input_action sets a LEVEL-HELD InputState (the sim integrates it every tick until
 #    reset), so a single Move keeps the avatar moving — no per-poll re-inject needed.
 vdctl move 1 0 0 >/dev/null
 
-# 5) POLL the OWN pos[0] delta until >= THRESH or MAXPOLL exhausted. Position is the ONLY honest v1 pass signal.
+# 5) POLL the OWN pos DISPLACEMENT magnitude until >= THRESH or MAXPOLL exhausted. Position is the ONLY honest
+#    v1 pass signal; magnitude (sqrt of per-axis delta² sum) makes it axis-convention-agnostic.
 p=0
 while [ "$p" -lt "$MAXPOLL" ]; do
   alive
   S="$(vdctl state)"
-  X="$(printf '%s' "$S" | jq -r --arg e "$OWN" '.state.entities[] | select(.entity==$e) | .pos[0]')"
-  crossed="$(jq -n --argjson x "$X" --argjson x0 "$X0" --argjson t "$THRESH" '($x - $x0) >= $t')"
+  P="$(printf '%s' "$S" | jq -c --arg e "$OWN" '.state.entities[] | select(.entity==$e) | .pos')"
+  crossed="$(jq -n --argjson p "$P" --argjson p0 "$P0" --argjson t "$THRESH" \
+    '( ( ($p[0]-$p0[0]) as $dx | ($p[1]-$p0[1]) as $dy | ($p[2]-$p0[2]) as $dz | ($dx*$dx)+($dy*$dy)+($dz*$dz) ) | sqrt ) >= $t')"
   if [ "$crossed" = "true" ]; then
-    echo "[agent] PASS crossed: pos.x $X0 -> $X (delta >= $THRESH)" >&2
+    echo "[agent] PASS crossed: pos $P0 -> $P (displacement >= $THRESH)" >&2
     printf '%s\n' "$S"
     exit 0
   fi
   p=$((p + 1))
   sleep 0.1
 done
-echo "[agent] FAIL timeout: pos.x never advanced $THRESH from $X0 (last $X) in $MAXPOLL polls" >&2
+echo "[agent] FAIL timeout: pos displacement never reached $THRESH from $P0 (last $P) in $MAXPOLL polls" >&2
 vdctl state
 exit 1

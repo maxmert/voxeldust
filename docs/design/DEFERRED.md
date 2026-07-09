@@ -3241,11 +3241,17 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   universal, no profile gate. **Proofs:** loopback repro red→green + 62/62 mesh tests; LIVE on default-VXLAN
   Docker-Desktop k3d the agent went `snapshots_applied` 0 → **2227** (decode_errors=0). See
   [[project_d18_datagram_overlay]].
-- **STILL OWED (separate, tracked apart from D-18):** (a) the 4 MB BULK-burst latency gate SPIKE-3a proper (extract
-  the `percentile_unstable` harness to `vd-harness` when it adds the second hard gate); (b) the NEWLY-EXPOSED
-  input→movement leg — with snapshots flowing the agent E2E now reaches `move 1 0 0` → pos.x advance, which does
-  NOT advance (machinery exists: stub `apply_input`/`integrate`, move_speed 2.0) — a wiring/orientation/delivery
-  gap in the client→gateway→shard input path (S5b-adjacent).
+- **✅ input→movement leg RESOLVED (Jul 2026): it was a SCENARIO axis bug, not a system bug.** With snapshots
+  flowing the agent E2E reached `move 1 0 0` → pos advance, which appeared stuck. Root cause: the shared movement
+  convention (`vd_core::kinematics::local_axes_from_movement`) maps `move 1 0 0` (forward) to world **−Z**, but
+  `scenario-boundary.sh` asserted on `pos[0]` (X) — so it checked the wrong axis. The avatar was moving all along.
+  Fix: the scenario now checks the axis-agnostic **Euclidean displacement magnitude** (no hand-re-encoded axis
+  drift — the sim owns the ONE convention). LIVE-proven on default-VXLAN Docker-Desktop k3d: the avatar moved
+  `[0,0,0] → [0,0,-1.0]` (exactly −Z as predicted) and the **full agent-HR6 boundary-crossing E2E now PASSES**
+  end-to-end (login → Active → own_entity → snapshots → forward input → shard authoritative sim → displacement
+  threshold met).
+- **STILL OWED (separate):** the 4 MB BULK-burst latency gate SPIKE-3a proper (extract the `percentile_unstable`
+  harness to `vd-harness` when it adds the second hard latency gate).
 - **Source:** `PLAN.md` SPIKE list.
 - **⚠️ CONFIRMED LIVE (S5a agent-HR6, Jul 2026, k3d cluster voxeldust-newsystem):** the in-cluster agent-client
   logs in over real QUIC/mTLS + reaches Active + gets its own_entity (the RELIABLE control plane works
