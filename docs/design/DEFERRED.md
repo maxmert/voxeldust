@@ -3238,11 +3238,28 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   shape: the servers tolerate the overlay because their control plane RETRANSMITS (reliable streams); the
   20 Hz snapshot fan-out is FIRE-AND-FORGET unreliable QUIC datagrams, and those are lost on the overlay
   (path-MTU / datagram-loss), degrading the connection so the gateway can't drain → sheds. This is EXACTLY the
-  datagram-over-overlay delivery gap SPIKE-3a exists to close. The FIX is a transport spike (cap the QUIC
-  datagram/UDP-payload size to the overlay MTU + PMTUD policy, or a reliable-snapshot fallback for the
-  in-cluster path) — a real design item touching the whole mesh transport (and load-bearing for the end-goal
-  client multi-mesh rendering over the network), NOT a quick tweak. The S5a HARNESS itself is proven correct up
-  to Active+own_entity; the boundary-crossing PASS is gated on this fix. See [[project_cloud_ready_k3d_plan]].
+  datagram-over-overlay delivery gap SPIKE-3a exists to close.
+- **⚠️ MTU-PIN HYPOTHESIS DESIGNED + IMPLEMENTED + DISPROVED LIVE, then REVERTED (Jul 2026, understand
+  `wf_7bdd33d9` + design `wf_a06f687e`):** the vetted fix was a cloud-gated quinn MTU pin (`initial_mtu(1350)` +
+  `min_mtu(1200)` + `mtu_discovery_config(None)`, plumbed via `resolve_mesh_mtu`). It was fully implemented +
+  GATE-GREEN (Tier-A 100%, io-prod Tier-B floor held, workspace 59/0). **But the LIVE re-run on the pinned server
+  image FALSIFIED it:** (a) the gateway STILL shed "sustained-congested peer" (the pin did NOT stop the snapshot
+  loss); (b) the pin REGRESSED the client login (it reached Active+own_entity BEFORE the pin, and could NOT after
+  — an asymmetric pinned-server / unpinned-client handshake break). **KEY INSIGHT (why MTU is a red herring):**
+  the snapshot datagram is ~1115 B and the measured overlay MTU is 1450 (eth0/cni0/flannel.1 = 1450), so a 1115 B
+  datagram ALWAYS fits — even UNPINNED, quinn discovers the 1450 path and 1115 < 1450, so `datagrams_dropped_too_
+  large` should never trip. The real snapshot loss is a DEEPER unreliable-QUIC-datagram delivery failure over
+  **Docker Desktop's k3d VXLAN / VM networking** (the LinuxKit/gVisor UDP stack drops fire-and-forget QUIC
+  datagrams for reasons OTHER than payload size), which is very possibly a LOCAL-DEV-ONLY artifact that would NOT
+  reproduce on a real cloud CNI + real nodes. The MTU-pin code was REVERTED (it regressed login without fixing the
+  loss). **STILL OWED (re-scoped):** (1) the DECISIVE bracket — recreate k3d with a raised flannel MTU
+  (`--k3s-arg`); if snapshots then flow it IS somehow MTU-adjacent, if not it is a datagram-over-VM-stack issue;
+  (2) confirm on a REAL cloud CNI (a real k8s cluster, not Docker-Desktop k3d) whether the snapshot datagrams
+  deliver — if they do, D-18 is a local-dev test-harness artifact, not a product bug, and the S5a live proof
+  should run there; (3) only if it reproduces off-Docker-Desktop, a real transport fix (NOT the MTU pin —
+  disproved). **The S5a HARNESS + the login/Active/own_entity e2e are PROVEN correct on the overlay; only the
+  unreliable-snapshot leg fails, and that leg is NOT confirmed to be a real-cloud problem.** See
+  [[project_cloud_ready_k3d_plan]].
 
 ### D-19 🟥 SPIKE-6a (rapier snapshot/restore + cross-binary determinism) blocks P5; SPIKE-10a (dual-frame ship-interior physics) blocks P8.
 - **Source:** `PLAN.md` SPIKE list.
