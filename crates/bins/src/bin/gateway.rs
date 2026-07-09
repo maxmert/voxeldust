@@ -115,7 +115,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 local_tick,
                 self_fence_grace_ticks,
             );
-            vd_node::health::gateway_ready(clock_synced, sessions.len(), max_sessions, sessions_live)
+            vd_node::health::gateway_ready(
+                clock_synced,
+                sessions.len(),
+                max_sessions,
+                sessions_live,
+            )
         };
         vd_io_prod::probe::publish_tick(&health, local_tick, ready);
         let _ = pacer.wait();

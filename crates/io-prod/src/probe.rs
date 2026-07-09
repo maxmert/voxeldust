@@ -331,7 +331,10 @@ mod tests {
                 s.draining,
                 "draining must survive a concurrent publish_tick (round {round})"
             );
-            assert!(!s.ready, "a drained cell is never ready, even under the race");
+            assert!(
+                !s.ready,
+                "a drained cell is never ready, even under the race"
+            );
         }
     }
 

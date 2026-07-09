@@ -71,7 +71,10 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
             "VD_ORCH_PROBE_ADDR",
             format!("{HOST}:{}", ports.probe_orchestrator),
         ),
-        ("VD_GW_PROBE_ADDR", format!("{HOST}:{}", ports.probe_gateway)),
+        (
+            "VD_GW_PROBE_ADDR",
+            format!("{HOST}:{}", ports.probe_gateway),
+        ),
         (
             "VD_SHARD_PROBE_ADDR",
             format!("{HOST}:{}", ports.probe_shard),

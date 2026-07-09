@@ -148,7 +148,11 @@ pub fn shard_ready(clock_synced: bool, authority_ready: bool) -> bool {
 /// attaches and its recheck freezes (the acknowledged zero-session blind spot). Inert `grace == 0` (dev /
 /// in-process, no partition concept) ⇒ live. Mirrors the armed/inert shape of [`shard_authority_ready`].
 #[must_use]
-pub fn gateway_sessions_live(freshest_session_confirmed: Option<u64>, local_tick: u64, grace: u64) -> bool {
+pub fn gateway_sessions_live(
+    freshest_session_confirmed: Option<u64>,
+    local_tick: u64,
+    grace: u64,
+) -> bool {
     match freshest_session_confirmed {
         None => true,
         Some(confirmed) => is_confirmed_fresh(local_tick, confirmed, grace) | (grace == 0),

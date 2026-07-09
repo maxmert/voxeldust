@@ -4782,11 +4782,21 @@ mod tests {
         // gateway stays Ready despite the lingering SelfFenced ghost); the pre-Active 999 stays excluded.
         sessions.by_session.insert(
             SessionId(4),
-            sess(SessionPhase::Active { entity: EntityId(1) }, 30),
+            sess(
+                SessionPhase::Active {
+                    entity: EntityId(1),
+                },
+                30,
+            ),
         );
         sessions.by_session.insert(
             SessionId(5),
-            sess(SessionPhase::Active { entity: EntityId(2) }, 50),
+            sess(
+                SessionPhase::Active {
+                    entity: EntityId(2),
+                },
+                50,
+            ),
         );
         assert_eq!(sessions.freshest_session_confirmed(), Some(50));
     }
