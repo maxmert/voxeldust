@@ -3252,14 +3252,22 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   **Docker Desktop's k3d VXLAN / VM networking** (the LinuxKit/gVisor UDP stack drops fire-and-forget QUIC
   datagrams for reasons OTHER than payload size), which is very possibly a LOCAL-DEV-ONLY artifact that would NOT
   reproduce on a real cloud CNI + real nodes. The MTU-pin code was REVERTED (it regressed login without fixing the
-  loss). **STILL OWED (re-scoped):** (1) the DECISIVE bracket — recreate k3d with a raised flannel MTU
-  (`--k3s-arg`); if snapshots then flow it IS somehow MTU-adjacent, if not it is a datagram-over-VM-stack issue;
-  (2) confirm on a REAL cloud CNI (a real k8s cluster, not Docker-Desktop k3d) whether the snapshot datagrams
-  deliver — if they do, D-18 is a local-dev test-harness artifact, not a product bug, and the S5a live proof
-  should run there; (3) only if it reproduces off-Docker-Desktop, a real transport fix (NOT the MTU pin —
-  disproved). **The S5a HARNESS + the login/Active/own_entity e2e are PROVEN correct on the overlay; only the
-  unreliable-snapshot leg fails, and that leg is NOT confirmed to be a real-cloud problem.** See
-  [[project_cloud_ready_k3d_plan]].
+  loss).
+- **✅ FLANNEL-MTU-BUMP CONTROL RUN — MTU DEFINITIVELY RULED OUT (Jul 2026):** recreated k3d with the flannel
+  `host-gw` backend (`--k3s-arg '--flannel-backend=host-gw@server:*'` → NO VXLAN encapsulation → pod MTU = the full
+  host **1500**, up from the VXLAN 1450; VERIFIED live: `cni0=1500`, no `flannel.1` iface). Redeployed the
+  (unpinned, current-code) server image + re-ran the S5a agent Job. **RESULT: the client STILL reaches Active +
+  own_entity but `snapshots_applied` is STILL 0** (decode_errors=0) — raising the pod MTU 1450→1500 (where even
+  quinn's 1452 DPLPMTUD probes fit) changed NOTHING. This is the DECISIVE bracket: MTU / PMTUD is conclusively
+  **not** the cause (confirming 1115 B < any MTU always fits). D-18 is a DEEPER unreliable-QUIC-datagram delivery
+  failure over Docker Desktop's k3d VM networking, independent of MTU/VXLAN — most likely a LOCAL-DEV-HARNESS
+  artifact (LinuxKit UDP stack dropping fire-and-forget datagrams), NOT a product bug.
+- **STILL OWED (re-scoped, MTU path now CLOSED):** (1) confirm on a REAL cloud CNI (a real k8s cluster, not
+  Docker-Desktop k3d) whether the snapshot datagrams deliver — if they do, D-18 is fully a local test-harness
+  artifact + the S5a live proof should run there; (2) only if it reproduces off-Docker-Desktop, dig the datagram
+  send path (ECN/GSO/UDP behaviour), NOT MTU (disproved). **The S5a HARNESS + the login/Active/own_entity e2e are
+  PROVEN correct on the overlay; only the unreliable-snapshot leg fails, and that leg is NOT confirmed to be a
+  real-cloud problem.** See [[project_cloud_ready_k3d_plan]].
 
 ### D-19 🟥 SPIKE-6a (rapier snapshot/restore + cross-binary determinism) blocks P5; SPIKE-10a (dual-frame ship-interior physics) blocks P8.
 - **Source:** `PLAN.md` SPIKE list.
