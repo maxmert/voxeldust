@@ -274,17 +274,32 @@ k3d-up:
 k3d-load: image-build
     k3d image import {{server_image}} -c {{k3d_cluster}}
 
-# Mint the two Secrets from the dev tooling. VD_AUTH_PUBKEY_HEX must be exported from `gen-authkey` first.
+# Mint the three Secrets from ONE gen-authkey run so the gateway's pubkey and the agent's signing seed are a
+# MATCHED pair (a mismatch = every login rejected). Nothing hits git: the trust bundle is mktemp-scoped and the
+# signing seed lives only in a shell var + the k8s Secret. vd-auth-signing is the CLIENT's secret (mounted only
+# on the agent Job), honoring gen-authkey's "signing key out-of-band, never a SERVER secret" contract.
 k3d-secrets:
     #!/usr/bin/env bash
     set -euo pipefail
+    # IDEMPOTENT: if the full triad already exists, REUSE it — never rotate a live cluster's auth pair out from
+    # under a running gateway (which loaded VD_AUTH_PUBKEY at boot and won't reload the Secret), which would
+    # reject every login. A fresh cluster has none, so it mints below.
+    if {{k}} get secret vd-mtls vd-auth vd-auth-signing >/dev/null 2>&1; then
+        echo "k3d-secrets: vd-mtls + vd-auth + vd-auth-signing already present — reusing (no rotation)."
+        exit 0
+    fi
     T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
     cargo run -q -p vd-bins --bin vd-devcluster -- gen-trust "$T"
     {{k}} create secret generic vd-mtls \
         --from-file=ca.der="$T/ca.der" --from-file=node.der="$T/node.der" --from-file=key.der="$T/key.der" \
         --dry-run=client -o yaml | {{k}} apply -f -
-    : "${VD_AUTH_PUBKEY_HEX:?export VD_AUTH_PUBKEY_HEX from: cargo run -p vd-bins --bin vd-devcluster -- gen-authkey}"
-    {{k}} create secret generic vd-auth --from-literal=AUTH_PUBKEY="$VD_AUTH_PUBKEY_HEX" \
+    authout="$(cargo run -q -p vd-bins --bin vd-devcluster -- gen-authkey)"
+    pub="$(printf  '%s\n' "$authout" | sed -n 's/^VD_AUTH_PUBKEY=//p')"
+    sign="$(printf '%s\n' "$authout" | sed -n 's/^VD_AUTH_SIGNING_KEY=//p')"
+    : "${pub:?gen-authkey produced no VD_AUTH_PUBKEY}"; : "${sign:?gen-authkey produced no VD_AUTH_SIGNING_KEY}"
+    {{k}} create secret generic vd-auth --from-literal=AUTH_PUBKEY="$pub" \
+        --dry-run=client -o yaml | {{k}} apply -f -
+    {{k}} create secret generic vd-auth-signing --from-literal=AUTH_SIGNING_KEY="$sign" \
         --dry-run=client -o yaml | {{k}} apply -f -
 
 k3d-apply: k3d-secrets
@@ -315,5 +330,35 @@ k3d-dod:
     done
     echo "DoD FAIL: not bootstrapped (no shard holds a realm)"; {{k}} get pods; {{k}} exec vd-shard-0 -- true 2>/dev/null; exit 1
 
-# The full LIVE bring-up (deferred; run explicitly). Requires VD_AUTH_PUBKEY_HEX exported.
+# The full LIVE bring-up (deferred; run explicitly). Secrets are minted self-contained by k3d-secrets.
 k3d-all: k3d-up k3d-load k3d-apply k3d-dod
+
+# ---- S5a: in-cluster agent-HR6 continuous testing --------------------------------------------
+# The agent image = client + vdctl, --features dev-control (Bevy-FREE), SEPARATE from the server image so the
+# dev-control listener never links into the server bins. It logs an avatar into the LIVE gateway over the pod
+# network (QUIC) and is driven by vdctl over loopback TCP, asserting on DevState (GPU-free).
+agent_image := env_var_or_default("VD_AGENT_IMAGE", "voxeldust-agent:dev")
+
+agent-image-build:
+    docker build -f docker/agent.Dockerfile -t {{agent_image}} .
+
+# Build+import the agent image, run the boundary Job against the LIVE cluster, report pass/fail from the Job's
+# terminal condition + dump logs. Run AFTER k3d-dod (the cluster must be bootstrapped so the shard holds a realm).
+k3d-agent: agent-image-build k3d-secrets
+    #!/usr/bin/env bash
+    set -euo pipefail
+    k3d image import {{agent_image}} -c {{k3d_cluster}}
+    {{k}} delete job vd-agent-boundary --ignore-not-found
+    {{k}} apply -f deploy/k3d/60-agent.yaml
+    echo "waiting for the agent Job (bounded by activeDeadlineSeconds) ..."
+    if {{k}} wait --for=condition=complete job/vd-agent-boundary --timeout=200s 2>/dev/null; then
+        echo "k3d-agent OK: avatar logged in + crossed the boundary (pos threshold met on DevState)"
+        {{k}} logs job/vd-agent-boundary; exit 0
+    fi
+    echo "k3d-agent FAIL: the crossing did not pass — logs + status:"
+    {{k}} logs job/vd-agent-boundary --tail=200 || true
+    {{k}} describe job/vd-agent-boundary | tail -20
+    exit 1
+
+# Convenience: full server bring-up THEN the agent proof (deferred, run explicitly).
+k3d-agent-e2e: k3d-all k3d-agent

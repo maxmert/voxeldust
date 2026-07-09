@@ -1,0 +1,55 @@
+# S5a — the agent-HR6 boundary-crossing Job. Logs an avatar into the LIVE cluster and drives it across a
+# position boundary via injected input, asserting on DevState (GPU-free, in-cluster). Applied SEPARATELY from
+# the servers (`just k3d-agent`), NOT part of `kubectl apply -f deploy/k3d/` for the servers — it is a test
+# workload, run after the cluster is bootstrapped.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vd-agent-boundary
+  namespace: voxeldust
+  labels: { app: vd, role: agent }
+spec:
+  backoffLimit: 1 # one retry for a transient admission hiccup; past that = a real failure
+  activeDeadlineSeconds: 180 # HARD k8s cap: the Job can NEVER hang forever
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels: { app: vd, role: agent } # app: vd => vd-allow-mesh (egress UDP/9000) + vd-allow-dns admit it
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001 # REQUIRED: makes the vd-mtls Secret (defaultMode 0400) group-readable by uid 10001 —
+        # without it the mount is root:root 0400 and the non-root client hits EACCES reading /etc/vd/trust/*.der
+        # (the server pods set fsGroup for the same reason; a Secret-only pod needs it just like a PVC pod).
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: agent
+          image: voxeldust-agent:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: vd-cluster-env } # harmless to the client (it reads only VD_AUTH_SIGNING_KEY); gives VD_TRUST_DIR
+          env:
+            - { name: VD_SCENARIO, value: "boundary" }
+            - { name: VD_AGENT_INDEX, value: "0" } # NodeId = CLIENT_NODE_BASE(100)+0 = 100 (disjoint from 1/2/3)
+            - { name: VD_CLIENT_QUIC, value: "9000" }
+            - { name: VD_DEVCTL_PORT, value: "7777" }
+            - { name: VD_CROSS_THRESHOLD, value: "1.0" }
+            - { name: VD_MAX_POLLS, value: "300" }
+            - name: VD_AUTH_SIGNING_KEY # the ONLY process-env var the client reads (mints the login)
+              valueFrom:
+                secretKeyRef: { name: vd-auth-signing, key: AUTH_SIGNING_KEY }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # SAFE: the dev-control-only client writes NO files (the runs/ writer is #[cfg(render)], off)
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "250m", memory: "192Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+          volumeMounts:
+            - { name: trust, mountPath: /etc/vd/trust, readOnly: true }
+      volumes:
+        - { name: trust, secret: { secretName: vd-mtls, defaultMode: 0400 } }

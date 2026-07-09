@@ -3230,6 +3230,19 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 - **Blocks:** **P3.** The hand-rolled latency-gate harness (`percentile_unstable`, established by SPIKE-2a)
   should be extracted to a shared `vd-harness` helper when SPIKE-3a adds the second hard latency gate.
 - **Source:** `PLAN.md` SPIKE list.
+- **⚠️ CONFIRMED LIVE (S5a agent-HR6, Jul 2026, k3d cluster voxeldust-newsystem):** the in-cluster agent-client
+  logs in over real QUIC/mTLS + reaches Active + gets its own_entity (the RELIABLE control plane works
+  end-to-end over the flannel VXLAN overlay), but `snapshots_applied` stays **0** — the gateway logs a steady
+  `OutboundBox staging over cap: shed oldest UNRELIABLE frames (Snapshot/Input) toward sustained-congested
+  peer` (~every 20ms), and the client receives NOTHING (`decode_errors=0`, `stale_frames_dropped=0`). Root
+  shape: the servers tolerate the overlay because their control plane RETRANSMITS (reliable streams); the
+  20 Hz snapshot fan-out is FIRE-AND-FORGET unreliable QUIC datagrams, and those are lost on the overlay
+  (path-MTU / datagram-loss), degrading the connection so the gateway can't drain → sheds. This is EXACTLY the
+  datagram-over-overlay delivery gap SPIKE-3a exists to close. The FIX is a transport spike (cap the QUIC
+  datagram/UDP-payload size to the overlay MTU + PMTUD policy, or a reliable-snapshot fallback for the
+  in-cluster path) — a real design item touching the whole mesh transport (and load-bearing for the end-goal
+  client multi-mesh rendering over the network), NOT a quick tweak. The S5a HARNESS itself is proven correct up
+  to Active+own_entity; the boundary-crossing PASS is gated on this fix. See [[project_cloud_ready_k3d_plan]].
 
 ### D-19 🟥 SPIKE-6a (rapier snapshot/restore + cross-binary determinism) blocks P5; SPIKE-10a (dual-frame ship-interior physics) blocks P8.
 - **Source:** `PLAN.md` SPIKE list.

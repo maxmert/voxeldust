@@ -26,7 +26,11 @@ use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
-use vd_bins::{GATEWAY, loopback};
+use vd_bins::GATEWAY;
+// `loopback` is now used ONLY by the dev-control listener bind (the QUIC bind moved to a configurable
+// `--bind` addr), which is itself feature-gated — so the import is too, else the default build sees it unused.
+#[cfg(feature = "dev-control")]
+use vd_bins::loopback;
 use vd_client::net::{ClientCore, ClientPhase};
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client::tuning::ClientInterpTuning;
@@ -87,7 +91,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &trust,
         &MeshConfig::new(
             local,
-            loopback(args.client_quic),
+            // The QUIC bind: loopback for the local dev cluster (default), 0.0.0.0 (`--bind 0.0.0.0`) for an
+            // in-cluster agent so it can reach the gateway over the pod network (a loopback source can't route
+            // off-host). CA-1 reply-on-connection means the gateway learns this client's addr from the accepted
+            // connection, so no advertised/booked address is needed.
+            std::net::SocketAddr::new(args.bind_ip, args.client_quic),
             peers,
             CLIENT_OUTBOUND_CAP,
             // R-2b: a fresh process per client launch; 0 is correct here. NOTE: once R-3' dedup is
@@ -441,6 +449,10 @@ struct ClientArgs {
     name: String,
     gateway: SocketAddr,
     client_quic: u16,
+    /// The IP the client's QUIC endpoint binds. Default `127.0.0.1` (the local dev cluster: client + gateway
+    /// share loopback). MUST be `0.0.0.0` for an in-cluster (k3d) agent — a loopback-bound socket cannot reach
+    /// a gateway on the pod network (the source addr never routes off loopback → `sendmsg` fails).
+    bind_ip: std::net::IpAddr,
     trust_dir: String,
     dev_control: Option<u16>,
     agent_index: u64,
@@ -458,6 +470,7 @@ fn parse_args() -> Result<ClientArgs, String> {
     let mut name = "client".to_owned();
     let mut gateway: Option<SocketAddr> = None;
     let mut client_quic: Option<u16> = None;
+    let mut bind_ip: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     let mut trust_dir: Option<String> = None;
     let mut dev_control: Option<u16> = None;
     let mut agent_index: u64 = 0;
@@ -472,6 +485,7 @@ fn parse_args() -> Result<ClientArgs, String> {
             "--name" => name = next_val(&mut it, "--name")?,
             "--gateway" => gateway = Some(parse_val(&mut it, "--gateway")?),
             "--client-quic" => client_quic = Some(parse_val(&mut it, "--client-quic")?),
+            "--bind" => bind_ip = parse_val(&mut it, "--bind")?,
             "--trust-dir" => trust_dir = Some(next_val(&mut it, "--trust-dir")?),
             "--dev-control" => dev_control = Some(parse_val(&mut it, "--dev-control")?),
             "--agent-index" => agent_index = parse_val(&mut it, "--agent-index")?,
@@ -490,6 +504,7 @@ fn parse_args() -> Result<ClientArgs, String> {
         name,
         gateway: gateway.ok_or("missing --gateway <addr>")?,
         client_quic: client_quic.ok_or("missing --client-quic <port>")?,
+        bind_ip,
         trust_dir: trust_dir.ok_or("missing --trust-dir <dir>")?,
         dev_control,
         agent_index,
