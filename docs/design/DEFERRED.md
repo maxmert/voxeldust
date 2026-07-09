@@ -3226,9 +3226,26 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 
 ## BLOCKING SPIKES (must run before the phase they gate)
 
-### D-18 🟥 SPIKE-3a — datagram delivery under a 4 MB BULK burst on the k3d overlay
-- **Blocks:** **P3.** The hand-rolled latency-gate harness (`percentile_unstable`, established by SPIKE-2a)
-  should be extracted to a shared `vd-harness` helper when SPIKE-3a adds the second hard latency gate.
+### D-18 🟩 snapshot-datagram loss over the k3d overlay — ROOT-CAUSED + FIXED + LIVE-PROVEN
+- **✅ RESOLVED (Jul 2026): it was OUR CODE, not the environment.** Root cause: datagram reading was ASYMMETRIC —
+  the `read_datagram` loop lived ONLY in `serve_connection` (the ACCEPT path); the DIAL path spawned
+  `dispatch_streams` (reliable, both sides) but NO datagram reader. A peer that DIALS never reads the datagrams
+  the far end sends back over that connection. A CLIENT dials the GATEWAY → login/Active works (reliable streams)
+  but snapshots (unreliable datagrams) were silently dropped on the client, with `send_datagram` returning Ok on
+  the gateway (no drop counter moves). Invisible in the fully-booked mesh (each receiver's peer dials a fresh
+  connection to it, so datagrams always land on an ACCEPTED connection); fatal for reply-on-connection (the
+  gateway can't dial an unbooked client, so it replies over the client's INBOUND/dialed connection). MTU / PMTUD /
+  "Docker Desktop artifact" were ALL wrong guesses — a pure-loopback quinn repro (test
+  `ca1_reply_on_connection_delivers_an_unreliable_snapshot_datagram`) nailed it with NO env at all. **Fix
+  (mesh.rs):** extract the loop into `read_datagrams` and spawn it on the DIAL side too, symmetric with accept —
+  universal, no profile gate. **Proofs:** loopback repro red→green + 62/62 mesh tests; LIVE on default-VXLAN
+  Docker-Desktop k3d the agent went `snapshots_applied` 0 → **2227** (decode_errors=0). See
+  [[project_d18_datagram_overlay]].
+- **STILL OWED (separate, tracked apart from D-18):** (a) the 4 MB BULK-burst latency gate SPIKE-3a proper (extract
+  the `percentile_unstable` harness to `vd-harness` when it adds the second hard gate); (b) the NEWLY-EXPOSED
+  input→movement leg — with snapshots flowing the agent E2E now reaches `move 1 0 0` → pos.x advance, which does
+  NOT advance (machinery exists: stub `apply_input`/`integrate`, move_speed 2.0) — a wiring/orientation/delivery
+  gap in the client→gateway→shard input path (S5b-adjacent).
 - **Source:** `PLAN.md` SPIKE list.
 - **⚠️ CONFIRMED LIVE (S5a agent-HR6, Jul 2026, k3d cluster voxeldust-newsystem):** the in-cluster agent-client
   logs in over real QUIC/mTLS + reaches Active + gets its own_entity (the RELIABLE control plane works

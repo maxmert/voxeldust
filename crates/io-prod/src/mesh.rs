@@ -1168,12 +1168,28 @@ async fn serve_connection(
         Some(learn),
     ));
 
-    // Unreliable datagrams on the same connection (UNCHANGED hot path — byte-for-byte the R-1' split shape).
-    while let Ok(datagram) = connection.read_datagram().await {
+    // Unreliable datagrams on the same connection. Extracted to `read_datagrams` (D-18 fix) so the DIAL side
+    // runs the IDENTICAL loop — a datagram must be readable regardless of who dialed, or a reply-on-connection
+    // snapshot to a client (which DIALS the gateway) is silently dropped.
+    read_datagrams(&connection, &inbox, &stats).await;
+    // The connection closed (peer gone / drop_connections / kill): tear down its reader + ack tasks.
+    streams.abort();
+    ack_task.abort();
+}
+
+/// Read UNRELIABLE datagrams off `conn` into the shared inbox until the connection closes (`read_datagram`
+/// errors on close). Runs on BOTH sides of a connection — the ACCEPT side ([`serve_connection`]) AND the DIAL
+/// side ([`ensure_connection`]'s Dial arm) — because QUIC datagrams are bidirectional and each endpoint must
+/// read the datagrams sent TO IT. Without a reader on the dialed side, a peer that DIALS (a client dialing the
+/// gateway) never receives the datagrams the far end sends back over that same connection — the D-18 snapshot
+/// loss: reliable frames traverse `dispatch_streams` (both sides) so login works, but snapshots (unreliable
+/// datagrams) are dropped on the dialer with `send_datagram` succeeding on the sender (no drop counter moves).
+async fn read_datagrams(conn: &quinn::Connection, inbox: &SharedInbox, stats: &Arc<MeshStats>) {
+    while let Ok(datagram) = conn.read_datagram().await {
         if let Ok(frame) = postcard::from_bytes::<DatagramFrame>(&datagram) {
             push_inbox(
-                &inbox,
-                &stats,
+                inbox,
+                stats,
                 Inbound::Wire {
                     from: frame.from,
                     class: frame.class,
@@ -1183,9 +1199,6 @@ async fn serve_connection(
         }
         // A malformed datagram is silently dropped: unreliable carriers tolerate it.
     }
-    // The connection closed (peer gone / drop_connections / kill): tear down its reader + ack tasks.
-    streams.abort();
-    ack_task.abort();
 }
 
 /// CA-1 S1 — the ONE unified per-connection uni-stream dispatcher. Runs on EVERY connection (accepted AND
@@ -1913,6 +1926,15 @@ async fn ensure_connection(
                 ack_due,
                 ack_flush,
             )));
+            // D-18: a DIALED connection must ALSO read datagrams — the far end (a gateway replying to a client
+            // that dialed in, reply-on-connection) sends snapshots back over THIS connection, and without a
+            // reader they are silently dropped. Symmetric with the accept-side reader in `serve_connection`.
+            serve_tasks.push(tokio::spawn({
+                let conn = conn.clone();
+                let inbox = Arc::clone(inbox);
+                let stats = Arc::clone(stats);
+                async move { read_datagrams(&conn, &inbox, &stats).await }
+            }));
             conn
         }
         // LEARNED (CA-1 reply-on-connection): NEVER dial. Adopt the held accepted connection the receive side
@@ -3515,6 +3537,75 @@ mod tests {
                 "CA-1 GATE (ii): A's learned lane never retired (reliable_acked stuck at 0)"
             );
         }
+    }
+
+    /// D-18 REPRO (the gateway→client snapshot path): CA-1 reply-on-connection must deliver an UNRELIABLE
+    /// SNAPSHOT DATAGRAM to a LEARNED (unbooked) peer — not just a reliable Control frame. This is the exact
+    /// k3d failure (an unbooked in-cluster client gets 0 snapshots while login/Active — reliable frames over the
+    /// SAME learned lane — works). Pure loopback quinn: NO Docker Desktop, NO k3d. If B never receives the
+    /// datagram, the drop counters pin the failure mode (too_large ⇒ max_datagram_size None on the accepted
+    /// reply connection; dropped_send ⇒ send_datagram errored; both 0 ⇒ the frame never reached the datagram arm).
+    #[test]
+    fn ca1_reply_on_connection_delivers_an_unreliable_snapshot_datagram() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let sock_a = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve a");
+        let sock_b = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve b");
+        let addr_a = sock_a.local_addr().expect("addr a");
+        let addr_b = sock_b.local_addr().expect("addr b");
+        drop(sock_a);
+        drop(sock_b);
+        // A (gateway): EMPTY book. B (client): books A, so B dials A.
+        let (mut ta, ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0),
+            None,
+        )
+        .expect("spawn A");
+        let book_b: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
+        let (mut tb, _ctl_b) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b, book_b, 64, 0),
+            None,
+        )
+        .expect("spawn B");
+
+        // B → A (reliable Control): A LEARNS B's return connection (exactly as a client's login does).
+        tb.send(a, MsgClass::Control, vec![0xB].into())
+            .expect("B->A booked send");
+        let got_a = wait_for(&mut ta, |g| {
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == b && bytes[0] == 0xB),
+            )
+        });
+        assert!(!got_a.is_empty(), "A learned B");
+
+        // A → B: UNRELIABLE Snapshot datagrams, re-sent at ~20 Hz (the real fan-out cadence — a fire-and-forget
+        // datagram has no retransmit, so an early not-yet-ready-MTU drop must not read as a permanent failure).
+        // Assert B receives at least one within the deadline.
+        let started = Instant::now();
+        let mut received = false;
+        while started.elapsed() < DEADLINE {
+            ta.send(b, MsgClass::Snapshot, vec![0xC5, 0xC5, 0xC5].into())
+                .expect("learned-lane snapshot enqueues");
+            if tb.drain_inbound().into_iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if from == a && bytes.first() == Some(&0xC5)),
+            ) {
+                received = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let s = ctl_a.stats();
+        assert!(
+            received,
+            "D-18: B never received a learned-lane Snapshot datagram (dropped_too_large={}, dropped_send={})",
+            s.datagrams_dropped_too_large, s.datagrams_dropped_send
+        );
     }
 
     #[test]
