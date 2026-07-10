@@ -2665,6 +2665,15 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   pose every tick. `partition_entities` additionally re-encodes every entity twice per tick (a sizing pass + the
   per-chunk encode). At **hundreds of users in ONE location** (one realm, one shard, one sub) this is
   O(entities×clients) ≈ N× the necessary per-client bytes at 20 Hz — the canonical dense-crowd / firefight wall.
+- **✅ BASELINE FIXTURE LANDED (Jul 2026) — the owed "N-in-one-realm" load proof (was: largest was 32 sessions):**
+  `tests/tests/p1_gates.rs` test `p1_volume_dense_hundreds_walk_under_invariants` runs N≥128 sessions in ONE realm
+  (env-RAISABLE `VD_DENSITY_CLIENTS`, clamped so CI always proves ≥128) and asserts EVERY invariant holds at scale
+  (authority-unique per tick, all-N spawned, ≥80%-of-ideal applied inputs, no InputLog eviction, every dot sees all N,
+  no reliable shed, wire-truth, input-conservation + authority-settled at rest). It REPORTS (never gates) the D-9 O(N²)
+  fan-out as an outbound-MESSAGE-COUNT baseline (NOT bytes — `Stepped.sent` is messages, a proxy for the byte fan-out) —
+  measured n=128: gateway_msgs_total=357248, peak=1920 msgs/tick, elapsed 7.6s. So "hundreds in one location" is
+  CORRECTNESS-proven; the D-9 byte-volume reshape below is the remaining owed work (P6, additive, client wire stays
+  frozen). A soak at higher N prints the growing quadratic curve without failing (it is deferred, not gated).
 - **NOT covered by the cross-shard InterestSet:** `connection_plane.md:189` / `PLAN.md:141` interest governs which
   SHARDS a session subscribes to + ghost-band membership between neighbor shards — it CANNOT cull co-located players
   who all share one shard/realm/sub. Also DISTINCT from [[D-4]](a) (client-side `DeliveredView` eviction of
@@ -2947,16 +2956,25 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   later" into a measured-headroom decision.
 - **Pin (exists-to-be-flipped):** direction is now RESOLVED (above); flips 🟩 when plant-now items (1)-(5) land as
   reviewed shapes (degenerate-to-today, proptested) BEFORE P4/P5/P6 harden the single-anchor/single-writer/single-cluster code.
-- **⚠️ MECHANICAL-GUARD GAP (audit `wf_9f26b8cb`, owed before P4/P5/P6):** plant-items (2)-(5) are pinned ONLY in prose
-  doc-comments today — there is NO exists-to-be-flipped TEST, so the "a phase isn't done until its DEFERRED entries flip"
-  gate cannot mechanically catch a P4/P5/P6 slice that hardens single-anchor/single-cluster (e.g. introduces the P6
-  single-cluster HARD ERROR per `sealed_shards.md:236`) WITHOUT first softening it to per-region. OWED with the P4/P5
-  re-centering work: add exists-to-be-flipped tripwire tests that go RED when the hardening lands without the seam — e.g.
-  the P6 single-cluster HARD-ERROR's introduction GATED behind a test proving >1 anchor is representable (the per-region-soft
-  form); and (same class) the `action_bits`-is-inert interim ([[D-39]].1) gets a unit test asserting two `InputDatagram`s
-  differing ONLY in `action_bits` integrate to identical poses today (flips when the reliable discrete-action arm consumes
-  it), so a regression cannot silently gate PvP fire-reg onto the lossy datagram. Converts the prose obligation into the
-  mechanical green-gate the rest of DEFERRED relies on.
+- **⚠️ MECHANICAL-GUARD GAP (audit `wf_9f26b8cb`, owed before P4/P5/P6) — PARTIALLY CLOSED (Jul 2026):** the guard-gap
+  was that plant-items (2)-(5) are pinned ONLY in prose doc-comments, so the "a phase isn't done until its DEFERRED
+  entries flip" gate cannot mechanically catch a P4/P5/P6 slice that hardens single-anchor/single-cluster WITHOUT first
+  softening it to per-region.
+  - **✅ LANDED — the `action_bits`-inert tripwire ([[D-39]].1):** `crates/sim/src/stub.rs` test
+    `action_bits_are_inert_two_datagrams_differing_only_in_action_bits_integrate_identically` asserts two
+    `InputDatagram`s differing ONLY in `action_bits` (0 vs `u32::MAX`) integrate to the IDENTICAL authoritative pose
+    today (the integrator reads only movement+look). It flips RED the day the reliable client→shard discrete-action arm
+    makes the sim consume `action_bits`, so a regression can never silently gate PvP fire-registration (or P6
+    block-edit-forward) onto the lossy UNRELIABLE input datagram. A live green gate, no longer prose-only.
+  - **🟥 STILL OWED — the region/anchor tripwires (>1 anchor representable / region-range `DirectoryKey` / inter-region
+    non-radial band), OWED WITH the P4/P5 re-centering work:** these are NOT landable now because their SUBJECT TYPE is
+    absent in code as of HEAD ab8fae8 — there is no `FrameSpace`/`SurfaceAnchor` struct (only doc-comments), `DirectoryKey`
+    (`wire/seams/directory.rs`) has no `RegionId`/region-range arm (`RegionId` has zero code defs), and `OverlapBand`
+    (`core/geometry.rs`) is a scalar radial-shell with only radial constructors (no band-shape discriminant). Writing a
+    tripwire against a non-existent field is empty-set theater that false-greens and would ITSELF corner the P4/P5 seam.
+    These land WITH plant-items (2)-(5) (the degenerate-now `RegionId{WHOLE}` / multi-anchor `FrameSpace` / non-radial band
+    shapes) during the P4/P5 re-centering — the tripwire and the seam it guards are the SAME slice. (The LatticePos
+    multi-cell round-trip — plant-item (1) — is already covered by `pose.rs` tests, so no coordinate tripwire is owed there.)
 - **Source:** whole-codebase audit `wf_032b80eb` (PvP + large-scale: H2 partition; the rapier/step_tick ceiling; the
   synchronized-crossing batch gap; the single-orchestrator interim soak) + design brief `wf_c4157f73` + impl-plan `wf_73c0d67f`.
 

@@ -4404,13 +4404,27 @@ mod tests {
     }
 
     fn input_msg(seq: u64, fence: Fence, movement: [f32; 3], look: [f32; 2]) -> Inbound {
+        // Every existing caller keeps the inert action_bits:0 default via this delegation (DRY — ONE
+        // InputDatagram construction site); only the action_bits tripwire below varies the bits.
+        input_msg_bits(seq, fence, movement, look, 0)
+    }
+
+    /// Like [`input_msg`] but with an EXPLICIT `action_bits` — the D-41/D-39.1 tripwire is the sole
+    /// caller that needs to vary the one field `input_msg` otherwise hardcodes to 0.
+    fn input_msg_bits(
+        seq: u64,
+        fence: Fence,
+        movement: [f32; 3],
+        look: [f32; 2],
+        action_bits: u32,
+    ) -> Inbound {
         let input = InputDatagram {
             seq,
             is_cut_marker: false,
             client_tick: vd_core::TickId(2),
             movement,
             look,
-            action_bits: 0,
+            action_bits,
         };
         let msg = GatewayToShard::SessionInput {
             session: SESSION,
@@ -5105,6 +5119,39 @@ mod tests {
         assert!(
             dot.pose.pos.offset().z < 0.0,
             "the finite input integrated (moved -Z)"
+        );
+    }
+
+    #[test]
+    fn action_bits_are_inert_two_datagrams_differing_only_in_action_bits_integrate_identically() {
+        // D-41 / D-39.1 MECHANICAL-GUARD TRIPWIRE (exists-to-be-flipped). `action_bits` is INERT in the
+        // current integrator — `integrate` reads ONLY `look` + `movement`, never `action_bits` — so two
+        // inputs identical EXCEPT for `action_bits` MUST integrate to the identical authoritative pose
+        // today. This flips RED the day the reliable client→shard discrete-action arm makes the sim
+        // consume `action_bits` (its named consumers: P6 block-edit-forward + P11 PvP fire-registration,
+        // DEFERRED D-39.1) — a hard guard that world-mutating actions (esp. PvP fire-reg) can NEVER be
+        // silently gated onto the lossy UNRELIABLE input datagram that `action_bits` rides.
+        let mut inert = Rig::new();
+        inert.grant_realm();
+        let _ = inert.attach();
+        let mut set = Rig::new();
+        set.grant_realm();
+        let _ = set.attach();
+
+        // A non-trivial input (movement + look both non-zero) so the pose actually MOVES — proving the
+        // two agree on a REAL integration, not on a shared do-nothing origin.
+        let movement = [1.0f32, 0.5, -0.25];
+        let look = [0.3f32, 0.1];
+        let _ = inert.tick(vec![input_msg_bits(1, Fence(1), movement, look, 0)]);
+        let _ = set.tick(vec![input_msg_bits(1, Fence(1), movement, look, u32::MAX)]);
+
+        let dot_inert = inert.world.resource::<Dots>().0[&SESSION];
+        let dot_set = set.world.resource::<Dots>().0[&SESSION];
+        // Dot is Copy + PartialEq (pose + yaw + pitch + vel): ONE equality assert is the strongest,
+        // HR5-coverage-safe identical-pose check (no `matches!` false-arm, no `&&` short-circuit).
+        assert_eq!(
+            dot_inert, dot_set,
+            "action_bits is inert: 0 vs u32::MAX must not change the integrated pose"
         );
     }
 
