@@ -31,24 +31,43 @@ resolve() {
 }
 
 ROLE="${1:-}"
-ORCH="$(resolve "vd-orch-0.vd-orch.$NS.$DOM")"
-GW="$(resolve "vd-gateway-0.vd-gateway.$NS.$DOM")"
-SH="$(resolve "vd-shard-0.vd-shard.$NS.$DOM")"
+# The peer FQDNs (headless-Service pod names). Resolved to IPs for VD_PEERS (dialed now) AND kept UN-resolved
+# for VD_PEER_HOSTS — the in-process auto-resolver re-resolves these periodically and pushes a peer's NEW pod
+# IP via update_peer_addr, so a rescheduled StatefulSet pod (same DNS name, new IP) is re-plumbed for INITIATED
+# traffic (reply-on-connection only covers replies).
+ORCH_FQDN="vd-orch-0.vd-orch.$NS.$DOM"
+GW_FQDN="vd-gateway-0.vd-gateway.$NS.$DOM"
+SH_FQDN="vd-shard-0.vd-shard.$NS.$DOM"
+ORCH="$(resolve "$ORCH_FQDN")"
+GW="$(resolve "$GW_FQDN")"
+SH="$(resolve "$SH_FQDN")"
 
+# VD_PEERS = id=IP:port (dialed now); VD_PEER_HOSTS = the SAME roster + NodeIds as id=fqdn:port (re-resolved).
 case "$ROLE" in
-  vd-orchestrator) VD_PEERS="2=$GW:$MESH_PORT,3=$SH:$MESH_PORT" ;;
-  vd-gateway)      VD_PEERS="1=$ORCH:$MESH_PORT,3=$SH:$MESH_PORT" ;;
-  vd-shard)        VD_PEERS="1=$ORCH:$MESH_PORT,2=$GW:$MESH_PORT" ;;
+  vd-orchestrator)
+    VD_PEERS="2=$GW:$MESH_PORT,3=$SH:$MESH_PORT"
+    VD_PEER_HOSTS="2=$GW_FQDN:$MESH_PORT,3=$SH_FQDN:$MESH_PORT" ;;
+  vd-gateway)
+    VD_PEERS="1=$ORCH:$MESH_PORT,3=$SH:$MESH_PORT"
+    VD_PEER_HOSTS="1=$ORCH_FQDN:$MESH_PORT,3=$SH_FQDN:$MESH_PORT" ;;
+  vd-shard)
+    VD_PEERS="1=$ORCH:$MESH_PORT,2=$GW:$MESH_PORT"
+    VD_PEER_HOSTS="1=$ORCH_FQDN:$MESH_PORT,2=$GW_FQDN:$MESH_PORT" ;;
   *) echo "entrypoint: FATAL unknown role '$ROLE' (expected vd-orchestrator|vd-gateway|vd-shard)" >&2; exit 1 ;;
 esac
 
 # GUARD: a present-but-empty/mis-shaped VD_PEERS silently parses to a SOLO node (peer_book drops empty entries),
-# so fail loud rather than boot a partitioned singleton. The shape must contain at least one id=host:port.
+# so fail loud rather than boot a partitioned singleton. The shape must contain at least one id=host:port. The
+# SAME guard applies to VD_PEER_HOSTS (mis-shaped ⇒ the auto-resolver's fail-loud drift guard, but catch it here).
 case "$VD_PEERS" in
   *=*:*) : ;;
   *) echo "entrypoint: FATAL empty/mis-shaped VD_PEERS='$VD_PEERS'" >&2; exit 1 ;;
 esac
+case "$VD_PEER_HOSTS" in
+  *=*:*) : ;;
+  *) echo "entrypoint: FATAL empty/mis-shaped VD_PEER_HOSTS='$VD_PEER_HOSTS'" >&2; exit 1 ;;
+esac
 
-export VD_PEERS
-echo "entrypoint: role=$ROLE VD_PEERS=$VD_PEERS" >&2
+export VD_PEERS VD_PEER_HOSTS
+echo "entrypoint: role=$ROLE VD_PEERS=$VD_PEERS VD_PEER_HOSTS=$VD_PEER_HOSTS" >&2
 exec "$@"

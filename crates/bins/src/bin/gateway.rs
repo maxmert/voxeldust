@@ -34,8 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // R-6d3b-2b: the ONE shared boot sequence (HR3 — the SAME helper the shard uses). Resolves incarnation
     // once, opens+wraps the durable outbox, spawns the mesh WITH the sink, replays retained rows before
     // build_app. HR3 uniformity: the gateway opens one iff VD_OUTBOX_PATH is set (empty until it has a
-    // producer-less flow). `_control` + `runtime` stay bound for the tick loop.
-    let (transport, _control) = vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
+    // producer-less flow). `control` (Arc-wrapped below for the auto-resolver) + `runtime` stay bound.
+    let (transport, control) = vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
     let mut node = build_app(
         NodeConfig {
             node_id: local,
@@ -99,6 +99,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )),
         );
     }
+    // Cloud reschedule re-plumb: the peer-addr auto-resolver (production caller of update_peer_addr) — spawned
+    // iff VD_PEER_HOSTS is set (cloud deploy), a no-op in-process. Shares the tick loop's shutdown flag so it
+    // drains on SIGTERM. `control` stays bound (Arc) so the endpoint lives for the whole run. So a rescheduled
+    // shard's new IP is re-plumbed and the gateway can keep ROUTING inputs to it.
+    let control = std::sync::Arc::new(control);
+    vd_bins::spawn_peer_resolver_if_configured(
+        &env,
+        runtime.handle(),
+        std::sync::Arc::clone(&control),
+        std::sync::Arc::clone(&shutdown),
+    )?;
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = node.step_tick();
         // Readiness = clock-synced AND session capacity available (the SAME quantity the admission gate
@@ -130,7 +141,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::sleep(shutdown_linger);
     // GRACEFUL DRAIN: the gateway holds no un-fsynced durable state (its R-6d outbox — empty until it has a
     // producer-less flow — is fsync-before-send; sessions re-adopt via their ResumeTicket on reconnect). A
-    // clean return drops `node`/`runtime`/`_control`, tearing down the endpoint + peer writers in order.
+    // clean return drops `node`/`runtime`/`control` (+ the resolver task's Arc clone), tearing down the
+    // endpoint + peer writers in order (the resolver exits on the shared shutdown flag first).
     tracing::info!("gateway drained on shutdown signal — exiting cleanly");
     Ok(())
 }

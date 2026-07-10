@@ -280,6 +280,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // stays LIVE through the final-fsync park (never a kubelet SIGKILL mid-write).
     let shutdown =
         vd_bins::install_shutdown_flag_with_health(runtime.handle(), Arc::clone(&health));
+    // Cloud reschedule re-plumb: the peer-addr auto-resolver (production caller of update_peer_addr) — spawned
+    // iff VD_PEER_HOSTS is set (cloud deploy), a no-op in-process. The orchestrator INITIATES to shards (realm
+    // grants), so it must re-plumb a rescheduled shard's new IP. Shares the tick loop's shutdown flag + the
+    // retained-for-/metrics `control` Arc.
+    vd_bins::spawn_peer_resolver_if_configured(
+        &env,
+        runtime.handle(),
+        Arc::clone(&control),
+        Arc::clone(&shutdown),
+    )?;
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         // Flush the PREVIOUS tick's outbox now that its batch is durable. The world outbox still holds only
         // that tick's sends (this runs before the next run_schedule refills it), so the defer is exact.

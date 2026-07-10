@@ -34,9 +34,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET
     );
     // R-6d3b-2b: the ONE shared boot sequence — resolve incarnation once, open+wrap the durable outbox, spawn
-    // the mesh WITH the sink (durable-before-send gate LIVE), replay retained rows BEFORE build_app. `_control`
-    // + `runtime` stay bound for the whole tick loop (dropping either tears down the endpoint / peer-writers).
-    let (transport, _control) = vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
+    // the mesh WITH the sink (durable-before-send gate LIVE), replay retained rows BEFORE build_app. `control`
+    // (Arc-wrapped below for the auto-resolver) + `runtime` stay bound for the whole tick loop (dropping either
+    // tears down the endpoint / peer-writers).
+    let (transport, control) = vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
     let mut node = build_app(
         NodeConfig {
             node_id: local,
@@ -111,6 +112,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )),
         );
     }
+    // Cloud reschedule re-plumb: the peer-addr auto-resolver (the production caller of update_peer_addr) —
+    // spawned iff VD_PEER_HOSTS is set (cloud deploy), a no-op in-process. Shares the tick loop's shutdown flag,
+    // so it drains cleanly on SIGTERM. `control` stays bound (Arc) so the endpoint lives for the whole run.
+    let control = std::sync::Arc::new(control);
+    vd_bins::spawn_peer_resolver_if_configured(
+        &env,
+        runtime.handle(),
+        std::sync::Arc::clone(&control),
+        std::sync::Arc::clone(&shutdown),
+    )?;
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = node.step_tick();
         // Readiness = clock-synced AND realm-authority-ready (confirmed-fresh under active D-3 so a
@@ -140,7 +151,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::sleep(shutdown_linger);
     // GRACEFUL DRAIN: the shard holds no un-fsynced durable state — its R-6d outbox is fsync-BEFORE-send and
     // any in-flight mesh send is recovery-covered by the outbox replay on restart. So a clean return
-    // suffices: `node`, `runtime`, and `_control` drop, tearing down the endpoint + peer writers in order.
+    // suffices: `node`, `runtime`, and `control` (+ the resolver task's Arc clone) drop, tearing down the
+    // endpoint + peer writers in order (the resolver task exits on the shared shutdown flag first).
     tracing::info!("shard drained on shutdown signal — exiting cleanly");
     Ok(())
 }

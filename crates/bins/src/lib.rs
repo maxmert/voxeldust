@@ -559,6 +559,56 @@ pub fn boot_mesh_and_replay(
     Ok((transport, control))
 }
 
+/// Spawn the peer-address AUTO-RESOLVER IFF `VD_PEER_HOSTS` is set — the production caller of
+/// [`vd_io_prod::mesh::spawn_peer_resolver`] that re-plumbs a rescheduled BOOKED peer (new pod IP, same DNS
+/// name) for INITIATED traffic. The cloud deploy sets `VD_PEER_HOSTS` (docker/entrypoint.sh); every in-process
+/// / dev / parity rig leaves it UNSET, so this is a no-op — byte-identical to today. HR3: the ONE resolver
+/// wiring shared by every node bin (shard / gateway / orchestrator). The default re-resolve interval
+/// ([`vd_io_prod::mesh::DEFAULT_PEER_RERESOLVE_INTERVAL`], 500 ms) is well under the cloud confirmed-dead
+/// liveness window, so a rescheduled peer is re-plumbed before the saga declares it dead — coherent by
+/// construction (not a tunable, so no boot cross-check is owed).
+///
+/// # Errors
+/// A MALFORMED `VD_PEER_HOSTS`, or a host for a peer NOT booked in `VD_PEERS` (a config drift), fails LOUD;
+/// absence is a clean no-op.
+pub fn spawn_peer_resolver_if_configured(
+    env: &EnvConfig,
+    runtime: &tokio::runtime::Handle,
+    control: std::sync::Arc<vd_io_prod::mesh::MeshControl>,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let hosts = match env.peer_hosts("VD_PEER_HOSTS") {
+        Ok(hosts) => hosts,
+        // Absent ⇒ no auto-resolver (in-process / dev / parity rigs) — byte-identical to today.
+        Err(vd_io_prod::runtime::ConfigError::Missing(_)) => return Ok(()),
+        // Present but malformed ⇒ fail loud (never a silent mis-parse).
+        Err(other) => return Err(Box::new(other)),
+    };
+    // Drift guard: every re-resolved peer MUST be booked in VD_PEERS — a host for an unbooked peer is a config
+    // bug (the auto-resolver only re-plumbs booked peers; it never invents a dial target).
+    let booked = env.peer_book("VD_PEERS")?;
+    for id in hosts.keys() {
+        if !booked.contains_key(id) {
+            return Err(format!(
+                "VD_PEER_HOSTS lists peer {} which is not in VD_PEERS — the auto-resolver only re-plumbs booked peers",
+                id.0
+            )
+            .into());
+        }
+    }
+    let resolver: std::sync::Arc<dyn vd_io_prod::mesh::AddrResolver> =
+        std::sync::Arc::new(vd_io_prod::mesh::SystemDnsResolver);
+    vd_io_prod::mesh::spawn_peer_resolver(
+        runtime,
+        control,
+        hosts,
+        resolver,
+        vd_io_prod::mesh::PeerResolveTuning::default(),
+        shutdown,
+    );
+    Ok(())
+}
+
 /// The env every node shares (trust bundle + transport knobs + the per-launch process incarnation).
 #[must_use]
 pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, String)> {
