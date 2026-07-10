@@ -21,6 +21,10 @@ ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# SPIKE-2a's p99 latency gate uses the ONE shared `vd_harness::latency::percentile_unstable`
+# (HR3 one-tooling, shared with SPIKE-3a). A dev-scope edge only: it never inverts the
+# bins→node→sim→wire→core build graph (harness sits above node, and this is test-only).
+vd-harness = { workspace = true }
 
 [lints]
 workspace = true

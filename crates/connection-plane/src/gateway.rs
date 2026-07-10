@@ -3428,8 +3428,10 @@ mod tests {
         assert_eq!(route_read.len(), READERS * SAMPLES_PER_READER);
         assert_eq!(forward.len(), READERS * SAMPLES_PER_READER);
 
-        let route_p99 = percentile_unstable(route_read, 99);
-        let forward_p99 = percentile_unstable(forward, 99);
+        // The p99 tail helper is the ONE shared latency-gate utility (HR3), extracted to
+        // vd-harness so SPIKE-2a (here) and SPIKE-3a (vd-io-prod) can never drift.
+        let route_p99 = vd_harness::latency::percentile_unstable(route_read, 99);
+        let forward_p99 = vd_harness::latency::percentile_unstable(forward, 99);
         // The hard latency GATES are release-only (a debug/coverage tail is meaningless).
         #[cfg(not(debug_assertions))]
         {
@@ -3461,38 +3463,6 @@ mod tests {
         }
         #[cfg(debug_assertions)]
         let _ = (route_p99, forward_p99);
-    }
-
-    /// The p99-style tail of a latency sample set (sort + nearest-rank index). TOTAL — an
-    /// empty set is `Duration::ZERO` (no panic), since this is earmarked for extraction to a
-    /// shared harness helper for the 2nd hard latency gate (SPIKE-3a, P3) whose caller may not
-    /// guarantee non-empty. Hand-rolled (no bench crate — see the spike doc).
-    fn percentile_unstable(
-        mut samples: Vec<std::time::Duration>,
-        pct: usize,
-    ) -> std::time::Duration {
-        if samples.is_empty() {
-            return std::time::Duration::ZERO;
-        }
-        samples.sort_unstable();
-        let rank = samples.len().saturating_mul(pct) / 100;
-        samples[rank.min(samples.len() - 1)]
-    }
-
-    #[test]
-    fn percentile_unstable_total_over_empty_single_and_edges() {
-        use std::time::Duration;
-        let d = Duration::from_nanos;
-        // Empty → ZERO (the total-ness the future harness reuse relies on; no panic).
-        assert_eq!(percentile_unstable(Vec::new(), 99), Duration::ZERO);
-        // Single element → itself at any percentile.
-        assert_eq!(percentile_unstable(vec![d(5)], 99), d(5));
-        assert_eq!(percentile_unstable(vec![d(5)], 0), d(5));
-        // Nearest-rank over a known set; p100 clamps to the max (no out-of-bounds).
-        let s = vec![d(10), d(40), d(20), d(30), d(50)]; // sorts to 10,20,30,40,50
-        assert_eq!(percentile_unstable(s.clone(), 99), d(50)); // rank 4
-        assert_eq!(percentile_unstable(s.clone(), 100), d(50)); // rank 5 → clamp to 4
-        assert_eq!(percentile_unstable(s, 50), d(30)); // rank 2
     }
 
     #[test]

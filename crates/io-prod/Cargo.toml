@@ -39,6 +39,10 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true } # R-6d4-A: the both-ends-restart replay proptest (dev-only)
+# SPIKE-3a's snapshot-under-bulk p99 gate uses the ONE shared `vd_harness::latency::
+# percentile_unstable` (HR3, shared with SPIKE-2a). Dev-scope only: harness sits above node,
+# so a test-only edge is acyclic (no io-prod/connection-plane ref in node/sim/client).
+vd-harness = { workspace = true }
 
 [lints]
 workspace = true

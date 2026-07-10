@@ -3250,8 +3250,16 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   `[0,0,0] → [0,0,-1.0]` (exactly −Z as predicted) and the **full agent-HR6 boundary-crossing E2E now PASSES**
   end-to-end (login → Active → own_entity → snapshots → forward input → shard authoritative sim → displacement
   threshold met).
-- **STILL OWED (separate):** the 4 MB BULK-burst latency gate SPIKE-3a proper (extract the `percentile_unstable`
-  harness to `vd-harness` when it adds the second hard latency gate).
+- **✅ SPIKE-3a LANDED (Jul 2026): the 2nd hard latency gate.** `crates/io-prod/tests/mesh_snapshot_latency.rs`
+  — ONE real-QUIC loopback sender→receiver connection on which a ~1.8 GB reliable `Saga` burst saturates the
+  wire while a 20 Hz unreliable Snapshot datagram stream competes on the SAME per-peer FIFO lane. Hard gate
+  (release-only): delivered-snapshot p99 < 15 ms (a named, headroom-justified const, ~20x the observed ~0.7 ms
+  and under one 50 ms tick), plus an always-on ≥50% delivery-ratio floor, a `datagrams_dropped_too_large==0`
+  honesty check, and a `reliable_acked ≥ bulk_pushed/2` competitor-real check. Result: the snapshot hot path
+  stays **sub-millisecond and lossless** under massive bulk (the "hundreds in one location + a bulk transfer must
+  not starve snapshots" property). DRY (HR3): `percentile_unstable` extracted to `vd-harness` (`latency.rs`),
+  shared with the SPIKE-2a gate. Wired into `just spike3a` + `just gate`. Adversarially reviewed (no bugs; the
+  debug-window/env-floor/jitter concerns folded in).
 - **Source:** `PLAN.md` SPIKE list.
 - **⚠️ CONFIRMED LIVE (S5a agent-HR6, Jul 2026, k3d cluster voxeldust-newsystem):** the in-cluster agent-client
   logs in over real QUIC/mTLS + reaches Active + gets its own_entity (the RELIABLE control plane works

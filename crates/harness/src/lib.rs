@@ -27,5 +27,6 @@
 pub mod chaos;
 pub mod client;
 pub mod fabric;
+pub mod latency;
 pub mod oracle;
 pub mod topology;

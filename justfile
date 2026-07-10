@@ -133,6 +133,15 @@ orch-crash-cov:
 spike2a:
     cargo test --release -p vd-connection-plane spike_2a -- --nocapture --test-threads=1
 
+# SPIKE-3a (the 2nd hard latency gate): the 20Hz unreliable SNAPSHOT datagram hot path stays
+# TIMELY (delivered p99 under one tick) while a bulk RELIABLE burst saturates the SAME quinn
+# connection — the "hundreds in one location + a ship-blueprint/terrain-chunk transfer must not
+# starve snapshots" property. RELEASE build (a debug/coverage tail is meaningless; `just test`
+# still exercises the send/drain/decode + ratio + honesty asserts, just not the timing).
+# Shares the ONE `vd_harness::latency::percentile_unstable` with SPIKE-2a (HR3, no drift).
+spike3a:
+    cargo test --release -p vd-io-prod --test mesh_snapshot_latency -- --nocapture --test-threads=1
+
 fmt:
     cargo fmt --all
 
@@ -152,7 +161,7 @@ render-smoke:
 # Everything a merge requires (render-smoke is GPU-required + local; spike2a is a release
 # build — both are documented in their recipes). fmt-check FAILS on drift (run `just fmt`
 # to fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a render-smoke coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a render-smoke coverage
 
 # One-time setup helper.
 coverage-setup:
