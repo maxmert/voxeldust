@@ -16,10 +16,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use vd_core::NodeId;
-use vd_io_prod::mesh::{MeshConfig, MeshControl, MeshTransport, spawn_mesh};
+use vd_io_prod::mesh::{
+    AddrResolver, MeshConfig, MeshControl, MeshTransport, PeerResolveTuning,
+    PeerResolveTuningError, SystemDnsResolver, spawn_mesh, spawn_peer_resolver,
+};
 use vd_io_prod::trust::ClusterTrust;
 use vd_sim::io::{Inbound, MsgClass, Transport};
 
@@ -309,4 +314,174 @@ fn l5_a_rescheduled_peer_at_a_new_address_is_reachable() {
         },
         "L5: a rescheduled peer is reachable at its real addr after the update_peer_addr re-plumb",
     );
+}
+
+// ---- Peer-address AUTO-RESOLVER (the production caller of update_peer_addr) — deterministic tests ----------
+
+/// A deterministic in-memory [`AddrResolver`] (no getaddrinfo ⇒ no flake): returns the cell's current value
+/// for ANY host (the tests use one peer). Flip the cell to simulate a reschedule + DNS re-point (or `None` for
+/// an NXDOMAIN gap).
+struct CellResolver {
+    cell: Arc<Mutex<Option<SocketAddr>>>,
+}
+impl AddrResolver for CellResolver {
+    fn resolve(&self, _hostport: &str) -> Option<SocketAddr> {
+        *self
+            .cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// A fast test tuning (short interval, no settle) — NAMED, never inline (HR5 no-magic-numbers).
+fn test_resolve_tuning() -> PeerResolveTuning {
+    PeerResolveTuning {
+        interval: Duration::from_millis(20),
+        initial_delay: Duration::ZERO,
+    }
+}
+
+/// Spawn A (booking B at `b_book_addr`) + B (at `addr_b_real`) + the auto-resolver over B's name (resolving
+/// `cell`), returning the pieces the test drives. Shared setup (DRY across the three arms).
+#[allow(clippy::type_complexity)]
+fn autopush_rig(
+    handle: &tokio::runtime::Handle,
+    trust: &ClusterTrust,
+    b_book_addr: SocketAddr,
+    addr_b_real: SocketAddr,
+    cell: Arc<Mutex<Option<SocketAddr>>>,
+) -> (
+    MeshTransport,
+    MeshTransport,
+    Arc<MeshControl>,
+    Arc<AtomicBool>,
+) {
+    let (a_id, b_id) = (NodeId(1), NodeId(2));
+    let addr_a = reserve();
+    let a_book: BTreeMap<NodeId, SocketAddr> = [(b_id, b_book_addr)].into();
+    let b_book: BTreeMap<NodeId, SocketAddr> = [(a_id, addr_a)].into();
+    let (a, ca) = spawn_node(handle, trust, a_id, addr_a, &a_book, None);
+    let (b, _cb) = spawn_node(handle, trust, b_id, addr_b_real, &b_book, None);
+    let ca = Arc::new(ca);
+    let resolver = Arc::new(CellResolver { cell });
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let hosts: BTreeMap<NodeId, String> = [(b_id, "b.example:0".to_owned())].into();
+    let _task = spawn_peer_resolver(
+        handle,
+        Arc::clone(&ca),
+        hosts,
+        resolver,
+        test_resolve_tuning(),
+        Arc::clone(&shutdown),
+    );
+    (a, b, ca, shutdown)
+}
+
+/// Poll until B receives A's tagged reliable frame (or the deadline trips).
+fn b_got(b: &mut MeshTransport, tag: u8) -> bool {
+    b.drain_inbound().iter().any(
+        |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == NodeId(1) && bytes[0] == tag),
+    )
+}
+
+#[test]
+fn autopush_re_resolves_and_replumbs_a_rescheduled_peer_without_a_manual_push() {
+    // The AUTO-RESOLVER is the missing production caller of update_peer_addr: unlike l5 (which pushes by hand),
+    // here the periodic loop ITSELF re-plumbs a rescheduled peer. A books B at a STALE addr; DNS for B's name
+    // starts stale then flips to B's REAL addr; the resolver's next tick pushes it — no manual push.
+    let rt = runtime(2);
+    let trust = ClusterTrust::generate("vd-mesh-autopush").expect("trust");
+    let (addr_b_real, addr_b_stale) = (reserve(), reserve());
+    let cell = Arc::new(Mutex::new(Some(addr_b_stale)));
+    let (mut a, mut b, ca, shutdown) = autopush_rig(
+        rt.handle(),
+        &trust,
+        addr_b_stale,
+        addr_b_real,
+        Arc::clone(&cell),
+    );
+
+    // Reschedule: DNS now resolves B's name to its REAL addr. Completion-gate on the AUTO-RESOLVER pushing it
+    // into the shared topology — NO manual update_peer_addr call anywhere in this test (the distinguishing
+    // property vs the l5 test, which pushes by hand).
+    *cell
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(addr_b_real);
+    wait_until(
+        Duration::from_secs(5),
+        || ca.current_peer_addr(NodeId(2)) == Some(addr_b_real),
+        "the AUTO-RESOLVER re-plumbed B's new addr into the topology (no manual update_peer_addr)",
+    );
+    // And it is actually reachable at the re-plumbed addr (A dials the refreshed topology).
+    a.send(NodeId(2), MsgClass::Saga, vec![7u8].into())
+        .expect("enqueued (failure is async)");
+    wait_until(
+        Duration::from_secs(5),
+        || b_got(&mut b, 7),
+        "A's initiation reached B at the auto-re-plumbed addr",
+    );
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+#[test]
+fn autopush_is_a_noop_when_the_resolved_addr_is_unchanged() {
+    // The unchanged arm: A already books B's REAL addr and DNS keeps resolving that SAME addr, so EVERY tick is a
+    // no-op — update_peer_addr (which unconditionally closes the dialed conn) is never called, so no per-tick
+    // close/re-dial storm breaks the live connection. B stays reachable.
+    let rt = runtime(2);
+    let trust = ClusterTrust::generate("vd-mesh-autopush-noop").expect("trust");
+    let addr_b = reserve();
+    let cell = Arc::new(Mutex::new(Some(addr_b))); // unchanged from A's book
+    let (mut a, mut b, _ca, shutdown) = autopush_rig(rt.handle(), &trust, addr_b, addr_b, cell);
+
+    a.send(NodeId(2), MsgClass::Saga, vec![9u8].into())
+        .expect("enqueued");
+    wait_until(
+        Duration::from_secs(5),
+        || b_got(&mut b, 9),
+        "an unchanged re-resolve is a no-op — B stays reachable (no close/re-dial storm)",
+    );
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+#[test]
+fn autopush_failed_resolve_never_evicts_a_live_peer_addr() {
+    // The None arm: A books B's REAL addr but DNS ALWAYS fails (NXDOMAIN gap). A failed resolve MUST be a strict
+    // no-op — never a topology eviction (which would strand a peer mid-reschedule). B stays reachable.
+    let rt = runtime(2);
+    let trust = ClusterTrust::generate("vd-mesh-autopush-nxdomain").expect("trust");
+    let addr_b = reserve();
+    let cell = Arc::new(Mutex::new(None)); // resolve returns None every tick
+    let (mut a, mut b, _ca, shutdown) = autopush_rig(rt.handle(), &trust, addr_b, addr_b, cell);
+
+    a.send(NodeId(2), MsgClass::Saga, vec![5u8].into())
+        .expect("enqueued");
+    wait_until(
+        Duration::from_secs(5),
+        || b_got(&mut b, 5),
+        "a failed/NXDOMAIN resolve is a strict no-op — B is not evicted/stranded",
+    );
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+#[test]
+fn peer_resolve_tuning_validate_rejects_a_zero_interval() {
+    assert_eq!(PeerResolveTuning::default().validate(), Ok(()));
+    let bad = PeerResolveTuning {
+        interval: Duration::ZERO,
+        initial_delay: Duration::ZERO,
+    };
+    assert_eq!(bad.validate(), Err(PeerResolveTuningError::IntervalZero));
+}
+
+#[test]
+fn system_dns_resolver_resolves_a_literal_and_rejects_garbage() {
+    // A literal IP:port needs no DNS ⇒ deterministic, no external resolver dependency (the Some arm).
+    let r = SystemDnsResolver;
+    assert_eq!(
+        r.resolve("127.0.0.1:9000"),
+        Some("127.0.0.1:9000".parse().expect("literal"))
+    );
+    // A syntactically-invalid hostport is None (the failed-lookup arm).
+    assert_eq!(r.resolve("definitely not a host:port pair"), None);
 }

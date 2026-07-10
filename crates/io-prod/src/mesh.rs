@@ -178,6 +178,58 @@ pub const DEFAULT_REDIAL_BACKOFF_MIN: Duration = Duration::from_millis(50);
 /// See [`DEFAULT_REDIAL_BACKOFF_MIN`].
 pub const DEFAULT_REDIAL_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
+/// The peer-address auto-resolver cadence — the missing PRODUCTION caller of [`MeshControl::update_peer_addr`].
+/// A background task re-resolves each booked peer's DNS name this often and pushes a CHANGED address, so a
+/// rescheduled peer (new pod IP, SAME DNS name) is re-plumbed for INITIATED traffic. Deliberately a FEW HUNDRED
+/// ms — WELL under the cloud saga-liveness confirmed-dead window (`LivenessTuning::cloud` ~1.5 s @ 50 Hz) so the
+/// re-plumb lands before a moved-but-recoverable peer is declared dead; NOT a multiple of the redial backoff
+/// (which is deliberately larger). A boot cross-check (bins) fails loud if this is mis-tuned vs the window.
+pub const DEFAULT_PEER_RERESOLVE_INTERVAL: Duration = Duration::from_millis(500);
+/// A short settle after boot before the FIRST re-resolve: the entrypoint already resolved the initial addrs,
+/// so the first tick is a no-op on an unchanged cluster; this just avoids racing that boot resolution.
+pub const DEFAULT_PEER_RERESOLVE_INITIAL_DELAY: Duration = Duration::from_secs(1);
+
+/// Peer-address auto-resolver tuning — the ONE config home (no inline literals at use sites), mirroring
+/// [`MeshReliabilityTuning`]. Plain (not `Serialize`): operational tuning, never persisted. A FAILED resolve is
+/// simply retried at the next `interval` (no separate failure backoff — the interval already paces the resolves
+/// far below any CoreDNS-hammering rate).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerResolveTuning {
+    /// How often the auto-resolver re-resolves each peer's DNS name. Must be > 0 (a 0 interval busy-spins).
+    pub interval: Duration,
+    /// A settle after boot before the first re-resolve.
+    pub initial_delay: Duration,
+}
+
+impl Default for PeerResolveTuning {
+    fn default() -> Self {
+        PeerResolveTuning {
+            interval: DEFAULT_PEER_RERESOLVE_INTERVAL,
+            initial_delay: DEFAULT_PEER_RERESOLVE_INITIAL_DELAY,
+        }
+    }
+}
+
+/// A `PeerResolveTuning` field out of range — surfaced loud at boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PeerResolveTuningError {
+    #[error("peer re-resolve interval must be > 0")]
+    IntervalZero,
+}
+
+impl PeerResolveTuning {
+    /// Reject an out-of-range field (fail-loud at boot). Equality-comparable typed error (HR5(d)).
+    ///
+    /// # Errors
+    /// [`PeerResolveTuningError::IntervalZero`] if the interval is zero (a 0 timer busy-spins).
+    pub fn validate(&self) -> Result<(), PeerResolveTuningError> {
+        if self.interval.is_zero() {
+            return Err(PeerResolveTuningError::IntervalZero);
+        }
+        Ok(())
+    }
+}
+
 /// At-least-once redelivery tuning — the ONE config home for the redelivering transport (no inline
 /// literals at use sites). Plain (not `Serialize`): operational tuning, never persisted.
 ///
@@ -909,6 +961,14 @@ impl MeshControl {
         if let Some(conn) = reg.remove(&peer) {
             conn.close(quinn::VarInt::from_u32(3), b"peer addr updated");
         }
+    }
+
+    /// The peer's CURRENT dialed address in the shared topology. The auto-resolver seeds its
+    /// change-detection baseline from this so the FIRST re-resolve is a no-op on an unchanged cluster (an
+    /// unconditional first push would `update_peer_addr`-close every fine connection). `None` if unbooked.
+    #[must_use]
+    pub fn current_peer_addr(&self, peer: NodeId) -> Option<SocketAddr> {
+        self.topology.load().get(&peer).copied()
     }
 
     /// The transport honesty counters (dropped-datagram metrics; GW-1 never-silent).
@@ -2460,6 +2520,108 @@ pub trait ReplayTransport: Transport {
 impl ReplayTransport for MeshTransport {
     fn lane_alive(&self, peer: NodeId) -> bool {
         self.lanes.get(&peer).is_some_and(|l| !l.tx.is_closed())
+    }
+}
+
+// ---- Peer-address AUTO-RESOLVER (CA-1: the production caller of update_peer_addr) -------------------------
+
+/// The DNS-resolution seam for the peer auto-resolver — INJECTED so production uses the system resolver
+/// (getaddrinfo, which picks up k8s pod DNS) while a test injects a deterministic in-memory resolver (no
+/// getaddrinfo → no flake). `resolve` returns `None` on a failed/NXDOMAIN/empty lookup — a strict NO-OP for the
+/// caller (NEVER a topology eviction: a peer mid-reschedule must not be stranded).
+pub trait AddrResolver: Send + Sync {
+    /// Resolve `host:port` to ONE socket address, or `None` on any failure.
+    fn resolve(&self, hostport: &str) -> Option<SocketAddr>;
+}
+
+/// The production [`AddrResolver`]: the BLOCKING system resolver (getaddrinfo via nsswitch/resolv.conf). The
+/// auto-resolver calls it OFF the runtime worker (`spawn_blocking`).
+pub struct SystemDnsResolver;
+
+impl AddrResolver for SystemDnsResolver {
+    fn resolve(&self, hostport: &str) -> Option<SocketAddr> {
+        resolve_first(hostport)
+    }
+}
+
+/// The first resolved address for `host:port`, or `None`. The MONOMORPHIC helper the trait impl shares — the
+/// `?` lives here, not in a generic body (HR5(a) branchless-shim).
+fn resolve_first(hostport: &str) -> Option<SocketAddr> {
+    use std::net::ToSocketAddrs;
+    hostport.to_socket_addrs().ok()?.next()
+}
+
+/// The change-gate for ONE resolved peer address (the monomorphic core — every arm exercised deterministically
+/// by the tests): push + record ONLY on a successful-AND-CHANGED address; a failed (`None`) or unchanged resolve
+/// is a strict NO-OP (never an eviction, never a re-dial storm — `update_peer_addr` unconditionally closes the
+/// dialed conn, so pushing ONLY on a real change is load-bearing).
+fn apply_resolved(
+    control: &MeshControl,
+    last: &mut BTreeMap<NodeId, SocketAddr>,
+    id: NodeId,
+    resolved: Option<SocketAddr>,
+) {
+    let Some(addr) = resolved else {
+        return; // failed / NXDOMAIN: keep the last-known addr, retry next interval
+    };
+    if last.get(&id) == Some(&addr) {
+        return; // unchanged: no re-dial storm
+    }
+    control.update_peer_addr(id, addr);
+    last.insert(id, addr);
+}
+
+/// Spawn the peer-address AUTO-RESOLVER — the missing production caller of [`MeshControl::update_peer_addr`]. A
+/// background task (OFF the tick path, on the node's existing runtime) that every `tuning.interval` re-resolves
+/// each `(NodeId, "host:port")` via the injected [`AddrResolver`] (in `spawn_blocking` — getaddrinfo blocks) and
+/// pushes a CHANGED address, so a rescheduled peer (new pod IP, same DNS name) is re-plumbed for INITIATED
+/// reliable traffic. Change-detection is seeded from the CURRENT topology so the first tick is a no-op on an
+/// unchanged cluster. Exits within one interval of `shutdown` being set (drains with the tick loop — it holds an
+/// `Arc<MeshControl>`, so it MUST exit for the endpoint to close). Returns the task handle.
+pub fn spawn_peer_resolver(
+    handle: &tokio::runtime::Handle,
+    control: Arc<MeshControl>,
+    hosts: BTreeMap<NodeId, String>,
+    resolver: Arc<dyn AddrResolver>,
+    tuning: PeerResolveTuning,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) -> JoinHandle<()> {
+    handle.spawn(peer_resolver_loop(
+        control, hosts, resolver, tuning, shutdown,
+    ))
+}
+
+async fn peer_resolver_loop(
+    control: Arc<MeshControl>,
+    hosts: BTreeMap<NodeId, String>,
+    resolver: Arc<dyn AddrResolver>,
+    tuning: PeerResolveTuning,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) {
+    // Seed change-detection from the CURRENT topology (the entrypoint's boot resolution) so the first tick is a
+    // no-op on an unchanged cluster — an unconditional first push would tear down every live connection.
+    let mut last: BTreeMap<NodeId, SocketAddr> = hosts
+        .keys()
+        .filter_map(|id| control.current_peer_addr(*id).map(|addr| (*id, addr)))
+        .collect();
+    tokio::time::sleep(tuning.initial_delay).await;
+    let mut ticker = tokio::time::interval(tuning.interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    while !shutdown.load(Ordering::Relaxed) {
+        ticker.tick().await;
+        if shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        for (id, host) in &hosts {
+            // getaddrinfo BLOCKS — off the runtime worker so a slow/hung resolver never stalls it.
+            let host = host.clone();
+            let resolver = Arc::clone(&resolver);
+            let resolved = tokio::task::spawn_blocking(move || resolver.resolve(&host))
+                .await
+                .ok()
+                .flatten();
+            apply_resolved(&control, &mut last, *id, resolved);
+        }
     }
 }
 

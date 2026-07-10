@@ -135,6 +135,31 @@ impl EnvConfig {
         Ok(book)
     }
 
+    /// The peer DNS-name book for the auto-resolver: `"1=vd-orch-0.vd-orch...:9000,2=..."`. Identical to
+    /// [`peer_book`](Self::peer_book) EXCEPT the `host:port` is kept UN-resolved (a `String`) — the peer
+    /// auto-resolver re-resolves it periodically. Absent ⇒ no auto-resolver is spawned (byte-identical to today).
+    ///
+    /// # Errors
+    /// [`ConfigError`] on absence or any malformed entry (a missing `=` or an unparseable NodeId).
+    pub fn peer_hosts(&self, key: &str) -> Result<BTreeMap<NodeId, String>, ConfigError> {
+        let value = self.raw(key)?;
+        let mut hosts = BTreeMap::new();
+        for entry in value.split(',').filter(|e| !e.is_empty()) {
+            let Some((id, host)) = entry.split_once('=') else {
+                return Err(ConfigError::Unparseable {
+                    key: key.to_owned(),
+                    value: entry.to_owned(),
+                });
+            };
+            let id: u64 = id.parse().map_err(|_| ConfigError::Unparseable {
+                key: key.to_owned(),
+                value: entry.to_owned(),
+            })?;
+            hosts.insert(NodeId(id), host.to_owned());
+        }
+        Ok(hosts)
+    }
+
     /// A comma-separated NodeId list: `"2,3,4"`.
     ///
     /// # Errors
@@ -323,6 +348,36 @@ mod tests {
         assert!(env.node_list("BAD_LIST").is_err());
         assert_eq!(
             env.peer_book("MISSING"),
+            Err(ConfigError::Missing("MISSING".to_owned()))
+        );
+    }
+
+    #[test]
+    fn peer_hosts_keeps_the_host_string_unresolved() {
+        let env = cfg(&[
+            (
+                "HOSTS",
+                "1=vd-orch-0.vd-orch.ns.svc:9000,2=vd-gateway-0.vd-gateway.ns.svc:9000",
+            ),
+            ("EMPTY", ""),
+            ("NO_EQ", "1:vd-orch-0:9000"),
+            ("BAD_ID", "x=vd-orch-0:9000"),
+        ]);
+        let hosts = env.peer_hosts("HOSTS").expect("parses");
+        assert_eq!(hosts.len(), 2);
+        // The DNS NAME stays UN-resolved (unlike peer_book, which SocketAddr-parses) — the auto-resolver
+        // resolves it periodically. A `host:port` that is NOT a literal addr is VALID here.
+        assert_eq!(hosts[&NodeId(1)], "vd-orch-0.vd-orch.ns.svc:9000");
+        assert_eq!(env.peer_hosts("EMPTY"), Ok(BTreeMap::new()));
+        for bad in ["NO_EQ", "BAD_ID"] {
+            let err = env.peer_hosts(bad).expect_err("rejected");
+            assert!(
+                matches!(err, ConfigError::Unparseable { .. }),
+                "{bad}: {err}"
+            );
+        }
+        assert_eq!(
+            env.peer_hosts("MISSING"),
             Err(ConfigError::Missing("MISSING".to_owned()))
         );
     }
