@@ -2568,6 +2568,9 @@ fn apply_resolved(
         return; // unchanged: no re-dial storm
     }
     control.update_peer_addr(id, addr);
+    // A re-plumb is a notable cloud event (a peer rescheduled to a new address) — log it LOUD so a live
+    // reschedule proof (S6) can confirm the auto-resolver actually pushed, not just that recovery happened.
+    tracing::info!(peer = id.0, %addr, "peer-resolver: re-plumbed a peer to its new address");
     last.insert(id, addr);
 }
 

@@ -1107,9 +1107,17 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     deadlock — publishNotReadyAddresses worked). ONE DoD-recipe bug found + FIXED live: `cluster_bootstrapped()` is a
     Rust METHOD, not a serialized snapshot field, so `k3d-dod` now reads the directory for a `"authority":"shard:"`
     entry (the real bootstrap signal). Residuals still ledgered: NetworkPolicy is a no-op on k3d/flannel (declarative;
-    reach admin via port-forward); a peer reschedule to a new IP needs a `rollout restart` re-seed day-1
-    (update_peer_addr is shipped, no auto-pusher). Owed by S5/S6: in-cluster agent-HR6 testing; the CA-1
-    CrashLoop/reschedule e2e (both now UNBLOCKED — the cluster is live).
+    reach admin via port-forward). **✅ S6 RESCHEDULE-RECOVERY LIVE-PROVEN (auto-pusher, Jul 2026):** the "rollout
+    restart re-seed day-1 / no auto-pusher" crutch is RETIRED — `just k3d-reschedule-e2e` (fresh cluster `voxeldust-s6`)
+    kills `vd-shard-0`, the StatefulSet reschedules it to a NEW podIP (10.42.0.17→.18, asserted non-vacuous), and the
+    cluster RE-BOOTSTRAPS on its own: the in-process peer-resolver on BOTH survivors re-resolves the shard's DNS name +
+    pushes the new IP via `update_peer_addr` (direct evidence: `peer-resolver: re-plumbed a peer to its new address
+    peer=3 addr=10.42.0.18:9000` on orch + gateway), so INITIATED reliable traffic re-plumbs with NO manual intervention
+    (reply-on-connection only ever covered replies). Asserts ONLY the reliable control plane (D-18: unreliable snapshots
+    don't flow on the Docker-Desktop k3d overlay). Same slice hardened the harness: `60-agent.yaml` moved to
+    `deploy/k3d/agent/` (the non-recursive base `apply` no longer pulls the ImagePullBackOff agent Job into k3d-dod's
+    `wait -l app=vd`); k3d-dod cold-start timeouts 120s→300s. See [[project_peer_addr_autopusher]]. Owed by S5:
+    in-cluster agent-HR6 continuous testing (`k3d-agent`); S5b: vdctl WalkTo/LookAt → nav math + DevState orientation.
   - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
     SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
     adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT
