@@ -56,6 +56,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hoisted so the S3 readiness predicate gates on the SAME capacity the admission gate rejects on.
     let max_sessions: usize = env.parse("VD_MAX_SESSIONS")?;
     let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
+    // interplay-02 (holistic audit): the RUNTIME twin of the compile-time DRAIN-BURST assert. The gateway
+    // drains up to `max_buffered_inputs` cut-buffered frames to the dest shard in ONE tick; that MUST stay
+    // within the dest inbox floor `inbound_capacity_for(outbound_cap)`, or a cloud ConfigMap that lowers
+    // VD_OUTBOUND_CAP (without the gateway's VD_MAX_BUFFERED_INPUTS) silently sheds a conserved resume-input
+    // at the transfer-commit moment (D-8). VD_OUTBOUND_CAP is the cluster-wide dest cap (DEV value off-cloud).
+    let max_buffered_inputs: usize = env.parse("VD_MAX_BUFFERED_INPUTS")?;
+    let dest_outbound_cap: usize =
+        env.parse_or("VD_OUTBOUND_CAP", vd_bins::DEV.outbound_cap as usize)?;
+    vd_bins::validate_drain_burst(dest_outbound_cap, max_buffered_inputs)?;
     register_gateway(
         world,
         schedule,
@@ -79,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             self_fence_grace_ticks,
             tuning: TransportTuning {
                 max_sessions,
-                max_buffered_inputs: env.parse("VD_MAX_BUFFERED_INPUTS")?,
+                max_buffered_inputs,
             },
         },
     );

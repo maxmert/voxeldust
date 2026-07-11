@@ -290,6 +290,54 @@ const _: () = assert!(
     "DEV.max_buffered_inputs must stay within the dest inbox floor inbound_capacity_for(outbound_cap) — the drain-burst invariant (D-8)",
 );
 
+/// The DRAIN-BURST invariant violated at RUNTIME: the gateway's cut-buffer drain (`max_buffered_inputs`
+/// frames in one tick) exceeds the dest shard's `BoundedInbox` floor `inbound_capacity_for(outbound_cap)`,
+/// so a full drain plus a co-arriving frame sheds a CONSERVED (unreliable) input at the transfer-commit
+/// moment (D-8). Carries the offending pair + the computed floor for the boot log.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DrainBurstError {
+    pub outbound_cap: usize,
+    pub max_buffered_inputs: usize,
+    pub floor: usize,
+}
+
+impl std::fmt::Display for DrainBurstError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DRAIN-BURST invariant violated (D-8): VD_MAX_BUFFERED_INPUTS={} exceeds the dest inbox floor \
+             inbound_capacity_for(VD_OUTBOUND_CAP={})={} — a full cut-buffer drain would shed a conserved input",
+            self.max_buffered_inputs, self.outbound_cap, self.floor
+        )
+    }
+}
+
+impl std::error::Error for DrainBurstError {}
+
+/// DRAIN-BURST (RUNTIME): the runtime twin of the compile-time [`DEV`] assert above, mirroring
+/// [`validate_tick_pair`]. The const assert covers only the DEV pair; a cloud ConfigMap can lower
+/// `VD_OUTBOUND_CAP` (shrinking the dest inbox floor) WITHOUT lowering the gateway's
+/// `VD_MAX_BUFFERED_INPUTS`, which silently sheds a conserved resume-input at the transfer-commit moment
+/// (no crash). This cross-checks the env-supplied pair at gateway boot. The floor formula stays ONCE in
+/// `vd_io_prod::mesh` (enforce, don't just document — the previously convention-only runtime half).
+///
+/// # Errors
+/// [`DrainBurstError`] when `max_buffered_inputs` exceeds `inbound_capacity_for(outbound_cap)`.
+pub fn validate_drain_burst(
+    outbound_cap: usize,
+    max_buffered_inputs: usize,
+) -> Result<(), DrainBurstError> {
+    let floor = vd_io_prod::mesh::inbound_capacity_for(outbound_cap);
+    if max_buffered_inputs > floor {
+        return Err(DrainBurstError {
+            outbound_cap,
+            max_buffered_inputs,
+            floor,
+        });
+    }
+    Ok(())
+}
+
 // ---- the env contract --------------------------------------------------------
 
 /// The bind addresses of the three fixed cluster nodes (admin is the orchestrator's
@@ -1093,6 +1141,31 @@ mod incarnation_tests {
         assert_eq!(validate_tick_pair(50, 0.02 + TICK_DT_EPSILON / 2.0), Ok(()));
         // Degenerate tick_hz=0 floors to 1 (⇔ dt 1.0), mirroring TickPacer.
         assert_eq!(validate_tick_pair(0, 1.0), Ok(()));
+    }
+
+    #[test]
+    fn validate_drain_burst_accepts_the_floor_rejects_overshoot() {
+        // The shipped DEV pair is within the dest inbox floor (the runtime twin of the const assert).
+        assert_eq!(
+            validate_drain_burst(DEV.outbound_cap as usize, DEV.max_buffered_inputs as usize),
+            Ok(())
+        );
+        let floor = vd_io_prod::mesh::inbound_capacity_for(DEV.outbound_cap as usize);
+        // A ConfigMap lowering VD_OUTBOUND_CAP (shrinking the floor) without the gateway's drain burst is the
+        // D-8 silent-shed footgun → loud (usize::MAX inputs overshoot ANY floor).
+        assert_eq!(
+            validate_drain_burst(DEV.outbound_cap as usize, usize::MAX),
+            Err(DrainBurstError {
+                outbound_cap: DEV.outbound_cap as usize,
+                max_buffered_inputs: usize::MAX,
+                floor,
+            })
+        );
+        // Exactly AT the floor is accepted — the boundary is inclusive (`>` floor is the reject).
+        assert_eq!(
+            validate_drain_burst(DEV.outbound_cap as usize, floor),
+            Ok(())
+        );
     }
 
     #[test]

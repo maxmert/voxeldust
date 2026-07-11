@@ -95,6 +95,22 @@ impl OutboundBox {
                 && matches!(durability, crate::io::Durability::Ephemeral)),
             "producer-less-reliable flow pushed Ephemeral (needs Retained — D-6 #1 silent-loss): {flow:?}"
         );
+        // interplay-01 (2026-07-11 holistic audit): the SYMMETRIC half of the HR1 send seam. The durability guard
+        // above forbids a producer-less-reliable flow riding `Ephemeral`; THIS forbids a SIDE-EFFECTING flow
+        // (authority-gating, non-idempotent — Transfer/Saga/SagaAck/side-effecting Directory ops) riding an
+        // UNRELIABLE carrier (Snapshot/Input/GhostDelta), where datagram loss would SILENTLY drop an
+        // authority-gating message with a green suite. FireAndForget flows (ghost pose deltas) MAY ride Unreliable
+        // — loss is correct there. Debug-only (release hot path untouched); it fires at EVERY offending push, so a
+        // future P9-Signal / P6-BlockEdit / PvP-fire push on the wrong class fails LOUD the moment it is written —
+        // the send-time twin of the compile-time `intershard_closed.rs` classifiers.
+        debug_assert!(
+            !(matches!(
+                flow.effect_class(),
+                vd_wire::intershard::EffectClass::SideEffecting { .. }
+            ) && class.reliability() == crate::io::Reliability::Unreliable),
+            "side-effecting flow pushed on an Unreliable carrier (needs a Reliable MsgClass — datagram loss \
+             would silent-drop an authority-gating message): class={class:?} flow={flow:?}"
+        );
         let bytes = crate::io::bytes(
             postcard::to_allocvec(flow).expect("closed wire enums serialize infallibly"),
         );
@@ -190,6 +206,56 @@ mod tests {
                 entity: vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 7, 1),
                 source_fence: vd_core::Fence(1),
             }),
+        );
+    }
+
+    /// interplay-01 (holistic audit): the SYMMETRIC send-seam guard — a SIDE-EFFECTING flow pushed on an
+    /// UNRELIABLE carrier must fail loud (else a datagram loss silently drops an authority-gating message),
+    /// covering the second `debug_assert` panic arm. Debug-only, like its durability sibling above.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "side-effecting flow pushed on an Unreliable carrier")]
+    fn push_flow_rejects_a_side_effecting_flow_on_an_unreliable_carrier() {
+        use vd_wire::intershard::InterShardFlow;
+        use vd_wire::seams::directory::{DirectoryKey, DirectoryOp};
+        let mut ob = OutboundBox::default();
+        // A `LeaseRevoke` is SideEffecting + ReDriven (so the durability guard above does NOT fire); routing it on
+        // `MsgClass::Snapshot` (Unreliable) is exactly the silent-authority-drop this guard forbids.
+        ob.push_flow(
+            NodeId(2),
+            MsgClass::Snapshot,
+            &InterShardFlow::Directory(DirectoryOp::LeaseRevoke {
+                key: DirectoryKey::Entity(vd_core::EntityId::pack(
+                    vd_core::entity_kind::EntityKind::Player,
+                    1,
+                    2,
+                    3,
+                )),
+                fence: vd_core::Fence(1),
+            }),
+        );
+    }
+
+    /// interplay-01, the FireAndForget side: a ghost flow (re-derivable, loss-tolerant) is NOT subject to the
+    /// carrier-reliability guard — it stages cleanly on any carrier. Covers the guard's `matches!`-false branch
+    /// (pushed Retained so the durability sibling above also holds, isolating THIS guard's arm).
+    #[test]
+    fn push_flow_stages_a_fire_and_forget_flow_unguarded() {
+        use vd_wire::intershard::{GhostFlow, InterShardFlow};
+        let mut ob = OutboundBox::default();
+        ob.push_flow_durable(
+            NodeId(2),
+            MsgClass::GhostReliable,
+            &InterShardFlow::Ghost(GhostFlow::Despawn {
+                entity: vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 7, 1),
+                source_fence: vd_core::Fence(1),
+            }),
+            crate::io::Durability::Retained,
+        );
+        assert_eq!(
+            ob.0.len(),
+            1,
+            "a FireAndForget flow stages regardless of carrier reliability"
         );
     }
 }
