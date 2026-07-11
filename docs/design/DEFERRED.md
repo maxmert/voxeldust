@@ -1117,7 +1117,8 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     don't flow on the Docker-Desktop k3d overlay). Same slice hardened the harness: `60-agent.yaml` moved to
     `deploy/k3d/agent/` (the non-recursive base `apply` no longer pulls the ImagePullBackOff agent Job into k3d-dod's
     `wait -l app=vd`); k3d-dod cold-start timeouts 120s→300s. See [[project_peer_addr_autopusher]]. Owed by S5:
-    in-cluster agent-HR6 continuous testing (`k3d-agent`); S5b: vdctl WalkTo/LookAt → nav math + DevState orientation.
+    in-cluster agent-HR6 continuous testing (`k3d-agent`). ✅ S5b (vdctl WalkTo/LookAt → nav + DevState orient) DONE
+    — see D-15.
   - **STILL OWED after Slice D + the partial flip** (separate items, ledgered): precondition **#1 (NARROWED to the
     SOURCE-CRASH residual):** `BatchHandoff::AwaitAdopt`'s producer-less phase, IF the SOURCE crashes before the dest
     adopts, is NOT covered by the transport (the retry buffer is RAM, dies with the process). **This is NOT
@@ -3201,13 +3202,33 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   as a Bevy resource the egui pass reads. Pure perf; negligible at a handful of entities.
 - **Source:** P1.5 foundation audit (`scalability-1`).
 
-### D-15 🟥 `walk-to`/`look-at` not wired through `vdctl`
-- **Missing:** the closed-loop `walk-to`/`look-at` dev-control commands (the `DevRequest::WalkTo`/`LookAt`
-  variants exist but return `Unsupported`).
-- **Where:** `crates/bins/src/bin/vdctl.rs` + the client `dev_control` handler.
-- **When / proper:** **P2** — needed for the paired 2-client visual scenario (client2 screenshots client1
-  crossing). `NavController` math is pure-ready in `crates/client-harness/src/nav.rs`.
-- **Source:** Slice-3 T6 scope decision.
+### D-15 🟩 `walk-to`/`look-at` wired through `vdctl` (landed early as S5b, Jul 2026)
+- **Landed:** the closed-loop `walk_to`/`look_at` dev-control commands drive the own avatar to a WORLD
+  position / facing by injecting ordinary Move/Look at the input seam. `DevRequest::WalkTo`/`LookAt` are handled
+  in `client.rs` `serve_conn` (`drive_walk_to`/`drive_look_at`, sharing a `drive_closed_loop` core that mirrors
+  `wait_until`), REUSING the pure `vd_client_harness::nav` math (`walk_to`/`look_at`, already 100% Tier-A — no
+  new math). `DevEntityRow` gained an `orient: [f64;4]` field (the delivered `StampedPose.orient`, sanitized to
+  IDENTITY-on-nonfinite) so look-at reads the current facing — **NO frozen-wire change** (orient already rode
+  the wire). vdctl `walk_to`/`look_at` subcommands (defaults arrive_epsilon 0.5 m / align_epsilon 0.02 rad /
+  400·200 tick budgets). **NO client prediction** — the loops steer on the DELIVERED (lagged) state; the server
+  stays sole authority.
+- **Adversary-caught CADENCE FIX:** the driver polls every 5 ms but the sim assembles input at 20 Hz and `Look`
+  ACCUMULATES (`add_look`), so a naive per-poll emit would sum ~10 clamped deltas into ONE datagram (~10× turn →
+  oscillation under lag). The drivers emit AT MOST ONE input per assembled sim step (gated on `step_seq`
+  advancing) — one clamped delta per datagram, matching nav's convergence model.
+- **Proof:** `crates/bins/tests/dev_control_nav.rs` — a REAL client logs into a REAL cluster; walk_to converges
+  to a world target, look_at aligns (verified by reconstructing `orient·-Z` from the new field — the end-to-end
+  orient wire-through), an unreachable target TIMES OUT bounded. Plus vdctl parse tests + vd-client
+  `sanitize_quat` (both arms) + the devstate orient assertion. `just gate` GREEN (Tier-A 100%).
+- **Frame note (does NOT corner P5):** the drivers consume `orient` as a full WORLD-SPACE rotation (correct
+  through P3 — all live spawns are `FrameRef::SystemSpace`, up == +Y). When planet radial-up lands, the fix is
+  the sim's ONE `orient_from_angles` composing `frame_from_up`, keeping the stored orient a true world rotation
+  the drivers read UNCHANGED; the `forward_in_frame` seam stays deliberately inert (wiring it now would
+  double-apply the frame).
+- **Where:** `crates/bins/src/bin/{client.rs,vdctl.rs}`, `crates/devproto/src/state.rs`,
+  `crates/client/src/net.rs`, `crates/bins/tests/dev_control_nav.rs`, `crates/bins/Cargo.toml`.
+- **Source:** Slice-3 T6 scope decision; landed early as S5b (cloud-base finish). Design + adversary:
+  `scripts/s5b_vetted_design.md`.
 
 ### D-16 🟥 G-RENDER-SMOKE is GPU-required / local-only
 - **Missing:** a GPU-less path for the visual gate (no software-adapter policy).
@@ -3239,8 +3260,9 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 - **Missing — the wgpu paired-client visual:** the real two-client wgpu scenario (client2 screenshots client1
   crossing the source→dest boundary, per `PLAN.md:186/212`). Blocked on: (i) a 2-shard local-process cluster
   (`crates/bins/src/bin/vd-devcluster.rs` spawns ONE `vd-shard`); (ii) a second capture client + cross-boundary
-  `vdctl` driving; (iii) **D-15** (`WalkTo`/`LookAt` wired). The render crate is real and `G-RENDER-SMOKE` is live,
-  but single-shard/single-client.
+  `vdctl` driving; (iii) ~~**D-15** (`WalkTo`/`LookAt` wired)~~ ✅ DONE (S5b, Jul 2026) — cross-boundary vdctl
+  driving is now available. The render crate is real and `G-RENDER-SMOKE` is live, but single-shard/single-client;
+  remaining D-30 blockers are (i) the dual-shard cluster + (ii) the second capture client.
 - **Where:** `crates/bins/src/bin/vd-devcluster.rs` (dual-shard spawn), `crates/bins/tests/render_smoke.rs` (the
   paired scenario sibling), `crates/bins/src/bin/client.rs` (D-15), `justfile` (a new `render-cross` recipe);
   the seamless in-process gate in `tests/tests/p2_transfer_gates.rs` (reusing `vd_harness::oracle` render oracles).

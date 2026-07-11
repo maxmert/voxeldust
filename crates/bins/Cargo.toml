@@ -55,7 +55,11 @@ path = "src/bin/vd-outbox-testnode.rs"
 # `cargo build -p vd-bins` contains NO listener code at all — absence is a compile
 # fact, not a runtime flag. `scripts/client.sh` builds the `client` bin WITH it.
 default = []
-dev-control = []
+# Pulls vd-client-harness for its `nav` closed-loop math (walk-to/look-at). That crate is
+# renderer-FREE (deps: vd-core, vd-devproto, glam, serde) — it pulls NO vd-client-render /
+# bevy_render / wgpu, so the ~8.8 GB Bevy RENDERER weight rides only on `render` below.
+# (bevy_ecs is baseline in sim/node regardless — this feature adds zero crates to that.)
+dev-control = ["dep:vd-client-harness"]
 # The windowed Bevy client (Slice-3 T4). OPT-IN so the headless/process-tier build stays
 # Bevy-free + fast: `--features render` pulls vd-client-render (the ~8.8 GB Bevy dep) and
 # enables the `client --window` mode. The default + dev-control builds contain no Bevy.
@@ -74,8 +78,9 @@ vd-node = { workspace = true }
 vd-connection-plane = { workspace = true }
 vd-io-prod = { path = "../io-prod" }
 vd-client-render = { workspace = true, optional = true }
-# Tier-A: the run manifest + `capture_entry` alignment seam (used by the `--capture`
-# client's dev-control listener to record each capture). Pulled in only with `render`.
+# Tier-A + renderer-FREE: the `nav` closed-loop math (walk-to/look-at) used by the
+# dev-control drivers, plus the run manifest + `capture_entry` seam used by `--capture`.
+# Enabled by BOTH `dev-control` and `render` (Cargo unions the feature deps).
 vd-client-harness = { workspace = true, optional = true }
 vd-wire = { workspace = true }
 tokio = { workspace = true }

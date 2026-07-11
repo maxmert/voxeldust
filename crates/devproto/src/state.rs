@@ -22,6 +22,12 @@ pub enum DevPhase {
 pub struct DevEntityRow {
     pub entity: String,
     pub pos: [f64; 3],
+    /// Composited world orientation (`x,y,z,w` — glam `DQuat` component order). Always
+    /// finite (sanitized like `pos`); EVERY row carries it (no per-row `is_own` flag), so
+    /// the look-at closed loop reads the OWN row's orient as the current facing. Through
+    /// P3 this is a full world-space rotation (`orient * -Z` = world-forward), so the
+    /// closed-loop nav needs no separate "up".
+    pub orient: [f64; 4],
     pub authoritative_sub: u32,
 }
 
@@ -99,6 +105,7 @@ pub(crate) mod tests {
             entities: vec![DevEntityRow {
                 entity: "ent-7".to_owned(),
                 pos: [1.0, 2.0, 3.0],
+                orient: [0.0, 0.0, 0.0, 1.0],
                 authoritative_sub: 0,
             }],
             snapshots_applied: 4,
@@ -121,6 +128,8 @@ pub(crate) mod tests {
         // ids are strings (u128 cannot ride a JSON number).
         assert!(json.contains("\"session\":\"sess-1\""));
         assert!(json.contains("\"location\":\"System 7\""));
+        // The orientation quat rides each row (x,y,z,w) — the identity here.
+        assert!(json.contains("\"orient\":[0.0,0.0,0.0,1.0]"));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         let back: DevState = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, state);

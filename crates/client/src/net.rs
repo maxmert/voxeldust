@@ -395,6 +395,7 @@ impl ClientState {
                     .map(|(entity, sub, pose)| DevEntityRow {
                         entity: entity.to_string(),
                         pos: sanitize_vec3(pose.pos),
+                        orient: sanitize_quat(pose.orient),
                         authoritative_sub: sub.0,
                     })
                     .collect()
@@ -447,6 +448,18 @@ fn sanitize_f64(x: f64) -> f64 {
 
 fn sanitize_vec3(v: glam::DVec3) -> [f64; 3] {
     [sanitize_f64(v.x), sanitize_f64(v.y), sanitize_f64(v.z)]
+}
+
+/// Force a quaternion finite while PRESERVING a valid rotation: a non-finite quat (a
+/// corrupt/diverged sender) maps to IDENTITY — NOT a component-wise zero, which is a
+/// zero-length non-rotation that would poison `orient * -Z` / `orient.conjugate()` in the
+/// look-at loop. Mirrors [`vd_core::pose::StampedPose::sanitized`]'s orient guarantee.
+fn sanitize_quat(q: glam::DQuat) -> [f64; 4] {
+    if q.is_finite() {
+        [q.x, q.y, q.z, q.w]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    }
 }
 
 /// The branchless shim: owns a concrete transport and delegates every step to the
@@ -1050,6 +1063,18 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_quat_keeps_a_finite_rotation_and_maps_a_corrupt_one_to_identity() {
+        // A finite quat passes through in x,y,z,w order — the delivered rotation the
+        // look-at loop reads as the own facing.
+        let q = glam::DQuat::from_xyzw(0.1, 0.2, 0.3, 0.9);
+        assert_eq!(sanitize_quat(q), [0.1, 0.2, 0.3, 0.9]);
+        // A non-finite quat (a corrupt/diverged sender) maps to IDENTITY — a real
+        // rotation, never a zero-length non-rotation that would poison `orient * -Z`.
+        let corrupt = glam::DQuat::from_xyzw(f64::NAN, 0.0, 0.0, 1.0);
+        assert_eq!(sanitize_quat(corrupt), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn devstate_before_welcome_is_honest_about_nothing_delivered() {
         let c = core();
         let s = c.state().devstate(0.0, 0, 0);
@@ -1095,6 +1120,9 @@ mod tests {
         );
         assert_eq!(s.entities.len(), 1, "one composited entity");
         assert_eq!(s.entities[0].entity, ent().to_string());
+        // The delivered orientation rides each row (x,y,z,w) — the rest pose is identity,
+        // proving the orient field flows from the composited pose into the DevState.
+        assert_eq!(s.entities[0].orient, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(s.entities[0].authoritative_sub, 0);
         assert_eq!(s.snapshots_applied, 1);
         assert_eq!(c.state().snapshots_applied(), 1);

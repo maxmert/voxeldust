@@ -29,6 +29,15 @@ const DEFAULT_WAIT_TICKS: u64 = 200;
 const DEFAULT_RECORD_FPS: u32 = 30;
 const DEFAULT_RECORD_SECS: f64 = 2.0;
 
+/// Closed-loop `walk_to`/`look_at` defaults. `arrive_epsilon` = 0.5 m sits comfortably above
+/// one sim step (so the fixed-magnitude Move never overshoots into oscillation — the contract
+/// `nav::walk_to` pins); `align_epsilon` = 0.02 rad (~1.1°) is the true 3-D facing tolerance.
+/// The tick budgets bound a drive (≈20 s / 10 s at 20 Hz) so an unreachable target times out.
+const DEFAULT_ARRIVE_EPSILON: f64 = 0.5;
+const DEFAULT_ALIGN_EPSILON: f64 = 0.02;
+const DEFAULT_WALK_TICKS: u64 = 400;
+const DEFAULT_LOOK_TICKS: u64 = 200;
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
@@ -79,7 +88,9 @@ fn take_port(args: &mut Vec<String>) -> Result<u16, String> {
 fn parse_command(args: &[String]) -> Result<DevRequest, String> {
     let cmd = args
         .first()
-        .ok_or("missing command: move|look|action|close|reset|state|wait|screenshot|record")?;
+        .ok_or(
+            "missing command: move|look|action|close|reset|state|wait|screenshot|record|walk_to|look_at",
+        )?;
     let rest = &args[1..];
     match cmd.as_str() {
         "move" => Ok(DevRequest::Move {
@@ -200,8 +211,56 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
             }
             Ok(DevRequest::Record { fps, secs, label })
         }
+        "walk_to" => {
+            let usage = "walk_to <x> <y> <z> [arrive_epsilon] [max_ticks]";
+            let (target, arrive_epsilon, max_ticks) =
+                parse_target(rest, usage, DEFAULT_ARRIVE_EPSILON, DEFAULT_WALK_TICKS)?;
+            Ok(DevRequest::WalkTo {
+                target,
+                arrive_epsilon,
+                max_ticks,
+            })
+        }
+        "look_at" => {
+            let usage = "look_at <x> <y> <z> [align_epsilon] [max_ticks]";
+            let (target, align_epsilon, max_ticks) =
+                parse_target(rest, usage, DEFAULT_ALIGN_EPSILON, DEFAULT_LOOK_TICKS)?;
+            Ok(DevRequest::LookAt {
+                target,
+                align_epsilon,
+                max_ticks,
+            })
+        }
         other => Err(format!("unknown command: {other}")),
     }
+}
+
+/// Shared parse for the two closed loops: EXACTLY three world coords, then an OPTIONAL
+/// epsilon and OPTIONAL max_ticks (each defaulting) — `walk_to`/`look_at` differ only in the
+/// defaults + the request they build. Rejects too few / too many args loudly.
+fn parse_target(
+    rest: &[String],
+    usage: &str,
+    default_epsilon: f64,
+    default_ticks: u64,
+) -> Result<([f64; 3], f64, u64), String> {
+    if rest.len() < 3 || rest.len() > 5 {
+        return Err(usage.to_owned());
+    }
+    let target = floats64::<3>(&rest[..3], usage)?;
+    let epsilon = match rest.get(3) {
+        Some(raw) => raw
+            .parse()
+            .map_err(|_| format!("{usage}: bad epsilon {raw:?}"))?,
+        None => default_epsilon,
+    };
+    let max_ticks = match rest.get(4) {
+        Some(raw) => raw
+            .parse()
+            .map_err(|_| format!("{usage}: bad max_ticks {raw:?}"))?,
+        None => default_ticks,
+    };
+    Ok((target, epsilon, max_ticks))
 }
 
 /// Parse EXACTLY `N` floats — rejects too few AND too many (a fat-fingered extra arg
@@ -209,6 +268,19 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
 fn floats<const N: usize>(args: &[String], usage: &str) -> Result<[f32; N], String> {
     exact_arity(args, N, usage)?;
     let mut out = [0.0f32; N];
+    for (slot, raw) in out.iter_mut().zip(args) {
+        *slot = raw
+            .parse()
+            .map_err(|_| format!("{usage}: bad number {raw:?}"))?;
+    }
+    Ok(out)
+}
+
+/// Parse EXACTLY `N` f64s — like [`floats`] but for the closed-loop WORLD targets, which
+/// need f64 range/precision (world coordinates dwarf f32's exact-integer band).
+fn floats64<const N: usize>(args: &[String], usage: &str) -> Result<[f64; N], String> {
+    exact_arity(args, N, usage)?;
+    let mut out = [0.0f64; N];
     for (slot, raw) in out.iter_mut().zip(args) {
         *slot = raw
             .parse()
@@ -266,4 +338,49 @@ fn parse_op(raw: &str) -> Result<WaitOp, String> {
 /// so a closed/empty read means the client died.
 fn round_trip(port: u16, request: &DevRequest) -> Result<DevResponse, String> {
     dev_roundtrip(port, request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|a| (*a).to_owned()).collect()
+    }
+
+    #[test]
+    fn walk_to_parses_coords_and_defaults_the_rest() {
+        let r = parse_command(&args(&["walk_to", "1", "2.5", "-3"])).expect("parse");
+        assert_eq!(
+            r,
+            DevRequest::WalkTo {
+                target: [1.0, 2.5, -3.0],
+                arrive_epsilon: DEFAULT_ARRIVE_EPSILON,
+                max_ticks: DEFAULT_WALK_TICKS,
+            }
+        );
+    }
+
+    #[test]
+    fn look_at_takes_explicit_epsilon_and_budget() {
+        let r = parse_command(&args(&["look_at", "0", "1", "0", "0.05", "120"])).expect("parse");
+        assert_eq!(
+            r,
+            DevRequest::LookAt {
+                target: [0.0, 1.0, 0.0],
+                align_epsilon: 0.05,
+                max_ticks: 120,
+            }
+        );
+    }
+
+    #[test]
+    fn closed_loop_rejects_too_few_and_bad_numbers() {
+        // Fewer than three coords is a loud usage error, never a silent partial.
+        assert!(parse_command(&args(&["walk_to", "1", "2"])).is_err());
+        // A non-numeric coordinate is rejected, not defaulted to 0.
+        assert!(parse_command(&args(&["look_at", "1", "x", "3"])).is_err());
+        // Too many trailing args (past epsilon + max_ticks) is rejected.
+        assert!(parse_command(&args(&["walk_to", "1", "2", "3", "0.5", "400", "extra"])).is_err());
+    }
 }

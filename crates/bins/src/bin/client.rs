@@ -551,6 +551,10 @@ mod dev_control {
     };
     #[cfg(feature = "render")]
     use vd_client_harness::manifest::{CaptureKind, MANIFEST_FILENAME, RunManifest};
+    // The closed-loop nav math (walk-to/look-at) — pure, 100% Tier-A covered in the
+    // renderer-free vd-client-harness; the drivers below are branchless shims over it.
+    use vd_client_harness::nav;
+    use vd_core::glam::{DQuat, DVec3};
     use vd_devproto::{
         DevError, DevPhase, DevRequest, DevResponse, DevState, InputAction, WaitPredicate,
         decode_request, encode_response,
@@ -730,6 +734,28 @@ mod dev_control {
                     Some(response) => response,
                     None => return Ok(()), // socket closed mid-wait
                 },
+                // Closed loops: driven tick-by-tick here (like WaitUntil) — serve_conn owns
+                // the read half the drive must cancel on (socket EOF).
+                Ok(DevRequest::WalkTo {
+                    target,
+                    arrive_epsilon,
+                    max_ticks,
+                }) => match drive_walk_to(&handles, &mut framer, target, arrive_epsilon, max_ticks)
+                    .await
+                {
+                    Some(response) => response,
+                    None => return Ok(()), // socket closed mid-drive
+                },
+                Ok(DevRequest::LookAt {
+                    target,
+                    align_epsilon,
+                    max_ticks,
+                }) => match drive_look_at(&handles, &mut framer, target, align_epsilon, max_ticks)
+                    .await
+                {
+                    Some(response) => response,
+                    None => return Ok(()), // socket closed mid-drive
+                },
                 // Capture mode only (a wired `captures` channel): handled here (not in
                 // dispatch_immediate) because the optional `--at-tick` wait is async +
                 // cancellable on EOF, like WaitUntil. Otherwise → Unsupported below.
@@ -775,18 +801,18 @@ mod dev_control {
             DevRequest::State => DevResponse::State {
                 state: current(handles),
             },
-            // Unreachable: serve_conn intercepts WaitUntil. Defensive, not a panic.
-            DevRequest::WaitUntil { .. } => DevResponse::Error {
-                error: DevError::BadRequest,
-            },
-            // Decodable but not yet wired (capture + closed loops land at T4/T5): an
-            // HONEST `Unsupported`, NOT `BadRequest` (which stays reserved for malformed
-            // input). Routed explicitly so the honesty surface is correct before the
-            // feature lands.
-            DevRequest::Screenshot { .. }
-            | DevRequest::Record { .. }
+            // Unreachable: serve_conn intercepts WaitUntil + the WalkTo/LookAt closed loops
+            // (all owe the read half). Defensive, not a panic — never dishonest `Unsupported`
+            // (they ARE supported, just driven in serve_conn).
+            DevRequest::WaitUntil { .. }
             | DevRequest::WalkTo { .. }
             | DevRequest::LookAt { .. } => DevResponse::Error {
+                error: DevError::BadRequest,
+            },
+            // Decodable but not wired in this build (capture needs `--features render` +
+            // Capture mode): an HONEST `Unsupported`, NOT `BadRequest` (reserved for
+            // malformed input). Reached when `captures` is None (headless/windowed).
+            DevRequest::Screenshot { .. } | DevRequest::Record { .. } => DevResponse::Error {
                 error: DevError::Unsupported,
             },
             input => apply(handles, input),
@@ -861,6 +887,134 @@ mod dev_control {
                 }
             }
         }
+    }
+
+    /// The OWN entity's delivered (lagged — NO prediction) world pose + facing, from the
+    /// published `DevState`: the row whose id matches `own_entity`. `None` until a snapshot
+    /// has anchored the own row (the drive loops keep polling until it appears). A branchless
+    /// shim over the already-composited state; the closed-loop math it feeds is 100% Tier-A
+    /// covered in `vd-client-harness::nav`.
+    fn own_pose(state: &DevState) -> Option<(DVec3, DQuat)> {
+        let own = state.own_entity.as_deref()?;
+        state
+            .entities
+            .iter()
+            .find(|row| row.entity == own)
+            .map(|row| {
+                let o = row.orient;
+                (
+                    DVec3::from_array(row.pos),
+                    DQuat::from_xyzw(o[0], o[1], o[2], o[3]),
+                )
+            })
+    }
+
+    /// Push one closed-loop input (Move/Look) straight to the step mailbox — bypassing
+    /// `apply`'s mutating gate (these decompose into ordinary NON-privileged input) — and
+    /// counting a shed LOUD (never silent) if the bounded mailbox is full. The loop re-sends
+    /// next tick, so a shed is harmless (Move is a held axis; a dropped Look just slows the
+    /// turn), but it is always surfaced in `dev_commands_dropped`.
+    fn push_action(handles: &Handles, action: InputAction) {
+        if handles.commands.try_send(action).is_err() {
+            handles.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// One closed-loop tick's outcome: the error-reducing input, and whether converged.
+    struct LoopStep {
+        action: InputAction,
+        done: bool,
+    }
+
+    /// The shared closed-loop driver for WalkTo/LookAt. Each ASSEMBLED sim step (gated on
+    /// `step_seq` advancing — the load-bearing cadence fix: the loop polls every `WAIT_POLL`
+    /// = 5 ms but the sim assembles input at the tick rate, and `Look` ACCUMULATES via
+    /// `add_look`, so emitting per-poll would sum ~10 clamped deltas into ONE datagram = ~10×
+    /// the intended turn → overshoot/oscillation; gating to one emit per step lands exactly
+    /// one clamped delta per datagram, matching `nav`'s per-tick convergence model), it polls
+    /// the DELIVERED (lagged) own pose, asks `step` for the error-reducing input, emits it
+    /// (shed-loud), and returns `State` on convergence / `Timeout` on `max_ticks` or a Closed
+    /// session / `None` on socket EOF. NO client prediction — the server stays sole authority;
+    /// this only injects ordinary Move/Look toward the goal on the delivered state.
+    async fn drive_closed_loop(
+        handles: &Handles,
+        framer: &mut LineFramer,
+        max_ticks: u64,
+        mut step: impl FnMut(DVec3, DQuat) -> LoopStep,
+    ) -> Option<DevResponse> {
+        let start = handles.step_seq.load(Ordering::Relaxed);
+        let mut last_sent = start.wrapping_sub(1); // force an emit on the first observed step
+        loop {
+            let state = handles.published.load_full();
+            let seq = handles.step_seq.load(Ordering::Relaxed);
+            if seq != last_sent {
+                last_sent = seq;
+                if let Some((pos, orient)) = own_pose(state.as_ref()) {
+                    let step = step(pos, orient);
+                    if step.done {
+                        return Some(DevResponse::State {
+                            state: state.as_ref().clone(),
+                        });
+                    }
+                    push_action(handles, step.action);
+                }
+            }
+            if state.phase == DevPhase::Closed || seq.wrapping_sub(start) >= max_ticks {
+                return Some(DevResponse::Timeout {
+                    state: state.as_ref().clone(),
+                });
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(WAIT_POLL) => {}
+                read = framer.fill() => {
+                    if matches!(read, Ok(true) | Err(_)) {
+                        return None; // socket EOF: cancel the drive
+                    }
+                }
+            }
+        }
+    }
+
+    /// Closed loop: steer the own entity toward WORLD `target` with ordinary Move until
+    /// within `arrive_epsilon` (→ `State`) or the budget/Closed (→ `Timeout`). `arrive_epsilon`
+    /// MUST exceed one sim step or the fixed-magnitude Move overshoots and never settles — the
+    /// contract `nav::walk_to` pins; vdctl defaults it well above one step.
+    async fn drive_walk_to(
+        handles: &Handles,
+        framer: &mut LineFramer,
+        target: [f64; 3],
+        arrive_epsilon: f64,
+        max_ticks: u64,
+    ) -> Option<DevResponse> {
+        let target = DVec3::from_array(target);
+        drive_closed_loop(handles, framer, max_ticks, move |pos, orient| {
+            let step = nav::walk_to(pos, orient, target, arrive_epsilon);
+            LoopStep {
+                done: step.arrived,
+                action: step.action(),
+            }
+        })
+        .await
+    }
+
+    /// Closed loop: turn the own entity to face WORLD `target` with ordinary Look until within
+    /// `align_epsilon` RADIANS (the true 3-D angle, honest at the pole) or the budget/Closed.
+    async fn drive_look_at(
+        handles: &Handles,
+        framer: &mut LineFramer,
+        target: [f64; 3],
+        align_epsilon: f64,
+        max_ticks: u64,
+    ) -> Option<DevResponse> {
+        let target = DVec3::from_array(target);
+        drive_closed_loop(handles, framer, max_ticks, move |pos, orient| {
+            let step = nav::look_at(pos, orient, target, align_epsilon);
+            LoopStep {
+                done: step.aligned,
+                action: step.action(),
+            }
+        })
+        .await
     }
 
     /// Serve a `Screenshot` (Capture mode): optionally wait for the universe tick to reach
