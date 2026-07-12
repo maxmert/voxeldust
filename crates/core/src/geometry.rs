@@ -396,6 +396,87 @@ pub struct RealmBoundary {
     pub effect: CrossEffect,
 }
 
+impl RealmBoundary {
+    /// Build a SPHERICAL-SHELL realm boundary paired — BY CONSTRUCTION — with its ABSOLUTE
+    /// velocity-safe SOI band. The shape is `Shell { r: r_soi }` and the band is
+    /// [`OverlapBand::for_soi_velocity_safe`] (edges in the SAME METRE units as the shell radius),
+    /// so a shell can NEVER be handed a normalized (unit-Chebyshev) box band — the shape↔band unit
+    /// mismatch the Slice-1 reviewer flagged is UNCONSTRUCTIBLE here, not merely detected. The SOI
+    /// constructor derives its edges from ordered constant factors and is infallible, so this is too.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn shell(
+        realm: RealmId,
+        center: LatticePos,
+        r_soi: f64,
+        create_factor: f64,
+        destroy_factor: f64,
+        v_rel: f64,
+        dt: f64,
+        pad_floor: f64,
+        k_safety_extra: f64,
+        parent: Option<RealmId>,
+        to_realm: RealmId,
+        effect: CrossEffect,
+    ) -> RealmBoundary {
+        RealmBoundary {
+            realm,
+            center,
+            shape: Boundary::Shell { r: r_soi },
+            band: OverlapBand::for_soi_velocity_safe(
+                r_soi,
+                create_factor,
+                destroy_factor,
+                v_rel,
+                dt,
+                pad_floor,
+                k_safety_extra,
+            ),
+            parent,
+            to_realm,
+            effect,
+        }
+    }
+
+    /// Build a BOX realm boundary — `Aabb` when `orient` is `None`, `Obb` when `Some` — paired BY
+    /// CONSTRUCTION with its NORMALIZED (unit-Chebyshev) band. The band is [`OverlapBand::for_box`]
+    /// (factors relative to the box surface = 1.0), so a box can NEVER be handed an absolute SOI band;
+    /// together with [`RealmBoundary::shell`] this makes every shape↔band pairing correct by the ONLY
+    /// two constructors that exist. `for_box` is fallible (it takes CALLER factors, and an inverted
+    /// pair would invert the hysteresis into a per-tick flap), so this returns the error loudly rather
+    /// than constructing a flapping band.
+    ///
+    /// # Errors
+    /// [`BandError::InvalidEdges`] unless `0 < create_factor < destroy_factor`.
+    #[must_use = "the Result carries a BandError that must not be dropped"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn boxed(
+        realm: RealmId,
+        center: LatticePos,
+        half: DVec3,
+        orient: Option<DQuat>,
+        create_factor: f64,
+        destroy_factor: f64,
+        parent: Option<RealmId>,
+        to_realm: RealmId,
+        effect: CrossEffect,
+    ) -> Result<RealmBoundary, BandError> {
+        let shape = match orient {
+            Some(orient) => Boundary::Obb { half, orient },
+            None => Boundary::Aabb { half },
+        };
+        Ok(RealmBoundary {
+            realm,
+            center,
+            shape,
+            band: OverlapBand::for_box(create_factor, destroy_factor)?,
+            parent,
+            to_realm,
+            effect,
+        })
+    }
+}
+
 /// Per-deployment boundary tuning: the dwell/entry hysteresis counts, the minimum velocity pad,
 /// the extra band-safety margin over [`K_SAFETY`], and the coordinate cell size. Validated once
 /// at config load ([`BoundaryTuning::validate`]); the geometry fns take pre-validated scalars.
@@ -451,39 +532,117 @@ impl BoundaryTuning {
 
 /// Pick EXACTLY ONE winner among the boundaries an entity commits against on the same tick.
 /// The total order is INNERMOST-first (MAX `depth`), ties broken by `RealmId`'s derived `Ord`
-/// (MIN). `None` if empty. PERMUTATION-INVARIANT: the winner is independent of slice order
-/// (the order is total, so the fold's result is order-free) — a proptest pins this.
+/// (MIN), then `Direction` (`Inward` < `Outward`). `None` if empty. PERMUTATION-INVARIANT: the
+/// winner is independent of slice order (the order is total, so the fold's result is order-free).
+///
+/// A thin WRAPPER over [`resolve_winner_ix`] (the DRY core): it tags each candidate with its slice
+/// index, resolves the winning index under the 4-key order, and projects back to `(realm, dir)`.
+/// Callers that need the winning BOUNDARY INDEX (the trigger, to look the boundary back up) call
+/// [`resolve_winner_ix`] directly.
 #[must_use]
 pub fn resolve_winner(candidates: &[(u32, RealmId, Direction)]) -> Option<(RealmId, Direction)> {
+    let indexed: Vec<(u32, RealmId, Direction, usize)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, &(d, r, dir))| (d, r, dir, i))
+        .collect();
+    resolve_winner_ix(&indexed).map(|(ix, dir)| (candidates[ix].1, dir))
+}
+
+/// Pick EXACTLY ONE winner among indexed boundary candidates, returning the winning
+/// `(boundary_index, direction)`. The DRY CORE both [`resolve_winner`] and the trigger share: the
+/// index lets the caller recover WHICH boundary won (to re-home / route the entity), which the
+/// `(realm, dir)` projection loses when two boundaries share a `(depth, realm)`.
+///
+/// The order is a STRICT TOTAL order over the 4-tuple — deeper `depth` wins; then smaller `RealmId`;
+/// then smaller `Direction`; then smaller slice INDEX — so the fold is PERMUTATION-INVARIANT (a
+/// proptest pins it). The index tiebreak is what makes it total even for two candidates identical in
+/// `(depth, realm, dir)` (e.g. a body crossing two coincident mouths of one realm the same way): the
+/// lower-indexed boundary wins deterministically instead of "whichever the fold saw first". `None` if
+/// empty.
+#[must_use]
+pub fn resolve_winner_ix(
+    candidates: &[(u32, RealmId, Direction, usize)],
+) -> Option<(usize, Direction)> {
     candidates
         .iter()
         .copied()
         .reduce(|best, cur| {
-            if candidate_beats(cur, best) {
+            if candidate_beats_ix(cur, best) {
                 cur
             } else {
                 best
             }
         })
-        .map(|(_, realm, dir)| (realm, dir))
+        .map(|(_, _, dir, ix)| (ix, dir))
 }
 
-/// Does candidate `a` beat the current best `b` under the STRICT TOTAL order — deeper wins;
-/// equal depth, smaller `RealmId` wins; equal depth AND realm, smaller `Direction` (`Inward`)
-/// wins? The final direction tiebreak closes the reachable collision the reviewer found — two
-/// boundary mouths into ONE realm at the same depth yield `(d, realm, Inward)` + `(d, realm,
-/// Outward)`; without it the fold kept whichever came first (slice-order-dependent = non-
-/// deterministic). A monotonic helper so the tie-break branching is fully covered here, not
-/// smeared through the fold's closure.
+/// Does candidate `a` beat the current best `b` under the STRICT TOTAL order — deeper wins; equal
+/// depth, smaller `RealmId` wins; equal depth AND realm, smaller `Direction` (`Inward`) wins; equal
+/// on all three, smaller slice INDEX wins? The direction tiebreak closes the reviewer's reachable
+/// collision (two mouths into ONE realm at the same depth: `(d, realm, Inward)` + `(d, realm,
+/// Outward)`); the 4th index key closes the remaining one (two coincident boundaries identical in
+/// `(depth, realm, dir)`), keeping the winner slice-order-INDEPENDENT — determinism is load-bearing
+/// cross-host. A monotonic helper so every tie-break branch is covered here, not smeared through the
+/// fold's closure.
 #[must_use]
-fn candidate_beats(a: (u32, RealmId, Direction), b: (u32, RealmId, Direction)) -> bool {
+fn candidate_beats_ix(
+    a: (u32, RealmId, Direction, usize),
+    b: (u32, RealmId, Direction, usize),
+) -> bool {
     if a.0 != b.0 {
         a.0 > b.0
     } else if a.1 != b.1 {
         a.1 < b.1
-    } else {
+    } else if a.2 != b.2 {
         a.2 < b.2
+    } else {
+        a.3 < b.3
     }
+}
+
+/// The membership-dwell RISING-EDGE commit decision for ONE boundary on ONE tick — the centrepiece
+/// of the spatial transfer trigger. Returns `Some(dir)` iff THIS tick is the exact edge on which the
+/// entity commits a crossing of this boundary in direction `dir`, else `None`. Pure and stateless:
+/// the caller carries the per-entity/per-boundary counters (`inward_ticks`, `since_commit`) and the
+/// hysteresis membership (`now_member`); this fn is the branch logic that turns them into a one-shot
+/// commit signal. NOTHING calls it yet (the caller is a later slice).
+///
+/// The logic, IN ORDER:
+/// 1. **Cooldown.** If a commit fired `since_commit` ticks ago and that is still `< k_dwell`, suppress
+///    (anti-flap after a commit). `None` ⇒ never committed ⇒ the cooldown is inert.
+/// 2. **Leaving is immediate.** An `Outward` or `ThroughAndBack` swept classification commits `Outward`
+///    at once — an exit is not dwelled (the entity is already gone; delaying teardown risks a
+///    stale-authority window). This is the classic swept-crossing path.
+/// 3. **Entering is a RISING EDGE.** An inward commit fires on the exact tick the consecutive
+///    in-band dwell reaches `n_entry` — `inward_ticks == n_entry`, NOT `swept == Inward`. This is the
+///    fatal-bug fix: gating entry on `swept == Inward` misses the fast crosser that matured its dwell
+///    while already inside (its per-tick swept reads `StaysInside`, not `Inward`), so it would NEVER
+///    commit. `==` (not `>=`) is a strict edge: the caller PRE-INCREMENTS `inward_ticks`, so the count
+///    equals `n_entry` on exactly one tick — the edge fires once, then the cooldown holds it. `now_member`
+///    guards a stale counter (a body that left the band still carrying a matured count must not commit).
+/// 4. Otherwise `None`.
+#[must_use]
+pub fn should_commit(
+    swept: ShellCrossing,
+    now_member: bool,
+    inward_ticks: u32,
+    since_commit: Option<u32>,
+    tuning: &BoundaryTuning,
+) -> Option<Direction> {
+    if let Some(sc) = since_commit
+        && sc < tuning.k_dwell
+    {
+        return None;
+    }
+    match swept {
+        ShellCrossing::Outward | ShellCrossing::ThroughAndBack => return Some(Direction::Outward),
+        _ => {}
+    }
+    if now_member && inward_ticks == tuning.n_entry {
+        return Some(Direction::Inward);
+    }
+    None
 }
 
 impl OverlapBand {
@@ -961,6 +1120,100 @@ mod tests {
     }
 
     #[test]
+    fn realm_boundary_shell_pairs_a_shell_with_an_absolute_band() {
+        // The pairing constructor: a Shell shape ALWAYS gets the absolute velocity-safe SOI band,
+        // and a Shell can never be constructed with a normalized box band — the mismatch is
+        // unconstructible. destroy > create (a valid hysteresis band by construction).
+        let rb = RealmBoundary::shell(
+            RealmId::System(1),
+            LatticePos::local(DVec3::new(10.0, 20.0, 30.0)),
+            1000.0, // r_soi
+            0.95,   // create_factor
+            1.05,   // destroy_factor
+            2.0,    // v_rel
+            0.05,   // dt
+            0.5,    // pad_floor
+            1.0,    // k_safety_extra
+            Some(RealmId::System(1)),
+            RealmId::Planet(4),
+            CrossEffect::Authority,
+        );
+        assert_eq!(rb.shape, Boundary::Shell { r: 1000.0 });
+        assert_eq!(rb.realm, RealmId::System(1));
+        assert_eq!(rb.to_realm, RealmId::Planet(4));
+        assert_eq!(rb.parent, Some(RealmId::System(1)));
+        assert_eq!(rb.effect, CrossEffect::Authority);
+        // The band is the absolute one (edges in metres, ~950 / ~1050), destroy strictly beyond create.
+        assert!(rb.band.destroy_above() > rb.band.create_below());
+        assert_eq!(rb.band.create_below(), 950.0);
+    }
+
+    #[test]
+    fn realm_boundary_boxed_picks_shape_from_orient_and_rejects_an_inverted_band() {
+        // orient None ⇒ Aabb (axis-aligned).
+        let aabb = RealmBoundary::boxed(
+            RealmId::Station(2),
+            LatticePos::local(DVec3::ZERO),
+            DVec3::new(5.0, 6.0, 7.0),
+            None,
+            1.15,
+            1.30,
+            None,
+            RealmId::Station(2),
+            CrossEffect::Interest,
+        )
+        .expect("ordered factors");
+        assert_eq!(
+            aabb.shape,
+            Boundary::Aabb {
+                half: DVec3::new(5.0, 6.0, 7.0)
+            }
+        );
+        assert_eq!(aabb.parent, None);
+        assert_eq!(aabb.effect, CrossEffect::Interest);
+        // The band is the normalized box band (factors verbatim), destroy > create.
+        assert_eq!(aabb.band.create_below(), 1.15);
+        assert_eq!(aabb.band.destroy_above(), 1.30);
+        // orient Some ⇒ Obb (oriented).
+        let orient = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_4);
+        let obb = RealmBoundary::boxed(
+            RealmId::Area(3),
+            LatticePos::local(DVec3::ZERO),
+            DVec3::new(2.0, 3.0, 4.0),
+            Some(orient),
+            1.15,
+            1.30,
+            Some(RealmId::Planet(9)),
+            RealmId::Area(3),
+            CrossEffect::Authority,
+        )
+        .expect("ordered factors");
+        assert_eq!(
+            obb.shape,
+            Boundary::Obb {
+                half: DVec3::new(2.0, 3.0, 4.0),
+                orient
+            }
+        );
+        // An inverted factor pair fails LOUD (an inverted band inverts the hysteresis into a flap).
+        assert_eq!(
+            RealmBoundary::boxed(
+                RealmId::Station(2),
+                LatticePos::local(DVec3::ZERO),
+                DVec3::new(1.0, 1.0, 1.0),
+                None,
+                1.30, // create > destroy: inverted
+                1.15,
+                None,
+                RealmId::Station(2),
+                CrossEffect::Interest,
+            )
+            .expect_err("inverted band"),
+            BandError::InvalidEdges
+        );
+    }
+
+    #[test]
     fn resolve_winner_empty_is_none() {
         assert_eq!(resolve_winner(&[]), None);
     }
@@ -991,25 +1244,137 @@ mod tests {
     }
 
     #[test]
-    fn candidate_beats_covers_both_tie_break_arms() {
-        let deep = (5u32, RealmId::Planet(0), Direction::Inward);
-        let shallow = (2u32, RealmId::Planet(0), Direction::Inward);
+    fn candidate_beats_ix_covers_all_four_tie_break_arms() {
+        let deep = (5u32, RealmId::Planet(0), Direction::Inward, 0usize);
+        let shallow = (2u32, RealmId::Planet(0), Direction::Inward, 0usize);
         // Deeper beats shallower (the `a.0 > b.0` arm, true side).
-        assert!(candidate_beats(deep, shallow));
+        assert!(candidate_beats_ix(deep, shallow));
         // Shallower does NOT beat deeper (the `a.0 > b.0` arm, false side).
-        assert!(!candidate_beats(shallow, deep));
+        assert!(!candidate_beats_ix(shallow, deep));
         // Equal depth, smaller realm beats larger (the `a.1 < b.1` arm, true side).
-        let lo = (3u32, RealmId::Planet(1), Direction::Inward);
-        let hi = (3u32, RealmId::Planet(2), Direction::Inward);
-        assert!(candidate_beats(lo, hi));
+        let lo = (3u32, RealmId::Planet(1), Direction::Inward, 0usize);
+        let hi = (3u32, RealmId::Planet(2), Direction::Inward, 0usize);
+        assert!(candidate_beats_ix(lo, hi));
         // Equal depth, larger realm does NOT beat smaller (the `a.1 < b.1` arm, false side).
-        assert!(!candidate_beats(hi, lo));
-        // Equal depth AND realm: Inward beats Outward (the `a.2 < b.2` final tiebreak, true side).
-        let inw = (3u32, RealmId::Planet(1), Direction::Inward);
-        let out = (3u32, RealmId::Planet(1), Direction::Outward);
-        assert!(candidate_beats(inw, out));
+        assert!(!candidate_beats_ix(hi, lo));
+        // Equal depth AND realm: Inward beats Outward (the `a.2 < b.2` tiebreak, true side).
+        let inw = (3u32, RealmId::Planet(1), Direction::Inward, 0usize);
+        let out = (3u32, RealmId::Planet(1), Direction::Outward, 0usize);
+        assert!(candidate_beats_ix(inw, out));
         // ...and Outward does NOT beat Inward (the `a.2 < b.2` arm, false side).
-        assert!(!candidate_beats(out, inw));
+        assert!(!candidate_beats_ix(out, inw));
+        // Equal depth AND realm AND direction: smaller INDEX beats larger (the `a.3 < b.3` final
+        // tiebreak, true side) — two coincident mouths of one realm crossed the same way.
+        let ix_lo = (3u32, RealmId::Planet(1), Direction::Inward, 2usize);
+        let ix_hi = (3u32, RealmId::Planet(1), Direction::Inward, 5usize);
+        assert!(candidate_beats_ix(ix_lo, ix_hi));
+        // ...and the larger index does NOT beat the smaller (the `a.3 < b.3` arm, false side).
+        assert!(!candidate_beats_ix(ix_hi, ix_lo));
+    }
+
+    #[test]
+    fn resolve_winner_ix_returns_the_winning_boundary_index() {
+        // A nesting fixture: two boundaries an entity crosses this tick, the innermost (max depth)
+        // wins and its SLICE INDEX comes back so the trigger can look the boundary back up. The outer
+        // system boundary is index 0, the inner planet boundary index 1 — the deeper (index 1) wins.
+        let cands = [
+            (2u32, RealmId::System(1), Direction::Inward, 0usize),
+            (7u32, RealmId::Planet(4), Direction::Inward, 1usize),
+        ];
+        assert_eq!(resolve_winner_ix(&cands), Some((1, Direction::Inward)));
+        // Empty ⇒ None.
+        assert_eq!(
+            resolve_winner_ix(&[] as &[(u32, RealmId, Direction, usize)]),
+            None
+        );
+    }
+
+    #[test]
+    fn should_commit_cooldown_arm() {
+        let t = BoundaryTuning::DEFAULT; // n_entry = 3, k_dwell = 5
+        // since_commit None ⇒ never committed ⇒ cooldown inert; the inward rising edge still fires.
+        assert_eq!(
+            should_commit(ShellCrossing::StaysInside, true, t.n_entry, None, &t),
+            Some(Direction::Inward)
+        );
+        // since_commit < k_dwell ⇒ suppressed even on a would-be inward edge.
+        assert_eq!(
+            should_commit(
+                ShellCrossing::StaysInside,
+                true,
+                t.n_entry,
+                Some(t.k_dwell - 1),
+                &t
+            ),
+            None
+        );
+        // since_commit == k_dwell ⇒ cooldown elapsed ⇒ proceed (the inward edge fires).
+        assert_eq!(
+            should_commit(
+                ShellCrossing::StaysInside,
+                true,
+                t.n_entry,
+                Some(t.k_dwell),
+                &t
+            ),
+            Some(Direction::Inward)
+        );
+    }
+
+    #[test]
+    fn should_commit_leaving_is_immediate() {
+        let t = BoundaryTuning::DEFAULT;
+        // Outward commits Outward at once, no dwell — inward_ticks and membership are irrelevant.
+        assert_eq!(
+            should_commit(ShellCrossing::Outward, false, 0, None, &t),
+            Some(Direction::Outward)
+        );
+        // ThroughAndBack (a tunnelling exit) likewise commits Outward immediately.
+        assert_eq!(
+            should_commit(ShellCrossing::ThroughAndBack, false, 0, None, &t),
+            Some(Direction::Outward)
+        );
+    }
+
+    #[test]
+    fn should_commit_inward_is_a_strict_rising_edge() {
+        let t = BoundaryTuning::DEFAULT; // n_entry = 3
+        // The fast-crosser-matured case: swept reads StaysInside (already inside), NOT Inward — the
+        // fatal-bug case. The edge is on inward_ticks == n_entry EXACTLY.
+        // One tick before the edge: no commit.
+        assert_eq!(
+            should_commit(ShellCrossing::StaysInside, true, t.n_entry - 1, None, &t),
+            None
+        );
+        // Exactly at the edge: commit Inward (fires once — the caller pre-increments).
+        assert_eq!(
+            should_commit(ShellCrossing::StaysInside, true, t.n_entry, None, &t),
+            Some(Direction::Inward)
+        );
+        // One tick past the edge (`==`, not `>=`): NO second commit.
+        assert_eq!(
+            should_commit(ShellCrossing::StaysInside, true, t.n_entry + 1, None, &t),
+            None
+        );
+        // A stale matured counter but NOT a member (left the band): the now_member guard suppresses.
+        assert_eq!(
+            should_commit(ShellCrossing::StaysInside, false, t.n_entry, None, &t),
+            None
+        );
+    }
+
+    #[test]
+    fn should_commit_no_commit_when_outside_and_not_maturing() {
+        let t = BoundaryTuning::DEFAULT;
+        // Outside, not a member, no matured dwell: no commit for either quiescent classification.
+        assert_eq!(
+            should_commit(ShellCrossing::StaysOutside, false, 0, None, &t),
+            None
+        );
+        assert_eq!(
+            should_commit(ShellCrossing::StaysInside, false, 0, None, &t),
+            None
+        );
     }
 
     #[test]
@@ -1257,5 +1622,203 @@ mod tests {
             reversed.reverse();
             prop_assert_eq!(resolve_winner(&reversed), baseline);
         }
+
+        /// The INDEXED resolver is permutation-invariant too, INCLUDING the index-tiebreak arm:
+        /// with same-(depth,realm,dir) candidates differing only in the SLICE INDEX field, the fold
+        /// must pick the SAME winning index regardless of iteration order (rotate + reverse). This
+        /// exercises the 4th `a.3 < b.3` key that `resolve_winner`'s projection cannot see.
+        #[test]
+        fn resolve_winner_ix_permutation_invariant_including_the_index_tiebreak(
+            depths in prop::collection::vec(0u32..3, 1..6),
+            seeds in prop::collection::vec(0u64..2, 1..6),
+            dirs in prop::collection::vec(0u8..2, 1..6),
+            ixs in prop::collection::vec(0usize..6, 1..6),
+        ) {
+            let n = depths.len().min(seeds.len()).min(dirs.len()).min(ixs.len());
+            let mut cands: Vec<(u32, RealmId, Direction, usize)> = Vec::new();
+            for i in 0..n {
+                let dir = if dirs[i] == 0 { Direction::Inward } else { Direction::Outward };
+                // Only Planet realms + a tiny seed set so (depth, realm, dir) collisions are frequent
+                // and the distinguishing field is the index — forcing the 4th tiebreak.
+                cands.push((depths[i], RealmId::Planet(seeds[i]), dir, ixs[i]));
+            }
+            let baseline = resolve_winner_ix(&cands);
+            let mut rotated = cands.clone();
+            rotated.rotate_left(1);
+            prop_assert_eq!(resolve_winner_ix(&rotated), baseline);
+            let mut reversed = cands.clone();
+            reversed.reverse();
+            prop_assert_eq!(resolve_winner_ix(&reversed), baseline);
+        }
+
+        /// THE ENDORSED WIN — drive `should_commit` over a full ORDERED trajectory the way the real
+        /// per-tick caller will, and assert the three invariants that would have caught the fatal
+        /// bug (an inward gate on `swept == Inward` never commits a fast crosser that matured its
+        /// dwell already inside).
+        ///
+        /// Trajectory: a body starts FAR outside on the +x radial, descends through the annulus at a
+        /// constant per-tick step (swept from sub-annulus up to TUNNELLING — a step larger than the
+        /// destroy edge, so a single tick can read `StaysInside`/`ThroughAndBack` rather than
+        /// `Inward`), dwells deep inside, then leaves symmetrically. We simulate the caller's real
+        /// bookkeeping — `inward_ticks = if now_member { +1 } else { 0 }`, `since_commit` from the last
+        /// commit tick, membership from the shell's `OverlapBand` — and assert EXACTLY ONE inward
+        /// commit for the one net inward crossing (and one outward on the way out, never more).
+        #[test]
+        fn should_commit_over_a_full_trajectory_commits_inward_exactly_once(
+            step in 5.0f64..900.0, // per-tick radial speed: sub-annulus (~few) .. tunnelling (>destroy)
+        ) {
+            let r = 1000.0_f64;
+            let t = BoundaryTuning::DEFAULT; // n_entry = 3, k_dwell = 5
+            let band = OverlapBand::for_soi_velocity_safe(r, 1.15, 1.30, step, 1.0, 0.5, 1.0);
+            let run = drive_trajectory(r, step, &band, &t, /*dwell_ticks=*/ 30);
+            let inward = run.iter().filter(|d| **d == Some(Direction::Inward)).count();
+            let outward = run.iter().filter(|d| **d == Some(Direction::Outward)).count();
+            // Invariant 1: EXACTLY ONE inward commit for the single net inward crossing.
+            prop_assert_eq!(inward, 1);
+            // ...and exactly one outward for the single net outward crossing on the way back out.
+            prop_assert_eq!(outward, 1);
+        }
+
+        /// Invariant 2: a body whose TOTAL in-band membership reaches only `n_entry - 1` ticks before
+        /// it LEAVES commits NO inward crossing (it never reached the rising edge) — only the outward
+        /// exit. `depth` varies where inside the band it turns around (from a shallow dip to just shy
+        /// of the create edge) while keeping the in-band tick count exactly `n_entry - 1`.
+        #[test]
+        fn should_commit_no_inward_when_dwell_falls_one_short(depth in 0.0f64..0.9) {
+            let r = 1000.0_f64;
+            let t = BoundaryTuning::DEFAULT; // n_entry = 3
+            let band = OverlapBand::for_soi_velocity_safe(r, 1.15, 1.30, 1.0, 1.0, 0.5, 1.0);
+            let run = drive_shallow_dip(r, depth, &band, &t, /*in_band_ticks=*/ (t.n_entry - 1) as usize);
+            let inward = run.iter().filter(|d| **d == Some(Direction::Inward)).count();
+            prop_assert_eq!(inward, 0);
+        }
+
+        /// Invariant 3: a body hovering AT the surface (never fully inside, never fully out) across
+        /// `k_dwell` ticks does NOT flap — at most ONE commit total over the whole hover.
+        #[test]
+        fn should_commit_no_flap_hovering_at_the_surface(
+            jitter in -0.4f64..0.4, // stays inside the create..destroy annulus (never a clean cross)
+        ) {
+            let r = 1000.0_f64;
+            let t = BoundaryTuning::DEFAULT; // k_dwell = 5
+            let band = OverlapBand::for_soi_velocity_safe(r, 1.15, 1.30, 1.0, 1.0, 0.5, 1.0);
+            let commits = drive_hover(r, jitter, &band, &t, /*ticks=*/ 4 * t.k_dwell as usize);
+            prop_assert!(commits <= 1, "a surface-hovering body must not flap: {} commits", commits);
+        }
+    }
+
+    /// Simulate the real per-tick trigger caller over a radial +x trajectory: descend from far
+    /// outside through the shell at `step` per tick, dwell `dwell_ticks` deep inside, then ascend back
+    /// out symmetrically. Returns the per-tick `should_commit` outcome. This is the caller's real
+    /// loop — membership from `band`, `inward_ticks` reset on leaving the band, `since_commit` measured
+    /// from the last commit tick — so the proptests exercise `should_commit` exactly as production
+    /// will, not in isolation.
+    fn drive_trajectory(
+        r: f64,
+        step: f64,
+        band: &OverlapBand,
+        t: &BoundaryTuning,
+        dwell_ticks: usize,
+    ) -> Vec<Option<Direction>> {
+        // Build the radial distance samples: far outside -> deep inside -> far outside.
+        let start = r * 2.0; // comfortably outside the destroy edge
+        let deep = r * 0.1; // comfortably inside
+        let mut dists: Vec<f64> = Vec::new();
+        // Descent (exclusive of `start`, which seeds p_prev).
+        let mut d = start;
+        while d > deep {
+            d -= step;
+            dists.push(d.max(deep));
+        }
+        // Dwell deep inside.
+        for _ in 0..dwell_ticks {
+            dists.push(deep);
+        }
+        // Ascend back out symmetrically.
+        let mut u = deep;
+        while u < start {
+            u += step;
+            dists.push(u.min(start));
+        }
+        run_ticks(r, start, &dists, band, t)
+    }
+
+    /// Simulate a body that dips into the band for EXACTLY `in_band_ticks` consecutive member ticks
+    /// (dipping a fraction `depth` of the way from the create edge toward the center) and then leaves
+    /// past the destroy edge — the "matured only n_entry-1 ticks then left" case. Deterministic: the
+    /// distances are placed so membership is `in_band_ticks` ticks, no more.
+    fn drive_shallow_dip(
+        r: f64,
+        depth: f64,
+        band: &OverlapBand,
+        t: &BoundaryTuning,
+        in_band_ticks: usize,
+    ) -> Vec<Option<Direction>> {
+        let outside = band.destroy_above() + 1.0; // clearly not a member (before and after)
+        // A distance strictly inside the create edge (a member from a non-member prior state): sit
+        // `depth` of the way from the create edge toward the center, but never at/below 0.
+        let inside = (band.create_below() * (1.0 - depth)).max(band.create_below() * 0.05);
+        let mut dists = vec![outside]; // one outside tick to seed non-membership
+        for _ in 0..in_band_ticks {
+            dists.push(inside);
+        }
+        dists.push(outside); // leave past the destroy edge
+        run_ticks(r, outside, &dists, band, t)
+    }
+
+    /// Simulate a body hovering within the create..destroy annulus (a small radial `jitter` around
+    /// the mean band radius) for `ticks` — never a clean crossing, the anti-flap stress case.
+    fn drive_hover(
+        r: f64,
+        jitter: f64,
+        band: &OverlapBand,
+        t: &BoundaryTuning,
+        ticks: usize,
+    ) -> usize {
+        let mid = (band.create_below() + band.destroy_above()) * 0.5;
+        // Start outside the band so p_prev seeds a non-member, then oscillate near the surface.
+        let start = band.destroy_above() + 1.0;
+        let mut dists: Vec<f64> = Vec::new();
+        for i in 0..ticks {
+            // Alternate a tiny amount around `mid` scaled by jitter — stays in [create, destroy].
+            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+            dists.push(mid + sign * jitter * (band.destroy_above() - band.create_below()) * 0.4);
+        }
+        run_ticks(r, start, &dists, band, t)
+            .iter()
+            .filter(|d| d.is_some())
+            .count()
+    }
+
+    /// The shared per-tick loop: seed `p_prev` at `start` (radial +x), then for each radial distance
+    /// in `dists` classify the swept segment, update hysteresis membership, advance the caller's
+    /// `inward_ticks`/`since_commit` bookkeeping, and record `should_commit`.
+    fn run_ticks(
+        r: f64,
+        start: f64,
+        dists: &[f64],
+        band: &OverlapBand,
+        t: &BoundaryTuning,
+    ) -> Vec<Option<Direction>> {
+        let mut prev = start;
+        let mut member = false;
+        let mut inward_ticks = 0u32;
+        let mut last_commit_tick: Option<usize> = None;
+        let mut out: Vec<Option<Direction>> = Vec::new();
+        for (tick, &cur) in dists.iter().enumerate() {
+            let p0 = DVec3::new(prev, 0.0, 0.0);
+            let p1 = DVec3::new(cur, 0.0, 0.0);
+            let swept = segment_shell_crossing(p0, p1, r);
+            member = band.update_membership(member, cur);
+            inward_ticks = if member { inward_ticks + 1 } else { 0 };
+            let since_commit = last_commit_tick.map(|lc| (tick - lc) as u32);
+            let decision = should_commit(swept, member, inward_ticks, since_commit, t);
+            if decision.is_some() {
+                last_commit_tick = Some(tick);
+            }
+            out.push(decision);
+            prev = cur;
+        }
+        out
     }
 }

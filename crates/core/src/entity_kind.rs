@@ -92,6 +92,17 @@ pub fn continuity_of(entity: crate::EntityId) -> ContinuityModel {
     EntityKind::from_tag(entity.kind_tag()).map_or(ContinuityModel::Frozen, |k| k.def().continuity)
 }
 
+/// The durability class of the kind an `EntityId` encodes (HR2: policy fan-out dispatches on the
+/// KIND, never a shard kind, HR3) — the durability sibling of [`continuity_of`]. An `EntityId` whose
+/// tag this binary does not know is treated as `Transient` — the conservative default (an unknown
+/// kind gets the loss-budgeted transient machinery, never the zero-loss Durable saga it may not be
+/// able to honour), and never a panic on a corrupt id (the decode-to-Default ban, HR2, resolved
+/// toward the safe class).
+#[must_use]
+pub fn durability_of(entity: crate::EntityId) -> DurabilityClass {
+    EntityKind::from_tag(entity.kind_tag()).map_or(DurabilityClass::Transient, |k| k.def().class)
+}
+
 /// An `EntityId` carried a kind tag this binary does not know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("unknown entity-kind tag {0}")]
@@ -323,6 +334,20 @@ mod tests {
             EntityKind::ALL.len(),
             "from_tag accepts exactly the registered set"
         );
+    }
+
+    #[test]
+    fn durability_of_reads_the_kind_and_defaults_unknown_to_transient() {
+        // HR2: a Player id is Durable (its kind's class); a Debris id is Transient; a corrupt id whose
+        // tag this binary does not know resolves to the conservative Transient default — never a panic.
+        let player = crate::EntityId::pack(EntityKind::Player, 1, 7, 0);
+        assert_eq!(durability_of(player), DurabilityClass::Durable);
+        let debris = crate::EntityId::pack(EntityKind::Debris, 1, 7, 0);
+        assert_eq!(durability_of(debris), DurabilityClass::Transient);
+        // An EntityId with an unknown tag byte (99) → the safe Transient default.
+        let unknown_tag = crate::EntityId(99u128 << 120);
+        assert_eq!(unknown_tag.kind_tag(), 99);
+        assert_eq!(durability_of(unknown_tag), DurabilityClass::Transient);
     }
 
     #[test]

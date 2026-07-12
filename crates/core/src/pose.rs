@@ -145,6 +145,17 @@ impl LatticePos {
         self.offset
     }
 
+    /// The integer CELL anchor — the authoritative, bit-deterministic coarse coordinate. Through P3
+    /// this is always `ZERO` ([`LatticePos::local`] is the only public constructor and pins it), but
+    /// the read accessor exists now for the (P4/P5) cell-aware membership rebase in the spatial
+    /// transfer trigger: cross-cell membership is exact integer cell arithmetic, so the trigger reads
+    /// the cell here rather than reaching into the private field. Mirrors [`LatticePos::offset`] — reads
+    /// go through one accessor so a future integer-offset migration stays one-type-local.
+    #[must_use]
+    pub fn cell(self) -> I64Vec3 {
+        self.cell
+    }
+
     /// Map the frame-local offset while PRESERVING the integer cell anchor — the cell-stable in-frame
     /// move (the per-tick integrator and any local displacement). [`LatticePos::local`] resets the cell
     /// to `ZERO`; this is the cell-preserving sibling, so a mutation site OUTSIDE vd-core keeps the
@@ -448,6 +459,22 @@ mod tests {
         let lp = LatticePos::local(v);
         assert_eq!(lp.offset(), v);
         assert_eq!(lp.cell, I64Vec3::ZERO);
+    }
+
+    #[test]
+    fn lattice_cell_accessor_reads_zero_for_local_and_the_exact_cell_otherwise() {
+        // `local(..)` pins the cell to ZERO (the P3 invariant) — the accessor must read it back.
+        assert_eq!(
+            LatticePos::local(DVec3::new(1.5, -2.5, 3.5)).cell(),
+            I64Vec3::ZERO
+        );
+        // A directly-constructed non-zero cell reads back EXACTLY (the P4/P5 rebase precondition;
+        // mirrors the non-zero-cell serde precedent below).
+        let lp = LatticePos {
+            cell: I64Vec3::new(5, -7, 11),
+            offset: DVec3::new(0.25, -0.5, 0.75),
+        };
+        assert_eq!(lp.cell(), I64Vec3::new(5, -7, 11));
     }
 
     #[test]
