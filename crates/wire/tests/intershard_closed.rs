@@ -2,7 +2,7 @@
 //! in-module unit test to the design-named INTEGRATION location so the closed-set
 //! guarantee is a per-release gate, not a convention (audit SEAL-2).
 //!
-//! The closed taxonomy `InterShardFlow` (the FULL current 17-arm set — see `wire/src/lib.rs`
+//! The closed taxonomy `InterShardFlow` (the FULL current 21-arm set — see `wire/src/lib.rs`
 //! for the canonical enumeration; this header does NOT re-list it to avoid a second copy that
 //! drifts, the exact staleness the `arm_tripwire` below structurally prevents) is the ONLY
 //! shape that crosses a shard boundary; every arm has a
@@ -230,6 +230,34 @@ fn every_arm() -> Vec<InterShardFlow> {
             step_id: vd_wire::intershard::RE_SOLICIT_STEP,
             fence: Fence(6),
         }),
+        // Slice 3c arms (spatial transfer-trigger, INERT — planted; consumer routes land later). The two
+        // crossing REQUESTS carry NO TransferId (the orch mints it), so they key idempotency on a NON-GENESIS
+        // subject/src-realm Fence (`FencedKey` — the roundtrip test asserts `!= Fence::GENESIS`). Classified
+        // ReDriven, so the producer-less golden pin below still asserts exactly TWO producer-less arms.
+        InterShardFlow::CrossingRequest(vd_wire::intershard::CrossingRequest {
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            from_realm: RealmId::System(1),
+            to_realm: RealmId::Planet(2),
+            subject_fence: Fence(7),
+        }),
+        InterShardFlow::TransientCrossingRequest(vd_wire::intershard::TransientCrossingRequest {
+            subject: DirectoryKey::Entity(eid(EntityKind::Debris)),
+            from_realm: RealmId::System(1),
+            to_realm: RealmId::Planet(2),
+            src_realm_fence: Fence(7),
+        }),
+        // The GRANT + ABORTED carry a real minted TransferId (keyed on `(transfer, TRANSIENT_BATCH_STEP)`).
+        InterShardFlow::TransientCrossingGrant(vd_wire::intershard::TransientCrossingGrant {
+            subject: DirectoryKey::Entity(eid(EntityKind::Debris)),
+            dest: NodeId(3),
+            to_realm: RealmId::Planet(2),
+            dst_realm_fence: Fence(4),
+            batch: TransferId(10),
+        }),
+        InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            transfer: TransferId(10),
+        }),
     ]
 }
 
@@ -256,7 +284,11 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::TransientAbandon(_)
         | InterShardFlow::ReHome(_)
         | InterShardFlow::TransientDiscard(_)
-        | InterShardFlow::ReSolicitBatch(_) => {}
+        | InterShardFlow::ReSolicitBatch(_)
+        | InterShardFlow::CrossingRequest(_)
+        | InterShardFlow::TransientCrossingRequest(_)
+        | InterShardFlow::TransientCrossingGrant(_)
+        | InterShardFlow::CrossingAborted(_) => {}
     }
 }
 

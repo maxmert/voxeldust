@@ -18,6 +18,12 @@
 //! - R-6d3c (D-6 #1 NEVER-restart closure): `TransientDiscard` (orch→dest discard-poison — the source
 //!   died in `BatchHandoff::AwaitAdopt` pre-adopt, so a late-replayed `Arriving` copy is removed + its
 //!   adopt poisoned; reuses `TransientHandoff`).
+//! - CA-1 S3: `ReSolicitBatch` (orch→source AwaitAdopt liveness probe; reuses `TransientHandoff`).
+//! - Slice 3c (spatial transfer-trigger, INERT — planted here, consumer routes land later): `CrossingRequest`
+//!   / `TransientCrossingRequest` (shard→orch: a durable/transient entity crossed a realm boundary — key
+//!   idempotency on the subject/src-realm `Fence`, NO `TransferId` at emit), `TransientCrossingGrant`
+//!   (orch→source: the resolved dest, its four fields mirror `TransientStatus::Crossing`), `CrossingAborted`
+//!   (orch→source: the resolve saga aborted pre-CAS — clear the source's `RequestInFlight` latch).
 //!
 //! RESERVED (variant lands with its consumer): `BlockEdit` (P6), `Coupling` `EffectFree` ports (P8),
 //! `Signal` (P9 cross-shard functional-block signals).
@@ -202,6 +208,37 @@ pub enum InterShardFlow {
     /// re-driven by `scan_deadlines` on every AwaitAdopt Timeout (it does NOT grow the producer-less outbox
     /// set / trip the push-`Ephemeral` debug_assert). APPENDED (preserves every existing postcard discriminant).
     ReSolicitBatch(TransientHandoff),
+    /// SHARD → orchestrator (Slice 3c, spatial transfer-trigger): a DURABLE entity crossed a realm boundary;
+    /// the orchestrator resolves the dest for `to_realm` and STARTS the durable transfer saga (the route-swap
+    /// plus the FlushSource/StubCrossing/Demote/Promote machinery). INERT this slice — the arm is planted; the
+    /// explicit orch route lands in a later slice (the demux wildcards catch it until then). Carries NO
+    /// `TransferId` (the orchestrator mints it on start), so `effect_class` keys idempotency on the subject's
+    /// `subject_fence` (`FencedKey`) — a redelivered request for the same fenced crossing is a no-op, never a
+    /// second saga. Side-effecting. APPENDED (preserves every existing postcard discriminant).
+    CrossingRequest(CrossingRequest),
+    /// SHARD → orchestrator (Slice 3c, spatial transfer-trigger): a TRANSIENT crossed a realm boundary; the
+    /// orchestrator resolves the dest for `to_realm` and GRANTS it back (`TransientCrossingGrant` below), which
+    /// the source flips its pending `Crossing` item to. INERT this slice (planted; the explicit orch route
+    /// lands later — the demux wildcards catch it). Carries NO `TransferId` at emit (the orchestrator mints the
+    /// batch id), so `effect_class` keys idempotency on `src_realm_fence` (`FencedKey`), not `(transfer, step)`.
+    /// Side-effecting. APPENDED (preserves every existing postcard discriminant).
+    TransientCrossingRequest(TransientCrossingRequest),
+    /// ORCHESTRATOR → SOURCE shard (Slice 3c): the GRANT carrying the resolved dest for a
+    /// `TransientCrossingRequest`. Its four fields EXACTLY match `TransientStatus::Crossing`
+    /// (`sim::stub`), so the source flip is a straight field assign (no repack). INERT this slice
+    /// (planted; the source consume route lands later — the demux wildcards catch it). Carries the minted
+    /// `batch` `TransferId`, so `effect_class` keys idempotency on `(batch, TRANSIENT_BATCH_STEP)` — the same
+    /// phase the batch's whole handoff amortizes to. Side-effecting. APPENDED (preserves every existing
+    /// postcard discriminant).
+    TransientCrossingGrant(TransientCrossingGrant),
+    /// ORCHESTRATOR → SOURCE shard (Slice 3c): the crossing's resolve/start saga ABORTED pre-CAS (e.g. the
+    /// dest is unavailable), so the source CLEARS the subject's `RequestInFlight` latch — the entity is free
+    /// to re-cross next tick. The PROPER fix (a positive orchestrator signal), never a bounded TTL window that
+    /// guesses when to retry. INERT this slice (planted; the source consume route lands later — the demux
+    /// wildcards catch it). Carries the aborted `transfer` `TransferId`, so `effect_class` keys idempotency on
+    /// `(transfer, TRANSIENT_BATCH_STEP)`. Side-effecting. APPENDED (preserves every existing postcard
+    /// discriminant).
+    CrossingAborted(CrossingAborted),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -347,6 +384,33 @@ impl InterShardFlow {
                     step_id: cmd.step_id,
                 },
             },
+            // Slice 3c spatial transfer-trigger: the two crossing REQUESTS carry NO TransferId at emit (the
+            // orchestrator mints it when it starts the saga), so they key idempotency on the crossing's fence
+            // (`FencedKey`) — a redelivered request for the same fenced crossing is a no-op, never a second
+            // saga. The GRANT/ABORTED carry a real minted TransferId, so they key on `(transfer,
+            // TRANSIENT_BATCH_STEP)` like the rest of the batch's amortized handoff.
+            InterShardFlow::CrossingRequest(r) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::FencedKey {
+                    fence: r.subject_fence,
+                },
+            },
+            InterShardFlow::TransientCrossingRequest(r) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::FencedKey {
+                    fence: r.src_realm_fence,
+                },
+            },
+            InterShardFlow::TransientCrossingGrant(g) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: g.batch,
+                    step_id: TRANSIENT_BATCH_STEP,
+                },
+            },
+            InterShardFlow::CrossingAborted(a) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: a.transfer,
+                    step_id: TRANSIENT_BATCH_STEP,
+                },
+            },
         }
     }
 
@@ -399,7 +463,15 @@ impl InterShardFlow {
             | InterShardFlow::TransientDiscard(_)
             // CA-1 S3: the orchestrator-EMITTED AwaitAdopt probe — re-driven by scan_deadlines every
             // Timeout, so the RAM retry suffices (a lost probe is re-emitted next Timeout); NOT producer-less.
-            | InterShardFlow::ReSolicitBatch(_) => FlowDurabilityClass::ReDriven,
+            | InterShardFlow::ReSolicitBatch(_)
+            // Slice 3c spatial transfer-trigger: the crossing requests are re-EMITTED by the source's ongoing
+            // boundary detection (the entity is still over the boundary next tick), and the grant/aborted are
+            // orchestrator/saga round-trip control (the saga's scan_deadlines re-drives them) — so the RAM
+            // retry + the reliable Saga lane suffice; NONE grows the producer-less outbox set.
+            | InterShardFlow::CrossingRequest(_)
+            | InterShardFlow::TransientCrossingRequest(_)
+            | InterShardFlow::TransientCrossingGrant(_)
+            | InterShardFlow::CrossingAborted(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -501,6 +573,54 @@ pub struct TransientHandoff {
     pub transfer: TransferId,
     pub step_id: u32,
     pub fence: Fence,
+}
+
+/// SHARD → ORCHESTRATOR (Slice 3c spatial transfer-trigger): a DURABLE entity crossed a realm boundary;
+/// the orchestrator resolves the dest for `to_realm` and starts the durable transfer saga. Carries NO
+/// `TransferId` — the orchestrator MINTS it on start — so `effect_class` keys idempotency on
+/// `subject_fence` ([`IdempotencyKey::FencedKey`]): a redelivered request for the same fenced crossing
+/// resolves to a no-op, never a second saga.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossingRequest {
+    pub subject: DirectoryKey,
+    pub from_realm: RealmId,
+    pub to_realm: RealmId,
+    pub subject_fence: Fence,
+}
+
+/// SHARD → ORCHESTRATOR (Slice 3c spatial transfer-trigger): a TRANSIENT crossed a realm boundary; the
+/// orchestrator resolves the dest for `to_realm` and grants it back ([`TransientCrossingGrant`]). Carries
+/// NO `TransferId` (the orchestrator mints the batch id), so `effect_class` keys idempotency on
+/// `src_realm_fence` ([`IdempotencyKey::FencedKey`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransientCrossingRequest {
+    pub subject: DirectoryKey,
+    pub from_realm: RealmId,
+    pub to_realm: RealmId,
+    pub src_realm_fence: Fence,
+}
+
+/// ORCHESTRATOR → SOURCE shard (Slice 3c): the GRANT carrying the resolved dest for a
+/// [`TransientCrossingRequest`]. Its four fields EXACTLY match `sim::stub::TransientStatus::Crossing`
+/// (`dest`/`to_realm`/`dst_realm_fence`/`batch`), so the source flip is a straight field assign. `batch`
+/// is the orchestrator-minted batch id — `effect_class` keys idempotency on `(batch, TRANSIENT_BATCH_STEP)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransientCrossingGrant {
+    pub subject: DirectoryKey,
+    pub dest: NodeId,
+    pub to_realm: RealmId,
+    pub dst_realm_fence: Fence,
+    pub batch: TransferId,
+}
+
+/// ORCHESTRATOR → SOURCE shard (Slice 3c): the crossing's resolve/start saga ABORTED pre-CAS, so the
+/// source CLEARS the subject's `RequestInFlight` latch — the entity is free to re-cross. The PROPER fix (a
+/// positive orchestrator signal), never a bounded TTL window. `transfer` is the aborted saga id;
+/// `effect_class` keys idempotency on `(transfer, TRANSIENT_BATCH_STEP)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossingAborted {
+    pub subject: DirectoryKey,
+    pub transfer: TransferId,
 }
 
 /// Ghost replication: kinematic mirrors that NEVER independently integrate physics.
