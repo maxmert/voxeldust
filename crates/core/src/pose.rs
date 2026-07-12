@@ -25,6 +25,13 @@ pub enum RealmId {
     System(u64),
     /// A ship's interior world, keyed by the ship entity.
     Ship(EntityId),
+    /// A space station's interior world, keyed by its deterministic seed — a first-class
+    /// realm (like a ship) so a station's functional blocks can be a cross-shard signal
+    /// source/sink. APPENDED (discriminant 3) so the wire stays additive.
+    Station(u64),
+    /// A sub-planet AREA (city district / spaceport / crowd zone) split to its own shard,
+    /// keyed by its deterministic seed. APPENDED (discriminant 4).
+    Area(u64),
 }
 
 impl core::fmt::Display for RealmId {
@@ -33,6 +40,8 @@ impl core::fmt::Display for RealmId {
             RealmId::Planet(seed) => write!(f, "planet-{seed:016x}"),
             RealmId::System(seed) => write!(f, "system-{seed:016x}"),
             RealmId::Ship(id) => write!(f, "ship-{id}"),
+            RealmId::Station(seed) => write!(f, "station-{seed:016x}"),
+            RealmId::Area(seed) => write!(f, "area-{seed:016x}"),
         }
     }
 }
@@ -49,6 +58,12 @@ pub enum FrameRef {
     /// Galaxy space: integer light-year cells + f64 offsets keep f64 precision
     /// (the cell layout lands with the galaxy work, P10).
     GalaxySpace,
+    /// A station's interior grid frame (moves with the hull, like a ship). APPENDED
+    /// (discriminant 4) so the wire stays additive.
+    StationLocal { station_seed: u64 },
+    /// A sub-planet AREA frame: a zone WITHIN a planet, carrying the parent planet's seed
+    /// (the fixed parent, no lookup) plus the area's own seed. APPENDED (discriminant 5).
+    AreaLocal { planet_seed: u64, area_seed: u64 },
 }
 
 impl FrameRef {
@@ -61,6 +76,8 @@ impl FrameRef {
             FrameRef::ShipLocal { ship } => Some(RealmId::Ship(ship)),
             FrameRef::SystemSpace { system_seed } => Some(RealmId::System(system_seed)),
             FrameRef::GalaxySpace => None,
+            FrameRef::StationLocal { station_seed } => Some(RealmId::Station(station_seed)),
+            FrameRef::AreaLocal { area_seed, .. } => Some(RealmId::Area(area_seed)),
         }
     }
 
@@ -77,6 +94,11 @@ impl FrameRef {
             FrameRef::ShipLocal { ship } => format!("Ship {ship}"),
             FrameRef::SystemSpace { system_seed } => format!("System {system_seed}"),
             FrameRef::GalaxySpace => "Galaxy".to_owned(),
+            FrameRef::StationLocal { station_seed } => format!("Station {station_seed}"),
+            FrameRef::AreaLocal {
+                planet_seed,
+                area_seed,
+            } => format!("Area {area_seed} on Planet {planet_seed}"),
         }
     }
 }
@@ -250,6 +272,18 @@ mod tests {
             Some(RealmId::Ship(ship_id()))
         );
         assert_eq!(FrameRef::GalaxySpace.realm(), None);
+        assert_eq!(
+            FrameRef::StationLocal { station_seed: 7 }.realm(),
+            Some(RealmId::Station(7))
+        );
+        assert_eq!(
+            FrameRef::AreaLocal {
+                planet_seed: 5,
+                area_seed: 8
+            }
+            .realm(),
+            Some(RealmId::Area(8))
+        );
     }
 
     #[test]
@@ -266,6 +300,18 @@ mod tests {
             format!("Ship {}", ship_id())
         );
         assert_eq!(FrameRef::GalaxySpace.label(), "Galaxy");
+        assert_eq!(
+            FrameRef::StationLocal { station_seed: 7 }.label(),
+            "Station 7"
+        );
+        assert_eq!(
+            FrameRef::AreaLocal {
+                planet_seed: 5,
+                area_seed: 8
+            }
+            .label(),
+            "Area 8 on Planet 5"
+        );
     }
 
     #[test]
@@ -277,6 +323,32 @@ mod tests {
                 .to_string()
                 .starts_with("ship-ent-01.")
         );
+        assert_eq!(
+            RealmId::Station(0xEF).to_string(),
+            "station-00000000000000ef"
+        );
+        assert_eq!(RealmId::Area(0x12).to_string(), "area-0000000000000012");
+    }
+
+    #[test]
+    fn station_and_area_arms_round_trip_over_the_wire() {
+        // The APPENDED arms (RealmId 3/4, FrameRef 4/5) are NON-zero discriminants, so this
+        // exercises the additive wire growth (existing arms keep their index) — the pose.rs
+        // non-zero-cell precedent applied to the realm taxonomy.
+        for r in [RealmId::Station(0xABCD), RealmId::Area(0x9876)] {
+            let bytes = postcard::to_allocvec(&r).expect("encode realm");
+            assert_eq!(postcard::from_bytes::<RealmId>(&bytes).expect("decode"), r);
+        }
+        for f in [
+            FrameRef::StationLocal { station_seed: 42 },
+            FrameRef::AreaLocal {
+                planet_seed: 7,
+                area_seed: 99,
+            },
+        ] {
+            let bytes = postcard::to_allocvec(&f).expect("encode frame");
+            assert_eq!(postcard::from_bytes::<FrameRef>(&bytes).expect("decode"), f);
+        }
     }
 
     #[test]

@@ -215,6 +215,23 @@ pub mod profiles {
             ..CapRequest::default()
         })
     }
+
+    /// A space station: a block-built Cartesian hull like a [`ship`], PLUS `hull_host` (it
+    /// hosts its own exterior body in the parent planet/system realm, like a ship exterior)
+    /// and `signal_relay` (its functional blocks are a cross-shard SIGNAL source/sink — the
+    /// end-goal's block-comms). DATA only — no per-realm-kind feature code (HR3).
+    pub fn station() -> Result<ShardProfile, ProfileError> {
+        ShardProfile::build(CapRequest {
+            voxel: Some(VoxelGeometry::Cartesian),
+            functional_blocks: true,
+            block_edit: true,
+            surfaces: true,
+            seats: true,
+            signal_relay: true,
+            hull_host: true,
+            ..CapRequest::default()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +267,18 @@ mod tests {
         assert!(asteroid.block_edit());
         assert!(!asteroid.functional_blocks());
         assert!(!asteroid.signal_graph());
+
+        // A station is a ship-like Cartesian block hull that ALSO hull-hosts + signal-relays
+        // (a first-class cross-shard signal source), coherent under build().
+        let station = profiles::station().expect("station");
+        assert_eq!(station.voxel(), Some(VoxelGeometry::Cartesian));
+        assert!(station.functional_blocks());
+        assert!(station.signal_graph());
+        assert!(station.block_edit());
+        assert!(station.surfaces());
+        assert!(station.seats());
+        assert!(station.hull_host());
+        assert!(station.signal_relay());
     }
 
     /// The NEGATIVE gate (G-IDENTICAL's companion): incoherent requests never reach

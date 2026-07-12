@@ -228,7 +228,14 @@ impl DeliveredView {
         match pose.frame {
             FrameRef::PlanetCentered { .. }
             | FrameRef::SystemSpace { .. }
-            | FrameRef::GalaxySpace => pose.pos,
+            | FrameRef::GalaxySpace
+            // An AREA shares its parent planet's coordinate frame (a sub-region, no offset), so it
+            // renders at `pose.pos` PERMANENTLY. A STATION interior renders at its frame origin
+            // until P8 delivers a station HULL to compose against — the ShipLocal-style hull
+            // composite lands THEN, keyed on the station's hull entity, WITHOUT changing this
+            // one-level chokepoint (a station that orbits resolves its hull here like a ship).
+            | FrameRef::AreaLocal { .. }
+            | FrameRef::StationLocal { .. } => pose.pos,
             FrameRef::ShipLocal { ship } => self
                 .hull_pose(ship, cursor)
                 .map_or(pose.pos, |hull| hull.pos + hull.orient * pose.pos),
@@ -410,6 +417,23 @@ mod tests {
             orient: DQuat::IDENTITY,
         };
         assert_eq!(view.world_pos(&planet, 11.0), DVec3::new(4.0, 0.0, 0.0));
+        // A sub-planet AREA shares the planet frame; a STATION interior renders at its frame
+        // origin until a P8 station hull is delivered — both fall in the world-frame arm today.
+        let area = RenderPose {
+            frame: FrameRef::AreaLocal {
+                planet_seed: 1,
+                area_seed: 2,
+            },
+            pos: DVec3::new(5.0, 6.0, 7.0),
+            orient: DQuat::IDENTITY,
+        };
+        assert_eq!(view.world_pos(&area, 11.0), DVec3::new(5.0, 6.0, 7.0));
+        let station = RenderPose {
+            frame: FrameRef::StationLocal { station_seed: 9 },
+            pos: DVec3::new(8.0, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        assert_eq!(view.world_pos(&station, 11.0), DVec3::new(8.0, 0.0, 0.0));
     }
 
     #[test]
