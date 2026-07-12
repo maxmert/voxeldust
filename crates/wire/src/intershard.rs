@@ -623,6 +623,28 @@ pub struct CrossingAborted {
     pub transfer: TransferId,
 }
 
+/// Deterministic `TransferId` for a geometric crossing — the SAME value the source (its
+/// `RequestInFlight` latch) and the orchestrator (`start_transfer`) INDEPENDENTLY derive from
+/// `(subject, subject_fence)`, so a saga terminal (`Demote` / `CrossingAborted`) carrying that id
+/// matches the source latch. FNV-1a over `postcard(subject, subject_fence)`, high-byte namespace-tagged
+/// `0x39` (disjoint from `rehome_transfer_id`'s `0x37`). Branchless (HR5: no rng / wall-clock / default
+/// hasher — the byte-identical seed-replay canary forbids all three); the same subject + fence always
+/// derives the same id, so a re-attempt after a lost RAM enqueue is idempotent. Mirrors
+/// `rehome_transfer_id`'s (vd-node) shape.
+#[must_use]
+pub fn crossing_transfer_id(subject: DirectoryKey, subject_fence: Fence) -> TransferId {
+    const FNV_OFFSET: u128 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u128 = 0x0000_0100_0000_01b3;
+    const CROSSING_TAG: u128 = 0x39u128 << 120;
+    const LOW_120: u128 = (1u128 << 120) - 1;
+    let seed = postcard::to_allocvec(&(subject, subject_fence)).expect("encode crossing id seed");
+    let mut h = FNV_OFFSET;
+    for b in seed {
+        h = (h ^ u128::from(b)).wrapping_mul(FNV_PRIME);
+    }
+    TransferId(CROSSING_TAG | (h & LOW_120))
+}
+
 /// Ghost replication: kinematic mirrors that NEVER independently integrate physics.
 ///
 /// OWED (DEFERRED D-39.6, P11 combat): cross-boundary PvP needs ghosts to carry a small read-only
@@ -1243,6 +1265,62 @@ mod tests {
                 new_fence: Fence(6),
                 step_id: PROMOTE_STEP,
                 source: NodeId(2),
+            }),
+        ] {
+            let bytes = postcard::to_allocvec(&flow).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
+                flow
+            );
+        }
+    }
+
+    /// `crossing_transfer_id` is DETERMINISTIC (two calls with the same args agree), STABLE across the
+    /// subject+fence pair only (different subject OR different fence yields a different id), and carries the
+    /// `0x39` namespace tag (disjoint from rehome's `0x37`) in its high byte.
+    #[test]
+    fn crossing_transfer_id_is_deterministic_and_namespaced() {
+        let subject = DirectoryKey::Entity(eid(EntityKind::Player));
+        let other_subject = DirectoryKey::Entity(eid(EntityKind::Ship));
+        let id = crossing_transfer_id(subject, Fence(4));
+        // Deterministic: a second call with the same args is byte-identical.
+        assert_eq!(id, crossing_transfer_id(subject, Fence(4)));
+        // A different fence changes the id.
+        assert_ne!(id, crossing_transfer_id(subject, Fence(5)));
+        // A different subject changes the id.
+        assert_ne!(id, crossing_transfer_id(other_subject, Fence(4)));
+        // The high byte is the `0x39` crossing namespace tag.
+        assert_eq!(id.0 >> 120, 0x39);
+    }
+
+    #[test]
+    fn crossing_arms_roundtrip() {
+        for flow in [
+            InterShardFlow::CrossingRequest(CrossingRequest {
+                subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+                from_realm: RealmId::System(1),
+                to_realm: RealmId::Planet(2),
+                subject_fence: Fence(4),
+            }),
+            InterShardFlow::TransientCrossingRequest(TransientCrossingRequest {
+                subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+                from_realm: RealmId::System(1),
+                to_realm: RealmId::Planet(2),
+                src_realm_fence: Fence(4),
+            }),
+            InterShardFlow::TransientCrossingGrant(TransientCrossingGrant {
+                subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+                dest: NodeId(2),
+                to_realm: RealmId::Planet(2),
+                dst_realm_fence: Fence(6),
+                batch: TransferId(9),
+            }),
+            InterShardFlow::CrossingAborted(CrossingAborted {
+                subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+                transfer: crossing_transfer_id(
+                    DirectoryKey::Entity(eid(EntityKind::Player)),
+                    Fence(4),
+                ),
             }),
         ] {
             let bytes = postcard::to_allocvec(&flow).expect("encode");

@@ -91,6 +91,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             self_fence_grace_ticks,
             // Per-datagram snapshot budget — partitioned so none exceeds the MTU (GW-1).
             snapshot_datagram_budget: snapshot_budget,
+            // Slice 3e — the geometric transfer-trigger tuning. INERT in production through P3 (the
+            // trigger's `RealmBoundaries` registry is empty ⇒ `evaluate_realm_boundaries` early-returns,
+            // behaviour-identical); the tuning is validated at `register_stub_shard` regardless.
+            boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+            // Slice 3d — the crossing-latch TTL fallback. INERT (0): the POSITIVE saga-terminal clear is
+            // the sole driver until the 3f abort/TTL egress lands.
+            request_ttl_ticks: 0,
         },
     );
     let mut pacer = TickPacer::new(tick_hz);

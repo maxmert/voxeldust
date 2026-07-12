@@ -75,6 +75,10 @@ pub fn stub_config() -> StubConfig {
         // the self-fence cells set it explicitly. Pre-D-3 behavior: no proactive fence.
         self_fence_grace_ticks: 0,
         snapshot_datagram_budget: 1100,
+        // Slice 3e: the geometric transfer-trigger tuning. INERT here (the cluster scenarios plant no
+        // `RealmBoundaries`, so `evaluate_realm_boundaries` early-returns — behaviour-identical).
+        boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+        request_ttl_ticks: 0,
     }
 }
 
@@ -433,6 +437,9 @@ pub fn seed_transient_crossing(
                         dst_realm_fence,
                         batch,
                     },
+                    // Slice 3d: the geometric-trigger prev-offset seed (the test plants no boundaries,
+                    // so it is never read — seed to the pose offset for the degenerate first segment).
+                    prev_offset: pose.pos.offset(),
                 },
             );
     });

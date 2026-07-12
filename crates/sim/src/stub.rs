@@ -19,8 +19,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::collections::DetHashMap;
-use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of};
-use vd_core::geometry::OverlapBand;
+use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
+use vd_core::geometry::{
+    Direction, OverlapBand, RealmBoundary, ShellCrossing, resolve_winner_ix, should_commit,
+};
 use vd_core::glam::DVec3;
 use vd_core::kinematics;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
@@ -28,11 +30,12 @@ use vd_core::rng::SplitMix64;
 use vd_core::{AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::intershard::{
-    DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP,
-    ReHomeCmd, ReHomeState, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP,
-    TRANSIENT_BATCH_STEP, TRANSIENT_COMPLETE_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP,
-    TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff, TransientItem,
-    TransitionPayload,
+    CrossingAborted, CrossingRequest, DemoteCmd, FlushSource, GhostFlow, InterShardFlow,
+    PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP,
+    TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP, TRANSIENT_COMPLETE_STEP,
+    TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck,
+    TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest, TransientHandoff,
+    TransientItem, TransitionPayload, crossing_transfer_id,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -83,6 +86,18 @@ pub struct StubConfig {
     /// orchestrator-side by `DirectoryTuning::validate`. REQUIRES `realm_recheck_interval > 0` as the confirmation channel —
     /// the timer is inert without it (no round-trip ⇒ no `last_confirmed` ⇒ nothing to measure).
     pub self_fence_grace_ticks: u64,
+    /// Slice 3d/3e — the per-shard boundary hysteresis tuning consumed by `evaluate_realm_boundaries`
+    /// (`should_commit`'s dwell/cooldown counts + the velocity pad + cell size). Validated once at
+    /// `register_stub_shard` (fail-loud like the tick-pair guard). Default [`BoundaryTuning::DEFAULT`].
+    /// INERT in production through P3: the trigger is gated on a NON-EMPTY `RealmBoundaries` registry,
+    /// which the composer leaves empty (behaviour-identical); only tests populate it.
+    pub boundary: vd_core::geometry::BoundaryTuning,
+    /// Slice 3d — how long (ticks) a `RequestInFlight` crossing latch may stand before the geometric
+    /// trigger is permitted to re-request (a belt-and-braces bound on top of the POSITIVE saga terminal
+    /// clear via `on_saga_demote` / `CrossingAborted`). `0` = INERT (the positive clear is the sole
+    /// driver; the pre-3f default and every current rig). Reserved for the 3f abort/TTL egress — carried
+    /// now so the config surface is frozen before the consumer lands.
+    pub request_ttl_ticks: u32,
 }
 
 /// One connected avatar.
@@ -148,6 +163,13 @@ pub struct Dot {
     pub yaw: f64,
     pub pitch: f64,
     pub last_applied_seq: Option<u64>,
+    /// Slice 3d — the frame-local offset (`pose.pos.offset()`) at the END of the PREVIOUS tick's
+    /// integration, the START endpoint of THIS tick's swept boundary segment (`prev_offset → cur`)
+    /// in `evaluate_realm_boundaries`. Seeded to the spawn offset at every construction site so
+    /// tick-1's segment is degenerate (`prev == cur` ⇒ never a spurious crossing), then written LAST
+    /// each evaluation tick to `cur` — so the anti-tunneling sweep tests the WHOLE motion segment,
+    /// never a point sample. INERT in production through P3 (the boundary registry is EMPTY).
+    pub prev_offset: DVec3,
 }
 
 /// All avatars on this shard, in deterministic session order. The key set IS the
@@ -230,6 +252,12 @@ pub struct Transient {
     /// committed go-token.
     pub anchor_fence: Fence,
     pub status: TransientStatus,
+    /// Slice 3d — the frame-local offset at the END of the previous tick, the START endpoint of THIS
+    /// tick's swept boundary segment in `evaluate_realm_boundaries` (the transient twin of
+    /// `Dot::prev_offset`). Seeded to the pose offset at every construction site so tick-1's segment
+    /// is degenerate, then written LAST each evaluation tick — anti-tunneling over the whole segment.
+    /// INERT in production through P3 (the boundary registry is EMPTY).
+    pub prev_offset: DVec3,
 }
 
 /// A transient's lifecycle tier (D-7) — the Held-vs-Arriving split is the transient twin of the
@@ -302,6 +330,61 @@ impl TransientStatus {
 /// directory. Sits beside `Dots`/`GhostColliderRegistration` (a sibling held-set, not a fork).
 #[derive(Resource, Debug, Default)]
 pub struct OwnedTransients(pub BTreeMap<EntityId, Transient>);
+
+// ---------------------------------------------------------------------------
+// Slice 3d/3e — the per-shard geometric transfer-TRIGGER state (`evaluate_realm_boundaries`).
+// INERT in production through P3: the trigger early-returns on an EMPTY `RealmBoundaries` registry
+// (the composer plants none — behaviour-identical), so ALL of the state below stays untouched in a
+// real run; the tests populate `RealmBoundaries` to exercise every arm.
+// ---------------------------------------------------------------------------
+
+/// The per-entity/per-boundary hysteresis-dwell state the geometric trigger carries between ticks —
+/// the `should_commit` counters (the fn itself is pure/stateless, this is its store). Keyed by the
+/// subject entity (both owned dots AND held transients). Evicted lazily when the subject leaves (the
+/// DRY retain in `evaluate_realm_boundaries`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CrossingState {
+    /// Consecutive in-band ticks (the rising-edge entry dwell). Reset to 0 the moment membership drops.
+    pub inward_ticks: u32,
+    /// The `local_tick` a crossing last committed (arms the post-commit cooldown). `None` = never.
+    /// PER-ENTITY (an authority anti-thrash window) — deliberately NOT reset on a winner change below.
+    pub last_commit_tick: Option<TickId>,
+    /// The hysteresis membership at the END of the previous tick (fed to `OverlapBand::update_membership`).
+    pub was_member: bool,
+    /// The slice index of the boundary this `inward_ticks`/`was_member` dwell belongs to — the dwell
+    /// counters are per-*(entity, boundary)*, but stored in one per-entity slot for the SINGLE winner
+    /// picked each tick. When `resolve_winner_ix` picks a DIFFERENT boundary (an entity moving between
+    /// two disjoint regions), carrying the prior boundary's dwell/hysteresis into the new one corrupts
+    /// its rising edge (a lost or false crossing) — so a winner change restarts the dwell from this
+    /// boundary's create edge (`evaluate_one_subject`). `None` = never evaluated. Cooldown is preserved.
+    pub winner_ix: Option<usize>,
+}
+
+/// The geometric trigger's per-entity dwell state (Slice 3d). One entry per subject that has been
+/// evaluated against ≥1 boundary; lazily evicted when the subject leaves the shard.
+#[derive(Resource, Debug, Default)]
+pub struct CrossingProgress(pub BTreeMap<EntityId, CrossingState>);
+
+/// The per-entity DURABLE-crossing latch (Slice 3d): a durable entity that has emitted a
+/// `CrossingRequest` is latched here (keyed by subject entity → the deterministic
+/// [`crossing_transfer_id`]) so the trigger emits EXACTLY ONE request per crossing. Cleared POSITIVELY
+/// by the saga terminal — `on_saga_demote` on a durable COMMIT, or `CrossingAborted` on a pre-CAS abort
+/// (the 3f abort egress) — never by a bounded TTL window. Lazily evicted when the subject leaves.
+#[derive(Resource, Debug, Default)]
+pub struct RequestInFlight(pub BTreeMap<EntityId, TransferId>);
+
+/// The per-entity INTEREST zone the geometric trigger last resolved (Slice 3d): a `CrossEffect::Interest`
+/// crossing writes the entered realm here. WRITE-ONLY this slice (no reader yet — the ghost/subscription
+/// consumer is a later slice; ledgered). Lazily evicted when the subject leaves.
+#[derive(Resource, Debug, Default)]
+pub struct InterestZones(pub BTreeMap<EntityId, RealmId>);
+
+/// The realm boundaries this shard evaluates every owned entity against (Slice 3e). DEFAULT EMPTY —
+/// production plants none through P3, so `evaluate_realm_boundaries` early-returns (the trigger is
+/// behaviour-identical / inert). Tests populate it (e.g. a planet-SOI [`RealmBoundary::shell`]) to
+/// exercise the crossing logic.
+#[derive(Resource, Debug, Default)]
+pub struct RealmBoundaries(pub Vec<RealmBoundary>);
 
 /// Entity minting state: a per-shard monotonic sequence + seed-derived entropy.
 #[derive(Resource, Debug)]
@@ -593,6 +676,38 @@ pub struct StubStats {
     /// its SEND outcome at the orchestrator, not this handler; a LIVE source simply acknowledges receipt by
     /// existing). Ops visibility that the AwaitAdopt probe reached a live source.
     pub re_solicits_received: u64,
+    /// Slice 3e — DURABLE geometric crossings REQUESTED: `evaluate_realm_boundaries` committed a durable
+    /// entity across an `Authority` boundary and emitted ONE `CrossingRequest` (latched in
+    /// `RequestInFlight`). The headline durable-trigger counter. `0` in prod through P3 (empty registry).
+    pub crossings_requested: u64,
+    /// Slice 3e — durable crossings SUPPRESSED because the subject was already latched in-flight (a second
+    /// `should_commit` edge before the saga terminal cleared the latch). Proves exactly-one-request. `0`
+    /// steady-state.
+    pub crossings_suppressed_in_flight: u64,
+    /// Slice 3e — TRANSIENT geometric crossings REQUESTED: a transient committed across an `Authority`
+    /// boundary and emitted a `TransientCrossingRequest` (the batched-grant path). `0` in prod through P3.
+    pub transient_crossings_requested: u64,
+    /// Slice 3e — `InterestZones` writes from an `Interest`-effect crossing (WRITE-ONLY this slice — the
+    /// ghost/subscription reader is a later slice). Ops visibility. `0` in prod through P3.
+    pub crossing_interest_updates: u64,
+    /// Slice 3e — `RequestInFlight` latches CLEARED by a saga terminal at the SOURCE: `on_saga_demote` on a
+    /// durable COMMIT, or a `CrossingAborted` demux on a pre-CAS abort. Proves the POSITIVE (never-TTL)
+    /// clear. `0` until a triggered crossing resolves.
+    pub crossing_latches_cleared: u64,
+    /// Slice 3e — SOURCE `TransientCrossingGrant`s APPLIED: a granted transient flipped `Held → Crossing`
+    /// so `emit_transient_batch` ships it. `0` in prod through P3 (no transient crossings triggered).
+    pub transient_grants_applied: u64,
+    /// Slice 3e — `TransientCrossingGrant` counted NO-OPS: an unknown transient OR one already flipped (a
+    /// redelivery after the flip). `0` in a healthy single-delivery run.
+    pub transient_grant_noop: u64,
+    /// Slice 3e — `TransientCrossingGrant` for a NON-Entity subject (Realm/Session/Ship) — a counted no-op.
+    /// `0` in a healthy run (a transient crossing subject is always an Entity).
+    pub transient_grant_no_entity: u64,
+    /// Slice 3e — `CrossingAborted` for a NON-Entity subject — a counted no-op. `0` in a healthy run.
+    pub crossing_abort_no_entity: u64,
+    /// Slice 3e — `CrossingAborted` whose transfer id did NOT match the subject's current latch (a stale
+    /// abort for a superseded / re-latched crossing) — a counted no-op, the latch is preserved. `0` healthy.
+    pub crossing_abort_stale: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -675,6 +790,14 @@ pub struct PendingCrossings(BTreeMap<EntityId, PendingCrossing>);
 /// Install the stub-shard systems and resources onto a node's world + schedule.
 /// Called by the node composer for `NodeKind::StubShard` (never by feature code).
 pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: StubConfig) {
+    // Slice 3e — FAIL-LOUD boundary-tuning validation at boot (mirroring the tick-pair guard): a
+    // zero dwell/pad/cell would silently disable anti-flap or divide the cell rebase. The registry is
+    // EMPTY in prod (the trigger is inert), but the tuning is validated regardless so a misconfigured
+    // deployment never boots a half-armed trigger.
+    config
+        .boundary
+        .validate()
+        .expect("StubConfig.boundary is a valid BoundaryTuning (n_entry/k_dwell/pad/cell > 0)");
     world.insert_resource(config);
     world.insert_resource(Dots::default());
     world.insert_resource(RealmAuthority::default());
@@ -691,6 +814,12 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(GhostColliderRegistration::default());
     world.insert_resource(SourceGhostMirror::default());
     world.insert_resource(OwnedTransients::default());
+    // Slice 3d/3e — the geometric transfer-trigger state. `RealmBoundaries` defaults EMPTY, so
+    // `evaluate_realm_boundaries` early-returns in prod (inert through P3); tests populate it.
+    world.insert_resource(CrossingProgress::default());
+    world.insert_resource(RequestInFlight::default());
+    world.insert_resource(InterestZones::default());
+    world.insert_resource(RealmBoundaries::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -708,18 +837,37 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // settled the Arriving set — a just-promoted item is Held, not re-driven) and AFTER
     // `self_fence_lapsed_realm` (a self-fenced holder already dropped its Arriving items, so it re-drives
     // nothing). It is an orchestrator-bound egress like `emit_transient_batch`.
+    // `evaluate_realm_boundaries` (Slice 3e) runs AFTER `self_fence_lapsed_realm` (a holder that lost its
+    // realm this tick emits NO crossing request — the authority gate short-circuits) and BEFORE
+    // `readvance_transients` / `emit_transient_batch`: a TRANSIENT crossing it flags emits a
+    // `TransientCrossingRequest` this tick, and the source's own position (read from the settled
+    // post-inbound pose) drives the swept segment. Its `CrossingRequest`/`TransientCrossingRequest`
+    // egress is orchestrator-bound like `emit_transient_batch`. INERT unless `RealmBoundaries` is
+    // non-empty (the composer plants none through P3 — behaviour-identical).
+    // The full per-tick order is a single strict chain. Bevy's system-tuple `.chain()` supports at most
+    // 8 direct elements, so the 9 systems are expressed as two chained groups joined by
+    // `.after(self_fence_lapsed_realm)` — the SAME total order as one flat `.chain()` (group A ends at
+    // `self_fence_lapsed_realm`; group B is itself chained and runs strictly after it). Splitting here is
+    // a mechanical arity workaround, NOT a semantics change.
     schedule.add_systems(
         (
             request_pending_grants,
             process_inbound,
             self_fence_lapsed_realm,
+        )
+            .chain(),
+    );
+    schedule.add_systems(
+        (
+            evaluate_realm_boundaries,
             readvance_transients,
             emit_transient_batch,
             redrive_pending_adoptions,
             feed_source_ghosts,
             emit_frames,
         )
-            .chain(),
+            .chain()
+            .after(self_fence_lapsed_realm),
     );
 }
 
@@ -843,11 +991,15 @@ fn process_inbound(
     mut stats: ResMut<StubStats>,
     mut applied: ResMut<AppliedSteps>,
     mut pending: ResMut<PendingCrossings>,
-    mut registration: ResMut<GhostColliderRegistration>,
-    mut mirror: ResMut<SourceGhostMirror>,
+    // Bundled into ONE tuple `SystemParam` (bevy caps a system at 16 top-level params; Slice 3e's
+    // `RequestInFlight` addition would make 17). Both are the ghost-path stores, so grouping them is a
+    // mechanical arity fix, not a coupling change — destructured back to the two `&mut` at the call sites.
+    ghost_state: (ResMut<GhostColliderRegistration>, ResMut<SourceGhostMirror>),
     mut owned_transients: ResMut<OwnedTransients>,
+    mut in_flight: ResMut<RequestInFlight>,
     mut outbox: ResMut<OutboundBox>,
 ) {
+    let (mut registration, mut mirror) = ghost_state;
     for msg in &inbox.0 {
         let Inbound::Wire { from, class, bytes } = msg else {
             // Unreachability notices are observed by the node shell (TickReport);
@@ -885,6 +1037,7 @@ fn process_inbound(
                 &mut pending,
                 &mut registration,
                 &mut owned_transients,
+                &mut in_flight,
                 &mut stats,
                 &mut outbox,
             ),
@@ -965,6 +1118,8 @@ fn on_gateway_msg(
                     yaw: 0.0,
                     pitch: 0.0,
                     last_applied_seq: None,
+                    // Seed to the spawn offset (origin): tick-1's swept segment is degenerate.
+                    prev_offset: DVec3::ZERO,
                 }
             });
             // Idempotent re-attach: refresh the fence if the gateway's advanced.
@@ -1092,6 +1247,8 @@ fn on_gateway_msg(
                 yaw: 0.0,
                 pitch: 0.0,
                 last_applied_seq: None,
+                // Seed to the spawn offset (origin): tick-1's swept segment is degenerate.
+                prev_offset: DVec3::ZERO,
             });
             // STALE-GATEWAY-DROP (the binding day-one rule, `wire::session_flow`): a slot whose
             // fence is BELOW the dot's session fence is a replay or a partitioned old gateway —
@@ -1391,18 +1548,27 @@ fn on_saga_demote(
     config: &StubConfig,
     clock: &ClockSample,
     dots: &mut Dots,
+    in_flight: &mut RequestInFlight,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
     match cmd.subject.transfer_subject_entity() {
-        Some(entity) => self_fence_foreign_entity(
-            &mut dots.0,
-            entity,
-            cmd.new_owner_fence,
-            cmd.transfer,
-            clock.local_tick,
-            stats,
-        ),
+        Some(entity) => {
+            self_fence_foreign_entity(
+                &mut dots.0,
+                entity,
+                cmd.new_owner_fence,
+                cmd.transfer,
+                clock.local_tick,
+                stats,
+            );
+            // Slice 3e: the durable COMMIT terminal at the source — POSITIVELY clear the crossing
+            // latch (the triggered durable crossing committed; the entity may trigger again). A latch
+            // present-and-removed increments the cleared counter; an absent latch is a clean no-op.
+            if in_flight.0.remove(&entity).is_some() {
+                stats.crossing_latches_cleared += 1;
+            }
+        }
         None => stats.saga_demote_no_entity += 1,
     }
     // Ack DemoteAck UNCONDITIONALLY — the saga's demote-before-promote ordering gates the dest
@@ -1414,6 +1580,64 @@ fn on_saga_demote(
             transfer: cmd.transfer,
         }),
     );
+}
+
+/// SOURCE consumer of the orchestrator's `TransientCrossingGrant` (Slice 3e): the grant carries the
+/// resolved dest + fence + batch id for a transient this shard flagged via `TransientCrossingRequest`,
+/// so flip the SOURCE Transient `Held → Crossing{dest, to_realm, dst_realm_fence, batch}` — the four
+/// grant fields match `TransientStatus::Crossing` EXACTLY (a straight field assign). `emit_transient_
+/// batch` then ships it. A grant for a NON-Entity subject, an UNKNOWN transient, or a non-`Held` one (a
+/// redelivery after the flip) is a counted no-op (degrade, never panic). Monomorphic so every arm is
+/// covered once (HR5).
+fn on_transient_crossing_grant(
+    grant: TransientCrossingGrant,
+    owned: &mut OwnedTransients,
+    stats: &mut StubStats,
+) {
+    let Some(entity) = grant.subject.transfer_subject_entity() else {
+        stats.transient_grant_no_entity += 1;
+        return;
+    };
+    // Flip ONLY a SETTLED `Held{outbound: None}` transient → Crossing. A `Held{outbound: Some}` (already
+    // emitted this batch), a `Crossing` (already flipped), or an Arriving/Departing (mid-handoff) item is
+    // a counted no-op — so a REDELIVERED grant never re-flips + re-emits an in-flight batch (at-least-once).
+    match owned.0.get_mut(&entity) {
+        Some(t) if matches!(t.status, TransientStatus::Held { outbound: None }) => {
+            t.status = TransientStatus::Crossing {
+                dest: grant.dest,
+                to_realm: grant.to_realm,
+                dst_realm_fence: grant.dst_realm_fence,
+                batch: grant.batch,
+            };
+            stats.transient_grants_applied += 1;
+        }
+        // Unknown transient OR one already crossing/emitted/handing-off (a redelivery) — counted no-op.
+        Some(_) | None => stats.transient_grant_noop += 1,
+    }
+}
+
+/// SOURCE consumer of the orchestrator's `CrossingAborted` (Slice 3e): the crossing resolve/start saga
+/// aborted pre-CAS, so CLEAR the subject's `RequestInFlight` latch — but ONLY if it still holds THIS
+/// aborted transfer id (a stale abort for a superseded / re-latched transfer must not free a live
+/// crossing). The positive re-cross signal (never a bounded TTL). The full abort EGRESS is Slice 3f;
+/// this consumer arm lands now so the wire arm is exercised. Monomorphic.
+fn on_crossing_aborted(
+    abort: CrossingAborted,
+    in_flight: &mut RequestInFlight,
+    stats: &mut StubStats,
+) {
+    let Some(entity) = abort.subject.transfer_subject_entity() else {
+        stats.crossing_abort_no_entity += 1;
+        return;
+    };
+    // Clear ONLY on an exact id match (`== Some(&abort.transfer)`) — equality over the value so the
+    // false arm is a covered no-op, not an uncoverable `matches!` region (HR5(d)).
+    if in_flight.0.get(&entity) == Some(&abort.transfer) {
+        in_flight.0.remove(&entity);
+        stats.crossing_latches_cleared += 1;
+    } else {
+        stats.crossing_abort_stale += 1;
+    }
 }
 
 /// DEST consumer of the saga-pushed ordered `Promote` (1d.5b.3b, D-2): the SECOND half of
@@ -1644,6 +1868,8 @@ fn re_home_apply(
             yaw: 0.0,
             pitch: 0.0,
             last_applied_seq: None,
+            // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
+            prev_offset: pose.pos.offset(),
         },
     );
     stats.re_home_adopted += 1;
@@ -2053,6 +2279,324 @@ fn drain_pending_crossing(
     );
 }
 
+/// Slice 3e — THE per-shard geometric transfer-TRIGGER: evaluate every owned dot + held transient
+/// against the realm boundaries this shard carries, and — on a `should_commit` rising edge / immediate
+/// exit — fan out ONE crossing egress by the winning boundary's `CrossEffect` × the subject's
+/// `DurabilityClass`. INERT in production through P3: `RealmBoundaries` is empty (the composer plants
+/// none — behaviour-identical); its logic is exercised only by the sim integration tests.
+///
+/// A BRANCHLESS SHIM (HR5): the system body is iterate → delegate; ALL `if`/`match`/`&&`/`?` live in
+/// the monomorphic helpers [`evaluate_one_subject`] / [`crossing_candidates`] / [`boundary_depth`] /
+/// [`fan_out_crossing`] / [`retain_live`]. The heavy geometry lives in `vd_core::geometry`
+/// (`should_commit` / `resolve_winner_ix` / `update_membership`) — this file only wires it.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_realm_boundaries(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    authority: Res<RealmAuthority>,
+    boundaries: Res<RealmBoundaries>,
+    mut dots: ResMut<Dots>,
+    mut owned_transients: ResMut<OwnedTransients>,
+    mut progress: ResMut<CrossingProgress>,
+    mut in_flight: ResMut<RequestInFlight>,
+    mut interest: ResMut<InterestZones>,
+    mut stats: ResMut<StubStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    // Authority gate (mirrors `emit_transient_batch`): a shard without its realm lease triggers no
+    // crossing — the `_realm_fence` (the realm-authority fence) is the durable `subject_fence` and the
+    // transient `src_realm_fence` the egress carries.
+    let Some(realm_fence) = authority.0 else {
+        return;
+    };
+    // EVICTION (lazy retain, DRY single site): drop per-entity state for any subject no longer resident
+    // (a logged-out dot / a released transient), so the maps never leak. The live set is the union of
+    // owned-dot entities and held-transient keys.
+    let live: BTreeSet<EntityId> = dots
+        .0
+        .values()
+        .map(|d| d.entity)
+        .chain(owned_transients.0.keys().copied())
+        .collect();
+    retain_live(&mut progress.0, &live);
+    retain_live(&mut in_flight.0, &live);
+    retain_live(&mut interest.0, &live);
+
+    let ctx = CrossingCtx {
+        config: &config,
+        clock: &clock,
+        boundaries: &boundaries.0,
+        realm_fence,
+    };
+    // Per owned dot (only those this shard SIMULATES) — the durable subjects.
+    for dot in dots.0.values_mut().filter(|d| d.authority.simulates()) {
+        let cur = dot.pose.pos.offset();
+        dot.prev_offset = evaluate_one_subject(
+            &ctx,
+            dot.entity,
+            cur,
+            dot.prev_offset,
+            dot.authority.fence(),
+            &mut progress.0,
+            &mut in_flight.0,
+            &mut interest.0,
+            &mut stats,
+            &mut outbox,
+        );
+    }
+    // Per HELD transient (`is_held()` — the counted tier; Arriving/Departing are excluded) — the
+    // transient subjects. The transient carries no per-entity authority fence; its egress rides the
+    // shard's `src_realm_fence`, so the helper's `subject_fence` argument is the realm fence.
+    for (entity, t) in owned_transients
+        .0
+        .iter_mut()
+        .filter(|(_, t)| t.status.is_held())
+    {
+        let cur = t.pose.pos.offset();
+        t.prev_offset = evaluate_one_subject(
+            &ctx,
+            *entity,
+            cur,
+            t.prev_offset,
+            realm_fence,
+            &mut progress.0,
+            &mut in_flight.0,
+            &mut interest.0,
+            &mut stats,
+            &mut outbox,
+        );
+    }
+}
+
+/// Read-only per-tick context shared by every subject evaluation (Slice 3e).
+struct CrossingCtx<'a> {
+    config: &'a StubConfig,
+    clock: &'a ClockSample,
+    boundaries: &'a [RealmBoundary],
+    /// The realm-authority fence — the durable subject's `subject_fence` fallback AND the transient
+    /// `src_realm_fence`.
+    realm_fence: Fence,
+}
+
+/// Retain only the entries whose key is a LIVE subject (the DRY eviction primitive, Slice 3e). A
+/// monomorphic `retain` over any `BTreeMap<EntityId, V>` so the closure's branch is covered ONCE.
+fn retain_live<V>(map: &mut BTreeMap<EntityId, V>, live: &BTreeSet<EntityId>) {
+    map.retain(|e, _| live.contains(e));
+}
+
+/// The FULL per-subject crossing evaluation (Slice 3e), monomorphic so every branch is covered ONCE
+/// here (HR5), not smeared across the dot- and transient-loops. Returns the value to store back into
+/// the subject's `prev_offset` (always `cur` — so next tick's segment is `prev → cur`). Steps:
+/// pick the winning boundary (`resolve_winner_ix` over the candidates), advance the membership dwell,
+/// ask `should_commit`, and on a rising edge fan the crossing out by effect × durability.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_one_subject(
+    ctx: &CrossingCtx<'_>,
+    entity: EntityId,
+    cur: DVec3,
+    prev: DVec3,
+    subject_fence: Fence,
+    progress: &mut BTreeMap<EntityId, CrossingState>,
+    in_flight: &mut BTreeMap<EntityId, TransferId>,
+    interest: &mut BTreeMap<EntityId, RealmId>,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) -> DVec3 {
+    // No boundary won this tick → nothing to evaluate; still store `cur` as the next `prev`.
+    let Some((ix, _dir)) = resolve_winner_ix(&crossing_candidates(ctx.boundaries, prev, cur))
+    else {
+        return cur;
+    };
+    let winner = &ctx.boundaries[ix];
+    let center = winner.center.offset();
+    let swept = winner.shape.swept(prev - center, cur - center);
+    let ms = winner.shape.membership_scalar(cur - center);
+    let state = progress.entry(entity).or_default();
+    // Per-(entity, boundary) dwell: if the winning boundary CHANGED since last tick (the entity moved
+    // between two disjoint regions), this boundary's rising-edge dwell restarts from its own create
+    // edge — carrying the prior winner's `was_member`/`inward_ticks` would corrupt it (its hysteresis
+    // reads the destroy edge, its dwell already past `n_entry` → a lost inward commit). The commit
+    // COOLDOWN (`last_commit_tick`) is per-ENTITY and is intentionally preserved across the change.
+    if state.winner_ix != Some(ix) {
+        state.winner_ix = Some(ix);
+        state.inward_ticks = 0;
+        state.was_member = false;
+    }
+    let now_member = winner.band.update_membership(state.was_member, ms);
+    // INCREMENT FIRST (the pre-increment `should_commit` relies on): the in-band dwell reaches
+    // `n_entry` on exactly one tick.
+    state.inward_ticks = if now_member {
+        state.inward_ticks.saturating_add(1)
+    } else {
+        0
+    };
+    let since_commit = state
+        .last_commit_tick
+        // `.min(u32::MAX)` before the cast: `saturating_sub` is u64, and a raw `as u32` truncation is
+        // non-monotone (a gap of `2^32 + k` would read as `k` and falsely re-suppress). Saturating keeps
+        // the cooldown compare monotone. (Reachable only after ~2^32 ticks between commits — defensive.)
+        .map(|t| (ctx.clock.local_tick.0.saturating_sub(t.0)).min(u32::MAX as u64) as u32);
+    if let Some(dir) = should_commit(
+        swept,
+        now_member,
+        state.inward_ticks,
+        since_commit,
+        &ctx.config.boundary,
+    ) {
+        fan_out_crossing(
+            ctx,
+            entity,
+            subject_fence,
+            winner,
+            dir,
+            state,
+            in_flight,
+            interest,
+            stats,
+            outbox,
+        );
+    }
+    // Write `was_member` back LAST (the state was borrowed mutably above via `entry`); `prev_offset`
+    // is returned to the caller for the write.
+    state.was_member = now_member;
+    cur
+}
+
+/// Build the `(depth, to_realm, direction, ix)` candidate slice `resolve_winner_ix` consumes (Slice
+/// 3e). One candidate per boundary whose swept segment is RELEVANT this tick (a finite membership
+/// scalar — a degenerate/NaN geometry contributes nothing). `depth` is the boundary's parent-chain
+/// length (innermost wins). Monomorphic — the `match`/filter branching is covered once here.
+fn crossing_candidates(
+    boundaries: &[RealmBoundary],
+    prev: DVec3,
+    cur: DVec3,
+) -> Vec<(u32, RealmId, Direction, usize)> {
+    boundaries
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, b)| {
+            let center = b.center.offset();
+            let swept = b.shape.swept(prev - center, cur - center);
+            // Only a boundary the segment actually relates to (entered/exited/inside/through) is a
+            // candidate — a clean StaysOutside is not a crossing. A degenerate (non-finite) membership
+            // scalar is skipped (never trust a corrupt pose into the winner order).
+            let ms = b.shape.membership_scalar(cur - center);
+            candidate_direction(swept)
+                .filter(|_| ms.is_finite())
+                .map(|dir| (boundary_depth(boundaries, ix), b.to_realm, dir, ix))
+        })
+        .collect()
+}
+
+/// The `Direction` a swept classification implies for the winner order (Slice 3e), or `None` when the
+/// segment does not relate to the boundary (`StaysOutside`). Inward-ish (`Inward`/`StaysInside`) maps
+/// to `Inward`; leaving (`Outward`/`ThroughAndBack`) to `Outward`. This is ONLY the candidate's
+/// tiebreak key — the ACTUAL commit direction is `should_commit`'s (a `StaysInside` candidate whose
+/// dwell matures commits `Inward` there). Monomorphic so the match is covered once.
+fn candidate_direction(swept: ShellCrossing) -> Option<Direction> {
+    match swept {
+        ShellCrossing::Inward | ShellCrossing::StaysInside => Some(Direction::Inward),
+        ShellCrossing::Outward | ShellCrossing::ThroughAndBack => Some(Direction::Outward),
+        ShellCrossing::StaysOutside => None,
+    }
+}
+
+/// The parent-chain length of boundary `ix` (Slice 3e): walk `parent` through the boundary slice,
+/// counting hops until the top level (`None`) or a broken/cyclic link. Innermost (longest chain) wins
+/// `resolve_winner_ix`. Bounded by the slice length (a self-referential or missing parent stops the
+/// walk), so it always terminates. Monomorphic — the loop's branches are covered once.
+fn boundary_depth(boundaries: &[RealmBoundary], ix: usize) -> u32 {
+    let mut depth = 0u32;
+    let mut parent = boundaries[ix].parent;
+    // Bound the walk by the slice length so a mis-authored cycle can never spin.
+    for _ in 0..boundaries.len() {
+        let Some(p) = parent else {
+            break;
+        };
+        let Some(next) = boundaries.iter().find(|b| b.realm == p) else {
+            break;
+        };
+        depth = depth.saturating_add(1);
+        parent = next.parent;
+    }
+    depth
+}
+
+/// Fan the committed crossing out by the winning boundary's `CrossEffect` × the subject's
+/// `DurabilityClass` (Slice 3e), the ONE dispatch site (HR2 policy fan-out on one machinery).
+/// Monomorphic so every arm is covered once:
+/// - `Interest` → record the entered realm in `InterestZones` (WRITE-ONLY this slice; no cooldown arm).
+/// - `Authority` + `Durable` → emit ONE `CrossingRequest` (latched in `RequestInFlight`, skipped if
+///   already in flight) + arm the cooldown.
+/// - `Authority` + `Transient` → emit a `TransientCrossingRequest` (batched-grant path) + arm cooldown.
+#[allow(clippy::too_many_arguments)]
+fn fan_out_crossing(
+    ctx: &CrossingCtx<'_>,
+    entity: EntityId,
+    subject_fence: Fence,
+    winner: &RealmBoundary,
+    _dir: Direction,
+    state: &mut CrossingState,
+    in_flight: &mut BTreeMap<EntityId, TransferId>,
+    interest: &mut BTreeMap<EntityId, RealmId>,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let from_realm = ctx.config.realm;
+    let to_realm = winner.to_realm;
+    match (winner.effect, durability_of(entity)) {
+        (vd_core::geometry::CrossEffect::Interest, _) => {
+            // Interest-only: record the entered realm; NO authority egress, NO cooldown (a ghost band
+            // is idempotent — the reader re-derives from the map, so re-writes are free).
+            interest.insert(entity, to_realm);
+            stats.crossing_interest_updates += 1;
+        }
+        (vd_core::geometry::CrossEffect::Authority, DurabilityClass::Durable) => {
+            // The durable transfer request — latched so exactly ONE fires per crossing. The `Vacant`
+            // arm inserts the deterministic latch id + emits + arms the cooldown; the `Occupied` arm
+            // (already in-flight) is the SUPPRESS no-op. `Entry` (not `contains_key`+`insert`) so there
+            // is one map lookup and clippy's map_entry lint is satisfied.
+            use std::collections::btree_map::Entry;
+            match in_flight.entry(entity) {
+                Entry::Vacant(slot) => {
+                    let subject = DirectoryKey::Entity(entity);
+                    let transfer = crossing_transfer_id(subject, subject_fence);
+                    slot.insert(transfer);
+                    outbox.push_flow(
+                        ctx.config.orchestrator,
+                        MsgClass::Saga,
+                        &InterShardFlow::CrossingRequest(CrossingRequest {
+                            subject,
+                            from_realm,
+                            to_realm,
+                            subject_fence,
+                        }),
+                    );
+                    state.last_commit_tick = Some(ctx.clock.local_tick);
+                    stats.crossings_requested += 1;
+                }
+                Entry::Occupied(_) => stats.crossings_suppressed_in_flight += 1,
+            }
+        }
+        (vd_core::geometry::CrossEffect::Authority, DurabilityClass::Transient) => {
+            // The transient crossing request (the batched-grant path — no per-entity latch; the batch
+            // idempotency lives in the grant/adopt journal). `src_realm_fence` is the realm fence.
+            outbox.push_flow(
+                ctx.config.orchestrator,
+                MsgClass::Saga,
+                &InterShardFlow::TransientCrossingRequest(TransientCrossingRequest {
+                    subject: DirectoryKey::Entity(entity),
+                    from_realm,
+                    to_realm,
+                    src_realm_fence: ctx.realm_fence,
+                }),
+            );
+            state.last_commit_tick = Some(ctx.clock.local_tick);
+            stats.transient_crossings_requested += 1;
+        }
+    }
+}
+
 /// Per-shard system (D-7b): RE-ADVANCE every AUTHORITATIVELY-HELD transient's pose by its closed-form
 /// continuity each tick — debris is a MOVING object, so a frozen-on-cut pose would teleport. Runs on
 /// BOTH source and dest, each from its OWN stamped origin (no double-advance: the dest re-advances
@@ -2187,15 +2731,18 @@ fn adopt_transient_batch(
         StepOutcome::FirstApply => {
             let adopted = items.len() as u64;
             for item in items {
+                // SANITIZE network input at the decode-ingress chokepoint (D-7b): a corrupt /
+                // diverged sender could carry NaN/Inf, which would poison the ballistic
+                // re-advance + the render — never trust the wire pose.
+                let pose = item.pose.sanitized();
                 owned.0.insert(
                     item.entity,
                     Transient {
-                        // SANITIZE network input at the decode-ingress chokepoint (D-7b): a corrupt /
-                        // diverged sender could carry NaN/Inf, which would poison the ballistic
-                        // re-advance + the render — never trust the wire pose.
-                        pose: item.pose.sanitized(),
+                        pose,
                         anchor_fence: dst_realm_fence,
                         status: TransientStatus::Arriving { batch: transfer },
+                        // Seed to the adopted pose offset: the first evaluation segment is degenerate.
+                        prev_offset: pose.pos.offset(),
                     },
                 );
             }
@@ -2523,6 +3070,7 @@ fn on_directory_reply(
     pending: &mut PendingCrossings,
     registration: &mut GhostColliderRegistration,
     owned_transients: &mut OwnedTransients,
+    in_flight: &mut RequestInFlight,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
@@ -2583,9 +3131,28 @@ fn on_directory_reply(
             on_transient_discard(discard, owned_transients, applied, stats);
             return;
         }
-        // SOURCE: the saga-pushed ordered Demote (1d.5b.1) — Owned→Frozen→Ghost + DemoteAck.
+        // SOURCE: the saga-pushed ordered Demote (1d.5b.1) — Owned→Frozen→Ghost + DemoteAck. Slice 3e:
+        // the durable COMMIT terminal at the source, so it also POSITIVELY clears the subject's
+        // `RequestInFlight` crossing latch (a triggered durable crossing has committed — the entity is
+        // free to trigger again from its new home).
         Ok(InterShardFlow::Demote(cmd)) => {
-            on_saga_demote(cmd, config, clock, dots, stats, outbox);
+            on_saga_demote(cmd, config, clock, dots, in_flight, stats, outbox);
+            return;
+        }
+        // SOURCE (Slice 3e): the orchestrator GRANTED a resolved dest for a `TransientCrossingRequest`
+        // — flip the source Transient to `Crossing` so `emit_transient_batch` ships it this/next tick.
+        // The grant's four fields EXACTLY match `TransientStatus::Crossing`. A grant for a
+        // non-Entity subject or an unknown/settled transient is a counted no-op (degrade, never panic).
+        Ok(InterShardFlow::TransientCrossingGrant(g)) => {
+            on_transient_crossing_grant(g, owned_transients, stats);
+            return;
+        }
+        // SOURCE (Slice 3e): the crossing resolve/start saga ABORTED pre-CAS — CLEAR the subject's
+        // `RequestInFlight` latch IF it still holds THIS transfer id (the positive re-cross signal; the
+        // full abort EGRESS is Slice 3f, but the consumer arm lands now so the wire arm is used). A
+        // mismatch (a stale abort for a superseded/re-latched transfer) is a counted no-op.
+        Ok(InterShardFlow::CrossingAborted(a)) => {
+            on_crossing_aborted(a, in_flight, stats);
             return;
         }
         // DEST: the saga-pushed ordered Promote (1d.5b.3b) — the REAL Ghost→Owned promoter + the
@@ -2974,6 +3541,8 @@ mod tests {
             lease_renew_interval_ticks: 0,
             self_fence_grace_ticks: 0,
             snapshot_datagram_budget: 1100,
+            boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+            request_ttl_ticks: 0,
         }
     }
 
@@ -3197,6 +3766,7 @@ mod tests {
                 pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(98)),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
+                prev_offset: DVec3::ZERO,
             },
         );
 
@@ -3275,6 +3845,7 @@ mod tests {
                     pose: moving,
                     anchor_fence: Fence(1),
                     status: TransientStatus::Held { outbound: None },
+                    prev_offset: DVec3::ZERO,
                 },
             );
             owned.0.insert(
@@ -3285,6 +3856,7 @@ mod tests {
                     status: TransientStatus::Arriving {
                         batch: TransferId(1),
                     },
+                    prev_offset: DVec3::ZERO,
                 },
             );
             owned.0.insert(
@@ -3295,6 +3867,7 @@ mod tests {
                     status: TransientStatus::Departing {
                         batch: TransferId(1),
                     },
+                    prev_offset: DVec3::ZERO,
                 },
             );
         }
@@ -3339,6 +3912,7 @@ mod tests {
                     dst_realm_fence: Fence(2),
                     batch,
                 },
+                prev_offset: DVec3::ZERO,
             },
         );
         let sent = rig.tick(vec![]);
@@ -3403,6 +3977,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: crossing,
+                prev_offset: DVec3::ZERO,
             },
         );
         let sent = rig.tick(vec![]);
@@ -3493,6 +4068,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(2),
             status,
+            prev_offset: DVec3::ZERO,
         };
         let mut owned = OwnedTransients::default();
         owned.0.insert(
@@ -3690,6 +4266,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
+                prev_offset: DVec3::ZERO,
             },
         );
         let takeover = DirectoryReply::Head {
@@ -3730,6 +4307,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
+                prev_offset: DVec3::ZERO,
             },
         );
         let revoked = DirectoryReply::Head {
@@ -3793,6 +4371,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(2),
             status,
+            prev_offset: DVec3::ZERO,
         };
         let mut owned = OwnedTransients::default();
         // Four Debris in handover (one per tier).
@@ -3867,6 +4446,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(3),
             status,
+            prev_offset: DVec3::ZERO,
         };
         let mut owned = OwnedTransients::default();
         let dep_this = EntityId::pack(EntityKind::Debris, 1, 1, 0);
@@ -3951,6 +4531,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(4),
             status,
+            prev_offset: DVec3::ZERO,
         };
         let mut owned = OwnedTransients::default();
         let arr_this = EntityId::pack(EntityKind::Debris, 1, 1, 0);
@@ -4081,6 +4662,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Arriving { batch },
+                prev_offset: DVec3::ZERO,
             },
         );
         let discard = TransientHandoff {
@@ -4123,6 +4705,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(1),
             status: TransientStatus::Arriving { batch: b },
+            prev_offset: DVec3::ZERO,
         };
         {
             let mut owned = rig.world.resource_mut::<OwnedTransients>();
@@ -4143,6 +4726,7 @@ mod tests {
                     pose: transient_pose(),
                     anchor_fence: Fence(1),
                     status: TransientStatus::Held { outbound: None },
+                    prev_offset: DVec3::ZERO,
                 },
             );
         }
@@ -4177,6 +4761,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
+                prev_offset: DVec3::ZERO,
             },
         );
         let sent = rig.tick(vec![]);
@@ -4308,6 +4893,7 @@ mod tests {
                 status: TransientStatus::Held {
                     outbound: Some(src_batch),
                 },
+                prev_offset: DVec3::ZERO,
             },
         );
         let rel = TransientHandoff {
@@ -4374,6 +4960,7 @@ mod tests {
                 status: TransientStatus::Departing {
                     batch: abandon_batch,
                 },
+                prev_offset: DVec3::ZERO,
             },
         );
         let sent = rig.tick(vec![wire_msg(
@@ -4585,6 +5172,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             last_applied_seq: None,
+            prev_offset: DVec3::ZERO,
         };
         let granted_e = EntityId::pack(EntityKind::Player, 10, 1, 1);
         let provisional_e = EntityId::pack(EntityKind::Player, 10, 2, 2);
@@ -5329,6 +5917,7 @@ mod tests {
                         yaw: 0.0,
                         pitch: 0.0,
                         last_applied_seq: None,
+                        prev_offset: DVec3::ZERO,
                     },
                 );
             }
@@ -7117,6 +7706,7 @@ mod tests {
                     dst_realm_fence: Fence(2),
                     batch: TransferId(0xB3),
                 },
+                prev_offset: DVec3::ZERO,
             },
         );
         assert_eq!(
@@ -7147,5 +7737,829 @@ mod tests {
             Some(Durability::Retained),
             "the band-exit Ghost::Despawn MUST push Durability::Retained (no re-driver)"
         );
+    }
+
+    // ---- Slice 3d/3e (the geometric transfer trigger) -----------------------------------------
+
+    use vd_core::geometry::{BoundaryTuning, CrossEffect, RealmBoundary};
+
+    const OTHER_REALM: RealmId = RealmId::Planet(42);
+    const TRIG_SESSION: SessionId = SessionId(0xBB);
+
+    /// A durable-entity shell boundary centred at the origin whose create edge (`r_soi·1.15`) is large
+    /// enough that a dot placed a few hundred metres out is comfortably a member. `effect` chooses
+    /// Authority (a transfer) vs Interest (a ghost). Slow v_rel/dt so the band is factor-sized, not
+    /// velocity-widened.
+    fn shell_boundary(effect: CrossEffect) -> RealmBoundary {
+        RealmBoundary::shell(
+            RealmId::System(7), // this shard's realm (the boundary's exterior side)
+            LatticePos::local(DVec3::ZERO),
+            1000.0, // r_soi
+            1.15,   // create_factor → create edge 1150 m
+            1.30,   // destroy_factor → destroy edge 1300 m
+            1.0,    // v_rel (slow)
+            0.05,   // dt
+            0.5,    // pad_floor
+            1.0,    // k_safety_extra
+            None,   // top-level (depth 0)
+            OTHER_REALM,
+            effect,
+        )
+    }
+
+    /// Insert an OWNED dot (a durable Player by default) at frame-local `offset`, its `prev_offset`
+    /// seeded to the SAME offset (a fresh spawn — the first evaluated segment is degenerate).
+    fn insert_owned_dot(rig: &mut Rig, session: SessionId, entity: EntityId, offset: DVec3) {
+        rig.world.resource_mut::<Dots>().0.insert(
+            session,
+            Dot {
+                entity,
+                account: AccountId(1),
+                session_fence: Fence(1),
+                gateway: GATEWAY,
+                granted: true,
+                input_active: false,
+                adopting: false,
+                authority: Authority::Owned { fence: Fence(1) },
+                departing: false,
+                entity_fence: Fence(1),
+                pose: StampedPose::at_rest(config().frame, offset, UniverseTick(100)),
+                yaw: 0.0,
+                pitch: 0.0,
+                last_applied_seq: None,
+                prev_offset: offset,
+            },
+        );
+    }
+
+    /// Move an owned dot's frame-local offset (its render/trigger position) without touching
+    /// `prev_offset` (the trigger writes that itself each tick).
+    fn move_dot(rig: &mut Rig, session: SessionId, offset: DVec3) {
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&session)
+            .expect("the owned dot")
+            .pose
+            .pos = LatticePos::local(offset);
+    }
+
+    /// Every `CrossingRequest` in the outbox (decoded), so a test asserts the exact count.
+    fn crossing_requests(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<CrossingRequest> {
+        sent.iter()
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                    Ok(InterShardFlow::CrossingRequest(r)) => Some(r),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Every `TransientCrossingRequest` in the outbox (decoded).
+    fn transient_crossing_requests(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+    ) -> Vec<TransientCrossingRequest> {
+        sent.iter()
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                    Ok(InterShardFlow::TransientCrossingRequest(r)) => Some(r),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    #[test]
+    fn durable_dot_dwelling_in_band_triggers_exactly_one_crossing_request() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 1);
+        // Inside the band (ms = 100 m < the 1150 m create edge): a member every tick.
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+
+        // n_entry = 3 (DEFAULT): the rising edge fires on the 3rd consecutive in-band tick. Run enough
+        // ticks to cross that edge, holding position (so `now_member` stays true).
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&all);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "exactly ONE CrossingRequest across the dwell"
+        );
+        assert_eq!(reqs[0].subject, DirectoryKey::Entity(entity));
+        assert_eq!(reqs[0].from_realm, config().realm);
+        assert_eq!(reqs[0].to_realm, OTHER_REALM);
+        assert_eq!(reqs[0].subject_fence, Fence(1));
+        // The latch is set to the deterministic id BOTH ends derive.
+        assert_eq!(
+            rig.world.resource::<RequestInFlight>().0.get(&entity),
+            Some(&crossing_transfer_id(
+                DirectoryKey::Entity(entity),
+                Fence(1)
+            )),
+        );
+        let stats = rig.world.resource::<StubStats>();
+        assert_eq!(stats.crossings_requested, 1);
+        // The cooldown was armed (`last_commit_tick` set) on the emit.
+        assert!(
+            rig.world
+                .resource::<CrossingProgress>()
+                .0
+                .get(&entity)
+                .expect("progress")
+                .last_commit_tick
+                .is_some(),
+            "the commit armed the cooldown",
+        );
+    }
+
+    #[test]
+    fn the_in_flight_latch_suppresses_a_second_request() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 2);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        // Dwell in-band to the FIRST commit (sets the latch + arms the cooldown).
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        assert_eq!(crossing_requests(&all).len(), 1, "the first crossing fired");
+        assert!(
+            rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity)
+        );
+        // WITHOUT sending the Demote terminal (so the latch STAYS set), drive a SECOND rising edge:
+        // leave the band (resets inward_ticks) long enough for the cooldown to lapse, then re-enter and
+        // dwell to n_entry again. This second `should_commit` fires Inward — but the latch is still held,
+        // so `fan_out_crossing` takes the SUPPRESS arm (no second request).
+        for t in 8..12 {
+            rig.set_local_tick(t);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(2000.0, 0.0, 0.0)); // outside the destroy edge
+            all.extend(rig.tick(vec![]));
+        }
+        for t in 12..18 {
+            rig.set_local_tick(t);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(100.0, 0.0, 0.0)); // back inside, re-dwell
+            all.extend(rig.tick(vec![]));
+        }
+        assert_eq!(
+            crossing_requests(&all).len(),
+            1,
+            "the RequestInFlight latch holds it to ONE request across the second dwell",
+        );
+        assert!(
+            rig.world
+                .resource::<StubStats>()
+                .crossings_suppressed_in_flight
+                > 0,
+            "the second matured edge hit the in-flight SUPPRESS arm",
+        );
+    }
+
+    #[test]
+    fn a_transient_crossing_emits_a_transient_crossing_request() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        // A Debris entity is Transient → the transient fan-out arm.
+        let entity = EntityId::pack(EntityKind::Debris, 10, 1, 3);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                pose: StampedPose::at_rest(
+                    config().frame,
+                    DVec3::new(100.0, 0.0, 0.0),
+                    UniverseTick(100),
+                ),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+                prev_offset: DVec3::new(100.0, 0.0, 0.0),
+            },
+        );
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        let reqs = transient_crossing_requests(&all);
+        assert_eq!(reqs.len(), 1, "exactly ONE TransientCrossingRequest");
+        assert_eq!(reqs[0].subject, DirectoryKey::Entity(entity));
+        assert_eq!(reqs[0].to_realm, OTHER_REALM);
+        assert_eq!(reqs[0].src_realm_fence, Fence(1));
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .transient_crossings_requested,
+            1
+        );
+        // Transients are NOT latched in RequestInFlight (the batch journal dedups instead).
+        assert!(rig.world.resource::<RequestInFlight>().0.is_empty());
+    }
+
+    #[test]
+    fn an_interest_boundary_writes_the_interest_zone_and_emits_nothing() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Interest));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 4);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        // Split the two emptiness checks (HR5(d): a single `assert!(a && b)` leaves the short-circuit
+        // false-branch of `a` uncovered).
+        assert!(
+            crossing_requests(&all).is_empty(),
+            "an Interest boundary emits NO durable CrossingRequest",
+        );
+        assert!(
+            transient_crossing_requests(&all).is_empty(),
+            "an Interest boundary emits NO TransientCrossingRequest",
+        );
+        assert_eq!(
+            rig.world.resource::<InterestZones>().0.get(&entity),
+            Some(&OTHER_REALM),
+            "the entered realm is recorded in InterestZones",
+        );
+        assert!(rig.world.resource::<StubStats>().crossing_interest_updates > 0);
+    }
+
+    #[test]
+    fn an_empty_registry_or_no_realm_triggers_nothing() {
+        // (a) EMPTY boundary registry (the production-inert path): no candidates, no emit, no state.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 5);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        assert!(crossing_requests(&all).is_empty());
+        assert!(rig.world.resource::<RequestInFlight>().0.is_empty());
+        assert!(rig.world.resource::<CrossingProgress>().0.is_empty());
+
+        // (b) NO realm authority (never granted): the authority gate short-circuits BEFORE any work —
+        // even with a populated registry + an in-band dot.
+        let mut rig2 = Rig::new();
+        rig2.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        // A dot cannot normally exist without a realm, but the trigger's gate must be authority-first:
+        // force one in and confirm the early-return fires.
+        insert_owned_dot(&mut rig2, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        assert_eq!(rig2.world.resource::<RealmAuthority>().0, None);
+        let mut all2: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig2.set_local_tick(t);
+            all2.extend(rig2.tick(vec![]));
+        }
+        assert!(
+            crossing_requests(&all2).is_empty(),
+            "no realm authority ⇒ the trigger early-returns",
+        );
+        assert!(rig2.world.resource::<CrossingProgress>().0.is_empty());
+    }
+
+    #[test]
+    fn eviction_drops_state_for_a_departed_subject() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 6);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        // Dwell to a commit so all three maps hold an entry for the subject.
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            let _ = rig.tick(vec![]);
+        }
+        assert!(
+            rig.world
+                .resource::<CrossingProgress>()
+                .0
+                .contains_key(&entity)
+        );
+        assert!(
+            rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity)
+        );
+        // Also seed an InterestZones entry for the SAME subject so the interest-retain arm is covered.
+        rig.world
+            .resource_mut::<InterestZones>()
+            .0
+            .insert(entity, OTHER_REALM);
+        // The dot logs out (removed): next evaluation tick evicts its per-entity state (the DRY retain).
+        rig.world.resource_mut::<Dots>().0.remove(&TRIG_SESSION);
+        rig.set_local_tick(8);
+        let _ = rig.tick(vec![]);
+        assert!(
+            !rig.world
+                .resource::<CrossingProgress>()
+                .0
+                .contains_key(&entity)
+        );
+        assert!(
+            !rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity)
+        );
+        assert!(
+            !rig.world
+                .resource::<InterestZones>()
+                .0
+                .contains_key(&entity)
+        );
+    }
+
+    #[test]
+    fn the_grant_demux_flips_a_source_transient_to_crossing() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let entity = EntityId::pack(EntityKind::Debris, 10, 1, 7);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                pose: transient_pose(),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+                prev_offset: transient_pose().pos.offset(),
+            },
+        );
+        let grant = TransientCrossingGrant {
+            subject: DirectoryKey::Entity(entity),
+            dest: DEST_NODE,
+            to_realm: OTHER_REALM,
+            dst_realm_fence: Fence(3),
+            batch: TransferId(77),
+        };
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::TransientCrossingGrant(grant),
+        )]);
+        // The grant flipped Held → Crossing; `emit_transient_batch` (later in the SAME schedule tick)
+        // drained the Crossing into ONE batch and left it Held{outbound: Some(batch)}. The flip is
+        // proven by BOTH the emit having fired and the resulting outbound tag.
+        assert_eq!(
+            rig.world.resource::<StubStats>().transient_grants_applied,
+            1
+        );
+        assert_eq!(rig.world.resource::<StubStats>().transients_emitted, 1);
+        assert_eq!(
+            rig.world.resource::<OwnedTransients>().0[&entity].status,
+            TransientStatus::Held {
+                outbound: Some(TransferId(77)),
+            },
+            "the flipped Crossing was emitted, leaving Held{{outbound: Some(batch)}}",
+        );
+        // A REDELIVERED grant now finds Held{outbound: Some} (not a settled Held{None}) — a counted
+        // no-op, so no re-flip + re-emit.
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::TransientCrossingGrant(grant),
+        )]);
+        assert_eq!(rig.world.resource::<StubStats>().transient_grant_noop, 1);
+        assert_eq!(
+            rig.world.resource::<StubStats>().transients_emitted,
+            1,
+            "the redelivered grant did NOT re-emit",
+        );
+    }
+
+    #[test]
+    fn the_crossing_aborted_demux_clears_the_latch_on_an_id_match_only() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 8);
+        // A live owned dot for the entity so the trigger's eviction retain keeps its latch (the empty
+        // registry means no crossing is triggered; the dot only keeps the subject alive).
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(0.0, 0.0, 0.0));
+        let transfer = crossing_transfer_id(DirectoryKey::Entity(entity), Fence(1));
+        rig.world
+            .resource_mut::<RequestInFlight>()
+            .0
+            .insert(entity, transfer);
+        // A STALE abort (wrong id) preserves the latch (a superseded / re-latched crossing).
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::CrossingAborted(CrossingAborted {
+                subject: DirectoryKey::Entity(entity),
+                transfer: TransferId(999),
+            }),
+        )]);
+        assert!(
+            rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity),
+            "a mismatched abort does NOT clear the latch",
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossing_abort_stale, 1);
+        // The MATCHING abort clears it.
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::CrossingAborted(CrossingAborted {
+                subject: DirectoryKey::Entity(entity),
+                transfer,
+            }),
+        )]);
+        assert!(
+            !rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity)
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossing_latches_cleared,
+            1
+        );
+    }
+
+    #[test]
+    fn a_saga_demote_clears_the_durable_crossing_latch() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 9);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            let _ = rig.tick(vec![]);
+        }
+        assert!(
+            rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity)
+        );
+        // The durable COMMIT terminal at the source (the saga-pushed Demote) POSITIVELY clears it.
+        let demote = DemoteCmd {
+            transfer: crossing_transfer_id(DirectoryKey::Entity(entity), Fence(1)),
+            subject: DirectoryKey::Entity(entity),
+            new_owner_fence: Fence(2),
+            step_id: DEMOTE_STEP,
+        };
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::Demote(demote),
+        )]);
+        assert!(
+            !rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity),
+            "the durable Demote terminal cleared the crossing latch",
+        );
+        assert!(rig.world.resource::<StubStats>().crossing_latches_cleared >= 1);
+    }
+
+    #[test]
+    fn an_outward_crossing_commits_immediately() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 1);
+        // Start INSIDE the shell (r = 1000), previously a member.
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(500.0, 0.0, 0.0));
+        // Prime membership with one in-band tick.
+        rig.set_local_tick(2);
+        let _ = rig.tick(vec![]);
+        // Now step OUTSIDE the shell in one move (prev=500 inside → cur=5000 outside ⇒ swept Outward):
+        // an exit commits Outward IMMEDIATELY (no dwell), so a single tick emits the request.
+        move_dot(&mut rig, TRIG_SESSION, DVec3::new(5000.0, 0.0, 0.0));
+        rig.set_local_tick(3);
+        let out = rig.tick(vec![]);
+        assert_eq!(
+            crossing_requests(&out).len(),
+            1,
+            "an outward crossing commits immediately (no dwell)",
+        );
+    }
+
+    #[test]
+    fn a_boundary_hovering_dot_does_not_flap() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 2);
+        // Hover well inside the band (member every tick) for MANY ticks: hysteresis + the latch cap the
+        // emits at ≤ 1 across the whole k_dwell window (no per-tick flap).
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(200.0, 0.0, 0.0));
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..15 {
+            rig.set_local_tick(t);
+            // Jitter within the band each tick (still a member: ms stays < 1150).
+            let jitter = if t % 2 == 0 { 210.0 } else { 190.0 };
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(jitter, 0.0, 0.0));
+            all.extend(rig.tick(vec![]));
+        }
+        assert!(
+            crossing_requests(&all).len() <= 1,
+            "a boundary-hovering dot emits at most one request (no flap)",
+        );
+    }
+
+    #[test]
+    fn a_non_entity_grant_and_abort_are_counted_no_ops() {
+        // The `transfer_subject_entity() == None` arms of the two demuxes (a Realm subject).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::TransientCrossingGrant(TransientCrossingGrant {
+                subject: DirectoryKey::Realm(RealmId::System(7)),
+                dest: DEST_NODE,
+                to_realm: OTHER_REALM,
+                dst_realm_fence: Fence(3),
+                batch: TransferId(1),
+            }),
+        )]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().transient_grant_no_entity,
+            1
+        );
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::CrossingAborted(CrossingAborted {
+                subject: DirectoryKey::Realm(RealmId::System(7)),
+                transfer: TransferId(1),
+            }),
+        )]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossing_abort_no_entity,
+            1
+        );
+    }
+
+    #[test]
+    fn a_grant_for_an_unknown_transient_is_a_counted_no_op() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let entity = EntityId::pack(EntityKind::Debris, 10, 2, 3);
+        let _ = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::TransientCrossingGrant(TransientCrossingGrant {
+                subject: DirectoryKey::Entity(entity),
+                dest: DEST_NODE,
+                to_realm: OTHER_REALM,
+                dst_realm_fence: Fence(3),
+                batch: TransferId(1),
+            }),
+        )]);
+        assert_eq!(rig.world.resource::<StubStats>().transient_grant_noop, 1);
+    }
+
+    #[test]
+    fn a_boundary_the_segment_stays_outside_of_is_not_a_candidate() {
+        // A dot far OUTSIDE the shell (never a member, swept StaysOutside): no candidate, no state
+        // change — the `candidate_direction == None` filter arm.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 4);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(9000.0, 0.0, 0.0));
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            // Move around, but always well outside both the shell AND the destroy edge.
+            move_dot(
+                &mut rig,
+                TRIG_SESSION,
+                DVec3::new(9000.0 + t as f64, 0.0, 0.0),
+            );
+            all.extend(rig.tick(vec![]));
+        }
+        assert!(crossing_requests(&all).is_empty());
+        // No boundary won ⇒ no CrossingProgress entry was created (the `resolve_winner_ix == None` arm).
+        assert!(rig.world.resource::<CrossingProgress>().0.is_empty());
+    }
+
+    #[test]
+    fn a_nested_inner_boundary_wins_over_its_parent() {
+        // Two Authority shells sharing the origin: an OUTER (this shard's realm, depth 0) and an INNER
+        // nested under it (depth 1, a DIFFERENT to_realm). `resolve_winner_ix` picks the INNER (deeper),
+        // so the emitted crossing targets the inner realm — exercising `boundary_depth`'s parent walk.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let inner_realm = RealmId::Planet(7);
+        let outer = shell_boundary(CrossEffect::Authority); // realm System(7), parent None, to OTHER_REALM
+        let inner = RealmBoundary::shell(
+            OTHER_REALM,                    // the inner boundary's own realm
+            LatticePos::local(DVec3::ZERO), // coincident centre
+            1000.0,
+            1.15,
+            1.30,
+            1.0,
+            0.05,
+            0.5,
+            1.0,
+            Some(RealmId::System(7)), // nested under the OUTER boundary's realm ⇒ depth 1
+            inner_realm,
+            CrossEffect::Authority,
+        );
+        {
+            let mut b = rig.world.resource_mut::<RealmBoundaries>();
+            b.0.push(outer);
+            b.0.push(inner);
+        }
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 5);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&all);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].to_realm, inner_realm,
+            "the INNER (deeper) boundary wins the tiebreak",
+        );
+    }
+
+    #[test]
+    fn a_dangling_parent_link_stops_the_depth_walk() {
+        // A boundary whose `parent` realm has NO matching boundary in the slice: `boundary_depth`'s
+        // walk hits the `find(...) else break` arm (a broken/mis-authored parent link) and stops at
+        // depth 0 rather than spinning. The dot still commits (depth is only the winner tiebreak), so a
+        // CrossingRequest fires — proving the dangling-parent walk terminates cleanly.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let dangling = RealmBoundary::shell(
+            RealmId::System(7),
+            LatticePos::local(DVec3::ZERO),
+            1000.0,
+            1.15,
+            1.30,
+            1.0,
+            0.05,
+            0.5,
+            1.0,
+            Some(RealmId::System(999)), // no boundary owns System(999) ⇒ the find() misses
+            OTHER_REALM,
+            CrossEffect::Authority,
+        );
+        rig.world.resource_mut::<RealmBoundaries>().0.push(dangling);
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 6);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        assert_eq!(
+            crossing_requests(&all).len(),
+            1,
+            "a dangling parent link still commits (the walk terminated at depth 0)",
+        );
+    }
+
+    #[test]
+    fn entering_a_nested_boundary_while_still_inside_the_parent_starts_a_fresh_dwell() {
+        // REGRESSION (adversarial review, Slice 3d/3e): the per-entity `CrossingState` dwell counters
+        // are semantically per-*(entity, boundary)*. The real case that bites — a ship dwelling inside
+        // a STATION (B0, depth 0) then moving into a nested docking BAY (B1, depth 1) WITHOUT ever
+        // leaving the station. At the flip the entity is a CONTINUOUS member (`was_member` never drops),
+        // so B1 inherits B0's `was_member = true` (→ B1 reads the DESTROY edge) and `inward_ticks`
+        // already past `n_entry` (→ the `== n_entry` rising edge never re-fires) — the crossing into B1
+        // is LOST forever. B1 wins the flip by DEPTH (not by the `Direction` tiebreak), so the bug bites
+        // deterministically. Two Interest boundaries isolate it (no latch, no cooldown — only the dwell
+        // decides); the final `InterestZones` proves B1 was actually entered.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        const B1_REALM: RealmId = RealmId::Planet(43);
+        // B0: a large station shell at the origin, depth 0, this shard's realm System(7).
+        let b0 = RealmBoundary::shell(
+            RealmId::System(7),
+            LatticePos::local(DVec3::ZERO),
+            2000.0,
+            1.15,
+            1.30,
+            1.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            OTHER_REALM,
+            CrossEffect::Interest,
+        );
+        // B1: a small bay shell OFFSET inside B0, nested under it (parent System(7) ⇒ depth 1). At the
+        // origin the entity is deep inside B0 but well OUTSIDE B1 (|1000| ≫ B1's 520 m destroy edge).
+        let b1 = RealmBoundary::shell(
+            RealmId::Station(1),
+            LatticePos::local(DVec3::new(1000.0, 0.0, 0.0)),
+            400.0,
+            1.15,
+            1.30,
+            1.0,
+            0.05,
+            0.5,
+            1.0,
+            Some(RealmId::System(7)),
+            B1_REALM,
+            CrossEffect::Interest,
+        );
+        {
+            let mut b = rig.world.resource_mut::<RealmBoundaries>();
+            b.0.push(b0); // ix 0
+            b.0.push(b1); // ix 1
+        }
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 7);
+        // Start at the origin: inside B0, outside B1 ⇒ only B0 is a candidate (B1 StaysOutside).
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::ZERO);
+        // Phase 1: dwell inside B0 (accumulates `inward_ticks` past `n_entry`, sets `was_member = true`).
+        for t in 2..7 {
+            rig.set_local_tick(t);
+            let _ = rig.tick(vec![]);
+        }
+        assert_eq!(
+            rig.world.resource::<InterestZones>().0.get(&entity),
+            Some(&OTHER_REALM),
+            "phase 1: the entity is registered in B0 (the station) interest zone",
+        );
+        // Phase 2: move into B1 (still inside B0). The winner flips 0 → 1 by depth while membership is
+        // continuous — WITHOUT the per-boundary reset, B1's rising edge would never fire.
+        for t in 7..15 {
+            rig.set_local_tick(t);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(1000.0, 0.0, 0.0));
+            let _ = rig.tick(vec![]);
+        }
+        assert_eq!(
+            rig.world.resource::<InterestZones>().0.get(&entity),
+            Some(&B1_REALM),
+            "phase 2: the fresh per-boundary dwell committed the crossing into B1 (not lost)",
+        );
+        // Two DISTINCT interest commits happened (one per boundary) — the dwell restarted, it did not
+        // carry B0's saturated counters (which would have suppressed B1 forever).
+        assert!(
+            rig.world.resource::<StubStats>().crossing_interest_updates >= 2,
+            "each boundary's rising edge fired its own interest update",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "valid BoundaryTuning")]
+    fn a_zero_dwell_boundary_tuning_fails_loud_at_boot() {
+        let bad = StubConfig {
+            boundary: BoundaryTuning {
+                n_entry: 0,
+                ..BoundaryTuning::DEFAULT
+            },
+            ..config()
+        };
+        // The fail-loud validation in `register_stub_shard` (mirrors the tick-pair guard).
+        let _ = Rig::with_config(bad);
     }
 }

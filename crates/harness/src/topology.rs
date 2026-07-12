@@ -1019,6 +1019,8 @@ mod tests {
                 lease_renew_interval_ticks: 0,
                 self_fence_grace_ticks: 0,
                 snapshot_datagram_budget: 1100,
+                boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+                request_ttl_ticks: 0,
             },
         );
         topo.add_node(Box::new(shard));
@@ -1131,6 +1133,9 @@ mod tests {
                     pose,
                     anchor_fence: vd_core::Fence(7),
                     status: vd_sim::stub::TransientStatus::Held { outbound: None },
+                    // Slice 3d: the geometric-trigger prev-offset seed (no boundaries planted here, so
+                    // it is never read — seed to the pose offset for the degenerate first segment).
+                    prev_offset: pose.pos.offset(),
                 },
             );
             owned.insert(
@@ -1141,6 +1146,7 @@ mod tests {
                     status: vd_sim::stub::TransientStatus::Arriving {
                         batch: vd_core::TransferId(1),
                     },
+                    prev_offset: pose.pos.offset(),
                 },
             );
         }
