@@ -2,7 +2,7 @@
 //! in-module unit test to the design-named INTEGRATION location so the closed-set
 //! guarantee is a per-release gate, not a convention (audit SEAL-2).
 //!
-//! The closed taxonomy `InterShardFlow` (the FULL current 21-arm set — see `wire/src/lib.rs`
+//! The closed taxonomy `InterShardFlow` (the FULL current 22-arm set — see `wire/src/lib.rs`
 //! for the canonical enumeration; this header does NOT re-list it to avoid a second copy that
 //! drifts, the exact staleness the `arm_tripwire` below structurally prevents) is the ONLY
 //! shape that crosses a shard boundary; every arm has a
@@ -239,6 +239,7 @@ fn every_arm() -> Vec<InterShardFlow> {
             from_realm: RealmId::System(1),
             to_realm: RealmId::Planet(2),
             subject_fence: Fence(7),
+            session: SessionId(3),
         }),
         InterShardFlow::TransientCrossingRequest(vd_wire::intershard::TransientCrossingRequest {
             subject: DirectoryKey::Entity(eid(EntityKind::Debris)),
@@ -255,6 +256,13 @@ fn every_arm() -> Vec<InterShardFlow> {
             batch: TransferId(10),
         }),
         InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+            transfer: TransferId(10),
+        }),
+        // Slice 3f arm: the source→orch latch-clear CONFIRM (SIDE-EFFECTING, `(transfer,
+        // TRANSIENT_BATCH_STEP)`-keyed — the SAME journal as the `CrossingAborted` it answers). ReDriven,
+        // NOT producer-less — so the golden pin below still asserts exactly TWO producer-less arms.
+        InterShardFlow::CrossingAbortedAck(vd_wire::intershard::CrossingAborted {
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             transfer: TransferId(10),
         }),
@@ -288,7 +296,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::CrossingRequest(_)
         | InterShardFlow::TransientCrossingRequest(_)
         | InterShardFlow::TransientCrossingGrant(_)
-        | InterShardFlow::CrossingAborted(_) => {}
+        | InterShardFlow::CrossingAborted(_)
+        | InterShardFlow::CrossingAbortedAck(_) => {}
     }
 }
 

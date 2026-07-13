@@ -2328,8 +2328,10 @@ fn evaluate_realm_boundaries(
         boundaries: &boundaries.0,
         realm_fence,
     };
-    // Per owned dot (only those this shard SIMULATES) — the durable subjects.
-    for dot in dots.0.values_mut().filter(|d| d.authority.simulates()) {
+    // Per owned dot (only those this shard SIMULATES) — the durable subjects. `.iter_mut()` (not
+    // `.values_mut()`) so the `SessionId` key is in scope: a durable crossing carries the subject's
+    // session for the saga's gateway-routed `PrepareSubscribe` (Slice 3f).
+    for (session, dot) in dots.0.iter_mut().filter(|(_, d)| d.authority.simulates()) {
         let cur = dot.pose.pos.offset();
         dot.prev_offset = evaluate_one_subject(
             &ctx,
@@ -2337,6 +2339,7 @@ fn evaluate_realm_boundaries(
             cur,
             dot.prev_offset,
             dot.authority.fence(),
+            Some(*session),
             &mut progress.0,
             &mut in_flight.0,
             &mut interest.0,
@@ -2359,6 +2362,9 @@ fn evaluate_realm_boundaries(
             cur,
             t.prev_offset,
             realm_fence,
+            // A transient carries no session (its batch handoff emits no session-bearing command); it
+            // dispatches to the Transient arm, which never reads this. Slice 3f.
+            None,
             &mut progress.0,
             &mut in_flight.0,
             &mut interest.0,
@@ -2396,6 +2402,10 @@ fn evaluate_one_subject(
     cur: DVec3,
     prev: DVec3,
     subject_fence: Fence,
+    // The subject's session — `Some` for a durable dot (the durable `CrossingRequest` carries it so the
+    // orchestrator's saga can `PrepareSubscribe` to the client's gateway), `None` for a transient (whose
+    // batch path emits no session-bearing command and never reaches the durable arm). Slice 3f.
+    subject_session: Option<SessionId>,
     progress: &mut BTreeMap<EntityId, CrossingState>,
     in_flight: &mut BTreeMap<EntityId, TransferId>,
     interest: &mut BTreeMap<EntityId, RealmId>,
@@ -2447,6 +2457,7 @@ fn evaluate_one_subject(
             ctx,
             entity,
             subject_fence,
+            subject_session,
             winner,
             dir,
             state,
@@ -2534,6 +2545,7 @@ fn fan_out_crossing(
     ctx: &CrossingCtx<'_>,
     entity: EntityId,
     subject_fence: Fence,
+    subject_session: Option<SessionId>,
     winner: &RealmBoundary,
     _dir: Direction,
     state: &mut CrossingState,
@@ -2562,6 +2574,12 @@ fn fan_out_crossing(
                     let subject = DirectoryKey::Entity(entity);
                     let transfer = crossing_transfer_id(subject, subject_fence);
                     slot.insert(transfer);
+                    // A durable crossing subject is ALWAYS a session-owned dot (only the dot loop reaches
+                    // the Durable arm — a transient's `durability_of` routes to the arm below), so the
+                    // session is structurally present. `.expect` asserts that invariant as a straight-line
+                    // expression (the panic body is stdlib, no coverable false arm — HR5).
+                    let session =
+                        subject_session.expect("a durable crossing subject carries its session");
                     outbox.push_flow(
                         ctx.config.orchestrator,
                         MsgClass::Saga,
@@ -2570,6 +2588,7 @@ fn fan_out_crossing(
                             from_realm,
                             to_realm,
                             subject_fence,
+                            session,
                         }),
                     );
                     state.last_commit_tick = Some(ctx.clock.local_tick);
@@ -7859,6 +7878,9 @@ mod tests {
         assert_eq!(reqs[0].from_realm, config().realm);
         assert_eq!(reqs[0].to_realm, OTHER_REALM);
         assert_eq!(reqs[0].subject_fence, Fence(1));
+        // Slice 3f: the source threads the dot's session (its `Dots` map key) so the orchestrator's
+        // saga can `PrepareSubscribe` to the client's gateway.
+        assert_eq!(reqs[0].session, TRIG_SESSION);
         // The latch is set to the deterministic id BOTH ends derive.
         assert_eq!(
             rig.world.resource::<RequestInFlight>().0.get(&entity),

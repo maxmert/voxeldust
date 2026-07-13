@@ -53,10 +53,11 @@ use vd_sim::saga::{
     SagaState, SagaTuning,
 };
 use vd_wire::intershard::{
-    DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow, PROMOTE_STEP,
-    PromoteCmd, RE_HOME_STEP, RE_SOLICIT_STEP, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP,
-    TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP,
-    TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff, TransitionPayload,
+    CrossingRequest, DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow,
+    PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, RE_SOLICIT_STEP, ReHomeCmd, ReHomeState,
+    STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_DISCARD_STEP,
+    TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff,
+    TransientCrossingGrant, TransientCrossingRequest, TransitionPayload, crossing_transfer_id,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -440,6 +441,28 @@ pub struct SagaRuntimeRes {
     /// `select_rehome_target` reads it for the lowest LIVE capability-matched shard; an EMPTY roster
     /// (`Default`) ⇒ no target ⇒ the saga stays parked (honest), which every legacy rig expects.
     roster: BTreeMap<NodeId, ShardProfile>,
+    /// Slice 3f-B: durable `CrossingRequest`s that RESOLVED (subject + dest-realm + session all found in
+    /// the directory) and STARTED a crossing saga. A monotonic count; a redelivered request for an
+    /// already-live crossing is absorbed by `process_starts`' `contains_key`/`lock_transfer` guard and
+    /// does NOT re-increment (the count reflects distinct started sagas, not requests seen). 0 until the
+    /// first durable boundary crossing lands.
+    crossings_started: u64,
+    /// Slice 3f-B: durable `CrossingRequest`s whose SUBJECT owner was found but whose dest-`Realm` OR
+    /// `Session` head was UNRESOLVED, so no saga could start this tick. Counted-only for now — the
+    /// abort-reply egress that clears the source latch is a LATER sub-slice (3f-D); until then a lost
+    /// crossing here is re-driven by the source's ongoing boundary detection (the `ReDriven` class).
+    crossing_unresolved: u64,
+    /// Slice 3f-B: durable `CrossingRequest`s whose SUBJECT had no directory `OwnerRecord` at all (the
+    /// entity's authority already moved / was revoked between the source's latch and this resolve). No
+    /// owner to reply to ⇒ a counted drop.
+    crossing_subject_gone: u64,
+    /// Slice 3f-C: transient `TransientCrossingRequest`s whose dest `Realm` head RESOLVED, so a
+    /// `TransientCrossingGrant` was emitted back to the transport-origin. A redelivered request re-grants
+    /// the SAME deterministic `batch` id (idempotent at the source), so this counts grants EMITTED.
+    transient_crossings_granted: u64,
+    /// Slice 3f-C: transient `TransientCrossingRequest`s whose dest `Realm` head was UNRESOLVED — no grant
+    /// emitted (the source re-requests; the grant is idempotent, so a later-resolving realm still grants).
+    transient_dest_unresolved: u64,
 }
 
 /// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
@@ -608,6 +631,40 @@ impl SagaRuntimeRes {
     #[must_use]
     pub fn sends_shed(&self) -> u64 {
         self.sends_shed
+    }
+
+    /// Slice 3f-B — durable crossing sagas STARTED from a resolved `CrossingRequest` (subject, dest-realm,
+    /// and session all in the directory). Monotonic; a redelivered request for a live crossing does not
+    /// re-count (the `contains_key`/`lock_transfer` guard absorbs it).
+    #[must_use]
+    pub fn crossings_started(&self) -> u64 {
+        self.crossings_started
+    }
+
+    /// Slice 3f-B — durable `CrossingRequest`s the subject was known for but the dest-realm OR session head
+    /// was unresolved (no saga started this tick; the abort-reply that clears the source latch is 3f-D).
+    #[must_use]
+    pub fn crossing_unresolved(&self) -> u64 {
+        self.crossing_unresolved
+    }
+
+    /// Slice 3f-B — durable `CrossingRequest`s whose subject had no directory owner (authority already
+    /// moved/revoked); a counted drop with no reply target.
+    #[must_use]
+    pub fn crossing_subject_gone(&self) -> u64 {
+        self.crossing_subject_gone
+    }
+
+    /// Slice 3f-C — transient `TransientCrossingGrant`s emitted for a resolved dest realm.
+    #[must_use]
+    pub fn transient_crossings_granted(&self) -> u64 {
+        self.transient_crossings_granted
+    }
+
+    /// Slice 3f-C — transient `TransientCrossingRequest`s dropped because the dest realm was unresolved.
+    #[must_use]
+    pub fn transient_dest_unresolved(&self) -> u64 {
+        self.transient_dest_unresolved
     }
 }
 
@@ -1232,6 +1289,102 @@ pub(crate) fn rehydrate(
         directory,
         runtime,
     })
+}
+
+/// Slice 3f-B — consume a DURABLE `CrossingRequest` from a source shard's boundary detector: resolve the
+/// subject's current owner, the dest realm's owner, and the client's gateway (from the `Session` head), then
+/// START a durable crossing saga on the EXISTING `start_transfer` entry. The saga's `ctx.transfer` is the id
+/// the SOURCE latched — `crossing_transfer_id(req.subject, req.subject_fence)` over the WIRE fence — so the
+/// eventual `Demote`/abort terminal carries the exact id the source's `RequestInFlight` latch keys on, even
+/// if the head fence advanced between latch and resolve. `ctx.expected_fence` is the CURRENT head fence (the
+/// CAS expectation), which is distinct from the id fence by design.
+///
+/// MONOMORPHIC (no generic body): ALL branching is the single 3-arm `match` on the three head reads (NOT a
+/// let-else), so each outcome — start / unresolved / subject-gone — is a covered region (HR5). The
+/// abort-reply egress that clears the source latch on an unresolved dest is a LATER sub-slice (3f-D); here an
+/// unresolved crossing is only COUNTED (the source re-drives it — the `ReDriven` class), never replied to.
+fn handle_crossing_request(
+    runtime: &mut SagaRuntimeRes,
+    dir: &DirectoryCore,
+    _outbox: &mut OutboundBox,
+    req: CrossingRequest,
+) {
+    // The id the source latched — derived from the WIRE fence (`req.subject_fence`), NOT the head fence, so a
+    // terminal carrying it matches the source latch even if the head advanced (`crossing_transfer_id` doc).
+    let transfer = crossing_transfer_id(req.subject, req.subject_fence);
+    match (
+        dir.head(req.subject),
+        dir.head(DirectoryKey::Realm(req.to_realm)),
+        dir.head(DirectoryKey::Session(req.session)),
+    ) {
+        // REDELIVERY GUARD (mirrors `process_starts`' `contains_key`): a re-delivered request for a crossing
+        // whose saga is ALREADY live is absorbed — no second enqueue, no re-count — so `crossings_started`
+        // reflects DISTINCT started sagas, not requests seen. The source re-drives the request every tick the
+        // entity stays over the boundary (`ReDriven`), so this arm is the common steady-state case.
+        (Some(_subj), Some(_dest_rec), Some(_sess_rec))
+            if runtime.sagas.contains_key(&transfer) => {}
+        (Some(subj), Some(dest_rec), Some(sess_rec)) => {
+            let ctx = SagaCtx {
+                transfer,
+                session: req.session,
+                subject: req.subject,
+                // The CURRENT head fence is the CAS expectation (distinct from the WIRE-fence-derived id).
+                expected_fence: subj.fence,
+                source: subj.authority.node(),
+                dest: dest_rec.authority.node(),
+                class: vd_core::entity_kind::DurabilityClass::Durable,
+                needs_provision: false,
+                from_realm: req.from_realm,
+                to_realm: req.to_realm,
+            };
+            let gateway = sess_rec.authority.node();
+            runtime.start_transfer(ctx, gateway);
+            runtime.crossings_started += 1;
+        }
+        // The subject owner is known but the dest realm OR the session route is unresolved: no saga can start
+        // this tick. COUNTED only (3f-B is happy-path; the source-latch-clearing abort-reply is 3f-D).
+        (Some(_subj), _, _) => runtime.crossing_unresolved += 1,
+        // No directory owner for the subject at all (authority already moved/revoked): a counted drop.
+        (None, _, _) => runtime.crossing_subject_gone += 1,
+    }
+}
+
+/// Slice 3f-C — consume a TRANSIENT `TransientCrossingRequest`: resolve the dest realm's owner and GRANT it
+/// back to the transport-origin `from`. A transient is NOT a directory `OwnerRecord` (burst isolation — HR2),
+/// so `from` (the connection the request arrived on) is the ONLY authoritative reply address; there is no
+/// owner lookup for the source. The `batch` id is `crossing_transfer_id(req.subject, req.src_realm_fence)` —
+/// deterministic per subject, so a redelivered request re-grants the SAME batch (absorbed at the source's
+/// `on_transient_crossing_grant` no-op). The grant is `ReDriven` (the source re-requests) ⇒ plain `push_flow`
+/// (Ephemeral), never `Retained`.
+///
+/// MONOMORPHIC (no generic body): the single 2-arm `Option` match is the only branch (HR5-covered both ways).
+fn handle_transient_crossing_request(
+    dir: &DirectoryCore,
+    outbox: &mut OutboundBox,
+    runtime: &mut SagaRuntimeRes,
+    req: TransientCrossingRequest,
+    from: NodeId,
+) {
+    match dir.head(DirectoryKey::Realm(req.to_realm)) {
+        Some(rec) => {
+            let batch = crossing_transfer_id(req.subject, req.src_realm_fence);
+            outbox.push_flow(
+                from,
+                MsgClass::Saga,
+                &InterShardFlow::TransientCrossingGrant(TransientCrossingGrant {
+                    subject: req.subject,
+                    dest: rec.authority.node(),
+                    to_realm: req.to_realm,
+                    dst_realm_fence: rec.fence,
+                    batch,
+                }),
+            );
+            runtime.transient_crossings_granted += 1;
+        }
+        // Unresolved dest realm: emit nothing (the source re-requests; the grant is idempotent, so a
+        // later-resolving realm still grants). Counted only.
+        None => runtime.transient_dest_unresolved += 1,
+    }
 }
 
 /// Process the create-on-trigger queue: per-key-serialize via `lock_transfer`, `start` the
@@ -1886,14 +2039,17 @@ pub fn drive_sagas(
     // gets its Timeout re-drive/abort next tick (the producer is the R1 backstop, never a wedge).
     scan_deadlines(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
     for msg in &inbox.0 {
-        let (class, bytes) = match msg {
+        // `from` is the transport ORIGIN — carried past the class filter because the transient crossing
+        // consumer (3f-C) replies to it (a transient has no directory `OwnerRecord`, so the connection it
+        // arrived on is the only authoritative reply address). The other saga-driving arms ignore it.
+        let (from, class, bytes) = match msg {
             // D-3 CLEAR-ON-ACK: ANY successful inbound from a peer is proof it is alive — clear its
             // unreachable evidence (done at the TOP, BEFORE the class filter, so a peer that only sends
             // `LeaseRenew`/Directory ops — not saga acks — still un-marks itself; this is why no separate
             // `serve_directory` clear is needed: both systems read the same inbox, this one sees it all).
             Inbound::Wire { from, class, bytes } => {
                 runtime.liveness.record_ack(*from);
-                (class, bytes)
+                (*from, class, bytes)
             }
             // D-3: a delivery failure toward `to` — record one unreachable notice. The evidence-gated
             // tracker confirms `to` dead only after `n_consecutive_unreachable` within the window with no
@@ -1990,8 +2146,20 @@ pub fn drive_sagas(
             Ok(InterShardFlow::TransferAck(
                 TransferAck::Accepted { .. } | TransferAck::Rejected { .. },
             )) => {}
-            // Everything else (Ghost / Directory / Saga commands / DirectoryReply / FlushSource)
-            // and any decode failure: not a saga-driving inbound here.
+            // Slice 3f-B: a DURABLE entity crossed a realm boundary — resolve the three heads and START a
+            // crossing saga (or count the unresolved/subject-gone outcome). The subject/source/dest/session
+            // all come from the directory; the id rides the WIRE fence so it matches the source latch.
+            Ok(InterShardFlow::CrossingRequest(req)) => {
+                handle_crossing_request(&mut runtime, &dir.0, &mut outbox, req);
+            }
+            // Slice 3f-C: a TRANSIENT crossed a realm boundary — resolve the dest realm and GRANT it back to
+            // the transport-origin `from` (a transient has no directory owner to look up).
+            Ok(InterShardFlow::TransientCrossingRequest(req)) => {
+                handle_transient_crossing_request(&dir.0, &mut outbox, &mut runtime, req, from);
+            }
+            // Everything else (Ghost / Directory / Saga commands / DirectoryReply / FlushSource /
+            // CrossingAborted / CrossingAbortedAck — the 3f-D abort-reply pair) and any decode failure:
+            // not a saga-driving inbound here.
             _ => {}
         }
     }
@@ -2492,6 +2660,69 @@ mod tests {
 
         fn live(&mut self) -> usize {
             self.orch.world_mut().resource::<SagaRuntimeRes>().live()
+        }
+
+        /// Slice 3f-B: a source shard ships a durable `CrossingRequest` (the boundary-detector egress). The
+        /// orchestrator sees it as `Inbound::Wire { from: SOURCE, .. }` (the source is the transport origin).
+        fn crossing_request(&mut self, req: CrossingRequest) {
+            self.source
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(
+                        postcard::to_allocvec(&InterShardFlow::CrossingRequest(req)).expect("encode"),
+                    ),
+                )
+                .expect("sent");
+            self.settle();
+        }
+
+        /// Slice 3f-C: a source shard ships a transient `TransientCrossingRequest`. The reply GRANT routes
+        /// back to the transport origin (`SOURCE`), so a test drains it via [`drain_source`](Self::drain_source).
+        fn transient_crossing_request(&mut self, req: TransientCrossingRequest) {
+            self.source
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(
+                        postcard::to_allocvec(&InterShardFlow::TransientCrossingRequest(req))
+                            .expect("encode"),
+                    ),
+                )
+                .expect("sent");
+            self.settle();
+        }
+
+        /// The immutable ctx of the ONE live saga keyed on `transfer` — the crossing tests assert its
+        /// source/dest/session/transfer are the ones the resolver latched. Panics if absent (the test's
+        /// contract is that the saga started).
+        fn saga_ctx(&mut self, transfer: TransferId) -> SagaCtx {
+            self.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .sagas
+                .get(&transfer)
+                .expect("saga live")
+                .ctx
+        }
+
+        /// Read a `SagaRuntimeRes` counter accessor (the crossing outcome counts).
+        fn count(&mut self, read: impl Fn(&SagaRuntimeRes) -> u64) -> u64 {
+            read(self.orch.world_mut().resource::<SagaRuntimeRes>())
+        }
+    }
+
+    const CROSSING_SESSION: SessionId = SessionId(9);
+
+    /// A durable `CrossingRequest` for `subject()` crossing FROM_REALM → TO_REALM at `subject_fence`,
+    /// carrying `CROSSING_SESSION` (the source-supplied session — 3f-A).
+    fn crossing_req(subject_fence: Fence) -> CrossingRequest {
+        CrossingRequest {
+            subject: subject(),
+            from_realm: FROM_REALM,
+            to_realm: TO_REALM,
+            subject_fence,
+            session: CROSSING_SESSION,
         }
     }
 
@@ -5560,5 +5791,222 @@ mod tests {
             rig.drain_gateway().is_empty(),
             "nothing is emitted in response"
         );
+    }
+
+    // ── Slice 3f-B — the durable `CrossingRequest` consumer ────────────────────────────────────────
+
+    #[test]
+    fn crossing_request_starts_a_tagged_saga() {
+        // All THREE heads resolve (subject@F/SOURCE, Realm(to)@DEST, Session@GATEWAY) → a durable crossing
+        // saga starts, keyed on the id the SOURCE latched (`crossing_transfer_id(subject, F)` over the WIRE
+        // fence), with source/dest/session/gateway resolved from the directory.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1)); // Entity(subject())@F(1) owned by Shard(SOURCE)
+        rig.grant_key(
+            DirectoryKey::Realm(TO_REALM),
+            AuthorityRef::Shard(DEST),
+            Fence(5),
+        );
+        rig.grant_key(
+            DirectoryKey::Session(CROSSING_SESSION),
+            AuthorityRef::Gateway(GATEWAY),
+            Fence(3),
+        );
+        rig.crossing_request(crossing_req(Fence(1))); // tick N: enqueue the start
+        rig.settle(); // tick N+1: process_starts inserts the saga
+
+        let latched = crossing_transfer_id(subject(), Fence(1));
+        let ctx = rig.saga_ctx(latched);
+        assert_eq!(ctx.transfer, latched);
+        assert_eq!(ctx.transfer, crossing_transfer_id(subject(), Fence(1)));
+        assert_eq!(ctx.source, SOURCE);
+        assert_eq!(ctx.dest, DEST);
+        assert_eq!(ctx.session, CROSSING_SESSION);
+        assert_eq!(ctx.expected_fence, Fence(1));
+        assert_eq!(ctx.class, DurabilityClass::Durable);
+        assert_eq!(ctx.from_realm, FROM_REALM);
+        assert_eq!(ctx.to_realm, TO_REALM);
+        assert_eq!(rig.live(), 1);
+        assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 1);
+        assert_eq!(rig.count(SagaRuntimeRes::crossing_unresolved), 0);
+        assert_eq!(rig.count(SagaRuntimeRes::crossing_subject_gone), 0);
+    }
+
+    #[test]
+    fn crossing_request_unresolved_dest_counted() {
+        // Subject + session resolve, but Realm(to) is ABSENT → no saga; counted `crossing_unresolved`.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        rig.grant_key(
+            DirectoryKey::Session(CROSSING_SESSION),
+            AuthorityRef::Gateway(GATEWAY),
+            Fence(3),
+        );
+        rig.crossing_request(crossing_req(Fence(1)));
+        rig.settle();
+
+        assert_eq!(rig.live(), 0);
+        assert_eq!(rig.count(SagaRuntimeRes::crossing_unresolved), 1);
+        assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 0);
+        assert_eq!(rig.count(SagaRuntimeRes::crossing_subject_gone), 0);
+    }
+
+    #[test]
+    fn crossing_request_unresolved_session_counted() {
+        // Subject + dest realm resolve, but Session is ABSENT → no saga; counted `crossing_unresolved`.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        rig.grant_key(
+            DirectoryKey::Realm(TO_REALM),
+            AuthorityRef::Shard(DEST),
+            Fence(5),
+        );
+        rig.crossing_request(crossing_req(Fence(1)));
+        rig.settle();
+
+        assert_eq!(rig.live(), 0);
+        assert_eq!(rig.count(SagaRuntimeRes::crossing_unresolved), 1);
+        assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 0);
+        assert_eq!(rig.count(SagaRuntimeRes::crossing_subject_gone), 0);
+    }
+
+    #[test]
+    fn crossing_request_vanished_subject_counted() {
+        // The subject has NO directory owner (authority already moved/revoked) → `crossing_subject_gone`,
+        // even though the dest realm + session are present (the subject arm is checked first).
+        let mut rig = Rig::new();
+        rig.grant_key(
+            DirectoryKey::Realm(TO_REALM),
+            AuthorityRef::Shard(DEST),
+            Fence(5),
+        );
+        rig.grant_key(
+            DirectoryKey::Session(CROSSING_SESSION),
+            AuthorityRef::Gateway(GATEWAY),
+            Fence(3),
+        );
+        rig.crossing_request(crossing_req(Fence(1)));
+        rig.settle();
+
+        assert_eq!(rig.live(), 0);
+        assert_eq!(rig.count(SagaRuntimeRes::crossing_subject_gone), 1);
+        assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 0);
+        assert_eq!(rig.count(SagaRuntimeRes::crossing_unresolved), 0);
+    }
+
+    #[test]
+    fn crossing_request_redelivery_is_one_saga() {
+        // A redelivered request for the SAME fenced crossing resolves to ONE saga. Because the first request
+        // has already SETTLED (its saga inserted by `process_starts`), the redelivery hits the handler's
+        // `contains_key(&transfer)` guard arm → no second `start_transfer`, no second count: `crossings_started`
+        // stays 1 and reflects DISTINCT started sagas, not requests seen.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        rig.grant_key(
+            DirectoryKey::Realm(TO_REALM),
+            AuthorityRef::Shard(DEST),
+            Fence(5),
+        );
+        rig.grant_key(
+            DirectoryKey::Session(CROSSING_SESSION),
+            AuthorityRef::Gateway(GATEWAY),
+            Fence(3),
+        );
+        rig.crossing_request(crossing_req(Fence(1)));
+        rig.settle(); // the saga starts + locks the subject
+        rig.crossing_request(crossing_req(Fence(1))); // redelivery
+        rig.settle();
+
+        assert_eq!(rig.live(), 1, "the redelivery never spawns a second saga");
+        let latched = crossing_transfer_id(subject(), Fence(1));
+        assert_eq!(rig.saga_ctx(latched).transfer, latched);
+        assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 1);
+    }
+
+    // ── Slice 3f-C — the transient `TransientCrossingRequest` consumer ─────────────────────────────
+
+    /// A transient crossing request for `subject()` into TO_REALM at `src_realm_fence`.
+    fn transient_req(src_realm_fence: Fence) -> TransientCrossingRequest {
+        TransientCrossingRequest {
+            subject: subject(),
+            from_realm: FROM_REALM,
+            to_realm: TO_REALM,
+            src_realm_fence,
+        }
+    }
+
+    /// The wire form of the `TransientCrossingGrant` the source expects back from the orchestrator.
+    fn grant_wire(grant: TransientCrossingGrant) -> Inbound {
+        Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Saga,
+            bytes: postcard::to_allocvec(&InterShardFlow::TransientCrossingGrant(grant))
+                .expect("encode")
+                .into(),
+        }
+    }
+
+    #[test]
+    fn transient_request_grants_resolved_dest() {
+        // Realm(to) resolves to DEST@RF → ONE grant back to the transport-origin (SOURCE), carrying the
+        // resolved dest, the current realm-lease fence, and the deterministic per-subject batch id.
+        let mut rig = Rig::new();
+        let realm_fence = Fence(4);
+        rig.grant_key(
+            DirectoryKey::Realm(TO_REALM),
+            AuthorityRef::Shard(DEST),
+            realm_fence,
+        );
+        // Discard the `LeaseGrant`'s directory-reply (seeding artifact) so the drain below is the grant only.
+        let _ = rig.drain_source();
+        rig.transient_crossing_request(transient_req(Fence(2)));
+
+        let batch = crossing_transfer_id(subject(), Fence(2));
+        assert_eq!(
+            rig.drain_source(),
+            vec![grant_wire(TransientCrossingGrant {
+                subject: subject(),
+                dest: DEST,
+                to_realm: TO_REALM,
+                dst_realm_fence: realm_fence,
+                batch,
+            })]
+        );
+        assert_eq!(rig.count(SagaRuntimeRes::transient_crossings_granted), 1);
+        assert_eq!(rig.count(SagaRuntimeRes::transient_dest_unresolved), 0);
+    }
+
+    #[test]
+    fn transient_request_unknown_realm_drops() {
+        // No Realm(to) record → no grant emitted; counted `transient_dest_unresolved`.
+        let mut rig = Rig::new();
+        rig.transient_crossing_request(transient_req(Fence(2)));
+
+        assert!(
+            rig.drain_source().is_empty(),
+            "an unresolved dest realm emits no grant"
+        );
+        assert_eq!(rig.count(SagaRuntimeRes::transient_dest_unresolved), 1);
+        assert_eq!(rig.count(SagaRuntimeRes::transient_crossings_granted), 0);
+    }
+
+    #[test]
+    fn transient_request_redelivery_regrants_same_batch() {
+        // A redelivered request re-grants the SAME deterministic batch id (idempotent at the source).
+        let mut rig = Rig::new();
+        rig.grant_key(
+            DirectoryKey::Realm(TO_REALM),
+            AuthorityRef::Shard(DEST),
+            Fence(4),
+        );
+        // Discard the `LeaseGrant`'s directory-reply (seeding artifact) so both drains are the grant only.
+        let _ = rig.drain_source();
+        rig.transient_crossing_request(transient_req(Fence(2)));
+        let first = rig.drain_source();
+        rig.transient_crossing_request(transient_req(Fence(2)));
+        let second = rig.drain_source();
+
+        assert_eq!(first, second, "the redelivery re-grants the identical batch");
+        assert_eq!(rig.count(SagaRuntimeRes::transient_crossings_granted), 2);
     }
 }

@@ -36,7 +36,7 @@
 use serde::{Deserialize, Serialize};
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::{RealmId, StampedPose};
-use vd_core::{EntityId, EpochId, Fence, NodeId, TickId, TransferId};
+use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId};
 
 use crate::seams::directory::{DirectoryKey, DirectoryOp, DirectoryReply};
 use crate::seams::transfer_control::{TransferControl, TransferControlAck};
@@ -239,6 +239,15 @@ pub enum InterShardFlow {
     /// `(transfer, TRANSIENT_BATCH_STEP)`. Side-effecting. APPENDED (preserves every existing postcard
     /// discriminant).
     CrossingAborted(CrossingAborted),
+    /// SOURCE shard → ORCHESTRATOR (Slice 3f): the latch-clear CONFIRM for a `CrossingAborted` — the source
+    /// consumed the abort and cleared (or found already-cleared) the subject's `RequestInFlight` latch, so the
+    /// orchestrator drops the DURABLE `pending_abort_replies` entry and stops re-emitting. This closes the
+    /// Option-B ack-gate: the orchestrator keeps the aborted-crossing reply alive (re-driven by
+    /// `scan_deadlines`, crash-durable via the saga store) until THIS ack lands — so a lost `CrossingAborted`
+    /// can never strand the entity. Reuses the `CrossingAborted` `{subject, transfer}` payload; `effect_class`
+    /// keys idempotency on the SAME `(transfer, TRANSIENT_BATCH_STEP)` as the abort it answers (request + ack
+    /// share one journal). Side-effecting. APPENDED (preserves every existing postcard discriminant).
+    CrossingAbortedAck(CrossingAborted),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -411,6 +420,15 @@ impl InterShardFlow {
                     step_id: TRANSIENT_BATCH_STEP,
                 },
             },
+            // The ack answers a specific `CrossingAborted`, so it keys idempotency on the SAME
+            // `(transfer, TRANSIENT_BATCH_STEP)` — request + ack share one journal (a redelivered ack for an
+            // already-dropped `pending_abort_replies` entry is a covered no-op at the consumer).
+            InterShardFlow::CrossingAbortedAck(a) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::TransferStep {
+                    transfer: a.transfer,
+                    step_id: TRANSIENT_BATCH_STEP,
+                },
+            },
         }
     }
 
@@ -467,11 +485,14 @@ impl InterShardFlow {
             // Slice 3c spatial transfer-trigger: the crossing requests are re-EMITTED by the source's ongoing
             // boundary detection (the entity is still over the boundary next tick), and the grant/aborted are
             // orchestrator/saga round-trip control (the saga's scan_deadlines re-drives them) — so the RAM
-            // retry + the reliable Saga lane suffice; NONE grows the producer-less outbox set.
+            // retry + the reliable Saga lane suffice; NONE grows the producer-less outbox set. Slice 3f: the
+            // `CrossingAbortedAck` is source-re-driven too (re-sent on every re-delivered `CrossingAborted`),
+            // so it is `ReDriven`, never producer-less.
             | InterShardFlow::CrossingRequest(_)
             | InterShardFlow::TransientCrossingRequest(_)
             | InterShardFlow::TransientCrossingGrant(_)
-            | InterShardFlow::CrossingAborted(_) => FlowDurabilityClass::ReDriven,
+            | InterShardFlow::CrossingAborted(_)
+            | InterShardFlow::CrossingAbortedAck(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -580,12 +601,19 @@ pub struct TransientHandoff {
 /// `TransferId` — the orchestrator MINTS it on start — so `effect_class` keys idempotency on
 /// `subject_fence` ([`IdempotencyKey::FencedKey`]): a redelivered request for the same fenced crossing
 /// resolves to a no-op, never a second saga.
+///
+/// Slice 3f — carries the subject's `session`: the durable crossing saga's FIRST action is a
+/// `PrepareSubscribe { session, dest }` routed to the client's gateway, and the orchestrator has no
+/// `Entity → Session` reverse index, so the SOURCE (which owns the dot, keyed by `SessionId`) supplies it.
+/// Transients need none (their short batch path emits no session-bearing command), so only THIS request
+/// grew the field. APPENDED (postcard field-append — preserves the arm's discriminant).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossingRequest {
     pub subject: DirectoryKey,
     pub from_realm: RealmId,
     pub to_realm: RealmId,
     pub subject_fence: Fence,
+    pub session: SessionId,
 }
 
 /// SHARD → ORCHESTRATOR (Slice 3c spatial transfer-trigger): a TRANSIENT crossed a realm boundary; the
@@ -1301,6 +1329,7 @@ mod tests {
                 from_realm: RealmId::System(1),
                 to_realm: RealmId::Planet(2),
                 subject_fence: Fence(4),
+                session: SessionId(3),
             }),
             InterShardFlow::TransientCrossingRequest(TransientCrossingRequest {
                 subject: DirectoryKey::Entity(eid(EntityKind::Player)),
@@ -1322,6 +1351,13 @@ mod tests {
                     Fence(4),
                 ),
             }),
+            InterShardFlow::CrossingAbortedAck(CrossingAborted {
+                subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+                transfer: crossing_transfer_id(
+                    DirectoryKey::Entity(eid(EntityKind::Player)),
+                    Fence(4),
+                ),
+            }),
         ] {
             let bytes = postcard::to_allocvec(&flow).expect("encode");
             assert_eq!(
@@ -1329,6 +1365,18 @@ mod tests {
                 flow
             );
         }
+    }
+
+    /// Slice 3f: the ack answers a `CrossingAborted` on the SAME idempotency journal — both key on
+    /// `(transfer, TRANSIENT_BATCH_STEP)`. Pins the request+ack shared-journal invariant (a future refactor
+    /// splitting them would break the ack's dedup at the source).
+    #[test]
+    fn crossing_aborted_ack_shares_the_abort_idempotency_key() {
+        let subject = DirectoryKey::Entity(eid(EntityKind::Player));
+        let transfer = crossing_transfer_id(subject, Fence(4));
+        let abort = InterShardFlow::CrossingAborted(CrossingAborted { subject, transfer });
+        let ack = InterShardFlow::CrossingAbortedAck(CrossingAborted { subject, transfer });
+        assert_eq!(abort.effect_class(), ack.effect_class());
     }
 
     #[test]
