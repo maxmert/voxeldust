@@ -95,6 +95,29 @@ pub struct InspectReport {
     /// MUST be 0 for a conservation assertion to be trustworthy (a non-zero value means the
     /// oracle did not see the whole run).
     pub input_window_evictions: u64,
+    /// Slice 3g — DURABLE geometric crossings REQUESTED by this shard's `evaluate_realm_boundaries`
+    /// (from `StubStats.crossings_requested`; `0`/None-arm on the orchestrator/client). The Leg-1
+    /// observable of the crossing-e2e: a triggered durable crossing emitted a `CrossingRequest`.
+    pub crossings_requested: u64,
+    /// Slice 3g — DURABLE crossing SAGAS STARTED on the orchestrator (from `SagaRuntimeRes.crossings_started`;
+    /// `0`/None-arm on shards/clients). THE composition proof of the crossing-e2e: a source's
+    /// `CrossingRequest` resolved its three heads and BECAME a saga — the geometric trigger drove the
+    /// transfer saga end-to-end (never hand-fed via `trigger_transfer`).
+    pub crossings_started: u64,
+    /// Slice 3g — TRANSIENT geometric crossings REQUESTED by this shard (from
+    /// `StubStats.transient_crossings_requested`). The transient (HR2 second-class) Leg-1 observable.
+    pub transient_crossings_requested: u64,
+    /// Slice 3g — TRANSIENT crossings GRANTED on the orchestrator (from
+    /// `SagaRuntimeRes.transient_crossings_granted`). The transient auto-grant composition proof.
+    pub transient_crossings_granted: u64,
+    /// Slice 3g — `RequestInFlight` durable-crossing latches CLEARED by a saga terminal at the SOURCE
+    /// (from `StubStats.crossing_latches_cleared`). Proves the POSITIVE latch clear on a committed
+    /// crossing — the latch lifecycle END.
+    pub crossing_latches_cleared: u64,
+    /// Slice 3g — the entities currently latched in this shard's `RequestInFlight` (the standing
+    /// durable-crossing latches; `RequestInFlight.0.keys()`, sorted). Empty once a crossing's terminal
+    /// clears the latch — the abort/commit-leg "latch empty" ground truth.
+    pub in_flight_latches: Vec<EntityId>,
 }
 
 /// Anything the topology can drive. `ShardNode<FabricTransport>` is the canonical
@@ -143,6 +166,10 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         report.active_transfers = rt.active_transfers();
         report.batch_goes = rt.batch_goes();
         report.batch_go_writes = rt.batch_go_writes(); // D-7c G-TIER write-rate observable
+        // Slice 3g: the crossing-e2e composition proofs — a source `CrossingRequest` that BECAME a saga
+        // (durable) and a `TransientCrossingRequest` that was auto-GRANTED (transient). Orchestrator-only.
+        report.crossings_started = rt.crossings_started();
+        report.transient_crossings_granted = rt.transient_crossings_granted();
     }
     if let Some(dots) = world.get_resource::<vd_sim::stub::Dots>() {
         // A dot is HELD only while it SIMULATES (`Authority::Owned`, 1d.4b): a Ghost (a retained
@@ -228,6 +255,16 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             .collect();
         loss.sort_by_key(|(k, _)| *k as u8);
         report.transient_loss = loss;
+        // Slice 3g: the shard-side crossing counters — Leg-1 (a `CrossingRequest`/`TransientCrossingRequest`
+        // emitted) and the POSITIVE latch clear on a committed durable crossing.
+        report.crossings_requested = stats.crossings_requested;
+        report.transient_crossings_requested = stats.transient_crossings_requested;
+        report.crossing_latches_cleared = stats.crossing_latches_cleared;
+    }
+    if let Some(in_flight) = world.get_resource::<vd_sim::stub::RequestInFlight>() {
+        // Slice 3g: the standing durable-crossing latches (the abort/commit-leg "latch empty" ground
+        // truth). BTreeMap keys are already sorted — the trace is replay-stable.
+        report.in_flight_latches = in_flight.0.keys().copied().collect();
     }
     report
 }

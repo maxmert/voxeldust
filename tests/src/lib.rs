@@ -445,6 +445,77 @@ pub fn seed_transient_crossing(
     });
 }
 
+/// Slice 3g — install `boundaries` into the SOURCE shard's ([`SHARD`]) `RealmBoundaries` resource, ARMING
+/// the geometric transfer trigger (`evaluate_realm_boundaries` early-returns while the registry is empty,
+/// so the cluster is behaviour-identical until this plant). The caller owns the boundary set — a single
+/// shell for the 3g crossing-e2e; a later dense soak reuses this with N shells. INERT until this call.
+pub fn plant_crossing_boundaries(
+    topo: &mut Topology,
+    boundaries: Vec<vd_core::geometry::RealmBoundary>,
+) {
+    with_node(topo, SHARD, |s| {
+        s.world_mut()
+            .resource_mut::<vd_sim::stub::RealmBoundaries>()
+            .0 = boundaries;
+    });
+}
+
+/// Slice 3g — the crossing-e2e convenience: plant ONE small AUTHORITY shell on the SOURCE, centered at the
+/// dot's SPAWN offset (`DVec3::ZERO` in the source frame — where login places the avatar, stub.rs `login`),
+/// so the subject is a band MEMBER from spawn and `should_commit` fires an `Inward` after `n_entry` dwell
+/// ticks (the PROVEN `should_commit` path — no fragile 1000 m traversal race). The shell's exterior realm
+/// is the SOURCE realm ([`stub_config`]`.realm` = `System(7)`); its `to_realm` is the DEST realm
+/// ([`dest_stub_config`]`.realm` = `System(8)`).
+///
+/// **M2 (load-bearing):** `to_realm` MUST byte-equal the realm the DEST actually holds
+/// ([`dest_stub_config`]`.realm`) so the orchestrator's `handle_crossing_request` resolves the dest head and
+/// starts the saga; a mismatch silently counts `crossing_unresolved` (a vacuous green). The create edge
+/// (`r_soi · 1.15 = 1150 m`) dwarfs the ~0.1 m/tick walk, so the dot dwells in-band for the whole run.
+pub fn plant_one_crossing_shell(topo: &mut Topology) {
+    use vd_core::geometry::{CrossEffect, RealmBoundary};
+    use vd_core::pose::LatticePos;
+    let shell = RealmBoundary::shell(
+        stub_config().realm, // the boundary's exterior side = the SOURCE realm (System(7))
+        LatticePos::local(vd_core::glam::DVec3::ZERO), // centered at the dot's login spawn offset
+        1000.0, // r_soi
+        1.15,   // create_factor → create edge 1150 m (dwarfs the 0.1 m/tick walk)
+        1.30,   // destroy_factor → destroy edge 1300 m
+        stub_config().move_speed_mps, // v_rel (the dot's own walk speed — factor-sized, not widened)
+        stub_config().tick_dt_s,      // dt
+        0.5,    // pad_floor
+        1.0,    // k_safety_extra
+        None,   // top-level (depth 0)
+        // M2: byte-equal the realm the DEST shard holds, so the dest head resolves and a saga starts.
+        dest_stub_config().realm,
+        CrossEffect::Authority, // a TRANSFER crossing (hands authority to the dest realm)
+    );
+    plant_crossing_boundaries(topo, vec![shell]);
+}
+
+/// Slice 3g — seed an OWNED `Held{outbound: None}` Debris transient on the SOURCE ([`SHARD`]), positioned
+/// INSIDE the planted crossing band (at `pos`, in the source frame), so the geometric dwell fires its
+/// Transient fan-out (`TransientCrossingRequest`) — the HR2 second-class autonomous crossing (no
+/// test-seeded `Crossing` status, no hand-fed batch). `anchor` is the source's realm-lease fence (via
+/// [`realm_fence`]). The dot is at rest (`vel = 0`), so its `prev_offset == pos` (a degenerate first
+/// segment) and it stays a member of the shell centered at spawn.
+pub fn seed_held_transient(topo: &mut Topology, entity: EntityId, anchor: Fence, pos: vd_core::glam::DVec3) {
+    with_node(topo, SHARD, |s| {
+        let pose = vd_core::pose::StampedPose::at_rest(stub_config().frame, pos, TRANSIENT_SEED_TICK0);
+        s.world_mut()
+            .resource_mut::<vd_sim::stub::OwnedTransients>()
+            .0
+            .insert(
+                entity,
+                vd_sim::stub::Transient {
+                    pose,
+                    anchor_fence: anchor,
+                    status: vd_sim::stub::TransientStatus::Held { outbound: None },
+                    prev_offset: pose.pos.offset(),
+                },
+            );
+    });
+}
+
 /// Total transients DROPPED as a LOSS (self-fence, no hand-off) across the source + dest shards
 /// (D-7) — 0 on the happy path (a clean adopt-before-drop hand-off is NOT a loss).
 #[must_use]
