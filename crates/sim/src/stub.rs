@@ -338,6 +338,24 @@ pub struct OwnedTransients(pub BTreeMap<EntityId, Transient>);
 // real run; the tests populate `RealmBoundaries` to exercise every arm.
 // ---------------------------------------------------------------------------
 
+/// The re-emit payload a held durable `RequestInFlight` latch carries so `redrive_stranded_crossings`
+/// (3f-D4) can re-mint the SAME `CrossingRequest` without recovering these fields from the live
+/// `Dots`/geometry (`RequestInFlight` holds only `EntityId → TransferId`). Captured at the emit site
+/// (`fan_out_crossing`'s durable `Vacant` arm) alongside the latch. All `Copy` (so `CrossingState`
+/// stays `Copy`+`Default`); `from_realm` is `config.realm` (constant) and `subject` is the map key, so
+/// only the three genuinely-per-crossing fields ride here. `None` when no latch is held.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LatchedCrossing {
+    /// The destination realm the crossing resolved (`winner.to_realm`) — re-emitted verbatim.
+    pub to_realm: RealmId,
+    /// The subject's authority fence at latch time (the `CrossingRequest.subject_fence` + the second
+    /// component of the deterministic [`crossing_transfer_id`], so the re-drive re-mints the SAME id).
+    pub subject_fence: Fence,
+    /// The subject's session (the durable crossing carries it so the orchestrator's saga can
+    /// `PrepareSubscribe` to the client's gateway).
+    pub session: SessionId,
+}
+
 /// The per-entity/per-boundary hysteresis-dwell state the geometric trigger carries between ticks —
 /// the `should_commit` counters (the fn itself is pure/stateless, this is its store). Keyed by the
 /// subject entity (both owned dots AND held transients). Evicted lazily when the subject leaves (the
@@ -366,6 +384,13 @@ pub struct CrossingState {
     /// re-mints the same first-attempt id — idempotent). Not reset on a winner change (per-entity, like the
     /// cooldown).
     pub crossing_attempt: u32,
+    /// The re-emit payload for the durable latch this state armed (3f-D4). `Some` iff a durable
+    /// `RequestInFlight` latch is currently held for this subject — set alongside the latch in
+    /// `fan_out_crossing`'s durable `Vacant` arm, read by `redrive_stranded_crossings` to re-mint the
+    /// SAME `CrossingRequest`. Left `None` on a transient crossing (no latch) and after an abort clear
+    /// (the abort resets the whole `CrossingState`). `Option` keeps `LatchedCrossing` (a non-`Default`
+    /// payload) off the `Default` path.
+    pub latched_crossing: Option<LatchedCrossing>,
 }
 
 /// The geometric trigger's per-entity dwell state (Slice 3d). One entry per subject that has been
@@ -692,6 +717,13 @@ pub struct StubStats {
     /// `should_commit` edge before the saga terminal cleared the latch). Proves exactly-one-request. `0`
     /// steady-state.
     pub crossings_suppressed_in_flight: u64,
+    /// Slice 3f-D4 — a STRANDED durable latch RE-DRIVEN by `redrive_stranded_crossings`: a
+    /// delivered-but-unresolved dest (`head(Realm(to))` transiently absent at P4/P5) left the
+    /// `RequestInFlight` latch standing with no rising edge to re-emit it, so the per-tick latch-scan
+    /// re-emitted the SAME `CrossingRequest` once `local_tick - last_commit_tick >= request_ttl_ticks`.
+    /// `0` while `request_ttl_ticks == 0` (the INERT default / every current rig) and on every happy path
+    /// (the saga terminal clears the latch before the ttl elapses).
+    pub crossings_redriven: u64,
     /// Slice 3e (robustness, goal-audit L4) — a Durable-TAGGED subject reached the durable crossing arm from
     /// the held-transient loop (a kind/loop mismatch — e.g. a mis-tagged batch item) and so carried no
     /// session: DEGRADED (counted, emitted nothing) instead of panicking. Must be `0` in a well-formed mesh;
@@ -873,6 +905,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     schedule.add_systems(
         (
             evaluate_realm_boundaries,
+            redrive_stranded_crossings,
             readvance_transients,
             emit_transient_batch,
             redrive_pending_adoptions,
@@ -2647,6 +2680,13 @@ fn fan_out_crossing(
                         }),
                     );
                     state.last_commit_tick = Some(ctx.clock.local_tick);
+                    // 3f-D4: carry the re-emit payload so `redrive_stranded_crossings` can re-mint the SAME
+                    // request for a delivered-but-unresolved dest (a stranded latch with no rising edge).
+                    state.latched_crossing = Some(LatchedCrossing {
+                        to_realm,
+                        subject_fence,
+                        session,
+                    });
                     stats.crossings_requested += 1;
                 }
                 Entry::Occupied(_) => stats.crossings_suppressed_in_flight += 1,
@@ -2667,6 +2707,82 @@ fn fan_out_crossing(
             );
             state.last_commit_tick = Some(ctx.clock.local_tick);
             stats.transient_crossings_requested += 1;
+        }
+    }
+}
+
+/// Slice 3f-D4 (DEFERRED D-43 #2) — the per-tick RE-DRIVE of a STRANDED durable crossing latch. A
+/// DELIVERED-but-unresolved dest (`head(Realm(to))` transiently absent — a realm shard mid-lease /
+/// partitioned at P4/P5) leaves the `RequestInFlight` latch standing with NO rising edge to re-emit it:
+/// `should_commit` is a STRICT one-tick rising edge, so `fan_out_crossing`'s `Occupied` arm never
+/// re-fires for a statically-DWELLING stranded dot. This scan re-emits the SAME latched
+/// `CrossingRequest` (same `(subject, subject_fence, attempt)` → byte-identical [`crossing_transfer_id`];
+/// the orchestrator's `contains_key` guard absorbs a dup that already started, an unresolved one re-tries
+/// the head reads) once `local_tick - last_commit_tick >= request_ttl_ticks`, then re-arms the ttl timer.
+/// `request_ttl_ticks == 0` (the INERT default / every current rig) → an early return before any
+/// iteration. Authority-gated exactly like `evaluate_realm_boundaries`. A BRANCHLESS shim over the
+/// re-emit payload the latch carried at emit time ([`LatchedCrossing`]) — no recovery from live geometry;
+/// the only branches are the ttl early-return, the authority gate, and the `>= ttl` window, each covered
+/// once (HR5). Determinism: `in_flight.0` / `progress.0` are `BTreeMap`s (ordered iteration), the
+/// re-mint is a pure fn of the latched fields + the universe clock, `.min(u32::MAX)` guards the cast
+/// (mirrors `evaluate_one_subject`'s `since_commit` compute). The `.expect()`s are STRAIGHT-LINE
+/// invariants (a held latch always carries its `CrossingState` — `retain_live` syncs both on the same
+/// live set — with a `latched_crossing` payload + an armed `last_commit_tick`), matching the existing
+/// session `.expect()` shape, so they add no coverable false arm.
+#[allow(clippy::too_many_arguments)]
+fn redrive_stranded_crossings(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    authority: Res<RealmAuthority>,
+    in_flight: Res<RequestInFlight>,
+    mut progress: ResMut<CrossingProgress>,
+    mut stats: ResMut<StubStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    let ttl = config.request_ttl_ticks;
+    if ttl == 0 {
+        return;
+    }
+    let Some(_realm_fence) = authority.0 else {
+        return;
+    };
+    // `in_flight` (immutable) and `progress` (mutable) are DISTINCT resources — no aliasing — so the scan
+    // reads the held latches while mutating each subject's `CrossingState` in one deterministic pass.
+    for (entity, _latched) in in_flight.0.iter() {
+        let state = progress
+            .0
+            .get_mut(entity)
+            .expect("a held latch always has a CrossingState (retain_live syncs both)");
+        let lc = state
+            .latched_crossing
+            .expect("a held durable latch carries its re-emit payload");
+        let last = state
+            .last_commit_tick
+            .expect("a held latch armed the cooldown at emit time");
+        let elapsed = clock
+            .local_tick
+            .0
+            .saturating_sub(last.0)
+            .min(u32::MAX as u64) as u32;
+        if elapsed >= ttl {
+            let subject = DirectoryKey::Entity(*entity);
+            outbox.push_flow(
+                config.orchestrator,
+                MsgClass::Saga,
+                &InterShardFlow::CrossingRequest(CrossingRequest {
+                    subject,
+                    from_realm: config.realm,
+                    to_realm: lc.to_realm,
+                    subject_fence: lc.subject_fence,
+                    session: lc.session,
+                    // The SAME attempt (unchanged since the latch — the attempt bumps only on a
+                    // post-abort re-latch), so the re-emitted id is byte-identical to the standing latch.
+                    attempt: state.crossing_attempt,
+                }),
+            );
+            // Re-arm the ttl timer so the next re-drive is another `ttl` ticks out.
+            state.last_commit_tick = Some(clock.local_tick);
+            stats.crossings_redriven += 1;
         }
     }
 }
@@ -8110,7 +8226,10 @@ mod tests {
             "the degradation leaves no orphan latch",
         );
         assert!(
-            rig.world.resource::<StubStats>().crossing_durable_no_session > 0,
+            rig.world
+                .resource::<StubStats>()
+                .crossing_durable_no_session
+                > 0,
             "the kind/loop mismatch is counted, not panicked",
         );
     }
@@ -8165,8 +8284,10 @@ mod tests {
         assert!(rig.world.resource::<CrossingProgress>().0.is_empty());
 
         // (b) NO realm authority (never granted): the authority gate short-circuits BEFORE any work —
-        // even with a populated registry + an in-band dot.
-        let mut rig2 = Rig::new();
+        // even with a populated registry + an in-band dot. A NON-ZERO `request_ttl_ticks` here so the
+        // 3f-D4 `redrive_stranded_crossings` scan ALSO reaches (and covers) its authority-gate `else`
+        // arm (past its own `ttl==0` early-return), mirroring the trigger's gate.
+        let mut rig2 = Rig::with_config(config_with_ttl(3));
         rig2.world
             .resource_mut::<RealmBoundaries>()
             .0
@@ -8182,9 +8303,14 @@ mod tests {
         }
         assert!(
             crossing_requests(&all2).is_empty(),
-            "no realm authority ⇒ the trigger early-returns",
+            "no realm authority ⇒ the trigger + the ttl re-drive both early-return",
         );
         assert!(rig2.world.resource::<CrossingProgress>().0.is_empty());
+        assert_eq!(
+            rig2.world.resource::<StubStats>().crossings_redriven,
+            0,
+            "no realm authority ⇒ the ttl scan never re-drives",
+        );
     }
 
     #[test]
@@ -8354,7 +8480,11 @@ mod tests {
             rig.world.resource::<StubStats>().crossing_latches_cleared,
             1
         );
-        assert_eq!(crossing_aborted_acks(&match_out).len(), 1, "the match acks too");
+        assert_eq!(
+            crossing_aborted_acks(&match_out).len(),
+            1,
+            "the match acks too"
+        );
         // The re-arm bumped the attempt (0 -> 1), so a re-cross mints a FRESH id (H2).
         assert_eq!(
             rig.world
@@ -8363,6 +8493,157 @@ mod tests {
                 .get(&entity)
                 .map(|st| st.crossing_attempt),
             Some(1),
+        );
+    }
+
+    /// 3f-D4 config: the shared trigger fixture with a NON-ZERO `request_ttl_ticks` so
+    /// `redrive_stranded_crossings` is armed (every other rig uses the INERT `0`).
+    fn config_with_ttl(ttl: u32) -> StubConfig {
+        StubConfig {
+            request_ttl_ticks: ttl,
+            ..config()
+        }
+    }
+
+    #[test]
+    fn a_stranded_durable_latch_redrives_after_the_ttl() {
+        // 3f-D4: a delivered-but-unresolved dest leaves the durable latch STANDING with no rising edge
+        // (the dot dwells statically in-band; `evaluate_realm_boundaries`'s `Occupied` arm only
+        // suppresses). The per-tick latch-scan MUST re-emit the SAME `CrossingRequest` once the ttl
+        // elapses — the C1 fix (the `Entry::Occupied` re-drive the DEFERRED text prescribed is
+        // unreachable for a static dweller).
+        const TTL: u32 = 3;
+        let mut rig = Rig::with_config(config_with_ttl(TTL));
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 42);
+        // In-band from spawn (ms = 100 m < the 1150 m create edge) so the first commit latches it; there is
+        // no orchestrator in this rig, so the latch is never cleared → it STRANDS (the tested condition).
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+
+        // Dwell to the FIRST commit: n_entry = 3, so inward reaches 3 at local_tick 4 (inward 1/2/3 at
+        // ticks 2/3/4) → the durable `Vacant` arm emits ONE request + arms `last_commit_tick = 4`.
+        let mut first: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..=4 {
+            rig.set_local_tick(t);
+            first.extend(rig.tick(vec![]));
+        }
+        let first_reqs = crossing_requests(&first);
+        assert_eq!(
+            first_reqs.len(),
+            1,
+            "exactly ONE request from the rising edge"
+        );
+        assert_eq!(
+            first_reqs[0].attempt, 0,
+            "the first crossing uses attempt 0"
+        );
+        let latched_id = crossing_transfer_id(DirectoryKey::Entity(entity), Fence(1), 0);
+        assert_eq!(
+            rig.world.resource::<RequestInFlight>().0.get(&entity),
+            Some(&latched_id),
+            "the latch is held (no orchestrator ever cleared it)",
+        );
+        // No re-drive has fired yet (elapsed 0 on the commit tick, and ticks 5/6 are still < ttl).
+        for t in 5..=6 {
+            rig.set_local_tick(t);
+            let out = rig.tick(vec![]);
+            assert_eq!(
+                crossing_requests(&out).len(),
+                0,
+                "no re-drive while local_tick - last_commit_tick < ttl (tick {t})",
+            );
+        }
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_redriven,
+            0,
+            "the ttl window has NOT elapsed yet (the `>= ttl` false arm)",
+        );
+
+        // Tick 7: local_tick - 4 == 3 >= TTL → the scan re-emits the SAME request (the `>= ttl` TRUE arm).
+        rig.set_local_tick(7);
+        let redrive_out = rig.tick(vec![]);
+        let redrive_reqs = crossing_requests(&redrive_out);
+        assert_eq!(
+            redrive_reqs.len(),
+            1,
+            "the ttl re-drive re-emitted exactly one request"
+        );
+        // The re-drive is BYTE-IDENTICAL to the standing latch: same subject/to_realm/fence/session/attempt.
+        assert_eq!(redrive_reqs[0].subject, DirectoryKey::Entity(entity));
+        assert_eq!(redrive_reqs[0].to_realm, OTHER_REALM);
+        assert_eq!(redrive_reqs[0].from_realm, config().realm);
+        assert_eq!(redrive_reqs[0].subject_fence, Fence(1));
+        assert_eq!(redrive_reqs[0].session, TRIG_SESSION);
+        assert_eq!(redrive_reqs[0].attempt, 0, "same attempt → same id");
+        assert_eq!(
+            crossing_transfer_id(
+                redrive_reqs[0].subject,
+                redrive_reqs[0].subject_fence,
+                redrive_reqs[0].attempt,
+            ),
+            latched_id,
+            "the re-emitted id equals the standing latch id (idempotent at the orchestrator)",
+        );
+        assert!(
+            rig.world.resource::<StubStats>().crossings_redriven >= 1,
+            "the re-drive counter bumped",
+        );
+        assert_eq!(
+            rig.world.resource::<RequestInFlight>().0.get(&entity),
+            Some(&latched_id),
+            "the latch is STILL held after the re-drive (only a saga terminal clears it)",
+        );
+
+        // Tick 8: the re-drive re-armed `last_commit_tick = 7`, so 8 - 7 == 1 < TTL → NO third emit yet
+        // (the `>= ttl` false arm again, proving the timer re-arms and does not storm every tick).
+        rig.set_local_tick(8);
+        let after = rig.tick(vec![]);
+        assert_eq!(
+            crossing_requests(&after).len(),
+            0,
+            "the re-drive re-armed the ttl timer — no storm before the next window",
+        );
+    }
+
+    #[test]
+    fn the_ttl_redrive_is_inert_when_request_ttl_ticks_is_zero() {
+        // 3f-D4: with the DEFAULT `request_ttl_ticks == 0` the scan EARLY-RETURNS (the inert default of
+        // every current rig) — a held latch is NEVER re-driven, even past many ticks.
+        let mut rig = Rig::new(); // request_ttl_ticks == 0
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 43);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+
+        // Dwell to the first commit, then advance well past any plausible ttl window.
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..=40 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        assert_eq!(
+            crossing_requests(&all).len(),
+            1,
+            "exactly the ONE rising-edge request — the ttl scan is inert (never re-drives)",
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_redriven,
+            0,
+            "the ttl==0 early-return means a held latch is never re-driven",
+        );
+        assert!(
+            rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity),
+            "the latch stands (no positive clear), but is never re-emitted",
         );
     }
 
@@ -8381,7 +8662,10 @@ mod tests {
                 transfer: TransferId(5),
             }),
         )]);
-        assert_eq!(rig.world.resource::<StubStats>().crossing_abort_no_entity, 1);
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossing_abort_no_entity,
+            1
+        );
         assert_eq!(
             crossing_aborted_acks(&out).len(),
             1,
