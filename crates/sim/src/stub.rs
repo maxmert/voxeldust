@@ -358,6 +358,14 @@ pub struct CrossingState {
     /// its rising edge (a lost or false crossing) — so a winner change restarts the dwell from this
     /// boundary's create edge (`evaluate_one_subject`). `None` = never evaluated. Cooldown is preserved.
     pub winner_ix: Option<usize>,
+    /// The per-entity crossing-ATTEMPT counter (Slice 3f-D, H2). Bumped ONLY when a NEW `RequestInFlight`
+    /// latch is taken (`fan_out_crossing`'s `Vacant` arm), i.e. only AFTER the prior latch cleared on
+    /// abort/commit — so it feeds a UNIQUE [`crossing_transfer_id`] per attempt: a stale `CrossingAborted`
+    /// for an old attempt can never wrong-clear a same-fence re-cross's fresh latch. A lost-enqueue keeps the
+    /// latch held (no bump); a crash evicts `CrossingProgress` → resets to `0` (the restored in-band dot
+    /// re-mints the same first-attempt id — idempotent). Not reset on a winner change (per-entity, like the
+    /// cooldown).
+    pub crossing_attempt: u32,
 }
 
 /// The geometric trigger's per-entity dwell state (Slice 3d). One entry per subject that has been
@@ -1001,10 +1009,14 @@ fn process_inbound(
     // mechanical arity fix, not a coupling change — destructured back to the two `&mut` at the call sites.
     ghost_state: (ResMut<GhostColliderRegistration>, ResMut<SourceGhostMirror>),
     mut owned_transients: ResMut<OwnedTransients>,
-    mut in_flight: ResMut<RequestInFlight>,
+    // Bundled tuple `SystemParam` (bevy's 16-param ceiling): 3f-D threads `CrossingProgress` into the
+    // `CrossingAborted` demux (for the L1 dwell re-arm + attempt bump) — both are the crossing-trigger
+    // latch/dwell stores, so grouping them is a mechanical arity fix. Destructured to two `&mut` below.
+    crossing: (ResMut<RequestInFlight>, ResMut<CrossingProgress>),
     mut outbox: ResMut<OutboundBox>,
 ) {
     let (mut registration, mut mirror) = ghost_state;
+    let (mut in_flight, mut progress) = crossing;
     for msg in &inbox.0 {
         let Inbound::Wire { from, class, bytes } = msg else {
             // Unreachability notices are observed by the node shell (TickReport);
@@ -1043,6 +1055,7 @@ fn process_inbound(
                 &mut registration,
                 &mut owned_transients,
                 &mut in_flight,
+                &mut progress,
                 &mut stats,
                 &mut outbox,
             ),
@@ -1621,16 +1634,33 @@ fn on_transient_crossing_grant(
     }
 }
 
-/// SOURCE consumer of the orchestrator's `CrossingAborted` (Slice 3e): the crossing resolve/start saga
-/// aborted pre-CAS, so CLEAR the subject's `RequestInFlight` latch — but ONLY if it still holds THIS
-/// aborted transfer id (a stale abort for a superseded / re-latched transfer must not free a live
-/// crossing). The positive re-cross signal (never a bounded TTL). The full abort EGRESS is Slice 3f;
-/// this consumer arm lands now so the wire arm is exercised. Monomorphic.
+/// SOURCE consumer of the orchestrator's `CrossingAborted` (Slice 3f-D): the crossing resolve/start saga
+/// aborted pre-CAS, so CLEAR the subject's `RequestInFlight` latch (the positive re-cross signal, never a
+/// bounded TTL) — but ONLY if it still holds THIS aborted transfer id (a stale abort for a superseded /
+/// re-latched transfer must not free a live crossing; the per-attempt id makes that exact).
+///
+/// ALWAYS acks `CrossingAbortedAck` (all three paths): the orchestrator keeps its durable
+/// `pending_abort_replies` entry alive — re-emitting `CrossingAborted` every `scan_deadlines` window,
+/// crash-durable via the store — until THIS ack drops it. So a lost first ack whose re-emit finds the latch
+/// already cleared must STILL re-ack, else the ORCHESTRATOR entry leaks (the ack-gate must not merely
+/// relocate the strand). On the id-match clear it also RE-ARMS: reset ONLY the dwell (so a still-in-band
+/// entity re-requests without physically re-crossing — audit-L1) + BUMP the attempt (so the re-latch mints a
+/// FRESH id — H2). Monomorphic.
 fn on_crossing_aborted(
     abort: CrossingAborted,
     in_flight: &mut RequestInFlight,
+    progress: &mut CrossingProgress,
     stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+    orchestrator: NodeId,
 ) {
+    // UNCONDITIONAL ack (all paths, before the no-entity early-return). `abort` is `Copy`, so it also drives
+    // the id-match below.
+    outbox.push_flow(
+        orchestrator,
+        MsgClass::Saga,
+        &InterShardFlow::CrossingAbortedAck(abort),
+    );
     let Some(entity) = abort.subject.transfer_subject_entity() else {
         stats.crossing_abort_no_entity += 1;
         return;
@@ -1639,6 +1669,16 @@ fn on_crossing_aborted(
     // false arm is a covered no-op, not an uncoverable `matches!` region (HR5(d)).
     if in_flight.0.get(&entity) == Some(&abort.transfer) {
         in_flight.0.remove(&entity);
+        // Re-arm (audit-L1 + H2): reset the dwell so the rising edge can re-fire without a physical re-cross,
+        // and BUMP the attempt so the re-latch mints a fresh id. `entry().or_default()` (not `if let`) so
+        // there is no uncoverable `None` region — a latched entity always has a `CrossingState`, but a
+        // default is harmless if absent. NOT a drop: dropping would reset the attempt to 0 → aliasing.
+        let st = progress.0.entry(entity).or_default();
+        st.crossing_attempt = st.crossing_attempt.saturating_add(1);
+        st.inward_ticks = 0;
+        st.was_member = false;
+        st.winner_ix = None;
+        st.last_commit_tick = None;
         stats.crossing_latches_cleared += 1;
     } else {
         stats.crossing_abort_stale += 1;
@@ -2587,7 +2627,12 @@ fn fan_out_crossing(
             match in_flight.entry(entity) {
                 Entry::Vacant(slot) => {
                     let subject = DirectoryKey::Entity(entity);
-                    let transfer = crossing_transfer_id(subject, subject_fence);
+                    // 3f-D (H2): the id is stamped with the current attempt so each latch is UNIQUE. The
+                    // attempt is bumped ONLY when this latch later CLEARS on abort (`on_crossing_aborted`),
+                    // NOT here — so the still-latched id is stable for the ttl-re-drive, and a crash (which
+                    // evicts `CrossingProgress` → attempt back to 0) re-mints the same first-attempt id.
+                    let attempt = state.crossing_attempt;
+                    let transfer = crossing_transfer_id(subject, subject_fence, attempt);
                     slot.insert(transfer);
                     outbox.push_flow(
                         ctx.config.orchestrator,
@@ -2598,6 +2643,7 @@ fn fan_out_crossing(
                             to_realm,
                             subject_fence,
                             session,
+                            attempt,
                         }),
                     );
                     state.last_commit_tick = Some(ctx.clock.local_tick);
@@ -3099,6 +3145,7 @@ fn on_directory_reply(
     registration: &mut GhostColliderRegistration,
     owned_transients: &mut OwnedTransients,
     in_flight: &mut RequestInFlight,
+    progress: &mut CrossingProgress,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
@@ -3180,7 +3227,7 @@ fn on_directory_reply(
         // full abort EGRESS is Slice 3f, but the consumer arm lands now so the wire arm is used). A
         // mismatch (a stale abort for a superseded/re-latched transfer) is a counted no-op.
         Ok(InterShardFlow::CrossingAborted(a)) => {
-            on_crossing_aborted(a, in_flight, stats);
+            on_crossing_aborted(a, in_flight, progress, stats, outbox, config.orchestrator);
             return;
         }
         // DEST: the saga-pushed ordered Promote (1d.5b.3b) — the REAL Ghost→Owned promoter + the
@@ -7844,6 +7891,18 @@ mod tests {
             .collect()
     }
 
+    /// Every `CrossingAbortedAck` in the outbox (decoded) — the source's latch-clear confirm (3f-D).
+    fn crossing_aborted_acks(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<CrossingAborted> {
+        sent.iter()
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                    Ok(InterShardFlow::CrossingAbortedAck(a)) => Some(a),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
     /// Every `TransientCrossingRequest` in the outbox (decoded).
     fn transient_crossing_requests(
         sent: &[(NodeId, MsgClass, Vec<u8>)],
@@ -7890,12 +7949,15 @@ mod tests {
         // Slice 3f: the source threads the dot's session (its `Dots` map key) so the orchestrator's
         // saga can `PrepareSubscribe` to the client's gateway.
         assert_eq!(reqs[0].session, TRIG_SESSION);
-        // The latch is set to the deterministic id BOTH ends derive.
+        // 3f-D: the FIRST crossing uses attempt 0.
+        assert_eq!(reqs[0].attempt, 0);
+        // The latch is set to the deterministic id BOTH ends derive (attempt 0).
         assert_eq!(
             rig.world.resource::<RequestInFlight>().0.get(&entity),
             Some(&crossing_transfer_id(
                 DirectoryKey::Entity(entity),
-                Fence(1)
+                Fence(1),
+                0
             )),
         );
         let stats = rig.world.resource::<StubStats>();
@@ -8245,13 +8307,14 @@ mod tests {
         // A live owned dot for the entity so the trigger's eviction retain keeps its latch (the empty
         // registry means no crossing is triggered; the dot only keeps the subject alive).
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(0.0, 0.0, 0.0));
-        let transfer = crossing_transfer_id(DirectoryKey::Entity(entity), Fence(1));
+        let transfer = crossing_transfer_id(DirectoryKey::Entity(entity), Fence(1), 0);
         rig.world
             .resource_mut::<RequestInFlight>()
             .0
             .insert(entity, transfer);
-        // A STALE abort (wrong id) preserves the latch (a superseded / re-latched crossing).
-        let _ = rig.tick(vec![wire_msg(
+        // A STALE abort (wrong id) preserves the latch (a superseded / re-latched crossing) — but STILL acks
+        // (3f-D: the orchestrator keeps its durable entry until the ack, so every delivery must re-ack).
+        let stale_out = rig.tick(vec![wire_msg(
             ORCH,
             MsgClass::Saga,
             &InterShardFlow::CrossingAborted(CrossingAborted {
@@ -8267,8 +8330,13 @@ mod tests {
             "a mismatched abort does NOT clear the latch",
         );
         assert_eq!(rig.world.resource::<StubStats>().crossing_abort_stale, 1);
-        // The MATCHING abort clears it.
-        let _ = rig.tick(vec![wire_msg(
+        assert_eq!(
+            crossing_aborted_acks(&stale_out).len(),
+            1,
+            "even a stale abort is acked (all paths ack — else the orch entry leaks)",
+        );
+        // The MATCHING abort clears the latch, acks, and RE-ARMS (bumps the attempt + resets the dwell).
+        let match_out = rig.tick(vec![wire_msg(
             ORCH,
             MsgClass::Saga,
             &InterShardFlow::CrossingAborted(CrossingAborted {
@@ -8285,6 +8353,39 @@ mod tests {
         assert_eq!(
             rig.world.resource::<StubStats>().crossing_latches_cleared,
             1
+        );
+        assert_eq!(crossing_aborted_acks(&match_out).len(), 1, "the match acks too");
+        // The re-arm bumped the attempt (0 -> 1), so a re-cross mints a FRESH id (H2).
+        assert_eq!(
+            rig.world
+                .resource::<CrossingProgress>()
+                .0
+                .get(&entity)
+                .map(|st| st.crossing_attempt),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn a_crossing_aborted_for_a_non_entity_subject_still_acks() {
+        // The THIRD unconditional-ack path (3f-D): a `CrossingAborted` whose subject is not an Entity (a
+        // malformed/realm subject) has no latch to clear, but MUST still ack — else the orchestrator's
+        // durable `pending_abort_replies` entry would leak.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let out = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::CrossingAborted(CrossingAborted {
+                subject: DirectoryKey::Realm(RealmId::System(7)),
+                transfer: TransferId(5),
+            }),
+        )]);
+        assert_eq!(rig.world.resource::<StubStats>().crossing_abort_no_entity, 1);
+        assert_eq!(
+            crossing_aborted_acks(&out).len(),
+            1,
+            "the no-entity path acks too",
         );
     }
 
@@ -8310,7 +8411,7 @@ mod tests {
         );
         // The durable COMMIT terminal at the source (the saga-pushed Demote) POSITIVELY clears it.
         let demote = DemoteCmd {
-            transfer: crossing_transfer_id(DirectoryKey::Entity(entity), Fence(1)),
+            transfer: crossing_transfer_id(DirectoryKey::Entity(entity), Fence(1), 0),
             subject: DirectoryKey::Entity(entity),
             new_owner_fence: Fence(2),
             step_id: DEMOTE_STEP,

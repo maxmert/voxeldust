@@ -607,6 +607,11 @@ pub struct TransientHandoff {
 /// `Entity → Session` reverse index, so the SOURCE (which owns the dot, keyed by `SessionId`) supplies it.
 /// Transients need none (their short batch path emits no session-bearing command), so only THIS request
 /// grew the field. APPENDED (postcard field-append — preserves the arm's discriminant).
+///
+/// Slice 3f-D — carries the source's `attempt` (its per-entity crossing-attempt counter) so the
+/// orchestrator derives the IDENTICAL per-attempt [`crossing_transfer_id`]: each crossing attempt gets a
+/// unique id, so a stale abort for an old attempt can never wrong-clear a same-fence re-cross (H2).
+/// APPENDED (postcard field-append).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossingRequest {
     pub subject: DirectoryKey,
@@ -614,6 +619,7 @@ pub struct CrossingRequest {
     pub to_realm: RealmId,
     pub subject_fence: Fence,
     pub session: SessionId,
+    pub attempt: u32,
 }
 
 /// SHARD → ORCHESTRATOR (Slice 3c spatial transfer-trigger): a TRANSIENT crossed a realm boundary; the
@@ -651,26 +657,41 @@ pub struct CrossingAborted {
     pub transfer: TransferId,
 }
 
-/// Deterministic `TransferId` for a geometric crossing — the SAME value the source (its
-/// `RequestInFlight` latch) and the orchestrator (`start_transfer`) INDEPENDENTLY derive from
-/// `(subject, subject_fence)`, so a saga terminal (`Demote` / `CrossingAborted`) carrying that id
-/// matches the source latch. FNV-1a over `postcard(subject, subject_fence)`, high-byte namespace-tagged
-/// `0x39` (disjoint from `rehome_transfer_id`'s `0x37`). Branchless (HR5: no rng / wall-clock / default
-/// hasher — the byte-identical seed-replay canary forbids all three); the same subject + fence always
-/// derives the same id, so a re-attempt after a lost RAM enqueue is idempotent. Mirrors
-/// `rehome_transfer_id`'s (vd-node) shape.
+/// The ONE deterministic namespaced-`TransferId` primitive (Slice 3f-D, DRY hoist): FNV-1a over an
+/// already-encoded `seed`, with `tag` in the high byte so disjoint namespaces (`0x39` crossing,
+/// `0x37` re-home) can never collide with each other or with the small/sequential connection-plane ids
+/// (high byte `0x00`). Branchless (HR5: no rng / wall-clock / default hasher — the byte-identical
+/// seed-replay canary forbids all three). Callers encode their OWN seed, so this serves both the
+/// 3-arg crossing id and the 2-arg re-home id without arity coupling.
 #[must_use]
-pub fn crossing_transfer_id(subject: DirectoryKey, subject_fence: Fence) -> TransferId {
+pub fn namespaced_transfer_id(tag: u8, seed: &[u8]) -> TransferId {
     const FNV_OFFSET: u128 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u128 = 0x0000_0100_0000_01b3;
-    const CROSSING_TAG: u128 = 0x39u128 << 120;
     const LOW_120: u128 = (1u128 << 120) - 1;
-    let seed = postcard::to_allocvec(&(subject, subject_fence)).expect("encode crossing id seed");
     let mut h = FNV_OFFSET;
     for b in seed {
-        h = (h ^ u128::from(b)).wrapping_mul(FNV_PRIME);
+        h = (h ^ u128::from(*b)).wrapping_mul(FNV_PRIME);
     }
-    TransferId(CROSSING_TAG | (h & LOW_120))
+    TransferId(((tag as u128) << 120) | (h & LOW_120))
+}
+
+/// Deterministic `TransferId` for a geometric crossing — the SAME value the source (its
+/// `RequestInFlight` latch) and the orchestrator INDEPENDENTLY derive from `(subject, subject_fence,
+/// attempt)`, so a saga terminal (`Demote` / `CrossingAborted`) carrying that id matches the source
+/// latch. High-byte namespace-tagged `0x39` (disjoint from `rehome_transfer_id`'s `0x37`).
+///
+/// Slice 3f-D — the `attempt` is the source's per-entity crossing-attempt counter (bumped ONLY on a new
+/// latch, i.e. only AFTER the prior latch cleared on abort/commit). It makes each crossing ATTEMPT's id
+/// UNIQUE, so a stale `CrossingAborted` for an old attempt can never wrong-clear a same-fence re-cross's
+/// fresh latch (H2). Idempotency is PRESERVED where it matters: a lost-RAM-enqueue keeps the latch held
+/// (no new attempt, the ttl-re-drive re-emits the same id), and a crash resets the RAM counter to `0`
+/// (the restored in-band dot re-mints the same first-attempt id). Only a post-abort re-latch — exactly
+/// where H2 needs a fresh id — advances the attempt.
+#[must_use]
+pub fn crossing_transfer_id(subject: DirectoryKey, subject_fence: Fence, attempt: u32) -> TransferId {
+    let seed = postcard::to_allocvec(&(subject, subject_fence, attempt))
+        .expect("encode crossing id seed");
+    namespaced_transfer_id(0x39, &seed)
 }
 
 /// Ghost replication: kinematic mirrors that NEVER independently integrate physics.
@@ -1304,20 +1325,22 @@ mod tests {
     }
 
     /// `crossing_transfer_id` is DETERMINISTIC (two calls with the same args agree), STABLE across the
-    /// subject+fence pair only (different subject OR different fence yields a different id), and carries the
-    /// `0x39` namespace tag (disjoint from rehome's `0x37`) in its high byte.
+    /// (subject, fence, attempt) triple only (a different subject OR fence OR attempt yields a different id),
+    /// and carries the `0x39` namespace tag (disjoint from rehome's `0x37`) in its high byte.
     #[test]
     fn crossing_transfer_id_is_deterministic_and_namespaced() {
         let subject = DirectoryKey::Entity(eid(EntityKind::Player));
         let other_subject = DirectoryKey::Entity(eid(EntityKind::Ship));
-        let id = crossing_transfer_id(subject, Fence(4));
+        let id = crossing_transfer_id(subject, Fence(4), 0);
         // Deterministic: a second call with the same args is byte-identical.
-        assert_eq!(id, crossing_transfer_id(subject, Fence(4)));
+        assert_eq!(id, crossing_transfer_id(subject, Fence(4), 0));
         // A different fence changes the id.
-        assert_ne!(id, crossing_transfer_id(subject, Fence(5)));
+        assert_ne!(id, crossing_transfer_id(subject, Fence(5), 0));
         // A different subject changes the id.
-        assert_ne!(id, crossing_transfer_id(other_subject, Fence(4)));
-        // The high byte is the `0x39` crossing namespace tag.
+        assert_ne!(id, crossing_transfer_id(other_subject, Fence(4), 0));
+        // 3f-D: a different ATTEMPT changes the id (a post-abort re-cross gets a fresh id — H2).
+        assert_ne!(id, crossing_transfer_id(subject, Fence(4), 1));
+        // The high byte is the `0x39` crossing namespace tag (attempt lives in the low 120 bits).
         assert_eq!(id.0 >> 120, 0x39);
     }
 
@@ -1330,6 +1353,7 @@ mod tests {
                 to_realm: RealmId::Planet(2),
                 subject_fence: Fence(4),
                 session: SessionId(3),
+                attempt: 0,
             }),
             InterShardFlow::TransientCrossingRequest(TransientCrossingRequest {
                 subject: DirectoryKey::Entity(eid(EntityKind::Player)),
@@ -1349,6 +1373,7 @@ mod tests {
                 transfer: crossing_transfer_id(
                     DirectoryKey::Entity(eid(EntityKind::Player)),
                     Fence(4),
+                    0,
                 ),
             }),
             InterShardFlow::CrossingAbortedAck(CrossingAborted {
@@ -1356,6 +1381,7 @@ mod tests {
                 transfer: crossing_transfer_id(
                     DirectoryKey::Entity(eid(EntityKind::Player)),
                     Fence(4),
+                    0,
                 ),
             }),
         ] {
@@ -1373,7 +1399,7 @@ mod tests {
     #[test]
     fn crossing_aborted_ack_shares_the_abort_idempotency_key() {
         let subject = DirectoryKey::Entity(eid(EntityKind::Player));
-        let transfer = crossing_transfer_id(subject, Fence(4));
+        let transfer = crossing_transfer_id(subject, Fence(4), 0);
         let abort = InterShardFlow::CrossingAborted(CrossingAborted { subject, transfer });
         let ack = InterShardFlow::CrossingAbortedAck(CrossingAborted { subject, transfer });
         assert_eq!(abort.effect_class(), ack.effect_class());

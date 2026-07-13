@@ -240,6 +240,7 @@ fn every_arm() -> Vec<InterShardFlow> {
             to_realm: RealmId::Planet(2),
             subject_fence: Fence(7),
             session: SessionId(3),
+            attempt: 0,
         }),
         InterShardFlow::TransientCrossingRequest(vd_wire::intershard::TransientCrossingRequest {
             subject: DirectoryKey::Entity(eid(EntityKind::Debris)),

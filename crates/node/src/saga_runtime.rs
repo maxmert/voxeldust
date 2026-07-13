@@ -58,6 +58,7 @@ use vd_wire::intershard::{
     STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_DISCARD_STEP,
     TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff,
     TransientCrossingGrant, TransientCrossingRequest, TransitionPayload, crossing_transfer_id,
+    namespaced_transfer_id,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -88,6 +89,8 @@ enum StoreKey {
     BatchGo(BatchId),
     Directory(DirectoryKey),
     Clock,
+    /// Slice 3f-D: a durable crossing-abort reply pending a source ack (Mechanism Y).
+    AbortReply(TransferId),
 }
 
 impl StoreKey {
@@ -95,6 +98,8 @@ impl StoreKey {
     const BATCH_GO: u8 = 2;
     const DIRECTORY: u8 = 3;
     const CLOCK: u8 = 4;
+    /// Slice 3f-D: the crossing-abort-reply family tag (5 — the next free tag after CLOCK=4).
+    const ABORT_REPLY: u8 = 5;
 
     /// The store key bytes: family tag + postcard(id). postcard encoding of these small fixed-shape
     /// types is infallible (no I/O); `.expect` is straight-line at this monomorphic site (the panic body
@@ -115,6 +120,10 @@ impl StoreKey {
                 k.extend(postcard::to_allocvec(&d).expect("encode DirectoryKey store key"));
             }
             StoreKey::Clock => k.push(Self::CLOCK),
+            StoreKey::AbortReply(t) => {
+                k.push(Self::ABORT_REPLY);
+                k.extend(postcard::to_allocvec(&t).expect("encode TransferId store key"));
+            }
         }
         k
     }
@@ -236,6 +245,27 @@ struct PendingReHome {
     dead_owner: NodeId,
     /// The fence the dead owner was committed at — Slice 4's `ReHomeCommit` CAS expectation (`fence+1`).
     prev_fence: Fence,
+}
+
+/// Slice 3f-D (Mechanism Y): a durable orchestrator record that a CROSSING-ORIGIN durable saga tombstoned
+/// ABORTED (a pre-CAS failure), so the SOURCE's `RequestInFlight` crossing latch must be POSITIVELY cleared
+/// — a lost RAM enqueue would otherwise strand the entity's latch forever. Held in
+/// [`SagaRuntimeRes::pending_abort_replies`] (keyed by the aborted `TransferId`) AND persisted
+/// (`StoreKey::AbortReply`), so an orchestrator restart BETWEEN the abort and the source's ack re-emits
+/// `CrossingAborted` via rehydrate → the latch still clears (a RAM-only map would have lost it on the kill).
+/// Dropped by the source's `CrossingAbortedAck`, or SELF-REAPED when `source` is confirmed dead (D-37
+/// already re-homed the entity → the abort is moot). Self-describing (carries `transfer`), so rehydrate
+/// never parses the store key. NO generation/attempt field is needed: the 3f-D1 attempt-stamp already
+/// makes each crossing ATTEMPT's id UNIQUE (`crossing_transfer_id(subject, subject_fence, attempt)`), so
+/// there is no ABA on the `TransferId` key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PendingAbortReply {
+    /// The aborted crossing's `TransferId` — the map key AND the id the source latch keys on.
+    pub transfer: TransferId,
+    /// The SOURCE shard to re-emit `CrossingAborted` to (and whose death triggers the moot-abort reap).
+    pub source: NodeId,
+    /// The subject key echoed back in `CrossingAborted` (the source's latch is entity-keyed).
+    pub subject: DirectoryKey,
 }
 
 /// D-3 dead-vs-slow EVIDENCE for one peer: how many CONSECUTIVE `NodeUnreachable` notices (no
@@ -463,6 +493,19 @@ pub struct SagaRuntimeRes {
     /// Slice 3f-C: transient `TransientCrossingRequest`s whose dest `Realm` head was UNRESOLVED — no grant
     /// emitted (the source re-requests; the grant is idempotent, so a later-resolving realm still grants).
     transient_dest_unresolved: u64,
+    /// Slice 3f-D (Mechanism Y): crossing-origin durable-abort replies pending a source ack, keyed by the
+    /// aborted `TransferId`. DURABLE (persisted via `StoreKey::AbortReply` + rehydrated) — the whole point is
+    /// crash-durability of the latch-clear obligation, so an orchestrator restart between the abort and the
+    /// source's ack re-emits `CrossingAborted` and the source latch still clears. `scan_deadlines` re-emits
+    /// per entry (throttled to `redrive_deadline_ticks`) until a `CrossingAbortedAck` drops it (or a
+    /// dead-source reap). Empty on `Default`. See [`PendingAbortReply`].
+    pending_abort_replies: BTreeMap<TransferId, PendingAbortReply>,
+    /// Slice 3f-D: the universe tick the abort-reply RE-EMIT pass last fired (like `scan_deadlines`' per-saga
+    /// `since`, but ONE runtime-level cadence gate for the whole pending set) — so the re-emit runs at most
+    /// once per `redrive_deadline_ticks`, never a per-tick storm against an alive-but-ack-stalled source. RAM
+    /// throttle only (NOT persisted): a rebuilt orchestrator re-emits once immediately on its first post-restart
+    /// scan, which is exactly the harmless prompt behaviour rehydrate wants (the source re-acks). 0 at genesis.
+    last_abort_reply_emit: UniverseTick,
 }
 
 /// One batched `TransientGo` go-token emitted by the `IssueTransientGo` executor, COLLECTED by
@@ -1102,6 +1145,17 @@ fn bound_rejection_ledger(runtime: &mut SagaRuntimeRes) {
     }
 }
 
+/// Slice 3f-D: is this saga a CROSSING-ORIGIN transfer (a geometric boundary crossing, id-namespaced
+/// `0x39` in the `TransferId`'s high byte by [`crossing_transfer_id`])? A STATELESS TAG-CHECK on the id —
+/// `0x39` is EXCLUSIVE of the re-home namespace (`0x37`) and the connection-plane's small high-byte-`0x00`
+/// ids (see `namespaced_transfer_id`), so the discriminator needs no `SagaSnapshot` field, no version bump,
+/// and no id recompute. A branchless monomorphic expression (HR5). Only a crossing-origin durable saga that
+/// tombstones ABORTED owes a `PendingAbortReply` (Mechanism Y); every other tombstone is inert here.
+#[must_use]
+fn is_crossing_origin(ctx: &SagaCtx) -> bool {
+    (ctx.transfer.0 >> 120) == 0x39
+}
+
 /// Persist a quiescent saga: record rejections + the batched go-tokens, then GC (terminal) or write
 /// back the state.
 fn commit_result(
@@ -1140,10 +1194,43 @@ fn commit_result(
             .push((StoreKey::BatchGo(bg.batch).bytes(), Some(encode(&token))));
     }
     if tombstone {
+        // Slice 3f-D (Mechanism Y): a CROSSING-ORIGIN (`0x39`) DURABLE saga that tombstoned ABORTED (a
+        // pre-CAS failure — source authority never handed off) owes the SOURCE a positive latch-clear, else
+        // a lost RAM enqueue strands the entity's `RequestInFlight` latch. Read the live saga's ctx BEFORE
+        // the `remove` (the source/subject to reply to), gated on the stateless id tag-check
+        // (`is_crossing_origin`) AND the terminal being `Aborted` AND `Durable` class. `.get(..).expect(..)`
+        // (NOT `if let Some`) — the saga is GUARANTEED present here (it was live when `run_to_quiescence`
+        // produced this terminal, and this single-threaded schedule touched nothing in between), matching the
+        // else-branch's `.expect` at the write-back below — so there is no uncoverable `None` region (HR5).
+        let aborted = matches!(final_state, SagaState::Aborted { .. });
+        let live = runtime
+            .sagas
+            .get(&transfer)
+            .expect("the saga was present at the start of this run");
+        let crossing_origin = is_crossing_origin(&live.ctx);
+        let durable = live.ctx.class == vd_core::entity_kind::DurabilityClass::Durable;
+        if aborted && crossing_origin && durable {
+            let reply = PendingAbortReply {
+                transfer,
+                source: live.ctx.source,
+                subject: live.ctx.subject,
+            };
+            runtime.pending_abort_replies.insert(transfer, reply);
+            // Persist (self-describing). Committed at the SAME end-of-tick group-commit barrier as the
+            // saga-snapshot DELETE below and the directory `abort_clear` (all ride `pending_writes` /
+            // `dirty`), so the abort reply + the tombstone are ATOMIC post-crash — a restart never sees one
+            // without the other. The FIRST `CrossingAborted` emit is left to `scan_deadlines` (which owns the
+            // outbox + the throttle); Mechanism Y IS "scan re-emits per entry until acked", so a scan-driven
+            // first emit is the design (and the first scan sees `last_abort_reply_emit == 0` → emits promptly).
+            runtime
+                .pending_writes
+                .push((StoreKey::AbortReply(transfer).bytes(), Some(encode(&reply))));
+        }
         runtime.sagas.remove(&transfer);
         // D-6: a tombstoned saga's durable snapshot is DELETED — rehydrate's Saga-scan must not
         // resurrect it (the matching directory mutation commits in the SAME barrier, so the durable
-        // saga set + directory are always consistent post-crash).
+        // saga set + directory are always consistent post-crash). UNCONDITIONAL (never gated on the
+        // crossing check) — every tombstone deletes its snapshot.
         runtime
             .pending_writes
             .push((StoreKey::Saga(transfer).bytes(), None));
@@ -1270,6 +1357,16 @@ pub(crate) fn rehydrate(
     }
     let batch_go_writes = batch_goes.len() as u64;
 
+    // Slice 3f-D (Mechanism Y): restore the durable crossing-abort replies (self-describing — no key
+    // parse), so a restart between an abort and the source's ack re-emits `CrossingAborted` on the first
+    // post-restart `scan_deadlines` tick and the source latch still clears (a RAM-only map would strand it).
+    let mut pending_abort_replies: BTreeMap<TransferId, PendingAbortReply> = BTreeMap::new();
+    for (_k, v) in store.scan(&[StoreKey::ABORT_REPLY]) {
+        let reply: PendingAbortReply =
+            postcard::from_bytes(&v).expect("decode persisted abort-reply");
+        pending_abort_replies.insert(reply.transfer, reply);
+    }
+
     // D-3: thread the CONFIGURED liveness tuning through the recover path so a kill-9-rebuilt orchestrator
     // keeps its prod dead-vs-slow margin (n=3), not the kill-equivalent n=1 default. The tracker itself is
     // rebuilt EMPTY (the CAP freeze), but its TUNING must survive the restart.
@@ -1277,6 +1374,7 @@ pub(crate) fn rehydrate(
     runtime.sagas = sagas;
     runtime.batch_goes = batch_goes;
     runtime.batch_go_writes = batch_go_writes;
+    runtime.pending_abort_replies = pending_abort_replies;
     // D-3 Slice 4 CAP freeze: a rebuilt orchestrator does NOT reap for `recovery_grace_ticks` after recover
     // — belt-and-suspenders atop the RAM-empty tracker (the PRIMARY freeze), so even a fast restart cannot
     // race a slow-rejoining live peer into a reap before its first renewal re-lands. Measured from the
@@ -1309,9 +1407,10 @@ fn handle_crossing_request(
     _outbox: &mut OutboundBox,
     req: CrossingRequest,
 ) {
-    // The id the source latched — derived from the WIRE fence (`req.subject_fence`), NOT the head fence, so a
-    // terminal carrying it matches the source latch even if the head advanced (`crossing_transfer_id` doc).
-    let transfer = crossing_transfer_id(req.subject, req.subject_fence);
+    // The id the source latched — derived from the WIRE fence (`req.subject_fence`) + the source's
+    // per-attempt counter (`req.attempt`), NOT the head fence, so a terminal carrying it matches the source
+    // latch even if the head advanced, and a post-abort re-cross's fresh attempt gets a distinct id (H2).
+    let transfer = crossing_transfer_id(req.subject, req.subject_fence, req.attempt);
     match (
         dir.head(req.subject),
         dir.head(DirectoryKey::Realm(req.to_realm)),
@@ -1367,7 +1466,8 @@ fn handle_transient_crossing_request(
 ) {
     match dir.head(DirectoryKey::Realm(req.to_realm)) {
         Some(rec) => {
-            let batch = crossing_transfer_id(req.subject, req.src_realm_fence);
+            // Transients carry no per-entity attempt (no durable latch / abort-reply) → attempt 0.
+            let batch = crossing_transfer_id(req.subject, req.src_realm_fence, 0);
             outbox.push_flow(
                 from,
                 MsgClass::Saga,
@@ -1678,18 +1778,11 @@ fn select_rehome_target(
 /// branchless (HR5: no rng, no default hasher — the byte-identical seed-replay canary forbids both); the
 /// same orphan + fence always derives the same id, so a re-attempt after a lost RAM enqueue is idempotent.
 /// One orphan re-homes at most once per fence (the `in_transfer` lock dedups), so per-`(subject, fence)`
-/// uniqueness suffices.
+/// uniqueness suffices. Slice 3f-D (L2 DRY): the FNV body is the shared [`namespaced_transfer_id`]
+/// primitive; only the `0x37` tag + the 2-arg seed are re-home's own.
 fn rehome_transfer_id(subject: DirectoryKey, prev_fence: Fence) -> TransferId {
-    const FNV_OFFSET: u128 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u128 = 0x0000_0100_0000_01b3;
-    const REHOME_TAG: u128 = 0x37u128 << 120;
-    const LOW_120: u128 = (1u128 << 120) - 1;
     let seed = postcard::to_allocvec(&(subject, prev_fence)).expect("encode rehome id seed");
-    let mut h = FNV_OFFSET;
-    for b in seed {
-        h = (h ^ u128::from(b)).wrapping_mul(FNV_PRIME);
-    }
-    TransferId(REHOME_TAG | (h & LOW_120))
+    namespaced_transfer_id(0x37, &seed)
 }
 
 /// D-37 Slice 3: build the `SagaCtx` for a STANDING re-home. REAL fields carry the recovery: `subject`
@@ -1860,6 +1953,52 @@ fn scan_deadlines(
             _ => {}
         }
         deliver(runtime, dir, outbox, epoch, now, transfer, event);
+    }
+
+    // Slice 3f-D (Mechanism Y): drive the durable crossing-abort replies — a SEPARATE pass (disjoint from
+    // `sagas`), run AFTER the `due` drain. Per entry: (1) REAP when the subject NO LONGER belongs to
+    // `source` (`dir.head(subject) != source`) — the abort is then MOOT: D-37 has re-homed the dead
+    // source's entity, OR it transferred away, so the source's stale crossing latch is irrelevant. This is
+    // the SAME "entity left the owner" fact D-37's re-home discharges, NOT the `is_confirmed_dead` PULSE
+    // (which flips true on a transient blip AND EXPIRES on recovery — so it would reap a briefly-blipped-
+    // then-RECOVERED source's live latch-clear obligation BEFORE re-home ever completes, stranding the
+    // entity at the boundary; adversary-review HIGH). A recovered source still owns the subject → head
+    // stays `source` → the reply keeps re-emitting until that source acks. (2) else RE-EMIT
+    // `CrossingAborted` to the source, THROTTLED to `redrive_deadline_ticks` (cheap-idempotent cadence — an
+    // alive-but-ack-stalled source must not draw a per-tick egress). The throttle is ONE runtime-level gate
+    // (`last_abort_reply_emit`), so `PendingAbortReply` stays a 3-field record (no per-entry stamp, no ABA).
+    // COLLECT-then-APPLY into Vecs so mutation happens after the shared borrow ends (determinism +
+    // borrow-safety); `dir` is a disjoint param, so `dir.head` inside the `runtime`-values loop is sound.
+    let reemit_due = now.0.saturating_sub(runtime.last_abort_reply_emit.0)
+        >= tuning.redrive_deadline_ticks;
+    let mut reaped: Vec<TransferId> = Vec::new();
+    let mut to_emit: Vec<PendingAbortReply> = Vec::new();
+    for reply in runtime.pending_abort_replies.values() {
+        let owner = dir.head(reply.subject).map(|r| r.authority.node());
+        if owner != Some(reply.source) {
+            reaped.push(reply.transfer);
+        } else if reemit_due {
+            to_emit.push(*reply);
+        }
+    }
+    if !to_emit.is_empty() {
+        runtime.last_abort_reply_emit = now;
+    }
+    for reply in to_emit {
+        outbox.push_flow(
+            reply.source,
+            MsgClass::Saga,
+            &InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
+                subject: reply.subject,
+                transfer: reply.transfer,
+            }),
+        );
+    }
+    for transfer in reaped {
+        runtime.pending_abort_replies.remove(&transfer);
+        runtime
+            .pending_writes
+            .push((StoreKey::AbortReply(transfer).bytes(), None));
     }
 }
 
@@ -2157,9 +2296,20 @@ pub fn drive_sagas(
             Ok(InterShardFlow::TransientCrossingRequest(req)) => {
                 handle_transient_crossing_request(&dir.0, &mut outbox, &mut runtime, req, from);
             }
+            // Slice 3f-D (Mechanism Y): the SOURCE acked a crossing-abort reply — drop the pending entry +
+            // stage its persist-DELETE (both ride this tick's group-commit barrier, so a kill after the ack
+            // never re-emits). `is_some()`-gated so a REDELIVERED ack (the `ReDriven` class re-sends it on
+            // every re-delivered `CrossingAborted`) is an idempotent no-op — never a double-DELETE stage.
+            Ok(InterShardFlow::CrossingAbortedAck(ack)) => {
+                if runtime.pending_abort_replies.remove(&ack.transfer).is_some() {
+                    runtime
+                        .pending_writes
+                        .push((StoreKey::AbortReply(ack.transfer).bytes(), None));
+                }
+            }
             // Everything else (Ghost / Directory / Saga commands / DirectoryReply / FlushSource /
-            // CrossingAborted / CrossingAbortedAck — the 3f-D abort-reply pair) and any decode failure:
-            // not a saga-driving inbound here.
+            // CrossingAborted — the orchestrator EMITS the abort reply, never consumes it) and any decode
+            // failure: not a saga-driving inbound here.
             _ => {}
         }
     }
@@ -2723,6 +2873,7 @@ mod tests {
             to_realm: TO_REALM,
             subject_fence,
             session: CROSSING_SESSION,
+            attempt: 0,
         }
     }
 
@@ -5815,10 +5966,10 @@ mod tests {
         rig.crossing_request(crossing_req(Fence(1))); // tick N: enqueue the start
         rig.settle(); // tick N+1: process_starts inserts the saga
 
-        let latched = crossing_transfer_id(subject(), Fence(1));
+        let latched = crossing_transfer_id(subject(), Fence(1), 0);
         let ctx = rig.saga_ctx(latched);
         assert_eq!(ctx.transfer, latched);
-        assert_eq!(ctx.transfer, crossing_transfer_id(subject(), Fence(1)));
+        assert_eq!(ctx.transfer, crossing_transfer_id(subject(), Fence(1), 0));
         assert_eq!(ctx.source, SOURCE);
         assert_eq!(ctx.dest, DEST);
         assert_eq!(ctx.session, CROSSING_SESSION);
@@ -5918,7 +6069,7 @@ mod tests {
         rig.settle();
 
         assert_eq!(rig.live(), 1, "the redelivery never spawns a second saga");
-        let latched = crossing_transfer_id(subject(), Fence(1));
+        let latched = crossing_transfer_id(subject(), Fence(1), 0);
         assert_eq!(rig.saga_ctx(latched).transfer, latched);
         assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 1);
     }
@@ -5961,7 +6112,7 @@ mod tests {
         let _ = rig.drain_source();
         rig.transient_crossing_request(transient_req(Fence(2)));
 
-        let batch = crossing_transfer_id(subject(), Fence(2));
+        let batch = crossing_transfer_id(subject(), Fence(2), 0);
         assert_eq!(
             rig.drain_source(),
             vec![grant_wire(TransientCrossingGrant {
@@ -6008,5 +6159,428 @@ mod tests {
 
         assert_eq!(first, second, "the redelivery re-grants the identical batch");
         assert_eq!(rig.count(SagaRuntimeRes::transient_crossings_granted), 2);
+    }
+
+    // ───────────────────────── Slice 3f-D: durable crossing-abort core (Mechanism Y) ─────────────────────
+
+    /// A crossing-origin `TransferId` (id-namespaced `0x39`) the source's latch keys on — the SAME value
+    /// `handle_crossing_request` mints from `(subject, subject_fence, attempt)`.
+    fn crossing_xfer() -> TransferId {
+        crossing_transfer_id(subject(), Fence(1), 0)
+    }
+
+    /// Inject a live saga under a SPECIFIC transfer id (its `ctx.transfer` set to `transfer`, source
+    /// SOURCE / dest DEST / subject `subject()`) with the given class + state — for the `commit_result`
+    /// crossing-abort tests (the id's high byte is the `is_crossing_origin` discriminator).
+    fn inject_saga_id(
+        runtime: &mut SagaRuntimeRes,
+        transfer: TransferId,
+        class: DurabilityClass,
+        state: SagaState,
+    ) {
+        let mut ctx = ctx(class, Fence(1));
+        ctx.transfer = transfer;
+        runtime.sagas.insert(
+            transfer,
+            LiveSaga {
+                ctx,
+                state,
+                gateway: GATEWAY,
+                since: UniverseTick(0),
+                flushed_pose: None,
+                dead_observed_since: None,
+                dest_adopted: false,
+            },
+        );
+    }
+
+    /// The terminal `Aborted` state (a pre-CAS failure) a tombstoning saga carries.
+    fn aborted_state() -> SagaState {
+        SagaState::Aborted {
+            reason: AbortReason::CutTimeout,
+        }
+    }
+
+    /// Count the `pending_writes` entries staging THIS abort-reply key with the given put/delete shape
+    /// (`Some` = PUT, `None` = DELETE). Value-equality on the key bytes — no key-parse.
+    fn abort_reply_writes(runtime: &SagaRuntimeRes, transfer: TransferId, put: bool) -> usize {
+        let key = StoreKey::AbortReply(transfer).bytes();
+        runtime
+            .pending_writes
+            .iter()
+            .filter(|(k, v)| *k == key && v.is_some() == put)
+            .count()
+    }
+
+    #[test]
+    fn store_key_abort_reply_tag_is_five_and_distinct() {
+        // D0: the AbortReply family tag is 5 and disjoint from every prior family (1..=4).
+        let bytes = StoreKey::AbortReply(crossing_xfer()).bytes();
+        assert_eq!(bytes[0], 5, "AbortReply tag is 5");
+        let tags = [
+            StoreKey::Saga(XFER).bytes()[0],
+            StoreKey::BatchGo(BatchId(XFER)).bytes()[0],
+            StoreKey::Directory(subject()).bytes()[0],
+            StoreKey::Clock.bytes()[0],
+            StoreKey::AbortReply(XFER).bytes()[0],
+        ];
+        let mut distinct = tags.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), tags.len(), "all five family tags are distinct");
+    }
+
+    #[test]
+    fn pending_abort_reply_roundtrips() {
+        // D0: the self-describing record encodes + decodes byte-identically (all three fields).
+        let reply = PendingAbortReply {
+            transfer: crossing_xfer(),
+            source: SOURCE,
+            subject: subject(),
+        };
+        let bytes = encode(&reply);
+        let back: PendingAbortReply =
+            postcard::from_bytes(&bytes).expect("decode PendingAbortReply");
+        assert_eq!(back, reply);
+    }
+
+    #[test]
+    fn is_crossing_origin_is_true_only_for_the_crossing_namespace() {
+        // D1: the stateless tag-check — `0x39` crossing is EXCLUSIVE of re-home (`0x37`) and the
+        // connection-plane's small high-byte-`0x00` ids.
+        let mut c = ctx(DurabilityClass::Durable, Fence(1));
+        c.transfer = crossing_xfer();
+        assert!(is_crossing_origin(&c), "a 0x39 id IS crossing-origin");
+        c.transfer = namespaced_transfer_id(0x37, b"rehome"); // re-home namespace
+        assert!(!is_crossing_origin(&c), "a 0x37 re-home id is NOT crossing-origin");
+        c.transfer = TransferId(1); // a small connection-plane id (high byte 0x00)
+        assert!(!is_crossing_origin(&c), "a high-byte-0x00 id is NOT crossing-origin");
+    }
+
+    #[test]
+    fn commit_result_aborted_crossing_inserts_pending_reply_and_stages_both_writes() {
+        // D1: a crossing-origin (0x39) DURABLE saga that tombstones ABORTED inserts a PendingAbortReply,
+        // stages its PUT, AND stages the UNCONDITIONAL saga-snapshot DELETE — both in the SAME tick's
+        // `pending_writes` (co-tick atomicity), keyed on DISTINCT families.
+        let mut runtime = SagaRuntimeRes::default();
+        let transfer = crossing_xfer();
+        inject_saga_id(&mut runtime, transfer, DurabilityClass::Durable, aborted_state());
+
+        commit_result(&mut runtime, transfer, aborted_state(), true, vec![], vec![], UniverseTick(0));
+
+        let entry = runtime
+            .pending_abort_replies
+            .get(&transfer)
+            .expect("a pending abort reply was inserted");
+        assert_eq!(entry.source, SOURCE);
+        assert_eq!(entry.subject, subject());
+        assert_eq!(entry.transfer, transfer);
+        assert_eq!(
+            abort_reply_writes(&runtime, transfer, true),
+            1,
+            "the AbortReply PUT was staged"
+        );
+        // The co-tick UNCONDITIONAL saga-snapshot DELETE (a distinct key family) is also staged.
+        let saga_delete = StoreKey::Saga(transfer).bytes();
+        assert_eq!(
+            runtime
+                .pending_writes
+                .iter()
+                .filter(|(k, v)| *k == saga_delete && v.is_none())
+                .count(),
+            1,
+            "the saga-snapshot DELETE rides the same tick"
+        );
+        assert!(!runtime.sagas.contains_key(&transfer), "the saga was tombstoned");
+    }
+
+    #[test]
+    fn commit_result_done_crossing_does_not_insert() {
+        // D1: a crossing-origin saga that tombstones DONE (not Aborted) inserts NOTHING — the `aborted`
+        // operand is false (the &&-split's second-false case).
+        let mut runtime = SagaRuntimeRes::default();
+        let transfer = crossing_xfer();
+        inject_saga_id(
+            &mut runtime,
+            transfer,
+            DurabilityClass::Durable,
+            SagaState::Done { new_fence: Fence(2) },
+        );
+        commit_result(
+            &mut runtime,
+            transfer,
+            SagaState::Done { new_fence: Fence(2) },
+            true,
+            vec![],
+            vec![],
+            UniverseTick(0),
+        );
+        assert!(runtime.pending_abort_replies.is_empty(), "Done does not owe a reply");
+        assert_eq!(abort_reply_writes(&runtime, transfer, true), 0);
+    }
+
+    #[test]
+    fn commit_result_aborted_rehome_does_not_insert() {
+        // D1: a NON-crossing (re-home 0x37) saga that tombstones Aborted inserts NOTHING — the
+        // `is_crossing_origin` operand is false (the discriminator-exclusivity / first-false case).
+        let mut runtime = SagaRuntimeRes::default();
+        let transfer = namespaced_transfer_id(0x37, b"rehome");
+        inject_saga_id(&mut runtime, transfer, DurabilityClass::Durable, aborted_state());
+        commit_result(&mut runtime, transfer, aborted_state(), true, vec![], vec![], UniverseTick(0));
+        assert!(runtime.pending_abort_replies.is_empty(), "a re-home abort owes no crossing reply");
+    }
+
+    #[test]
+    fn commit_result_aborted_transient_crossing_does_not_insert() {
+        // D1: a crossing-namespaced but TRANSIENT saga aborting inserts NOTHING — the `durable` operand is
+        // false (the class-gate false arm; a transient carries no per-entity durable latch).
+        let mut runtime = SagaRuntimeRes::default();
+        let transfer = crossing_xfer();
+        inject_saga_id(&mut runtime, transfer, DurabilityClass::Transient, aborted_state());
+        commit_result(&mut runtime, transfer, aborted_state(), true, vec![], vec![], UniverseTick(0));
+        assert!(runtime.pending_abort_replies.is_empty(), "a transient abort owes no durable reply");
+    }
+
+    /// Scan the abort-reply pending set + re-emits with a fresh outbox, at `now`, using the runtime's
+    /// tuning (redrive default = 8). Returns the emitted `CrossingAborted` flows to `source`.
+    /// Run the abort-reply pass with the subject's directory head owned by `owner` (`None` = no record →
+    /// the subject "left the source", which the head-check reaps). 3f-D: the reap keys on ownership, so the
+    /// re-emit tests seed `Some(SOURCE)` (still owned → re-emit) and the reap tests seed `None`/`Some(other)`.
+    fn scan_abort(
+        runtime: &mut SagaRuntimeRes,
+        now: UniverseTick,
+        owner: Option<NodeId>,
+    ) -> Vec<InterShardFlow> {
+        let mut dir = DirectoryCore::new(DirectoryTuning {
+            lease_ttl_ticks: 10_000,
+            ..DirectoryTuning::default()
+        });
+        if let Some(node) = owner {
+            dir.grant(subject(), AuthorityRef::Shard(node), Fence(1), now);
+        }
+        let mut outbox = OutboundBox::default();
+        scan_deadlines(runtime, &mut dir, &mut outbox, EpochId(1), now);
+        flows_to_node(&outbox, SOURCE)
+    }
+
+    /// Seed one live pending abort reply (no live saga — the saga already tombstoned; this is the
+    /// standalone obligation) with `last_abort_reply_emit` armed to 0 (never emitted).
+    fn seed_pending_reply(runtime: &mut SagaRuntimeRes, transfer: TransferId) {
+        runtime.pending_abort_replies.insert(
+            transfer,
+            PendingAbortReply {
+                transfer,
+                source: SOURCE,
+                subject: subject(),
+            },
+        );
+    }
+
+    #[test]
+    fn scan_deadlines_reemits_a_pending_abort_reply_once_per_cadence() {
+        // D2: a live-source pending reply re-emits exactly ONE CrossingAborted to the source per
+        // redrive-cadence window (8), and the entry stays (awaiting the ack).
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive = 8
+        let transfer = crossing_xfer();
+        seed_pending_reply(&mut runtime, transfer);
+
+        // First scan at now=8: last_emit=0, 8-0 >= 8 → emit once (source still owns the subject).
+        let emitted = scan_abort(&mut runtime, UniverseTick(8), Some(SOURCE));
+        assert_eq!(
+            emitted,
+            vec![InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
+                subject: subject(),
+                transfer,
+            })],
+            "exactly one CrossingAborted re-emitted to the source"
+        );
+        assert!(
+            runtime.pending_abort_replies.contains_key(&transfer),
+            "the entry persists until acked"
+        );
+        assert_eq!(runtime.last_abort_reply_emit, UniverseTick(8), "the cadence gate advanced");
+    }
+
+    #[test]
+    fn scan_deadlines_throttles_the_abort_reemit_within_the_cadence_window() {
+        // D2: within the same redrive window the re-emit is THROTTLED (the not-yet-due arm) — no second
+        // egress against an alive-but-ack-stalled source.
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive = 8
+        let transfer = crossing_xfer();
+        seed_pending_reply(&mut runtime, transfer);
+        runtime.last_abort_reply_emit = UniverseTick(6); // last emitted at tick 6
+
+        // now=10: 10-6 = 4 < 8 → NOT due, no emit (source still owns → throttled, not reaped).
+        let emitted = scan_abort(&mut runtime, UniverseTick(10), Some(SOURCE));
+        assert!(emitted.is_empty(), "within the window: no re-emit (throttled)");
+        assert_eq!(runtime.last_abort_reply_emit, UniverseTick(6), "the gate did not advance");
+    }
+
+    #[test]
+    fn scan_deadlines_reaps_a_pending_reply_whose_subject_left_the_source() {
+        // D2: when the subject NO LONGER belongs to the source (head absent — D-37 re-homed it, or it
+        // transferred away), the abort is MOOT → REAPED: the entry is removed, a DELETE staged, ZERO
+        // CrossingAborted emitted (the reap arm). `None` owner = no directory record for the subject.
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
+        let transfer = crossing_xfer();
+        seed_pending_reply(&mut runtime, transfer);
+
+        let emitted = scan_abort(&mut runtime, UniverseTick(8), None);
+        assert!(emitted.is_empty(), "a subject that left the source draws no re-emit");
+        assert!(
+            !runtime.pending_abort_replies.contains_key(&transfer),
+            "the moot reply was reaped"
+        );
+        assert_eq!(
+            abort_reply_writes(&runtime, transfer, false),
+            1,
+            "the reap staged a persist-DELETE"
+        );
+    }
+
+    #[test]
+    fn scan_deadlines_reemits_while_owned_then_reaps_when_the_subject_leaves() {
+        // D2: two cadence-spaced scans re-emit twice while the source still owns the subject; then the
+        // subject leaves the source (re-homed away → head no longer resolves to SOURCE) and the third scan
+        // reaps. Proves the re-emit obligation persists on a LIVE-or-recovering owner and only drains once
+        // the entity has genuinely moved (the adversary-review-HIGH fix: not the `is_confirmed_dead` pulse).
+        let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // redrive = 8
+        let transfer = crossing_xfer();
+        seed_pending_reply(&mut runtime, transfer);
+
+        assert_eq!(scan_abort(&mut runtime, UniverseTick(8), Some(SOURCE)).len(), 1, "first re-emit");
+        assert_eq!(scan_abort(&mut runtime, UniverseTick(16), Some(SOURCE)).len(), 1, "second re-emit");
+        // The subject re-homed away from SOURCE (owned by DEST now) → the abort is moot → reaped.
+        assert!(
+            scan_abort(&mut runtime, UniverseTick(24), Some(DEST)).is_empty(),
+            "no re-emit once the subject left the source"
+        );
+        assert!(
+            !runtime.pending_abort_replies.contains_key(&transfer),
+            "the third scan reaped the moot reply"
+        );
+    }
+
+    #[test]
+    fn crossing_aborted_ack_drops_the_pending_entry() {
+        // D3: the source's `CrossingAbortedAck` drops the pending entry — driven through the full
+        // `drive_sagas` inbound path (the new ack arm). Grant the subject's head to SOURCE first, so the
+        // ownership-reap does NOT preempt the ack (it would otherwise drain the moot entry before the ack
+        // arrives). Then seed the entry, have SOURCE send the ack, and settle.
+        let mut rig = Rig::new();
+        let transfer = crossing_xfer();
+        rig.grant_key(subject(), AuthorityRef::Shard(SOURCE), Fence(1)); // source still owns → no reap
+        {
+            let mut runtime = rig.orch.world_mut().resource_mut::<SagaRuntimeRes>();
+            runtime.pending_abort_replies.insert(
+                transfer,
+                PendingAbortReply { transfer, source: SOURCE, subject: subject() },
+            );
+        }
+        let ack = |rig: &mut Rig| {
+            rig.source
+                .send(
+                    ORCH,
+                    MsgClass::Saga,
+                    vd_sim::io::bytes(
+                        postcard::to_allocvec(&InterShardFlow::CrossingAbortedAck(
+                            vd_wire::intershard::CrossingAborted { subject: subject(), transfer },
+                        ))
+                        .expect("encode"),
+                    ),
+                )
+                .expect("ack sent");
+            rig.settle();
+        };
+        ack(&mut rig); // present → `is_some()`-true arm: drops + stages the DELETE
+        assert!(
+            rig.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .pending_abort_replies
+                .is_empty(),
+            "the ack dropped the pending entry"
+        );
+        ack(&mut rig); // redelivery → `is_some()`-false arm: idempotent no-op (no panic, no double-DELETE)
+        assert!(
+            rig.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .pending_abort_replies
+                .is_empty(),
+            "a redelivered ack stays a no-op",
+        );
+    }
+
+    #[test]
+    fn crossing_aborted_ack_is_idempotent_on_redelivery() {
+        // D3: a REDELIVERED ack (whose entry is already gone) is a `is_some()`-false no-op — no panic, no
+        // double-DELETE stage. Unit-drive the arm twice directly on a runtime.
+        let mut runtime = SagaRuntimeRes::default();
+        let transfer = crossing_xfer();
+        seed_pending_reply(&mut runtime, transfer);
+
+        // First remove: present.
+        assert!(runtime.pending_abort_replies.remove(&transfer).is_some());
+        runtime
+            .pending_writes
+            .push((StoreKey::AbortReply(transfer).bytes(), None));
+        // Second (redelivery): absent → the guard's false arm is a no-op.
+        assert!(
+            runtime.pending_abort_replies.remove(&transfer).is_none(),
+            "a redelivered ack finds nothing"
+        );
+        assert_eq!(
+            abort_reply_writes(&runtime, transfer, false),
+            1,
+            "only ONE DELETE staged (the redelivery did not double-stage)"
+        );
+    }
+
+    #[test]
+    fn rehydrate_restores_a_persisted_abort_reply_and_reemits_on_first_scan() {
+        // D0 + crash-leg: an AbortReply record persisted before a kill-9 is restored by rehydrate, and the
+        // FIRST post-restart scan re-emits CrossingAborted (a RAM-only map would have stranded the source).
+        let transfer = crossing_xfer();
+        let mut store = MemStore::new();
+        // The Clock record is the genesis-vs-recover discriminator — seed it so rehydrate recovers.
+        store.put(
+            &StoreKey::Clock.bytes(),
+            &encode(&(EpochId(1), UniverseTick(0))),
+        );
+        // The persisted abort-reply obligation (what commit_result staged pre-crash).
+        let reply = PendingAbortReply { transfer, source: SOURCE, subject: subject() };
+        store.put(&StoreKey::AbortReply(transfer).bytes(), &encode(&reply));
+        // COMMIT the staged writes (the group-commit barrier the orchestrator would have run pre-crash) —
+        // `scan` reads only the committed set.
+        store.commit();
+
+        let recovered = rehydrate(
+            &store,
+            1024,
+            SagaTuning::default(),
+            LivenessTuning::default(),
+            DirectoryTuning {
+                lease_ttl_ticks: 10_000,
+                ..DirectoryTuning::default()
+            },
+        )
+        .expect("the store is non-empty (a Clock record present) → recover");
+        let mut runtime = recovered.runtime;
+        assert_eq!(
+            runtime.pending_abort_replies.get(&transfer),
+            Some(&reply),
+            "rehydrate restored the persisted abort reply"
+        );
+        // The first post-restart scan (last_abort_reply_emit == 0) re-emits immediately (source still owns).
+        let emitted = scan_abort(&mut runtime, UniverseTick(8), Some(SOURCE));
+        assert_eq!(
+            emitted,
+            vec![InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
+                subject: subject(),
+                transfer,
+            })],
+            "the restored obligation re-emits on the first post-restart scan (crash-leg proof)"
+        );
     }
 }
