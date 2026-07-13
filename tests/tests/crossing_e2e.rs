@@ -307,17 +307,15 @@ fn crossing_e2e_renders_at_dest() {
 /// (`TransientCrossingRequest`) → the orchestrator AUTO-GRANTS it (`TransientCrossingGrant`) — proving the
 /// SAME geometric trigger machinery fans a SECOND durability class out (HR2) with NO hand-fed batch.
 ///
-/// ⚠️ HONEST SCOPE (a real missing route, NOT hand-fed to force green): the AUTONOMOUS transient loop
-/// closes through Leg 1 + the auto-grant, then STOPS. The grant path
-/// (`saga_runtime::handle_transient_crossing_request`, saga_runtime.rs ~:1460) GRANTS but never
-/// `start_transfer`s a `BatchHandoff` saga — unlike the DURABLE `handle_crossing_request` (:1440) which
-/// starts one. So when the source ships the `TransientBatch` and the DEST adopts + acks `BatchAdopted`,
-/// the orchestrator's `deliver` (saga_runtime.rs :1110) early-returns on the unknown transfer (no live
-/// saga), and the item never promotes `Arriving→Held` (no `batch_goes`, empty dest `owned_transients`).
-/// The missing production route is the batch-saga START on the transient-crossing-grant path — a
-/// SATURATION of the geometric trigger into the transient handoff, distinct from this trigger-composition
-/// slice. Asserting the auto-grant is the honest, non-vacuous HR2 proof reachable NOW; the downstream
-/// batch-handoff composition is REPORTED as owed (see the task report), never faked here.
+/// SCOPE: this test asserts the AUTONOMOUS transient loop through Leg 1 + the auto-grant (the HR2
+/// second-class proof reachable in the `p2_cluster` scaffold). The DOWNSTREAM batch handoff — the grant
+/// starting a `BatchHandoff` saga so the dest promotes `Arriving→Held` (`batch_goes` non-empty, dest
+/// `owned_transients` populated) — was an owed route this test originally FLAGGED (it was missing, not
+/// hand-fed to force green); it is now LANDED (D-43 #9: `handle_transient_crossing_request` starts the
+/// saga at grant, keyed on `batch`), and the full end-to-end transient composition is proven in
+/// `crates/harness/src/topology.rs::a_transient_crossing_composes_end_to_end_dest_owns_and_go_token_recorded`
+/// (a real 3-node topology where the dest ends `Held` with a recorded go-token). This test stays scoped
+/// to Leg-1 + grant because the `p2_cluster` scaffold does not drive the multi-shard batch handoff.
 #[test]
 fn crossing_e2e_transient_crosses_via_batch_grant() {
     let fabric = FaultFabric::new(909, 2);

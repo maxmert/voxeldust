@@ -1454,9 +1454,12 @@ fn handle_crossing_request(
 /// owner lookup for the source. The `batch` id is `crossing_transfer_id(req.subject, req.src_realm_fence)` —
 /// deterministic per subject, so a redelivered request re-grants the SAME batch (absorbed at the source's
 /// `on_transient_crossing_grant` no-op). The grant is `ReDriven` (the source re-requests) ⇒ plain `push_flow`
-/// (Ephemeral), never `Retained`.
+/// (Ephemeral), never `Retained`. D-43 #9: the resolved arm ALSO starts the `BatchHandoff` saga (keyed on the
+/// same `batch`) so the dest's `BatchAdopted` lands on a live `AwaitAdopt` (see the inline note for why this
+/// causes no double-emit).
 ///
-/// MONOMORPHIC (no generic body): the single 2-arm `Option` match is the only branch (HR5-covered both ways).
+/// MONOMORPHIC (no generic body): the branches are the 2-arm `Option` match plus the plain `if !contains_key`
+/// saga-start guard (a `ReDriven` re-request whose saga is already live takes the skip arm) — all HR5-covered.
 fn handle_transient_crossing_request(
     dir: &DirectoryCore,
     outbox: &mut OutboundBox,
@@ -1480,6 +1483,43 @@ fn handle_transient_crossing_request(
                 }),
             );
             runtime.transient_crossings_granted += 1;
+
+            // D-43 #9: START the SAME `BatchHandoff` saga the machinery drives (HR2 one-machinery),
+            // keyed on `batch` == the id the DEST acks `BatchAdopted` under, so `deliver` routes the
+            // adopt onto a LIVE `AwaitAdopt` saga instead of the silent None early-return (the exact
+            // symptom: `orch.batch_goes == []`, the dest stuck `Arriving`). This is the HR2/HR3 twin of
+            // the durable `handle_crossing_request` (build ctx → `start_transfer`), differing ONLY in
+            // `class: Transient` + the inert session/subject/gateway.
+            //
+            // NO DOUBLE-EMIT: the source emits its batch on the GRANT (the `Held→Crossing` flip in
+            // `on_transient_crossing_grant`), NOT on the orchestrator-local go-token (`IssueTransientGo`
+            // is wire-silent), so starting the saga at grant time is invisible to the source. The
+            // `contains_key` fast-skip mirrors the durable arm — it avoids a redundant `pending` push when
+            // the saga is already live from a prior tick's re-request; `process_starts`' own `contains_key`
+            // is the AUTHORITATIVE one-saga guard (a transient takes NO directory lock, so a debris burst
+            // stays burst-isolated).
+            if !runtime.sagas.contains_key(&batch) {
+                let ctx = SagaCtx {
+                    transfer: batch,
+                    // INERT — the transient short-path never reads `ctx.session` (no gateway route-swap).
+                    session: SessionId::NONE,
+                    // INERT provenance — a transient never enters the directory (`locks_directory_key`
+                    // is false), so `subject` is never a CAS/lock key.
+                    subject: DirectoryKey::Realm(req.to_realm),
+                    // The dest realm-lease fence the batched go-token commits at.
+                    expected_fence: rec.fence,
+                    // The transport-origin connection = the source shard.
+                    source: from,
+                    dest: rec.authority.node(),
+                    class: vd_core::entity_kind::DurabilityClass::Transient,
+                    needs_provision: false,
+                    from_realm: req.from_realm,
+                    to_realm: req.to_realm,
+                };
+                // The `gateway` arg is INERT for a Transient (never read, never rendered by `views`) —
+                // pass the in-scope `from` rather than fabricate a sentinel NodeId.
+                runtime.start_transfer(ctx, from);
+            }
         }
         // Unresolved dest realm: emit nothing (the source re-requests; the grant is idempotent, so a
         // later-resolving realm still grants). Counted only.
@@ -2484,10 +2524,13 @@ mod tests {
 
     /// A TRANSIENT batch saga ctx (D-7): the subject is the dest realm (inert provenance — never
     /// enters the directory, since `locks_directory_key(Transient)=false`); `expected_fence` is the
-    /// dest realm-lease fence the batched go-token commits at.
+    /// dest realm-lease fence the batched go-token commits at; `session` is the session-less sentinel
+    /// (`SessionId::NONE`) — faithful to production, which builds exactly this ctx in
+    /// `handle_transient_crossing_request` (D-43 #9). The transient short-path never reads it.
     fn transient_ctx(expected_fence: Fence) -> SagaCtx {
         SagaCtx {
             subject: DirectoryKey::Realm(TO_REALM),
+            session: SessionId::NONE,
             ..ctx(DurabilityClass::Transient, expected_fence)
         }
     }
@@ -2854,6 +2897,18 @@ mod tests {
                 .get(&transfer)
                 .expect("saga live")
                 .ctx
+        }
+
+        /// The `SagaState` of the ONE live saga keyed on `transfer` (the D-43 #9 transient-start test
+        /// asserts it is parked in `BatchHandoff{AwaitAdopt}`). Panics if absent.
+        fn saga_state(&mut self, transfer: TransferId) -> SagaState {
+            self.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .sagas
+                .get(&transfer)
+                .expect("saga live")
+                .state
         }
 
         /// Read a `SagaRuntimeRes` counter accessor (the crossing outcome counts).
@@ -3494,6 +3549,79 @@ mod tests {
             runtime.batch_go_writes(),
             1,
             "batch_go_writes restored from the map len, NOT re-incremented through the +=1 (G-TIER decouple)"
+        );
+    }
+
+    #[test]
+    fn orchestrator_rehydrates_a_transient_saga_mid_await_release() {
+        // D-43 #9 crash-safety (FIRST-TIME-REACHABLE persisted state): before the fix, a Transient saga
+        // was NEVER persisted (the only `start_transfer` caller was the durable crossing handler), so a
+        // `BatchHandoff{AwaitRelease}` `SagaSnapshot` becomes reachable only now. Persist a transient saga
+        // mid-`AwaitRelease` (post-`BatchAdopted`), kill-9 + rehydrate, and assert it re-inserts under
+        // `batch` with `SessionId::NONE` INTACT, re-drives its pending `TransientRelease` on the next tick,
+        // and its go-token is restored — locking the newly-reachable transient persistence path.
+        let mut rig = Rig::new();
+        rig.trigger(transient_ctx(Fence(9)));
+        rig.settle(); // → BatchHandoff{AwaitAdopt}, go-token committed
+        rig.batch_adopted(XFER); // dest adopts → AwaitRelease, source told to TransientRelease
+        {
+            let runtime = rig.orch.world_mut().resource::<SagaRuntimeRes>();
+            assert_eq!(runtime.live(), 1, "the transient saga is live pre-crash");
+            assert_eq!(
+                runtime.sagas.get(&XFER).expect("saga live").state,
+                SagaState::BatchHandoff {
+                    phase: BatchHandoffPhase::AwaitRelease,
+                    new_fence: Fence(9),
+                },
+                "parked mid-AwaitRelease (the newly-reachable persisted transient state)"
+            );
+            assert_eq!(
+                runtime.sagas.get(&XFER).expect("saga live").ctx.session,
+                SessionId::NONE,
+                "the session-less sentinel is what gets persisted"
+            );
+        }
+        let _ = (rig.drain_source(), rig.drain_dest()); // clear the pre-crash egress
+
+        rig.rebuild();
+        {
+            let runtime = rig.orch.world_mut().resource::<SagaRuntimeRes>();
+            assert_eq!(
+                runtime.live(),
+                1,
+                "the in-flight transient saga SURVIVED the kill-9 mid-AwaitRelease"
+            );
+            let live = runtime.sagas.get(&XFER).expect("re-inserted under batch");
+            assert_eq!(
+                live.state,
+                SagaState::BatchHandoff {
+                    phase: BatchHandoffPhase::AwaitRelease,
+                    new_fence: Fence(9),
+                },
+                "the AwaitRelease phase + go-token fence rehydrated verbatim"
+            );
+            assert_eq!(
+                live.ctx.session,
+                SessionId::NONE,
+                "the session-less sentinel survived the WAL round-trip intact"
+            );
+            assert_eq!(
+                runtime.batch_goes(),
+                vec![(BatchId(XFER), Fence(9))],
+                "the committed go-token re-hydrated (the dest's authority stays backed)"
+            );
+        }
+
+        // The rehydrated saga re-drives on the next tick: `since` is armed to 0, so the first
+        // `scan_deadlines` fires a `Timeout` → re-emits the idempotent `TransientRelease` to the source.
+        rig.settle();
+        assert!(
+            rig.drain_source().contains(&flow_inbound(&handoff(
+                InterShardFlow::TransientRelease,
+                TRANSIENT_RELEASE_STEP,
+                Fence(9),
+            ))),
+            "the rebuilt orchestrator re-drove the in-flight transient handoff (re-emitted TransientRelease)"
         );
     }
 
@@ -6128,6 +6256,56 @@ mod tests {
     }
 
     #[test]
+    fn transient_request_grant_starts_a_batchhandoff_awaitadopt_saga() {
+        // D-43 #9 (THE fix): the resolved grant ALSO starts the transient `BatchHandoff` saga keyed on
+        // `batch`, parked in `AwaitAdopt` awaiting the dest's `BatchAdopted` — so the downstream adopt
+        // lands on a LIVE saga (not the silent None early-return). The go-token committed at the dest
+        // realm-lease fence, and the grant emit is UNCHANGED (still counted once).
+        let mut rig = Rig::new();
+        let realm_fence = Fence(4);
+        rig.grant_key(
+            DirectoryKey::Realm(TO_REALM),
+            AuthorityRef::Shard(DEST),
+            realm_fence,
+        );
+        let _ = rig.drain_source(); // discard the LeaseGrant reply (seeding artifact)
+        rig.transient_crossing_request(transient_req(Fence(2))); // tick N: grant + enqueue the start
+        rig.settle(); // tick N+1: process_starts inserts the BatchHandoff saga → drives to AwaitAdopt
+
+        let batch = crossing_transfer_id(subject(), Fence(2), 0);
+        // EXACTLY ONE live saga, under `batch`.
+        assert_eq!(rig.live(), 1, "the grant started exactly one saga");
+        let ctx = rig.saga_ctx(batch);
+        assert_eq!(
+            rig.saga_state(batch),
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitAdopt,
+                new_fence: realm_fence,
+            },
+            "parked in AwaitAdopt at the dest realm-lease fence"
+        );
+        assert_eq!(ctx.class, DurabilityClass::Transient);
+        assert_eq!(ctx.source, SOURCE, "source == the transport-origin (from)");
+        assert_eq!(ctx.dest, DEST, "dest == the resolved realm owner");
+        assert_eq!(
+            ctx.session,
+            SessionId::NONE,
+            "a session-less transient carries the typed sentinel, not a real id"
+        );
+        // The batched go-token committed at the realm-lease fence (G-TIER: one write per batch).
+        assert_eq!(
+            rig.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .batch_goes(),
+            vec![(BatchId(batch), realm_fence)],
+            "the go-token was written (was [] before the fix)"
+        );
+        // The grant leg is UNCHANGED: still exactly one grant counted.
+        assert_eq!(rig.count(SagaRuntimeRes::transient_crossings_granted), 1);
+    }
+
+    #[test]
     fn transient_request_unknown_realm_drops() {
         // No Realm(to) record → no grant emitted; counted `transient_dest_unresolved`.
         let mut rig = Rig::new();
@@ -6159,6 +6337,9 @@ mod tests {
 
         assert_eq!(first, second, "the redelivery re-grants the identical batch");
         assert_eq!(rig.count(SagaRuntimeRes::transient_crossings_granted), 2);
+        // D-43 #9 idempotency (the `if !contains_key` FALSE arm): the re-request did NOT start a second
+        // saga — one batch, one `BatchHandoff` saga, absorbed by the guard.
+        assert_eq!(rig.live(), 1, "one batch, one saga (idempotent re-grant)");
     }
 
     // ───────────────────────── Slice 3f-D: durable crossing-abort core (Mechanism Y) ─────────────────────

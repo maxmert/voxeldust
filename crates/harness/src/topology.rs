@@ -1230,6 +1230,192 @@ mod tests {
         );
     }
 
+    /// D-43 #9 (the REQUIRED composition regression): a crossing-triggered TRANSIENT completes its
+    /// handoff end-to-end across a REAL 3-node cluster (orch A + source shard B realm FROM + dest shard C
+    /// realm TO). Before the fix, `handle_transient_crossing_request` granted the dest but never STARTED a
+    /// `BatchHandoff` saga, so the dest's `BatchAdopted` hit `deliver`'s silent None early-return — the
+    /// item was stuck `Arriving`, no go-token was written (`orch.batch_goes == []`,
+    /// `dest.owned_transients == []`). This proves the silent-early-return is CURED with a REAL dest
+    /// reacting to a REAL envelope: the go-token lands, the dest promotes `Arriving→Held`, and the
+    /// single-transient-holder oracle passes. The `saga_runtime` rig SIMULATES the dest ack; only a
+    /// topology-level run proves the whole choreography self-drives.
+    #[test]
+    fn a_transient_crossing_composes_end_to_end_dest_owns_and_go_token_recorded() {
+        use vd_core::entity_kind::EntityKind;
+        use vd_core::geometry::{BoundaryTuning, CrossEffect, RealmBoundary};
+        use vd_core::glam::DVec3;
+        use vd_core::pose::{FrameRef, LatticePos};
+        use vd_node::orchestrator::{OrchestratorConfig, register_orchestrator};
+        use vd_sim::directory::DirectoryTuning;
+        use vd_sim::stub::{
+            OwnedTransients, RealmBoundaries, StubConfig, Transient, TransientStatus,
+            register_stub_shard,
+        };
+
+        // The two realms the transient crosses: FROM (source shard B's realm) → TO (dest shard C's realm).
+        const C: NodeId = NodeId(3);
+        let from_realm = RealmId::System(5);
+        let to_realm = RealmId::Planet(42);
+
+        let fabric = FaultFabric::new(4343, 2);
+        let mut topo = Topology::new(fabric.clone(), StaggerPlan::lockstep());
+
+        // Orchestrator (A) — owns the directory (both shards' realm leases) + the saga runtime.
+        let mut orch = vd_node::build_app(
+            NodeConfig {
+                node_id: A,
+                kind: NodeKind::Orchestrator,
+            },
+            fabric.register(A),
+        );
+        let (world, schedule) = orch.parts_mut();
+        register_orchestrator(
+            world,
+            schedule,
+            &OrchestratorConfig {
+                epoch: vd_core::EpochId(1),
+                reserve_chunk: 64,
+                clock_peers: vec![B, C],
+                directory: DirectoryTuning {
+                    lease_ttl_ticks: 100,
+                    ..DirectoryTuning::default()
+                },
+                saga: vd_sim::saga::SagaTuning::default(),
+                liveness: vd_sim::saga::LivenessTuning::default(),
+                roster: std::collections::BTreeMap::new(),
+            },
+        );
+        topo.add_node(Box::new(orch));
+
+        // A stub shard builder (both B and C are the ONE `shard` binary — HR3 — differing only by realm).
+        let build_shard = |id: NodeId, realm: RealmId, system_seed: u64| {
+            let mut shard = vd_node::build_app(
+                NodeConfig {
+                    node_id: id,
+                    kind: NodeKind::StubShard,
+                },
+                fabric.register(id),
+            );
+            let (world, schedule) = shard.parts_mut();
+            vd_node::follower::register_clock_follower(world, schedule);
+            register_stub_shard(
+                world,
+                schedule,
+                StubConfig {
+                    realm,
+                    frame: FrameRef::SystemSpace { system_seed },
+                    move_speed_mps: 1.0,
+                    tick_dt_s: 0.05,
+                    orchestrator: A,
+                    mint_seed: system_seed,
+                    input_log_capacity: 1_000_000,
+                    realm_recheck_interval: 0,
+                    lease_renew_interval_ticks: 0,
+                    self_fence_grace_ticks: 0,
+                    snapshot_datagram_budget: 1100,
+                    boundary: BoundaryTuning::DEFAULT,
+                    request_ttl_ticks: 0,
+                },
+            );
+            shard
+        };
+        topo.add_node(Box::new(build_shard(B, from_realm, 5)));
+        topo.add_node(Box::new(build_shard(C, to_realm, 42)));
+
+        // Let both shards win their realm leases through the REAL directory (the authority gate on the
+        // crossing trigger + `emit_transient_batch` requires B to hold FROM and C to hold TO).
+        for _ in 0..8 {
+            topo.step();
+        }
+        {
+            let reports = topo.inspect_all();
+            let b = &reports.iter().find(|(id, _)| *id == B).expect("B").1;
+            let c = &reports.iter().find(|(id, _)| *id == C).expect("C").1;
+            assert_eq!(
+                b.held_realms,
+                vec![(from_realm, Fence(1))],
+                "source shard B holds its FROM realm lease"
+            );
+            assert_eq!(
+                c.held_realms,
+                vec![(to_realm, Fence(1))],
+                "dest shard C holds its TO realm lease"
+            );
+        }
+
+        // Seed a Debris transient dwelling over the B→C boundary on the SOURCE shard: plant an Authority
+        // shell boundary on B whose exterior realm is B's (FROM) and whose `to_realm` is C's (TO), and a
+        // held Debris a few hundred metres out (comfortably in the create band, < the 1150 m edge). The
+        // rising edge fires on the 3rd consecutive in-band tick (`n_entry` DEFAULT). Mirror the shard-level
+        // `a_transient_crossing_emits_a_transient_crossing_request` seed.
+        let debris = EntityId::pack(EntityKind::Debris, 5, 1, 3);
+        {
+            let shard = topo
+                .node_mut(B)
+                .expect("B present")
+                .as_any_mut()
+                .expect("downcast")
+                .downcast_mut::<vd_node::ShardNode<crate::fabric::FabricTransport>>()
+                .expect("ShardNode");
+            let world = shard.world_mut();
+            world.resource_mut::<RealmBoundaries>().0.push(RealmBoundary::shell(
+                from_realm,
+                LatticePos::local(DVec3::ZERO),
+                1000.0, // r_soi
+                1.15,   // create_factor → create edge 1150 m
+                1.30,   // destroy_factor
+                1.0,    // v_rel (slow)
+                0.05,   // dt
+                0.5,    // pad_floor
+                1.0,    // k_safety_extra
+                None,   // top-level
+                to_realm,
+                CrossEffect::Authority,
+            ));
+            let pose = StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 5 },
+                DVec3::new(100.0, 0.0, 0.0),
+                vd_core::UniverseTick(1),
+            );
+            world.resource_mut::<OwnedTransients>().0.insert(
+                debris,
+                Transient {
+                    pose,
+                    anchor_fence: Fence(1),
+                    status: TransientStatus::Held { outbound: None },
+                    prev_offset: pose.pos.offset(),
+                },
+            );
+        }
+
+        // Step long enough for the FULL choreography: rising-edge → TransientCrossingRequest → grant +
+        // saga-start (THE fix) → source flips + ships the batch envelope → dest adopts (BatchAdopted) →
+        // AwaitRelease/Promote/Complete round-trips → dest promotes Arriving→Held → source retires.
+        for _ in 0..40 {
+            topo.step();
+        }
+
+        let reports = topo.inspect_all();
+        let orch = &reports.iter().find(|(id, _)| *id == A).expect("A").1;
+        let dest = &reports.iter().find(|(id, _)| *id == C).expect("C").1;
+
+        // THE D-43 #9 symptom, before-vs-after: the go-token was written (was `[]` before the fix).
+        assert!(
+            !orch.batch_goes.is_empty(),
+            "orch.batch_goes is non-empty (was [] before the fix — the silent early-return)"
+        );
+        // The dest OWNS the transient authoritatively (was stuck Arriving, so `owned_transients == []`).
+        assert_eq!(
+            dest.owned_transients,
+            vec![(debris, Fence(1))],
+            "dest C promoted the transient Arriving→Held at its realm-lease fence (was [] before the fix)"
+        );
+        // The single-transient-holder oracle passes: held by exactly ONE shard, anchored to a live realm
+        // fence AND a committed go-token fence (no {source,dest} both-held window).
+        crate::oracle::verify_transient_authority_held(&reports)
+            .expect("TRANSIENT-AUTHORITY-HELD holds after the composed crossing");
+    }
+
     #[test]
     #[should_panic(expected = "duplicate topology node")]
     fn duplicate_nodes_panic() {

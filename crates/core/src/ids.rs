@@ -76,6 +76,15 @@ impl core::fmt::Display for AccountId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub u128);
 
+impl SessionId {
+    /// The typed "no session" sentinel a SESSION-LESS principal carries (D-43 #9: a transient
+    /// batch saga has no client session — it must not carry `SessionId(0)`, a valid ALLOCATABLE
+    /// id). The high byte `u128::MAX` cannot collide with the connection-plane's low sequential
+    /// session ids, so a future class-blind reader (the persisted `SagaSnapshot`) never aliases
+    /// this onto a real session. INERT by construction: the transient short-path never reads it.
+    pub const NONE: SessionId = SessionId(u128::MAX);
+}
+
 impl core::fmt::Display for SessionId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "sess-{:032x}", self.0)
@@ -248,6 +257,15 @@ mod tests {
         assert!(TransferId(1) < TransferId(2));
         assert!(EpochId(1) < EpochId(2));
         assert!(UniverseTick::default() < UniverseTick(1));
+    }
+
+    #[test]
+    fn session_none_is_the_max_sentinel_never_a_real_id() {
+        // D-43 #9: the session-less sentinel a transient batch saga carries is DISTINCT from
+        // `SessionId(0)` (a valid allocatable id), so a class-blind persisted-snapshot reader can
+        // never alias the two. The high byte is `u128::MAX` — above every low sequential id.
+        assert_ne!(SessionId::NONE, SessionId(0));
+        assert_eq!(SessionId::NONE, SessionId(u128::MAX));
     }
 
     #[test]
