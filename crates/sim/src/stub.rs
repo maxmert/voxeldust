@@ -684,6 +684,11 @@ pub struct StubStats {
     /// `should_commit` edge before the saga terminal cleared the latch). Proves exactly-one-request. `0`
     /// steady-state.
     pub crossings_suppressed_in_flight: u64,
+    /// Slice 3e (robustness, goal-audit L4) — a Durable-TAGGED subject reached the durable crossing arm from
+    /// the held-transient loop (a kind/loop mismatch — e.g. a mis-tagged batch item) and so carried no
+    /// session: DEGRADED (counted, emitted nothing) instead of panicking. Must be `0` in a well-formed mesh;
+    /// a non-zero value flags a mis-tagged transient batch from a peer.
+    pub crossing_durable_no_session: u64,
     /// Slice 3e — TRANSIENT geometric crossings REQUESTED: a transient committed across an `Authority`
     /// boundary and emitted a `TransientCrossingRequest` (the batched-grant path). `0` in prod through P3.
     pub transient_crossings_requested: u64,
@@ -2564,6 +2569,16 @@ fn fan_out_crossing(
             stats.crossing_interest_updates += 1;
         }
         (vd_core::geometry::CrossEffect::Authority, DurabilityClass::Durable) => {
+            // A durable crossing subject is normally a session-owned dot (only the dot loop passes
+            // `Some(session)`). But `durability_of` keys on the entity's KIND TAG, not the loop of origin:
+            // a Durable-TAGGED item in the held-transient set (e.g. a mis-tagged batch item adopted with
+            // no kind check) would reach this arm with `None`. DEGRADE, never panic (a mutual-TLS peer's
+            // malformed batch must not crash the shard, and an unroutable crossing must not start a saga):
+            // count it and emit nothing. Gated BEFORE the latch insert so no orphan latch is left.
+            let Some(session) = subject_session else {
+                stats.crossing_durable_no_session += 1;
+                return;
+            };
             // The durable transfer request — latched so exactly ONE fires per crossing. The `Vacant`
             // arm inserts the deterministic latch id + emits + arms the cooldown; the `Occupied` arm
             // (already in-flight) is the SUPPRESS no-op. `Entry` (not `contains_key`+`insert`) so there
@@ -2574,12 +2589,6 @@ fn fan_out_crossing(
                     let subject = DirectoryKey::Entity(entity);
                     let transfer = crossing_transfer_id(subject, subject_fence);
                     slot.insert(transfer);
-                    // A durable crossing subject is ALWAYS a session-owned dot (only the dot loop reaches
-                    // the Durable arm — a transient's `durability_of` routes to the arm below), so the
-                    // session is structurally present. `.expect` asserts that invariant as a straight-line
-                    // expression (the panic body is stdlib, no coverable false arm — HR5).
-                    let session =
-                        subject_session.expect("a durable crossing subject carries its session");
                     outbox.push_flow(
                         ctx.config.orchestrator,
                         MsgClass::Saga,
@@ -7996,6 +8005,52 @@ mod tests {
         );
         // Transients are NOT latched in RequestInFlight (the batch journal dedups instead).
         assert!(rig.world.resource::<RequestInFlight>().0.is_empty());
+    }
+
+    #[test]
+    fn a_durable_tagged_transient_degrades_instead_of_panicking() {
+        // REGRESSION (goal-audit L4): a Durable-TAGGED entity in the held-transient set (a kind/loop
+        // mismatch — e.g. a mis-tagged batch item) reaches the durable crossing arm from the transient
+        // loop, which passes `None` for the session. The arm must DEGRADE (count + emit nothing), NOT
+        // panic on `subject_session.expect`, and must leave NO orphan latch.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        // A Player entity is DURABLE, but we place it (wrongly) in the transient set.
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 9);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                pose: StampedPose::at_rest(
+                    config().frame,
+                    DVec3::new(100.0, 0.0, 0.0),
+                    UniverseTick(100),
+                ),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+                prev_offset: DVec3::new(100.0, 0.0, 0.0),
+            },
+        );
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![])); // must not panic
+        }
+        assert!(
+            crossing_requests(&all).is_empty(),
+            "a session-less durable subject emits NO CrossingRequest",
+        );
+        assert!(
+            rig.world.resource::<RequestInFlight>().0.is_empty(),
+            "the degradation leaves no orphan latch",
+        );
+        assert!(
+            rig.world.resource::<StubStats>().crossing_durable_no_session > 0,
+            "the kind/loop mismatch is counted, not panicked",
+        );
     }
 
     #[test]
