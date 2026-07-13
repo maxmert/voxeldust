@@ -118,6 +118,12 @@ pub struct InspectReport {
     /// durable-crossing latches; `RequestInFlight.0.keys()`, sorted). Empty once a crossing's terminal
     /// clears the latch — the abort/commit-leg "latch empty" ground truth.
     pub in_flight_latches: Vec<EntityId>,
+    /// Slice 3g abort/crash-leg — durable crossing-abort replies STAGED on the orchestrator awaiting a source
+    /// `CrossingAbortedAck` (from `SagaRuntimeRes.pending_abort_replies_len`; `0`/None-arm on shards/clients).
+    /// The Mechanism-Y observable: `>= 1` mid-flight proves the crossing-origin pre-CAS abort staged its
+    /// persisted latch-clear obligation (a non-crossing abort stages NOTHING); `== 0` after proves the source
+    /// ack reaped it; `>= 1` immediately after an orchestrator rebuild proves the entry rode the WAL.
+    pub pending_abort_replies: usize,
 }
 
 /// Anything the topology can drive. `ShardNode<FabricTransport>` is the canonical
@@ -170,6 +176,9 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         // (durable) and a `TransientCrossingRequest` that was auto-GRANTED (transient). Orchestrator-only.
         report.crossings_started = rt.crossings_started();
         report.transient_crossings_granted = rt.transient_crossings_granted();
+        // Slice 3g abort/crash-leg: the staged durable crossing-abort replies (Mechanism-Y), the
+        // pre-CAS abort's persisted latch-clear obligation. Orchestrator-only (shards/clients: 0).
+        report.pending_abort_replies = rt.pending_abort_replies_len();
     }
     if let Some(dots) = world.get_resource::<vd_sim::stub::Dots>() {
         // A dot is HELD only while it SIMULATES (`Authority::Owned`, 1d.4b): a Ghost (a retained

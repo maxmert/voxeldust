@@ -684,6 +684,17 @@ impl SagaRuntimeRes {
         self.crossings_started
     }
 
+    /// Slice 3f-D (Mechanism Y) — the number of durable crossing-abort replies STAGED and awaiting a source
+    /// `CrossingAbortedAck` (the persisted latch-clear obligations). Bumps at the pre-CAS abort tombstone
+    /// (`commit_result`), drops when the source acks (or a dead-source ownership reap in `scan_deadlines`).
+    /// The 3g abort/crash-leg observable: `>= 1` mid-flight proves the Mechanism-Y path ran (a non-crossing
+    /// abort stages NOTHING); `== 0` after the ack proves the round-trip reaped it; restored from the WAL by
+    /// `rehydrate` so a `>= 1` immediately post-restart proves the entry rode the store, not RAM survival.
+    #[must_use]
+    pub fn pending_abort_replies_len(&self) -> usize {
+        self.pending_abort_replies.len()
+    }
+
     /// Slice 3f-B — durable `CrossingRequest`s the subject was known for but the dest-realm OR session head
     /// was unresolved (no saga started this tick; the abort-reply that clears the source latch is 3f-D).
     #[must_use]

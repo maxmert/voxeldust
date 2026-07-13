@@ -213,6 +213,9 @@ fn build_cluster(
             // these explicitly). Pre-D-3 behavior: no recheck, no proactive fence.
             session_recheck_interval: 0,
             self_fence_grace_ticks: 0,
+            // 3g abort-leg lever INERT for every cluster (behaviour-identical); `arm_gateway_reject`
+            // sets it live on the gateway node when a test wants the pre-CAS abort.
+            reject_next_prepare: None,
             tuning: TransportTuning {
                 max_sessions,
                 max_buffered_inputs: TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS,
@@ -345,6 +348,19 @@ fn with_orchestrator<R>(
     f: impl FnOnce(&mut ShardNode<FabricTransport>) -> R,
 ) -> R {
     with_node(topo, ORCH, f)
+}
+
+/// Slice 3g abort-leg: ARM the gateway's one-shot `reject_next_prepare` lever (the SOLE way to drive a
+/// crossing-origin durable saga into its pre-CAS abort in a cluster — the gateway is the durable Prepare
+/// decider). The NEXT `PrepareSubscribe` the gateway would answer `Ready` instead replies
+/// `Prepared{ Rejected(reject) }`, then the gateway self-clears the lever (one-shot). `GatewayConfig` is a
+/// live `#[derive(Resource)]` inserted by `register_gateway`, so `resource_mut::<GatewayConfig>()` mutates it.
+pub fn arm_gateway_reject(topo: &mut Topology, reject: vd_wire::seams::transfer_control::PrepareReject) {
+    with_node(topo, GATEWAY, |gw| {
+        gw.world_mut()
+            .resource_mut::<GatewayConfig>()
+            .reject_next_prepare = Some(reject);
+    });
 }
 
 /// Read the player's transfer SUBJECT live from the orchestrator directory: the `Session`, the

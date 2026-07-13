@@ -86,6 +86,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // recheck channel exists AND grace spans >= 2 recheck cycles — the no-mass-fence guard).
             session_recheck_interval,
             self_fence_grace_ticks,
+            // 3g abort-leg lever: INERT in production (a test-only one-shot; a real gateway never
+            // rejects a prepare via this knob). Behaviour-identical to the pre-3g `Ready` stub.
+            reject_next_prepare: None,
             tuning: TransportTuning {
                 max_sessions,
                 max_buffered_inputs,

@@ -34,7 +34,9 @@ use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
-use vd_wire::seams::transfer_control::{PrepareResult, TransferControl, TransferControlAck};
+use vd_wire::seams::transfer_control::{
+    PrepareReject, PrepareResult, TransferControl, TransferControlAck,
+};
 use vd_wire::session_flow::{
     GatewayToShard, ShardToGateway, peek_input_seq, peek_is_cut_marker, peek_snapshot_frame_id,
     retag_snapshot_sub,
@@ -121,6 +123,13 @@ pub struct GatewayConfig {
     /// orchestrator's reassign window opens. `0` = INERT (the pre-D-3 default). The gateway's local copy of
     /// `DirectoryTuning::self_fence_grace_ticks`; the split-brain-safe ordering is validated orch-side.
     pub self_fence_grace_ticks: u64,
+    /// 3g abort-leg (INERT test lever): when `Some`, the NEXT `PrepareSubscribe` that would
+    /// otherwise reply `Ready` instead replies `Prepared{ result: Rejected(this) }`, then the
+    /// gateway self-clears it (one-shot). `None` on EVERY cluster = the 1c `Ready` stub,
+    /// behaviour-identical. The SOLE way to trigger the pre-CAS abort of a crossing-origin
+    /// durable saga in a cluster, since the gateway (not the dest stub) is the durable Prepare
+    /// decider (`apply_prepare` hardcodes `Ready` today).
+    pub reject_next_prepare: Option<PrepareReject>,
     pub tuning: TransportTuning,
 }
 
@@ -774,7 +783,10 @@ pub fn forward_frame(
 /// ---------------------------------------------------------------------------
 #[allow(clippy::too_many_arguments)] // bevy system: each resource is one parameter
 fn process_gateway_inbound(
-    config: Res<GatewayConfig>,
+    // ResMut (was Res): `on_transfer_control` `.take()`s the one-shot `reject_next_prepare` lever
+    // (3g abort-leg). Every other read in this body (`config.orchestrator`, `config.is_known_shard`)
+    // derefs the `ResMut` read-only, so no other edit.
+    mut config: ResMut<GatewayConfig>,
     identity: Res<NodeIdentity>,
     clock: Res<ClockSample>,
     inbox: Res<InboundBox>,
@@ -817,9 +829,13 @@ fn process_gateway_inbound(
                     // The TransferControl consumer (the gateway counterpart to the saga
                     // runtime): the no-authority-move phases (1c.2); the route-touching
                     // phases park until 1c.3/1c.4.
-                    Ok(InterShardFlow::Saga(cmd)) => {
-                        on_transfer_control(cmd, &config, &mut sessions, &mut stats, &mut outbox)
-                    }
+                    Ok(InterShardFlow::Saga(cmd)) => on_transfer_control(
+                        cmd,
+                        &mut config,
+                        &mut sessions,
+                        &mut stats,
+                        &mut outbox,
+                    ),
                     Ok(_) | Err(_) => stats.undecodable += 1,
                 },
                 // Membership (clock sync) is consumed by the follower system.
@@ -1195,7 +1211,10 @@ fn on_client_input(
 /// never re-applies.
 fn on_transfer_control(
     cmd: TransferControl,
-    config: &GatewayConfig,
+    // `&mut` (was `&`): the one-shot `reject_next_prepare` lever is `.take()`n by `apply_prepare`
+    // (3g abort-leg). The borrow is split at the call site — `config.orchestrator` reads and
+    // `&mut config.reject_next_prepare` never overlap (distinct statements / a disjoint field).
+    config: &mut GatewayConfig,
     sessions: &mut GatewaySessions,
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
@@ -1239,7 +1258,9 @@ fn on_transfer_control(
     // Compute the ack (or None for deferred/parked phases), then record-then-send below.
     let ack: Option<TransferControlAck> = match cmd {
         TransferControl::PrepareSubscribe { dest, .. } => {
-            apply_prepare(session, transfer, dest, stats)
+            // Split borrow: `session` from `sessions`, `&mut config.reject_next_prepare` from
+            // `config` (disjoint resources / a disjoint field) — the one-shot 3g reject lever.
+            apply_prepare(session, transfer, dest, stats, &mut config.reject_next_prepare)
         }
         TransferControl::RequestCut { .. } => {
             apply_request_cut(session, outbox, transfer, stats);
@@ -1320,6 +1341,10 @@ fn apply_prepare(
     transfer: TransferId,
     dest: NodeId,
     stats: &mut GatewayStats,
+    // 3g abort-leg (INERT test lever): consumed ONCE when this prepare would otherwise reply `Ready`.
+    // The not-Active guard below stays ABOVE this and MUST NOT consume it — the lever fires only for a
+    // would-be-`Ready` prepare, so a not-Active prepare leaves it armed for the retried (Active) one.
+    reject_next_prepare: &mut Option<PrepareReject>,
 ) -> Option<TransferControlAck> {
     if !matches!(session.phase, SessionPhase::Active { .. }) {
         stats.transfer_unroutable += 1;
@@ -1349,14 +1374,29 @@ fn apply_prepare(
     // The dest input slot is opened at CommitAuthority (apply_commit) — the gateway BUFFERS
     // seq>marker locally during the cut, so the dest needs nothing until the commit drain.
     // (An early prepare-time open is a P3 gateway-adoption resilience concern, not 1c.5.)
-    tracing::debug!(
-        transfer = transfer.0,
-        "PrepareSubscribe readiness is a 1c stub (Ready)"
-    );
-    Some(TransferControlAck::Prepared {
-        transfer,
-        result: PrepareResult::Ready,
-    })
+    //
+    // 3g abort-leg: the ONE-SHOT reject lever. `None` (every real cluster) = the 1c `Ready` stub
+    // (behaviour-identical). `Some(reject)` = reply `Rejected(reject)` and SELF-CLEAR (`.take()`),
+    // so the very next prepare is `Ready` again — the sole way to drive a crossing-origin durable
+    // saga into its pre-CAS abort in a cluster (the gateway is the durable Prepare decider).
+    let result = match reject_next_prepare.take() {
+        Some(reject) => {
+            tracing::debug!(
+                transfer = transfer.0,
+                ?reject,
+                "PrepareSubscribe REJECTED by the one-shot reject_next_prepare lever (3g abort-leg)"
+            );
+            PrepareResult::Rejected(reject)
+        }
+        None => {
+            tracing::debug!(
+                transfer = transfer.0,
+                "PrepareSubscribe readiness is a 1c stub (Ready)"
+            );
+            PrepareResult::Ready
+        }
+    };
+    Some(TransferControlAck::Prepared { transfer, result })
 }
 
 /// `RequestCut` (step 1): mark the cut as requested + ask the client to emit the in-band
@@ -2070,6 +2110,7 @@ mod tests {
             lease_renew_interval_ticks: 0,
             session_recheck_interval: 0,
             self_fence_grace_ticks: 0,
+            reject_next_prepare: None, // 3g abort-leg lever INERT by default (behaviour-identical)
             tuning: TransportTuning {
                 max_sessions: 4,
                 max_buffered_inputs: 8,
@@ -5771,6 +5812,129 @@ mod tests {
         assert!(
             renewed_sessions(&rig.tick(vec![])).is_empty(),
             "an off-cadence tick emits no LeaseRenew"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // 3g abort-leg: the one-shot `reject_next_prepare` lever (HR5(c) — the gateway unit tests OWN the
+    // two-arm coverage of `apply_prepare`'s reject tail; the e2e is composition proof, not the arm owner).
+    // Drive `apply_prepare` DIRECTLY (no `Rig`) so both the `Some`/`None` arms + the guard precedence are
+    // exercised in one monomorphic surface. `assert_eq!` on the FULL ack (HR5(d) — never `matches!`).
+    // ---------------------------------------------------------------------------
+
+    use vd_wire::seams::transfer_control::SpatialReject;
+
+    /// A bare ACTIVE session for driving `apply_prepare` directly (mirrors `freshest_..`'s `sess`, but
+    /// always Active with a fresh empty transfer). `transfer: None` so `apply_prepare` opens fresh progress.
+    fn active_session() -> Session {
+        Session {
+            client: CLIENT,
+            account: AccountId(5),
+            fence: Fence(1),
+            phase: SessionPhase::Active {
+                entity: EntityId(1),
+            },
+            next_sub: 0,
+            confirmed_at: TickId(1),
+            negotiated_minor: 1,
+            transfer: None,
+            subs: BTreeMap::new(),
+            delivered: BTreeMap::new(),
+            hot: Arc::new(SessionHot {
+                route: ArcSwap::from_pointee(RouteSnapshot {
+                    authority: SHARD,
+                    fence: Fence(1),
+                    cut: None,
+                }),
+                last_input_seq: AtomicU64::new(0),
+                subs: ArcSwap::from_pointee(SubTable::default()),
+            }),
+        }
+    }
+
+    #[test]
+    fn apply_prepare_inert_lever_replies_ready() {
+        // The `None` arm: an INERT lever leaves the 1c stub behaviour byte-identical (Ready) AND stays None.
+        let mut session = active_session();
+        let mut stats = GatewayStats::default();
+        let mut lever: Option<PrepareReject> = None;
+        let ack = apply_prepare(&mut session, XFER, DEST, &mut stats, &mut lever);
+        assert_eq!(
+            ack,
+            Some(TransferControlAck::Prepared {
+                transfer: XFER,
+                result: PrepareResult::Ready,
+            }),
+            "an inert (None) lever replies the 1c Ready stub"
+        );
+        assert_eq!(lever, None, "the inert lever is untouched (stays None)");
+        assert_eq!(
+            stats.transfer_unroutable, 0,
+            "an Active prepare is not a routing failure"
+        );
+        assert!(
+            session.transfer.is_some(),
+            "the prepare opened progress on the Active session"
+        );
+    }
+
+    #[test]
+    fn apply_prepare_armed_lever_rejects_once_then_self_clears() {
+        // The `Some` arm + the one-shot self-clear: the FIRST prepare rejects with the armed reason and the
+        // lever clears; the SECOND (fresh Active session) prepare is Ready again — proving `.take()` fired.
+        let reject = PrepareReject::Spatial(SpatialReject::Obstructed);
+        let mut lever: Option<PrepareReject> = Some(reject);
+
+        let mut first = active_session();
+        let mut stats = GatewayStats::default();
+        let ack1 = apply_prepare(&mut first, XFER, DEST, &mut stats, &mut lever);
+        assert_eq!(
+            ack1,
+            Some(TransferControlAck::Prepared {
+                transfer: XFER,
+                result: PrepareResult::Rejected(reject),
+            }),
+            "the armed lever rejects the first prepare with the exact armed reason"
+        );
+        assert_eq!(lever, None, "the one-shot lever self-cleared (.take)");
+
+        // A SECOND prepare on a fresh Active session now sees the cleared lever → Ready.
+        let mut second = active_session();
+        let ack2 = apply_prepare(&mut second, XFER, DEST, &mut stats, &mut lever);
+        assert_eq!(
+            ack2,
+            Some(TransferControlAck::Prepared {
+                transfer: XFER,
+                result: PrepareResult::Ready,
+            }),
+            "the very next prepare is Ready again (the lever is one-shot, not sticky)"
+        );
+        assert_eq!(
+            stats.transfer_unroutable, 0,
+            "neither Active prepare is a routing failure"
+        );
+    }
+
+    #[test]
+    fn apply_prepare_not_active_does_not_consume_the_lever() {
+        // Guard precedence: the not-Active guard sits ABOVE the lever and returns None + bumps
+        // `transfer_unroutable` WITHOUT consuming the lever — so an inactivity-rejected prepare leaves the
+        // lever armed for the retried (Active) one (the lever fires only for a would-be-Ready prepare).
+        let reject = PrepareReject::Spatial(SpatialReject::Obstructed);
+        let mut lever: Option<PrepareReject> = Some(reject);
+        let mut session = active_session();
+        session.phase = SessionPhase::AwaitingAttach; // NOT Active
+        let mut stats = GatewayStats::default();
+        let ack = apply_prepare(&mut session, XFER, DEST, &mut stats, &mut lever);
+        assert_eq!(ack, None, "a not-Active prepare is un-acked (pins the saga, WEDGE-1)");
+        assert_eq!(
+            stats.transfer_unroutable, 1,
+            "a not-Active prepare is counted as unroutable"
+        );
+        assert_eq!(
+            lever,
+            Some(reject),
+            "the guard did NOT consume the lever — it stays armed for the retried Active prepare"
         );
     }
 }

@@ -12,7 +12,16 @@
 //! source's `CrossingRequest` resolved its three directory heads and BECAME a real transfer saga.
 //!
 //! SCOPE (per the vetted plan): Test 1 durable happy-path, Test 2 dest render, Test 4 transient (HR2
-//! second class), Test 5 determinism. The abort leg (Test 3), the crash leg, and 3f-D4 are OUT OF SCOPE.
+//! second class), Test 5 determinism, Test 3 the pre-CAS ABORT leg, and the Tier-1 CRASH leg (an
+//! orchestrator World-REBUILD between the abort-emit and the source ack — NOT a process SIGKILL; the
+//! honest tier is in the test names). 3f-D4 (unresolved-dest re-drive) stays OUT OF SCOPE.
+//!
+//! MECHANISM-Y COMPOSITION: the abort/crash legs prove the crash-durable crossing-abort (`pending_abort_
+//! replies`) COMPOSES at cluster tier. The abort is forced PRE-CAS by the gateway's one-shot
+//! `reject_next_prepare` lever (`arm_gateway_reject`) — the gateway is the durable Prepare decider, so a
+//! `Prepared{ Rejected(Spatial(Obstructed)) }` drives the saga's `abort_from_pre_freeze` (no `ThawSource`,
+//! no `IssueCommitCas`), and the directory head NEVER moves off the source (the pre-CAS proof). The dest
+//! stub never sees the Prepare, so `stub.rs` is untouched; no wire type is new (all reject arms exist).
 //!
 //! GEOMETRY HONESTY: the shell is centered at the dot's SPAWN offset, so the dot is born-inside and
 //! commits after `n_entry` dwell ticks. This proves TRIGGER→TRANSFER composition; the pixel-visible
@@ -20,18 +29,22 @@
 
 use vd_core::glam::DVec3;
 use vd_core::pose::FrameRef;
-use vd_core::{AccountId, EntityId, NodeId, TickId};
+use vd_core::{AccountId, EntityId, Fence, NodeId, TickId};
 use vd_harness::client::ScriptedClient;
-use vd_harness::fabric::FaultFabric;
+use vd_harness::fabric::{FaultFabric, LinkPolicy};
 use vd_harness::oracle::{RenderSample, verify_authority_settled, verify_authority_unique};
 use vd_harness::topology::{InspectReport, Topology};
 use vd_core::entity_kind::EntityKind;
+use vd_sim::io::mem::MemStore;
 use vd_tests::{
-    DEST, ORCH, SHARD, dest_stub_config, live_sagas, p1_client, p2_cluster, plant_one_crossing_shell,
-    realm_fence, saga_states, seed_held_transient, stub_config, walk_forward,
+    DEST, ORCH, SHARD, arm_gateway_reject, dest_stub_config, live_sagas, p1_client, p2_cluster,
+    p2_cluster_durable_orch, plant_one_crossing_shell, read_subject, realm_fence, rebuild_orchestrator,
+    saga_states, seed_held_transient, stub_config, walk_forward,
 };
 use vd_wire::channels::SubId;
+use vd_wire::intershard::crossing_transfer_id;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
+use vd_wire::seams::transfer_control::{PrepareReject, SpatialReject};
 
 const CLIENT: NodeId = NodeId(100);
 
@@ -387,5 +400,292 @@ fn crossing_e2e_is_byte_identical_under_same_seed() {
         run(),
         "identical seed ⇒ identical ground truth, harness trace, subject, AND the per-tick render trace \
          (the autonomous crossing is deterministic)",
+    );
+}
+
+// ===================================================================================================
+// TEST 3 — the pre-CAS ABORT leg + the Tier-1 CRASH leg (Mechanism-Y composition at cluster tier).
+// ===================================================================================================
+
+/// The subject's directory head-holding node (the pre-CAS proof reads this: it MUST stay at the SOURCE).
+/// Reads the same `report(ORCH).directory` the happy-path Test 1 does (arm-agnostic `.node()`, per Q-4).
+fn head_node(reports: &[(NodeId, InspectReport)], subject: EntityId) -> NodeId {
+    report(reports, ORCH)
+        .directory
+        .iter()
+        .find_map(|(k, r)| (*k == DirectoryKey::Entity(subject)).then_some(r.authority.node()))
+        .expect("the crossing subject is recorded in the directory")
+}
+
+/// Shared warmup for both abort legs: warm the cluster + walking client to the M2 gate (SHARD holds the
+/// avatar, DEST holds `to_realm`), capture `subject` + its directory fence, GUARD the `0x39` crossing
+/// namespace, ARM the one-shot gateway reject AS LATE AS POSSIBLE, then PLANT the crossing shell. Returns
+/// `subject`. Verbatim the `run_autonomous_crossing` warmup + M2 gate — only the tail (arm + plant vs
+/// self-drive) diverges. The client must already be added to `topo`.
+fn warm_and_arm_pre_cas_abort(topo: &mut Topology) -> EntityId {
+    // WARMUP: the player logs in + walks; the SOURCE grants its avatar and the DEST wins its realm lease.
+    step_until(topo, 80, &mut |_| {}, |t| {
+        let r = t.inspect_all();
+        !report(&r, SHARD).held_entities.is_empty()
+            && report(&r, DEST)
+                .held_realms
+                .iter()
+                .any(|(realm, _)| *realm == dest_stub_config().realm)
+    });
+
+    // M2 GATE (hard-assert, anti-vacuity): the DEST holds the exact realm the planted shell hands authority
+    // to — else `handle_crossing_request` silently counts `crossing_unresolved` and NO saga (nor abort) runs.
+    let warm = topo.inspect_all();
+    assert!(
+        report(&warm, DEST)
+            .held_realms
+            .iter()
+            .any(|(realm, _)| *realm == dest_stub_config().realm),
+        "M2: the DEST holds the shell's to_realm {:?} — the crossing can resolve its dest head",
+        dest_stub_config().realm,
+    );
+    let (subject, _) = *report(&warm, SHARD)
+        .held_entities
+        .first()
+        .expect("the SHARD holds the walking avatar before the crossing is planted");
+
+    // PRE-CONDITION (cheap namespace guard): the id the source will latch is `0x39`-namespaced. `fence` is the
+    // subject's directory head fence — the closest observable to the `subject_fence` the source mints into the
+    // wire request. A driver namespace regression fails HERE with a precise message, not later as "no reply".
+    let (_session, subject_dir, fence): (_, EntityId, Fence) = read_subject(topo);
+    assert_eq!(subject_dir, subject, "the directory subject IS the SHARD-held avatar");
+    assert_eq!(
+        crossing_transfer_id(DirectoryKey::Entity(subject), fence, 0).0 >> 120,
+        0x39,
+        "the crossing transfer id is 0x39-namespaced (the crossing-origin Mechanism-Y discriminator)",
+    );
+
+    // ARM the one-shot reject AS LATE AS POSSIBLE (right before the plant), so no warmup/re-driven prepare
+    // can spend it on the wrong transfer — then PLANT the shell (mints the 0x39 crossing on the dwell).
+    arm_gateway_reject(topo, PrepareReject::Spatial(SpatialReject::Obstructed));
+    plant_one_crossing_shell(topo);
+    subject
+}
+
+/// TEST 3 — THE PRE-CAS ABORT LEG: a crossing-origin durable saga forced to REJECT at Prepare (the gateway's
+/// one-shot lever) aborts BEFORE the directory CAS, clears the source latch via Mechanism-Y, and the head
+/// NEVER moves off the source. Proves the crash-durable crossing-abort COMPOSES at cluster tier (the abort
+/// staged a persisted latch-clear obligation and the source's ack reaped it), all geometrically triggered.
+#[test]
+fn crossing_e2e_pre_cas_abort_clears_the_source_latch() {
+    let fabric = FaultFabric::new(0x3F_AB07, 2);
+    let mut topo = p2_cluster(&fabric, 8);
+    topo.add_node(Box::new(p1_client(&fabric, CLIENT, AccountId(1000), walk_forward())));
+
+    let subject = warm_and_arm_pre_cas_abort(&mut topo);
+
+    // Drive to terminal, CAPTURING the transient pre-ack staging (the load-bearing non-vacuity proof) and
+    // the post-plant crossings count (proves the lever wasn't spent on a stray prepare).
+    // Exit only once the crossing has STARTED (`crossings_started >= 1`, so the abort ran, not a vacuous
+    // "no saga ever lived") AND tombstoned (`live_sagas == 0`). Observe the transient `pending_abort_replies
+    // >= 1` staging along the way (the load-bearing non-vacuity proof).
+    let mut saw_pending_pre_ack = false;
+    let mut crossings_after_plant = 0u64;
+    step_until(
+        &mut topo,
+        60,
+        &mut |t| {
+            let r = t.inspect_all();
+            if report(&r, ORCH).pending_abort_replies >= 1 {
+                saw_pending_pre_ack = true;
+            }
+            crossings_after_plant = report(&r, ORCH).crossings_started;
+        },
+        // Exit once the FULL Mechanism-Y round-trip completed: the crossing started + aborted (tombstoned),
+        // the source cleared its latch, AND the source's ack reaped the staged reply (`pending == 0`).
+        |t| {
+            let r = t.inspect_all();
+            report(&r, ORCH).crossings_started >= 1
+                && live_sagas(t) == 0
+                && report(&r, SHARD).crossing_latches_cleared >= 1
+                && report(&r, ORCH).pending_abort_replies == 0
+        },
+    );
+
+    let r = topo.inspect_all();
+
+    // (a) NON-VACUITY / Mechanism-Y ran: the 0x39 crossing-origin durable tombstone STAGED a reply BEFORE the
+    //     source ack reaped it. A non-crossing-origin abort stages NOTHING (the `is_crossing_origin` gate), so
+    //     `>= 1` at any tick proves the 0x39 pre-freeze path specifically ran — the discriminator.
+    assert!(
+        saw_pending_pre_ack,
+        "pending_abort_replies >= 1 BEFORE the ack — the 0x39 crossing-origin latch-clear reply staged",
+    );
+    // (b) exactly ONE crossing started after the plant: the lever wasn't spent on a stray prepare, and a
+    //     second crossing didn't sneak through Ready (the one-shot fired for THIS crossing).
+    assert_eq!(
+        crossings_after_plant, 1,
+        "exactly one durable crossing saga started post-plant",
+    );
+    // (c) the staged reply was REAPED by the source's CrossingAbortedAck (the round-trip completed).
+    assert_eq!(
+        report(&r, ORCH).pending_abort_replies,
+        0,
+        "pending_abort_replies == 0 after the source ack reaped the reply",
+    );
+    // (d) the source POSITIVELY cleared its crossing latch (via on_crossing_aborted, not a timeout).
+    assert!(
+        report(&r, SHARD).crossing_latches_cleared >= 1,
+        "the source cleared its RequestInFlight latch on the abort (crossing_latches_cleared >= 1): {}",
+        report(&r, SHARD).crossing_latches_cleared,
+    );
+    // (e) no standing latch for the subject.
+    assert!(
+        !report(&r, SHARD).in_flight_latches.contains(&subject),
+        "no standing RequestInFlight latch for the aborted subject: {:?}",
+        report(&r, SHARD).in_flight_latches,
+    );
+    // (f) no live sagas (the abort tombstoned).
+    assert_eq!(live_sagas(&mut topo), 0, "the aborted saga tombstoned");
+
+    // (g1) PRE-CAS PROOF — head-position necessary half: the directory head STAYED at the SOURCE (authority
+    //      never handed off; `abort_from_pre_freeze` issues no `IssueCommitCas`). Arm-agnostic `.node()`.
+    assert_eq!(
+        head_node(&r, subject),
+        SHARD,
+        "pre-CAS abort: the directory head never moved off the SOURCE",
+    );
+    // (g2) PRE-CAS PROOF — sufficient half: the DEST never adopted the subject (a post-CAS-then-compensate
+    //      path would have advanced a dest ownership counter). Combined with (a), pre-CAS is fully pinned.
+    assert!(
+        !report(&r, DEST).held_entities.iter().any(|(e, _)| *e == subject),
+        "pre-CAS: the DEST never adopted the subject (no CAS ran)",
+    );
+
+    // The HR2 authority oracles hold after the abort tail (exactly one holder, no lingering pending).
+    verify_authority_unique(&r).expect("exactly one holder of the aborted subject (the SOURCE)");
+    verify_authority_settled(&r).expect("no lingering pending/departing after the abort tail");
+}
+
+/// TEST — THE TIER-1 CRASH LEG: an orchestrator REBUILD (World-rebuild via `rebuild_orchestrator` from the
+/// RETAINED WAL — an honest analog of a kill-9, NOT a process SIGKILL) BETWEEN the abort-emit and the source
+/// ack. The parked ack sits in the fabric while the orchestrator dies + re-hydrates; the persisted
+/// `pending_abort_replies` entry rides the WAL, is restored, and the first post-restart scan re-emits so the
+/// source clears/re-acks. Proves the crash-durable crossing-abort COMPOSES across an orchestrator restart.
+///
+/// TIER HONESTY (`..._survives_orchestrator_restart`, NOT `..._kill9`): a World-rebuild, not a `kill -9`. The
+/// abort-reply crash *durability* is process-proven generically by `orchestrator_crash.rs` + WAL-specifically
+/// by `rehydrate_restores_a_persisted_abort_reply_and_reemits_on_first_scan`; the crossing-specific SIGKILL
+/// stays owed (DEFERRED D-43 — a composition gap, blocked on a shard-bin boundary-plant knob).
+#[test]
+fn crossing_e2e_abort_survives_orchestrator_restart() {
+    let fabric = FaultFabric::new(0x3F_AB08, 2);
+    let (mut topo, store) = p2_cluster_durable_orch(&fabric, 8); // RETAINED MemStore
+    topo.add_node(Box::new(p1_client(&fabric, CLIENT, AccountId(1000), walk_forward())));
+
+    let subject = warm_and_arm_pre_cas_abort(&mut topo);
+
+    // PHASE 1 — HEALTHY link: drive until the crossing has STARTED, aborted, and STAGED its persisted reply
+    // (`pending_abort_replies >= 1`). The link MUST stay healthy here: the `CrossingRequest` that starts the
+    // saga rides SHARD -> ORCH — the SAME directed link we park below — so parking before the request
+    // arrives would strand the crossing (it would never become a saga). Stop the INSTANT the reply is staged.
+    step_until(&mut topo, 80, &mut |_| {}, |t| {
+        report(&t.inspect_all(), ORCH).pending_abort_replies >= 1
+    });
+
+    // PHASE 2 — PARK the ack direction (SHARD -> ORCH Saga) so the source's `CrossingAbortedAck` requeues in
+    // the fabric (partitioned = block + redeliver, never dropped) instead of reaping the staged reply. The
+    // `CrossingAborted` re-emit flows ORCH -> SHARD (left healthy), so the source still receives it, clears
+    // its latch, and acks — but that ack is now PARKED. This is the "abort emitted, ack in flight" instant.
+    fabric.set_policy(
+        SHARD,
+        ORCH,
+        LinkPolicy {
+            partitioned: true,
+            ..Default::default()
+        },
+    );
+    // Drive (ack parked) until the SOURCE has RECEIVED a re-emitted `CrossingAborted` and cleared its latch —
+    // `crossing_latches_cleared` bumps ONLY via `on_crossing_aborted` (the pre-CAS abort never commits, so
+    // `on_saga_demote`, the other writer, cannot fire for this subject). With the ack parked, the ORCH still
+    // holds the staged reply — so this is exactly "an emit fired + its ack is parked, entry not reaped".
+    step_until(&mut topo, 80, &mut |_| {}, |t| {
+        report(&t.inspect_all(), SHARD).crossing_latches_cleared >= 1
+    });
+    let pre = topo.inspect_all();
+    assert!(
+        report(&pre, ORCH).pending_abort_replies >= 1,
+        "the abort reply is still staged (ack parked by the partition, not reaped) at the restart instant",
+    );
+    assert!(
+        report(&pre, SHARD).crossing_latches_cleared >= 1,
+        "an emit FIRED pre-restart and the source acked (the ack is the thing being parked)",
+    );
+
+    // REBUILD the orchestrator from the RETAINED store (the World-rebuild kill-9 analog).
+    rebuild_orchestrator(&mut topo, &fabric, store.clone());
+
+    // THE LOAD-BEARING CRASH ASSERTION: capture the instant AFTER rebuild, BEFORE any healed step. This (and
+    // only this) proves the entry rode the WAL — not the throttle reset, not in-process World survival.
+    assert!(
+        report(&topo.inspect_all(), ORCH).pending_abort_replies >= 1,
+        "the persisted abort-reply was RESTORED from the WAL by the cluster rehydrate (pre-heal capture)",
+    );
+
+    // HEAL + reap — a LABELED liveness check (NOT the crash proof: the post-restart re-emit is throttle-reset-
+    // guaranteed, so this only shows the tail completes once the parked ack redelivers).
+    fabric.set_policy(SHARD, ORCH, LinkPolicy::default());
+    step_until(&mut topo, 60, &mut |_| {}, |t| {
+        report(&t.inspect_all(), ORCH).pending_abort_replies == 0
+    });
+
+    let r = topo.inspect_all();
+    assert_eq!(
+        report(&r, ORCH).pending_abort_replies,
+        0,
+        "liveness: the reply was reaped post-restart by the redelivered source ack",
+    );
+    assert!(
+        report(&r, SHARD).crossing_latches_cleared >= 1,
+        "the source latch stayed cleared across the restart",
+    );
+    assert!(
+        !report(&r, SHARD).in_flight_latches.contains(&subject),
+        "no standing latch for the subject after the restart tail: {:?}",
+        report(&r, SHARD).in_flight_latches,
+    );
+    assert_eq!(
+        head_node(&r, subject),
+        SHARD,
+        "the directory head never moved — the pre-CAS abort survived the restart",
+    );
+}
+
+/// MANDATORY NEGATIVE CONTROL (anti-theater): rebuild an IDENTICAL fixture against a FRESH empty
+/// `MemStore::new()` and assert `pending_abort_replies == 0` immediately post-rebuild. Without this, the
+/// crash-leg's pre-heal capture is confounded by an in-process-survival illusion; with it, the WAL-restore
+/// assertion is PROVEN to read the store, not a leftover — the empty store recovers NOTHING.
+#[test]
+fn crossing_e2e_abort_reply_absent_from_empty_store_rebuild() {
+    let fabric = FaultFabric::new(0x3F_AB09, 2);
+    let (mut topo, _store) = p2_cluster_durable_orch(&fabric, 8);
+    topo.add_node(Box::new(p1_client(&fabric, CLIENT, AccountId(1000), walk_forward())));
+
+    let _subject = warm_and_arm_pre_cas_abort(&mut topo);
+
+    // Drive until the abort reply is genuinely staged (the same window the crash leg captures) — so the
+    // control is non-vacuous: a reply DID exist in the dying process, and the empty rebuild must still find 0.
+    step_until(&mut topo, 80, &mut |_| {}, |t| {
+        report(&t.inspect_all(), ORCH).pending_abort_replies >= 1
+    });
+    assert!(
+        report(&topo.inspect_all(), ORCH).pending_abort_replies >= 1,
+        "the abort reply is staged in the (about-to-die) orchestrator before the empty rebuild",
+    );
+
+    // REBUILD against a FRESH empty store (a NON-durable restart): nothing is persisted to recover.
+    rebuild_orchestrator(&mut topo, &fabric, MemStore::new());
+
+    // THE CONTROL: immediately post-rebuild, the empty store recovered NO abort reply — proving the crash
+    // leg's `>= 1` restore reads the WAL, not an in-process survivor.
+    assert_eq!(
+        report(&topo.inspect_all(), ORCH).pending_abort_replies,
+        0,
+        "an EMPTY-store rebuild restores NO abort reply (the crash-leg restore reads the WAL, not RAM)",
     );
 }
