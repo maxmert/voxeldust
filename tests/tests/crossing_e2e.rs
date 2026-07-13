@@ -27,6 +27,7 @@
 //! commits after `n_entry` dwell ticks. This proves TRIGGER→TRANSFER composition; the pixel-visible
 //! PHYSICAL traversal (a dot that walks ACROSS a boundary) remains the D-15/D-30 visual owed line.
 
+use vd_core::entity_kind::EntityKind;
 use vd_core::glam::DVec3;
 use vd_core::pose::FrameRef;
 use vd_core::{AccountId, EntityId, Fence, NodeId, TickId};
@@ -34,12 +35,11 @@ use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::{FaultFabric, LinkPolicy};
 use vd_harness::oracle::{RenderSample, verify_authority_settled, verify_authority_unique};
 use vd_harness::topology::{InspectReport, Topology};
-use vd_core::entity_kind::EntityKind;
 use vd_sim::io::mem::MemStore;
 use vd_tests::{
     DEST, ORCH, SHARD, arm_gateway_reject, dest_stub_config, live_sagas, p1_client, p2_cluster,
-    p2_cluster_durable_orch, plant_one_crossing_shell, read_subject, realm_fence, rebuild_orchestrator,
-    saga_states, seed_held_transient, stub_config, walk_forward,
+    p2_cluster_durable_orch, plant_one_crossing_shell, read_subject, realm_fence,
+    rebuild_orchestrator, saga_states, seed_held_transient, stub_config, walk_forward,
 };
 use vd_wire::channels::SubId;
 use vd_wire::intershard::crossing_transfer_id;
@@ -288,7 +288,8 @@ fn crossing_e2e_durable_dot_crosses_a_planted_boundary() {
 fn crossing_e2e_renders_at_dest() {
     let fabric = FaultFabric::new(909, 2);
     let mut caps: Vec<CapturedTick> = Vec::new();
-    let (_topo, _subject) = run_autonomous_crossing(&fabric, &mut |t| caps.push(capture_subject(t)));
+    let (_topo, _subject) =
+        run_autonomous_crossing(&fabric, &mut |t| caps.push(capture_subject(t)));
 
     let rendered: Vec<RenderSample> = caps.iter().filter_map(|c| c.sample).collect();
     let dest_sample = *rendered
@@ -389,8 +390,9 @@ fn crossing_e2e_transient_crosses_via_batch_grant() {
 fn crossing_e2e_is_byte_identical_under_same_seed() {
     let run = || {
         let mut caps: Vec<CapturedTick> = Vec::new();
-        let (mut topo, subject) =
-            run_autonomous_crossing(&FaultFabric::new(909, 2), &mut |t| caps.push(capture_subject(t)));
+        let (mut topo, subject) = run_autonomous_crossing(&FaultFabric::new(909, 2), &mut |t| {
+            caps.push(capture_subject(t))
+        });
         let reports = topo.inspect_all();
         let trace = topo.trace_bytes();
         (reports, trace, subject, caps)
@@ -453,7 +455,10 @@ fn warm_and_arm_pre_cas_abort(topo: &mut Topology) -> EntityId {
     // subject's directory head fence — the closest observable to the `subject_fence` the source mints into the
     // wire request. A driver namespace regression fails HERE with a precise message, not later as "no reply".
     let (_session, subject_dir, fence): (_, EntityId, Fence) = read_subject(topo);
-    assert_eq!(subject_dir, subject, "the directory subject IS the SHARD-held avatar");
+    assert_eq!(
+        subject_dir, subject,
+        "the directory subject IS the SHARD-held avatar"
+    );
     assert_eq!(
         crossing_transfer_id(DirectoryKey::Entity(subject), fence, 0).0 >> 120,
         0x39,
@@ -475,7 +480,12 @@ fn warm_and_arm_pre_cas_abort(topo: &mut Topology) -> EntityId {
 fn crossing_e2e_pre_cas_abort_clears_the_source_latch() {
     let fabric = FaultFabric::new(0x3F_AB07, 2);
     let mut topo = p2_cluster(&fabric, 8);
-    topo.add_node(Box::new(p1_client(&fabric, CLIENT, AccountId(1000), walk_forward())));
+    topo.add_node(Box::new(p1_client(
+        &fabric,
+        CLIENT,
+        AccountId(1000),
+        walk_forward(),
+    )));
 
     let subject = warm_and_arm_pre_cas_abort(&mut topo);
 
@@ -553,7 +563,10 @@ fn crossing_e2e_pre_cas_abort_clears_the_source_latch() {
     // (g2) PRE-CAS PROOF — sufficient half: the DEST never adopted the subject (a post-CAS-then-compensate
     //      path would have advanced a dest ownership counter). Combined with (a), pre-CAS is fully pinned.
     assert!(
-        !report(&r, DEST).held_entities.iter().any(|(e, _)| *e == subject),
+        !report(&r, DEST)
+            .held_entities
+            .iter()
+            .any(|(e, _)| *e == subject),
         "pre-CAS: the DEST never adopted the subject (no CAS ran)",
     );
 
@@ -576,7 +589,12 @@ fn crossing_e2e_pre_cas_abort_clears_the_source_latch() {
 fn crossing_e2e_abort_survives_orchestrator_restart() {
     let fabric = FaultFabric::new(0x3F_AB08, 2);
     let (mut topo, store) = p2_cluster_durable_orch(&fabric, 8); // RETAINED MemStore
-    topo.add_node(Box::new(p1_client(&fabric, CLIENT, AccountId(1000), walk_forward())));
+    topo.add_node(Box::new(p1_client(
+        &fabric,
+        CLIENT,
+        AccountId(1000),
+        walk_forward(),
+    )));
 
     let subject = warm_and_arm_pre_cas_abort(&mut topo);
 
@@ -664,7 +682,12 @@ fn crossing_e2e_abort_survives_orchestrator_restart() {
 fn crossing_e2e_abort_reply_absent_from_empty_store_rebuild() {
     let fabric = FaultFabric::new(0x3F_AB09, 2);
     let (mut topo, _store) = p2_cluster_durable_orch(&fabric, 8);
-    topo.add_node(Box::new(p1_client(&fabric, CLIENT, AccountId(1000), walk_forward())));
+    topo.add_node(Box::new(p1_client(
+        &fabric,
+        CLIENT,
+        AccountId(1000),
+        walk_forward(),
+    )));
 
     let _subject = warm_and_arm_pre_cas_abort(&mut topo);
 

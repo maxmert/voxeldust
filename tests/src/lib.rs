@@ -355,7 +355,10 @@ fn with_orchestrator<R>(
 /// decider). The NEXT `PrepareSubscribe` the gateway would answer `Ready` instead replies
 /// `Prepared{ Rejected(reject) }`, then the gateway self-clears the lever (one-shot). `GatewayConfig` is a
 /// live `#[derive(Resource)]` inserted by `register_gateway`, so `resource_mut::<GatewayConfig>()` mutates it.
-pub fn arm_gateway_reject(topo: &mut Topology, reject: vd_wire::seams::transfer_control::PrepareReject) {
+pub fn arm_gateway_reject(
+    topo: &mut Topology,
+    reject: vd_wire::seams::transfer_control::PrepareReject,
+) {
     with_node(topo, GATEWAY, |gw| {
         gw.world_mut()
             .resource_mut::<GatewayConfig>()
@@ -493,14 +496,14 @@ pub fn plant_one_crossing_shell(topo: &mut Topology) {
     let shell = RealmBoundary::shell(
         stub_config().realm, // the boundary's exterior side = the SOURCE realm (System(7))
         LatticePos::local(vd_core::glam::DVec3::ZERO), // centered at the dot's login spawn offset
-        1000.0, // r_soi
-        1.15,   // create_factor → create edge 1150 m (dwarfs the 0.1 m/tick walk)
-        1.30,   // destroy_factor → destroy edge 1300 m
+        1000.0,              // r_soi
+        1.15,                // create_factor → create edge 1150 m (dwarfs the 0.1 m/tick walk)
+        1.30,                // destroy_factor → destroy edge 1300 m
         stub_config().move_speed_mps, // v_rel (the dot's own walk speed — factor-sized, not widened)
         stub_config().tick_dt_s,      // dt
-        0.5,    // pad_floor
-        1.0,    // k_safety_extra
-        None,   // top-level (depth 0)
+        0.5,                          // pad_floor
+        1.0,                          // k_safety_extra
+        None,                         // top-level (depth 0)
         // M2: byte-equal the realm the DEST shard holds, so the dest head resolves and a saga starts.
         dest_stub_config().realm,
         CrossEffect::Authority, // a TRANSFER crossing (hands authority to the dest realm)
@@ -514,9 +517,15 @@ pub fn plant_one_crossing_shell(topo: &mut Topology) {
 /// test-seeded `Crossing` status, no hand-fed batch). `anchor` is the source's realm-lease fence (via
 /// [`realm_fence`]). The dot is at rest (`vel = 0`), so its `prev_offset == pos` (a degenerate first
 /// segment) and it stays a member of the shell centered at spawn.
-pub fn seed_held_transient(topo: &mut Topology, entity: EntityId, anchor: Fence, pos: vd_core::glam::DVec3) {
+pub fn seed_held_transient(
+    topo: &mut Topology,
+    entity: EntityId,
+    anchor: Fence,
+    pos: vd_core::glam::DVec3,
+) {
     with_node(topo, SHARD, |s| {
-        let pose = vd_core::pose::StampedPose::at_rest(stub_config().frame, pos, TRANSIENT_SEED_TICK0);
+        let pose =
+            vd_core::pose::StampedPose::at_rest(stub_config().frame, pos, TRANSIENT_SEED_TICK0);
         s.world_mut()
             .resource_mut::<vd_sim::stub::OwnedTransients>()
             .0

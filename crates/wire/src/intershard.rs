@@ -688,9 +688,13 @@ pub fn namespaced_transfer_id(tag: u8, seed: &[u8]) -> TransferId {
 /// (the restored in-band dot re-mints the same first-attempt id). Only a post-abort re-latch — exactly
 /// where H2 needs a fresh id — advances the attempt.
 #[must_use]
-pub fn crossing_transfer_id(subject: DirectoryKey, subject_fence: Fence, attempt: u32) -> TransferId {
-    let seed = postcard::to_allocvec(&(subject, subject_fence, attempt))
-        .expect("encode crossing id seed");
+pub fn crossing_transfer_id(
+    subject: DirectoryKey,
+    subject_fence: Fence,
+    attempt: u32,
+) -> TransferId {
+    let seed =
+        postcard::to_allocvec(&(subject, subject_fence, attempt)).expect("encode crossing id seed");
     namespaced_transfer_id(0x39, &seed)
 }
 

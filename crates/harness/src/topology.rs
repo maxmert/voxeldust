@@ -1367,20 +1367,23 @@ mod tests {
                 .downcast_mut::<vd_node::ShardNode<crate::fabric::FabricTransport>>()
                 .expect("ShardNode");
             let world = shard.world_mut();
-            world.resource_mut::<RealmBoundaries>().0.push(RealmBoundary::shell(
-                from_realm,
-                LatticePos::local(DVec3::ZERO),
-                1000.0, // r_soi
-                1.15,   // create_factor → create edge 1150 m
-                1.30,   // destroy_factor
-                1.0,    // v_rel (slow)
-                0.05,   // dt
-                0.5,    // pad_floor
-                1.0,    // k_safety_extra
-                None,   // top-level
-                to_realm,
-                CrossEffect::Authority,
-            ));
+            world
+                .resource_mut::<RealmBoundaries>()
+                .0
+                .push(RealmBoundary::shell(
+                    from_realm,
+                    LatticePos::local(DVec3::ZERO),
+                    1000.0, // r_soi
+                    1.15,   // create_factor → create edge 1150 m
+                    1.30,   // destroy_factor
+                    1.0,    // v_rel (slow)
+                    0.05,   // dt
+                    0.5,    // pad_floor
+                    1.0,    // k_safety_extra
+                    None,   // top-level
+                    to_realm,
+                    CrossEffect::Authority,
+                ));
             let pose = StampedPose::at_rest(
                 FrameRef::SystemSpace { system_seed: 5 },
                 DVec3::new(100.0, 0.0, 0.0),

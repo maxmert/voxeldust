@@ -56,9 +56,9 @@ use vd_wire::intershard::{
     CrossingRequest, DEMOTE_STEP, DemoteCmd, FLUSH_SOURCE_STEP, FlushSource, InterShardFlow,
     PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, RE_SOLICIT_STEP, ReHomeCmd, ReHomeState,
     STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_DISCARD_STEP,
-    TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope, TransientHandoff,
-    TransientCrossingGrant, TransientCrossingRequest, TransitionPayload, crossing_transfer_id,
-    namespaced_transfer_id,
+    TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck, TransferEnvelope,
+    TransientCrossingGrant, TransientCrossingRequest, TransientHandoff, TransitionPayload,
+    crossing_transfer_id, namespaced_transfer_id,
 };
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -2020,8 +2020,8 @@ fn scan_deadlines(
     // (`last_abort_reply_emit`), so `PendingAbortReply` stays a 3-field record (no per-entry stamp, no ABA).
     // COLLECT-then-APPLY into Vecs so mutation happens after the shared borrow ends (determinism +
     // borrow-safety); `dir` is a disjoint param, so `dir.head` inside the `runtime`-values loop is sound.
-    let reemit_due = now.0.saturating_sub(runtime.last_abort_reply_emit.0)
-        >= tuning.redrive_deadline_ticks;
+    let reemit_due =
+        now.0.saturating_sub(runtime.last_abort_reply_emit.0) >= tuning.redrive_deadline_ticks;
     let mut reaped: Vec<TransferId> = Vec::new();
     let mut to_emit: Vec<PendingAbortReply> = Vec::new();
     for reply in runtime.pending_abort_replies.values() {
@@ -2352,7 +2352,11 @@ pub fn drive_sagas(
             // never re-emits). `is_some()`-gated so a REDELIVERED ack (the `ReDriven` class re-sends it on
             // every re-delivered `CrossingAborted`) is an idempotent no-op — never a double-DELETE stage.
             Ok(InterShardFlow::CrossingAbortedAck(ack)) => {
-                if runtime.pending_abort_replies.remove(&ack.transfer).is_some() {
+                if runtime
+                    .pending_abort_replies
+                    .remove(&ack.transfer)
+                    .is_some()
+                {
                     runtime
                         .pending_writes
                         .push((StoreKey::AbortReply(ack.transfer).bytes(), None));
@@ -2874,7 +2878,8 @@ mod tests {
                     ORCH,
                     MsgClass::Saga,
                     vd_sim::io::bytes(
-                        postcard::to_allocvec(&InterShardFlow::CrossingRequest(req)).expect("encode"),
+                        postcard::to_allocvec(&InterShardFlow::CrossingRequest(req))
+                            .expect("encode"),
                     ),
                 )
                 .expect("sent");
@@ -6346,7 +6351,10 @@ mod tests {
         rig.transient_crossing_request(transient_req(Fence(2)));
         let second = rig.drain_source();
 
-        assert_eq!(first, second, "the redelivery re-grants the identical batch");
+        assert_eq!(
+            first, second,
+            "the redelivery re-grants the identical batch"
+        );
         assert_eq!(rig.count(SagaRuntimeRes::transient_crossings_granted), 2);
         // D-43 #9 idempotency (the `if !contains_key` FALSE arm): the re-request did NOT start a second
         // saga — one batch, one `BatchHandoff` saga, absorbed by the guard.
@@ -6419,7 +6427,11 @@ mod tests {
         let mut distinct = tags.to_vec();
         distinct.sort_unstable();
         distinct.dedup();
-        assert_eq!(distinct.len(), tags.len(), "all five family tags are distinct");
+        assert_eq!(
+            distinct.len(),
+            tags.len(),
+            "all five family tags are distinct"
+        );
     }
 
     #[test]
@@ -6444,9 +6456,15 @@ mod tests {
         c.transfer = crossing_xfer();
         assert!(is_crossing_origin(&c), "a 0x39 id IS crossing-origin");
         c.transfer = namespaced_transfer_id(0x37, b"rehome"); // re-home namespace
-        assert!(!is_crossing_origin(&c), "a 0x37 re-home id is NOT crossing-origin");
+        assert!(
+            !is_crossing_origin(&c),
+            "a 0x37 re-home id is NOT crossing-origin"
+        );
         c.transfer = TransferId(1); // a small connection-plane id (high byte 0x00)
-        assert!(!is_crossing_origin(&c), "a high-byte-0x00 id is NOT crossing-origin");
+        assert!(
+            !is_crossing_origin(&c),
+            "a high-byte-0x00 id is NOT crossing-origin"
+        );
     }
 
     #[test]
@@ -6456,9 +6474,22 @@ mod tests {
         // `pending_writes` (co-tick atomicity), keyed on DISTINCT families.
         let mut runtime = SagaRuntimeRes::default();
         let transfer = crossing_xfer();
-        inject_saga_id(&mut runtime, transfer, DurabilityClass::Durable, aborted_state());
+        inject_saga_id(
+            &mut runtime,
+            transfer,
+            DurabilityClass::Durable,
+            aborted_state(),
+        );
 
-        commit_result(&mut runtime, transfer, aborted_state(), true, vec![], vec![], UniverseTick(0));
+        commit_result(
+            &mut runtime,
+            transfer,
+            aborted_state(),
+            true,
+            vec![],
+            vec![],
+            UniverseTick(0),
+        );
 
         let entry = runtime
             .pending_abort_replies
@@ -6483,7 +6514,10 @@ mod tests {
             1,
             "the saga-snapshot DELETE rides the same tick"
         );
-        assert!(!runtime.sagas.contains_key(&transfer), "the saga was tombstoned");
+        assert!(
+            !runtime.sagas.contains_key(&transfer),
+            "the saga was tombstoned"
+        );
     }
 
     #[test]
@@ -6496,18 +6530,25 @@ mod tests {
             &mut runtime,
             transfer,
             DurabilityClass::Durable,
-            SagaState::Done { new_fence: Fence(2) },
+            SagaState::Done {
+                new_fence: Fence(2),
+            },
         );
         commit_result(
             &mut runtime,
             transfer,
-            SagaState::Done { new_fence: Fence(2) },
+            SagaState::Done {
+                new_fence: Fence(2),
+            },
             true,
             vec![],
             vec![],
             UniverseTick(0),
         );
-        assert!(runtime.pending_abort_replies.is_empty(), "Done does not owe a reply");
+        assert!(
+            runtime.pending_abort_replies.is_empty(),
+            "Done does not owe a reply"
+        );
         assert_eq!(abort_reply_writes(&runtime, transfer, true), 0);
     }
 
@@ -6517,9 +6558,25 @@ mod tests {
         // `is_crossing_origin` operand is false (the discriminator-exclusivity / first-false case).
         let mut runtime = SagaRuntimeRes::default();
         let transfer = namespaced_transfer_id(0x37, b"rehome");
-        inject_saga_id(&mut runtime, transfer, DurabilityClass::Durable, aborted_state());
-        commit_result(&mut runtime, transfer, aborted_state(), true, vec![], vec![], UniverseTick(0));
-        assert!(runtime.pending_abort_replies.is_empty(), "a re-home abort owes no crossing reply");
+        inject_saga_id(
+            &mut runtime,
+            transfer,
+            DurabilityClass::Durable,
+            aborted_state(),
+        );
+        commit_result(
+            &mut runtime,
+            transfer,
+            aborted_state(),
+            true,
+            vec![],
+            vec![],
+            UniverseTick(0),
+        );
+        assert!(
+            runtime.pending_abort_replies.is_empty(),
+            "a re-home abort owes no crossing reply"
+        );
     }
 
     #[test]
@@ -6528,9 +6585,25 @@ mod tests {
         // false (the class-gate false arm; a transient carries no per-entity durable latch).
         let mut runtime = SagaRuntimeRes::default();
         let transfer = crossing_xfer();
-        inject_saga_id(&mut runtime, transfer, DurabilityClass::Transient, aborted_state());
-        commit_result(&mut runtime, transfer, aborted_state(), true, vec![], vec![], UniverseTick(0));
-        assert!(runtime.pending_abort_replies.is_empty(), "a transient abort owes no durable reply");
+        inject_saga_id(
+            &mut runtime,
+            transfer,
+            DurabilityClass::Transient,
+            aborted_state(),
+        );
+        commit_result(
+            &mut runtime,
+            transfer,
+            aborted_state(),
+            true,
+            vec![],
+            vec![],
+            UniverseTick(0),
+        );
+        assert!(
+            runtime.pending_abort_replies.is_empty(),
+            "a transient abort owes no durable reply"
+        );
     }
 
     /// Scan the abort-reply pending set + re-emits with a fresh outbox, at `now`, using the runtime's
@@ -6580,17 +6653,23 @@ mod tests {
         let emitted = scan_abort(&mut runtime, UniverseTick(8), Some(SOURCE));
         assert_eq!(
             emitted,
-            vec![InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
-                subject: subject(),
-                transfer,
-            })],
+            vec![InterShardFlow::CrossingAborted(
+                vd_wire::intershard::CrossingAborted {
+                    subject: subject(),
+                    transfer,
+                }
+            )],
             "exactly one CrossingAborted re-emitted to the source"
         );
         assert!(
             runtime.pending_abort_replies.contains_key(&transfer),
             "the entry persists until acked"
         );
-        assert_eq!(runtime.last_abort_reply_emit, UniverseTick(8), "the cadence gate advanced");
+        assert_eq!(
+            runtime.last_abort_reply_emit,
+            UniverseTick(8),
+            "the cadence gate advanced"
+        );
     }
 
     #[test]
@@ -6604,8 +6683,15 @@ mod tests {
 
         // now=10: 10-6 = 4 < 8 → NOT due, no emit (source still owns → throttled, not reaped).
         let emitted = scan_abort(&mut runtime, UniverseTick(10), Some(SOURCE));
-        assert!(emitted.is_empty(), "within the window: no re-emit (throttled)");
-        assert_eq!(runtime.last_abort_reply_emit, UniverseTick(6), "the gate did not advance");
+        assert!(
+            emitted.is_empty(),
+            "within the window: no re-emit (throttled)"
+        );
+        assert_eq!(
+            runtime.last_abort_reply_emit,
+            UniverseTick(6),
+            "the gate did not advance"
+        );
     }
 
     #[test]
@@ -6618,7 +6704,10 @@ mod tests {
         seed_pending_reply(&mut runtime, transfer);
 
         let emitted = scan_abort(&mut runtime, UniverseTick(8), None);
-        assert!(emitted.is_empty(), "a subject that left the source draws no re-emit");
+        assert!(
+            emitted.is_empty(),
+            "a subject that left the source draws no re-emit"
+        );
         assert!(
             !runtime.pending_abort_replies.contains_key(&transfer),
             "the moot reply was reaped"
@@ -6640,8 +6729,16 @@ mod tests {
         let transfer = crossing_xfer();
         seed_pending_reply(&mut runtime, transfer);
 
-        assert_eq!(scan_abort(&mut runtime, UniverseTick(8), Some(SOURCE)).len(), 1, "first re-emit");
-        assert_eq!(scan_abort(&mut runtime, UniverseTick(16), Some(SOURCE)).len(), 1, "second re-emit");
+        assert_eq!(
+            scan_abort(&mut runtime, UniverseTick(8), Some(SOURCE)).len(),
+            1,
+            "first re-emit"
+        );
+        assert_eq!(
+            scan_abort(&mut runtime, UniverseTick(16), Some(SOURCE)).len(),
+            1,
+            "second re-emit"
+        );
         // The subject re-homed away from SOURCE (owned by DEST now) → the abort is moot → reaped.
         assert!(
             scan_abort(&mut runtime, UniverseTick(24), Some(DEST)).is_empty(),
@@ -6666,7 +6763,11 @@ mod tests {
             let mut runtime = rig.orch.world_mut().resource_mut::<SagaRuntimeRes>();
             runtime.pending_abort_replies.insert(
                 transfer,
-                PendingAbortReply { transfer, source: SOURCE, subject: subject() },
+                PendingAbortReply {
+                    transfer,
+                    source: SOURCE,
+                    subject: subject(),
+                },
             );
         }
         let ack = |rig: &mut Rig| {
@@ -6676,7 +6777,10 @@ mod tests {
                     MsgClass::Saga,
                     vd_sim::io::bytes(
                         postcard::to_allocvec(&InterShardFlow::CrossingAbortedAck(
-                            vd_wire::intershard::CrossingAborted { subject: subject(), transfer },
+                            vd_wire::intershard::CrossingAborted {
+                                subject: subject(),
+                                transfer,
+                            },
                         ))
                         .expect("encode"),
                     ),
@@ -6741,7 +6845,11 @@ mod tests {
             &encode(&(EpochId(1), UniverseTick(0))),
         );
         // The persisted abort-reply obligation (what commit_result staged pre-crash).
-        let reply = PendingAbortReply { transfer, source: SOURCE, subject: subject() };
+        let reply = PendingAbortReply {
+            transfer,
+            source: SOURCE,
+            subject: subject(),
+        };
         store.put(&StoreKey::AbortReply(transfer).bytes(), &encode(&reply));
         // COMMIT the staged writes (the group-commit barrier the orchestrator would have run pre-crash) —
         // `scan` reads only the committed set.
@@ -6768,10 +6876,12 @@ mod tests {
         let emitted = scan_abort(&mut runtime, UniverseTick(8), Some(SOURCE));
         assert_eq!(
             emitted,
-            vec![InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
-                subject: subject(),
-                transfer,
-            })],
+            vec![InterShardFlow::CrossingAborted(
+                vd_wire::intershard::CrossingAborted {
+                    subject: subject(),
+                    transfer,
+                }
+            )],
             "the restored obligation re-emits on the first post-restart scan (crash-leg proof)"
         );
     }

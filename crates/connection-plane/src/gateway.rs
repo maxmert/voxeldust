@@ -1260,7 +1260,13 @@ fn on_transfer_control(
         TransferControl::PrepareSubscribe { dest, .. } => {
             // Split borrow: `session` from `sessions`, `&mut config.reject_next_prepare` from
             // `config` (disjoint resources / a disjoint field) — the one-shot 3g reject lever.
-            apply_prepare(session, transfer, dest, stats, &mut config.reject_next_prepare)
+            apply_prepare(
+                session,
+                transfer,
+                dest,
+                stats,
+                &mut config.reject_next_prepare,
+            )
         }
         TransferControl::RequestCut { .. } => {
             apply_request_cut(session, outbox, transfer, stats);
@@ -5926,7 +5932,10 @@ mod tests {
         session.phase = SessionPhase::AwaitingAttach; // NOT Active
         let mut stats = GatewayStats::default();
         let ack = apply_prepare(&mut session, XFER, DEST, &mut stats, &mut lever);
-        assert_eq!(ack, None, "a not-Active prepare is un-acked (pins the saga, WEDGE-1)");
+        assert_eq!(
+            ack, None,
+            "a not-Active prepare is un-acked (pins the saga, WEDGE-1)"
+        );
         assert_eq!(
             stats.transfer_unroutable, 1,
             "a not-Active prepare is counted as unroutable"
