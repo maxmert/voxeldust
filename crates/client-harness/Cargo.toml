@@ -8,6 +8,8 @@ description = "P1.5 Slice 3 PURE harness logic (Tier-A, 100% coverage): the HR6 
 [dependencies]
 vd-core = { workspace = true }
 vd-devproto = { workspace = true }
+vd-client = { workspace = true }
+vd-wire = { workspace = true }
 glam = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

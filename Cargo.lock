@@ -6241,6 +6241,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "postcard",
+ "thiserror 2.0.18",
  "vd-core",
  "vd-devproto",
  "vd-sim",
@@ -6254,8 +6255,10 @@ dependencies = [
  "glam",
  "serde",
  "serde_json",
+ "vd-client",
  "vd-core",
  "vd-devproto",
+ "vd-wire",
 ]
 
 [[package]]

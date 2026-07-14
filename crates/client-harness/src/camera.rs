@@ -60,6 +60,91 @@ impl FollowCamera {
     }
 }
 
+// ---------------------------------------------------------------------------
+// World→screen projection (Slice V1): the ONE legitimate screen-space projection.
+// The transfer MEMBERSHIP verdict stays world-space (deterministic state artifact);
+// this pinhole projection exists ONLY for the PIXEL-corroboration verdict
+// (`dot_pixels_within_box_region`) — to compute where a world point lands on the
+// readback so the dot's pixels can be checked against the box's projected screen box.
+// Pure + deterministic (no GPU): a right-handed look-at view + a symmetric-perspective
+// divide + a viewport map. Tier-A, fully coverable on synthetic cameras.
+// ---------------------------------------------------------------------------
+
+use glam::DMat4;
+
+/// A pixel position in the readback image (origin top-left, `+y` DOWN — image-buffer
+/// convention, matching `assert.rs`'s `(ry * width + rx)` indexing).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenPos {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A pixel-space axis-aligned rectangle in the readback image, as inclusive `min`/`max`
+/// corners (origin top-left). The projected screen extent of a world region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenAabb {
+    pub min: ScreenPos,
+    pub max: ScreenPos,
+}
+
+impl ScreenAabb {
+    /// Whether `p` lies within the rectangle (inclusive on every edge).
+    #[must_use]
+    pub fn contains(&self, p: ScreenPos) -> bool {
+        p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
+    }
+}
+
+/// A pinhole capture camera: a look-at view + a symmetric vertical-FOV perspective, sized to a
+/// pixel viewport. Deterministic and GPU-free — the Tier-A projection the pixel-corroboration
+/// verdict uses to place a world point on the readback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaptureCamera {
+    pub eye: DVec3,
+    pub target: DVec3,
+    pub up: DVec3,
+    /// Vertical field of view in radians.
+    pub fov_y: f64,
+    /// Viewport width in pixels.
+    pub width: usize,
+    /// Viewport height in pixels.
+    pub height: usize,
+}
+
+impl CaptureCamera {
+    /// Project a world point to a pixel position, or `None` if it is behind the camera or the
+    /// viewport is degenerate (zero-size). Right-handed look-at + symmetric perspective divide +
+    /// a top-left-origin viewport map (NDC `+y` up flips to image `+y` down).
+    #[must_use]
+    pub fn project_point(&self, world_p: DVec3) -> Option<ScreenPos> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        let aspect = self.width as f64 / self.height as f64;
+        let view = DMat4::look_at_rh(self.eye, self.target, self.up);
+        // A far/near pair wide enough for any capture; the divide only needs a positive w (= -z_view).
+        let proj = DMat4::perspective_rh(self.fov_y, aspect, NEAR_PLANE, FAR_PLANE);
+        let clip = proj * view * world_p.extend(1.0);
+        // w = -z_view; a point on or behind the eye plane has w <= 0 and cannot be projected.
+        if clip.w <= 0.0 {
+            return None;
+        }
+        let ndc_x = clip.x / clip.w; // [-1, 1] left→right
+        let ndc_y = clip.y / clip.w; // [-1, 1] bottom→top
+        // Viewport map: NDC→pixels, flipping y so +ndc_y (up) → smaller pixel row (top).
+        let px = (ndc_x * 0.5 + 0.5) * self.width as f64;
+        let py = (1.0 - (ndc_y * 0.5 + 0.5)) * self.height as f64;
+        Some(ScreenPos { x: px, y: py })
+    }
+}
+
+/// The perspective near plane (m) — small; only the `w`-sign gate and the divide matter for a
+/// pixel map, so the exact value is not load-bearing (a named const, not a magic number).
+pub const NEAR_PLANE: f64 = 0.1;
+/// The perspective far plane (m) — generous so any capture-scale point projects.
+pub const FAR_PLANE: f64 = 1.0e12;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +224,82 @@ mod tests {
             close(fwd, DVec3::Y),
             "rest forward for up=Z is +Y, got {fwd:?}"
         );
+    }
+
+    // ---- CaptureCamera::project_point + ScreenAabb ------------------------------
+
+    /// A camera looking down -Z at the origin, 64×48 viewport, 90° vertical FOV.
+    fn cam() -> CaptureCamera {
+        CaptureCamera {
+            eye: DVec3::new(0.0, 0.0, 10.0),
+            target: DVec3::ZERO,
+            up: DVec3::Y,
+            fov_y: std::f64::consts::FRAC_PI_2,
+            width: 64,
+            height: 48,
+        }
+    }
+
+    #[test]
+    fn a_point_on_the_view_axis_projects_to_the_viewport_center() {
+        let c = cam();
+        let p = c.project_point(DVec3::ZERO).expect("origin is in front");
+        assert!((p.x - 32.0).abs() < 1e-6, "centered x, got {}", p.x);
+        assert!((p.y - 24.0).abs() < 1e-6, "centered y, got {}", p.y);
+    }
+
+    #[test]
+    fn up_in_world_maps_to_a_smaller_pixel_row_top_left_origin() {
+        // A point above the axis (+y world) must land in the UPPER half of the image (py < center):
+        // the y-flip in the viewport map (image origin top-left).
+        let c = cam();
+        let above = c
+            .project_point(DVec3::new(0.0, 2.0, 0.0))
+            .expect("in front");
+        assert!(
+            above.y < 24.0,
+            "above-center world → upper image row, got {}",
+            above.y
+        );
+        let right = c
+            .project_point(DVec3::new(2.0, 0.0, 0.0))
+            .expect("in front");
+        assert!(
+            right.x > 32.0,
+            "+x world → right image column, got {}",
+            right.x
+        );
+    }
+
+    #[test]
+    fn a_point_behind_the_camera_does_not_project() {
+        // Behind the eye (further +z than the eye) → w <= 0 → None (the behind-camera gate).
+        let c = cam();
+        assert_eq!(c.project_point(DVec3::new(0.0, 0.0, 20.0)), None);
+    }
+
+    #[test]
+    fn a_degenerate_viewport_does_not_project() {
+        let mut c = cam();
+        c.width = 0;
+        assert_eq!(c.project_point(DVec3::ZERO), None);
+        let mut c = cam();
+        c.height = 0;
+        assert_eq!(c.project_point(DVec3::ZERO), None);
+    }
+
+    #[test]
+    fn screen_aabb_contains_is_inclusive_on_every_edge() {
+        let r = ScreenAabb {
+            min: ScreenPos { x: 10.0, y: 20.0 },
+            max: ScreenPos { x: 30.0, y: 40.0 },
+        };
+        assert!(r.contains(ScreenPos { x: 20.0, y: 30.0 })); // interior
+        assert!(r.contains(ScreenPos { x: 10.0, y: 20.0 })); // min corner (inclusive)
+        assert!(r.contains(ScreenPos { x: 30.0, y: 40.0 })); // max corner (inclusive)
+        assert!(!r.contains(ScreenPos { x: 9.9, y: 30.0 })); // left of min x
+        assert!(!r.contains(ScreenPos { x: 30.1, y: 30.0 })); // right of max x
+        assert!(!r.contains(ScreenPos { x: 20.0, y: 19.9 })); // above min y
+        assert!(!r.contains(ScreenPos { x: 20.0, y: 40.1 })); // below max y
     }
 }

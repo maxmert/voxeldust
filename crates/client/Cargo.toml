@@ -12,6 +12,7 @@ vd-wire = { workspace = true }
 vd-sim = { workspace = true }
 glam = { workspace = true }
 postcard = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true
