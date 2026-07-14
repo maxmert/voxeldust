@@ -430,7 +430,11 @@ mod tests {
         // MsgClass is wire-frozen: it rides every postcard frame (ReliableFrame/DatagramFrame) via its
         // variant index. Pin each variant's ACTUAL postcard byte so a REORDER or REMOVAL fails the build
         // (postcard encodes a fieldless enum as its 0-based variant index, a single varint byte for 0..=6).
-        // Keep in lockstep with io-prod `outbox.rs` class_to_byte (the durable outbox KEY encoding).
+        // NOTE: io-prod `outbox.rs` `class_to_byte` is a SEPARATE, INDEPENDENT mapping (the durable outbox
+        // KEY byte), deliberately DECOUPLED from this wire discriminant so a variant REORDER never re-maps
+        // on-disk keys. The two currently COINCIDE (both 0..=6 in declaration order) but are NOT required to
+        // agree — each is pinned SEPARATELY (this test + io-prod `class_byte_round_trips_for_every_variant`).
+        // Do NOT add a cross-crate guard forcing them equal: it would defeat class_to_byte's reorder-immunity.
         let pc = |c: MsgClass| postcard::to_allocvec(&c).expect("MsgClass encodes");
         assert_eq!(pc(MsgClass::Control), vec![0]);
         assert_eq!(pc(MsgClass::Saga), vec![1]);

@@ -183,7 +183,9 @@ pub const DEFAULT_REDIAL_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// rescheduled peer (new pod IP, SAME DNS name) is re-plumbed for INITIATED traffic. Deliberately a FEW HUNDRED
 /// ms — WELL under the cloud saga-liveness confirmed-dead window (`LivenessTuning::cloud` ~1.5 s @ 50 Hz) so the
 /// re-plumb lands before a moved-but-recoverable peer is declared dead; NOT a multiple of the redial backoff
-/// (which is deliberately larger). A boot cross-check (bins) fails loud if this is mis-tuned vs the window.
+/// (which is deliberately larger). It is a FIXED const (not operator-tunable), so this coherence holds BY
+/// CONSTRUCTION — there is NO boot cross-check (`vd-bins` `spawn_peer_resolver_if_configured` records "not a
+/// tunable, so no boot cross-check is owed"); a future move to an operator-tunable interval must add one.
 pub const DEFAULT_PEER_RERESOLVE_INTERVAL: Duration = Duration::from_millis(500);
 /// A short settle after boot before the FIRST re-resolve: the entrypoint already resolved the initial addrs,
 /// so the first tick is a no-op on an unchanged cluster; this just avoids racing that boot resolution.

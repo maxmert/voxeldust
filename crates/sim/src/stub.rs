@@ -1838,33 +1838,53 @@ fn promote_apply(
             realm_fence,
         },
     );
-    // Register the transfer source as a ghost-neighbor + SPAWN the source ghost: the dest (owner)
-    // now DRIVES the GhostFlow collider feed to the source (owner → ghost-host), keeping the retained
-    // source ghost a live collider + the render seamless. `feed_source_ghosts` streams Delta after.
-    // The ANCHOR is THIS promote pose (= the crossed pose, the boundary the entity entered through):
-    // the dest measures band membership from here and Despawns the ghost on band-exit (1d.5b.3c).
-    // ⚠️ DRY PIN: this GhostNeighbor-insert + GhostFlow::Spawn block is byte-identical to `re_home_apply`'s
-    // tail. They are deliberately NOT yet extracted (the bodies ABOVE diverge — promote flips Ghost→Owned +
-    // announces SubscriptionReady, re-home builds a fresh Owned dot). EXTRACT a shared
-    // `register_and_spawn_source_ghost` helper WHEN [[D-39]].6 (the ghost combat-state blob — a new GhostFlow
-    // variant) or the band-driven multi-neighbor generalization edits the Spawn/anchor shape, so the change
-    // touches ONE place. Until then, edit BOTH sites in lockstep.
+    // The dest (owner) registers the source as a ghost-neighbor + spawns the source ghost; the ANCHOR is
+    // THIS promote pose (= the crossed pose, the boundary the entity entered through), from which the dest
+    // measures band membership + Despawns the ghost on band-exit (1d.5b.3c). Shared tail — see the fn doc.
+    register_and_spawn_source_ghost(
+        entity,
+        cmd.source,
+        pose,
+        cmd.new_fence,
+        clock.local_tick,
+        registration,
+        outbox,
+    );
+}
+
+/// Register the transfer/re-home SOURCE as a ghost-neighbor + SPAWN the source ghost so this shard (the new
+/// owner) DRIVES the `GhostFlow` collider feed to the source (owner → ghost-host) — keeping the retained
+/// source ghost a live collider + the render seamless (`feed_source_ghosts` streams Delta after). The ANCHOR
+/// is the applied (crossed / re-homed) pose. Shared by [`promote_apply`] (a `Ghost→Owned` flip) and
+/// [`re_home_apply`] (a fresh Owned build): the two DIVERGE above this tail, which was byte-identical (the
+/// old ⚠️ DRY-PIN, now extracted so a [[D-39]].6 ghost-blob / band-driven multi-neighbor edit touches ONE
+/// place). A Spawn to a possibly-dead source is harmless FireAndForget (HR1: the shard cannot see the
+/// liveness set — never special-case it).
+fn register_and_spawn_source_ghost(
+    entity: EntityId,
+    source: NodeId,
+    pose: StampedPose,
+    source_fence: Fence,
+    since_tick: TickId,
+    registration: &mut GhostColliderRegistration,
+    outbox: &mut OutboundBox,
+) {
     registration.0.insert(
         entity,
         GhostNeighbor {
-            source: cmd.source,
+            source,
             seq: 0,
             anchor: pose.pos.offset(),
         },
     );
     outbox.push_flow(
-        cmd.source,
+        source,
         MsgClass::GhostReliable,
         &InterShardFlow::Ghost(GhostFlow::Spawn {
             entity,
             pose,
-            source_fence: cmd.new_fence,
-            since_tick: clock.local_tick,
+            source_fence,
+            since_tick,
         }),
     );
 }
@@ -1960,28 +1980,16 @@ fn re_home_apply(
         },
     );
     stats.re_home_adopted += 1;
-    // Register the (re-home) source as a ghost-neighbor + SPAWN its ghost — the target (owner) now drives
-    // the GhostFlow collider feed to it, exactly as `promote_apply` does. A Spawn to a possibly-dead
-    // source is harmless FireAndForget (HR1: the shard cannot see the liveness set — never special-case it).
-    // ⚠️ DRY PIN: byte-identical to `promote_apply`'s tail — see the extract-at-[[D-39]].6 note there; edit
-    // BOTH sites in lockstep until extracted.
-    registration.0.insert(
+    // Register the (re-home) source as a ghost-neighbor + spawn its ghost — the target (owner) now drives
+    // the collider feed to it, exactly as `promote_apply` does. Shared tail — see the fn doc.
+    register_and_spawn_source_ghost(
         entity,
-        GhostNeighbor {
-            source: cmd.source,
-            seq: 0,
-            anchor: pose.pos.offset(),
-        },
-    );
-    outbox.push_flow(
         cmd.source,
-        MsgClass::GhostReliable,
-        &InterShardFlow::Ghost(GhostFlow::Spawn {
-            entity,
-            pose,
-            source_fence: cmd.new_fence,
-            since_tick: clock.local_tick,
-        }),
+        pose,
+        cmd.new_fence,
+        clock.local_tick,
+        registration,
+        outbox,
     );
 }
 
