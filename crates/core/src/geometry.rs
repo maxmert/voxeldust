@@ -475,6 +475,58 @@ impl RealmBoundary {
             effect,
         })
     }
+
+    /// Build an AXIS-ALIGNED BOX realm boundary paired — BY CONSTRUCTION — with its NORMALIZED-Chebyshev
+    /// VELOCITY-SAFE band, the exact MIRROR of [`RealmBoundary::shell`] for a Cartesian station volume.
+    /// The shape is `Aabb { half }` and the band is [`OverlapBand::for_box_velocity_safe`]; the two
+    /// constructors share the SAME arg shape (`create_factor`, `destroy_factor`, `v_rel`, `dt`,
+    /// `pad_floor`, `k_safety_extra`) so ONE crossing-feature fixture drives both a Spherical Shell and a
+    /// Cartesian Aabb boundary (the D-38 G-IDENTICAL discharge). The only difference is the UNIT: the
+    /// shell scales its band off `r_soi` (metres), the box off the Chebyshev surface (`1.0`), so
+    /// `create = create_factor` and `destroy = destroy_factor` are the normalized band edges — the box's
+    /// per-tick velocity travel is converted into the Chebyshev scale by the band ctor (÷ the tightest
+    /// half-extent). Because a box `membership_scalar` is [`chebyshev_norm`] (1.0 on the surface), pairing
+    /// an Aabb with the ABSOLUTE SOI band would be a unit mismatch — so, mirroring `boxed`, an Aabb can
+    /// NEVER be handed the metre-scaled shell band, and (unlike the infallible `shell`) this returns the
+    /// band error LOUDLY rather than constructing a flapping/inverted band.
+    ///
+    /// # Errors
+    /// [`BandError::InvalidEdges`] unless the resulting normalized band satisfies `0 < create < destroy`
+    /// (see [`OverlapBand::for_box_velocity_safe`]).
+    #[must_use = "the Result carries a BandError that must not be dropped"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn aabb(
+        realm: RealmId,
+        center: LatticePos,
+        half: DVec3,
+        create_factor: f64,
+        destroy_factor: f64,
+        v_rel: f64,
+        dt: f64,
+        pad_floor: f64,
+        k_safety_extra: f64,
+        parent: Option<RealmId>,
+        to_realm: RealmId,
+        effect: CrossEffect,
+    ) -> Result<RealmBoundary, BandError> {
+        Ok(RealmBoundary {
+            realm,
+            center,
+            shape: Boundary::Aabb { half },
+            band: OverlapBand::for_box_velocity_safe(
+                create_factor,
+                destroy_factor,
+                v_rel,
+                dt,
+                half.min_element(),
+                pad_floor,
+                k_safety_extra,
+            )?,
+            parent,
+            to_realm,
+            effect,
+        })
+    }
 }
 
 /// Per-deployment boundary tuning: the dwell/entry hysteresis counts, the minimum velocity pad,
@@ -686,6 +738,45 @@ impl OverlapBand {
     /// [`BandError::InvalidEdges`] unless `0 < create_factor < destroy_factor`.
     pub fn for_box(create_factor: f64, destroy_factor: f64) -> Result<OverlapBand, BandError> {
         OverlapBand::new(create_factor, destroy_factor)
+    }
+
+    /// The NORMALIZED-Chebyshev analog of [`OverlapBand::for_soi_velocity_safe`] — the box band whose
+    /// destroy edge is widened so the create → destroy gap stays velocity-safe on a CORNER (diagonal)
+    /// approach, in the UNITLESS Chebyshev scale ([`chebyshev_norm`], 1.0 = box surface). It mirrors the
+    /// SOI constructor arm-for-arm with the box's "unit" fixed at 1.0:
+    /// - `create = create_factor` (the SOI's `r_soi · create_factor`, with `r_soi ≡ 1.0` — the surface).
+    /// - The velocity pad is the SOI's `|v_rel|·dt·(K_SAFETY + k_safety_extra)` (a METRE per-tick travel)
+    ///   converted INTO the Chebyshev scale by dividing by `min_half` (the tightest half-extent — the
+    ///   worst-case face, where a metre of travel spends the MOST normalized band). The `pad_floor` is
+    ///   already unitless (a normalized-gap floor), so it enters the `max` directly.
+    /// - `destroy = max(destroy_factor, create + velocity_pad)` (the SOI's `max(r_soi · destroy_factor,
+    ///   create + velocity_pad)` with `r_soi ≡ 1.0`).
+    ///
+    /// This is INFALLIBLE for the same reason the SOI constructor is: `create > 0` (a `> 0` factor) and
+    /// `destroy = max(destroy_factor, create + non_negative_pad) > create` whenever `destroy_factor >
+    /// create` OR the pad is positive — but a CALLER could pass `destroy_factor <= create_factor` with a
+    /// zero pad, so it routes through [`OverlapBand::new`] and returns the error LOUDLY (an inverted band
+    /// inverts the hysteresis into a per-tick flap, the exact failure this module prevents), exactly like
+    /// [`OverlapBand::for_box`]. `min_half` is a precondition `> 0` (the box is non-degenerate; the
+    /// [`RealmBoundary::aabb`] caller derives it from `half.min_element()`).
+    ///
+    /// # Errors
+    /// [`BandError::InvalidEdges`] unless the resulting `0 < create < destroy` holds.
+    pub fn for_box_velocity_safe(
+        create_factor: f64,
+        destroy_factor: f64,
+        v_rel: f64,
+        dt: f64,
+        min_half: f64,
+        pad_floor: f64,
+        k_safety_extra: f64,
+    ) -> Result<OverlapBand, BandError> {
+        let create = create_factor;
+        // The SOI's metre per-tick pad, converted to the Chebyshev scale (÷ the tightest half-extent).
+        let normalized_travel = (v_rel.abs() * dt * (K_SAFETY + k_safety_extra)) / min_half;
+        let velocity_pad = f64::max(pad_floor, normalized_travel);
+        let destroy = f64::max(destroy_factor, create + velocity_pad);
+        OverlapBand::new(create, destroy)
     }
 }
 
@@ -1117,6 +1208,133 @@ mod tests {
         );
         assert_eq!(OverlapBand::for_box(1.2, 1.2), Err(BandError::InvalidEdges));
         assert_eq!(OverlapBand::for_box(0.0, 1.0), Err(BandError::InvalidEdges));
+    }
+
+    #[test]
+    fn for_box_velocity_safe_widens_destroy_in_normalized_units() {
+        // The NORMALIZED-Chebyshev mirror of `for_soi_velocity_safe`: create = create_factor exactly
+        // (the box's unit is the surface = 1.0), destroy = max(destroy_factor, create + velocity_pad).
+        // SLOW body (small v_rel): the normalized travel is below the raw destroy_factor gap, so the
+        // FACTOR edge wins the max (the `destroy_factor` arm) — but the pad_floor also loses here, so we
+        // pick a pad_floor small enough that destroy_factor dominates.
+        let slow = OverlapBand::for_box_velocity_safe(
+            1.15, // create_factor → create edge 1.15
+            1.30, // destroy_factor → the raw factor destroy edge 1.30
+            1.0,  // v_rel (slow)
+            0.05, // dt
+            5.0,  // min_half
+            0.01, // pad_floor (tiny — below the factor gap of 0.15)
+            1.0,  // k_safety_extra
+        )
+        .expect("ordered factors");
+        assert_eq!(slow.create_below(), 1.15);
+        // normalized_travel = 1.0 * 0.05 * (2.0 + 1.0) / 5.0 = 0.03 < 0.15 factor gap; pad_floor 0.01 <
+        // 0.15 too, so the destroy_factor arm (1.30) wins the outer max.
+        assert_eq!(slow.destroy_above(), 1.30);
+        // FAST body: the normalized travel exceeds the factor gap, so destroy widens to create + pad
+        // (the `create + velocity_pad` arm of the outer max), strictly beyond the raw factor edge.
+        let v = 5000.0;
+        let dt = 0.05;
+        let extra = 1.0;
+        let min_half = 5.0;
+        let fast = OverlapBand::for_box_velocity_safe(1.15, 1.30, v, dt, min_half, 0.5, extra)
+            .expect("ok");
+        assert_eq!(fast.create_below(), 1.15);
+        let expected_pad = v * dt * (K_SAFETY + extra) / min_half;
+        assert_eq!(fast.destroy_above(), 1.15 + expected_pad);
+        assert!(fast.destroy_above() > 1.30);
+        // The pad_floor wins when both the velocity travel and the factor gap are tiny (the `pad_floor`
+        // arm of the INNER max): v_rel = 0 ⇒ normalized_travel = 0 < pad_floor 0.5, and destroy_factor
+        // 1.16 < create + 0.5 = 1.65, so the floored destroy (1.65) wins the outer max too.
+        let floored =
+            OverlapBand::for_box_velocity_safe(1.15, 1.16, 0.0, 0.05, 5.0, 0.5, 1.0).expect("ok");
+        assert_eq!(floored.destroy_above(), 1.15 + 0.5);
+        // An inverted/degenerate normalized result is REJECTED LOUD (routes through `new`): a
+        // destroy_factor below create_factor with a zero pad inverts the hysteresis.
+        assert_eq!(
+            OverlapBand::for_box_velocity_safe(1.30, 1.15, 0.0, 0.05, 5.0, 0.0, 1.0),
+            Err(BandError::InvalidEdges)
+        );
+    }
+
+    #[test]
+    fn realm_boundary_aabb_pairs_an_aabb_with_a_normalized_velocity_safe_band() {
+        // The MIRROR of `realm_boundary_shell_pairs_a_shell_with_an_absolute_band`: an Aabb shape ALWAYS
+        // gets the normalized-Chebyshev velocity-safe band, and an Aabb can never be handed the absolute
+        // SOI band — the mismatch is unconstructible. Same arg shape as `shell` (the D-38 fixture drives
+        // both through one closure).
+        let half = DVec3::new(5.0, 6.0, 7.0);
+        let rb = RealmBoundary::aabb(
+            RealmId::Station(2),
+            LatticePos::local(DVec3::new(10.0, 20.0, 30.0)),
+            half,
+            1.15, // create_factor → create edge 1.15 (normalized)
+            1.30, // destroy_factor → destroy edge 1.30 (normalized, slow body)
+            1.0,  // v_rel (slow)
+            0.05, // dt
+            0.01, // pad_floor (tiny so the factor edge dominates)
+            1.0,  // k_safety_extra
+            Some(RealmId::Planet(9)),
+            RealmId::Station(2),
+            CrossEffect::Authority,
+        )
+        .expect("ordered factors");
+        // The shape is the AABB with the given half-extents.
+        assert_eq!(rb.shape, Boundary::Aabb { half });
+        assert_eq!(rb.realm, RealmId::Station(2));
+        assert_eq!(rb.to_realm, RealmId::Station(2));
+        assert_eq!(rb.parent, Some(RealmId::Planet(9)));
+        assert_eq!(rb.effect, CrossEffect::Authority);
+        // The band is the normalized one: create at the create_factor, destroy strictly beyond it. For a
+        // slow body the factor edges hold verbatim (create 1.15, destroy 1.30).
+        assert_eq!(rb.band.create_below(), 1.15);
+        assert_eq!(rb.band.destroy_above(), 1.30);
+        assert!(rb.band.destroy_above() > rb.band.create_below());
+        // Membership: the normalized Chebyshev scalar (1.0 on the surface) drives the band. A point at
+        // half the tightest extent is a member (norm 0.5 < create 1.15); a point well outside is not.
+        let inside = DVec3::new(2.5, 0.0, 0.0); // norm = 2.5 / 5.0 = 0.5
+        let ms_in = rb.shape.membership_scalar(inside);
+        assert_eq!(ms_in, 0.5);
+        assert!(
+            rb.band.update_membership(false, ms_in),
+            "0.5 < create ⇒ member"
+        );
+        let outside = DVec3::new(10.0, 0.0, 0.0); // norm = 10.0 / 5.0 = 2.0
+        let ms_out = rb.shape.membership_scalar(outside);
+        assert_eq!(ms_out, 2.0);
+        assert!(
+            !rb.band.update_membership(true, ms_out),
+            "2.0 > destroy ⇒ torn down even from a member prior state"
+        );
+        // A swept INWARD crossing on a DIAGONAL segment (≥2 non-zero axes) is classified Inward — the
+        // slab-corner path of `segment_aabb_crossing`, the exact box surface a pure axis-aligned approach
+        // would skip. From clearly outside the box to clearly inside it.
+        let outside_diag = DVec3::new(20.0, 20.0, 0.0); // both axes outside (20 > 5, 20 > 6)
+        let inside_diag = DVec3::new(1.0, 1.0, 0.0); // inside all axes
+        assert_eq!(
+            rb.shape.swept(outside_diag, inside_diag),
+            ShellCrossing::Inward,
+            "a diagonal descent into the box is an Inward swept crossing"
+        );
+        // The band error surfaces LOUD through this ctor too (an inverted factor pair with no pad).
+        assert_eq!(
+            RealmBoundary::aabb(
+                RealmId::Station(2),
+                LatticePos::local(DVec3::ZERO),
+                DVec3::new(1.0, 1.0, 1.0),
+                1.30, // create > destroy: inverted
+                1.15,
+                0.0, // v_rel 0 ⇒ no widening
+                0.05,
+                0.0, // pad_floor 0 ⇒ no floor rescue
+                1.0,
+                None,
+                RealmId::Station(2),
+                CrossEffect::Interest,
+            )
+            .expect_err("inverted band rejected"),
+            BandError::InvalidEdges
+        );
     }
 
     #[test]

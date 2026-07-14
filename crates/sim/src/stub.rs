@@ -7932,7 +7932,7 @@ mod tests {
 
     // ---- Slice 3d/3e (the geometric transfer trigger) -----------------------------------------
 
-    use vd_core::geometry::{BoundaryTuning, CrossEffect, RealmBoundary};
+    use vd_core::geometry::{Boundary, BoundaryTuning, CrossEffect, RealmBoundary};
 
     const OTHER_REALM: RealmId = RealmId::Planet(42);
     const TRIG_SESSION: SessionId = SessionId(0xBB);
@@ -8366,6 +8366,303 @@ mod tests {
                 .resource::<InterestZones>()
                 .0
                 .contains_key(&entity)
+        );
+    }
+
+    // ---- Slice 4a (task #133): D-38 discharge + ledger-eviction + cell-carry SHAPE -----------------
+
+    /// The ONE crossing-feature fixture, driven by a boundary-CONSTRUCTOR closure so its BODY is written
+    /// exactly once and run over two boundary shapes. Plants `make_boundary()` in `RealmBoundaries`,
+    /// inserts an OWNED DURABLE dot clearly OUTSIDE the boundary (membership above the destroy edge), then
+    /// drives it INWARD across the create edge on a DIAGONAL segment (a velocity with ≥2 non-zero axis
+    /// components — so the Aabb run genuinely exercises `segment_aabb_crossing`'s slab-corner test, which
+    /// a pure axis-aligned approach would skip; a shell's `|p|` membership handles the same diagonal
+    /// unchanged, so the body is identical). Returns the emitted `CrossingRequest`s + the dot's
+    /// start/end membership scalars, so the caller asserts the destination, the exactly-one count, and
+    /// that the membership actually crossed the create edge (the anti-vacuity guarantee — the box gated,
+    /// it was not a no-op). INWARD only: the outward/undock path has an un-fixed direction-blind latch
+    /// hazard deferred to Slice 4b (`scripts/slice4_design_adversary.md` CRITICAL-1).
+    /// A Spherical-profile Shell boundary (the `shell_boundary(Authority)` used by the D-38 fixture as a
+    /// named fn, so the identical body is driven by a plain fn pointer, not a shape-branching closure).
+    fn shell_boundary_authority() -> RealmBoundary {
+        shell_boundary(CrossEffect::Authority)
+    }
+
+    /// A Cartesian-profile Aabb station boundary mirroring `shell_boundary_authority` arg-for-arg (same
+    /// realm/to_realm/effect; the ONLY difference is the shape + its normalized band). Half-extents 200 m
+    /// ⇒ a create edge at Chebyshev norm 1.15 (≈ 230 m/axis), destroy 1.30; slow v_rel so it is
+    /// factor-sized, not velocity-widened — exactly the shell's band posture.
+    fn aabb_boundary_authority() -> RealmBoundary {
+        RealmBoundary::aabb(
+            RealmId::System(7), // this shard's realm (mirrors shell_boundary's exterior side)
+            LatticePos::local(DVec3::ZERO),
+            DVec3::new(200.0, 200.0, 200.0),
+            1.15,
+            1.30,
+            1.0,  // v_rel (slow — factor-sized)
+            0.05, // dt
+            0.01, // pad_floor
+            1.0,  // k_safety_extra
+            None, // top-level (depth 0)
+            OTHER_REALM,
+            CrossEffect::Authority,
+        )
+        .expect("valid box band")
+    }
+
+    fn drive_inward_crossing_feature(
+        make_boundary: impl Fn() -> RealmBoundary,
+    ) -> (Vec<CrossingRequest>, f64, f64, Boundary) {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let boundary = make_boundary();
+        let to_realm = boundary.to_realm;
+        let center = boundary.center.offset();
+        // `RealmBoundary` is Copy: capture the shape up front so the membership scalars are read WITHOUT
+        // re-borrowing the world resource (the boundary geometry is immutable through the run).
+        let shape = boundary.shape;
+        rig.world.resource_mut::<RealmBoundaries>().0.push(boundary);
+        // A distinct durable Player, placed on a DIAGONAL well OUTSIDE the boundary.
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 0x4A);
+        let outside = DVec3::new(1000.0, 1000.0, 0.0);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, outside);
+        // Membership scalar of the START pose, relative to the boundary center (proves it began OUTSIDE
+        // the destroy edge — no vacuous "already inside" pass).
+        let start_ms = shape.membership_scalar(outside - center);
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        // Approach inward along the diagonal, then hold deep inside so the dwell matures (n_entry = 3).
+        let waypoints = [
+            DVec3::new(700.0, 700.0, 0.0),
+            DVec3::new(400.0, 400.0, 0.0),
+            DVec3::new(50.0, 50.0, 0.0),
+            DVec3::new(50.0, 50.0, 0.0),
+            DVec3::new(50.0, 50.0, 0.0),
+            DVec3::new(50.0, 50.0, 0.0),
+        ];
+        for (i, wp) in waypoints.iter().enumerate() {
+            rig.set_local_tick(2 + i as u64);
+            move_dot(&mut rig, TRIG_SESSION, *wp);
+            all.extend(rig.tick(vec![]));
+        }
+        let inside = DVec3::new(50.0, 50.0, 0.0);
+        let end_ms = shape.membership_scalar(inside - center);
+        // Only requests whose destination is THIS boundary's to_realm — the destination assert lives in
+        // the caller, but filtering here proves the collection is this feature's, not incidental noise.
+        let reqs: Vec<CrossingRequest> = crossing_requests(&all)
+            .into_iter()
+            .filter(|r| r.to_realm == to_realm)
+            .collect();
+        (reqs, start_ms, end_ms, shape)
+    }
+
+    /// DISCHARGES D-38: the first G-IDENTICAL assert_feature_anywhere — ONE crossing-feature fixture,
+    /// identical on a Spherical (Shell) and a Cartesian (Aabb) profile.
+    #[test]
+    fn assert_feature_anywhere() {
+        // Run (a): a Spherical PLANET profile ⇔ a Shell boundary (SOI descent). The dot descends the
+        // diagonal across the shell's create edge and commits exactly ONE inward crossing to OTHER_REALM.
+        let planet = crate::capability::profiles::planet().expect("planet profile");
+        assert_eq!(
+            planet.voxel(),
+            Some(crate::capability::VoxelGeometry::Spherical),
+            "the Shell run is tied to the Spherical profile",
+        );
+        let (shell_reqs, shell_start_ms, shell_end_ms, shell_shape) =
+            drive_inward_crossing_feature(shell_boundary_authority);
+        // Spherical ⇔ Shell: the run's boundary IS a Shell (compared by equality, not `matches!`, so
+        // there is no uncoverable false arm — HR5(d)). `shell_boundary` uses r_soi 1000.
+        assert_eq!(shell_shape, Boundary::Shell { r: 1000.0 });
+        // Run (b): a Cartesian STATION profile ⇔ an Aabb boundary (station volume). The IDENTICAL body
+        // drives the SAME diagonal descent across the box's create edge → exactly ONE inward crossing.
+        let station = crate::capability::profiles::station().expect("station profile");
+        assert_eq!(
+            station.voxel(),
+            Some(crate::capability::VoxelGeometry::Cartesian),
+            "the Aabb run is tied to the Cartesian profile",
+        );
+        let (aabb_reqs, aabb_start_ms, aabb_end_ms, aabb_shape) =
+            drive_inward_crossing_feature(aabb_boundary_authority);
+        // Cartesian ⇔ Aabb: the run's boundary IS an Aabb (equality, no `matches!` false arm — HR5(d)).
+        assert_eq!(
+            aabb_shape,
+            Boundary::Aabb {
+                half: DVec3::new(200.0, 200.0, 200.0),
+            }
+        );
+
+        // (i) EXACTLY ONE inward CrossingRequest per run, whose destination is the boundary's to_realm —
+        // the box/shell actually GATED the crossing (not a bare count of "something fired").
+        assert_eq!(
+            shell_reqs.len(),
+            1,
+            "the Shell run emits exactly one inward crossing"
+        );
+        assert_eq!(
+            aabb_reqs.len(),
+            1,
+            "the Aabb run emits exactly one inward crossing"
+        );
+        assert_eq!(
+            shell_reqs[0].to_realm, OTHER_REALM,
+            "the Shell crossing gated to OTHER_REALM"
+        );
+        assert_eq!(
+            aabb_reqs[0].to_realm, OTHER_REALM,
+            "the Aabb crossing gated to OTHER_REALM"
+        );
+        // IDENTICAL feature behavior across the two profiles: same subject, same source realm, same
+        // destination, same attempt. The two runs differ ONLY in boundary shape, never in the feature.
+        assert_eq!(shell_reqs[0].subject, aabb_reqs[0].subject);
+        assert_eq!(shell_reqs[0].from_realm, aabb_reqs[0].from_realm);
+        assert_eq!(shell_reqs[0].to_realm, aabb_reqs[0].to_realm);
+        assert_eq!(shell_reqs[0].attempt, aabb_reqs[0].attempt);
+        assert_eq!(shell_reqs[0].session, aabb_reqs[0].session);
+
+        // (ii) Anti-vacuity: the membership ACTUALLY crossed the create edge in BOTH runs — the dot
+        // started OUTSIDE the destroy edge and ended INSIDE the create edge (a real inward commit, never
+        // a no-op that fired on an already-inside dot). Shell edges are metres (create 1150, destroy
+        // 1300); Aabb edges are the normalized Chebyshev create 1.15 / destroy 1.30.
+        assert!(
+            shell_start_ms > 1300.0,
+            "Shell start OUTSIDE the destroy edge (ms {shell_start_ms})"
+        );
+        assert!(
+            shell_end_ms < 1150.0,
+            "Shell end INSIDE the create edge (ms {shell_end_ms})"
+        );
+        assert!(
+            aabb_start_ms > 1.30,
+            "Aabb start OUTSIDE the destroy edge (norm {aabb_start_ms})"
+        );
+        assert!(
+            aabb_end_ms < 1.15,
+            "Aabb end INSIDE the create edge (norm {aabb_end_ms})"
+        );
+    }
+
+    /// Slice 4a: the ledger-eviction-on-leave gate (the InputLog-leak class). The `retain_live` machinery
+    /// already exists (`stub.rs` `evaluate_realm_boundaries`); this PROVES all THREE per-entity ledgers
+    /// (CrossingProgress + RequestInFlight + InterestZones) are evicted when the subject leaves. Uses
+    /// `assert_eq!(.get(), None)` (not `assert!(matches!)`) so the None equality is the covered arm.
+    #[test]
+    fn slice4a_all_three_ledgers_evict_when_the_subject_leaves() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 0x4B);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        // Dwell to a durable commit so CrossingProgress (dwell) AND RequestInFlight (latch) both hold a
+        // row for the subject.
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            let _ = rig.tick(vec![]);
+        }
+        // Seed InterestZones directly for the SAME subject (the third ledger).
+        rig.world
+            .resource_mut::<InterestZones>()
+            .0
+            .insert(entity, OTHER_REALM);
+        // All three ledgers now hold an entry (setup pre-conditions; the load-bearing asserts are the
+        // three `None` equalities after the subject leaves).
+        assert!(
+            rig.world
+                .resource::<CrossingProgress>()
+                .0
+                .contains_key(&entity)
+        );
+        assert!(
+            rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity)
+        );
+        assert!(rig.world.resource::<InterestZones>().0.contains_key(&entity));
+        // The dot logs out (removed from Dots). Not in OwnedTransients either, so `live` excludes it.
+        rig.world.resource_mut::<Dots>().0.remove(&TRIG_SESSION);
+        rig.set_local_tick(8);
+        let _ = rig.tick(vec![]);
+        // All THREE per-entity ledgers no longer contain the subject — split into three `is_none()`
+        // asserts (HR5: never a collapsed `assert!(a && b)`), equality-form (not `matches!`).
+        assert_eq!(
+            rig.world.resource::<CrossingProgress>().0.get(&entity),
+            None
+        );
+        assert_eq!(rig.world.resource::<RequestInFlight>().0.get(&entity), None);
+        assert_eq!(rig.world.resource::<InterestZones>().0.get(&entity), None);
+    }
+
+    /// Slice 4a (adversary MEDIUM-3 — the cell-carry SHAPE assertion, NOT an integer-gate flip). Proves
+    /// the dot's `LatticePos.cell` (a DISTINCT NON-ZERO cell) is CARRIED UNCHANGED through the trigger
+    /// AND the offset-based crossing still fires. This proves the cell is PRESERVED (shape only). It does
+    /// NOT prove the "integer in/out DECISION flips across a cell boundary": `should_commit` /
+    /// `evaluate_one_subject` read ONLY `LatticePos.offset()` today (`stub.rs`), never comparing the cell,
+    /// so a cross-cell in/out DECISION test is BLOCKED on the P4/P5 rebase math (D-41) and is deliberately
+    /// NOT written here.
+    #[test]
+    fn slice4a_nonzero_cell_is_carried_unchanged_and_the_offset_crossing_still_fires() {
+        use vd_core::glam::I64Vec3;
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 0x4C);
+        // A DISTINCT non-zero cell anchor. The trigger reads only `offset()`, so the crossing decision is
+        // driven by the (in-band) offset exactly as if the cell were zero.
+        let cell = I64Vec3::new(5, -7, 11);
+        let offset_inside = DVec3::new(100.0, 0.0, 0.0); // ms = 100 m < the 1150 m create edge ⇒ a member
+        rig.world.resource_mut::<Dots>().0.insert(
+            TRIG_SESSION,
+            Dot {
+                entity,
+                account: AccountId(1),
+                session_fence: Fence(1),
+                gateway: GATEWAY,
+                granted: true,
+                input_active: false,
+                adopting: false,
+                authority: Authority::Owned { fence: Fence(1) },
+                departing: false,
+                entity_fence: Fence(1),
+                pose: StampedPose {
+                    // Plant the non-zero cell anchor on an otherwise-rest pose (avoids naming DQuat).
+                    pos: LatticePos::at(cell, offset_inside),
+                    ..StampedPose::at_rest(config().frame, offset_inside, UniverseTick(100))
+                },
+                yaw: 0.0,
+                pitch: 0.0,
+                last_applied_seq: None,
+                prev_offset: offset_inside,
+            },
+        );
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        // The OFFSET-based crossing still fires: exactly one inward CrossingRequest.
+        assert_eq!(
+            crossing_requests(&all).len(),
+            1,
+            "the offset-based crossing fires regardless of the (non-zero) cell anchor",
+        );
+        // The non-zero cell is CARRIED UNCHANGED through the trigger — PROVING the cell is PRESERVED
+        // (shape). (It is NOT compared in the in/out decision — that cell-aware gate is P4/P5 D-41 math.)
+        assert_eq!(
+            rig.world
+                .resource::<Dots>()
+                .0
+                .get(&TRIG_SESSION)
+                .expect("the owned dot")
+                .pose
+                .pos
+                .cell(),
+            cell,
+            "the non-zero LatticePos.cell is carried through the trigger unchanged (SHAPE preserved)",
         );
     }
 

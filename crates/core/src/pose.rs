@@ -137,6 +137,19 @@ impl LatticePos {
         }
     }
 
+    /// A position at an EXPLICIT integer cell anchor + a frame-local offset — the cell-aware sibling of
+    /// [`LatticePos::local`] (which pins the cell to `ZERO`). This is the single construction point for a
+    /// NON-ZERO cell: the P4/P5 cross-cell re-centering and the cell-aware membership rebase in the
+    /// spatial transfer trigger produce lattice positions at a real cell here, rather than reaching into
+    /// the private field. Through P3 there is no production caller (every pose is cell-`ZERO` via
+    /// [`LatticePos::local`]); it exists so the cell anchor can be planted and its CARRY-through
+    /// verified now (the D-41 SHAPE half — the in/out DECISION flip across a cell boundary is the P4/P5
+    /// rebase MATH, still owed). The bounded-offset invariant has its future home in the same one place.
+    #[must_use]
+    pub fn at(cell: I64Vec3, offset: DVec3) -> LatticePos {
+        LatticePos { cell, offset }
+    }
+
     /// The frame-local f64 offset — what physics / rendering / interpolation work in (small and
     /// cm-exact). Reads go through this accessor so a future integer-offset migration stays
     /// one-type-local.
@@ -459,6 +472,17 @@ mod tests {
         let lp = LatticePos::local(v);
         assert_eq!(lp.offset(), v);
         assert_eq!(lp.cell, I64Vec3::ZERO);
+    }
+
+    #[test]
+    fn lattice_at_carries_the_explicit_cell_and_offset() {
+        // The cell-aware ctor: the single construction point for a NON-ZERO cell (the P4/P5 rebase
+        // precondition). Both the cell and the offset read back EXACTLY.
+        let cell = I64Vec3::new(5, -7, 11);
+        let offset = DVec3::new(0.25, -0.5, 0.75);
+        let lp = LatticePos::at(cell, offset);
+        assert_eq!(lp.cell(), cell);
+        assert_eq!(lp.offset(), offset);
     }
 
     #[test]
