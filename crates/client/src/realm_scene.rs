@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use glam::DVec3;
 use vd_core::geometry::{Boundary, RealmBoundary};
-use vd_core::pose::RealmId;
+use vd_core::pose::{FrameRef, RealmId};
 
 /// The render-relevant shape of one realm's extent. A `RealmBoundary::shape` projects to this,
 /// DROPPING the metric band/effect: [`Boundary::Shell`]→[`BoxShape::Sphere`],
@@ -47,6 +47,13 @@ pub enum BoxShape {
 pub struct RealmBox {
     /// The render-relevant shape (sphere or box).
     pub shape: BoxShape,
+    /// The realm's authoritative reference frame — the box's `center_offset` is expressed in THIS
+    /// frame, so the renderer places the box by composing the frame ORIGIN through the ONE
+    /// `DeliveredView::world_pos` chokepoint (identity for the world-origin frames through P3; a
+    /// Station-hull-borne box composes through its hull at P8, WITHOUT changing this shape). Carried
+    /// here so the render glue never reconstructs a `FrameRef` from a `RealmId` — the `Area` arm
+    /// can't (it needs the parent planet seed) and it would be a per-KIND match in a feature path.
+    pub frame: FrameRef,
     /// The box center as a frame-local offset from the realm's frame origin.
     pub center_offset: DVec3,
     /// The parent realm, when this box nests inside another (`None` at the top level).
@@ -63,8 +70,8 @@ pub struct RealmBox {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RealmScene(BTreeMap<RealmId, RealmBox>);
 
-/// Why a `Vec<RealmBoundary>` failed to project to a [`RealmScene`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+/// Why a `Vec<RealmBoundary>` (or a `boxes.json` dev-config) failed to project to a [`RealmScene`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SceneError {
     /// Two boundaries named the same realm — the map key would collide, so the source is rejected
     /// loudly rather than silently keeping whichever the input happened to list first.
@@ -74,6 +81,10 @@ pub enum SceneError {
     /// loud stop instead of an unbounded walk (adversary H7 cycle/again-guard).
     #[error("parent chain cycles or exceeds the max nesting depth")]
     CycleOrDepthExceeded,
+    /// The `boxes.json` dev-config was not a valid JSON array of `RealmBoundary` — the (owned)
+    /// serde message so a bad hand-authored file fails LOUD at load, never silently empty.
+    #[error("malformed boxes.json: {0}")]
+    MalformedJson(String),
 }
 
 /// The nesting-depth ceiling: the parent walk stops (loud, [`SceneError::CycleOrDepthExceeded`])
@@ -113,6 +124,7 @@ impl RealmScene {
                 b.realm,
                 RealmBox {
                     shape: shape_of(b.shape),
+                    frame: frame_of_realm(b.realm, b.parent),
                     center_offset: b.center.offset(),
                     parent: b.parent,
                     depth,
@@ -121,6 +133,23 @@ impl RealmScene {
             );
         }
         Ok(RealmScene(boxes))
+    }
+
+    /// Project a `boxes.json` dev-config into the render scene. The JSON is a plain array of
+    /// [`RealmBoundary`] — the IDENTICAL `Vec<RealmBoundary>` the shard plants into its
+    /// `RealmBoundaries` resource (single-sourced: the same authored file feeds both the shard
+    /// authority and the client render), so a box's extent can never disagree with the shard's
+    /// crossing geometry. Deserializes then delegates to [`RealmScene::from_boundaries`] — so a
+    /// malformed file and a duplicate/cyclic set both fail LOUD ([`SceneError`]), never a silent
+    /// empty scene.
+    ///
+    /// # Errors
+    /// [`SceneError::MalformedJson`] if the text is not a valid `RealmBoundary` array;
+    /// [`SceneError::DuplicateRealm`] / [`SceneError::CycleOrDepthExceeded`] as
+    /// [`RealmScene::from_boundaries`].
+    pub fn from_boxes_json(json: &str) -> Result<RealmScene, SceneError> {
+        let boundaries = parse_boundaries(json)?;
+        RealmScene::from_boundaries(&boundaries)
     }
 
     /// The box for a realm, if present.
@@ -146,6 +175,13 @@ impl RealmScene {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+/// Parse a `boxes.json` text into a `Vec<RealmBoundary>`, mapping the serde error into an owned
+/// [`SceneError::MalformedJson`] — a monomorphic helper so the fallible decode + error map live
+/// here, off [`RealmScene::from_boxes_json`] (which stays a straight-line delegate).
+fn parse_boundaries(json: &str) -> Result<Vec<RealmBoundary>, SceneError> {
+    serde_json::from_str(json).map_err(|e| SceneError::MalformedJson(e.to_string()))
 }
 
 /// The nesting depth of `realm` by walking `parents` up to the root — a monomorphic, bounded
@@ -182,6 +218,34 @@ fn shape_of(boundary: Boundary) -> BoxShape {
         Boundary::Aabb { half } => BoxShape::Box { half },
         // Obb orientation DEFERRED: render the axis-aligned bounding proxy for now.
         Boundary::Obb { half, orient: _ } => BoxShape::Box { half },
+    }
+}
+
+/// The realm's authoritative [`FrameRef`] — the frame its box's `center_offset` is expressed in,
+/// so the render glue composes the box through the ONE `world_pos` chokepoint. A monomorphic helper
+/// (the realm-KIND destructure lives HERE in Tier-A, never in the Tier-B render feature path). An
+/// `Area` frame needs the PARENT planet seed (a `RealmId::Area` alone can't carry it): the parent is
+/// the boundary's `parent` link when it is a `Planet`, else `0` (a top-level area — defensive, no
+/// panic). A `Ship`'s frame is keyed by its hull entity; the rest map their seed directly.
+fn frame_of_realm(realm: RealmId, parent: Option<RealmId>) -> FrameRef {
+    match realm {
+        RealmId::Planet(planet_seed) => FrameRef::PlanetCentered { planet_seed },
+        RealmId::System(system_seed) => FrameRef::SystemSpace { system_seed },
+        RealmId::Ship(ship) => FrameRef::ShipLocal { ship },
+        RealmId::Station(station_seed) => FrameRef::StationLocal { station_seed },
+        RealmId::Area(area_seed) => FrameRef::AreaLocal {
+            planet_seed: parent_planet_seed(parent),
+            area_seed,
+        },
+    }
+}
+
+/// The parent planet's seed for an `Area` frame: the `parent` link when it names a `Planet`, else
+/// `0` (a top-level or non-planet-parented area — defensive). Monomorphic so both arms are covered.
+fn parent_planet_seed(parent: Option<RealmId>) -> u64 {
+    match parent {
+        Some(RealmId::Planet(seed)) => seed,
+        _ => 0,
     }
 }
 
@@ -406,6 +470,7 @@ fn push_tri(verts: &mut Vec<Vertex>, a: [f32; 3], b: [f32; 3], c: [f32; 3]) {
 mod tests {
     use super::*;
     use glam::{DQuat, DVec3};
+    use vd_core::EntityId;
     use vd_core::geometry::{CrossEffect, RealmBoundary};
     use vd_core::pose::{LatticePos, RealmId};
 
@@ -503,6 +568,70 @@ mod tests {
             BoxShape::Box {
                 half: DVec3::new(4.0, 5.0, 6.0)
             }
+        );
+    }
+
+    #[test]
+    fn frame_of_realm_maps_every_kind_and_derives_the_area_parent_seed() {
+        use vd_core::entity_kind::EntityKind;
+        // Every realm KIND maps to its authoritative frame (the Tier-A destructure, all arms).
+        assert_eq!(
+            frame_of_realm(RealmId::Planet(4), None),
+            FrameRef::PlanetCentered { planet_seed: 4 }
+        );
+        assert_eq!(
+            frame_of_realm(RealmId::System(5), None),
+            FrameRef::SystemSpace { system_seed: 5 }
+        );
+        let hull = EntityId::pack(EntityKind::Player, 1, 1, 1);
+        assert_eq!(
+            frame_of_realm(RealmId::Ship(hull), None),
+            FrameRef::ShipLocal { ship: hull }
+        );
+        assert_eq!(
+            frame_of_realm(RealmId::Station(6), None),
+            FrameRef::StationLocal { station_seed: 6 }
+        );
+        // An Area under a Planet parent carries the parent's planet seed.
+        assert_eq!(
+            frame_of_realm(RealmId::Area(9), Some(RealmId::Planet(7))),
+            FrameRef::AreaLocal {
+                planet_seed: 7,
+                area_seed: 9
+            }
+        );
+        // An Area with a NON-planet parent (or no parent) defaults the planet seed to 0 — the
+        // `_ => 0` arm of parent_planet_seed.
+        assert_eq!(
+            frame_of_realm(RealmId::Area(9), Some(RealmId::System(3))),
+            FrameRef::AreaLocal {
+                planet_seed: 0,
+                area_seed: 9
+            }
+        );
+        assert_eq!(
+            frame_of_realm(RealmId::Area(9), None),
+            FrameRef::AreaLocal {
+                planet_seed: 0,
+                area_seed: 9
+            }
+        );
+    }
+
+    #[test]
+    fn a_projected_box_carries_its_realm_frame() {
+        // The projection captures each realm's authoritative frame on its box (so the render glue
+        // composes through the chokepoint without reconstructing a FrameRef).
+        let scene = RealmScene::from_boundaries(&[shell_boundary(
+            RealmId::System(7),
+            DVec3::ZERO,
+            1000.0,
+            None,
+        )])
+        .expect("projects");
+        assert_eq!(
+            scene.get(RealmId::System(7)).expect("box").frame,
+            FrameRef::SystemSpace { system_seed: 7 }
         );
     }
 
@@ -630,6 +759,7 @@ mod tests {
             shape: BoxShape::Box {
                 half: DVec3::new(2.0, 3.0, 4.0),
             },
+            frame: FrameRef::SystemSpace { system_seed: 1 },
             center_offset: DVec3::new(1.0, 0.0, 0.0),
             parent: None,
             depth: 0,
@@ -659,6 +789,7 @@ mod tests {
     fn sphere_lowers_to_one_prim_of_unit_positions_scaled_by_radius() {
         let rbox = RealmBox {
             shape: BoxShape::Sphere { r: 5.0 },
+            frame: FrameRef::SystemSpace { system_seed: 1 },
             center_offset: DVec3::ZERO,
             parent: None,
             depth: 0,
@@ -701,5 +832,77 @@ mod tests {
         assert_eq!(scene.len(), 0);
         assert!(scene.get(RealmId::System(1)).is_none());
         assert_eq!(scene, RealmScene::default());
+    }
+
+    #[test]
+    fn from_boxes_json_loads_the_same_scene_as_the_boundaries_it_serializes() {
+        // The dev-config path is SINGLE-SOURCED with the shard plant: the same `Vec<RealmBoundary>`
+        // serialized to JSON must load to the byte-identical scene `from_boundaries` builds.
+        let boundaries = vec![
+            shell_boundary(RealmId::System(7), DVec3::new(1.0, 2.0, 3.0), 1000.0, None),
+            aabb_boundary(RealmId::Station(9), DVec3::new(4.0, 5.0, 6.0), None),
+        ];
+        let json = serde_json::to_string(&boundaries).expect("serialize boundaries");
+        let from_json = RealmScene::from_boxes_json(&json).expect("loads");
+        let from_vec = RealmScene::from_boundaries(&boundaries).expect("projects");
+        assert_eq!(from_json, from_vec, "the dev-config load matches the plant");
+        // And it really carries the boxes (not a silent empty).
+        assert_eq!(from_json.len(), 2);
+        assert_eq!(
+            from_json.get(RealmId::System(7)).expect("system").shape,
+            BoxShape::Sphere { r: 1000.0 }
+        );
+    }
+
+    #[test]
+    fn from_boxes_json_rejects_malformed_json_loud() {
+        // Not JSON at all → a MalformedJson error carrying the serde message (never a silent empty).
+        // Discriminant equality (not `assert!(matches!(..))`, whose `_ => false` arm is an
+        // uncoverable region — CLAUDE.md HR5) to check the variant without the (varying) payload.
+        let malformed = std::mem::discriminant(&SceneError::MalformedJson(String::new()));
+        let err =
+            RealmScene::from_boxes_json("{not valid json").expect_err("malformed must reject");
+        assert_eq!(std::mem::discriminant(&err), malformed, "got {err:?}");
+        // Valid JSON but the WRONG shape (an object, not a RealmBoundary array) also rejects.
+        let err = RealmScene::from_boxes_json("{}").expect_err("wrong shape must reject");
+        assert_eq!(std::mem::discriminant(&err), malformed, "got {err:?}");
+    }
+
+    #[test]
+    fn from_boxes_json_propagates_a_duplicate_realm_from_the_projection() {
+        // A well-formed JSON array that still violates the projection contract (duplicate realm)
+        // surfaces the SAME `from_boundaries` error through the JSON entrypoint.
+        let boundaries = vec![
+            shell_boundary(RealmId::System(7), DVec3::ZERO, 100.0, None),
+            aabb_boundary(RealmId::System(7), DVec3::splat(5.0), None),
+        ];
+        let json = serde_json::to_string(&boundaries).expect("serialize");
+        let err = RealmScene::from_boxes_json(&json).expect_err("duplicate must reject");
+        assert_eq!(err, SceneError::DuplicateRealm);
+    }
+
+    #[test]
+    fn scene_error_variants_render_their_loud_display_messages() {
+        // The thiserror `#[error(...)]` Display arms — rendered so a bad dev-config `boxes.json`
+        // fails LOUD at load (never a silent empty). The other tests compare by value/discriminant
+        // and never format, so without this the Display arms stay uncovered.
+        assert_eq!(
+            SceneError::DuplicateRealm.to_string(),
+            "duplicate realm id in the boundary set"
+        );
+        assert_eq!(
+            SceneError::CycleOrDepthExceeded.to_string(),
+            "parent chain cycles or exceeds the max nesting depth"
+        );
+        assert_eq!(
+            SceneError::MalformedJson("bad".into()).to_string(),
+            "malformed boxes.json: bad"
+        );
+        // Exercise the derived Clone + PartialEq FIELD comparison for the payload variant (the two
+        // regions V2's `MalformedJson(String)` added — the other tests compare unit variants or use
+        // `matches!`, so the String-carrying arm's clone/eq stays uncovered without this).
+        let m = SceneError::MalformedJson("x".into());
+        assert_eq!(m.clone(), m);
+        assert_ne!(m, SceneError::MalformedJson("y".into()));
     }
 }

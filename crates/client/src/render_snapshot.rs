@@ -12,6 +12,8 @@
 //! [`RenderClock`] the headless [`DevState`](vd_devproto::DevState) path already uses, so
 //! the window and `vdctl state` can never disagree about what was delivered.
 
+use std::sync::Arc;
+
 use glam::DVec3;
 use vd_core::EntityId;
 use vd_core::pose::FrameRef;
@@ -19,23 +21,55 @@ use vd_wire::channels::SubId;
 
 use crate::interp::RenderPose;
 use crate::net::ClientPhase;
+use crate::realm_scene::RealmScene;
 use crate::render_clock::RenderClock;
 use crate::view::DeliveredView;
 
 /// An immutable snapshot of the delivered world + the render clock at one core step.
-/// Cheap to clone (the view is `BTreeMap`s of `Copy` tracks); published every step and
-/// read wait-free by the renderer.
+/// Cheap to clone (the view is `BTreeMap`s of `Copy` tracks; the scene is a shared `Arc`);
+/// published every step and read wait-free by the renderer.
 #[derive(Clone, Debug)]
 pub struct RenderSnapshot {
     view: DeliveredView,
     clock: RenderClock,
     phase: ClientPhase,
+    /// The boot-loaded realm-geometry projection (Visual Crossing Playground V2), carried on the
+    /// SAME render seam as the poses so the renderer draws the realm boxes lock-free alongside the
+    /// entity dots. Boot-loaded ONCE (a dev-config `boxes.json`) and shared by `Arc` — a per-step
+    /// clone of the snapshot is a pointer bump, never a deep copy of the box map. Default EMPTY
+    /// (no boxes until a scene is loaded), so every existing pose-only path is unchanged.
+    scene: Arc<RealmScene>,
 }
 
 impl RenderSnapshot {
+    /// A snapshot with NO realm boxes (the pose-only default — every pre-V2 construction site).
     #[must_use]
     pub fn new(view: DeliveredView, clock: RenderClock, phase: ClientPhase) -> RenderSnapshot {
-        RenderSnapshot { view, clock, phase }
+        RenderSnapshot::with_scene(view, clock, phase, Arc::new(RealmScene::default()))
+    }
+
+    /// A snapshot carrying a boot-loaded [`RealmScene`] on the render seam (V2). The `Arc` is the
+    /// one the core holds — cloning the snapshot each step just bumps its refcount.
+    #[must_use]
+    pub fn with_scene(
+        view: DeliveredView,
+        clock: RenderClock,
+        phase: ClientPhase,
+        scene: Arc<RealmScene>,
+    ) -> RenderSnapshot {
+        RenderSnapshot {
+            view,
+            clock,
+            phase,
+            scene,
+        }
+    }
+
+    /// The boot-loaded realm-box scene to draw (empty until a `boxes.json` is loaded). The renderer
+    /// iterates this alongside [`RenderSnapshot::rendered`] to draw the translucent realm volumes.
+    #[must_use]
+    pub fn scene(&self) -> &RealmScene {
+        &self.scene
     }
 
     /// The client lifecycle phase (so the renderer can show "connecting…" vs live).
@@ -128,6 +162,50 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_default_snapshot_carries_an_empty_scene_and_with_scene_carries_the_loaded_one() {
+        use crate::realm_scene::{BoxShape, RealmScene};
+        use std::sync::Arc;
+        use vd_core::geometry::{CrossEffect, RealmBoundary};
+        use vd_core::pose::{LatticePos, RealmId};
+
+        // The pose-only `new` carries an empty scene (every pre-V2 path is unchanged).
+        let bare = RenderSnapshot::new(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Connecting,
+        );
+        assert!(bare.scene().is_empty(), "new() ⇒ no realm boxes");
+
+        // `with_scene` carries the boot-loaded scene through the render seam.
+        let scene = RealmScene::from_boundaries(&[RealmBoundary::shell(
+            RealmId::System(7),
+            LatticePos::local(DVec3::ZERO),
+            1000.0,
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            RealmId::System(7),
+            CrossEffect::Authority,
+        )])
+        .expect("scene");
+        let s = RenderSnapshot::with_scene(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Active,
+            Arc::new(scene),
+        );
+        assert_eq!(s.scene().len(), 1, "the loaded box is carried on the seam");
+        assert_eq!(
+            s.scene().get(RealmId::System(7)).expect("box").shape,
+            BoxShape::Sphere { r: 1000.0 }
+        );
     }
 
     #[test]

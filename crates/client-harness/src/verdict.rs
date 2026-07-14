@@ -589,6 +589,7 @@ mod tests {
             shape: BoxShape::Box {
                 half: DVec3::splat(10.0),
             },
+            frame: FrameRef::StationLocal { station_seed: 1 },
             center_offset: DVec3::new(100.0, 0.0, 0.0),
             parent: None,
             depth: 0,
@@ -686,6 +687,7 @@ mod tests {
         // client-harness binary — both tessellation paths must execute here, not only in vd-client.
         let sphere = RealmBox {
             shape: BoxShape::Sphere { r: 3.0 },
+            frame: FrameRef::SystemSpace { system_seed: 1 },
             center_offset: DVec3::ZERO,
             parent: None,
             depth: 0,
@@ -703,6 +705,7 @@ mod tests {
             shape: BoxShape::Box {
                 half: DVec3::splat(2.0),
             },
+            frame: FrameRef::SystemSpace { system_seed: 1 },
             center_offset: DVec3::ZERO,
             parent: None,
             depth: 0,
@@ -712,5 +715,38 @@ mod tests {
         assert_eq!(box_prims.len(), 1);
         // 6 faces × 2 tris × 3 verts = 36.
         assert_eq!(box_prims[0].vertices.len(), 36);
+    }
+
+    #[test]
+    fn from_boxes_json_loads_and_rejects_in_this_binary() {
+        // Covers `from_boxes_json`'s regions from the client-harness binary too (HR5(c)): in prod it
+        // is CALLED only by the client bin (coverage-exempt `/bin/`), so without this the harness
+        // binary's linked copy stays count=0. Happy: the SAME Vec<RealmBoundary> the shard plants,
+        // serialized, loads the box; error: a malformed string is a LOUD MalformedJson, never a
+        // silent empty. Discriminant equality (not `matches!`) keeps the error arm coverable.
+        let boundaries = [RealmBoundary::aabb(
+            RealmId::Station(3),
+            LatticePos::local(DVec3::ZERO),
+            DVec3::splat(10.0),
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            RealmId::Station(3),
+            CrossEffect::Authority,
+        )
+        .expect("valid band")];
+        let json = serde_json::to_string(&boundaries).expect("serialize the plant");
+        let scene = RealmScene::from_boxes_json(&json).expect("loads the plant JSON");
+        assert_eq!(scene.len(), 1);
+        let err = RealmScene::from_boxes_json("not json at all").expect_err("malformed rejects");
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&SceneError::MalformedJson(String::new())),
+            "malformed JSON is a loud MalformedJson, not a silent empty",
+        );
     }
 }

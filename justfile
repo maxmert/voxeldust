@@ -158,10 +158,18 @@ fmt-check:
 render-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
 
-# Everything a merge requires (render-smoke is GPU-required + local; spike2a is a release
-# build — both are documented in their recipes). fmt-check FAILS on drift (run `just fmt`
-# to fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a render-smoke coverage
+# G-RENDER-BOXES-SMOKE (Visual Crossing Playground V3 pixel proof): bring up the cluster, launch a
+# HEADLESS `client --capture --realm-boxes <boxes.json>` (ONE translucent colored realm box),
+# capture a real wgpu-readback frame, and assert the box is PIXEL-VISIBLE inside its projected
+# screen region (H2 — not a bare content fraction) + zero magenta. Same GPU-required, LOCAL-gate
+# preconditions as render-smoke (no CI, no software fallback; steer with WGPU_BACKENDS).
+render-boxes-smoke:
+    cargo test -p vd-bins --features dev-control,render --test render_boxes_smoke -- --nocapture
+
+# Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
+# a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
+# fix); every gate step is fail-on-violation, none mutates the tree.
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a render-smoke render-boxes-smoke coverage
 
 # One-time setup helper.
 coverage-setup:

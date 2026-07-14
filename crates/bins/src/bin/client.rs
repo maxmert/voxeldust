@@ -105,7 +105,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None, // R-6d3a: the client has no producer-less durable flows — no outbox needed.
     )?;
-    let core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
+    let mut core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
+
+    // Visual Crossing Playground V2: boot-load the dev-config realm boxes (if given) into the
+    // render scene, which then rides every render_snapshot() onto the seam. Single-sourced with
+    // the shard boundary plant; a malformed/duplicate/cyclic file fails LOUD at boot (never a
+    // silent empty scene). Config injection — zero cross-process bytes (HR1-inert).
+    if let Some(path) = &args.realm_boxes {
+        let json =
+            std::fs::read_to_string(path).map_err(|e| format!("read --realm-boxes {path}: {e}"))?;
+        let scene = vd_client::realm_scene::RealmScene::from_boxes_json(&json)
+            .map_err(|e| format!("parse --realm-boxes {path}: {e}"))?;
+        core.state_mut().load_scene(scene);
+    }
 
     // The lock-free step ↔ listener bridge: ArcSwap publishes the decoded delivered
     // DevState; the bounded mailbox carries injected InputActions; the atomics carry
@@ -464,6 +476,11 @@ struct ClientArgs {
     /// Headless offscreen render + wgpu readback for `vdctl screenshot` (Slice-3 T5) — the
     /// agent's eyes, no display. Requires `--features dev-control,render` + `--dev-control`.
     capture: bool,
+    /// Optional dev-config `boxes.json` — a JSON array of `RealmBoundary` (the IDENTICAL Vec the
+    /// shard plants) boot-loaded into the render scene so the realms render as translucent boxes
+    /// (Visual Crossing Playground V2). `None` ⇒ no boxes (the pose-only default). Single-sourced
+    /// with the shard boundary plant; adds ZERO cross-process bytes (HR1-inert config injection).
+    realm_boxes: Option<String>,
 }
 
 fn parse_args() -> Result<ClientArgs, String> {
@@ -478,6 +495,7 @@ fn parse_args() -> Result<ClientArgs, String> {
     let mut step_hz: u32 = DEFAULT_STEP_HZ;
     let mut window = false;
     let mut capture = false;
+    let mut realm_boxes: Option<String> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -493,6 +511,7 @@ fn parse_args() -> Result<ClientArgs, String> {
             "--step-hz" => step_hz = parse_val(&mut it, "--step-hz")?,
             "--window" => window = true,
             "--capture" => capture = true,
+            "--realm-boxes" => realm_boxes = Some(next_val(&mut it, "--realm-boxes")?),
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -512,6 +531,7 @@ fn parse_args() -> Result<ClientArgs, String> {
         step_hz,
         window,
         capture,
+        realm_boxes,
     })
 }
 

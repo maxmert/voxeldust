@@ -24,7 +24,10 @@ use vd_wire::channels::{
 use vd_wire::seams::tickets::LoginTicket;
 use vd_wire::version::ProtoVersion;
 
+use std::sync::Arc;
+
 use crate::input::InputState;
+use crate::realm_scene::RealmScene;
 use crate::render_clock::RenderClock;
 use crate::render_snapshot::RenderSnapshot;
 use crate::tuning::ClientInterpTuning;
@@ -85,6 +88,11 @@ pub struct ClientState {
     /// The freshest APPLIED universe tick (run-stable + join-independent) — what
     /// `screenshot --at-tick` aligns on; `None` before the first applied snapshot.
     latest_universe_tick: Option<u64>,
+    /// The boot-loaded realm-box scene (Visual Crossing Playground V2), shared onto the render
+    /// seam via `Arc` so the per-step `render_snapshot()` clone is a pointer bump. Default EMPTY
+    /// (no boxes) until [`ClientState::load_scene`] plants a dev-config `boxes.json` at boot — it
+    /// is CONFIG, not delivered state, so it never changes on the wire.
+    scene: Arc<RealmScene>,
 }
 
 impl ClientState {
@@ -110,7 +118,16 @@ impl ClientState {
             foreign_peer_drops: 0,
             snapshots_applied: 0,
             latest_universe_tick: None,
+            scene: Arc::new(RealmScene::default()),
         }
+    }
+
+    /// Boot-load the realm-box render scene (V2). Called ONCE at start-up with the dev-config
+    /// `boxes.json` (single-sourced with the shard's boundary plant); the scene then rides every
+    /// [`ClientState::render_snapshot`] onto the render seam. It is config, not delivered state, so
+    /// this is a non-mutating one-shot set, distinct from the wire ingest path.
+    pub fn load_scene(&mut self, scene: RealmScene) {
+        self.scene = Arc::new(scene);
     }
 
     /// One full client step = [`pump_inbound`](Self::pump_inbound) then
@@ -369,7 +386,12 @@ impl ClientState {
     /// `BTreeMap`s of `Copy` tracks.
     #[must_use]
     pub fn render_snapshot(&self) -> RenderSnapshot {
-        RenderSnapshot::new(self.view.clone(), self.render_clock, self.phase)
+        RenderSnapshot::with_scene(
+            self.view.clone(),
+            self.render_clock,
+            self.phase,
+            Arc::clone(&self.scene),
+        )
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
@@ -1159,5 +1181,37 @@ mod tests {
         let rendered = snap.rendered(10.0);
         assert_eq!(rendered.len(), 1);
         assert_eq!(rendered[0].0, ent());
+    }
+
+    #[test]
+    fn a_boot_loaded_scene_rides_the_render_snapshot_and_defaults_empty() {
+        use vd_core::geometry::{CrossEffect, RealmBoundary};
+        use vd_core::pose::{LatticePos, RealmId};
+        let mut c = core();
+        // Default: no scene loaded ⇒ the render snapshot carries an empty box set.
+        assert!(
+            c.state().render_snapshot().scene().is_empty(),
+            "no boxes until a scene is loaded"
+        );
+        // Boot-load a one-box scene; it then rides EVERY render_snapshot() onto the seam.
+        let scene = RealmScene::from_boundaries(&[RealmBoundary::shell(
+            RealmId::System(7),
+            LatticePos::local(DVec3::ZERO),
+            1000.0,
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            RealmId::System(7),
+            CrossEffect::Authority,
+        )])
+        .expect("scene");
+        c.state_mut().load_scene(scene);
+        let snap = c.state().render_snapshot();
+        assert_eq!(snap.scene().len(), 1, "the loaded box is on the seam");
+        assert!(snap.scene().get(RealmId::System(7)).is_some());
     }
 }

@@ -145,6 +145,89 @@ pub const NEAR_PLANE: f64 = 0.1;
 /// The perspective far plane (m) — generous so any capture-scale point projects.
 pub const FAR_PLANE: f64 = 1.0e12;
 
+// ---------------------------------------------------------------------------
+// Scene framing (Slice V3): fit a CaptureCamera to the whole realm-box scene so
+// every box is visible in the readback — Tier-A math the Tier-B renderer only APPLIES.
+// ---------------------------------------------------------------------------
+
+use vd_client::realm_scene::{BoxShape, RealmScene};
+
+/// The default capture vertical FOV (radians, 45°) — the framing distance is derived from this,
+/// so a box scene fits the same frustum the render camera uses. A named const (no magic number).
+pub const FIT_FOV_Y: f64 = std::f64::consts::FRAC_PI_4;
+
+/// Headroom multiplier on the fitted distance so no box edge kisses the frame border (a small,
+/// deterministic margin — 15% padding around the union bounds).
+pub const FIT_MARGIN: f64 = 1.15;
+
+/// The fixed view direction the fitted camera looks ALONG (from eye toward the scene center):
+/// a gentle downward-and-forward 3/4 view so nested boxes read as volumes, not flat quads. Unit,
+/// not axis-parallel to world-Y (so `look_at_rh`'s up basis is well-defined). Named, deterministic.
+const FIT_VIEW_DIR: DVec3 = DVec3::new(0.3, -0.35, -0.887);
+
+/// Fit a [`CaptureCamera`] of pixel size `width`×`height` to the WHOLE scene: frame the union of
+/// every box's center ± its extent so all boxes land in the readback. Returns `None` for an empty
+/// scene (nothing to frame) or a degenerate viewport (zero-size). The eye sits back along
+/// [`FIT_VIEW_DIR`] far enough that the union's bounding sphere fits [`FIT_FOV_Y`] (× [`FIT_MARGIN`]),
+/// looking at the union center. Pure + deterministic — the box render camera the pixel proof uses.
+#[must_use]
+pub fn fit_camera_to_scene(
+    scene: &RealmScene,
+    width: usize,
+    height: usize,
+) -> Option<CaptureCamera> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (center, radius) = scene_bounds(scene)?;
+    // Distance so the bounding sphere of `radius` subtends at most the vertical FOV: the half-angle
+    // is fov_y/2, so `sin(half) = radius / dist` ⇒ `dist = radius / sin(half)`, padded by the
+    // margin and floored so a single tiny (or zero-radius) box is still viewed from a sane range.
+    let half_fov = FIT_FOV_Y * 0.5;
+    let fit_dist = (radius / half_fov.sin()) * FIT_MARGIN;
+    let dist = fit_dist.max(radius + NEAR_PLANE * 2.0);
+    let dir = FIT_VIEW_DIR.normalize();
+    let eye = center - dir * dist; // back off ALONG the view dir so the camera looks toward center
+    Some(CaptureCamera {
+        eye,
+        target: center,
+        up: DVec3::Y,
+        fov_y: FIT_FOV_Y,
+        width,
+        height,
+    })
+}
+
+/// The union bounding sphere of every box in the scene: its center (the midpoint of the union AABB)
+/// and radius (half the AABB diagonal, so the whole union fits). `None` for an empty scene. A
+/// monomorphic helper — the per-box extent branch lives here, off `fit_camera_to_scene`.
+fn scene_bounds(scene: &RealmScene) -> Option<(DVec3, f64)> {
+    let mut min = DVec3::splat(f64::INFINITY);
+    let mut max = DVec3::splat(f64::NEG_INFINITY);
+    let mut any = false;
+    for (_realm, rbox) in scene.iter() {
+        any = true;
+        let extent = box_extent(rbox.shape);
+        min = min.min(rbox.center_offset - extent);
+        max = max.max(rbox.center_offset + extent);
+    }
+    if !any {
+        return None;
+    }
+    let center = (min + max) * 0.5;
+    let radius = (max - min).length() * 0.5;
+    Some((center, radius))
+}
+
+/// A box's per-axis half-extent: a sphere is `r` on every axis; a box is its `half`. A monomorphic
+/// helper (the shape KIND branch is here, not in the framing body).
+fn box_extent(shape: BoxShape) -> DVec3 {
+    match shape {
+        BoxShape::Sphere { r } => DVec3::splat(r),
+        BoxShape::Box { half } => half,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +384,157 @@ mod tests {
         assert!(!r.contains(ScreenPos { x: 30.1, y: 30.0 })); // right of max x
         assert!(!r.contains(ScreenPos { x: 20.0, y: 19.9 })); // above min y
         assert!(!r.contains(ScreenPos { x: 20.0, y: 40.1 })); // below max y
+    }
+
+    // ---- fit_camera_to_scene (Slice V3 framing) --------------------------------
+
+    use vd_client::realm_scene::RealmScene;
+    use vd_core::geometry::{CrossEffect, RealmBoundary};
+    use vd_core::pose::{LatticePos, RealmId};
+
+    /// A `Shell` boundary at `center`, radius `r`.
+    fn shell_b(realm: RealmId, center: DVec3, r: f64) -> RealmBoundary {
+        RealmBoundary::shell(
+            realm,
+            LatticePos::local(center),
+            r,
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            realm,
+            CrossEffect::Authority,
+        )
+    }
+
+    /// An `Aabb` boundary at `center`, half-extents `half`.
+    fn aabb_b(realm: RealmId, center: DVec3, half: DVec3) -> RealmBoundary {
+        RealmBoundary::aabb(
+            realm,
+            LatticePos::local(center),
+            half,
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            realm,
+            CrossEffect::Authority,
+        )
+        .expect("aabb")
+    }
+
+    #[test]
+    fn an_empty_scene_frames_to_no_camera() {
+        // Nothing to frame ⇒ None (never a nonsense camera at the origin).
+        assert_eq!(fit_camera_to_scene(&RealmScene::default(), 64, 48), None);
+    }
+
+    #[test]
+    fn a_degenerate_viewport_frames_to_no_camera() {
+        let scene = RealmScene::from_boundaries(&[shell_b(RealmId::System(1), DVec3::ZERO, 10.0)])
+            .expect("scene");
+        assert_eq!(fit_camera_to_scene(&scene, 0, 48), None);
+        assert_eq!(fit_camera_to_scene(&scene, 64, 0), None);
+    }
+
+    #[test]
+    fn the_fitted_camera_frames_every_box_center_and_extent_in_the_viewport() {
+        // Two well-separated boxes (a sphere and a box); the fitted camera must place BOTH
+        // entirely on-screen — every corner of each box's extent projects inside [0,w]×[0,h].
+        let (w, h) = (128usize, 96usize);
+        let scene = RealmScene::from_boundaries(&[
+            shell_b(RealmId::System(1), DVec3::new(-200.0, 0.0, 0.0), 60.0),
+            aabb_b(
+                RealmId::Station(2),
+                DVec3::new(200.0, 40.0, 0.0),
+                DVec3::new(50.0, 50.0, 50.0),
+            ),
+        ])
+        .expect("scene");
+        let cam = fit_camera_to_scene(&scene, w, h).expect("frames");
+        assert_eq!(cam.fov_y, FIT_FOV_Y);
+        assert_eq!((cam.width, cam.height), (w, h));
+        // Every box corner projects, and lands inside the viewport (the framing succeeded).
+        for (_realm, rbox) in scene.iter() {
+            let ext = match rbox.shape {
+                vd_client::realm_scene::BoxShape::Sphere { r } => DVec3::splat(r),
+                vd_client::realm_scene::BoxShape::Box { half } => half,
+            };
+            for sx in [-1.0, 1.0] {
+                for sy in [-1.0, 1.0] {
+                    for sz in [-1.0, 1.0] {
+                        let corner = rbox.center_offset + ext * DVec3::new(sx, sy, sz);
+                        let p = cam
+                            .project_point(corner)
+                            .expect("corner projects (in front)");
+                        // Range-`contains` (not `a && b`) so the assert carries no short-circuit
+                        // branch of its own (HR5: `assert!(a && b)` leaves an uncoverable arm).
+                        assert!(
+                            (0.0..=w as f64).contains(&p.x),
+                            "corner x {} off-screen (w={w})",
+                            p.x
+                        );
+                        assert!(
+                            (0.0..=h as f64).contains(&p.y),
+                            "corner y {} off-screen (h={h})",
+                            p.y
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_tiny_box_uses_the_distance_floor_and_still_frames() {
+        // A zero-radius (degenerate) box: `radius == 0` would give a zero fit distance, so the
+        // `.max(radius + NEAR_PLANE*2)` FLOOR must kick in — exercises that branch. The box
+        // center still projects near the viewport center.
+        let (w, h) = (64usize, 64usize);
+        let scene = RealmScene::from_boundaries(&[shell_b(
+            RealmId::System(1),
+            DVec3::new(5.0, 6.0, 7.0),
+            0.0,
+        )])
+        .expect("scene");
+        let cam = fit_camera_to_scene(&scene, w, h).expect("frames");
+        // The eye is the floor distance back along the view dir (not AT the center → finite).
+        assert!(cam.eye.is_finite());
+        assert_ne!(cam.eye, cam.target, "the floor kept the eye off the target");
+        let p = cam
+            .project_point(DVec3::new(5.0, 6.0, 7.0))
+            .expect("center projects");
+        // The center of the framed box lands at the viewport center (within a pixel).
+        assert!((p.x - w as f64 / 2.0).abs() < 1.0, "center x {}", p.x);
+        assert!((p.y - h as f64 / 2.0).abs() < 1.0, "center y {}", p.y);
+    }
+
+    #[test]
+    fn scene_bounds_covers_both_the_sphere_and_box_extent_arms() {
+        // Directly exercise box_extent's two arms via a mixed scene: the union AABB must reach
+        // the sphere's far edge (r) AND the box's far corner (half).
+        let scene = RealmScene::from_boundaries(&[
+            shell_b(RealmId::System(1), DVec3::new(-100.0, 0.0, 0.0), 10.0),
+            aabb_b(
+                RealmId::Station(2),
+                DVec3::new(100.0, 0.0, 0.0),
+                DVec3::new(20.0, 5.0, 5.0),
+            ),
+        ])
+        .expect("scene");
+        let (center, radius) = scene_bounds(&scene).expect("bounds");
+        // Union spans x from -110 (sphere far edge) to +120 (box far corner) ⇒ center x = 5.
+        assert!((center.x - 5.0).abs() < 1e-9, "center x {}", center.x);
+        // Radius is half the diagonal of the union AABB (positive, finite).
+        assert!(radius > 0.0);
+        assert!(radius.is_finite());
+        // The empty-scene None arm.
+        assert_eq!(scene_bounds(&RealmScene::default()), None);
     }
 }

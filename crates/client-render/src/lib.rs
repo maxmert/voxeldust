@@ -44,14 +44,17 @@ use bevy_egui::{
     EguiPrimaryContextPass, PrimaryEguiContext, egui,
 };
 use crossbeam_channel::{Receiver, Sender};
+use vd_client::interp::RenderPose;
 use vd_client::net::ClientPhase;
+use vd_client::realm_scene::{MeshPrim, to_render_prims};
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client_harness::camera::FollowCamera;
 use vd_client_harness::capture::capture_rel_path;
 use vd_client_harness::input_map::{MovementKeys, mouse_look};
 use vd_client_harness::manifest::CaptureKind;
 use vd_core::EntityId;
-use vd_core::glam::DVec3;
+use vd_core::glam::{DQuat, DVec3};
+use vd_core::pose::RealmId;
 use vd_devproto::InputAction;
 
 // ---- render tuning (named consts; no inline magic numbers) ----------------------
@@ -80,9 +83,11 @@ const LANDMARK_COLORS: [Color; 8] = [
 ];
 /// Offscreen capture resolution. Width chosen so `width*4` is NOT a multiple of 256
 /// (1280*4 = 5120 IS a multiple → no padding; use 1284 to force the 256-byte row-pad
-/// strip path that the readback must handle). Height even.
-const CAPTURE_W: u32 = 1284;
-const CAPTURE_H: u32 = 720;
+/// strip path that the readback must handle). Height even. PUBLIC so a capture-gate test
+/// (`render_boxes_smoke`) can reconstruct the exact `fit_camera_to_scene` camera the offscreen
+/// render used, and project a box's screen AABB against the very pixels it produced.
+pub const CAPTURE_W: u32 = 1284;
+pub const CAPTURE_H: u32 = 720;
 /// Frames to render before the first capture can serve (let the render world warm up +
 /// the egui pass + the readback pipeline fill — the spike used 8).
 const CAPTURE_PRE_ROLL: u32 = 8;
@@ -175,6 +180,16 @@ struct CameraState {
 #[derive(Resource, Default)]
 struct DotEntities(BTreeMap<EntityId, Entity>);
 
+/// The map from a realm to its spawned translucent box entity — the SIBLING of [`DotEntities`]
+/// (the binary-render rule: the realm-box render is a DISTINCT path, never bolted onto the dot
+/// path). Keyed by [`RealmId`] for a deterministic spawn/despawn order.
+#[derive(Resource, Default)]
+struct RealmBoxEntities(BTreeMap<RealmId, Entity>);
+
+/// Marker: a rendered realm box (a translucent colored volume).
+#[derive(Component)]
+struct RealmBoxMarker;
+
 /// Shared dot render assets (one sphere mesh; own/other materials) built once at setup.
 #[derive(Resource)]
 struct DotAssets {
@@ -222,6 +237,7 @@ fn run_windowed(handles: RenderHandles) {
             last_movement: MovementKeys::default(),
         })
         .init_resource::<DotEntities>()
+        .init_resource::<RealmBoxEntities>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Voxeldust — dev client".into(),
@@ -244,7 +260,13 @@ fn run_windowed(handles: RenderHandles) {
         .add_systems(Startup, setup_scene)
         .add_systems(
             Update,
-            (input_system, sync_world, cursor_grab, exit_when_core_stops),
+            (
+                input_system,
+                sync_world,
+                sync_realm_boxes,
+                cursor_grab,
+                exit_when_core_stops,
+            ),
         )
         // The HUD draws in the egui pass (NOT Update — the 0.39 multipass idiom).
         .add_systems(EguiPrimaryContextPass, hud_primary)
@@ -461,6 +483,137 @@ fn sync_world(
     }
 }
 
+/// Sync the translucent realm-box meshes to the boot-loaded [`RenderSnapshot`] scene (Visual
+/// Crossing Playground V3) — the SIBLING path to `sync_world`'s dots. For each [`RealmBox`] the
+/// scene carries, place it at the world position of its realm frame's ORIGIN composed through the
+/// ONE `DeliveredView::world_pos` chokepoint (so a nested/hull-borne box lands correctly, without a
+/// second composition path), lower it to [`MeshPrim`] VERTICES (H4: the renderer consumes vertices,
+/// NEVER a shape variant), and spawn a translucent [`StandardMaterial`] volume. Straight-line glue:
+/// every geometry/color/placement decision is a Tier-A call (`to_render_prims`, `world_pos`); this
+/// only builds Bevy `Mesh`/`Transform`/material handles and spawns/despawns to match the scene.
+fn sync_realm_boxes(
+    net: Res<Net>,
+    mut boxes: ResMut<RealmBoxEntities>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+    mut box_tf: Query<&mut Transform, With<RealmBoxMarker>>,
+) {
+    let now_s = net.started_at.elapsed().as_secs_f64();
+    let snap = net.snapshot.load();
+    let mut seen: BTreeSet<RealmId> = BTreeSet::new();
+    for (realm, rbox) in snap.scene().iter() {
+        seen.insert(realm);
+        // The box's frame ORIGIN in world space, composed through the ONE chokepoint (identity for
+        // the world-origin frames through P3; a hull-borne station composes through its hull at P8).
+        let frame_origin = RenderPose {
+            frame: rbox.frame,
+            pos: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+        };
+        let world_center = snap.world_pos(&frame_origin, now_s);
+        // Lower to render primitives (VERTICES) at that world center — no shape branch here.
+        let prims = to_render_prims(rbox, world_center);
+        match boxes.0.get(&realm) {
+            // Existing box: the geometry is fixed (config, not delivered state) through P3, so only
+            // the transform can move (a hull-borne box at P8). Update its translation.
+            Some(&entity) => {
+                if let Ok(mut transform) = box_tf.get_mut(entity)
+                    && let Some(prim) = prims.first()
+                {
+                    transform.translation = Vec3::from_array(prim.transform.translation);
+                }
+            }
+            // New box: build the translucent mesh + material once and spawn it.
+            None => {
+                if let Some(entity) =
+                    spawn_realm_box(&prims, &mut meshes, &mut materials, &mut commands)
+                {
+                    boxes.0.insert(realm, entity);
+                }
+            }
+        }
+    }
+    // Despawn boxes no longer in the scene (empty through P3, but the seam supports dynamic scenes).
+    boxes.0.retain(|realm, entity| {
+        if seen.contains(realm) {
+            true
+        } else {
+            commands.entity(*entity).despawn();
+            false
+        }
+    });
+}
+
+/// Frame the OFFSCREEN capture camera on the whole realm-box scene (capture-only, V3): when a
+/// `boxes.json` scene is loaded, point the camera at `fit_camera_to_scene` so EVERY box lands in the
+/// readback — the deterministic capture camera the pixel proof (`render_boxes_smoke`) reconstructs
+/// to project the box's screen AABB. Runs AFTER `sync_world` so, when a scene is present, the
+/// box-framing view WINS over the follow-the-dot camera (a loaded scene means "show the boxes"). An
+/// empty scene leaves the follow camera untouched (the existing behaviour). Tier-A math
+/// (`fit_camera_to_scene`); this only applies the returned pose to the Bevy transform.
+fn frame_scene_camera(net: Res<Net>, mut cam_tf: Query<&mut Transform, With<FollowCam>>) {
+    let snap = net.snapshot.load();
+    let Some(cam) = vd_client_harness::camera::fit_camera_to_scene(
+        snap.scene(),
+        CAPTURE_W as usize,
+        CAPTURE_H as usize,
+    ) else {
+        return; // empty scene (or degenerate viewport) → keep the follow camera
+    };
+    if let Some(mut transform) = cam_tf.iter_mut().next() {
+        *transform = Transform::from_translation(cam.eye.as_vec3())
+            .looking_at(cam.target.as_vec3(), cam.up.as_vec3());
+    }
+}
+
+/// Spawn one realm box from its lowered [`MeshPrim`]s (today exactly one per box): a Bevy `Mesh`
+/// built from the prim VERTICES + a TRANSLUCENT [`StandardMaterial`] (`AlphaMode::Blend`,
+/// `cull_mode: None` so the volume reads front-and-back, `unlit` so the color is legible in the
+/// stub world regardless of lighting). Returns `None` if the box lowered to no prim (defensive).
+fn spawn_realm_box(
+    prims: &[MeshPrim],
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    commands: &mut Commands,
+) -> Option<Entity> {
+    let prim = prims.first()?;
+    let mesh = meshes.add(mesh_from_prim(prim));
+    let [r, g, b, a] = prim.color_rgba;
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgba(r, g, b, a),
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        unlit: true,
+        ..default()
+    });
+    let entity = commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(Vec3::from_array(prim.transform.translation))
+                .with_scale(Vec3::from_array(prim.transform.scale)),
+            RealmBoxMarker,
+        ))
+        .id();
+    Some(entity)
+}
+
+/// Build a Bevy `Mesh` from a [`MeshPrim`]'s vertex buffer — a non-indexed triangle list of
+/// positions + normals (the LOCAL unit geometry; the entity `Transform` scale/translation places
+/// it). PURE glue: no shape branch, no logic — exactly the H4 seam (P4 greedy quads slot in here
+/// unchanged, more vertices through the same path).
+fn mesh_from_prim(prim: &MeshPrim) -> Mesh {
+    let positions: Vec<[f32; 3]> = prim.vertices.iter().map(|v| v.pos).collect();
+    let normals: Vec<[f32; 3]> = prim.vertices.iter().map(|v| v.normal).collect();
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+}
+
 /// The windowed HUD: draw into the PRIMARY egui context (the 0.39 multipass idiom —
 /// registered in `EguiPrimaryContextPass`, context via `EguiContexts::ctx_mut()` which
 /// returns a `Result`, so this system returns `Result`).
@@ -584,6 +737,7 @@ fn run_capture(handles: RenderHandles) {
             shot: 0,
         })
         .init_resource::<DotEntities>()
+        .init_resource::<RealmBoxEntities>()
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -603,7 +757,18 @@ fn run_capture(handles: RenderHandles) {
         .add_systems(PreStartup, disable_primary_egui_context)
         .add_systems(Startup, setup_capture)
         .add_systems(OffscreenEguiPass, hud_offscreen)
-        .add_systems(Update, (sync_world, serve_captures, exit_when_core_stops))
+        .add_systems(
+            Update,
+            (
+                sync_world,
+                sync_realm_boxes,
+                // AFTER sync_world so, with a scene loaded, the box-framing view overrides the
+                // follow-the-dot camera (chain: the box camera is the last word on the transform).
+                frame_scene_camera.after(sync_world),
+                serve_captures,
+                exit_when_core_stops,
+            ),
+        )
         .run();
 }
 
