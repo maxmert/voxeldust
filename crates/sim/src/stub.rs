@@ -753,6 +753,15 @@ pub struct StubStats {
     /// Slice 3e — `CrossingAborted` whose transfer id did NOT match the subject's current latch (a stale
     /// abort for a superseded / re-latched crossing) — a counted no-op, the latch is preserved. `0` healthy.
     pub crossing_abort_stale: u64,
+    /// Slice 4b — an AUTHORITY-effect OUTWARD crossing (an undock) committed against a boundary whose
+    /// `parent` is `None`, so there is no enclosing realm to re-home the subject to. DEGRADED (counted,
+    /// emitted nothing) inside the Authority arms only — the Interest arm is direction-agnostic and never
+    /// reaches here. This is a COMPOSER / boundary-AUTHORING error, NOT a per-tick runtime condition:
+    /// every real realm nests in an enclosing System/Galaxy realm, so a top-level Authority boundary an
+    /// entity can leave OUTWARD is malformed. It is counted (not silently dropped) so a valid-fixture test
+    /// can assert it stays `0`; a dedicated malformed-fixture test drives it to `1` to cover the degrade
+    /// arm. `0` in prod through P3 (empty registry) and in every well-formed fixture.
+    pub crossing_outward_no_parent: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -2611,6 +2620,27 @@ fn boundary_depth(boundaries: &[RealmBoundary], ix: usize) -> u32 {
     depth
 }
 
+/// Slice 4b — the direction-resolved AUTHORITY destination for a committed crossing. An INWARD dock
+/// hands authority to the boundary interior (`winner.to_realm`); an OUTWARD undock re-homes to the
+/// boundary's enclosing `parent` (the realm the container itself sits in). A total 2-arm map over
+/// [`Direction`] — the two arms are contrasted by the dock (Inward → `to_realm`) and undock (Outward
+/// → `parent`) tests, so both are covered.
+///
+/// `None` on an Outward crossing whose boundary has NO parent is a COMPOSER / boundary-AUTHORING error,
+/// NOT a per-tick runtime condition: every real realm nests in an enclosing System/Galaxy realm, so a
+/// top-level Authority boundary an entity can leave OUTWARD is malformed. The caller counts the degrade
+/// (`crossing_outward_no_parent`) and emits nothing, so a valid fixture can assert the counter stays `0`
+/// while a malformed-fixture test drives it to `1` to cover the `None` arm — never a silent per-tick drop.
+///
+/// Used ONLY in the two Authority arms (durable + transient); the Interest arm stays direction-agnostic
+/// (a ghost is written to `winner.to_realm` regardless of direction).
+fn authority_dest(dir: Direction, winner: &RealmBoundary) -> Option<RealmId> {
+    match dir {
+        Direction::Inward => Some(winner.to_realm),
+        Direction::Outward => winner.parent,
+    }
+}
+
 /// Fan the committed crossing out by the winning boundary's `CrossEffect` × the subject's
 /// `DurabilityClass` (Slice 3e), the ONE dispatch site (HR2 policy fan-out on one machinery).
 /// Monomorphic so every arm is covered once:
@@ -2618,6 +2648,10 @@ fn boundary_depth(boundaries: &[RealmBoundary], ix: usize) -> u32 {
 /// - `Authority` + `Durable` → emit ONE `CrossingRequest` (latched in `RequestInFlight`, skipped if
 ///   already in flight) + arm the cooldown.
 /// - `Authority` + `Transient` → emit a `TransientCrossingRequest` (batched-grant path) + arm cooldown.
+///
+/// Slice 4b: the AUTHORITY arms resolve their destination through [`authority_dest`] (dock → interior,
+/// undock → parent); the `None`-outward degrade is placed INSIDE each Authority arm so it never
+/// short-circuits the direction-agnostic Interest arm. The Interest arm keeps reading `winner.to_realm`.
 #[allow(clippy::too_many_arguments)]
 fn fan_out_crossing(
     ctx: &CrossingCtx<'_>,
@@ -2625,7 +2659,7 @@ fn fan_out_crossing(
     subject_fence: Fence,
     subject_session: Option<SessionId>,
     winner: &RealmBoundary,
-    _dir: Direction,
+    dir: Direction,
     state: &mut CrossingState,
     in_flight: &mut BTreeMap<EntityId, TransferId>,
     interest: &mut BTreeMap<EntityId, RealmId>,
@@ -2633,12 +2667,12 @@ fn fan_out_crossing(
     outbox: &mut OutboundBox,
 ) {
     let from_realm = ctx.config.realm;
-    let to_realm = winner.to_realm;
     match (winner.effect, durability_of(entity)) {
         (vd_core::geometry::CrossEffect::Interest, _) => {
             // Interest-only: record the entered realm; NO authority egress, NO cooldown (a ghost band
-            // is idempotent — the reader re-derives from the map, so re-writes are free).
-            interest.insert(entity, to_realm);
+            // is idempotent — the reader re-derives from the map, so re-writes are free). Direction-
+            // agnostic: a ghost band always records `winner.to_realm` (no parent re-home for interest).
+            interest.insert(entity, winner.to_realm);
             stats.crossing_interest_updates += 1;
         }
         (vd_core::geometry::CrossEffect::Authority, DurabilityClass::Durable) => {
@@ -2650,6 +2684,13 @@ fn fan_out_crossing(
             // count it and emit nothing. Gated BEFORE the latch insert so no orphan latch is left.
             let Some(session) = subject_session else {
                 stats.crossing_durable_no_session += 1;
+                return;
+            };
+            // Slice 4b: resolve the direction-keyed destination (dock → interior, undock → parent). A
+            // top-level Outward with no parent is a malformed boundary — count LOUD + emit nothing
+            // (gated BEFORE the latch insert so no orphan latch is left).
+            let Some(to_realm) = authority_dest(dir, winner) else {
+                stats.crossing_outward_no_parent += 1;
                 return;
             };
             // The durable transfer request — latched so exactly ONE fires per crossing. The `Vacant`
@@ -2693,6 +2734,13 @@ fn fan_out_crossing(
             }
         }
         (vd_core::geometry::CrossEffect::Authority, DurabilityClass::Transient) => {
+            // Slice 4b: same direction-keyed destination as the durable arm — an undock re-homes debris
+            // to the parent, a dock to the interior. A top-level Outward with no parent is malformed —
+            // count LOUD + emit nothing (the transient carries no latch, so nothing to unwind).
+            let Some(to_realm) = authority_dest(dir, winner) else {
+                stats.crossing_outward_no_parent += 1;
+                return;
+            };
             // The transient crossing request (the batched-grant path — no per-entity latch; the batch
             // idempotency lives in the grant/adopt journal). `src_realm_fence` is the realm fence.
             outbox.push_flow(
@@ -7958,6 +8006,33 @@ mod tests {
         )
     }
 
+    /// The PARENT realm a nested boundary re-homes to on an OUTWARD undock (Slice 4b). Distinct from
+    /// `OTHER_REALM` (the inward interior) and this shard's realm, so the destination a test reads is
+    /// unambiguous.
+    const PARENT_REALM: RealmId = RealmId::System(77);
+
+    /// A NESTED (Slice 4b) authority shell: same geometry as `shell_boundary`, but this boundary belongs
+    /// to a CHILD realm (`to_realm` = the child interior) that NESTS inside `PARENT_REALM`. An INWARD
+    /// crossing docks into the child interior (`to_realm`); an OUTWARD crossing undocks to `parent`
+    /// (`PARENT_REALM`). `realm` is set to `to_realm` (the interior child) so `boundary_depth` — which
+    /// walks `parent` — sees a one-level-deep nesting.
+    fn nested_shell_boundary(effect: CrossEffect) -> RealmBoundary {
+        RealmBoundary::shell(
+            OTHER_REALM, // the child realm this boundary encloses (its exterior side = the child)
+            LatticePos::local(DVec3::ZERO),
+            1000.0,             // r_soi
+            1.15,               // create_factor → create edge 1150 m
+            1.30,               // destroy_factor → destroy edge 1300 m
+            1.0,                // v_rel (slow)
+            0.05,               // dt
+            0.5,                // pad_floor
+            1.0,                // k_safety_extra
+            Some(PARENT_REALM), // NESTED — an undock re-homes here
+            OTHER_REALM,        // the interior an INWARD dock enters
+            effect,
+        )
+    }
+
     /// Insert an OWNED dot (a durable Player by default) at frame-local `offset`, its `prev_offset`
     /// seeded to the SAME offset (a fresh spawn — the first evaluated segment is degenerate).
     fn insert_owned_dot(rig: &mut Rig, session: SessionId, entity: EntityId, offset: DVec3) {
@@ -8579,7 +8654,12 @@ mod tests {
                 .0
                 .contains_key(&entity)
         );
-        assert!(rig.world.resource::<InterestZones>().0.contains_key(&entity));
+        assert!(
+            rig.world
+                .resource::<InterestZones>()
+                .0
+                .contains_key(&entity)
+        );
         // The dot logs out (removed from Dots). Not in OwnedTransients either, so `live` excludes it.
         rig.world.resource_mut::<Dots>().0.remove(&TRIG_SESSION);
         rig.set_local_tick(8);
@@ -9012,29 +9092,283 @@ mod tests {
         assert!(rig.world.resource::<StubStats>().crossing_latches_cleared >= 1);
     }
 
+    /// Drive an entity OUTWARD across a shell in ONE move (prev inside → cur far outside ⇒ swept
+    /// Outward, which `should_commit` commits IMMEDIATELY, no dwell). Returns the outbound frames of the
+    /// exit tick. Shared by the nested-undock and top-level-degrade tests so they differ ONLY in the
+    /// planted boundary's `parent`.
+    fn drive_outward_exit(rig: &mut Rig, entity: EntityId) -> Vec<(NodeId, MsgClass, Vec<u8>)> {
+        // Start INSIDE the shell (r = 1000), previously a member.
+        insert_owned_dot(rig, TRIG_SESSION, entity, DVec3::new(500.0, 0.0, 0.0));
+        // Prime membership with one in-band tick.
+        rig.set_local_tick(2);
+        let _ = rig.tick(vec![]);
+        // Step OUTSIDE the shell in one move (prev=500 inside → cur=5000 outside ⇒ swept Outward).
+        move_dot(rig, TRIG_SESSION, DVec3::new(5000.0, 0.0, 0.0));
+        rig.set_local_tick(3);
+        rig.tick(vec![])
+    }
+
     #[test]
-    fn an_outward_crossing_commits_immediately() {
+    fn slice4b_an_undock_re_homes_outward_to_the_parent_realm() {
+        // Slice 4b — the UNDOCK leg: a NESTED authority boundary (child = OTHER_REALM, parent =
+        // PARENT_REALM). An entity leaving OUTWARD commits immediately (no dwell) and the request's
+        // `to_realm` is the PARENT (`winner.parent`), NOT the boundary interior (`winner.to_realm`).
         let mut rig = Rig::new();
         rig.grant_realm();
         rig.world
             .resource_mut::<RealmBoundaries>()
             .0
-            .push(shell_boundary(CrossEffect::Authority));
+            .push(nested_shell_boundary(CrossEffect::Authority));
         let entity = EntityId::pack(EntityKind::Player, 10, 2, 1);
-        // Start INSIDE the shell (r = 1000), previously a member.
-        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(500.0, 0.0, 0.0));
-        // Prime membership with one in-band tick.
-        rig.set_local_tick(2);
-        let _ = rig.tick(vec![]);
-        // Now step OUTSIDE the shell in one move (prev=500 inside → cur=5000 outside ⇒ swept Outward):
-        // an exit commits Outward IMMEDIATELY (no dwell), so a single tick emits the request.
-        move_dot(&mut rig, TRIG_SESSION, DVec3::new(5000.0, 0.0, 0.0));
-        rig.set_local_tick(3);
-        let out = rig.tick(vec![]);
+        let out = drive_outward_exit(&mut rig, entity);
+        let reqs = crossing_requests(&out);
         assert_eq!(
-            crossing_requests(&out).len(),
+            reqs.len(),
             1,
             "an outward crossing commits immediately (no dwell)",
+        );
+        // THE LOAD-BEARING ASSERT: the undock re-homes to the PARENT via `winner.parent`, not the
+        // boundary interior. This is NON-VACUOUS because PARENT_REALM != OTHER_REALM (`winner.to_realm`):
+        // an unchanged `to_realm = winner.to_realm` implementation would fail this exact equality.
+        assert_eq!(
+            reqs[0].to_realm, PARENT_REALM,
+            "the undock re-homes OUTWARD to the parent realm (winner.parent), not the interior",
+        );
+        assert_ne!(
+            reqs[0].to_realm, OTHER_REALM,
+            "the undock destination is NOT the boundary interior (winner.to_realm) — direction resolved",
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossing_outward_no_parent,
+            0,
+            "a well-formed NESTED boundary never hits the no-parent degrade (the malformed tripwire is 0)",
+        );
+    }
+
+    #[test]
+    fn slice4b_a_dock_and_undock_resolve_contrasting_destinations() {
+        // Slice 4b — DOCK vs UNDOCK contrast: the SAME nested boundary resolves an INWARD dock to the
+        // interior (`winner.to_realm`) and an OUTWARD undock to the parent (`winner.parent`). Both
+        // `authority_dest` arms covered, and the two destinations asserted to DIFFER (no accidental alias).
+        let boundary = nested_shell_boundary(CrossEffect::Authority);
+
+        // DOCK (Inward) — reuse the existing dwell-based inward driver against the nested boundary.
+        let mut dock = Rig::new();
+        dock.grant_realm();
+        dock.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(boundary);
+        let dock_entity = EntityId::pack(EntityKind::Player, 10, 2, 2);
+        // Inside the band from spawn (ms = 100 m < the 1150 m create edge) → the rising edge commits Inward.
+        insert_owned_dot(
+            &mut dock,
+            TRIG_SESSION,
+            dock_entity,
+            DVec3::new(100.0, 0.0, 0.0),
+        );
+        let mut dock_out: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            dock.set_local_tick(t);
+            dock_out.extend(dock.tick(vec![]));
+        }
+        let dock_reqs = crossing_requests(&dock_out);
+        assert_eq!(
+            dock_reqs.len(),
+            1,
+            "the dock commits exactly one Inward crossing"
+        );
+        assert_eq!(
+            dock_reqs[0].to_realm, OTHER_REALM,
+            "the dock docks INWARD to the boundary interior (winner.to_realm)",
+        );
+
+        // UNDOCK (Outward) — the same boundary, driven outward.
+        let mut undock = Rig::new();
+        undock.grant_realm();
+        undock
+            .world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(boundary);
+        let undock_entity = EntityId::pack(EntityKind::Player, 10, 2, 3);
+        let undock_out = drive_outward_exit(&mut undock, undock_entity);
+        let undock_reqs = crossing_requests(&undock_out);
+        assert_eq!(
+            undock_reqs.len(),
+            1,
+            "the undock commits exactly one Outward crossing"
+        );
+        assert_eq!(
+            undock_reqs[0].to_realm, PARENT_REALM,
+            "the undock re-homes OUTWARD to the parent realm (winner.parent)",
+        );
+
+        // THE CONTRAST: the two directions resolve DISTINCT destinations off the same boundary.
+        assert_ne!(
+            dock_reqs[0].to_realm, undock_reqs[0].to_realm,
+            "a dock and undock of the same boundary resolve DIFFERENT destinations (interior vs parent)",
+        );
+    }
+
+    #[test]
+    fn slice4b_a_top_level_outward_undock_with_no_parent_degrades_loud() {
+        // Slice 4b — the DEGRADE arm: a TOP-LEVEL authority boundary (parent = None) an entity leaves
+        // OUTWARD has no enclosing realm to re-home to. This is a boundary-AUTHORING error, not a runtime
+        // condition — `authority_dest` returns None, the Authority arm counts `crossing_outward_no_parent`
+        // and emits NOTHING (no `CrossingRequest`, no orphan latch).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // `shell_boundary` is TOP-LEVEL (parent = None) — the malformed-for-outward fixture.
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 4);
+        let out = drive_outward_exit(&mut rig, entity);
+        assert_eq!(
+            crossing_requests(&out).len(),
+            0,
+            "a top-level Outward undock (no parent) emits NO CrossingRequest (the degrade)",
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossing_outward_no_parent,
+            1,
+            "the no-parent-outward degrade is COUNTED LOUD exactly once (the authoring tripwire)",
+        );
+        // No orphan latch: the degrade gates BEFORE the `in_flight` insert.
+        assert!(
+            rig.world.resource::<RequestInFlight>().0.is_empty(),
+            "the degrade leaves NO standing RequestInFlight latch",
+        );
+    }
+
+    #[test]
+    fn slice4b_a_transient_top_level_outward_undock_degrades_loud() {
+        // Slice 4b — the TRANSIENT degrade arm (the mirror of the durable `..._degrades_loud`): a HELD
+        // transient leaving a TOP-LEVEL Authority boundary (parent = None) OUTWARD has no enclosing realm
+        // to re-home to → `authority_dest` returns None, the Transient Authority arm counts
+        // `crossing_outward_no_parent` and emits NO `TransientCrossingRequest`. Covers the SECOND
+        // `authority_dest` degrade site (the Transient arm), distinct from the Durable arm's.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // `shell_boundary` is TOP-LEVEL (parent = None) — the malformed-for-outward fixture.
+        rig.world
+            .resource_mut::<RealmBoundaries>()
+            .0
+            .push(shell_boundary(CrossEffect::Authority));
+        let entity = EntityId::pack(EntityKind::Debris, 10, 3, 7);
+        // A HELD transient INSIDE the shell (r = 1000), at rest (zero velocity so `readvance_transients`
+        // leaves its pose where set) and previously a member.
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                pose: StampedPose::at_rest(
+                    config().frame,
+                    DVec3::new(500.0, 0.0, 0.0),
+                    UniverseTick(100),
+                ),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+                prev_offset: DVec3::new(500.0, 0.0, 0.0),
+            },
+        );
+        // Prime membership with one in-band tick (inside).
+        rig.set_local_tick(2);
+        let _ = rig.tick(vec![]);
+        // Step OUTSIDE the shell (prev = 500 inside → cur = 5000 outside ⇒ swept Outward).
+        rig.world
+            .resource_mut::<OwnedTransients>()
+            .0
+            .get_mut(&entity)
+            .expect("the held transient is still owned")
+            .pose = StampedPose::at_rest(
+            config().frame,
+            DVec3::new(5000.0, 0.0, 0.0),
+            UniverseTick(100),
+        );
+        rig.set_local_tick(3);
+        let out = rig.tick(vec![]);
+        // The top-level transient Outward undock DEGRADES: no `TransientCrossingRequest`.
+        assert_eq!(
+            transient_crossing_requests(&out).len(),
+            0,
+            "a top-level transient Outward undock (no parent) emits NO TransientCrossingRequest (degrade)",
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossing_outward_no_parent,
+            1,
+            "the transient no-parent-outward degrade is COUNTED LOUD exactly once",
+        );
+    }
+
+    #[test]
+    fn slice4b_two_same_depth_outward_boundaries_peel_deterministically() {
+        // Slice 4b (adversary FINDING-3) — an entity near TWO coincident same-depth Outward boundaries
+        // resolves to EXACTLY ONE winner per tick, and the choice is PERMUTATION-INVARIANT (independent of
+        // the slice order). Both boundaries are top-level-under-the-same-absent-parent (`PARENT_REALM` is
+        // not itself a boundary in the slice ⇒ `boundary_depth == 0` for both ⇒ a genuine same-depth tie),
+        // with DISTINCT interiors (`to_realm`) so the tiebreak has something to order.
+        //
+        // DOC (the FINDING-3 resolution): `resolve_winner_ix`'s Outward tiebreak sorts on the candidate's
+        // `to_realm` (the INTERIOR realm — the candidate is built BEFORE the direction resolves the
+        // destination, so `crossing_candidates` can only key on the interior). The WINNER's DESTINATION is
+        // then `winner.parent` (both peel to `PARENT_REALM` here). So the SELECTION key (`to_realm`, min
+        // wins) and the OUTCOME realm (`parent`) are deliberately DIFFERENT realms — selection only needs
+        // to be a strict total order (it is: `to_realm` Ord + the slice-index final tiebreak), which the
+        // permutation-invariance below pins.
+        //
+        // Two nested boundaries with the SAME geometry/parent but distinct interiors. Both leave OUTWARD
+        // to PARENT_REALM; the tiebreak picks the one with the smaller `to_realm` interior.
+        let low = RealmId::Planet(1); // the smaller interior (wins the `to_realm` tiebreak)
+        let high = RealmId::Planet(9); // the larger interior
+        let make = |interior: RealmId| {
+            RealmBoundary::shell(
+                interior,
+                LatticePos::local(DVec3::ZERO),
+                1000.0,
+                1.15,
+                1.30,
+                1.0,
+                0.05,
+                0.5,
+                1.0,
+                Some(PARENT_REALM), // both nested under the same (absent-from-slice) parent
+                interior,
+                CrossEffect::Authority,
+            )
+        };
+
+        // Drive the SAME outward exit under BOTH slice orderings and assert the request set is identical.
+        let run = |order: [RealmId; 2]| -> Vec<CrossingRequest> {
+            let mut rig = Rig::new();
+            rig.grant_realm();
+            {
+                let mut b = rig.world.resource_mut::<RealmBoundaries>();
+                b.0.push(make(order[0]));
+                b.0.push(make(order[1]));
+            }
+            let entity = EntityId::pack(EntityKind::Player, 10, 2, 5);
+            crossing_requests(&drive_outward_exit(&mut rig, entity))
+        };
+        let forward = run([low, high]);
+        let reversed = run([high, low]);
+
+        // EXACTLY ONE winner per tick (a single boundary peels, never both).
+        assert_eq!(
+            forward.len(),
+            1,
+            "exactly ONE boundary peels per tick (the winner reduces to one)",
+        );
+        // PERMUTATION-INVARIANT: swapping the slice order yields the identical request (same destination).
+        assert_eq!(
+            forward, reversed,
+            "the winner is slice-order-INDEPENDENT (the same boundary peels under either ordering)",
+        );
+        // The destination is the PARENT (the undock outcome), not the interior tiebreak key.
+        assert_eq!(
+            forward[0].to_realm, PARENT_REALM,
+            "the winning undock peels OUTWARD to the parent (winner.parent), regardless of tiebreak key",
         );
     }
 
