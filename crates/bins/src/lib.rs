@@ -1024,6 +1024,104 @@ pub fn http_get_status(
         .ok()
 }
 
+// ---- the shard boundary-plant knob (DEFERRED 1-SIGKILL-OWED) -----------------
+
+/// A `VD_REALM_BOUNDARIES` file the shard could not turn into a valid, in-realm boundary set — rejected
+/// LOUD at shard boot rather than silently booting an empty (inert) trigger. (Manual `Display`/`Error`
+/// impls: `vd-bins` does not pull `thiserror`.) The two arms mirror the client's `--realm-boxes` failure
+/// modes plus a shard-only config-drift guard (a boundary for a realm THIS shard does not host).
+#[derive(Clone, Debug, PartialEq)]
+pub enum RealmBoundariesError {
+    /// The file could not be read or its JSON did not parse as `Vec<RealmBoundary>`.
+    Malformed(String),
+    /// A boundary's exterior `realm` is NOT the realm this shard hosts — a config drift (the same
+    /// `boundaries.json` was handed to the wrong shard). Carries the offending + hosted realm.
+    WrongRealm {
+        boundary_realm: vd_core::pose::RealmId,
+        hosted_realm: vd_core::pose::RealmId,
+    },
+}
+
+impl std::fmt::Display for RealmBoundariesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RealmBoundariesError::Malformed(why) => write!(
+                f,
+                "VD_REALM_BOUNDARIES could not be loaded as a Vec<RealmBoundary>: {why} \
+                 (the file is single-sourced with the client's --realm-boxes boxes.json)"
+            ),
+            RealmBoundariesError::WrongRealm {
+                boundary_realm,
+                hosted_realm,
+            } => write!(
+                f,
+                "VD_REALM_BOUNDARIES has a boundary for realm {boundary_realm} but this shard hosts \
+                 realm {hosted_realm} — a config drift (the wrong boundaries.json for this shard); the \
+                 boundary's exterior `realm` must be the realm the shard is authoritative for"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RealmBoundariesError {}
+
+/// Resolve the shard's boot-loaded realm boundaries (DEFERRED 1-SIGKILL-OWED — the process-seam
+/// boundary-plant knob). Reads `VD_REALM_BOUNDARIES` (a path to a `boundaries.json` = a
+/// `Vec<RealmBoundary>`, the IDENTICAL format the client loads as `--realm-boxes` — SINGLE-SOURCED),
+/// parses it, and validates every boundary's exterior `realm` is the realm THIS shard hosts
+/// (`hosted_realm`, a config-drift guard). Returns:
+/// - `Ok(None)` when the env var is ABSENT — INERT: the caller leaves the shard's `RealmBoundaries`
+///   at its `default()` empty, so `evaluate_realm_boundaries` early-returns exactly as today (every
+///   existing run stays byte-identical).
+/// - `Ok(Some(vec))` when the file loads and every boundary is in-realm — the caller plants it.
+///
+/// Fails LOUD ([`RealmBoundariesError`]) on a malformed file or a boundary for a realm this shard
+/// does not host — a misconfiguration must never become a silent inert trigger.
+///
+/// # Errors
+/// [`RealmBoundariesError`] on a read/parse failure or an out-of-realm boundary.
+pub fn resolve_realm_boundaries(
+    env: &EnvConfig,
+    hosted_realm: vd_core::pose::RealmId,
+) -> Result<Option<Vec<vd_core::geometry::RealmBoundary>>, RealmBoundariesError> {
+    // ABSENT ⇒ inert (Ok(None)); this is the ONLY non-error absence path. A present path that fails to
+    // read/parse/validate is LOUD.
+    let Ok(path) = env.string("VD_REALM_BOUNDARIES") else {
+        return Ok(None);
+    };
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| RealmBoundariesError::Malformed(format!("read {path}: {e}")))?;
+    let boundaries = parse_realm_boundaries(&json)?;
+    guard_boundaries_in_realm(&boundaries, hosted_realm)?;
+    Ok(Some(boundaries))
+}
+
+/// Parse a `boundaries.json` string into a `Vec<RealmBoundary>` (the SAME serde shape the client's
+/// `RealmScene::from_boxes_json` loads — single-sourced). A monomorphic helper so the parse-error arm
+/// is covered off the env/fs body.
+fn parse_realm_boundaries(
+    json: &str,
+) -> Result<Vec<vd_core::geometry::RealmBoundary>, RealmBoundariesError> {
+    serde_json::from_str(json).map_err(|e| RealmBoundariesError::Malformed(e.to_string()))
+}
+
+/// The config-drift guard: every boundary's exterior `realm` must equal the realm this shard hosts. A
+/// monomorphic helper so the reject arm is covered off the env/fs body.
+fn guard_boundaries_in_realm(
+    boundaries: &[vd_core::geometry::RealmBoundary],
+    hosted_realm: vd_core::pose::RealmId,
+) -> Result<(), RealmBoundariesError> {
+    for b in boundaries {
+        if b.realm != hosted_realm {
+            return Err(RealmBoundariesError::WrongRealm {
+                boundary_realm: b.realm,
+                hosted_realm,
+            });
+        }
+    }
+    Ok(())
+}
+
 // ---- RAII child guard --------------------------------------------------------
 
 /// Owns spawned child processes and KILLS them on drop — so a partial spawn, an
@@ -1340,5 +1438,115 @@ mod incarnation_tests {
             e.to_string().contains("durable root"),
             "names the root violation: {e}"
         );
+    }
+
+    // ---- the shard boundary-plant knob (DEFERRED 1-SIGKILL-OWED) --------------
+
+    use vd_core::geometry::{CrossEffect, RealmBoundary};
+    use vd_core::glam::DVec3;
+    use vd_core::pose::{LatticePos, RealmId};
+
+    /// One in-`realm` AUTHORITY shell whose `to_realm` is a distinct dest — the shape the crossing
+    /// smoke plants (single-sourced with `plant_one_crossing_shell`).
+    fn shell(realm: RealmId, to_realm: RealmId) -> RealmBoundary {
+        RealmBoundary::shell(
+            realm,
+            LatticePos::local(DVec3::ZERO),
+            1000.0,
+            1.15,
+            1.30,
+            2.0,
+            0.02,
+            0.5,
+            1.0,
+            None,
+            to_realm,
+            CrossEffect::Authority,
+        )
+    }
+
+    /// Write `boundaries` as the client-identical `boxes.json` into a fresh temp file, returning the
+    /// path — so the loader is exercised end-to-end (fs → serde → guard), like the shard's boot read.
+    fn write_boundaries(tag: &str, boundaries: &[RealmBoundary]) -> (TempDir, String) {
+        let dir = TempDir::new(tag);
+        std::fs::create_dir_all(&dir.0).expect("mk boundaries dir");
+        let path = dir.file("boundaries.json");
+        std::fs::write(&path, serde_json::to_string(boundaries).expect("serialize"))
+            .expect("write");
+        (dir, path)
+    }
+
+    #[test]
+    fn resolve_realm_boundaries_is_inert_when_absent() {
+        // ABSENT env var ⇒ Ok(None): the caller leaves the default-empty resource, byte-identical to today.
+        let hosted = RealmId::System(7);
+        assert_eq!(resolve_realm_boundaries(&env(&[]), hosted), Ok(None));
+    }
+
+    #[test]
+    fn resolve_realm_boundaries_loads_an_in_realm_file() {
+        // A present, well-formed, in-realm file ⇒ Ok(Some(vec)) with the exact planted boundary.
+        let hosted = RealmId::System(7);
+        let planted = vec![shell(hosted, RealmId::System(8))];
+        let (_dir, path) = write_boundaries("load", &planted);
+        let got = resolve_realm_boundaries(&env(&[("VD_REALM_BOUNDARIES", &path)]), hosted)
+            .expect("the in-realm file loads");
+        assert_eq!(got, Some(planted));
+    }
+
+    #[test]
+    fn resolve_realm_boundaries_is_loud_on_a_missing_file() {
+        // A present path that does NOT exist ⇒ LOUD Malformed (never a silent inert boot).
+        let hosted = RealmId::System(7);
+        let missing = TempDir::new("missing").file("nope.json");
+        let err = resolve_realm_boundaries(&env(&[("VD_REALM_BOUNDARIES", &missing)]), hosted)
+            .expect_err("a missing file is loud");
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&RealmBoundariesError::Malformed(String::new())),
+        );
+        assert!(err.to_string().contains("VD_REALM_BOUNDARIES"));
+    }
+
+    #[test]
+    fn resolve_realm_boundaries_is_loud_on_malformed_json() {
+        // A present file that is not a Vec<RealmBoundary> ⇒ LOUD Malformed.
+        let hosted = RealmId::System(7);
+        let dir = TempDir::new("bad");
+        std::fs::create_dir_all(&dir.0).expect("mk");
+        let path = dir.file("bad.json");
+        std::fs::write(&path, "not json at all").expect("write");
+        let err = resolve_realm_boundaries(&env(&[("VD_REALM_BOUNDARIES", &path)]), hosted)
+            .expect_err("malformed json is loud");
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&RealmBoundariesError::Malformed(String::new())),
+        );
+    }
+
+    #[test]
+    fn resolve_realm_boundaries_rejects_a_boundary_for_a_realm_this_shard_does_not_host() {
+        // The config-drift guard: a boundary whose exterior `realm` is NOT the hosted realm ⇒ loud
+        // WrongRealm (the wrong boxes.json handed to this shard), never a silently mis-planted band.
+        let hosted = RealmId::System(7);
+        let drifted = RealmId::System(999);
+        let planted = vec![shell(drifted, RealmId::System(8))];
+        let (_dir, path) = write_boundaries("drift", &planted);
+        let err = resolve_realm_boundaries(&env(&[("VD_REALM_BOUNDARIES", &path)]), hosted)
+            .expect_err("an out-of-realm boundary is loud");
+        assert_eq!(
+            err,
+            RealmBoundariesError::WrongRealm {
+                boundary_realm: drifted,
+                hosted_realm: hosted,
+            },
+        );
+        assert!(err.to_string().contains("config drift"));
+    }
+
+    #[test]
+    fn guard_boundaries_in_realm_accepts_an_empty_set() {
+        // The guard's loop-never-fires arm: an empty (but present) file is in-realm-vacuously OK.
+        assert_eq!(guard_boundaries_in_realm(&[], RealmId::System(7)), Ok(()));
     }
 }

@@ -100,6 +100,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             request_ttl_ticks: 0,
         },
     );
+    // DEFERRED 1-SIGKILL-OWED — the process-seam boundary-plant knob. `VD_REALM_BOUNDARIES` (a path to a
+    // `boundaries.json` = a `Vec<RealmBoundary>`, SINGLE-SOURCED with the client's `--realm-boxes`
+    // boxes.json) arms the geometric transfer trigger by REPLACING the default-empty `RealmBoundaries` the
+    // stub just inserted. ABSENT ⇒ inert (the resource stays `default()` empty ⇒ `evaluate_realm_boundaries`
+    // early-returns, byte-identical to today). A malformed file OR a boundary for a realm this shard does
+    // NOT host (a config drift) fails LOUD here (Display carries the actionable guidance for `kubectl logs`).
+    let hosted_realm = vd_core::pose::RealmId::System(realm_seed);
+    if let Some(boundaries) =
+        vd_bins::resolve_realm_boundaries(&env, hosted_realm).map_err(|e| e.to_string())?
+    {
+        tracing::info!(
+            count = boundaries.len(),
+            realm = %hosted_realm,
+            "planting VD_REALM_BOUNDARIES — the geometric transfer trigger is ARMED",
+        );
+        node.world_mut()
+            .resource_mut::<vd_sim::stub::RealmBoundaries>()
+            .0 = boundaries;
+    }
     let mut pacer = TickPacer::new(tick_hz);
     // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its
     // heartbeat + THIS shard's readiness) and the /healthz+/readyz HTTP task reads. Slice 1: the SIGTERM flag
