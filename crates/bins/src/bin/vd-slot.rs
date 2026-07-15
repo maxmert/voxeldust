@@ -79,6 +79,14 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
             "VD_SHARD_PROBE_ADDR",
             format!("{HOST}:{}", ports.probe_shard),
         ),
+        // Track R / 1d.2 (M-2 scope: the LOCAL 2-process crossing playground): the DEST shard's QUIC +
+        // probe addrs, surfaced from the covered scheme so a dual `client.sh`/S4 scenario never
+        // hand-computes the shard-b offset. Emitted for every slot; bound only by a dual `up`.
+        ("VD_SHARD_B_ADDR", format!("{HOST}:{}", ports.shard_b)),
+        (
+            "VD_SHARD_B_PROBE_ADDR",
+            format!("{HOST}:{}", ports.probe_shard_b),
+        ),
     ];
     if let Some(agent) = agent {
         let devctl = ports.dev_control(agent).map_err(|e| e.to_string())?;

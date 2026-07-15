@@ -76,8 +76,10 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        shard_b: reserve_tcp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     };
-    let mut orch_env = orchestrator_env(&addrs1, &DEV, &store_str);
+    let mut orch_env = orchestrator_env(&addrs1, &DEV, &store_str, false);
     orch_env.push(("VD_STORE_TEST_SENTINEL_SEED", SENTINEL_SEED.to_string()));
     let mut orch1_child = KillOnDrop(Some(
         spawn_node(env!("CARGO_BIN_EXE_vd-orchestrator"), &common, &orch_env).expect("spawn orch"),
@@ -88,7 +90,7 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &common,
-            &shard_env(&addrs1, &DEV),
+            &shard_env(&addrs1, &DEV, false),
         )
         .expect("spawn shard"),
     );
@@ -139,13 +141,15 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        shard_b: reserve_tcp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     };
     cluster.push(
         "vd-orchestrator-restart",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs2, &DEV, &store_str),
+            &orchestrator_env(&addrs2, &DEV, &store_str, false),
         )
         .expect("respawn orchestrator"),
     );
@@ -236,6 +240,8 @@ fn grant_a_recovery_assertion_fails_against_a_fresh_store() {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        shard_b: reserve_tcp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     };
     // NO shard ⇒ no realm is ever granted.
     let mut cluster = Cluster::new();
@@ -244,7 +250,7 @@ fn grant_a_recovery_assertion_fails_against_a_fresh_store() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs, &DEV, &store.display().to_string()),
+            &orchestrator_env(&addrs, &DEV, &store.display().to_string(), false),
         )
         .expect("spawn orch"),
     );

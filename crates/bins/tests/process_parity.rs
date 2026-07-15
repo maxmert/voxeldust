@@ -175,6 +175,11 @@ fn p1_parity_real_binaries_over_quic() {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        // Track R / 1d.2: the DEST shard's addrs. This single-shard parity scenario passes `dual=false`
+        // to every `*_env` builder, so these are never booked (proven byte-identical by the inert-parity
+        // unit test `single_shard_env_is_byte_identical_to_dual_false`).
+        shard_b: reserve_udp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     };
     let clients = [
         (NodeId(CLIENT_NODE_BASE), client_a_addr),
@@ -188,23 +193,28 @@ fn p1_parity_real_binaries_over_quic() {
     };
 
     let mut cluster = Cluster::new();
+    // Single-shard parity: every builder passes `dual=false` (the inert arm — byte-identical to the
+    // pre-Track-R env; proven by `single_shard_env_is_byte_identical_to_dual_false`).
     cluster.push(
         "vd-orchestrator",
         spawn(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            orchestrator_env(&addrs, &DEV, &orch_store),
+            orchestrator_env(&addrs, &DEV, &orch_store, false),
         ),
     );
     cluster.push(
         "vd-gateway",
         spawn(
             env!("CARGO_BIN_EXE_vd-gateway"),
-            gateway_env(&addrs, &clients, &auth_pubkey_hex, &DEV),
+            gateway_env(&addrs, &clients, &auth_pubkey_hex, &DEV, false),
         ),
     );
     cluster.push(
         "vd-shard",
-        spawn(env!("CARGO_BIN_EXE_vd-shard"), shard_env(&addrs, &DEV)),
+        spawn(
+            env!("CARGO_BIN_EXE_vd-shard"),
+            shard_env(&addrs, &DEV, false),
+        ),
     );
     let _guard = cluster; // RAII: kill the children on test end or panic
 

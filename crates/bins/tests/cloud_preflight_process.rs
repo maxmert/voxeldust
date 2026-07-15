@@ -29,6 +29,8 @@ fn addrs() -> ClusterAddrs {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        shard_b: reserve_tcp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     }
 }
 
@@ -89,7 +91,12 @@ fn orchestrator_cloud_rejects_the_ephemeral_store_escape() {
     let trust = write_trust("eph");
     let store = std::env::temp_dir().join(format!("vd-cloudpf-eph-{}.redb", std::process::id()));
     let mut envs = common_env(&trust.display().to_string(), &DEV);
-    envs.extend(orchestrator_env(&addrs, &DEV, &store.display().to_string()));
+    envs.extend(orchestrator_env(
+        &addrs,
+        &DEV,
+        &store.display().to_string(),
+        false,
+    ));
     envs.push(("VD_PROFILE", "cloud".to_owned()));
 
     let (ok, err) = run_to_exit(env!("CARGO_BIN_EXE_vd-orchestrator"), &envs)
@@ -114,7 +121,12 @@ fn orchestrator_cloud_rejects_a_manual_process_incarnation() {
     let trust = write_trust("inc");
     let store = std::env::temp_dir().join(format!("vd-cloudpf-inc-{}.redb", std::process::id()));
     let mut envs = common_env(&trust.display().to_string(), &DEV);
-    envs.extend(orchestrator_env(&addrs, &DEV, &store.display().to_string()));
+    envs.extend(orchestrator_env(
+        &addrs,
+        &DEV,
+        &store.display().to_string(),
+        false,
+    ));
     envs.retain(|(k, _)| *k != "VD_STORE_EPHEMERAL_OK");
     envs.push(("VD_PROFILE", "cloud".to_owned()));
 
@@ -139,7 +151,12 @@ fn orchestrator_cloud_requires_a_durable_root() {
     let trust = write_trust("root");
     let store = std::env::temp_dir().join(format!("vd-cloudpf-root-{}.redb", std::process::id()));
     let mut envs = common_env(&trust.display().to_string(), &DEV);
-    envs.extend(orchestrator_env(&addrs, &DEV, &store.display().to_string()));
+    envs.extend(orchestrator_env(
+        &addrs,
+        &DEV,
+        &store.display().to_string(),
+        false,
+    ));
     envs.retain(|(k, _)| *k != "VD_STORE_EPHEMERAL_OK" && *k != "VD_PROCESS_INCARNATION");
     envs.push(("VD_PROFILE", "cloud".to_owned()));
 
@@ -166,7 +183,13 @@ fn gateway_cloud_vetoes_the_built_in_dev_auth_key() {
     let trust = write_trust("dev");
     let durable = non_temp_dir("dev");
     let mut envs = common_env(&trust.display().to_string(), &DEV);
-    envs.extend(gateway_env(&addrs, &[], &dev_auth_pubkey_hex(), &DEV));
+    envs.extend(gateway_env(
+        &addrs,
+        &[],
+        &dev_auth_pubkey_hex(),
+        &DEV,
+        false,
+    ));
     envs.retain(|(k, _)| *k != "VD_PROCESS_INCARNATION");
     envs.push(("VD_PROFILE", "cloud".to_owned()));
     // BOTH durable roots present + non-temp so the preflight passes the durable-root arms and REACHES the
@@ -207,7 +230,7 @@ fn orchestrator_cloud_boots_green_with_a_coherent_config() {
 
     let mut common = common_env(&trust.display().to_string(), &DEV);
     common.retain(|(k, _)| *k != "VD_PROCESS_INCARNATION");
-    let mut node_env = orchestrator_env(&addrs, &DEV, &store.display().to_string());
+    let mut node_env = orchestrator_env(&addrs, &DEV, &store.display().to_string(), false);
     node_env.retain(|(k, _)| *k != "VD_STORE_EPHEMERAL_OK" && *k != "VD_LEASE_TTL");
     node_env.push(("VD_PROFILE", "cloud".to_owned()));
     node_env.push(("VD_STORE_DURABLE_ROOT", durable.display().to_string()));

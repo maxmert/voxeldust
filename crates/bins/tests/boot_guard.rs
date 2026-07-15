@@ -23,6 +23,8 @@ fn addrs() -> ClusterAddrs {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        shard_b: reserve_tcp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     }
 }
 
@@ -37,7 +39,7 @@ fn a_temp_store_without_ephemeral_ok_refuses_to_boot() {
     // A temp-dir store path (the guard's reject target) — with the dev escape STRIPPED.
     let temp_store =
         std::env::temp_dir().join(format!("vd-bootreject-{}.redb", std::process::id()));
-    let mut node_env = orchestrator_env(&addrs, &DEV, &temp_store.display().to_string());
+    let mut node_env = orchestrator_env(&addrs, &DEV, &temp_store.display().to_string(), false);
     node_env.retain(|(k, _)| *k != "VD_STORE_EPHEMERAL_OK");
     let common = common_env(&trust_dir.display().to_string(), &DEV);
 
@@ -92,7 +94,7 @@ fn a_temp_store_with_ephemeral_ok_boots_past_the_guard() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs, &DEV, &store.display().to_string()),
+            &orchestrator_env(&addrs, &DEV, &store.display().to_string(), false),
         )
         .expect("spawn orch"),
     );

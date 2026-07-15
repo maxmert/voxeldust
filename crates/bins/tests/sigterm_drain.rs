@@ -72,12 +72,14 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        shard_b: reserve_tcp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     };
     let mut orch1_child = KillOnDrop(Some(
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs1, &DEV, &store_str),
+            &orchestrator_env(&addrs1, &DEV, &store_str, false),
         )
         .expect("spawn orch"),
     ));
@@ -87,7 +89,7 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &common,
-            &shard_env(&addrs1, &DEV),
+            &shard_env(&addrs1, &DEV, false),
         )
         .expect("spawn shard"),
     );
@@ -155,13 +157,15 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        shard_b: reserve_tcp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     };
     cluster.push(
         "vd-orchestrator-restart",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs2, &DEV, &store_str),
+            &orchestrator_env(&addrs2, &DEV, &store_str, false),
         )
         .expect("respawn orchestrator"),
     );

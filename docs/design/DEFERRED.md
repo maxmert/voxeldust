@@ -2857,6 +2857,26 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   DELETED in CAF-NEW-1; `scripts/dev-cluster.sh` + `vd-devcluster` are the local-process launcher).
 - **Source:** whole-codebase audits `wf_43fea0dd` (CAF-2) + `wwg7ydm9y` (CAF-NEW-1, stale stack removed).
 
+### D-44 🟥 N-shard roster generalization for the k3d deploy (Track R / 1d.2 M-2 scope split)
+- **Landed (Track R / 1d.2 Batch A):** the LOCAL 2-process dual-shard crossing playground — a single extra
+  DEST shard (`SHARD_B = NodeId(4)`, realm `DEV.realm_seed_b`) wired as a clean 2-shard extension: the
+  `--dual` launcher flag, `shard_b_env`, `ClusterAddrs.shard_b`, `DevPortScheme` `SHARD_B_OFFSET`/
+  `PROBE_SHARD_B_OFFSET` (`RESERVED_NODE_PORTS` 7→9), the gateway `VD_KNOWN_SHARDS` union + orchestrator
+  `VD_ROSTER`, and the C1 both-realms readiness gate (`AdminSnapshot::realms_present`). PROVEN by
+  `crates/bins/tests/dual_cluster_crossing_smoke.rs` (a real dot re-homes SOURCE→DEST over process QUIC).
+- **Missing (for the k3d/#123 deploy):** the wiring is a HARDCODED 2-shard shape — one const, one twin
+  builder, one `ClusterAddrs` field, `+2` reserved ports. k8s scales shards as StatefulSet ordinals, each
+  with its own realm + peer entries, so the gateway `known_shards`, the orchestrator `roster`/`clock_peers`,
+  the port scheme, and `ClusterAddrs` must grow to N: `ClusterAddrs.shards: Vec<SocketAddr>`,
+  `shard_env(idx, realm_seed)`, `DevPortScheme` a `Vec<(shard, probe)>` per index, and N-entry
+  `VD_KNOWN_SHARDS`/`VD_ROSTER`/`VD_CLOCK_PEERS` built from a shard-count.
+- **Where:** `crates/bins/src/lib.rs` (`SHARD_B`, `ClusterAddrs`, the `*_env` builders), `crates/devproto/
+  src/lib.rs` (`SHARD_B_OFFSET`/`SlotPorts`), `crates/bins/src/bin/{gateway,orchestrator,vd-devcluster}.rs`.
+- **When / proper:** the **cloud-ready k3d slice (#123)** — a separate slice, per the M-2 scope decision (the
+  visual-testable-endstate memory's "P3 main plan first, do the cloud shape LATER"). HR3 stays clean: adding
+  a shard is a roster/list EXTENSION, never a code branch on a shard kind.
+- **Source:** dual-shard cluster design + adversary `scripts/dual_shard_cluster_design_adversary.md` (M-2).
+
 ---
 
 ## PERF / SCALE (negligible now; land with the slice that makes them matter)

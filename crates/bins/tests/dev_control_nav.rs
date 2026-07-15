@@ -79,6 +79,8 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
+        shard_b: reserve_tcp_addr(),
+        shard_b_probe: reserve_tcp_addr(),
     };
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);
@@ -90,19 +92,22 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
         "vd-orchestrator",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            orchestrator_env(&addrs, &DEV, &orch_store),
+            orchestrator_env(&addrs, &DEV, &orch_store, false),
         ),
     );
     nodes.push(
         "vd-gateway",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
-            gateway_env(&addrs, &client_book, &dev_auth_pubkey_hex(), &DEV),
+            gateway_env(&addrs, &client_book, &dev_auth_pubkey_hex(), &DEV, false),
         ),
     );
     nodes.push(
         "vd-shard",
-        spawn_node(env!("CARGO_BIN_EXE_vd-shard"), shard_env(&addrs, &DEV)),
+        spawn_node(
+            env!("CARGO_BIN_EXE_vd-shard"),
+            shard_env(&addrs, &DEV, false),
+        ),
     );
     let _nodes = nodes; // RAII: reaps the cluster on test end or panic
 

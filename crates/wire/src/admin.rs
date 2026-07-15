@@ -117,6 +117,35 @@ impl AdminSnapshot {
             .iter()
             .any(|entry| entry.authority.starts_with("shard:"))
     }
+
+    /// True once EVERY realm in `realms` has been granted to a SHARD in the directory — the
+    /// STRICT both-realms readiness gate a MULTI-shard cluster's `await_ready` needs (Track R / 1d.2,
+    /// C1). [`cluster_bootstrapped`](Self::cluster_bootstrapped) returns `true` the instant ANY one
+    /// shard grants ANY realm; a dual cluster that drove a crossing on that signal would proceed
+    /// BEFORE the DEST shard granted its realm, so `handle_crossing_request` would resolve no dest
+    /// head and only COUNT `crossing_unresolved` — the crossing would never fire. This predicate
+    /// requires a `shard:`-authority row keyed on EACH realm's canonical `Display`, so `[System(7),
+    /// System(8)]` is satisfied only once BOTH the source and dest shards have granted. An EMPTY
+    /// `realms` slice is vacuously `true` (no realm is owed) — the single-shard launcher keeps
+    /// calling [`cluster_bootstrapped`](Self::cluster_bootstrapped) and stays byte-identical.
+    ///
+    /// A realm's directory `key` is rendered through its canonical [`RealmId`](vd_core::pose::RealmId)
+    /// `Display` (see `render_directory_key`), so the caller passes the realm ids and this matches
+    /// against the same rendered form — never a hand-built string.
+    #[must_use]
+    pub fn realms_present(&self, realms: &[vd_core::pose::RealmId]) -> bool {
+        realms.iter().all(|realm| self.realm_granted(*realm))
+    }
+
+    /// True iff a `shard:`-authority directory row is keyed on `realm`'s canonical `Display`. A
+    /// MONOMORPHIC helper so the two branch arms (matching row / no matching row) are covered off
+    /// the generic `all` closure in [`realms_present`](Self::realms_present) (HR5 generic-shim rule).
+    fn realm_granted(&self, realm: vd_core::pose::RealmId) -> bool {
+        let key = realm.to_string();
+        self.directory
+            .iter()
+            .any(|entry| entry.key == key && entry.authority.starts_with("shard:"))
+    }
 }
 
 /// The reviewed Prometheus metric-name registry (PLAN.md observability list). ONE
@@ -319,6 +348,57 @@ mod tests {
             ..empty
         };
         assert!(!gateway_only.cluster_bootstrapped());
+    }
+
+    /// One `shard:`-authority directory row keyed on `realm`'s canonical `Display`.
+    fn realm_row(realm: RealmId) -> DirectoryEntryView {
+        directory_entry_view(&DirectoryKey::Realm(realm), &record(None))
+    }
+
+    #[test]
+    fn realms_present_is_the_strict_both_realms_gate() {
+        // C1 (Track R / 1d.2): the dual-cluster readiness gate must wait for BOTH realms, never an "OR".
+        let empty = AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(1));
+
+        // 0 realms owed: vacuously true (the single-shard path passes this way; no realm is required).
+        assert!(empty.realms_present(&[]));
+
+        // 1 realm owed, but the directory is empty ⇒ NOT present.
+        assert!(!empty.realms_present(&[RealmId::System(7)]));
+
+        // Only realm 7 granted: [7] present, [7,8] NOT present (the both-realms gate holds the launcher).
+        let only_source = AdminSnapshot {
+            directory: vec![realm_row(RealmId::System(7))],
+            ..empty.clone()
+        };
+        assert!(only_source.realms_present(&[RealmId::System(7)]));
+        assert!(
+            !only_source.realms_present(&[RealmId::System(7), RealmId::System(8)]),
+            "the crossing must NOT be driven until the DEST realm is granted too"
+        );
+
+        // BOTH realms granted to shards: the both-realms gate is satisfied.
+        let both = AdminSnapshot {
+            directory: vec![realm_row(RealmId::System(7)), realm_row(RealmId::System(8))],
+            ..empty.clone()
+        };
+        assert!(both.realms_present(&[RealmId::System(7), RealmId::System(8)]));
+
+        // A realm granted only to a GATEWAY (not a shard) does NOT count as present.
+        let gateway_realm = AdminSnapshot {
+            directory: vec![directory_entry_view(
+                &DirectoryKey::Realm(RealmId::System(8)),
+                &OwnerRecord {
+                    authority: AuthorityRef::Gateway(NodeId(2)),
+                    ..record(None)
+                },
+            )],
+            ..empty
+        };
+        assert!(
+            !gateway_realm.realms_present(&[RealmId::System(8)]),
+            "a gateway-owned realm row is not a shard grant"
+        );
     }
 
     #[test]

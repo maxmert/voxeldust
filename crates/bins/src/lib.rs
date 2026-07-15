@@ -117,6 +117,15 @@ pub fn spawn_probe_server(
 pub const ORCH: NodeId = NodeId(1);
 pub const GATEWAY: NodeId = NodeId(2);
 pub const SHARD: NodeId = NodeId(3);
+/// Track R / 1d.2 — the DEST shard (realm B) a dot re-homes INTO. Matches the harness `DEST`
+/// (`tests/src/lib.rs`). Absent from a single-shard `up` (only a dual `up` / `VD_KNOWN_SHARDS` /
+/// `VD_ROSTER` brings it into any roster). HR3: this is a `NodeId` in a SET, never a shard KIND —
+/// adding it is a roster extension, never a code branch on a shard kind.
+///
+/// SCOPE (M-2): this is a single extra shard for the LOCAL 2-process crossing playground. The
+/// N-shard k3d roster generalization (a `Vec` of shard ids/addrs, N-entry rosters) is ledgered as a
+/// separate cloud (#123) slice in `docs/design/DEFERRED.md`.
+pub const SHARD_B: NodeId = NodeId(4);
 
 // ---- dev auth identity -------------------------------------------------------
 
@@ -180,6 +189,12 @@ pub struct DevClusterParams {
     pub max_sessions: u32,
     pub max_buffered_inputs: u32,
     pub realm_seed: u64,
+    /// Track R / 1d.2 — the DEST realm seed: the shard at [`SHARD_B`] hosts `RealmId::System(realm_seed_b)`
+    /// and a dot re-homes INTO it. MUST differ from [`realm_seed`](Self::realm_seed) (a same-realm
+    /// "crossing" is a no-op) — enforced by a compile-time assert on [`DEV`]. Matches the harness
+    /// `dest_stub_config` (`System(8)`). Inert in a single-shard `up`: no DEST is spawned, so no realm
+    /// B is ever granted.
+    pub realm_seed_b: u64,
     pub move_speed: f64,
     pub tick_dt: f64,
     pub mint_seed: u64,
@@ -202,6 +217,7 @@ pub const DEV: DevClusterParams = DevClusterParams {
     max_buffered_inputs: vd_connection_plane::gateway::TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS
         as u32,
     realm_seed: 7,
+    realm_seed_b: 8, // Track R / 1d.2 DEST realm (matches the harness `dest_stub_config` System(8)).
     move_speed: 2.0,
     tick_dt: 0.02,
     mint_seed: 11,
@@ -209,6 +225,14 @@ pub const DEV: DevClusterParams = DevClusterParams {
     realm_recheck: 0,
     snapshot_budget: 1100,
 };
+
+/// DEST-REALM-DISTINCT (compile-time, Track R / 1d.2): the DEST realm MUST differ from the source
+/// realm — a crossing INTO the shard's own realm is a no-op (the geometric trigger's `to_realm` would
+/// equal the exterior `realm`). A regression here fails the BUILD, not a flaky dual-cluster test.
+const _: () = assert!(
+    DEV.realm_seed != DEV.realm_seed_b,
+    "DEV.realm_seed_b (the DEST realm) must differ from DEV.realm_seed (the source realm)",
+);
 
 /// SCALE-MAXSESSIONS-VS-K (compile-time): the gateway must admit at least K =
 /// `max_clients_per_worktree` sessions, or the last dev-control client window for a
@@ -353,6 +377,12 @@ pub struct ClusterAddrs {
     pub orchestrator_probe: SocketAddr,
     pub gateway_probe: SocketAddr,
     pub shard_probe: SocketAddr,
+    /// Track R / 1d.2 (M-2 scope: the LOCAL 2-process crossing playground): the DEST shard's QUIC bind +
+    /// probe. Populated for every cluster (data, no branch); dialed/spawned ONLY in dual mode (the `dual`
+    /// arm of the env builders books it; a single-shard `up` never spawns the DEST). N-shard generalization
+    /// (a `Vec` of shard addrs) is ledgered to cloud #123 in `docs/design/DEFERRED.md`.
+    pub shard_b: SocketAddr,
+    pub shard_b_probe: SocketAddr,
 }
 
 /// Format a peer address book as the `id=addr,…` string the nodes parse from
@@ -677,20 +707,41 @@ pub fn orchestrator_env(
     a: &ClusterAddrs,
     p: &DevClusterParams,
     store_path: &str,
+    dual: bool,
 ) -> Vec<(&'static str, String)> {
-    vec![
+    // Track R / 1d.2: in DUAL mode the orchestrator INITIATES realm-grants / re-home to the DEST, so it
+    // books SHARD_B AND drives the universe clock to it (a follower whose clock never advances can never
+    // win its realm lease — the harness `clock_peers = {GW, SHARD, DEST}` rule). The DEST is ALSO added to
+    // `VD_ROSTER` (the D-37 re-home candidate set; the crossing itself resolves via the directory head, NOT
+    // the roster — see the bin note). Absent `dual` these three keys are byte-identical to a single-shard
+    // `up` (the crossing INERT).
+    let mut peers = vec![(GATEWAY, a.gateway), (SHARD, a.shard)];
+    let mut clock_peers = format!("{},{}", GATEWAY.0, SHARD.0);
+    if dual {
+        peers.push((SHARD_B, a.shard_b));
+        clock_peers = format!("{},{},{}", GATEWAY.0, SHARD.0, SHARD_B.0);
+    }
+    let mut env = vec![
         str_pair("VD_NODE_ID", ORCH.0),
         str_pair("VD_BIND", a.orchestrator),
-        ("VD_PEERS", book(&[(GATEWAY, a.gateway), (SHARD, a.shard)])),
+        ("VD_PEERS", book(&peers)),
         str_pair("VD_EPOCH", p.epoch),
         str_pair("VD_RESERVE_CHUNK", p.reserve_chunk),
-        ("VD_CLOCK_PEERS", format!("{},{}", GATEWAY.0, SHARD.0)),
+        ("VD_CLOCK_PEERS", clock_peers),
         str_pair("VD_LEASE_TTL", p.lease_ttl),
         str_pair("VD_ADMIN_ADDR", a.admin),
         str_pair("VD_PROBE_ADDR", a.orchestrator_probe),
         ("VD_STORE_PATH", store_path.to_owned()),
         ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
-    ]
+    ];
+    if dual {
+        // The D-37 re-home candidate SET: every DEST shard the orchestrator may re-home an orphan onto.
+        // `select_rehome_target` is realm-BLIND (lowest live capable node) — a D-37 concern, NOT the
+        // crossing (which resolves `head(Realm(to_realm))`, HR3-clean). For the crossing this roster's only
+        // job is that the DEST is a known re-home target; the head resolution comes from DEST's realm grant.
+        env.push(str_pair("VD_ROSTER", SHARD_B.0));
+    }
+    env
 }
 
 /// The gateway's node-specific env. `clients` are seeded into the gateway's peer
@@ -702,10 +753,19 @@ pub fn gateway_env(
     clients: &[(NodeId, SocketAddr)],
     auth_pubkey_hex: &str,
     p: &DevClusterParams,
+    dual: bool,
 ) -> Vec<(&'static str, String)> {
+    // Track R / 1d.2: in DUAL mode the gateway must BOOK the DEST (to route a transferred client's
+    // inputs / cut-drains onto it) AND class the DEST as a KNOWN shard (`VD_KNOWN_SHARDS`, consumed by
+    // the gateway bin's `known_shards` set) so a DEST→gateway frame reaches `on_shard_frame` instead of
+    // dropping as an unknown peer. `VD_SHARD` (the LOGIN shard) stays SHARD in both modes. Absent `dual`
+    // neither the DEST peer nor `VD_KNOWN_SHARDS` is emitted — byte-identical to a single-shard `up`.
     let mut peers = vec![(ORCH, a.orchestrator), (SHARD, a.shard)];
+    if dual {
+        peers.push((SHARD_B, a.shard_b));
+    }
     peers.extend_from_slice(clients);
-    vec![
+    let mut env = vec![
         str_pair("VD_NODE_ID", GATEWAY.0),
         str_pair("VD_BIND", a.gateway),
         ("VD_PEERS", book(&peers)),
@@ -716,19 +776,33 @@ pub fn gateway_env(
         str_pair("VD_MAX_SESSIONS", p.max_sessions),
         str_pair("VD_MAX_BUFFERED_INPUTS", p.max_buffered_inputs),
         str_pair("VD_PROBE_ADDR", a.gateway_probe),
-    ]
+    ];
+    if dual {
+        // The gateway bin unions this into `known_shards` over the login `shard` (via `node_list`), so the
+        // routable-shard roster is {SHARD, DEST} — every shard's frames are node-class dispatchable.
+        env.push(str_pair("VD_KNOWN_SHARDS", SHARD_B.0));
+    }
+    env
 }
 
-/// The stub-shard's node-specific env (realm + movement + snapshot budget).
+/// The SOURCE stub-shard's node-specific env (realm + movement + snapshot budget). In DUAL mode it also
+/// BOOKS the DEST shard so the two shards can mesh cross-shard transfer traffic (each shard books the
+/// other). Absent `dual` the peer book is byte-identical to a single-shard `up`. The SOURCE hosts the
+/// crossing trigger into realm B (planted separately via `VD_REALM_BOUNDARIES`, set by the launcher).
 #[must_use]
-pub fn shard_env(a: &ClusterAddrs, p: &DevClusterParams) -> Vec<(&'static str, String)> {
+pub fn shard_env(
+    a: &ClusterAddrs,
+    p: &DevClusterParams,
+    dual: bool,
+) -> Vec<(&'static str, String)> {
+    let mut peers = vec![(ORCH, a.orchestrator), (GATEWAY, a.gateway)];
+    if dual {
+        peers.push((SHARD_B, a.shard_b));
+    }
     vec![
         str_pair("VD_NODE_ID", SHARD.0),
         str_pair("VD_BIND", a.shard),
-        (
-            "VD_PEERS",
-            book(&[(ORCH, a.orchestrator), (GATEWAY, a.gateway)]),
-        ),
+        ("VD_PEERS", book(&peers)),
         str_pair("VD_REALM_SEED", p.realm_seed),
         str_pair("VD_SPEED", p.move_speed),
         str_pair("VD_TICK_DT", p.tick_dt),
@@ -739,6 +813,86 @@ pub fn shard_env(a: &ClusterAddrs, p: &DevClusterParams) -> Vec<(&'static str, S
         str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
         str_pair("VD_PROBE_ADDR", a.shard_probe),
     ]
+}
+
+/// Track R / 1d.2 — the DEST stub-shard's node-specific env (twin of [`shard_env`]). Hosts realm B
+/// (`System(realm_seed_b)`) at [`SHARD_B`], with a DISTINCT mint seed (so its dots are genuinely separate,
+/// mirroring the harness `dest_stub_config` mint 17 vs the source's 11) and its OWN QUIC bind + probe. Its
+/// `VD_PEERS` books ORCH, GATEWAY, AND the SOURCE shard (each shard books the other — the cross-shard mesh).
+/// NO `VD_REALM_BOUNDARIES`: the SOURCE hosts the crossing trigger INTO realm B; the DEST just receives.
+/// Only ever spawned by a dual `up`, so it has no `dual` arm.
+#[must_use]
+pub fn shard_b_env(a: &ClusterAddrs, p: &DevClusterParams) -> Vec<(&'static str, String)> {
+    vec![
+        str_pair("VD_NODE_ID", SHARD_B.0),
+        str_pair("VD_BIND", a.shard_b),
+        (
+            "VD_PEERS",
+            book(&[
+                (ORCH, a.orchestrator),
+                (GATEWAY, a.gateway),
+                (SHARD, a.shard),
+            ]),
+        ),
+        str_pair("VD_REALM_SEED", p.realm_seed_b), // System(realm_seed_b) — DEST realm identity
+        str_pair("VD_SPEED", p.move_speed),
+        str_pair("VD_TICK_DT", p.tick_dt),
+        str_pair("VD_ORCH", ORCH.0),
+        // A distinct mint so DEST-minted entities never alias the source's (harness DEST=17 vs source=11).
+        str_pair("VD_MINT_SEED", p.mint_seed.wrapping_add(6)),
+        str_pair("VD_INPUT_LOG_CAP", p.input_log_cap),
+        str_pair("VD_REALM_RECHECK", p.realm_recheck),
+        str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
+        str_pair("VD_PROBE_ADDR", a.shard_b_probe),
+    ]
+}
+
+/// Track R / 1d.2 — the SINGLE-SOURCED source-realm crossing boundary set the SOURCE shard boots with
+/// (`VD_REALM_BOUNDARIES`) so its geometric dwell detector fires a `CrossingRequest` into realm B. Returns
+/// the `Vec<RealmBoundary>` (also serialize-roundtrippable to the `boxes.json` the shard's boot loader
+/// reads — the same format the client's `--realm-boxes` loads). ONE born-inside authority shell centered at
+/// the dot's login spawn offset (`LatticePos::local(ZERO)`), whose exterior `realm` is the SOURCE realm
+/// (`System(realm_seed)`, so `guard_boundaries_in_realm` accepts it) and whose `to_realm` is DERIVED from
+/// `realm_seed_b` (NEVER an inline `System(8)` — HR3 / M-1). Geometry mirrors the harness
+/// `plant_one_crossing_shell` (born-inside ⇒ commits after the dwell without any walk).
+#[must_use]
+pub fn source_crossing_boundaries(p: &DevClusterParams) -> Vec<vd_core::geometry::RealmBoundary> {
+    use vd_core::geometry::{CrossEffect, RealmBoundary};
+    use vd_core::glam::DVec3;
+    use vd_core::pose::{LatticePos, RealmId};
+    vec![RealmBoundary::shell(
+        RealmId::System(p.realm_seed), // exterior side = the SOURCE realm (guard-passing)
+        LatticePos::local(DVec3::ZERO), // centered at the dot's login spawn offset (born-inside)
+        1000.0,                        // r_soi
+        1.15,                          // create_factor → create edge 1150 m
+        1.30,                          // destroy_factor → destroy edge 1300 m
+        p.move_speed,                  // v_rel (the dot's own walk speed)
+        p.tick_dt,                     // dt
+        0.5,                           // pad_floor
+        1.0,                           // k_safety_extra
+        None,                          // top-level (depth 0)
+        RealmId::System(p.realm_seed_b), // to_realm DERIVED from realm_seed_b (M-1: never inline)
+        CrossEffect::Authority,        // a TRANSFER crossing (hands authority to the dest realm)
+    )]
+}
+
+/// Track R / 1d.2 — write [`source_crossing_boundaries`] as the client-identical `boundaries.json` into
+/// `dir`, returning the path (as a `String` for the env value). The SOURCE shard reads it via
+/// `VD_REALM_BOUNDARIES`; the file is SINGLE-SOURCED with [`source_crossing_boundaries`] so the launcher
+/// and any client `--realm-boxes` project the SAME geometry.
+///
+/// # Errors
+/// A directory-create, serialize, or write failure.
+pub fn write_source_boundaries(
+    dir: &std::path::Path,
+    p: &DevClusterParams,
+) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create boundaries dir: {e}"))?;
+    let path = dir.join("source_boundaries.json");
+    let json = serde_json::to_string(&source_crossing_boundaries(p))
+        .map_err(|e| format!("serialize boundaries: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write boundaries: {e}"))?;
+    Ok(path.display().to_string())
 }
 
 // ---- shell-safe value quoting ------------------------------------------------
@@ -898,6 +1052,8 @@ pub fn record_extra_pid(slot: u16, pid: u32) -> Result<(), String> {
 pub const SMOKE_SLOT: u16 = WORKTREE_SLOT_CEILING + 16; // 80: dev_cluster_smoke up/down
 pub const RECOVERY_SLOT: u16 = WORKTREE_SLOT_CEILING + 17; // 81: dev_cluster_smoke recovery
 pub const RENDER_SMOKE_SLOT: u16 = WORKTREE_SLOT_CEILING + 18; // 82: G-RENDER-SMOKE
+/// Track R / 1d.2: the dual-shard crossing smoke's slot (distinct from every other test slot).
+pub const CROSSING_SLOT: u16 = WORKTREE_SLOT_CEILING + 19; // 83: dual_cluster_crossing_smoke
 
 /// Run one `vd-devcluster` subcommand against a slot (the launcher binary path comes from
 /// the calling test's `env!("CARGO_BIN_EXE_vd-devcluster")`).
@@ -1548,5 +1704,269 @@ mod incarnation_tests {
     fn guard_boundaries_in_realm_accepts_an_empty_set() {
         // The guard's loop-never-fires arm: an empty (but present) file is in-realm-vacuously OK.
         assert_eq!(guard_boundaries_in_realm(&[], RealmId::System(7)), Ok(()));
+    }
+
+    // ---- Track R / 1d.2: the dual-shard env builders + boundaries helper --------------------------
+
+    /// Loopback addrs distinct per role so a mis-booked peer is visible in an assert. Every field is a
+    /// unique port, so a `book(...)` mismatch shows up as a wrong port string.
+    fn dual_addrs() -> ClusterAddrs {
+        ClusterAddrs {
+            orchestrator: loopback(9001),
+            gateway: loopback(9002),
+            shard: loopback(9003),
+            admin: loopback(9004),
+            orchestrator_probe: loopback(9005),
+            gateway_probe: loopback(9006),
+            shard_probe: loopback(9007),
+            shard_b: loopback(9008),
+            shard_b_probe: loopback(9009),
+        }
+    }
+
+    /// Look up a key's value in a rendered env vec (None if absent).
+    fn env_value<'a>(env: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn orchestrator_env_dual_books_dest_clock_and_roster_inert_when_single() {
+        let a = dual_addrs();
+        let single = orchestrator_env(&a, &DEV, "store", false);
+        let dual = orchestrator_env(&a, &DEV, "store", true);
+
+        // VD_ROSTER: absent single, present=DEST dual (the D-37 re-home candidate set).
+        assert_eq!(env_value(&single, "VD_ROSTER"), None);
+        assert_eq!(
+            env_value(&dual, "VD_ROSTER"),
+            Some(SHARD_B.0.to_string()).as_deref()
+        );
+
+        // VD_CLOCK_PEERS: {GW,SHARD} single vs {GW,SHARD,DEST} dual (DEST's follower clock must advance).
+        assert_eq!(
+            env_value(&single, "VD_CLOCK_PEERS"),
+            Some(format!("{},{}", GATEWAY.0, SHARD.0)).as_deref()
+        );
+        assert_eq!(
+            env_value(&dual, "VD_CLOCK_PEERS"),
+            Some(format!("{},{},{}", GATEWAY.0, SHARD.0, SHARD_B.0)).as_deref()
+        );
+
+        // VD_PEERS: the DEST is booked ONLY in dual (each initiator books the DEST).
+        let dest_book = format!("{}={}", SHARD_B.0, a.shard_b);
+        assert!(
+            !env_value(&single, "VD_PEERS")
+                .expect("VD_PEERS is always emitted")
+                .contains(&dest_book)
+        );
+        assert!(
+            env_value(&dual, "VD_PEERS")
+                .expect("VD_PEERS is always emitted")
+                .contains(&dest_book)
+        );
+    }
+
+    #[test]
+    fn gateway_env_dual_books_dest_and_emits_known_shards_inert_when_single() {
+        let a = dual_addrs();
+        let single = gateway_env(&a, &[], "pub", &DEV, false);
+        let dual = gateway_env(&a, &[], "pub", &DEV, true);
+
+        // VD_KNOWN_SHARDS: absent single, =DEST dual (so a DEST frame is node-class dispatchable).
+        assert_eq!(env_value(&single, "VD_KNOWN_SHARDS"), None);
+        assert_eq!(
+            env_value(&dual, "VD_KNOWN_SHARDS"),
+            Some(SHARD_B.0.to_string()).as_deref()
+        );
+
+        // The DEST peer is booked ONLY in dual; VD_SHARD (the login shard) stays SHARD in both.
+        let dest_book = format!("{}={}", SHARD_B.0, a.shard_b);
+        assert!(
+            !env_value(&single, "VD_PEERS")
+                .expect("VD_PEERS is always emitted")
+                .contains(&dest_book)
+        );
+        assert!(
+            env_value(&dual, "VD_PEERS")
+                .expect("VD_PEERS is always emitted")
+                .contains(&dest_book)
+        );
+        assert_eq!(
+            env_value(&single, "VD_SHARD"),
+            Some(SHARD.0.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&dual, "VD_SHARD"),
+            Some(SHARD.0.to_string()).as_deref()
+        );
+    }
+
+    #[test]
+    fn shard_env_dual_books_the_other_shard_inert_when_single() {
+        let a = dual_addrs();
+        let single = shard_env(&a, &DEV, false);
+        let dual = shard_env(&a, &DEV, true);
+        let dest_book = format!("{}={}", SHARD_B.0, a.shard_b);
+        // Each shard books the other ONLY in dual (the cross-shard mesh); single is byte-identical.
+        assert!(
+            !env_value(&single, "VD_PEERS")
+                .expect("VD_PEERS is always emitted")
+                .contains(&dest_book)
+        );
+        assert!(
+            env_value(&dual, "VD_PEERS")
+                .expect("VD_PEERS is always emitted")
+                .contains(&dest_book)
+        );
+        // The SOURCE shard is realm A in both modes; the boundaries are planted by the launcher, not here.
+        assert_eq!(
+            env_value(&dual, "VD_REALM_SEED"),
+            Some(DEV.realm_seed.to_string()).as_deref()
+        );
+        assert_eq!(env_value(&dual, "VD_REALM_BOUNDARIES"), None);
+    }
+
+    #[test]
+    fn single_shard_env_is_byte_identical_to_dual_false() {
+        // H-1 inert-parity: the `dual=false` arm of every builder emits EXACTLY the pre-Track-R env, so a
+        // single-shard `up` / the process_parity gate stays byte-identical. (Asserted field-by-field
+        // against the hand-written expected today's env — a regression flips this loud.)
+        let a = dual_addrs();
+
+        let orch = orchestrator_env(&a, &DEV, "store", false);
+        assert_eq!(
+            orch,
+            vec![
+                ("VD_NODE_ID", ORCH.0.to_string()),
+                ("VD_BIND", a.orchestrator.to_string()),
+                ("VD_PEERS", book(&[(GATEWAY, a.gateway), (SHARD, a.shard)])),
+                ("VD_EPOCH", DEV.epoch.to_string()),
+                ("VD_RESERVE_CHUNK", DEV.reserve_chunk.to_string()),
+                ("VD_CLOCK_PEERS", format!("{},{}", GATEWAY.0, SHARD.0)),
+                ("VD_LEASE_TTL", DEV.lease_ttl.to_string()),
+                ("VD_ADMIN_ADDR", a.admin.to_string()),
+                ("VD_PROBE_ADDR", a.orchestrator_probe.to_string()),
+                ("VD_STORE_PATH", "store".to_owned()),
+                ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
+            ]
+        );
+
+        let gw = gateway_env(&a, &[], "pub", &DEV, false);
+        assert_eq!(
+            gw,
+            vec![
+                ("VD_NODE_ID", GATEWAY.0.to_string()),
+                ("VD_BIND", a.gateway.to_string()),
+                (
+                    "VD_PEERS",
+                    book(&[(ORCH, a.orchestrator), (SHARD, a.shard)])
+                ),
+                ("VD_ORCH", ORCH.0.to_string()),
+                ("VD_SHARD", SHARD.0.to_string()),
+                ("VD_AUTH_PUBKEY", "pub".to_owned()),
+                ("VD_SESSION_SEED", DEV.session_seed.to_string()),
+                ("VD_MAX_SESSIONS", DEV.max_sessions.to_string()),
+                (
+                    "VD_MAX_BUFFERED_INPUTS",
+                    DEV.max_buffered_inputs.to_string()
+                ),
+                ("VD_PROBE_ADDR", a.gateway_probe.to_string()),
+            ]
+        );
+
+        let shard = shard_env(&a, &DEV, false);
+        assert_eq!(
+            shard,
+            vec![
+                ("VD_NODE_ID", SHARD.0.to_string()),
+                ("VD_BIND", a.shard.to_string()),
+                (
+                    "VD_PEERS",
+                    book(&[(ORCH, a.orchestrator), (GATEWAY, a.gateway)])
+                ),
+                ("VD_REALM_SEED", DEV.realm_seed.to_string()),
+                ("VD_SPEED", DEV.move_speed.to_string()),
+                ("VD_TICK_DT", DEV.tick_dt.to_string()),
+                ("VD_ORCH", ORCH.0.to_string()),
+                ("VD_MINT_SEED", DEV.mint_seed.to_string()),
+                ("VD_INPUT_LOG_CAP", DEV.input_log_cap.to_string()),
+                ("VD_REALM_RECHECK", DEV.realm_recheck.to_string()),
+                ("VD_SNAPSHOT_BUDGET", DEV.snapshot_budget.to_string()),
+                ("VD_PROBE_ADDR", a.shard_probe.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn shard_b_env_is_the_dest_realm_with_a_distinct_mint_and_books_the_source() {
+        let a = dual_addrs();
+        let env = shard_b_env(&a, &DEV);
+        assert_eq!(
+            env_value(&env, "VD_NODE_ID"),
+            Some(SHARD_B.0.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&env, "VD_BIND"),
+            Some(a.shard_b.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&env, "VD_REALM_SEED"),
+            Some(DEV.realm_seed_b.to_string()).as_deref()
+        );
+        // A DISTINCT mint (never the source's) so DEST-minted entities don't alias the source's.
+        assert_eq!(
+            env_value(&env, "VD_MINT_SEED"),
+            Some(DEV.mint_seed.wrapping_add(6).to_string()).as_deref()
+        );
+        assert_ne!(
+            env_value(&env, "VD_MINT_SEED"),
+            Some(DEV.mint_seed.to_string()).as_deref()
+        );
+        // Books ORCH, GATEWAY, and the SOURCE shard (the cross-shard mesh) — NOT itself.
+        let peers = env_value(&env, "VD_PEERS").expect("VD_PEERS is always emitted");
+        assert!(peers.contains(&format!("{}={}", SHARD.0, a.shard)));
+        assert!(peers.contains(&format!("{}={}", ORCH.0, a.orchestrator)));
+        assert!(peers.contains(&format!("{}={}", GATEWAY.0, a.gateway)));
+        assert!(!peers.contains(&format!("{}=", SHARD_B.0)));
+        // The DEST hosts realm B only — no crossing trigger (the SOURCE hosts it).
+        assert_eq!(env_value(&env, "VD_REALM_BOUNDARIES"), None);
+    }
+
+    #[test]
+    fn source_crossing_boundaries_is_a_born_inside_source_realm_shell_to_dest() {
+        // The planted shell's exterior realm = the SOURCE realm (so the shard guard accepts it); its
+        // `to_realm` is DERIVED from realm_seed_b (M-1: never an inline System(8)).
+        let boundaries = source_crossing_boundaries(&DEV);
+        assert_eq!(boundaries.len(), 1);
+        let b = &boundaries[0];
+        assert_eq!(b.realm, RealmId::System(DEV.realm_seed));
+        assert_eq!(b.to_realm, RealmId::System(DEV.realm_seed_b));
+        assert_eq!(b.effect, CrossEffect::Authority);
+        // The guard accepts it for the SOURCE realm, rejects it for a foreign realm (loud config drift).
+        assert_eq!(
+            guard_boundaries_in_realm(&boundaries, RealmId::System(DEV.realm_seed)),
+            Ok(())
+        );
+        assert_eq!(
+            guard_boundaries_in_realm(&boundaries, RealmId::System(DEV.realm_seed_b)),
+            Err(RealmBoundariesError::WrongRealm {
+                boundary_realm: RealmId::System(DEV.realm_seed),
+                hosted_realm: RealmId::System(DEV.realm_seed_b),
+            })
+        );
+    }
+
+    #[test]
+    fn write_source_boundaries_roundtrips_the_single_sourced_geometry() {
+        // The written file is the client-identical boxes.json: it serialize-roundtrips to the SAME Vec the
+        // helper returns AND loads back through the shard's boot loader (fs → serde → in-source-realm guard).
+        let dir = TempDir::new("crossing");
+        let path = write_source_boundaries(&dir.0, &DEV).expect("write boundaries");
+        let loaded = resolve_realm_boundaries(
+            &env(&[("VD_REALM_BOUNDARIES", &path)]),
+            RealmId::System(DEV.realm_seed),
+        )
+        .expect("the written file loads in the source realm");
+        assert_eq!(loaded, Some(source_crossing_boundaries(&DEV)));
     }
 }

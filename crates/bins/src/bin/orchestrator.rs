@@ -210,10 +210,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             directory,
             saga,
             liveness,
-            // D-37: EMPTY in prod for now (ledgered DEFERRED.md D-37) — a re-home parks until the
-            // per-shard-profile roster config lands (P3 is harness-driven; the cluster builder wires its
-            // own roster from the shard list). No env knob added yet (no-unilateral-deps).
-            roster: std::collections::BTreeMap::new(),
+            // Track R / 1d.2: the D-37 re-home roster is the routable-shard SET from VD_ROSTER (parsed by
+            // the EXISTING `EnvConfig::node_list`), each an empty/stub `ShardProfile` (a P3 bare-point
+            // subject's `CapRequest::default()` ⇒ the empty profile satisfies). Absent VD_ROSTER ⇒ empty
+            // (a re-home parks; a single-shard `up` stays byte-identical). NOTE: `select_rehome_target` is
+            // realm-BLIND (it picks the lowest live capable NodeId) — a D-37 concern, NOT the crossing,
+            // which resolves via `head(Realm(to_realm))` (HR3-clean, roster-independent). SCOPE (M-2): this
+            // local playground is 2-shard; the N-entry k3d roster is ledgered to cloud #123 in DEFERRED.md.
+            roster: {
+                let mut roster = std::collections::BTreeMap::new();
+                for node in env.node_list("VD_ROSTER").unwrap_or_default() {
+                    roster.insert(
+                        node,
+                        vd_sim::capability::ShardProfile::build(
+                            vd_sim::capability::CapRequest::default(),
+                        )
+                        .expect("the empty ShardProfile is coherent"),
+                    );
+                }
+                roster
+            },
         },
         Box::new(store),
     );

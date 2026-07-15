@@ -71,9 +71,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         GatewayConfig {
             orchestrator: env.node_id("VD_ORCH")?,
             shard,
-            // P1 single-shard roster: the one login shard is the only routable shard
-            // (Track R / 1d.2 multi-shard cluster rosters extend this set).
-            known_shards: std::collections::BTreeSet::from([shard]),
+            // Track R / 1d.2: the STABLE routable-shard roster — the login shard PLUS every shard in
+            // VD_KNOWN_SHARDS (parsed by the EXISTING `EnvConfig::node_list`), so a (render-ready) DEST's
+            // frames are node-class dispatchable (`is_known_shard` ⇒ they reach `on_shard_frame` instead
+            // of dropping as an unknown peer). The login `shard` is ALWAYS a member. Absent VD_KNOWN_SHARDS
+            // ⇒ just {shard} (a single-shard `up` stays byte-identical). SCOPE (M-2): this local playground
+            // is 2-shard; the N-shard k3d roster is ledgered to cloud #123 in DEFERRED.md.
+            known_shards: {
+                let mut set = std::collections::BTreeSet::from([shard]);
+                set.extend(env.node_list("VD_KNOWN_SHARDS").unwrap_or_default());
+                set
+            },
             auth_verifying_key: env.hex32("VD_AUTH_PUBKEY")?,
             session_seed: env.parse("VD_SESSION_SEED")?,
             // The SAME VD_TICK_HZ that paces this node — relayed to clients via

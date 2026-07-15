@@ -31,10 +31,11 @@ use std::time::{Duration, Instant};
 
 use vd_bins::{
     Cluster, ClusterAddrs, DEV, ORCH_STORE_NAME, RUNFILE_NAME, TRUST_DIR_NAME, admin_get_body,
-    common_env, dev_auth_pubkey_hex, gateway_env, loopback, orchestrator_env, sh_quote, shard_env,
-    slot_workdir,
+    common_env, dev_auth_pubkey_hex, gateway_env, loopback, orchestrator_env, sh_quote,
+    shard_b_env, shard_env, slot_workdir, write_source_boundaries,
 };
 use vd_core::NodeId;
+use vd_core::pose::RealmId;
 use vd_devproto::{CLIENT_NODE_BASE, DevPortScheme, SlotPorts};
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::AdminSnapshot;
@@ -45,6 +46,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Bounds the admin readiness GET so a wedged endpoint can't stall the poll.
 const ADMIN_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// One entry in the spawn list: (executable, log/kill-record label, env vars).
+/// HR3: the DEST runs the SAME `vd-shard` binary as the SOURCE — the label only
+/// names its log + kill-record entry, never a distinct binary.
+type NodeSpec = (&'static str, &'static str, Vec<(&'static str, String)>);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -84,12 +90,21 @@ fn run(args: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let work = work_dir(slot);
     match cmd {
-        "up" => up(slot, ports, &work),
+        // Track R / 1d.2 (M-2 scope: the LOCAL 2-process crossing playground): `--dual` spawns the DEST
+        // shard (realm B) as a 4th node and arms the SOURCE's geometric crossing trigger into realm B. A
+        // plain `up` (no `--dual`) stays 3 nodes, byte-identical to today. `--dual` is a clean 2-shard
+        // extension; the N-shard k3d roster generalization is ledgered to cloud #123 in DEFERRED.md.
+        "up" => up(slot, ports, &work, has_flag(args, "--dual")),
         "down" => down(&work),
         "status" => status(ports, &work),
         "env" => env_cmd(&work),
         other => Err(format!("unknown subcommand `{other}`")),
     }
+}
+
+/// True iff `flag` appears anywhere in `args` (a bare boolean flag, e.g. `--dual`).
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
 }
 
 /// Generate a fresh mTLS `ClusterTrust` bundle (`ca.der`/`node.der`/`key.der`) into `dir` — the
@@ -147,7 +162,7 @@ fn env_cmd(work: &Path) -> Result<(), String> {
 /// unrecorded port-holder (the pid lands before the child binds its port).
 /// `Cluster::Drop` additionally reaps GRACEFUL in-process failures (an early `?` /
 /// panic), but does NOT run on SIGKILL — the durable runfile is what covers that.
-fn up(slot: u16, ports: SlotPorts, work: &Path) -> Result<(), String> {
+fn up(slot: u16, ports: SlotPorts, work: &Path, dual: bool) -> Result<(), String> {
     std::fs::create_dir_all(work).map_err(|e| format!("create work dir: {e}"))?;
     // The runfile IS the claim: O_EXCL create fails if another launcher holds it.
     let mut runfile = match std::fs::OpenOptions::new()
@@ -165,7 +180,7 @@ fn up(slot: u16, ports: SlotPorts, work: &Path) -> Result<(), String> {
         Err(e) => return Err(format!("claim slot: {e}")),
     };
 
-    let result = up_inner(slot, ports, work, &mut runfile);
+    let result = up_inner(slot, ports, work, &mut runfile, dual);
     if result.is_err() {
         // Graceful failure: Cluster::Drop already killed the children; drop the
         // workdir (and the runfile/claim with it) so the slot is immediately reusable.
@@ -179,6 +194,7 @@ fn up_inner(
     ports: SlotPorts,
     work: &Path,
     runfile: &mut std::fs::File,
+    dual: bool,
 ) -> Result<(), String> {
     // mTLS trust bundle (shared by every node) + the dev auth identity.
     let trust_dir = work.join(TRUST_DIR_NAME);
@@ -197,6 +213,9 @@ fn up_inner(
         orchestrator_probe: loopback(ports.probe_orchestrator),
         gateway_probe: loopback(ports.probe_gateway),
         shard_probe: loopback(ports.probe_shard),
+        // Track R / 1d.2: the DEST shard's QUIC + probe (bound only when `dual` spawns the 4th node).
+        shard_b: loopback(ports.shard_b),
+        shard_b_probe: loopback(ports.probe_shard_b),
     };
     // CA-1 CRUTCH (fenced; deferred to M3): seed every dev-control client's QUIC
     // addr into the gateway book so the gateway can route snapshots back (the mesh
@@ -215,30 +234,52 @@ fn up_inner(
 
     // Spawn into a RAII guard (graceful-failure reaper); record each pid into the
     // runfile (SIGKILL reaper) the INSTANT its child exists, before the next spawn.
-    let mut cluster = Cluster::new();
-    for (name, node_env) in [
+    // Track R / 1d.2: the base 3 nodes are dual-aware (their `dual` arm books the DEST + emits
+    // VD_KNOWN_SHARDS/VD_ROSTER). In dual mode the SOURCE ALSO gets VD_REALM_BOUNDARIES (its geometric
+    // crossing trigger into realm B) and a 4th DEST shard is appended LAST (so the other nodes' books
+    // tolerate a not-yet-bound peer with retry — process_parity's NodeUnreachable-then-retry pattern).
+    // Each entry is (executable, log/kill-record label, env). HR3: the DEST runs the SAME `vd-shard`
+    // binary as the SOURCE — a distinct label (`vd-shard-b`) only names its log + kill-record entry.
+    let mut nodes: Vec<NodeSpec> = vec![
         (
             "vd-orchestrator",
-            orchestrator_env(&addrs, &DEV, &store_str),
+            "vd-orchestrator",
+            orchestrator_env(&addrs, &DEV, &store_str, dual),
         ),
         (
             "vd-gateway",
-            gateway_env(&addrs, &clients, &auth_pubkey, &DEV),
+            "vd-gateway",
+            gateway_env(&addrs, &clients, &auth_pubkey, &DEV, dual),
         ),
-        ("vd-shard", shard_env(&addrs, &DEV)),
-    ] {
-        let child = spawn_node(name, work, &common, node_env)?;
+        ("vd-shard", "vd-shard", shard_env(&addrs, &DEV, dual)),
+    ];
+    if dual {
+        // The SOURCE (realm 7) hosts the crossing trigger INTO realm B; the DEST (realm 8) just receives.
+        // The boundaries file is SINGLE-SOURCED via `write_source_boundaries` (System(7)→System(8) shell).
+        let boundaries_path = write_source_boundaries(work, &DEV)?;
+        let source = nodes
+            .iter_mut()
+            .find(|(_, label, _)| *label == "vd-shard")
+            .expect("the source shard is in the spawn list");
+        source.2.push(("VD_REALM_BOUNDARIES", boundaries_path));
+        // The DEST shard: the SAME `vd-shard` binary (HR3) with realm B, a distinct mint, its own
+        // bind+probe, booking the source (the cross-shard mesh) — labelled `vd-shard-b` for its log.
+        nodes.push(("vd-shard", "vd-shard-b", shard_b_env(&addrs, &DEV)));
+    }
+    let mut cluster = Cluster::new();
+    for (bin, label, node_env) in nodes {
+        let child = spawn_node(bin, label, work, &common, node_env)?;
         let pid = child.id();
         // Guard the child BEFORE the fallible record: if `record_pid` errors (a disk
         // fault mid-bring-up), `cluster` must already own this child so its Drop kills
         // it — otherwise an unrecorded, unkilled port-holder leaks when `up` then
         // removes the workdir. `push` is infallible and `record_pid` still runs before
         // the next spawn, so the pid is durable before the next child binds its port.
-        cluster.push(name, child);
+        cluster.push(label, child);
         record_pid(runfile, pid)?;
     }
 
-    if let Err(msg) = await_ready(&mut cluster, ports.admin) {
+    if let Err(msg) = await_ready(&mut cluster, ports.admin, dual) {
         for name in cluster.names() {
             dump_log_tail(work, name);
         }
@@ -265,16 +306,20 @@ fn up_inner(
     Ok(())
 }
 
-/// Wait until the cluster has bootstrapped (a shard granted its realm) with ALL
-/// node processes still alive — failing LOUD if a child exits or the deadline hits.
-fn await_ready(cluster: &mut Cluster, admin_port: u16) -> Result<(), String> {
+/// Wait until the cluster has bootstrapped with ALL node processes still alive — failing LOUD if a child
+/// exits or the deadline hits. In SINGLE-shard mode "bootstrapped" = any shard granted its realm
+/// ([`AdminSnapshot::cluster_bootstrapped`]). In DUAL mode (Track R / 1d.2, C1) it is the STRICT
+/// both-realms gate ([`AdminSnapshot::realms_present`] over `[System(7), System(8)]`): a dot cannot be
+/// driven across until the DEST realm is in the ONE directory, or `handle_crossing_request` would resolve
+/// no dest head and only COUNT `crossing_unresolved` — the crossing would never fire.
+fn await_ready(cluster: &mut Cluster, admin_port: u16, dual: bool) -> Result<(), String> {
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
         if let Some((name, status)) = cluster.first_exited() {
             return Err(format!("{name} exited during bring-up ({status})"));
         }
-        if admin_bootstrapped(admin_port) {
-            return Ok(()); // all three confirmed alive THIS iteration, and ready
+        if admin_ready(admin_port, dual) {
+            return Ok(()); // all node processes confirmed alive THIS iteration, and ready
         }
         if Instant::now() >= deadline {
             return Err("cluster did not become ready within the deadline".to_owned());
@@ -283,9 +328,19 @@ fn await_ready(cluster: &mut Cluster, admin_port: u16) -> Result<(), String> {
     }
 }
 
-/// A blocking HTTP/1.1 GET of `/admin/snapshot`, parsed and judged by the Tier-A
-/// [`AdminSnapshot::cluster_bootstrapped`] predicate (no brittle substring match).
-fn admin_bootstrapped(admin_port: u16) -> bool {
+/// The DUAL-cluster expected realms (source + DEST), derived from the DEV params (NEVER an inline
+/// `System(8)` — HR3 / M-1). Both must be granted before the crossing can fire.
+fn dual_expected_realms() -> [RealmId; 2] {
+    [
+        RealmId::System(DEV.realm_seed),
+        RealmId::System(DEV.realm_seed_b),
+    ]
+}
+
+/// A blocking HTTP/1.1 GET of `/admin/snapshot`, parsed and judged by a Tier-A predicate (no brittle
+/// substring match): the single-shard `cluster_bootstrapped` OR, in dual mode, the STRICT both-realms
+/// `realms_present` gate.
+fn admin_ready(admin_port: u16, dual: bool) -> bool {
     let Some(body) = admin_get_body(
         loopback(admin_port),
         "/admin/snapshot",
@@ -293,9 +348,14 @@ fn admin_bootstrapped(admin_port: u16) -> bool {
     ) else {
         return false;
     };
-    serde_json::from_str::<AdminSnapshot>(&body)
-        .map(|snap| snap.cluster_bootstrapped())
-        .unwrap_or(false)
+    let Ok(snap) = serde_json::from_str::<AdminSnapshot>(&body) else {
+        return false;
+    };
+    if dual {
+        snap.realms_present(&dual_expected_realms())
+    } else {
+        snap.cluster_bootstrapped()
+    }
 }
 
 /// Tear the cluster down: SIGTERM each recorded process group, escalate to SIGKILL
@@ -349,7 +409,9 @@ fn status(ports: SlotPorts, work: &Path) -> Result<(), String> {
     }
     let pids = read_pids(work).unwrap_or_default();
     let live = pids.iter().filter(|p| alive(**p)).count();
-    let ready = admin_bootstrapped(ports.admin);
+    // `status` reports the base bootstrap signal (any shard granted a realm) — it does not re-derive dual
+    // (the pid count already reflects 3 vs 4 nodes; a dual cluster shows the base signal once the source grants).
+    let ready = admin_ready(ports.admin, false);
     println!(
         "dev-cluster: {live}/{} node processes alive; admin {} => {}",
         pids.len(),
@@ -365,13 +427,17 @@ fn status(ports: SlotPorts, work: &Path) -> Result<(), String> {
 /// process group, with the merged env, redirecting its output to `<work>/<bin>.log`.
 fn spawn_node(
     bin: &str,
+    label: &str,
     work: &Path,
     common: &[(&'static str, String)],
     node_env: Vec<(&'static str, String)>,
 ) -> Result<Child, String> {
+    // HR3: ONE shard binary — the SOURCE and DEST both run `vd-shard`, distinguished by env + a distinct
+    // `label` (the DEST logs to `vd-shard-b.log` while spawning the SAME `vd-shard` executable), never a
+    // per-shard binary. `bin` is the sibling executable; `label` names the log + the kill-record entry.
     let exe = sibling_binary(bin)?;
     let log =
-        File::create(work.join(format!("{bin}.log"))).map_err(|e| format!("log file: {e}"))?;
+        File::create(work.join(format!("{label}.log"))).map_err(|e| format!("log file: {e}"))?;
     let err = log.try_clone().map_err(|e| format!("log clone: {e}"))?;
     let mut cmd = Command::new(exe);
     for (k, v) in common.iter().chain(node_env.iter()) {
@@ -385,7 +451,7 @@ fn spawn_node(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.spawn().map_err(|e| format!("spawn {bin}: {e}"))
+    cmd.spawn().map_err(|e| format!("spawn {label}: {e}"))
 }
 
 /// Resolve a sibling binary next to this launcher in the cargo target dir.
