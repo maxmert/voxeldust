@@ -37,9 +37,9 @@ use vd_harness::oracle::{RenderSample, verify_authority_settled, verify_authorit
 use vd_harness::topology::{InspectReport, Topology};
 use vd_sim::io::mem::MemStore;
 use vd_tests::{
-    DEST, ORCH, SHARD, arm_gateway_reject, dest_stub_config, live_sagas, p1_client, p2_cluster,
-    p2_cluster_durable_orch, plant_one_crossing_shell, read_subject, realm_fence,
-    rebuild_orchestrator, saga_states, seed_held_transient, stub_config, walk_forward,
+    DEST, ORCH, SHARD, arm_gateway_reject, clear_crossing_boundaries, dest_stub_config, live_sagas,
+    p1_client, p2_cluster, p2_cluster_durable_orch, plant_one_crossing_shell, read_subject,
+    realm_fence, rebuild_orchestrator, saga_states, seed_held_transient, stub_config, walk_forward,
 };
 use vd_wire::channels::SubId;
 use vd_wire::intershard::crossing_transfer_id;
@@ -505,6 +505,12 @@ fn crossing_e2e_pre_cas_abort_clears_the_source_latch() {
                 saw_pending_pre_ack = true;
             }
             crossings_after_plant = report(&r, ORCH).crossings_started;
+            // C-3: DISARM the source once the ONE crossing has started, so the position-driven re-home does
+            // not re-fire after the abort resets the source cooldown (the dot never physically leaves the
+            // dest region). This keeps the abort as the terminal event and the started-count at exactly one.
+            if crossings_after_plant >= 1 {
+                clear_crossing_boundaries(t);
+            }
         },
         // Exit once the FULL Mechanism-Y round-trip completed: the crossing started + aborted (tombstoned),
         // the source cleared its latch, AND the source's ack reaped the staged reply (`pending == 0`).
@@ -602,9 +608,18 @@ fn crossing_e2e_abort_survives_orchestrator_restart() {
     // (`pending_abort_replies >= 1`). The link MUST stay healthy here: the `CrossingRequest` that starts the
     // saga rides SHARD -> ORCH — the SAME directed link we park below — so parking before the request
     // arrives would strand the crossing (it would never become a saga). Stop the INSTANT the reply is staged.
-    step_until(&mut topo, 80, &mut |_| {}, |t| {
-        report(&t.inspect_all(), ORCH).pending_abort_replies >= 1
-    });
+    // C-3: DISARM the source once the ONE crossing has started, so the position-driven re-home does not
+    // re-fire after the abort resets the source cooldown (the dot never physically leaves the dest region).
+    step_until(
+        &mut topo,
+        80,
+        &mut |t| {
+            if report(&t.inspect_all(), ORCH).crossings_started >= 1 {
+                clear_crossing_boundaries(t);
+            }
+        },
+        |t| report(&t.inspect_all(), ORCH).pending_abort_replies >= 1,
+    );
 
     // PHASE 2 — PARK the ack direction (SHARD -> ORCH Saga) so the source's `CrossingAbortedAck` requeues in
     // the fabric (partitioned = block + redeliver, never dropped) instead of reaping the staged reply. The

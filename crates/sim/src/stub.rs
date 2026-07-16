@@ -20,9 +20,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
-use vd_core::frame::rebind_pose_to_dest;
+use vd_core::frame::{IdentityFrames, rebind_pose_to_dest};
 use vd_core::geometry::{
-    Direction, OverlapBand, RealmBoundary, ShellCrossing, resolve_winner_ix, should_commit,
+    DepthKey, OverlapBand, RealmRegion, container, region_depth, region_signed_distance,
+    should_rehome,
 };
 use vd_core::glam::DVec3;
 use vd_core::kinematics;
@@ -164,12 +165,11 @@ pub struct Dot {
     pub yaw: f64,
     pub pitch: f64,
     pub last_applied_seq: Option<u64>,
-    /// Slice 3d — the frame-local offset (`pose.pos.offset()`) at the END of the PREVIOUS tick's
-    /// integration, the START endpoint of THIS tick's swept boundary segment (`prev_offset → cur`)
-    /// in `evaluate_realm_boundaries`. Seeded to the spawn offset at every construction site so
-    /// tick-1's segment is degenerate (`prev == cur` ⇒ never a spurious crossing), then written LAST
-    /// each evaluation tick to `cur` — so the anti-tunneling sweep tests the WHOLE motion segment,
-    /// never a point sample. INERT in production through P3 (the boundary registry is EMPTY).
+    /// The frame-local offset (`pose.pos.offset()`) at the END of the previous tick, written LAST each
+    /// evaluation tick to `cur`. INERT under CONTAINMENT (task #135): the detector uses POINT membership
+    /// (`region_signed_distance` at `cur`), not a swept segment, so `prev_offset` is written-but-unread —
+    /// RESERVED for the deferred additive swept tunnel-guard (DEFERRED D-45). Seeded to the spawn offset
+    /// at every construction site.
     pub prev_offset: DVec3,
 }
 
@@ -357,26 +357,16 @@ pub struct LatchedCrossing {
     pub session: SessionId,
 }
 
-/// The per-entity/per-boundary hysteresis-dwell state the geometric trigger carries between ticks —
-/// the `should_commit` counters (the fn itself is pure/stateless, this is its store). Keyed by the
-/// subject entity (both owned dots AND held transients). Evicted lazily when the subject leaves (the
-/// DRY retain in `evaluate_realm_boundaries`).
+/// The per-entity crossing state the CONTAINMENT trigger carries between ticks — the post-commit cooldown
+/// plus the durable re-drive latch. (The per-region HYSTERETIC membership lives in the separate
+/// [`ContainmentProgress`] bitset, task #135 §2.3; this struct no longer holds the old single-winner
+/// dwell.) Keyed by the subject entity (owned dots AND held transients); lazily evicted when it leaves.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CrossingState {
-    /// Consecutive in-band ticks (the rising-edge entry dwell). Reset to 0 the moment membership drops.
-    pub inward_ticks: u32,
-    /// The `local_tick` a crossing last committed (arms the post-commit cooldown). `None` = never.
-    /// PER-ENTITY (an authority anti-thrash window) — deliberately NOT reset on a winner change below.
+    /// The `local_tick` a crossing last committed (arms the symmetric post-commit cooldown,
+    /// [`should_rehome`]). `None` = never committed. PER-ENTITY anti-thrash; reset on abort so the
+    /// re-home can re-fire without a physical re-cross (the container still differs from the owner).
     pub last_commit_tick: Option<TickId>,
-    /// The hysteresis membership at the END of the previous tick (fed to `OverlapBand::update_membership`).
-    pub was_member: bool,
-    /// The slice index of the boundary this `inward_ticks`/`was_member` dwell belongs to — the dwell
-    /// counters are per-*(entity, boundary)*, but stored in one per-entity slot for the SINGLE winner
-    /// picked each tick. When `resolve_winner_ix` picks a DIFFERENT boundary (an entity moving between
-    /// two disjoint regions), carrying the prior boundary's dwell/hysteresis into the new one corrupts
-    /// its rising edge (a lost or false crossing) — so a winner change restarts the dwell from this
-    /// boundary's create edge (`evaluate_one_subject`). `None` = never evaluated. Cooldown is preserved.
-    pub winner_ix: Option<usize>,
     /// The per-entity crossing-ATTEMPT counter (Slice 3f-D, H2). Bumped ONLY when a NEW `RequestInFlight`
     /// latch is taken (`fan_out_crossing`'s `Vacant` arm), i.e. only AFTER the prior latch cleared on
     /// abort/commit — so it feeds a UNIQUE [`crossing_transfer_id`] per attempt: a stale `CrossingAborted`
@@ -394,10 +384,43 @@ pub struct CrossingState {
     pub latched_crossing: Option<LatchedCrossing>,
 }
 
-/// The geometric trigger's per-entity dwell state (Slice 3d). One entry per subject that has been
-/// evaluated against ≥1 boundary; lazily evicted when the subject leaves the shard.
+/// The containment trigger's per-entity cooldown/latch state (task #135). One entry per evaluated
+/// subject; lazily evicted when the subject leaves the shard.
 #[derive(Resource, Debug, Default)]
 pub struct CrossingProgress(pub BTreeMap<EntityId, CrossingState>);
+
+/// Per-entity HYSTERETIC containment membership: bit `ix` = "hysteretic member of `RealmRegions[ix]`"
+/// (task #135 §2.3). A fixed-width `u64` (`MAX_REGIONS` = 64: the shard's own realm + its ~4 ancestors +
+/// a bounded child set; the HUNDREDS of sibling child realms resolve via the directory, NOT a local bit —
+/// the scale answer). `Copy`, ONE word per entity → zero cross-entity contention (the `par_iter`
+/// precondition). Each region's bit advances INDEPENDENTLY by its own [`vd_core::geometry::ContainmentBand`]
+/// — there is no single-winner slot to corrupt (the old `winner_ix` reset was actively wrong here).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RegionMembership {
+    bits: u64,
+}
+
+impl RegionMembership {
+    /// Is the entity a hysteretic member of region `ix`? (Precondition `ix < MAX_REGIONS`.)
+    fn get(self, ix: usize) -> bool {
+        self.bits & (1u64 << ix) != 0
+    }
+
+    /// Set the membership bit for region `ix` (precondition `ix < MAX_REGIONS`).
+    fn set(&mut self, ix: usize, member: bool) {
+        let mask = 1u64 << ix;
+        if member {
+            self.bits |= mask;
+        } else {
+            self.bits &= !mask;
+        }
+    }
+}
+
+/// Per-entity containment-membership bitsets (task #135). Keyed by the subject entity; lazily evicted
+/// with the other per-entity ledgers when the subject leaves.
+#[derive(Resource, Debug, Default)]
+pub struct ContainmentProgress(pub BTreeMap<EntityId, RegionMembership>);
 
 /// The per-entity DURABLE-crossing latch (Slice 3d): a durable entity that has emitted a
 /// `CrossingRequest` is latched here (keyed by subject entity → the deterministic
@@ -407,18 +430,47 @@ pub struct CrossingProgress(pub BTreeMap<EntityId, CrossingState>);
 #[derive(Resource, Debug, Default)]
 pub struct RequestInFlight(pub BTreeMap<EntityId, TransferId>);
 
-/// The per-entity INTEREST zone the geometric trigger last resolved (Slice 3d): a `CrossEffect::Interest`
-/// crossing writes the entered realm here. WRITE-ONLY this slice (no reader yet — the ghost/subscription
-/// consumer is a later slice; ledgered). Lazily evicted when the subject leaves.
-#[derive(Resource, Debug, Default)]
-pub struct InterestZones(pub BTreeMap<EntityId, RealmId>);
+/// The bitset width bound: a shard's region set exceeding this fails LOUD at boot (`guard_regions_nest`,
+/// C-5). The scale answer is NOT a wider bitset — it is the own-realm + ~4-ancestor scoping (children via
+/// the directory, §2.3), so 64 is generous headroom, not a ceiling on how crowded a realm can be.
+pub const MAX_REGIONS: usize = 64;
 
-/// The realm boundaries this shard evaluates every owned entity against (Slice 3e). DEFAULT EMPTY —
-/// production plants none through P3, so `evaluate_realm_boundaries` early-returns (the trigger is
-/// behaviour-identical / inert). Tests populate it (e.g. a planet-SOI [`RealmBoundary::shell`]) to
-/// exercise the crossing logic.
+/// The seed-derived realm REGIONS this shard evaluates CONTAINMENT against (task #135): the shard's own
+/// realm + its ancestor chain (+ a bounded child set). Holds the regions, their BOOT-COMPUTED depth keys
+/// (so the per-tick `container` fold never re-walks parents — O(entities × regions), not O(N·M²)), and the
+/// ambient-ROOT realm (the `parent: None` region — the `container` fold identity). DEFAULT EMPTY → the
+/// detector early-returns (INERT in production through C-3; the seed boot-population + `guard_regions_nest`
+/// land C-5/C-6). Replaces the directional `RealmBoundaries` portal registry.
 #[derive(Resource, Debug, Default)]
-pub struct RealmBoundaries(pub Vec<RealmBoundary>);
+pub struct RealmRegions {
+    regions: Vec<RealmRegion>,
+    depths: Vec<DepthKey>,
+    root_realm: Option<RealmId>,
+}
+
+impl RealmRegions {
+    /// Build the resource from a region forest, computing the depth-key cache + the ambient-root realm
+    /// ONCE (regions are static at P3). The per-tick detector reads the cache; it never re-walks parents.
+    #[must_use]
+    pub fn new(regions: Vec<RealmRegion>) -> RealmRegions {
+        let depths = regions
+            .iter()
+            .enumerate()
+            .map(|(ix, r)| (region_depth(&regions, r.realm), r.realm, ix))
+            .collect();
+        let root_realm = regions.iter().find(|r| r.parent.is_none()).map(|r| r.realm);
+        RealmRegions {
+            regions,
+            depths,
+            root_realm,
+        }
+    }
+
+    /// The detector short-circuits (inert) when no regions are planted — production through C-3.
+    fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+}
 
 /// Entity minting state: a per-shard monotonic sequence + seed-derived entropy.
 #[derive(Resource, Debug)]
@@ -733,9 +785,6 @@ pub struct StubStats {
     /// Slice 3e — TRANSIENT geometric crossings REQUESTED: a transient committed across an `Authority`
     /// boundary and emitted a `TransientCrossingRequest` (the batched-grant path). `0` in prod through P3.
     pub transient_crossings_requested: u64,
-    /// Slice 3e — `InterestZones` writes from an `Interest`-effect crossing (WRITE-ONLY this slice — the
-    /// ghost/subscription reader is a later slice). Ops visibility. `0` in prod through P3.
-    pub crossing_interest_updates: u64,
     /// Slice 3e — `RequestInFlight` latches CLEARED by a saga terminal at the SOURCE: `on_saga_demote` on a
     /// durable COMMIT, or a `CrossingAborted` demux on a pre-CAS abort. Proves the POSITIVE (never-TTL)
     /// clear. `0` until a triggered crossing resolves.
@@ -754,15 +803,6 @@ pub struct StubStats {
     /// Slice 3e — `CrossingAborted` whose transfer id did NOT match the subject's current latch (a stale
     /// abort for a superseded / re-latched crossing) — a counted no-op, the latch is preserved. `0` healthy.
     pub crossing_abort_stale: u64,
-    /// Slice 4b — an AUTHORITY-effect OUTWARD crossing (an undock) committed against a boundary whose
-    /// `parent` is `None`, so there is no enclosing realm to re-home the subject to. DEGRADED (counted,
-    /// emitted nothing) inside the Authority arms only — the Interest arm is direction-agnostic and never
-    /// reaches here. This is a COMPOSER / boundary-AUTHORING error, NOT a per-tick runtime condition:
-    /// every real realm nests in an enclosing System/Galaxy realm, so a top-level Authority boundary an
-    /// entity can leave OUTWARD is malformed. It is counted (not silently dropped) so a valid-fixture test
-    /// can assert it stays `0`; a dedicated malformed-fixture test drives it to `1` to cover the degrade
-    /// arm. `0` in prod through P3 (empty registry) and in every well-formed fixture.
-    pub crossing_outward_no_parent: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -869,12 +909,13 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(GhostColliderRegistration::default());
     world.insert_resource(SourceGhostMirror::default());
     world.insert_resource(OwnedTransients::default());
-    // Slice 3d/3e — the geometric transfer-trigger state. `RealmBoundaries` defaults EMPTY, so
-    // `evaluate_realm_boundaries` early-returns in prod (inert through P3); tests populate it.
+    // task #135 — the CONTAINMENT trigger state. `RealmRegions` defaults EMPTY, so
+    // `evaluate_realm_boundaries` early-returns in prod (inert through C-3; seed boot-population is
+    // C-5/C-6); tests populate it via `RealmRegions::new`.
     world.insert_resource(CrossingProgress::default());
+    world.insert_resource(ContainmentProgress::default());
     world.insert_resource(RequestInFlight::default());
-    world.insert_resource(InterestZones::default());
-    world.insert_resource(RealmBoundaries::default());
+    world.insert_resource(RealmRegions::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -1712,15 +1753,14 @@ fn on_crossing_aborted(
     // false arm is a covered no-op, not an uncoverable `matches!` region (HR5(d)).
     if in_flight.0.get(&entity) == Some(&abort.transfer) {
         in_flight.0.remove(&entity);
-        // Re-arm (audit-L1 + H2): reset the dwell so the rising edge can re-fire without a physical re-cross,
-        // and BUMP the attempt so the re-latch mints a fresh id. `entry().or_default()` (not `if let`) so
+        // Re-arm (audit-L1 + H2): reset the cooldown so the re-home can re-fire, and BUMP the attempt so the
+        // re-latch mints a fresh id. `entry().or_default()` (not `if let`) so
         // there is no uncoverable `None` region — a latched entity always has a `CrossingState`, but a
         // default is harmless if absent. NOT a drop: dropping would reset the attempt to 0 → aliasing.
         let st = progress.0.entry(entity).or_default();
         st.crossing_attempt = st.crossing_attempt.saturating_add(1);
-        st.inward_ticks = 0;
-        st.was_member = false;
-        st.winner_ix = None;
+        // Reset the cooldown so the re-home can re-fire without a physical re-cross — the container still
+        // differs from the owner (the entity did not move), so `should_rehome` fires again next tick.
         st.last_commit_tick = None;
         stats.crossing_latches_cleared += 1;
     } else {
@@ -2376,38 +2416,40 @@ fn drain_pending_crossing(
 }
 
 /// Slice 3e — THE per-shard geometric transfer-TRIGGER: evaluate every owned dot + held transient
-/// against the realm boundaries this shard carries, and — on a `should_commit` rising edge / immediate
-/// exit — fan out ONE crossing egress by the winning boundary's `CrossEffect` × the subject's
-/// `DurabilityClass`. INERT in production through P3: `RealmBoundaries` is empty (the composer plants
-/// none — behaviour-identical); its logic is exercised only by the sim integration tests.
+/// against the realm REGIONS this shard carries (task #135): compute the DEEPEST region CONTAINING each
+/// owned subject (`container`) and, when that differs from the realm this shard owns it in, fan out ONE
+/// authority re-home. SYMMETRIC + direction-free — escaping a realm and entering one are the same rule.
+/// INERT in production through C-3: `RealmRegions` is empty (the seed boot-population is C-5/C-6), so it
+/// early-returns (behaviour-identical); its logic is exercised only by the sim integration tests.
 ///
-/// A BRANCHLESS SHIM (HR5): the system body is iterate → delegate; ALL `if`/`match`/`&&`/`?` live in
-/// the monomorphic helpers [`evaluate_one_subject`] / [`crossing_candidates`] / [`boundary_depth`] /
-/// [`fan_out_crossing`] / [`retain_live`]. The heavy geometry lives in `vd_core::geometry`
-/// (`should_commit` / `resolve_winner_ix` / `update_membership`) — this file only wires it.
+/// A BRANCHLESS SHIM (HR5): the system body is iterate → delegate; ALL branching lives in the monomorphic
+/// helpers [`evaluate_one_subject`] / [`fan_out_crossing`] / [`retain_live`]. The geometry lives in
+/// `vd_core::geometry` (`container` / `region_signed_distance` / `should_rehome` / `ContainmentBand`).
 #[allow(clippy::too_many_arguments)]
 fn evaluate_realm_boundaries(
     config: Res<StubConfig>,
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
-    boundaries: Res<RealmBoundaries>,
+    regions: Res<RealmRegions>,
     mut dots: ResMut<Dots>,
     mut owned_transients: ResMut<OwnedTransients>,
     mut progress: ResMut<CrossingProgress>,
+    mut membership: ResMut<ContainmentProgress>,
     mut in_flight: ResMut<RequestInFlight>,
-    mut interest: ResMut<InterestZones>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
 ) {
     // Authority gate (mirrors `emit_transient_batch`): a shard without its realm lease triggers no
-    // crossing — the `_realm_fence` (the realm-authority fence) is the durable `subject_fence` and the
-    // transient `src_realm_fence` the egress carries.
+    // re-home — the `realm_fence` is the durable `subject_fence` and the transient `src_realm_fence`.
     let Some(realm_fence) = authority.0 else {
         return;
     };
-    // EVICTION (lazy retain, DRY single site): drop per-entity state for any subject no longer resident
-    // (a logged-out dot / a released transient), so the maps never leak. The live set is the union of
-    // owned-dot entities and held-transient keys.
+    // Inert until regions are planted (production through C-3): nothing to evaluate containment against.
+    if regions.is_empty() {
+        return;
+    }
+    // EVICTION (lazy retain, DRY single site): drop per-entity state for any subject no longer resident,
+    // so the maps never leak. The live set is the union of owned-dot entities and held-transient keys.
     let live: BTreeSet<EntityId> = dots
         .0
         .values()
@@ -2415,30 +2457,31 @@ fn evaluate_realm_boundaries(
         .chain(owned_transients.0.keys().copied())
         .collect();
     retain_live(&mut progress.0, &live);
+    retain_live(&mut membership.0, &live);
     retain_live(&mut in_flight.0, &live);
-    retain_live(&mut interest.0, &live);
 
     let ctx = CrossingCtx {
         config: &config,
         clock: &clock,
-        boundaries: &boundaries.0,
+        regions: &regions.regions,
+        depths: &regions.depths,
+        root_realm: regions.root_realm,
         realm_fence,
     };
     // Per owned dot (only those this shard SIMULATES) — the durable subjects. `.iter_mut()` (not
     // `.values_mut()`) so the `SessionId` key is in scope: a durable crossing carries the subject's
     // session for the saga's gateway-routed `PrepareSubscribe` (Slice 3f).
     for (session, dot) in dots.0.iter_mut().filter(|(_, d)| d.authority.simulates()) {
-        let cur = dot.pose.pos.offset();
+        let pose = dot.pose;
         dot.prev_offset = evaluate_one_subject(
             &ctx,
             dot.entity,
-            cur,
-            dot.prev_offset,
+            &pose,
             dot.authority.fence(),
             Some(*session),
             &mut progress.0,
+            &mut membership.0,
             &mut in_flight.0,
-            &mut interest.0,
             &mut stats,
             &mut outbox,
         );
@@ -2451,30 +2494,36 @@ fn evaluate_realm_boundaries(
         .iter_mut()
         .filter(|(_, t)| t.status.is_held())
     {
-        let cur = t.pose.pos.offset();
+        let pose = t.pose;
         t.prev_offset = evaluate_one_subject(
             &ctx,
             *entity,
-            cur,
-            t.prev_offset,
+            &pose,
             realm_fence,
             // A transient carries no session (its batch handoff emits no session-bearing command); it
             // dispatches to the Transient arm, which never reads this. Slice 3f.
             None,
             &mut progress.0,
+            &mut membership.0,
             &mut in_flight.0,
-            &mut interest.0,
             &mut stats,
             &mut outbox,
         );
     }
 }
 
-/// Read-only per-tick context shared by every subject evaluation (Slice 3e).
+/// Read-only per-tick context shared by every subject evaluation (task #135).
 struct CrossingCtx<'a> {
     config: &'a StubConfig,
     clock: &'a ClockSample,
-    boundaries: &'a [RealmBoundary],
+    /// The shard's realm REGIONS (own realm + ancestor chain + a bounded child set).
+    regions: &'a [RealmRegion],
+    /// The boot-computed depth key per region (index-aligned to `regions`) — the `container` fold reads
+    /// these, never re-walking parents (O(entities × regions), not O(N·M²)).
+    depths: &'a [DepthKey],
+    /// The ambient-ROOT realm (the `parent: None` region) — the `container` fold identity. Always `Some`
+    /// here (the system early-returns on an empty registry before building the ctx).
+    root_realm: Option<RealmId>,
     /// The realm-authority fence — the durable subject's `subject_fence` fallback AND the transient
     /// `src_realm_fence`.
     realm_fence: Fence,
@@ -2486,66 +2535,67 @@ fn retain_live<V>(map: &mut BTreeMap<EntityId, V>, live: &BTreeSet<EntityId>) {
     map.retain(|e, _| live.contains(e));
 }
 
-/// The FULL per-subject crossing evaluation (Slice 3e), monomorphic so every branch is covered ONCE
-/// here (HR5), not smeared across the dot- and transient-loops. Returns the value to store back into
-/// the subject's `prev_offset` (always `cur` — so next tick's segment is `prev → cur`). Steps:
-/// pick the winning boundary (`resolve_winner_ix` over the candidates), advance the membership dwell,
-/// ask `should_commit`, and on a rising edge fan the crossing out by effect × durability.
+/// The FULL per-subject CONTAINMENT evaluation (task #135), monomorphic so every branch is covered ONCE
+/// here (HR5). Full-scan the shard's regions: advance each region's per-entity hysteretic membership bit
+/// (its own [`vd_core::geometry::ContainmentBand`] over `signed_distance`), fold the members into the
+/// DEEPEST containing realm ([`container`], total by construction — no `None`), and — when that differs
+/// from the realm this shard owns the subject in AND the post-commit cooldown elapsed ([`should_rehome`])
+/// — fan ONE re-home out by the subject's `DurabilityClass`. Returns `cur` for the caller's `prev_offset`.
+///
+/// SYMMETRIC + direction-free: escaping a realm (System→Galaxy) and entering one (Galaxy→System) are the
+/// identical path — the container simply changed. The per-region band hysteresis IS the anti-flap dwell.
 #[allow(clippy::too_many_arguments)]
 fn evaluate_one_subject(
     ctx: &CrossingCtx<'_>,
     entity: EntityId,
-    cur: DVec3,
-    prev: DVec3,
+    pose: &StampedPose,
     subject_fence: Fence,
     // The subject's session — `Some` for a durable dot (the durable `CrossingRequest` carries it so the
     // orchestrator's saga can `PrepareSubscribe` to the client's gateway), `None` for a transient (whose
     // batch path emits no session-bearing command and never reaches the durable arm). Slice 3f.
     subject_session: Option<SessionId>,
     progress: &mut BTreeMap<EntityId, CrossingState>,
+    membership: &mut BTreeMap<EntityId, RegionMembership>,
     in_flight: &mut BTreeMap<EntityId, TransferId>,
-    interest: &mut BTreeMap<EntityId, RealmId>,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) -> DVec3 {
-    // No boundary won this tick → nothing to evaluate; still store `cur` as the next `prev`.
-    let Some((ix, _dir)) = resolve_winner_ix(&crossing_candidates(ctx.boundaries, prev, cur))
-    else {
+    let cur = pose.pos.offset();
+    // The ambient root seeds the `container` fold (always `Some` — the system gated on a non-empty
+    // registry before building the ctx; the `let-else` keeps this branchless of an `unwrap`).
+    let Some(root_realm) = ctx.root_realm else {
         return cur;
     };
-    let winner = &ctx.boundaries[ix];
-    let center = winner.center.offset();
-    let swept = winner.shape.swept(prev - center, cur - center);
-    let ms = winner.shape.membership_scalar(cur - center);
-    let state = progress.entry(entity).or_default();
-    // Per-(entity, boundary) dwell: if the winning boundary CHANGED since last tick (the entity moved
-    // between two disjoint regions), this boundary's rising-edge dwell restarts from its own create
-    // edge — carrying the prior winner's `was_member`/`inward_ticks` would corrupt it (its hysteresis
-    // reads the destroy edge, its dwell already past `n_entry` → a lost inward commit). The commit
-    // COOLDOWN (`last_commit_tick`) is per-ENTITY and is intentionally preserved across the change.
-    if state.winner_ix != Some(ix) {
-        state.winner_ix = Some(ix);
-        state.inward_ticks = 0;
-        state.was_member = false;
+    // FULL SCAN: advance each region's hysteretic membership bit and collect the members' depth keys.
+    // Per-region + per-entity (the bitset) → each region's bit advances INDEPENDENTLY (no winner slot to
+    // corrupt). Zips regions with their boot-computed depth keys (no per-tick parent walk, no index panic).
+    let bits = membership.entry(entity).or_default();
+    let mut members: Vec<DepthKey> = Vec::new();
+    for (ix, (region, &depth_key)) in ctx.regions.iter().zip(ctx.depths.iter()).enumerate() {
+        // The input-side frame seam (§2.5): re-express the pose into the region's frame BEFORE the signed
+        // distance. `IdentityFrames` is a no-op at P3 (never errors); P4/P5 swaps in the real ephemeris
+        // `FrameContext` (safe-degrading an un-nameable region to non-member) — additive, no reshape.
+        let sd = region_signed_distance(pose, region, &IdentityFrames)
+            .expect("IdentityFrames placements never error at P3");
+        let now = region.band.member(bits.get(ix), sd);
+        bits.set(ix, now);
+        if now {
+            members.push(depth_key);
+        }
     }
-    let now_member = winner.band.update_membership(state.was_member, ms);
-    // INCREMENT FIRST (the pre-increment `should_commit` relies on): the in-band dwell reaches
-    // `n_entry` on exactly one tick.
-    state.inward_ticks = if now_member {
-        state.inward_ticks.saturating_add(1)
-    } else {
-        0
-    };
+    let container_realm = container(root_realm, &members);
+    // The post-commit cooldown from the per-entity CrossingState.
+    let state = progress.entry(entity).or_default();
     let since_commit = state
         .last_commit_tick
         // `.min(u32::MAX)` before the cast: `saturating_sub` is u64, and a raw `as u32` truncation is
-        // non-monotone (a gap of `2^32 + k` would read as `k` and falsely re-suppress). Saturating keeps
-        // the cooldown compare monotone. (Reachable only after ~2^32 ticks between commits — defensive.)
+        // non-monotone (a gap of `2^32 + k` would read as `k` and falsely re-suppress). (Defensive.)
         .map(|t| (ctx.clock.local_tick.0.saturating_sub(t.0)).min(u32::MAX as u64) as u32);
-    if let Some(dir) = should_commit(
-        swept,
-        now_member,
-        state.inward_ticks,
+    // The ONE symmetric re-home decision: re-home iff the deepest container differs from the owning realm
+    // (past the cooldown). `dest` is the container realm — derived from position, never authored.
+    if let Some(dest) = should_rehome(
+        ctx.config.realm,
+        container_realm,
         since_commit,
         &ctx.config.boundary,
     ) {
@@ -2554,152 +2604,45 @@ fn evaluate_one_subject(
             entity,
             subject_fence,
             subject_session,
-            winner,
-            dir,
+            dest,
             state,
             in_flight,
-            interest,
             stats,
             outbox,
         );
     }
-    // Write `was_member` back LAST (the state was borrowed mutably above via `entry`); `prev_offset`
-    // is returned to the caller for the write.
-    state.was_member = now_member;
     cur
 }
 
-/// Build the `(depth, to_realm, direction, ix)` candidate slice `resolve_winner_ix` consumes (Slice
-/// 3e). One candidate per boundary whose swept segment is RELEVANT this tick (a finite membership
-/// scalar — a degenerate/NaN geometry contributes nothing). `depth` is the boundary's parent-chain
-/// length (innermost wins). Monomorphic — the `match`/filter branching is covered once here.
-fn crossing_candidates(
-    boundaries: &[RealmBoundary],
-    prev: DVec3,
-    cur: DVec3,
-) -> Vec<(u32, RealmId, Direction, usize)> {
-    boundaries
-        .iter()
-        .enumerate()
-        .filter_map(|(ix, b)| {
-            let center = b.center.offset();
-            let swept = b.shape.swept(prev - center, cur - center);
-            // Only a boundary the segment actually relates to (entered/exited/inside/through) is a
-            // candidate — a clean StaysOutside is not a crossing. A degenerate (non-finite) membership
-            // scalar is skipped (never trust a corrupt pose into the winner order).
-            let ms = b.shape.membership_scalar(cur - center);
-            candidate_direction(swept)
-                .filter(|_| ms.is_finite())
-                .map(|dir| (boundary_depth(boundaries, ix), b.to_realm, dir, ix))
-        })
-        .collect()
-}
-
-/// The `Direction` a swept classification implies for the winner order (Slice 3e), or `None` when the
-/// segment does not relate to the boundary (`StaysOutside`). Inward-ish (`Inward`/`StaysInside`) maps
-/// to `Inward`; leaving (`Outward`/`ThroughAndBack`) to `Outward`. This is ONLY the candidate's
-/// tiebreak key — the ACTUAL commit direction is `should_commit`'s (a `StaysInside` candidate whose
-/// dwell matures commits `Inward` there). Monomorphic so the match is covered once.
-fn candidate_direction(swept: ShellCrossing) -> Option<Direction> {
-    match swept {
-        ShellCrossing::Inward | ShellCrossing::StaysInside => Some(Direction::Inward),
-        ShellCrossing::Outward | ShellCrossing::ThroughAndBack => Some(Direction::Outward),
-        ShellCrossing::StaysOutside => None,
-    }
-}
-
-/// The parent-chain length of boundary `ix` (Slice 3e): walk `parent` through the boundary slice,
-/// counting hops until the top level (`None`) or a broken/cyclic link. Innermost (longest chain) wins
-/// `resolve_winner_ix`. Bounded by the slice length (a self-referential or missing parent stops the
-/// walk), so it always terminates. Monomorphic — the loop's branches are covered once.
-fn boundary_depth(boundaries: &[RealmBoundary], ix: usize) -> u32 {
-    let mut depth = 0u32;
-    let mut parent = boundaries[ix].parent;
-    // Bound the walk by the slice length so a mis-authored cycle can never spin.
-    for _ in 0..boundaries.len() {
-        let Some(p) = parent else {
-            break;
-        };
-        let Some(next) = boundaries.iter().find(|b| b.realm == p) else {
-            break;
-        };
-        depth = depth.saturating_add(1);
-        parent = next.parent;
-    }
-    depth
-}
-
-/// Slice 4b — the direction-resolved AUTHORITY destination for a committed crossing. An INWARD dock
-/// hands authority to the boundary interior (`winner.to_realm`); an OUTWARD undock re-homes to the
-/// boundary's enclosing `parent` (the realm the container itself sits in). A total 2-arm map over
-/// [`Direction`] — the two arms are contrasted by the dock (Inward → `to_realm`) and undock (Outward
-/// → `parent`) tests, so both are covered.
-///
-/// `None` on an Outward crossing whose boundary has NO parent is a COMPOSER / boundary-AUTHORING error,
-/// NOT a per-tick runtime condition: every real realm nests in an enclosing System/Galaxy realm, so a
-/// top-level Authority boundary an entity can leave OUTWARD is malformed. The caller counts the degrade
-/// (`crossing_outward_no_parent`) and emits nothing, so a valid fixture can assert the counter stays `0`
-/// while a malformed-fixture test drives it to `1` to cover the `None` arm — never a silent per-tick drop.
-///
-/// Used ONLY in the two Authority arms (durable + transient); the Interest arm stays direction-agnostic
-/// (a ghost is written to `winner.to_realm` regardless of direction).
-fn authority_dest(dir: Direction, winner: &RealmBoundary) -> Option<RealmId> {
-    match dir {
-        Direction::Inward => Some(winner.to_realm),
-        Direction::Outward => winner.parent,
-    }
-}
-
-/// Fan the committed crossing out by the winning boundary's `CrossEffect` × the subject's
-/// `DurabilityClass` (Slice 3e), the ONE dispatch site (HR2 policy fan-out on one machinery).
-/// Monomorphic so every arm is covered once:
-/// - `Interest` → record the entered realm in `InterestZones` (WRITE-ONLY this slice; no cooldown arm).
-/// - `Authority` + `Durable` → emit ONE `CrossingRequest` (latched in `RequestInFlight`, skipped if
-///   already in flight) + arm the cooldown.
-/// - `Authority` + `Transient` → emit a `TransientCrossingRequest` (batched-grant path) + arm cooldown.
-///
-/// Slice 4b: the AUTHORITY arms resolve their destination through [`authority_dest`] (dock → interior,
-/// undock → parent); the `None`-outward degrade is placed INSIDE each Authority arm so it never
-/// short-circuits the direction-agnostic Interest arm. The Interest arm keeps reading `winner.to_realm`.
+/// Fan the committed RE-HOME out by the subject's `DurabilityClass` — the ONE dispatch site (HR2 policy
+/// fan-out on one machinery, NO `match` on realm kind, so stations/ships/signals inherit it unchanged).
+/// `to_realm` is the DERIVED container realm ([`container`]), a value flowing unmodified through the
+/// frozen wire. Monomorphic so both arms are covered once:
+/// - `Durable` → emit ONE `CrossingRequest` (latched in `RequestInFlight`, suppressed if already in
+///   flight) + arm the cooldown + carry the re-drive payload.
+/// - `Transient` → emit a `TransientCrossingRequest` (batched-grant path, no per-entity latch) + arm the cooldown.
 #[allow(clippy::too_many_arguments)]
 fn fan_out_crossing(
     ctx: &CrossingCtx<'_>,
     entity: EntityId,
     subject_fence: Fence,
     subject_session: Option<SessionId>,
-    winner: &RealmBoundary,
-    dir: Direction,
+    to_realm: RealmId,
     state: &mut CrossingState,
     in_flight: &mut BTreeMap<EntityId, TransferId>,
-    interest: &mut BTreeMap<EntityId, RealmId>,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
     let from_realm = ctx.config.realm;
-    match (winner.effect, durability_of(entity)) {
-        (vd_core::geometry::CrossEffect::Interest, _) => {
-            // Interest-only: record the entered realm; NO authority egress, NO cooldown (a ghost band
-            // is idempotent — the reader re-derives from the map, so re-writes are free). Direction-
-            // agnostic: a ghost band always records `winner.to_realm` (no parent re-home for interest).
-            interest.insert(entity, winner.to_realm);
-            stats.crossing_interest_updates += 1;
-        }
-        (vd_core::geometry::CrossEffect::Authority, DurabilityClass::Durable) => {
+    match durability_of(entity) {
+        DurabilityClass::Durable => {
             // A durable crossing subject is normally a session-owned dot (only the dot loop passes
             // `Some(session)`). But `durability_of` keys on the entity's KIND TAG, not the loop of origin:
-            // a Durable-TAGGED item in the held-transient set (e.g. a mis-tagged batch item adopted with
-            // no kind check) would reach this arm with `None`. DEGRADE, never panic (a mutual-TLS peer's
-            // malformed batch must not crash the shard, and an unroutable crossing must not start a saga):
-            // count it and emit nothing. Gated BEFORE the latch insert so no orphan latch is left.
+            // a Durable-TAGGED item in the held-transient set would reach this arm with `None`. DEGRADE,
+            // never panic (an unroutable crossing must not start a saga): count it and emit nothing. Gated
+            // BEFORE the latch insert so no orphan latch is left.
             let Some(session) = subject_session else {
                 stats.crossing_durable_no_session += 1;
-                return;
-            };
-            // Slice 4b: resolve the direction-keyed destination (dock → interior, undock → parent). A
-            // top-level Outward with no parent is a malformed boundary — count LOUD + emit nothing
-            // (gated BEFORE the latch insert so no orphan latch is left).
-            let Some(to_realm) = authority_dest(dir, winner) else {
-                stats.crossing_outward_no_parent += 1;
                 return;
             };
             // The durable transfer request — latched so exactly ONE fires per crossing. The `Vacant`
@@ -2742,14 +2685,7 @@ fn fan_out_crossing(
                 Entry::Occupied(_) => stats.crossings_suppressed_in_flight += 1,
             }
         }
-        (vd_core::geometry::CrossEffect::Authority, DurabilityClass::Transient) => {
-            // Slice 4b: same direction-keyed destination as the durable arm — an undock re-homes debris
-            // to the parent, a dock to the interior. A top-level Outward with no parent is malformed —
-            // count LOUD + emit nothing (the transient carries no latch, so nothing to unwind).
-            let Some(to_realm) = authority_dest(dir, winner) else {
-                stats.crossing_outward_no_parent += 1;
-                return;
-            };
+        DurabilityClass::Transient => {
             // The transient crossing request (the batched-grant path — no per-entity latch; the batch
             // idempotency lives in the grant/adopt journal). `src_realm_fence` is the realm fence.
             outbox.push_flow(
@@ -2770,9 +2706,10 @@ fn fan_out_crossing(
 
 /// Slice 3f-D4 (DEFERRED D-43 #2) — the per-tick RE-DRIVE of a STRANDED durable crossing latch. A
 /// DELIVERED-but-unresolved dest (`head(Realm(to))` transiently absent — a realm shard mid-lease /
-/// partitioned at P4/P5) leaves the `RequestInFlight` latch standing with NO rising edge to re-emit it:
-/// `should_commit` is a STRICT one-tick rising edge, so `fan_out_crossing`'s `Occupied` arm never
-/// re-fires for a statically-DWELLING stranded dot. This scan re-emits the SAME latched
+/// partitioned at P4/P5) leaves the `RequestInFlight` latch standing with NO re-emit: under CONTAINMENT
+/// (task #135) `should_rehome` returns `Some(container)` every tick the container differs, but the still-
+/// latched dot hits `fan_out_crossing`'s `Occupied` SUPPRESS arm each tick, so nothing re-fires while the
+/// dot dwells in the (unresolved) region. This scan re-emits the SAME latched
 /// `CrossingRequest` (same `(subject, subject_fence, attempt)` → byte-identical [`crossing_transfer_id`];
 /// the orchestrator's `contains_key` guard absorbs a dup that already started, an unresolved one re-tries
 /// the head reads) once `local_tick - last_commit_tick >= request_ttl_ticks`, then re-arms the ttl timer.
@@ -7994,59 +7931,101 @@ mod tests {
         );
     }
 
-    // ---- Slice 3d/3e (the geometric transfer trigger) -----------------------------------------
+    // ---- Slice 3d/3e/4b + C-3 (the CONTAINMENT re-home trigger) --------------------------------
 
-    use vd_core::geometry::{Boundary, BoundaryTuning, CrossEffect, RealmBoundary};
+    use vd_core::geometry::{Boundary, BoundaryTuning, ContainmentBand, RealmRegion};
+    use vd_core::pose::frame_for_realm;
 
+    /// The shard's OWN realm (mirrors `config().realm`); a re-home fires when the container differs.
+    const OWN_REALM: RealmId = RealmId::System(7);
+    /// The DEEPER child region a dot docks INTO (its container becomes `OTHER_REALM` ⇒ re-home here).
     const OTHER_REALM: RealmId = RealmId::Planet(42);
+    /// The ambient ROOT realm (`parent: None`) — the `container` fold identity. A large Shell covering
+    /// everything, so an entity is ALWAYS in ≥1 realm (the "no way we will not be in any realm" mandate).
+    const ROOT_REALM: RealmId = RealmId::System(0);
+    /// The PARENT an OWN-realm child undocks OUTWARD to (distinct from `OWN_REALM` and `OTHER_REALM`, so
+    /// the undock destination a test reads is unambiguous). In the escape forest `OWN_REALM` nests under it.
+    const PARENT_REALM: RealmId = RealmId::System(77);
     const TRIG_SESSION: SessionId = SessionId(0xBB);
 
-    /// A durable-entity shell boundary centred at the origin whose create edge (`r_soi·1.15`) is large
-    /// enough that a dot placed a few hundred metres out is comfortably a member. `effect` chooses
-    /// Authority (a transfer) vs Interest (a ghost). Slow v_rel/dt so the band is factor-sized, not
-    /// velocity-widened.
-    fn shell_boundary(effect: CrossEffect) -> RealmBoundary {
-        RealmBoundary::shell(
-            RealmId::System(7), // this shard's realm (the boundary's exterior side)
-            LatticePos::local(DVec3::ZERO),
-            1000.0, // r_soi
-            1.15,   // create_factor → create edge 1150 m
-            1.30,   // destroy_factor → destroy edge 1300 m
-            1.0,    // v_rel (slow)
-            0.05,   // dt
-            0.5,    // pad_floor
-            1.0,    // k_safety_extra
-            None,   // top-level (depth 0)
-            OTHER_REALM,
-            effect,
-        )
+    /// Build a velocity-safe containment band (slow v_rel so it is inset/outset-sized, not widened). The
+    /// generous inset/outset (metres) means a dot placed clearly inside/outside a region's shell resolves
+    /// membership without any per-tick flap.
+    fn band() -> ContainmentBand {
+        ContainmentBand::for_containment_velocity_safe(50.0, 100.0, 1.0, 0.05, 1.0)
+            .expect("valid containment band")
     }
 
-    /// The PARENT realm a nested boundary re-homes to on an OUTWARD undock (Slice 4b). Distinct from
-    /// `OTHER_REALM` (the inward interior) and this shard's realm, so the destination a test reads is
-    /// unambiguous.
-    const PARENT_REALM: RealmId = RealmId::System(77);
+    /// The frame `realm`'s region is expressed in. System/Planet always resolve; under `IdentityFrames`
+    /// the frame is a no-op at P3, so positions are frame-invariant regardless.
+    fn frame_of(realm: RealmId) -> FrameRef {
+        frame_for_realm(realm, None).expect("System/Planet realm always resolves a frame")
+    }
 
-    /// A NESTED (Slice 4b) authority shell: same geometry as `shell_boundary`, but this boundary belongs
-    /// to a CHILD realm (`to_realm` = the child interior) that NESTS inside `PARENT_REALM`. An INWARD
-    /// crossing docks into the child interior (`to_realm`); an OUTWARD crossing undocks to `parent`
-    /// (`PARENT_REALM`). `realm` is set to `to_realm` (the interior child) so `boundary_depth` — which
-    /// walks `parent` — sees a one-level-deep nesting.
-    fn nested_shell_boundary(effect: CrossEffect) -> RealmBoundary {
-        RealmBoundary::shell(
-            OTHER_REALM, // the child realm this boundary encloses (its exterior side = the child)
-            LatticePos::local(DVec3::ZERO),
-            1000.0,             // r_soi
-            1.15,               // create_factor → create edge 1150 m
-            1.30,               // destroy_factor → destroy edge 1300 m
-            1.0,                // v_rel (slow)
-            0.05,               // dt
-            0.5,                // pad_floor
-            1.0,                // k_safety_extra
-            Some(PARENT_REALM), // NESTED — an undock re-homes here
-            OTHER_REALM,        // the interior an INWARD dock enters
-            effect,
-        )
+    /// One `RealmRegion` shell at `center` of radius `r`, in `realm`'s own frame, nested under `parent`.
+    fn region(realm: RealmId, parent: Option<RealmId>, center: DVec3, r: f64) -> RealmRegion {
+        RealmRegion {
+            realm,
+            center: LatticePos::local(center),
+            frame: frame_of(realm),
+            shape: Boundary::Shell { r },
+            band: band(),
+            parent,
+        }
+    }
+
+    /// One `RealmRegion` axis-aligned BOX at `center` with per-axis `half`, nested under `parent`.
+    fn region_box(
+        realm: RealmId,
+        parent: Option<RealmId>,
+        center: DVec3,
+        half: DVec3,
+    ) -> RealmRegion {
+        RealmRegion {
+            realm,
+            center: LatticePos::local(center),
+            frame: frame_of(realm),
+            shape: Boundary::Aabb { half },
+            band: band(),
+            parent,
+        }
+    }
+
+    /// The AMBIENT-ROOT region: a huge shell at the origin covering all placements a test uses, so the
+    /// container fold is total (every point is at least in the root). `parent: None`.
+    fn root_region() -> RealmRegion {
+        region(ROOT_REALM, None, DVec3::ZERO, 1.0e9)
+    }
+
+    /// The shard's OWN-realm region (`System(7)`): a large shell at the origin nested under the root. A dot
+    /// inside only this (and the root) has container == `OWN_REALM` ⇒ NO re-home.
+    fn own_region() -> RealmRegion {
+        region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 100_000.0)
+    }
+
+    /// The DEEPER child region (`OTHER_REALM` = `Planet(42)`): a small shell at the origin nested under
+    /// `OWN_REALM`. A dot clearly inside it ⇒ container == `OTHER_REALM` ⇒ re-home INWARD to `OTHER_REALM`.
+    fn child_region() -> RealmRegion {
+        region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 1000.0)
+    }
+
+    /// Plant the STANDARD 3-level dock forest (root ⊃ own ⊃ child) into the world's `RealmRegions`. A dot
+    /// inside the child re-homes to `OTHER_REALM`; a dot only inside own (outside child) stays.
+    fn plant_dock_regions(rig: &mut Rig) {
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vec![root_region(), own_region(), child_region()]);
+    }
+
+    /// Plant the ESCAPE forest: root(`System(0)`) ⊃ parent(`PARENT_REALM`) ⊃ own(`OWN_REALM`, a SMALL
+    /// shell). The shard's config realm is `OWN_REALM`. A dot INSIDE the small own-shell has container ==
+    /// `OWN_REALM` (no re-home); a dot OUTSIDE it but still inside the parent shell has container ==
+    /// `PARENT_REALM` ⇒ re-home OUTWARD to `PARENT_REALM` (the undock). Symmetric with the dock — the same
+    /// containment machinery, no "direction".
+    fn plant_escape_regions(rig: &mut Rig) {
+        let parent = region(PARENT_REALM, Some(ROOT_REALM), DVec3::ZERO, 100_000.0);
+        let own_small = region(OWN_REALM, Some(PARENT_REALM), DVec3::ZERO, 1000.0);
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vec![root_region(), parent, own_small]);
     }
 
     /// Insert an OWNED dot (a durable Player by default) at frame-local `offset`, its `prev_offset`
@@ -8128,16 +8107,14 @@ mod tests {
     fn durable_dot_dwelling_in_band_triggers_exactly_one_crossing_request() {
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        // The dock forest (root ⊃ own(System(7)) ⊃ child(Planet(42))).
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 1);
-        // Inside the band (ms = 100 m < the 1150 m create edge): a member every tick.
+        // Deep inside the CHILD region's shell (|100| ≪ 1000 - inset): container == OTHER_REALM ⇒ re-home.
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
 
-        // n_entry = 3 (DEFAULT): the rising edge fires on the 3rd consecutive in-band tick. Run enough
-        // ticks to cross that edge, holding position (so `now_member` stays true).
+        // Under containment the band IS the dwell: the re-home fires as soon as the container differs;
+        // the RequestInFlight latch then suppresses every later tick → exactly ONE request across the dwell.
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
         for t in 2..8 {
             rig.set_local_tick(t);
@@ -8186,14 +8163,11 @@ mod tests {
     fn the_in_flight_latch_suppresses_a_second_request() {
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 2);
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
-        // Dwell in-band to the FIRST commit (sets the latch + arms the cooldown).
+        // Deep inside the child ⇒ the FIRST re-home fires (sets the latch + arms the cooldown).
         for t in 2..8 {
             rig.set_local_tick(t);
             all.extend(rig.tick(vec![]));
@@ -8205,31 +8179,32 @@ mod tests {
                 .0
                 .contains_key(&entity)
         );
-        // WITHOUT sending the Demote terminal (so the latch STAYS set), drive a SECOND rising edge:
-        // leave the band (resets inward_ticks) long enough for the cooldown to lapse, then re-enter and
-        // dwell to n_entry again. This second `should_commit` fires Inward — but the latch is still held,
-        // so `fan_out_crossing` takes the SUPPRESS arm (no second request).
+        // WITHOUT sending the Demote terminal (so the latch STAYS set), drive a SECOND container change:
+        // leave the child region (container reverts to own ⇒ no re-home) long enough for the cooldown to
+        // lapse, then re-enter the child (container flips back to OTHER_REALM). This second re-home
+        // decision reaches `fan_out_crossing` — but the latch is still held, so it takes the SUPPRESS arm.
         for t in 8..12 {
             rig.set_local_tick(t);
-            move_dot(&mut rig, TRIG_SESSION, DVec3::new(2000.0, 0.0, 0.0)); // outside the destroy edge
+            // Outside the child shell (sd 1000 > outset) but still inside own ⇒ container == own.
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(2000.0, 0.0, 0.0));
             all.extend(rig.tick(vec![]));
         }
         for t in 12..18 {
             rig.set_local_tick(t);
-            move_dot(&mut rig, TRIG_SESSION, DVec3::new(100.0, 0.0, 0.0)); // back inside, re-dwell
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(100.0, 0.0, 0.0)); // back inside the child
             all.extend(rig.tick(vec![]));
         }
         assert_eq!(
             crossing_requests(&all).len(),
             1,
-            "the RequestInFlight latch holds it to ONE request across the second dwell",
+            "the RequestInFlight latch holds it to ONE request across the second container change",
         );
         assert!(
             rig.world
                 .resource::<StubStats>()
                 .crossings_suppressed_in_flight
                 > 0,
-            "the second matured edge hit the in-flight SUPPRESS arm",
+            "the second container change hit the in-flight SUPPRESS arm",
         );
     }
 
@@ -8237,10 +8212,7 @@ mod tests {
     fn a_transient_crossing_emits_a_transient_crossing_request() {
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         // A Debris entity is Transient → the transient fan-out arm.
         let entity = EntityId::pack(EntityKind::Debris, 10, 1, 3);
         rig.world.resource_mut::<OwnedTransients>().0.insert(
@@ -8256,8 +8228,11 @@ mod tests {
                 prev_offset: DVec3::new(100.0, 0.0, 0.0),
             },
         );
+        // A transient carries NO per-entity latch (its batch journal dedups instead), so the ONLY
+        // anti-thrash is the symmetric `k_dwell` cooldown (§2.7). Run WITHIN the cooldown window
+        // (commit at tick 2, k_dwell = 5) so the container-differs re-home fires exactly once.
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
-        for t in 2..8 {
+        for t in 2..7 {
             rig.set_local_tick(t);
             all.extend(rig.tick(vec![]));
         }
@@ -8284,10 +8259,7 @@ mod tests {
         // panic on `subject_session.expect`, and must leave NO orphan latch.
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         // A Player entity is DURABLE, but we place it (wrongly) in the transient set.
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 9);
         rig.world.resource_mut::<OwnedTransients>().0.insert(
@@ -8326,15 +8298,16 @@ mod tests {
     }
 
     #[test]
-    fn an_interest_boundary_writes_the_interest_zone_and_emits_nothing() {
+    fn a_dot_inside_only_its_own_realm_triggers_no_re_home() {
+        // The "no re-home" case (§4): a dot inside the OWN region (System(7)) but OUTSIDE the deeper child
+        // (Planet(42)) has container == OWN_REALM == the realm the shard owns it in ⇒ `should_rehome`
+        // returns None. No CrossingRequest, no latch — symmetric with the empty-registry inert path.
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Interest));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 4);
-        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        // Outside the child shell (sd 3000 > outset) but well inside own ⇒ container == OWN_REALM.
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(4000.0, 0.0, 0.0));
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
         for t in 2..8 {
             rig.set_local_tick(t);
@@ -8344,23 +8317,110 @@ mod tests {
         // false-branch of `a` uncovered).
         assert!(
             crossing_requests(&all).is_empty(),
-            "an Interest boundary emits NO durable CrossingRequest",
+            "container == own ⇒ NO durable CrossingRequest",
         );
         assert!(
             transient_crossing_requests(&all).is_empty(),
-            "an Interest boundary emits NO TransientCrossingRequest",
+            "container == own ⇒ NO TransientCrossingRequest",
         );
-        assert_eq!(
-            rig.world.resource::<InterestZones>().0.get(&entity),
-            Some(&OTHER_REALM),
-            "the entered realm is recorded in InterestZones",
+        assert!(
+            rig.world.resource::<RequestInFlight>().0.is_empty(),
+            "no re-home ⇒ no latch",
         );
-        assert!(rig.world.resource::<StubStats>().crossing_interest_updates > 0);
+    }
+
+    #[test]
+    fn a_rootless_region_forest_is_a_safe_no_op() {
+        // DEFENSIVE (HR5): a NON-EMPTY forest with NO ambient root (every region has a parent — a
+        // malformed set that `guard_regions_nest` rejects at boot in C-5) leaves `root_realm == None`, so
+        // `evaluate_one_subject` cannot seed the `container` fold and returns EARLY — no re-home, never a
+        // panic. Covers the `let Some(root_realm) = ctx.root_realm else { return cur }` guard.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // A single region whose `parent` is `Some(..)` ⇒ NO `parent: None` root ⇒ `root_realm == None`.
+        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![own_region()]);
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 5);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::ZERO);
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..6 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        assert!(
+            crossing_requests(&all).is_empty(),
+            "a rootless forest cannot seed the container fold ⇒ NO re-home",
+        );
+    }
+
+    #[test]
+    fn an_aborted_re_home_re_fires_while_the_dot_is_still_in_the_region() {
+        // POSITIVE proof of the abort RE-FIRE (`on_crossing_aborted` resets `last_commit_tick=None`): a dot
+        // whose crossing ABORTED is STILL geometrically in the deeper region, so `container != owning` and
+        // `should_rehome` fires AGAIN with a FRESH id — the re-home self-heals without a physical re-cross.
+        // A green tree that DISARMS the detector during the abort (the e2e tests) cannot catch a broken
+        // re-fire; this drives the abort WITH the regions still armed and asserts the attempt-1 re-emit.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_dock_regions(&mut rig);
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 9);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::ZERO); // inside the child ⇒ re-homes
+        rig.set_local_tick(2);
+        let first = crossing_requests(&rig.tick(vec![]));
+        assert_eq!(first.len(), 1, "the in-region dot re-homes once");
+        assert_eq!(first[0].attempt, 0, "the first re-home is attempt 0");
+        // The MATCHING abort clears the latch + resets the cooldown so the re-home can re-fire.
+        let transfer = crossing_transfer_id(DirectoryKey::Entity(entity), Fence(1), 0);
+        let mut after: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        rig.set_local_tick(3);
+        after.extend(rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::CrossingAborted(CrossingAborted {
+                subject: DirectoryKey::Entity(entity),
+                transfer,
+            }),
+        )]));
+        rig.set_local_tick(4);
+        after.extend(rig.tick(vec![])); // still in the region ⇒ re-fires with a fresh id
+        let refired = crossing_requests(&after).iter().any(|r| r.attempt == 1);
+        assert!(
+            refired,
+            "after the abort the still-in-region dot RE-FIRES with attempt==1 (self-heal)",
+        );
+    }
+
+    #[test]
+    fn a_dot_jittering_across_a_region_surface_within_the_band_never_re_homes() {
+        // The BAND (not the latch) proves anti-flap. A dot whose signed distance to the child region
+        // oscillates ACROSS the surface (sd ∈ [-40, +40]) but stays inside the acquire-hysteresis dead-zone
+        // (acquire only at sd ≤ -inset = -50) NEVER acquires membership, so `container` stays the OWN realm
+        // and ZERO re-homes fire — latch-INDEPENDENT (no re-home ⇒ no latch to mask a flap). A broken band
+        // (naive point membership `sd ≤ 0`) would acquire the child on every sd<0 tick and re-home.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_dock_regions(&mut rig); // child (Planet 42) at origin, r=1000, band inset=50/outset=100
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 11);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(1040.0, 0.0, 0.0)); // sd_child = +40
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        // Jitter x ∈ [960, 1040] ⇒ sd_child ∈ [-40, +40], crossing the surface but never reaching -inset,
+        // for well over `k_dwell` ticks.
+        for (i, &x) in [960.0, 1040.0, 970.0, 1030.0, 965.0, 1035.0, 962.0, 1038.0]
+            .iter()
+            .enumerate()
+        {
+            rig.set_local_tick(2 + i as u64);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(x, 0.0, 0.0));
+            all.extend(rig.tick(vec![]));
+        }
+        assert!(
+            crossing_requests(&all).is_empty(),
+            "the acquire-hysteresis dead-zone keeps the dot a non-member ⇒ ZERO re-homes (band, not latch)",
+        );
     }
 
     #[test]
     fn an_empty_registry_or_no_realm_triggers_nothing() {
-        // (a) EMPTY boundary registry (the production-inert path): no candidates, no emit, no state.
+        // (a) EMPTY region registry (the production-inert path): no candidates, no emit, no state.
         let mut rig = Rig::new();
         rig.grant_realm();
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 5);
@@ -8379,10 +8439,7 @@ mod tests {
         // 3f-D4 `redrive_stranded_crossings` scan ALSO reaches (and covers) its authority-gate `else`
         // arm (past its own `ttl==0` early-return), mirroring the trigger's gate.
         let mut rig2 = Rig::with_config(config_with_ttl(3));
-        rig2.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig2);
         // A dot cannot normally exist without a realm, but the trigger's gate must be authority-first:
         // force one in and confirm the early-return fires.
         insert_owned_dot(&mut rig2, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
@@ -8408,13 +8465,11 @@ mod tests {
     fn eviction_drops_state_for_a_departed_subject() {
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 6);
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
-        // Dwell to a commit so all three maps hold an entry for the subject.
+        // Deep inside the child ⇒ a re-home fires, so ALL FOUR per-entity ledgers hold a row (the
+        // ContainmentProgress bitset is written by the full-scan every tick a subject is evaluated).
         for t in 2..8 {
             rig.set_local_tick(t);
             let _ = rig.tick(vec![]);
@@ -8431,11 +8486,13 @@ mod tests {
                 .0
                 .contains_key(&entity)
         );
-        // Also seed an InterestZones entry for the SAME subject so the interest-retain arm is covered.
-        rig.world
-            .resource_mut::<InterestZones>()
-            .0
-            .insert(entity, OTHER_REALM);
+        assert!(
+            rig.world
+                .resource::<ContainmentProgress>()
+                .0
+                .contains_key(&entity),
+            "the per-region membership bitset holds a row for the evaluated subject",
+        );
         // The dot logs out (removed): next evaluation tick evicts its per-entity state (the DRY retain).
         rig.world.resource_mut::<Dots>().0.remove(&TRIG_SESSION);
         rig.set_local_tick(8);
@@ -8454,7 +8511,7 @@ mod tests {
         );
         assert!(
             !rig.world
-                .resource::<InterestZones>()
+                .resource::<ContainmentProgress>()
                 .0
                 .contains_key(&entity)
         );
@@ -8462,66 +8519,52 @@ mod tests {
 
     // ---- Slice 4a (task #133): D-38 discharge + ledger-eviction + cell-carry SHAPE -----------------
 
-    /// The ONE crossing-feature fixture, driven by a boundary-CONSTRUCTOR closure so its BODY is written
-    /// exactly once and run over two boundary shapes. Plants `make_boundary()` in `RealmBoundaries`,
-    /// inserts an OWNED DURABLE dot clearly OUTSIDE the boundary (membership above the destroy edge), then
-    /// drives it INWARD across the create edge on a DIAGONAL segment (a velocity with ≥2 non-zero axis
-    /// components — so the Aabb run genuinely exercises `segment_aabb_crossing`'s slab-corner test, which
-    /// a pure axis-aligned approach would skip; a shell's `|p|` membership handles the same diagonal
-    /// unchanged, so the body is identical). Returns the emitted `CrossingRequest`s + the dot's
-    /// start/end membership scalars, so the caller asserts the destination, the exactly-one count, and
-    /// that the membership actually crossed the create edge (the anti-vacuity guarantee — the box gated,
-    /// it was not a no-op). INWARD only: the outward/undock path has an un-fixed direction-blind latch
-    /// hazard deferred to Slice 4b (`scripts/slice4_design_adversary.md` CRITICAL-1).
-    /// A Spherical-profile Shell boundary (the `shell_boundary(Authority)` used by the D-38 fixture as a
-    /// named fn, so the identical body is driven by a plain fn pointer, not a shape-branching closure).
-    fn shell_boundary_authority() -> RealmBoundary {
-        shell_boundary(CrossEffect::Authority)
+    /// The DEEPER CHILD region as a Spherical Shell (SOI descent) — the shape the G-IDENTICAL fixture
+    /// varies. Radius 1000, at the origin, nested under `OWN_REALM`, realm `OTHER_REALM`.
+    fn child_region_shell() -> RealmRegion {
+        child_region()
     }
 
-    /// A Cartesian-profile Aabb station boundary mirroring `shell_boundary_authority` arg-for-arg (same
-    /// realm/to_realm/effect; the ONLY difference is the shape + its normalized band). Half-extents 200 m
-    /// ⇒ a create edge at Chebyshev norm 1.15 (≈ 230 m/axis), destroy 1.30; slow v_rel so it is
-    /// factor-sized, not velocity-widened — exactly the shell's band posture.
-    fn aabb_boundary_authority() -> RealmBoundary {
-        RealmBoundary::aabb(
-            RealmId::System(7), // this shard's realm (mirrors shell_boundary's exterior side)
-            LatticePos::local(DVec3::ZERO),
-            DVec3::new(200.0, 200.0, 200.0),
-            1.15,
-            1.30,
-            1.0,  // v_rel (slow — factor-sized)
-            0.05, // dt
-            0.01, // pad_floor
-            1.0,  // k_safety_extra
-            None, // top-level (depth 0)
+    /// The DEEPER CHILD region as a Cartesian Aabb (station volume) — mirrors `child_region_shell`
+    /// arg-for-arg (same realm/parent/center/band; the ONLY difference is the SHAPE). Half-extents 200 m.
+    fn child_region_aabb() -> RealmRegion {
+        region_box(
             OTHER_REALM,
-            CrossEffect::Authority,
+            Some(OWN_REALM),
+            DVec3::ZERO,
+            DVec3::new(200.0, 200.0, 200.0),
         )
-        .expect("valid box band")
     }
 
+    /// The ONE crossing-feature fixture, driven by a CHILD-REGION-CONSTRUCTOR closure so its BODY is
+    /// written exactly once and run over two region shapes (§9's "same fixture on a Shell now, box at
+    /// P4"). Plants root ⊃ own ⊃ CHILD(make_child()) in `RealmRegions`, inserts an OWNED DURABLE dot
+    /// clearly OUTSIDE the child (signed_distance > 0 — no vacuous "already inside" pass), then drives it
+    /// INWARD across the child's acquire edge on a DIAGONAL segment (a velocity with ≥2 non-zero axis
+    /// components — so the Aabb run genuinely exercises `box_signed_distance`'s corner metric, which a
+    /// pure axis-aligned approach would skip; a shell's `|p|` distance handles the same diagonal unchanged,
+    /// so the body is identical). Returns the emitted `CrossingRequest`s + the dot's start/end SIGNED
+    /// DISTANCE to the child (the anti-vacuity guarantee — the region actually GATED the re-home, it was
+    /// not a no-op that fired on an already-inside dot) + the child shape.
     fn drive_inward_crossing_feature(
-        make_boundary: impl Fn() -> RealmBoundary,
+        make_child: impl Fn() -> RealmRegion,
     ) -> (Vec<CrossingRequest>, f64, f64, Boundary) {
         let mut rig = Rig::new();
         rig.grant_realm();
-        let boundary = make_boundary();
-        let to_realm = boundary.to_realm;
-        let center = boundary.center.offset();
-        // `RealmBoundary` is Copy: capture the shape up front so the membership scalars are read WITHOUT
-        // re-borrowing the world resource (the boundary geometry is immutable through the run).
-        let shape = boundary.shape;
-        rig.world.resource_mut::<RealmBoundaries>().0.push(boundary);
-        // A distinct durable Player, placed on a DIAGONAL well OUTSIDE the boundary.
+        let child = make_child();
+        let to_realm = child.realm; // OTHER_REALM
+        let shape = child.shape;
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vec![root_region(), own_region(), child]);
+        // A distinct durable Player, placed on a DIAGONAL well OUTSIDE the child region.
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 0x4A);
         let outside = DVec3::new(1000.0, 1000.0, 0.0);
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, outside);
-        // Membership scalar of the START pose, relative to the boundary center (proves it began OUTSIDE
-        // the destroy edge — no vacuous "already inside" pass).
-        let start_ms = shape.membership_scalar(outside - center);
+        // Signed distance of the START pose to the child (proves it began OUTSIDE — positive distance).
+        let start_sd = child_signed_distance(&child, outside);
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
-        // Approach inward along the diagonal, then hold deep inside so the dwell matures (n_entry = 3).
+        // Approach inward along the diagonal, then hold deep inside (the band IS the dwell — one member
+        // tick suffices, but hold a few so the run mirrors a real approach).
         let waypoints = [
             DVec3::new(700.0, 700.0, 0.0),
             DVec3::new(400.0, 400.0, 0.0),
@@ -8536,44 +8579,54 @@ mod tests {
             all.extend(rig.tick(vec![]));
         }
         let inside = DVec3::new(50.0, 50.0, 0.0);
-        let end_ms = shape.membership_scalar(inside - center);
-        // Only requests whose destination is THIS boundary's to_realm — the destination assert lives in
-        // the caller, but filtering here proves the collection is this feature's, not incidental noise.
+        let end_sd = child_signed_distance(&child, inside);
+        // Only requests whose destination is THIS child's realm — filtering here proves the collection is
+        // this feature's, not incidental noise.
         let reqs: Vec<CrossingRequest> = crossing_requests(&all)
             .into_iter()
             .filter(|r| r.to_realm == to_realm)
             .collect();
-        (reqs, start_ms, end_ms, shape)
+        (reqs, start_sd, end_sd, shape)
     }
 
-    /// DISCHARGES D-38: the first G-IDENTICAL assert_feature_anywhere — ONE crossing-feature fixture,
-    /// identical on a Spherical (Shell) and a Cartesian (Aabb) profile.
+    /// The signed distance from a frame-local `offset` to a region's surface (the exact scalar the
+    /// containment band consumes). Under `IdentityFrames` at P3 the reframe is a no-op, so this is the
+    /// same value the detector reads.
+    fn child_signed_distance(region: &RealmRegion, offset: DVec3) -> f64 {
+        use vd_core::geometry::region_signed_distance;
+        let pose = StampedPose::at_rest(config().frame, offset, UniverseTick(100));
+        region_signed_distance(&pose, region, &IdentityFrames)
+            .expect("identity reframe never errors")
+    }
+
+    /// DISCHARGES D-38: the G-IDENTICAL assert_feature_anywhere — ONE containment re-home fixture,
+    /// identical whether the deeper child region is a Spherical (Shell) or a Cartesian (Aabb) volume.
     #[test]
     fn assert_feature_anywhere() {
-        // Run (a): a Spherical PLANET profile ⇔ a Shell boundary (SOI descent). The dot descends the
-        // diagonal across the shell's create edge and commits exactly ONE inward crossing to OTHER_REALM.
+        // Run (a): a Spherical PLANET profile ⇔ a Shell child region (SOI descent). The dot descends the
+        // diagonal across the shell's acquire edge and commits exactly ONE re-home to OTHER_REALM.
         let planet = crate::capability::profiles::planet().expect("planet profile");
         assert_eq!(
             planet.voxel(),
             Some(crate::capability::VoxelGeometry::Spherical),
             "the Shell run is tied to the Spherical profile",
         );
-        let (shell_reqs, shell_start_ms, shell_end_ms, shell_shape) =
-            drive_inward_crossing_feature(shell_boundary_authority);
-        // Spherical ⇔ Shell: the run's boundary IS a Shell (compared by equality, not `matches!`, so
-        // there is no uncoverable false arm — HR5(d)). `shell_boundary` uses r_soi 1000.
+        let (shell_reqs, shell_start_sd, shell_end_sd, shell_shape) =
+            drive_inward_crossing_feature(child_region_shell);
+        // Spherical ⇔ Shell: the run's region IS a Shell (compared by equality, not `matches!`, so there
+        // is no uncoverable false arm — HR5(d)). `child_region` uses r 1000.
         assert_eq!(shell_shape, Boundary::Shell { r: 1000.0 });
-        // Run (b): a Cartesian STATION profile ⇔ an Aabb boundary (station volume). The IDENTICAL body
-        // drives the SAME diagonal descent across the box's create edge → exactly ONE inward crossing.
+        // Run (b): a Cartesian STATION profile ⇔ an Aabb child region (station volume). The IDENTICAL body
+        // drives the SAME diagonal descent across the box's acquire edge → exactly ONE re-home.
         let station = crate::capability::profiles::station().expect("station profile");
         assert_eq!(
             station.voxel(),
             Some(crate::capability::VoxelGeometry::Cartesian),
             "the Aabb run is tied to the Cartesian profile",
         );
-        let (aabb_reqs, aabb_start_ms, aabb_end_ms, aabb_shape) =
-            drive_inward_crossing_feature(aabb_boundary_authority);
-        // Cartesian ⇔ Aabb: the run's boundary IS an Aabb (equality, no `matches!` false arm — HR5(d)).
+        let (aabb_reqs, aabb_start_sd, aabb_end_sd, aabb_shape) =
+            drive_inward_crossing_feature(child_region_aabb);
+        // Cartesian ⇔ Aabb: the run's region IS an Aabb (equality, no `matches!` false arm — HR5(d)).
         assert_eq!(
             aabb_shape,
             Boundary::Aabb {
@@ -8581,81 +8634,70 @@ mod tests {
             }
         );
 
-        // (i) EXACTLY ONE inward CrossingRequest per run, whose destination is the boundary's to_realm —
-        // the box/shell actually GATED the crossing (not a bare count of "something fired").
+        // (i) EXACTLY ONE re-home CrossingRequest per run, whose destination is the child's realm — the
+        // box/shell actually GATED the re-home (not a bare count of "something fired").
         assert_eq!(
             shell_reqs.len(),
             1,
-            "the Shell run emits exactly one inward crossing"
+            "the Shell run emits exactly one re-home"
         );
-        assert_eq!(
-            aabb_reqs.len(),
-            1,
-            "the Aabb run emits exactly one inward crossing"
-        );
+        assert_eq!(aabb_reqs.len(), 1, "the Aabb run emits exactly one re-home");
         assert_eq!(
             shell_reqs[0].to_realm, OTHER_REALM,
-            "the Shell crossing gated to OTHER_REALM"
+            "the Shell re-home gated to OTHER_REALM"
         );
         assert_eq!(
             aabb_reqs[0].to_realm, OTHER_REALM,
-            "the Aabb crossing gated to OTHER_REALM"
+            "the Aabb re-home gated to OTHER_REALM"
         );
         // IDENTICAL feature behavior across the two profiles: same subject, same source realm, same
-        // destination, same attempt. The two runs differ ONLY in boundary shape, never in the feature.
+        // destination, same attempt. The two runs differ ONLY in region shape, never in the feature.
         assert_eq!(shell_reqs[0].subject, aabb_reqs[0].subject);
         assert_eq!(shell_reqs[0].from_realm, aabb_reqs[0].from_realm);
         assert_eq!(shell_reqs[0].to_realm, aabb_reqs[0].to_realm);
         assert_eq!(shell_reqs[0].attempt, aabb_reqs[0].attempt);
         assert_eq!(shell_reqs[0].session, aabb_reqs[0].session);
 
-        // (ii) Anti-vacuity: the membership ACTUALLY crossed the create edge in BOTH runs — the dot
-        // started OUTSIDE the destroy edge and ended INSIDE the create edge (a real inward commit, never
-        // a no-op that fired on an already-inside dot). Shell edges are metres (create 1150, destroy
-        // 1300); Aabb edges are the normalized Chebyshev create 1.15 / destroy 1.30.
+        // (ii) Anti-vacuity: the signed distance ACTUALLY crossed the acquire edge in BOTH runs — the dot
+        // started OUTSIDE the surface (sd > 0) and ended at least `inset` (50 m) INSIDE (sd <= -inset), a
+        // real membership acquire, never a no-op that fired on an already-inside dot.
         assert!(
-            shell_start_ms > 1300.0,
-            "Shell start OUTSIDE the destroy edge (ms {shell_start_ms})"
+            shell_start_sd > 0.0,
+            "Shell start OUTSIDE the surface (sd {shell_start_sd})"
         );
         assert!(
-            shell_end_ms < 1150.0,
-            "Shell end INSIDE the create edge (ms {shell_end_ms})"
+            shell_end_sd <= -50.0,
+            "Shell end at least the inset INSIDE (sd {shell_end_sd})"
         );
         assert!(
-            aabb_start_ms > 1.30,
-            "Aabb start OUTSIDE the destroy edge (norm {aabb_start_ms})"
+            aabb_start_sd > 0.0,
+            "Aabb start OUTSIDE the surface (sd {aabb_start_sd})"
         );
         assert!(
-            aabb_end_ms < 1.15,
-            "Aabb end INSIDE the create edge (norm {aabb_end_ms})"
+            aabb_end_sd <= -50.0,
+            "Aabb end at least the inset INSIDE (sd {aabb_end_sd})"
         );
     }
 
     /// Slice 4a: the ledger-eviction-on-leave gate (the InputLog-leak class). The `retain_live` machinery
     /// already exists (`stub.rs` `evaluate_realm_boundaries`); this PROVES all THREE per-entity ledgers
-    /// (CrossingProgress + RequestInFlight + InterestZones) are evicted when the subject leaves. Uses
-    /// `assert_eq!(.get(), None)` (not `assert!(matches!)`) so the None equality is the covered arm.
+    /// evicted by the detector (CrossingProgress + RequestInFlight + ContainmentProgress — the C-3 bitset
+    /// is the 4th `retain_live` monomorphization that REPLACES the deleted `InterestZones`) are evicted
+    /// when the subject leaves. Uses `assert_eq!(.get(), None)` (not `assert!(matches!)`) so the None
+    /// equality is the covered arm.
     #[test]
     fn slice4a_all_three_ledgers_evict_when_the_subject_leaves() {
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 0x4B);
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
-        // Dwell to a durable commit so CrossingProgress (dwell) AND RequestInFlight (latch) both hold a
-        // row for the subject.
+        // Deep inside the child ⇒ a durable re-home commits, so CrossingProgress (cooldown), RequestInFlight
+        // (latch) AND ContainmentProgress (bitset) all hold a row for the subject.
         for t in 2..8 {
             rig.set_local_tick(t);
             let _ = rig.tick(vec![]);
         }
-        // Seed InterestZones directly for the SAME subject (the third ledger).
-        rig.world
-            .resource_mut::<InterestZones>()
-            .0
-            .insert(entity, OTHER_REALM);
         // All three ledgers now hold an entry (setup pre-conditions; the load-bearing asserts are the
         // three `None` equalities after the subject leaves).
         assert!(
@@ -8672,7 +8714,7 @@ mod tests {
         );
         assert!(
             rig.world
-                .resource::<InterestZones>()
+                .resource::<ContainmentProgress>()
                 .0
                 .contains_key(&entity)
         );
@@ -8687,7 +8729,10 @@ mod tests {
             None
         );
         assert_eq!(rig.world.resource::<RequestInFlight>().0.get(&entity), None);
-        assert_eq!(rig.world.resource::<InterestZones>().0.get(&entity), None);
+        assert_eq!(
+            rig.world.resource::<ContainmentProgress>().0.get(&entity),
+            None
+        );
     }
 
     /// Slice 4a (adversary MEDIUM-3 — the cell-carry SHAPE assertion, NOT an integer-gate flip). Proves
@@ -8702,15 +8747,12 @@ mod tests {
         use vd_core::glam::I64Vec3;
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 0x4C);
         // A DISTINCT non-zero cell anchor. The trigger reads only `offset()`, so the crossing decision is
         // driven by the (in-band) offset exactly as if the cell were zero.
         let cell = I64Vec3::new(5, -7, 11);
-        let offset_inside = DVec3::new(100.0, 0.0, 0.0); // ms = 100 m < the 1150 m create edge ⇒ a member
+        let offset_inside = DVec3::new(100.0, 0.0, 0.0); // sd = 100 - 1000 ≪ -inset ⇒ inside the child
         rig.world.resource_mut::<Dots>().0.insert(
             TRIG_SESSION,
             Dot {
@@ -8908,17 +8950,14 @@ mod tests {
         const TTL: u32 = 3;
         let mut rig = Rig::with_config(config_with_ttl(TTL));
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 42);
-        // In-band from spawn (ms = 100 m < the 1150 m create edge) so the first commit latches it; there is
-        // no orchestrator in this rig, so the latch is never cleared → it STRANDS (the tested condition).
+        // Deep inside the child from spawn (sd = 100 - 1000 ≪ -inset) so the first commit latches it; there
+        // is no orchestrator in this rig, so the latch is never cleared → it STRANDS (the tested condition).
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
 
-        // Dwell to the FIRST commit: n_entry = 3, so inward reaches 3 at local_tick 4 (inward 1/2/3 at
-        // ticks 2/3/4) → the durable `Vacant` arm emits ONE request + arms `last_commit_tick = 4`.
+        // Inside the child from tick 2 ⇒ the re-home commits on the FIRST evaluated tick (the band IS the
+        // dwell) → the durable `Vacant` arm emits ONE request + arms `last_commit_tick = 2`.
         let mut first: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
         for t in 2..=4 {
             rig.set_local_tick(t);
@@ -8940,24 +8979,16 @@ mod tests {
             Some(&latched_id),
             "the latch is held (no orchestrator ever cleared it)",
         );
-        // No re-drive has fired yet (elapsed 0 on the commit tick, and ticks 5/6 are still < ttl).
-        for t in 5..=6 {
-            rig.set_local_tick(t);
-            let out = rig.tick(vec![]);
-            assert_eq!(
-                crossing_requests(&out).len(),
-                0,
-                "no re-drive while local_tick - last_commit_tick < ttl (tick {t})",
-            );
-        }
+        // The commit armed `last_commit_tick = 2`. Ticks 3/4 (already ticked in the loop above) were still
+        // < TTL, so no re-drive fired there — proven by `first_reqs.len() == 1`.
         assert_eq!(
             rig.world.resource::<StubStats>().crossings_redriven,
             0,
-            "the ttl window has NOT elapsed yet (the `>= ttl` false arm)",
+            "the ttl window has NOT elapsed yet through tick 4 (the `>= ttl` false arm)",
         );
 
-        // Tick 7: local_tick - 4 == 3 >= TTL → the scan re-emits the SAME request (the `>= ttl` TRUE arm).
-        rig.set_local_tick(7);
+        // Tick 5: local_tick - 2 == 3 >= TTL → the scan re-emits the SAME request (the `>= ttl` TRUE arm).
+        rig.set_local_tick(5);
         let redrive_out = rig.tick(vec![]);
         let redrive_reqs = crossing_requests(&redrive_out);
         assert_eq!(
@@ -8991,9 +9022,9 @@ mod tests {
             "the latch is STILL held after the re-drive (only a saga terminal clears it)",
         );
 
-        // Tick 8: the re-drive re-armed `last_commit_tick = 7`, so 8 - 7 == 1 < TTL → NO third emit yet
+        // Tick 6: the re-drive re-armed `last_commit_tick = 5`, so 6 - 5 == 1 < TTL → NO third emit yet
         // (the `>= ttl` false arm again, proving the timer re-arms and does not storm every tick).
-        rig.set_local_tick(8);
+        rig.set_local_tick(6);
         let after = rig.tick(vec![]);
         assert_eq!(
             crossing_requests(&after).len(),
@@ -9008,14 +9039,11 @@ mod tests {
         // every current rig) — a held latch is NEVER re-driven, even past many ticks.
         let mut rig = Rig::new(); // request_ttl_ticks == 0
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 43);
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
 
-        // Dwell to the first commit, then advance well past any plausible ttl window.
+        // Commit on the first in-band tick, then advance well past any plausible ttl window.
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
         for t in 2..=40 {
             rig.set_local_tick(t);
@@ -9070,10 +9098,7 @@ mod tests {
     fn a_saga_demote_clears_the_durable_crossing_latch() {
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 9);
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
         for t in 2..8 {
@@ -9113,12 +9138,16 @@ mod tests {
     /// exit tick. Shared by the nested-undock and top-level-degrade tests so they differ ONLY in the
     /// planted boundary's `parent`.
     fn drive_outward_exit(rig: &mut Rig, entity: EntityId) -> Vec<(NodeId, MsgClass, Vec<u8>)> {
-        // Start INSIDE the shell (r = 1000), previously a member.
+        // ESCAPE forest: root ⊃ parent(PARENT_REALM) ⊃ own(OWN_REALM, small shell r=1000). The shard owns
+        // OWN_REALM; a dot leaving the small own-shell (but inside the parent) undocks OUTWARD to the parent.
+        plant_escape_regions(rig);
+        // Start INSIDE the own-shell (sd = 500 - 1000 ≪ -inset ⇒ container == OWN_REALM, no re-home yet).
         insert_owned_dot(rig, TRIG_SESSION, entity, DVec3::new(500.0, 0.0, 0.0));
         // Prime membership with one in-band tick.
         rig.set_local_tick(2);
         let _ = rig.tick(vec![]);
-        // Step OUTSIDE the shell in one move (prev=500 inside → cur=5000 outside ⇒ swept Outward).
+        // Step OUTSIDE the own-shell (sd = 5000 - 1000 ≫ +outset ⇒ own membership releases) but still
+        // deep inside the PARENT shell ⇒ container flips to PARENT_REALM ⇒ re-home OUTWARD to the parent.
         move_dot(rig, TRIG_SESSION, DVec3::new(5000.0, 0.0, 0.0));
         rig.set_local_tick(3);
         rig.tick(vec![])
@@ -9126,57 +9155,49 @@ mod tests {
 
     #[test]
     fn slice4b_an_undock_re_homes_outward_to_the_parent_realm() {
-        // Slice 4b — the UNDOCK leg: a NESTED authority boundary (child = OTHER_REALM, parent =
-        // PARENT_REALM). An entity leaving OUTWARD commits immediately (no dwell) and the request's
-        // `to_realm` is the PARENT (`winner.parent`), NOT the boundary interior (`winner.to_realm`).
+        // Slice 4b (retargeted to CONTAINMENT) — the UNDOCK leg: the shard OWNS a CHILD realm (OWN_REALM,
+        // a small shell nested under PARENT_REALM). An entity leaving the child region (container flips to
+        // the parent) re-homes OUTWARD to PARENT_REALM. Symmetric with the dock — the SAME machinery; there
+        // is no "direction", only "the container changed".
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(nested_shell_boundary(CrossEffect::Authority));
         let entity = EntityId::pack(EntityKind::Player, 10, 2, 1);
         let out = drive_outward_exit(&mut rig, entity);
         let reqs = crossing_requests(&out);
         assert_eq!(
             reqs.len(),
             1,
-            "an outward crossing commits immediately (no dwell)",
+            "leaving the owned child region re-homes exactly once",
         );
-        // THE LOAD-BEARING ASSERT: the undock re-homes to the PARENT via `winner.parent`, not the
-        // boundary interior. This is NON-VACUOUS because PARENT_REALM != OTHER_REALM (`winner.to_realm`):
-        // an unchanged `to_realm = winner.to_realm` implementation would fail this exact equality.
+        // THE LOAD-BEARING ASSERT: the undock re-homes to the PARENT (the deepest region still containing
+        // the dot after it left the child). NON-VACUOUS because PARENT_REALM != OWN_REALM != OTHER_REALM.
         assert_eq!(
             reqs[0].to_realm, PARENT_REALM,
-            "the undock re-homes OUTWARD to the parent realm (winner.parent), not the interior",
+            "the undock re-homes OUTWARD to the parent realm (the new deepest container)",
         );
         assert_ne!(
             reqs[0].to_realm, OTHER_REALM,
-            "the undock destination is NOT the boundary interior (winner.to_realm) — direction resolved",
+            "the undock destination is NOT the inward child interior",
         );
         assert_eq!(
-            rig.world.resource::<StubStats>().crossing_outward_no_parent,
-            0,
-            "a well-formed NESTED boundary never hits the no-parent degrade (the malformed tripwire is 0)",
+            reqs[0].from_realm, OWN_REALM,
+            "the re-home leaves the realm the shard owns the subject in",
         );
     }
 
     #[test]
     fn slice4b_a_dock_and_undock_resolve_contrasting_destinations() {
-        // Slice 4b — DOCK vs UNDOCK contrast: the SAME nested boundary resolves an INWARD dock to the
-        // interior (`winner.to_realm`) and an OUTWARD undock to the parent (`winner.parent`). Both
-        // `authority_dest` arms covered, and the two destinations asserted to DIFFER (no accidental alias).
-        let boundary = nested_shell_boundary(CrossEffect::Authority);
+        // Slice 4b (retargeted to CONTAINMENT) — DOCK vs UNDOCK contrast: entering a DEEPER child region
+        // re-homes to the child interior (OTHER_REALM); leaving an OWNED child region re-homes to the
+        // parent (PARENT_REALM). Both fall out of `container()`; the two destinations DIFFER (no accidental
+        // alias) — proving the symmetric rule distinguishes the two container changes without a direction.
 
-        // DOCK (Inward) — reuse the existing dwell-based inward driver against the nested boundary.
+        // DOCK (into a deeper child) — the standard dock forest; the dot inside the child re-homes to it.
         let mut dock = Rig::new();
         dock.grant_realm();
-        dock.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(boundary);
+        plant_dock_regions(&mut dock);
         let dock_entity = EntityId::pack(EntityKind::Player, 10, 2, 2);
-        // Inside the band from spawn (ms = 100 m < the 1150 m create edge) → the rising edge commits Inward.
+        // Deep inside the child from spawn (sd ≪ -inset) → container == OTHER_REALM ≠ own ⇒ re-home INWARD.
         insert_owned_dot(
             &mut dock,
             TRIG_SESSION,
@@ -9189,228 +9210,82 @@ mod tests {
             dock_out.extend(dock.tick(vec![]));
         }
         let dock_reqs = crossing_requests(&dock_out);
-        assert_eq!(
-            dock_reqs.len(),
-            1,
-            "the dock commits exactly one Inward crossing"
-        );
+        assert_eq!(dock_reqs.len(), 1, "the dock commits exactly one re-home");
         assert_eq!(
             dock_reqs[0].to_realm, OTHER_REALM,
-            "the dock docks INWARD to the boundary interior (winner.to_realm)",
+            "the dock docks INWARD to the deeper child region's realm",
         );
 
-        // UNDOCK (Outward) — the same boundary, driven outward.
+        // UNDOCK (out of an owned child) — the escape forest; leaving the own-shell undocks to the parent.
         let mut undock = Rig::new();
         undock.grant_realm();
-        undock
-            .world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(boundary);
         let undock_entity = EntityId::pack(EntityKind::Player, 10, 2, 3);
         let undock_out = drive_outward_exit(&mut undock, undock_entity);
         let undock_reqs = crossing_requests(&undock_out);
         assert_eq!(
             undock_reqs.len(),
             1,
-            "the undock commits exactly one Outward crossing"
+            "the undock commits exactly one re-home"
         );
         assert_eq!(
             undock_reqs[0].to_realm, PARENT_REALM,
-            "the undock re-homes OUTWARD to the parent realm (winner.parent)",
+            "the undock re-homes OUTWARD to the parent realm",
         );
 
-        // THE CONTRAST: the two directions resolve DISTINCT destinations off the same boundary.
+        // THE CONTRAST: the two container changes resolve DISTINCT destinations.
         assert_ne!(
             dock_reqs[0].to_realm, undock_reqs[0].to_realm,
-            "a dock and undock of the same boundary resolve DIFFERENT destinations (interior vs parent)",
+            "a dock and an undock resolve DIFFERENT destinations (deeper child vs parent)",
         );
     }
 
     #[test]
-    fn slice4b_a_top_level_outward_undock_with_no_parent_degrades_loud() {
-        // Slice 4b — the DEGRADE arm: a TOP-LEVEL authority boundary (parent = None) an entity leaves
-        // OUTWARD has no enclosing realm to re-home to. This is a boundary-AUTHORING error, not a runtime
-        // condition — `authority_dest` returns None, the Authority arm counts `crossing_outward_no_parent`
-        // and emits NOTHING (no `CrossingRequest`, no orphan latch).
+    fn a_nested_inner_boundary_wins_over_its_parent() {
+        // Retargeted to CONTAINMENT (the `deepest_wins` property): a dot inside BOTH the own region
+        // (System(7)) AND a coincident DEEPER child (Planet(42), nested under own) has container == the
+        // INNER child (depth beats the parent), so the re-home targets the inner realm — exercising the
+        // boot-cached `region_depth` argmax.
         let mut rig = Rig::new();
         rig.grant_realm();
-        // `shell_boundary` is TOP-LEVEL (parent = None) — the malformed-for-outward fixture.
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
-        let entity = EntityId::pack(EntityKind::Player, 10, 2, 4);
-        let out = drive_outward_exit(&mut rig, entity);
+        plant_dock_regions(&mut rig); // root ⊃ own(System 7) ⊃ child(Planet 42), all origin-coincident
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 5);
+        // At |100| the dot is inside own (100000) AND the child (1000): the deeper child wins.
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..8 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&all);
+        assert_eq!(reqs.len(), 1);
         assert_eq!(
-            crossing_requests(&out).len(),
-            0,
-            "a top-level Outward undock (no parent) emits NO CrossingRequest (the degrade)",
-        );
-        assert_eq!(
-            rig.world.resource::<StubStats>().crossing_outward_no_parent,
-            1,
-            "the no-parent-outward degrade is COUNTED LOUD exactly once (the authoring tripwire)",
-        );
-        // No orphan latch: the degrade gates BEFORE the `in_flight` insert.
-        assert!(
-            rig.world.resource::<RequestInFlight>().0.is_empty(),
-            "the degrade leaves NO standing RequestInFlight latch",
-        );
-    }
-
-    #[test]
-    fn slice4b_a_transient_top_level_outward_undock_degrades_loud() {
-        // Slice 4b — the TRANSIENT degrade arm (the mirror of the durable `..._degrades_loud`): a HELD
-        // transient leaving a TOP-LEVEL Authority boundary (parent = None) OUTWARD has no enclosing realm
-        // to re-home to → `authority_dest` returns None, the Transient Authority arm counts
-        // `crossing_outward_no_parent` and emits NO `TransientCrossingRequest`. Covers the SECOND
-        // `authority_dest` degrade site (the Transient arm), distinct from the Durable arm's.
-        let mut rig = Rig::new();
-        rig.grant_realm();
-        // `shell_boundary` is TOP-LEVEL (parent = None) — the malformed-for-outward fixture.
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
-        let entity = EntityId::pack(EntityKind::Debris, 10, 3, 7);
-        // A HELD transient INSIDE the shell (r = 1000), at rest (zero velocity so `readvance_transients`
-        // leaves its pose where set) and previously a member.
-        rig.world.resource_mut::<OwnedTransients>().0.insert(
-            entity,
-            Transient {
-                pose: StampedPose::at_rest(
-                    config().frame,
-                    DVec3::new(500.0, 0.0, 0.0),
-                    UniverseTick(100),
-                ),
-                anchor_fence: Fence(1),
-                status: TransientStatus::Held { outbound: None },
-                prev_offset: DVec3::new(500.0, 0.0, 0.0),
-            },
-        );
-        // Prime membership with one in-band tick (inside).
-        rig.set_local_tick(2);
-        let _ = rig.tick(vec![]);
-        // Step OUTSIDE the shell (prev = 500 inside → cur = 5000 outside ⇒ swept Outward).
-        rig.world
-            .resource_mut::<OwnedTransients>()
-            .0
-            .get_mut(&entity)
-            .expect("the held transient is still owned")
-            .pose = StampedPose::at_rest(
-            config().frame,
-            DVec3::new(5000.0, 0.0, 0.0),
-            UniverseTick(100),
-        );
-        rig.set_local_tick(3);
-        let out = rig.tick(vec![]);
-        // The top-level transient Outward undock DEGRADES: no `TransientCrossingRequest`.
-        assert_eq!(
-            transient_crossing_requests(&out).len(),
-            0,
-            "a top-level transient Outward undock (no parent) emits NO TransientCrossingRequest (degrade)",
-        );
-        assert_eq!(
-            rig.world.resource::<StubStats>().crossing_outward_no_parent,
-            1,
-            "the transient no-parent-outward degrade is COUNTED LOUD exactly once",
-        );
-    }
-
-    #[test]
-    fn slice4b_two_same_depth_outward_boundaries_peel_deterministically() {
-        // Slice 4b (adversary FINDING-3) — an entity near TWO coincident same-depth Outward boundaries
-        // resolves to EXACTLY ONE winner per tick, and the choice is PERMUTATION-INVARIANT (independent of
-        // the slice order). Both boundaries are top-level-under-the-same-absent-parent (`PARENT_REALM` is
-        // not itself a boundary in the slice ⇒ `boundary_depth == 0` for both ⇒ a genuine same-depth tie),
-        // with DISTINCT interiors (`to_realm`) so the tiebreak has something to order.
-        //
-        // DOC (the FINDING-3 resolution): `resolve_winner_ix`'s Outward tiebreak sorts on the candidate's
-        // `to_realm` (the INTERIOR realm — the candidate is built BEFORE the direction resolves the
-        // destination, so `crossing_candidates` can only key on the interior). The WINNER's DESTINATION is
-        // then `winner.parent` (both peel to `PARENT_REALM` here). So the SELECTION key (`to_realm`, min
-        // wins) and the OUTCOME realm (`parent`) are deliberately DIFFERENT realms — selection only needs
-        // to be a strict total order (it is: `to_realm` Ord + the slice-index final tiebreak), which the
-        // permutation-invariance below pins.
-        //
-        // Two nested boundaries with the SAME geometry/parent but distinct interiors. Both leave OUTWARD
-        // to PARENT_REALM; the tiebreak picks the one with the smaller `to_realm` interior.
-        let low = RealmId::Planet(1); // the smaller interior (wins the `to_realm` tiebreak)
-        let high = RealmId::Planet(9); // the larger interior
-        let make = |interior: RealmId| {
-            RealmBoundary::shell(
-                interior,
-                LatticePos::local(DVec3::ZERO),
-                1000.0,
-                1.15,
-                1.30,
-                1.0,
-                0.05,
-                0.5,
-                1.0,
-                Some(PARENT_REALM), // both nested under the same (absent-from-slice) parent
-                interior,
-                CrossEffect::Authority,
-            )
-        };
-
-        // Drive the SAME outward exit under BOTH slice orderings and assert the request set is identical.
-        let run = |order: [RealmId; 2]| -> Vec<CrossingRequest> {
-            let mut rig = Rig::new();
-            rig.grant_realm();
-            {
-                let mut b = rig.world.resource_mut::<RealmBoundaries>();
-                b.0.push(make(order[0]));
-                b.0.push(make(order[1]));
-            }
-            let entity = EntityId::pack(EntityKind::Player, 10, 2, 5);
-            crossing_requests(&drive_outward_exit(&mut rig, entity))
-        };
-        let forward = run([low, high]);
-        let reversed = run([high, low]);
-
-        // EXACTLY ONE winner per tick (a single boundary peels, never both).
-        assert_eq!(
-            forward.len(),
-            1,
-            "exactly ONE boundary peels per tick (the winner reduces to one)",
-        );
-        // PERMUTATION-INVARIANT: swapping the slice order yields the identical request (same destination).
-        assert_eq!(
-            forward, reversed,
-            "the winner is slice-order-INDEPENDENT (the same boundary peels under either ordering)",
-        );
-        // The destination is the PARENT (the undock outcome), not the interior tiebreak key.
-        assert_eq!(
-            forward[0].to_realm, PARENT_REALM,
-            "the winning undock peels OUTWARD to the parent (winner.parent), regardless of tiebreak key",
+            reqs[0].to_realm, OTHER_REALM,
+            "the INNER (deeper) region wins the depth argmax",
         );
     }
 
     #[test]
     fn a_boundary_hovering_dot_does_not_flap() {
+        // Retargeted to CONTAINMENT (`hysteresis_no_flap`): a dot jittering INSIDE the child region's band
+        // for many ticks stays a member (its bit never releases), so container is stable and the latch caps
+        // the emits at ≤ 1 across the whole window (no per-tick flap).
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 2, 2);
-        // Hover well inside the band (member every tick) for MANY ticks: hysteresis + the latch cap the
-        // emits at ≤ 1 across the whole k_dwell window (no per-tick flap).
+        // Hover deep inside the child (sd stays ≪ -inset even with the jitter): a member every tick.
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(200.0, 0.0, 0.0));
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
         for t in 2..15 {
             rig.set_local_tick(t);
-            // Jitter within the band each tick (still a member: ms stays < 1150).
+            // Jitter within the child region each tick (still a member: sd stays deeply negative).
             let jitter = if t % 2 == 0 { 210.0 } else { 190.0 };
             move_dot(&mut rig, TRIG_SESSION, DVec3::new(jitter, 0.0, 0.0));
             all.extend(rig.tick(vec![]));
         }
         assert!(
             crossing_requests(&all).len() <= 1,
-            "a boundary-hovering dot emits at most one request (no flap)",
+            "a region-hovering dot emits at most one request (no flap)",
         );
     }
 
@@ -9468,21 +9343,19 @@ mod tests {
     }
 
     #[test]
-    fn a_boundary_the_segment_stays_outside_of_is_not_a_candidate() {
-        // A dot far OUTSIDE the shell (never a member, swept StaysOutside): no candidate, no state
-        // change — the `candidate_direction == None` filter arm.
+    fn a_dot_outside_the_deeper_child_but_inside_own_stays() {
+        // Retargeted from the portal "StaysOutside is not a candidate": a dot that is OUTSIDE the deeper
+        // child region (its bit never acquires) but inside the OWN region has container == OWN_REALM — the
+        // realm the shard owns it in — so NO re-home fires and no crossing latch is created.
         let mut rig = Rig::new();
         rig.grant_realm();
-        rig.world
-            .resource_mut::<RealmBoundaries>()
-            .0
-            .push(shell_boundary(CrossEffect::Authority));
+        plant_dock_regions(&mut rig);
         let entity = EntityId::pack(EntityKind::Player, 10, 2, 4);
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(9000.0, 0.0, 0.0));
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
         for t in 2..8 {
             rig.set_local_tick(t);
-            // Move around, but always well outside both the shell AND the destroy edge.
+            // Move around, but always well outside the child region (and inside own).
             move_dot(
                 &mut rig,
                 TRIG_SESSION,
@@ -9491,170 +9364,18 @@ mod tests {
             all.extend(rig.tick(vec![]));
         }
         assert!(crossing_requests(&all).is_empty());
-        // No boundary won ⇒ no CrossingProgress entry was created (the `resolve_winner_ix == None` arm).
-        assert!(rig.world.resource::<CrossingProgress>().0.is_empty());
-    }
-
-    #[test]
-    fn a_nested_inner_boundary_wins_over_its_parent() {
-        // Two Authority shells sharing the origin: an OUTER (this shard's realm, depth 0) and an INNER
-        // nested under it (depth 1, a DIFFERENT to_realm). `resolve_winner_ix` picks the INNER (deeper),
-        // so the emitted crossing targets the inner realm — exercising `boundary_depth`'s parent walk.
-        let mut rig = Rig::new();
-        rig.grant_realm();
-        let inner_realm = RealmId::Planet(7);
-        let outer = shell_boundary(CrossEffect::Authority); // realm System(7), parent None, to OTHER_REALM
-        let inner = RealmBoundary::shell(
-            OTHER_REALM,                    // the inner boundary's own realm
-            LatticePos::local(DVec3::ZERO), // coincident centre
-            1000.0,
-            1.15,
-            1.30,
-            1.0,
-            0.05,
-            0.5,
-            1.0,
-            Some(RealmId::System(7)), // nested under the OUTER boundary's realm ⇒ depth 1
-            inner_realm,
-            CrossEffect::Authority,
-        );
-        {
-            let mut b = rig.world.resource_mut::<RealmBoundaries>();
-            b.0.push(outer);
-            b.0.push(inner);
-        }
-        let entity = EntityId::pack(EntityKind::Player, 10, 2, 5);
-        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
-        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
-        for t in 2..8 {
-            rig.set_local_tick(t);
-            all.extend(rig.tick(vec![]));
-        }
-        let reqs = crossing_requests(&all);
-        assert_eq!(reqs.len(), 1);
+        assert!(rig.world.resource::<RequestInFlight>().0.is_empty());
+        // The subject is evaluated every tick (so it carries a ContainmentProgress bit + a CrossingProgress
+        // cooldown row), but since container == own NO re-home ever COMMITTED — the cooldown was never
+        // armed (the `last_commit_tick` is None).
         assert_eq!(
-            reqs[0].to_realm, inner_realm,
-            "the INNER (deeper) boundary wins the tiebreak",
-        );
-    }
-
-    #[test]
-    fn a_dangling_parent_link_stops_the_depth_walk() {
-        // A boundary whose `parent` realm has NO matching boundary in the slice: `boundary_depth`'s
-        // walk hits the `find(...) else break` arm (a broken/mis-authored parent link) and stops at
-        // depth 0 rather than spinning. The dot still commits (depth is only the winner tiebreak), so a
-        // CrossingRequest fires — proving the dangling-parent walk terminates cleanly.
-        let mut rig = Rig::new();
-        rig.grant_realm();
-        let dangling = RealmBoundary::shell(
-            RealmId::System(7),
-            LatticePos::local(DVec3::ZERO),
-            1000.0,
-            1.15,
-            1.30,
-            1.0,
-            0.05,
-            0.5,
-            1.0,
-            Some(RealmId::System(999)), // no boundary owns System(999) ⇒ the find() misses
-            OTHER_REALM,
-            CrossEffect::Authority,
-        );
-        rig.world.resource_mut::<RealmBoundaries>().0.push(dangling);
-        let entity = EntityId::pack(EntityKind::Player, 10, 2, 6);
-        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
-        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
-        for t in 2..8 {
-            rig.set_local_tick(t);
-            all.extend(rig.tick(vec![]));
-        }
-        assert_eq!(
-            crossing_requests(&all).len(),
-            1,
-            "a dangling parent link still commits (the walk terminated at depth 0)",
-        );
-    }
-
-    #[test]
-    fn entering_a_nested_boundary_while_still_inside_the_parent_starts_a_fresh_dwell() {
-        // REGRESSION (adversarial review, Slice 3d/3e): the per-entity `CrossingState` dwell counters
-        // are semantically per-*(entity, boundary)*. The real case that bites — a ship dwelling inside
-        // a STATION (B0, depth 0) then moving into a nested docking BAY (B1, depth 1) WITHOUT ever
-        // leaving the station. At the flip the entity is a CONTINUOUS member (`was_member` never drops),
-        // so B1 inherits B0's `was_member = true` (→ B1 reads the DESTROY edge) and `inward_ticks`
-        // already past `n_entry` (→ the `== n_entry` rising edge never re-fires) — the crossing into B1
-        // is LOST forever. B1 wins the flip by DEPTH (not by the `Direction` tiebreak), so the bug bites
-        // deterministically. Two Interest boundaries isolate it (no latch, no cooldown — only the dwell
-        // decides); the final `InterestZones` proves B1 was actually entered.
-        let mut rig = Rig::new();
-        rig.grant_realm();
-        const B1_REALM: RealmId = RealmId::Planet(43);
-        // B0: a large station shell at the origin, depth 0, this shard's realm System(7).
-        let b0 = RealmBoundary::shell(
-            RealmId::System(7),
-            LatticePos::local(DVec3::ZERO),
-            2000.0,
-            1.15,
-            1.30,
-            1.0,
-            0.05,
-            0.5,
-            1.0,
+            rig.world
+                .resource::<CrossingProgress>()
+                .0
+                .get(&entity)
+                .and_then(|st| st.last_commit_tick),
             None,
-            OTHER_REALM,
-            CrossEffect::Interest,
-        );
-        // B1: a small bay shell OFFSET inside B0, nested under it (parent System(7) ⇒ depth 1). At the
-        // origin the entity is deep inside B0 but well OUTSIDE B1 (|1000| ≫ B1's 520 m destroy edge).
-        let b1 = RealmBoundary::shell(
-            RealmId::Station(1),
-            LatticePos::local(DVec3::new(1000.0, 0.0, 0.0)),
-            400.0,
-            1.15,
-            1.30,
-            1.0,
-            0.05,
-            0.5,
-            1.0,
-            Some(RealmId::System(7)),
-            B1_REALM,
-            CrossEffect::Interest,
-        );
-        {
-            let mut b = rig.world.resource_mut::<RealmBoundaries>();
-            b.0.push(b0); // ix 0
-            b.0.push(b1); // ix 1
-        }
-        let entity = EntityId::pack(EntityKind::Player, 10, 2, 7);
-        // Start at the origin: inside B0, outside B1 ⇒ only B0 is a candidate (B1 StaysOutside).
-        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::ZERO);
-        // Phase 1: dwell inside B0 (accumulates `inward_ticks` past `n_entry`, sets `was_member = true`).
-        for t in 2..7 {
-            rig.set_local_tick(t);
-            let _ = rig.tick(vec![]);
-        }
-        assert_eq!(
-            rig.world.resource::<InterestZones>().0.get(&entity),
-            Some(&OTHER_REALM),
-            "phase 1: the entity is registered in B0 (the station) interest zone",
-        );
-        // Phase 2: move into B1 (still inside B0). The winner flips 0 → 1 by depth while membership is
-        // continuous — WITHOUT the per-boundary reset, B1's rising edge would never fire.
-        for t in 7..15 {
-            rig.set_local_tick(t);
-            move_dot(&mut rig, TRIG_SESSION, DVec3::new(1000.0, 0.0, 0.0));
-            let _ = rig.tick(vec![]);
-        }
-        assert_eq!(
-            rig.world.resource::<InterestZones>().0.get(&entity),
-            Some(&B1_REALM),
-            "phase 2: the fresh per-boundary dwell committed the crossing into B1 (not lost)",
-        );
-        // Two DISTINCT interest commits happened (one per boundary) — the dwell restarted, it did not
-        // carry B0's saturated counters (which would have suppressed B1 forever).
-        assert!(
-            rig.world.resource::<StubStats>().crossing_interest_updates >= 2,
-            "each boundary's rising edge fired its own interest update",
+            "no re-home committed ⇒ the cooldown was never armed",
         );
     }
 
@@ -9663,12 +9384,13 @@ mod tests {
     fn a_zero_dwell_boundary_tuning_fails_loud_at_boot() {
         let bad = StubConfig {
             boundary: BoundaryTuning {
-                n_entry: 0,
+                k_dwell: 0,
                 ..BoundaryTuning::DEFAULT
             },
             ..config()
         };
-        // The fail-loud validation in `register_stub_shard` (mirrors the tick-pair guard).
+        // The fail-loud validation in `register_stub_shard` (mirrors the tick-pair guard). `k_dwell` is the
+        // post-commit cooldown `should_rehome` still reads (§2.7); zero fails `BoundaryTuning::validate`.
         let _ = Rig::with_config(bad);
     }
 }

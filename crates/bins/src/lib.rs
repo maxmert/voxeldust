@@ -1395,6 +1395,78 @@ fn parse_realm_boundaries(
     serde_json::from_str(json).map_err(|e| RealmBoundariesError::Malformed(e.to_string()))
 }
 
+/// C-3 CONTAINMENT SEAM-ADAPTER — lift the SOURCE-shard's loaded `RealmBoundary` set (the born-inside
+/// crossing geometry, single-sourced with the client's `--realm-boxes`) into the containment
+/// [`RealmRegion`](vd_core::geometry::RealmRegion) forest the sim's `RealmRegions` resource now consumes.
+/// The old directional `RealmBoundary` model authored `realm = the exterior side` + a `to_realm`
+/// destination; the containment model derives the destination as the DEEPEST containing region's realm.
+/// So each loaded boundary becomes a DEEPER CHILD region whose `realm = boundary.to_realm` (the re-home
+/// destination), nested under the shard's `hosted_realm` (a large own-region), which in turn nests under an
+/// ambient root — so a dot born INSIDE the boundary shell has its deepest container == `to_realm` and
+/// re-homes there (behaviour-equivalent to the born-inside dwell the directional model committed). The
+/// on-disk JSON + the client `--realm-boxes` scene are UNCHANGED (still `RealmBoundary`); this converts
+/// only at the shard's plant seam. The band is re-derived velocity-safe from the shard's tick params.
+///
+/// A proper single-sourced `RealmRegion` boot path (`realm_regions_for` / a `regions.json`) is the C-5/C-6
+/// slice; this adapter keeps the process tier compiling + the born-inside crossing smoke behaviour-live
+/// through C-3 without touching the JSON format or the client.
+#[must_use]
+pub fn regions_for_source_plant(
+    boundaries: &[vd_core::geometry::RealmBoundary],
+    hosted_realm: vd_core::pose::RealmId,
+    move_speed_mps: f64,
+    tick_dt_s: f64,
+) -> Vec<vd_core::geometry::RealmRegion> {
+    use vd_core::geometry::{Boundary, ContainmentBand, RealmRegion};
+    use vd_core::pose::{LatticePos, RealmId, frame_for_realm};
+    let root_realm = RealmId::System(0);
+    let band =
+        ContainmentBand::for_containment_velocity_safe(50.0, 100.0, move_speed_mps, tick_dt_s, 1.0)
+            .unwrap_or_else(|_| {
+                // A degenerate tick config can only produce a non-positive band; fall back to a fixed safe pair
+                // (both edges > 0) so the plant never panics the shard boot.
+                ContainmentBand::for_containment_velocity_safe(50.0, 100.0, 0.0, 1.0, 0.0)
+                    .expect("the zero-velocity fallback band is always valid")
+            });
+    let region = |realm: RealmId, parent: Option<RealmId>, shape: Boundary| RealmRegion {
+        realm,
+        center: LatticePos::local(vd_core::glam::DVec3::ZERO),
+        frame: frame_for_realm(realm, None)
+            .unwrap_or(vd_core::pose::FrameRef::SystemSpace { system_seed: 0 }),
+        shape,
+        band,
+        parent,
+    };
+    // Ambient root ⊃ the shard's own realm (large) ⊃ one deeper child per loaded boundary (its to_realm).
+    let mut regions = vec![
+        region(root_realm, None, Boundary::Shell { r: 1.0e9 }),
+        region(
+            hosted_realm,
+            Some(root_realm),
+            Boundary::Shell { r: 100_000.0 },
+        ),
+    ];
+    for b in boundaries
+        .iter()
+        .filter(|b| b.effect == vd_core::geometry::CrossEffect::Authority)
+    {
+        // Nest the destination realm as a deeper AUTHORITY child, REUSING the boundary's own shape + center
+        // so the client's `--realm-boxes` projection (same geometry) still frames the dot inside it. Only
+        // Authority boundaries become containment regions — an Interest boundary (a ghost-only zone) is NOT
+        // an authority re-home, so it is dropped here (the interim adapter carries no Interest path; C-6).
+        regions.push(RealmRegion {
+            realm: b.to_realm,
+            center: b.center,
+            frame: frame_for_realm(b.to_realm, None)
+                .unwrap_or(vd_core::pose::FrameRef::SystemSpace { system_seed: 0 }),
+            shape: b.shape,
+            band,
+            parent: Some(hosted_realm),
+        });
+    }
+    regions
+}
+
 /// The config-drift guard: every boundary's exterior `realm` must equal the realm this shard hosts. A
 /// monomorphic helper so the reject arm is covered off the env/fs body.
 fn guard_boundaries_in_realm(

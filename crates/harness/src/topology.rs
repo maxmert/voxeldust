@@ -1259,13 +1259,13 @@ mod tests {
     #[test]
     fn a_transient_crossing_composes_end_to_end_dest_owns_and_go_token_recorded() {
         use vd_core::entity_kind::EntityKind;
-        use vd_core::geometry::{BoundaryTuning, CrossEffect, RealmBoundary};
+        use vd_core::geometry::{Boundary, BoundaryTuning, ContainmentBand, RealmRegion};
         use vd_core::glam::DVec3;
-        use vd_core::pose::{FrameRef, LatticePos};
+        use vd_core::pose::{FrameRef, LatticePos, frame_for_realm};
         use vd_node::orchestrator::{OrchestratorConfig, register_orchestrator};
         use vd_sim::directory::DirectoryTuning;
         use vd_sim::stub::{
-            OwnedTransients, RealmBoundaries, StubConfig, Transient, TransientStatus,
+            OwnedTransients, RealmRegions, StubConfig, Transient, TransientStatus,
             register_stub_shard,
         };
 
@@ -1360,11 +1360,11 @@ mod tests {
             );
         }
 
-        // Seed a Debris transient dwelling over the B→C boundary on the SOURCE shard: plant an Authority
-        // shell boundary on B whose exterior realm is B's (FROM) and whose `to_realm` is C's (TO), and a
-        // held Debris a few hundred metres out (comfortably in the create band, < the 1150 m edge). The
-        // rising edge fires on the 3rd consecutive in-band tick (`n_entry` DEFAULT). Mirror the shard-level
-        // `a_transient_crossing_emits_a_transient_crossing_request` seed.
+        // Seed a Debris transient inside the B→C region on the SOURCE shard: plant a CONTAINMENT forest on
+        // B — root(System(0)) ⊃ own(FROM = B's realm) ⊃ dest(TO = C's realm, a deeper child region) — all
+        // origin-coincident, and a held Debris a few hundred metres out (deep inside the dest child shell).
+        // Its deepest container is the TO realm ≠ B's own FROM realm, so the containment trigger re-homes it
+        // B→C. Mirror the shard-level `a_transient_crossing_emits_a_transient_crossing_request` seed.
         let debris = EntityId::pack(EntityKind::Debris, 5, 1, 3);
         {
             let shard = topo
@@ -1375,23 +1375,22 @@ mod tests {
                 .downcast_mut::<vd_node::ShardNode<crate::fabric::FabricTransport>>()
                 .expect("ShardNode");
             let world = shard.world_mut();
-            world
-                .resource_mut::<RealmBoundaries>()
-                .0
-                .push(RealmBoundary::shell(
-                    from_realm,
-                    LatticePos::local(DVec3::ZERO),
-                    1000.0, // r_soi
-                    1.15,   // create_factor → create edge 1150 m
-                    1.30,   // destroy_factor
-                    1.0,    // v_rel (slow)
-                    0.05,   // dt
-                    0.5,    // pad_floor
-                    1.0,    // k_safety_extra
-                    None,   // top-level
-                    to_realm,
-                    CrossEffect::Authority,
-                ));
+            let band = ContainmentBand::for_containment_velocity_safe(50.0, 100.0, 1.0, 0.05, 1.0)
+                .expect("valid containment band");
+            let make = |realm: RealmId, parent: Option<RealmId>, r: f64| RealmRegion {
+                realm,
+                center: LatticePos::local(DVec3::ZERO),
+                frame: frame_for_realm(realm, None).expect("System/Planet realm resolves a frame"),
+                shape: Boundary::Shell { r },
+                band,
+                parent,
+            };
+            let root = RealmId::System(0);
+            *world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
+                make(root, None, 1.0e9),
+                make(from_realm, Some(root), 100_000.0),
+                make(to_realm, Some(from_realm), 1000.0),
+            ]);
             let pose = StampedPose::at_rest(
                 FrameRef::SystemSpace { system_seed: 5 },
                 DVec3::new(100.0, 0.0, 0.0),

@@ -63,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The compile-time TICK-PAIR assert guards only the DEV const — cross-check the env-supplied pair here.
     let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
     let tick_dt: f64 = env.parse("VD_TICK_DT")?;
+    let move_speed: f64 = env.parse("VD_SPEED")?;
     vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
     register_stub_shard(
         world,
@@ -72,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             frame: vd_core::pose::FrameRef::SystemSpace {
                 system_seed: realm_seed,
             },
-            move_speed_mps: env.parse("VD_SPEED")?,
+            move_speed_mps: move_speed,
             tick_dt_s: tick_dt,
             orchestrator: env.node_id("VD_ORCH")?,
             mint_seed: env.parse("VD_MINT_SEED")?,
@@ -102,10 +103,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // DEFERRED 1-SIGKILL-OWED — the process-seam boundary-plant knob. `VD_REALM_BOUNDARIES` (a path to a
     // `boundaries.json` = a `Vec<RealmBoundary>`, SINGLE-SOURCED with the client's `--realm-boxes`
-    // boxes.json) arms the geometric transfer trigger by REPLACING the default-empty `RealmBoundaries` the
+    // boxes.json) arms the containment re-home trigger by REPLACING the default-empty `RealmRegions` the
     // stub just inserted. ABSENT ⇒ inert (the resource stays `default()` empty ⇒ `evaluate_realm_boundaries`
     // early-returns, byte-identical to today). A malformed file OR a boundary for a realm this shard does
     // NOT host (a config drift) fails LOUD here (Display carries the actionable guidance for `kubectl logs`).
+    // C-3: the loaded directional boundaries are lifted into the containment `RealmRegion` forest the sim
+    // consumes (`regions_for_source_plant`) — the JSON format + client `--realm-boxes` stay unchanged; a
+    // single-sourced `regions.json` boot path is the C-5/C-6 slice.
     let hosted_realm = vd_core::pose::RealmId::System(realm_seed);
     if let Some(boundaries) =
         vd_bins::resolve_realm_boundaries(&env, hosted_realm).map_err(|e| e.to_string())?
@@ -113,11 +117,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(
             count = boundaries.len(),
             realm = %hosted_realm,
-            "planting VD_REALM_BOUNDARIES — the geometric transfer trigger is ARMED",
+            "planting VD_REALM_BOUNDARIES — the containment re-home trigger is ARMED",
         );
-        node.world_mut()
-            .resource_mut::<vd_sim::stub::RealmBoundaries>()
-            .0 = boundaries;
+        let regions =
+            vd_bins::regions_for_source_plant(&boundaries, hosted_realm, move_speed, tick_dt);
+        *node
+            .world_mut()
+            .resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::new(regions);
     }
     let mut pacer = TickPacer::new(tick_hz);
     // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its

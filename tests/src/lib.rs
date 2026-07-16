@@ -75,8 +75,8 @@ pub fn stub_config() -> StubConfig {
         // the self-fence cells set it explicitly. Pre-D-3 behavior: no proactive fence.
         self_fence_grace_ticks: 0,
         snapshot_datagram_budget: 1100,
-        // Slice 3e: the geometric transfer-trigger tuning. INERT here (the cluster scenarios plant no
-        // `RealmBoundaries`, so `evaluate_realm_boundaries` early-returns — behaviour-identical).
+        // Slice 3e / C-3: the containment re-home trigger tuning. INERT here (the cluster scenarios plant
+        // no `RealmRegions`, so `evaluate_realm_boundaries` early-returns — behaviour-identical).
         boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
         request_ttl_ticks: 0,
     }
@@ -464,51 +464,84 @@ pub fn seed_transient_crossing(
     });
 }
 
-/// Slice 3g — install `boundaries` into the SOURCE shard's ([`SHARD`]) `RealmBoundaries` resource, ARMING
-/// the geometric transfer trigger (`evaluate_realm_boundaries` early-returns while the registry is empty,
-/// so the cluster is behaviour-identical until this plant). The caller owns the boundary set — a single
-/// shell for the 3g crossing-e2e; a later dense soak reuses this with N shells. INERT until this call.
+/// The ambient ROOT realm (`parent: None`) for a crossing-e2e region forest — a huge shell covering
+/// everything, so the `container` fold is total (an entity is ALWAYS in ≥1 realm).
+pub const CROSSING_ROOT_REALM: RealmId = RealmId::System(0);
+
+/// Build a velocity-safe [`ContainmentBand`](vd_core::geometry::ContainmentBand) for a crossing-e2e region,
+/// sized against the dot's own walk speed (the only motion in these fixtures) so it can never flap.
+fn crossing_band() -> vd_core::geometry::ContainmentBand {
+    vd_core::geometry::ContainmentBand::for_containment_velocity_safe(
+        50.0,  // inset (m inside to acquire)
+        100.0, // outset_min (m outside to release)
+        stub_config().move_speed_mps,
+        stub_config().tick_dt_s,
+        1.0, // k_safety_extra
+    )
+    .expect("valid crossing containment band")
+}
+
+/// One `RealmRegion` shell at the origin of `realm`'s frame, radius `r`, nested under `parent`.
+fn crossing_region(
+    realm: RealmId,
+    parent: Option<RealmId>,
+    r: f64,
+) -> vd_core::geometry::RealmRegion {
+    use vd_core::pose::{LatticePos, frame_for_realm};
+    vd_core::geometry::RealmRegion {
+        realm,
+        center: LatticePos::local(vd_core::glam::DVec3::ZERO),
+        frame: frame_for_realm(realm, None).expect("System realm always resolves a frame"),
+        shape: vd_core::geometry::Boundary::Shell { r },
+        band: crossing_band(),
+        parent,
+    }
+}
+
+/// Slice 3g (C-3 CONTAINMENT) — install a REGION forest into the SOURCE shard's ([`SHARD`]) `RealmRegions`
+/// resource, ARMING the containment re-home trigger (`evaluate_realm_boundaries` early-returns while the
+/// registry is empty, so the cluster is behaviour-identical until this plant). The caller owns the region
+/// set. INERT until this call.
 pub fn plant_crossing_boundaries(
     topo: &mut Topology,
-    boundaries: Vec<vd_core::geometry::RealmBoundary>,
+    regions: Vec<vd_core::geometry::RealmRegion>,
 ) {
     with_node(topo, SHARD, |s| {
-        s.world_mut()
-            .resource_mut::<vd_sim::stub::RealmBoundaries>()
-            .0 = boundaries;
+        *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::new(regions);
     });
 }
 
-/// Slice 3g — the crossing-e2e convenience: plant ONE small AUTHORITY shell on the SOURCE, centered at the
-/// dot's SPAWN offset (`DVec3::ZERO` in the source frame — where login places the avatar, stub.rs `login`),
-/// so the subject is a band MEMBER from spawn and `should_commit` fires an `Inward` after `n_entry` dwell
-/// ticks (the PROVEN `should_commit` path — no fragile 1000 m traversal race). The shell's exterior realm
-/// is the SOURCE realm ([`stub_config`]`.realm` = `System(7)`); its `to_realm` is the DEST realm
-/// ([`dest_stub_config`]`.realm` = `System(8)`).
+/// Slice 3g (C-3 CONTAINMENT) — the crossing-e2e convenience: plant a 3-level forest on the SOURCE
+/// (root ⊃ own(`System(7)`) ⊃ dest(`System(8)`)), all origin-coincident at the dot's SPAWN offset
+/// (`DVec3::ZERO` in the source frame — where login places the avatar, stub.rs `login`). The dot is a
+/// MEMBER of the DEST region from spawn, so its deepest container is the DEST realm — `should_rehome`
+/// fires a re-home to `System(8)` (the containment twin of the old `should_commit` Inward path). The OWN
+/// region (`System(7)`) is the realm the shard owns the subject in, so a dot inside ONLY it would NOT
+/// re-home; the deeper dest region is what triggers the crossing.
 ///
-/// **M2 (load-bearing):** `to_realm` MUST byte-equal the realm the DEST actually holds
+/// **M2 (load-bearing):** the dest region's `realm` MUST byte-equal the realm the DEST shard actually holds
 /// ([`dest_stub_config`]`.realm`) so the orchestrator's `handle_crossing_request` resolves the dest head and
-/// starts the saga; a mismatch silently counts `crossing_unresolved` (a vacuous green). The create edge
-/// (`r_soi · 1.15 = 1150 m`) dwarfs the ~0.1 m/tick walk, so the dot dwells in-band for the whole run.
+/// starts the saga; a mismatch silently counts `crossing_unresolved` (a vacuous green). The dest shell (r =
+/// 1000 m) dwarfs the ~0.1 m/tick walk, so the dot stays a member for the whole run.
 pub fn plant_one_crossing_shell(topo: &mut Topology) {
-    use vd_core::geometry::{CrossEffect, RealmBoundary};
-    use vd_core::pose::LatticePos;
-    let shell = RealmBoundary::shell(
-        stub_config().realm, // the boundary's exterior side = the SOURCE realm (System(7))
-        LatticePos::local(vd_core::glam::DVec3::ZERO), // centered at the dot's login spawn offset
-        1000.0,              // r_soi
-        1.15,                // create_factor → create edge 1150 m (dwarfs the 0.1 m/tick walk)
-        1.30,                // destroy_factor → destroy edge 1300 m
-        stub_config().move_speed_mps, // v_rel (the dot's own walk speed — factor-sized, not widened)
-        stub_config().tick_dt_s,      // dt
-        0.5,                          // pad_floor
-        1.0,                          // k_safety_extra
-        None,                         // top-level (depth 0)
-        // M2: byte-equal the realm the DEST shard holds, so the dest head resolves and a saga starts.
-        dest_stub_config().realm,
-        CrossEffect::Authority, // a TRANSFER crossing (hands authority to the dest realm)
-    );
-    plant_crossing_boundaries(topo, vec![shell]);
+    let root = crossing_region(CROSSING_ROOT_REALM, None, 1.0e9);
+    let own = crossing_region(stub_config().realm, Some(CROSSING_ROOT_REALM), 100_000.0);
+    // M2: the dest region's realm byte-equals the realm the DEST shard holds, so the dest head resolves.
+    let dest = crossing_region(dest_stub_config().realm, Some(stub_config().realm), 1000.0);
+    plant_crossing_boundaries(topo, vec![root, own, dest]);
+}
+
+/// C-3 CONTAINMENT — DISARM the SOURCE shard's containment trigger by emptying its `RealmRegions`. Under
+/// containment a re-home is POSITION-driven, so an abort resets the source's cooldown and the still-in-region
+/// dot re-fires the SAME re-home next tick (the intended behaviour: the entity did not move). An abort test
+/// that wants to observe EXACTLY ONE crossing (the one that aborts) calls this once the crossing has started,
+/// so the source stops re-homing — leaving the abort as the terminal event under test.
+pub fn clear_crossing_boundaries(topo: &mut Topology) {
+    with_node(topo, SHARD, |s| {
+        *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::default();
+    });
 }
 
 /// Slice 3g — seed an OWNED `Held{outbound: None}` Debris transient on the SOURCE ([`SHARD`]), positioned

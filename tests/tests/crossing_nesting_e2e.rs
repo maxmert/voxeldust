@@ -16,9 +16,9 @@
 //! DEST's own `crossings_requested` going 0 → ≥ 1 for the SAME entity DEST adopted (with a negative
 //! control that keeps it at 0 when no boundary is planted / nothing moves).
 
-use vd_core::geometry::{BoundaryTuning, CrossEffect, RealmBoundary};
+use vd_core::geometry::{Boundary, ContainmentBand, RealmRegion};
 use vd_core::glam::DVec3;
-use vd_core::pose::{LatticePos, RealmId};
+use vd_core::pose::{LatticePos, RealmId, frame_for_realm};
 use vd_core::{AccountId, EntityId, NodeId};
 use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::{FabricTransport, FaultFabric};
@@ -92,14 +92,33 @@ fn set_dest_subject_offset(topo: &mut Topology, subject: EntityId, off: DVec3) -
     })
 }
 
-/// Plant `boundaries` into DEST's `RealmBoundaries` (the DEST variant of vd-tests' SHARD-only
-/// `plant_crossing_boundaries`).
-fn plant_dest_boundaries(topo: &mut Topology, boundaries: Vec<RealmBoundary>) {
+/// Plant a REGION forest into DEST's `RealmRegions` (the DEST variant of vd-tests' SHARD-only
+/// `plant_crossing_boundaries`; C-3 CONTAINMENT).
+fn plant_dest_regions(topo: &mut Topology, regions: Vec<RealmRegion>) {
     with_shard(topo, DEST, |s| {
-        s.world_mut()
-            .resource_mut::<vd_sim::stub::RealmBoundaries>()
-            .0 = boundaries;
+        *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::new(regions);
     });
+}
+
+/// One `RealmRegion` shell at the origin of `realm`'s frame, radius `r`, nested under `parent`.
+fn dest_region(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
+    let band = ContainmentBand::for_containment_velocity_safe(
+        50.0,
+        100.0,
+        dest_stub_config().move_speed_mps,
+        dest_stub_config().tick_dt_s,
+        1.0,
+    )
+    .expect("valid dest containment band");
+    RealmRegion {
+        realm,
+        center: LatticePos::local(DVec3::ZERO),
+        frame: frame_for_realm(realm, None).expect("System realm always resolves a frame"),
+        shape: Boundary::Shell { r },
+        band,
+        parent,
+    }
 }
 
 /// Drive one autonomous durable crossing SHARD→DEST (mirrors crossing_e2e::run_autonomous_crossing),
@@ -183,51 +202,37 @@ fn crossing_e2e_dest_reevaluates_adopted_entity_self_heal() {
         report(&pre, SHARD).crossings_requested,
     );
 
-    // ============ PLANT A BOUNDARY ON DEST (not SHARD) ============
-    // An INWARD-crossable authority shell in DEST's own realm (exterior = System(8)), handing authority
-    // to a THIRD realm (System(99)) on an inward crossing. The subject starts OUTSIDE and is driven inward
-    // across the create edge, dwells n_entry ticks, and fires. `to_realm=System(99)` need not resolve at
-    // the orchestrator — the CLAIM is only that DEST's `crossings_requested` bumps (inside
-    // fan_out_crossing, at emit, BEFORE any orchestrator resolution).
+    // ============ PLANT A REGION FOREST ON DEST (not SHARD) ============
+    // C-3 CONTAINMENT: root ⊃ own(System(8)) ⊃ child(System(99)), all origin-coincident. The subject
+    // starts OUTSIDE the child (container == DEST's own realm ⇒ no re-home) and is moved INTO the child
+    // (container flips to System(99) ⇒ DEST re-homes). `child.realm = System(99)` need not resolve at the
+    // orchestrator — the CLAIM is only that DEST's `crossings_requested` bumps (inside fan_out_crossing, at
+    // emit, BEFORE any orchestrator resolution).
     let center = DVec3::ZERO;
-    let shell = RealmBoundary::shell(
-        dest_stub_config().realm, // exterior side = DEST's realm (System(8))
-        LatticePos::local(center),
-        1000.0, // r_soi
-        1.15,   // create_factor → create edge 1150 m
-        1.30,   // destroy_factor → destroy edge 1300 m
-        dest_stub_config().move_speed_mps,
-        dest_stub_config().tick_dt_s,
-        0.5, // pad_floor
-        1.0, // k_safety_extra
-        None,
-        RealmId::System(99), // a DISTINCT third realm — the inward create edge target
-        CrossEffect::Authority,
+    let root = dest_region(RealmId::System(0), None, 1.0e9);
+    let own = dest_region(
+        dest_stub_config().realm,
+        Some(RealmId::System(0)),
+        100_000.0,
     );
-    plant_dest_boundaries(&mut topo, vec![shell]);
+    // A DISTINCT third realm — the deeper child region whose membership triggers the DEST re-home.
+    let child = dest_region(RealmId::System(99), Some(dest_stub_config().realm), 1000.0);
+    plant_dest_regions(&mut topo, vec![root, own, child]);
 
-    // ============ MOVE THE ADOPTED ENTITY ACROSS THE DEST BOUNDARY ============
-    // Start it well OUTSIDE the create edge, then walk it inward across the edge, then hold it inside so
-    // its dwell matures (n_entry). The manual pose write lands the same tick as evaluate_realm_boundaries
-    // (schedule: process_inbound → evaluate_realm_boundaries), and the adopted dot receives no DEST-side
-    // input so nothing fights the write. The swept segment prev→cur is the real inward motion.
-    let n_entry = BoundaryTuning::DEFAULT.n_entry;
-
-    // Seed the dot OUTSIDE (2000 m out, > destroy edge 1300 m). Set it, then step once so this becomes the
-    // prev_offset for the next tick's swept segment.
+    // ============ MOVE THE ADOPTED ENTITY INTO THE DEST CHILD REGION ============
+    // Start it OUTSIDE the child shell (2000 m out, > outset) but inside own ⇒ container == own(System(8)),
+    // no re-home. The manual pose write lands the same tick as evaluate_realm_boundaries (schedule:
+    // process_inbound → evaluate_realm_boundaries), and the adopted dot receives no DEST-side input so
+    // nothing fights the write.
     assert!(
         set_dest_subject_offset(&mut topo, subject, DVec3::new(2000.0, 0.0, 0.0)),
         "the adopted subject dot is present on DEST and settable",
     );
-    topo.step(); // establish prev_offset = 2000 (outside)
+    topo.step();
 
-    // Walk inward across the create edge to the center: 2000 → 1100 (crosses 1150 inward) → 500 → 0.
-    for x in [1100.0_f64, 500.0, 0.0] {
-        set_dest_subject_offset(&mut topo, subject, DVec3::new(x, 0.0, 0.0));
-        topo.step();
-    }
-    // Hold at the center for the remaining dwell ticks (n_entry consecutive in-band ticks → commit).
-    for _ in 0..(n_entry as u64 + 4) {
+    // Move it INTO the child region (deep inside the shell): container flips to System(99) ⇒ re-home.
+    // Hold at the center for a few ticks so the containment membership is stable through the commit.
+    for _ in 0..8 {
         set_dest_subject_offset(&mut topo, subject, center);
         topo.step();
     }
