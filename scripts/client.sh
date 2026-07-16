@@ -26,6 +26,7 @@ AGENT=0
 NAME="client"
 WINDOW=0
 CAPTURE=0
+REALM_BOXES=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --slot) SLOT="${2:?--slot needs a value}"; shift 2 ;;
@@ -33,6 +34,9 @@ while [[ $# -gt 0 ]]; do
         --name) NAME="${2:?--name needs a value}"; shift 2 ;;
         --window) WINDOW=1; shift ;;
         --capture) CAPTURE=1; shift ;;
+        # Boot-load a colored-box render scene (the Visual Crossing Playground): a boxes.json =
+        # Vec<RealmBoundary>, drawn as translucent realm boxes the dot walks between.
+        --realm-boxes) REALM_BOXES="${2:?--realm-boxes needs a value}"; shift 2 ;;
         *) echo "client.sh: unexpected argument '$1'" >&2; exit 1 ;;
     esac
 done
@@ -81,4 +85,5 @@ CMD=(
 )
 [[ "$WINDOW" == "1" ]] && CMD+=(--window)
 [[ "$CAPTURE" == "1" ]] && CMD+=(--capture)
+[[ -n "$REALM_BOXES" ]] && CMD+=(--realm-boxes "$REALM_BOXES")
 exec "${CMD[@]}"

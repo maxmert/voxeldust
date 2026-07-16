@@ -84,6 +84,17 @@ fn run(args: &[String]) -> Result<(), String> {
     if cmd == "gen-authkey" {
         return gen_authkey();
     }
+    // `emit-crossing-fixtures <dir>` writes the Visual Crossing Playground fixtures (the walk-into shard
+    // trigger + the client's two-box scene) for the human `crossing-playground` launcher — single-sourced
+    // with the `render_crossing_smoke` gate via `vd_bins::crossing_playground`. No slot; dir arg only.
+    if cmd == "emit-crossing-fixtures" {
+        let dir = args.get(1).ok_or("emit-crossing-fixtures needs a <dir>")?;
+        let (trigger, scene) =
+            vd_bins::crossing_playground::write_fixtures(Path::new(dir), &vd_bins::DEV)?;
+        println!("VD_CROSSING_TRIGGER={trigger}");
+        println!("VD_CROSSING_SCENE={scene}");
+        return Ok(());
+    }
     let slot = parse_slot(args)?;
     let ports = DevPortScheme::DEFAULT
         .slot_ports(slot)

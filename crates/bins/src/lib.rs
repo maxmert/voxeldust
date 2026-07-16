@@ -926,6 +926,109 @@ pub fn resolve_source_boundaries(
     }
 }
 
+/// The Visual Crossing Playground geometry (V4) — the SINGLE SOURCE for the walk-into crossing shared
+/// by the `render_crossing_smoke` GPU gate AND the human `crossing-playground` launcher. Box A is the
+/// SOURCE realm at the origin (the dot's login spawn); box B is the DEST realm offset on +X, far enough
+/// that the two projected boxes are disjoint on screen. The dot walks +X out of box A across a shell
+/// trigger (centered at box B, exterior `realm`=SOURCE so the shard's in-realm guard accepts it,
+/// `to_realm`=DEST) into box B, where the transfer re-homes its authority.
+pub mod crossing_playground {
+    use super::DevClusterParams;
+    use vd_core::geometry::{CrossEffect, RealmBoundary};
+    use vd_core::glam::DVec3;
+    use vd_core::pose::{LatticePos, RealmId};
+
+    /// Box A (SOURCE realm) center — the dot's login-spawn origin.
+    pub const BOX_A_CENTER: DVec3 = DVec3::new(0.0, 0.0, 0.0);
+    /// Box B (DEST realm) center — offset on +X so the two boxes are disjoint on screen.
+    pub const BOX_B_CENTER: DVec3 = DVec3::new(50.0, 0.0, 0.0);
+    /// The (Chebyshev) half-extent of each render box.
+    pub const BOX_HALF: DVec3 = DVec3::new(12.0, 12.0, 12.0);
+    /// The trigger shell's SOI radius (create edge = `r_soi * 1.15` ≈ 11.5 → the dot enters at box B's
+    /// near face ≈ +38.5, dwells `n_entry` ticks, and commits).
+    pub const TRIGGER_R_SOI: f64 = 10.0;
+
+    /// The SHARD's walk-into crossing trigger (planted on the SOURCE via `VD_REALM_BOUNDARIES`): a shell
+    /// centered at box B, exterior `realm`=SOURCE (guard-passing), `to_realm`=DEST. Realms DERIVED from
+    /// `DevClusterParams` (never inline — HR3).
+    #[must_use]
+    pub fn trigger(p: &DevClusterParams) -> Vec<RealmBoundary> {
+        vec![RealmBoundary::shell(
+            RealmId::System(p.realm_seed),
+            LatticePos::local(BOX_B_CENTER),
+            TRIGGER_R_SOI,
+            1.15,
+            1.30,
+            p.move_speed,
+            p.tick_dt,
+            0.5,
+            1.0,
+            None,
+            RealmId::System(p.realm_seed_b),
+            CrossEffect::Authority,
+        )]
+    }
+
+    /// The CLIENT render scene: TWO static region boxes keyed by their OWN realm (box A under SOURCE,
+    /// box B under DEST) so `RealmScene::from_boundaries` draws two distinct boxes and `expected_box`
+    /// resolves each. `v_rel = 0`: inert render geometry, never a crossing (distinct from [`trigger`]).
+    #[must_use]
+    pub fn scene(p: &DevClusterParams) -> Vec<RealmBoundary> {
+        vec![
+            region_box(RealmId::System(p.realm_seed), BOX_A_CENTER),
+            region_box(RealmId::System(p.realm_seed_b), BOX_B_CENTER),
+        ]
+    }
+
+    fn region_box(realm: RealmId, center: DVec3) -> RealmBoundary {
+        RealmBoundary::aabb(
+            realm,
+            LatticePos::local(center),
+            BOX_HALF,
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            realm,
+            CrossEffect::Authority,
+        )
+        .expect("valid region box")
+    }
+
+    /// Write the two playground fixtures into `dir` — `crossing-trigger.json` (the shard trigger, for
+    /// `VD_DEVCLUSTER_BOUNDARIES`) and `crossing-scene.json` (the client's `--realm-boxes` two-box
+    /// scene) — returning `(trigger_path, scene_path)`. Both are `Vec<RealmBoundary>` JSON, the same
+    /// format the shard boot-loads and the client renders.
+    ///
+    /// # Errors
+    /// A directory-create, serialize, or write failure.
+    pub fn write_fixtures(
+        dir: &std::path::Path,
+        p: &DevClusterParams,
+    ) -> Result<(String, String), String> {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create fixtures dir: {e}"))?;
+        let trigger_path = dir.join("crossing-trigger.json");
+        let scene_path = dir.join("crossing-scene.json");
+        std::fs::write(
+            &trigger_path,
+            serde_json::to_string(&trigger(p)).map_err(|e| format!("serialize trigger: {e}"))?,
+        )
+        .map_err(|e| format!("write trigger: {e}"))?;
+        std::fs::write(
+            &scene_path,
+            serde_json::to_string(&scene(p)).map_err(|e| format!("serialize scene: {e}"))?,
+        )
+        .map_err(|e| format!("write scene: {e}"))?;
+        Ok((
+            trigger_path.display().to_string(),
+            scene_path.display().to_string(),
+        ))
+    }
+}
+
 // ---- shell-safe value quoting ------------------------------------------------
 
 /// POSIX-single-quote a value for safe emission into a `KEY=VALUE` line that a

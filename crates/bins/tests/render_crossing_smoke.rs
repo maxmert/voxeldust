@@ -35,6 +35,7 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use vd_bins::crossing_playground::{self, BOX_A_CENTER, BOX_B_CENTER};
 use vd_bins::{
     DEV, DevClusterDown, admin_get_body, dev_auth_signing_key_hex, dev_roundtrip, devcluster,
     loopback, record_extra_pid, slot_trust_dir, slot_workdir,
@@ -47,9 +48,8 @@ use vd_client_harness::verdict::{
     dot_pixels_within_box_region, expected_box, projected_point_aabb,
 };
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
-use vd_core::geometry::{CrossEffect, RealmBoundary};
 use vd_core::glam::DVec3;
-use vd_core::pose::{FrameRef, LatticePos, RealmId};
+use vd_core::pose::{FrameRef, RealmId};
 use vd_devproto::{DevPortScheme, DevRequest, DevResponse, WORKTREE_SLOT_CEILING};
 
 const CLIENT_NAME: &str = "g-render-crossing";
@@ -57,15 +57,9 @@ const CLIENT_NAME: &str = "g-render-crossing";
 /// gates (render-smoke +18, render-boxes/crossing-e2e +19) so a live cluster can never collide.
 const RENDER_CROSSING_SLOT: u16 = WORKTREE_SLOT_CEILING + 22; // 86: G-RENDER-CROSSING-SMOKE
 
-/// Box A = the SOURCE realm `System(7)` at the origin (the dot's login spawn); box B = the DEST realm
-/// `System(8)` offset on +X. Small + close enough that the walk is quick, far enough that the two
-/// projected screen rectangles are DISJOINT (so "the dot's pixels moved A→B" is non-vacuous).
-const BOX_A_CENTER: DVec3 = DVec3::new(0.0, 0.0, 0.0);
-const BOX_B_CENTER: DVec3 = DVec3::new(50.0, 0.0, 0.0);
-const BOX_HALF: DVec3 = DVec3::new(12.0, 12.0, 12.0);
-/// The crossing trigger's SOI radius: create edge = `r_soi * 1.15` ≈ 11.5, so the dot enters the
-/// trigger (and box B) at ≈ +38.5 — box B's near face — then dwells `n_entry` ticks and commits.
-const TRIGGER_R_SOI: f64 = 10.0;
+// The playground geometry (box A@SOURCE origin, box B@DEST +X, the walk-into shell trigger + two-box
+// scene) is the SINGLE-SOURCED `vd_bins::crossing_playground` fixture set, shared with the human
+// `crossing-playground` launcher. BOX_A_CENTER/BOX_B_CENTER/BOX_HALF are imported for the projection math.
 /// The dot's on-screen world radius for its projected rectangle (brackets the billboard marker).
 const DOT_WORLD_RADIUS: f64 = 2.0;
 /// The AFTER capture waits for the dot to reach here (well past the ≈ +38.5 crossing point, near box B
@@ -76,58 +70,6 @@ const CROSSING_DEADLINE: Duration = Duration::from_secs(70);
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(200);
 const CROSSING_POLL: Duration = Duration::from_millis(100);
-
-/// The SHARD's crossing trigger (planted on the SOURCE via `VD_REALM_BOUNDARIES`, injected through the
-/// launcher's `VD_DEVCLUSTER_BOUNDARIES` hook): a walk-into SOI shell centered at box B whose exterior
-/// `realm` is the SOURCE realm (so `guard_boundaries_in_realm` accepts it) and whose `to_realm` is the
-/// DEST realm. Distinct from the client SCENE (below) — the trigger is authority geometry, the scene is
-/// what pixels show. Realms are DERIVED from `DEV` (never inline `System(8)` — HR3).
-fn trigger_boundaries() -> Vec<RealmBoundary> {
-    vec![RealmBoundary::shell(
-        RealmId::System(DEV.realm_seed), // exterior side = the SOURCE realm (guard-passing)
-        LatticePos::local(BOX_B_CENTER), // centered at box B (walk-into, NOT born-inside)
-        TRIGGER_R_SOI,
-        1.15, // create_factor
-        1.30, // destroy_factor
-        DEV.move_speed,
-        DEV.tick_dt,
-        0.5, // pad_floor
-        1.0, // k_safety_extra
-        None,
-        RealmId::System(DEV.realm_seed_b), // to_realm DERIVED from realm_seed_b
-        CrossEffect::Authority,
-    )]
-}
-
-/// The CLIENT render scene: TWO static region boxes keyed by their OWN realm — box A under `System(7)`,
-/// box B under `System(8)` — so `RealmScene::from_boundaries` renders two distinctly-colored boxes and
-/// `expected_box` resolves each realm. (A single crossing boundary would key BOTH under the source
-/// realm and collide — the scene and the trigger are deliberately SEPARATE artifacts.) `v_rel = 0`:
-/// these are inert render geometry, never a crossing.
-fn scene_boundaries() -> Vec<RealmBoundary> {
-    vec![
-        region_box(RealmId::System(DEV.realm_seed), BOX_A_CENTER),
-        region_box(RealmId::System(DEV.realm_seed_b), BOX_B_CENTER),
-    ]
-}
-
-fn region_box(realm: RealmId, center: DVec3) -> RealmBoundary {
-    RealmBoundary::aabb(
-        realm,
-        LatticePos::local(center),
-        BOX_HALF,
-        1.15,
-        1.30,
-        0.0, // v_rel = 0: a static render box, never a crossing
-        0.05,
-        0.5,
-        1.0,
-        None,
-        realm, // to_realm = realm (self): inert render geometry
-        CrossEffect::Authority,
-    )
-    .expect("valid region box")
-}
 
 /// Kill the capture client on drop — the 5th process beyond the dual cluster's 4 nodes.
 struct ChildGuard(Child);
@@ -328,15 +270,15 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
     let cwd = slot_workdir(RENDER_CROSSING_SLOT).join("capture-cwd");
     std::fs::create_dir_all(&cwd).expect("make client cwd");
 
-    // Two files (single-sourcing is impossible for a crossing — see scene_boundaries): the SHARD
+    // Two files (single-sourcing is impossible for a crossing — see crossing_playground::scene): the SHARD
     // trigger (injected via the launcher hook) and the CLIENT two-box scene.
     let trigger_path = cwd.join("trigger.json");
     std::fs::write(
         &trigger_path,
-        serde_json::to_string(&trigger_boundaries()).expect("serialize trigger"),
+        serde_json::to_string(&crossing_playground::trigger(&DEV)).expect("serialize trigger"),
     )
     .expect("write trigger.json");
-    let scene_boundaries = scene_boundaries();
+    let scene_boundaries = crossing_playground::scene(&DEV);
     let scene = RealmScene::from_boundaries(&scene_boundaries).expect("the scene projects");
     let boxes_json = cwd.join("boxes.json");
     std::fs::write(
