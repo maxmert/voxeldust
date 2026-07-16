@@ -16,7 +16,8 @@
 use glam::{DQuat, DVec3};
 use serde::{Deserialize, Serialize};
 
-use crate::pose::{LatticePos, RealmId};
+use crate::frame::{FrameContext, FrameError, transfer_frame};
+use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose};
 
 /// Base star-system SOI radius in galaxy units (ported from the reference repo's
 /// `galaxy.rs`; part of the galaxy-scale definition, not a tunable).
@@ -780,10 +781,409 @@ impl OverlapBand {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Containment realm-membership (task #135) — APPEND-ONLY pure geometry. NOTHING
+// calls this yet (the detector wiring is C-3). It REPLACES the DIRECTIONAL portal
+// model (`RealmBoundary { to_realm }` + `should_commit`'s asymmetric in/out) with
+// CONTAINMENT: a realm is a REGION of space; an entity's realm is the DEEPEST region
+// CONTAINING it; re-home on change; SYMMETRIC (escaping and entering are one rule).
+// See scripts/containment_realm_membership_design.md.
+// ---------------------------------------------------------------------------
+
+/// A signed-distance hysteresis band (METRES, negative inside) for CONTAINMENT membership. A DISTINCT
+/// type from [`OverlapBand`] so it can NEVER be fed the radial-analog [`Boundary::membership_scalar`]
+/// (and `OverlapBand` can never be fed [`Boundary::signed_distance`]) — the shape↔band unit mismatch
+/// stays UNCONSTRUCTIBLE, exactly as the portal bands enforce it. ONE band flavour serves every shape:
+/// [`box_signed_distance`] is a true Euclidean SDF, so a metre dead-zone is uniform-thickness at box
+/// faces AND corners automatically (no normalized-Chebyshev split). The dead-zone (`inset` inside ..
+/// `outset` outside) straddles the surface, so a surface-hovering entity cannot flap.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContainmentBand {
+    inset: f64,
+    outset: f64,
+}
+
+impl ContainmentBand {
+    /// The VELOCITY-SAFE constructor — the ONLY way to build one. Widens the outer edge so the
+    /// dead-zone `inset + outset >= |v_rel|·dt·(K_SAFETY + k_safety_extra)`, mirroring
+    /// [`OverlapBand::for_soi_velocity_safe`]: a body moving `|v_rel|·dt` per tick can neither skip
+    /// the band nor tunnel a thin region between ticks. The `debug_assert!` pins the
+    /// [`ContainmentBand::width_safe_for`] invariant (like the SOI/box ctors). Fallible: an inverted
+    /// or degenerate pair would invert the hysteresis into a per-tick flap, so it is rejected LOUD.
+    ///
+    /// # Errors
+    /// [`BandError::InvalidEdges`] unless both resolved edges are strictly positive.
+    #[must_use = "the Result carries a BandError that must not be dropped"]
+    pub fn for_containment_velocity_safe(
+        inset: f64,
+        outset_min: f64,
+        v_rel: f64,
+        dt: f64,
+        k_safety_extra: f64,
+    ) -> Result<ContainmentBand, BandError> {
+        let need = v_rel.abs() * dt * (K_SAFETY + k_safety_extra);
+        let outset = f64::max(outset_min, need - inset);
+        if inset > 0.0 && outset > 0.0 {
+            let band = ContainmentBand { inset, outset };
+            debug_assert!(band.width_safe_for(v_rel, dt));
+            Ok(band)
+        } else {
+            Err(BandError::InvalidEdges)
+        }
+    }
+
+    /// Velocity-scaled width invariant: the dead-zone `inset + outset` exceeds the per-tick travel
+    /// times [`K_SAFETY`], so a body at `v_rel` (units/s) over `dt_s`-second ticks cannot skip the band.
+    #[must_use]
+    pub fn width_safe_for(&self, v_rel: f64, dt_s: f64) -> bool {
+        (self.inset + self.outset) >= v_rel.abs() * dt_s * K_SAFETY
+    }
+
+    /// The inner (acquire) edge — metres INSIDE the surface.
+    #[must_use]
+    pub fn inset(&self) -> f64 {
+        self.inset
+    }
+
+    /// The outer (release) edge — metres OUTSIDE the surface.
+    #[must_use]
+    pub fn outset(&self) -> f64 {
+        self.outset
+    }
+
+    /// Sign-correct hysteresis membership from a SIGNED DISTANCE (negative inside — the
+    /// [`Boundary::signed_distance`] convention). Not yet a member: acquire when at least `inset`
+    /// INSIDE (`signed_distance <= -inset`). Already a member: hold until more than `outset` OUTSIDE
+    /// (`signed_distance <= outset` keeps it). The dead-zone `[-inset, +outset]` straddles the
+    /// surface — mirrors [`OverlapBand::update_membership`]'s smaller-is-more-inside `<=` convention,
+    /// in signed-metre units.
+    #[must_use]
+    pub fn member(&self, was_member: bool, signed_distance: f64) -> bool {
+        if was_member {
+            signed_distance <= self.outset
+        } else {
+            signed_distance <= -self.inset
+        }
+    }
+}
+
+/// One realm REGION: a volume that, when it is the DEEPEST region CONTAINING a point, defines that
+/// point's realm. CONTAINMENT, not a portal — there is no `to_realm` and no [`Direction`] (both were
+/// the directional-trigger model's; the destination is DERIVED as the containing realm, symmetric by
+/// construction). Every field `Copy`, so the whole descriptor is. Serde only for the client's
+/// `--realm-boxes` single-source (identical bytes — regions are COMPUTED from the universe seed, not
+/// authored; see `realm_regions_for`, C-2).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RealmRegion {
+    /// The realm an entity IS IN while this is its deepest containing region.
+    pub realm: RealmId,
+    /// The region center in the lattice (callers subtract it before the shape methods).
+    pub center: LatticePos,
+    /// The frame `center`/`shape` are expressed in. PLANTED now (P3: every region shares one identity
+    /// frame, so `transfer_frame(&IdentityFrames)` is a no-op) so the P4/P5 ephemeris swap is additive.
+    pub frame: FrameRef,
+    /// The region shape (`Shell` | `Aabb` | `Obb`) — reused verbatim from the portal model.
+    pub shape: Boundary,
+    /// The signed-distance hysteresis band around the surface (anti-flap on the containment edge).
+    pub band: ContainmentBand,
+    /// The enclosing realm you fall to on LEAVING this region. `None` ONLY for the single ambient root
+    /// (the Universe), whose volume contains all reachable space — so an entity is ALWAYS in ≥1 realm.
+    pub parent: Option<RealmId>,
+}
+
+/// The containment depth-argmax order: depth DESC (the innermost realm wins), then `RealmId` ASC, then
+/// slice `ix` ASC. NO [`Direction`] — containment has no crossing direction (that was the portal
+/// model's concern). A STRICT TOTAL order ⇒ the argmax is permutation-invariant, which matters because
+/// the winning realm is load-bearing cross-host and must not depend on region slice order. A monotonic
+/// helper (mirrors [`candidate_beats_ix`]) so every tiebreak branch is covered ONCE here, not smeared
+/// through the container fold. NOTHING calls it yet (the `container` fold is C-2).
+#[must_use]
+pub fn depth_beats(a: (u32, RealmId, usize), b: (u32, RealmId, usize)) -> bool {
+    if a.0 != b.0 {
+        a.0 > b.0
+    } else if a.1 != b.1 {
+        a.1 < b.1
+    } else {
+        a.2 < b.2
+    }
+}
+
+/// The ONE SYMMETRIC re-home decision — REPLACES the asymmetric [`should_commit`]. `Some(dest)` iff the
+/// deepest hysteretic CONTAINER this tick (`container`) differs from the realm the shard OWNS the entity
+/// in (`owning`), AND the post-commit cooldown has elapsed. NO [`Direction`]: escaping a realm
+/// (System→Galaxy) and entering one (Galaxy→System) are the IDENTICAL path — the container simply
+/// changed. The [`ContainmentBand`] hysteresis sits BEFORE this (the caller only flips `container` once
+/// the dead-zone is crossed), so `should_rehome` needs no dwell of its own — the band IS the dwell.
+/// `k_dwell` is a symmetric post-commit anti-thrash cooldown, direction-blind by design and CORRECT here
+/// (the direction-blindness was a bug only in the asymmetric portal model). NOTHING calls it yet (the
+/// detector wiring is C-3).
+#[must_use]
+pub fn should_rehome(
+    owning: RealmId,
+    container: RealmId,
+    since_commit: Option<u32>,
+    tuning: &BoundaryTuning,
+) -> Option<RealmId> {
+    if let Some(sc) = since_commit
+        && sc < tuning.k_dwell
+    {
+        return None;
+    }
+    (container != owning).then_some(container)
+}
+
+/// A region's containment sort key: `(depth, realm, slice-ix)` — the input to [`depth_beats`]. `depth`
+/// is the region's nesting depth (0 = the ambient root); `realm` is unique per region; `ix` is a final
+/// determinism tiebreak. Computed once at boot (regions are static at P3), cached, and read per tick.
+pub type DepthKey = (u32, RealmId, usize);
+
+/// The nesting DEPTH of the region named `realm` = the number of ancestors up to the ambient root
+/// (root = 0, its children = 1, grandchildren = 2, ...). Higher depth = more nested = wins containment.
+/// Walks `parent` pointers, resolving each to the region whose `.realm` equals it (unique per region —
+/// `guard_regions_nest`). Bounded by `regions.len()` hops so a MALFORMED cyclic set (which the boot
+/// guard rejects) terminates instead of hanging. Computed ONCE at boot and cached, NOT per tick.
+#[must_use]
+pub fn region_depth(regions: &[RealmRegion], realm: RealmId) -> u32 {
+    let mut depth = 0u32;
+    let mut cur = realm;
+    for _ in 0..regions.len() {
+        let Some(region) = regions.iter().find(|r| r.realm == cur) else {
+            return depth; // dangling parent (the boot guard rejects this; a safe stop if it slips)
+        };
+        let Some(parent) = region.parent else {
+            return depth; // reached the ambient root
+        };
+        depth += 1;
+        cur = parent;
+    }
+    depth // hop cap hit — a cycle (the boot guard rejects it; a safe stop, never a hang)
+}
+
+/// The entity's realm THIS TICK = the DEEPEST region whose membership holds, folded from the ambient
+/// ROOT realm as the IDENTITY (depth 0). Returns [`RealmId`] — NOT `Option` — because the root seeds
+/// the fold, so the argmax is never empty: there is **no `None` arm to leave uncoverable** (HR5-clean
+/// by TYPE, the "always in a realm" mandate made structural). `members` are the [`DepthKey`]s whose
+/// membership bit is set this tick (the root need not appear — it is the identity seed). SYMMETRIC and
+/// direction-free: escaping a realm and entering one both fall out of which region now wins.
+#[must_use]
+pub fn container(root_realm: RealmId, members: &[DepthKey]) -> RealmId {
+    let mut best: DepthKey = (0, root_realm, usize::MAX); // the root: depth 0, the fold identity
+    for &m in members {
+        if depth_beats(m, best) {
+            best = m;
+        }
+    }
+    best.1
+}
+
+/// The signed distance from `pose` to `region`'s surface, RE-EXPRESSED into the region's frame FIRST
+/// (the input-side frame seam — the containment twin of [`crate::frame::rebind_pose_to_dest`]'s output
+/// seam). At P3 `ctx` is [`crate::frame::IdentityFrames`] (a no-op reframe — position unchanged); at
+/// P4/P5 the ephemeris `FrameContext` makes it a real transform, ADDITIVELY, with no caller reshape. A
+/// BRANCHLESS generic shim (HR5): it looks the reframe up and delegates ALL branching to the MONOMORPHIC
+/// [`region_signed_distance_resolved`], so a new `FrameContext` monomorphization adds ZERO uncovered
+/// per-mono branch. The caller treats an `Err` region as "not a member" (safe degrade), never a container.
+///
+/// # Errors
+/// [`FrameError`] if `ctx` has no placement for `pose`'s frame or `region.frame` (inert under identity).
+pub fn region_signed_distance(
+    pose: &StampedPose,
+    region: &RealmRegion,
+    ctx: &impl FrameContext,
+) -> Result<f64, FrameError> {
+    region_signed_distance_resolved(transfer_frame(pose, region.frame, ctx), region)
+}
+
+/// The MONOMORPHIC core of [`region_signed_distance`]: given the already-reframed pose (or its frame
+/// error), fail loud on the error else take the shape's signed distance from the region center. Holding
+/// the `?` branch here keeps [`region_signed_distance`] a straight-line generic shim (HR5).
+fn region_signed_distance_resolved(
+    reframed: Result<StampedPose, FrameError>,
+    region: &RealmRegion,
+) -> Result<f64, FrameError> {
+    let p = reframed?;
+    Ok(region
+        .shape
+        .signed_distance(p.pos.offset() - region.center.offset()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    // ----- Containment realm-membership (task #135, C-1) -----
+
+    #[test]
+    fn containment_band_member_acquires_inside_and_holds_until_outside() {
+        // v_rel = 0 ⇒ need = 0 ⇒ outset = max(3, 0 - 2) = 3; inset = 2.
+        let b = ContainmentBand::for_containment_velocity_safe(2.0, 3.0, 0.0, 0.1, 0.0)
+            .expect("valid band");
+        assert_eq!(b.inset(), 2.0);
+        assert_eq!(b.outset(), 3.0);
+        // NOT yet a member: acquire ONLY at least `inset` inside (signed_distance <= -inset = -2).
+        assert!(
+            !b.member(false, 0.0),
+            "on the surface: not inside enough to acquire"
+        );
+        assert!(
+            !b.member(false, -1.9),
+            "1.9 m inside is short of the 2 m acquire edge"
+        );
+        assert!(b.member(false, -2.0), "exactly `inset` inside acquires");
+        assert!(b.member(false, -5.0), "deep inside acquires");
+        // ALREADY a member: hold until MORE than `outset` outside (signed_distance > +3 releases).
+        assert!(
+            b.member(true, 0.0),
+            "a member on the surface stays (dead-zone straddles it)"
+        );
+        assert!(
+            b.member(true, 3.0),
+            "a member exactly at the outset edge stays"
+        );
+        assert!(!b.member(true, 3.1), "past the outset edge releases");
+    }
+
+    #[test]
+    fn containment_band_velocity_widens_the_outset() {
+        // need = |v_rel|·dt·(K_SAFETY + extra) = 10 · 1 · (2 + 0) = 20; outset = max(1, 20 - 2) = 18.
+        let b = ContainmentBand::for_containment_velocity_safe(2.0, 1.0, 10.0, 1.0, 0.0)
+            .expect("valid band");
+        assert_eq!(b.inset(), 2.0);
+        assert_eq!(b.outset(), 18.0);
+        assert!(
+            b.width_safe_for(10.0, 1.0),
+            "the dead-zone (inset+outset) covers a per-tick step × K_SAFETY"
+        );
+        assert!(
+            !b.width_safe_for(100.0, 1.0),
+            "a body 10× faster would skip this band"
+        );
+    }
+
+    #[test]
+    fn containment_band_rejects_degenerate_edges() {
+        // inset <= 0 ⇒ Err (the `&&` short-circuits on the first operand).
+        assert_eq!(
+            ContainmentBand::for_containment_velocity_safe(0.0, 1.0, 0.0, 0.1, 0.0),
+            Err(BandError::InvalidEdges)
+        );
+        // inset > 0 but the resolved outset is <= 0 (outset_min = 0 AND need - inset < 0) ⇒ Err.
+        assert_eq!(
+            ContainmentBand::for_containment_velocity_safe(1.0, 0.0, 0.0, 0.1, 0.0),
+            Err(BandError::InvalidEdges)
+        );
+    }
+
+    #[test]
+    fn depth_beats_orders_deepest_then_realm_then_index() {
+        let r = RealmId::System(1);
+        // depth DESC: the deeper region wins (and the order is strict — not vice-versa).
+        assert!(depth_beats((2, r, 0), (1, r, 0)));
+        assert!(!depth_beats((1, r, 0), (2, r, 0)));
+        // equal depth ⇒ RealmId ASC: the smaller realm wins.
+        assert!(depth_beats(
+            (2, RealmId::System(1), 0),
+            (2, RealmId::System(2), 0)
+        ));
+        assert!(!depth_beats(
+            (2, RealmId::System(2), 0),
+            (2, RealmId::System(1), 0)
+        ));
+        // equal depth AND realm ⇒ slice ix ASC: the smaller index wins.
+        assert!(depth_beats((2, r, 0), (2, r, 1)));
+        assert!(!depth_beats((2, r, 1), (2, r, 0)));
+        // identical ⇒ not strictly greater (irreflexive — a candidate never beats itself).
+        assert!(!depth_beats((2, r, 0), (2, r, 0)));
+    }
+
+    #[test]
+    fn should_rehome_fires_only_on_a_container_change_past_the_cooldown() {
+        let t = BoundaryTuning::DEFAULT; // k_dwell = 5
+        let owning = RealmId::System(7);
+        let dest = RealmId::System(8);
+        // container changed, never committed (None) ⇒ re-home to the new container.
+        assert_eq!(should_rehome(owning, dest, None, &t), Some(dest));
+        // container changed, cooldown elapsed (since_commit == k_dwell) ⇒ re-home.
+        assert_eq!(should_rehome(owning, dest, Some(t.k_dwell), &t), Some(dest));
+        // container changed but WITHIN the cooldown ⇒ suppressed.
+        assert_eq!(should_rehome(owning, dest, Some(t.k_dwell - 1), &t), None);
+        // container == owning (no change) ⇒ no re-home, regardless of cooldown.
+        assert_eq!(should_rehome(owning, owning, None, &t), None);
+        // SYMMETRIC: the reverse re-home (8→7) fires by the IDENTICAL rule — no direction.
+        assert_eq!(should_rehome(dest, owning, None, &t), Some(owning));
+    }
+
+    fn test_region(realm: RealmId, parent: Option<RealmId>) -> RealmRegion {
+        RealmRegion {
+            realm,
+            center: LatticePos::local(DVec3::ZERO),
+            frame: FrameRef::SystemSpace { system_seed: 0 },
+            shape: Boundary::Shell { r: 1.0 },
+            band: ContainmentBand::for_containment_velocity_safe(1.0, 2.0, 0.0, 1.0, 0.0)
+                .expect("valid test band"),
+            parent,
+        }
+    }
+
+    fn test_pose() -> StampedPose {
+        StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 7 },
+            pos: LatticePos::local(DVec3::ZERO),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: crate::ids::UniverseTick(0),
+        }
+    }
+
+    #[test]
+    fn container_folds_the_deepest_member_from_the_root_identity() {
+        let root = RealmId::System(0);
+        // No members ⇒ the root realm (the fold IDENTITY — "always in a realm", no None arm).
+        assert_eq!(container(root, &[]), root);
+        // Members present ⇒ the DEEPEST wins; a shallower member does NOT displace a deeper best.
+        let members = [
+            (1u32, RealmId::System(1), 1usize),
+            (3u32, RealmId::Planet(7), 3usize),
+            (2u32, RealmId::System(7), 2usize),
+        ];
+        assert_eq!(container(root, &members), RealmId::Planet(7));
+        // A single shallow member still beats the depth-0 root identity.
+        assert_eq!(
+            container(root, &[(1, RealmId::System(1), 1)]),
+            RealmId::System(1)
+        );
+    }
+
+    #[test]
+    fn region_depth_terminates_on_a_malformed_cycle() {
+        // A 2-region CYCLE (each is the other's parent) — the boot guard rejects this, but region_depth
+        // must TERMINATE via the hop cap, never hang. It returns after `regions.len()` hops.
+        let cyclic = [
+            test_region(RealmId::System(1), Some(RealmId::System(2))),
+            test_region(RealmId::System(2), Some(RealmId::System(1))),
+        ];
+        assert_eq!(
+            region_depth(&cyclic, RealmId::System(1)),
+            cyclic.len() as u32,
+            "the hop cap bounds a malformed cycle"
+        );
+    }
+
+    #[test]
+    fn region_signed_distance_resolves_ok_and_propagates_a_frame_error() {
+        let region = test_region(RealmId::System(7), None);
+        // Ok arm: an already-reframed pose at the unit shell's center ⇒ signed distance -r = -1.
+        assert_eq!(
+            region_signed_distance_resolved(Ok(test_pose()), &region),
+            Ok(-1.0)
+        );
+        // Err arm: a frame error propagates (the P4/P5 unknown-frame degrade; inert under identity).
+        assert_eq!(
+            region_signed_distance_resolved(Err(FrameError::UnknownSourceFrame), &region),
+            Err(FrameError::UnknownSourceFrame)
+        );
+    }
 
     #[test]
     fn the_two_soi_functions_stay_distinct() {

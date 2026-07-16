@@ -27,6 +27,7 @@ pub mod kinematics;
 pub mod pose;
 pub mod rng;
 pub mod tlv;
+pub mod worldgen;
 
 /// Re-exported so consumers use ONE glam version (pose types expose its vectors).
 pub use glam;
