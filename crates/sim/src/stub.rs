@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
+use vd_core::frame::rebind_pose_to_dest;
 use vd_core::geometry::{
     Direction, OverlapBand, RealmBoundary, ShellCrossing, resolve_winner_ix, should_commit,
 };
@@ -2922,7 +2923,11 @@ fn emit_transient_batch(
                 .items
                 .push(TransientItem {
                     entity: *entity,
-                    pose: t.pose,
+                    // Rebind the SOURCE-frame pose into the DEST realm's frame via the ONE machinery
+                    // (HR3) the durable crossing + D-37 re-home also use. Identity through P3
+                    // (position/velocity/orientation UNCHANGED, only the frame flips to `to_realm`), so
+                    // the adopting shard reads the pose already expressed in its own frame.
+                    pose: rebind_pose_to_dest(t.pose, to_realm),
                     state: Vec::new(),
                 });
             t.status = TransientStatus::Held {
@@ -4188,8 +4193,11 @@ mod tests {
                         entity,
                         // D-7b: `readvance_transients` ran BEFORE emit (Crossing is_held), re-stamping
                         // the pose to the source's current universe-tick (100); a rest pose's position
-                        // is unchanged (vel ZERO), only the stamp moves.
+                        // is unchanged (vel ZERO), only the stamp moves. Then `emit_transient_batch`
+                        // REBINDS it into the dest realm's frame (HR3 one machinery) — identity through
+                        // P3, so position/velocity/orientation stay put and only the FRAME flips {7}→{8}.
                         pose: StampedPose {
+                            frame: FrameRef::SystemSpace { system_seed: 8 },
                             universe_tick: UniverseTick(100),
                             ..transient_pose()
                         },

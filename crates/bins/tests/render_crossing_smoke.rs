@@ -345,6 +345,10 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
         system_seed: DEV.realm_seed,
     }
     .label();
+    let system_b = FrameRef::SystemSpace {
+        system_seed: DEV.realm_seed_b,
+    }
+    .label();
     let before_state = {
         let deadline = Instant::now() + CROSSING_DEADLINE;
         loop {
@@ -424,11 +428,13 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
         let deadline = Instant::now() + CROSSING_DEADLINE;
         loop {
             let s = poll_state(devctl);
-            // The client-observed re-home = the composited (authoritative) world pos is now geometrically
-            // inside box B, past the crossing point. This is the DELIVERED render truth (what pixels show),
-            // NOT the `location` label — which lags because the re-homed pose keeps the source frame (a
-            // separate, cosmetic-for-identity-frames re-expression gap; see the crossing-frame follow-up).
-            if expected_box(&scene, own_pos(&s)) == Some(RealmId::System(DEV.realm_seed_b))
+            // The client-observed re-home, on THREE signals: (1) the HUD `location` label reads the DEST
+            // realm ("System 8") — the frame-rebinding re-expresses the crossed pose into System(8)'s frame,
+            // so the authoritative FrameRef (and its label) flips; (2) the composited authoritative world pos
+            // is geometrically inside box B; (3) it advanced past the crossing point (a pose only the DEST
+            // could have delivered). The label is now a HARD gate, not a lagging cosmetic signal.
+            if s.location.as_deref() == Some(system_b.as_str())
+                && expected_box(&scene, own_pos(&s)) == Some(RealmId::System(DEV.realm_seed_b))
                 && own_pos(&s).x >= CROSSING_CONFIRMED_X
             {
                 break s;
@@ -477,7 +483,7 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
     println!(
         "G-RENDER-CROSSING-SMOKE: {w}x{h} · box A screen {:?} box B screen {:?} · pos {pos_before} → \
          {pos_after} · auth_sub {auth_sub_before} → {auth_sub_after} · DEST-owns={dest_owns} · \
-         location label {:?} (unchanged = the frame-re-expression gap, cosmetic for identity frames)",
+         location label {:?} (flipped to the DEST realm — the frame-rebinding re-expresses the pose)",
         (box_a_region.min.x as i32, box_a_region.max.x as i32),
         (box_b_region.min.x as i32, box_b_region.max.x as i32),
         after_state.location,

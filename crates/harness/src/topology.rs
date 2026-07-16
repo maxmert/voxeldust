@@ -99,6 +99,13 @@ pub struct InspectReport {
     /// (from `StubStats.crossings_requested`; `0`/None-arm on the orchestrator/client). The Leg-1
     /// observable of the crossing-e2e: a triggered durable crossing emitted a `CrossingRequest`.
     pub crossings_requested: u64,
+    /// DEST-side crossings whose STATE was APPLIED (from `StubStats.crossings_applied`, incremented in
+    /// `apply_crossing`): the dot's pose was overwritten with the crossed pose, not merely authority
+    /// committed. The INPUT-INVARIANT dropped-vs-landed discriminator for the entity-STATE-crossed gate —
+    /// a dropped crossing leaves this `0` while the dest still adopts the entity at its origin default.
+    /// Unlike the pose (which the dest's own input drift moves) or the frame (now the dest realm's frame
+    /// either way, post frame-rebinding), this counter only advances on a genuinely landed crossing.
+    pub crossings_applied: u64,
     /// Slice 3g — DURABLE crossing SAGAS STARTED on the orchestrator (from `SagaRuntimeRes.crossings_started`;
     /// `0`/None-arm on shards/clients). THE composition proof of the crossing-e2e: a source's
     /// `CrossingRequest` resolved its three heads and BECAME a saga — the geometric trigger drove the
@@ -267,6 +274,7 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         // Slice 3g: the shard-side crossing counters — Leg-1 (a `CrossingRequest`/`TransientCrossingRequest`
         // emitted) and the POSITIVE latch clear on a committed durable crossing.
         report.crossings_requested = stats.crossings_requested;
+        report.crossings_applied = stats.crossings_applied;
         report.transient_crossings_requested = stats.transient_crossings_requested;
         report.crossing_latches_cleared = stats.crossing_latches_cleared;
     }

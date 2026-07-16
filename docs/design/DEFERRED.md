@@ -3173,21 +3173,31 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   dest-INPUT-SLOT teardown on the STUB side (1d.2b closed the gateway dest SUB on abort, but the dest's provisional
   `input_active` `Dot` is not yet despawned on abort). The dest spatial admissibility check stays PRE-commit at
   `PrepareSubscribe` (D-21).
-  **FRAME-REBINDING (audit finding 5):** 1d.1 stores the crossed pose's `FrameRef` VERBATIM — it stays the SOURCE
-  realm's frame (e.g. `SystemSpace{system_seed: 7}`) on a dot owned by the DEST realm. Inert in 1d.1 (render_ready
-  false → nothing reads the frame; and the gate USES this as the crossing discriminator). But render (1d.3) /
-  ghost / client compositing MUST re-express the pose into the dest realm's frame (or carry an explicit
-  cross-frame transform) before it is rendered or fed to physics — owed with `render_ready` + the real frame seam
-  (`FrameSpace`, P4/P5). Pinned RED-to-flip: the gate asserts seed-7 today and flips to the dest frame when
-  rebinding lands.
+  **FRAME-REBINDING (audit finding 5) — 🟩 AUTHORITY REBOUND (2026-07-16):** the crossed pose is now re-expressed
+  into the DEST realm's frame at the ONE machinery every cross-realm hand-off funnels through —
+  `vd_core::frame::rebind_pose_to_dest`, called by the durable crossing (`build_crossing`), the D-37 forward re-home
+  (`build_rehome`), AND the D-7 transient batch (`emit_transient_batch`) (HR3 — one rebind, no per-path fork). The
+  SOURCE computes the dest pose and ships it verbatim (`transfer_protocol.md` §6), so authority never depends on
+  cross-binary float reproducibility. Through P1-P3 the `IdentityFrames` context makes this a pure FRAME-field rebind
+  (position/velocity/orientation UNCHANGED, only the frame label flips `SystemSpace{7}`→`SystemSpace{8}`), so the HUD
+  reads the dest realm the instant authority commits while the dot stays put. The pinned RED-to-flip gates flipped
+  seed-7→seed-8 across `frame.rs`, `saga_runtime.rs`, `stub.rs`, `p2_transfer_gates`, `crossing_e2e`, and
+  `render_crossing_smoke`.
+  **STILL OWED (P4/P5/P10):** (1) the NON-IDENTITY transform — swap `IdentityFrames` for the closed-form ephemeris
+  `FrameContext` so a cross-realm rebind actually MOVES the pose (a P10 warp between star systems light-years apart);
+  the `transfer_frame`/`FrameContext` signature is frozen, so this lands the function body with NO caller reshape.
+  (2) the CLIENT-COMPOSITE re-expression of NEIGHBOUR realms — rendering every realm around the player in the player's
+  own coordinates (the pure-renderer redesign, `project_greenfield_client_tech`); today the client observes the single
+  authoritative realm. (3) `frame_for_realm`'s `Area` arm needs its planet-parent provenance threaded (owed with the
+  Station/Area realm work, task #133); a genuinely un-nameable dest currently SAFE-DEGRADES to the source-frame pose
+  (label lags, NEVER a dropped hand-off) — covered by `rebind_pose_to_dest_safe_degrades_an_unnameable_dest_to_the_source_pose`.
   **EMPIRICALLY CONFIRMED (2026-07-16, `render_crossing_smoke`):** over the live dual-shard process tier a dot
-  re-homes System(7)→System(8), the client observes it (own `authoritative_sub` flips 0→1, DEST owns the entity),
-  the dot renders at the correct WORLD position (box B) — but `DevState.location` reads `"System 7"` post-crossing
-  because the delivered pose still carries `SystemSpace{7}`. COSMETIC for the playground's identity `SystemSpace`
-  frames (world pos identical either way); a REAL position bug for the GAME's non-identity frames (a P10 warp between
-  real star systems light-years apart). `render_crossing_smoke` therefore gates on the DELIVERED render truth
-  (`expected_box`==box B + the dot's pixels + DEST-owns + auth_sub-flip), NOT the `location` label; when frame
-  rebinding lands the label flip becomes assertable. GENERAL: diagnose the delivered state, not a derived label.
+  re-homes System(7)→System(8), the client observes it (own `authoritative_sub` flips 0→1, DEST owns the entity), the
+  dot renders at the correct WORLD position (box B), AND `DevState.location` now reads `"System 8"` post-crossing — the
+  frame-rebinding re-expresses the delivered pose into `SystemSpace{8}`. The smoke now gates on BOTH the delivered
+  render truth (`expected_box`==box B + the dot's pixels + DEST-owns + auth_sub-flip) AND the flipped `location` label.
+  GENERAL: diagnose the delivered state, not a derived label — this fix is the label CATCHING UP to an
+  already-correct delivered state (the earlier "System 7" misread was the label lagging, not the crossing failing).
 - **Also owed:** the EARLY (prepare-time) `OpenInputSlot` for the gateway-adoption-mid-cut race is a **P3**
   resilience item (the gateway re-drives the slot before the buffer drain); inert in 1c (single process, commit
   emits the slot in the same handler before the drain).

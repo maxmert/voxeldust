@@ -375,15 +375,21 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
     // authority) survives the handoff. (The VISIBLE in-client render of that crossed pose is proven
     // by the 1d.3 capstone `p2_dod_visible_crossing_*` below, on the REAL DeliveredView.)
     //
-    // The LOAD-BEARING discriminator is the pose's FRAME, NOT its position. The dest's OWN input
-    // integration (`integrate`) moves `pos` but NEVER changes `frame`, and a dropped crossing would
-    // leave the dest's adopt-default dot in the DEST realm's frame (`SystemSpace{system_seed: 8}` —
-    // `dest_stub_config`). The crossing carries the SOURCE realm's frame (`system_seed: 7`) and
-    // overwrites the dot's pose with it. So a dest frame of seed-7 can ONLY come from a landed
-    // crossing — making this assertion go RED if the crossing is dropped (a `pos != ZERO` check
-    // could NOT: the dest's own drained post-marker input also moves it off origin). This also pins
-    // the 1d.1 interim that the source frame is stored VERBATIM (frame-rebinding into the dest realm
-    // is OWED for 1d.2/1d.3 — DEFERRED D-27); the assertion flips to seed-8 when rebinding lands.
+    // The INPUT-INVARIANT dropped-vs-landed discriminator is now the DEST's `crossings_applied` counter:
+    // `apply_crossing` overwrote the dot's pose with the CROSSED pose and bumped it, whereas a dropped
+    // crossing leaves the dest adopting the entity at its origin default with the counter at 0. Pre
+    // frame-rebinding this keyed on the pose FRAME being seed-7 (the crossing carried the source frame
+    // VERBATIM); now the crossing re-expresses the pose into the DEST realm's frame (seed-8 — the
+    // `transfer_frame` IDENTITY through P3), so the frame is seed-8 whether landed OR dropped, and the
+    // pose position is moved by the dest's own drained input — so NEITHER frame nor position discriminates
+    // any more. The counter does (it is untouched by input). The frame assertion below is now a CONFIRMING
+    // check that the rebinding landed the authoritative pose in the DEST realm's frame.
+    assert_eq!(
+        dst.crossings_applied, 1,
+        "the DEST APPLIED the crossing STATE exactly once (the dot's pose overwritten with the crossed \
+         pose) — a dropped crossing leaves this 0: crossings_applied={}",
+        dst.crossings_applied,
+    );
     let dest_pose = dst
         .held_poses
         .iter()
@@ -392,9 +398,9 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
         .expect("the dest holds a pose for the transferred entity");
     assert_eq!(
         dest_pose.frame,
-        FrameRef::SystemSpace { system_seed: 7 },
-        "the dest holds the SOURCE realm's frame (seed 7), proving the crossing overwrote the dot's \
-         adopt-default DEST frame (seed 8) — a dropped crossing would leave seed 8: {dest_pose:?}",
+        FrameRef::SystemSpace { system_seed: 8 },
+        "the crossed pose is re-expressed into the DEST realm's frame (seed 8 — the frame-rebinding \
+         transfer_frame identity through P3), landing the authoritative pose in the right realm: {dest_pose:?}",
     );
     assert!(
         dest_pose.pos.offset().is_finite(),
@@ -742,15 +748,15 @@ fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
         "exactly one source→dest authority flip (no flapping)"
     );
 
-    // (2) THE DEST RENDERS THE CROSSED POSE, not the origin-adopt default — the load-bearing
-    // discriminator (drop-flip turns THIS red): the SOURCE realm's `SystemSpace{seed:7}` at a
-    // non-origin, finite world position, NEVER the dest's own seed-8 origin default at ZERO.
-    // (render-origin — the flip misplaced to the adopt grant arm — is UNIT-covered and moot here, per
-    // the docstring; the e2e variant forcing crossing-after-adopt is the D-2 follow-up.)
+    // (2) THE DEST RENDERS THE CROSSED POSE, not the origin-adopt default. The drop discriminators are
+    // the ONE source→dest AUTHORITY flip (above) + the non-origin `world_pos` (below); the FRAME is now
+    // the DEST realm's `SystemSpace{seed:8}` — post frame-rebinding the crossing re-expresses the pose
+    // into the dest frame (`transfer_frame` identity through P3), so this assertion CONFIRMS the rebinding
+    // landed the authoritative render pose in the right realm (it no longer carries the drop detection).
     assert_eq!(
         dest_sample.frame,
-        FrameRef::SystemSpace { system_seed: 7 },
-        "the dest renders the crossed SOURCE-realm pose (seed 7), not the origin-adopt default (seed 8): {dest_sample:?}",
+        FrameRef::SystemSpace { system_seed: 8 },
+        "the dest renders the crossed pose re-expressed into the DEST realm's frame (seed 8): {dest_sample:?}",
     );
     assert!(
         dest_sample.world_pos.is_finite(),

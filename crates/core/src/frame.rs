@@ -17,7 +17,7 @@
 use glam::{DQuat, DVec3};
 
 use crate::ids::UniverseTick;
-use crate::pose::{FrameRef, LatticePos, StampedPose};
+use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose, frame_for_realm};
 
 /// Where a frame's origin sits — and how it moves — relative to the COMMON PARENT at a
 /// universe tick. A rigid placement: position, velocity, orientation, angular velocity.
@@ -93,15 +93,35 @@ pub fn transfer_frame(
     to: FrameRef,
     ctx: &impl FrameContext,
 ) -> Result<StampedPose, FrameError> {
+    // A BRANCHLESS generic shim (HR5): look up both placements as straight-line expressions and
+    // delegate ALL branching — the same-frame short-circuit, the missing-placement errors, and the
+    // transform — to the MONOMORPHIC `transfer_frame_resolved`. So a new `FrameContext`
+    // monomorphization (e.g. the always-`Some` `IdentityFrames`) adds ZERO uncovered per-mono branch;
+    // the error arms are covered ONCE in the resolved helper. (Same-frame looks the placements up but
+    // ignores them — the resolved short-circuit still returns `Ok(*pose)`, unchanged behaviour.)
+    transfer_frame_resolved(
+        pose,
+        to,
+        ctx.placement(pose.frame, pose.universe_tick),
+        ctx.placement(to, pose.universe_tick),
+    )
+}
+
+/// The MONOMORPHIC core of [`transfer_frame`]: given the already-looked-up source + dest placements,
+/// short-circuit a same-frame transfer, fail LOUD (a typed error, never a garbage pose) on a missing
+/// placement, else compose the rigid-body transform. Holding every branch here keeps [`transfer_frame`]
+/// a straight-line generic shim so its coverage does not multiply per `FrameContext` instantiation.
+fn transfer_frame_resolved(
+    pose: &StampedPose,
+    to: FrameRef,
+    from: Option<FramePlacement>,
+    dest: Option<FramePlacement>,
+) -> Result<StampedPose, FrameError> {
     if pose.frame == to {
         return Ok(*pose);
     }
-    let from = ctx
-        .placement(pose.frame, pose.universe_tick)
-        .ok_or(FrameError::UnknownSourceFrame)?;
-    let dest = ctx
-        .placement(to, pose.universe_tick)
-        .ok_or(FrameError::UnknownDestFrame)?;
+    let from = from.ok_or(FrameError::UnknownSourceFrame)?;
+    let dest = dest.ok_or(FrameError::UnknownDestFrame)?;
 
     // 1. Lift the local pose into the common parent frame. (P1-P3: cell is ZERO, so `offset()` is the
     // full frame-local position. The exact-integer cross-cell re-base — lift source cell+offset at the
@@ -129,6 +149,41 @@ pub fn transfer_frame(
         orient: new_orient.normalize(),
         universe_tick: pose.universe_tick,
     })
+}
+
+/// A tick-independent [`FrameContext`] whose every frame is the IDENTITY placement (origin at the
+/// common parent, no motion, no rotation). This is the P1-P3 reality: only `SystemSpace` is live and
+/// every placement is the identity (see the module docs), so a cross-realm `transfer_frame` re-expresses
+/// the FRAME field while leaving position/velocity/orientation UNCHANGED — exactly what the crossing
+/// needs to rebind the authoritative pose into the dest realm's frame today. P4/P8/P10 replace this with
+/// the closed-form ephemeris `FrameContext`; because the signature is frozen, that swap adds the real
+/// transform WITHOUT reshaping any caller. Total + branchless: `placement` is `Some` for every frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IdentityFrames;
+
+impl FrameContext for IdentityFrames {
+    fn placement(&self, _frame: FrameRef, _tick: UniverseTick) -> Option<FramePlacement> {
+        Some(FramePlacement::identity())
+    }
+}
+
+/// Rebind an authoritative pose into the frame of its destination realm — the ONE machinery (HR3) every
+/// cross-realm hand-off uses to re-express a source-frame pose so the dest reads it in its OWN frame: the
+/// durable crossing (`build_crossing`), the D-37 forward re-home (`build_rehome`), and the D-7 transient
+/// batch (`emit_transient_batch`) all funnel through here. Through P1-P3 [`IdentityFrames`] makes this a
+/// pure FRAME-field rebind — position/velocity/orientation UNCHANGED, only the frame label flips to the
+/// dest realm (the dot stays put while its HUD realm advances). P4/P8/P10 swap in the closed-form
+/// ephemeris `FrameContext` for the real transform with NO caller reshape (frozen signature).
+///
+/// `parent` is threaded as `None` today: no `Area` realm crosses through P3, so `frame_for_realm` is
+/// always `Some` for a live (`System`/`Planet`/`Ship`/`Station`) dest. SAFE DEGRADE: a dest realm with no
+/// nameable frame (an `Area` lacking its planet-parent provenance, owed at P4+) or a transform error
+/// returns the SOURCE-frame pose UNCHANGED (the label lags) — NEVER a dropped hand-off. The proper
+/// post-commit abort on a genuinely un-nameable dest is a P4 item; the degrade arm is inert now.
+pub fn rebind_pose_to_dest(pose: StampedPose, to_realm: RealmId) -> StampedPose {
+    frame_for_realm(to_realm, None)
+        .and_then(|dest_frame| transfer_frame(&pose, dest_frame, &IdentityFrames).ok())
+        .unwrap_or(pose)
 }
 
 #[cfg(test)]
@@ -186,6 +241,49 @@ mod tests {
         assert_eq!(
             transfer_frame(&p, planet(), &ctx),
             Err(FrameError::UnknownDestFrame)
+        );
+    }
+
+    #[test]
+    fn identity_frames_reframes_without_moving_the_pose() {
+        // The P1-P3 crossing fix: re-express a pose from SystemSpace{7} into SystemSpace{8} under
+        // IdentityFrames — the FRAME field flips but position/velocity/orientation are UNCHANGED (every
+        // placement is the identity). This is exactly what rebinds a crossed pose to the dest realm today.
+        let from = FrameRef::SystemSpace { system_seed: 7 };
+        let to = FrameRef::SystemSpace { system_seed: 8 };
+        let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
+        let got = transfer_frame(&p, to, &IdentityFrames).expect("identity reframe");
+        assert_eq!(got.frame, to);
+        assert_eq!(got.pos.offset(), p.pos.offset());
+        assert_eq!(got.vel, p.vel);
+        assert_eq!(got.orient, p.orient);
+        assert_eq!(got.universe_tick, p.universe_tick);
+    }
+
+    #[test]
+    fn rebind_pose_to_dest_flips_the_frame_to_a_nameable_realm() {
+        // The Some arm (the live P3 path): a System dest is always nameable, so the pose is re-expressed
+        // into SystemSpace{8} — frame flips, position/velocity/orientation unchanged under IdentityFrames.
+        let from = FrameRef::SystemSpace { system_seed: 7 };
+        let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
+        let got = rebind_pose_to_dest(p, RealmId::System(8));
+        assert_eq!(got.frame, FrameRef::SystemSpace { system_seed: 8 });
+        assert_eq!(got.pos.offset(), p.pos.offset());
+        assert_eq!(got.vel, p.vel);
+        assert_eq!(got.orient, p.orient);
+    }
+
+    #[test]
+    fn rebind_pose_to_dest_safe_degrades_an_unnameable_dest_to_the_source_pose() {
+        // The None fallback arm: an Area realm has no nameable frame WITHOUT its planet parent (threaded as
+        // None here, owed at P4), so `frame_for_realm` is None and the pose is returned UNCHANGED — the
+        // hand-off is never dropped, only the frame label lags. This exercises `unwrap_or(pose)`.
+        let from = FrameRef::SystemSpace { system_seed: 7 };
+        let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
+        let got = rebind_pose_to_dest(p, RealmId::Area(99));
+        assert_eq!(
+            got, p,
+            "an un-nameable dest returns the source pose verbatim"
         );
     }
 

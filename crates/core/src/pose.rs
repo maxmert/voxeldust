@@ -103,6 +103,31 @@ impl FrameRef {
     }
 }
 
+/// The forward realm→frame map: the [`FrameRef`] an entity OWNED by `realm` is expressed in (the dest
+/// frame a crossing re-expresses into). It is the inverse of [`FrameRef::realm`] but NOT recoverable
+/// from it — `realm()` is LOSSY in the `Area` arm (it drops the parent planet seed), so an `Area` frame
+/// needs its enclosing planet as `parent` PROVENANCE (a sub-planet district lives ON a planet; the
+/// crossing carries the parent via the boundary's `parent`). Every other kind is a one-field lift.
+/// Returns `None` ONLY for an `Area` given without a `Planet` parent — a caller precondition failure,
+/// never a silent wrong frame. This is THE one total mapping (HR3): a match over `RealmId`, not a
+/// per-feature branch on realm KIND.
+#[must_use]
+pub fn frame_for_realm(realm: RealmId, parent: Option<RealmId>) -> Option<FrameRef> {
+    match realm {
+        RealmId::System(system_seed) => Some(FrameRef::SystemSpace { system_seed }),
+        RealmId::Planet(planet_seed) => Some(FrameRef::PlanetCentered { planet_seed }),
+        RealmId::Ship(ship) => Some(FrameRef::ShipLocal { ship }),
+        RealmId::Station(station_seed) => Some(FrameRef::StationLocal { station_seed }),
+        RealmId::Area(area_seed) => match parent {
+            Some(RealmId::Planet(planet_seed)) => Some(FrameRef::AreaLocal {
+                planet_seed,
+                area_seed,
+            }),
+            _ => None,
+        },
+    }
+}
+
 /// A frame-local position as an integer CELL anchor + a bounded f64 local OFFSET — the
 /// tiered-integer coordinate base (D-41). The `cell` is the authoritative, bit-deterministic
 /// integer truth (an `i64` lattice; the FINE tier — star system and inward — is millimetres, the
@@ -307,6 +332,42 @@ mod tests {
             }
             .realm(),
             Some(RealmId::Area(8))
+        );
+    }
+
+    #[test]
+    fn frame_for_realm_is_the_total_forward_map() {
+        // The one-field lifts.
+        assert_eq!(
+            frame_for_realm(RealmId::System(9), None),
+            Some(FrameRef::SystemSpace { system_seed: 9 })
+        );
+        assert_eq!(
+            frame_for_realm(RealmId::Planet(5), None),
+            Some(FrameRef::PlanetCentered { planet_seed: 5 })
+        );
+        assert_eq!(
+            frame_for_realm(RealmId::Ship(ship_id()), None),
+            Some(FrameRef::ShipLocal { ship: ship_id() })
+        );
+        assert_eq!(
+            frame_for_realm(RealmId::Station(7), None),
+            Some(FrameRef::StationLocal { station_seed: 7 })
+        );
+        // The Area arm needs a PLANET parent as provenance (the parent seed is not in RealmId::Area).
+        assert_eq!(
+            frame_for_realm(RealmId::Area(8), Some(RealmId::Planet(5))),
+            Some(FrameRef::AreaLocal {
+                planet_seed: 5,
+                area_seed: 8
+            })
+        );
+        // An Area without a Planet parent (missing, or a non-Planet realm) is a loud None, never a
+        // silent wrong frame.
+        assert_eq!(frame_for_realm(RealmId::Area(8), None), None);
+        assert_eq!(
+            frame_for_realm(RealmId::Area(8), Some(RealmId::System(9))),
+            None
         );
     }
 

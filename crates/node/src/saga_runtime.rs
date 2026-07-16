@@ -42,6 +42,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use serde::{Deserialize, Serialize};
+use vd_core::frame::rebind_pose_to_dest;
 use vd_core::pose::{RealmId, StampedPose};
 use vd_core::{BatchId, EpochId, Fence, NodeId, SessionId, TransferId, UniverseTick};
 use vd_sim::capability::{CapRequest, ShardProfile};
@@ -759,7 +760,7 @@ fn build_crossing(
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let entity = ctx.subject.transfer_subject_entity()?;
-    let pose = flush_pose?;
+    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm);
     Some(InterShardFlow::Transfer(TransferEnvelope {
         transfer_id: ctx.transfer,
         universe_epoch: epoch,
@@ -817,7 +818,7 @@ fn build_rehome(
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let _entity = ctx.subject.transfer_subject_entity()?;
-    let pose = flush_pose?;
+    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm);
     Some(InterShardFlow::ReHome(ReHomeCmd {
         transfer: ctx.transfer,
         universe_epoch: epoch,
@@ -1842,8 +1843,15 @@ fn rehome_transfer_id(subject: DirectoryKey, prev_fence: Fence) -> TransferId {
 /// `class = Durable` (a standing re-home is always a durable per-key recovery — transient batches live and
 /// die in one realm, never standing-re-homed). PLACEHOLDER fields — the `ReHome` envelope carries NO
 /// session/realm and the Slice-4 adopt sources the entity's session/realm/pose from the RealmId-keyed
-/// checkpoint reload (D-6/P7), NOT this ctx — so `session`/`from_realm`/`to_realm` are NEVER read by the
-/// re-home path; they are derived from the entity for replay-determinism + the shared WAL snapshot shape.
+/// checkpoint reload (D-6/P7), NOT this ctx — so `session`/`from_realm` are NEVER read by the re-home path;
+/// they are derived from the entity for replay-determinism + the shared WAL snapshot shape.
+///
+/// `to_realm` CAVEAT (frame-rebinding): `build_rehome` now rebinds the flushed pose into `to_realm`'s frame,
+/// so `to_realm` IS read WHEN a pose is present. This standing-reaper path is safe because it ALWAYS parks
+/// with `flushed_pose: None` (a pre-flush death has no recoverable pose — see `process_rehome_starts`), so
+/// the `rebind_pose_to_dest` call is never reached and the entity-derived placeholder stays inert. WHEN
+/// Slice-4/P7 sources a REAL pose from the RealmId-keyed checkpoint, it MUST supply the true destination
+/// realm here (not the `System(entity)` placeholder) or the pose will be rebound into the wrong frame.
 fn rehome_ctx(
     subject: DirectoryKey,
     prev_fence: Fence,
@@ -2460,6 +2468,13 @@ mod tests {
         )
     }
 
+    /// The dest-frame pose a crossing/re-home now SHIPS: [`flushed_pose`] re-expressed into `TO_REALM`'s
+    /// frame via the SAME `rebind_pose_to_dest` the builders apply, so the frame flips SystemSpace{7}→{8}
+    /// through the P3 identity (position unchanged) and this stays byte-identical to the builder output.
+    fn dest_flushed_pose() -> StampedPose {
+        super::rebind_pose_to_dest(flushed_pose(), TO_REALM)
+    }
+
     const ORCH: NodeId = NodeId(1);
     const SOURCE: NodeId = NodeId(2);
     const DEST: NodeId = NodeId(3);
@@ -3029,7 +3044,7 @@ mod tests {
                         entity: subject_eid(),
                         from_realm: FROM_REALM,
                         to_realm: TO_REALM,
-                        pose: flushed_pose(),
+                        pose: dest_flushed_pose(),
                         state: vec![],
                     },
                 }))
@@ -4939,7 +4954,7 @@ mod tests {
             subject: subject(),
             new_fence: Fence(2),
             step_id: RE_HOME_STEP,
-            state: ReHomeState::PoseOnly(flushed_pose()),
+            state: ReHomeState::PoseOnly(dest_flushed_pose()),
             source: SOURCE,
         });
         assert!(
@@ -5002,7 +5017,7 @@ mod tests {
             subject: subject(),
             new_fence: Fence(2),
             step_id: RE_HOME_STEP,
-            state: ReHomeState::PoseOnly(flushed_pose()),
+            state: ReHomeState::PoseOnly(dest_flushed_pose()),
             source: SOURCE,
         });
         assert!(
@@ -6013,7 +6028,7 @@ mod tests {
                     entity: subject_eid(),
                     from_realm: FROM_REALM,
                     to_realm: TO_REALM,
-                    pose: flushed_pose(),
+                    pose: dest_flushed_pose(),
                     state: vec![],
                 },
             })

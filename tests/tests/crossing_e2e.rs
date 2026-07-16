@@ -296,14 +296,14 @@ fn crossing_e2e_renders_at_dest() {
         .last()
         .expect("the subject renders at some tick across the crossing");
 
-    // The dest renders the CROSSED SOURCE-realm pose (`SystemSpace{seed:7}`), not its own adopt-default
-    // seed-8 origin — a dropped crossing would leave seed 8. This is the same discriminator as the D-28
-    // render gate: the dest's own integration moves `pos` but never `frame`, so a seed-7 frame at the dest
-    // can ONLY come from a landed crossing.
+    // The dest renders the CROSSED pose re-expressed into the DEST realm's frame (`SystemSpace{seed:8}` —
+    // post frame-rebinding, `transfer_frame` identity through P3). The drop discriminator is now the
+    // non-origin `world_pos` below (the walked crossed pose, NOT the dest's ZERO adopt-default); this frame
+    // assertion CONFIRMS the rebinding placed the render pose in the right realm.
     assert_eq!(
         dest_sample.frame,
-        FrameRef::SystemSpace { system_seed: 7 },
-        "the dest renders the CROSSED source-realm frame (seed 7), not the adopt-default (seed 8): {dest_sample:?}",
+        FrameRef::SystemSpace { system_seed: 8 },
+        "the dest renders the crossed pose re-expressed into the DEST realm's frame (seed 8): {dest_sample:?}",
     );
     assert!(
         dest_sample.world_pos.is_finite(),
