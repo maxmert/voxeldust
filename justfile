@@ -166,10 +166,19 @@ render-smoke:
 render-boxes-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_boxes_smoke -- --nocapture
 
+# G-RENDER-CROSSING-SMOKE (Visual Crossing Playground V4 pixel proof): bring up the DUAL cluster with
+# an injected walk-into crossing trigger (VD_DEVCLUSTER_BOUNDARIES), launch a HEADLESS
+# `client --capture --realm-boxes` (TWO translucent boxes A@System(7) / B@System(8)), WalkTo the
+# avatar across the boundary, and capture BEFORE (dot in box A) + AFTER (dot in box B) — asserting
+# the location/expected_box flip + world-motion (state) AND the dot's pixels move A→B (H2) + zero
+# magenta. Same GPU-required, LOCAL-gate preconditions as render-smoke.
+render-crossing-smoke:
+    cargo test -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
+
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a render-smoke render-boxes-smoke coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a render-smoke render-boxes-smoke render-crossing-smoke coverage
 
 # One-time setup helper.
 coverage-setup:

@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use vd_bins::{
     Cluster, ClusterAddrs, DEV, ORCH_STORE_NAME, RUNFILE_NAME, TRUST_DIR_NAME, admin_get_body,
-    common_env, dev_auth_pubkey_hex, gateway_env, loopback, orchestrator_env, sh_quote,
-    shard_b_env, shard_env, slot_workdir, write_source_boundaries,
+    common_env, dev_auth_pubkey_hex, gateway_env, loopback, orchestrator_env,
+    resolve_source_boundaries, sh_quote, shard_b_env, shard_env, slot_workdir,
 };
 use vd_core::NodeId;
 use vd_core::pose::RealmId;
@@ -255,8 +255,12 @@ fn up_inner(
     ];
     if dual {
         // The SOURCE (realm 7) hosts the crossing trigger INTO realm B; the DEST (realm 8) just receives.
-        // The boundaries file is SINGLE-SOURCED via `write_source_boundaries` (System(7)→System(8) shell).
-        let boundaries_path = write_source_boundaries(work, &DEV)?;
+        // Default: the born-inside System(7)→System(8) shell. A test/operator may OVERRIDE the source
+        // geometry via `VD_DEVCLUSTER_BOUNDARIES` (a readable boundaries.json) so a crossing test can
+        // plant its own WALK-INTO trigger; inert-by-default, so `dual_cluster_crossing_smoke` and a bare
+        // `up --dual` are unchanged. `resolve_source_boundaries` fails LOUD on a bad override path.
+        let boundaries_path =
+            resolve_source_boundaries(std::env::var("VD_DEVCLUSTER_BOUNDARIES").ok(), work, &DEV)?;
         let source = nodes
             .iter_mut()
             .find(|(_, label, _)| *label == "vd-shard")

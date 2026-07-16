@@ -3180,6 +3180,14 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   cross-frame transform) before it is rendered or fed to physics — owed with `render_ready` + the real frame seam
   (`FrameSpace`, P4/P5). Pinned RED-to-flip: the gate asserts seed-7 today and flips to the dest frame when
   rebinding lands.
+  **EMPIRICALLY CONFIRMED (2026-07-16, `render_crossing_smoke`):** over the live dual-shard process tier a dot
+  re-homes System(7)→System(8), the client observes it (own `authoritative_sub` flips 0→1, DEST owns the entity),
+  the dot renders at the correct WORLD position (box B) — but `DevState.location` reads `"System 7"` post-crossing
+  because the delivered pose still carries `SystemSpace{7}`. COSMETIC for the playground's identity `SystemSpace`
+  frames (world pos identical either way); a REAL position bug for the GAME's non-identity frames (a P10 warp between
+  real star systems light-years apart). `render_crossing_smoke` therefore gates on the DELIVERED render truth
+  (`expected_box`==box B + the dot's pixels + DEST-owns + auth_sub-flip), NOT the `location` label; when frame
+  rebinding lands the label flip becomes assertable. GENERAL: diagnose the delivered state, not a derived label.
 - **Also owed:** the EARLY (prepare-time) `OpenInputSlot` for the gateway-adoption-mid-cut race is a **P3**
   resilience item (the gateway re-drives the slot before the buffer drain); inert in 1c (single process, commit
   emits the slot in the same handler before the drain).

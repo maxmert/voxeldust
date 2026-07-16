@@ -895,6 +895,37 @@ pub fn write_source_boundaries(
     Ok(path.display().to_string())
 }
 
+/// The path to the SOURCE shard's crossing boundaries for a `--dual` cluster: an operator/test
+/// OVERRIDE via `VD_DEVCLUSTER_BOUNDARIES` (a dev-config hook so a crossing test — e.g. the visual
+/// `render_crossing_smoke` — can inject its OWN *walk-into* geometry in place of the default
+/// *born-inside* shell), else the born-inside shell [`write_source_boundaries`] writes into `dir`.
+/// INERT by default: `env_override == None`/empty ⇒ the born-inside default, so every committed
+/// dual-cluster path (`dual_cluster_crossing_smoke`, the launcher's own `up --dual`) is byte-identical.
+/// The override file is validated as a readable file so a typo'd path fails LOUD rather than silently
+/// planting the born-inside default (which would make a crossing test's geometry a mystery no-op).
+///
+/// # Errors
+/// An override path that is not a readable file, or a [`write_source_boundaries`] failure when no
+/// override is set.
+pub fn resolve_source_boundaries(
+    env_override: Option<String>,
+    dir: &std::path::Path,
+    p: &DevClusterParams,
+) -> Result<String, String> {
+    match env_override {
+        Some(path) if !path.is_empty() => {
+            if std::path::Path::new(&path).is_file() {
+                Ok(path)
+            } else {
+                Err(format!(
+                    "VD_DEVCLUSTER_BOUNDARIES is set but not a readable file: {path}"
+                ))
+            }
+        }
+        _ => write_source_boundaries(dir, p),
+    }
+}
+
 // ---- shell-safe value quoting ------------------------------------------------
 
 /// POSIX-single-quote a value for safe emission into a `KEY=VALUE` line that a
@@ -1968,5 +1999,36 @@ mod incarnation_tests {
         )
         .expect("the written file loads in the source realm");
         assert_eq!(loaded, Some(source_crossing_boundaries(&DEV)));
+    }
+
+    #[test]
+    fn resolve_source_boundaries_prefers_a_valid_override_else_born_inside_default() {
+        let dir = TempDir::new("resolve-src");
+        // (1) No override → the born-inside default, byte-identical to write_source_boundaries.
+        let default_path = resolve_source_boundaries(None, &dir.0, &DEV)
+            .expect("no override writes the born-inside default");
+        let loaded = resolve_realm_boundaries(
+            &env(&[("VD_REALM_BOUNDARIES", &default_path)]),
+            RealmId::System(DEV.realm_seed),
+        )
+        .expect("the default file loads");
+        assert_eq!(loaded, Some(source_crossing_boundaries(&DEV)));
+        // (2) An EMPTY override is treated as unset → still the born-inside default path.
+        let empty_path = resolve_source_boundaries(Some(String::new()), &dir.0, &DEV)
+            .expect("empty override falls back to the default");
+        assert_eq!(empty_path, default_path);
+        // (3) A valid override FILE is returned verbatim (the test/operator's own walk-into geometry).
+        let override_file = dir.0.join("override.json");
+        std::fs::write(&override_file, "[]").expect("write override");
+        let override_path = override_file.display().to_string();
+        assert_eq!(
+            resolve_source_boundaries(Some(override_path.clone()), &dir.0, &DEV),
+            Ok(override_path),
+        );
+        // (4) An override that is NOT a readable file fails LOUD (never a silent fall-back).
+        let missing = dir.0.join("nope.json").display().to_string();
+        let err = resolve_source_boundaries(Some(missing), &dir.0, &DEV)
+            .expect_err("a bad override path is loud");
+        assert!(err.contains("VD_DEVCLUSTER_BOUNDARIES"));
     }
 }

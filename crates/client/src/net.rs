@@ -75,6 +75,16 @@ pub struct ClientState {
     /// unbounded per-input history (a 20 Hz session would grow that forever).
     sent_input_count: u64,
     last_sent_input: Option<(SessionId, u64)>,
+    /// Armed by the gateway's `RequestCut` (the SERVER's request); the NEXT input datagram
+    /// stamps `is_cut_marker = true` — the client's half of the transfer cut (the seamless
+    /// input-stream partition point). PASSIVE + server-authoritative: the client never
+    /// initiates a cut and a premature/forged marker is gateway-dropped (F1); the marker only
+    /// anchors WHERE the client's own input stream splits, never WHICH shard owns the entity
+    /// (that is the server's directory CAS). Withholding it cannot veto the transfer — the
+    /// saga's `Cutting` phase aborts on `CutTimeout` and the geometric dwell re-arms. The
+    /// gateway confirms the cut from THIS in-band marker (`on_cut_marker`); the reliable
+    /// `CutEmitted` backstop is a deliberately deferred layer (a gateway no-op in P1).
+    cut_marker_armed: bool,
     closing: bool,
     /// Whether the cluster tick rate has been learned from the wire (R1) — applied
     /// once; a duplicate `UniverseRate` must not reset the render cursor.
@@ -111,6 +121,7 @@ impl ClientState {
             next_input_seq: 0,
             sent_input_count: 0,
             last_sent_input: None,
+            cut_marker_armed: false,
             closing: false,
             tick_hz_learned: false,
             decode_errors: 0,
@@ -217,7 +228,14 @@ impl ClientState {
             ServerControlMsg::UniverseRate { tick_hz } => {
                 self.set_tick_hz_from_wire(tick_hz);
             }
-            // Transfer/cut/ping control is P2+; a P1.5 client ignores it (no crash).
+            // The SERVER's transfer-cut request: arm the in-band CUT_MARKER for the next input
+            // (the client's PASSIVE half of a server-driven, server-abortable cut). See
+            // `cut_marker_armed`. A marker before this request is gateway-dropped (F1), so the
+            // client can neither initiate nor veto the transfer.
+            ServerControlMsg::RequestCut { .. } => {
+                self.cut_marker_armed = true;
+            }
+            // Other transfer/ping control is P2+; a P1.5 client ignores it (no crash).
             _ => self.ignored += 1,
         }
     }
@@ -265,7 +283,9 @@ impl ClientState {
                 let (movement, look, action_bits) = self.input.take_frame();
                 let input = InputDatagram {
                     seq,
-                    is_cut_marker: false,
+                    // Stamp the CUT_MARKER on exactly this input if the server armed one via
+                    // `RequestCut` (taken once — the seamless input-stream split point).
+                    is_cut_marker: std::mem::take(&mut self.cut_marker_armed),
                     client_tick: self.tick,
                     movement,
                     look,
@@ -543,7 +563,7 @@ mod tests {
     use glam::DVec3;
     use vd_core::entity_kind::EntityKind;
     use vd_core::pose::{FrameRef, StampedPose};
-    use vd_core::{AccountId, EpochId, Fence, MsgId, UniverseTick};
+    use vd_core::{AccountId, EpochId, Fence, MsgId, TransferId, UniverseTick};
     use vd_sim::io::{Bytes, SendError};
     use vd_wire::channels::{EntitySnap, SubId};
 
@@ -677,6 +697,51 @@ mod tests {
         // Two inputs sent (activate's last step while Active, then this one); seq advanced.
         assert_eq!(c.state().sent_input_count(), 2);
         assert_eq!(c.state().last_sent_input(), Some((SessionId(9), 2)));
+    }
+
+    #[test]
+    fn request_cut_stamps_the_next_input_marker_exactly_once() {
+        let mut c = core();
+        activate(&mut c);
+        // A live input before any cut request carries NO marker.
+        c.step(0.0);
+        let before: InputDatagram =
+            postcard::from_bytes(&c.transport.sent.last().expect("input sent").1).expect("decode");
+        assert!(
+            !before.is_cut_marker,
+            "no CUT_MARKER before the server requests one"
+        );
+
+        // The SERVER requests the cut → the NEXT input stamps the in-band marker (the client's
+        // passive half; the client never initiates). Server-authoritative: the gateway confirms
+        // this marker, and a marker BEFORE RequestCut would be dropped (F1).
+        let req = postcard::to_allocvec(&ServerControlMsg::RequestCut {
+            transfer: TransferId(1),
+        })
+        .expect("test fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, req);
+        c.step(0.0);
+        let marked: InputDatagram =
+            postcard::from_bytes(&c.transport.sent.last().expect("input sent").1).expect("decode");
+        assert!(
+            marked.is_cut_marker,
+            "the input after RequestCut carries the in-band CUT_MARKER"
+        );
+        // RequestCut is HANDLED, not counted as an ignored drop.
+        assert_eq!(
+            c.state().dropped_counts().1,
+            0,
+            "RequestCut is handled, not ignored"
+        );
+
+        // Taken exactly once: the following input is unmarked again (not sticky every tick).
+        c.step(0.0);
+        let after: InputDatagram =
+            postcard::from_bytes(&c.transport.sent.last().expect("input sent").1).expect("decode");
+        assert!(
+            !after.is_cut_marker,
+            "the marker is stamped once, not every tick"
+        );
     }
 
     #[test]
