@@ -94,6 +94,29 @@ pub fn dest_stub_config() -> StubConfig {
     }
 }
 
+/// C-6c — the GALAXY shard (`RealmId::System(GALAXY_SEED)`, the seed forest's between-systems space): the
+/// shard that OWNS the between-space + System 7/System 8 as its children, so a SIBLING crossing routes
+/// THROUGH it (leave System 7 → land in the Galaxy → the Galaxy shard sees the entry into System 8). This
+/// is the shard the 3-shard round-trip needs so `head(Realm(Galaxy))` resolves and authority can REST in
+/// the between-space. Matches `vd_core::worldgen`'s `GALAXY = System(1)`.
+pub const GALAXY: NodeId = NodeId(5);
+/// The Galaxy realm seed — must match `vd_core::worldgen`'s Galaxy (`System(1)`), the between-systems space.
+pub const GALAXY_SEED: u64 = 1;
+
+/// The GALAXY stub's params: hosts `System(GALAXY_SEED)` (the between-space), a distinct mint seed so its
+/// entities never alias the systems' (source=11, dest=17, galaxy=23).
+#[must_use]
+pub fn galaxy_stub_config() -> StubConfig {
+    StubConfig {
+        realm: RealmId::System(GALAXY_SEED),
+        frame: FrameRef::SystemSpace {
+            system_seed: GALAXY_SEED,
+        },
+        mint_seed: 23,
+        ..stub_config()
+    }
+}
+
 /// The shared cluster spine: an orchestrator + a gateway + N stub shards on a fabric-backed
 /// topology, built in a fixed order (orchestrator, gateway, then shards in list order — the
 /// `p1_cluster` baseline must stay byte-identical). `clock_peers` are the nodes the
@@ -326,6 +349,29 @@ pub fn p2_cluster_staggered(
     )
 }
 
+/// C-6c — the 3-SHARD GALAXY cluster: orchestrator + gateway + THREE stub shards — System 7 (the login
+/// shard, [`SHARD`]), the Galaxy between-space ([`GALAXY`], `System(GALAXY_SEED)`), and System 8
+/// ([`DEST`]) — so a dot re-homes through the FULL containment chain System 7 → Galaxy → System 8 → Galaxy
+/// → System 7. All three shards win their realm leases through the REAL directory, and the gateway's
+/// `known_shards` = {SHARD, GALAXY, DEST} routes every shard's frames. This is the harness-tier substrate
+/// for the round-trip gate; the seed-forest containment neighbourhood is planted per-shard by the caller.
+#[must_use]
+pub fn p3_galaxy_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
+    build_cluster(
+        fabric,
+        max_sessions,
+        vec![GATEWAY, SHARD, GALAXY, DEST],
+        vec![
+            (SHARD, stub_config()),
+            (GALAXY, galaxy_stub_config()),
+            (DEST, dest_stub_config()),
+        ],
+        StaggerPlan::lockstep(),
+        MemStore::new(), // a fresh (genesis) store — this cluster is not rebuilt
+        default_directory_tuning(),
+    )
+}
+
 /// Borrow a topology node downcast to its concrete `ShardNode<FabricTransport>` so scenario code
 /// can drive/read it directly (orchestrator = saga producer + directory; gateway = route/stats).
 fn with_node<R>(
@@ -512,6 +558,61 @@ pub fn plant_crossing_boundaries(
     });
 }
 
+/// C-6c — plant the SEED-DERIVED containment neighbourhood (`vd_core::worldgen::realm_neighbourhood_for`)
+/// on the shard `node` (its own realm + ancestors + owned children — the EXACT geometry the production
+/// `shard.rs` boot computes). ARMS the containment detector on that shard against the canonical forest,
+/// so a re-home is driven by real seed geometry, not an authored fixture. `universe_seed` matches the
+/// shard's boot seed.
+pub fn plant_seed_neighbourhood(
+    topo: &mut Topology,
+    node: NodeId,
+    universe_seed: u64,
+    hosted_realm: RealmId,
+) {
+    let regions = vd_core::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm);
+    with_node(topo, node, |s| {
+        *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::new(regions);
+    });
+}
+
+/// C-6c — set the dot whose `entity == subject` on shard `node` to frame-local `off` (find it in `Dots`).
+/// Returns true if found + set. The adopted/owned dot's manual write survives into
+/// `evaluate_realm_boundaries` the same tick (schedule order: process_inbound → evaluate_realm_boundaries),
+/// so the seed-forest detector re-homes it based on its scripted position — the round-trip's waypoint driver.
+pub fn set_shard_subject_offset(
+    topo: &mut Topology,
+    node: NodeId,
+    subject: EntityId,
+    off: vd_core::glam::DVec3,
+) -> bool {
+    with_node(topo, node, |s| {
+        let dots = s.world_mut().resource_mut::<vd_sim::stub::Dots>();
+        for dot in dots.into_inner().0.values_mut() {
+            if dot.entity == subject {
+                dot.pose.pos = vd_core::pose::LatticePos::local(off);
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// C-6c — the node the directory records as `head(Entity(subject))`'s authority (arm-agnostic `.node()`),
+/// or `None` if the subject is not (yet) recorded. This is `head(Realm(subject))` in the containment sense:
+/// the shard that OWNS the dot's authority — it flips through System 7 → Galaxy → System 8 → Galaxy →
+/// System 7 as the dot re-homes. Read straight off the orchestrator's ONE directory.
+#[must_use]
+pub fn entity_head_node(topo: &mut Topology, subject: EntityId) -> Option<NodeId> {
+    with_orchestrator(topo, |orch| {
+        orch.world_mut()
+            .resource::<DirectoryRes>()
+            .0
+            .head(DirectoryKey::Entity(subject))
+            .map(|r| r.authority.node())
+    })
+}
+
 /// Slice 3g (C-3 CONTAINMENT) — the crossing-e2e convenience: plant a 3-level forest on the SOURCE
 /// (root ⊃ own(`System(7)`) ⊃ dest(`System(8)`)), all origin-coincident at the dot's SPAWN offset
 /// (`DVec3::ZERO` in the source frame — where login places the avatar, stub.rs `login`). The dot is a
@@ -572,6 +673,87 @@ pub fn seed_held_transient(
                 },
             );
     });
+}
+
+/// C-6c — seed an OWNED `Held` transient (a Debris) on ANY shard `node` at frame-local `pos` (the generic
+/// twin of [`seed_held_transient`], which is SHARD-only). `anchor` is that shard's realm-lease fence. A
+/// transient re-homes via the batched `TransientGo` path (HR2 second class) with NO client cut-marker, so
+/// it self-drives across shards — the round-trip subject whose OWNERSHIP (which shard holds it) flips
+/// through the containment chain without the gateway session-migration a durable dot's directory head needs.
+pub fn seed_held_transient_on(
+    topo: &mut Topology,
+    node: NodeId,
+    frame: FrameRef,
+    entity: EntityId,
+    anchor: Fence,
+    pos: vd_core::glam::DVec3,
+) {
+    with_node(topo, node, |s| {
+        let pose = vd_core::pose::StampedPose::at_rest(frame, pos, TRANSIENT_SEED_TICK0);
+        s.world_mut()
+            .resource_mut::<vd_sim::stub::OwnedTransients>()
+            .0
+            .insert(
+                entity,
+                vd_sim::stub::Transient {
+                    pose,
+                    anchor_fence: anchor,
+                    status: vd_sim::stub::TransientStatus::Held { outbound: None },
+                    prev_offset: pos,
+                },
+            );
+    });
+}
+
+/// C-6c — set a HELD transient's frame-local offset on shard `node` (find it in `OwnedTransients`). Returns
+/// true if found + set. The manual write survives into `evaluate_realm_boundaries` the same tick, so the
+/// seed-forest detector re-homes the transient based on its scripted waypoint position.
+pub fn set_transient_offset_on(
+    topo: &mut Topology,
+    node: NodeId,
+    entity: EntityId,
+    off: vd_core::glam::DVec3,
+) -> bool {
+    with_node(topo, node, |s| {
+        let mut owned = s
+            .world_mut()
+            .resource_mut::<vd_sim::stub::OwnedTransients>();
+        if let Some(t) = owned.0.get_mut(&entity) {
+            t.pose.pos = vd_core::pose::LatticePos::local(off);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// C-6c — remove the transient `entity` from shard `node`'s `OwnedTransients` (a no-op if absent). Used by
+/// the round-trip driver to drop a completed leg's fresh subject so the next leg's holder read is clean.
+pub fn remove_transient_on(topo: &mut Topology, node: NodeId, entity: EntityId) {
+    with_node(topo, node, |s| {
+        s.world_mut()
+            .resource_mut::<vd_sim::stub::OwnedTransients>()
+            .0
+            .remove(&entity);
+    });
+}
+
+/// C-6c — which of `nodes` currently HOLDS the transient `entity` authoritatively (the `is_held()` subset of
+/// its `owned_transients`), or `None` if no shard holds it. This is the transient's OWNERSHIP head (the HR2
+/// analog of `head(Realm(subject))` — a transient has no directory row by design). It flips through
+/// System 7 → Galaxy → System 8 → Galaxy → System 7 as the transient re-homes.
+#[must_use]
+pub fn transient_holder(
+    reports: &[(NodeId, InspectReport)],
+    nodes: &[NodeId],
+    entity: EntityId,
+) -> Option<NodeId> {
+    nodes.iter().copied().find(|n| {
+        reports
+            .iter()
+            .find(|(id, _)| id == n)
+            .is_some_and(|(_, r)| r.owned_transients.iter().any(|(e, _)| *e == entity))
+    })
 }
 
 /// Total transients DROPPED as a LOSS (self-fence, no hand-off) across the source + dest shards

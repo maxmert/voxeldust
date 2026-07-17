@@ -101,31 +101,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             request_ttl_ticks: 0,
         },
     );
-    // DEFERRED 1-SIGKILL-OWED — the process-seam boundary-plant knob. `VD_REALM_BOUNDARIES` (a path to a
-    // `boundaries.json` = a `Vec<RealmBoundary>`, SINGLE-SOURCED with the client's `--realm-boxes`
-    // boxes.json) arms the containment re-home trigger by REPLACING the default-empty `RealmRegions` the
-    // stub just inserted. ABSENT ⇒ inert (the resource stays `default()` empty ⇒ `evaluate_realm_boundaries`
-    // early-returns, byte-identical to today). A malformed file OR a boundary for a realm this shard does
-    // NOT host (a config drift) fails LOUD here (Display carries the actionable guidance for `kubectl logs`).
-    // C-3: the loaded directional boundaries are lifted into the containment `RealmRegion` forest the sim
-    // consumes (`regions_for_source_plant`) — the JSON format + client `--realm-boxes` stay unchanged; a
-    // single-sourced `regions.json` boot path is the C-5/C-6 slice.
+    // C-6b — the SEED-DERIVED containment boot (task #135). The shard computes its realm-region
+    // NEIGHBOURHOOD closed-form from the shared universe seed (`realm_neighbourhood_for`: own realm +
+    // ancestor chain to the ambient root + owned children — NEVER siblings, HR1 replicated-by-construction,
+    // no inter-shard bytes) and plants it, so the containment detector is LIVE from boot (no longer inert).
+    // `VD_UNIVERSE_SEED` (default 0) is the ONE seed every shard shares; a per-shard forest that fails
+    // `guard_regions_nest` (two roots, a dangling parent, a cycle, count > MAX_REGIONS) is a CODE bug in the
+    // generator — fail LOUD at boot (Display carries the actionable guidance for `kubectl logs`), never a
+    // silent detector no-op on a malformed forest.
     let hosted_realm = vd_core::pose::RealmId::System(realm_seed);
-    if let Some(boundaries) =
+    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
+    let regions = vd_core::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm);
+    // `VD_REALM_BOUNDARIES` OVERRIDE (kept for the dual-cluster / render-crossing PLAYGROUND smokes): an
+    // authored `boundaries.json` (a `Vec<RealmBoundary>`, SINGLE-SOURCED with the client's `--realm-boxes`)
+    // REPLACES the seed neighbourhood with a born-inside child crossing shell, so the process-tier smoke can
+    // prove a DIRECT source→dest re-home without standing up a Galaxy shard. ABSENT ⇒ the seed forest (the
+    // production default). A malformed file / a boundary for a realm this shard does NOT host fails LOUD.
+    let regions = if let Some(boundaries) =
         vd_bins::resolve_realm_boundaries(&env, hosted_realm).map_err(|e| e.to_string())?
     {
         tracing::info!(
             count = boundaries.len(),
             realm = %hosted_realm,
-            "planting VD_REALM_BOUNDARIES — the containment re-home trigger is ARMED",
+            "planting VD_REALM_BOUNDARIES OVERRIDE — the authored playground crossing forest is ARMED",
         );
-        let regions =
-            vd_bins::regions_for_source_plant(&boundaries, hosted_realm, move_speed, tick_dt);
-        *node
-            .world_mut()
-            .resource_mut::<vd_sim::stub::RealmRegions>() =
-            vd_sim::stub::RealmRegions::new(regions);
-    }
+        vd_bins::override_regions_for_boundaries(&boundaries, hosted_realm, move_speed, tick_dt)
+    } else {
+        tracing::info!(
+            count = regions.len(),
+            realm = %hosted_realm,
+            seed = universe_seed,
+            "planting the SEED-DERIVED containment neighbourhood — the re-home detector is LIVE",
+        );
+        regions
+    };
+    // The BOOT FENCE (C-5): pure-topology validation BEFORE the infallible `RealmRegions::new`, so a
+    // malformed forest fails LOUD here rather than degrading to the detector's rootless no-op.
+    vd_core::geometry::guard_regions_nest(&regions, vd_sim::stub::MAX_REGIONS).map_err(|e| {
+        format!("malformed realm-region forest for {hosted_realm}: {e} — refusing to boot")
+    })?;
+    *node
+        .world_mut()
+        .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions);
     let mut pacer = TickPacer::new(tick_hz);
     // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its
     // heartbeat + THIS shard's readiness) and the /healthz+/readyz HTTP task reads. Slice 1: the SIGTERM flag

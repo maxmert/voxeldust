@@ -17,8 +17,9 @@
 use std::collections::BTreeMap;
 
 use glam::DVec3;
-use vd_core::geometry::{Boundary, RealmBoundary};
+use vd_core::geometry::{Boundary, RealmBoundary, RealmRegion};
 use vd_core::pose::{FrameRef, RealmId};
+use vd_core::worldgen::MAX_RENDERABLE_EXTENT_M;
 
 /// The render-relevant shape of one realm's extent. A `RealmBoundary::shape` projects to this,
 /// DROPPING the metric band/effect: [`Boundary::Shell`]→[`BoxShape::Sphere`],
@@ -152,6 +153,66 @@ impl RealmScene {
         RealmScene::from_boundaries(&boundaries)
     }
 
+    /// Project the SEED-DERIVED containment [`RealmRegion`] forest (`worldgen::realm_regions_for`) into
+    /// the render scene — the C-6b SINGLE-SOURCE so the client draws EXACTLY the sim's containment
+    /// geometry (no authored `boxes.json`, no drift). Only FINITE LEAF realms are drawn: a region whose
+    /// shape extent (`Boundary::finite_extent`) is `<= worldgen::MAX_RENDERABLE_EXTENT_M` (systems r=40,
+    /// planets r=10) becomes a box; the ~unbounded ambient shells (Galaxy r=1000, Universe r=1e9) are
+    /// SKIPPED — the between-space is FELT, not framed. Depth is computed over the FULL forest's parent
+    /// links (so a rendered System keeps its true nesting depth even though its Galaxy parent is skipped),
+    /// then only the renderable subset is kept. A `RealmRegion` has NO `to_realm`/`effect` to leak (unlike
+    /// `RealmBoundary`), so this is the cleaner projection; it produces the identical [`RealmBox`] type.
+    ///
+    /// # Errors
+    /// [`SceneError::DuplicateRealm`] on a repeated realm id (the seed forest guarantees uniqueness — a
+    /// duplicate is a generator bug); [`SceneError::CycleOrDepthExceeded`] on a cyclic/over-deep chain.
+    pub fn from_regions(regions: &[RealmRegion]) -> Result<RealmScene, SceneError> {
+        // Pass 1: the parent map over the WHOLE forest (renderable + ambient), rejecting duplicates — so
+        // the depth walk is a LOOKUP over the true nesting, not just the renderable subset.
+        let mut parents: BTreeMap<RealmId, Option<RealmId>> = BTreeMap::new();
+        for r in regions {
+            if parents.insert(r.realm, r.parent).is_some() {
+                return Err(SceneError::DuplicateRealm);
+            }
+        }
+        // Pass 2: project ONLY the finite renderable regions (skip the ambient Galaxy/Universe shells),
+        // computing depth over the FULL map so a rendered System keeps its true depth.
+        let mut boxes: BTreeMap<RealmId, RealmBox> = BTreeMap::new();
+        for r in regions {
+            if r.shape.finite_extent() > MAX_RENDERABLE_EXTENT_M {
+                continue; // ambient (non-renderable) shell — felt, not framed
+            }
+            let depth = depth_of(r.realm, &parents)?;
+            boxes.insert(
+                r.realm,
+                RealmBox {
+                    shape: shape_of(r.shape),
+                    frame: r.frame,
+                    center_offset: r.center.offset(),
+                    parent: r.parent,
+                    depth,
+                    color_rgba: color_from_seed(stable_seed(r.realm)),
+                },
+            );
+        }
+        Ok(RealmScene(boxes))
+    }
+
+    /// Project a `regions.json` dev-config (a JSON array of [`RealmRegion`] — the IDENTICAL forest the
+    /// shard computes from `worldgen::realm_regions_for(seed)` and plants into its `RealmRegions`) into the
+    /// render scene. The C-6b SINGLE-SOURCE for the playground `--realm-boxes`: the client draws EXACTLY the
+    /// sim's containment geometry (byte-identical to what the shard's detector evaluates). Deserializes then
+    /// delegates to [`RealmScene::from_regions`] — a malformed file and a duplicate/cyclic set both fail
+    /// LOUD ([`SceneError`]), never a silent empty scene.
+    ///
+    /// # Errors
+    /// [`SceneError::MalformedJson`] if the text is not a valid `RealmRegion` array;
+    /// [`SceneError::DuplicateRealm`] / [`SceneError::CycleOrDepthExceeded`] as [`RealmScene::from_regions`].
+    pub fn from_regions_json(json: &str) -> Result<RealmScene, SceneError> {
+        let regions = parse_regions(json)?;
+        RealmScene::from_regions(&regions)
+    }
+
     /// The box for a realm, if present.
     #[must_use]
     pub fn get(&self, realm: RealmId) -> Option<&RealmBox> {
@@ -181,6 +242,13 @@ impl RealmScene {
 /// [`SceneError::MalformedJson`] — a monomorphic helper so the fallible decode + error map live
 /// here, off [`RealmScene::from_boxes_json`] (which stays a straight-line delegate).
 fn parse_boundaries(json: &str) -> Result<Vec<RealmBoundary>, SceneError> {
+    serde_json::from_str(json).map_err(|e| SceneError::MalformedJson(e.to_string()))
+}
+
+/// Parse a `regions.json` text into a `Vec<RealmRegion>`, mapping the serde error into an owned
+/// [`SceneError::MalformedJson`] — the twin of [`parse_boundaries`] for the C-6b seed-forest single-source
+/// (all fallible decode + error map here, so [`RealmScene::from_regions_json`] stays a straight-line delegate).
+fn parse_regions(json: &str) -> Result<Vec<RealmRegion>, SceneError> {
     serde_json::from_str(json).map_err(|e| SceneError::MalformedJson(e.to_string()))
 }
 
@@ -879,6 +947,111 @@ mod tests {
         let json = serde_json::to_string(&boundaries).expect("serialize");
         let err = RealmScene::from_boxes_json(&json).expect_err("duplicate must reject");
         assert_eq!(err, SceneError::DuplicateRealm);
+    }
+
+    #[test]
+    fn from_regions_draws_only_finite_leaf_realms_and_skips_the_ambient_shells() {
+        // C-6b SINGLE-SOURCE: the client's scene is projected from the SAME seed forest the sim's
+        // containment detector consumes (`worldgen::realm_regions_for`). Only the FINITE leaf realms
+        // (System 7/8 r=40, Planet 7 r=10) are drawn; the ambient Galaxy(r=1000)/Universe(r=1e9) shells
+        // are SKIPPED (extent > MAX_RENDERABLE_EXTENT_M).
+        let regions = vd_core::worldgen::realm_regions_for(0);
+        let scene = RealmScene::from_regions(&regions).expect("the seed forest projects");
+        // The three finite renderable realms are present.
+        assert!(scene.get(RealmId::System(7)).is_some(), "System 7 renders");
+        assert!(scene.get(RealmId::System(8)).is_some(), "System 8 renders");
+        assert!(scene.get(RealmId::Planet(7)).is_some(), "Planet 7 renders");
+        // The ambient shells are SKIPPED (felt, not framed).
+        assert!(
+            scene.get(RealmId::System(0)).is_none(),
+            "the Universe ambient root is NOT rendered"
+        );
+        assert!(
+            scene.get(RealmId::System(1)).is_none(),
+            "the Galaxy between-space is NOT rendered"
+        );
+        assert_eq!(scene.len(), 3, "exactly the 3 finite leaf realms");
+        // A rendered System keeps its TRUE nesting depth (Universe 0 ⊃ Galaxy 1 ⊃ System 2), even though
+        // its Galaxy parent is skipped from the drawn set — depth is over the FULL forest.
+        assert_eq!(
+            scene.get(RealmId::System(7)).expect("system 7 box").depth,
+            2,
+            "System 7 is depth 2 (Universe ⊃ Galaxy ⊃ System) even with the ambient parents skipped"
+        );
+        assert_eq!(
+            scene.get(RealmId::Planet(7)).expect("planet 7 box").depth,
+            3,
+            "Planet 7 is depth 3 (… ⊃ System ⊃ Planet)"
+        );
+        // A System renders as a sphere of its SOI radius; the box carries the realm's own frame.
+        assert_eq!(
+            scene.get(RealmId::System(7)).expect("system 7 box").shape,
+            BoxShape::Sphere { r: 40.0 }
+        );
+        assert_eq!(
+            scene.get(RealmId::System(7)).expect("system 7 box").frame,
+            FrameRef::SystemSpace { system_seed: 7 }
+        );
+    }
+
+    #[test]
+    fn from_regions_json_loads_the_same_scene_as_the_seed_forest_it_serializes() {
+        // The playground `--realm-boxes` single-source: the seed forest serialized to `regions.json` loads
+        // to the byte-identical scene `from_regions` builds directly — the client draws EXACTLY the sim's
+        // containment geometry.
+        let regions = vd_core::worldgen::realm_regions_for(0);
+        let json = serde_json::to_string(&regions).expect("serialize regions");
+        let from_json = RealmScene::from_regions_json(&json).expect("loads");
+        let from_vec = RealmScene::from_regions(&regions).expect("projects");
+        assert_eq!(
+            from_json, from_vec,
+            "the regions.json load matches the plant"
+        );
+        assert_eq!(from_json.len(), 3, "the 3 finite leaf realms");
+    }
+
+    #[test]
+    fn from_regions_json_rejects_malformed_json_loud() {
+        // Not a RealmRegion array → a MalformedJson error (never a silent empty). Discriminant equality
+        // (HR5: matches!'s _ => false arm is uncoverable).
+        let malformed = std::mem::discriminant(&SceneError::MalformedJson(String::new()));
+        let err =
+            RealmScene::from_regions_json("{not valid json").expect_err("malformed must reject");
+        assert_eq!(std::mem::discriminant(&err), malformed, "got {err:?}");
+    }
+
+    #[test]
+    fn from_regions_rejects_a_duplicate_realm_in_the_forest() {
+        // A duplicate realm in the forest is a generator bug — rejected LOUD (not silently keeping the
+        // first). Covers the DuplicateRealm arm of from_regions.
+        let mut regions = vd_core::worldgen::realm_regions_for(0);
+        let dup = *regions.first().expect("non-empty forest");
+        regions.push(dup);
+        let err = RealmScene::from_regions(&regions).expect_err("a duplicate realm must reject");
+        assert_eq!(err, SceneError::DuplicateRealm);
+    }
+
+    #[test]
+    fn from_regions_rejects_a_cyclic_renderable_chain_loud() {
+        // A FINITE (renderable) region whose parent chain CYCLES → the pass-2 depth walk stops loud at
+        // MAX_NEST_DEPTH and `from_regions` propagates it (the `depth_of(..)?` Err arm — distinct from
+        // pass-1's DuplicateRealm, which returns BEFORE the depth walk). Mutate the seed forest so
+        // System 7 ⇄ System 8 (both finite, r=40) point at each other: no duplicate (pass 1 is clean), so
+        // the cycle is caught only in the depth walk of a renderable region — exactly the `?` under test.
+        let mut regions = vd_core::worldgen::realm_regions_for(0);
+        regions
+            .iter_mut()
+            .find(|r| r.realm == RealmId::System(7))
+            .expect("System 7 in the seed forest")
+            .parent = Some(RealmId::System(8));
+        regions
+            .iter_mut()
+            .find(|r| r.realm == RealmId::System(8))
+            .expect("System 8 in the seed forest")
+            .parent = Some(RealmId::System(7));
+        let err =
+            RealmScene::from_regions(&regions).expect_err("a cyclic renderable chain must reject");
+        assert_eq!(err, SceneError::CycleOrDepthExceeded);
     }
 
     #[test]

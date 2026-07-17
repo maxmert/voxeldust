@@ -8352,6 +8352,133 @@ mod tests {
         );
     }
 
+    /// The instantaneous (hysteresis-free) CONTAINER realm of `pos` over the SEED-DERIVED forest
+    /// (`worldgen::realm_regions_for` — the exact geometry a shard boots): the members are the regions
+    /// whose surface `pos` is on/inside (`signed_distance <= 0`), folded from the Universe root. This is
+    /// the containment CONTRACT — the sim's stateful band membership layers hysteresis on top. Asserting
+    /// this (NOT the emitted `to_realm`) proves the containment MODEL routes a sibling crossing through the
+    /// shared parent (task #135 C-6c).
+    fn seed_container_at(pos: DVec3) -> RealmId {
+        let regions = vd_core::worldgen::realm_regions_for(0);
+        let stamped = |p: DVec3| StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 0 },
+            pos: LatticePos::local(p),
+            vel: DVec3::ZERO,
+            orient: vd_core::glam::DQuat::IDENTITY,
+            universe_tick: UniverseTick(0),
+        };
+        let members: Vec<DepthKey> = regions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                region_signed_distance(&stamped(pos), r, &IdentityFrames)
+                    .expect("IdentityFrames never errors")
+                    <= 0.0
+            })
+            .map(|(ix, r)| (region_depth(&regions, r.realm), r.realm, ix))
+            .collect();
+        container(RealmId::System(0), &members)
+    }
+
+    #[test]
+    fn symmetric_recross_resolves_the_full_container_sequence_both_ways() {
+        // C-6c — THE CONTAINER-SEQUENCE round-trip over the SEED forest: a dot scripted +X
+        // origin(System 7) → x=50(Galaxy gap) → x=100(System 8) → x=50(Galaxy) → origin(System 7) resolves
+        // the CONTAINER-realm sequence [System 7, Galaxy, System 8, Galaxy, System 7]. This is the pure
+        // geometric proof the sibling crossing routes THROUGH the shared Galaxy parent BOTH ways (leaving a
+        // system lands in the Galaxy ancestor, entering the next is the Galaxy shard's job). We assert the
+        // CONTAINER (`container()`), NOT the emitted `to_realm` — the model's symmetric truth.
+        const GALAXY: RealmId = RealmId::System(1);
+        const SYSTEM_7: RealmId = RealmId::System(7);
+        const SYSTEM_8: RealmId = RealmId::System(8);
+        let waypoints = [
+            (DVec3::new(0.0, 0.0, 0.0), SYSTEM_7), // origin: inside System 7's SOI (r=40)
+            (DVec3::new(50.0, 0.0, 0.0), GALAXY),  // the gap: outside 7 (r=40) and 8 (@100, r=40)
+            (DVec3::new(100.0, 0.0, 0.0), SYSTEM_8), // inside System 8's SOI
+            (DVec3::new(50.0, 0.0, 0.0), GALAXY),  // back in the gap (the RETURN leg)
+            (DVec3::new(0.0, 0.0, 0.0), SYSTEM_7), // home (the full reverse-cross)
+        ];
+        let seq: Vec<RealmId> = waypoints
+            .iter()
+            .map(|(p, _)| seed_container_at(*p))
+            .collect();
+        let expected: Vec<RealmId> = waypoints.iter().map(|(_, r)| *r).collect();
+        assert_eq!(
+            seq, expected,
+            "the container sequence routes System 7 → Galaxy → System 8 → Galaxy → System 7 BOTH ways",
+        );
+    }
+
+    #[test]
+    fn escape_soi_lands_in_the_immediate_parent_not_a_skipped_ancestor() {
+        // C-6c — the ESCAPE-SOI mandate: leaving a region lands you in its IMMEDIATE parent, never a
+        // skipped ancestor. Leaving Planet 7 (SOI r=10 at (20,0,0)) lands in System 7 (the star system it
+        // orbits), NOT the Galaxy; leaving System 7 (SOI r=40) lands in the Galaxy (the between-systems
+        // space), NOT the Universe. The container fold picks the DEEPEST containing realm at each step.
+        const GALAXY: RealmId = RealmId::System(1);
+        const SYSTEM_7: RealmId = RealmId::System(7);
+        const PLANET_7: RealmId = RealmId::Planet(7);
+        // Inside Planet 7's SOI (centered at (20,0,0), r=10) → the PLANET.
+        assert_eq!(seed_container_at(DVec3::new(20.0, 0.0, 0.0)), PLANET_7);
+        // Just OUTSIDE Planet 7 but still inside System 7 (at the star, the origin) → the STAR SYSTEM (the
+        // immediate parent), NOT the Galaxy grandparent.
+        assert_eq!(seed_container_at(DVec3::ZERO), SYSTEM_7);
+        // Outside System 7's SOI (x=50, in the gap) → the GALAXY (the immediate parent), NOT the Universe.
+        assert_eq!(seed_container_at(DVec3::new(50.0, 0.0, 0.0)), GALAXY);
+    }
+
+    #[test]
+    fn the_live_containment_scan_holds_a_dense_crowd_in_one_realm_without_a_spurious_re_home() {
+        // C-6c SCALE — the "hundreds in ONE location" mandate at the DETECTOR tier. The O(subjects × regions)
+        // container fold runs over the WHOLE owned crowd EVERY tick; this proves it stays bounded + CORRECT
+        // at crowd scale with the REAL production neighbourhood planted. (The e2e density gate
+        // `p1_volume_dense_hundreds_walk_under_invariants` runs the detector INERT — empty `RealmRegions`,
+        // early-return — so the live full-scan is only exercised at N ≥ 128 HERE.)
+        const CROWD: usize = 128; // the "hundreds in one location" floor (N ≥ 128)
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // The REAL seed neighbourhood `shard.rs` boots for System 7 — {Universe, Galaxy, System 7, Planet 7},
+        // a 4-region fold per subject — NOT a hand-authored fixture, so this exercises the scan the bins run.
+        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(
+            vd_core::worldgen::realm_neighbourhood_for(0, RealmId::System(7)),
+        );
+        // Pack N dots into a tight ~3.5 m cube at the star (origin): every dot is well inside System 7 (r=40)
+        // and ≥ ~16 m from Planet 7's centre (20,0,0) ⇒ its deepest container is System 7 == its owning realm
+        // (no re-home). Overlapping positions are fine — a crowd IS hundreds in one place; the entities differ.
+        for i in 0..CROWD {
+            let offset = DVec3::new(
+                (i % 5) as f64 - 2.0,
+                ((i / 5) % 5) as f64 - 2.0,
+                ((i / 25) % 5) as f64 - 2.0,
+            );
+            insert_owned_dot(
+                &mut rig,
+                SessionId(i as u128),
+                EntityId::pack(EntityKind::Player, i as u32, 1, i as u32),
+                offset,
+            );
+        }
+        // Re-scan the whole crowd for several ticks.
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 0..5 {
+            rig.set_local_tick(2 + t);
+            all.extend(rig.tick(vec![]));
+        }
+        // The scan TOUCHED every dot (membership computed for all N) — proof the full-scan RAN at scale, not
+        // an inert early-return (an empty `RealmRegions` leaves this map empty).
+        assert_eq!(
+            rig.world.resource::<ContainmentProgress>().0.len(),
+            CROWD,
+            "the live containment scan evaluated all {CROWD} dots (not an inert early-return)",
+        );
+        // And it stayed CORRECT at scale: the whole crowd is contained in System 7 ⇒ ZERO re-homes fire.
+        let spurious = crossing_requests(&all).len();
+        assert_eq!(
+            spurious, 0,
+            "a dense crowd inside one realm triggers NO spurious re-home under the O(N×regions) scan",
+        );
+    }
+
     #[test]
     fn an_aborted_re_home_re_fires_while_the_dot_is_still_in_the_region() {
         // POSITIVE proof of the abort RE-FIRE (`on_crossing_aborted` resets `last_commit_tick=None`): a dot

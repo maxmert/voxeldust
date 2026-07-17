@@ -107,15 +107,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let mut core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
 
-    // Visual Crossing Playground V2: boot-load the dev-config realm boxes (if given) into the
-    // render scene, which then rides every render_snapshot() onto the seam. Single-sourced with
-    // the shard boundary plant; a malformed/duplicate/cyclic file fails LOUD at boot (never a
+    // C-6b Visual Crossing Playground: boot-load the dev-config realm geometry (if given) into the render
+    // scene, which then rides every render_snapshot() onto the seam. SINGLE-SOURCED with the shard's
+    // containment plant. Preferred: a `regions.json` (a `Vec<RealmRegion>` = the SEED forest
+    // `worldgen::realm_regions_for(seed)` — the client draws EXACTLY what the sim's detector evaluates,
+    // ambient shells auto-skipped). Legacy fallback: a `boxes.json` (a `Vec<RealmBoundary>`) for the
+    // authored playground OVERRIDE smokes. A file that parses as NEITHER fails LOUD at boot (never a
     // silent empty scene). Config injection — zero cross-process bytes (HR1-inert).
     if let Some(path) = &args.realm_boxes {
         let json =
             std::fs::read_to_string(path).map_err(|e| format!("read --realm-boxes {path}: {e}"))?;
-        let scene = vd_client::realm_scene::RealmScene::from_boxes_json(&json)
-            .map_err(|e| format!("parse --realm-boxes {path}: {e}"))?;
+        let scene = vd_client::realm_scene::RealmScene::from_regions_json(&json)
+            .or_else(|_| vd_client::realm_scene::RealmScene::from_boxes_json(&json))
+            .map_err(|e| {
+                format!("parse --realm-boxes {path} as regions.json or boxes.json: {e}")
+            })?;
         core.state_mut().load_scene(scene);
     }
 

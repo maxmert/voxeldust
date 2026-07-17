@@ -1027,6 +1027,25 @@ pub mod crossing_playground {
             scene_path.display().to_string(),
         ))
     }
+
+    /// C-6b SINGLE-SOURCE: write the SEED-DERIVED containment forest (`realm_regions_for(seed)`) as
+    /// `regions.json` into `dir`, returning the path. The client loads it via `--realm-boxes` (which tries
+    /// `RealmScene::from_regions_json` first), so it draws EXACTLY the geometry the shard's detector
+    /// evaluates — the canonical Universe⊃Galaxy⊃System⊃Planet forest, ambient shells auto-skipped by the
+    /// renderable-extent filter. This is the single-sourced canonical render (distinct from
+    /// [`write_fixtures`]'s authored two-box OVERRIDE scene used by the direct-re-home smoke).
+    ///
+    /// # Errors
+    /// A directory-create, serialize, or write failure.
+    pub fn write_seed_regions(dir: &std::path::Path, universe_seed: u64) -> Result<String, String> {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create regions dir: {e}"))?;
+        let path = dir.join("regions.json");
+        let regions = vd_core::worldgen::realm_regions_for(universe_seed);
+        let json =
+            serde_json::to_string(&regions).map_err(|e| format!("serialize regions: {e}"))?;
+        std::fs::write(&path, json).map_err(|e| format!("write regions: {e}"))?;
+        Ok(path.display().to_string())
+    }
 }
 
 // ---- shell-safe value quoting ------------------------------------------------
@@ -1314,7 +1333,7 @@ pub fn http_get_status(
         .ok()
 }
 
-// ---- the shard boundary-plant knob (DEFERRED 1-SIGKILL-OWED) -----------------
+// ---- the shard boundary-plant OVERRIDE knob (C-6b; the seed forest is the default) ----------
 
 /// A `VD_REALM_BOUNDARIES` file the shard could not turn into a valid, in-realm boundary set — rejected
 /// LOUD at shard boot rather than silently booting an empty (inert) trigger. (Manual `Display`/`Error`
@@ -1355,18 +1374,17 @@ impl std::fmt::Display for RealmBoundariesError {
 
 impl std::error::Error for RealmBoundariesError {}
 
-/// Resolve the shard's boot-loaded realm boundaries (DEFERRED 1-SIGKILL-OWED — the process-seam
-/// boundary-plant knob). Reads `VD_REALM_BOUNDARIES` (a path to a `boundaries.json` = a
-/// `Vec<RealmBoundary>`, the IDENTICAL format the client loads as `--realm-boxes` — SINGLE-SOURCED),
-/// parses it, and validates every boundary's exterior `realm` is the realm THIS shard hosts
-/// (`hosted_realm`, a config-drift guard). Returns:
-/// - `Ok(None)` when the env var is ABSENT — INERT: the caller leaves the shard's `RealmBoundaries`
-///   at its `default()` empty, so `evaluate_realm_boundaries` early-returns exactly as today (every
-///   existing run stays byte-identical).
-/// - `Ok(Some(vec))` when the file loads and every boundary is in-realm — the caller plants it.
+/// Resolve the shard's `VD_REALM_BOUNDARIES` OVERRIDE (C-6b — the process-seam playground knob). Reads
+/// `VD_REALM_BOUNDARIES` (a path to a `boundaries.json` = a `Vec<RealmBoundary>`, the IDENTICAL format the
+/// client loads as `--realm-boxes` — SINGLE-SOURCED), parses it, and validates every boundary's exterior
+/// `realm` is the realm THIS shard hosts (`hosted_realm`, a config-drift guard). Returns:
+/// - `Ok(None)` when the env var is ABSENT — the caller falls back to the SEED-DERIVED containment
+///   neighbourhood (`realm_neighbourhood_for`), the production default (the detector is LIVE either way).
+/// - `Ok(Some(vec))` when the file loads and every boundary is in-realm — the caller plants the authored
+///   born-inside child crossing forest (the `dual_cluster_crossing_smoke` / `render_crossing_smoke` path).
 ///
 /// Fails LOUD ([`RealmBoundariesError`]) on a malformed file or a boundary for a realm this shard
-/// does not host — a misconfiguration must never become a silent inert trigger.
+/// does not host — a misconfiguration must never become a silent wrong-geometry trigger.
 ///
 /// # Errors
 /// [`RealmBoundariesError`] on a read/parse failure or an out-of-realm boundary.
@@ -1395,23 +1413,22 @@ fn parse_realm_boundaries(
     serde_json::from_str(json).map_err(|e| RealmBoundariesError::Malformed(e.to_string()))
 }
 
-/// C-3 CONTAINMENT SEAM-ADAPTER — lift the SOURCE-shard's loaded `RealmBoundary` set (the born-inside
-/// crossing geometry, single-sourced with the client's `--realm-boxes`) into the containment
-/// [`RealmRegion`](vd_core::geometry::RealmRegion) forest the sim's `RealmRegions` resource now consumes.
-/// The old directional `RealmBoundary` model authored `realm = the exterior side` + a `to_realm`
-/// destination; the containment model derives the destination as the DEEPEST containing region's realm.
-/// So each loaded boundary becomes a DEEPER CHILD region whose `realm = boundary.to_realm` (the re-home
-/// destination), nested under the shard's `hosted_realm` (a large own-region), which in turn nests under an
-/// ambient root — so a dot born INSIDE the boundary shell has its deepest container == `to_realm` and
-/// re-homes there (behaviour-equivalent to the born-inside dwell the directional model committed). The
-/// on-disk JSON + the client `--realm-boxes` scene are UNCHANGED (still `RealmBoundary`); this converts
-/// only at the shard's plant seam. The band is re-derived velocity-safe from the shard's tick params.
-///
-/// A proper single-sourced `RealmRegion` boot path (`realm_regions_for` / a `regions.json`) is the C-5/C-6
-/// slice; this adapter keeps the process tier compiling + the born-inside crossing smoke behaviour-live
-/// through C-3 without touching the JSON format or the client.
+/// The `VD_REALM_BOUNDARIES` OVERRIDE adapter (C-6b) — lift the SOURCE-shard's loaded `RealmBoundary` set
+/// (the born-inside crossing geometry, single-sourced with the client's `--realm-boxes`) into the
+/// containment [`RealmRegion`](vd_core::geometry::RealmRegion) forest the sim's `RealmRegions` resource
+/// consumes. This is the PLAYGROUND override, NOT the production boot: the default boot computes the
+/// SEED-DERIVED neighbourhood (`vd_core::worldgen::realm_neighbourhood_for`) directly, where a star-system's
+/// disjoint sibling is reached THROUGH the shared Galaxy parent. The override models the crossing dest as a
+/// DEEPER CHILD region whose `realm = boundary.to_realm`, nested under the shard's `hosted_realm`, which
+/// nests under an ambient root — so a dot born INSIDE the shell has its deepest container == `to_realm` and
+/// re-homes there in ONE step. This lets `dual_cluster_crossing_smoke` / `render_crossing_smoke` prove a
+/// DIRECT source→dest re-home over the process tier WITHOUT standing up a Galaxy shard (the seed-forest
+/// escape-SOI-to-sibling round-trip is the harness-tier gate `three_shard_round_trip_*`). The on-disk JSON
+/// (and the client `--realm-boxes` scene) are UNCHANGED (still `RealmBoundary`); this converts only at the
+/// shard's plant seam. The band is re-derived velocity-safe from the shard's tick params. The result is
+/// `guard_regions_nest`-validated at the plant seam like the seed forest (an authored fixture is fenced too).
 #[must_use]
-pub fn regions_for_source_plant(
+pub fn override_regions_for_boundaries(
     boundaries: &[vd_core::geometry::RealmBoundary],
     hosted_realm: vd_core::pose::RealmId,
     move_speed_mps: f64,

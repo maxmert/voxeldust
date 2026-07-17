@@ -268,6 +268,19 @@ impl Boundary {
         }
     }
 
+    /// The largest linear extent of this shape from its center: the radius for a `Shell`, the max
+    /// half-extent component for a box (`Aabb`/`Obb`). The ONE geometry-owned answer to "how big is
+    /// this region", so the client's renderable-region filter (draw finite leaf realms, skip the
+    /// ~unbounded ambient Galaxy/Universe shells — `worldgen::MAX_RENDERABLE_EXTENT_M`) never re-derives
+    /// a per-shape size in a feature path. Monomorphic (the KIND branch lives here, not in the client).
+    #[must_use]
+    pub fn finite_extent(&self) -> f64 {
+        match self {
+            Boundary::Shell { r } => *r,
+            Boundary::Aabb { half } | Boundary::Obb { half, .. } => half.max_element(),
+        }
+    }
+
     /// Signed distance to the surface: NEGATIVE inside, positive outside, ~0 on the surface.
     /// This is for the (future, Slice 3) commit line — it is DISTINCT from
     /// [`Boundary::membership_scalar`] and must NEVER be fed to the band (the band consumes
@@ -892,6 +905,115 @@ fn region_signed_distance_resolved(
         .signed_distance(p.pos.offset() - region.center.offset()))
 }
 
+/// Why a realm-region forest is malformed — the boot fence (task #135, C-5). ONE variant per REJECT arm
+/// so each is asserted with `expect_err` equality (HR5(d)), never `matches!`. These are PURE TOPOLOGY
+/// checks; the geometric child-⊆-parent volume subset check needs cross-frame Shape×Shape math and is
+/// LEDGERED to P4/P5 (DEFERRED D-45).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RegionNestError {
+    #[error("the forest has {found} ambient roots (parent: None); exactly one is required")]
+    RootCount { found: usize },
+    #[error(
+        "two regions share realm {realm:?}; each realm must be unique (region_depth determinism)"
+    )]
+    DuplicateRealm { realm: RealmId },
+    #[error("region {realm:?} names parent {parent:?}, which is not a region in the forest")]
+    DanglingParent { realm: RealmId, parent: RealmId },
+    #[error("region {realm:?}'s parent chain cycles or never reaches the single root")]
+    CycleOrOrphan { realm: RealmId },
+    #[error("the forest has {found} regions; the membership bitset holds at most {max}")]
+    TooManyRegions { found: usize, max: usize },
+}
+
+/// The BOOT FENCE for a realm-region forest (task #135, C-5): pure topological validation run at shard
+/// boot BEFORE the infallible [`RealmRegions::new`] (in `vd_sim`), so a malformed set fails LOUD rather
+/// than degrading to the detector's `root_realm == None` no-op. Rejects, in order (fail-fast + cheap-
+/// first): count > `max` (the membership-bitset width, passed by the caller — vd-core stays free of the
+/// bitset detail); not exactly one `parent: None` root; a duplicate `.realm`; a dangling parent; a parent
+/// chain that cycles or never reaches the root. A straight-line SHIM — each fallible arm is a monomorphic
+/// helper, so the `?` branch regions are covered once here (HR5). This validates only TOPOLOGY (the
+/// geometric child-⊆-parent subset check is P4/P5, D-45).
+///
+/// # Errors
+/// [`RegionNestError`] — one variant per malformation above.
+pub fn guard_regions_nest(regions: &[RealmRegion], max: usize) -> Result<(), RegionNestError> {
+    guard_region_count(regions, max)?;
+    guard_single_root(regions)?;
+    guard_unique_realms(regions)?;
+    guard_parents_resolve(regions)?;
+    guard_chains_reach_root(regions)?;
+    Ok(())
+}
+
+fn guard_region_count(regions: &[RealmRegion], max: usize) -> Result<(), RegionNestError> {
+    if regions.len() > max {
+        return Err(RegionNestError::TooManyRegions {
+            found: regions.len(),
+            max,
+        });
+    }
+    Ok(())
+}
+
+fn guard_single_root(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+    let found = regions.iter().filter(|r| r.parent.is_none()).count();
+    if found != 1 {
+        return Err(RegionNestError::RootCount { found });
+    }
+    Ok(())
+}
+
+fn guard_unique_realms(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+    // O(N²) over a bounded N (≤ `max` ≤ 64): no alloc, no hasher.
+    for (i, a) in regions.iter().enumerate() {
+        if regions[..i].iter().any(|b| b.realm == a.realm) {
+            return Err(RegionNestError::DuplicateRealm { realm: a.realm });
+        }
+    }
+    Ok(())
+}
+
+fn guard_parents_resolve(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+    for r in regions {
+        if let Some(p) = r.parent
+            && !regions.iter().any(|x| x.realm == p)
+        {
+            return Err(RegionNestError::DanglingParent {
+                realm: r.realm,
+                parent: p,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Every region's parent chain must reach the single root within `regions.len()` hops (a longer walk
+/// must cycle — parents resolve + one root ⇒ acyclic reaches the root). Runs AFTER the single-root /
+/// unique / resolve guards, so the `.parent` lookups are total. Bounded ⇒ never hangs on a cycle.
+fn guard_chains_reach_root(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+    for r in regions {
+        if !chain_reaches_root(regions, r.realm) {
+            return Err(RegionNestError::CycleOrOrphan { realm: r.realm });
+        }
+    }
+    Ok(())
+}
+
+fn chain_reaches_root(regions: &[RealmRegion], start: RealmId) -> bool {
+    let mut cur = start;
+    for _ in 0..regions.len() {
+        match regions
+            .iter()
+            .find(|x| x.realm == cur)
+            .and_then(|x| x.parent)
+        {
+            None => return true, // reached the ambient root (`parent: None`)
+            Some(p) => cur = p,
+        }
+    }
+    false // exceeded `len` hops without reaching the root ⇒ a cycle
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,6 +1189,100 @@ mod tests {
         assert_eq!(
             region_signed_distance_resolved(Err(FrameError::UnknownSourceFrame), &region),
             Err(FrameError::UnknownSourceFrame)
+        );
+    }
+
+    // ----- guard_regions_nest (C-5): each reject arm + the ok arm -----
+
+    /// A well-formed forest: exactly one root, unique realms, resolvable acyclic parents, within `max`.
+    fn valid_forest() -> Vec<RealmRegion> {
+        vec![
+            test_region(RealmId::System(0), None), // the ambient root
+            test_region(RealmId::System(1), Some(RealmId::System(0))),
+            test_region(RealmId::Planet(1), Some(RealmId::System(1))),
+        ]
+    }
+
+    #[test]
+    fn guard_regions_nest_accepts_a_valid_forest() {
+        assert_eq!(guard_regions_nest(&valid_forest(), 64), Ok(()));
+    }
+
+    #[test]
+    fn guard_regions_nest_rejects_too_many_regions() {
+        // 3 regions with `max = 2` ⇒ the count fence trips FIRST (before any topology walk).
+        assert_eq!(
+            guard_regions_nest(&valid_forest(), 2),
+            Err(RegionNestError::TooManyRegions { found: 3, max: 2 })
+        );
+    }
+
+    #[test]
+    fn guard_regions_nest_rejects_zero_or_two_roots() {
+        // TWO roots.
+        let two_roots = vec![
+            test_region(RealmId::System(0), None),
+            test_region(RealmId::System(1), None),
+        ];
+        assert_eq!(
+            guard_regions_nest(&two_roots, 64),
+            Err(RegionNestError::RootCount { found: 2 })
+        );
+        // ZERO roots (a pure cycle — caught by the root count BEFORE the chain walk).
+        let no_root = vec![
+            test_region(RealmId::System(1), Some(RealmId::System(2))),
+            test_region(RealmId::System(2), Some(RealmId::System(1))),
+        ];
+        assert_eq!(
+            guard_regions_nest(&no_root, 64),
+            Err(RegionNestError::RootCount { found: 0 })
+        );
+    }
+
+    #[test]
+    fn guard_regions_nest_rejects_a_duplicate_realm() {
+        let dup = vec![
+            test_region(RealmId::System(0), None),
+            test_region(RealmId::System(1), Some(RealmId::System(0))),
+            test_region(RealmId::System(1), Some(RealmId::System(0))),
+        ];
+        assert_eq!(
+            guard_regions_nest(&dup, 64),
+            Err(RegionNestError::DuplicateRealm {
+                realm: RealmId::System(1)
+            })
+        );
+    }
+
+    #[test]
+    fn guard_regions_nest_rejects_a_dangling_parent() {
+        let dangling = vec![
+            test_region(RealmId::System(0), None),
+            test_region(RealmId::System(1), Some(RealmId::System(9))), // System(9) is not a region
+        ];
+        assert_eq!(
+            guard_regions_nest(&dangling, 64),
+            Err(RegionNestError::DanglingParent {
+                realm: RealmId::System(1),
+                parent: RealmId::System(9),
+            })
+        );
+    }
+
+    #[test]
+    fn guard_regions_nest_rejects_a_cycle() {
+        // One valid root + a 2-region cycle whose parents resolve ⇒ passes count/root/unique/resolve,
+        // then the chain walk exceeds `len` hops for the cycle members ⇒ CycleOrOrphan.
+        let cyclic = vec![
+            test_region(RealmId::System(0), None),
+            test_region(RealmId::System(1), Some(RealmId::System(2))),
+            test_region(RealmId::System(2), Some(RealmId::System(1))),
+        ];
+        assert_eq!(
+            guard_regions_nest(&cyclic, 64),
+            Err(RegionNestError::CycleOrOrphan {
+                realm: RealmId::System(1)
+            })
         );
     }
 
@@ -1415,6 +1631,30 @@ mod tests {
             orient: DQuat::IDENTITY,
         };
         assert_eq!(obb_id.membership_scalar(p), 1.5);
+    }
+
+    #[test]
+    fn finite_extent_is_the_largest_linear_extent_per_shape() {
+        // Shell => the radius (the client renderable-extent filter reads this: systems r=40, planets
+        // r=10 render; the ambient Galaxy r=1000 / Universe r=1e9 do NOT).
+        assert_eq!(Boundary::Shell { r: 40.0 }.finite_extent(), 40.0);
+        // Aabb => the max half-extent component.
+        assert_eq!(
+            Boundary::Aabb {
+                half: DVec3::new(2.0, 8.0, 4.0),
+            }
+            .finite_extent(),
+            8.0,
+        );
+        // Obb => the max half-extent component (orientation dropped — it does not change the extent).
+        assert_eq!(
+            Boundary::Obb {
+                half: DVec3::new(3.0, 5.0, 1.0),
+                orient: DQuat::from_rotation_z(0.7),
+            }
+            .finite_extent(),
+            5.0,
+        );
     }
 
     #[test]
