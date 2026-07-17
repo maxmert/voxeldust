@@ -12,6 +12,15 @@
 //! detects the entry into the next system), so no shard ever needs a sibling in its local scan
 //! ([`realm_neighbourhood_for`]). `RealmId::System`/`Planet` stand in for the levels at P3; dedicated
 //! `RealmId::{Universe,Galaxy}` arms + the realistic SOI/AU/ly ephemeris scale land at P4+ (D-44).
+//!
+//! **Station + Area are FIRST-CLASS realms in this forest** (task #133): a [`RealmId::Station`] BOX nests
+//! directly under a star system (a docked/free-floating station volume) and a [`RealmId::Area`] BOX nests
+//! under a planet (a city district / spaceport). They are `Aabb` regions (Cartesian volumes, not SOI
+//! shells), so the SAME kind-agnostic containment detector re-homes an entity into a Station or an Area
+//! with ZERO station/area-specific code (HR3) — the box `signed_distance` feeds the identical
+//! `ContainmentBand` the shells use. Planting them here makes the detector LIVE for them (before, the
+//! `RealmId::{Station,Area}` arms existed in the taxonomy + frame map but no region carried them, so the
+//! detector was inert for those kinds).
 
 use glam::DVec3;
 
@@ -38,6 +47,18 @@ const PLANET_SOI_R_M: f64 = 10.0;
 const SYSTEM_B_OFFSET_M: f64 = 100.0;
 /// Planet A's center inside System A (offset from the star at the origin).
 const PLANET_A_OFFSET_M: f64 = 20.0;
+/// Station A's center inside System A, on the -X side (opposite Planet A on +X), clear of the origin
+/// crowd + the round-trip legs at x = 0/50/100. A Cartesian box, not an SOI shell.
+const STATION_A_OFFSET_M: f64 = -25.0;
+/// Station A's box half-extent (a small docked-station volume). `|-25| + 5 = 30 < 40` ⇒ fully inside
+/// System A's r=40 SOI.
+const STATION_HALF_M: f64 = 5.0;
+/// Area A's center inside Planet A (Planet A is at +20, r=10). Placed at +25 so the box x∈[22,28] stays
+/// within Planet A's sphere yet is OFFSET from the (20,0,0) escape-SOI probe (which must still resolve to
+/// Planet 7, not the Area).
+const AREA_OFFSET_M: f64 = 25.0;
+/// Area A's box half-extent (a small sub-planet district volume).
+const AREA_HALF_M: f64 = 3.0;
 
 /// P3 placeholder realm ids for the hierarchy levels that lack a dedicated `RealmId` arm (Universe,
 /// Galaxy get one at P4+). The star systems + planet use their real seeds.
@@ -46,6 +67,10 @@ const GALAXY: RealmId = RealmId::System(1);
 const SYSTEM_A: RealmId = RealmId::System(7);
 const SYSTEM_B: RealmId = RealmId::System(8);
 const PLANET_A: RealmId = RealmId::Planet(7);
+/// Station A — a first-class Station realm nested directly under System A (task #133).
+const STATION_A: RealmId = RealmId::Station(7);
+/// Area A — a first-class sub-planet Area realm nested under Planet A (task #133).
+const AREA_A: RealmId = RealmId::Area(7);
 
 /// The largest region extent the CLIENT renders as a box: finite leaf realms (systems/planets) are drawn,
 /// the ~unbounded ambient shells (Galaxy/Universe) are NOT — the between-space is felt, not framed. Set
@@ -79,6 +104,21 @@ pub fn realm_regions_for(_seed_universe: u64) -> Vec<RealmRegion> {
         parent,
     };
 
+    // The BOX sibling of `shell` for the Cartesian first-class realms (Station/Area): identical frame /
+    // band plumbing, only the shape differs (`Aabb { half }` instead of a shell). Station/Area both
+    // resolve a canonical frame via `frame_for_realm` (a Station's system parent is irrelevant to its
+    // StationLocal frame; an Area REQUIRES a Planet parent — planted below — so the `.expect` cannot fire).
+    let boxed = |realm: RealmId, center: DVec3, half: f64, parent: Option<RealmId>| RealmRegion {
+        realm,
+        center: LatticePos::local(center),
+        frame: frame_for_realm(realm, parent).expect("Station/Area realms have a canonical frame"),
+        shape: Boundary::Aabb {
+            half: DVec3::splat(half),
+        },
+        band,
+        parent,
+    };
+
     vec![
         // Universe: the ambient ROOT (parent None) — contains all reachable space (the fold identity).
         shell(UNIVERSE, DVec3::ZERO, UNIVERSE_R_M, None),
@@ -100,6 +140,25 @@ pub fn realm_regions_for(_seed_universe: u64) -> Vec<RealmRegion> {
             DVec3::new(SYSTEM_B_OFFSET_M, 0.0, 0.0),
             SYSTEM_SOI_R_M,
             Some(GALAXY),
+        ),
+        // Station A: a first-class Station BOX nested directly under System A (depth 3), on the -X side
+        // opposite Planet A — so the SAME containment detector re-homes into a Station with no station-
+        // specific code (task #133). Box x∈[-30,-20] is fully inside System A's r=40 SOI + clear of the
+        // origin crowd and the round-trip legs at x = 0/50/100.
+        boxed(
+            STATION_A,
+            DVec3::new(STATION_A_OFFSET_M, 0.0, 0.0),
+            STATION_HALF_M,
+            Some(SYSTEM_A),
+        ),
+        // Area A: a first-class sub-planet Area BOX nested under Planet A (depth 4) — the DEEPEST region in
+        // the forest. Box x∈[22,28] stays within Planet A's r=10 sphere (center +20) yet is OFFSET from the
+        // (20,0,0) escape-SOI probe, so (20,0,0) still resolves to Planet 7 (not the Area).
+        boxed(
+            AREA_A,
+            DVec3::new(AREA_OFFSET_M, 0.0, 0.0),
+            AREA_HALF_M,
+            Some(PLANET_A),
         ),
     ]
 }
@@ -189,12 +248,21 @@ mod tests {
         realms.sort();
         realms.dedup();
         assert_eq!(realms.len(), rs.len(), "every region has a distinct realm");
+        assert_eq!(
+            rs.len(),
+            7,
+            "the 7-region forest (5 shells + Station + Area)"
+        );
         // The mandate depths: Universe 0, Galaxy 1, System 2, Planet 3; the sibling system is same-depth.
         assert_eq!(region_depth(&rs, UNIVERSE), 0);
         assert_eq!(region_depth(&rs, GALAXY), 1);
         assert_eq!(region_depth(&rs, SYSTEM_A), 2);
         assert_eq!(region_depth(&rs, PLANET_A), 3);
         assert_eq!(region_depth(&rs, SYSTEM_B), 2);
+        // Station A nests directly under System A (depth 3); Area A nests under Planet A (depth 4, the
+        // deepest region). The kind-agnostic detector re-homes into either with no station/area code.
+        assert_eq!(region_depth(&rs, STATION_A), 3);
+        assert_eq!(region_depth(&rs, AREA_A), 4);
         // SIBLING TOPOLOGY LOCKED (task #135 C-6b): System B is a CHILD OF THE GALAXY — a SIBLING of
         // System A reached through the shared parent — NOT a child of System A. This is the canonical forest
         // the LIVE boot uses; the interim `override_regions_for_boundaries` child-of-source model (a
@@ -208,6 +276,25 @@ mod tests {
             Some(GALAXY),
             "System B is a sibling under the Galaxy, NOT a child of System A",
         );
+        // PARENTAGE LOCKED for the first-class Station/Area realms (task #133): a Station nests under its
+        // star SYSTEM, an Area under its PLANET (the Area's frame REQUIRES a Planet parent — pin it so a
+        // refactor cannot silently re-parent it and break `frame_for_realm`).
+        assert_eq!(
+            rs.iter()
+                .find(|r| r.realm == STATION_A)
+                .expect("Station A present")
+                .parent,
+            Some(SYSTEM_A),
+            "Station A nests directly under System A",
+        );
+        assert_eq!(
+            rs.iter()
+                .find(|r| r.realm == AREA_A)
+                .expect("Area A present")
+                .parent,
+            Some(PLANET_A),
+            "Area A nests under Planet A (its frame provenance)",
+        );
     }
 
     #[test]
@@ -219,6 +306,15 @@ mod tests {
         );
         // Inside system A but outside planet A (the origin — the star) → the STAR SYSTEM.
         assert_eq!(container_at(DVec3::ZERO), SYSTEM_A);
+        // Inside the Station BOX (at (-25,0,0), half=5) → STATION_A: the box is DEEPER (depth 3) than
+        // System 7 (depth 2), so the container fold picks the Station — the first-class box realm wins.
+        assert_eq!(
+            container_at(DVec3::new(STATION_A_OFFSET_M, 0.0, 0.0)),
+            STATION_A
+        );
+        // Inside the Area BOX (at (25,0,0), half=3) → AREA_A: the box (depth 4) is deeper than Planet 7
+        // (depth 3) which contains it, so the Area wins — the DEEPEST realm in the whole forest.
+        assert_eq!(container_at(DVec3::new(AREA_OFFSET_M, 0.0, 0.0)), AREA_A);
         // In the walkable GAP between the two systems (x=50: outside A's r=40 and B at +100) → the GALAXY
         // (escape the system → immediately the galaxy — the mandate).
         assert_eq!(container_at(DVec3::new(50.0, 0.0, 0.0)), GALAXY);
@@ -250,7 +346,8 @@ mod tests {
 
     #[test]
     fn realm_neighbourhood_scopes_to_own_ancestors_and_children_never_siblings() {
-        // System 7's shard: own + ancestors (Galaxy, Universe) + child Planet 7 — NOT sibling System 8.
+        // System 7's shard: own + ancestors (Galaxy, Universe) + children Planet 7 AND Station 7 (a
+        // first-class child under System 7) — NOT sibling System 8, NOT the grandchild Area 7.
         let n7: Vec<RealmId> = realm_neighbourhood_for(0, SYSTEM_A)
             .iter()
             .map(|r| r.realm)
@@ -260,10 +357,18 @@ mod tests {
         assert!(n7.contains(&UNIVERSE));
         assert!(n7.contains(&PLANET_A));
         assert!(
+            n7.contains(&STATION_A),
+            "the Station is an OWNED child of System 7 — the shard scans it",
+        );
+        assert!(
             !n7.contains(&SYSTEM_B),
             "a shard NEVER loads a sibling — the scale-bounded rule",
         );
-        assert_eq!(n7.len(), 4);
+        assert!(
+            !n7.contains(&AREA_A),
+            "Area 7 is a grandchild (under Planet 7), not a direct child of System 7",
+        );
+        assert_eq!(n7.len(), 5);
         // The GALAXY shard: own + ancestor Universe + children System 7 & 8 (the between-space owner that
         // routes a sibling crossing) — NOT Planet 7 (a grandchild, not a direct child).
         let ng: Vec<RealmId> = realm_neighbourhood_for(0, GALAXY)
@@ -279,8 +384,42 @@ mod tests {
             "a grandchild is not a direct child"
         );
         assert_eq!(ng.len(), 4);
+        // The STATION 7 shard: its own realm + its ANCESTOR CHAIN (System 7, Galaxy, Universe) and NO
+        // children (a leaf) — it never pulls its sibling Planet 7 (they share the System 7 parent).
+        let nst: Vec<RealmId> = realm_neighbourhood_for(0, STATION_A)
+            .iter()
+            .map(|r| r.realm)
+            .collect();
+        assert!(nst.contains(&STATION_A));
+        assert!(nst.contains(&SYSTEM_A));
+        assert!(nst.contains(&GALAXY));
+        assert!(nst.contains(&UNIVERSE));
+        assert!(
+            !nst.contains(&PLANET_A),
+            "the Station never loads its sibling Planet 7",
+        );
+        assert_eq!(nst.len(), 4);
+        // The AREA 7 shard: its own realm + its ANCESTOR CHAIN (Planet 7, System 7, Galaxy, Universe) and
+        // NO children — it never pulls its sibling Station 7 (they share the System 7 ancestor, not a parent).
+        let nar: Vec<RealmId> = realm_neighbourhood_for(0, AREA_A)
+            .iter()
+            .map(|r| r.realm)
+            .collect();
+        assert!(nar.contains(&AREA_A));
+        assert!(nar.contains(&PLANET_A));
+        assert!(nar.contains(&SYSTEM_A));
+        assert!(nar.contains(&GALAXY));
+        assert!(nar.contains(&UNIVERSE));
+        assert!(
+            !nar.contains(&STATION_A),
+            "the Area never loads the Station (they are not parent/child)",
+        );
+        assert_eq!(nar.len(), 5);
         // A shard hosting an unknown realm ⇒ empty neighbourhood ⇒ the detector is inert (safe degrade).
+        // Both appended kinds (Station/Area) at an ABSENT seed (99) degrade to empty — the seed-7 plant
+        // above does NOT make every Station/Area live.
         assert!(realm_neighbourhood_for(0, RealmId::Station(99)).is_empty());
+        assert!(realm_neighbourhood_for(0, RealmId::Area(99)).is_empty());
     }
 
     #[test]

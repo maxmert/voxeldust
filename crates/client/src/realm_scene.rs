@@ -953,14 +953,19 @@ mod tests {
     fn from_regions_draws_only_finite_leaf_realms_and_skips_the_ambient_shells() {
         // C-6b SINGLE-SOURCE: the client's scene is projected from the SAME seed forest the sim's
         // containment detector consumes (`worldgen::realm_regions_for`). Only the FINITE leaf realms
-        // (System 7/8 r=40, Planet 7 r=10) are drawn; the ambient Galaxy(r=1000)/Universe(r=1e9) shells
-        // are SKIPPED (extent > MAX_RENDERABLE_EXTENT_M).
+        // (System 7/8 r=40, Planet 7 r=10, Station 7 half=5, Area 7 half=3) are drawn; the ambient
+        // Galaxy(r=1000)/Universe(r=1e9) shells are SKIPPED (extent > MAX_RENDERABLE_EXTENT_M).
         let regions = vd_core::worldgen::realm_regions_for(0);
         let scene = RealmScene::from_regions(&regions).expect("the seed forest projects");
-        // The three finite renderable realms are present.
+        // The finite renderable realms are present.
         assert!(scene.get(RealmId::System(7)).is_some(), "System 7 renders");
         assert!(scene.get(RealmId::System(8)).is_some(), "System 8 renders");
         assert!(scene.get(RealmId::Planet(7)).is_some(), "Planet 7 renders");
+        assert!(
+            scene.get(RealmId::Station(7)).is_some(),
+            "Station 7 renders"
+        );
+        assert!(scene.get(RealmId::Area(7)).is_some(), "Area 7 renders");
         // The ambient shells are SKIPPED (felt, not framed).
         assert!(
             scene.get(RealmId::System(0)).is_none(),
@@ -970,7 +975,7 @@ mod tests {
             scene.get(RealmId::System(1)).is_none(),
             "the Galaxy between-space is NOT rendered"
         );
-        assert_eq!(scene.len(), 3, "exactly the 3 finite leaf realms");
+        assert_eq!(scene.len(), 5, "exactly the 5 finite leaf realms");
         // A rendered System keeps its TRUE nesting depth (Universe 0 ⊃ Galaxy 1 ⊃ System 2), even though
         // its Galaxy parent is skipped from the drawn set — depth is over the FULL forest.
         assert_eq!(
@@ -992,6 +997,44 @@ mod tests {
             scene.get(RealmId::System(7)).expect("system 7 box").frame,
             FrameRef::SystemSpace { system_seed: 7 }
         );
+        // The Aabb→Box projection is the "client render is FREE" proof: a Station/Area PLANTED as a first-
+        // class box realm draws — with ZERO station/area-specific render code — as a Box of its half-extents
+        // at its true forest depth (Station 3 under System 7; Area 4 under Planet 7, the deepest realm).
+        let station = scene.get(RealmId::Station(7)).expect("station 7 box");
+        assert_eq!(
+            station.shape,
+            BoxShape::Box {
+                half: DVec3::splat(5.0)
+            }
+        );
+        assert_eq!(
+            station.depth, 3,
+            "Station 7 is depth 3 (… ⊃ System ⊃ Station)"
+        );
+        assert_eq!(
+            station.frame,
+            FrameRef::StationLocal { station_seed: 7 },
+            "the Station box carries its own StationLocal frame"
+        );
+        let area = scene.get(RealmId::Area(7)).expect("area 7 box");
+        assert_eq!(
+            area.shape,
+            BoxShape::Box {
+                half: DVec3::splat(3.0)
+            }
+        );
+        assert_eq!(
+            area.depth, 4,
+            "Area 7 is depth 4 (… ⊃ Planet ⊃ Area) — the deepest realm"
+        );
+        assert_eq!(
+            area.frame,
+            FrameRef::AreaLocal {
+                planet_seed: 7,
+                area_seed: 7
+            },
+            "the Area box carries its AreaLocal frame (parent planet seed 7 from the Planet parent link)"
+        );
     }
 
     #[test]
@@ -1007,7 +1050,7 @@ mod tests {
             from_json, from_vec,
             "the regions.json load matches the plant"
         );
-        assert_eq!(from_json.len(), 3, "the 3 finite leaf realms");
+        assert_eq!(from_json.len(), 5, "the 5 finite leaf realms");
     }
 
     #[test]

@@ -8437,8 +8437,9 @@ mod tests {
         const CROWD: usize = 128; // the "hundreds in one location" floor (N ≥ 128)
         let mut rig = Rig::new();
         rig.grant_realm();
-        // The REAL seed neighbourhood `shard.rs` boots for System 7 — {Universe, Galaxy, System 7, Planet 7},
-        // a 4-region fold per subject — NOT a hand-authored fixture, so this exercises the scan the bins run.
+        // The REAL seed neighbourhood `shard.rs` boots for System 7 — {Universe, Galaxy, System 7, Planet 7,
+        // Station 7} (Station 7 is System 7's first-class child, task #133), a 5-region fold per subject — NOT
+        // a hand-authored fixture, so this exercises the scan the bins run. The crowd clears the Station box.
         *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(
             vd_core::worldgen::realm_neighbourhood_for(0, RealmId::System(7)),
         );
@@ -8477,6 +8478,241 @@ mod tests {
             spurious, 0,
             "a dense crowd inside one realm triggers NO spurious re-home under the O(N×regions) scan",
         );
+    }
+
+    // ---- task #133: the first-class Station/Area realm re-home GATE (kind-agnostic detector) --------
+
+    /// The System-7 seed neighbourhood the LIVE `shard.rs` boots — now including the first-class Station 7
+    /// child (task #133). Planting THIS (not a hand-authored fixture) proves the Station region is one the
+    /// production bins actually load.
+    const STATION_A: RealmId = RealmId::Station(7);
+
+    /// Grant `realm` to THIS shard (a parameterized [`Rig::grant_realm`], which hardcodes `config().realm`)
+    /// so a non-default-realm rig (e.g. a Station-owning shard) can take authority. Mirrors `grant_realm`'s
+    /// round-trip directory confirmation, keyed on the passed realm.
+    fn grant_realm_for(rig: &mut Rig, realm: RealmId) {
+        let reply = DirectoryReply::Head {
+            key: DirectoryKey::Realm(realm),
+            record: Some(vd_wire::seams::directory::OwnerRecord {
+                authority: AuthorityRef::Shard(SHARD),
+                fence: Fence(1),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        };
+        let bytes = crate::io::bytes(
+            postcard::to_allocvec(&InterShardFlow::DirectoryReply(reply)).expect("encode"),
+        );
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Saga,
+            bytes,
+        }]);
+    }
+
+    /// Insert an OWNED durable dot at frame-local `offset` expressed in `frame` (the frame-aware sibling of
+    /// [`insert_owned_dot`], which pins the pose frame to `config().frame`). Needed for a Station-owning
+    /// shard, whose dots live in the StationLocal frame. Under `IdentityFrames` the frame is inert for the
+    /// container decision, but carrying the OWNING realm's frame keeps the fixture honest.
+    fn insert_owned_dot_framed(
+        rig: &mut Rig,
+        session: SessionId,
+        entity: EntityId,
+        frame: FrameRef,
+        offset: DVec3,
+    ) {
+        rig.world.resource_mut::<Dots>().0.insert(
+            session,
+            Dot {
+                entity,
+                account: AccountId(1),
+                session_fence: Fence(1),
+                gateway: GATEWAY,
+                granted: true,
+                input_active: false,
+                adopting: false,
+                authority: Authority::Owned { fence: Fence(1) },
+                departing: false,
+                entity_fence: Fence(1),
+                pose: StampedPose::at_rest(frame, offset, UniverseTick(100)),
+                yaw: 0.0,
+                pitch: 0.0,
+                last_applied_seq: None,
+                prev_offset: offset,
+            },
+        );
+    }
+
+    #[test]
+    fn a_dot_moving_into_the_station_box_re_homes_into_the_first_class_station_realm() {
+        // THE task #133 headline: the SAME kind-agnostic containment detector re-homes a dot into a
+        // first-class STATION realm with ZERO station-specific code (HR3). The shard OWNS System 7 and boots
+        // the REAL seed neighbourhood (now {Universe, Galaxy, System 7, Planet 7, STATION 7}). A dot starts
+        // at the origin (container == System 7 == owning ⇒ NO re-home), then walks into the Station BOX at
+        // (-25,0,0) (a Cartesian `Aabb`, not an SOI shell) — its deepest container flips to Station 7 ≠ the
+        // owning System 7, so ONE re-home fires whose `to_realm` is the Station. The box `signed_distance`
+        // feeds the identical `ContainmentBand` the shells use — the Station is detected by geometry alone.
+        let mut rig = Rig::new(); // owns System 7 (config().realm)
+        rig.grant_realm();
+        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(
+            vd_core::worldgen::realm_neighbourhood_for(0, RealmId::System(7)),
+        );
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 33);
+        // Origin: well inside System 7 (r=40), clear of the Station box (x∈[-30,-20]) ⇒ container == System 7.
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::ZERO);
+        rig.set_local_tick(2);
+        let at_origin = crossing_requests(&rig.tick(vec![]));
+        assert_eq!(
+            at_origin.len(),
+            0,
+            "a dot at the origin is contained in System 7 (== owning) ⇒ NO re-home",
+        );
+        // Walk INTO the Station box centre — the deepest container becomes Station 7.
+        let mut into: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 3..8 {
+            rig.set_local_tick(t);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(-25.0, 0.0, 0.0)); // the Station box centre
+            into.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&into);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "exactly ONE re-home into the Station (latched thereafter)"
+        );
+        assert_eq!(
+            reqs[0].to_realm, STATION_A,
+            "the kind-agnostic detector re-homes into the first-class Station realm",
+        );
+        assert_eq!(
+            reqs[0].from_realm,
+            config().realm,
+            "leaving the owning System 7"
+        );
+        assert_eq!(reqs[0].subject, DirectoryKey::Entity(entity));
+    }
+
+    #[test]
+    fn a_station_owning_shard_re_homes_a_dot_that_leaves_the_station_back_to_system_7() {
+        // The RETURN leg of the round-trip, proven as a GENUINE emission (symmetric detector, no direction):
+        // a shard that OWNS Station 7 boots Station 7's seed neighbourhood — its own realm + its ANCESTOR
+        // chain {System 7, Galaxy, Universe}. A dot INSIDE the Station box is contained in Station 7 (==
+        // owning ⇒ NO re-home); when it LEAVES the box (to the origin, still inside System 7's r=40 SOI) its
+        // deepest container becomes System 7 ≠ the owning Station 7, so ONE re-home fires whose `to_realm` is
+        // System 7. This is the same machinery as the inbound gate above, run from the Station's authority —
+        // the "both ways" proof that a Station is a first-class realm on the identical kind-agnostic path.
+        let station_cfg = StubConfig {
+            realm: STATION_A,
+            frame: FrameRef::StationLocal { station_seed: 7 },
+            ..config()
+        };
+        let mut rig = Rig::with_config(station_cfg);
+        grant_realm_for(&mut rig, STATION_A);
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vd_core::worldgen::realm_neighbourhood_for(0, STATION_A));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 34);
+        // Inside the Station box (its centre) ⇒ container == Station 7 == owning ⇒ NO re-home.
+        insert_owned_dot_framed(
+            &mut rig,
+            TRIG_SESSION,
+            entity,
+            station_cfg.frame,
+            DVec3::new(-25.0, 0.0, 0.0),
+        );
+        rig.set_local_tick(2);
+        let inside = crossing_requests(&rig.tick(vec![]));
+        assert_eq!(
+            inside.len(),
+            0,
+            "a dot inside the Station box is contained in Station 7 (== owning) ⇒ NO re-home",
+        );
+        // LEAVE the Station box to the origin — still inside System 7 (r=40), outside the Station box
+        // (x∈[-30,-20]) ⇒ the deepest container becomes System 7, the immediate parent.
+        let mut out: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 3..8 {
+            rig.set_local_tick(t);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::ZERO); // out of the box, into open System 7 space
+            out.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&out);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "exactly ONE re-home back to System 7 (latched thereafter)"
+        );
+        assert_eq!(
+            reqs[0].to_realm,
+            RealmId::System(7),
+            "leaving the Station re-homes back to the enclosing System 7 (symmetric, same detector)",
+        );
+        assert_eq!(
+            reqs[0].from_realm, STATION_A,
+            "leaving the owning Station 7"
+        );
+        assert_eq!(reqs[0].subject, DirectoryKey::Entity(entity));
+    }
+
+    #[test]
+    fn a_dot_moving_into_the_area_box_re_homes_into_the_first_class_area_realm() {
+        // The AREA analog of the Station inbound gate (task #133), proving the SAME kind-agnostic detector
+        // re-homes into a first-class AREA realm — the DEEPEST region in the seed forest (depth 4). A shard
+        // that OWNS Planet 7 boots Planet 7's seed neighbourhood (its own realm + ancestors {System 7,
+        // Galaxy, Universe} + its child AREA 7). A dot starts at Planet 7's centre (20,0,0) (container ==
+        // Planet 7 == owning ⇒ NO re-home — this is ALSO the escape-SOI probe point, which must NOT resolve
+        // to the Area), then walks into the Area BOX at (25,0,0) — its deepest container flips to Area 7 ≠
+        // the owning Planet 7, so ONE re-home fires whose `to_realm` is the Area. Zero area-specific code.
+        let planet_cfg = StubConfig {
+            realm: RealmId::Planet(7),
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            ..config()
+        };
+        let mut rig = Rig::with_config(planet_cfg);
+        grant_realm_for(&mut rig, RealmId::Planet(7));
+        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(
+            vd_core::worldgen::realm_neighbourhood_for(0, RealmId::Planet(7)),
+        );
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 35);
+        // Planet 7's centre (20,0,0): inside Planet 7 (r=10), OUTSIDE the Area box (x∈[22,28]) ⇒ container
+        // == Planet 7 == owning ⇒ NO re-home (and the escape-SOI probe still resolves to Planet 7).
+        insert_owned_dot_framed(
+            &mut rig,
+            TRIG_SESSION,
+            entity,
+            planet_cfg.frame,
+            DVec3::new(20.0, 0.0, 0.0),
+        );
+        rig.set_local_tick(2);
+        let at_centre = crossing_requests(&rig.tick(vec![]));
+        assert_eq!(
+            at_centre.len(),
+            0,
+            "the dot at Planet 7's centre is contained in Planet 7 (== owning) ⇒ NO re-home",
+        );
+        // Walk INTO the Area box centre (25,0,0) — inside Planet 7 (r=10 sphere) AND the Area box ⇒ the
+        // deepest container becomes Area 7.
+        let mut into: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 3..8 {
+            rig.set_local_tick(t);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(25.0, 0.0, 0.0)); // the Area box centre
+            into.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&into);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "exactly ONE re-home into the Area (latched thereafter)"
+        );
+        assert_eq!(
+            reqs[0].to_realm,
+            RealmId::Area(7),
+            "the kind-agnostic detector re-homes into the first-class Area realm (the deepest region)",
+        );
+        assert_eq!(
+            reqs[0].from_realm,
+            RealmId::Planet(7),
+            "leaving the owning Planet 7"
+        );
+        assert_eq!(reqs[0].subject, DirectoryKey::Entity(entity));
     }
 
     #[test]
