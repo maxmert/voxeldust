@@ -49,9 +49,22 @@ use crate::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 
 /// Stub-shard configuration (composer-provided; world params seed-derived, no
 /// inline literals in systems).
-#[derive(Resource, Clone, Copy, Debug)]
+///
+/// NOT `Copy` (the `held_realms` `BTreeSet` is heap-backed): it is only ever borrowed
+/// (`Res<StubConfig>` / `&StubConfig`), constructed once per shard and moved into the world at
+/// `register_stub_shard`. Prefer `StubConfig::single_realm` for the byte-identical single-realm case.
+#[derive(Resource, Clone, Debug)]
 pub struct StubConfig {
     pub realm: RealmId,
+    /// The FULL set of realms this shard HOSTS — its own `realm` PLUS any deeper CHILD realms it
+    /// CO-HOSTS (the un-hosted-child cure). A shard's `realm_neighbourhood_for` already includes its
+    /// owned children as evaluated regions; co-hosting makes the shard the actual HEAD of those child
+    /// realms so a durable dot that walks into a child (e.g. a planet's SOI nested in the shard's
+    /// system) RE-HOMES LOCALLY (a realm-label update, no `CrossingRequest`) instead of stranding on an
+    /// un-hosted `head(Realm(child))`. Default (`single_realm`) = `{realm}`, so every single-realm shard
+    /// and test is byte-identical (the extra-realm grant/affirm/short-circuit paths are all inert when
+    /// the set is the lone `realm`).
+    pub held_realms: BTreeSet<RealmId>,
     pub frame: FrameRef,
     /// Dot walk speed, meters per second.
     pub move_speed_mps: f64,
@@ -100,6 +113,28 @@ pub struct StubConfig {
     /// driver; the pre-3f default and every current rig). Reserved for the 3f abort/TTL egress — carried
     /// now so the config surface is frozen before the consumer lands.
     pub request_ttl_ticks: u32,
+}
+
+impl StubConfig {
+    /// The `held_realms` for a SINGLE-realm shard: exactly `{realm}`. The default co-hosting set —
+    /// every single-realm construction site passes this so its behaviour is byte-identical to the
+    /// pre-co-hosting `RealmAuthority(Option<Fence>)` model (the extra-realm grant/affirm/short-circuit
+    /// paths are all inert when the set is the lone `realm`).
+    #[must_use]
+    pub fn single_realm(realm: RealmId) -> BTreeSet<RealmId> {
+        BTreeSet::from([realm])
+    }
+
+    /// The realms this shard hosts BEYOND its own `realm` — the co-hosted CHILD realms. Empty for a
+    /// single-realm shard (`held_realms == {realm}`). The grant/affirm/renewal paths iterate THIS so the
+    /// primary `realm` keeps its existing single-realm machinery untouched (byte-identical) and only the
+    /// EXTRA realms take the additive co-host path.
+    pub fn cohosted_realms(&self) -> impl Iterator<Item = RealmId> + '_ {
+        self.held_realms
+            .iter()
+            .copied()
+            .filter(move |r| *r != self.realm)
+    }
 }
 
 /// One connected avatar.
@@ -178,10 +213,21 @@ pub struct Dot {
 #[derive(Resource, Debug, Default)]
 pub struct Dots(pub BTreeMap<SessionId, Dot>);
 
-/// The realm authority this shard holds (None until the directory grants it; no
-/// frames are emitted unowned).
+/// The PRIMARY realm authority this shard holds (`config.realm`'s fence; None until the directory
+/// grants it — no frames are emitted unowned). The self-fence / emit-frame / promote-guard machinery
+/// all key on THIS, unchanged from the single-realm model. CO-HOSTED child realms (co-hosting) carry
+/// their own fences in [`CoHostedAuthority`]; the local re-home short-circuit reads the union via
+/// `CrossingCtx::held_here`.
 #[derive(Resource, Debug, Default)]
 pub struct RealmAuthority(pub Option<Fence>);
+
+/// The fences for the CO-HOSTED CHILD realms this shard hosts beyond its own `config.realm` (the
+/// un-hosted-child cure). Populated by the same directory grant/affirm path as `RealmAuthority` but
+/// for `config.cohosted_realms()` — a per-realm map so each child's head is affirmed independently.
+/// Default EMPTY: a single-realm shard (`held_realms == {realm}`) never populates it, so every
+/// single-realm rig is byte-identical (the map is only touched when `cohosted_realms()` is non-empty).
+#[derive(Resource, Debug, Default)]
+pub struct CoHostedAuthority(pub BTreeMap<RealmId, Fence>);
 
 /// D-3 Slice 5 — the `local_tick` of the last realm-head ROUND-TRIP confirmation (the reply at which
 /// the directory affirmed this shard still owns its realm). The partition detector for the proactive
@@ -279,6 +325,9 @@ pub enum TransientStatus {
         to_realm: RealmId,
         dst_realm_fence: Fence,
         batch: TransferId,
+        /// The dest realm's PARENT provenance — carried from the [`TransientCrossingGrant`] so
+        /// `emit_transient_batch`'s `rebind_pose_to_dest` forms an `Area` frame. `None` for a non-Area dest.
+        to_parent: Option<RealmId>,
     },
     /// A mid-flight adopted copy at the DEST (UNCOUNTED — the Ghost analogue: excluded from the
     /// conservation count AND from rendering), tagged with its batch. Flips to `Held{outbound: None}`
@@ -355,6 +404,10 @@ pub struct LatchedCrossing {
     /// The subject's session (the durable crossing carries it so the orchestrator's saga can
     /// `PrepareSubscribe` to the client's gateway).
     pub session: SessionId,
+    /// The dest realm's PARENT provenance (the container region's `parent`) — re-emitted VERBATIM so the
+    /// stranded-latch re-drive re-mints the byte-identical `CrossingRequest` (an Area dest's frame still
+    /// forms on the re-drive). `None` for a non-Area dest.
+    pub to_parent: Option<RealmId>,
 }
 
 /// The per-entity crossing state the CONTAINMENT trigger carries between ticks — the post-commit cooldown
@@ -893,15 +946,20 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
         .boundary
         .validate()
         .expect("StubConfig.boundary is a valid BoundaryTuning (n_entry/k_dwell/pad/cell > 0)");
+    // Capture the scalar params read AFTER the config move (`StubConfig` is no longer `Copy` — the
+    // `held_realms` set is heap-backed).
+    let mint_seed = config.mint_seed;
+    let input_log_capacity = config.input_log_capacity;
     world.insert_resource(config);
     world.insert_resource(Dots::default());
     world.insert_resource(RealmAuthority::default());
+    world.insert_resource(CoHostedAuthority::default());
     world.insert_resource(RealmConfirmedAt::default());
     world.insert_resource(EntityMint {
         seq: 0,
-        rng: SplitMix64::new(config.mint_seed),
+        rng: SplitMix64::new(mint_seed),
     });
-    world.insert_resource(InputLog::new(config.input_log_capacity));
+    world.insert_resource(InputLog::new(input_log_capacity));
     world.insert_resource(FrameCounter::default());
     world.insert_resource(StubStats::default());
     world.insert_resource(AppliedSteps::default());
@@ -976,9 +1034,28 @@ fn request_pending_grants(
     identity: Res<NodeIdentity>,
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
+    cohosted: Res<CoHostedAuthority>,
     dots: Res<Dots>,
     mut outbox: ResMut<OutboundBox>,
 ) {
+    // Co-hosting (the un-hosted-child cure): keep requesting the head of every co-hosted CHILD realm not
+    // yet affirmed (the un-affirmed child self-grants at `GENESIS.next`, exactly like the primary realm's
+    // `None` arm; a re-request of an already-held child is idempotent by fence). INERT for a single-realm
+    // shard — `cohosted_realms()` is empty, so this loop never bodies (byte-identical). A BRANCHLESS shim:
+    // the sole branch is the `contains_key` membership, covered by both a held and an un-held child.
+    for realm in config.cohosted_realms() {
+        if !cohosted.0.contains_key(&realm) {
+            outbox.push_flow(
+                config.orchestrator,
+                MsgClass::Saga,
+                &InterShardFlow::Directory(DirectoryOp::LeaseGrant {
+                    key: DirectoryKey::Realm(realm),
+                    owner: AuthorityRef::Shard(identity.node_id),
+                    fence: Fence::GENESIS.next(),
+                }),
+            );
+        }
+    }
     match authority.0 {
         None => {
             let op = DirectoryOp::LeaseGrant {
@@ -1014,7 +1091,16 @@ fn request_pending_grants(
                 config.lease_renew_interval_ticks,
                 clock.local_tick.0,
             ) {
+                // The primary realm + every CO-HOSTED child realm this shard actually holds + every
+                // granted non-departing Entity. The co-host chain is EMPTY for a single-realm shard
+                // (`cohosted.0` is never populated), so the renewal set is byte-identical there.
                 let renewals = std::iter::once((DirectoryKey::Realm(config.realm), realm_fence))
+                    .chain(
+                        cohosted
+                            .0
+                            .iter()
+                            .map(|(realm, fence)| (DirectoryKey::Realm(*realm), *fence)),
+                    )
                     .chain(
                         dots.0
                             .values()
@@ -1081,8 +1167,14 @@ fn process_inbound(
     clock: Res<ClockSample>,
     inbox: Res<InboundBox>,
     mut dots: ResMut<Dots>,
-    mut authority: ResMut<RealmAuthority>,
-    mut confirmed: ResMut<RealmConfirmedAt>,
+    // Bundled realm-authority tuple `SystemParam` (bevy's 16-param ceiling): the primary realm fence, its
+    // confirmation timestamp, AND the co-hosted child-realm fence map are all the realm-authority stores,
+    // so grouping them is a mechanical arity fix. Destructured to three `&mut` below.
+    realm_auth: (
+        ResMut<RealmAuthority>,
+        ResMut<RealmConfirmedAt>,
+        ResMut<CoHostedAuthority>,
+    ),
     mut mint: ResMut<EntityMint>,
     mut log: ResMut<InputLog>,
     mut stats: ResMut<StubStats>,
@@ -1101,6 +1193,7 @@ fn process_inbound(
 ) {
     let (mut registration, mut mirror) = ghost_state;
     let (mut in_flight, mut progress) = crossing;
+    let (mut authority, mut confirmed, mut cohosted) = realm_auth;
     for msg in &inbox.0 {
         let Inbound::Wire { from, class, bytes } = msg else {
             // Unreachability notices are observed by the node shell (TickReport);
@@ -1133,6 +1226,7 @@ fn process_inbound(
                 &clock,
                 &mut authority,
                 &mut confirmed,
+                &mut cohosted,
                 &mut dots,
                 &mut applied,
                 &mut pending,
@@ -1360,10 +1454,10 @@ fn on_gateway_msg(
                 stats.input_slots_stale += 1;
                 return;
             }
-            // SECURITY / HR1: only activate + seed a PROVISIONAL slot, and only from the
-            // gateway that owns the session — a shard must never apply input for a session it
-            // was not legitimately routed, and a granted entity's input stream is owned by its
-            // own applied watermark.
+            // SECURITY / HR1: only arm input from the gateway that owns the session — a shard must
+            // never apply input for a session it was not legitimately routed. `!granted` gates: only
+            // a fresh adopt-Ghost slot arms `input_active` + re-seeds its watermark; a granted dot
+            // owns its own input watermark and must not be re-seeded (the `!granted` guard false arm).
             if !dot.granted && dot.gateway == from {
                 dot.input_active = true;
                 // OBSERVABILITY: record the gateway-EMITTED resume watermark (unmutated) so the
@@ -1686,8 +1780,8 @@ fn on_saga_demote(
 
 /// SOURCE consumer of the orchestrator's `TransientCrossingGrant` (Slice 3e): the grant carries the
 /// resolved dest + fence + batch id for a transient this shard flagged via `TransientCrossingRequest`,
-/// so flip the SOURCE Transient `Held → Crossing{dest, to_realm, dst_realm_fence, batch}` — the four
-/// grant fields match `TransientStatus::Crossing` EXACTLY (a straight field assign). `emit_transient_
+/// so flip the SOURCE Transient `Held → Crossing{dest, to_realm, dst_realm_fence, batch, to_parent}` — the
+/// five grant fields match `TransientStatus::Crossing` EXACTLY (a straight field assign). `emit_transient_
 /// batch` then ships it. A grant for a NON-Entity subject, an UNKNOWN transient, or a non-`Held` one (a
 /// redelivery after the flip) is a counted no-op (degrade, never panic). Monomorphic so every arm is
 /// covered once (HR5).
@@ -1710,6 +1804,7 @@ fn on_transient_crossing_grant(
                 to_realm: grant.to_realm,
                 dst_realm_fence: grant.dst_realm_fence,
                 batch: grant.batch,
+                to_parent: grant.to_parent,
             };
             stats.transient_grants_applied += 1;
         }
@@ -1784,6 +1879,7 @@ fn on_crossing_aborted(
 fn on_saga_promote(
     cmd: PromoteCmd,
     config: &StubConfig,
+    self_node: NodeId,
     clock: &ClockSample,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
@@ -1796,6 +1892,7 @@ fn on_saga_promote(
         StepOutcome::FirstApply => promote_apply(
             cmd,
             config,
+            self_node,
             clock,
             dots,
             applied,
@@ -1827,6 +1924,7 @@ fn on_saga_promote(
 fn promote_apply(
     cmd: PromoteCmd,
     config: &StubConfig,
+    self_node: NodeId,
     clock: &ClockSample,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
@@ -1856,14 +1954,29 @@ fn promote_apply(
         return;
     }
     let session = *session;
-    // Ghost→Owned at the post-CAS fence (the dest Ghost holds GENESIS `source_fence`, strictly < any
-    // CAS fence; the crossing's stale gate ensured `cmd.new_fence >= entity_fence`), hence infallible.
-    dot.authority = dot
-        .authority
-        .apply(AuthorityCmd::Promote {
-            new_fence: cmd.new_fence,
-        })
-        .expect("dest Ghost promotes at the post-CAS fence (strictly newer than its GENESIS source_fence)");
+    // Ghost→Owned at the post-CAS fence. TWO cases, split by whether this is a SOURCE==DEST re-home (task
+    // #149) — a co-hosted-child crossing whose `head(Realm(dest))` resolved to THIS node:
+    // - CROSS-NODE (`cmd.source != self_node`): the DEST's Ghost holds GENESIS `source_fence`, strictly < the
+    //   CAS fence, so the standard strict-newer `AuthorityCmd::Promote` is infallible.
+    // - SOURCE==DEST (`cmd.source == self_node`): the ordered `Demote` already self-fenced THIS SAME dot to
+    //   `Ghost{source_fence: cmd.new_fence}` (the demote lands the CAS fence), so a strict-newer Promote at
+    //   the SAME fence would `StaleFence`. The directory CAS committed THIS node as the owner at
+    //   `cmd.new_fence`, so RE-OWN the dot at that exact fence directly (the route swap completing as the
+    //   idempotent no-op the source==dest saga is). This monomorphic 2-arm `if` keeps both paths covered
+    //   (HR5): the cross-node strict-newer promote AND the source==dest equal-fence re-own.
+    dot.authority = if cmd.source == self_node {
+        Authority::Owned {
+            fence: cmd.new_fence,
+        }
+    } else {
+        dot.authority
+            .apply(AuthorityCmd::Promote {
+                new_fence: cmd.new_fence,
+            })
+            .expect(
+                "cross-node dest Ghost promotes at the post-CAS fence (strictly newer than GENESIS)",
+            )
+    };
     let gateway = dot.gateway;
     let pose = dot.pose;
     stats.promotes_confirmed += 1;
@@ -1882,9 +1995,11 @@ fn promote_apply(
     // The dest (owner) registers the source as a ghost-neighbor + spawns the source ghost; the ANCHOR is
     // THIS promote pose (= the crossed pose, the boundary the entity entered through), from which the dest
     // measures band membership + Despawns the ghost on band-exit (1d.5b.3c). Shared tail — see the fn doc.
+    // `self_node` guards the source==dest same-node re-home (no self-ghost feed loop).
     register_and_spawn_source_ghost(
         entity,
         cmd.source,
+        self_node,
         pose,
         cmd.new_fence,
         clock.local_tick,
@@ -1901,15 +2016,29 @@ fn promote_apply(
 /// old ⚠️ DRY-PIN, now extracted so a [[D-39]].6 ghost-blob / band-driven multi-neighbor edit touches ONE
 /// place). A Spawn to a possibly-dead source is harmless FireAndForget (HR1: the shard cannot see the
 /// liveness set — never special-case it).
+///
+/// SOURCE==DEST GUARD (task #149): a same-node re-home (a co-hosted-child crossing whose `head(Realm(dest))`
+/// resolves to THIS node) drives the SAME orchestrator saga, so it reaches promote with `source == self_node`.
+/// Registering `self` as a ghost-neighbor of itself + Spawning a ghost to itself would create a self-ghost
+/// feed loop (the owner would `GhostFlow::Delta` its own retained copy). Skip BOTH here — the dot is already
+/// Owned+rendered on this node; there is no foreign owner to feed. A cross-node source (`source != self_node`)
+/// takes the register+Spawn path exactly as before. Monomorphic, both arms covered.
+#[allow(clippy::too_many_arguments)]
 fn register_and_spawn_source_ghost(
     entity: EntityId,
     source: NodeId,
+    self_node: NodeId,
     pose: StampedPose,
     source_fence: Fence,
     since_tick: TickId,
     registration: &mut GhostColliderRegistration,
     outbox: &mut OutboundBox,
 ) {
+    if source == self_node {
+        // Same-node re-home: no foreign owner to feed. Skip the self-ghost register + Spawn (else a
+        // self-feed loop). The dot is already Owned + rendered here — nothing else is owed.
+        return;
+    }
     registration.0.insert(
         entity,
         GhostNeighbor {
@@ -1939,6 +2068,7 @@ fn register_and_spawn_source_ghost(
 fn on_re_home(
     cmd: ReHomeCmd,
     config: &StubConfig,
+    self_node: NodeId,
     clock: &ClockSample,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
@@ -1959,9 +2089,16 @@ fn on_re_home(
     }
     let transfer = cmd.transfer; // `ReHomeCmd` is Clone-not-Copy (the pose payload) — capture before the move
     match applied.journal_step(transfer, RE_HOME_STEP) {
-        StepOutcome::FirstApply => {
-            re_home_apply(cmd, config, clock, dots, registration, stats, outbox)
-        }
+        StepOutcome::FirstApply => re_home_apply(
+            cmd,
+            config,
+            self_node,
+            clock,
+            dots,
+            registration,
+            stats,
+            outbox,
+        ),
         StepOutcome::AlreadyApplied => stats.re_home_redelivered += 1,
     }
     outbox.push_flow(
@@ -1977,9 +2114,11 @@ fn on_re_home(
 /// counted no-op (`re_home_no_entity`). The created dot is clientless (no session route — the client
 /// re-subscribes via the D-37/D-36 connection-plane path, owed): `AccountId(0)` + the orchestrator as an
 /// inert reply sentinel, `granted` so it simulates + emits frames, born `Owned` at `cmd.new_fence`.
+#[allow(clippy::too_many_arguments)]
 fn re_home_apply(
     cmd: ReHomeCmd,
     config: &StubConfig,
+    self_node: NodeId,
     clock: &ClockSample,
     dots: &mut Dots,
     registration: &mut GhostColliderRegistration,
@@ -2022,10 +2161,12 @@ fn re_home_apply(
     );
     stats.re_home_adopted += 1;
     // Register the (re-home) source as a ghost-neighbor + spawn its ghost — the target (owner) now drives
-    // the collider feed to it, exactly as `promote_apply` does. Shared tail — see the fn doc.
+    // the collider feed to it, exactly as `promote_apply` does. Shared tail — see the fn doc. `self_node`
+    // guards the source==dest same-node re-home (no self-ghost feed loop).
     register_and_spawn_source_ghost(
         entity,
         cmd.source,
+        self_node,
         pose,
         cmd.new_fence,
         clock.local_tick,
@@ -2473,7 +2614,7 @@ fn evaluate_realm_boundaries(
     // session for the saga's gateway-routed `PrepareSubscribe` (Slice 3f).
     for (session, dot) in dots.0.iter_mut().filter(|(_, d)| d.authority.simulates()) {
         let pose = dot.pose;
-        dot.prev_offset = evaluate_one_subject(
+        let eval = evaluate_one_subject(
             &ctx,
             dot.entity,
             &pose,
@@ -2485,6 +2626,7 @@ fn evaluate_realm_boundaries(
             &mut stats,
             &mut outbox,
         );
+        dot.prev_offset = eval.prev_offset;
     }
     // Per HELD transient (`is_held()` — the counted tier; Arriving/Departing are excluded) — the
     // transient subjects. The transient carries no per-entity authority fence; its egress rides the
@@ -2495,7 +2637,7 @@ fn evaluate_realm_boundaries(
         .filter(|(_, t)| t.status.is_held())
     {
         let pose = t.pose;
-        t.prev_offset = evaluate_one_subject(
+        let eval = evaluate_one_subject(
             &ctx,
             *entity,
             &pose,
@@ -2509,6 +2651,7 @@ fn evaluate_realm_boundaries(
             &mut stats,
             &mut outbox,
         );
+        t.prev_offset = eval.prev_offset;
     }
 }
 
@@ -2535,12 +2678,41 @@ fn retain_live<V>(map: &mut BTreeMap<EntityId, V>, live: &BTreeSet<EntityId>) {
     map.retain(|e, _| live.contains(e));
 }
 
+/// The result of one subject's containment evaluation — the frame-local offset the caller records as
+/// `prev_offset`. (Every re-home is now the uniform orchestrator saga — source==dest is the degenerate
+/// case — so the detector emits a `CrossingRequest`/`TransientCrossingRequest` and NEVER rewrites the pose
+/// in place; the crossed pose is rebound at the DEST's adopt via `rebind_pose_to_dest`, which is the same
+/// node's adopt on a co-hosted re-home.)
+struct SubjectEval {
+    prev_offset: DVec3,
+}
+
+/// The subject's OWNING realm derived from its POSE FRAME (not a co-hosting relabel — that machinery is
+/// deleted; every re-home is now the uniform orchestrator saga). `FrameRef::realm()` is `Some` for every
+/// LIVE frame (System/Planet/Area/…), so the fallback to `config_realm` is reached ONLY by a frame with no
+/// nameable realm (`FrameRef::GalaxySpace`, which no live shard hosts). Extracted as a MONOMORPHIC helper so
+/// BOTH arms — the `Some` (a System/Planet/Area frame) and the `None` fallback — are covered by direct unit
+/// tests (HR5: the fallback is otherwise uncoverable, no live shard uses `GalaxySpace`).
+#[must_use]
+fn owning_realm(frame: FrameRef, config_realm: RealmId) -> RealmId {
+    frame.realm().unwrap_or(config_realm)
+}
+
 /// The FULL per-subject CONTAINMENT evaluation (task #135), monomorphic so every branch is covered ONCE
 /// here (HR5). Full-scan the shard's regions: advance each region's per-entity hysteretic membership bit
 /// (its own [`vd_core::geometry::ContainmentBand`] over `signed_distance`), fold the members into the
 /// DEEPEST containing realm ([`container`], total by construction — no `None`), and — when that differs
 /// from the realm this shard owns the subject in AND the post-commit cooldown elapsed ([`should_rehome`])
 /// — fan ONE re-home out by the subject's `DurabilityClass`. Returns `cur` for the caller's `prev_offset`.
+///
+/// UNIFORM re-home (the un-hosted-child cure, task #149): there is NO node-placement short-circuit. Whether
+/// `head(Realm(dest))` resolves to a FOREIGN node or to THIS node (source==dest, a co-hosted child), the
+/// detector emits the SAME `CrossingRequest`/`TransientCrossingRequest` and the ONE orchestrator saga
+/// carries it — a same-node saga completes post-S3 (the gateway self-acks the cut, the CAS bumps the fence,
+/// the route swap is an idempotent no-op). So co-hosting is now PURELY a placement (the grant/affirm that
+/// makes `head(Realm(child))` resolve here); the crossed pose is rebound at the DEST's adopt (same node on a
+/// co-hosted re-home), never rewritten in place. `to_parent` (the container region's `parent`) rides the
+/// request so an `Area` dest's frame forms.
 ///
 /// SYMMETRIC + direction-free: escaping a realm (System→Galaxy) and entering one (Galaxy→System) are the
 /// identical path — the container simply changed. The per-region band hysteresis IS the anti-flap dwell.
@@ -2559,12 +2731,12 @@ fn evaluate_one_subject(
     in_flight: &mut BTreeMap<EntityId, TransferId>,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
-) -> DVec3 {
+) -> SubjectEval {
     let cur = pose.pos.offset();
     // The ambient root seeds the `container` fold (always `Some` — the system gated on a non-empty
     // registry before building the ctx; the `let-else` keeps this branchless of an `unwrap`).
     let Some(root_realm) = ctx.root_realm else {
-        return cur;
+        return SubjectEval { prev_offset: cur };
     };
     // FULL SCAN: advance each region's hysteretic membership bit and collect the members' depth keys.
     // Per-region + per-entity (the bitset) → each region's bit advances INDEPENDENTLY (no winner slot to
@@ -2584,6 +2756,19 @@ fn evaluate_one_subject(
         }
     }
     let container_realm = container(root_realm, &members);
+    // The container region's PARENT provenance — the one field a `rebind_pose_to_dest` into an `Area` needs
+    // (its enclosing `Planet`). A deterministic worldgen fact carried on every `RealmRegion`; threaded onto
+    // the crossing request so the dest's Area frame forms. `None` for a non-Area dest (a one-field lift) and
+    // when the container is the root (no matching region — never re-homes to it anyway).
+    let to_parent = ctx
+        .regions
+        .iter()
+        .find(|r| r.realm == container_realm)
+        .and_then(|r| r.parent);
+    // The subject's OWNING realm derived from its POSE FRAME (the relabel map is deleted): `pose.frame`'s
+    // realm, else `config.realm` for a frame with no nameable realm (`owning_realm`, unit-tested both arms).
+    // On a single-realm shard the pose frame IS `config.frame` (== `config.realm`'s frame) verbatim.
+    let owning = owning_realm(pose.frame, ctx.config.realm);
     // The post-commit cooldown from the per-entity CrossingState.
     let state = progress.entry(entity).or_default();
     let since_commit = state
@@ -2591,27 +2776,24 @@ fn evaluate_one_subject(
         // `.min(u32::MAX)` before the cast: `saturating_sub` is u64, and a raw `as u32` truncation is
         // non-monotone (a gap of `2^32 + k` would read as `k` and falsely re-suppress). (Defensive.)
         .map(|t| (ctx.clock.local_tick.0.saturating_sub(t.0)).min(u32::MAX as u64) as u32);
-    // The ONE symmetric re-home decision: re-home iff the deepest container differs from the owning realm
-    // (past the cooldown). `dest` is the container realm — derived from position, never authored.
-    if let Some(dest) = should_rehome(
-        ctx.config.realm,
-        container_realm,
-        since_commit,
-        &ctx.config.boundary,
-    ) {
+    // The ONE symmetric re-home decision: re-home iff the deepest container differs from the OWNING realm
+    // (past the cooldown). `dest` is the container realm — derived from position, never authored. It ALWAYS
+    // fans out the crossing — a same-node dest (a co-hosted child) is the degenerate case of the same saga.
+    if let Some(dest) = should_rehome(owning, container_realm, since_commit, &ctx.config.boundary) {
         fan_out_crossing(
             ctx,
             entity,
             subject_fence,
             subject_session,
             dest,
+            to_parent,
             state,
             in_flight,
             stats,
             outbox,
         );
     }
-    cur
+    SubjectEval { prev_offset: cur }
 }
 
 /// Fan the committed RE-HOME out by the subject's `DurabilityClass` — the ONE dispatch site (HR2 policy
@@ -2628,6 +2810,9 @@ fn fan_out_crossing(
     subject_fence: Fence,
     subject_session: Option<SessionId>,
     to_realm: RealmId,
+    // The dest realm's PARENT provenance (the container region's `parent`) — carried onto BOTH class arms'
+    // requests so the dest's `rebind_pose_to_dest` forms an `Area` frame. `None` for a non-Area dest.
+    to_parent: Option<RealmId>,
     state: &mut CrossingState,
     in_flight: &mut BTreeMap<EntityId, TransferId>,
     stats: &mut StubStats,
@@ -2670,6 +2855,7 @@ fn fan_out_crossing(
                             subject_fence,
                             session,
                             attempt,
+                            to_parent,
                         }),
                     );
                     state.last_commit_tick = Some(ctx.clock.local_tick);
@@ -2679,6 +2865,7 @@ fn fan_out_crossing(
                         to_realm,
                         subject_fence,
                         session,
+                        to_parent,
                     });
                     stats.crossings_requested += 1;
                 }
@@ -2696,6 +2883,7 @@ fn fan_out_crossing(
                     from_realm,
                     to_realm,
                     src_realm_fence: ctx.realm_fence,
+                    to_parent,
                 }),
             );
             state.last_commit_tick = Some(ctx.clock.local_tick);
@@ -2772,6 +2960,9 @@ fn redrive_stranded_crossings(
                     // The SAME attempt (unchanged since the latch — the attempt bumps only on a
                     // post-abort re-latch), so the re-emitted id is byte-identical to the standing latch.
                     attempt: state.crossing_attempt,
+                    // The SAME parent provenance the latch captured — so the re-drive re-mints the identical
+                    // request (an Area dest's frame still forms on the re-drive).
+                    to_parent: lc.to_parent,
                 }),
             );
             // Re-arm the ttl timer so the next re-drive is another `ttl` ticks out.
@@ -2847,6 +3038,9 @@ fn emit_transient_batch(
             to_realm,
             dst_realm_fence,
             batch,
+            // The dest realm's parent is consumed IMMEDIATELY by the per-item rebind below (each item's
+            // pose forms its Area frame at push time), so it rides no further into the `Group`.
+            to_parent,
         } = t.status
         {
             batches
@@ -2863,8 +3057,9 @@ fn emit_transient_batch(
                     // Rebind the SOURCE-frame pose into the DEST realm's frame via the ONE machinery
                     // (HR3) the durable crossing + D-37 re-home also use. Identity through P3
                     // (position/velocity/orientation UNCHANGED, only the frame flips to `to_realm`), so
-                    // the adopting shard reads the pose already expressed in its own frame.
-                    pose: rebind_pose_to_dest(t.pose, to_realm),
+                    // the adopting shard reads the pose already expressed in its own frame. `to_parent`
+                    // supplies the enclosing Planet so an `Area` dest's frame forms.
+                    pose: rebind_pose_to_dest(t.pose, to_realm, to_parent),
                     state: Vec::new(),
                 });
             t.status = TransientStatus::Held {
@@ -3244,6 +3439,57 @@ fn self_fence_lapsed_realm(
     }
 }
 
+/// Apply a realm-head affirm to the right authority store — the PRIMARY realm (`config.realm` ↦
+/// `RealmAuthority`, the single-realm machinery, byte-identical) OR a CO-HOSTED CHILD realm
+/// (`CoHostedAuthority`, the additive co-host store). Monomorphic so every branch is covered ONCE
+/// (HR5). `record` is the head at the moment of the read (`None` = the record was revoked):
+/// - PRIMARY realm, OURS  → hold `RealmAuthority` at the recorded fence + re-arm the self-fence clock.
+/// - PRIMARY realm, FOREIGN/None → self-fence (drop `RealmAuthority` + declare the transients lost).
+/// - CO-HOSTED realm, OURS → hold this child's `CoHostedAuthority` fence (independent of the primary).
+/// - CO-HOSTED realm, FOREIGN/None → drop this child's entry (the shard no longer co-hosts it). The
+///   transient loss path is PRIMARY-only (transients are anchored to `RealmAuthority`, never a child).
+#[allow(clippy::too_many_arguments)]
+fn affirm_realm_head(
+    realm: RealmId,
+    record: Option<&vd_wire::seams::directory::OwnerRecord>,
+    identity: &NodeIdentity,
+    config: &StubConfig,
+    clock: &ClockSample,
+    authority: &mut RealmAuthority,
+    confirmed: &mut RealmConfirmedAt,
+    cohosted: &mut CoHostedAuthority,
+    owned_transients: &mut OwnedTransients,
+    stats: &mut StubStats,
+) {
+    let ours = record.map(|r| r.authority) == Some(AuthorityRef::Shard(identity.node_id));
+    if realm == config.realm {
+        // The PRIMARY realm — the single-realm authority path, UNCHANGED.
+        if ours {
+            authority.0 = record.map(|r| r.fence);
+            // D-3 Slice 5: a round-trip that AFFIRMS ownership re-arms the self-fence deadline — the
+            // holder has just heard from the directory, so it is provably not partitioned now.
+            confirmed.0 = clock.local_tick;
+        } else {
+            // Taken over (P2 transfer / reassignment) or revoked (record None): SELF-FENCE immediately
+            // (fence rule 4) — drop authority and stop emitting so a stale old owner cannot affect clients.
+            tracing::warn!("realm lease no longer held by this shard — self-fencing");
+            authority.0 = None;
+            // D-7: the transients were anchored to the now-lost lease, with no hand-off — a counted LOSS
+            // (the declared-loss path; durable dots are retained by authority.rs).
+            self_fence_drop_transients(owned_transients, stats);
+        }
+    } else if ours {
+        // A CO-HOSTED CHILD realm we still hold: refresh its own fence (independent of the primary).
+        cohosted
+            .0
+            .insert(realm, record.map_or(Fence::GENESIS, |r| r.fence));
+    } else {
+        // A CO-HOSTED CHILD realm taken over or revoked: drop the co-host entry (no transient loss — a
+        // child realm never anchors this shard's transients; those ride `RealmAuthority`).
+        cohosted.0.remove(&realm);
+    }
+}
+
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
 #[allow(clippy::too_many_arguments)]
 fn on_directory_reply(
@@ -3253,6 +3499,7 @@ fn on_directory_reply(
     clock: &ClockSample,
     authority: &mut RealmAuthority,
     confirmed: &mut RealmConfirmedAt,
+    cohosted: &mut CoHostedAuthority,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
     pending: &mut PendingCrossings,
@@ -3359,6 +3606,7 @@ fn on_directory_reply(
             on_saga_promote(
                 cmd,
                 config,
+                identity.node_id,
                 clock,
                 dots,
                 applied,
@@ -3380,6 +3628,7 @@ fn on_directory_reply(
             on_re_home(
                 cmd,
                 config,
+                identity.node_id,
                 clock,
                 dots,
                 applied,
@@ -3406,35 +3655,27 @@ fn on_directory_reply(
     };
     match reply {
         DirectoryReply::Head {
-            key: DirectoryKey::Realm(_),
-            record: Some(record),
+            key: DirectoryKey::Realm(realm),
+            record,
         } => {
-            if record.authority == AuthorityRef::Shard(identity.node_id) {
-                authority.0 = Some(record.fence);
-                // D-3 Slice 5: a round-trip that AFFIRMS ownership re-arms the self-fence deadline —
-                // the holder has just heard from the directory, so it is provably not partitioned now.
-                confirmed.0 = clock.local_tick;
-            } else {
-                // The realm was taken over (P2 transfer / reassignment): SELF-FENCE
-                // immediately (fence rule 4) — drop authority and stop emitting
-                // frames so a stale old owner cannot affect clients.
-                tracing::warn!(
-                    "realm lease now held by {:?}, not this shard — self-fencing",
-                    record.authority
-                );
-                authority.0 = None;
-                // D-7: the transients were anchored to the now-lost lease, with no hand-off — a
-                // counted LOSS (the declared-loss path; durable dots are retained by authority.rs).
-                self_fence_drop_transients(owned_transients, stats);
-            }
-        }
-        DirectoryReply::Head {
-            key: DirectoryKey::Realm(_),
-            record: None,
-        } => {
-            // The realm record is gone (revoked): self-fence (frames stop).
-            authority.0 = None;
-            self_fence_drop_transients(owned_transients, stats);
+            // A realm-head affirm for the PRIMARY realm drives the single-realm authority machinery
+            // (unchanged); one for a CO-HOSTED CHILD realm drives only its own map entry — so the
+            // co-hosting affirm reuses THIS one arm (no new dispatch arm), byte-identical for a
+            // single-realm shard (the `else` branch is never reached when `held_realms == {realm}`).
+            // Branching is hoisted into the monomorphic `affirm_realm_head` (HR5): the arm body is a
+            // branchless shim.
+            affirm_realm_head(
+                realm,
+                record.as_ref(),
+                identity,
+                config,
+                clock,
+                authority,
+                confirmed,
+                cohosted,
+                owned_transients,
+                stats,
+            );
         }
         DirectoryReply::Head {
             key: DirectoryKey::Entity(entity),
@@ -3720,6 +3961,7 @@ mod tests {
     fn config() -> StubConfig {
         StubConfig {
             realm: RealmId::System(7),
+            held_realms: StubConfig::single_realm(RealmId::System(7)),
             frame: FrameRef::SystemSpace { system_seed: 7 },
             move_speed_mps: 2.0,
             tick_dt_s: 0.05,
@@ -3903,6 +4145,7 @@ mod tests {
                 to_realm: RealmId::System(8),
                 dst_realm_fence: Fence(2),
                 batch: TransferId(1),
+                to_parent: None,
             }
             .is_held()
         );
@@ -4100,6 +4343,7 @@ mod tests {
                     to_realm: RealmId::System(8),
                     dst_realm_fence: Fence(2),
                     batch,
+                    to_parent: None,
                 },
                 prev_offset: DVec3::ZERO,
             },
@@ -4162,6 +4406,7 @@ mod tests {
             to_realm: RealmId::System(8),
             dst_realm_fence: Fence(2),
             batch: TransferId(0xB3),
+            to_parent: None,
         };
         rig.world.resource_mut::<OwnedTransients>().0.insert(
             entity,
@@ -4292,6 +4537,7 @@ mod tests {
                 to_realm: RealmId::System(8),
                 dst_realm_fence: Fence(9),
                 batch: other,
+                to_parent: None,
             }),
         );
         owned.0.insert(
@@ -4535,6 +4781,7 @@ mod tests {
                 to_realm: RealmId::System(8),
                 dst_realm_fence: Fence(2),
                 batch: TransferId(1),
+                to_parent: None,
             }
             .is_in_handover()
         );
@@ -4578,6 +4825,7 @@ mod tests {
                 to_realm: RealmId::System(8),
                 dst_realm_fence: Fence(2),
                 batch: t,
+                to_parent: None,
             }),
         );
         owned.0.insert(
@@ -5414,6 +5662,72 @@ mod tests {
         assert!(
             renew_keys(&rig.tick(vec![])).is_empty(),
             "an off-cadence tick emits no LeaseRenew"
+        );
+    }
+
+    #[test]
+    fn a_cohosting_shard_renews_its_child_realm_lease_on_cadence() {
+        // D-3 heartbeat, co-hosting (task #149): a MULTI-realm shard renews its PRIMARY realm AND every
+        // CO-HOSTED CHILD realm it holds (the `cohosted.0` chain in the renewal set). Drives the co-host
+        // renewal closure that a single-realm shard never reaches (`cohosted.0` empty). Boot System 7
+        // (primary) + Planet 7 (co-hosted child), then a cadence tick renews BOTH realm keys.
+        let mut rig = Rig::with_config(StubConfig {
+            lease_renew_interval_ticks: 4,
+            ..cohost_planet_config()
+        });
+        boot_cohost_planet(&mut rig); // primary System 7 on RealmAuthority + child Planet 7 on CoHostedAuthority
+        assert_eq!(
+            rig.world
+                .resource::<CoHostedAuthority>()
+                .0
+                .get(&RealmId::Planet(7)),
+            Some(&Fence(1)),
+            "precondition: the co-hosted Planet-7 head is held (so the renewal chain has a child to emit)",
+        );
+        // A still-granting (provisional) dot so the cadence tick ALSO emits a `LeaseGrant` to ORCH — a
+        // NON-`LeaseRenew` op that exercises the extractor's fall-through arm (no uncoverable `_ => None`).
+        rig.world.resource_mut::<Dots>().0.insert(
+            SessionId(1),
+            Dot {
+                entity: EntityId::pack(EntityKind::Player, 7, 1, 1),
+                account: AccountId(1),
+                session_fence: Fence(1),
+                gateway: GATEWAY,
+                granted: false, // provisional ⇒ emits LeaseGrant, NOT LeaseRenew
+                input_active: false,
+                adopting: false,
+                authority: Authority::Owned { fence: Fence(1) },
+                departing: false,
+                entity_fence: Fence(1),
+                pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(0)),
+                yaw: 0.0,
+                pitch: 0.0,
+                last_applied_seq: None,
+                prev_offset: DVec3::ZERO,
+            },
+        );
+        let renew_keys = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<DirectoryKey> {
+            sent.iter()
+                .filter(|(to, _, _)| *to == ORCH)
+                .filter_map(
+                    |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                        Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew { key, .. })) => {
+                            Some(key)
+                        }
+                        _ => None,
+                    },
+                )
+                .collect()
+        };
+        rig.set_local_tick(4); // on the renew cadence
+        let on = renew_keys(&rig.tick(vec![]));
+        assert!(
+            on.contains(&DirectoryKey::Realm(RealmId::System(7))),
+            "the PRIMARY realm lease is renewed: {on:?}",
+        );
+        assert!(
+            on.contains(&DirectoryKey::Realm(RealmId::Planet(7))),
+            "the CO-HOSTED CHILD realm lease is ALSO renewed (the co-host chain): {on:?}",
         );
     }
 
@@ -6681,6 +6995,60 @@ mod tests {
     }
 
     #[test]
+    fn the_saga_promote_re_owns_a_source_equals_dest_ghost_at_the_exact_cas_fence() {
+        // The SOURCE==DEST re-own arm of `promote_apply` (task #149): a co-hosted-child crossing whose
+        // `head(Realm(dest))` resolves to THIS node reaches `on_saga_promote` with `cmd.source == self_node`
+        // (= the Rig's own SHARD id). Unlike the cross-node case (a GENESIS-fenced Ghost, strictly older than
+        // the CAS fence, promoted via `AuthorityCmd::Promote`), the ordered same-node `Demote` already
+        // self-fenced THIS dot to `Ghost{source_fence: cmd.new_fence}`, so a strict-newer Promote at the SAME
+        // fence would `StaleFence`. The `if cmd.source == self_node` arm RE-OWNS the dot directly at that exact
+        // fence — the idempotent route-swap the degenerate saga is. Same Ghost-dot fixture as the cross-node
+        // test but with `source = SHARD`, asserting `Owned { fence: <the promote's new_fence> }`.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]); // adopting dot for SUBJECT
+        let _ = rig.tick(vec![adopted_head(Fence(2))]); // flip → granted Ghost
+        let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]); // lands STUB_CROSSING_STEP
+        assert!(
+            !rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates(),
+            "still Ghost after the crossing (source==dest re-own has not run yet)"
+        );
+        rig.set_local_tick(5);
+        // `source == SHARD` (the Rig's own node id) ⇒ `cmd.source == self_node` ⇒ the direct re-own arm.
+        let sent = rig.tick(vec![promote_msg(Fence(2), SHARD)]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].authority,
+            Authority::Owned { fence: Fence(2) },
+            "the source==dest Promote RE-OWNS the dot at the exact CAS fence (no strict-newer StaleFence)"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().promotes_confirmed, 1);
+        assert!(
+            saga_ack_to_orch(
+                &sent,
+                TransferControlAck::PromoteAck {
+                    transfer: TransferId(7)
+                }
+            ),
+            "the source==dest Promote still acks PromoteAck: {sent:?}"
+        );
+        // The self-ghost tail is skipped on source==dest (no self-feed loop) — mirrors the re-home guard.
+        assert_eq!(
+            rig.world
+                .resource::<GhostColliderRegistration>()
+                .0
+                .get(&SUBJECT),
+            None,
+            "a source==dest promote registers NO self-ghost neighbor",
+        );
+        assert!(
+            flows_to(&sent, SHARD).is_empty(),
+            "no GhostFlow::Spawn is sent to self on a source==dest promote: {sent:?}",
+        );
+    }
+
+    #[test]
     fn on_re_home_creates_an_owned_dot_from_the_pose_acks_and_spawns_the_ghost() {
         // D-37 CELL 2 adopt: the FRESH target receives a `ReHome` and CREATES an Owned dot from the pose
         // (no pre-existing ghost to flip, unlike Promote). Acks PromoteAck, registers + Spawns the source
@@ -6752,6 +7120,49 @@ mod tests {
                 transfer: TransferId(7)
             }
         ));
+    }
+
+    #[test]
+    fn a_same_node_re_home_registers_no_self_ghost_and_spawns_none() {
+        // GHOST-FEED GUARD (task #149): a SOURCE==DEST re-home (the co-hosted-child crossing whose
+        // `head(Realm(dest))` resolves to THIS node) reaches `re_home_apply` with `cmd.source == self_node`.
+        // `register_and_spawn_source_ghost` must SKIP the self-ghost registration + the `GhostFlow::Spawn`
+        // (else a self-feed loop: the owner would `Delta` its own retained copy). The dot is still adopted
+        // Owned + acked; ONLY the ghost tail is skipped. `source == SHARD` (the Rig's own node id).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.set_local_tick(5);
+        let session = SessionId(SUBJECT.0);
+        let sent = rig.tick(vec![re_home_msg(
+            Fence(2),
+            SHARD, // source == this node's id (the source==dest degenerate saga)
+            DirectoryKey::Entity(SUBJECT),
+        )]);
+        // The dot is still adopted Owned + PromoteAck'd (the re-home body ran) …
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&session].authority,
+            Authority::Owned { fence: Fence(2) },
+            "a same-node re-home still adopts the dot Owned",
+        );
+        assert!(saga_ack_to_orch(
+            &sent,
+            TransferControlAck::PromoteAck {
+                transfer: TransferId(7)
+            }
+        ));
+        // … but NO self-ghost was registered and NO Spawn was emitted to self.
+        assert_eq!(
+            rig.world
+                .resource::<GhostColliderRegistration>()
+                .0
+                .get(&SUBJECT),
+            None,
+            "a source==dest re-home registers NO self-ghost neighbor",
+        );
+        assert!(
+            flows_to(&sent, SHARD).is_empty(),
+            "no GhostFlow::Spawn is sent to self on a same-node re-home: {sent:?}",
+        );
     }
 
     #[test]
@@ -7897,6 +8308,7 @@ mod tests {
                     to_realm: RealmId::System(8),
                     dst_realm_fence: Fence(2),
                     batch: TransferId(0xB3),
+                    to_parent: None,
                 },
                 prev_offset: DVec3::ZERO,
             },
@@ -8101,6 +8513,50 @@ mod tests {
                 },
             )
             .collect()
+    }
+
+    #[test]
+    fn owning_realm_reads_the_pose_frame_when_nameable() {
+        // The `Some` arm (the LIVE path — every real shard frame is nameable): the owning realm is the
+        // pose FRAME's realm, IGNORING the `config_realm` fallback. Covers a System, Planet, and Area frame.
+        assert_eq!(
+            super::owning_realm(
+                FrameRef::SystemSpace { system_seed: 7 },
+                RealmId::System(99)
+            ),
+            RealmId::System(7),
+            "a System frame owns System(system_seed), not the config fallback",
+        );
+        assert_eq!(
+            super::owning_realm(
+                FrameRef::PlanetCentered { planet_seed: 3 },
+                RealmId::System(99)
+            ),
+            RealmId::Planet(3),
+            "a Planet frame owns Planet(planet_seed)",
+        );
+        assert_eq!(
+            super::owning_realm(
+                FrameRef::AreaLocal {
+                    planet_seed: 3,
+                    area_seed: 8,
+                },
+                RealmId::System(99),
+            ),
+            RealmId::Area(8),
+            "an Area frame owns Area(area_seed) — the very frame the to_parent fix makes form",
+        );
+    }
+
+    #[test]
+    fn owning_realm_falls_back_to_config_realm_for_an_unnameable_frame() {
+        // The `None` fallback arm (otherwise UNCOVERABLE — no live shard uses GalaxySpace): a frame whose
+        // `FrameRef::realm()` is None (`GalaxySpace`) falls back to the shard's `config_realm`.
+        assert_eq!(
+            super::owning_realm(FrameRef::GalaxySpace, RealmId::System(42)),
+            RealmId::System(42),
+            "GalaxySpace has no realm → the config_realm fallback",
+        );
     }
 
     #[test]
@@ -8491,14 +8947,38 @@ mod tests {
     /// so a non-default-realm rig (e.g. a Station-owning shard) can take authority. Mirrors `grant_realm`'s
     /// round-trip directory confirmation, keyed on the passed realm.
     fn grant_realm_for(rig: &mut Rig, realm: RealmId) {
+        grant_realm_for_at(rig, realm, Fence(1));
+    }
+
+    /// Like [`grant_realm_for`] but at an explicit `fence` — for asserting a RE-affirm refreshes the
+    /// co-hosted child's recorded fence (the `else if ours` refresh arm of `affirm_realm_head`).
+    fn grant_realm_for_at(rig: &mut Rig, realm: RealmId, fence: Fence) {
         let reply = DirectoryReply::Head {
             key: DirectoryKey::Realm(realm),
             record: Some(vd_wire::seams::directory::OwnerRecord {
                 authority: AuthorityRef::Shard(SHARD),
-                fence: Fence(1),
+                fence,
                 lease_expires: UniverseTick(1_000),
                 in_transfer: None,
             }),
+        };
+        let bytes = crate::io::bytes(
+            postcard::to_allocvec(&InterShardFlow::DirectoryReply(reply)).expect("encode"),
+        );
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Saga,
+            bytes,
+        }]);
+    }
+
+    /// Affirm a realm head that is NO LONGER this shard's — a REVOKED record (`None`, the reaper dropped
+    /// the lease). For a CO-HOSTED child this drives the FOREIGN/None `else` arm of `affirm_realm_head`
+    /// (`cohosted.0.remove(&realm)`) — the child dropped from `CoHostedAuthority`.
+    fn revoke_realm_for(rig: &mut Rig, realm: RealmId) {
+        let reply = DirectoryReply::Head {
+            key: DirectoryKey::Realm(realm),
+            record: None,
         };
         let bytes = crate::io::bytes(
             postcard::to_allocvec(&InterShardFlow::DirectoryReply(reply)).expect("encode"),
@@ -8603,9 +9083,11 @@ mod tests {
         // the "both ways" proof that a Station is a first-class realm on the identical kind-agnostic path.
         let station_cfg = StubConfig {
             realm: STATION_A,
+            held_realms: StubConfig::single_realm(STATION_A),
             frame: FrameRef::StationLocal { station_seed: 7 },
             ..config()
         };
+        let station_frame = station_cfg.frame; // FrameRef is Copy — capture before the config move
         let mut rig = Rig::with_config(station_cfg);
         grant_realm_for(&mut rig, STATION_A);
         *rig.world.resource_mut::<RealmRegions>() =
@@ -8616,7 +9098,7 @@ mod tests {
             &mut rig,
             TRIG_SESSION,
             entity,
-            station_cfg.frame,
+            station_frame,
             DVec3::new(-25.0, 0.0, 0.0),
         );
         rig.set_local_tick(2);
@@ -8663,9 +9145,11 @@ mod tests {
         // the owning Planet 7, so ONE re-home fires whose `to_realm` is the Area. Zero area-specific code.
         let planet_cfg = StubConfig {
             realm: RealmId::Planet(7),
+            held_realms: StubConfig::single_realm(RealmId::Planet(7)),
             frame: FrameRef::PlanetCentered { planet_seed: 7 },
             ..config()
         };
+        let planet_frame = planet_cfg.frame; // FrameRef is Copy — capture before the config move
         let mut rig = Rig::with_config(planet_cfg);
         grant_realm_for(&mut rig, RealmId::Planet(7));
         *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(
@@ -8678,7 +9162,7 @@ mod tests {
             &mut rig,
             TRIG_SESSION,
             entity,
-            planet_cfg.frame,
+            planet_frame,
             DVec3::new(20.0, 0.0, 0.0),
         );
         rig.set_local_tick(2);
@@ -8713,6 +9197,247 @@ mod tests {
             "leaving the owning Planet 7"
         );
         assert_eq!(reqs[0].subject, DirectoryKey::Entity(entity));
+    }
+
+    /// Co-hosting config: a shard hosting System 7 that ALSO CO-HOSTS Planet 7 (the un-hosted-child cure).
+    /// Its `held_realms` is `{System(7), Planet(7)}` — the primary realm plus the co-hosted child. The
+    /// region union (`realm_neighbourhood_for_held`) gives it BOTH neighbourhoods so the detector can
+    /// evaluate Planet 7's SOI from the System-7 authority.
+    fn cohost_planet_config() -> StubConfig {
+        StubConfig {
+            held_realms: BTreeSet::from([RealmId::System(7), RealmId::Planet(7)]),
+            ..config()
+        }
+    }
+
+    /// Grant the PRIMARY realm (System 7) AND affirm the CO-HOSTED child (Planet 7), populating both
+    /// `RealmAuthority` and `CoHostedAuthority` — the co-hosting boot state. Plant the UNION region set.
+    fn boot_cohost_planet(rig: &mut Rig) {
+        grant_realm_for(rig, RealmId::System(7)); // primary → RealmAuthority
+        grant_realm_for(rig, RealmId::Planet(7)); // co-hosted child → CoHostedAuthority
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vd_core::worldgen::realm_neighbourhood_for_held(
+                0,
+                &BTreeSet::from([RealmId::System(7), RealmId::Planet(7)]),
+            ));
+    }
+
+    #[test]
+    fn a_cohosting_shard_affirms_the_child_realm_head_into_its_own_authority_map() {
+        // The multi-realm AFFIRM path (co-hosting): a shard co-hosting Planet 7 must land the Planet-7
+        // realm-head reply in `CoHostedAuthority` (independent of the primary `RealmAuthority`), so the
+        // short-circuit's `held_here` answers `Some` for the child. This is the grant/affirm half of the cure.
+        let mut rig = Rig::with_config(cohost_planet_config());
+        grant_realm_for(&mut rig, RealmId::System(7));
+        assert_eq!(
+            rig.world.resource::<RealmAuthority>().0,
+            Some(Fence(1)),
+            "the primary System-7 realm is held on RealmAuthority",
+        );
+        assert!(
+            !rig.world
+                .resource::<CoHostedAuthority>()
+                .0
+                .contains_key(&RealmId::Planet(7)),
+            "the child is NOT held until its own head affirms",
+        );
+        grant_realm_for(&mut rig, RealmId::Planet(7));
+        assert_eq!(
+            rig.world
+                .resource::<CoHostedAuthority>()
+                .0
+                .get(&RealmId::Planet(7)),
+            Some(&Fence(1)),
+            "the co-hosted Planet-7 head lands in CoHostedAuthority (not RealmAuthority)",
+        );
+        assert_eq!(
+            rig.world.resource::<RealmAuthority>().0,
+            Some(Fence(1)),
+            "the child affirm leaves the primary realm untouched",
+        );
+        // RE-AFFIRM the SAME child at a NEWER fence: the child is ALREADY in `CoHostedAuthority`, so this hits
+        // the `else if ours` REFRESH arm (not the first insert). The stored fence must update to the refreshed
+        // value — the periodic round-trip re-arming a still-held co-hosted child head.
+        grant_realm_for_at(&mut rig, RealmId::Planet(7), Fence(2));
+        assert_eq!(
+            rig.world
+                .resource::<CoHostedAuthority>()
+                .0
+                .get(&RealmId::Planet(7)),
+            Some(&Fence(2)),
+            "the re-affirm REFRESHES the co-hosted Planet-7 fence to the newer value",
+        );
+        assert_eq!(
+            rig.world.resource::<RealmAuthority>().0,
+            Some(Fence(1)),
+            "the child re-affirm still leaves the primary realm untouched",
+        );
+    }
+
+    #[test]
+    fn a_revoked_cohosted_child_head_is_dropped_from_the_cohost_authority_map() {
+        // The FOREIGN/None `else` arm of `affirm_realm_head` (`cohosted.0.remove(&realm)`): a co-hosted CHILD
+        // realm this shard held is TAKEN OVER or REVOKED (here `record: None` — the reaper dropped the lease),
+        // so its `CoHostedAuthority` entry is DROPPED (no transient loss — a child never anchors this shard's
+        // transients; those ride the PRIMARY `RealmAuthority`). This is distinct from the primary self-fence
+        // (which drops `RealmAuthority` + declares transients lost). Boot with Planet 7 HELD, then revoke it.
+        let mut rig = Rig::with_config(cohost_planet_config());
+        boot_cohost_planet(&mut rig); // primary System 7 + co-hosted child Planet 7 both held
+        assert_eq!(
+            rig.world
+                .resource::<CoHostedAuthority>()
+                .0
+                .get(&RealmId::Planet(7)),
+            Some(&Fence(1)),
+            "precondition: the co-hosted Planet-7 head is held",
+        );
+        revoke_realm_for(&mut rig, RealmId::Planet(7)); // record None ⇒ not ours ⇒ the remove arm
+        assert!(
+            !rig.world
+                .resource::<CoHostedAuthority>()
+                .0
+                .contains_key(&RealmId::Planet(7)),
+            "the revoked co-hosted child is DROPPED from CoHostedAuthority",
+        );
+        // The PRIMARY realm is UNTOUCHED — the child-revoke path never self-fences the primary lease.
+        assert_eq!(
+            rig.world.resource::<RealmAuthority>().0,
+            Some(Fence(1)),
+            "revoking the co-hosted child leaves the primary System-7 realm held",
+        );
+    }
+
+    #[test]
+    fn a_dot_re_homing_into_a_cohosted_child_emits_a_crossing_request_with_its_parent() {
+        // THE UNIVERSAL re-home assertion (task #149, re-baselined from the old relabel test): a durable dot
+        // that walks from System 7 into CO-HOSTED Planet 7's SOI emits the SAME `CrossingRequest` as a
+        // foreign crossing — there is NO local short-circuit. `head(Realm(Planet 7))` resolves to THIS node
+        // (source==dest), which the ONE orchestrator saga handles as the degenerate case. The request carries
+        // Planet 7 as `to_realm` and its enclosing System 7 as `to_parent` (the container region's parent) so
+        // the dest's `rebind_pose_to_dest` forms the child frame. The pose is NOT rewritten in place here (the
+        // detector only requests); the frame flips at the dest's adopt (same node on a co-hosted re-home).
+        let mut rig = Rig::with_config(cohost_planet_config());
+        boot_cohost_planet(&mut rig);
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 51);
+        // Start at the origin — inside System 7 (r=40), OUTSIDE Planet 7 (centre 20, r=10) ⇒ container ==
+        // System 7 == owning ⇒ NO re-home.
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::ZERO);
+        rig.set_local_tick(2);
+        let at_origin = crossing_requests(&rig.tick(vec![]));
+        assert_eq!(
+            at_origin.len(),
+            0,
+            "at the origin the dot is in System 7 (== owning)"
+        );
+        // Walk INTO Planet 7's centre (20,0,0) — its deepest container flips to Planet 7, a realm THIS
+        // shard CO-HOSTS ⇒ ONE CrossingRequest (the uniform saga; a co-hosted dest is source==dest).
+        let mut out: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 3..8 {
+            rig.set_local_tick(t);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(20.0, 0.0, 0.0));
+            out.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&out);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "a re-home into a CO-HOSTED child emits ONE CrossingRequest (source==dest — the uniform saga)",
+        );
+        assert_eq!(
+            reqs[0].to_realm,
+            RealmId::Planet(7),
+            "the crossing targets the co-hosted Planet 7 realm",
+        );
+        assert_eq!(
+            reqs[0].to_parent,
+            Some(RealmId::System(7)),
+            "the request carries Planet 7's enclosing System 7 as to_parent (so the dest's Area/child frame forms)",
+        );
+    }
+
+    #[test]
+    fn a_dot_re_homing_into_a_non_cohosted_child_emits_a_crossing_request() {
+        // The SAME co-hosting shard, a dot walking into Station 7 — a child it does NOT co-host (`held_realms`
+        // is `{System(7), Planet(7)}`, no Station). Post-task-#149 this is IDENTICAL to the co-hosted case:
+        // ONE `CrossingRequest` (the node-placement branch is deleted — held-here vs foreign no longer
+        // matters, both are the uniform saga). Kept as a second geometry to prove the request fires for any
+        // container change, co-hosted or not.
+        let mut rig = Rig::with_config(cohost_planet_config());
+        boot_cohost_planet(&mut rig);
+        // The region union for {System 7, Planet 7} DOES include Station 7 (a child of the held System 7).
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 52);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::ZERO);
+        let mut out: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 3..9 {
+            rig.set_local_tick(t);
+            move_dot(&mut rig, TRIG_SESSION, DVec3::new(-25.0, 0.0, 0.0)); // Station 7 box centre
+            out.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&out);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "a re-home into a NON-co-hosted child emits ONE CrossingRequest (the uniform saga)",
+        );
+        assert_eq!(
+            reqs[0].to_realm,
+            RealmId::Station(7),
+            "the crossing targets the Station 7 realm",
+        );
+        assert_eq!(
+            reqs[0].to_parent,
+            Some(RealmId::System(7)),
+            "the request carries Station 7's enclosing System 7 as to_parent",
+        );
+    }
+
+    #[test]
+    fn a_held_transient_re_homing_into_a_cohosted_child_emits_a_transient_request_with_its_parent()
+    {
+        // The TRANSIENT twin (HR2 — the SAME machinery, no per-kind fork, no local short-circuit): a held
+        // Debris transient inside CO-HOSTED Planet 7 emits ONE `TransientCrossingRequest` carrying Planet 7's
+        // enclosing System 7 as `to_parent` (so the batch's `rebind_pose_to_dest` forms the child frame). The
+        // pose is not rewritten in place; the frame flips at the dest's adopt.
+        let mut rig = Rig::with_config(cohost_planet_config());
+        boot_cohost_planet(&mut rig);
+        let entity = EntityId::pack(EntityKind::Debris, 10, 1, 61);
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            entity,
+            Transient {
+                // Inside Planet 7's SOI (centre x=20, r=10) — container == Planet 7 (co-hosted).
+                pose: StampedPose::at_rest(
+                    config().frame,
+                    DVec3::new(20.0, 0.0, 0.0),
+                    UniverseTick(100),
+                ),
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+                prev_offset: DVec3::new(20.0, 0.0, 0.0),
+            },
+        );
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..7 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        let reqs = transient_crossing_requests(&all);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "a transient re-home into a CO-HOSTED child emits ONE TransientCrossingRequest (the uniform saga)",
+        );
+        assert_eq!(reqs[0].to_realm, RealmId::Planet(7));
+        assert_eq!(
+            reqs[0].to_parent,
+            Some(RealmId::System(7)),
+            "the transient request carries Planet 7's enclosing System 7 as to_parent",
+        );
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .transient_crossings_requested,
+            1,
+        );
     }
 
     #[test]
@@ -9187,6 +9912,7 @@ mod tests {
             to_realm: OTHER_REALM,
             dst_realm_fence: Fence(3),
             batch: TransferId(77),
+            to_parent: None,
         };
         let _ = rig.tick(vec![wire_msg(
             ORCH,
@@ -9666,6 +10392,7 @@ mod tests {
                 to_realm: OTHER_REALM,
                 dst_realm_fence: Fence(3),
                 batch: TransferId(1),
+                to_parent: None,
             }),
         )]);
         assert_eq!(
@@ -9700,6 +10427,7 @@ mod tests {
                 to_realm: OTHER_REALM,
                 dst_realm_fence: Fence(3),
                 batch: TransferId(1),
+                to_parent: None,
             }),
         )]);
         assert_eq!(rig.world.resource::<StubStats>().transient_grant_noop, 1);

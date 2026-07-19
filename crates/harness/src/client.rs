@@ -200,18 +200,18 @@ impl ScriptedClient {
             }
             // The gateway RELIABLY closed a subscription (a transfer's source-sub release, Track
             // R / 1d.2). Remove it from the held SET so its now-foreign datagrams stop being
-            // admitted; any OTHER held sub (e.g. the dest sub of the overlap) keeps routing. Drop
-            // the closed sub's tracks from the REAL view too — the SOUND per-sub eviction.
+            // admitted; any OTHER held sub keeps routing. Forget that sub's staleness high-water in
+            // the REAL view (per-entity eviction is EventMsg::EntityRemoved now — S6).
             ServerControlMsg::SubscriptionClosing { sub } => {
                 self.held_subs.remove(&sub);
                 self.delivered_view.drop_sub(sub);
             }
-            // STOP discarding the sub (1d.3c): the REAL view records render authority per entity, so
-            // the avatar composites to the named (dest) sub during the overlap — the flat view only
-            // ever learns the entity id.
-            ServerControlMsg::AuthorityChanged { entity, sub } => {
+            // THE pure-renderer own-entity signal (minor 2): name the avatar by EntityId alone — no
+            // sub, no owning node. A node-agnostic client renders every entity latest-wins by
+            // EntityId; this just marks which one is itself.
+            ServerControlMsg::OwnEntity { entity } => {
                 self.view.own_entity = Some(entity);
-                self.delivered_view.set_authority(entity, sub);
+                self.delivered_view.set_own_entity(entity);
             }
             ServerControlMsg::Close { reason } => {
                 self.close_reason = Some(reason);
@@ -221,11 +221,15 @@ impl ScriptedClient {
             // interpolate, so it has nothing to apply — ignore it (the real client
             // learns its render rate from this; vd-client net.rs).
             ServerControlMsg::UniverseRate { .. } => {}
-            // The gateway asks the client to cut its input flow: the NEXT input carries the
-            // in-band CUT_MARKER (the seq becomes the transfer's marker_seq, threaded end-to-end).
+            // Node-AWARE legacy `AuthorityChanged` (superseded by `OwnEntity` + EntityId-keyed
+            // latest-wins render): the gateway still emits it to OLD (minor<2) clients, so a
+            // pure-renderer test client IGNORES it (inert, not a protocol regression).
+            ServerControlMsg::AuthorityChanged { .. } => {}
+            // The gateway asks the client to cut its input flow. The cut is SERVER-TIMED now (S3),
+            // so this marker is INERT server-side — but the harness still stamps it (harmless) to
+            // exercise the pause/resume input-partition primitive the input-conservation gates use.
             ServerControlMsg::RequestCut { .. } => self.emit_marker_next = true,
-            // No pings or sub teardown reach a P1/P2 client; arriving here means a protocol
-            // regression worth failing loudly.
+            // No pings reach a P1/P2 client; arriving here means a protocol regression worth failing loudly.
             other => panic!("unexpected control message: {other:?}"),
         }
     }
@@ -478,9 +482,8 @@ mod tests {
         );
         send_control(
             gw,
-            &ServerControlMsg::AuthorityChanged {
+            &ServerControlMsg::OwnEntity {
                 entity: EntityId(7),
-                sub: SubId(0),
             },
         );
         fabric.pump(TickId(2));
@@ -540,6 +543,31 @@ mod tests {
         fabric.pump(TickId(9));
         let _ = client.step();
         assert_eq!(client.phase(), ClientPhase::Active);
+    }
+
+    #[test]
+    fn the_legacy_authority_changed_control_is_inertly_ignored_by_the_node_agnostic_client() {
+        // `AuthorityChanged` is the pre-S6 NODE-AWARE own-entity signal, superseded by `OwnEntity`.
+        // A node-agnostic pure-renderer client tolerates it as a NO-OP: the variant still ships for
+        // minor<2 peers, so the exhaustive `on_control` match must handle it — it never panics and
+        // does NOT change the own-entity (only `OwnEntity` sets that now). Stays Active.
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        activate(&fabric, &mut gw, &mut client);
+        let own_before = client.view.own_entity;
+        send_control(
+            &mut gw,
+            &ServerControlMsg::AuthorityChanged {
+                entity: EntityId(7),
+                sub: SubId(4),
+            },
+        );
+        fabric.pump(TickId(9));
+        let _ = client.step();
+        assert_eq!(client.phase(), ClientPhase::Active);
+        assert_eq!(
+            client.view.own_entity, own_before,
+            "legacy AuthorityChanged does NOT change the own entity (only OwnEntity does)"
+        );
     }
 
     #[test]
@@ -695,10 +723,11 @@ mod tests {
     }
 
     #[test]
-    fn the_client_admits_frames_on_both_held_subs_during_a_transfer_overlap() {
-        // 1d.2d: after a second SubscriptionOpened (the dest sub of a transfer overlap) the
-        // client holds BOTH subs, so a frame on EITHER is admitted (neither dropped as foreign).
-        // AuthorityChanged re-points the avatar to the dest sub.
+    fn the_client_admits_frames_on_both_held_subs_and_renders_latest_wins() {
+        // Multi-realm AoI: after a second SubscriptionOpened (the dest sub of a re-home overlap) the
+        // client holds BOTH subs, so a frame on EITHER is admitted (neither dropped as foreign). A
+        // pure-renderer client keys tracks by EntityId, so the SAME avatar arriving on both subs
+        // folds into ONE track (latest-wins) — it never learns which node owns it.
         let (fabric, mut gw, mut client) = rig(|_| None);
         activate(&fabric, &mut gw, &mut client); // SubId(0) held
         send_control(
@@ -708,17 +737,17 @@ mod tests {
                 frame: FrameRef::SystemSpace { system_seed: 8 },
             },
         );
+        // The node-agnostic re-confirm of the avatar (the gateway's dest re-point emits OwnEntity).
         send_control(
             &mut gw,
-            &ServerControlMsg::AuthorityChanged {
+            &ServerControlMsg::OwnEntity {
                 entity: EntityId(7),
-                sub: SubId(1),
             },
         );
         fabric.pump(TickId(3));
         let _ = client.step();
         assert_eq!(client.held_subs, BTreeSet::from([SubId(0), SubId(1)]));
-        // A frame on the SOURCE sub (0) AND a frame on the DEST sub (1) are BOTH admitted.
+        // A frame on the SOURCE sub (0) AND a LATER frame on the DEST sub (1) are BOTH admitted.
         send_snapshot(&mut gw, &snapshot_of(SubId(0), 1, EntityId(7), 1.0));
         send_snapshot(&mut gw, &snapshot_of(SubId(1), 1, EntityId(7), 2.0));
         fabric.pump(TickId(4));
@@ -727,54 +756,45 @@ mod tests {
             client.view.stale_frames_dropped, 0,
             "both held subs admitted — neither frame dropped as foreign"
         );
-        // The avatar's authoritative sub is the dest (the AuthorityChanged re-point).
         assert_eq!(client.view.own_entity, Some(EntityId(7)));
 
-        // 1d.3c: the REAL composited view received the SAME bytes (single shared decode). Both
-        // subs hold a track for the avatar, but it renders EXACTLY ONCE — from the dest sub (1),
-        // the AuthorityChanged re-point — at the dest's x=2.0. The flat view physically cannot
-        // show this (last-writer-wins), which is why the capstone reads the REAL view.
+        // The REAL view received the SAME bytes (single shared decode). Per-entity latest-wins: the
+        // avatar renders EXACTLY ONCE, at the dest-sub pose x=2.0 (the last-delivered) — node-agnostic.
         let rendered = client.delivered_view.rendered(10.0);
-        assert_eq!(
-            rendered.len(),
-            1,
-            "the avatar composites to exactly one copy"
-        );
-        let (rid, rsub, rpose) = rendered[0];
+        assert_eq!(rendered.len(), 1, "one track per entity");
+        let (rid, _rsub, rpose) = rendered[0];
         assert_eq!(rid, EntityId(7));
         assert_eq!(
-            rsub,
-            SubId(1),
-            "rendered from the dest sub (the AuthorityChanged re-point)"
+            rpose.pos.x, 2.0,
+            "latest-wins: the dest-sub pose, not the source copy"
         );
-        assert_eq!(rpose.pos.x, 2.0, "the dest-sub pose, not the source copy");
     }
 
     #[test]
-    fn closing_a_sub_evicts_its_tracks_from_the_real_view_too() {
-        // 1d.3c: a reliable SubscriptionClosing drops the closed sub's tracks from the REAL
-        // composited view (the SOUND per-sub eviction), not just the held SET — so the avatar's
-        // dest-sub copy is the one that survives a source-sub release during a transfer.
+    fn closing_a_sub_keeps_the_entity_track_in_the_real_view() {
+        // Pure-renderer split (S6): a reliable SubscriptionClosing forgets the sub's high-water but
+        // does NOT evict the EntityId-keyed track (per-entity eviction is EventMsg::EntityRemoved).
         let (fabric, mut gw, mut client) = rig(|_| None);
-        activate(&fabric, &mut gw, &mut client); // holds SubId(0), authority on SubId(0)
+        activate(&fabric, &mut gw, &mut client); // holds SubId(0)
         send_snapshot(&mut gw, &snapshot_of(SubId(0), 1, EntityId(7), 5.0));
         fabric.pump(TickId(3));
         let _ = client.step();
         assert_eq!(
             client.delivered_view.rendered(10.0).len(),
             1,
-            "rendered on sub 0"
+            "rendered from its per-entity track"
         );
-        // Close sub 0: its track is evicted from the real view, so the avatar renders nowhere.
+        // Close sub 0: the entity track SURVIVES (only EntityRemoved evicts it).
         send_control(
             &mut gw,
             &ServerControlMsg::SubscriptionClosing { sub: SubId(0) },
         );
         fabric.pump(TickId(4));
         let _ = client.step();
-        assert!(
-            client.delivered_view.rendered(10.0).is_empty(),
-            "the closed sub's track was evicted from the real composited view",
+        assert_eq!(
+            client.delivered_view.rendered(10.0).len(),
+            1,
+            "the entity track survives a SubscriptionClosing (EntityId-keyed)",
         );
     }
 

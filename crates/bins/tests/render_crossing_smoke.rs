@@ -164,19 +164,6 @@ fn poll_state(port: u16) -> vd_devproto::DevState {
     }
 }
 
-/// The OWN entity's composited authoritative SubId — flips off the login sub when the client
-/// observes the re-home onto the DEST subscription (the client-tier proof the transfer was real,
-/// not just the dot walking).
-fn own_auth_sub(state: &vd_devproto::DevState) -> u32 {
-    let own = state.own_entity.as_deref().expect("own_entity");
-    state
-        .entities
-        .iter()
-        .find(|r| r.entity == own)
-        .expect("own row")
-        .authoritative_sub
-}
-
 /// The OWN entity's delivered row (id + composited world pose), or panic naming the state.
 fn own_pos(state: &vd_devproto::DevState) -> DVec3 {
     let own = state
@@ -367,7 +354,10 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
         }
     };
     let pos_before = own_pos(&before_state);
-    let auth_sub_before = own_auth_sub(&before_state);
+    // S6 (pure renderer): the client is NODE-AGNOSTIC — it no longer tracks an authoritative sub.
+    // The client-tier re-home proof is the OWN entity's LOCATION label flipping realms (source→dest),
+    // which is the own entity's delivered authoritative FrameRef re-expressed by the server.
+    let location_before = before_state.location.clone();
     assert_eq!(
         expected_box(&scene, pos_before),
         Some(RealmId::System(DEV.realm_seed)),
@@ -475,31 +465,37 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
     let dot_region_after = projected_point_aabb(&camera, pos_after, DOT_WORLD_RADIUS)
         .expect("the dot projects in front of the camera (after)");
 
-    let auth_sub_after = own_auth_sub(&after_state);
+    let location_after = after_state.location.clone();
     let final_directory = directory_rows(admin);
     let dest_owns = final_directory
         .iter()
         .any(|(key, authority)| key.starts_with("ent-") && authority == "shard:node-4");
     println!(
         "G-RENDER-CROSSING-SMOKE: {w}x{h} · box A screen {:?} box B screen {:?} · pos {pos_before} → \
-         {pos_after} · auth_sub {auth_sub_before} → {auth_sub_after} · DEST-owns={dest_owns} · \
-         location label {:?} (flipped to the DEST realm — the frame-rebinding re-expresses the pose)",
+         {pos_after} · location {location_before:?} → {location_after:?} · DEST-owns={dest_owns} \
+         (the location label flipped to the DEST realm — the frame-rebinding re-expresses the pose)",
         (box_a_region.min.x as i32, box_a_region.max.x as i32),
         (box_b_region.min.x as i32, box_b_region.max.x as i32),
-        after_state.location,
     );
 
     // NON-VACUITY: this must be a REAL transfer, not just the dot walking into box B's region.
-    // (a) the directory CAS committed authority onto the DEST; (b) the CLIENT observed the re-home —
-    // the own dot's composited authoritative sub flipped OFF the login sub onto the DEST subscription.
+    // (a) the directory CAS committed authority onto the DEST; (b) the CLIENT (a NODE-AGNOSTIC pure
+    // renderer, S6) observed the re-home — the own dot's LOCATION label flipped realms (source→dest),
+    // i.e. its delivered authoritative FrameRef re-homed. This is the client-tier proof (not pixels),
+    // and it needs NO node awareness (the client never learns which shard owns the avatar).
     assert!(
         dest_owns,
         "the DEST (shard:node-4) must OWN the re-homed dot — the transfer committed, not just a walk: {final_directory:?}",
     );
     assert_ne!(
-        auth_sub_after, auth_sub_before,
-        "the client must have observed the authority re-home (own dot's authoritative sub flips off \
-         the login sub {auth_sub_before} onto the DEST sub) — the client-tier proof, not just pixels",
+        location_after, location_before,
+        "the client must have observed the authority re-home (own dot's LOCATION label flips off \
+         the source realm {location_before:?} onto the DEST realm) — the client-tier proof, not just pixels",
+    );
+    assert_eq!(
+        location_after.as_deref(),
+        Some(system_b.as_str()),
+        "the client's location label reads the DEST realm (System 8) after the re-home",
     );
 
     // STATE: the composited world pos is now geometrically inside box B, and advanced far on +X.

@@ -53,6 +53,12 @@ pub struct SagaCtx {
     /// the dest finds the adopted dot by entity, so these are faithful provenance, not a key.
     pub from_realm: RealmId,
     pub to_realm: RealmId,
+    /// The dest realm's PARENT provenance — threaded from `CrossingRequest.to_parent` (the SOURCE detector
+    /// fills it from the container region's `parent`). The saga carries it VERBATIM to
+    /// `rebind_pose_to_dest(flush_pose, to_realm, to_parent)` so an `Area` dest's `{planet_seed, area_seed}`
+    /// frame forms (the "Area label never flips" fix). `None` for every non-Area re-home and for the
+    /// non-crossing constructions (D-37 standing re-home, which parks pre-flush and never rebinds).
+    pub to_parent: Option<RealmId>,
 }
 
 /// The saga deadline budget (Slice 2a) — the ONE home for the two timeout thresholds (HR "no magic
@@ -1462,6 +1468,8 @@ mod tests {
             needs_provision,
             from_realm: RealmId::System(3),
             to_realm: RealmId::System(4),
+            // A System dest needs no parent (the frame is a one-field lift) — the FSM tests never rebind.
+            to_parent: None,
         }
     }
 

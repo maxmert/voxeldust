@@ -56,6 +56,9 @@ pub fn auth_verifying_key() -> [u8; 32] {
 pub fn stub_config() -> StubConfig {
     StubConfig {
         realm: RealmId::System(7),
+        // Single-realm (co-hosting is exercised by the --triple straight-walk smoke, not these cluster
+        // scenarios — their crossings target realms hosted by OTHER shards). Byte-identical default.
+        held_realms: StubConfig::single_realm(RealmId::System(7)),
         frame: FrameRef::SystemSpace { system_seed: 7 },
         move_speed_mps: 2.0,
         tick_dt_s: 0.05,
@@ -88,10 +91,41 @@ pub fn stub_config() -> StubConfig {
 pub fn dest_stub_config() -> StubConfig {
     StubConfig {
         realm: RealmId::System(8),
+        // Override the inherited `{System(7)}` — this shard hosts System 8 (single-realm).
+        held_realms: StubConfig::single_realm(RealmId::System(8)),
         frame: FrameRef::SystemSpace { system_seed: 8 },
         mint_seed: 17,
         ..stub_config()
     }
+}
+
+/// task #149 — the CO-HOSTING login shard: the SAME [`SHARD`] node HOSTS its System 7 realm AND co-hosts the
+/// nested Planet 7 + Area 7 child realms (the un-hosted-child cure). So a dot that walks from System 7 into
+/// Planet 7 / Area 7 re-homes to a realm THIS node ALSO heads — `head(Realm(Area 7))` resolves to SHARD
+/// (SOURCE==DEST), the degenerate case of the ONE uniform orchestrator saga. Matches the worldgen forest
+/// (System 7 ⊃ Planet 7 ⊃ Area 7), so `plant_seed_neighbourhood` gives the shard all three regions.
+#[must_use]
+pub fn cohost_stub_config() -> StubConfig {
+    StubConfig {
+        held_realms: BTreeSet::from([RealmId::System(7), RealmId::Planet(7), RealmId::Area(7)]),
+        ..stub_config()
+    }
+}
+
+/// task #149 — the SOURCE==DEST cluster: orchestrator + gateway + ONE co-hosting [`SHARD`] (System 7 +
+/// Planet 7 + Area 7). A durable dot that walks into Planet 7 / Area 7 drives the uniform crossing saga with
+/// the SAME node as both source and dest — proving the co-hosted re-home completes (no local short-circuit).
+#[must_use]
+pub fn p2_cluster_cohost(fabric: &FaultFabric, max_sessions: usize) -> Topology {
+    build_cluster(
+        fabric,
+        max_sessions,
+        vec![GATEWAY, SHARD],
+        vec![(SHARD, cohost_stub_config())],
+        StaggerPlan::lockstep(),
+        MemStore::new(),
+        default_directory_tuning(),
+    )
 }
 
 /// C-6c — the GALAXY shard (`RealmId::System(GALAXY_SEED)`, the seed forest's between-systems space): the
@@ -109,6 +143,9 @@ pub const GALAXY_SEED: u64 = 1;
 pub fn galaxy_stub_config() -> StubConfig {
     StubConfig {
         realm: RealmId::System(GALAXY_SEED),
+        // Override the inherited `{System(7)}` — this shard hosts the Galaxy (single-realm; its System
+        // 7/8 children are hosted by OTHER shards, so no co-hosting is needed on the Galaxy).
+        held_realms: StubConfig::single_realm(RealmId::System(GALAXY_SEED)),
         frame: FrameRef::SystemSpace {
             system_seed: GALAXY_SEED,
         },
@@ -501,6 +538,7 @@ pub fn seed_transient_crossing(
                         to_realm: dest_stub_config().realm,
                         dst_realm_fence,
                         batch,
+                        to_parent: None,
                     },
                     // Slice 3d: the geometric-trigger prev-offset seed (the test plants no boundaries,
                     // so it is never read — seed to the pose offset for the degenerate first segment).
@@ -576,6 +614,24 @@ pub fn plant_seed_neighbourhood(
     });
 }
 
+/// task #149 — plant the seed-derived containment neighbourhood for the UNION of a CO-HOSTED held set
+/// (`vd_core::worldgen::realm_neighbourhood_for_held`), the EXACT geometry the production `shard.rs` boot
+/// computes for a multi-realm shard. A single-realm `plant_seed_neighbourhood` gives only its own realm +
+/// ancestors + DIRECT children — so a shard co-hosting `{System 7, Planet 7, Area 7}` needs THIS to evaluate
+/// Area 7 (a GRANDCHILD of System 7, absent from System 7's own neighbourhood).
+pub fn plant_seed_neighbourhood_held(
+    topo: &mut Topology,
+    node: NodeId,
+    universe_seed: u64,
+    held: &BTreeSet<RealmId>,
+) {
+    let regions = vd_core::worldgen::realm_neighbourhood_for_held(universe_seed, held);
+    with_node(topo, node, |s| {
+        *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::new(regions);
+    });
+}
+
 /// C-6c — set the dot whose `entity == subject` on shard `node` to frame-local `off` (find it in `Dots`).
 /// Returns true if found + set. The adopted/owned dot's manual write survives into
 /// `evaluate_realm_boundaries` the same tick (schedule order: process_inbound → evaluate_realm_boundaries),
@@ -595,6 +651,27 @@ pub fn set_shard_subject_offset(
             }
         }
         false
+    })
+}
+
+/// task #149 — the AUTHORITATIVE pose FRAME of the dot whose `entity == subject` on shard `node`, or `None`
+/// if that shard holds no such dot. The frame flips to the dest realm's canonical frame once a re-home's
+/// dest adopt runs `rebind_pose_to_dest` — on a co-hosted (source==dest) re-home that adopt is THIS node's
+/// own promote, so the frame advances to the child realm (Planet/Area) here. The source==dest e2e reads
+/// this to prove the crossed pose ends in the `AreaLocal` frame (the "Area label never flips" fix).
+#[must_use]
+pub fn shard_subject_frame(
+    topo: &mut Topology,
+    node: NodeId,
+    subject: EntityId,
+) -> Option<FrameRef> {
+    with_node(topo, node, |s| {
+        s.world_mut()
+            .resource::<vd_sim::stub::Dots>()
+            .0
+            .values()
+            .find(|d| d.entity == subject)
+            .map(|d| d.pose.frame)
     })
 }
 
@@ -1160,6 +1237,7 @@ pub fn run_fault_scenario(seed: u64, sc: Scenario) -> (Topology, EntityId, BTree
             needs_provision: false,
             from_realm: RealmId::System(7),
             to_realm: RealmId::System(8),
+            to_parent: None,
         },
     );
     // Drive to the target saga phase (the client auto-stamps the CUT_MARKER on RequestCut; the saga
@@ -1387,6 +1465,7 @@ pub fn run_transient_fault_scenario(
             needs_provision: false,
             from_realm: RealmId::System(7),
             to_realm: RealmId::System(8),
+            to_parent: None,
         },
     );
     // Drive to the target `BatchHandoff` phase (the saga progresses on the choreography acks).
@@ -1557,6 +1636,7 @@ pub fn run_transient_dest_flap(seed: u64) -> (Topology, EntityId) {
             needs_provision: false,
             from_realm: RealmId::System(7),
             to_realm: RealmId::System(8),
+            to_parent: None,
         },
     );
     // Drive to AwaitRelease (BEFORE AwaitPromote), so the orch→DEST promote — emitted on the AwaitPromote
@@ -1672,6 +1752,7 @@ pub fn run_orch_kill_transient(seed: u64, durable: bool) -> OrchKillOutcome {
             needs_provision: false,
             from_realm: RealmId::System(7),
             to_realm: RealmId::System(8),
+            to_parent: None,
         },
     );
     // Drive to the `BatchHandoff` tail — the saga is quiescent-but-persisted (the kill target).
@@ -1810,6 +1891,7 @@ pub fn run_orch_kill_durable(seed: u64, at_phase: &str, durable_store: bool) -> 
             needs_provision: false,
             from_realm: RealmId::System(7),
             to_realm: RealmId::System(8),
+            to_parent: None,
         },
     );
     // Drive to the target saga phase (the client auto-stamps the CUT_MARKER on RequestCut).

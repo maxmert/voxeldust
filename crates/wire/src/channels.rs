@@ -113,6 +113,16 @@ pub enum ServerControlMsg {
     UniverseRate {
         tick_hz: u32,
     },
+    /// "This entity is YOUR avatar" — the PURE-RENDERER own-entity signal (proto_minor 2),
+    /// emitted only to a peer that negotiated minor >= 2. It replaces `AuthorityChanged` as
+    /// the "this is your avatar" signal for a node-AGNOSTIC client: it names ONLY the entity,
+    /// never a `sub` / owning node, so a pure-renderer client learns which entity to center on
+    /// WITHOUT ever learning which shard simulates it (the server re-homes authority invisibly;
+    /// the client just renders whatever authoritative coordinate streams in for that entity).
+    /// Appended trailing variant — every prior variant decodes unchanged (postcard additive rule).
+    OwnEntity {
+        entity: EntityId,
+    },
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).
@@ -375,6 +385,7 @@ mod tests {
                 reason: "test".into(),
             },
             ServerControlMsg::UniverseRate { tick_hz: 50 },
+            ServerControlMsg::OwnEntity { entity: eid() },
         ];
         for msg in msgs {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
@@ -400,6 +411,27 @@ mod tests {
         assert_eq!(
             postcard::from_bytes::<ServerControlMsg>(&rate_bytes).expect("decode"),
             rate
+        );
+    }
+
+    #[test]
+    fn own_entity_is_additive_minor_2_and_prior_variants_decode_unchanged() {
+        // The minor-2 additive shape: OwnEntity is appended AFTER UniverseRate, so bytes a
+        // minor<2 sender produced (any variant BEFORE OwnEntity, including the minor-1
+        // UniverseRate itself) still decode unchanged on a minor-2 decoder — appending a
+        // trailing variant never shifts a prior variant's discriminant or framing.
+        let prior = ServerControlMsg::UniverseRate { tick_hz: 50 };
+        let bytes = postcard::to_allocvec(&prior).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&bytes).expect("decode"),
+            prior
+        );
+        // The new variant itself is a clean self-contained message.
+        let own = ServerControlMsg::OwnEntity { entity: eid() };
+        let own_bytes = postcard::to_allocvec(&own).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&own_bytes).expect("decode"),
+            own
         );
     }
 

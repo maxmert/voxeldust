@@ -115,6 +115,14 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
     let mut cluster = Cluster::new(); // RAII-reaped
     cluster.push(
@@ -122,7 +130,7 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs, &DEV, &store_str, false),
+            &orchestrator_env(&addrs, &DEV, &store_str, vd_bins::ClusterShape::Single),
         )
         .expect("spawn orch"),
     );
@@ -146,7 +154,7 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &shard_common,
-            &shard_env(&addrs, &DEV, false),
+            &shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
         )
         .expect("spawn shard")
     };

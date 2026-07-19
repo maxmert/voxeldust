@@ -232,7 +232,7 @@ mod tests {
             &std::collections::BTreeSet::from([SubId(0)]),
             snap(1, 10, vec![(ent(1), 0.0)]),
         );
-        view.set_authority(ent(1), SubId(0));
+        view.set_own_entity(ent(1));
         let snap = RenderSnapshot::new(
             view,
             RenderClock::new(ClientInterpTuning::DEFAULT), // never observed → unanchored
@@ -254,7 +254,7 @@ mod tests {
             &std::collections::BTreeSet::from([SubId(0)]),
             snap(1, 10, vec![(ent(1), 4.0)]),
         );
-        view.set_authority(ent(1), SubId(0));
+        view.set_own_entity(ent(1));
         let mut clock = RenderClock::new(ClientInterpTuning::DEFAULT);
         clock.observe(UniverseTick(10), 100.0);
         let s = RenderSnapshot::new(view, clock, ClientPhase::Active);
@@ -297,7 +297,7 @@ mod tests {
             &std::collections::BTreeSet::from([SubId(0)]),
             snap(2, 12, vec![(ent(1), 10.0)]),
         );
-        view.set_authority(ent(1), SubId(0));
+        view.set_own_entity(ent(1));
 
         // Anchor the clock at tick 12 (the freshest) at wall-time 100.0, default
         // tuning (2.4-tick buffer). cursor(100.0) = 12 - 2.4 = 9.6 → before the window

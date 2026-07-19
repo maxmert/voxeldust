@@ -620,6 +620,13 @@ pub struct CrossingRequest {
     pub subject_fence: Fence,
     pub session: SessionId,
     pub attempt: u32,
+    /// The dest realm's PARENT provenance (the fix for the "Area label never flips" bug). An `AreaLocal`
+    /// frame carries `{planet_seed, area_seed}`, so re-expressing a pose into an `Area` needs its enclosing
+    /// `Planet` — which only the SOURCE detector knows (the container region's `parent`, a deterministic
+    /// worldgen fact). The saga threads it VERBATIM to `rebind_pose_to_dest(.., to_realm, to_parent)` so an
+    /// Area frame forms; every other realm kind is a one-field lift and ignores it (`None`). APPENDED
+    /// (postcard field-append — preserves the arm's discriminant).
+    pub to_parent: Option<RealmId>,
 }
 
 /// SHARD → ORCHESTRATOR (Slice 3c spatial transfer-trigger): a TRANSIENT crossed a realm boundary; the
@@ -632,12 +639,18 @@ pub struct TransientCrossingRequest {
     pub from_realm: RealmId,
     pub to_realm: RealmId,
     pub src_realm_fence: Fence,
+    /// The dest realm's PARENT provenance — see [`CrossingRequest::to_parent`]. The source detector fills it
+    /// from the container region's `parent`; the orchestrator copies it into the [`TransientCrossingGrant`],
+    /// which the source stamps onto `TransientStatus::Crossing` so the batch's `rebind_pose_to_dest` forms an
+    /// Area frame. `None` for every non-Area dest. APPENDED (postcard field-append).
+    pub to_parent: Option<RealmId>,
 }
 
 /// ORCHESTRATOR → SOURCE shard (Slice 3c): the GRANT carrying the resolved dest for a
-/// [`TransientCrossingRequest`]. Its four fields EXACTLY match `sim::stub::TransientStatus::Crossing`
-/// (`dest`/`to_realm`/`dst_realm_fence`/`batch`), so the source flip is a straight field assign. `batch`
-/// is the orchestrator-minted batch id — `effect_class` keys idempotency on `(batch, TRANSIENT_BATCH_STEP)`.
+/// [`TransientCrossingRequest`]. Its five fields EXACTLY match `sim::stub::TransientStatus::Crossing`
+/// (`dest`/`to_realm`/`dst_realm_fence`/`batch`/`to_parent`), so the source flip is a straight field
+/// assign. `batch` is the orchestrator-minted batch id — `effect_class` keys idempotency on
+/// `(batch, TRANSIENT_BATCH_STEP)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransientCrossingGrant {
     pub subject: DirectoryKey,
@@ -645,6 +658,11 @@ pub struct TransientCrossingGrant {
     pub to_realm: RealmId,
     pub dst_realm_fence: Fence,
     pub batch: TransferId,
+    /// The dest realm's PARENT provenance — copied VERBATIM from the [`TransientCrossingRequest`] the
+    /// orchestrator resolved (see [`CrossingRequest::to_parent`]). The source stamps it onto
+    /// `TransientStatus::Crossing` so `emit_transient_batch`'s `rebind_pose_to_dest` forms an Area frame.
+    /// `None` for every non-Area dest. APPENDED (postcard field-append).
+    pub to_parent: Option<RealmId>,
 }
 
 /// ORCHESTRATOR → SOURCE shard (Slice 3c): the crossing's resolve/start saga ABORTED pre-CAS, so the
@@ -1358,12 +1376,15 @@ mod tests {
                 subject_fence: Fence(4),
                 session: SessionId(3),
                 attempt: 0,
+                // None here roundtrips the appended field's absent-parent encoding (the non-Area default).
+                to_parent: None,
             }),
             InterShardFlow::TransientCrossingRequest(TransientCrossingRequest {
                 subject: DirectoryKey::Entity(eid(EntityKind::Player)),
                 from_realm: RealmId::System(1),
                 to_realm: RealmId::Planet(2),
                 src_realm_fence: Fence(4),
+                to_parent: Some(RealmId::System(1)),
             }),
             InterShardFlow::TransientCrossingGrant(TransientCrossingGrant {
                 subject: DirectoryKey::Entity(eid(EntityKind::Player)),
@@ -1371,6 +1392,7 @@ mod tests {
                 to_realm: RealmId::Planet(2),
                 dst_realm_fence: Fence(6),
                 batch: TransferId(9),
+                to_parent: Some(RealmId::System(1)),
             }),
             InterShardFlow::CrossingAborted(CrossingAborted {
                 subject: DirectoryKey::Entity(eid(EntityKind::Player)),

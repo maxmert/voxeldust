@@ -31,6 +31,14 @@ fn addrs() -> ClusterAddrs {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     }
 }
 
@@ -95,7 +103,7 @@ fn orchestrator_cloud_rejects_the_ephemeral_store_escape() {
         &addrs,
         &DEV,
         &store.display().to_string(),
-        false,
+        vd_bins::ClusterShape::Single,
     ));
     envs.push(("VD_PROFILE", "cloud".to_owned()));
 
@@ -125,7 +133,7 @@ fn orchestrator_cloud_rejects_a_manual_process_incarnation() {
         &addrs,
         &DEV,
         &store.display().to_string(),
-        false,
+        vd_bins::ClusterShape::Single,
     ));
     envs.retain(|(k, _)| *k != "VD_STORE_EPHEMERAL_OK");
     envs.push(("VD_PROFILE", "cloud".to_owned()));
@@ -155,7 +163,7 @@ fn orchestrator_cloud_requires_a_durable_root() {
         &addrs,
         &DEV,
         &store.display().to_string(),
-        false,
+        vd_bins::ClusterShape::Single,
     ));
     envs.retain(|(k, _)| *k != "VD_STORE_EPHEMERAL_OK" && *k != "VD_PROCESS_INCARNATION");
     envs.push(("VD_PROFILE", "cloud".to_owned()));
@@ -188,7 +196,7 @@ fn gateway_cloud_vetoes_the_built_in_dev_auth_key() {
         &[],
         &dev_auth_pubkey_hex(),
         &DEV,
-        false,
+        vd_bins::ClusterShape::Single,
     ));
     envs.retain(|(k, _)| *k != "VD_PROCESS_INCARNATION");
     envs.push(("VD_PROFILE", "cloud".to_owned()));
@@ -230,7 +238,12 @@ fn orchestrator_cloud_boots_green_with_a_coherent_config() {
 
     let mut common = common_env(&trust.display().to_string(), &DEV);
     common.retain(|(k, _)| *k != "VD_PROCESS_INCARNATION");
-    let mut node_env = orchestrator_env(&addrs, &DEV, &store.display().to_string(), false);
+    let mut node_env = orchestrator_env(
+        &addrs,
+        &DEV,
+        &store.display().to_string(),
+        vd_bins::ClusterShape::Single,
+    );
     node_env.retain(|(k, _)| *k != "VD_STORE_EPHEMERAL_OK" && *k != "VD_LEASE_TTL");
     node_env.push(("VD_PROFILE", "cloud".to_owned()));
     node_env.push(("VD_STORE_DURABLE_ROOT", durable.display().to_string()));

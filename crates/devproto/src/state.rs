@@ -28,6 +28,10 @@ pub struct DevEntityRow {
     /// P3 this is a full world-space rotation (`orient * -Z` = world-forward), so the
     /// closed-loop nav needs no separate "up".
     pub orient: [f64; 4],
+    /// INERT since the pure-renderer collapse (S6): a node-AGNOSTIC client no longer has a
+    /// per-entity authoritative sub (it renders every entity latest-wins by `EntityId`, never
+    /// learning which node owns it). Retained as a stable diagnostic field (always the inert
+    /// `vd_client::view::RENDERED_SUB` = 0) so `vdctl`/process-parity decode the row unchanged.
     pub authoritative_sub: u32,
 }
 
@@ -46,7 +50,8 @@ pub struct DevState {
     pub phase: DevPhase,
     /// Canonical `Display` of the session id (a string — JSON cannot hold a u128).
     pub session: Option<String>,
-    /// Canonical `Display` of this client's own entity (from `AuthorityChanged`).
+    /// Canonical `Display` of this client's own entity (from `ServerControlMsg::OwnEntity` — the
+    /// node-agnostic own-avatar signal; the client never learns which node owns it).
     pub own_entity: Option<String>,
     /// The player's LOCATION — a human-readable realm label (e.g. "System 7", later
     /// named planets/ships) derived from the authoritative FrameRef of the own entity,

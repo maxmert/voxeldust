@@ -175,10 +175,21 @@ render-boxes-smoke:
 render-crossing-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
 
+# NODE-PER-REALM WALK GATE (task #149) — the HEADLESS process-tier walk proof (supersedes the retired
+# `triple-crossing-smoke`, whose --triple co-hosting cluster now thrashes under node-per-realm). Brings up the
+# `--forest` cluster (orchestrator + gateway + SIX single-realm shards: System 7, Planet 7, Station 7, Area 7,
+# Galaxy, System 8, NO co-hosting), logs in a REAL headless durable player over localhost QUIC, and drives it
+# with dev-control `WalkTo` along +X through the chain of CROSS-NODE re-homes. Asserts the player ARRIVES at
+# every leg (movement never freezes across a crossing) and the subject Entity's directory fence stays SMALL
+# (one clean commit per crossing — the thrash guard). No GPU: this is the CI walk gate; the live window is the
+# interim visual proof (DEFERRED.md — the GPU pixel-capture walk is owed a re-base onto the --forest cluster).
+node-per-realm-walk:
+    cargo test -p vd-bins --features dev-control --test node_per_realm_walk -- --nocapture
+
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a render-smoke render-boxes-smoke render-crossing-smoke coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk coverage
 
 # One-time setup helper.
 coverage-setup:

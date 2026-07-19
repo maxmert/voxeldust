@@ -65,14 +65,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tick_dt: f64 = env.parse("VD_TICK_DT")?;
     let move_speed: f64 = env.parse("VD_SPEED")?;
     vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
+    // NODE-PER-REALM (task #149): a realm-shard hosts EXACTLY ONE realm, of a KIND read from `VD_REALM_KIND`
+    // (`system` | `planet` | `station` | `area`) beside `VD_REALM_SEED`. ABSENT/empty ⇒ `System(seed)` — the
+    // pre-NODE-PER-REALM default, so every legacy shard boot is byte-identical. This lets a Planet/Station/
+    // Area shard exist (the Forest cluster) so a walk into a child realm is a uniform CROSS-NODE saga, never a
+    // co-hosted local relabel. An unrecognized kind fails LOUD at boot.
+    let realm_kind = env.string("VD_REALM_KIND").unwrap_or_default();
+    let own_realm = vd_bins::realm_from_kind_seed(&realm_kind, realm_seed)?;
+    // CO-HOSTING (the un-hosted-child cure, KEPT for the --triple LEGACY shape): a shard may host its own
+    // realm PLUS deeper CHILD realms it co-hosts (`VD_HELD_REALMS`, set by the --triple launcher). ABSENT ⇒
+    // single-realm ({own realm} — the byte-identical default, and the NODE-PER-REALM Forest case: each shard
+    // holds exactly its own realm). A malformed value fails LOUD at boot (a co-hosting misconfig must never
+    // silently degrade to single-realm and re-open the orphan gap). The own realm is always included.
+    let held_realms =
+        vd_bins::parse_held_realms(&env.string("VD_HELD_REALMS").unwrap_or_default(), own_realm)?;
+    // `VD_UNIVERSE_SEED` (default 0) is the ONE seed every shard shares — read ONCE here (reused for the
+    // frame lookup below AND the seed-neighbourhood plant further down).
+    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
+    // The shard's LOCAL authority frame = its realm's canonical frame from the seed forest (NODE-PER-REALM:
+    // a Planet shard is `PlanetCentered`, a Station `StationLocal`, an Area `AreaLocal{planet,area}` — an Area
+    // REQUIRES its Planet parent, which the forest region carries). Looked up from the shared seed forest so
+    // the frame + parent are the SAME deterministic worldgen fact the detector + `rebind_pose_to_dest` use —
+    // never a per-kind inline. A `System(seed)` shard resolves to `SystemSpace{seed}` (byte-identical to the
+    // old hardcoded frame). If the realm is absent from the forest (an unknown seed) fall back to its
+    // parentless canonical frame (an Area then has no frame — rejected LOUD, never a silent wrong frame).
+    let own_frame = vd_core::worldgen::realm_regions_for(universe_seed)
+        .iter()
+        .find(|r| r.realm == own_realm)
+        .map(|r| r.frame)
+        .or_else(|| vd_core::pose::frame_for_realm(own_realm, None))
+        .ok_or_else(|| {
+            format!(
+                "realm {own_realm} has no canonical frame (an Area realm needs a Planet parent, absent from \
+                 the seed forest for this seed) — refusing to boot"
+            )
+        })?;
     register_stub_shard(
         world,
         schedule,
         StubConfig {
-            realm: vd_core::pose::RealmId::System(realm_seed),
-            frame: vd_core::pose::FrameRef::SystemSpace {
-                system_seed: realm_seed,
-            },
+            realm: own_realm,
+            held_realms: held_realms.clone(),
+            frame: own_frame,
             move_speed_mps: move_speed,
             tick_dt_s: tick_dt,
             orchestrator: env.node_id("VD_ORCH")?,
@@ -105,13 +139,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // NEIGHBOURHOOD closed-form from the shared universe seed (`realm_neighbourhood_for`: own realm +
     // ancestor chain to the ambient root + owned children — NEVER siblings, HR1 replicated-by-construction,
     // no inter-shard bytes) and plants it, so the containment detector is LIVE from boot (no longer inert).
-    // `VD_UNIVERSE_SEED` (default 0) is the ONE seed every shard shares; a per-shard forest that fails
-    // `guard_regions_nest` (two roots, a dangling parent, a cycle, count > MAX_REGIONS) is a CODE bug in the
-    // generator — fail LOUD at boot (Display carries the actionable guidance for `kubectl logs`), never a
-    // silent detector no-op on a malformed forest.
-    let hosted_realm = vd_core::pose::RealmId::System(realm_seed);
-    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
-    let regions = vd_core::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm);
+    // `universe_seed` was read once above; a per-shard forest that fails `guard_regions_nest` (two roots, a
+    // dangling parent, a cycle, count > MAX_REGIONS) is a CODE bug in the generator — fail LOUD at boot
+    // (Display carries the actionable guidance for `kubectl logs`), never a silent detector no-op.
+    let hosted_realm = own_realm;
+    // The regions this shard EVALUATES containment against = the UNION of the neighbourhoods of every realm
+    // it HOLDS (co-hosting): a co-hosting shard must see the deeper child regions (a Planet's Area is a
+    // GRANDCHILD, absent from the system's own neighbourhood) so the LOCAL re-home short-circuit can fire.
+    // For a single-realm shard (`held_realms == {hosted}`) this equals `realm_neighbourhood_for(hosted)`
+    // exactly — byte-identical.
+    let regions = vd_core::worldgen::realm_neighbourhood_for_held(universe_seed, &held_realms);
     // `VD_REALM_BOUNDARIES` OVERRIDE (kept for the dual-cluster / render-crossing PLAYGROUND smokes): an
     // authored `boundaries.json` (a `Vec<RealmBoundary>`, SINGLE-SOURCED with the client's `--realm-boxes`)
     // REPLACES the seed neighbourhood with a born-inside child crossing shell, so the process-tier smoke can

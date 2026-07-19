@@ -241,12 +241,16 @@ fn every_arm() -> Vec<InterShardFlow> {
             subject_fence: Fence(7),
             session: SessionId(3),
             attempt: 0,
+            // The parent-provenance the SOURCE fills for the dest realm's frame (Some here exercises the
+            // appended-field roundtrip; None is the non-Area default).
+            to_parent: Some(RealmId::System(1)),
         }),
         InterShardFlow::TransientCrossingRequest(vd_wire::intershard::TransientCrossingRequest {
             subject: DirectoryKey::Entity(eid(EntityKind::Debris)),
             from_realm: RealmId::System(1),
             to_realm: RealmId::Planet(2),
             src_realm_fence: Fence(7),
+            to_parent: Some(RealmId::System(1)),
         }),
         // The GRANT + ABORTED carry a real minted TransferId (keyed on `(transfer, TRANSIENT_BATCH_STEP)`).
         InterShardFlow::TransientCrossingGrant(vd_wire::intershard::TransientCrossingGrant {
@@ -255,6 +259,7 @@ fn every_arm() -> Vec<InterShardFlow> {
             to_realm: RealmId::Planet(2),
             dst_realm_fence: Fence(4),
             batch: TransferId(10),
+            to_parent: Some(RealmId::System(1)),
         }),
         InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),

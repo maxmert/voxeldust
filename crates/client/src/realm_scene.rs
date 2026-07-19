@@ -952,9 +952,10 @@ mod tests {
     #[test]
     fn from_regions_draws_only_finite_leaf_realms_and_skips_the_ambient_shells() {
         // C-6b SINGLE-SOURCE: the client's scene is projected from the SAME seed forest the sim's
-        // containment detector consumes (`worldgen::realm_regions_for`). Only the FINITE leaf realms
-        // (System 7/8 r=40, Planet 7 r=10, Station 7 half=5, Area 7 half=3) are drawn; the ambient
-        // Galaxy(r=1000)/Universe(r=1e9) shells are SKIPPED (extent > MAX_RENDERABLE_EXTENT_M).
+        // containment detector consumes (`worldgen::realm_regions_for`). The finite realms are drawn —
+        // System 7/8 (r=40), Planet 7 (r=10), Station 7 (half=5), Area 7 (half=3) — AND the Galaxy (r=180)
+        // as the CONTAINING box around the systems, so an entity in the between-space is visibly still
+        // inside a realm (never orphaned). Only the ~unbounded Universe (r=1e9) is SKIPPED (extent > thresh).
         let regions = vd_core::worldgen::realm_regions_for(0);
         let scene = RealmScene::from_regions(&regions).expect("the seed forest projects");
         // The finite renderable realms are present.
@@ -966,16 +967,23 @@ mod tests {
             "Station 7 renders"
         );
         assert!(scene.get(RealmId::Area(7)).is_some(), "Area 7 renders");
-        // The ambient shells are SKIPPED (felt, not framed).
+        // The Galaxy IS drawn now — the CONTAINING box (a Sphere of its radius) at depth 1, enclosing both
+        // systems; an entity in the gap between them is visibly inside it (never orphaned).
+        let galaxy = scene
+            .get(RealmId::System(1))
+            .expect("the Galaxy renders as the containing box");
+        assert_eq!(galaxy.shape, BoxShape::Sphere { r: 180.0 });
+        assert_eq!(galaxy.depth, 1, "the Galaxy is depth 1 (Universe ⊃ Galaxy)");
+        // Only the ~unbounded ambient Universe root is SKIPPED (felt, not framed).
         assert!(
             scene.get(RealmId::System(0)).is_none(),
             "the Universe ambient root is NOT rendered"
         );
-        assert!(
-            scene.get(RealmId::System(1)).is_none(),
-            "the Galaxy between-space is NOT rendered"
+        assert_eq!(
+            scene.len(),
+            6,
+            "the 5 finite leaf realms + the Galaxy containing box"
         );
-        assert_eq!(scene.len(), 5, "exactly the 5 finite leaf realms");
         // A rendered System keeps its TRUE nesting depth (Universe 0 ⊃ Galaxy 1 ⊃ System 2), even though
         // its Galaxy parent is skipped from the drawn set — depth is over the FULL forest.
         assert_eq!(
@@ -1050,7 +1058,11 @@ mod tests {
             from_json, from_vec,
             "the regions.json load matches the plant"
         );
-        assert_eq!(from_json.len(), 5, "the 5 finite leaf realms");
+        assert_eq!(
+            from_json.len(),
+            6,
+            "the 5 finite leaf realms + the Galaxy containing box"
+        );
     }
 
     #[test]

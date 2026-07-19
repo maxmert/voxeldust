@@ -74,12 +74,20 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
     let mut orch1_child = KillOnDrop(Some(
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs1, &DEV, &store_str, false),
+            &orchestrator_env(&addrs1, &DEV, &store_str, vd_bins::ClusterShape::Single),
         )
         .expect("spawn orch"),
     ));
@@ -89,7 +97,7 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &common,
-            &shard_env(&addrs1, &DEV, false),
+            &shard_env(&addrs1, &DEV, vd_bins::ClusterShape::Single),
         )
         .expect("spawn shard"),
     );
@@ -159,13 +167,21 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
     cluster.push(
         "vd-orchestrator-restart",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs2, &DEV, &store_str, false),
+            &orchestrator_env(&addrs2, &DEV, &store_str, vd_bins::ClusterShape::Single),
         )
         .expect("respawn orchestrator"),
     );

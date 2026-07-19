@@ -37,14 +37,18 @@ const CONTAINMENT_OUTSET_M: f64 = 2.0;
 /// Universe by the container fold IDENTITY. Non-renderable (far above the render-extent threshold).
 const UNIVERSE_R_M: f64 = 1.0e9;
 /// The galaxy radius — FINITE (it encloses the star systems), and it is the between-systems space an
-/// entity occupies after leaving one system SOI and before entering the next. Non-renderable.
-const GALAXY_R_M: f64 = 1_000.0;
+/// entity occupies after leaving one system SOI and before entering the next. RENDERABLE (below the extent
+/// threshold) so the client draws it as the CONTAINING box around the two systems — an entity in the gap is
+/// visibly still inside the Galaxy realm, never orphaned. Contains System B's far face (130 + 40 = 170).
+const GALAXY_R_M: f64 = 180.0;
 /// A star-system SOI radius (walk scale).
 const SYSTEM_SOI_R_M: f64 = 40.0;
 /// A planet SOI radius (walk scale), nested inside a system.
 const PLANET_SOI_R_M: f64 = 10.0;
-/// System B's center on +X — a disjoint sibling of System A with a WALKABLE gap of galaxy between them.
-const SYSTEM_B_OFFSET_M: f64 = 100.0;
+/// System B's center on +X — a disjoint sibling of System A with a WALKABLE gap of galaxy between them
+/// (System A far-face 40, System B near-face 90 ⇒ a ~50 m pure-Galaxy gap: leaving A you are IN the Galaxy
+/// realm until you enter B). The round-trip probe points 0/50/100 still resolve System A / Galaxy / System B.
+const SYSTEM_B_OFFSET_M: f64 = 130.0;
 /// Planet A's center inside System A (offset from the star at the origin).
 const PLANET_A_OFFSET_M: f64 = 20.0;
 /// Station A's center inside System A, on the -X side (opposite Planet A on +X), clear of the origin
@@ -72,10 +76,11 @@ const STATION_A: RealmId = RealmId::Station(7);
 /// Area A — a first-class sub-planet Area realm nested under Planet A (task #133).
 const AREA_A: RealmId = RealmId::Area(7);
 
-/// The largest region extent the CLIENT renders as a box: finite leaf realms (systems/planets) are drawn,
-/// the ~unbounded ambient shells (Galaxy/Universe) are NOT — the between-space is felt, not framed. Set
-/// between a system SOI ([`SYSTEM_SOI_R_M`] = 40) and the galaxy ([`GALAXY_R_M`] = 1000).
-pub const MAX_RENDERABLE_EXTENT_M: f64 = 100.0;
+/// The largest region extent the CLIENT renders as a box: the Galaxy ([`GALAXY_R_M`] = 180) IS drawn — as
+/// the CONTAINING box around the star systems so an entity in the between-space is visibly still inside a
+/// realm (never orphaned) — but the ~unbounded Universe ([`UNIVERSE_R_M`] = 1e9) is NOT (it is the ambient
+/// fold identity, not a frame). Set between the galaxy (180) and the universe (1e9).
+pub const MAX_RENDERABLE_EXTENT_M: f64 = 200.0;
 
 /// The single source of truth for realm→region geometry (see the module docs). At P3 returns the static
 /// WALK-scale mandate forest; `seed_universe` is threaded for the frozen P4/P5 `f(seed)` signature
@@ -177,6 +182,37 @@ pub fn realm_neighbourhood_for(seed_universe: u64, hosted_realm: RealmId) -> Vec
     all.iter()
         .copied()
         .filter(|r| ancestry.contains(&r.realm) || r.parent == Some(hosted_realm))
+        .collect()
+}
+
+/// The regions a CO-HOSTING shard evaluates containment against: the UNION of the per-realm
+/// neighbourhoods over every realm the shard HOLDS (the un-hosted-child cure). A shard that hosts its
+/// system AND that system's Planet/Station/Area children must evaluate the deeper regions (a Planet's
+/// child Area is a GRANDCHILD of the system, absent from the system's own neighbourhood), so the shard
+/// scans the union — deduped by realm, order-stable (region forest order), so the boot depth-key/guard
+/// results are deterministic. For a SINGLE-realm shard (`held == {hosted}`) this equals
+/// [`realm_neighbourhood_for`] exactly (byte-identical). Closed-form `f(seed, held)`, replicated by
+/// construction (HR1) — the held-set is itself seed-derivable topology, not shared mutable state.
+#[must_use]
+pub fn realm_neighbourhood_for_held(
+    seed_universe: u64,
+    held: &std::collections::BTreeSet<RealmId>,
+) -> Vec<RealmRegion> {
+    let all = realm_regions_for(seed_universe);
+    // A realm is IN-SCOPE iff it is an ancestor of, or a child of, ANY held realm. Collect the qualifying
+    // realm set first (deduped), then filter the canonical forest ONCE so the output keeps forest order.
+    let mut scope: std::collections::BTreeSet<RealmId> = std::collections::BTreeSet::new();
+    for &hosted in held {
+        for a in ancestor_realms(&all, hosted) {
+            scope.insert(a);
+        }
+        for r in all.iter().filter(|r| r.parent == Some(hosted)) {
+            scope.insert(r.realm);
+        }
+    }
+    all.iter()
+        .copied()
+        .filter(|r| scope.contains(&r.realm))
         .collect()
 }
 
@@ -425,5 +461,46 @@ mod tests {
     #[test]
     fn region_depth_of_an_unknown_realm_is_zero() {
         assert_eq!(region_depth(&regions(), RealmId::Station(99)), 0);
+    }
+
+    #[test]
+    fn a_single_held_realm_neighbourhood_union_equals_the_single_neighbourhood() {
+        // Co-hosting DEGENERATE case: a held-set of exactly one realm is byte-identical to
+        // `realm_neighbourhood_for` — the single-realm shard path is untouched.
+        for r in [SYSTEM_A, GALAXY, PLANET_A, STATION_A] {
+            let single = realm_neighbourhood_for(0, r);
+            let held = realm_neighbourhood_for_held(0, &std::collections::BTreeSet::from([r]));
+            assert_eq!(
+                single, held,
+                "the held-set union for {{{r}}} equals its single neighbourhood",
+            );
+        }
+    }
+
+    #[test]
+    fn a_cohosted_system_plus_children_union_reaches_the_deepest_grandchild_area() {
+        // The un-hosted-child cure: a shard co-hosting System 7 + its children (Planet/Station/Area) must
+        // evaluate the DEEPEST region (Area 7, a GRANDCHILD of System 7 absent from System 7's OWN
+        // neighbourhood). The union reaches it via Planet 7 being held.
+        let held = std::collections::BTreeSet::from([SYSTEM_A, PLANET_A, STATION_A, AREA_A]);
+        let realms: Vec<RealmId> = realm_neighbourhood_for_held(0, &held)
+            .iter()
+            .map(|r| r.realm)
+            .collect();
+        for expected in [UNIVERSE, GALAXY, SYSTEM_A, PLANET_A, STATION_A, AREA_A] {
+            assert!(realms.contains(&expected), "the union includes {expected}");
+        }
+        // System B (a SIBLING of System 7 — never a child/ancestor of any held realm) is EXCLUDED.
+        assert!(
+            !realms.contains(&SYSTEM_B),
+            "a sibling system is never in the co-hosting union",
+        );
+        // The union deduplicates (Universe/Galaxy/System 7 appear once even though several held realms
+        // share them as ancestors) — the region set is a valid single-root forest.
+        assert_eq!(
+            realms.len(),
+            6,
+            "6 distinct regions (7-forest minus the sibling System B)"
+        );
     }
 }

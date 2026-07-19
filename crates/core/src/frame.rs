@@ -175,13 +175,19 @@ impl FrameContext for IdentityFrames {
 /// dest realm (the dot stays put while its HUD realm advances). P4/P8/P10 swap in the closed-form
 /// ephemeris `FrameContext` for the real transform with NO caller reshape (frozen signature).
 ///
-/// `parent` is threaded as `None` today: no `Area` realm crosses through P3, so `frame_for_realm` is
-/// always `Some` for a live (`System`/`Planet`/`Ship`/`Station`) dest. SAFE DEGRADE: a dest realm with no
-/// nameable frame (an `Area` lacking its planet-parent provenance, owed at P4+) or a transform error
-/// returns the SOURCE-frame pose UNCHANGED (the label lags) — NEVER a dropped hand-off. The proper
-/// post-commit abort on a genuinely un-nameable dest is a P4 item; the degrade arm is inert now.
-pub fn rebind_pose_to_dest(pose: StampedPose, to_realm: RealmId) -> StampedPose {
-    frame_for_realm(to_realm, None)
+/// `to_parent` supplies the dest realm's PARENT provenance — the one field [`frame_for_realm`] needs to
+/// build the lossy arm: an `Area` frame carries `{planet_seed, area_seed}`, so re-expressing a pose into
+/// an `Area` requires its enclosing `Planet`. Every other realm kind is a one-field lift and ignores
+/// `to_parent`. The caller threads it from the crossing carrier (`CrossingRequest.to_parent`), which the
+/// SOURCE detector fills from the container region's `parent` — a deterministic worldgen fact. SAFE
+/// DEGRADE: a dest realm with no nameable frame (an `Area` genuinely given without its planet parent) or a
+/// transform error returns the SOURCE-frame pose UNCHANGED (the label lags) — NEVER a dropped hand-off.
+pub fn rebind_pose_to_dest(
+    pose: StampedPose,
+    to_realm: RealmId,
+    to_parent: Option<RealmId>,
+) -> StampedPose {
+    frame_for_realm(to_realm, to_parent)
         .and_then(|dest_frame| transfer_frame(&pose, dest_frame, &IdentityFrames).ok())
         .unwrap_or(pose)
 }
@@ -266,7 +272,7 @@ mod tests {
         // into SystemSpace{8} — frame flips, position/velocity/orientation unchanged under IdentityFrames.
         let from = FrameRef::SystemSpace { system_seed: 7 };
         let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = rebind_pose_to_dest(p, RealmId::System(8));
+        let got = rebind_pose_to_dest(p, RealmId::System(8), None);
         assert_eq!(got.frame, FrameRef::SystemSpace { system_seed: 8 });
         assert_eq!(got.pos.offset(), p.pos.offset());
         assert_eq!(got.vel, p.vel);
@@ -274,13 +280,34 @@ mod tests {
     }
 
     #[test]
+    fn rebind_pose_to_dest_flips_into_an_area_frame_given_its_planet_parent() {
+        // The lossy arm: an Area dest IS nameable once its enclosing planet is threaded as `to_parent`, so
+        // the pose re-expresses into AreaLocal{planet_seed, area_seed} — the frame flips, position/velocity
+        // unchanged under IdentityFrames. This is the Area-label fix: the parent provenance the crossing
+        // now carries makes the district frame form (Station/System/Planet needed no parent; Area does).
+        let from = FrameRef::PlanetCentered { planet_seed: 7 };
+        let p = pose_in(from, DVec3::new(25.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
+        let got = rebind_pose_to_dest(p, RealmId::Area(99), Some(RealmId::Planet(7)));
+        assert_eq!(
+            got.frame,
+            FrameRef::AreaLocal {
+                planet_seed: 7,
+                area_seed: 99,
+            }
+        );
+        assert_eq!(got.pos.offset(), p.pos.offset());
+        assert_eq!(got.vel, p.vel);
+    }
+
+    #[test]
     fn rebind_pose_to_dest_safe_degrades_an_unnameable_dest_to_the_source_pose() {
-        // The None fallback arm: an Area realm has no nameable frame WITHOUT its planet parent (threaded as
-        // None here, owed at P4), so `frame_for_realm` is None and the pose is returned UNCHANGED — the
-        // hand-off is never dropped, only the frame label lags. This exercises `unwrap_or(pose)`.
+        // The None fallback arm: an Area realm has no nameable frame WITHOUT its planet parent, so
+        // `frame_for_realm` is None and the pose is returned UNCHANGED — the hand-off is never dropped,
+        // only the frame label lags. This exercises `unwrap_or(pose)` (a caller precondition failure —
+        // the detector always supplies the parent for an Area dest today).
         let from = FrameRef::SystemSpace { system_seed: 7 };
         let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = rebind_pose_to_dest(p, RealmId::Area(99));
+        let got = rebind_pose_to_dest(p, RealmId::Area(99), None);
         assert_eq!(
             got, p,
             "an un-nameable dest returns the source pose verbatim"

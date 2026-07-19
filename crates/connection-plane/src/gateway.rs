@@ -38,8 +38,7 @@ use vd_wire::seams::transfer_control::{
     PrepareReject, PrepareResult, TransferControl, TransferControlAck,
 };
 use vd_wire::session_flow::{
-    GatewayToShard, ShardToGateway, peek_input_seq, peek_is_cut_marker, peek_snapshot_frame_id,
-    retag_snapshot_sub,
+    GatewayToShard, ShardToGateway, peek_input_seq, peek_snapshot_frame_id, retag_snapshot_sub,
 };
 use vd_wire::version::ProtoVersion;
 
@@ -946,6 +945,34 @@ fn push_control(outbox: &mut OutboundBox, to: NodeId, msg: &ServerControlMsg) {
     ));
 }
 
+/// Announce "this entity is YOUR avatar" to one client — the DUAL-signal that carries the
+/// pure-renderer migration (S4). It ALWAYS pushes `AuthorityChanged{entity, sub}` (the sub-keyed
+/// signal an OLD, node-AWARE minor<2 client re-points render authority with) AND — to a peer that
+/// negotiated minor >= 2 — the node-AGNOSTIC `OwnEntity{entity}` (which names ONLY the entity, no
+/// sub / owning node). A pure-renderer client reads `OwnEntity` and IGNORES `AuthorityChanged`; an
+/// old client reads `AuthorityChanged` and ignores the (withheld-anyway) `OwnEntity`. The gateway
+/// emits BOTH so a rolling fleet of both client versions renders the same avatar without a flag day.
+fn announce_own_entity(
+    outbox: &mut OutboundBox,
+    client: NodeId,
+    negotiated_minor: u16,
+    entity: EntityId,
+    sub: SubId,
+) {
+    // The sub-keyed re-point for a node-AWARE (minor<2) client. Always emitted (harmless to a
+    // pure-renderer client, which drops it as an ignored variant).
+    push_control(
+        outbox,
+        client,
+        &ServerControlMsg::AuthorityChanged { entity, sub },
+    );
+    // The node-AGNOSTIC own-entity signal (sender-gates-variants): withheld from a minor<2 peer
+    // (it would desync an old decoder), sent to minor>=2 (the pure-renderer client's own-entity cue).
+    if negotiated_minor >= 2 {
+        push_control(outbox, client, &ServerControlMsg::OwnEntity { entity });
+    }
+}
+
 fn push_to_shard(outbox: &mut OutboundBox, to: NodeId, class: MsgClass, msg: &GatewayToShard) {
     let bytes = postcard::to_allocvec(msg).expect("closed wire enums serialize infallibly");
     outbox.0.push((
@@ -1194,12 +1221,10 @@ fn on_client_input(
         InputRouting::Deduped => stats.inputs_deduped += 1,
         InputRouting::Malformed => stats.inputs_malformed += 1,
     }
-    // COLD: observe the in-band cut marker ONLY while a transfer is in flight (1c sources
-    // it SCRIPTED on the input flow; the client emit is 1e — DEFERRED D-5). `route_input`
-    // never decodes `is_cut_marker`; this is a separate cold decode, off the hot path.
-    if let Some(tp) = session.transfer.as_mut() {
-        on_cut_marker(tp, bytes, config.orchestrator, outbox);
-    }
+    // S3: the in-band cut marker is RETIRED (the cut is server-timed — `apply_request_cut` self-acks
+    // `CutConfirmed`, `apply_freeze` derives the seq at install time). A client `CUT_MARKER` is now an
+    // ordinary input already routed above; there is no per-input marker observation left to do, so
+    // this hot-ish path drops the former cold marker decode.
 }
 
 /// THE gateway counterpart to the saga runtime: consume one `TransferControl` command.
@@ -1228,18 +1253,15 @@ fn on_transfer_control(
     };
     // REDELIVERY GATE (consult-before-effect): a recorded step for THIS transfer re-sends
     // the recorded ack verbatim, no effect — via the ONE dedup accessor `TransferProgress::
-    // recorded` (the cut-marker observer reads the SAME way; DRY-1). A let-chain (each link's
-    // true/false arm is separately exercised: no-transfer / wrong-transfer / unrecorded-step
-    // / recorded-step).
+    // recorded`. A let-chain (each link's true/false arm is separately exercised: no-transfer
+    // / wrong-transfer / unrecorded-step / recorded-step).
     //
-    // RequestCut is EXCLUDED (F1): it is NOT self-acking — its `CutConfirmed` is journaled
-    // at the SAME step-1 slot by the cut-marker observer, NOT by RequestCut itself. So a
-    // redelivered RequestCut must re-run `apply_request_cut` (an idempotent client re-push
-    // the client de-dups), never consult the marker's slot and wrongly answer the command
-    // with a `CutConfirmed`. The marker observer owns the step-1 journal exclusively.
-    let is_request_cut = matches!(cmd, TransferControl::RequestCut { .. });
-    if !is_request_cut
-        && let Some(tp) = session.transfer.as_ref()
+    // S3: `RequestCut` is now SELF-ACKING (`apply_request_cut` returns `CutConfirmed`, journaled
+    // at step 1 by the standard record-then-send path below), so it is NO LONGER excluded from
+    // this gate — a redelivered `RequestCut` re-serves the recorded `CutConfirmed` verbatim, never
+    // re-pushing the client `RequestCut` or re-generating the ack. (The old exclusion existed only
+    // because the now-inert cut-marker observer owned the step-1 journal; the server owns it now.)
+    if let Some(tp) = session.transfer.as_ref()
         && tp.transfer == transfer
         && let Some(prior) = tp.recorded(step)
     {
@@ -1269,8 +1291,8 @@ fn on_transfer_control(
             )
         }
         TransferControl::RequestCut { .. } => {
-            apply_request_cut(session, outbox, transfer, stats);
-            None // the ack (CutConfirmed) is deferred to the cut-marker observer
+            // S3: self-acking `CutConfirmed` (server-timed cut) — journaled at step 1 below.
+            apply_request_cut(session, outbox, transfer, stats)
         }
         TransferControl::FreezeSource {
             marker_seq, dest, ..
@@ -1405,25 +1427,34 @@ fn apply_prepare(
     Some(TransferControlAck::Prepared { transfer, result })
 }
 
-/// `RequestCut` (step 1): mark the cut as requested + ask the client to emit the in-band
-/// cut marker. The ack (`CutConfirmed`) is DEFERRED to the marker observer, so this returns
-/// nothing. Re-pushing `RequestCut` is harmless (reliable+ordered CONTROL; the client
-/// de-dups), so it is not journaled at command time. Requires the matching progress
-/// (`PrepareSubscribe` precedes it); setting `cut_requested` is what later authorizes the
-/// marker observer to confirm a cut (F1: no `CutConfirmed` before its `RequestCut`).
+/// `RequestCut` (step 1): mark the cut as requested + SELF-ACK `CutConfirmed` (the SERVER-TIMED
+/// cut, S3). The cut is now driven ENTIRELY server-side — the saga no longer waits on a client
+/// `CUT_MARKER` (which multi-hop breaks: on hop 2+ the client's session is bound to the FIRST
+/// shard's port, so the marker never reaches the current authority, and the saga stalls
+/// `Cutting`→`CutTimeout`). The gateway still pushes `ServerControlMsg::RequestCut` to the
+/// client (harmless/cosmetic — the old client's marker is now an inert ordinary input, S3),
+/// but the `CutConfirmed` seq here is a PLACEHOLDER: the REAL input-cut seq is derived ATOMICALLY
+/// at cut-install time in [`apply_freeze`] from `last_input_seq` (the leak-free partition point),
+/// and rides `SourceFrozen.drained_seq` + the installed `SeqCut.marker_seq` — never this value.
+/// So the FSM carries this `marker_seq` unread (`CommittingCas` reads `drained_seq`, not it).
+///
+/// Journaled at step 1 (via the standard record-then-send path in `on_transfer_control`), so a
+/// redelivered `RequestCut` re-serves the SAME `CutConfirmed` verbatim (idempotent). Requires the
+/// matching progress (`PrepareSubscribe` precedes it); setting `cut_requested` keeps the F1 guard
+/// intact for the now-inert marker observer. Returns the ack for the caller to journal + reply.
 fn apply_request_cut(
     session: &mut Session,
     outbox: &mut OutboundBox,
     transfer: TransferId,
     stats: &mut GatewayStats,
-) {
+) -> Option<TransferControlAck> {
     let bound = session
         .transfer
         .as_ref()
         .is_some_and(|tp| tp.transfer == transfer);
     if !bound {
         stats.transfer_unroutable += 1; // RequestCut without a matching Prepared: drop+count
-        return;
+        return None;
     }
     session
         .transfer
@@ -1435,6 +1466,12 @@ fn apply_request_cut(
         session.client,
         &ServerControlMsg::RequestCut { transfer },
     );
+    // SELF-ACK the cut server-side (S3). `marker_seq: 0` is a PLACEHOLDER — the FSM carries it
+    // unread; the real input-cut seq is `apply_freeze`'s install-time `last_input_seq`.
+    Some(TransferControlAck::CutConfirmed {
+        transfer,
+        marker_seq: 0,
+    })
 }
 
 /// `FreezeSource` (step 2): INSTALL the live cut — `seq <= marker_seq` stays bound to the
@@ -1454,7 +1491,7 @@ fn apply_request_cut(
 fn apply_freeze(
     session: &mut Session,
     transfer: TransferId,
-    marker_seq: u64,
+    _cmd_marker_seq: u64, // S3: the command's marker is a PLACEHOLDER — the gateway derives its own below.
     dest: NodeId,
     stats: &mut GatewayStats,
 ) -> Option<TransferControlAck> {
@@ -1466,14 +1503,34 @@ fn apply_freeze(
         stats.transfer_unroutable += 1; // no source to freeze: pin the saga (no ack)
         return None;
     }
+    // S3 SERVER-TIMED CUT — derive the input-cut seq at INSTALL time from `last_input_seq`, the
+    // gateway's per-session high-water. `route_input`'s `fetch_max` advanced `last_input_seq` and
+    // then Forwarded EVERY pre-cut input to the current authority (the source), so at the instant
+    // this `store_cut` installs the `SeqCut`, `last_input_seq` == "the highest seq forwarded to the
+    // source". Everything `<= marker_seq` went to the source and WILL apply (in-order,
+    // at-least-once); everything `> marker_seq` buffers for the dest, which resumes at
+    // `marker_seq + 1`. So inputs partition IDENTICALLY across the cut — NONE lost, NONE doubled —
+    // which is exactly why the client `CUT_MARKER` is no longer needed (S3). This RETIRES the OLD
+    // hazard: the OLD marker came from the client's chosen `CUT_MARKER` seq, which could sit BELOW
+    // inputs already Forwarded to the source, so the dest re-applied them (double).
+    //
+    // PARTITION SAFETY IS BY SERIALIZATION, NOT BY THESE ATOMICS (verify wf review a9946a1c). Today
+    // `route_input` (from `on_client_input`) and this `apply_freeze` (from `on_transfer_control`)
+    // both run inside the SINGLE `process_gateway_inbound` system on the ONE sim thread, one inbound
+    // msg at a time — they never overlap, so the `load(marker)`→`store_cut` pair is effectively
+    // atomic w.r.t. the router. **TRIPWIRE (DEFERRED.md D-46):** the "(future) threaded 20 Hz
+    // forwarder" would make this a live TOCTOU — a concurrent `route_input` could `fetch_max(X+1)`
+    // and Forward X+1 to the source in the window between the load and the store (marker=X), then
+    // the dest re-applies X+1 (the dest seeds `last_applied` to `marker_seq`, NOT the source's true
+    // last-applied, so it does NOT dedup this cross-shard double). Before threading the forwarder,
+    // install the cut FIRST with a sentinel marker then settle it (so a racing input Buffers), or
+    // seed the dest watermark from the source's acked last-applied — NOT this gateway high-water.
+    let marker_seq = session.hot.last_input_seq.load(Ordering::Relaxed);
     store_cut(&session.hot, Some(SeqCut { marker_seq, dest }));
-    // drained_seq = marker_seq: the 1c SINGLE-STUB-SHARD value. By construction of the cut
-    // (seq <= marker -> source), the marker IS the last source-bound seq, so "the source
-    // applied input through exactly this seq" == marker_seq. NOT last_input_seq (the OBSERVED
-    // high-water, which a client racing dest-bound input past the marker pushes ABOVE
-    // marker_seq, breaking input-conservation). A real source-applied drain watermark replaces
-    // this at 1d (the shard drain oracle); until then nothing READS drained_seq (the FSM
-    // carries it unread into CommittingCas), so the stub is observability-only.
+    // drained_seq = marker_seq (the install-time high-water): "the source applied input through
+    // exactly this seq" holds because the source applies everything the gateway forwarded (all
+    // `<= marker_seq`). The FSM threads THIS `SourceFrozen.drained_seq` into `CommittingCas` as the
+    // CAS watermark + it seeds the dest's `OpenInputSlot.resume_from_seq` at `apply_commit`.
     Some(TransferControlAck::SourceFrozen {
         transfer,
         drained_seq: marker_seq,
@@ -1713,43 +1770,18 @@ fn apply_release(session: &mut Session, transfer: TransferId) -> Option<Transfer
     Some(TransferControlAck::Released { transfer })
 }
 
-/// COLD cut-marker observer (off the hot path): when a transfer is in flight and a client
-/// `InputDatagram` carries `is_cut_marker`, derive `CutConfirmed{marker_seq}` and ack it —
-/// journaled at step 1 (via the SAME `TransferProgress` accessors as the redelivery gate),
-/// so a triple-sent marker re-sends the SAME ack. REQUIRES `RequestCut` to have been issued
-/// (`tp.cut_requested`) first (F1): a premature/forged marker must NEVER journal a
-/// `CutConfirmed` before its issuing command. 1c sources the marker SCRIPTED (the client
-/// emit is 1e — D-5).
-fn on_cut_marker(
-    tp: &mut TransferProgress,
-    bytes: &[u8],
-    orchestrator: NodeId,
-    outbox: &mut OutboundBox,
-) {
-    // PEEK the two head fields (seq + is_cut_marker) — never a full InputDatagram decode
-    // (D-24 SCALE-CUTDECODE-1): on_cut_marker runs for EVERY input mid-transfer, so it reads
-    // only what it needs off the postcard prefix.
-    let Ok((seq, is_cut_marker)) = peek_is_cut_marker(bytes) else {
-        return; // malformed/truncated/bad-bool = "not a marker"; route_input already counts malformed
-    };
-    if !is_cut_marker {
-        return; // ordinary input
-    }
-    if !tp.cut_requested {
-        return; // F1: a marker before its RequestCut is premature/forged — never confirm it
-    }
-    const CUT_STEP: u32 = 1; // step 1 = RequestCut/CutConfirmed
-    if let Some(prior) = tp.recorded(CUT_STEP) {
-        reply_ack(outbox, orchestrator, prior); // triple-sent marker: re-send the SAME ack
-        return;
-    }
-    let ack = TransferControlAck::CutConfirmed {
-        transfer: tp.transfer,
-        marker_seq: seq,
-    };
-    tp.journal(CUT_STEP, ack);
-    reply_ack(outbox, orchestrator, ack);
-}
+// S3 — THE CUT-MARKER OBSERVER IS RETIRED. The cut is now driven ENTIRELY server-side:
+// `apply_request_cut` self-acks `CutConfirmed` (server-timed advance) and `apply_freeze` derives
+// the real input-cut seq from `last_input_seq` at install time. A client's stamped `CUT_MARKER`
+// (which the OLD client still emits on a `ServerControlMsg::RequestCut`) no longer drives anything
+// — it is an ordinary input routed by `route_input` like any other, so the former `on_cut_marker`
+// per-input observer (a cold `peek_is_cut_marker` decode for every mid-transfer input) is DELETED.
+//
+// This is what makes MULTI-HOP durable crossings work: on hop 2+ the client's session stays bound
+// to the FIRST shard's port, so its marker never reaches the current authority's saga — under the
+// old marker-driven cut that starved the `Cutting` step into `CutTimeout`→abort. Server-timing the
+// cut removes that client dependency entirely. The `TransferProgress::cut_requested` field is kept
+// (set by `apply_request_cut`) as the F1 phase-order record, harmless now that no observer reads it.
 
 /// Handle a shard control reply (attach/detach lifecycle), from shard `from`.
 fn on_shard_control(
@@ -1810,10 +1842,12 @@ fn on_shard_control(
                 .by_session
                 .get(&session_id)
                 .expect("session present");
-            push_control(
+            announce_own_entity(
                 outbox,
                 session.client,
-                &ServerControlMsg::AuthorityChanged { entity, sub },
+                session.negotiated_minor,
+                entity,
+                sub,
             );
         }
         ShardToGateway::SessionDetached { .. } => {
@@ -1844,10 +1878,16 @@ fn on_shard_control(
                 .by_session
                 .get(&session_id)
                 .expect("session present");
-            push_control(
+            // The read-plane re-point at the dest promote (FORK 0a). Announce BOTH signals: a node-aware
+            // client re-points its render authority to `sub` via `AuthorityChanged`; a pure-renderer
+            // client (minor>=2) already renders this entity latest-wins by EntityId and just re-confirms
+            // `OwnEntity` (idempotent). The client learns WHICH entity is its avatar, never WHICH node.
+            announce_own_entity(
                 outbox,
                 session.client,
-                &ServerControlMsg::AuthorityChanged { entity, sub },
+                session.negotiated_minor,
+                entity,
+                sub,
             );
         }
         ShardToGateway::Frame { .. } => {
@@ -2550,7 +2590,10 @@ mod tests {
             ]
         );
         // Attach tick: SubscriptionOpened STRICTLY BEFORE AuthorityChanged (X1),
-        // sub allocated from the monotonic allocator.
+        // sub allocated from the monotonic allocator. The default rig negotiates minor 2
+        // (ProtoVersion::CURRENT), so the gateway ALSO trails `OwnEntity` (the pure-renderer
+        // own-entity signal, S4) after `AuthorityChanged` — the node-aware + node-agnostic
+        // dual-announce for a rolling fleet of both client versions.
         let controls = decode_controls(&sends[2], CLIENT);
         assert_eq!(
             controls,
@@ -2563,12 +2606,63 @@ mod tests {
                     entity: EntityId(77),
                     sub: SubId(0),
                 },
+                ServerControlMsg::OwnEntity {
+                    entity: EntityId(77),
+                },
             ]
         );
         assert_eq!(
             rig.stats(),
             GatewayStats::default(),
             "clean run, zero rejects"
+        );
+    }
+
+    #[test]
+    fn own_entity_trails_authority_changed_for_minor2_and_is_withheld_from_minor0() {
+        // S4 dual-announce (sender-gates-variants): a minor>=2 (pure-renderer) client gets BOTH
+        // `AuthorityChanged{entity, sub}` (the node-aware sub re-point) AND `OwnEntity{entity}` (the
+        // node-AGNOSTIC own-entity cue) at attach — the node-agnostic signal LAST. A minor-0 client
+        // gets ONLY `AuthorityChanged` (the minor-2 OwnEntity is withheld — it would desync an old
+        // decoder). Neither ever learns which shard owns the entity from these two messages.
+        let mut rig = Rig::new();
+        let (_sid, sends) = rig.login(); // default hello = ProtoVersion::CURRENT (minor 2)
+        let controls = decode_controls(&sends[2], CLIENT); // the attach tick's client controls
+        assert_eq!(
+            controls,
+            vec![
+                ServerControlMsg::SubscriptionOpened {
+                    sub: SubId(0),
+                    frame: FrameRef::SystemSpace { system_seed: 7 },
+                },
+                ServerControlMsg::AuthorityChanged {
+                    entity: EntityId(77),
+                    sub: SubId(0),
+                },
+                ServerControlMsg::OwnEntity {
+                    entity: EntityId(77),
+                },
+            ],
+            "minor-2 attach announces AuthorityChanged THEN the node-agnostic OwnEntity",
+        );
+
+        // A minor-0 client: OwnEntity is withheld — ONLY AuthorityChanged names its avatar.
+        let mut rig0 = Rig::new();
+        let (_sid0, sends0) = rig0.login_with(&hello_msg_minor0());
+        let controls0 = decode_controls(&sends0[2], CLIENT);
+        assert_eq!(
+            controls0,
+            vec![
+                ServerControlMsg::SubscriptionOpened {
+                    sub: SubId(0),
+                    frame: FrameRef::SystemSpace { system_seed: 7 },
+                },
+                ServerControlMsg::AuthorityChanged {
+                    entity: EntityId(77),
+                    sub: SubId(0),
+                },
+            ],
+            "a minor-0 client gets AuthorityChanged but NOT the minor-2 OwnEntity (sender-gates-variants)",
         );
     }
 
@@ -3710,7 +3804,11 @@ mod tests {
     }
 
     #[test]
-    fn request_cut_pushes_to_client_and_defers_the_ack_to_the_marker() {
+    fn request_cut_pushes_to_client_and_self_acks_cut_confirmed() {
+        // S3: RequestCut is now SELF-ACKING (server-timed cut). It STILL pushes one
+        // ServerControlMsg::RequestCut to the CLIENT (cosmetic — the old client's marker is inert)
+        // AND self-acks CutConfirmed{marker_seq: 0 placeholder} in the SAME tick — the saga advances
+        // Cutting→Freezing with no client marker. (The real input-cut seq is derived at FreezeSource.)
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
         let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
@@ -3718,37 +3816,38 @@ mod tests {
             session: sid,
             dest: SHARD,
         })]);
-        // RequestCut → exactly one ServerControlMsg::RequestCut to the CLIENT, ZERO SagaAck.
         let sent = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
             transfer: XFER,
             session: sid,
         })]);
         assert_eq!(
             decode_controls(&sent, CLIENT),
-            vec![ServerControlMsg::RequestCut { transfer: XFER }]
+            vec![ServerControlMsg::RequestCut { transfer: XFER }],
+            "RequestCut still pushes to the client (cosmetic — the marker is now inert)",
         );
-        assert_eq!(
-            acks_to_orch(&sent),
-            vec![],
-            "the ack is deferred to the marker"
-        );
-
-        // The scripted in-band cut marker on the INPUT flow → CutConfirmed{marker_seq}.
-        let sent = rig.tick(vec![marker_input(42)]);
         assert_eq!(
             acks_to_orch(&sent),
             vec![TransferControlAck::CutConfirmed {
                 transfer: XFER,
-                marker_seq: 42,
-            }]
+                marker_seq: 0, // placeholder; the real seq is FreezeSource's install-time high-water
+            }],
+            "RequestCut self-acks CutConfirmed server-side (no client marker needed)",
+        );
+
+        // A client CUT_MARKER on the INPUT flow is now INERT — an ordinary input, NO CutConfirmed.
+        let sent = rig.tick(vec![marker_input(42)]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![],
+            "the client marker no longer drives a CutConfirmed (S3 — server-timed cut)",
         );
     }
 
     #[test]
-    fn a_redelivered_request_cut_after_the_marker_re_pushes_never_re_confirms() {
-        // F1: RequestCut is NOT self-acking — its CutConfirmed is journaled at step 1 by the
-        // marker observer. A redelivered RequestCut must re-push to the client (idempotent),
-        // never answer the COMMAND with the marker's CutConfirmed from the shared slot.
+    fn a_redelivered_request_cut_re_serves_the_recorded_cut_confirmed() {
+        // S3: RequestCut is now self-acking and journaled at step 1, so a redelivery re-serves the
+        // SAME CutConfirmed verbatim via the standard redelivery gate — it does NOT re-push the
+        // client RequestCut nor re-generate the ack (the effect already ran once).
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
         let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
@@ -3762,19 +3861,29 @@ mod tests {
                 session: sid,
             })
         };
-        let _ = rig.tick(vec![request_cut()]);
-        let _ = rig.tick(vec![marker_input(5)]); // CutConfirmed journaled at step 1
-        // Redeliver RequestCut: re-pushes to the client, does NOT re-send CutConfirmed.
+        let first = rig.tick(vec![request_cut()]);
+        assert_eq!(
+            decode_controls(&first, CLIENT),
+            vec![ServerControlMsg::RequestCut { transfer: XFER }],
+            "the first RequestCut pushes to the client + self-acks",
+        );
+        let confirmed = vec![TransferControlAck::CutConfirmed {
+            transfer: XFER,
+            marker_seq: 0,
+        }];
+        assert_eq!(acks_to_orch(&first), confirmed);
+        // Redeliver RequestCut: the redelivery gate re-serves the recorded CutConfirmed, and does
+        // NOT re-push the client RequestCut (no re-effect).
         let sent = rig.tick(vec![request_cut()]);
         assert_eq!(
             decode_controls(&sent, CLIENT),
-            vec![ServerControlMsg::RequestCut { transfer: XFER }],
-            "the redelivered RequestCut re-pushes to the client"
+            vec![],
+            "a redelivered RequestCut re-serves the recorded ack — it does NOT re-push the client",
         );
         assert_eq!(
             acks_to_orch(&sent),
-            vec![],
-            "it never answers the command with the marker's CutConfirmed"
+            confirmed,
+            "the redelivery re-serves the SAME CutConfirmed verbatim (idempotent)",
         );
     }
 
@@ -4373,7 +4482,10 @@ mod tests {
     }
 
     #[test]
-    fn a_triple_sent_cut_marker_resends_the_same_cut_confirmed() {
+    fn a_cut_marker_is_inert_no_ack_after_request_cut() {
+        // S3: the client CUT_MARKER is RETIRED. After RequestCut has self-acked CutConfirmed, a
+        // stamped marker on the input flow is just an ordinary input — it drives NO ack, however
+        // many times it is (re)sent. (The saga already advanced server-side; the marker is dead.)
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
         let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
@@ -4385,18 +4497,25 @@ mod tests {
             transfer: XFER,
             session: sid,
         })]);
-        // Three sends of the marker at the same seq (the channel's triple-send) → the SAME
-        // CutConfirmed each time (journaled at step 1), never three distinct acks.
+        // Three sends of the marker at the same seq → ZERO acks each (the marker is inert now).
         let a = rig.tick(vec![marker_input(9)]);
         let b = rig.tick(vec![marker_input(9)]);
         let c = rig.tick(vec![marker_input(9)]);
-        let confirmed = vec![TransferControlAck::CutConfirmed {
-            transfer: XFER,
-            marker_seq: 9,
-        }];
-        assert_eq!(acks_to_orch(&a), confirmed);
-        assert_eq!(acks_to_orch(&b), confirmed);
-        assert_eq!(acks_to_orch(&c), confirmed);
+        assert_eq!(
+            acks_to_orch(&a),
+            vec![],
+            "a stamped marker drives no ack (S3)"
+        );
+        assert_eq!(
+            acks_to_orch(&b),
+            vec![],
+            "a re-sent marker drives no ack (S3)"
+        );
+        assert_eq!(
+            acks_to_orch(&c),
+            vec![],
+            "a re-sent marker drives no ack (S3)"
+        );
     }
 
     fn session_transfer_is_none(rig: &Rig, sid: SessionId) -> bool {
@@ -4664,9 +4783,9 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_marker_before_its_request_cut_is_dropped_not_confirmed() {
-        // F1: a marker that arrives before `RequestCut` was issued (a premature or forged
-        // emit) must NOT be confirmed — no `CutConfirmed`, nothing journaled at step 1.
+    fn a_cut_marker_is_inert_before_and_after_request_cut() {
+        // S3: the client CUT_MARKER never drives a CutConfirmed — before OR after RequestCut. The
+        // cut is server-timed: RequestCut self-acks CutConfirmed, and a marker input is ordinary.
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
         let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
@@ -4674,27 +4793,32 @@ mod tests {
             session: sid,
             dest: SHARD,
         })]);
-        // No RequestCut issued yet — feed a cut marker directly.
+        // A marker BEFORE RequestCut: inert (an ordinary input; no ack).
         let sent = rig.tick(vec![marker_input(7)]);
         assert_eq!(
             acks_to_orch(&sent),
             vec![],
-            "a marker before RequestCut is dropped, never confirmed"
+            "a marker before RequestCut drives no ack (S3 — inert)"
         );
-        // And a LATER RequestCut + marker still confirms cleanly (the premature one left no
-        // poisoned journal entry).
-        let _ = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
+        // RequestCut self-acks CutConfirmed server-side.
+        let sent = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
             transfer: XFER,
             session: sid,
         })]);
-        let sent = rig.tick(vec![marker_input(8)]);
         assert_eq!(
             acks_to_orch(&sent),
             vec![TransferControlAck::CutConfirmed {
                 transfer: XFER,
-                marker_seq: 8,
+                marker_seq: 0,
             }],
-            "the real cut (after RequestCut) confirms with its own marker_seq"
+            "RequestCut self-acks the cut server-side (no client marker)",
+        );
+        // A marker AFTER RequestCut is still inert (the saga already advanced; no second ack).
+        let sent = rig.tick(vec![marker_input(8)]);
+        assert_eq!(
+            acks_to_orch(&sent),
+            vec![],
+            "a marker after RequestCut drives no ack (S3 — the cut is already server-timed)"
         );
     }
 
@@ -5301,6 +5425,11 @@ mod tests {
                     entity: EntityId(77),
                     sub: SubId(1),
                 },
+                // The default rig negotiates minor 2, so the pure-renderer `OwnEntity` trails the
+                // node-aware `AuthorityChanged` at the dest re-point too (S4 dual-announce).
+                ServerControlMsg::OwnEntity {
+                    entity: EntityId(77),
+                },
             ],
             "SubscriptionOpened(1) strictly precedes AuthorityChanged(entity,1) (X1 + A1 re-point)"
         );
@@ -5651,6 +5780,11 @@ mod tests {
                 ServerControlMsg::AuthorityChanged {
                     entity: EntityId(77), // the login avatar (SUBJECT id at the gateway is the dot's entity)
                     sub: SubId(1),
+                },
+                // The default rig is minor 2, so `OwnEntity` re-confirms the avatar (a pure-renderer
+                // client renders it latest-wins by EntityId — the sub is irrelevant to it, S4).
+                ServerControlMsg::OwnEntity {
+                    entity: EntityId(77),
                 },
             ],
             "the dest sub opens (X1) and authority re-points to SubId(1) (FORK 0a / A1)"

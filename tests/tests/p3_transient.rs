@@ -52,6 +52,7 @@ fn transient_batch_ctx(batch: TransferId, dst_fence: vd_core::Fence) -> SagaCtx 
         needs_provision: false,
         from_realm: SRC_REALM,
         to_realm: DST_REALM,
+        to_parent: None,
     }
 }
 
@@ -131,6 +132,7 @@ fn p3_transient_debris_batch_crosses_adopt_before_drop() {
             needs_provision: false,
             from_realm: SRC_REALM,
             to_realm: DST_REALM,
+            to_parent: None,
         },
     );
 
@@ -225,6 +227,7 @@ fn p3_transient_crosses_without_double_holding_under_stagger() {
             needs_provision: false,
             from_realm: SRC_REALM,
             to_realm: DST_REALM,
+            to_parent: None,
         },
     );
 
@@ -285,6 +288,7 @@ fn p3_moving_debris_re_advances_continuously_across_the_cut() {
             needs_provision: false,
             from_realm: SRC_REALM,
             to_realm: DST_REALM,
+            to_parent: None,
         },
     );
     step_asserting_conservation(&mut topo, 24);
@@ -330,6 +334,7 @@ fn p3_fast_debris_re_advances_continuously_under_stagger() {
             needs_provision: false,
             from_realm: SRC_REALM,
             to_realm: DST_REALM,
+            to_parent: None,
         },
     );
     // While the lagging dest's universe-tick trails the source's emit-tick, readvance's
@@ -549,6 +554,7 @@ fn run_durable_to_settle(
             needs_provision: false,
             from_realm: SRC_REALM,
             to_realm: DST_REALM,
+            to_parent: None,
         },
     );
 

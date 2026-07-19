@@ -16,7 +16,7 @@ pub enum WaitField {
     Active,
     /// The number of composited render entities.
     EntityCount,
-    /// 1 once `own_entity` is known (from `AuthorityChanged`), else 0.
+    /// 1 once `own_entity` is known (from `ServerControlMsg::OwnEntity`), else 0.
     OwnEntitySet,
     /// The count of applied snapshots (session-relative; proves frames are landing).
     SnapshotsApplied,

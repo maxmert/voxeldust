@@ -87,6 +87,30 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
             "VD_SHARD_B_PROBE_ADDR",
             format!("{HOST}:{}", ports.probe_shard_b),
         ),
+        // S5b (the acceptance capstone: the LOCAL 3-process seed-forest crossing): the GALAXY
+        // between-space shard's QUIC + probe addrs, surfaced from the covered scheme so a `--triple`
+        // scenario never hand-computes the galaxy offset. Emitted for every slot; bound only by a
+        // `--triple` up.
+        ("VD_GALAXY_ADDR", format!("{HOST}:{}", ports.galaxy)),
+        (
+            "VD_GALAXY_PROBE_ADDR",
+            format!("{HOST}:{}", ports.probe_galaxy),
+        ),
+        // NODE-PER-REALM (Forest): the Planet/Station/Area 7 realm-shards' QUIC + probe addrs, surfaced
+        // from the covered scheme so a `--forest` client.sh/S4 scenario never hand-computes an offset.
+        // Emitted for every slot; bound only by a `--forest` up.
+        ("VD_PLANET_ADDR", format!("{HOST}:{}", ports.planet)),
+        (
+            "VD_PLANET_PROBE_ADDR",
+            format!("{HOST}:{}", ports.probe_planet),
+        ),
+        ("VD_STATION_ADDR", format!("{HOST}:{}", ports.station)),
+        (
+            "VD_STATION_PROBE_ADDR",
+            format!("{HOST}:{}", ports.probe_station),
+        ),
+        ("VD_AREA_ADDR", format!("{HOST}:{}", ports.area)),
+        ("VD_AREA_PROBE_ADDR", format!("{HOST}:{}", ports.probe_area)),
     ];
     if let Some(agent) = agent {
         let devctl = ports.dev_control(agent).map_err(|e| e.to_string())?;

@@ -77,6 +77,14 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
     let client_book: Vec<(NodeId, SocketAddr)> = clients
         .iter()
@@ -93,21 +101,27 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
         "vd-orchestrator",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            orchestrator_env(&addrs, &DEV, &orch_store, false),
+            orchestrator_env(&addrs, &DEV, &orch_store, vd_bins::ClusterShape::Single),
         ),
     );
     guard.push(
         "vd-gateway",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
-            gateway_env(&addrs, &client_book, &dev_auth_pubkey_hex(), &DEV, false),
+            gateway_env(
+                &addrs,
+                &client_book,
+                &dev_auth_pubkey_hex(),
+                &DEV,
+                vd_bins::ClusterShape::Single,
+            ),
         ),
     );
     guard.push(
         "vd-shard",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, false),
+            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
         ),
     );
 
@@ -263,6 +277,14 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);
@@ -274,21 +296,27 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
         "vd-orchestrator",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            orchestrator_env(&addrs, &DEV, &orch_store, false),
+            orchestrator_env(&addrs, &DEV, &orch_store, vd_bins::ClusterShape::Single),
         ),
     );
     nodes.push(
         "vd-gateway",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
-            gateway_env(&addrs, &client_book, &dev_auth_pubkey_hex(), &DEV, false),
+            gateway_env(
+                &addrs,
+                &client_book,
+                &dev_auth_pubkey_hex(),
+                &DEV,
+                vd_bins::ClusterShape::Single,
+            ),
         ),
     );
     nodes.push(
         "vd-shard",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, false),
+            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
         ),
     );
     let _nodes = nodes; // RAII: reaps the cluster on test end or panic

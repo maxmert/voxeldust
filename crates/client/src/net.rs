@@ -19,7 +19,7 @@ use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_devproto::{DevEntityRow, DevPhase, DevState, DevTransferView, InputAction};
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
-    ClientControlMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SnapshotVerdict,
+    ClientControlMsg, EventMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SnapshotVerdict,
 };
 use vd_wire::seams::tickets::LoginTicket;
 use vd_wire::version::ProtoVersion;
@@ -61,10 +61,10 @@ pub struct ClientState {
     ticket: LoginTicket,
     phase: ClientPhase,
     session: Option<SessionId>,
-    /// The SET of subscriptions held (Track R / 1d.2d): grown on `SubscriptionOpened`,
-    /// shrunk on `SubscriptionClosing`. Holds BOTH subs during a transfer overlap so a frame
-    /// on either is admitted; the render layer composites the avatar to ONE sub via
-    /// `AuthorityChanged`.
+    /// The SET of subscriptions held (multi-realm AoI): grown on `SubscriptionOpened`, shrunk on
+    /// `SubscriptionClosing`. A snapshot on ANY held sub is admitted; a pure-renderer client keeps
+    /// this a SET (a player in a ship docked at a station on a planet holds several realm subs at
+    /// once) but renders every entity by its `EntityId` — it never learns which node owns any sub.
     held_subs: std::collections::BTreeSet<vd_wire::channels::SubId>,
     view: DeliveredView,
     render_clock: RenderClock,
@@ -75,16 +75,6 @@ pub struct ClientState {
     /// unbounded per-input history (a 20 Hz session would grow that forever).
     sent_input_count: u64,
     last_sent_input: Option<(SessionId, u64)>,
-    /// Armed by the gateway's `RequestCut` (the SERVER's request); the NEXT input datagram
-    /// stamps `is_cut_marker = true` — the client's half of the transfer cut (the seamless
-    /// input-stream partition point). PASSIVE + server-authoritative: the client never
-    /// initiates a cut and a premature/forged marker is gateway-dropped (F1); the marker only
-    /// anchors WHERE the client's own input stream splits, never WHICH shard owns the entity
-    /// (that is the server's directory CAS). Withholding it cannot veto the transfer — the
-    /// saga's `Cutting` phase aborts on `CutTimeout` and the geometric dwell re-arms. The
-    /// gateway confirms the cut from THIS in-band marker (`on_cut_marker`); the reliable
-    /// `CutEmitted` backstop is a deliberately deferred layer (a gateway no-op in P1).
-    cut_marker_armed: bool,
     closing: bool,
     /// Whether the cluster tick rate has been learned from the wire (R1) — applied
     /// once; a duplicate `UniverseRate` must not reset the render cursor.
@@ -121,7 +111,6 @@ impl ClientState {
             next_input_seq: 0,
             sent_input_count: 0,
             last_sent_input: None,
-            cut_marker_armed: false,
             closing: false,
             tick_hz_learned: false,
             decode_errors: 0,
@@ -219,8 +208,12 @@ impl ClientState {
                 self.view.drop_sub(sub);
                 self.held_subs.remove(&sub);
             }
-            ServerControlMsg::AuthorityChanged { entity, sub } => {
-                self.view.set_authority(entity, sub);
+            // THE pure-renderer own-entity signal (minor 2): name the client's own avatar by
+            // EntityId alone — NO sub, NO owning node. The client renders every entity at its
+            // authoritative coordinate; this just tells it which dot is itself. It never learns
+            // which shard simulates the avatar (that is the server's business, invisible here).
+            ServerControlMsg::OwnEntity { entity } => {
+                self.view.set_own_entity(entity);
             }
             ServerControlMsg::Close { .. } => {
                 self.phase = ClientPhase::Closed;
@@ -228,15 +221,30 @@ impl ClientState {
             ServerControlMsg::UniverseRate { tick_hz } => {
                 self.set_tick_hz_from_wire(tick_hz);
             }
-            // The SERVER's transfer-cut request: arm the in-band CUT_MARKER for the next input
-            // (the client's PASSIVE half of a server-driven, server-abortable cut). See
-            // `cut_marker_armed`. A marker before this request is gateway-dropped (F1), so the
-            // client can neither initiate nor veto the transfer.
-            ServerControlMsg::RequestCut { .. } => {
-                self.cut_marker_armed = true;
-            }
-            // Other transfer/ping control is P2+; a P1.5 client ignores it (no crash).
+            // Node-AWARE legacy control a pure-renderer client no longer acts on: `AuthorityChanged`
+            // (the sub re-point — superseded by `OwnEntity` + EntityId-keyed latest-wins render) and
+            // `RequestCut` (the cut is server-timed now, S3 — the client stamps nothing). Both are
+            // still SENT by the gateway to old (minor<2) clients, so a minor-2 client ignores them
+            // (no crash) — forward/backward compatibility, counted as benign.
             _ => self.ignored += 1,
+        }
+    }
+
+    /// Evict one entity's delivered copy (the reliable `EventMsg::EntityRemoved`, S6): the
+    /// server-authoritative "this entity left your view" signal a pure-renderer client needs
+    /// because it keys tracks by `EntityId` (a `SubscriptionClosing` can no longer evict them).
+    /// Node-agnostic: it names only the entity, never a node.
+    ///
+    /// ROUTING: `EventMsg` shares the reliable Control carrier but is a DISTINCT enum, so the
+    /// gateway will emit it on a dedicated reliable class (owed WITH the send-once server filter,
+    /// S0 — until the server stops streaming a de-owned copy there is nothing for this to evict).
+    /// This method is the client half, driven by the bin's inbound router and exercised directly in
+    /// the unit tests; it decodes an `EventMsg` and applies the eviction.
+    pub fn apply_event(&mut self, event: EventMsg) {
+        match event {
+            EventMsg::EntityRemoved { entity } => self.view.remove_entity(entity),
+            // A cosmetic notice (no state) — ignored by the headless/pure-renderer core.
+            EventMsg::Notice { .. } => self.ignored += 1,
         }
     }
 
@@ -283,9 +291,9 @@ impl ClientState {
                 let (movement, look, action_bits) = self.input.take_frame();
                 let input = InputDatagram {
                     seq,
-                    // Stamp the CUT_MARKER on exactly this input if the server armed one via
-                    // `RequestCut` (taken once — the seamless input-stream split point).
-                    is_cut_marker: std::mem::take(&mut self.cut_marker_armed),
+                    // S3/S6: the cut is SERVER-TIMED — the client stamps NOTHING. A pure renderer
+                    // just forwards its inputs; it never learns (nor marks) a transfer boundary.
+                    is_cut_marker: false,
                     client_tick: self.tick,
                     movement,
                     look,
@@ -700,62 +708,95 @@ mod tests {
     }
 
     #[test]
-    fn request_cut_stamps_the_next_input_marker_exactly_once() {
+    fn the_client_never_stamps_a_cut_marker() {
+        // S6: the cut is SERVER-TIMED — a pure-renderer client stamps NOTHING. Even a legacy
+        // `RequestCut` (still sent to old clients) is IGNORED (benign), never acted on: the next
+        // input carries `is_cut_marker = false` like every input.
         let mut c = core();
         activate(&mut c);
-        // A live input before any cut request carries NO marker.
         c.step(0.0);
         let before: InputDatagram =
             postcard::from_bytes(&c.transport.sent.last().expect("input sent").1).expect("decode");
-        assert!(
-            !before.is_cut_marker,
-            "no CUT_MARKER before the server requests one"
-        );
+        assert!(!before.is_cut_marker, "the client never marks an input");
 
-        // The SERVER requests the cut → the NEXT input stamps the in-band marker (the client's
-        // passive half; the client never initiates). Server-authoritative: the gateway confirms
-        // this marker, and a marker BEFORE RequestCut would be dropped (F1).
+        // Deliver a legacy RequestCut: it is IGNORED (a minor-2 client no longer acts on it).
         let req = postcard::to_allocvec(&ServerControlMsg::RequestCut {
             transfer: TransferId(1),
         })
         .expect("test fixture");
         c.transport.deliver(GATEWAY, MsgClass::Control, req);
         c.step(0.0);
-        let marked: InputDatagram =
-            postcard::from_bytes(&c.transport.sent.last().expect("input sent").1).expect("decode");
-        assert!(
-            marked.is_cut_marker,
-            "the input after RequestCut carries the in-band CUT_MARKER"
-        );
-        // RequestCut is HANDLED, not counted as an ignored drop.
-        assert_eq!(
-            c.state().dropped_counts().1,
-            0,
-            "RequestCut is handled, not ignored"
-        );
-
-        // Taken exactly once: the following input is unmarked again (not sticky every tick).
-        c.step(0.0);
         let after: InputDatagram =
             postcard::from_bytes(&c.transport.sent.last().expect("input sent").1).expect("decode");
         assert!(
             !after.is_cut_marker,
-            "the marker is stamped once, not every tick"
+            "still no CUT_MARKER after a legacy RequestCut (the cut is server-timed)"
+        );
+        assert_eq!(
+            c.state().dropped_counts().1,
+            1,
+            "the legacy RequestCut is counted as one benign ignored variant"
         );
     }
 
     #[test]
-    fn authority_changed_marks_own_entity() {
+    fn own_entity_via_own_entity() {
+        // The node-agnostic OwnEntity signal names this client's avatar by EntityId alone.
         let mut c = core();
         activate(&mut c);
-        let msg = postcard::to_allocvec(&ServerControlMsg::AuthorityChanged {
-            entity: ent(),
-            sub: SubId(0),
-        })
-        .expect("test fixture");
+        let msg =
+            postcard::to_allocvec(&ServerControlMsg::OwnEntity { entity: ent() }).expect("fixture");
         c.transport.deliver(GATEWAY, MsgClass::Control, msg);
         c.step(0.0);
         assert_eq!(c.state().own_entity(), Some(ent()));
+        // A legacy AuthorityChanged (still sent to old clients) is IGNORED by a pure renderer.
+        let auth = postcard::to_allocvec(&ServerControlMsg::AuthorityChanged {
+            entity: EntityId::pack(EntityKind::Player, 1, 2, 2),
+            sub: SubId(0),
+        })
+        .expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, auth);
+        c.step(0.0);
+        assert_eq!(
+            c.state().own_entity(),
+            Some(ent()),
+            "AuthorityChanged does not re-point the own entity on a pure-renderer client"
+        );
+    }
+
+    #[test]
+    fn entity_removed_evicts_a_de_owned_entity_copy() {
+        // S6: the reliable per-entity eviction (EventMsg::EntityRemoved) via the client's
+        // apply_event router. A de-owned copy is dropped; the own avatar's removal clears own_entity.
+        let mut c = core();
+        activate(&mut c);
+        let own =
+            postcard::to_allocvec(&ServerControlMsg::OwnEntity { entity: ent() }).expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, own);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
+        c.step(10.0);
+        assert_eq!(
+            c.state().view().render(100.0).len(),
+            1,
+            "the avatar is delivered"
+        );
+        assert_eq!(c.state().own_entity(), Some(ent()));
+
+        // A Notice event is benign (counted ignored). Then EntityRemoved evicts the avatar.
+        c.state_mut()
+            .apply_event(EventMsg::Notice { text: "hi".into() });
+        c.state_mut()
+            .apply_event(EventMsg::EntityRemoved { entity: ent() });
+        assert!(
+            c.state().view().render(100.0).is_empty(),
+            "the removed entity's track is evicted"
+        );
+        assert_eq!(
+            c.state().own_entity(),
+            None,
+            "removing the avatar clears own_entity"
+        );
     }
 
     #[test]
@@ -807,10 +848,11 @@ mod tests {
     }
 
     #[test]
-    fn subscription_closing_evicts_the_subs_tracks_and_clears_the_held_sub() {
-        // The reliable per-sub teardown: a delivered entity exists, then the gateway closes
-        // the sub → its track is evicted (view bounded to the live set) and the held sub is
-        // cleared (not left dangling), so a later SubscriptionOpened cleanly re-arms.
+    fn subscription_closing_clears_the_held_sub_but_keeps_entity_tracks() {
+        // The reliable per-sub teardown on a PURE-RENDERER client: closing a sub clears it from the
+        // held SET (its datagrams stop being admitted) and forgets that sub's staleness high-water,
+        // but it does NOT evict entity tracks — those are EntityId-keyed (per-entity eviction is the
+        // reliable EventMsg::EntityRemoved). This is the intended pure-renderer split.
         let mut c = core();
         activate(&mut c);
         c.transport
@@ -818,7 +860,7 @@ mod tests {
         c.step(10.0);
         assert_eq!(c.state().view().render(10.0).len(), 1, "entity delivered");
 
-        // Closing a sub we do NOT hold leaves the held sub + our tracks intact.
+        // Closing a sub we do NOT hold leaves the held set + our tracks intact.
         let foreign =
             postcard::to_allocvec(&ServerControlMsg::SubscriptionClosing { sub: SubId(5) })
                 .expect("fixture");
@@ -835,14 +877,16 @@ mod tests {
             "our entity still present"
         );
 
+        // Close the HELD sub: it leaves the set, but the entity track SURVIVES (EntityId-keyed).
         let closing =
             postcard::to_allocvec(&ServerControlMsg::SubscriptionClosing { sub: SubId(0) })
                 .expect("fixture");
         c.transport.deliver(GATEWAY, MsgClass::Control, closing);
         c.step(10.0);
-        assert!(
-            c.state().view().render(10.0).is_empty(),
-            "the closed sub's track is evicted"
+        assert_eq!(
+            c.state().view().render(10.0).len(),
+            1,
+            "the entity track survives a SubscriptionClosing (only EntityRemoved evicts it)"
         );
         assert!(c.state().held_subs().is_empty(), "held set cleared");
         // It is NOT counted as an ignored drop — it was handled.
@@ -1180,12 +1224,9 @@ mod tests {
     fn devstate_when_live_reports_the_decoded_delivered_view() {
         let mut c = core();
         activate(&mut c);
-        let auth = postcard::to_allocvec(&ServerControlMsg::AuthorityChanged {
-            entity: ent(),
-            sub: SubId(0),
-        })
-        .expect("fixture");
-        c.transport.deliver(GATEWAY, MsgClass::Control, auth);
+        let own =
+            postcard::to_allocvec(&ServerControlMsg::OwnEntity { entity: ent() }).expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, own);
         c.transport
             .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
         c.step(10.0);
@@ -1228,12 +1269,9 @@ mod tests {
         // its own display cursor.
         let mut c = core();
         activate(&mut c);
-        let auth = postcard::to_allocvec(&ServerControlMsg::AuthorityChanged {
-            entity: ent(),
-            sub: SubId(0),
-        })
-        .expect("fixture");
-        c.transport.deliver(GATEWAY, MsgClass::Control, auth);
+        let own =
+            postcard::to_allocvec(&ServerControlMsg::OwnEntity { entity: ent() }).expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, own);
         c.transport
             .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
         c.step(10.0);

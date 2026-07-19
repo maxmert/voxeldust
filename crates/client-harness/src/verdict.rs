@@ -9,11 +9,12 @@
 //!    a sphere or a box). A crossing landed in the right box iff [`expected_box`] flips from the
 //!    source realm to the dest realm — pure math, never GPU-inferred.
 //!
-//! 2. **Anti-vacuity crossing (adversary H1).** [`crossing_was_real`] proves the two-holder
-//!    overlap window was REAL — the avatar had a delivered track on BOTH the source AND the dest
-//!    sub at the observed frame — so a dest-sub-never-delivered regression FAILS the gate instead
-//!    of passing vacuously (the dot merely re-labeled box B by its `FrameRef` while the dest stream
-//!    carried nothing). Reuses the existing [`DeliveredView::subs_holding`] anti-vacuity probe.
+//! 2. **Anti-vacuity crossing (adversary H1), pure-renderer form (S6).** [`crossing_was_real`] proves
+//!    the dest stream ACTUALLY CARRIED the entity — a delivered track exists — so a re-home that only
+//!    re-labeled box B by its `FrameRef` while the dest stream carried nothing FAILS the gate instead
+//!    of passing vacuously. (The old "two-holder source+dest sub overlap" is deleted by the
+//!    pure-renderer collapse: the client keys tracks by `EntityId` and never learns the owning node,
+//!    so the same avatar on both subs folds into ONE track — a delivered track is the anti-vacuity.)
 //!
 //! 3. **Pixel corroboration (adversary H2).** [`dot_pixels_within_box_region`] confirms the dot's
 //!    non-clear PIXELS fall inside the box's projected screen rectangle — the ONE legitimate
@@ -27,7 +28,6 @@ use vd_client::view::DeliveredView;
 use vd_core::EntityId;
 use vd_core::geometry::Boundary;
 use vd_core::pose::RealmId;
-use vd_wire::channels::SubId;
 
 use crate::camera::{CaptureCamera, ScreenAabb, ScreenPos};
 
@@ -79,21 +79,16 @@ pub fn expected_box(scene: &RealmScene, world_p: DVec3) -> Option<RealmId> {
     best.map(|(_, realm)| realm)
 }
 
-/// **Anti-vacuity (H1):** was the crossing REAL — did `entity` have a delivered track on BOTH
-/// `source` and `dest` at this observed frame? Reuses [`DeliveredView::subs_holding`] (the subs
-/// currently holding a track for the entity). A gate calls this at the overlap frame: `true` proves
-/// the two-holder window was real (the dest stream actually carried the entity), so asserting the
-/// dot then landed in the dest box is NOT vacuous. A dest-sub-never-delivered regression returns
-/// `false` here even though the entity's `FrameRef` may already read the dest realm.
+/// **Anti-vacuity (H1), pure-renderer form (S6):** was the crossing REAL — does `entity` have a
+/// DELIVERED track at this observed frame? A pure-renderer client keys tracks by `EntityId` (it never
+/// learns which node owns the entity), so the old "two-holder source+dest sub overlap" is deleted:
+/// the same avatar arriving on both subs folds into ONE track. The surviving anti-vacuity is that the
+/// dest stream ACTUALLY CARRIED the entity — a delivered track exists — so asserting the dot then
+/// landed in the dest box is NOT vacuous (a re-home that only re-labeled the `FrameRef` without a
+/// real delivered pose returns `false`). `true` iff a delivered track exists for `entity`.
 #[must_use]
-pub fn crossing_was_real(
-    view: &DeliveredView,
-    entity: EntityId,
-    source: SubId,
-    dest: SubId,
-) -> bool {
-    let holders = view.subs_holding(entity);
-    holders.contains(&source) && holders.contains(&dest)
+pub fn crossing_was_real(view: &DeliveredView, entity: EntityId) -> bool {
+    !view.subs_holding(entity).is_empty()
 }
 
 /// **Pixel corroboration (H2):** do the dot's non-clear PIXELS fall inside the box's projected
@@ -203,6 +198,7 @@ mod tests {
     use vd_core::geometry::{CrossEffect, RealmBoundary};
     use vd_core::pose::{FrameRef, LatticePos, StampedPose};
     use vd_core::{TickId, UniverseTick};
+    use vd_wire::channels::SubId;
     use vd_wire::channels::{EntitySnap, SnapshotDatagram};
 
     fn ent(seq: u64) -> EntityId {
@@ -378,32 +374,20 @@ mod tests {
     }
 
     #[test]
-    fn crossing_was_real_requires_both_holders() {
-        // Build an overlap: the dot arrives on BOTH sub 0 (source) and sub 1 (dest).
+    fn crossing_was_real_requires_a_delivered_track() {
+        // Pure-renderer anti-vacuity (S6): the crossing is real iff a DELIVERED track exists.
         let mut view = DeliveredView::default();
-        let both = BTreeSet::from([SubId(0), SubId(1)]);
         let dot = ent(1);
-        view.on_snapshot(&both, snap_on(SubId(0), 1, 10, dot, 0.0));
-        // Before the dest delivered, the overlap is NOT real (only the source holds).
-        assert!(!crossing_was_real(&view, dot, SubId(0), SubId(1)));
-        // After the dest sub delivers, both hold → the crossing was real.
-        view.on_snapshot(&both, snap_on(SubId(1), 1, 10, dot, 50.0));
-        assert!(crossing_was_real(&view, dot, SubId(0), SubId(1)));
-        // An entity with no tracks at all → not real (empty holders).
-        assert!(!crossing_was_real(&view, ent(99), SubId(0), SubId(1)));
-    }
-
-    #[test]
-    fn crossing_was_real_fails_when_only_the_dest_holds() {
-        // The mirror regression: the SOURCE never delivered (only the dest holds) → not a real
-        // two-holder overlap. Guards the `contains(&source)` conjunct.
-        let mut view = DeliveredView::default();
-        let dot = ent(2);
+        // No track yet → not real (a FrameRef-only re-label would be vacuous).
+        assert!(!crossing_was_real(&view, dot));
+        // A delivered pose on ANY held sub → real (the dest stream carried the entity).
         view.on_snapshot(
             &BTreeSet::from([SubId(1)]),
-            snap_on(SubId(1), 1, 10, dot, 5.0),
+            snap_on(SubId(1), 1, 10, dot, 50.0),
         );
-        assert!(!crossing_was_real(&view, dot, SubId(0), SubId(1)));
+        assert!(crossing_was_real(&view, dot));
+        // An entity with no delivered track at all → not real.
+        assert!(!crossing_was_real(&view, ent(99)));
     }
 
     // ---- pixel corroboration ---------------------------------------------------

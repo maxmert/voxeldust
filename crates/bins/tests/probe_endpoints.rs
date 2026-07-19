@@ -29,6 +29,14 @@ fn addrs() -> ClusterAddrs {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     }
 }
 
@@ -80,7 +88,7 @@ fn cluster_converges_to_ready_and_all_endpoints_serve() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs, &DEV, &store, false),
+            &orchestrator_env(&addrs, &DEV, &store, vd_bins::ClusterShape::Single),
         )
         .expect("spawn orch"),
     );
@@ -89,7 +97,7 @@ fn cluster_converges_to_ready_and_all_endpoints_serve() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
             &common,
-            &gateway_env(&addrs, &[], &auth, &DEV, false),
+            &gateway_env(&addrs, &[], &auth, &DEV, vd_bins::ClusterShape::Single),
         )
         .expect("spawn gateway"),
     );
@@ -98,7 +106,7 @@ fn cluster_converges_to_ready_and_all_endpoints_serve() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &common,
-            &shard_env(&addrs, &DEV, false),
+            &shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
         )
         .expect("spawn shard"),
     );
@@ -143,7 +151,7 @@ fn orchestrator_alone_is_ready_without_a_shard() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs, &DEV, &store, false),
+            &orchestrator_env(&addrs, &DEV, &store, vd_bins::ClusterShape::Single),
         )
         .expect("spawn orch"),
     );
@@ -189,14 +197,14 @@ fn sigterm_de_routes_readyz_while_healthz_stays_live() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs, &DEV, &store, false),
+            &orchestrator_env(&addrs, &DEV, &store, vd_bins::ClusterShape::Single),
         )
         .expect("spawn orch"),
     );
     // The gateway as a STANDALONE child so we can grab its pid + SIGTERM it (Cluster only offers SIGKILL).
     // A drain LINGER holds it in Terminating for 1.5 s after de-routing, so the 503 window is observable
     // (without the linger a store-less gateway exits within ~1 tick, faster than a probe poll).
-    let mut gw_env = gateway_env(&addrs, &[], &auth, &DEV, false);
+    let mut gw_env = gateway_env(&addrs, &[], &auth, &DEV, vd_bins::ClusterShape::Single);
     gw_env.push(("VD_SHUTDOWN_LINGER_MS", "1500".to_owned()));
     let mut gateway: Child =
         spawn_node(env!("CARGO_BIN_EXE_vd-gateway"), &common, &gw_env).expect("spawn gateway");
@@ -248,7 +256,7 @@ fn a_partitioned_shard_goes_not_ready_but_stays_live() {
     let store = orch_store("part");
     let common = common_env(&trust.display().to_string(), &DEV);
 
-    let mut shard_e = shard_env(&addrs, &DEV, false);
+    let mut shard_e = shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single);
     // A small active self-fence: grace 20 ticks (~0.4 s @50Hz), recheck 8 (grace >= 2*recheck). RealmConfirmedAt
     // re-arms every recheck round-trip while the orchestrator is alive; freezes when it dies.
     shard_e.push(("VD_SELF_FENCE_GRACE", "20".to_owned()));
@@ -260,7 +268,7 @@ fn a_partitioned_shard_goes_not_ready_but_stays_live() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs, &DEV, &store, false),
+            &orchestrator_env(&addrs, &DEV, &store, vd_bins::ClusterShape::Single),
         )
         .expect("spawn orch"),
     );

@@ -126,6 +126,131 @@ pub const SHARD: NodeId = NodeId(3);
 /// N-shard k3d roster generalization (a `Vec` of shard ids/addrs, N-entry rosters) is ledgered as a
 /// separate cloud (#123) slice in `docs/design/DEFERRED.md`.
 pub const SHARD_B: NodeId = NodeId(4);
+/// S5b — the GALAXY between-space shard (`RealmId::System(GALAXY_SEED)`, the seed forest's
+/// between-systems space). It OWNS System 7 + System 8 as its CHILDREN, so a SIBLING crossing routes
+/// THROUGH it (leave System 7 → land in the Galaxy → the Galaxy shard detects the entry into System 8),
+/// and authority can REST in the between-space so the multi-hop dot is NEVER orphaned. Matches the
+/// harness `GALAXY` (`tests/src/lib.rs`) + `vd_core::worldgen`'s `GALAXY = System(1)`. Absent from a
+/// single-shard / dual `up`; only a [`ClusterShape::Triple`] `up` brings it into any roster. HR3: one
+/// more `NodeId` in a SET, never a shard KIND — adding it is a roster extension, never a code branch.
+pub const GALAXY: NodeId = NodeId(5);
+
+/// NODE-PER-REALM (task #149): the Planet 7 realm-shard (`RealmId::Planet(7)`) — its OWN node, so a
+/// walk into Planet 7's SOI is a CROSS-NODE saga, not a co-hosted local relabel. Present only in a
+/// [`ClusterShape::Forest`] `up`. HR3: one more `NodeId` in the roster, never a shard KIND.
+pub const PLANET_A_SHARD: NodeId = NodeId(6);
+/// NODE-PER-REALM: the Station 7 realm-shard (`RealmId::Station(7)`) — its OWN node. Forest-only.
+pub const STATION_A_SHARD: NodeId = NodeId(7);
+/// NODE-PER-REALM: the Area 7 realm-shard (`RealmId::Area(7)`) — its OWN node (the DEEPEST realm). Forest-only.
+pub const AREA_A_SHARD: NodeId = NodeId(8);
+
+/// The GALAXY realm seed — must match `vd_core::worldgen`'s Galaxy (`System(1)`, the between-systems
+/// space) and the harness `GALAXY_SEED`. The galaxy shard hosts `RealmId::System(GALAXY_SEED)`.
+pub const GALAXY_SEED: u64 = 1;
+
+/// The seed of the System-7 sub-forest (Planet 7 / Station 7 / Area 7 all key on 7 in `vd_core::worldgen`).
+/// The [`ClusterShape::Forest`] realm-shards host `Planet(FOREST_CHILD_SEED)` etc.
+pub const FOREST_CHILD_SEED: u64 = 7;
+
+/// The TOPOLOGY shape of a dev cluster — how many stub shards it spawns. A DATA value the shared env
+/// builders fan out on (booking extra peers / rosters), NOT a shard-kind match in a feature (HR3): every
+/// spawned shard runs the SAME `vd-shard` binary; the shape only says which node ids are in the roster.
+///
+/// - [`Single`](ClusterShape::Single): orchestrator + gateway + System 7 (the base `up`).
+/// - [`Dual`](ClusterShape::Dual): + the DEST shard [`SHARD_B`] (System 8) — the `--dual` DIRECT-re-home
+///   playground (a born-inside or injected walk-into trigger re-homes 7→8 in one hop, no Galaxy).
+/// - [`Triple`](ClusterShape::Triple): + the DEST [`SHARD_B`] AND the [`GALAXY`] between-space shard —
+///   the `--triple` SEED-FOREST cluster where a durable dot walks System 7 → Galaxy → System 8 and back,
+///   coordinate-driven, with the Galaxy rendered as the containing box (never orphaned). S5b.
+/// - [`Forest`](ClusterShape::Forest): NODE-PER-REALM (task #149) — SIX single-realm shards, one per realm
+///   of the whole seed sub-forest: System 7, Planet 7, Station 7, Area 7, Galaxy (System 1), System 8. NO
+///   `VD_HELD_REALMS` co-hosting — EVERY re-home (including into a System-7 child) is a uniform CROSS-NODE
+///   saga, so the source==dest degenerate case never arises. This is the shape the node-per-realm walk gate
+///   (`crates/bins/tests/node_per_realm_walk.rs`) + the `crossing-playground.sh` launcher stand up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClusterShape {
+    Single,
+    Dual,
+    Triple,
+    Forest,
+}
+
+/// ONE extra realm-shard beyond the base orchestrator+gateway+System-7 trio: its roster [`NodeId`], the
+/// [`RealmId`](vd_core::pose::RealmId) it SINGLY hosts, and its QUIC + probe bind. The shape's fan-out
+/// ([`ClusterShape::extra_realm_shards`]) returns these as DATA the env builders + the launcher iterate —
+/// never a shard-KIND branch (HR3). Each carries its realm so the shard bin can boot the right realm KIND
+/// (`VD_REALM_KIND`), not just a `System(seed)`.
+#[derive(Clone, Copy, Debug)]
+pub struct RealmShard {
+    pub node: NodeId,
+    pub realm: vd_core::pose::RealmId,
+    pub quic: SocketAddr,
+    pub probe: SocketAddr,
+}
+
+impl ClusterShape {
+    /// Does this shape spawn the DEST shard [`SHARD_B`] (System 8)? Dual + Triple do; Single does not.
+    /// (Forest hosts System 8 too, but as one of its uniform realm-shards — see [`extra_realm_shards`].)
+    ///
+    /// [`extra_realm_shards`]: ClusterShape::extra_realm_shards
+    #[must_use]
+    pub fn has_dest(self) -> bool {
+        matches!(self, ClusterShape::Dual | ClusterShape::Triple)
+    }
+
+    /// Does this shape spawn the [`GALAXY`] between-space shard (System 1) via the Triple wiring? Only
+    /// Triple does (Forest also hosts the Galaxy, but through [`extra_realm_shards`], not this flag).
+    #[must_use]
+    pub fn has_galaxy(self) -> bool {
+        matches!(self, ClusterShape::Triple)
+    }
+
+    /// The single-realm shards this shape stands up BEYOND the base orchestrator + gateway + System-7 shard
+    /// (which always hosts `System(realm_seed)`). Non-empty ONLY for [`Forest`](ClusterShape::Forest): the
+    /// Planet 7 / Station 7 / Area 7 children, the Galaxy between-space, and System 8 — each its OWN node so
+    /// every re-home is a uniform CROSS-NODE saga. Single/Dual/Triple keep the legacy explicit wiring
+    /// (their System 8 / Galaxy ride the `has_dest`/`has_galaxy` flags in the `*_env` builders), so this is
+    /// EMPTY for them — byte-identical. The System-7 shard is NOT listed (it is the always-present base).
+    #[must_use]
+    pub fn extra_realm_shards(self, a: &ClusterAddrs, p: &DevClusterParams) -> Vec<RealmShard> {
+        use vd_core::pose::RealmId;
+        if self != ClusterShape::Forest {
+            return Vec::new();
+        }
+        vec![
+            RealmShard {
+                node: PLANET_A_SHARD,
+                realm: RealmId::Planet(FOREST_CHILD_SEED),
+                quic: a.planet,
+                probe: a.planet_probe,
+            },
+            RealmShard {
+                node: STATION_A_SHARD,
+                realm: RealmId::Station(FOREST_CHILD_SEED),
+                quic: a.station,
+                probe: a.station_probe,
+            },
+            RealmShard {
+                node: AREA_A_SHARD,
+                realm: RealmId::Area(FOREST_CHILD_SEED),
+                quic: a.area,
+                probe: a.area_probe,
+            },
+            RealmShard {
+                node: GALAXY,
+                realm: RealmId::System(GALAXY_SEED),
+                quic: a.galaxy,
+                probe: a.galaxy_probe,
+            },
+            RealmShard {
+                node: SHARD_B,
+                realm: RealmId::System(p.realm_seed_b),
+                quic: a.shard_b,
+                probe: a.shard_b_probe,
+            },
+        ]
+    }
+}
 
 // ---- dev auth identity -------------------------------------------------------
 
@@ -383,6 +508,21 @@ pub struct ClusterAddrs {
     /// (a `Vec` of shard addrs) is ledgered to cloud #123 in `docs/design/DEFERRED.md`.
     pub shard_b: SocketAddr,
     pub shard_b_probe: SocketAddr,
+    /// S5b — the GALAXY between-space shard's QUIC bind + probe. Populated for every cluster (data, no
+    /// branch); dialed/spawned ONLY in [`ClusterShape::Triple`]/[`Forest`](ClusterShape::Forest) mode. Twin
+    /// of the [`shard_b`](Self::shard_b) pair — one more shard in the roster, never a shard KIND.
+    pub galaxy: SocketAddr,
+    pub galaxy_probe: SocketAddr,
+    /// NODE-PER-REALM (task #149) — the Planet 7 / Station 7 / Area 7 realm-shards' QUIC binds + probes.
+    /// Populated for every cluster (data, no branch); dialed/spawned ONLY in [`Forest`](ClusterShape::Forest)
+    /// mode, where each hosts exactly ONE realm so every re-home is a uniform CROSS-NODE saga. Twins of the
+    /// [`galaxy`](Self::galaxy) pair — three more shards in the roster, never a shard KIND.
+    pub planet: SocketAddr,
+    pub planet_probe: SocketAddr,
+    pub station: SocketAddr,
+    pub station_probe: SocketAddr,
+    pub area: SocketAddr,
+    pub area_probe: SocketAddr,
 }
 
 /// Format a peer address book as the `id=addr,…` string the nodes parse from
@@ -707,20 +847,40 @@ pub fn orchestrator_env(
     a: &ClusterAddrs,
     p: &DevClusterParams,
     store_path: &str,
-    dual: bool,
+    shape: ClusterShape,
 ) -> Vec<(&'static str, String)> {
-    // Track R / 1d.2: in DUAL mode the orchestrator INITIATES realm-grants / re-home to the DEST, so it
-    // books SHARD_B AND drives the universe clock to it (a follower whose clock never advances can never
-    // win its realm lease — the harness `clock_peers = {GW, SHARD, DEST}` rule). The DEST is ALSO added to
-    // `VD_ROSTER` (the D-37 re-home candidate set; the crossing itself resolves via the directory head, NOT
-    // the roster — see the bin note). Absent `dual` these three keys are byte-identical to a single-shard
-    // `up` (the crossing INERT).
-    let mut peers = vec![(GATEWAY, a.gateway), (SHARD, a.shard)];
-    let mut clock_peers = format!("{},{}", GATEWAY.0, SHARD.0);
-    if dual {
-        peers.push((SHARD_B, a.shard_b));
-        clock_peers = format!("{},{},{}", GATEWAY.0, SHARD.0, SHARD_B.0);
+    // Track R / 1d.2 + S5b: in a MULTI-shard cluster the orchestrator INITIATES realm-grants / re-home to
+    // every extra shard, so it books them AND drives the universe clock to each (a follower whose clock
+    // never advances can never win its realm lease — the harness `clock_peers = {GW, SHARD, [DEST,
+    // GALAXY]}` rule). Each extra shard is ALSO added to `VD_ROSTER` (the D-37 re-home candidate set; the
+    // crossing itself resolves via the directory head, NOT the roster — see the bin note). In Single mode
+    // these keys are byte-identical to the pre-Track-R env (the crossing INERT). The peer/clock/roster
+    // lists GROW with the shape (data, no per-kind branch): Dual adds the DEST; Triple adds DEST + GALAXY.
+    let mut extra_shards: Vec<(NodeId, SocketAddr)> = Vec::new();
+    if shape.has_dest() {
+        extra_shards.push((SHARD_B, a.shard_b));
     }
+    if shape.has_galaxy() {
+        extra_shards.push((GALAXY, a.galaxy));
+    }
+    // NODE-PER-REALM (Forest): fold the Planet/Station/Area/Galaxy/System-8 realm-shards in as extra
+    // roster entries (empty for Single/Dual/Triple — byte-identical). The orchestrator books + drives the
+    // clock + rosters each, exactly like the Dual/Triple extras.
+    extra_shards.extend(
+        shape
+            .extra_realm_shards(a, p)
+            .iter()
+            .map(|s| (s.node, s.quic)),
+    );
+    let mut peers = vec![(GATEWAY, a.gateway), (SHARD, a.shard)];
+    peers.extend_from_slice(&extra_shards);
+    let mut clock_ids = vec![GATEWAY.0, SHARD.0];
+    clock_ids.extend(extra_shards.iter().map(|(id, _)| id.0));
+    let clock_peers = clock_ids
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     let mut env = vec![
         str_pair("VD_NODE_ID", ORCH.0),
         str_pair("VD_BIND", a.orchestrator),
@@ -734,12 +894,19 @@ pub fn orchestrator_env(
         ("VD_STORE_PATH", store_path.to_owned()),
         ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
     ];
-    if dual {
-        // The D-37 re-home candidate SET: every DEST shard the orchestrator may re-home an orphan onto.
+    if !extra_shards.is_empty() {
+        // The D-37 re-home candidate SET: every extra shard the orchestrator may re-home an orphan onto.
         // `select_rehome_target` is realm-BLIND (lowest live capable node) — a D-37 concern, NOT the
         // crossing (which resolves `head(Realm(to_realm))`, HR3-clean). For the crossing this roster's only
-        // job is that the DEST is a known re-home target; the head resolution comes from DEST's realm grant.
-        env.push(str_pair("VD_ROSTER", SHARD_B.0));
+        // job is that each dest is a known re-home target; the head resolution comes from its realm grant.
+        env.push((
+            "VD_ROSTER",
+            extra_shards
+                .iter()
+                .map(|(id, _)| id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
     }
     env
 }
@@ -753,17 +920,35 @@ pub fn gateway_env(
     clients: &[(NodeId, SocketAddr)],
     auth_pubkey_hex: &str,
     p: &DevClusterParams,
-    dual: bool,
+    shape: ClusterShape,
 ) -> Vec<(&'static str, String)> {
-    // Track R / 1d.2: in DUAL mode the gateway must BOOK the DEST (to route a transferred client's
-    // inputs / cut-drains onto it) AND class the DEST as a KNOWN shard (`VD_KNOWN_SHARDS`, consumed by
-    // the gateway bin's `known_shards` set) so a DEST→gateway frame reaches `on_shard_frame` instead of
-    // dropping as an unknown peer. `VD_SHARD` (the LOGIN shard) stays SHARD in both modes. Absent `dual`
-    // neither the DEST peer nor `VD_KNOWN_SHARDS` is emitted — byte-identical to a single-shard `up`.
-    let mut peers = vec![(ORCH, a.orchestrator), (SHARD, a.shard)];
-    if dual {
-        peers.push((SHARD_B, a.shard_b));
+    // Track R / 1d.2 + S5b: in a MULTI-shard cluster the gateway must BOOK every extra shard (to route a
+    // transferred client's inputs / cut-drains onto it — the durable session-route swap at
+    // `CommitAuthority` migrates the route to each successive source shard, so ALL of them must be
+    // dialable) AND class each as a KNOWN shard (`VD_KNOWN_SHARDS`, consumed by the gateway bin's
+    // `known_shards` set) so a shard→gateway frame reaches `on_shard_frame` instead of dropping as an
+    // unknown peer. `VD_SHARD` (the LOGIN shard) stays SHARD in every mode. In Single mode neither an
+    // extra peer nor `VD_KNOWN_SHARDS` is emitted — byte-identical to the pre-Track-R env. The lists GROW
+    // with the shape (data, no per-kind branch): Dual adds the DEST; Triple adds DEST + GALAXY.
+    let mut extra_shards: Vec<(NodeId, SocketAddr)> = Vec::new();
+    if shape.has_dest() {
+        extra_shards.push((SHARD_B, a.shard_b));
     }
+    if shape.has_galaxy() {
+        extra_shards.push((GALAXY, a.galaxy));
+    }
+    // NODE-PER-REALM (Forest): the gateway must BOOK + CLASS-as-known every realm-shard (the durable
+    // session-route swap at CommitAuthority migrates the client's input route onto each successive source
+    // shard as the dot walks System 7 → Planet 7 → Area 7 → … so ALL must be dialable AND recognized). Empty
+    // for Single/Dual/Triple — byte-identical.
+    extra_shards.extend(
+        shape
+            .extra_realm_shards(a, p)
+            .iter()
+            .map(|s| (s.node, s.quic)),
+    );
+    let mut peers = vec![(ORCH, a.orchestrator), (SHARD, a.shard)];
+    peers.extend_from_slice(&extra_shards);
     peers.extend_from_slice(clients);
     let mut env = vec![
         str_pair("VD_NODE_ID", GATEWAY.0),
@@ -777,10 +962,17 @@ pub fn gateway_env(
         str_pair("VD_MAX_BUFFERED_INPUTS", p.max_buffered_inputs),
         str_pair("VD_PROBE_ADDR", a.gateway_probe),
     ];
-    if dual {
+    if !extra_shards.is_empty() {
         // The gateway bin unions this into `known_shards` over the login `shard` (via `node_list`), so the
-        // routable-shard roster is {SHARD, DEST} — every shard's frames are node-class dispatchable.
-        env.push(str_pair("VD_KNOWN_SHARDS", SHARD_B.0));
+        // routable-shard roster is {SHARD, DEST[, GALAXY]} — every shard's frames are node-class dispatchable.
+        env.push((
+            "VD_KNOWN_SHARDS",
+            extra_shards
+                .iter()
+                .map(|(id, _)| id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
     }
     env
 }
@@ -793,16 +985,35 @@ pub fn gateway_env(
 pub fn shard_env(
     a: &ClusterAddrs,
     p: &DevClusterParams,
-    dual: bool,
+    shape: ClusterShape,
 ) -> Vec<(&'static str, String)> {
+    // The SOURCE (System 7) books every OTHER shard so the cross-shard mesh can carry transfer traffic
+    // (each shard books the others). The list GROWS with the shape (data, no per-kind branch): Dual books
+    // the DEST; Triple books DEST + GALAXY. In Single mode the book is byte-identical to the pre-Track-R env.
     let mut peers = vec![(ORCH, a.orchestrator), (GATEWAY, a.gateway)];
-    if dual {
+    if shape.has_dest() {
         peers.push((SHARD_B, a.shard_b));
     }
-    vec![
+    if shape.has_galaxy() {
+        peers.push((GALAXY, a.galaxy));
+    }
+    // NODE-PER-REALM (Forest): the System-7 shard books every OTHER realm-shard (Planet/Station/Area/
+    // Galaxy/System 8) so the cross-shard mesh carries a re-home INTO any of them. Empty for the legacy
+    // shapes — byte-identical.
+    peers.extend(
+        shape
+            .extra_realm_shards(a, p)
+            .iter()
+            .map(|s| (s.node, s.quic)),
+    );
+    let mut env = vec![
         str_pair("VD_NODE_ID", SHARD.0),
         str_pair("VD_BIND", a.shard),
         ("VD_PEERS", book(&peers)),
+        // No `VD_REALM_KIND`: the System-7 source shard is a System realm, which is the shard bin's
+        // ABSENT-default (`realm_from_kind_seed("", seed) == System(seed)`) — so the env stays BYTE-IDENTICAL
+        // to the pre-NODE-PER-REALM shard env (the process_parity/inert-parity gate), and the Forest's extra
+        // realm-shards carry their non-System KIND via `realm_shard_env`.
         str_pair("VD_REALM_SEED", p.realm_seed),
         str_pair("VD_SPEED", p.move_speed),
         str_pair("VD_TICK_DT", p.tick_dt),
@@ -812,28 +1023,177 @@ pub fn shard_env(
         str_pair("VD_REALM_RECHECK", p.realm_recheck),
         str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
         str_pair("VD_PROBE_ADDR", a.shard_probe),
+    ];
+    // CO-HOSTING (the un-hosted-child cure) — the --triple LEGACY shape only: the seed forest nests Planet 7
+    // / Station 7 / Area 7 under System 7, but the --triple cluster hosts no shard for those children, so the
+    // System-7 shard CO-HOSTS them (`VD_HELD_REALMS`) and a walk-into-child re-home resolves `head(Realm(
+    // child))` to THIS node (source==dest). NODE-PER-REALM (Forest) is the SUPERSEDING shape: it gives each
+    // child its OWN shard, so NO co-hosting — every re-home is a uniform CROSS-NODE saga (the source==dest
+    // degenerate case never arises). Dual/Single don't co-host either — byte-identical there.
+    if shape.has_galaxy() {
+        env.push(str_pair("VD_HELD_REALMS", triple_source_held_realms_env()));
+    }
+    env
+}
+
+/// The `VD_REALM_KIND` env token for a realm KIND (`system` | `planet` | `station` | `area` | `ship`). The
+/// shard bin ([`crate`]'s `shard.rs`) reads this beside `VD_REALM_SEED` to build its `own_realm` of the
+/// right KIND (NODE-PER-REALM) — before this a shard could only host `System(seed)`. Monomorphic (the
+/// `RealmId` arm match covered here), reusing the `VD_HELD_REALMS` `realm_token` kind vocabulary; the seed
+/// is irrelevant to the KIND token, so any seed of the wanted kind maps to the right word.
+#[must_use]
+pub fn realm_kind_token(realm: vd_core::pose::RealmId) -> &'static str {
+    use vd_core::pose::RealmId;
+    match realm {
+        RealmId::System(_) => "system",
+        RealmId::Planet(_) => "planet",
+        RealmId::Station(_) => "station",
+        RealmId::Area(_) => "area",
+        RealmId::Ship(_) => "ship",
+    }
+}
+
+/// Parse a `VD_REALM_KIND` token + a `VD_REALM_SEED` into the shard's `own_realm` (the inverse of
+/// [`realm_kind_token`]). A shard hosts EXACTLY ONE realm; its KIND is this token, its seed is `VD_REALM_SEED`.
+/// ABSENT/empty token ⇒ `System(seed)` (the pre-NODE-PER-REALM default, so every legacy shard boot is
+/// byte-identical). A `ship` kind is rejected here (a Ship realm keys on an entity id, not a seed — P8, never a
+/// booted realm-shard).
+///
+/// # Errors
+/// An unrecognized kind token.
+pub fn realm_from_kind_seed(kind: &str, seed: u64) -> Result<vd_core::pose::RealmId, String> {
+    use vd_core::pose::RealmId;
+    match kind.trim() {
+        "" | "system" => Ok(RealmId::System(seed)),
+        "planet" => Ok(RealmId::Planet(seed)),
+        "station" => Ok(RealmId::Station(seed)),
+        "area" => Ok(RealmId::Area(seed)),
+        other => Err(format!(
+            "VD_REALM_KIND {other:?} is not one of system|planet|station|area (a realm-shard hosts one \
+             seed-keyed realm; Ship realms key on an entity id and are never booted as a realm-shard)"
+        )),
+    }
+}
+
+/// NODE-PER-REALM (Forest) — the node-specific env for ONE extra realm-shard (Planet/Station/Area/Galaxy/
+/// System 8), each hosting EXACTLY its own realm (NO `VD_HELD_REALMS`). Twin of [`shard_env`]/[`galaxy_env`]:
+/// it books ORCH + GATEWAY + the System-7 source shard + every OTHER Forest realm-shard (each shard books the
+/// others so the cross-shard mesh carries a re-home between any pair), and emits `VD_REALM_KIND` + `VD_REALM_SEED`
+/// so the shard bin boots the right realm KIND. A DISTINCT mint per node (derived from the source mint by the
+/// node id) so no two shards alias entity ids. The Galaxy/System-8 realm-shards get their historic distinct
+/// mints (`+12`/`+6`) so their entity ids match the legacy Triple/Dual rigs; the new children derive from the
+/// node id. NO `VD_REALM_BOUNDARIES` — the SEED neighbourhood boots (`realm_neighbourhood_for(own)` = own +
+/// ancestors + DIRECT children), so a Planet-7 shard sees the Area-7 child boundary, System 7 sees the
+/// Planet/Station boundaries, etc. — this is how the containment detector fires each cross-node re-home.
+#[must_use]
+pub fn realm_shard_env(
+    a: &ClusterAddrs,
+    p: &DevClusterParams,
+    shape: ClusterShape,
+    shard: RealmShard,
+) -> Vec<(&'static str, String)> {
+    let mut peers = vec![
+        (ORCH, a.orchestrator),
+        (GATEWAY, a.gateway),
+        (SHARD, a.shard),
+    ];
+    // Book every OTHER extra realm-shard (skip self) so each shard can mesh a transfer to any other.
+    peers.extend(
+        shape
+            .extra_realm_shards(a, p)
+            .iter()
+            .filter(|s| s.node != shard.node)
+            .map(|s| (s.node, s.quic)),
+    );
+    // A distinct mint per node so no two shards ever alias an entity id. The Galaxy/System-8 shards keep
+    // their HISTORIC offsets (matching the Triple/Dual rigs: `+12`/`+6`); the new Planet/Station/Area children
+    // derive from the node id above a BASE (`+100`) that clears the small historic offsets — so a node-id of
+    // 6 (Planet) never collides with System-8's `+6`. All five mints are pairwise distinct (asserted in
+    // `forest_realm_shard_env_hosts_one_realm_with_its_kind_and_books_the_others`).
+    const FOREST_CHILD_MINT_BASE: u64 = 100;
+    let mint = match shard.node {
+        GALAXY => p.mint_seed.wrapping_add(12),
+        SHARD_B => p.mint_seed.wrapping_add(6),
+        other => p
+            .mint_seed
+            .wrapping_add(FOREST_CHILD_MINT_BASE)
+            .wrapping_add(other.0),
+    };
+    vec![
+        str_pair("VD_NODE_ID", shard.node.0),
+        str_pair("VD_BIND", shard.quic),
+        ("VD_PEERS", book(&peers)),
+        str_pair("VD_REALM_KIND", realm_kind_token(shard.realm)),
+        str_pair("VD_REALM_SEED", realm_seed_of(shard.realm)),
+        str_pair("VD_SPEED", p.move_speed),
+        str_pair("VD_TICK_DT", p.tick_dt),
+        str_pair("VD_ORCH", ORCH.0),
+        str_pair("VD_MINT_SEED", mint),
+        str_pair("VD_INPUT_LOG_CAP", p.input_log_cap),
+        str_pair("VD_REALM_RECHECK", p.realm_recheck),
+        str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
+        str_pair("VD_PROBE_ADDR", shard.probe),
     ]
+}
+
+/// The seed a seed-keyed realm hosts (`VD_REALM_SEED`). A `Ship` realm has no seed (it keys on an entity id);
+/// it is never a booted realm-shard, so it maps to 0 for token totality only.
+fn realm_seed_of(realm: vd_core::pose::RealmId) -> u64 {
+    use vd_core::pose::RealmId;
+    match realm {
+        RealmId::System(s) | RealmId::Planet(s) | RealmId::Station(s) | RealmId::Area(s) => s,
+        RealmId::Ship(_) => 0,
+    }
+}
+
+/// The `VD_HELD_REALMS` value the --triple System-7 shard co-hosts: its own realm PLUS its seed-forest
+/// children Planet 7 / Station 7 / Area 7 (the un-hosted-child cure). SINGLE-SOURCED so the launcher, the
+/// shard boot, and the smoke test agree on the exact co-hosted set. `realm_seed` is the SOURCE realm seed
+/// (7 in every current rig), so the children key on the same seed (Planet(7)/Station(7)/Area(7)) — the
+/// forest's `PLANET_A`/`STATION_A`/`AREA_A` all carry seed 7.
+#[must_use]
+pub fn triple_source_held_realms() -> std::collections::BTreeSet<vd_core::pose::RealmId> {
+    use vd_core::pose::RealmId;
+    std::collections::BTreeSet::from([
+        RealmId::System(7),
+        RealmId::Planet(7),
+        RealmId::Station(7),
+        RealmId::Area(7),
+    ])
+}
+
+/// The env-string form of [`triple_source_held_realms`] (`VD_HELD_REALMS` wire).
+#[must_use]
+pub fn triple_source_held_realms_env() -> String {
+    held_realms_env(&triple_source_held_realms())
 }
 
 /// Track R / 1d.2 — the DEST stub-shard's node-specific env (twin of [`shard_env`]). Hosts realm B
 /// (`System(realm_seed_b)`) at [`SHARD_B`], with a DISTINCT mint seed (so its dots are genuinely separate,
 /// mirroring the harness `dest_stub_config` mint 17 vs the source's 11) and its OWN QUIC bind + probe. Its
-/// `VD_PEERS` books ORCH, GATEWAY, AND the SOURCE shard (each shard books the other — the cross-shard mesh).
-/// NO `VD_REALM_BOUNDARIES`: the SOURCE hosts the crossing trigger INTO realm B; the DEST just receives.
-/// Only ever spawned by a dual `up`, so it has no `dual` arm.
+/// `VD_PEERS` books ORCH, GATEWAY, the SOURCE shard, AND (in [`ClusterShape::Triple`]) the GALAXY between-
+/// space shard — each shard books the others (the cross-shard mesh), so the list GROWS with the shape.
+/// NO `VD_REALM_BOUNDARIES`: in Triple the seed forest routes System 8 → Galaxy → System 7 through the
+/// Galaxy parent; in Dual the SOURCE hosts the injected/born-inside trigger and the DEST just receives.
+/// Spawned by a Dual or Triple `up`.
 #[must_use]
-pub fn shard_b_env(a: &ClusterAddrs, p: &DevClusterParams) -> Vec<(&'static str, String)> {
+pub fn shard_b_env(
+    a: &ClusterAddrs,
+    p: &DevClusterParams,
+    shape: ClusterShape,
+) -> Vec<(&'static str, String)> {
+    let mut peers = vec![
+        (ORCH, a.orchestrator),
+        (GATEWAY, a.gateway),
+        (SHARD, a.shard),
+    ];
+    if shape.has_galaxy() {
+        peers.push((GALAXY, a.galaxy));
+    }
     vec![
         str_pair("VD_NODE_ID", SHARD_B.0),
         str_pair("VD_BIND", a.shard_b),
-        (
-            "VD_PEERS",
-            book(&[
-                (ORCH, a.orchestrator),
-                (GATEWAY, a.gateway),
-                (SHARD, a.shard),
-            ]),
-        ),
+        ("VD_PEERS", book(&peers)),
         str_pair("VD_REALM_SEED", p.realm_seed_b), // System(realm_seed_b) — DEST realm identity
         str_pair("VD_SPEED", p.move_speed),
         str_pair("VD_TICK_DT", p.tick_dt),
@@ -844,6 +1204,43 @@ pub fn shard_b_env(a: &ClusterAddrs, p: &DevClusterParams) -> Vec<(&'static str,
         str_pair("VD_REALM_RECHECK", p.realm_recheck),
         str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
         str_pair("VD_PROBE_ADDR", a.shard_b_probe),
+    ]
+}
+
+/// S5b — the GALAXY between-space stub-shard's node-specific env (twin of [`shard_env`] / [`shard_b_env`]).
+/// Hosts the Galaxy realm (`System(GALAXY_SEED)`, the seed forest's between-systems space) at [`GALAXY`],
+/// with a DISTINCT mint seed (mirroring the harness `galaxy_stub_config` mint 23 vs source 11 / dest 17)
+/// and its OWN QUIC bind + probe. Its `VD_PEERS` books ORCH, GATEWAY, AND BOTH the SOURCE (System 7) and
+/// DEST (System 8) shards — the Galaxy is the SIBLING-ROUTING shard (it OWNS the two systems as children,
+/// so a crossing routes System 7 → Galaxy → System 8 THROUGH it, and back). NO `VD_REALM_BOUNDARIES`: the
+/// Galaxy boots the SEED-DERIVED neighbourhood (`realm_neighbourhood_for(System(1))` = {Universe, Galaxy,
+/// System 7, System 8}), so its detector re-homes Galaxy→7 and Galaxy→8 by construction. Only ever spawned
+/// by a [`ClusterShape::Triple`] `up`.
+#[must_use]
+pub fn galaxy_env(a: &ClusterAddrs, p: &DevClusterParams) -> Vec<(&'static str, String)> {
+    vec![
+        str_pair("VD_NODE_ID", GALAXY.0),
+        str_pair("VD_BIND", a.galaxy),
+        (
+            "VD_PEERS",
+            book(&[
+                (ORCH, a.orchestrator),
+                (GATEWAY, a.gateway),
+                (SHARD, a.shard),
+                (SHARD_B, a.shard_b),
+            ]),
+        ),
+        str_pair("VD_REALM_SEED", GALAXY_SEED), // System(GALAXY_SEED) — the between-space realm identity
+        str_pair("VD_SPEED", p.move_speed),
+        str_pair("VD_TICK_DT", p.tick_dt),
+        str_pair("VD_ORCH", ORCH.0),
+        // A distinct mint so Galaxy-minted entities never alias the systems' (harness GALAXY=23 vs
+        // source=11 / dest=17); derived from the source mint so it stays magic-number-free.
+        str_pair("VD_MINT_SEED", p.mint_seed.wrapping_add(12)),
+        str_pair("VD_INPUT_LOG_CAP", p.input_log_cap),
+        str_pair("VD_REALM_RECHECK", p.realm_recheck),
+        str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
+        str_pair("VD_PROBE_ADDR", a.galaxy_probe),
     ]
 }
 
@@ -1413,6 +1810,120 @@ fn parse_realm_boundaries(
     serde_json::from_str(json).map_err(|e| RealmBoundariesError::Malformed(e.to_string()))
 }
 
+/// Serialize a co-hosted realm SET to the `VD_HELD_REALMS` env format (`kind:seed` comma-separated, e.g.
+/// `system:7,planet:7,station:7,area:7`) — the wire the --triple launcher hands a co-hosting shard. Sorted
+/// (BTreeSet order) so the env is deterministic; the round-trip inverse is [`parse_held_realms`].
+#[must_use]
+pub fn held_realms_env(realms: &std::collections::BTreeSet<vd_core::pose::RealmId>) -> String {
+    realms
+        .iter()
+        .map(|r| realm_token(*r))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The `kind:seed` token for ONE realm (the `VD_HELD_REALMS` element). Monomorphic — the `RealmId` arm
+/// match is covered here, off the iterator body. A `Ship` realm keys on its entity id (a `u128`), encoded
+/// as `ship:<u128>` for totality (ships are P8 — never in a P3 `VD_HELD_REALMS` — but the codec stays
+/// exhaustive so a future ship co-host round-trips).
+fn realm_token(realm: vd_core::pose::RealmId) -> String {
+    use vd_core::pose::RealmId;
+    match realm {
+        RealmId::System(s) => format!("system:{s}"),
+        RealmId::Planet(s) => format!("planet:{s}"),
+        RealmId::Station(s) => format!("station:{s}"),
+        RealmId::Area(s) => format!("area:{s}"),
+        RealmId::Ship(id) => format!("ship:{}", id.0),
+    }
+}
+
+/// Parse the `VD_HELD_REALMS` env value (`kind:seed` comma-separated) into the co-hosted realm set. ABSENT
+/// or EMPTY ⇒ `{fallback}` (the single-realm default — a shard with no co-hosting knob holds exactly its
+/// own realm, byte-identical). A malformed token fails LOUD. `fallback` (this shard's own realm) is ALWAYS
+/// included even if the env omits it (a shard always hosts its own realm). The inverse of [`held_realms_env`].
+///
+/// # Errors
+/// Returns the offending token string when a `kind:seed` element is unrecognized or the seed is not a `u64`.
+pub fn parse_held_realms(
+    raw: &str,
+    fallback: vd_core::pose::RealmId,
+) -> Result<std::collections::BTreeSet<vd_core::pose::RealmId>, String> {
+    let mut set = std::collections::BTreeSet::from([fallback]);
+    for token in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        set.insert(parse_realm_token(token)?);
+    }
+    Ok(set)
+}
+
+/// Parse ONE `kind:seed` token into a `RealmId` (monomorphic — the split/kind/seed error arms are covered
+/// here off the CSV loop body). `ship:<u128>` decodes an entity-keyed Ship realm (the inverse of the ship
+/// arm in [`realm_token`]; P8, never in a P3 rig — kept for round-trip totality).
+fn parse_realm_token(token: &str) -> Result<vd_core::pose::RealmId, String> {
+    use vd_core::pose::RealmId;
+    let (kind, seed_str) = token
+        .split_once(':')
+        .ok_or_else(|| format!("VD_HELD_REALMS token {token:?} is not `kind:seed`"))?;
+    if kind == "ship" {
+        let raw: u128 = seed_str
+            .parse()
+            .map_err(|_| format!("VD_HELD_REALMS token {token:?} has a non-u128 ship id"))?;
+        return Ok(RealmId::Ship(vd_core::EntityId(raw)));
+    }
+    let seed: u64 = seed_str
+        .parse()
+        .map_err(|_| format!("VD_HELD_REALMS token {token:?} has a non-u64 seed"))?;
+    match kind {
+        "system" => Ok(RealmId::System(seed)),
+        "planet" => Ok(RealmId::Planet(seed)),
+        "station" => Ok(RealmId::Station(seed)),
+        "area" => Ok(RealmId::Area(seed)),
+        other => Err(format!(
+            "VD_HELD_REALMS token {token:?} has unknown kind {other:?}"
+        )),
+    }
+}
+
+/// The containment ACQUIRE edge sits this fraction of a region's OWN extent inside its surface. Fractional
+/// (not a fixed metre) so it is reachable at ANY scale — a fixed inset is unreachable inside a shell SMALLER
+/// than the inset (the r=10 crossing-trigger shell vs a fixed inset=50: acquire needed a dot 50 m inside a
+/// 10 m shell ⇒ NO dot ever became a member ⇒ the walk-across crossing never fired). Mirrors how
+/// `OverlapBand`'s SOI factors scale with `r_soi`.
+const OVERRIDE_BAND_INSET_FRACTION: f64 = 0.1;
+/// The RELEASE edge, a larger fraction OUTSIDE the surface — the dead-zone (inset+outset) straddles the
+/// surface so a surface-hovering dot cannot flap.
+const OVERRIDE_BAND_OUTSET_FRACTION: f64 = 0.2;
+
+/// A [`ContainmentBand`](vd_core::geometry::ContainmentBand) SIZED TO `shape`'s own extent (a fraction of a
+/// shell's radius / a box's smallest half-extent), velocity-widened for a body moving at `move_speed_mps`.
+/// Scale-invariant: the acquire edge is reachable inside the shape whether it is a 10 m crossing shell or a
+/// 100 km realm — the fixed-metre-inset bug this replaces made small shells un-enterable.
+fn override_containment_band(
+    shape: &vd_core::geometry::Boundary,
+    move_speed_mps: f64,
+    tick_dt_s: f64,
+) -> vd_core::geometry::ContainmentBand {
+    use vd_core::geometry::{Boundary, ContainmentBand};
+    let extent = match shape {
+        Boundary::Shell { r } => *r,
+        Boundary::Aabb { half } | Boundary::Obb { half, .. } => half.min_element(),
+    };
+    let inset = extent * OVERRIDE_BAND_INSET_FRACTION;
+    let outset_min = extent * OVERRIDE_BAND_OUTSET_FRACTION;
+    ContainmentBand::for_containment_velocity_safe(
+        inset,
+        outset_min,
+        move_speed_mps,
+        tick_dt_s,
+        1.0,
+    )
+    .unwrap_or_else(|_| {
+        // A degenerate tick config can only shrink the velocity term; the positive-fraction edges of a
+        // positive extent are valid at v_rel=0, so the plant never panics the shard boot.
+        ContainmentBand::for_containment_velocity_safe(inset, outset_min, 0.0, 1.0, 0.0)
+            .expect("a positive-fraction band of a positive extent is valid")
+    })
+}
+
 /// The `VD_REALM_BOUNDARIES` OVERRIDE adapter (C-6b) — lift the SOURCE-shard's loaded `RealmBoundary` set
 /// (the born-inside crossing geometry, single-sourced with the client's `--realm-boxes`) into the
 /// containment [`RealmRegion`](vd_core::geometry::RealmRegion) forest the sim's `RealmRegions` resource
@@ -1434,24 +1945,18 @@ pub fn override_regions_for_boundaries(
     move_speed_mps: f64,
     tick_dt_s: f64,
 ) -> Vec<vd_core::geometry::RealmRegion> {
-    use vd_core::geometry::{Boundary, ContainmentBand, RealmRegion};
+    use vd_core::geometry::{Boundary, RealmRegion};
     use vd_core::pose::{LatticePos, RealmId, frame_for_realm};
     let root_realm = RealmId::System(0);
-    let band =
-        ContainmentBand::for_containment_velocity_safe(50.0, 100.0, move_speed_mps, tick_dt_s, 1.0)
-            .unwrap_or_else(|_| {
-                // A degenerate tick config can only produce a non-positive band; fall back to a fixed safe pair
-                // (both edges > 0) so the plant never panics the shard boot.
-                ContainmentBand::for_containment_velocity_safe(50.0, 100.0, 0.0, 1.0, 0.0)
-                    .expect("the zero-velocity fallback band is always valid")
-            });
     let region = |realm: RealmId, parent: Option<RealmId>, shape: Boundary| RealmRegion {
         realm,
         center: LatticePos::local(vd_core::glam::DVec3::ZERO),
         frame: frame_for_realm(realm, None)
             .unwrap_or(vd_core::pose::FrameRef::SystemSpace { system_seed: 0 }),
+        // The band is SIZED TO the region's own extent (a fraction of its radius), never a fixed metre —
+        // see `override_containment_band` (the r=10-shell / inset=50 un-enterable bug).
+        band: override_containment_band(&shape, move_speed_mps, tick_dt_s),
         shape,
-        band,
         parent,
     };
     // Ambient root ⊃ the shard's own realm (large) ⊃ one deeper child per loaded boundary (its to_realm).
@@ -1476,8 +1981,8 @@ pub fn override_regions_for_boundaries(
             center: b.center,
             frame: frame_for_realm(b.to_realm, None)
                 .unwrap_or(vd_core::pose::FrameRef::SystemSpace { system_seed: 0 }),
+            band: override_containment_band(&b.shape, move_speed_mps, tick_dt_s),
             shape: b.shape,
-            band,
             parent: Some(hosted_realm),
         });
     }
@@ -1582,6 +2087,49 @@ impl Drop for Cluster {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod override_band_tests {
+    use super::override_containment_band;
+    use vd_core::geometry::Boundary;
+    use vd_core::glam::DVec3;
+
+    #[test]
+    fn override_band_scales_to_the_region_extent_and_stays_reachable() {
+        // The crossing-playground trigger scale: a small r=10 shell. The acquire inset must land WELL INSIDE
+        // it so a dot walking to box B's centre becomes a member — the OLD fixed inset=50 made acquire need a
+        // dot 50 m inside a 10 m shell (impossible ⇒ the walk-across crossing silently never fired).
+        let band = override_containment_band(&Boundary::Shell { r: 10.0 }, 2.0, 0.05);
+        assert!(
+            band.inset() < 10.0,
+            "the acquire inset {} must sit inside the r=10 shell",
+            band.inset(),
+        );
+        // A dot 7 m inside the surface (signed distance -7) ACQUIRES; with the old inset=50 it would not.
+        assert!(
+            band.member(false, -7.0),
+            "a dot 7 m inside a r=10 crossing shell must ACQUIRE membership",
+        );
+        // Scale-invariant: a 100 km realm gets a proportionally larger (still-reachable) band.
+        let big = override_containment_band(&Boundary::Shell { r: 100_000.0 }, 2.0, 0.05);
+        assert!(
+            big.inset() > band.inset(),
+            "the band scales with the region extent (not a fixed metre)",
+        );
+        // A box region sizes off its smallest half-extent (covers the Aabb/Obb arm of the extent match).
+        let boxed = override_containment_band(
+            &Boundary::Aabb {
+                half: DVec3::splat(5.0),
+            },
+            2.0,
+            0.05,
+        );
+        assert!(
+            boxed.member(false, -3.0),
+            "a dot 3 m inside a 5 m box half-extent must acquire membership",
+        );
     }
 }
 
@@ -1929,6 +2477,96 @@ mod incarnation_tests {
         assert_eq!(guard_boundaries_in_realm(&[], RealmId::System(7)), Ok(()));
     }
 
+    // ---- Co-hosting: the VD_HELD_REALMS env round-trip + parse guards ---------------------------
+
+    #[test]
+    fn held_realms_env_round_trips_all_four_realm_kinds() {
+        // Every RealmId kind serializes + re-parses (the `realm_token` / `parse_realm_token` arms). The
+        // --triple source set is the exercised value; the parse fallback (System 7) is already in it.
+        let set = triple_source_held_realms();
+        let wire = held_realms_env(&set);
+        // Sorted by `RealmId`'s derived Ord (variant declaration order Planet<System<Ship<Station<Area).
+        assert_eq!(
+            wire, "planet:7,system:7,station:7,area:7",
+            "sorted kind:seed CSV"
+        );
+        assert_eq!(
+            parse_held_realms(&wire, RealmId::System(7)).expect("round-trips"),
+            set,
+        );
+        // A Station/Area/Planet token each survives the round-trip (covers all four `parse_realm_token`
+        // match arms via a distinct-kind fallback).
+        assert_eq!(
+            parse_held_realms("area:42", RealmId::Area(42)).expect("area token"),
+            std::collections::BTreeSet::from([RealmId::Area(42)]),
+        );
+        // The Ship arm (P8, never in a P3 rig) round-trips for codec totality — `ship:<u128>`.
+        let ship = RealmId::Ship(vd_core::EntityId(0xDEAD_BEEF));
+        let ship_set = std::collections::BTreeSet::from([ship]);
+        assert_eq!(
+            parse_held_realms(&held_realms_env(&ship_set), RealmId::System(7)),
+            Ok(std::collections::BTreeSet::from([RealmId::System(7), ship])),
+        );
+        assert!(
+            parse_held_realms("ship:notanumber", RealmId::System(7))
+                .expect_err("a non-u128 ship id is loud")
+                .contains("non-u128 ship id"),
+        );
+    }
+
+    #[test]
+    fn parse_held_realms_defaults_to_the_fallback_when_absent_or_empty() {
+        // ABSENT / EMPTY ⇒ exactly `{fallback}` (the single-realm byte-identical default). Whitespace-only
+        // and stray commas degrade to the same (the `filter(!is_empty)` arm).
+        let fallback = RealmId::System(9);
+        let only = std::collections::BTreeSet::from([fallback]);
+        assert_eq!(parse_held_realms("", fallback).expect("empty"), only);
+        assert_eq!(parse_held_realms("  ", fallback).expect("blank"), only);
+        assert_eq!(parse_held_realms(" , ,", fallback).expect("commas"), only);
+        // The fallback is ALWAYS included even if the env omits it (a shard always hosts its own realm).
+        assert_eq!(
+            parse_held_realms("planet:9", fallback).expect("adds fallback"),
+            std::collections::BTreeSet::from([fallback, RealmId::Planet(9)]),
+        );
+    }
+
+    #[test]
+    fn parse_held_realms_is_loud_on_a_malformed_token() {
+        // Every parse-error arm fails LOUD (a co-hosting misconfig must never silently degrade): no colon,
+        // an unknown kind, a non-u64 seed.
+        let fb = RealmId::System(7);
+        assert!(
+            parse_held_realms("system7", fb)
+                .expect_err("no colon is loud")
+                .contains("not `kind:seed`")
+        );
+        assert!(
+            parse_held_realms("moon:7", fb)
+                .expect_err("unknown kind is loud")
+                .contains("unknown kind")
+        );
+        assert!(
+            parse_held_realms("system:x", fb)
+                .expect_err("non-u64 seed is loud")
+                .contains("non-u64 seed")
+        );
+    }
+
+    #[test]
+    fn triple_source_held_realms_is_system_7_plus_its_seed_forest_children() {
+        // The --triple co-hosted set SINGLE-SOURCED: System 7 + Planet/Station/Area 7 (its seed-forest
+        // children). The launcher, the shard boot, and the smoke all read this one value.
+        assert_eq!(
+            triple_source_held_realms(),
+            std::collections::BTreeSet::from([
+                RealmId::System(7),
+                RealmId::Planet(7),
+                RealmId::Station(7),
+                RealmId::Area(7),
+            ]),
+        );
+    }
+
     // ---- Track R / 1d.2: the dual-shard env builders + boundaries helper --------------------------
 
     /// Loopback addrs distinct per role so a mis-booked peer is visible in an assert. Every field is a
@@ -1944,6 +2582,14 @@ mod incarnation_tests {
             shard_probe: loopback(9007),
             shard_b: loopback(9008),
             shard_b_probe: loopback(9009),
+            galaxy: loopback(9010),
+            galaxy_probe: loopback(9011),
+            planet: loopback(9012),
+            planet_probe: loopback(9013),
+            station: loopback(9014),
+            station_probe: loopback(9015),
+            area: loopback(9016),
+            area_probe: loopback(9017),
         }
     }
 
@@ -1955,8 +2601,8 @@ mod incarnation_tests {
     #[test]
     fn orchestrator_env_dual_books_dest_clock_and_roster_inert_when_single() {
         let a = dual_addrs();
-        let single = orchestrator_env(&a, &DEV, "store", false);
-        let dual = orchestrator_env(&a, &DEV, "store", true);
+        let single = orchestrator_env(&a, &DEV, "store", ClusterShape::Single);
+        let dual = orchestrator_env(&a, &DEV, "store", ClusterShape::Dual);
 
         // VD_ROSTER: absent single, present=DEST dual (the D-37 re-home candidate set).
         assert_eq!(env_value(&single, "VD_ROSTER"), None);
@@ -1990,10 +2636,37 @@ mod incarnation_tests {
     }
 
     #[test]
+    fn orchestrator_env_triple_books_dest_and_galaxy_in_roster_clock_and_peers() {
+        // S5b: the Triple orchestrator drives the clock to BOTH extra shards and lists both in the
+        // re-home roster, so the Galaxy (the between-space parent) wins its lease and rests authority.
+        let a = dual_addrs();
+        let triple = orchestrator_env(&a, &DEV, "store", ClusterShape::Triple);
+
+        // VD_ROSTER = {DEST, GALAXY} (in the shape's extend order: DEST then GALAXY).
+        assert_eq!(
+            env_value(&triple, "VD_ROSTER"),
+            Some(format!("{},{}", SHARD_B.0, GALAXY.0)).as_deref()
+        );
+        // VD_CLOCK_PEERS = {GW, SHARD, DEST, GALAXY} — every follower's clock must advance to win its lease.
+        assert_eq!(
+            env_value(&triple, "VD_CLOCK_PEERS"),
+            Some(format!(
+                "{},{},{},{}",
+                GATEWAY.0, SHARD.0, SHARD_B.0, GALAXY.0
+            ))
+            .as_deref()
+        );
+        // VD_PEERS books BOTH extra shards.
+        let peers = env_value(&triple, "VD_PEERS").expect("VD_PEERS is always emitted");
+        assert!(peers.contains(&format!("{}={}", SHARD_B.0, a.shard_b)));
+        assert!(peers.contains(&format!("{}={}", GALAXY.0, a.galaxy)));
+    }
+
+    #[test]
     fn gateway_env_dual_books_dest_and_emits_known_shards_inert_when_single() {
         let a = dual_addrs();
-        let single = gateway_env(&a, &[], "pub", &DEV, false);
-        let dual = gateway_env(&a, &[], "pub", &DEV, true);
+        let single = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Single);
+        let dual = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Dual);
 
         // VD_KNOWN_SHARDS: absent single, =DEST dual (so a DEST frame is node-class dispatchable).
         assert_eq!(env_value(&single, "VD_KNOWN_SHARDS"), None);
@@ -2025,10 +2698,33 @@ mod incarnation_tests {
     }
 
     #[test]
+    fn gateway_env_triple_books_dest_and_galaxy_and_lists_both_known_shards() {
+        // S5b: the Triple gateway must BOOK both extra shards (so the durable session-route can swap to
+        // each successive source across the multi-hop) and class both as known (so each shard→gateway
+        // frame is node-class dispatchable), while VD_SHARD (the login shard) stays SHARD.
+        let a = dual_addrs();
+        let triple = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Triple);
+
+        // VD_KNOWN_SHARDS = {DEST, GALAXY}.
+        assert_eq!(
+            env_value(&triple, "VD_KNOWN_SHARDS"),
+            Some(format!("{},{}", SHARD_B.0, GALAXY.0)).as_deref()
+        );
+        // Both extra peers are booked; the login shard is unchanged.
+        let peers = env_value(&triple, "VD_PEERS").expect("VD_PEERS is always emitted");
+        assert!(peers.contains(&format!("{}={}", SHARD_B.0, a.shard_b)));
+        assert!(peers.contains(&format!("{}={}", GALAXY.0, a.galaxy)));
+        assert_eq!(
+            env_value(&triple, "VD_SHARD"),
+            Some(SHARD.0.to_string()).as_deref()
+        );
+    }
+
+    #[test]
     fn shard_env_dual_books_the_other_shard_inert_when_single() {
         let a = dual_addrs();
-        let single = shard_env(&a, &DEV, false);
-        let dual = shard_env(&a, &DEV, true);
+        let single = shard_env(&a, &DEV, ClusterShape::Single);
+        let dual = shard_env(&a, &DEV, ClusterShape::Dual);
         let dest_book = format!("{}={}", SHARD_B.0, a.shard_b);
         // Each shard books the other ONLY in dual (the cross-shard mesh); single is byte-identical.
         assert!(
@@ -2051,12 +2747,12 @@ mod incarnation_tests {
 
     #[test]
     fn single_shard_env_is_byte_identical_to_dual_false() {
-        // H-1 inert-parity: the `dual=false` arm of every builder emits EXACTLY the pre-Track-R env, so a
-        // single-shard `up` / the process_parity gate stays byte-identical. (Asserted field-by-field
-        // against the hand-written expected today's env — a regression flips this loud.)
+        // H-1 inert-parity: the `ClusterShape::Single` arm of every builder emits EXACTLY the pre-Track-R
+        // env, so a single-shard `up` / the process_parity gate stays byte-identical. (Asserted
+        // field-by-field against the hand-written expected today's env — a regression flips this loud.)
         let a = dual_addrs();
 
-        let orch = orchestrator_env(&a, &DEV, "store", false);
+        let orch = orchestrator_env(&a, &DEV, "store", ClusterShape::Single);
         assert_eq!(
             orch,
             vec![
@@ -2074,7 +2770,7 @@ mod incarnation_tests {
             ]
         );
 
-        let gw = gateway_env(&a, &[], "pub", &DEV, false);
+        let gw = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Single);
         assert_eq!(
             gw,
             vec![
@@ -2097,7 +2793,7 @@ mod incarnation_tests {
             ]
         );
 
-        let shard = shard_env(&a, &DEV, false);
+        let shard = shard_env(&a, &DEV, ClusterShape::Single);
         assert_eq!(
             shard,
             vec![
@@ -2123,7 +2819,7 @@ mod incarnation_tests {
     #[test]
     fn shard_b_env_is_the_dest_realm_with_a_distinct_mint_and_books_the_source() {
         let a = dual_addrs();
-        let env = shard_b_env(&a, &DEV);
+        let env = shard_b_env(&a, &DEV, ClusterShape::Dual);
         assert_eq!(
             env_value(&env, "VD_NODE_ID"),
             Some(SHARD_B.0.to_string()).as_deref()
@@ -2145,14 +2841,260 @@ mod incarnation_tests {
             env_value(&env, "VD_MINT_SEED"),
             Some(DEV.mint_seed.to_string()).as_deref()
         );
-        // Books ORCH, GATEWAY, and the SOURCE shard (the cross-shard mesh) — NOT itself.
+        // Books ORCH, GATEWAY, and the SOURCE shard (the cross-shard mesh) — NOT itself, and NOT the
+        // Galaxy in Dual (there is none).
         let peers = env_value(&env, "VD_PEERS").expect("VD_PEERS is always emitted");
         assert!(peers.contains(&format!("{}={}", SHARD.0, a.shard)));
         assert!(peers.contains(&format!("{}={}", ORCH.0, a.orchestrator)));
         assert!(peers.contains(&format!("{}={}", GATEWAY.0, a.gateway)));
         assert!(!peers.contains(&format!("{}=", SHARD_B.0)));
+        assert!(!peers.contains(&format!("{}={}", GALAXY.0, a.galaxy)));
         // The DEST hosts realm B only — no crossing trigger (the SOURCE hosts it).
         assert_eq!(env_value(&env, "VD_REALM_BOUNDARIES"), None);
+    }
+
+    #[test]
+    fn shard_b_env_triple_also_books_the_galaxy() {
+        // S5b: in Triple the DEST (System 8) additionally books the GALAXY between-space shard — each
+        // shard books the others (the sibling crossing routes System 8 → Galaxy → System 7 through it).
+        let a = dual_addrs();
+        let peers = env_value(&shard_b_env(&a, &DEV, ClusterShape::Triple), "VD_PEERS")
+            .expect("VD_PEERS is always emitted")
+            .to_owned();
+        assert!(peers.contains(&format!("{}={}", GALAXY.0, a.galaxy)));
+        assert!(peers.contains(&format!("{}={}", SHARD.0, a.shard)));
+    }
+
+    #[test]
+    fn galaxy_env_is_the_between_space_realm_with_a_distinct_mint_and_books_both_systems() {
+        // S5b: the GALAXY shard hosts System(GALAXY_SEED) (the between-space), with a mint distinct from
+        // BOTH systems (so its entities never alias), and books ORCH, GATEWAY, AND both systems — it is the
+        // sibling-routing shard. It boots the SEED neighbourhood (no boundary override).
+        let a = dual_addrs();
+        let env = galaxy_env(&a, &DEV);
+        assert_eq!(
+            env_value(&env, "VD_NODE_ID"),
+            Some(GALAXY.0.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&env, "VD_BIND"),
+            Some(a.galaxy.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&env, "VD_REALM_SEED"),
+            Some(GALAXY_SEED.to_string()).as_deref()
+        );
+        // A mint distinct from BOTH the source (11) and the DEST (11+6) mints.
+        let galaxy_mint = env_value(&env, "VD_MINT_SEED").expect("VD_MINT_SEED emitted");
+        assert_eq!(galaxy_mint, DEV.mint_seed.wrapping_add(12).to_string());
+        assert_ne!(galaxy_mint, DEV.mint_seed.to_string());
+        assert_ne!(galaxy_mint, DEV.mint_seed.wrapping_add(6).to_string());
+        // Books ORCH, GATEWAY, AND both systems (System 7 + System 8) — NOT itself.
+        let peers = env_value(&env, "VD_PEERS").expect("VD_PEERS is always emitted");
+        assert!(peers.contains(&format!("{}={}", ORCH.0, a.orchestrator)));
+        assert!(peers.contains(&format!("{}={}", GATEWAY.0, a.gateway)));
+        assert!(peers.contains(&format!("{}={}", SHARD.0, a.shard)));
+        assert!(peers.contains(&format!("{}={}", SHARD_B.0, a.shard_b)));
+        assert!(!peers.contains(&format!("{}=", GALAXY.0)));
+        // The Galaxy boots the seed neighbourhood — no crossing-trigger override.
+        assert_eq!(env_value(&env, "VD_REALM_BOUNDARIES"), None);
+    }
+
+    // ---- NODE-PER-REALM (Forest) env builders (task #149) --------------------------------------
+
+    #[test]
+    fn realm_kind_token_round_trips_through_realm_from_kind_seed() {
+        use vd_core::pose::RealmId;
+        for realm in [
+            RealmId::System(7),
+            RealmId::Planet(7),
+            RealmId::Station(7),
+            RealmId::Area(7),
+        ] {
+            let token = realm_kind_token(realm);
+            let seed = realm_seed_of(realm);
+            assert_eq!(
+                realm_from_kind_seed(token, seed),
+                Ok(realm),
+                "the VD_REALM_KIND token round-trips for {realm}"
+            );
+        }
+        // An ABSENT/empty kind defaults to System(seed) — the byte-identical legacy shard boot.
+        assert_eq!(realm_from_kind_seed("", 7), Ok(RealmId::System(7)));
+        // An unknown kind fails LOUD (never a silent wrong realm).
+        assert!(realm_from_kind_seed("nope", 7).is_err());
+    }
+
+    #[test]
+    fn forest_extra_realm_shards_are_the_six_realm_minus_system_7() {
+        // The Forest shape's extra shards = Planet 7, Station 7, Area 7, Galaxy, System 8 (System 7 is the
+        // always-present base source shard, NOT listed). Non-Forest shapes list NONE.
+        use vd_core::pose::RealmId;
+        let a = dual_addrs();
+        assert!(
+            ClusterShape::Single.extra_realm_shards(&a, &DEV).is_empty(),
+            "Single has no extra realm-shards"
+        );
+        assert!(
+            ClusterShape::Triple.extra_realm_shards(&a, &DEV).is_empty(),
+            "Triple keeps the legacy explicit wiring — no extra_realm_shards"
+        );
+        let forest = ClusterShape::Forest.extra_realm_shards(&a, &DEV);
+        let realms: Vec<RealmId> = forest.iter().map(|s| s.realm).collect();
+        assert_eq!(
+            realms,
+            vec![
+                RealmId::Planet(FOREST_CHILD_SEED),
+                RealmId::Station(FOREST_CHILD_SEED),
+                RealmId::Area(FOREST_CHILD_SEED),
+                RealmId::System(GALAXY_SEED),
+                RealmId::System(DEV.realm_seed_b),
+            ],
+        );
+        // Each realm-shard has a DISTINCT node id (no aliasing).
+        let nodes: std::collections::BTreeSet<u64> = forest.iter().map(|s| s.node.0).collect();
+        assert_eq!(
+            nodes.len(),
+            forest.len(),
+            "distinct node ids per realm-shard"
+        );
+    }
+
+    #[test]
+    fn forest_source_shard_env_books_all_five_others_and_never_cohosts() {
+        // The Forest System-7 source shard books EVERY other realm-shard (the cross-shard mesh) and, crucially,
+        // sets NO `VD_HELD_REALMS` — each realm is its own node, so the source==dest co-hosting is gone.
+        let a = dual_addrs();
+        let env = shard_env(&a, &DEV, ClusterShape::Forest);
+        let peers = env_value(&env, "VD_PEERS").expect("VD_PEERS is always emitted");
+        for shard in ClusterShape::Forest.extra_realm_shards(&a, &DEV) {
+            assert!(
+                peers.contains(&format!("{}={}", shard.node.0, shard.quic)),
+                "the source shard books realm-shard node {}",
+                shard.node.0,
+            );
+        }
+        // NO co-hosting in Forest (the KEY node-per-realm property).
+        assert_eq!(
+            env_value(&env, "VD_HELD_REALMS"),
+            None,
+            "Forest never co-hosts — VD_HELD_REALMS must be absent (each realm on its own node)"
+        );
+        // The System-7 source shard is still a System realm via the absent-default (no VD_REALM_KIND emitted).
+        assert_eq!(env_value(&env, "VD_REALM_KIND"), None);
+        assert_eq!(
+            env_value(&env, "VD_REALM_SEED"),
+            Some(DEV.realm_seed.to_string()).as_deref()
+        );
+    }
+
+    #[test]
+    fn forest_realm_shard_env_hosts_one_realm_with_its_kind_and_books_the_others() {
+        // A Planet-7 realm-shard: hosts EXACTLY Planet 7 (VD_REALM_KIND=planet, VD_REALM_SEED=7), no
+        // co-hosting, a distinct mint, and books ORCH + GATEWAY + System 7 + every OTHER realm-shard (never
+        // itself).
+        use vd_core::pose::RealmId;
+        let a = dual_addrs();
+        let planet = ClusterShape::Forest
+            .extra_realm_shards(&a, &DEV)
+            .into_iter()
+            .find(|s| s.realm == RealmId::Planet(FOREST_CHILD_SEED))
+            .expect("the Planet 7 realm-shard is in the Forest set");
+        let env = realm_shard_env(&a, &DEV, ClusterShape::Forest, planet);
+        assert_eq!(
+            env_value(&env, "VD_NODE_ID"),
+            Some(planet.node.0.to_string()).as_deref()
+        );
+        assert_eq!(env_value(&env, "VD_REALM_KIND"), Some("planet"));
+        assert_eq!(
+            env_value(&env, "VD_REALM_SEED"),
+            Some(FOREST_CHILD_SEED.to_string()).as_deref()
+        );
+        // NO co-hosting, NO boundary override — the seed neighbourhood boots.
+        assert_eq!(env_value(&env, "VD_HELD_REALMS"), None);
+        assert_eq!(env_value(&env, "VD_REALM_BOUNDARIES"), None);
+        // Books ORCH + GATEWAY + System 7 + every OTHER realm-shard, but NOT itself.
+        let peers = env_value(&env, "VD_PEERS").expect("VD_PEERS is always emitted");
+        assert!(peers.contains(&format!("{}={}", ORCH.0, a.orchestrator)));
+        assert!(peers.contains(&format!("{}={}", GATEWAY.0, a.gateway)));
+        assert!(peers.contains(&format!("{}={}", SHARD.0, a.shard)));
+        assert!(
+            !peers.contains(&format!("{}={}", planet.node.0, planet.quic)),
+            "a realm-shard does not book ITSELF"
+        );
+        for other in ClusterShape::Forest
+            .extra_realm_shards(&a, &DEV)
+            .into_iter()
+            .filter(|s| s.node != planet.node)
+        {
+            assert!(
+                peers.contains(&format!("{}={}", other.node.0, other.quic)),
+                "the Planet-7 shard books the OTHER realm-shard node {}",
+                other.node.0,
+            );
+        }
+        // The Galaxy + System-8 realm-shards keep their HISTORIC distinct mints so their entity ids match the
+        // legacy Triple/Dual rigs; the new children derive from the node id — all pairwise distinct.
+        let mints: std::collections::BTreeSet<String> = ClusterShape::Forest
+            .extra_realm_shards(&a, &DEV)
+            .into_iter()
+            .map(|s| {
+                env_value(
+                    &realm_shard_env(&a, &DEV, ClusterShape::Forest, s),
+                    "VD_MINT_SEED",
+                )
+                .expect("mint emitted")
+                .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            mints.len(),
+            5,
+            "every realm-shard has a distinct mint (no entity-id aliasing across shards)"
+        );
+    }
+
+    #[test]
+    fn forest_orchestrator_and_gateway_book_and_roster_all_six_realm_shards() {
+        // The Forest orchestrator drives the clock + rosters every realm-shard; the gateway books + classes
+        // each as known (so the session-route swap reaches every successive source shard as the dot walks).
+        let a = dual_addrs();
+        let orch = orchestrator_env(&a, &DEV, "store", ClusterShape::Forest);
+        let gw = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Forest);
+        let orch_peers = env_value(&orch, "VD_PEERS").expect("orch VD_PEERS");
+        let gw_peers = env_value(&gw, "VD_PEERS").expect("gw VD_PEERS");
+        let roster = env_value(&orch, "VD_ROSTER").expect("VD_ROSTER emitted in Forest");
+        let known = env_value(&gw, "VD_KNOWN_SHARDS").expect("VD_KNOWN_SHARDS emitted in Forest");
+        for shard in ClusterShape::Forest.extra_realm_shards(&a, &DEV) {
+            assert!(
+                orch_peers.contains(&format!("{}={}", shard.node.0, shard.quic)),
+                "orchestrator books realm-shard {}",
+                shard.node.0
+            );
+            assert!(
+                gw_peers.contains(&format!("{}={}", shard.node.0, shard.quic)),
+                "gateway books realm-shard {}",
+                shard.node.0
+            );
+            assert!(
+                roster.split(',').any(|id| id == shard.node.0.to_string()),
+                "VD_ROSTER lists realm-shard {}",
+                shard.node.0
+            );
+            assert!(
+                known.split(',').any(|id| id == shard.node.0.to_string()),
+                "VD_KNOWN_SHARDS lists realm-shard {}",
+                shard.node.0
+            );
+        }
+        // The clock advances to every follower (else a follower never wins its lease).
+        let clock = env_value(&orch, "VD_CLOCK_PEERS").expect("VD_CLOCK_PEERS");
+        assert!(
+            clock
+                .split(',')
+                .any(|id| id == PLANET_A_SHARD.0.to_string())
+        );
+        assert!(clock.split(',').any(|id| id == AREA_A_SHARD.0.to_string()));
     }
 
     #[test]

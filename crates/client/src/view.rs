@@ -2,27 +2,33 @@
 //! same honesty rule as the `WireMonitor`: the client renders what it was actually
 //! sent, never internal hope).
 //!
-//! Poses are kept as per-`(SubId, EntityId)` [`EntityTrack`]s so the shape survives
-//! P2 cross-shard overlap (an entity visible through two subscriptions). The
-//! composited render pass picks ONE authoritative sub per entity and suppresses the
-//! duplicate copies; in P1.5's single-subscription world that is simply the one
-//! sub, but the seam is already correct for P2.
+//! ## Pure renderer — ONE track per `EntityId`, latest-wins (S6)
+//! Poses are kept per-[`EntityId`] (NOT per-`(SubId, EntityId)`): the client is a PURE
+//! RENDERER that never learns which node owns an entity. It renders EVERY entity at its
+//! authoritative coordinate, and when the server re-homes authority the entity simply keeps
+//! arriving (on whichever sub the new owner rides) into the SAME per-entity track — latest
+//! delivered pose wins ([`EntityTrack::observe`], which collapses the interp window on a
+//! frame change so a cross-realm re-home is clean, never a blended garbage intermediate).
+//! `held_subs` stays a SET on the client (multi-realm AoI legitimately holds several subs —
+//! a player in a ship docked at a station on a planet holds Ship+Station+Planet+System subs
+//! at once); what was DELETED is the per-entity authority disambiguation
+//! (`authoritative_sub`/`set_authority`/`chosen_subs`) whose only purpose was to de-dup an
+//! entity the SERVER chose to emit twice. The server sends each entity once (in its
+//! authoritative realm); the client just renders it.
 //!
 //! ## Track eviction — sound signals only (NEVER datagram-absence)
 //! A track is dropped ONLY on a RELIABLE signal, never on absence from a datagram:
 //! snapshots ride UNRELIABLE datagrams, so an entity merely ABSENT from one frame is
 //! indistinguishable from packet loss — evicting on absence would delete live entities.
-//! Two reliable signals bound the view to its live set:
-//!   * per-SUB teardown — [`DeliveredView::drop_sub`], driven by the gateway's reliable
-//!     `SubscriptionClosing`; this is wired NOW (it keeps memory + per-step clone cost
-//!     proportional to the LIVE subscription set as AoI churns on the end-goal cross-shard
-//!     path, not to every sub ever seen).
-//!   * per-ENTITY teardown within a still-open sub — `EventMsg::EntityRemoved`; this is the
-//!     remaining P2 piece, gated on routing the reliable EventMsg class to the client
-//!     (there is no Bulk/Event arm on the client inbound seam yet). Until then a still-open
-//!     sub's tracks persist, which is correct (lossy datagrams cannot prove departure).
-//!
-//! (Raised by the Slice-0–T3 + P1.5-foundation audits; drop_sub closes the per-sub half.)
+//! The reliable signals that bound the view to its live set:
+//!   * per-ENTITY teardown — [`DeliveredView::remove_entity`], driven by the reliable
+//!     `EventMsg::EntityRemoved` (S6): the server-authoritative "this entity left your view"
+//!     signal. With per-ENTITY tracks this is THE eviction primitive (a de-owned copy the
+//!     send-once server no longer streams).
+//!   * per-SUB drop — [`DeliveredView::drop_sub`], driven by the reliable
+//!     `SubscriptionClosing`: forgets that sub's staleness high-water so a re-opened sub id
+//!     is not rejected as stale. It no longer evicts entity tracks (they are EntityId-keyed,
+//!     shared across subs) — `EntityRemoved` owns per-entity eviction.
 
 use std::collections::BTreeMap;
 
@@ -33,14 +39,21 @@ use vd_wire::channels::{SnapshotDatagram, SnapshotVerdict, SubId, classify_snaps
 
 use crate::interp::{EntityTrack, RenderPose};
 
+/// The inert per-row "authoritative sub" a pure-renderer client reports for its diagnosis
+/// surface (`DevEntityRow.authoritative_sub`): a node-agnostic client no longer has a
+/// per-entity authoritative sub, so [`DeliveredView::rendered`] reports this constant. Kept
+/// as a stable diagnostic field (not deleted) so `vdctl`/process-parity decode unchanged.
+pub const RENDERED_SUB: SubId = SubId(0);
+
 /// The decoded, delivered world view.
 #[derive(Clone, Debug, Default)]
 pub struct DeliveredView {
-    tracks: BTreeMap<(SubId, EntityId), EntityTrack>,
+    /// ONE track per entity (latest-wins) — the pure-renderer shape. An entity re-homing
+    /// across shards keeps arriving into the SAME track regardless of which sub carries it.
+    tracks: BTreeMap<EntityId, EntityTrack>,
+    /// Per-sub staleness high-water for the §6.3 gate — `held_subs` stays a SET (multi-realm
+    /// AoI), so a strictly-older `frame_id` on a given sub is still dropped per sub.
     high_water: BTreeMap<SubId, u64>,
-    /// Explicit render authority per entity (from `AuthorityChanged`); overrides the
-    /// default lowest-sub pick when an entity is visible through several subs (P2).
-    authoritative_sub: BTreeMap<EntityId, SubId>,
     own_entity: Option<EntityId>,
     stale_frames_dropped: u64,
     /// FAULT count: delivered poses that carried a non-finite (NaN/Inf) component and had
@@ -51,12 +64,13 @@ pub struct DeliveredView {
 
 impl DeliveredView {
     /// Fold one delivered snapshot in, through the shared §6.3 gate
-    /// ([`classify_snapshot`]): apply the entities (feeding their per-sub tracks) or
-    /// count the drop. `held_subs` is the SET of subscriptions the client currently holds
-    /// (Track R / 1d.2d): during a cross-shard transfer overlap the client holds BOTH the
-    /// source and dest subs, so a frame on either is admitted — the composited render pass
-    /// ([`DeliveredView::render`]) still picks ONE authoritative sub per entity (via
-    /// `AuthorityChanged`/`set_authority`), so the avatar is rendered exactly once.
+    /// ([`classify_snapshot`]): apply the entities into their per-ENTITY tracks (latest-wins)
+    /// or count the drop. `held_subs` is the SET of subscriptions the client currently holds
+    /// (multi-realm AoI): a frame on ANY held sub is admitted; a frame on a sub the client
+    /// does not hold drops. Because tracks are keyed by [`EntityId`] (NOT by sub), an entity
+    /// that re-homes to a new owner keeps folding into the SAME track no matter which sub now
+    /// carries it — [`EntityTrack::observe`] collapses the window on the cross-realm frame
+    /// change, so the render is clean without any client-side node awareness.
     /// Returns the verdict so the caller anchors the render clock only on `Apply`.
     pub fn on_snapshot(
         &mut self,
@@ -80,7 +94,7 @@ impl DeliveredView {
                         self.nonfinite_poses += 1;
                     }
                     self.tracks
-                        .entry((snap.sub, entity.entity))
+                        .entry(entity.entity)
                         .and_modify(|track| track.observe(pose))
                         .or_insert_with(|| EntityTrack::new(pose));
                 }
@@ -92,68 +106,55 @@ impl DeliveredView {
         verdict
     }
 
-    /// Record render authority for an entity (from `AuthorityChanged`): which sub
-    /// renders it, and that it is THIS client's own entity.
-    pub fn set_authority(&mut self, entity: EntityId, sub: SubId) {
-        self.authoritative_sub.insert(entity, sub);
+    /// Record which entity is THIS client's own avatar (from the node-agnostic
+    /// `ServerControlMsg::OwnEntity`). It names ONLY the entity — never a sub / owning node —
+    /// so the pure-renderer client learns which entity to center on WITHOUT learning which
+    /// shard simulates it.
+    pub fn set_own_entity(&mut self, entity: EntityId) {
         self.own_entity = Some(entity);
     }
 
-    /// Drop every track (+ high-water + authority pointer) for a subscription the gateway
-    /// has RELIABLY closed (`SubscriptionClosing`). The SOUND eviction signal — reliable +
-    /// per-sub, unlike datagram-absence — so the view (and the per-step clone of it) stays
-    /// bounded to the live subscription set as AoI churns. An entity whose authority pointed
-    /// at the closed sub loses that override and falls back to its lowest remaining sub (or
-    /// is no longer rendered if it had only this one). `own_entity` is retained: it is an id,
-    /// and `own_location_frame` already reports `None` once the own track is gone.
-    pub fn drop_sub(&mut self, sub: SubId) {
-        self.tracks.retain(|(s, _), _| *s != sub);
-        self.high_water.remove(&sub);
-        self.authoritative_sub.retain(|_, s| *s != sub);
+    /// Evict one entity's track (from the reliable `EventMsg::EntityRemoved`) — the SOUND
+    /// per-entity eviction signal (reliable + explicit, unlike datagram-absence). If the
+    /// removed entity is the own avatar, `own_entity` is cleared too (the server told us it
+    /// left our view). A remove for an entity we hold no track for is a harmless no-op.
+    pub fn remove_entity(&mut self, entity: EntityId) {
+        self.tracks.remove(&entity);
+        if self.own_entity == Some(entity) {
+            self.own_entity = None;
+        }
     }
 
-    /// The composited render poses at `cursor`: each entity rendered EXACTLY ONCE,
-    /// from its authoritative sub (explicit `AuthorityChanged`, else the lowest sub
-    /// it appears in — unambiguous in P1.5's single sub, disambiguated by authority
-    /// in P2). Cross-sub duplicates are suppressed.
+    /// Forget a subscription's staleness high-water when the gateway RELIABLY closes it
+    /// (`SubscriptionClosing`), so a later re-opened sub id is not rejected as stale. It does
+    /// NOT evict entity tracks — those are EntityId-keyed and shared across subs, so per-entity
+    /// eviction is [`DeliveredView::remove_entity`]'s job (`EventMsg::EntityRemoved`). A close
+    /// for a sub never delivered is a harmless no-op.
+    pub fn drop_sub(&mut self, sub: SubId) {
+        self.high_water.remove(&sub);
+    }
+
+    /// The render poses at `cursor`: each entity rendered EXACTLY ONCE from its single
+    /// per-entity track. A pure-renderer client has one track per entity by construction, so
+    /// there is no cross-sub duplicate to suppress.
     #[must_use]
     pub fn render(&self, cursor: f64) -> BTreeMap<EntityId, RenderPose> {
-        self.rendered(cursor)
-            .into_iter()
-            .map(|(entity, _sub, pose)| (entity, pose))
+        self.tracks
+            .iter()
+            .map(|(entity, track)| (*entity, track.sample(cursor)))
             .collect()
     }
 
-    /// Like [`DeliveredView::render`] but also reports each entity's authoritative
-    /// sub — the dev-control diagnosis surface (which sub a rendered entity came
-    /// from; in P1.5 always the one sub, disambiguated by authority in P2).
+    /// Like [`DeliveredView::render`] but shaped for the dev-control diagnosis surface, which
+    /// carries a per-row `authoritative_sub`. A node-agnostic client has no per-entity
+    /// authoritative sub, so every row reports the inert [`RENDERED_SUB`] constant (kept so
+    /// `vdctl`/process-parity decode the row unchanged).
     #[must_use]
     pub fn rendered(&self, cursor: f64) -> Vec<(EntityId, SubId, RenderPose)> {
-        self.chosen_subs()
-            .into_iter()
-            .filter_map(|(entity, sub)| {
-                self.tracks
-                    .get(&(sub, entity))
-                    .map(|track| (entity, sub, track.sample(cursor)))
-            })
+        self.tracks
+            .iter()
+            .map(|(entity, track)| (*entity, RENDERED_SUB, track.sample(cursor)))
             .collect()
-    }
-
-    /// Each entity's authoritative sub: explicit `AuthorityChanged`, else the lowest
-    /// sub it appears on. Suppresses cross-sub duplicates (each entity once).
-    fn chosen_subs(&self) -> BTreeMap<EntityId, SubId> {
-        let mut chosen: BTreeMap<EntityId, SubId> = BTreeMap::new();
-        for (sub, entity) in self.tracks.keys() {
-            match self.authoritative_sub.get(entity) {
-                Some(auth) => {
-                    chosen.insert(*entity, *auth);
-                }
-                None => {
-                    chosen.entry(*entity).or_insert(*sub);
-                }
-            }
-        }
-        chosen
     }
 
     #[must_use]
@@ -161,35 +162,29 @@ impl DeliveredView {
         self.own_entity
     }
 
-    /// The subs that currently hold a delivered TRACK for `entity` (ascending). A pure read-only
-    /// diagnosis surface (it touches NO render/eviction state) — the dev-control + transfer-gate
-    /// anti-vacuity probe: during a cross-shard overlap the avatar has a track on BOTH the source
-    /// AND the dest sub here, even though [`DeliveredView::rendered`] composites it to ONE. So a gate
-    /// can prove the two-holder window was REAL (both tracks live) before asserting it still rendered
-    /// exactly once — otherwise "rendered once" is vacuously true because no overlap ever occurred.
+    /// The subs that currently hold a delivered track for `entity` — a pure-renderer client
+    /// keeps ONE per-entity track (not per-sub), so this reports the inert [`RENDERED_SUB`]
+    /// when a track exists and nothing otherwise. Retained as a read-only diagnosis surface
+    /// (the transfer-gate anti-vacuity probe) whose semantics collapse with the send-once
+    /// pure-renderer model: an entity either has a delivered track or it does not.
     #[must_use]
     pub fn subs_holding(&self, entity: EntityId) -> Vec<SubId> {
-        self.tracks
-            .keys()
-            .filter(|(_, e)| *e == entity)
-            .map(|(sub, _)| *sub)
-            .collect()
+        if self.tracks.contains_key(&entity) {
+            vec![RENDERED_SUB]
+        } else {
+            Vec::new()
+        }
     }
 
-    /// The frame the OWN entity is currently in — its authoritative track's leading
-    /// edge — i.e. the player's LOCATION (realm), the basis for the player-stats HUD and
-    /// the `vdctl` location readout. `None` until the own entity is known AND has a
-    /// delivered track on its authoritative sub. Cursor-free (frame does not interpolate)
-    /// and authority-disambiguated by the SAME `chosen_subs` the render path uses, so the
-    /// location can never disagree with the rendered pose. It is the delivered FrameRef,
-    /// so it is fence-validated and changes only on a real cross-realm move.
+    /// The frame the OWN entity is currently in — its track's leading edge — i.e. the
+    /// player's LOCATION (realm), the basis for the player-stats HUD and the `vdctl` location
+    /// readout. `None` until the own entity is known AND has a delivered track. Cursor-free
+    /// (frame does not interpolate); it is the delivered FrameRef, so it is fence-validated
+    /// and changes only on a real cross-realm move (the re-home flips it, node-agnostically).
     #[must_use]
     pub fn own_location_frame(&self) -> Option<FrameRef> {
         let own = self.own_entity?;
-        let sub = self.chosen_subs().get(&own).copied()?;
-        self.tracks
-            .get(&(sub, own))
-            .map(|track| track.current_frame())
+        self.tracks.get(&own).map(|track| track.current_frame())
     }
 
     #[must_use]
@@ -244,14 +239,10 @@ impl DeliveredView {
 
     /// The hull entity's rendered pose at `cursor` — the basis a `ShipLocal` interior pose
     /// composes against. The hull is just-another-delivered-entity (the id named by the
-    /// frame), resolved on its authoritative sub via the SAME `chosen_subs` the render path
-    /// uses. `None` until the hull is delivered there (no ships pre-P8, or authority points
-    /// at a sub we hold no track for) ⇒ the interior renders at its frame origin.
+    /// frame), resolved by its per-entity track. `None` until the hull is delivered (no ships
+    /// pre-P8) ⇒ the interior renders at its frame origin.
     fn hull_pose(&self, hull: EntityId, cursor: f64) -> Option<RenderPose> {
-        let sub = self.chosen_subs().get(&hull).copied()?;
-        self.tracks
-            .get(&(sub, hull))
-            .map(|track| track.sample(cursor))
+        self.tracks.get(&hull).map(|track| track.sample(cursor))
     }
 }
 
@@ -323,23 +314,27 @@ mod tests {
     }
 
     #[test]
-    fn drop_sub_evicts_only_that_subs_tracks_and_keeps_the_view_bounded() {
-        // Two entities through two subs; closing sub 0 evicts ONLY its tracks + authority,
-        // leaving sub 1 intact — the reliable per-sub eviction that bounds the view.
+    fn drop_sub_forgets_only_the_high_water_and_keeps_entity_tracks() {
+        // The pure-renderer drop_sub forgets a sub's STALENESS high-water (so a re-opened sub id
+        // is not rejected as stale) but does NOT evict entity tracks — those are EntityId-keyed and
+        // per-entity eviction is remove_entity's job (EventMsg::EntityRemoved).
         let mut view = DeliveredView::default();
-        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 1.0)]));
-        view.on_snapshot(&s(SubId(1)), snap(SubId(1), 1, 10, vec![(ent(2), 2.0)]));
-        view.set_authority(ent(1), SubId(0));
-        assert_eq!(view.render(10.0).len(), 2);
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 5, 10, vec![(ent(1), 1.0)]));
+        assert_eq!(view.render(10.0).len(), 1);
 
+        // Drop sub 0: the entity track SURVIVES (tracks are not sub-keyed), only the high-water is
+        // forgotten — so a re-opened sub 0 with a LOW frame_id is admitted, not rejected as stale.
         view.drop_sub(SubId(0));
-        let r = view.render(10.0);
-        assert_eq!(r.len(), 1, "only sub 1 survives");
-        assert!(r.contains_key(&ent(2)));
-        // high-water for the dropped sub is gone, so a fresh frame_id on a re-opened sub 0
-        // is not rejected as stale.
-        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 12, vec![(ent(3), 3.0)]));
-        assert!(view.render(12.0).contains_key(&ent(3)));
+        assert_eq!(
+            view.render(10.0).len(),
+            1,
+            "entity track survives a drop_sub"
+        );
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 12, vec![(ent(2), 3.0)]));
+        assert!(
+            view.render(12.0).contains_key(&ent(2)),
+            "the low frame_id is admitted after the high-water was forgotten"
+        );
         // Dropping a sub that was never delivered is a harmless no-op.
         view.drop_sub(SubId(7));
     }
@@ -383,26 +378,14 @@ mod tests {
             "interior composes through the hull pose"
         );
 
-        // ShipLocal whose hull is NOT delivered → falls back to the frame-local pos.
+        // ShipLocal whose hull entity is NOT delivered → falls back to the frame-local pos (the
+        // trackless-hull arm of hull_pose: no panic, no stale pose from another entity).
         let orphan = RenderPose {
             frame: FrameRef::ShipLocal { ship: ent(99) },
             pos: DVec3::new(3.0, 0.0, 0.0),
             orient: DQuat::IDENTITY,
         };
         assert_eq!(view.world_pos(&orphan, 11.0), DVec3::new(3.0, 0.0, 0.0));
-
-        // ShipLocal whose hull authority points at a sub with NO track → also falls back
-        // (defensive: no panic, no stale pose) — exercises hull_pose's trackless-sub arm.
-        view.set_authority(hull, SubId(9));
-        let interior_pose = RenderPose {
-            frame: FrameRef::ShipLocal { ship: hull },
-            pos: DVec3::new(5.0, 0.0, 0.0),
-            orient: DQuat::IDENTITY,
-        };
-        assert_eq!(
-            view.world_pos(&interior_pose, 11.0),
-            DVec3::new(5.0, 0.0, 0.0)
-        );
 
         // Galaxy + Planet frames are identity too (the combined world-frame arm).
         let gal = RenderPose {
@@ -541,50 +524,119 @@ mod tests {
     }
 
     #[test]
-    fn authority_changed_sets_own_entity() {
+    fn own_entity_records_the_avatar_and_is_node_agnostic() {
+        // OwnEntity names ONLY the entity — the pure-renderer own-avatar cue, with no sub/owner.
         let mut view = DeliveredView::default();
         assert_eq!(view.own_entity(), None);
-        view.set_authority(ent(7), SubId(0));
+        view.set_own_entity(ent(7));
+        assert_eq!(view.own_entity(), Some(ent(7)));
+        // Re-announcing (idempotent — the dest re-point re-confirms the same avatar) is a no-op.
+        view.set_own_entity(ent(7));
         assert_eq!(view.own_entity(), Some(ent(7)));
     }
 
     #[test]
-    fn an_entity_seen_through_two_subs_renders_once_from_its_authoritative_sub() {
-        // 1d.2d overlap: with BOTH subs in the held SET, a frame on EITHER is admitted, so
-        // entity 1 arrives on BOTH sub 0 and sub 1. Without authority it renders from the
-        // lowest sub; AuthorityChanged moves it to the named sub — either way it renders
-        // EXACTLY ONCE (the source copy is composited-suppressed — the FORK 0a guarantee).
+    fn a_re_homed_entity_renders_once_latest_wins_across_subs() {
+        // THE pure-renderer node-agnostic property: an entity arrives on the source sub, then the
+        // SAME entity arrives on the DEST sub (a different realm frame) after the server re-homes
+        // it. With per-ENTITY tracks it folds into ONE track — the frame change collapses the interp
+        // window to the dest pose (EntityTrack::observe), so it renders EXACTLY ONCE at the dest
+        // coordinate, and the client never learned which node owns it.
         let mut view = DeliveredView::default();
-        let both = BTreeSet::from([SubId(0), SubId(1)]); // the transfer-overlap held set
+        let both = BTreeSet::from([SubId(0), SubId(1)]); // multi-realm AoI: both subs held
         view.on_snapshot(&both, snap(SubId(0), 1, 10, vec![(ent(1), 0.0)]));
+        // Same tick, same system frame, DEST sub, farther along: latest-wins updates the pose.
         view.on_snapshot(&both, snap(SubId(1), 1, 10, vec![(ent(1), 50.0)]));
         assert_eq!(
             view.stale_frames_dropped(),
             0,
-            "BOTH subs admitted from the held set (no foreign-sub drop in the overlap)"
+            "both held subs admitted (no foreign-sub drop across the AoI)"
         );
-        // No authority yet → lowest sub (0).
         let r = view.render(10.0);
-        assert_eq!(r.len(), 1, "rendered exactly once");
-        assert_eq!(r[&ent(1)].pos, DVec3::new(0.0, 0.0, 0.0), "from sub 0");
-        // AuthorityChanged moves render authority to sub 1 (the dest — FORK 0a re-point).
-        view.set_authority(ent(1), SubId(1));
-        let r = view.render(10.0);
-        assert_eq!(r.len(), 1, "still exactly once");
+        assert_eq!(r.len(), 1, "rendered exactly once (one track per entity)");
         assert_eq!(
             r[&ent(1)].pos,
             DVec3::new(50.0, 0.0, 0.0),
-            "now from sub 1 (the dest)"
+            "latest-wins: the dest-sub pose replaced the source copy"
         );
-        // The anti-vacuity probe SEES both tracks even though render composites to one: the
-        // two-holder overlap was REAL at the wire.
-        assert_eq!(
-            view.subs_holding(ent(1)),
-            vec![SubId(0), SubId(1)],
-            "both the source and dest subs hold a track during the overlap"
-        );
-        // An entity with no delivered track at all → empty (no panic).
+        // The diagnosis probe reports the inert RENDERED_SUB when a track exists, else nothing.
+        assert_eq!(view.subs_holding(ent(1)), vec![RENDERED_SUB]);
         assert!(view.subs_holding(ent(2)).is_empty());
+    }
+
+    #[test]
+    fn a_cross_realm_re_home_flips_the_frame_cleanly() {
+        // The re-home from realm A (system 1) to realm B (system 8): the dest frame DIFFERS, so
+        // EntityTrack::observe collapses the window and the render reports the DEST realm frame —
+        // node-agnostically (the client only ever saw two poses for one EntityId).
+        let mut view = DeliveredView::default();
+        let both = BTreeSet::from([SubId(0), SubId(1)]);
+        view.set_own_entity(ent(1));
+        view.on_snapshot(&both, snap(SubId(0), 1, 10, vec![(ent(1), 0.0)]));
+        assert_eq!(
+            view.own_location_frame(),
+            Some(FrameRef::SystemSpace { system_seed: 1 }),
+            "starts in realm A"
+        );
+        // A dest frame (system 8) on the OTHER sub — the re-home. The frame flips cleanly.
+        view.on_snapshot(
+            &both,
+            SnapshotDatagram {
+                sub: SubId(1),
+                frame_id: 1,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(11),
+                entities: vec![EntitySnap {
+                    entity: ent(1),
+                    pose: StampedPose::at_rest(
+                        FrameRef::SystemSpace { system_seed: 8 },
+                        DVec3::new(9.0, 0.0, 0.0),
+                        UniverseTick(11),
+                    ),
+                }],
+            },
+        );
+        assert_eq!(
+            view.own_location_frame(),
+            Some(FrameRef::SystemSpace { system_seed: 8 }),
+            "the re-home flipped the location to realm B — no node info needed"
+        );
+        assert_eq!(
+            view.render(11.0)[&ent(1)].pos,
+            DVec3::new(9.0, 0.0, 0.0),
+            "renders the dest pose"
+        );
+    }
+
+    #[test]
+    fn remove_entity_evicts_the_track_and_clears_own_when_it_is_the_avatar() {
+        // EventMsg::EntityRemoved: the reliable per-entity eviction. Removing a non-own entity drops
+        // just its track; removing the OWN avatar also clears own_entity (the server said it left).
+        let mut view = DeliveredView::default();
+        view.set_own_entity(ent(1));
+        view.on_snapshot(
+            &s(SubId(0)),
+            snap(SubId(0), 1, 10, vec![(ent(1), 1.0), (ent(2), 2.0)]),
+        );
+        assert_eq!(view.render(10.0).len(), 2);
+
+        // Remove a NON-own entity: its track goes, own_entity is untouched.
+        view.remove_entity(ent(2));
+        let r = view.render(10.0);
+        assert_eq!(r.len(), 1, "only ent(2) evicted");
+        assert!(r.contains_key(&ent(1)));
+        assert_eq!(view.own_entity(), Some(ent(1)), "own unchanged");
+
+        // Remove the OWN avatar: its track goes AND own_entity clears.
+        view.remove_entity(ent(1));
+        assert!(view.render(10.0).is_empty(), "the avatar track was evicted");
+        assert_eq!(
+            view.own_entity(),
+            None,
+            "own cleared when the avatar is removed"
+        );
+        // Removing an entity we hold no track for is a harmless no-op.
+        view.remove_entity(ent(9));
     }
 
     #[test]
@@ -592,9 +644,9 @@ mod tests {
         let mut view = DeliveredView::default();
         // (a) No own entity yet → None.
         assert_eq!(view.own_location_frame(), None);
-        // (b) Own entity known but NO delivered track yet (authority arrived before any
-        // snapshot) → None: it is not in chosen_subs.
-        view.set_authority(ent(1), SubId(0));
+        // (b) Own entity known but NO delivered track yet (OwnEntity arrived before any snapshot)
+        // → None: there is no track to read a frame from.
+        view.set_own_entity(ent(1));
         assert_eq!(view.own_location_frame(), None);
         // (c) A snapshot delivers the own entity → its frame IS the player's location.
         view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 0.0)]));
@@ -602,19 +654,8 @@ mod tests {
             view.own_location_frame(),
             Some(FrameRef::SystemSpace { system_seed: 1 })
         );
-        // (d) Authority moved to a sub with no track for it → None (mirrors render: we
-        // show nothing for an entity we have no delivered pose for).
-        view.set_authority(ent(1), SubId(9));
+        // (d) The own entity is removed → None again (no track to read).
+        view.remove_entity(ent(1));
         assert_eq!(view.own_location_frame(), None);
-    }
-
-    #[test]
-    fn authority_on_a_sub_without_a_track_renders_nothing_for_that_entity() {
-        // Defensive: authority names a sub the entity has not appeared on → the
-        // entity is simply not rendered (no panic, no stale pose from another sub).
-        let mut view = DeliveredView::default();
-        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 1.0)]));
-        view.set_authority(ent(1), SubId(9)); // a sub with no track for ent(1)
-        assert!(view.render(10.0).is_empty());
     }
 }

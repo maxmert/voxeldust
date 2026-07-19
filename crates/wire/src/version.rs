@@ -17,8 +17,16 @@ use serde::{Deserialize, Serialize};
 
 /// Breaking-change generation of the whole wire contract.
 pub const PROTO_MAJOR: u16 = 1;
-/// Additive revision within the major — minor 1 added `ServerControlMsg::UniverseRate`.
-pub const PROTO_MINOR: u16 = 1;
+/// Additive revision within the major — minor 1 added `ServerControlMsg::UniverseRate`;
+/// minor 2 added `ServerControlMsg::OwnEntity` (the pure-renderer own-entity signal);
+/// minor 3 appended `to_parent: Option<RealmId>` to the shard↔orch crossing carriers
+/// (`CrossingRequest`/`TransientCrossingRequest`/`TransientCrossingGrant`) so an `Area` dest's frame
+/// forms — the parent-provenance the re-home threads to `rebind_pose_to_dest` (the "Area label never
+/// flips" fix). NOTE these are `InterShardFlow` (mesh) carriers, whose whole cluster runs ONE build in
+/// dev-greenfield; the field-append is version-visible here for the release-conformance ledger, not for a
+/// mixed-minor mesh negotiation (which does not exist — the negotiated minor gates the CLIENT↔gateway
+/// `ServerControlMsg` variants).
+pub const PROTO_MINOR: u16 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -74,19 +82,26 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 1,
-            "minor 1 added ServerControlMsg::UniverseRate"
+            PROTO_MINOR, 3,
+            "minor 3 appended to_parent to the crossing carriers (minor 2 OwnEntity, minor 1 UniverseRate)"
         );
         assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.1");
-        // Sender-gates-variants: talking to an older minor-0 peer negotiates DOWN to
-        // minor 0, so the gateway withholds the minor-1 UniverseRate variant.
-        let old = ProtoVersion { major: 1, minor: 0 };
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.3");
+        // Sender-gates-variants: talking to an older minor-1 peer negotiates DOWN to
+        // minor 1, so the gateway withholds the minor-2 OwnEntity variant (falling back to
+        // the retained-ghost/AuthorityChanged path). An even-older minor-0 peer negotiates
+        // down to minor 0, withholding BOTH UniverseRate and OwnEntity.
+        let old1 = ProtoVersion { major: 1, minor: 1 };
         assert_eq!(
-            ProtoVersion::CURRENT.negotiate(old),
+            ProtoVersion::CURRENT.negotiate(old1),
+            Some(ProtoVersion { major: 1, minor: 1 })
+        );
+        let old0 = ProtoVersion { major: 1, minor: 0 };
+        assert_eq!(
+            ProtoVersion::CURRENT.negotiate(old0),
             Some(ProtoVersion { major: 1, minor: 0 })
         );
     }

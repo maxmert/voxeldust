@@ -118,7 +118,12 @@ impl ProcessClient {
             ServerControlMsg::SubscriptionOpened { sub, .. } => {
                 self.held_subs.insert(sub);
             }
-            ServerControlMsg::AuthorityChanged { entity, .. } => self.own_entity = Some(entity),
+            // S6: the node-agnostic own-entity signal (minor 2) names the avatar by EntityId alone —
+            // this pure-renderer parity client learns which entity is itself WITHOUT any node info.
+            ServerControlMsg::OwnEntity { entity } => self.own_entity = Some(entity),
+            // Legacy node-aware `AuthorityChanged` — still emitted to old clients; a minor-2 client
+            // ignores it (OwnEntity is the own-entity source of truth).
+            ServerControlMsg::AuthorityChanged { .. } => {}
             ServerControlMsg::Close { reason } => panic!("gateway closed the session: {reason}"),
             // The cluster tick rate (minor 1) — this minimal parity client does not
             // interpolate; ignore it (the real client learns its render rate from it).
@@ -180,6 +185,14 @@ fn p1_parity_real_binaries_over_quic() {
         // unit test `single_shard_env_is_byte_identical_to_dual_false`).
         shard_b: reserve_udp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
     let clients = [
         (NodeId(CLIENT_NODE_BASE), client_a_addr),
@@ -199,21 +212,27 @@ fn p1_parity_real_binaries_over_quic() {
         "vd-orchestrator",
         spawn(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
-            orchestrator_env(&addrs, &DEV, &orch_store, false),
+            orchestrator_env(&addrs, &DEV, &orch_store, vd_bins::ClusterShape::Single),
         ),
     );
     cluster.push(
         "vd-gateway",
         spawn(
             env!("CARGO_BIN_EXE_vd-gateway"),
-            gateway_env(&addrs, &clients, &auth_pubkey_hex, &DEV, false),
+            gateway_env(
+                &addrs,
+                &clients,
+                &auth_pubkey_hex,
+                &DEV,
+                vd_bins::ClusterShape::Single,
+            ),
         ),
     );
     cluster.push(
         "vd-shard",
         spawn(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, false),
+            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
         ),
     );
     let _guard = cluster; // RAII: kill the children on test end or panic

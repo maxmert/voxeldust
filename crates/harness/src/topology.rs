@@ -253,6 +253,17 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
             Some(fence) => report.held_realms = vec![(config.realm, fence)],
             None => report.pending_realms = vec![config.realm],
         }
+        // Co-hosting: a multi-realm shard ALSO reports each co-hosted CHILD realm it currently holds
+        // (append to `held_realms`) and each it does not yet (`pending_realms`). EMPTY on a single-realm
+        // shard (`CoHostedAuthority` is never populated and `cohosted_realms()` is empty) — byte-identical.
+        if let Some(cohosted) = world.get_resource::<vd_sim::stub::CoHostedAuthority>() {
+            for child in config.cohosted_realms() {
+                match cohosted.0.get(&child) {
+                    Some(fence) => report.held_realms.push((child, *fence)),
+                    None => report.pending_realms.push(child),
+                }
+            }
+        }
     }
     if let Some(log) = world.get_resource::<vd_sim::stub::InputLog>() {
         report.applied_inputs = log.applied();
@@ -1063,6 +1074,7 @@ mod tests {
             schedule,
             StubConfig {
                 realm: vd_core::pose::RealmId::System(5),
+                held_realms: StubConfig::single_realm(vd_core::pose::RealmId::System(5)),
                 frame: vd_core::pose::FrameRef::SystemSpace { system_seed: 5 },
                 move_speed_mps: 1.0,
                 tick_dt_s: 0.05,
@@ -1247,6 +1259,94 @@ mod tests {
         );
     }
 
+    /// Co-hosting scrape (task #149): a MULTI-realm shard reports each CO-HOSTED CHILD realm alongside
+    /// its primary — held children (`CoHostedAuthority` has an entry) append to `held_realms`, un-held
+    /// children (`cohosted_realms()` yields a child with NO map entry yet) append to `pending_realms`.
+    /// Exercised directly on a hand-built `World` (the co-hosting branch of `inspect_world` — the single-
+    /// realm topology fixtures leave it inert). BOTH match arms: Planet(5) held, Station(5) pending.
+    #[test]
+    fn inspect_reports_cohosted_child_realms_held_and_pending() {
+        use bevy_ecs::prelude::World;
+        use std::collections::BTreeSet;
+        use vd_core::Fence;
+        use vd_core::pose::{FrameRef, RealmId};
+        use vd_sim::stub::{CoHostedAuthority, RealmAuthority, StubConfig};
+
+        const PRIMARY: RealmId = RealmId::System(5);
+        const CHILD_HELD: RealmId = RealmId::Planet(5);
+        const CHILD_PENDING: RealmId = RealmId::Station(5);
+
+        let mut world = World::new();
+        world.insert_resource(StubConfig {
+            realm: PRIMARY,
+            // Host the primary + two co-hosted children.
+            held_realms: BTreeSet::from([PRIMARY, CHILD_HELD, CHILD_PENDING]),
+            frame: FrameRef::SystemSpace { system_seed: 5 },
+            move_speed_mps: 1.0,
+            tick_dt_s: 0.05,
+            orchestrator: A,
+            mint_seed: 3,
+            input_log_capacity: 1_000_000,
+            realm_recheck_interval: 0,
+            lease_renew_interval_ticks: 0,
+            snapshot_datagram_budget: 1100,
+            self_fence_grace_ticks: 0,
+            boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+            request_ttl_ticks: 0,
+        });
+        // Primary realm HELD (so the co-hosting block is reached — it is gated on `RealmAuthority`).
+        world.insert_resource(RealmAuthority(Some(Fence(1))));
+        // Only Planet(5) is affirmed in the co-host map; Station(5) is not yet ⇒ the two match arms.
+        let mut cohosted = CoHostedAuthority::default();
+        cohosted.0.insert(CHILD_HELD, Fence(2));
+        world.insert_resource(cohosted);
+
+        let report = inspect_world(&mut world);
+        assert_eq!(
+            report.held_realms,
+            vec![(PRIMARY, Fence(1)), (CHILD_HELD, Fence(2))],
+            "the primary AND the affirmed co-hosted child are reported held (child at its own fence)",
+        );
+        assert_eq!(
+            report.pending_realms,
+            vec![CHILD_PENDING],
+            "the un-affirmed co-hosted child is reported pending",
+        );
+
+        // The `None` arm of `world.get_resource::<CoHostedAuthority>()` (line 259): a node whose realm is
+        // held but which carries NO `CoHostedAuthority` resource at all (the co-host block is skipped
+        // wholesale — no child realms appended). Build a second minimal World WITHOUT the resource.
+        let mut bare = World::new();
+        bare.insert_resource(StubConfig {
+            realm: PRIMARY,
+            held_realms: BTreeSet::from([PRIMARY, CHILD_HELD]),
+            frame: FrameRef::SystemSpace { system_seed: 5 },
+            move_speed_mps: 1.0,
+            tick_dt_s: 0.05,
+            orchestrator: A,
+            mint_seed: 3,
+            input_log_capacity: 1_000_000,
+            realm_recheck_interval: 0,
+            lease_renew_interval_ticks: 0,
+            snapshot_datagram_budget: 1100,
+            self_fence_grace_ticks: 0,
+            boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+            request_ttl_ticks: 0,
+        });
+        bare.insert_resource(RealmAuthority(Some(Fence(1))));
+        // NO CoHostedAuthority inserted ⇒ the `if let Some(cohosted)` guard takes its skip path.
+        let bare_report = inspect_world(&mut bare);
+        assert_eq!(
+            bare_report.held_realms,
+            vec![(PRIMARY, Fence(1))],
+            "with no CoHostedAuthority resource, only the primary realm is reported held",
+        );
+        assert!(
+            bare_report.pending_realms.is_empty(),
+            "no co-hosted children are appended when the resource is absent",
+        );
+    }
+
     /// D-43 #9 (the REQUIRED composition regression): a crossing-triggered TRANSIENT completes its
     /// handoff end-to-end across a REAL 3-node cluster (orch A + source shard B realm FROM + dest shard C
     /// realm TO). Before the fix, `handle_transient_crossing_request` granted the dest but never STARTED a
@@ -1320,6 +1420,7 @@ mod tests {
                 schedule,
                 StubConfig {
                     realm,
+                    held_realms: StubConfig::single_realm(realm),
                     frame: FrameRef::SystemSpace { system_seed },
                     move_speed_mps: 1.0,
                     tick_dt_s: 0.05,

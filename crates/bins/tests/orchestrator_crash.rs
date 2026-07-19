@@ -78,8 +78,16 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
-    let mut orch_env = orchestrator_env(&addrs1, &DEV, &store_str, false);
+    let mut orch_env = orchestrator_env(&addrs1, &DEV, &store_str, vd_bins::ClusterShape::Single);
     orch_env.push(("VD_STORE_TEST_SENTINEL_SEED", SENTINEL_SEED.to_string()));
     let mut orch1_child = KillOnDrop(Some(
         spawn_node(env!("CARGO_BIN_EXE_vd-orchestrator"), &common, &orch_env).expect("spawn orch"),
@@ -90,7 +98,7 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &common,
-            &shard_env(&addrs1, &DEV, false),
+            &shard_env(&addrs1, &DEV, vd_bins::ClusterShape::Single),
         )
         .expect("spawn shard"),
     );
@@ -143,13 +151,21 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
     cluster.push(
         "vd-orchestrator-restart",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs2, &DEV, &store_str, false),
+            &orchestrator_env(&addrs2, &DEV, &store_str, vd_bins::ClusterShape::Single),
         )
         .expect("respawn orchestrator"),
     );
@@ -242,6 +258,14 @@ fn grant_a_recovery_assertion_fails_against_a_fresh_store() {
         shard_probe: reserve_tcp_addr(),
         shard_b: reserve_tcp_addr(),
         shard_b_probe: reserve_tcp_addr(),
+        galaxy: reserve_udp_addr(),
+        galaxy_probe: reserve_tcp_addr(),
+        planet: reserve_udp_addr(),
+        planet_probe: reserve_tcp_addr(),
+        station: reserve_udp_addr(),
+        station_probe: reserve_tcp_addr(),
+        area: reserve_udp_addr(),
+        area_probe: reserve_tcp_addr(),
     };
     // NO shard ⇒ no realm is ever granted.
     let mut cluster = Cluster::new();
@@ -250,7 +274,12 @@ fn grant_a_recovery_assertion_fails_against_a_fresh_store() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &common,
-            &orchestrator_env(&addrs, &DEV, &store.display().to_string(), false),
+            &orchestrator_env(
+                &addrs,
+                &DEV,
+                &store.display().to_string(),
+                vd_bins::ClusterShape::Single,
+            ),
         )
         .expect("spawn orch"),
     );

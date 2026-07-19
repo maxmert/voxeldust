@@ -760,7 +760,7 @@ fn build_crossing(
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let entity = ctx.subject.transfer_subject_entity()?;
-    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm);
+    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm, ctx.to_parent);
     Some(InterShardFlow::Transfer(TransferEnvelope {
         transfer_id: ctx.transfer,
         universe_epoch: epoch,
@@ -818,7 +818,7 @@ fn build_rehome(
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let _entity = ctx.subject.transfer_subject_entity()?;
-    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm);
+    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm, ctx.to_parent);
     Some(InterShardFlow::ReHome(ReHomeCmd {
         transfer: ctx.transfer,
         universe_epoch: epoch,
@@ -1447,6 +1447,9 @@ fn handle_crossing_request(
                 needs_provision: false,
                 from_realm: req.from_realm,
                 to_realm: req.to_realm,
+                // Thread the dest realm's parent provenance the SOURCE detector filled — so `build_crossing`'s
+                // `rebind_pose_to_dest` forms an Area frame (the "Area label never flips" fix).
+                to_parent: req.to_parent,
             };
             let gateway = sess_rec.authority.node();
             runtime.start_transfer(ctx, gateway);
@@ -1492,6 +1495,9 @@ fn handle_transient_crossing_request(
                     to_realm: req.to_realm,
                     dst_realm_fence: rec.fence,
                     batch,
+                    // Copy the dest realm's parent VERBATIM so the source can stamp it onto
+                    // `TransientStatus::Crossing` for the batch's Area-frame rebind.
+                    to_parent: req.to_parent,
                 }),
             );
             runtime.transient_crossings_granted += 1;
@@ -1527,6 +1533,10 @@ fn handle_transient_crossing_request(
                     needs_provision: false,
                     from_realm: req.from_realm,
                     to_realm: req.to_realm,
+                    // INERT for the transient batch path: the batch's pose rebind rides `TransientStatus::
+                    // Crossing.to_parent` (carried on the GRANT below), never this ctx (the transient saga is
+                    // the orchestrator-side `BatchHandoff` choreography, which builds no crossing envelope).
+                    to_parent: None,
                 };
                 // The `gateway` arg is INERT for a Transient (never read, never rendered by `views`) —
                 // pass the in-scope `from` rather than fabricate a sentinel NodeId.
@@ -1876,6 +1886,11 @@ fn rehome_ctx(
         dest: target,
         class: vd_core::entity_kind::DurabilityClass::Durable,
         needs_provision: false,
+        // `None`: the standing reaper ALWAYS parks with `flushed_pose: None` (a pre-flush death has no
+        // recoverable pose — see the `to_realm` CAVEAT above), so `build_rehome`'s `rebind_pose_to_dest` is
+        // never reached and this parent is inert. WHEN Slice-4/P7 sources a REAL pose from the RealmId-keyed
+        // checkpoint, it must supply the true dest parent here (with the true `to_realm`) for an Area target.
+        to_parent: None,
     }
 }
 
@@ -2472,7 +2487,8 @@ mod tests {
     /// frame via the SAME `rebind_pose_to_dest` the builders apply, so the frame flips SystemSpace{7}→{8}
     /// through the P3 identity (position unchanged) and this stays byte-identical to the builder output.
     fn dest_flushed_pose() -> StampedPose {
-        super::rebind_pose_to_dest(flushed_pose(), TO_REALM)
+        // `TO_REALM` is `System(8)` (a one-field frame) — no parent needed to name the dest frame.
+        super::rebind_pose_to_dest(flushed_pose(), TO_REALM, None)
     }
 
     const ORCH: NodeId = NodeId(1);
@@ -2549,6 +2565,8 @@ mod tests {
             needs_provision: false,
             from_realm: FROM_REALM,
             to_realm: TO_REALM,
+            // `TO_REALM` is `System(8)` — a one-field frame, no parent needed.
+            to_parent: None,
         }
     }
 
@@ -2960,6 +2978,10 @@ mod tests {
             subject_fence,
             session: CROSSING_SESSION,
             attempt: 0,
+            // A concrete parent so the threading through `handle_crossing_request` → `ctx.to_parent` is
+            // ASSERTED (crossing_request_resolves_and_starts_the_saga). The value is arbitrary here
+            // (TO_REALM=System(8) is nameable regardless); the assertion proves the field is not dropped.
+            to_parent: Some(FROM_REALM),
         }
     }
 
@@ -6136,6 +6158,9 @@ mod tests {
         assert_eq!(ctx.class, DurabilityClass::Durable);
         assert_eq!(ctx.from_realm, FROM_REALM);
         assert_eq!(ctx.to_realm, TO_REALM);
+        // The parent-provenance the SOURCE detector supplied was threaded VERBATIM onto the saga ctx (so
+        // `build_crossing`'s `rebind_pose_to_dest` can form an Area frame) — never dropped at the resolver.
+        assert_eq!(ctx.to_parent, Some(FROM_REALM));
         assert_eq!(rig.live(), 1);
         assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 1);
         assert_eq!(rig.count(SagaRuntimeRes::crossing_unresolved), 0);
@@ -6235,13 +6260,15 @@ mod tests {
 
     // ── Slice 3f-C — the transient `TransientCrossingRequest` consumer ─────────────────────────────
 
-    /// A transient crossing request for `subject()` into TO_REALM at `src_realm_fence`.
+    /// A transient crossing request for `subject()` into TO_REALM at `src_realm_fence`. Carries a concrete
+    /// `to_parent` so the orchestrator's VERBATIM copy into the `TransientCrossingGrant` is asserted below.
     fn transient_req(src_realm_fence: Fence) -> TransientCrossingRequest {
         TransientCrossingRequest {
             subject: subject(),
             from_realm: FROM_REALM,
             to_realm: TO_REALM,
             src_realm_fence,
+            to_parent: Some(FROM_REALM),
         }
     }
 
@@ -6280,6 +6307,9 @@ mod tests {
                 to_realm: TO_REALM,
                 dst_realm_fence: realm_fence,
                 batch,
+                // The orchestrator copied the request's parent VERBATIM into the grant (asserted by this
+                // full-value equality) — so the source can stamp it onto `TransientStatus::Crossing`.
+                to_parent: Some(FROM_REALM),
             })]
         );
         assert_eq!(rig.count(SagaRuntimeRes::transient_crossings_granted), 1);

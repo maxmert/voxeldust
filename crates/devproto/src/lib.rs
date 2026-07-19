@@ -24,8 +24,12 @@
 //!   0 orchestrator (QUIC)   1 gateway (QUIC)   2 shard (QUIC)   3 admin (HTTP)
 //!   4 probe-orch (HTTP)     5 probe-gateway (HTTP)   6 probe-shard (HTTP)   [S3 /healthz+/readyz]
 //!   7 shard-b (QUIC)        8 probe-shard-b (HTTP)   [Track R / 1d.2 DEST shard — inert in a single-shard up]
-//!   9 .. 9+K   dev-control[agent]   (vdctl ↔ client, TCP)
-//!   9+K .. 9+2K   client-quic[agent]  (client ↔ gateway, QUIC)
+//!   9 galaxy (QUIC)        10 probe-galaxy (HTTP)  [S5b GALAXY between-space shard — inert unless a --triple up]
+//!  11 planet (QUIC)        12 probe-planet (HTTP)  [NODE-PER-REALM Planet 7 — inert unless a --forest up]
+//!  13 station (QUIC)       14 probe-station (HTTP) [NODE-PER-REALM Station 7 — inert unless a --forest up]
+//!  15 area (QUIC)          16 probe-area (HTTP)    [NODE-PER-REALM Area 7 — inert unless a --forest up]
+//!  17 .. 17+K   dev-control[agent]   (vdctl ↔ client, TCP)
+//!  17+K .. 17+2K   client-quic[agent]  (client ↔ gateway, QUIC)
 //! ```
 //! SCOPE (Track R / 1d.2, M-2): this reserves ONE extra shard (the local 2-process crossing
 //! playground). The N-shard k3d roster generalization (a `Vec` of shard/probe ports, N-entry
@@ -52,9 +56,10 @@ pub use state::{DevEntityRow, DevPhase, DevState, DevTransferView};
 
 /// Ports reserved at the front of every slot block for the fixed cluster nodes
 /// (orchestrator, gateway, shard, admin, the S3 per-node /healthz+/readyz probe
-/// listeners, + the Track R / 1d.2 DEST shard's QUIC + probe) ahead of the
-/// per-client port bands.
-const RESERVED_NODE_PORTS: u16 = 9;
+/// listeners, the Track R / 1d.2 DEST shard's QUIC + probe, the S5b GALAXY
+/// between-space shard's QUIC + probe, + the NODE-PER-REALM Planet/Station/Area 7
+/// realm-shards' QUIC + probe) ahead of the per-client port bands.
+const RESERVED_NODE_PORTS: u16 = 17;
 
 const ORCHESTRATOR_OFFSET: u16 = 0;
 const GATEWAY_OFFSET: u16 = 1;
@@ -70,6 +75,22 @@ const PROBE_SHARD_OFFSET: u16 = 6;
 /// never spawns the DEST, so these two ports stay free (the single-shard `up` is byte-identical).
 const SHARD_B_OFFSET: u16 = 7;
 const PROBE_SHARD_B_OFFSET: u16 = 8;
+/// S5b (the acceptance capstone: the LOCAL 3-process seed-forest crossing): the GALAXY between-space
+/// shard's QUIC bind + its /healthz+/readyz probe. Reserved in EVERY slot block (so the per-client
+/// bands sit at a fixed offset regardless of `--triple`), but bound only by a `--triple` up — a
+/// single-shard / dual `up` never spawns the GALAXY, so these two ports stay free.
+const GALAXY_OFFSET: u16 = 9;
+const PROBE_GALAXY_OFFSET: u16 = 10;
+/// NODE-PER-REALM (task #149): the Planet 7 / Station 7 / Area 7 realm-shards' QUIC binds + probes.
+/// Reserved in EVERY slot block (so the per-client bands sit at a fixed offset regardless of shape), but
+/// bound only by a `--forest` up — a single-shard / dual / triple `up` never spawns them, so these six
+/// ports stay free. Twins of the [`GALAXY_OFFSET`] pair — three more shards in the roster, never a KIND.
+const PLANET_OFFSET: u16 = 11;
+const PROBE_PLANET_OFFSET: u16 = 12;
+const STATION_OFFSET: u16 = 13;
+const PROBE_STATION_OFFSET: u16 = 14;
+const AREA_OFFSET: u16 = 15;
+const PROBE_AREA_OFFSET: u16 = 16;
 
 /// The base `NodeId` for dev-control clients: client `agent` is `NodeId(BASE +
 /// agent)`. ONE source of truth for the launcher (which seeds these into the
@@ -132,6 +153,21 @@ pub struct SlotPorts {
     /// slice in `docs/design/DEFERRED.md` — NOT this local playground's job.
     pub shard_b: u16,
     pub probe_shard_b: u16,
+    /// S5b (the acceptance capstone: the LOCAL 3-process seed-forest crossing): the GALAXY
+    /// between-space shard's QUIC bind + probe. Bound only by a `--triple` up; a single-shard / dual
+    /// `up` leaves them free. Mirrors the [`shard_b`](Self::shard_b) pair — one more shard in the
+    /// roster, never a shard KIND (HR3).
+    pub galaxy: u16,
+    pub probe_galaxy: u16,
+    /// NODE-PER-REALM (task #149): the Planet 7 / Station 7 / Area 7 realm-shards' QUIC binds + probes.
+    /// Bound only by a `--forest` up; a single-shard / dual / triple `up` leaves them free. Twins of the
+    /// [`galaxy`](Self::galaxy) pair — three more shards in the roster, never a shard KIND (HR3).
+    pub planet: u16,
+    pub probe_planet: u16,
+    pub station: u16,
+    pub probe_station: u16,
+    pub area: u16,
+    pub probe_area: u16,
     /// First dev-control port (`agent` 0); private — go through [`SlotPorts::dev_control`].
     dev_control_base: u16,
     /// First client-QUIC port (`agent` 0); private — go through [`SlotPorts::client_quic`].
@@ -187,6 +223,14 @@ impl DevPortScheme {
             probe_shard: base + PROBE_SHARD_OFFSET,
             shard_b: base + SHARD_B_OFFSET,
             probe_shard_b: base + PROBE_SHARD_B_OFFSET,
+            galaxy: base + GALAXY_OFFSET,
+            probe_galaxy: base + PROBE_GALAXY_OFFSET,
+            planet: base + PLANET_OFFSET,
+            probe_planet: base + PROBE_PLANET_OFFSET,
+            station: base + STATION_OFFSET,
+            probe_station: base + PROBE_STATION_OFFSET,
+            area: base + AREA_OFFSET,
+            probe_area: base + PROBE_AREA_OFFSET,
             dev_control_base: base + RESERVED_NODE_PORTS,
             client_quic_base: base + RESERVED_NODE_PORTS + k,
             max_clients: k,
@@ -258,12 +302,22 @@ mod tests {
         // Track R / 1d.2: the DEST shard's QUIC + probe follow the source-shard node ports.
         assert_eq!(p.shard_b, 7007);
         assert_eq!(p.probe_shard_b, 7008);
-        // The dev-control band follows the 9 node ports…
-        assert_eq!(p.dev_control(0), Ok(7009));
-        assert_eq!(p.dev_control(3), Ok(7012));
+        // S5b: the GALAXY between-space shard's QUIC + probe follow the DEST-shard node ports.
+        assert_eq!(p.galaxy, 7009);
+        assert_eq!(p.probe_galaxy, 7010);
+        // NODE-PER-REALM (Forest): the Planet/Station/Area 7 realm-shards' QUIC + probe follow the Galaxy.
+        assert_eq!(p.planet, 7011);
+        assert_eq!(p.probe_planet, 7012);
+        assert_eq!(p.station, 7013);
+        assert_eq!(p.probe_station, 7014);
+        assert_eq!(p.area, 7015);
+        assert_eq!(p.probe_area, 7016);
+        // The dev-control band follows the 17 node ports…
+        assert_eq!(p.dev_control(0), Ok(7017));
+        assert_eq!(p.dev_control(3), Ok(7020));
         // …then the client-QUIC band follows the K dev-control ports.
-        assert_eq!(p.client_quic(0), Ok(7013));
-        assert_eq!(p.client_quic(3), Ok(7016));
+        assert_eq!(p.client_quic(0), Ok(7021));
+        assert_eq!(p.client_quic(3), Ok(7024));
     }
 
     #[test]
@@ -272,7 +326,7 @@ mod tests {
         let s1 = DevPortScheme::DEFAULT.slot_ports(1).expect("s1");
         assert_eq!(s1.orchestrator, 7032, "slot 1 starts one block (32) later");
         // The highest port slot 0 hands out is below slot 1's first node port.
-        assert_eq!(s0.client_quic(3), Ok(7016));
+        assert_eq!(s0.client_quic(3), Ok(7024));
         assert!(s0.client_quic(3).expect("s0 last") < s1.orchestrator);
     }
 
@@ -280,8 +334,8 @@ mod tests {
     fn agent_at_or_above_k_is_a_typed_error_in_both_bands() {
         let p = DevPortScheme::DEFAULT.slot_ports(2).expect("valid");
         // Valid agents in both bands.
-        assert_eq!(p.dev_control(0), Ok(7073)); // 7000 + 2*32 + 9
-        assert_eq!(p.client_quic(0), Ok(7077)); // …+ K
+        assert_eq!(p.dev_control(0), Ok(7081)); // 7000 + 2*32 + 17
+        assert_eq!(p.client_quic(0), Ok(7085)); // …+ K
         // Out of range in EACH band (covers checked_agent via both callers).
         assert_eq!(
             p.dev_control(4),
@@ -295,16 +349,16 @@ mod tests {
 
     #[test]
     fn a_block_too_small_for_both_bands_is_rejected() {
-        // 9 node ports + 2*4 client ports needs >= 17; block_size 11 fails.
+        // 17 node ports + 2*4 client ports needs >= 25; block_size 17 fails.
         let scheme = DevPortScheme {
             base: 7000,
-            block_size: 11,
+            block_size: 17,
             max_clients_per_worktree: 4,
         };
         assert_eq!(
             scheme.validate(),
             Err(PortSchemeError::BlockTooSmall {
-                block_size: 11,
+                block_size: 17,
                 k: 4
             })
         );
@@ -312,25 +366,25 @@ mod tests {
         assert_eq!(
             scheme.slot_ports(0),
             Err(PortSchemeError::BlockTooSmall {
-                block_size: 11,
+                block_size: 17,
                 k: 4
             })
         );
-        // The exact-fit boundary (block_size == 9 + 2K = 17) is valid; one below (16) fails.
+        // The exact-fit boundary (block_size == 17 + 2K = 25) is valid; one below (24) fails.
         let exact = DevPortScheme {
             base: 7000,
-            block_size: 17,
+            block_size: 25,
             max_clients_per_worktree: 4,
         };
         assert_eq!(exact.validate(), Ok(()));
         assert_eq!(
             DevPortScheme {
-                block_size: 16,
+                block_size: 24,
                 ..exact
             }
             .validate(),
             Err(PortSchemeError::BlockTooSmall {
-                block_size: 16,
+                block_size: 24,
                 k: 4
             })
         );
@@ -348,7 +402,7 @@ mod tests {
             .slot_ports(1828)
             .expect("last fitting slot");
         assert_eq!(last.orchestrator, 65496); // 7000 + 1828*32
-        assert_eq!(last.client_quic(3), Ok(65512)); // + RESERVED(9) + K(4) + agent 3
+        assert_eq!(last.client_quic(3), Ok(65520)); // + RESERVED(17) + K(4) + agent 3
     }
 
     #[test]

@@ -2,11 +2,16 @@
 //! regress them.
 //!
 //! The D-28 cross-cut INPUT-CONSERVATION gate: a player's input survives a REAL cross-shard
-//! authority handoff exactly once, in order, with the CUT_MARKER threaded end-to-end (client →
-//! saga → gateway → dest). It is the FIRST proof of the core transfer thesis, and the first to
-//! JOIN the two crate halves — the gateway's buffer/drain (connection-plane) and the dest's
-//! `OpenInputSlot`/`apply_input` (sim) — in one scenario over the real fabric, driven by the
-//! REAL saga producer (never hand-fed acks).
+//! authority handoff exactly once, in order, with the SERVER-TIMED cut seq threaded end-to-end
+//! (gateway `last_input_seq` at freeze → saga → dest `OpenInputSlot`). It is the FIRST proof of
+//! the core transfer thesis, and the first to JOIN the two crate halves — the gateway's
+//! buffer/drain (connection-plane) and the dest's `OpenInputSlot`/`apply_input` (sim) — in one
+//! scenario over the real fabric, driven by the REAL saga producer (never hand-fed acks).
+//!
+//! S3 — the cut is SERVER-TIMED: the client `CUT_MARKER` is retired (it starved multi-hop durable
+//! crossings into `CutTimeout`). The gateway derives the input-cut seq from its own `last_input_seq`
+//! high-water at FreezeSource-install time — the leak-free partition point for ANY client behaviour
+//! — so this gate no longer depends on the client pausing across the freeze window.
 //!
 //! SCOPE (D-28 + 1d.5b.1): the transfer commits authority to the dest (directory CAS lands) AND the
 //! ORDERED demote/release tail now CLOSES — the saga drives Swapping → Demoting → Promoting →
@@ -43,8 +48,9 @@ const CLIENT: NodeId = NodeId(100);
 /// deterministically (no interpolation ambiguity in the capture).
 const TRACE_CURSOR: f64 = 1.0e9;
 
-/// One captured tick of the subject's composited render: its sample (`None` ⇒ rendered nowhere)
-/// and the SUBS that hold a track for it (the anti-vacuity overlap probe — both source + dest live).
+/// One captured tick of the subject's render: its sample (`None` ⇒ rendered nowhere) and the subs
+/// holding a track for it. Since the pure-renderer collapse (S6) `subs_holding` reports at most the
+/// inert `RENDERED_SUB` (one track per EntityId), so it is a liveness probe, not the overlap probe.
 #[derive(Clone, Debug, PartialEq)]
 struct CapturedTick {
     tick: TickId,
@@ -52,9 +58,9 @@ struct CapturedTick {
     subs_holding: Vec<SubId>,
 }
 
-/// Capture the subject's composited render sample + held-subs from the client's REAL `DeliveredView`
-/// this tick. The subject is the client's OWN entity (set by the login `AuthorityChanged`). Built
-/// from delivered bytes only — never node internals.
+/// Capture the subject's render sample + held-subs from the client's REAL `DeliveredView` this tick.
+/// The subject is the client's OWN entity (set by the node-agnostic `OwnEntity` signal). Built from
+/// delivered bytes only — never node internals.
 fn capture_subject(topo: &mut Topology) -> CapturedTick {
     let tick = topo.tick();
     with_client(topo, |c| {
@@ -124,7 +130,14 @@ fn step_until(
 
 /// Drive ONE full cross-shard transfer of a logged-in player from [`SHARD`] to [`DEST`] over
 /// the real fabric, returning the quiesced topology plus the session, transferred entity, and
-/// the marker seq the run threaded (all observed LIVE, never hardcoded).
+/// the SERVER-derived cut seq the run threaded (all observed LIVE, never hardcoded).
+///
+/// S3 — the cut is SERVER-TIMED: the gateway derives the input-cut seq from its own `last_input_seq`
+/// high-water at FreezeSource-install time (NOT the client's `CUT_MARKER`, now retired/inert). So the
+/// returned cut seq is read from the DEST's own resume watermark (`dest_resume_seq`, the value the
+/// gateway EMITTED in `OpenInputSlot`) — the single live source of truth threaded end-to-end, which
+/// the D-28 partition assertions check against. The client still stamps a marker (harmless), but its
+/// seq no longer defines the partition.
 ///
 /// `observe` is invoked after EVERY `topo.step()` — the per-tick observer (skeptic D2): the
 /// function deliberately quiesces to single-holder steady state before returning, so a trace
@@ -174,6 +187,7 @@ fn run_cut_transfer(
             // stamped onto the StubCrossing the saga emits at commit (1d.1).
             from_realm: RealmId::System(7),
             to_realm: RealmId::System(8),
+            to_parent: None,
         },
     );
 
@@ -222,7 +236,12 @@ fn run_cut_transfer(
         source_clear && dest_holds
     });
 
-    let marker = with_client(&mut topo, |c| c.marker_seq()).expect("the client stamped a marker");
+    // S3: the partition point is the SERVER-derived cut seq — the resume watermark the gateway
+    // EMITTED in the dest's `OpenInputSlot` (`dest_resume_seq`), NOT the client's now-inert marker.
+    // Read it LIVE off the dest report (the single source of truth the D-28 assertions check).
+    let marker = report(&topo.inspect_all(), DEST)
+        .dest_resume_seq
+        .expect("the gateway seeded the dest's resume watermark from the server-derived cut");
     (topo, session, entity, marker)
 }
 
@@ -251,30 +270,32 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
     // ⇒ NonMonotonicApply; a phantom ⇒ Phantom.
     verify_input_conservation(&reports).expect("cross-cut INPUT-CONSERVATION holds");
 
-    // (3) THE PARTITION IS REAL (cut-specific, anti-vacuous): source applied only `<= marker`,
-    // dest applied a NON-EMPTY batch all `> marker`, resuming exactly at `marker + 1`. (Holds by
-    // construction because the client paused across the freeze window — no post-marker leak.)
+    // (3) THE PARTITION IS REAL (cut-specific, anti-vacuous): source applied only `<= cut`,
+    // dest applied a NON-EMPTY batch all `> cut`, resuming exactly at `cut + 1`. `m` is the
+    // SERVER-derived cut seq (S3 — the gateway's install-time `last_input_seq` high-water), so this
+    // partition holds for ANY client behaviour: everything the gateway forwarded to the source is
+    // `<= m`, everything buffered for the dest is `> m`. No client pause is relied on.
     assert!(
         src.applied_inputs.iter().all(|(_, s)| *s <= m),
-        "source applied only seqs <= the marker {m}: {:?}",
+        "source applied only seqs <= the cut {m}: {:?}",
         src.applied_inputs,
     );
     assert!(
         dst.applied_inputs.iter().all(|(_, s)| *s > m),
-        "dest applied only seqs > the marker {m}: {:?}",
+        "dest applied only seqs > the cut {m}: {:?}",
         dst.applied_inputs,
     );
     assert!(
         !dst.applied_inputs.is_empty(),
-        "the dest applied a NON-EMPTY post-marker batch",
+        "the dest applied a NON-EMPTY post-cut batch",
     );
     assert_eq!(
         dst.applied_inputs.iter().map(|(_, s)| *s).min(),
         Some(m + 1),
-        "the dest resumes exactly at marker+1 (no gap, no off-by-one)",
+        "the dest resumes exactly at cut+1 (no gap, no off-by-one)",
     );
     // The BUFFER/DRAIN path — the headline 1c.7 deliverable — was actually exercised: at least
-    // one seq > marker hit the gateway AFTER the cut installed and was buffered (not merely
+    // one seq > cut hit the gateway AFTER the cut installed and was buffered (not merely
     // direct-forwarded to the dest after the route swapped). Pinned to a real observable so a
     // future tick-ordering shift that silently routes M+1 direct turns this RED, not green.
     assert!(
@@ -282,20 +303,29 @@ fn p2_dod_cross_cut_input_is_conserved_exactly_once() {
         "the cut buffer held >= 1 frame — the gateway buffer/drain path was exercised",
     );
 
-    // (4) THE MARKER ITSELF is applied at the SOURCE (the every-sent-accounted anchor: at marker
-    // arrival no cut is installed yet, so it is forwarded-and-applied at source).
+    // (4) THE CUT SEQ ITSELF is applied at the SOURCE (the every-sent-accounted anchor): the server
+    // derives the cut from `last_input_seq` = the highest seq FORWARDED to the source, so seq `m`
+    // was forwarded-and-applied at the source (`<= cut`), never buffered for the dest. This is the
+    // input-conservation invariant made concrete: the cut sits exactly at the source/dest boundary.
     assert!(
         src.applied_inputs.contains(&(session, m)),
-        "the marker input (seq {m}) is applied at the source",
+        "the cut input (seq {m}) is applied at the source",
     );
 
-    // (5) THE MARKER THREADED end-to-end: the resume watermark the gateway EMITTED in
-    // `OpenInputSlot` (latched on the dest) equals the client's OWN marker seq — one live value,
-    // no hardcoded literal on either side.
+    // (5) THE CUT = THE SOURCE'S ACTUAL LAST-APPLIED SEQ (S3 input-conservation): the server-derived
+    // cut equals the MAX seq the source applied — so no source-applied input sits above the cut
+    // (which the dest would double-apply) and no forwarded input sits unapplied below it (which
+    // would be lost). One live value threaded end-to-end (source-applied == cut == dest resume-1).
+    let source_max_applied = src
+        .applied_inputs
+        .iter()
+        .filter(|(s, _)| *s == session)
+        .map(|(_, seq)| *seq)
+        .max();
     assert_eq!(
-        dst.dest_resume_seq,
+        source_max_applied,
         Some(m),
-        "the dest seeded its resume watermark to the client's own marker seq",
+        "the server-derived cut equals the source's last-applied seq (no leak, no double-apply)",
     );
 
     // (6) NO SILENT WINDOW LOSS: the input logs saw the whole run (else conservation is a lie).
@@ -729,23 +759,29 @@ fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
 
     // The subject's rendered samples in order (skipping the pre-login ticks; there is no vanish now).
     let rendered: Vec<RenderSample> = caps.iter().filter_map(|c| c.sample).collect();
-    let source_sub = rendered
+    let source_frame = rendered
         .first()
         .expect("the subject renders at some tick")
-        .sub;
+        .frame;
     let dest_sample = *rendered.last().expect("the subject renders at some tick");
 
-    // (1) THE VISIBLE CROSSING: the authoritative rendered sub flips source→dest EXACTLY ONCE (the
-    // crossing becomes visible from the dest; the de-dup is structural — `chosen_subs` is one sub per
-    // entity, so the captured sample is already at-most-one). suppress-dest leaves source==dest → RED.
+    // (1) THE VISIBLE CROSSING (node-AGNOSTIC, S6): the pure-renderer client keys tracks by EntityId
+    // and never learns the owning node, so the crossing is visible as the rendered FRAME flipping
+    // source-realm→dest-realm EXACTLY ONCE (the re-home re-expresses the avatar into the dest realm's
+    // frame; EntityTrack::observe collapses the window on the frame change). suppress-dest leaves the
+    // frame at the source realm → RED. (This replaces the old sub-flip assertion — a pure-renderer
+    // client has no per-entity sub to flip.)
     assert_ne!(
-        source_sub, dest_sample.sub,
-        "the rendered sub flipped source→dest — the crossing is visible from the dest",
+        source_frame, dest_sample.frame,
+        "the rendered realm frame flipped source→dest — the crossing is visible node-agnostically",
     );
-    let flips = rendered.windows(2).filter(|w| w[0].sub != w[1].sub).count();
+    let flips = rendered
+        .windows(2)
+        .filter(|w| w[0].frame != w[1].frame)
+        .count();
     assert_eq!(
         flips, 1,
-        "exactly one source→dest authority flip (no flapping)"
+        "exactly one source→dest realm-frame flip (no flapping)"
     );
 
     // (2) THE DEST RENDERS THE CROSSED POSE, not the origin-adopt default. The drop discriminators are
@@ -789,18 +825,22 @@ fn p2_dod_the_cross_shard_crossing_renders_at_the_dest_at_the_crossed_pose() {
     verify_no_vanish(&trace, tol).expect("the avatar never vanishes across the seamless crossing");
     verify_pose_continuity(&trace, tol)
         .expect("the avatar's world pose is continuous across the source→dest flip (no teleport)");
-    // ANTI-VACUITY: the two-holder OVERLAP actually happened — at ≥1 tick BOTH the source sub AND
-    // the dest sub held a track for the subject (the seamless window the no-vanish rides on). Without
-    // it, "no vanish" could pass with the source never dropping (a degenerate single-sub render).
-    let overlap_ticks = caps.iter().filter(|c| c.subs_holding.len() >= 2).count();
+    // ANTI-VACUITY (node-agnostic, S6): a REAL re-home happened — the rendered realm frame actually
+    // TRANSITIONED source→dest (asserted in (1): a source-realm frame at the first render, a dest-realm
+    // frame at the last). Without a real crossing the frame would never flip and "no vanish" would pass
+    // degenerately on a single-realm render. (The old "two-holder sub overlap" anti-vacuity is deleted
+    // by the pure-renderer collapse: the client keys tracks by EntityId, so the same avatar arriving on
+    // BOTH the source and dest subs folds into ONE track — the overlap is now invisible at the client
+    // by design, and the frame transition is the observable that proves the crossing was real.)
     assert!(
-        overlap_ticks >= 1,
-        "the source + dest subs OVERLAP (both emit the avatar) — the seamless two-holder window",
+        source_frame == FrameRef::SystemSpace { system_seed: 7 }
+            && dest_sample.frame == FrameRef::SystemSpace { system_seed: 8 },
+        "the render transitioned the SOURCE realm (seed 7) → the DEST realm (seed 8): a real re-home",
     );
     assert_eq!(
         max_absent_run(&caps),
         0,
-        "ZERO vanish: the source sub holds until the dest is delivered (the seamless transition)",
+        "ZERO vanish: the avatar renders continuously across the re-home (the seamless transition)",
     );
 }
 
