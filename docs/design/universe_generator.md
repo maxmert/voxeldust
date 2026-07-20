@@ -1,8 +1,8 @@
 # Seed Universe Generator — design (D-45(a), pre-P4)
 
-Status: **Slices 0–1 LANDED**; Slices 2–4 + step-2 DESIGNED + adversarially vetted, not yet
-implemented (Jul 2026). Slice 0 (seed-tree RNG) committed `07a2c1d`; Slice 1 (3D Kepler ephemeris
-math) on this branch, HR5 100%, full workspace gate green. This is the plan of
+Status: **Slices 0–2 LANDED**; Slices 3–4 + step-2 DESIGNED + adversarially vetted, not yet
+implemented (Jul 2026). Slice 0 (seed-tree RNG) `07a2c1d`; Slice 1 (3D Kepler ephemeris math)
+`3ae580f`; Slice 2 (taxonomy as data) on this branch — all HR5 100%, full workspace gate green. This is the plan of
 record for turning `worldgen::realm_regions_for` from a hardcoded 7-region demo forest into a real,
 seed-derived, generic, configurable universe generator — the foundation the later steps (orbits,
 dynamic shard spawn, server-authoritative LOD, warp) all plug into.
@@ -168,9 +168,21 @@ children — never the whole tree.
   invariant the Slice-3 eccentricity sampler must respect (32 iters do NOT converge as e→1); (c) the
   negative-M case keeps `normalize_angle` coverage self-contained. Cross-host SPIKE-6a DEFERRED to
   step-2 explicitly (pin is host-local, documented).
-- **Slice 2** — taxonomy as data (`GalaxyType`/`SpectralClass`/`PlanetType`/`ProfileKind` + classifier
-  tables + drift tripwires + inverse-CDF samplers + `capability::profile_for`). Verify no core→sim dep
-  edge. HR5 100%.
+- **Slice 2** ✅ DONE (this branch) — taxonomy as data in a new `vd-core` `taxonomy.rs`:
+  `GalaxyType`/`SpectralClass`/`PlanetType` (the `entity_kind.rs` `KindDef` idiom — `ALL` + `from_tag`
+  fail-loud + `def()` + dual drift tripwires + coherence) with REAL cited boundaries (Pecaut-Mamajek MK
+  masses, Duric MLR, Hayashi frost line, Pollack core-accretion, Nair-Abraham galaxy census); closed-form
+  inverse-CDF samplers `sample_imf_mass` (bounded Pareto, branchless shim + log-uniform limit),
+  `sample_rayleigh`, `orbital_axis_au`, `sample_galaxy_type` + classifiers `classify_spectral` /
+  `main_sequence_luminosity` / `habitable_zone_radius_au` / `frost_line_radius_au` / `classify_planet`
+  (params-as-args — Slice-3 `UniverseConfig` supplies them, none gathered here); `ProfileKind` tag +
+  `vd-sim` `capability::profile_for` (the ONE total wildcard-free core→sim map onto `profiles::*`, plus a
+  named `profiles::stub()`). HR5 100% region+branch on BOTH crates; full workspace gate green. Adversarial
+  vet folded in: corrected the transposed Duric MLR table (+ a continuity tripwire), fixed the wrong IMF
+  midpoint golden, made libm goldens tolerance-based, `requires_frost_line` (IceGiant-only, gas giants form
+  both sides), and STRIPPED serde from the `*Def` structs (a `&'static str` field is not `Deserialize`-able
+  — the fieldless enums carry the wire discriminant). Off-wire (HR1); no `UniverseConfig`, no wire arm, no
+  worldgen consumer. Cross-host SPIKE-6a deferred (transcendentals are boot/seed-time).
 - **Slice 3** — THE generator + `UniverseConfig` + the lazy `RealmPath` layer, at **walk-scale
   byte-identical**. `RealmPath`/`RealmLevel`/`RealmKindTag`, the P3 `RealmPathBook`, `walk_scale()` +
   `canonical()` presets, `generate()`/`to_regions()` (pure `GeneratedBody` descriptor → frozen

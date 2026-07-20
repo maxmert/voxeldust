@@ -26,6 +26,7 @@ pub mod ids;
 pub mod kinematics;
 pub mod pose;
 pub mod rng;
+pub mod taxonomy;
 pub mod tlv;
 pub mod worldgen;
 

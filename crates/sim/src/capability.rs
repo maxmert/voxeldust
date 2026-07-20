@@ -232,6 +232,36 @@ pub mod profiles {
             ..CapRequest::default()
         })
     }
+
+    /// The bare P3 empty-space subject: no capabilities, satisfied by any target. Named as
+    /// DATA here (not an inline `build(default())` at the one call site) so the empty
+    /// capability set has a single home like every other profile (HR3, one data row).
+    pub fn stub() -> Result<ShardProfile, ProfileError> {
+        ShardProfile::build(CapRequest::default())
+    }
+}
+
+/// The ONE total core->sim map: a wildcard-free `ProfileKind -> ShardProfile` match onto the
+/// canonical [`profiles`]. A new `ProfileKind` variant is a HARD compile error here until
+/// mapped — the drift trap (a new body kind can never silently fall through to a wrong or
+/// default profile). `ProfileKind` lives in vd-core (a pure tag); this map lives in vd-sim
+/// because `ShardProfile` is a sim type — the tag flows DOWN the `bins->node->sim->wire->core`
+/// arrow, never a reverse edge. Fallible by contract (never swallows the constructor `Result`).
+pub fn profile_for(kind: vd_core::taxonomy::ProfileKind) -> Result<ShardProfile, ProfileError> {
+    use vd_core::taxonomy::ProfileKind;
+    match kind {
+        ProfileKind::Galaxy => profiles::galaxy(),
+        ProfileKind::System => profiles::system(),
+        ProfileKind::Planet => profiles::planet(),
+        ProfileKind::Ship => profiles::ship(),
+        ProfileKind::Asteroid => profiles::asteroid(),
+        ProfileKind::Station => profiles::station(),
+        // An Area is presently a passive Cartesian district hull -> ship-like caps (DATA
+        // reuse, HR3). DEFERRED: a signal-relaying/hull-hosting Area (a spaceport district)
+        // gets its own profiles::area() — a one-arm edit, first needed at P8/P9.
+        ProfileKind::Area => profiles::ship(),
+        ProfileKind::Stub => profiles::stub(),
+    }
 }
 
 #[cfg(test)]
@@ -454,6 +484,111 @@ mod tests {
         assert!(
             profiles::galaxy().expect("galaxy").satisfies(&needs_relay),
             "a galaxy relay provides signal_relay ⇒ satisfied"
+        );
+    }
+
+    #[test]
+    fn profile_for_is_total_over_profile_kind() {
+        use vd_core::taxonomy::ProfileKind;
+        // Every ProfileKind maps to a buildable profile (the wildcard-free match is total).
+        for k in ProfileKind::ALL {
+            assert!(profile_for(k).is_ok(), "{k:?} builds");
+        }
+        // Spot-check each arm's capability contract.
+        assert!(
+            profile_for(ProfileKind::Galaxy)
+                .expect("galaxy")
+                .signal_relay()
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Galaxy).expect("galaxy").voxel(),
+            None
+        );
+        assert!(
+            profile_for(ProfileKind::System)
+                .expect("system")
+                .hull_host()
+        );
+        assert!(
+            !profile_for(ProfileKind::System)
+                .expect("system")
+                .signal_graph()
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Planet).expect("planet").voxel(),
+            Some(VoxelGeometry::Spherical)
+        );
+        assert!(
+            profile_for(ProfileKind::Planet)
+                .expect("planet")
+                .functional_blocks()
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Ship).expect("ship").voxel(),
+            Some(VoxelGeometry::Cartesian)
+        );
+        assert!(
+            profile_for(ProfileKind::Asteroid)
+                .expect("asteroid")
+                .block_edit()
+        );
+        assert!(
+            !profile_for(ProfileKind::Asteroid)
+                .expect("asteroid")
+                .functional_blocks()
+        );
+        assert!(
+            profile_for(ProfileKind::Station)
+                .expect("station")
+                .signal_relay()
+        );
+        assert!(
+            profile_for(ProfileKind::Station)
+                .expect("station")
+                .hull_host()
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Area).expect("area").voxel(),
+            Some(VoxelGeometry::Cartesian)
+        );
+    }
+
+    #[test]
+    fn profile_for_maps_every_arm_to_its_named_profile() {
+        use vd_core::taxonomy::ProfileKind;
+        // Each arm equals calling the named profiles::* directly — proves no drift AND that
+        // every arm of the total match executes (Area reuses ship; Stub is the empty set).
+        assert_eq!(
+            profile_for(ProfileKind::Galaxy).expect("g"),
+            profiles::galaxy().expect("g")
+        );
+        assert_eq!(
+            profile_for(ProfileKind::System).expect("sy"),
+            profiles::system().expect("sy")
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Planet).expect("p"),
+            profiles::planet().expect("p")
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Ship).expect("sh"),
+            profiles::ship().expect("sh")
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Asteroid).expect("a"),
+            profiles::asteroid().expect("a")
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Station).expect("st"),
+            profiles::station().expect("st")
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Area).expect("ar"),
+            profiles::ship().expect("ar")
+        );
+        assert_eq!(
+            profile_for(ProfileKind::Stub).expect("stub"),
+            profiles::stub().expect("stub")
         );
     }
 }
