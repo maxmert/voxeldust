@@ -1,6 +1,8 @@
 # Seed Universe Generator — design (D-45(a), pre-P4)
 
-Status: **DESIGNED + adversarially vetted** (Jul 2026), not yet implemented. This is the plan of
+Status: **Slices 0–1 LANDED**; Slices 2–4 + step-2 DESIGNED + adversarially vetted, not yet
+implemented (Jul 2026). Slice 0 (seed-tree RNG) committed `07a2c1d`; Slice 1 (3D Kepler ephemeris
+math) on this branch, HR5 100%, full workspace gate green. This is the plan of
 record for turning `worldgen::realm_regions_for` from a hardcoded 7-region demo forest into a real,
 seed-derived, generic, configurable universe generator — the foundation the later steps (orbits,
 dynamic shard spawn, server-authoritative LOD, warp) all plug into.
@@ -148,12 +150,24 @@ children — never the whole tree.
 
 ## Slice sequence
 
-- **Slice 0** — determinism foundation: `child_seed` + `realm_stream` over `SplitMix64` + known-vector
-  pins. Pure-additive, no behaviour change.
-- **Slice 1** — real 3D Kepler math in `celestial.rs` (`OrbitalElements`, `orbital_state`,
-  `solve_kepler_fixed`, `secs_since_epoch`); no worldgen consumer yet. Golden-value tests (circular,
-  equatorial, full-period return, fixed-vs-adaptive residual) + a frozen rotation-convention golden
-  byte-table + same-binary replay. HR5 100%. DEFER the cross-host SPIKE-6a to step-2 explicitly.
+- **Slice 0** ✅ DONE (`07a2c1d`) — determinism foundation: `child_seed` + `realm_stream` over
+  `SplitMix64` + known-vector pins. Pure-additive, no behaviour change.
+- **Slice 1** ✅ DONE (this branch) — real 3D Kepler math in `celestial.rs` (`OrbitalElements` +
+  derived `mu`/`mean_motion`/`period`, `OrbitalState`, `orbital_state`, `solve_kepler_fixed`,
+  `secs_since_epoch`, named `KEPLER_FIXED_ITERS`/`KEPLER_ECC_MAX`/`KEPLER_DENOM_FLOOR`); no worldgen
+  consumer yet. Perifocal r + angular-momentum-form v → 3-1-3 `Rz(Ω)·Rx(i)·Rz(ω)` glam rotation on
+  BOTH vectors; the fixed solver's denominator floor is BRANCHLESS (`fp.abs().max(FLOOR).copysign(fp)`)
+  so no uncoverable arm. Tests: analytic goldens (M=0/π/2/π, inclination+RAAN handedness probes,
+  full-period return) + invariants (|r|=a(1−e·cosE), vis-viva, specific energy, |r×v|) +
+  fixed-vs-adaptive residual (incl. a negative raw M to light `normalize_angle`'s branch) + 2 proptests
+  (residual over `e ≤ KEPLER_ECC_MAX`, rotation norm-preservation) + serde round-trips + same-binary
+  bit-replay. HR5 100% region+branch. Adversarial vet folded in three fixes: (a) the frozen
+  rotation-convention **byte-pin lives in `crates/core/tests/` (integration, excluded from the coverage
+  gate)** — an exact-bits assert inside the Tier-A unit suite would be a cross-toolchain-libm oracle
+  that could spuriously RED the HR5 gate; (b) `KEPLER_ECC_MAX = 0.97` is the fail-loud cross-slice
+  invariant the Slice-3 eccentricity sampler must respect (32 iters do NOT converge as e→1); (c) the
+  negative-M case keeps `normalize_angle` coverage self-contained. Cross-host SPIKE-6a DEFERRED to
+  step-2 explicitly (pin is host-local, documented).
 - **Slice 2** — taxonomy as data (`GalaxyType`/`SpectralClass`/`PlanetType`/`ProfileKind` + classifier
   tables + drift tripwires + inverse-CDF samplers + `capability::profile_for`). Verify no core→sim dep
   edge. HR5 100%.
