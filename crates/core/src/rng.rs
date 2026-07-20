@@ -61,9 +61,75 @@ impl SplitMix64 {
     }
 }
 
+/// Derive a child's seed from its parent — the seed-tree DOWN primitive (D-45(a) universe generator).
+/// A 3-round fold of `(parent_seed, salt, index)` through SplitMix64's avalanche, so distinct triples
+/// give distinct, well-distributed child seeds. `salt` distinguishes sibling KINDS (a planet vs a station
+/// under one system); `index` distinguishes siblings of the same kind. Pure + portable (integer-only, no
+/// wall clock) — the whole seed tree is replicated by construction from the shared universe seed (HR1).
+#[must_use]
+pub fn child_seed(parent_seed: u64, salt: u64, index: u64) -> u64 {
+    let r1 = SplitMix64::new(parent_seed).next_u64();
+    let r2 = SplitMix64::new(r1 ^ salt).next_u64();
+    SplitMix64::new(r2 ^ index).next_u64()
+}
+
+/// The deterministic per-realm STREAM: fold the universe seed then each lineage-level seed (root → this
+/// realm) into a fresh `SplitMix64` via the same avalanche [`child_seed`] uses. Pure
+/// `f(universe_seed, lineage)` — every shard draws the identical stream for a realm by construction (HR1),
+/// so per-realm world decisions (masses, orbits, child counts) never need shared state. An empty lineage
+/// (the Universe root) streams from the universe seed alone.
+#[must_use]
+pub fn realm_stream(universe_seed: u64, lineage_seeds: &[u64]) -> SplitMix64 {
+    let acc = lineage_seeds
+        .iter()
+        .fold(universe_seed, |acc, &level| child_seed(acc, level, 0));
+    SplitMix64::new(acc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_seed_is_deterministic_and_input_sensitive() {
+        // Same inputs -> same seed (replicated by construction from the shared universe seed).
+        assert_eq!(child_seed(7, 2, 5), child_seed(7, 2, 5));
+        // Each input independently changes the result: parent, salt (kind), index (sibling).
+        assert_ne!(child_seed(7, 2, 5), child_seed(8, 2, 5));
+        assert_ne!(child_seed(7, 2, 5), child_seed(7, 3, 5));
+        assert_ne!(child_seed(7, 2, 5), child_seed(7, 2, 6));
+    }
+
+    #[test]
+    fn child_seed_known_vector_pins_the_seed_tree() {
+        // Golden value pins the 3-round fold — a refactor that changes the mix is caught (HR1).
+        assert_eq!(child_seed(0, 0, 0), 0x2382_75BC_38FC_BE91);
+    }
+
+    #[test]
+    fn realm_stream_folds_the_lineage_deterministically() {
+        // Same lineage -> same stream.
+        assert_eq!(
+            realm_stream(1, &[10, 20]).next_u64(),
+            realm_stream(1, &[10, 20]).next_u64(),
+        );
+        // A different lineage -> a different stream.
+        assert_ne!(
+            realm_stream(1, &[10, 20]).next_u64(),
+            realm_stream(1, &[10, 21]).next_u64(),
+        );
+        // The empty lineage (the Universe root) streams from the universe seed alone.
+        assert_eq!(
+            realm_stream(1, &[]).next_u64(),
+            SplitMix64::new(1).next_u64(),
+        );
+    }
+
+    #[test]
+    fn realm_stream_known_vector_pins_the_algorithm() {
+        // Golden value pins the fold-into-stream construction.
+        assert_eq!(realm_stream(0, &[1, 2]).next_u64(), 0xF3DE_01E1_F369_72F9);
+    }
 
     #[test]
     fn same_seed_same_stream() {
