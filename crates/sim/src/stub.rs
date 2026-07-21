@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
-use vd_core::frame::{IdentityFrames, rebind_pose_to_dest};
+use vd_core::frame::{FramePlacement, LocalFrames, rebind_pose_to_dest};
 use vd_core::geometry::{
     DepthKey, OverlapBand, RealmRegion, container, region_depth, region_signed_distance,
     should_rehome,
@@ -522,6 +522,26 @@ impl RealmRegions {
     /// The detector short-circuits (inert) when no regions are planted — production through C-3.
     fn is_empty(&self) -> bool {
         self.regions.is_empty()
+    }
+
+    /// The per-shard ephemeris [`FrameContext`] (D-45(a) frame-authority FA-1). At walk/static scale
+    /// every region frame is at the identity placement (positions ride the region `center`), so this
+    /// is byte-equivalent to [`IdentityFrames`] for the container decision — the seam swap regression
+    /// gate. `own` is the ambient-root region's frame (defaulting to `GalaxySpace` for an empty forest,
+    /// which the detector never evaluates — it short-circuits on `is_empty`). FA-4 refreshes MOVING
+    /// direct-child placements from the ephemeris per tick; here every child is static.
+    #[must_use]
+    pub fn frame_context(&self, tick_hz: f64) -> LocalFrames {
+        let own = self
+            .regions
+            .iter()
+            .find(|r| r.parent.is_none())
+            .map_or(FrameRef::GalaxySpace, |r| r.frame);
+        let mut ctx = LocalFrames::new(own, tick_hz);
+        for r in &self.regions {
+            ctx = ctx.with_placed(r.frame, FramePlacement::identity());
+        }
+        ctx
     }
 }
 
@@ -2601,6 +2621,9 @@ fn evaluate_realm_boundaries(
     retain_live(&mut membership.0, &live);
     retain_live(&mut in_flight.0, &live);
 
+    // FA-1: the per-shard ephemeris frame context. At walk/static scale it is byte-equivalent to
+    // IdentityFrames; FA-4 refreshes moving-child placements per tick. `tick_hz = 1/tick_dt_s`.
+    let frames = regions.frame_context(1.0 / config.tick_dt_s);
     let ctx = CrossingCtx {
         config: &config,
         clock: &clock,
@@ -2608,6 +2631,7 @@ fn evaluate_realm_boundaries(
         depths: &regions.depths,
         root_realm: regions.root_realm,
         realm_fence,
+        frames: &frames,
     };
     // Per owned dot (only those this shard SIMULATES) — the durable subjects. `.iter_mut()` (not
     // `.values_mut()`) so the `SessionId` key is in scope: a durable crossing carries the subject's
@@ -2670,6 +2694,10 @@ struct CrossingCtx<'a> {
     /// The realm-authority fence — the durable subject's `subject_fence` fallback AND the transient
     /// `src_realm_fence`.
     realm_fence: Fence,
+    /// The per-shard ephemeris frame context (FA-1): the input seam re-expresses a subject pose into
+    /// each region's (possibly moving) frame through this before the signed distance. Byte-equivalent
+    /// to [`IdentityFrames`] at walk/static scale (every region frame at the identity placement).
+    frames: &'a LocalFrames,
 }
 
 /// Retain only the entries whose key is a LIVE subject (the DRY eviction primitive, Slice 3e). A
@@ -2744,11 +2772,12 @@ fn evaluate_one_subject(
     let bits = membership.entry(entity).or_default();
     let mut members: Vec<DepthKey> = Vec::new();
     for (ix, (region, &depth_key)) in ctx.regions.iter().zip(ctx.depths.iter()).enumerate() {
-        // The input-side frame seam (§2.5): re-express the pose into the region's frame BEFORE the signed
-        // distance. `IdentityFrames` is a no-op at P3 (never errors); P4/P5 swaps in the real ephemeris
-        // `FrameContext` (safe-degrading an un-nameable region to non-member) — additive, no reshape.
-        let sd = region_signed_distance(pose, region, &IdentityFrames)
-            .expect("IdentityFrames placements never error at P3");
+        // The input-side frame seam (§2.5, FA-1): re-express the pose into the region's frame BEFORE the
+        // signed distance, through the shard's own `LocalFrames` ephemeris (`ctx.frames`). At walk/static
+        // scale every region is at identity so this is byte-equal to the retired `IdentityFrames`; FA-4
+        // gives moving direct children a live orbital placement per tick. A frame the shard cannot name
+        // (`Err`) SAFE-DEGRADES to non-member (`f64::MAX`) — never a spurious container.
+        let sd = region_signed_distance(pose, region, ctx.frames).unwrap_or(f64::MAX);
         let now = region.band.member(bits.get(ix), sd);
         bits.set(ix, now);
         if now {
@@ -3947,6 +3976,7 @@ fn emit_frames(
 mod tests {
     use super::*;
     use crate::capability::NodeKind;
+    use vd_core::frame::IdentityFrames; // the retired identity ctx — tests use it as the byte-identity oracle
     use vd_core::pose::LatticePos; // only the tests construct a LatticePos directly; prod uses .map_offset/.offset
     use vd_core::{MsgId, UniverseTick};
     use vd_wire::intershard::{
@@ -8513,6 +8543,74 @@ mod tests {
                 },
             )
             .collect()
+    }
+
+    #[test]
+    fn frame_context_places_every_region_at_identity_and_defaults_own_to_galaxyspace() {
+        use vd_core::frame::FrameContext;
+        // (a) EMPTY forest → `own` defaults to `GalaxySpace` (the detector short-circuits on `is_empty`
+        // before ever building this, but the default must still be well-formed): `GalaxySpace` resolves to
+        // the identity via the `own` arm, and NO other frame is placed, so any other frame is `None`.
+        let empty = RealmRegions::new(vec![]);
+        let ectx = empty.frame_context(20.0);
+        assert_eq!(
+            ectx.placement(FrameRef::GalaxySpace, UniverseTick(0)),
+            Some(FramePlacement::identity()),
+            "empty-forest own defaults to GalaxySpace ⇒ identity",
+        );
+        assert_eq!(
+            ectx.placement(frame_of(OWN_REALM), UniverseTick(7)),
+            None,
+            "an unplaced frame in an empty forest resolves to None",
+        );
+        // (b) The standard dock forest (root ⊃ own ⊃ child): EVERY region frame resolves to the identity
+        // placement at EVERY tick (static walk scale) — the byte-identity guarantee vs the retired
+        // `IdentityFrames`. FA-4 will hand MOVING direct children a live orbital placement; here all static.
+        let ctx = RealmRegions::new(vec![root_region(), own_region(), child_region()])
+            .frame_context(20.0);
+        for r in [root_region(), own_region(), child_region()] {
+            for tick in [UniverseTick(0), UniverseTick(1_000_000)] {
+                assert_eq!(
+                    ctx.placement(r.frame, tick),
+                    Some(FramePlacement::identity()),
+                    "region {:?} sits at the identity placement at tick {} (static walk scale)",
+                    r.realm,
+                    tick.0,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unnameable_pose_frame_safe_degrades_to_non_member_never_a_spurious_container() {
+        // FA-1 safe-degrade: a subject whose pose frame the shard cannot NAME (not among its regions) has
+        // `region_signed_distance` → `Err` → `f64::MAX` for EVERY region, so it is a member of NONE and its
+        // deepest container folds to the ambient ROOT — never a spurious INNER container, never a panic. The
+        // discriminator: at the origin under the OWN (registered) frame the deepest container is the child
+        // `OTHER_REALM` (a re-home INWARD); under an un-nameable frame the child must NOT be entered.
+        let mut rig = Rig::new(); // owns System 7 (config().realm == OWN_REALM)
+        rig.grant_realm();
+        plant_dock_regions(&mut rig); // root(1e9) ⊃ own(1e5) ⊃ child(1000), all shells at the origin
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 77);
+        // A Station frame the dock forest NEVER planted — un-nameable to any dock region.
+        insert_owned_dot_framed(
+            &mut rig,
+            TRIG_SESSION,
+            entity,
+            FrameRef::StationLocal { station_seed: 999 },
+            DVec3::ZERO,
+        );
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..6 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        assert!(
+            crossing_requests(&all)
+                .iter()
+                .all(|r| r.to_realm != OTHER_REALM),
+            "an un-nameable pose frame safe-degrades to non-member ⇒ NEVER re-homes into the inner child",
+        );
     }
 
     #[test]
