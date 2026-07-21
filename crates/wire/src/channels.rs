@@ -19,7 +19,7 @@
 //! `proto_minor` negotiation.
 
 use serde::{Deserialize, Serialize};
-use vd_core::pose::{FrameRef, StampedPose};
+use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, SessionId, TickId, TransferId, UniverseTick};
 
 use crate::seams::tickets::{LoginTicket, ResumeTicket};
@@ -187,6 +187,21 @@ pub struct EntitySnap {
     pub pose: StampedPose,
 }
 
+/// One REALM's authored placement inside a realm-snapshot frame (the frame-authority
+/// observer feed, D-45(a) realm-unification FA-2a). A realm is NOT an entity — it is
+/// keyed by [`RealmId`] (the render layer's `RealmScene` is `RealmId`-keyed), and
+/// [`FrameRef::realm`] is a LOSSY inverse, so a moving realm's box cannot be recovered
+/// from an [`EntitySnap`]'s `pose.frame`. Its parent shard AUTHORS this pose each tick
+/// ({input signals} + {ambient physics} → pose; a passive orbiting body is the
+/// zero-signal degenerate case) and SHIPS it to observers as a latest-wins,
+/// FireAndForget row — never acked, always re-derivable (kept STRICTLY separate from the
+/// child-shard authority feed). Empty at walk/static scale ⇒ zero bytes on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RealmSnap {
+    pub realm: RealmId,
+    pub pose: StampedPose,
+}
+
 /// The 20 Hz per-subscription world-state datagram.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotDatagram {
@@ -198,6 +213,27 @@ pub struct SnapshotDatagram {
     /// The analytic clock value this frame's poses are stamped against.
     pub universe_tick: UniverseTick,
     pub entities: Vec<EntitySnap>,
+}
+
+/// The per-subscription REALM-placement datagram (D-45(a) realm-unification FA-2a): the
+/// twin of [`SnapshotDatagram`] carrying a shard's authored placements for the RENDERABLE
+/// REALMS it parents (a moving planet/station/ship box), keyed by [`RealmId`] not
+/// [`EntityId`]. Shares [`SnapshotDatagram`]'s staleness discipline (`sub` + monotone
+/// `frame_id`, latest-wins, unreliable) and is partitioned by the SAME MTU budget. A shard
+/// emits this ONLY when it parents ≥1 moving/renderable child, so at walk/static scale
+/// (every placement identity ⇒ no moving child) NOTHING is sent — zero bytes, byte-identical
+/// to the pre-plant wire. FA-2c wires the emit; this is the frozen SHAPE plant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RealmSnapshotDatagram {
+    pub sub: SubId,
+    /// Monotonic per-sub frame counter (stale frames dropped) — the realm feed's own
+    /// counter, independent of the entity snapshot's `frame_id`.
+    pub frame_id: u64,
+    /// The SENDER's local sim tick (there is NO global sim tick).
+    pub source_tick: TickId,
+    /// The analytic clock value this frame's placements are authored against.
+    pub universe_tick: UniverseTick,
+    pub realms: Vec<RealmSnap>,
 }
 
 /// The fixed per-datagram overhead (sub + frame_id + source_tick + universe_tick +
@@ -511,6 +547,57 @@ mod tests {
         assert_eq!(
             postcard::from_bytes::<SnapshotDatagram>(&bytes).expect("decode"),
             snap
+        );
+    }
+
+    #[test]
+    fn realm_snapshot_datagram_roundtrips_and_is_empty_at_static_scale() {
+        // FA-2a: the RealmId-keyed observer carrier round-trips a moving-realm placement
+        // (two DISTINCT RealmId arms + poses in their own frames), and the STATIC-scale case
+        // (no moving/renderable child) carries an EMPTY realm list — the byte-identity plant.
+        let populated = RealmSnapshotDatagram {
+            sub: SubId(4),
+            frame_id: 77,
+            source_tick: TickId(9),
+            universe_tick: UniverseTick(3000),
+            realms: vec![
+                RealmSnap {
+                    realm: RealmId::Planet(7),
+                    pose: StampedPose::at_rest(
+                        FrameRef::SystemSpace { system_seed: 7 },
+                        DVec3::new(1.496e11, 0.0, 0.0),
+                        UniverseTick(3000),
+                    ),
+                },
+                RealmSnap {
+                    realm: RealmId::Station(3),
+                    pose: StampedPose::at_rest(
+                        FrameRef::SystemSpace { system_seed: 7 },
+                        DVec3::new(0.0, 2.0e8, 0.0),
+                        UniverseTick(3000),
+                    ),
+                },
+            ],
+        };
+        let bytes = postcard::to_allocvec(&populated).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<RealmSnapshotDatagram>(&bytes).expect("decode"),
+            populated
+        );
+
+        // The zero-signal / static-scale case: an empty realm list still round-trips (and is
+        // what a walk-scale shard would build — FA-2c never SENDS it, so zero bytes on the wire).
+        let empty = RealmSnapshotDatagram {
+            sub: SubId(4),
+            frame_id: 78,
+            source_tick: TickId(10),
+            universe_tick: UniverseTick(3001),
+            realms: Vec::new(),
+        };
+        let bytes = postcard::to_allocvec(&empty).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<RealmSnapshotDatagram>(&bytes).expect("decode"),
+            empty
         );
     }
 
