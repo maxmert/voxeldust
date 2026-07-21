@@ -14,8 +14,11 @@
 //! ephemeris-backed [`FrameContext`] — the SIGNATURE landing now is what lets those
 //! phases add the function bodies WITHOUT reshaping the frozen `StampedPose`/`FrameRef`.
 
+use std::collections::BTreeMap;
+
 use glam::{DQuat, DVec3};
 
+use crate::celestial::{OrbitalElements, orbital_state, secs_since_epoch};
 use crate::ids::UniverseTick;
 use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose, frame_for_realm};
 
@@ -164,6 +167,83 @@ pub struct IdentityFrames;
 impl FrameContext for IdentityFrames {
     fn placement(&self, _frame: FrameRef, _tick: UniverseTick) -> Option<FramePlacement> {
         Some(FramePlacement::identity())
+    }
+}
+
+/// A per-shard ephemeris [`FrameContext`] — the moving-frame successor to [`IdentityFrames`]
+/// (D-45(a) frame-authority). Each shard is the SOLE AUTHOR of the placements of its DIRECT
+/// CHILDREN, expressed in its OWN frame, and evaluates containment in that frame:
+/// - **own** → [`FramePlacement::identity`]: this shard IS its own local origin; its boundary is a
+///   static shell/box at the origin, never moving under it.
+/// - a **moving direct child** → placed LIVE this tick from its orbital elements
+///   (`origin`/`velocity` = [`orbital_state`]`(elements, secs_since_epoch(tick, tick_hz))`) — the
+///   child's position IN THIS SHARD'S frame, which the shard AUTHORS.
+/// - a **static direct child** or the **direct parent** → a stored [`FramePlacement`] (identity for a
+///   walk-scale body whose position rides its region `center`; the RECEIVED parent placement
+///   otherwise — parent authors it, this shard receives it).
+/// - anything else (an ancestor ABOVE the direct parent — grandparent, root — a sibling, an
+///   unrelated realm) → `None`.
+///
+/// **Why grandparent+ → `None` is correct (not a bug):** an entity re-homes to its DIRECT parent
+/// the instant it leaves this realm, before it could reach a grandparent boundary; and the
+/// root-seeded `container` fold resolves a member-of-nothing subject to the root. So dropping
+/// grandparent MEMBERSHIP never changes the container DECISION — only the raw membership bitset,
+/// which nothing observes. On the walk-scale forest every neighbourhood frame is stored at the
+/// identity (children ride their center; the parent is static), so `LocalFrames` is byte-equivalent
+/// to [`IdentityFrames`] for the decision — the proof the FA-1 seam swap gates.
+///
+/// Two shards at a SHARED boundary read DIFFERENT frames: the parent evaluates a child's moving SOI
+/// at the child's AUTHORED position in the parent frame; the child evaluates its OWN boundary as a
+/// static shell at the local origin. No cross-host bit-equality is ever invoked (author-and-ship) —
+/// the ephemeris SPIKE-6a gate the replicated-by-seed oracle needed is retired.
+#[derive(Clone, Debug)]
+pub struct LocalFrames {
+    own: FrameRef,
+    moving: BTreeMap<FrameRef, OrbitalElements>,
+    placed: BTreeMap<FrameRef, FramePlacement>,
+    tick_hz: f64,
+}
+
+impl LocalFrames {
+    /// A context for a shard whose realm frame is `own`, advancing at `tick_hz` (the per-shard clock
+    /// the ephemeris samples). Register children/parent placements with the builder methods.
+    #[must_use]
+    pub fn new(own: FrameRef, tick_hz: f64) -> LocalFrames {
+        LocalFrames {
+            own,
+            moving: BTreeMap::new(),
+            placed: BTreeMap::new(),
+            tick_hz,
+        }
+    }
+
+    /// Register a MOVING direct child: its placement is derived live from `elements` each tick.
+    #[must_use]
+    pub fn with_moving_child(mut self, frame: FrameRef, elements: OrbitalElements) -> LocalFrames {
+        self.moving.insert(frame, elements);
+        self
+    }
+
+    /// Register a STATIC direct child or the DIRECT PARENT at a fixed placement (identity for a
+    /// walk-scale body whose position rides its region `center`; the received parent placement
+    /// otherwise).
+    #[must_use]
+    pub fn with_placed(mut self, frame: FrameRef, placement: FramePlacement) -> LocalFrames {
+        self.placed.insert(frame, placement);
+        self
+    }
+}
+
+impl FrameContext for LocalFrames {
+    fn placement(&self, frame: FrameRef, tick: UniverseTick) -> Option<FramePlacement> {
+        if self.own == frame {
+            return Some(FramePlacement::identity());
+        }
+        if let Some(elements) = self.moving.get(&frame) {
+            let state = orbital_state(elements, secs_since_epoch(tick.0, self.tick_hz));
+            return Some(FramePlacement::moving(state.position, state.velocity));
+        }
+        self.placed.get(&frame).copied()
     }
 }
 
@@ -442,5 +522,65 @@ mod tests {
             FrameError::UnknownDestFrame.to_string(),
             "no ephemeris placement for the destination frame at this tick"
         );
+    }
+
+    // ---- D-45(a) frame-authority FA-0: LocalFrames ----------------------------------
+
+    fn test_elements() -> OrbitalElements {
+        OrbitalElements {
+            sma: 1.0e6,
+            ecc: 0.0,
+            inclination: 0.0,
+            raan: 0.0,
+            arg_periapsis: 0.0,
+            mean_anomaly_epoch: 0.0,
+            central_mass: 1.989e30,
+        }
+    }
+
+    #[test]
+    fn local_frames_own_is_the_identity() {
+        // A shard IS its own local origin: its boundary is static at the origin.
+        let ctx = LocalFrames::new(sys(), 20.0);
+        assert_eq!(
+            ctx.placement(sys(), UniverseTick(5)),
+            Some(FramePlacement::identity())
+        );
+    }
+
+    #[test]
+    fn local_frames_moving_child_tracks_the_authored_orbit() {
+        let elem = test_elements();
+        let ctx = LocalFrames::new(sys(), 20.0).with_moving_child(planet(), elem);
+        // The child's placement equals the shard's AUTHORED orbital state at that tick.
+        for t in [0u64, 1, 137, 5000] {
+            let state = orbital_state(&elem, secs_since_epoch(t, 20.0));
+            assert_eq!(
+                ctx.placement(planet(), UniverseTick(t)),
+                Some(FramePlacement::moving(state.position, state.velocity)),
+            );
+        }
+        // Tick-dependent: the planet is at a different place a tick later (it orbits).
+        assert_ne!(
+            ctx.placement(planet(), UniverseTick(0)),
+            ctx.placement(planet(), UniverseTick(1)),
+        );
+    }
+
+    #[test]
+    fn local_frames_placed_returns_the_stored_placement() {
+        // A static child / the received parent placement.
+        let station = FrameRef::StationLocal { station_seed: 3 };
+        let p = FramePlacement::moving(DVec3::new(4.0, 0.0, 0.0), DVec3::ZERO);
+        let ctx = LocalFrames::new(sys(), 20.0).with_placed(station, p);
+        assert_eq!(ctx.placement(station, UniverseTick(9)), Some(p));
+    }
+
+    #[test]
+    fn local_frames_unknown_frame_is_none() {
+        // A grandparent (above the direct parent), a sibling, or an unrelated frame -> None
+        // (non-member by design; the root-seeded container fold preserves the decision).
+        let ctx = LocalFrames::new(sys(), 20.0);
+        assert_eq!(ctx.placement(planet(), UniverseTick(1)), None);
     }
 }
