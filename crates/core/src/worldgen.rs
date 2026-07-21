@@ -23,9 +23,13 @@
 //! detector was inert for those kinds).
 
 use glam::DVec3;
+use serde::{Deserialize, Serialize};
 
-use crate::geometry::{Boundary, ContainmentBand, RealmRegion};
+use crate::celestial::KEPLER_ECC_MAX;
+use crate::geometry::{BandError, Boundary, ContainmentBand, RealmRegion};
 use crate::pose::{LatticePos, RealmId, frame_for_realm};
+use crate::rng::SplitMix64;
+use crate::taxonomy::{FrostThresholds, GalaxyType, SpectralClass};
 
 /// The inner (acquire) edge of the P3 static containment band, metres inside a surface.
 const CONTAINMENT_INSET_M: f64 = 1.0;
@@ -233,6 +237,278 @@ fn ancestor_realms(all: &[RealmRegion], hosted_realm: RealmId) -> Vec<RealmId> {
         }
     }
     chain
+}
+
+// ===== UniverseConfig (D-45(a) Slice 3b) — the ONE config home ==========================
+//
+// The ~15 placeholder consts above become NAMED fields of six sub-structs (NOT a god-struct).
+// `walk_scale()` reproduces today's EXACT metre-scale geometry (the byte-identity source);
+// `canonical()` is the real-scale (AU/ly) tuning — PLANTED but not live as containment regions
+// until the D-41 non-zero-cell re-quantization (P4/P5); `seed_derived()` perturbs canonical
+// within documented bounds. Nothing consumes this yet — 3c wires the generator onto it.
+
+// --- Stellar/orbital PHYSICS (scale-independent; walk + canonical share these) ---
+/// Salpeter IMF slope α (Salpeter 1955): `dN/dM ∝ M^-2.35`.
+const IMF_SLOPE: f64 = 2.35;
+/// Stellar mass sampling bounds (solar masses): the hydrogen-burning limit to a massive-O cap.
+const IMF_MASS_LO_MSUN: f64 = 0.08;
+const IMF_MASS_HI_MSUN: f64 = 120.0;
+/// Titius-Bode orbital spacing seed (AU) + geometric ratio (Chambers 1996).
+const ORBITAL_A0_AU: f64 = 0.4;
+const ORBITAL_RATIO: f64 = 1.7;
+/// Rayleigh scale for orbital eccentricity / inclination (Fabrycky 2014) — small so sampled
+/// values stay well inside `KEPLER_ECC_MAX` (the generator also hard-caps at `ecc_cap`).
+const ECC_SIGMA: f64 = 0.03;
+const INCL_SIGMA: f64 = 0.02;
+/// Per-system occurrence probability of a station / a sub-planet area district.
+const STATION_OCCURRENCE_PROB: f64 = 0.3;
+const AREA_OCCURRENCE_PROB: f64 = 0.3;
+/// The band by which `seed_derived` jitters the galaxy-type census (peak-to-peak).
+const TYPE_MIX_JITTER: f64 = 0.1;
+
+// --- Canonical (real-scale) geometry — planted; live at P4 after D-41 (illustrative values) ---
+const CANONICAL_UNIVERSE_R_M: f64 = 8.8e26; // ~observable-universe radius
+const CANONICAL_GALAXY_R_M: f64 = 5.0e20; // ~Milky-Way disc radius (~52k ly)
+const CANONICAL_RENDER_EXTENT_M: f64 = 1.5e11; // ~1 AU renderable neighbourhood
+const CANONICAL_SYSTEM_SOI_R_M: f64 = 1.0e13; // ~system SOI (~65 AU)
+const CANONICAL_PLANET_SOI_R_M: f64 = 9.0e8; // ~Earth SOI
+const CANONICAL_PLANET_OFFSET_M: f64 = 1.496e11; // ~1 AU
+const CANONICAL_SYSTEM_B_OFFSET_M: f64 = 4.0e16; // ~4 ly to the next system
+const CANONICAL_STATION_OFFSET_M: f64 = 4.0e8;
+const CANONICAL_STATION_HALF_M: f64 = 5.0e3;
+const CANONICAL_AREA_OFFSET_M: f64 = 1.0e5;
+const CANONICAL_AREA_HALF_M: f64 = 1.0e4;
+/// Canonical local galaxy population range (the real galaxy has millions; only a bounded set
+/// generates locally — the DENSE ambient scan is the D-45 spatial index).
+const CANONICAL_SYSTEM_COUNT_LO: u32 = 1;
+const CANONICAL_SYSTEM_COUNT_HI: u32 = 8;
+/// The walk forest is exactly two systems (A + its disjoint sibling B).
+const WALK_SYSTEM_COUNT: u32 = 2;
+
+/// Ambient-root + galaxy + client-render scale.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScaleConfig {
+    pub universe_r_m: f64,
+    pub galaxy_r_m: f64,
+    pub render_extent_m: f64,
+}
+
+/// Galaxy population + morphology census.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GalaxyConfig {
+    /// Cumulative galaxy-type thresholds for `taxonomy::sample_galaxy_type`.
+    pub type_cumulative: [f64; 2],
+    pub system_count_lo: u32,
+    pub system_count_hi: u32,
+}
+
+/// Star physics: SOI scale + the IMF + the mass-luminosity fit.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StellarConfig {
+    pub system_soi_r_m: f64,
+    pub imf_slope: f64,
+    pub mass_lo_msun: f64,
+    pub mass_hi_msun: f64,
+    pub mlr_segments: [(f64, f64, f64); 3],
+}
+
+/// Planet physics: SOI scale, orbital spacing, eccentricity/inclination, and the frost/mass
+/// thresholds (kept as raw f64 so the config stays serde-clean; `frost_thresholds()` builds the
+/// `taxonomy::FrostThresholds` view).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlanetConfig {
+    pub planet_soi_r_m: f64,
+    pub orbital_a0_au: f64,
+    pub orbital_ratio: f64,
+    pub ecc_sigma: f64,
+    pub incl_sigma: f64,
+    /// Hard eccentricity cap the generator clamps to — a fail-loud cross-slice invariant: it
+    /// MUST stay `<= KEPLER_ECC_MAX` (the fixed Kepler solver's convergence domain).
+    pub ecc_cap: f64,
+    pub frost_coeff_au: f64,
+    pub m_ocean_lo_mearth: f64,
+    pub m_gas_mearth: f64,
+    pub m_core_crit_mearth: f64,
+}
+
+impl PlanetConfig {
+    /// The `taxonomy::FrostThresholds` view over the raw config fields (fed to `classify_planet`).
+    #[must_use]
+    pub fn frost_thresholds(&self) -> FrostThresholds {
+        FrostThresholds {
+            m_ocean_lo_mearth: self.m_ocean_lo_mearth,
+            m_gas_mearth: self.m_gas_mearth,
+            m_core_crit_mearth: self.m_core_crit_mearth,
+        }
+    }
+}
+
+/// Satellite bodies: station/area occurrence + the walk-scale placement geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SatelliteConfig {
+    pub station_prob: f64,
+    pub area_prob: f64,
+    pub station_half_m: f64,
+    pub area_half_m: f64,
+    pub station_offset_m: f64,
+    pub area_offset_m: f64,
+    pub planet_offset_m: f64,
+    pub system_b_offset_m: f64,
+}
+
+/// Containment-band edges (the acquire/release hysteresis).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BandConfig {
+    pub inset_m: f64,
+    pub outset_m: f64,
+    pub k_safety_extra: f64,
+}
+
+impl BandConfig {
+    /// Build the P3 static containment band (v_rel = 0, dt = 1 — the widening is inert). Fallible
+    /// (the ctor validates edges); walk-scale edges are valid by construction.
+    pub fn build(&self) -> Result<ContainmentBand, BandError> {
+        ContainmentBand::for_containment_velocity_safe(
+            self.inset_m,
+            self.outset_m,
+            0.0,
+            1.0,
+            self.k_safety_extra,
+        )
+    }
+}
+
+/// THE one config home for the seed universe generator — six named sub-structs (no god-struct),
+/// every field seed-derivable and doc-cited (no magic numbers).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniverseConfig {
+    pub scale: ScaleConfig,
+    pub galaxy: GalaxyConfig,
+    pub stellar: StellarConfig,
+    pub planet: PlanetConfig,
+    pub satellite: SatelliteConfig,
+    pub band: BandConfig,
+}
+
+impl UniverseConfig {
+    /// The walk-scale preset — its fields ARE today's named geometry consts, so the generator
+    /// reproduces the EXACT current forest (the byte-identity source). The galaxy is renderable
+    /// (`galaxy_r_m < render_extent_m`), so the client draws it as the containing box.
+    #[must_use]
+    pub fn walk_scale() -> UniverseConfig {
+        UniverseConfig {
+            scale: ScaleConfig {
+                universe_r_m: UNIVERSE_R_M,
+                galaxy_r_m: GALAXY_R_M,
+                render_extent_m: MAX_RENDERABLE_EXTENT_M,
+            },
+            galaxy: GalaxyConfig {
+                type_cumulative: GalaxyType::CANONICAL_CUMULATIVE,
+                system_count_lo: WALK_SYSTEM_COUNT,
+                system_count_hi: WALK_SYSTEM_COUNT,
+            },
+            stellar: StellarConfig {
+                system_soi_r_m: SYSTEM_SOI_R_M,
+                imf_slope: IMF_SLOPE,
+                mass_lo_msun: IMF_MASS_LO_MSUN,
+                mass_hi_msun: IMF_MASS_HI_MSUN,
+                mlr_segments: SpectralClass::MLR_SEGMENTS,
+            },
+            planet: PlanetConfig {
+                planet_soi_r_m: PLANET_SOI_R_M,
+                orbital_a0_au: ORBITAL_A0_AU,
+                orbital_ratio: ORBITAL_RATIO,
+                ecc_sigma: ECC_SIGMA,
+                incl_sigma: INCL_SIGMA,
+                ecc_cap: KEPLER_ECC_MAX,
+                frost_coeff_au: crate::taxonomy::FROST_COEFF_AU,
+                m_ocean_lo_mearth: FrostThresholds::CANONICAL.m_ocean_lo_mearth,
+                m_gas_mearth: FrostThresholds::CANONICAL.m_gas_mearth,
+                m_core_crit_mearth: FrostThresholds::CANONICAL.m_core_crit_mearth,
+            },
+            satellite: SatelliteConfig {
+                station_prob: STATION_OCCURRENCE_PROB,
+                area_prob: AREA_OCCURRENCE_PROB,
+                station_half_m: STATION_HALF_M,
+                area_half_m: AREA_HALF_M,
+                station_offset_m: STATION_A_OFFSET_M,
+                area_offset_m: AREA_OFFSET_M,
+                planet_offset_m: PLANET_A_OFFSET_M,
+                system_b_offset_m: SYSTEM_B_OFFSET_M,
+            },
+            band: BandConfig {
+                inset_m: CONTAINMENT_INSET_M,
+                outset_m: CONTAINMENT_OUTSET_M,
+                k_safety_extra: 0.0,
+            },
+        }
+    }
+
+    /// The canonical real-scale (AU/ly) preset — PLANTED; its bodies go LIVE as containment
+    /// regions only after the D-41 cross-cell re-quantization (P4/P5). Physics is shared with
+    /// `walk_scale`; only the metre-scale geometry differs.
+    #[must_use]
+    pub fn canonical() -> UniverseConfig {
+        UniverseConfig {
+            scale: ScaleConfig {
+                universe_r_m: CANONICAL_UNIVERSE_R_M,
+                galaxy_r_m: CANONICAL_GALAXY_R_M,
+                render_extent_m: CANONICAL_RENDER_EXTENT_M,
+            },
+            galaxy: GalaxyConfig {
+                type_cumulative: GalaxyType::CANONICAL_CUMULATIVE,
+                system_count_lo: CANONICAL_SYSTEM_COUNT_LO,
+                system_count_hi: CANONICAL_SYSTEM_COUNT_HI,
+            },
+            stellar: StellarConfig {
+                system_soi_r_m: CANONICAL_SYSTEM_SOI_R_M,
+                imf_slope: IMF_SLOPE,
+                mass_lo_msun: IMF_MASS_LO_MSUN,
+                mass_hi_msun: IMF_MASS_HI_MSUN,
+                mlr_segments: SpectralClass::MLR_SEGMENTS,
+            },
+            planet: PlanetConfig {
+                planet_soi_r_m: CANONICAL_PLANET_SOI_R_M,
+                orbital_a0_au: ORBITAL_A0_AU,
+                orbital_ratio: ORBITAL_RATIO,
+                ecc_sigma: ECC_SIGMA,
+                incl_sigma: INCL_SIGMA,
+                ecc_cap: KEPLER_ECC_MAX,
+                frost_coeff_au: crate::taxonomy::FROST_COEFF_AU,
+                m_ocean_lo_mearth: FrostThresholds::CANONICAL.m_ocean_lo_mearth,
+                m_gas_mearth: FrostThresholds::CANONICAL.m_gas_mearth,
+                m_core_crit_mearth: FrostThresholds::CANONICAL.m_core_crit_mearth,
+            },
+            satellite: SatelliteConfig {
+                station_prob: STATION_OCCURRENCE_PROB,
+                area_prob: AREA_OCCURRENCE_PROB,
+                station_half_m: CANONICAL_STATION_HALF_M,
+                area_half_m: CANONICAL_AREA_HALF_M,
+                station_offset_m: CANONICAL_STATION_OFFSET_M,
+                area_offset_m: CANONICAL_AREA_OFFSET_M,
+                planet_offset_m: CANONICAL_PLANET_OFFSET_M,
+                system_b_offset_m: CANONICAL_SYSTEM_B_OFFSET_M,
+            },
+            band: BandConfig {
+                inset_m: CONTAINMENT_INSET_M,
+                outset_m: CONTAINMENT_OUTSET_M,
+                k_safety_extra: 0.0,
+            },
+        }
+    }
+
+    /// Perturb `canonical()` deterministically within documented bounds, so different seeds yield
+    /// different galaxy morphologies. Physics + geometry stay canonical; only the galaxy-type
+    /// census is jittered (kept ordered + within `[0.1, 0.99]`). `ecc_cap` stays `KEPLER_ECC_MAX`.
+    #[must_use]
+    pub fn seed_derived(seed: u64) -> UniverseConfig {
+        let mut rng = SplitMix64::new(seed);
+        let mut cfg = UniverseConfig::canonical();
+        let jitter = (rng.next_f64() - 0.5) * TYPE_MIX_JITTER;
+        let c_spiral = (cfg.galaxy.type_cumulative[0] + jitter).clamp(0.1, 0.85);
+        cfg.galaxy.type_cumulative = [c_spiral, (c_spiral + 0.18).min(0.99)];
+        cfg
+    }
 }
 
 #[cfg(test)]
@@ -502,5 +778,85 @@ mod tests {
             6,
             "6 distinct regions (7-forest minus the sibling System B)"
         );
+    }
+
+    // ---- D-45(a) Slice 3b: UniverseConfig -------------------------------------------
+
+    #[test]
+    fn walk_scale_equals_the_named_geometry_consts() {
+        let c = UniverseConfig::walk_scale();
+        assert_eq!(c.scale.universe_r_m, UNIVERSE_R_M);
+        assert_eq!(c.scale.galaxy_r_m, GALAXY_R_M);
+        assert_eq!(c.scale.render_extent_m, MAX_RENDERABLE_EXTENT_M);
+        assert_eq!(c.stellar.system_soi_r_m, SYSTEM_SOI_R_M);
+        assert_eq!(c.planet.planet_soi_r_m, PLANET_SOI_R_M);
+        assert_eq!(c.satellite.planet_offset_m, PLANET_A_OFFSET_M);
+        assert_eq!(c.satellite.system_b_offset_m, SYSTEM_B_OFFSET_M);
+        assert_eq!(c.satellite.station_offset_m, STATION_A_OFFSET_M);
+        assert_eq!(c.satellite.station_half_m, STATION_HALF_M);
+        assert_eq!(c.satellite.area_offset_m, AREA_OFFSET_M);
+        assert_eq!(c.satellite.area_half_m, AREA_HALF_M);
+        assert_eq!(c.band.inset_m, CONTAINMENT_INSET_M);
+        assert_eq!(c.band.outset_m, CONTAINMENT_OUTSET_M);
+        // The galaxy is renderable (drawn as the containing box); the Universe is not.
+        assert!(c.scale.galaxy_r_m < c.scale.render_extent_m);
+    }
+
+    #[test]
+    fn universe_config_presets_serde_round_trip() {
+        for c in [
+            UniverseConfig::walk_scale(),
+            UniverseConfig::canonical(),
+            UniverseConfig::seed_derived(3),
+            UniverseConfig::seed_derived(999),
+        ] {
+            let bytes = postcard::to_allocvec(&c).expect("encode");
+            let back: UniverseConfig = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(c, back);
+        }
+    }
+
+    #[test]
+    fn every_preset_ecc_cap_is_within_the_kepler_domain() {
+        // Fail-loud cross-slice invariant: no preset may cap eccentricity above the fixed Kepler
+        // solver's convergence domain (KEPLER_ECC_MAX).
+        assert!(UniverseConfig::walk_scale().planet.ecc_cap <= KEPLER_ECC_MAX);
+        assert!(UniverseConfig::canonical().planet.ecc_cap <= KEPLER_ECC_MAX);
+        for seed in [0u64, 1, 42, 999] {
+            assert!(UniverseConfig::seed_derived(seed).planet.ecc_cap <= KEPLER_ECC_MAX);
+        }
+    }
+
+    #[test]
+    fn walk_band_builds_the_static_band() {
+        UniverseConfig::walk_scale()
+            .band
+            .build()
+            .expect("walk band is valid by construction");
+    }
+
+    #[test]
+    fn frost_thresholds_reads_the_planet_config() {
+        let ft = UniverseConfig::walk_scale().planet.frost_thresholds();
+        assert_eq!(ft, FrostThresholds::CANONICAL);
+    }
+
+    #[test]
+    fn seed_derived_is_deterministic_and_bounded() {
+        assert_eq!(
+            UniverseConfig::seed_derived(7),
+            UniverseConfig::seed_derived(7)
+        );
+        assert_ne!(
+            UniverseConfig::seed_derived(1).galaxy.type_cumulative,
+            UniverseConfig::seed_derived(2).galaxy.type_cumulative,
+        );
+        for seed in [0u64, 1, 5, 100, 9999] {
+            let c = UniverseConfig::seed_derived(seed).galaxy.type_cumulative;
+            assert!(c[0] >= 0.1, "spiral cumulative >= floor: {c:?}");
+            assert!(c[0] <= 0.85, "spiral cumulative <= ceiling: {c:?}");
+            assert!(c[1] > c[0], "type cumulative ordered: {c:?}");
+            assert!(c[1] <= 0.99, "second cumulative capped: {c:?}");
+        }
     }
 }
