@@ -25,7 +25,7 @@
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::celestial::KEPLER_ECC_MAX;
+use crate::celestial::{KEPLER_ECC_MAX, OrbitalElements, orbital_state};
 use crate::geometry::{BandError, Boundary, ContainmentBand, RealmRegion};
 use crate::pose::{LatticePos, RealmId, frame_for_realm};
 use crate::rng::SplitMix64;
@@ -86,90 +86,148 @@ const AREA_A: RealmId = RealmId::Area(7);
 /// fold identity, not a frame). Set between the galaxy (180) and the universe (1e9).
 pub const MAX_RENDERABLE_EXTENT_M: f64 = 200.0;
 
-/// The single source of truth for realm→region geometry (see the module docs). At P3 returns the static
-/// WALK-scale mandate forest; `seed_universe` is threaded for the frozen P4/P5 `f(seed)` signature
-/// (unused while the bodies are static).
+/// A body the generator emits before lowering — its realm, parent, shape, and placement. The
+/// walk roster uses `StaticOffset` placements (the byte-identity source); real bodies
+/// (canonical/seed_derived) use `Orbital`, whose static tick-0 anchor is baked at boot. [`to_regions`]
+/// lowers a slice of these to the frozen [`RealmRegion`] forest.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GeneratedBody {
+    realm: RealmId,
+    parent: Option<RealmId>,
+    shape: Boundary,
+    placement: Placement,
+}
+
+/// Where a body sits in its parent inertial frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Placement {
+    /// A fixed frame-local offset (the walk roster — the byte-identity source).
+    StaticOffset(DVec3),
+    /// A Keplerian orbit; its static tick-0 epoch anchor is baked at boot. PLANTED for the
+    /// canonical seed-driven generation that goes live at P4 (its bodies need D-41 cells) — no
+    /// production producer at P3 (walk uses `StaticOffset` for byte-identity), so the lowering arm
+    /// is exercised by tests until then.
+    #[allow(dead_code)]
+    Orbital(OrbitalElements),
+}
+
+/// The static tick-0 epoch center of a placement as a `cell == ZERO` [`LatticePos`] (D-41: step-1
+/// keeps `cell == ZERO`; the moving ephemeris re-derives the live origin per tick at step-2). A
+/// branchless shim over [`placement_offset`] (HR5: the one match lives in the monomorphic helper).
+fn epoch_offset_in_parent(placement: Placement) -> LatticePos {
+    LatticePos::local(placement_offset(placement))
+}
+
+/// The frame-local offset of a placement. `Orbital` evaluates [`orbital_state`] ONCE at tick 0
+/// (Tier-2 libm is boot-time here, not a per-tick oracle — the cross-host gate is SPIKE-6a).
+fn placement_offset(placement: Placement) -> DVec3 {
+    match placement {
+        Placement::StaticOffset(v) => v,
+        Placement::Orbital(elements) => orbital_state(&elements, 0.0).position,
+    }
+}
+
+/// Lower generated bodies to the frozen `RealmRegion` forest under `config`. Every region shares
+/// the one static containment band; the frame is the realm's canonical authority frame
+/// (`frame_for_realm`) with parent-provenance from the body (so the Area `.expect` cannot fire),
+/// keeping the input-side containment seam and the output-side `rebind_pose_to_dest` in agreement.
+fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmRegion> {
+    let band = config
+        .band
+        .build()
+        .expect("containment band edges are valid by construction");
+    bodies
+        .iter()
+        .map(|b| RealmRegion {
+            realm: b.realm,
+            center: epoch_offset_in_parent(b.placement),
+            frame: frame_for_realm(b.realm, b.parent)
+                .expect("roster realms have a canonical frame"),
+            shape: b.shape,
+            band,
+            parent: b.parent,
+        })
+        .collect()
+}
+
+/// The walk-scale mandate forest as config-driven bodies, in forest order (Universe → Galaxy →
+/// System A → Planet A → System B → Station A → Area A). All placements are `StaticOffset`, so the
+/// lowering is byte-identical to the pre-generator forest. The GENERIC seed-driven child
+/// enumeration (canonical scale) is deferred to P4 — its bodies are not live containment regions
+/// until the D-41 non-zero-cell re-quantization.
+fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
+    let sc = &config.scale;
+    let st = &config.stellar;
+    let pl = &config.planet;
+    let sa = &config.satellite;
+    let shell = |r: f64| Boundary::Shell { r };
+    let boxed = |half: f64| Boundary::Aabb {
+        half: DVec3::splat(half),
+    };
+    let at_x = |off: f64| Placement::StaticOffset(DVec3::new(off, 0.0, 0.0));
+    let origin = Placement::StaticOffset(DVec3::ZERO);
+    vec![
+        // Universe: the ambient ROOT (parent None) — contains all reachable space (fold identity).
+        GeneratedBody {
+            realm: UNIVERSE,
+            parent: None,
+            shape: shell(sc.universe_r_m),
+            placement: origin,
+        },
+        // Galaxy: the finite between-systems space, nested in the Universe.
+        GeneratedBody {
+            realm: GALAXY,
+            parent: Some(UNIVERSE),
+            shape: shell(sc.galaxy_r_m),
+            placement: origin,
+        },
+        // Star system A: nested in the Galaxy at the origin.
+        GeneratedBody {
+            realm: SYSTEM_A,
+            parent: Some(GALAXY),
+            shape: shell(st.system_soi_r_m),
+            placement: origin,
+        },
+        // Planet A: nested in system A, offset from the star.
+        GeneratedBody {
+            realm: PLANET_A,
+            parent: Some(SYSTEM_A),
+            shape: shell(pl.planet_soi_r_m),
+            placement: at_x(sa.planet_offset_m),
+        },
+        // Star system B: a DISJOINT sibling of system A under the Galaxy (a walkable galaxy gap between).
+        GeneratedBody {
+            realm: SYSTEM_B,
+            parent: Some(GALAXY),
+            shape: shell(st.system_soi_r_m),
+            placement: at_x(sa.system_b_offset_m),
+        },
+        // Station A: a first-class Station BOX under System A (depth 3), on the -X side opposite Planet A.
+        GeneratedBody {
+            realm: STATION_A,
+            parent: Some(SYSTEM_A),
+            shape: boxed(sa.station_half_m),
+            placement: at_x(sa.station_offset_m),
+        },
+        // Area A: a first-class sub-planet Area BOX under Planet A (depth 4) — the DEEPEST region.
+        GeneratedBody {
+            realm: AREA_A,
+            parent: Some(PLANET_A),
+            shape: boxed(sa.area_half_m),
+            placement: at_x(sa.area_offset_m),
+        },
+    ]
+}
+
+/// The single source of truth for realm→region geometry (see the module docs). At P3 returns the
+/// static WALK-scale mandate forest, now GENERATED from [`UniverseConfig::walk_scale`] via
+/// [`generate_walk_forest`] + [`to_regions`] (byte-identical to the pre-generator forest);
+/// `_seed_universe` is threaded for the frozen P4/P5 `f(seed)` signature (unused while static —
+/// the seed-driven canonical generation lands at P4).
 #[must_use]
 pub fn realm_regions_for(_seed_universe: u64) -> Vec<RealmRegion> {
-    // ONE band for the whole P3 static forest — the geometry is static (v_rel = 0), so the velocity
-    // widening is inert; the edges are valid by construction, so the ctor never errors here.
-    let band = ContainmentBand::for_containment_velocity_safe(
-        CONTAINMENT_INSET_M,
-        CONTAINMENT_OUTSET_M,
-        0.0,
-        1.0,
-        0.0,
-    )
-    .expect("P3 containment band edges are valid by construction");
-
-    let shell = |realm: RealmId, center: DVec3, r: f64, parent: Option<RealmId>| RealmRegion {
-        realm,
-        center: LatticePos::local(center),
-        // The region frame = the realm's canonical authority frame (`frame_for_realm`), so the
-        // input-side containment seam and the output-side `rebind_pose_to_dest` agree.
-        frame: frame_for_realm(realm, parent).expect("System/Planet realms have a canonical frame"),
-        shape: Boundary::Shell { r },
-        band,
-        parent,
-    };
-
-    // The BOX sibling of `shell` for the Cartesian first-class realms (Station/Area): identical frame /
-    // band plumbing, only the shape differs (`Aabb { half }` instead of a shell). Station/Area both
-    // resolve a canonical frame via `frame_for_realm` (a Station's system parent is irrelevant to its
-    // StationLocal frame; an Area REQUIRES a Planet parent — planted below — so the `.expect` cannot fire).
-    let boxed = |realm: RealmId, center: DVec3, half: f64, parent: Option<RealmId>| RealmRegion {
-        realm,
-        center: LatticePos::local(center),
-        frame: frame_for_realm(realm, parent).expect("Station/Area realms have a canonical frame"),
-        shape: Boundary::Aabb {
-            half: DVec3::splat(half),
-        },
-        band,
-        parent,
-    };
-
-    vec![
-        // Universe: the ambient ROOT (parent None) — contains all reachable space (the fold identity).
-        shell(UNIVERSE, DVec3::ZERO, UNIVERSE_R_M, None),
-        // Galaxy: the finite between-systems space, nested in the Universe.
-        shell(GALAXY, DVec3::ZERO, GALAXY_R_M, Some(UNIVERSE)),
-        // Star system A: nested in the Galaxy at the origin.
-        shell(SYSTEM_A, DVec3::ZERO, SYSTEM_SOI_R_M, Some(GALAXY)),
-        // Planet A: nested in system A, offset from the star.
-        shell(
-            PLANET_A,
-            DVec3::new(PLANET_A_OFFSET_M, 0.0, 0.0),
-            PLANET_SOI_R_M,
-            Some(SYSTEM_A),
-        ),
-        // Star system B: a DISJOINT sibling of system A under the Galaxy — a walkable gap of galaxy
-        // between them (leave A at +40, cross galaxy, enter B at +60).
-        shell(
-            SYSTEM_B,
-            DVec3::new(SYSTEM_B_OFFSET_M, 0.0, 0.0),
-            SYSTEM_SOI_R_M,
-            Some(GALAXY),
-        ),
-        // Station A: a first-class Station BOX nested directly under System A (depth 3), on the -X side
-        // opposite Planet A — so the SAME containment detector re-homes into a Station with no station-
-        // specific code (task #133). Box x∈[-30,-20] is fully inside System A's r=40 SOI + clear of the
-        // origin crowd and the round-trip legs at x = 0/50/100.
-        boxed(
-            STATION_A,
-            DVec3::new(STATION_A_OFFSET_M, 0.0, 0.0),
-            STATION_HALF_M,
-            Some(SYSTEM_A),
-        ),
-        // Area A: a first-class sub-planet Area BOX nested under Planet A (depth 4) — the DEEPEST region in
-        // the forest. Box x∈[22,28] stays within Planet A's r=10 sphere (center +20) yet is OFFSET from the
-        // (20,0,0) escape-SOI probe, so (20,0,0) still resolves to Planet 7 (not the Area).
-        boxed(
-            AREA_A,
-            DVec3::new(AREA_OFFSET_M, 0.0, 0.0),
-            AREA_HALF_M,
-            Some(PLANET_A),
-        ),
-    ]
+    let config = UniverseConfig::walk_scale();
+    to_regions(&generate_walk_forest(&config), &config)
 }
 
 /// The regions a shard hosting `hosted_realm` evaluates CONTAINMENT against: its own realm + its ancestor
@@ -858,5 +916,110 @@ mod tests {
             assert!(c[1] > c[0], "type cumulative ordered: {c:?}");
             assert!(c[1] <= 0.99, "second cumulative capped: {c:?}");
         }
+    }
+
+    // ---- D-45(a) Slice 3c: generate -> to_regions lowering (byte-identity) -----------
+
+    #[test]
+    fn realm_regions_for_matches_the_frozen_pre_generator_golden() {
+        // A HAND-AUTHORED frozen golden (literal values, independent of the generator path): if
+        // to_regions drifts any coordinate / shape / parent, this fails against the literals — NOT
+        // a self-referential capture of the (rewritten) realm_regions_for output.
+        let rs = realm_regions_for(0);
+        let expected: [(RealmId, DVec3, Boundary, Option<RealmId>); 7] = [
+            (UNIVERSE, DVec3::ZERO, Boundary::Shell { r: 1.0e9 }, None),
+            (
+                GALAXY,
+                DVec3::ZERO,
+                Boundary::Shell { r: 180.0 },
+                Some(UNIVERSE),
+            ),
+            (
+                SYSTEM_A,
+                DVec3::ZERO,
+                Boundary::Shell { r: 40.0 },
+                Some(GALAXY),
+            ),
+            (
+                PLANET_A,
+                DVec3::new(20.0, 0.0, 0.0),
+                Boundary::Shell { r: 10.0 },
+                Some(SYSTEM_A),
+            ),
+            (
+                SYSTEM_B,
+                DVec3::new(130.0, 0.0, 0.0),
+                Boundary::Shell { r: 40.0 },
+                Some(GALAXY),
+            ),
+            (
+                STATION_A,
+                DVec3::new(-25.0, 0.0, 0.0),
+                Boundary::Aabb {
+                    half: DVec3::splat(5.0),
+                },
+                Some(SYSTEM_A),
+            ),
+            (
+                AREA_A,
+                DVec3::new(25.0, 0.0, 0.0),
+                Boundary::Aabb {
+                    half: DVec3::splat(3.0),
+                },
+                Some(PLANET_A),
+            ),
+        ];
+        assert_eq!(rs.len(), 7);
+        for (r, (realm, offset, shape, parent)) in rs.iter().zip(expected) {
+            assert_eq!(r.realm, realm);
+            assert_eq!(r.center.offset(), offset);
+            assert_eq!(
+                r.center.cell(),
+                glam::I64Vec3::ZERO,
+                "step-1 keeps cell == ZERO"
+            );
+            assert_eq!(r.shape, shape);
+            assert_eq!(r.parent, parent);
+            assert_eq!(
+                r.frame,
+                frame_for_realm(realm, parent).expect("canonical frame")
+            );
+        }
+        // The whole forest shares the one static walk band.
+        let band = UniverseConfig::walk_scale()
+            .band
+            .build()
+            .expect("walk band");
+        for r in &rs {
+            assert_eq!(r.band, band);
+        }
+    }
+
+    #[test]
+    fn to_regions_lowers_an_orbital_body_to_a_static_cell_zero_center() {
+        // The Orbital placement arm (canonical/seed_derived bodies; not live at walk scale) lowers
+        // via orbital_state(e, 0.0) into a cell == ZERO center — the arm the walk gate never hits.
+        let elements = OrbitalElements {
+            sma: 1.5e11,
+            ecc: 0.1,
+            inclination: 0.4,
+            raan: 0.3,
+            arg_periapsis: 0.9,
+            mean_anomaly_epoch: 0.2,
+            central_mass: 1.989e30,
+        };
+        let body = GeneratedBody {
+            realm: RealmId::Planet(42),
+            parent: Some(RealmId::System(42)),
+            shape: Boundary::Shell { r: 9.0e8 },
+            placement: Placement::Orbital(elements),
+        };
+        let regions = to_regions(&[body], &UniverseConfig::canonical());
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].center.cell(), glam::I64Vec3::ZERO);
+        assert_eq!(
+            regions[0].center.offset(),
+            orbital_state(&elements, 0.0).position
+        );
     }
 }
