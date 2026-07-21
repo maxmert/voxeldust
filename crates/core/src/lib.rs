@@ -25,6 +25,7 @@ pub mod geometry;
 pub mod ids;
 pub mod kinematics;
 pub mod pose;
+pub mod realm_path;
 pub mod rng;
 pub mod taxonomy;
 pub mod tlv;
