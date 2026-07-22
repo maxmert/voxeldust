@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
-use vd_core::celestial::OrbitalElements;
+use vd_core::celestial::{OrbitalElements, orbital_state, secs_since_epoch};
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
 use vd_core::frame::{FramePlacement, LocalFrames, rebind_pose_to_dest};
@@ -30,8 +30,13 @@ use vd_core::glam::DVec3;
 use vd_core::kinematics;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::rng::SplitMix64;
-use vd_core::{AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId};
-use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram, SubId, partition_entities};
+use vd_core::{
+    AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick,
+};
+use vd_wire::channels::{
+    EntitySnap, InputDatagram, RealmSnap, RealmSnapshotDatagram, SnapshotDatagram, SubId,
+    partition_entities, partition_realms,
+};
 use vd_wire::intershard::{
     CrossingAborted, CrossingRequest, DemoteCmd, FlushSource, GhostFlow, InterShardFlow,
     PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP,
@@ -570,6 +575,35 @@ impl RealmRegions {
         }
         ctx
     }
+
+    /// The shard's authored placements for its MOVING children as [`RealmSnap`] observer rows (FA-2c) —
+    /// each computed LIVE from its `OrbitalElements` at `tick` (the closed-form ephemeris `frame_context`
+    /// would derive; a passive orbiting body is LAW-1's zero-signal case). The pose is stamped in the
+    /// shard's OWN (ambient-root) frame — the parent authors its children THERE. BRANCHLESS + EMPTY at
+    /// walk/static scale (`moving` is empty ⇒ no rows ⇒ `emit_realm_frames` sends nothing ⇒ byte-identical).
+    /// Authored (signal-driven, `with_placed`) children join here when they exist (P6/P9); today only the
+    /// orbital roster moves.
+    #[must_use]
+    pub fn authored_realm_snaps(&self, tick_hz: f64, tick: UniverseTick) -> Vec<RealmSnap> {
+        let own = self
+            .regions
+            .iter()
+            .find(|r| r.parent.is_none())
+            .map_or(FrameRef::GalaxySpace, |r| r.frame);
+        let secs = secs_since_epoch(tick.0, tick_hz);
+        self.moving
+            .iter()
+            .map(|(realm, elements)| {
+                let state = orbital_state(elements, secs);
+                let mut pose = StampedPose::at_rest(own, state.position, tick);
+                pose.vel = state.velocity;
+                RealmSnap {
+                    realm: *realm,
+                    pose,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Entity minting state: a per-shard monotonic sequence + seed-derived entropy.
@@ -669,6 +703,11 @@ impl InputLog {
 /// Per-shard monotonic snapshot frame counter.
 #[derive(Resource, Debug, Default)]
 pub struct FrameCounter(pub u64);
+
+/// Per-shard monotonic REALM-snapshot frame counter (FA-2c) — the realm observer feed's own `frame_id`,
+/// independent of the entity [`FrameCounter`] so the client's per-feed staleness gates never cross.
+#[derive(Resource, Debug, Default)]
+pub struct RealmFrameCounter(pub u64);
 
 /// Counters for conditions that are tolerated but must never be silent.
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
@@ -1008,6 +1047,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     });
     world.insert_resource(InputLog::new(input_log_capacity));
     world.insert_resource(FrameCounter::default());
+    world.insert_resource(RealmFrameCounter::default());
     world.insert_resource(StubStats::default());
     world.insert_resource(AppliedSteps::default());
     world.insert_resource(PendingCrossings::default());
@@ -1067,6 +1107,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
             redrive_pending_adoptions,
             feed_source_ghosts,
             emit_frames,
+            emit_realm_frames,
         )
             .chain()
             .after(self_fence_lapsed_realm),
@@ -3999,6 +4040,79 @@ fn emit_frames(
     }
 }
 
+/// Emit the shard's authored REALM placements (moving planet/station/ship boxes) to observers each tick
+/// (FA-2c) — the render-plane twin of [`emit_frames`]. No realm authority ⇒ silent. NO moving child ⇒
+/// silent (byte-identical at walk/static scale — `authored_realm_snaps` is empty). Otherwise it ships a
+/// [`RealmSnapshotDatagram`] (MTU-partitioned by the shared `partition_realms`) as a
+/// [`MsgClass::RealmSnapshot`] datagram to every gateway with an EMITTING observer — the SAME recipients
+/// the entity snapshot reaches. Latest-wins, unreliable; realms are world observation, never authority.
+#[allow(clippy::too_many_arguments)]
+fn emit_realm_frames(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    authority: Res<RealmAuthority>,
+    regions: Res<RealmRegions>,
+    dots: Res<Dots>,
+    mirror: Res<SourceGhostMirror>,
+    mut counter: ResMut<RealmFrameCounter>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    let Some(realm_fence) = authority.0 else {
+        return;
+    };
+    // The authored moving-child rows — EMPTY at walk/static scale ⇒ nothing ships (byte-identical).
+    let realms = regions.authored_realm_snaps(1.0 / config.tick_dt_s, clock.universe_tick);
+    if realms.is_empty() {
+        return;
+    }
+    // The observers present: the SAME gateway set the entity snapshot reaches (the emitting dots). No
+    // observer ⇒ no realm ship (a shard authors its children's motion regardless, but ships only to a
+    // recipient — the `emit_frames` gating, verbatim).
+    let mut gateways: Vec<NodeId> = dots
+        .0
+        .values()
+        .filter(|d| emits(&mirror, d))
+        .map(|d| d.gateway)
+        .collect();
+    gateways.sort_unstable();
+    gateways.dedup();
+    if gateways.is_empty() {
+        return;
+    }
+    let frame_id = counter.0;
+    counter.0 += 1;
+    // Partition BY CONTENT so no realm datagram exceeds the MTU budget (audit GW-1) — the SAME shared
+    // partitioner every shard's entity snapshot uses; each chunk is a self-contained latest-wins frame.
+    for chunk in partition_realms(&realms, config.snapshot_datagram_budget) {
+        let snapshot = RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id,
+            source_tick: clock.local_tick,
+            universe_tick: clock.universe_tick,
+            realms: chunk,
+        };
+        let realm_snapshot_bytes =
+            postcard::to_allocvec(&snapshot).expect("closed wire enums serialize infallibly");
+        let frame = ShardToGateway::RealmFrame {
+            realm_fence,
+            source_tick: clock.local_tick,
+            realm_snapshot_bytes,
+        };
+        // ONE shared body per chunk, refcount-cloned to every subscribing gateway (SCALE-1).
+        let bytes = crate::io::bytes(
+            postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
+        );
+        for &gateway in &gateways {
+            outbox.0.push((
+                gateway,
+                MsgClass::RealmSnapshot,
+                bytes.clone(),
+                Durability::Ephemeral,
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5527,6 +5641,21 @@ mod tests {
                     .into_snapshot_bytes()
                     .expect("snapshot class carries Frame");
                 postcard::from_bytes::<SnapshotDatagram>(&snapshot_bytes).expect("snapshot")
+            })
+            .collect()
+    }
+
+    /// The realm-observer twin of [`decode_frames`] (FA-2c): every `RealmSnapshotDatagram` on the
+    /// `RealmSnapshot` class, decoded from its `ShardToGateway::RealmFrame` carrier.
+    fn decode_realm_frames(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<RealmSnapshotDatagram> {
+        sent.iter()
+            .filter(|(_, class, _)| *class == MsgClass::RealmSnapshot)
+            .map(|(_, _, bytes)| {
+                let frame: ShardToGateway = postcard::from_bytes(bytes).expect("frame");
+                let realm_bytes = frame
+                    .into_realm_snapshot_bytes()
+                    .expect("realm class carries RealmFrame");
+                postcard::from_bytes::<RealmSnapshotDatagram>(&realm_bytes).expect("realm snapshot")
             })
             .collect()
     }
@@ -7631,6 +7760,104 @@ mod tests {
             vec![emitter],
             "only the emitting retained Ghost renders; the silent GENESIS adopt Ghost is filtered out"
         );
+    }
+
+    fn orbit() -> OrbitalElements {
+        OrbitalElements {
+            sma: 1.5e11,
+            ecc: 0.1,
+            inclination: 0.4,
+            raan: 0.3,
+            arg_periapsis: 0.9,
+            mean_anomaly_epoch: 0.2,
+            central_mass: 1.989e30,
+        }
+    }
+
+    #[test]
+    fn authored_realm_snaps_computes_a_moving_child_pose_in_the_own_frame_and_is_empty_when_static()
+    {
+        // FA-2c: a moving child's authored `RealmSnap` is its ephemeris pose (position + velocity) at the
+        // tick, stamped in the shard's OWN (ambient-root) frame; a forest with NO moving child yields none.
+        let elements = orbit();
+        let mut moving = BTreeMap::new();
+        moving.insert(OTHER_REALM, elements);
+        let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
+            .with_moving_children(moving);
+        let (tick_hz, tick) = (20.0, UniverseTick(1_000));
+        let snaps = regions.authored_realm_snaps(tick_hz, tick);
+        let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].realm, OTHER_REALM);
+        assert_eq!(
+            snaps[0].pose.frame,
+            frame_of(ROOT_REALM),
+            "authored in the own frame"
+        );
+        assert_eq!(snaps[0].pose.pos.offset(), state.position);
+        assert_eq!(snaps[0].pose.vel, state.velocity);
+        assert_eq!(snaps[0].pose.universe_tick, tick);
+        // A static forest (no moving roster) authors NO realm snap — the byte-identity case.
+        assert!(
+            RealmRegions::new(vec![root_region(), own_region()])
+                .authored_realm_snaps(tick_hz, tick)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn emit_realm_frames_ships_a_moving_child_only_to_a_present_observer_with_authority() {
+        // FA-2c: the shard ships a moving child's box to observers ONLY when it (a) holds its realm, (b)
+        // authors >=1 moving child, and (c) has an emitting observer — the emit_frames gating, verbatim.
+        // Covers all four arms of emit_realm_frames.
+        let plant = |rig: &mut Rig| {
+            let mut moving = BTreeMap::new();
+            moving.insert(OTHER_REALM, orbit());
+            *rig.world.resource_mut::<RealmRegions>() =
+                RealmRegions::new(vec![root_region(), own_region(), child_region()])
+                    .with_moving_children(moving);
+        };
+        // A dot INSIDE own but OUTSIDE the child (container == owning ⇒ it emits, never re-homes).
+        let observer = |rig: &mut Rig, tag: u32| {
+            insert_owned_dot(
+                rig,
+                TRIG_SESSION,
+                EntityId::pack(EntityKind::Player, 10, 1, tag),
+                DVec3::new(5_000.0, 0.0, 0.0),
+            );
+        };
+        let realms = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<RealmId> {
+            decode_realm_frames(sent)
+                .into_iter()
+                .flat_map(|f| f.realms)
+                .map(|s| s.realm)
+                .collect()
+        };
+
+        // (a) HAPPY: granted + moving child + emitting observer ⇒ the moving realm ships.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant(&mut rig);
+        observer(&mut rig, 5);
+        assert_eq!(realms(&rig.tick(vec![])), vec![OTHER_REALM]);
+
+        // (b) NO OBSERVER: granted + moving child but no emitting dot ⇒ silent (gateways empty).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant(&mut rig);
+        assert!(realms(&rig.tick(vec![])).is_empty());
+
+        // (c) STATIC SCALE: granted + observer but EMPTY roster ⇒ silent (the byte-identity arm).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        observer(&mut rig, 6);
+        assert!(realms(&rig.tick(vec![])).is_empty());
+
+        // (d) NO AUTHORITY: an ungranted shard is silent even with a moving child + observer.
+        let mut rig = Rig::new();
+        plant(&mut rig);
+        observer(&mut rig, 7);
+        assert!(realms(&rig.tick(vec![])).is_empty());
     }
 
     #[test]
