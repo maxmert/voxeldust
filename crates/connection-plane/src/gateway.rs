@@ -5459,7 +5459,11 @@ mod tests {
             .iter()
             .filter(|(to, class, _)| (*to == CLIENT) & (*class == MsgClass::RealmSnapshot))
             .collect();
-        assert_eq!(got.len(), 1, "the realm frame reached the client via the dispatch");
+        assert_eq!(
+            got.len(),
+            1,
+            "the realm frame reached the client via the dispatch"
+        );
         let snap: RealmSnapshotDatagram = postcard::from_bytes(&got[0].2).expect("decode");
         assert_eq!(snap.realms[0].realm, RealmId::Planet(7));
     }
