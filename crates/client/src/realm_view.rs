@@ -83,6 +83,17 @@ impl RealmView {
             .map(|track| track.sample(cursor))
     }
 
+    /// The LATEST streamed pose for `realm` (no interpolation) — `None` for a realm the feed never
+    /// streamed. The scene overlay reads this to move a boot box to its live server-shipped placement;
+    /// the latest (not a cursor-interpolated blend) keeps the overlay cursor-free (FA-2c; render-side
+    /// interpolation is an FA-5+ smoothness refinement).
+    #[must_use]
+    pub fn realm_latest(&self, realm: RealmId) -> Option<RenderPose> {
+        self.placements
+            .get(&realm)
+            .map(|track| track.current_render_pose())
+    }
+
     /// Whether the feed has streamed ANY realm placement yet — the byte-identity gate for the scene
     /// overlay (empty ⇒ the published scene is the boot scene by pointer-bump, walk-scale unchanged).
     #[must_use]
@@ -147,6 +158,12 @@ mod tests {
         assert!(v.realm_pose(RealmId::Station(2), 10.0).is_some());
         // A realm the feed never streamed has no pose (its box stays boot-static).
         assert_eq!(v.realm_pose(RealmId::Planet(99), 10.0), None);
+        // realm_latest (the cursor-free overlay reader) mirrors: Some for a streamed realm, None else.
+        assert_eq!(
+            v.realm_latest(RealmId::Planet(1)).map(|p| p.pos),
+            Some(DVec3::new(1.0e9, 0.0, 0.0)),
+        );
+        assert_eq!(v.realm_latest(RealmId::Planet(99)), None);
         assert!(!v.is_empty());
     }
 

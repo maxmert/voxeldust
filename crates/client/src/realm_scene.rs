@@ -21,6 +21,8 @@ use vd_core::geometry::{Boundary, RealmBoundary, RealmRegion};
 use vd_core::pose::{FrameRef, RealmId};
 use vd_core::worldgen::MAX_RENDERABLE_EXTENT_M;
 
+use crate::realm_view::RealmView;
+
 /// The render-relevant shape of one realm's extent. A `RealmBoundary::shape` projects to this,
 /// DROPPING the metric band/effect: [`Boundary::Shell`]→[`BoxShape::Sphere`],
 /// [`Boundary::Aabb`]→[`BoxShape::Box`], [`Boundary::Obb`]→[`BoxShape::Box`] (orientation
@@ -235,6 +237,34 @@ impl RealmScene {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Overlay a [`RealmView`]'s streamed live placements onto this BOOT scene (D-45(a) FA-2c-3.3): each
+    /// boot box whose realm the feed has streamed gets its `frame` AND `center_offset` REPLACED by the
+    /// latest server-shipped pose. BOTH move because the pose is authored in the shard's PARENT frame
+    /// (`SystemSpace` for a planet), NOT the realm's own boot frame (`PlanetCentered`) — the boot frame is
+    /// only correct for a STATIC realm; a MOVING realm must render in the frame it was authored in (this is
+    /// invisible through P3 where all such frames are world-origin identity, but load-bearing at P4/P5).
+    /// Shape / parent / depth / color are boot config and are kept. A boot box the feed never names stays
+    /// boot-static. Callers skip this when the view is empty (walk scale → the boot scene, byte-identical).
+    #[must_use]
+    pub fn overlaid(&self, view: &RealmView) -> RealmScene {
+        let boxes = self
+            .0
+            .iter()
+            .map(|(&realm, boot)| {
+                let overlaid = match view.realm_latest(realm) {
+                    Some(live) => RealmBox {
+                        frame: live.frame,
+                        center_offset: live.pos,
+                        ..*boot
+                    },
+                    None => *boot,
+                };
+                (realm, overlaid)
+            })
+            .collect();
+        RealmScene(boxes)
     }
 }
 
@@ -598,6 +628,62 @@ mod tests {
             CrossEffect::Interest,
         )
         .expect("valid obb band")
+    }
+
+    #[test]
+    fn overlaid_moves_a_streamed_box_frame_and_offset_keeps_static_and_empty_is_boot_identical() {
+        use vd_core::pose::StampedPose;
+        use vd_core::{TickId, UniverseTick};
+        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram, SubId};
+        // A boot scene: Planet 1 (boot frame PlanetCentered) + Station 2, both boot-static.
+        let boot = RealmScene::from_boundaries(&[
+            shell_boundary(
+                RealmId::Planet(1),
+                DVec3::new(20.0, 0.0, 0.0),
+                5.0,
+                Some(RealmId::System(7)),
+            ),
+            shell_boundary(
+                RealmId::Station(2),
+                DVec3::new(-25.0, 0.0, 0.0),
+                3.0,
+                Some(RealmId::System(7)),
+            ),
+        ])
+        .expect("boot scene");
+        // Stream a LIVE pose for Planet 1 ONLY, authored in the PARENT (System) frame at a new offset.
+        let streamed_frame = FrameRef::SystemSpace { system_seed: 7 };
+        let streamed_offset = DVec3::new(1.0e9, 5.0e8, 0.0);
+        let mut view = RealmView::default();
+        view.on_realm_snapshot(RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 1,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(10),
+            realms: vec![RealmSnap {
+                realm: RealmId::Planet(1),
+                pose: StampedPose::at_rest(streamed_frame, streamed_offset, UniverseTick(10)),
+            }],
+        });
+        let scene = boot.overlaid(&view);
+        // Planet 1 moved — BOTH its frame and center_offset are the streamed (parent-frame) values, and
+        // its frame CHANGED from the boot PlanetCentered (the must-fix: a moving realm renders in the
+        // frame it was authored in, not its own boot frame).
+        let moved = scene.get(RealmId::Planet(1)).expect("planet box");
+        assert_eq!(moved.center_offset, streamed_offset);
+        assert_eq!(moved.frame, streamed_frame);
+        assert_ne!(
+            moved.frame,
+            boot.get(RealmId::Planet(1)).expect("boot planet").frame,
+            "the overlay REPLACES the boot frame (PlanetCentered → the authored SystemSpace)",
+        );
+        // Station 2 (not streamed) stays boot-static.
+        assert_eq!(
+            scene.get(RealmId::Station(2)),
+            boot.get(RealmId::Station(2))
+        );
+        // An EMPTY view overlays to the boot scene byte-identical (the walk-scale case).
+        assert_eq!(boot.overlaid(&RealmView::default()), boot);
     }
 
     #[test]

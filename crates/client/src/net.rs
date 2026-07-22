@@ -19,7 +19,8 @@ use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_devproto::{DevEntityRow, DevPhase, DevState, DevTransferView, InputAction};
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
-    ClientControlMsg, EventMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SnapshotVerdict,
+    ClientControlMsg, EventMsg, InputDatagram, RealmSnapshotDatagram, ServerControlMsg,
+    SnapshotDatagram, SnapshotVerdict,
 };
 use vd_wire::seams::tickets::LoginTicket;
 use vd_wire::version::ProtoVersion;
@@ -28,6 +29,7 @@ use std::sync::Arc;
 
 use crate::input::InputState;
 use crate::realm_scene::RealmScene;
+use crate::realm_view::{RealmVerdict, RealmView};
 use crate::render_clock::RenderClock;
 use crate::render_snapshot::RenderSnapshot;
 use crate::tuning::ClientInterpTuning;
@@ -89,10 +91,15 @@ pub struct ClientState {
     /// `screenshot --at-tick` aligns on; `None` before the first applied snapshot.
     latest_universe_tick: Option<u64>,
     /// The boot-loaded realm-box scene (Visual Crossing Playground V2), shared onto the render
-    /// seam via `Arc` so the per-step `render_snapshot()` clone is a pointer bump. Default EMPTY
-    /// (no boxes) until [`ClientState::load_scene`] plants a dev-config `boxes.json` at boot — it
-    /// is CONFIG, not delivered state, so it never changes on the wire.
+    /// seam via `Arc` so the per-step `render_snapshot()` clone is a pointer bump. The BOOT-STATIC
+    /// config (never mutated); a MOVING realm's live pose rides `realm_view` and is OVERLAID at
+    /// publish time (FA-2c-3.3), keeping this the pure config source-of-truth.
     scene: Arc<RealmScene>,
+    /// The delivered REALM view (FA-2c) — the streamed authoritative placements for the shard's
+    /// moving realm boxes (an orbiting planet/station/ship). EMPTY until a `RealmSnapshot` arrives
+    /// (walk scale ships none, so the published scene stays the boot `scene` — byte-identical). Read
+    /// by `render_snapshot()` to OVERLAY each moving box's live pose onto the boot scene.
+    realm_view: RealmView,
 }
 
 impl ClientState {
@@ -119,6 +126,7 @@ impl ClientState {
             snapshots_applied: 0,
             latest_universe_tick: None,
             scene: Arc::new(RealmScene::default()),
+            realm_view: RealmView::default(),
         }
     }
 
@@ -177,6 +185,7 @@ impl ClientState {
         match class {
             MsgClass::Control => self.on_control(&bytes),
             MsgClass::Snapshot => self.on_snapshot(&bytes, now_s),
+            MsgClass::RealmSnapshot => self.on_realm_snapshot(&bytes, now_s),
             // No other class flows toward a client in P1.5.
             _ => self.ignored += 1,
         }
@@ -258,6 +267,26 @@ impl ClientState {
         if self.view.on_snapshot(&self.held_subs, snap) == SnapshotVerdict::Apply {
             self.render_clock.observe(tick, now_s);
             self.snapshots_applied += 1;
+            self.latest_universe_tick = Some(tick.0);
+        }
+    }
+
+    /// Fold one delivered REALM frame in (FA-2c) — the render-plane twin of [`Self::on_snapshot`]. The
+    /// realm observer feed is sub-agnostic (world observation), so it delegates the latest-wins gate to
+    /// [`RealmView::on_realm_snapshot`] and reacts on `Apply`. It ALSO anchors the render cursor: a client
+    /// spectating a moving realm with NO entity in view (or before its own avatar's first frame) must
+    /// still get a cursor, else the moving box would FREEZE at boot (the very failure FA-2c prevents).
+    /// Both feeds stamp the same shard `universe_tick`, so anchoring from either is consistent.
+    fn on_realm_snapshot(&mut self, bytes: &[u8], now_s: f64) {
+        let Ok(snap) = postcard::from_bytes::<RealmSnapshotDatagram>(bytes) else {
+            // A malformed realm datagram is a decode fault like any other — reuse the shared
+            // `decode_errors` counter (a decode fault is a decode fault, DRY + already surfaced).
+            self.decode_errors += 1;
+            return;
+        };
+        let tick = snap.universe_tick;
+        if self.realm_view.on_realm_snapshot(snap) == RealmVerdict::Apply {
+            self.render_clock.observe(tick, now_s);
             self.latest_universe_tick = Some(tick.0);
         }
     }
@@ -414,12 +443,17 @@ impl ClientState {
     /// `BTreeMap`s of `Copy` tracks.
     #[must_use]
     pub fn render_snapshot(&self) -> RenderSnapshot {
-        RenderSnapshot::with_scene(
-            self.view.clone(),
-            self.render_clock,
-            self.phase,
-            Arc::clone(&self.scene),
-        )
+        // FA-2c-3.3: OVERLAY the streamed live realm placements onto the boot scene. When the realm feed
+        // is EMPTY (walk/static scale — the server ships no moving realm) publish the boot `Arc` by
+        // pointer-bump, so the published scene is byte-identical to the pre-FA-2c wire; otherwise build a
+        // fresh immutable overlaid scene (the boot `Arc` is never mutated — no `make_mut` on the shared
+        // boot config; the render thread reads an immutable snapshot wait-free, as it already does).
+        let scene = if self.realm_view.is_empty() {
+            Arc::clone(&self.scene)
+        } else {
+            Arc::new(self.scene.overlaid(&self.realm_view))
+        };
+        RenderSnapshot::with_scene(self.view.clone(), self.render_clock, self.phase, scene)
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
@@ -675,6 +709,26 @@ mod tests {
         .expect("test fixture")
     }
 
+    /// A `RealmSnapshotDatagram` moving `realm` to frame-local x (FA-2c) — the realm twin of [`snapshot`].
+    fn realm_snapshot(frame_id: u64, tick: u64, realm: vd_core::pose::RealmId, x: f64) -> Vec<u8> {
+        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
+        postcard::to_allocvec(&RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(tick),
+            realms: vec![RealmSnap {
+                realm,
+                pose: StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    DVec3::new(x, 0.0, 0.0),
+                    UniverseTick(tick),
+                ),
+            }],
+        })
+        .expect("test fixture")
+    }
+
     /// Drive Connecting → Active.
     fn activate(c: &mut ClientCore<MockTransport>) {
         let r = c.step(0.0); // sends Hello
@@ -797,6 +851,78 @@ mod tests {
             None,
             "removing the avatar clears own_entity"
         );
+    }
+
+    #[test]
+    fn a_realm_snapshot_routes_streams_anchors_the_cursor_and_is_not_counted_ignored() {
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        activate(&mut c);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot(1, 10, RealmId::Planet(7), 1.0e9),
+        );
+        c.step(0.0);
+        // The realm view holds the streamed placement (the route reached on_realm_snapshot).
+        assert_eq!(
+            c.state()
+                .realm_view
+                .realm_latest(RealmId::Planet(7))
+                .map(|p| p.pos),
+            Some(DVec3::new(1.0e9, 0.0, 0.0)),
+        );
+        // The realm feed ANCHORED the render cursor (must-fix ii — a spectator's moving box never
+        // freezes): latest_universe_tick advanced even with NO entity snapshot delivered.
+        assert_eq!(c.state().latest_universe_tick, Some(10));
+        // A RealmSnapshot is NOT counted in `ignored` — it routes to on_realm_snapshot, not the wildcard.
+        assert_eq!(c.state().dropped_counts().1, 0);
+        // render_snapshot() takes the OVERLAY branch when the realm view is non-empty (the boot scene is
+        // empty by default, so the published scene is the empty overlay — the is_empty()==false arm).
+        let rs = c.state().render_snapshot();
+        assert!(rs.scene().is_empty());
+    }
+
+    #[test]
+    fn a_stale_realm_frame_is_dropped_and_a_malformed_one_counts_a_decode_error() {
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        activate(&mut c);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot(5, 10, RealmId::Planet(7), 1.0),
+        );
+        c.step(0.0);
+        // A STRICTLY-older realm frame is dropped — the placement does not regress.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot(4, 10, RealmId::Planet(7), 999.0),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state()
+                .realm_view
+                .realm_latest(RealmId::Planet(7))
+                .map(|p| p.pos.x),
+            Some(1.0),
+        );
+        // A malformed realm datagram bumps the SHARED decode_errors counter (DRY).
+        c.transport
+            .deliver(GATEWAY, MsgClass::RealmSnapshot, vec![0xff, 0xff]);
+        c.step(0.0);
+        assert_eq!(c.state().dropped_counts().0, 1);
+    }
+
+    #[test]
+    fn render_snapshot_publishes_the_boot_scene_when_no_realm_streamed() {
+        // The byte-identity arm (is_empty()==true): with NO realm frame, render_snapshot() publishes the
+        // boot scene unchanged (empty by default) — walk scale is unmoved.
+        let mut c = core();
+        activate(&mut c);
+        let rs = c.state().render_snapshot();
+        assert!(rs.scene().is_empty());
     }
 
     #[test]

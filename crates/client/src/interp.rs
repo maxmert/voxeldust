@@ -150,6 +150,19 @@ impl EntityTrack {
     pub fn current_frame(self) -> FrameRef {
         self.current.frame
     }
+
+    /// The freshest delivered pose as a [`RenderPose`] — the LATEST server-shipped position with NO
+    /// interpolation (the leading edge). For consumers that want the latest pose without a render cursor
+    /// (the realm-box overlay, FA-2c): a slow moving realm box shows its latest streamed placement per
+    /// step; render-side cursor interpolation is an FA-5+ smoothness refinement (D-45).
+    #[must_use]
+    pub fn current_render_pose(self) -> RenderPose {
+        RenderPose {
+            frame: self.current.frame,
+            pos: self.current.pos.offset(),
+            orient: self.current.orient,
+        }
+    }
 }
 
 #[cfg(test)]
