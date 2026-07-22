@@ -855,6 +855,9 @@ fn process_gateway_inbound(
                 MsgClass::Snapshot => {
                     on_shard_frame(from, bytes, &mut sessions, &mut stats, &mut outbox);
                 }
+                MsgClass::RealmSnapshot => {
+                    on_shard_realm_frame(from, bytes, &mut sessions, &mut stats, &mut outbox);
+                }
                 _ => stats.undecodable += 1,
             }
         } else {
@@ -1987,6 +1990,51 @@ fn on_shard_frame(
     }
 }
 
+/// Fan one REALM frame (from shard `from`) out to that shard's subscribers as a
+/// [`MsgClass::RealmSnapshot`] datagram (FA-2c) — the render-plane twin of [`on_shard_frame`]. Realm
+/// placements are WORLD OBSERVATION keyed by `RealmId` (the client's `RealmScene` consumer is
+/// sub-agnostic, latest-wins), so per the vetted design the observer feed is FireAndForget with NO
+/// authority gating: unlike the entity frame there is NO per-sub re-tag, NO delivery watermark, and NO
+/// per-shard fence drop (a realm box is ambient world state, not per-session authority — a briefly stale
+/// box self-heals next tick). ONE shared body is refcount-cloned to every subscriber (SCALE-1). The
+/// gateway never decodes the payload.
+fn on_shard_realm_frame(
+    from: NodeId,
+    bytes: &[u8],
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    let Ok(ShardToGateway::RealmFrame {
+        realm_snapshot_bytes,
+        ..
+    }) = postcard::from_bytes::<ShardToGateway>(bytes)
+    else {
+        stats.undecodable += 1;
+        return;
+    };
+    // ONE shared body (sub 0, RealmId-keyed — no per-session re-tag) shared across every subscriber.
+    let body = vd_sim::io::bytes(realm_snapshot_bytes);
+    for session_id in sessions.subscribers_of(from) {
+        let Some(session) = sessions.by_session.get_mut(&session_id) else {
+            // The reverse index and `by_session` are kept in sync; a miss is a desync (counted, never
+            // silent — the same C2 honesty floor as `on_shard_frame`).
+            stats.frame_sub_desync += 1;
+            continue;
+        };
+        // Active sessions only — a self-fenced / still-attaching session is served no frames.
+        if !matches!(session.phase, SessionPhase::Active { .. }) {
+            continue;
+        }
+        outbox.0.push((
+            session.client,
+            MsgClass::RealmSnapshot,
+            body.clone(),
+            vd_sim::io::Durability::Ephemeral,
+        ));
+    }
+}
+
 /// Handle a directory reply: the Session-key head confirms (or denies) the mint.
 fn on_directory_reply(
     reply: DirectoryReply,
@@ -2122,9 +2170,12 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
     use vd_core::pose::FrameRef;
+    use vd_core::pose::RealmId;
     use vd_core::{EpochId, TickId, UniverseTick};
     use vd_sim::capability::NodeKind;
-    use vd_wire::channels::{EntitySnap, InputDatagram, SnapshotDatagram};
+    use vd_wire::channels::{
+        EntitySnap, InputDatagram, RealmSnap, RealmSnapshotDatagram, SnapshotDatagram,
+    };
     use vd_wire::seams::directory::OwnerRecord;
 
     const GW: NodeId = NodeId(1);
@@ -2558,6 +2609,30 @@ mod tests {
             realm_fence: fence,
             source_tick: TickId(5),
             snapshot_bytes: postcard::to_allocvec(&snapshot).expect("encode"),
+        }
+    }
+
+    /// A `ShardToGateway::RealmFrame` carrying one moving-realm placement (FA-2c) — the realm twin of
+    /// [`frame_msg`].
+    fn realm_frame_msg(realm: RealmId) -> ShardToGateway {
+        let snapshot = RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 3,
+            source_tick: TickId(5),
+            universe_tick: UniverseTick(50),
+            realms: vec![RealmSnap {
+                realm,
+                pose: vd_core::pose::StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    vd_core::glam::DVec3::new(1.0e9, 0.0, 0.0),
+                    UniverseTick(50),
+                ),
+            }],
+        };
+        ShardToGateway::RealmFrame {
+            realm_fence: Fence(1),
+            source_tick: TickId(5),
+            realm_snapshot_bytes: postcard::to_allocvec(&snapshot).expect("encode"),
         }
     }
 
@@ -5304,6 +5379,89 @@ mod tests {
             "a malformed snapshot body is counted undecodable"
         );
         assert!(outbox.0.is_empty(), "nothing forwarded on a malformed body");
+    }
+
+    #[test]
+    fn on_shard_realm_frame_fans_to_an_active_subscribers_client() {
+        // FA-2c: a realm frame from a subscribed shard reaches the subscriber's client as a
+        // MsgClass::RealmSnapshot datagram (sub-agnostic, RealmId-keyed) — the render-plane fan-out.
+        let (mut sessions, _sid, _) = one_active_session();
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        let msg = postcard::to_allocvec(&realm_frame_msg(RealmId::Planet(7))).expect("encode");
+        on_shard_realm_frame(SHARD, &msg, &mut sessions, &mut stats, &mut outbox);
+        let got: Vec<&(NodeId, MsgClass, vd_sim::io::Bytes, vd_sim::io::Durability)> = outbox
+            .0
+            .iter()
+            .filter(|(to, class, _, _)| (*to == CLIENT) & (*class == MsgClass::RealmSnapshot))
+            .collect();
+        assert_eq!(
+            got.len(),
+            1,
+            "the active subscriber's client got one realm frame"
+        );
+        let snap: RealmSnapshotDatagram = postcard::from_bytes(&got[0].2).expect("decode");
+        assert_eq!(snap.realms.len(), 1);
+        assert_eq!(snap.realms[0].realm, RealmId::Planet(7));
+    }
+
+    #[test]
+    fn on_shard_realm_frame_counts_undecodable_and_desync_and_skips_non_active() {
+        let msg = postcard::to_allocvec(&realm_frame_msg(RealmId::Planet(7))).expect("encode");
+
+        // (a) undecodable: garbage bytes ⇒ counted, nothing sent.
+        let (mut sessions, _sid, _) = one_active_session();
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        on_shard_realm_frame(SHARD, &[0xff, 0xff], &mut sessions, &mut stats, &mut outbox);
+        assert_eq!(stats.undecodable, 1);
+        assert!(outbox.0.is_empty());
+
+        // (b) forced desync: the reverse index references a session absent from `by_session` ⇒ counted,
+        // never a silent drop (the C2 honesty floor, mirroring on_shard_frame).
+        let mut sessions = GatewaySessions::default();
+        sessions
+            .subscribed_shards
+            .entry(SHARD)
+            .or_default()
+            .insert(SessionId(0xC0DE));
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        on_shard_realm_frame(SHARD, &msg, &mut sessions, &mut stats, &mut outbox);
+        assert_eq!(stats.frame_sub_desync, 1);
+        assert!(outbox.0.is_empty());
+
+        // (c) a non-Active (self-fenced) subscriber is served no realm frame.
+        let (mut sessions, sid, _) = one_active_session();
+        sessions.by_session.get_mut(&sid).expect("present").phase = SessionPhase::SelfFenced;
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        on_shard_realm_frame(SHARD, &msg, &mut sessions, &mut stats, &mut outbox);
+        assert!(
+            outbox.0.is_empty(),
+            "a self-fenced session gets no realm frame"
+        );
+    }
+
+    #[test]
+    fn a_realm_frame_routes_through_the_dispatch_arm_to_the_client() {
+        // Covers the MsgClass::RealmSnapshot dispatch arm (process_gateway_inbound): a realm frame from
+        // a subscribed shard, routed through the real gateway inbound loop, reaches the subscriber's
+        // client as a RealmSnapshot datagram — the FA-2c end-to-end gateway path.
+        let mut rig = Rig::new();
+        let (_, _) = rig.login(); // subscribes to SHARD
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::RealmSnapshot,
+            &realm_frame_msg(RealmId::Planet(7)),
+        )]);
+        let got: Vec<&(NodeId, MsgClass, Vec<u8>)> = sent
+            .iter()
+            .filter(|(to, class, _)| (*to == CLIENT) & (*class == MsgClass::RealmSnapshot))
+            .collect();
+        assert_eq!(got.len(), 1, "the realm frame reached the client via the dispatch");
+        let snap: RealmSnapshotDatagram = postcard::from_bytes(&got[0].2).expect("decode");
+        assert_eq!(snap.realms[0].realm, RealmId::Planet(7));
     }
 
     #[test]
