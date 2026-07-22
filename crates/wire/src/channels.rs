@@ -326,9 +326,19 @@ pub enum SnapshotVerdict {
     DropStale,
 }
 
+/// The strictly-older staleness predicate shared by every latest-wins frame gate (D-45(a) FA-2c): a
+/// `frame_id` STRICTLY below the per-feed `high_water` is a late straggler (stale); an EQUAL id is a
+/// sibling chunk of the CURRENT frame (a partitioned multi-datagram snapshot) and is NOT stale — each
+/// chunk self-contained, latest-wins. Extracted so the entity [`classify_snapshot`] and the realm-feed
+/// gate (`vd_client::RealmView`) share the ONE `<` comparison and can never drift (DRY; §6.3).
+#[must_use]
+pub fn is_stale(high_water: Option<u64>, frame_id: u64) -> bool {
+    high_water.is_some_and(|hw| frame_id < hw)
+}
+
 /// THE §6.3 snapshot staleness gate, shared by every snapshot consumer (the
 /// in-process `ScriptedClient` and the real client) so they cannot drift: a
-/// strictly-older `frame_id` is stale, but an EQUAL `frame_id` is a sibling chunk
+/// strictly-older `frame_id` is stale ([`is_stale`]), but an EQUAL `frame_id` is a sibling chunk
 /// of the current tick (a partitioned multi-datagram snapshot) and is APPLIED —
 /// each chunk self-contained, latest-wins. A sub the client does not hold drops.
 ///
@@ -347,7 +357,7 @@ pub fn classify_snapshot(
     if !held_subs.contains(&snap_sub) {
         return SnapshotVerdict::DropForeignSub;
     }
-    if high_water.is_some_and(|hw| snap_frame_id < hw) {
+    if is_stale(high_water, snap_frame_id) {
         return SnapshotVerdict::DropStale;
     }
     SnapshotVerdict::Apply
@@ -361,6 +371,16 @@ mod tests {
 
     fn eid() -> EntityId {
         EntityId::pack(EntityKind::Player, 1, 1, 1)
+    }
+
+    #[test]
+    fn is_stale_is_the_strictly_older_predicate() {
+        // The shared latest-wins scalar (FA-2c): no high-water ⇒ never stale; strictly-older ⇒ stale;
+        // EQUAL (a sibling chunk of the current frame) and NEWER ⇒ fresh.
+        assert!(!is_stale(None, 0));
+        assert!(is_stale(Some(5), 4));
+        assert!(!is_stale(Some(5), 5));
+        assert!(!is_stale(Some(5), 6));
     }
 
     #[test]
