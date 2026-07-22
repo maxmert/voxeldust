@@ -500,12 +500,15 @@ impl ClientState {
             entities,
             snapshots_applied: self.snapshots_applied,
             realm_frames_applied: self.realm_view.frames_applied(),
-            stale_frames_dropped: self.view.stale_frames_dropped(),
+            // SUM both feeds' faults — the realm feed computes+exposes its OWN stale/NaN counts, so a
+            // corrupt realm feed must not be invisible behind the entity view's (both 0 at walk scale).
+            stale_frames_dropped: self.view.stale_frames_dropped()
+                + self.realm_view.stale_frames_dropped(),
             sent_input_count: self.sent_input_count,
             decode_errors: self.decode_errors,
             ignored: self.ignored,
             foreign_peer_drops: self.foreign_peer_drops,
-            nonfinite_poses: self.view.nonfinite_poses(),
+            nonfinite_poses: self.view.nonfinite_poses() + self.realm_view.nonfinite_poses(),
             dev_commands_applied,
             dev_commands_dropped,
             transfer: DevTransferView::None,
@@ -914,6 +917,34 @@ mod tests {
             .deliver(GATEWAY, MsgClass::RealmSnapshot, vec![0xff, 0xff]);
         c.step(0.0);
         assert_eq!(c.state().dropped_counts().0, 1);
+    }
+
+    #[test]
+    fn devstate_surfaces_the_realm_feeds_own_fault_counters_not_just_the_entity_views() {
+        // The holistic /goal audit MEDIUM (wf_c9444997): devstate() surfaced only the ENTITY view's
+        // stale/NaN counters, so a corrupt realm feed was invisible on the HR6 diagnosis surface. The
+        // realm feed computes+exposes its OWN counts — they are now SUMMED with the entity view's.
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        activate(&mut c);
+        // A realm frame with a non-finite pose (a diverged shard) — a FAULT the realm feed sanitizes.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot(2, 10, RealmId::Planet(7), f64::NAN),
+        );
+        c.step(0.0);
+        // A strictly-older realm frame for the same realm — a stale drop the realm feed counts.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot(1, 10, RealmId::Planet(7), 1.0),
+        );
+        c.step(0.0);
+        let st = c.state().devstate(0.0, 0, 0);
+        // The entity view contributes 0 here; both realm-feed faults reach the surface (SUMMED).
+        assert_eq!(st.nonfinite_poses, 1, "the realm feed's NaN sanitize is surfaced");
+        assert_eq!(st.stale_frames_dropped, 1, "the realm feed's stale drop is surfaced");
     }
 
     #[test]

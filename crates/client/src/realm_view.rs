@@ -5,11 +5,12 @@
 //!
 //! Reuses [`EntityTrack`] VERBATIM (no-prediction interpolation, frame-change window-collapse,
 //! freeze-on-loss) — so a moving realm box interpolates at the 20 Hz feed rate and FREEZES (never coasts)
-//! on loss, exactly like an entity. Latest-wins by a SINGLE per-FEED monotone high-water: the realm
-//! observer feed is SUB-AGNOSTIC (the gateway fans it to every subscriber with no held-sub check) and
-//! carries one `frame_id` per frame, so there is no per-sub high-water and no foreign-sub arm — that is
-//! the ONE place the realm gate genuinely differs from the entity gate (hence [`RealmVerdict`], not
-//! `SnapshotVerdict`), while sharing the strictly-older [`is_stale`] scalar.
+//! on loss, exactly like an entity. Latest-wins by a PER-`RealmId` monotone high-water (each realm is
+//! authored by exactly ONE shard, so its `frame_id` stream is monotone; keying the gate per single-owner
+//! realm decouples the independent per-shard `RealmFrameCounter`s so two co-subscribed mover shards never
+//! freeze each other — see [`RealmView::high_water`]). The realm gate has no per-sub/foreign-sub arm (the
+//! feed is sub-agnostic — the gateway fans it to every subscriber), hence [`RealmVerdict`] (not
+//! `SnapshotVerdict`), while sharing the strictly-older [`is_stale`] scalar with the entity gate.
 //!
 //! EMPTY until a `RealmSnapshot` datagram arrives; at walk/static scale the server ships none.
 
@@ -36,9 +37,16 @@ pub enum RealmVerdict {
 pub struct RealmView {
     /// ONE track per realm (latest-wins) — the moving box's interpolated pose.
     placements: BTreeMap<RealmId, EntityTrack>,
-    /// The per-FEED staleness high-water for the §6.3 gate (a SINGLE scalar — the realm feed is
-    /// sub-agnostic and carries one `frame_id` per frame, unlike the entity path's per-sub map).
-    high_water: Option<u64>,
+    /// The per-REALM staleness high-water for the §6.3 gate — keyed by the single-owner `RealmId`,
+    /// NOT one feed-global scalar. Each `RealmId` is authored by exactly ONE shard (its parent), and
+    /// each shard runs its OWN monotone `RealmFrameCounter` from 0; a feed-global high-water would let a
+    /// higher-counter shard's `frame_id` ratchet past a co-subscribed lower-counter shard's and FREEZE
+    /// that shard's boxes forever (two mover shards in one client's AoI — the node-per-realm Forest case,
+    /// e.g. a System 7 → Galaxy → System 8 warp). Keying per single-owner `RealmId` decouples the
+    /// independent counters (the render is already per-`RealmId` latest-wins). A straggler across an
+    /// authority HANDOFF (a realm re-homing between shards, two transient co-authors) still needs the
+    /// `realm_fence` — an FA-6 concern (D-45 owed), not reachable until a realm reparents.
+    high_water: BTreeMap<RealmId, u64>,
     /// Realm frames ACCEPTED by the gate (the realm liveness signal a `wait-until` predicate polls —
     /// the realm twin of `snapshots_applied`; STAYS 0 at walk scale where no realm frame ships).
     frames_applied: u64,
@@ -50,20 +58,22 @@ pub struct RealmView {
 }
 
 impl RealmView {
-    /// Fold one delivered realm frame in through the shared strictly-older gate ([`is_stale`]): on Apply
-    /// advance the high-water and fold each `RealmSnap` into its per-`RealmId` track (sanitize-at-ingress,
-    /// latest-wins); on a stale frame count the drop. An EQUAL `frame_id` (a sibling chunk of a
-    /// partitioned frame) is NOT stale and applies — `EntityTrack::observe` updates in place without
-    /// collapsing the interp window. Returns the verdict so the caller anchors the render clock on Apply.
+    /// Fold one delivered realm frame in through the shared strictly-older gate ([`is_stale`]), gated
+    /// PER-`RealmId` (not one feed-global scalar — see [`RealmView::high_water`]): for each `RealmSnap`, a
+    /// `frame_id` strictly older than THAT realm's high-water is a straggler (dropped + counted); a
+    /// fresh-or-equal one advances the realm's high-water and folds the pose into its track
+    /// (sanitize-at-ingress, latest-wins; an EQUAL `frame_id` — a sibling chunk of a partitioned frame —
+    /// applies without collapsing the interp window). The datagram verdict is [`RealmVerdict::Apply`] iff
+    /// ≥1 realm landed (so the caller anchors the render clock on real progress), else `DropStale`.
     pub fn on_realm_snapshot(&mut self, snap: RealmSnapshotDatagram) -> RealmVerdict {
-        if is_stale(self.high_water, snap.frame_id) {
-            self.stale_frames_dropped += 1;
-            return RealmVerdict::DropStale;
-        }
-        self.high_water = Some(snap.frame_id);
-        // Count the ACCEPTED frame — strictly AFTER the is_stale gate, so a DropStale never inflates it.
-        self.frames_applied += 1;
+        let mut any_applied = false;
         for row in snap.realms {
+            // Per-REALM staleness: a co-subscribed higher-counter shard must never ratchet a
+            // lower-counter shard's realm past `frame_id` (the freeze bug a feed-global scalar caused).
+            if is_stale(self.high_water.get(&row.realm).copied(), snap.frame_id) {
+                self.stale_frames_dropped += 1;
+                continue;
+            }
             // Sanitize at the decode-ingress chokepoint (the DeliveredView discipline, view.rs): a
             // non-finite realm pose must never reach the render transforms; count the fault.
             let raw = row.pose;
@@ -71,12 +81,20 @@ impl RealmView {
             if pose != raw {
                 self.nonfinite_poses += 1;
             }
+            self.high_water.insert(row.realm, snap.frame_id);
             self.placements
                 .entry(row.realm)
                 .and_modify(|track| track.observe(pose))
                 .or_insert_with(|| EntityTrack::new(pose));
+            any_applied = true;
         }
-        RealmVerdict::Apply
+        if any_applied {
+            // Count the ACCEPTED frame — strictly AFTER the gate, so an all-stale drop never inflates it.
+            self.frames_applied += 1;
+            RealmVerdict::Apply
+        } else {
+            RealmVerdict::DropStale
+        }
     }
 
     /// The pose to render for `realm` at `cursor` (universe-tick f64 units) — `None` for a realm the feed
@@ -165,7 +183,9 @@ mod tests {
             ],
         ));
         assert_eq!(verdict, RealmVerdict::Apply);
-        assert_eq!(v.high_water, Some(3));
+        // Per-realm high-water: BOTH streamed realms are stamped at the datagram's frame_id.
+        assert_eq!(v.high_water.get(&RealmId::Planet(1)), Some(&3));
+        assert_eq!(v.high_water.get(&RealmId::Station(2)), Some(&3));
         assert!(v.realm_pose(RealmId::Planet(1), 10.0).is_some());
         assert!(v.realm_pose(RealmId::Station(2), 10.0).is_some());
         // A realm the feed never streamed has no pose (its box stays boot-static).
@@ -177,6 +197,49 @@ mod tests {
         );
         assert_eq!(v.realm_latest(RealmId::Planet(99)), None);
         assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn two_mover_shards_with_divergent_frame_ids_both_stay_live_no_cross_shard_freeze() {
+        // The FA-5 multi-emitter case (the holistic /goal audit HIGH, wf_c9444997): two shards each
+        // author their OWN disjoint realms with INDEPENDENT RealmFrameCounters — shard A far ahead
+        // (frame_id 500), shard B fresh (frame_id 30). A feed-GLOBAL high-water would let A(500) ratchet
+        // past B and DROP every B frame as stale forever (B's boxes FREEZE — the node-per-realm Forest
+        // System 7 -> Galaxy -> System 8 warp bug). Per-RealmId keying decouples them: BOTH stay live.
+        let mut v = RealmView::default();
+        // Shard A (System 7): its planet at a high counter.
+        assert_eq!(
+            v.on_realm_snapshot(frame(500, 10, vec![(RealmId::Planet(7), pose(DVec3::X, 10))])),
+            RealmVerdict::Apply,
+        );
+        // Shard B (System 8): its planet at a LOW counter — must NOT be rejected as "stale" vs A's 500.
+        assert_eq!(
+            v.on_realm_snapshot(frame(30, 10, vec![(RealmId::Planet(8), pose(DVec3::Y, 10))])),
+            RealmVerdict::Apply,
+            "shard B's low-counter frame must apply — no cross-shard high-water conflation",
+        );
+        assert!(v.realm_pose(RealmId::Planet(7), 10.0).is_some());
+        assert!(v.realm_pose(RealmId::Planet(8), 10.0).is_some());
+        // B keeps advancing independently of A's counter — it is not frozen.
+        assert_eq!(
+            v.on_realm_snapshot(frame(
+                31,
+                20,
+                vec![(RealmId::Planet(8), pose(DVec3::new(0.0, 3.0, 0.0), 20))]
+            )),
+            RealmVerdict::Apply,
+        );
+        assert_eq!(
+            v.realm_latest(RealmId::Planet(8)).map(|p| p.pos),
+            Some(DVec3::new(0.0, 3.0, 0.0)),
+            "B moved to its frame-31 pose — not frozen",
+        );
+        // A per-realm stale straggler (B at 30 after B advanced to 31) is STILL dropped.
+        assert_eq!(
+            v.on_realm_snapshot(frame(30, 10, vec![(RealmId::Planet(8), pose(DVec3::ZERO, 10))])),
+            RealmVerdict::DropStale,
+        );
+        assert_eq!(v.stale_frames_dropped(), 1);
     }
 
     #[test]
@@ -196,7 +259,7 @@ mod tests {
             RealmVerdict::DropStale,
         );
         assert_eq!(v.stale_frames_dropped, 1);
-        assert_eq!(v.high_water, Some(5));
+        assert_eq!(v.high_water.get(&RealmId::Planet(1)), Some(&5));
         // frames_applied counts ONLY the accepted frame, not the stale drop.
         assert_eq!(v.frames_applied(), 1);
         // An EQUAL frame_id (a sibling chunk of the partitioned frame 5) is NOT stale and applies —
