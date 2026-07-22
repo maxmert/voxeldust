@@ -499,6 +499,7 @@ impl ClientState {
             universe_tick: self.latest_universe_tick,
             entities,
             snapshots_applied: self.snapshots_applied,
+            realm_frames_applied: self.realm_view.frames_applied(),
             stale_frames_dropped: self.view.stale_frames_dropped(),
             sent_input_count: self.sent_input_count,
             decode_errors: self.decode_errors,

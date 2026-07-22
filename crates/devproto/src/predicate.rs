@@ -20,6 +20,9 @@ pub enum WaitField {
     OwnEntitySet,
     /// The count of applied snapshots (session-relative; proves frames are landing).
     SnapshotsApplied,
+    /// The count of applied REALM frames (FA-2c) — proves the moving-realm observer feed is landing
+    /// (a closed-loop e2e blocks on `realm_frames_applied ge 1` before capturing an orbiting box).
+    RealmFramesApplied,
     /// The freshest APPLIED universe tick (run-stable + join-independent) — what
     /// `screenshot --at-tick` aligns on for reproducible captures. Reads `0` BOTH before
     /// any frame has landed AND for a genuine applied tick 0, so the two are
@@ -36,17 +39,21 @@ impl WaitField {
     pub fn is_boolean(self) -> bool {
         match self {
             WaitField::Active | WaitField::OwnEntitySet => true,
-            WaitField::EntityCount | WaitField::SnapshotsApplied | WaitField::UniverseTick => false,
+            WaitField::EntityCount
+            | WaitField::SnapshotsApplied
+            | WaitField::RealmFramesApplied
+            | WaitField::UniverseTick => false,
         }
     }
 
     /// Every field — the SINGLE source for CLI help / validation, so a new variant can
     /// never leave `vdctl`'s help text or error message stale (the DRY drift the audit hit).
-    pub const ALL: [WaitField; 5] = [
+    pub const ALL: [WaitField; 6] = [
         WaitField::Active,
         WaitField::EntityCount,
         WaitField::OwnEntitySet,
         WaitField::SnapshotsApplied,
+        WaitField::RealmFramesApplied,
         WaitField::UniverseTick,
     ];
 
@@ -59,6 +66,7 @@ impl WaitField {
             WaitField::EntityCount => "entity_count",
             WaitField::OwnEntitySet => "own_entity_set",
             WaitField::SnapshotsApplied => "snapshots_applied",
+            WaitField::RealmFramesApplied => "realm_frames_applied",
             WaitField::UniverseTick => "universe_tick",
         }
     }
@@ -165,6 +173,7 @@ fn field_value(state: &DevState, field: WaitField) -> u64 {
         WaitField::EntityCount => state.entities.len() as u64,
         WaitField::OwnEntitySet => u64::from(state.own_entity.is_some()),
         WaitField::SnapshotsApplied => state.snapshots_applied,
+        WaitField::RealmFramesApplied => state.realm_frames_applied,
         WaitField::UniverseTick => state.universe_tick.unwrap_or(0),
     }
 }
@@ -185,6 +194,7 @@ mod tests {
         assert_eq!(field_value(&s, WaitField::EntityCount), 1);
         assert_eq!(field_value(&s, WaitField::OwnEntitySet), 1);
         assert_eq!(field_value(&s, WaitField::SnapshotsApplied), 4);
+        assert_eq!(field_value(&s, WaitField::RealmFramesApplied), 3);
         assert_eq!(field_value(&s, WaitField::UniverseTick), 101);
         // UniverseTick is None before the first snapshot -> reads 0.
         let mut fresh = sample();
@@ -236,6 +246,7 @@ mod tests {
         assert!(WaitField::OwnEntitySet.is_boolean());
         assert!(!WaitField::EntityCount.is_boolean());
         assert!(!WaitField::SnapshotsApplied.is_boolean());
+        assert!(!WaitField::RealmFramesApplied.is_boolean());
         assert!(!WaitField::UniverseTick.is_boolean());
     }
 

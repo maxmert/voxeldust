@@ -73,6 +73,9 @@ pub struct DevState {
     // counter is a real problem; THROUGHPUT/BENIGN ones are not.
     /// THROUGHPUT: snapshots accepted by the §6.3 gate (proves frames are landing).
     pub snapshots_applied: u64,
+    /// THROUGHPUT: REALM frames accepted by the gate (FA-2c) — proves the moving-realm feed is landing
+    /// (a `WaitUntil{RealmFramesApplied >= 1}` closed-loop e2e polls this). 0 at walk scale (no movers).
+    pub realm_frames_applied: u64,
     /// BENIGN: snapshots dropped as foreign-sub or strictly-stale (the gate working).
     pub stale_frames_dropped: u64,
     /// THROUGHPUT: input datagrams that rode the wire.
@@ -114,6 +117,7 @@ pub(crate) mod tests {
                 authoritative_sub: 0,
             }],
             snapshots_applied: 4,
+            realm_frames_applied: 3,
             stale_frames_dropped: 1,
             sent_input_count: 9,
             decode_errors: 0,

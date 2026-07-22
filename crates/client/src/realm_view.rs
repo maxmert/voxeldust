@@ -39,6 +39,9 @@ pub struct RealmView {
     /// The per-FEED staleness high-water for the §6.3 gate (a SINGLE scalar — the realm feed is
     /// sub-agnostic and carries one `frame_id` per frame, unlike the entity path's per-sub map).
     high_water: Option<u64>,
+    /// Realm frames ACCEPTED by the gate (the realm liveness signal a `wait-until` predicate polls —
+    /// the realm twin of `snapshots_applied`; STAYS 0 at walk scale where no realm frame ships).
+    frames_applied: u64,
     /// FAULT count: strictly-older realm frames dropped by the gate.
     stale_frames_dropped: u64,
     /// FAULT count: delivered realm poses that carried a non-finite (NaN/Inf) component and had to be
@@ -58,6 +61,8 @@ impl RealmView {
             return RealmVerdict::DropStale;
         }
         self.high_water = Some(snap.frame_id);
+        // Count the ACCEPTED frame — strictly AFTER the is_stale gate, so a DropStale never inflates it.
+        self.frames_applied += 1;
         for row in snap.realms {
             // Sanitize at the decode-ingress chokepoint (the DeliveredView discipline, view.rs): a
             // non-finite realm pose must never reach the render transforms; count the fault.
@@ -99,6 +104,13 @@ impl RealmView {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.placements.is_empty()
+    }
+
+    /// Realm frames accepted by the gate — the realm liveness signal surfaced on DevState (the realm
+    /// twin of `snapshots_applied`, what a `WaitUntil{RealmFramesApplied >= 1}` closed-loop e2e polls).
+    #[must_use]
+    pub fn frames_applied(&self) -> u64 {
+        self.frames_applied
     }
 
     /// Strictly-older realm frames dropped (a fault surfaced on DevState).
@@ -185,6 +197,8 @@ mod tests {
         );
         assert_eq!(v.stale_frames_dropped, 1);
         assert_eq!(v.high_water, Some(5));
+        // frames_applied counts ONLY the accepted frame, not the stale drop.
+        assert_eq!(v.frames_applied(), 1);
         // An EQUAL frame_id (a sibling chunk of the partitioned frame 5) is NOT stale and applies —
         // a second realm lands from the same frame.
         assert_eq!(
@@ -196,6 +210,8 @@ mod tests {
             RealmVerdict::Apply,
         );
         assert!(v.realm_pose(RealmId::Station(2), 10.0).is_some());
+        // The equal-sibling Apply advanced frames_applied to 2 (the DropStale between did not).
+        assert_eq!(v.frames_applied(), 2);
     }
 
     #[test]

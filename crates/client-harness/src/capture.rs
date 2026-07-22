@@ -145,6 +145,7 @@ mod tests {
             universe_tick,
             entities: Vec::new(),
             snapshots_applied,
+            realm_frames_applied: 0,
             stale_frames_dropped: 0,
             sent_input_count: 0,
             decode_errors: 0,
