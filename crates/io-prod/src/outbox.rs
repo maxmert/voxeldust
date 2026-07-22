@@ -73,6 +73,7 @@ fn class_to_byte(class: MsgClass) -> u8 {
         MsgClass::Membership => 4,
         MsgClass::GhostReliable => 5,
         MsgClass::GhostDelta => 6,
+        MsgClass::RealmSnapshot => 7,
     }
 }
 
@@ -86,6 +87,7 @@ fn class_from_byte(b: u8) -> Option<MsgClass> {
         4 => MsgClass::Membership,
         5 => MsgClass::GhostReliable,
         6 => MsgClass::GhostDelta,
+        7 => MsgClass::RealmSnapshot,
         _ => return None,
     })
 }
@@ -630,7 +632,7 @@ mod tests {
     use super::*;
     use vd_sim::io::Transport; // FlakyTransport impls Transport (+ ReplayTransport via super::*)
 
-    const ALL_CLASSES: [MsgClass; 7] = [
+    const ALL_CLASSES: [MsgClass; 8] = [
         MsgClass::Control,
         MsgClass::Saga,
         MsgClass::Snapshot,
@@ -638,6 +640,7 @@ mod tests {
         MsgClass::Membership,
         MsgClass::GhostReliable,
         MsgClass::GhostDelta,
+        MsgClass::RealmSnapshot,
     ];
 
     fn key(peer: u64, class: MsgClass, inc: u64, seq: u64) -> OutboxKey {
@@ -669,7 +672,7 @@ mod tests {
     #[test]
     fn class_byte_round_trips_for_every_variant() {
         // The golden pin: a variant reorder / addition must keep the durable bytes stable (or force a
-        // deliberate remap). Exhaustive over ALL 7 classes, bytes 0..=6 distinct.
+        // deliberate remap). Exhaustive over ALL 8 classes, bytes 0..=7 distinct.
         let mut seen = std::collections::BTreeSet::new();
         for c in ALL_CLASSES {
             let b = class_to_byte(c);
@@ -680,7 +683,7 @@ mod tests {
             assert_eq!(class_from_byte(b), Some(c), "round-trip {c:?}");
         }
         assert_eq!(seen.len(), ALL_CLASSES.len(), "every class mapped");
-        assert_eq!(class_from_byte(7), None, "an unknown byte decodes to None");
+        assert_eq!(class_from_byte(8), None, "an unknown byte decodes to None");
         assert_eq!(class_from_byte(255), None);
     }
 

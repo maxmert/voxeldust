@@ -69,6 +69,14 @@ pub enum MsgClass {
     /// must never head-of-line-block behind a stale one (identical contract to `Snapshot`/`Input`).
     /// (Producer/consumer land at 1d.5b.3b; the variant is UNROUTED until then.)
     GhostDelta,
+    /// REALM-placement observer feed (`RealmSnapshotDatagram`, D-45(a) realm-unification FA-2c): the
+    /// 20Hz latest-wins stream of a shard's authored placements for the moving REALMS it parents (an
+    /// orbiting planet/station/ship box), keyed by `RealmId` not `EntityId`. UNRELIABLE — a fresh
+    /// realm pose must never head-of-line-block behind a stale one (identical contract to `Snapshot`).
+    /// A SEPARATE class from `Snapshot` so the client routes a realm datagram to its own `RealmScene`
+    /// consumer (postcard is non-self-describing — the carrier class is the discriminator). UNROUTED
+    /// through FA-2b; FA-2c wires the shard emit + gateway forward + client consume.
+    RealmSnapshot,
 }
 
 /// Carrier reliability: whether a class rides a reliable ordered stream or a
@@ -107,7 +115,10 @@ impl MsgClass {
     #[must_use]
     pub fn reliability(self) -> Reliability {
         match self {
-            MsgClass::Snapshot | MsgClass::Input | MsgClass::GhostDelta => Reliability::Unreliable,
+            MsgClass::Snapshot
+            | MsgClass::Input
+            | MsgClass::GhostDelta
+            | MsgClass::RealmSnapshot => Reliability::Unreliable,
             MsgClass::Control | MsgClass::Saga | MsgClass::Membership | MsgClass::GhostReliable => {
                 Reliability::Reliable
             }
@@ -443,6 +454,7 @@ mod tests {
         assert_eq!(pc(MsgClass::Membership), vec![4]);
         assert_eq!(pc(MsgClass::GhostReliable), vec![5]);
         assert_eq!(pc(MsgClass::GhostDelta), vec![6]);
+        assert_eq!(pc(MsgClass::RealmSnapshot), vec![7]);
         // Round-trip closes the loop: the byte decodes back to the same variant.
         for (b, c) in [
             (0u8, MsgClass::Control),
@@ -452,6 +464,7 @@ mod tests {
             (4, MsgClass::Membership),
             (5, MsgClass::GhostReliable),
             (6, MsgClass::GhostDelta),
+            (7, MsgClass::RealmSnapshot),
         ] {
             assert_eq!(
                 postcard::from_bytes::<MsgClass>(&[b]).expect("decodes"),
@@ -472,6 +485,11 @@ mod tests {
         // the ghost pose feed is unreliable latest-wins (a fresh pose must never HOL-block).
         assert_eq!(MsgClass::GhostReliable.reliability(), Reliability::Reliable);
         assert_eq!(MsgClass::GhostDelta.reliability(), Reliability::Unreliable);
+        // FA-2c: the realm-placement observer feed is unreliable latest-wins (like Snapshot).
+        assert_eq!(
+            MsgClass::RealmSnapshot.reliability(),
+            Reliability::Unreliable
+        );
         // A NodeUnreachable notice is reliable feedback regardless of failed class.
         assert_eq!(
             Inbound::NodeUnreachable {

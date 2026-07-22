@@ -1291,8 +1291,8 @@ fn process_inbound(
                 on_ghost_flow(*from, bytes, &mut dots, &mut mirror, &mut stats);
             }
             // Membership (clock sync) is consumed by the node-level follower system;
-            // Snapshot never targets a shard.
-            MsgClass::Membership | MsgClass::Snapshot => {}
+            // Snapshot / RealmSnapshot are gateway→client render datagrams and never target a shard.
+            MsgClass::Membership | MsgClass::Snapshot | MsgClass::RealmSnapshot => {}
         }
     }
 }
