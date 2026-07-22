@@ -256,27 +256,60 @@ pub const CONSERVATIVE_DATAGRAM_BUDGET: usize = 1200;
 /// catches the impossible case). Greedy, deterministic, O(n) encodes.
 #[must_use]
 pub fn partition_entities(entities: &[EntitySnap], budget_bytes: usize) -> Vec<Vec<EntitySnap>> {
-    let body_budget = budget_bytes.saturating_sub(SNAPSHOT_HEADER_BUDGET).max(1);
-    let mut chunks: Vec<Vec<EntitySnap>> = Vec::new();
-    let mut current: Vec<EntitySnap> = Vec::new();
+    partition_rows(entities, budget_bytes)
+}
+
+/// Split a shard's authored REALM placements into datagram-sized chunks — the [`RealmSnapshotDatagram`]
+/// twin of [`partition_entities`] (D-45(a) FA-2c), sharing the SAME greedy MTU budget so a realm feed
+/// never exceeds the datagram MTU (audit GW-1). EMPTY in ⇒ EMPTY out (a walk-scale shard authors no
+/// moving child ⇒ no realm datagram is ever sent).
+#[must_use]
+pub fn partition_realms(realms: &[RealmSnap], budget_bytes: usize) -> Vec<Vec<RealmSnap>> {
+    partition_rows(realms, budget_bytes)
+}
+
+/// The shared greedy MTU partitioner for a snapshot row type (`EntitySnap` / `RealmSnap`, DRY). A
+/// BRANCHLESS generic shim (HR5): it maps each row to its encoded size and slices by the chunk ranges
+/// [`chunk_boundaries`] computes — ALL the bin-packing branching lives in that MONOMORPHIC helper, so a
+/// new row-type monomorphization adds ZERO uncovered per-mono branch.
+fn partition_rows<T: Serialize + Copy>(rows: &[T], budget_bytes: usize) -> Vec<Vec<T>> {
+    let sizes: Vec<usize> = rows
+        .iter()
+        .map(|r| {
+            postcard::to_allocvec(r)
+                .map(|v| v.len())
+                .unwrap_or(SNAPSHOT_HEADER_BUDGET)
+        })
+        .collect();
+    chunk_boundaries(&sizes, budget_bytes, SNAPSHOT_HEADER_BUDGET)
+        .into_iter()
+        .map(|(s, e)| rows[s..e].to_vec())
+        .collect()
+}
+
+/// Greedy MTU bin-packing over the ENCODED SIZES of a row list: the `[start, end)` chunk index ranges
+/// that keep each chunk's body at or under the budget (one oversize row still ships alone). MONOMORPHIC
+/// (takes only `&[usize]`), so ALL the partition branching is covered ONCE here (HR5) and every typed
+/// `partition_*` shim stays branchless. `header` is the fixed per-datagram overhead subtracted first.
+fn chunk_boundaries(sizes: &[usize], budget_bytes: usize, header: usize) -> Vec<(usize, usize)> {
+    let body_budget = budget_bytes.saturating_sub(header).max(1);
+    let mut bounds: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
     let mut current_bytes = 0usize;
-    for snap in entities {
-        let snap_bytes = postcard::to_allocvec(snap)
-            .map(|v| v.len())
-            .unwrap_or(SNAPSHOT_HEADER_BUDGET);
-        // Start a new chunk if this entity would overflow the body budget — unless the
-        // chunk is empty (one oversize entity still ships alone).
-        if !current.is_empty() && current_bytes + snap_bytes > body_budget {
-            chunks.push(std::mem::take(&mut current));
+    for (i, &sz) in sizes.iter().enumerate() {
+        // Start a new chunk if this row would overflow the body budget — unless the current chunk is
+        // empty (`i > start`; one oversize row still ships alone).
+        if i > start && current_bytes + sz > body_budget {
+            bounds.push((start, i));
+            start = i;
             current_bytes = 0;
         }
-        current.push(*snap);
-        current_bytes += snap_bytes;
+        current_bytes += sz;
     }
-    if !current.is_empty() {
-        chunks.push(current);
+    if start < sizes.len() {
+        bounds.push((start, sizes.len()));
     }
-    chunks
+    bounds
 }
 
 /// What a client does with one arriving [`SnapshotDatagram`], given the
@@ -700,5 +733,48 @@ mod tests {
         let chunks = partition_entities(&entities, 1);
         assert_eq!(chunks.len(), 5);
         assert!(chunks.iter().all(|c| c.len() == 1));
+    }
+
+    fn realm_snap(n: u32) -> RealmSnap {
+        RealmSnap {
+            realm: RealmId::Planet(u64::from(n)),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 7 },
+                DVec3::new(f64::from(n) * 1.0e9, 0.0, 0.0),
+                UniverseTick(10),
+            ),
+        }
+    }
+
+    #[test]
+    fn partition_realms_chunks_under_budget_and_is_empty_for_no_realms() {
+        // FA-2c: the realm partitioner shares the entity partitioner's MTU discipline (DRY —
+        // `partition_rows`/`chunk_boundaries`). Empty in ⇒ empty out (a walk-scale shard authors no moving
+        // realm ⇒ no datagram); a tight budget forces >1 chunk, each a real RealmSnapshotDatagram within
+        // budget, losing no realm; a roomy budget keeps one chunk.
+        assert_eq!(partition_realms(&[], 1000), Vec::<Vec<RealmSnap>>::new());
+        let realms: Vec<RealmSnap> = (0u32..40).map(realm_snap).collect();
+        let budget = 300;
+        let chunks = partition_realms(&realms, budget);
+        assert!(chunks.len() > 1, "a 40-realm system must partition");
+        let mut seen = Vec::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(!chunk.is_empty(), "no empty chunk");
+            let datagram = RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id: i as u64,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(10),
+                realms: chunk.clone(),
+            };
+            let encoded = postcard::to_allocvec(&datagram).expect("encode").len();
+            assert!(
+                encoded <= budget,
+                "chunk {i} encodes to {encoded} > budget {budget}"
+            );
+            seen.extend(chunk.iter().map(|s| s.realm));
+        }
+        assert_eq!(seen, realms.iter().map(|s| s.realm).collect::<Vec<_>>());
+        assert_eq!(partition_realms(&realms, 100_000).len(), 1);
     }
 }

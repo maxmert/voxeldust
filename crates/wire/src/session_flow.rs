@@ -111,6 +111,19 @@ pub enum ShardToGateway {
         frame: FrameRef,
         realm_fence: Fence,
     },
+    /// One REALM-placement frame (D-45(a) realm-unification FA-2c): `realm_snapshot_bytes` is an opaque
+    /// postcard [`crate::channels::RealmSnapshotDatagram`] carrying the shard's authored placements for the
+    /// moving REALMS it parents (an orbiting planet/station/ship box). The gateway forwards it to the shard's
+    /// subscribers as a `MsgClass::RealmSnapshot` datagram (the render-plane twin of [`Frame`]); it never
+    /// decodes the payload. A SEPARATE arm from [`Frame`] so a realm datagram is dispatched to the client's
+    /// `RealmScene` consumer, not its entity-snapshot path. APPENDED variant (postcard-safe additive shape —
+    /// a prior arm's discriminant/framing is unchanged). Emitted only when the shard parents >=1 moving child
+    /// (EMPTY at walk/static scale ⇒ never sent).
+    RealmFrame {
+        realm_fence: Fence,
+        source_tick: TickId,
+        realm_snapshot_bytes: Vec<u8>,
+    },
 }
 
 impl ShardToGateway {
@@ -121,6 +134,23 @@ impl ShardToGateway {
         match self {
             ShardToGateway::Frame { snapshot_bytes, .. } => Some(snapshot_bytes),
             ShardToGateway::SessionAttached { .. }
+            | ShardToGateway::SessionDetached { .. }
+            | ShardToGateway::SubscriptionReady { .. }
+            | ShardToGateway::RealmFrame { .. } => None,
+        }
+    }
+
+    /// The opaque realm-placement payload, when this is a [`ShardToGateway::RealmFrame`] (the render-plane
+    /// twin of [`into_snapshot_bytes`](Self::into_snapshot_bytes)) — test/tooling sugar.
+    #[must_use]
+    pub fn into_realm_snapshot_bytes(self) -> Option<Vec<u8>> {
+        match self {
+            ShardToGateway::RealmFrame {
+                realm_snapshot_bytes,
+                ..
+            } => Some(realm_snapshot_bytes),
+            ShardToGateway::Frame { .. }
+            | ShardToGateway::SessionAttached { .. }
             | ShardToGateway::SessionDetached { .. }
             | ShardToGateway::SubscriptionReady { .. } => None,
         }
@@ -336,6 +366,11 @@ mod tests {
                 frame: FrameRef::SystemSpace { system_seed: 8 },
                 realm_fence: Fence(2),
             },
+            ShardToGateway::RealmFrame {
+                realm_fence: Fence(1),
+                source_tick: TickId(8),
+                realm_snapshot_bytes: vec![7, 8, 9],
+            },
         ];
         for msg in s2g {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
@@ -372,6 +407,49 @@ mod tests {
             realm_fence: Fence(2),
         };
         assert_eq!(ready.into_snapshot_bytes(), None);
+        // A RealmFrame is NOT an entity Frame — `into_snapshot_bytes` must not extract it.
+        let realm_frame = ShardToGateway::RealmFrame {
+            realm_fence: Fence(1),
+            source_tick: TickId(2),
+            realm_snapshot_bytes: vec![7, 8, 9],
+        };
+        assert_eq!(realm_frame.into_snapshot_bytes(), None);
+    }
+
+    #[test]
+    fn into_realm_snapshot_bytes_extracts_realm_frames_only() {
+        // FA-2c: the render-plane twin of `into_snapshot_bytes` — only a RealmFrame yields its payload.
+        let realm_frame = ShardToGateway::RealmFrame {
+            realm_fence: Fence(1),
+            source_tick: TickId(2),
+            realm_snapshot_bytes: vec![4, 5, 6],
+        };
+        assert_eq!(realm_frame.into_realm_snapshot_bytes(), Some(vec![4, 5, 6]));
+        // Every other arm (including the entity Frame) yields None.
+        let entity_frame = ShardToGateway::Frame {
+            realm_fence: Fence(1),
+            source_tick: TickId(2),
+            snapshot_bytes: vec![1, 2, 3],
+        };
+        assert_eq!(entity_frame.into_realm_snapshot_bytes(), None);
+        let attached = ShardToGateway::SessionAttached {
+            session: SessionId(1),
+            entity: EntityId(2),
+            frame: FrameRef::SystemSpace { system_seed: 3 },
+            realm_fence: Fence(1),
+        };
+        assert_eq!(attached.into_realm_snapshot_bytes(), None);
+        let detached = ShardToGateway::SessionDetached {
+            session: SessionId(1),
+        };
+        assert_eq!(detached.into_realm_snapshot_bytes(), None);
+        let ready = ShardToGateway::SubscriptionReady {
+            session: SessionId(1),
+            entity: EntityId(2),
+            frame: FrameRef::SystemSpace { system_seed: 3 },
+            realm_fence: Fence(2),
+        };
+        assert_eq!(ready.into_realm_snapshot_bytes(), None);
     }
 
     #[test]

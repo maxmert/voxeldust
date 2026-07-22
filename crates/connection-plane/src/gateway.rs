@@ -1890,8 +1890,10 @@ fn on_shard_control(
                 sub,
             );
         }
-        ShardToGateway::Frame { .. } => {
-            // Frames ride the Snapshot class; one on Control is a peer bug.
+        ShardToGateway::Frame { .. } | ShardToGateway::RealmFrame { .. } => {
+            // Entity/realm frames ride the Snapshot / RealmSnapshot datagram classes; one on the
+            // reliable Control stream is a peer bug (FA-2c: a RealmFrame is forwarded by
+            // `on_shard_realm_frame`, dispatched from `MsgClass::RealmSnapshot`, never here).
             stats.undecodable += 1;
         }
     }
