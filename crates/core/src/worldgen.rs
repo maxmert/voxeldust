@@ -150,6 +150,46 @@ fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmReg
         .collect()
 }
 
+/// The DIRECT MOVING children a shard hosting `hosted_realm` AUTHORS (D-45(a) realm-unification FA-2b):
+/// each direct child (`parent == hosted_realm`) whose placement is a live `Orbital`. Under LAW-1 a
+/// passive orbiting body is the ZERO-SIGNAL case — the parent shard re-authors its live pose each tick
+/// from these `OrbitalElements` (`LocalFrames::with_moving_child`), never a static region `center`.
+/// Returned `(realm, elements)` so the sim keys it against each region by realm. A branchless-shim (HR5):
+/// the `Orbital`/`StaticOffset` match lives in the monomorphic [`orbital_of`] helper, not this closure.
+/// The walk roster is ALL `StaticOffset`, so this is EMPTY at walk scale (byte-identity); the canonical
+/// seed generation (P4/FA-5) is what populates it.
+fn moving_children(
+    bodies: &[GeneratedBody],
+    hosted_realm: RealmId,
+) -> Vec<(RealmId, OrbitalElements)> {
+    bodies
+        .iter()
+        .filter(|b| b.parent == Some(hosted_realm))
+        .filter_map(|b| orbital_of(b.placement).map(|e| (b.realm, e)))
+        .collect()
+}
+
+/// The `OrbitalElements` of a placement, or `None` for a static one — the MONOMORPHIC discriminator that
+/// keeps [`moving_children`]'s closure branchless (HR5: the `match` is covered once, here).
+fn orbital_of(placement: Placement) -> Option<OrbitalElements> {
+    match placement {
+        Placement::Orbital(elements) => Some(elements),
+        Placement::StaticOffset(_) => None,
+    }
+}
+
+/// [`moving_children`] over the seed forest a shard boots — the AUTHORED moving-child roster for
+/// `hosted_realm` (its direct `Orbital` children, each `(realm, elements)`). Closed-form
+/// `f(seed, hosted_realm)`; EMPTY at walk scale (byte-identity), populated at canonical scale (P4/FA-5).
+#[must_use]
+pub fn moving_children_for(
+    _seed_universe: u64,
+    hosted_realm: RealmId,
+) -> Vec<(RealmId, OrbitalElements)> {
+    let config = UniverseConfig::walk_scale();
+    moving_children(&generate_walk_forest(&config), hosted_realm)
+}
+
 /// The walk-scale mandate forest as config-driven bodies, in forest order (Universe → Galaxy →
 /// System A → Planet A → System B → Station A → Area A). All placements are `StaticOffset`, so the
 /// lowering is byte-identical to the pre-generator forest. The GENERIC seed-driven child
@@ -1021,5 +1061,52 @@ mod tests {
             regions[0].center.offset(),
             orbital_state(&elements, 0.0).position
         );
+    }
+
+    #[test]
+    fn moving_children_selects_only_direct_orbital_children() {
+        // FA-2b: the AUTHORED moving-child roster keeps ONLY a hosted realm's DIRECT children whose
+        // placement is `Orbital` — a STATIC child, an orbital NON-child (someone else's), and an
+        // orbital GRANDchild are all excluded. Exercises both `orbital_of` arms + the parent filter.
+        let elements = OrbitalElements {
+            sma: 1.5e11,
+            ecc: 0.1,
+            inclination: 0.4,
+            raan: 0.3,
+            arg_periapsis: 0.9,
+            mean_anomaly_epoch: 0.2,
+            central_mass: 1.989e30,
+        };
+        let orbital_child = GeneratedBody {
+            realm: RealmId::Planet(1),
+            parent: Some(RealmId::System(7)),
+            shape: Boundary::Shell { r: 9.0e8 },
+            placement: Placement::Orbital(elements),
+        };
+        let static_child = GeneratedBody {
+            realm: RealmId::Station(2),
+            parent: Some(RealmId::System(7)),
+            shape: Boundary::Shell { r: 1.0e6 },
+            placement: Placement::StaticOffset(DVec3::new(5.0, 0.0, 0.0)),
+        };
+        let orbital_non_child = GeneratedBody {
+            realm: RealmId::Planet(3),
+            parent: Some(RealmId::System(99)),
+            shape: Boundary::Shell { r: 9.0e8 },
+            placement: Placement::Orbital(elements),
+        };
+        let bodies = [orbital_child, static_child, orbital_non_child];
+        assert_eq!(
+            moving_children(&bodies, RealmId::System(7)),
+            vec![(RealmId::Planet(1), elements)],
+        );
+    }
+
+    #[test]
+    fn moving_children_for_is_empty_at_walk_scale() {
+        // The byte-identity guarantee: the walk roster is ALL `StaticOffset`, so a walk-scale shard
+        // authors NO moving child — `frame_context` registers every region at identity, unchanged.
+        assert!(moving_children_for(0, RealmId::System(7)).is_empty());
+        assert!(moving_children_for(0, RealmId::System(8)).is_empty());
     }
 }

@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
+use vd_core::celestial::OrbitalElements;
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
 use vd_core::frame::{FramePlacement, LocalFrames, rebind_pose_to_dest};
@@ -499,11 +500,18 @@ pub struct RealmRegions {
     regions: Vec<RealmRegion>,
     depths: Vec<DepthKey>,
     root_realm: Option<RealmId>,
+    /// The shard's DIRECT MOVING children (FA-2b): realm → its `OrbitalElements`. A region in this map
+    /// is AUTHORED live each tick from its ephemeris (`frame_context` registers it `with_moving_child`);
+    /// a region absent from it rides its static `center` at the identity placement. EMPTY at walk/static
+    /// scale (`worldgen::moving_children_for` returns none — all `StaticOffset`), so the frame context is
+    /// byte-identical to FA-1; the canonical seed generation (P4/FA-5) is what populates it.
+    moving: BTreeMap<RealmId, OrbitalElements>,
 }
 
 impl RealmRegions {
     /// Build the resource from a region forest, computing the depth-key cache + the ambient-root realm
     /// ONCE (regions are static at P3). The per-tick detector reads the cache; it never re-walks parents.
+    /// The moving-child roster starts EMPTY — [`with_moving_children`](Self::with_moving_children) adds it.
     #[must_use]
     pub fn new(regions: Vec<RealmRegion>) -> RealmRegions {
         let depths = regions
@@ -516,7 +524,21 @@ impl RealmRegions {
             regions,
             depths,
             root_realm,
+            moving: BTreeMap::new(),
         }
+    }
+
+    /// Register the shard's DIRECT MOVING children (FA-2b): the `(realm, elements)` roster
+    /// `worldgen::moving_children_for` derives for the hosted realm. A builder (not a `new` arg) so the
+    /// many `RealmRegions::new` call sites stay unchanged and byte-identical (the walk roster passes an
+    /// empty map). Only the frames of registered realms author live; every other region stays static.
+    #[must_use]
+    pub fn with_moving_children(
+        mut self,
+        moving: BTreeMap<RealmId, OrbitalElements>,
+    ) -> RealmRegions {
+        self.moving = moving;
+        self
     }
 
     /// The detector short-circuits (inert) when no regions are planted — production through C-3.
@@ -524,12 +546,14 @@ impl RealmRegions {
         self.regions.is_empty()
     }
 
-    /// The per-shard ephemeris [`FrameContext`] (D-45(a) frame-authority FA-1). At walk/static scale
-    /// every region frame is at the identity placement (positions ride the region `center`), so this
-    /// is byte-equivalent to [`IdentityFrames`] for the container decision — the seam swap regression
-    /// gate. `own` is the ambient-root region's frame (defaulting to `GalaxySpace` for an empty forest,
-    /// which the detector never evaluates — it short-circuits on `is_empty`). FA-4 refreshes MOVING
-    /// direct-child placements from the ephemeris per tick; here every child is static.
+    /// The per-shard ephemeris [`FrameContext`] (D-45(a) frame-authority FA-1/FA-2b). A region in the
+    /// [`moving`](Self::moving) roster is AUTHORED live from its `OrbitalElements` each tick
+    /// (`with_moving_child` — `placement()` re-derives its pose from `tick`); every other region rides
+    /// its static `center` at the identity placement (`with_placed`). At walk/static scale the moving
+    /// roster is EMPTY, so every region takes the identity arm ⇒ byte-equivalent to [`IdentityFrames`]
+    /// for the container decision (the FA-1 seam-swap regression gate). `own` is the ambient-root
+    /// region's frame (defaulting to `GalaxySpace` for an empty forest, which the detector never
+    /// evaluates — it short-circuits on `is_empty`).
     #[must_use]
     pub fn frame_context(&self, tick_hz: f64) -> LocalFrames {
         let own = self
@@ -539,7 +563,10 @@ impl RealmRegions {
             .map_or(FrameRef::GalaxySpace, |r| r.frame);
         let mut ctx = LocalFrames::new(own, tick_hz);
         for r in &self.regions {
-            ctx = ctx.with_placed(r.frame, FramePlacement::identity());
+            ctx = match self.moving.get(&r.realm) {
+                Some(elements) => ctx.with_moving_child(r.frame, *elements),
+                None => ctx.with_placed(r.frame, FramePlacement::identity()),
+            };
         }
         ctx
     }
@@ -8579,6 +8606,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn frame_context_authors_a_registered_moving_child_from_its_ephemeris() {
+        use vd_core::celestial::{orbital_state, secs_since_epoch};
+        use vd_core::frame::FrameContext;
+        // FA-2b: a region in the MOVING roster is authored LIVE from its `OrbitalElements` each tick
+        // (`with_moving_child`) — its placement TRACKS the orbit; a region ABSENT from the roster stays
+        // static at the identity (the byte-identity arm). The moving child is `child_region`
+        // (`OTHER_REALM` = Planet 42); the roster maps its realm to a Kepler orbit.
+        let elements = OrbitalElements {
+            sma: 1.5e11,
+            ecc: 0.1,
+            inclination: 0.4,
+            raan: 0.3,
+            arg_periapsis: 0.9,
+            mean_anomaly_epoch: 0.2,
+            central_mass: 1.989e30,
+        };
+        let mut moving = BTreeMap::new();
+        moving.insert(OTHER_REALM, elements);
+        let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
+            .with_moving_children(moving);
+        let tick_hz = 20.0;
+        let ctx = regions.frame_context(tick_hz);
+        // The MOVING child: authored from the ephemeris at the sampled tick (the `with_moving_child` arm).
+        let tick = UniverseTick(1_000);
+        let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
+        assert_eq!(
+            ctx.placement(frame_of(OTHER_REALM), tick),
+            Some(FramePlacement::moving(state.position, state.velocity)),
+            "a registered moving child is authored live from its orbit, not the static identity",
+        );
+        // A region ABSENT from the roster (`own`) stays static at the identity — the byte-identity arm.
+        assert_eq!(
+            ctx.placement(frame_of(OWN_REALM), tick),
+            Some(FramePlacement::identity()),
+            "a non-roster region stays at the identity placement (byte-identical to FA-1)",
+        );
     }
 
     #[test]
