@@ -19,8 +19,8 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 use vd_core::NodeId;
 use vd_devproto::{DevRequest, DevResponse, WORKTREE_SLOT_CEILING};
-use vd_io_prod::runtime::EnvConfig;
 use vd_io_prod::runtime::hex32_encode;
+use vd_io_prod::runtime::{ConfigError, EnvConfig};
 
 // ---- graceful shutdown (cloud-ready k3d, Slice 1) ----------------------------
 
@@ -1801,6 +1801,71 @@ pub fn resolve_realm_boundaries(
     Ok(Some(boundaries))
 }
 
+/// The world-SCALE a shard boots (D-45(a) FA-5). `Walk` is the production/byte-identity default (the P3
+/// walk-scale mandate forest — all `StaticOffset`, no movers); `Visual` is the FA-5 window test: a single
+/// star system whose planets ORBIT (the `worldgen::visual_scale` synthetic-scale preset).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UniverseScale {
+    Walk,
+    Visual,
+}
+
+/// Resolve `VD_UNIVERSE_SCALE`: ABSENT / empty / `walk` ⇒ [`UniverseScale::Walk`] (the byte-identical
+/// production default — EVERY existing shard boot is unchanged); `visual` ⇒ [`UniverseScale::Visual`];
+/// ANY other value fails LOUD at boot (never a silent degrade to Walk).
+///
+/// # Errors
+/// [`ConfigError::Unparseable`] for an unrecognized value.
+pub fn resolve_universe_scale(env: &EnvConfig) -> Result<UniverseScale, ConfigError> {
+    universe_scale_of(env.string("VD_UNIVERSE_SCALE").unwrap_or_default().trim())
+}
+
+/// The `str -> UniverseScale` map (monomorphic, off the env body so each arm is covered once, HR5).
+fn universe_scale_of(raw: &str) -> Result<UniverseScale, ConfigError> {
+    match raw {
+        "" | "walk" => Ok(UniverseScale::Walk),
+        "visual" => Ok(UniverseScale::Visual),
+        other => Err(ConfigError::Unparseable {
+            key: "VD_UNIVERSE_SCALE".to_owned(),
+            value: other.to_owned(),
+        }),
+    }
+}
+
+/// The containment region forest + the moving-child roster for a shard booting at `scale`, hosting
+/// `held_realms` (own realm `hosted`). `Walk` ⇒ the seed NEIGHBOURHOOD + an EMPTY roster — BYTE-IDENTICAL
+/// to the pre-FA-5 boot (the exact `realm_neighbourhood_for_held`, and `RealmRegions::with_moving_children`
+/// with an empty map is a no-op vs `new`). `Visual` ⇒ the FA-5 single-system forest (`realm_regions_for_config`)
+/// plus its orbiting planets as movers (`moving_children_for_config`) — the SAME `(seed, visual config)`
+/// builds BOTH, so the regions and the moving roster can NEVER derive from different elements (the vet
+/// all-shard-seams-same-config rule; the shard authors each planet's live pose against the same region set).
+#[must_use]
+pub fn boot_regions_and_movers(
+    scale: UniverseScale,
+    universe_seed: u64,
+    held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    hosted: vd_core::pose::RealmId,
+) -> (
+    Vec<vd_core::geometry::RealmRegion>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::celestial::OrbitalElements>,
+) {
+    use std::collections::BTreeMap;
+    match scale {
+        UniverseScale::Walk => (
+            vd_core::worldgen::realm_neighbourhood_for_held(universe_seed, held_realms),
+            BTreeMap::new(),
+        ),
+        UniverseScale::Visual => {
+            let config = vd_core::worldgen::UniverseConfig::visual_scale();
+            let regions = vd_core::worldgen::realm_regions_for_config(universe_seed, &config);
+            let moving = vd_core::worldgen::moving_children_for_config(universe_seed, &config, hosted)
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            (regions, moving)
+        }
+    }
+}
+
 /// Parse a `boundaries.json` string into a `Vec<RealmBoundary>` (the SAME serde shape the client's
 /// `RealmScene::from_boxes_json` loads — single-sourced). A monomorphic helper so the parse-error arm
 /// is covered off the env/fs body.
@@ -2475,6 +2540,81 @@ mod incarnation_tests {
     fn guard_boundaries_in_realm_accepts_an_empty_set() {
         // The guard's loop-never-fires arm: an empty (but present) file is in-realm-vacuously OK.
         assert_eq!(guard_boundaries_in_realm(&[], RealmId::System(7)), Ok(()));
+    }
+
+    // ---- FA-5 S2: the universe-scale boot selector ---------------------------------------------
+
+    #[test]
+    fn resolve_universe_scale_defaults_to_walk_when_absent_empty_or_named() {
+        // ABSENT ⇒ Walk (the byte-identical production default); empty + "walk" also Walk.
+        assert_eq!(resolve_universe_scale(&env(&[])), Ok(UniverseScale::Walk));
+        assert_eq!(
+            resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "")])),
+            Ok(UniverseScale::Walk),
+        );
+        assert_eq!(
+            resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "walk")])),
+            Ok(UniverseScale::Walk),
+        );
+    }
+
+    #[test]
+    fn resolve_universe_scale_selects_visual_trims_and_is_loud_on_unknown() {
+        assert_eq!(
+            resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "visual")])),
+            Ok(UniverseScale::Visual),
+        );
+        // Surrounding whitespace is trimmed.
+        assert_eq!(
+            resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "  visual  ")])),
+            Ok(UniverseScale::Visual),
+        );
+        // An unrecognized value fails LOUD (never a silent Walk).
+        assert_eq!(
+            resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "galaxy")])),
+            Err(ConfigError::Unparseable {
+                key: "VD_UNIVERSE_SCALE".to_owned(),
+                value: "galaxy".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn boot_regions_and_movers_walk_is_the_seed_neighbourhood_with_an_empty_roster() {
+        use std::collections::BTreeSet;
+        let hosted = RealmId::System(7);
+        let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
+        let (regions, moving) = boot_regions_and_movers(UniverseScale::Walk, 0, &held, hosted);
+        // Walk ⇒ EXACTLY realm_neighbourhood_for_held + an EMPTY mover roster (the pre-FA-5 boot; the
+        // empty map makes with_moving_children a no-op vs new — byte-identical).
+        assert_eq!(
+            regions,
+            vd_core::worldgen::realm_neighbourhood_for_held(0, &held),
+        );
+        assert!(moving.is_empty());
+    }
+
+    #[test]
+    fn boot_regions_and_movers_visual_builds_the_system_forest_and_orbiting_planets() {
+        use std::collections::BTreeSet;
+        let hosted = RealmId::System(7);
+        let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
+        let (regions, moving) = boot_regions_and_movers(UniverseScale::Visual, 0, &held, hosted);
+        let config = vd_core::worldgen::UniverseConfig::visual_scale();
+        // The SAME (seed, config) builds BOTH the regions and the mover roster (they can't disagree).
+        assert_eq!(regions, vd_core::worldgen::realm_regions_for_config(0, &config));
+        assert_eq!(
+            moving,
+            vd_core::worldgen::moving_children_for_config(0, &config, hosted)
+                .into_iter()
+                .collect(),
+        );
+        // The visual boot actually plants orbiting planets (vs the empty walk roster).
+        assert!(!moving.is_empty());
+        // Every mover is a region in the planted forest, so frame_context can author its live pose.
+        for realm in moving.keys() {
+            assert!(regions.iter().any(|r| r.realm == *realm));
+        }
     }
 
     // ---- Co-hosting: the VD_HELD_REALMS env round-trip + parse guards ---------------------------
