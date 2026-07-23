@@ -209,12 +209,20 @@ mod tests {
         let mut v = RealmView::default();
         // Shard A (System 7): its planet at a high counter.
         assert_eq!(
-            v.on_realm_snapshot(frame(500, 10, vec![(RealmId::Planet(7), pose(DVec3::X, 10))])),
+            v.on_realm_snapshot(frame(
+                500,
+                10,
+                vec![(RealmId::Planet(7), pose(DVec3::X, 10))]
+            )),
             RealmVerdict::Apply,
         );
         // Shard B (System 8): its planet at a LOW counter — must NOT be rejected as "stale" vs A's 500.
         assert_eq!(
-            v.on_realm_snapshot(frame(30, 10, vec![(RealmId::Planet(8), pose(DVec3::Y, 10))])),
+            v.on_realm_snapshot(frame(
+                30,
+                10,
+                vec![(RealmId::Planet(8), pose(DVec3::Y, 10))]
+            )),
             RealmVerdict::Apply,
             "shard B's low-counter frame must apply — no cross-shard high-water conflation",
         );
@@ -236,7 +244,11 @@ mod tests {
         );
         // A per-realm stale straggler (B at 30 after B advanced to 31) is STILL dropped.
         assert_eq!(
-            v.on_realm_snapshot(frame(30, 10, vec![(RealmId::Planet(8), pose(DVec3::ZERO, 10))])),
+            v.on_realm_snapshot(frame(
+                30,
+                10,
+                vec![(RealmId::Planet(8), pose(DVec3::ZERO, 10))]
+            )),
             RealmVerdict::DropStale,
         );
         assert_eq!(v.stale_frames_dropped(), 1);

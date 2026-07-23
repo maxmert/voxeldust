@@ -62,6 +62,8 @@ pub fn stub_config() -> StubConfig {
         frame: FrameRef::SystemSpace { system_seed: 7 },
         move_speed_mps: 2.0,
         tick_dt_s: 0.05,
+        // Realm SUBJECTIVE-time factor; 1.0 = objective universe time (byte-identical default).
+        time_multiplier: 1.0,
         orchestrator: ORCH,
         mint_seed: 11,
         // Large window: the oracle must see a whole short test run.

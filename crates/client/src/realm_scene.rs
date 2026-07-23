@@ -131,7 +131,7 @@ impl RealmScene {
                     center_offset: b.center.offset(),
                     parent: b.parent,
                     depth,
-                    color_rgba: color_from_seed(stable_seed(b.realm)),
+                    color_rgba: color_for_realm(b.realm),
                 },
             );
         }
@@ -193,7 +193,7 @@ impl RealmScene {
                     center_offset: r.center.offset(),
                     parent: r.parent,
                     depth,
-                    color_rgba: color_from_seed(stable_seed(r.realm)),
+                    color_rgba: color_for_realm(r.realm),
                 },
             );
         }
@@ -375,24 +375,50 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The golden-ratio conjugate — successive multiples spread hues maximally around the wheel, so
-/// adjacent realm seeds get visually distinct colors.
-const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_895;
+/// The value (brightness) tint spread (FA-5 visual test): a realm's brightness is nudged DOWN by up to
+/// this much by its seed, so co-located realms of one kind stay distinguishable WITHOUT leaving the role's
+/// hue family (every Planet stays blue). Small enough that the family hue always reads.
+const VALUE_TINT_SPREAD: f64 = 0.30;
 
-/// A TRANSLUCENT RGBA color from a stable seed: the seed picks a hue on the golden-ratio-spaced
-/// wheel (fixed saturation/value for vivid, legible boxes), converted to sRGB with [`BOX_ALPHA`].
-/// Pure — the same seed always yields the same color (determinism is load-bearing for captures).
+/// A TRANSLUCENT RGBA render color for a realm by its ROLE (kind), tinted within the role's family by
+/// seed. Planets are the BLUE family (the visual-universe test's blue spheres); each other role gets its
+/// own base hue. PURE + cosmetic — the same realm always yields the same color (determinism is load-bearing
+/// for captures) and the look is a pure CLIENT law of the realm's kind, NEVER on the wire (the server ships
+/// no color; a realm's appearance is not authority).
 #[must_use]
-pub fn color_from_seed(seed: u64) -> [f32; 4] {
-    // Map the seed into [0,1) and advance by the golden-ratio conjugate for a well-spread hue.
-    let unit = (seed as f64) / (u64::MAX as f64);
-    let hue = (unit + GOLDEN_RATIO_CONJUGATE).fract();
-    let [r, g, b] = hsv_to_rgb(hue, 0.65, 0.95);
+pub fn color_for_realm(realm: RealmId) -> [f32; 4] {
+    let (hue, sat, val_base) = role_hsv(realm);
+    // Distinguish within the family by nudging VALUE (brightness) by a small seed amount — the HUE (the
+    // family) is FIXED, so every Planet stays blue. `seed_unit ∈ [0,1)` keeps `val` in a legible band.
+    let val = val_base - VALUE_TINT_SPREAD * seed_unit(stable_seed(realm));
+    let [r, g, b] = hsv_to_rgb(hue, sat, val);
     [r, g, b, BOX_ALPHA]
 }
 
+/// The base `(hue, sat, val)` for a realm ROLE — the ONE place a realm KIND maps to a look (a cosmetic
+/// table, not a feature branch — HR3-safe because it drives only rendering, never behaviour). Planet =
+/// blue; System (also the Galaxy/Universe `System` stand-ins) = warm star; Ship = amber; Station = steel;
+/// Area = green. Monomorphic (the kind match is covered here, off the pure [`color_for_realm`]).
+fn role_hsv(realm: RealmId) -> (f64, f64, f64) {
+    match realm {
+        RealmId::Planet(_) => (0.60, 0.75, 0.95),
+        RealmId::System(_) => (0.13, 0.55, 0.98),
+        RealmId::Ship(_) => (0.08, 0.80, 0.95),
+        RealmId::Station(_) => (0.58, 0.10, 0.85),
+        RealmId::Area(_) => (0.33, 0.60, 0.88),
+    }
+}
+
+/// A seed → `[0,1)` unit for the brightness tint, via the shared `SplitMix64` avalanche (deterministic +
+/// portable — determinism is load-bearing for captures). Reused, NOT a raw `seed >> 11`: a bare shift can
+/// COLLAPSE adjacent small-input hashes (the visual test's `Planet(7)`/`Planet(8)` FNV seeds differ only
+/// in bits the shift drops), giving two planets the identical shade; the avalanche spreads any bit.
+fn seed_unit(seed: u64) -> f64 {
+    vd_core::rng::SplitMix64::new(seed).next_f64()
+}
+
 /// HSV→RGB for `h,s,v ∈ [0,1]` → linear-ish `[r,g,b] ∈ [0,1]` (the standard 6-sector formula).
-/// A monomorphic helper so every sector branch is covered here, off the pure `color_from_seed`.
+/// A monomorphic helper so every sector branch is covered here, off the pure [`color_for_realm`].
 fn hsv_to_rgb(h: f64, s: f64, v: f64) -> [f32; 3] {
     let sector = (h * 6.0).floor();
     let f = h * 6.0 - sector;
@@ -544,13 +570,17 @@ fn unit_sphere_vertices() -> Vec<Vertex> {
             let b = grid[i + 1][j];
             let c = grid[i + 1][j + 1];
             let d = grid[i][j + 1];
-            // Top cap (i==0): the a/d row collapses to the pole → one triangle (b,c,pole).
+            // Wound (a,d,b)/(b,d,c) → CCW when viewed from OUTSIDE (front face outward), matching the
+            // outward vertex normals AND the cuboid convention, so `cull_mode: Face::Back` uniformly
+            // culls the inside: the container realm you sit inside (System SOI) drops away instead of
+            // washing the whole view with its translucent tint.
+            // Top cap (i==0): the a/d row collapses to the pole → one triangle (b,pole,c).
             if i != 0 {
-                push_tri(&mut verts, a, b, d);
+                push_tri(&mut verts, a, d, b);
             }
-            // Bottom cap (i==STACKS-1): the b/c row collapses to the pole → one triangle (a,c... ).
+            // Bottom cap (i==STACKS-1): the b/c row collapses to the pole → one triangle (a,d,pole).
             if i != SPHERE_STACKS - 1 {
-                push_tri(&mut verts, b, c, d);
+                push_tri(&mut verts, b, d, c);
             }
         }
     }
@@ -877,17 +907,39 @@ mod tests {
     }
 
     #[test]
-    fn color_from_seed_is_translucent_deterministic_and_in_gamut() {
-        let c = color_from_seed(stable_seed(RealmId::System(7)));
-        assert_eq!(c, color_from_seed(stable_seed(RealmId::System(7))));
-        assert_eq!(c[3], BOX_ALPHA, "alpha is the translucent const");
-        for ch in &c[..3] {
-            assert!((0.0..=1.0).contains(ch), "channel {ch} in gamut");
+    fn color_for_realm_is_blue_for_planets_role_based_translucent_and_in_gamut() {
+        // Every ROLE (kind) is exercised (covers all `role_hsv` arms): translucent + in-gamut + deterministic.
+        let realms = [
+            RealmId::Planet(7),
+            RealmId::System(7),
+            RealmId::Ship(vd_core::ids::EntityId(1)),
+            RealmId::Station(7),
+            RealmId::Area(7),
+        ];
+        for realm in realms {
+            let c = color_for_realm(realm);
+            assert_eq!(c[3], BOX_ALPHA, "alpha is the translucent const");
+            for ch in &c[..3] {
+                assert!((0.0..=1.0).contains(ch), "channel {ch} in gamut");
+            }
+            assert_eq!(
+                color_for_realm(realm),
+                c,
+                "deterministic (load-bearing for captures)"
+            );
         }
-        // Distinct realms get distinct colors (the hue spread).
+        // A PLANET is BLUE — the blue channel dominates red + green (the visual test's blue spheres).
+        let [pr, pg, pb, _] = color_for_realm(RealmId::Planet(7));
+        assert!(pb > pr, "planet blue > red");
+        assert!(pb > pg, "planet blue > green");
+        // A same-kind realm stays in the family (still blue) but is a distinguishable shade.
+        let [qr, qg, qb, _] = color_for_realm(RealmId::Planet(8));
+        assert!(qb > qr, "planet 8 still blue > red");
+        assert!(qb > qg, "planet 8 still blue > green");
         assert_ne!(
-            color_from_seed(stable_seed(RealmId::System(7))),
-            color_from_seed(stable_seed(RealmId::System(8)))
+            color_for_realm(RealmId::Planet(7)),
+            color_for_realm(RealmId::Planet(8)),
+            "seed tints the shade within the blue family",
         );
     }
 

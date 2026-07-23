@@ -76,6 +76,14 @@ pub struct StubConfig {
     pub move_speed_mps: f64,
     /// Simulation tick length, seconds.
     pub tick_dt_s: f64,
+    /// The realm's SUBJECTIVE time factor (D-45(a)): how fast time passes INSIDE this shard's realm vs
+    /// universe time. `1.0` = universe rate (default, byte-identical). `< 1.0` DILATES — an occupant who
+    /// enters a slow-time realm moves slower (a time-dilation zone); `> 1.0` speeds them up. Applied to
+    /// OCCUPANT MOVEMENT ([`integrate`]) — NOT to the realm's own celestial orbit (that is parent-authored
+    /// in OBJECTIVE universe time; celestial mechanics are not subjective). Boot-constant now
+    /// (`VD_TIME_MULTIPLIER` global default + `VD_REALM_TIME_MULTIPLIER` per-realm override); a DYNAMIC
+    /// (runtime-changing, orchestrator-propagated) factor accumulates local time on this same seam later.
+    pub time_multiplier: f64,
     /// The orchestrator's node id (directory seam peer).
     pub orchestrator: NodeId,
     /// Seed for the entity-mint entropy tail (NEVER wall-clock — R7).
@@ -1659,7 +1667,11 @@ fn integrate(dot: &mut Dot, input: &InputDatagram, config: &StubConfig, clock: &
     // The movement-axis map is the ONE shared input convention (vd_core::kinematics) —
     // the client's nav/camera invert the SAME definition (no hand-re-encoded drift).
     let axes = kinematics::local_axes_from_movement(input.movement);
-    let step = dot.pose.orient * axes * (config.move_speed_mps * config.tick_dt_s);
+    // OCCUPANT movement runs in the realm's SUBJECTIVE time: `move_speed · dt · time_multiplier`. At the
+    // default `1.0` this is byte-identical; a slow-time realm (`< 1.0`) moves its occupants slower.
+    let step = dot.pose.orient
+        * axes
+        * (config.move_speed_mps * config.tick_dt_s * config.time_multiplier);
     // Integrate the frame-local offset, PRESERVING the cell anchor (`map_offset`, NOT `local` which
     // would zero it). Through P3 cell is ZERO so this is the full local position += step,
     // behaviour-identical to the pre-lattice `pos += step` (D-41); the per-tick normalize/re-centering
@@ -4136,6 +4148,7 @@ mod tests {
             frame: FrameRef::SystemSpace { system_seed: 7 },
             move_speed_mps: 2.0,
             tick_dt_s: 0.05,
+            time_multiplier: 1.0,
             orchestrator: ORCH,
             mint_seed: 99,
             input_log_capacity: 1024,
@@ -6294,6 +6307,31 @@ mod tests {
             (dot.pose.pos.offset().y - expected_step).abs() < 1e-12,
             "vertical"
         );
+    }
+
+    #[test]
+    fn occupant_movement_dilates_with_the_realm_time_multiplier() {
+        // A realm's SUBJECTIVE time factor scales OCCUPANT movement: a slow-time realm (0.5) advances the
+        // dot HALF as far per tick; the default (1.0) is byte-identical to the un-scaled `speed·dt` step.
+        let step_len_at = |mult: f64| {
+            let mut rig = Rig::with_config(StubConfig {
+                time_multiplier: mult,
+                ..config()
+            });
+            rig.grant_realm();
+            let _ = rig.attach();
+            // Pure forward input (movement = [forward, strafe, up]).
+            let _ = rig.tick(vec![input_msg(1, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+            rig.world.resource::<Dots>().0[&SESSION]
+                .pose
+                .pos
+                .offset()
+                .length()
+        };
+        // Default 1.0 = the un-multiplied step (`move_speed 2.0 · dt 0.05` = 0.1) — byte-identical.
+        assert!((step_len_at(1.0) - 2.0 * 0.05).abs() < 1e-12);
+        // The 0.5-multiplier realm moved EXACTLY half as far (time dilation).
+        assert!((step_len_at(0.5) - step_len_at(1.0) * 0.5).abs() < 1e-12);
     }
 
     #[test]

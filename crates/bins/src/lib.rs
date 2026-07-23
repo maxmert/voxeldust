@@ -1435,11 +1435,37 @@ pub mod crossing_playground {
     /// # Errors
     /// A directory-create, serialize, or write failure.
     pub fn write_seed_regions(dir: &std::path::Path, universe_seed: u64) -> Result<String, String> {
+        write_regions_json(dir, &vd_core::worldgen::realm_regions_for(universe_seed))
+    }
+
+    /// FA-5 VISUAL-scale twin of [`write_seed_regions`]: write the visual single-system forest
+    /// (`realm_regions_for_config(seed, visual_scale())` — the SAME forest a `VD_UNIVERSE_SCALE=visual`
+    /// shard plants, single-sourced) as `regions.json`, so the client's `--realm-boxes` draws EXACTLY the
+    /// orbiting-planet system the shard authors + ships (the planets ORBIT via the realm-frame overlay; the
+    /// static `regions.json` seeds their tick-0 positions, the live feed animates them).
+    ///
+    /// # Errors
+    /// A directory-create, serialize, or write failure.
+    pub fn write_visual_regions(
+        dir: &std::path::Path,
+        universe_seed: u64,
+    ) -> Result<String, String> {
+        let config = vd_core::worldgen::UniverseConfig::visual_scale();
+        write_regions_json(
+            dir,
+            &vd_core::worldgen::realm_regions_for_config(universe_seed, &config),
+        )
+    }
+
+    /// Serialize a `RealmRegion` forest to `<dir>/regions.json` (the `--realm-boxes` format), returning
+    /// the path — the shared body of [`write_seed_regions`] / [`write_visual_regions`] (single-sourced).
+    fn write_regions_json(
+        dir: &std::path::Path,
+        regions: &[vd_core::geometry::RealmRegion],
+    ) -> Result<String, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("create regions dir: {e}"))?;
         let path = dir.join("regions.json");
-        let regions = vd_core::worldgen::realm_regions_for(universe_seed);
-        let json =
-            serde_json::to_string(&regions).map_err(|e| format!("serialize regions: {e}"))?;
+        let json = serde_json::to_string(regions).map_err(|e| format!("serialize regions: {e}"))?;
         std::fs::write(&path, json).map_err(|e| format!("write regions: {e}"))?;
         Ok(path.display().to_string())
     }
@@ -1832,6 +1858,40 @@ fn universe_scale_of(raw: &str) -> Result<UniverseScale, ConfigError> {
     }
 }
 
+/// Resolve the shard's realm SUBJECTIVE time multiplier (D-45(a)): `VD_REALM_TIME_MULTIPLIER` (the
+/// per-realm override) else `VD_TIME_MULTIPLIER` (the orchestrator-wide default) else `1.0` (universe
+/// rate — byte-identical). Feeds `StubConfig::time_multiplier` (dilates OCCUPANT movement inside the
+/// realm, never the celestial orbit).
+///
+/// # Errors
+/// [`ConfigError::Unparseable`] for a value that is not a finite `f64 > 0` (time must move forward at a
+/// finite positive rate; a frozen/negative realm clock is an operator error, rejected LOUD at boot).
+pub fn resolve_time_multiplier(env: &EnvConfig) -> Result<f64, ConfigError> {
+    let raw = env
+        .string("VD_REALM_TIME_MULTIPLIER")
+        .or_else(|_| env.string("VD_TIME_MULTIPLIER"))
+        .unwrap_or_default();
+    parse_time_multiplier(raw.trim())
+}
+
+/// The `str -> multiplier` map (monomorphic, off the env body so each arm is covered once, HR5). Empty ⇒
+/// `1.0`; a finite `f64 > 0` ⇒ that rate; anything else ⇒ loud.
+fn parse_time_multiplier(raw: &str) -> Result<f64, ConfigError> {
+    if raw.is_empty() {
+        return Ok(1.0);
+    }
+    let unparseable = || ConfigError::Unparseable {
+        key: "VD_TIME_MULTIPLIER".to_owned(),
+        value: raw.to_owned(),
+    };
+    let value: f64 = raw.parse().map_err(|_| unparseable())?;
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(unparseable())
+    }
+}
+
 /// The containment region forest + the moving-child roster for a shard booting at `scale`, hosting
 /// `held_realms` (own realm `hosted`). `Walk` ⇒ the seed NEIGHBOURHOOD + an EMPTY roster — BYTE-IDENTICAL
 /// to the pre-FA-5 boot (the exact `realm_neighbourhood_for_held`, and `RealmRegions::with_moving_children`
@@ -1858,9 +1918,10 @@ pub fn boot_regions_and_movers(
         UniverseScale::Visual => {
             let config = vd_core::worldgen::UniverseConfig::visual_scale();
             let regions = vd_core::worldgen::realm_regions_for_config(universe_seed, &config);
-            let moving = vd_core::worldgen::moving_children_for_config(universe_seed, &config, hosted)
-                .into_iter()
-                .collect::<BTreeMap<_, _>>();
+            let moving =
+                vd_core::worldgen::moving_children_for_config(universe_seed, &config, hosted)
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>();
             (regions, moving)
         }
     }
@@ -2580,6 +2641,34 @@ mod incarnation_tests {
     }
 
     #[test]
+    fn resolve_time_multiplier_defaults_reads_env_override_and_is_loud_on_bad() {
+        // ABSENT / empty ⇒ 1.0 (universe rate, byte-identical).
+        assert_eq!(resolve_time_multiplier(&env(&[])), Ok(1.0));
+        assert_eq!(
+            resolve_time_multiplier(&env(&[("VD_TIME_MULTIPLIER", "")])),
+            Ok(1.0),
+        );
+        // The orchestrator-wide default is read + trimmed.
+        assert_eq!(
+            resolve_time_multiplier(&env(&[("VD_TIME_MULTIPLIER", "  0.5 ")])),
+            Ok(0.5),
+        );
+        // The per-realm override WINS over the global.
+        assert_eq!(
+            resolve_time_multiplier(&env(&[
+                ("VD_TIME_MULTIPLIER", "0.5"),
+                ("VD_REALM_TIME_MULTIPLIER", "2.0"),
+            ])),
+            Ok(2.0),
+        );
+        // Non-numeric / zero / negative / non-finite all fail LOUD (time moves forward at a finite rate).
+        assert!(resolve_time_multiplier(&env(&[("VD_TIME_MULTIPLIER", "fast")])).is_err());
+        assert!(resolve_time_multiplier(&env(&[("VD_TIME_MULTIPLIER", "0")])).is_err());
+        assert!(resolve_time_multiplier(&env(&[("VD_TIME_MULTIPLIER", "-1")])).is_err());
+        assert!(resolve_time_multiplier(&env(&[("VD_TIME_MULTIPLIER", "inf")])).is_err());
+    }
+
+    #[test]
     fn boot_regions_and_movers_walk_is_the_seed_neighbourhood_with_an_empty_roster() {
         use std::collections::BTreeSet;
         let hosted = RealmId::System(7);
@@ -2602,7 +2691,10 @@ mod incarnation_tests {
         let (regions, moving) = boot_regions_and_movers(UniverseScale::Visual, 0, &held, hosted);
         let config = vd_core::worldgen::UniverseConfig::visual_scale();
         // The SAME (seed, config) builds BOTH the regions and the mover roster (they can't disagree).
-        assert_eq!(regions, vd_core::worldgen::realm_regions_for_config(0, &config));
+        assert_eq!(
+            regions,
+            vd_core::worldgen::realm_regions_for_config(0, &config)
+        );
         assert_eq!(
             moving,
             vd_core::worldgen::moving_children_for_config(0, &config, hosted)

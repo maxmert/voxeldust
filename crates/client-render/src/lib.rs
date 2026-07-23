@@ -32,8 +32,8 @@ use bevy::render::render_graph::{
     self, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
 };
 use bevy::render::render_resource::{
-    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, PollType,
-    TexelCopyBufferInfo, TexelCopyBufferLayout, TextureFormat, TextureUsages,
+    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, Face, MapMode,
+    PollType, TexelCopyBufferInfo, TexelCopyBufferLayout, TextureFormat, TextureUsages,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
@@ -62,8 +62,9 @@ const WINDOW_W: u32 = 1280;
 const WINDOW_H: u32 = 720;
 /// The scene clear color (sRGB) — the cleared-background of BOTH the windowed and the
 /// headless-capture cameras (single-sourced so the two can never drift, and so the
-/// G-RENDER-SMOKE content check measures content against the one true background).
-const CLEAR_SRGB: [f32; 3] = [0.02, 0.03, 0.06];
+/// G-RENDER-SMOKE content check measures content against the one true background). Deep-space
+/// BLACK: the starfield is the only sky, so the gaps between stars must read as empty space.
+const CLEAR_SRGB: [f32; 3] = [0.0, 0.0, 0.0];
 const DOT_RADIUS: f32 = 0.5;
 /// Reference-scene extents so motion is VISIBLE in the empty stub world (P1.5 has no
 /// terrain): a ground plate + a ring of distinct landmark pillars for parallax. Pure
@@ -81,6 +82,41 @@ const LANDMARK_COLORS: [Color; 8] = [
     Color::srgb(0.6, 0.3, 0.9),
     Color::srgb(0.9, 0.3, 0.7),
 ];
+// ---- starfield (VU-0: the always-visible night sky) ------------------------------------
+/// Fixed galaxy seed for the ambient background starfield. The far, UNREACHABLE stars are a
+/// permanent night-sky backdrop (a legitimate distant-point-of-light representation — NOT a
+/// mesh proxy). SEAM: at the real-astronomy / galaxy-catalog slice (warp) this seed becomes
+/// SERVER-provided (the agnostic client discovers it), the NEAR reachable systems promote to
+/// real realm content you fly to, and the far field stays a backdrop. Deterministic (the same
+/// sky every session, on every machine) via `SplitMix64`.
+const STARFIELD_SEED: u64 = 0x5644_5354_4152_5300; // "VDSTARS\0"
+/// Star-sphere radius (render-m). 50x beyond the 40 render-m visual system, so the field reads
+/// as at infinity (parallax-free) yet sits inside [`STAR_FAR_PLANE`]. Revisited at the
+/// real-astronomy switch (a floating-origin / skybox pass supersedes this follow-sphere).
+const STAR_SPHERE_RADIUS: f32 = 2000.0;
+/// Windowed camera far plane — bumped from Bevy's default 1000 so the star sphere is drawn.
+const STAR_FAR_PLANE: f32 = 6000.0;
+/// Uniform all-sky star count + the extra Milky-Way band over-density.
+const STAR_COUNT_UNIFORM: usize = 1600;
+const STAR_COUNT_BAND: usize = 1200;
+/// Milky-Way band half-thickness (rad) — band stars cluster within this of the galactic plane.
+const STAR_BAND_HALF_ANGLE: f32 = 0.32;
+/// Apparent star size (render-m at [`STAR_SPHERE_RADIUS`]) — MIN≈1px, MAX≈3px in the 1280-wide view.
+const STAR_SIZE_MIN: f32 = 0.7;
+const STAR_SIZE_MAX: f32 = 2.4;
+/// Tilted galactic-plane normal (unnormalised; normalised at build) so the band is not axis-aligned.
+const GALACTIC_NORMAL: Vec3 = Vec3::new(0.30, 1.0, -0.20);
+/// Spectral-class palette `(base_color, emissive)` O/B..M — real-ish star colors. A star's tier
+/// indexes this; shared as N materials so the whole field batches by material.
+const STAR_TIERS: [([f32; 3], [f32; 3]); 5] = [
+    ([0.75, 0.83, 1.00], [0.55, 0.62, 0.90]), // O/B blue-white
+    ([0.95, 0.97, 1.00], [0.75, 0.77, 0.82]), // A  white
+    ([1.00, 0.97, 0.86], [0.85, 0.80, 0.62]), // G  yellow-white
+    ([1.00, 0.86, 0.62], [0.90, 0.60, 0.35]), // K  orange
+    ([1.00, 0.72, 0.55], [0.85, 0.42, 0.28]), // M  red
+];
+/// Cumulative spectral weights (M/K dwarfs dominate the real sky) — a uniform draw picks a tier.
+const STAR_TIER_CUM: [f32; 5] = [0.07, 0.20, 0.40, 0.65, 1.00]; // O/B, A, G, K, M
 /// Offscreen capture resolution. Width chosen so `width*4` is NOT a multiple of 256
 /// (1280*4 = 5120 IS a multiple → no padding; use 1284 to force the 256-byte row-pad
 /// strip path that the readback must handle). Height even. PUBLIC so a capture-gate test
@@ -263,7 +299,11 @@ fn run_windowed(handles: RenderHandles) {
             (
                 input_system,
                 sync_world,
-                sync_realm_boxes,
+                // Sync the realm spheres, then despawn the stub-world scaffolding once they exist (chained
+                // so the despawn sees the just-spawned boxes the same frame — no scaffold flash in space).
+                (sync_realm_boxes, despawn_reference_scaffold).chain(),
+                // Keep the ambient starfield centered on the camera (an inertial sky at infinity).
+                follow_starfield,
                 cursor_grab,
                 exit_when_core_stops,
             ),
@@ -279,17 +319,46 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // First-person follow camera (positioned each frame by `sync_world`).
+    // First-person follow camera (positioned each frame by `sync_world`). Far plane bumped so the
+    // ambient star sphere (at `STAR_SPHERE_RADIUS`) is not clipped by Bevy's default 1000 m far.
     commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            far: STAR_FAR_PLANE,
+            ..default()
+        }),
         Transform::from_xyz(0.0, 1.6, 0.0).looking_at(Vec3::NEG_Z, Vec3::Y),
         FollowCam,
     ));
     setup_world(&mut commands, &mut meshes, &mut materials);
+    setup_starfield(&mut commands, &mut meshes, &mut materials);
 }
 
 // (the windowed camera above; the shared world below — capture's offscreen camera lives
 // in `run_capture` and reuses `setup_world`.)
+
+/// Marker for the empty-stub-world reference scaffolding (the ground plate + the landmark pillars) — a
+/// P1.5 MOTION reference, despawned by [`despawn_reference_scaffold`] the moment real realm content loads.
+#[derive(Component)]
+struct ReferenceScaffold;
+
+/// Despawn the reference scaffolding ONCE real realm content (any [`RealmBox`]) is present. The visual
+/// universe — and the eventual game — ALWAYS has realm spheres, so the ground/pillars belong ONLY to the
+/// empty P1.5 stub world (`render_smoke`, launched with NO `--realm-boxes`), never the SPACE view. Seamless:
+/// they vanish as the boot realm scene loads. Windowed-only — the capture path deliberately keeps them so
+/// `render_smoke`'s empty-world content floor still holds (`render_boxes_smoke` checks the box, not these).
+fn despawn_reference_scaffold(
+    boxes: Res<RealmBoxEntities>,
+    scaffold: Query<Entity, With<ReferenceScaffold>>,
+    mut commands: Commands,
+) {
+    if boxes.0.is_empty() {
+        return;
+    }
+    for entity in &scaffold {
+        commands.entity(entity).despawn();
+    }
+}
 
 /// Spawn the key light, reference scene (ground + landmark pillars), and the shared dot
 /// assets — identical for the windowed and capture cameras (DRY: one world, two views).
@@ -307,7 +376,8 @@ fn setup_world(
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Reference ground plate (a thin slab — motion reference for the empty stub world).
+    // Reference ground plate (a thin slab — motion reference for the empty stub world). Tagged
+    // `ReferenceScaffold`: despawned the moment real realm content loads (never in the space view).
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(GROUND_HALF * 2.0, 0.2, GROUND_HALF * 2.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -316,8 +386,9 @@ fn setup_world(
             ..default()
         })),
         Transform::from_xyz(0.0, -0.1, 0.0),
+        ReferenceScaffold,
     ));
-    // Landmark pillars in a ring — distinct colors give parallax as the player walks.
+    // Landmark pillars in a ring — distinct colors give parallax as the player walks (stub-world only).
     let pillar = meshes.add(Cuboid::new(1.0, LANDMARK_HEIGHT, 1.0));
     for (i, color) in LANDMARK_COLORS.iter().enumerate() {
         let angle = i as f32 / LANDMARK_COLORS.len() as f32 * std::f32::consts::TAU;
@@ -332,6 +403,7 @@ fn setup_world(
                 LANDMARK_HEIGHT * 0.5,
                 LANDMARK_RING_RADIUS * angle.sin(),
             ),
+            ReferenceScaffold,
         ));
     }
 
@@ -350,6 +422,118 @@ fn setup_world(
         }),
     });
     // The stats HUD is drawn each frame by `hud_primary` via egui (no entity to spawn).
+}
+
+/// Marker: the root of the ambient starfield. It follows the camera POSITION each frame (so the
+/// sky is at infinity — parallax-free) but keeps identity ROTATION (an inertial night sky: turn
+/// or fly and the stars hold their world directions). Windowed-only; not `ReferenceScaffold`, so
+/// it survives when the realm content loads (the sky is always there).
+#[derive(Component)]
+struct StarfieldRoot;
+
+/// One background star: a world DIRECTION on the celestial sphere, an apparent SIZE, and a
+/// spectral TIER (index into [`STAR_TIERS`]).
+struct Star {
+    dir: Vec3,
+    size: f32,
+    tier: usize,
+}
+
+/// Seed-stable ambient starfield: a uniform all-sky population plus a denser, tilted Milky-Way
+/// band. Pure (`SplitMix64`) so the sky is byte-identical every session and on every machine.
+fn generate_starfield(seed: u64) -> Vec<Star> {
+    let mut rng = vd_core::rng::SplitMix64::new(seed);
+    let mut stars = Vec::with_capacity(STAR_COUNT_UNIFORM + STAR_COUNT_BAND);
+
+    // Uniform all-sky field (z uniform in [-1,1], azimuth uniform → uniform on the sphere).
+    for _ in 0..STAR_COUNT_UNIFORM {
+        let y = 2.0 * rng.next_f64() as f32 - 1.0;
+        let phi = std::f32::consts::TAU * rng.next_f64() as f32;
+        let r = (1.0 - y * y).max(0.0).sqrt();
+        let dir = Vec3::new(r * phi.cos(), y, r * phi.sin());
+        stars.push(make_star(dir, &mut rng, 1.0));
+    }
+
+    // Denser, tilted Milky-Way band: longitude uniform around a tilted plane, latitude a cubic
+    // draw (concentrates near 0 → a thin band). Band stars run a touch larger/brighter.
+    let n = GALACTIC_NORMAL.normalize();
+    let u_axis = n.any_orthonormal_vector();
+    let v_axis = n.cross(u_axis);
+    for _ in 0..STAR_COUNT_BAND {
+        let lon = std::f32::consts::TAU * rng.next_f64() as f32;
+        let t = 2.0 * rng.next_f64() as f32 - 1.0;
+        let lat = STAR_BAND_HALF_ANGLE * t * t * t;
+        let in_plane = lon.cos() * u_axis + lon.sin() * v_axis;
+        let dir = (lat.cos() * in_plane + lat.sin() * n).normalize();
+        stars.push(make_star(dir, &mut rng, 1.15));
+    }
+    stars
+}
+
+/// Assign a star its spectral tier (one weighted draw) and apparent size (a squared draw → most
+/// stars faint, a few bright), scaled by `size_boost` (the band population runs slightly brighter).
+fn make_star(dir: Vec3, rng: &mut vd_core::rng::SplitMix64, size_boost: f32) -> Star {
+    let x = rng.next_f64() as f32;
+    let tier = STAR_TIER_CUM
+        .iter()
+        .position(|&c| x <= c)
+        .unwrap_or(STAR_TIERS.len() - 1);
+    let m = rng.next_f64() as f32;
+    let size = (STAR_SIZE_MIN + (STAR_SIZE_MAX - STAR_SIZE_MIN) * m * m) * size_boost;
+    Star { dir, size, tier }
+}
+
+/// Spawn the ambient starfield: one shared unit sphere (scaled per star), one shared unlit
+/// emissive material per spectral tier, all parented to a [`StarfieldRoot`] so the whole sky
+/// follows the camera as one entity. Windowed-only (the capture path keeps its deterministic
+/// box-framing scene untouched).
+fn setup_starfield(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let unit = meshes.add(Sphere::new(1.0));
+    let tier_mats: Vec<Handle<StandardMaterial>> = STAR_TIERS
+        .iter()
+        .map(|(base, emis)| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(base[0], base[1], base[2]),
+                emissive: LinearRgba::rgb(emis[0], emis[1], emis[2]),
+                unlit: true,
+                ..default()
+            })
+        })
+        .collect();
+
+    let stars = generate_starfield(STARFIELD_SEED);
+    commands
+        .spawn((StarfieldRoot, Transform::default(), Visibility::default()))
+        .with_children(|parent| {
+            for star in &stars {
+                parent.spawn((
+                    Mesh3d(unit.clone()),
+                    MeshMaterial3d(tier_mats[star.tier].clone()),
+                    Transform::from_translation(star.dir * STAR_SPHERE_RADIUS)
+                        .with_scale(Vec3::splat(star.size)),
+                ));
+            }
+        });
+}
+
+/// Keep the starfield centered on the camera (position only; identity rotation) so it reads as an
+/// inertial sky at infinity. A one-frame lag is invisible at the star radius, so no ordering is
+/// needed against the camera update.
+fn follow_starfield(
+    cam: Query<&Transform, (With<FollowCam>, Without<StarfieldRoot>)>,
+    mut field: Query<&mut Transform, (With<StarfieldRoot>, Without<FollowCam>)>,
+) {
+    let Some(cam_tf) = cam.iter().next() else {
+        return;
+    };
+    let pos = cam_tf.translation;
+    for mut tf in &mut field {
+        tf.translation = pos;
+    }
 }
 
 /// Keyboard → held movement (resent only on change; latest-wins on the wire); mouse →
@@ -569,8 +753,12 @@ fn frame_scene_camera(net: Res<Net>, mut cam_tf: Query<&mut Transform, With<Foll
 
 /// Spawn one realm box from its lowered [`MeshPrim`]s (today exactly one per box): a Bevy `Mesh`
 /// built from the prim VERTICES + a TRANSLUCENT [`StandardMaterial`] (`AlphaMode::Blend`,
-/// `cull_mode: None` so the volume reads front-and-back, `unlit` so the color is legible in the
-/// stub world regardless of lighting). Returns `None` if the box lowered to no prim (defensive).
+/// BACK-face culling so a box renders only when viewed from OUTSIDE, `unlit` so the color is legible
+/// regardless of lighting). Back-face culling is what keeps the CONTAINER realm you are inside (e.g.
+/// the System) from washing the whole view with its translucent tint — from inside, all its faces
+/// are back-faces and cull away, leaving black space + stars + the child realm boxes; the boundary
+/// reappears as a shell only when you fly out and look back. Returns `None` if the box lowered to no
+/// prim (defensive).
 fn spawn_realm_box(
     prims: &[MeshPrim],
     meshes: &mut Assets<Mesh>,
@@ -583,7 +771,7 @@ fn spawn_realm_box(
     let material = materials.add(StandardMaterial {
         base_color: Color::srgba(r, g, b, a),
         alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
+        cull_mode: Some(Face::Back),
         unlit: true,
         ..default()
     });

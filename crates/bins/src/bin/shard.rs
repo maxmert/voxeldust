@@ -64,6 +64,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tick_hz: u32 = env.parse("VD_TICK_HZ")?;
     let tick_dt: f64 = env.parse("VD_TICK_DT")?;
     let move_speed: f64 = env.parse("VD_SPEED")?;
+    // The realm's SUBJECTIVE time factor (D-45(a)): dilates OCCUPANT movement inside this realm (never the
+    // celestial orbit). `VD_REALM_TIME_MULTIPLIER` override / `VD_TIME_MULTIPLIER` global / 1.0 default.
+    let time_multiplier = vd_bins::resolve_time_multiplier(&env)?;
     vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
     // NODE-PER-REALM (task #149): a realm-shard hosts EXACTLY ONE realm, of a KIND read from `VD_REALM_KIND`
     // (`system` | `planet` | `station` | `area`) beside `VD_REALM_SEED`. ABSENT/empty ⇒ `System(seed)` — the
@@ -117,6 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             frame: own_frame,
             move_speed_mps: move_speed,
             tick_dt_s: tick_dt,
+            time_multiplier,
             orchestrator: env.node_id("VD_ORCH")?,
             mint_seed: env.parse("VD_MINT_SEED")?,
             // Bounded in production: the input-conservation log is a metrics ring,
@@ -170,7 +174,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "planting VD_REALM_BOUNDARIES OVERRIDE — the authored playground crossing forest is ARMED",
         );
         (
-            vd_bins::override_regions_for_boundaries(&boundaries, hosted_realm, move_speed, tick_dt),
+            vd_bins::override_regions_for_boundaries(
+                &boundaries,
+                hosted_realm,
+                move_speed,
+                tick_dt,
+            ),
             std::collections::BTreeMap::new(),
         )
     } else {

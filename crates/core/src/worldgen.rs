@@ -31,7 +31,9 @@ use crate::celestial::{G, KEPLER_ECC_MAX, OrbitalElements, orbital_state};
 use crate::geometry::{BandError, Boundary, ContainmentBand, RealmRegion};
 use crate::pose::{LatticePos, RealmId, frame_for_realm};
 use crate::rng::{SplitMix64, child_seed, realm_stream};
-use crate::taxonomy::{FrostThresholds, GalaxyType, SpectralClass, orbital_axis_au, sample_rayleigh};
+use crate::taxonomy::{
+    FrostThresholds, GalaxyType, SpectralClass, orbital_axis_au, sample_rayleigh,
+};
 
 /// The inner (acquire) edge of the P3 static containment band, metres inside a surface.
 const CONTAINMENT_INSET_M: f64 = 1.0;
@@ -113,10 +115,12 @@ const VISUAL_SYSTEM_MARGIN_M: f64 = 4.0;
 /// A planet's SOI radius as a fraction of the SMALLEST inter-orbit gap; `< 0.5` guarantees adjacent
 /// SOIs never overlap (the non-overlap invariant is a pinned test, not a hand-tuned coincidence).
 const VISUAL_SOI_GAP_FRACTION: f64 = 0.35;
-/// The OUTER (slowest) planet completes one orbit in this many seconds, so within a ~1 s inter-capture
-/// screenshot gap it sweeps ~30° (~17 m at the System framing = tens of pixels, well above the
-/// few-pixel visibility floor); inner planets are faster. Feeds the synthetic mass via Kepler-3.
-const VISUAL_TARGET_OUTER_PERIOD_S: f64 = 12.0;
+/// The OUTER (slowest) planet's orbital period in seconds — a MAJESTIC-but-visible pace for the human
+/// window view (the inner planets are faster by Kepler-3: `T ∝ a^1.5`, so ~37 s / ~81 s / 180 s for the
+/// 3 planets). Feeds the synthetic central mass via the Kepler-3 inversion. NOT tuned to a frantic
+/// few-second orbit: the automated 2-capture render gate samples universe ticks FAR ENOUGH apart to see
+/// the sweep, so the period is free to be leisurely for a human watching.
+const VISUAL_TARGET_OUTER_PERIOD_S: f64 = 180.0;
 /// One solar mass (kg) — the canonical/walk INERT central mass (those presets emit no `Orbital` body,
 /// so it is never read there; [`UniverseConfig::visual_scale`] overrides it with a synthetic mass).
 const CANONICAL_STAR_MASS_KG: f64 = 1.989e30;
@@ -270,7 +274,8 @@ fn visual_central_mass_kg() -> f64 {
 fn planet_elements(config: &UniverseConfig, stream: &mut SplitMix64, n: u32) -> OrbitalElements {
     let sma = orbital_axis_au(n, config.planet.orbital_a0_au, config.planet.orbital_ratio)
         * config.scale.au_to_render_m;
-    let ecc = sample_rayleigh(stream.next_f64(), config.planet.ecc_sigma).min(config.planet.ecc_cap);
+    let ecc =
+        sample_rayleigh(stream.next_f64(), config.planet.ecc_sigma).min(config.planet.ecc_cap);
     let inclination = sample_rayleigh(stream.next_f64(), config.planet.incl_sigma);
     let raan = stream.next_f64() * TAU;
     let arg_periapsis = stream.next_f64() * TAU;
@@ -1369,7 +1374,10 @@ mod tests {
         for (body, region) in bodies.iter().zip(&regions).skip(3) {
             let elements = orbital_of(body.placement).expect("a planet is Orbital");
             assert_eq!(region.center.cell(), glam::I64Vec3::ZERO);
-            assert_eq!(region.center.offset(), orbital_state(&elements, 0.0).position);
+            assert_eq!(
+                region.center.offset(),
+                orbital_state(&elements, 0.0).position
+            );
         }
     }
 
@@ -1402,7 +1410,9 @@ mod tests {
         let mut hot = UniverseConfig::visual_scale();
         hot.planet.ecc_sigma = 5.0;
         let mut stream = realm_stream(0, &SYSTEM_A_LINEAGE);
-        let hot_eccs: Vec<f64> = (0..64).map(|n| planet_elements(&hot, &mut stream, n).ecc).collect();
+        let hot_eccs: Vec<f64> = (0..64)
+            .map(|n| planet_elements(&hot, &mut stream, n).ecc)
+            .collect();
         assert!(hot_eccs.iter().all(|&e| e <= hot.planet.ecc_cap));
         assert!(
             hot_eccs.contains(&hot.planet.ecc_cap),
@@ -1463,12 +1473,18 @@ mod tests {
             mean_anomaly_epoch: 0.0,
             central_mass: visual_central_mass_kg(),
         };
-        let rel = (outer.period() - VISUAL_TARGET_OUTER_PERIOD_S).abs() / VISUAL_TARGET_OUTER_PERIOD_S;
+        let rel =
+            (outer.period() - VISUAL_TARGET_OUTER_PERIOD_S).abs() / VISUAL_TARGET_OUTER_PERIOD_S;
         // No call/expression in the message (it would be an uncovered on-panic-only region, HR5).
-        assert!(rel < 1e-9, "outer period must equal the target within tolerance");
+        assert!(
+            rel < 1e-9,
+            "outer period must equal the target within tolerance"
+        );
         // Every visual planet's period is seconds-scale — not sub-µs (invisible), not years.
         for body in visual_forest().iter().skip(3) {
-            let p = orbital_of(body.placement).expect("a planet is Orbital").period();
+            let p = orbital_of(body.placement)
+                .expect("a planet is Orbital")
+                .period();
             assert!(p > 1.0);
             assert!(p <= VISUAL_TARGET_OUTER_PERIOD_S + 1e-6);
         }
@@ -1492,7 +1508,10 @@ mod tests {
             let gap = (orbital_axis_au(n, ORBITAL_A0_AU, ORBITAL_RATIO)
                 - orbital_axis_au(n - 1, ORBITAL_A0_AU, ORBITAL_RATIO))
                 * config.scale.au_to_render_m;
-            assert!(gap > two_soi, "orbit gap {gap} must exceed two SOIs {two_soi}");
+            assert!(
+                gap > two_soi,
+                "orbit gap {gap} must exceed two SOIs {two_soi}"
+            );
         }
     }
 

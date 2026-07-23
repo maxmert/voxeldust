@@ -943,8 +943,14 @@ mod tests {
         c.step(0.0);
         let st = c.state().devstate(0.0, 0, 0);
         // The entity view contributes 0 here; both realm-feed faults reach the surface (SUMMED).
-        assert_eq!(st.nonfinite_poses, 1, "the realm feed's NaN sanitize is surfaced");
-        assert_eq!(st.stale_frames_dropped, 1, "the realm feed's stale drop is surfaced");
+        assert_eq!(
+            st.nonfinite_poses, 1,
+            "the realm feed's NaN sanitize is surfaced"
+        );
+        assert_eq!(
+            st.stale_frames_dropped, 1,
+            "the realm feed's stale drop is surfaced"
+        );
     }
 
     #[test]

@@ -106,6 +106,16 @@ fn run(args: &[String]) -> Result<(), String> {
         println!("VD_SEED_SCENE={scene}");
         return Ok(());
     }
+    // `emit-visual-fixtures <dir>` writes the FA-5 VISUAL-scale seed forest (`regions.json` — the SAME
+    // `realm_regions_for_config(seed, visual_scale())` a `VD_UNIVERSE_SCALE=visual` shard plants) for the
+    // `visual-run` launcher: the client's `--realm-boxes` loads it, drawing the orbiting-planet system the
+    // shard authors + ships (the planets ORBIT via the realm-frame overlay). No slot; dir arg only.
+    if cmd == "emit-visual-fixtures" {
+        let dir = args.get(1).ok_or("emit-visual-fixtures needs a <dir>")?;
+        let scene = vd_bins::crossing_playground::write_visual_regions(Path::new(dir), 0)?;
+        println!("VD_VISUAL_SCENE={scene}");
+        return Ok(());
+    }
     let slot = parse_slot(args)?;
     let ports = DevPortScheme::DEFAULT
         .slot_ports(slot)
