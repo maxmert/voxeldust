@@ -141,7 +141,9 @@ pub enum RlmTuningError {
     ZeroWindowWhileActive,
     /// The demand TTL does not strictly outlast the drain+cooldown reclaim floor, so a re-asserted demand
     /// could arrive too late to abort a drain — the thrash-heed inequality.
-    #[error("demand_ttl {demand_ttl} must strictly exceed the drain+cooldown reclaim floor {reclaim_floor}")]
+    #[error(
+        "demand_ttl {demand_ttl} must strictly exceed the drain+cooldown reclaim floor {reclaim_floor}"
+    )]
     DemandTtlRacesReclaim { demand_ttl: u64, reclaim_floor: u64 },
 }
 
@@ -279,10 +281,9 @@ impl DemandLedger {
 /// #8). Monomorphic (all branching here, HR5).
 fn refresh_demand(cell: &mut LedgerCell, tick: UniverseTick) {
     cell.last_demand_tick = cell.last_demand_tick.max(tick);
-    if let Some(start) = cell.first_empty_tick {
-        if tick >= start {
-            cell.first_empty_tick = None;
-        }
+    // Clear the empty streak iff one is open AND this demand is at-or-after its start.
+    if cell.first_empty_tick.is_some_and(|start| tick >= start) {
+        cell.first_empty_tick = None;
     }
 }
 
@@ -419,7 +420,12 @@ pub fn empty_confirmed(cell: &LedgerCell, now: UniverseTick, grace: u64) -> bool
 /// `Empty`; demand-absence alone never un-desires it — a partitioned parent stops `KeepAlive`-ing but arm
 /// B holds). Bitwise (no short-circuit false-arm, HR5). `running_live` is resolved by the caller.
 #[must_use]
-pub fn desired_alive(cell: &LedgerCell, now: UniverseTick, tuning: &RlmTuning, running_live: bool) -> bool {
+pub fn desired_alive(
+    cell: &LedgerCell,
+    now: UniverseTick,
+    tuning: &RlmTuning,
+    running_live: bool,
+) -> bool {
     demanded_recently(cell, now, tuning.demand_ttl_ticks)
         | (running_live & !empty_confirmed(cell, now, tuning.empty_grace_ticks))
 }
@@ -753,9 +759,15 @@ mod tests {
     fn record_spinup_then_keepalive_refreshes_demand() {
         let mut l = DemandLedger::default();
         l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(10), Fence(1));
-        assert_eq!(l.get(sys(7).path()).unwrap().last_demand_tick, UniverseTick(10));
+        assert_eq!(
+            l.get(sys(7).path()).unwrap().last_demand_tick,
+            UniverseTick(10)
+        );
         l.record_demand(&sys(7), DemandVerb::KeepAlive, UniverseTick(14), Fence(1));
-        assert_eq!(l.get(sys(7).path()).unwrap().last_demand_tick, UniverseTick(14));
+        assert_eq!(
+            l.get(sys(7).path()).unwrap().last_demand_tick,
+            UniverseTick(14)
+        );
         assert_eq!(l.len(), 1);
         assert!(!l.is_empty());
     }
@@ -769,8 +781,16 @@ mod tests {
         assert_eq!(c.last_empty_tick, Some(UniverseTick(20)));
         l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(25), Fence(2));
         let c = l.get(sys(7).path()).unwrap();
-        assert_eq!(c.first_empty_tick, Some(UniverseTick(20)), "streak anchor unchanged");
-        assert_eq!(c.last_empty_tick, Some(UniverseTick(25)), "last report advances");
+        assert_eq!(
+            c.first_empty_tick,
+            Some(UniverseTick(20)),
+            "streak anchor unchanged"
+        );
+        assert_eq!(
+            c.last_empty_tick,
+            Some(UniverseTick(25)),
+            "last report advances"
+        );
     }
 
     #[test]
@@ -806,7 +826,12 @@ mod tests {
         let build = |pairs: &[(u64, u64)]| -> Fence {
             let mut l = DemandLedger::default();
             for (tick, fence) in pairs {
-                l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(*tick), Fence(*fence));
+                l.record_demand(
+                    &sys(7),
+                    DemandVerb::SpinUp,
+                    UniverseTick(*tick),
+                    Fence(*fence),
+                );
             }
             l.get(sys(7).path()).unwrap().last_fence
         };
@@ -823,9 +848,15 @@ mod tests {
         let mut l = DemandLedger::default();
         // mark_spawned creates the cell for an ancestor the demand fold never touched.
         l.mark_spawned(&sys(7), UniverseTick(40));
-        assert_eq!(l.get(sys(7).path()).unwrap().spawn_watermark, UniverseTick(40));
+        assert_eq!(
+            l.get(sys(7).path()).unwrap().spawn_watermark,
+            UniverseTick(40)
+        );
         l.mark_reaped(sys(7).path(), UniverseTick(50));
-        assert_eq!(l.get(sys(7).path()).unwrap().teardown_watermark, UniverseTick(50));
+        assert_eq!(
+            l.get(sys(7).path()).unwrap().teardown_watermark,
+            UniverseTick(50)
+        );
         // mark_reaped on an absent cell is a no-op (no panic).
         l.mark_reaped(sys(8).path(), UniverseTick(60));
         assert!(l.get(sys(8).path()).is_none());
@@ -836,10 +867,15 @@ mod tests {
         let mut l = DemandLedger::default();
         l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(10), Fence(1));
         let mut d = LedgerDelta::default();
-        d.set_draining.insert(sys(7).path().clone(), Some(UniverseTick(12)));
-        d.set_draining.insert(sys(8).path().clone(), Some(UniverseTick(12))); // absent → ignored
+        d.set_draining
+            .insert(sys(7).path().clone(), Some(UniverseTick(12)));
+        d.set_draining
+            .insert(sys(8).path().clone(), Some(UniverseTick(12))); // absent → ignored
         l.apply_delta(&d);
-        assert_eq!(l.get(sys(7).path()).unwrap().draining_since, Some(UniverseTick(12)));
+        assert_eq!(
+            l.get(sys(7).path()).unwrap().draining_since,
+            Some(UniverseTick(12))
+        );
         assert!(l.get(sys(8).path()).is_none());
         // Clearing (rescue).
         let mut clear = LedgerDelta::default();
@@ -901,9 +937,19 @@ mod tests {
         let t = cloud();
         // Within TTL ⇒ desired even when NOT running (arm A).
         assert!(desired_alive(c, UniverseTick(100), &t, false));
-        assert!(desired_alive(c, UniverseTick(100 + t.demand_ttl_ticks), &t, false));
+        assert!(desired_alive(
+            c,
+            UniverseTick(100 + t.demand_ttl_ticks),
+            &t,
+            false
+        ));
         // Past TTL and not running ⇒ not desired.
-        assert!(!desired_alive(c, UniverseTick(101 + t.demand_ttl_ticks), &t, false));
+        assert!(!desired_alive(
+            c,
+            UniverseTick(101 + t.demand_ttl_ticks),
+            &t,
+            false
+        ));
     }
 
     #[test]
@@ -971,7 +1017,11 @@ mod tests {
         for tick in 100..100 + 5 * t.empty_grace_ticks {
             l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(tick), Fence(1));
             assert!(
-                empty_confirmed(l.get(sys(7).path()).unwrap(), UniverseTick(tick), t.empty_grace_ticks),
+                empty_confirmed(
+                    l.get(sys(7).path()).unwrap(),
+                    UniverseTick(tick),
+                    t.empty_grace_ticks
+                ),
                 "a continuously-empty realm stays confirmed at tick {tick}"
             );
         }
@@ -1061,7 +1111,10 @@ mod tests {
     /// A multi-level lineage coord (Universe→…→leaf).
     fn deep(levels: &[(RealmKindTag, u64)]) -> RealmCoord {
         RealmCoord::from_path(RealmPath::from_levels(
-            levels.iter().map(|(k, s)| RealmLevel::new(*k, *s)).collect(),
+            levels
+                .iter()
+                .map(|(k, s)| RealmLevel::new(*k, *s))
+                .collect(),
         ))
         .expect("non-empty lineage")
     }
@@ -1173,7 +1226,10 @@ mod tests {
             UniverseTick(100),
             UniverseTick(0),
         );
-        assert!(actions.is_empty(), "a live launch ⇒ no double-spawn (BUG-B)");
+        assert!(
+            actions.is_empty(),
+            "a live launch ⇒ no double-spawn (BUG-B)"
+        );
     }
 
     #[test]
@@ -1250,7 +1306,12 @@ mod tests {
         let d = dir(&[(RealmId::System(7), 9, 3)]);
         let now = UniverseTick(500);
         let mut l = DemandLedger::default();
-        l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1)); // fresh empty
+        l.record_demand(
+            &sys(7),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        ); // fresh empty
         // Tick A: becomes teardown-ready ⇒ open the drain, NO kill.
         let (a, da) = reconcile(
             &l,
@@ -1261,11 +1322,19 @@ mod tests {
             now,
             UniverseTick(0),
         );
-        assert!(a.is_empty(), "the first ready tick opens the drain, never kills");
+        assert!(
+            a.is_empty(),
+            "the first ready tick opens the drain, never kills"
+        );
         assert_eq!(da.set_draining.get(sys(7).path()), Some(&Some(now)));
         l.apply_delta(&da);
         // Tick B: a demand lands INSIDE the drain window ⇒ rescue (drain cleared, no kill).
-        l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(now.0 + 1), Fence(1));
+        l.record_demand(
+            &sys(7),
+            DemandVerb::SpinUp,
+            UniverseTick(now.0 + 1),
+            Fence(1),
+        );
         let (b, db) = reconcile(
             &l,
             &d,
@@ -1276,7 +1345,11 @@ mod tests {
             UniverseTick(0),
         );
         assert!(b.is_empty(), "a rescuing demand aborts the kill (BUG-C)");
-        assert_eq!(db.set_draining.get(sys(7).path()), Some(&None), "drain cleared");
+        assert_eq!(
+            db.set_draining.get(sys(7).path()),
+            Some(&None),
+            "drain cleared"
+        );
         l.apply_delta(&db);
         assert_eq!(l.get(sys(7).path()).unwrap().draining_since, None);
     }
@@ -1287,7 +1360,12 @@ mod tests {
         let d = dir(&[(RealmId::System(7), 9, 3)]);
         let now = UniverseTick(500);
         let mut l = DemandLedger::default();
-        l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1));
+        l.record_demand(
+            &sys(7),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        );
         // Force it into Draining, started exactly `drain` ticks ago ⇒ the window has elapsed.
         let mut open = LedgerDelta::default();
         open.set_draining.insert(
@@ -1320,8 +1398,18 @@ mod tests {
         let d = dir(&[(RealmId::System(7), 9, 3), (RealmId::Planet(3), 8, 4)]);
         let now = UniverseTick(500);
         let mut l = DemandLedger::default();
-        l.record_demand(&u_g_s(), DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1));
-        l.record_demand(&u_g_s_p(), DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1));
+        l.record_demand(
+            &u_g_s(),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        );
+        l.record_demand(
+            &u_g_s_p(),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        );
         let mut open = LedgerDelta::default();
         let started = Some(UniverseTick(now.0 - t.teardown_drain_ticks));
         open.set_draining.insert(u_g_s().path().clone(), started);
@@ -1361,8 +1449,18 @@ mod tests {
         let d = dir(&[(RealmId::System(7), 9, 3)]);
         let now = UniverseTick(500);
         let mut l = DemandLedger::default();
-        l.record_demand(&u_g_s(), DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1));
-        l.record_demand(&u_g_s_p(), DemandVerb::SpinUp, UniverseTick(now.0), Fence(1));
+        l.record_demand(
+            &u_g_s(),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        );
+        l.record_demand(
+            &u_g_s_p(),
+            DemandVerb::SpinUp,
+            UniverseTick(now.0),
+            Fence(1),
+        );
         let (actions, delta) = reconcile(
             &l,
             &d,
@@ -1420,7 +1518,12 @@ mod tests {
         let d = dir(&[(RealmId::System(7), 9, 3)]);
         let now = UniverseTick(500);
         let mut l = DemandLedger::default();
-        l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1));
+        l.record_demand(
+            &sys(7),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        );
         // The crash-quiesce window has NOT elapsed ⇒ no teardown even though otherwise ready (arm B keeps
         // running realms alive while demands re-accrue).
         let (actions, delta) = reconcile(
@@ -1433,7 +1536,10 @@ mod tests {
             UniverseTick(now.0 + 100),
         );
         assert!(actions.is_empty());
-        assert!(delta.set_draining.is_empty(), "quiesce blocks even opening the drain");
+        assert!(
+            delta.set_draining.is_empty(),
+            "quiesce blocks even opening the drain"
+        );
     }
 
     #[test]

@@ -41,12 +41,12 @@ use vd_wire::channels::{
     partition_entities, partition_realms,
 };
 use vd_wire::intershard::{
-    CrossingAborted, CrossingRequest, DemandVerb, DemoteCmd, FlushSource, GhostFlow, InterShardFlow,
-    PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, RealmDemand, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP,
-    TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP, TRANSIENT_COMPLETE_STEP,
-    TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck,
-    TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest, TransientHandoff,
-    TransientItem, TransitionPayload, crossing_transfer_id,
+    CrossingAborted, CrossingRequest, DemandVerb, DemoteCmd, FlushSource, GhostFlow,
+    InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, RealmDemand,
+    STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP,
+    TRANSIENT_COMPLETE_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP,
+    TransferAck, TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest,
+    TransientHandoff, TransientItem, TransitionPayload, crossing_transfer_id,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
@@ -4277,6 +4277,7 @@ fn has_synced(clock: Res<ClockSample>) -> bool {
 /// Step 2 NEVER emits a parent `TearDown` (REVISION 1 R2 supersedes the §2.2 pseudocode): a child leaving
 /// AoI simply STOPS being demanded (its key drops after grace); the Step-3 reconciler closure is the sole
 /// kill authority.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_realm_aoi(
     config: Res<StubConfig>,
     clock: Res<ClockSample>,
@@ -4385,7 +4386,14 @@ fn aoi_decide(
                 v != DemandVerb::TearDown,
                 "Step 2 never emits parent TearDown — the Step-3 closure is the sole kill authority (M-1)"
             );
-            push_demand(outbox, config.orchestrator, child_coord, realm_fence, v, tick);
+            push_demand(
+                outbox,
+                config.orchestrator,
+                child_coord,
+                realm_fence,
+                v,
+                tick,
+            );
         }
         match next {
             Some(s) => {
@@ -11351,10 +11359,12 @@ mod tests {
     /// ships entity snapshots (non-`InterShardFlow` bytes) alongside the demand.
     fn demands(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<RealmDemand> {
         sent.iter()
-            .filter_map(|(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
-                Ok(InterShardFlow::RealmDemand(d)) => Some(d),
-                _ => None,
-            })
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                    Ok(InterShardFlow::RealmDemand(d)) => Some(d),
+                    _ => None,
+                },
+            )
             .collect()
     }
 
@@ -11455,11 +11465,21 @@ mod tests {
     fn region_level_recovers_seed_lineage_kinds() {
         use vd_core::realm_path::{RealmKindTag, RealmLevel};
         assert_eq!(
-            region_level(&region(RealmId::Planet(42), Some(OWN_REALM), DVec3::ZERO, 1.0)),
+            region_level(&region(
+                RealmId::Planet(42),
+                Some(OWN_REALM),
+                DVec3::ZERO,
+                1.0
+            )),
             RealmLevel::new(RealmKindTag::Planet, 42)
         );
         assert_eq!(
-            region_level(&region(RealmId::System(7), Some(ROOT_REALM), DVec3::ZERO, 1.0)),
+            region_level(&region(
+                RealmId::System(7),
+                Some(ROOT_REALM),
+                DVec3::ZERO,
+                1.0
+            )),
             RealmLevel::new(RealmKindTag::System, 7)
         );
     }
@@ -11471,7 +11491,12 @@ mod tests {
         let regions = RealmRegions::new(vec![
             root_region(),
             own_region(),
-            region(OTHER_REALM, Some(OWN_REALM), DVec3::new(10.0, 0.0, 0.0), 100.0),
+            region(
+                OTHER_REALM,
+                Some(OWN_REALM),
+                DVec3::new(10.0, 0.0, 0.0),
+                100.0,
+            ),
         ]);
         let placements = regions.child_placements(OWN_REALM, 20.0, UniverseTick(5));
         assert_eq!(placements.len(), 1);
@@ -11486,9 +11511,18 @@ mod tests {
         let mut rig = Rig::new();
         plant_aoi(
             &mut rig,
-            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3),
+            ],
         );
-        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(500.0, 0.0, 0.0),
+        );
         assert!(demands(&rig.tick(vec![])).is_empty());
     }
 
@@ -11497,7 +11531,12 @@ mod tests {
         // Granted, but NO regions ⇒ the `is_empty` guard short-circuits ⇒ no demand.
         let mut rig = Rig::new();
         rig.grant_realm();
-        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(500.0, 0.0, 0.0),
+        );
         assert!(demands(&rig.tick(vec![])).is_empty());
     }
 
@@ -11510,9 +11549,18 @@ mod tests {
         rig.world.resource_mut::<ClockSample>().synced = false;
         plant_aoi(
             &mut rig,
-            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3),
+            ],
         );
-        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(500.0, 0.0, 0.0),
+        );
         assert!(demands(&rig.tick(vec![])).is_empty());
     }
 
@@ -11524,7 +11572,11 @@ mod tests {
         rig.grant_realm();
         plant_aoi(
             &mut rig,
-            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3),
+            ],
         );
         assert_eq!(
             demands(&rig.tick(vec![])),
@@ -11545,9 +11597,18 @@ mod tests {
         rig.grant_realm();
         plant_aoi(
             &mut rig,
-            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3),
+            ],
         );
-        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(500.0, 0.0, 0.0),
+        );
         let want = child_coord_of(OWN_REALM, OTHER_REALM);
         assert_eq!(
             demands(&rig.tick(vec![])),
@@ -11577,19 +11638,35 @@ mod tests {
         rig.grant_realm();
         plant_aoi(
             &mut rig,
-            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 2)],
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 2),
+            ],
         );
-        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(500.0, 0.0, 0.0),
+        );
         let mut seen = Vec::new();
         seen.extend(demands(&rig.tick(vec![]))); // SpinUp (grace armed to 2)
         move_dot(&mut rig, TRIG_SESSION, DVec3::new(3000.0, 0.0, 0.0)); // OUT of the 2000 m tear-down
         seen.extend(demands(&rig.tick(vec![]))); // KeepAlive (grace 2 → 1)
         seen.extend(demands(&rig.tick(vec![]))); // KeepAlive (grace 1 → 0)
         let after_grace = demands(&rig.tick(vec![])); // grace 0 ⇒ drop, silent
-        assert!(after_grace.is_empty(), "grace expired ⇒ the child stops being demanded");
+        assert!(
+            after_grace.is_empty(),
+            "grace expired ⇒ the child stops being demanded"
+        );
         assert_eq!(
             seen.iter().map(|d| d.verb).collect::<Vec<_>>(),
-            vec![DemandVerb::SpinUp, DemandVerb::KeepAlive, DemandVerb::KeepAlive]
+            vec![
+                DemandVerb::SpinUp,
+                DemandVerb::KeepAlive,
+                DemandVerb::KeepAlive
+            ]
         );
         assert!(
             !seen.iter().any(|d| d.verb == DemandVerb::TearDown),
@@ -11609,9 +11686,18 @@ mod tests {
         rig.grant_realm();
         plant_aoi(
             &mut rig,
-            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3),
+            ],
         );
-        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(1500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(1500.0, 0.0, 0.0),
+        );
         rig.world
             .resource_mut::<Dots>()
             .0
@@ -11635,9 +11721,18 @@ mod tests {
         still.grant_realm();
         plant_aoi(
             &mut still,
-            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3),
+            ],
         );
-        insert_owned_dot(&mut still, TRIG_SESSION, player(7), DVec3::new(1500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut still,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(1500.0, 0.0, 0.0),
+        );
         assert!(demands(&still.tick(vec![])).is_empty());
     }
 
@@ -11671,7 +11766,11 @@ mod tests {
             (SessionId(1), DVec3::new(500.0, 0.0, 0.0)),
         ]);
         assert_eq!(a, b);
-        assert_eq!(a.len(), 2, "both children reached ⇒ two SpinUps in a stable order");
+        assert_eq!(
+            a.len(),
+            2,
+            "both children reached ⇒ two SpinUps in a stable order"
+        );
     }
 
     #[test]
@@ -11682,9 +11781,18 @@ mod tests {
         rig.grant_realm();
         plant_aoi(
             &mut rig,
-            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3),
+            ],
         );
-        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(500.0, 0.0, 0.0),
+        );
         let _ = rig.tick(vec![]); // SpinUp ⇒ the child's AoI state is recorded
         assert_eq!(rig.world.resource::<AoiMembership>().0.len(), 1);
         // The child leaves the roster (region removed); its state is evicted next tick.
@@ -11698,7 +11806,11 @@ mod tests {
 
     /// Drive ONE AoI tick for a shard hosting `own_realm` with a live `child` region, an in-range occupant,
     /// and a granted lease — returning every demand. The HR4 fixture runs this on two realm kinds.
-    fn drive_aoi_spinup(own_realm: RealmId, own_frame: FrameRef, child: RealmRegion) -> Vec<RealmDemand> {
+    fn drive_aoi_spinup(
+        own_realm: RealmId,
+        own_frame: FrameRef,
+        child: RealmRegion,
+    ) -> Vec<RealmDemand> {
         let cfg = StubConfig {
             realm: own_realm,
             held_realms: StubConfig::single_realm(own_realm),
@@ -11709,9 +11821,20 @@ mod tests {
         let mut rig = Rig::with_config(cfg);
         grant_realm_for(&mut rig, own_realm);
         let root = region(ROOT_REALM, None, DVec3::ZERO, 1.0e9);
-        let own = region_framed(own_realm, Some(ROOT_REALM), DVec3::ZERO, 100_000.0, own_frame);
+        let own = region_framed(
+            own_realm,
+            Some(ROOT_REALM),
+            DVec3::ZERO,
+            100_000.0,
+            own_frame,
+        );
         plant_aoi(&mut rig, vec![root, own, child]);
-        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(500.0, 0.0, 0.0),
+        );
         demands(&rig.tick(vec![]))
     }
 
@@ -11753,6 +11876,9 @@ mod tests {
         assert_eq!(a[0].universe_tick, b[0].universe_tick);
         // Each names its OWN child through the coord machinery (System→Planet, Planet→Area).
         assert_eq!(a[0].child, child_coord_of(OWN_REALM, OTHER_REALM));
-        assert_eq!(b[0].child, child_coord_of(RealmId::Planet(42), RealmId::Area(99)));
+        assert_eq!(
+            b[0].child,
+            child_coord_of(RealmId::Planet(42), RealmId::Area(99))
+        );
     }
 }

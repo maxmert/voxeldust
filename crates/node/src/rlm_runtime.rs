@@ -89,7 +89,10 @@ impl RlmReconcilerRes {
     /// Build the reconciler around a validated tuning + an execute-seam spawner. `rlm_quiesced_until` is
     /// `0` (no freeze) at a cold boot; the crash-restart path re-arms it (slice 3e).
     #[must_use]
-    pub fn new(tuning: RlmTuning, spawner: Box<dyn RealmSpawner + Send + Sync>) -> RlmReconcilerRes {
+    pub fn new(
+        tuning: RlmTuning,
+        spawner: Box<dyn RealmSpawner + Send + Sync>,
+    ) -> RlmReconcilerRes {
         RlmReconcilerRes {
             ledger: DemandLedger::default(),
             launches: LaunchLedger::default(),
@@ -243,7 +246,9 @@ impl RlmReconcilerRes {
         let live = self.spawner.live_nodes();
         let ttl = self.tuning.launch_ttl_ticks;
         for (path, nodes) in &mut self.launches.minted {
-            let rid = path.realm_id().expect("a lifecycle realm path is non-empty");
+            let rid = path
+                .realm_id()
+                .expect("a lifecycle realm path is non-empty");
             let head_up = dir.head(DirectoryKey::Realm(rid)).is_some();
             nodes.retain(|node, minted_at| {
                 let within_ttl = now.0.saturating_sub(minted_at.0) < ttl;
@@ -279,7 +284,9 @@ impl RlmReconcilerRes {
 /// three [`RevokeOutcome`] arms are handled exhaustively (critique H-1: a refused revoke self-heals rather
 /// than desyncing).
 fn apply_revoke(dir: &mut DirectoryCore, path: &RealmPath, fence: Fence) -> bool {
-    let rid = path.realm_id().expect("a lifecycle realm path is non-empty");
+    let rid = path
+        .realm_id()
+        .expect("a lifecycle realm path is non-empty");
     match dir.revoke(DirectoryKey::Realm(rid), fence) {
         RevokeOutcome::Revoked | RevokeOutcome::UnknownKey => true,
         RevokeOutcome::Refused { .. } => false,
@@ -456,7 +463,10 @@ mod tests {
         };
         let rlm = run(vec![directory_saga, wrong_class, non_wire]);
         assert!(rlm.ledger().is_empty());
-        assert_eq!(rlm.undecodable_demands, 0, "a valid non-demand frame is not undecodable");
+        assert_eq!(
+            rlm.undecodable_demands, 0,
+            "a valid non-demand frame is not undecodable"
+        );
     }
 
     #[test]
@@ -548,7 +558,10 @@ mod tests {
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
-        assert_eq!(rlm.launches.minted.get(sys(7).path()).map(BTreeMap::len), Some(1));
+        assert_eq!(
+            rlm.launches.minted.get(sys(7).path()).map(BTreeMap::len),
+            Some(1)
+        );
         // The shard self-grants its head ⇒ the launch reconcile drains the minted node.
         grant(&mut d, RealmId::System(7), 50, 1);
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102));
@@ -564,8 +577,12 @@ mod tests {
         let mut d = dir();
         grant(&mut d, RealmId::System(7), 50, 3);
         let now = UniverseTick(500);
-        rlm.ledger
-            .record_demand(&sys(7), DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1));
+        rlm.ledger.record_demand(
+            &sys(7),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        );
         let mut open = LedgerDelta::default();
         open.set_draining.insert(
             sys(7).path().clone(),
@@ -574,7 +591,10 @@ mod tests {
         rlm.ledger.apply_delta(&open);
         rlm.reconcile_and_drive(&mut d, &|_n| false, now);
         assert_eq!(rlm.teardowns_reaped, 1);
-        assert!(!head_present(&d, RealmId::System(7)), "head revoked on kill");
+        assert!(
+            !head_present(&d, RealmId::System(7)),
+            "head revoked on kill"
+        );
         // Post-kill gauges: nothing desired, nothing running.
         assert_eq!(rlm.desired_gauge, 0);
         assert_eq!(rlm.running_gauge, 0);
@@ -590,8 +610,14 @@ mod tests {
         // node 50 DEAD ⇒ zombie ⇒ ForceReap (force-revoke the stale head).
         rlm.reconcile_and_drive(&mut d, &|n| n == NodeId(50), UniverseTick(100));
         assert_eq!(rlm.force_reaps, 1);
-        assert!(!head_present(&d, RealmId::System(7)), "zombie head force-revoked");
-        assert_eq!(rlm.spins_requested, 0, "no spawn the same sweep as the reap");
+        assert!(
+            !head_present(&d, RealmId::System(7)),
+            "zombie head force-revoked"
+        );
+        assert_eq!(
+            rlm.spins_requested, 0,
+            "no spawn the same sweep as the reap"
+        );
         // Next sweep: head gone, still demanded ⇒ re-spawn (self-heal).
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101));
         assert_eq!(rlm.spins_requested, 1);
@@ -609,7 +635,10 @@ mod tests {
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
         assert_eq!(rlm.spins_requested, 1);
         assert_eq!(rlm.spins_failed, 1);
-        assert_eq!(rlm.launches.fail_streak.get(sys(7).path()).copied(), Some(1));
+        assert_eq!(
+            rlm.launches.fail_streak.get(sys(7).path()).copied(),
+            Some(1)
+        );
         // Sweep 2 at now = 100 + cooldown: eligible per reconcile, but within the 2×cooldown backoff ⇒ skip.
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + cd));
         assert_eq!(rlm.spins_requested, 1, "still backing off ⇒ no 2nd attempt");
@@ -668,8 +697,12 @@ mod tests {
         let mut d = dir();
         grant(&mut d, RealmId::System(7), 50, 3);
         let now = UniverseTick(500);
-        rlm.ledger
-            .record_demand(&sys(7), DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1));
+        rlm.ledger.record_demand(
+            &sys(7),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        );
         rlm.reconcile_and_drive(&mut d, &|_n| false, now);
         assert_eq!(rlm.teardowns_reaped, 0, "quiesce blocks the reap");
         assert!(head_present(&d, RealmId::System(7)));
@@ -687,9 +720,18 @@ mod tests {
         grant(&mut d, RealmId::System(7), 50, 5); // head now at fence 5
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::Empty, UniverseTick(100), Fence(1));
-        rlm.exec_kill(&mut d, sys(7).path(), NodeId(50), Fence(3), UniverseTick(200)); // stale fence 3
+        rlm.exec_kill(
+            &mut d,
+            sys(7).path(),
+            NodeId(50),
+            Fence(3),
+            UniverseTick(200),
+        ); // stale fence 3
         assert_eq!(rlm.teardowns_reaped, 0, "a refused revoke counts no reap");
-        assert!(head_present(&d, RealmId::System(7)), "the newer owner's head stands");
+        assert!(
+            head_present(&d, RealmId::System(7)),
+            "the newer owner's head stands"
+        );
         assert!(
             rlm.ledger().get(sys(7).path()).is_some(),
             "the cell is retained for a retry"
@@ -702,7 +744,10 @@ mod tests {
         grant(&mut d, RealmId::System(7), 1, 5);
         // Refused (stale fence) ⇒ false, head stands.
         assert!(!apply_revoke(&mut d, sys(7).path(), Fence(3)));
-        assert!(head_present(&d, RealmId::System(7)), "a refused revoke leaves the head");
+        assert!(
+            head_present(&d, RealmId::System(7)),
+            "a refused revoke leaves the head"
+        );
         // Revoked (matching fence) ⇒ true, head gone.
         assert!(apply_revoke(&mut d, sys(7).path(), Fence(5)));
         assert!(!head_present(&d, RealmId::System(7)));

@@ -237,7 +237,6 @@ fn orbital_of(placement: Placement) -> Option<OrbitalElements> {
 /// OWN frame — occupant and child MUST share a cell through P3 (every pose is cell-ZERO; the cross-cell
 /// fold is P4/P5-owed). Yields `RealmCoord` via `parent.child(level)` so a not-yet-spawned child is
 /// nameable — NOT the lossy `RealmId`.
-#[must_use]
 pub fn children_within<'a>(
     parent: &'a RealmCoord,
     occupant_pos: DVec3,
@@ -265,7 +264,9 @@ fn aoi_within(child_pos: DVec3, occupant_pos: DVec3, radius: f64) -> Option<f64>
 #[must_use]
 pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
     match realm {
-        RealmId::System(UNIVERSE_SEED) => Some(RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED)),
+        RealmId::System(UNIVERSE_SEED) => {
+            Some(RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED))
+        }
         RealmId::System(GALAXY_SEED) => Some(RealmLevel::new(RealmKindTag::Galaxy, GALAXY_SEED)),
         RealmId::System(s) => Some(RealmLevel::new(RealmKindTag::System, s)),
         RealmId::Planet(s) => Some(RealmLevel::new(RealmKindTag::Planet, s)),
@@ -1526,7 +1527,10 @@ mod tests {
             planet.aoi.spin_up_r_m(),
             planet.shape.finite_extent() * VISUAL_AOI_SPIN_UP_FACTOR
         );
-        let system = visual.iter().find(|r| r.realm == SYSTEM_A).expect("system A");
+        let system = visual
+            .iter()
+            .find(|r| r.realm == SYSTEM_A)
+            .expect("system A");
         assert!(system.aoi.spin_up_r_m() > planet.aoi.spin_up_r_m());
     }
 
@@ -1534,7 +1538,10 @@ mod tests {
     fn aoi_within_boundary() {
         let occ = DVec3::ZERO;
         assert_eq!(aoi_within(DVec3::ZERO, occ, 10.0), Some(0.0));
-        assert_eq!(aoi_within(DVec3::new(10.0, 0.0, 0.0), occ, 10.0), Some(10.0));
+        assert_eq!(
+            aoi_within(DVec3::new(10.0, 0.0, 0.0), occ, 10.0),
+            Some(10.0)
+        );
         assert_eq!(aoi_within(DVec3::new(11.0, 0.0, 0.0), occ, 10.0), None);
     }
 
@@ -1547,14 +1554,23 @@ mod tests {
         ]))
         .expect("parent coord");
         let children = [
-            (RealmLevel::new(RealmKindTag::Planet, 10), DVec3::new(5.0, 0.0, 0.0)),
-            (RealmLevel::new(RealmKindTag::Planet, 20), DVec3::new(50.0, 0.0, 0.0)),
+            (
+                RealmLevel::new(RealmKindTag::Planet, 10),
+                DVec3::new(5.0, 0.0, 0.0),
+            ),
+            (
+                RealmLevel::new(RealmKindTag::Planet, 20),
+                DVec3::new(50.0, 0.0, 0.0),
+            ),
         ];
         let got: Vec<RealmCoord> = children_within(&parent, DVec3::ZERO, 10.0, &children)
             .map(|(c, _)| c)
             .collect();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0], parent.child(RealmLevel::new(RealmKindTag::Planet, 10)));
+        assert_eq!(
+            got[0],
+            parent.child(RealmLevel::new(RealmKindTag::Planet, 10))
+        );
     }
 
     #[test]
@@ -1593,7 +1609,12 @@ mod tests {
             Some(RealmLevel::new(RealmKindTag::Area, 7))
         );
         // A ship is entity-backed (P8), not seed-lineage ⇒ None (the filter_map-dropped case).
-        let ship = RealmId::Ship(crate::EntityId::pack(crate::entity_kind::EntityKind::Player, 1, 1, 1));
+        let ship = RealmId::Ship(crate::EntityId::pack(
+            crate::entity_kind::EntityKind::Player,
+            1,
+            1,
+            1,
+        ));
         assert_eq!(level_of(ship), None);
     }
 

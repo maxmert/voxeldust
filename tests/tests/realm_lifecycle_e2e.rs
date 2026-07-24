@@ -61,7 +61,12 @@ fn assemble(rlm: RlmTuning, spawner: MemSpawner, store: MemStore) -> Orch {
     world.insert_resource(OutboundBox::default());
     world.insert_resource(ClockSample::default());
     let mut schedule = Schedule::default();
-    register_orchestrator_with_store(&mut world, &mut schedule, &orch_cfg(rlm), Box::new(store.clone()));
+    register_orchestrator_with_store(
+        &mut world,
+        &mut schedule,
+        &orch_cfg(rlm),
+        Box::new(store.clone()),
+    );
     // Overwrite the default (internal-spawner) reconciler with one holding OUR inspectable spawner.
     world.insert_resource(RlmReconcilerRes::new(rlm, Box::new(spawner.clone())));
     Orch {
@@ -73,7 +78,11 @@ fn assemble(rlm: RlmTuning, spawner: MemSpawner, store: MemStore) -> Orch {
 }
 
 fn build() -> Orch {
-    assemble(RlmTuning::cloud(20), MemSpawner::new(MemHub::new(), NodeId(1_000_000), 8), MemStore::new())
+    assemble(
+        RlmTuning::cloud(20),
+        MemSpawner::new(MemHub::new(), NodeId(1_000_000), 8),
+        MemStore::new(),
+    )
 }
 
 impl Orch {
@@ -115,23 +124,32 @@ impl Orch {
     /// booted shard reaches (the real launch is Step 5). `node` is "alive" (never latched dead).
     fn register_shard(&mut self, rid: RealmId, node: NodeId) {
         let now = self.now();
-        self.world
-            .resource_mut::<DirectoryRes>()
-            .0
-            .grant(DirectoryKey::Realm(rid), AuthorityRef::Shard(node), Fence(1), now);
+        self.world.resource_mut::<DirectoryRes>().0.grant(
+            DirectoryKey::Realm(rid),
+            AuthorityRef::Shard(node),
+            Fence(1),
+            now,
+        );
     }
 
     /// Rebuild the orchestrator from its retained WAL (a kill-9): a FRESH world, the SAME store.
     fn crash_rebuild(self) -> Orch {
-        assemble(RlmTuning::cloud(20), MemSpawner::new(MemHub::new(), NodeId(2_000_000), 8), self.store)
+        assemble(
+            RlmTuning::cloud(20),
+            MemSpawner::new(MemHub::new(), NodeId(2_000_000), 8),
+            self.store,
+        )
     }
 }
 
 // ---- coords ------------------------------------------------------------------------------------
 
 fn system(seed: u64) -> RealmCoord {
-    RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(RealmKindTag::System, seed)]))
-        .expect("one-level path")
+    RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(
+        RealmKindTag::System,
+        seed,
+    )]))
+    .expect("one-level path")
 }
 
 /// A demand for `coord` at the orchestrator's current tick (a Step-2 shard stamps its own `now`).
@@ -153,13 +171,21 @@ fn a_demand_spins_up_the_realm_then_holds_while_launching() {
     orch.tick(&[]); // advance the genesis tick so `now` is live
     // A real SpinUp wire frame ⇒ the reconciler spawns the realm exactly once.
     let d = demand(&orch, &c, DemandVerb::SpinUp);
-    orch.tick(&[d.clone()]);
-    assert_eq!(orch.rlm().spins_requested, 1, "the demand spun up the realm");
+    orch.tick(&[d]);
+    assert_eq!(
+        orch.rlm().spins_requested,
+        1,
+        "the demand spun up the realm"
+    );
     assert_eq!(orch.spawner.live_nodes().len(), 1, "one pod launched");
     // Re-asserted while still launching (no head yet) ⇒ NO double-spawn (BUG-B).
     let d2 = demand(&orch, &c, DemandVerb::KeepAlive);
     orch.tick(&[d2]);
-    assert_eq!(orch.rlm().spins_requested, 1, "no double-spawn while launching");
+    assert_eq!(
+        orch.rlm().spins_requested,
+        1,
+        "no double-spawn while launching"
+    );
 }
 
 #[test]
@@ -189,8 +215,15 @@ fn no_strand_a_running_realm_with_no_demand_and_no_empty_is_never_killed() {
     for _ in 0..200 {
         orch.tick(&[]); // no demands at all — total silence
     }
-    assert_eq!(orch.rlm().teardowns_reaped, 0, "a live realm is never killed without an affirmative Empty");
-    assert!(orch.head(RealmId::System(7)), "the realm stayed alive through the silence");
+    assert_eq!(
+        orch.rlm().teardowns_reaped,
+        0,
+        "a live realm is never killed without an affirmative Empty"
+    );
+    assert!(
+        orch.head(RealmId::System(7)),
+        "the realm stayed alive through the silence"
+    );
 }
 
 #[test]
@@ -213,7 +246,10 @@ fn an_empty_realm_out_of_aoi_is_reclaimed_after_the_windows() {
         }
     }
     assert!(reaped, "a genuinely-empty out-of-AoI realm is reclaimed");
-    assert!(!orch.head(RealmId::System(7)), "its head was revoked on the reap");
+    assert!(
+        !orch.head(RealmId::System(7)),
+        "its head was revoked on the reap"
+    );
 }
 
 #[test]
@@ -231,9 +267,20 @@ fn a_demand_in_the_drain_window_rescues_the_realm() {
         let d = demand(&orch, &c, DemandVerb::SpinUp);
         orch.tick(&[d]);
     }
-    assert_eq!(orch.rlm().teardowns_reaped, 0, "the rescuing demand aborted the teardown");
-    assert_eq!(orch.rlm().spins_requested, 0, "the realm was never killed, so never re-spawned");
-    assert!(orch.head(RealmId::System(7)), "the rescued realm is still running");
+    assert_eq!(
+        orch.rlm().teardowns_reaped,
+        0,
+        "the rescuing demand aborted the teardown"
+    );
+    assert_eq!(
+        orch.rlm().spins_requested,
+        0,
+        "the realm was never killed, so never re-spawned"
+    );
+    assert!(
+        orch.head(RealmId::System(7)),
+        "the rescued realm is still running"
+    );
 }
 
 #[test]
@@ -251,8 +298,15 @@ fn an_orchestrator_crash_reaps_nothing_on_the_first_reboot_tick() {
     for _ in 0..50 {
         reborn.tick(&[]); // no demands yet (shards re-accrue over time)
     }
-    assert_eq!(reborn.rlm().teardowns_reaped, 0, "a rebuilt orchestrator never mass-reaps a surviving realm");
-    assert!(reborn.head(RealmId::System(7)), "the durable realm survived the crash");
+    assert_eq!(
+        reborn.rlm().teardowns_reaped,
+        0,
+        "a rebuilt orchestrator never mass-reaps a surviving realm"
+    );
+    assert!(
+        reborn.head(RealmId::System(7)),
+        "the durable realm survived the crash"
+    );
 }
 
 #[test]
