@@ -488,6 +488,31 @@ mod tests {
     }
 
     #[test]
+    fn profile_for_accepts_every_realm_coord_profile_kind() {
+        // RLM Step 1 consistency: every RealmCoord kind lowers to a ProfileKind that profile_for
+        // builds (this check lives here, not in vd-core, since profile_for is a vd-sim fn). Pins the
+        // Universe/Galaxy → Galaxy collapse the lifecycle relies on.
+        use vd_core::realm_coord::RealmCoord;
+        use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+        let coord = |kind| {
+            RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(kind, 7)]))
+                .expect("1-level path has a leaf")
+        };
+        for kind in RealmKindTag::ALL {
+            let c = coord(kind);
+            assert!(
+                profile_for(c.profile_kind()).is_ok(),
+                "{kind:?} profile builds"
+            );
+        }
+        // Universe and Galaxy collapse to the SAME (Galaxy) profile.
+        assert_eq!(
+            coord(RealmKindTag::Universe).profile_kind(),
+            coord(RealmKindTag::Galaxy).profile_kind()
+        );
+    }
+
+    #[test]
     fn profile_for_is_total_over_profile_kind() {
         use vd_core::taxonomy::ProfileKind;
         // Every ProfileKind maps to a buildable profile (the wildcard-free match is total).

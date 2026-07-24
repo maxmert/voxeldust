@@ -16,13 +16,18 @@
 //! its in-process absence as normal; mem/mesh parity is preserved by ABSENCE, not by
 //! fabricating a mem shed path.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use vd_core::realm_coord::RealmCoord;
+use vd_core::taxonomy::ProfileKind;
 use vd_core::{EpochId, MsgId, NodeId, TickId, UniverseTick};
 
-use super::{BoundedInbox, Bytes, Clock, Inbound, MsgClass, SendError, Store, Transport};
+use super::{
+    BoundedInbox, Bytes, Clock, Inbound, MsgClass, RealmSpawner, SendError, SpawnError, Store,
+    Transport,
+};
 
 /// The deterministic test clock: the topology driver advances it explicitly; nodes
 /// only ever READ it through the [`Clock`] trait. Shared-handle semantics (clone =
@@ -276,6 +281,38 @@ impl MemHub {
         }
     }
 
+    /// REMOVE a node from the hub entirely (RLM Step 1): a torn-down realm's transport slot is
+    /// reclaimed. DISTINCT from [`MemHub::kill`] (flag-only, for the kill-9 crash model where the id
+    /// may be `reregister`ed): `deregister` is safe to fully remove ONLY because the caller
+    /// ([`MemSpawner`], F2-monotone) NEVER re-registers a removed id — so there is no resurrection.
+    /// A no-op on an unknown id (mirrors `kill`). Prevents unbounded hub accretion under the
+    /// reconciler's spawn/kill churn.
+    pub fn deregister(&self, id: NodeId) {
+        self.lock().nodes.remove(&id);
+    }
+
+    /// The number of registered (not-yet-deregistered) nodes — the accretion assertion for RLM churn.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.lock().nodes.len()
+    }
+
+    /// A fresh transport HANDLE for an already-registered `id` (the RLM harness plant retrieves the
+    /// spawned node's endpoint here, since [`MemSpawner::spawn_realm`] discards the register handle).
+    /// `None` if `id` is not registered. A handle is a cheap `{id, hub}` view — several handles to one
+    /// node all route through its single hub queue.
+    #[must_use]
+    pub fn transport_for(&self, id: NodeId) -> Option<MemTransport> {
+        if self.lock().nodes.contains_key(&id) {
+            Some(MemTransport {
+                local: id,
+                hub: self.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
     /// Deterministically deliver every queued outbound frame: FIFO per sender, senders
     /// processed in `NodeId` order (BTreeMap iteration — never hash order).
     pub fn pump(&self) {
@@ -392,6 +429,83 @@ impl MemTransport {
             .nodes
             .get(&self.local)
             .map_or(0, |node| node.inbound.dropped_reliable())
+    }
+}
+
+/// The in-process [`RealmSpawner`] twin (RLM Step 1) — the deterministic harness counterpart to the
+/// real-process spawner (Step 5), like [`MemStore`]/[`MemHub`]. Mints monotone `NodeId`s (F2: never
+/// reused), plants each node's transport in a shared [`MemHub`], and records `(ProfileKind, at_tick)`
+/// per live node. No wall clock, no RNG; all state `BTreeMap`/`BTreeSet` (deterministic order).
+#[derive(Clone, Debug)]
+pub struct MemSpawner {
+    inner: Arc<Mutex<SpawnerInner>>,
+}
+
+#[derive(Debug)]
+struct SpawnerInner {
+    hub: MemHub,
+    next_node: u64,
+    live: BTreeMap<NodeId, (ProfileKind, UniverseTick)>,
+    killed: BTreeSet<NodeId>,
+    outbound_capacity: usize,
+}
+
+impl MemSpawner {
+    /// `first_node` starts the monotone mint range (choose it ABOVE the scenario's statically-picked
+    /// ids so a minted id never collides with a hand-picked one); `outbound_capacity` is the hub
+    /// registration bound for a spawned node. Both are config values (no inline magic number).
+    #[must_use]
+    pub fn new(hub: MemHub, first_node: NodeId, outbound_capacity: usize) -> Self {
+        MemSpawner {
+            inner: Arc::new(Mutex::new(SpawnerInner {
+                hub,
+                next_node: first_node.0,
+                live: BTreeMap::new(),
+                killed: BTreeSet::new(),
+                outbound_capacity,
+            })),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, SpawnerInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The live nodes' `(ProfileKind, at_tick)` witnesses — the reconciler reads this to compare
+    /// desired-vs-actual (the `at_tick` says WHEN a realm was spawned), and the harness reads it to
+    /// build the spawned node.
+    #[must_use]
+    pub fn live(&self) -> BTreeMap<NodeId, (ProfileKind, UniverseTick)> {
+        self.lock().live.clone()
+    }
+}
+
+impl RealmSpawner for MemSpawner {
+    fn spawn_realm(&self, coord: &RealmCoord, at_tick: UniverseTick) -> Result<NodeId, SpawnError> {
+        let kind = coord.profile_kind();
+        let mut g = self.lock();
+        let id = NodeId(g.next_node);
+        g.next_node += 1; // F2: monotone — never decremented, never reused
+        // Plant the node's transport in the hub (the harness retrieves the handle via
+        // `MemHub::transport_for`); monotone ids mean `register` never sees a duplicate.
+        let cap = g.outbound_capacity;
+        let _transport = g.hub.register(id, cap);
+        g.live.insert(id, (kind, at_tick));
+        Ok(id)
+    }
+
+    fn kill_realm(&self, node: NodeId) -> Result<(), SpawnError> {
+        let mut g = self.lock();
+        if g.killed.contains(&node) {
+            Err(SpawnError::AlreadyKilled(node))
+        } else if !g.live.contains_key(&node) {
+            Err(SpawnError::UnknownNode(node))
+        } else {
+            g.live.remove(&node);
+            g.killed.insert(node);
+            g.hub.deregister(node); // F-B: remove, not flag — no hub accretion under churn
+            Ok(())
+        }
     }
 }
 
@@ -707,6 +821,164 @@ mod tests {
             s.scan(b"x:"),
             vec![(b"x:2".to_vec(), vec![2].into())],
             "the committed delete removed x:1, x:2 remains",
+        );
+    }
+
+    // ---- RLM Step 1: the MemSpawner twin + MemHub deregister / transport_for ------------------
+    use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+
+    /// A 1-level `RealmCoord` for `kind`/`seed` (the leaf kind drives `profile_kind`).
+    fn spawn_coord(kind: RealmKindTag, seed: u64) -> RealmCoord {
+        RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(kind, seed)]))
+            .expect("1-level path has a leaf")
+    }
+
+    /// A `MemSpawner` whose mint range starts at `first` (above the hand-picked ids A/B).
+    fn spawner(first: u64) -> (MemHub, MemSpawner) {
+        let hub = MemHub::new();
+        let sp = MemSpawner::new(hub.clone(), NodeId(first), 8);
+        (hub, sp)
+    }
+
+    #[test]
+    fn spawn_mints_fresh_monotone_ids() {
+        let (hub, sp) = spawner(100);
+        let a = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::System, 7), UniverseTick(1))
+            .expect("spawn");
+        let b = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::Planet, 7), UniverseTick(1))
+            .expect("spawn");
+        let c = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::Area, 7), UniverseTick(1))
+            .expect("spawn");
+        assert_eq!((a, b, c), (NodeId(100), NodeId(101), NodeId(102)));
+        assert_eq!(hub.node_count(), 3, "each spawn planted a hub transport");
+    }
+
+    #[test]
+    fn spawn_derives_profile_from_kind() {
+        let (_hub, sp) = spawner(100);
+        let id = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::System, 7), UniverseTick(1))
+            .expect("spawn");
+        assert_eq!(sp.live()[&id].0, ProfileKind::System);
+    }
+
+    #[test]
+    fn spawn_records_at_tick() {
+        let (_hub, sp) = spawner(100);
+        let id = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::System, 7), UniverseTick(42))
+            .expect("spawn");
+        assert_eq!(sp.live()[&id].1, UniverseTick(42));
+    }
+
+    #[test]
+    fn kill_unknown_errors() {
+        let (_hub, sp) = spawner(100);
+        assert_eq!(
+            sp.kill_realm(NodeId(999)).expect_err("never spawned"),
+            SpawnError::UnknownNode(NodeId(999))
+        );
+    }
+
+    #[test]
+    fn kill_then_kill_again_errors() {
+        let (_hub, sp) = spawner(100);
+        let id = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::System, 7), UniverseTick(1))
+            .expect("spawn");
+        assert_eq!(sp.kill_realm(id), Ok(()));
+        assert_eq!(
+            sp.kill_realm(id).expect_err("second kill"),
+            SpawnError::AlreadyKilled(id)
+        );
+    }
+
+    #[test]
+    fn killed_id_is_never_reminted() {
+        let (_hub, sp) = spawner(100);
+        let first = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::System, 7), UniverseTick(1))
+            .expect("spawn");
+        assert_eq!(first, NodeId(100));
+        sp.kill_realm(first).expect("kill");
+        let next = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::System, 8), UniverseTick(1))
+            .expect("respawn");
+        assert_ne!(next, first);
+        assert_eq!(
+            next,
+            NodeId(101),
+            "the mint counter never rewinds past a killed id"
+        );
+    }
+
+    #[test]
+    fn kill_deregisters_from_hub_no_accretion() {
+        let (hub, sp) = spawner(100);
+        let baseline = hub.node_count();
+        for _ in 0..5 {
+            let id = sp
+                .spawn_realm(&spawn_coord(RealmKindTag::System, 7), UniverseTick(1))
+                .expect("spawn");
+            assert_eq!(hub.node_count(), baseline + 1);
+            sp.kill_realm(id).expect("kill");
+            assert_eq!(
+                hub.node_count(),
+                baseline,
+                "kill deregistered the node — no accretion"
+            );
+        }
+    }
+
+    #[test]
+    fn deregister_unknown_is_noop() {
+        let hub = MemHub::new();
+        hub.deregister(NodeId(777)); // the absent-key branch — must not panic
+        assert_eq!(hub.node_count(), 0);
+    }
+
+    #[test]
+    fn transport_for_returns_a_handle_for_registered_else_none() {
+        let hub = MemHub::new();
+        let _t = hub.register(A, 8);
+        assert!(
+            hub.transport_for(A).is_some(),
+            "registered node has a handle"
+        );
+        assert!(
+            hub.transport_for(B).is_none(),
+            "unregistered node has no handle"
+        );
+    }
+
+    #[test]
+    fn mem_spawner_recovers_from_poisoned_lock() {
+        let (_hub, sp) = spawner(100);
+        let sp2 = sp.clone();
+        let poisoner = std::thread::spawn(move || {
+            let _g = sp2.lock();
+            panic!("poison the spawner lock");
+        });
+        assert!(poisoner.join().is_err(), "poisoner thread must panic");
+        // The next op recovers via `into_inner` — one panic cannot wedge the spawner.
+        let id = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::System, 7), UniverseTick(1))
+            .expect("post-poison spawn");
+        assert_eq!(id, NodeId(100));
+    }
+
+    #[test]
+    fn spawn_error_display() {
+        assert_eq!(
+            SpawnError::UnknownNode(NodeId(5)).to_string(),
+            "unknown realm node: node-5"
+        );
+        assert_eq!(
+            SpawnError::AlreadyKilled(NodeId(5)).to_string(),
+            "realm node already killed: node-5"
         );
     }
 }

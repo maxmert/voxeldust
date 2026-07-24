@@ -36,7 +36,8 @@
 use serde::{Deserialize, Serialize};
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::{RealmId, StampedPose};
-use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId};
+use vd_core::realm_coord::RealmCoord;
+use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick};
 
 use crate::seams::directory::{DirectoryKey, DirectoryOp, DirectoryReply};
 use crate::seams::transfer_control::{TransferControl, TransferControlAck};
@@ -248,6 +249,12 @@ pub enum InterShardFlow {
     /// keys idempotency on the SAME `(transfer, TRANSIENT_BATCH_STEP)` as the abort it answers (request + ack
     /// share one journal). Side-effecting. APPENDED (preserves every existing postcard discriminant).
     CrossingAbortedAck(CrossingAborted),
+    /// Realm lifecycle (RLM Step 1): a level-triggered spin-up / keep-alive / empty / teardown
+    /// demand between a realm and the orchestrator. Re-asserted every tick, so a dropped verb
+    /// self-heals ⇒ `ReDriven`. Authority-gating discrete state keyed on `parent_fence` (the
+    /// parent's authority proof), like `CrossingRequest` ⇒ `SideEffecting{FencedKey}`. APPENDED
+    /// (preserves every existing postcard discriminant).
+    RealmDemand(RealmDemand),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -429,6 +436,13 @@ impl InterShardFlow {
                     step_id: TRANSIENT_BATCH_STEP,
                 },
             },
+            // Authority-gating discrete state (drives a spawn/kill), keyed on the parent's authority
+            // fence — a redelivered demand for the same fenced parent is a covered no-op.
+            InterShardFlow::RealmDemand(d) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::FencedKey {
+                    fence: d.parent_fence,
+                },
+            },
         }
     }
 
@@ -492,9 +506,42 @@ impl InterShardFlow {
             | InterShardFlow::TransientCrossingRequest(_)
             | InterShardFlow::TransientCrossingGrant(_)
             | InterShardFlow::CrossingAborted(_)
-            | InterShardFlow::CrossingAbortedAck(_) => FlowDurabilityClass::ReDriven,
+            | InterShardFlow::CrossingAbortedAck(_)
+            // RLM Step 1: the parent re-asserts this demand every tick it holds (and the child its
+            // Empty report), so a dropped verb self-heals next tick — ReDriven, never producer-less.
+            | InterShardFlow::RealmDemand(_) => FlowDurabilityClass::ReDriven,
         }
     }
+}
+
+/// The lifecycle verb a [`RealmDemand`] carries. LEVEL-TRIGGERED: re-asserted every tick; a dropped
+/// verb self-heals on the next re-assertion (⇒ `ReDriven`). `Empty` is the child self-reporting
+/// upward that it holds no occupants (it is the occupancy authority — a sealed parent cannot see
+/// inside it). APPEND-only after `TearDown` (frozen postcard discriminants).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum DemandVerb {
+    /// An occupant AoI now reaches this child: it must be running.
+    SpinUp = 0,
+    /// Still reached — keep it running (steady-state re-assertion).
+    KeepAlive = 1,
+    /// Child → parent: I hold no occupants (occupancy self-report, RLM R1).
+    Empty = 2,
+    /// No occupant AoI reaches this child: it may be reclaimed.
+    TearDown = 3,
+}
+
+/// A level-triggered realm-lifecycle demand (RLM Step 1). Carries the CHILD endpoint as a
+/// lineage-anchored [`RealmCoord`] (globally unique — the consumer dedups on `child.path()`, never
+/// the lossy `child.lowered()`), the PARENT's authority [`Fence`] (the authority proof; the parent
+/// coord is redundant — `child.parent()` derives it — so it is NOT on the wire), the verb, and the
+/// tick it was asserted at. Field order is frozen once shipped (positional postcard).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RealmDemand {
+    pub child: RealmCoord,
+    pub parent_fence: Fence,
+    pub verb: DemandVerb,
+    pub universe_tick: UniverseTick,
 }
 
 /// Orchestrator → SOURCE shard pose-flush request (Slice 1d.1). The source finds the held dot for
@@ -937,6 +984,70 @@ mod tests {
             class,
             payload,
         }
+    }
+
+    /// A Universe-rooted `[Universe, Galaxy, System]` lineage (globally-unique path); leaf lowers
+    /// to a real `RealmId::System`.
+    fn demand_coord() -> RealmCoord {
+        use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+        RealmCoord::from_path(RealmPath::from_levels(vec![
+            RealmLevel::new(RealmKindTag::Universe, 0),
+            RealmLevel::new(RealmKindTag::Galaxy, 2),
+            RealmLevel::new(RealmKindTag::System, 7),
+        ]))
+        .expect("3-level path has a leaf")
+    }
+
+    /// A `[Universe, Galaxy]` lineage — a distinct wire shape (shorter path; leaf lowers via the
+    /// Galaxy stand-in), so the round-trip exercises more than one `RealmCoord` encoding.
+    fn galaxy_demand_coord() -> RealmCoord {
+        use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+        RealmCoord::from_path(RealmPath::from_levels(vec![
+            RealmLevel::new(RealmKindTag::Universe, 0),
+            RealmLevel::new(RealmKindTag::Galaxy, 2),
+        ]))
+        .expect("2-level path has a leaf")
+    }
+
+    #[test]
+    fn realm_demand_arms_roundtrip() {
+        // Every verb × two coord shapes: postcard round-trips the appended arm + its RealmCoord.
+        for verb in [
+            DemandVerb::SpinUp,
+            DemandVerb::KeepAlive,
+            DemandVerb::Empty,
+            DemandVerb::TearDown,
+        ] {
+            for child in [demand_coord(), galaxy_demand_coord()] {
+                let flow = InterShardFlow::RealmDemand(RealmDemand {
+                    child,
+                    parent_fence: Fence(4),
+                    verb,
+                    universe_tick: UniverseTick(9),
+                });
+                let bytes = postcard::to_allocvec(&flow).expect("encode");
+                let back: InterShardFlow = postcard::from_bytes(&bytes).expect("decode");
+                assert_eq!(back, flow);
+            }
+        }
+    }
+
+    #[test]
+    fn realm_demand_effect_and_durability() {
+        // The appended classifier arms (equality, not `matches!`): FencedKey{parent_fence} + ReDriven.
+        let flow = InterShardFlow::RealmDemand(RealmDemand {
+            child: demand_coord(),
+            parent_fence: Fence(4),
+            verb: DemandVerb::SpinUp,
+            universe_tick: UniverseTick(9),
+        });
+        assert_eq!(
+            flow.effect_class(),
+            EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::FencedKey { fence: Fence(4) }
+            }
+        );
+        assert_eq!(flow.durability_class(), FlowDurabilityClass::ReDriven);
     }
 
     /// G-SEALED: every arm has a coherent effect class, and side-effecting arms

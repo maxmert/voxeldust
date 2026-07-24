@@ -15,6 +15,8 @@
 
 use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
+use vd_core::realm_coord::RealmCoord;
+use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
 use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick};
 use vd_wire::intershard::{
     EffectClass, FLUSH_SOURCE_STEP, FlowDurabilityClass, FlushSource, GhostFlow, IdempotencyKey,
@@ -272,7 +274,27 @@ fn every_arm() -> Vec<InterShardFlow> {
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             transfer: TransferId(10),
         }),
+        // RLM Step 1 arm: the realm-lifecycle demand. Universe-rooted child path (not a bare
+        // 1-level — no aliasing), non-`GENESIS` parent fence (the roundtrip asserts `!= GENESIS`
+        // for `FencedKey`). SIDE-EFFECTING (FencedKey{parent_fence}) / ReDriven — NOT producer-less.
+        InterShardFlow::RealmDemand(vd_wire::intershard::RealmDemand {
+            child: demand_child_coord(),
+            parent_fence: Fence(4),
+            verb: vd_wire::intershard::DemandVerb::SpinUp,
+            universe_tick: UniverseTick(9),
+        }),
     ]
+}
+
+/// A Universe-rooted `[Universe, Galaxy, System]` child coord for the `RealmDemand` fixture — a
+/// lineage-rooted path (not a bare 1-level), so the globally-unique-path invariant holds.
+fn demand_child_coord() -> RealmCoord {
+    RealmCoord::from_path(RealmPath::from_levels(vec![
+        RealmLevel::new(RealmKindTag::Universe, 0),
+        RealmLevel::new(RealmKindTag::Galaxy, 2),
+        RealmLevel::new(RealmKindTag::System, 7),
+    ]))
+    .expect("3-level path has a leaf")
 }
 
 /// Compile-time tripwire: adding an `InterShardFlow` arm MUST break this exhaustive
@@ -303,7 +325,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::TransientCrossingRequest(_)
         | InterShardFlow::TransientCrossingGrant(_)
         | InterShardFlow::CrossingAborted(_)
-        | InterShardFlow::CrossingAbortedAck(_) => {}
+        | InterShardFlow::CrossingAbortedAck(_)
+        | InterShardFlow::RealmDemand(_) => {}
     }
 }
 
@@ -330,6 +353,17 @@ fn payload_tripwire(p: &TransitionPayload) {
 fn ghost_tripwire(g: &GhostFlow) {
     match g {
         GhostFlow::Spawn { .. } | GhostFlow::Delta { .. } | GhostFlow::Despawn { .. } => {}
+    }
+}
+
+/// NESTED-VARIANT tripwire (RLM Step 1): a new `DemandVerb` must be enumerated here or fail to
+/// compile — the same guard `payload_tripwire`/`ghost_tripwire` give the nested Transfer/Ghost
+/// payloads (a 5th verb would otherwise slip `every_arm` + the golden pin vacuously). Never called.
+#[allow(dead_code)]
+fn demand_verb_tripwire(v: &vd_wire::intershard::DemandVerb) {
+    use vd_wire::intershard::DemandVerb;
+    match v {
+        DemandVerb::SpinUp | DemandVerb::KeepAlive | DemandVerb::Empty | DemandVerb::TearDown => {}
     }
 }
 

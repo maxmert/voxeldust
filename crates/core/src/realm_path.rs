@@ -2,10 +2,13 @@
 //! Universe root, used by the seed universe generator to derive "who is my parent" and "who
 //! are my children" WITHOUT scanning a materialized region Vec.
 //!
-//! Strictly OFF the wire (HR1): [`RealmId`]/`FrameRef`/`StampedPose` frozen bytes are
-//! untouched, and [`RealmKindTag`] is a DERIVATION-only tag distinct from the frozen `RealmId`
-//! enum (it can name `Universe`/`Galaxy`, which `RealmId` cannot until Slice 4 — they map to
-//! the interim `System(0)`/`System(1)` stand-ins here). The path is the sole source of parent
+//! The frozen `RealmId`/`FrameRef`/`StampedPose` wire bytes are untouched. [`RealmKindTag`] is a
+//! DERIVATION tag distinct from the frozen `RealmId` enum (it can name `Universe`/`Galaxy`, which
+//! `RealmId` cannot until Slice 4 — they map to the interim `System(0)`/`System(1)` stand-ins
+//! here). NOTE (RLM Step 1): `RealmKindTag`/`RealmLevel`/`RealmPath` are now serde-derived because
+//! [`crate::realm_coord::RealmCoord`] lifts them onto the wire behind the frozen
+//! `InterShardFlow::RealmDemand` arm; their postcard discriminants are frozen append-only surfaces.
+//! The path is the sole source of parent
 //! provenance: [`RealmPath::parent_realm`] closes the "a `Planet` cannot name its `System`"
 //! gap and supplies the exact `Area`→`Planet` parent that [`crate::pose::frame_for_realm`]
 //! needs — read from the path, not a region scan.
@@ -16,29 +19,46 @@
 //! piece, deferred to P4; do NOT assume this book generalizes for free.
 
 use crate::pose::RealmId;
+use serde::{Deserialize, Serialize};
 
 /// The interim `RealmId` stand-in for the Universe root (no dedicated wire arm until Slice 4).
 const UNIVERSE_STANDIN: RealmId = RealmId::System(0);
 /// The interim `RealmId` stand-in for a Galaxy realm (no dedicated wire arm until Slice 4).
 const GALAXY_STANDIN: RealmId = RealmId::System(1);
 
-/// The KIND of a realm in a lineage — a derivation-only tag (NOT the frozen wire `RealmId`).
-/// `Universe`/`Galaxy` have no `RealmId` arm yet (Slice 4); they resolve to the stand-ins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The KIND of a realm in a lineage. `Universe`/`Galaxy` have no `RealmId` arm yet (Slice 4);
+/// they resolve to the stand-ins. Now serde-derived + `#[repr(u8)]` with explicit discriminants
+/// (frozen APPEND-only order, mirroring [`crate::taxonomy::ProfileKind`]) because it rides the
+/// wire via [`crate::realm_coord::RealmCoord`] (RLM Step 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum RealmKindTag {
-    Universe,
-    Galaxy,
-    System,
-    Planet,
-    Station,
-    Area,
+    Universe = 0,
+    Galaxy = 1,
+    System = 2,
+    Planet = 3,
+    Station = 4,
+    Area = 5,
+}
+
+impl RealmKindTag {
+    /// Every kind in declaration order = the frozen postcard discriminant order (APPEND-only).
+    /// Mirrors [`crate::taxonomy::ProfileKind::ALL`]; the drift tripwire test loops it.
+    pub const ALL: [RealmKindTag; 6] = [
+        RealmKindTag::Universe,
+        RealmKindTag::Galaxy,
+        RealmKindTag::System,
+        RealmKindTag::Planet,
+        RealmKindTag::Station,
+        RealmKindTag::Area,
+    ];
 }
 
 /// One level of a lineage: its kind + its deterministic seed. The `seed` doubles as the
 /// `RealmId` payload for the keyed kinds (System/Planet/Station/Area) and as the RNG lineage
 /// seed fed to [`crate::rng::realm_stream`]; `Universe`/`Galaxy` resolve to the stand-ins
 /// regardless of `seed`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealmLevel {
     pub kind: RealmKindTag,
     pub seed: u64,
@@ -67,7 +87,7 @@ impl RealmLevel {
 
 /// A realm's ordered lineage, root → leaf (e.g. `[Universe, Galaxy(g), System(s), Planet(p),
 /// Area(a)]`). Off the wire; the derivation-layer source of parent/child structure.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealmPath(Vec<RealmLevel>);
 
 impl RealmPath {
@@ -293,5 +313,43 @@ mod tests {
         // A non-roster realm is loud None (never a wrong-lineage guess).
         assert_eq!(path_for_realm(RealmId::System(999)), None);
         assert_eq!(path_for_realm(RealmId::Planet(999)), None);
+    }
+
+    #[test]
+    fn realm_kind_tag_all_is_exhaustive() {
+        // Drift tripwire: a 7th kind must be added to ALL (this match then fails to compile).
+        for k in RealmKindTag::ALL {
+            match k {
+                RealmKindTag::Universe
+                | RealmKindTag::Galaxy
+                | RealmKindTag::System
+                | RealmKindTag::Planet
+                | RealmKindTag::Station
+                | RealmKindTag::Area => {}
+            }
+        }
+        assert_eq!(RealmKindTag::ALL.len(), 6);
+    }
+
+    #[test]
+    fn realm_kind_tag_serde_discriminants_frozen() {
+        // Each unit variant's postcard byte IS its append-only discriminant 0..5 — a wire freeze
+        // (RealmCoord lifts RealmKindTag onto the RealmDemand arm); `as u8` pins the repr too.
+        let expected: [(RealmKindTag, u8); 6] = [
+            (RealmKindTag::Universe, 0),
+            (RealmKindTag::Galaxy, 1),
+            (RealmKindTag::System, 2),
+            (RealmKindTag::Planet, 3),
+            (RealmKindTag::Station, 4),
+            (RealmKindTag::Area, 5),
+        ];
+        for (kind, disc) in expected {
+            assert_eq!(kind as u8, disc, "{kind:?} repr discriminant");
+            assert_eq!(
+                postcard::to_allocvec(&kind).expect("encode"),
+                vec![disc],
+                "{kind:?} postcard discriminant byte"
+            );
+        }
     }
 }

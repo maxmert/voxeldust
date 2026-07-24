@@ -18,7 +18,8 @@
 pub mod mem;
 
 use serde::{Deserialize, Serialize};
-use vd_core::{MsgId, NodeId};
+use vd_core::realm_coord::RealmCoord;
+use vd_core::{MsgId, NodeId, UniverseTick};
 
 /// Opaque wire payload. Always produced by a `vd-wire` encoder — never hand-rolled
 /// bytes (HR1: the closed flow taxonomies are the only byte producers).
@@ -422,6 +423,36 @@ pub trait Store {
     fn scan(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Bytes)>;
     /// THE durability barrier: make every staged `put`/`delete` durable atomically (group-commit).
     fn commit(&mut self);
+}
+
+/// Closed spawn/kill failure taxonomy (thiserror), mirroring [`SendError`]. NO `BadProfile` arm:
+/// `profile_for` is infallible for every kind `RealmCoord::profile_kind` produces, so profile
+/// selection cannot fail — `spawn_realm`'s `Result` exists only as the future-placement seam, and
+/// both current variants are `kill_realm` outcomes (each independently reachable — no dead region).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SpawnError {
+    /// `kill_realm` named an id this spawner never minted.
+    #[error("unknown realm node: {0}")]
+    UnknownNode(NodeId),
+    /// `kill_realm` named an id already torn down (F2: never resurrected under the same id).
+    #[error("realm node already killed: {0}")]
+    AlreadyKilled(NodeId),
+}
+
+/// The sealed spawn/kill port (RLM Step 1). Lives OUTSIDE the sealed shard (HR1): a shard cannot
+/// spin up a sibling — only the lifecycle authority (the orchestrator, or the harness twin) holds a
+/// `RealmSpawner`. OBJECT-SAFE (used as `&dyn RealmSpawner`), so there is NO per-monomorphization
+/// region gotcha (HR5) — like [`Store`]. The real-process impl (Step 5) launches a `vd-shard` and
+/// registers a `MeshTransport`; the [`crate::io::mem::MemSpawner`] twin plants a `MemHub` node.
+pub trait RealmSpawner {
+    /// Spin up `coord` as a sealed shard at `at_tick`, returning its FRESH `NodeId` (F2: monotone,
+    /// NEVER reused — a torn-down realm's id is retired forever, so a dead-node latch can never
+    /// shadow a new incarnation). The profile is derived from `coord.profile_kind()` (HR3: a
+    /// capability config, never a feature match-on-kind).
+    fn spawn_realm(&self, coord: &RealmCoord, at_tick: UniverseTick) -> Result<NodeId, SpawnError>;
+
+    /// Tear down a running realm shard by its minted id.
+    fn kill_realm(&self, node: NodeId) -> Result<(), SpawnError>;
 }
 
 #[cfg(test)]
