@@ -61,14 +61,16 @@ fn assemble(rlm: RlmTuning, spawner: MemSpawner, store: MemStore) -> Orch {
     world.insert_resource(OutboundBox::default());
     world.insert_resource(ClockSample::default());
     let mut schedule = Schedule::default();
+    // RLM Step 4a — the spawner is INJECTED through the REAL boot path (no post-boot overwrite), so the
+    // orchestrator's own `arm_quiesce`-on-recover fires: on a crash-rebuild from a non-empty store the
+    // reconciler comes up with the crash-recovery freeze ALREADY armed, exactly as production would.
     register_orchestrator_with_store(
         &mut world,
         &mut schedule,
         &orch_cfg(rlm),
         Box::new(store.clone()),
+        Box::new(spawner.clone()),
     );
-    // Overwrite the default (internal-spawner) reconciler with one holding OUR inspectable spawner.
-    world.insert_resource(RlmReconcilerRes::new(rlm, Box::new(spawner.clone())));
     Orch {
         world,
         schedule,
@@ -295,6 +297,16 @@ fn an_orchestrator_crash_reaps_nothing_on_the_first_reboot_tick() {
     assert!(orch.head(RealmId::System(7)));
 
     let mut reborn = orch.crash_rebuild();
+    // RLM Step 4a — the crash-recovery freeze is ARMED on recover (before 4a it was hard-set to 0 and the
+    // clause was DEAD: `arm_quiesce` had no boot caller). Resume the clock one tick so `now` is meaningful,
+    // then assert teardown is frozen strictly PAST the resume point.
+    reborn.tick(&[]);
+    assert!(
+        reborn.rlm().rlm_quiesced_until() > reborn.now(),
+        "the crash-recovery freeze is armed past the resume point ({:?} > {:?})",
+        reborn.rlm().rlm_quiesced_until(),
+        reborn.now(),
+    );
     for _ in 0..50 {
         reborn.tick(&[]); // no demands yet (shards re-accrue over time)
     }
@@ -306,6 +318,117 @@ fn an_orchestrator_crash_reaps_nothing_on_the_first_reboot_tick() {
     assert!(
         reborn.head(RealmId::System(7)),
         "the durable realm survived the crash"
+    );
+}
+
+#[test]
+fn a_genesis_orchestrator_has_no_crash_freeze() {
+    // The freeze exists ONLY to protect a RECOVERED realm's demand ledger while it re-accrues. A GENESIS
+    // orchestrator never ran a realm, so there is nothing to freeze — `rlm_quiesced_until` stays unarmed
+    // (`0`). This is the before/after contrast that pins the 4a fix: genesis == 0, recover > now.
+    let orch = build();
+    assert_eq!(
+        orch.rlm().rlm_quiesced_until(),
+        UniverseTick(0),
+        "a genesis orchestrator's crash freeze is unarmed",
+    );
+}
+
+#[test]
+fn the_crash_freeze_bridges_an_empty_report_until_a_demand_reaccrues() {
+    // THE STRAND the 4a freeze exists to close (vet wf_c09198b3). A demand-kept-alive STAGING realm (empty
+    // of direct occupants, but a parent's `KeepAlive` holds it desired because an occupant's AoI reaches it)
+    // survives a kill-9. Post-crash the RAM demand ledger is EMPTY. The surviving child shard keeps
+    // self-reporting `Empty`; its parent's `KeepAlive` has not re-accrued yet. WITHOUT the freeze the FRESH
+    // ledger cell (`spawn_watermark == 0`) bypasses `min_dwell` AND arm-B fires (`empty_confirmed`, not
+    // demanded) ⇒ the realm is reaped despite a demand being milliseconds from re-landing. The freeze holds
+    // teardown across that gap.
+    let mut orch = build();
+    let c = system(7);
+    orch.tick(&[]);
+    orch.tick(&[demand(&orch, &c, DemandVerb::SpinUp)]);
+    orch.register_shard(RealmId::System(7), CHILD_SHARD);
+    orch.tick(&[demand(&orch, &c, DemandVerb::KeepAlive)]);
+    assert!(
+        orch.head(RealmId::System(7)),
+        "the staging realm is running"
+    );
+
+    let mut reborn = orch.crash_rebuild();
+    reborn.tick(&[]); // resume the clock
+    assert!(
+        reborn.rlm().rlm_quiesced_until() > reborn.now(),
+        "the freeze is armed",
+    );
+    // The child shard survived and keeps reporting Empty; NO demand re-accrues yet. Past `empty_grace` the
+    // realm is confirmed-empty AND undesired — reaped in an instant if the freeze were dead.
+    for _ in 0..15 {
+        let empty = demand(&reborn, &c, DemandVerb::Empty);
+        reborn.tick(&[empty]);
+    }
+    assert_eq!(
+        reborn.rlm().teardowns_reaped,
+        0,
+        "the freeze bridges the empty report — no reap while frozen",
+    );
+    assert!(
+        reborn.head(RealmId::System(7)),
+        "the realm survives the freeze window",
+    );
+    // The parent's `KeepAlive` re-accrues (the occupant's AoI re-lands) — now permanently desired.
+    for _ in 0..15 {
+        let ka = demand(&reborn, &c, DemandVerb::KeepAlive);
+        reborn.tick(&[ka]);
+    }
+    assert_eq!(
+        reborn.rlm().teardowns_reaped,
+        0,
+        "a re-accrued demand keeps the realm alive past the freeze",
+    );
+    assert!(
+        reborn.head(RealmId::System(7)),
+        "the realm stays running once its demand re-accrues",
+    );
+}
+
+#[test]
+fn the_crash_freeze_releases_and_a_truly_abandoned_realm_is_reaped() {
+    // The freeze is a TEMPORARY bridge, not a permanent no-reap. If a realm is genuinely abandoned (the warp
+    // was cancelled: the child shard keeps reporting `Empty` and NO demand ever re-accrues), it MUST still be
+    // reaped once the freeze releases — otherwise a crash would leak a realm shard forever (the 100K-scale
+    // cost the reconciler exists to reclaim). This proves the 4a freeze RELEASES.
+    let mut orch = build();
+    let c = system(7);
+    orch.tick(&[]);
+    orch.tick(&[demand(&orch, &c, DemandVerb::SpinUp)]);
+    orch.register_shard(RealmId::System(7), CHILD_SHARD);
+    orch.tick(&[demand(&orch, &c, DemandVerb::KeepAlive)]);
+    assert!(orch.head(RealmId::System(7)));
+
+    let mut reborn = orch.crash_rebuild();
+    // Empty-only forever, no demand ever re-accrues. Run well past the freeze (`recovery_grace` = one full
+    // demand TTL) plus the two-phase drain + cooldown; the abandoned realm is reaped.
+    let mut reaped_tick = None;
+    for _ in 0..400 {
+        let empty = demand(&reborn, &c, DemandVerb::Empty);
+        reborn.tick(&[empty]);
+        if reborn.rlm().teardowns_reaped >= 1 {
+            reaped_tick = Some(reborn.now());
+            break;
+        }
+    }
+    assert!(
+        reaped_tick.is_some(),
+        "the freeze released and the abandoned realm was reaped",
+    );
+    assert!(
+        !reborn.head(RealmId::System(7)),
+        "the abandoned realm's head is revoked after the reap",
+    );
+    // The reap happened AFTER the freeze window (never during it).
+    assert!(
+        reaped_tick.expect("reaped") >= reborn.rlm().rlm_quiesced_until(),
+        "the reap fired only after the freeze released",
     );
 }
 

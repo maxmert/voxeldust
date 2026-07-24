@@ -28,7 +28,7 @@ use vd_node::orchestrator::{DirectoryRes, OrchestratorConfig, register_orchestra
 use vd_node::saga_runtime::{ActiveTransfer, SagaRuntimeRes};
 use vd_sim::capability::{CapRequest, NodeKind, ShardProfile};
 use vd_sim::directory::DirectoryTuning;
-use vd_sim::io::mem::MemStore;
+use vd_sim::io::mem::{MemHub, MemSpawner, MemStore};
 use vd_sim::saga::{LivenessTuning, SagaCtx};
 use vd_sim::stub::{StubConfig, register_stub_shard};
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, OwnerRecord};
@@ -199,6 +199,13 @@ fn stub_roster(shard_ids: impl IntoIterator<Item = NodeId>) -> BTreeMap<NodeId, 
     shard_ids.into_iter().map(|id| (id, empty)).collect()
 }
 
+/// A throwaway RLM realm spawner for the P2/P3 cluster harnesses. RLM is INERT in these clusters (the
+/// reconciler never sweeps ⇒ this is never invoked); it only satisfies the boot signature. The dedicated
+/// RLM E2E (`realm_lifecycle_e2e.rs`) builds its own inspectable spawner tied to the shared hub.
+fn harness_spawner() -> Box<dyn vd_sim::io::RealmSpawner + Send + Sync> {
+    Box::new(MemSpawner::new(MemHub::new(), NodeId(1_000_000), 8))
+}
+
 /// The default orchestrator directory tuning: a long lease, the REAPER INERT (interval 0). Every cluster
 /// uses this EXCEPT the D-37 standing-re-home cell ([`reaping_directory_tuning`]) — keeping the reaper
 /// CELL-3-SPECIFIC so a short lease does not spuriously lapse + reap the other crash cells' live owners.
@@ -248,7 +255,13 @@ fn build_cluster(
     // the standing-re-home cell passes the reaping tuning.
     let mut oc = orch_config(clock_peers, roster);
     oc.directory = directory;
-    register_orchestrator_with_store(world, schedule, &oc, Box::new(orch_store));
+    register_orchestrator_with_store(
+        world,
+        schedule,
+        &oc,
+        Box::new(orch_store),
+        harness_spawner(),
+    );
     topo.add_node(Box::new(orch));
 
     let mut gateway = build_app(
@@ -1695,6 +1708,7 @@ pub fn rebuild_orchestrator(topo: &mut Topology, fabric: &FaultFabric, store: Me
         // rebuilt orchestrator recovers to the same re-home config (a clean recover).
         &orch_config(vec![GATEWAY, SHARD, DEST], stub_roster([SHARD, DEST])),
         Box::new(store),
+        harness_spawner(),
     );
     topo.replace_node(Box::new(orch));
 }

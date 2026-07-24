@@ -127,6 +127,13 @@ impl RlmReconcilerRes {
         self.rlm_quiesced_until = until;
     }
 
+    /// The crash-recovery freeze watermark: teardown is blocked while `now < rlm_quiesced_until`. `0` when
+    /// unarmed (genesis boot / inert). Read by the boot path's post-recover assertion + the E2E freeze proof.
+    #[must_use]
+    pub fn rlm_quiesced_until(&self) -> UniverseTick {
+        self.rlm_quiesced_until
+    }
+
     /// Slice 3d — the ONLY impure step: run the pure kernel decision, apply its ledger delta, then EXECUTE
     /// each action against the [`RealmSpawner`] (spawn / kill / force-reap), reconcile the launch
     /// bookkeeping, and refresh the gauges. `dir` is the live directory (read for heads, staged for revoke
@@ -344,7 +351,7 @@ pub fn reconcile_realm_lifecycle(
         return; // INERT: the byte-identical default (no reconciler wired).
     }
     let now = clock.universe_tick;
-    if now.0 % interval != 0 {
+    if !now.0.is_multiple_of(interval) {
         return; // scale cadence: sweep only every `interval` ticks.
     }
     let dead = |node: NodeId| runtime.is_node_latched_dead(node);
@@ -408,12 +415,18 @@ mod tests {
         ]);
         // sys(7): SpinUp then KeepAlive → last_demand_tick advanced.
         assert_eq!(
-            rlm.ledger().get(sys(7).path()).unwrap().last_demand_tick,
+            rlm.ledger()
+                .get(sys(7).path())
+                .expect("cell present")
+                .last_demand_tick,
             UniverseTick(104)
         );
-        // sys(8): Empty → an empty streak, never demanded.
+        // sys(8): Empty → last_empty latched, never demanded.
         assert_eq!(
-            rlm.ledger().get(sys(8).path()).unwrap().first_empty_tick,
+            rlm.ledger()
+                .get(sys(8).path())
+                .expect("cell present")
+                .last_empty_tick,
             Some(UniverseTick(100))
         );
         assert_eq!(rlm.ledger().len(), 2);
@@ -566,7 +579,7 @@ mod tests {
         grant(&mut d, RealmId::System(7), 50, 1);
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102));
         assert!(
-            rlm.launches.minted.get(sys(7).path()).is_none(),
+            !rlm.launches.minted.contains_key(sys(7).path()),
             "head appeared ⇒ launch drained (BUG-B)"
         );
     }
@@ -663,14 +676,14 @@ mod tests {
         // still be registering — never drop a just-launched node).
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
         assert!(
-            rlm.launches.minted.get(sys(7).path()).is_some(),
+            rlm.launches.minted.contains_key(sys(7).path()),
             "a fresh launch is held through its TTL grace"
         );
         // Sweep past the TTL, still no head + never live ⇒ a silent-async-failure is dropped so a fresh
         // SpinUp re-fires next sweep (BUG-B silent-failure self-heal).
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + ttl));
         assert!(
-            rlm.launches.minted.get(sys(7).path()).is_none(),
+            !rlm.launches.minted.contains_key(sys(7).path()),
             "a launch that never went live is dropped past its TTL"
         );
         assert!(GhostSpawner.kill_realm(NodeId(999)).is_ok());
@@ -694,6 +707,11 @@ mod tests {
     fn drive_quiesce_blocks_teardown() {
         let mut rlm = RlmReconcilerRes::new(RlmTuning::cloud(20), spawner());
         rlm.arm_quiesce(UniverseTick(10_000));
+        assert_eq!(
+            rlm.rlm_quiesced_until(),
+            UniverseTick(10_000),
+            "the freeze watermark reads back what was armed"
+        );
         let mut d = dir();
         grant(&mut d, RealmId::System(7), 50, 3);
         let now = UniverseTick(500);
@@ -759,8 +777,10 @@ mod tests {
 
     fn lifecycle_world(rlm: RlmReconcilerRes, tick: u64) -> World {
         let mut world = World::new();
-        let mut cs = vd_sim::runtime::ClockSample::default();
-        cs.universe_tick = UniverseTick(tick);
+        let cs = vd_sim::runtime::ClockSample {
+            universe_tick: UniverseTick(tick),
+            ..vd_sim::runtime::ClockSample::default()
+        };
         world.insert_resource(cs);
         world.insert_resource(crate::orchestrator::DirectoryRes(DirectoryCore::new(
             DirectoryTuning::default(),

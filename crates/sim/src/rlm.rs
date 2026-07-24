@@ -49,6 +49,13 @@ pub struct RlmTuning {
     pub launch_ttl_ticks: u64,
     /// How often (ticks) the reconciler sweeps. `0` = INERT (never sweeps; the byte-identical default).
     pub reconcile_interval_ticks: u64,
+    /// RLM Step 4a — the crash-recovery FREEZE window: after a kill-9 rebuild (empty RAM ledger), teardown
+    /// is blocked for this many ticks past the recovered ceiling so a re-asserted demand can re-accrue
+    /// before a realm can be reaped. Sized from the DEMAND re-accrue cadence (≈ `demand_ttl_ticks` — a realm
+    /// must survive at least one full demand-TTL of post-restart silence so a parent's `KeepAlive` breaks
+    /// it). Its OWN knob (NOT the liveness/directory grace, which is sized for the dead-peer renewal
+    /// cadence, a different clock). `0` in the inert default (nothing to freeze).
+    pub recovery_grace_ticks: u64,
 }
 
 impl Default for RlmTuning {
@@ -63,6 +70,7 @@ impl Default for RlmTuning {
             spinup_cooldown_ticks: 0,
             launch_ttl_ticks: 0,
             reconcile_interval_ticks: 0,
+            recovery_grace_ticks: 0,
         }
     }
 }
@@ -81,14 +89,19 @@ impl RlmTuning {
         let cooldown = hz.max(1);
         let spinup_cooldown = hz.max(1);
         let launch_ttl = (hz * 3).max(1);
+        let demand_ttl = (hz * 4).max(drain + cooldown + 1);
         RlmTuning {
-            demand_ttl_ticks: (hz * 4).max(drain + cooldown + 1),
+            demand_ttl_ticks: demand_ttl,
             empty_grace_ticks: (hz / 2).max(1),
             teardown_cooldown_ticks: cooldown,
             teardown_drain_ticks: drain,
             spinup_cooldown_ticks: spinup_cooldown,
             launch_ttl_ticks: launch_ttl,
             reconcile_interval_ticks: 1,
+            // The post-crash freeze spans one full demand cadence: a rebuilt orchestrator with an empty RAM
+            // ledger must let a parent's `KeepAlive` (or a login demand) re-accrue before any realm can be
+            // reaped, so we hold teardown for exactly one demand TTL past the recovered ceiling.
+            recovery_grace_ticks: demand_ttl,
         }
     }
 
@@ -116,7 +129,8 @@ impl RlmTuning {
             | (self.teardown_cooldown_ticks == 0)
             | (self.teardown_drain_ticks == 0)
             | (self.spinup_cooldown_ticks == 0)
-            | (self.launch_ttl_ticks == 0);
+            | (self.launch_ttl_ticks == 0)
+            | (self.recovery_grace_ticks == 0);
         if active & any_zero {
             return Err(RlmTuningError::ZeroWindowWhileActive);
         }
@@ -136,7 +150,7 @@ impl RlmTuning {
 /// A mis-ordered [`RlmTuning`] — rejected LOUD at boot so a deployment never runs a thrash-prone budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RlmTuningError {
-    /// An ACTIVE reconciler with a zero window (any of the six timing fields) — every window must be > 0.
+    /// An ACTIVE reconciler with a zero window (any of the seven timing fields) — every window must be > 0.
     #[error("active RlmTuning has a zero timing window")]
     ZeroWindowWhileActive,
     /// The demand TTL does not strictly outlast the drain+cooldown reclaim floor, so a re-asserted demand
@@ -156,13 +170,16 @@ pub enum RlmTuningError {
 pub struct LedgerCell {
     /// The realm's FULL lineage coord — for spawn (`profile_kind`) and the ancestor walk.
     pub coord: RealmCoord,
-    /// Freshest SpinUp | KeepAlive | player-spawn demand tick (`Empty` does NOT refresh it).
+    /// Freshest SpinUp | KeepAlive | player-spawn demand tick (`Empty` does NOT refresh it). The `max`
+    /// of every non-Empty demand seen ⇒ ORDER-INDEPENDENT (a reordered inbox yields the same value).
     pub last_demand_tick: UniverseTick,
-    /// Most recent `Empty` self-report (retained for audit; the streak below drives `empty_confirmed`).
+    /// Most recent `Empty` self-report (the `max` of every `Empty` tick ⇒ ORDER-INDEPENDENT). Drives BOTH
+    /// clauses of [`empty_confirmed`]: freshness (`now - last_empty <= grace`) AND the arm-C
+    /// no-demand-since (`last_demand < last_empty`). Keying arm-C on this `max` (not a streak-start) is
+    /// what makes the reap decision deterministic when a parent's `KeepAlive` and the child's `Empty` land
+    /// on the SAME coord in the SAME tick from different sources — their arrival order must NOT change
+    /// whether the realm is reaped (the crash-replay proptest's INV-FOLD-ORDER caught the streak-based bug).
     pub last_empty_tick: Option<UniverseTick>,
-    /// Start of the CURRENT empty streak (the grace/`arm-C` anchor). Cleared by a non-Empty demand
-    /// at-or-after it; a RE-asserted `Empty` does NOT advance it.
-    pub first_empty_tick: Option<UniverseTick>,
     /// Last tick a `SpinUp` intent was emitted for this realm (min-dwell + spin-up cooldown anchor).
     pub spawn_watermark: UniverseTick,
     /// Last tick a `Kill` executed for this realm (teardown cooldown anchor).
@@ -175,14 +192,13 @@ pub struct LedgerCell {
 }
 
 impl LedgerCell {
-    /// A fresh cell for `coord` with no demands yet (all ticks zero, no empty streak).
+    /// A fresh cell for `coord` with no demands yet (all ticks zero, no empty report).
     #[must_use]
     fn empty(coord: RealmCoord) -> LedgerCell {
         LedgerCell {
             coord,
             last_demand_tick: UniverseTick(0),
             last_empty_tick: None,
-            first_empty_tick: None,
             spawn_watermark: UniverseTick(0),
             teardown_watermark: UniverseTick(0),
             draining_since: None,
@@ -191,9 +207,12 @@ impl LedgerCell {
     }
 }
 
-/// The per-realm demand ledger (RAM-only in Step 3; self-heals on restart via re-asserted demands — a
-/// durable snapshot is the reserved Step-4 `StoreKey::Rlm`). Keyed by the lineage [`RealmPath`] (`Ord`,
-/// collision-free) for determinism.
+/// The per-realm demand ledger (RAM-only; self-heals on restart via re-asserted (`ReDriven`, every tick)
+/// demands within ~1 demand round-trip). The durable `StoreKey::Rlm` snapshot is DEFERRED (`DEFERRED.md`
+/// D-RLM-2): the crash-replay proptest (`mod crash_replay_proptest`) + the armed Step-4a crash-recovery
+/// freeze (`RlmTuning::recovery_grace_ticks`) are the machine-checked evidence the RAM self-heal + freeze
+/// suffice (INV-SNAPSHOT-EQUIVALENCE: the RAM-heal and durable-snapshot arms reach identical reap-sets).
+/// Keyed by the lineage [`RealmPath`] (`Ord`, collision-free) for determinism.
 #[derive(Default, Debug)]
 pub struct DemandLedger {
     cells: BTreeMap<RealmPath, LedgerCell>,
@@ -276,24 +295,18 @@ impl DemandLedger {
     }
 }
 
-/// Refresh a non-Empty demand: bump `last_demand_tick`, and CLEAR the empty streak iff this demand is
-/// at-or-after the streak start (a stale reordered SpinUp must NOT clear a fresher `Empty` — determinism
-/// #8). Monomorphic (all branching here, HR5).
+/// Refresh a non-Empty demand: bump `last_demand_tick` to the `max` seen. ORDER-INDEPENDENT — a stale
+/// reordered SpinUp simply loses the `max` and never lowers it (no streak-clearing needed; `empty_confirmed`
+/// compares `last_demand < last_empty`, both maxes, so a stale demand can't un-empty a fresher `Empty`).
 fn refresh_demand(cell: &mut LedgerCell, tick: UniverseTick) {
     cell.last_demand_tick = cell.last_demand_tick.max(tick);
-    // Clear the empty streak iff one is open AND this demand is at-or-after its start.
-    if cell.first_empty_tick.is_some_and(|start| tick >= start) {
-        cell.first_empty_tick = None;
-    }
 }
 
-/// Latch an `Empty`: bump `last_empty_tick`, and START the streak if none is open (a re-asserted `Empty`
-/// does NOT advance the streak anchor, so grace ages from the streak start). Monomorphic.
+/// Latch an `Empty`: bump `last_empty_tick` to the `max` seen (ORDER-INDEPENDENT). A continuously-empty
+/// realm re-reporting `Empty` keeps this fresh; one that stops lets it age past `grace` (⇒ the zombie /
+/// not-confirmed path — the crashed-vs-empty disambiguation).
 fn latch_empty(cell: &mut LedgerCell, tick: UniverseTick) {
     cell.last_empty_tick = Some(cell.last_empty_tick.map_or(tick, |t| t.max(tick)));
-    if cell.first_empty_tick.is_none() {
-        cell.first_empty_tick = Some(tick);
-    }
 }
 
 /// Keep the fence of the lexicographically-freshest `(tick, fence)` demand (audit only; order-independent
@@ -395,23 +408,25 @@ pub fn demanded_recently(cell: &LedgerCell, now: UniverseTick, ttl: u64) -> bool
         & (now.0.saturating_sub(cell.last_demand_tick.0) <= ttl)
 }
 
-/// The realm has AFFIRMATIVELY gone empty: a RECENT `Empty` report (within grace of the LAST report — so a
+/// The realm has AFFIRMATIVELY gone empty: a RECENT `Empty` report (`now - last_empty <= grace` — so a
 /// continuously-empty realm re-asserting `Empty` every tick STAYS confirmed, while grace tolerates a single
-/// dropped datagram) AND no non-Empty demand at-or-after the empty STREAK start (arm C — order-independent:
-/// the `last_demand_tick < first_empty_tick` term resolves a same-tick / reordered `Empty`+`SpinUp`
-/// regardless of inbox order). A crashed shard STOPS reporting ⇒ `last_empty_tick` ages past grace ⇒ NOT
-/// confirmed-empty (it takes the `zombie` path instead — the dead-vs-empty disambiguation). NOTE: freshness
-/// is measured from `last_empty_tick`, NOT the streak start — an empty realm that outlives `grace` must
-/// remain reap-eligible, which measuring from the streak start would wrongly prevent. Bitwise `&` (HR5).
+/// dropped datagram) AND the realm's LATEST signal is that `Empty`, not a demand (arm C:
+/// `last_demand_tick < last_empty_tick`). Both terms key on `max`-tracked ticks, so the result is
+/// ORDER-INDEPENDENT: a parent's `KeepAlive` and the child's `Empty` on the SAME coord in the SAME tick from
+/// different sources resolve to the SAME reap decision regardless of arrival order (a same-tick pair leaves
+/// `last_demand == last_empty` ⇒ `<` is false ⇒ NOT confirmed ⇒ the realm is kept alive — the safe tie-break;
+/// a stale reordered demand keeps `last_demand < last_empty` ⇒ still confirmed). A crashed shard STOPS
+/// reporting ⇒ `last_empty_tick` ages past grace ⇒ NOT confirmed-empty (it takes the `zombie` path instead —
+/// the dead-vs-empty disambiguation). Bitwise `&` (both operands covered, HR5).
 #[must_use]
 pub fn empty_confirmed(cell: &LedgerCell, now: UniverseTick, grace: u64) -> bool {
-    match (cell.last_empty_tick, cell.first_empty_tick) {
-        (Some(last), Some(streak)) => {
+    match cell.last_empty_tick {
+        Some(last) => {
             let fresh = now.0.saturating_sub(last.0) <= grace;
-            let no_demand_since = cell.last_demand_tick < streak;
+            let no_demand_since = cell.last_demand_tick < last;
             fresh & no_demand_since
         }
-        _ => false,
+        None => false,
     }
 }
 
@@ -743,6 +758,7 @@ mod tests {
             teardown_drain_ticks: 2, // floor = 5, demand_ttl 5 !> 5
             spinup_cooldown_ticks: 1,
             launch_ttl_ticks: 1,
+            recovery_grace_ticks: 1, // non-zero so `any_zero` passes and the reclaim-race check is reached
         };
         assert_eq!(
             bad.validate(),
@@ -760,12 +776,12 @@ mod tests {
         let mut l = DemandLedger::default();
         l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(10), Fence(1));
         assert_eq!(
-            l.get(sys(7).path()).unwrap().last_demand_tick,
+            l.get(sys(7).path()).expect("cell present").last_demand_tick,
             UniverseTick(10)
         );
         l.record_demand(&sys(7), DemandVerb::KeepAlive, UniverseTick(14), Fence(1));
         assert_eq!(
-            l.get(sys(7).path()).unwrap().last_demand_tick,
+            l.get(sys(7).path()).expect("cell present").last_demand_tick,
             UniverseTick(14)
         );
         assert_eq!(l.len(), 1);
@@ -773,40 +789,65 @@ mod tests {
     }
 
     #[test]
-    fn record_empty_starts_a_streak_that_a_reassert_does_not_advance() {
+    fn record_empty_advances_last_empty_to_the_max_order_independently() {
         let mut l = DemandLedger::default();
         l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(20), Fence(2));
-        let c = l.get(sys(7).path()).unwrap();
-        assert_eq!(c.first_empty_tick, Some(UniverseTick(20)));
-        assert_eq!(c.last_empty_tick, Some(UniverseTick(20)));
-        l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(25), Fence(2));
-        let c = l.get(sys(7).path()).unwrap();
         assert_eq!(
-            c.first_empty_tick,
-            Some(UniverseTick(20)),
-            "streak anchor unchanged"
+            l.get(sys(7).path()).expect("cell present").last_empty_tick,
+            Some(UniverseTick(20))
         );
+        // A fresher re-report advances the max; a stale (reordered) one is ignored by the max.
+        l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(25), Fence(2));
+        l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(15), Fence(2));
         assert_eq!(
-            c.last_empty_tick,
+            l.get(sys(7).path()).expect("cell present").last_empty_tick,
             Some(UniverseTick(25)),
-            "last report advances"
+            "last_empty tracks the max Empty tick — order-independent"
         );
     }
 
     #[test]
-    fn a_demand_at_or_after_the_streak_clears_it_but_a_stale_one_does_not() {
-        let mut l = DemandLedger::default();
-        l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(20), Fence(1));
-        // A stale (reordered) SpinUp BEFORE the streak start does NOT clear it.
-        l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(15), Fence(1));
-        assert_eq!(
-            l.get(sys(7).path()).unwrap().first_empty_tick,
-            Some(UniverseTick(20)),
-            "a stale demand cannot clear a fresher empty streak"
+    fn empty_confirmed_is_order_independent_for_a_same_tick_demand_and_empty() {
+        // The determinism bug the crash-replay proptest caught (INV-FOLD-ORDER): a parent's `KeepAlive` and
+        // the child's `Empty` on the SAME coord in the SAME tick, from different sources, must reap the SAME
+        // way regardless of arrival order. Keying arm-C on `last_demand < last_empty` (both maxes) fixes it.
+        let t = cloud();
+        let fold = |order: &[(DemandVerb, u64)]| -> LedgerCell {
+            let mut l = DemandLedger::default();
+            for (v, tk) in order {
+                l.record_demand(&sys(7), *v, UniverseTick(*tk), Fence(1));
+            }
+            l.get(sys(7).path()).expect("cell present").clone()
+        };
+        let ka_first = fold(&[
+            (DemandVerb::KeepAlive, 10),
+            (DemandVerb::Empty, 10),
+            (DemandVerb::Empty, 11),
+        ]);
+        let empty_first = fold(&[
+            (DemandVerb::Empty, 11),
+            (DemandVerb::Empty, 10),
+            (DemandVerb::KeepAlive, 10),
+        ]);
+        for now in [11u64, 12, 15, 100] {
+            assert_eq!(
+                empty_confirmed(&ka_first, UniverseTick(now), t.empty_grace_ticks),
+                empty_confirmed(&empty_first, UniverseTick(now), t.empty_grace_ticks),
+                "empty_confirmed diverged across fold order at now={now}"
+            );
+        }
+        // A stale (earlier) reordered demand does NOT un-empty a fresher Empty.
+        let stale = fold(&[(DemandVerb::Empty, 20), (DemandVerb::SpinUp, 15)]);
+        assert!(
+            empty_confirmed(&stale, UniverseTick(20), t.empty_grace_ticks),
+            "a stale demand cannot un-empty a fresher Empty"
         );
-        // A SpinUp at-or-after the streak start clears it.
-        l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(22), Fence(1));
-        assert_eq!(l.get(sys(7).path()).unwrap().first_empty_tick, None);
+        // A demand at-or-after the latest Empty DOES un-empty it.
+        let fresh_demand = fold(&[(DemandVerb::Empty, 20), (DemandVerb::SpinUp, 22)]);
+        assert!(
+            !empty_confirmed(&fresh_demand, UniverseTick(22), t.empty_grace_ticks),
+            "a demand at-or-after the latest Empty un-empties the realm"
+        );
     }
 
     #[test]
@@ -815,9 +856,9 @@ mod tests {
         l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(10), Fence(1));
         l.record_demand(&sys(7), DemandVerb::TearDown, UniverseTick(30), Fence(1));
         // TearDown neither refreshed the demand nor latched empty.
-        let c = l.get(sys(7).path()).unwrap();
+        let c = l.get(sys(7).path()).expect("cell present");
         assert_eq!(c.last_demand_tick, UniverseTick(10));
-        assert_eq!(c.first_empty_tick, None);
+        assert_eq!(c.last_empty_tick, None);
     }
 
     #[test]
@@ -833,7 +874,7 @@ mod tests {
                     Fence(*fence),
                 );
             }
-            l.get(sys(7).path()).unwrap().last_fence
+            l.get(sys(7).path()).expect("cell present").last_fence
         };
         // The max-(tick,fence) is (5,2); a later lower-tick demand does not displace it.
         assert_eq!(build(&[(5, 2), (3, 9)]), Fence(2));
@@ -849,12 +890,14 @@ mod tests {
         // mark_spawned creates the cell for an ancestor the demand fold never touched.
         l.mark_spawned(&sys(7), UniverseTick(40));
         assert_eq!(
-            l.get(sys(7).path()).unwrap().spawn_watermark,
+            l.get(sys(7).path()).expect("cell present").spawn_watermark,
             UniverseTick(40)
         );
         l.mark_reaped(sys(7).path(), UniverseTick(50));
         assert_eq!(
-            l.get(sys(7).path()).unwrap().teardown_watermark,
+            l.get(sys(7).path())
+                .expect("cell present")
+                .teardown_watermark,
             UniverseTick(50)
         );
         // mark_reaped on an absent cell is a no-op (no panic).
@@ -873,7 +916,7 @@ mod tests {
             .insert(sys(8).path().clone(), Some(UniverseTick(12))); // absent → ignored
         l.apply_delta(&d);
         assert_eq!(
-            l.get(sys(7).path()).unwrap().draining_since,
+            l.get(sys(7).path()).expect("cell present").draining_since,
             Some(UniverseTick(12))
         );
         assert!(l.get(sys(8).path()).is_none());
@@ -881,7 +924,10 @@ mod tests {
         let mut clear = LedgerDelta::default();
         clear.set_draining.insert(sys(7).path().clone(), None);
         l.apply_delta(&clear);
-        assert_eq!(l.get(sys(7).path()).unwrap().draining_since, None);
+        assert_eq!(
+            l.get(sys(7).path()).expect("cell present").draining_since,
+            None
+        );
     }
 
     // ---- 3. ACTIONS + DELTA (derives) ------------------------------------------------------------
@@ -933,7 +979,7 @@ mod tests {
     fn desired_alive_arm_a_demand_driven() {
         let mut l = DemandLedger::default();
         l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
-        let c = l.get(sys(7).path()).unwrap();
+        let c = l.get(sys(7).path()).expect("cell present");
         let t = cloud();
         // Within TTL ⇒ desired even when NOT running (arm A).
         assert!(desired_alive(c, UniverseTick(100), &t, false));
@@ -957,7 +1003,7 @@ mod tests {
         let mut l = DemandLedger::default();
         // A realm demanded long ago (arm A now stale) that is LIVE and never said Empty.
         l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(1), Fence(1));
-        let c = l.get(sys(7).path()).unwrap();
+        let c = l.get(sys(7).path()).expect("cell present");
         let t = cloud();
         let now = UniverseTick(10_000); // arm A long expired
         assert!(!demanded_recently(c, now, t.demand_ttl_ticks));
@@ -974,13 +1020,13 @@ mod tests {
         // A realm that has ONLY reported Empty keeps the `0` sentinel ⇒ NOT demanded, even at an early
         // tick where `now <= ttl` would spuriously pass a raw `now - 0 <= ttl`.
         l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(3), Fence(1));
-        let c = l.get(sys(7).path()).unwrap();
+        let c = l.get(sys(7).path()).expect("cell present");
         assert_eq!(c.last_demand_tick, UniverseTick(0));
         assert!(!demanded_recently(c, UniverseTick(5), t.demand_ttl_ticks));
         // A real SpinUp ⇒ demanded within the TTL.
         l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(6), Fence(1));
         assert!(demanded_recently(
-            l.get(sys(7).path()).unwrap(),
+            l.get(sys(7).path()).expect("cell present"),
             UniverseTick(7),
             t.demand_ttl_ticks
         ));
@@ -991,7 +1037,7 @@ mod tests {
         let t = cloud();
         let mut l = DemandLedger::default();
         l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(100), Fence(1));
-        let c = l.get(sys(7).path()).unwrap().clone();
+        let c = l.get(sys(7).path()).expect("cell present").clone();
         // Fresh + no demand since streak ⇒ confirmed.
         assert!(empty_confirmed(&c, UniverseTick(100), t.empty_grace_ticks));
         assert!(empty_confirmed(
@@ -1018,7 +1064,7 @@ mod tests {
             l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(tick), Fence(1));
             assert!(
                 empty_confirmed(
-                    l.get(sys(7).path()).unwrap(),
+                    l.get(sys(7).path()).expect("cell present"),
                     UniverseTick(tick),
                     t.empty_grace_ticks
                 ),
@@ -1028,7 +1074,7 @@ mod tests {
         // It STOPS reporting (crash) ⇒ ages out of confirmed-empty past grace.
         let last = 100 + 5 * t.empty_grace_ticks - 1;
         assert!(!empty_confirmed(
-            l.get(sys(7).path()).unwrap(),
+            l.get(sys(7).path()).expect("cell present"),
             UniverseTick(last + t.empty_grace_ticks + 1),
             t.empty_grace_ticks
         ));
@@ -1041,7 +1087,7 @@ mod tests {
         // Never said Empty ⇒ false.
         l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         assert!(!empty_confirmed(
-            l.get(sys(7).path()).unwrap(),
+            l.get(sys(7).path()).expect("cell present"),
             UniverseTick(100),
             t.empty_grace_ticks
         ));
@@ -1051,7 +1097,7 @@ mod tests {
         r.record_demand(&sys(8), DemandVerb::SpinUp, UniverseTick(30), Fence(1));
         r.record_demand(&sys(8), DemandVerb::Empty, UniverseTick(30), Fence(1));
         assert!(!empty_confirmed(
-            r.get(sys(8).path()).unwrap(),
+            r.get(sys(8).path()).expect("cell present"),
             UniverseTick(30),
             t.empty_grace_ticks
         ));
@@ -1065,7 +1111,7 @@ mod tests {
         // transfer. `now` is well past min_dwell (spawn_watermark 0); the Empty streak is within grace.
         let now = UniverseTick(200);
         l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(195), Fence(1));
-        let base = l.get(sys(7).path()).unwrap().clone();
+        let base = l.get(sys(7).path()).expect("cell present").clone();
         assert!(teardown_ready(&base, now, &t, &facts(true)));
 
         // Each single clause flip makes it NOT ready:
@@ -1087,7 +1133,7 @@ mod tests {
         let mut never_empty = DemandLedger::default();
         never_empty.record_demand(&sys(9), DemandVerb::SpinUp, UniverseTick(1), Fence(1));
         assert!(!teardown_ready(
-            never_empty.get(sys(9).path()).unwrap(),
+            never_empty.get(sys(9).path()).expect("cell present"),
             now,
             &t,
             &facts(true)
@@ -1351,7 +1397,10 @@ mod tests {
             "drain cleared"
         );
         l.apply_delta(&db);
-        assert_eq!(l.get(sys(7).path()).unwrap().draining_since, None);
+        assert_eq!(
+            l.get(sys(7).path()).expect("cell present").draining_since,
+            None
+        );
     }
 
     #[test]
@@ -1478,7 +1527,7 @@ mod tests {
                 .any(|a| matches!(a, LifecycleAction::Kill { .. })),
             "a live child keeps its ancestor un-reaped"
         );
-        assert!(delta.set_draining.get(u_g_s().path()).is_none());
+        assert!(!delta.set_draining.contains_key(u_g_s().path()));
     }
 
     #[test]
@@ -1642,5 +1691,726 @@ mod tests {
             UniverseTick(100 + t.spinup_cooldown_ticks),
             &t
         )); // past cooldown
+    }
+
+    // ==============================================================================================
+    // RLM Step 4b — the crash-replay determinism + crash-robustness PROPTEST (mirror R-6d4-A,
+    // `crates/io-prod/src/outbox.rs`). Generalizes the single 3f E2E (`realm_lifecycle_e2e.rs`) into a
+    // machine-checked proof that `reconcile` + the demand fold + `drive_drain` are DETERMINISTIC and
+    // CRASH-ROBUST under ARBITRARY crash / reorder / dup interleavings. It also carries the DIVERGENCE
+    // ORACLE that DECIDES whether the deferred durable snapshot (4c / D-RLM-2) is ever needed:
+    // INV-SNAPSHOT-SAFETY — the RAM-heal arm (empty ledger on crash, the shipped 4a-armed behaviour) must
+    // NEVER reap a realm the durable-snapshot arm (ledger survives the crash) would not. A violation IS the
+    // "restart-window strand the CAP-freeze + arm-B don't cover" and the trigger to promote the snapshot.
+    //
+    // Everything here drives the REAL production kernel (`reconcile`/`DemandLedger`/`apply_delta`) against a
+    // REAL `DirectoryCore` for the durable heads; the RAM/durable crash boundary is modelled as (durable
+    // heads kept) vs (RAM ledger + liveness + quiesce cleared). The reference oracle (`empty_open`,
+    // `model_draining`, `ever_demanded`) is maintained BY HAND from the op history — never by calling the
+    // kernel — so the invariants are a genuine cross-check, not a tautology.
+    mod crash_replay_proptest {
+        use crate::directory::{DirectoryCore, DirectoryTuning};
+        use crate::rlm::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        use std::cell::Cell;
+        use std::collections::{BTreeMap, BTreeSet};
+        use vd_core::pose::RealmId;
+        use vd_core::realm_coord::RealmCoord;
+        use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+        use vd_core::{Fence, NodeId, UniverseTick};
+        use vd_wire::intershard::DemandVerb;
+        use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
+
+        /// SMALL crossable windows so a `vec(op, 0..=48)` run actually crosses `demand_ttl`/`empty_grace`/
+        /// `drain`/`cooldown`/`min_dwell`/`recovery_grace` — the reconcile LOGIC is scale-invariant, so a
+        /// 1 Hz budget exercises the identical arms a cloud budget does, just reachably.
+        fn tuning() -> RlmTuning {
+            RlmTuning::cloud(1)
+        }
+
+        /// The three model realms: two siblings + a CHILD of `System(7)` so ancestor-closure +
+        /// `has_desired_descendant` fire; a run that never demands `System(8)` leaves it never-demanded.
+        fn realm_coord(sel: u8) -> RealmCoord {
+            match sel % 3 {
+                0 => one(RealmKindTag::System, 7),
+                1 => one(RealmKindTag::System, 8),
+                _ => RealmCoord::from_path(RealmPath::from_levels(vec![
+                    RealmLevel::new(RealmKindTag::System, 7),
+                    RealmLevel::new(RealmKindTag::Planet, 9),
+                ]))
+                .expect("two-level path"),
+            }
+        }
+        fn one(kind: RealmKindTag, seed: u64) -> RealmCoord {
+            RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(kind, seed)]))
+                .expect("one-level path")
+        }
+        fn decode_verb(v: u8) -> DemandVerb {
+            match v % 4 {
+                0 => DemandVerb::SpinUp,
+                1 => DemandVerb::KeepAlive,
+                2 => DemandVerb::Empty,
+                _ => DemandVerb::TearDown,
+            }
+        }
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            Demand { realm: u8, verb: u8, fence: u8 },
+            Sweep,
+            IdleTick { by: u8 },
+            GrantHead { realm: u8, node: u8 },
+            RevokeHead { realm: u8 },
+            MarkDead { node: u8 },
+            Crash,
+            Reboot,
+            ReorderDup { realm: u8, verb: u8, count: u8 },
+        }
+
+        fn op_strategy() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                4 => (0u8..3, 0u8..4, 0u8..3).prop_map(|(realm, verb, fence)| Op::Demand { realm, verb, fence }),
+                4 => Just(Op::Sweep),
+                3 => (0u8..8).prop_map(|by| Op::IdleTick { by }),
+                2 => (0u8..3, 0u8..3).prop_map(|(realm, node)| Op::GrantHead { realm, node }),
+                1 => (0u8..3).prop_map(|realm| Op::RevokeHead { realm }),
+                1 => (0u8..3).prop_map(|node| Op::MarkDead { node }),
+                1 => Just(Op::Crash),
+                2 => Just(Op::Reboot),
+                1 => (0u8..3, 0u8..4, 0u8..5).prop_map(|(realm, verb, count)| Op::ReorderDup { realm, verb, count }),
+            ]
+        }
+
+        /// One reconcile sweep's observable outcome (node-id-AGNOSTIC — the kernel-determinism scope: the
+        /// ledger/head/desired-set + action COUNTS are invariant across a rebuild, raw `NodeId` bytes are
+        /// not; here every head node is supplied by an explicit `GrantHead` op, so even node ids are
+        /// deterministic within one arm and `SweepRec` compares fully).
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct SweepRec {
+            now: u64,
+            kills: BTreeSet<RealmPath>,
+            force_reaps: usize,
+            actions_len: usize,
+            in_freeze: bool,
+        }
+
+        struct Run {
+            sweeps: Vec<SweepRec>,
+            killed_ever: BTreeSet<RealmPath>,
+        }
+
+        /// Drive the op history through the REAL kernel. `lose_ram=true` is the shipped RAM-heal (4a) arm
+        /// (a `Crash` clears the demand ledger); `lose_ram=false` is the durable-snapshot dry-run arm (the
+        /// ledger survives). The hand-maintained oracle (`empty_open`/`model_draining`/`ever_demanded`)
+        /// asserts the per-arm invariants after every op. Returns the sweep trace + the whole-run reap set.
+        fn run_arm(ops: &[Op], lose_ram: bool, cov: Option<&Cell<[bool; 6]>>) -> Run {
+            let t = tuning();
+            let grace = t.recovery_grace_ticks;
+            let no_launch: BTreeMap<RealmPath, BTreeMap<NodeId, UniverseTick>> = BTreeMap::new();
+
+            let mut ledger = DemandLedger::default();
+            let mut dir = DirectoryCore::new(DirectoryTuning::default());
+            let mut dead: BTreeSet<NodeId> = BTreeSet::new();
+            let mut empty_open: BTreeMap<RealmPath, bool> = BTreeMap::new();
+            let mut model_draining: BTreeSet<RealmPath> = BTreeSet::new();
+            let mut ever_demanded: BTreeSet<RealmPath> = BTreeSet::new();
+            let mut fence_ctr: BTreeMap<RealmId, u64> = BTreeMap::new();
+            let mut now: u64 = 1;
+            let mut quiesced_until: u64 = 0;
+            let mut running = true;
+
+            let mut sweeps = Vec::new();
+            let mut killed_ever: BTreeSet<RealmPath> = BTreeSet::new();
+            let set_cov = |i: usize| {
+                if let Some(c) = cov {
+                    let mut f = c.get();
+                    f[i] = true;
+                    c.set(f);
+                }
+            };
+
+            for op in ops {
+                match op {
+                    Op::Demand { realm, verb, fence } => {
+                        let coord = realm_coord(*realm);
+                        let v = decode_verb(*verb);
+                        ledger.record_demand(
+                            &coord,
+                            v,
+                            UniverseTick(now),
+                            Fence(u64::from(*fence)),
+                        );
+                        ever_demanded.insert(coord.path().clone());
+                        match v {
+                            DemandVerb::Empty => {
+                                empty_open.insert(coord.path().clone(), true);
+                            }
+                            DemandVerb::SpinUp | DemandVerb::KeepAlive => {
+                                empty_open.insert(coord.path().clone(), false);
+                            }
+                            DemandVerb::TearDown => {}
+                        }
+                    }
+                    Op::IdleTick { by } => now = now.saturating_add(u64::from(*by)),
+                    Op::GrantHead { realm, node } => {
+                        let rid = realm_coord(*realm).lowered();
+                        let f = fence_ctr.entry(rid).or_insert(0);
+                        *f += 1;
+                        dir.grant(
+                            DirectoryKey::Realm(rid),
+                            AuthorityRef::Shard(NodeId(100 + u64::from(*node))),
+                            Fence(*f),
+                            UniverseTick(now),
+                        );
+                    }
+                    Op::RevokeHead { realm } => {
+                        let rid = realm_coord(*realm).lowered();
+                        if let Some(rec) = dir.head(DirectoryKey::Realm(rid)) {
+                            let _ = dir.revoke(DirectoryKey::Realm(rid), rec.fence);
+                        }
+                    }
+                    Op::MarkDead { node } => {
+                        dead.insert(NodeId(100 + u64::from(*node)));
+                    }
+                    Op::Crash => {
+                        if !ledger.is_empty() {
+                            set_cov(0);
+                        }
+                        dead.clear();
+                        if lose_ram {
+                            ledger = DemandLedger::default();
+                            empty_open.clear();
+                            model_draining.clear();
+                        }
+                        running = false;
+                    }
+                    Op::Reboot => {
+                        running = true;
+                        quiesced_until = now.saturating_add(grace);
+                        now = now.saturating_add(1);
+                    }
+                    // ReorderDup drives the standalone fold-order check (in `model_check`); a world no-op.
+                    Op::ReorderDup { .. } => {}
+                    Op::Sweep => {
+                        if !running {
+                            continue; // the orchestrator is down between Crash and Reboot.
+                        }
+                        let dead_ref = &dead;
+                        let is_dead = |n: NodeId| dead_ref.contains(&n);
+                        let (actions, delta) = reconcile(
+                            &ledger,
+                            &dir,
+                            &is_dead,
+                            &no_launch,
+                            &t,
+                            UniverseTick(now),
+                            UniverseTick(quiesced_until),
+                        );
+                        let in_freeze = now < quiesced_until;
+                        let mut kills: BTreeSet<RealmPath> = BTreeSet::new();
+                        let mut force_reaps = 0usize;
+                        for a in &actions {
+                            match a {
+                                LifecycleAction::Kill { path, .. } => {
+                                    // INV-CRASH-NO-REAP: the ARMED freeze blocks every kill in its window.
+                                    assert!(
+                                        !in_freeze,
+                                        "INV-CRASH-NO-REAP: a Kill fired inside the freeze (now={now} < quiesce={quiesced_until})"
+                                    );
+                                    // INV-NO-STRAND: a kill only ever targets a realm the INDEPENDENT oracle
+                                    // saw affirmatively report Empty (no wrongful reap of a live realm).
+                                    assert_eq!(
+                                        empty_open.get(path),
+                                        Some(&true),
+                                        "INV-NO-STRAND: killed a realm that never reported Empty in the oracle"
+                                    );
+                                    // INV-DELTA-CONSISTENT: two-phase — a kill implies a drain opened on a
+                                    // PRIOR sweep (never a first-sweep synchronous kill; the BUG-C veto).
+                                    assert!(
+                                        model_draining.contains(path),
+                                        "INV-DELTA: a Kill fired without a prior-opened drain window"
+                                    );
+                                    kills.insert(path.clone());
+                                }
+                                LifecycleAction::ForceReap { .. } => force_reaps += 1,
+                                LifecycleAction::SpinUp { .. } => {}
+                            }
+                        }
+                        // cov[1]: the freeze demonstrably FIRED — a live-head, oracle-empty realm swept inside
+                        // the window and was NOT reaped (the exact strand 4a closes).
+                        let mut live_empty_open = false;
+                        for (path, cell) in ledger.iter() {
+                            let head = dir.head(DirectoryKey::Realm(cell.coord.lowered()));
+                            if running_live(head, &is_dead) & (empty_open.get(path) == Some(&true))
+                            {
+                                live_empty_open = true;
+                            }
+                        }
+                        if in_freeze & live_empty_open & kills.is_empty() {
+                            set_cov(1);
+                        }
+                        if !kills.is_empty() {
+                            set_cov(2);
+                        }
+                        if force_reaps > 0 {
+                            set_cov(3);
+                        }
+                        // Apply the delta + actions to advance the world (the runtime's EXECUTE step).
+                        ledger.apply_delta(&delta);
+                        for (path, v) in &delta.set_draining {
+                            if v.is_some() {
+                                model_draining.insert(path.clone());
+                            } else {
+                                model_draining.remove(path);
+                            }
+                        }
+                        for path in &delta.retire {
+                            model_draining.remove(path);
+                        }
+                        for a in &actions {
+                            match a {
+                                LifecycleAction::Kill { path, fence, .. } => {
+                                    let rid =
+                                        path.realm_id().expect("a lifecycle path is non-empty");
+                                    let _ = dir.revoke(DirectoryKey::Realm(rid), *fence);
+                                    ledger.mark_reaped(path, UniverseTick(now));
+                                    killed_ever.insert(path.clone());
+                                }
+                                LifecycleAction::ForceReap { path, fence, .. } => {
+                                    let rid =
+                                        path.realm_id().expect("a lifecycle path is non-empty");
+                                    let _ = dir.revoke(DirectoryKey::Realm(rid), *fence);
+                                }
+                                LifecycleAction::SpinUp { .. } => {}
+                            }
+                        }
+                        // INV-BOUNDED: the ledger never exceeds the realms ever demanded (the retire path
+                        // keeps the RAM self-heal from leaking — the property that matters at 100K scale).
+                        // Both `len()`s live in the CONDITION (always evaluated ⇒ covered); a STATIC message
+                        // keeps the failure path free of uncoverable method-call regions (HR5).
+                        assert!(
+                            ledger.len() <= ever_demanded.len(),
+                            "INV-BOUNDED: the ledger grew past the distinct-demanded realm count"
+                        );
+                        sweeps.push(SweepRec {
+                            now,
+                            kills,
+                            force_reaps,
+                            actions_len: actions.len(),
+                            in_freeze,
+                        });
+                        now = now.saturating_add(1);
+                    }
+                }
+            }
+            Run {
+                sweeps,
+                killed_ever,
+            }
+        }
+
+        /// `record_demand`'s fold is order- AND dup-independent — every field it writes is a `max`/latch
+        /// (`last_demand_tick`, `last_empty_tick`, `last_fence`), so the whole cell (and thus every predicate)
+        /// is identical across fold orders. This is the invariant whose VIOLATION this proptest first caught:
+        /// the original streak-based `empty_confirmed` (`last_demand < first_empty_tick`) was order-SENSITIVE
+        /// for a same-tick `KeepAlive`+`Empty`, so a parent's demand and a child's empty racing on one coord
+        /// could flip a reap decision. Fold a mixed multiset forward vs reversed+duplicated and assert every
+        /// probed predicate agrees — generalizing the arm-C reorder unit tests over the fuzzer's multisets.
+        fn assert_fold_order_independent(realm: u8, verb: u8, count: u8) {
+            let coord = realm_coord(realm);
+            let n = u64::from(count % 6) + 1;
+            let mut demands: Vec<(DemandVerb, u64, u64)> = Vec::new();
+            for k in 0..n {
+                demands.push((decode_verb(verb), 10 + 2 * k, k + 1));
+                demands.push((DemandVerb::Empty, 11 + 2 * k, 1));
+                demands.push((DemandVerb::KeepAlive, 10 + 2 * k, 2));
+            }
+            let fold = |order: &[(DemandVerb, u64, u64)]| -> LedgerCell {
+                let mut l = DemandLedger::default();
+                for (v, tk, f) in order {
+                    l.record_demand(&coord, *v, UniverseTick(*tk), Fence(*f));
+                }
+                l.get(coord.path()).cloned().expect("folded cell exists")
+            };
+            let forward = fold(&demands);
+            let mut shuffled = demands.clone();
+            shuffled.reverse();
+            // Re-push the FIRST demand (`k=0`: verb @ tick 10, fence 1) verbatim ⇒ the fold sees a duplicate,
+            // proving idempotence. Constructed (not `demands.first()`) so there is no never-taken empty-vec
+            // arm — `demands` always holds ≥3 tuples (`n >= 1`), so an `Option`/index here is dead (HR5).
+            shuffled.push((decode_verb(verb), 10, 1));
+            let reversed = fold(&shuffled);
+            // The order-INVARIANT projections (max/max/lex-max).
+            assert_eq!(forward.last_demand_tick, reversed.last_demand_tick);
+            assert_eq!(forward.last_empty_tick, reversed.last_empty_tick);
+            assert_eq!(forward.last_fence, reversed.last_fence);
+            // The DECISION agrees at probes spanning the whole demand window.
+            let t = tuning();
+            for probe in [0u64, 12, 14, 16, 20, 40] {
+                let now = UniverseTick(probe);
+                assert_eq!(
+                    empty_confirmed(&forward, now, t.empty_grace_ticks),
+                    empty_confirmed(&reversed, now, t.empty_grace_ticks),
+                    "INV-FOLD-ORDER: empty_confirmed disagrees across fold order at {probe}"
+                );
+                assert_eq!(
+                    demanded_recently(&forward, now, t.demand_ttl_ticks),
+                    demanded_recently(&reversed, now, t.demand_ttl_ticks),
+                    "INV-FOLD-ORDER: demanded_recently disagrees across fold order at {probe}"
+                );
+            }
+        }
+
+        /// The whole battery for one op history. INV-DET (run-twice), INV-SNAPSHOT-SAFETY (the 4c decider),
+        /// INV-FOLD-ORDER, and the per-arm invariants asserted inside `run_arm`.
+        fn model_check(ops: &[Op], cov: &Cell<[bool; 6]>) {
+            // INV-DET — `reconcile` is a pure deterministic `f(...)`; the whole crash-interleaved history
+            // replays byte-identically (BTreeMap keys, no wall clock / default hasher). Generalizes
+            // `reconcile_is_deterministic_run_twice` over arbitrary crash histories.
+            let a1 = run_arm(ops, true, Some(cov));
+            let a2 = run_arm(ops, true, None);
+            assert_eq!(
+                a1.sweeps, a2.sweeps,
+                "INV-DET: sweep trace diverged across replay"
+            );
+            assert_eq!(
+                a1.killed_ever, a2.killed_ever,
+                "INV-DET: whole-run reap set diverged across replay"
+            );
+            // INV-SNAPSHOT-EQUIVALENCE / the DIVERGENCE ORACLE (the DECIDER for 4c): run the shipped RAM-heal
+            // arm (empty ledger on crash) and the durable-snapshot dry-run arm (ledger survives) over the SAME
+            // history plus a fixed SETTLING TAIL (age stale demands out, resolve open drains — no new demands).
+            // Because `recovery_grace == demand_ttl` (RlmTuning::cloud), any pre-crash demand the snapshot arm
+            // clings to has AGED OUT exactly when the freeze lifts, so the two arms REACH THE SAME REAP-SET.
+            // Equal ⇒ the durable snapshot changes no teardown decision the armed freeze + arm-B don't already
+            // achieve ⇒ D-RLM-2 stays deferred (the expected outcome, §0). A DIFFERENCE is precisely "the
+            // restart-window strand the CAP-freeze + arm-B don't cover" — the machine-checked trigger to
+            // promote §3. A raw per-sweep subset would false-fail (the snapshot arm reaps up to one demand-TTL
+            // LATER), so the invariant is equality AFTER settling, not a mid-flight subset.
+            let mut settled: Vec<Op> = ops.to_vec();
+            settled.push(Op::Reboot); // ensure the reconciler is UP (a run may end mid-crash) before settling.
+            for _ in 0..6 {
+                settled.push(Op::IdleTick { by: 50 });
+                settled.push(Op::Sweep);
+            }
+            let ram = run_arm(&settled, true, None);
+            let snap = run_arm(&settled, false, None);
+            assert_eq!(
+                ram.killed_ever, snap.killed_ever,
+                "INV-SNAPSHOT-EQUIVALENCE: RAM-heal and durable-snapshot reap-sets DIFFER after settling — promote D-RLM-2 (4c)"
+            );
+            // INV-FOLD-ORDER + the op-derived cov floor.
+            for (i, op) in ops.iter().enumerate() {
+                if let Op::ReorderDup { realm, verb, count } = op {
+                    assert_fold_order_independent(*realm, *verb, *count);
+                    if *count >= 2 {
+                        let mut f = cov.get();
+                        f[4] = true;
+                        cov.set(f);
+                    }
+                }
+                // cov[5]: a Sweep in the tick immediately after Reboot — the off-tick-race position where the
+                // freeze MUST hold (a Crash landing just before the reconcile scan).
+                if matches!(op, Op::Reboot)
+                    && ops.get(i + 1).is_some_and(|n| matches!(n, Op::Sweep))
+                {
+                    let mut f = cov.get();
+                    f[5] = true;
+                    cov.set(f);
+                }
+            }
+        }
+
+        #[test]
+        fn rlm_reconcile_survives_arbitrary_crash_interleavings_deterministically() {
+            let cov = std::rc::Rc::new(Cell::new([false; 6]));
+            let cov_run = std::rc::Rc::clone(&cov);
+            let mut runner = TestRunner::new_with_rng(
+                Config {
+                    cases: 1024,
+                    ..Config::default()
+                },
+                TestRng::from_seed(RngAlgorithm::ChaCha, &[0x72u8; 32]),
+            );
+            // `.expect` (not `if let Err { panic! }`): the never-taken failure branch's panic lives INSIDE
+            // `Result::expect` (std, uninstrumented for this crate) rather than as an uncoverable region here,
+            // and `expect` prints the `Err`'s Debug (the shrunk minimal case) automatically (HR5-clean).
+            runner
+                .run(&prop::collection::vec(op_strategy(), 0..=48), move |ops| {
+                    model_check(&ops, &cov_run);
+                    Ok(())
+                })
+                .expect("crash-replay proptest failed (shrunk minimal case follows)");
+            let f = cov.get();
+            // The RELIABLY-random anti-vacuity floor (these arms hit across the 1024 fixed-seed cases). The
+            // TIMING-SPECIFIC arms (cov1 freeze-fired, cov2 a kill, cov3 a zombie force-reap) need a tight
+            // Empty→Sweep→Sweep / MarkDead cadence that random ops seldom line up, so each is PINNED by a
+            // deterministic named witness below (which asserts its own flag) — the union is the full floor.
+            assert!(f[0], "cov0: a Crash lost a non-empty ledger");
+            assert!(f[4], "cov4: a ReorderDup folded a ≥2 multiset");
+            assert!(f[5], "cov5: a Sweep landed in the tick right after Reboot");
+        }
+
+        // ---- deterministic named witnesses (regressions kept alongside the fuzzer) -------------------
+
+        #[test]
+        fn witness_crash_before_sweep_reaps_nothing_in_grace() {
+            let cov = Cell::new([false; 6]);
+            // A live, confirmed-empty, past-window realm crashes then a Sweep lands right after reboot: the
+            // ARMED freeze blocks the reap that would otherwise fire.
+            model_check(
+                &[
+                    Op::Demand {
+                        realm: 0,
+                        verb: 2,
+                        fence: 1,
+                    }, // Empty
+                    Op::GrantHead { realm: 0, node: 0 },
+                    Op::IdleTick { by: 6 },
+                    Op::Crash,
+                    Op::Reboot,
+                    Op::Demand {
+                        realm: 0,
+                        verb: 2,
+                        fence: 1,
+                    }, // re-report Empty post-reboot
+                    Op::Sweep, // inside the freeze ⇒ no kill
+                ],
+                &cov,
+            );
+            // The freeze fired: a live, oracle-empty realm swept inside the post-reboot window was not reaped
+            // (cov1). A post-reboot `Empty` MUST precede the sweep for the realm to have a cell to protect, so
+            // this witness cannot also be the strict Reboot→Sweep adjacency (cov5) — the fuzzer pins that.
+            assert!(
+                cov.get()[1],
+                "the freeze fired on a would-be-reapable realm"
+            );
+        }
+
+        #[test]
+        fn witness_a_confirmed_empty_realm_is_reaped_after_the_drain() {
+            let cov = Cell::new([false; 6]);
+            // No crash ⇒ the freeze is unarmed (quiesce 0). A live, out-of-AoI, confirmed-empty realm past its
+            // dwell drains one window then is KILLED on the next sweep — the reap path (cov2), exercised in a
+            // DEBUG test so `coverage-fast` covers the kill/revoke/mark_reaped arms (the soak is release-only).
+            model_check(
+                &[
+                    Op::IdleTick { by: 6 },              // now → 7 (past min_dwell 4)
+                    Op::GrantHead { realm: 0, node: 0 }, // a live head
+                    Op::Demand {
+                        realm: 0,
+                        verb: 2,
+                        fence: 1,
+                    }, // Empty (undesired, confirmed)
+                    Op::Sweep,                           // opens the drain (quiesced ⇒ ready)
+                    Op::Demand {
+                        realm: 0,
+                        verb: 2,
+                        fence: 1,
+                    }, // keep Empty fresh through the drain
+                    Op::Sweep,                           // drain elapsed ⇒ KILL
+                ],
+                &cov,
+            );
+            assert!(cov.get()[2], "a Kill was emitted (the reap path)");
+        }
+
+        #[test]
+        fn witness_snapshot_and_ramheal_agree_on_a_simple_trace() {
+            let cov = Cell::new([false; 6]);
+            // A plain spin/keepalive trace: both arms decide identically (no divergence) — the expected 4c
+            // outcome. `model_check`'s INV-SNAPSHOT-EQUIVALENCE asserts the settled reap-sets are equal.
+            model_check(
+                &[
+                    Op::Demand {
+                        realm: 0,
+                        verb: 0,
+                        fence: 1,
+                    }, // SpinUp
+                    Op::Sweep,
+                    Op::GrantHead { realm: 0, node: 0 },
+                    Op::Demand {
+                        realm: 0,
+                        verb: 1,
+                        fence: 1,
+                    }, // KeepAlive
+                    Op::Sweep,
+                ],
+                &cov,
+            );
+        }
+
+        #[test]
+        fn witness_zombie_after_reboot_force_reaps() {
+            let cov = Cell::new([false; 6]);
+            // A demanded realm with a live head whose owner latches dead ⇒ the sweep force-reaps the zombie.
+            model_check(
+                &[
+                    Op::Demand {
+                        realm: 0,
+                        verb: 0,
+                        fence: 1,
+                    },
+                    Op::GrantHead { realm: 0, node: 0 },
+                    Op::MarkDead { node: 0 },
+                    Op::Sweep,
+                ],
+                &cov,
+            );
+            assert!(cov.get()[3], "the zombie force-reap path fired");
+        }
+
+        #[test]
+        fn witness_reorder_dup_folds_identically() {
+            let cov = Cell::new([false; 6]);
+            model_check(
+                &[Op::ReorderDup {
+                    realm: 2,
+                    verb: 2,
+                    count: 4,
+                }],
+                &cov,
+            );
+            assert!(cov.get()[4], "a ≥2 reorder/dup multiset was folded");
+        }
+
+        #[test]
+        fn witness_crash_mid_drain_reopens_not_double_kills() {
+            let cov = Cell::new([false; 6]);
+            // A realm draining toward a kill crashes mid-drain: the post-reboot sweep re-opens the drain
+            // under the fresh freeze rather than double-killing (INV-DELTA + INV-CRASH-NO-REAP).
+            model_check(
+                &[
+                    Op::Demand {
+                        realm: 0,
+                        verb: 2,
+                        fence: 1,
+                    }, // Empty
+                    Op::GrantHead { realm: 0, node: 0 },
+                    Op::IdleTick { by: 6 },
+                    Op::Demand {
+                        realm: 0,
+                        verb: 2,
+                        fence: 1,
+                    },
+                    Op::Sweep, // opens the drain
+                    Op::Crash, // mid-drain crash
+                    Op::Reboot,
+                    Op::Demand {
+                        realm: 0,
+                        verb: 2,
+                        fence: 1,
+                    },
+                    Op::Sweep, // re-opens under the freeze; never a double-kill
+                ],
+                &cov,
+            );
+        }
+
+        #[test]
+        fn witness_ancestor_closure_survives_crash() {
+            let cov = Cell::new([false; 6]);
+            // Demand the CHILD (realm 2 = Planet under System(7)); ancestor-closure pulls System(7) alive.
+            // A crash + re-demand re-derives the same closure (the level-triggered self-heal).
+            model_check(
+                &[
+                    Op::Demand {
+                        realm: 2,
+                        verb: 0,
+                        fence: 1,
+                    },
+                    Op::Sweep, // spins up the child + its ancestor
+                    Op::Crash,
+                    Op::Reboot,
+                    Op::Demand {
+                        realm: 2,
+                        verb: 0,
+                        fence: 1,
+                    },
+                    Op::Sweep,
+                ],
+                &cov,
+            );
+        }
+
+        #[test]
+        fn witness_a_drain_opened_then_a_demand_rescues_it() {
+            let cov = Cell::new([false; 6]);
+            // A realm opens its teardown drain (confirmed-empty, out of AoI) then a KeepAlive RE-ACCRUES
+            // before the drain elapses ⇒ the next sweep CLEARS `draining_since` (the BUG-C veto — a
+            // login-into-draining rescue). Exercises the drain-CLEAR delta arm (`set_draining = None`), which
+            // the crash/kill witnesses never take (they crash mid-drain or kill through it, never rescue).
+            model_check(
+                &[
+                    Op::IdleTick { by: 6 },
+                    Op::GrantHead { realm: 0, node: 0 },
+                    Op::Demand {
+                        realm: 0,
+                        verb: 2,
+                        fence: 1,
+                    }, // Empty ⇒ confirmed
+                    Op::Sweep, // teardown-ready ⇒ opens the drain (draining_since = Some)
+                    Op::Demand {
+                        realm: 0,
+                        verb: 1,
+                        fence: 1,
+                    }, // KeepAlive rescues within the drain window
+                    Op::Sweep, // ready=false ⇒ the drain CLEARS (draining_since = None)
+                ],
+                &cov,
+            );
+        }
+
+        #[test]
+        fn witness_crash_with_empty_ledger_then_a_sweep_while_down() {
+            let cov = Cell::new([false; 6]);
+            // The two boundary arms the demand-first witnesses never take: a `Crash` with NOTHING demanded yet
+            // (the empty-ledger side of the `!is_empty()` cov0 check) IMMEDIATELY followed by a `Sweep` while
+            // the orchestrator is DOWN (running=false ⇒ the sweep is skipped, the `continue`).
+            model_check(&[Op::Crash, Op::Sweep, Op::Reboot, Op::Sweep], &cov);
+        }
+
+        /// The SOAK (release-gated, mirror the SPIKE-3a `just <name> release` latency-gate pattern): one very
+        /// long op stream with periodic crashes + continuous re-accrue, asserting the full battery
+        /// throughout. A SUSTAINED INV-SNAPSHOT-SAFETY / INV-NO-STRAND / leak violation is the concrete
+        /// trigger to promote the deferred durable snapshot (§3 / D-RLM-2). `just rlm-soak` runs it.
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn rlm_soak_long_crash_stream_stays_consistent() {
+            // A fixed-seed xorshift (no wall clock / no rand dep — deterministic repro) drives ~30k ops.
+            let mut state: u64 = 0x7272_7272_7272_7272;
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let mut ops: Vec<Op> = Vec::with_capacity(30_000);
+            for _ in 0..30_000 {
+                let r = next();
+                let realm = (r & 0x3) as u8 % 3;
+                let node = ((r >> 2) & 0x3) as u8 % 3;
+                let verb = ((r >> 4) & 0x3) as u8;
+                ops.push(match (r >> 8) % 16 {
+                    0 | 1 | 2 | 3 => Op::Demand {
+                        realm,
+                        verb,
+                        fence: 1,
+                    },
+                    4 | 5 | 6 | 7 => Op::Sweep,
+                    8 | 9 => Op::IdleTick {
+                        by: ((r >> 12) & 0x7) as u8,
+                    },
+                    10 | 11 => Op::GrantHead { realm, node },
+                    12 => Op::RevokeHead { realm },
+                    13 => Op::MarkDead { node },
+                    14 => Op::Crash,
+                    _ => Op::Reboot,
+                });
+            }
+            let cov = Cell::new([false; 6]);
+            model_check(&ops, &cov);
+        }
     }
 }

@@ -233,6 +233,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rlm: vd_sim::rlm::RlmTuning::default(),
         },
         Box::new(store),
+        // RLM: inert `rlm` (default) ⇒ the reconciler never sweeps ⇒ this spawner is never invoked. A
+        // placeholder in-process `MemSpawner` until Step 5 supplies the real k8s pod launcher (the demand-
+        // driven realm-shard scheduler that replaces this local-only bin with a cluster-native one).
+        Box::new(vd_sim::io::mem::MemSpawner::new(
+            vd_sim::io::mem::MemHub::new(),
+            vd_core::NodeId(1_000_000),
+            8,
+        )),
     );
 
     // The admin endpoint: republished after every tick, served off-thread.

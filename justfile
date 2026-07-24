@@ -142,6 +142,14 @@ spike2a:
 spike3a:
     cargo test --release -p vd-io-prod --test mesh_snapshot_latency -- --nocapture --test-threads=1
 
+# RLM Step 4b (the crash-replay SOAK): a ~30k-op crash/reorder/dup stream through the REAL realm
+# reconcile kernel, asserting determinism + crash-no-reap + no-strand + bounded-ledger +
+# INV-SNAPSHOT-SAFETY throughout. RELEASE build (the `#[cfg(not(debug_assertions))]` soak is inert in
+# debug; `just test` still runs the 1024-case fixed-seed proptest + the 6 named witnesses). A sustained
+# ARM-A≠ARM-B divergence here is the concrete trigger to promote the deferred durable snapshot (D-RLM-2).
+rlm-soak:
+    cargo test --release -p vd-sim rlm_soak -- --nocapture --test-threads=1
+
 fmt:
     cargo fmt --all
 
@@ -189,7 +197,7 @@ node-per-realm-walk:
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk coverage
 
 # One-time setup helper.
 coverage-setup:

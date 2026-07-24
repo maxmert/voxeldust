@@ -1305,6 +1305,12 @@ pub(crate) struct Rehydrated {
     pub clock: CeilingClock,
     pub directory: DirectoryCore,
     pub runtime: SagaRuntimeRes,
+    /// RLM Step 4a — the crash-recovery FREEZE watermark for the realm reconciler: teardown is blocked
+    /// until `now` reaches it, so a rebuilt orchestrator (empty RAM demand ledger) never mass-reaps a
+    /// still-occupied realm before its parent's `KeepAlive` (or a login demand) re-accrues. Measured from
+    /// the RECOVERED ceiling (the resumed `now`) + `RlmTuning::recovery_grace_ticks`; the boot path arms
+    /// the reconciler with it. `0` when the RLM tuning is inert (nothing to freeze).
+    pub rlm_quiesced_until: UniverseTick,
 }
 
 /// Reconstruct the orchestrator's durable state from the [`Store`] on a kill-9 restart (D-6). Returns
@@ -1323,6 +1329,7 @@ pub(crate) fn rehydrate(
     saga_tuning: SagaTuning,
     liveness: LivenessTuning,
     dir_tuning: DirectoryTuning,
+    rlm: vd_sim::rlm::RlmTuning,
 ) -> Option<Rehydrated> {
     // The Clock family is the genesis-vs-recover discriminator: absent ⇒ no tick ever committed ⇒ genesis.
     let clock_recs = store.scan(&[StoreKey::CLOCK]);
@@ -1402,10 +1409,19 @@ pub(crate) fn rehydrate(
     runtime.liveness_quiesced_until =
         UniverseTick(ceiling.0.saturating_add(dir_tuning.recovery_grace_ticks));
 
+    // RLM Step 4a — the realm reconciler's own crash-recovery freeze, sized from the DEMAND re-accrue
+    // cadence (`RlmTuning::recovery_grace_ticks`, a different clock than the liveness renewal above). A
+    // rebuilt orchestrator's RAM demand ledger is EMPTY, so without this freeze a shard that re-asserts
+    // `Empty` before its parent's `KeepAlive` re-lands would be reaped despite still being occupied.
+    // Measured from the RAW recovered `ceiling` (the resumed `now`) — NOT `clock.confirmed_ceiling()`,
+    // which is already advanced by `reserve_chunk` at the boot insert site.
+    let rlm_quiesced_until = UniverseTick(ceiling.0.saturating_add(rlm.recovery_grace_ticks));
+
     Some(Rehydrated {
         clock,
         directory,
         runtime,
+        rlm_quiesced_until,
     })
 }
 
@@ -2653,6 +2669,16 @@ mod tests {
         }
     }
 
+    /// A throwaway RLM spawner for the D-6 crash/recover rigs (RLM is INERT in `orch_config` ⇒ never
+    /// invoked; it only satisfies the `register_orchestrator_with_store` signature).
+    fn test_spawner() -> Box<dyn vd_sim::io::RealmSpawner + Send + Sync> {
+        Box::new(vd_sim::io::mem::MemSpawner::new(
+            MemHub::new(),
+            NodeId(1_000_000),
+            8,
+        ))
+    }
+
     impl Rig {
         fn new() -> Rig {
             let hub = MemHub::new();
@@ -2672,6 +2698,7 @@ mod tests {
                 schedule,
                 &orch_config(),
                 Box::new(store.clone()),
+                test_spawner(),
             );
             let gateway = hub.register(GATEWAY, 64);
             let source = hub.register(SOURCE, 64);
@@ -2705,6 +2732,7 @@ mod tests {
                 schedule,
                 &orch_config(),
                 Box::new(self.store.clone()),
+                test_spawner(),
             );
             self.orch = orch; // the old orchestrator World is dropped here — its RAM is lost
         }
@@ -2729,6 +2757,7 @@ mod tests {
                     ..orch_config()
                 },
                 Box::new(self.store.clone()),
+                test_spawner(),
             );
             self.orch = orch;
         }
@@ -6926,6 +6955,7 @@ mod tests {
                 lease_ttl_ticks: 10_000,
                 ..DirectoryTuning::default()
             },
+            vd_sim::rlm::RlmTuning::default(),
         )
         .expect("the store is non-empty (a Clock record present) → recover");
         let mut runtime = recovered.runtime;

@@ -8,10 +8,10 @@
 //! `ReserveCeiling` actions before confirming — the clock discipline is identical.
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
-use vd_core::{EpochId, NodeId};
+use vd_core::{EpochId, NodeId, UniverseTick};
 use vd_sim::directory::{DirectoryCore, DirectoryTuning};
 use vd_sim::io::mem::{MemHub, MemSpawner, MemStore};
-use vd_sim::io::{Inbound, MsgClass, Store};
+use vd_sim::io::{Inbound, MsgClass, RealmSpawner, Store};
 use vd_sim::rlm::RlmTuning;
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_wire::intershard::InterShardFlow;
@@ -79,7 +79,17 @@ pub fn register_orchestrator(world: &mut World, schedule: &mut Schedule, cfg: &O
     // ~5 unrelated unit-test/bin call sites need no churn, and `drive_sagas`'s `StoreRes` is always
     // present. A caller that needs a RECOVERABLE (kill-9-survivable) orchestrator passes a retained
     // handle via [`register_orchestrator_with_store`]; redb is the io-prod backend (DEFERRED).
-    register_orchestrator_with_store(world, schedule, cfg, Box::new(MemStore::new()));
+    //
+    // RLM Step 3/4a — the default realm spawner is a fresh in-process `MemSpawner` (ids minted from a
+    // high base so they never collide with hand-picked test node ids). INERT unless `cfg.rlm` is active;
+    // a live-AoI / harness / bootstrap boot passes its OWN spawner (Step 5 supplies the real k8s launcher).
+    register_orchestrator_with_store(
+        world,
+        schedule,
+        cfg,
+        Box::new(MemStore::new()),
+        Box::new(MemSpawner::new(MemHub::new(), NodeId(1_000_000), 8)),
+    );
 }
 
 /// As [`register_orchestrator`], but against a caller-provided durable [`Store`] (D-6). A NON-EMPTY
@@ -92,17 +102,24 @@ pub fn register_orchestrator_with_store(
     schedule: &mut Schedule,
     cfg: &OrchestratorConfig,
     store: Box<dyn Store + Send + Sync>,
+    spawner: Box<dyn RealmSpawner + Send + Sync>,
 ) {
-    let (clock, directory, mut runtime) = match crate::saga_runtime::rehydrate(
+    // RLM Step 4a — `rlm_quiesced_until` carries the crash-recovery FREEZE watermark out of the boot
+    // discriminant (RECOVER arms it from the recovered ceiling; GENESIS leaves it `0` = unarmed). It must
+    // be captured HERE because the recover-vs-genesis distinction is erased once the match collapses.
+    let (clock, directory, mut runtime, rlm_quiesced_until) = match crate::saga_runtime::rehydrate(
         store.as_ref(),
         cfg.reserve_chunk,
         cfg.saga,
         cfg.liveness,
         cfg.directory,
+        cfg.rlm,
     ) {
-        // RECOVER: the rebuilt orchestrator resumes its durable state (no in-flight transfer vanishes).
-        Some(r) => (r.clock, r.directory, r.runtime),
+        // RECOVER: the rebuilt orchestrator resumes its durable state (no in-flight transfer vanishes). The
+        // realm reconciler's RAM demand ledger is EMPTY, so the freeze holds teardown until demands re-accrue.
+        Some(r) => (r.clock, r.directory, r.runtime, r.rlm_quiesced_until),
         // GENESIS: a fresh orchestrator reserves the clock ceiling + starts with an empty directory/saga set.
+        // Nothing to freeze — no realm was ever running, so teardown is unarmed (`rlm_quiesced_until = 0`).
         None => {
             let (mut clock, ClockAction::ReserveCeiling(ceiling)) =
                 CeilingClock::genesis(cfg.epoch, cfg.reserve_chunk)
@@ -114,6 +131,7 @@ pub fn register_orchestrator_with_store(
                 clock,
                 DirectoryCore::new(cfg.directory),
                 crate::saga_runtime::SagaRuntimeRes::with_tunings(cfg.saga, cfg.liveness),
+                UniverseTick(0),
             )
         }
     };
@@ -127,13 +145,16 @@ pub fn register_orchestrator_with_store(
     world.insert_resource(runtime);
     world.insert_resource(crate::saga_runtime::StoreRes(store));
     // RLM Step 3 — the realm-lifecycle reconciler. INERT by default (`cfg.rlm` zero ⇒ the sweep never
-    // runs ⇒ byte-identical). The spawner defaults to a fresh in-process `MemSpawner` (mint ids from a
-    // high base so they never collide with hand-picked test node ids); a live-AoI / harness boot overwrites
-    // this resource with a spawner tied to its own hub (Step 5 supplies the real k8s launcher).
-    world.insert_resource(RlmReconcilerRes::new(
-        cfg.rlm,
-        Box::new(MemSpawner::new(MemHub::new(), NodeId(1_000_000), 8)),
-    ));
+    // runs ⇒ byte-identical). The caller INJECTS the spawner (register_orchestrator supplies an in-process
+    // MemSpawner; a live-AoI / harness / bootstrap boot supplies one tied to its own hub; Step 5 supplies
+    // the real k8s launcher) — so this is the ONE construction site and no downstream rig has to re-insert
+    // and clobber the boot-armed quiesce (RLM Step 4a — the E2E harness overwrite is gone).
+    let mut reconciler = RlmReconcilerRes::new(cfg.rlm, spawner);
+    // RLM Step 4a — arm the crash-recovery freeze on RECOVER (a no-op `arm_quiesce(0)` on GENESIS). Teardown
+    // is blocked until `now >= rlm_quiesced_until`, so a rebuilt orchestrator with an empty demand ledger
+    // never reaps a still-occupied realm before its parent's `KeepAlive` (or a login demand) re-accrues.
+    reconciler.arm_quiesce(rlm_quiesced_until);
+    world.insert_resource(reconciler);
     // RLM Step 3e chain. `record_realm_demands` folds this tick's re-asserted demands BEFORE `serve_directory`
     // (so they are fresh). `drive_sagas_core` runs the saga FSMs + the reaper + rehome-arm (mutating the
     // directory). `reconcile_realm_lifecycle` then reads the post-CAS heads + liveness and stages its
