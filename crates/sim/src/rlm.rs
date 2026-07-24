@@ -383,23 +383,30 @@ pub fn launching(head: Option<OwnerRecord>, launch_present: bool) -> bool {
     head.is_none() & launch_present
 }
 
-/// `(A)` of the desired-alive predicate — a demand landed within the TTL. `Empty` never refreshes
-/// `last_demand_tick`, so an empty realm ages out of arm A.
+/// `(A)` of the desired-alive predicate — a REAL demand (SpinUp/KeepAlive/spawn) landed within the TTL.
+/// `Empty` never refreshes `last_demand_tick`, so an empty realm ages out of arm A. The `0` sentinel (a
+/// realm that has ONLY ever self-reported `Empty`, never been demanded) is NOT "demanded" — the raw
+/// `now - 0 <= ttl` would be spuriously true at every early universe tick (`now <= ttl`), keeping a
+/// never-demanded empty realm undead near genesis. Bitwise `&` (both operands covered, HR5).
 #[must_use]
 pub fn demanded_recently(cell: &LedgerCell, now: UniverseTick, ttl: u64) -> bool {
-    now.0.saturating_sub(cell.last_demand_tick.0) <= ttl
+    (cell.last_demand_tick != UniverseTick(0))
+        & (now.0.saturating_sub(cell.last_demand_tick.0) <= ttl)
 }
 
-/// The realm has AFFIRMATIVELY gone empty (arm-C hardened): a `RECENT` `Empty` report (within grace of the
-/// streak start) AND no non-Empty demand at-or-after the streak start. Order-independent (the
-/// `last_demand_tick < first_empty_tick` term resolves a same-tick / reordered `Empty`+`SpinUp` regardless
-/// of inbox order). A crashed shard stops reporting ⇒ the streak ages past grace ⇒ NOT confirmed-empty (it
-/// takes the `zombie` path instead — the dead-vs-empty disambiguation).
+/// The realm has AFFIRMATIVELY gone empty: a RECENT `Empty` report (within grace of the LAST report — so a
+/// continuously-empty realm re-asserting `Empty` every tick STAYS confirmed, while grace tolerates a single
+/// dropped datagram) AND no non-Empty demand at-or-after the empty STREAK start (arm C — order-independent:
+/// the `last_demand_tick < first_empty_tick` term resolves a same-tick / reordered `Empty`+`SpinUp`
+/// regardless of inbox order). A crashed shard STOPS reporting ⇒ `last_empty_tick` ages past grace ⇒ NOT
+/// confirmed-empty (it takes the `zombie` path instead — the dead-vs-empty disambiguation). NOTE: freshness
+/// is measured from `last_empty_tick`, NOT the streak start — an empty realm that outlives `grace` must
+/// remain reap-eligible, which measuring from the streak start would wrongly prevent. Bitwise `&` (HR5).
 #[must_use]
 pub fn empty_confirmed(cell: &LedgerCell, now: UniverseTick, grace: u64) -> bool {
     match (cell.last_empty_tick, cell.first_empty_tick) {
-        (Some(_last), Some(streak)) => {
-            let fresh = now.0.saturating_sub(streak.0) <= grace;
+        (Some(last), Some(streak)) => {
+            let fresh = now.0.saturating_sub(last.0) <= grace;
             let no_demand_since = cell.last_demand_tick < streak;
             fresh & no_demand_since
         }
@@ -487,12 +494,19 @@ fn is_strict_descendant(candidate: &RealmPath, ancestor: &RealmPath) -> bool {
         & candidate.levels().starts_with(ancestor.levels())
 }
 
-/// A realm may be (re-)spun only past its spin-up cooldown; a realm with no cell yet (an ancestor the demand
-/// fold never touched) has never been spawned ⇒ eligible immediately. Monomorphic (both arms covered).
+/// A realm may be (re-)spun only past its spin-up cooldown. A realm that has never been spawn-ATTEMPTED is
+/// eligible immediately: either it has no cell yet (an ancestor the demand fold never touched) OR its cell's
+/// `spawn_watermark` is still the `0` sentinel (created by the demand fold, no spawn stamped). The sentinel
+/// is load-bearing at EARLY universe ticks — `now - 0 >= cooldown` is FALSE while `now < cooldown`, which
+/// would wrongly block a realm's very first spawn near genesis (a real orchestrator boots at tick ~1, not
+/// `≫ cooldown`; the unit tests masked this by using `now=100`). Monomorphic bitwise (both arms covered).
 fn spinup_eligible(cell: Option<&LedgerCell>, now: UniverseTick, tuning: &RlmTuning) -> bool {
     match cell {
         None => true,
-        Some(c) => now.0.saturating_sub(c.spawn_watermark.0) >= tuning.spinup_cooldown_ticks,
+        Some(c) => {
+            (c.spawn_watermark == UniverseTick(0))
+                | (now.0.saturating_sub(c.spawn_watermark.0) >= tuning.spinup_cooldown_ticks)
+        }
     }
 }
 
@@ -908,6 +922,25 @@ mod tests {
     }
 
     #[test]
+    fn demanded_recently_ignores_the_never_demanded_sentinel() {
+        let t = cloud();
+        let mut l = DemandLedger::default();
+        // A realm that has ONLY reported Empty keeps the `0` sentinel ⇒ NOT demanded, even at an early
+        // tick where `now <= ttl` would spuriously pass a raw `now - 0 <= ttl`.
+        l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(3), Fence(1));
+        let c = l.get(sys(7).path()).unwrap();
+        assert_eq!(c.last_demand_tick, UniverseTick(0));
+        assert!(!demanded_recently(c, UniverseTick(5), t.demand_ttl_ticks));
+        // A real SpinUp ⇒ demanded within the TTL.
+        l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(6), Fence(1));
+        assert!(demanded_recently(
+            l.get(sys(7).path()).unwrap(),
+            UniverseTick(7),
+            t.demand_ttl_ticks
+        ));
+    }
+
+    #[test]
     fn empty_confirmed_requires_fresh_report_and_no_demand_since_streak() {
         let t = cloud();
         let mut l = DemandLedger::default();
@@ -924,6 +957,29 @@ mod tests {
         assert!(!empty_confirmed(
             &c,
             UniverseTick(101 + t.empty_grace_ticks),
+            t.empty_grace_ticks
+        ));
+    }
+
+    #[test]
+    fn empty_confirmed_stays_true_while_empty_is_re_asserted_beyond_grace() {
+        // A realm that stays empty and re-reports `Empty` every tick must REMAIN confirmed-empty far past
+        // the grace window (freshness is from the LAST report, not the streak start) — else a long-empty
+        // realm could never be reaped. A crashed realm (stops reporting) DOES age out.
+        let t = cloud();
+        let mut l = DemandLedger::default();
+        for tick in 100..100 + 5 * t.empty_grace_ticks {
+            l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(tick), Fence(1));
+            assert!(
+                empty_confirmed(l.get(sys(7).path()).unwrap(), UniverseTick(tick), t.empty_grace_ticks),
+                "a continuously-empty realm stays confirmed at tick {tick}"
+            );
+        }
+        // It STOPS reporting (crash) ⇒ ages out of confirmed-empty past grace.
+        let last = 100 + 5 * t.empty_grace_ticks - 1;
+        assert!(!empty_confirmed(
+            l.get(sys(7).path()).unwrap(),
+            UniverseTick(last + t.empty_grace_ticks + 1),
             t.empty_grace_ticks
         ));
     }
@@ -1467,6 +1523,11 @@ mod tests {
         let t = cloud();
         // Never spawned (no cell) ⇒ eligible.
         assert!(spinup_eligible(None, UniverseTick(0), &t));
+        // Cell with the `0` sentinel (demanded, never spawn-attempted) ⇒ eligible even at an EARLY tick
+        // inside the cooldown window (the genesis-boot case the E2E exposed).
+        let fresh = LedgerCell::empty(sys(7));
+        assert_eq!(fresh.spawn_watermark, UniverseTick(0));
+        assert!(spinup_eligible(Some(&fresh), UniverseTick(2), &t));
         let mut c = LedgerCell::empty(sys(7));
         c.spawn_watermark = UniverseTick(100);
         assert!(!spinup_eligible(Some(&c), UniverseTick(105), &t)); // within cooldown
