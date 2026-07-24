@@ -170,6 +170,15 @@ impl OrbitalElements {
     pub fn period(&self) -> f64 {
         core::f64::consts::TAU / self.mean_motion()
     }
+
+    /// Max orbital speed (at periapsis) `v_peri = √(μ/p)·(1+e)`, `p = a(1−e²)` (the vis-viva speed
+    /// at closest approach), in m/s. Closed-form `f(elements)` — so a moving child's own orbital
+    /// closing speed is seed-derivable, used to widen its AoI band by its motion (RLM Step 2, M2).
+    #[must_use]
+    pub fn v_peri(&self) -> f64 {
+        let p = self.sma * (1.0 - self.ecc * self.ecc);
+        (self.mu() / p).sqrt() * (1.0 + self.ecc)
+    }
 }
 
 /// A body's instantaneous Cartesian state (position + velocity) in the PARENT inertial
@@ -388,6 +397,16 @@ mod tests {
     /// Circular speed `vc = √(μ/a)`.
     fn vc(e: &OrbitalElements) -> f64 {
         (e.mu() / e.sma).sqrt()
+    }
+
+    #[test]
+    fn aoi_v_peri_periapsis_speed() {
+        // Circular (e=0): v_peri = √(μ/a) = the circular speed exactly.
+        let c = circular();
+        assert!((c.v_peri() - vc(&c)).abs() < 1e-9 * vc(&c));
+        // Eccentric: the periapsis speed exceeds the same-sma circular speed (√((1+e)/(1-e)) > 1).
+        let e = eccentric();
+        assert!(e.v_peri() > vc(&e));
     }
 
     #[test]

@@ -117,6 +117,7 @@ fn dest_region(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
         frame: frame_for_realm(realm, None).expect("System realm always resolves a frame"),
         shape: Boundary::Shell { r },
         band,
+        aoi: vd_core::geometry::AoiConfig::inert(),
         parent,
     }
 }

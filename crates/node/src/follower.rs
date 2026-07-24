@@ -73,6 +73,10 @@ fn observe_clock_syncs(
         sample.universe_tick = clock.now();
         sample.epoch = clock.epoch();
     }
+    // RLM Step 2 (D-Finding-1 / L2): set the synced gate ONCE the clock exists, at fn EXIT — NOT inside
+    // the loop (which fires only on delivery ticks → a sync-flap the run-condition would inherit). Once
+    // `state.clock` is `Some` it never resets, so every subsequent tick reads `synced = true`.
+    sample.synced = state.clock.is_some();
 }
 
 #[cfg(test)]

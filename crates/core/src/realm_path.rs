@@ -30,7 +30,11 @@ const GALAXY_STANDIN: RealmId = RealmId::System(1);
 /// they resolve to the stand-ins. Now serde-derived + `#[repr(u8)]` with explicit discriminants
 /// (frozen APPEND-only order, mirroring [`crate::taxonomy::ProfileKind`]) because it rides the
 /// wire via [`crate::realm_coord::RealmCoord`] (RLM Step 1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// `Ord`/`PartialOrd` (RLM Step 2): `RealmPath` is a `BTreeMap`/`BTreeSet` key in the AoI ledger, so the
+// whole lineage type stack is totally ordered. A PURE ADDITIVE derive — ordering is NOT serialized, so
+// the frozen postcard bytes are untouched; `#[repr(u8)]` explicit discriminants make the kind order
+// (Universe < Galaxy < … < Area) match declaration order deterministically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum RealmKindTag {
     Universe = 0,
@@ -58,7 +62,7 @@ impl RealmKindTag {
 /// `RealmId` payload for the keyed kinds (System/Planet/Station/Area) and as the RNG lineage
 /// seed fed to [`crate::rng::realm_stream`]; `Universe`/`Galaxy` resolve to the stand-ins
 /// regardless of `seed`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RealmLevel {
     pub kind: RealmKindTag,
     pub seed: u64,
@@ -87,7 +91,7 @@ impl RealmLevel {
 
 /// A realm's ordered lineage, root → leaf (e.g. `[Universe, Galaxy(g), System(s), Planet(p),
 /// Area(a)]`). Off the wire; the derivation-layer source of parent/child structure.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RealmPath(Vec<RealmLevel>);
 
 impl RealmPath {
@@ -351,5 +355,26 @@ mod tests {
                 "{kind:?} postcard discriminant byte"
             );
         }
+    }
+
+    #[test]
+    fn realm_path_is_totally_ordered_by_lineage() {
+        // RLM Step 2: `RealmPath` is a `BTreeMap`/`BTreeSet` key in the AoI ledger, so the whole type stack
+        // is `Ord`. Kind order follows the `#[repr(u8)]` declaration (Universe < Galaxy < … < Area), then
+        // seed, then path length (a prefix sorts before its extension) — a deterministic total order.
+        let a = RealmLevel::new(RealmKindTag::Universe, 0);
+        let b = RealmLevel::new(RealmKindTag::Galaxy, 0);
+        assert!(a < b, "kind order follows the repr discriminant");
+        let sys7 = system_path(7);
+        let sys8 = system_path(8);
+        assert!(sys7 < sys8, "same lineage, greater leaf seed sorts later");
+        assert!(galaxy_path() < sys7, "a prefix sorts before its extension");
+        // A BTreeSet round-trips the ordering (the actual AoI use).
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(sys8.clone());
+        set.insert(galaxy_path());
+        set.insert(sys7.clone());
+        let ordered: Vec<RealmPath> = set.into_iter().collect();
+        assert_eq!(ordered, vec![galaxy_path(), sys7, sys8]);
     }
 }

@@ -2083,6 +2083,7 @@ pub fn override_regions_for_boundaries(
         // see `override_containment_band` (the r=10-shell / inset=50 un-enterable bug).
         band: override_containment_band(&shape, move_speed_mps, tick_dt_s),
         shape,
+        aoi: vd_core::geometry::AoiConfig::inert(),
         parent,
     };
     // Ambient root ⊃ the shard's own realm (large) ⊃ one deeper child per loaded boundary (its to_realm).
@@ -2109,6 +2110,7 @@ pub fn override_regions_for_boundaries(
                 .unwrap_or(vd_core::pose::FrameRef::SystemSpace { system_seed: 0 }),
             band: override_containment_band(&b.shape, move_speed_mps, tick_dt_s),
             shape: b.shape,
+            aoi: vd_core::geometry::AoiConfig::inert(),
             parent: Some(hosted_realm),
         });
     }

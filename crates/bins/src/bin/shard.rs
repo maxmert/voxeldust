@@ -116,6 +116,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         schedule,
         StubConfig {
             realm: own_realm,
+            // RLM Step 2: the single-realm ROOT coord (inert AoI never reads it; the live-AoI visual boot
+            // that names deep children replaces it with the full seed lineage — Step 5/6). Byte-identical.
+            own_coord: StubConfig::root_coord(own_realm),
+            boot_ticks_p99: 0,
             held_realms: held_realms.clone(),
             frame: own_frame,
             move_speed_mps: move_speed,

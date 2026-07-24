@@ -56,6 +56,8 @@ pub fn auth_verifying_key() -> [u8; 32] {
 pub fn stub_config() -> StubConfig {
     StubConfig {
         realm: RealmId::System(7),
+        own_coord: StubConfig::root_coord(RealmId::System(7)),
+        boot_ticks_p99: 0,
         // Single-realm (co-hosting is exercised by the --triple straight-walk smoke, not these cluster
         // scenarios — their crossings target realms hosted by OTHER shards). Byte-identical default.
         held_realms: StubConfig::single_realm(RealmId::System(7)),
@@ -94,6 +96,7 @@ pub fn dest_stub_config() -> StubConfig {
     StubConfig {
         realm: RealmId::System(8),
         // Override the inherited `{System(7)}` — this shard hosts System 8 (single-realm).
+        own_coord: StubConfig::root_coord(RealmId::System(8)),
         held_realms: StubConfig::single_realm(RealmId::System(8)),
         frame: FrameRef::SystemSpace { system_seed: 8 },
         mint_seed: 17,
@@ -147,6 +150,7 @@ pub fn galaxy_stub_config() -> StubConfig {
         realm: RealmId::System(GALAXY_SEED),
         // Override the inherited `{System(7)}` — this shard hosts the Galaxy (single-realm; its System
         // 7/8 children are hosted by OTHER shards, so no co-hosting is needed on the Galaxy).
+        own_coord: StubConfig::root_coord(RealmId::System(GALAXY_SEED)),
         held_realms: StubConfig::single_realm(RealmId::System(GALAXY_SEED)),
         frame: FrameRef::SystemSpace {
             system_seed: GALAXY_SEED,
@@ -580,6 +584,7 @@ fn crossing_region(
         frame: frame_for_realm(realm, None).expect("System realm always resolves a frame"),
         shape: vd_core::geometry::Boundary::Shell { r },
         band: crossing_band(),
+        aoi: vd_core::geometry::AoiConfig::inert(),
         parent,
     }
 }

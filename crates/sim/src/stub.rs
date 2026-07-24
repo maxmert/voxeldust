@@ -29,7 +29,10 @@ use vd_core::geometry::{
 use vd_core::glam::DVec3;
 use vd_core::kinematics;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
+use vd_core::realm_coord::RealmCoord;
+use vd_core::realm_path::{RealmLevel, RealmPath};
 use vd_core::rng::SplitMix64;
+use vd_core::worldgen::level_of;
 use vd_core::{
     AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick,
 };
@@ -38,8 +41,8 @@ use vd_wire::channels::{
     partition_entities, partition_realms,
 };
 use vd_wire::intershard::{
-    CrossingAborted, CrossingRequest, DemoteCmd, FlushSource, GhostFlow, InterShardFlow,
-    PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP,
+    CrossingAborted, CrossingRequest, DemandVerb, DemoteCmd, FlushSource, GhostFlow, InterShardFlow,
+    PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, RealmDemand, ReHomeCmd, ReHomeState, STUB_CROSSING_STEP,
     TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP, TRANSIENT_COMPLETE_STEP,
     TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransferAck,
     TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest, TransientHandoff,
@@ -127,9 +130,29 @@ pub struct StubConfig {
     /// driver; the pre-3f default and every current rig). Reserved for the 3f abort/TTL egress — carried
     /// now so the config surface is frozen before the consumer lands.
     pub request_ttl_ticks: u32,
+    /// The shard's OWN full lifecycle coord (RLM Step 2) — the AoI loop names children via
+    /// `own_coord.child(level)` and keys demands on `child.path()`, unbuildable from the lossy `realm`.
+    /// Default = the single-realm ROOT coord for `realm` ([`StubConfig::root_coord`], byte-identity: inert
+    /// AoI never reads it); a live-AoI (visual) shard's boot sets the FULL seed lineage.
+    pub own_coord: RealmCoord,
+    /// F7 predictive horizon (ticks): the AoI loop projects `pos + vel·(boot_ticks_p99·tick_dt_s)` so a
+    /// fast occupant demands spin-up before it arrives (boot latency masked). `0` ⇒ no predictive term
+    /// (default; byte-identity). Never an inline literal.
+    pub boot_ticks_p99: u32,
 }
 
 impl StubConfig {
+    /// The default single-realm ROOT coord for `realm` — a one-level lineage (the inert-AoI default; a
+    /// live-AoI shard's boot replaces it with the full seed lineage). `realm` is always a seed-lineage
+    /// realm here (never an entity-backed ship), so `level_of` resolves.
+    #[must_use]
+    pub fn root_coord(realm: RealmId) -> RealmCoord {
+        RealmCoord::from_path(RealmPath::from_levels(vec![
+            level_of(realm).expect("a shard realm is a seed-lineage realm"),
+        ]))
+        .expect("a one-level path has a leaf")
+    }
+
     /// The `held_realms` for a SINGLE-realm shard: exactly `{realm}`. The default co-hosting set —
     /// every single-realm construction site passes this so its behaviour is byte-identical to the
     /// pre-co-hosting `RealmAuthority(Option<Fence>)` model (the extra-realm grant/affirm/short-circuit
@@ -489,6 +512,21 @@ impl RegionMembership {
 #[derive(Resource, Debug, Default)]
 pub struct ContainmentProgress(pub BTreeMap<EntityId, RegionMembership>);
 
+/// Per-CHILD AoI hysteresis + grace (RLM Step 2), keyed by child `RealmPath` (globally unique — Step 3
+/// dedups on `child.path()`). Twin of [`ContainmentProgress`], but CHILD-path-keyed (not entity-keyed).
+/// `BTreeMap` (no default-hasher HashMap in sim — determinism). Default empty; lazily evicted each tick
+/// to the current direct-child roster (`retain_live`).
+#[derive(Resource, Debug, Default)]
+pub struct AoiMembership(pub BTreeMap<RealmPath, AoiState>);
+
+/// One direct child's AoI state: `was_in` (acquired — for the hysteresis) + `grace_remaining` (ticks a
+/// would-be release is held after the last in-range observation).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AoiState {
+    was_in: bool,
+    grace_remaining: u32,
+}
+
 /// The per-entity DURABLE-crossing latch (Slice 3d): a durable entity that has emitted a
 /// `CrossingRequest` is latched here (keyed by subject entity → the deterministic
 /// [`crossing_transfer_id`]) so the trigger emits EXACTLY ONE request per crossing. Cleared POSITIVELY
@@ -592,25 +630,81 @@ impl RealmRegions {
     /// Authored (signal-driven, `with_placed`) children join here when they exist (P6/P9); today only the
     /// orbital roster moves.
     #[must_use]
-    pub fn authored_realm_snaps(&self, tick_hz: f64, tick: UniverseTick) -> Vec<RealmSnap> {
-        let own = self
+    pub fn authored_realm_snaps(
+        &self,
+        own_realm: RealmId,
+        tick_hz: f64,
+        tick: UniverseTick,
+    ) -> Vec<RealmSnap> {
+        // Movers-only view of the unified placements (RLM Step 2, H2): the observer feed ships only the
+        // moving children (a static child rides its `center`, not a live snap). At walk/static scale
+        // `moving` is empty ⇒ this drops every row ⇒ EMPTY ⇒ byte-identical to the pre-refactor feed.
+        self.child_placements(own_realm, tick_hz, tick)
+            .into_iter()
+            .filter(|(r, _)| self.moving.contains_key(&r.realm))
+            .map(|(r, pose)| RealmSnap {
+                realm: r.realm,
+                pose,
+            })
+            .collect()
+    }
+
+    /// The UNIFIED per-tick placement of EVERY DIRECT child (RLM Step 2, H2): a mover authored from its
+    /// `OrbitalElements`, a static child at its region `center`. ONE position code-path both the observer
+    /// feed AND the AoI loop consume — no third position path. DIRECT children only (`parent == own`);
+    /// ancestor/self/root regions excluded. Poses stamped in the shard's OWN (ambient-root) frame — the
+    /// SAME frame `authored_realm_snaps` used, so the AoI distance and the feed measure one geometry
+    /// (H-1). Returns `(&RealmRegion, StampedPose)` so callers read extent/aoi/parent without a re-scan.
+    #[must_use]
+    pub fn child_placements(
+        &self,
+        own_realm: RealmId,
+        tick_hz: f64,
+        tick: UniverseTick,
+    ) -> Vec<(&RealmRegion, StampedPose)> {
+        // Two DIFFERENT anchors: the pose FRAME is the ambient-ROOT frame (`parent: None` — the parent
+        // authors its children THERE), while CHILD SELECTION is by the shard's OWN realm (`own_realm ==
+        // config.realm`). They are NOT the same region — a forest nests own several levels below the root
+        // (the escape/undock 3-level topology), so filtering by the root would drop every real child.
+        let own_frame = self
             .regions
             .iter()
             .find(|r| r.parent.is_none())
             .map_or(FrameRef::GalaxySpace, |r| r.frame);
         let secs = secs_since_epoch(tick.0, tick_hz);
-        self.moving
+        self.regions
             .iter()
-            .map(|(realm, elements)| {
-                let state = orbital_state(elements, secs);
-                let mut pose = StampedPose::at_rest(own, state.position, tick);
-                pose.vel = state.velocity;
-                RealmSnap {
-                    realm: *realm,
-                    pose,
-                }
-            })
+            .filter(|r| is_direct_child(r.parent, own_realm))
+            .map(|r| (r, place_child(&self.moving, r, own_frame, secs, tick)))
             .collect()
+    }
+}
+
+/// A region is a DIRECT child iff its parent IS the shard's own realm. A branchless equality (HR5): the
+/// `==` is covered true (a child) and false (the root's `None`, an ancestor, a sibling) by any nested
+/// forest.
+fn is_direct_child(region_parent: Option<RealmId>, own_realm: RealmId) -> bool {
+    region_parent == Some(own_realm)
+}
+
+/// Place ONE child (RLM Step 2, H2): a mover from its ephemeris (`orbital_state`), a static child at its
+/// `center` (both in the parent's OWN frame — cell-0 identity through P3). The `match` is covered once
+/// here (a mover test + a static test), NOT per generic monomorphization (HR5).
+fn place_child(
+    moving: &BTreeMap<RealmId, OrbitalElements>,
+    r: &RealmRegion,
+    own: FrameRef,
+    secs: f64,
+    tick: UniverseTick,
+) -> StampedPose {
+    match moving.get(&r.realm) {
+        Some(elements) => {
+            let st = orbital_state(elements, secs);
+            let mut p = StampedPose::at_rest(own, st.position, tick);
+            p.vel = st.velocity;
+            p
+        }
+        None => StampedPose::at_rest(own, r.center.offset(), tick),
     }
 }
 
@@ -1040,6 +1134,19 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
         .boundary
         .validate()
         .expect("StubConfig.boundary is a valid BoundaryTuning (n_entry/k_dwell/pad/cell > 0)");
+    // RLM Step 2 (L3 co-hosting hygiene): the AoI loop (`aoi_decide`) builds exactly ONE `own_coord` per
+    // shard from `config.realm`, so it names the PRIMARY realm's direct children — correct for
+    // node-per-realm (`held_realms == {realm}`, the base; co-hosting is D-44 KEPT-unused). A co-hosting
+    // shard's CO-HOSTED realms' children are simply not AoI-evaluated here (a per-held-realm coord loop is
+    // owed if/when D-44 is revived) — an incompleteness, NOT a mis-key, so it is safe for dormant infra
+    // and NOT a boot tripwire (an unconditional `held_realms.len() == 1` panic would break the dormant
+    // co-hosting grant/affirm/re-home tests, which legitimately build multi-realm shards). The live-AoI
+    // composer (RLM Step 5/6) builds node-per-realm shards, so the primary path is always complete.
+    // RLM Step 2 (M-2 single-source): the AoI hysteresis BANDS are baked into each `RealmRegion.aoi` at
+    // GENERATION from `UniverseConfig.interest` (occupant_v_max_mps + tick_dt_s), and the runtime horizon
+    // reads `StubConfig.tick_dt_s` — so the two must agree on `tick_dt_s`. `register_stub_shard` sees only
+    // `StubConfig` (never `UniverseConfig`), so the cross-check belongs at the COMPOSER boot where both
+    // meet (the live-AoI shard wiring, RLM Step 5/6); `InterestConfig` already carries the inputs for it.
     // Capture the scalar params read AFTER the config move (`StubConfig` is no longer `Copy` — the
     // `held_realms` set is heap-backed).
     let mint_seed = config.mint_seed;
@@ -1069,6 +1176,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(ContainmentProgress::default());
     world.insert_resource(RequestInFlight::default());
     world.insert_resource(RealmRegions::default());
+    // RLM Step 2 — the per-CHILD AoI hysteresis ledger. Defaults EMPTY; `evaluate_realm_aoi` is inert
+    // (early-returns) until regions are planted AND the shard is clock-synced, so this is byte-identical
+    // through walk/canonical scale (inert AoI ⇒ no demand ⇒ never touched).
+    world.insert_resource(AoiMembership::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -1106,19 +1217,36 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
         )
             .chain(),
     );
+    // RLM Step 2 (M-1 retrofit, behaviour-CHANGING by design): `evaluate_realm_boundaries` and
+    // `emit_realm_frames` are the two AUTHORING systems — both previously gated ONLY on `RealmAuthority`
+    // (`authority.0`), the D-Finding-1 hole where a fresh shard authors at tick 0 BEFORE its first
+    // `ClockSync` (a pre-sync celestial pose is wrong). `.run_if(has_synced)` closes it. Both early-return
+    // on empty snaps/regions, so at walk/static scale this is inert (byte-identical); at visual scale the
+    // first-sync boundary is exactly what must be gated. `ClockSample` is persistent and both systems sit
+    // AFTER `observe_clock_syncs` on the shared schedule, so reading `synced` is order-correct.
     schedule.add_systems(
         (
-            evaluate_realm_boundaries,
+            evaluate_realm_boundaries.run_if(has_synced),
             redrive_stranded_crossings,
             readvance_transients,
             emit_transient_batch,
             redrive_pending_adoptions,
             feed_source_ghosts,
             emit_frames,
-            emit_realm_frames,
+            emit_realm_frames.run_if(has_synced),
         )
             .chain()
             .after(self_fence_lapsed_realm),
+    );
+    // RLM Step 2 — the demand-driven realm-lifecycle detector, a THIRD chained group (group B is at
+    // Bevy's 8-`.chain()` arity limit). Runs strictly AFTER `emit_realm_frames` (the author tail — the AoI
+    // decision reads the SAME per-tick child placements the observer feed just shipped, H-1) and
+    // `.run_if(has_synced)` (a fresh shard demands nothing pre-sync — determinism).
+    schedule.add_systems(
+        (evaluate_realm_aoi,)
+            .chain()
+            .after(emit_realm_frames)
+            .run_if(has_synced),
     );
 }
 
@@ -2780,10 +2908,11 @@ struct CrossingCtx<'a> {
     frames: &'a LocalFrames,
 }
 
-/// Retain only the entries whose key is a LIVE subject (the DRY eviction primitive, Slice 3e). A
-/// monomorphic `retain` over any `BTreeMap<EntityId, V>` so the closure's branch is covered ONCE.
-fn retain_live<V>(map: &mut BTreeMap<EntityId, V>, live: &BTreeSet<EntityId>) {
-    map.retain(|e, _| live.contains(e));
+/// Retain only the entries whose key is a LIVE subject (the DRY eviction primitive, Slice 3e; RLM Step 2
+/// widened over `K` for `AoiMembership`'s `RealmPath` keys). A branchless `retain` over any
+/// `BTreeMap<K, V>` — no per-monomorphization branch trap (HR5).
+fn retain_live<K: Ord, V>(map: &mut BTreeMap<K, V>, live: &BTreeSet<K>) {
+    map.retain(|k, _| live.contains(k));
 }
 
 /// The result of one subject's containment evaluation — the frame-local offset the caller records as
@@ -4073,7 +4202,8 @@ fn emit_realm_frames(
         return;
     };
     // The authored moving-child rows — EMPTY at walk/static scale ⇒ nothing ships (byte-identical).
-    let realms = regions.authored_realm_snaps(1.0 / config.tick_dt_s, clock.universe_tick);
+    let realms =
+        regions.authored_realm_snaps(config.realm, 1.0 / config.tick_dt_s, clock.universe_tick);
     if realms.is_empty() {
         return;
     }
@@ -4125,6 +4255,244 @@ fn emit_realm_frames(
     }
 }
 
+/// RLM Step 2 — the run-condition: a fresh shard AUTHORS NOTHING (its celestial poses, boundary crossings,
+/// AoI demands) until its clock is LIVE (D-Finding-1). `ClockSample.synced` latches `true` on the first
+/// `ClockSync` and never resets, so once synced every subsequent tick runs the gated authors. Reading the
+/// persistent `ClockSample` after `observe_clock_syncs` (same schedule) is order-correct.
+fn has_synced(clock: Res<ClockSample>) -> bool {
+    clock.synced
+}
+
+/// RLM Step 2 — the demand-driven realm-lifecycle detector (the SIBLING of [`evaluate_realm_boundaries`]):
+/// per tick, this shard computes which of its DIRECT children an occupant's Area-of-Interest reaches and
+/// emits a [`RealmDemand`] toward the orchestrator so those child realms spin up (and self-reports its own
+/// realm's emptiness so it can be torn down). This realizes the decentralized RLM policy: EVERY realm's
+/// shard is the AoI authority for ITS children — no central AoI scan (HR2/HR3 generic; one loop, no
+/// match-on-realm-kind). A BRANCHLESS system shim: only the two guard `else`s (both mirroring the covered
+/// detector), then delegate — ALL hysteresis/predictive/emit branching lives in the monomorphic
+/// [`aoi_decide`]/[`aoi_transition`]/[`aoi_min_dist`] helpers (HR5 per-monomorphization discipline).
+///
+/// Gated `.run_if(has_synced)` + on `RealmAuthority` + on a non-empty region set, so it is INERT (emits
+/// nothing) at walk/canonical scale where the seed AoI bands are [`AoiConfig::inert`] — byte-identical.
+/// Step 2 NEVER emits a parent `TearDown` (REVISION 1 R2 supersedes the §2.2 pseudocode): a child leaving
+/// AoI simply STOPS being demanded (its key drops after grace); the Step-3 reconciler closure is the sole
+/// kill authority.
+fn evaluate_realm_aoi(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    authority: Res<RealmAuthority>,
+    regions: Res<RealmRegions>,
+    dots: Res<Dots>,
+    owned_transients: Res<OwnedTransients>,
+    mut membership: ResMut<AoiMembership>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
+    // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
+    let Some(realm_fence) = authority.0 else {
+        return;
+    };
+    // Inert until regions are planted (production through canonical scale): no children to evaluate.
+    if regions.is_empty() {
+        return;
+    }
+    // L3: `aoi_decide` names the PRIMARY realm's (`config.realm`) direct children via ONE `own_coord`.
+    // For node-per-realm (the base) that is complete; a co-hosting shard's co-hosted realms' children are
+    // simply not evaluated here (D-44 dormant — see `register_stub_shard`). No panic: dormant co-hosting
+    // tests legitimately run this with `held_realms.len() > 1` and inert bands, emitting nothing.
+    aoi_decide(
+        &config,
+        &clock,
+        &regions,
+        &dots,
+        &owned_transients,
+        realm_fence,
+        &mut membership.0,
+        &mut outbox,
+    );
+}
+
+/// The monomorphic AoI decision (ALL branching HERE, HR5). For each direct child: reduce the occupant set
+/// to a scalar min distance (live + F7 predictive), run the per-child hysteresis + grace machine, and emit
+/// the resulting verb. With ZERO occupants the shard self-reports `Empty{own_coord}` (the sole occupancy
+/// authority a sealed parent cannot see — Step-3 EDGE 1). Deterministic: occupants reduce to a scalar min
+/// BEFORE any emit (iteration order cannot leak into the demand set, H-2); children fold in the stable
+/// seed-derived `child_placements` order.
+#[allow(clippy::too_many_arguments)]
+fn aoi_decide(
+    config: &StubConfig,
+    clock: &ClockSample,
+    regions: &RealmRegions,
+    dots: &Dots,
+    owned: &OwnedTransients,
+    realm_fence: Fence,
+    membership: &mut BTreeMap<RealmPath, AoiState>,
+    outbox: &mut OutboundBox,
+) {
+    let own_coord = &config.own_coord;
+    let tick = clock.universe_tick;
+    let tick_hz = 1.0 / config.tick_dt_s;
+    let horizon_s = f64::from(config.boot_ticks_p99) * config.tick_dt_s; // F7 predictive horizon
+
+    // Occupants = owned durable dots this shard SIMULATES ∪ held transients (mirror
+    // `evaluate_realm_boundaries`). Each reduced to frame-local `(pos, vel)` — the SAME own frame the
+    // child placements use (H-1) — so the AoI distance and the observer feed measure one geometry.
+    let occupants: Vec<(DVec3, DVec3)> = dots
+        .0
+        .values()
+        .filter(|d| d.authority.simulates())
+        .map(|d| (d.pose.pos.offset(), d.pose.vel))
+        .chain(
+            owned
+                .0
+                .values()
+                .filter(|t| t.status.is_held())
+                .map(|t| (t.pose.pos.offset(), t.pose.vel)),
+        )
+        .collect();
+
+    // Zero-occupant self-report: this CHILD shard tells the orchestrator its OWN realm holds nobody
+    // (`child == own_coord`). Fence = this shard's own realm authority over its emptiness.
+    if occupants.is_empty() {
+        push_demand(
+            outbox,
+            config.orchestrator,
+            own_coord.clone(),
+            realm_fence,
+            DemandVerb::Empty,
+            tick,
+        );
+        return;
+    }
+
+    // The UNIFIED direct-child placements (movers authored from ephemeris, static children at `center`),
+    // stable seed-derived Vec order — the SAME code-path the observer feed reads (H-1/H-2, no reorder).
+    let placements = regions.child_placements(config.realm, tick_hz, tick);
+    let mut live_paths = BTreeSet::<RealmPath>::new();
+    for (region, pose) in &placements {
+        let level = region_level(region);
+        let child_coord = own_coord.child(level);
+        let key = child_coord.path().clone();
+        live_paths.insert(key.clone());
+        let child_pos = pose.pos.offset(); // own frame (== the placements' frame)
+
+        let min_dist_eff = aoi_min_dist(&occupants, child_pos, horizon_s);
+        let state = membership.get(&key).copied().unwrap_or_default();
+        let now_in = region.aoi.in_range(state.was_in, min_dist_eff);
+        let (verb, next) = aoi_transition(state, now_in, region.aoi.grace_ticks());
+        if let Some(v) = verb {
+            debug_assert!(
+                v != DemandVerb::TearDown,
+                "Step 2 never emits parent TearDown — the Step-3 closure is the sole kill authority (M-1)"
+            );
+            push_demand(outbox, config.orchestrator, child_coord, realm_fence, v, tick);
+        }
+        match next {
+            Some(s) => {
+                membership.insert(key, s);
+            }
+            None => {
+                membership.remove(&key);
+            }
+        }
+    }
+    // Evict any child-path no longer in the roster (no leak) — the DRY primitive, keyed by RealmPath.
+    retain_live(membership, &live_paths);
+}
+
+/// The smallest distance from ANY occupant to `child_pos`, taking the LESSER of the live distance and the
+/// F7 predictive distance (`occ_pos + occ_vel·horizon_s`) — so a fast occupant demands spin-up BEFORE it
+/// arrives (boot latency masked). A STATIC occupant has `vel == 0` ⇒ `pred == live` ⇒ no predictive term.
+/// Straight-line fold (monomorphic, HR5); the scalar min is order-independent.
+fn aoi_min_dist(occupants: &[(DVec3, DVec3)], child_pos: DVec3, horizon_s: f64) -> f64 {
+    let mut min = f64::MAX;
+    for (pos, vel) in occupants {
+        let live = (child_pos - *pos).length();
+        let pred = (child_pos - (*pos + *vel * horizon_s)).length();
+        min = min.min(live).min(pred);
+    }
+    min
+}
+
+/// The per-child hysteresis + grace state machine (ALL of it monomorphic — each arm a covered region,
+/// HR5). Returns `(verb_to_emit, next_state)`. Step 2 NEVER returns `TearDown`: a child leaving range
+/// holds for `grace_ticks` (emitting `KeepAlive`), then drops its key and emits NOTHING — the Step-3
+/// reconciler closure tears it down (M-1, REVISION 1 R2 supersedes the §2.2 pseudocode).
+fn aoi_transition(
+    state: AoiState,
+    now_in: bool,
+    grace_ticks: u32,
+) -> (Option<DemandVerb>, Option<AoiState>) {
+    match (state.was_in, now_in) {
+        (false, true) => (
+            Some(DemandVerb::SpinUp),
+            Some(AoiState {
+                was_in: true,
+                grace_remaining: grace_ticks,
+            }),
+        ),
+        (true, true) => (
+            Some(DemandVerb::KeepAlive),
+            Some(AoiState {
+                was_in: true,
+                grace_remaining: grace_ticks,
+            }),
+        ),
+        (true, false) => {
+            if state.grace_remaining > 0 {
+                (
+                    Some(DemandVerb::KeepAlive),
+                    Some(AoiState {
+                        was_in: true,
+                        grace_remaining: state.grace_remaining - 1,
+                    }),
+                )
+            } else {
+                (None, None) // drop the key; NO TearDown
+            }
+        }
+        (false, false) => (None, None),
+    }
+}
+
+/// The `RealmId → RealmLevel` for a hosted child region — sourced un-lossily from the seed via
+/// [`level_of`] (the `System(0)`/`System(1)` stand-ins recover to Universe/Galaxy; keyed kinds pass
+/// through). Monomorphic (HR5: the kind match is covered once inside `level_of`). A hosted child region is
+/// ALWAYS a seed-lineage realm — never an entity-backed ship — so the `None` arm is unreachable here.
+fn region_level(region: &RealmRegion) -> RealmLevel {
+    level_of(region.realm)
+        .expect("a hosted child region is a seed-lineage realm (never an entity-backed ship)")
+}
+
+/// Emit ONE [`RealmDemand`] toward the orchestrator (the RLM emit seam). Rides `MsgClass::Saga` (Reliable)
+/// so the side-effecting-flow guard passes; `push_flow` defaults `Ephemeral`, which is CORRECT — a
+/// `RealmDemand` is `ReDriven` (self-heals on the next re-assertion), NOT producer-less-reliable, so the
+/// durability guard passes.
+///
+/// The wire field is named `parent_fence` but carries the EMITTER's authority fence: the PARENT's realm
+/// fence for SpinUp/KeepAlive (proving authority over the child), the CHILD-shard's own realm fence for
+/// Empty (its authority over its own emptiness). Step 3 keys the Empty idempotency on `parent_fence`
+/// accordingly (`IdempotencyKey::FencedKey`).
+fn push_demand(
+    outbox: &mut OutboundBox,
+    orch: NodeId,
+    child: RealmCoord,
+    fence: Fence,
+    verb: DemandVerb,
+    tick: UniverseTick,
+) {
+    outbox.push_flow(
+        orch,
+        MsgClass::Saga,
+        &InterShardFlow::RealmDemand(RealmDemand {
+            child,
+            parent_fence: fence,
+            verb,
+            universe_tick: tick,
+        }),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4158,6 +4526,8 @@ mod tests {
             snapshot_datagram_budget: 1100,
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
             request_ttl_ticks: 0,
+            own_coord: StubConfig::root_coord(RealmId::System(7)),
+            boot_ticks_p99: 0,
         }
     }
 
@@ -4183,6 +4553,10 @@ mod tests {
                 local_tick: vd_core::TickId(1),
                 universe_tick: UniverseTick(100),
                 epoch: vd_core::EpochId(1),
+                // RLM Step 2 (M-1 rig sweep): the shared rig is SYNCED so the newly-gated authors
+                // (`evaluate_realm_boundaries`/`emit_realm_frames`/`evaluate_realm_aoi`) actually run —
+                // else they silently no-op and every author assertion goes false-green.
+                synced: true,
             });
             let mut schedule = Schedule::default();
             register_stub_shard(&mut world, &mut schedule, cfg);
@@ -7823,7 +8197,7 @@ mod tests {
         let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
             .with_moving_children(moving);
         let (tick_hz, tick) = (20.0, UniverseTick(1_000));
-        let snaps = regions.authored_realm_snaps(tick_hz, tick);
+        let snaps = regions.authored_realm_snaps(OWN_REALM, tick_hz, tick);
         let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].realm, OTHER_REALM);
@@ -7838,7 +8212,7 @@ mod tests {
         // A static forest (no moving roster) authors NO realm snap — the byte-identity case.
         assert!(
             RealmRegions::new(vec![root_region(), own_region()])
-                .authored_realm_snaps(tick_hz, tick)
+                .authored_realm_snaps(OWN_REALM, tick_hz, tick)
                 .is_empty()
         );
     }
@@ -8704,6 +9078,7 @@ mod tests {
             frame: frame_of(realm),
             shape: Boundary::Shell { r },
             band: band(),
+            aoi: vd_core::geometry::AoiConfig::inert(),
             parent,
         }
     }
@@ -8721,6 +9096,7 @@ mod tests {
             frame: frame_of(realm),
             shape: Boundary::Aabb { half },
             band: band(),
+            aoi: vd_core::geometry::AoiConfig::inert(),
             parent,
         }
     }
@@ -10912,5 +11288,471 @@ mod tests {
         // The fail-loud validation in `register_stub_shard` (mirrors the tick-pair guard). `k_dwell` is the
         // post-commit cooldown `should_rehome` still reads (§2.7); zero fails `BoundaryTuning::validate`.
         let _ = Rig::with_config(bad);
+    }
+
+    // ===== RLM Step 2 — demand-driven realm lifecycle (AoI) ==========================================
+
+    /// A live AoI band (base 1000 ⇒ spin_up 1000 m, tear_down 2000 m, `grace` ticks). The velocity-safe
+    /// ctor is the only way to build a live band; `v_rel = 0` here (the tests place occupants by geometry).
+    fn aoi_band(grace: u32) -> vd_core::geometry::AoiConfig {
+        vd_core::geometry::AoiConfig::for_velocity_safe(1000.0, 1.0, 2.0, 0.0, 0.05, grace, 0.0)
+            .expect("0 < spin_up < tear_down ⇒ a valid live band")
+    }
+
+    /// A Shell region with an EXPLICIT frame — `region`/`frame_of` resolves via `frame_for_realm(realm,
+    /// None)`, which returns `None` for an `Area` (Area needs its `Planet` parent); the HR4 fixture
+    /// supplies the frame here.
+    fn region_framed(
+        realm: RealmId,
+        parent: Option<RealmId>,
+        center: DVec3,
+        r: f64,
+        frame: FrameRef,
+    ) -> RealmRegion {
+        RealmRegion {
+            realm,
+            center: LatticePos::local(center),
+            frame,
+            shape: Boundary::Shell { r },
+            band: band(),
+            aoi: vd_core::geometry::AoiConfig::inert(),
+            parent,
+        }
+    }
+
+    /// A small direct-child region (containment shell radius `r`) carrying a LIVE AoI band — frame via
+    /// `frame_of`. An occupant OUTSIDE the small containment shell but INSIDE the 1000 m AoI is the
+    /// "reaches before it enters" case the whole feature exists for.
+    fn aoi_child(realm: RealmId, parent: RealmId, r: f64, grace: u32) -> RealmRegion {
+        RealmRegion {
+            aoi: aoi_band(grace),
+            ..region(realm, Some(parent), DVec3::ZERO, r)
+        }
+    }
+
+    /// Like [`aoi_child`] but with an EXPLICIT frame (for the `Area` child `frame_of` cannot resolve).
+    fn aoi_child_framed(
+        realm: RealmId,
+        parent: Option<RealmId>,
+        frame: FrameRef,
+        grace: u32,
+    ) -> RealmRegion {
+        RealmRegion {
+            aoi: aoi_band(grace),
+            ..region_framed(realm, parent, DVec3::ZERO, 100.0, frame)
+        }
+    }
+
+    fn plant_aoi(rig: &mut Rig, regions: Vec<RealmRegion>) {
+        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(regions);
+    }
+
+    /// Every `RealmDemand` in the outbox (decoded). The `_ => None` arm is exercised too — an AoI tick also
+    /// ships entity snapshots (non-`InterShardFlow` bytes) alongside the demand.
+    fn demands(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<RealmDemand> {
+        sent.iter()
+            .filter_map(|(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                Ok(InterShardFlow::RealmDemand(d)) => Some(d),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The child coord the loop names for `own_realm`'s child `child_realm` — `own_coord.child(level)`.
+    fn child_coord_of(own_realm: RealmId, child_realm: RealmId) -> RealmCoord {
+        StubConfig::root_coord(own_realm).child(level_of(child_realm).expect("seed-lineage child"))
+    }
+
+    fn player(tag: u32) -> EntityId {
+        EntityId::pack(EntityKind::Player, 10, 1, tag)
+    }
+
+    #[test]
+    fn aoi_transition_covers_every_hysteresis_arm() {
+        let g = 3;
+        // (false,true) ACQUIRE ⇒ SpinUp, grace armed.
+        assert_eq!(
+            aoi_transition(AoiState::default(), true, g),
+            (
+                Some(DemandVerb::SpinUp),
+                Some(AoiState {
+                    was_in: true,
+                    grace_remaining: g
+                })
+            ),
+        );
+        // (true,true) HOLD-IN ⇒ KeepAlive, grace re-armed.
+        assert_eq!(
+            aoi_transition(
+                AoiState {
+                    was_in: true,
+                    grace_remaining: 1
+                },
+                true,
+                g
+            ),
+            (
+                Some(DemandVerb::KeepAlive),
+                Some(AoiState {
+                    was_in: true,
+                    grace_remaining: g
+                })
+            ),
+        );
+        // (true,false) grace > 0 ⇒ KeepAlive, grace decrements.
+        assert_eq!(
+            aoi_transition(
+                AoiState {
+                    was_in: true,
+                    grace_remaining: 2
+                },
+                false,
+                g
+            ),
+            (
+                Some(DemandVerb::KeepAlive),
+                Some(AoiState {
+                    was_in: true,
+                    grace_remaining: 1
+                })
+            ),
+        );
+        // (true,false) grace == 0 ⇒ DROP the key, NO demand (never a TearDown — M-1).
+        assert_eq!(
+            aoi_transition(
+                AoiState {
+                    was_in: true,
+                    grace_remaining: 0
+                },
+                false,
+                g
+            ),
+            (None, None),
+        );
+        // (false,false) never-in ⇒ nothing.
+        assert_eq!(aoi_transition(AoiState::default(), false, g), (None, None));
+    }
+
+    #[test]
+    fn aoi_min_dist_takes_the_lesser_of_live_and_predictive() {
+        let child = DVec3::ZERO;
+        // A STATIC occupant: pred == live == its distance.
+        assert_eq!(
+            aoi_min_dist(&[(DVec3::new(500.0, 0.0, 0.0), DVec3::ZERO)], child, 1.0),
+            500.0
+        );
+        // A MOVING occupant closing in: pred (300) beats live (1500).
+        let occ = (DVec3::new(1500.0, 0.0, 0.0), DVec3::new(-1200.0, 0.0, 0.0));
+        assert_eq!(aoi_min_dist(&[occ], child, 1.0), 300.0);
+        // The MIN across two occupants — order-independent (H-2).
+        let a = (DVec3::new(900.0, 0.0, 0.0), DVec3::ZERO);
+        let b = (DVec3::new(400.0, 0.0, 0.0), DVec3::ZERO);
+        assert_eq!(aoi_min_dist(&[a, b], child, 1.0), 400.0);
+        assert_eq!(aoi_min_dist(&[b, a], child, 1.0), 400.0);
+    }
+
+    #[test]
+    fn region_level_recovers_seed_lineage_kinds() {
+        use vd_core::realm_path::{RealmKindTag, RealmLevel};
+        assert_eq!(
+            region_level(&region(RealmId::Planet(42), Some(OWN_REALM), DVec3::ZERO, 1.0)),
+            RealmLevel::new(RealmKindTag::Planet, 42)
+        );
+        assert_eq!(
+            region_level(&region(RealmId::System(7), Some(ROOT_REALM), DVec3::ZERO, 1.0)),
+            RealmLevel::new(RealmKindTag::System, 7)
+        );
+    }
+
+    #[test]
+    fn child_placements_unifies_movers_and_static() {
+        // A STATIC direct child of OWN (not in the moving roster) rides its region center — place_child's
+        // `None` arm — and is_direct_child accepts ONLY the OWN child (root/own excluded).
+        let regions = RealmRegions::new(vec![
+            root_region(),
+            own_region(),
+            region(OTHER_REALM, Some(OWN_REALM), DVec3::new(10.0, 0.0, 0.0), 100.0),
+        ]);
+        let placements = regions.child_placements(OWN_REALM, 20.0, UniverseTick(5));
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].0.realm, OTHER_REALM);
+        assert_eq!(placements[0].1.pos.offset(), DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(placements[0].1.vel, DVec3::ZERO);
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_inert_without_authority() {
+        // No realm lease ⇒ the authority `else` short-circuits ⇒ no demand (even with a live child + dot).
+        let mut rig = Rig::new();
+        plant_aoi(
+            &mut rig,
+            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+        );
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        assert!(demands(&rig.tick(vec![])).is_empty());
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_inert_empty_regions() {
+        // Granted, but NO regions ⇒ the `is_empty` guard short-circuits ⇒ no demand.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        assert!(demands(&rig.tick(vec![])).is_empty());
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_unsynced_authors_nothing() {
+        // D-Finding-1: a shard whose clock is NOT yet synced authors nothing (`has_synced` skips the
+        // system) — no pre-sync demand even with authority + a live child + an in-range occupant.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world.resource_mut::<ClockSample>().synced = false;
+        plant_aoi(
+            &mut rig,
+            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+        );
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        assert!(demands(&rig.tick(vec![])).is_empty());
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_empty_self_report() {
+        // Zero occupants ⇒ the CHILD shard self-reports its OWN realm holds nobody: exactly one
+        // `Empty { child = own_coord }` (Step-3's occupancy authority — a sealed parent cannot see inside).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+        );
+        assert_eq!(
+            demands(&rig.tick(vec![])),
+            vec![RealmDemand {
+                child: StubConfig::root_coord(OWN_REALM),
+                parent_fence: Fence(1),
+                verb: DemandVerb::Empty,
+                universe_tick: UniverseTick(100),
+            }]
+        );
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_spinup_then_keepalive() {
+        // AOI-2: an occupant reaching the child emits exactly one SpinUp keyed on `child.path()`; the next
+        // tick (still in range) emits KeepAlive. The FULL demand is asserted (child, fence, verb, tick).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+        );
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let want = child_coord_of(OWN_REALM, OTHER_REALM);
+        assert_eq!(
+            demands(&rig.tick(vec![])),
+            vec![RealmDemand {
+                child: want.clone(),
+                parent_fence: Fence(1),
+                verb: DemandVerb::SpinUp,
+                universe_tick: UniverseTick(100),
+            }]
+        );
+        assert_eq!(
+            demands(&rig.tick(vec![])),
+            vec![RealmDemand {
+                child: want,
+                parent_fence: Fence(1),
+                verb: DemandVerb::KeepAlive,
+                universe_tick: UniverseTick(100),
+            }]
+        );
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_grace_then_drop() {
+        // An occupant LEAVES: while grace remains the child stays demanded (KeepAlive), then its key drops
+        // and it stops being demanded — and NO parent TearDown is EVER emitted (M-1 locks REVISION-1 R2).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 2)],
+        );
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let mut seen = Vec::new();
+        seen.extend(demands(&rig.tick(vec![]))); // SpinUp (grace armed to 2)
+        move_dot(&mut rig, TRIG_SESSION, DVec3::new(3000.0, 0.0, 0.0)); // OUT of the 2000 m tear-down
+        seen.extend(demands(&rig.tick(vec![]))); // KeepAlive (grace 2 → 1)
+        seen.extend(demands(&rig.tick(vec![]))); // KeepAlive (grace 1 → 0)
+        let after_grace = demands(&rig.tick(vec![])); // grace 0 ⇒ drop, silent
+        assert!(after_grace.is_empty(), "grace expired ⇒ the child stops being demanded");
+        assert_eq!(
+            seen.iter().map(|d| d.verb).collect::<Vec<_>>(),
+            vec![DemandVerb::SpinUp, DemandVerb::KeepAlive, DemandVerb::KeepAlive]
+        );
+        assert!(
+            !seen.iter().any(|d| d.verb == DemandVerb::TearDown),
+            "Step 2 never emits a parent TearDown"
+        );
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_predictive_spinup() {
+        // F7: an occupant OUTSIDE the spin-up radius but whose `pos + vel·horizon` lands inside ⇒ SpinUp
+        // (boot latency masked); a STATIC occupant at the same pos ⇒ NO demand.
+        let horizon = StubConfig {
+            boot_ticks_p99: 20,
+            ..config()
+        }; // horizon_s = 20 · 0.05 = 1.0
+        let mut rig = Rig::with_config(horizon);
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+        );
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(1500.0, 0.0, 0.0));
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&TRIG_SESSION)
+            .expect("the dot")
+            .pose
+            .vel = DVec3::new(-1000.0, 0.0, 0.0); // pred: 1500 − 1000·1.0 = 500 < 1000
+        assert_eq!(
+            demands(&rig.tick(vec![]))
+                .iter()
+                .map(|d| d.verb)
+                .collect::<Vec<_>>(),
+            vec![DemandVerb::SpinUp]
+        );
+
+        // STATIC occupant (vel 0) at the same 1500 m ⇒ live == pred == 1500 > 1000 ⇒ silent.
+        let mut still = Rig::with_config(StubConfig {
+            boot_ticks_p99: 20,
+            ..config()
+        });
+        still.grant_realm();
+        plant_aoi(
+            &mut still,
+            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+        );
+        insert_owned_dot(&mut still, TRIG_SESSION, player(7), DVec3::new(1500.0, 0.0, 0.0));
+        assert!(demands(&still.tick(vec![])).is_empty());
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_demand_order_is_stable() {
+        // H-2: two children + two occupants — the emitted `Vec<RealmDemand>` is IDENTICAL regardless of the
+        // occupants' `Dots` insertion order (occupants reduce to a scalar min BEFORE any emit).
+        let build = |sessions: &[(SessionId, DVec3)]| -> Vec<RealmDemand> {
+            let mut rig = Rig::new();
+            rig.grant_realm();
+            plant_aoi(
+                &mut rig,
+                vec![
+                    root_region(),
+                    own_region(),
+                    aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3),
+                    aoi_child(RealmId::Planet(43), OWN_REALM, 100.0, 3),
+                ],
+            );
+            for (i, (s, pos)) in sessions.iter().enumerate() {
+                insert_owned_dot(&mut rig, *s, player(i as u32), *pos);
+            }
+            demands(&rig.tick(vec![]))
+        };
+        let a = build(&[
+            (SessionId(1), DVec3::new(500.0, 0.0, 0.0)),
+            (SessionId(2), DVec3::new(700.0, 0.0, 0.0)),
+        ]);
+        let b = build(&[
+            (SessionId(2), DVec3::new(700.0, 0.0, 0.0)),
+            (SessionId(1), DVec3::new(500.0, 0.0, 0.0)),
+        ]);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 2, "both children reached ⇒ two SpinUps in a stable order");
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_evicts_a_departed_child() {
+        // The AoI ledger is lazily evicted to the current roster: a child removed from the forest drops its
+        // membership entry (retain_live, keyed by RealmPath) — no leak.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![root_region(), own_region(), aoi_child(OTHER_REALM, OWN_REALM, 100.0, 3)],
+        );
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let _ = rig.tick(vec![]); // SpinUp ⇒ the child's AoI state is recorded
+        assert_eq!(rig.world.resource::<AoiMembership>().0.len(), 1);
+        // The child leaves the roster (region removed); its state is evicted next tick.
+        plant_aoi(&mut rig, vec![root_region(), own_region()]);
+        let _ = rig.tick(vec![]);
+        assert!(
+            rig.world.resource::<AoiMembership>().0.is_empty(),
+            "a departed child's AoI state is evicted"
+        );
+    }
+
+    /// Drive ONE AoI tick for a shard hosting `own_realm` with a live `child` region, an in-range occupant,
+    /// and a granted lease — returning every demand. The HR4 fixture runs this on two realm kinds.
+    fn drive_aoi_spinup(own_realm: RealmId, own_frame: FrameRef, child: RealmRegion) -> Vec<RealmDemand> {
+        let cfg = StubConfig {
+            realm: own_realm,
+            held_realms: StubConfig::single_realm(own_realm),
+            frame: own_frame,
+            own_coord: StubConfig::root_coord(own_realm),
+            ..config()
+        };
+        let mut rig = Rig::with_config(cfg);
+        grant_realm_for(&mut rig, own_realm);
+        let root = region(ROOT_REALM, None, DVec3::ZERO, 1.0e9);
+        let own = region_framed(own_realm, Some(ROOT_REALM), DVec3::ZERO, 100_000.0, own_frame);
+        plant_aoi(&mut rig, vec![root, own, child]);
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        demands(&rig.tick(vec![]))
+    }
+
+    #[test]
+    fn assert_realm_aoi_feature_anywhere() {
+        // HR4 G-IDENTICAL: the IDENTICAL AoI feature (an occupant reaching a child ⇒ exactly ONE SpinUp
+        // keyed on the child's coord) fires byte-identically on a SYSTEM shard (child = Planet) AND a
+        // PLANET shard (child = Area). The loop is kind-BLIND — `own_coord.child(level_of(child))`, no
+        // match-on-realm-kind — so the two runs differ ONLY in the child realm named.
+        let a = drive_aoi_spinup(
+            OWN_REALM,
+            FrameRef::SystemSpace { system_seed: 7 },
+            aoi_child_framed(
+                OTHER_REALM,
+                Some(OWN_REALM),
+                FrameRef::PlanetCentered { planet_seed: 42 },
+                3,
+            ),
+        );
+        let b = drive_aoi_spinup(
+            RealmId::Planet(42),
+            FrameRef::PlanetCentered { planet_seed: 42 },
+            aoi_child_framed(
+                RealmId::Area(99),
+                Some(RealmId::Planet(42)),
+                FrameRef::AreaLocal {
+                    planet_seed: 42,
+                    area_seed: 99,
+                },
+                3,
+            ),
+        );
+        assert_eq!(a.len(), 1, "the System shard emits exactly one SpinUp");
+        assert_eq!(b.len(), 1, "the Planet shard emits exactly one SpinUp");
+        assert_eq!(a[0].verb, DemandVerb::SpinUp);
+        assert_eq!(b[0].verb, DemandVerb::SpinUp);
+        // IDENTICAL structure — same verb, same emitter fence, same tick; only the child KIND differs.
+        assert_eq!(a[0].parent_fence, b[0].parent_fence);
+        assert_eq!(a[0].universe_tick, b[0].universe_tick);
+        // Each names its OWN child through the coord machinery (System→Planet, Planet→Area).
+        assert_eq!(a[0].child, child_coord_of(OWN_REALM, OTHER_REALM));
+        assert_eq!(b[0].child, child_coord_of(RealmId::Planet(42), RealmId::Area(99)));
     }
 }

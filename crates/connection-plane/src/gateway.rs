@@ -2239,6 +2239,9 @@ mod tests {
                 local_tick: TickId(1),
                 universe_tick: UniverseTick(50),
                 epoch: EpochId(9),
+                // RLM Step 2: a live-clock rig (the gateway runs no clock-gated authors, so this is inert
+                // for the gateway systems — set for a coherent non-default clock).
+                synced: true,
             });
             let mut schedule = Schedule::default();
             register_gateway(&mut world, &mut schedule, config());

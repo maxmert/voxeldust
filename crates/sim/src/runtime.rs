@@ -153,6 +153,12 @@ pub struct ClockSample {
     pub local_tick: TickId,
     pub universe_tick: UniverseTick,
     pub epoch: EpochId,
+    /// Whether this shard has received its FIRST `ClockSync` (RLM Step 2, D-Finding-1). `universe_tick`
+    /// defaults to 0 — a VALID synced tick — so a `!= 0` test is wrong; this bit is the authoritative
+    /// "the clock is live" gate. Set by `observe_clock_syncs` = `clock.is_some()` (never resets once
+    /// `Some`). The author paths (`emit_realm_frames`/`evaluate_realm_boundaries`/`evaluate_realm_aoi`)
+    /// `.run_if(has_synced)`, so a fresh shard authors NOTHING pre-sync (determinism).
+    pub synced: bool,
 }
 
 #[cfg(test)]

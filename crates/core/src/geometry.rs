@@ -765,6 +765,102 @@ impl ContainmentBand {
     }
 }
 
+/// A per-realm Area-of-Interest hysteresis band (METRES) for demand-driven realm lifecycle (RLM
+/// Step 2). DISTINCT from [`OverlapBand`]/[`ContainmentBand`]: it drives a child SHARD's spin-up/down,
+/// not entity membership. `spin_up_r_m` (a child within this range of an occupant is DEMANDED live)
+/// and `tear_down_r_m > spin_up_r_m` (released only past this larger radius) straddle a dead-zone so an
+/// occupant loitering at the edge cannot flap the child. `grace_ticks` holds a would-be release that
+/// many ticks after the last in-range observation (the temporal anti-thrash; the geometric half is the
+/// gap). Fields PRIVATE — the `0 < spin_up < tear_down` invariant is unconstructible-if-violated.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AoiConfig {
+    spin_up_r_m: f64,
+    tear_down_r_m: f64,
+    grace_ticks: u32,
+}
+
+impl AoiConfig {
+    /// The VELOCITY-SAFE constructor — the ONLY fallible way to build a LIVE band (mirrors
+    /// [`ContainmentBand::for_containment_velocity_safe`]). `spin_up = base_extent·spin_up_factor`;
+    /// `tear_down = max(base_extent·tear_down_factor, spin_up + need)`, `need = |v_rel|·dt·(K_SAFETY +
+    /// k_safety_extra)` — the gap WIDENED so a body closing at `v_rel` (m/s) over `dt`-second ticks can
+    /// neither skip the band nor thrash the child. Fallible LOUD unless `0 < spin_up < tear_down` (the
+    /// exact flap this type prevents). NOTE: at zero factor the generator calls [`AoiConfig::inert`],
+    /// never this.
+    ///
+    /// # Errors
+    /// [`BandError::InvalidEdges`] unless `0 < spin_up < tear_down`.
+    #[must_use = "the Result carries a BandError that must not be dropped"]
+    pub fn for_velocity_safe(
+        base_extent: f64,
+        spin_up_factor: f64,
+        tear_down_factor: f64,
+        v_rel: f64,
+        dt: f64,
+        grace_ticks: u32,
+        k_safety_extra: f64,
+    ) -> Result<AoiConfig, BandError> {
+        let spin_up = base_extent * spin_up_factor;
+        let need = v_rel.abs() * dt * (K_SAFETY + k_safety_extra);
+        let tear_down = f64::max(base_extent * tear_down_factor, spin_up + need);
+        if spin_up > 0.0 && tear_down > spin_up {
+            let band = AoiConfig {
+                spin_up_r_m: spin_up,
+                tear_down_r_m: tear_down,
+                grace_ticks,
+            };
+            debug_assert!(band.width_safe_for(v_rel, dt));
+            Ok(band)
+        } else {
+            Err(BandError::InvalidEdges)
+        }
+    }
+
+    /// The inert AoI (zero factor / walk-scale): `spin_up == 0` ⇒ nothing is ever in range ⇒ no demand.
+    /// Distinct from the fallible ctor so the byte-identity path never touches the reject arm. This is
+    /// the `#[serde(default)]` for [`RealmRegion::aoi`] — a legacy `regions.json` missing the field
+    /// decodes to inert (behaviour-identical).
+    #[must_use]
+    pub fn inert() -> AoiConfig {
+        AoiConfig {
+            spin_up_r_m: 0.0,
+            tear_down_r_m: 0.0,
+            grace_ticks: 0,
+        }
+    }
+
+    /// The inner (spin-up) radius — metres; a child within this of an occupant is demanded live.
+    #[must_use]
+    pub fn spin_up_r_m(&self) -> f64 {
+        self.spin_up_r_m
+    }
+    /// The outer (tear-down) radius — metres; a live child is released only past this.
+    #[must_use]
+    pub fn tear_down_r_m(&self) -> f64 {
+        self.tear_down_r_m
+    }
+    /// Grace ticks held after the last in-range observation before release.
+    #[must_use]
+    pub fn grace_ticks(&self) -> u32 {
+        self.grace_ticks
+    }
+
+    fn width_safe_for(&self, v_rel: f64, dt_s: f64) -> bool {
+        (self.tear_down_r_m - self.spin_up_r_m) >= v_rel.abs() * dt_s * K_SAFETY
+    }
+
+    /// AoI hysteresis over a scalar min distance (BRANCHLESS bitwise `&`/`|`, like
+    /// [`ShardProfile::satisfies`] — no short-circuit region to leave uncovered, HR5). `min_dist` is the
+    /// smallest distance from ANY occupant to the child (the caller reduces). Acquire within `spin_up`;
+    /// once in, hold within the larger `tear_down`.
+    #[must_use]
+    pub fn in_range(&self, was_in: bool, min_dist: f64) -> bool {
+        let hold = min_dist <= self.tear_down_r_m;
+        let acquire = min_dist <= self.spin_up_r_m;
+        (was_in & hold) | acquire
+    }
+}
+
 /// One realm REGION: a volume that, when it is the DEEPEST region CONTAINING a point, defines that
 /// point's realm. CONTAINMENT, not a portal — there is no `to_realm` and no [`Direction`] (both were
 /// the directional-trigger model's; the destination is DERIVED as the containing realm, symmetric by
@@ -784,6 +880,13 @@ pub struct RealmRegion {
     pub shape: Boundary,
     /// The signed-distance hysteresis band around the surface (anti-flap on the containment edge).
     pub band: ContainmentBand,
+    /// Per-realm AoI hysteresis (RLM Step 2), populated by `worldgen::to_regions` from the seed. Inert
+    /// (`spin_up == 0`) at walk-scale ⇒ no demand ⇒ behaviour byte-identity. `#[serde(default)]` so a
+    /// legacy `regions.json` (written before this field) decodes to inert — the client/devcluster
+    /// on-disk contract stays forward-compatible (on-disk BYTES differ — the field is additive to the
+    /// JSON — but a legacy file parses and a fresh one round-trips).
+    #[serde(default = "AoiConfig::inert")]
+    pub aoi: AoiConfig,
     /// The enclosing realm you fall to on LEAVING this region. `None` ONLY for the single ambient root
     /// (the Universe), whose volume contains all reachable space — so an entity is ALWAYS in ≥1 realm.
     pub parent: Option<RealmId>,
@@ -1082,6 +1185,60 @@ mod tests {
         );
     }
 
+    // ---- RLM Step 2: AoiConfig ---------------------------------------------------------------
+    #[test]
+    fn aoi_config_for_velocity_safe_ok() {
+        // spin = 10·2 = 20; need = 0; tear = max(10·3, 20) = 30.
+        let b = AoiConfig::for_velocity_safe(10.0, 2.0, 3.0, 0.0, 1.0, 5, 0.0).expect("valid");
+        assert_eq!(b.spin_up_r_m(), 20.0);
+        assert_eq!(b.tear_down_r_m(), 30.0);
+        assert_eq!(b.grace_ticks(), 5);
+        assert!(b.spin_up_r_m() < b.tear_down_r_m());
+    }
+
+    #[test]
+    fn aoi_config_rejects_inverted_edges() {
+        // tear_factor < spin_factor with no widening ⇒ tear == spin ⇒ reject (the second `&&` operand).
+        assert_eq!(
+            AoiConfig::for_velocity_safe(10.0, 3.0, 2.0, 0.0, 1.0, 0, 0.0),
+            Err(BandError::InvalidEdges)
+        );
+    }
+
+    #[test]
+    fn aoi_config_rejects_zero_spin_up() {
+        // spin_factor 0 ⇒ spin_up == 0 ⇒ reject (the first `&&` operand short-circuits).
+        assert_eq!(
+            AoiConfig::for_velocity_safe(10.0, 0.0, 2.0, 0.0, 1.0, 0, 0.0),
+            Err(BandError::InvalidEdges)
+        );
+    }
+
+    #[test]
+    fn aoi_config_velocity_widens_the_gap() {
+        // need = 100·1·(K_SAFETY 2 + 0) = 200; tear = max(10·2.5 = 25, 20 + 200 = 220) = 220.
+        let b = AoiConfig::for_velocity_safe(10.0, 2.0, 2.5, 100.0, 1.0, 0, 0.0).expect("valid");
+        assert_eq!(b.spin_up_r_m(), 20.0);
+        assert_eq!(b.tear_down_r_m(), 220.0);
+    }
+
+    #[test]
+    fn aoi_config_inert_is_zero() {
+        let b = AoiConfig::inert();
+        assert_eq!(b.spin_up_r_m(), 0.0);
+        assert!(!b.in_range(false, 100.0));
+        assert!(!b.in_range(true, 100.0));
+    }
+
+    #[test]
+    fn aoi_in_range_acquire_and_hold() {
+        let b = AoiConfig::for_velocity_safe(10.0, 2.0, 3.0, 0.0, 1.0, 5, 0.0).expect("valid"); // 20 / 30
+        assert!(b.in_range(false, 19.0)); // acquire within spin_up
+        assert!(!b.in_range(false, 21.0)); // not acquired; not yet in
+        assert!(b.in_range(true, 29.0)); // hold within the larger tear_down
+        assert!(!b.in_range(true, 31.0)); // released past tear_down
+    }
+
     #[test]
     fn depth_beats_orders_deepest_then_realm_then_index() {
         let r = RealmId::System(1);
@@ -1129,6 +1286,7 @@ mod tests {
             shape: Boundary::Shell { r: 1.0 },
             band: ContainmentBand::for_containment_velocity_safe(1.0, 2.0, 0.0, 1.0, 0.0)
                 .expect("valid test band"),
+            aoi: AoiConfig::inert(),
             parent,
         }
     }

@@ -28,8 +28,10 @@ use serde::{Deserialize, Serialize};
 use core::f64::consts::TAU;
 
 use crate::celestial::{G, KEPLER_ECC_MAX, OrbitalElements, orbital_state};
-use crate::geometry::{BandError, Boundary, ContainmentBand, RealmRegion};
+use crate::geometry::{AoiConfig, BandError, Boundary, ContainmentBand, RealmRegion};
 use crate::pose::{LatticePos, RealmId, frame_for_realm};
+use crate::realm_coord::RealmCoord;
+use crate::realm_path::{RealmKindTag, RealmLevel};
 use crate::rng::{SplitMix64, child_seed, realm_stream};
 use crate::taxonomy::{
     FrostThresholds, GalaxyType, SpectralClass, orbital_axis_au, sample_rayleigh,
@@ -177,14 +179,24 @@ fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmReg
         .expect("containment band edges are valid by construction");
     bodies
         .iter()
-        .map(|b| RealmRegion {
-            realm: b.realm,
-            center: epoch_offset_in_parent(b.placement),
-            frame: frame_for_realm(b.realm, b.parent)
-                .expect("roster realms have a canonical frame"),
-            shape: b.shape,
-            band,
-            parent: b.parent,
+        .map(|b| {
+            // RLM Step 2: per-realm AoI = factor × the body's OWN finite extent, the dead-zone widened
+            // by the occupant speed + THIS child's own orbital closing speed (v_peri; 0 if static).
+            let v_child = orbital_of(b.placement).map_or(0.0, |e| e.v_peri());
+            let aoi = config
+                .interest
+                .build(b.shape.finite_extent(), v_child)
+                .expect("aoi band edges are valid by construction");
+            RealmRegion {
+                realm: b.realm,
+                center: epoch_offset_in_parent(b.placement),
+                frame: frame_for_realm(b.realm, b.parent)
+                    .expect("roster realms have a canonical frame"),
+                shape: b.shape,
+                band,
+                aoi,
+                parent: b.parent,
+            }
         })
         .collect()
 }
@@ -215,6 +227,70 @@ fn orbital_of(placement: Placement) -> Option<OrbitalElements> {
         Placement::Orbital(elements) => Some(elements),
         Placement::StaticOffset(_) => None,
     }
+}
+
+/// Direct children of `parent` within `radius` of `occupant_pos`, as `(child RealmCoord, distance)`
+/// (RLM Step 2, the C1 spatial-index SEAM). Today a LINEAR fold over the caller's ALREADY-BOUNDED
+/// direct-child slice (correct under sparse occupancy — `MAX_REGIONS` caps live direct children); the
+/// P6/D-9 spatial index replaces the linear body WITHOUT changing this signature (this is NOT the
+/// O(all realms) [`realm_neighbourhood_for`] scan). Positions are FRAME-LOCAL `DVec3` in the parent's
+/// OWN frame — occupant and child MUST share a cell through P3 (every pose is cell-ZERO; the cross-cell
+/// fold is P4/P5-owed). Yields `RealmCoord` via `parent.child(level)` so a not-yet-spawned child is
+/// nameable — NOT the lossy `RealmId`.
+#[must_use]
+pub fn children_within<'a>(
+    parent: &'a RealmCoord,
+    occupant_pos: DVec3,
+    radius: f64,
+    direct_children: &'a [(RealmLevel, DVec3)],
+) -> impl Iterator<Item = (RealmCoord, f64)> + 'a {
+    direct_children.iter().filter_map(move |(level, pos)| {
+        aoi_within(*pos, occupant_pos, radius).map(|d| (parent.child(*level), d))
+    })
+}
+
+/// The monomorphic distance predicate (HR5: the compare lives here; `children_within`'s closure is a
+/// branchless map). `Some(d)` iff `d <= radius`.
+fn aoi_within(child_pos: DVec3, occupant_pos: DVec3, radius: f64) -> Option<f64> {
+    let d = (child_pos - occupant_pos).length();
+    (d <= radius).then_some(d)
+}
+
+/// A SEED-LINEAGE `RealmId` → its `RealmLevel` (kind + seed), un-lossily: the `System(0)`/`System(1)`
+/// stand-ins recover as `Universe`/`Galaxy` (the reverse of `to_realm_id`'s forward map), the keyed
+/// kinds pass through. `None` for [`RealmId::Ship`] — a ship is ENTITY-backed (P8, an `EntityId`
+/// payload), NOT a seed-lineage realm, so it has no seed `RealmLevel` (and never appears in a seed
+/// forest / P3 region). Monomorphic (HR5: the kind match covered once here). A P3 stand-in like
+/// `path_for_realm` — a real system with seed 0/1 would alias, but the walk/visual forest uses 7/8.
+#[must_use]
+pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
+    match realm {
+        RealmId::System(UNIVERSE_SEED) => Some(RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED)),
+        RealmId::System(GALAXY_SEED) => Some(RealmLevel::new(RealmKindTag::Galaxy, GALAXY_SEED)),
+        RealmId::System(s) => Some(RealmLevel::new(RealmKindTag::System, s)),
+        RealmId::Planet(s) => Some(RealmLevel::new(RealmKindTag::Planet, s)),
+        RealmId::Station(s) => Some(RealmLevel::new(RealmKindTag::Station, s)),
+        RealmId::Area(s) => Some(RealmLevel::new(RealmKindTag::Area, s)),
+        RealmId::Ship(_) => None,
+    }
+}
+
+/// The direct-child `RealmLevel` roster for `hosted` — from the SAME `(seed, config)` forest
+/// [`to_regions`]/[`moving_children`] consume (`b.parent == Some(hosted)`), so the AoI child roster and
+/// the containment region roster never diverge (L1). Closed-form `f(seed, config, hosted)`. `filter_map`
+/// drops any non-seed-lineage child (a ship — never present in a seed forest). Each level builds the
+/// child's `RealmCoord` as `own_coord.child(level)` (§3).
+#[must_use]
+pub fn direct_child_levels(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    hosted: RealmId,
+) -> Vec<RealmLevel> {
+    generate_system_forest(seed_universe, config)
+        .iter()
+        .filter(|b| b.parent == Some(hosted))
+        .filter_map(|b| level_of(b.realm))
+        .collect()
 }
 
 /// [`moving_children`] over the seed forest a shard boots — the AUTHORED moving-child roster for
@@ -656,7 +732,82 @@ impl BandConfig {
     }
 }
 
-/// THE one config home for the seed universe generator — six named sub-structs (no god-struct),
+// ---- RLM Step 2: per-realm AoI radii (all seed-relative factors, no magic numbers) ----------------
+/// The universe seconds-per-tick the AoI widening is measured against — MUST equal `StubConfig.tick_dt_s`
+/// (a boot `debug_assert!` cross-checks it, M-2). Named, not inline.
+const AOI_TICK_DT_S: f64 = 0.05;
+/// Visual-scale AoI: spin a child up when an occupant is within this multiple of the child's own finite
+/// extent (SOI radius), release past the larger tear-down multiple — HR3 proportional, no kind-match.
+const VISUAL_AOI_SPIN_UP_FACTOR: f64 = 2.5;
+const VISUAL_AOI_TEAR_DOWN_FACTOR: f64 = 4.0;
+/// Grace ticks a would-be release is held (1 s at the visual 20 Hz).
+const VISUAL_AOI_GRACE_TICKS: u32 = 20;
+/// Extra velocity-safety margin folded into the dead-zone widening (beyond `K_SAFETY`).
+const VISUAL_AOI_K_SAFETY_EXTRA: f64 = 0.5;
+/// The visual occupant's max speed (m/s) — MUST equal `StubConfig.move_speed_mps · time_multiplier`
+/// (boot `debug_assert!`, M-2), so the anti-thrash pad is measured against the speed the sim integrates.
+const VISUAL_OCCUPANT_V_MAX_MPS: f64 = 2.0;
+
+/// Per-realm AoI radii as UNIFORM FACTORS of the realm's own finite extent (HR3: no match-on-kind — a
+/// bigger realm reaches proportionally farther), plus the widening inputs (`occupant_v_max_mps`,
+/// `tick_dt_s`) so [`to_regions`] stays a pure `f(UniverseConfig)` (a boot `debug_assert!` cross-checks
+/// them against the live `StubConfig`, M-2 — no two-home drift). `walk_scale`/`canonical` set
+/// `spin_up_factor = 0` ⇒ AoI inert ⇒ behaviour byte-identity.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InterestConfig {
+    pub spin_up_factor: f64,
+    pub tear_down_factor: f64,
+    pub grace_ticks: u32,
+    pub k_safety_extra: f64,
+    pub occupant_v_max_mps: f64,
+    pub tick_dt_s: f64,
+}
+
+impl InterestConfig {
+    /// Build the per-realm AoI band from the realm's own `finite_extent` + the child's own orbital
+    /// closing speed `v_child` (its `v_peri`; 0 for a static child). At walk-scale (`spin_up_factor <=
+    /// 0`) returns the inert band BRANCHLESSLY — NEVER through the fallible ctor (whose reject arm the
+    /// byte-identity path must not touch). Fallible only for the LIVE case.
+    ///
+    /// # Errors
+    /// [`BandError::InvalidEdges`] from [`AoiConfig::for_velocity_safe`] if the live factors are degenerate.
+    pub fn build(&self, finite_extent: f64, v_child: f64) -> Result<AoiConfig, BandError> {
+        if self.spin_up_factor <= 0.0 {
+            Ok(AoiConfig::inert())
+        } else {
+            AoiConfig::for_velocity_safe(
+                finite_extent,
+                self.spin_up_factor,
+                self.tear_down_factor,
+                self.occupant_v_max_mps + v_child,
+                self.tick_dt_s,
+                self.grace_ticks,
+                self.k_safety_extra,
+            )
+        }
+    }
+
+    /// The inert preset (walk/canonical): zero factor ⇒ AoI never fires ⇒ byte-identity.
+    #[must_use]
+    pub fn inert() -> InterestConfig {
+        InterestConfig {
+            spin_up_factor: 0.0,
+            tear_down_factor: 0.0,
+            grace_ticks: 0,
+            k_safety_extra: 0.0,
+            occupant_v_max_mps: 0.0,
+            tick_dt_s: AOI_TICK_DT_S,
+        }
+    }
+
+    /// Whether AoI is LIVE (a positive spin-up factor) — the M-2 boot cross-check applies only here.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.spin_up_factor > 0.0
+    }
+}
+
+/// THE one config home for the seed universe generator — named sub-structs (no god-struct),
 /// every field seed-derivable and doc-cited (no magic numbers).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UniverseConfig {
@@ -666,6 +817,8 @@ pub struct UniverseConfig {
     pub planet: PlanetConfig,
     pub satellite: SatelliteConfig,
     pub band: BandConfig,
+    /// Per-realm AoI radii (RLM Step 2). Inert at walk/canonical (byte-identity); live at visual.
+    pub interest: InterestConfig,
 }
 
 impl UniverseConfig {
@@ -724,6 +877,7 @@ impl UniverseConfig {
                 outset_m: CONTAINMENT_OUTSET_M,
                 k_safety_extra: 0.0,
             },
+            interest: InterestConfig::inert(), // walk: AoI OFF ⇒ byte-identity.
         }
     }
 
@@ -781,6 +935,7 @@ impl UniverseConfig {
                 outset_m: CONTAINMENT_OUTSET_M,
                 k_safety_extra: 0.0,
             },
+            interest: InterestConfig::inert(), // canonical: AoI OFF until D-41 (byte-identity).
         }
     }
 
@@ -800,6 +955,16 @@ impl UniverseConfig {
         cfg.stellar.central_mass_kg = visual_central_mass_kg();
         cfg.planet.planet_soi_r_m = visual_planet_soi_r_m();
         cfg.planet.n_planets = VISUAL_N_PLANETS;
+        // RLM Step 2: the ONE place LIVE AoI turns on — per-realm radii = factor × the realm's own
+        // extent (HR3), the anti-thrash pad measured against the visual occupant + tick_dt (M-2).
+        cfg.interest = InterestConfig {
+            spin_up_factor: VISUAL_AOI_SPIN_UP_FACTOR,
+            tear_down_factor: VISUAL_AOI_TEAR_DOWN_FACTOR,
+            grace_ticks: VISUAL_AOI_GRACE_TICKS,
+            k_safety_extra: VISUAL_AOI_K_SAFETY_EXTRA,
+            occupant_v_max_mps: VISUAL_OCCUPANT_V_MAX_MPS,
+            tick_dt_s: AOI_TICK_DT_S,
+        };
         cfg
     }
 
@@ -1322,6 +1487,114 @@ mod tests {
         // authors NO moving child — `frame_context` registers every region at identity, unchanged.
         assert!(moving_children_for(0, RealmId::System(7)).is_empty());
         assert!(moving_children_for(0, RealmId::System(8)).is_empty());
+    }
+
+    // ===== RLM Step 2: per-realm AoI config + generator accessors ========================
+
+    #[test]
+    fn interest_config_build_inert_at_zero_factor() {
+        let inert = InterestConfig::inert();
+        assert!(!inert.is_live());
+        assert_eq!(
+            inert.build(100.0, 5.0).expect("inert always ok"),
+            AoiConfig::inert()
+        );
+    }
+
+    #[test]
+    fn interest_config_build_live() {
+        let live = UniverseConfig::visual_scale().interest;
+        assert!(live.is_live());
+        // spin_up_r = extent × spin_up_factor (v_child 0 ⇒ tear = base·tear_factor, no widening).
+        let band = live.build(100.0, 0.0).expect("valid live");
+        assert_eq!(band.spin_up_r_m(), 100.0 * VISUAL_AOI_SPIN_UP_FACTOR);
+    }
+
+    #[test]
+    fn to_regions_stamps_per_realm_aoi() {
+        // Walk: every region inert (byte-identity — the field never changes containment).
+        for r in realm_regions_for(0) {
+            assert_eq!(r.aoi, AoiConfig::inert());
+        }
+        // Visual: a Planet's spin_up = its own extent × factor; a bigger realm (System) reaches farther.
+        let visual = realm_regions_for_config(0, &UniverseConfig::visual_scale());
+        let planet = visual
+            .iter()
+            .find(|r| matches!(r.realm, RealmId::Planet(_)))
+            .expect("a planet");
+        assert_eq!(
+            planet.aoi.spin_up_r_m(),
+            planet.shape.finite_extent() * VISUAL_AOI_SPIN_UP_FACTOR
+        );
+        let system = visual.iter().find(|r| r.realm == SYSTEM_A).expect("system A");
+        assert!(system.aoi.spin_up_r_m() > planet.aoi.spin_up_r_m());
+    }
+
+    #[test]
+    fn aoi_within_boundary() {
+        let occ = DVec3::ZERO;
+        assert_eq!(aoi_within(DVec3::ZERO, occ, 10.0), Some(0.0));
+        assert_eq!(aoi_within(DVec3::new(10.0, 0.0, 0.0), occ, 10.0), Some(10.0));
+        assert_eq!(aoi_within(DVec3::new(11.0, 0.0, 0.0), occ, 10.0), None);
+    }
+
+    #[test]
+    fn children_within_filters_by_radius() {
+        let parent = RealmCoord::from_path(crate::realm_path::RealmPath::from_levels(vec![
+            RealmLevel::new(RealmKindTag::Universe, 0),
+            RealmLevel::new(RealmKindTag::Galaxy, 1),
+            RealmLevel::new(RealmKindTag::System, 7),
+        ]))
+        .expect("parent coord");
+        let children = [
+            (RealmLevel::new(RealmKindTag::Planet, 10), DVec3::new(5.0, 0.0, 0.0)),
+            (RealmLevel::new(RealmKindTag::Planet, 20), DVec3::new(50.0, 0.0, 0.0)),
+        ];
+        let got: Vec<RealmCoord> = children_within(&parent, DVec3::ZERO, 10.0, &children)
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], parent.child(RealmLevel::new(RealmKindTag::Planet, 10)));
+    }
+
+    #[test]
+    fn direct_child_levels_from_seed() {
+        // Visual System A hosts N orbiting planets; the roster is exactly those planet levels.
+        let config = UniverseConfig::visual_scale();
+        let levels = direct_child_levels(0, &config, SYSTEM_A);
+        assert_eq!(levels.len(), VISUAL_N_PLANETS as usize);
+        assert!(levels.iter().all(|l| l.kind == RealmKindTag::Planet));
+    }
+
+    #[test]
+    fn level_of_covers_every_kind() {
+        assert_eq!(
+            level_of(RealmId::System(0)),
+            Some(RealmLevel::new(RealmKindTag::Universe, 0))
+        );
+        assert_eq!(
+            level_of(RealmId::System(1)),
+            Some(RealmLevel::new(RealmKindTag::Galaxy, 1))
+        );
+        assert_eq!(
+            level_of(RealmId::System(7)),
+            Some(RealmLevel::new(RealmKindTag::System, 7))
+        );
+        assert_eq!(
+            level_of(RealmId::Planet(7)),
+            Some(RealmLevel::new(RealmKindTag::Planet, 7))
+        );
+        assert_eq!(
+            level_of(RealmId::Station(7)),
+            Some(RealmLevel::new(RealmKindTag::Station, 7))
+        );
+        assert_eq!(
+            level_of(RealmId::Area(7)),
+            Some(RealmLevel::new(RealmKindTag::Area, 7))
+        );
+        // A ship is entity-backed (P8), not seed-lineage ⇒ None (the filter_map-dropped case).
+        let ship = RealmId::Ship(crate::EntityId::pack(crate::entity_kind::EntityKind::Player, 1, 1, 1));
+        assert_eq!(level_of(ship), None);
     }
 
     // ===== FA-5 S1: the config-driven VISUAL-scale Orbital generator =====================

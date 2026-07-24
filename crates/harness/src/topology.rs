@@ -1074,6 +1074,8 @@ mod tests {
             schedule,
             StubConfig {
                 realm: vd_core::pose::RealmId::System(5),
+                own_coord: StubConfig::root_coord(vd_core::pose::RealmId::System(5)),
+                boot_ticks_p99: 0,
                 held_realms: StubConfig::single_realm(vd_core::pose::RealmId::System(5)),
                 frame: vd_core::pose::FrameRef::SystemSpace { system_seed: 5 },
                 move_speed_mps: 1.0,
@@ -1280,6 +1282,8 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(StubConfig {
             realm: PRIMARY,
+            own_coord: StubConfig::root_coord(PRIMARY),
+            boot_ticks_p99: 0,
             // Host the primary + two co-hosted children.
             held_realms: BTreeSet::from([PRIMARY, CHILD_HELD, CHILD_PENDING]),
             frame: FrameRef::SystemSpace { system_seed: 5 },
@@ -1321,6 +1325,8 @@ mod tests {
         let mut bare = World::new();
         bare.insert_resource(StubConfig {
             realm: PRIMARY,
+            own_coord: StubConfig::root_coord(PRIMARY),
+            boot_ticks_p99: 0,
             held_realms: BTreeSet::from([PRIMARY, CHILD_HELD]),
             frame: FrameRef::SystemSpace { system_seed: 5 },
             move_speed_mps: 1.0,
@@ -1423,6 +1429,8 @@ mod tests {
                 schedule,
                 StubConfig {
                     realm,
+                    own_coord: StubConfig::root_coord(realm),
+                    boot_ticks_p99: 0,
                     held_realms: StubConfig::single_realm(realm),
                     frame: FrameRef::SystemSpace { system_seed },
                     move_speed_mps: 1.0,
@@ -1488,6 +1496,7 @@ mod tests {
                 frame: frame_for_realm(realm, None).expect("System/Planet realm resolves a frame"),
                 shape: Boundary::Shell { r },
                 band,
+                aoi: vd_core::geometry::AoiConfig::inert(),
                 parent,
             };
             let root = RealmId::System(0);
