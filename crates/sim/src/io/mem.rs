@@ -507,6 +507,10 @@ impl RealmSpawner for MemSpawner {
             Ok(())
         }
     }
+
+    fn live_nodes(&self) -> BTreeSet<NodeId> {
+        self.lock().live.keys().copied().collect()
+    }
 }
 
 #[cfg(test)]

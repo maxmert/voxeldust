@@ -28,6 +28,7 @@ pub mod capability;
 pub mod coupling;
 pub mod directory;
 pub mod io;
+pub mod rlm;
 pub mod runtime;
 pub mod saga;
 pub mod stub;

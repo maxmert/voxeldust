@@ -10,12 +10,14 @@
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::{EpochId, NodeId};
 use vd_sim::directory::{DirectoryCore, DirectoryTuning};
-use vd_sim::io::mem::MemStore;
+use vd_sim::io::mem::{MemHub, MemSpawner, MemStore};
 use vd_sim::io::{Inbound, MsgClass, Store};
+use vd_sim::rlm::RlmTuning;
 use vd_sim::runtime::{ClockSample, InboundBox, OutboundBox};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{DirectoryOp, DirectoryReply};
 
+use crate::rlm_runtime::{RlmReconcilerRes, reconcile_realm_lifecycle, record_realm_demands};
 use crate::universe_clock::{CeilingClock, ClockAction};
 
 /// Orchestrator configuration (composer-provided; ONE struct, no inline literals).
@@ -40,6 +42,10 @@ pub struct OrchestratorConfig {
     /// now (ledgered — prod re-home parks until the per-shard-profile roster config lands; P3 is
     /// harness-driven). An empty roster ⇒ `select_rehome_target` returns `None` ⇒ the saga stays parked.
     pub roster: std::collections::BTreeMap<NodeId, vd_sim::capability::ShardProfile>,
+    /// RLM Step 3 — the realm-lifecycle reconciler's timing budget. DEFAULT is INERT
+    /// (`reconcile_interval_ticks == 0` ⇒ the reconcile sweep never runs ⇒ byte-identical to a build
+    /// without RLM); the live-AoI orchestrator boot sets `RlmTuning::cloud(tick_hz)`.
+    pub rlm: RlmTuning,
 }
 
 /// The directory, resource-wrapped (single writer: this node's schedule).
@@ -120,15 +126,29 @@ pub fn register_orchestrator_with_store(
     world.insert_resource(OrchestratorStats::default());
     world.insert_resource(runtime);
     world.insert_resource(crate::saga_runtime::StoreRes(store));
-    // serve_directory then drive_sagas: both read the Saga-class inbound (directory ops vs
-    // gateway acks); the saga runtime's direct commit_cas runs after the directory service. The
-    // D-6 group-commit barrier is at the tail of drive_sagas (the chain's last system), so it fsyncs
-    // AFTER every state change this tick and BEFORE the node's flush phase sends `outbox`.
+    // RLM Step 3 — the realm-lifecycle reconciler. INERT by default (`cfg.rlm` zero ⇒ the sweep never
+    // runs ⇒ byte-identical). The spawner defaults to a fresh in-process `MemSpawner` (mint ids from a
+    // high base so they never collide with hand-picked test node ids); a live-AoI / harness boot overwrites
+    // this resource with a spawner tied to its own hub (Step 5 supplies the real k8s launcher).
+    world.insert_resource(RlmReconcilerRes::new(
+        cfg.rlm,
+        Box::new(MemSpawner::new(MemHub::new(), NodeId(1_000_000), 8)),
+    ));
+    // RLM Step 3e chain. `record_realm_demands` folds this tick's re-asserted demands BEFORE `serve_directory`
+    // (so they are fresh). `drive_sagas_core` runs the saga FSMs + the reaper + rehome-arm (mutating the
+    // directory). `reconcile_realm_lifecycle` then reads the post-CAS heads + liveness and stages its
+    // grant/revoke into the SAME `dir.dirty` set. `commit_barrier` is the ONE fsync at the chain tail — it
+    // drains every mutation this tick and runs BEFORE the node's flush phase sends `outbox`
+    // (persist-before-effect; the D-6 + COMP-2 guarantees are preserved — the barrier was only MOVED out of
+    // `drive_sagas`, not reordered).
     schedule.add_systems(
         (
             advance_and_broadcast_clock,
+            record_realm_demands,
             serve_directory,
-            crate::saga_runtime::drive_sagas,
+            crate::saga_runtime::drive_sagas_core,
+            reconcile_realm_lifecycle,
+            crate::saga_runtime::commit_barrier,
         )
             .chain(),
     );
@@ -337,6 +357,7 @@ mod tests {
             saga: vd_sim::saga::SagaTuning::default(),
             liveness: vd_sim::saga::LivenessTuning::default(),
             roster: std::collections::BTreeMap::new(),
+            rlm: RlmTuning::default(),
         }
     }
 

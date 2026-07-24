@@ -453,6 +453,13 @@ pub trait RealmSpawner {
 
     /// Tear down a running realm shard by its minted id.
     fn kill_realm(&self, node: NodeId) -> Result<(), SpawnError>;
+
+    /// The nodes this spawner currently believes are LIVE (minted, not yet torn down) — the RLM Step-3
+    /// launch-reconcile bridge. The reconciler reads it to distinguish "spawned but not yet leased" (still
+    /// live) from "silently died" (fell out of the set), so it neither double-spawns nor leaks; and a
+    /// rebuilt orchestrator recognizes its pre-crash pods through it. The mem twin returns its in-process
+    /// set; the real k8s launcher lists pods by label (Step 5).
+    fn live_nodes(&self) -> std::collections::BTreeSet<NodeId>;
 }
 
 #[cfg(test)]

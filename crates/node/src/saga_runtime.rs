@@ -529,6 +529,14 @@ struct BatchGo {
 const REJECTION_LEDGER_CAP: usize = 1024;
 
 impl SagaRuntimeRes {
+    /// Whether `node` has been LATCHED dead by the D-3 liveness tracker (RLM Step 3e: the reconciler's
+    /// BUG-A zombie check reads this to tell a live head from a dead-but-recorded one). Delegates to the
+    /// private liveness latch — the ONE authority on confirmed-dead nodes (`should_reap` reads the same).
+    #[must_use]
+    pub fn is_node_latched_dead(&self, node: NodeId) -> bool {
+        self.liveness.is_latched_dead(node)
+    }
+
     /// Construct with the deadline budget from config (Slice 2a). The production path
     /// (`register_orchestrator`) calls this with `cfg.saga`; `Default` is the dev/test value.
     #[must_use]
@@ -2231,14 +2239,12 @@ fn latch_adopted_from_inbox(runtime: &mut SagaRuntimeRes, inbox: &InboundBox) {
 /// The orchestrator saga-runtime system: process new triggers, FIRE due deadlines (Slice 2a), then
 /// drive every live saga forward on the gateway acks delivered this tick. Runs on the orchestrator's
 /// single-threaded schedule; the directory CAS is a direct in-process call (no await, no lock across a send).
-pub fn drive_sagas(
+pub fn drive_sagas_core(
     inbox: Res<InboundBox>,
     clock: Res<ClockSample>,
-    clock_res: Res<UniverseClockRes>,
     mut dir: ResMut<DirectoryRes>,
     mut runtime: ResMut<SagaRuntimeRes>,
     mut outbox: ResMut<OutboundBox>,
-    mut store: ResMut<StoreRes>,
 ) {
     let now = clock.universe_tick;
     let epoch = clock.epoch;
@@ -2403,50 +2409,60 @@ pub fn drive_sagas(
     // makes the reaper re-detect on reboot — see `PendingReHome`). Must run AFTER the reaper (it drains what
     // the reaper enqueued) and BEFORE the reconcile (so the lock/saga persist this tick).
     process_rehome_starts(&mut runtime, &mut dir.0, &mut outbox, epoch, now);
-    // D-6 GROUP-COMMIT BARRIER: stage every saga/go-token write recorded this tick (drained from
-    // `pending_writes`), stage this tick's incremental DIRECTORY deltas (the independent key family) + the
-    // durable clock ceiling, then ONE `commit()` — the ~1-fsync/tick durability point (io-prod batches it
-    // off-tick later). This
-    // runs at the END of the schedule, BEFORE the node's flush phase sends `outbox`, so no effect leaves
-    // the orchestrator before the state authorizing it is durable (persist-before-effect). The directory
-    // reconcile + the saga writes commit in the SAME barrier ⇒ the durable saga set and directory are
-    // always CONSISTENT post-crash (a Swapping snapshot ⟺ dest-owned directory; rehydrate never sees a
-    // half-state). The clock ceiling is persisted so a rebuild resumes FORWARD (`CeilingClock::recover`).
+    // RLM Step 3e: the D-6 GROUP-COMMIT BARRIER was extracted to the [`commit_barrier`] system (below) so
+    // the realm-lifecycle reconciler (`reconcile_realm_lifecycle`) can run BETWEEN this core and the ONE
+    // fsync, staging its grant/revoke into the SAME `dir.0.dirty` set. The reaper + rehome-arm above STAY
+    // here (they run before the reconcile); ONLY the drain/commit moved — the mutation phases are unchanged,
+    // so persist-before-effect + the COMP-2 anti-zombie guarantees hold exactly as before.
+}
+
+/// The D-6 GROUP-COMMIT BARRIER body (RLM Step 3e extraction). Drains this tick's staged saga/go-token
+/// writes (`pending_writes`), then this tick's incremental DIRECTORY deltas (`dir.dirty` — `Some` ⇒ PUT the
+/// new snapshot, `None`/DELETE ⇒ the COMP-2 anti-zombie: a revoked/reaped record is deleted durably so
+/// `rehydrate` can't resurrect it), then the durable clock ceiling, then ONE `commit()`. The `dirty` set
+/// accumulates across `serve_directory` + `drive_sagas_core` + `reconcile_realm_lifecycle`, so this single
+/// drain — the one place with both the store and the directory — captures every change this tick.
+/// `O(changes)`, not `O(directory)`: a quiescent tick stages nothing.
+fn group_commit(
+    runtime: &mut SagaRuntimeRes,
+    dir: &mut DirectoryCore,
+    store: &mut (dyn Store + Send + Sync),
+    clock_res: &UniverseClockRes,
+) {
     for (key, value) in std::mem::take(&mut runtime.pending_writes) {
         match value {
-            Some(bytes) => store.0.put(&key, &bytes),
-            None => store.0.delete(&key),
+            Some(bytes) => store.put(&key, &bytes),
+            None => store.delete(&key),
         }
     }
-    // RECONCILE the durable Directory family with RAM, INCREMENTALLY (D-alpha; audit COMP-2): stage ONLY
-    // the rows this tick actually CHANGED — `DirectoryCore` records each in its `dirty` delta set (`Some` ⇒
-    // PUT the new snapshot, `None` ⇒ DELETE the removed row). The store already holds every prior tick's
-    // snapshot, so the union of (durable state ⊕ this tick's deltas) is byte-identical to the old full
-    // delete-all-then-put-current reconcile (the test-only differential oracle pins this). The `None`/DELETE
-    // arm is the COMP-2 anti-zombie: a REVOKED record (a logged-out / departed owner removed from RAM via
-    // `LeaseRevoke`, `directory.rs` `revoke`, OR a reaped dead lease above) is DELETED durably, so
-    // `rehydrate`'s `restore` cannot resurrect it at its stale owner+fence on the next kill-9 (split-brain
-    // on the exact recover path D-6 cures). The directory is mutated across TWO systems (serve_directory +
-    // drive_sagas) but `dirty` accumulates across BOTH within the tick, so the single drain HERE — the one
-    // place with both the store + the directory — captures every change. Within-tick collapse is automatic
-    // (last write to a key wins), so N renews of one key cost ONE staged delta. O(changes) not O(directory):
-    // a quiescent tick stages nothing (the write-amp win that makes the off-tick `RedbStore` writer viable).
-    for (key, change) in dir.0.take_dirty() {
+    for (key, change) in dir.take_dirty() {
         match change {
             Some(record) => {
                 let snapshot = DirSnapshot { key, record };
-                store
-                    .0
-                    .put(&StoreKey::Directory(key).bytes(), &encode(&snapshot));
+                store.put(&StoreKey::Directory(key).bytes(), &encode(&snapshot));
             }
-            None => store.0.delete(&StoreKey::Directory(key).bytes()),
+            None => store.delete(&StoreKey::Directory(key).bytes()),
         }
     }
-    store.0.put(
+    store.put(
         &StoreKey::Clock.bytes(),
         &encode(&(clock_res.0.epoch(), clock_res.0.confirmed_ceiling())),
     );
-    store.0.commit();
+    store.commit();
+}
+
+/// The orchestrator's FINAL chained system (RLM Step 3e): the D-6 group-commit barrier. Runs strictly AFTER
+/// `drive_sagas_core` (the reaper + rehome-arm) and `reconcile_realm_lifecycle` (the RLM grant/revoke), so
+/// ONE fsync captures every state change this tick and no effect leaves the orchestrator before the state
+/// authorizing it is durable (persist-before-effect). Splitting the barrier out is a MOVE of the drain/
+/// commit only — the mutation order is unchanged, so the D-6 + COMP-2 guarantees are preserved exactly.
+pub fn commit_barrier(
+    clock_res: Res<UniverseClockRes>,
+    mut dir: ResMut<DirectoryRes>,
+    mut runtime: ResMut<SagaRuntimeRes>,
+    mut store: ResMut<StoreRes>,
+) {
+    group_commit(&mut runtime, &mut dir.0, &mut *store.0, &clock_res);
 }
 
 #[cfg(test)]
@@ -2633,6 +2649,7 @@ mod tests {
             saga: SagaTuning::default(),
             liveness: LivenessTuning::default(),
             roster: BTreeMap::new(),
+            rlm: vd_sim::rlm::RlmTuning::default(),
         }
     }
 

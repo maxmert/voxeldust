@@ -230,6 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 roster
             },
+            rlm: vd_sim::rlm::RlmTuning::default(),
         },
         Box::new(store),
     );

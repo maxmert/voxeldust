@@ -1056,6 +1056,7 @@ mod tests {
                 saga: vd_sim::saga::SagaTuning::default(),
                 liveness: vd_sim::saga::LivenessTuning::default(),
                 roster: std::collections::BTreeMap::new(),
+                rlm: vd_sim::rlm::RlmTuning::default(),
             },
         );
         topo.add_node(Box::new(orch));
@@ -1409,6 +1410,7 @@ mod tests {
                 saga: vd_sim::saga::SagaTuning::default(),
                 liveness: vd_sim::saga::LivenessTuning::default(),
                 roster: std::collections::BTreeMap::new(),
+                rlm: vd_sim::rlm::RlmTuning::default(),
             },
         );
         topo.add_node(Box::new(orch));

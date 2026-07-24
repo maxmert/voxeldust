@@ -187,6 +187,8 @@ pub fn orch_config(
         liveness: vd_sim::saga::LivenessTuning::default(),
         // D-37: the re-home target roster (the D-6 rebuild passes the IDENTICAL one → clean recover).
         roster,
+        // RLM Step 3: INERT reconciler (the cluster scenarios do not exercise realm lifecycle).
+        rlm: vd_sim::rlm::RlmTuning::default(),
     }
 }
 
