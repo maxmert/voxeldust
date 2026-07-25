@@ -151,17 +151,20 @@ impl StoreKey {
     }
 }
 
-/// The EXACT durable key bytes for one realm's launch-intent record (`[RLM_LAUNCH] ++ postcard(node)`) —
-/// public to the crate so [`crate::rlm_spawn::SpawnCore`] stages intents through the SAME encoding the
-/// rehydrate scan reads back (zero key-byte drift; the encoding lives ONLY in [`StoreKey::bytes`]).
+/// The EXACT durable key bytes for one realm's launch-intent record (`[RLM_LAUNCH] ++ postcard(node)`).
+/// Public so [`crate::rlm_spawn::SpawnCore`] stages intents through the SAME encoding the rehydrate scan
+/// reads back, AND so the RLM Step-5e process-tier crash gate (`rlm_kill9_spawn.rs`) reopens `launch.redb`
+/// and reads back the exact same rows — zero key-byte drift (the encoding lives ONLY in [`StoreKey::bytes`]).
 #[must_use]
-pub(crate) fn rlm_launch_store_key(node: NodeId) -> Vec<u8> {
+pub fn rlm_launch_store_key(node: NodeId) -> Vec<u8> {
     StoreKey::RlmLaunch(node).bytes()
 }
 
-/// The family prefix that `scan`s exactly the launch-intent records (RLM Step 5b rehydrate).
+/// The family prefix that `scan`s exactly the launch-intent records (RLM Step 5b rehydrate). Public so the
+/// 5e crash gate can compute the SAME prefix the launch.redb writer pauses on (the mid-fsync crash window)
+/// and that the gate scans the recovered ledger by — one encoder, [`StoreKey::bytes`], no drift.
 #[must_use]
-pub(crate) fn rlm_launch_prefix() -> Vec<u8> {
+pub fn rlm_launch_prefix() -> Vec<u8> {
     vec![StoreKey::RLM_LAUNCH]
 }
 

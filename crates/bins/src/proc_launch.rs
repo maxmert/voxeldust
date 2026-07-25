@@ -200,8 +200,9 @@ impl LaunchBackend for ProcLaunchBackend {
             }) => match cache {
                 Some((at, result)) if at.elapsed() < self.tuning.orphan_probe_interval => *result,
                 _ => {
-                    let alive = crate::admin_get_body(*probe, "/whoami", Some(self.tuning.probe_timeout))
-                        == Some(cookie.to_env_string());
+                    let alive =
+                        crate::admin_get_body(*probe, "/whoami", Some(self.tuning.probe_timeout))
+                            == Some(cookie.to_env_string());
                     *cache = Some((Instant::now(), alive));
                     alive
                 }

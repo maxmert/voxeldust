@@ -213,8 +213,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| e.to_string())?;
     // The launch ledger is low-write-rate (one write-ahead + one confirm per spawn), so the default writer
     // channel depth suffices — no need to mirror the saga WAL's tuned depth.
-    let (launch_store, _launch_durability) =
-        RedbStore::open(&launch_store_path, StoreTuning::default())?;
+    //
+    // RLM 5e-5 kill-9 gate (store-test-hooks, ABSENT from release): `VD_RLM_TEST_LAUNCH_PAUSE` parks the
+    // launch.redb writer just before it fsyncs the FIRST batch carrying a launch-intent key (the v1
+    // write-ahead) and drops a `.paused` marker. `spawn_realm` blocks in `flush()` — which sits STRICTLY
+    // before `backend.launch()` — so the test can SIGKILL in the pre-fork window: no child forks, and the
+    // v1 batch is not durable, so rehydrate is clean (no orphan, no F2 id-reuse).
+    #[cfg(feature = "store-test-hooks")]
+    let launch_tuning = if vd_bins::parse_bool_env(&env, "VD_RLM_TEST_LAUNCH_PAUSE")? {
+        StoreTuning {
+            pause_on_key_prefix: Some(vd_node::saga_runtime::rlm_launch_prefix()),
+            pause_marker_path: Some(launch_store_path.with_extension("paused")),
+            ..StoreTuning::default()
+        }
+    } else {
+        StoreTuning::default()
+    };
+    #[cfg(not(feature = "store-test-hooks"))]
+    let launch_tuning = StoreTuning::default();
+    let (launch_store, _launch_durability) = RedbStore::open(&launch_store_path, launch_tuning)?;
     let mut spawn_anchors: Vec<(&'static str, String)> = Vec::new();
     for key in [
         "VD_TRUST_DIR",
@@ -225,6 +242,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "VD_UNIVERSE_SEED",
         "VD_UNIVERSE_SCALE",
         "VD_OUTBOUND_CAP",
+        // A forked shard's must-parse boot params (a shard refuses to boot without them — see the smoke
+        // gate's anchor list). Byte-identical while inert (consumed ONLY inside `spawn_realm`, never run
+        // under `RlmTuning::default()`); 5f's `--demand` launcher needs them regardless.
+        "VD_MINT_SEED",
+        "VD_INPUT_LOG_CAP",
     ] {
         if let Some(v) = env.string(key).ok().filter(|v| !v.is_empty()) {
             spawn_anchors.push((key, v));
@@ -238,32 +260,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(gw) = env.peer_book("VD_PEERS")?.get(&vd_bins::GATEWAY).copied() {
         anchor_peers.push((vd_bins::GATEWAY, gw));
     }
+    let backend = vd_bins::proc_launch::ProcLaunchBackend::new(
+        Arc::clone(&control),
+        vd_bins::proc_launch::ProcSpawnTuning {
+            exe: "vd-shard",
+            workdir: store_path.with_file_name("realm-logs"),
+            // Operational param (env-overridable, ONE default) — the SIGTERM→SIGKILL teardown grace.
+            drain_grace: std::time::Duration::from_millis(
+                env.parse_or("VD_REALM_DRAIN_GRACE_MS", 3_000)?,
+            ),
+            anchors: spawn_anchors,
+            // RLM 5e-4 adopted-orphan liveness (env-overridable, ONE default each): the slow cookie-probe
+            // cadence + the bounded probe read timeout, so a rehydrated survivor's `/whoami` guard never
+            // storms or stalls the reconcile sweep.
+            orphan_probe_interval: std::time::Duration::from_millis(
+                env.parse_or("VD_REALM_ORPHAN_PROBE_MS", 1_000)?,
+            ),
+            probe_timeout: std::time::Duration::from_millis(
+                env.parse_or("VD_REALM_PROBE_TIMEOUT_MS", 500)?,
+            ),
+        },
+    );
+    // The F2 allocator bases. RLM 5e-5 (store-test-hooks): `VD_RLM_TEST_FIRST_PORT` gives each kill-9 subtest
+    // a DISJOINT port band, so the pre-fork `/whoami` witness is deterministic (no reap-then-reuse race).
+    #[allow(unused_mut)]
+    let mut spawn_tuning = vd_node::rlm_spawn::SpawnTuning::dev();
+    #[cfg(feature = "store-test-hooks")]
+    if let Some(p) = env
+        .string("VD_RLM_TEST_FIRST_PORT")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        spawn_tuning.first_port = p
+            .parse()
+            .map_err(|_| format!("VD_RLM_TEST_FIRST_PORT is not a u16: {p:?}"))?;
+    }
+    // `SpawnCore::new` == rehydrate (recover + adopt the launch.redb survivors). RLM 5e-5 D6 CONTROL
+    // (store-test-hooks): `VD_RLM_TEST_REHYDRATE_DISABLE` rebuilds via `water_only` — cursors only, NO adopt —
+    // so a re-issued spawn DOUBLE-spawns a survivor, the falsifiable twin proving rehydrate/adopt is
+    // load-bearing. Release builds have exactly ONE construction path (byte-identical).
+    #[cfg(feature = "store-test-hooks")]
+    let spawn_core = if vd_bins::parse_bool_env(&env, "VD_RLM_TEST_REHYDRATE_DISABLE")? {
+        vd_node::rlm_spawn::SpawnCore::water_only(
+            Box::new(launch_store),
+            backend,
+            spawn_tuning,
+            anchor_peers,
+        )
+    } else {
+        vd_node::rlm_spawn::SpawnCore::new(
+            Box::new(launch_store),
+            backend,
+            spawn_tuning,
+            anchor_peers,
+        )
+    };
+    #[cfg(not(feature = "store-test-hooks"))]
     let spawn_core = vd_node::rlm_spawn::SpawnCore::new(
         Box::new(launch_store),
-        vd_bins::proc_launch::ProcLaunchBackend::new(
-            Arc::clone(&control),
-            vd_bins::proc_launch::ProcSpawnTuning {
-                exe: "vd-shard",
-                workdir: store_path.with_file_name("realm-logs"),
-                // Operational param (env-overridable, ONE default) — the SIGTERM→SIGKILL teardown grace.
-                drain_grace: std::time::Duration::from_millis(
-                    env.parse_or("VD_REALM_DRAIN_GRACE_MS", 3_000)?,
-                ),
-                anchors: spawn_anchors,
-                // RLM 5e-4 adopted-orphan liveness (env-overridable, ONE default each): the slow cookie-probe
-                // cadence + the bounded probe read timeout, so a rehydrated survivor's `/whoami` guard never
-                // storms or stalls the reconcile sweep.
-                orphan_probe_interval: std::time::Duration::from_millis(
-                    env.parse_or("VD_REALM_ORPHAN_PROBE_MS", 1_000)?,
-                ),
-                probe_timeout: std::time::Duration::from_millis(
-                    env.parse_or("VD_REALM_PROBE_TIMEOUT_MS", 500)?,
-                ),
-            },
-        ),
-        vd_node::rlm_spawn::SpawnTuning::dev(),
+        backend,
+        spawn_tuning,
         anchor_peers,
     );
+    // RLM 5e-5 (store-test-hooks): drive ONE real spawn over launch.redb at boot — the reconciler is inert,
+    // so the kill-9 gate needs this hook to produce a killable launch. Idempotent by `coord.path()` (a
+    // rehydrated survivor already in the live set is NOT re-spawned — the crash-recovery guard, in the flesh).
+    #[cfg(feature = "store-test-hooks")]
+    if let Some(hex) = env
+        .string("VD_RLM_TEST_SPAWN_COORD")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        use vd_sim::io::RealmSpawner;
+        let path = vd_core::realm_path::RealmPath::from_env_string(&hex)
+            .map_err(|e| format!("VD_RLM_TEST_SPAWN_COORD: {e:?}"))?;
+        let coord = vd_core::realm_coord::RealmCoord::from_path(path)
+            .ok_or("VD_RLM_TEST_SPAWN_COORD: empty realm path")?;
+        if !spawn_core.launch_ledger_seed().contains_key(coord.path()) {
+            spawn_core
+                .spawn_realm(&coord, UniverseTick(0))
+                .map_err(|e| format!("RLM boot spawn: {e:?}"))?;
+        }
+    }
     // RLM Step 5e: project the recovered launch set (rehydrated from launch.redb) into the reconciler's
     // crash-recovery SEED — computed on the CONCRETE SpawnCore before it is boxed as a `dyn RealmSpawner`,
     // so a rebuilt orchestrator's first sweep does not re-spawn a survivor. EMPTY at genesis (byte-identical).

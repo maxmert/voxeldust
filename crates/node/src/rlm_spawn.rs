@@ -155,15 +155,18 @@ pub trait LaunchBackend: Send + Sync {
 /// `Option` (both arms reachable: `None` = crash between v1 and v2; `Some` = completed) — no impossible
 /// cross-product, so rehydrate's match is HR5-coverable. `cookie`/`probe_port` are persisted for the
 /// Step-5e cookie-probe (dormant in 5c: written, not yet read by the Owned-only rehydrate path).
+/// Public (data only — no logic, so zero coverage burden) so the RLM 5e-5 process-tier crash gate can reopen
+/// `launch.redb` and decode the recovered rows to assert on the ledger (row count, node id, pid) — reading
+/// back through the SAME frozen postcard shape the spawner wrote, no re-implementation.
 #[derive(Serialize, Deserialize)]
-struct LaunchIntent {
-    node: NodeId,
-    coord: RealmCoord,
-    port: u16,
-    probe_port: u16,
-    at_tick: UniverseTick,
-    cookie: IncarnationCookie,
-    pid: Option<u32>,
+pub struct LaunchIntent {
+    pub node: NodeId,
+    pub coord: RealmCoord,
+    pub port: u16,
+    pub probe_port: u16,
+    pub at_tick: UniverseTick,
+    pub cookie: IncarnationCookie,
+    pub pid: Option<u32>,
 }
 
 /// The durable F2 high-water — a SINGLE record (no payload key). Persisted BEFORE each mint so a rehydrate
@@ -346,6 +349,43 @@ impl<B: LaunchBackend> SpawnCore<B> {
                 store,
                 anchor_peers,
                 path_index,
+            })),
+            backend,
+        }
+    }
+
+    /// Rebuild the F2 ALLOCATOR CURSORS ONLY (the durable high-water) with an EMPTY live set — deliberately
+    /// SKIPPING the survivor adopt-scan [`rehydrate`] runs. Resuming the high-water keeps F2 intact (the next
+    /// mint is still strictly above every id ever produced, so NO id-reuse), but the empty live set means
+    /// `launch_ledger_seed` comes up empty and the reconciler's minted-guard is NOT pre-seeded.
+    ///
+    /// This exists for the RLM 5e-5 crash-gate **D6 CONTROL arm**: a rebuilt orchestrator constructed this
+    /// way re-issues a spawn for a coord whose survivor it did NOT adopt → a genuine DOUBLE-SPAWN — the
+    /// falsifiable twin that proves [`rehydrate`]'s adopt path (populates `live` → seeds the guard) is
+    /// LOAD-BEARING, not vacuous. It is a cursor-only constructor selected by a store-test-hooks env in the
+    /// bin, NOT a shard-kind fork (HR3-neutral).
+    #[must_use]
+    pub fn water_only(
+        store: Box<dyn Store + Send + Sync>,
+        backend: B,
+        tuning: SpawnTuning,
+        anchor_peers: Vec<(NodeId, SocketAddr)>,
+    ) -> SpawnCore<B> {
+        let water = read_water(&*store).unwrap_or(WaterMark {
+            next_node: tuning.first_node,
+            next_port: u32::from(tuning.first_port),
+        });
+        SpawnCore {
+            inner: Arc::new(Mutex::new(SpawnInner {
+                next_node: water.next_node,
+                next_port: water.next_port,
+                bind_host: tuning.bind_host,
+                live: BTreeMap::new(),
+                killed: BTreeSet::new(),
+                dead: BTreeSet::new(),
+                store,
+                anchor_peers,
+                path_index: BTreeMap::new(),
             })),
             backend,
         }
@@ -1044,6 +1084,121 @@ mod tests {
             remaining,
             BTreeSet::from([rlm_launch_store_key(NodeId(1_000))])
         );
+    }
+
+    #[test]
+    fn water_only_resumes_the_cursor_but_recovers_no_live_children() {
+        // RLM 5e-5 D6 CONTROL substrate: a store carrying an ADVANCED water + one COMPLETED (pid:Some)
+        // survivor. `water_only` resumes the F2 cursor ABOVE the survivor (so F2 still holds — NO id-reuse)
+        // but DELIBERATELY skips the adopt-scan, so nothing is recovered live / adopted / booked.
+        let store = MemStore::new();
+        let retained = store.clone();
+        {
+            let mut s = store;
+            s.put(
+                &rlm_water_store_key(),
+                &encode(&WaterMark {
+                    next_node: 1_001,
+                    next_port: 42_002,
+                }),
+            );
+            s.put(
+                &rlm_launch_store_key(NodeId(1_000)),
+                &encode(&LaunchIntent {
+                    node: NodeId(1_000),
+                    coord: system(1, 1),
+                    port: 42_000,
+                    probe_port: 42_001,
+                    at_tick: T,
+                    cookie: IncarnationCookie(1_000),
+                    pid: Some(9_001),
+                }),
+            );
+            s.commit();
+        }
+
+        let fresh = FakeBackend::default();
+        let sc = SpawnCore::water_only(
+            Box::new(retained),
+            fresh.clone(),
+            tuning(1_000, 42_000),
+            Vec::new(),
+        );
+
+        // The deliberate skip: NO live slot, NO seed entry, NO adopt, NO booking — the empty seed is what
+        // makes a re-issued spawn a genuine double-spawn (the falsifiable twin of the adopt path).
+        assert_eq!(sc.live_nodes(), BTreeSet::new());
+        assert_eq!(
+            sc.launch_ledger_seed(),
+            crate::rlm_runtime::LaunchSeed::new()
+        );
+        assert_eq!(fresh.adopted(), Vec::new());
+        assert_eq!(fresh.book_count(), 0);
+
+        // But the F2 cursor RESUMED past the survivor (the Some arm of `read_water`) — the next mint is
+        // strictly ABOVE 1000, never a reuse of the survivor's id.
+        let n = sc.spawn_realm(&system(1, 2), T).expect("spawn");
+        assert_eq!(n, NodeId(1_001));
+    }
+
+    #[test]
+    fn water_only_over_a_virgin_store_starts_at_genesis() {
+        // The `read_water` None arm: a virgin store yields the genesis cursors (base id/port), same as `new`.
+        let fresh = FakeBackend::default();
+        let sc = SpawnCore::water_only(
+            Box::new(MemStore::new()),
+            fresh,
+            tuning(1_000, 42_000),
+            Vec::new(),
+        );
+        assert_eq!(sc.live_nodes(), BTreeSet::new());
+        let n = sc.spawn_realm(&system(1, 1), T).expect("spawn");
+        assert_eq!(n, NodeId(1_000));
+    }
+
+    #[test]
+    fn two_coords_sharing_a_lowered_leaf_get_distinct_full_path_ledger_rows() {
+        // RLM 5e-5 D2 (Tier-A, authoritative): `system(2,7)` and `system(3,7)` both LOWER to
+        // `RealmId::System(7)` (the single-galaxy-lossy aliasing, D-41-gated). The launch ledger is
+        // FULL-`RealmPath`-keyed, so the two spawns get DISTINCT rows — no cross-galaxy double-spawn.
+        let store = MemStore::new();
+        let retained = store.clone();
+        let sc = SpawnCore::new(
+            Box::new(store),
+            FakeBackend::default(),
+            tuning(1_000, 42_000),
+            Vec::new(),
+        );
+
+        // The lowered() collision is REAL (not a contrived fixture).
+        assert_eq!(system(2, 7).lowered(), system(3, 7).lowered());
+
+        sc.spawn_realm(&system(2, 7), T).expect("spawn a");
+        sc.spawn_realm(&system(3, 7), T).expect("spawn b");
+
+        // The seed carries TWO distinct full-path keys (not one aliased entry).
+        let seed = sc.launch_ledger_seed();
+        assert_eq!(seed.len(), 2);
+        assert!(seed.contains_key(system(2, 7).path()));
+        assert!(seed.contains_key(system(3, 7).path()));
+
+        // The durable ledger holds TWO rows decoding to the two DISTINCT full paths.
+        let rows: BTreeSet<RealmPath> = retained
+            .scan(&rlm_launch_prefix())
+            .into_iter()
+            .map(|(_, v)| {
+                postcard::from_bytes::<LaunchIntent>(&v)
+                    .expect("decode intent")
+                    .coord
+                    .path()
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            BTreeSet::from([system(2, 7).path().clone(), system(3, 7).path().clone()])
+        );
+        // The DIRECTORY-head aliasing (both → RealmId::System(7)) is by-design + D-41-gated — NOT asserted.
     }
 
     #[test]

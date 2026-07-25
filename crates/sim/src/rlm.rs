@@ -1766,6 +1766,12 @@ mod tests {
             Crash,
             Reboot,
             ReorderDup { realm: u8, verb: u8, count: u8 },
+            // RLM 5e-5 (D9) — the launch-ledger arm. `SpawnConfirm` = the v2 pid:Some intent landed durably
+            // (the realm joins the crash-recovery seed); `PartialCrash` = rehydrate DROPS every launch-live
+            // entry that never confirmed (the pid:None drop), preserving the F2 cursor so a re-drive mints
+            // STRICTLY higher — the ledger-level image of the forked-before-v2 window (D-RLM-5).
+            SpawnConfirm { realm: u8 },
+            PartialCrash,
         }
 
         fn op_strategy() -> impl Strategy<Value = Op> {
@@ -1779,6 +1785,8 @@ mod tests {
                 1 => Just(Op::Crash),
                 2 => Just(Op::Reboot),
                 1 => (0u8..3, 0u8..4, 0u8..5).prop_map(|(realm, verb, count)| Op::ReorderDup { realm, verb, count }),
+                2 => (0u8..3).prop_map(|realm| Op::SpawnConfirm { realm }),
+                1 => Just(Op::PartialCrash),
             ]
         }
 
@@ -1798,16 +1806,27 @@ mod tests {
         struct Run {
             sweeps: Vec<SweepRec>,
             killed_ever: BTreeSet<RealmPath>,
+            /// RLM 5e-5 (D9): how many `SpinUp` actions were EXECUTED (minted a launch id) per path across
+            /// the whole run — the double-spawn observable. A confirmed survivor that is re-minted after a
+            /// crash reads `2` here; the D6 control (unseeded recovery) is exactly the arm that produces it.
+            minted_per_path: BTreeMap<RealmPath, usize>,
         }
 
         /// Drive the op history through the REAL kernel. `lose_ram=true` is the shipped RAM-heal (4a) arm
         /// (a `Crash` clears the demand ledger); `lose_ram=false` is the durable-snapshot dry-run arm (the
-        /// ledger survives). The hand-maintained oracle (`empty_open`/`model_draining`/`ever_demanded`)
-        /// asserts the per-arm invariants after every op. Returns the sweep trace + the whole-run reap set.
-        fn run_arm(ops: &[Op], lose_ram: bool, cov: Option<&Cell<[bool; 6]>>) -> Run {
+        /// ledger survives). `seed_survives=true` is the shipped launch recovery (a reboot RESEEDS the live
+        /// launch set from the durable `confirmed` rows — the `launch_ledger_seed`→`with_launch_seed` path);
+        /// `seed_survives=false` is the RLM 5e-5 **D6 CONTROL** (the `water_only` rebuild — no reseed), which
+        /// re-mints a confirmed survivor = the double-spawn the seed prevents. The hand oracle
+        /// (`empty_open`/`model_draining`/`ever_demanded`) asserts the per-arm invariants after every op.
+        fn run_arm(
+            ops: &[Op],
+            lose_ram: bool,
+            seed_survives: bool,
+            cov: Option<&Cell<[bool; 9]>>,
+        ) -> Run {
             let t = tuning();
             let grace = t.recovery_grace_ticks;
-            let no_launch: BTreeMap<RealmPath, BTreeMap<NodeId, UniverseTick>> = BTreeMap::new();
 
             let mut ledger = DemandLedger::default();
             let mut dir = DirectoryCore::new(DirectoryTuning::default());
@@ -1819,6 +1838,21 @@ mod tests {
             let mut now: u64 = 1;
             let mut quiesced_until: u64 = 0;
             let mut running = true;
+
+            // RLM 5e-5 launch-ledger hand-model. `launch_live` = the RAM "minted" set fed to `reconcile`'s
+            // no-double-spawn guard (drains on head-up, mirroring `reconcile_launches`); it is LOST on a
+            // crash. `confirmed` = the DURABLE launch rows (pid:Some) — the crash-recovery seed source; it
+            // survives a crash and drains only on Kill/ForceReap. `id_cursor` is the F2 monotone allocator,
+            // NEVER reset across a crash (so a re-drive mints strictly higher — no id-reuse).
+            let mut launch_live: BTreeMap<RealmPath, BTreeMap<NodeId, UniverseTick>> =
+                BTreeMap::new();
+            let mut confirmed: BTreeMap<RealmPath, BTreeMap<NodeId, UniverseTick>> =
+                BTreeMap::new();
+            let mut id_cursor: u64 = 1_000;
+            let mut minted_ids: BTreeSet<NodeId> = BTreeSet::new();
+            let mut pre_crash_launch: BTreeMap<RealmPath, BTreeMap<NodeId, UniverseTick>> =
+                BTreeMap::new();
+            let mut minted_per_path: BTreeMap<RealmPath, usize> = BTreeMap::new();
 
             let mut sweeps = Vec::new();
             let mut killed_ever: BTreeSet<RealmPath> = BTreeSet::new();
@@ -1883,15 +1917,59 @@ mod tests {
                             empty_open.clear();
                             model_draining.clear();
                         }
+                        // The RAM launch-live set is LOST on a crash; the durable `confirmed` rows survive.
+                        // Capture the pre-crash live set for the SUPERSET check the reboot reseed makes.
+                        pre_crash_launch = launch_live.clone();
+                        launch_live.clear();
                         running = false;
                     }
                     Op::Reboot => {
                         running = true;
                         quiesced_until = now.saturating_add(grace);
                         now = now.saturating_add(1);
+                        // The shipped launch recovery: RESEED the live set from the durable `confirmed` rows
+                        // (`launch_ledger_seed` → `with_launch_seed`). The D6 CONTROL (`seed_survives=false`,
+                        // the `water_only` rebuild) SKIPS this, leaving `launch_live` empty so a survivor is
+                        // re-minted = the double-spawn the seed prevents.
+                        if seed_survives {
+                            launch_live = confirmed.clone();
+                            // INV-LAUNCH-SNAPSHOT-SUPERSET: every confirmed survivor that was live pre-crash
+                            // is recovered into the reseeded set (the seed never LOSES a durable survivor).
+                            for path in pre_crash_launch.keys() {
+                                if confirmed.contains_key(path) {
+                                    assert!(
+                                        launch_live.contains_key(path),
+                                        "INV-LAUNCH-SNAPSHOT-SUPERSET: reseed dropped a confirmed survivor"
+                                    );
+                                    set_cov(8);
+                                }
+                            }
+                        }
                     }
                     // ReorderDup drives the standalone fold-order check (in `model_check`); a world no-op.
                     Op::ReorderDup { .. } => {}
+                    Op::SpawnConfirm { realm } => {
+                        // v2 pid:Some landed durably: the realm's live launch row joins the durable seed. A
+                        // confirm for a realm with no in-flight launch is a benign no-op (the None arm). Every
+                        // `launch_live` entry is non-empty by construction (minted with a node, drained as a
+                        // whole entry), so `get(..).is_some()` alone is the launch-present test — no
+                        // `!is_empty()` sub-check (its false arm would be an uncoverable region, HR5).
+                        let path = realm_coord(*realm).path().clone();
+                        if let Some(nodes) = launch_live.get(&path) {
+                            confirmed.insert(path, nodes.clone());
+                            set_cov(6);
+                        }
+                    }
+                    Op::PartialCrash => {
+                        // rehydrate's pid:None DROP, modeled directly: every launch-live entry that never
+                        // confirmed is removed (the forked-before-v2 window), while `id_cursor` is preserved
+                        // so a subsequent re-drive mints STRICTLY higher — the ledger image of D-RLM-5.
+                        let before = launch_live.len();
+                        launch_live.retain(|p, _| confirmed.contains_key(p));
+                        if launch_live.len() < before {
+                            set_cov(7);
+                        }
+                    }
                     Op::Sweep => {
                         if !running {
                             continue; // the orchestrator is down between Crash and Reboot.
@@ -1902,7 +1980,7 @@ mod tests {
                             &ledger,
                             &dir,
                             &is_dead,
-                            &no_launch,
+                            &launch_live,
                             &t,
                             UniverseTick(now),
                             UniverseTick(quiesced_until),
@@ -1934,7 +2012,36 @@ mod tests {
                                     kills.insert(path.clone());
                                 }
                                 LifecycleAction::ForceReap { .. } => force_reaps += 1,
-                                LifecycleAction::SpinUp { .. } => {}
+                                LifecycleAction::SpinUp { coord } => {
+                                    // EXECUTE the launch (the runtime's mint step): the launch-model image of
+                                    // `reconcile_launches` recording a fresh minted id.
+                                    let path = coord.path().clone();
+                                    let rid = coord.lowered();
+                                    // INV-NO-DOUBLE-SPAWN: the kernel guard (rlm.rs:612-614) held — a SpinUp is
+                                    // emitted ONLY for a realm with no live head AND no in-flight launch (the
+                                    // model never leaves a Some-empty entry, so `contains_key` == launch_present).
+                                    assert!(
+                                        dir.head(DirectoryKey::Realm(rid)).is_none(),
+                                        "INV-NO-DOUBLE-SPAWN: SpinUp for a realm that already has a head"
+                                    );
+                                    assert!(
+                                        !launch_live.contains_key(&path),
+                                        "INV-NO-DOUBLE-SPAWN: SpinUp for a realm already launching"
+                                    );
+                                    // F2 mint: strictly monotone, NEVER reset across a crash — INV-NO-ID-REUSE
+                                    // (`insert` returns false on a reused id, tripping the assert).
+                                    let n = NodeId(id_cursor);
+                                    id_cursor += 1;
+                                    assert!(
+                                        minted_ids.insert(n),
+                                        "INV-NO-ID-REUSE: a mint reused an F2 id"
+                                    );
+                                    launch_live
+                                        .entry(path.clone())
+                                        .or_default()
+                                        .insert(n, UniverseTick(now));
+                                    *minted_per_path.entry(path).or_insert(0) += 1;
+                                }
                             }
                         }
                         // cov[1]: the freeze demonstrably FIRED — a live-head, oracle-empty realm swept inside
@@ -1976,15 +2083,30 @@ mod tests {
                                     let _ = dir.revoke(DirectoryKey::Realm(rid), *fence);
                                     ledger.mark_reaped(path, UniverseTick(now));
                                     killed_ever.insert(path.clone());
+                                    // The reaped realm's durable launch row is deleted (kill_realm) — so a
+                                    // later re-demand mints a FRESH id, never resurrecting the retired one.
+                                    launch_live.remove(path);
+                                    confirmed.remove(path);
                                 }
                                 LifecycleAction::ForceReap { path, fence, .. } => {
                                     let rid =
                                         path.realm_id().expect("a lifecycle path is non-empty");
                                     let _ = dir.revoke(DirectoryKey::Realm(rid), *fence);
+                                    // A force-reaped zombie's row is dropped too, so the self-heal SpinUp on
+                                    // the next sweep mints a fresh id (the retired zombie id is never reused).
+                                    launch_live.remove(path);
+                                    confirmed.remove(path);
                                 }
                                 LifecycleAction::SpinUp { .. } => {}
                             }
                         }
+                        // Drain the launch bookkeeping (the launch-model image of `reconcile_launches`): a
+                        // minted node whose realm now has a head is no longer "launching", so drop the whole
+                        // entry — the guard then reads head-present (not launch-present) and never re-spins it.
+                        launch_live.retain(|path, _| {
+                            let rid = path.realm_id().expect("a lifecycle path is non-empty");
+                            dir.head(DirectoryKey::Realm(rid)).is_none()
+                        });
                         // INV-BOUNDED: the ledger never exceeds the realms ever demanded (the retire path
                         // keeps the RAM self-heal from leaking — the property that matters at 100K scale).
                         // Both `len()`s live in the CONDITION (always evaluated ⇒ covered); a STATIC message
@@ -2007,6 +2129,7 @@ mod tests {
             Run {
                 sweeps,
                 killed_ever,
+                minted_per_path,
             }
         }
 
@@ -2064,12 +2187,13 @@ mod tests {
 
         /// The whole battery for one op history. INV-DET (run-twice), INV-SNAPSHOT-SAFETY (the 4c decider),
         /// INV-FOLD-ORDER, and the per-arm invariants asserted inside `run_arm`.
-        fn model_check(ops: &[Op], cov: &Cell<[bool; 6]>) {
+        fn model_check(ops: &[Op], cov: &Cell<[bool; 9]>) {
             // INV-DET — `reconcile` is a pure deterministic `f(...)`; the whole crash-interleaved history
             // replays byte-identically (BTreeMap keys, no wall clock / default hasher). Generalizes
-            // `reconcile_is_deterministic_run_twice` over arbitrary crash histories.
-            let a1 = run_arm(ops, true, Some(cov));
-            let a2 = run_arm(ops, true, None);
+            // `reconcile_is_deterministic_run_twice` over arbitrary crash histories. `seed_survives=true`
+            // is the shipped launch recovery (the D6 CONTROL — no reseed — is exercised by its own witness).
+            let a1 = run_arm(ops, true, true, Some(cov));
+            let a2 = run_arm(ops, true, true, None);
             assert_eq!(
                 a1.sweeps, a2.sweeps,
                 "INV-DET: sweep trace diverged across replay"
@@ -2094,8 +2218,8 @@ mod tests {
                 settled.push(Op::IdleTick { by: 50 });
                 settled.push(Op::Sweep);
             }
-            let ram = run_arm(&settled, true, None);
-            let snap = run_arm(&settled, false, None);
+            let ram = run_arm(&settled, true, true, None);
+            let snap = run_arm(&settled, false, true, None);
             assert_eq!(
                 ram.killed_ever, snap.killed_ever,
                 "INV-SNAPSHOT-EQUIVALENCE: RAM-heal and durable-snapshot reap-sets DIFFER after settling — promote D-RLM-2 (4c)"
@@ -2124,7 +2248,7 @@ mod tests {
 
         #[test]
         fn rlm_reconcile_survives_arbitrary_crash_interleavings_deterministically() {
-            let cov = std::rc::Rc::new(Cell::new([false; 6]));
+            let cov = std::rc::Rc::new(Cell::new([false; 9]));
             let cov_run = std::rc::Rc::clone(&cov);
             let mut runner = TestRunner::new_with_rng(
                 Config {
@@ -2156,7 +2280,7 @@ mod tests {
 
         #[test]
         fn witness_crash_before_sweep_reaps_nothing_in_grace() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             // A live, confirmed-empty, past-window realm crashes then a Sweep lands right after reboot: the
             // ARMED freeze blocks the reap that would otherwise fire.
             model_check(
@@ -2190,7 +2314,7 @@ mod tests {
 
         #[test]
         fn witness_a_confirmed_empty_realm_is_reaped_after_the_drain() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             // No crash ⇒ the freeze is unarmed (quiesce 0). A live, out-of-AoI, confirmed-empty realm past its
             // dwell drains one window then is KILLED on the next sweep — the reap path (cov2), exercised in a
             // DEBUG test so `coverage-fast` covers the kill/revoke/mark_reaped arms (the soak is release-only).
@@ -2218,7 +2342,7 @@ mod tests {
 
         #[test]
         fn witness_snapshot_and_ramheal_agree_on_a_simple_trace() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             // A plain spin/keepalive trace: both arms decide identically (no divergence) — the expected 4c
             // outcome. `model_check`'s INV-SNAPSHOT-EQUIVALENCE asserts the settled reap-sets are equal.
             model_check(
@@ -2243,7 +2367,7 @@ mod tests {
 
         #[test]
         fn witness_zombie_after_reboot_force_reaps() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             // A demanded realm with a live head whose owner latches dead ⇒ the sweep force-reaps the zombie.
             model_check(
                 &[
@@ -2263,7 +2387,7 @@ mod tests {
 
         #[test]
         fn witness_reorder_dup_folds_identically() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             model_check(
                 &[Op::ReorderDup {
                     realm: 2,
@@ -2277,7 +2401,7 @@ mod tests {
 
         #[test]
         fn witness_crash_mid_drain_reopens_not_double_kills() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             // A realm draining toward a kill crashes mid-drain: the post-reboot sweep re-opens the drain
             // under the fresh freeze rather than double-killing (INV-DELTA + INV-CRASH-NO-REAP).
             model_check(
@@ -2310,7 +2434,7 @@ mod tests {
 
         #[test]
         fn witness_ancestor_closure_survives_crash() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             // Demand the CHILD (realm 2 = Planet under System(7)); ancestor-closure pulls System(7) alive.
             // A crash + re-demand re-derives the same closure (the level-triggered self-heal).
             model_check(
@@ -2336,7 +2460,7 @@ mod tests {
 
         #[test]
         fn witness_a_drain_opened_then_a_demand_rescues_it() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             // A realm opens its teardown drain (confirmed-empty, out of AoI) then a KeepAlive RE-ACCRUES
             // before the drain elapses ⇒ the next sweep CLEARS `draining_since` (the BUG-C veto — a
             // login-into-draining rescue). Exercises the drain-CLEAR delta arm (`set_draining = None`), which
@@ -2364,11 +2488,116 @@ mod tests {
 
         #[test]
         fn witness_crash_with_empty_ledger_then_a_sweep_while_down() {
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             // The two boundary arms the demand-first witnesses never take: a `Crash` with NOTHING demanded yet
             // (the empty-ledger side of the `!is_empty()` cov0 check) IMMEDIATELY followed by a `Sweep` while
             // the orchestrator is DOWN (running=false ⇒ the sweep is skipped, the `continue`).
             model_check(&[Op::Crash, Op::Sweep, Op::Reboot, Op::Sweep], &cov);
+        }
+
+        // ---- RLM 5e-5 (D9) launch-ledger witnesses -------------------------------------------------
+
+        #[test]
+        fn witness_spawnconfirm_then_crash_survives_in_the_seed() {
+            let cov = Cell::new([false; 9]);
+            // A realm is spun up (minted), CONFIRMED (v2 pid:Some durable), then the orchestrator crashes. The
+            // reboot RESEEDS the live launch set from the durable `confirmed` rows, so the survivor is
+            // recovered (INV-LAUNCH-SNAPSHOT-SUPERSET) — the crash-recovery seed that suppresses a re-spawn.
+            model_check(
+                &[
+                    Op::IdleTick { by: 6 }, // now → 7 (past min_dwell) so the SpinUp is eligible
+                    Op::Demand {
+                        realm: 0,
+                        verb: 0,
+                        fence: 1,
+                    }, // SpinUp
+                    Op::Sweep,              // mints the launch into launch_live
+                    Op::SpawnConfirm { realm: 0 }, // v2 durable ⇒ joins the seed (cov6)
+                    Op::Crash,              // RAM launch lost; confirmed survives
+                    Op::Reboot,             // reseed from confirmed ⇒ SUPERSET recovers it (cov8)
+                ],
+                &cov,
+            );
+            assert!(cov.get()[6], "a SpawnConfirm recorded a durable launch row");
+            assert!(
+                cov.get()[8],
+                "the reboot reseed recovered a confirmed survivor"
+            );
+        }
+
+        #[test]
+        fn witness_partialcrash_drops_unconfirmed_keeps_confirmed_and_redrives() {
+            let cov = Cell::new([false; 9]);
+            // Two realms are launched; ONE is confirmed (v2 durable), the other is NOT. A PartialCrash (the
+            // rehydrate pid:None drop) removes ONLY the unconfirmed one; the confirmed one survives. The
+            // dropped realm re-drives on the next sweep and — because the F2 cursor is preserved — mints a
+            // STRICTLY higher id (INV-NO-ID-REUSE, asserted inside run_arm). Exercises BOTH retain arms.
+            model_check(
+                &[
+                    Op::IdleTick { by: 6 },
+                    Op::Demand {
+                        realm: 0,
+                        verb: 0,
+                        fence: 1,
+                    }, // SpinUp realm 0
+                    Op::Demand {
+                        realm: 1,
+                        verb: 0,
+                        fence: 1,
+                    }, // SpinUp realm 1
+                    Op::Sweep,                     // mint both
+                    Op::SpawnConfirm { realm: 0 }, // confirm ONLY realm 0 (kept across PartialCrash)
+                    Op::PartialCrash,              // drop realm 1 (unconfirmed) — cov7
+                    Op::Demand {
+                        realm: 1,
+                        verb: 0,
+                        fence: 1,
+                    }, // re-desire realm 1
+                    Op::Sweep,                     // re-mint realm 1 at a strictly higher id
+                ],
+                &cov,
+            );
+            assert!(cov.get()[7], "a PartialCrash dropped an unconfirmed launch");
+        }
+
+        #[test]
+        fn witness_unseeded_reconciler_double_spawns_a_survivor() {
+            // The D6 CONTROL (the anti-vacuity twin): the SAME crash history proves the launch-recovery seed
+            // is LOAD-BEARING. WITH the seed (a reboot reseeds launch_live from `confirmed` — the shipped
+            // `launch_ledger_seed`→`with_launch_seed` path) the confirmed survivor is recognized ⇒ minted
+            // ONCE. WITHOUT it (`seed_survives=false` — the `water_only` rebuild) the reconciler re-spins the
+            // survivor ⇒ minted TWICE = the double-spawn the seed prevents. `minted_per_path` is the observable.
+            let ops = [
+                Op::IdleTick { by: 6 },
+                Op::Demand {
+                    realm: 0,
+                    verb: 0,
+                    fence: 1,
+                }, // SpinUp
+                Op::Sweep,                     // mint #1 into launch_live
+                Op::SpawnConfirm { realm: 0 }, // v2 durable
+                Op::Crash,                     // RAM launch lost; confirmed (durable) survives
+                Op::Reboot,
+                Op::Demand {
+                    realm: 0,
+                    verb: 0,
+                    fence: 1,
+                }, // re-desire (the RAM demand ledger was cleared by the crash)
+                Op::Sweep, // no head + (no seed ⇒ re-mint | seed ⇒ suppressed)
+            ];
+            let path = realm_coord(0).path().clone();
+            let seeded = run_arm(&ops, true, true, None);
+            let unseeded = run_arm(&ops, true, false, None);
+            assert_eq!(
+                seeded.minted_per_path.get(&path).copied(),
+                Some(1),
+                "WITH the recovery seed the confirmed survivor is minted exactly once"
+            );
+            assert_eq!(
+                unseeded.minted_per_path.get(&path).copied(),
+                Some(2),
+                "WITHOUT the seed the survivor is re-spun — the double-spawn the seed prevents"
+            );
         }
 
         /// The SOAK (release-gated, mirror the SPIKE-3a `just <name> release` latency-gate pattern): one very
@@ -2392,7 +2621,7 @@ mod tests {
                 let realm = (r & 0x3) as u8 % 3;
                 let node = ((r >> 2) & 0x3) as u8 % 3;
                 let verb = ((r >> 4) & 0x3) as u8;
-                ops.push(match (r >> 8) % 16 {
+                ops.push(match (r >> 8) % 18 {
                     0 | 1 | 2 | 3 => Op::Demand {
                         realm,
                         verb,
@@ -2406,10 +2635,12 @@ mod tests {
                     12 => Op::RevokeHead { realm },
                     13 => Op::MarkDead { node },
                     14 => Op::Crash,
+                    15 => Op::SpawnConfirm { realm },
+                    16 => Op::PartialCrash,
                     _ => Op::Reboot,
                 });
             }
-            let cov = Cell::new([false; 6]);
+            let cov = Cell::new([false; 9]);
             model_check(&ops, &cov);
         }
     }

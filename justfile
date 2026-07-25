@@ -200,10 +200,19 @@ node-per-realm-walk:
 rlm-proc-spawn:
     cargo test -p vd-bins --test rlm_proc_spawn_smoke -- --nocapture
 
+# RLM 5e-5: the kill-9 crash-safety CAPSTONE — SIGKILLs the real orchestrator across the launch.redb
+# crash windows (mid-fsync pre-fork = no orphan/no double-spawn; adopt = a survivor recovered without
+# relaunch; the water_only control = a genuine double-spawn proving rehydrate/adopt is load-bearing). Tier-B,
+# feature-GATED: `--features store-test-hooks` is MANDATORY (without it the `#![cfg]` file compiles out +
+# silently skips). `--test-threads=1` + disjoint per-arm F2 port bands keep the pre-fork probe witness
+# deterministic (like orch-crash, it forks real processes + SIGKILLs — no concurrent cluster tests).
+rlm-kill9:
+    cargo test -p vd-bins --features store-test-hooks --test rlm_kill9_spawn -- --test-threads=1 --nocapture
+
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 coverage
 
 # One-time setup helper.
 coverage-setup:
