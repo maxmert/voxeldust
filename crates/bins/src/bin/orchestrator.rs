@@ -200,6 +200,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          un-acked batch until R-6d's durable outbox lands.",
         store_path.display()
     );
+    // RLM Step 5e: the REAL demand-driven realm spawner, wired LIVE but INERT (`RlmTuning::default()` below
+    // ⇒ the reconciler never sweeps ⇒ `spawn_realm` is never called ⇒ boot is byte-identical). It forks real
+    // `vd-shard` processes (`ProcLaunchBackend`) driven by the 100%-covered `SpawnCore` kernel. Its launch
+    // ledger lives in a SEPARATE `launch.redb` beside the saga WAL — isolating the write-ahead-before-fork
+    // durability barrier + decoupling launch fsyncs from the per-tick universe-clock barrier (zero edits to
+    // the depth-1 D-6 writer core). 5f arms `RlmTuning` + adds the `--demand` launcher that assembles the
+    // COMPLETE shard boot-env; the anchors here are the subset the orchestrator's own env carries (unused
+    // while inert — the 5e kill-9 gate builds its own full anchors).
+    let launch_store_path = store_path.with_file_name(vd_bins::LAUNCH_STORE_NAME);
+    vd_io_prod::boot::check_durable_path(&launch_store_path, durable_root.as_deref(), ephemeral_ok)
+        .map_err(|e| e.to_string())?;
+    // The launch ledger is low-write-rate (one write-ahead + one confirm per spawn), so the default writer
+    // channel depth suffices — no need to mirror the saga WAL's tuned depth.
+    let (launch_store, _launch_durability) =
+        RedbStore::open(&launch_store_path, StoreTuning::default())?;
+    let mut spawn_anchors: Vec<(&'static str, String)> = Vec::new();
+    for key in [
+        "VD_TRUST_DIR",
+        "VD_TICK_HZ",
+        "VD_TICK_DT",
+        "VD_SPEED",
+        "VD_SNAPSHOT_BUDGET",
+        "VD_UNIVERSE_SEED",
+        "VD_UNIVERSE_SCALE",
+        "VD_OUTBOUND_CAP",
+    ] {
+        if let Some(v) = env.string(key).ok().filter(|v| !v.is_empty()) {
+            spawn_anchors.push((key, v));
+        }
+    }
+    spawn_anchors.push(("VD_ORCH", local.0.to_string()));
+    // The child's VD_PEERS anchors: this orchestrator (self) + the gateway (if booked). The per-realm
+    // ANCESTOR closure is computed per-spawn by SpawnCore; only these static anchors are held here.
+    let mut anchor_peers: Vec<(vd_core::NodeId, std::net::SocketAddr)> =
+        vec![(local, env.parse("VD_BIND")?)];
+    if let Some(gw) = env.peer_book("VD_PEERS")?.get(&vd_bins::GATEWAY).copied() {
+        anchor_peers.push((vd_bins::GATEWAY, gw));
+    }
+    let realm_spawner: Box<dyn vd_sim::io::RealmSpawner + Send + Sync> =
+        Box::new(vd_node::rlm_spawn::SpawnCore::new(
+            Box::new(launch_store),
+            vd_bins::proc_launch::ProcLaunchBackend::new(
+                Arc::clone(&control),
+                vd_bins::proc_launch::ProcSpawnTuning {
+                    exe: "vd-shard",
+                    workdir: store_path.with_file_name("realm-logs"),
+                    // Operational param (env-overridable, ONE default) — the SIGTERM→SIGKILL teardown grace.
+                    drain_grace: std::time::Duration::from_millis(
+                        env.parse_or("VD_REALM_DRAIN_GRACE_MS", 3_000)?,
+                    ),
+                    anchors: spawn_anchors,
+                },
+            ),
+            vd_node::rlm_spawn::SpawnTuning::dev(),
+            anchor_peers,
+        ));
     register_orchestrator_with_store(
         world,
         schedule,
@@ -233,14 +289,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rlm: vd_sim::rlm::RlmTuning::default(),
         },
         Box::new(store),
-        // RLM: inert `rlm` (default) ⇒ the reconciler never sweeps ⇒ this spawner is never invoked. A
-        // placeholder in-process `MemSpawner` until Step 5 supplies the real k8s pod launcher (the demand-
-        // driven realm-shard scheduler that replaces this local-only bin with a cluster-native one).
-        Box::new(vd_sim::io::mem::MemSpawner::new(
-            vd_sim::io::mem::MemHub::new(),
-            vd_core::NodeId(1_000_000),
-            8,
-        )),
+        // RLM Step 5e: the REAL `SpawnCore<ProcLaunchBackend>` built above (was a placeholder `MemSpawner`).
+        // INERT while `RlmTuning::default()` keeps the reconciler from sweeping — 5f arms it via `--demand`.
+        realm_spawner,
     );
 
     // The admin endpoint: republished after every tick, served off-thread.

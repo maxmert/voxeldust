@@ -1581,6 +1581,11 @@ pub const TRUST_DIR_NAME: &str = "trust";
 /// The orchestrator's durable redb Store filename inside a slot workdir (D-6). Lives in the work dir so
 /// `down`'s `remove_dir_all(work)` reaps it with the slot — ONE layout definition, shared by the launcher.
 pub const ORCH_STORE_NAME: &str = "orchestrator.redb";
+/// RLM Step 5e: the realm spawner's launch-ledger redb, a SIBLING of [`ORCH_STORE_NAME`] in the SAME dir
+/// (so `down` reaps it too). A SEPARATE file/writer from the saga WAL — it isolates the write-ahead-
+/// before-fork durability barrier and decouples launch fsyncs from the per-tick universe-clock barrier
+/// (zero edits to the depth-1 D-6 writer core).
+pub const LAUNCH_STORE_NAME: &str = "launch.redb";
 
 /// A slot's working directory (`$TMPDIR/vd-devcluster/slot-N`) — the SINGLE definition of
 /// the launcher's on-disk layout (was re-derived inline by the launcher AND each process
