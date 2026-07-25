@@ -347,6 +347,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // so a rebuilt orchestrator's first sweep does not re-spawn a survivor. EMPTY at genesis (byte-identical).
     let launch_seed = spawn_core.launch_ledger_seed();
     let realm_spawner: Box<dyn vd_sim::io::RealmSpawner + Send + Sync> = Box::new(spawn_core);
+    // RLM 5f — ARM the reconciler when `--demand` (VD_DEMAND) is set; otherwise the fully-INERT default
+    // (byte-identical boot). ONE value selection on `OrchestratorConfig.rlm` (HR3 — not a per-kind fork).
+    // `VD_DEMAND` XOR `VD_STATIC_FOREST` fail-loud: an armed sweep would reap the pre-spawned static-forest
+    // heads (they have no demand cell), so the two boot modes are mutually exclusive. `VD_BOOT_TICKS_P99`
+    // floors the launch-TTL so a slow real fork is never re-spun mid-boot (default 0 ⇒ the ~3s cloud
+    // default; 5f-4 bakes the measured value). `settle` is a small post-boot margin (default 0). `validate`
+    // rejects a mis-ordered budget LOUD at boot, mirroring `saga.validate()?` above.
+    let demand = vd_bins::parse_bool_env(&env, "VD_DEMAND")?;
+    let static_forest = vd_bins::parse_bool_env(&env, "VD_STATIC_FOREST")?;
+    if demand & static_forest {
+        return Err("VD_DEMAND and VD_STATIC_FOREST are mutually exclusive: an armed demand reconciler \
+                    would reap the externally pre-spawned static-forest realm heads"
+            .into());
+    }
+    let boot_ticks_p99: u64 = env.parse_or("VD_BOOT_TICKS_P99", 0)?;
+    let settle_ticks: u64 = env.parse_or("VD_REALM_SETTLE_TICKS", 0)?;
+    let rlm = vd_node::rlm_runtime::resolve_rlm_tuning(demand, tick_hz, boot_ticks_p99, settle_ticks);
+    rlm.validate().map_err(|e| e.to_string())?;
     register_orchestrator_with_store(
         world,
         schedule,
@@ -377,11 +395,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 roster
             },
-            rlm: vd_sim::rlm::RlmTuning::default(),
+            rlm,
         },
         Box::new(store),
         // RLM Step 5e: the REAL `SpawnCore<ProcLaunchBackend>` built above (was a placeholder `MemSpawner`).
-        // INERT while `RlmTuning::default()` keeps the reconciler from sweeping — 5f arms it via `--demand`.
+        // INERT unless `VD_DEMAND` armed `rlm` above (5f) — with it unset the reconciler never sweeps.
         realm_spawner,
         launch_seed,
     );

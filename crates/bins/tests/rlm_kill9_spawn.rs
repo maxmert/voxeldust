@@ -451,3 +451,35 @@ fn d6_control_an_unseeded_rebuild_double_spawns_a_survivor() {
     );
     reap_forked(&rows);
 }
+
+#[test]
+fn demand_with_static_forest_fails_loud() {
+    // RLM 5f-1 SAFETY: an ARMED demand reconciler must NEVER boot atop externally pre-spawned static heads
+    // (it would reap them — they carry no demand cell). `orchestrator_env` marks the static-boot mode
+    // (VD_STATIC_FOREST), so adding VD_DEMAND is the exact misconfig the XOR gate rejects: the orchestrator
+    // must EXIT non-zero and NEVER serve admin (the reconciler is never armed on a bad config).
+    let f = fixture("demandxor");
+    let a = addrs();
+    let env = orch_env(&f, &a, &[("VD_DEMAND", "1".to_string())]);
+    let mut child = spawn_node(env!("CARGO_BIN_EXE_vd-orchestrator"), &f.common, &env)
+        .expect("spawn orch");
+    let start = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("try_wait orch") {
+            break s;
+        }
+        assert!(
+            admin(a.admin).is_none(),
+            "the orchestrator served admin despite the VD_DEMAND + VD_STATIC_FOREST misconfig"
+        );
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the misconfigured orchestrator never exited (the XOR gate did not fire?)"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        !status.success(),
+        "boot MUST fail loud on VD_DEMAND + VD_STATIC_FOREST, got {status:?}"
+    );
+}

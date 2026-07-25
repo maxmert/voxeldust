@@ -137,7 +137,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // for every existing rig (they set no `VD_OWN_COORD`); the spawner (5c) feeds the full lineage so
             // `evaluate_realm_aoi` can name this shard's TRUE children, not just root-level ones.
             own_coord: own_coord.clone(),
-            boot_ticks_p99: 0,
+            // RLM 5f: the measured process-boot p99 (ticks) feeds `evaluate_realm_aoi`'s PREDICTIVE spin-up
+            // horizon (a child is demanded `boot_ticks_p99*dt` before an occupant reaches it, so its shard is
+            // warm on arrival). Default 0 ⇒ no look-ahead (byte-identical); 5f-4 bakes the measured value.
+            boot_ticks_p99: env.parse_or("VD_BOOT_TICKS_P99", 0)?,
             held_realms: held_realms.clone(),
             frame: own_frame,
             move_speed_mps: move_speed,

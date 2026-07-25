@@ -30,6 +30,26 @@ use vd_core::{Fence, NodeId, UniverseTick};
 /// hammers a permanently-unschedulable realm either.
 const BACKOFF_CAP: u32 = 10;
 
+/// RLM 5f — the ONE arming decision (Tier-A, both arms covered): resolve the orchestrator's [`RlmTuning`]
+/// from the launcher's `--demand` flag. When `demand` is set the reconciler is ARMED with a live budget
+/// whose launch-TTL is floored by the MEASURED process boot latency (so a slow real fork is never re-spun
+/// mid-boot); when unset it is the fully-INERT default (`reconcile_interval_ticks == 0` ⇒ never sweeps ⇒
+/// boot byte-identical). NOT a per-kind fork (HR3) — a value selection on ONE struct. The caller must
+/// [`RlmTuning::validate`] the result and fail loud (mirrors the saga-budget validate at boot).
+#[must_use]
+pub fn resolve_rlm_tuning(
+    demand: bool,
+    tick_hz: u32,
+    boot_ticks_p99: u64,
+    settle: u64,
+) -> RlmTuning {
+    if demand {
+        RlmTuning::cloud_with_boot(tick_hz, boot_ticks_p99, settle)
+    } else {
+        RlmTuning::default()
+    }
+}
+
 /// The launch-set shape (RLM Step 5e): `path → { minted node → mint tick }` — both [`LaunchLedger::minted`]
 /// and the crash-recovery seed a rebuilt orchestrator feeds [`RlmReconcilerRes::with_launch_seed`] (the
 /// spawner's `launch_ledger_seed()` projection). ONE name for the shape (DRY), keyed by the lineage
@@ -406,6 +426,21 @@ mod tests {
 
     fn spawner() -> Box<dyn RealmSpawner + Send + Sync> {
         Box::new(MemSpawner::new(MemHub::new(), NodeId(1000), 8))
+    }
+
+    #[test]
+    fn resolve_rlm_tuning_arms_only_under_demand() {
+        // --demand OFF => the fully-INERT default (never sweeps; boot byte-identical); validate vacuous.
+        let inert = resolve_rlm_tuning(false, 20, 100, 10);
+        assert_eq!(inert, RlmTuning::default());
+        assert_eq!(inert.reconcile_interval_ticks, 0);
+        assert_eq!(inert.validate(), Ok(()));
+        // --demand ON => the boot-floored live budget; validate-clean; min_dwell covers the measured boot.
+        let armed = resolve_rlm_tuning(true, 20, 100, 10);
+        assert_eq!(armed, RlmTuning::cloud_with_boot(20, 100, 10));
+        assert_eq!(armed.reconcile_interval_ticks, 1);
+        assert_eq!(armed.validate(), Ok(()));
+        assert!(armed.min_dwell_ticks() >= 100 + 10);
     }
 
     fn demand_frame(coord: &RealmCoord, verb: DemandVerb, tick: u64, fence: u64) -> Inbound {

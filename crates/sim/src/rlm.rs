@@ -80,15 +80,32 @@ impl RlmTuning {
     /// deriving from `tick_hz`, no magic literals in systems). The ordering invariant
     /// (`demand_ttl > drain + cooldown`, `empty_grace >= 1`, all non-zero) holds by construction — asserted
     /// by [`validate`](RlmTuning::validate) at boot. `hz` = ticks per second; the windows are seconds-scaled.
+    /// The boot-AGNOSTIC form (launch-TTL defaults to ~3s); DRY — it is [`cloud_with_boot`] with an
+    /// unmeasured boot (`boot_ticks_p99 = settle = 0`), so `max(hz*3, 0) = hz*3` (byte-identical to before).
     #[must_use]
     pub fn cloud(tick_hz: u32) -> RlmTuning {
+        RlmTuning::cloud_with_boot(tick_hz, 0, 0)
+    }
+
+    /// A live cloud budget whose launch-TTL is FLOORED by the MEASURED process boot latency (RLM 5f): a
+    /// minted-but-unleased launch counts as "still booting" for at least `boot_ticks_p99 + settle`, so a
+    /// slow real fork (a ~3s CI boot) is NEVER re-spun mid-boot — which would double-spawn = thrash. The
+    /// floor is `max(hz*3, boot_ticks_p99 + settle)`, so the boot-agnostic ~3s default still applies when
+    /// boot is unmeasured (0). All other windows are seconds-scaled exactly as the boot-agnostic budget; the
+    /// ordering invariant holds by construction (validate-clean). Because `min_dwell = spinup_cooldown +
+    /// launch_ttl`, flooring launch_ttl AUTOMATICALLY makes `min_dwell >= boot_ticks_p99 + settle` — a realm
+    /// is never teardown-eligible before it finishes booting (the 5f coupling). `hz` = ticks per second.
+    #[must_use]
+    pub fn cloud_with_boot(tick_hz: u32, boot_ticks_p99: u64, settle: u64) -> RlmTuning {
         let hz = u64::from(tick_hz).max(1);
         // ~1s demand freshness, ~0.5s empty-report tolerance, a drain + cooldown that together stay well
         // inside the demand TTL so a re-asserted demand always aborts a drain before a kill fires.
         let drain = (hz / 2).max(1);
         let cooldown = hz.max(1);
         let spinup_cooldown = hz.max(1);
-        let launch_ttl = (hz * 3).max(1);
+        // The boot floor: at least ~3s OR the measured boot+settle, whichever is larger (the DERIVED-from-
+        // measured-boot fix — a fixed hz*3 would re-fire SpinUp mid-boot for a slower real fork).
+        let launch_ttl = (hz * 3).max(boot_ticks_p99.saturating_add(settle));
         let demand_ttl = (hz * 4).max(drain + cooldown + 1);
         RlmTuning {
             demand_ttl_ticks: demand_ttl,
@@ -737,6 +754,39 @@ mod tests {
         // hz saturates to 1 — every window is still non-zero + ordered.
         assert_eq!(RlmTuning::cloud(0).validate(), Ok(()));
         assert_eq!(RlmTuning::cloud(1).validate(), Ok(()));
+    }
+
+    #[test]
+    fn rlm_tuning_cloud_delegates_to_boot_agnostic() {
+        // DRY: the boot-agnostic `cloud` IS `cloud_with_boot` with an unmeasured boot — byte-identical, so
+        // every existing cloud() caller is unaffected by the 5f boot-aware path.
+        assert_eq!(RlmTuning::cloud(20), RlmTuning::cloud_with_boot(20, 0, 0));
+        assert_eq!(RlmTuning::cloud(1), RlmTuning::cloud_with_boot(1, 0, 0));
+    }
+
+    #[test]
+    fn rlm_tuning_cloud_with_boot_floors_launch_ttl_on_measured_boot() {
+        // At 20 Hz the boot-agnostic launch-TTL is hz*3 = 60 ticks (~3s). A MEASURED boot+settle ABOVE that
+        // raises the floor (so a slow real fork is never re-spun mid-boot); one BELOW leaves the ~3s default.
+        let settle = 10;
+        for p99 in [0u64, 30, 60, 100, 200] {
+            let t = RlmTuning::cloud_with_boot(20, p99, settle);
+            assert_eq!(t.validate(), Ok(()), "boot-floored budget stays valid (p99={p99})");
+            // launch_ttl is the MAX of the ~3s default and the measured boot+settle.
+            assert_eq!(t.launch_ttl_ticks, (20 * 3).max(p99 + settle), "p99={p99}");
+            // The 5f coupling: min_dwell (spinup_cooldown + launch_ttl) never falls below boot+settle, so a
+            // realm is never teardown-eligible before it finishes booting. The condition evaluates both
+            // sides every pass (covered); the message is STATIC so the never-taken failure path carries no
+            // uncoverable method-call region (HR5).
+            assert!(
+                t.min_dwell_ticks() >= p99 + settle,
+                "min_dwell must cover the measured boot+settle floor"
+            );
+        }
+        // The floor DOMINATES the default when boot is large (200+10 > 60).
+        assert_eq!(RlmTuning::cloud_with_boot(20, 200, 10).launch_ttl_ticks, 210);
+        // The default DOMINATES when boot is small (40+5 < 60).
+        assert_eq!(RlmTuning::cloud_with_boot(20, 40, 5).launch_ttl_ticks, 60);
     }
 
     #[test]

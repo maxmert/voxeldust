@@ -899,6 +899,11 @@ pub fn orchestrator_env(
         str_pair("VD_PROBE_ADDR", a.orchestrator_probe),
         ("VD_STORE_PATH", store_path.to_owned()),
         ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
+        // RLM 5f: every harness shape STATICALLY pre-spawns its shards (each self-grants a realm head the
+        // orchestrator did not demand), so an ARMED demand reconciler would reap them. Mark the static-boot
+        // mode so the orchestrator's `VD_DEMAND` XOR `VD_STATIC_FOREST` gate fails loud on a misconfig; inert
+        // while `VD_DEMAND` is unset (byte-identical). 5f-4's root-chain demand boot omits this marker.
+        ("VD_STATIC_FOREST", "1".to_owned()),
     ];
     if !extra_shards.is_empty() {
         // The D-37 re-home candidate SET: every extra shard the orchestrator may re-home an orphan onto.

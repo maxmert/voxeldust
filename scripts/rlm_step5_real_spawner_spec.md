@@ -709,6 +709,54 @@ is monomorphic + fake-`LaunchBackend`-covered in `vd-node` (Tier-A); the OS shim
   settle`. *Tests (process-tier):* a walk into a neighbor realm spins its shard UP on demand (no
   pre-baked forest) and a walk out spins it DOWN with hysteresis (no thrash) — the process-tier
   repro the mem twin masks.
+> **5f VET AMENDMENTS (workflow `wf_bc3cf90d`, GO_WITH_FIXES, 11 agents 2026-07-26).** 7 each-gate-able
+> sub-slices; arming is byte-identical-until-flipped; the frozen-wire grow is the ONLY user-gated slice + is LAST.
+> - **CRITICAL (all 3 proposals had it; folded into 5f-5):** a naive orphan-head sweep FALSE-REAPS an OCCUPIED
+>   leaf after an orchestrator crash — the RAM `DemandLedger` is wiped on rebuild, so a player deep inside a
+>   leaf has no re-asserted demand → the sweep reaps the realm + strands its ancestor chain. FIX: on
+>   rehydrate, RE-SYNTHESIZE a demand cell for EVERY adopted live realm from its DURABLE `launch.redb`
+>   `LaunchIntent` coord (launch.redb survives; RAM ledger does not) BEFORE the first reconcile sweep → arm B
+>   (`running_live & !empty_confirmed`) keeps an occupied leaf desired + `ancestor_close` pulls its whole
+>   chain; a vacant one Empty-reaps via the normal two-phase drain; a dead one takes the zombie path. The
+>   residual orphan-head cross-check (heads with NO cell AND NO launch intent) is a BOUNDED/incremental
+>   round-robin window (a SEPARATE observed-grant tap — NEVER the barrier's `take_dirty`; a maintained
+>   ledgered-RealmId reverse index; a lossy-key collision resolves CONSERVATIVELY as ledgered → never
+>   false-reap) + a capped `/whoami` probe budget; ForceReap fires ONLY behind `rlm_quiesced_until` on a
+>   truly-unsynthesizable probe-confirmed-alive head. The `/whoami` result reaches the pure kernel only as a
+>   resolved boolean (determinism preserved).
+> - **Sub-slices:** **5f-1 ARM** (byte-identical-until-flipped; `RlmTuning::cloud_with_boot(hz, boot_p99,
+>   settle)` with `launch_ttl = max(hz*3, boot_p99+settle)` — HIGH: launch_ttl DERIVED from measured boot else
+>   a ~3s boot re-fires SpinUp mid-boot = thrash; `resolve_rlm_tuning(demand,…)` Tier-A shim; orchestrator swap
+>   `RlmTuning::default()`→shim + `rlm.validate()?` fail-loud; `VD_DEMAND` env knob; `--demand` XOR
+>   `--static-forest` boot gate; `VD_BOOT_TICKS_P99` seam; harness arming mirror). **5f-2** lazy
+>   pos→RealmCoord(FULL-lineage) resolver in vd-core worldgen (descend root→deepest, O(depth·children), NOT the
+>   test-only materialize-forest path). **5f-3** organic login bootstrap (ONE synthetic `RealmDemand{deepest
+>   coord, SpinUp}` through the EXISTING source-agnostic `record_realm_demands`→`ancestor_close`; NEVER the
+>   store-test-hooks direct-spawn bypass; login admits via `ReHomeState::PoseOnly`; gateway dynamic home route;
+>   trust boundary = who may inject the Saga-class frame). **5f-4 FIRST-LIVE** (root-chain boot + a walk-scale
+>   STATIC-geometry LIVE-AoI-band variant + gateway dynamic-shard admission via AUTHENTICATED orch push + RLM
+>   counters→AdminSnapshot + MEASURE boot_p99 + the anti-thrash walk gate `rlm_demand_walk.rs`: Gate 1 walk-IN
+>   spins UP predictively, Gate 2 walk-OUT spins DOWN once + LOITER-in-dead-zone no-flap [CORRECTNESS], Gate 4
+>   D4 first-contact input-drop bounded). **5f-5** cell-resynthesis + orphan-head sweep (THE CRITICAL FIX
+>   above; closes D-RLM-5; + shard self-terminate-on-lease-revoke so ForceReap can act; kill9 gate incl. the
+>   CRASH-WITH-PLAYER-INSIDE-a-leaf sub-gate). **5f-6** realm-aware `select_rehome_target` (FAILURE-path fix;
+>   the normal crossing already lands on the containing-realm owner) + the wire-FREE D-RLM-6 miss-detector
+>   (`Inbound::NodeUnreachable` to the parent lane, NEVER `SendShed`) + re-plumb via `update_peer_addr`, CLOUD
+>   resolve source = per-realm Service DNS re-lookup (ZERO wire; closes D-RLM-6 in k8s). **5f-7 [USER-GATED,
+>   LAST]** the `PeerLocate{realm:RealmCoord}`→`PeerLocated{realm, current:Option<(NodeId,SocketAddr)>}` frozen-
+>   wire grow (TWO new append-only `InterShardFlow` arms, PROTO_MINOR 3→4, keyed on incarnation-stable
+>   RealmCoord NOT NodeId, `std::net::SocketAddr` on the wire — FIRST address on the frozen wire) + the
+>   process-tier no-DNS ancestor-churn re-reach gate (Gate 3). If DECLINED: 5f-1..5f-6 land + gate; Gate 3
+>   stays deferred to k8s DNS (#123).
+> - **USER DECISION (surface before 5f-7):** APPROVE the 2-arm wire grow (RealmCoord key + std SocketAddr,
+>   built LAST so nothing waits) — RECOMMENDED — vs DECLINE (process-tier Gate 3 → k8s DNS). Low-stakes knobs:
+>   `VD_DEMAND` env (no sign-off); no `dev()` timing variant (use `cloud_with_boot` with real p99).
+> - **DEFERRED:** D-41 multi-galaxy `lowered()` uniqueness (nothing in 5f blocked at single-galaxy; warp-scale
+>   → P4/P5); true 100K throughput (orchestrator subtree-SHARDING later — 5f must add NO centralized reconciler
+>   state that blocks it; `reconcile_interval` is the interim throttle); durable per-account spawn-pose store
+>   (P7 identity_persistence; 5f-3 uses a `PoseOnly` env stand-in). Ledger: D-RLM-5→🟩 on 5f-5; D-RLM-6
+>   process-lane→🟩 on 5f-7 (or 'k8s-DNS-only' if declined); PROTO_MINOR 3→4 + arm-count doc on 5f-7.
+
 - **5g — retire the static forest + process-parity capstone.** Delete `ClusterShape::Forest`/the
   literal `Vec`/fixed roster NodeIds/`expected_realms(Forest)`/`--static-forest` once every gate runs
   on `--demand`. Delete `NodeKind::StubShard` after 5a's inertness proof (or keep only as the
