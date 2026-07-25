@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use vd_core::incarnation::IncarnationCookie;
 use vd_core::realm_coord::RealmCoord;
+use vd_core::realm_path::RealmPath;
 use vd_core::{NodeId, UniverseTick};
 use vd_sim::io::{RealmSpawner, SpawnError, Store};
 
@@ -217,6 +218,34 @@ struct SpawnInner {
     /// fixture in 5d; the orchestrator fills the real `(ORCH, bind)`/`(GATEWAY, bind)` at 5e). The
     /// per-spawn ANCESTOR set is computed dynamically from `live`; only these static anchors are held here.
     anchor_peers: Vec<(NodeId, SocketAddr)>,
+    /// RLM Step 5e (D3): a `RealmPath → NodeId` index over `live`, so [`closure_peers`] resolves each
+    /// ancestor with an exact-key lookup — O(depth·log L) per spawn — instead of the O(depth·L) full scan
+    /// that would go O(depth·K²) under a warp-burst subtree spin-up (`closure_peers` is on the spawn hot
+    /// path once wired live). Kept in lockstep with `live` by [`SpawnInner::insert_live`]/[`remove_live`].
+    /// INVARIANT: at most one live shard per realm path (the reconciler's idempotency-by-`coord.path` guard
+    /// ensures it; `insert_live` overwrites, `remove_live` clears — so the index is always `live`'s
+    /// path-projection).
+    path_index: BTreeMap<RealmPath, NodeId>,
+}
+
+impl SpawnInner {
+    /// Add a live shard, keeping `path_index` in lockstep with `live` (the ONLY insert path — so the index
+    /// can never drift). Overwrites any prior entry for the coord's path (the one-shard-per-path invariant).
+    fn insert_live(&mut self, node: NodeId, slot: LiveSlot) {
+        self.path_index.insert(slot.coord.path().clone(), node);
+        self.live.insert(node, slot);
+    }
+
+    /// Remove a live shard by id, clearing its `path_index` entry (the ONLY remove path). Callers
+    /// (`kill_realm` after its `contains_key` guard, the `live_nodes` prune over `live.keys()`) ALWAYS pass
+    /// a currently-live node, so the `.expect` panic body is in stdlib, not a coverable caller branch (HR5).
+    fn remove_live(&mut self, node: NodeId) {
+        let slot = self
+            .live
+            .remove(&node)
+            .expect("remove_live called on a node that is not live");
+        self.path_index.remove(slot.coord.path());
+    }
 }
 
 /// The decision half of the real-process [`RealmSpawner`] (RLM Step 5b). Generic over the [`LaunchBackend`]
@@ -260,6 +289,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
             next_port: u32::from(tuning.first_port),
         });
         let mut live = BTreeMap::new();
+        let mut path_index = BTreeMap::new();
         // v1-only intents (`pid: None`) are launches never confirmed before a crash — DROP them (Step 5c
         // D3/D4): reconstructing an unconfirmed launch risks a double-spawn, so 5c re-drives from scratch.
         // The narrow forked-but-crashed-before-v2 orphan window is DEFERRED to 5e (DEFERRED.md D-RLM-5),
@@ -273,6 +303,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
             match intent.pid {
                 Some(_pid) => {
                     backend.book_peer(intent.node, addr);
+                    path_index.insert(intent.coord.path().clone(), intent.node);
                     live.insert(
                         intent.node,
                         LiveSlot {
@@ -301,6 +332,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
                 dead: BTreeSet::new(),
                 store,
                 anchor_peers,
+                path_index,
             })),
             backend,
         }
@@ -381,7 +413,7 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
         // RLM 5d: the child's VD_PEERS book — the ancestor closure (from the live map, the ONLY holder of
         // every node's coord+addr) ∪ the fixed anchors. Computed BEFORE launch so the forked shard can dial
         // its parent chain immediately (no DNS). A branchless fill from the monomorphic helper (HR5).
-        let peers = closure_peers(coord, &g.live, &g.anchor_peers);
+        let peers = closure_peers(coord, &g.path_index, &g.live, &g.anchor_peers);
         let spec = LaunchSpec {
             node,
             coord: coord.clone(),
@@ -409,7 +441,7 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
                 );
                 g.store.commit();
                 self.backend.book_peer(node, addr);
-                g.live.insert(
+                g.insert_live(
                     node,
                     LiveSlot {
                         coord: coord.clone(),
@@ -436,7 +468,7 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
         } else if !g.live.contains_key(&node) {
             Err(SpawnError::UnknownNode(node))
         } else {
-            g.live.remove(&node);
+            g.remove_live(node);
             g.killed.insert(node);
             g.store.delete(&rlm_launch_store_key(node));
             g.store.commit();
@@ -458,7 +490,7 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
             .collect();
         if !orphans.is_empty() {
             for n in orphans {
-                g.live.remove(&n);
+                g.remove_live(n);
                 g.dead.insert(n);
                 g.store.delete(&rlm_launch_store_key(n));
             }
@@ -480,24 +512,34 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
 /// OUTSIDE the generic `SpawnCore<B>` body — covered ONCE regardless of `B` (HR5). The generic `spawn_realm`
 /// calls it as a straight-line fill.
 ///
+/// SCALE (RLM 5e D3): each ancestor is resolved by an EXACT-KEY `path_index` lookup — O(depth·log L) per
+/// spawn — not a full scan of `live` (which would be O(depth·L), i.e. O(depth·K²) under a warp-burst subtree
+/// spin-up). `path_index` is `live`'s path-projection (kept in lockstep by `insert_live`/`remove_live`), so
+/// the found slot's addr is a second exact lookup in `live`.
+///
 /// LIMITATION (ledgered to 5e/5f, DEFERRED.md D-RLM-6): the book is fixed at the child's boot — an ancestor
 /// that is absent at spawn, or that later restarts under a NEW incarnation while this child stays live, is
 /// NOT reachable by this already-running child (its dial lane is built once from `VD_PEERS`;
 /// reply-on-connection cannot repair it because it needs the child to be the dialer and the child has no
 /// addr/lane for the new incarnation). Correct ONLY under parent-first spawn ordering + no ancestor churn
-/// under a live descendant; the refresh policy is an open 5e/5f decision.
+/// under a live descendant; the refresh policy is the D-RLM-6 = C (lazy resolve-on-miss) 5f build.
 fn closure_peers(
     coord: &RealmCoord,
+    path_index: &BTreeMap<RealmPath, NodeId>,
     live: &BTreeMap<NodeId, LiveSlot>,
     anchors: &[(NodeId, SocketAddr)],
 ) -> Vec<(NodeId, SocketAddr)> {
     let mut peers = Vec::new();
     let mut ancestor = coord.parent();
     while let Some(a) = ancestor {
-        for (node, slot) in live {
-            if slot.coord().path() == a.path() {
-                peers.push((*node, slot.addr()));
-            }
+        if let Some(&node) = path_index.get(a.path()) {
+            // `path_index` is `live`'s path-projection (the same `insert_live`/`remove_live` maintain both),
+            // so the node is ALWAYS present in `live` — the `.expect` panic body is in stdlib, not a
+            // coverable caller branch (HR5), so this is not an uncoverable `None` arm.
+            let slot = live.get(&node).expect(
+                "path_index node is always live (insert_live/remove_live keep them in lockstep)",
+            );
+            peers.push((node, slot.addr()));
         }
         ancestor = a.parent();
     }
@@ -966,6 +1008,14 @@ mod tests {
         }
     }
 
+    /// The `path_index` projection of a `live` map (what `insert_live` maintains) — so the `closure_peers`
+    /// tests exercise the real exact-key lookup path.
+    fn index_of(live: &BTreeMap<NodeId, LiveSlot>) -> BTreeMap<RealmPath, NodeId> {
+        live.iter()
+            .map(|(node, slot)| (slot.coord().path().clone(), *node))
+            .collect()
+    }
+
     #[test]
     fn closure_peers_collects_live_ancestors_leaf_to_root_then_anchors() {
         let leaf = coord_of(&[
@@ -989,7 +1039,7 @@ mod tests {
 
         // Ancestors leaf→root (Galaxy then Universe), THEN the anchors; no sibling, no self.
         assert_eq!(
-            closure_peers(&leaf, &live, &anchors),
+            closure_peers(&leaf, &index_of(&live), &live, &anchors),
             vec![
                 (NodeId(10), addr(5_010)),
                 (NodeId(11), addr(5_011)),
@@ -1008,7 +1058,7 @@ mod tests {
         live.insert(NodeId(10), live_slot(descendant, 5_010));
         let anchors = vec![(NodeId(1), addr(9_001))];
         assert_eq!(
-            closure_peers(&root, &live, &anchors),
+            closure_peers(&root, &index_of(&live), &live, &anchors),
             vec![(NodeId(1), addr(9_001))]
         );
     }
@@ -1028,7 +1078,7 @@ mod tests {
         let anchors = vec![(NodeId(1), addr(9_001))];
         // Galaxy included; Universe (absent) skipped; then the anchor.
         assert_eq!(
-            closure_peers(&leaf, &live, &anchors),
+            closure_peers(&leaf, &index_of(&live), &live, &anchors),
             vec![(NodeId(10), addr(5_010)), (NodeId(1), addr(9_001))]
         );
     }
