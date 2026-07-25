@@ -355,6 +355,30 @@ impl<B: LaunchBackend> SpawnCore<B> {
     pub fn orphan_count(&self) -> usize {
         self.lock().dead.len()
     }
+
+    /// Project the live launch set into the reconciler's `LaunchLedger.minted` shape (`path → {node →
+    /// at_tick}`) — the RLM Step 5e CRASH-RECOVERY SEED. Computed on the concrete `SpawnCore` BEFORE it is
+    /// boxed as a `dyn RealmSpawner` and handed to the reconciler, so a restarted orchestrator's FIRST
+    /// reconcile sweep already knows which coords are launched and does NOT re-spawn a survivor (the
+    /// double-spawn guard's crash-recovery half — the RAM-only demand ledger comes up empty, so the seed is
+    /// the ONLY thing suppressing a spurious re-spawn until demands re-accrue).
+    ///
+    /// SUPERSET of the pre-crash `minted` (vet D5), NOT byte-identical: the reconciler DRAINS `minted[path]`
+    /// the moment a directory head is up, whereas `live` retains a node until it actually dies — so a
+    /// survivor whose shard self-granted its head pre-crash had an empty `minted[path]` then, but its live
+    /// slot re-seeds it here. Safe: the re-seeded head-up entry is drained on sweep-1 (the launch reconcile
+    /// sees the head), and the empty post-crash demand ledger means no `SpinUp` is decided regardless.
+    #[must_use]
+    pub fn launch_ledger_seed(&self) -> crate::rlm_runtime::LaunchSeed {
+        let g = self.lock();
+        let mut seed: crate::rlm_runtime::LaunchSeed = BTreeMap::new();
+        for (node, slot) in &g.live {
+            seed.entry(slot.coord.path().clone())
+                .or_default()
+                .insert(*node, slot.at_tick);
+        }
+        seed
+    }
 }
 
 impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
@@ -984,6 +1008,29 @@ mod tests {
         assert_eq!(t.first_node, 1_000);
         assert_eq!(t.first_port, 42_000);
         assert_eq!(t.bind_host, Ipv4Addr::LOCALHOST);
+    }
+
+    #[test]
+    fn launch_ledger_seed_projects_live_into_the_reconciler_shape() {
+        // RLM 5e-3b: the crash-recovery seed projector — live (node→{coord,at_tick}) → path→{node→at_tick},
+        // the exact LaunchLedger.minted shape the rebuilt reconciler is seeded with.
+        let sc = core(FakeBackend::default(), tuning(1_000, 42_000));
+        let a = sc
+            .spawn_realm(&system(1, 1), UniverseTick(5))
+            .expect("spawn a");
+        let b = sc
+            .spawn_realm(&system(1, 2), UniverseTick(6))
+            .expect("spawn b");
+        let seed = sc.launch_ledger_seed();
+        assert_eq!(seed.len(), 2);
+        assert_eq!(
+            seed[system(1, 1).path()],
+            [(a, UniverseTick(5))].into_iter().collect()
+        );
+        assert_eq!(
+            seed[system(1, 2).path()],
+            [(b, UniverseTick(6))].into_iter().collect()
+        );
     }
 
     // ---- closure_peers (RLM 5d VD_PEERS ancestor closure) ----------------------------------------

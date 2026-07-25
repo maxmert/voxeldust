@@ -238,24 +238,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(gw) = env.peer_book("VD_PEERS")?.get(&vd_bins::GATEWAY).copied() {
         anchor_peers.push((vd_bins::GATEWAY, gw));
     }
-    let realm_spawner: Box<dyn vd_sim::io::RealmSpawner + Send + Sync> =
-        Box::new(vd_node::rlm_spawn::SpawnCore::new(
-            Box::new(launch_store),
-            vd_bins::proc_launch::ProcLaunchBackend::new(
-                Arc::clone(&control),
-                vd_bins::proc_launch::ProcSpawnTuning {
-                    exe: "vd-shard",
-                    workdir: store_path.with_file_name("realm-logs"),
-                    // Operational param (env-overridable, ONE default) — the SIGTERM→SIGKILL teardown grace.
-                    drain_grace: std::time::Duration::from_millis(
-                        env.parse_or("VD_REALM_DRAIN_GRACE_MS", 3_000)?,
-                    ),
-                    anchors: spawn_anchors,
-                },
-            ),
-            vd_node::rlm_spawn::SpawnTuning::dev(),
-            anchor_peers,
-        ));
+    let spawn_core = vd_node::rlm_spawn::SpawnCore::new(
+        Box::new(launch_store),
+        vd_bins::proc_launch::ProcLaunchBackend::new(
+            Arc::clone(&control),
+            vd_bins::proc_launch::ProcSpawnTuning {
+                exe: "vd-shard",
+                workdir: store_path.with_file_name("realm-logs"),
+                // Operational param (env-overridable, ONE default) — the SIGTERM→SIGKILL teardown grace.
+                drain_grace: std::time::Duration::from_millis(
+                    env.parse_or("VD_REALM_DRAIN_GRACE_MS", 3_000)?,
+                ),
+                anchors: spawn_anchors,
+            },
+        ),
+        vd_node::rlm_spawn::SpawnTuning::dev(),
+        anchor_peers,
+    );
+    // RLM Step 5e: project the recovered launch set (rehydrated from launch.redb) into the reconciler's
+    // crash-recovery SEED — computed on the CONCRETE SpawnCore before it is boxed as a `dyn RealmSpawner`,
+    // so a rebuilt orchestrator's first sweep does not re-spawn a survivor. EMPTY at genesis (byte-identical).
+    let launch_seed = spawn_core.launch_ledger_seed();
+    let realm_spawner: Box<dyn vd_sim::io::RealmSpawner + Send + Sync> = Box::new(spawn_core);
     register_orchestrator_with_store(
         world,
         schedule,
@@ -292,6 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // RLM Step 5e: the REAL `SpawnCore<ProcLaunchBackend>` built above (was a placeholder `MemSpawner`).
         // INERT while `RlmTuning::default()` keeps the reconciler from sweeping — 5f arms it via `--demand`.
         realm_spawner,
+        launch_seed,
     );
 
     // The admin endpoint: republished after every tick, served off-thread.

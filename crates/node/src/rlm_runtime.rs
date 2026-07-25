@@ -30,6 +30,12 @@ use vd_core::{Fence, NodeId, UniverseTick};
 /// hammers a permanently-unschedulable realm either.
 const BACKOFF_CAP: u32 = 10;
 
+/// The launch-set shape (RLM Step 5e): `path → { minted node → mint tick }` — both [`LaunchLedger::minted`]
+/// and the crash-recovery seed a rebuilt orchestrator feeds [`RlmReconcilerRes::with_launch_seed`] (the
+/// spawner's `launch_ledger_seed()` projection). ONE name for the shape (DRY), keyed by the lineage
+/// [`RealmPath`] so it is galaxy-unique + deterministic.
+pub type LaunchSeed = BTreeMap<RealmPath, BTreeMap<NodeId, UniverseTick>>;
+
 /// The EXECUTE-side launch bookkeeping (BUG-B): every node the reconciler minted per realm coord, so a
 /// re-issue never orphans a prior node, plus the launch-failure backoff streak. Keyed by the lineage
 /// [`RealmPath`] (`Ord`, deterministic). Drained by the launch-reconcile step when a head appears or a
@@ -87,15 +93,36 @@ pub struct RlmReconcilerRes {
 
 impl RlmReconcilerRes {
     /// Build the reconciler around a validated tuning + an execute-seam spawner. `rlm_quiesced_until` is
-    /// `0` (no freeze) at a cold boot; the crash-restart path re-arms it (slice 3e).
+    /// `0` (no freeze) at a cold boot; the crash-restart path re-arms it (slice 3e). Genesis/inert boot →
+    /// an EMPTY launch seed (byte-identical); the crash-restart path uses [`with_launch_seed`].
     #[must_use]
     pub fn new(
         tuning: RlmTuning,
         spawner: Box<dyn RealmSpawner + Send + Sync>,
     ) -> RlmReconcilerRes {
+        RlmReconcilerRes::with_launch_seed(tuning, spawner, BTreeMap::new())
+    }
+
+    /// Build the reconciler with a PRE-SEEDED launch ledger (RLM Step 5e crash-recovery entry point).
+    /// `launch_seed` (`path → {node → mint tick}`) is the spawner's `launch_ledger_seed()` projection of the
+    /// shards a rebuilt orchestrator recovered from its durable launch ledger — so the FIRST reconcile
+    /// sweep sees them as already-launched (`launch_present`) and does NOT re-spawn a survivor. It is the
+    /// crash-recovery half of the double-spawn guard: the RAM-only demand ledger comes up EMPTY, so this
+    /// seed is the only thing suppressing a spurious re-spawn until demands re-accrue (bridged meanwhile by
+    /// the Step-4a quiesce freeze). SUPERSET of the pre-crash `minted` (vet D5) — a head-up survivor whose
+    /// `minted[path]` was empty pre-crash is re-seeded here, and drained on sweep-1 once the head is seen.
+    #[must_use]
+    pub fn with_launch_seed(
+        tuning: RlmTuning,
+        spawner: Box<dyn RealmSpawner + Send + Sync>,
+        launch_seed: LaunchSeed,
+    ) -> RlmReconcilerRes {
         RlmReconcilerRes {
             ledger: DemandLedger::default(),
-            launches: LaunchLedger::default(),
+            launches: LaunchLedger {
+                minted: launch_seed,
+                fail_streak: BTreeMap::new(),
+            },
             tuning,
             spawner,
             rlm_quiesced_until: UniverseTick(0),
@@ -577,6 +604,42 @@ mod tests {
             rlm.launches.minted.get(sys(7).path()).map(BTreeMap::len),
             Some(1),
             "still exactly one minted node for the path — no second incarnation"
+        );
+    }
+
+    #[test]
+    fn a_recovered_launch_seed_suppresses_the_respawn_on_the_first_sweep() {
+        // RLM 5e-3b (D10): the crash-recovery half of idempotency-by-coord.path. A rebuilt orchestrator
+        // seeded (from the durable launch ledger) with a survivor for `sys(7)` does NOT re-spawn it on the
+        // first sweep even under a re-asserted SpinUp — `launch_present` is true from the SEED (read by the
+        // pure kernel before any drain). The empty-seed control arm proves the seed is the differentiator.
+        let seed: LaunchSeed = [(
+            sys(7).path().clone(),
+            [(NodeId(50), UniverseTick(90))].into_iter().collect(),
+        )]
+        .into_iter()
+        .collect();
+        let mut seeded = RlmReconcilerRes::with_launch_seed(RlmTuning::cloud(20), spawner(), seed);
+        let mut d = dir();
+        seeded
+            .ledger
+            .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
+        seeded.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        assert_eq!(
+            seeded.spins_requested, 0,
+            "the recovered launch seed suppresses the re-spawn (path-keyed launch_present)"
+        );
+
+        // Control: the SAME demand with an EMPTY (genesis) seed DOES spawn — so it is the seed, not some
+        // other guard, that suppressed the re-spawn above.
+        let mut cold = RlmReconcilerRes::new(RlmTuning::cloud(20), spawner());
+        let mut d2 = dir();
+        cold.ledger
+            .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
+        cold.reconcile_and_drive(&mut d2, &|_n| false, UniverseTick(100));
+        assert_eq!(
+            cold.spins_requested, 1,
+            "an unseeded (genesis) reconciler spawns the demanded realm"
         );
     }
 

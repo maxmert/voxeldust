@@ -89,6 +89,8 @@ pub fn register_orchestrator(world: &mut World, schedule: &mut Schedule, cfg: &O
         cfg,
         Box::new(MemStore::new()),
         Box::new(MemSpawner::new(MemHub::new(), NodeId(1_000_000), 8)),
+        // Genesis in-process boot: no recovered launches (byte-identical).
+        crate::rlm_runtime::LaunchSeed::new(),
     );
 }
 
@@ -103,6 +105,10 @@ pub fn register_orchestrator_with_store(
     cfg: &OrchestratorConfig,
     store: Box<dyn Store + Send + Sync>,
     spawner: Box<dyn RealmSpawner + Send + Sync>,
+    // RLM Step 5e: the crash-recovery launch seed (`SpawnCore::launch_ledger_seed()` projected on the
+    // concrete spawner BEFORE boxing) — the shards a rebuilt orchestrator recovered, so the first reconcile
+    // sweep does not re-spawn a survivor. EMPTY at genesis / for the in-process `MemSpawner` (byte-identical).
+    launch_seed: crate::rlm_runtime::LaunchSeed,
 ) {
     // RLM Step 4a — `rlm_quiesced_until` carries the crash-recovery FREEZE watermark out of the boot
     // discriminant (RECOVER arms it from the recovered ceiling; GENESIS leaves it `0` = unarmed). It must
@@ -149,7 +155,7 @@ pub fn register_orchestrator_with_store(
     // MemSpawner; a live-AoI / harness / bootstrap boot supplies one tied to its own hub; Step 5 supplies
     // the real k8s launcher) — so this is the ONE construction site and no downstream rig has to re-insert
     // and clobber the boot-armed quiesce (RLM Step 4a — the E2E harness overwrite is gone).
-    let mut reconciler = RlmReconcilerRes::new(cfg.rlm, spawner);
+    let mut reconciler = RlmReconcilerRes::with_launch_seed(cfg.rlm, spawner, launch_seed);
     // RLM Step 4a — arm the crash-recovery freeze on RECOVER (a no-op `arm_quiesce(0)` on GENESIS). Teardown
     // is blocked until `now >= rlm_quiesced_until`, so a rebuilt orchestrator with an empty demand ledger
     // never reaps a still-occupied realm before its parent's `KeepAlive` (or a login demand) re-accrues.

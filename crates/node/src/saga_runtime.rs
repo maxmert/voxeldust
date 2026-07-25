@@ -2740,6 +2740,8 @@ mod tests {
                 &orch_config(),
                 Box::new(store.clone()),
                 test_spawner(),
+                // RLM inert in these D-6 crash/recover rigs — no recovered launches.
+                crate::rlm_runtime::LaunchSeed::new(),
             );
             let gateway = hub.register(GATEWAY, 64);
             let source = hub.register(SOURCE, 64);
@@ -2774,6 +2776,8 @@ mod tests {
                 &orch_config(),
                 Box::new(self.store.clone()),
                 test_spawner(),
+                // RLM inert in these D-6 crash/recover rigs — no recovered launches.
+                crate::rlm_runtime::LaunchSeed::new(),
             );
             self.orch = orch; // the old orchestrator World is dropped here — its RAM is lost
         }
@@ -2799,6 +2803,8 @@ mod tests {
                 },
                 Box::new(self.store.clone()),
                 test_spawner(),
+                // RLM inert in these D-6 crash/recover rigs — no recovered launches.
+                crate::rlm_runtime::LaunchSeed::new(),
             );
             self.orch = orch;
         }
