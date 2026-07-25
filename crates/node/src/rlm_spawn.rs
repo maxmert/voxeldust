@@ -1,0 +1,692 @@
+//! RLM Step 5b — `SpawnCore`, the DECISION half of the real-process realm spawner.
+//!
+//! The [`vd_sim::io::RealmSpawner`] contract has two independent halves (spec
+//! `scripts/rlm_step5_real_spawner_spec.md` §1.1): a DECISION kernel that owns the F2 monotone id/port
+//! allocator, the durable launch ledger, and the live/killed bookkeeping (this module, Tier-A, vd-node);
+//! and a LAUNCH BACKEND that actually forks/execs a `vd-shard` (or, later, admits a k8s pod) and books it
+//! into the mesh (Tier-B, vd-bins, slice 5c). The seam between them is [`LaunchBackend`] — an object-safe
+//! port so the decision logic is exercised to 100% against a deterministic fake here, and the OS shim
+//! carries NO branching worth covering. This is the same DECIDE-vs-EXECUTE split the reconciler already
+//! uses ([`crate::rlm_runtime`]) and the same layering fix the spec's §1.2 correction demands: vd-node
+//! cannot reach `vd-io-prod`'s `MeshControl`, so peer-booking is delegated THROUGH the backend
+//! ([`LaunchBackend::book_peer`]) rather than held as a mesh handle in the kernel.
+//!
+//! # What 5b owns
+//!
+//! - **F2 monotone allocation** — every realm gets a fresh `NodeId` and dev bind port from a cursor that
+//!   only ever advances. A torn-down (or crashed) id is retired forever, so a stale dead-node latch can
+//!   never shadow a new incarnation. The cursor is a DURABLE high-water ([`StoreKey::RlmWater`]) persisted
+//!   BEFORE each mint and NEVER re-derived from `max(survivors)` — so even after every survivor's intent is
+//!   deleted, the next mint still lands strictly above every id this spawner ever produced.
+//! - **A write-ahead launch ledger** — one durable intent per realm ([`StoreKey::RlmLaunch`]), staged
+//!   before the launch, so a rebuilt orchestrator reconstructs EXACTLY the children it minted pre-crash
+//!   (the `live_nodes` "recognize my pre-crash pods" contract), then reconciles each against backend
+//!   ground truth.
+//! - **Backend-truth liveness** — `live_nodes` is the reconcile read: it probes each believed-live child
+//!   against [`LaunchBackend::is_alive`] and PRUNES crashers (a k8s-kubelet-style ground-truth reconcile),
+//!   caching the orphan so a corpse is never re-probed.
+//!
+//! # What 5b does NOT own (deferred, by the slice plan)
+//!
+//! - The OS process shim + pid/incarnation-cookie re-adoption (slice 5c).
+//! - The ancestor-closure peer set + real host:port addressing across pods (slice 5d).
+//! - Rebuilding the reconciler's `LaunchLedger` (node→path) from the recovered intents on restart (slice
+//!   5e) — 5b delivers and proves the durable node→coord SUBSTRATE ([`SpawnCore::live_slots`]); 5e consumes
+//!   it.
+//!
+//! Coverage: Tier-A — 100% region + branch (HR5). The generic `SpawnCore<B>` has a SINGLE instantiation in
+//! this crate (the test `FakeBackend`), so covering every branch against the fake covers the whole
+//! monomorphization; the real backend is a separate Tier-B binary.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use serde::{Deserialize, Serialize};
+
+use vd_core::realm_coord::RealmCoord;
+use vd_core::{NodeId, UniverseTick};
+use vd_sim::io::{RealmSpawner, SpawnError, Store};
+
+use crate::saga_runtime::{encode, rlm_launch_prefix, rlm_launch_store_key, rlm_water_store_key};
+
+/// The operational parameters of the dev-scale allocator — the ONE config struct (no inline magic
+/// numbers). Production/5d overrides every field; [`SpawnTuning::dev`] is the single-host loopback default.
+#[derive(Clone, Copy)]
+pub struct SpawnTuning {
+    /// The first `NodeId` the F2 cursor mints. Chosen ABOVE the hand-picked scenario ids so a minted id
+    /// never collides with a statically-planted one (same guidance as `MemSpawner::new`'s `first_node`).
+    pub first_node: u64,
+    /// The first dev bind port. On a single loopback host the cursor walks `u16`s; 5d spreads realms across
+    /// pods/IPs so per-host port pressure never approaches exhaustion at real scale.
+    pub first_port: u16,
+    /// The dev bind host every port hangs off (loopback). 5d generalizes to real per-pod addresses.
+    pub bind_host: Ipv4Addr,
+}
+
+impl SpawnTuning {
+    /// Base of the dev `NodeId` range — above any scenario's statically-picked ids.
+    const DEV_FIRST_NODE: u64 = 1_000;
+    /// Base of the dev loopback port range.
+    const DEV_FIRST_PORT: u16 = 42_000;
+
+    /// The single-host loopback defaults for local `just run`/tests.
+    #[must_use]
+    pub const fn dev() -> SpawnTuning {
+        SpawnTuning {
+            first_node: Self::DEV_FIRST_NODE,
+            first_port: Self::DEV_FIRST_PORT,
+            bind_host: Ipv4Addr::LOCALHOST,
+        }
+    }
+}
+
+/// The launch arguments the decision kernel hands the backend for one realm. The backend derives the
+/// child's `ShardProfile` from `coord` (its `VD_OWN_COORD` env — same path `shard.rs` already walks in 5a),
+/// so no profile is passed separately; `addr` is the kernel-allocated dev bind.
+pub struct LaunchSpec {
+    /// The freshly minted id this realm will run under.
+    pub node: NodeId,
+    /// The realm's full lineage coord (→ the child's `VD_OWN_COORD`).
+    pub coord: RealmCoord,
+    /// The dev bind address the child listens on and the kernel books into the mesh.
+    pub addr: SocketAddr,
+}
+
+/// The launch/teardown/liveness/booking port (RLM Step 5b) — object-safe, so [`SpawnCore`]'s decision logic
+/// is covered against a deterministic fake and the real OS shim (5c) carries no coverable branching. Every
+/// method is side-effecting against the outside world (fork/exec, signal, mesh booking); NONE decides
+/// policy — the policy is entirely in [`SpawnCore`].
+pub trait LaunchBackend: Send + Sync {
+    /// Bring `spec`'s shard up. `Ok` means a confirmed-launched child; `Err(reason)` is a REAL launch
+    /// failure (fork/exec / admission) the kernel surfaces as [`SpawnError::LaunchFailed`] (→ the
+    /// reconciler's backoff). The in-process fake never fails unless told to; the OS shim maps a failed
+    /// spawn.
+    fn launch(&self, spec: &LaunchSpec) -> Result<(), String>;
+
+    /// Ground-truth liveness of a previously launched node — a crashed child returns `false`. Reads
+    /// external state (a pid, a pod phase); the kernel reconciles `live_nodes` against it.
+    fn is_alive(&self, node: NodeId) -> bool;
+
+    /// Best-effort teardown of a node (signal / pod delete). The reconciler is the SOLE kill authority, so
+    /// the kernel only calls this from `kill_realm`.
+    fn teardown(&self, node: NodeId);
+
+    /// Announce `node`'s reachable `addr` to the mesh (real: `MeshControl::update_peer_addr`; fake:
+    /// record). Called ONCE per successful spawn and once per survivor on rehydrate — the layering fix that
+    /// keeps the mesh handle OUT of the kernel (vd-node cannot depend on vd-io-prod).
+    fn book_peer(&self, node: NodeId, addr: SocketAddr);
+}
+
+/// The durable launch-intent record (write-ahead of the launch). Self-describing (carries its own `node`)
+/// so the rehydrate `scan` reconstructs the live set without parsing keys. Every field is read on
+/// rehydrate — `node` keys the live set, `coord`/`port`/`at_tick` rebuild the [`LiveSlot`].
+#[derive(Serialize, Deserialize)]
+struct LaunchIntent {
+    node: NodeId,
+    coord: RealmCoord,
+    port: u16,
+    at_tick: UniverseTick,
+}
+
+/// The durable F2 high-water — a SINGLE record (no payload key). Persisted BEFORE each mint so a rehydrate
+/// resumes strictly above every id ever produced, independent of which survivors remain. `next_port` is a
+/// `u32` cursor so the LAST valid `u16` bind port (65535) is itself allocatable — exhaustion is the mint
+/// that would need 65536, not the one that uses 65535.
+#[derive(Serialize, Deserialize)]
+struct WaterMark {
+    next_node: u64,
+    next_port: u32,
+}
+
+/// One live realm's in-RAM record — the recovered node→realm binding the reconciler needs to map a
+/// surviving pod back to its desired coord (slice 5e consumes it via [`SpawnCore::live_slots`]).
+#[derive(Clone)]
+pub struct LiveSlot {
+    coord: RealmCoord,
+    addr: SocketAddr,
+    at_tick: UniverseTick,
+}
+
+impl LiveSlot {
+    /// The realm this node serves (its full lineage coord).
+    #[must_use]
+    pub fn coord(&self) -> &RealmCoord {
+        &self.coord
+    }
+    /// The node's booked mesh address.
+    #[must_use]
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+    /// The universe tick the realm was spawned at (staleness accounting).
+    #[must_use]
+    pub fn at_tick(&self) -> UniverseTick {
+        self.at_tick
+    }
+}
+
+/// The mutable, lock-guarded interior — allocator cursors, the live/killed/dead sets, and the durable
+/// store. All ordered collections (`BTreeMap`/`BTreeSet`): deterministic iteration, no default-hasher ban.
+struct SpawnInner {
+    /// F2 node cursor — only ever advances (persisted in [`WaterMark`]).
+    next_node: u64,
+    /// F2 dev port cursor (`u32` so the last `u16` port is usable) — only ever advances; exhaustion past
+    /// `u16::MAX` is loud, never wrapped.
+    next_port: u32,
+    /// The dev bind host every allocated port hangs off.
+    bind_host: Ipv4Addr,
+    /// Minted, launched, and not yet torn down — the reconcile source of truth for `live_nodes`.
+    live: BTreeMap<NodeId, LiveSlot>,
+    /// Commanded down via `kill_realm` (F2: an id here is retired; distinguishes `AlreadyKilled`).
+    killed: BTreeSet<NodeId>,
+    /// Crashed/orphaned (backend reported dead) — pruned out of `live` by the reconcile read and never
+    /// re-probed (the "cache orphan probes" property). Observable via [`SpawnCore::orphan_count`].
+    dead: BTreeSet<NodeId>,
+    /// The durable launch ledger + high-water. Its committed contents survive an orchestrator kill-9.
+    store: Box<dyn Store + Send + Sync>,
+}
+
+/// The decision half of the real-process [`RealmSpawner`] (RLM Step 5b). Generic over the [`LaunchBackend`]
+/// so the identical policy drives the deterministic fake (tests) and the OS shim (5c) — the reconciler
+/// holds it as `&dyn RealmSpawner`. Cheap-cloneable handle (the state is `Arc<Mutex<..>>`), like
+/// `MemSpawner`.
+pub struct SpawnCore<B: LaunchBackend> {
+    inner: Arc<Mutex<SpawnInner>>,
+    backend: B,
+}
+
+impl<B: LaunchBackend> SpawnCore<B> {
+    /// Genesis construction: an orchestrator starting with no durable launch history. Defined AS
+    /// rehydrate-over-an-empty-store — one construction path (DRY): an empty store yields exactly the
+    /// genesis cursors and an empty live set.
+    #[must_use]
+    pub fn new(
+        store: Box<dyn Store + Send + Sync>,
+        backend: B,
+        tuning: SpawnTuning,
+    ) -> SpawnCore<B> {
+        SpawnCore::rehydrate(store, backend, tuning)
+    }
+
+    /// Rebuild from a durable store after an orchestrator restart: resume the F2 high-water (NEVER
+    /// `max(survivors)`), reconstruct the live set from the launch intents, and RE-ANNOUNCE each survivor's
+    /// address to the mesh (the restart forgot peer addrs; the children themselves survived). The first
+    /// `live_nodes` then reconciles the reconstructed set against backend truth, pruning any that died
+    /// during the downtime.
+    #[must_use]
+    pub fn rehydrate(
+        store: Box<dyn Store + Send + Sync>,
+        backend: B,
+        tuning: SpawnTuning,
+    ) -> SpawnCore<B> {
+        let water = read_water(&*store).unwrap_or(WaterMark {
+            next_node: tuning.first_node,
+            next_port: u32::from(tuning.first_port),
+        });
+        let mut live = BTreeMap::new();
+        for (_key, value) in store.scan(&rlm_launch_prefix()) {
+            let intent: LaunchIntent =
+                postcard::from_bytes(&value).expect("decode persisted launch intent");
+            let addr = SocketAddr::from((tuning.bind_host, intent.port));
+            backend.book_peer(intent.node, addr);
+            live.insert(
+                intent.node,
+                LiveSlot {
+                    coord: intent.coord,
+                    addr,
+                    at_tick: intent.at_tick,
+                },
+            );
+        }
+        SpawnCore {
+            inner: Arc::new(Mutex::new(SpawnInner {
+                next_node: water.next_node,
+                next_port: water.next_port,
+                bind_host: tuning.bind_host,
+                live,
+                killed: BTreeSet::new(),
+                dead: BTreeSet::new(),
+                store,
+            })),
+            backend,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, SpawnInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The recovered node→realm bindings — the substrate slice 5e reads to rebuild the reconciler's
+    /// `LaunchLedger` (node→path) after a restart. A snapshot clone (deterministic order).
+    #[must_use]
+    pub fn live_slots(&self) -> BTreeMap<NodeId, LiveSlot> {
+        self.lock().live.clone()
+    }
+
+    /// How many minted children have been observed to crash (pruned orphans). Observability + the proof
+    /// that a dead child is cached, not re-probed.
+    #[must_use]
+    pub fn orphan_count(&self) -> usize {
+        self.lock().dead.len()
+    }
+}
+
+impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
+    fn spawn_realm(&self, coord: &RealmCoord, at_tick: UniverseTick) -> Result<NodeId, SpawnError> {
+        let mut g = self.lock();
+        // F2 port allocation: loud on dev-scale single-host exhaustion, NEVER wrapped (a wrap would reuse a
+        // retired port → the exact stale-latch hazard F2 exists to prevent). Checked before minting, so an
+        // exhausted allocator burns nothing. The cursor is a `u32`, so port 65535 is itself allocatable and
+        // only a cursor past `u16::MAX` is exhausted.
+        let cursor = g.next_port;
+        if cursor > u32::from(u16::MAX) {
+            return Err(SpawnError::LaunchFailed {
+                reason: "dev port space exhausted".into(),
+            });
+        }
+        let port = cursor as u16;
+        let next_port = cursor + 1;
+        let node = NodeId(g.next_node);
+        let addr = SocketAddr::from((g.bind_host, port));
+
+        // Write-ahead: persist the ADVANCED high-water + this node's intent BEFORE the launch, atomically.
+        // A crash between "child launched" and "recorded" then cannot orphan the child — rehydrate
+        // reconstructs it and `live_nodes` reconciles it against truth. The water advances even if the
+        // launch fails (the id/port are burned — F2 beats port thrift at dev scale).
+        let water = WaterMark {
+            next_node: g.next_node + 1,
+            next_port,
+        };
+        let intent = LaunchIntent {
+            node,
+            coord: coord.clone(),
+            port,
+            at_tick,
+        };
+        g.store.put(&rlm_water_store_key(), &encode(&water));
+        g.store.put(&rlm_launch_store_key(node), &encode(&intent));
+        g.store.commit();
+        g.next_node += 1;
+        g.next_port = next_port;
+
+        let spec = LaunchSpec {
+            node,
+            coord: coord.clone(),
+            addr,
+        };
+        match self.backend.launch(&spec) {
+            Ok(()) => {
+                // Book the peer BEFORE the node becomes visible as live, so the reconciler never reads a
+                // live id the mesh cannot yet address.
+                self.backend.book_peer(node, addr);
+                g.live.insert(
+                    node,
+                    LiveSlot {
+                        coord: coord.clone(),
+                        addr,
+                        at_tick,
+                    },
+                );
+                Ok(node)
+            }
+            Err(reason) => {
+                // The write-ahead intent points at a child that never came up — delete it. The high-water
+                // stays advanced (the id/port are retired, never retried under the same id).
+                g.store.delete(&rlm_launch_store_key(node));
+                g.store.commit();
+                Err(SpawnError::LaunchFailed { reason })
+            }
+        }
+    }
+
+    fn kill_realm(&self, node: NodeId) -> Result<(), SpawnError> {
+        let mut g = self.lock();
+        if g.killed.contains(&node) {
+            Err(SpawnError::AlreadyKilled(node))
+        } else if !g.live.contains_key(&node) {
+            Err(SpawnError::UnknownNode(node))
+        } else {
+            g.live.remove(&node);
+            g.killed.insert(node);
+            g.store.delete(&rlm_launch_store_key(node));
+            g.store.commit();
+            self.backend.teardown(node);
+            Ok(())
+        }
+    }
+
+    fn live_nodes(&self) -> BTreeSet<NodeId> {
+        let mut g = self.lock();
+        // Reconcile the believed-live set against backend ground truth: any child the backend reports dead
+        // has crashed (an orphan). Collect first (the probe borrows `self.backend` while `g` borrows the
+        // state), then prune — moving each to `dead`, deleting its stale intent.
+        let orphans: Vec<NodeId> = g
+            .live
+            .keys()
+            .copied()
+            .filter(|n| !self.backend.is_alive(*n))
+            .collect();
+        if !orphans.is_empty() {
+            for n in orphans {
+                g.live.remove(&n);
+                g.dead.insert(n);
+                g.store.delete(&rlm_launch_store_key(n));
+            }
+            g.store.commit();
+        }
+        g.live.keys().copied().collect()
+    }
+}
+
+/// Read the durable F2 high-water, if any (the single [`StoreKey::RlmWater`] record). `None` on a virgin
+/// store (genesis). A branchless helper — the `.expect` panic body is in stdlib, not a coverable branch
+/// (HR5); the `.map` closure runs only when a record exists (covered by every rehydrate-with-history test).
+fn read_water(store: &dyn Store) -> Option<WaterMark> {
+    store
+        .scan(&rlm_water_store_key())
+        .into_iter()
+        .next()
+        .map(|(_key, value)| {
+            postcard::from_bytes(&value).expect("decode persisted launch high-water")
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+    use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+    use vd_sim::io::mem::MemStore;
+
+    // ---- a deterministic in-process LaunchBackend ------------------------------------------------
+
+    #[derive(Default)]
+    struct FakeInner {
+        launched: Vec<NodeId>,
+        booked: Vec<(NodeId, SocketAddr)>,
+        torn_down: Vec<NodeId>,
+        alive: BTreeSet<NodeId>,
+        probes: u32,
+        fail_next: Option<String>,
+    }
+
+    /// Cheap-cloneable handle (state behind `Arc<Mutex<..>>`) so a test retains a view after moving one
+    /// clone into the `SpawnCore` — mirrors `MemSpawner`/`MemHub`.
+    #[derive(Clone, Default)]
+    struct FakeBackend {
+        inner: Arc<StdMutex<FakeInner>>,
+    }
+
+    impl FakeBackend {
+        fn g(&self) -> MutexGuard<'_, FakeInner> {
+            self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+        /// Arm the NEXT `launch` call to fail with `reason`.
+        fn fail_next(&self, reason: &str) {
+            self.g().fail_next = Some(reason.to_string());
+        }
+        /// Externally kill a node (simulate a child crash): the backend now reports it dead.
+        fn crash(&self, node: NodeId) {
+            self.g().alive.remove(&node);
+        }
+        fn probes(&self) -> u32 {
+            self.g().probes
+        }
+        fn book_count(&self) -> usize {
+            self.g().booked.len()
+        }
+        fn last_booked(&self) -> (NodeId, SocketAddr) {
+            *self.g().booked.last().expect("a booking happened")
+        }
+        fn torn_down(&self) -> Vec<NodeId> {
+            self.g().torn_down.clone()
+        }
+        fn launched(&self) -> Vec<NodeId> {
+            self.g().launched.clone()
+        }
+    }
+
+    impl LaunchBackend for FakeBackend {
+        fn launch(&self, spec: &LaunchSpec) -> Result<(), String> {
+            let mut g = self.g();
+            if let Some(reason) = g.fail_next.take() {
+                return Err(reason);
+            }
+            g.launched.push(spec.node);
+            g.alive.insert(spec.node);
+            Ok(())
+        }
+        fn is_alive(&self, node: NodeId) -> bool {
+            let mut g = self.g();
+            g.probes += 1;
+            g.alive.contains(&node)
+        }
+        fn teardown(&self, node: NodeId) {
+            let mut g = self.g();
+            g.torn_down.push(node);
+            g.alive.remove(&node);
+        }
+        fn book_peer(&self, node: NodeId, addr: SocketAddr) {
+            self.g().booked.push((node, addr));
+        }
+    }
+
+    // ---- fixtures --------------------------------------------------------------------------------
+
+    /// A system coord `[Universe, Galaxy(g), System(s)]` (a real multi-level lineage, not a stand-in).
+    fn system(g: u64, s: u64) -> RealmCoord {
+        RealmCoord::from_path(RealmPath::from_levels(vec![
+            RealmLevel::new(RealmKindTag::Universe, 0),
+            RealmLevel::new(RealmKindTag::Galaxy, g),
+            RealmLevel::new(RealmKindTag::System, s),
+        ]))
+        .expect("3-level path has a leaf")
+    }
+
+    /// A tuning with small explicit bases so ids/ports are easy to assert on.
+    fn tuning(first_node: u64, first_port: u16) -> SpawnTuning {
+        SpawnTuning {
+            first_node,
+            first_port,
+            bind_host: Ipv4Addr::LOCALHOST,
+        }
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+    }
+
+    fn core(backend: FakeBackend, tuning: SpawnTuning) -> SpawnCore<FakeBackend> {
+        SpawnCore::new(Box::new(MemStore::new()), backend, tuning)
+    }
+
+    const T: UniverseTick = UniverseTick(7);
+
+    // ---- tests -----------------------------------------------------------------------------------
+
+    #[test]
+    fn genesis_is_empty_and_mints_from_the_configured_base() {
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), tuning(1_000, 42_000));
+        assert_eq!(sc.live_nodes(), BTreeSet::new());
+        assert_eq!(sc.orphan_count(), 0);
+
+        let a = sc.spawn_realm(&system(1, 1), T).expect("first spawn");
+        assert_eq!(a, NodeId(1_000));
+        assert_eq!(fake.launched(), vec![NodeId(1_000)]);
+        assert_eq!(fake.last_booked(), (NodeId(1_000), addr(42_000)));
+    }
+
+    #[test]
+    fn spawn_mints_monotone_ids_and_books_each_peer_once() {
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), tuning(1_000, 42_000));
+
+        let a = sc.spawn_realm(&system(1, 1), T).expect("spawn a");
+        let b = sc.spawn_realm(&system(1, 2), T).expect("spawn b");
+        assert_eq!((a, b), (NodeId(1_000), NodeId(1_001)));
+
+        // One booking per spawn, each with its own monotone dev port.
+        assert_eq!(fake.book_count(), 2);
+        assert_eq!(
+            sc.live_nodes(),
+            BTreeSet::from([NodeId(1_000), NodeId(1_001)])
+        );
+        let slots = sc.live_slots();
+        assert_eq!(slots[&NodeId(1_000)].addr(), addr(42_000));
+        assert_eq!(slots[&NodeId(1_001)].addr(), addr(42_001));
+        assert_eq!(slots[&NodeId(1_000)].coord(), &system(1, 1));
+        assert_eq!(slots[&NodeId(1_000)].at_tick(), T);
+    }
+
+    #[test]
+    fn launch_failure_burns_the_slot_and_touches_no_live_state() {
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), tuning(1_000, 42_000));
+
+        fake.fail_next("fork: EAGAIN");
+        let err = sc.spawn_realm(&system(1, 1), T).expect_err("launch fails");
+        assert_eq!(
+            err,
+            SpawnError::LaunchFailed {
+                reason: "fork: EAGAIN".to_string()
+            }
+        );
+        // No live state, no booking, the intent was rolled back.
+        assert_eq!(sc.live_nodes(), BTreeSet::new());
+        assert_eq!(fake.book_count(), 0);
+
+        // The burned id/port are retired — the next spawn lands strictly above them (F2), not reused.
+        let next = sc.spawn_realm(&system(1, 2), T).expect("retry spawns");
+        assert_eq!(next, NodeId(1_001));
+        assert_eq!(fake.last_booked(), (NodeId(1_001), addr(42_001)));
+    }
+
+    #[test]
+    fn kill_is_a_two_arm_taxonomy_and_tears_down() {
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), tuning(1_000, 42_000));
+        let a = sc.spawn_realm(&system(1, 1), T).expect("spawn");
+
+        assert_eq!(sc.kill_realm(a), Ok(()));
+        assert_eq!(fake.torn_down(), vec![a]);
+        assert_eq!(sc.live_nodes(), BTreeSet::new());
+
+        // Killing again is AlreadyKilled; killing a never-minted id is UnknownNode.
+        assert_eq!(sc.kill_realm(a), Err(SpawnError::AlreadyKilled(a)));
+        assert_eq!(
+            sc.kill_realm(NodeId(9_999)),
+            Err(SpawnError::UnknownNode(NodeId(9_999)))
+        );
+    }
+
+    #[test]
+    fn live_nodes_prunes_a_crashed_child_and_caches_the_orphan() {
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), tuning(1_000, 42_000));
+        let a = sc.spawn_realm(&system(1, 1), T).expect("spawn a");
+        let b = sc.spawn_realm(&system(1, 2), T).expect("spawn b");
+
+        // A healthy reconcile keeps both (no orphan → no prune branch).
+        assert_eq!(sc.live_nodes(), BTreeSet::from([a, b]));
+        assert_eq!(sc.orphan_count(), 0);
+
+        // A crashes out-of-band; the next reconcile drops it and records the orphan.
+        fake.crash(a);
+        assert_eq!(sc.live_nodes(), BTreeSet::from([b]));
+        assert_eq!(sc.orphan_count(), 1);
+        let probes_after_reap = fake.probes();
+
+        // The corpse is cached — a further reconcile does NOT re-probe A (only the still-live B is probed).
+        assert_eq!(sc.live_nodes(), BTreeSet::from([b]));
+        assert_eq!(sc.orphan_count(), 1);
+        assert_eq!(fake.probes(), probes_after_reap + 1);
+    }
+
+    #[test]
+    fn rehydrate_reconstructs_survivors_rebooks_them_and_recovers_the_binding() {
+        let store = MemStore::new();
+        let retained = store.clone(); // shares the committed WAL (the kill-9 analog: RAM dies, disk lives)
+        let live_fake = FakeBackend::default();
+        {
+            let sc = SpawnCore::new(Box::new(store), live_fake.clone(), tuning(1_000, 42_000));
+            sc.spawn_realm(&system(1, 1), T).expect("spawn a");
+            sc.spawn_realm(&system(1, 2), T).expect("spawn b");
+        } // orchestrator "dies" — RAM gone, the committed store survives via the retained clone.
+
+        // A fresh backend (post-restart) that still sees the children alive; rehydrate over the SAME store.
+        let fresh = FakeBackend::default();
+        fresh.g().alive.extend([NodeId(1_000), NodeId(1_001)]);
+        let sc = SpawnCore::rehydrate(Box::new(retained), fresh.clone(), tuning(1_000, 42_000));
+
+        // Survivors recovered, each re-announced to the mesh, and the node→realm binding restored.
+        assert_eq!(
+            sc.live_nodes(),
+            BTreeSet::from([NodeId(1_000), NodeId(1_001)])
+        );
+        assert_eq!(fresh.book_count(), 2);
+        assert_eq!(sc.live_slots()[&NodeId(1_001)].coord(), &system(1, 2));
+
+        // The F2 water resumed past the survivors — the next mint is strictly above them.
+        let c = sc.spawn_realm(&system(1, 3), T).expect("spawn c");
+        assert_eq!(c, NodeId(1_002));
+    }
+
+    #[test]
+    fn rehydrate_resumes_past_deleted_survivors_never_maxplusone() {
+        let store = MemStore::new();
+        let retained = store.clone();
+        let fake = FakeBackend::default();
+        {
+            let sc = SpawnCore::new(Box::new(store), fake.clone(), tuning(1_000, 42_000));
+            sc.spawn_realm(&system(1, 1), T).expect("spawn a"); // 1_000
+            sc.spawn_realm(&system(1, 2), T).expect("spawn b"); // 1_001
+            let c = sc.spawn_realm(&system(1, 3), T).expect("spawn c"); // 1_002
+            sc.kill_realm(c).expect("kill c"); // intent for 1_002 deleted
+        }
+
+        // Only A,B survive in the ledger; C's intent is gone. max(survivors)+1 would WRONGLY be 1_002.
+        let fresh = FakeBackend::default();
+        let sc = SpawnCore::rehydrate(Box::new(retained), fresh, tuning(1_000, 42_000));
+        assert_eq!(
+            sc.live_slots().keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([NodeId(1_000), NodeId(1_001)])
+        );
+        // The durable high-water resumes at 1_003 — strictly above C, the retired id, not above the
+        // surviving max. This is the F2 guarantee a `max(survivors)+1` allocator would violate.
+        let d = sc.spawn_realm(&system(1, 4), T).expect("spawn d");
+        assert_eq!(d, NodeId(1_003));
+    }
+
+    #[test]
+    fn dev_port_exhaustion_is_loud_and_changes_nothing() {
+        let fake = FakeBackend::default();
+        // Start the port cursor at the very top so the SECOND spawn exhausts it.
+        let sc = core(fake.clone(), tuning(1_000, u16::MAX));
+
+        let a = sc.spawn_realm(&system(1, 1), T).expect("last port spawns");
+        assert_eq!(a, NodeId(1_000));
+
+        let err = sc
+            .spawn_realm(&system(1, 2), T)
+            .expect_err("port exhausted");
+        assert_eq!(
+            err,
+            SpawnError::LaunchFailed {
+                reason: "dev port space exhausted".to_string()
+            }
+        );
+        // The exhausted attempt burned nothing: only the first child is live, only it was booked.
+        assert_eq!(sc.live_nodes(), BTreeSet::from([NodeId(1_000)]));
+        assert_eq!(fake.book_count(), 1);
+    }
+
+    #[test]
+    fn dev_tuning_is_loopback_with_documented_bases() {
+        let t = SpawnTuning::dev();
+        assert_eq!(t.first_node, 1_000);
+        assert_eq!(t.first_port, 42_000);
+        assert_eq!(t.bind_host, Ipv4Addr::LOCALHOST);
+    }
+}

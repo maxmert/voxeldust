@@ -984,5 +984,12 @@ mod tests {
             SpawnError::AlreadyKilled(NodeId(5)).to_string(),
             "realm node already killed: node-5"
         );
+        assert_eq!(
+            SpawnError::LaunchFailed {
+                reason: "fork: EAGAIN".to_string()
+            }
+            .to_string(),
+            "realm launch failed: fork: EAGAIN"
+        );
     }
 }

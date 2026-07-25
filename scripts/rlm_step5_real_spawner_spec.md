@@ -98,6 +98,19 @@ struct LiveSlot {
 }
 ```
 
+> **IMPLEMENTATION NOTE (5b, LAYERING CORRECTION).** The `orch_control: Arc<MeshControl>` field above is
+> IMPOSSIBLE as drawn: `MeshControl` lives in `vd-io-prod`, and the dependency rule is `bins → node → sim`
+> — **vd-node cannot depend on vd-io-prod**. So peer-booking is delegated THROUGH the backend seam:
+> `LaunchBackend::book_peer(node, addr)` (the real `ProcLaunchBackend` in vd-bins calls
+> `MeshControl::update_peer_addr`; the fake records it). `SpawnInner` therefore holds NO mesh handle — the
+> kernel stays in vd-node, the mesh handle stays in vd-bins. Likewise the SHIPPED 5b `SpawnInner` is
+> flatter than drawn: `store: Box<dyn Store + Send + Sync>` (not `Arc<dyn Store>`) inside the mutex for
+> `&mut`-through-lock; `next_port` is a `u32` cursor (so port 65535 is usable and exhaustion is loud, never
+> wrapped); `LiveSlot` carries `{coord, addr, at_tick}` only — `SlotHandle`/`IncarnationCookie`/`pgid` are
+> deferred to 5c (no dead 5b state), and `live_cache` folds into `live_nodes`'s prune-and-cache path.
+> `SpawnCore<B>` holds `backend: B` beside `inner: Arc<Mutex<SpawnInner>>` (backend outside the mutex, so a
+> launch/probe never holds the state lock across an OS call).
+
 `Arc<Mutex<..>>` gives `Send + Sync` with `&self` — satisfies `Box<dyn RealmSpawner + Send + Sync>`
 (`rlm_runtime.rs:65`), exactly the `MemSpawner` pattern. All maps `BTreeMap`/`BTreeSet`
 (deterministic iteration — matters for `live_nodes()` ordering and replay).

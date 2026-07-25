@@ -92,6 +92,17 @@ enum StoreKey {
     Clock,
     /// Slice 3f-D: a durable crossing-abort reply pending a source ack (Mechanism Y).
     AbortReply(TransferId),
+    /// RLM Step 5b: one launch-intent record per live realm shard (write-ahead of the launch, so a
+    /// rehydrate reconstructs exactly the children the pre-crash orchestrator minted). Self-describing
+    /// VALUE (carries its own `NodeId`) — `scan(&[RLM_LAUNCH])` recovers the whole live set without
+    /// parsing keys, and `is_alive` reconciles each against backend ground truth. A DISTINCT family from
+    /// the D-6 saga WAL so the two never collide even when they share one redb file (the ONE key-space
+    /// authority — [`StoreKey::bytes`]).
+    RlmLaunch(NodeId),
+    /// RLM Step 5b: the F2 monotone allocator high-water (`next_node`/`next_port`) — a SINGLE record
+    /// (no payload key, like `Clock`). Persisted BEFORE each mint and NEVER derived from `max(survivors)`,
+    /// so a torn-down id's slot is never re-minted even after every survivor's intent is deleted.
+    RlmWater,
 }
 
 impl StoreKey {
@@ -101,6 +112,11 @@ impl StoreKey {
     const CLOCK: u8 = 4;
     /// Slice 3f-D: the crossing-abort-reply family tag (5 — the next free tag after CLOCK=4).
     const ABORT_REPLY: u8 = 5;
+    /// RLM Step 5b: the launch-intent family tag (6). D-RLM-2 (the deferred demand-ledger snapshot) will
+    /// take the NEXT free tag after these two when/if it lands — the tag space is append-only.
+    const RLM_LAUNCH: u8 = 6;
+    /// RLM Step 5b: the allocator-high-water family tag (7).
+    const RLM_WATER: u8 = 7;
 
     /// The store key bytes: family tag + postcard(id). postcard encoding of these small fixed-shape
     /// types is infallible (no I/O); `.expect` is straight-line at this monomorphic site (the panic body
@@ -125,9 +141,34 @@ impl StoreKey {
                 k.push(Self::ABORT_REPLY);
                 k.extend(postcard::to_allocvec(&t).expect("encode TransferId store key"));
             }
+            StoreKey::RlmLaunch(n) => {
+                k.push(Self::RLM_LAUNCH);
+                k.extend(postcard::to_allocvec(&n).expect("encode NodeId store key"));
+            }
+            StoreKey::RlmWater => k.push(Self::RLM_WATER),
         }
         k
     }
+}
+
+/// The EXACT durable key bytes for one realm's launch-intent record (`[RLM_LAUNCH] ++ postcard(node)`) —
+/// public to the crate so [`crate::rlm_spawn::SpawnCore`] stages intents through the SAME encoding the
+/// rehydrate scan reads back (zero key-byte drift; the encoding lives ONLY in [`StoreKey::bytes`]).
+#[must_use]
+pub(crate) fn rlm_launch_store_key(node: NodeId) -> Vec<u8> {
+    StoreKey::RlmLaunch(node).bytes()
+}
+
+/// The family prefix that `scan`s exactly the launch-intent records (RLM Step 5b rehydrate).
+#[must_use]
+pub(crate) fn rlm_launch_prefix() -> Vec<u8> {
+    vec![StoreKey::RLM_LAUNCH]
+}
+
+/// The durable key for the F2 allocator high-water (RLM Step 5b) — the single-record family.
+#[must_use]
+pub(crate) fn rlm_water_store_key() -> Vec<u8> {
+    StoreKey::RlmWater.bytes()
 }
 
 /// The EXACT durable store-key bytes the group-commit barrier stages for a directory row
@@ -1294,7 +1335,7 @@ fn commit_result(
 /// infallible for these fixed-shape types; the `.expect` panic body lives in stdlib, not a coverable
 /// caller branch — HR5, matching the codebase's `to_allocvec().expect` idiom). Instantiated per record
 /// type, each covered by its persist site.
-fn encode<T: Serialize>(value: &T) -> Bytes {
+pub(crate) fn encode<T: Serialize>(value: &T) -> Bytes {
     postcard::to_allocvec(value)
         .expect("postcard encodes a durable record")
         .into()

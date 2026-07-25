@@ -426,9 +426,13 @@ pub trait Store {
 }
 
 /// Closed spawn/kill failure taxonomy (thiserror), mirroring [`SendError`]. NO `BadProfile` arm:
-/// `profile_for` is infallible for every kind `RealmCoord::profile_kind` produces, so profile
-/// selection cannot fail — `spawn_realm`'s `Result` exists only as the future-placement seam, and
-/// both current variants are `kill_realm` outcomes (each independently reachable — no dead region).
+/// `profile_for` is infallible for every kind `RealmCoord::profile_kind` produces, so profile selection
+/// cannot fail. `UnknownNode`/`AlreadyKilled` are `kill_realm` outcomes; `LaunchFailed`
+/// is a REAL `spawn_realm` failure — a process fork/exec or (future) k8s admission that actually failed
+/// (RLM Step 5, decision OQ-1). It carries an operator-facing reason and drives the reconciler's
+/// exponential backoff (`exec_spinup`, `BACKOFF_CAP`); the in-process `MemSpawner` never produces it (its
+/// spawn is infallible), only the real `SpawnCore`/`ProcLaunchBackend` do. Each variant is independently
+/// reachable — no dead region (HR5).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SpawnError {
     /// `kill_realm` named an id this spawner never minted.
@@ -437,6 +441,10 @@ pub enum SpawnError {
     /// `kill_realm` named an id already torn down (F2: never resurrected under the same id).
     #[error("realm node already killed: {0}")]
     AlreadyKilled(NodeId),
+    /// `spawn_realm` could not launch the shard (fork/exec / admission failure). The reconciler backs off
+    /// and retries; the reserved id/port are NOT reclaimed (F2 monotonicity beats port thrift at dev scale).
+    #[error("realm launch failed: {reason}")]
+    LaunchFailed { reason: String },
 }
 
 /// The sealed spawn/kill port (RLM Step 1). Lives OUTSIDE the sealed shard (HR1): a shard cannot

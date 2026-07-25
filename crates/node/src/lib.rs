@@ -23,6 +23,7 @@ pub mod follower;
 pub mod health;
 pub mod orchestrator;
 pub mod rlm_runtime;
+pub mod rlm_spawn;
 pub mod saga_runtime;
 pub mod tracer;
 pub mod universe_clock;
