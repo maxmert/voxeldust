@@ -28,10 +28,15 @@ use serde::{Deserialize, Serialize};
 use core::f64::consts::TAU;
 
 use crate::celestial::{G, KEPLER_ECC_MAX, OrbitalElements, orbital_state};
-use crate::geometry::{AoiConfig, BandError, Boundary, ContainmentBand, RealmRegion};
-use crate::pose::{LatticePos, RealmId, frame_for_realm};
+use crate::frame::IdentityFrames;
+use crate::geometry::{
+    AoiConfig, BandError, Boundary, ContainmentBand, RealmRegion, region_depth,
+    region_signed_distance,
+};
+use crate::ids::UniverseTick;
+use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose, frame_for_realm};
 use crate::realm_coord::RealmCoord;
-use crate::realm_path::{RealmKindTag, RealmLevel};
+use crate::realm_path::{RealmKindTag, RealmLevel, RealmPath};
 use crate::rng::{SplitMix64, child_seed, realm_stream};
 use crate::taxonomy::{
     FrostThresholds, GalaxyType, SpectralClass, orbital_axis_au, sample_rayleigh,
@@ -433,6 +438,88 @@ pub fn moving_children_for_config(
     hosted: RealmId,
 ) -> Vec<(RealmId, OrbitalElements)> {
     moving_children(&generate_system_forest(seed_universe, config), hosted)
+}
+
+// ===== RLM Slice 5f-2: the lazy position → full-lineage RealmCoord resolver ==========================
+
+/// Resolve `pos` — a FRAME-LOCAL [`DVec3`] in the Universe root's OWN frame (cell-zero through P3,
+/// exactly the pose the containment regions are expressed in; mirrors the test-only `container_at`'s
+/// `at(pos)`) — to the FULL-LINEAGE [`RealmCoord`] of the DEEPEST realm whose boundary contains it.
+///
+/// It DESCENDS from the Universe root: at each level it picks the DEEPEST DIRECT child (a region whose
+/// `.parent == Some(current)`) whose boundary contains `pos` (`region_signed_distance <= 0` under
+/// [`IdentityFrames`], the P3 no-op reframe), EXTENDS the lineage by that child's [`RealmLevel`], and
+/// recurses; it STOPS when no direct child contains `pos`. It ALWAYS returns at least the root coord —
+/// the ambient Universe contains all reachable space (the container-fold identity), so an entity is
+/// always in ≥ one realm and the result is never empty.
+///
+/// This returns the WHOLE root→leaf lineage (built by `root.child(level)…`), NOT the lossy [`RealmId`]
+/// and NOT [`RealmCoord::lowered`]: the RLM ancestor-closure the orchestrator runs off this needs the
+/// UN-collapsed lineage (a `Galaxy`/`Universe` level is LOST through `RealmId`, and a System seed
+/// collapses across galaxies). It is the un-lossy `f(seed, config, pos)` twin of the leaf-only
+/// [`RealmId`] contract the test-only `container_at` pins.
+///
+/// HONEST SCOPE (D-41 / P4): this materializes the WHOLE (single-galaxy, walk-scale) containment forest
+/// once per call — acceptable at walk / single-galaxy scale. A per-subtree LAZY generator that resolves
+/// a 100K-realm / multi-galaxy universe WITHOUT materializing the whole forest is the owed P4 piece;
+/// this 5f-2 function nails the LINEAGE shape + the descend structure, and ONLY the generator's laziness
+/// is deferred. It resolves against the P3 LIVE containment forest (the walk roster
+/// [`generate_walk_forest`]+[`to_regions`], byte-identical to [`realm_regions_for`] at `walk_scale`) —
+/// the SAME geometry the sim's `RealmRegions` and the client draw — not the FA-5 visual single-system
+/// forest ([`realm_regions_for_config`]); unifying the two under one seed-lazy generator is the P4 owe.
+#[must_use]
+pub fn container_coord_at(_seed_universe: u64, config: &UniverseConfig, pos: DVec3) -> RealmCoord {
+    let regions = to_regions(&generate_walk_forest(config), config);
+    let pose = StampedPose::at_rest(
+        FrameRef::SystemSpace { system_seed: 0 },
+        pos,
+        UniverseTick(0),
+    );
+    // The root is ALWAYS the base of the lineage (an entity is in the Universe even beyond its shell —
+    // the container-fold identity). A well-formed forest has exactly one ambient root (`parent: None`).
+    let root = regions
+        .iter()
+        .find(|r| r.parent.is_none())
+        .expect("a well-formed forest has exactly one ambient root");
+    let mut coord = RealmCoord::from_path(RealmPath::from_levels(vec![
+        level_of(root.realm).expect("a seed-forest realm has a RealmLevel"),
+    ]))
+    .expect("a one-level path always has a leaf");
+    let mut current = root.realm;
+    // Descend the parent chain: extend into the deepest direct child that contains `pos`, until none.
+    while let Some(child) = deepest_containing_child(&regions, current, &pose) {
+        coord = coord.child(level_of(child).expect("a seed-forest realm has a RealmLevel"));
+        current = child;
+    }
+    coord
+}
+
+/// The DEEPEST direct child of `parent` (a region with `.parent == Some(parent)`) whose boundary
+/// contains `pose`, or `None` when none does (the descend's stop). In a well-formed containment tree at
+/// most one direct child contains a point; [`region_depth`] is a deterministic tiebreak should a
+/// malformed forest overlap siblings (never at walk scale). A MONOMORPHIC helper (concrete types) so the
+/// containment predicate is covered ONCE here, keeping [`container_coord_at`] a straight-line descend.
+fn deepest_containing_child(
+    regions: &[RealmRegion],
+    parent: RealmId,
+    pose: &StampedPose,
+) -> Option<RealmId> {
+    regions
+        .iter()
+        .filter(|r| r.parent == Some(parent))
+        .filter(|r| region_contains(pose, r))
+        .max_by_key(|r| region_depth(regions, r.realm))
+        .map(|r| r.realm)
+}
+
+/// `pose` is on/inside `region`'s boundary — the P3 instantaneous containment predicate
+/// (`signed_distance <= 0`), reframed under [`IdentityFrames`] (a no-op at P3). `.expect` because
+/// identity never errors — a real `Err` would be a P4 ephemeris bug and must fail LOUD, never degrade to
+/// a wrong containment. Monomorphic (the compare region is covered here, HR5).
+fn region_contains(pose: &StampedPose, region: &RealmRegion) -> bool {
+    region_signed_distance(pose, region, &IdentityFrames)
+        .expect("IdentityFrames never errors at P3")
+        <= 0.0
 }
 
 /// The walk-scale mandate forest as config-driven bodies, in forest order (Universe → Galaxy →
@@ -1111,6 +1198,102 @@ mod tests {
         assert_eq!(container_at(DVec3::new(5_000.0, 0.0, 0.0)), UNIVERSE);
         // Beyond EVERYTHING (outside the universe shell) → STILL the Universe, by fold identity.
         assert_eq!(container_at(DVec3::new(1.0e15, 0.0, 0.0)), UNIVERSE);
+    }
+
+    /// The FULL-lineage container coord of `pos` under the P3 walk forest (`seed 0`, `walk_scale`) —
+    /// the un-lossy `container_coord_at` twin of `container_at`.
+    fn coord_at(pos: DVec3) -> RealmCoord {
+        container_coord_at(0, &UniverseConfig::walk_scale(), pos)
+    }
+
+    /// An expected lineage from `(kind, seed)` pairs, root → leaf.
+    fn lineage(levels: &[(RealmKindTag, u64)]) -> RealmPath {
+        RealmPath::from_levels(levels.iter().map(|&(k, s)| RealmLevel::new(k, s)).collect())
+    }
+
+    #[test]
+    fn container_coord_resolves_the_full_lineage_for_the_walk_mandate_chain() {
+        use RealmKindTag::{Area, Galaxy, Planet, Station, System, Universe};
+        // The WHOLE POINT of this function vs `container_at`: it returns the FULL root→leaf lineage, so
+        // every case asserts `.path()` level-for-level (not just the lossy leaf `.lowered()`).
+
+        // Inside Planet A's SOI (20,0,0) → the full [Universe, Galaxy, System A, Planet A] lineage, which
+        // LOWERS to the leaf Planet A (lineage + lowered agree).
+        let planet = coord_at(DVec3::new(PLANET_A_OFFSET_M, 0.0, 0.0));
+        assert_eq!(
+            planet.path(),
+            &lineage(&[(Universe, 0), (Galaxy, 1), (System, 7), (Planet, 7)])
+        );
+        assert_eq!(planet.lowered(), PLANET_A);
+
+        // The origin (the star) → [Universe, Galaxy, System A] (inside System A, outside Planet A).
+        let origin = coord_at(DVec3::ZERO);
+        assert_eq!(
+            origin.path(),
+            &lineage(&[(Universe, 0), (Galaxy, 1), (System, 7)])
+        );
+        assert_eq!(origin.lowered(), SYSTEM_A);
+
+        // The Station BOX (-25,0,0) → the Station lineage (depth 3 directly under System A).
+        let station = coord_at(DVec3::new(STATION_A_OFFSET_M, 0.0, 0.0));
+        assert_eq!(
+            station.path(),
+            &lineage(&[(Universe, 0), (Galaxy, 1), (System, 7), (Station, 7)])
+        );
+        assert_eq!(station.lowered(), STATION_A);
+
+        // The Area BOX (25,0,0) → the DEEPEST 5-level lineage [Universe, Galaxy, System A, Planet A,
+        // Area A] (the descend recurses past Planet A into its Area child).
+        let area = coord_at(DVec3::new(AREA_OFFSET_M, 0.0, 0.0));
+        assert_eq!(
+            area.path(),
+            &lineage(&[
+                (Universe, 0),
+                (Galaxy, 1),
+                (System, 7),
+                (Planet, 7),
+                (Area, 7)
+            ])
+        );
+        assert_eq!(area.lowered(), AREA_A);
+
+        // Inside the SIBLING System B (130,0,0) → its own [Universe, Galaxy, System B] lineage (System 8,
+        // NOT System 7 — the lineage disambiguates the two same-depth systems).
+        let system_b = coord_at(DVec3::new(SYSTEM_B_OFFSET_M, 0.0, 0.0));
+        assert_eq!(
+            system_b.path(),
+            &lineage(&[(Universe, 0), (Galaxy, 1), (System, 8)])
+        );
+        assert_eq!(system_b.lowered(), SYSTEM_B);
+
+        // Outside everything but inside the Universe (5000,0,0: beyond the Galaxy r=180, inside the
+        // Universe r=1e9) → JUST the root [Universe] (no direct child of the root contains it).
+        let root = coord_at(DVec3::new(5_000.0, 0.0, 0.0));
+        assert_eq!(root.path(), &lineage(&[(Universe, 0)]));
+        assert_eq!(root.lowered(), UNIVERSE);
+
+        // Beyond the Universe shell too (1e15) → STILL just [Universe] by the container-fold identity
+        // (the root is unconditional — its own boundary is never tested).
+        let beyond = coord_at(DVec3::new(1.0e15, 0.0, 0.0));
+        assert_eq!(beyond.path(), &lineage(&[(Universe, 0)]));
+        assert_eq!(beyond.lowered(), UNIVERSE);
+    }
+
+    #[test]
+    fn container_coord_at_is_a_deterministic_pure_function() {
+        // f(seed, config, pos): byte-identical across calls (no `Date::now`/rng), so the orchestrator's
+        // ancestor-closure is reproducible cross-host (HR1). Two independent resolves of the deepest
+        // point (Area A) are equal, path and all.
+        let a = coord_at(DVec3::new(AREA_OFFSET_M, 0.0, 0.0));
+        let b = container_coord_at(
+            0,
+            &UniverseConfig::walk_scale(),
+            DVec3::new(AREA_OFFSET_M, 0.0, 0.0),
+        );
+        assert_eq!(a, b);
+        // The lineage length is exactly depth + 1 (root at index 0, leaf last) — the descend appended a
+        // level per hop, never truncating (the "full lineage, not lowered()" contract).
+        assert_eq!(a.path().levels().len(), 5);
     }
 
     #[test]
