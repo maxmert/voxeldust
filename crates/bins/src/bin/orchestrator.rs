@@ -250,6 +250,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     env.parse_or("VD_REALM_DRAIN_GRACE_MS", 3_000)?,
                 ),
                 anchors: spawn_anchors,
+                // RLM 5e-4 adopted-orphan liveness (env-overridable, ONE default each): the slow cookie-probe
+                // cadence + the bounded probe read timeout, so a rehydrated survivor's `/whoami` guard never
+                // storms or stalls the reconcile sweep.
+                orphan_probe_interval: std::time::Duration::from_millis(
+                    env.parse_or("VD_REALM_ORPHAN_PROBE_MS", 1_000)?,
+                ),
+                probe_timeout: std::time::Duration::from_millis(
+                    env.parse_or("VD_REALM_PROBE_TIMEOUT_MS", 500)?,
+                ),
             },
         ),
         vd_node::rlm_spawn::SpawnTuning::dev(),

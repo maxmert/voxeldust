@@ -56,13 +56,32 @@ pub struct ProcSpawnTuning {
     /// universe seed/scale, `VD_ORCH`, …). The per-realm vars (`VD_NODE_ID`/`VD_BIND`/`VD_OWN_COORD`/…) are
     /// derived per launch from the [`LaunchSpec`] and merged OVER these.
     pub anchors: Vec<(&'static str, String)>,
+    /// RLM 5e-4: the slow cadence between ADOPTED-orphan `/whoami` cookie-probes. `is_alive` returns the
+    /// cached result within this window (O(1)-amortized), re-probing only once it elapses — so a probe
+    /// STORM never hits the tick thread and a survivor's later death is still eventually observed (D7/D8).
+    pub orphan_probe_interval: Duration,
+    /// RLM 5e-4: the bounded read timeout on the orphan cookie-probe, so a wedged/dead survivor's probe
+    /// cannot stall the reconcile sweep.
+    pub probe_timeout: Duration,
 }
 
-/// One launched realm shard this backend owns — the OS `Child` (for `try_wait` liveness + the teardown
-/// reap) and its pid (which, via `process_group(0)`, is also the pgid the group signal targets).
-struct OwnedSlot {
-    child: Child,
-    pid: u32,
+/// One realm shard this backend tracks. `Owned` = launched by THIS orchestrator process (holds the OS
+/// `Child` for `try_wait` liveness + the teardown reap). `Orphan` = a survivor ADOPTED on rehydrate after a
+/// restart (RLM 5e-4): a DIFFERENT process launched it, so there is no `Child` handle — liveness is the
+/// `/whoami` incarnation-cookie probe (the pid-reuse guard), keyed on the persisted `(pid, cookie, probe)`.
+enum Slot {
+    Owned {
+        child: Child,
+        pid: u32,
+    },
+    Orphan {
+        pid: u32,
+        cookie: IncarnationCookie,
+        probe: SocketAddr,
+        /// `(when, result)` of the last cookie-probe — the cadence cache (`orphan_probe_interval`). Seeded
+        /// optimistic-ALIVE by `adopt` so the first post-rehydrate sweep does NOT probe (defers the burst).
+        cache: Option<(Instant, bool)>,
+    },
 }
 
 /// The real-process [`LaunchBackend`]: forks a `vd-shard` per realm and books it into the orchestrator's
@@ -72,9 +91,10 @@ pub struct ProcLaunchBackend {
     /// The orchestrator's own mesh control surface — the real [`LaunchBackend::book_peer`] target.
     control: Arc<MeshControl>,
     tuning: ProcSpawnTuning,
-    /// Live owned children, keyed by the id the kernel minted. `Mutex` (not the kernel's — this is the
-    /// backend's private OS-handle table); deterministic `BTreeMap` order.
-    slots: Mutex<BTreeMap<NodeId, OwnedSlot>>,
+    /// Tracked shards (owned children + adopted orphans), keyed by the id the kernel minted. `Mutex` (not
+    /// the kernel's — this is the backend's private OS-handle table); deterministic `BTreeMap` order. Only
+    /// the single sim/reconcile thread touches it, so `is_alive`'s bounded probe may hold the lock briefly.
+    slots: Mutex<BTreeMap<NodeId, Slot>>,
     /// A per-backend monotone sequence mixed into each cookie so two spawns in the same nanosecond still
     /// differ.
     mint_seq: AtomicU64,
@@ -92,7 +112,7 @@ impl ProcLaunchBackend {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, BTreeMap<NodeId, OwnedSlot>> {
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<NodeId, Slot>> {
         self.slots.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -143,46 +163,98 @@ impl LaunchBackend for ProcLaunchBackend {
         let child = crate::spawn_node_grouped(&exe, &self.tuning.anchors, &node_env, log)
             .map_err(|e| format!("spawn realm {}: {e}", spec.node.0))?;
         let pid = child.id();
-        self.lock().insert(spec.node, OwnedSlot { child, pid });
+        self.lock().insert(spec.node, Slot::Owned { child, pid });
         Ok(pid)
     }
 
+    fn adopt(&self, node: NodeId, pid: u32, cookie: IncarnationCookie, probe: SocketAddr) {
+        // RLM 5e-4: reconstruct an ORPHAN slot for a survivor recovered from the durable launch ledger on a
+        // restart — a DIFFERENT orchestrator process launched it, so there is no `Child` handle; `is_alive`
+        // confirms it via the `/whoami` cookie-probe (the pid-reuse guard). Seed the cache optimistic-ALIVE
+        // so the FIRST post-rehydrate sweep does NOT probe (defers the recovery burst by one interval, D8);
+        // it re-probes once the interval elapses, so a survivor's later death is still observed (D7).
+        self.lock().insert(
+            node,
+            Slot::Orphan {
+                pid,
+                cookie,
+                probe,
+                cache: Some((Instant::now(), true)),
+            },
+        );
+    }
+
     fn is_alive(&self, node: NodeId) -> bool {
-        // Owned-slot liveness: a real non-blocking `waitpid`. `Ok(None)` = still running; `Ok(Some(_))` =
-        // exited (reaped here); `Err`/unknown = dead. (The orphan cookie-probe path is slice 5e.)
+        // Owned = a real non-blocking `waitpid` (`Ok(None)` = still running; else dead). Orphan = the slow-
+        // cadence `/whoami` cookie-probe: return the cached result within `orphan_probe_interval`, else probe
+        // and require the echoed cookie to EQUAL ours (a recycled pid answering with a different cookie —
+        // or nothing bound — reads dead: the pid-reuse guard). Single sim-thread caller, so a bounded probe
+        // may hold the lock.
         match self.lock().get_mut(&node) {
-            Some(slot) => matches!(slot.child.try_wait(), Ok(None)),
+            Some(Slot::Owned { child, .. }) => matches!(child.try_wait(), Ok(None)),
+            Some(Slot::Orphan {
+                cookie,
+                probe,
+                cache,
+                ..
+            }) => match cache {
+                Some((at, result)) if at.elapsed() < self.tuning.orphan_probe_interval => *result,
+                _ => {
+                    let alive = crate::admin_get_body(*probe, "/whoami", Some(self.tuning.probe_timeout))
+                        == Some(cookie.to_env_string());
+                    *cache = Some((Instant::now(), alive));
+                    alive
+                }
+            },
             None => false,
         }
     }
 
     fn teardown(&self, node: NodeId) {
         // Best-effort (the trait contract): an unknown/already-torn-down id is a no-op.
-        let Some(OwnedSlot { mut child, pid }) = self.lock().remove(&node) else {
+        let Some(slot) = self.lock().remove(&node) else {
             return;
         };
         let grace = self.tuning.drain_grace;
-        // DETACHED so `kill_realm` never blocks on the grace window (D2). SIGTERM the group → poll → SIGKILL
-        // → REAP. The final `wait()` releases the zombie (a dropped-without-wait `Child` would leak a
-        // `<defunct>` per spin-down — the exact self-DoS on RLM's up/DOWN churn the vet flagged).
-        std::thread::spawn(move || {
-            crate::signal_group(pid, "TERM");
-            let deadline = Instant::now() + grace;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => return, // exited gracefully + reaped by try_wait
-                    Ok(None) => {}
-                    Err(_) => break, // wait errored — fall through to the hard kill
-                }
-                if Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(TEARDOWN_POLL);
+        // DETACHED so `kill_realm` never blocks on the grace window (D2). SIGTERM the group → poll → SIGKILL.
+        match slot {
+            // Owned: we hold the `Child`, so the final `wait()` REAPS it (a dropped-without-wait `Child`
+            // would leak a `<defunct>` per spin-down — the self-DoS on RLM's up/DOWN churn the vet flagged).
+            Slot::Owned { mut child, pid } => {
+                std::thread::spawn(move || {
+                    crate::signal_group(pid, "TERM");
+                    let deadline = Instant::now() + grace;
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) => return, // exited gracefully + reaped by try_wait
+                            Ok(None) => {}
+                            Err(_) => break, // wait errored — fall through to the hard kill
+                        }
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        std::thread::sleep(TEARDOWN_POLL);
+                    }
+                    crate::signal_group(pid, "KILL");
+                    let _ = child.kill(); // SIGKILL the direct child too
+                    let _ = child.wait(); // REAP — never leave a zombie
+                });
             }
-            crate::signal_group(pid, "KILL");
-            let _ = child.kill(); // SIGKILL the direct child too
-            let _ = child.wait(); // REAP — never leave a zombie
-        });
+            // Orphan: a DIFFERENT process's child (reparented to init on the crash), so we cannot `wait()` it
+            // — signal its group, escalate to SIGKILL after the grace, and let init reap the corpse.
+            Slot::Orphan { pid, .. } => {
+                std::thread::spawn(move || {
+                    crate::signal_group(pid, "TERM");
+                    let deadline = Instant::now() + grace;
+                    while Instant::now() < deadline && crate::pid_alive(pid) {
+                        std::thread::sleep(TEARDOWN_POLL);
+                    }
+                    if crate::pid_alive(pid) {
+                        crate::signal_group(pid, "KILL");
+                    }
+                });
+            }
+        }
     }
 
     fn book_peer(&self, node: NodeId, addr: SocketAddr) {

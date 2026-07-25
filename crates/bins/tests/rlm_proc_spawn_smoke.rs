@@ -142,6 +142,9 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
         workdir: h.workdir.clone(),
         drain_grace: Duration::from_secs(3),
         anchors: anchors(&h.trust_dir),
+        // Fast probe cadence + a generous read timeout for the adopt leg below (the orphan cookie-probe).
+        orphan_probe_interval: Duration::from_millis(100),
+        probe_timeout: Duration::from_millis(500),
     };
     let backend = ProcLaunchBackend::new(Arc::clone(&h.control), tuning);
     let boot_deadline = Duration::from_secs(30);
@@ -173,7 +176,7 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
     let galaxy_node = NodeId(1_001);
     let galaxy_probe = reserve_tcp_addr();
     let galaxy_cookie = backend.mint_cookie(galaxy_node);
-    backend
+    let galaxy_pid = backend
         .launch(&LaunchSpec {
             node: galaxy_node,
             coord: galaxy(2),
@@ -222,8 +225,45 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
         "the torn-down node is no longer a live slot"
     );
 
-    // Clean up the galaxy shard (best-effort — the process would otherwise outlive the test).
+    // --- 4 (RLM 5e-4): ORPHAN ADOPTION over the /whoami cookie-probe. ---------------------------------
+    // Model an orchestrator RESTART: a SECOND backend (the rebuilt process) inherits NO `Child` for the
+    // still-running galaxy shard. It ADOPTS it from the persisted `(pid, cookie, probe)` — exactly what
+    // `SpawnCore::rehydrate` does per survivor. Liveness is then the incarnation-cookie probe, not `try_wait`.
+    let restarted = ProcLaunchBackend::new(
+        Arc::clone(&h.control),
+        ProcSpawnTuning {
+            exe: "vd-shard",
+            workdir: h.workdir.clone(),
+            drain_grace: Duration::from_secs(3),
+            anchors: anchors(&h.trust_dir),
+            orphan_probe_interval: Duration::from_millis(100),
+            probe_timeout: Duration::from_millis(500),
+        },
+    );
+    restarted.adopt(galaxy_node, galaxy_pid, galaxy_cookie, galaxy_probe);
+
+    // adopt seeds the cache optimistic-ALIVE (defers the first probe), so let it lapse to force a REAL probe;
+    // is_alive then dials /whoami and requires the echoed cookie to EQUAL the adopted one (the pid-reuse guard).
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        restarted.is_alive(galaxy_node),
+        "the adopted orphan is confirmed alive via the /whoami cookie-probe (cookie matches)"
+    );
+
+    // Kill the galaxy shard; once its pid is gone, the probe can no longer connect, so the cookie-probe reads
+    // DEAD — the orphan-path negative case (a recycled pid answering a DIFFERENT cookie reads dead the same way).
     backend.teardown(galaxy_node);
+    let reap_deadline = Duration::from_secs(10);
+    let start = Instant::now();
+    while start.elapsed() < reap_deadline && pid_alive(galaxy_pid) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_millis(150)); // lapse the probe cache so is_alive re-probes
+    assert!(
+        !restarted.is_alive(galaxy_node),
+        "the adopted orphan reads DEAD once the shard exits — the cookie-probe cannot connect"
+    );
+
     std::thread::sleep(Duration::from_millis(500));
     let _ = std::fs::remove_dir_all(h.workdir.parent().unwrap_or(&h.workdir));
 }

@@ -684,6 +684,24 @@ is monomorphic + fake-`LaunchBackend`-covered in `vd-node` (Tier-A); the OS shim
 >   anchors + a rehydrate-DISABLED control arm that DOES double-spawn [D6], MID-FSYNC asserting fork-did-not-
 >   happen [D1], the two-`lowered()` pin [D2]) + the 4b real-launcher proptest arm (each new op paired with
 >   a deterministic example test [D9]).
+> - **5e-4 DONE (uncommitted at time of write).** `LaunchBackend` grew `adopt(node, pid, cookie, probe)`
+>   (added to the trait AFTER `launch`); `SpawnCore::rehydrate` calls it per `pid:Some` survivor (was a
+>   manual `alive`-prime in the Tier-A tests — adopt is now the ONE thing that marks a re-owned child live).
+>   Tier-B `ProcLaunchBackend`: `OwnedSlot`→`enum Slot{Owned,Orphan}`; `adopt` inserts an `Orphan{pid,cookie,
+>   probe,cache:Some((now,true))}` (optimistic-alive seed defers the FIRST post-rehydrate probe = D8 no-storm);
+>   `is_alive` = Owned `try_wait` / Orphan cadence cookie-probe (`admin_get_body(probe,"/whoami",Some(
+>   probe_timeout)) == Some(cookie.to_env_string())`, cached within `orphan_probe_interval`); `teardown` =
+>   Owned reap / Orphan signal-only (init reaps the reparented corpse). `ProcSpawnTuning` grew
+>   `orphan_probe_interval` (`VD_REALM_ORPHAN_PROBE_MS`, 1000) + `probe_timeout` (`VD_REALM_PROBE_TIMEOUT_MS`,
+>   500). Gate: 15 Tier-A kernel tests + the process gate (extended with an ADOPT+cookie-probe leg: launch a
+>   real shard → adopt into a SECOND backend → `is_alive` true via `/whoami` equality → kill → `is_alive`
+>   false once the pid is gone). **DELIBERATE DEVIATION from §1.5's "promote to Owned-equivalent on first
+>   contact, leave the probe path":** the orphan is probed at the SLOW cadence for its whole life, NOT
+>   promoted-then-untracked — because RLM's ONLY crash-detection signal is `live_nodes → is_alive`, so a
+>   promoted-and-untracked orphan that later crashed would report alive forever (a player in a dead realm
+>   gets no shard — a correctness bug). The cadence cache still satisfies the anti-storm intent (D8) AND
+>   retains continuous death detection (strictly more robust). The head-layer death detection §1.5 assumes
+>   is a P6/warp-era concern, not wired in RLM yet.
 - **5f — `--demand` launcher + bootstrap seed-demand + non-inert `RlmTuning` + realm-aware
   `select_rehome_target`.** Root-chain-only boot; orchestrator seeds the bootstrap-containing-realm
   demand from the stored spawn pos (§2.2); AoI grows the rest. `--static-forest` retained (temporary

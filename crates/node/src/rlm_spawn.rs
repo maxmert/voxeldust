@@ -125,8 +125,17 @@ pub trait LaunchBackend: Send + Sync {
     /// backoff). The in-process fake never fails unless told to; the OS shim maps a failed spawn.
     fn launch(&self, spec: &LaunchSpec) -> Result<u32, String>;
 
-    /// Ground-truth liveness of a previously launched node — a crashed child returns `false`. Reads
-    /// external state (a pid, a pod phase); the kernel reconciles `live_nodes` against it.
+    /// Re-adopt a survivor recovered from the durable launch ledger after an orchestrator RESTART (RLM
+    /// Step 5e): a DIFFERENT process launched it, so the backend has no `Child` handle — it reconstructs an
+    /// ORPHAN entry keyed on the persisted `(pid, cookie, probe)`, and `is_alive` then confirms it via the
+    /// `/whoami` cookie-probe (the pid-reuse guard) rather than `try_wait`. Called by [`SpawnCore::rehydrate`]
+    /// for each confirmed (`pid: Some`) survivor BEFORE the first `live_nodes` sweep. The fake records it;
+    /// the OS shim builds the orphan slot.
+    fn adopt(&self, node: NodeId, pid: u32, cookie: IncarnationCookie, probe: SocketAddr);
+
+    /// Ground-truth liveness of a previously launched/adopted node — a crashed child returns `false`. Reads
+    /// external state (a pid `try_wait`, or an adopted orphan's `/whoami` cookie-probe); the kernel
+    /// reconciles `live_nodes` against it.
     fn is_alive(&self, node: NodeId) -> bool;
 
     /// Best-effort teardown of a node (signal / pod delete). The reconciler is the SOLE kill authority, so
@@ -301,7 +310,11 @@ impl<B: LaunchBackend> SpawnCore<B> {
                 postcard::from_bytes(&value).expect("decode persisted launch intent");
             let addr = SocketAddr::from((tuning.bind_host, intent.port));
             match intent.pid {
-                Some(_pid) => {
+                Some(pid) => {
+                    // RLM 5e-4: re-adopt the survivor (the backend has no `Child` for it post-restart) so
+                    // `is_alive` confirms it via the `/whoami` cookie-probe; then re-announce its addr.
+                    let probe = SocketAddr::from((tuning.bind_host, intent.probe_port));
+                    backend.adopt(intent.node, pid, intent.cookie, probe);
                     backend.book_peer(intent.node, addr);
                     path_index.insert(intent.coord.path().clone(), intent.node);
                     live.insert(
@@ -600,6 +613,9 @@ mod tests {
         /// minted cookie + the two allocated ports INTO the backend (not re-derived there).
         launched_specs: Vec<(NodeId, SocketAddr, SocketAddr, IncarnationCookie)>,
         booked: Vec<(NodeId, SocketAddr)>,
+        /// The `(node, pid, cookie, probe)` each `adopt` received — proves rehydrate re-adopts every
+        /// confirmed survivor with the persisted identity (RLM 5e-4).
+        adopted: Vec<(NodeId, u32, IncarnationCookie, SocketAddr)>,
         torn_down: Vec<NodeId>,
         alive: BTreeSet<NodeId>,
         probes: u32,
@@ -644,6 +660,10 @@ mod tests {
         fn last_spec(&self) -> (NodeId, SocketAddr, SocketAddr, IncarnationCookie) {
             *self.g().launched_specs.last().expect("a launch happened")
         }
+        /// Every `(node, pid, cookie, probe)` `adopt` received — proves rehydrate re-adopts each survivor.
+        fn adopted(&self) -> Vec<(NodeId, u32, IncarnationCookie, SocketAddr)> {
+            self.g().adopted.clone()
+        }
     }
 
     impl LaunchBackend for FakeBackend {
@@ -663,6 +683,13 @@ mod tests {
             g.alive.insert(spec.node);
             // A deterministic fake pid (distinct per launch) — `unwrap_or` keeps the fn total for HR5.
             Ok(9_000 + u32::try_from(g.launched.len()).unwrap_or(0))
+        }
+        fn adopt(&self, node: NodeId, pid: u32, cookie: IncarnationCookie, probe: SocketAddr) {
+            let mut g = self.g();
+            g.adopted.push((node, pid, cookie, probe));
+            // An adopted survivor is alive (the real backend confirms via the /whoami cookie-probe; the fake
+            // models a successful probe) — so a rehydrate then reports it live without a manual `alive` prime.
+            g.alive.insert(node);
         }
         fn is_alive(&self, node: NodeId) -> bool {
             let mut g = self.g();
@@ -838,9 +865,9 @@ mod tests {
             sc.spawn_realm(&system(1, 2), T).expect("spawn b");
         } // orchestrator "dies" — RAM gone, the committed store survives via the retained clone.
 
-        // A fresh backend (post-restart) that still sees the children alive; rehydrate over the SAME store.
+        // A fresh backend (post-restart). rehydrate ADOPTS each survivor — no manual `alive` prime: adopt
+        // is what marks a re-owned child live (the real backend confirms it via the /whoami cookie-probe).
         let fresh = FakeBackend::default();
-        fresh.g().alive.extend([NodeId(1_000), NodeId(1_001)]);
         let sc = SpawnCore::rehydrate(
             Box::new(retained),
             fresh.clone(),
@@ -855,6 +882,17 @@ mod tests {
         );
         assert_eq!(fresh.book_count(), 2);
         assert_eq!(sc.live_slots()[&NodeId(1_001)].coord(), &system(1, 2));
+
+        // Each survivor was re-adopted with its PERSISTED identity — the pid, the minted cookie, and the
+        // probe port from the ledger (the pid-reuse guard's inputs). pids are the fake's 9_000+launch-index;
+        // cookies are the deterministic mint of each node id; probe ports are the odd half of each pair.
+        assert_eq!(
+            fresh.adopted(),
+            vec![
+                (NodeId(1_000), 9_001, IncarnationCookie(1_000), addr(42_001)),
+                (NodeId(1_001), 9_002, IncarnationCookie(1_001), addr(42_003)),
+            ]
+        );
 
         // The F2 water resumed past the survivors — the next mint is strictly above them.
         let c = sc.spawn_realm(&system(1, 3), T).expect("spawn c");
@@ -974,7 +1012,6 @@ mod tests {
         }
 
         let fresh = FakeBackend::default();
-        fresh.g().alive.insert(NodeId(1_000));
         let sc = SpawnCore::rehydrate(
             Box::new(retained.clone()),
             fresh.clone(),
@@ -989,6 +1026,13 @@ mod tests {
             BTreeSet::from([NodeId(1_000)])
         );
         assert_eq!(fresh.book_count(), 1);
+
+        // ONLY the completed survivor was adopted (with its persisted pid/cookie/probe) — the partial is
+        // never adopted, so adopt is the one thing that distinguishes a re-owned child from a dropped one.
+        assert_eq!(
+            fresh.adopted(),
+            vec![(NodeId(1_000), 9_001, IncarnationCookie(1_000), addr(42_001))]
+        );
 
         // The partial's stale intent was DELETED from the durable store; only the survivor's remains.
         let remaining: BTreeSet<Vec<u8>> = retained
