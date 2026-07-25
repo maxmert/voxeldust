@@ -240,6 +240,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 health.clone(),
                 probe_tuning.stall_deadline(tick_hz),
             )),
+            // RLM 5c: the realm spawner sets VD_INCARNATION_COOKIE (a real forked shard); ABSENT for the
+            // in-process rigs (no /whoami mounted). Echoed verbatim on /whoami for the Step-5e pid-reuse
+            // guard — we re-emit the exact string the parent minted (no decode/re-encode round-trip).
+            env.string("VD_INCARNATION_COOKIE")
+                .ok()
+                .filter(|s| !s.is_empty()),
         );
     }
     // Cloud reschedule re-plumb: the peer-addr auto-resolver (the production caller of update_peer_addr) —

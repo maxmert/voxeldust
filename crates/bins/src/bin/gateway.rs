@@ -117,6 +117,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 health.clone(),
                 probe_tuning.stall_deadline(tick_hz),
             )),
+            // gateway carries no incarnation cookie (RLM 5c: /whoami is realm-shard-only).
+            None,
         );
     }
     // Cloud reschedule re-plumb: the peer-addr auto-resolver (production caller of update_peer_addr) — spawned

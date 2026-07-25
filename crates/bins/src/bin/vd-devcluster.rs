@@ -26,7 +26,7 @@ use std::fs::File;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode};
+use std::process::{Child, ExitCode};
 use std::time::{Duration, Instant};
 
 use vd_bins::GALAXY_SEED;
@@ -527,20 +527,23 @@ fn down(work: &Path) -> Result<(), String> {
     // and is cleared, so a claim-only crash state is always recoverable here.
     let pids = read_pids(work)?;
     for pid in &pids {
-        signal_group(*pid, "TERM");
+        vd_bins::signal_group(*pid, "TERM");
     }
     let deadline = Instant::now() + TERM_GRACE;
-    while Instant::now() < deadline && pids.iter().any(|p| alive(*p)) {
+    while Instant::now() < deadline && pids.iter().any(|p| vd_bins::pid_alive(*p)) {
         std::thread::sleep(POLL_INTERVAL);
     }
     for pid in &pids {
-        if alive(*pid) {
-            signal_group(*pid, "KILL");
+        if vd_bins::pid_alive(*pid) {
+            vd_bins::signal_group(*pid, "KILL");
         }
     }
     // Brief settle, then confirm.
     std::thread::sleep(POLL_INTERVAL);
-    let survivors: Vec<u32> = pids.into_iter().filter(|p| alive(*p)).collect();
+    let survivors: Vec<u32> = pids
+        .into_iter()
+        .filter(|p| vd_bins::pid_alive(*p))
+        .collect();
     if !survivors.is_empty() {
         return Err(format!(
             "could not kill {survivors:?}; leaving the runfile ({}) for a retry",
@@ -558,7 +561,7 @@ fn status(ports: SlotPorts, work: &Path) -> Result<(), String> {
         return Ok(());
     }
     let pids = read_pids(work).unwrap_or_default();
-    let live = pids.iter().filter(|p| alive(**p)).count();
+    let live = pids.iter().filter(|p| vd_bins::pid_alive(**p)).count();
     // `status` reports the base bootstrap signal (any shard granted a realm) — it does not re-derive the
     // shape (the pid count already reflects 3 vs 4 vs 5 nodes; a multi-shard cluster shows the base signal
     // once the source grants).
@@ -576,6 +579,8 @@ fn status(ports: SlotPorts, work: &Path) -> Result<(), String> {
 
 /// Spawn a sibling node binary (resolved relative to this launcher) in its OWN
 /// process group, with the merged env, redirecting its output to `<work>/<bin>.log`.
+/// Thin wrapper over the SHARED [`vd_bins::spawn_node_grouped`] (the RLM 5c DRY lift): it owns only the
+/// launcher's naming conventions (sibling-exe resolution + the `<work>/<label>.log` path).
 fn spawn_node(
     bin: &str,
     label: &str,
@@ -586,41 +591,11 @@ fn spawn_node(
     // HR3: ONE shard binary — the SOURCE and DEST both run `vd-shard`, distinguished by env + a distinct
     // `label` (the DEST logs to `vd-shard-b.log` while spawning the SAME `vd-shard` executable), never a
     // per-shard binary. `bin` is the sibling executable; `label` names the log + the kill-record entry.
-    let exe = sibling_binary(bin)?;
+    let exe = vd_bins::sibling_binary(bin)?;
     let log =
         File::create(work.join(format!("{label}.log"))).map_err(|e| format!("log file: {e}"))?;
-    let err = log.try_clone().map_err(|e| format!("log clone: {e}"))?;
-    let mut cmd = Command::new(exe);
-    for (k, v) in common.iter().chain(node_env.iter()) {
-        cmd.env(k, v);
-    }
-    cmd.stdout(log).stderr(err);
-    #[cfg(unix)]
-    {
-        // Own process group so `down` can SIGTERM/SIGKILL the whole subtree by a
-        // recorded group id (and a recycled bare PID can't be hit by accident).
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    cmd.spawn().map_err(|e| format!("spawn {label}: {e}"))
-}
-
-/// Resolve a sibling binary next to this launcher in the cargo target dir.
-fn sibling_binary(name: &str) -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    let dir = exe
-        .parent()
-        .ok_or("launcher has no parent dir")?
-        .to_path_buf();
-    let candidate = dir.join(name);
-    if candidate.exists() {
-        Ok(candidate)
-    } else {
-        Err(format!(
-            "{name} not found next to the launcher ({}); run `cargo build` first",
-            candidate.display()
-        ))
-    }
+    vd_bins::spawn_node_grouped(&exe, common, &node_env, log)
+        .map_err(|e| format!("spawn {label}: {e}"))
 }
 
 /// The dev-control client address book seeded into the gateway: one
@@ -705,32 +680,6 @@ fn dump_log_tail(work: &Path, bin: &str) {
             }
         }
     }
-}
-
-// ---- process signalling ------------------------------------------------------
-
-/// Send `sig` to the process GROUP led by `pid` (negative target). Best-effort;
-/// `kill`'s "No such process" on an already-dead group is expected and silenced.
-fn signal_group(pid: u32, sig: &str) {
-    let _ = Command::new("kill")
-        .arg(format!("-{sig}"))
-        .arg(format!("-{pid}"))
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-/// Is `pid` still a live process? (`kill -0` is the POSIX existence probe; its
-/// "No such process" on a dead pid is the negative answer, silenced.)
-fn alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 // ---- small helpers -----------------------------------------------------------

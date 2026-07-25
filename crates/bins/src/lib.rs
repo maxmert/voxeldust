@@ -96,16 +96,20 @@ fn spawn_signal_watcher(
 /// unauthenticated (a kubelet `httpGet` presents no token; access is NetworkPolicy-gated in S4). Binds a plain
 /// `TcpListener` + `axum::serve(probe_router(source))`; a bind failure is fatal (a probe-less pod would be
 /// silently un-restartable / never-Ready in k8s).
+/// `cookie` (RLM 5c) is `Some` ONLY on a spawned realm shard (its `VD_INCARNATION_COOKIE`) — it mounts
+/// the `/whoami` echo the realm spawner's pid-reuse guard reads (Step 5e); the orchestrator + gateway pass
+/// `None` (bare-status routes only).
 pub fn spawn_probe_server(
     runtime: &tokio::runtime::Handle,
     addr: SocketAddr,
     source: std::sync::Arc<dyn vd_io_prod::probe::HealthSource>,
+    cookie: Option<String>,
 ) {
     runtime.spawn(async move {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .unwrap_or_else(|e| panic!("probe server failed to bind {addr}: {e}"));
-        axum::serve(listener, vd_io_prod::probe::probe_router(source))
+        axum::serve(listener, vd_io_prod::probe::probe_router(source, cookie))
             .await
             .expect("probe server");
     });
@@ -1682,6 +1686,90 @@ pub fn spawn_node(
     let mut cmd = Command::new(bin);
     for (k, v) in common.iter().chain(node_env.iter()) {
         cmd.env(k, v);
+    }
+    cmd.spawn()
+}
+
+// ---- shared launcher primitives (RLM 5c DRY lift) ----------------------------
+// These four were private to the `vd-devcluster` launcher; the RLM real-process realm spawner
+// (`proc_launch::ProcLaunchBackend`) needs the IDENTICAL launch/kill/liveness primitives, so they live
+// here as ONE path both share (HR3/DRY). No libc — process-group signalling is via the POSIX `kill` tool
+// (RLM Step-5 OQ-3). The plain [`spawn_node`] above stays byte-identical for its 12+ process-tier callers.
+
+/// Resolve a sibling binary (e.g. `vd-shard`) next to THIS process's executable in the cargo target dir.
+///
+/// # Errors
+/// The binary is absent next to the launcher (a build that never produced it).
+pub fn sibling_binary(name: &str) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or("launcher has no parent dir")?
+        .to_path_buf();
+    let candidate = dir.join(name);
+    if candidate.exists() {
+        Ok(candidate)
+    } else {
+        Err(format!(
+            "{name} not found next to the launcher ({}); run `cargo build` first",
+            candidate.display()
+        ))
+    }
+}
+
+/// Send `sig` to the process GROUP led by `pid` (the NEGATIVE `-pid` target) via the POSIX `kill` tool.
+/// Best-effort; a "No such process" on an already-dead group is expected and silenced.
+pub fn signal_group(pid: u32, sig: &str) {
+    let _ = Command::new("kill")
+        .arg(format!("-{sig}"))
+        .arg(format!("-{pid}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Is `pid` still a live process? (`kill -0` is the POSIX existence probe.)
+///
+/// NOTE (RLM 5e): this is PID-REUSE-UNSAFE for an ADOPTED orphan after an orchestrator restart — a
+/// recycled pid answers "alive". Owned-slot liveness uses [`std::process::Child::try_wait`] (a real
+/// `waitpid` on a handle we own); the orphan path (5e) gates `pid_alive` behind an incarnation-cookie
+/// probe, never `kill -0` alone.
+#[must_use]
+pub fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Spawn one node binary with `common` env merged over `node_env`, redirecting stdout+stderr to `log`,
+/// and (unix) making the child LEAD ITS OWN PROCESS GROUP (`process_group(0)` ⇒ child pid == pgid) so a
+/// later [`signal_group`] reaches the whole subtree and a recycled bare pid can't be hit by accident.
+/// `exe` is a resolved path (via [`sibling_binary`]); `log` is a PARAMETER (each caller names its own
+/// per-node log file). The grouped+logged spawn the dev-cluster launcher AND the realm spawner share.
+///
+/// # Errors
+/// Propagates the OS spawn error (e.g. the binary is missing) or a `log` handle-clone failure.
+pub fn spawn_node_grouped(
+    exe: &std::path::Path,
+    common: &[(&'static str, String)],
+    node_env: &[(&'static str, String)],
+    log: std::fs::File,
+) -> std::io::Result<Child> {
+    let err = log.try_clone()?;
+    let mut cmd = Command::new(exe);
+    for (k, v) in common.iter().chain(node_env.iter()) {
+        cmd.env(k, v);
+    }
+    cmd.stdout(log).stderr(err);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
     cmd.spawn()
 }

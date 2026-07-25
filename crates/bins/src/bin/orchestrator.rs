@@ -298,6 +298,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::clone(&health),
                 probe_tuning.stall_deadline(tick_hz),
             )),
+            // the orchestrator carries no incarnation cookie (RLM 5c: /whoami is realm-shard-only).
+            None,
         );
     }
     // Slice 1: SIGTERM/SIGINT flips this flag; the loop breaks to run the graceful drain below. The

@@ -2,9 +2,16 @@
 //! served identically by ALL THREE bins (HR3). A SEPARATE router from `admin_router` on purpose: `/admin/*`
 //! serves topology (directory + leases + sagas) and must gain auth before any routable bind, while probes are
 //! UNAUTHENTICATED by necessity (a kubelet `httpGet` presents no token) — coupling them would open the
-//! topology surface to the unauth kubelet posture. The probe response is a BARE status code (no body), so no
-//! path exists for cluster state to leak to an unauth caller; a partitioned-vs-full-vs-booting distinction
-//! lives behind the auth-gated `/metrics`, never here.
+//! topology surface to the unauth kubelet posture. The `/healthz`+`/readyz` responses are a BARE status
+//! code (no body), so no path exists for cluster state to leak to an unauth caller; a
+//! partitioned-vs-full-vs-booting distinction lives behind the auth-gated `/metrics`, never here.
+//!
+//! RLM 5c adds ONE body-returning route, `/whoami`, mounted ONLY on a spawned realm shard (a `Some` cookie)
+//! — it echoes that incarnation's [`IncarnationCookie`](vd_core::incarnation::IncarnationCookie) so the
+//! realm spawner can confirm a probe-addr holder is the EXACT child it launched (the Step-5e pid-reuse
+//! guard). The cookie is a per-incarnation NONCE the parent itself minted, not cluster state and not a
+//! secret (the guard relies on the true child HOLDING this probe port, not on cookie secrecy), so echoing
+//! it leaks nothing — the no-topology posture is preserved.
 //!
 //! HR1/seam: this is thin axum GLUE (Tier-B) over the PURE decision surface in `vd_node::health` (Tier-A,
 //! 100% region+branch). Each bin injects its own [`HealthSource`] whose `report()` reads a lock-free
@@ -146,14 +153,25 @@ impl HealthSource for PublishedHealth {
 #[derive(Clone)]
 struct ProbeState {
     source: Arc<dyn HealthSource>,
+    /// RLM 5c: this incarnation's cookie, echoed on `/whoami`. `None` on the orchestrator/gateway (they
+    /// mount no `/whoami`); `Some` only on a spawned realm shard. `Arc<str>` so a clone-per-request is cheap.
+    cookie: Option<Arc<str>>,
 }
 
 /// Build the ONE probe router: `/healthz` (liveness) + `/readyz` (readiness), each a bare status code.
-pub fn probe_router(source: Arc<dyn HealthSource>) -> axum::Router {
-    axum::Router::new()
+/// RLM 5c: a `Some(cookie)` ALSO mounts `/whoami` (the sole body-returning route — see the module posture
+/// note); `None` installs only the bare-status routes.
+pub fn probe_router(source: Arc<dyn HealthSource>, cookie: Option<String>) -> axum::Router {
+    let mut router = axum::Router::new()
         .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .with_state(ProbeState { source })
+        .route("/readyz", get(readyz));
+    if cookie.is_some() {
+        router = router.route("/whoami", get(whoami));
+    }
+    router.with_state(ProbeState {
+        source,
+        cookie: cookie.map(Arc::from),
+    })
 }
 
 /// k8s LIVENESS: `200` while live, `503` ONLY on a detected running wedge (a deliberate drain reads live).
@@ -176,14 +194,22 @@ async fn readyz(State(state): State<ProbeState>) -> StatusCode {
     }
 }
 
+/// RLM 5c pid-reuse guard (Step 5e): echo this incarnation's cookie as the `200` body so the realm
+/// spawner can confirm a probe-addr holder is the EXACT child it launched. Mounted only when a cookie is
+/// present, so `cookie` is always `Some` here; `unwrap_or_default` keeps the handler total (no dead arm)
+/// and leaks nothing but the nonce the parent itself minted.
+async fn whoami(State(state): State<ProbeState>) -> String {
+    state.cookie.as_deref().unwrap_or_default().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// One blocking HTTP/1.1 GET against the served probe router (raw bytes = what a kubelet `httpGet` sends);
-    /// returns the numeric status. Mirrors `admin::tests::http_get`.
-    fn probe_status(report: HealthReport, path: &str) -> u16 {
+    /// One blocking HTTP/1.1 GET against the served probe router (raw bytes = what a kubelet `httpGet`
+    /// sends); returns the numeric status AND the response body. Mirrors `admin::tests::http_get`.
+    fn probe_get(report: HealthReport, cookie: Option<String>, path: &str) -> (u16, String) {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -196,7 +222,7 @@ mod tests {
                 .expect("bind");
             let addr = listener.local_addr().expect("addr");
             tokio::spawn(async move {
-                axum::serve(listener, probe_router(source))
+                axum::serve(listener, probe_router(source, cookie))
                     .await
                     .expect("serve");
             });
@@ -209,13 +235,39 @@ mod tests {
             let text = String::from_utf8(response).expect("utf8 response");
             let status_line = text.lines().next().expect("status line");
             // "HTTP/1.1 200 OK" → 200
-            status_line
+            let status = status_line
                 .split_whitespace()
                 .nth(1)
                 .expect("status code")
                 .parse::<u16>()
-                .expect("numeric status")
+                .expect("numeric status");
+            let body = text
+                .split_once("\r\n\r\n")
+                .map(|(_, b)| b.to_owned())
+                .unwrap_or_default();
+            (status, body)
         })
+    }
+
+    /// The bare-status probes carry no cookie (orchestrator/gateway posture) — the common case.
+    fn probe_status(report: HealthReport, path: &str) -> u16 {
+        probe_get(report, None, path).0
+    }
+
+    #[test]
+    fn whoami_echoes_the_cookie_when_present_and_is_absent_otherwise() {
+        let report = HealthReport {
+            live: true,
+            ready: true,
+        };
+        // A shard with a cookie serves /whoami echoing exactly the minted nonce.
+        let (status, body) = probe_get(report, Some("deadbeefcookie".to_string()), "/whoami");
+        assert_eq!(status, 200);
+        assert_eq!(body, "deadbeefcookie");
+        // With no cookie (orchestrator/gateway), /whoami is not mounted → 404, and the bare-status routes
+        // still answer.
+        assert_eq!(probe_get(report, None, "/whoami").0, 404);
+        assert_eq!(probe_get(report, None, "/readyz").0, 200);
     }
 
     #[test]
