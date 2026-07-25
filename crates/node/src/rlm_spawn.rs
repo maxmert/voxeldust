@@ -368,6 +368,13 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
             }),
         );
         g.store.commit();
+        // RLM 5e D1 (CRITICAL): the v1 intent+water must be DURABLE ON DISK before the child forks. `commit`
+        // is block-on-PRIOR — it hands the batch to the off-tick writer and returns before ITS fsync — so
+        // without this flush a kill-9 in the [fork issued .. v1 fsync] window would leave a live child with
+        // NO recoverable intent (rehydrate reconstructs nothing → headless zombie) AND lose the id/port
+        // water advance (→ F2 id-reuse → double-spawn). `flush` parks until v1 is fsync'd; a crash now
+        // degrades to at most a `pid:None` partial rehydrate DROPS (D-RLM-5), never a no-intent orphan.
+        g.store.flush();
         g.next_node += 1;
         g.next_port = next_port;
 

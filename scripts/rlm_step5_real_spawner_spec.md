@@ -649,6 +649,41 @@ is monomorphic + fake-`LaunchBackend`-covered in `vd-node` (Tier-A); the OS shim
   restart) against the shared-handle refactor. Extends the 4b crash-replay proptest with a real-launcher
   variant. (Absorbing 5c-3 here is deliberate: the store-share is unexercised until the reconciler is
   armed at 5f, and 5e both PRECEDES the arm and OWNS the crash test that proves the share.)
+
+> **5e VET AMENDMENTS (workflow `wf_71fd3e40`, GO_WITH_FIXES + 2 user decisions 2026-07-25).**
+> - **STORE: SEPARATE `launch.redb`, NOT a shared-writer (user decision; supersedes the "share ONE file"
+>   line above).** redb takes a process-exclusive lock, and the single-barrier atomicity that a shared file
+>   would buy was ALREADY surrendered by D1's two-barrier design — so `SpawnCore`'s launch ledger gets its
+>   OWN redb file + writer (a fresh instance of the SAME proven store; ZERO edits to the depth-1
+>   single-writer/seq/Drop core the D-6 kill-9 proptests pin). This DECOUPLES launch fsyncs from the
+>   per-tick universe-clock barrier — a warp-burst subtree spin-up can never stall the clock (the D4
+>   seamless-freeze hazard the shared writer created). Cost: one extra writer thread + two-file boot.
+> - **D1 CRITICAL (blocking): write-ahead must be DURABLE BEFORE THE FORK.** `RedbStore::commit` is
+>   block-on-PRIOR (submits this batch to the off-tick writer, returns before ITS fsync), so `spawn_realm`
+>   forking right after the v1 commit races v1's durability → a kill-9 in that window = headless zombie +
+>   F2 id-reuse + double-spawn. FIX: the `Store` seam grows `flush(&mut self)` (block until every committed
+>   write is durable; `MemStore` = no-op, `RedbStore` = wait-durable-through-last-submitted); `spawn_realm`
+>   does commit(v1) → `store.flush()` → `backend.launch` → commit(v2). A crash then degrades to at most a
+>   `pid:None` partial (D-RLM-5), never a no-intent orphan with a reusable id.
+> - **D-RLM-6 = C (lazy resolve-on-miss)** — 5e PICKS + ledgers only (DEFERRED.md D-RLM-6); 5f builds the
+>   miss-trigger + re-resolve + the `PeerLocate` addr arm (validated in the no-DNS process gate).
+> - **D3:** `SpawnInner` gains a `path_index: BTreeMap<RealmPath, NodeId>`; `closure_peers` does an
+>   exact-key lookup per ancestor (O(depth·log L), not the O(depth·L) full scan) — done in 5e since 5e
+>   wires the spawn path LIVE.
+> - **D2 (scope, ledger):** the launch ledger is full-`RealmPath`-keyed ⇒ NO double-spawn galaxy-wide; but
+>   every DIRECTORY-HEAD-keyed reconciler decision (absent/teardown/force-reap + C's resolve) keys the
+>   lossy `coord.lowered()` and is single-galaxy-correct until D-41's path-indexed directory — pin it with
+>   a two-same-`lowered()`-id case in the kill-9 gate; gate WARP (5f/Step 7) on D-41.
+> - **D5:** the rehydrated `minted` is a SUPERSET of pre-crash `minted` (the launch reconcile drains a
+>   head-up entry that the live-projection re-seeds), drained on sweep-1 — the proptest invariant is
+>   superset-+-sweep-1-drain, NOT byte-identical equality.
+> - **Sub-slices (each gate-able):** 5e-1 flush seam + the D1 fix; 5e-2 orch-bin wiring (launch.redb +
+>   `SpawnCore<ProcLaunchBackend>`, `RlmTuning::default()` inert → byte-identical); 5e-3 rehydrate seed +
+>   the `path_index`; 5e-4 orphan-adopt (`LaunchBackend::adopt` + `Slot::Orphan` + slow-cadence cookie-probe
+>   with a post-promotion probe [D7] + per-sweep cap [D8]); 5e-5 kill-9 process gate (ADOPT with full shard
+>   anchors + a rehydrate-DISABLED control arm that DOES double-spawn [D6], MID-FSYNC asserting fork-did-not-
+>   happen [D1], the two-`lowered()` pin [D2]) + the 4b real-launcher proptest arm (each new op paired with
+>   a deterministic example test [D9]).
 - **5f — `--demand` launcher + bootstrap seed-demand + non-inert `RlmTuning` + realm-aware
   `select_rehome_target`.** Root-chain-only boot; orchestrator seeds the bootstrap-containing-realm
   demand from the stored spawn pos (§2.2); AoI grows the rest. `--static-forest` retained (temporary

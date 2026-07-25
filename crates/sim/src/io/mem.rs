@@ -149,6 +149,12 @@ impl Store for MemStore {
             }
         }
     }
+
+    fn flush(&mut self) {
+        // No-op: `commit` merges staged into `committed` synchronously, so a committed write is ALREADY
+        // durable (this in-memory twin models the fsync as instantaneous). The redb backend is where
+        // `flush` actually parks for the off-tick fsync.
+    }
 }
 
 #[derive(Debug)]

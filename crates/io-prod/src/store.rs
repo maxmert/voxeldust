@@ -826,6 +826,14 @@ impl Store for RedbStore {
             }
         }
     }
+
+    fn flush(&mut self) {
+        // RLM Step 5e write-ahead-before-fork: park until EVERY submitted batch (incl. the one `commit`
+        // just handed the off-tick writer) has fsynced — `commit` is block-on-PRIOR, so without this the
+        // caller's LAST commit is durable only after the NEXT commit. Reuses the existing durability park
+        // (same `backpressure_stalls()` accounting, same writer-death liveness escape).
+        self.flush_blocking();
+    }
 }
 
 impl Drop for RedbStore {
@@ -887,6 +895,27 @@ mod tests {
                 "both committed records recovered, ascending"
             );
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn store_flush_seam_parks_until_the_committed_batch_is_durable() {
+        // RLM 5e D1: the `Store::flush` seam (distinct from `commit`, which is block-on-PRIOR) parks until
+        // every already-committed batch is fsync'd — `spawn_realm` calls it so the launch intent is ON DISK
+        // before the child forks. After flush, the last submitted batch is durable.
+        let path = temp_path();
+        let (mut s, h) = open(&path);
+        s.put(b"launch-intent", &b(b"v1"));
+        s.commit();
+        s.flush(); // the new Store trait method → RedbStore::flush → flush_blocking
+        assert!(
+            h.durable_through() >= h.last_submitted(),
+            "flush parked until the committed batch fsync'd (durable caught up to submitted)"
+        );
+        assert_eq!(
+            s.scan(b"launch-intent"),
+            vec![(b"launch-intent".to_vec(), b(b"v1"))]
+        );
         let _ = std::fs::remove_file(&path);
     }
 

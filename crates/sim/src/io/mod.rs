@@ -423,6 +423,14 @@ pub trait Store {
     fn scan(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Bytes)>;
     /// THE durability barrier: make every staged `put`/`delete` durable atomically (group-commit).
     fn commit(&mut self);
+    /// BLOCK until every already-`commit`ted write is durable on disk (fsync'd), not merely submitted.
+    /// `commit` is block-on-PRIOR (it stages the current batch to an off-tick writer and returns before
+    /// THAT batch's own fsync), so a caller that must not proceed until its LAST commit is durable — RLM
+    /// Step 5e's write-ahead-BEFORE-fork (`spawn_realm` must not fork a child until the launch intent is on
+    /// disk, else a crash orphans a child with no recoverable record) — calls `flush` after `commit`. The
+    /// synchronous MemStore is durable at `commit`, so `flush` is a no-op there; the redb backend parks
+    /// until its last submitted batch fsyncs.
+    fn flush(&mut self);
 }
 
 /// Closed spawn/kill failure taxonomy (thiserror), mirroring [`SendError`]. NO `BadProfile` arm:
