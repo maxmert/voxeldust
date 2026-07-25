@@ -578,23 +578,41 @@ is monomorphic + fake-`LaunchBackend`-covered in `vd-node` (Tier-A); the OS shim
 >    `#[cfg_attr(coverage_nightly, coverage(off))]` / `coverage-exemptions.toml` entry on `proc_launch.rs`
 >    — the Tier-B posture is proven by the §8 process gate; exemptions stay reserved for Tier-A code.
 >
-> **Build order (3 gate-able stages):** 5c-1 = vd-core `IncarnationCookie` + the vd-node seam growth
-> (Tier-A 100% against the one `FakeBackend`); 5c-2 = the vd-bins DRY lift + `ProcLaunchBackend` +
-> shard `/whoami` + the process smoke test (Tier-B); 5c-3 = the shared-`RedbStore` refactor + the inert
-> live-wire of `SpawnCore<ProcLaunchBackend>` into the orchestrator bin (`RlmTuning::default()` keeps it
-> byte-identical).
+> **Build order — AS BUILT (2 gate-able stages; 5c-3 REFOLDED into 5e):** 5c-1 = vd-core
+> `IncarnationCookie` + the vd-node seam growth (Tier-A 100% against the one `FakeBackend`) — COMMITTED
+> `1a57d33`. 5c-2 = the vd-bins DRY lift + `/whoami` (5c-2a `6a04107`) + `ProcLaunchBackend` + the process
+> smoke gate (5c-2b `bc6e1af`, Tier-B). **5c-3 (the shared-`RedbStore` refactor + the orchestrator-bin
+> wire) is DEFERRED to 5e**, decided during implementation: `SpawnCore` is INERT under
+> `RlmTuning::default()` (the reconciler never sweeps ⇒ it never writes its store), so landing the durable
+> store-share in 5c-3 would wire durability into a path NOTHING exercises — and the share is an invasive
+> change to the depth-1 single-writer D-6 durability core (shared monotone seq, two channel senders, a
+> drop-order/join hazard) that the D-6 kill-9 crash proptests exercise. Its correct home is **5e**, where
+> the launch-ledger rehydrate is BUILT and the kill-9-then-rehydrate gate PROVES the shared-writer
+> coordination + drop order don't break durability — and 5e precedes 5f (which arms `RlmTuning`), so the
+> spawner is never armed over an unshared store. The `MemSpawner` placeholder at `orchestrator.rs:239`
+> stays until 5e swaps it for `SpawnCore<ProcLaunchBackend>` over the shared redb. The real spawner itself
+> (kernel + hands) is COMPLETE and PROVEN forking real `vd-shard`s as of 5c-2b.
 - **5d — CA-1 addressing + idempotency-by-coord.** `update_peer_addr` push at spawn (orch + dest→
   gateway); `VD_PEERS` = ancestor closure; reply-on-connection convergence. *Tests:* orch reaches a
   spawned shard; an older shard reaches a newer via a learned reply lane (pure-loopback repro, D-18
   discipline); a re-issued `SpinUp` on a live coord is a no-op (idempotency keyed on `coord.path`,
   not incarnation — the C-1 guard fix); absent `VD_PEER_HOSTS` ⇒ clean no-op.
-- **5e — crash re-discovery (the C-1/H-1/H-4 capstone).** Durable intent domain; `LaunchLedger::
-  rehydrate` + `DirectoryCore` rehydrate before first sweep; durable id/port high-water; orphan-head
-  sweep; cookie-guarded orphan reap. *Gate tests (process-tier):* **kill-9 the orchestrator
-  mid-spawn (before head commit) → rehydrate repopulates `minted`+directory → re-drive → NO
-  double-spawn, NO headless zombie, NO F2 id-reuse**; a stranded head with no ledger cell is adopted
-  or reaped after the freeze; a killed-then-crashed id is never re-minted. Extends the 4b crash-
-  replay proptest with a real-launcher variant.
+- **5e — crash re-discovery (the C-1/H-1/H-4 capstone) + the ABSORBED 5c-3 durable wiring.** FIRST lands
+  what 5c-3 deferred (see the amendment): the shared-`RedbStore` handle (shared monotone seq + the single
+  writer/join, so `SpawnCore`'s launch-ledger and the saga WAL share ONE physical redb in SEPARATE
+  barriers) and the orchestrator-bin swap of the `MemSpawner` placeholder for
+  `SpawnCore<ProcLaunchBackend>` (built with the retained `Arc<MeshControl>` + a `ProcSpawnTuning` whose
+  anchors are the orchestrator's own boot env). THEN the crash machinery on top: the orphan-adopt path
+  (`ProcLaunchBackend::adopt` + `Slot::Orphan` + the `/whoami` cookie-probe liveness, all descoped from 5c
+  per D4), `LaunchLedger::rehydrate` + `DirectoryCore` rehydrate before the first sweep, durable id/port
+  high-water, orphan-head sweep, cookie-guarded orphan reap. *Gate tests (process-tier):* **kill-9 the
+  orchestrator mid-spawn (before head commit) → rehydrate repopulates `minted`+directory → re-drive → NO
+  double-spawn, NO headless zombie, NO F2 id-reuse**; a stranded head with no ledger cell is adopted or
+  reaped after the freeze; a killed-then-crashed id is never re-minted. **This gate is ALSO where the
+  shared-writer durability is PROVEN** — re-run the full D-6 crash proptest suite (`R-6d4-A` both-ends
+  restart) against the shared-handle refactor. Extends the 4b crash-replay proptest with a real-launcher
+  variant. (Absorbing 5c-3 here is deliberate: the store-share is unexercised until the reconciler is
+  armed at 5f, and 5e both PRECEDES the arm and OWNS the crash test that proves the share.)
 - **5f — `--demand` launcher + bootstrap seed-demand + non-inert `RlmTuning` + realm-aware
   `select_rehome_target`.** Root-chain-only boot; orchestrator seeds the bootstrap-containing-realm
   demand from the stored spawn pos (§2.2); AoI grows the rest. `--static-forest` retained (temporary
