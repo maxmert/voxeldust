@@ -194,10 +194,16 @@ render-crossing-smoke:
 node-per-realm-walk:
     cargo test -p vd-bins --features dev-control --test node_per_realm_walk -- --nocapture
 
+# RLM 5c-2b: the real-process ProcLaunchBackend gate — forks a real vd-shard (Planet 7 + Galaxy), asserts
+# it boots + echoes its incarnation cookie on /whoami + teardown reaps it (pid gone, no zombie). Tier-B
+# (vd-bins), so this process proof stands in for coverage on the launch/liveness/teardown syscalls.
+rlm-proc-spawn:
+    cargo test -p vd-bins --test rlm_proc_spawn_smoke -- --nocapture
+
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn coverage
 
 # One-time setup helper.
 coverage-setup:

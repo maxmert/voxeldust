@@ -11,6 +11,8 @@
 //! This is Tier-B (process glue): exercised by the process-tier parity + smoke
 //! tests, not the coverage gate.
 
+pub mod proc_launch;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus};
@@ -1697,24 +1699,33 @@ pub fn spawn_node(
 // (RLM Step-5 OQ-3). The plain [`spawn_node`] above stays byte-identical for its 12+ process-tier callers.
 
 /// Resolve a sibling binary (e.g. `vd-shard`) next to THIS process's executable in the cargo target dir.
+/// Tries the exe's own dir first (the deploy/launcher layout: bins beside each other in `target/debug`),
+/// then its parent (the `cargo test` layout: a test binary lives in `target/debug/deps`, one level BELOW
+/// the real bins) — so the SAME resolver serves the launcher AND a process-tier test that forks a bin.
 ///
 /// # Errors
-/// The binary is absent next to the launcher (a build that never produced it).
+/// The binary is absent in both candidate dirs (a build that never produced it).
 pub fn sibling_binary(name: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let dir = exe
         .parent()
         .ok_or("launcher has no parent dir")?
         .to_path_buf();
-    let candidate = dir.join(name);
-    if candidate.exists() {
-        Ok(candidate)
-    } else {
-        Err(format!(
-            "{name} not found next to the launcher ({}); run `cargo build` first",
-            candidate.display()
-        ))
+    let beside = dir.join(name);
+    if beside.exists() {
+        return Ok(beside);
     }
+    // `cargo test` fallback: the bins are in the parent of `deps/`.
+    if let Some(up) = dir.parent() {
+        let up_candidate = up.join(name);
+        if up_candidate.exists() {
+            return Ok(up_candidate);
+        }
+    }
+    Err(format!(
+        "{name} not found next to the launcher ({}) or its parent; run `cargo build` first",
+        beside.display()
+    ))
 }
 
 /// Send `sig` to the process GROUP led by `pid` (the NEGATIVE `-pid` target) via the POSIX `kill` tool.
