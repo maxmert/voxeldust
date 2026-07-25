@@ -173,14 +173,16 @@ impl RealmPath {
 }
 
 /// Lowercase hex alphabet for [`RealmPath::to_env_string`] (a table, so the encode has no `write!`
-/// `Result` arm to leave uncovered — HR5).
-const HEX_LOWER: [char; 16] = [
+/// `Result` arm to leave uncovered — HR5). `pub(crate)` so [`crate::incarnation`] shares the ONE hex
+/// vocabulary (DRY) rather than re-declaring it.
+pub(crate) const HEX_LOWER: [char; 16] = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
 ];
 
 /// One lowercase-hex digit → its nibble. Accepts ONLY what [`RealmPath::to_env_string`] emits (`0-9`,
-/// `a-f`); anything else is `None` (rejected LOUD). Monomorphic (every arm covered, HR5).
-fn hex_digit(c: u8) -> Option<u8> {
+/// `a-f`); anything else is `None` (rejected LOUD). Monomorphic (every arm covered, HR5). `pub(crate)`
+/// so [`crate::incarnation`] shares it (DRY).
+pub(crate) fn hex_digit(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
         b'a'..=b'f' => Some(c - b'a' + 10),

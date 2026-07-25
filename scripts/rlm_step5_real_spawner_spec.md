@@ -526,6 +526,63 @@ is monomorphic + fake-`LaunchBackend`-covered in `vd-node` (Tier-A); the OS shim
   by the process gate; syscall lines exempted. *Test:* a spawned Planet boots `RealmId::Planet(seed)`
   with the planet profile; a spawned Galaxy carries `signal_relay`; child's authored frames byte-
   identical to a static one at the same synced tick (Cat-A DET-1).
+
+> **5c VET AMENDMENTS (workflow `wf_12f77998`, GO_WITH_FIXES — these SUPERSEDE the 5c bullet above and
+> the §1.3/§1.5/§4 detail where they conflict).** The vet confirmed 10 defects in the first-draft 5c
+> design; the corrected, buildable 5c is:
+>
+> 1. **Owned-path only — orphan/adopt DESCOPED to 5e (D4).** 5c ships `launch`, Owned `is_alive`
+>    (`try_wait`), Owned `teardown`, `book_peer`, `mint_cookie`, and the `/whoami` echo plumbing
+>    (dormant). `AdoptSpec`, `Slot::Orphan`, `ProcLaunchBackend::adopt`, the orphan cookie-probe cadence,
+>    and the cookie-guarded teardown branch move to **5e**, where the kill-9-then-rehydrate PROCESS gate
+>    actually constructs orphans and drives both arms of the pid-reuse guard. 5c's rehydrate stays the 5b
+>    `book_peer`+insert shape (reading the new fields) and MUST NOT delete a `pid: Some` survivor's
+>    intent.
+> 2. **Reap on teardown (D2).** `teardown` moves the owned `Child` into a detached thread → SIGTERM(group)
+>    → bounded `try_wait` poll → SIGKILL → **final `child.wait()` to REAP**. Dropping the `Child` without
+>    `wait()` would leak a `<defunct>` zombie per spin-down (a self-inflicted `EAGAIN` DoS on the up/DOWN
+>    churn that is RLM's whole point).
+> 3. **Mint the cookie PRE-FORK; ONE `Option` in the durable intent (D3).** `LaunchBackend` grows
+>    `mint_cookie(node) -> IncarnationCookie` (fake: deterministic; real: std-entropy, no `rand` dep).
+>    The kernel mints BEFORE the fork and persists it in the write-ahead (v1) record. `LaunchIntent`
+>    grows `cookie: IncarnationCookie` (NON-optional) + `pid: Option<u32>` + `probe_port: u16` — exactly
+>    ONE `Option`, both arms reachable (`None` = crash between v1 and the post-launch v2 commit;
+>    `Some` = completed spawn). No impossible `(Some,None)`/`(None,Some)` cross-product ⇒ HR5 100% branch
+>    attained naturally. `launch(&LaunchSpec) -> Result<u32 /* pid */, String>`; `LaunchSpec` gains
+>    `probe: SocketAddr` + `cookie: IncarnationCookie` (passed IN). Two-port stride allocator (bind +
+>    probe; exhaustion when `cursor + 1 > u16::MAX`).
+> 4. **Shared redb handle, TWO barriers — NOT one (D1).** The "single group-commit barrier / intent and
+>    head can never diverge" claim is UNATTAINABLE (`RedbStore` is single-writer, exclusive-lock, and
+>    already moved into `register_orchestrator_with_store`) and is DROPPED. `RedbStore` becomes a
+>    shareable handle; `SpawnCore` shares that ONE physical redb file but commits in a SEPARATE barrier
+>    from `commit_barrier`. The v1→v2 (fork-done, crash-before-pid) window + the intent/head divergence
+>    window are LEDGERED to 5e (alongside the crash-recovery it already owns) — DEFERRED, not owed in 5c.
+> 5. **DRY-lift scope (D5/D6).** Lift ONLY the node-shape helpers `vd-devcluster` and `spawn_node` share
+>    (`sibling_binary`, `pid_alive`, `signal_group`, and a new `spawn_node_grouped(exe, common, node_env,
+>    log)` — log passed as a PARAM). Leave `vd_bins::spawn_node` byte-identical (12+ callers). EXCLUDE the
+>    three `render_*_smoke` client spawns (full arg vector + inherited stdio + `ChildGuard` — not
+>    expressible in the env-only shape). Keep `vd-devcluster::down()`'s BATCHED TERM-all/wait-once/KILL-all
+>    loop (a per-pid `teardown_group` in a loop would serialize an 8-node `--forest` ~3s→~24s).
+> 6. **No DET-1 label in 5c (D7).** An occupant-less Walk-scale Planet emits no `RealmSnap` rows (empty
+>    vs empty proves nothing) and the F2 node id differs from a static rig's hand-picked id (head value
+>    not byte-identical). 5c's process test asserts only: boots the right realm+profile, self-grants the
+>    expected head (head APPEARS), teardown exits AND is reaped. The content-keyed, source-node-stripped,
+>    tick-aligned frame-parity DET-1 proof moves to **5g**.
+> 7. **`IncarnationCookie` in `vd_core::incarnation` (pure data, no rng/clock)** — minted by the backend,
+>    stored by the kernel as opaque bytes. `spawn_probe_server` grows a `cookie: Option<String>` param;
+>    gateway + orchestrator pass `None` (D8); shard reads `VD_INCARNATION_COOKIE` and installs the
+>    `/whoami` echo; the `probe.rs` "no body" invariant doc is updated to acknowledge `/whoami`'s
+>    non-sensitive per-incarnation nonce (the guard relies on the true child HOLDING the probe port, not
+>    on cookie secrecy — D9).
+> 8. **No dead coverage exemptions (D10).** `vd-bins` is in NO 100% recipe, so NO
+>    `#[cfg_attr(coverage_nightly, coverage(off))]` / `coverage-exemptions.toml` entry on `proc_launch.rs`
+>    — the Tier-B posture is proven by the §8 process gate; exemptions stay reserved for Tier-A code.
+>
+> **Build order (3 gate-able stages):** 5c-1 = vd-core `IncarnationCookie` + the vd-node seam growth
+> (Tier-A 100% against the one `FakeBackend`); 5c-2 = the vd-bins DRY lift + `ProcLaunchBackend` +
+> shard `/whoami` + the process smoke test (Tier-B); 5c-3 = the shared-`RedbStore` refactor + the inert
+> live-wire of `SpawnCore<ProcLaunchBackend>` into the orchestrator bin (`RlmTuning::default()` keeps it
+> byte-identical).
 - **5d — CA-1 addressing + idempotency-by-coord.** `update_peer_addr` push at spawn (orch + dest→
   gateway); `VD_PEERS` = ancestor closure; reply-on-connection convergence. *Tests:* orch reaches a
   spawned shard; an older shard reaches a newer via a learned reply lane (pure-loopback repro, D-18

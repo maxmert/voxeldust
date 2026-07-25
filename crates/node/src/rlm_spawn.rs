@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
+use vd_core::incarnation::IncarnationCookie;
 use vd_core::realm_coord::RealmCoord;
 use vd_core::{NodeId, UniverseTick};
 use vd_sim::io::{RealmSpawner, SpawnError, Store};
@@ -83,7 +84,9 @@ impl SpawnTuning {
 
 /// The launch arguments the decision kernel hands the backend for one realm. The backend derives the
 /// child's `ShardProfile` from `coord` (its `VD_OWN_COORD` env — same path `shard.rs` already walks in 5a),
-/// so no profile is passed separately; `addr` is the kernel-allocated dev bind.
+/// so no profile is passed separately; `addr` is the kernel-allocated dev bind, `probe` the admin/health
+/// bind, and `cookie` the pre-fork incarnation nonce the child echoes on its `/whoami` probe (Step 5e's
+/// pid-reuse guard). All are minted by the kernel and passed IN so the backend carries zero policy.
 pub struct LaunchSpec {
     /// The freshly minted id this realm will run under.
     pub node: NodeId,
@@ -91,6 +94,11 @@ pub struct LaunchSpec {
     pub coord: RealmCoord,
     /// The dev bind address the child listens on and the kernel books into the mesh.
     pub addr: SocketAddr,
+    /// The admin/health bind (→ the child's `VD_PROBE_ADDR`); the Step-5e cookie-probe targets it.
+    pub probe: SocketAddr,
+    /// The pre-fork incarnation nonce (→ the child's `VD_INCARNATION_COOKIE`); persisted in the
+    /// write-ahead intent BEFORE the fork, so a restart can identify this exact incarnation (Step 5e).
+    pub cookie: IncarnationCookie,
 }
 
 /// The launch/teardown/liveness/booking port (RLM Step 5b) — object-safe, so [`SpawnCore`]'s decision logic
@@ -98,11 +106,16 @@ pub struct LaunchSpec {
 /// method is side-effecting against the outside world (fork/exec, signal, mesh booking); NONE decides
 /// policy — the policy is entirely in [`SpawnCore`].
 pub trait LaunchBackend: Send + Sync {
-    /// Bring `spec`'s shard up. `Ok` means a confirmed-launched child; `Err(reason)` is a REAL launch
-    /// failure (fork/exec / admission) the kernel surfaces as [`SpawnError::LaunchFailed`] (→ the
-    /// reconciler's backoff). The in-process fake never fails unless told to; the OS shim maps a failed
-    /// spawn.
-    fn launch(&self, spec: &LaunchSpec) -> Result<(), String>;
+    /// Mint a fresh incarnation nonce for `node`, called by the kernel BEFORE the fork so it can be
+    /// persisted in the write-ahead intent (Step 5c D3). The real backend draws std entropy; the fake is
+    /// deterministic. Kept OUT of the kernel so the deterministic sim/node core never touches rng.
+    fn mint_cookie(&self, node: NodeId) -> IncarnationCookie;
+
+    /// Bring `spec`'s shard up. `Ok(pid)` is a confirmed-launched child whose OS pid the kernel records in
+    /// the post-launch intent (Step 5e teardown/identity); `Err(reason)` is a REAL launch failure
+    /// (fork/exec / admission) the kernel surfaces as [`SpawnError::LaunchFailed`] (→ the reconciler's
+    /// backoff). The in-process fake never fails unless told to; the OS shim maps a failed spawn.
+    fn launch(&self, spec: &LaunchSpec) -> Result<u32, String>;
 
     /// Ground-truth liveness of a previously launched node — a crashed child returns `false`. Reads
     /// external state (a pid, a pod phase); the kernel reconciles `live_nodes` against it.
@@ -119,14 +132,21 @@ pub trait LaunchBackend: Send + Sync {
 }
 
 /// The durable launch-intent record (write-ahead of the launch). Self-describing (carries its own `node`)
-/// so the rehydrate `scan` reconstructs the live set without parsing keys. Every field is read on
-/// rehydrate — `node` keys the live set, `coord`/`port`/`at_tick` rebuild the [`LiveSlot`].
+/// so the rehydrate `scan` reconstructs the live set without parsing keys. Written TWICE per spawn (Step 5c
+/// D3): a v1 record BEFORE the fork with `pid: None` (the write-ahead — a crash here cannot orphan a child
+/// we never recorded), then a v2 record with `pid: Some` AFTER the launch confirms. `pid` is the ONE
+/// `Option` (both arms reachable: `None` = crash between v1 and v2; `Some` = completed) — no impossible
+/// cross-product, so rehydrate's match is HR5-coverable. `cookie`/`probe_port` are persisted for the
+/// Step-5e cookie-probe (dormant in 5c: written, not yet read by the Owned-only rehydrate path).
 #[derive(Serialize, Deserialize)]
 struct LaunchIntent {
     node: NodeId,
     coord: RealmCoord,
     port: u16,
+    probe_port: u16,
     at_tick: UniverseTick,
+    cookie: IncarnationCookie,
+    pid: Option<u32>,
 }
 
 /// The durable F2 high-water — a SINGLE record (no payload key). Persisted BEFORE each mint so a rehydrate
@@ -220,24 +240,42 @@ impl<B: LaunchBackend> SpawnCore<B> {
         backend: B,
         tuning: SpawnTuning,
     ) -> SpawnCore<B> {
+        let mut store = store;
         let water = read_water(&*store).unwrap_or(WaterMark {
             next_node: tuning.first_node,
             next_port: u32::from(tuning.first_port),
         });
         let mut live = BTreeMap::new();
+        // v1-only intents (`pid: None`) are launches never confirmed before a crash — DROP them (Step 5c
+        // D3/D4): reconstructing an unconfirmed launch risks a double-spawn, so 5c re-drives from scratch.
+        // The narrow forked-but-crashed-before-v2 orphan window is DEFERRED to 5e (DEFERRED.md D-RLM-5),
+        // where the cookie-probe sweep reaps it. F2 is unaffected — the high-water advanced in the v1
+        // commit, so a dropped id/port is retired regardless.
+        let mut partial = Vec::new();
         for (_key, value) in store.scan(&rlm_launch_prefix()) {
             let intent: LaunchIntent =
                 postcard::from_bytes(&value).expect("decode persisted launch intent");
             let addr = SocketAddr::from((tuning.bind_host, intent.port));
-            backend.book_peer(intent.node, addr);
-            live.insert(
-                intent.node,
-                LiveSlot {
-                    coord: intent.coord,
-                    addr,
-                    at_tick: intent.at_tick,
-                },
-            );
+            match intent.pid {
+                Some(_pid) => {
+                    backend.book_peer(intent.node, addr);
+                    live.insert(
+                        intent.node,
+                        LiveSlot {
+                            coord: intent.coord,
+                            addr,
+                            at_tick: intent.at_tick,
+                        },
+                    );
+                }
+                None => partial.push(intent.node),
+            }
+        }
+        for node in &partial {
+            store.delete(&rlm_launch_store_key(*node));
+        }
+        if !partial.is_empty() {
+            store.commit();
         }
         SpawnCore {
             inner: Arc::new(Mutex::new(SpawnInner {
@@ -275,37 +313,45 @@ impl<B: LaunchBackend> SpawnCore<B> {
 impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
     fn spawn_realm(&self, coord: &RealmCoord, at_tick: UniverseTick) -> Result<NodeId, SpawnError> {
         let mut g = self.lock();
-        // F2 port allocation: loud on dev-scale single-host exhaustion, NEVER wrapped (a wrap would reuse a
-        // retired port → the exact stale-latch hazard F2 exists to prevent). Checked before minting, so an
-        // exhausted allocator burns nothing. The cursor is a `u32`, so port 65535 is itself allocatable and
-        // only a cursor past `u16::MAX` is exhausted.
+        // F2 TWO-port allocation (bind + probe): loud on dev-scale single-host exhaustion, NEVER wrapped (a
+        // wrap would reuse a retired port → the exact stale-latch hazard F2 exists to prevent). Checked
+        // before minting, so an exhausted allocator burns nothing. The cursor is a `u32`, so the last usable
+        // pair ends at 65535; exhaustion is a pair that would need a port past `u16::MAX`.
         let cursor = g.next_port;
-        if cursor > u32::from(u16::MAX) {
+        if cursor + 1 > u32::from(u16::MAX) {
             return Err(SpawnError::LaunchFailed {
                 reason: "dev port space exhausted".into(),
             });
         }
-        let port = cursor as u16;
-        let next_port = cursor + 1;
+        let bind_port = cursor as u16;
+        let probe_port = (cursor + 1) as u16;
+        let next_port = cursor + 2;
         let node = NodeId(g.next_node);
-        let addr = SocketAddr::from((g.bind_host, port));
+        let addr = SocketAddr::from((g.bind_host, bind_port));
+        let probe = SocketAddr::from((g.bind_host, probe_port));
+        let cookie = self.backend.mint_cookie(node);
 
-        // Write-ahead: persist the ADVANCED high-water + this node's intent BEFORE the launch, atomically.
-        // A crash between "child launched" and "recorded" then cannot orphan the child — rehydrate
-        // reconstructs it and `live_nodes` reconciles it against truth. The water advances even if the
-        // launch fails (the id/port are burned — F2 beats port thrift at dev scale).
+        // v1 write-ahead: persist the ADVANCED high-water + this node's intent (with `pid: None` and the
+        // pre-fork cookie) BEFORE the launch, atomically. A crash between "child launched" and "pid
+        // recorded" then leaves a v1-only record rehydrate DROPS (never a double-spawn). The water advances
+        // even if the launch fails (the id/port pair is burned — F2 beats port thrift at dev scale).
         let water = WaterMark {
             next_node: g.next_node + 1,
             next_port,
         };
-        let intent = LaunchIntent {
-            node,
-            coord: coord.clone(),
-            port,
-            at_tick,
-        };
         g.store.put(&rlm_water_store_key(), &encode(&water));
-        g.store.put(&rlm_launch_store_key(node), &encode(&intent));
+        g.store.put(
+            &rlm_launch_store_key(node),
+            &encode(&LaunchIntent {
+                node,
+                coord: coord.clone(),
+                port: bind_port,
+                probe_port,
+                at_tick,
+                cookie,
+                pid: None,
+            }),
+        );
         g.store.commit();
         g.next_node += 1;
         g.next_port = next_port;
@@ -314,11 +360,27 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
             node,
             coord: coord.clone(),
             addr,
+            probe,
+            cookie,
         };
         match self.backend.launch(&spec) {
-            Ok(()) => {
-                // Book the peer BEFORE the node becomes visible as live, so the reconciler never reads a
-                // live id the mesh cannot yet address.
+            Ok(pid) => {
+                // v2: record the confirmed pid, so a restart can identify + tear down this exact
+                // incarnation (Step 5e). Then book the peer BEFORE the node becomes visible as live, so the
+                // reconciler never reads a live id the mesh cannot yet address.
+                g.store.put(
+                    &rlm_launch_store_key(node),
+                    &encode(&LaunchIntent {
+                        node,
+                        coord: coord.clone(),
+                        port: bind_port,
+                        probe_port,
+                        at_tick,
+                        cookie,
+                        pid: Some(pid),
+                    }),
+                );
+                g.store.commit();
                 self.backend.book_peer(node, addr);
                 g.live.insert(
                     node,
@@ -332,7 +394,7 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
             }
             Err(reason) => {
                 // The write-ahead intent points at a child that never came up — delete it. The high-water
-                // stays advanced (the id/port are retired, never retried under the same id).
+                // stays advanced (the id/port pair is retired, never retried under the same id).
                 g.store.delete(&rlm_launch_store_key(node));
                 g.store.commit();
                 Err(SpawnError::LaunchFailed { reason })
@@ -404,6 +466,9 @@ mod tests {
     #[derive(Default)]
     struct FakeInner {
         launched: Vec<NodeId>,
+        /// The full `(node, bind, probe, cookie)` each `launch` received — proves the kernel threads the
+        /// minted cookie + the two allocated ports INTO the backend (not re-derived there).
+        launched_specs: Vec<(NodeId, SocketAddr, SocketAddr, IncarnationCookie)>,
         booked: Vec<(NodeId, SocketAddr)>,
         torn_down: Vec<NodeId>,
         alive: BTreeSet<NodeId>,
@@ -445,17 +510,29 @@ mod tests {
         fn launched(&self) -> Vec<NodeId> {
             self.g().launched.clone()
         }
+        /// The `(node, bind, probe, cookie)` of the most recent `launch` — proves seam threading.
+        fn last_spec(&self) -> (NodeId, SocketAddr, SocketAddr, IncarnationCookie) {
+            *self.g().launched_specs.last().expect("a launch happened")
+        }
     }
 
     impl LaunchBackend for FakeBackend {
-        fn launch(&self, spec: &LaunchSpec) -> Result<(), String> {
+        fn mint_cookie(&self, node: NodeId) -> IncarnationCookie {
+            // Deterministic (no entropy) so the Tier-A tests are byte-stable — the real backend draws std
+            // entropy. Keyed on the node so distinct spawns get distinct cookies.
+            IncarnationCookie(u128::from(node.0))
+        }
+        fn launch(&self, spec: &LaunchSpec) -> Result<u32, String> {
             let mut g = self.g();
             if let Some(reason) = g.fail_next.take() {
                 return Err(reason);
             }
             g.launched.push(spec.node);
+            g.launched_specs
+                .push((spec.node, spec.addr, spec.probe, spec.cookie));
             g.alive.insert(spec.node);
-            Ok(())
+            // A deterministic fake pid (distinct per launch) — `unwrap_or` keeps the fn total for HR5.
+            Ok(9_000 + u32::try_from(g.launched.len()).unwrap_or(0))
         }
         fn is_alive(&self, node: NodeId) -> bool {
             let mut g = self.g();
@@ -527,7 +604,8 @@ mod tests {
         let b = sc.spawn_realm(&system(1, 2), T).expect("spawn b");
         assert_eq!((a, b), (NodeId(1_000), NodeId(1_001)));
 
-        // One booking per spawn, each with its own monotone dev port.
+        // One booking per spawn; the two-port stride means each realm gets a bind port TWO above the last
+        // (bind 42000/probe 42001 for a; bind 42002/probe 42003 for b).
         assert_eq!(fake.book_count(), 2);
         assert_eq!(
             sc.live_nodes(),
@@ -535,9 +613,16 @@ mod tests {
         );
         let slots = sc.live_slots();
         assert_eq!(slots[&NodeId(1_000)].addr(), addr(42_000));
-        assert_eq!(slots[&NodeId(1_001)].addr(), addr(42_001));
+        assert_eq!(slots[&NodeId(1_001)].addr(), addr(42_002));
         assert_eq!(slots[&NodeId(1_000)].coord(), &system(1, 1));
         assert_eq!(slots[&NodeId(1_000)].at_tick(), T);
+
+        // The kernel minted the cookie + allocated the probe port and threaded BOTH into the backend
+        // (bind and probe are the adjacent pair; the cookie is the deterministic mint of b's id).
+        let (node, bind, probe, cookie) = fake.last_spec();
+        assert_eq!(node, NodeId(1_001));
+        assert_eq!((bind, probe), (addr(42_002), addr(42_003)));
+        assert_eq!(cookie, IncarnationCookie(1_001));
     }
 
     #[test]
@@ -557,10 +642,11 @@ mod tests {
         assert_eq!(sc.live_nodes(), BTreeSet::new());
         assert_eq!(fake.book_count(), 0);
 
-        // The burned id/port are retired — the next spawn lands strictly above them (F2), not reused.
+        // The burned id/port pair is retired — the next spawn lands strictly above them (F2): id 1001, and
+        // bind 42002 (the failed spawn consumed the 42000/42001 pair).
         let next = sc.spawn_realm(&system(1, 2), T).expect("retry spawns");
         assert_eq!(next, NodeId(1_001));
-        assert_eq!(fake.last_booked(), (NodeId(1_001), addr(42_001)));
+        assert_eq!(fake.last_booked(), (NodeId(1_001), addr(42_002)));
     }
 
     #[test]
@@ -662,10 +748,13 @@ mod tests {
     #[test]
     fn dev_port_exhaustion_is_loud_and_changes_nothing() {
         let fake = FakeBackend::default();
-        // Start the port cursor at the very top so the SECOND spawn exhausts it.
-        let sc = core(fake.clone(), tuning(1_000, u16::MAX));
+        // Start the cursor so exactly ONE two-port pair fits (65534/65535) and the SECOND spawn — which
+        // would need a port past u16::MAX — exhausts it.
+        let sc = core(fake.clone(), tuning(1_000, u16::MAX - 1));
 
-        let a = sc.spawn_realm(&system(1, 1), T).expect("last port spawns");
+        let a = sc
+            .spawn_realm(&system(1, 1), T)
+            .expect("last port pair spawns");
         assert_eq!(a, NodeId(1_000));
 
         let err = sc
@@ -680,6 +769,89 @@ mod tests {
         // The exhausted attempt burned nothing: only the first child is live, only it was booked.
         assert_eq!(sc.live_nodes(), BTreeSet::from([NodeId(1_000)]));
         assert_eq!(fake.book_count(), 1);
+    }
+
+    #[test]
+    fn a_completed_spawn_persists_the_cookie_and_confirmed_pid() {
+        let store = MemStore::new();
+        let retained = store.clone();
+        let fake = FakeBackend::default();
+        let sc = SpawnCore::new(Box::new(store), fake, tuning(1_000, 42_000));
+        let a = sc.spawn_realm(&system(1, 1), T).expect("spawn");
+
+        // The durable intent the kernel committed carries the PRE-FORK cookie, the confirmed pid, and the
+        // allocated probe port (the v2 write-back) — exactly what Step 5e needs to identify + tear down
+        // this incarnation after a restart.
+        let recs = retained.scan(&rlm_launch_store_key(a));
+        assert_eq!(recs.len(), 1, "one intent record for the spawned node");
+        let intent: LaunchIntent =
+            postcard::from_bytes(&recs[0].1).expect("decode persisted intent");
+        assert_eq!(intent.cookie, IncarnationCookie(1_000));
+        assert_eq!(intent.pid, Some(9_001));
+        assert_eq!((intent.port, intent.probe_port), (42_000, 42_001));
+    }
+
+    #[test]
+    fn rehydrate_drops_partial_intents_and_keeps_completed_ones() {
+        // A store as it would look after a crash: one COMPLETED survivor (`pid: Some`, both write-ahead and
+        // confirm landed) and one PARTIAL (`pid: None`, crashed between the v1 and v2 commits).
+        let store = MemStore::new();
+        let retained = store.clone();
+        {
+            let mut s = store;
+            s.put(
+                &rlm_launch_store_key(NodeId(1_000)),
+                &encode(&LaunchIntent {
+                    node: NodeId(1_000),
+                    coord: system(1, 1),
+                    port: 42_000,
+                    probe_port: 42_001,
+                    at_tick: T,
+                    cookie: IncarnationCookie(1_000),
+                    pid: Some(9_001),
+                }),
+            );
+            s.put(
+                &rlm_launch_store_key(NodeId(1_001)),
+                &encode(&LaunchIntent {
+                    node: NodeId(1_001),
+                    coord: system(1, 2),
+                    port: 42_002,
+                    probe_port: 42_003,
+                    at_tick: T,
+                    cookie: IncarnationCookie(1_001),
+                    pid: None,
+                }),
+            );
+            s.commit();
+        }
+
+        let fresh = FakeBackend::default();
+        fresh.g().alive.insert(NodeId(1_000));
+        let sc = SpawnCore::rehydrate(
+            Box::new(retained.clone()),
+            fresh.clone(),
+            tuning(1_000, 42_000),
+        );
+
+        // The completed survivor is reconstructed + rebooked; the partial is NOT reconstructed (no
+        // double-spawn hazard) and is booked zero times.
+        assert_eq!(
+            sc.live_slots().keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([NodeId(1_000)])
+        );
+        assert_eq!(fresh.book_count(), 1);
+
+        // The partial's stale intent was DELETED from the durable store; only the survivor's remains.
+        let remaining: BTreeSet<Vec<u8>> = retained
+            .scan(&rlm_launch_prefix())
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            remaining,
+            BTreeSet::from([rlm_launch_store_key(NodeId(1_000))])
+        );
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod fence;
 pub mod frame;
 pub mod geometry;
 pub mod ids;
+pub mod incarnation;
 pub mod kinematics;
 pub mod pose;
 pub mod realm_coord;
