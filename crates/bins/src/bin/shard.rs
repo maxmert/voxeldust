@@ -38,16 +38,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (Arc-wrapped below for the auto-resolver) + `runtime` stay bound for the whole tick loop (dropping either
     // tears down the endpoint / peer-writers).
     let (transport, control) = vd_bins::boot_mesh_and_replay(&env, runtime.handle(), &trust)?;
+    // RLM Step 5a: the shard's OWN lineage coord + its DERIVED ShardProfile, resolved BEFORE build_app.
+    // `VD_OWN_COORD` (the real spawner's UN-collapsed RealmPath, Step 5c) preserves a Galaxy/Universe level
+    // that `RealmId` would collapse — so a Galaxy shard keeps `signal_relay` (uncorners P9 Signals). ABSENT
+    // ⇒ the root coord from VD_REALM_KIND/SEED (byte-identical for every existing rig until 5c emits
+    // VD_OWN_COORD). The profile is DERIVED from the coord (HR3: the ONE kind→profile match lives in
+    // `profile_kind`, never a feature/reconciler branch). The `StubShard → Shard(profile)` swap is
+    // CAPABILITY-INERT at P1–P3 (no system reads the profile caps yet) — proven byte-identical for every
+    // `ProfileKind` by the vd-node 5a inertness gate.
+    let realm_seed: u64 = env.parse("VD_REALM_SEED")?;
+    let realm_kind = env.string("VD_REALM_KIND").unwrap_or_default();
+    let own_realm = vd_bins::realm_from_kind_seed(&realm_kind, realm_seed)?;
+    let own_coord = match env.string("VD_OWN_COORD").ok().filter(|s| !s.is_empty()) {
+        Some(s) => vd_core::realm_coord::RealmCoord::from_path(
+            vd_core::realm_path::RealmPath::from_env_string(&s).map_err(|e| e.to_string())?,
+        )
+        .ok_or("VD_OWN_COORD is an empty lineage — refusing to boot")?,
+        None => vd_sim::stub::StubConfig::root_coord(own_realm),
+    };
+    let profile =
+        vd_sim::capability::profile_for(own_coord.profile_kind()).map_err(|e| e.to_string())?;
     let mut node = build_app(
         NodeConfig {
             node_id: local,
-            kind: NodeKind::StubShard,
+            kind: NodeKind::Shard(profile),
         },
         transport,
     );
     let (world, schedule) = node.parts_mut();
     register_clock_follower(world, schedule);
-    let realm_seed: u64 = env.parse("VD_REALM_SEED")?;
     // D-3 Slice 5: the proactive self-fence cadence is a NODE-side knob the orchestrator never sees, so
     // its split-brain-safety (armed ⇒ a confirmation channel exists AND the grace spans >= 2 recheck
     // cycles, so a healthy holder never self-fences between on-time replies) is validated HERE at boot —
@@ -68,13 +87,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // celestial orbit). `VD_REALM_TIME_MULTIPLIER` override / `VD_TIME_MULTIPLIER` global / 1.0 default.
     let time_multiplier = vd_bins::resolve_time_multiplier(&env)?;
     vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
-    // NODE-PER-REALM (task #149): a realm-shard hosts EXACTLY ONE realm, of a KIND read from `VD_REALM_KIND`
-    // (`system` | `planet` | `station` | `area`) beside `VD_REALM_SEED`. ABSENT/empty ⇒ `System(seed)` — the
-    // pre-NODE-PER-REALM default, so every legacy shard boot is byte-identical. This lets a Planet/Station/
-    // Area shard exist (the Forest cluster) so a walk into a child realm is a uniform CROSS-NODE saga, never a
-    // co-hosted local relabel. An unrecognized kind fails LOUD at boot.
-    let realm_kind = env.string("VD_REALM_KIND").unwrap_or_default();
-    let own_realm = vd_bins::realm_from_kind_seed(&realm_kind, realm_seed)?;
+    // NODE-PER-REALM (task #149): a realm-shard hosts EXACTLY ONE realm. `own_realm` (its `RealmId`),
+    // `own_coord` (its un-collapsed lineage), and its derived `ShardProfile` were all resolved ABOVE (before
+    // build_app) from `VD_OWN_COORD` or, absent it, `VD_REALM_KIND`/`VD_REALM_SEED` (ABSENT/empty ⇒
+    // `System(seed)` — the pre-NODE-PER-REALM default, so every legacy shard boot stays byte-identical).
     // CO-HOSTING (the un-hosted-child cure, KEPT for the --triple LEGACY shape): a shard may host its own
     // realm PLUS deeper CHILD realms it co-hosts (`VD_HELD_REALMS`, set by the --triple launcher). ABSENT ⇒
     // single-realm ({own realm} — the byte-identical default, and the NODE-PER-REALM Forest case: each shard
@@ -116,9 +132,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         schedule,
         StubConfig {
             realm: own_realm,
-            // RLM Step 2: the single-realm ROOT coord (inert AoI never reads it; the live-AoI visual boot
-            // that names deep children replaces it with the full seed lineage — Step 5/6). Byte-identical.
-            own_coord: StubConfig::root_coord(own_realm),
+            // RLM Step 5a: the shard's REAL lineage coord (resolved above from `VD_OWN_COORD`, or the root
+            // coord from VD_REALM_KIND/SEED when absent). Byte-identical to the old `root_coord(own_realm)`
+            // for every existing rig (they set no `VD_OWN_COORD`); the spawner (5c) feeds the full lineage so
+            // `evaluate_realm_aoi` can name this shard's TRUE children, not just root-level ones.
+            own_coord: own_coord.clone(),
             boot_ticks_p99: 0,
             held_realms: held_realms.clone(),
             frame: own_frame,

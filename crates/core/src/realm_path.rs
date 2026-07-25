@@ -130,6 +130,76 @@ impl RealmPath {
     pub fn lineage_seeds(&self) -> Vec<u64> {
         self.0.iter().map(|level| level.seed).collect()
     }
+
+    /// Encode this lineage as a compact env-var string — the `VD_OWN_COORD` transport the real realm
+    /// spawner (RLM Step 5) hands a freshly-launched shard so it recovers its UN-collapsed lineage (a
+    /// `Galaxy`/`Universe` level is otherwise lost through `RealmId`, dropping `signal_relay`). Lowercase
+    /// hex of the FROZEN postcard bytes: it can never drift from the wire form and covers EVERY level
+    /// kind with no per-kind vocabulary to maintain (generic by construction). Round-trips exactly via
+    /// [`RealmPath::from_env_string`].
+    #[must_use]
+    pub fn to_env_string(&self) -> String {
+        let bytes = postcard::to_allocvec(self).expect("postcard encodes a RealmPath");
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in &bytes {
+            s.push(HEX_LOWER[(b >> 4) as usize]);
+            s.push(HEX_LOWER[(b & 0x0f) as usize]);
+        }
+        s
+    }
+
+    /// Decode a [`to_env_string`](RealmPath::to_env_string) form. FAILS LOUD on any malformation — a
+    /// boot misconfiguration must never silently mis-place a shard (it would author the wrong realm's
+    /// frames). Monomorphic body (all branching here, HR5).
+    ///
+    /// # Errors
+    /// [`RealmPathEnvError`] on an odd-length string, a non-hex digit, or bytes that do not decode to a
+    /// `RealmPath`.
+    pub fn from_env_string(s: &str) -> Result<RealmPath, RealmPathEnvError> {
+        let raw = s.as_bytes();
+        if !raw.len().is_multiple_of(2) {
+            return Err(RealmPathEnvError::OddLength(raw.len()));
+        }
+        let mut bytes = Vec::with_capacity(raw.len() / 2);
+        let mut i = 0;
+        while i < raw.len() {
+            let hi = hex_digit(raw[i]).ok_or(RealmPathEnvError::NotHex)?;
+            let lo = hex_digit(raw[i + 1]).ok_or(RealmPathEnvError::NotHex)?;
+            bytes.push((hi << 4) | lo);
+            i += 2;
+        }
+        postcard::from_bytes(&bytes).map_err(|_| RealmPathEnvError::Malformed)
+    }
+}
+
+/// Lowercase hex alphabet for [`RealmPath::to_env_string`] (a table, so the encode has no `write!`
+/// `Result` arm to leave uncovered — HR5).
+const HEX_LOWER: [char; 16] = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+];
+
+/// One lowercase-hex digit → its nibble. Accepts ONLY what [`RealmPath::to_env_string`] emits (`0-9`,
+/// `a-f`); anything else is `None` (rejected LOUD). Monomorphic (every arm covered, HR5).
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    }
+}
+
+/// A malformed `VD_OWN_COORD` — rejected LOUD at boot so a shard never silently authors the wrong realm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RealmPathEnvError {
+    /// The hex string has an odd number of characters (not whole bytes).
+    #[error("VD_OWN_COORD hex has an odd length ({0})")]
+    OddLength(usize),
+    /// A character outside the lowercase-hex alphabet `[0-9a-f]`.
+    #[error("VD_OWN_COORD contains a non-hex character")]
+    NotHex,
+    /// Well-formed hex whose bytes do not decode to a `RealmPath`.
+    #[error("VD_OWN_COORD bytes do not decode to a RealmPath")]
+    Malformed,
 }
 
 // ===== The P3 fixed RealmPathBook (the RealmId->RealmPath inversion over the roster) =====
@@ -252,6 +322,59 @@ mod tests {
         assert_eq!(
             RealmLevel::new(RealmKindTag::Area, 7).to_realm_id(),
             RealmId::Area(7)
+        );
+    }
+
+    #[test]
+    fn env_string_round_trips_every_lineage_including_galaxy() {
+        // Every depth round-trips EXACTLY — crucially `galaxy_path` (a `Galaxy` level would be lost
+        // through `RealmId`, dropping `signal_relay`); that preservation is the whole reason for
+        // `VD_OWN_COORD`. The paths' hex spans both `0-9` and `a-f` nibbles (both `hex_digit` valid arms).
+        for p in [
+            universe_path(),
+            galaxy_path(),
+            system_path(7),
+            planet_path(),
+            area_path(),
+            RealmPath::from_levels(vec![]), // the empty boundary encodes to "00" (postcard len-0)
+        ] {
+            // The round-trip IS the format proof: `from_env_string` accepts ONLY lowercase hex, so a
+            // successful decode back to `p` guarantees `to_env_string` emitted valid lowercase hex.
+            let enc = p.to_env_string();
+            assert_eq!(RealmPath::from_env_string(&enc), Ok(p), "round-trip {enc}");
+        }
+    }
+
+    #[test]
+    fn env_string_rejects_malformed_input_loud() {
+        // Odd length ⇒ not whole bytes.
+        assert_eq!(
+            RealmPath::from_env_string("abc"),
+            Err(RealmPathEnvError::OddLength(3))
+        );
+        // A non-hex character ⇒ the `hex_digit` reject arm (uppercase is NOT accepted either).
+        assert_eq!(
+            RealmPath::from_env_string("zz"),
+            Err(RealmPathEnvError::NotHex)
+        );
+        assert_eq!(
+            RealmPath::from_env_string("AB"),
+            Err(RealmPathEnvError::NotHex)
+        );
+        // First nibble VALID, second INVALID ⇒ the LOW-nibble reject (a region distinct from the high one).
+        assert_eq!(
+            RealmPath::from_env_string("az"),
+            Err(RealmPathEnvError::NotHex)
+        );
+        // Well-formed hex whose bytes are NOT a RealmPath (a truncated Vec-length varint) + the empty
+        // string (no length byte at all).
+        assert_eq!(
+            RealmPath::from_env_string("ff"),
+            Err(RealmPathEnvError::Malformed)
+        );
+        assert_eq!(
+            RealmPath::from_env_string(""),
+            Err(RealmPathEnvError::Malformed)
         );
     }
 

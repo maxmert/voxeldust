@@ -414,6 +414,38 @@ mod tests {
     }
 
     #[test]
+    fn a_galaxy_coord_selects_a_signal_relay_profile_a_system_does_not() {
+        // RLM Step 5a: the `VD_OWN_COORD → coord.profile_kind() → profile_for` chain PRESERVES the Galaxy
+        // level (which `RealmId` collapses to `System(1)`), so a Galaxy shard's `ShardProfile` carries
+        // `signal_relay` — the capability that later uncorners cross-shard Signals (P9). The System contrast
+        // proves it is the Galaxy LEVEL, not a universal cap.
+        use vd_core::realm_coord::RealmCoord;
+        use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+        let galaxy = RealmCoord::from_path(RealmPath::from_levels(vec![
+            RealmLevel::new(RealmKindTag::Universe, 0),
+            RealmLevel::new(RealmKindTag::Galaxy, 1),
+        ]))
+        .expect("two-level galaxy lineage");
+        assert!(
+            profile_for(galaxy.profile_kind())
+                .expect("galaxy profile")
+                .signal_relay(),
+            "a Galaxy coord must select a signal_relay-capable profile"
+        );
+        let system = RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(
+            RealmKindTag::System,
+            7,
+        )]))
+        .expect("one-level system lineage");
+        assert!(
+            !profile_for(system.profile_kind())
+                .expect("system profile")
+                .signal_relay(),
+            "a System coord's profile has no signal_relay"
+        );
+    }
+
+    #[test]
     fn node_kinds_roundtrip() {
         let kinds = vec![
             NodeKind::Gateway,

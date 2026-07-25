@@ -1124,7 +1124,9 @@ struct PendingCrossing {
 pub struct PendingCrossings(BTreeMap<EntityId, PendingCrossing>);
 
 /// Install the stub-shard systems and resources onto a node's world + schedule.
-/// Called by the node composer for `NodeKind::StubShard` (never by feature code).
+/// Called EXPLICITLY by the shard bin (RLM Step 5a: for a `NodeKind::Shard(profile)`; was
+/// `NodeKind::StubShard` pre-5a) — never by feature code, and NEVER gated on the node kind (the
+/// carried `ShardProfile` is capability-inert at P1–P3, proven byte-identical by the 5a inertness gate).
 pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: StubConfig) {
     // Slice 3e — FAIL-LOUD boundary-tuning validation at boot (mirroring the tick-pair guard): a
     // zero dwell/pad/cell would silently disable anti-flap or divide the cell rebase. The registry is
@@ -4550,12 +4552,18 @@ mod tests {
         }
 
         fn with_config(cfg: StubConfig) -> Rig {
+            Rig::with_config_and_kind(cfg, NodeKind::StubShard)
+        }
+
+        /// As [`with_config`](Self::with_config) but with an explicit [`NodeKind`] — the RLM Step-5a
+        /// capability-inertness gate parameterizes the shard's carried profile over this.
+        fn with_config_and_kind(cfg: StubConfig, kind: NodeKind) -> Rig {
             let mut world = World::new();
             world.insert_resource(InboundBox::default());
             world.insert_resource(OutboundBox::default());
             world.insert_resource(NodeIdentity {
                 node_id: SHARD,
-                kind: NodeKind::StubShard,
+                kind,
             });
             world.insert_resource(ClockSample {
                 local_tick: vd_core::TickId(1),
@@ -4692,6 +4700,32 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn shard_profile_swap_is_capability_inert_for_every_profile_kind() {
+        // RLM Step 5a ACCEPTANCE GATE. The shard boot swaps `NodeKind::StubShard` →
+        // `NodeKind::Shard(profile_for(coord.profile_kind()))`. That swap MUST be CAPABILITY-INERT at P1–P3:
+        // no system reads the carried `ShardProfile` caps to decide behavior yet, so a shard carrying ANY
+        // profile emits BYTE-IDENTICAL authored frames + grants to the zero-cap StubShard shard, at the same
+        // synced tick, with identical inputs. PROVEN here (not asserted) over EVERY `ProfileKind` — incl.
+        // `Galaxy` (the one that carries `signal_relay`, which will uncorner P9 Signals). A future
+        // `match kind` / capability gate that changes authored output would break this guard.
+        use vd_core::taxonomy::ProfileKind;
+        let baseline = Rig::with_config_and_kind(config(), NodeKind::StubShard).tick(vec![]);
+        assert!(
+            !baseline.is_empty(),
+            "a synced shard authors + self-grants on an empty tick — a non-vacuous inertness baseline"
+        );
+        for k in ProfileKind::ALL {
+            let profile =
+                crate::capability::profile_for(k).expect("every ProfileKind yields a profile");
+            let out = Rig::with_config_and_kind(config(), NodeKind::Shard(profile)).tick(vec![]);
+            assert_eq!(
+                out, baseline,
+                "Shard({k:?}) authored output diverged from StubShard — the profile swap is NOT inert"
+            );
+        }
     }
 
     #[test]
