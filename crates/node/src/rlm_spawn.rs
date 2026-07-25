@@ -99,6 +99,13 @@ pub struct LaunchSpec {
     /// The pre-fork incarnation nonce (→ the child's `VD_INCARNATION_COOKIE`); persisted in the
     /// write-ahead intent BEFORE the fork, so a restart can identify this exact incarnation (Step 5e).
     pub cookie: IncarnationCookie,
+    /// The child's `VD_PEERS` book (RLM Step 5d): the ANCESTOR CLOSURE — every live shard on `coord`'s
+    /// `parent()`-to-root chain — plus the fixed anchors (orchestrator + gateway). Computed per-spawn by
+    /// [`closure_peers`] from the kernel's live map (the ONLY component holding every live node's coord AND
+    /// addr), so the child can dial its parent chain up to root without DNS. Excludes self/siblings/
+    /// descendants (they resolve lazily via reply-on-connection). Rides this INTERNAL spec, NOT the frozen
+    /// `RealmSpawner` seam.
+    pub peers: Vec<(NodeId, SocketAddr)>,
 }
 
 /// The launch/teardown/liveness/booking port (RLM Step 5b) — object-safe, so [`SpawnCore`]'s decision logic
@@ -205,6 +212,11 @@ struct SpawnInner {
     dead: BTreeSet<NodeId>,
     /// The durable launch ledger + high-water. Its committed contents survive an orchestrator kill-9.
     store: Box<dyn Store + Send + Sync>,
+    /// The fixed anchors appended to EVERY child's `VD_PEERS` (RLM Step 5d): the orchestrator + gateway,
+    /// which are never part of a realm lineage but every shard must reach. A construction input (a test
+    /// fixture in 5d; the orchestrator fills the real `(ORCH, bind)`/`(GATEWAY, bind)` at 5e). The
+    /// per-spawn ANCESTOR set is computed dynamically from `live`; only these static anchors are held here.
+    anchor_peers: Vec<(NodeId, SocketAddr)>,
 }
 
 /// The decision half of the real-process [`RealmSpawner`] (RLM Step 5b). Generic over the [`LaunchBackend`]
@@ -225,8 +237,9 @@ impl<B: LaunchBackend> SpawnCore<B> {
         store: Box<dyn Store + Send + Sync>,
         backend: B,
         tuning: SpawnTuning,
+        anchor_peers: Vec<(NodeId, SocketAddr)>,
     ) -> SpawnCore<B> {
-        SpawnCore::rehydrate(store, backend, tuning)
+        SpawnCore::rehydrate(store, backend, tuning, anchor_peers)
     }
 
     /// Rebuild from a durable store after an orchestrator restart: resume the F2 high-water (NEVER
@@ -239,6 +252,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
         store: Box<dyn Store + Send + Sync>,
         backend: B,
         tuning: SpawnTuning,
+        anchor_peers: Vec<(NodeId, SocketAddr)>,
     ) -> SpawnCore<B> {
         let mut store = store;
         let water = read_water(&*store).unwrap_or(WaterMark {
@@ -286,6 +300,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
                 killed: BTreeSet::new(),
                 dead: BTreeSet::new(),
                 store,
+                anchor_peers,
             })),
             backend,
         }
@@ -356,12 +371,17 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
         g.next_node += 1;
         g.next_port = next_port;
 
+        // RLM 5d: the child's VD_PEERS book — the ancestor closure (from the live map, the ONLY holder of
+        // every node's coord+addr) ∪ the fixed anchors. Computed BEFORE launch so the forked shard can dial
+        // its parent chain immediately (no DNS). A branchless fill from the monomorphic helper (HR5).
+        let peers = closure_peers(coord, &g.live, &g.anchor_peers);
         let spec = LaunchSpec {
             node,
             coord: coord.clone(),
             addr,
             probe,
             cookie,
+            peers,
         };
         match self.backend.launch(&spec) {
             Ok(pid) => {
@@ -439,6 +459,43 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
         }
         g.live.keys().copied().collect()
     }
+}
+
+/// The `VD_PEERS` book for a child at `coord` (RLM Step 5d): the ANCESTOR CLOSURE ∪ the fixed `anchors`.
+///
+/// Walks `coord.parent()` to the root and, for each ancestor whose `RealmPath` a `live` slot serves,
+/// collects `(node, bind_addr)`; then appends `anchors` (the orchestrator + gateway — never part of a
+/// lineage, always reachable). Excludes `coord` itself, siblings, descendants, and any ancestor not yet
+/// live (those resolve lazily via reply-on-connection). Deterministic order (the `parent()` walk is
+/// leaf→root; `live` lookups are exact; `anchors` in caller order) — no wall-clock, no rng.
+///
+/// MONOMORPHIC free helper (concrete types), so ALL branching (the walk loop + the found/absent arm) lives
+/// OUTSIDE the generic `SpawnCore<B>` body — covered ONCE regardless of `B` (HR5). The generic `spawn_realm`
+/// calls it as a straight-line fill.
+///
+/// LIMITATION (ledgered to 5e/5f, DEFERRED.md D-RLM-6): the book is fixed at the child's boot — an ancestor
+/// that is absent at spawn, or that later restarts under a NEW incarnation while this child stays live, is
+/// NOT reachable by this already-running child (its dial lane is built once from `VD_PEERS`;
+/// reply-on-connection cannot repair it because it needs the child to be the dialer and the child has no
+/// addr/lane for the new incarnation). Correct ONLY under parent-first spawn ordering + no ancestor churn
+/// under a live descendant; the refresh policy is an open 5e/5f decision.
+fn closure_peers(
+    coord: &RealmCoord,
+    live: &BTreeMap<NodeId, LiveSlot>,
+    anchors: &[(NodeId, SocketAddr)],
+) -> Vec<(NodeId, SocketAddr)> {
+    let mut peers = Vec::new();
+    let mut ancestor = coord.parent();
+    while let Some(a) = ancestor {
+        for (node, slot) in live {
+            if slot.coord().path() == a.path() {
+                peers.push((*node, slot.addr()));
+            }
+        }
+        ancestor = a.parent();
+    }
+    peers.extend_from_slice(anchors);
+    peers
 }
 
 /// Read the durable F2 high-water, if any (the single [`StoreKey::RlmWater`] record). `None` on a virgin
@@ -575,7 +632,9 @@ mod tests {
     }
 
     fn core(backend: FakeBackend, tuning: SpawnTuning) -> SpawnCore<FakeBackend> {
-        SpawnCore::new(Box::new(MemStore::new()), backend, tuning)
+        // Empty anchors: these kernel tests don't spawn under a live-ancestor lineage, so the VD_PEERS
+        // closure is exercised directly in the `closure_peers_*` tests below (not through spawn_realm).
+        SpawnCore::new(Box::new(MemStore::new()), backend, tuning, Vec::new())
     }
 
     const T: UniverseTick = UniverseTick(7);
@@ -696,7 +755,12 @@ mod tests {
         let retained = store.clone(); // shares the committed WAL (the kill-9 analog: RAM dies, disk lives)
         let live_fake = FakeBackend::default();
         {
-            let sc = SpawnCore::new(Box::new(store), live_fake.clone(), tuning(1_000, 42_000));
+            let sc = SpawnCore::new(
+                Box::new(store),
+                live_fake.clone(),
+                tuning(1_000, 42_000),
+                Vec::new(),
+            );
             sc.spawn_realm(&system(1, 1), T).expect("spawn a");
             sc.spawn_realm(&system(1, 2), T).expect("spawn b");
         } // orchestrator "dies" — RAM gone, the committed store survives via the retained clone.
@@ -704,7 +768,12 @@ mod tests {
         // A fresh backend (post-restart) that still sees the children alive; rehydrate over the SAME store.
         let fresh = FakeBackend::default();
         fresh.g().alive.extend([NodeId(1_000), NodeId(1_001)]);
-        let sc = SpawnCore::rehydrate(Box::new(retained), fresh.clone(), tuning(1_000, 42_000));
+        let sc = SpawnCore::rehydrate(
+            Box::new(retained),
+            fresh.clone(),
+            tuning(1_000, 42_000),
+            Vec::new(),
+        );
 
         // Survivors recovered, each re-announced to the mesh, and the node→realm binding restored.
         assert_eq!(
@@ -725,7 +794,12 @@ mod tests {
         let retained = store.clone();
         let fake = FakeBackend::default();
         {
-            let sc = SpawnCore::new(Box::new(store), fake.clone(), tuning(1_000, 42_000));
+            let sc = SpawnCore::new(
+                Box::new(store),
+                fake.clone(),
+                tuning(1_000, 42_000),
+                Vec::new(),
+            );
             sc.spawn_realm(&system(1, 1), T).expect("spawn a"); // 1_000
             sc.spawn_realm(&system(1, 2), T).expect("spawn b"); // 1_001
             let c = sc.spawn_realm(&system(1, 3), T).expect("spawn c"); // 1_002
@@ -734,7 +808,7 @@ mod tests {
 
         // Only A,B survive in the ledger; C's intent is gone. max(survivors)+1 would WRONGLY be 1_002.
         let fresh = FakeBackend::default();
-        let sc = SpawnCore::rehydrate(Box::new(retained), fresh, tuning(1_000, 42_000));
+        let sc = SpawnCore::rehydrate(Box::new(retained), fresh, tuning(1_000, 42_000), Vec::new());
         assert_eq!(
             sc.live_slots().keys().copied().collect::<BTreeSet<_>>(),
             BTreeSet::from([NodeId(1_000), NodeId(1_001)])
@@ -776,7 +850,7 @@ mod tests {
         let store = MemStore::new();
         let retained = store.clone();
         let fake = FakeBackend::default();
-        let sc = SpawnCore::new(Box::new(store), fake, tuning(1_000, 42_000));
+        let sc = SpawnCore::new(Box::new(store), fake, tuning(1_000, 42_000), Vec::new());
         let a = sc.spawn_realm(&system(1, 1), T).expect("spawn");
 
         // The durable intent the kernel committed carries the PRE-FORK cookie, the confirmed pid, and the
@@ -832,6 +906,7 @@ mod tests {
             Box::new(retained.clone()),
             fresh.clone(),
             tuning(1_000, 42_000),
+            Vec::new(),
         );
 
         // The completed survivor is reconstructed + rebooked; the partial is NOT reconstructed (no
@@ -860,5 +935,94 @@ mod tests {
         assert_eq!(t.first_node, 1_000);
         assert_eq!(t.first_port, 42_000);
         assert_eq!(t.bind_host, Ipv4Addr::LOCALHOST);
+    }
+
+    // ---- closure_peers (RLM 5d VD_PEERS ancestor closure) ----------------------------------------
+
+    /// A coord from a lineage of `(kind, seed)` levels.
+    fn coord_of(levels: &[(RealmKindTag, u64)]) -> RealmCoord {
+        RealmCoord::from_path(RealmPath::from_levels(
+            levels
+                .iter()
+                .map(|(k, s)| RealmLevel::new(*k, *s))
+                .collect(),
+        ))
+        .expect("a non-empty lineage has a leaf")
+    }
+
+    /// A live slot serving `coord`, bound at `addr(port)`.
+    fn live_slot(coord: RealmCoord, port: u16) -> LiveSlot {
+        LiveSlot {
+            coord,
+            addr: addr(port),
+            at_tick: T,
+        }
+    }
+
+    #[test]
+    fn closure_peers_collects_live_ancestors_leaf_to_root_then_anchors() {
+        let leaf = coord_of(&[
+            (RealmKindTag::Universe, 0),
+            (RealmKindTag::Galaxy, 2),
+            (RealmKindTag::System, 7),
+        ]);
+        let galaxy = coord_of(&[(RealmKindTag::Universe, 0), (RealmKindTag::Galaxy, 2)]);
+        let universe = coord_of(&[(RealmKindTag::Universe, 0)]);
+        let sibling = coord_of(&[
+            (RealmKindTag::Universe, 0),
+            (RealmKindTag::Galaxy, 2),
+            (RealmKindTag::System, 8),
+        ]);
+        let mut live = BTreeMap::new();
+        live.insert(NodeId(10), live_slot(galaxy, 5_010)); // Galaxy ancestor — INCLUDED
+        live.insert(NodeId(11), live_slot(universe, 5_011)); // Universe ancestor — INCLUDED
+        live.insert(NodeId(12), live_slot(sibling, 5_012)); // sibling System — EXCLUDED
+        live.insert(NodeId(13), live_slot(leaf.clone(), 5_013)); // the leaf itself — EXCLUDED (never books self)
+        let anchors = vec![(NodeId(1), addr(9_001)), (NodeId(2), addr(9_002))];
+
+        // Ancestors leaf→root (Galaxy then Universe), THEN the anchors; no sibling, no self.
+        assert_eq!(
+            closure_peers(&leaf, &live, &anchors),
+            vec![
+                (NodeId(10), addr(5_010)),
+                (NodeId(11), addr(5_011)),
+                (NodeId(1), addr(9_001)),
+                (NodeId(2), addr(9_002)),
+            ]
+        );
+    }
+
+    #[test]
+    fn closure_peers_on_a_root_coord_is_just_the_anchors() {
+        // A root coord has NO parent → the walk runs zero iterations; a live descendant is ignored.
+        let root = coord_of(&[(RealmKindTag::Universe, 0)]);
+        let descendant = coord_of(&[(RealmKindTag::Universe, 0), (RealmKindTag::Galaxy, 2)]);
+        let mut live = BTreeMap::new();
+        live.insert(NodeId(10), live_slot(descendant, 5_010));
+        let anchors = vec![(NodeId(1), addr(9_001))];
+        assert_eq!(
+            closure_peers(&root, &live, &anchors),
+            vec![(NodeId(1), addr(9_001))]
+        );
+    }
+
+    #[test]
+    fn closure_peers_skips_an_ancestor_not_yet_live() {
+        // D3: an ancestor walked but ABSENT from `live` contributes nothing (the not-found arm). Only the
+        // Galaxy ancestor is live; the Universe ancestor is missing.
+        let leaf = coord_of(&[
+            (RealmKindTag::Universe, 0),
+            (RealmKindTag::Galaxy, 2),
+            (RealmKindTag::System, 7),
+        ]);
+        let galaxy = coord_of(&[(RealmKindTag::Universe, 0), (RealmKindTag::Galaxy, 2)]);
+        let mut live = BTreeMap::new();
+        live.insert(NodeId(10), live_slot(galaxy, 5_010));
+        let anchors = vec![(NodeId(1), addr(9_001))];
+        // Galaxy included; Universe (absent) skipped; then the anchor.
+        assert_eq!(
+            closure_peers(&leaf, &live, &anchors),
+            vec![(NodeId(10), addr(5_010)), (NodeId(1), addr(9_001))]
+        );
     }
 }

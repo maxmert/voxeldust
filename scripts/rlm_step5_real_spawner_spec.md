@@ -597,6 +597,42 @@ is monomorphic + fake-`LaunchBackend`-covered in `vd-node` (Tier-A); the OS shim
   spawned shard; an older shard reaches a newer via a learned reply lane (pure-loopback repro, D-18
   discipline); a re-issued `SpinUp` on a live coord is a no-op (idempotency keyed on `coord.path`,
   not incarnation — the C-1 guard fix); absent `VD_PEER_HOSTS` ⇒ clean no-op.
+
+> **5d VET AMENDMENTS (workflow `wf_9e6e54c7`, GO_WITH_FIXES) — AS BUILT.**
+> 1. **Idempotency-by-`coord.path` ALREADY EXISTS** in the reconciler kernel (`rlm.rs` `launch_live`/
+>    `LaunchLedger.minted`, path-keyed). 5d adds NO kernel code — only a paired assertion on the existing
+>    `drive_..._holds_while_launching` test proving a RE-ISSUED `SpinUp` on a live/launching coord is a
+>    no-op (path-keyed, not incarnation-keyed). **D2 caveat:** the *running/absent* half keys the directory
+>    head on the LOSSY `coord.lowered()`, so C-1 is galaxy-correct only until the D-41 path-indexed
+>    directory lands (ledgered to D-41, NOT re-keyed here).
+> 2. **`VD_PEERS` ancestor closure — the frozen `RealmSpawner` seam is UNTOUCHED.** The closure rides the
+>    INTERNAL `LaunchSpec.peers`, computed per-spawn by a monomorphic free helper `closure_peers(coord,
+>    live, anchors)` in `vd-node` (Tier-A, 100% — 3 tests incl. the walked-but-not-live arm, D3). The
+>    static anchors (ORCH/GATEWAY) are a `SpawnCore` construction field (`anchor_peers`); real values wire
+>    at 5e, a fixture until then. `ProcLaunchBackend::child_env` emits `VD_PEERS = book(&spec.peers)` (the
+>    ONE formatter, reused). Closure = live ancestors (`coord.parent()`→root) ∪ anchors; excludes
+>    self/siblings/descendants/not-yet-live ancestors.
+> 3. **Gateway→shard is REPLY-ON-CONNECTION, not a push.** The spec's literal "dest→gateway
+>    `update_peer_addr` push" is a REACHABILITY NO-OP (`update_peer_addr` creates no dial lane; the sole
+>    lane-create is the boot loop over `cfg.peers`) — the child (which lists GATEWAY as an anchor) DIALS the
+>    gateway, which learns it on accept (`LearnedPeers`). This mechanism is ALREADY PROVEN by the existing
+>    mesh tests (`..._on_connection_reaches_a_peer_not_in_the_book`, the D-18 symmetric-datagram test) — 5d
+>    adds NO mesh code, so no new loopback test (DRY); it only DRIVES the existing machinery. `book_peer` is
+>    belt-and-suspenders bookkeeping only.
+> 4. **DEFERRED (ledgered, D-RLM-6):** a child's `VD_PEERS`/dial lanes are FIXED at boot — an ancestor
+>    absent at spawn, or one that RESTARTS under a new incarnation while a descendant stays live, is NOT
+>    reachable by that running descendant (reply-on-connection can't repair it: needs the descendant to be
+>    the dialer, which has no addr for the new incarnation). Correct ONLY under parent-first spawn ordering
+>    + no ancestor churn under a live descendant. The refresh policy is an OPEN 5e/5f decision (two
+>    candidates: reconciler re-spawns the descendant subtree on ancestor-incarnation-change [likely
+>    HR-clean, zero new wire]; or a runtime lane-re-key control path [new wire, joint investigation]) with a
+>    **5f HARD gate**: ancestor crash+respawn while a descendant stays live → descendant re-reaches within
+>    bounded ticks. **D4** first-contact input-drop (Unreliable `Input` before the dest is learned) is a
+>    **5f HARD gate** too, not a 5d assertion.
+> **As-built 5d = (1) `closure_peers` Tier-A + 3 tests; (2) the path-keyed idempotency assertion; (3)
+> `LaunchSpec.peers` + `SpawnCore.anchor_peers` (fixture); (4) `child_env` `VD_PEERS` emit + the smoke test
+> carries a peers fixture.** Real anchors + the spawner-internal coord-scan short-circuit fold to 5e;
+> end-to-end reachability + D1/D4 hard gates to 5f.
 - **5e — crash re-discovery (the C-1/H-1/H-4 capstone) + the ABSORBED 5c-3 durable wiring.** FIRST lands
   what 5c-3 deferred (see the amendment): the shared-`RedbStore` handle (shared monotone seq + the single
   writer/join, so `SpawnCore`'s launch-ledger and the saga WAL share ONE physical redb in SEPARATE

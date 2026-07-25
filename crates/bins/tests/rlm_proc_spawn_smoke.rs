@@ -120,7 +120,6 @@ fn harness() -> Harness {
 /// unreachable orchestrator — the shard boots + binds its probe (so `/whoami` answers) without ever
 /// syncing; the mechanism proof needs no live clock.
 fn anchors(trust_dir: &std::path::Path) -> Vec<(&'static str, String)> {
-    let dummy_orch: SocketAddr = (Ipv4Addr::LOCALHOST, 1).into();
     let mut env = common_env(trust_dir.to_str().expect("utf8 trust dir"), &DEV);
     env.extend([
         ("VD_SNAPSHOT_BUDGET", DEV.snapshot_budget.to_string()),
@@ -129,7 +128,8 @@ fn anchors(trust_dir: &std::path::Path) -> Vec<(&'static str, String)> {
         ("VD_ORCH", "1".to_string()),
         ("VD_MINT_SEED", DEV.mint_seed.to_string()),
         ("VD_INPUT_LOG_CAP", DEV.input_log_cap.to_string()),
-        ("VD_PEERS", format!("1={dummy_orch}")),
+        // NOTE: VD_PEERS is NO LONGER an anchor — RLM 5d makes ProcLaunchBackend::child_env emit it from
+        // the kernel-computed LaunchSpec.peers (the ancestor closure). The specs below fill it.
     ]);
     env
 }
@@ -146,6 +146,12 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
     let backend = ProcLaunchBackend::new(Arc::clone(&h.control), tuning);
     let boot_deadline = Duration::from_secs(30);
 
+    // The RLM 5d VD_PEERS book the kernel would compute (ancestor closure ∪ anchors). Here a fixture
+    // naming an unreachable orchestrator — the child parses it into its peer book + boots (a real ancestor
+    // closure is exercised by the Tier-A `closure_peers_*` tests; this proves ProcLaunchBackend EMITS it and
+    // the forked shard ACCEPTS a non-empty VD_PEERS end-to-end).
+    let peers = vec![(NodeId(1), SocketAddr::from((Ipv4Addr::LOCALHOST, 1)))];
+
     // --- 1+2: a Planet and a Galaxy shard both boot; the Planet echoes its EXACT cookie on /whoami. ---
     let planet_node = NodeId(1_000);
     let planet_bind = reserve_udp_addr();
@@ -160,6 +166,7 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
             addr: planet_bind,
             probe: planet_probe,
             cookie: planet_cookie,
+            peers: peers.clone(),
         })
         .expect("planet launch");
 
@@ -173,6 +180,7 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
             addr: reserve_udp_addr(),
             probe: galaxy_probe,
             cookie: galaxy_cookie,
+            peers: peers.clone(),
         })
         .expect("galaxy launch");
 

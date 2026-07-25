@@ -562,6 +562,22 @@ mod tests {
         // Next sweep: launching (minted, no head) ⇒ NO second spawn (BUG-B).
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101));
         assert_eq!(rlm.spins_requested, 1, "no double-spawn while launching");
+        // RLM 5d C-1 idempotency-by-coord.path: a genuinely RE-ISSUED SpinUp on the still-launching coord
+        // is ALSO a no-op. The suppression is keyed on the minted node under `sys(7).path()` (the lineage
+        // path), NOT on the incarnation — the allocator WOULD mint a fresh NodeId/cookie, but `launch_present`
+        // for the path blocks the emit. So a re-issued demand can never orphan a second incarnation.
+        rlm.ledger
+            .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(102), Fence(2));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102));
+        assert_eq!(
+            rlm.spins_requested, 1,
+            "a re-issued SpinUp on a live/launching coord is idempotent (path-keyed, not incarnation-keyed)"
+        );
+        assert_eq!(
+            rlm.launches.minted.get(sys(7).path()).map(BTreeMap::len),
+            Some(1),
+            "still exactly one minted node for the path — no second incarnation"
+        );
     }
 
     #[test]

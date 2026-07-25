@@ -110,6 +110,9 @@ impl ProcLaunchBackend {
             ("VD_INCARNATION_COOKIE", spec.cookie.to_env_string()),
             ("VD_REALM_KIND", crate::realm_kind_token(realm).to_string()),
             ("VD_REALM_SEED", crate::realm_seed_of(realm).to_string()),
+            // RLM 5d: the ancestor-closure peer book (∪ anchors) the kernel computed — the child dials its
+            // parent chain up to root without DNS. `book` is the ONE VD_PEERS formatter (DRY, reused).
+            ("VD_PEERS", crate::book(&spec.peers)),
         ]
     }
 }
