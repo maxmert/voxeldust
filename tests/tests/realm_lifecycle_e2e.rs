@@ -42,11 +42,13 @@ struct Orch {
     store: MemStore,
 }
 
-fn orch_cfg(rlm: RlmTuning) -> OrchestratorConfig {
+/// `clock_peers` is EMPTY for every hand-fed cell (nothing follows this clock); the RLM 5f-3d ARMED cell
+/// passes the real gateway so it receives the per-tick `ClockSync` broadcast through the production path.
+fn orch_cfg(rlm: RlmTuning, clock_peers: Vec<NodeId>) -> OrchestratorConfig {
     OrchestratorConfig {
         epoch: EpochId(1),
         reserve_chunk: 1024,
-        clock_peers: vec![],
+        clock_peers,
         directory: DirectoryTuning::default(),
         saga: SagaTuning::default(),
         liveness: LivenessTuning::default(),
@@ -56,6 +58,15 @@ fn orch_cfg(rlm: RlmTuning) -> OrchestratorConfig {
 }
 
 fn assemble(rlm: RlmTuning, spawner: MemSpawner, store: MemStore) -> Orch {
+    assemble_with_peers(rlm, spawner, store, vec![])
+}
+
+fn assemble_with_peers(
+    rlm: RlmTuning,
+    spawner: MemSpawner,
+    store: MemStore,
+    clock_peers: Vec<NodeId>,
+) -> Orch {
     let mut world = World::new();
     world.insert_resource(InboundBox::default());
     world.insert_resource(OutboundBox::default());
@@ -67,7 +78,7 @@ fn assemble(rlm: RlmTuning, spawner: MemSpawner, store: MemStore) -> Orch {
     register_orchestrator_with_store(
         &mut world,
         &mut schedule,
-        &orch_cfg(rlm),
+        &orch_cfg(rlm, clock_peers),
         Box::new(store.clone()),
         Box::new(spawner.clone()),
         // RLM 5e-3b: the crash-recovery launch seed — EMPTY here (the injected spawner IS the recovery
@@ -111,7 +122,14 @@ impl Orch {
 
     /// Run ONE real orchestrator tick, delivering `demands` as real Saga-class wire frames first.
     fn tick(&mut self, demands: &[RealmDemand]) {
-        let inbox: Vec<Inbound> = demands
+        self.tick_with(demands, Vec::new());
+    }
+
+    /// [`Orch::tick`] plus `extra` raw inbound frames — the seam the RLM 5f-3d ARMED cell pumps a REAL
+    /// gateway's outbox through, so the login's demand/head-read reach this orchestrator as the exact wire
+    /// bytes the gateway emitted (never hand-built). Empty for every pre-5f-3d cell ⇒ behaviour-identical.
+    fn tick_with(&mut self, demands: &[RealmDemand], extra: Vec<Inbound>) {
+        let mut inbox: Vec<Inbound> = demands
             .iter()
             .map(|d| Inbound::Wire {
                 from: STUB,
@@ -121,8 +139,18 @@ impl Orch {
                     .into(),
             })
             .collect();
+        inbox.extend(extra);
         self.world.resource_mut::<InboundBox>().0 = inbox;
         self.schedule.run(&mut self.world);
+    }
+
+    /// Take everything this orchestrator's systems staged for the wire this tick (the in-process stand-in
+    /// for its flush phase — the ARMED cell hands the GATEWAY-bound frames to the gateway).
+    fn drain_outbox(&mut self) -> Vec<(NodeId, MsgClass, Vec<u8>)> {
+        std::mem::take(&mut self.world.resource_mut::<OutboundBox>().0)
+            .into_iter()
+            .map(|(to, class, bytes, _)| (to, class, bytes.to_vec()))
+            .collect()
     }
 
     /// Model a spawned child shard REGISTERING (self-granting its realm head) — the directory state a
@@ -432,6 +460,483 @@ fn the_crash_freeze_releases_and_a_truly_abandoned_realm_is_reaped() {
     assert!(
         reaped_tick.expect("reaped") >= reborn.rlm().rlm_quiesced_until(),
         "the reap fired only after the freeze released",
+    );
+}
+
+// ===== RLM 5f-3d — the ARMED dynamic-home LOGIN, end to end =====================================
+//
+// Every cell above hand-feeds the reconciler. THIS section drives it from a REAL gateway: a signed `Hello`
+// → the real directory-committed `Session` lease → the gateway's SERVER-DERIVED home demand → the real
+// reconciler spawn of the whole home lineage → the (modelled) child shard taking its realm head → the
+// gateway's OWN `HeadRead` reply → its `AttachSession` landing on the SPAWNED node.
+//
+// Both nodes are 100% real code on their real per-tick schedules (`register_gateway` +
+// `register_orchestrator_with_store`), talking through their real wire bytes. Only the never-built peer is
+// modelled at its wire seam, exactly as the cells above model it: the spawned shard's self-grant of its
+// realm head, its `Empty` self-report, and its `SessionAttached` reply.
+
+// The cluster's node ids + auth key come from `vd_tests` (never re-invented). `SHARD` is aliased
+// `LOGIN_SHARD`: it is the gateway's FROZEN `config.shard`, and it does NOT exist in this cluster — that is
+// the point, since on an armed gateway nothing may ever be routed there.
+use vd_tests::{AUTH_SIGNING_KEY, GATEWAY, ORCH, SHARD as LOGIN_SHARD, auth_verifying_key};
+
+use vd_connection_plane::gateway::{
+    GatewayConfig, GatewaySessions, GatewayStats, SeedInjectorConfig, TransportTuning,
+    register_gateway,
+};
+use vd_connection_plane::tickets;
+use vd_core::glam::DVec3;
+use vd_core::pose::{FrameRef, StampedPose};
+use vd_core::taxonomy::ProfileKind;
+use vd_core::worldgen::{UniverseConfig, container_coord_at};
+use vd_core::{AccountId, EntityId, SessionId, TickId};
+use vd_node::follower::register_clock_follower;
+use vd_sim::capability::NodeKind;
+use vd_sim::runtime::NodeIdentity;
+use vd_wire::channels::ClientControlMsg;
+use vd_wire::seams::directory::DirectoryOp;
+use vd_wire::session_flow::{GatewayToShard, ShardToGateway};
+use vd_wire::version::ProtoVersion;
+
+/// The client connection (vd-tests reserves 100+ for clients).
+const CLIENT: NodeId = NodeId(100);
+/// The login account, and its STORED absolute spawn pose (the 5f-3b pose-store stand-in): the Area-A box at
+/// x=25, whose deepest containing realm is the 5-level [Universe, Galaxy, System(7), Planet(7), Area(7)] home.
+const LOGIN_ACCOUNT: AccountId = AccountId(5);
+const SPAWN_X: f64 = 25.0;
+/// The cluster tick rate EVERY budget in this section derives from (the shipped cloud rate).
+const TICK_HZ: u32 = 20;
+/// The avatar entity the modelled home shard reports on attach.
+const AVATAR: EntityId = EntityId(77);
+
+/// The login's SERVER-derived home lineage (what the gateway's injector resolves), and the `RealmId` the
+/// directory keys it by.
+fn home_lineage() -> RealmCoord {
+    container_coord_at(
+        0,
+        &UniverseConfig::walk_scale(),
+        DVec3::new(SPAWN_X, 0.0, 0.0),
+    )
+}
+
+/// The cluster's ONE RLM budget: the orchestrator reconciles with it AND the gateway derives its
+/// demand-re-drive cadence + bootstrap TTL from it (HR3 — `resolve_rlm_tuning` is the single derivation, so
+/// the gateway's hold can never be tighter than the boot the reconciler itself allows).
+fn armed_tuning() -> RlmTuning {
+    vd_node::rlm_runtime::resolve_rlm_tuning(true, TICK_HZ, 0, 0)
+}
+
+/// A real gateway node: its own World + schedule + local tick counter (the node shell's per-tick
+/// `local_tick` advance, mirrored here since this rig has no transport).
+struct Gw {
+    world: World,
+    schedule: Schedule,
+    tick: TickId,
+}
+
+impl Gw {
+    fn new(rlm: &RlmTuning) -> Gw {
+        let mut world = World::new();
+        world.insert_resource(InboundBox::default());
+        world.insert_resource(OutboundBox::default());
+        // synced = false: the REAL clock follower arms it off the orchestrator's broadcast, so the MF3
+        // pre-sync hold is exercised by the boot itself rather than hand-set.
+        world.insert_resource(ClockSample::default());
+        world.insert_resource(NodeIdentity {
+            node_id: GATEWAY,
+            kind: NodeKind::Gateway,
+        });
+        let mut schedule = Schedule::default();
+        register_clock_follower(&mut world, &mut schedule);
+        // The ARMED injector — the ONLY difference from the default cluster gateway config: the
+        // `GatewayConfig` FIELD SET is untouched, just its `seed_injector`. Both windows come from the SAME
+        // `resolve_rlm_tuning` the orchestrator above reconciles with.
+        let seed_injector = SeedInjectorConfig {
+            armed: true,
+            universe_seed: 0,
+            universe_config: UniverseConfig::walk_scale(),
+            spawn_poses: std::collections::BTreeMap::from([(
+                LOGIN_ACCOUNT,
+                StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 0 },
+                    DVec3::new(SPAWN_X, 0.0, 0.0),
+                    UniverseTick(0),
+                ),
+            )]),
+            demand_ttl_ticks: rlm.demand_ttl_ticks,
+            bootstrap_ttl_ticks: SeedInjectorConfig::bootstrap_ttl_from_rlm(
+                rlm.launch_ttl_ticks,
+                rlm.demand_ttl_ticks,
+            ),
+        };
+        seed_injector
+            .validate()
+            .expect("the derived armed budget is valid (the bin fails loud otherwise)");
+        register_gateway(
+            &mut world,
+            &mut schedule,
+            GatewayConfig {
+                orchestrator: ORCH,
+                shard: LOGIN_SHARD,
+                known_shards: std::collections::BTreeSet::from([LOGIN_SHARD]),
+                auth_verifying_key: auth_verifying_key(),
+                session_seed: 23,
+                tick_hz: TICK_HZ,
+                // MF2: the lease-liveness heartbeat is LIVE (a derived cadence, not a literal) — a login held
+                // across a whole pod boot must keep its committed lease renewed.
+                lease_renew_interval_ticks: rlm.demand_ttl_ticks
+                    / SeedInjectorConfig::REDRIVE_DIVISOR,
+                session_recheck_interval: 0,
+                self_fence_grace_ticks: 0,
+                reject_next_prepare: None,
+                seed_injector,
+                tuning: TransportTuning {
+                    max_sessions: 4,
+                    max_buffered_inputs: TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS,
+                },
+            },
+        );
+        Gw {
+            world,
+            schedule,
+            tick: TickId(0),
+        }
+    }
+
+    /// ONE real gateway tick: advance `local_tick`, deliver `inbound`, run the schedule, take the outbox.
+    fn step(&mut self, inbound: Vec<Inbound>) -> Vec<(NodeId, MsgClass, Vec<u8>)> {
+        self.tick = self.tick.next();
+        self.world.resource_mut::<ClockSample>().local_tick = self.tick;
+        self.world.resource_mut::<InboundBox>().0 = inbound;
+        self.schedule.run(&mut self.world);
+        std::mem::take(&mut self.world.resource_mut::<OutboundBox>().0)
+            .into_iter()
+            .map(|(to, class, bytes, _)| (to, class, bytes.to_vec()))
+            .collect()
+    }
+
+    fn sessions(&self) -> &GatewaySessions {
+        self.world.resource::<GatewaySessions>()
+    }
+
+    fn stats(&self) -> &GatewayStats {
+        self.world.resource::<GatewayStats>()
+    }
+}
+
+/// The two-real-node cluster: a gateway and an orchestrator, one wire hop apart.
+struct Armed {
+    orch: Orch,
+    gw: Gw,
+    to_orch: Vec<Inbound>,
+    to_gw: Vec<Inbound>,
+    /// Everything the gateway sent SHARD-ward (never the orchestrator, never the client), in order.
+    shard_bound: Vec<(NodeId, MsgClass, Vec<u8>)>,
+    /// Everything the gateway sent the ORCHESTRATOR (also forwarded) — the MF2 renewal observable.
+    orch_bound: Vec<Vec<u8>>,
+}
+
+impl Armed {
+    fn new() -> Armed {
+        let rlm = armed_tuning();
+        Armed {
+            orch: assemble_with_peers(
+                rlm,
+                MemSpawner::new(MemHub::new(), NodeId(1_000_000), 8),
+                MemStore::new(),
+                vec![GATEWAY],
+            ),
+            gw: Gw::new(&rlm),
+            to_orch: Vec::new(),
+            to_gw: Vec::new(),
+            shard_bound: Vec::new(),
+            orch_bound: Vec::new(),
+        }
+    }
+
+    /// ONE cluster step: the gateway runs (seeing last step's orchestrator replies plus `client_frames`),
+    /// then the orchestrator runs (seeing the gateway's frames plus the modelled child shard's `demands`).
+    /// Replies land on the gateway next step — one wire hop each way.
+    fn step(&mut self, client_frames: Vec<Inbound>, demands: &[RealmDemand]) {
+        let mut gw_in = std::mem::take(&mut self.to_gw);
+        gw_in.extend(client_frames);
+        for (to, class, bytes) in self.gw.step(gw_in) {
+            if to == ORCH {
+                self.orch_bound.push(bytes.clone());
+                self.to_orch.push(Inbound::Wire {
+                    from: GATEWAY,
+                    class,
+                    bytes: bytes.into(),
+                });
+            } else if to != CLIENT {
+                // SHARD-bound (the client-visible control stream is the unit cells' subject; this section's
+                // is the ROUTE — WHICH node the login lands on).
+                self.shard_bound.push((to, class, bytes));
+            }
+        }
+        let inbound = std::mem::take(&mut self.to_orch);
+        self.orch.tick_with(demands, inbound);
+        for (to, class, bytes) in self.orch.drain_outbox() {
+            if to == GATEWAY {
+                self.to_gw.push(Inbound::Wire {
+                    from: ORCH,
+                    class,
+                    bytes: bytes.into(),
+                });
+            }
+        }
+    }
+
+    /// A real signed `Hello` from the client (the auth service's key — never a bypass).
+    fn hello() -> Vec<Inbound> {
+        let hello = ClientControlMsg::Hello {
+            version: ProtoVersion::CURRENT,
+            login: tickets::mint_login(&AUTH_SIGNING_KEY, LOGIN_ACCOUNT, EpochId(1), 1),
+        };
+        vec![Inbound::Wire {
+            from: CLIENT,
+            class: MsgClass::Control,
+            bytes: postcard::to_allocvec(&hello).expect("encode").into(),
+        }]
+    }
+
+    /// The modelled home shard confirming the attach (the wire frame a booted shard sends).
+    fn attached(session: SessionId, node: NodeId) -> Vec<Inbound> {
+        let msg = ShardToGateway::SessionAttached {
+            session,
+            entity: AVATAR,
+            frame: FrameRef::SystemSpace { system_seed: 7 },
+            realm_fence: Fence(1),
+        };
+        vec![Inbound::Wire {
+            from: node,
+            class: MsgClass::Control,
+            bytes: postcard::to_allocvec(&msg).expect("encode").into(),
+        }]
+    }
+
+    fn session(&self) -> SessionId {
+        self.gw
+            .sessions()
+            .sessions()
+            .next()
+            .expect("the login minted a session")
+    }
+
+    /// The node the reconciler LAUNCHED for the home leaf: the only live pod with the `Area` profile (its
+    /// four ancestors launch as Galaxy/System/Planet profiles), so this never guesses a mint order.
+    fn home_node(&self) -> Option<NodeId> {
+        let area: Vec<NodeId> = self
+            .orch
+            .spawner
+            .live()
+            .into_iter()
+            .filter(|(_, (kind, _))| *kind == ProfileKind::Area)
+            .map(|(node, _)| node)
+            .collect();
+        assert!(area.len() <= 1, "one Area realm ⇒ at most one Area pod");
+        area.first().copied()
+    }
+
+    /// How many `AttachSession` frames for `session` the gateway sent to `node`.
+    fn attaches_to(&self, node: NodeId, session: SessionId) -> usize {
+        self.shard_bound
+            .iter()
+            .filter(|(to, class, bytes)| {
+                (*to == node)
+                    & (*class == MsgClass::Control)
+                    & matches!(
+                        postcard::from_bytes::<GatewayToShard>(bytes),
+                        Ok(GatewayToShard::AttachSession { session: s, .. }) if s == session
+                    )
+            })
+            .count()
+    }
+
+    /// How many `LeaseRenew`s for this session's key the gateway sent the orchestrator (MF2).
+    fn session_renewals(&self, session: SessionId) -> usize {
+        self.orch_bound
+            .iter()
+            .filter(|bytes| {
+                matches!(
+                    postcard::from_bytes::<InterShardFlow>(bytes),
+                    Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew {
+                        key: DirectoryKey::Session(s),
+                        ..
+                    })) if s == session
+                )
+            })
+            .count()
+    }
+
+    /// Drive the cluster until `home_shard_of` resolves (feeding nothing), at most `max` steps.
+    fn run_until_home_resolved(&mut self, session: SessionId, max: usize) {
+        for _ in 0..max {
+            if self.gw.sessions().home_shard_of(session).is_some() {
+                return;
+            }
+            self.step(vec![], &[]);
+        }
+    }
+}
+
+#[test]
+fn an_armed_login_spins_its_home_realm_and_attaches_on_the_spawned_node() {
+    // RLM 5f-3d, end to end. NOTHING is hand-fed to the reconciler here: the login itself produces the
+    // demand, and the gateway routes to whatever node the directory says owns the spawned realm.
+    let mut cluster = Armed::new();
+    let lineage = home_lineage();
+    let home_rid = lineage.lowered();
+    // Boot: two ticks so the gateway's REAL follower sees the orchestrator's `ClockSync` broadcast.
+    cluster.step(vec![], &[]);
+    cluster.step(vec![], &[]);
+    assert!(
+        cluster.gw.world.resource::<ClockSample>().synced,
+        "the gateway followed the cluster clock through the production path"
+    );
+    // The login: Hello → LeaseGrant → the real committed lease → the SERVER-derived home demand.
+    cluster.step(Armed::hello(), &[]);
+    let sid = cluster.session();
+    for _ in 0..3 {
+        cluster.step(vec![], &[]);
+    }
+    assert_eq!(
+        cluster.gw.sessions().home_realm_of(sid),
+        Some(home_rid),
+        "the gateway derived this account's home realm from its STORED pose"
+    );
+    assert_eq!(
+        cluster.gw.stats().logins_held_pre_sync,
+        0,
+        "the clock was synced before the lease committed, so nothing was held (MF3)"
+    );
+    assert_eq!(
+        cluster.orch.rlm().spins_requested,
+        5,
+        "the login's ONE leaf demand spun up the WHOLE 5-level home lineage (the 5f-3a ride)"
+    );
+    let home = cluster.home_node().expect("the home realm's pod launched");
+    assert_eq!(
+        cluster.gw.sessions().home_shard_of(sid),
+        None,
+        "…and nothing is routable yet: the pod is still booting"
+    );
+    assert_eq!(
+        cluster.attaches_to(LOGIN_SHARD, sid),
+        0,
+        "the held login is NEVER attached to the static login shard"
+    );
+    // The spawned shard boots and takes its realm lease (modelled — the real launch is Step 5).
+    cluster.orch.register_shard(home_rid, home);
+    // The gateway's own re-driven `HeadRead` now names it.
+    cluster.run_until_home_resolved(sid, 200);
+    assert_eq!(
+        cluster.gw.sessions().home_shard_of(sid),
+        Some(home),
+        "the gateway routed the session to the SPAWNED node the directory named"
+    );
+    assert!(
+        cluster.attaches_to(home, sid) >= 1,
+        "and sent its AttachSession THERE"
+    );
+    assert_eq!(
+        cluster.attaches_to(LOGIN_SHARD, sid),
+        0,
+        "never to config.shard — the whole point of the dynamic route"
+    );
+    // The spawned shard confirms: the session goes Active on ITS attach, off the RUNTIME routable roster.
+    cluster.step(Armed::attached(sid, home), &[]);
+    assert_eq!(
+        cluster.gw.sessions().entity_of(sid),
+        Some(AVATAR),
+        "the login completed on the demand-spawned home shard"
+    );
+    assert_eq!(cluster.gw.stats().home_bootstrap_timeouts, 0);
+    assert_eq!(cluster.gw.stats().home_wait_desync, 0);
+    assert_eq!(
+        cluster.orch.rlm().teardowns_reaped,
+        0,
+        "and nothing was reaped along the way"
+    );
+}
+
+#[test]
+fn the_login_re_seed_keeps_the_reconciler_from_reaping_the_home_it_is_attaching_to() {
+    // MF1 DEFECT A, END TO END — the load-bearing invariant of this whole slice, against the REAL
+    // reconciler. The home realm boots and takes its lease, but its `SessionAttached` never comes back (the
+    // 5f-4 dial-a-fresh-pod race), and being unoccupied it self-reports `Empty` every tick — so the
+    // reconciler's arm-B (`running_live & !empty_confirmed`) is FALSE. The ONLY thing keeping the realm
+    // desired is the gateway's re-seeded demand. Before MF1 the re-seed stopped at the head resolve, arm-A
+    // lapsed one `demand_ttl` later, and the reconciler KILLED the realm the login was attaching to — tens of
+    // ticks BEFORE the gateway's bounded bootstrap TTL would have noticed anything.
+    let rlm = armed_tuning();
+    let mut cluster = Armed::new();
+    let lineage = home_lineage();
+    let home_rid = lineage.lowered();
+    cluster.step(vec![], &[]);
+    cluster.step(vec![], &[]);
+    cluster.step(Armed::hello(), &[]);
+    let sid = cluster.session();
+    for _ in 0..3 {
+        cluster.step(vec![], &[]);
+    }
+    let login_tick = cluster.gw.tick.0;
+    let home = cluster.home_node().expect("the home realm's pod launched");
+    cluster.orch.register_shard(home_rid, home);
+    cluster.run_until_home_resolved(sid, 200);
+    assert_eq!(cluster.gw.sessions().home_shard_of(sid), Some(home));
+    // HOLD past the point the reconciler WOULD have reaped: one whole demand TTL after the last demand the
+    // pre-MF1 re-drive would have sent, plus the drain + cooldown windows a Kill rides.
+    let hold_until =
+        login_tick + rlm.demand_ttl_ticks + rlm.teardown_drain_ticks + rlm.teardown_cooldown_ticks;
+    // …and the hold must stay INSIDE the gateway's bounded bootstrap TTL, so a Close can never be mistaken
+    // for a reap. `login_tick` is measured a few ticks AFTER the lease committed, so this is the pessimistic
+    // side of the real deadline; the empirical proof is `home_bootstrap_timeouts == 0` below.
+    let bootstrap_deadline = login_tick
+        + SeedInjectorConfig::bootstrap_ttl_from_rlm(rlm.launch_ttl_ticks, rlm.demand_ttl_ticks);
+    assert!(
+        hold_until < bootstrap_deadline,
+        "the reap window ({hold_until}) must fall strictly inside the bootstrap window \
+         ({bootstrap_deadline})"
+    );
+    while cluster.gw.tick.0 < hold_until {
+        // The booted-but-unoccupied shard's own `Empty` self-report, every tick.
+        let empty = demand(&cluster.orch, &lineage, DemandVerb::Empty);
+        cluster.step(vec![], &[empty]);
+        assert_eq!(
+            cluster.orch.rlm().teardowns_reaped,
+            0,
+            "the realm this login is attaching to must NEVER be reaped mid-bootstrap (MF1-A)"
+        );
+    }
+    assert_eq!(
+        cluster.orch.rlm().force_reaps,
+        0,
+        "and no zombie sweep either"
+    );
+    assert!(
+        cluster.orch.head(home_rid),
+        "its realm lease is still recorded"
+    );
+    assert!(
+        cluster.orch.spawner.live_nodes().contains(&home),
+        "and its pod is still alive"
+    );
+    assert_eq!(
+        cluster.gw.stats().home_bootstrap_timeouts,
+        0,
+        "the login is still held, still inside its bounded window"
+    );
+    assert!(
+        cluster.session_renewals(sid) >= 1,
+        "and its COMMITTED lease was renewed while pre-Active (MF2)"
+    );
+    // The lost attach finally lands: the login completes on the realm that was never reaped.
+    cluster.step(Armed::attached(sid, home), &[]);
+    assert_eq!(
+        cluster.gw.sessions().entity_of(sid),
+        Some(AVATAR),
+        "the session reached Active on its ORIGINAL home shard — nothing was killed under it"
     );
 }
 

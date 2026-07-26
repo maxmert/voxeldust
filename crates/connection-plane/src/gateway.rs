@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arc_swap::ArcSwap;
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::glam::DVec3;
-use vd_core::pose::{FrameRef, StampedPose};
+use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::rng::SplitMix64;
 use vd_core::worldgen::{UniverseConfig, container_coord_at, realm_regions_for};
@@ -36,7 +36,9 @@ use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
 use vd_wire::intershard::{DemandVerb, InterShardFlow, RealmDemand};
-use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
+use vd_wire::seams::directory::{
+    AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply, OwnerRecord,
+};
 use vd_wire::seams::transfer_control::{
     PrepareReject, PrepareResult, TransferControl, TransferControlAck,
 };
@@ -86,11 +88,13 @@ impl TransportTuning {
     pub const DEFAULT_MAX_BUFFERED_INPUTS: usize = 256;
 }
 
-/// RLM 5f-3c — the TRUSTED GATEWAY SEED INJECTOR config: the SERVER-side inputs the gateway derives an
-/// authenticated login's HOME realm from (never anything the client supplies). Grouped in ONE struct (the
+/// RLM 5f-3c/5f-3d — the DYNAMIC-HOME config: the SERVER-side inputs the gateway derives an
+/// authenticated login's HOME realm from (never anything the client supplies), PLUS (5f-3d) the timing of
+/// the pre-Active hold while that home's shard boots. Grouped in ONE struct (the
 /// operational-params-in-one-struct convention) so it grows [`GatewayConfig`] by a SINGLE field, and its
-/// [`Default`] is the fully-INERT case (unarmed, empty pose store, walk-scale forest) — byte-identical to
-/// the pre-5f-3c gateway: no `RealmDemand` is ever emitted.
+/// [`Default`] is the fully-INERT case (unarmed, empty pose store, walk-scale forest, zero windows) —
+/// byte-identical to the pre-5f-3c gateway: no `RealmDemand` is ever emitted and no login ever enters
+/// [`SessionPhase::AwaitingHomeRealm`].
 ///
 /// The `spawn_poses` map is the SAME `VD_SPAWN_POSES` stand-in the shard admits at (5f-3b), so the
 /// gateway-DERIVED home coord and the shard-side admit pose agree; the P7 durable per-account pose store
@@ -99,8 +103,11 @@ impl TransportTuning {
 #[derive(Clone, Debug)]
 pub struct SeedInjectorConfig {
     /// The ARMED gate (`VD_DEMAND`). `false` (default) ⇒ the injector is INERT: a login emits NO
-    /// `RealmDemand`, byte-identical to the pre-5f-3c gateway. The live-arming veto (the mutual-exclusion
-    /// safety with a static forest) is 5f-3e; this flag is only the on/off.
+    /// `RealmDemand` and routes to the static `GatewayConfig::shard`, byte-identical to the pre-5f-3c
+    /// gateway. It is ALSO the 5f-3d DYNAMIC-HOME phase gate (with `ClockSample::synced` — the ONE shared
+    /// expression [`GatewayConfig::dynamic_home_mode`], so the seed and the wait can never disagree). The
+    /// live-arming veto (the mutual-exclusion safety with a static forest) is 5f-3e; this flag is only the
+    /// on/off.
     pub armed: bool,
     /// The ONE universe seed the whole cluster shares (the SAME `VD_UNIVERSE_SEED` the shard reads), so the
     /// gateway resolves against the identical containment forest.
@@ -111,20 +118,115 @@ pub struct SeedInjectorConfig {
     pub universe_config: UniverseConfig,
     /// The per-account STORED spawn poses (the `VD_SPAWN_POSES` stand-in for the P7 durable pose store).
     pub spawn_poses: BTreeMap<AccountId, StampedPose>,
+    /// RLM 5f-3d — the gateway's LOCAL copy of the ORCHESTRATOR's `RlmTuning::demand_ttl_ticks` (BOTH come
+    /// from the SAME `resolve_rlm_tuning(tick_hz, …)` derivation, so they cannot drift while `VD_TICK_HZ` is
+    /// cluster-wide). It sizes the home-demand RE-DRIVE cadence ([`Self::redrive_interval_ticks`]) — the
+    /// CORRECTNESS invariant that keeps the reconciler's arm-A `demanded_recently` FRESH across the spawned
+    /// shard's whole pod boot (if the re-seed lapses, arm-A expires before arm-B
+    /// `running_live & !empty_confirmed` arms on live occupancy, and the reconciler KILLS the half-booted
+    /// realm). `0` (the default) is INERT — unreachable while unarmed.
+    pub demand_ttl_ticks: u64,
+    /// RLM 5f-3d — the BOUNDED pre-Active bootstrap TTL (gateway LOCAL ticks) spanning the WHOLE
+    /// dynamic-home wait: [`SessionPhase::AwaitingHomeRealm`] **plus** the dynamic-target
+    /// `AwaitingAttach` (a freshly spawned shard can die between head-resolve and `SessionAttached`, so a
+    /// TTL that stopped at the resolve would leave that session hanging forever). On expiry the client is
+    /// Closed LOUDLY — never a silent hang (CRITIQUE-1). DERIVE it with [`Self::bootstrap_ttl_from_rlm`] so
+    /// it is never tighter than the boot the orchestrator's own measured launch-TTL floor allows. `0` (the
+    /// default) is INERT — unreachable while unarmed.
+    pub bootstrap_ttl_ticks: u64,
 }
 
 impl Default for SeedInjectorConfig {
-    /// The fully-INERT injector: unarmed, empty pose store, walk-scale forest — byte-identical to the
-    /// pre-5f-3c gateway (`UniverseConfig` has no `Default`, so this is written out; walk-scale is the
-    /// P3 forest `container_coord_at` descends).
+    /// The fully-INERT injector: unarmed, empty pose store, walk-scale forest, zero windows —
+    /// byte-identical to the pre-5f-3c gateway (`UniverseConfig` has no `Default`, so this is written out;
+    /// walk-scale is the P3 forest `container_coord_at` descends).
     fn default() -> SeedInjectorConfig {
         SeedInjectorConfig {
             armed: false,
             universe_seed: 0,
             universe_config: UniverseConfig::walk_scale(),
             spawn_poses: BTreeMap::new(),
+            demand_ttl_ticks: 0,
+            bootstrap_ttl_ticks: 0,
         }
     }
+}
+
+impl SeedInjectorConfig {
+    /// RLM 5f-3d — the re-drive cadence divisor: the home demand is re-seeded every `demand_ttl / 4` local
+    /// ticks. NAMED (never an inline literal) and chosen so the re-seed keeps the reconciler's arm-A alive
+    /// with ~4x headroom (three consecutive lost re-seeds still leave the demand fresh) while cutting a
+    /// 100K mass-login's re-drive fan-in by that same factor versus an every-tick re-drive: at the shipped
+    /// cloud budget (`demand_ttl = hz*4`) the cadence is ~1s regardless of tick rate, i.e. a 10–40x
+    /// reduction at 10–40 Hz. Mirrors the reconciler's own back-off-never-hammer discipline
+    /// (`exec_spinup`'s cooldown), which is what kept the co-hosting THRASH from recurring.
+    ///
+    /// That same headroom absorbs the LOCAL-vs-UNIVERSE tick skew: the cadence is counted in the gateway's
+    /// own local ticks while the reconciler measures demand freshness in UNIVERSE ticks, so under a CPU
+    /// throttle one cadence spans more than `demand_ttl / 4` universe ticks. Even at the tick-skew ceiling the
+    /// re-seed still lands well inside `demand_ttl` — the margin is why the divisor is 4 and not 2.
+    pub const REDRIVE_DIVISOR: u64 = 4;
+
+    /// RLM 5f-3d — the home-bootstrap RE-DRIVE cadence in gateway LOCAL ticks: `demand_ttl / 4`, floored at
+    /// 1 (a zero cadence would divide by zero in [`home_redrive_due`]). STRICTLY less than `demand_ttl`
+    /// whenever the TTL is > 1, so the re-seed always lands before arm-A goes stale.
+    #[must_use]
+    pub fn redrive_interval_ticks(&self) -> u64 {
+        (self.demand_ttl_ticks / SeedInjectorConfig::REDRIVE_DIVISOR).max(1)
+    }
+
+    /// RLM 5f-3d — the ONE bootstrap-TTL derivation from the cluster's RLM budget (so a bin never inlines a
+    /// literal): the reconciler's own launch (boot) floor — already floored by the MEASURED pod-boot p99 in
+    /// `RlmTuning::cloud_with_boot`, the 5f-1 boot-floor discipline — PLUS one full demand cadence of slack
+    /// for the demand ingest, the spawn decision, the realm lease grant, the head round-trip and the
+    /// attach. So a REAL slow boot never trips the TTL, while a genuinely failed boot still Closes loudly
+    /// inside a bounded window.
+    #[must_use]
+    pub fn bootstrap_ttl_from_rlm(launch_ttl_ticks: u64, demand_ttl_ticks: u64) -> u64 {
+        launch_ttl_ticks.saturating_add(demand_ttl_ticks)
+    }
+
+    /// Reject a mis-tuned ARMED injector at boot (fail-LOUD, mirroring `RlmTuning::validate`). Every check
+    /// is gated on `armed`: an UNARMED injector never reads these windows, so the zero default is
+    /// vacuously valid. Bitwise `&` keeps both operands covered (HR5).
+    ///
+    /// # Errors
+    /// - [`SeedInjectorError::ZeroWindowWhileArmed`] — armed with a zero demand TTL or bootstrap TTL (the
+    ///   re-drive would degenerate to every-tick and the bootstrap would expire before it began).
+    /// - [`SeedInjectorError::BootstrapTtlBelowRedrive`] — the bootstrap window cannot contain even ONE
+    ///   re-drive, so a slow home boot would be Closed before its demand was ever re-seeded.
+    pub fn validate(&self) -> Result<(), SeedInjectorError> {
+        let armed = self.armed;
+        if armed & ((self.demand_ttl_ticks == 0) | (self.bootstrap_ttl_ticks == 0)) {
+            return Err(SeedInjectorError::ZeroWindowWhileArmed);
+        }
+        let redrive = self.redrive_interval_ticks();
+        if armed & (self.bootstrap_ttl_ticks <= redrive) {
+            return Err(SeedInjectorError::BootstrapTtlBelowRedrive {
+                bootstrap_ttl: self.bootstrap_ttl_ticks,
+                redrive,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A mis-tuned ARMED [`SeedInjectorConfig`] — rejected LOUD at boot so a deployment never runs a
+/// bootstrap budget that would Close healthy logins (or hammer the orchestrator every tick).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SeedInjectorError {
+    /// Armed with a zero `demand_ttl_ticks` or `bootstrap_ttl_ticks`.
+    #[error(
+        "an ARMED gateway seed injector needs demand_ttl_ticks > 0 and bootstrap_ttl_ticks > 0 \
+         (derive them from the cluster RlmTuning — see SeedInjectorConfig::bootstrap_ttl_from_rlm)"
+    )]
+    ZeroWindowWhileArmed,
+    /// The bootstrap window is not longer than one re-drive cadence.
+    #[error(
+        "bootstrap_ttl {bootstrap_ttl} must strictly exceed the re-drive cadence {redrive} \
+         (else a slow home boot is Closed before its demand is ever re-seeded)"
+    )]
+    BootstrapTtlBelowRedrive { bootstrap_ttl: u64, redrive: u64 },
 }
 
 /// Gateway configuration (composer-provided).
@@ -140,6 +242,11 @@ pub struct GatewayConfig {
     /// subscription-refcount slip can NEVER mis-class a client datagram as a shard frame.
     /// (DISTINCT from the per-session `subscribed_shards` reverse index, which governs
     /// fan-out only.) `shard` is always a member.
+    ///
+    /// RLM 5f-3d: this set stays FROZEN config. A DEMAND-SPAWNED home shard was never in it (its
+    /// `NodeId` is minted at spawn time, long after boot), so the dynamic roster lives in the RUNTIME
+    /// [`GatewaySessions::dynamic_shards`] map and the ONE dispatch predicate
+    /// ([`is_routable_shard`]) is their union.
     pub known_shards: BTreeSet<NodeId>,
     /// The auth service's Ed25519 verifying key (login validation).
     pub auth_verifying_key: [u8; tickets::ED25519_KEY_BYTES],
@@ -173,20 +280,69 @@ pub struct GatewayConfig {
     /// durable saga in a cluster, since the gateway (not the dest stub) is the durable Prepare
     /// decider (`apply_prepare` hardcodes `Ready` today).
     pub reject_next_prepare: Option<PrepareReject>,
-    /// RLM 5f-3c — the trusted-gateway seed-injector inputs (server-derived home realm). [`Default`] is
-    /// fully INERT (unarmed) ⇒ byte-identical to the pre-5f-3c gateway.
+    /// RLM 5f-3c/5f-3d — the trusted-gateway dynamic-home inputs (server-derived home realm + the
+    /// bootstrap hold timing). [`Default`] is fully INERT (unarmed) ⇒ byte-identical to the pre-5f-3c
+    /// gateway.
     pub seed_injector: SeedInjectorConfig,
     pub tuning: TransportTuning,
 }
 
 impl GatewayConfig {
-    /// Is `from` a routable shard (STABLE node-class dispatch — FORK 5)? Seeded from the
-    /// cluster's shard roster, provably disjoint from client NodeIds, so it can never
-    /// mis-class a client datagram as a shard frame regardless of subscription churn.
+    /// Is `from` a routable shard per the FROZEN config roster (STABLE node-class dispatch — FORK 5)?
+    /// Seeded from the cluster's shard roster, provably disjoint from client NodeIds, so it can never
+    /// mis-class a client datagram as a shard frame regardless of subscription churn. The RUNTIME half of
+    /// the dispatch (demand-spawned home shards) is [`is_routable_shard`].
     #[must_use]
     fn is_known_shard(&self, from: NodeId) -> bool {
         self.known_shards.contains(&from)
     }
+
+    /// RLM 5f-3d — THE dynamic-home mode gate (ONE expression, HR3): the gateway routes a login to its
+    /// DEMAND-SPAWNED home realm's shard only when the injector is `armed` (`VD_DEMAND`) AND the clock has
+    /// `synced`. Both conjuncts are load-bearing:
+    /// - `armed` is the config gate — ABSENT it the login follows the EXACT pre-5f-3d static flow
+    ///   (`AwaitingDirectory → AwaitingAttach → config.shard`), with NO `AwaitingHomeRealm`, NO extra
+    ///   head-read and NO reordered `Welcome`/`AttachSession` (byte-identical).
+    /// - `synced` because a PRE-SYNC seed would carry `universe_tick` 0, which `demanded_recently` reads as
+    ///   "never demanded" — the home would never spin, so the session would wait for a realm nobody
+    ///   demanded until the bootstrap TTL Closed it. Sharing this ONE expression with the seed emit is what
+    ///   makes "entering the wait ⇒ a demand was seeded" a construction-level invariant.
+    ///
+    /// MF3: an ARMED-but-pre-sync login does NOT fall through to the static arm — the committed-lease arm
+    /// HOLDS it in `AwaitingDirectory` (emitting nothing) before consulting this gate, because on an armed
+    /// cluster `config.shard` is not that player's home. So the live inputs here are `!armed` (⇒ false, the
+    /// static path) and `armed & synced` (⇒ true, the dynamic path); the pre-sync case is caught upstream and
+    /// counted (`logins_held_pre_sync`).
+    ///
+    /// Bitwise `&` (no short-circuit region — HR5); the function returns both true and false across the
+    /// static/dynamic unit tests.
+    #[must_use]
+    fn dynamic_home_mode(&self, clock_synced: bool) -> bool {
+        self.seed_injector.armed & clock_synced
+    }
+}
+
+/// RLM 5f-3d — THE ONE node-class dispatch predicate for "is this peer a shard": the FROZEN config roster
+/// UNION the RUNTIME set of demand-spawned home shards. A dynamically spawned shard's `NodeId` is minted at
+/// spawn time — it can never be in the boot-time config — so without the runtime half its `SessionAttached`
+/// and its frames would fall through to the client branch and be counted `undecodable`. Bitwise `|` so
+/// neither membership arm is a short-circuit-uncoverable region (HR5); when unarmed `dynamic_shards` is
+/// always empty, so the result is byte-identical to the pre-5f-3d config-only test.
+#[must_use]
+fn is_routable_shard(config: &GatewayConfig, sessions: &GatewaySessions, from: NodeId) -> bool {
+    config.is_known_shard(from) | sessions.dynamic_shards.contains_key(&from)
+}
+
+/// RLM 5f-3d — THE ONE routing target for everything a session sends shard-ward (HR3: one routing path, NOT
+/// a per-kind fork): its DYNAMICALLY resolved home shard when it has one, else the statically configured
+/// login `config.shard`. Every former `config.shard` literal on the session path routes through this — the
+/// `AttachSession` grant, its per-tick retry, the login `open_sub`, and the `Bye` detach — so a routed
+/// session follows its home while a STATIC session (`home_shard` forever `None`) is byte-identical to the
+/// pre-5f-3d gateway. The WRITE route's authority is retargeted separately, through the sole `store_route`
+/// primitive at the home resolve.
+#[must_use]
+fn session_target(session: &Session, config: &GatewayConfig) -> NodeId {
+    session.home_shard.unwrap_or(config.shard)
 }
 
 /// The WRITE-plane route a session's input follows (authority + the transfer cut).
@@ -336,13 +492,33 @@ pub struct SubEntry {
     pub accepted: Fence,
 }
 
-/// Where one session is in its login lifecycle.
-#[derive(Debug)]
+/// Where one session is in its login lifecycle. `PartialEq` so tests assert the phase by EQUALITY
+/// (`assert_eq!`), never `assert!(matches!(…))` whose false arm is uncoverable (HR5).
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum SessionPhase {
     /// Session-key grant sent; awaiting the directory head (retried every tick —
     /// idempotent by fence).
     AwaitingDirectory,
-    /// Directory granted; attach sent to the shard (retried until attached).
+    /// RLM 5f-3d — the DYNAMIC-HOME hold: the session's lease is COMMITTED (the client is already
+    /// `Welcome`d) and its home realm has been DEMANDED, but that realm's shard is still booting, so there
+    /// is no node to attach to yet. The gateway holds the client here — SEAMLESSLY: no `Close`, no
+    /// teleport, no fallback attach to some other shard, no loading screen; the client is simply welcomed
+    /// and frame-less until its own home attaches. While here the gateway (a) RE-SEEDS the home demand and
+    /// (b) re-polls `HeadRead{Realm(home.lowered())}` on the [`SeedInjectorConfig::redrive_interval_ticks`]
+    /// cadence, and the bounded [`SeedInjectorConfig::bootstrap_ttl_ticks`] guarantees the hold ENDS —
+    /// loudly — rather than hanging. Entered ONLY in dynamic mode
+    /// ([`GatewayConfig::dynamic_home_mode`]); a static login never sees this phase.
+    ///
+    /// `home_rid` names the realm being waited on — the KEY into [`GatewaySessions::home_bootstraps`],
+    /// where the wait's heavy state lives ONCE PER REALM (the resolved lineage [`RealmCoord`], the cadence
+    /// anchor, the member set). At a 100K mass login onto one home that is ONE lineage `Vec` and ONE
+    /// re-drive, not one per session. [`Session::home_rid`] is the same id as a standing copy that outlives
+    /// this phase (the bounded-TTL diagnostic reads it from `AwaitingAttach`, where the phase payload is
+    /// gone).
+    AwaitingHomeRealm { home_rid: RealmId },
+    /// Directory granted (and, in dynamic mode, the home realm RESOLVED); attach sent to the session's
+    /// target shard — `session.home_shard` when dynamically resolved, else the static `config.shard` —
+    /// retried until attached.
     AwaitingAttach,
     /// Live: input routes shard-ward, frames flow client-ward. The subscription set
     /// lives on `Session.subs` (the cold authority) + `SessionHot.subs` (the hot
@@ -387,6 +563,25 @@ struct Session {
     fence: Fence,
     phase: SessionPhase,
     next_sub: u32,
+    /// RLM 5f-3d (the D-34 field) — the session's DYNAMICALLY resolved home shard: `Some` once the
+    /// `Realm(home_rid)` head named the node that owns its home realm. THE routing field: every shard-ward
+    /// send resolves through [`session_target`] = `home_shard.unwrap_or(config.shard)`, so a static
+    /// (unarmed) session — forever `None` — is byte-identical to the pre-5f-3d gateway.
+    home_shard: Option<NodeId>,
+    /// RLM 5f-3d — the STANDING home-realm identity of a dynamic session: set once at the committed lease
+    /// and NEVER cleared, so it outlives the `AwaitingHomeRealm` phase payload. Two live readers: the
+    /// bounded-TTL Close diagnostic (which can fire in `AwaitingAttach`, where the phase payload is gone —
+    /// this is then the ONLY surviving name of the realm that failed to boot) and the
+    /// [`GatewaySessions::end_home_wait`] index removal on every session exit. `None` ⇒ a static session.
+    home_rid: Option<RealmId>,
+    /// RLM 5f-3d — the HARD deadline (gateway LOCAL tick) of the BOUNDED pre-Active dynamic-home bootstrap:
+    /// `Some` EXACTLY while a dynamic session is booting — spanning `AwaitingHomeRealm` **and** the
+    /// dynamic-target `AwaitingAttach` (a freshly spawned shard can die between head-resolve and
+    /// `SessionAttached`) — and cleared at the `Active` promote. `None` for a STATIC session, always.
+    /// It lives HERE rather than in the phase precisely because it must outlive the `AwaitingHomeRealm`
+    /// phase; the re-drive ANCHOR (`since`) conversely lives IN that phase, where it is total (a session in
+    /// `AwaitingHomeRealm` always has one — no `Option` arm that no test could ever reach).
+    bootstrap_deadline: Option<TickId>,
     /// D-3 Slice 5b — the `local_tick` of the last `Session`-head ROUND-TRIP confirmation (the reply that
     /// affirmed THIS gateway still owns the session lease). The partition detector for the proactive
     /// self-fence: set when the session goes `Active` (the attach IS a confirmation) and re-armed on every
@@ -426,6 +621,66 @@ pub struct GatewaySessions {
     /// `config.known_shards`), so a refcount slip cannot mis-route a client. A `Draining`
     /// sub stays indexed for one tick (its straggler is drained), then removed.
     subscribed_shards: BTreeMap<NodeId, BTreeSet<SessionId>>,
+    /// RLM 5f-3d — the RUNTIME routable-shard roster: `demand-spawned home shard -> how many sessions are
+    /// homed on it`. A dynamically spawned shard's `NodeId` is minted at spawn time and can NEVER be in the
+    /// FROZEN [`GatewayConfig::known_shards`], so this is the other half of the ONE dispatch predicate
+    /// [`is_routable_shard`]. REFCOUNTED (not a grow-only set) so a long-lived gateway does not accumulate
+    /// one entry per realm shard the cluster ever spun up across 100K-realm churn: a node LEAVES the roster
+    /// when its last session does. Empty (⇒ dispatch byte-identical) unless in dynamic-home mode.
+    dynamic_shards: BTreeMap<NodeId, u32>,
+    /// RLM 5f-3d — the per-REALM home-BOOTSTRAP index: `home realm -> the ONE wait every session booting
+    /// into that realm shares`. Two independent things make it per-REALM rather than per-session, both
+    /// load-bearing at 100K scale:
+    /// - a `Realm` head reply carries NO session id, so without an index every reply would cost an O(S) scan
+    ///   over all sessions — O(S²) across a mass login. With it ONE reply resolves the WHOLE member set at
+    ///   O(log R + k).
+    /// - the RE-DRIVE iterates this map, so N sessions booting into ONE home cost ONE `RealmDemand` + ONE
+    ///   `HeadRead` per cadence instead of 2N. Coalescing is provably safe: the only per-session field a
+    ///   demand carries is the audit-only `parent_fence`, which the orchestrator's ledger folds
+    ///   order-independently and never reads for a decision (`rlm.rs` `update_fence`); child, verb and tick
+    ///   are identical for every member.
+    ///
+    /// An entry SURVIVES the head resolve (it is not the wait's terminator — the `Active` promote is), which
+    /// is what keeps the demand re-seeded across the attach round-trip; see [`HomeWait::resolved`].
+    /// Maintained by the [`GatewaySessions::begin_home_wait`] / [`GatewaySessions::end_home_wait`] pair:
+    /// EVERY exit (the `Active` promote, the bootstrap-TTL Close, `Bye`) drops that member through
+    /// `end_home_wait`, and the realm's entry is PRUNED when its last member leaves — so neither an entry nor
+    /// a lineage `Vec` can outlive its sessions. Empty unless in dynamic-home mode (⇒ byte-identical).
+    home_bootstraps: BTreeMap<RealmId, HomeWait>,
+}
+
+/// RLM 5f-3d — ONE realm's pre-Active home bootstrap: the state EVERY session booting into that realm
+/// shares. Held once per REALM, which is simultaneously the memory win (one lineage `Vec` for a whole mass
+/// login) and the coalescing point (one demand + one head-read per cadence, however many sessions wait).
+/// `PartialEq`/`Debug` so tests assert the WHOLE index by equality (never `matches!` — HR5); NO `Clone` —
+/// nothing ever copies a wait.
+#[derive(Debug, PartialEq, Eq)]
+struct HomeWait {
+    /// The SERVER-derived home lineage, descended ONCE per realm. Every re-seed rebuilds its demand off THIS
+    /// coord through [`demand_for_home`] — never a fresh forest descend (O(1) per re-drive), and never a
+    /// demand naming a different realm than the one being waited on.
+    coord: RealmCoord,
+    /// The gateway LOCAL tick this wait OPENED: the re-drive cadence anchor, and the anchor a member's
+    /// DYNAMIC attach retry rides ([`GatewaySessions::attach_anchor`]). TOTAL (every entry has one — no
+    /// unreachable `Option` arm) and PER-REALM, so a mass login across MANY homes spreads its re-drives over
+    /// the cadence window instead of spiking them on one tick.
+    since: TickId,
+    /// The account whose per-account sentinel `parent_fence` the COALESCED demand carries — the first member
+    /// to open the wait. ONE representative is correct and deliberate: that fence is audit-only at the
+    /// orchestrator (`rlm.rs` `update_fence` never reads it for a decision), so pinning it per REALM keeps
+    /// the re-seed's BYTES stable across member churn instead of flapping with whichever waiter is iterated.
+    account: AccountId,
+    /// The sessions currently booting into this realm — every one of them pre-`Active`. NON-EMPTY by
+    /// construction: `end_home_wait` prunes the entry when the last member leaves.
+    members: BTreeSet<SessionId>,
+    /// Has a `Realm` head reply already named this realm's node for every CURRENT member? It gates ONLY the
+    /// head-read half of the re-drive. The DEMAND half keeps running until the last member goes `Active`,
+    /// because the reconciler's arm-A `demanded_recently` must stay fresh across the attach round-trip too:
+    /// a re-seed that stopped at the resolve lets arm-A lapse mid-bootstrap and the reconciler REAPS the very
+    /// realm the login is waiting for (arm-B cannot cover it — a booted-but-unoccupied realm self-reports
+    /// `Empty`). Reset to `false` whenever a NEW member joins, so one lost reply cannot wedge that joiner —
+    /// the poll simply resumes on the next cadence tick.
+    resolved: bool,
 }
 
 impl GatewaySessions {
@@ -448,9 +703,26 @@ impl GatewaySessions {
         self.by_session.get(&session).and_then(|s| match s.phase {
             SessionPhase::Active { entity, .. } => Some(entity),
             SessionPhase::AwaitingDirectory
+            | SessionPhase::AwaitingHomeRealm { .. }
             | SessionPhase::AwaitingAttach
             | SessionPhase::SelfFenced => None,
         })
+    }
+
+    /// RLM 5f-3d — the session's DYNAMICALLY resolved home shard, or `None` for a STATIC (unarmed) session
+    /// / one whose home realm has not become routable yet. The observable half of the D-34 routing field
+    /// (the harness/oracles and 5f-4's live route read it to assert WHICH node a session was routed to).
+    #[must_use]
+    pub fn home_shard_of(&self, session: SessionId) -> Option<NodeId> {
+        self.by_session.get(&session).and_then(|s| s.home_shard)
+    }
+
+    /// RLM 5f-3d — the session's HOME REALM (the deepest realm containing its stored spawn pose), or `None`
+    /// for a STATIC (unarmed) session. Set once at the committed lease and never cleared, so it is
+    /// meaningful in every phase from the lease onward.
+    #[must_use]
+    pub fn home_realm_of(&self, session: SessionId) -> Option<RealmId> {
+        self.by_session.get(&session).and_then(|s| s.home_rid)
     }
 
     /// D-3 / S4 — the local tick of the FRESHEST last-lease-round-trip confirmation (`Session::confirmed_at`)
@@ -490,6 +762,101 @@ impl GatewaySessions {
             .get(&shard)
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// RLM 5f-3d — THE one entry into the pre-Active home bootstrap (HR3): JOIN `session_id` to its home
+    /// realm's [`HomeWait`], creating that wait (with the descended lineage, the cadence anchor and the
+    /// representative account) when this session is the first one booting into the realm. Called from the
+    /// committed-lease arm in dynamic mode, exactly once per login.
+    ///
+    /// A joiner ALWAYS clears `resolved`: it has not seen a head reply of its own, so the head poll must
+    /// resume even when an earlier member already resolved this realm — otherwise a single lost reply would
+    /// hang the joiner until the bounded TTL closed it. `since` is NOT re-anchored (the shared cadence is the
+    /// point), and the coord/account of the opening member are kept (the demand is per-realm, not per-member).
+    fn begin_home_wait(
+        &mut self,
+        session_id: SessionId,
+        home_rid: RealmId,
+        coord: RealmCoord,
+        since: TickId,
+        account: AccountId,
+    ) {
+        let wait = self
+            .home_bootstraps
+            .entry(home_rid)
+            .or_insert_with(|| HomeWait {
+                coord,
+                since,
+                account,
+                members: BTreeSet::new(),
+                resolved: false,
+            });
+        wait.members.insert(session_id);
+        wait.resolved = false;
+    }
+
+    /// RLM 5f-3d — THE one exit from the pre-Active home bootstrap (HR3): drop `session_id` from its home
+    /// realm's member set and PRUNE the whole realm entry once it empties (no unbounded growth, no orphan
+    /// lineage `Vec`). Called on EVERY exit — the `Active` promote, the bootstrap-TTL Close, and `Bye` — so
+    /// an index entry can never outlive its sessions. Total, never fallible:
+    /// - `home_rid` `None` ⇒ a STATIC session ⇒ no-op (the byte-identical arm every static `Bye` takes);
+    /// - the realm absent ⇒ this session already left the bootstrap (the normal arm for a `Bye` AFTER the
+    ///   session went `Active`, since `Session::home_rid` is deliberately never cleared) ⇒ no-op.
+    fn end_home_wait(&mut self, session_id: SessionId, home_rid: Option<RealmId>) {
+        let Some(rid) = home_rid else {
+            return;
+        };
+        let Some(wait) = self.home_bootstraps.get_mut(&rid) else {
+            return;
+        };
+        wait.members.remove(&session_id);
+        if wait.members.is_empty() {
+            self.home_bootstraps.remove(&rid);
+        }
+    }
+
+    /// RLM 5f-3d — the cadence ANCHOR a pre-`Active` session's `AwaitingAttach` retry rides, fed to
+    /// [`attach_retry_due`]: `Some(since)` of the [`HomeWait`] it belongs to for a DYNAMIC session (so its
+    /// attach retry is coalesced onto the SAME backed-off cadence as that realm's re-drive — a mass login
+    /// must not re-attach every session every tick at a freshly booted shard), `None` for a STATIC session
+    /// (`home_rid` is `None` ⇒ the byte-identical per-tick retry).
+    ///
+    /// Both `?` arms are total and FAIL-SAFE: `None` means "retry every tick", i.e. the pre-5f-3d behaviour —
+    /// never a wedge. The second arm (a `home_rid` with no live wait) cannot occur on the live path — every
+    /// path that drops a member either removes the session (`Bye`, the TTL Close) or leaves `AwaitingAttach`
+    /// (the `Active` promote) — so it is proven directly by a unit test rather than through a system.
+    #[must_use]
+    fn attach_anchor(&self, home_rid: Option<RealmId>) -> Option<TickId> {
+        let rid = home_rid?;
+        Some(self.home_bootstraps.get(&rid)?.since)
+    }
+
+    /// RLM 5f-3d — claim `home` for one session on the RUNTIME routable-shard roster (the dispatch half of
+    /// the dynamic route): the node becomes node-class-dispatchable as a shard for as long as at least one
+    /// session is homed on it.
+    fn claim_dynamic_shard(&mut self, home: NodeId) {
+        *self.dynamic_shards.entry(home).or_insert(0) += 1;
+    }
+
+    /// RLM 5f-3d — release one session's claim on its dynamically resolved home shard. At zero the node
+    /// LEAVES the runtime roster, so a long-lived gateway accumulates no entry per ever-spawned realm shard
+    /// (the 100K-realm churn leak). `None` — a STATIC session, or a dynamic one that never resolved a home
+    /// — is a no-op. All arms (no home / last-out ⇒ remove / others remain) are proven by unit tests.
+    fn release_dynamic_shard(&mut self, home: Option<NodeId>) {
+        let Some(node) = home else {
+            return;
+        };
+        let remaining = self
+            .dynamic_shards
+            .get(&node)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(1);
+        if remaining == 0 {
+            self.dynamic_shards.remove(&node);
+        } else {
+            self.dynamic_shards.insert(node, remaining);
+        }
     }
 
     /// THE one open primitive (HR3): allocate a never-reused `sub` id, insert the cold
@@ -647,6 +1014,23 @@ pub struct GatewayStats {
     /// `self_fence_grace_ticks` (a detected partition from the orchestrator) was hard-stopped. Ops
     /// visibility / partition signal; `0` on the happy path and inert (`self_fence_grace_ticks == 0`).
     pub sessions_self_fenced_lapsed: u64,
+    /// RLM 5f-3d — bounded-TTL dynamic-home bootstrap FAILURES: a login whose demand-spawned home realm did
+    /// not become routable (or whose resolved home never confirmed the attach) inside
+    /// `bootstrap_ttl_ticks` was Closed LOUDLY. `0` on every happy path and inert for a static gateway; a
+    /// nonzero value is the ops signal that the spawn path — not the session path — is broken.
+    pub home_bootstrap_timeouts: u64,
+    /// RLM 5f-3d — a `home_bootstraps` member referenced a session absent from `by_session` (an invariant
+    /// breach the `begin_home_wait`/`end_home_wait` pairing makes impossible by construction). Counted,
+    /// never a silent `continue` — the same C2 honesty floor as `frame_sub_desync`. (Plain backticks, not an
+    /// intra-doc link: this is PUBLIC documentation naming a private index.)
+    pub home_wait_desync: u64,
+    /// RLM 5f-3d (MF3) — committed-lease logins HELD because the gateway is ARMED but its clock has not
+    /// synced yet, so the home realm could not be demanded (a pre-sync demand carries `universe_tick` 0,
+    /// which the reconciler reads as "never demanded"). The login stays in `AwaitingDirectory` and its
+    /// idempotent `LeaseGrant` is re-driven, so this self-heals on the first `ClockSync`: a small count at
+    /// boot is normal, a CLIMBING one says the clock broadcast never arrived (check the orchestrator's
+    /// `clock_peers`). `0` on a static gateway — the static path never consults the clock.
+    pub logins_held_pre_sync: u64,
     /// D-3 Slice 5b — REACTIVE Session self-fences: a `Session`-head recheck reply revealed the lease had
     /// been reassigned/revoked (no longer this gateway at its fence), so the session was hard-stopped
     /// promptly (the link-alive cure, vs the proactive timer's partition cure). `0` on the happy path.
@@ -664,6 +1048,12 @@ pub fn register_gateway(world: &mut World, schedule: &mut Schedule, config: Gate
         (
             process_gateway_inbound,
             self_fence_lapsed_sessions,
+            // RLM 5f-3d: the bounded dynamic-home bootstrap reaper. AFTER `process_gateway_inbound` so a
+            // home head (or a `SessionAttached`) applied THIS tick pre-empts a spurious expiry — the same
+            // ordering rationale as the self-fence — and BEFORE `drive_pending_sessions` so an expired
+            // session is never re-driven after it was Closed. INERT for a static gateway (no session
+            // carries a bootstrap window ⇒ no wire bytes ⇒ byte-identical).
+            expire_home_bootstrap,
             drive_pending_sessions,
             renew_and_recheck_sessions,
         )
@@ -701,6 +1091,132 @@ fn self_fence_lapsed_sessions(
     }
 }
 
+/// RLM 5f-3d — is the home-bootstrap RE-DRIVE due for a wait that OPENED at `since`, at gateway local tick
+/// `now`, on cadence `interval`? PURE (ticks in, bool out — no wall-clock, no rng), so the whole re-drive
+/// schedule is deterministic and replayable.
+///
+/// Two properties the correctness invariant rests on:
+/// - `elapsed != 0` — the tick the wait BEGAN already emitted the seed + head-read inline, so re-driving in
+///   the same tick would be a pure duplicate (`drive_pending_sessions` runs after
+///   `process_gateway_inbound` in the SAME tick).
+/// - `elapsed % cadence` anchored on the wait's OWN `since` ([`HomeWait::since`], not a global
+///   `local_tick % interval`) — so a 100K mass login across many homes re-drives them on different ticks,
+///   spreading the orchestrator fan-in across the whole cadence window instead of spiking it on one tick.
+///
+/// `interval.max(1)` keeps the cadence total AND fail-SAFE: a zero interval degrades to "every tick" (the
+/// re-drive is a correctness invariant, so erring toward re-driving beats silently never re-driving —
+/// `u64::is_multiple_of(0)` would be false for every nonzero elapsed). The live cadence
+/// [`SeedInjectorConfig::redrive_interval_ticks`] is already floored at 1, and `validate` refuses an armed
+/// zero window at boot, so this is belt-and-suspenders.
+#[must_use]
+fn home_redrive_due(now: TickId, since: TickId, interval: u64) -> bool {
+    let elapsed = now.0.saturating_sub(since.0);
+    let cadence = interval.max(1);
+    (elapsed != 0) & elapsed.is_multiple_of(cadence)
+}
+
+/// RLM 5f-3d — has the BOUNDED pre-Active bootstrap window closed (CRITIQUE-1)? Strictly `>` so the
+/// deadline tick itself is still inside the window (the hold is generous at its own edge). PURE.
+#[must_use]
+fn home_bootstrap_expired(now: TickId, deadline: TickId) -> bool {
+    now.0 > deadline.0
+}
+
+/// RLM 5f-3d — is a session's `AwaitingAttach` retry due at gateway local tick `now`? ONE predicate for both
+/// modes (HR3), fed the anchor by [`GatewaySessions::attach_anchor`]:
+/// - `None` (a STATIC session — no home bootstrap) ⇒ EVERY tick, byte-identical to the pre-5f-3d retry
+///   driver.
+/// - `Some(since)` (a DYNAMIC member of a [`HomeWait`]) ⇒ the SAME backed-off cadence that realm's re-drive
+///   rides. A mass login must not re-`AttachSession` every waiting session at a just-booted shard every
+///   tick; the inline attach at the head resolve already went out, and the bounded bootstrap TTL spans many
+///   cadences, so a lost attach still retries well inside the window.
+///
+/// PURE, and `home_redrive_due`'s `elapsed != 0` guard keeps the retry off the tick the wait opened.
+#[must_use]
+fn attach_retry_due(anchor: Option<TickId>, now: TickId, cadence: u64) -> bool {
+    match anchor {
+        None => true,
+        Some(since) => home_redrive_due(now, since, cadence),
+    }
+}
+
+/// RLM 5f-3d — THE bounded dynamic-home bootstrap reaper (CRITIQUE-1: a hold must END, and end LOUDLY).
+/// Every session carrying a [`Session::bootstrap_deadline`] window — i.e. one in `AwaitingHomeRealm` OR in
+/// the dynamic-target `AwaitingAttach`, since a freshly spawned shard can die between head-resolve and
+/// `SessionAttached` — is Closed once `local_tick` passes its deadline: `tracing::error!` + a
+/// `ServerControlMsg::Close` naming the failure + the counter, plus the SAME cleanup `Bye` performs (revoke
+/// the committed `Session` lease so it does not linger until the orchestrator's reaper; detach at the home
+/// shard iff one was resolved). NEVER a silent hang and never a teleport to some other shard.
+///
+/// A STATIC session has `bootstrap == None` and is untouched, so an unarmed gateway emits nothing here
+/// (byte-identical); the per-tick cost is the same O(S) scan `self_fence_lapsed_sessions` already pays.
+fn expire_home_bootstrap(
+    config: Res<GatewayConfig>,
+    clock: Res<ClockSample>,
+    mut sessions: ResMut<GatewaySessions>,
+    mut stats: ResMut<GatewayStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    // Collect first: the removal mutates both session maps AND both 5f-3d indexes.
+    let expired: Vec<SessionId> = sessions
+        .by_session
+        .iter()
+        .filter(|(_, s)| {
+            s.bootstrap_deadline
+                .is_some_and(|deadline| home_bootstrap_expired(clock.local_tick, deadline))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for session_id in expired {
+        let session = sessions
+            .by_session
+            .remove(&session_id)
+            .expect("collected from by_session this very tick");
+        sessions.by_client.remove(&session.client);
+        sessions.end_home_wait(session_id, session.home_rid);
+        sessions.release_dynamic_shard(session.home_shard);
+        stats.home_bootstrap_timeouts += 1;
+        tracing::error!(
+            session = %session_id,
+            home_realm = ?session.home_rid,
+            home_shard = ?session.home_shard,
+            "the dynamic home realm did not become routable inside the bounded bootstrap TTL — closing \
+             this client LOUDLY (RLM 5f-3d; never a silent hang). Check the orchestrator's realm spawn \
+             path, then VD_BOOT_TICKS_P99 / the derived bootstrap TTL."
+        );
+        push_control(
+            &mut outbox,
+            session.client,
+            &ServerControlMsg::Close {
+                reason: "home realm did not become available".to_owned(),
+            },
+        );
+        // The lease WAS committed (the window opens strictly downstream of the grant), so revoke it rather
+        // than leave a live `Session` record for the reaper — exactly what `Bye` does.
+        push_directory(
+            &mut outbox,
+            config.orchestrator,
+            DirectoryOp::LeaseRevoke {
+                key: DirectoryKey::Session(session_id),
+                fence: session.fence,
+            },
+        );
+        // Detach ONLY at a home we actually attached to. Expiring in `AwaitingHomeRealm` (no home resolved)
+        // must not spray a detach at the static `config.shard`, which in dynamic mode may not even exist.
+        if let Some(home) = session.home_shard {
+            push_to_shard(
+                &mut outbox,
+                home,
+                MsgClass::Control,
+                &GatewayToShard::DetachSession {
+                    session: session_id,
+                    fence: session.fence,
+                },
+            );
+        }
+    }
+}
+
 /// D-3 lease-liveness producers (gateway half), each on the gateway's own LOCAL cadence:
 /// (1) the HEARTBEAT — re-send `LeaseRenew` for every Active session's `Session` key, so the lease never
 ///     lapses while the client is connected (the orchestrator's reaper revokes a lapsed-and-confirmed-dead
@@ -710,8 +1226,21 @@ fn self_fence_lapsed_sessions(
 ///     whose affirming reply re-arms `Session.confirmed_at` (and whose foreign/absent reply triggers the
 ///     reactive self-fence); mirrors the shard's `realm_recheck`, and is what makes the proactive
 ///     `self_fence_lapsed_sessions` timer non-inert.
-/// Both cadences are independent and INERT at interval `0` (the pre-D-3 default). Non-Active sessions have
-/// no lease to renew/confirm, so both exclude them.
+/// Both cadences are independent and INERT at interval `0` (the pre-D-3 default).
+///
+/// RLM 5f-3d (MF2) — the RENEW set is `Active` **OR** mid-dynamic-home-bootstrap
+/// ([`Session::bootstrap_deadline`] `Some`). An `Active`-only renew set was correct while pre-`Active` lasted
+/// one or two ticks; the dynamic-home hold can last a whole measured pod boot
+/// ([`SeedInjectorConfig::bootstrap_ttl_ticks`] — 140 local ticks at the shipped budget, more with a bigger
+/// measured boot), which EXCEEDS the orchestrator's lease-reap horizon. Its lease was already COMMITTED at
+/// the grant, so without a renewal a held login's own lease lapses mid-hold and (once this gateway is latched
+/// dead by some unrelated blip) can be REVOKED under it, with nothing pre-`Active` watching. A STATIC session
+/// has `bootstrap_deadline == None` forever, so the renew set — and the wire bytes — are unchanged for an
+/// unarmed gateway. Bitwise `|`: no short-circuit region (HR5); both operands are cheap tests.
+///
+/// The RECHECK stays `Active`-ONLY: it exists to re-arm `confirmed_at` for the proactive self-fence, which
+/// only guards a session the gateway is actively serving as authority. A pre-`Active` login has no authority
+/// to fence and is bounded by the bootstrap TTL instead, so polling its head would be pure round-trip cost.
 fn renew_and_recheck_sessions(
     config: Res<GatewayConfig>,
     clock: Res<ClockSample>,
@@ -723,7 +1252,9 @@ fn renew_and_recheck_sessions(
         let renewals = sessions
             .by_session
             .iter()
-            .filter(|(_, s)| matches!(s.phase, SessionPhase::Active { .. }))
+            .filter(|(_, s)| {
+                matches!(s.phase, SessionPhase::Active { .. }) | s.bootstrap_deadline.is_some()
+            })
             .map(|(id, s)| (DirectoryKey::Session(*id), s.fence));
         outbox.push_renewals(renewals, config.orchestrator);
     }
@@ -851,11 +1382,11 @@ fn process_gateway_inbound(
             continue;
         };
         let from = *from;
-        // Node-class dispatch (FORK 5): orchestrator → known-shard (STABLE roster) →
-        // client-fallthrough. The orderING (orchestrator first) keeps a shard NodeId from ever
-        // colliding with the orchestrator role; node roles are disjoint by construction. The
-        // shard test is the STABLE `config.known_shards`, NEVER the mutable per-session
-        // `subscribed_shards` — so a subscription refcount slip cannot mis-class a client.
+        // Node-class dispatch (FORK 5): orchestrator → routable-shard → client-fallthrough. The orderING
+        // (orchestrator first) keeps a shard NodeId from ever colliding with the orchestrator role; node
+        // roles are disjoint by construction. The shard test is the STABLE `config.known_shards` UNION the
+        // RUNTIME `dynamic_shards` roster of demand-spawned home shards (5f-3d), NEVER the mutable
+        // per-session `subscribed_shards` — so a subscription refcount slip cannot mis-class a client.
         if from == config.orchestrator {
             match class {
                 // The orchestrator→gateway Saga class carries an InterShardFlow envelope:
@@ -888,7 +1419,7 @@ fn process_gateway_inbound(
                 MsgClass::Membership => {}
                 _ => stats.undecodable += 1,
             }
-        } else if config.is_known_shard(from) {
+        } else if is_routable_shard(&config, &sessions, from) {
             match class {
                 MsgClass::Control => on_shard_control(
                     from,
@@ -1120,6 +1651,13 @@ fn on_client_control(
                     fence,
                     phase: SessionPhase::AwaitingDirectory,
                     next_sub: 0,
+                    // RLM 5f-3d: no home yet — the home realm is DERIVED (and its shard resolved) strictly
+                    // downstream of the committed lease, so a fresh session routes at `config.shard` in
+                    // BOTH modes (and its input is dropped anyway until `Active`). A dynamic session's
+                    // route is retargeted through the sole `store_route` primitive at the home resolve.
+                    home_shard: None,
+                    home_rid: None,
+                    bootstrap_deadline: None,
                     // Armed at the Active transition (the attach); irrelevant while still logging in.
                     confirmed_at: TickId(0),
                     negotiated_minor: negotiated.minor,
@@ -1180,15 +1718,22 @@ fn on_client_control(
                      pin until the Slice-2 timeout producer lands (D-23)"
                 );
             }
-            // ⚠️ SCALE (DEFERRED D-34): detaches the single `config.shard`, NOT the session's
-            // current authority. After a transfer (player homed on the dest), this leaks the
-            // dest's `SessionTable` entry. Correct only for single-login-shard P2; the proper fix
-            // is a per-session `home_shard`/`authority` field (set by the orchestrator Spawn
-            // Resolver, updated on commit) that this detach + the login landing both route off.
-            // NOT a `session.subs.keys()` scan — `subs` is empty at login (would regress login→Bye).
+            // RLM 5f-3d: drop this session from BOTH runtime indexes before anything else — every exit from
+            // the dynamic-home machinery runs through the ONE `end_home_wait` / `release_dynamic_shard`
+            // pair, so a `Bye` mid-boot can never leave a waiting-index entry or a roster refcount behind.
+            // A STATIC session takes the `None` arm of both (no-op ⇒ byte-identical).
+            sessions.end_home_wait(session_id, session.home_rid);
+            sessions.release_dynamic_shard(session.home_shard);
+            // 5f-3d: the detach goes to the session's ROUTING TARGET — its dynamically resolved home shard
+            // when it has one, else the static `config.shard` (the ONE `session_target` path, HR3). That
+            // closes the dynamic half of D-34.
+            // ⚠️ SCALE (DEFERRED D-34, still open): after a TRANSFER (player homed on the dest) the target
+            // is still not the current authority, so that case leaks the dest's `SessionTable` entry. The
+            // remaining fix is to keep `home_shard` updated on `CommitAuthority`. NOT a
+            // `session.subs.keys()` scan — `subs` is empty at login (would regress login→Bye).
             push_to_shard(
                 outbox,
-                config.shard,
+                session_target(&session, config),
                 MsgClass::Control,
                 &GatewayToShard::DetachSession {
                     session: session_id,
@@ -1854,6 +2399,11 @@ fn on_shard_control(
             frame,
             realm_fence,
         } => {
+            // 5f-3d: the sub + the route must land on the session's ROUTING TARGET (its resolved home
+            // shard, else the static `config.shard`), captured while we hold the session below — as is its
+            // home realm, so the per-realm bootstrap can be left once the borrow ends.
+            let target;
+            let home_rid;
             {
                 let Some(session) = sessions.by_session.get_mut(&session_id) else {
                     // Attach reply for a session that left meanwhile: ignore (the
@@ -1878,15 +2428,25 @@ fn on_shard_control(
                 let authority = session.hot.route.load().authority;
                 store_route(&session.hot, authority, realm_fence, None);
                 session.phase = SessionPhase::Active { entity };
+                // RLM 5f-3d: the pre-Active bootstrap window CLOSES here — the session is LIVE, so the
+                // bounded TTL no longer applies to it. Already `None` for a static session (byte-identical).
+                session.bootstrap_deadline = None;
+                target = session_target(session, config);
+                home_rid = session.home_rid;
                 // D-3 Slice 5b: going Active IS a fresh round-trip confirmation (the directory granted
                 // and the shard attached) — arm the self-fence deadline from here.
                 session.confirmed_at = clock.local_tick;
             }
-            // Open the login sub on `config.shard` at the realm fence — the FIRST `open_sub`
+            // RLM 5f-3d: the `Active` promote is THE terminator of this session's home bootstrap — it leaves
+            // the per-realm wait HERE (the head resolve deliberately does not, so the demand stays re-seeded
+            // across the attach round-trip). The realm's entry is pruned with its last member, so a fully
+            // attached mass login leaves the index empty. `None` (a static session) is the no-op arm.
+            sessions.end_home_wait(session_id, home_rid);
+            // Open the login sub on the session's routing TARGET at the realm fence — the FIRST `open_sub`
             // caller (the transfer dest is the second, 1d.2b). `open_sub` pushes
             // SubscriptionOpened BEFORE publishing the SubTable (X1) and indexes the fan-out.
             let sub = sessions
-                .open_sub(session_id, config.shard, frame, realm_fence, outbox)
+                .open_sub(session_id, target, frame, realm_fence, outbox)
                 .expect("session present (we just held it above this tick)");
             let session = sessions
                 .by_session
@@ -2110,34 +2670,46 @@ fn home_sentinel_fence(account: AccountId) -> Fence {
 /// home is in-forest by construction (the resolver only ever descends that forest); this is the injector's
 /// defense-in-depth re-check that a corrupted P7 pose stand-in cannot smuggle an OFF-forest realm onto the
 /// source-blind orchestrator inbound. A straight-line expression (the membership `any` is stdlib), so its
-/// true/false arms are proven directly in the unit test — no live branch escapes into [`home_seed_demand`].
+/// true/false arms are proven directly in the unit test — no live branch escapes into [`home_coord`].
 fn coord_in_forest(coord: &RealmCoord, seed: u64) -> bool {
     realm_regions_for(seed)
         .iter()
         .any(|r| r.realm == coord.lowered())
 }
 
-/// RLM 5f-3c — SERVER-DERIVE the ONE bootstrap `RealmDemand{SpinUp}` for an authenticated login's HOME
-/// lineage. The child is [`container_coord_at`] over the account's STORED spawn pose (or the origin) — the
-/// FULL home lineage, so ingesting it spins up the whole ancestor chain (the 5f-3a ride). The `RealmDemand`
-/// carries NO client-supplied coord/pose: the client's only spatial input is its authenticated
-/// `AccountId`, so a raw client cannot steer which realm spins up (the abuse boundary).
+/// RLM 5f-3c — SERVER-DERIVE an authenticated login's HOME lineage: [`container_coord_at`] over the
+/// account's STORED spawn pose (or the origin) — the FULL root→leaf lineage, so demanding it spins up the
+/// whole ancestor chain (the 5f-3a ride). NOTHING client-supplied enters here: the client's only spatial
+/// input is its authenticated `AccountId`, so a raw client cannot steer which realm spins up (the abuse
+/// boundary).
 ///
 /// Defense-in-depth: the derived coord is asserted in-forest via [`coord_in_forest`]. This is NOT a live
 /// branch (`container_coord_at` yields an in-forest lineage by construction, so the `.expect` panic path —
 /// stdlib, uncounted — never fires in prod; `coord_in_forest`'s own arms are covered by its unit test).
 /// `container_coord_at`'s descend is already lineage-depth-bounded (`parent()` → `None` at the root), so no
-/// extra depth cap is needed. Concrete (non-generic), no wall-clock/rng — the tick is the clock's.
-fn home_seed_demand(
-    cfg: &SeedInjectorConfig,
+/// extra depth cap is needed. Concrete (non-generic), no wall-clock/rng.
+///
+/// RLM 5f-3d SCALE: this DESCEND runs exactly ONCE per login. The resolved coord is then carried in
+/// [`SessionPhase::AwaitingHomeRealm`], so every re-drive rebuilds its demand off the STORED lineage via
+/// [`demand_for_home`] instead of re-descending the forest — which also makes it impossible for a re-seed
+/// to name a different realm than the one the session is waiting on.
+fn home_coord(cfg: &SeedInjectorConfig, account: AccountId) -> RealmCoord {
+    let pos = home_spawn_offset(cfg, account);
+    let child = container_coord_at(cfg.universe_seed, &cfg.universe_config, pos);
+    coord_in_forest(&child, cfg.universe_seed)
+        .then_some(child)
+        .expect("container_coord_at yields an in-forest home lineage by construction (5f-3c)")
+}
+
+/// RLM 5f-3c/5f-3d — THE one `RealmDemand{SpinUp}` constructor for a home lineage (HR3): the initial seed
+/// (off the freshly derived [`home_coord`]) and EVERY re-drive (off the coord stored in the phase) build the
+/// demand here, so they differ ONLY in `universe_tick` — never in child, verb or fence. The tick is the
+/// clock's (determinism: no wall-clock, no rng).
+fn demand_for_home(
+    child: RealmCoord,
     account: AccountId,
     universe_tick: vd_core::UniverseTick,
 ) -> RealmDemand {
-    let pos = home_spawn_offset(cfg, account);
-    let child = container_coord_at(cfg.universe_seed, &cfg.universe_config, pos);
-    let child = coord_in_forest(&child, cfg.universe_seed)
-        .then_some(child)
-        .expect("container_coord_at yields an in-forest home lineage by construction (5f-3c)");
     RealmDemand {
         child,
         parent_fence: home_sentinel_fence(account),
@@ -2146,7 +2718,92 @@ fn home_seed_demand(
     }
 }
 
-/// Handle a directory reply: the Session-key head confirms (or denies) the mint.
+/// RLM 5f-3d — THE dynamic-home ROUTE resolve. A `Realm` head reply carries NO session id, so it is matched
+/// against the [`GatewaySessions::home_bootstraps`] index: ONE reply resolves EVERY session booting into that
+/// realm (a mass login onto the same home is a win, not a fan-out cost).
+///
+/// - `record` `None` — the realm is NOT routable yet (the orchestrator holds the demand; its shard is still
+///   booting). Every waiter STAYS in `AwaitingHomeRealm`: NO `Close`, NO teleport, NO fallback attach to
+///   some other shard, no loading screen — the SEAMLESS hold. The re-drive keeps the demand fresh and
+///   re-polls this very head until it resolves (or the bounded TTL Closes loudly).
+/// - `record` `Some` — the owning node is now known: it JOINS the RUNTIME routable-shard roster (it can
+///   never be in the frozen config), the WRITE route is retargeted to it through the sole `store_route`
+///   primitive, the phase advances to `AwaitingAttach`, and the attach is sent THERE (never to
+///   `config.shard`).
+///
+/// The wait ENTRY SURVIVES this resolve (only `resolved` flips): the demand re-seed must continue across the
+/// attach round-trip or the reconciler's arm-A lapses and reaps the realm out from under the login. That makes
+/// the per-member `AwaitingHomeRealm` test below load-bearing rather than decorative — it is what keeps the
+/// resolve IDEMPOTENT under at-least-once delivery. A duplicate reply finds its members in `AwaitingAttach`
+/// and touches nothing, so it can neither re-`claim_dynamic_shard` (a refcount leak that would pin the node
+/// on the roster forever) nor demote a session that has already gone `Active`.
+///
+/// A reply nobody waits on — EVERY `Realm` head in static mode, or one after the last member left — is a
+/// clean no-op, exactly the pre-5f-3d behaviour for this arm.
+///
+/// SCOPE: a home realm that MIGRATES to a different node after this resolve but before `SessionAttached`
+/// does not re-point the attach (its members have left `AwaitingHomeRealm`) — it rides the bounded bootstrap
+/// TTL and Closes loudly, then the client re-logins onto the new owner. Live re-pointing mid-bootstrap
+/// belongs with the D-34 authority-follows-commit work, not here.
+fn on_home_realm_head(
+    home_rid: RealmId,
+    record: Option<OwnerRecord>,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    let Some(owner) = record else {
+        return; // still booting — hold the client, seamlessly
+    };
+    let home = owner.authority.node();
+    let Some(wait) = sessions.home_bootstraps.get_mut(&home_rid) else {
+        return; // nobody is booting into this realm (every static-mode Realm head lands here)
+    };
+    // The head poll is SATISFIED for every current member: stop re-polling (the demand half of the re-drive
+    // deliberately keeps running — see `HomeWait::resolved`). A later joiner clears this again.
+    wait.resolved = true;
+    let members: Vec<SessionId> = wait.members.iter().copied().collect();
+    for session_id in members {
+        let Some(session) = sessions.by_session.get_mut(&session_id) else {
+            // The index and `by_session` are kept in sync by the begin/end pair; a miss is an
+            // invariant breach — counted, never a silent continue (the C2 honesty floor).
+            stats.home_wait_desync += 1;
+            continue;
+        };
+        if !matches!(session.phase, SessionPhase::AwaitingHomeRealm { .. }) {
+            // Already resolved by an earlier reply for this realm (it sits in `AwaitingAttach`, still a
+            // member because the re-seed must continue): a duplicate is an exact no-op, never a second
+            // roster claim and never a re-attach storm.
+            continue;
+        }
+        session.home_shard = Some(home);
+        // THE sole route-mutation primitive (HR3): retarget the WRITE route's authority to the home shard,
+        // CARRYING the route's current fence — the attach SETS the fresh realm fence a round-trip later.
+        // Without this the session would attach to (and subscribe on) its home while still routing input at
+        // the placeholder `config.shard`.
+        store_route(&session.hot, home, session.hot.route.load().fence, None);
+        session.phase = SessionPhase::AwaitingAttach;
+        let (fence, account) = (session.fence, session.account);
+        push_to_shard(
+            outbox,
+            home,
+            MsgClass::Control,
+            &GatewayToShard::AttachSession {
+                session: session_id,
+                fence,
+                account,
+            },
+        );
+        // The home joins the RUNTIME routable roster, so its `SessionAttached` + frames are node-class
+        // dispatchable as a shard (its NodeId was minted at spawn — never in the frozen config).
+        sessions.claim_dynamic_shard(home);
+    }
+}
+
+/// Handle a directory reply. TWO gateway obligations ride this seam: the `Session` head confirms (or denies)
+/// the mint and re-confirms an Active lease (D-3), and — RLM 5f-3d — the `Realm` head names the node owning
+/// a pre-Active session's DYNAMIC HOME realm (5f-3c discarded this arm). Everything else (Entity/Ship heads,
+/// CAS outcomes, clock samples) carries no gateway obligation.
 fn on_directory_reply(
     reply: DirectoryReply,
     config: &GatewayConfig,
@@ -2156,12 +2813,21 @@ fn on_directory_reply(
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
 ) {
-    let DirectoryReply::Head {
-        key: DirectoryKey::Session(session_id),
-        record,
-    } = reply
-    else {
-        return; // entity/realm heads carry no gateway obligation in P1
+    let (session_id, record) = match reply {
+        DirectoryReply::Head {
+            key: DirectoryKey::Session(session_id),
+            record,
+        } => (session_id, record),
+        // RLM 5f-3d — the dynamic-home route resolve (this arm used to be discarded).
+        DirectoryReply::Head {
+            key: DirectoryKey::Realm(home_rid),
+            record,
+        } => {
+            on_home_realm_head(home_rid, record, sessions, stats, outbox);
+            return;
+        }
+        // Entity/Ship heads, CAS outcomes and clock samples carry no gateway obligation.
+        _ => return,
     };
     let Some(session) = sessions.by_session.get_mut(&session_id) else {
         return; // session left while the reply was in flight
@@ -2187,7 +2853,47 @@ fn on_directory_reply(
     }
     if granted {
         // The mint is committed. Welcome the client; attach to the shard.
-        session.phase = SessionPhase::AwaitingAttach;
+        //
+        // RLM 5f-3d — ONE derivation for the whole dynamic decision (HR3, and the CRITIQUE-3 correctness
+        // invariant): in DYNAMIC mode ([`GatewayConfig::dynamic_home_mode`] — the config gate `armed` AND
+        // `clock.synced`) we server-derive the home demand ONCE here and use it for BOTH the seed emit and
+        // the wait, so "a session entered `AwaitingHomeRealm` ⇒ a `SpinUp` demand was seeded for EXACTLY
+        // that realm" holds by construction rather than by two agreeing conditions. In STATIC mode this is
+        // `None` and everything below is the EXACT pre-5f-3d flow: phase `AwaitingAttach`, Welcome,
+        // UniverseRate, `AttachSession` to `config.shard` — same order, same bytes, no extra head-read.
+        //
+        // MF3 — the gate is THREE-way, not two. `armed & !synced` must HOLD, never fall through to the
+        // static arm: on an ARMED cluster `config.shard` is NOT this player's home (it may not even be a
+        // live node), so attaching there would either serve the player from the WRONG shard undetected or
+        // spin an unbounded per-tick attach retry with no TTL behind it (nothing sets `bootstrap_deadline`
+        // on the static arm). Holding costs nothing and is invisible to the client: no Welcome yet, so no
+        // client-visible artifact, and the `AwaitingDirectory` retry arm re-sends the IDEMPOTENT `LeaseGrant`
+        // — the next reply (clock now synced) takes the dynamic arm. Counted, never silent. (That per-tick
+        // re-grant is also what keeps the already-committed lease fresh through the hold: an idempotent
+        // re-grant at the same owner+fence REFRESHES `lease_expires`, so this hold needs no renewal of its
+        // own — unlike the post-Welcome dynamic-home hold, which is why MF2 widened the renew set.)
+        if config.seed_injector.armed & !clock.synced {
+            stats.logins_held_pre_sync += 1;
+            return;
+        }
+        let home = if config.dynamic_home_mode(clock.synced) {
+            // The ONE forest descend per login (5f-3d: every later re-drive reuses this coord).
+            Some(home_coord(&config.seed_injector, session.account))
+        } else {
+            None
+        };
+        // The lowered directory key of the very realm this login is about to demand.
+        let home_rid = home.as_ref().map(RealmCoord::lowered);
+        session.phase = match home_rid {
+            // DYNAMIC: hold here until this realm's shard is routable (there is no node to attach to yet).
+            // The phase carries ONLY the realm id — the lineage + the cadence anchor live once per realm in
+            // `home_bootstraps` (indexed below).
+            Some(home_rid) => SessionPhase::AwaitingHomeRealm { home_rid },
+            // STATIC: the pre-5f-3d transition, unchanged.
+            None => SessionPhase::AwaitingAttach,
+        };
+        // The STANDING home identity (never cleared — it outlives the phase payload); `None` when static.
+        session.home_rid = home_rid;
         push_control(
             outbox,
             session.client,
@@ -2209,41 +2915,79 @@ fn on_directory_reply(
                 },
             );
         }
-        push_to_shard(
-            outbox,
-            config.shard,
-            MsgClass::Control,
-            &GatewayToShard::AttachSession {
-                session: session_id,
-                fence: session.fence,
-                account: session.account,
-            },
-        );
-        // RLM 5f-3c — THE TRUSTED GATEWAY SEED INJECTOR. THIS arm is the cluster-attested proof an
-        // AUTHENTICATED login LANDED: it is reached ONLY strictly downstream of `validate_login` success
-        // AND a directory-CAS-committed `Session` lease owned by THIS gateway at THIS fence (`granted`), on
-        // the `AwaitingDirectory → AwaitingAttach` transition — so it emits EXACTLY ONCE per login (a
-        // re-driven grant re-enters and returns at the `AwaitingAttach`/`Active` guards above, never here).
-        // We SERVER-DERIVE the login's home lineage from the account's stored pose and emit ONE
-        // `InterShardFlow::RealmDemand{SpinUp}` to the orchestrator so the whole home ancestor chain spins
-        // up (the 5f-3a ride) — riding the EXISTING RealmDemand arm on `MsgClass::Saga` (Reliable; the flow
-        // is `ReDriven`, so the default `Ephemeral` is correct). NO new wire arm, no grown `AttachSession`.
-        //
-        // INERT unless `armed` (`VD_DEMAND`; unarmed default ⇒ byte-identical, no emit) AND `clock.synced`:
-        // a PRE-SYNC seed would carry `universe_tick` 0 → `last_demand_tick` 0, which `demanded_recently`
-        // (rlm.rs) treats as "never demanded" (the `!= 0` sentinel) so the home would NEVER spin — hence we
-        // gate on synced exactly as the shard authors do (`has_synced`). The abuse boundary: a raw client
-        // speaks only `ClientControlMsg` and can never reach this arm or supply the coord.
-        if config.seed_injector.armed && clock.synced {
-            outbox.push_flow(
-                config.orchestrator,
-                MsgClass::Saga,
-                &InterShardFlow::RealmDemand(home_seed_demand(
-                    &config.seed_injector,
-                    session.account,
-                    clock.universe_tick,
-                )),
-            );
+        // Captured while the `session` borrow is live — the per-realm index insert below needs them once it
+        // has ended.
+        let account = session.account;
+        let since = clock.local_tick;
+        // The DYNAMIC arm hands the descended lineage out here so the index insert can own it (the demand
+        // consumes its own copy). `None` for a static login.
+        let wait_seed: Option<(RealmId, RealmCoord)> = match home {
+            // STATIC (the byte-identical default): attach to the session's routing target, which for a
+            // session that never resolves a home IS `config.shard`.
+            None => {
+                push_to_shard(
+                    outbox,
+                    session_target(session, config),
+                    MsgClass::Control,
+                    &GatewayToShard::AttachSession {
+                        session: session_id,
+                        fence: session.fence,
+                        account: session.account,
+                    },
+                );
+                None
+            }
+            // RLM 5f-3c/5f-3d — THE TRUSTED GATEWAY SEED INJECTOR + THE DYNAMIC-HOME HOLD. This arm is the
+            // cluster-attested proof an AUTHENTICATED login LANDED: it is reached ONLY strictly downstream
+            // of `validate_login` success AND a directory-CAS-committed `Session` lease owned by THIS
+            // gateway at THIS fence (`granted`), on the `AwaitingDirectory →` transition — so it fires
+            // EXACTLY ONCE per login (a re-driven grant re-enters and returns at the
+            // `AwaitingHomeRealm`/`AwaitingAttach`/`Active` guards above, never here). The demand carries
+            // NO client-supplied coord: the client's only spatial input is its authenticated `AccountId`
+            // (the abuse boundary — a raw client speaks only `ClientControlMsg`).
+            //
+            // We emit NO `AttachSession` here: the home shard does not exist yet. The client has already
+            // been `Welcome`d (above) and stays held in `AwaitingHomeRealm` — no `Close`, no teleport, no
+            // attach to a wrong shard — until the `Realm` head names its node.
+            Some(home) => {
+                let rid = home.lowered();
+                // The BOUNDED hold (CRITIQUE-1): a deadline spanning this phase AND the dynamic-target
+                // `AwaitingAttach`. `saturating_add` so a huge TTL cannot wrap into an instant expiry.
+                session.bootstrap_deadline = Some(TickId(
+                    clock
+                        .local_tick
+                        .0
+                        .saturating_add(config.seed_injector.bootstrap_ttl_ticks),
+                ));
+                // (a) SEED the home demand — the whole ancestor chain spins up (the 5f-3a ride) — riding the
+                // EXISTING `RealmDemand` arm on `MsgClass::Saga` (Reliable; the flow is `ReDriven`, so the
+                // default `Ephemeral` is correct). NO new wire arm, no grown `AttachSession`. Built through
+                // the SAME `demand_for_home` every re-drive uses (HR3).
+                outbox.push_flow(
+                    config.orchestrator,
+                    MsgClass::Saga,
+                    &InterShardFlow::RealmDemand(demand_for_home(
+                        home.clone(),
+                        account,
+                        clock.universe_tick,
+                    )),
+                );
+                // (b) POLL the home realm's directory head — the EXISTING `HeadRead`/`Head` pair, whose
+                // reply carries the owning node once the spawned shard takes its realm lease.
+                push_directory(
+                    outbox,
+                    config.orchestrator,
+                    DirectoryOp::HeadRead {
+                        key: DirectoryKey::Realm(rid),
+                    },
+                );
+                Some((rid, home))
+            }
+        };
+        // Index the member LAST: `session`'s borrow of `sessions` must end before this. `None` (static) ⇒
+        // no-op ⇒ the bootstrap index stays empty on an unarmed gateway.
+        if let Some((home_rid, coord)) = wait_seed {
+            sessions.begin_home_wait(session_id, home_rid, coord, since, account);
         }
     } else {
         // Mint refused (id collision or foreign holder): close loudly; the client
@@ -2264,14 +3008,65 @@ fn on_directory_reply(
 
 /// Per-tick retry driver: pending directory grants and shard attaches are
 /// re-sent until answered (all idempotent — at-least-once over a lossy fabric).
+///
+/// RLM 5f-3d adds the DYNAMIC-HOME re-drive — the only producer here that is neither per-tick nor
+/// per-session: it iterates the per-REALM [`GatewaySessions::home_bootstraps`] index on a BACKED-OFF cadence.
 fn drive_pending_sessions(
     config: Res<GatewayConfig>,
     identity: Res<NodeIdentity>,
+    clock: Res<ClockSample>,
     sessions: Res<GatewaySessions>,
     mut outbox: ResMut<OutboundBox>,
 ) {
+    let cadence = config.seed_injector.redrive_interval_ticks();
+    // ---- RLM 5f-3d — THE HOME-BOOTSTRAP RE-DRIVE, and it is a CORRECTNESS INVARIANT, not idempotent
+    // politeness (CRITIQUE-3). While ANY session is booting into a realm the gateway must periodically:
+    //   (a) RE-SEED the `SpinUp` demand — keeping the reconciler's arm-A `demanded_recently` FRESH through
+    //       the shard's whole pod boot AND the attach round-trip that follows it, UNTIL the last member goes
+    //       `Active`. Arm-B (`running_live & !empty_confirmed`) cannot cover that gap: a booted realm with
+    //       nobody attached yet self-reports `Empty`, so if arm-A lapses the reconciler KILLS the realm the
+    //       login is waiting for — and the login would then wait for a realm that was just reaped, until its
+    //       bounded TTL Closed it. Hence the re-seed runs until `Active`, NOT until the head resolves.
+    //   (b) RE-POLL `HeadRead{Realm(rid)}` — the reply is the ONLY way the gateway learns the node, so a
+    //       dropped reply must not wedge the login. This half STOPS at the resolve (`HomeWait::resolved`) and
+    //       resumes if a later member joins.
+    // Both ride EXISTING wire arms, and both are gated on ONE backed-off cadence
+    // (`demand_ttl / REDRIVE_DIVISOR`, anchored per realm): NOT every tick, and NOT per session. Under a
+    // 100K mass login onto one home, a per-session every-tick re-drive would fan 200K messages at the
+    // orchestrator EVERY tick; this emits ONE demand (+ at most one head-read) per REALM per cadence.
+    // Coalescing is sound because the only per-session field in the demand is the audit-only `parent_fence`
+    // (`rlm.rs` `update_fence` never reads it for a decision). Each re-seed carries the FULL lineage, so it
+    // refreshes the whole ancestor chain exactly as the initial seed did (the 5f-3a ride), not just the leaf.
+    // (The ONE inline seed at a login's committed lease is unchanged and stays per-login — it must land the
+    // instant the login lands. That is once per login, not once per cadence; the unbounded cost this loop
+    // removes is the REPEAT.)
+    for (home_rid, wait) in &sessions.home_bootstraps {
+        if home_redrive_due(clock.local_tick, wait.since, cadence) {
+            // Rebuilt off the STORED lineage (no forest re-descend — O(1) per re-drive) through the SAME
+            // `demand_for_home` the initial seed used, so it names EXACTLY the realm these sessions wait on;
+            // only `universe_tick` moves.
+            outbox.push_flow(
+                config.orchestrator,
+                MsgClass::Saga,
+                &InterShardFlow::RealmDemand(demand_for_home(
+                    wait.coord.clone(),
+                    wait.account,
+                    clock.universe_tick,
+                )),
+            );
+            if !wait.resolved {
+                push_directory(
+                    &mut outbox,
+                    config.orchestrator,
+                    DirectoryOp::HeadRead {
+                        key: DirectoryKey::Realm(*home_rid),
+                    },
+                );
+            }
+        }
+    }
     for (session_id, session) in &sessions.by_session {
-        match session.phase {
+        match &session.phase {
             SessionPhase::AwaitingDirectory => {
                 push_directory(
                     &mut outbox,
@@ -2283,17 +3078,32 @@ fn drive_pending_sessions(
                     },
                 );
             }
+            // RLM 5f-3d: a session HOLDING for its home realm has no per-session producer — its demand
+            // re-seed and head re-poll are COALESCED per realm by the loop above (one message set for every
+            // member of that home), so there is nothing to emit here.
+            SessionPhase::AwaitingHomeRealm { .. } => {}
             SessionPhase::AwaitingAttach => {
-                push_to_shard(
-                    &mut outbox,
-                    config.shard,
-                    MsgClass::Control,
-                    &GatewayToShard::AttachSession {
-                        session: *session_id,
-                        fence: session.fence,
-                        account: session.account,
-                    },
-                );
+                // 5f-3d: a STATIC attach retries EVERY tick (byte-identical); a DYNAMIC one rides the same
+                // backed-off cadence as its realm's re-drive (a mass login must not re-attach every session
+                // at a just-booted shard every tick). ONE predicate, ONE anchor source — HR3.
+                if attach_retry_due(
+                    sessions.attach_anchor(session.home_rid),
+                    clock.local_tick,
+                    cadence,
+                ) {
+                    push_to_shard(
+                        &mut outbox,
+                        // 5f-3d: the retry follows the SAME ONE routing path as the original grant — the
+                        // resolved home shard for a dynamic session, `config.shard` for a static one.
+                        session_target(session, &config),
+                        MsgClass::Control,
+                        &GatewayToShard::AttachSession {
+                            session: *session_id,
+                            fence: session.fence,
+                            account: session.account,
+                        },
+                    );
+                }
             }
             // Active needs no re-drive; a SelfFenced session is deliberately left alone (D-3 Slice 5b) —
             // it is no longer renewed, re-checked, or re-attached, awaiting connection-end / adoption.
@@ -5104,6 +5914,10 @@ mod tests {
                 fence: Fence(1),
                 phase,
                 next_sub: 0,
+                // 5f-3d: a STATIC session (no dynamic home, no bootstrap window) — the byte-identical shape.
+                home_shard: None,
+                home_rid: None,
+                bootstrap_deadline: None,
                 confirmed_at: TickId(confirmed),
                 negotiated_minor: 1,
                 transfer: None,
@@ -5179,6 +5993,10 @@ mod tests {
                     entity: EntityId(77),
                 },
                 next_sub: 0,
+                // 5f-3d: a STATIC session (no dynamic home, no bootstrap window) — the byte-identical shape.
+                home_shard: None,
+                home_rid: None,
+                bootstrap_deadline: None,
                 confirmed_at: TickId(0),
                 negotiated_minor: 1,
                 transfer: None,
@@ -5374,6 +6192,10 @@ mod tests {
                     entity: EntityId(88),
                 },
                 next_sub: 0,
+                // 5f-3d: a STATIC session (no dynamic home, no bootstrap window) — the byte-identical shape.
+                home_shard: None,
+                home_rid: None,
+                bootstrap_deadline: None,
                 confirmed_at: TickId(0),
                 negotiated_minor: 1,
                 transfer: None,
@@ -6054,6 +6876,25 @@ mod tests {
             .collect()
     }
 
+    /// Every session whose lease the gateway RENEWED in this batch (an ORCH-bound `LeaseRenew` on a
+    /// Session key). Shared by the D-3 renew-cadence cell and the 5f-3d MF2 dynamic-hold cell so the
+    /// decoder's non-renew (`_ => None`) arm is owned once — the D-3 cell's hello tick emits a
+    /// `LeaseGrant` (a Directory op that is NOT a renew), exercising that arm for both callers.
+    fn renewed_sessions(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<SessionId> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == ORCH)
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                    Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew {
+                        key: DirectoryKey::Session(s),
+                        ..
+                    })) => Some(s),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
     #[test]
     fn capstone_two_sub_overlap_routes_both_frames_and_repoints_the_avatar_to_the_dest() {
         // 1d.2c CAPSTONE (the gateway read-plane half of the 2-shard transfer): during the
@@ -6189,21 +7030,7 @@ mod tests {
         // ACTIVE session's Session key — never a still-logging-in (non-Active) session, and never
         // off-cadence. Drives ONE session through AwaitingAttach (non-Active) then Active so both filter
         // arms + the iterator's zero-iter (no Active → empty) and nonzero-iter (Active) are exercised.
-        let renewed_sessions = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<SessionId> {
-            sent.iter()
-                .filter(|(to, _, _)| *to == ORCH)
-                .filter_map(
-                    |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
-                        Ok(InterShardFlow::Directory(DirectoryOp::LeaseRenew {
-                            key: DirectoryKey::Session(s),
-                            ..
-                        })) => Some(s),
-                        _ => None,
-                    },
-                )
-                .collect()
-        };
-
+        // (`renewed_sessions` is the module-level decode helper, shared with the 5f-3d MF2 cell.)
         let mut rig = Rig::new();
         rig.world.insert_resource(GatewayConfig {
             lease_renew_interval_ticks: 4,
@@ -6282,6 +7109,10 @@ mod tests {
                 entity: EntityId(1),
             },
             next_sub: 0,
+            // 5f-3d: a STATIC session (no dynamic home, no bootstrap window) — the byte-identical shape.
+            home_shard: None,
+            home_rid: None,
+            bootstrap_deadline: None,
             confirmed_at: TickId(1),
             negotiated_minor: 1,
             transfer: None,
@@ -6423,13 +7254,25 @@ mod tests {
         )
     }
 
-    /// An ARMED injector over `poses`, walk-scale seed 0 (the forest `container_coord_at` descends).
+    /// RLM 5f-3d — the DEMAND TTL every armed test rig runs with: 8 ticks ⇒ a re-drive cadence of
+    /// `8 / REDRIVE_DIVISOR = 2` ticks. Small enough that a handful of `set_tick` steps cross it, and NOT 1,
+    /// so "backed off, not every tick" is observable.
+    const TEST_DEMAND_TTL: u64 = 8;
+    /// RLM 5f-3d — the bootstrap TTL for rigs that must NOT expire while a test drives several ticks.
+    const TEST_BOOTSTRAP_TTL: u64 = 100;
+
+    /// An ARMED injector over `poses`, walk-scale seed 0 (the forest `container_coord_at` descends), with a
+    /// LIVE 5f-3d bootstrap budget (a short re-drive cadence, a long bootstrap TTL). The pre-5f-3d 5f-3c
+    /// tests are unaffected by the budget: they hold `local_tick` at 1, so neither the re-drive nor the TTL
+    /// can fire during them.
     fn armed_injector(poses: BTreeMap<AccountId, StampedPose>) -> SeedInjectorConfig {
         SeedInjectorConfig {
             armed: true,
             universe_seed: 0,
             universe_config: UniverseConfig::walk_scale(),
             spawn_poses: poses,
+            demand_ttl_ticks: TEST_DEMAND_TTL,
+            bootstrap_ttl_ticks: TEST_BOOTSTRAP_TTL,
         }
     }
 
@@ -6530,8 +7373,60 @@ mod tests {
         // The synced gate (CRITIQUE-2): a PRE-SYNC seed would carry universe_tick 0 → last_demand_tick 0,
         // which `demanded_recently` treats as "never demanded" → the home would never spin. So the
         // injector emits ONLY once the clock is synced. Both arms of the `clock.synced` gate.
+        //
+        // MF3 — and an ARMED-but-pre-sync grant must HOLD, not fall back to the static path: `config.shard`
+        // is not this player's home on an armed cluster, so a static attach there would serve the player from
+        // the WRONG shard (or retry forever with no TTL). It emits NOTHING client-ward or shard-ward, stays in
+        // `AwaitingDirectory`, is COUNTED, and the re-driven idempotent `LeaseGrant` takes the DYNAMIC arm
+        // once the clock syncs.
         let poses = BTreeMap::from([(AccountId(5), spawn_at(25.0))]);
         // pre-sync: armed, but the clock has not synced → NO demand.
+        let mut rig = Rig::new();
+        arm_injector(&mut rig, armed_injector(poses.clone()), false);
+        let sid = {
+            let _ = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+            session_of(&rig, CLIENT)
+        };
+        let grant = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        assert_eq!(
+            decode_controls(&grant, CLIENT),
+            Vec::new(),
+            "a pre-sync armed grant pushes NOTHING at the client (no Welcome, no Close — no artifact)"
+        );
+        assert!(
+            !saw_attach(&grant, SHARD, sid),
+            "and NEVER attaches to the static config.shard on an armed cluster (MF3)"
+        );
+        assert_eq!(demands_to_orch(&grant).len(), 0, "and demands nothing");
+        assert_eq!(
+            grant
+                .iter()
+                .map(|(to, class, _)| (*to, *class))
+                .collect::<Vec<_>>(),
+            vec![(ORCH, MsgClass::Saga)],
+            "the ONLY send is the AwaitingDirectory retry's idempotent LeaseGrant"
+        );
+        assert_eq!(phase_of(&rig, sid), SessionPhase::AwaitingDirectory);
+        assert_eq!(
+            rig.stats().logins_held_pre_sync,
+            1,
+            "the hold is counted, never silent"
+        );
+        // The clock syncs; the SAME session's re-driven grant now takes the DYNAMIC arm.
+        rig.world.resource_mut::<ClockSample>().synced = true;
+        let synced_grant = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        assert_eq!(
+            phase_of(&rig, sid),
+            waiting_phase(),
+            "once synced the held login enters AwaitingHomeRealm — no re-login needed"
+        );
+        assert_eq!(
+            demands_to_orch(&synced_grant).len(),
+            1,
+            "and its home is demanded exactly then"
+        );
+        assert_eq!(rig.stats().logins_held_pre_sync, 1, "held once, not twice");
+        // The original 5f-3c assertion, unchanged: a whole pre-sync login drive injects no demand at all.
         let mut rig = Rig::new();
         arm_injector(&mut rig, armed_injector(poses.clone()), false);
         let (_sid, presync) = rig.login();
@@ -6577,10 +7472,14 @@ mod tests {
             .sessions()
             .next()
             .expect("session pending");
-        // AwaitingDirectory → AwaitingAttach: the ONE emit.
+        // The committed-lease transition (5f-3d: `AwaitingDirectory → AwaitingHomeRealm`, since this rig is
+        // armed + synced): the ONE inline emit.
         let g1 = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
-        // A re-driven grant while AwaitingAttach: the AwaitingAttach guard returns — NO emit.
+        // A re-driven grant while `AwaitingHomeRealm`: the not-AwaitingDirectory guard returns — NO emit.
+        // (The `local_tick` stays 1 throughout, so the 5f-3d re-drive cadence never fires here either.)
         let g2 = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        // A `SessionAttached` from the STATIC shard while awaiting the HOME realm is correctly ignored
+        // (5f-3d: this armed session is routed to its home, not to `config.shard`) — and emits nothing.
         let attached = rig.tick(vec![wire(
             SHARD,
             MsgClass::Control,
@@ -6591,7 +7490,7 @@ mod tests {
                 realm_fence: Fence(1),
             },
         )]);
-        // A granted head while Active: the Active recheck re-arms confirmed_at — NO emit.
+        // A further granted head: still the same guard, still NO emit.
         let g3 = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
         let total: usize = [&hello, &g1, &g2, &attached, &g3]
             .iter()
@@ -6710,6 +7609,1254 @@ mod tests {
         assert!(
             !coord_in_forest(&off, 0),
             "an off-forest leaf (a corrupted stand-in) is rejected"
+        );
+    }
+
+    // ===== RLM 5f-3d — the GATEWAY DYNAMIC-HOME ROUTE + the seamless attach hold ===================
+
+    /// The DEMAND-SPAWNED home shard. Deliberately NOT a member of `config().known_shards`
+    /// (`{SHARD, DEST}`), exactly like a real shard whose `NodeId` is minted at spawn time — so any test
+    /// that routes to it proves the RUNTIME `dynamic_shards` roster is what makes it dispatchable.
+    const HOME: NodeId = NodeId(77);
+    /// A second client connection. The SAME account ⇒ the SAME home realm, which is what makes the
+    /// one-reply-resolves-many fan-out (and the roster refcount) observable.
+    const CLIENT2: NodeId = NodeId(101);
+
+    /// The home realm `AccountId(5)`'s stored pose `(25,0,0)` resolves to: the SAME lineage `home_coord`
+    /// derives (and `demand_for_home` demands), lowered to the `RealmId` the directory keys realms by
+    /// (`DirectoryKey::Realm(coord.lowered())` — exactly what `rlm.rs` grants a spawned realm at).
+    fn home_lineage() -> RealmCoord {
+        container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0))
+    }
+
+    /// …lowered to the `RealmId` the directory keys realms by.
+    fn home_realm() -> RealmId {
+        home_lineage().lowered()
+    }
+
+    /// A `Realm`-head reply for `rid`: `Some(node)` = the realm is LIVE, owned by `node` (its shard took the
+    /// realm lease); `None` = not up yet (the shard is still booting).
+    fn realm_head(rid: RealmId, owner: Option<NodeId>) -> InterShardFlow {
+        InterShardFlow::DirectoryReply(DirectoryReply::Head {
+            key: DirectoryKey::Realm(rid),
+            record: owner.map(|node| OwnerRecord {
+                authority: AuthorityRef::Shard(node),
+                fence: Fence(3),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        })
+    }
+
+    /// A rig in DYNAMIC-HOME mode: armed + synced, with `AccountId(5)`'s stored spawn pose and the live
+    /// 5f-3d budget (`TEST_DEMAND_TTL` / `TEST_BOOTSTRAP_TTL`).
+    fn dynamic_rig() -> Rig {
+        let mut rig = Rig::new();
+        arm_injector(
+            &mut rig,
+            armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))])),
+            true,
+        );
+        rig
+    }
+
+    /// A dynamic rig whose bootstrap TTL is `ttl` ticks (for the bounded-TTL cells).
+    fn dynamic_rig_with_ttl(ttl: u64) -> Rig {
+        let mut rig = Rig::new();
+        let injector = SeedInjectorConfig {
+            bootstrap_ttl_ticks: ttl,
+            ..armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))]))
+        };
+        arm_injector(&mut rig, injector, true);
+        rig
+    }
+
+    fn phase_of(rig: &Rig, sid: SessionId) -> SessionPhase {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session present")
+            .phase
+            .clone()
+    }
+
+    fn session_of(rig: &Rig, client: NodeId) -> SessionId {
+        *rig.world
+            .resource::<GatewaySessions>()
+            .by_client
+            .get(&client)
+            .expect("client has a session")
+    }
+
+    /// The session's WRITE-route authority (the node its input would be forwarded to).
+    fn route_authority(rig: &Rig, sid: SessionId) -> NodeId {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session present")
+            .hot
+            .route
+            .load()
+            .authority
+    }
+
+    /// The phase a WAITING dynamic session must be in: holding for its home REALM (the lineage + the cadence
+    /// anchor live once per realm in `home_bootstraps`, asserted by [`home_wait`]).
+    fn waiting_phase() -> SessionPhase {
+        SessionPhase::AwaitingHomeRealm {
+            home_rid: home_realm(),
+        }
+    }
+
+    /// The EXACT per-realm bootstrap index a set of `members` waiting on the one home realm must produce
+    /// (wait opened at local tick `since`, representative account 5 — every dynamic rig's login account).
+    fn home_wait(since: u64, members: &[SessionId], resolved: bool) -> BTreeMap<RealmId, HomeWait> {
+        BTreeMap::from([(
+            home_realm(),
+            HomeWait {
+                coord: home_lineage(),
+                since: TickId(since),
+                account: AccountId(5),
+                members: members.iter().copied().collect(),
+                resolved,
+            },
+        )])
+    }
+
+    /// Drive ONE dynamic login for `client` (hello → granted lease); returns its id + the GRANT tick's sends.
+    #[allow(clippy::type_complexity)] // test helper: one tick of raw sends
+    fn dynamic_login(
+        rig: &mut Rig,
+        client: NodeId,
+    ) -> (SessionId, Vec<(NodeId, MsgClass, Vec<u8>)>) {
+        let _ = rig.tick(vec![wire(client, MsgClass::Control, &hello_msg())]);
+        let sid = session_of(rig, client);
+        let granted = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        (sid, granted)
+    }
+
+    /// Did the gateway send THIS session's `AttachSession` to `node`? Compares the EXACT expected bytes
+    /// (never a speculative decode — postcard is not self-describing, so a client-bound `ServerControlMsg`
+    /// on the same `Control` class can mis-decode as a `GatewayToShard`). Bitwise `&` (no short-circuit
+    /// region — HR5).
+    fn saw_attach(sent: &[(NodeId, MsgClass, Vec<u8>)], node: NodeId, sid: SessionId) -> bool {
+        let expected = postcard::to_allocvec(&GatewayToShard::AttachSession {
+            session: sid,
+            fence: Fence(1),
+            account: AccountId(5),
+        })
+        .expect("encode");
+        sent.iter().any(|(to, class, bytes)| {
+            (*to == node)
+                & (*class == MsgClass::Control)
+                & (bytes.as_slice() == expected.as_slice())
+        })
+    }
+
+    /// Did the gateway send THIS session's `DetachSession` to `node`? (Exact bytes, as above.)
+    fn saw_detach(sent: &[(NodeId, MsgClass, Vec<u8>)], node: NodeId, sid: SessionId) -> bool {
+        let expected = postcard::to_allocvec(&GatewayToShard::DetachSession {
+            session: sid,
+            fence: Fence(1),
+        })
+        .expect("encode");
+        sent.iter().any(|(to, class, bytes)| {
+            (*to == node)
+                & (*class == MsgClass::Control)
+                & (bytes.as_slice() == expected.as_slice())
+        })
+    }
+
+    /// Did the gateway revoke THIS session's committed lease? (Exact bytes, as above.)
+    fn saw_lease_revoke(sent: &[(NodeId, MsgClass, Vec<u8>)], sid: SessionId) -> bool {
+        let expected =
+            postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::LeaseRevoke {
+                key: DirectoryKey::Session(sid),
+                fence: Fence(1),
+            }))
+            .expect("encode");
+        sent.iter().any(|(to, class, bytes)| {
+            (*to == ORCH) & (*class == MsgClass::Saga) & (bytes.as_slice() == expected.as_slice())
+        })
+    }
+
+    /// How many `HeadRead{Realm(rid)}` polls the gateway sent (exact bytes).
+    fn realm_head_reads(sent: &[(NodeId, MsgClass, Vec<u8>)], rid: RealmId) -> usize {
+        let expected = postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::HeadRead {
+            key: DirectoryKey::Realm(rid),
+        }))
+        .expect("encode");
+        sent.iter()
+            .filter(|(to, class, bytes)| {
+                (*to == ORCH)
+                    & (*class == MsgClass::Saga)
+                    & (bytes.as_slice() == expected.as_slice())
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_dynamic_login_is_welcomed_at_the_lease_then_held_with_no_attach_and_no_close() {
+        // THE SEAMLESS HOLD. On the committed lease a dynamic login is WELCOMED exactly as a static one is
+        // (same instant, same bytes), then HELD in `AwaitingHomeRealm`: no `AttachSession` to the static
+        // `config.shard` (a teleport to the wrong shard), no `Close`, no loading-screen signal — it simply
+        // has no frames yet. The demand + the head-poll ride EXISTING wire arms.
+        let mut rig = dynamic_rig();
+        let (sid, granted) = dynamic_login(&mut rig, CLIENT);
+        assert_eq!(
+            decode_controls(&granted, CLIENT),
+            vec![
+                ServerControlMsg::Welcome {
+                    version: ProtoVersion::CURRENT,
+                    session: sid,
+                    session_fence: Fence(1),
+                    epoch: EpochId(9),
+                },
+                ServerControlMsg::UniverseRate { tick_hz: 50 },
+            ],
+            "a dynamic login is Welcome'd at the committed lease — and nothing else is pushed at it"
+        );
+        assert!(
+            !saw_attach(&granted, SHARD, sid),
+            "a dynamic login never attaches to the static config.shard"
+        );
+        assert!(
+            !saw_attach(&granted, HOME, sid),
+            "and it cannot attach to its home before the head names the node"
+        );
+        assert_eq!(phase_of(&rig, sid), waiting_phase());
+        assert_eq!(
+            demands_to_orch(&granted).len(),
+            1,
+            "ONE home demand, on the existing RealmDemand arm"
+        );
+        assert_eq!(
+            realm_head_reads(&granted, home_realm()),
+            1,
+            "and ONE poll of the home realm's directory head"
+        );
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert_eq!(sessions.home_realm_of(sid), Some(home_realm()));
+        assert_eq!(
+            sessions.home_shard_of(sid),
+            None,
+            "no home shard until the head resolves"
+        );
+        assert_eq!(
+            sessions.entity_of(sid),
+            None,
+            "a held session has no avatar yet (the new phase is a non-Active arm of entity_of)"
+        );
+        assert_eq!(
+            sessions.home_bootstraps,
+            home_wait(1, &[sid], false),
+            "the session is a member of its home realm's ONE bootstrap wait — which owns the descended \
+             lineage, the cadence anchor and the representative account (so ONE reply resolves it and ONE \
+             re-drive covers it)"
+        );
+        // The EXACT send fingerprint of a dynamic grant tick: Welcome + UniverseRate to the client, then the
+        // demand + the head-poll to the orchestrator — and NOTHING shard-ward (no attach from the grant arm
+        // and none from the re-drive, which is not due on the tick the wait began).
+        assert_eq!(
+            granted
+                .iter()
+                .map(|(to, class, _)| (*to, *class))
+                .collect::<Vec<_>>(),
+            vec![
+                (CLIENT, MsgClass::Control),
+                (CLIENT, MsgClass::Control),
+                (ORCH, MsgClass::Saga),
+                (ORCH, MsgClass::Saga),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_committed_lease_welcome_is_identical_in_both_modes() {
+        // SEAMLESS + byte-identical AT THE CLIENT BOUNDARY: the client sees the SAME control stream at the
+        // committed lease whether or not the gateway is in dynamic-home mode. Nothing about the home
+        // bootstrap leaks to it — no Close, no teleport, no extra/omitted variant, no reordering. (Both rigs
+        // share `session_seed`, so the minted SessionId — and hence the Welcome bytes — match exactly.)
+        let mut dynamic = dynamic_rig();
+        let (dyn_sid, dyn_granted) = dynamic_login(&mut dynamic, CLIENT);
+        let mut static_rig = Rig::new();
+        let (static_sid, static_granted) = dynamic_login(&mut static_rig, CLIENT);
+        assert_eq!(dyn_sid, static_sid, "the same mint stream in both rigs");
+        assert_eq!(
+            decode_controls(&dyn_granted, CLIENT),
+            decode_controls(&static_granted, CLIENT),
+            "the client-visible Welcome at the committed lease is identical in both modes"
+        );
+    }
+
+    #[test]
+    fn a_home_head_with_no_record_keeps_the_session_waiting_seamlessly() {
+        // The realm is DEMANDED but its shard is still booting (`record: None`). The waiter STAYS: no Close,
+        // no teleport, no fallback attach — and it is not dropped.
+        let mut rig = dynamic_rig();
+        let (sid, _) = dynamic_login(&mut rig, CLIENT);
+        let after = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), None),
+        )]);
+        assert_eq!(
+            phase_of(&rig, sid),
+            waiting_phase(),
+            "a not-yet-routable home keeps the session waiting"
+        );
+        assert_eq!(
+            decode_controls(&after, CLIENT),
+            Vec::new(),
+            "NOTHING is pushed at the client while its home boots (no Close, no teleport)"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().len(),
+            1,
+            "held, never dropped"
+        );
+        assert!(
+            !saw_attach(&after, SHARD, sid),
+            "and never fallen back onto the static shard"
+        );
+    }
+
+    #[test]
+    fn a_resolved_home_head_routes_the_attach_to_the_spawned_shard_and_admits_its_frames() {
+        // THE ROUTE. The `Realm` head names the spawned node: it JOINS the runtime routable roster, the
+        // WRITE route is retargeted to it, the attach goes THERE (never `config.shard`), and — purely via
+        // that runtime roster — its `SessionAttached` promotes the session and its frames reach the client.
+        let mut rig = dynamic_rig();
+        let (sid, _) = dynamic_login(&mut rig, CLIENT);
+        let resolved = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert_eq!(phase_of(&rig, sid), SessionPhase::AwaitingAttach);
+        assert!(
+            saw_attach(&resolved, HOME, sid),
+            "the attach goes to the SPAWNED home shard"
+        );
+        assert!(
+            !saw_attach(&resolved, SHARD, sid),
+            "never to the static config.shard"
+        );
+        assert_eq!(
+            route_authority(&rig, sid),
+            HOME,
+            "the WRITE route retargeted"
+        );
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert_eq!(sessions.home_shard_of(sid), Some(HOME));
+        assert_eq!(
+            sessions.dynamic_shards,
+            BTreeMap::from([(HOME, 1)]),
+            "the spawned node joined the RUNTIME routable roster (it is not in the frozen config)"
+        );
+        assert_eq!(
+            sessions.home_bootstraps,
+            home_wait(1, &[sid], true),
+            "the session STAYS a member of the (now resolved) bootstrap — MF1: the demand re-seed must \
+             outlive the resolve and run until the Active promote, or the reconciler reaps the realm this \
+             login is attaching to"
+        );
+        // The runtime roster is what makes HOME dispatchable as a shard at all.
+        let attached = rig.tick(vec![wire(
+            HOME,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().entity_of(sid),
+            Some(EntityId(77)),
+            "the session went Active off its HOME shard's attach"
+        );
+        assert_eq!(
+            decode_controls(&attached, CLIENT),
+            vec![
+                ServerControlMsg::SubscriptionOpened {
+                    sub: SubId(0),
+                    frame: FrameRef::SystemSpace { system_seed: 7 },
+                },
+                ServerControlMsg::AuthorityChanged {
+                    entity: EntityId(77),
+                    sub: SubId(0),
+                },
+                ServerControlMsg::OwnEntity {
+                    entity: EntityId(77)
+                },
+            ],
+            "the login sub opened on the HOME shard (never config.shard)"
+        );
+        let framed = rig.tick(vec![wire(
+            HOME,
+            MsgClass::Snapshot,
+            &frame_msg(Fence(1), 1),
+        )]);
+        assert_eq!(
+            framed
+                .iter()
+                .filter(|(to, class, _)| (*to == CLIENT) & (*class == MsgClass::Snapshot))
+                .count(),
+            1,
+            "a frame from the dynamically routed home shard reaches the client"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<GatewaySessions>()
+                .by_session
+                .get(&sid)
+                .expect("session")
+                .bootstrap_deadline,
+            None,
+            "the bounded bootstrap window closed at the Active promote"
+        );
+        // MF1 test (iii): the `Active` promote is the wait's TERMINATOR — the member leaves and, being the
+        // last one, takes the realm's whole entry (and its lineage `Vec`) with it.
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().home_bootstraps,
+            BTreeMap::new(),
+            "the Active promote drops the member and prunes the realm entry"
+        );
+        // …so the re-drive is silent from here on, however many cadences pass (nothing left to re-seed).
+        set_tick(&mut rig, 11);
+        let after_active = rig.tick(vec![]);
+        assert_eq!(
+            demands_to_orch(&after_active).len(),
+            0,
+            "an Active session's home is no longer re-seeded (arm-B owns it now — live occupancy)"
+        );
+        assert_eq!(realm_head_reads(&after_active, home_realm()), 0);
+        // A `Bye` from an ACTIVE dynamic session: its `home_rid` still names the realm but the wait entry is
+        // long gone, so the index exit is a clean no-op — while the DETACH still routes to its home shard and
+        // the runtime roster releases (the whole dynamic teardown, after the bootstrap has ended).
+        let bye = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert!(
+            saw_detach(&bye, HOME, sid),
+            "an Active dynamic session detaches at its HOME shard, never config.shard"
+        );
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert_eq!(sessions.len(), 0);
+        assert_eq!(sessions.home_bootstraps, BTreeMap::new());
+        assert_eq!(
+            sessions.dynamic_shards,
+            BTreeMap::new(),
+            "and its roster claim is released"
+        );
+    }
+
+    #[test]
+    fn the_home_bootstrap_re_drive_fires_on_the_backoff_cadence_not_every_tick() {
+        // THE RE-DRIVE AS A CORRECTNESS INVARIANT (CRITIQUE-3): while waiting, the gateway must keep
+        // re-seeding the demand (so the reconciler's arm-A `demanded_recently` never lapses mid-boot and
+        // reaps the half-booted realm) AND re-poll the head. But BACKED OFF: `demand_ttl / 4`, NOT every
+        // tick — the 100K mass-login storm guard. Both arms of the due/not-due branch are exercised.
+        let cadence = SeedInjectorConfig {
+            ..armed_injector(BTreeMap::new())
+        }
+        .redrive_interval_ticks();
+        assert_eq!(cadence, 2, "demand_ttl 8 / REDRIVE_DIVISOR 4 = 2");
+        assert!(
+            cadence < TEST_DEMAND_TTL,
+            "the cadence must be STRICTLY inside the demand TTL, or arm-A lapses mid-boot"
+        );
+        assert!(cadence > 1, "…and it must not degenerate to every tick");
+        let mut rig = dynamic_rig();
+        let (sid, _) = dynamic_login(&mut rig, CLIENT); // waiting since local tick 1
+        // Tick 2 (elapsed 1): NOT due.
+        set_tick(&mut rig, 2);
+        let quiet = rig.tick(vec![]);
+        assert_eq!(demands_to_orch(&quiet).len(), 0, "no re-seed off cadence");
+        assert_eq!(
+            realm_head_reads(&quiet, home_realm()),
+            0,
+            "no re-poll off cadence"
+        );
+        // Tick 3 (elapsed 2 == cadence): DUE — both halves fire.
+        set_tick(&mut rig, 3);
+        let driven = rig.tick(vec![]);
+        let demands = demands_to_orch(&driven);
+        assert_eq!(demands.len(), 1, "the home demand is RE-SEEDED on cadence");
+        assert_eq!(
+            demands[0].child,
+            container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0)),
+            "the re-seed names the SAME server-derived home lineage"
+        );
+        assert_eq!(demands[0].verb, DemandVerb::SpinUp);
+        assert_eq!(
+            realm_head_reads(&driven, home_realm()),
+            1,
+            "and the head is re-polled"
+        );
+        // Tick 4 (elapsed 3): NOT due again — proof it is a cadence, not a latch.
+        set_tick(&mut rig, 4);
+        let quiet2 = rig.tick(vec![]);
+        assert_eq!(demands_to_orch(&quiet2).len(), 0);
+        // Tick 5 (elapsed 4): due again.
+        set_tick(&mut rig, 5);
+        assert_eq!(demands_to_orch(&rig.tick(vec![])).len(), 1);
+        assert_eq!(
+            phase_of(&rig, sid),
+            waiting_phase(),
+            "still held, seamlessly"
+        );
+    }
+
+    #[test]
+    fn the_re_seed_outlives_the_resolve_so_the_reconciler_never_reaps_the_home_mid_attach() {
+        // MF1 DEFECT A — THE ANTI-REAP INVARIANT, the reason this slice exists. The head resolve is NOT the
+        // end of the re-seed: a session can sit in the DYNAMIC `AwaitingAttach` for the whole rest of the
+        // bootstrap window (a lost `AttachSession`/`SessionAttached` — the 5f-4 dial-a-fresh-pod race), and a
+        // booted-but-unoccupied realm self-reports `Empty`, so the reconciler's arm-B (`running_live &
+        // !empty_confirmed`) is FALSE. Only the gateway's re-seed keeps arm-A `demanded_recently` alive; if it
+        // stopped at the resolve, arm-A would expire one `demand_ttl` after it and the reconciler would KILL
+        // the realm this login is attaching to — long BEFORE the bootstrap TTL noticed.
+        let mut rig = dynamic_rig(); // demand_ttl 8 (cadence 2), bootstrap_ttl 100
+        let (sid, _) = dynamic_login(&mut rig, CLIENT); // wait opened at local tick 1
+        let resolve_tick = 2;
+        // A tick MORE than one whole `demand_ttl` after the resolve — exactly where the reconciler's arm-A
+        // would have lapsed had the re-seed stopped there — and on the wait's cadence (odd, anchored at 1).
+        let probe_tick = 13;
+        assert!(
+            probe_tick - resolve_tick > TEST_DEMAND_TTL,
+            "the probe must sit past one whole demand TTL from the resolve (where arm-A lapses)"
+        );
+        set_tick(&mut rig, resolve_tick);
+        let resolved = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert!(saw_attach(&resolved, HOME, sid));
+        assert_eq!(phase_of(&rig, sid), SessionPhase::AwaitingAttach);
+        // Now the attach is NEVER confirmed.
+        set_tick(&mut rig, probe_tick);
+        let late = rig.tick(vec![]);
+        assert_eq!(
+            demands_to_orch(&late).len(),
+            1,
+            "the home demand is STILL re-seeded while the resolved session waits to attach (MF1-A)"
+        );
+        assert_eq!(
+            demands_to_orch(&late)[0].child,
+            home_lineage(),
+            "and it still names the SAME server-derived home lineage"
+        );
+        assert_eq!(
+            realm_head_reads(&late, home_realm()),
+            0,
+            "…while the head POLL stays off — the node is already known (only the demand half continues)"
+        );
+        assert!(
+            saw_attach(&late, HOME, sid),
+            "the dynamic attach retry rides the SAME cadence tick (coalesced, not per-tick)"
+        );
+        // Off-cadence the whole thing is silent — the retry is a cadence, not a latch.
+        set_tick(&mut rig, probe_tick + 1);
+        let quiet = rig.tick(vec![]);
+        assert_eq!(demands_to_orch(&quiet).len(), 0);
+        assert!(
+            !saw_attach(&quiet, HOME, sid),
+            "a DYNAMIC attach retry does not fire every tick (the mass-login storm guard)"
+        );
+        // Still held, still bounded, and it can still complete: the attach lands and the session goes Active.
+        assert_eq!(rig.stats().home_bootstrap_timeouts, 0);
+        let attached = rig.tick(vec![wire(
+            HOME,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().entity_of(sid),
+            Some(EntityId(77)),
+            "the late attach still completes the login"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().home_bootstraps,
+            BTreeMap::new(),
+            "and THAT is what ends the re-seed"
+        );
+        let _ = attached;
+    }
+
+    #[test]
+    fn two_sessions_on_one_home_coalesce_to_exactly_one_demand_and_one_head_read() {
+        // MF1 DEFECT B — the STORM guard. The re-drive iterates REALMS, not sessions: N sessions booting into
+        // ONE home cost ONE `RealmDemand` + ONE `HeadRead` per cadence, not 2N. (At the 100K mass-login scale
+        // the difference is 200K messages per cadence versus 2.) Coalescing is sound because the only
+        // per-session field in the demand is the audit-only `parent_fence`.
+        let mut rig = dynamic_rig();
+        let (sid_a, _) = dynamic_login(&mut rig, CLIENT);
+        let (sid_b, _) = dynamic_login(&mut rig, CLIENT2);
+        set_tick(&mut rig, 3); // elapsed 2 == the cadence
+        let driven = rig.tick(vec![]);
+        let demands = demands_to_orch(&driven);
+        assert_eq!(
+            demands.len(),
+            1,
+            "TWO waiters on one home ⇒ exactly ONE re-seeded demand"
+        );
+        assert_eq!(demands[0].child, home_lineage());
+        assert_eq!(
+            demands[0].parent_fence,
+            home_sentinel_fence(AccountId(5)),
+            "carrying the wait's representative per-account sentinel (audit-only at the orchestrator)"
+        );
+        assert_eq!(
+            realm_head_reads(&driven, home_realm()),
+            1,
+            "and exactly ONE head poll for the realm both are waiting on"
+        );
+        // After the resolve: still ONE demand per cadence (the anti-reap invariant), and ZERO head-reads.
+        let _ = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        set_tick(&mut rig, 5);
+        let after = rig.tick(vec![]);
+        assert_eq!(
+            demands_to_orch(&after).len(),
+            1,
+            "one demand per cadence still covers BOTH resolved members"
+        );
+        assert_eq!(
+            realm_head_reads(&after, home_realm()),
+            0,
+            "and the head poll is done — the node is known"
+        );
+        assert_eq!(phase_of(&rig, sid_a), SessionPhase::AwaitingAttach);
+        assert_eq!(phase_of(&rig, sid_b), SessionPhase::AwaitingAttach);
+    }
+
+    #[test]
+    fn a_session_joining_an_already_resolved_home_resumes_the_head_poll_and_resolves() {
+        // The joiner case the surviving wait entry creates: session B logs into a home realm session A has
+        // ALREADY resolved. B has seen no head reply of its own, so joining CLEARS `resolved` — the poll
+        // resumes on the next cadence tick and B is resolved by the reply, while A (already in
+        // `AwaitingAttach`) is left untouched. Both arms of the per-member phase test, in one cell.
+        let mut rig = dynamic_rig();
+        let (sid_a, _) = dynamic_login(&mut rig, CLIENT);
+        let _ = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert_eq!(phase_of(&rig, sid_a), SessionPhase::AwaitingAttach);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().home_bootstraps,
+            home_wait(1, &[sid_a], true),
+            "resolved, and the entry survives"
+        );
+        // B logs in on the SAME account ⇒ the same home realm ⇒ it JOINS the existing wait.
+        let (sid_b, _) = dynamic_login(&mut rig, CLIENT2);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().home_bootstraps,
+            home_wait(1, &[sid_a, sid_b], false),
+            "the joiner cleared `resolved` (its own head reply may be lost — the poll must resume)"
+        );
+        set_tick(&mut rig, 3);
+        let driven = rig.tick(vec![]);
+        assert_eq!(
+            realm_head_reads(&driven, home_realm()),
+            1,
+            "so the head IS re-polled for the joiner"
+        );
+        let resolved = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert_eq!(phase_of(&rig, sid_b), SessionPhase::AwaitingAttach);
+        assert!(
+            saw_attach(&resolved, HOME, sid_b),
+            "the joiner's attach goes to the home shard"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().dynamic_shards,
+            BTreeMap::from([(HOME, 2)]),
+            "each member claims the roster exactly once — the already-resolved member was skipped"
+        );
+    }
+
+    #[test]
+    fn a_dynamic_pre_active_session_keeps_its_committed_lease_renewed() {
+        // MF2 — a held login's lease MUST be renewed. The dynamic-home hold can outlast the orchestrator's
+        // lease-reap horizon (`bootstrap_ttl` is a whole measured pod boot), and the lease was COMMITTED at
+        // the grant, so an `Active`-only renew set would let a held session's own lease lapse under it with
+        // nothing pre-Active watching. The renew set is therefore `Active` OR mid-bootstrap; the RECHECK
+        // stays Active-only.
+        // `renewed_sessions` (the module-level decode helper) owns the non-renew arm via the D-3 cell.
+        let rechecked = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<SessionId> {
+            sent.iter()
+                .filter(|(to, _, _)| *to == ORCH)
+                .filter_map(
+                    |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                        Ok(InterShardFlow::Directory(DirectoryOp::HeadRead {
+                            key: DirectoryKey::Session(s),
+                        })) => Some(s),
+                        _ => None,
+                    },
+                )
+                .collect()
+        };
+        // DYNAMIC: armed + synced, with the renew AND recheck cadences live.
+        let mut rig = Rig::new();
+        rig.world.insert_resource(GatewayConfig {
+            lease_renew_interval_ticks: 4,
+            session_recheck_interval: 4,
+            seed_injector: armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))])),
+            ..config()
+        });
+        let (sid, _) = dynamic_login(&mut rig, CLIENT);
+        assert_eq!(phase_of(&rig, sid), waiting_phase());
+        set_tick(&mut rig, 4);
+        let held = rig.tick(vec![]);
+        assert_eq!(
+            renewed_sessions(&held),
+            vec![sid],
+            "a session HELD in AwaitingHomeRealm still renews its committed lease (MF2)"
+        );
+        assert_eq!(
+            rechecked(&held),
+            Vec::new(),
+            "…but is NOT re-checked (no authority to self-fence pre-Active)"
+        );
+        // …and the Active-only recheck RESUMES once the hold ends: the whole point of gating the recheck on
+        // Active (not on the renew set) is that a held session parks the recheck and un-parks it on promote.
+        // Drive the SAME session home-resolved → attached → Active, then a recheck-cadence tick fires it.
+        let _ = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert_eq!(
+            phase_of(&rig, sid),
+            SessionPhase::AwaitingAttach,
+            "home resolved ⇒ the bootstrap hold ends"
+        );
+        let _ = rig.tick(vec![wire(
+            HOME,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+        set_tick(&mut rig, 8);
+        assert_eq!(
+            rechecked(&rig.tick(vec![])),
+            vec![sid],
+            "the Active-only recheck RESUMES once the session is Active"
+        );
+        // STATIC (the byte-identical control): an `AwaitingAttach` login carries no bootstrap window, so it
+        // is NOT renewed — the pre-5f-3d renew set exactly.
+        let mut plain = Rig::new();
+        plain.world.insert_resource(GatewayConfig {
+            lease_renew_interval_ticks: 4,
+            ..config()
+        });
+        let _ = plain.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        let static_sid = session_of(&plain, CLIENT);
+        let _ = plain.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(static_sid))]);
+        assert_eq!(phase_of(&plain, static_sid), SessionPhase::AwaitingAttach);
+        set_tick(&mut plain, 4);
+        assert_eq!(
+            renewed_sessions(&plain.tick(vec![])),
+            Vec::new(),
+            "a STATIC pre-Active login is not renewed (byte-identical renew set)"
+        );
+    }
+
+    #[test]
+    fn the_bounded_bootstrap_ttl_closes_a_never_routable_home_loudly() {
+        // CRITIQUE-1: the hold is BOUNDED. A home that never becomes routable Closes the client LOUDLY at
+        // the deadline (counted + a reason + the committed lease revoked), never a silent hang. Expiring in
+        // `AwaitingHomeRealm` sends NO detach (no home was ever resolved — the `None` arm).
+        let mut rig = dynamic_rig_with_ttl(5); // waiting since tick 1 ⇒ deadline 6
+        let (sid, _) = dynamic_login(&mut rig, CLIENT);
+        set_tick(&mut rig, 6); // AT the deadline: still inside the window
+        let inside = rig.tick(vec![]);
+        assert_eq!(
+            phase_of(&rig, sid),
+            waiting_phase(),
+            "the deadline tick itself is still inside the hold"
+        );
+        assert_eq!(decode_controls(&inside, CLIENT), Vec::new(), "no Close yet");
+        assert_eq!(rig.stats().home_bootstrap_timeouts, 0);
+        set_tick(&mut rig, 7); // PAST the deadline
+        let closed = rig.tick(vec![]);
+        assert_eq!(
+            decode_controls(&closed, CLIENT),
+            vec![ServerControlMsg::Close {
+                reason: "home realm did not become available".to_owned(),
+            }],
+            "the bounded TTL Closes LOUDLY with a reason"
+        );
+        assert_eq!(rig.stats().home_bootstrap_timeouts, 1);
+        assert!(
+            saw_lease_revoke(&closed, sid),
+            "the committed Session lease is revoked, not left for the reaper"
+        );
+        assert!(
+            !saw_detach(&closed, SHARD, sid),
+            "no detach is sprayed at the static shard we never attached to"
+        );
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert_eq!(sessions.len(), 0, "the session is gone");
+        assert_eq!(
+            sessions.home_bootstraps,
+            BTreeMap::new(),
+            "and its bootstrap-index entry with it (the last member out prunes the realm)"
+        );
+    }
+
+    #[test]
+    fn the_bootstrap_ttl_also_spans_the_dynamic_attach_wait_and_detaches_the_home() {
+        // The TTL spans the WHOLE pre-Active bootstrap: a home that resolves but never confirms the attach
+        // (a shard that dies between head-resolve and `SessionAttached`) ALSO Closes at the deadline — and
+        // because a home WAS resolved, the cleanup detaches THERE and releases the runtime roster entry.
+        let mut rig = dynamic_rig_with_ttl(5); // deadline 6
+        let (sid, _) = dynamic_login(&mut rig, CLIENT);
+        let _ = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert_eq!(phase_of(&rig, sid), SessionPhase::AwaitingAttach);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().dynamic_shards,
+            BTreeMap::from([(HOME, 1)])
+        );
+        set_tick(&mut rig, 7); // past the deadline, still AwaitingAttach
+        let closed = rig.tick(vec![]);
+        assert_eq!(
+            decode_controls(&closed, CLIENT),
+            vec![ServerControlMsg::Close {
+                reason: "home realm did not become available".to_owned(),
+            }],
+            "a dynamic AwaitingAttach that never attaches also Closes loudly"
+        );
+        assert_eq!(rig.stats().home_bootstrap_timeouts, 1);
+        assert!(
+            saw_detach(&closed, HOME, sid),
+            "the detach goes to the RESOLVED home shard"
+        );
+        assert!(saw_lease_revoke(&closed, sid));
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().dynamic_shards,
+            BTreeMap::new(),
+            "the last session left ⇒ the spawned node leaves the runtime roster (no churn leak)"
+        );
+    }
+
+    #[test]
+    fn one_home_head_resolves_every_waiter_and_the_roster_refcount_drains() {
+        // SCALE + the roster refcount. Two sessions on the SAME home realm are resolved by ONE head reply
+        // (a mass login onto one home is a win, not a fan-out cost); the roster counts BOTH, and only the
+        // LAST session leaving removes the node (both refcount arms).
+        let mut rig = dynamic_rig();
+        let (sid_a, _) = dynamic_login(&mut rig, CLIENT);
+        let (sid_b, _) = dynamic_login(&mut rig, CLIENT2);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().home_bootstraps,
+            home_wait(1, &[sid_a, sid_b], false),
+            "both sessions are members of the ONE per-realm wait (one lineage copy, one cadence anchor)"
+        );
+        let resolved = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert!(saw_attach(&resolved, HOME, sid_a));
+        assert!(saw_attach(&resolved, HOME, sid_b));
+        assert_eq!(phase_of(&rig, sid_a), SessionPhase::AwaitingAttach);
+        assert_eq!(phase_of(&rig, sid_b), SessionPhase::AwaitingAttach);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().dynamic_shards,
+            BTreeMap::from([(HOME, 2)]),
+            "the roster refcounts BOTH sessions homed on the spawned node"
+        );
+        // MF1-B — a DUPLICATE head reply (at-least-once) is an exact no-op: both members have left
+        // `AwaitingHomeRealm`, so nothing re-attaches and — crucially — the roster is NOT re-claimed (a
+        // second claim would pin the node on the runtime roster forever once these sessions leave).
+        let dup = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert!(
+            !saw_attach(&dup, HOME, sid_a),
+            "a duplicate Realm head does not re-attach an already-resolved member"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().dynamic_shards,
+            BTreeMap::from([(HOME, 2)]),
+            "and does not double-count the roster refcount"
+        );
+        assert_eq!(rig.stats().home_wait_desync, 0);
+        // A `Bye` from the first: the node STAYS (the other session still needs it).
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().dynamic_shards,
+            BTreeMap::from([(HOME, 1)]),
+            "one leaver does not evict a node another session is homed on"
+        );
+        // A `Bye` from the last: the node LEAVES the roster.
+        let last = rig.tick(vec![wire(
+            CLIENT2,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().dynamic_shards,
+            BTreeMap::new(),
+            "the last leaver evicts it (bounded across 100K-realm churn)"
+        );
+        assert!(
+            saw_detach(&last, HOME, sid_b),
+            "and the Bye detach itself routes to the session's HOME shard, not config.shard"
+        );
+    }
+
+    #[test]
+    fn byes_while_awaiting_the_home_prune_the_wait_index_incrementally() {
+        // The bootstrap index can never outlive its sessions: a `Bye` mid-boot drops that session from its
+        // home's member set (the entry survives while another member waits), and the LAST removal prunes the
+        // realm entry — one `RealmCoord` lineage freed with it.
+        let mut rig = dynamic_rig();
+        let (sid_a, _) = dynamic_login(&mut rig, CLIENT);
+        let (sid_b, _) = dynamic_login(&mut rig, CLIENT2);
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().home_bootstraps,
+            home_wait(1, &[sid_b], false),
+            "the remaining member keeps the realm's wait alive"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().dynamic_shards,
+            BTreeMap::new(),
+            "a session that never resolved a home releases nothing"
+        );
+        let _ = rig.tick(vec![wire(
+            CLIENT2,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().home_bootstraps,
+            BTreeMap::new(),
+            "the last removal PRUNES the realm entry (no unbounded growth)"
+        );
+        assert_eq!(rig.world.resource::<GatewaySessions>().len(), 0);
+        let _ = sid_a; // named for the assertion above only
+    }
+
+    #[test]
+    fn a_static_login_is_byte_identical_with_no_home_phase_and_no_extra_head_read() {
+        // BYTE-IDENTITY (CRITIQUE-2): with the injector UNARMED (the default) a login follows the EXACT
+        // pre-5f-3d flow — `AwaitingDirectory → AwaitingAttach → config.shard` — with NO `AwaitingHomeRealm`,
+        // NO extra head-read, NO RealmDemand, and no reordering of Welcome/UniverseRate/AttachSession.
+        let mut rig = Rig::new(); // config() ⇒ SeedInjectorConfig::default() (unarmed)
+        let (sid, sends) = rig.login();
+        assert_eq!(
+            phase_of(&rig, sid),
+            SessionPhase::Active {
+                entity: EntityId(77)
+            },
+            "the static login reached Active in the same three ticks as before"
+        );
+        assert_eq!(
+            decode_controls(&sends[1], CLIENT),
+            vec![
+                ServerControlMsg::Welcome {
+                    version: ProtoVersion::CURRENT,
+                    session: sid,
+                    session_fence: Fence(1),
+                    epoch: EpochId(9),
+                },
+                ServerControlMsg::UniverseRate { tick_hz: 50 },
+            ],
+            "Welcome then UniverseRate, unchanged"
+        );
+        assert!(
+            saw_attach(&sends[1], SHARD, sid),
+            "the attach goes to the static config.shard at the SAME tick as the Welcome"
+        );
+        // The EXACT send fingerprint of the static grant tick: Welcome + UniverseRate client-ward, then the
+        // grant arm's `AttachSession` and the per-tick retry driver's duplicate — both to `config.shard`.
+        // Nothing added, nothing reordered, nothing orchestrator-ward (no demand, no Realm head-read).
+        assert_eq!(
+            sends[1]
+                .iter()
+                .map(|(to, class, _)| (*to, *class))
+                .collect::<Vec<_>>(),
+            vec![
+                (CLIENT, MsgClass::Control),
+                (CLIENT, MsgClass::Control),
+                (SHARD, MsgClass::Control),
+                (SHARD, MsgClass::Control),
+            ]
+        );
+        let total_head_reads: usize = sends
+            .iter()
+            .map(|tick| realm_head_reads(tick, home_realm()))
+            .sum();
+        assert_eq!(
+            total_head_reads, 0,
+            "a static login costs NO extra Realm head-read round-trip"
+        );
+        assert_eq!(demand_count(&sends), 0, "and emits no RealmDemand");
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert_eq!(
+            sessions.home_shard_of(sid),
+            None,
+            "no dynamic home ⇒ session_target is config.shard"
+        );
+        assert_eq!(sessions.home_realm_of(sid), None);
+        assert_eq!(route_authority(&rig, sid), SHARD);
+        assert_eq!(sessions.home_bootstraps, BTreeMap::new());
+        assert_eq!(sessions.dynamic_shards, BTreeMap::new());
+        assert_eq!(rig.stats().home_bootstrap_timeouts, 0);
+        assert_eq!(
+            rig.stats().logins_held_pre_sync,
+            0,
+            "an UNARMED gateway never consults the clock on the login path (MF3)"
+        );
+        // A stray Realm head in static mode is a clean no-op (nobody waits on it).
+        let stray = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().home_shard_of(sid),
+            None,
+            "a static session is never re-homed by a stray Realm head"
+        );
+        assert_eq!(decode_controls(&stray, CLIENT), Vec::new());
+        assert_eq!(rig.stats().home_wait_desync, 0);
+    }
+
+    #[test]
+    fn a_forced_home_wait_desync_is_counted_never_silent() {
+        // The C2 honesty floor: a `home_bootstraps` MEMBER naming a session absent from `by_session` (an
+        // invariant breach the begin/end pairing makes impossible) is COUNTED, never a silent continue.
+        let mut sessions = GatewaySessions::default();
+        sessions.begin_home_wait(
+            SessionId(0xC0DE),
+            home_realm(),
+            home_lineage(),
+            TickId(1),
+            AccountId(5),
+        );
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        on_home_realm_head(
+            home_realm(),
+            Some(OwnerRecord {
+                authority: AuthorityRef::Shard(HOME),
+                fence: Fence(3),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.home_wait_desync, 1, "the desync is counted");
+        assert_eq!(
+            outbox.0.len(),
+            0,
+            "and nothing is sent for a phantom session"
+        );
+        assert_eq!(
+            sessions.dynamic_shards,
+            BTreeMap::new(),
+            "a phantom session claims no roster entry"
+        );
+        assert_eq!(
+            sessions.home_bootstraps,
+            home_wait(1, &[SessionId(0xC0DE)], true),
+            "the entry SURVIVES the resolve (the demand re-seed runs until Active) with the poll satisfied"
+        );
+    }
+
+    #[test]
+    fn the_attach_retry_cadence_gate_is_per_tick_for_static_and_backed_off_for_dynamic() {
+        // MF1 — the two ARMS of the attach-retry gate, driven directly (the live arms are proven by the
+        // static byte-identity fingerprint and by the dynamic cadence cell).
+        assert!(
+            attach_retry_due(None, TickId(2), 2),
+            "a STATIC session (no bootstrap wait) retries EVERY tick — byte-identical"
+        );
+        assert!(
+            attach_retry_due(None, TickId(3), 2),
+            "…on the off-cadence tick too"
+        );
+        assert!(
+            !attach_retry_due(Some(TickId(1)), TickId(2), 2),
+            "a DYNAMIC member is silent off its realm's cadence"
+        );
+        assert!(
+            attach_retry_due(Some(TickId(1)), TickId(3), 2),
+            "…and retries on it"
+        );
+        // The ANCHOR source, both `?` arms: `None` for a static session (no home realm), `None` also for the
+        // fail-SAFE case of a home realm with no live wait (unreachable on the live path — every member drop
+        // either removes the session or leaves `AwaitingAttach` — so it is proven here directly).
+        let mut sessions = GatewaySessions::default();
+        assert_eq!(
+            sessions.attach_anchor(None),
+            None,
+            "a static session has no anchor ⇒ per-tick retry"
+        );
+        assert_eq!(
+            sessions.attach_anchor(Some(home_realm())),
+            None,
+            "a home realm with no live wait falls back to the per-tick retry (never a wedge)"
+        );
+        sessions.begin_home_wait(
+            SessionId(1),
+            home_realm(),
+            home_lineage(),
+            TickId(9),
+            AccountId(5),
+        );
+        assert_eq!(
+            sessions.attach_anchor(Some(home_realm())),
+            Some(TickId(9)),
+            "a member rides its realm's wait anchor"
+        );
+    }
+
+    #[test]
+    fn home_redrive_due_fires_only_on_the_cadence_and_never_at_the_start() {
+        // The pure cadence predicate, both arms + the two guards: elapsed 0 (the tick the wait began, whose
+        // seed already went out inline) never re-drives; a zero interval degrades to every-tick (fail-safe,
+        // never a silent never-re-drive); and the anchor is the wait's OWN `since`, which is what spreads a
+        // mass login across many homes over the cadence window.
+        assert!(!home_redrive_due(TickId(1), TickId(1), 2), "elapsed 0");
+        assert!(!home_redrive_due(TickId(2), TickId(1), 2), "elapsed 1 of 2");
+        assert!(home_redrive_due(TickId(3), TickId(1), 2), "elapsed 2 of 2");
+        assert!(!home_redrive_due(TickId(4), TickId(1), 2), "elapsed 3 of 2");
+        assert!(home_redrive_due(TickId(5), TickId(1), 2), "elapsed 4 of 2");
+        // Two WAITS that opened on DIFFERENT ticks are due on DIFFERENT ticks (the storm spread).
+        assert!(home_redrive_due(TickId(4), TickId(2), 2));
+        assert!(!home_redrive_due(TickId(5), TickId(2), 2));
+        // Guards: a zero interval is every-tick (fail-safe); a `since` in the future saturates to 0.
+        assert!(home_redrive_due(TickId(2), TickId(1), 0));
+        assert!(!home_redrive_due(TickId(1), TickId(9), 2));
+    }
+
+    #[test]
+    fn home_bootstrap_expired_is_exclusive_at_the_deadline() {
+        // Strictly `>`: the deadline tick itself is still inside the hold (generous at its own edge).
+        assert!(!home_bootstrap_expired(TickId(5), TickId(6)));
+        assert!(!home_bootstrap_expired(TickId(6), TickId(6)));
+        assert!(home_bootstrap_expired(TickId(7), TickId(6)));
+    }
+
+    #[test]
+    fn the_seed_injector_validate_rejects_a_mis_tuned_armed_budget() {
+        // Fail-LOUD at boot (mirrors `RlmTuning::validate`): an UNARMED injector is vacuously valid (its
+        // windows are never read), an ARMED one needs both windows non-zero AND a bootstrap window that
+        // contains at least one re-drive. All arms + both Display messages.
+        assert_eq!(SeedInjectorConfig::default().validate(), Ok(()));
+        let armed = armed_injector(BTreeMap::new());
+        assert_eq!(armed.validate(), Ok(()), "the live test budget is valid");
+        let zero_demand = SeedInjectorConfig {
+            demand_ttl_ticks: 0,
+            ..armed_injector(BTreeMap::new())
+        };
+        assert_eq!(
+            zero_demand
+                .validate()
+                .expect_err("an armed zero demand TTL is rejected"),
+            SeedInjectorError::ZeroWindowWhileArmed
+        );
+        let zero_bootstrap = SeedInjectorConfig {
+            bootstrap_ttl_ticks: 0,
+            ..armed_injector(BTreeMap::new())
+        };
+        assert_eq!(
+            zero_bootstrap
+                .validate()
+                .expect_err("an armed zero bootstrap TTL is rejected"),
+            SeedInjectorError::ZeroWindowWhileArmed
+        );
+        let too_tight = SeedInjectorConfig {
+            bootstrap_ttl_ticks: 2, // == the cadence (8/4): no room for even one re-drive
+            ..armed_injector(BTreeMap::new())
+        };
+        assert_eq!(
+            too_tight
+                .validate()
+                .expect_err("a bootstrap window shorter than one re-drive is rejected"),
+            SeedInjectorError::BootstrapTtlBelowRedrive {
+                bootstrap_ttl: 2,
+                redrive: 2,
+            }
+        );
+        // The operator-facing Display text of both arms (the actionable boot failure).
+        assert!(
+            SeedInjectorError::ZeroWindowWhileArmed
+                .to_string()
+                .contains("bootstrap_ttl_ticks > 0")
+        );
+        assert!(
+            SeedInjectorError::BootstrapTtlBelowRedrive {
+                bootstrap_ttl: 2,
+                redrive: 2,
+            }
+            .to_string()
+            .contains("must strictly exceed the re-drive cadence")
+        );
+    }
+
+    #[test]
+    fn the_bootstrap_ttl_derivation_is_the_launch_floor_plus_one_demand_cadence() {
+        // The ONE derivation a bin uses (never an inline literal): the reconciler's measured-boot launch
+        // floor PLUS one demand cadence of slack, saturating.
+        assert_eq!(SeedInjectorConfig::bootstrap_ttl_from_rlm(60, 80), 140);
+        assert_eq!(
+            SeedInjectorConfig::bootstrap_ttl_from_rlm(u64::MAX, 1),
+            u64::MAX,
+            "saturating (a mis-set env can never wrap into an instant expiry)"
+        );
+        // The cadence divisor is the named constant, and a zero TTL still yields a usable cadence.
+        assert_eq!(SeedInjectorConfig::REDRIVE_DIVISOR, 4);
+        assert_eq!(
+            SeedInjectorConfig::default().redrive_interval_ticks(),
+            1,
+            "the inert default floors at 1 (never a divide-by-zero cadence)"
         );
     }
 }

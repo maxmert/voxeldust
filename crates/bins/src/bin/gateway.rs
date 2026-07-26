@@ -75,6 +75,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let demand_armed = vd_bins::parse_bool_env(&env, "VD_DEMAND")?;
     let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
     let spawn_poses = vd_bins::resolve_spawn_poses(&env)?;
+    // RLM 5f-3d — the DYNAMIC-HOME ROUTE budget. The gateway holds a login in `AwaitingHomeRealm` while its
+    // demanded home shard boots, re-seeding the demand on a backed-off cadence; both the cadence and the
+    // bounded bootstrap TTL are DERIVED from the SAME `resolve_rlm_tuning(tick_hz, boot_p99, settle)` the
+    // ORCHESTRATOR reconciles with (HR3 — ONE derivation, so the gateway's hold can never be tighter than
+    // the boot the reconciler itself allows, and its re-seed can never lapse before arm-A's `demand_ttl`).
+    // The SAME env keys the orchestrator reads, so a ConfigMap tunes both nodes at once. UNARMED ⇒
+    // `RlmTuning::default()` ⇒ both windows 0 ⇒ INERT (and `validate` is vacuous), byte-identical.
+    let boot_ticks_p99: u64 = env.parse_or("VD_BOOT_TICKS_P99", 0)?;
+    let settle_ticks: u64 = env.parse_or("VD_REALM_SETTLE_TICKS", 0)?;
+    let rlm = vd_node::rlm_runtime::resolve_rlm_tuning(
+        demand_armed,
+        tick_hz,
+        boot_ticks_p99,
+        settle_ticks,
+    );
+    let seed_injector = SeedInjectorConfig {
+        armed: demand_armed,
+        universe_seed,
+        universe_config: vd_core::worldgen::UniverseConfig::walk_scale(),
+        spawn_poses,
+        demand_ttl_ticks: rlm.demand_ttl_ticks,
+        bootstrap_ttl_ticks: SeedInjectorConfig::bootstrap_ttl_from_rlm(
+            rlm.launch_ttl_ticks,
+            rlm.demand_ttl_ticks,
+        ),
+    };
+    // Fail LOUD on a mis-tuned ARMED budget (mirrors `RlmTuning::validate` at the orchestrator boot): a
+    // gateway that would Close healthy logins before their home could boot must never start.
+    seed_injector.validate().map_err(|e| e.to_string())?;
     register_gateway(
         world,
         schedule,
@@ -107,15 +136,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 3g abort-leg lever: INERT in production (a test-only one-shot; a real gateway never
             // rejects a prepare via this knob). Behaviour-identical to the pre-3g `Ready` stub.
             reject_next_prepare: None,
-            // RLM 5f-3c — the trusted-gateway seed injector. UNARMED (VD_DEMAND unset) ⇒ INERT (byte-
-            // identical). The forest is walk-scale (container_coord_at's P3 scope); the pose store is the
-            // SAME map the shard admits at (5f-3b), so the derived home coord and the admit pose agree.
-            seed_injector: SeedInjectorConfig {
-                armed: demand_armed,
-                universe_seed,
-                universe_config: vd_core::worldgen::UniverseConfig::walk_scale(),
-                spawn_poses,
-            },
+            // RLM 5f-3c/5f-3d — the trusted-gateway dynamic-home config. UNARMED (VD_DEMAND unset) ⇒ INERT
+            // (byte-identical). The forest is walk-scale (container_coord_at's P3 scope); the pose store is
+            // the SAME map the shard admits at (5f-3b), so the derived home coord and the admit pose agree.
+            seed_injector,
             tuning: TransportTuning {
                 max_sessions,
                 max_buffered_inputs,
