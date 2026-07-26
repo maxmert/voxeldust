@@ -1160,6 +1160,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // reads `StubConfig.tick_dt_s` — so the two must agree on `tick_dt_s`. `register_stub_shard` sees only
     // `StubConfig` (never `UniverseConfig`), so the cross-check belongs at the COMPOSER boot where both
     // meet (the live-AoI shard wiring, RLM Step 5/6); `InterestConfig` already carries the inputs for it.
+    // RLM 5f-4a: `UniverseConfig::walk_demand(occupant_v_max_mps, tick_dt_s)` now takes BOTH as RUNTIME
+    // arguments (no hardcoded `AOI_TICK_DT_S` — which is 0.05 and would be WRONG at the dev cluster's 50 Hz =
+    // 0.02), so the composer (5f-4b) passes the live cluster's `tick_dt_s`/`move_speed·time_multiplier` and
+    // the two homes agree BY CONSTRUCTION; the `debug_assert!` cross-check lands with that composer wiring.
     // Capture the scalar params read AFTER the config move (`StubConfig` is no longer `Copy` — the
     // `held_realms` set is heap-backed).
     let mint_seed = config.mint_seed;

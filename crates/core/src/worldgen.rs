@@ -597,9 +597,24 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
 /// `_seed_universe` is threaded for the frozen P4/P5 `f(seed)` signature (unused while static —
 /// the seed-driven canonical generation lands at P4).
 #[must_use]
-pub fn realm_regions_for(_seed_universe: u64) -> Vec<RealmRegion> {
-    let config = UniverseConfig::walk_scale();
-    to_regions(&generate_walk_forest(&config), &config)
+pub fn realm_regions_for(seed_universe: u64) -> Vec<RealmRegion> {
+    realm_regions_for_walk_config(seed_universe, &UniverseConfig::walk_scale())
+}
+
+/// The walk mandate forest for an EXPLICIT `config` (RLM 5f-4) — the walk topology of
+/// [`generate_walk_forest`] lowered by [`to_regions`], carrying `config.interest` into each region's AoI
+/// band. `realm_regions_for` is this with [`walk_scale`](UniverseConfig::walk_scale) (AoI inert,
+/// byte-identical); a demand cluster passes [`walk_demand`](UniverseConfig::walk_demand) for the LIVE band
+/// over the SAME geometry. Uses `generate_walk_forest` (NOT `generate_system_forest`, whose `n_planets = 0`
+/// at walk yields only Universe+Galaxy+System A) so the full mandate chain (Planet/Station/Area/System B) is
+/// present — the same forest [`container_coord_at`] descends. `_seed_universe` threads the frozen P4/P5
+/// `f(seed)` signature (unused while static).
+#[must_use]
+pub fn realm_regions_for_walk_config(
+    _seed_universe: u64,
+    config: &UniverseConfig,
+) -> Vec<RealmRegion> {
+    to_regions(&generate_walk_forest(config), config)
 }
 
 /// The regions a shard hosting `hosted_realm` evaluates CONTAINMENT against: its own realm + its ancestor
@@ -632,7 +647,21 @@ pub fn realm_neighbourhood_for_held(
     seed_universe: u64,
     held: &std::collections::BTreeSet<RealmId>,
 ) -> Vec<RealmRegion> {
-    let all = realm_regions_for(seed_universe);
+    realm_neighbourhood_for_held_config(seed_universe, held, &UniverseConfig::walk_scale())
+}
+
+/// The co-hosting neighbourhood for an EXPLICIT `config` (RLM 5f-4) — the config twin of
+/// [`realm_neighbourhood_for_held`], preserving the ancestors-union-direct-children ("never siblings")
+/// scope. A demand shard passes [`walk_demand`](UniverseConfig::walk_demand) so its evaluated regions carry
+/// the LIVE AoI band; `realm_neighbourhood_for_held` is this with `walk_scale` (inert, byte-identical). One
+/// implementation (HR3).
+#[must_use]
+pub fn realm_neighbourhood_for_held_config(
+    seed_universe: u64,
+    held: &std::collections::BTreeSet<RealmId>,
+    config: &UniverseConfig,
+) -> Vec<RealmRegion> {
+    let all = realm_regions_for_walk_config(seed_universe, config);
     // A realm is IN-SCOPE iff it is an ancestor of, or a child of, ANY held realm. Collect the qualifying
     // realm set first (deduped), then filter the canonical forest ONCE so the output keeps forest order.
     let mut scope: std::collections::BTreeSet<RealmId> = std::collections::BTreeSet::new();
@@ -835,6 +864,42 @@ const VISUAL_AOI_K_SAFETY_EXTRA: f64 = 0.5;
 /// The visual occupant's max speed (m/s) — MUST equal `StubConfig.move_speed_mps · time_multiplier`
 /// (boot `debug_assert!`, M-2), so the anti-thrash pad is measured against the speed the sim integrates.
 const VISUAL_OCCUPANT_V_MAX_MPS: f64 = 2.0;
+
+/// Walk-demand-scale AoI (RLM 5f-4): the LIVE band for the WALK forest, so a WALKING occupant's AoI
+/// crosses each separated child's band. Tighter than visual (a walking player over metres, not AU): spin a
+/// child up within this multiple of its extent, release past the larger tear-down multiple — HR3
+/// proportional, no kind-match. The two DYNAMICS inputs (occupant speed, tick dt) are NOT consts — they are
+/// supplied at the composer boot from the LIVE cluster values, which is what closes the M-2 two-home owe (a
+/// hardcoded `AOI_TICK_DT_S = 0.05` is wrong at the dev cluster's 50 Hz = 0.02).
+const WALK_DEMAND_AOI_SPIN_UP_FACTOR: f64 = 1.2;
+const WALK_DEMAND_AOI_TEAR_DOWN_FACTOR: f64 = 1.8;
+/// The loiter grace as a DURATION (seconds) — converted to ticks against the live `tick_dt_s` at boot
+/// ([`grace_ticks_from_seconds`]), so it is correct at any tick rate.
+const WALK_DEMAND_AOI_GRACE_S: f64 = 1.0;
+const WALK_DEMAND_AOI_K_SAFETY_EXTRA: f64 = 0.5;
+
+/// The 1-tick floor for the loiter grace when the tick dt is degenerate — a tripwire (the composer
+/// cross-checks the tick pair before this is reached; a non-finite/non-positive dt here is a mis-wired
+/// boot). Named, not inline.
+const GRACE_TICKS_FLOOR: u32 = 1;
+
+/// Convert a loiter grace measured in SECONDS to ticks against the live `dt_s` (RLM 5f-4 — a duration is
+/// correct at ANY tick rate). Monomorphic + saturating: a degenerate `dt_s` (≤0 / non-finite) OR a
+/// degenerate quotient (non-finite / below one tick) yields [`GRACE_TICKS_FLOOR`]; an absurd quotient
+/// saturates at `u32::MAX`; otherwise the in-range `round()` is a lossless `u32`.
+fn grace_ticks_from_seconds(secs: f64, dt_s: f64) -> u32 {
+    if !(dt_s > 0.0 && dt_s.is_finite()) {
+        return GRACE_TICKS_FLOOR;
+    }
+    let ticks = (secs / dt_s).round();
+    if !(ticks.is_finite() && ticks >= 1.0) {
+        GRACE_TICKS_FLOOR
+    } else if ticks >= f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        ticks as u32
+    }
+}
 
 /// Per-realm AoI radii as UNIFORM FACTORS of the realm's own finite extent (HR3: no match-on-kind — a
 /// bigger realm reaches proportionally farther), plus the widening inputs (`occupant_v_max_mps`,
@@ -1052,6 +1117,27 @@ impl UniverseConfig {
             k_safety_extra: VISUAL_AOI_K_SAFETY_EXTRA,
             occupant_v_max_mps: VISUAL_OCCUPANT_V_MAX_MPS,
             tick_dt_s: AOI_TICK_DT_S,
+        };
+        cfg
+    }
+
+    /// The WALK-demand preset (RLM 5f-4): the EXACT walk-scale geometry with the AoI band turned LIVE, so a
+    /// WALKING occupant drives demand-driven spin-up/down over the static walk forest. Differs from
+    /// [`walk_scale`](UniverseConfig::walk_scale) in the `interest` field ONLY (geometry byte-identical). The
+    /// two DYNAMICS inputs are ARGUMENTS from the live cluster: `occupant_v_max_mps` (the occupant's max
+    /// speed `move_speed · time_multiplier`) and `tick_dt_s` (the cluster's seconds-per-tick) — so the
+    /// anti-thrash pad + the loiter grace are measured against the speed the sim integrates and the rate it
+    /// ticks at (closing the M-2 two-home owe; no hardcoded `AOI_TICK_DT_S`).
+    #[must_use]
+    pub fn walk_demand(occupant_v_max_mps: f64, tick_dt_s: f64) -> UniverseConfig {
+        let mut cfg = UniverseConfig::walk_scale();
+        cfg.interest = InterestConfig {
+            spin_up_factor: WALK_DEMAND_AOI_SPIN_UP_FACTOR,
+            tear_down_factor: WALK_DEMAND_AOI_TEAR_DOWN_FACTOR,
+            grace_ticks: grace_ticks_from_seconds(WALK_DEMAND_AOI_GRACE_S, tick_dt_s),
+            k_safety_extra: WALK_DEMAND_AOI_K_SAFETY_EXTRA,
+            occupant_v_max_mps,
+            tick_dt_s,
         };
         cfg
     }
@@ -1715,6 +1801,192 @@ mod tests {
             .find(|r| r.realm == SYSTEM_A)
             .expect("system A");
         assert!(system.aoi.spin_up_r_m() > planet.aoi.spin_up_r_m());
+    }
+
+    // ===== RLM 5f-4a: the walk-demand LIVE AoI band over the walk forest =================
+    // The dev demand-cluster's live AoI dynamics: a 2 m/s brisk walk (move_speed × time_multiplier),
+    // 50 Hz (0.02 s/tick). Kept here (test-only) — the composer supplies the live cluster values at boot.
+    fn walk_demand_regions() -> Vec<RealmRegion> {
+        realm_regions_for_walk_config(0, &UniverseConfig::walk_demand(2.0, 0.02))
+    }
+
+    #[test]
+    fn walk_demand_band_is_crossable_for_every_separated_child() {
+        // Every expectation is DERIVED from the generated forest, never hand-typed.
+        let regions = walk_demand_regions();
+        for r in &regions {
+            let ext = r.shape.finite_extent();
+            let su = r.aoi.spin_up_r_m();
+            // (a) An occupant INSIDE the child (within its own extent) is always in range.
+            assert!(
+                su > ext,
+                "spin-up must exceed the child's own extent (in range inside the child)"
+            );
+            let Some(parent_id) = r.parent else { continue };
+            let parent = regions
+                .iter()
+                .find(|p| p.realm == parent_id)
+                .expect("a region's parent is in the forest");
+            let d = r.center.offset().length();
+            let td = r.aoi.tear_down_r_m();
+            // (c) Releasable: a point inside the parent exists from which the child is out of tear-down
+            // range (tear_down < the farthest-in-parent distance = separation + the parent's own extent).
+            assert!(
+                td < d + parent.shape.finite_extent(),
+                "tear-down must release within the parent's reach (child is releasable)"
+            );
+            if d > 0.0 {
+                // (b) SEPARATED child: out of range AT the parent origin ⇒ a walk toward it CROSSES the band.
+                assert!(
+                    su < d,
+                    "a separated child must be out of range at the parent origin (crossable)"
+                );
+            } else {
+                // (d) CO-LOCATED ancestor (offset 0): always in range at the parent origin.
+                assert!(
+                    su > d,
+                    "a co-located child must be in range at the parent origin"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn planet_a_is_releasable_at_its_parents_origin() {
+        // L3's precondition (spin-DOWN): Planet A releases while the occupant is still AT the parent origin
+        // — a STRONGER fact than the uniform (c) criterion (which does NOT hold for the Area: 5.4 vs 5).
+        let regions = walk_demand_regions();
+        let planet = regions
+            .iter()
+            .find(|r| matches!(r.realm, RealmId::Planet(_)))
+            .expect("planet A in the walk forest");
+        let d = planet.center.offset().length();
+        assert!(
+            planet.aoi.tear_down_r_m() < d,
+            "planet A must release at its parent's origin (tear-down < its own offset)"
+        );
+    }
+
+    #[test]
+    fn planet_a_geometric_warmup_precedes_its_boundary() {
+        // Gate 1 rests on this: a geometric warm-up margin exists OUTSIDE the child's boundary.
+        let regions = walk_demand_regions();
+        let planet = regions
+            .iter()
+            .find(|r| matches!(r.realm, RealmId::Planet(_)))
+            .expect("planet A in the walk forest");
+        assert!(
+            planet.aoi.spin_up_r_m() > planet.shape.finite_extent(),
+            "planet A must warm up before its boundary (spin-up radius exceeds its extent)"
+        );
+    }
+
+    #[test]
+    fn walk_and_canonical_keep_aoi_inert_while_visual_stays_live() {
+        // Byte-identity: walk + canonical keep AoI OFF (behaviour unchanged); visual is untouched (live).
+        for r in realm_regions_for(0) {
+            assert_eq!(r.aoi, AoiConfig::inert(), "walk regions stay AoI-inert");
+        }
+        for r in realm_regions_for_walk_config(0, &UniverseConfig::canonical()) {
+            assert_eq!(
+                r.aoi,
+                AoiConfig::inert(),
+                "canonical regions stay AoI-inert"
+            );
+        }
+        assert!(
+            UniverseConfig::visual_scale().interest.is_live(),
+            "visual AoI is unchanged by 5f-4 (still live)"
+        );
+    }
+
+    #[test]
+    fn walk_demand_differs_from_walk_only_in_aoi() {
+        let walk = realm_regions_for_walk_config(0, &UniverseConfig::walk_scale());
+        let demand = walk_demand_regions();
+        assert_eq!(walk.len(), demand.len(), "same forest topology");
+        for (w, d) in walk.iter().zip(demand.iter()) {
+            assert_eq!(w.realm, d.realm, "realm unchanged");
+            assert_eq!(w.center, d.center, "center unchanged");
+            assert_eq!(w.frame, d.frame, "frame unchanged");
+            assert_eq!(w.shape, d.shape, "shape unchanged");
+            assert_eq!(w.band, d.band, "containment band unchanged");
+            assert_eq!(w.parent, d.parent, "parent unchanged");
+            assert_eq!(w.aoi, AoiConfig::inert(), "walk region is AoI-inert");
+            assert_ne!(
+                d.aoi,
+                AoiConfig::inert(),
+                "walk-demand region has a LIVE AoI band"
+            );
+        }
+    }
+
+    #[test]
+    fn walk_config_builders_delegate_byte_identically() {
+        // The existing fns delegate to the config builders with walk_scale ⇒ byte-identical output.
+        assert_eq!(
+            realm_regions_for(0),
+            realm_regions_for_walk_config(0, &UniverseConfig::walk_scale()),
+            "realm_regions_for delegates byte-identically"
+        );
+        let all = realm_regions_for(0);
+        let a_planet = all
+            .iter()
+            .find_map(|r| matches!(r.realm, RealmId::Planet(_)).then_some(r.realm))
+            .expect("a planet in the walk forest");
+        let sets = [
+            std::collections::BTreeSet::from([SYSTEM_A]),
+            std::collections::BTreeSet::from([a_planet]),
+            std::collections::BTreeSet::from([SYSTEM_A, a_planet]),
+        ];
+        for held in &sets {
+            assert_eq!(
+                realm_neighbourhood_for_held(0, held),
+                realm_neighbourhood_for_held_config(0, held, &UniverseConfig::walk_scale()),
+                "realm_neighbourhood_for_held delegates byte-identically"
+            );
+        }
+    }
+
+    #[test]
+    fn grace_ticks_from_seconds_converts_saturates_and_floors() {
+        assert_eq!(grace_ticks_from_seconds(1.0, 0.02), 50, "1 s at 50 Hz");
+        assert_eq!(grace_ticks_from_seconds(1.0, 0.05), 20, "1 s at 20 Hz");
+        assert_eq!(
+            grace_ticks_from_seconds(1.0, 0.0),
+            GRACE_TICKS_FLOOR,
+            "dt 0 ⇒ floor"
+        );
+        assert_eq!(
+            grace_ticks_from_seconds(1.0, -0.02),
+            GRACE_TICKS_FLOOR,
+            "dt < 0 ⇒ floor"
+        );
+        assert_eq!(
+            grace_ticks_from_seconds(1.0, f64::NAN),
+            GRACE_TICKS_FLOOR,
+            "dt NaN ⇒ floor"
+        );
+        assert_eq!(
+            grace_ticks_from_seconds(1.0, f64::INFINITY),
+            GRACE_TICKS_FLOOR,
+            "dt +inf ⇒ floor"
+        );
+        assert_eq!(
+            grace_ticks_from_seconds(0.0, 0.02),
+            GRACE_TICKS_FLOOR,
+            "0 ticks ⇒ floor"
+        );
+        assert_eq!(
+            grace_ticks_from_seconds(f64::INFINITY, 0.02),
+            GRACE_TICKS_FLOOR,
+            "non-finite quotient ⇒ floor"
+        );
+        assert_eq!(
+            grace_ticks_from_seconds(1e20, 0.02),
+            u32::MAX,
+            "absurd quotient ⇒ saturate"
+        );
     }
 
     #[test]
