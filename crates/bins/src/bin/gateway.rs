@@ -2,7 +2,7 @@
 //! session/route logic). Config → mesh → build_app → register → tick loop.
 
 use vd_connection_plane::gateway::{
-    GatewayConfig, GatewaySessions, TransportTuning, register_gateway,
+    GatewayConfig, GatewaySessions, SeedInjectorConfig, TransportTuning, register_gateway,
 };
 use vd_io_prod::runtime::{EnvConfig, TickPacer};
 use vd_io_prod::trust::ClusterTrust;
@@ -65,6 +65,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dest_outbound_cap: usize =
         env.parse_or("VD_OUTBOUND_CAP", vd_bins::DEV.outbound_cap as usize)?;
     vd_bins::validate_drain_burst(dest_outbound_cap, max_buffered_inputs)?;
+    // RLM 5f-3c — the TRUSTED GATEWAY SEED INJECTOR inputs. `VD_DEMAND` ARMS it (unset ⇒ INERT, byte-
+    // identical: a login emits no `RealmDemand`); the live-arming veto (mutual exclusion with a static
+    // forest, mirroring the orchestrator's `VD_DEMAND` XOR `VD_STATIC_FOREST`) is 5f-3e — this is only the
+    // on/off flag. `VD_UNIVERSE_SEED` is the SAME cluster seed the shard reads. The per-account STORED
+    // spawn poses REUSE 5f-3b's `resolve_spawn_poses` (the SAME `VD_SPAWN_POSES` map the shard admits at,
+    // so the gateway-DERIVED home coord and the shard-side admit pose agree). The forest is walk-scale (the
+    // P3 scope of `container_coord_at`; the visual/canonical lazy generator is the P4 owe).
+    let demand_armed = vd_bins::parse_bool_env(&env, "VD_DEMAND")?;
+    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
+    let spawn_poses = vd_bins::resolve_spawn_poses(&env)?;
     register_gateway(
         world,
         schedule,
@@ -97,6 +107,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 3g abort-leg lever: INERT in production (a test-only one-shot; a real gateway never
             // rejects a prepare via this knob). Behaviour-identical to the pre-3g `Ready` stub.
             reject_next_prepare: None,
+            // RLM 5f-3c — the trusted-gateway seed injector. UNARMED (VD_DEMAND unset) ⇒ INERT (byte-
+            // identical). The forest is walk-scale (container_coord_at's P3 scope); the pose store is the
+            // SAME map the shard admits at (5f-3b), so the derived home coord and the admit pose agree.
+            seed_injector: SeedInjectorConfig {
+                armed: demand_armed,
+                universe_seed,
+                universe_config: vd_core::worldgen::UniverseConfig::walk_scale(),
+                spawn_poses,
+            },
             tuning: TransportTuning {
                 max_sessions,
                 max_buffered_inputs,

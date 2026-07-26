@@ -70,6 +70,9 @@ fn assemble(rlm: RlmTuning, spawner: MemSpawner, store: MemStore) -> Orch {
         &orch_cfg(rlm),
         Box::new(store.clone()),
         Box::new(spawner.clone()),
+        // RLM 5e-3b: the crash-recovery launch seed — EMPTY here (the injected spawner IS the recovery
+        // subject; this E2E drives the freeze-on-recover, not a launch-ledger seed). Byte-identical.
+        vd_node::rlm_runtime::LaunchSeed::new(),
     );
     Orch {
         world,

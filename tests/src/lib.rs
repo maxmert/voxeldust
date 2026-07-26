@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use vd_connection_plane::gateway::{
-    GatewayConfig, GatewayStats, TransportTuning, register_gateway,
+    GatewayConfig, GatewayStats, SeedInjectorConfig, TransportTuning, register_gateway,
 };
 use vd_connection_plane::tickets;
 
@@ -58,6 +58,8 @@ pub fn stub_config() -> StubConfig {
         realm: RealmId::System(7),
         own_coord: StubConfig::root_coord(RealmId::System(7)),
         boot_ticks_p99: 0,
+        // RLM 5f-3b: empty ⇒ origin-at-rest login (byte-identical); the P7 store fills it later.
+        spawn_poses: std::collections::BTreeMap::new(),
         // Single-realm (co-hosting is exercised by the --triple straight-walk smoke, not these cluster
         // scenarios — their crossings target realms hosted by OTHER shards). Byte-identical default.
         held_realms: StubConfig::single_realm(RealmId::System(7)),
@@ -261,6 +263,8 @@ fn build_cluster(
         &oc,
         Box::new(orch_store),
         harness_spawner(),
+        // RLM 5e-3b: the crash-recovery launch seed — EMPTY for the in-process MemSpawner (byte-identical).
+        vd_node::rlm_runtime::LaunchSeed::new(),
     );
     topo.add_node(Box::new(orch));
 
@@ -297,6 +301,9 @@ fn build_cluster(
             // 3g abort-leg lever INERT for every cluster (behaviour-identical); `arm_gateway_reject`
             // sets it live on the gateway node when a test wants the pre-CAS abort.
             reject_next_prepare: None,
+            // 5f-3c: the trusted-gateway seed injector is UNARMED here ⇒ INERT (byte-identical: the
+            // cluster scenarios pre-spawn their shards, so no login-driven RealmDemand is emitted).
+            seed_injector: SeedInjectorConfig::default(),
             tuning: TransportTuning {
                 max_sessions,
                 max_buffered_inputs: TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS,
@@ -1709,6 +1716,8 @@ pub fn rebuild_orchestrator(topo: &mut Topology, fabric: &FaultFabric, store: Me
         &orch_config(vec![GATEWAY, SHARD, DEST], stub_roster([SHARD, DEST])),
         Box::new(store),
         harness_spawner(),
+        // RLM 5e-3b: the crash-recovery launch seed — EMPTY for the in-process MemSpawner (byte-identical).
+        vd_node::rlm_runtime::LaunchSeed::new(),
     );
     topo.replace_node(Box::new(orch));
 }

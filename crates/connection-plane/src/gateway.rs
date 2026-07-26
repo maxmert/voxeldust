@@ -26,13 +26,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
-use vd_core::pose::FrameRef;
+use vd_core::glam::DVec3;
+use vd_core::pose::{FrameRef, StampedPose};
+use vd_core::realm_coord::RealmCoord;
 use vd_core::rng::SplitMix64;
+use vd_core::worldgen::{UniverseConfig, container_coord_at, realm_regions_for};
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
-use vd_wire::intershard::InterShardFlow;
+use vd_wire::intershard::{DemandVerb, InterShardFlow, RealmDemand};
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::{
     PrepareReject, PrepareResult, TransferControl, TransferControlAck,
@@ -83,6 +86,47 @@ impl TransportTuning {
     pub const DEFAULT_MAX_BUFFERED_INPUTS: usize = 256;
 }
 
+/// RLM 5f-3c — the TRUSTED GATEWAY SEED INJECTOR config: the SERVER-side inputs the gateway derives an
+/// authenticated login's HOME realm from (never anything the client supplies). Grouped in ONE struct (the
+/// operational-params-in-one-struct convention) so it grows [`GatewayConfig`] by a SINGLE field, and its
+/// [`Default`] is the fully-INERT case (unarmed, empty pose store, walk-scale forest) — byte-identical to
+/// the pre-5f-3c gateway: no `RealmDemand` is ever emitted.
+///
+/// The `spawn_poses` map is the SAME `VD_SPAWN_POSES` stand-in the shard admits at (5f-3b), so the
+/// gateway-DERIVED home coord and the shard-side admit pose agree; the P7 durable per-account pose store
+/// swaps in behind this SAME map with zero caller reshape. An absent entry ⇒ the injector derives the
+/// root/origin coord (still a valid in-forest home).
+#[derive(Clone, Debug)]
+pub struct SeedInjectorConfig {
+    /// The ARMED gate (`VD_DEMAND`). `false` (default) ⇒ the injector is INERT: a login emits NO
+    /// `RealmDemand`, byte-identical to the pre-5f-3c gateway. The live-arming veto (the mutual-exclusion
+    /// safety with a static forest) is 5f-3e; this flag is only the on/off.
+    pub armed: bool,
+    /// The ONE universe seed the whole cluster shares (the SAME `VD_UNIVERSE_SEED` the shard reads), so the
+    /// gateway resolves against the identical containment forest.
+    pub universe_seed: u64,
+    /// The containment-forest config [`container_coord_at`] descends. Walk-scale through P3 (the 5f-2
+    /// reality — `container_coord_at` resolves against the walk forest regardless of scale; the visual/
+    /// canonical lazy generator is the P4 owe).
+    pub universe_config: UniverseConfig,
+    /// The per-account STORED spawn poses (the `VD_SPAWN_POSES` stand-in for the P7 durable pose store).
+    pub spawn_poses: BTreeMap<AccountId, StampedPose>,
+}
+
+impl Default for SeedInjectorConfig {
+    /// The fully-INERT injector: unarmed, empty pose store, walk-scale forest — byte-identical to the
+    /// pre-5f-3c gateway (`UniverseConfig` has no `Default`, so this is written out; walk-scale is the
+    /// P3 forest `container_coord_at` descends).
+    fn default() -> SeedInjectorConfig {
+        SeedInjectorConfig {
+            armed: false,
+            universe_seed: 0,
+            universe_config: UniverseConfig::walk_scale(),
+            spawn_poses: BTreeMap::new(),
+        }
+    }
+}
+
 /// Gateway configuration (composer-provided).
 #[derive(Resource, Clone, Debug)]
 pub struct GatewayConfig {
@@ -129,6 +173,9 @@ pub struct GatewayConfig {
     /// durable saga in a cluster, since the gateway (not the dest stub) is the durable Prepare
     /// decider (`apply_prepare` hardcodes `Ready` today).
     pub reject_next_prepare: Option<PrepareReject>,
+    /// RLM 5f-3c — the trusted-gateway seed-injector inputs (server-derived home realm). [`Default`] is
+    /// fully INERT (unarmed) ⇒ byte-identical to the pre-5f-3c gateway.
+    pub seed_injector: SeedInjectorConfig,
     pub tuning: TransportTuning,
 }
 
@@ -2035,6 +2082,70 @@ fn on_shard_realm_frame(
     }
 }
 
+/// The account's ABSOLUTE Universe-root spawn position (the frame [`container_coord_at`] reads), or the
+/// origin when no pose is stored. Through P3 a `LatticePos` is cell-`ZERO`, so `.offset()` IS the absolute
+/// position (5f-3b stores it via `StampedPose::at_rest(SystemSpace{0}, …)`). ABSENT (the empty stand-in /
+/// a fresh P7 store) ⇒ `DVec3::ZERO` ⇒ the root/origin home — a valid in-forest coord. Both arms are the
+/// `Option` combinators' (stdlib) so this stays a branchless shim (HR5); both are proven by the unit tests.
+fn home_spawn_offset(cfg: &SeedInjectorConfig, account: AccountId) -> DVec3 {
+    cfg.spawn_poses
+        .get(&account)
+        .map(|p| p.pos.offset())
+        .unwrap_or(DVec3::ZERO)
+}
+
+/// A DETERMINISTIC per-account sentinel [`Fence`] for the injected `RealmDemand`'s `parent_fence` — NOT a
+/// global constant (CRITIQUE-1 defense-in-depth: a single shared sentinel would collapse every login's
+/// `FencedKey` idempotency into one). It is NOT the auth: `record_demand` does NOT read `parent_fence` for
+/// any Step-3 decision (it only `max`-tracks it as `last_fence` for audit — rlm.rs), so this is
+/// belt-and-suspenders. Folds the `u128` `AccountId` to `u64`; distinct accounts yield distinct sentinels
+/// across the small id space the P7 store issues (a collision is harmless — audit-only). No wall-clock/rng.
+fn home_sentinel_fence(account: AccountId) -> Fence {
+    let a = account.0;
+    Fence((a as u64) ^ ((a >> 64) as u64))
+}
+
+/// True iff `coord`'s leaf realm is a region in the seed forest [`container_coord_at`] resolves against
+/// (the walk-scale containment forest — `realm_regions_for` builds the IDENTICAL roster). A SERVER-derived
+/// home is in-forest by construction (the resolver only ever descends that forest); this is the injector's
+/// defense-in-depth re-check that a corrupted P7 pose stand-in cannot smuggle an OFF-forest realm onto the
+/// source-blind orchestrator inbound. A straight-line expression (the membership `any` is stdlib), so its
+/// true/false arms are proven directly in the unit test — no live branch escapes into [`home_seed_demand`].
+fn coord_in_forest(coord: &RealmCoord, seed: u64) -> bool {
+    realm_regions_for(seed)
+        .iter()
+        .any(|r| r.realm == coord.lowered())
+}
+
+/// RLM 5f-3c — SERVER-DERIVE the ONE bootstrap `RealmDemand{SpinUp}` for an authenticated login's HOME
+/// lineage. The child is [`container_coord_at`] over the account's STORED spawn pose (or the origin) — the
+/// FULL home lineage, so ingesting it spins up the whole ancestor chain (the 5f-3a ride). The `RealmDemand`
+/// carries NO client-supplied coord/pose: the client's only spatial input is its authenticated
+/// `AccountId`, so a raw client cannot steer which realm spins up (the abuse boundary).
+///
+/// Defense-in-depth: the derived coord is asserted in-forest via [`coord_in_forest`]. This is NOT a live
+/// branch (`container_coord_at` yields an in-forest lineage by construction, so the `.expect` panic path —
+/// stdlib, uncounted — never fires in prod; `coord_in_forest`'s own arms are covered by its unit test).
+/// `container_coord_at`'s descend is already lineage-depth-bounded (`parent()` → `None` at the root), so no
+/// extra depth cap is needed. Concrete (non-generic), no wall-clock/rng — the tick is the clock's.
+fn home_seed_demand(
+    cfg: &SeedInjectorConfig,
+    account: AccountId,
+    universe_tick: vd_core::UniverseTick,
+) -> RealmDemand {
+    let pos = home_spawn_offset(cfg, account);
+    let child = container_coord_at(cfg.universe_seed, &cfg.universe_config, pos);
+    let child = coord_in_forest(&child, cfg.universe_seed)
+        .then_some(child)
+        .expect("container_coord_at yields an in-forest home lineage by construction (5f-3c)");
+    RealmDemand {
+        child,
+        parent_fence: home_sentinel_fence(account),
+        verb: DemandVerb::SpinUp,
+        universe_tick,
+    }
+}
+
 /// Handle a directory reply: the Session-key head confirms (or denies) the mint.
 fn on_directory_reply(
     reply: DirectoryReply,
@@ -2108,6 +2219,32 @@ fn on_directory_reply(
                 account: session.account,
             },
         );
+        // RLM 5f-3c — THE TRUSTED GATEWAY SEED INJECTOR. THIS arm is the cluster-attested proof an
+        // AUTHENTICATED login LANDED: it is reached ONLY strictly downstream of `validate_login` success
+        // AND a directory-CAS-committed `Session` lease owned by THIS gateway at THIS fence (`granted`), on
+        // the `AwaitingDirectory → AwaitingAttach` transition — so it emits EXACTLY ONCE per login (a
+        // re-driven grant re-enters and returns at the `AwaitingAttach`/`Active` guards above, never here).
+        // We SERVER-DERIVE the login's home lineage from the account's stored pose and emit ONE
+        // `InterShardFlow::RealmDemand{SpinUp}` to the orchestrator so the whole home ancestor chain spins
+        // up (the 5f-3a ride) — riding the EXISTING RealmDemand arm on `MsgClass::Saga` (Reliable; the flow
+        // is `ReDriven`, so the default `Ephemeral` is correct). NO new wire arm, no grown `AttachSession`.
+        //
+        // INERT unless `armed` (`VD_DEMAND`; unarmed default ⇒ byte-identical, no emit) AND `clock.synced`:
+        // a PRE-SYNC seed would carry `universe_tick` 0 → `last_demand_tick` 0, which `demanded_recently`
+        // (rlm.rs) treats as "never demanded" (the `!= 0` sentinel) so the home would NEVER spin — hence we
+        // gate on synced exactly as the shard authors do (`has_synced`). The abuse boundary: a raw client
+        // speaks only `ClientControlMsg` and can never reach this arm or supply the coord.
+        if config.seed_injector.armed && clock.synced {
+            outbox.push_flow(
+                config.orchestrator,
+                MsgClass::Saga,
+                &InterShardFlow::RealmDemand(home_seed_demand(
+                    &config.seed_injector,
+                    session.account,
+                    clock.universe_tick,
+                )),
+            );
+        }
     } else {
         // Mint refused (id collision or foreign holder): close loudly; the client
         // retries login with a fresh Hello.
@@ -2210,6 +2347,9 @@ mod tests {
             session_recheck_interval: 0,
             self_fence_grace_ticks: 0,
             reject_next_prepare: None, // 3g abort-leg lever INERT by default (behaviour-identical)
+            // 5f-3c: the injector is UNARMED by default ⇒ INERT (byte-identical: no RealmDemand emitted).
+            // The armed tests below override this via `..config()`.
+            seed_injector: SeedInjectorConfig::default(),
             tuning: TransportTuning {
                 max_sessions: 4,
                 max_buffered_inputs: 8,
@@ -6245,6 +6385,331 @@ mod tests {
             lever,
             Some(reject),
             "the guard did NOT consume the lever — it stays armed for the retried Active prepare"
+        );
+    }
+
+    // ===== RLM 5f-3c — the TRUSTED GATEWAY SEED INJECTOR =========================================
+
+    /// Every `RealmDemand` the gateway sent to the orchestrator (decoded), ignoring the directory ops that
+    /// also ride ORCH+Saga (login's `LeaseGrant`). Mirrors [`acks_to_orch`]: `.expect` keeps the Err path
+    /// in std (no caller branch); a non-`RealmDemand` ORCH/Saga send (the login `LeaseGrant`) maps to None
+    /// — the `_` arm is exercised by the armed login's hello tick.
+    fn demands_to_orch(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<RealmDemand> {
+        sent.iter()
+            .filter(|(node, class, _)| (*node == ORCH) & (*class == MsgClass::Saga))
+            .filter_map(|(_, _, bytes)| {
+                match postcard::from_bytes::<InterShardFlow>(bytes)
+                    .expect("gateway sends a valid flow")
+                {
+                    InterShardFlow::RealmDemand(d) => Some(d),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// The count of injected home demands across an entire multi-tick login drive.
+    fn demand_count(sends: &LoginSends) -> usize {
+        sends.iter().map(|tick| demands_to_orch(tick).len()).sum()
+    }
+
+    /// An at-rest ABSOLUTE spawn pose at `(x,0,0)` in the Universe-root frame (the frame
+    /// `container_coord_at` reads) — the same shape 5f-3b stores.
+    fn spawn_at(x: f64) -> StampedPose {
+        StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 0 },
+            DVec3::new(x, 0.0, 0.0),
+            UniverseTick(0),
+        )
+    }
+
+    /// An ARMED injector over `poses`, walk-scale seed 0 (the forest `container_coord_at` descends).
+    fn armed_injector(poses: BTreeMap<AccountId, StampedPose>) -> SeedInjectorConfig {
+        SeedInjectorConfig {
+            armed: true,
+            universe_seed: 0,
+            universe_config: UniverseConfig::walk_scale(),
+            spawn_poses: poses,
+        }
+    }
+
+    /// Arm `rig`'s live `GatewayConfig` with `injector` + set the clock's `synced` latch (the same
+    /// re-insert mechanism the D-3 heartbeat tests use).
+    fn arm_injector(rig: &mut Rig, injector: SeedInjectorConfig, synced: bool) {
+        rig.world.insert_resource(GatewayConfig {
+            seed_injector: injector,
+            ..config()
+        });
+        rig.world.resource_mut::<ClockSample>().synced = synced;
+    }
+
+    /// A Session-head reply GRANTED to a FOREIGN gateway (`granted` is false — not this gateway).
+    fn foreign_head(session: SessionId) -> InterShardFlow {
+        InterShardFlow::DirectoryReply(DirectoryReply::Head {
+            key: DirectoryKey::Session(session),
+            record: Some(OwnerRecord {
+                authority: AuthorityRef::Gateway(NodeId(0xBAD)),
+                fence: Fence(1),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        })
+    }
+
+    /// A Session-head reply owned by THIS gateway but at the WRONG fence (`granted` is false).
+    fn wrong_fence_head(session: SessionId) -> InterShardFlow {
+        InterShardFlow::DirectoryReply(DirectoryReply::Head {
+            key: DirectoryKey::Session(session),
+            record: Some(OwnerRecord {
+                authority: AuthorityRef::Gateway(GW),
+                fence: Fence(0xF),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        })
+    }
+
+    #[test]
+    fn a_granted_session_lease_injects_exactly_one_server_derived_home_demand() {
+        // The trusted injector: on the committed-lease arm (an authenticated login LANDED), the gateway
+        // emits EXACTLY ONE RealmDemand{SpinUp} whose child is the SERVER-DERIVED home lineage
+        // (container_coord_at over the account's STORED pose) — the client supplies NO coord/pose.
+        let account = AccountId(5); // the login account (hello_msg)
+        let mut rig = Rig::new();
+        arm_injector(
+            &mut rig,
+            armed_injector(BTreeMap::from([(account, spawn_at(25.0))])),
+            true,
+        );
+        let (_sid, sends) = rig.login();
+        let demands: Vec<RealmDemand> = sends
+            .iter()
+            .flat_map(|tick| demands_to_orch(tick))
+            .collect();
+        assert_eq!(
+            demands.len(),
+            1,
+            "exactly one home demand per committed lease"
+        );
+        // The child is the config-derived home lineage — NOT anything the client sent. (25,0,0) is the
+        // Area-A box: the deep 5-level [Universe, Galaxy, System(7), Planet(7), Area(7)] home (5f-3a).
+        let expected_child =
+            container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0));
+        assert_eq!(
+            demands[0].child, expected_child,
+            "the child is the SERVER-derived home lineage from the stored pose"
+        );
+        assert_eq!(demands[0].verb, DemandVerb::SpinUp);
+        assert_eq!(
+            demands[0].universe_tick,
+            UniverseTick(50),
+            "the demand carries the clock's universe tick (determinism, no wall-clock)"
+        );
+        assert_eq!(
+            demands[0].parent_fence,
+            Fence(5),
+            "the per-account sentinel fence (account 5 → 5), not a global constant"
+        );
+    }
+
+    #[test]
+    fn an_unarmed_injector_emits_no_home_demand_byte_identical() {
+        // Default (VD_DEMAND unset) ⇒ the injector is INERT: a login emits NO RealmDemand (the byte-
+        // identical default; covers the `armed == false` short-circuit arm of the emit gate).
+        let mut rig = Rig::new(); // config() ⇒ SeedInjectorConfig::default() (unarmed)
+        let (_sid, sends) = rig.login();
+        assert_eq!(
+            demand_count(&sends),
+            0,
+            "an unarmed gateway injects no home demand"
+        );
+    }
+
+    #[test]
+    fn a_pre_sync_clock_injects_no_demand_and_a_synced_clock_injects_one() {
+        // The synced gate (CRITIQUE-2): a PRE-SYNC seed would carry universe_tick 0 → last_demand_tick 0,
+        // which `demanded_recently` treats as "never demanded" → the home would never spin. So the
+        // injector emits ONLY once the clock is synced. Both arms of the `clock.synced` gate.
+        let poses = BTreeMap::from([(AccountId(5), spawn_at(25.0))]);
+        // pre-sync: armed, but the clock has not synced → NO demand.
+        let mut rig = Rig::new();
+        arm_injector(&mut rig, armed_injector(poses.clone()), false);
+        let (_sid, presync) = rig.login();
+        assert_eq!(
+            demand_count(&presync),
+            0,
+            "no home demand while the clock is pre-sync"
+        );
+        // synced: the same armed injector, clock synced → exactly one demand, nonzero tick.
+        let mut rig = Rig::new();
+        arm_injector(&mut rig, armed_injector(poses), true);
+        let (_sid, synced) = rig.login();
+        let demands: Vec<RealmDemand> = synced
+            .iter()
+            .flat_map(|tick| demands_to_orch(tick))
+            .collect();
+        assert_eq!(
+            demands.len(),
+            1,
+            "exactly one home demand once the clock is synced"
+        );
+        assert_ne!(
+            demands[0].universe_tick,
+            UniverseTick(0),
+            "a synced demand carries a NONZERO universe tick (so demanded_recently desires it)"
+        );
+    }
+
+    #[test]
+    fn a_re_driven_grant_injects_the_home_demand_exactly_once() {
+        // The mint-commit arm fires ONCE (AwaitingDirectory→AwaitingAttach); a re-driven grant re-enters
+        // at the AwaitingAttach / Active guards above and returns — it never re-emits. Emit-once per lease.
+        let mut rig = Rig::new();
+        arm_injector(
+            &mut rig,
+            armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))])),
+            true,
+        );
+        let hello = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        let sid = rig
+            .world
+            .resource::<GatewaySessions>()
+            .sessions()
+            .next()
+            .expect("session pending");
+        // AwaitingDirectory → AwaitingAttach: the ONE emit.
+        let g1 = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        // A re-driven grant while AwaitingAttach: the AwaitingAttach guard returns — NO emit.
+        let g2 = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        let attached = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+        // A granted head while Active: the Active recheck re-arms confirmed_at — NO emit.
+        let g3 = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        let total: usize = [&hello, &g1, &g2, &attached, &g3]
+            .iter()
+            .map(|tick| demands_to_orch(tick).len())
+            .sum();
+        assert_eq!(
+            total, 1,
+            "exactly one home demand across the whole login + every re-drive"
+        );
+    }
+
+    /// Drive an armed gateway to a login's `AwaitingDirectory`, then feed `reply` (a NON-granted head):
+    /// no home demand is ever injected (the emit is strictly downstream of the committed-lease arm).
+    fn assert_no_demand_on_non_granted(reply: impl Fn(SessionId) -> InterShardFlow) {
+        let mut rig = Rig::new();
+        arm_injector(
+            &mut rig,
+            armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))])),
+            true,
+        );
+        let hello = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        let sid = rig
+            .world
+            .resource::<GatewaySessions>()
+            .sessions()
+            .next()
+            .expect("session pending");
+        let after = rig.tick(vec![wire(ORCH, MsgClass::Saga, &reply(sid))]);
+        assert_eq!(
+            demands_to_orch(&hello).len(),
+            0,
+            "the hello tick injects no demand"
+        );
+        assert_eq!(
+            demands_to_orch(&after).len(),
+            0,
+            "a non-granted reply injects no home demand"
+        );
+    }
+
+    #[test]
+    fn an_absent_directory_head_injects_no_home_demand() {
+        // record None (the reaper revoked / never minted) ⇒ granted false ⇒ the refused arm ⇒ NO emit.
+        assert_no_demand_on_non_granted(absent_head);
+    }
+
+    #[test]
+    fn a_foreign_owned_head_injects_no_home_demand() {
+        // The lease is owned by a DIFFERENT gateway ⇒ granted false ⇒ NO emit.
+        assert_no_demand_on_non_granted(foreign_head);
+    }
+
+    #[test]
+    fn a_wrong_fence_head_injects_no_home_demand() {
+        // Owned by THIS gateway but at the wrong fence ⇒ granted false ⇒ NO emit.
+        assert_no_demand_on_non_granted(wrong_fence_head);
+    }
+
+    #[test]
+    fn an_absent_spawn_pose_derives_the_origin_home_in_forest() {
+        // The P7-store-absent stand-in: NO stored pose ⇒ the injector derives the ROOT/ORIGIN home coord
+        // (still a valid in-forest lineage), NOT a skip. One demand, child == container_coord_at(origin).
+        let mut rig = Rig::new();
+        arm_injector(&mut rig, armed_injector(BTreeMap::new()), true); // empty pose store
+        let (_sid, sends) = rig.login();
+        let demands: Vec<RealmDemand> = sends
+            .iter()
+            .flat_map(|tick| demands_to_orch(tick))
+            .collect();
+        assert_eq!(
+            demands.len(),
+            1,
+            "an absent pose still injects one (origin) home demand"
+        );
+        let expected = container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::ZERO);
+        assert_eq!(
+            demands[0].child, expected,
+            "an absent pose derives the origin home lineage (the P7-store-absent stand-in)"
+        );
+    }
+
+    #[test]
+    fn the_home_sentinel_fence_is_per_account_and_deterministic() {
+        // CRITIQUE-1 defense-in-depth: the sentinel is DETERMINISTIC per-account (NOT a global constant),
+        // so two accounts carry DISTINCT parent_fences — no FencedKey idempotency-collapse.
+        assert_ne!(
+            home_sentinel_fence(AccountId(5)),
+            home_sentinel_fence(AccountId(6)),
+            "two accounts ⇒ two distinct sentinels"
+        );
+        assert_eq!(
+            home_sentinel_fence(AccountId(5)),
+            Fence(5),
+            "the fold is deterministic (low word for a small account)"
+        );
+        // Accounts differing ONLY in the high u64 word still differ — the fold mixes both halves.
+        assert_ne!(
+            home_sentinel_fence(AccountId(1u128 << 64)),
+            home_sentinel_fence(AccountId(0)),
+            "the high word is folded in (distinct even when the low word matches)"
+        );
+    }
+
+    #[test]
+    fn coord_in_forest_accepts_a_seed_home_and_rejects_an_off_forest_coord() {
+        // The injector's defense-in-depth predicate (both arms): a SERVER-derived home IS in-forest
+        // (true); a coord whose leaf is NOT a seed realm (a corrupted stand-in) is rejected (false).
+        use vd_core::realm_path::{RealmKindTag, RealmLevel};
+        let home = container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0));
+        assert!(
+            coord_in_forest(&home, 0),
+            "a server-derived home resolves in the seed forest"
+        );
+        // Append a leaf realm that is NOT in the walk forest (Station(0xDEAD)) — an off-forest coord.
+        let off = home.child(RealmLevel::new(RealmKindTag::Station, 0xDEAD));
+        assert!(
+            !coord_in_forest(&off, 0),
+            "an off-forest leaf (a corrupted stand-in) is rejected"
         );
     }
 }
