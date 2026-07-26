@@ -1078,6 +1078,8 @@ mod tests {
                 own_coord: StubConfig::root_coord(vd_core::pose::RealmId::System(5)),
                 boot_ticks_p99: 0,
                 held_realms: StubConfig::single_realm(vd_core::pose::RealmId::System(5)),
+                // RLM 5f-3b: empty ⇒ every login births origin-at-rest (byte-identical); the P7 store fills it.
+                spawn_poses: std::collections::BTreeMap::new(),
                 frame: vd_core::pose::FrameRef::SystemSpace { system_seed: 5 },
                 move_speed_mps: 1.0,
                 tick_dt_s: 0.05,
@@ -1287,6 +1289,8 @@ mod tests {
             boot_ticks_p99: 0,
             // Host the primary + two co-hosted children.
             held_realms: BTreeSet::from([PRIMARY, CHILD_HELD, CHILD_PENDING]),
+            // RLM 5f-3b: empty ⇒ origin-at-rest login (byte-identical); the P7 store fills it later.
+            spawn_poses: std::collections::BTreeMap::new(),
             frame: FrameRef::SystemSpace { system_seed: 5 },
             move_speed_mps: 1.0,
             tick_dt_s: 0.05,
@@ -1329,6 +1333,8 @@ mod tests {
             own_coord: StubConfig::root_coord(PRIMARY),
             boot_ticks_p99: 0,
             held_realms: BTreeSet::from([PRIMARY, CHILD_HELD]),
+            // RLM 5f-3b: empty ⇒ origin-at-rest login (byte-identical); the P7 store fills it later.
+            spawn_poses: std::collections::BTreeMap::new(),
             frame: FrameRef::SystemSpace { system_seed: 5 },
             move_speed_mps: 1.0,
             tick_dt_s: 0.05,
@@ -1434,6 +1440,8 @@ mod tests {
                     own_coord: StubConfig::root_coord(realm),
                     boot_ticks_p99: 0,
                     held_realms: StubConfig::single_realm(realm),
+                    // RLM 5f-3b: empty ⇒ origin-at-rest login (byte-identical); the P7 store fills it later.
+                    spawn_poses: std::collections::BTreeMap::new(),
                     frame: FrameRef::SystemSpace { system_seed },
                     move_speed_mps: 1.0,
                     tick_dt_s: 0.05,

@@ -2001,6 +2001,68 @@ fn parse_time_multiplier(raw: &str) -> Result<f64, ConfigError> {
     }
 }
 
+/// Resolve the shard's per-account STORED spawn poses (RLM 5f-3b) from the `VD_SPAWN_POSES` STAND-IN — the
+/// seam the P7 durable per-account pose store replaces with ZERO caller reshape (it fills the SAME
+/// `StubConfig::spawn_poses` map). A login for an account with a stored pose is admitted at THAT pose
+/// (organic bootstrap) instead of the origin; the shard-side lookup is keyed by the `AccountId` the
+/// `AttachSession` arm already carries, so this grows NO frozen wire.
+///
+/// Format: `account=x,y,z` entries separated by `;`, where `account` is the decimal [`AccountId`] u128 and
+/// `x,y,z` the ABSOLUTE Universe-root position (the `SystemSpace{system_seed: 0}` frame `container_coord_at`
+/// reads), at rest. ABSENT / empty ⇒ an EMPTY map ⇒ every login births origin-at-rest (BYTE-IDENTICAL to
+/// the pre-5f-3b boot). Models `resolve_time_multiplier` (an `unwrap_or_default` read + a monomorphic parse).
+///
+/// # Errors
+/// [`ConfigError::Unparseable`] on any malformed entry (a missing `=`, a non-numeric account, or a position
+/// that is not exactly three finite `f64`s) — an operator typo fails LOUD at boot, never a silently dropped
+/// spawn point.
+pub fn resolve_spawn_poses(
+    env: &EnvConfig,
+) -> Result<std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>, ConfigError> {
+    let raw = env.string("VD_SPAWN_POSES").unwrap_or_default();
+    parse_spawn_poses(raw.trim())
+}
+
+/// The `str -> per-account spawn-pose map` parse (monomorphic, off the env body so each arm is covered
+/// once, HR5). Empty ⇒ an empty map; each `account=x,y,z` entry ⇒ an at-rest absolute pose in the
+/// Universe-root frame; anything malformed ⇒ loud.
+fn parse_spawn_poses(
+    raw: &str,
+) -> Result<std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>, ConfigError> {
+    use vd_core::glam::DVec3;
+    use vd_core::pose::{FrameRef, StampedPose};
+    let mut map = std::collections::BTreeMap::new();
+    if raw.is_empty() {
+        return Ok(map);
+    }
+    let unparseable = |entry: &str| ConfigError::Unparseable {
+        key: "VD_SPAWN_POSES".to_owned(),
+        value: entry.to_owned(),
+    };
+    for entry in raw.split(';').filter(|e| !e.trim().is_empty()) {
+        let (acct_raw, coords_raw) = entry.split_once('=').ok_or_else(|| unparseable(entry))?;
+        let account =
+            vd_core::AccountId(acct_raw.trim().parse::<u128>().map_err(|_| unparseable(entry))?);
+        let coords = coords_raw
+            .split(',')
+            .map(|c| c.trim().parse::<f64>())
+            .collect::<Result<Vec<f64>, _>>()
+            .map_err(|_| unparseable(entry))?;
+        if coords.len() != 3 {
+            return Err(unparseable(entry));
+        }
+        map.insert(
+            account,
+            StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::new(coords[0], coords[1], coords[2]),
+                vd_core::UniverseTick(0),
+            ),
+        );
+    }
+    Ok(map)
+}
+
 /// The containment region forest + the moving-child roster for a shard booting at `scale`, hosting
 /// `held_realms` (own realm `hosted`). `Walk` ⇒ the seed NEIGHBOURHOOD + an EMPTY roster — BYTE-IDENTICAL
 /// to the pre-FA-5 boot (the exact `realm_neighbourhood_for_held`, and `RealmRegions::with_moving_children`
@@ -2780,6 +2842,47 @@ mod incarnation_tests {
     }
 
     #[test]
+    fn resolve_spawn_poses_is_empty_by_default_parses_entries_and_is_loud_on_bad() {
+        use vd_core::glam::DVec3;
+        use vd_core::pose::{FrameRef, StampedPose};
+        // ABSENT / empty ⇒ EMPTY map (every login origin-at-rest, byte-identical).
+        assert_eq!(resolve_spawn_poses(&env(&[])), Ok(std::collections::BTreeMap::new()));
+        assert_eq!(
+            resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "  ")])),
+            Ok(std::collections::BTreeMap::new()),
+        );
+        // A well-formed multi-entry value parses to at-rest ABSOLUTE poses in the Universe-root frame.
+        let got = resolve_spawn_poses(&env(&[(
+            "VD_SPAWN_POSES",
+            " 5=11,-22,33 ; 7 = 1.5, 2.5, 3.5 ",
+        )]))
+        .expect("well-formed entries parse");
+        let mut want = std::collections::BTreeMap::new();
+        want.insert(
+            vd_core::AccountId(5),
+            StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::new(11.0, -22.0, 33.0),
+                vd_core::UniverseTick(0),
+            ),
+        );
+        want.insert(
+            vd_core::AccountId(7),
+            StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::new(1.5, 2.5, 3.5),
+                vd_core::UniverseTick(0),
+            ),
+        );
+        assert_eq!(got, want);
+        // Malformed entries all fail LOUD: missing '=', a non-numeric account, wrong coord count, bad float.
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5,1,2,3")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "abc=1,2,3")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=1,2")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=1,2,x")])).is_err());
+    }
+
+    #[test]
     fn boot_regions_and_movers_walk_is_the_seed_neighbourhood_with_an_empty_roster() {
         use std::collections::BTreeSet;
         let hosted = RealmId::System(7);
@@ -3110,6 +3213,10 @@ mod incarnation_tests {
                 ("VD_PROBE_ADDR", a.orchestrator_probe.to_string()),
                 ("VD_STORE_PATH", "store".to_owned()),
                 ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
+                // RLM 5f-1: the static-boot marker (every harness shape pre-spawns its shards, so an armed
+                // `VD_DEMAND` reconciler must be refused). INERT while `VD_DEMAND` is unset ⇒ boot behaviour
+                // stays byte-identical; only the env LIST grew by this one marker.
+                ("VD_STATIC_FOREST", "1".to_owned()),
             ]
         );
 

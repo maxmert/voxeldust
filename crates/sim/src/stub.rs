@@ -139,6 +139,17 @@ pub struct StubConfig {
     /// fast occupant demands spin-up before it arrives (boot latency masked). `0` ⇒ no predictive term
     /// (default; byte-identity). Never an inline literal.
     pub boot_ticks_p99: u32,
+    /// RLM 5f-3b — the per-account STORED spawn poses: a login admits the account's avatar at ITS stored
+    /// pose (organic bootstrap), not the origin. Keyed by the [`AccountId`] the `AttachSession` arm already
+    /// carries, so the pose loads SHARD-SIDE with NO frozen-wire grow. Each pose is ABSOLUTE — expressed in
+    /// the Universe-root frame `container_coord_at` reads (`SystemSpace{system_seed: 0}`, worldgen.rs) — and
+    /// [`resolve_spawn_pose`] REBINDS it into THIS shard's realm frame via the ONE frame machinery (HR3)
+    /// crossings/re-homes use (`rebind_pose_to_dest`), never a raw-offset replant. DEFAULT EMPTY ⇒
+    /// origin-at-rest ⇒ BYTE-IDENTICAL to the pre-5f-3b admit for every existing rig (the `None` arm is the
+    /// old literal). A `BTreeMap` (O(log n) lookup, scales to a real roster); a config/env STAND-IN
+    /// (`vd_bins::resolve_spawn_poses`) fills it today and the P7 durable per-account pose store swaps in
+    /// behind this SAME map with zero caller reshape.
+    pub spawn_poses: BTreeMap<AccountId, StampedPose>,
 }
 
 impl StubConfig {
@@ -1484,6 +1495,42 @@ struct GatewayMsgCtx<'a> {
     realm_fence: Option<Fence>,
 }
 
+/// Resolve the BIRTH pose for a login-admitted avatar (RLM 5f-3b) — THE one admit-pose seam (HR3): every
+/// login births its dot through here, with NO origin/home fork (only the pose value differs). Two arms:
+///
+/// - **`Some` (stored):** the account has a stored spawn pose. It is an ABSOLUTE pose in the Universe-root
+///   frame [`container_coord_at`](vd_core::worldgen::container_coord_at) reads
+///   (`SystemSpace{system_seed: 0}`). We [`StampedPose::sanitized`] it (a config/P7-store pose can never
+///   poison the sim), RE-STAMP its `universe_tick` to the current clock `tick`, then REBIND it into `leaf`'s
+///   realm frame via [`rebind_pose_to_dest`] — the SAME machinery the durable crossing / D-37 re-home /
+///   transient batch use. This is deliberately NOT a raw-offset replant of the stored offset into the leaf
+///   frame: routing through `rebind_pose_to_dest` keeps the pose FRAME-COHERENT (under P3 [`IdentityFrames`]
+///   the position is unchanged and only the frame LABEL flips to `leaf`; when the P4 ephemeris `FrameContext`
+///   lands, the real absolute→leaf transform flows in here for free, no caller reshape).
+/// - **`None` (absent):** origin-at-rest in `config.frame` — BYTE-IDENTICAL to the pre-5f-3b admit literal.
+///
+/// Concrete (non-generic) + branchless-per-arm: both `Some`/`None` arms are exercised by the unit tests,
+/// no wall-clock/rng (the `tick` is the clock's). `leaf` is this shard's own lineage coord: `leaf.lowered()`
+/// is the dest realm and `leaf.parent()` its parent provenance (the one field a rebind into an `Area` needs).
+fn resolve_spawn_pose(
+    config: &StubConfig,
+    account: AccountId,
+    leaf: &RealmCoord,
+    tick: UniverseTick,
+) -> StampedPose {
+    config
+        .spawn_poses
+        .get(&account)
+        .map(|stored| {
+            let absolute = StampedPose {
+                universe_tick: tick,
+                ..stored.sanitized()
+            };
+            rebind_pose_to_dest(absolute, leaf.lowered(), leaf.parent().map(|p| p.lowered()))
+        })
+        .unwrap_or_else(|| StampedPose::at_rest(config.frame, DVec3::ZERO, tick))
+}
+
 /// Handle one gateway→shard message.
 #[allow(clippy::too_many_arguments)]
 fn on_gateway_msg(
@@ -1515,6 +1562,16 @@ fn on_gateway_msg(
             };
             let dot = dots.0.entry(session).or_insert_with(|| {
                 let entity = mint_entity(mint, ctx.identity.node_id);
+                // RLM 5f-3b: birth at the account's STORED spawn pose, rebound into THIS shard's realm
+                // frame via the ONE frame machinery (HR3), or origin-at-rest when none is stored (empty
+                // `spawn_poses` ⇒ byte-identical to the pre-5f-3b literal). ONE admit path — only the pose
+                // value changes; the Ghost birth → LeaseGrant → Promote → SessionAttached flow is unchanged.
+                let pose = resolve_spawn_pose(
+                    ctx.config,
+                    account,
+                    &ctx.config.own_coord,
+                    ctx.clock.universe_tick,
+                );
                 Dot {
                     entity,
                     account,
@@ -1532,16 +1589,13 @@ fn on_gateway_msg(
                     },
                     departing: false,
                     entity_fence: Fence::GENESIS,
-                    pose: StampedPose::at_rest(
-                        ctx.config.frame,
-                        DVec3::ZERO,
-                        ctx.clock.universe_tick,
-                    ),
+                    pose,
                     yaw: 0.0,
                     pitch: 0.0,
                     last_applied_seq: None,
-                    // Seed to the spawn offset (origin): tick-1's swept segment is degenerate.
-                    prev_offset: DVec3::ZERO,
+                    // Seed to the spawn offset: tick-1's swept segment is degenerate. Origin when no stored
+                    // pose (byte-identical to the old `DVec3::ZERO`); the stored offset otherwise.
+                    prev_offset: pose.pos.offset(),
                 }
             });
             // Idempotent re-attach: refresh the fence if the gateway's advanced.
@@ -4538,6 +4592,8 @@ mod tests {
             request_ttl_ticks: 0,
             own_coord: StubConfig::root_coord(RealmId::System(7)),
             boot_ticks_p99: 0,
+            // 5f-3b: no stored spawn poses ⇒ every login births origin-at-rest (byte-identical).
+            spawn_poses: BTreeMap::new(),
         }
     }
 
@@ -6492,6 +6548,101 @@ mod tests {
         // Both decode failures (Saga + Control) are COUNTED, never silent (ROB-E2E-1);
         // the Snapshot/Membership garbage is not decoded by the stub, so it adds nothing.
         assert_eq!(rig.world.resource::<StubStats>().undecodable, 2);
+    }
+
+    /// The absolute Universe-root frame a STORED spawn pose lives in (`container_coord_at`'s frame).
+    fn root_frame() -> FrameRef {
+        FrameRef::SystemSpace { system_seed: 0 }
+    }
+
+    #[test]
+    fn resolve_spawn_pose_rebinds_a_stored_absolute_pose_into_the_leaf_realm_frame() {
+        // 5f-3b `Some` arm: a login WITH a stored spawn pose is admitted at THAT pose, rebound into the leaf
+        // realm's frame via the ONE frame machinery — NOT the origin, and NOT a raw-offset replant. The leaf
+        // here is an AREA under a Planet: an `Area` frame is LOSSY (it needs its enclosing Planet as parent
+        // PROVENANCE), so this proves the parent from `leaf.parent()` is threaded into `rebind_pose_to_dest`
+        // to FORM the `AreaLocal{planet_seed, area_seed}` frame — the frame-coherence path P4's ephemeris
+        // rides. Under P3 IdentityFrames the position is UNCHANGED; only the frame LABEL flips.
+        use vd_core::realm_path::RealmKindTag;
+        let account = AccountId(0x5F3B);
+        let stored_pos = DVec3::new(100.0, 200.0, 300.0);
+        // ABSOLUTE stored pose: the Universe-root frame `container_coord_at` reads (SystemSpace{0}).
+        let stored = StampedPose::at_rest(root_frame(), stored_pos, UniverseTick(0));
+        // A multi-level leaf: Area(99) under Planet(7) — so `leaf.parent()` is `Some` (exercises the
+        // `.map(|p| p.lowered())` provenance closure) AND the dest frame is the lossy Area arm.
+        let planet = RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(
+            RealmKindTag::Planet,
+            7,
+        )]))
+        .expect("a one-level path has a leaf");
+        let leaf = planet.child(RealmLevel::new(RealmKindTag::Area, 99));
+        let mut cfg = config();
+        cfg.spawn_poses.insert(account, stored);
+        let got = resolve_spawn_pose(&cfg, account, &leaf, UniverseTick(77));
+        // Frame LABEL flipped to the leaf realm's AreaLocal frame (formed from the Planet parent
+        // provenance), NOT the stored absolute SystemSpace{0}.
+        assert_eq!(
+            got.frame,
+            FrameRef::AreaLocal {
+                planet_seed: 7,
+                area_seed: 99,
+            }
+        );
+        // Position is the STORED pos (NOT origin), unchanged under the P3 identity rebind.
+        assert_eq!(got.pos.offset(), stored_pos);
+        // Re-stamped to the current clock tick; at rest (the stored pose was at rest).
+        assert_eq!(got.universe_tick, UniverseTick(77));
+        assert_eq!(got.vel, DVec3::ZERO);
+    }
+
+    #[test]
+    fn resolve_spawn_pose_without_an_entry_is_origin_at_rest_byte_identical() {
+        // 5f-3b `None` arm: a login WITHOUT a stored pose is origin-at-rest in this shard's frame —
+        // BYTE-IDENTICAL to the pre-5f-3b admit literal (`at_rest(config.frame, ZERO, tick)`).
+        let cfg = config(); // empty spawn_poses
+        let got = resolve_spawn_pose(&cfg, AccountId(0xAB), &cfg.own_coord, UniverseTick(42));
+        assert_eq!(
+            got,
+            StampedPose::at_rest(cfg.frame, DVec3::ZERO, UniverseTick(42))
+        );
+    }
+
+    #[test]
+    fn login_admits_the_dot_at_its_stored_spawn_pose_through_the_one_admit_path() {
+        // The admit-path proof (the wiring, not just the helper): a real AttachSession for an account WITH
+        // a stored spawn pose births its dot at the rebound stored pose — same Ghost-birth admit path, only
+        // the pose value differs. `attach_request` attaches AccountId(5), so key the stand-in on it.
+        let stored_pos = DVec3::new(11.0, -22.0, 33.0);
+        let stored = StampedPose::at_rest(root_frame(), stored_pos, UniverseTick(0));
+        let mut rig = Rig::with_config(StubConfig {
+            spawn_poses: BTreeMap::from([(AccountId(5), stored)]),
+            ..config()
+        });
+        rig.grant_realm();
+        let _ = rig.attach_request(SESSION, GATEWAY);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        // Born at the STORED pose, rebound into the shard's realm frame (System 7), re-stamped to the
+        // rig clock (universe_tick 100) — NOT origin-at-rest.
+        assert_eq!(dot.pose.frame, FrameRef::SystemSpace { system_seed: 7 });
+        assert_eq!(dot.pose.pos.offset(), stored_pos);
+        assert_eq!(dot.pose.universe_tick, UniverseTick(100));
+        // `prev_offset` is seeded from the SAME stored offset (not the old hardcoded ZERO).
+        assert_eq!(dot.prev_offset, stored_pos);
+    }
+
+    #[test]
+    fn login_without_a_stored_pose_births_at_the_origin_unchanged() {
+        // The admit-path `None` proof: an account with no stand-in entry births origin-at-rest — the
+        // byte-identical pre-5f-3b behaviour through the real attach path.
+        let mut rig = Rig::new(); // config() ⇒ empty spawn_poses
+        rig.grant_realm();
+        let _ = rig.attach_request(SESSION, GATEWAY);
+        let dot = rig.world.resource::<Dots>().0[&SESSION];
+        assert_eq!(
+            dot.pose,
+            StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(100))
+        );
+        assert_eq!(dot.prev_offset, DVec3::ZERO);
     }
 
     #[test]

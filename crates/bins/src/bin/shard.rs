@@ -86,6 +86,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The realm's SUBJECTIVE time factor (D-45(a)): dilates OCCUPANT movement inside this realm (never the
     // celestial orbit). `VD_REALM_TIME_MULTIPLIER` override / `VD_TIME_MULTIPLIER` global / 1.0 default.
     let time_multiplier = vd_bins::resolve_time_multiplier(&env)?;
+    // RLM 5f-3b: the per-account STORED spawn poses (the `VD_SPAWN_POSES` STAND-IN for the P7 durable pose
+    // store). ABSENT ⇒ an EMPTY map ⇒ every login births origin-at-rest (byte-identical). A login then
+    // loads the stored pose SHARD-SIDE (keyed by the account in the AttachSession arm) and admits at it.
+    let spawn_poses = vd_bins::resolve_spawn_poses(&env)?;
     vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
     // NODE-PER-REALM (task #149): a realm-shard hosts EXACTLY ONE realm. `own_realm` (its `RealmId`),
     // `own_coord` (its un-collapsed lineage), and its derived `ShardProfile` were all resolved ABOVE (before
@@ -170,6 +174,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Slice 3d — the crossing-latch TTL fallback. INERT (0): the POSITIVE saga-terminal clear is
             // the sole driver until the 3f abort/TTL egress lands.
             request_ttl_ticks: 0,
+            // RLM 5f-3b — the per-account STORED spawn poses (the `VD_SPAWN_POSES` stand-in; the P7 durable
+            // pose store swaps in behind this SAME map). ABSENT ⇒ empty ⇒ origin-at-rest (byte-identical).
+            spawn_poses,
         },
     );
     // C-6b — the SEED-DERIVED containment boot (task #135). The shard computes its realm-region
