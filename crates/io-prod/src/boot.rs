@@ -257,6 +257,15 @@ pub enum CloudProfileError {
     )]
     DevAuthKey,
     #[error(
+        "cloud profile refuses VD_DEMAND (any node role): the demand-driven realm reconciler/injector folds a \
+         RealmDemand SOURCE-BLIND, and cluster mesh trust is today a SINGLE shared secret every cluster-bundle \
+         holder (including the dev client) possesses — so an armed cloud node (especially the orchestrator, \
+         which ACTS on demands) is a client-injectable universe-scale spawn DoS via a direct mesh dial-in, not \
+         only via a gateway login. Refuse until per-node client-facing trust (distinct from the shared cluster \
+         mTLS bundle) exists; deferred to P7 (identity_persistence). Use a dev/test profile for the demand route"
+    )]
+    DemandWithoutClientTrust,
+    #[error(
         "cloud profile requires {0} to expose the k8s /healthz + /readyz probe surface (absent/empty) — \
          without it kubelet cannot restart a wedged pod or de-route a not-ready one, so a broken pod boots \
          SILENTLY always-healthy + always-ready (the one cloud footgun that otherwise fails OPEN)"
@@ -411,9 +420,11 @@ pub fn resolve_d3(
 /// The cloud footgun preflight — call ONCE per node at boot, BEFORE any durable/authoritative action. In
 /// [`Profile::DevTest`] a no-op passthrough. In [`Profile::Cloud`] it fails LOUD on: any ephemeral-store
 /// escape (`VD_STORE_EPHEMERAL_OK` / `VD_BOOT_STATE_EPHEMERAL_OK` / `VD_OUTBOX_EPHEMERAL_OK`) or a manual
-/// `VD_PROCESS_INCARNATION` (the durable monotone counter is mandatory in cloud); a missing/empty or
-/// under-temp `VD_STORE_DURABLE_ROOT`; and (gateway only, via `dev_pubkey = Some`) a `VD_AUTH_PUBKEY` that
-/// decodes to the built-in DEV verifying key. Returns the resolved [`Profile`] to thread into [`resolve_d3`].
+/// `VD_PROCESS_INCARNATION` (the durable monotone counter is mandatory in cloud); an armed `VD_DEMAND` on ANY
+/// node role (RLM 5f-3e — the source-blind demand route cannot be safe on the shared cluster secret; any
+/// bundle holder can inject directly via the mesh); a missing/empty or under-temp `VD_STORE_DURABLE_ROOT`;
+/// and (gateway only, via `dev_pubkey = Some`) a `VD_AUTH_PUBKEY` that decodes to the built-in DEV verifying
+/// key. Returns the resolved [`Profile`] to thread into [`resolve_d3`].
 ///
 /// Whether a canonicalized durable-root path is temp-TANGLED — it must be DISJOINT from the temp dir. Rejects
 /// a root UNDER temp (a temp path masquerading as durable — [`is_under_temp`]) AND a root that is an ANCESTOR
@@ -452,6 +463,20 @@ pub fn enforce_cloud_preflight(
 ) -> Result<Profile, Box<dyn Error>> {
     let profile = resolve_profile(env)?;
     if profile == Profile::Cloud {
+        // RLM 5f-3e — the live-arming veto (ANY cloud role, checked first). `record_realm_demands`
+        // (vd-node rlm_runtime.rs) folds a Saga-class RealmDemand SOURCE-BLIND, and cluster mesh membership is
+        // today ONE shared secret every cluster-bundle holder — including the dev client — possesses
+        // (docs/design/identity_persistence.md §5). So ANY bundle holder can dial a cloud node directly on the
+        // mesh and inject a demand; the gateway login is NOT required. The armed ORCHESTRATOR is what turns an
+        // injected demand into a spawn (an inert reconciler folds but never acts), so an armed cloud node of
+        // ANY role is a client-injectable universe-scale spawn DoS. Refuse VD_DEMAND in cloud entirely until
+        // per-node client-facing trust (distinct from the shared cluster mTLS bundle) exists — deferred to P7
+        // (identity_persistence; DEFERRED.md D-RLM-7 the veto, D-RLM-8 the source-blind ingest it stands in
+        // for). NOT an escape-hatch knob: it cannot be safely armed yet. DevTest is the no-op passthrough, so
+        // the mem-twin + process-tier gates (5f-4) arm the demand route freely.
+        if env.bool("VD_DEMAND")? {
+            return Err(CloudProfileError::DemandWithoutClientTrust.into());
+        }
         for key in [
             "VD_STORE_EPHEMERAL_OK",
             "VD_BOOT_STATE_EPHEMERAL_OK",
@@ -968,6 +993,53 @@ mod tests {
         assert_eq!(
             enforce_cloud_preflight(&env_of(&ok), Some(dev)).expect("a real key passes the veto"),
             Profile::Cloud
+        );
+    }
+
+    #[test]
+    fn cloud_preflight_refuses_an_armed_demand_route_any_role_until_client_trust_exists() {
+        let dev = [0x42u8; 32];
+        // RLM 5f-3e: an armed VD_DEMAND in cloud is refused for ANY node role, because a bundle-holding client
+        // can inject a RealmDemand by dialing ANY cloud node directly on the mesh (source-blind fold) — the
+        // armed ORCHESTRATOR (None) is precisely what turns that into a spawn, so gateway-only scoping would
+        // leave the DoS live. Vetoed FIRST in the cloud block: fires with no durable roots / probe / auth key.
+        // ORCHESTRATOR (dev_pubkey = None) armed ⇒ refused (the DoS actor — this is the load-bearing arm).
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(
+                &env_of(&[("VD_PROFILE", "cloud"), ("VD_DEMAND", "1")]),
+                None
+            )),
+            CloudProfileError::DemandWithoutClientTrust
+        );
+        // GATEWAY (dev_pubkey = Some) armed ⇒ refused too (the login injector).
+        assert_eq!(
+            cloud_err(enforce_cloud_preflight(
+                &env_of(&[("VD_PROFILE", "cloud"), ("VD_DEMAND", "1")]),
+                Some(dev)
+            )),
+            CloudProfileError::DemandWithoutClientTrust
+        );
+        // UNARMED cloud (no VD_DEMAND) is untouched by the veto — it proceeds to the other cloud checks and
+        // passes with coherent roots + probe (orchestrator role; the veto's false arm).
+        assert_eq!(
+            enforce_cloud_preflight(
+                &env_of(&[
+                    ("VD_PROFILE", "cloud"),
+                    ("VD_STORE_DURABLE_ROOT", "/var/lib/vd"),
+                    ("VD_BOOT_DURABLE_ROOT", "/var/lib/vd-boot"),
+                    ("VD_PROBE_ADDR", "0.0.0.0:9002"),
+                ]),
+                None
+            )
+            .expect("an UNarmed cloud node boots"),
+            Profile::Cloud
+        );
+        // DevTest: an armed node passes untouched — the veto is cloud-only, so 5f-4's mem-twin + process-tier
+        // gates arm the demand route freely.
+        assert_eq!(
+            enforce_cloud_preflight(&env_of(&[("VD_DEMAND", "1")]), None)
+                .expect("dev/test arms the demand route freely"),
+            Profile::DevTest
         );
     }
 

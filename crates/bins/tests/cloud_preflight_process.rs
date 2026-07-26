@@ -183,8 +183,8 @@ fn orchestrator_cloud_requires_a_durable_root() {
 
 /// Preflight arm 4 (dev auth key) — GATEWAY-ONLY. Proves the gateway's `Some(dev_auth_pubkey_bytes())` wiring
 /// is LIVE: `gateway_env` sets `VD_AUTH_PUBKEY` to the built-in dev verifying key, which a cloud gateway must
-/// refuse. Strip the manual incarnation + supply a real (non-temp) durable root so the preflight reaches the
-/// dev-key arm (it is checked LAST).
+/// refuse. Strip the manual incarnation + supply a real (non-temp) durable root so the preflight passes the
+/// earlier arms and reaches the gateway dev-key veto (no `VD_DEMAND` here, so the 5f-3e veto does not fire).
 #[test]
 fn gateway_cloud_vetoes_the_built_in_dev_auth_key() {
     let addrs = addrs();
@@ -273,4 +273,68 @@ fn orchestrator_cloud_boots_green_with_a_coherent_config() {
     let _ = std::fs::remove_dir_all(&trust);
     let _ = std::fs::remove_dir_all(&durable);
     let _ = std::fs::remove_dir_all(&boot_durable);
+}
+
+/// RLM 5f-3e (any role) — the demand-arming veto is LIVE in a real bin. The ORCHESTRATOR is the DoS ACTOR (it
+/// ACTS on injected demands) and passes `None` to the preflight, so this proves the veto is NOT gateway-only —
+/// gateway-only scoping would leave the exact configuration this closes wide open, since a bundle-holding
+/// client can inject a `RealmDemand` by dialing the orchestrator directly on the mesh. `VD_PROFILE=cloud` +
+/// `VD_DEMAND=1` on the standard dev env ⇒ refuse to boot (the veto is checked FIRST in the cloud block, so no
+/// other footgun needs stripping to reach it).
+#[test]
+fn orchestrator_cloud_refuses_an_armed_demand_route() {
+    let addrs = addrs();
+    let trust = write_trust("demand");
+    let store = std::env::temp_dir().join(format!("vd-cloudpf-demand-{}.redb", std::process::id()));
+    let mut envs = common_env(&trust.display().to_string(), &DEV);
+    envs.extend(orchestrator_env(
+        &addrs,
+        &DEV,
+        &store.display().to_string(),
+        vd_bins::ClusterShape::Single,
+    ));
+    envs.push(("VD_PROFILE", "cloud".to_owned()));
+    envs.push(("VD_DEMAND", "1".to_owned()));
+
+    let (ok, err) = run_to_exit(env!("CARGO_BIN_EXE_vd-orchestrator"), &envs)
+        .expect("orchestrator must EXIT (refuse to boot), not run forever");
+    assert!(
+        !ok,
+        "a cloud node with VD_DEMAND armed must refuse to boot; stderr: {err}"
+    );
+    assert!(
+        err.contains("refuses VD_DEMAND"),
+        "must reject the armed demand route with guidance (proves the 5f-3e veto is live for ANY role, not \
+         only the gateway); stderr: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&trust);
+}
+
+/// RLM 5f-3e enabling-condition pin (a STATIC assertion over the shipped manifests, not a process spawn). The
+/// whole cloud footgun preflight — the 5f-3e demand veto, the dev-key veto, the ephemeral-store escapes —
+/// fires ONLY under `Profile::Cloud`, which `resolve_profile` derives from `VD_PROFILE`; absent ⇒ DevTest, a
+/// deliberate fail-OPEN. The only thing that flips the shipped cluster into cloud is the `vd-cluster-env`
+/// ConfigMap setting `VD_PROFILE: "cloud"` AND every server manifest importing it via `envFrom`. Pin both, so
+/// a manifest edit that drops either — silently disarming EVERY cloud security control while `just gate`
+/// stays green — fails HERE instead.
+#[test]
+fn shipped_cloud_manifests_pin_the_cloud_profile() {
+    let deploy = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/k3d");
+    let read = |name: &str| {
+        std::fs::read_to_string(deploy.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
+    };
+    let configmap = read("10-configmap.yaml");
+    assert!(
+        configmap.contains("VD_PROFILE: \"cloud\""),
+        "the vd-cluster-env ConfigMap MUST set VD_PROFILE=cloud — without it every cloud footgun veto (the \
+         5f-3e demand veto, the dev-key veto, the ephemeral escapes) is silently disarmed into DevTest"
+    );
+    for node in ["30-orch.yaml", "40-gateway.yaml", "50-shard.yaml"] {
+        let manifest = read(node);
+        assert!(
+            manifest.contains("vd-cluster-env"),
+            "{node} MUST import the vd-cluster-env ConfigMap (envFrom) or the node boots WITHOUT \
+             VD_PROFILE=cloud — fail-open into DevTest with every cloud veto disarmed"
+        );
+    }
 }

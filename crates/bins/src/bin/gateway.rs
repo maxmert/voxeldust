@@ -66,9 +66,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         env.parse_or("VD_OUTBOUND_CAP", vd_bins::DEV.outbound_cap as usize)?;
     vd_bins::validate_drain_burst(dest_outbound_cap, max_buffered_inputs)?;
     // RLM 5f-3c — the TRUSTED GATEWAY SEED INJECTOR inputs. `VD_DEMAND` ARMS it (unset ⇒ INERT, byte-
-    // identical: a login emits no `RealmDemand`); the live-arming veto (mutual exclusion with a static
-    // forest, mirroring the orchestrator's `VD_DEMAND` XOR `VD_STATIC_FOREST`) is 5f-3e — this is only the
-    // on/off flag. `VD_UNIVERSE_SEED` is the SAME cluster seed the shard reads. The per-account STORED
+    // identical: a login emits no `RealmDemand`); the live-arming VETO (5f-3e) already fired ABOVE, in the
+    // cloud preflight (`vd_io_prod::boot::enforce_cloud_preflight`, via the `resolve_node_d3` call at the top
+    // of `main`): a CLOUD node of ANY role with `VD_DEMAND` set is REFUSED until per-node client-facing trust
+    // exists (P7), because the source-blind demand route is a client-injectable spawn DoS on today's shared
+    // cluster secret — so by the time control reaches here `VD_DEMAND` is only the on/off flag.
+    // `VD_UNIVERSE_SEED` is the SAME cluster seed the shard reads. The per-account STORED
     // spawn poses REUSE 5f-3b's `resolve_spawn_poses` (the SAME `VD_SPAWN_POSES` map the shard admits at,
     // so the gateway-DERIVED home coord and the shard-side admit pose agree). The forest is walk-scale (the
     // P3 scope of `container_coord_at`; the visual/canonical lazy generator is the P4 owe).
