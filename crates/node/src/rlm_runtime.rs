@@ -468,6 +468,18 @@ mod tests {
         world.remove_resource::<RlmReconcilerRes>().expect("res")
     }
 
+    /// Ingest `inbound` into an EXISTING reconciler through the UNCHANGED `record_realm_demands` system
+    /// (mirrors [`run`] but folds into a res that already carries state), returning it for the next drive.
+    fn ingest_into(rlm: RlmReconcilerRes, inbound: Vec<Inbound>) -> RlmReconcilerRes {
+        let mut world = World::new();
+        world.insert_resource(InboundBox(inbound));
+        world.insert_resource(rlm);
+        let mut schedule = Schedule::default();
+        schedule.add_systems(record_realm_demands);
+        schedule.run(&mut world);
+        world.remove_resource::<RlmReconcilerRes>().expect("res")
+    }
+
     #[test]
     fn ingest_folds_each_verb_into_the_ledger() {
         let rlm = run(vec![
@@ -639,6 +651,80 @@ mod tests {
             rlm.launches.minted.get(sys(7).path()).map(BTreeMap::len),
             Some(1),
             "still exactly one minted node for the path — no second incarnation"
+        );
+    }
+
+    #[test]
+    fn ingest_reconcile_drive_5f3a_bootstrap_ride_spins_the_whole_home_lineage() {
+        // RLM 5f-3a — the OQ-4 "ride" contract (Layer-2, ingest→reconcile→drive). ONE synthetic RealmDemand
+        // for the player's DEEPEST home realm — the Area-A box at x=25, resolved by the REAL 5f-2 resolver
+        // `container_coord_at` to the 5-level lineage [Universe(0), Galaxy(1), System(7), Planet(7),
+        // Area(7)] — injected through the UNCHANGED source-agnostic `record_realm_demands` ingress, must
+        // spin up the WHOLE ancestor chain in ONE reconcile sweep, STRUCTURALLY via
+        // ledger→reconcile→ancestor_close→spawn. ANTI-BYPASS: this test ONLY ever pushes a Wire{Saga} demand
+        // frame (`demand_frame` → `record_realm_demands`); it NEVER calls `spawn_realm` / a direct spawn
+        // hook, so passing proves the seed rode the ONE machinery.
+        use RealmKindTag::{Area, Galaxy, Planet, System, Universe};
+        use glam::DVec3;
+        use vd_core::worldgen::{UniverseConfig, container_coord_at};
+
+        let deepest =
+            container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0));
+        let lin = |levels: &[(RealmKindTag, u64)]| -> RealmPath {
+            RealmPath::from_levels(levels.iter().map(|&(k, s)| RealmLevel::new(k, s)).collect())
+        };
+        let expected: std::collections::BTreeSet<RealmPath> = [
+            lin(&[(Universe, 0)]),
+            lin(&[(Universe, 0), (Galaxy, 1)]),
+            lin(&[(Universe, 0), (Galaxy, 1), (System, 7)]),
+            lin(&[(Universe, 0), (Galaxy, 1), (System, 7), (Planet, 7)]),
+            lin(&[
+                (Universe, 0),
+                (Galaxy, 1),
+                (System, 7),
+                (Planet, 7),
+                (Area, 7),
+            ]),
+        ]
+        .into_iter()
+        .collect();
+
+        // Ingest ONE Wire{Saga} demand for the deepest home (build the World exactly like `run`), then
+        // reconcile+drive at tick 100 (NONZERO — a post-ClockSync tick).
+        let mut rlm = run(vec![demand_frame(&deepest, DemandVerb::SpinUp, 100, 1)]);
+        let mut d = dir();
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        assert_eq!(
+            rlm.spins_requested, 5,
+            "one leaf demand spins the whole 5-level home lineage in one sweep"
+        );
+        assert_eq!(rlm.undecodable_demands, 0);
+        let minted: std::collections::BTreeSet<RealmPath> =
+            rlm.launches.minted.keys().cloned().collect();
+        assert_eq!(
+            minted, expected,
+            "minted EXACTLY the whole Universe→Area ancestor chain — nothing missing, nothing extra"
+        );
+
+        // A SECOND sweep at the next tick is a NO-OP: the chain is launching (minted, no head) ⇒ nothing
+        // re-spawns (idempotent, launching-not-double-spawned).
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101));
+        assert_eq!(
+            rlm.spins_requested, 5,
+            "second sweep is idempotent — a launching chain is not re-spawned"
+        );
+
+        // Control — the fence is CARRIED, not AUTHORISING: a re-injected demand for the SAME home with a
+        // DIFFERENT `parent_fence` yields the byte-identical spawn set (reconcile never reads `last_fence`
+        // for a decision, rlm.rs ~206-208). spins_requested stays 5.
+        let mut rlm = ingest_into(
+            rlm,
+            vec![demand_frame(&deepest, DemandVerb::SpinUp, 102, 999)],
+        );
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102));
+        assert_eq!(
+            rlm.spins_requested, 5,
+            "a different parent_fence changes nothing — the fence is carried, never authorising"
         );
     }
 

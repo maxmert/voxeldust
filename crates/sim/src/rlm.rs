@@ -771,7 +771,11 @@ mod tests {
         let settle = 10;
         for p99 in [0u64, 30, 60, 100, 200] {
             let t = RlmTuning::cloud_with_boot(20, p99, settle);
-            assert_eq!(t.validate(), Ok(()), "boot-floored budget stays valid (p99={p99})");
+            assert_eq!(
+                t.validate(),
+                Ok(()),
+                "boot-floored budget stays valid (p99={p99})"
+            );
             // launch_ttl is the MAX of the ~3s default and the measured boot+settle.
             assert_eq!(t.launch_ttl_ticks, (20 * 3).max(p99 + settle), "p99={p99}");
             // The 5f coupling: min_dwell (spinup_cooldown + launch_ttl) never falls below boot+settle, so a
@@ -784,7 +788,10 @@ mod tests {
             );
         }
         // The floor DOMINATES the default when boot is large (200+10 > 60).
-        assert_eq!(RlmTuning::cloud_with_boot(20, 200, 10).launch_ttl_ticks, 210);
+        assert_eq!(
+            RlmTuning::cloud_with_boot(20, 200, 10).launch_ttl_ticks,
+            210
+        );
         // The default DOMINATES when boot is small (40+5 < 60).
         assert_eq!(RlmTuning::cloud_with_boot(20, 40, 5).launch_ttl_ticks, 60);
     }
@@ -1301,6 +1308,73 @@ mod tests {
                 LifecycleAction::SpinUp { coord: u_g_s_p() },
             ]
         );
+    }
+
+    /// RLM 5f-3a — the OQ-4 "ride" contract (Layer-1, pure kernel). The bootstrap-ride proof: ONE synthetic
+    /// leaf demand for a player's DEEPEST home realm spins up the WHOLE ancestor chain in ONE reconcile
+    /// sweep. DISTINCT from `reconcile_ancestor_closes_and_spins_up_ancestor_first` above (which demands a
+    /// hand-built 4-level coord `u_g_s_p` = [Universe(0), Galaxy(1), System(7), Planet(3)]): here the
+    /// demanded leaf is resolved by the REAL 5f-2 resolver `container_coord_at` at the Area-A box (x=25) —
+    /// proven by 5f-2 to be the DEEPER full 5-level lineage [Universe(0), Galaxy(1), System(7), Planet(7),
+    /// Area(7)] — so this exercises the real resolver → reconcile seam end-to-end on the deepest chain.
+    /// The four ancestors have NO demand cell of their own (only the Area leaf was recorded); they are
+    /// desired PURELY by `ancestor_close`, so passing proves a leaf demand pulls its whole chain with NO
+    /// per-level descent.
+    #[test]
+    fn reconcile_5f3a_bootstrap_ride_spins_the_whole_area_lineage_from_one_leaf_demand() {
+        use RealmKindTag::{Area, Galaxy, Planet, System, Universe};
+        use glam::DVec3;
+        use vd_core::worldgen::{UniverseConfig, container_coord_at};
+
+        let t = cloud();
+        // The deepest home coord from the REAL resolver (NOT hand-built) — the Area-A box at x=25.
+        let deepest =
+            container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0));
+        let mut l = DemandLedger::default();
+        // tick NONZERO (a post-ClockSync tick) — a tick-0 seed is inert by `demanded_recently`.
+        l.record_demand(&deepest, DemandVerb::SpinUp, UniverseTick(100), Fence(1));
+        let d = dir(&[]); // EMPTY directory — no heads, nothing running.
+        let (actions, delta) = reconcile(
+            &l,
+            &d,
+            &|_n: NodeId| false,
+            &no_launch(),
+            &t,
+            UniverseTick(100),
+            UniverseTick(0),
+        );
+        // EXACTLY 5 SpinUps, ancestor-first, coord-for-coord — the whole Universe→Area chain from ONE leaf.
+        // (All-SpinUp ⇒ no ForceReap/Kill.) The comparison is over the FULL `.path()` per level (each `deep`
+        // builds the lineage), proving `container_coord_at`'s leaf drove the exact ancestor prefix chain.
+        assert_eq!(
+            actions,
+            vec![
+                LifecycleAction::SpinUp {
+                    coord: deep(&[(Universe, 0)])
+                },
+                LifecycleAction::SpinUp {
+                    coord: deep(&[(Universe, 0), (Galaxy, 1)])
+                },
+                LifecycleAction::SpinUp {
+                    coord: deep(&[(Universe, 0), (Galaxy, 1), (System, 7)])
+                },
+                LifecycleAction::SpinUp {
+                    coord: deep(&[(Universe, 0), (Galaxy, 1), (System, 7), (Planet, 7)])
+                },
+                LifecycleAction::SpinUp {
+                    coord: deep(&[
+                        (Universe, 0),
+                        (Galaxy, 1),
+                        (System, 7),
+                        (Planet, 7),
+                        (Area, 7)
+                    ])
+                },
+            ]
+        );
+        // Pure spin-up bootstrap: no teardown/draining side-effects.
+        assert!(delta.set_draining.is_empty());
+        assert!(delta.retire.is_empty());
     }
 
     #[test]
