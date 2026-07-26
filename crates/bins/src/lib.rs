@@ -1973,6 +1973,52 @@ fn universe_scale_of(raw: &str) -> Result<UniverseScale, ConfigError> {
     }
 }
 
+/// The env keys a DEMAND-SPAWNED shard inherits from the orchestrator's own env (RLM 5f). ONE list so the
+/// spawn-anchor set is single-sourced + unit-testable. Each is forwarded ONLY if present + non-empty (see
+/// [`spawn_anchors_from_env`]), so an absent key ⇒ byte-identical child env; the whole set is unused while
+/// the reconciler is inert (`spawn_realm` never runs).
+#[must_use]
+pub fn spawn_anchor_keys() -> &'static [&'static str] {
+    &[
+        "VD_TRUST_DIR",
+        "VD_TICK_HZ",
+        "VD_TICK_DT",
+        "VD_SPEED",
+        "VD_SNAPSHOT_BUDGET",
+        "VD_UNIVERSE_SEED",
+        "VD_UNIVERSE_SCALE",
+        "VD_OUTBOUND_CAP",
+        // A forked shard's must-parse boot params (consumed only inside `spawn_realm`).
+        "VD_MINT_SEED",
+        "VD_INPUT_LOG_CAP",
+        // RLM 5f-4: a demand-spawned shard needs these LIVE too — WITHOUT VD_BOOT_TICKS_P99 its predictive
+        // AoI horizon is 0 (the walk-in predictive spin-up is silently dead); WITHOUT VD_SPAWN_POSES the
+        // gateway's server-derived login home and the shard's admit pose disagree; WITHOUT
+        // VD_LEASE_RENEW_INTERVAL its realm lease is never renewed (liveness inert). The self-fence RECHECK
+        // is deliberately NOT forwarded — the shard's `resolve_node_d3` self-derives a sane active default
+        // from the `n` key (there is no `VD_REALM_RECHECK` read; a spawned shard defaults to hz/2).
+        "VD_BOOT_TICKS_P99",
+        "VD_SPAWN_POSES",
+        "VD_LEASE_RENEW_INTERVAL",
+    ]
+}
+
+/// Build the spawned-child anchor env from the orchestrator's own env — each [`spawn_anchor_keys`] key
+/// carried iff present + non-empty (absent ⇒ byte-identical child env). The caller appends the
+/// node-specific anchors (VD_ORCH + the VD_PEERS ancestor closure) after this.
+#[must_use]
+pub fn spawn_anchors_from_env(env: &EnvConfig) -> Vec<(&'static str, String)> {
+    spawn_anchor_keys()
+        .iter()
+        .filter_map(|&key| {
+            env.string(key)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| (key, v))
+        })
+        .collect()
+}
+
 /// Resolve the shard's realm SUBJECTIVE time multiplier (D-45(a)): `VD_REALM_TIME_MULTIPLIER` (the
 /// per-realm override) else `VD_TIME_MULTIPLIER` (the orchestrator-wide default) else `1.0` (universe
 /// rate — byte-identical). Feeds `StubConfig::time_multiplier` (dilates OCCUPANT movement inside the
@@ -2820,6 +2866,48 @@ mod incarnation_tests {
         assert_eq!(
             resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "walk-demand")])),
             Ok(UniverseScale::WalkDemand),
+        );
+    }
+
+    #[test]
+    fn spawn_anchors_forward_the_5f4_keys_and_stay_byte_identical_when_absent() {
+        // Absent 5f-4 keys ⇒ EXACTLY the pre-5f-4 anchor set (byte-identical spawned-child env), and each
+        // present key is carried in list order.
+        let base = env(&[
+            ("VD_TRUST_DIR", "/t"),
+            ("VD_TICK_HZ", "50"),
+            ("VD_UNIVERSE_SEED", "7"),
+        ]);
+        assert_eq!(
+            spawn_anchors_from_env(&base),
+            vec![
+                ("VD_TRUST_DIR", "/t".to_owned()),
+                ("VD_TICK_HZ", "50".to_owned()),
+                ("VD_UNIVERSE_SEED", "7".to_owned()),
+            ],
+            "only the present pre-5f-4 keys, in list order — the 5f-4 keys absent ⇒ byte-identical"
+        );
+        // The 5f-4 keys are forwarded when present, in list order (after the earlier keys).
+        let armed = env(&[
+            ("VD_TICK_HZ", "50"),
+            ("VD_BOOT_TICKS_P99", "100"),
+            ("VD_SPAWN_POSES", "5=1,2,3"),
+            ("VD_LEASE_RENEW_INTERVAL", "25"),
+        ]);
+        assert_eq!(
+            spawn_anchors_from_env(&armed),
+            vec![
+                ("VD_TICK_HZ", "50".to_owned()),
+                ("VD_BOOT_TICKS_P99", "100".to_owned()),
+                ("VD_SPAWN_POSES", "5=1,2,3".to_owned()),
+                ("VD_LEASE_RENEW_INTERVAL", "25".to_owned()),
+            ],
+            "the 5f-4 keys reach the spawned shard so its predictive AoI, admit pose, and lease liveness live"
+        );
+        // An empty value is dropped, never forwarded as an empty string.
+        assert!(
+            spawn_anchors_from_env(&env(&[("VD_BOOT_TICKS_P99", "")])).is_empty(),
+            "an empty value is not forwarded"
         );
     }
 

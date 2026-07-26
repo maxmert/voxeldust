@@ -232,26 +232,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(feature = "store-test-hooks"))]
     let launch_tuning = StoreTuning::default();
     let (launch_store, _launch_durability) = RedbStore::open(&launch_store_path, launch_tuning)?;
-    let mut spawn_anchors: Vec<(&'static str, String)> = Vec::new();
-    for key in [
-        "VD_TRUST_DIR",
-        "VD_TICK_HZ",
-        "VD_TICK_DT",
-        "VD_SPEED",
-        "VD_SNAPSHOT_BUDGET",
-        "VD_UNIVERSE_SEED",
-        "VD_UNIVERSE_SCALE",
-        "VD_OUTBOUND_CAP",
-        // A forked shard's must-parse boot params (a shard refuses to boot without them — see the smoke
-        // gate's anchor list). Byte-identical while inert (consumed ONLY inside `spawn_realm`, never run
-        // under `RlmTuning::default()`); 5f's `--demand` launcher needs them regardless.
-        "VD_MINT_SEED",
-        "VD_INPUT_LOG_CAP",
-    ] {
-        if let Some(v) = env.string(key).ok().filter(|v| !v.is_empty()) {
-            spawn_anchors.push((key, v));
-        }
-    }
+    // RLM 5f — the env a demand-spawned shard inherits (single-sourced + unit-tested in vd_bins). Each key
+    // is carried only if present + non-empty ⇒ byte-identical child env; the set is unused while inert.
+    let mut spawn_anchors = vd_bins::spawn_anchors_from_env(&env);
     spawn_anchors.push(("VD_ORCH", local.0.to_string()));
     // The child's VD_PEERS anchors: this orchestrator (self) + the gateway (if booked). The per-realm
     // ANCESTOR closure is computed per-spawn by SpawnCore; only these static anchors are held here.
