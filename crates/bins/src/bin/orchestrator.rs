@@ -357,13 +357,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let demand = vd_bins::parse_bool_env(&env, "VD_DEMAND")?;
     let static_forest = vd_bins::parse_bool_env(&env, "VD_STATIC_FOREST")?;
     if demand & static_forest {
-        return Err("VD_DEMAND and VD_STATIC_FOREST are mutually exclusive: an armed demand reconciler \
+        return Err(
+            "VD_DEMAND and VD_STATIC_FOREST are mutually exclusive: an armed demand reconciler \
                     would reap the externally pre-spawned static-forest realm heads"
-            .into());
+                .into(),
+        );
     }
     let boot_ticks_p99: u64 = env.parse_or("VD_BOOT_TICKS_P99", 0)?;
     let settle_ticks: u64 = env.parse_or("VD_REALM_SETTLE_TICKS", 0)?;
-    let rlm = vd_node::rlm_runtime::resolve_rlm_tuning(demand, tick_hz, boot_ticks_p99, settle_ticks);
+    let rlm =
+        vd_node::rlm_runtime::resolve_rlm_tuning(demand, tick_hz, boot_ticks_p99, settle_ticks);
     rlm.validate().map_err(|e| e.to_string())?;
     register_orchestrator_with_store(
         world,

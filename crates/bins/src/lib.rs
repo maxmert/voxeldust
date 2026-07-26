@@ -2018,7 +2018,8 @@ fn parse_time_multiplier(raw: &str) -> Result<f64, ConfigError> {
 /// spawn point.
 pub fn resolve_spawn_poses(
     env: &EnvConfig,
-) -> Result<std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>, ConfigError> {
+) -> Result<std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>, ConfigError>
+{
     let raw = env.string("VD_SPAWN_POSES").unwrap_or_default();
     parse_spawn_poses(raw.trim())
 }
@@ -2028,7 +2029,8 @@ pub fn resolve_spawn_poses(
 /// Universe-root frame; anything malformed ⇒ loud.
 fn parse_spawn_poses(
     raw: &str,
-) -> Result<std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>, ConfigError> {
+) -> Result<std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>, ConfigError>
+{
     use vd_core::glam::DVec3;
     use vd_core::pose::{FrameRef, StampedPose};
     let mut map = std::collections::BTreeMap::new();
@@ -2041,8 +2043,12 @@ fn parse_spawn_poses(
     };
     for entry in raw.split(';').filter(|e| !e.trim().is_empty()) {
         let (acct_raw, coords_raw) = entry.split_once('=').ok_or_else(|| unparseable(entry))?;
-        let account =
-            vd_core::AccountId(acct_raw.trim().parse::<u128>().map_err(|_| unparseable(entry))?);
+        let account = vd_core::AccountId(
+            acct_raw
+                .trim()
+                .parse::<u128>()
+                .map_err(|_| unparseable(entry))?,
+        );
         let coords = coords_raw
             .split(',')
             .map(|c| c.trim().parse::<f64>())
@@ -2846,7 +2852,10 @@ mod incarnation_tests {
         use vd_core::glam::DVec3;
         use vd_core::pose::{FrameRef, StampedPose};
         // ABSENT / empty ⇒ EMPTY map (every login origin-at-rest, byte-identical).
-        assert_eq!(resolve_spawn_poses(&env(&[])), Ok(std::collections::BTreeMap::new()));
+        assert_eq!(
+            resolve_spawn_poses(&env(&[])),
+            Ok(std::collections::BTreeMap::new())
+        );
         assert_eq!(
             resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "  ")])),
             Ok(std::collections::BTreeMap::new()),

@@ -461,8 +461,8 @@ fn demand_with_static_forest_fails_loud() {
     let f = fixture("demandxor");
     let a = addrs();
     let env = orch_env(&f, &a, &[("VD_DEMAND", "1".to_string())]);
-    let mut child = spawn_node(env!("CARGO_BIN_EXE_vd-orchestrator"), &f.common, &env)
-        .expect("spawn orch");
+    let mut child =
+        spawn_node(env!("CARGO_BIN_EXE_vd-orchestrator"), &f.common, &env).expect("spawn orch");
     let start = Instant::now();
     let status = loop {
         if let Some(s) = child.try_wait().expect("try_wait orch") {
