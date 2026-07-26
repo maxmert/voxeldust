@@ -1942,12 +1942,17 @@ pub fn resolve_realm_boundaries(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UniverseScale {
     Walk,
+    /// RLM 5f-4: the EXACT walk geometry with the AoI band LIVE (`VD_UNIVERSE_SCALE=walk-demand`) — a demand
+    /// cluster boots this so a WALKING occupant drives demand-driven realm spin-up/down. Geometry (and thus
+    /// containment) is byte-identical to `Walk`; only the per-realm AoI band differs.
+    WalkDemand,
     Visual,
 }
 
 /// Resolve `VD_UNIVERSE_SCALE`: ABSENT / empty / `walk` ⇒ [`UniverseScale::Walk`] (the byte-identical
-/// production default — EVERY existing shard boot is unchanged); `visual` ⇒ [`UniverseScale::Visual`];
-/// ANY other value fails LOUD at boot (never a silent degrade to Walk).
+/// production default — EVERY existing shard boot is unchanged); `walk-demand` ⇒
+/// [`UniverseScale::WalkDemand`] (walk geometry, LIVE AoI); `visual` ⇒ [`UniverseScale::Visual`]; ANY other
+/// value fails LOUD at boot (never a silent degrade to Walk).
 ///
 /// # Errors
 /// [`ConfigError::Unparseable`] for an unrecognized value.
@@ -1959,6 +1964,7 @@ pub fn resolve_universe_scale(env: &EnvConfig) -> Result<UniverseScale, ConfigEr
 fn universe_scale_of(raw: &str) -> Result<UniverseScale, ConfigError> {
     match raw {
         "" | "walk" => Ok(UniverseScale::Walk),
+        "walk-demand" => Ok(UniverseScale::WalkDemand),
         "visual" => Ok(UniverseScale::Visual),
         other => Err(ConfigError::Unparseable {
             key: "VD_UNIVERSE_SCALE".to_owned(),
@@ -2072,16 +2078,22 @@ fn parse_spawn_poses(
 /// The containment region forest + the moving-child roster for a shard booting at `scale`, hosting
 /// `held_realms` (own realm `hosted`). `Walk` ⇒ the seed NEIGHBOURHOOD + an EMPTY roster — BYTE-IDENTICAL
 /// to the pre-FA-5 boot (the exact `realm_neighbourhood_for_held`, and `RealmRegions::with_moving_children`
-/// with an empty map is a no-op vs `new`). `Visual` ⇒ the FA-5 single-system forest (`realm_regions_for_config`)
+/// with an empty map is a no-op vs `new`). `WalkDemand` ⇒ the SAME neighbourhood geometry with the LIVE AoI
+/// band (`walk_demand(occupant_v_max_mps, tick_dt_s)`), empty roster — the shard demands its children as a
+/// walking occupant reaches them. `Visual` ⇒ the FA-5 single-system forest (`realm_regions_for_config`)
 /// plus its orbiting planets as movers (`moving_children_for_config`) — the SAME `(seed, visual config)`
 /// builds BOTH, so the regions and the moving roster can NEVER derive from different elements (the vet
 /// all-shard-seams-same-config rule; the shard authors each planet's live pose against the same region set).
+/// `occupant_v_max_mps` (= `move_speed · time_multiplier`) + `tick_dt_s` feed the WalkDemand AoI band ONLY
+/// (ignored by `Walk`/`Visual`); they close the M-2 two-home owe (the band's tick dt = the live cluster's).
 #[must_use]
 pub fn boot_regions_and_movers(
     scale: UniverseScale,
     universe_seed: u64,
     held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
     hosted: vd_core::pose::RealmId,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
 ) -> (
     Vec<vd_core::geometry::RealmRegion>,
     std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::celestial::OrbitalElements>,
@@ -2090,6 +2102,14 @@ pub fn boot_regions_and_movers(
     match scale {
         UniverseScale::Walk => (
             vd_core::worldgen::realm_neighbourhood_for_held(universe_seed, held_realms),
+            BTreeMap::new(),
+        ),
+        UniverseScale::WalkDemand => (
+            vd_core::worldgen::realm_neighbourhood_for_held_config(
+                universe_seed,
+                held_realms,
+                &vd_core::worldgen::UniverseConfig::walk_demand(occupant_v_max_mps, tick_dt_s),
+            ),
             BTreeMap::new(),
         ),
         UniverseScale::Visual => {
@@ -2796,6 +2816,11 @@ mod incarnation_tests {
             resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "walk")])),
             Ok(UniverseScale::Walk),
         );
+        // RLM 5f-4: "walk-demand" is the demand-cluster scale (walk geometry, LIVE AoI).
+        assert_eq!(
+            resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "walk-demand")])),
+            Ok(UniverseScale::WalkDemand),
+        );
     }
 
     #[test]
@@ -2896,7 +2921,9 @@ mod incarnation_tests {
         use std::collections::BTreeSet;
         let hosted = RealmId::System(7);
         let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
-        let (regions, moving) = boot_regions_and_movers(UniverseScale::Walk, 0, &held, hosted);
+        // The two dynamics args are IGNORED by Walk — pass live-cluster-ish values to prove it.
+        let (regions, moving) =
+            boot_regions_and_movers(UniverseScale::Walk, 0, &held, hosted, 2.0, 0.02);
         // Walk ⇒ EXACTLY realm_neighbourhood_for_held + an EMPTY mover roster (the pre-FA-5 boot; the
         // empty map makes with_moving_children a no-op vs new — byte-identical).
         assert_eq!(
@@ -2907,11 +2934,49 @@ mod incarnation_tests {
     }
 
     #[test]
+    fn boot_regions_and_movers_walk_demand_is_walk_geometry_with_a_live_band() {
+        use std::collections::BTreeSet;
+        let hosted = RealmId::System(7);
+        let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
+        let (regions, moving) =
+            boot_regions_and_movers(UniverseScale::WalkDemand, 0, &held, hosted, 2.0, 0.02);
+        // Same GEOMETRY as Walk (containment unchanged) — the SAME neighbourhood the config builder returns
+        // for walk_demand, and an EMPTY mover roster (static walk forest, no orbits).
+        let want = vd_core::worldgen::realm_neighbourhood_for_held_config(
+            0,
+            &held,
+            &vd_core::worldgen::UniverseConfig::walk_demand(2.0, 0.02),
+        );
+        assert_eq!(regions, want);
+        assert!(moving.is_empty());
+        // The band is LIVE (vs Walk's inert): every region carries a positive spin-up radius, and the
+        // geometry (realm/center/shape) matches Walk region-for-region — only the AoI differs.
+        let walk = boot_regions_and_movers(UniverseScale::Walk, 0, &held, hosted, 2.0, 0.02).0;
+        assert_eq!(regions.len(), walk.len());
+        for (d, w) in regions.iter().zip(walk.iter()) {
+            assert_eq!(d.realm, w.realm, "same realm");
+            assert_eq!(d.center, w.center, "same center (geometry unchanged)");
+            assert_eq!(d.shape, w.shape, "same shape (containment unchanged)");
+            assert!(
+                d.aoi.spin_up_r_m() > 0.0,
+                "walk-demand region has a LIVE AoI band"
+            );
+            assert_eq!(w.aoi.spin_up_r_m(), 0.0, "walk region stays AoI-inert");
+        }
+        // The hosted realm IS in its own neighbourhood (membership sanity — a shard evaluates its own realm).
+        assert!(
+            regions.iter().any(|r| r.realm == hosted),
+            "hosted realm is in its neighbourhood"
+        );
+    }
+
+    #[test]
     fn boot_regions_and_movers_visual_builds_the_system_forest_and_orbiting_planets() {
         use std::collections::BTreeSet;
         let hosted = RealmId::System(7);
         let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
-        let (regions, moving) = boot_regions_and_movers(UniverseScale::Visual, 0, &held, hosted);
+        let (regions, moving) =
+            boot_regions_and_movers(UniverseScale::Visual, 0, &held, hosted, 2.0, 0.02);
         let config = vd_core::worldgen::UniverseConfig::visual_scale();
         // The SAME (seed, config) builds BOTH the regions and the mover roster (they can't disagree).
         assert_eq!(

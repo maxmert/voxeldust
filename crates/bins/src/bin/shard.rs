@@ -110,8 +110,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ORBIT. Build the containment forest + the moving-child roster from the SAME `(scale, seed, config)`,
     // so the authored own-frame and the moving planets can never derive from different elements.
     let scale = vd_bins::resolve_universe_scale(&env)?;
-    let (seed_regions, moving) =
-        vd_bins::boot_regions_and_movers(scale, universe_seed, &held_realms, own_realm);
+    // RLM 5f-4: the WalkDemand AoI band is measured against the LIVE occupant speed the sim integrates
+    // (`move_speed · time_multiplier`) at the LIVE tick dt — closing the M-2 two-home owe. `Walk`/`Visual`
+    // ignore both.
+    let (seed_regions, moving) = vd_bins::boot_regions_and_movers(
+        scale,
+        universe_seed,
+        &held_realms,
+        own_realm,
+        move_speed * time_multiplier,
+        tick_dt,
+    );
     // The shard's LOCAL authority frame = its realm's canonical frame from the seed forest (NODE-PER-REALM:
     // a Planet shard is `PlanetCentered`, a Station `StationLocal`, an Area `AreaLocal{planet,area}` — an Area
     // REQUIRES its Planet parent, which the forest region carries). Looked up from `seed_regions` — the
