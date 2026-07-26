@@ -168,6 +168,14 @@ impl RlmReconcilerRes {
         &self.tuning
     }
 
+    /// The current live demand-spawned node roster (RLM 5f-4c). Republished into
+    /// [`DynamicClockPeers`](crate::orchestrator::DynamicClockPeers) each sweep so a spawned shard receives
+    /// the `ClockSync` broadcast (and therefore syncs, then authors + demands its own children).
+    #[must_use]
+    pub fn live_nodes(&self) -> std::collections::BTreeSet<NodeId> {
+        self.spawner.live_nodes()
+    }
+
     /// Set the crash-recovery quiesce watermark (slice 3e boot path): teardown is blocked until `now`
     /// reaches it, so a rebuilt orchestrator (empty ledger) never mass-reaps before demands re-accrue.
     pub fn arm_quiesce(&mut self, until: UniverseTick) {
@@ -392,10 +400,11 @@ pub fn reconcile_realm_lifecycle(
     mut dir: ResMut<crate::orchestrator::DirectoryRes>,
     runtime: Res<crate::saga_runtime::SagaRuntimeRes>,
     mut rlm: ResMut<RlmReconcilerRes>,
+    mut dynamic_peers: ResMut<crate::orchestrator::DynamicClockPeers>,
 ) {
     let interval = rlm.tuning().reconcile_interval_ticks;
     if interval == 0 {
-        return; // INERT: the byte-identical default (no reconciler wired).
+        return; // INERT: the byte-identical default (no reconciler wired) — DynamicClockPeers stays empty.
     }
     let now = clock.universe_tick;
     if !now.0.is_multiple_of(interval) {
@@ -403,6 +412,10 @@ pub fn reconcile_realm_lifecycle(
     }
     let dead = |node: NodeId| runtime.is_node_latched_dead(node);
     rlm.reconcile_and_drive(&mut dir.0, &dead, now);
+    // RLM 5f-4c: republish the live spawned-node roster so the clock broadcast (next tick) reaches every
+    // demand-spawned shard — a node spawned in THIS sweep is included immediately, a reaped one drops next
+    // sweep. Assigned (not merged) so the set can only shrink when the roster does (no unbounded growth).
+    dynamic_peers.0 = rlm.live_nodes();
 }
 
 #[cfg(test)]
@@ -988,6 +1001,7 @@ mod tests {
         world.insert_resource(crate::saga_runtime::SagaRuntimeRes::with_tuning(
             vd_sim::saga::SagaTuning::default(),
         ));
+        world.insert_resource(crate::orchestrator::DynamicClockPeers::default());
         world.insert_resource(rlm);
         world
     }
@@ -1006,6 +1020,48 @@ mod tests {
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         let mut world = lifecycle_world(rlm, 100);
         assert_eq!(run_lifecycle(&mut world), 0, "inert tuning ⇒ no sweep");
+        // RLM 5f-4c: the inert path returns BEFORE the publish ⇒ DynamicClockPeers stays empty
+        // (byte-identical — the clock broadcast reaches only the static peers).
+        assert!(
+            world
+                .resource::<crate::orchestrator::DynamicClockPeers>()
+                .0
+                .is_empty(),
+            "inert reconciler publishes no dynamic clock peers"
+        );
+    }
+
+    #[test]
+    fn reconcile_system_republishes_the_live_spawned_roster_as_clock_peers() {
+        // RLM 5f-4c (the blocker fix): an armed sweep that spins a realm up must publish the spawned node
+        // into DynamicClockPeers, so the next clock broadcast reaches it — without ClockSync a spawned shard
+        // gates off all authoring and would be mute. Published SET == the spawner's live roster EXACTLY
+        // (assignment, not merge ⇒ a reaped node drops next sweep; no unbounded growth at 100K).
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::cloud(20), spawner());
+        rlm.ledger
+            .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
+        let mut world = lifecycle_world(rlm, 100);
+        assert!(
+            world
+                .resource::<crate::orchestrator::DynamicClockPeers>()
+                .0
+                .is_empty(),
+            "empty before the first sweep"
+        );
+        assert_eq!(run_lifecycle(&mut world), 1, "the demanded realm spins up");
+        let published = world
+            .resource::<crate::orchestrator::DynamicClockPeers>()
+            .0
+            .clone();
+        let live = world.resource::<RlmReconcilerRes>().live_nodes();
+        assert_eq!(
+            published, live,
+            "DynamicClockPeers mirrors the live roster exactly"
+        );
+        assert!(
+            !published.is_empty(),
+            "the spawned node is now a clock peer"
+        );
     }
 
     #[test]

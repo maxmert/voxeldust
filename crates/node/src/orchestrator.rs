@@ -59,6 +59,16 @@ pub struct UniverseClockRes(pub CeilingClock);
 #[derive(Resource, Clone, Debug)]
 struct ClockPeers(Vec<NodeId>);
 
+/// RLM 5f-4c: the runtime set of DEMAND-SPAWNED shard nodes that ALSO receive the per-tick `ClockSync`
+/// broadcast. Republished from the spawner's live roster each reconcile sweep
+/// ([`reconcile_realm_lifecycle`](crate::rlm_runtime::reconcile_realm_lifecycle)). A spawned shard gates ALL
+/// its authoring on `has_synced`, so without this it would never sync ⇒ never demand its own children,
+/// never detect an occupant leaving, never report ready. EMPTY in the inert default (the reconciler never
+/// sweeps) ⇒ the broadcast is byte-identical to the static-only one. Disjoint from [`ClockPeers`] by
+/// construction (spawned nodes get fresh F2 ids, never a static-roster id).
+#[derive(Resource, Clone, Debug, Default)]
+pub struct DynamicClockPeers(pub(crate) std::collections::BTreeSet<NodeId>);
+
 /// Orchestrator-side honesty counters — tolerated anomalies that must never be silent.
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
 pub struct OrchestratorStats {
@@ -147,6 +157,7 @@ pub fn register_orchestrator_with_store(
     world.insert_resource(UniverseClockRes(clock));
     world.insert_resource(DirectoryRes(directory));
     world.insert_resource(ClockPeers(cfg.clock_peers.clone()));
+    world.insert_resource(DynamicClockPeers::default());
     world.insert_resource(OrchestratorStats::default());
     world.insert_resource(runtime);
     world.insert_resource(crate::saga_runtime::StoreRes(store));
@@ -187,6 +198,7 @@ fn advance_and_broadcast_clock(
     mut clock: ResMut<UniverseClockRes>,
     mut sample: ResMut<ClockSample>,
     peers: Res<ClockPeers>,
+    dynamic: Res<DynamicClockPeers>,
     mut outbox: ResMut<OutboundBox>,
 ) {
     let (now, action) = clock
@@ -210,7 +222,11 @@ fn advance_and_broadcast_clock(
         universe_tick: now,
         epoch: clock.0.epoch(),
     });
-    for peer in &peers.0 {
+    // RLM 5f-4c: the STATIC peers (in cfg order) THEN the runtime DYNAMIC set (demand-spawned shards,
+    // sorted). `dynamic` is empty in the inert default ⇒ byte-identical to the static-only broadcast; the
+    // two are disjoint by construction (fresh F2 ids vs the static roster) so the chain never double-sends
+    // — and a stray overlap would only cost a harmless duplicate Membership ClockSync (loss-tolerated).
+    for peer in peers.0.iter().chain(dynamic.0.iter()) {
         outbox.push_flow(*peer, MsgClass::Membership, &flow);
     }
 }
@@ -438,6 +454,54 @@ mod tests {
             orch.world_mut().resource::<ClockSample>().universe_tick,
             UniverseTick(201)
         );
+    }
+
+    #[test]
+    fn clock_broadcast_also_reaches_dynamic_spawned_peers() {
+        // RLM 5f-4c: a demand-spawned shard (in DynamicClockPeers) receives the SAME ClockSync as the static
+        // peers, so it can sync + author. The static peers are unaffected (union, not replacement). The
+        // inert reconciler (cfg's default RlmTuning) never republishes, so the seeded set survives the tick.
+        const SPAWNED: NodeId = NodeId(1000);
+        let hub = MemHub::new();
+        let mut orch = build_app(
+            NodeConfig {
+                node_id: ORCH,
+                kind: NodeKind::Orchestrator,
+            },
+            hub.register(ORCH, 64),
+        );
+        {
+            let (world, schedule) = orch.parts_mut();
+            register_orchestrator(world, schedule, &cfg());
+            world.insert_resource(DynamicClockPeers([SPAWNED].into_iter().collect()));
+        }
+        let mut shard_t = hub.register(SHARD, 64);
+        let mut gateway_t = hub.register(GATEWAY, 64);
+        let mut spawned_t = hub.register(SPAWNED, 64);
+
+        let report = orch.step_tick();
+        assert_eq!(
+            report.sent, 3,
+            "static SHARD + GATEWAY + the dynamic spawned node"
+        );
+        hub.pump();
+        let expected_sync = Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Membership,
+            bytes: postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::ClockSync {
+                universe_tick: UniverseTick(1),
+                epoch: EpochId(7),
+            }))
+            .expect("encode")
+            .into(),
+        };
+        for t in [&mut shard_t, &mut gateway_t, &mut spawned_t] {
+            assert_eq!(
+                t.drain_inbound(),
+                vec![expected_sync.clone()],
+                "every peer, static + dynamic, receives ClockSync"
+            );
+        }
     }
 
     /// Drive one directory op through a stepped orchestrator and return the raw
