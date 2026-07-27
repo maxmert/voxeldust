@@ -188,6 +188,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spawn_poses,
         },
     );
+    // RLM 5f RG-2: a DEMAND-spawned shard (it carries the spawner's VD_INCARNATION_COOKIE) greets its booked
+    // peers so they learn its return connection — its spawn-minted NodeId is reachable without any pre-booked
+    // address (the cloud-portable property). A STATIC shard carries no cookie ⇒ None ⇒ no greeting ⇒
+    // byte-identical. Inserted via the still-live `world` borrow before the RealmRegions plant below.
+    if let Some(presence) = vd_bins::resolve_presence(&env, tick_dt)? {
+        world.insert_resource(presence);
+    }
     // C-6b — the SEED-DERIVED containment boot (task #135). The shard computes its realm-region
     // NEIGHBOURHOOD closed-form from the shared universe seed (`realm_neighbourhood_for`: own realm +
     // ancestor chain to the ambient root + owned children — NEVER siblings, HR1 replicated-by-construction,

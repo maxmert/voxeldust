@@ -2053,6 +2053,48 @@ fn parse_time_multiplier(raw: &str) -> Result<f64, ConfigError> {
     }
 }
 
+/// RLM 5f RG-2 — the default reactive-greeting cadence in SECONDS (the shard reannounces its presence to
+/// each booked peer it has not heard from for this long). Scaled to ticks at boot from the live tick rate;
+/// `VD_PRESENCE_INTERVAL_TICKS` overrides the computed default outright.
+pub const PRESENCE_REANNOUNCE_SECS: f64 = 1.0;
+
+/// RLM 5f RG-2 — build a DEMAND-spawned shard's reactive-greeting policy ([`PresenceAnnounce`]), or `None`
+/// for a STATIC shard (⇒ no greeting ⇒ byte-identical). The trigger is `VD_INCARNATION_COOKIE`, which ONLY
+/// the demand spawner sets on a forked child (`proc_launch::child_env`); a static dev-cluster/k3d shard never
+/// carries it. The greet set is EVERY booked peer (`VD_PEERS` = the ancestor closure ∪ {orchestrator,
+/// gateway}) — the cloud-completeness widening (a parent must reach a just-spawned child for a crossing-in),
+/// not the gateway alone. The cadence is `PRESENCE_REANNOUNCE_SECS` scaled to ticks by the live `tick_dt`,
+/// overridable by `VD_PRESENCE_INTERVAL_TICKS`; a zero override fails LOUD ([`PresenceAnnounce::new`]).
+///
+/// # Errors
+/// A malformed `VD_PEERS`, an unparseable `VD_PRESENCE_INTERVAL_TICKS`, or a zero interval — an operator
+/// misconfig fails loud at boot rather than silently disabling reachability.
+pub fn resolve_presence(
+    env: &EnvConfig,
+    tick_dt: f64,
+) -> Result<Option<vd_sim::stub::PresenceAnnounce>, String> {
+    // A static shard never carries the spawner's incarnation cookie ⇒ it inserts no greeting policy.
+    if env
+        .string("VD_INCARNATION_COOKIE")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Ok(None);
+    }
+    // The default cadence scales with the tick rate (≈ PRESENCE_REANNOUNCE_SECS of real time); the env knob
+    // overrides it with an explicit tick count.
+    let default_ticks = (PRESENCE_REANNOUNCE_SECS / tick_dt).ceil().max(1.0) as u64;
+    let interval_ticks: u64 = env
+        .parse_or("VD_PRESENCE_INTERVAL_TICKS", default_ticks)
+        .map_err(|e| e.to_string())?;
+    let peers: std::collections::BTreeSet<vd_core::NodeId> = env
+        .peer_book("VD_PEERS")
+        .map_err(|e| e.to_string())?
+        .into_keys()
+        .collect();
+    vd_sim::stub::PresenceAnnounce::new(peers, interval_ticks).map(Some)
+}
+
 /// Resolve the shard's per-account STORED spawn poses (RLM 5f-3b) from the `VD_SPAWN_POSES` STAND-IN — the
 /// seam the P7 durable per-account pose store replaces with ZERO caller reshape (it fills the SAME
 /// `StubConfig::spawn_poses` map). A login for an account with a stored pose is admitted at THAT pose
@@ -2516,6 +2558,62 @@ mod incarnation_tests {
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect::<BTreeMap<_, _>>(),
         )
+    }
+
+    // ---- RLM 5f RG-2: the reactive-greeting boot policy -----------------------------------------
+    #[test]
+    fn resolve_presence_is_none_for_a_static_shard() {
+        // No VD_INCARNATION_COOKIE ⇒ a static shard ⇒ no greeting policy (byte-identical boot).
+        let e = env(&[("VD_PEERS", "2=127.0.0.1:9000")]);
+        assert!(resolve_presence(&e, 0.02).expect("ok").is_none());
+    }
+
+    #[test]
+    fn resolve_presence_greets_every_booked_peer_at_the_scaled_default() {
+        let e = env(&[
+            ("VD_INCARNATION_COOKIE", "abc123"),
+            ("VD_PEERS", "2=127.0.0.1:9000,3=127.0.0.1:9001,30=127.0.0.1:9002"),
+        ]);
+        let p = resolve_presence(&e, 0.02)
+            .expect("ok")
+            .expect("a demand shard greets");
+        // Greets the FULL booked set (ancestors + orchestrator + gateway), not the gateway alone.
+        assert_eq!(
+            p.peers,
+            std::collections::BTreeSet::from([
+                vd_core::NodeId(2),
+                vd_core::NodeId(3),
+                vd_core::NodeId(30),
+            ]),
+        );
+        // Default cadence scales with the tick rate: PRESENCE_REANNOUNCE_SECS (1.0s) / 0.02s = 50 ticks.
+        assert_eq!(p.interval_ticks, 50);
+    }
+
+    #[test]
+    fn resolve_presence_honors_the_tick_override() {
+        let e = env(&[
+            ("VD_INCARNATION_COOKIE", "abc"),
+            ("VD_PEERS", "2=127.0.0.1:9000"),
+            ("VD_PRESENCE_INTERVAL_TICKS", "77"),
+        ]);
+        assert_eq!(
+            resolve_presence(&e, 0.02)
+                .expect("ok")
+                .expect("some")
+                .interval_ticks,
+            77,
+        );
+    }
+
+    #[test]
+    fn resolve_presence_rejects_a_zero_interval_override() {
+        let e = env(&[
+            ("VD_INCARNATION_COOKIE", "abc"),
+            ("VD_PEERS", "2=127.0.0.1:9000"),
+            ("VD_PRESENCE_INTERVAL_TICKS", "0"),
+        ]);
+        assert!(resolve_presence(&e, 0.02).is_err());
     }
 
     #[test]
