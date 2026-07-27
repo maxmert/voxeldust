@@ -103,6 +103,19 @@ pub const CLIENT_NODE_BASE: u64 = 100;
 /// macOS (~10000+): base 7000 + 63·32 + 32 = 9048 < 10000.
 pub const WORKTREE_SLOT_CEILING: u16 = 64;
 
+/// RLM 5f-4g: the base of the per-slot DEMAND-SPAWN port region — the ports a demand cluster's
+/// on-demand realm shards bind (QUIC + probe, 2 per spawn). Sits ABOVE the node blocks (7000..9048) so a
+/// demand cluster's spawns never alias a static node port, and each worktree slot gets its OWN disjoint
+/// band (`SPAWN_REGION_BASE + slot·spawn_block`) so two slot clusters never collide on a spawn port — the
+/// exact per-slot isolation the fixed 42000 default lacked. Matches `SpawnTuning::dev`'s historic 42000.
+pub const SPAWN_REGION_BASE: u16 = 42_000;
+
+/// Default per-slot demand-spawn capacity (LIFETIME spawns, not concurrent — the F2 allocator is monotone
+/// and frees nothing). Modest by design: the gateway pre-books one boot lane per predictable spawn, so the
+/// band width (`2·this`) is the boot-lane count; [`DevPortScheme::validate`] fails LOUD if the ceiling
+/// slot's band would run past the u16 port space, which is what keeps a small default safe to raise.
+pub const DEFAULT_MAX_LIFETIME_SPAWNS_PER_SLOT: u16 = 32;
+
 /// The deterministic dev-cluster port scheme (HR6). ONE reviewed source of truth;
 /// no port literal is ever inlined in a script or a binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +128,9 @@ pub struct DevPortScheme {
     /// `K` — the maximum simultaneous dev-control client windows per worktree slot.
     /// P2's two-client visual scenario needs `>= 2`; the default leaves headroom.
     pub max_clients_per_worktree: u16,
+    /// RLM 5f-4g: the per-slot demand-spawn capacity (LIFETIME spawns). The slot's spawn band is
+    /// `2·this` ports wide (QUIC + probe per spawn), based at [`SPAWN_REGION_BASE`] + `slot·2·this`.
+    pub max_lifetime_spawns_per_slot: u16,
 }
 
 /// A typed, loud failure — the scheme never silently aliases two roles onto one
@@ -130,6 +146,20 @@ pub enum PortSchemeError {
     /// `agent` is `>= K` — outside the slot's client bands.
     #[error("agent index {agent} is out of range for K={k}")]
     AgentOutOfRange { agent: u16, k: u16 },
+    /// RLM 5f-4g: the per-slot demand-spawn region is mis-placed — it OVERLAPS the node blocks
+    /// (`SPAWN_REGION_BASE` below the ceiling slot's node-block top) or the ceiling slot's spawn band runs
+    /// past the u16 port space. Either would silently alias a spawn port onto a real bind → a spawned shard
+    /// the gateway dials to the wrong socket (a blind player). Loud at boot instead.
+    #[error(
+        "demand-spawn region invalid: SPAWN_REGION_BASE {spawn_base} with block {spawn_block} over {slots} \
+         slots overlaps the node region (top {node_top}) or overruns the u16 port space"
+    )]
+    SpawnRegionInvalid {
+        spawn_base: u16,
+        spawn_block: u32,
+        slots: u16,
+        node_top: u32,
+    },
 }
 
 /// The resolved ports for one worktree slot. Node ports are plain field reads;
@@ -168,6 +198,14 @@ pub struct SlotPorts {
     pub probe_station: u16,
     pub area: u16,
     pub probe_area: u16,
+    /// RLM 5f-4g: this slot's DEMAND-SPAWN port band `[spawn_base, spawn_port_end)` — `2·max_lifetime`
+    /// ports wide, based at [`SPAWN_REGION_BASE`] + `slot·2·max_lifetime` so each slot's band is DISJOINT.
+    /// The launcher passes these as `VD_RLM_FIRST_PORT` / `VD_RLM_PORT_LIMIT`, so a demand cluster's
+    /// on-demand realm shards bind inside THIS slot's region and the F2 allocator refuses LOUDLY at
+    /// `spawn_port_end` instead of walking into the next slot (or wrapping u16).
+    pub spawn_base: u16,
+    /// Exclusive end of the spawn band (the first port the allocator must refuse).
+    pub spawn_port_end: u16,
     /// First dev-control port (`agent` 0); private — go through [`SlotPorts::dev_control`].
     dev_control_base: u16,
     /// First client-QUIC port (`agent` 0); private — go through [`SlotPorts::client_quic`].
@@ -181,6 +219,7 @@ impl DevPortScheme {
         base: 7000,
         block_size: 32,
         max_clients_per_worktree: 4,
+        max_lifetime_spawns_per_slot: DEFAULT_MAX_LIFETIME_SPAWNS_PER_SLOT,
     };
 
     /// Internal consistency: the block must hold the node ports plus both client
@@ -191,6 +230,25 @@ impl DevPortScheme {
                 block_size: self.block_size,
                 k: self.max_clients_per_worktree,
             });
+        }
+        // RLM 5f-4g: the per-slot demand-spawn region must (a) sit ABOVE every slot's node block and (b)
+        // keep the CEILING slot's band inside the u16 port space — computed in u32 (overflow-free). Split
+        // into two guards (no short-circuit) so each arm is covered.
+        let slots = u32::from(WORKTREE_SLOT_CEILING);
+        let node_top = u32::from(self.base) + slots * u32::from(self.block_size);
+        let spawn_block = 2 * u32::from(self.max_lifetime_spawns_per_slot);
+        let spawn_top = u32::from(SPAWN_REGION_BASE) + slots * spawn_block;
+        let invalid = || PortSchemeError::SpawnRegionInvalid {
+            spawn_base: SPAWN_REGION_BASE,
+            spawn_block,
+            slots: WORKTREE_SLOT_CEILING,
+            node_top,
+        };
+        if u32::from(SPAWN_REGION_BASE) < node_top {
+            return Err(invalid()); // (a) spawn region overlaps the node blocks
+        }
+        if spawn_top > u32::from(u16::MAX) {
+            return Err(invalid()); // (b) ceiling slot's band (exclusive end) runs past the u16 port space
         }
         Ok(())
     }
@@ -213,6 +271,15 @@ impl DevPortScheme {
         self.validate()?;
         let base = self.slot_base(slot)?;
         let k = self.max_clients_per_worktree;
+        // RLM 5f-4g: this slot's disjoint demand-spawn band. `validate` already proved slots `0..CEILING`
+        // fit; this per-slot range-check keeps a caller-supplied `slot >= CEILING` (off the contract) loud
+        // rather than wrapping u16 into another region.
+        let spawn_block = 2 * u32::from(self.max_lifetime_spawns_per_slot);
+        let spawn_base_u32 = u32::from(SPAWN_REGION_BASE) + u32::from(slot) * spawn_block;
+        let spawn_end_u32 = spawn_base_u32 + spawn_block;
+        if spawn_end_u32 > u32::from(u16::MAX) {
+            return Err(PortSchemeError::SlotOverflowsPortSpace { slot });
+        }
         Ok(SlotPorts {
             orchestrator: base + ORCHESTRATOR_OFFSET,
             gateway: base + GATEWAY_OFFSET,
@@ -231,6 +298,8 @@ impl DevPortScheme {
             probe_station: base + PROBE_STATION_OFFSET,
             area: base + AREA_OFFSET,
             probe_area: base + PROBE_AREA_OFFSET,
+            spawn_base: spawn_base_u32 as u16,
+            spawn_port_end: spawn_end_u32 as u16,
             dev_control_base: base + RESERVED_NODE_PORTS,
             client_quic_base: base + RESERVED_NODE_PORTS + k,
             max_clients: k,
@@ -354,6 +423,7 @@ mod tests {
             base: 7000,
             block_size: 17,
             max_clients_per_worktree: 4,
+            max_lifetime_spawns_per_slot: DEFAULT_MAX_LIFETIME_SPAWNS_PER_SLOT,
         };
         assert_eq!(
             scheme.validate(),
@@ -375,6 +445,7 @@ mod tests {
             base: 7000,
             block_size: 25,
             max_clients_per_worktree: 4,
+            max_lifetime_spawns_per_slot: DEFAULT_MAX_LIFETIME_SPAWNS_PER_SLOT,
         };
         assert_eq!(exact.validate(), Ok(()));
         assert_eq!(
@@ -391,18 +462,89 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_whose_block_overflows_the_port_space_is_rejected() {
-        // base 7000, block 32: slot 1829 ends at 7000 + 1829*32 + 32 = 65560 > 65536.
+    fn a_slot_whose_bands_overflow_the_port_space_are_rejected() {
+        // RLM 5f-4g: with the demand-spawn band added, the SPAWN region is now the FIRST binding constraint
+        // for the DEFAULT scheme — slot 367's band ends at 42000 + 367*64 + 64 = 65552 > 65536. (These are
+        // FAR past the CEILING of 64 that `slot_for_worktree` ever produces; the guard keeps an explicit
+        // `--slot N` loud rather than wrapping u16.)
+        assert_eq!(
+            DevPortScheme::DEFAULT.slot_ports(367),
+            Err(PortSchemeError::SlotOverflowsPortSpace { slot: 367 })
+        );
+        // The highest slot that still fits BOTH bands resolves cleanly (boundary, not overflow).
+        let last = DevPortScheme::DEFAULT
+            .slot_ports(366)
+            .expect("last fitting slot");
+        assert_eq!(last.orchestrator, 18_712); // 7000 + 366*32
+        assert_eq!(last.spawn_base, 65_424); // 42000 + 366*64
+        assert_eq!(last.spawn_port_end, 65_488); // + 2*32
+        // A much higher slot still errors via the NODE block (slot_base, checked before the spawn band):
+        // slot 1829 ends at 7000 + 1829*32 + 32 = 65560 > 65536.
         assert_eq!(
             DevPortScheme::DEFAULT.slot_ports(1829),
             Err(PortSchemeError::SlotOverflowsPortSpace { slot: 1829 })
         );
-        // The highest slot that still fits resolves cleanly (boundary, not overflow).
-        let last = DevPortScheme::DEFAULT
-            .slot_ports(1828)
-            .expect("last fitting slot");
-        assert_eq!(last.orchestrator, 65496); // 7000 + 1828*32
-        assert_eq!(last.client_quic(3), Ok(65520)); // + RESERVED(17) + K(4) + agent 3
+    }
+
+    #[test]
+    fn the_demand_spawn_band_is_per_slot_disjoint_and_clear_of_the_node_blocks() {
+        // RLM 5f-4g: each slot gets its OWN spawn band, 2*32 = 64 ports wide, based at SPAWN_REGION_BASE.
+        let s0 = DevPortScheme::DEFAULT.slot_ports(0).expect("s0");
+        let s1 = DevPortScheme::DEFAULT.slot_ports(1).expect("s1");
+        assert_eq!(s0.spawn_base, 42_000);
+        assert_eq!(s0.spawn_port_end, 42_064);
+        // Slot 1's band starts EXACTLY where slot 0's ends — adjacent, never overlapping (the fix for the
+        // fixed-42000 collision two slot clusters used to share).
+        assert_eq!(s1.spawn_base, 42_064);
+        assert_eq!(s1.spawn_port_end, 42_128);
+        // The spawn band sits ABOVE every node/client port of the highest CONTRACT slot (0..CEILING), so a
+        // demand spawn never aliases a static node port.
+        let ceiling = DevPortScheme::DEFAULT
+            .slot_ports(WORKTREE_SLOT_CEILING - 1)
+            .expect("ceiling slot");
+        assert!(s0.spawn_base > ceiling.client_quic(3).expect("ceiling client port"));
+    }
+
+    #[test]
+    fn a_spawn_region_overlapping_the_node_blocks_is_rejected_loud() {
+        // A huge block_size pushes the CONTRACT node region (7000 + 64*600 = 45400) ABOVE SPAWN_REGION_BASE
+        // (42000) — the spawn band would alias a node port. validate() must refuse it.
+        let overlap = DevPortScheme {
+            base: 7000,
+            block_size: 600,
+            max_clients_per_worktree: 4,
+            max_lifetime_spawns_per_slot: 32,
+        };
+        assert_eq!(
+            overlap.validate(),
+            Err(PortSchemeError::SpawnRegionInvalid {
+                spawn_base: 42_000,
+                spawn_block: 64,
+                slots: 64,
+                node_top: 45_400,
+            })
+        );
+    }
+
+    #[test]
+    fn a_spawn_region_overrunning_the_u16_space_is_rejected_loud() {
+        // A huge per-slot spawn capacity makes the ceiling slot's band end (42000 + 64*400 = 67600) exceed
+        // u16 — the exact silent-wrap the loud guard forbids.
+        let overflow = DevPortScheme {
+            base: 7000,
+            block_size: 32,
+            max_clients_per_worktree: 4,
+            max_lifetime_spawns_per_slot: 200,
+        };
+        assert_eq!(
+            overflow.validate(),
+            Err(PortSchemeError::SpawnRegionInvalid {
+                spawn_base: 42_000,
+                spawn_block: 400,
+                slots: 64,
+                node_top: 9_048,
+            })
+        );
     }
 
     #[test]
@@ -444,11 +586,23 @@ mod tests {
             "slot 1829 runs past the u16 port space for this scheme"
         );
         assert_eq!(agent.to_string(), "agent index 4 is out of range for K=4");
+        let spawn = PortSchemeError::SpawnRegionInvalid {
+            spawn_base: 42_000,
+            spawn_block: 64,
+            slots: 64,
+            node_top: 45_400,
+        };
+        assert_eq!(
+            spawn.to_string(),
+            "demand-spawn region invalid: SPAWN_REGION_BASE 42000 with block 64 over 64 slots overlaps the \
+             node region (top 45400) or overruns the u16 port space"
+        );
         assert_eq!(
             format!("{too_small:?}"),
             "BlockTooSmall { block_size: 11, k: 4 }"
         );
         assert_ne!(overflow, agent);
+        assert_ne!(spawn, agent);
         assert_eq!(CLIENT_NODE_BASE, 100);
     }
 }
