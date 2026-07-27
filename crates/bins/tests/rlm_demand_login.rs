@@ -322,3 +322,11 @@ fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greetin
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+// The bootstrap-TTL fail-safe leg (a demand login whose home never boots must be CLOSED at
+// `bootstrap_ttl_ticks`, not hang) is DEFERRED — see DEFERRED.md D-RLM-9. An empirical spike here found the
+// obvious inductions do NOT reach the TTL: with no orchestrator (or the gateway dropped from its peers) the
+// gateway never CLOCK-SYNCS, so its seed injector stays inert and no demand is ever emitted — the login sits
+// with an open session and `home_bootstrap_timeouts == 0` (a separate pre-sync-hold concern). The TTL fires
+// only for a SYNCED gateway whose home genuinely fails to boot, which CA-1 learning (the orchestrator learns
+// the gateway from the demand frame and delivers the grant anyway) makes delicate to induce.
