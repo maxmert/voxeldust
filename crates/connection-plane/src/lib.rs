@@ -23,5 +23,6 @@
 
 // BULK pacing / multi-sub interest land with P2 per the staged build plan.
 
+pub mod admin;
 pub mod gateway;
 pub mod tickets;

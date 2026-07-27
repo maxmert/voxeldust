@@ -756,6 +756,14 @@ impl GatewaySessions {
     pub fn is_empty(&self) -> bool {
         self.by_session.is_empty()
     }
+    /// RLM RG-4 — how many demand-spawned home shards are on the RUNTIME routable roster. The direct
+    /// process-tier observable for "the dynamic-home resolve fired": `dynamic_shards` is populated in exactly
+    /// one place, `claim_dynamic_shard` at the `on_home_realm_head` resolve, so a nonzero count means a login
+    /// routed to a spawn-minted node rather than the static `config.shard`.
+    #[must_use]
+    pub fn dynamic_shard_count(&self) -> usize {
+        self.dynamic_shards.len()
+    }
     /// The session ids currently active (for tests/oracles).
     pub fn sessions(&self) -> impl Iterator<Item = SessionId> + '_ {
         self.by_session.keys().copied()
@@ -3638,6 +3646,26 @@ mod tests {
         }]);
         assert_eq!(rig.stats().undecodable, 1);
         assert_eq!(rig.stats().presence_announces, 0);
+    }
+
+    // ---- RLM 5f RG-4a2: the gateway's /admin/snapshot builder --------------------------------
+    #[test]
+    fn the_gateway_admin_snapshot_reflects_the_live_world() {
+        // The world→contract builder: one logged-in session ⇒ sessions_open 1; a static rig demanded no
+        // dynamic home ⇒ dynamic_shards 0; the clock is mirrored; and the gateway carries NO directory (it
+        // does not own one — reporting a directory from a gateway would mislead an operator).
+        let mut rig = Rig::new();
+        let _ = rig.login();
+        let snap = crate::admin::gateway_admin_snapshot(&mut rig.world);
+        let gw = snap.gateway.expect("a gateway snapshot carries the gateway view");
+        assert_eq!(gw.sessions_open, 1);
+        assert_eq!(gw.dynamic_shards, 0);
+        assert_eq!(snap.universe_tick, 50);
+        assert_eq!(snap.epoch, 9);
+        assert!(
+            snap.directory.is_empty(),
+            "the gateway owns no directory — that is the orchestrator's"
+        );
     }
 
     /// A session-grant head reply as the orchestrator now sends it — wrapped in the
