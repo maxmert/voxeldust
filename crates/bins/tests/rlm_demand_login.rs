@@ -181,6 +181,48 @@ fn await_active(devctl_port: u16, gateway_admin: SocketAddr, deadline: Duration)
     }
 }
 
+/// Push a fresh demand gateway onto `cluster` — the SAME env each time, so a restart re-binds the SAME addrs.
+fn push_demand_gateway(
+    cluster: &mut Cluster,
+    f: &Fixture,
+    a: &ClusterAddrs,
+    client_book: &[(NodeId, SocketAddr)],
+) {
+    cluster.push(
+        "vd-gateway",
+        vd_bins::spawn_node(
+            env!("CARGO_BIN_EXE_vd-gateway"),
+            &f.common,
+            &gateway_env(a, client_book, &dev_auth_pubkey_hex(), &DEV, ClusterShape::Demand),
+        )
+        .expect("spawn gateway"),
+    );
+}
+
+/// Boot a demand cluster (orchestrator + gateway) + one dev-control client — NO shard pre-booked. The only
+/// way to a world is the armed reconciler spinning one up on the client's login demand.
+fn boot_demand_login(
+    f: &Fixture,
+    a: &ClusterAddrs,
+    client_book: &[(NodeId, SocketAddr)],
+    client_quic: SocketAddr,
+    devctl_port: u16,
+) -> Cluster {
+    let mut cluster = Cluster::new();
+    cluster.push(
+        "vd-orchestrator",
+        vd_bins::spawn_node(
+            env!("CARGO_BIN_EXE_vd-orchestrator"),
+            &f.common,
+            &orchestrator_env(a, &DEV, &f.store_str, ClusterShape::Demand),
+        )
+        .expect("spawn orchestrator"),
+    );
+    push_demand_gateway(&mut cluster, f, a, client_book);
+    cluster.push("client", spawn_client(f, a.gateway, client_quic.port(), devctl_port));
+    cluster
+}
+
 #[test]
 fn a_demand_login_spins_up_a_fresh_home_and_lands_with_no_prebooked_shard() {
     let f = fixture("login");
@@ -192,28 +234,7 @@ fn a_demand_login_spins_up_a_fresh_home_and_lands_with_no_prebooked_shard() {
 
     // The forked-shard reaper drops LAST (declared first) — after the Cluster has reaped the orchestrator.
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let mut cluster = Cluster::new();
-    cluster.push(
-        "vd-orchestrator",
-        vd_bins::spawn_node(
-            env!("CARGO_BIN_EXE_vd-orchestrator"),
-            &f.common,
-            &orchestrator_env(&a, &DEV, &f.store_str, ClusterShape::Demand),
-        )
-        .expect("spawn orchestrator"),
-    );
-    cluster.push(
-        "vd-gateway",
-        vd_bins::spawn_node(
-            env!("CARGO_BIN_EXE_vd-gateway"),
-            &f.common,
-            &gateway_env(&a, &client_book, &dev_auth_pubkey_hex(), &DEV, ClusterShape::Demand),
-        )
-        .expect("spawn gateway"),
-    );
-    // NO shard is spawned — the ONLY way to a world is the armed reconciler spinning one up on login demand.
-    cluster.push("client", spawn_client(&f, a.gateway, client_quic.port(), devctl_port));
-    let _cluster = cluster; // RAII: kills orchestrator + gateway + client on test end / panic.
+    let _cluster = boot_demand_login(&f, &a, &client_book, client_quic, devctl_port);
 
     // ---- THE proof: the login went Active, and it did so by spawning + reaching a fresh home shard. ----
     let state = await_active(devctl_port, gw_admin, DEADLINE);
@@ -248,4 +269,56 @@ fn a_demand_login_spins_up_a_fresh_home_and_lands_with_no_prebooked_shard() {
         "no spawn failed: {:?}",
         orch.rlm
     );
+}
+
+#[test]
+fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greeting() {
+    // The reactive greeting's SELF-HEAL property (RG-1): the connection between a demand-spawned shard and the
+    // gateway is learned (not pre-booked), so it must survive a GATEWAY restart with no manual re-plumb. This
+    // is the SERVER-side re-heal — the client's session does NOT resume (reconnect-without-replay is D-11,
+    // deferred), but the still-running shard must re-teach a FRESH gateway where it is.
+    let f = fixture("reheal");
+    let gw_admin = reserve_tcp_addr();
+    let a = demand_addrs(gw_admin);
+    let client_quic = reserve_udp_addr();
+    let devctl_port = reserve_tcp_addr().port();
+    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
+
+    let _reaper = ForkedReaper(f.launch_path.clone());
+    let mut cluster = boot_demand_login(&f, &a, &client_book, client_quic, devctl_port);
+
+    // The login spawned a home shard + the gateway learned it via the reactive greeting.
+    await_active(devctl_port, gw_admin, DEADLINE);
+    let before = gateway_view(gw_admin).expect("gateway view");
+    assert!(
+        before.presence_announces >= 1 && before.dynamic_shards >= 1,
+        "the demand shard is up + learned before the restart: {before:?}",
+    );
+
+    // SIGKILL + reap the gateway, then boot a FRESH one on the SAME addrs (a fresh process ⇒ its
+    // presence_announces resets to 0). The still-running demand shard is UNAFFECTED — it leads its OWN process
+    // group, so the Cluster's per-child kill never touched it. D-34: we restart the GATEWAY (the learner), not
+    // the shard.
+    cluster.kill_and_reap("vd-gateway");
+    push_demand_gateway(&mut cluster, &f, &a, &client_book);
+    let _cluster = cluster;
+
+    // THE re-heal proof: the fresh gateway RE-LEARNS the still-running shard via the greeting ALONE. The shard
+    // greets-on-silence (RG-1) — having stopped hearing from the old gateway it re-dials the SAME booked
+    // address + re-sends its ShardPresence, so the fresh gateway learns the return connection with NO
+    // pre-booked address + NO re-login. `presence_announces` climbs from 0 back to >= 1.
+    let started = Instant::now();
+    loop {
+        if let Some(gw) = gateway_view(gw_admin)
+            && gw.presence_announces >= 1
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the restarted gateway never re-learned the demand shard via the reactive greeting: {:?}",
+            gateway_view(gw_admin),
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
