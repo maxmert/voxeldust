@@ -264,20 +264,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         },
     );
-    // The F2 allocator bases. RLM 5e-5 (store-test-hooks): `VD_RLM_TEST_FIRST_PORT` gives each kill-9 subtest
-    // a DISJOINT port band, so the pre-fork `/whoami` witness is deterministic (no reap-then-reuse race).
-    #[allow(unused_mut)]
-    let mut spawn_tuning = vd_node::rlm_spawn::SpawnTuning::dev();
-    #[cfg(feature = "store-test-hooks")]
-    if let Some(p) = env
-        .string("VD_RLM_TEST_FIRST_PORT")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
-        spawn_tuning.first_port = p
-            .parse()
-            .map_err(|_| format!("VD_RLM_TEST_FIRST_PORT is not a u16: {p:?}"))?;
-    }
+    // RLM 5f-4g: the F2 allocator's id base + port band — real operational params (env-overridable, ONE
+    // default each = the `dev()` single-host loopback bases). A demand LAUNCHER passes the orchestrator its
+    // per-slot band (`VD_RLM_FIRST_PORT` / `VD_RLM_PORT_LIMIT`, derived from the devproto SlotPorts) so each
+    // slot's monotone allocator stays inside its own reserved ports; unset, the whole-u16-space `dev()`
+    // default applies (byte-identical to pre-5f-4g). This is NOT a shard-kind fork — the same knobs configure
+    // every orchestrator (HR3). The kill-9 subtests set disjoint bands through these same knobs.
+    let dev_tuning = vd_node::rlm_spawn::SpawnTuning::dev();
+    let spawn_tuning = vd_node::rlm_spawn::SpawnTuning {
+        first_node: env.parse_or("VD_RLM_FIRST_NODE", dev_tuning.first_node)?,
+        first_port: env.parse_or("VD_RLM_FIRST_PORT", dev_tuning.first_port)?,
+        port_limit: env.parse_or("VD_RLM_PORT_LIMIT", dev_tuning.port_limit)?,
+        bind_host: dev_tuning.bind_host,
+    };
     // `SpawnCore::new` == rehydrate (recover + adopt the launch.redb survivors). RLM 5e-5 D6 CONTROL
     // (store-test-hooks): `VD_RLM_TEST_REHYDRATE_DISABLE` rebuilds via `water_only` — cursors only, NO adopt —
     // so a re-issued spawn DOUBLE-spawns a survivor, the falsifiable twin proving rehydrate/adopt is

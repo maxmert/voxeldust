@@ -5,7 +5,8 @@
 //! Because the reconciler is INERT in the bin (`RlmTuning::default()`), a store-test-hooks boot-spawn hook
 //! (`VD_RLM_TEST_SPAWN_COORD`) drives exactly ONE real spawn so there is something to crash.
 //!
-//! THREE arms (each on a DISJOINT F2 port band via `VD_RLM_TEST_FIRST_PORT`, `--test-threads=1`):
+//! THREE arms (each on a DISJOINT, bounded F2 port band via `VD_RLM_FIRST_PORT`/`VD_RLM_PORT_LIMIT`,
+//! `--test-threads=1`):
 //!  - **D1 (mid-fsync, pre-fork):** `VD_RLM_TEST_LAUNCH_PAUSE` parks the launch.redb writer just before it
 //!    fsyncs the v1 write-ahead batch. `spawn_realm` blocks in `flush()` — STRICTLY before `backend.launch()`
 //!    — so a SIGKILL here forks NO child (proven DIRECTLY: the child probe port never answers `/whoami`) and
@@ -242,7 +243,8 @@ fn d1_sigkill_mid_fsync_forks_no_child_and_rehydrates_clean() {
         &a1,
         &[
             ("VD_RLM_TEST_SPAWN_COORD", hex.clone()),
-            ("VD_RLM_TEST_FIRST_PORT", "42000".to_string()),
+            ("VD_RLM_FIRST_PORT", "42000".to_string()),
+            ("VD_RLM_PORT_LIMIT", "43000".to_string()),
             ("VD_RLM_TEST_LAUNCH_PAUSE", "1".to_string()),
         ],
     );
@@ -283,7 +285,8 @@ fn d1_sigkill_mid_fsync_forks_no_child_and_rehydrates_clean() {
         &a2,
         &[
             ("VD_RLM_TEST_SPAWN_COORD", hex.clone()),
-            ("VD_RLM_TEST_FIRST_PORT", "42000".to_string()),
+            ("VD_RLM_FIRST_PORT", "42000".to_string()),
+            ("VD_RLM_PORT_LIMIT", "43000".to_string()),
         ],
     );
     let mut cluster = Cluster::new();
@@ -330,7 +333,8 @@ fn adopt_a_survivor_is_recovered_without_relaunch() {
         &a1,
         &[
             ("VD_RLM_TEST_SPAWN_COORD", hex.clone()),
-            ("VD_RLM_TEST_FIRST_PORT", "43000".to_string()),
+            ("VD_RLM_FIRST_PORT", "43000".to_string()),
+            ("VD_RLM_PORT_LIMIT", "44000".to_string()),
         ],
     );
     let mut orch1 = KillOnDrop(Some(
@@ -353,7 +357,8 @@ fn adopt_a_survivor_is_recovered_without_relaunch() {
         &a2,
         &[
             ("VD_RLM_TEST_SPAWN_COORD", hex.clone()),
-            ("VD_RLM_TEST_FIRST_PORT", "43000".to_string()),
+            ("VD_RLM_FIRST_PORT", "43000".to_string()),
+            ("VD_RLM_PORT_LIMIT", "44000".to_string()),
         ],
     );
     let mut cluster = Cluster::new();
@@ -398,7 +403,8 @@ fn d6_control_an_unseeded_rebuild_double_spawns_a_survivor() {
         &a1,
         &[
             ("VD_RLM_TEST_SPAWN_COORD", hex.clone()),
-            ("VD_RLM_TEST_FIRST_PORT", "44000".to_string()),
+            ("VD_RLM_FIRST_PORT", "44000".to_string()),
+            ("VD_RLM_PORT_LIMIT", "45000".to_string()),
         ],
     );
     let mut orch1 = KillOnDrop(Some(
@@ -418,7 +424,8 @@ fn d6_control_an_unseeded_rebuild_double_spawns_a_survivor() {
         &a2,
         &[
             ("VD_RLM_TEST_SPAWN_COORD", hex.clone()),
-            ("VD_RLM_TEST_FIRST_PORT", "44000".to_string()),
+            ("VD_RLM_FIRST_PORT", "44000".to_string()),
+            ("VD_RLM_PORT_LIMIT", "45000".to_string()),
             ("VD_RLM_TEST_REHYDRATE_DISABLE", "1".to_string()),
         ],
     );
