@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
+use bevy_ecs::prelude::{IntoScheduleConfigs, Local, Res, ResMut, Resource, Schedule, World};
 use vd_core::celestial::{OrbitalElements, orbital_state, secs_since_epoch};
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
@@ -45,7 +45,7 @@ use vd_wire::intershard::{
     InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, RealmDemand,
     STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP,
     TRANSIENT_COMPLETE_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP,
-    TransferAck, TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest,
+    ShardPresence, TransferAck, TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest,
     TransientHandoff, TransientItem, TransitionPayload, crossing_transfer_id,
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
@@ -286,6 +286,40 @@ pub struct CoHostedAuthority(pub BTreeMap<RealmId, Fence>);
 /// re-granted realm never inherits a stale deadline.
 #[derive(Resource, Debug, Default)]
 pub struct RealmConfirmedAt(pub TickId);
+
+/// RLM 5f RG-1 — the reactive-greeting policy for a DEMAND-SPAWNED shard. A shard minted at spawn has a
+/// `NodeId` its peers never booked, so it makes itself reachable by GREETING every one of them: it sends a
+/// reliable [`ShardPresence`] and the peer's mesh learns the return connection (no address needed — the
+/// cloud-portable property). `peers` = the shard's full booked set (gateway + ancestor chain + orchestrator,
+/// from `VD_PEERS`); it greets each ONLY while SILENT (no contact for `interval_ticks`), so an active realm
+/// hearing its gateway stays quiet and a gateway restart / dropped connection self-heals within one interval.
+/// Present ONLY on a demand shard (the `--demand` boot inserts it, RG-2); ABSENT ⇒ [`announce_presence`]
+/// no-ops ⇒ every static rig is byte-identical.
+#[derive(Resource, Clone, Debug)]
+pub struct PresenceAnnounce {
+    /// The booked peers to greet (all of `VD_PEERS` except self).
+    pub peers: BTreeSet<NodeId>,
+    /// Greet a peer once it has had no contact (inbound OR a prior greeting) for this many local ticks.
+    /// `>= 1` (0 would greet every tick — rejected by [`PresenceAnnounce::new`]).
+    pub interval_ticks: u64,
+}
+
+impl PresenceAnnounce {
+    /// Build the greeting policy, failing LOUD on a zero interval (which would greet every tick — a
+    /// misconfiguration, never the intent). The peer set may be empty (an inert no-op, not an error).
+    ///
+    /// # Errors
+    /// `interval_ticks == 0`.
+    pub fn new(peers: BTreeSet<NodeId>, interval_ticks: u64) -> Result<PresenceAnnounce, String> {
+        if interval_ticks == 0 {
+            return Err("PresenceAnnounce interval_ticks must be >= 1 (0 would greet every tick)".into());
+        }
+        Ok(PresenceAnnounce {
+            peers,
+            interval_ticks,
+        })
+    }
+}
 
 /// One ghost-neighbor this shard FEEDS (1d.5b.3b): the node hosting a kinematic ghost of an entity
 /// we OWN, plus the monotone egress `seq` stamped on each `GhostFlow::Delta`. Holds NO pose/authority
@@ -1230,6 +1264,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
         (
             request_pending_grants,
             process_inbound,
+            // RLM 5f RG-1: the reactive greeting — UNGATED (fires pre-sync/pre-lease, reachability precedes
+            // authority) and after `process_inbound` so THIS tick's inbound counts as contact. No-op unless a
+            // demand boot inserted `PresenceAnnounce`, so group order is byte-identical for static rigs.
+            announce_presence,
             self_fence_lapsed_realm,
         )
             .chain(),
@@ -1363,6 +1401,63 @@ fn request_pending_grants(
                 MsgClass::Saga,
                 &InterShardFlow::Directory(op),
             );
+        }
+    }
+}
+
+/// RLM 5f RG-1 — is `peer` DUE a greeting this tick? `true` when the shard has had NO contact with it
+/// (never, or not for `interval` ticks). A monomorphic helper so [`announce_presence`] stays a shim (HR5):
+/// the two arms (never-contacted ⇒ greet; contacted ⇒ silence check) live here, covered by both a
+/// first-tick greet and a within-interval skip.
+fn presence_due(
+    last_contact: &BTreeMap<NodeId, TickId>,
+    peer: NodeId,
+    now: TickId,
+    interval: u64,
+) -> bool {
+    match last_contact.get(&peer) {
+        None => true,
+        Some(seen) => now.0.saturating_sub(seen.0) >= interval,
+    }
+}
+
+/// RLM 5f RG-1 — the REACTIVE GREETING. A demand-spawned shard greets every booked peer it has not heard
+/// from recently, so the peer's mesh learns the return connection (making this shard — whose spawn-minted
+/// `NodeId` no peer booked — reachable WITHOUT any pre-booked address; the cloud-portable property). GREET-
+/// ON-SILENCE: an inbound frame from a peer OR a greeting we send it both count as contact, so an active
+/// realm hearing its gateway stays quiet while an idle/warm realm greets at most once per `interval_ticks`,
+/// and a gateway restart / dropped connection self-heals within one interval. UNGATED on `has_synced` /
+/// `RealmAuthority` (the greeting must fire pre-sync, pre-lease — reachability precedes authority). No-ops
+/// (the `else` return) when [`PresenceAnnounce`] is absent ⇒ every static rig is byte-identical. The
+/// `last_contact` ledger is a per-system `Local` (RAM, rebuilt empty on boot — reachability re-heals from
+/// scratch, which is correct after a restart).
+fn announce_presence(
+    presence: Option<Res<PresenceAnnounce>>,
+    clock: Res<ClockSample>,
+    inbox: Res<InboundBox>,
+    mut last_contact: Local<BTreeMap<NodeId, TickId>>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    let Some(presence) = presence else {
+        return;
+    };
+    let now = clock.local_tick;
+    // Any inbound frame from a peer is contact — it proves the two-way lane is live, so we need not greet.
+    for msg in &inbox.0 {
+        if let Inbound::Wire { from, .. } = msg {
+            last_contact.insert(*from, now);
+        }
+    }
+    // Greet each booked peer that is silent; the greeting itself counts as contact so the cadence is
+    // bounded to one per `interval_ticks` even for a peer that never replies (an idle warm realm).
+    for &peer in &presence.peers {
+        if presence_due(&last_contact, peer, now, presence.interval_ticks) {
+            outbox.push_flow(
+                peer,
+                MsgClass::Saga,
+                &InterShardFlow::ShardPresence(ShardPresence { local_tick: now }),
+            );
+            last_contact.insert(peer, now);
         }
     }
 }
@@ -4599,6 +4694,162 @@ mod tests {
             // 5f-3b: no stored spawn poses ⇒ every login births origin-at-rest (byte-identical).
             spawn_poses: BTreeMap::new(),
         }
+    }
+
+    // ---- RLM 5f RG-1: the reactive greeting ------------------------------------------------------
+    /// A booked ANCESTOR peer (parent realm) — distinct from the orchestrator + gateway.
+    const ANCESTOR: NodeId = NodeId(40);
+
+    /// A greeting policy over `peers` with silence threshold `interval`.
+    fn presence(peers: &[NodeId], interval: u64) -> PresenceAnnounce {
+        PresenceAnnounce::new(peers.iter().copied().collect(), interval).expect("valid interval")
+    }
+
+    /// The `(target → greeted-at tick)` of every `ShardPresence` a tick emitted (ignoring the other
+    /// flows a shard also sends). The `_ => None` arm is covered by those other flows (e.g. the boot
+    /// `LeaseGrant`), the `Some` arm by any greeting.
+    fn presence_ticks(
+        sent: &[(NodeId, MsgClass, InterShardFlow, Durability)],
+    ) -> BTreeMap<NodeId, TickId> {
+        sent.iter()
+            .filter_map(|(to, _, flow, _)| match flow {
+                InterShardFlow::ShardPresence(p) => Some((*to, p.local_tick)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A well-formed but INERT inbound FROM `from` (a head-read reply for a realm this shard does not
+    /// own ⇒ `process_inbound` no-ops) — used only to register CONTACT for the silence heuristic.
+    fn benign_contact(from: NodeId) -> Inbound {
+        let reply = DirectoryReply::Head {
+            key: DirectoryKey::Realm(RealmId::System(999)),
+            record: None,
+        };
+        Inbound::Wire {
+            from,
+            class: MsgClass::Saga,
+            bytes: crate::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::DirectoryReply(reply)).expect("encode"),
+            ),
+        }
+    }
+
+    #[test]
+    fn presence_absent_sends_no_greeting() {
+        // No PresenceAnnounce ⇒ announce_presence no-ops ⇒ byte-identical (a static shard).
+        let mut rig = Rig::new();
+        assert!(presence_ticks(&rig.tick_raw(vec![])).is_empty());
+    }
+
+    #[test]
+    fn greets_every_booked_peer_while_silent() {
+        let mut rig = Rig::new();
+        rig.world
+            .insert_resource(presence(&[GATEWAY, ANCESTOR, ORCH], 50));
+        let ticks = presence_ticks(&rig.tick_raw(vec![]));
+        assert_eq!(
+            ticks.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([GATEWAY, ANCESTOR, ORCH]),
+        );
+        // The greeting carries the shard's local tick (1 in a fresh rig).
+        assert_eq!(ticks[&GATEWAY], TickId(1));
+    }
+
+    #[test]
+    fn greeting_rides_the_reliable_saga_class() {
+        // Learning fires ONLY on a reliable frame; a datagram would teach nothing.
+        let mut rig = Rig::new();
+        rig.world.insert_resource(presence(&[GATEWAY], 50));
+        let sent = rig.tick_raw(vec![]);
+        let greeting = sent
+            .iter()
+            .find(|(_, _, flow, _)| matches!(flow, InterShardFlow::ShardPresence(_)))
+            .expect("a greeting");
+        assert_eq!(greeting.1, MsgClass::Saga);
+    }
+
+    #[test]
+    fn stays_silent_within_the_interval_after_greeting() {
+        let mut rig = Rig::new();
+        rig.world.insert_resource(presence(&[GATEWAY], 50));
+        rig.tick_raw(vec![]); // tick 1: greet ⇒ last_contact[GATEWAY] = 1
+        rig.set_local_tick(40); // 40 − 1 = 39 < 50
+        assert!(presence_ticks(&rig.tick_raw(vec![])).is_empty());
+    }
+
+    #[test]
+    fn re_greets_after_an_interval_of_silence() {
+        let mut rig = Rig::new();
+        rig.world.insert_resource(presence(&[GATEWAY], 50));
+        rig.tick_raw(vec![]); // tick 1: greet
+        rig.set_local_tick(51); // 51 − 1 = 50 ≥ 50
+        let ticks = presence_ticks(&rig.tick_raw(vec![]));
+        assert_eq!(
+            ticks.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([GATEWAY]),
+        );
+        assert_eq!(ticks[&GATEWAY], TickId(51));
+    }
+
+    #[test]
+    fn inbound_from_a_peer_suppresses_only_that_peers_greeting() {
+        let mut rig = Rig::new();
+        rig.world.insert_resource(presence(&[GATEWAY, ANCESTOR], 50));
+        // A frame from GATEWAY this tick = contact ⇒ GATEWAY silent; ANCESTOR (unheard) still greeted.
+        let ticks = presence_ticks(&rig.tick_raw(vec![benign_contact(GATEWAY)]));
+        assert_eq!(
+            ticks.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([ANCESTOR]),
+        );
+    }
+
+    #[test]
+    fn a_non_wire_notice_is_not_contact() {
+        let mut rig = Rig::new();
+        rig.world.insert_resource(presence(&[GATEWAY], 50));
+        // A NodeUnreachable notice is not an inbound frame ⇒ does NOT reset silence ⇒ GATEWAY greeted.
+        let notice = Inbound::NodeUnreachable {
+            to: GATEWAY,
+            class: MsgClass::Saga,
+            undelivered: MsgId(0),
+        };
+        assert!(presence_ticks(&rig.tick_raw(vec![notice])).contains_key(&GATEWAY));
+    }
+
+    #[test]
+    fn presence_new_rejects_a_zero_interval() {
+        assert!(PresenceAnnounce::new(BTreeSet::from([GATEWAY]), 0).is_err());
+        assert_eq!(
+            PresenceAnnounce::new(BTreeSet::from([GATEWAY]), 1)
+                .expect("ok")
+                .interval_ticks,
+            1,
+        );
+    }
+
+    #[test]
+    fn greeting_is_g_identical_across_shard_kinds() {
+        // HR4: the SAME greeting fixture on a System-realm shard and a Planet-realm shard emits the
+        // IDENTICAL ShardPresence set — the greeting is shard-kind-blind (reachability, not gameplay).
+        let mut system = Rig::with_config(config());
+        let mut planet = {
+            let mut cfg = config();
+            cfg.realm = RealmId::Planet(7);
+            cfg.held_realms = StubConfig::single_realm(RealmId::Planet(7));
+            cfg.own_coord = StubConfig::root_coord(RealmId::Planet(7));
+            Rig::with_config(cfg)
+        };
+        system
+            .world
+            .insert_resource(presence(&[GATEWAY, ANCESTOR], 50));
+        planet
+            .world
+            .insert_resource(presence(&[GATEWAY, ANCESTOR], 50));
+        assert_eq!(
+            presence_ticks(&system.tick_raw(vec![])),
+            presence_ticks(&planet.tick_raw(vec![])),
+        );
     }
 
     struct Rig {
