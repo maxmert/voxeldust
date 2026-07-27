@@ -255,6 +255,19 @@ pub enum InterShardFlow {
     /// parent's authority proof), like `CrossingRequest` ⇒ `SideEffecting{FencedKey}`. APPENDED
     /// (preserves every existing postcard discriminant).
     RealmDemand(RealmDemand),
+    /// SHARD → its GATEWAY (RLM reactive greeting): a demand-spawned shard's [`NodeId`] is minted at
+    /// spawn, so it can NEVER be in the gateway's boot-time peer book; the gateway can only REPLY over a
+    /// connection the shard itself opened (the io-prod mesh records the return connection on the FIRST
+    /// reliable frame of an accepted stream, then serves both reliable and unreliable traffic over it). This
+    /// arm IS that first reliable frame — a pure REACHABILITY primitive, nothing else. It carries NO realm
+    /// authority (which shard owns which realm is the orchestrator's fence-CAS directory head, consumed at
+    /// the gateway's home-realm resolve; a shard self-asserting ownership here would be a SECOND, unfenced
+    /// authority path), so the gateway records only a counter + a log line — never a routing claim. Sent
+    /// LEVEL-TRIGGERED on the shard's own silence cadence (only while it has NOT recently heard from the
+    /// gateway), so an active realm is silent while a gateway restart / dropped connection self-heals within
+    /// one cadence — a `ReDriven` (the shard re-asserts) `FireAndForget` (carries no idempotency-keyed
+    /// effect) flow. APPENDED (preserves every existing postcard discriminant).
+    ShardPresence(ShardPresence),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -443,6 +456,10 @@ impl InterShardFlow {
                     fence: d.parent_fence,
                 },
             },
+            // The reactive greeting mutates NOTHING at the gateway (a counter + a log line) and carries no
+            // transfer trigger or authority-gating state — it is re-derivable (the shard re-greets) and
+            // loss-tolerant (a dropped greeting is re-sent next silence cadence) ⇒ FireAndForget.
+            InterShardFlow::ShardPresence(_) => EffectClass::FireAndForget,
         }
     }
 
@@ -509,7 +526,11 @@ impl InterShardFlow {
             | InterShardFlow::CrossingAbortedAck(_)
             // RLM Step 1: the parent re-asserts this demand every tick it holds (and the child its
             // Empty report), so a dropped verb self-heals next tick — ReDriven, never producer-less.
-            | InterShardFlow::RealmDemand(_) => FlowDurabilityClass::ReDriven,
+            | InterShardFlow::RealmDemand(_)
+            // RLM reactive greeting: the shard re-asserts it on its silence cadence, so a dropped greeting
+            // self-heals next cadence — ReDriven, never producer-less (a lost greeting needs no durable
+            // outbox; the next re-greet re-teaches the gateway's return connection).
+            | InterShardFlow::ShardPresence(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -542,6 +563,19 @@ pub struct RealmDemand {
     pub parent_fence: Fence,
     pub verb: DemandVerb,
     pub universe_tick: UniverseTick,
+}
+
+/// The RLM reactive-greeting payload (shard → gateway). DELIBERATELY MINIMAL: the mechanism is the
+/// arrival of a reliable frame (the mesh learns the return connection below the app seam), so the body
+/// need carry nothing routing-relevant. It carries the shard's OWN [`TickId`] — its process-local tick,
+/// NOT the synced [`UniverseTick`] (which is 0 until the first clock-sync; the greeting fires pre-sync, so
+/// a universe tick would be meaningless) — purely for gateway-side observability (the `from` node id and
+/// this tick in a log line). No `NodeId` (redundant with the frame's sender), no realm/coord (that is the
+/// fenced directory's authority, never a self-assertion), no address (the gateway never dials — it reuses
+/// the accepted connection). Field order is frozen once shipped (positional postcard).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardPresence {
+    pub local_tick: TickId,
 }
 
 /// Orchestrator → SOURCE shard pose-flush request (Slice 1d.1). The source finds the held dot for

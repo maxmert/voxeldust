@@ -9,16 +9,18 @@
 //!    `ControlMsg | InputDatagram | BulkMsg | EventMsg | SnapshotDatagram`.
 //! 2. **`InterShardFlow`** (shard↔shard / shard↔orchestrator) — one reviewed file
 //!    (`intershard.rs`), arms frozen INCREMENTALLY with their first consumer. The CURRENT
-//!    closed set is 22 arms: `Ghost | Transfer | Directory | Saga | SagaAck | DirectoryReply
+//!    closed set is 24 arms: `Ghost | Transfer | Directory | Saga | SagaAck | DirectoryReply
 //!    | FlushSource | TransferAck | Demote | Promote | TransientRelease | TransientDrop |
 //!    ReleaseComplete | TransientAbandon | ReHome | TransientDiscard | ReSolicitBatch |
 //!    CrossingRequest | TransientCrossingRequest | TransientCrossingGrant | CrossingAborted |
-//!    CrossingAbortedAck` (P0
+//!    CrossingAbortedAck | RealmDemand | ShardPresence` (P0
 //!    Ghost/Transfer-Durable/Directory; P2 the route-swap + 1d.1/1d.5b transfer machinery; P3 the D-7
 //!    transient handoff + the D-37 `ReHome` forward-re-home adopt; R-6d3c the `TransientDiscard` D-6 #1
 //!    never-restart closure; CA-1 S3 the `ReSolicitBatch` AwaitAdopt liveness probe; Slice 3c the four
 //!    spatial transfer-trigger crossing arms — INERT, planted ahead of their consumer routes; Slice 3f the
-//!    `CrossingAbortedAck` latch-clear confirm that ack-gates the durable abort reply). RESERVED
+//!    `CrossingAbortedAck` latch-clear confirm that ack-gates the durable abort reply; RLM Step 1 the
+//!    `RealmDemand` level-triggered lifecycle verb; RLM 5f the `ShardPresence` reactive greeting that lets a
+//!    demand-spawned shard's minted node id become gateway-reachable without a pre-booked address). RESERVED
 //!    future arms (added under review with their phases): `BlockEdit` (P6),
 //!    `Coupling` `EffectFree` ports (P8), `Signal` (P9). See `intershard.rs`'s header for the
 //!    per-phase breakdown + the G-SEALED effect-class invariant.

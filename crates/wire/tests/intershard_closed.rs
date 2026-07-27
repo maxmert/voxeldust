@@ -283,6 +283,11 @@ fn every_arm() -> Vec<InterShardFlow> {
             verb: vd_wire::intershard::DemandVerb::SpinUp,
             universe_tick: UniverseTick(9),
         }),
+        // RLM reactive greeting (shard→gateway). FireAndForget / ReDriven — NOT producer-less, so the
+        // golden pin below still asserts exactly TWO producer-less arms. Minimal payload (a local tick).
+        InterShardFlow::ShardPresence(vd_wire::intershard::ShardPresence {
+            local_tick: vd_core::TickId(11),
+        }),
     ]
 }
 
@@ -326,7 +331,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::TransientCrossingGrant(_)
         | InterShardFlow::CrossingAborted(_)
         | InterShardFlow::CrossingAbortedAck(_)
-        | InterShardFlow::RealmDemand(_) => {}
+        | InterShardFlow::RealmDemand(_)
+        | InterShardFlow::ShardPresence(_) => {}
     }
 }
 
