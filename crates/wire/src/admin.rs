@@ -79,6 +79,32 @@ pub struct LeaseHealthView {
     pub ticks_remaining: i64,
 }
 
+/// The realm-lifecycle reconciler's observability counters + gauges (RLM 5f-4), rendered for operators —
+/// the "curl the demand loop at 2am" view: how many realms were spun up / failed / reaped, and the MEASURED
+/// pod-boot latency the launch-TTL can be tuned from. All zero on a quiescent (or inert) orchestrator.
+/// JSON-ONLY: this rides the `/admin/snapshot` HTTP body, NEVER the frozen postcard `InterShardFlow` wire,
+/// so appending it here does not touch the wire contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RlmView {
+    /// `SpinUp` intents executed (a demanded realm's shard was launched).
+    pub spins_requested: u64,
+    /// `spawn_realm` refusals (drives the backoff + the stuck alarm).
+    pub spins_failed: u64,
+    /// `Kill`s executed (a reclaimed realm).
+    pub teardowns_reaped: u64,
+    /// `ForceReap`s executed (a zombie head cleaned).
+    pub force_reaps: u64,
+    /// Saga frames that did not decode to a `RealmDemand` (honesty; 0 in a healthy run).
+    pub undecodable_demands: u64,
+    /// Last sweep's desired-realm count (gauge).
+    pub desired_gauge: u64,
+    /// Last sweep's running-realm count (gauge).
+    pub running_gauge: u64,
+    /// The MAX observed launch→head-up latency in universe ticks (monotone). The measured pod boot the
+    /// launch-TTL is tuned from (`VD_BOOT_TICKS_P99`, 5f-4j); 0 until a demand-spawned head first appears.
+    pub boot_ticks_observed_max: u64,
+}
+
 /// The whole read-only snapshot one `GET /admin/snapshot` returns. Empty-but-shaped
 /// from day one (the P0 demo); the orchestrator fills it as subsystems land.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +114,10 @@ pub struct AdminSnapshot {
     pub directory: Vec<DirectoryEntryView>,
     pub sagas: Vec<SagaView>,
     pub leases: Vec<LeaseHealthView>,
+    /// RLM 5f-4 — the demand-reconciler view. A JSON-only field on the `/admin/snapshot` body (never the
+    /// frozen postcard wire); a JSON reader ignores fields it does not know, so appending it is safe for an
+    /// older operator tool reading a newer snapshot.
+    pub rlm: RlmView,
 }
 
 impl AdminSnapshot {
@@ -101,6 +131,7 @@ impl AdminSnapshot {
             directory: Vec::new(),
             sagas: Vec::new(),
             leases: Vec::new(),
+            rlm: RlmView::default(),
         }
     }
 
@@ -290,6 +321,11 @@ mod tests {
         assert_eq!(snap.directory, Vec::new());
         assert_eq!(snap.sagas, Vec::new());
         assert_eq!(snap.leases, Vec::new());
+        assert_eq!(
+            snap.rlm,
+            RlmView::default(),
+            "a fresh snapshot has the zero RLM view"
+        );
         let bytes = postcard::to_allocvec(&snap).expect("encode");
         let back: AdminSnapshot = postcard::from_bytes(&bytes).expect("decode");
         assert_eq!(back, snap);
@@ -314,10 +350,23 @@ mod tests {
                 lease_expires: UniverseTick(90),
                 ticks_remaining: -10,
             }],
+            rlm: RlmView {
+                spins_requested: 4,
+                spins_failed: 1,
+                teardowns_reaped: 2,
+                force_reaps: 1,
+                undecodable_demands: 0,
+                desired_gauge: 3,
+                running_gauge: 2,
+                boot_ticks_observed_max: 37,
+            },
         };
         let bytes = postcard::to_allocvec(&snap).expect("encode");
         let back: AdminSnapshot = postcard::from_bytes(&bytes).expect("decode");
-        assert_eq!(back, snap);
+        assert_eq!(
+            back, snap,
+            "the RLM view round-trips with the rest of the snapshot"
+        );
     }
 
     #[test]

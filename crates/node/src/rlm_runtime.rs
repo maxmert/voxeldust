@@ -109,6 +109,10 @@ pub struct RlmReconcilerRes {
     pub desired_gauge: u64,
     /// Last sweep's running-realm count (gauge).
     pub running_gauge: u64,
+    /// RLM 5f-4: the MAX observed launch→head-up latency (universe ticks), monotone. The measured pod boot
+    /// the launch-TTL is tuned from (`VD_BOOT_TICKS_P99`, 5f-4j); 0 until a demand-spawned head first
+    /// appears. Surfaced in the admin snapshot (RlmView).
+    boot_ticks_observed_max: u64,
 }
 
 impl RlmReconcilerRes {
@@ -153,7 +157,15 @@ impl RlmReconcilerRes {
             undecodable_demands: 0,
             desired_gauge: 0,
             running_gauge: 0,
+            boot_ticks_observed_max: 0,
         }
+    }
+
+    /// The MAX observed launch→head-up latency (universe ticks) — the measured pod boot (RLM 5f-4). Read by
+    /// the admin snapshot; 5f-4j feeds it back into `VD_BOOT_TICKS_P99` to tune the launch-TTL.
+    #[must_use]
+    pub fn boot_ticks_observed_max(&self) -> u64 {
+        self.boot_ticks_observed_max
     }
 
     /// Read the demand ledger (the reconcile system + tests).
@@ -307,16 +319,26 @@ impl RlmReconcilerRes {
     fn reconcile_launches(&mut self, dir: &DirectoryCore, now: UniverseTick) {
         let live = self.spawner.live_nodes();
         let ttl = self.tuning.launch_ttl_ticks;
+        let mut observed_boot = self.boot_ticks_observed_max;
         for (path, nodes) in &mut self.launches.minted {
             let rid = path
                 .realm_id()
                 .expect("a lifecycle realm path is non-empty");
             let head_up = dir.head(DirectoryKey::Realm(rid)).is_some();
+            if head_up {
+                // RLM 5f-4: the head appeared — the launch→head-up latency (now - mint tick) is the MEASURED
+                // pod boot. Fold the max over the draining minted nodes into the monotone gauge so 5f-4j can
+                // tune the launch-TTL from real cluster boots. (These nodes drain in the retain below.)
+                for minted_at in nodes.values() {
+                    observed_boot = observed_boot.max(now.0.saturating_sub(minted_at.0));
+                }
+            }
             nodes.retain(|node, minted_at| {
                 let within_ttl = now.0.saturating_sub(minted_at.0) < ttl;
                 !head_up & (live.contains(node) | within_ttl)
             });
         }
+        self.boot_ticks_observed_max = observed_boot;
         self.launches.minted.retain(|_, nodes| !nodes.is_empty());
     }
 
@@ -1072,6 +1094,52 @@ mod tests {
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         let mut world = lifecycle_world(rlm, 100);
         assert_eq!(run_lifecycle(&mut world), 1);
+    }
+
+    #[test]
+    fn boot_ticks_observed_max_records_the_launch_to_head_latency_monotonically() {
+        use vd_wire::seams::directory::AuthorityRef;
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::cloud(20), spawner());
+        let mut dir = DirectoryCore::new(DirectoryTuning::default());
+        let dead = |_n: NodeId| false;
+        // Demand + reconcile at tick 100 ⇒ sys(7) spins up (a node minted AT 100), no head yet ⇒ boot 0.
+        rlm.ledger
+            .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
+        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(100));
+        assert_eq!(
+            rlm.boot_ticks_observed_max(),
+            0,
+            "no head up yet ⇒ no boot measured"
+        );
+        // The realm head appears (the shard booted); reconcile at 137 ⇒ launch(100)→head(137) = 37 ticks.
+        let _ = dir.grant(
+            DirectoryKey::Realm(RealmId::System(7)),
+            AuthorityRef::Shard(NodeId(50)),
+            Fence(1),
+            UniverseTick(137),
+        );
+        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(137));
+        assert_eq!(
+            rlm.boot_ticks_observed_max(),
+            37,
+            "launch(100)→head(137) = 37 ticks"
+        );
+        // A LATER, SHORTER boot does NOT lower the monotone max (the `.max()` keep arm).
+        rlm.ledger
+            .record_demand(&sys(8), DemandVerb::SpinUp, UniverseTick(200), Fence(1));
+        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(200));
+        let _ = dir.grant(
+            DirectoryKey::Realm(RealmId::System(8)),
+            AuthorityRef::Shard(NodeId(51)),
+            Fence(1),
+            UniverseTick(203),
+        );
+        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(203));
+        assert_eq!(
+            rlm.boot_ticks_observed_max(),
+            37,
+            "a 3-tick boot does not lower the 37-tick max (monotone)"
+        );
     }
 
     #[test]

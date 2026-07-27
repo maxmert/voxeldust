@@ -370,6 +370,21 @@ pub fn admin_snapshot(world: &mut bevy_ecs::prelude::World) -> vd_wire::admin::A
     if let Some(sagas) = world.get_resource::<crate::saga_runtime::SagaRuntimeRes>() {
         snapshot.sagas = sagas.views();
     }
+    // RLM 5f-4: the demand-reconciler observability view — counters + gauges + the measured pod boot. All
+    // zero on an inert orchestrator (byte-identical to before). Absent on a non-orchestrator world (the
+    // shaped-empty default). `pub` counter fields are read directly; boot latency via its getter.
+    if let Some(rlm) = world.get_resource::<crate::rlm_runtime::RlmReconcilerRes>() {
+        snapshot.rlm = vd_wire::admin::RlmView {
+            spins_requested: rlm.spins_requested,
+            spins_failed: rlm.spins_failed,
+            teardowns_reaped: rlm.teardowns_reaped,
+            force_reaps: rlm.force_reaps,
+            undecodable_demands: rlm.undecodable_demands,
+            desired_gauge: rlm.desired_gauge,
+            running_gauge: rlm.running_gauge,
+            boot_ticks_observed_max: rlm.boot_ticks_observed_max(),
+        };
+    }
     snapshot
 }
 
@@ -752,6 +767,40 @@ mod tests {
         bare.insert_resource(ClockSample::default());
         assert_eq!(admin_snapshot(&mut bare).directory, vec![]);
         assert_eq!(admin_snapshot(&mut bare).leases, vec![]);
+        // RLM 5f-4: no reconciler resource ⇒ the zero RLM view (the get_resource None arm).
+        assert_eq!(
+            admin_snapshot(&mut bare).rlm,
+            vd_wire::admin::RlmView::default(),
+            "a world without a reconciler renders the zero RLM view"
+        );
+    }
+
+    #[test]
+    fn admin_snapshot_surfaces_the_live_rlm_counters() {
+        use crate::rlm_runtime::RlmReconcilerRes;
+        use vd_sim::io::mem::{MemHub, MemSpawner};
+        let mut world = bevy_ecs::prelude::World::new();
+        world.insert_resource(ClockSample::default());
+        // A reconciler with observed activity — set the pub counters directly to prove the snapshot READS
+        // them (not merely renders defaults). boot_ticks_observed_max stays 0 (no head came up here).
+        let mut rlm = RlmReconcilerRes::new(
+            RlmTuning::default(),
+            Box::new(MemSpawner::new(MemHub::new(), NodeId(1000), 8)),
+        );
+        rlm.spins_requested = 4;
+        rlm.spins_failed = 1;
+        rlm.teardowns_reaped = 2;
+        rlm.running_gauge = 3;
+        world.insert_resource(rlm);
+        let snap = admin_snapshot(&mut world);
+        assert_eq!(snap.rlm.spins_requested, 4);
+        assert_eq!(snap.rlm.spins_failed, 1);
+        assert_eq!(snap.rlm.teardowns_reaped, 2);
+        assert_eq!(snap.rlm.running_gauge, 3);
+        assert_eq!(
+            snap.rlm.boot_ticks_observed_max, 0,
+            "no head up ⇒ no boot measured"
+        );
     }
 
     #[test]
