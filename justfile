@@ -209,12 +209,15 @@ rlm-proc-spawn:
 rlm-kill9:
     cargo test -p vd-bins --features store-test-hooks --test rlm_kill9_spawn -- --test-threads=1 --nocapture
 
-# RLM RG-4c: THE demand-login PROCESS proof — boots a DEMAND cluster (orchestrator + gateway ONLY, no shard
-# pre-booked) in real processes, logs in ONE real dev-control client, and proves from the gateway's admin
-# snapshot that the login SPAWNED + reached a fresh home shard with no pre-booked address (dynamic_shards >= 1,
-# presence_announces >= 1, home_bootstrap_timeouts == 0). Tier-B, `--features dev-control` (drives the client
-# through its loopback listener). `--test-threads=1` + a dedicated RLM port band (45000+) keep the
-# demand-spawned shards' deterministic ports off rlm_kill9's band.
+# RLM: THE demand-LOOP PROCESS proofs — boots a DEMAND cluster (orchestrator + gateway ONLY, no shard
+# pre-booked) in real processes. (1) demand-LOGIN: one real dev-control client logs in, proving from the
+# gateway admin snapshot that the login SPAWNED + reached a fresh home shard with no pre-booked address
+# (dynamic_shards >= 1, presence_announces >= 1, home_bootstrap_timeouts == 0). (2) gateway-restart re-heal:
+# the reactive greeting re-learns a running demand shard after the gateway restarts. (3) demand-WALK: a MOVING
+# client walks toward a child realm — its AoI spins the child up AHEAD of it, it CROSSES in (location→"Planet
+# 7"), and when it walks back out the vacated realm is torn down + reaped (teardowns_reaped >= 1). Tier-B,
+# `--features dev-control`. `--test-threads=1` + a dedicated RLM port band (45000+) keep the demand-spawned
+# shards' deterministic ports off rlm_kill9's band.
 rlm-demand-login:
     cargo test -p vd-bins --features dev-control --test rlm_demand_login -- --test-threads=1 --nocapture
 

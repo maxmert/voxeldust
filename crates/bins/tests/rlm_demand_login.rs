@@ -1,4 +1,4 @@
-//! RLM RG-4c — THE demand-login PROCESS proof.
+//! RLM — THE demand-loop PROCESS proofs: the demand-LOGIN (RG-4c) + the demand-WALK.
 //!
 //! Boots a DEMAND cluster in real OS processes — orchestrator + gateway ONLY, with NO shard pre-booked
 //! ([`ClusterShape::Demand`]) — then logs in ONE real dev-control client. The design pass (wf_5c3f7fbb) found
@@ -25,14 +25,15 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use vd_bins::{
-    Cluster, ClusterAddrs, ClusterShape, DEV, admin_get_body, common_env, dev_auth_pubkey_hex,
-    dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows, orchestrator_env,
-    reap_forked, reserve_tcp_addr, reserve_udp_addr,
+    Cluster, ClusterAddrs, ClusterShape, DEV, DevClusterParams, admin_get_body, common_env,
+    dev_auth_pubkey_hex, dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows,
+    orchestrator_env, reap_forked, reserve_tcp_addr, reserve_udp_addr,
 };
 use vd_core::NodeId;
-use vd_devproto::{CLIENT_NODE_BASE, DevPhase, DevRequest, DevResponse, DevState};
+use vd_core::glam::DVec3;
+use vd_devproto::{CLIENT_NODE_BASE, DevEntityRow, DevPhase, DevRequest, DevResponse, DevState};
 use vd_io_prod::trust::ClusterTrust;
-use vd_wire::admin::{AdminSnapshot, GatewayView};
+use vd_wire::admin::{AdminSnapshot, GatewayView, RlmView};
 
 /// Demand: the login must SPAWN a real shard process THEN converge — a longer budget than a static login.
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -186,6 +187,7 @@ fn push_demand_gateway(
     cluster: &mut Cluster,
     f: &Fixture,
     a: &ClusterAddrs,
+    p: &DevClusterParams,
     client_book: &[(NodeId, SocketAddr)],
 ) {
     cluster.push(
@@ -193,17 +195,18 @@ fn push_demand_gateway(
         vd_bins::spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
             &f.common,
-            &gateway_env(a, client_book, &dev_auth_pubkey_hex(), &DEV, ClusterShape::Demand),
+            &gateway_env(a, client_book, &dev_auth_pubkey_hex(), p, ClusterShape::Demand),
         )
         .expect("spawn gateway"),
     );
 }
 
 /// Boot a demand cluster (orchestrator + gateway) + one dev-control client — NO shard pre-booked. The only
-/// way to a world is the armed reconciler spinning one up on the client's login demand.
+/// way to a world is the armed reconciler spinning one up on the client's login demand (+ its AoI as it moves).
 fn boot_demand_login(
     f: &Fixture,
     a: &ClusterAddrs,
+    p: &DevClusterParams,
     client_book: &[(NodeId, SocketAddr)],
     client_quic: SocketAddr,
     devctl_port: u16,
@@ -214,11 +217,11 @@ fn boot_demand_login(
         vd_bins::spawn_node(
             env!("CARGO_BIN_EXE_vd-orchestrator"),
             &f.common,
-            &orchestrator_env(a, &DEV, &f.store_str, ClusterShape::Demand),
+            &orchestrator_env(a, p, &f.store_str, ClusterShape::Demand),
         )
         .expect("spawn orchestrator"),
     );
-    push_demand_gateway(&mut cluster, f, a, client_book);
+    push_demand_gateway(&mut cluster, f, a, p, client_book);
     cluster.push("client", spawn_client(f, a.gateway, client_quic.port(), devctl_port));
     cluster
 }
@@ -234,7 +237,7 @@ fn a_demand_login_spins_up_a_fresh_home_and_lands_with_no_prebooked_shard() {
 
     // The forked-shard reaper drops LAST (declared first) — after the Cluster has reaped the orchestrator.
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &DEV, &client_book, client_quic, devctl_port);
 
     // ---- THE proof: the login went Active, and it did so by spawning + reaching a fresh home shard. ----
     let state = await_active(devctl_port, gw_admin, DEADLINE);
@@ -285,7 +288,7 @@ fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greetin
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let mut cluster = boot_demand_login(&f, &a, &client_book, client_quic, devctl_port);
+    let mut cluster = boot_demand_login(&f, &a, &DEV, &client_book, client_quic, devctl_port);
 
     // The login spawned a home shard + the gateway learned it via the reactive greeting.
     await_active(devctl_port, gw_admin, DEADLINE);
@@ -300,7 +303,7 @@ fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greetin
     // group, so the Cluster's per-child kill never touched it. D-34: we restart the GATEWAY (the learner), not
     // the shard.
     cluster.kill_and_reap("vd-gateway");
-    push_demand_gateway(&mut cluster, &f, &a, &client_book);
+    push_demand_gateway(&mut cluster, &f, &a, &DEV, &client_book);
     let _cluster = cluster;
 
     // THE re-heal proof: the fresh gateway RE-LEARNS the still-running shard via the greeting ALONE. The shard
@@ -330,3 +333,149 @@ fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greetin
 // with an open session and `home_bootstrap_timeouts == 0` (a separate pre-sync-hold concern). The TTL fires
 // only for a SYNCED gateway whose home genuinely fails to boot, which CA-1 learning (the orchestrator learns
 // the gateway from the demand frame and delivers the grant anyway) makes delicate to induce.
+
+// ---- The demand-WALK: a MOVING occupant drives realm spin-up AHEAD + tear-down BEHIND -------------------
+
+/// Walk-demand params: a NON-ZERO predictive AoI horizon so a child realm spins up + boots BEFORE the walking
+/// occupant crosses its boundary. At 50 Hz, 150 ticks ≈ 3 s of look-ahead: Planet 7's spin-up band edge sits
+/// at x≈8 (extent 10 × the 1.2 walk-demand factor), so a +X walker at ~2 m/s predicts into it around x≈2 —
+/// ~4 s of walk to the physical boundary (x=10), covering the ~2–3 s the child needs to spawn + greet + route.
+fn walk_params() -> DevClusterParams {
+    DevClusterParams {
+        boot_ticks_p99: 150,
+        ..DEV
+    }
+}
+
+fn own_row(state: &DevState) -> Option<&DevEntityRow> {
+    let own = state.own_entity.as_deref()?;
+    state.entities.iter().find(|r| r.entity == own)
+}
+
+fn own_pos(state: &DevState) -> Option<DVec3> {
+    own_row(state).map(|r| DVec3::from_array(r.pos))
+}
+
+/// The orchestrator's RLM view (`spins_requested` / `spins_failed` / `teardowns_reaped` …); a zeroed view if
+/// the admin endpoint blinks (a poll loop tolerates that).
+fn orch_rlm(admin_addr: SocketAddr) -> RlmView {
+    admin(admin_addr).map(|s| s.rlm).unwrap_or_default()
+}
+
+/// Drive ONE walk leg: `WalkTo` the world x-target on the +X axis, settle the sticky Move, read the delivered
+/// own pose, and assert the occupant ARRIVED — movement never froze across the demand spin-up + cross-node
+/// re-home. A generous `max_ticks` so a slow spawn+cross never times out mid-leg (the point is that the dot
+/// keeps MOVING, and that the child booted in time to receive the cross — not raw speed).
+fn walk_leg(devctl_port: u16, leg: &str, target_x: f64, max_ticks: u64) -> DVec3 {
+    let target = DVec3::new(target_x, 0.0, 0.0);
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::WalkTo {
+            target: target.to_array(),
+            arrive_epsilon: 2.0,
+            max_ticks,
+        },
+    )
+    .unwrap_or_else(|| panic!("leg {leg}: no walk response"));
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Move {
+            axes: [0.0, 0.0, 0.0],
+        },
+    );
+    let landed = own_pos(&poll_state(devctl_port).expect("state after leg")).expect("own pos");
+    assert!(
+        (landed.x - target_x).abs() <= 2.0,
+        "leg {leg} FROZE: the occupant stalled at x={:.3}, never reaching x={target_x} — the demand child did \
+         not spin up + boot in time to receive the cross, or the re-home stalled.",
+        landed.x,
+    );
+    landed
+}
+
+#[test]
+fn a_walking_occupant_spins_up_a_child_ahead_crosses_in_then_the_vacated_realm_is_reaped() {
+    // THE demand-WALK — warp as a consequence of movement. A logged-in occupant walks toward a CHILD realm
+    // that does not exist yet; its Area-of-Interest (predictive) spins the child up AHEAD of it, the
+    // orchestrator spawns it, the occupant CROSSES in, and when the occupant walks back out the vacated child
+    // EMPTIES and its shard is reaped. No loading, no teleport — the demand loop driven by a moving player.
+    let f = fixture("walk");
+    let gw_admin = reserve_tcp_addr();
+    let a = demand_addrs(gw_admin);
+    let p = walk_params();
+    let client_quic = reserve_udp_addr();
+    let devctl_port = reserve_tcp_addr().port();
+    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
+    // Spawn + walk + cross + the drain/quiesce teardown windows ⇒ a materially longer budget than a login.
+    let deadline = Duration::from_secs(120);
+
+    let _reaper = ForkedReaper(f.launch_path.clone());
+    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+
+    // The login lands the occupant in the home realm (System 7) at the origin.
+    let landed = await_active(devctl_port, gw_admin, deadline);
+    assert_eq!(
+        landed.location.as_deref(),
+        Some("System 7"),
+        "the login lands in the home realm: {landed:?}",
+    );
+    let home_spins = orch_rlm(a.admin).spins_requested; // >= 1 (the home was demand-spawned)
+
+    // ---- LEG 1: spin-up-AHEAD + cross-IN ----
+    // Walk +X into Planet 7 (center +20, near-face x=10). The occupant's predictive AoI spins Planet 7 up while
+    // it is still ~8 m short of the boundary, the orchestrator spawns it, and the occupant crosses in without
+    // its movement freezing.
+    walk_leg(devctl_port, "into-planet-7", 15.0, 2_000);
+    let inside = poll_state(devctl_port).expect("state after leg 1");
+    // The occupant's AUTHORITATIVE frame is now Planet 7 — it re-homed onto the demand-spawned child's shard
+    // (the gateway routed it there). `location` changes ONLY on a real cross-realm move, so this IS the
+    // spin-up-ahead + cross-in proof: the child could not have existed at login (NO shard was pre-booked).
+    assert_eq!(
+        inside.location.as_deref(),
+        Some("Planet 7"),
+        "the occupant crossed into the demand-spawned child realm: {inside:?}",
+    );
+    assert!(
+        inside.own_entity.is_some(),
+        "the occupant kept authority across the cross-in: {inside:?}",
+    );
+    assert_eq!(
+        inside.decode_errors, 0,
+        "the client saw no decode faults across the walk-in: {inside:?}",
+    );
+    let walk_rlm = orch_rlm(a.admin);
+    assert!(
+        walk_rlm.spins_requested > home_spins,
+        "the WALK demanded a NEW child realm beyond the home (spins {} > {home_spins}): {walk_rlm:?}",
+        walk_rlm.spins_requested,
+    );
+    assert_eq!(walk_rlm.spins_failed, 0, "no spawn failed: {walk_rlm:?}");
+    // NOTE: the gateway's `dynamic_shards` counts LOGIN-home claims only (the `on_home_realm_head` resolve); a
+    // crossing dest is admitted via the `PrepareSubscribe` path, so it is NOT counted there — `location`
+    // above is the routing proof, not `dynamic_shards`.
+
+    // ---- LEG 2: tear-down-BEHIND ----
+    // Walk back to the origin (into System 7). The occupant leaves Planet 7 → it self-reports Empty → the
+    // reconciler drains + reaps it, while the still-occupied home (System 7) stays up.
+    walk_leg(devctl_port, "back-to-system-7", 0.0, 2_000);
+    let back = poll_state(devctl_port).expect("state after leg 2");
+    assert_eq!(
+        back.location.as_deref(),
+        Some("System 7"),
+        "the occupant returned to the parent realm: {back:?}",
+    );
+    // The vacated Planet 7 is torn down + its real shard process reaped. The drain + quiesce windows make this
+    // a polled assertion (not instant).
+    let started = Instant::now();
+    loop {
+        let r = orch_rlm(a.admin);
+        if r.teardowns_reaped >= 1 {
+            break;
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "the vacated Planet 7 was never torn down/reaped (teardowns_reaped stayed 0): {r:?}",
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
