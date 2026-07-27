@@ -178,6 +178,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::sync::Arc::clone(&control),
         std::sync::Arc::clone(&shutdown),
     )?;
+    // RLM RG-4: the gateway's read-only /admin/snapshot (GatewayView) + /metrics, iff VD_ADMIN_ADDR is set
+    // (the Demand cluster + cloud pods; unset in-process ⇒ byte-identical). The snapshot cell is republished
+    // lock-free after every tick below — a `curl` (the demand-login e2e's observability) never touches the
+    // sim thread. Metrics ride the SAME retained MeshControl the peer-resolver holds.
+    let admin_cell = if let Some(admin_addr) = vd_bins::resolve_admin(&env)? {
+        let cell = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            vd_connection_plane::admin::gateway_admin_snapshot(node.world_mut()),
+        ));
+        vd_bins::spawn_admin_server(
+            runtime.handle(),
+            admin_addr,
+            std::sync::Arc::new(vd_io_prod::admin::PublishedSnapshot(std::sync::Arc::clone(
+                &cell,
+            ))),
+            std::sync::Arc::new(vd_io_prod::admin::MeshMetrics(std::sync::Arc::clone(&control))),
+        );
+        Some(cell)
+    } else {
+        None
+    };
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = node.step_tick();
         // Readiness = clock-synced AND session capacity available (the SAME quantity the admission gate
@@ -202,6 +222,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         };
         vd_io_prod::probe::publish_tick(&health, local_tick, ready);
+        // RLM RG-4: republish the admin snapshot AFTER the tick (a curl always sees the latest GatewayView —
+        // presence_announces, dynamic_shards, sessions_open). No-op when no admin bind was booked.
+        if let Some(cell) = &admin_cell {
+            cell.store(std::sync::Arc::new(
+                vd_connection_plane::admin::gateway_admin_snapshot(node.world_mut()),
+            ));
+        }
         let _ = pacer.wait();
     }
     // S3 drain LINGER: the shutdown edge already set /readyz=503; linger in Terminating (default 0) so k8s

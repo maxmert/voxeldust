@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use vd_io_prod::admin::{MeshMetrics, SnapshotSource, admin_router};
+use vd_io_prod::admin::{MeshMetrics, PublishedSnapshot};
 use vd_io_prod::mesh::{MeshConfig, spawn_mesh};
 use vd_io_prod::runtime::{EnvConfig, TickPacer};
 use vd_io_prod::store::{RedbStore, StoreTuning};
@@ -26,14 +26,6 @@ use vd_sim::capability::NodeKind;
 use vd_wire::admin::AdminSnapshot;
 #[cfg(feature = "store-test-hooks")]
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
-
-struct Published(Arc<ArcSwap<AdminSnapshot>>);
-
-impl SnapshotSource for Published {
-    fn snapshot(&self) -> AdminSnapshot {
-        self.0.load().as_ref().clone()
-    }
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -395,14 +387,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let served = Arc::clone(&cell);
     // R-4d M4: the live mesh-metrics source shares the retained MeshControl.
     let metrics = Arc::new(MeshMetrics(Arc::clone(&control)));
-    runtime.spawn(async move {
-        let listener = tokio::net::TcpListener::bind(admin_addr)
-            .await
-            .expect("admin endpoint binds");
-        axum::serve(listener, admin_router(Arc::new(Published(served)), metrics))
-            .await
-            .expect("admin endpoint serves");
-    });
+    // RLM RG-4: the ONE shared bind+serve helper (was an inline runtime.spawn + a private `Published`), so the
+    // gateway (RG-4a5) and the orchestrator publish through the identical PublishedSnapshot contract.
+    vd_bins::spawn_admin_server(
+        runtime.handle(),
+        admin_addr,
+        Arc::new(PublishedSnapshot(served)),
+        metrics,
+    );
 
     // PERSIST-BEFORE-EFFECT (Slice D parked-flush): split each tick into run_schedule (stages + submits
     // this tick's durable batch via the group-commit barrier) and flush_outbox (sends the tick's egress),
