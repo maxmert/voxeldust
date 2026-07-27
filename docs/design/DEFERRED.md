@@ -2724,7 +2724,15 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   population — converts "negligible, trust me" into a measured floor.
 - **Source:** whole-codebase audits `wf_43fea0dd` (SCALE-B) + `wf_032b80eb` (PvP/large-scale: H1, the within-realm AoI gap).
 
-### D-10 🟥 Per-node honesty counters exist on every node but are unobservable at runtime (only the orchestrator publishes)
+### D-10 🟧 PARTIAL — Per-node honesty counters exist on every node; the ORCHESTRATOR + GATEWAY now publish, the SHARD/follower do not yet
+- **RG-4 progress (RLM RG-4a, committed `bd01f5a`..`f744a5c`):** the GATEWAY now publishes its own
+  `/admin/snapshot` (the `GatewayView` — all 22 `GatewayStats` counters + `sessions_open` + `dynamic_shards`),
+  through the SAME lock-free `PublishedSnapshot` cell the orchestrator uses (one shared `vd_io_prod::admin`
+  contract + `vd_bins::spawn_admin_server`, both bins). The reactive-greeting `presence_announces` + the
+  demand `dynamic_shards`/`home_bootstrap_timeouts` are now curl-able and the RG-4c demand-login e2e reads its
+  proof from them. The mesh `learned_peers_rejected` shed counter is scraped on `/metrics`. REMAINING: the
+  STUB-SHARD + follower counters (`StubStats`/`FollowerState.undecodable`) are still unexposed — a demand-spawned
+  shard has no admin endpoint yet. Flips 🟩 when the shard bin grows the same published-snapshot admin cell.
 - **Missing:** the COUNTERS now exist on every node — gateway (`GatewayStats.undecodable`/`inputs_*`),
   stub-shard (`StubStats.undecodable`/`attaches_deferred`), orchestrator (`OrchestratorStats.undecodable`),
   follower (`FollowerState.undecodable`/`rejected_backward`/`epoch_mismatches`), inbox-drop
