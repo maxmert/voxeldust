@@ -62,6 +62,12 @@ pub struct SpawnTuning {
     /// The first dev bind port. On a single loopback host the cursor walks `u16`s; 5d spreads realms across
     /// pods/IPs so per-host port pressure never approaches exhaustion at real scale.
     pub first_port: u16,
+    /// RLM 5f-4g: the EXCLUSIVE end of the bind-port band (a `u32` so it can name 65536 = "the whole u16
+    /// space", the byte-identical `dev()` default). The F2 allocator refuses LOUDLY once a `(bind, probe)`
+    /// pair would reach it — so a demand cluster's monotone allocator cannot walk out of its per-slot band
+    /// into a neighbouring slot's ports (the launcher sets this from `SlotPorts::spawn_port_end`). Because
+    /// the allocator never frees a port, this is the LIFETIME cap, not a concurrent one.
+    pub port_limit: u32,
     /// The dev bind host every port hangs off (loopback). 5d generalizes to real per-pod addresses.
     pub bind_host: Ipv4Addr,
 }
@@ -72,14 +78,42 @@ impl SpawnTuning {
     /// Base of the dev loopback port range.
     const DEV_FIRST_PORT: u16 = 42_000;
 
-    /// The single-host loopback defaults for local `just run`/tests.
+    /// The single-host loopback defaults for local `just run`/tests. `port_limit` is the WHOLE u16 space
+    /// (65536), so the raw default is byte-identical to the pre-5f-4g allocator; a demand LAUNCHER passes a
+    /// bounded per-slot `port_limit` (`SlotPorts::spawn_port_end`) to keep the band inside its slot.
     #[must_use]
     pub const fn dev() -> SpawnTuning {
         SpawnTuning {
             first_node: Self::DEV_FIRST_NODE,
             first_port: Self::DEV_FIRST_PORT,
+            port_limit: u16::MAX as u32 + 1,
             bind_host: Ipv4Addr::LOCALHOST,
         }
+    }
+
+    /// RLM 5f-4g: the FULL sequence of `(NodeId, bind, probe)` this tuning's F2 allocator will EVER mint —
+    /// the ONE source of truth the demand launcher's gateway pre-book consumes, so every mintable shard is
+    /// pre-booked (no un-dialable/un-booked spawn → no silent blind player). The k-th spawn takes
+    /// `(first_node + k, first_port + 2k, first_port + 2k + 1)` — EXACTLY what [`SpawnCore::spawn_realm`]
+    /// computes (`bind = cursor`, `probe = cursor + 1`, `next = cursor + 2`, `node += 1`, committed together,
+    /// even on a failed launch) — bounded by `port_limit` (the allocator refuses past it). The k-th-mint
+    /// invariant is pinned by a test so an allocator change can never silently desync the pre-book.
+    pub fn predicted_mints(&self) -> impl Iterator<Item = (NodeId, SocketAddr, SocketAddr)> + '_ {
+        let host = self.bind_host;
+        let first_node = self.first_node;
+        let first_port = u32::from(self.first_port);
+        // Whole `(bind, probe)` pairs that fit below the exclusive `port_limit`. Floored, so the last
+        // probe is `< port_limit <= 65536` ⇒ every bind/probe is a valid `u16`.
+        let pairs = self.port_limit.saturating_sub(first_port) / 2;
+        (0..pairs).map(move |k| {
+            let bind = first_port + 2 * k;
+            let probe = bind + 1;
+            (
+                NodeId(first_node + u64::from(k)),
+                SocketAddr::from((host, bind as u16)),
+                SocketAddr::from((host, probe as u16)),
+            )
+        })
     }
 }
 
@@ -211,9 +245,13 @@ impl LiveSlot {
 struct SpawnInner {
     /// F2 node cursor — only ever advances (persisted in [`WaterMark`]).
     next_node: u64,
-    /// F2 dev port cursor (`u32` so the last `u16` port is usable) — only ever advances; exhaustion past
-    /// `u16::MAX` is loud, never wrapped.
+    /// F2 dev port cursor (`u32` so the last `u16` port is usable) — only ever advances; exhaustion at
+    /// `port_limit` is loud, never wrapped.
     next_port: u32,
+    /// RLM 5f-4g: the EXCLUSIVE end of the bind-port band (from [`SpawnTuning::port_limit`]). A `(bind,
+    /// probe)` pair that would reach it is refused LOUDLY — a demand cluster's monotone allocator stays
+    /// inside its per-slot band. `dev()`'s 65536 keeps the raw default byte-identical to pre-5f-4g.
+    port_limit: u32,
     /// The dev bind host every allocated port hangs off.
     bind_host: Ipv4Addr,
     /// Minted, launched, and not yet torn down — the reconcile source of truth for `live_nodes`.
@@ -296,10 +334,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
         anchor_peers: Vec<(NodeId, SocketAddr)>,
     ) -> SpawnCore<B> {
         let mut store = store;
-        let water = read_water(&*store).unwrap_or(WaterMark {
-            next_node: tuning.first_node,
-            next_port: u32::from(tuning.first_port),
-        });
+        let water = resume_water(&*store, &tuning);
         let mut live = BTreeMap::new();
         let mut path_index = BTreeMap::new();
         // v1-only intents (`pid: None`) are launches never confirmed before a crash — DROP them (Step 5c
@@ -342,6 +377,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
             inner: Arc::new(Mutex::new(SpawnInner {
                 next_node: water.next_node,
                 next_port: water.next_port,
+                port_limit: tuning.port_limit,
                 bind_host: tuning.bind_host,
                 live,
                 killed: BTreeSet::new(),
@@ -379,6 +415,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
             inner: Arc::new(Mutex::new(SpawnInner {
                 next_node: water.next_node,
                 next_port: water.next_port,
+                port_limit: tuning.port_limit,
                 bind_host: tuning.bind_host,
                 live: BTreeMap::new(),
                 killed: BTreeSet::new(),
@@ -437,14 +474,16 @@ impl<B: LaunchBackend> SpawnCore<B> {
 impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
     fn spawn_realm(&self, coord: &RealmCoord, at_tick: UniverseTick) -> Result<NodeId, SpawnError> {
         let mut g = self.lock();
-        // F2 TWO-port allocation (bind + probe): loud on dev-scale single-host exhaustion, NEVER wrapped (a
-        // wrap would reuse a retired port → the exact stale-latch hazard F2 exists to prevent). Checked
-        // before minting, so an exhausted allocator burns nothing. The cursor is a `u32`, so the last usable
-        // pair ends at 65535; exhaustion is a pair that would need a port past `u16::MAX`.
+        // F2 TWO-port allocation (bind + probe): loud on band exhaustion, NEVER wrapped (a wrap would reuse
+        // a retired port → the exact stale-latch hazard F2 exists to prevent). Checked before minting, so an
+        // exhausted allocator burns nothing. RLM 5f-4g: exhaustion is a `(bind, probe)` pair whose PROBE
+        // (`cursor + 1`) would reach the EXCLUSIVE `port_limit` — a demand cluster's monotone allocator thus
+        // cannot walk out of its per-slot band into a neighbour's ports. `dev()`'s 65536 limit keeps this
+        // byte-identical to the pre-5f-4g "past `u16::MAX`" guard.
         let cursor = g.next_port;
-        if cursor + 1 > u32::from(u16::MAX) {
+        if cursor + 1 >= g.port_limit {
             return Err(SpawnError::LaunchFailed {
-                reason: "dev port space exhausted".into(),
+                reason: "dev port band exhausted".into(),
             });
         }
         let bind_port = cursor as u16;
@@ -637,6 +676,44 @@ fn read_water(store: &dyn Store) -> Option<WaterMark> {
         })
 }
 
+/// RLM 5f-4g: read the resume cursor (durable high-water, or genesis on a virgin store) and VALIDATE it
+/// against the configured band — the ONE path both [`SpawnCore::rehydrate`] and [`SpawnCore::water_only`]
+/// funnel through, so the band invariants are enforced at EVERY construction, never trusted. Two loud
+/// guards (fail-fast on an impossible durable/config state, never a silent wrapped or out-of-band port):
+///   * `port_limit <= 65536` — the exclusive band end must fit the u16 space, so every `as u16` cast in the
+///     allocator and [`SpawnTuning::predicted_mints`] is lossless (a larger limit would wrap the cursor to
+///     port 0 → an OS-chosen ephemeral port the launcher's pre-book never booked = a blind shard).
+///   * `first_port <= next_port <= port_limit` — the recovered cursor sits INSIDE its band (the top-inclusive
+///     bound is a legitimately full band: the last mint leaves `next_port == port_limit`). Below the floor: a
+///     store opened under a DIFFERENT (higher) `first_port` (an operator moved the band under a live store)
+///     would mint BELOW its band — into a neighbouring slot's ports AND outside `predicted_mints` (un-booked).
+///     Above the ceiling (only reachable via a corrupt record — this module is the sole writer, whose max
+///     `next_port` is `port_limit`): a near-`u32::MAX` cursor would overflow `cursor + 1` in a release build
+///     (overflow-checks off) and wrap the guard, minting a garbage port. Both refuse LOUDLY (never clamp — a
+///     retained water also carries a stale `next_node`, so a clamp would desync the (node, port) pairing).
+///
+/// Static assert messages (HR5: no format args → no uncoverable region); each false arm is pinned by a
+/// `#[should_panic]` test, each true arm by every normal construction.
+fn resume_water(store: &dyn Store, tuning: &SpawnTuning) -> WaterMark {
+    assert!(
+        tuning.port_limit <= u16::MAX as u32 + 1,
+        "SpawnTuning port_limit exceeds the u16 port space"
+    );
+    let water = read_water(store).unwrap_or(WaterMark {
+        next_node: tuning.first_node,
+        next_port: u32::from(tuning.first_port),
+    });
+    assert!(
+        water.next_port >= u32::from(tuning.first_port),
+        "recovered launch high-water is below the configured band floor"
+    );
+    assert!(
+        water.next_port <= tuning.port_limit,
+        "recovered launch high-water is above the configured band ceiling"
+    );
+    water
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,6 +772,11 @@ mod tests {
         }
         fn launched(&self) -> Vec<NodeId> {
             self.g().launched.clone()
+        }
+        /// Every `(node, bind, probe, cookie)` that reached `launch` (in order) — the full realized mint
+        /// sequence a burned launch is ABSENT from (5f-4g pre-book-desync proof).
+        fn launched_specs(&self) -> Vec<(NodeId, SocketAddr, SocketAddr, IncarnationCookie)> {
+            self.g().launched_specs.clone()
         }
         /// The `(node, bind, probe, cookie)` of the most recent `launch` — proves seam threading.
         fn last_spec(&self) -> (NodeId, SocketAddr, SocketAddr, IncarnationCookie) {
@@ -758,11 +840,24 @@ mod tests {
         .expect("3-level path has a leaf")
     }
 
-    /// A tuning with small explicit bases so ids/ports are easy to assert on.
+    /// A tuning with small explicit bases so ids/ports are easy to assert on. `port_limit` is the WHOLE u16
+    /// space (like `dev()`), so the allocator behaves exactly as pre-5f-4g for every existing test.
     fn tuning(first_node: u64, first_port: u16) -> SpawnTuning {
         SpawnTuning {
             first_node,
             first_port,
+            port_limit: u16::MAX as u32 + 1,
+            bind_host: Ipv4Addr::LOCALHOST,
+        }
+    }
+
+    /// A tuning with an explicit BOUNDED port band `[first_port, port_limit)` — for the 5f-4g band-exhaustion
+    /// and pre-book-coverage proofs (a demand launcher passes such a per-slot band).
+    fn banded_tuning(first_node: u64, first_port: u16, port_limit: u32) -> SpawnTuning {
+        SpawnTuning {
+            first_node,
+            first_port,
+            port_limit,
             bind_host: Ipv4Addr::LOCALHOST,
         }
     }
@@ -988,12 +1083,206 @@ mod tests {
         assert_eq!(
             err,
             SpawnError::LaunchFailed {
-                reason: "dev port space exhausted".to_string()
+                reason: "dev port band exhausted".to_string()
             }
         );
         // The exhausted attempt burned nothing: only the first child is live, only it was booked.
         assert_eq!(sc.live_nodes(), BTreeSet::from([NodeId(1_000)]));
         assert_eq!(fake.book_count(), 1);
+    }
+
+    #[test]
+    fn a_bounded_band_exhausts_loudly_at_its_own_end_not_u16_max() {
+        // RLM 5f-4g: a per-slot demand band far below u16::MAX. Band [42_000, 42_004) holds exactly TWO
+        // (bind, probe) pairs — 42000/42001 and 42002/42003 — the THIRD spawn (cursor 42_004, probe 42_005
+        // ≥ 42_004) must exhaust LOUDLY, never walking into a neighbouring slot's ports.
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), banded_tuning(1_000, 42_000, 42_004));
+
+        let a = sc.spawn_realm(&system(1, 1), T).expect("pair 0 fits");
+        let b = sc.spawn_realm(&system(1, 2), T).expect("pair 1 fits");
+        assert_eq!((a, b), (NodeId(1_000), NodeId(1_001)));
+
+        let err = sc
+            .spawn_realm(&system(1, 3), T)
+            .expect_err("band exhausted below u16::MAX");
+        assert_eq!(
+            err,
+            SpawnError::LaunchFailed {
+                reason: "dev port band exhausted".to_string()
+            }
+        );
+        // Exactly the band's capacity is live; the third attempt burned nothing.
+        assert_eq!(
+            sc.live_nodes(),
+            BTreeSet::from([NodeId(1_000), NodeId(1_001)])
+        );
+        assert_eq!(fake.book_count(), 2);
+    }
+
+    #[test]
+    fn predicted_mints_match_the_live_allocator_and_cover_the_whole_band() {
+        // RLM 5f-4g: `predicted_mints` is the ONE source of truth the demand launcher pre-books, so it must
+        // equal EXACTLY what the live allocator mints — else a spawned shard is un-booked (un-dialable). Drive
+        // the real F2 allocator to band exhaustion and assert the recorded (node, bind, probe) sequence is
+        // byte-identical to the prediction, and the prediction covers the WHOLE band (no more, no fewer).
+        let band = banded_tuning(1_000, 42_000, 42_008); // 4 pairs: 42000..42007
+        let predicted: Vec<(NodeId, SocketAddr, SocketAddr)> = band.predicted_mints().collect();
+
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), band);
+        // Spawn until the band is exhausted; collect what the allocator actually minted.
+        let mut minted = Vec::new();
+        for s in 0..predicted.len() {
+            let node = sc
+                .spawn_realm(&system(1, s as u64), T)
+                .expect("every predicted mint spawns");
+            let (spec_node, bind, probe, _cookie) = fake.last_spec();
+            assert_eq!(spec_node, node);
+            minted.push((node, bind, probe));
+        }
+        // The prediction equals the reality, mint-for-mint.
+        assert_eq!(minted, predicted);
+        // k-th mint invariant, spelled out for the launcher's pre-book contract.
+        assert_eq!(
+            predicted[0],
+            (NodeId(1_000), addr(42_000), addr(42_001))
+        );
+        assert_eq!(
+            predicted[3],
+            (NodeId(1_003), addr(42_006), addr(42_007))
+        );
+        // And the band is fully consumed: the next spawn exhausts loudly.
+        let err = sc
+            .spawn_realm(&system(9, 9), T)
+            .expect_err("band fully consumed");
+        assert_eq!(
+            err,
+            SpawnError::LaunchFailed {
+                reason: "dev port band exhausted".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_burned_launch_keeps_predicted_mints_keyed_correctly_by_node_id() {
+        // RLM 5f-4g (the pre-book-desync proof the verify pass demanded): a FAILED launch advances the F2
+        // cursor + node TOGETHER (the pair is burned, per the "committed even on a failed launch" contract),
+        // producing NO launch record. The launcher pre-books ALL predicted mints up front keyed by NODE id;
+        // a burn must therefore leave every SUCCESSFUL launch's address EXACTLY the one predicted for its node
+        // (a booked-but-unused entry for the burned node is harmless). Assert precisely that.
+        let band = banded_tuning(1_000, 42_000, 42_016); // 8 pairs
+        let by_node: BTreeMap<NodeId, (SocketAddr, SocketAddr)> = band
+            .predicted_mints()
+            .map(|(n, b, p)| (n, (b, p)))
+            .collect();
+
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), band);
+        sc.spawn_realm(&system(1, 0), T).expect("pair 0 succeeds");
+        // Pair 1 BURNS: node 1_001 / ports 42_002-42_003 are consumed, no launch record is produced.
+        fake.fail_next("fork: EAGAIN");
+        sc.spawn_realm(&system(1, 1), T).expect_err("pair 1 burns");
+        sc.spawn_realm(&system(1, 2), T).expect("pair 2 succeeds");
+        sc.spawn_realm(&system(1, 3), T).expect("pair 3 succeeds");
+
+        // Every REALIZED launch's (bind, probe) is exactly the address the pre-book mapped to its node id —
+        // the burn shifted no live node onto another node's booked address.
+        for (node, bind, probe, _cookie) in fake.launched_specs() {
+            assert_eq!((bind, probe), by_node[&node]);
+        }
+        // The live set is {1000, 1002, 1003}; 1001 was burned (booked but never launched → harmless).
+        assert_eq!(
+            sc.live_nodes(),
+            BTreeSet::from([NodeId(1_000), NodeId(1_002), NodeId(1_003)])
+        );
+        // The burned node WAS pre-booked (present in the prediction) — a harmless booked-but-unused entry.
+        assert!(by_node.contains_key(&NodeId(1_001)));
+    }
+
+    #[test]
+    fn predicted_mints_handles_odd_empty_and_inverted_bands() {
+        // Odd width [42_000, 42_005): 5 ports = 2 whole pairs (42000/1, 42002/3); the lone 42004 can't pair.
+        let odd: Vec<_> = banded_tuning(1_000, 42_000, 42_005).predicted_mints().collect();
+        assert_eq!(odd.len(), 2);
+        assert_eq!(odd[1], (NodeId(1_001), addr(42_002), addr(42_003)));
+
+        // Empty band (floor == limit): a CONSTRUCTIBLE zero-capacity band (genesis water == limit passes the
+        // top-inclusive ceiling guard) — no predicted mints, first spawn is immediately loud.
+        let empty = banded_tuning(1_000, 42_000, 42_000);
+        assert_eq!(empty.predicted_mints().count(), 0);
+        let sc = core(FakeBackend::default(), empty);
+        sc.spawn_realm(&system(1, 1), T)
+            .expect_err("empty band mints nothing");
+
+        // Inverted band (limit < floor): `predicted_mints` is a pure fn — `saturating_sub` floors capacity at
+        // 0, so it yields nothing without panicking. (A SpawnCore CANNOT be constructed on it: genesis water
+        // == first_port > port_limit trips the ceiling guard — proven by the `#[should_panic]` test below.)
+        assert_eq!(
+            banded_tuning(1_000, 42_000, 41_000).predicted_mints().count(),
+            0
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "above the configured band ceiling")]
+    fn an_inverted_band_cannot_be_constructed() {
+        // RLM 5f-4g: port_limit < first_port is a misconfiguration — genesis water (first_port) exceeds the
+        // band ceiling, so construction refuses loudly rather than yielding a dead allocator.
+        let _ = core(FakeBackend::default(), banded_tuning(1_000, 42_000, 41_000));
+    }
+
+    /// Build a `MemStore` carrying a single durable high-water record (the F2 resume cursor) for the
+    /// band-guard `#[should_panic]` proofs.
+    fn store_with_water(next_node: u64, next_port: u32) -> MemStore {
+        let store = MemStore::new();
+        let retained = store.clone();
+        let mut s = store;
+        s.put(
+            &rlm_water_store_key(),
+            &encode(&WaterMark {
+                next_node,
+                next_port,
+            }),
+        );
+        s.commit();
+        retained
+    }
+
+    #[test]
+    #[should_panic(expected = "port_limit exceeds the u16 port space")]
+    fn a_port_limit_above_the_u16_space_is_rejected_at_construction() {
+        // RLM 5f-4g: a hand-rolled tuning whose band end exceeds 65536 would silently wrap the `as u16` mint
+        // casts to port 0 — rejected LOUDLY at construction instead.
+        let _ = core(FakeBackend::default(), banded_tuning(1_000, 65_000, 70_000));
+    }
+
+    #[test]
+    #[should_panic(expected = "below the configured band floor")]
+    fn a_recovered_water_below_the_band_floor_is_rejected() {
+        // RLM 5f-4g: a durable store opened under a HIGHER first_port (an operator moved the band) would else
+        // mint below its band. The floor guard refuses loudly — never clamps (a stale next_node would desync).
+        let store = store_with_water(1_005, 41_000); // next_port 41_000 < first_port 42_000
+        let _ = SpawnCore::new(
+            Box::new(store),
+            FakeBackend::default(),
+            tuning(1_000, 42_000),
+            Vec::new(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "above the configured band ceiling")]
+    fn a_recovered_water_above_the_band_ceiling_is_rejected() {
+        // RLM 5f-4g: a corrupt high-water past the band ceiling (the sole writer never exceeds port_limit)
+        // would risk a `cursor + 1` overflow wrap in a release build — refused loudly on resume.
+        let store = store_with_water(1_005, 42_100); // next_port 42_100 > port_limit 42_064
+        let _ = SpawnCore::new(
+            Box::new(store),
+            FakeBackend::default(),
+            banded_tuning(1_000, 42_000, 42_064),
+            Vec::new(),
+        );
     }
 
     #[test]
@@ -1207,6 +1496,9 @@ mod tests {
         assert_eq!(t.first_node, 1_000);
         assert_eq!(t.first_port, 42_000);
         assert_eq!(t.bind_host, Ipv4Addr::LOCALHOST);
+        // RLM 5f-4g: the raw default band is the WHOLE u16 space (exclusive end 65536), so the allocator is
+        // byte-identical to pre-5f-4g — a demand LAUNCHER narrows this to a per-slot band.
+        assert_eq!(t.port_limit, 65_536);
     }
 
     #[test]
