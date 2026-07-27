@@ -209,10 +209,19 @@ rlm-proc-spawn:
 rlm-kill9:
     cargo test -p vd-bins --features store-test-hooks --test rlm_kill9_spawn -- --test-threads=1 --nocapture
 
+# RLM RG-4c: THE demand-login PROCESS proof — boots a DEMAND cluster (orchestrator + gateway ONLY, no shard
+# pre-booked) in real processes, logs in ONE real dev-control client, and proves from the gateway's admin
+# snapshot that the login SPAWNED + reached a fresh home shard with no pre-booked address (dynamic_shards >= 1,
+# presence_announces >= 1, home_bootstrap_timeouts == 0). Tier-B, `--features dev-control` (drives the client
+# through its loopback listener). `--test-threads=1` + a dedicated RLM port band (45000+) keep the
+# demand-spawned shards' deterministic ports off rlm_kill9's band.
+rlm-demand-login:
+    cargo test -p vd-bins --features dev-control --test rlm_demand_login -- --test-threads=1 --nocapture
+
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login coverage
 
 # One-time setup helper.
 coverage-setup:

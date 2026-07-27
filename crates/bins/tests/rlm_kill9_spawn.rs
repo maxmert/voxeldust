@@ -31,17 +31,14 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 use vd_bins::{
-    Cluster, ClusterAddrs, ClusterShape, DEV, admin_get_body, common_env, orchestrator_env,
-    pid_alive, reserve_tcp_addr, reserve_udp_addr, signal_group, spawn_node,
+    Cluster, ClusterAddrs, ClusterShape, DEV, admin_get_body, common_env, launch_rows,
+    orchestrator_env, reap_forked, reserve_tcp_addr, reserve_udp_addr, shard_spawn_anchor_env,
+    spawn_node,
 };
 use vd_core::NodeId;
 use vd_core::realm_coord::RealmCoord;
 use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
-use vd_io_prod::store::{RedbStore, StoreTuning};
 use vd_io_prod::trust::ClusterTrust;
-use vd_node::rlm_spawn::LaunchIntent;
-use vd_node::saga_runtime::rlm_launch_prefix;
-use vd_sim::io::Store;
 use vd_wire::admin::AdminSnapshot;
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -100,51 +97,6 @@ fn addrs() -> ClusterAddrs {
         station_probe: reserve_tcp_addr(),
         area: reserve_udp_addr(),
         area_probe: reserve_tcp_addr(),
-    }
-}
-
-/// The forked shard's must-parse boot params, added to the ORCHESTRATOR's env so its spawn-anchor harvest
-/// forwards them to the child (a shard refuses to boot without them). `common_env` supplies trust + tick-hz.
-fn push_shard_anchors(env: &mut Vec<(&'static str, String)>) {
-    env.extend([
-        ("VD_SNAPSHOT_BUDGET", DEV.snapshot_budget.to_string()),
-        ("VD_TICK_DT", DEV.tick_dt.to_string()),
-        ("VD_SPEED", DEV.move_speed.to_string()),
-        ("VD_MINT_SEED", DEV.mint_seed.to_string()),
-        ("VD_INPUT_LOG_CAP", DEV.input_log_cap.to_string()),
-    ]);
-}
-
-/// Reopen `launch.redb` read-only and decode the durable launch rows to `(node, coord, pid)` — reading back
-/// through the SAME frozen postcard shape the spawner wrote. DROPS the store (joins its writer, releases the
-/// redb process-exclusive lock) before returning, so a subsequent boot can open it. Caller must ensure NO
-/// orchestrator holds the file (kill + reap first).
-fn launch_rows(path: &std::path::Path) -> Vec<(NodeId, RealmCoord, Option<u32>)> {
-    let (store, _durability) =
-        RedbStore::open(path, StoreTuning::default()).expect("reopen launch.redb");
-    let rows: Vec<(NodeId, RealmCoord, Option<u32>)> = store
-        .scan(&rlm_launch_prefix())
-        .into_iter()
-        .map(|(_, v)| {
-            let i: LaunchIntent = postcard::from_bytes(&v).expect("decode LaunchIntent");
-            (i.node, i.coord, i.pid)
-        })
-        .collect();
-    drop(store);
-    rows
-}
-
-/// Reap every forked shard named by a durable row's confirmed pid — SIGKILL its process group + poll until
-/// gone. A row with no pid (v2 not yet durable) has no reapable handle here; the settle wait makes that rare.
-fn reap_forked(rows: &[(NodeId, RealmCoord, Option<u32>)]) {
-    for (_, _, pid) in rows {
-        if let Some(pid) = pid {
-            signal_group(*pid, "KILL");
-            let start = Instant::now();
-            while start.elapsed() < Duration::from_secs(5) && pid_alive(*pid) {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
     }
 }
 
@@ -226,7 +178,7 @@ fn orch_env(
     hooks: &[(&'static str, String)],
 ) -> Vec<(&'static str, String)> {
     let mut env = orchestrator_env(a, &DEV, &f.store_str, ClusterShape::Single);
-    push_shard_anchors(&mut env);
+    env.extend(shard_spawn_anchor_env(&DEV));
     env.extend(hooks.iter().cloned());
     env
 }

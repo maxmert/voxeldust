@@ -1946,6 +1946,49 @@ pub fn pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// Reopen a `launch.redb` read-only and decode the durable RLM launch rows to `(node, coord, pid)` — reading
+/// back through the SAME frozen postcard shape the spawner wrote. DROPS the store (joins its writer, releases
+/// the redb process-exclusive lock) before returning, so a subsequent boot can open it. The caller MUST ensure
+/// NO orchestrator holds the file (kill + reap first). Shared by the kill-9 crash gate + the demand-login e2e
+/// (RLM RG-4) — both reap the shards the ORCHESTRATOR forked, which its own process-group reap never reaches.
+///
+/// # Panics
+/// If `launch.redb` cannot be reopened or a row fails to decode (a corrupt durable ledger is a hard test
+/// failure, not a tolerated state).
+#[must_use]
+pub fn launch_rows(path: &std::path::Path) -> Vec<(NodeId, vd_core::realm_coord::RealmCoord, Option<u32>)> {
+    use vd_sim::io::Store as _;
+    let (store, _durability) =
+        vd_io_prod::store::RedbStore::open(path, vd_io_prod::store::StoreTuning::default())
+            .expect("reopen launch.redb");
+    let rows: Vec<(NodeId, vd_core::realm_coord::RealmCoord, Option<u32>)> = store
+        .scan(&vd_node::saga_runtime::rlm_launch_prefix())
+        .into_iter()
+        .map(|(_, v)| {
+            let i: vd_node::rlm_spawn::LaunchIntent =
+                postcard::from_bytes(&v).expect("decode LaunchIntent");
+            (i.node, i.coord, i.pid)
+        })
+        .collect();
+    drop(store);
+    rows
+}
+
+/// SIGKILL + poll-until-gone every forked shard named by a durable launch row's confirmed pid (a row with no
+/// pid — its v2 confirm not yet durable — has no reapable handle here). Shared by the kill-9 crash gate + the
+/// demand-login e2e (RLM RG-4) to clean up the demand-spawned shards the orchestrator forked.
+pub fn reap_forked(rows: &[(NodeId, vd_core::realm_coord::RealmCoord, Option<u32>)]) {
+    for (_, _, pid) in rows {
+        if let Some(pid) = pid {
+            signal_group(*pid, "KILL");
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_secs(5) && pid_alive(*pid) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 /// Spawn one node binary with `common` env merged over `node_env`, redirecting stdout+stderr to `log`,
 /// and (unix) making the child LEAD ITS OWN PROCESS GROUP (`process_group(0)` ⇒ child pid == pgid) so a
 /// later [`signal_group`] reaches the whole subtree and a recycled bare pid can't be hit by accident.

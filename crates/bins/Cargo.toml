@@ -91,9 +91,11 @@ crossbeam-channel = { workspace = true }
 axum = { workspace = true }
 ed25519-dalek = { workspace = true }
 serde_json = { workspace = true }
+# RLM RG-4: the lib's `launch_rows` decodes the durable LaunchIntent rows (the demand-login e2e + kill-9 gate
+# both reap the shards the orchestrator forked). postcard is the frozen store codec — a normal dep now.
+postcard = { workspace = true }
 
 [dev-dependencies]
-postcard = { workspace = true }
 # G-RENDER-SMOKE (render_smoke.rs, Tier-B/coverage-exempt): decode a captured PNG to RGBA8
 # for the Tier-A smoke assertions. image 0.25 is already pinned at the workspace root (a
 # dep of vd-client-render) — this is a dep MOVE into bins' test deps, not a new library.

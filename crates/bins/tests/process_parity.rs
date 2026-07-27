@@ -158,6 +158,10 @@ fn p1_parity_real_binaries_over_quic() {
     let client_a_addr = reserve_udp_addr();
     let client_b_addr = reserve_udp_addr();
     let admin_addr = reserve_tcp_addr();
+    // RLM RG-4c non-vacuity control: give the STATIC gateway its own admin endpoint so this test can prove a
+    // static gateway NEVER receives a reactive greeting nor mints a dynamic home — making the demand-login
+    // e2e's `presence_announces >= 1` / `dynamic_shards >= 1` assertions non-vacuous.
+    let gw_admin = reserve_tcp_addr();
 
     let trust_dir = std::env::temp_dir().join(format!("vd-parity-{}", std::process::id()));
     let trust = ClusterTrust::generate("vd-parity").expect("trust");
@@ -177,7 +181,7 @@ fn p1_parity_real_binaries_over_quic() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
-        gateway_admin: None,
+        gateway_admin: Some(gw_admin),
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),
@@ -343,6 +347,24 @@ fn p1_parity_real_binaries_over_quic() {
     );
     // Exactly: 1 realm + 2 sessions + 2 entities = 5 records, every one fenced.
     assert_eq!(entries.len(), 5, "directory dump: {entries:?}");
+
+    // ---- RLM RG-4c non-vacuity control: a STATIC gateway never greets nor mints ----
+    // Both clients logged into the PRE-BOOKED shard (node-3), so the gateway received NO reactive greeting
+    // and minted NO dynamic home. This is the falsifiable twin of the demand-login e2e: it proves that test's
+    // `presence_announces >= 1` / `dynamic_shards >= 1` could only come from the demand path, never a static one.
+    let gw_snapshot = http_get_json(gw_admin, "/admin/snapshot");
+    let gw = &gw_snapshot["gateway"];
+    assert_eq!(
+        gw["presence_announces"].as_u64(),
+        Some(0),
+        "a static gateway must receive NO reactive greeting: {gw}",
+    );
+    assert_eq!(
+        gw["dynamic_shards"].as_u64(),
+        Some(0),
+        "a static login routes to the pre-booked shard, never a demand-spawned node: {gw}",
+    );
+
     let _ = std::fs::remove_dir_all(&trust_dir);
     let _ = std::fs::remove_file(&orch_store);
 }
