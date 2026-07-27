@@ -111,9 +111,11 @@ pub const WORKTREE_SLOT_CEILING: u16 = 64;
 pub const SPAWN_REGION_BASE: u16 = 42_000;
 
 /// Default per-slot demand-spawn capacity (LIFETIME spawns, not concurrent — the F2 allocator is monotone
-/// and frees nothing). Modest by design: the gateway pre-books one boot lane per predictable spawn, so the
-/// band width (`2·this`) is the boot-lane count; [`DevPortScheme::validate`] fails LOUD if the ceiling
-/// slot's band would run past the u16 port space, which is what keeps a small default safe to raise.
+/// and frees nothing). Modest by design: each spawn takes TWO ports (bind + probe), so the band width
+/// (`2·this`) is the lifetime spawn budget; [`DevPortScheme::validate`] fails LOUD if the ceiling slot's band
+/// would run past the u16 port space, which is what keeps a small default safe to raise. (RLM RG-4/RG-5: a
+/// demand-spawned shard is reached via the reactive greeting, NOT a pre-booked address, so the band bounds
+/// deterministic spawn PORTS — for crash-recovery + per-slot isolation — never gateway boot lanes.)
 pub const DEFAULT_MAX_LIFETIME_SPAWNS_PER_SLOT: u16 = 32;
 
 /// The deterministic dev-cluster port scheme (HR6). ONE reviewed source of truth;

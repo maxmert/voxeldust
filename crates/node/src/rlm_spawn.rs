@@ -91,30 +91,6 @@ impl SpawnTuning {
         }
     }
 
-    /// RLM 5f-4g: the FULL sequence of `(NodeId, bind, probe)` this tuning's F2 allocator will EVER mint —
-    /// the ONE source of truth the demand launcher's gateway pre-book consumes, so every mintable shard is
-    /// pre-booked (no un-dialable/un-booked spawn → no silent blind player). The k-th spawn takes
-    /// `(first_node + k, first_port + 2k, first_port + 2k + 1)` — EXACTLY what [`SpawnCore::spawn_realm`]
-    /// computes (`bind = cursor`, `probe = cursor + 1`, `next = cursor + 2`, `node += 1`, committed together,
-    /// even on a failed launch) — bounded by `port_limit` (the allocator refuses past it). The k-th-mint
-    /// invariant is pinned by a test so an allocator change can never silently desync the pre-book.
-    pub fn predicted_mints(&self) -> impl Iterator<Item = (NodeId, SocketAddr, SocketAddr)> + '_ {
-        let host = self.bind_host;
-        let first_node = self.first_node;
-        let first_port = u32::from(self.first_port);
-        // Whole `(bind, probe)` pairs that fit below the exclusive `port_limit`. Floored, so the last
-        // probe is `< port_limit <= 65536` ⇒ every bind/probe is a valid `u16`.
-        let pairs = self.port_limit.saturating_sub(first_port) / 2;
-        (0..pairs).map(move |k| {
-            let bind = first_port + 2 * k;
-            let probe = bind + 1;
-            (
-                NodeId(first_node + u64::from(k)),
-                SocketAddr::from((host, bind as u16)),
-                SocketAddr::from((host, probe as u16)),
-            )
-        })
-    }
 }
 
 /// The launch arguments the decision kernel hands the backend for one realm. The backend derives the
@@ -681,12 +657,12 @@ fn read_water(store: &dyn Store) -> Option<WaterMark> {
 /// funnel through, so the band invariants are enforced at EVERY construction, never trusted. Two loud
 /// guards (fail-fast on an impossible durable/config state, never a silent wrapped or out-of-band port):
 ///   * `port_limit <= 65536` — the exclusive band end must fit the u16 space, so every `as u16` cast in the
-///     allocator and [`SpawnTuning::predicted_mints`] is lossless (a larger limit would wrap the cursor to
-///     port 0 → an OS-chosen ephemeral port the launcher's pre-book never booked = a blind shard).
+///     allocator is lossless (a larger limit would wrap the cursor to port 0 → the shard would bind — and so
+///     GREET from — an OS-chosen ephemeral port, a mis-bound spawn).
 ///   * `first_port <= next_port <= port_limit` — the recovered cursor sits INSIDE its band (the top-inclusive
 ///     bound is a legitimately full band: the last mint leaves `next_port == port_limit`). Below the floor: a
 ///     store opened under a DIFFERENT (higher) `first_port` (an operator moved the band under a live store)
-///     would mint BELOW its band — into a neighbouring slot's ports AND outside `predicted_mints` (un-booked).
+///     would mint BELOW its band — into a neighbouring slot's ports (a cross-slot port collision).
 ///     Above the ceiling (only reachable via a corrupt record — this module is the sole writer, whose max
 ///     `next_port` is `port_limit`): a near-`u32::MAX` cursor would overflow `cursor + 1` in a release build
 ///     (overflow-checks off) and wrap the guard, minting a garbage port. Both refuse LOUDLY (never clamp — a
@@ -773,11 +749,6 @@ mod tests {
         fn launched(&self) -> Vec<NodeId> {
             self.g().launched.clone()
         }
-        /// Every `(node, bind, probe, cookie)` that reached `launch` (in order) — the full realized mint
-        /// sequence a burned launch is ABSENT from (5f-4g pre-book-desync proof).
-        fn launched_specs(&self) -> Vec<(NodeId, SocketAddr, SocketAddr, IncarnationCookie)> {
-            self.g().launched_specs.clone()
-        }
         /// The `(node, bind, probe, cookie)` of the most recent `launch` — proves seam threading.
         fn last_spec(&self) -> (NodeId, SocketAddr, SocketAddr, IncarnationCookie) {
             *self.g().launched_specs.last().expect("a launch happened")
@@ -852,7 +823,7 @@ mod tests {
     }
 
     /// A tuning with an explicit BOUNDED port band `[first_port, port_limit)` — for the 5f-4g band-exhaustion
-    /// and pre-book-coverage proofs (a demand launcher passes such a per-slot band).
+    /// proofs (a demand cluster passes such a per-slot band so its spawn ports stay inside its slot).
     fn banded_tuning(first_node: u64, first_port: u16, port_limit: u32) -> SpawnTuning {
         SpawnTuning {
             first_node,
@@ -1118,110 +1089,6 @@ mod tests {
             BTreeSet::from([NodeId(1_000), NodeId(1_001)])
         );
         assert_eq!(fake.book_count(), 2);
-    }
-
-    #[test]
-    fn predicted_mints_match_the_live_allocator_and_cover_the_whole_band() {
-        // RLM 5f-4g: `predicted_mints` is the ONE source of truth the demand launcher pre-books, so it must
-        // equal EXACTLY what the live allocator mints — else a spawned shard is un-booked (un-dialable). Drive
-        // the real F2 allocator to band exhaustion and assert the recorded (node, bind, probe) sequence is
-        // byte-identical to the prediction, and the prediction covers the WHOLE band (no more, no fewer).
-        let band = banded_tuning(1_000, 42_000, 42_008); // 4 pairs: 42000..42007
-        let predicted: Vec<(NodeId, SocketAddr, SocketAddr)> = band.predicted_mints().collect();
-
-        let fake = FakeBackend::default();
-        let sc = core(fake.clone(), band);
-        // Spawn until the band is exhausted; collect what the allocator actually minted.
-        let mut minted = Vec::new();
-        for s in 0..predicted.len() {
-            let node = sc
-                .spawn_realm(&system(1, s as u64), T)
-                .expect("every predicted mint spawns");
-            let (spec_node, bind, probe, _cookie) = fake.last_spec();
-            assert_eq!(spec_node, node);
-            minted.push((node, bind, probe));
-        }
-        // The prediction equals the reality, mint-for-mint.
-        assert_eq!(minted, predicted);
-        // k-th mint invariant, spelled out for the launcher's pre-book contract.
-        assert_eq!(
-            predicted[0],
-            (NodeId(1_000), addr(42_000), addr(42_001))
-        );
-        assert_eq!(
-            predicted[3],
-            (NodeId(1_003), addr(42_006), addr(42_007))
-        );
-        // And the band is fully consumed: the next spawn exhausts loudly.
-        let err = sc
-            .spawn_realm(&system(9, 9), T)
-            .expect_err("band fully consumed");
-        assert_eq!(
-            err,
-            SpawnError::LaunchFailed {
-                reason: "dev port band exhausted".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn a_burned_launch_keeps_predicted_mints_keyed_correctly_by_node_id() {
-        // RLM 5f-4g (the pre-book-desync proof the verify pass demanded): a FAILED launch advances the F2
-        // cursor + node TOGETHER (the pair is burned, per the "committed even on a failed launch" contract),
-        // producing NO launch record. The launcher pre-books ALL predicted mints up front keyed by NODE id;
-        // a burn must therefore leave every SUCCESSFUL launch's address EXACTLY the one predicted for its node
-        // (a booked-but-unused entry for the burned node is harmless). Assert precisely that.
-        let band = banded_tuning(1_000, 42_000, 42_016); // 8 pairs
-        let by_node: BTreeMap<NodeId, (SocketAddr, SocketAddr)> = band
-            .predicted_mints()
-            .map(|(n, b, p)| (n, (b, p)))
-            .collect();
-
-        let fake = FakeBackend::default();
-        let sc = core(fake.clone(), band);
-        sc.spawn_realm(&system(1, 0), T).expect("pair 0 succeeds");
-        // Pair 1 BURNS: node 1_001 / ports 42_002-42_003 are consumed, no launch record is produced.
-        fake.fail_next("fork: EAGAIN");
-        sc.spawn_realm(&system(1, 1), T).expect_err("pair 1 burns");
-        sc.spawn_realm(&system(1, 2), T).expect("pair 2 succeeds");
-        sc.spawn_realm(&system(1, 3), T).expect("pair 3 succeeds");
-
-        // Every REALIZED launch's (bind, probe) is exactly the address the pre-book mapped to its node id —
-        // the burn shifted no live node onto another node's booked address.
-        for (node, bind, probe, _cookie) in fake.launched_specs() {
-            assert_eq!((bind, probe), by_node[&node]);
-        }
-        // The live set is {1000, 1002, 1003}; 1001 was burned (booked but never launched → harmless).
-        assert_eq!(
-            sc.live_nodes(),
-            BTreeSet::from([NodeId(1_000), NodeId(1_002), NodeId(1_003)])
-        );
-        // The burned node WAS pre-booked (present in the prediction) — a harmless booked-but-unused entry.
-        assert!(by_node.contains_key(&NodeId(1_001)));
-    }
-
-    #[test]
-    fn predicted_mints_handles_odd_empty_and_inverted_bands() {
-        // Odd width [42_000, 42_005): 5 ports = 2 whole pairs (42000/1, 42002/3); the lone 42004 can't pair.
-        let odd: Vec<_> = banded_tuning(1_000, 42_000, 42_005).predicted_mints().collect();
-        assert_eq!(odd.len(), 2);
-        assert_eq!(odd[1], (NodeId(1_001), addr(42_002), addr(42_003)));
-
-        // Empty band (floor == limit): a CONSTRUCTIBLE zero-capacity band (genesis water == limit passes the
-        // top-inclusive ceiling guard) — no predicted mints, first spawn is immediately loud.
-        let empty = banded_tuning(1_000, 42_000, 42_000);
-        assert_eq!(empty.predicted_mints().count(), 0);
-        let sc = core(FakeBackend::default(), empty);
-        sc.spawn_realm(&system(1, 1), T)
-            .expect_err("empty band mints nothing");
-
-        // Inverted band (limit < floor): `predicted_mints` is a pure fn — `saturating_sub` floors capacity at
-        // 0, so it yields nothing without panicking. (A SpawnCore CANNOT be constructed on it: genesis water
-        // == first_port > port_limit trips the ceiling guard — proven by the `#[should_panic]` test below.)
-        assert_eq!(
-            banded_tuning(1_000, 42_000, 41_000).predicted_mints().count(),
-            0
-        );
     }
 
     #[test]
