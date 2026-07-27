@@ -105,6 +105,49 @@ pub struct RlmView {
     pub boot_ticks_observed_max: u64,
 }
 
+/// The gateway's session/routing honesty counters + live gauges (RLM RG-4; the gateway half of the ledgered
+/// D-10 per-node observability). The gateway analogue of [`RlmView`]: the `GatewayStats` counters (defined in
+/// `vd-connection-plane`, mirrored here so the admin contract never depends on the sim crate) plus two live
+/// gauges. All zero on a fresh gateway; a nonzero `presence_announces` proves demand-spawned shards are
+/// reactively greeting this gateway. JSON-ONLY: this rides the `/admin/snapshot` HTTP body, NEVER the frozen
+/// postcard `InterShardFlow` wire, so appending it here does not touch the wire contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayView {
+    pub logins_rejected: u64,
+    pub version_rejected: u64,
+    pub sessions_refused_capacity: u64,
+    pub session_mints_refused: u64,
+    pub resumes_refused: u64,
+    pub inputs_deduped: u64,
+    pub inputs_unroutable: u64,
+    pub inputs_malformed: u64,
+    pub stale_frames_dropped: u64,
+    /// A frame the gateway could not decode/dispatch — the honesty floor; MUST stay 0 for a healthy demand
+    /// login (a miscounted greeting would show up here instead of `presence_announces`).
+    pub undecodable: u64,
+    pub frame_sub_desync: u64,
+    pub transfer_unroutable: u64,
+    pub transfer_control_parked: u64,
+    pub commit_without_cut: u64,
+    pub inputs_buffered_for_dest: u64,
+    pub dest_inputs_dropped: u64,
+    pub sessions_self_fenced_lapsed: u64,
+    /// A demand login whose home realm did not become routable inside its bootstrap window — the ops signal
+    /// that the spawn/greet path is broken. 0 on a healthy demand login.
+    pub home_bootstrap_timeouts: u64,
+    pub home_wait_desync: u64,
+    pub logins_held_pre_sync: u64,
+    pub sessions_self_fenced_revoked: u64,
+    /// Reactive-greeting `ShardPresence` frames received from demand-spawned shards (RG-3). Nonzero = a real
+    /// forked shard greeted this gateway; the direct process-tier proof the reactive path fired.
+    pub presence_announces: u64,
+    /// Gauge: sessions currently open on this gateway.
+    pub sessions_open: u64,
+    /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
+    /// resolve fired (the single call site of `claim_dynamic_shard`), i.e. a login routed to a spawned node.
+    pub dynamic_shards: u64,
+}
+
 /// The whole read-only snapshot one `GET /admin/snapshot` returns. Empty-but-shaped
 /// from day one (the P0 demo); the orchestrator fills it as subsystems land.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +161,12 @@ pub struct AdminSnapshot {
     /// frozen postcard wire); a JSON reader ignores fields it does not know, so appending it is safe for an
     /// older operator tool reading a newer snapshot.
     pub rlm: RlmView,
+    /// RLM RG-4 — the GATEWAY's counters, present ONLY on a gateway's snapshot (`None` on the orchestrator's,
+    /// which owns the directory but no gateway session state — so the field is self-identifying rather than a
+    /// misleading all-zero struct). Always serialized (`null` when `None`), so no `#[serde(default)]` is needed
+    /// on this same-build internal admin surface — the [`RlmView`] precedent (which also avoids `serde_json`).
+    /// JSON-only, never the frozen postcard wire.
+    pub gateway: Option<GatewayView>,
 }
 
 impl AdminSnapshot {
@@ -132,6 +181,7 @@ impl AdminSnapshot {
             sagas: Vec::new(),
             leases: Vec::new(),
             rlm: RlmView::default(),
+            gateway: None,
         }
     }
 
@@ -237,6 +287,11 @@ pub mod metric_names {
     /// Counter: reliable frames RETIRED by an incoming cumulative ack (the retry buffer
     /// draining). Stuck at 0 while sends flow = a DEAD ACK PATH (R-3'/R-4a).
     pub const RELIABLE_ACKED_TOTAL: &str = "vd_reliable_acked_total";
+    /// Counter: dial-in peers REJECTED because the learned-peer table hit its cap (RLM RG-4). A nonzero value
+    /// is a cap-too-low / peer-churn ALERT — on a demand cluster it would mean a spawned shard's reactive
+    /// greeting was refused and the shard is unreachable. Landed-but-blind on every node until now; the VALUE
+    /// mapping lands in the io-prod mesh-metrics wiring (RG-4a3).
+    pub const LEARNED_PEERS_REJECTED_TOTAL: &str = "vd_learned_peers_rejected_total";
 
     /// Every registered name (the conformance test iterates this; adding a metric
     /// without listing it here is a review-rejectable defect).
@@ -258,6 +313,7 @@ pub mod metric_names {
         GAP_DROP_TOTAL,
         RELIABLE_SHED_TOTAL,
         RELIABLE_ACKED_TOTAL,
+        LEARNED_PEERS_REJECTED_TOTAL,
     ];
 }
 
@@ -326,6 +382,7 @@ mod tests {
             RlmView::default(),
             "a fresh snapshot has the zero RLM view"
         );
+        assert_eq!(snap.gateway, None, "a fresh snapshot names no gateway view");
         let bytes = postcard::to_allocvec(&snap).expect("encode");
         let back: AdminSnapshot = postcard::from_bytes(&bytes).expect("decode");
         assert_eq!(back, snap);
@@ -360,14 +417,42 @@ mod tests {
                 running_gauge: 2,
                 boot_ticks_observed_max: 37,
             },
+            // Every field a DISTINCT value so the round-trip catches a transposition.
+            gateway: Some(GatewayView {
+                logins_rejected: 1,
+                version_rejected: 2,
+                sessions_refused_capacity: 3,
+                session_mints_refused: 4,
+                resumes_refused: 5,
+                inputs_deduped: 6,
+                inputs_unroutable: 7,
+                inputs_malformed: 8,
+                stale_frames_dropped: 9,
+                undecodable: 10,
+                frame_sub_desync: 11,
+                transfer_unroutable: 12,
+                transfer_control_parked: 13,
+                commit_without_cut: 14,
+                inputs_buffered_for_dest: 15,
+                dest_inputs_dropped: 16,
+                sessions_self_fenced_lapsed: 17,
+                home_bootstrap_timeouts: 18,
+                home_wait_desync: 19,
+                logins_held_pre_sync: 20,
+                sessions_self_fenced_revoked: 21,
+                presence_announces: 22,
+                sessions_open: 23,
+                dynamic_shards: 24,
+            }),
         };
         let bytes = postcard::to_allocvec(&snap).expect("encode");
         let back: AdminSnapshot = postcard::from_bytes(&bytes).expect("decode");
         assert_eq!(
             back, snap,
-            "the RLM view round-trips with the rest of the snapshot"
+            "the RLM + gateway views round-trip with the rest of the snapshot"
         );
     }
+
 
     #[test]
     fn cluster_bootstrapped_iff_a_shard_holds_a_realm() {
