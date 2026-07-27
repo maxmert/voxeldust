@@ -35,7 +35,7 @@ use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId}
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
-use vd_wire::intershard::{DemandVerb, InterShardFlow, RealmDemand};
+use vd_wire::intershard::{DemandVerb, InterShardFlow, RealmDemand, ShardPresence};
 use vd_wire::seams::directory::{
     AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply, OwnerRecord,
 };
@@ -1156,6 +1156,13 @@ pub struct GatewayStats {
     /// been reassigned/revoked (no longer this gateway at its fence), so the session was hard-stopped
     /// promptly (the link-alive cure, vs the proactive timer's partition cure). `0` on the happy path.
     pub sessions_self_fenced_revoked: u64,
+    /// RLM 5f RG-3 — reactive-greeting `ShardPresence` frames received from demand-spawned shards. Pure
+    /// OBSERVABILITY: the connection-learning that makes the shard reachable already happened below the app
+    /// seam (the mesh records the return connection on this same reliable frame), so the gateway does NOTHING
+    /// with it but count + debug-log — never a `dynamic_shards` claim (a presence has no session role or
+    /// lifetime, and the roster is authority-refcounted). `0` on a static gateway (no shard ever greets). Its
+    /// existence keeps a greeting from being miscounted `undecodable` (the honesty floor).
+    pub presence_announces: u64,
 }
 
 /// Install the gateway systems (composed by the harness/bin for `NodeKind::Gateway`).
@@ -1544,6 +1551,15 @@ fn process_gateway_inbound(
                 MsgClass::Membership => {}
                 _ => stats.undecodable += 1,
             }
+        } else if matches!(class, MsgClass::Saga) {
+            // RLM 5f RG-3: the ONLY non-orchestrator `Saga` frame is a demand-spawned shard's reactive
+            // greeting (`ShardPresence`) — a routable shard sends Control/Snapshot/RealmSnapshot and a client
+            // Control/Input, never Saga. It has NO routing effect (the mesh already learned the return
+            // connection below the app seam on this same reliable frame; the gateway makes the shard reachable
+            // by REPLYING over that learned lane). Hoisted ABOVE `is_routable_shard` because a greeting arrives
+            // BEFORE the shard is on the runtime roster (it becomes routable only when a session's home
+            // resolves), so it would otherwise fall to the client arm and be miscounted `undecodable`.
+            on_shard_presence(from, bytes, &mut stats);
         } else if is_routable_shard(&config, &sessions, from) {
             match class {
                 MsgClass::Control => on_shard_control(
@@ -1587,6 +1603,25 @@ fn process_gateway_inbound(
     // in-flight transfer and emit `DeliveredToObservers` when satisfied (the (a) demote-predicate
     // input). Run once per tick, NOT per frame — no 20Hz regression (D-24).
     recompute_delivery_watermarks(&sessions, &config, &mut outbox);
+}
+
+/// RLM 5f RG-3 — consume a demand shard's reactive greeting. PURE OBSERVABILITY: the reachability effect
+/// (the mesh learning the return connection) already happened below the app seam on this same reliable
+/// frame, so this only decodes for a counter + a debug line and claims NOTHING (no `dynamic_shards` role —
+/// a presence has no session and no lifetime). A body that is not a `ShardPresence` (any other
+/// `InterShardFlow` arm, or undecodable bytes) counts `undecodable` exactly as the pre-RG-3 fallthrough did.
+fn on_shard_presence(from: NodeId, bytes: &[u8], stats: &mut GatewayStats) {
+    match postcard::from_bytes::<InterShardFlow>(bytes) {
+        Ok(InterShardFlow::ShardPresence(ShardPresence { local_tick })) => {
+            stats.presence_announces += 1;
+            tracing::debug!(
+                from = from.0,
+                local_tick = local_tick.0,
+                "demand shard reactive greeting — learned for reply, no roster claim",
+            );
+        }
+        Ok(_) | Err(_) => stats.undecodable += 1,
+    }
 }
 
 /// 1d.5a — the STANDING per-observer delivery watermark pass. For each in-flight transfer, emit
@@ -3524,6 +3559,85 @@ mod tests {
             }],
             "a minor-0 client gets Welcome but NOT UniverseRate"
         );
+    }
+
+    // ---- RLM 5f RG-3: the reactive-greeting consume -------------------------------------------
+    #[test]
+    fn a_shard_presence_greeting_is_counted_never_undecodable() {
+        let mut rig = Rig::new();
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Saga,
+            &InterShardFlow::ShardPresence(ShardPresence {
+                local_tick: TickId(7),
+            }),
+        )]);
+        assert_eq!(rig.stats().presence_announces, 1);
+        assert_eq!(rig.stats().undecodable, 0);
+        // Pure observability — a greeting has NO routing effect (no roster claim, no reply here; the
+        // reachability was the mesh learning the connection below the seam).
+        assert!(sent.is_empty());
+    }
+
+    #[test]
+    fn a_greeting_from_an_unbooked_peer_is_counted_the_same() {
+        // A demand shard is NOT on the gateway's roster when it first greets; the counter must not care.
+        let mut rig = Rig::new();
+        rig.tick(vec![wire(
+            NodeId(999),
+            MsgClass::Saga,
+            &InterShardFlow::ShardPresence(ShardPresence {
+                local_tick: TickId(3),
+            }),
+        )]);
+        assert_eq!(rig.stats().presence_announces, 1);
+        assert_eq!(rig.stats().undecodable, 0);
+    }
+
+    #[test]
+    fn a_non_greeting_saga_body_stays_undecodable() {
+        // A VALID but non-ShardPresence InterShardFlow on the shard→gateway Saga class counts
+        // `undecodable` exactly as the pre-RG-3 fallthrough did (the Ok(_) arm) — no greeting miscount.
+        let mut rig = Rig::new();
+        rig.tick(vec![wire(SHARD, MsgClass::Saga, &granted_head(SessionId(1)))]);
+        assert_eq!(rig.stats().presence_announces, 0);
+        assert_eq!(rig.stats().undecodable, 1);
+    }
+
+    #[test]
+    fn garbage_saga_bytes_stay_undecodable() {
+        // Undecodable bytes (the Err arm) — an invalid discriminant.
+        let mut rig = Rig::new();
+        rig.tick(vec![Inbound::Wire {
+            from: SHARD,
+            class: MsgClass::Saga,
+            bytes: vec![0x7F].into(),
+        }]);
+        assert_eq!(rig.stats().presence_announces, 0);
+        assert_eq!(rig.stats().undecodable, 1);
+    }
+
+    #[test]
+    fn a_gateway_no_one_greets_is_byte_identical() {
+        // No shard greets ⇒ presence_announces stays 0 and every counter is the default (byte-identity).
+        let mut rig = Rig::new();
+        rig.tick(vec![]);
+        assert_eq!(rig.stats(), GatewayStats::default());
+    }
+
+    #[test]
+    fn a_routable_shard_sending_a_non_frame_class_is_still_undecodable() {
+        // The routable-shard branch's fallthrough (a rostered shard sending a class it never should — here
+        // Input) is UNCHANGED by RG-3: the greeting arm only intercepts Saga, so this still counts
+        // `undecodable`. (Re-covers that arm, which the greeting arm's hoist moved the old Saga case off.)
+        let mut rig = Rig::new();
+        rig.tick(vec![Inbound::Wire {
+            from: SHARD, // a `known_shards` member ⇒ routable
+            class: MsgClass::Input,
+            bytes: vec![0x00].into(),
+        }]);
+        assert_eq!(rig.stats().undecodable, 1);
+        assert_eq!(rig.stats().presence_announces, 0);
     }
 
     /// A session-grant head reply as the orchestrator now sends it — wrapped in the
