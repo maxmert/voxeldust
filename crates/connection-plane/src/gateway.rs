@@ -323,9 +323,11 @@ impl GatewayConfig {
 }
 
 /// RLM 5f-3d — THE ONE node-class dispatch predicate for "is this peer a shard": the FROZEN config roster
-/// UNION the RUNTIME set of demand-spawned home shards. A dynamically spawned shard's `NodeId` is minted at
-/// spawn time — it can never be in the boot-time config — so without the runtime half its `SessionAttached`
-/// and its frames would fall through to the client branch and be counted `undecodable`. Bitwise `|` so
+/// UNION the RUNTIME set of demand-spawned shards (a session's home shard, and — RLM 5f-4 — a transfer's
+/// crossing DEST). A dynamically spawned shard's `NodeId` is minted at spawn time — it can never be in the
+/// boot-time config — so without the runtime half its `SessionAttached`, its `SubscriptionReady` and its
+/// `Snapshot`/`RealmSnapshot` frames would all fall through to the client branch and be counted
+/// `undecodable` (the render authority never re-points ⇒ a BLIND player). Bitwise `|` so
 /// neither membership arm is a short-circuit-uncoverable region (HR5); when unarmed `dynamic_shards` is
 /// always empty, so the result is byte-identical to the pre-5f-3d config-only test.
 #[must_use]
@@ -402,6 +404,25 @@ struct TransferProgress {
     /// composited subs (ship/host/planet) in the N-shard end goal. `close_sub` no-ops if the dest
     /// sub is not (yet) open (abort normally runs pre-CAS, before the dest sub exists).
     dest: NodeId,
+    /// RLM 5f-4e — the SOURCE home this crossing is DEMOTING away from: the `home_shard` value
+    /// `CommitAuthority` displaced when it re-pointed the routing target at `dest`. `Some` EXACTLY inside
+    /// the demote tail (`CommitAuthority` → the terminal that closes the source sub); `None` before commit
+    /// (a fresh progress) and for a session that never resolved a dynamic home (a static login's
+    /// `home_shard` is `None`).
+    ///
+    /// WHY IT IS STASHED RATHER THAN RELEASED AT COMMIT (the REJECT-class blind window this closes): the
+    /// client's READ subscription on the SOURCE stays OPEN across the whole demote grace — it is closed only
+    /// at `ReleaseSubscribe`, a later tick — and the source keeps SHIPPING `Snapshot`/`RealmSnapshot` frames
+    /// the whole time (the composite the seamless crossing is built on). Dropping the source's runtime-roster
+    /// claim at commit un-routes it, so for a DEMAND-SPAWNED source (never in the FROZEN `known_shards`) every
+    /// one of those frames falls through to the client branch and is counted `undecodable` — the player goes
+    /// BLIND for the entire demote tail, right after every crossing. So the claim is HELD here and handed
+    /// back at the terminal that actually closes the sub (`ReleaseSubscribe` / `AbortTransfer`), or at the
+    /// session's exit ([`GatewaySessions::release_session_claims`]) if the client quits inside the window.
+    ///
+    /// It is INTERNAL gateway state — NOT on the wire (no `InterShardFlow` arm, no `TransferControl`
+    /// variant, no `PROTO_MINOR` bump); commit already knows the old home locally.
+    demoting_home: Option<NodeId>,
     /// The applied-steps idempotency journal: `(transfer, step_id) -> the recorded ack`,
     /// re-sent VERBATIM on an at-least-once redelivery (never re-applies the effect),
     /// reached ONLY through [`TransferProgress::recorded`] / [`TransferProgress::journal`]
@@ -426,6 +447,26 @@ struct TransferProgress {
     /// `Committed`). The durable seq-range interval-map backstop + the re-drive are owed 1d/P3
     /// (D-8 + the 1c.7 cross-crate conservation gate).
     dest_buffer: VecDeque<Vec<u8>>,
+}
+
+/// RLM 5f-4 — the DEFERRED runtime-roster edits ONE `TransferControl` command produced, applied only after
+/// the `&mut Session` borrow ends. Exactly the [`GatewaySessions::close_sub`] / `subs_to_close` shape and
+/// for the same reason: a `&mut Session` handed out of `by_session` may NEVER be held across a
+/// [`GatewaySessions`] mutation, and every roster edit mutates `dynamic_shards`.
+///
+/// Claims are applied BEFORE releases, so a re-claim of the SAME node — a second `PrepareSubscribe` naming
+/// the dest an earlier one already claimed — can never transiently drop that node off the roster (it must
+/// stay dispatchable straight through the defensive replace).
+#[derive(Debug, Default)]
+struct RosterEdits {
+    /// Crossing dests to CLAIM, each through the config-gated [`GatewaySessions::claim_crossing_dest`].
+    claim: Vec<NodeId>,
+    /// Roster claims to RELEASE. `None` — a static session's absent home, or a pre-commit transfer's absent
+    /// `demoting_home` — is the no-op arm of [`GatewaySessions::release_dynamic_shard`], so an `Option` role
+    /// can be pushed VERBATIM (which is also why adding the RLM 5f-4e demoting-source role introduced no new
+    /// branch at any release site). A single command may push SEVERAL: a terminal returns both the crossing
+    /// dest and the demoting source; a defensive Prepare replace returns both of the displaced progress's.
+    release: Vec<Option<NodeId>>,
 }
 
 impl TransferProgress {
@@ -567,6 +608,12 @@ struct Session {
     /// `Realm(home_rid)` head named the node that owns its home realm. THE routing field: every shard-ward
     /// send resolves through [`session_target`] = `home_shard.unwrap_or(config.shard)`, so a static
     /// (unarmed) session — forever `None` — is byte-identical to the pre-5f-3d gateway.
+    ///
+    /// RLM 5f-4 closes D-34's A1 (AUTHORITY-FOLLOWING DETACH): it is ALSO re-pointed at `CommitAuthority`
+    /// (to the transfer's `dest`), so after a crossing the routing target IS the current authority. A session
+    /// that never resolved a dynamic home and never crossed stays `None` forever. D-34's COMPOSITED-SUBS
+    /// clause remains OWED: this field names ONE node, whereas the source keeps its own read sub (and its
+    /// ghost) until `ReleaseSubscribe` — see `TransferProgress::demoting_home`.
     home_shard: Option<NodeId>,
     /// RLM 5f-3d — the STANDING home-realm identity of a dynamic session: set once at the committed lease
     /// and NEVER cleared, so it outlives the `AwaitingHomeRealm` phase payload. Two live readers: the
@@ -621,12 +668,29 @@ pub struct GatewaySessions {
     /// `config.known_shards`), so a refcount slip cannot mis-route a client. A `Draining`
     /// sub stays indexed for one tick (its straggler is drained), then removed.
     subscribed_shards: BTreeMap<NodeId, BTreeSet<SessionId>>,
-    /// RLM 5f-3d — the RUNTIME routable-shard roster: `demand-spawned home shard -> how many sessions are
-    /// homed on it`. A dynamically spawned shard's `NodeId` is minted at spawn time and can NEVER be in the
+    /// RLM 5f-3d — the RUNTIME routable-shard roster: `demand-spawned shard -> how many session ROLES are
+    /// held on it`. A dynamically spawned shard's `NodeId` is minted at spawn time and can NEVER be in the
     /// FROZEN [`GatewayConfig::known_shards`], so this is the other half of the ONE dispatch predicate
     /// [`is_routable_shard`]. REFCOUNTED (not a grow-only set) so a long-lived gateway does not accumulate
     /// one entry per realm shard the cluster ever spun up across 100K-realm churn: a node LEAVES the roster
-    /// when its last session does. Empty (⇒ dispatch byte-identical) unless in dynamic-home mode.
+    /// when its last role does. Empty (⇒ dispatch byte-identical) unless in dynamic-home mode.
+    ///
+    /// RLM 5f-4 / 5f-4e — there are now exactly THREE role kinds, each claiming ONE refcount:
+    /// - the session's HOME shard — claimed at the login home resolve (`on_home_realm_head`) and re-claimed
+    ///   for the new home at `CommitAuthority`; released at the session's exit
+    ///   ([`GatewaySessions::release_session_claims`]);
+    /// - an in-flight transfer's CROSSING DEST — claimed at `PrepareSubscribe`
+    ///   ([`GatewaySessions::claim_crossing_dest`]), released at its terminal (`ReleaseSubscribe` /
+    ///   `AbortTransfer`), on a defensive Prepare replace, and at the session's exit;
+    /// - a committed transfer's DEMOTING SOURCE home (`TransferProgress::demoting_home`) — the claim commit
+    ///   DISPLACED but deliberately did NOT release, because the client's read sub on the source outlives the
+    ///   commit by the whole demote grace. Released at the terminal that closes that sub, on a defensive
+    ///   Prepare replace, and at the session's exit.
+    ///
+    /// So mid-demote-tail a crossing session holds TWO refcounts on the dest (home + crossing) and ONE on the
+    /// source — deliberately: the dest stays routable when the tail releases the crossing one, and the SOURCE
+    /// stays routable for as long as the client is still reading it (without which the player went blind for
+    /// the whole tail after every crossing).
     dynamic_shards: BTreeMap<NodeId, u32>,
     /// RLM 5f-3d — the per-REALM home-BOOTSTRAP index: `home realm -> the ONE wait every session booting
     /// into that realm shares`. Two independent things make it per-REALM rather than per-session, both
@@ -857,6 +921,63 @@ impl GatewaySessions {
         } else {
             self.dynamic_shards.insert(node, remaining);
         }
+    }
+
+    /// RLM 5f-4 — CLAIM a transfer's CROSSING DEST on the runtime routable roster: THE ADMISSION that makes
+    /// a DEMAND-SPAWNED destination realm's shard node-class-dispatchable, so its `SubscriptionReady`, its
+    /// `Snapshot` frames and its `RealmSnapshot` frames are CONSUMED instead of falling through to the
+    /// client branch and being counted `undecodable` (which left the render authority un-repointed — a
+    /// BLIND player after every crossing into a realm the cluster spun up on demand). Driven by the
+    /// orchestrator-signed `PrepareSubscribe` (which strictly precedes FreezeSource/CommitAuthority, so the
+    /// dest is routable before its first frame) and re-claimed for the home role at `CommitAuthority`.
+    ///
+    /// GATED to a dest the FROZEN [`GatewayConfig::known_shards`] does not already cover. Two properties
+    /// follow, both load-bearing:
+    /// - an ALL-STATIC crossing leaves `dynamic_shards` EMPTY, so [`is_routable_shard`] answers purely from
+    ///   the config half exactly as it did before this slice (byte-identical dispatch, zero new state);
+    /// - the RELEASE side needs NO matching gate, because [`Self::release_dynamic_shard`] of a node that
+    ///   holds no entry is a total no-op on the map (`unwrap_or(0).saturating_sub(1) == 0` ⇒ it removes an
+    ///   absent key).
+    ///
+    /// The one-gate design is NOT justified by "a skipped claim leaves nothing to release" — that is FALSE:
+    /// a `known_shards` node CAN hold runtime entries, because the LOGIN-time home claim goes through the
+    /// RAW, UNGATED [`Self::claim_dynamic_shard`] (`on_home_realm_head`) and `bins/gateway.rs` always puts
+    /// the login shard in `known_shards`. The true invariant is a SPLIT by the frozen half:
+    /// - for a node IN `known_shards`, its runtime entry is IRRELEVANT to dispatch — [`is_routable_shard`]
+    ///   already answers `true` from the config half — so a crossing into it that skips the claim while its
+    ///   terminal decrements a login-time entry is unobservable, and can neither un-route the node nor pin it;
+    /// - for a node NOT in `known_shards` (the only case dispatch depends on), the gate NEVER skips, so every
+    ///   claim site (the raw login claim, this crossing claim, the commit-time home re-claim) is paired by
+    ///   count with a release site (the terminal, the defensive replace, the session exit) and the refcount
+    ///   is exactly balanced.
+    fn claim_crossing_dest(&mut self, config: &GatewayConfig, dest: NodeId) {
+        if config.is_known_shard(dest) {
+            return; // already dispatchable from the frozen roster — never a spurious dynamic entry
+        }
+        self.claim_dynamic_shard(dest);
+    }
+
+    /// RLM 5f-4 — THE one session-exit roster release (HR3): drop EVERY runtime-roster claim `session`
+    /// holds. There are THREE roles (RLM 5f-4e), released here in one place so no exit can leak a refcount
+    /// that would pin a demand-spawned node on the roster forever:
+    /// 1. its resolved HOME shard (`home_shard`);
+    /// 2. an in-flight transfer's CROSSING DEST (`transfer.dest`);
+    /// 3. an in-flight transfer's DEMOTING SOURCE home (`transfer.demoting_home`) — the claim
+    ///    `CommitAuthority` stashed instead of releasing, so the source stays routable while the client
+    ///    still reads it.
+    ///
+    /// Called from BOTH session exits (`Bye` and the bounded-TTL Close). Releasing all three is what makes
+    /// an exit anywhere in the demote tail exact: in the window between `CommitAuthority` and
+    /// `ReleaseSubscribe` the dest is claimed TWICE (crossing + new home) and the SOURCE still holds its
+    /// stashed one, and the three releases here take every node back to zero. Every arm is total: `None` — a
+    /// static session, one with no transfer in flight, or a pre-commit transfer (whose `demoting_home` is
+    /// always `None`) — is the no-op arm of [`Self::release_dynamic_shard`]. Role 3 is `None` for the
+    /// bounded-TTL exit BY CONSTRUCTION (that deadline is cleared at the `Active` promote and a transfer
+    /// requires `Active`), so only `Bye` can observe it `Some`.
+    fn release_session_claims(&mut self, session: &Session) {
+        self.release_dynamic_shard(session.home_shard);
+        self.release_dynamic_shard(session.transfer.as_ref().map(|tp| tp.dest));
+        self.release_dynamic_shard(session.transfer.as_ref().and_then(|tp| tp.demoting_home));
     }
 
     /// THE one open primitive (HR3): allocate a never-reused `sub` id, insert the cold
@@ -1174,7 +1295,11 @@ fn expire_home_bootstrap(
             .expect("collected from by_session this very tick");
         sessions.by_client.remove(&session.client);
         sessions.end_home_wait(session_id, session.home_rid);
-        sessions.release_dynamic_shard(session.home_shard);
+        // RLM 5f-4: the SAME session-exit release as `Bye` (HR3 — one primitive, both exits), so neither
+        // exit can leak a roster refcount. A TTL-expired session is pre-`Active` and therefore never holds
+        // a transfer, so only the home-shard half is live here; sharing the primitive is what keeps the two
+        // exits from drifting.
+        sessions.release_session_claims(&session);
         stats.home_bootstrap_timeouts += 1;
         tracing::error!(
             session = %session_id,
@@ -1719,18 +1844,22 @@ fn on_client_control(
                 );
             }
             // RLM 5f-3d: drop this session from BOTH runtime indexes before anything else — every exit from
-            // the dynamic-home machinery runs through the ONE `end_home_wait` / `release_dynamic_shard`
+            // the dynamic-home machinery runs through the ONE `end_home_wait` / `release_session_claims`
             // pair, so a `Bye` mid-boot can never leave a waiting-index entry or a roster refcount behind.
-            // A STATIC session takes the `None` arm of both (no-op ⇒ byte-identical).
+            // A STATIC session takes the `None` arm of both (no-op ⇒ byte-identical). RLM 5f-4/5f-4e: the
+            // release covers ALL THREE roles (home shard, an in-flight transfer's crossing dest, and the
+            // DEMOTING SOURCE home a committed crossing stashed), so a `Bye` anywhere in the demote tail —
+            // where the dest is claimed twice and the source still holds one — drops every node to zero.
             sessions.end_home_wait(session_id, session.home_rid);
-            sessions.release_dynamic_shard(session.home_shard);
+            sessions.release_session_claims(&session);
             // 5f-3d: the detach goes to the session's ROUTING TARGET — its dynamically resolved home shard
-            // when it has one, else the static `config.shard` (the ONE `session_target` path, HR3). That
-            // closes the dynamic half of D-34.
-            // ⚠️ SCALE (DEFERRED D-34, still open): after a TRANSFER (player homed on the dest) the target
-            // is still not the current authority, so that case leaks the dest's `SessionTable` entry. The
-            // remaining fix is to keep `home_shard` updated on `CommitAuthority`. NOT a
-            // `session.subs.keys()` scan — `subs` is empty at login (would regress login→Bye).
+            // when it has one, else the static `config.shard` (the ONE `session_target` path, HR3).
+            // RLM 5f-4 closes D-34's A1 (authority-following detach) HERE: `CommitAuthority` now re-points
+            // `home_shard` to the transfer dest, so after a crossing this target IS the current authority and
+            // the detach reaches the shard that actually holds the `SessionTable` entry (it used to go to the
+            // source and leak the dest's). The COMPOSITED-SUBS clause remains owed — this detaches only the
+            // CURRENT authority, while the source retains its own sub/ghost until `ReleaseSubscribe`.
+            // Still NOT a `session.subs.keys()` scan — `subs` is empty at login (would regress login→Bye).
             push_to_shard(
                 outbox,
                 session_target(&session, config),
@@ -1872,18 +2001,44 @@ fn on_transfer_control(
     // (abort runs pre-CAS, before the dest sub exists; `close_sub` no-ops then) but PRECISE for the
     // commit/flip-window-open ordering and the N-shard future.
     let mut subs_to_close: Vec<NodeId> = Vec::new();
+    // RLM 5f-4: the runtime routable-roster edits this command produced, applied after the borrow ends
+    // (the same deferred-mutation discipline as `subs_to_close` — see [`RosterEdits`]).
+    let mut roster = RosterEdits::default();
     // Compute the ack (or None for deferred/parked phases), then record-then-send below.
     let ack: Option<TransferControlAck> = match cmd {
         TransferControl::PrepareSubscribe { dest, .. } => {
+            // RLM 5f-4: the dest a DEFENSIVE replace is about to displace — captured BEFORE
+            // `apply_prepare` overwrites the progress, because that displaced dest's roster claim must be
+            // released WITH it or a second Prepare on this session leaks a refcount that pins the old dest
+            // on the roster forever.
+            let displaced = session.transfer.as_ref().map(|tp| tp.dest);
+            // RLM 5f-4e: and the displaced progress's DEMOTING SOURCE home. A second Prepare on a session
+            // that ALREADY committed a crossing (its demote tail still open) would otherwise strand that
+            // source claim: the replacement progress starts `demoting_home: None`, so after the overwrite NO
+            // holder can name the old source and no terminal will ever release it.
+            let displaced_home = session.transfer.as_ref().and_then(|tp| tp.demoting_home);
             // Split borrow: `session` from `sessions`, `&mut config.reject_next_prepare` from
             // `config` (disjoint resources / a disjoint field) — the one-shot 3g reject lever.
-            apply_prepare(
+            let ack = apply_prepare(
                 session,
                 transfer,
                 dest,
                 stats,
                 &mut config.reject_next_prepare,
-            )
+            );
+            // RLM 5f-4 — THE CROSSING-DEST ADMISSION. The roster edits ride the SAME condition as the
+            // progress write: `apply_prepare` returns `None` from exactly ONE guard (a not-Active session)
+            // and that guard opens NO progress, so a refused prepare must claim nothing (a claim with no
+            // terminal to release it IS the leak) and displace nothing. A `Rejected` verdict still opened
+            // the progress and still gets the claim — its `AbortTransfer` terminal releases it.
+            // BOTH displaced roles ride the SAME `ack.is_some()` gate as the claim: a refused prepare
+            // overwrote no progress, so it must hand nothing back either.
+            if ack.is_some() {
+                roster.claim.push(dest);
+                roster.release.push(displaced);
+                roster.release.push(displaced_home);
+            }
+            ack
         }
         TransferControl::RequestCut { .. } => {
             // S3: self-acking `CutConfirmed` (server-timed cut) — journaled at step 1 below.
@@ -1903,23 +2058,62 @@ fn on_transfer_control(
                 .filter(|tp| tp.transfer == transfer)
             {
                 subs_to_close.push(tp.dest);
+                // RLM 5f-4e: a POST-CAS abort ALSO closes the DEMOTING SOURCE sub, so the un-route below
+                // never outlives its subscription (the invariant the whole `demoting_home` stash exists to
+                // hold). `extend` of an `Option` is branchless — `None` (every PRE-CAS abort) is a no-op, so
+                // no new region and every existing abort cell is untouched. This arm is not reachable from
+                // the shipped sender (`saga.rs post_commit_is_forward_only` proptests no AbortTransfer after
+                // CasWon), but it is the one place the rework's own invariant could be violated.
+                subs_to_close.extend(tp.demoting_home);
+                // RLM 5f-4: the abort terminal RELEASES this transfer's crossing-dest claim — the
+                // compensating half of the Prepare-time admission. A pre-CAS abort never re-pointed
+                // `home_shard`, so this is the dest's ONLY claim and it leaves the roster here.
+                roster.release.push(Some(tp.dest));
+                // RLM 5f-4e: …AND the DEMOTING SOURCE home the commit stashed (released in lock-step with the
+                // sub close above). For a PRE-CAS abort this is always `None` (no commit ran ⇒ nothing
+                // displaced) — the no-op arm of `release_dynamic_shard`, so no new branch. Load-bearing for a
+                // POST-CAS abort: `apply_abort` PRUNES `session.transfer`, so a terminal that skipped the
+                // stash would strand the source's claim forever with no later holder able to name it.
+                roster.release.push(tp.demoting_home);
             }
             apply_abort(session, transfer)
         }
         TransferControl::CommitAuthority {
             new_fence, subject, ..
         } => apply_commit(
-            session, transfer, new_fence, subject, session_id, stats, outbox,
+            session,
+            transfer,
+            new_fence,
+            subject,
+            session_id,
+            stats,
+            outbox,
+            &mut roster,
         ),
         TransferControl::ReleaseSubscribe { src, .. } => {
             // Close the SOURCE sub ONLY for the matching in-flight transfer (mirroring
             // `apply_release`'s prune); a foreign/absent release closes nothing.
-            if session
+            if let Some(tp) = session
                 .transfer
                 .as_ref()
-                .is_some_and(|tp| tp.transfer == transfer)
+                .filter(|tp| tp.transfer == transfer)
             {
                 subs_to_close.push(src);
+                // RLM 5f-4: the demote tail releases this transfer's crossing-dest claim. The dest stays
+                // ROUTABLE because `CommitAuthority` claimed it a SECOND time for the session's new home
+                // role — that claim lives until the session exits, so the post-crossing player keeps
+                // receiving its dest frames long after the saga reaches `Done`.
+                roster.release.push(Some(tp.dest));
+                // RLM 5f-4e: the DEMOTING SOURCE's claim is due at the demote tail — the `close_sub` above
+                // (same command) stops the client reading the source. Holding the claim until here is what
+                // closes the blind window (the source stayed routable across the whole CommitAuthority→here
+                // grace). NOTE the routable window ends at the sub's CLOSE, one inbound-batch short of its
+                // REMOVAL: `close_sub` deliberately keeps the sub drainable for the rest of this batch + until
+                // the next `sweep_draining`, whereas this release lands at the end of THIS command — so a
+                // source straggler later in the same batch is dropped/`undecodable` for a demand-spawned
+                // source (a `known_shards` source is still served). Tying the release to the sweep instead is
+                // OWED (DEFERRED). `None` for a static/never-dynamically-homed session (the no-op arm).
+                roster.release.push(tp.demoting_home);
             }
             apply_release(session, transfer)
         }
@@ -1938,9 +2132,17 @@ fn on_transfer_control(
         }
         reply_ack(outbox, config.orchestrator, ack);
     }
-    // The `&mut Session` borrow has ended: close the collected subs through the sole close
-    // primitive (Draining grace; the next-tick sweep removes them). `close_sub` is idempotent
-    // and a no-op for a shard this session does not subscribe to.
+    // The `&mut Session` borrow has ended. RLM 5f-4: apply the runtime-roster edits FIRST — claims before
+    // releases (see [`RosterEdits`]) — so a just-admitted dest is node-class-dispatchable for the REST of
+    // this very tick's inbound batch, not only from the next tick.
+    for dest in roster.claim {
+        sessions.claim_crossing_dest(config, dest);
+    }
+    for node in roster.release {
+        sessions.release_dynamic_shard(node);
+    }
+    // Then close the collected subs through the sole close primitive (Draining grace; the next-tick sweep
+    // removes them). `close_sub` is idempotent and a no-op for a shard this session does not subscribe to.
     for shard in subs_to_close {
         sessions.close_sub(session_id, shard, outbox);
     }
@@ -1991,6 +2193,11 @@ fn apply_prepare(
         transfer,
         cut_requested: false,
         dest, // captured here for the precise abort-time dest-sub close (1d.2)
+        // RLM 5f-4e: a FRESH progress is demoting nothing — the stash is written ONLY by
+        // `apply_commit` (the one place a home is displaced). A defensive replace therefore starts
+        // `None`, which is why the DISPLACED progress's stash must be handed back at the replace
+        // (`on_transfer_control`'s PrepareSubscribe arm) or its source claim would be stranded.
+        demoting_home: None,
         applied: BTreeMap::new(),
         dest_buffer: VecDeque::new(),
     });
@@ -2203,6 +2410,14 @@ fn store_commit(hot: &SessionHot, dest: NodeId) {
 /// are distinct realm leases; intra-shard (one realm lease) it correctly does NOT fire.
 /// `new_fence` stays threaded through wire+saga (the CAS linearization point); the gateway
 /// consumes it without installing it until the dest re-stamps its realm lease (1d/mesh).
+///
+/// **RLM 5f-4e — closes D-34's A1 (authority-following detach); the composited-subs clause remains OWED.**
+/// Commit is where the session's ROUTING TARGET follows authority: `home_shard` is re-pointed to `dest`.
+/// The displaced OLD home's roster claim is **STASHED** in `TransferProgress::demoting_home`, NOT released
+/// here — the source's read sub outlives the commit by the whole demote grace (RLM 5f-4e). This re-points
+/// only the CURRENT authority; the SOURCE keeps its own sub/ghost until `ReleaseSubscribe`, so D-34's
+/// composited-subs half is not yet closed. See step (b2).
+#[allow(clippy::too_many_arguments)] // the 8th is the deferred roster carrier (the borrow-discipline seam)
 fn apply_commit(
     session: &mut Session,
     transfer: TransferId,
@@ -2211,6 +2426,9 @@ fn apply_commit(
     session_id: SessionId,
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
+    // RLM 5f-4: the deferred roster edits — `dest` is discovered HERE (from the installed cut), but
+    // `dynamic_shards` lives on `GatewaySessions`, which is borrow-locked while `session` is held.
+    roster: &mut RosterEdits,
 ) -> Option<TransferControlAck> {
     let bound = session
         .transfer
@@ -2254,23 +2472,49 @@ fn apply_commit(
     );
     // (b) THE swap: authority:=dest, fence carried, cut:=None (ONE atomic publish).
     store_commit(&session.hot, dest);
+    // (b2) RLM 5f-4e — closes D-34's A1 (composited-subs clause OWED): the player is now HOMED on the dest,
+    // so the session's ROUTING TARGET
+    // ([`session_target`]) must follow authority. `Option::replace` does both halves in ONE branchless
+    // expression: point `home_shard` at `dest` and hand back the OLD home. Roster consequences:
+    // - CLAIM `dest` for the new HOME role. This is a SECOND claim on top of the Prepare-time crossing
+    //   claim (the refcount makes it idempotent-by-construction), and it is what keeps the dest routable
+    //   after `ReleaseSubscribe` releases the crossing one — without it a demand-spawned dest left the
+    //   roster the instant the demote tail landed and the player went blind again.
+    // - RLM 5f-4e: the OLD home's claim is **STASHED, NOT RELEASED HERE** (`TransferProgress::
+    //   demoting_home`). Commit moves the WRITE authority, but the client's READ subscription on the
+    //   SOURCE stays open for the whole demote grace (closed at `ReleaseSubscribe`, a later tick) and the
+    //   source keeps shipping frames. Releasing at commit un-routed a DEMAND-SPAWNED source, so its
+    //   `Snapshot`/`RealmSnapshot` frames were counted `undecodable` for the entire tail — a BLIND player
+    //   right after every crossing. The stash is handed back where the sub actually closes
+    //   (`ReleaseSubscribe` / `AbortTransfer`), or at the session's exit if the client quits in the window,
+    //   so a chain of crossings still accumulates no refcount per hop.
+    // Before this, `home_shard` was never re-pointed at commit (the open D-34 owe), so a post-crossing
+    // `Bye` detached at the SOURCE and leaked the dest's `SessionTable` entry.
+    roster.claim.push(dest);
+    // Two statements, not one expression: `home_shard` and `transfer` are disjoint fields but a single
+    // `progress.demoting_home = session.home_shard.replace(dest)` would borrow `session` twice.
+    let demoting_home = session.home_shard.replace(dest);
+    // ONE `&mut` reach into the in-flight progress serves BOTH remaining steps (the stash write and the
+    // buffer take), so the bound-check's unreachable-`None` shape is asserted exactly once.
+    // The bound-check above guarantees `session.transfer` is Some (the in-flight transfer);
+    // `expect` is the unreachable-arm shape.
+    let progress = session
+        .transfer
+        .as_mut()
+        .expect("bound-check above guarantees the in-flight transfer is present");
+    progress.demoting_home = demoting_home;
     // (c) DRAIN the cut buffer to the now-authoritative dest as ordinary SessionInput, in
     // push order (== seq order: route_input's fetch_max dropped seq<=prev BEFORE buffering,
     // so the buffer is strictly increasing). `std::mem::take` empties it — the STRUCTURAL
     // drain-once guarantee: a redelivered CommitAuthority re-serves Committed via the gate
-    // (above) AND finds the buffer empty, so it never re-drains.
-    // The bound-check above guarantees `session.transfer` is Some (the in-flight transfer);
-    // `expect` is the unreachable-arm shape.
+    // (above) AND finds the buffer empty, so it never re-drains. That SAME gate is what keeps the
+    // (b2) stash exact under at-least-once delivery: a redelivered commit never re-enters here, so
+    // `demoting_home` can never be overwritten with `Some(dest)` (which would strand the real source
+    // claim) and `dest` is never claimed a third time.
     // Push order == seq order: `route_input`'s `fetch_max` returns `Deduped` for any
     // `seq <= prev` BEFORE the partition, so only a strictly-increasing subsequence is ever
     // buffered. The dest's own `last_applied_seq` dedup is the backstop regardless of order.
-    let buffered = std::mem::take(
-        &mut session
-            .transfer
-            .as_mut()
-            .expect("bound-check above guarantees the in-flight transfer is present")
-            .dest_buffer,
-    );
+    let buffered = std::mem::take(&mut progress.dest_buffer);
     for input_bytes in buffered {
         push_to_shard(
             outbox,
@@ -8858,5 +9102,962 @@ mod tests {
             1,
             "the inert default floors at 1 (never a divide-by-zero cadence)"
         );
+    }
+
+    // ===== RLM 5f-4 — the GATEWAY CROSSING-DESTINATION ADMISSION ===================================
+
+    /// A DEMAND-SPAWNED crossing DESTINATION. Deliberately NOT a member of `config().known_shards`
+    /// (`{SHARD, DEST}`) — exactly like a realm the cluster spun up on demand, whose `NodeId` was minted at
+    /// spawn time long after boot — so every frame of its that the gateway consumes PROVES the RUNTIME
+    /// roster admitted it.
+    const DYN_DEST: NodeId = NodeId(78);
+    /// A SECOND demand-spawned dest (the defensive-replace / chained-crossing cells).
+    const DYN_DEST2: NodeId = NodeId(79);
+    /// A SECOND transfer id: a DIFFERENT transfer, so a replacing `PrepareSubscribe` is not absorbed by
+    /// the redelivery gate.
+    const XFER2: TransferId = TransferId(0x5f4);
+
+    /// The RUNTIME routable-shard roster, WHOLE (asserted by equality — never `matches!`).
+    fn roster(rig: &Rig) -> BTreeMap<NodeId, u32> {
+        rig.world
+            .resource::<GatewaySessions>()
+            .dynamic_shards
+            .clone()
+    }
+
+    /// The session's resolved home shard — the D-34 routing field this slice re-points at commit.
+    fn homed_on(rig: &Rig, sid: SessionId) -> Option<NodeId> {
+        rig.world.resource::<GatewaySessions>().home_shard_of(sid)
+    }
+
+    /// The shards a session subscribes to (the COLD authority, sorted by `NodeId`).
+    fn subs_of(rig: &Rig, sid: SessionId) -> Vec<NodeId> {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session present")
+            .subs
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// How many datagrams of `class` reached CLIENT this tick.
+    fn to_client(sent: &[(NodeId, MsgClass, Vec<u8>)], class: MsgClass) -> usize {
+        sent.iter()
+            .filter(|(to, c, _)| (*to == CLIENT) & (*c == class))
+            .count()
+    }
+
+    /// Both of the dest's DATA classes in one tick: an entity `Snapshot` at `Fence(5)` — the realm fence
+    /// [`subscription_ready`] opens the dest sub at, so it is ACCEPTED rather than fence-dropped — and a
+    /// `RealmSnapshot` (ambient world state, no fence gate).
+    fn dest_frames(dest: NodeId) -> Vec<Inbound> {
+        vec![
+            wire(dest, MsgClass::Snapshot, &frame_msg(Fence(5), 1)),
+            wire(
+                dest,
+                MsgClass::RealmSnapshot,
+                &realm_frame_msg(RealmId::Planet(7)),
+            ),
+        ]
+    }
+
+    /// Drive the WHOLE saga a crossing rides against `dest`, ONE ordered CONTROL command per tick:
+    /// Prepare → RequestCut → FreezeSource → CommitAuthority. Returns the COMMIT tick's sends.
+    fn cross_to(
+        rig: &mut Rig,
+        sid: SessionId,
+        transfer: TransferId,
+        dest: NodeId,
+    ) -> Vec<(NodeId, MsgClass, Vec<u8>)> {
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer,
+            session: sid,
+            dest,
+        })]);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
+            transfer,
+            session: sid,
+        })]);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::FreezeSource {
+            transfer,
+            session: sid,
+            marker_seq: 0,
+            dest,
+        })]);
+        rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer,
+            session: sid,
+            new_fence: Fence(2),
+            subject: XFER_SUBJECT,
+        })])
+    }
+
+    #[test]
+    fn a_prepare_admits_the_crossing_dest_so_its_subscription_ready_lands() {
+        // THE BUG THIS SLICE FIXES, half one. A demand-spawned crossing dest is in NEITHER the frozen
+        // config roster nor (pre-5f-4) the runtime one, so every frame it sent fell through to the CLIENT
+        // branch. The orchestrator-signed `PrepareSubscribe` now ADMITS it, and Prepare strictly precedes
+        // FreezeSource/CommitAuthority — so the admission is in place before the dest's first frame.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "an ordinary login claims no runtime roster entry"
+        );
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DYN_DEST,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1)]),
+            "the Prepare claimed the demand-spawned dest onto the RUNTIME routable roster"
+        );
+        // …and THAT is what makes its read-plane promote land: the dest sub opens and the client is told
+        // which sub now carries its avatar.
+        let ready = rig.tick(vec![subscription_ready(DYN_DEST, sid)]);
+        assert_eq!(
+            decode_controls(&ready, CLIENT),
+            vec![
+                ServerControlMsg::SubscriptionOpened {
+                    sub: SubId(1),
+                    frame: FrameRef::SystemSpace { system_seed: 8 },
+                },
+                ServerControlMsg::AuthorityChanged {
+                    entity: EntityId(77),
+                    sub: SubId(1),
+                },
+                ServerControlMsg::OwnEntity {
+                    entity: EntityId(77)
+                },
+            ],
+            "the dest's SubscriptionReady opened the dest sub and re-pointed the render authority"
+        );
+        assert_eq!(subs_of(&rig, sid), vec![SHARD, DYN_DEST]);
+        assert_eq!(rig.stats().undecodable, 0, "nothing was lost");
+    }
+
+    #[test]
+    fn without_the_prepare_admission_a_crossing_dests_frames_are_all_lost() {
+        // THE FALSIFIABLE TWIN. The IDENTICAL frames from the IDENTICAL node with NO preceding Prepare: the
+        // dest is unrecognised, so every one of its frames falls through to the CLIENT branch and is counted
+        // `undecodable` — the `SubscriptionReady` (which fails the `ClientControlMsg` decode) so the render
+        // authority NEVER re-points and the player is BLIND, and both data classes (which have no
+        // client-branch arm at all) so nothing of the dest world is ever served. This is the state
+        // test-one's admission is measured against.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let ready = rig.tick(vec![subscription_ready(DYN_DEST, sid)]);
+        assert_eq!(
+            decode_controls(&ready, CLIENT),
+            Vec::new(),
+            "with no admission the dest's SubscriptionReady opens nothing and tells the client nothing"
+        );
+        assert_eq!(roster(&rig), BTreeMap::new(), "nothing was claimed");
+        assert_eq!(
+            subs_of(&rig, sid),
+            vec![SHARD],
+            "the session still subscribes ONLY to its source — the render authority never moved"
+        );
+        let frames = rig.tick(dest_frames(DYN_DEST));
+        assert_eq!(
+            to_client(&frames, MsgClass::Snapshot),
+            0,
+            "no entity frame from the unadmitted dest reached the client"
+        );
+        assert_eq!(
+            to_client(&frames, MsgClass::RealmSnapshot),
+            0,
+            "and no realm frame either"
+        );
+        assert_eq!(
+            rig.stats().undecodable,
+            3,
+            "all three of the dest's frames were counted undecodable, never served"
+        );
+    }
+
+    #[test]
+    fn the_forward_crossing_re_homes_the_session_and_admits_its_snapshot_and_realm_frames() {
+        // THE FORWARD CROSSING, end to end, into a DEMAND-SPAWNED dest: the write route swaps, the D-34
+        // routing field FOLLOWS authority, the dest is admitted, and BOTH of its render classes reach the
+        // client. Pre-5f-4 every one of the dest's frames was counted undecodable instead.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let committed = cross_to(&mut rig, sid, XFER, DYN_DEST);
+        assert_eq!(
+            acks_to_orch(&committed),
+            vec![TransferControlAck::Committed { transfer: XFER }],
+            "the commit acked exactly once"
+        );
+        assert_eq!(
+            route_authority(&rig, sid),
+            DYN_DEST,
+            "the WRITE route swapped to the dest"
+        );
+        assert_eq!(
+            homed_on(&rig, sid),
+            Some(DYN_DEST),
+            "THE D-34 CLOSE: the session's routing target followed authority to the dest"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 2)]),
+            "the dest holds TWO claims — the crossing (from Prepare) and the new home (from commit)"
+        );
+        // The read-plane promote, then BOTH render classes.
+        let _ = rig.tick(vec![subscription_ready(DYN_DEST, sid)]);
+        assert_eq!(subs_of(&rig, sid), vec![SHARD, DYN_DEST]);
+        let frames = rig.tick(dest_frames(DYN_DEST));
+        assert_eq!(
+            to_client(&frames, MsgClass::Snapshot),
+            1,
+            "the dest's entity frame reaches the client (the avatar renders after the crossing)"
+        );
+        assert_eq!(
+            to_client(&frames, MsgClass::RealmSnapshot),
+            1,
+            "and its realm frame too (the world around the avatar)"
+        );
+        assert_eq!(
+            rig.stats().undecodable,
+            0,
+            "nothing was lost as undecodable"
+        );
+    }
+
+    #[test]
+    fn the_release_terminal_returns_the_crossing_claim_and_the_dest_stays_routable() {
+        // The demote tail hands back the CROSSING claim only. The dest keeps the HOME claim commit
+        // installed, so a post-`Done` player keeps receiving its dest frames — the refcount's whole point.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = cross_to(&mut rig, sid, XFER, DYN_DEST);
+        let _ = rig.tick(vec![subscription_ready(DYN_DEST, sid)]);
+        let released = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid,
+            src: SHARD,
+        })]);
+        assert_eq!(
+            acks_to_orch(&released),
+            vec![TransferControlAck::Released { transfer: XFER }]
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1)]),
+            "the crossing claim went back; the HOME claim keeps the dest on the roster"
+        );
+        assert_eq!(
+            to_client(&rig.tick(dest_frames(DYN_DEST)), MsgClass::Snapshot),
+            1,
+            "so the dest is STILL routable after the saga reached Done"
+        );
+        // …and the session exit is what finally drains it.
+        let bye = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert!(
+            saw_detach(&bye, DYN_DEST, sid),
+            "D-34: the post-crossing detach reaches the CURRENT authority, not the source"
+        );
+        assert!(
+            !saw_detach(&bye, SHARD, sid),
+            "and never the source it left"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "the last claim went with the session — no roster leak"
+        );
+    }
+
+    #[test]
+    fn the_abort_terminal_returns_the_crossing_claim_and_the_dest_leaves_the_roster() {
+        // The compensating terminal. A pre-CAS abort never re-pointed `home_shard`, so the Prepare-time
+        // claim is the dest's ONLY one and the node leaves the roster with it.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DYN_DEST,
+        })]);
+        assert_eq!(roster(&rig), BTreeMap::from([(DYN_DEST, 1)]));
+        let aborted = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            acks_to_orch(&aborted),
+            vec![TransferControlAck::Aborted { transfer: XFER }]
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "the aborted crossing's claim is returned — the dest leaves the runtime roster"
+        );
+        assert_eq!(
+            homed_on(&rig, sid),
+            None,
+            "and an aborted crossing never re-homed the session"
+        );
+    }
+
+    #[test]
+    fn a_redelivered_and_a_replacing_prepare_never_leak_a_roster_refcount() {
+        // IDEMPOTENCE of the admission. (a) A redelivered SAME-transfer Prepare is absorbed by the journal
+        // gate before any effect ⇒ no second claim. (b) A DIFFERENT transfer's Prepare defensively REPLACES
+        // the progress: it claims the new dest and hands back the DISPLACED one, so neither a stale entry
+        // is pinned nor is a re-claimed same-node dest ever transiently unrouted.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let first = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DYN_DEST,
+        })]);
+        assert_eq!(roster(&rig), BTreeMap::from([(DYN_DEST, 1)]));
+        // (a) the exact same command again — the redelivery gate re-serves the recorded ack.
+        let again = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DYN_DEST,
+        })]);
+        assert_eq!(
+            acks_to_orch(&again),
+            acks_to_orch(&first),
+            "the redelivery re-served the recorded Prepared verbatim"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1)]),
+            "and claimed nothing a second time (a redelivery cannot inflate the refcount)"
+        );
+        // (b) a DIFFERENT transfer naming the SAME dest: claim-then-release keeps it at exactly one, and it
+        // never leaves the roster in between.
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER2,
+            session: sid,
+            dest: DYN_DEST,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1)]),
+            "the replace re-claimed and released the same node — net one, never a leak"
+        );
+        // (b') a replace naming a DIFFERENT dest hands the displaced one back.
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DYN_DEST2,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST2, 1)]),
+            "the displaced dest left the roster with the progress it belonged to"
+        );
+        let _ = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "and the terminal drains the survivor — every claim balanced"
+        );
+    }
+
+    #[test]
+    fn a_prepare_refused_before_attach_claims_no_roster_entry() {
+        // The claim rides the SAME condition as the progress write. A not-yet-Active session's Prepare is
+        // refused and opens NO progress, so a claim here would have no terminal to release it — a
+        // permanent roster leak pinning a node the crossing never reached.
+        let mut rig = Rig::new();
+        let _ = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        let sid = session_of(&rig, CLIENT);
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        assert_eq!(phase_of(&rig, sid), SessionPhase::AwaitingAttach);
+        let sent = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DYN_DEST,
+        })]);
+        assert_eq!(acks_to_orch(&sent), vec![], "the prepare was refused");
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "a refused prepare claims nothing (a claim with no terminal IS the leak)"
+        );
+        assert_eq!(rig.stats().transfer_unroutable, 1);
+    }
+
+    #[test]
+    fn a_crossing_off_a_shared_home_leaves_the_other_sessions_route_intact() {
+        // THE REFCOUNT'S OTHER ARM. Two sessions share one demand-spawned home; ONE of them crosses away.
+        // The node must survive the crosser's whole demote tail (decrement, not remove), or the session that
+        // stayed would go blind the moment its neighbour crossed. NOTE (RLM 5f-4e): the crosser's home claim
+        // is STASHED at commit and returned at `ReleaseSubscribe`, so HOME holds BOTH sessions' claims
+        // through the tail — which is exactly why a SHARED home masked the blind window; the solo-home cell
+        // `a_crossing_off_a_solo_dynamic_home_keeps_the_source_routable_through_the_demote_tail` is the
+        // falsifying one.
+        let mut rig = dynamic_rig();
+        let (sid_a, _) = dynamic_login(&mut rig, CLIENT);
+        let (sid_b, _) = dynamic_login(&mut rig, CLIENT2);
+        // ONE head reply resolves both members onto HOME (two claims).
+        let _ = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert_eq!(roster(&rig), BTreeMap::from([(HOME, 2)]));
+        for client in [CLIENT, CLIENT2] {
+            let sid = session_of(&rig, client);
+            let _ = rig.tick(vec![wire(
+                HOME,
+                MsgClass::Control,
+                &ShardToGateway::SessionAttached {
+                    session: sid,
+                    entity: EntityId(77),
+                    frame: FrameRef::SystemSpace { system_seed: 7 },
+                    realm_fence: Fence(1),
+                },
+            )]);
+        }
+        // B crosses HOME -> DYN_DEST.
+        let _ = cross_to(&mut rig, sid_b, XFER, DYN_DEST);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(HOME, 2), (DYN_DEST, 2)]),
+            "B's home claim is STASHED for its demote tail, so HOME still counts both sessions"
+        );
+        assert_eq!(
+            homed_on(&rig, sid_b),
+            Some(DYN_DEST),
+            "B followed authority"
+        );
+        assert_eq!(homed_on(&rig, sid_a), Some(HOME), "A did not move");
+        assert_eq!(
+            to_client(&rig.tick(dest_frames(HOME)), MsgClass::Snapshot),
+            1,
+            "and A still receives its HOME frames after its neighbour crossed away"
+        );
+        // Both exits drain to nothing.
+        let _ = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid_b,
+            src: HOME,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(HOME, 1), (DYN_DEST, 1)]),
+            "the tail returned B's stashed HOME claim AND its crossing claim — A's HOME claim is untouched"
+        );
+        let _ = rig.tick(vec![wire(
+            CLIENT2,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(roster(&rig), BTreeMap::from([(HOME, 1)]));
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "every claim across two sessions and one crossing is balanced"
+        );
+    }
+
+    #[test]
+    fn a_bye_mid_crossing_returns_the_crossing_claim_before_the_saga_terminal() {
+        // A `Bye` can land ANYWHERE in the saga, including before a terminal ever arrives (WEDGE-1). The
+        // ONE session-exit release covers the in-flight transfer's dest too, so a client that quits
+        // mid-crossing cannot pin a demand-spawned node on the roster forever.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DYN_DEST,
+        })]);
+        assert_eq!(roster(&rig), BTreeMap::from([(DYN_DEST, 1)]));
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "the exit released the in-flight crossing's claim, with no terminal in sight"
+        );
+    }
+
+    #[test]
+    fn a_bye_in_the_commit_to_release_window_returns_both_of_the_dests_claims() {
+        // The DOUBLE-claim window: between `CommitAuthority` and `ReleaseSubscribe` the dest is claimed
+        // twice (crossing + home). Both exits release BOTH roles through the ONE primitive, so a quit
+        // exactly here still drains the node to zero.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = cross_to(&mut rig, sid, XFER, DYN_DEST);
+        assert_eq!(roster(&rig), BTreeMap::from([(DYN_DEST, 2)]));
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "both roles released at the one exit — the doubly-claimed dest drains to zero"
+        );
+        // The OTHER exit (the bounded bootstrap TTL) shares that primitive: a pre-Active dynamic session
+        // holds only the home role, and it too drains.
+        let mut ttl_rig = dynamic_rig_with_ttl(5); // waiting since tick 1 ⇒ deadline 6
+        let (ttl_sid, _) = dynamic_login(&mut ttl_rig, CLIENT);
+        let _ = ttl_rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        assert_eq!(roster(&ttl_rig), BTreeMap::from([(HOME, 1)]));
+        set_tick(&mut ttl_rig, 7); // past the deadline
+        let _ = ttl_rig.tick(vec![]);
+        assert_eq!(ttl_rig.stats().home_bootstrap_timeouts, 1);
+        assert_eq!(
+            homed_on(&ttl_rig, ttl_sid),
+            None,
+            "the TTL-closed session is gone"
+        );
+        assert_eq!(
+            roster(&ttl_rig),
+            BTreeMap::new(),
+            "and the bounded-TTL exit released its claim through the same primitive"
+        );
+    }
+
+    #[test]
+    fn an_all_static_crossing_leaves_the_runtime_roster_empty() {
+        // BYTE-IDENTITY. `DEST` is in the FROZEN `known_shards`, so it is already dispatchable and the
+        // admission must not manufacture runtime state for it: `dynamic_shards` stays EMPTY at EVERY step,
+        // which makes `is_routable_shard` answer purely from the config half exactly as before this slice.
+        // (The D-34 re-point still happens — it is a routing fix, not a roster one.)
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER,
+            session: sid,
+            dest: DEST,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "a KNOWN dest is never claimed onto the runtime roster"
+        );
+        let _ = rig.tick(vec![saga_cmd(TransferControl::RequestCut {
+            transfer: XFER,
+            session: sid,
+        })]);
+        let _ = rig.tick(vec![saga_cmd(TransferControl::FreezeSource {
+            transfer: XFER,
+            session: sid,
+            marker_seq: 0,
+            dest: DEST,
+        })]);
+        let committed = rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer: XFER,
+            session: sid,
+            new_fence: Fence(2),
+            subject: XFER_SUBJECT,
+        })]);
+        assert_eq!(
+            committed
+                .iter()
+                .map(|(to, class, _)| (*to, *class))
+                .collect::<Vec<_>>(),
+            vec![(DEST, MsgClass::Control), (ORCH, MsgClass::Saga)],
+            "the commit tick's send fingerprint is unchanged: the dest's OpenInputSlot then the ack"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "still empty after the commit"
+        );
+        assert_eq!(
+            homed_on(&rig, sid),
+            Some(DEST),
+            "the D-34 re-point applies to a static dest too (routing, not roster)"
+        );
+        let _ = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid,
+            src: SHARD,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "and the release of a known dest is a total no-op on the map"
+        );
+        // The static dest's frames dispatch through the CONFIG half, as they always did.
+        let _ = rig.tick(vec![subscription_ready(DEST, sid)]);
+        let frames = rig.tick(dest_frames(DEST));
+        assert_eq!(to_client(&frames, MsgClass::Snapshot), 1);
+        assert_eq!(to_client(&frames, MsgClass::RealmSnapshot), 1);
+        assert_eq!(rig.stats().undecodable, 0);
+        let bye = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert!(
+            saw_detach(&bye, DEST, sid),
+            "D-34 closes for the static crossing too: the detach follows authority"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "and no entry was ever created"
+        );
+    }
+
+    // ===== RLM 5f-4e — the DEMOTING-SOURCE claim (the REJECT-class blind window) ====================
+
+    /// The SOURCE home a committed crossing is still demoting away from (`TransferProgress::
+    /// demoting_home`) — the RLM 5f-4e stash. Read by equality so a redelivery can be shown NOT to
+    /// clobber it. Only called where a transfer is in flight.
+    fn demoting_home_of(rig: &Rig, sid: SessionId) -> Option<NodeId> {
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session present")
+            .transfer
+            .as_ref()
+            .expect("a transfer is in flight")
+            .demoting_home
+    }
+
+    /// Drive ONE dynamic login all the way to `Active` on the DEMAND-SPAWNED `HOME` shard: hello → grant →
+    /// the `Realm` head that resolves the home → the home's `SessionAttached`. The session then holds
+    /// EXACTLY ONE roster claim (its home role) and ONE read sub (on `HOME`) — the shape every solo-home
+    /// crossing cell needs, where `HOME`'s routability rests ENTIRELY on that one claim (it is not in
+    /// `known_shards`).
+    fn dynamic_active_on_home(rig: &mut Rig, client: NodeId) -> SessionId {
+        let (sid, _) = dynamic_login(rig, client);
+        let _ = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &realm_head(home_realm(), Some(HOME)),
+        )]);
+        let _ = rig.tick(vec![wire(
+            HOME,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+        sid
+    }
+
+    #[test]
+    fn a_crossing_off_a_solo_dynamic_home_keeps_the_source_routable_through_the_demote_tail() {
+        // THE REJECT-CLASS BLIND WINDOW, falsified. ONE session on a DEMAND-SPAWNED home with NO second
+        // session parked there — which is exactly what `a_crossing_off_a_shared_home_…` masked: there the
+        // neighbour's claim kept the node routable no matter what commit did.
+        //
+        // The client's READ subscription on the SOURCE stays open across the WHOLE demote grace (it closes
+        // only at `ReleaseSubscribe`, a later tick) and the source keeps SHIPPING frames the whole time.
+        // Releasing the source's runtime-roster claim at `CommitAuthority` un-routed it, so every one of
+        // those frames fell through to the client branch and was counted `undecodable` — a BLIND player for
+        // the whole tail, right after EVERY crossing. Pre-rework this cell fails at the first (a) assertion
+        // below (0 frames served, 2 undecodable); post-rework the source stays routable until its sub closes.
+        let mut rig = dynamic_rig();
+        let sid = dynamic_active_on_home(&mut rig, CLIENT);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(HOME, 1)]),
+            "HOME's routability rests on this ONE claim — nothing else holds it"
+        );
+        assert_eq!(
+            subs_of(&rig, sid),
+            vec![HOME],
+            "and the client reads exactly one shard: the source"
+        );
+        let _ = cross_to(&mut rig, sid, XFER, DYN_DEST);
+        // (a) THE TICK AFTER COMMIT — the BEHAVIOURAL falsifier, asserted BEFORE any structural claim so a
+        // pre-rework tree fails on the SYMPTOM (the player's frames), not on an internal field. The dest sub
+        // does not exist yet — its `SubscriptionReady` is a round-trip away — so the SOURCE feed is ALL the
+        // player has. Both render classes must still land. Pre-rework: 0 and 0, with `undecodable` at 2.
+        let after_commit = rig.tick(dest_frames(HOME));
+        assert_eq!(
+            to_client(&after_commit, MsgClass::Snapshot),
+            1,
+            "the SOURCE's entity frame still reaches the client on the tick after commit"
+        );
+        assert_eq!(
+            to_client(&after_commit, MsgClass::RealmSnapshot),
+            1,
+            "and its realm frame too — the world does not vanish at the commit"
+        );
+        assert_eq!(
+            rig.stats().undecodable,
+            0,
+            "nothing of the source was counted undecodable"
+        );
+        // …and the structure that produced it: the target moved, the displaced home was STASHED, both ends
+        // are on the roster.
+        assert_eq!(
+            homed_on(&rig, sid),
+            Some(DYN_DEST),
+            "the routing target followed authority to the dest"
+        );
+        assert_eq!(
+            demoting_home_of(&rig, sid),
+            Some(HOME),
+            "…while the displaced home was STASHED on the progress, not released at commit"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(HOME, 1), (DYN_DEST, 2)]),
+            "so BOTH ends stay routable through the tail (source 1; dest home + crossing)"
+        );
+        // (b) AFTER THE DEST PROMOTE — both subs open, which is the composite a seamless crossing renders.
+        let _ = rig.tick(vec![subscription_ready(DYN_DEST, sid)]);
+        assert_eq!(
+            subs_of(&rig, sid),
+            vec![HOME, DYN_DEST],
+            "both subs are open across the tail"
+        );
+        let composited = rig.tick(dest_frames(HOME));
+        assert_eq!(
+            to_client(&composited, MsgClass::Snapshot),
+            1,
+            "the source still feeds the composite after the dest promote"
+        );
+        assert_eq!(to_client(&composited, MsgClass::RealmSnapshot), 1);
+        let dest_side = rig.tick(dest_frames(DYN_DEST));
+        assert_eq!(
+            to_client(&dest_side, MsgClass::Snapshot),
+            1,
+            "and the dest feeds it too — the player sees both ends, never neither"
+        );
+        assert_eq!(to_client(&dest_side, MsgClass::RealmSnapshot), 1);
+        assert_eq!(
+            rig.stats().undecodable,
+            0,
+            "still nothing lost, with both subs open"
+        );
+        // The terminal is where the source's claim comes DUE: the same command closes the source sub, so the
+        // routable window matches the sub's lifetime to the tick.
+        let released = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid,
+            src: HOME,
+        })]);
+        assert_eq!(
+            acks_to_orch(&released),
+            vec![TransferControlAck::Released { transfer: XFER }]
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1)]),
+            "the source left the roster WITH its sub; the dest keeps its home claim"
+        );
+        let bye = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert!(
+            saw_detach(&bye, DYN_DEST, sid),
+            "the detach follows authority to the dest"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "every claim across the whole crossing is balanced — no leak, nothing pinned"
+        );
+    }
+
+    #[test]
+    fn a_post_cas_abort_returns_both_the_crossing_dest_and_the_demoting_source_claims() {
+        // THE OTHER TERMINAL. `apply_abort` PRUNES `session.transfer`, so an abort that lands AFTER the CAS
+        // (the stash already written) is the LAST holder able to NAME the demoting source — skip it there and
+        // the source's claim is stranded on the roster forever, with no later path that could ever release
+        // it. Both roles go back here; the session, which the commit did re-home, keeps only its dest claim.
+        let mut rig = dynamic_rig();
+        let sid = dynamic_active_on_home(&mut rig, CLIENT);
+        let _ = cross_to(&mut rig, sid, XFER, DYN_DEST);
+        assert_eq!(roster(&rig), BTreeMap::from([(HOME, 1), (DYN_DEST, 2)]));
+        let aborted = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER,
+            session: sid,
+        })]);
+        assert_eq!(
+            acks_to_orch(&aborted),
+            vec![TransferControlAck::Aborted { transfer: XFER }]
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1)]),
+            "the crossing claim AND the stashed source claim both went back at the abort"
+        );
+        assert_eq!(
+            homed_on(&rig, sid),
+            Some(DYN_DEST),
+            "a POST-CAS abort does not un-re-home the session (the commit already happened)"
+        );
+        // RLM 5f-4e (the relocated-blind-window fix): the abort ALSO closed the DEMOTING SOURCE sub in
+        // lock-step with releasing its claim, so a straggler source frame can never hit an
+        // unroutable-but-still-subscribed node. One sweep tick later the drained source sub is gone.
+        let _ = rig.tick(vec![]);
+        assert!(
+            sub_for(&rig, sid, HOME).is_none(),
+            "the demoting source sub was closed at the abort and swept, not left dangling on an un-routed node"
+        );
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "and the exit drains the survivor — balanced"
+        );
+    }
+
+    #[test]
+    fn a_bye_inside_the_demote_tail_returns_the_stashed_source_claim_too() {
+        // THE THIRD ROLE AT THE SESSION EXIT. A client that quits between `CommitAuthority` and
+        // `ReleaseSubscribe` leaves NO terminal to run, so the ONE exit primitive must hand back all THREE
+        // roles (home + crossing dest + demoting source) or a demand-spawned source is pinned forever.
+        let mut rig = dynamic_rig();
+        let sid = dynamic_active_on_home(&mut rig, CLIENT);
+        let _ = cross_to(&mut rig, sid, XFER, DYN_DEST);
+        assert_eq!(roster(&rig), BTreeMap::from([(HOME, 1), (DYN_DEST, 2)]));
+        let bye = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert!(
+            saw_detach(&bye, DYN_DEST, sid),
+            "the detach follows authority to the dest"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "all three roles released at the ONE exit — nothing pinned, nothing double-released"
+        );
+    }
+
+    #[test]
+    fn a_second_prepare_inside_the_demote_tail_hands_back_the_displaced_source_claim() {
+        // THE DEFENSIVE REPLACE. A second `PrepareSubscribe` OVERWRITES the progress, and the replacement
+        // starts `demoting_home: None` — so unless the DISPLACED progress's stash is handed back alongside
+        // its displaced dest, the first crossing's source is stranded with no holder left able to name it.
+        let mut rig = dynamic_rig();
+        let sid = dynamic_active_on_home(&mut rig, CLIENT);
+        let _ = cross_to(&mut rig, sid, XFER, DYN_DEST);
+        assert_eq!(roster(&rig), BTreeMap::from([(HOME, 1), (DYN_DEST, 2)]));
+        // A DIFFERENT transfer (so the redelivery gate does not absorb it) naming a THIRD node.
+        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
+            transfer: XFER2,
+            session: sid,
+            dest: DYN_DEST2,
+        })]);
+        assert_eq!(
+            demoting_home_of(&rig, sid),
+            None,
+            "the replacement progress is demoting nothing of its own"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1), (DYN_DEST2, 1)]),
+            "the displaced dest AND the displaced source both went back; the new dest was claimed"
+        );
+        let _ = rig.tick(vec![saga_cmd(TransferControl::AbortTransfer {
+            transfer: XFER2,
+            session: sid,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1)]),
+            "the second crossing's terminal drains its dest (its own stash was None — the no-op arm)"
+        );
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::new(),
+            "and the exit drains the home role — fully balanced"
+        );
+    }
+
+    #[test]
+    fn a_redelivered_commit_neither_re_claims_the_dest_nor_clobbers_the_stash() {
+        // THE AT-LEAST-ONCE GUARD ON THE STASH. If a redelivered `CommitAuthority` re-entered
+        // `apply_commit`, `home_shard.replace(dest)` would return `Some(dest)` — overwriting the stash with
+        // the DEST, stranding the real source's claim — and would claim the dest a THIRD time. The
+        // applied-steps journal gate absorbs the redelivery BEFORE any effect, so both stay exact.
+        let mut rig = dynamic_rig();
+        let sid = dynamic_active_on_home(&mut rig, CLIENT);
+        let first = cross_to(&mut rig, sid, XFER, DYN_DEST);
+        let again = rig.tick(vec![saga_cmd(TransferControl::CommitAuthority {
+            transfer: XFER,
+            session: sid,
+            new_fence: Fence(2),
+            subject: XFER_SUBJECT,
+        })]);
+        assert_eq!(
+            acks_to_orch(&again),
+            acks_to_orch(&first),
+            "the redelivery re-served the recorded Committed verbatim"
+        );
+        assert_eq!(
+            demoting_home_of(&rig, sid),
+            Some(HOME),
+            "and left the stash naming the REAL source, never the dest"
+        );
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(HOME, 1), (DYN_DEST, 2)]),
+            "with no third claim on the dest"
+        );
+        // The proof the held claim is still the SOURCE's: the terminal drains HOME to nothing.
+        let _ = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
+            transfer: XFER,
+            session: sid,
+            src: HOME,
+        })]);
+        assert_eq!(
+            roster(&rig),
+            BTreeMap::from([(DYN_DEST, 1)]),
+            "the tail returned exactly the source claim (a clobbered stash would leave HOME pinned)"
+        );
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        assert_eq!(roster(&rig), BTreeMap::new());
     }
 }
