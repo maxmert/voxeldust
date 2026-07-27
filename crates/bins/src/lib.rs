@@ -180,6 +180,15 @@ pub const GALAXY_SEED: u64 = 1;
 /// The [`ClusterShape::Forest`] realm-shards host `Planet(FOREST_CHILD_SEED)` etc.
 pub const FOREST_CHILD_SEED: u64 = 7;
 
+/// RLM RG-4 — the deterministic port band a [`Demand`](ClusterShape::Demand) cluster mints its
+/// demand-spawned shards' QUIC + probe + admin ports from (`VD_RLM_FIRST_PORT`/`VD_RLM_PORT_LIMIT`). The
+/// spawner mints ports deterministically off `first_port` (the k-th spawn's probe = `first_port + 2k + 1`)
+/// for crash-recovery determinism, so it needs a FIXED band, not OS-assigned ports. Chosen ABOVE the
+/// `rlm_kill9` bands (42000–45000) so the two process-tier test binaries never collide when run in parallel.
+pub const RLM_DEMAND_FIRST_PORT: u32 = 45_000;
+/// The exclusive upper bound of [`RLM_DEMAND_FIRST_PORT`]'s band (1000 ports ⇒ ~500 demand shards).
+pub const RLM_DEMAND_PORT_LIMIT: u32 = 46_000;
+
 /// The TOPOLOGY shape of a dev cluster — how many stub shards it spawns. A DATA value the shared env
 /// builders fan out on (booking extra peers / rosters), NOT a shard-kind match in a feature (HR3): every
 /// spawned shard runs the SAME `vd-shard` binary; the shape only says which node ids are in the roster.
@@ -195,12 +204,18 @@ pub const FOREST_CHILD_SEED: u64 = 7;
 ///   `VD_HELD_REALMS` co-hosting — EVERY re-home (including into a System-7 child) is a uniform CROSS-NODE
 ///   saga, so the source==dest degenerate case never arises. This is the shape the node-per-realm walk gate
 ///   (`crates/bins/tests/node_per_realm_walk.rs`) + the `crossing-playground.sh` launcher stand up.
+/// - [`Demand`](ClusterShape::Demand): RLM RG-4 — orchestrator + gateway ONLY, with NO shard pre-booked. The
+///   ONLY way a player reaches a world is the armed demand reconciler spinning one up on the fly at login
+///   (`VD_DEMAND=1`, mutually exclusive with the static forest). The gateway reaches that just-spawned shard
+///   with NO pre-booked address via the reactive greeting (RG-0..3). This is the shape the demand-login e2e
+///   (`crates/bins/tests/rlm_demand_login.rs`) stands up; the launcher's `up --demand` is deferred.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClusterShape {
     Single,
     Dual,
     Triple,
     Forest,
+    Demand,
 }
 
 /// ONE extra realm-shard beyond the base orchestrator+gateway+System-7 trio: its roster [`NodeId`], the
@@ -224,6 +239,14 @@ impl ClusterShape {
     #[must_use]
     pub fn has_dest(self) -> bool {
         matches!(self, ClusterShape::Dual | ClusterShape::Triple)
+    }
+
+    /// RLM RG-4: is this the DEMAND shape (orchestrator + gateway only, the reconciler armed, NO static
+    /// shard)? The `*_env` builders fan out on this to emit `VD_DEMAND` + drop `VD_STATIC_FOREST`/the booked
+    /// shard — data, not a shard-KIND branch. `false` for every static shape (byte-identical).
+    #[must_use]
+    pub fn is_demand(self) -> bool {
+        matches!(self, ClusterShape::Demand)
     }
 
     /// Does this shape spawn the [`GALAXY`] between-space shard (System 1) via the Triple wiring? Only
@@ -354,6 +377,15 @@ pub struct DevClusterParams {
     pub input_log_cap: u32,
     pub realm_recheck: u64,
     pub snapshot_budget: u32,
+    /// RLM RG-4 (demand cluster): the predictive AoI horizon (`VD_BOOT_TICKS_P99`) — how far ahead a
+    /// demand-spawned shard warms a child realm BEFORE an occupant reaches it, AND the orchestrator's own
+    /// RLM-tuning read. 0 ⇒ reactive-only (spin up on arrival — the login IS the trigger); a visual walk-in
+    /// bumps it. Emitted ONLY by the [`Demand`](ClusterShape::Demand) arm; absent (⇒ shard default) elsewhere.
+    pub boot_ticks_p99: u64,
+    /// RLM RG-4 (demand cluster): the universe seed (`VD_UNIVERSE_SEED`) the orchestrator + every
+    /// demand-spawned shard generate their realm forest from. 0 = the default Walk-scale forest (the seed the
+    /// shard bin already defaults to), so a demand cluster's forest matches the static clusters' byte-for-byte.
+    pub universe_seed: u64,
 }
 
 /// The standard dev-cluster parameters (fast ticks for snappy bring-up).
@@ -377,6 +409,8 @@ pub const DEV: DevClusterParams = DevClusterParams {
     input_log_cap: 4096,
     realm_recheck: 0,
     snapshot_budget: 1100,
+    boot_ticks_p99: 0, // reactive-only in dev (the login is the demand trigger); a visual walk-in bumps it.
+    universe_seed: 0,  // the default Walk-scale forest (matches the shard bin's VD_UNIVERSE_SEED default).
 };
 
 /// DEST-REALM-DISTINCT (compile-time, Track R / 1d.2): the DEST realm MUST differ from the source
@@ -889,6 +923,59 @@ pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, S
     ]
 }
 
+/// RLM RG-4: the shard-spawn boot anchors a DEMAND orchestrator carries in its OWN env — the 5 must-parse
+/// params a forked shard consumes inside `spawn_realm` (a shard refuses to boot without them). The
+/// orchestrator's [`spawn_anchors_from_env`] harvest forwards each to every demand-spawned child. In a static
+/// cluster these already ride each shard's [`shard_env`]; a demand orchestrator has NO static shard, so it
+/// must carry them itself. (`VD_TRUST_DIR`/`VD_TICK_HZ`/`VD_OUTBOUND_CAP` already ride [`common_env`], and the
+/// seed + boot horizon ride the demand orchestrator arm directly — see [`orchestrator_env`].)
+#[must_use]
+pub fn shard_spawn_anchor_env(p: &DevClusterParams) -> Vec<(&'static str, String)> {
+    vec![
+        str_pair("VD_TICK_DT", p.tick_dt),
+        str_pair("VD_SPEED", p.move_speed),
+        str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
+        str_pair("VD_MINT_SEED", p.mint_seed),
+        str_pair("VD_INPUT_LOG_CAP", p.input_log_cap),
+    ]
+}
+
+/// RLM RG-4 — the DEMAND orchestrator's env: orchestrator + gateway ONLY. NO static shard is booked (the
+/// only shard is demand-spawned at runtime), NO `VD_STATIC_FOREST` and NO `VD_ROSTER` (nothing static to
+/// re-home onto), and the reconciler is ARMED (`VD_DEMAND=1`, mutually exclusive with the static forest). It
+/// carries every [`shard_spawn_anchor_env`] param + the universe seed + the predictive boot horizon + the RLM
+/// port band in its OWN env, so its [`spawn_anchors_from_env`] harvest can boot a demand-spawned shard the
+/// gateway then reaches with NO pre-booked address via the reactive greeting (RG-0..3).
+fn demand_orchestrator_env(
+    a: &ClusterAddrs,
+    p: &DevClusterParams,
+    store_path: &str,
+) -> Vec<(&'static str, String)> {
+    let mut env = vec![
+        str_pair("VD_NODE_ID", ORCH.0),
+        str_pair("VD_BIND", a.orchestrator),
+        ("VD_PEERS", book(&[(GATEWAY, a.gateway)])), // NO shard — it does not exist until demand spawns it.
+        str_pair("VD_EPOCH", p.epoch),
+        str_pair("VD_RESERVE_CHUNK", p.reserve_chunk),
+        ("VD_CLOCK_PEERS", GATEWAY.0.to_string()), // drive the universe clock to the gateway (the one booked follower).
+        str_pair("VD_LEASE_TTL", p.lease_ttl),
+        str_pair("VD_ADMIN_ADDR", a.admin),
+        str_pair("VD_PROBE_ADDR", a.orchestrator_probe),
+        ("VD_STORE_PATH", store_path.to_owned()),
+        ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
+        // ARM the reconciler. NO VD_STATIC_FOREST (the XOR gate the bin fail-loud-checks): an armed sweep atop
+        // externally pre-spawned static heads would reap them (they carry no demand cell).
+        ("VD_DEMAND", "1".to_owned()),
+        str_pair("VD_UNIVERSE_SEED", p.universe_seed),
+        str_pair("VD_BOOT_TICKS_P99", p.boot_ticks_p99),
+        str_pair("VD_RLM_FIRST_PORT", RLM_DEMAND_FIRST_PORT),
+        str_pair("VD_RLM_PORT_LIMIT", RLM_DEMAND_PORT_LIMIT),
+    ];
+    // The 5 shard-spawn anchors the orchestrator's harvest forwards to every demand-spawned child.
+    env.extend(shard_spawn_anchor_env(p));
+    env
+}
+
 /// The orchestrator's node-specific env (directory + clock + admin + the D-6 durable Store). `store_path`
 /// is the redb file location (REQUIRED by the bin — no in-memory fallback). Dev/test clusters store under a
 /// $TMPDIR work dir cleaned by `down`, so this also sets `VD_STORE_EPHEMERAL_OK` to clear the bin's HR1
@@ -900,6 +987,11 @@ pub fn orchestrator_env(
     store_path: &str,
     shape: ClusterShape,
 ) -> Vec<(&'static str, String)> {
+    // RLM RG-4: the demand cluster is a wholly different roster (orchestrator + gateway only) — not the static
+    // fan-out below, which always books a shard + marks VD_STATIC_FOREST.
+    if shape.is_demand() {
+        return demand_orchestrator_env(a, p, store_path);
+    }
     // Track R / 1d.2 + S5b: in a MULTI-shard cluster the orchestrator INITIATES realm-grants / re-home to
     // every extra shard, so it books them AND drives the universe clock to each (a follower whose clock
     // never advances can never win its realm lease — the harness `clock_peers = {GW, SHARD, [DEST,
@@ -967,6 +1059,39 @@ pub fn orchestrator_env(
     env
 }
 
+/// RLM RG-4 — the DEMAND gateway's env. Books ONLY the orchestrator + its dev-control clients — NO shard,
+/// because the home shard is demand-spawned at runtime and the gateway learns its return connection via the
+/// reactive greeting (RG-0..3), never a pre-booked address. `VD_DEMAND=1` arms the gateway's dynamic-home
+/// login route (a login emits a `RealmDemand`, waits for the just-spawned home head, and routes to the
+/// dynamically-minted node). `VD_SHARD` stays [`SHARD`] as the login-home DEFAULT id — the dynamic-home
+/// resolve supersedes it per-login, but the bin still parses the key.
+fn demand_gateway_env(
+    a: &ClusterAddrs,
+    clients: &[(NodeId, SocketAddr)],
+    auth_pubkey_hex: &str,
+    p: &DevClusterParams,
+) -> Vec<(&'static str, String)> {
+    let mut peers = vec![(ORCH, a.orchestrator)]; // NO shard booked — the reactive greeting learns it.
+    peers.extend_from_slice(clients);
+    let mut env = vec![
+        str_pair("VD_NODE_ID", GATEWAY.0),
+        str_pair("VD_BIND", a.gateway),
+        ("VD_PEERS", book(&peers)),
+        str_pair("VD_ORCH", ORCH.0),
+        str_pair("VD_SHARD", SHARD.0),
+        ("VD_AUTH_PUBKEY", auth_pubkey_hex.to_owned()),
+        str_pair("VD_SESSION_SEED", p.session_seed),
+        str_pair("VD_MAX_SESSIONS", p.max_sessions),
+        str_pair("VD_MAX_BUFFERED_INPUTS", p.max_buffered_inputs),
+        str_pair("VD_PROBE_ADDR", a.gateway_probe),
+        ("VD_DEMAND", "1".to_owned()), // arm the dynamic-home login route + the trusted seed injector.
+    ];
+    if let Some(admin) = a.gateway_admin {
+        env.push(str_pair("VD_ADMIN_ADDR", admin));
+    }
+    env
+}
+
 /// The gateway's node-specific env. `clients` are seeded into the gateway's peer
 /// book so it can route snapshots BACK to each dev-control client (the mesh dials
 /// by address book; a missing client entry = the gateway can never reach it).
@@ -978,6 +1103,10 @@ pub fn gateway_env(
     p: &DevClusterParams,
     shape: ClusterShape,
 ) -> Vec<(&'static str, String)> {
+    // RLM RG-4: the demand gateway books no static shard — a wholly different roster from the static fan-out.
+    if shape.is_demand() {
+        return demand_gateway_env(a, clients, auth_pubkey_hex, p);
+    }
     // Track R / 1d.2 + S5b: in a MULTI-shard cluster the gateway must BOOK every extra shard (to route a
     // transferred client's inputs / cut-drains onto it — the durable session-route swap at
     // `CommitAuthority` migrates the route to each successive source shard, so ALL of them must be
@@ -3379,6 +3508,96 @@ mod incarnation_tests {
     /// Look up a key's value in a rendered env vec (None if absent).
     fn env_value<'a>(env: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
         env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str())
+    }
+
+    // ---- RLM RG-4b: the DEMAND cluster env ------------------------------------------------------
+    #[test]
+    fn demand_orchestrator_env_arms_the_reconciler_and_books_no_shard() {
+        let a = dual_addrs();
+        let d = orchestrator_env(&a, &DEV, "store", ClusterShape::Demand);
+        // ARMED, and NOT the static forest (the exact XOR misconfig the bin fail-loud-rejects).
+        assert_eq!(env_value(&d, "VD_DEMAND"), Some("1"));
+        assert_eq!(env_value(&d, "VD_STATIC_FOREST"), None);
+        assert_eq!(env_value(&d, "VD_ROSTER"), None);
+        // The gateway is the ONLY booked peer + clock follower — NO shard exists until demand spawns one.
+        assert_eq!(
+            env_value(&d, "VD_PEERS"),
+            Some(format!("{}={}", GATEWAY.0, a.gateway)).as_deref()
+        );
+        assert_eq!(
+            env_value(&d, "VD_CLOCK_PEERS"),
+            Some(GATEWAY.0.to_string()).as_deref()
+        );
+        // It carries the seed + boot horizon + RLM port band + the 5 shard-spawn anchors its harvest forwards.
+        assert_eq!(
+            env_value(&d, "VD_UNIVERSE_SEED"),
+            Some(DEV.universe_seed.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&d, "VD_BOOT_TICKS_P99"),
+            Some(DEV.boot_ticks_p99.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&d, "VD_RLM_FIRST_PORT"),
+            Some(RLM_DEMAND_FIRST_PORT.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&d, "VD_RLM_PORT_LIMIT"),
+            Some(RLM_DEMAND_PORT_LIMIT.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&d, "VD_TICK_DT"),
+            Some(DEV.tick_dt.to_string()).as_deref()
+        );
+        assert_eq!(
+            env_value(&d, "VD_MINT_SEED"),
+            Some(DEV.mint_seed.to_string()).as_deref()
+        );
+    }
+
+    #[test]
+    fn demand_gateway_env_arms_dynamic_home_and_books_no_shard() {
+        let a = dual_addrs();
+        let clients = [(NodeId(30), loopback(9100))];
+        let g = gateway_env(&a, &clients, "pub", &DEV, ClusterShape::Demand);
+        assert_eq!(env_value(&g, "VD_DEMAND"), Some("1"));
+        // VD_SHARD stays the login-home DEFAULT id, but SHARD is NOT booked in VD_PEERS.
+        assert_eq!(env_value(&g, "VD_SHARD"), Some(SHARD.0.to_string()).as_deref());
+        let peers = env_value(&g, "VD_PEERS").expect("peers");
+        assert!(
+            !peers.contains(&format!("{}={}", SHARD.0, a.shard)),
+            "no static shard booked: {peers}"
+        );
+        assert!(
+            peers.contains(&format!("{}={}", ORCH.0, a.orchestrator)),
+            "the orchestrator is booked: {peers}"
+        );
+        assert!(
+            peers.contains(&format!("{}={}", 30, loopback(9100))),
+            "the dev-control client is booked: {peers}"
+        );
+        // No static-shard roster key (there are no static shards).
+        assert_eq!(env_value(&g, "VD_KNOWN_SHARDS"), None);
+    }
+
+    #[test]
+    fn demand_gateway_env_emits_admin_addr_only_when_booked() {
+        let mut a = dual_addrs();
+        assert_eq!(
+            env_value(
+                &gateway_env(&a, &[], "pub", &DEV, ClusterShape::Demand),
+                "VD_ADMIN_ADDR"
+            ),
+            None
+        );
+        a.gateway_admin = Some(loopback(9099));
+        assert_eq!(
+            env_value(
+                &gateway_env(&a, &[], "pub", &DEV, ClusterShape::Demand),
+                "VD_ADMIN_ADDR"
+            ),
+            Some(loopback(9099).to_string()).as_deref()
+        );
     }
 
     #[test]

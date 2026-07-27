@@ -507,6 +507,11 @@ fn admin_ready(admin_port: u16, shape: ClusterShape) -> bool {
         ClusterShape::Dual | ClusterShape::Triple | ClusterShape::Forest => {
             snap.realms_present(&expected_realms(shape))
         }
+        // RLM RG-4: a demand cluster stands up with NO static realm to wait for — readiness is just the
+        // orchestrator bootstrapped (directory + clock up); its shards spin up later, on login demand. The
+        // launcher's `up --demand` is deferred, so this arm is unreached via `up` (the RG-4c e2e builds the
+        // demand env directly), but the readiness predicate is well-defined for when it lands.
+        ClusterShape::Demand => snap.cluster_bootstrapped(),
     }
 }
 
