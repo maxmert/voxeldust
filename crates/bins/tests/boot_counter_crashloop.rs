@@ -110,6 +110,7 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
         gateway,
         shard,
         admin: admin_addr,
+        gateway_admin: None,
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),

@@ -177,6 +177,7 @@ fn p1_parity_real_binaries_over_quic() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
+        gateway_admin: None,
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),

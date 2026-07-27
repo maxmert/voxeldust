@@ -76,6 +76,7 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
+        gateway_admin: None,
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),

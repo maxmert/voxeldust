@@ -200,6 +200,7 @@ fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fe
         gateway: reserve_udp_addr(),
         shard: reserve_udp_addr(),
         admin: admin_addr,
+        gateway_admin: None,
         orchestrator_probe: reserve_tcp_addr(),
         gateway_probe: reserve_tcp_addr(),
         shard_probe: reserve_tcp_addr(),

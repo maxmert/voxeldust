@@ -117,6 +117,28 @@ pub fn spawn_probe_server(
     });
 }
 
+/// RLM RG-4: spawn the read-only admin HTTP endpoint (`/admin/snapshot` + `/metrics`) on `addr` — the
+/// orchestrator's + gateway's 2am `curl`. Mirrors [`spawn_probe_server`]: a detached task that binds then
+/// serves forever, and a bind failure is a LOUD panic (a mis-set `VD_ADMIN_ADDR` must not boot silently
+/// un-observable). ONE helper both bins call — the `snapshot` source is a lock-free cell the sim thread
+/// republishes after every tick (a `curl` never touches the sim thread) and `metrics` is a pure atomic load
+/// off the live mesh.
+pub fn spawn_admin_server(
+    runtime: &tokio::runtime::Handle,
+    addr: SocketAddr,
+    snapshot: std::sync::Arc<dyn vd_io_prod::admin::SnapshotSource>,
+    metrics: std::sync::Arc<dyn vd_io_prod::admin::MetricsSource>,
+) {
+    runtime.spawn(async move {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .unwrap_or_else(|e| panic!("admin server failed to bind {addr}: {e}"));
+        axum::serve(listener, vd_io_prod::admin::admin_router(snapshot, metrics))
+            .await
+            .expect("admin server");
+    });
+}
+
 // ---- node roster -------------------------------------------------------------
 
 /// The fixed P1 node identities. ONE definition for the launcher + parity test.
@@ -503,6 +525,12 @@ pub struct ClusterAddrs {
     pub gateway: SocketAddr,
     pub shard: SocketAddr,
     pub admin: SocketAddr,
+    /// RLM RG-4 — the GATEWAY's read-only admin HTTP bind (the gateway analogue of [`admin`](Self::admin),
+    /// which is the orchestrator's). `Some` ONLY where a cluster wants the gateway's `/admin/snapshot`
+    /// (`GatewayView`) + `/metrics` scrapeable — the [`Demand`](ClusterShape::Demand) cluster and every cloud
+    /// pod. `None` everywhere else keeps [`gateway_env`] from emitting `VD_ADMIN_ADDR`, so existing
+    /// Single/Dual/Triple/Forest clusters are byte-identical (no extra port bound).
+    pub gateway_admin: Option<SocketAddr>,
     /// The k8s /healthz+/readyz probe listeners (S3) — one per node (each needs its own kubelet-reachable
     /// port). Named fields (no offset math), matching the existing style.
     pub orchestrator_probe: SocketAddr,
@@ -731,6 +759,23 @@ pub fn resolve_probe(
     };
     tuning.validate()?;
     Ok(Some((addr, tuning)))
+}
+
+/// RLM RG-4: resolve the admin HTTP bind, or `None` if `VD_ADMIN_ADDR` is unset or empty (every
+/// in-process/parity rig stays byte-identical until it opts in; the demand cluster + every cloud pod set it).
+/// Twin of [`resolve_probe`] — a different concern (a read-only observability endpoint, no inert/split-brain
+/// hazard), meaningful in DevTest too (the demand-login e2e curls the gateway's snapshot).
+///
+/// # Errors
+/// A malformed `VD_ADMIN_ADDR`.
+pub fn resolve_admin(env: &EnvConfig) -> Result<Option<SocketAddr>, Box<dyn std::error::Error>> {
+    let Ok(addr_str) = env.string("VD_ADMIN_ADDR") else {
+        return Ok(None);
+    };
+    if addr_str.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(env.parse("VD_ADMIN_ADDR")?))
 }
 
 pub fn boot_mesh_and_replay(
@@ -973,6 +1018,11 @@ pub fn gateway_env(
         str_pair("VD_MAX_BUFFERED_INPUTS", p.max_buffered_inputs),
         str_pair("VD_PROBE_ADDR", a.gateway_probe),
     ];
+    // RLM RG-4: the gateway publishes its /admin/snapshot (GatewayView) ONLY where the cluster booked an
+    // admin bind (the Demand cluster + cloud pods). `None` ⇒ no VD_ADMIN_ADDR ⇒ byte-identical.
+    if let Some(admin) = a.gateway_admin {
+        env.push(str_pair("VD_ADMIN_ADDR", admin));
+    }
     if !extra_shards.is_empty() {
         // The gateway bin unions this into `known_shards` over the login `shard` (via `node_list`), so the
         // routable-shard roster is {SHARD, DEST[, GALAXY]} — every shard's frames are node-class dispatchable.
@@ -2616,6 +2666,32 @@ mod incarnation_tests {
         assert!(resolve_presence(&e, 0.02).is_err());
     }
 
+    // ---- RLM RG-4a4: the admin HTTP bind resolver -----------------------------------------------
+    #[test]
+    fn resolve_admin_is_none_when_unset_or_empty() {
+        // Unset ⇒ None (byte-identical: no admin server binds). An explicitly EMPTY value is also None
+        // (a ConfigMap that sets VD_ADMIN_ADDR="" must not try to bind "").
+        assert!(resolve_admin(&env(&[])).expect("ok").is_none());
+        assert!(
+            resolve_admin(&env(&[("VD_ADMIN_ADDR", "   ")]))
+                .expect("ok")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_admin_parses_a_socket_addr() {
+        let a = resolve_admin(&env(&[("VD_ADMIN_ADDR", "127.0.0.1:9099")]))
+            .expect("ok")
+            .expect("some");
+        assert_eq!(a, "127.0.0.1:9099".parse().expect("addr"));
+    }
+
+    #[test]
+    fn resolve_admin_rejects_a_malformed_addr() {
+        assert!(resolve_admin(&env(&[("VD_ADMIN_ADDR", "not-an-addr")])).is_err());
+    }
+
     #[test]
     fn validate_tick_pair_accepts_matched_rejects_drift() {
         // Matched: 50 Hz ⇔ 0.02 s.
@@ -3283,6 +3359,7 @@ mod incarnation_tests {
             gateway: loopback(9002),
             shard: loopback(9003),
             admin: loopback(9004),
+            gateway_admin: None,
             orchestrator_probe: loopback(9005),
             gateway_probe: loopback(9006),
             shard_probe: loopback(9007),
