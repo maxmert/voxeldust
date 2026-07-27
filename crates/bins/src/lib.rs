@@ -967,6 +967,13 @@ fn demand_orchestrator_env(
         // externally pre-spawned static heads would reap them (they carry no demand cell).
         ("VD_DEMAND", "1".to_owned()),
         str_pair("VD_UNIVERSE_SEED", p.universe_seed),
+        // RLM demand-walk: a demand cluster is a WALK-DEMAND cluster — walk geometry with the AoI band LIVE, so
+        // a MOVING occupant's `evaluate_realm_aoi` emits SpinUp/Empty as it approaches/leaves a child realm
+        // (the whole point of the demand loop). `spawn_anchors_from_env` forwards this to every demand-spawned
+        // shard (VD_SPEED + VD_TICK_DT — the band's occupant-speed/tick inputs — already ride the anchors). A
+        // STATIONARY login (rlm_demand_login) is unaffected: the occupant sits at the home origin, nowhere near
+        // a child's spin-up band, so it emits no spurious demand.
+        ("VD_UNIVERSE_SCALE", "walk-demand".to_owned()),
         str_pair("VD_BOOT_TICKS_P99", p.boot_ticks_p99),
         str_pair("VD_RLM_FIRST_PORT", RLM_DEMAND_FIRST_PORT),
         str_pair("VD_RLM_PORT_LIMIT", RLM_DEMAND_PORT_LIMIT),
@@ -3576,6 +3583,9 @@ mod incarnation_tests {
             env_value(&d, "VD_UNIVERSE_SEED"),
             Some(DEV.universe_seed.to_string()).as_deref()
         );
+        // Demand-walk: the demand cluster arms LIVE AoI (walk geometry + live band) so a MOVING occupant's
+        // evaluate_realm_aoi emits SpinUp/Empty as it approaches/leaves a child realm.
+        assert_eq!(env_value(&d, "VD_UNIVERSE_SCALE"), Some("walk-demand"));
         assert_eq!(
             env_value(&d, "VD_BOOT_TICKS_P99"),
             Some(DEV.boot_ticks_p99.to_string()).as_deref()
