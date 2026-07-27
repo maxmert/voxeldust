@@ -13,6 +13,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use axum::Json;
 use axum::extract::State;
 use axum::routing::get;
@@ -32,6 +33,19 @@ pub struct FixedSnapshot(pub AdminSnapshot);
 impl SnapshotSource for FixedSnapshot {
     fn snapshot(&self) -> AdminSnapshot {
         self.0.clone()
+    }
+}
+
+/// A LIVE source backed by a lock-free cell the sim thread republishes after every tick (RLM RG-4). The
+/// HTTP scrape task holds `Arc<PublishedSnapshot>` and only ever `load()`s — it never touches the sim
+/// thread, so a slow `curl` cannot stall a tick. Both the orchestrator (directory/saga/lease view) and the
+/// gateway (session/dynamic-shard view) publish through this ONE type — a bin that grew its own private
+/// `Published` would drift from this contract.
+pub struct PublishedSnapshot(pub Arc<ArcSwap<AdminSnapshot>>);
+
+impl SnapshotSource for PublishedSnapshot {
+    fn snapshot(&self) -> AdminSnapshot {
+        self.0.load().as_ref().clone()
     }
 }
 
@@ -58,6 +72,10 @@ pub struct MetricValues {
     pub gap_drop: u64,
     pub reliable_shed: u64,
     pub reliable_acked: u64,
+    /// CA-1 (RLM RG-4): unbooked dial-in peers dropped because the learned-peer table was at capacity —
+    /// the reactive-greeting mesh's shed-loud counter. A nonzero value means a demand shard's return
+    /// connection was refused; on a cloud tier it is the signal to raise the learned-peer cap.
+    pub learned_peers_rejected: u64,
 }
 
 /// The LIVE mesh metrics source: reads [`MeshControl::stats`] per scrape (a pure atomic
@@ -79,6 +97,7 @@ impl MetricsSource for MeshMetrics {
             gap_drop: s.gap_drop,
             reliable_shed: s.reliable_shed,
             reliable_acked: s.reliable_acked,
+            learned_peers_rejected: s.learned_peers_rejected,
         }
     }
 }
@@ -138,8 +157,9 @@ pub fn render_metrics(values: &MetricValues) -> String {
         gap_drop,
         reliable_shed,
         reliable_acked,
+        learned_peers_rejected,
     } = *values;
-    let live: [(&str, u64); 10] = [
+    let live: [(&str, u64); 11] = [
         (
             metric_names::DATAGRAMS_DROPPED_TOO_LARGE,
             datagrams_dropped_too_large,
@@ -165,6 +185,10 @@ pub fn render_metrics(values: &MetricValues) -> String {
         (metric_names::GAP_DROP_TOTAL, gap_drop),
         (metric_names::RELIABLE_SHED_TOTAL, reliable_shed),
         (metric_names::RELIABLE_ACKED_TOTAL, reliable_acked),
+        (
+            metric_names::LEARNED_PEERS_REJECTED_TOTAL,
+            learned_peers_rejected,
+        ),
     ];
     let mut out = String::new();
     for name in metric_names::ALL {
@@ -249,6 +273,30 @@ mod tests {
     }
 
     #[test]
+    fn a_published_snapshot_serves_the_latest_republished_cell() {
+        // RLM RG-4: the live source a bin republishes after every tick. A read sees whatever the sim thread
+        // last stored — so a `curl` after tick N observes tick N's snapshot, never a stale clone.
+        let cell = Arc::new(ArcSwap::from_pointee(AdminSnapshot::shaped_empty(
+            UniverseTick(1),
+            EpochId(2),
+        )));
+        let source = PublishedSnapshot(Arc::clone(&cell));
+        assert_eq!(
+            source.snapshot(),
+            AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(2))
+        );
+        cell.store(Arc::new(AdminSnapshot::shaped_empty(
+            UniverseTick(9),
+            EpochId(2),
+        )));
+        assert_eq!(
+            source.snapshot(),
+            AdminSnapshot::shaped_empty(UniverseTick(9), EpochId(2)),
+            "the read reflects the republished cell, not the boot snapshot"
+        );
+    }
+
+    #[test]
     fn metrics_endpoint_exposes_every_registered_name_and_live_values() {
         let (head, body) = http_get("/metrics");
         assert!(head.starts_with("HTTP/1.1 200"), "got: {head}");
@@ -283,6 +331,7 @@ mod tests {
             gap_drop: 8,
             reliable_shed: 9,
             reliable_acked: 10,
+            learned_peers_rejected: 11,
         });
         assert!(out.contains("vd_datagrams_dropped_too_large 1"));
         assert!(out.contains("vd_datagrams_dropped_send_total 2"));
@@ -294,6 +343,7 @@ mod tests {
         assert!(out.contains("vd_gap_drop_total 8"));
         assert!(out.contains("vd_reliable_shed_total 9"));
         assert!(out.contains("vd_reliable_acked_total 10"));
+        assert!(out.contains("vd_learned_peers_rejected_total 11"));
         // The `find`-miss branch: an ALL name with no live pairing renders 0.
         assert!(out.contains("vd_transfers_in_flight 0"));
     }
