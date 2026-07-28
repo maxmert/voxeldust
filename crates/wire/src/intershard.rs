@@ -37,7 +37,9 @@ use serde::{Deserialize, Serialize};
 use vd_core::entity_kind::DurabilityClass;
 use vd_core::pose::{RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
-use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick};
+use vd_core::{
+    AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick,
+};
 
 use crate::seams::directory::{DirectoryKey, DirectoryOp, DirectoryReply};
 use crate::seams::transfer_control::{TransferControl, TransferControlAck};
@@ -268,6 +270,15 @@ pub enum InterShardFlow {
     /// one cadence — a `ReDriven` (the shard re-asserts) `FireAndForget` (carries no idempotency-keyed
     /// effect) flow. APPENDED (preserves every existing postcard discriminant).
     ShardPresence(ShardPresence),
+    /// CHILD → PARENT shard (VU AoI S2a — the occupant-position UP-flow): relay where an observer IS so a
+    /// sealed-off ancestor can cull ITS OWN children (the observer's siblings/cousins) against that position.
+    /// The render-AoI is the union of per-level culls up the containment chain; positions flow DOWN today
+    /// (parents author children's placements), and THIS is the upward counterpart. A pure re-derivable
+    /// POSITION HINT — it carries NO fence and mutates nothing at the parent (the parent authorizes any
+    /// `SpinUp` it emits with its OWN realm fence): `FireAndForget` + `Unreliable` (a 20 Hz latest-wins
+    /// datagram; a lost hint self-heals next tick, like `GhostFlow::Delta`). A DEDICATED infra arm, NOT the
+    /// P9-reserved generic `Signal` bus. APPENDED (preserves every existing postcard discriminant).
+    OccupantInterest(OccupantInterest),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -460,6 +471,11 @@ impl InterShardFlow {
             // transfer trigger or authority-gating state — it is re-derivable (the shard re-greets) and
             // loss-tolerant (a dropped greeting is re-sent next silence cadence) ⇒ FireAndForget.
             InterShardFlow::ShardPresence(_) => EffectClass::FireAndForget,
+            // VU AoI S2a: the occupant-position up-flow mutates NOTHING at the parent (it folds a proxy
+            // occupant into its AoI cull; any `SpinUp` it emits is authorized by its OWN realm fence) and
+            // carries no transfer trigger or authority-gating state — a pure re-derivable position hint,
+            // loss-tolerant (self-heals next tick) ⇒ FireAndForget.
+            InterShardFlow::OccupantInterest(_) => EffectClass::FireAndForget,
         }
     }
 
@@ -531,6 +547,10 @@ impl InterShardFlow {
             // self-heals next cadence — ReDriven, never producer-less (a lost greeting needs no durable
             // outbox; the next re-greet re-teaches the gateway's return connection).
             | InterShardFlow::ShardPresence(_) => FlowDurabilityClass::ReDriven,
+            // VU AoI S2a: the occupant-position up-flow is a 20 Hz latest-wins datagram (like
+            // `GhostFlow::Delta`) — a lost hint self-heals on the next tick's re-assertion, never a durable
+            // outbox burden ⇒ Unreliable (NOT producer-less; the golden pin below still asserts exactly TWO).
+            InterShardFlow::OccupantInterest(_) => FlowDurabilityClass::Unreliable,
         }
     }
 }
@@ -576,6 +596,26 @@ pub struct RealmDemand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardPresence {
     pub local_tick: TickId,
+}
+
+/// The occupant-position up-flow payload (VU AoI S2a) — see [`InterShardFlow::OccupantInterest`]. Carries
+/// ONLY where an observer is, so a sealed ancestor can cull its own children against it; NO fence (the
+/// parent authorizes its own emitted demands with its OWN realm fence — a fence here would make it
+/// authority-gating, forcing `SideEffecting`/reliable and breaking the unreliable-scale premise). Field
+/// order is frozen once shipped (positional postcard).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OccupantInterest {
+    /// The DURABLE player id whose scene this feeds (survives re-home; the gateway maps it to the live
+    /// session for the render-delta route).
+    pub observer: AccountId,
+    /// THIS hop's PARENT realm (`child.parent()`) — the routing key. Its `path()` dedups multi-hop relays.
+    pub to_realm: RealmCoord,
+    /// The observer's pose (position + velocity) expressed in the EMITTER's frame, stamped at its
+    /// `universe_tick`. The parent re-expresses it into its own frame (compose with the child's placement).
+    pub occupant: StampedPose,
+    /// Hops from the observer's home realm (0 at the first parent). Drives the precision ladder: the
+    /// deepest ancestors get the full pose; far ancestors need only the lineage (the coarsening is S3).
+    pub coarsen_level: u8,
 }
 
 /// Orchestrator → SOURCE shard pose-flush request (Slice 1d.1). The source finds the held dot for
@@ -1082,6 +1122,25 @@ mod tests {
             }
         );
         assert_eq!(flow.durability_class(), FlowDurabilityClass::ReDriven);
+    }
+
+    #[test]
+    fn occupant_interest_effect_and_durability_and_round_trips() {
+        // VU AoI S2a — the appended classifier arms (equality, not `matches!`): FireAndForget + Unreliable,
+        // and the postcard roundtrip (a durable observer id, a parent coord, an in-frame pose, a level).
+        let flow = InterShardFlow::OccupantInterest(OccupantInterest {
+            observer: AccountId(5),
+            to_realm: demand_coord(),
+            occupant: pose(),
+            coarsen_level: 2,
+        });
+        assert_eq!(flow.effect_class(), EffectClass::FireAndForget);
+        assert_eq!(flow.durability_class(), FlowDurabilityClass::Unreliable);
+        let bytes = postcard::to_allocvec(&flow).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
+            flow
+        );
     }
 
     /// G-SEALED: every arm has a coherent effect class, and side-effecting arms

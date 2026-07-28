@@ -17,7 +17,9 @@ use vd_core::entity_kind::{DurabilityClass, EntityKind};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
-use vd_core::{EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick};
+use vd_core::{
+    AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick,
+};
 use vd_wire::intershard::{
     EffectClass, FLUSH_SOURCE_STEP, FlowDurabilityClass, FlushSource, GhostFlow, IdempotencyKey,
     InterShardFlow, STUB_CROSSING_STEP, TransferAck, TransferEnvelope, TransferStepRejectReason,
@@ -288,6 +290,15 @@ fn every_arm() -> Vec<InterShardFlow> {
         InterShardFlow::ShardPresence(vd_wire::intershard::ShardPresence {
             local_tick: vd_core::TickId(11),
         }),
+        // VU AoI S2a: the occupant-position up-flow (child → parent). FireAndForget / Unreliable — NOT
+        // producer-less, so the golden pin below still asserts exactly TWO producer-less arms. A durable
+        // `AccountId` observer, a Universe-rooted parent coord, a pose in the emitter's frame.
+        InterShardFlow::OccupantInterest(vd_wire::intershard::OccupantInterest {
+            observer: AccountId(5),
+            to_realm: demand_child_coord(),
+            occupant: pose(),
+            coarsen_level: 0,
+        }),
     ]
 }
 
@@ -332,7 +343,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::CrossingAborted(_)
         | InterShardFlow::CrossingAbortedAck(_)
         | InterShardFlow::RealmDemand(_)
-        | InterShardFlow::ShardPresence(_) => {}
+        | InterShardFlow::ShardPresence(_)
+        | InterShardFlow::OccupantInterest(_) => {}
     }
 }
 
@@ -417,6 +429,9 @@ fn durability_class_pins_the_producer_less_reliable_set() {
                 FlowDurabilityClass::ProducerLessReliable
             }
             InterShardFlow::Ghost(GhostFlow::Delta { .. }) => FlowDurabilityClass::Unreliable,
+            // VU AoI S2a: the occupant-position up-flow is a latest-wins datagram (Unreliable), NOT
+            // producer-less — so the golden `producer_less.len() == 2` pin below is unchanged.
+            InterShardFlow::OccupantInterest(_) => FlowDurabilityClass::Unreliable,
             InterShardFlow::Transfer(env)
                 if matches!(env.payload, TransitionPayload::TransientBatch { .. }) =>
             {
