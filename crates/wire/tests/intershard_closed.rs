@@ -299,6 +299,12 @@ fn every_arm() -> Vec<InterShardFlow> {
             occupant: pose(),
             coarsen_level: 0,
         }),
+        // VU AoI S2c: the parent's sibling-scene reflection DOWN to the home shard. FireAndForget / ReDriven —
+        // reliable but RE-DRIVEN, so the golden pin below still asserts exactly TWO producer-less arms.
+        InterShardFlow::ProxySceneSet(vd_wire::intershard::ProxySceneSet {
+            observer: AccountId(5),
+            realms: vec![],
+        }),
     ]
 }
 
@@ -344,7 +350,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::CrossingAbortedAck(_)
         | InterShardFlow::RealmDemand(_)
         | InterShardFlow::ShardPresence(_)
-        | InterShardFlow::OccupantInterest(_) => {}
+        | InterShardFlow::OccupantInterest(_)
+        | InterShardFlow::ProxySceneSet(_) => {}
     }
 }
 

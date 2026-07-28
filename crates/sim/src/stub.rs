@@ -315,6 +315,11 @@ pub struct RetainedOccupants(pub BTreeMap<AccountId, RetainedOccupant>);
 pub struct RetainedOccupant {
     pub occupant: StampedPose,
     pub last_seen: TickId,
+    /// VU AoI S2c — the HOME shard that relays this occupant (the sender `NodeId` of its `OccupantInterest`,
+    /// provably the shard hosting the dot). The parent reflects the occupant's sibling scene DOWN to here so
+    /// the home shard — which alone knows the client's connection — forwards it (Option C, no leakage). LAST-
+    /// WINS with the pose: a re-home makes the new home relay, overwriting this, and the down-reflect follows.
+    pub home: NodeId,
 }
 
 /// RLM 5f RG-1 — the reactive-greeting policy for a DEMAND-SPAWNED shard. A shard minted at spawn has a
@@ -1677,7 +1682,7 @@ fn process_inbound(
             // A malformed / mis-classed payload is counted as undecodable, never a panic.
             MsgClass::SignalDelta => match postcard::from_bytes::<InterShardFlow>(bytes) {
                 Ok(InterShardFlow::OccupantInterest(oi)) => {
-                    retain_occupant(&mut retained, &config, oi, clock.local_tick, &mut stats);
+                    retain_occupant(&mut retained, &config, oi, clock.local_tick, *from, &mut stats);
                 }
                 _ => stats.undecodable += 1,
             },
@@ -4999,6 +5004,7 @@ fn retain_occupant(
     config: &StubConfig,
     oi: OccupantInterest,
     now: TickId,
+    home: NodeId,
     stats: &mut StubStats,
 ) {
     // Single compare, no compound guard (HR5). `lowered()` matches the directory's own realm key — the
@@ -5008,11 +5014,14 @@ fn retain_occupant(
         return;
     }
     stats.occupant_interest_received += 1;
+    // `home` is the relay's sender NodeId (VU AoI S2c — the down-reflect return address). Overwrites last-wins
+    // with the pose so a re-home (the new home relays) re-targets the down-reflect automatically.
     store.0.insert(
         oi.observer,
         RetainedOccupant {
             occupant: oi.occupant,
             last_seen: now,
+            home,
         },
     );
 }
@@ -12782,28 +12791,37 @@ mod tests {
             occupant: StampedPose::at_rest(cfg.frame, DVec3::new(x, 0.0, 0.0), UniverseTick(t)),
             coarsen_level: 0,
         };
-        // An ON-TARGET relay (to_realm lowers to this shard's realm) ⇒ retained + counted.
+        // An ON-TARGET relay (to_realm lowers to this shard's realm) ⇒ retained + counted; home = the sender.
         retain_occupant(
             &mut store,
             &cfg,
             oi(cfg.own_coord.clone(), 10.0, 1),
             vd_core::TickId(5),
+            NodeId(41),
             &mut stats,
         );
         assert_eq!(store.0.len(), 1);
         assert_eq!(stats.occupant_interest_received, 1);
         assert_eq!(store.0[&AccountId(7)].last_seen, vd_core::TickId(5));
-        // LAST-WINS: the same account, a newer relay ⇒ OVERWRITE (len unchanged, newer pose + last_seen).
+        assert_eq!(store.0[&AccountId(7)].home, NodeId(41));
+        // LAST-WINS: the same account, a newer relay from a DIFFERENT home ⇒ OVERWRITE (newer pose + last_seen
+        // + home — a re-home makes the new home relay, re-targeting the down-reflect).
         retain_occupant(
             &mut store,
             &cfg,
             oi(cfg.own_coord.clone(), 20.0, 2),
             vd_core::TickId(9),
+            NodeId(42),
             &mut stats,
         );
         assert_eq!(store.0.len(), 1);
         assert_eq!(store.0[&AccountId(7)].last_seen, vd_core::TickId(9));
         assert_eq!(store.0[&AccountId(7)].occupant.pos.offset().x, 20.0);
+        assert_eq!(
+            store.0[&AccountId(7)].home,
+            NodeId(42),
+            "a relay from a different home last-wins-overwrites home (re-home re-targets the down-reflect)"
+        );
         assert_eq!(stats.occupant_interest_received, 2);
         // A MIS-ROUTED relay (to_realm lowers to a DIFFERENT realm — a recycled-NodeId mis-delivery) ⇒
         // counted misrouted + DROPPED; the stored entry is untouched.
@@ -12812,6 +12830,7 @@ mod tests {
             &cfg,
             oi(StubConfig::root_coord(RealmId::Planet(99)), 30.0, 3),
             vd_core::TickId(12),
+            NodeId(43),
             &mut stats,
         );
         assert_eq!(store.0.len(), 1, "a mis-routed relay is never retained");
@@ -12873,6 +12892,7 @@ mod tests {
         let mk = |t: u64| RetainedOccupant {
             occupant: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(0)),
             last_seen: vd_core::TickId(t),
+            home: NodeId(0),
         };
         {
             let mut store = rig.world.resource_mut::<RetainedOccupants>();
@@ -12914,8 +12934,12 @@ mod tests {
         rig
     }
 
-    /// Inject an ALIVE retained proxy (last_seen = the rig's current local tick) directly into the parent
-    /// store — the fold input, bypassing the separately-tested receive path for precise positioning.
+    /// The relay-sender (home shard) an injected proxy carries (VU AoI S2c — the down-reflect return address).
+    const HOME_SHARD: NodeId = NodeId(70);
+
+    /// Inject an ALIVE retained proxy (last_seen = the rig's current local tick, home = [`HOME_SHARD`]) directly
+    /// into the parent store — the fold input, bypassing the separately-tested receive path for precise
+    /// positioning.
     fn inject_proxy(rig: &mut Rig, account: AccountId, frame: FrameRef, offset: DVec3) {
         let now = rig.world.resource::<ClockSample>().local_tick;
         rig.world.resource_mut::<RetainedOccupants>().0.insert(
@@ -12923,6 +12947,7 @@ mod tests {
             RetainedOccupant {
                 occupant: StampedPose::at_rest(frame, offset, UniverseTick(100)),
                 last_seen: now,
+                home: HOME_SHARD,
             },
         );
     }
@@ -13002,6 +13027,7 @@ mod tests {
                     UniverseTick(100),
                 ),
                 last_seen: vd_core::TickId(0),
+                home: NodeId(0),
             };
             assert_eq!(proxy_observer(&entry, regions.root_frame(), &ctx), None);
             transfer_frame(&entry.occupant, regions.root_frame(), &ctx)

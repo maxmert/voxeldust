@@ -279,6 +279,17 @@ pub enum InterShardFlow {
     /// datagram; a lost hint self-heals next tick, like `GhostFlow::Delta`). A DEDICATED infra arm, NOT the
     /// P9-reserved generic `Signal` bus. APPENDED (preserves every existing postcard discriminant).
     OccupantInterest(OccupantInterest),
+    /// VU AoI S2c — a PARENT's reflection of one proxy occupant's CURRENT in-range SIBLING set, sent DOWN to
+    /// the home shard that relays the occupant (the up-relay's own return address, so the parent never learns
+    /// the client's connection). The home shard reconciles it into the client render stream it already owns.
+    /// LEVEL-triggered (the FULL current set, not an add/remove edge): the addressed home changes UNDER a
+    /// crossing (a cross-node re-home), so an edge sent there would be delivered-then-dropped; a full set lets
+    /// whoever draws the client's world reconcile to the truth after a hand-off / crash / lost message — the
+    /// same self-healing shape as `RealmDemand`. Carries ONLY public parent-authored `RealmShape` geometry —
+    /// NO NodeId / gateway / session (HR1: the client-connection detail never leaves the home shard).
+    /// `FireAndForget` (no fence, mutates no sim state — render bookkeeping only) + `ReDriven` (reliable; a
+    /// lost set self-heals on the next change, re-sent from the parent's RAM — no durable outbox). APPENDED.
+    ProxySceneSet(ProxySceneSet),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -476,6 +487,9 @@ impl InterShardFlow {
             // carries no transfer trigger or authority-gating state — a pure re-derivable position hint,
             // loss-tolerant (self-heals next tick) ⇒ FireAndForget.
             InterShardFlow::OccupantInterest(_) => EffectClass::FireAndForget,
+            // VU AoI S2c — a public-geometry render reflection; no fence, no transfer trigger, mutates no sim
+            // state at the home (render bookkeeping only). A re-delivered set is idempotent (full-set reconcile).
+            InterShardFlow::ProxySceneSet(_) => EffectClass::FireAndForget,
         }
     }
 
@@ -551,6 +565,10 @@ impl InterShardFlow {
             // `GhostFlow::Delta`) — a lost hint self-heals on the next tick's re-assertion, never a durable
             // outbox burden ⇒ Unreliable (NOT producer-less; the golden pin below still asserts exactly TWO).
             InterShardFlow::OccupantInterest(_) => FlowDurabilityClass::Unreliable,
+            // VU AoI S2c — RELIABLE (a lost set-change would blink a neighbour) but RE-DRIVEN, not
+            // producer-less: on any loss / crash / shed the parent re-sends the full set from its RAM store
+            // and the home reconciles it — no durable outbox (the level full-set IS the recovery).
+            InterShardFlow::ProxySceneSet(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -616,6 +634,20 @@ pub struct OccupantInterest {
     /// Hops from the observer's home realm (0 at the first parent). Drives the precision ladder: the
     /// deepest ancestors get the full pose; far ancestors need only the lineage (the coarsening is S3).
     pub coarsen_level: u8,
+}
+
+/// VU AoI S2c — a parent's LEVEL-triggered reflection of ONE proxy occupant's CURRENT in-range sibling set,
+/// sent DOWN to the home shard that relays the occupant. The home shard diffs `realms` against its per-account
+/// forwarded baseline to derive the client add/remove — so a lost/shed message or a re-home hand-off self-heals
+/// on the next set (an EDGE would be delivered-then-dropped to a route that changes under the crossing). Empty
+/// `realms` = "the proxy's AoI holds no sibling now" ⇒ the home reconciles every forwarded id for the account
+/// to `removed`. PUBLIC parent-authored geometry ONLY — no NodeId / gateway / session (HR1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProxySceneSet {
+    /// The DURABLE traveller id — the SAME key the home shard already streams `RealmSceneDelta` under.
+    pub observer: AccountId,
+    /// The FULL current set of the proxy's in-range sibling outlines (public `RealmShape` geometry).
+    pub realms: Vec<crate::channels::RealmShape>,
 }
 
 /// Orchestrator → SOURCE shard pose-flush request (Slice 1d.1). The source finds the held dot for
@@ -1136,6 +1168,24 @@ mod tests {
         });
         assert_eq!(flow.effect_class(), EffectClass::FireAndForget);
         assert_eq!(flow.durability_class(), FlowDurabilityClass::Unreliable);
+        let bytes = postcard::to_allocvec(&flow).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
+            flow
+        );
+    }
+
+    #[test]
+    fn proxy_scene_set_effect_and_durability_and_round_trips() {
+        // VU AoI S2c — the appended classifier arms (equality, not `matches!`): FireAndForget (public geometry,
+        // no fence, no home-side sim mutation) + ReDriven (reliable, RAM-re-sent — NOT producer-less, so the
+        // golden `producer_less.len() == 2` pin is unchanged). Plus the postcard roundtrip of the new variant.
+        let flow = InterShardFlow::ProxySceneSet(ProxySceneSet {
+            observer: AccountId(5),
+            realms: vec![],
+        });
+        assert_eq!(flow.effect_class(), EffectClass::FireAndForget);
+        assert_eq!(flow.durability_class(), FlowDurabilityClass::ReDriven);
         let bytes = postcard::to_allocvec(&flow).expect("encode");
         assert_eq!(
             postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
