@@ -37,7 +37,7 @@ use vd_core::{
     AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick,
 };
 use vd_wire::channels::{
-    EntitySnap, InputDatagram, RealmSnap, RealmSnapshotDatagram, SnapshotDatagram, SubId,
+    EntitySnap, InputDatagram, RealmShape, RealmSnap, RealmSnapshotDatagram, SnapshotDatagram, SubId,
     partition_entities, partition_realms,
 };
 use vd_wire::intershard::{
@@ -4536,6 +4536,18 @@ fn aoi_decide(
         return;
     }
 
+    // VU AoI S1b — the RENDER route for each DOT observer (a player with a client): its DURABLE id + the
+    // gateway to reach it. Only dots receive render deltas; held transients keep realms warm (lifecycle) but
+    // have no client to draw. The per-observer add/remove is accumulated below and emitted once per dot.
+    let render_routes: BTreeMap<ObserverId, (AccountId, NodeId)> = dots
+        .0
+        .iter()
+        .filter(|(_, d)| d.authority.simulates())
+        .map(|(s, d)| (ObserverId::Dot(*s), (d.account, d.gateway)))
+        .collect();
+    let mut render_adds: BTreeMap<ObserverId, Vec<RealmShape>> = BTreeMap::new();
+    let mut render_removes: BTreeMap<ObserverId, Vec<RealmId>> = BTreeMap::new();
+
     // The UNIFIED direct-child placements (movers authored from ephemeris, static children at `center`),
     // stable seed-derived Vec order — the SAME code-path the observer feed reads (H-1/H-2, no reorder).
     let placements = regions.child_placements(config.realm, tick_hz, tick);
@@ -4564,6 +4576,15 @@ fn aoi_decide(
             if matches!(verb, Some(DemandVerb::SpinUp | DemandVerb::KeepAlive)) {
                 now_demanded = true;
             }
+            // VU AoI S1b — the RENDER delta rides the SAME per-observer transition (no new AoI math, HR3):
+            // the child ENTERS this observer's view on ACQUIRE (`was_in` false→true), LEAVES on RELEASE (the
+            // latch drops after grace, true→gone). Accumulated per observer; emitted (dots only) below.
+            let next_in = next.is_some_and(|s| s.was_in);
+            if !state.was_in && next_in {
+                render_adds.entry(*obs).or_default().push(child_shape(region));
+            } else if state.was_in && !next_in {
+                render_removes.entry(*obs).or_default().push(region.realm);
+            }
             match next {
                 Some(s) => {
                     membership.insert(key, s);
@@ -4589,9 +4610,43 @@ fn aoi_decide(
             );
         }
     }
+    // VU AoI S1b — emit ONE render delta per DOT observer whose view changed this tick: the realms that
+    // ENTERED (`added` shapes) / LEFT (`removed` ids) its AoI, to its gateway, keyed by its DURABLE id. A
+    // dot with no change is skipped (so walk/static — no transitions — sends nothing: byte-identical). The
+    // stream rides the reliable Control lane ([`push_session_reply`]); the per-tick POSITION rides the
+    // separate unreliable realm datagram.
+    for (obs, (account, gateway)) in &render_routes {
+        let added = render_adds.remove(obs).unwrap_or_default();
+        let removed = render_removes.remove(obs).unwrap_or_default();
+        if added.is_empty() && removed.is_empty() {
+            continue;
+        }
+        push_session_reply(
+            outbox,
+            *gateway,
+            &ShardToGateway::RealmSceneDelta {
+                observer: *account,
+                added,
+                removed,
+            },
+        );
+    }
     // Evict any (observer, child-path) pair no longer live (an observer that left OR a child dropped from
     // the roster) — the DRY primitive, keyed by `(ObserverId, RealmPath)`.
     retain_live(membership, &live_keys);
+}
+
+/// The render subset of a direct-child region (VU AoI S1b) — realm + authoritative frame + STATIC center +
+/// boundary + parent, exactly what a client draws a box from. Twin of the [`realm_registry_for_home`]
+/// projection: the per-tick POSITION rides the separate realm datagram, not this static shape.
+fn child_shape(region: &RealmRegion) -> RealmShape {
+    RealmShape {
+        realm: region.realm,
+        frame: region.frame,
+        center: region.center,
+        shape: region.shape,
+        parent: region.parent,
+    }
 }
 
 /// The effective AoI distance from ONE occupant to `child_pos`: the LESSER of the live distance and the F7
@@ -11849,6 +11904,24 @@ mod tests {
             .collect()
     }
 
+    /// Every `ShardToGateway::RealmSceneDelta` in the outbox (VU AoI S1b), decoded — its (destination
+    /// gateway, observer durable-id, added shapes, removed ids). The `_ => None` arm is exercised by the
+    /// demands + entity snapshots that ride the same tick.
+    fn render_deltas(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+    ) -> Vec<(NodeId, AccountId, Vec<RealmShape>, Vec<RealmId>)> {
+        sent.iter()
+            .filter_map(|(node, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
+                Ok(ShardToGateway::RealmSceneDelta {
+                    observer,
+                    added,
+                    removed,
+                }) => Some((*node, observer, added, removed)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The child coord the loop names for `own_realm`'s child `child_realm` — `own_coord.child(level)`.
     fn child_coord_of(own_realm: RealmId, child_realm: RealmId) -> RealmCoord {
         StubConfig::root_coord(own_realm).child(level_of(child_realm).expect("seed-lineage child"))
@@ -12298,6 +12371,46 @@ mod tests {
             rig.world.resource::<AoiMembership>().0.is_empty(),
             "a departed child's AoI state is evicted"
         );
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_streams_a_render_delta_on_acquire_and_release() {
+        // VU AoI S1b: the same per-observer transition that drives the lifecycle demand ALSO streams the
+        // client render delta — a child ENTERS the dot's view on acquire (its shape ADDED), LEAVES on release
+        // (its id REMOVED) — to the dot's gateway, keyed by its DURABLE id. Sustained view streams nothing.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0), // grace 0 ⇒ leaving is an immediate release
+            ],
+        );
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        // Tick 1: ACQUIRE ⇒ exactly one render delta ADDING the entered child's shape, to the dot's gateway.
+        let d = render_deltas(&rig.tick(vec![]));
+        assert_eq!(d.len(), 1, "one render delta on acquire");
+        assert_eq!(d[0].0, GATEWAY, "routed to the dot's gateway");
+        assert_eq!(d[0].1, AccountId(1), "keyed by the dot's durable id (account)");
+        assert_eq!(
+            d[0].2.iter().map(|s| s.realm).collect::<Vec<_>>(),
+            vec![OTHER_REALM],
+            "the entered child's shape is added"
+        );
+        assert!(d[0].3.is_empty(), "nothing removed on entry");
+        // Tick 2: STILL in range (sustained) ⇒ NO render delta (only acquire/release change the view).
+        assert!(
+            render_deltas(&rig.tick(vec![])).is_empty(),
+            "a sustained view streams nothing"
+        );
+        // Move OUT (grace 0 ⇒ immediate release) ⇒ exactly one render delta REMOVING the departed child.
+        move_dot(&mut rig, TRIG_SESSION, DVec3::new(3000.0, 0.0, 0.0));
+        let d = render_deltas(&rig.tick(vec![]));
+        assert_eq!(d.len(), 1, "one render delta on release");
+        assert!(d[0].2.is_empty(), "nothing added on exit");
+        assert_eq!(d[0].3, vec![OTHER_REALM], "the departed child's id is removed");
     }
 
     #[test]
