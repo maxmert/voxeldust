@@ -13,8 +13,8 @@ use std::process::{Command, Stdio};
 // are the SHARED vd_bins definitions (one registry/layout for every process-tier test —
 // they can never drift from the launcher or collide with each other).
 use vd_bins::{
-    DEV, DevClusterDown, RECOVERY_SLOT, SMOKE_SLOT, common_env, devcluster, slot_runfile,
-    slot_workdir,
+    DEMAND_SMOKE_SLOT, DEV, DevClusterDown, RECOVERY_SLOT, SMOKE_SLOT, common_env, devcluster,
+    slot_runfile, slot_workdir,
 };
 use vd_devproto::DevPortScheme;
 
@@ -104,6 +104,38 @@ fn dev_cluster_comes_up_over_quic_and_tears_down_without_leaking() {
             "QUIC port {port} must be free after down (no leaked node)"
         );
     }
+}
+
+#[test]
+fn demand_cluster_up_boots_orchestrator_and_gateway_only_and_reaches_ready() {
+    // RLM demand-walk (VU): `up --demand` stands up the demand cluster (orchestrator + gateway, NO pre-booked
+    // shard) — the exact cluster the rlm_demand_login/demand-walk proofs build in-harness, now LAUNCHABLE so a
+    // windowed client can fly it. Readiness is "the orchestrator is up + serving" (a demand cluster has NO
+    // static realm to wait for — its worlds spin up on login/AoI demand, proven by rlm_demand_login).
+    let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
+    let slot = DEMAND_SMOKE_SLOT.to_string();
+    let _ = Command::new(launcher).args(["down", "--slot", &slot]).status(); // clean slate (idempotent)
+    let _guard = DevClusterDown::new(launcher, DEMAND_SMOKE_SLOT);
+
+    // `up --demand` exits 0 once the orchestrator is up + serving (no shard needs to grant a realm first).
+    let status = Command::new(launcher)
+        .args(["up", "--demand", "--slot", &slot])
+        .status()
+        .expect("run up --demand");
+    assert!(status.success(), "up --demand should reach ready and exit 0");
+
+    // Exactly TWO node PIDs recorded (orchestrator + gateway) — NO static login shard was booked.
+    let pids = recorded_pids(DEMAND_SMOKE_SLOT);
+    assert_eq!(
+        pids.len(),
+        2,
+        "a demand cluster is orchestrator + gateway ONLY (no pre-booked shard), got {pids:?}"
+    );
+    assert!(
+        pids.iter().all(|p| alive(*p)),
+        "both demand nodes alive while up: {pids:?}"
+    );
+    // Teardown + leak-freedom is proven by DevClusterDown (drop reaps) + the Single up/down test above.
 }
 
 #[test]

@@ -1832,6 +1832,8 @@ pub const RECOVERY_SLOT: u16 = WORKTREE_SLOT_CEILING + 17; // 81: dev_cluster_sm
 pub const RENDER_SMOKE_SLOT: u16 = WORKTREE_SLOT_CEILING + 18; // 82: G-RENDER-SMOKE
 /// Track R / 1d.2: the dual-shard crossing smoke's slot (distinct from every other test slot).
 pub const CROSSING_SLOT: u16 = WORKTREE_SLOT_CEILING + 19; // 83: dual_cluster_crossing_smoke
+/// RLM demand-walk (VU): the `up --demand` launcher smoke's slot.
+pub const DEMAND_SMOKE_SLOT: u16 = WORKTREE_SLOT_CEILING + 20; // 84: demand_cluster_smoke
 
 /// Run one `vd-devcluster` subcommand against a slot (the launcher binary path comes from
 /// the calling test's `env!("CARGO_BIN_EXE_vd-devcluster")`).

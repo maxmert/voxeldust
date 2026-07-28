@@ -157,6 +157,11 @@ fn cluster_shape(args: &[String]) -> ClusterShape {
         ClusterShape::Triple
     } else if has_flag(args, "--dual") {
         ClusterShape::Dual
+    } else if has_flag(args, "--demand") {
+        // RLM demand-walk (VU): orchestrator + gateway ONLY, NO shard pre-booked — the ONLY way to a world is
+        // the armed reconciler spinning one up on login/AoI demand. `up --demand` stands up the exact cluster
+        // the rlm_demand_login/demand-walk proofs build in-harness, so a windowed client can fly it.
+        ClusterShape::Demand
     } else {
         ClusterShape::Single
     }
@@ -317,8 +322,13 @@ fn up_inner(
             "vd-gateway",
             gateway_env(&addrs, &clients, &auth_pubkey, &DEV, shape),
         ),
-        ("vd-shard", "vd-shard", shard_env(&addrs, &DEV, shape)),
     ];
+    // The static login shard: present for every STATIC shape, ABSENT for Demand — the home shard is spawned on
+    // the fly by the armed reconciler at login (that IS the demand cluster). The has_dest/has_galaxy/extra-shard
+    // branches below are all empty for Demand (byte-identical to a Single roster minus the one static shard).
+    if !shape.is_demand() {
+        nodes.push(("vd-shard", "vd-shard", shard_env(&addrs, &DEV, shape)));
+    }
     if shape == ClusterShape::Dual {
         // Track R / 1d.2 (the DIRECT-re-home playground): the SOURCE (realm 7) hosts the crossing trigger
         // INTO realm B. Default: the born-inside System(7)→System(8) shell. A test/operator may OVERRIDE
@@ -507,11 +517,12 @@ fn admin_ready(admin_port: u16, shape: ClusterShape) -> bool {
         ClusterShape::Dual | ClusterShape::Triple | ClusterShape::Forest => {
             snap.realms_present(&expected_realms(shape))
         }
-        // RLM RG-4: a demand cluster stands up with NO static realm to wait for — readiness is just the
-        // orchestrator bootstrapped (directory + clock up); its shards spin up later, on login demand. The
-        // launcher's `up --demand` is deferred, so this arm is unreached via `up` (the RG-4c e2e builds the
-        // demand env directly), but the readiness predicate is well-defined for when it lands.
-        ClusterShape::Demand => snap.cluster_bootstrapped(),
+        // RLM demand-walk (VU): a demand cluster has NO static realm to wait for — its worlds spin up later, on
+        // login/AoI demand, so `cluster_bootstrapped` (a shard holds a realm) would NEVER become true and `up
+        // --demand` would hang. Readiness is instead just "the orchestrator is UP and serving" — we only reach
+        // this arm once its /admin/snapshot parsed, so it is accepting logins; a client login spawns the first
+        // world (proven by rlm_demand_login).
+        ClusterShape::Demand => true,
     }
 }
 
