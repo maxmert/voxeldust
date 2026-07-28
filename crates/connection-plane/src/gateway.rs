@@ -30,11 +30,13 @@ use vd_core::glam::DVec3;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::rng::SplitMix64;
-use vd_core::worldgen::{UniverseConfig, container_coord_at, realm_regions_for};
+use vd_core::worldgen::{
+    UniverseConfig, container_coord_at, realm_neighbourhood_for_held_config, realm_regions_for,
+};
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
-use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
+use vd_wire::channels::{ClientControlMsg, RealmShape, ServerControlMsg, SubId};
 use vd_wire::intershard::{DemandVerb, InterShardFlow, RealmDemand, ShardPresence};
 use vd_wire::seams::directory::{
     AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply, OwnerRecord,
@@ -1722,6 +1724,56 @@ fn announce_own_entity(
     }
 }
 
+/// Lower the SEED-DERIVED neighbourhood of `home` to the wire render subset a fully-agnostic client draws
+/// its whole world from (VU, proto_minor 5). The neighbourhood is `home`'s ancestor chain up to the ambient
+/// root ∪ its DIRECT children — never siblings ([`realm_neighbourhood_for_held_config`]) — each region
+/// lowered to a [`RealmShape`] (realm + authoritative frame + static center + boundary + parent), the RENDER
+/// fields ONLY, never the server-side AoI band. `root` is the parent-less ambient realm; it degrades to
+/// `home` when the neighbourhood is empty (a `home` not in the forest — a safe no-scene, never a panic).
+/// Closed-form `f(seed, home)`; the client REPLACES its whole scene with this on receipt.
+fn realm_registry_for_home(cfg: &SeedInjectorConfig, home: RealmId) -> ServerControlMsg {
+    let mut held = BTreeSet::new();
+    held.insert(home);
+    let neighbourhood =
+        realm_neighbourhood_for_held_config(cfg.universe_seed, &held, &cfg.universe_config);
+    let root = neighbourhood
+        .iter()
+        .find(|r| r.parent.is_none())
+        .map_or(home, |r| r.realm);
+    let regions = neighbourhood
+        .iter()
+        .map(|r| RealmShape {
+            realm: r.realm,
+            frame: r.frame,
+            center: r.center,
+            shape: r.shape,
+            parent: r.parent,
+        })
+        .collect();
+    ServerControlMsg::RealmRegistry { regions, root }
+}
+
+/// Stream the client its seed-derived realm render-scene at the home-entry seam (VU, proto_minor 5) — IFF
+/// this is a DEMAND cluster (an armed injector) AND the peer negotiated minor >= 5. A STATIC cluster (unarmed
+/// injector) emits NOTHING, byte-identical to the pre-VU gateway (the playground still boots its scene from
+/// `--realm-boxes`); an older peer is withheld the variant (sender-gates-variants — it would desync an old
+/// decoder). All the gating lives HERE, in one monomorphic place, so the seam call stays straight-line and
+/// every arm is unit-covered. `home_rid` is the LOGIN home; the warp-time RE-stream on a deeper cross (when
+/// the ambient realm shifts) is VU-6.
+fn maybe_announce_realm_registry(
+    outbox: &mut OutboundBox,
+    client: NodeId,
+    cfg: &SeedInjectorConfig,
+    negotiated_minor: u16,
+    home_rid: Option<RealmId>,
+) {
+    if !cfg.armed || negotiated_minor < 5 {
+        return;
+    }
+    let Some(home) = home_rid else { return };
+    push_control(outbox, client, &realm_registry_for_home(cfg, home));
+}
+
 fn push_to_shard(outbox: &mut OutboundBox, to: NodeId, class: MsgClass, msg: &GatewayToShard) {
     let bytes = postcard::to_allocvec(msg).expect("closed wire enums serialize infallibly");
     outbox.0.push((
@@ -2745,6 +2797,17 @@ fn on_shard_control(
                 session.negotiated_minor,
                 entity,
                 sub,
+            );
+            // VU (proto_minor 5): a demand cluster streams the client its AoI-scoped realm render-scene at
+            // this home-entry seam, so a fully-agnostic client draws its world from the STREAM ALONE. Withheld
+            // in static mode (unarmed injector → byte-identical) and from a minor<5 peer; the warp re-stream
+            // on a deeper cross is VU-6.
+            maybe_announce_realm_registry(
+                outbox,
+                session.client,
+                &config.seed_injector,
+                session.negotiated_minor,
+                home_rid,
             );
         }
         ShardToGateway::SessionDetached { .. } => {
@@ -7698,6 +7761,129 @@ mod tests {
         })
     }
 
+    /// The `RealmRegistry` render-scenes on an outbox (VU proto_minor 5), decoded off the control pushes —
+    /// each as its streamed neighbourhood + ambient root. The `_ => None` arm discriminates non-registry
+    /// control (e.g. `OwnEntity`), so a caller that pre-seeds one exercises it. Mirrors `demands_to_orch`.
+    fn realm_registries(outbox: &OutboundBox) -> Vec<(Vec<RealmShape>, RealmId)> {
+        outbox
+            .0
+            .iter()
+            .filter_map(|(_, _, bytes, _)| {
+                match postcard::from_bytes::<ServerControlMsg>(bytes)
+                    .expect("gateway test pushes only ServerControlMsg on this outbox")
+                {
+                    ServerControlMsg::RealmRegistry { regions, root } => Some((regions, root)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn realm_registry_streams_only_for_an_armed_cluster_a_minor5_peer_and_a_known_home() {
+        // The home-entry render-scene is gated on THREE conditions; each false arm emits nothing, so a static
+        // cluster and an old client stay byte-identical to the pre-VU gateway.
+        let home = container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0))
+            .lowered();
+        let armed = armed_injector(BTreeMap::new());
+        let inert = SeedInjectorConfig::default(); // unarmed = a static cluster
+        let client = NodeId(7);
+
+        // (1) static cluster (unarmed) → NOTHING, even at minor 5 with a valid home. The pre-seeded
+        // `OwnEntity` on the outbox proves the decoder discriminates (it is not counted as a render-scene).
+        let mut outbox = OutboundBox::default();
+        push_control(&mut outbox, client, &ServerControlMsg::OwnEntity {
+            entity: EntityId(1),
+        });
+        maybe_announce_realm_registry(&mut outbox, client, &inert, 5, Some(home));
+        assert!(
+            realm_registries(&outbox).is_empty(),
+            "a static cluster streams no render-scene (byte-identical to pre-VU)"
+        );
+
+        // (2) armed cluster but an OLD peer (minor < 5) → NOTHING (sender-gates-variants).
+        let mut outbox = OutboundBox::default();
+        maybe_announce_realm_registry(&mut outbox, client, &armed, 4, Some(home));
+        assert!(
+            realm_registries(&outbox).is_empty(),
+            "a minor<5 peer is withheld the RealmRegistry variant"
+        );
+
+        // (3) armed + minor 5 but NO home (a session that never resolved a home_rid) → NOTHING.
+        let mut outbox = OutboundBox::default();
+        maybe_announce_realm_registry(&mut outbox, client, &armed, 5, None);
+        assert!(
+            realm_registries(&outbox).is_empty(),
+            "no home_rid ⇒ no render-scene (a safe no-op, never a panic)"
+        );
+
+        // (4) armed + minor 5 + a known home → EXACTLY ONE RealmRegistry carrying the seed neighbourhood.
+        let mut outbox = OutboundBox::default();
+        maybe_announce_realm_registry(&mut outbox, client, &armed, 5, Some(home));
+        let sent = realm_registries(&outbox);
+        assert_eq!(sent.len(), 1, "exactly one render-scene per home entry");
+        assert!(
+            sent[0].0.iter().any(|s| s.realm == home),
+            "the streamed neighbourhood contains the client's own home realm"
+        );
+    }
+
+    #[test]
+    fn realm_registry_for_home_is_the_faithful_seed_neighbourhood_and_degrades_empty_off_forest() {
+        // The projection is a FAITHFUL render subset of the canonical seed neighbourhood: same realms, same
+        // order, same frame/center/shape/parent — only the server-side AoI band is dropped.
+        let home = container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0))
+            .lowered();
+        let cfg = armed_injector(BTreeMap::new());
+        let expected = realm_neighbourhood_for_held_config(
+            cfg.universe_seed,
+            &BTreeSet::from([home]),
+            &cfg.universe_config,
+        );
+        assert!(
+            !expected.is_empty(),
+            "the (25,0,0) home has a real seed neighbourhood"
+        );
+        // Round-trip the built registry through an outbox → the SAME covered decode the live seam uses (no
+        // `let-else { panic }`, whose never-taken arm would be an uncoverable region under HR5).
+        let mut ob = OutboundBox::default();
+        push_control(&mut ob, NodeId(7), &realm_registry_for_home(&cfg, home));
+        let sent = realm_registries(&ob);
+        assert_eq!(sent.len(), 1, "one RealmRegistry per home");
+        let (regions, root) = &sent[0];
+        assert_eq!(
+            regions.len(),
+            expected.len(),
+            "one render shape per neighbourhood region"
+        );
+        for (shape, region) in regions.iter().zip(expected.iter()) {
+            assert_eq!(shape.realm, region.realm);
+            assert_eq!(shape.frame, region.frame);
+            assert_eq!(shape.center, region.center);
+            assert_eq!(shape.shape, region.shape);
+            assert_eq!(shape.parent, region.parent);
+        }
+        let ambient_root = expected
+            .iter()
+            .find(|r| r.parent.is_none())
+            .expect("the neighbourhood reaches the parent-less ambient root");
+        assert_eq!(*root, ambient_root.realm, "root names the ambient realm");
+
+        // A home NOT in the seed forest degrades to an EMPTY scene rooted at itself (a Ship realm is spawned
+        // at runtime, never a static forest region) — the neighbourhood is empty, never a panic.
+        let off_forest = RealmId::Ship(EntityId(0xDEAD));
+        let mut ob = OutboundBox::default();
+        push_control(&mut ob, NodeId(7), &realm_registry_for_home(&cfg, off_forest));
+        let sent = realm_registries(&ob);
+        assert_eq!(sent.len(), 1, "one RealmRegistry even for an off-forest home");
+        let (regions, root) = &sent[0];
+        assert!(regions.is_empty(), "an off-forest home yields no render shapes");
+        assert_eq!(
+            *root, off_forest,
+            "root degrades to the home itself when the neighbourhood is empty"
+        );
+    }
+
     #[test]
     fn a_granted_session_lease_injects_exactly_one_server_derived_home_demand() {
         // The trusted injector: on the committed-lease arm (an authenticated login LANDED), the gateway
@@ -8379,8 +8565,12 @@ mod tests {
                 ServerControlMsg::OwnEntity {
                     entity: EntityId(77)
                 },
+                // VU (proto_minor 5): a demand cluster streams the seed-derived render-scene at this
+                // home-entry seam — the client's home neighbourhood, built by the SAME production projection
+                // (so the assertion tracks the forest geometry instead of hardcoding it).
+                realm_registry_for_home(&armed_injector(BTreeMap::new()), home_realm()),
             ],
-            "the login sub opened on the HOME shard (never config.shard)"
+            "the login sub opened on the HOME shard (never config.shard), then the render-scene streamed"
         );
         let framed = rig.tick(vec![wire(
             HOME,
