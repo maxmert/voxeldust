@@ -874,8 +874,10 @@ const VISUAL_OCCUPANT_V_MAX_MPS: f64 = 2.0;
 const WALK_DEMAND_AOI_SPIN_UP_FACTOR: f64 = 1.2;
 const WALK_DEMAND_AOI_TEAR_DOWN_FACTOR: f64 = 1.8;
 /// The loiter grace as a DURATION (seconds) — converted to ticks against the live `tick_dt_s` at boot
-/// ([`grace_ticks_from_seconds`]), so it is correct at any tick rate.
-const WALK_DEMAND_AOI_GRACE_S: f64 = 1.0;
+/// ([`grace_ticks_from_seconds`]), so it is correct at any tick rate. The SINGLE loiter-duration constant in
+/// the codebase: the region AoI `grace_ticks` derives from it here, and (VU AoI S2b) the parent's retained-
+/// occupant TTL reuses it, so the two are consistent by construction and neither is ever a magic number.
+pub const WALK_DEMAND_AOI_GRACE_S: f64 = 1.0;
 const WALK_DEMAND_AOI_K_SAFETY_EXTRA: f64 = 0.5;
 
 /// The 1-tick floor for the loiter grace when the tick dt is degenerate — a tripwire (the composer
@@ -886,8 +888,9 @@ const GRACE_TICKS_FLOOR: u32 = 1;
 /// Convert a loiter grace measured in SECONDS to ticks against the live `dt_s` (RLM 5f-4 — a duration is
 /// correct at ANY tick rate). Monomorphic + saturating: a degenerate `dt_s` (≤0 / non-finite) OR a
 /// degenerate quotient (non-finite / below one tick) yields [`GRACE_TICKS_FLOOR`]; an absurd quotient
-/// saturates at `u32::MAX`; otherwise the in-range `round()` is a lossless `u32`.
-fn grace_ticks_from_seconds(secs: f64, dt_s: f64) -> u32 {
+/// saturates at `u32::MAX`; otherwise the in-range `round()` is a lossless `u32`. `pub` so the VU AoI S2b
+/// retained-occupant TTL derives from the SAME converter + loiter constant the region grace uses (DRY).
+pub fn grace_ticks_from_seconds(secs: f64, dt_s: f64) -> u32 {
     if !(dt_s > 0.0 && dt_s.is_finite()) {
         return GRACE_TICKS_FLOOR;
     }

@@ -4559,6 +4559,9 @@ fn evaluate_realm_aoi(
     // VU AoI S2a-2b-ii — the resolved parent node (from the cadence HeadRead), the OccupantInterest up-relay
     // target. `None` at a root shard / before the first parent Head reply ⇒ the relay simply does not fire.
     parent: Res<ParentRealmNode>,
+    // VU AoI S2b — the up-relayed occupants this parent retains; `aoi_decide` prunes stale ones (S2b-ii) and
+    // folds the alive ones in as proxy observers (S2b-iii). EMPTY at walk/static ⇒ inert.
+    mut retained: ResMut<RetainedOccupants>,
 ) {
     // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
     // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
@@ -4583,6 +4586,7 @@ fn evaluate_realm_aoi(
         &mut membership.0,
         &mut outbox,
         parent.0,
+        &mut retained.0,
     );
 }
 
@@ -4623,11 +4627,19 @@ fn aoi_decide(
     membership: &mut BTreeMap<(ObserverId, RealmPath), AoiState>,
     outbox: &mut OutboundBox,
     parent_node: Option<NodeId>,
+    retained: &mut BTreeMap<AccountId, RetainedOccupant>,
 ) {
     let own_coord = &config.own_coord;
     let tick = clock.universe_tick;
     let tick_hz = 1.0 / config.tick_dt_s;
     let horizon_s = f64::from(config.boot_ticks_p99) * config.tick_dt_s; // F7 predictive horizon
+
+    // VU AoI S2b-ii — EXPIRE stale proxies BEFORE they can fold: prune any retained occupant whose last relay
+    // is older than the derived TTL. Bounds the store; the TTL window bridges a lost `Unreliable` relay so a
+    // single missed datagram never blinks a warmed sibling. Inert at walk/static (the store is empty — no
+    // relay is ever received — so the prune is a no-op ⇒ byte-identical).
+    let retain_ttl = retain_ttl_ticks(config);
+    retained.retain(|_, e| proxy_alive(e.last_seen, clock.local_tick, retain_ttl));
 
     // Observers = owned durable dots this shard SIMULATES ∪ held transients (mirror
     // `evaluate_realm_boundaries`), each TAGGED with its `ObserverId` + reduced to frame-local `(pos, vel)`
@@ -4967,6 +4979,31 @@ fn retain_occupant(
             last_seen: now,
         },
     );
+}
+
+/// VU AoI S2b-ii — the survive-one-lost-datagram floor for the retained-occupant TTL (a tick COUNT). The relay
+/// is `Unreliable`/`FireAndForget`, so one loss is a one-tick gap; retaining ≥ 2 ticks past `last_seen`
+/// bridges it regardless of intra-tick prune-vs-receive order. Operative ONLY under a degenerate test
+/// `tick_dt_s`; at a real cluster rate the derived 1 s term dominates. Independent of `GRACE_TICKS_FLOOR`.
+const RETAIN_TTL_FLOOR: u64 = 2;
+
+/// The retained-occupant TTL as a tick COUNT (a duration, not an instant — hence `u64`, not `TickId`).
+/// DERIVED from the ONE loiter constant ([`WALK_DEMAND_AOI_GRACE_S`], ~1 s) via the SAME converter the region
+/// grace uses, so it is never a magic number and is automatically consistent with an armed region's
+/// `grace_ticks`; floored at [`RETAIN_TTL_FLOOR`]. At the dev cluster's 20-50 Hz the derived term (20-50
+/// ticks) is what actually bridges a lost relay.
+fn retain_ttl_ticks(config: &StubConfig) -> u64 {
+    u64::from(vd_core::worldgen::grace_ticks_from_seconds(
+        vd_core::worldgen::WALK_DEMAND_AOI_GRACE_S,
+        config.tick_dt_s,
+    ))
+    .max(RETAIN_TTL_FLOOR)
+}
+
+/// A retained proxy occupant is ALIVE iff its last relay arrived no more than `ttl` ticks ago, on the parent's
+/// OWN local clock (`saturating_sub` so a clock not yet past `last_seen` reads age 0). Monomorphic (HR5).
+fn proxy_alive(last_seen: TickId, now: TickId, ttl: u64) -> bool {
+    now.0.saturating_sub(last_seen.0) <= ttl
 }
 
 #[cfg(test)]
@@ -12746,6 +12783,58 @@ mod tests {
             let _ = rig.tick(vec![]);
         }
         assert!(rig.world.resource::<RetainedOccupants>().0.is_empty());
+    }
+
+    #[test]
+    fn proxy_alive_and_retain_ttl_are_derived_and_bridge_one_loss() {
+        // TTL is DERIVED from the 1 s loiter constant via the shared converter — at a real dt it dominates the
+        // floor (round(1.0 / 0.05) = 20 ticks), never a magic number.
+        let normal = StubConfig {
+            tick_dt_s: 0.05,
+            ..config()
+        };
+        assert_eq!(retain_ttl_ticks(&normal), 20);
+        // A degenerate dt falls back to the survive-one-lost-datagram floor.
+        let degenerate = StubConfig {
+            tick_dt_s: 0.0,
+            ..config()
+        };
+        assert_eq!(retain_ttl_ticks(&degenerate), RETAIN_TTL_FLOOR);
+        // Alive predicate: age 0 and age == ttl are alive; age == ttl + 1 has expired.
+        assert!(proxy_alive(vd_core::TickId(10), vd_core::TickId(10), 3));
+        assert!(proxy_alive(vd_core::TickId(10), vd_core::TickId(13), 3));
+        assert!(!proxy_alive(vd_core::TickId(10), vd_core::TickId(14), 3));
+    }
+
+    #[test]
+    fn aoi_decide_prunes_expired_retained_occupants() {
+        // The parent's AoI pass EXPIRES stale proxies before they could fold: a proxy older than the TTL is
+        // pruned; a fresh one survives. (S2b-ii — the store self-erases; the fold is S2b-iii.)
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(&mut rig, vec![root_region(), own_region()]);
+        let ttl = retain_ttl_ticks(&config());
+        let now = 100 + ttl + 5;
+        rig.set_local_tick(now);
+        let mk = |t: u64| RetainedOccupant {
+            occupant: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(0)),
+            last_seen: vd_core::TickId(t),
+        };
+        {
+            let mut store = rig.world.resource_mut::<RetainedOccupants>();
+            store.0.insert(AccountId(1), mk(now)); // fresh: age 0
+            store.0.insert(AccountId(2), mk(100)); // stale: age ttl + 5 > ttl
+        }
+        let _ = rig.tick(vec![]);
+        let store = rig.world.resource::<RetainedOccupants>();
+        assert!(
+            store.0.contains_key(&AccountId(1)),
+            "a fresh proxy survives the prune"
+        );
+        assert!(
+            !store.0.contains_key(&AccountId(2)),
+            "a stale proxy (age > TTL) is pruned"
+        );
     }
 
     #[test]
