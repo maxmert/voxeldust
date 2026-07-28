@@ -1102,6 +1102,10 @@ pub struct StubStats {
     /// Slice 3e — `CrossingAborted` whose transfer id did NOT match the subject's current latch (a stale
     /// abort for a superseded / re-latched crossing) — a counted no-op, the latch is preserved. `0` healthy.
     pub crossing_abort_stale: u64,
+    /// VU AoI S2a — up-relayed `OccupantInterest` hints RECEIVED by this (parent) shard. This slice decodes,
+    /// counts, and DROPS them (proving the up-flow reaches the parent); S2b retains and folds them into the
+    /// AoI cull. `0` at walk/static scale (the up-flow is inert until armed).
+    pub occupant_interest_received: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -1595,6 +1599,13 @@ fn process_inbound(
             // Membership (clock sync) is consumed by the node-level follower system;
             // Snapshot / RealmSnapshot are gateway→client render datagrams and never target a shard.
             MsgClass::Membership | MsgClass::Snapshot | MsgClass::RealmSnapshot => {}
+            // VU AoI S2a: an up-relayed OccupantInterest from a CHILD shard. This slice DECODES + counts +
+            // DROPS it (proving the up-flow reaches this parent); S2b retains + folds it into the AoI cull.
+            // A malformed / mis-classed payload is counted as undecodable, never a panic.
+            MsgClass::SignalDelta => match postcard::from_bytes::<InterShardFlow>(bytes) {
+                Ok(InterShardFlow::OccupantInterest(_)) => stats.occupant_interest_received += 1,
+                _ => stats.undecodable += 1,
+            },
         }
     }
 }
@@ -12411,6 +12422,52 @@ mod tests {
         assert_eq!(d.len(), 1, "one render delta on release");
         assert!(d[0].2.is_empty(), "nothing added on exit");
         assert_eq!(d[0].3, vec![OTHER_REALM], "the departed child's id is removed");
+    }
+
+    #[test]
+    fn signal_delta_occupant_interest_is_decoded_counted_and_dropped() {
+        // VU AoI S2a: an up-relayed OccupantInterest reaches this (parent) shard on MsgClass::SignalDelta —
+        // it is DECODED + counted + DROPPED (S2b will fold it). A malformed SignalDelta is counted as
+        // undecodable, never a panic.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let interest = InterShardFlow::OccupantInterest(vd_wire::intershard::OccupantInterest {
+            observer: AccountId(5),
+            to_realm: StubConfig::root_coord(OWN_REALM),
+            occupant: StampedPose::at_rest(
+                config().frame,
+                DVec3::new(10.0, 0.0, 0.0),
+                UniverseTick(100),
+            ),
+            coarsen_level: 0,
+        });
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: NodeId(9),
+            class: MsgClass::SignalDelta,
+            bytes: crate::io::bytes(postcard::to_allocvec(&interest).expect("encode")),
+        }]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().occupant_interest_received,
+            1,
+            "a valid up-flow hint is decoded + counted"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().undecodable, 0);
+        // A garbage SignalDelta ⇒ undecodable, never a panic.
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: NodeId(9),
+            class: MsgClass::SignalDelta,
+            bytes: crate::io::bytes(vec![0xFF, 0xFF, 0xFF]),
+        }]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().occupant_interest_received,
+            1,
+            "still one — the garbage is not an OccupantInterest"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().undecodable,
+            1,
+            "a malformed SignalDelta is counted undecodable"
+        );
     }
 
     #[test]

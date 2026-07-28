@@ -78,6 +78,10 @@ pub enum MsgClass {
     /// consumer (postcard is non-self-describing — the carrier class is the discriminator). UNROUTED
     /// through FA-2b; FA-2c wires the shard emit + gateway forward + client consume.
     RealmSnapshot,
+    /// Cross-shard SIGNAL DELTAs (`InterShardFlow::OccupantInterest`, VU AoI S2a): the UNRELIABLE
+    /// child→parent occupant-position up-flow — a 20 Hz latest-wins datagram (a lost hint self-heals next
+    /// tick). A dedicated lane, sent shard→shard directly (never to a gateway). APPEND-ONLY (see the header).
+    SignalDelta,
 }
 
 /// Carrier reliability: whether a class rides a reliable ordered stream or a
@@ -119,7 +123,10 @@ impl MsgClass {
             MsgClass::Snapshot
             | MsgClass::Input
             | MsgClass::GhostDelta
-            | MsgClass::RealmSnapshot => Reliability::Unreliable,
+            | MsgClass::RealmSnapshot
+            // VU AoI S2a: the occupant-position up-flow is a 20 Hz latest-wins datagram (a lost hint
+            // self-heals next tick) — the UNRELIABLE lane, like the ghost pose delta.
+            | MsgClass::SignalDelta => Reliability::Unreliable,
             MsgClass::Control | MsgClass::Saga | MsgClass::Membership | MsgClass::GhostReliable => {
                 Reliability::Reliable
             }
@@ -509,6 +516,7 @@ mod tests {
         assert_eq!(pc(MsgClass::GhostReliable), vec![5]);
         assert_eq!(pc(MsgClass::GhostDelta), vec![6]);
         assert_eq!(pc(MsgClass::RealmSnapshot), vec![7]);
+        assert_eq!(pc(MsgClass::SignalDelta), vec![8]);
         // Round-trip closes the loop: the byte decodes back to the same variant.
         for (b, c) in [
             (0u8, MsgClass::Control),
@@ -519,6 +527,7 @@ mod tests {
             (5, MsgClass::GhostReliable),
             (6, MsgClass::GhostDelta),
             (7, MsgClass::RealmSnapshot),
+            (8, MsgClass::SignalDelta),
         ] {
             assert_eq!(
                 postcard::from_bytes::<MsgClass>(&[b]).expect("decodes"),

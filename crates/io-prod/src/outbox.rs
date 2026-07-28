@@ -74,6 +74,7 @@ fn class_to_byte(class: MsgClass) -> u8 {
         MsgClass::GhostReliable => 5,
         MsgClass::GhostDelta => 6,
         MsgClass::RealmSnapshot => 7,
+        MsgClass::SignalDelta => 8,
     }
 }
 
@@ -88,6 +89,7 @@ fn class_from_byte(b: u8) -> Option<MsgClass> {
         5 => MsgClass::GhostReliable,
         6 => MsgClass::GhostDelta,
         7 => MsgClass::RealmSnapshot,
+        8 => MsgClass::SignalDelta,
         _ => return None,
     })
 }
@@ -632,7 +634,7 @@ mod tests {
     use super::*;
     use vd_sim::io::Transport; // FlakyTransport impls Transport (+ ReplayTransport via super::*)
 
-    const ALL_CLASSES: [MsgClass; 8] = [
+    const ALL_CLASSES: [MsgClass; 9] = [
         MsgClass::Control,
         MsgClass::Saga,
         MsgClass::Snapshot,
@@ -641,6 +643,7 @@ mod tests {
         MsgClass::GhostReliable,
         MsgClass::GhostDelta,
         MsgClass::RealmSnapshot,
+        MsgClass::SignalDelta,
     ];
 
     fn key(peer: u64, class: MsgClass, inc: u64, seq: u64) -> OutboxKey {
@@ -683,7 +686,7 @@ mod tests {
             assert_eq!(class_from_byte(b), Some(c), "round-trip {c:?}");
         }
         assert_eq!(seen.len(), ALL_CLASSES.len(), "every class mapped");
-        assert_eq!(class_from_byte(8), None, "an unknown byte decodes to None");
+        assert_eq!(class_from_byte(9), None, "an unknown byte decodes to None");
         assert_eq!(class_from_byte(255), None);
     }
 
