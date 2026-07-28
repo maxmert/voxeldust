@@ -42,7 +42,8 @@ use vd_wire::channels::{
 };
 use vd_wire::intershard::{
     CrossingAborted, CrossingRequest, DemandVerb, DemoteCmd, FlushSource, GhostFlow,
-    InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, RealmDemand,
+    InterShardFlow, OccupantInterest, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState,
+    RealmDemand,
     STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP,
     TRANSIENT_COMPLETE_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP,
     ShardPresence, TransferAck, TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest,
@@ -4525,6 +4526,9 @@ fn evaluate_realm_aoi(
     owned_transients: Res<OwnedTransients>,
     mut membership: ResMut<AoiMembership>,
     mut outbox: ResMut<OutboundBox>,
+    // VU AoI S2a-2b-ii — the resolved parent node (from the cadence HeadRead), the OccupantInterest up-relay
+    // target. `None` at a root shard / before the first parent Head reply ⇒ the relay simply does not fire.
+    parent: Res<ParentRealmNode>,
 ) {
     // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
     // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
@@ -4548,6 +4552,7 @@ fn evaluate_realm_aoi(
         realm_fence,
         &mut membership.0,
         &mut outbox,
+        parent.0,
     );
 }
 
@@ -4587,6 +4592,7 @@ fn aoi_decide(
     realm_fence: Fence,
     membership: &mut BTreeMap<(ObserverId, RealmPath), AoiState>,
     outbox: &mut OutboundBox,
+    parent_node: Option<NodeId>,
 ) {
     let own_coord = &config.own_coord;
     let tick = clock.universe_tick;
@@ -4735,6 +4741,30 @@ fn aoi_decide(
             }),
         );
     }
+    // VU AoI S2a-2b-ii — the per-dot UP-RELAY. Once the parent node is RESOLVED (the cadence HeadRead above
+    // filled `ParentRealmNode`), ship each SIMULATED dot's CURRENT pose up to the parent as OccupantInterest,
+    // so the sealed parent culls the dot's SIBLINGS (the neighbour district / rest of the system) against it.
+    // The let-chain checks the parent COORD first, then the node: `parent_node` is only ever set for a shard
+    // whose parent exists (`update_parent_node`'s guard), so inspecting the node only after the coord matched
+    // leaves no unreachable region (the root shard skips at the coord arm; a parented-but-unresolved shard
+    // skips at the node arm). Inert at walk/static: `parent_node` is set only on an armed shard (the resolve
+    // HeadRead fires only when `aoi_live`), so an inert shard never reaches the loop body — byte-identical.
+    if let Some(parent_coord) = config.own_coord.parent()
+        && let Some(parent) = parent_node
+    {
+        for (_, d) in dots.0.iter().filter(|(_, d)| d.authority.simulates()) {
+            push_occupant_interest(
+                outbox,
+                parent,
+                d.account,
+                parent_coord.clone(),
+                StampedPose {
+                    universe_tick: tick,
+                    ..d.pose
+                },
+            );
+        }
+    }
     // Evict any (observer, child-path) pair no longer live (an observer that left OR a child dropped from
     // the roster) — the DRY primitive, keyed by `(ObserverId, RealmPath)`.
     retain_live(membership, &live_keys);
@@ -4852,6 +4882,30 @@ fn push_demand(
             parent_fence: fence,
             verb,
             universe_tick: tick,
+        }),
+    );
+}
+
+/// VU AoI S2a-2b-ii — up-relay ONE occupant's interest to its realm's PARENT node, so the sealed parent
+/// culls this occupant's SIBLINGS (the neighbour district / rest of the system) against the relayed pose.
+/// A DEDICATED infra arm (never the P9 Signal bus): FireAndForget + Unreliable (no fence, latest-wins — the
+/// next tick supersedes, no retransmit of a stale pose), on the `SignalDelta` carrier. `coarsen_level: 0` —
+/// the direct parent receives the full pose; the coarsening ladder up deeper ancestors is S3.
+fn push_occupant_interest(
+    outbox: &mut OutboundBox,
+    parent: NodeId,
+    observer: AccountId,
+    to_realm: RealmCoord,
+    occupant: StampedPose,
+) {
+    outbox.push_flow(
+        parent,
+        MsgClass::SignalDelta,
+        &InterShardFlow::OccupantInterest(OccupantInterest {
+            observer,
+            to_realm,
+            occupant,
+            coarsen_level: 0,
         }),
     );
 }
@@ -12914,5 +12968,180 @@ mod tests {
             ..config()
         };
         let _ = Rig::with_config(bad);
+    }
+
+    // ---- VU AoI S2a-2b-ii — the per-dot OccupantInterest up-relay ------------------------------
+
+    /// Every up-relayed `OccupantInterest` this tick, with its (destination node, carrier class). The
+    /// `_ => None` arm is exercised by the demands + render deltas + HeadReads riding the same tick.
+    fn occupant_interests(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+    ) -> Vec<(NodeId, MsgClass, OccupantInterest)> {
+        sent.iter()
+            .filter_map(|(to, class, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                Ok(InterShardFlow::OccupantInterest(oi)) => Some((*to, *class, oi)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Deliver a parent-realm Head reply naming `node` as the parent's authority — resolving
+    /// `ParentRealmNode` to it (the S2a-2b resolve the up-relay depends on). `node` is distinct from this
+    /// shard so `affirm_realm_head` takes its foreign no-op arm (never a spurious co-host insert).
+    fn resolve_parent_head(rig: &mut Rig, parent_realm: RealmId, node: NodeId) {
+        let reply = DirectoryReply::Head {
+            key: DirectoryKey::Realm(parent_realm),
+            record: Some(vd_wire::seams::directory::OwnerRecord {
+                authority: AuthorityRef::Shard(node),
+                fence: Fence(1),
+                lease_expires: UniverseTick(1_000),
+                in_transfer: None,
+            }),
+        };
+        let bytes = crate::io::bytes(
+            postcard::to_allocvec(&InterShardFlow::DirectoryReply(reply)).expect("encode"),
+        );
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Saga,
+            bytes,
+        }]);
+    }
+
+    /// A parented PLANET shard (own Planet(42) under System(7)) with its OWN realm granted and an ARMED
+    /// child band planted — the S2a-2b up-relay fixture. `recheck` arms the parent-resolve cadence.
+    fn parented_aoi_rig(recheck: u64) -> Rig {
+        let cfg = StubConfig {
+            realm: OTHER_REALM,
+            held_realms: StubConfig::single_realm(OTHER_REALM),
+            frame: frame_of(OTHER_REALM),
+            own_coord: child_coord_of(OWN_REALM, OTHER_REALM),
+            realm_recheck_interval: recheck,
+            ..config()
+        };
+        let mut rig = Rig::with_config(cfg);
+        grant_realm_for(&mut rig, OTHER_REALM);
+        plant_aoi(
+            &mut rig,
+            vec![
+                region(ROOT_REALM, None, DVec3::ZERO, 1.0e9),
+                region_framed(
+                    OTHER_REALM,
+                    Some(ROOT_REALM),
+                    DVec3::ZERO,
+                    100_000.0,
+                    frame_of(OTHER_REALM),
+                ),
+                aoi_child_framed(
+                    RealmId::Area(99),
+                    Some(OTHER_REALM),
+                    FrameRef::AreaLocal {
+                        planet_seed: 42,
+                        area_seed: 99,
+                    },
+                    0,
+                ),
+            ],
+        );
+        rig
+    }
+
+    #[test]
+    fn aoi_up_relays_each_dot_full_pose_to_the_resolved_parent_node() {
+        use vd_core::glam::{DQuat, I64Vec3};
+        const PARENT_NODE: NodeId = NodeId(55);
+        let mut rig = parented_aoi_rig(2);
+        resolve_parent_head(
+            &mut rig,
+            StubConfig::root_coord(OWN_REALM).lowered(),
+            PARENT_NODE,
+        );
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        // A DISTINCTIVE pose: a non-zero cell tier AND a non-identity orient + velocity — exactly what the
+        // reduced `observers` tuple would LOSE (`.offset()` zeroes the cell, and it drops orient). Reading
+        // `d.pose` directly must carry them ALL up faithfully.
+        let pose = StampedPose {
+            pos: LatticePos::at(I64Vec3::new(5, -7, 11), DVec3::new(500.0, -20.0, 7.0)),
+            vel: DVec3::new(1.0, 2.0, 3.0),
+            orient: DQuat::from_rotation_z(0.5),
+            ..StampedPose::at_rest(frame_of(OTHER_REALM), DVec3::new(500.0, 0.0, 0.0), UniverseTick(42))
+        };
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&SESSION)
+            .expect("the owned dot")
+            .pose = pose;
+        let sent = rig.tick(vec![]);
+        let ois = occupant_interests(&sent);
+        assert_eq!(ois.len(), 1, "exactly one OccupantInterest per simulated dot");
+        let (to, class, oi) = &ois[0];
+        assert_eq!(*to, PARENT_NODE, "up-relayed to the cached parent node");
+        assert_eq!(
+            *class,
+            MsgClass::SignalDelta,
+            "on the dedicated SignalDelta carrier"
+        );
+        assert_eq!(
+            *oi,
+            OccupantInterest {
+                observer: AccountId(1),
+                to_realm: StubConfig::root_coord(OWN_REALM),
+                // `universe_tick` STAMPED to the current tick (100 — the rig's universe clock); the rest of
+                // the pose (cell + offset + vel + orient) carried faithfully from `d.pose`.
+                occupant: StampedPose {
+                    universe_tick: UniverseTick(100),
+                    ..pose
+                },
+                coarsen_level: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn aoi_up_relays_nothing_from_a_root_shard() {
+        // A ROOT shard (galaxy free-fly: `own_coord` has no parent) is the TOP of the chain — it relays
+        // interest to no one. Armed + occupied, but `own_coord.parent()` is None ⇒ the relay never fires.
+        let mut rig = Rig::with_config(StubConfig {
+            realm: OWN_REALM,
+            held_realms: StubConfig::single_realm(OWN_REALM),
+            frame: frame_of(OWN_REALM),
+            own_coord: StubConfig::root_coord(OWN_REALM),
+            realm_recheck_interval: 2,
+            ..config()
+        });
+        grant_realm_for(&mut rig, OWN_REALM);
+        plant_aoi(
+            &mut rig,
+            vec![
+                region(ROOT_REALM, None, DVec3::ZERO, 1.0e9),
+                aoi_child(OTHER_REALM, ROOT_REALM, 1000.0, 0),
+            ],
+        );
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        rig.set_local_tick(4);
+        assert!(
+            occupant_interests(&rig.tick(vec![])).is_empty(),
+            "a root shard up-relays no OccupantInterest"
+        );
+    }
+
+    #[test]
+    fn aoi_resolves_the_parent_but_up_relays_nothing_until_the_node_is_known() {
+        // Parented + armed + on cadence, but the parent Head has NOT come back yet: the resolve HeadRead
+        // fires (so the node WILL arrive), but NO OccupantInterest until it does (the inner-unresolved arm).
+        let mut rig = parented_aoi_rig(2);
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        rig.set_local_tick(4);
+        let sent = rig.tick(vec![]);
+        let parent_key = DirectoryKey::Realm(StubConfig::root_coord(OWN_REALM).lowered());
+        assert!(
+            headreads(&sent).contains(&parent_key),
+            "the parent HeadRead fires (resolving the node)"
+        );
+        assert!(
+            occupant_interests(&sent).is_empty(),
+            "no up-relay until the parent node is resolved"
+        );
     }
 }
