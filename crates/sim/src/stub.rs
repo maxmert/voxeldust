@@ -557,12 +557,25 @@ impl RegionMembership {
 #[derive(Resource, Debug, Default)]
 pub struct ContainmentProgress(pub BTreeMap<EntityId, RegionMembership>);
 
-/// Per-CHILD AoI hysteresis + grace (RLM Step 2), keyed by child `RealmPath` (globally unique — Step 3
-/// dedups on `child.path()`). Twin of [`ContainmentProgress`], but CHILD-path-keyed (not entity-keyed).
-/// `BTreeMap` (no default-hasher HashMap in sim — determinism). Default empty; lazily evicted each tick
-/// to the current direct-child roster (`retain_live`).
+/// Identity of ONE AoI observer — the key that gives each occupant its OWN per-child hysteresis latch
+/// (VU S0: the cull is now PER-OBSERVER, not a global scalar-min over all occupants). The observers this
+/// shard evaluates are the occupants it SIMULATES: a durable dot (keyed by its `SessionId`) or a held
+/// transient (keyed by its `EntityId`). A later slice (S2b) adds a third arm for an up-relayed PROXY
+/// occupant (a durable player id) — the parent's cull of a deep observer's siblings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ObserverId {
+    Dot(SessionId),
+    Transient(EntityId),
+}
+
+/// Per-`(observer, child)` AoI hysteresis + grace (RLM Step 2 → VU S0 per-observer). Keyed by the
+/// OBSERVER plus the child `RealmPath` (globally unique — Step 3 dedups on `child.path()`), so each
+/// occupant carries its own acquire/grace latch and the child-level demand is the UNION over observers
+/// ([`union_verb`]). Twin of [`ContainmentProgress`]. `BTreeMap` (no default-hasher HashMap in sim —
+/// determinism). Default empty; lazily evicted each tick to the current (observer × direct-child) roster
+/// (`retain_live`).
 #[derive(Resource, Debug, Default)]
-pub struct AoiMembership(pub BTreeMap<RealmPath, AoiState>);
+pub struct AoiMembership(pub BTreeMap<(ObserverId, RealmPath), AoiState>);
 
 /// One direct child's AoI state: `was_in` (acquired — for the hysteresis) + `grace_remaining` (ticks a
 /// would-be release is held after the last in-range observation).
@@ -4468,12 +4481,13 @@ fn evaluate_realm_aoi(
     );
 }
 
-/// The monomorphic AoI decision (ALL branching HERE, HR5). For each direct child: reduce the occupant set
-/// to a scalar min distance (live + F7 predictive), run the per-child hysteresis + grace machine, and emit
-/// the resulting verb. With ZERO occupants the shard self-reports `Empty{own_coord}` (the sole occupancy
-/// authority a sealed parent cannot see — Step-3 EDGE 1). Deterministic: occupants reduce to a scalar min
-/// BEFORE any emit (iteration order cannot leak into the demand set, H-2); children fold in the stable
-/// seed-derived `child_placements` order.
+/// The monomorphic AoI decision (ALL branching HERE, HR5). PER-OBSERVER (VU S0): each occupant carries its
+/// OWN acquire/grace latch keyed `(observer, child.path())`, and the child-level demand is the UNION over
+/// observers ([`union_verb`]) — SpinUp the tick a child FIRST becomes demanded by anyone, KeepAlive while
+/// sustained. With ZERO occupants the shard self-reports `Empty{own_coord}` (the sole occupancy authority a
+/// sealed parent cannot see — Step-3 EDGE 1). Deterministic: at most ONE demand per child, emitted AFTER
+/// the observer fold (occupant iteration order cannot leak into the demand set, H-2); children fold in the
+/// stable seed-derived `child_placements` order.
 #[allow(clippy::too_many_arguments)]
 fn aoi_decide(
     config: &StubConfig,
@@ -4482,7 +4496,7 @@ fn aoi_decide(
     dots: &Dots,
     owned: &OwnedTransients,
     realm_fence: Fence,
-    membership: &mut BTreeMap<RealmPath, AoiState>,
+    membership: &mut BTreeMap<(ObserverId, RealmPath), AoiState>,
     outbox: &mut OutboundBox,
 ) {
     let own_coord = &config.own_coord;
@@ -4490,26 +4504,27 @@ fn aoi_decide(
     let tick_hz = 1.0 / config.tick_dt_s;
     let horizon_s = f64::from(config.boot_ticks_p99) * config.tick_dt_s; // F7 predictive horizon
 
-    // Occupants = owned durable dots this shard SIMULATES ∪ held transients (mirror
-    // `evaluate_realm_boundaries`). Each reduced to frame-local `(pos, vel)` — the SAME own frame the
-    // child placements use (H-1) — so the AoI distance and the observer feed measure one geometry.
-    let occupants: Vec<(DVec3, DVec3)> = dots
+    // Observers = owned durable dots this shard SIMULATES ∪ held transients (mirror
+    // `evaluate_realm_boundaries`), each TAGGED with its `ObserverId` + reduced to frame-local `(pos, vel)`
+    // — the SAME own frame the child placements use (H-1) — so the AoI distance and the observer feed
+    // measure one geometry.
+    let observers: Vec<(ObserverId, DVec3, DVec3)> = dots
         .0
-        .values()
-        .filter(|d| d.authority.simulates())
-        .map(|d| (d.pose.pos.offset(), d.pose.vel))
+        .iter()
+        .filter(|(_, d)| d.authority.simulates())
+        .map(|(s, d)| (ObserverId::Dot(*s), d.pose.pos.offset(), d.pose.vel))
         .chain(
             owned
                 .0
-                .values()
-                .filter(|t| t.status.is_held())
-                .map(|t| (t.pose.pos.offset(), t.pose.vel)),
+                .iter()
+                .filter(|(_, t)| t.status.is_held())
+                .map(|(e, t)| (ObserverId::Transient(*e), t.pose.pos.offset(), t.pose.vel)),
         )
         .collect();
 
     // Zero-occupant self-report: this CHILD shard tells the orchestrator its OWN realm holds nobody
     // (`child == own_coord`). Fence = this shard's own realm authority over its emptiness.
-    if occupants.is_empty() {
+    if observers.is_empty() {
         push_demand(
             outbox,
             config.orchestrator,
@@ -4524,19 +4539,42 @@ fn aoi_decide(
     // The UNIFIED direct-child placements (movers authored from ephemeris, static children at `center`),
     // stable seed-derived Vec order — the SAME code-path the observer feed reads (H-1/H-2, no reorder).
     let placements = regions.child_placements(config.realm, tick_hz, tick);
-    let mut live_paths = BTreeSet::<RealmPath>::new();
+    let mut live_keys = BTreeSet::<(ObserverId, RealmPath)>::new();
     for (region, pose) in &placements {
         let level = region_level(region);
         let child_coord = own_coord.child(level);
-        let key = child_coord.path().clone();
-        live_paths.insert(key.clone());
+        let path = child_coord.path().clone();
         let child_pos = pose.pos.offset(); // own frame (== the placements' frame)
 
-        let min_dist_eff = aoi_min_dist(&occupants, child_pos, horizon_s);
-        let state = membership.get(&key).copied().unwrap_or_default();
-        let now_in = region.aoi.in_range(state.was_in, min_dist_eff);
-        let (verb, next) = aoi_transition(state, now_in, region.aoi.grace_ticks());
-        if let Some(v) = verb {
+        // Was the child kept-alive by ANY observer at tick START (its acquire latch held)? — the input to
+        // the SpinUp-vs-KeepAlive union split, read BEFORE this tick's latch updates.
+        let was_demanded = observers
+            .iter()
+            .any(|(obs, _, _)| membership.get(&(*obs, path.clone())).is_some_and(|s| s.was_in));
+        // Fold each observer's own hysteresis machine; a child is demanded THIS tick iff ANY observer's
+        // machine keeps it live (SpinUp | KeepAlive).
+        let mut now_demanded = false;
+        for (obs, opos, ovel) in &observers {
+            let key = (*obs, path.clone());
+            live_keys.insert(key.clone());
+            let dist = occupant_child_dist(*opos, *ovel, child_pos, horizon_s);
+            let state = membership.get(&key).copied().unwrap_or_default();
+            let now_in = region.aoi.in_range(state.was_in, dist);
+            let (verb, next) = aoi_transition(state, now_in, region.aoi.grace_ticks());
+            if matches!(verb, Some(DemandVerb::SpinUp | DemandVerb::KeepAlive)) {
+                now_demanded = true;
+            }
+            match next {
+                Some(s) => {
+                    membership.insert(key, s);
+                }
+                None => {
+                    membership.remove(&key);
+                }
+            }
+        }
+        // ONE demand per child = the observer union (deterministic — independent of observer order).
+        if let Some(v) = union_verb(was_demanded, now_demanded) {
             debug_assert!(
                 v != DemandVerb::TearDown,
                 "Step 2 never emits parent TearDown — the Step-3 closure is the sole kill authority (M-1)"
@@ -4550,31 +4588,34 @@ fn aoi_decide(
                 tick,
             );
         }
-        match next {
-            Some(s) => {
-                membership.insert(key, s);
-            }
-            None => {
-                membership.remove(&key);
-            }
-        }
     }
-    // Evict any child-path no longer in the roster (no leak) — the DRY primitive, keyed by RealmPath.
-    retain_live(membership, &live_paths);
+    // Evict any (observer, child-path) pair no longer live (an observer that left OR a child dropped from
+    // the roster) — the DRY primitive, keyed by `(ObserverId, RealmPath)`.
+    retain_live(membership, &live_keys);
 }
 
-/// The smallest distance from ANY occupant to `child_pos`, taking the LESSER of the live distance and the
-/// F7 predictive distance (`occ_pos + occ_vel·horizon_s`) — so a fast occupant demands spin-up BEFORE it
+/// The effective AoI distance from ONE occupant to `child_pos`: the LESSER of the live distance and the F7
+/// predictive distance (`occ_pos + occ_vel·horizon_s`) — so a fast occupant demands spin-up BEFORE it
 /// arrives (boot latency masked). A STATIC occupant has `vel == 0` ⇒ `pred == live` ⇒ no predictive term.
-/// Straight-line fold (monomorphic, HR5); the scalar min is order-independent.
-fn aoi_min_dist(occupants: &[(DVec3, DVec3)], child_pos: DVec3, horizon_s: f64) -> f64 {
-    let mut min = f64::MAX;
-    for (pos, vel) in occupants {
-        let live = (child_pos - *pos).length();
-        let pred = (child_pos - (*pos + *vel * horizon_s)).length();
-        min = min.min(live).min(pred);
+/// Straight-line (monomorphic, HR5); the cross-observer UNION now lives in [`aoi_decide`]/[`union_verb`].
+fn occupant_child_dist(occ_pos: DVec3, occ_vel: DVec3, child_pos: DVec3, horizon_s: f64) -> f64 {
+    let live = (child_pos - occ_pos).length();
+    let pred = (child_pos - (occ_pos + occ_vel * horizon_s)).length();
+    live.min(pred)
+}
+
+/// The child-level demand verb = the UNION over observers of the per-observer hysteresis machines.
+/// `was` = any observer kept the child demanded at tick start; `now` = any observer keeps it demanded this
+/// tick. SpinUp the tick a child FIRST becomes demanded by anyone, KeepAlive while sustained, nothing when
+/// no observer wants it. The Step-3 reconciler folds SpinUp and KeepAlive IDENTICALLY (`refresh_demand`);
+/// the split preserves the single-observer byte-shape (one occupant ⇒ exactly today's SpinUp→KeepAlive).
+/// Monomorphic, every arm a covered region (HR5).
+fn union_verb(was: bool, now: bool) -> Option<DemandVerb> {
+    match (was, now) {
+        (false, true) => Some(DemandVerb::SpinUp),
+        (true, true) => Some(DemandVerb::KeepAlive),
+        (_, false) => None,
     }
-    min
 }
 
 /// The per-child hysteresis + grace state machine (ALL of it monomorphic — each arm a covered region,
@@ -11884,21 +11925,36 @@ mod tests {
     }
 
     #[test]
-    fn aoi_min_dist_takes_the_lesser_of_live_and_predictive() {
+    fn occupant_child_dist_takes_the_lesser_of_live_and_predictive() {
         let child = DVec3::ZERO;
-        // A STATIC occupant: pred == live == its distance.
+        // A STATIC occupant (vel 0): pred == live == its distance.
         assert_eq!(
-            aoi_min_dist(&[(DVec3::new(500.0, 0.0, 0.0), DVec3::ZERO)], child, 1.0),
+            occupant_child_dist(DVec3::new(500.0, 0.0, 0.0), DVec3::ZERO, child, 1.0),
             500.0
         );
-        // A MOVING occupant closing in: pred (300) beats live (1500).
-        let occ = (DVec3::new(1500.0, 0.0, 0.0), DVec3::new(-1200.0, 0.0, 0.0));
-        assert_eq!(aoi_min_dist(&[occ], child, 1.0), 300.0);
-        // The MIN across two occupants — order-independent (H-2).
-        let a = (DVec3::new(900.0, 0.0, 0.0), DVec3::ZERO);
-        let b = (DVec3::new(400.0, 0.0, 0.0), DVec3::ZERO);
-        assert_eq!(aoi_min_dist(&[a, b], child, 1.0), 400.0);
-        assert_eq!(aoi_min_dist(&[b, a], child, 1.0), 400.0);
+        // A MOVING occupant closing in: pred (300) beats live (1500) — the F7 predictive term.
+        assert_eq!(
+            occupant_child_dist(
+                DVec3::new(1500.0, 0.0, 0.0),
+                DVec3::new(-1200.0, 0.0, 0.0),
+                child,
+                1.0
+            ),
+            300.0
+        );
+        // (The cross-observer MIN/union now lives in `aoi_decide`/`union_verb`, covered by
+        // `evaluate_realm_aoi_demand_order_is_stable` + the two-observer tests below.)
+    }
+
+    #[test]
+    fn union_verb_is_spinup_on_first_demand_keepalive_while_sustained() {
+        // The child-level demand = the observer union: SpinUp the tick a child FIRST becomes demanded by
+        // anyone, KeepAlive while any observer sustains it, nothing when none want it. (One observer ⇒
+        // exactly the per-observer SpinUp→KeepAlive sequence, so the single-observer byte-shape is kept.)
+        assert_eq!(union_verb(false, true), Some(DemandVerb::SpinUp)); // newly demanded by someone
+        assert_eq!(union_verb(true, true), Some(DemandVerb::KeepAlive)); // still demanded
+        assert_eq!(union_verb(true, false), None); // the last observer left ⇒ drop (never a TearDown)
+        assert_eq!(union_verb(false, false), None); // never demanded
     }
 
     #[test]
@@ -12241,6 +12297,93 @@ mod tests {
         assert!(
             rig.world.resource::<AoiMembership>().0.is_empty(),
             "a departed child's AoI state is evicted"
+        );
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_two_observers_latch_independently_and_union() {
+        // VU S0: each observer carries its OWN acquire/grace latch; the child-level demand is their UNION.
+        // A hands the child off to B (A leaves as B arrives) WITHOUT a thrash — the child stays KeepAlive
+        // across the swap (never a re-SpinUp, never a drop), and both latches are tracked independently.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 2),
+            ],
+        );
+        let a = SessionId(1);
+        let b = SessionId(2);
+        insert_owned_dot(&mut rig, a, player(1), DVec3::new(500.0, 0.0, 0.0)); // A in range (< spin-up)
+        insert_owned_dot(&mut rig, b, player(2), DVec3::new(3000.0, 0.0, 0.0)); // B out (past tear-down)
+        // Tick 1: A acquires ⇒ exactly ONE SpinUp (the union); ONLY A holds a latch (B is out of range).
+        assert_eq!(
+            demands(&rig.tick(vec![]))
+                .iter()
+                .map(|d| d.verb)
+                .collect::<Vec<_>>(),
+            vec![DemandVerb::SpinUp]
+        );
+        assert_eq!(
+            rig.world.resource::<AoiMembership>().0.len(),
+            1,
+            "only the in-range observer holds a latch"
+        );
+        // A leaves (into grace) as B arrives: the child stays demanded via the union — ONE KeepAlive, no
+        // re-SpinUp, no drop — and NOW both observers hold a latch (A grace-holding, B acquired).
+        move_dot(&mut rig, a, DVec3::new(3000.0, 0.0, 0.0));
+        move_dot(&mut rig, b, DVec3::new(500.0, 0.0, 0.0));
+        assert_eq!(
+            demands(&rig.tick(vec![]))
+                .iter()
+                .map(|d| d.verb)
+                .collect::<Vec<_>>(),
+            vec![DemandVerb::KeepAlive]
+        );
+        assert_eq!(
+            rig.world.resource::<AoiMembership>().0.len(),
+            2,
+            "both observers hold independent latches (A in grace, B acquired)"
+        );
+    }
+
+    #[test]
+    fn evaluate_realm_aoi_per_observer_hysteresis_is_stricter_than_the_old_global_min() {
+        // VU S0 correctness: per-observer latches are STRICTER (more correct) than the old global-min.
+        // Observer A acquires then leaves entirely; observer B loiters in the HYSTERESIS band (past spin-up,
+        // inside tear-down) but NEVER acquired. Per-observer: once A is gone the child STOPS being demanded
+        // (B's release-band distance can't hold a latch it never acquired). The old global-min WOULD have
+        // kept it alive (B is within tear-down of the SHARED latch A set) — the flaw this per-observer fixes.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0), // grace 0 ⇒ A drops the instant it is out
+            ],
+        );
+        let a = SessionId(1);
+        let b = SessionId(2);
+        insert_owned_dot(&mut rig, a, player(1), DVec3::new(500.0, 0.0, 0.0)); // A acquires (< spin-up 1000)
+        insert_owned_dot(&mut rig, b, player(2), DVec3::new(1500.0, 0.0, 0.0)); // B loiters in the band
+        // Tick 1: A acquires, B (past spin-up, never acquired) does not ⇒ exactly one SpinUp.
+        assert_eq!(
+            demands(&rig.tick(vec![]))
+                .iter()
+                .map(|d| d.verb)
+                .collect::<Vec<_>>(),
+            vec![DemandVerb::SpinUp]
+        );
+        // A leaves entirely (past tear-down 2000); B stays loitering in the hysteresis band.
+        move_dot(&mut rig, a, DVec3::new(3000.0, 0.0, 0.0));
+        assert!(
+            demands(&rig.tick(vec![])).is_empty(),
+            "B never acquired ⇒ once A is gone the child stops being demanded (global-min would wrongly hold)"
         );
     }
 
