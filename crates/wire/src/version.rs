@@ -32,7 +32,12 @@ pub const PROTO_MAJOR: u16 = 1;
 /// minor 3 this is a mesh carrier (one cluster build), version-visible for the release-conformance ledger.
 /// (The RLM `PeerLocate`/`PeerLocated` address-lookup pair, if it lands, takes minor 5 — it was earlier
 /// pencilled at 4, but the greeting lands first and `PeerLocate` remains user-gated + may be declined.)
-pub const PROTO_MINOR: u16 = 4;
+///
+/// minor 5 appended `ServerControlMsg::RealmRegistry` — the wire-delivered realm render-scene (VU): the gateway
+/// ships the AoI-scoped realm SHAPES so a fully-agnostic client draws its world from the STREAM ALONE, retiring
+/// the `--realm-boxes` boot file as the networked source. (This took the minor slot earlier pencilled for
+/// `PeerLocate`, which remains user-gated + may be declined.)
+pub const PROTO_MINOR: u16 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -88,14 +93,14 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 4,
-            "minor 4 appended ShardPresence (minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate)"
+            PROTO_MINOR, 5,
+            "minor 5 appended RealmRegistry (minor 4 ShardPresence, minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate)"
         );
         assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.4");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.5");
         // Sender-gates-variants: talking to an older minor-1 peer negotiates DOWN to
         // minor 1, so the gateway withholds the minor-2 OwnEntity variant (falling back to
         // the retained-ghost/AuthorityChanged path). An even-older minor-0 peer negotiates

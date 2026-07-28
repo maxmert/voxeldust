@@ -19,7 +19,8 @@
 //! `proto_minor` negotiation.
 
 use serde::{Deserialize, Serialize};
-use vd_core::pose::{FrameRef, RealmId, StampedPose};
+use vd_core::geometry::Boundary;
+use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, SessionId, TickId, TransferId, UniverseTick};
 
 use crate::seams::tickets::{LoginTicket, ResumeTicket};
@@ -123,6 +124,18 @@ pub enum ServerControlMsg {
     OwnEntity {
         entity: EntityId,
     },
+    /// The AoI-scoped realm SHAPES the client renders — the wire-delivered render scene (VU, proto_minor 5),
+    /// so a FULLY-AGNOSTIC client draws its world from the STREAM ALONE (retiring the `--realm-boxes` boot file
+    /// as the networked source; the client never knows a seed or a shard). `regions` is the
+    /// ancestors-∪-direct-children neighbourhood the gateway derives seed-side (NEVER siblings, NEVER the whole
+    /// galaxy); `root` names the ambient container. It is the COMPLETE current neighbourhood each time (the
+    /// client REPLACES its scene), re-sent on a warp/cross into a new realm. The STATIC shape ships here ONCE
+    /// on realm-entry; the per-tick POSITION streams separately on the unreliable `RealmSnapshotDatagram`.
+    /// Emitted only to a peer that negotiated minor >= 5. Appended trailing variant (postcard additive rule).
+    RealmRegistry {
+        regions: Vec<RealmShape>,
+        root: RealmId,
+    },
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).
@@ -185,6 +198,23 @@ pub enum EventMsg {
 pub struct EntitySnap {
     pub entity: EntityId,
     pub pose: StampedPose,
+}
+
+/// One realm's STATIC render shape (VU, proto_minor 5) — exactly what a fully-agnostic client needs to DRAW a
+/// realm's box from the stream ALONE (no `--realm-boxes` file): its id, authoritative frame, static center,
+/// boundary (shape + extent), and parent link (the hierarchy). Carries ONLY realm identities + geometry —
+/// NEVER a `NodeId`/`SubId`/shard (node-agnostic) and NEVER server-only config (the AoI band + hysteresis stay
+/// off the wire; that is why this is a render SUBSET, not the full `RealmRegion`, which also keeps `RealmRegion`
+/// free to grow `#[serde(default)]` fields on its self-describing JSON boot path). The per-tick POSITION streams
+/// separately on [`RealmSnapshotDatagram`]; this static shape ships ONCE via [`ServerControlMsg::RealmRegistry`]
+/// when the realm enters the client's AoI.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RealmShape {
+    pub realm: RealmId,
+    pub frame: FrameRef,
+    pub center: LatticePos,
+    pub shape: Boundary,
+    pub parent: Option<RealmId>,
 }
 
 /// One REALM's authored placement inside a realm-snapshot frame (the frame-authority
@@ -521,6 +551,46 @@ mod tests {
         assert_eq!(
             postcard::from_bytes::<ServerControlMsg>(&own_bytes).expect("decode"),
             own
+        );
+    }
+
+    #[test]
+    fn realm_registry_is_additive_minor_5_and_empty_is_render_neutral() {
+        use vd_core::glam::DVec3;
+        // Appended AFTER OwnEntity ⇒ a minor<5 sender's bytes (any prior variant, here OwnEntity itself) still
+        // decode unchanged on a minor-5 decoder — a trailing variant never shifts a prior discriminant/framing.
+        let prior = ServerControlMsg::OwnEntity { entity: eid() };
+        let prior_bytes = postcard::to_allocvec(&prior).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&prior_bytes).expect("decode"),
+            prior
+        );
+        // The new variant round-trips with a full realm shape (id + frame + static center + boundary + parent).
+        let reg = ServerControlMsg::RealmRegistry {
+            regions: vec![RealmShape {
+                realm: RealmId::Planet(7),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                center: LatticePos::local(DVec3::new(20.0, 0.0, 0.0)),
+                shape: Boundary::Shell { r: 10.0 },
+                parent: Some(RealmId::System(7)),
+            }],
+            root: RealmId::System(0),
+        };
+        let bytes = postcard::to_allocvec(&reg).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&bytes).expect("decode"),
+            reg
+        );
+        // An EMPTY neighbourhood round-trips (the byte-cheap-when-empty precedent — a client with nothing in
+        // AoI gets a well-formed empty scene, never a decode fault).
+        let empty = ServerControlMsg::RealmRegistry {
+            regions: Vec::new(),
+            root: RealmId::System(0),
+        };
+        let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&empty_bytes).expect("decode"),
+            empty
         );
     }
 
