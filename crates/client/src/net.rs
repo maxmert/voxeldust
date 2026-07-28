@@ -230,6 +230,18 @@ impl ClientState {
             ServerControlMsg::UniverseRate { tick_hz } => {
                 self.set_tick_hz_from_wire(tick_hz);
             }
+            // THE streamed realm render-scene (VU proto_minor 5): a fully-agnostic client draws its world
+            // from the STREAM ALONE, so REPLACE the boot box scene with the AoI-scoped realm neighbourhood the
+            // gateway shipped. The live per-realm poses keep riding `realm_view` and OVERLAY onto these boxes
+            // at publish time — exactly as they did over the boot-file scene. `root` (the ambient container)
+            // is unused until camera framing (VU-6). A malformed neighbourhood (a duplicate/cyclic realm — a
+            // server bug) is counted on the shared decode counter and the previous scene kept, never a crash.
+            ServerControlMsg::RealmRegistry { regions, .. } => {
+                match RealmScene::from_shapes(&regions) {
+                    Ok(scene) => self.scene = Arc::new(scene),
+                    Err(_) => self.decode_errors += 1,
+                }
+            }
             // Node-AWARE legacy control a pure-renderer client no longer acts on: `AuthorityChanged`
             // (the sub re-point — superseded by `OwnEntity` + EntityId-keyed latest-wins render) and
             // `RequestCut` (the cut is server-timed now, S3 — the client stamps nothing). Both are
@@ -611,7 +623,7 @@ mod tests {
     use vd_core::pose::{FrameRef, StampedPose};
     use vd_core::{AccountId, EpochId, Fence, MsgId, TransferId, UniverseTick};
     use vd_sim::io::{Bytes, SendError};
-    use vd_wire::channels::{EntitySnap, SubId};
+    use vd_wire::channels::{EntitySnap, RealmShape, SubId};
 
     const GATEWAY: NodeId = NodeId(2);
     const OTHER: NodeId = NodeId(99);
@@ -1480,5 +1492,97 @@ mod tests {
         let snap = c.state().render_snapshot();
         assert_eq!(snap.scene().len(), 1, "the loaded box is on the seam");
         assert!(snap.scene().get(RealmId::System(7)).is_some());
+    }
+
+    /// One streamed render shape (VU proto_minor 5): a realm at origin with a `Shell{r}` boundary — `r`
+    /// large ⇒ an ambient (skipped) shell, `r` small ⇒ a finite drawn leaf.
+    fn realm_shape(
+        realm: vd_core::pose::RealmId,
+        parent: Option<vd_core::pose::RealmId>,
+        r: f64,
+    ) -> RealmShape {
+        RealmShape {
+            realm,
+            frame: FrameRef::SystemSpace { system_seed: 0 },
+            center: vd_core::pose::LatticePos::local(DVec3::ZERO),
+            shape: vd_core::geometry::Boundary::Shell { r },
+            parent,
+        }
+    }
+
+    /// A `RealmRegistry` control-message fixture carrying `regions` (root = the ambient `System(0)`).
+    fn realm_registry(regions: Vec<RealmShape>) -> Vec<u8> {
+        postcard::to_allocvec(&ServerControlMsg::RealmRegistry {
+            regions,
+            root: vd_core::pose::RealmId::System(0),
+        })
+        .expect("test fixture")
+    }
+
+    #[test]
+    fn a_streamed_realm_registry_replaces_the_boot_scene_and_skips_ambient_shells() {
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        assert!(
+            c.state().render_snapshot().scene().is_empty(),
+            "no boxes before any stream arrives"
+        );
+        // The AoI neighbourhood the gateway ships: a finite renderable planet under an ~unbounded ambient
+        // shell. A fully-agnostic client draws its world from THIS alone — no --realm-boxes file.
+        let regions = vec![
+            realm_shape(RealmId::System(0), None, 1_000_000_000.0), // ambient — felt, not framed
+            realm_shape(RealmId::Planet(7), Some(RealmId::System(0)), 10.0), // finite leaf — drawn
+        ];
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, realm_registry(regions));
+        c.step(0.0);
+        let snap = c.state().render_snapshot();
+        assert_eq!(
+            snap.scene().len(),
+            1,
+            "only the finite leaf is framed (the ambient shell is skipped)"
+        );
+        assert!(
+            snap.scene().get(RealmId::Planet(7)).is_some(),
+            "the streamed planet box is on the render seam"
+        );
+        assert_eq!(
+            c.state().dropped_counts().0,
+            0,
+            "a well-formed stream is no decode error"
+        );
+    }
+
+    #[test]
+    fn a_malformed_streamed_registry_is_counted_and_keeps_the_previous_scene() {
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        // A valid stream first establishes a scene.
+        let good = vec![realm_shape(RealmId::Planet(7), None, 10.0)];
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, realm_registry(good));
+        c.step(0.0);
+        assert_eq!(c.state().render_snapshot().scene().len(), 1);
+        // A DUPLICATE-realm neighbourhood (a server bug) is rejected LOUD by `from_shapes`: counted on the
+        // shared decode counter, and the previous good scene is KEPT — never a crash, never an empty flash.
+        let dup = vec![
+            realm_shape(RealmId::Planet(7), None, 10.0),
+            realm_shape(RealmId::Planet(7), None, 10.0),
+        ];
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, realm_registry(dup));
+        c.step(0.0);
+        assert_eq!(
+            c.state().dropped_counts().0,
+            1,
+            "the duplicate-realm stream is one decode error"
+        );
+        let snap = c.state().render_snapshot();
+        assert_eq!(
+            snap.scene().len(),
+            1,
+            "the previous good scene is kept when a stream is malformed"
+        );
+        assert!(snap.scene().get(RealmId::Planet(7)).is_some());
     }
 }

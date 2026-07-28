@@ -20,6 +20,7 @@ use glam::DVec3;
 use vd_core::geometry::{Boundary, RealmBoundary, RealmRegion};
 use vd_core::pose::{FrameRef, RealmId};
 use vd_core::worldgen::MAX_RENDERABLE_EXTENT_M;
+use vd_wire::channels::RealmShape;
 
 use crate::realm_view::RealmView;
 
@@ -169,18 +170,48 @@ impl RealmScene {
     /// [`SceneError::DuplicateRealm`] on a repeated realm id (the seed forest guarantees uniqueness — a
     /// duplicate is a generator bug); [`SceneError::CycleOrDepthExceeded`] on a cyclic/over-deep chain.
     pub fn from_regions(regions: &[RealmRegion]) -> Result<RealmScene, SceneError> {
-        // Pass 1: the parent map over the WHOLE forest (renderable + ambient), rejecting duplicates — so
-        // the depth walk is a LOOKUP over the true nesting, not just the renderable subset.
+        // A `RealmRegion` (seed forest / `regions.json`) lowers 1:1 to the wire render subset
+        // [`RealmShape`] — realm + frame + static center + boundary + parent — dropping the server-side AoI
+        // band. The projection then lives ONCE in [`RealmScene::from_shapes`], so the boot-file path and the
+        // STREAMED-scene path (VU proto_minor 5) draw byte-identical geometry from a single algorithm.
+        let shapes: Vec<RealmShape> = regions
+            .iter()
+            .map(|r| RealmShape {
+                realm: r.realm,
+                frame: r.frame,
+                center: r.center,
+                shape: r.shape,
+                parent: r.parent,
+            })
+            .collect();
+        RealmScene::from_shapes(&shapes)
+    }
+
+    /// Project a slice of wire render [`RealmShape`]s — the AoI-scoped realm SHAPES a fully-agnostic client
+    /// receives on `ServerControlMsg::RealmRegistry` (VU proto_minor 5) — into the render scene. THE
+    /// streamed single-source: the client draws its world
+    /// from the STREAM ALONE (no `--realm-boxes` file), and [`from_regions`](Self::from_regions) delegates
+    /// here so the file path is byte-identical. Only FINITE LEAF realms are drawn (extent
+    /// `<= worldgen::MAX_RENDERABLE_EXTENT_M`); the ~unbounded ambient shells (Galaxy/Universe) are SKIPPED —
+    /// the between-space is FELT, not framed. Depth is computed over the FULL neighbourhood's parent links so
+    /// a rendered System keeps its true nesting depth even though its skipped ambient parent is not drawn.
+    ///
+    /// # Errors
+    /// [`SceneError::DuplicateRealm`] on a repeated realm id (the seed neighbourhood guarantees uniqueness —
+    /// a duplicate is a server bug); [`SceneError::CycleOrDepthExceeded`] on a cyclic/over-deep chain.
+    pub fn from_shapes(shapes: &[RealmShape]) -> Result<RealmScene, SceneError> {
+        // Pass 1: the parent map over the WHOLE neighbourhood (renderable + ambient), rejecting duplicates —
+        // so the depth walk is a LOOKUP over the true nesting, not just the renderable subset.
         let mut parents: BTreeMap<RealmId, Option<RealmId>> = BTreeMap::new();
-        for r in regions {
+        for r in shapes {
             if parents.insert(r.realm, r.parent).is_some() {
                 return Err(SceneError::DuplicateRealm);
             }
         }
-        // Pass 2: project ONLY the finite renderable regions (skip the ambient Galaxy/Universe shells),
+        // Pass 2: project ONLY the finite renderable shapes (skip the ambient Galaxy/Universe shells),
         // computing depth over the FULL map so a rendered System keeps its true depth.
         let mut boxes: BTreeMap<RealmId, RealmBox> = BTreeMap::new();
-        for r in regions {
+        for r in shapes {
             if r.shape.finite_extent() > MAX_RENDERABLE_EXTENT_M {
                 continue; // ambient (non-renderable) shell — felt, not framed
             }
