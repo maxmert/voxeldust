@@ -296,6 +296,27 @@ pub struct RealmConfirmedAt(pub TickId);
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentRealmNode(pub Option<NodeId>);
 
+/// VU AoI S2b — the up-relayed occupants this (parent) shard RETAINS as PROXY observers of its OWN AoI, so it
+/// culls the occupant's SIBLINGS (the neighbour district / rest of the system) against the relayed position
+/// and warms them AHEAD of the traveller reaching them. Written from the `OccupantInterest` receive arm; the
+/// retained pose folds into `aoi_decide`'s observer set (S2b-iii). Keyed by the DURABLE `AccountId` (survives
+/// the occupant's re-home; matches the render-route identity; last-wins collapses the brief dual-relay while
+/// an occupant is crossing between two children). PURE AoI cull input — NEVER an authority store (HR1): no
+/// fence, never an owned entity, never persisted, never a transfer subject. `BTreeMap` (sim determinism — no
+/// default-hasher `HashMap`). EMPTY at walk/static (the up-flow is inert until armed) ⇒ byte-identical; empty
+/// on restart (the non-durability IS the re-home stale-occupant guard — it refills within one TTL window).
+#[derive(Resource, Debug, Default)]
+pub struct RetainedOccupants(pub BTreeMap<AccountId, RetainedOccupant>);
+
+/// One retained proxy occupant (VU AoI S2b): the last-relayed pose (in the CHILD realm's OWN frame — composed
+/// to the parent frame at fold time, never stored pre-composed, so a moving child re-composes fresh each tick)
+/// plus its last arrival tick on THIS shard's local clock (the anti-flicker TTL base).
+#[derive(Clone, Debug)]
+pub struct RetainedOccupant {
+    pub occupant: StampedPose,
+    pub last_seen: TickId,
+}
+
 /// RLM 5f RG-1 — the reactive-greeting policy for a DEMAND-SPAWNED shard. A shard minted at spawn has a
 /// `NodeId` its peers never booked, so it makes itself reachable by GREETING every one of them: it sends a
 /// reliable [`ShardPresence`] and the peer's mesh learns the return connection (no address needed — the
@@ -1118,10 +1139,13 @@ pub struct StubStats {
     /// Slice 3e — `CrossingAborted` whose transfer id did NOT match the subject's current latch (a stale
     /// abort for a superseded / re-latched crossing) — a counted no-op, the latch is preserved. `0` healthy.
     pub crossing_abort_stale: u64,
-    /// VU AoI S2a — up-relayed `OccupantInterest` hints RECEIVED by this (parent) shard. This slice decodes,
-    /// counts, and DROPS them (proving the up-flow reaches the parent); S2b retains and folds them into the
-    /// AoI cull. `0` at walk/static scale (the up-flow is inert until armed).
+    /// VU AoI S2a — up-relayed `OccupantInterest` hints RECEIVED + RETAINED by this (parent) shard (S2b folds
+    /// them into the AoI cull). `0` at walk/static scale (the up-flow is inert until armed).
     pub occupant_interest_received: u64,
+    /// VU AoI S2b — up-relayed `OccupantInterest` hints DROPPED as MIS-ROUTED: the relay's `to_realm` does not
+    /// lower to THIS shard's realm (a recycled-NodeId mis-delivery across a parent re-home). Rejected on
+    /// receive, never retained (the re-home stale-occupant guard). `0` healthy.
+    pub misrouted_interest: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -1278,6 +1302,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // through walk/canonical scale (inert AoI ⇒ no demand ⇒ never touched).
     world.insert_resource(AoiMembership::default());
     world.insert_resource(ParentRealmNode::default());
+    world.insert_resource(RetainedOccupants::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -1573,10 +1598,13 @@ fn process_inbound(
     // latch/dwell stores, so grouping them is a mechanical arity fix. Destructured to two `&mut` below.
     crossing: (ResMut<RequestInFlight>, ResMut<CrossingProgress>),
     mut outbox: ResMut<OutboundBox>,
-    // VU AoI S2a-2b — the cached parent-realm node (written from the parent Head reply in on_directory_reply).
-    // This fills bevy's 16th and LAST top-level param slot; any FUTURE resource must join a bundled tuple.
-    mut parent_node: ResMut<ParentRealmNode>,
+    // Bundled VU-AoI tuple `SystemParam` (bevy's 16-param, LAST slot): the cached parent-realm node (written
+    // from the parent Head reply in on_directory_reply) AND the retained up-relayed occupants (written from
+    // the OccupantInterest receive arm). Both are the parent-side up-flow stores, so grouping them is a
+    // mechanical arity fix; destructured to two `&mut` below.
+    vu_aoi: (ResMut<ParentRealmNode>, ResMut<RetainedOccupants>),
 ) {
+    let (mut parent_node, mut retained) = vu_aoi;
     let (mut registration, mut mirror) = ghost_state;
     let (mut in_flight, mut progress) = crossing;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
@@ -1637,7 +1665,9 @@ fn process_inbound(
             // DROPS it (proving the up-flow reaches this parent); S2b retains + folds it into the AoI cull.
             // A malformed / mis-classed payload is counted as undecodable, never a panic.
             MsgClass::SignalDelta => match postcard::from_bytes::<InterShardFlow>(bytes) {
-                Ok(InterShardFlow::OccupantInterest(_)) => stats.occupant_interest_received += 1,
+                Ok(InterShardFlow::OccupantInterest(oi)) => {
+                    retain_occupant(&mut retained, &config, oi, clock.local_tick, &mut stats);
+                }
                 _ => stats.undecodable += 1,
             },
         }
@@ -4907,6 +4937,35 @@ fn push_occupant_interest(
             occupant,
             coarsen_level: 0,
         }),
+    );
+}
+
+/// VU AoI S2b-i — RETAIN one up-relayed occupant on this (parent) shard (the receive side of the up-flow).
+/// Monomorphic (all branching HERE, HR5 — the generic `postcard::from_bytes` arm stays a straight call). Two
+/// arms: a MIS-ROUTED relay (its `to_realm` does not lower to this shard's realm — a recycled-NodeId
+/// mis-delivery across a parent re-home) is COUNTED + DROPPED (the stale-occupant guard); an on-target relay
+/// OVERWRITES the account's retained pose (last-wins collapses the brief dual-relay while an occupant crosses
+/// between two children) + stamps its arrival on the local clock (the anti-flicker TTL base, S2b-ii).
+fn retain_occupant(
+    store: &mut RetainedOccupants,
+    config: &StubConfig,
+    oi: OccupantInterest,
+    now: TickId,
+    stats: &mut StubStats,
+) {
+    // Single compare, no compound guard (HR5). `lowered()` matches the directory's own realm key — the
+    // colliding-alias corner is the boot-guarded D-RLM-10 case, unrepresentable in a lowered-keyed directory.
+    if oi.to_realm.lowered() != config.own_coord.lowered() {
+        stats.misrouted_interest += 1;
+        return;
+    }
+    stats.occupant_interest_received += 1;
+    store.0.insert(
+        oi.observer,
+        RetainedOccupant {
+            occupant: oi.occupant,
+            last_seen: now,
+        },
     );
 }
 
@@ -12572,10 +12631,10 @@ mod tests {
     }
 
     #[test]
-    fn signal_delta_occupant_interest_is_decoded_counted_and_dropped() {
-        // VU AoI S2a: an up-relayed OccupantInterest reaches this (parent) shard on MsgClass::SignalDelta —
-        // it is DECODED + counted + DROPPED (S2b will fold it). A malformed SignalDelta is counted as
-        // undecodable, never a panic.
+    fn signal_delta_occupant_interest_is_decoded_counted_and_retained() {
+        // VU AoI S2a/S2b-i: an up-relayed OccupantInterest reaches this (parent) shard on MsgClass::SignalDelta
+        // — it is DECODED + counted + RETAINED in RetainedOccupants (S2b-iii folds it into the AoI cull). A
+        // malformed SignalDelta is counted as undecodable, never a panic.
         let mut rig = Rig::new();
         rig.grant_realm();
         let interest = InterShardFlow::OccupantInterest(vd_wire::intershard::OccupantInterest {
@@ -12598,6 +12657,10 @@ mod tests {
             1,
             "a valid up-flow hint is decoded + counted"
         );
+        // ...and RETAINED in the store, keyed by the durable account (the receive-arm write end-to-end).
+        let store = rig.world.resource::<RetainedOccupants>();
+        assert_eq!(store.0.len(), 1);
+        assert!(store.0.contains_key(&AccountId(5)));
         assert_eq!(rig.world.resource::<StubStats>().undecodable, 0);
         // A garbage SignalDelta ⇒ undecodable, never a panic.
         let _ = rig.tick(vec![Inbound::Wire {
@@ -12615,6 +12678,74 @@ mod tests {
             1,
             "a malformed SignalDelta is counted undecodable"
         );
+    }
+
+    #[test]
+    fn retain_occupant_matches_misroutes_and_is_last_wins() {
+        let cfg = config(); // own realm System(7)
+        let mut store = RetainedOccupants::default();
+        let mut stats = StubStats::default();
+        let oi = |realm: RealmCoord, x: f64, t: u64| vd_wire::intershard::OccupantInterest {
+            observer: AccountId(7),
+            to_realm: realm,
+            occupant: StampedPose::at_rest(cfg.frame, DVec3::new(x, 0.0, 0.0), UniverseTick(t)),
+            coarsen_level: 0,
+        };
+        // An ON-TARGET relay (to_realm lowers to this shard's realm) ⇒ retained + counted.
+        retain_occupant(
+            &mut store,
+            &cfg,
+            oi(cfg.own_coord.clone(), 10.0, 1),
+            vd_core::TickId(5),
+            &mut stats,
+        );
+        assert_eq!(store.0.len(), 1);
+        assert_eq!(stats.occupant_interest_received, 1);
+        assert_eq!(store.0[&AccountId(7)].last_seen, vd_core::TickId(5));
+        // LAST-WINS: the same account, a newer relay ⇒ OVERWRITE (len unchanged, newer pose + last_seen).
+        retain_occupant(
+            &mut store,
+            &cfg,
+            oi(cfg.own_coord.clone(), 20.0, 2),
+            vd_core::TickId(9),
+            &mut stats,
+        );
+        assert_eq!(store.0.len(), 1);
+        assert_eq!(store.0[&AccountId(7)].last_seen, vd_core::TickId(9));
+        assert_eq!(store.0[&AccountId(7)].occupant.pos.offset().x, 20.0);
+        assert_eq!(stats.occupant_interest_received, 2);
+        // A MIS-ROUTED relay (to_realm lowers to a DIFFERENT realm — a recycled-NodeId mis-delivery) ⇒
+        // counted misrouted + DROPPED; the stored entry is untouched.
+        retain_occupant(
+            &mut store,
+            &cfg,
+            oi(StubConfig::root_coord(RealmId::Planet(99)), 30.0, 3),
+            vd_core::TickId(12),
+            &mut stats,
+        );
+        assert_eq!(store.0.len(), 1, "a mis-routed relay is never retained");
+        assert_eq!(
+            store.0[&AccountId(7)].last_seen,
+            vd_core::TickId(9),
+            "the stored entry is untouched by a mis-route"
+        );
+        assert_eq!(stats.misrouted_interest, 1);
+        assert_eq!(
+            stats.occupant_interest_received, 2,
+            "a mis-route is never counted as received"
+        );
+    }
+
+    #[test]
+    fn retained_occupants_stays_empty_without_any_up_relay() {
+        // Byte-identity guard: at walk/static NO OccupantInterest is emitted, so the parent store is NEVER
+        // written — it stays empty across ticks (the S2b feature is fully inert there).
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        for _ in 0..5 {
+            let _ = rig.tick(vec![]);
+        }
+        assert!(rig.world.resource::<RetainedOccupants>().0.is_empty());
     }
 
     #[test]
