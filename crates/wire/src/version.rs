@@ -37,7 +37,14 @@ pub const PROTO_MAJOR: u16 = 1;
 /// ships the AoI-scoped realm SHAPES so a fully-agnostic client draws its world from the STREAM ALONE, retiring
 /// the `--realm-boxes` boot file as the networked source. (This took the minor slot earlier pencilled for
 /// `PeerLocate`, which remains user-gated + may be declined.)
-pub const PROTO_MINOR: u16 = 5;
+///
+/// minor 6 appended `ServerControlMsg::RealmSceneDelta` + `ShardToGateway::RealmSceneDelta` — the INCREMENTAL
+/// realm render-scene (VU AoI): the scene now FOLLOWS the client's view continuously (a realm streams IN as it
+/// enters AoI, OUT as it leaves), so login/walk/warp are all "AoI membership changed". `RealmRegistry` remains
+/// the cold-start / warp re-anchor snapshot; the delta is the per-observer add/remove on top. The
+/// `ShardToGateway` arm is a mesh carrier (one cluster build), version-visible for the release-conformance
+/// ledger; the `ServerControlMsg` arm is the negotiated client-facing variant (gated on minor >= 6).
+pub const PROTO_MINOR: u16 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -93,14 +100,14 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 5,
-            "minor 5 appended RealmRegistry (minor 4 ShardPresence, minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate)"
+            PROTO_MINOR, 6,
+            "minor 6 appended RealmSceneDelta (minor 5 RealmRegistry, minor 4 ShardPresence, minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate)"
         );
         assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.5");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.6");
         // Sender-gates-variants: talking to an older minor-1 peer negotiates DOWN to
         // minor 1, so the gateway withholds the minor-2 OwnEntity variant (falling back to
         // the retained-ghost/AuthorityChanged path). An even-older minor-0 peer negotiates

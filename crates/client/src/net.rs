@@ -242,6 +242,17 @@ impl ClientState {
                     Err(_) => self.decode_errors += 1,
                 }
             }
+            // THE incremental render-scene update (VU AoI, proto_minor 6): apply the realms that ENTERED this
+            // client's view (`added`) and those that LEFT (`removed`) onto the current scene, so the world
+            // follows the view continuously. Atomic — a malformed delta (a cyclic parent chain, a server bug)
+            // is counted and the previous scene kept, never a partial mutation. The live per-realm poses keep
+            // riding `realm_view` and overlay onto whatever boxes are present.
+            ServerControlMsg::RealmSceneDelta { added, removed } => {
+                match self.scene.with_delta(&added, &removed) {
+                    Ok(scene) => self.scene = Arc::new(scene),
+                    Err(_) => self.decode_errors += 1,
+                }
+            }
             // Node-AWARE legacy control a pure-renderer client no longer acts on: `AuthorityChanged`
             // (the sub re-point — superseded by `OwnEntity` + EntityId-keyed latest-wins render) and
             // `RequestCut` (the cut is server-timed now, S3 — the client stamps nothing). Both are
@@ -1584,5 +1595,91 @@ mod tests {
             "the previous good scene is kept when a stream is malformed"
         );
         assert!(snap.scene().get(RealmId::Planet(7)).is_some());
+    }
+
+    /// A `RealmSceneDelta` control-message fixture (VU AoI, minor 6): realms that entered (`added`) + left
+    /// (`removed`).
+    fn realm_scene_delta(added: Vec<RealmShape>, removed: Vec<vd_core::pose::RealmId>) -> Vec<u8> {
+        postcard::to_allocvec(&ServerControlMsg::RealmSceneDelta { added, removed }).expect("fixture")
+    }
+
+    #[test]
+    fn a_streamed_scene_delta_adds_then_removes_a_box() {
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        // A delta ADDING one realm ⇒ the scene gains that box (the view came into range).
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            realm_scene_delta(vec![realm_shape(RealmId::Planet(7), None, 10.0)], Vec::new()),
+        );
+        c.step(0.0);
+        assert!(
+            c.state()
+                .render_snapshot()
+                .scene()
+                .get(RealmId::Planet(7))
+                .is_some(),
+            "the entered realm streams onto the render seam"
+        );
+        assert_eq!(c.state().dropped_counts().0, 0, "a well-formed delta is no error");
+        // A follow-up delta REMOVING it ⇒ the box leaves the seam (the view moved on).
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            realm_scene_delta(Vec::new(), vec![RealmId::Planet(7)]),
+        );
+        c.step(0.0);
+        assert!(
+            c.state()
+                .render_snapshot()
+                .scene()
+                .get(RealmId::Planet(7))
+                .is_none(),
+            "the departed realm is removed from the seam"
+        );
+    }
+
+    #[test]
+    fn a_malformed_scene_delta_is_counted_and_keeps_the_scene() {
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            realm_scene_delta(vec![realm_shape(RealmId::Planet(7), None, 10.0)], Vec::new()),
+        );
+        c.step(0.0);
+        assert_eq!(c.state().render_snapshot().scene().len(), 1);
+        // A CYCLIC delta (a server bug) is rejected: counted, previous scene kept, never a partial mutation.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            realm_scene_delta(
+                vec![
+                    realm_shape(RealmId::System(7), Some(RealmId::System(8)), 40.0),
+                    realm_shape(RealmId::System(8), Some(RealmId::System(7)), 40.0),
+                ],
+                Vec::new(),
+            ),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().dropped_counts().0,
+            1,
+            "the cyclic delta is one decode error"
+        );
+        assert_eq!(
+            c.state().render_snapshot().scene().len(),
+            1,
+            "the previous scene is kept on a malformed delta"
+        );
+        assert!(
+            c.state()
+                .render_snapshot()
+                .scene()
+                .get(RealmId::Planet(7))
+                .is_some()
+        );
     }
 }

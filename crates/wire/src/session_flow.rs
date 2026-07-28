@@ -16,8 +16,10 @@
 //!   ([`peek_input_seq`]) for dedup and forwards the original bytes unmodified.
 
 use serde::{Deserialize, Serialize};
-use vd_core::pose::FrameRef;
+use vd_core::pose::{FrameRef, RealmId};
 use vd_core::{AccountId, EntityId, Fence, SessionId, TickId};
+
+use crate::channels::RealmShape;
 
 use crate::channels::SubId;
 use crate::seams::directory::DirectoryKey;
@@ -124,6 +126,19 @@ pub enum ShardToGateway {
         source_tick: TickId,
         realm_snapshot_bytes: Vec<u8>,
     },
+    /// The per-OBSERVER incremental render-scene update (VU AoI, proto_minor 6): the realms among THIS
+    /// shard's own children that ENTERED (`added`) or LEFT (`removed`) `observer`'s AoI this tick, driven by
+    /// the per-observer hysteresis (S0). `observer` is the DURABLE player id (survives re-home) — the gateway
+    /// maps it to the live session and forwards a [`crate::channels::ServerControlMsg::RealmSceneDelta`] to
+    /// that client, gated on its negotiated minor >= 6. UNLIKE [`Frame`]/[`RealmFrame`] (opaque forwarded
+    /// bytes fanned to ALL subscribers), this is a TYPED, per-observer routed message the gateway decodes.
+    /// APPENDED variant (postcard-safe additive shape — a prior arm's discriminant/framing is unchanged).
+    /// Emitted only when a child crosses `observer`'s AoI edge (EMPTY sets are never sent).
+    RealmSceneDelta {
+        observer: AccountId,
+        added: Vec<RealmShape>,
+        removed: Vec<RealmId>,
+    },
 }
 
 impl ShardToGateway {
@@ -136,7 +151,8 @@ impl ShardToGateway {
             ShardToGateway::SessionAttached { .. }
             | ShardToGateway::SessionDetached { .. }
             | ShardToGateway::SubscriptionReady { .. }
-            | ShardToGateway::RealmFrame { .. } => None,
+            | ShardToGateway::RealmFrame { .. }
+            | ShardToGateway::RealmSceneDelta { .. } => None,
         }
     }
 
@@ -152,7 +168,8 @@ impl ShardToGateway {
             ShardToGateway::Frame { .. }
             | ShardToGateway::SessionAttached { .. }
             | ShardToGateway::SessionDetached { .. }
-            | ShardToGateway::SubscriptionReady { .. } => None,
+            | ShardToGateway::SubscriptionReady { .. }
+            | ShardToGateway::RealmSceneDelta { .. } => None,
         }
     }
 }
@@ -414,6 +431,13 @@ mod tests {
             realm_snapshot_bytes: vec![7, 8, 9],
         };
         assert_eq!(realm_frame.into_snapshot_bytes(), None);
+        // A RealmSceneDelta is a typed per-observer message, never an opaque frame.
+        let scene_delta = ShardToGateway::RealmSceneDelta {
+            observer: AccountId(5),
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        assert_eq!(scene_delta.into_snapshot_bytes(), None);
     }
 
     #[test]
@@ -450,6 +474,39 @@ mod tests {
             realm_fence: Fence(2),
         };
         assert_eq!(ready.into_realm_snapshot_bytes(), None);
+        let scene_delta = ShardToGateway::RealmSceneDelta {
+            observer: AccountId(5),
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        assert_eq!(scene_delta.into_realm_snapshot_bytes(), None);
+    }
+
+    #[test]
+    fn realm_scene_delta_shard_to_gateway_round_trips() {
+        use vd_core::geometry::Boundary;
+        use vd_core::glam::DVec3;
+        use vd_core::pose::LatticePos;
+        // VU AoI (proto_minor 6): a per-observer delta — one realm ENTERED the observer's AoI (its shape),
+        // one LEFT (its id) — round-trips, and is NOT an opaque forwarded frame (both extractors decline it).
+        let delta = ShardToGateway::RealmSceneDelta {
+            observer: AccountId(5),
+            added: vec![RealmShape {
+                realm: RealmId::Planet(7),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                center: LatticePos::local(DVec3::new(20.0, 0.0, 0.0)),
+                shape: Boundary::Shell { r: 10.0 },
+                parent: Some(RealmId::System(7)),
+            }],
+            removed: vec![RealmId::Planet(8)],
+        };
+        let bytes = postcard::to_allocvec(&delta).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ShardToGateway>(&bytes).expect("decode"),
+            delta
+        );
+        assert_eq!(delta.clone().into_snapshot_bytes(), None);
+        assert_eq!(delta.into_realm_snapshot_bytes(), None);
     }
 
     #[test]

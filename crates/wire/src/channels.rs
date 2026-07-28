@@ -136,6 +136,18 @@ pub enum ServerControlMsg {
         regions: Vec<RealmShape>,
         root: RealmId,
     },
+    /// The INCREMENTAL realm render-scene update (VU AoI, proto_minor 6): realms that ENTERED this client's
+    /// AoI (`added` — their static shapes) and realms that LEFT it (`removed` — their ids). The agnostic
+    /// client APPLIES this onto its scene (insert added boxes, drop removed) so its world follows its view
+    /// continuously — a realm streams IN as it comes into range and OUT as it leaves, with no pop. Unlike
+    /// [`RealmRegistry`] (the cold-start / warp re-anchor SNAPSHOT that alone carries `root`), this is a
+    /// DELTA. Reliable `Control` (an add/remove must not be lost — contrast the latest-wins pose datagram).
+    /// Emitted only on a real membership change and only to a peer that negotiated minor >= 6 (a static
+    /// cluster or older peer receives nothing). Appended trailing variant (postcard additive rule).
+    RealmSceneDelta {
+        added: Vec<RealmShape>,
+        removed: Vec<RealmId>,
+    },
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).
@@ -586,6 +598,48 @@ mod tests {
         let empty = ServerControlMsg::RealmRegistry {
             regions: Vec::new(),
             root: RealmId::System(0),
+        };
+        let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&empty_bytes).expect("decode"),
+            empty
+        );
+    }
+
+    #[test]
+    fn realm_scene_delta_is_additive_minor_6_and_empty_is_neutral() {
+        use vd_core::glam::DVec3;
+        // Appended AFTER RealmRegistry ⇒ a minor<6 sender's bytes (here the minor-5 RealmRegistry itself)
+        // still decode on a minor-6 decoder — a trailing variant never shifts a prior discriminant/framing.
+        let prior = ServerControlMsg::RealmRegistry {
+            regions: Vec::new(),
+            root: RealmId::System(0),
+        };
+        let prior_bytes = postcard::to_allocvec(&prior).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&prior_bytes).expect("decode"),
+            prior
+        );
+        // A real delta (one realm ENTERED AoI, one LEFT) round-trips.
+        let delta = ServerControlMsg::RealmSceneDelta {
+            added: vec![RealmShape {
+                realm: RealmId::Planet(7),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                center: LatticePos::local(DVec3::new(20.0, 0.0, 0.0)),
+                shape: Boundary::Shell { r: 10.0 },
+                parent: Some(RealmId::System(7)),
+            }],
+            removed: vec![RealmId::Planet(8)],
+        };
+        let bytes = postcard::to_allocvec(&delta).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&bytes).expect("decode"),
+            delta
+        );
+        // The EMPTY delta round-trips (the codec is total — though the server never SENDS an empty delta).
+        let empty = ServerControlMsg::RealmSceneDelta {
+            added: Vec::new(),
+            removed: Vec::new(),
         };
         let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
         assert_eq!(

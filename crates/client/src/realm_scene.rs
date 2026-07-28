@@ -231,6 +231,52 @@ impl RealmScene {
         Ok(RealmScene(boxes))
     }
 
+    /// Apply an INCREMENTAL AoI update (VU AoI, `ServerControlMsg::RealmSceneDelta`) — the realms that ENTERED
+    /// this client's view (`added`, their static shapes) and those that LEFT (`removed`, their ids) — returning
+    /// a NEW scene (ATOMIC: the caller swaps only on `Ok`, so a malformed delta leaves the live scene intact).
+    /// Added ambient shells (`finite_extent > MAX_RENDERABLE_EXTENT_M`) are skipped — the between-space is felt,
+    /// not framed (mirrors [`from_shapes`](Self::from_shapes)). Every box's nesting depth is RECOMPUTED over the
+    /// merged parent links, so a child whose delta arrived before its parent's (independent per-shard streams
+    /// carry no cross-stream order) nests correctly once the parent lands.
+    ///
+    /// # Errors
+    /// [`SceneError::CycleOrDepthExceeded`] if the merged parent links form a cycle / over-deep chain (a server
+    /// bug) — the caller counts it and keeps the previous scene, never a partial mutation.
+    pub fn with_delta(
+        &self,
+        added: &[RealmShape],
+        removed: &[RealmId],
+    ) -> Result<RealmScene, SceneError> {
+        let mut boxes = self.0.clone();
+        for realm in removed {
+            boxes.remove(realm);
+        }
+        for s in added {
+            if s.shape.finite_extent() > MAX_RENDERABLE_EXTENT_M {
+                continue; // ambient (non-renderable) shell — felt, not framed
+            }
+            boxes.insert(
+                s.realm,
+                RealmBox {
+                    shape: shape_of(s.shape),
+                    frame: s.frame,
+                    center_offset: s.center.offset(),
+                    parent: s.parent,
+                    depth: 0, // recomputed below over the merged parent map
+                    color_rgba: color_for_realm(s.realm),
+                },
+            );
+        }
+        // Recompute every box's depth over the merged parent links (the neighbourhood is bounded, so a full
+        // pass is cheap and covers the out-of-order-arrival case in one place).
+        let parents: BTreeMap<RealmId, Option<RealmId>> =
+            boxes.iter().map(|(r, b)| (*r, b.parent)).collect();
+        for (realm, b) in &mut boxes {
+            b.depth = depth_of(*realm, &parents)?;
+        }
+        Ok(RealmScene(boxes))
+    }
+
     /// Project a `regions.json` dev-config (a JSON array of [`RealmRegion`] — the IDENTICAL forest the
     /// shard computes from `worldgen::realm_regions_for(seed)` and plants into its `RealmRegions`) into the
     /// render scene. The C-6b SINGLE-SOURCE for the playground `--realm-boxes`: the client draws EXACTLY the
@@ -1275,6 +1321,95 @@ mod tests {
             .parent = Some(RealmId::System(7));
         let err =
             RealmScene::from_regions(&regions).expect_err("a cyclic renderable chain must reject");
+        assert_eq!(err, SceneError::CycleOrDepthExceeded);
+    }
+
+    /// A wire render shape at origin with a `Shell{r}` boundary — `r` large ⇒ an ambient (skipped) shell,
+    /// small ⇒ a finite drawn leaf.
+    fn shp(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmShape {
+        RealmShape {
+            realm,
+            frame: FrameRef::SystemSpace { system_seed: 0 },
+            center: LatticePos::local(DVec3::ZERO),
+            shape: Boundary::Shell { r },
+            parent,
+        }
+    }
+
+    #[test]
+    fn with_delta_adds_finite_skips_ambient_and_removes() {
+        // VU AoI: a delta ADDS the realms that entered view (finite leaves framed, ambient shells felt-not-
+        // framed) and REMOVES those that left. Atomic — returns a new scene the caller swaps.
+        let base = RealmScene::from_shapes(&[shp(RealmId::System(7), None, 40.0)]).expect("base");
+        let added = base
+            .with_delta(
+                &[
+                    shp(RealmId::Planet(7), Some(RealmId::System(7)), 10.0), // finite leaf — drawn
+                    shp(RealmId::System(0), None, 1_000_000_000.0),          // ambient shell — skipped
+                ],
+                &[],
+            )
+            .expect("a well-formed add applies");
+        assert!(
+            added.get(RealmId::Planet(7)).is_some(),
+            "the entered leaf is framed"
+        );
+        assert!(
+            added.get(RealmId::System(0)).is_none(),
+            "the ambient shell is felt, not framed"
+        );
+        assert_eq!(added.len(), 2, "System 7 (base) + Planet 7 (entered)");
+        // A follow-up delta removes Planet 7 (it left AoI).
+        let removed = added
+            .with_delta(&[], &[RealmId::Planet(7)])
+            .expect("a remove applies");
+        assert!(
+            removed.get(RealmId::Planet(7)).is_none(),
+            "the departed realm is removed"
+        );
+        assert_eq!(removed.len(), 1);
+    }
+
+    #[test]
+    fn with_delta_recomputes_depth_when_a_parent_arrives_after_its_child() {
+        // Independent per-shard streams carry no cross-stream order: a child's delta can land BEFORE its
+        // parent's. Depth is recomputed each delta, so once the parent arrives the child nests correctly.
+        let child_first = RealmScene::default()
+            .with_delta(&[shp(RealmId::Planet(7), Some(RealmId::System(7)), 10.0)], &[])
+            .expect("the child arrives first");
+        assert_eq!(
+            child_first.get(RealmId::Planet(7)).expect("present").depth,
+            0,
+            "no parent in the scene yet ⇒ the child renders as a root (depth 0)"
+        );
+        let with_parent = child_first
+            .with_delta(&[shp(RealmId::System(7), None, 40.0)], &[])
+            .expect("the parent arrives next");
+        assert_eq!(
+            with_parent.get(RealmId::System(7)).expect("present").depth,
+            0,
+            "the arrived parent is the root"
+        );
+        assert_eq!(
+            with_parent.get(RealmId::Planet(7)).expect("present").depth,
+            1,
+            "the child now nests one level under its arrived parent"
+        );
+    }
+
+    #[test]
+    fn with_delta_rejects_a_cyclic_parent_chain_loud() {
+        // A delta whose merged parent links CYCLE is a server bug → the depth recompute stops loud and the
+        // caller keeps the previous scene (atomic — never a partial mutation).
+        let err = RealmScene::default()
+            .with_delta(
+                &[
+                    shp(RealmId::System(7), Some(RealmId::System(8)), 40.0),
+                    shp(RealmId::System(8), Some(RealmId::System(7)), 40.0),
+                ],
+                &[],
+            )
+            .expect_err("a cyclic delta must reject");
         assert_eq!(err, SceneError::CycleOrDepthExceeded);
     }
 

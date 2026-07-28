@@ -2850,6 +2850,16 @@ fn on_shard_control(
                 sub,
             );
         }
+        ShardToGateway::RealmSceneDelta {
+            observer,
+            added,
+            removed,
+        } => {
+            // VU AoI (proto_minor 6): route the shard's per-observer render delta to that observer's live
+            // client. `observer` is the DURABLE player id; the shard emits only when armed, so a static/walk
+            // cluster produces nothing here.
+            forward_realm_scene_delta(sessions, observer, added, removed, outbox);
+        }
         ShardToGateway::Frame { .. } | ShardToGateway::RealmFrame { .. } => {
             // Entity/realm frames ride the Snapshot / RealmSnapshot datagram classes; one on the
             // reliable Control stream is a peer bug (FA-2c: a RealmFrame is forwarded by
@@ -2857,6 +2867,31 @@ fn on_shard_control(
             stats.undecodable += 1;
         }
     }
+}
+
+/// Route a shard-emitted per-observer render delta (VU AoI) to that observer's live client. `observer` is the
+/// DURABLE player id; its live session is found by account. Gated on the client's negotiated minor >= 6
+/// (sender-gates-variants: an older peer is withheld the variant). An unroutable observer (no live session
+/// for that account — it left, or never attached) is a clean no-op. NOTE: the by-account lookup is an
+/// O(sessions) scan; an `AccountId -> SessionId` index is the 100K scale form (ledgered, VU-AoI-scale).
+fn forward_realm_scene_delta(
+    sessions: &GatewaySessions,
+    observer: AccountId,
+    added: Vec<RealmShape>,
+    removed: Vec<RealmId>,
+    outbox: &mut OutboundBox,
+) {
+    let Some(session) = sessions.by_session.values().find(|s| s.account == observer) else {
+        return; // no live session for this durable id — a clean no-op
+    };
+    if session.negotiated_minor < 6 {
+        return; // an older peer never receives the delta variant
+    }
+    push_control(
+        outbox,
+        session.client,
+        &ServerControlMsg::RealmSceneDelta { added, removed },
+    );
 }
 
 /// Fan one shard frame (from shard `from`) out to that shard's subscribers, each at ITS sub
@@ -7881,6 +7916,127 @@ mod tests {
         assert_eq!(
             *root, off_forest,
             "root degrades to the home itself when the neighbourhood is empty"
+        );
+    }
+
+    /// The `RealmSceneDelta` render deltas the gateway pushed to a client (VU AoI), decoded off the control
+    /// pushes — each its (added-shapes, removed-ids). The `_ => None` arm discriminates non-delta control
+    /// (e.g. `OwnEntity`), so a caller that pre-seeds one exercises it.
+    fn scene_deltas(outbox: &OutboundBox) -> Vec<(Vec<RealmShape>, Vec<RealmId>)> {
+        outbox
+            .0
+            .iter()
+            .filter_map(|(_, _, bytes, _)| {
+                match postcard::from_bytes::<ServerControlMsg>(bytes)
+                    .expect("gateway test pushes only ServerControlMsg on this outbox")
+                {
+                    ServerControlMsg::RealmSceneDelta { added, removed } => Some((added, removed)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn realm_scene_delta_routes_to_the_observer_gated_on_minor_6() {
+        use vd_core::geometry::Boundary;
+        use vd_core::glam::DVec3;
+        use vd_core::pose::{LatticePos, RealmId};
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login(); // Active session at CLIENT, negotiated minor = CURRENT (6)
+        let account = rig
+            .world
+            .resource::<GatewaySessions>()
+            .by_session
+            .get(&sid)
+            .expect("session")
+            .account;
+        assert_eq!(
+            rig.world
+                .resource::<GatewaySessions>()
+                .by_session
+                .get(&sid)
+                .expect("session")
+                .negotiated_minor,
+            ProtoVersion::CURRENT.minor,
+            "the login negotiates CURRENT"
+        );
+        let added = vec![RealmShape {
+            realm: RealmId::Planet(7),
+            frame: FrameRef::SystemSpace { system_seed: 7 },
+            center: LatticePos::local(DVec3::new(20.0, 0.0, 0.0)),
+            shape: Boundary::Shell { r: 10.0 },
+            parent: Some(RealmId::System(7)),
+        }];
+        // (1) matching durable id + minor 6 ⇒ the client gets exactly one delta with the same add/remove.
+        {
+            let sessions = rig.world.resource::<GatewaySessions>();
+            let mut ob = OutboundBox::default();
+            forward_realm_scene_delta(
+                sessions,
+                account,
+                added.clone(),
+                vec![RealmId::Planet(8)],
+                &mut ob,
+            );
+            let sent = scene_deltas(&ob);
+            assert_eq!(sent.len(), 1, "the observer's delta is routed to its client");
+            assert_eq!(sent[0], (added.clone(), vec![RealmId::Planet(8)]));
+        }
+        // (2) an UNKNOWN durable id ⇒ nothing (a clean no-op). The pre-seeded OwnEntity proves the decoder
+        // discriminates (it is not counted as a delta).
+        {
+            let sessions = rig.world.resource::<GatewaySessions>();
+            let mut ob = OutboundBox::default();
+            push_control(&mut ob, CLIENT, &ServerControlMsg::OwnEntity {
+                entity: EntityId(1),
+            });
+            forward_realm_scene_delta(sessions, AccountId(0xBAD), added.clone(), Vec::new(), &mut ob);
+            assert!(
+                scene_deltas(&ob).is_empty(),
+                "no live session for the durable id ⇒ no delta"
+            );
+        }
+        // (3) an OLDER peer (minor < 6) is withheld the variant (sender-gates-variants).
+        rig.world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("session")
+            .negotiated_minor = 5;
+        {
+            let sessions = rig.world.resource::<GatewaySessions>();
+            let mut ob = OutboundBox::default();
+            forward_realm_scene_delta(sessions, account, added.clone(), Vec::new(), &mut ob);
+            assert!(
+                scene_deltas(&ob).is_empty(),
+                "a minor<6 peer receives no delta"
+            );
+        }
+        // (4) the FULL wire path: drive a `ShardToGateway::RealmSceneDelta` through `on_shard_control` (the
+        // router dispatch) — restore minor 6 first — and confirm the client receives the client-facing delta.
+        rig.world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("session")
+            .negotiated_minor = 6;
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::RealmSceneDelta {
+                observer: account,
+                added: added.clone(),
+                removed: vec![RealmId::Planet(8)],
+            },
+        )]);
+        let expected = ServerControlMsg::RealmSceneDelta {
+            added,
+            removed: vec![RealmId::Planet(8)],
+        };
+        assert!(
+            decode_controls(&sent, CLIENT).contains(&expected),
+            "the delta routes through on_shard_control to the client"
         );
     }
 
