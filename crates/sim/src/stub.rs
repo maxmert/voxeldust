@@ -21,7 +21,7 @@ use bevy_ecs::prelude::{IntoScheduleConfigs, Local, Res, ResMut, Resource, Sched
 use vd_core::celestial::{OrbitalElements, orbital_state, secs_since_epoch};
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
-use vd_core::frame::{FramePlacement, LocalFrames, rebind_pose_to_dest};
+use vd_core::frame::{FramePlacement, LocalFrames, rebind_pose_to_dest, transfer_frame};
 use vd_core::geometry::{
     DepthKey, OverlapBand, RealmRegion, container, region_depth, region_signed_distance,
     should_rehome,
@@ -596,6 +596,11 @@ pub struct ContainmentProgress(pub BTreeMap<EntityId, RegionMembership>);
 pub enum ObserverId {
     Dot(SessionId),
     Transient(EntityId),
+    /// VU AoI S2b-iii — an up-relayed PROXY occupant (a durable player deep in a descendant realm), keyed by
+    /// its `AccountId`. Folded into THIS parent's cull so it warms the occupant's SIBLINGS ahead of the
+    /// traveller. Runs the AoI/latch math like any observer but receives NO render delta (the parent hosts no
+    /// client for it — gated on `render_routes`).
+    Proxy(AccountId),
 }
 
 /// Per-`(observer, child)` AoI hysteresis + grace (RLM Step 2 → VU S0 per-observer). Keyed by the
@@ -692,6 +697,17 @@ impl RealmRegions {
         self.regions.iter().any(|r| r.aoi.spin_up_r_m() > 0.0)
     }
 
+    /// VU AoI S2b — the shard's AMBIENT-ROOT frame: the `parent.is_none()` region's frame (the frame
+    /// [`frame_context`](Self::frame_context)/`child_placements` stamp children in, and that `aoi_decide`'s
+    /// observers are measured in), defaulting to `GalaxySpace` for an empty forest. This is the `to` frame a
+    /// retained-proxy pose is lifted into so its sibling-cull distance is commensurate with the local dots'.
+    pub(crate) fn root_frame(&self) -> FrameRef {
+        self.regions
+            .iter()
+            .find(|r| r.parent.is_none())
+            .map_or(FrameRef::GalaxySpace, |r| r.frame)
+    }
+
     /// The per-shard ephemeris [`FrameContext`] (D-45(a) frame-authority FA-1/FA-2b). A region in the
     /// [`moving`](Self::moving) roster is AUTHORED live from its `OrbitalElements` each tick
     /// (`with_moving_child` — `placement()` re-derives its pose from `tick`); every other region rides
@@ -702,12 +718,7 @@ impl RealmRegions {
     /// evaluates — it short-circuits on `is_empty`).
     #[must_use]
     pub fn frame_context(&self, tick_hz: f64) -> LocalFrames {
-        let own = self
-            .regions
-            .iter()
-            .find(|r| r.parent.is_none())
-            .map_or(FrameRef::GalaxySpace, |r| r.frame);
-        let mut ctx = LocalFrames::new(own, tick_hz);
+        let mut ctx = LocalFrames::new(self.root_frame(), tick_hz);
         for r in &self.regions {
             ctx = match self.moving.get(&r.realm) {
                 Some(elements) => ctx.with_moving_child(r.frame, *elements),
@@ -4641,10 +4652,29 @@ fn aoi_decide(
     let retain_ttl = retain_ttl_ticks(config);
     retained.retain(|_, e| proxy_alive(e.last_seen, clock.local_tick, retain_ttl));
 
+    // VU AoI S2b-iii — the PROXY observers: each retained (post-prune ⇒ alive) up-relayed occupant, its pose
+    // lifted from its own child frame into this shard's ambient-root frame (the frame the local dots + child
+    // placements measure in), reduced to `(pos, vel)`. A pose the shard cannot place SAFE-DEGRADES to nothing
+    // (`proxy_observer` → `None`). Built ONLY when the store is non-empty — EMPTY at walk/static ⇒ no
+    // `frame_context` call, no rows ⇒ byte-identical. These fold into `observers` BELOW, BEFORE the emptiness
+    // gate, so a parent whose own local set is empty still culls a deep traveller's siblings (the payoff).
+    let proxy_observers: Vec<(ObserverId, DVec3, DVec3)> = if retained.is_empty() {
+        Vec::new()
+    } else {
+        let ctx = regions.frame_context(tick_hz);
+        let root_frame = regions.root_frame();
+        retained
+            .iter()
+            .filter_map(|(acct, e)| {
+                proxy_observer(e, root_frame, &ctx).map(|(p, v)| (ObserverId::Proxy(*acct), p, v))
+            })
+            .collect()
+    };
+
     // Observers = owned durable dots this shard SIMULATES ∪ held transients (mirror
-    // `evaluate_realm_boundaries`), each TAGGED with its `ObserverId` + reduced to frame-local `(pos, vel)`
-    // — the SAME own frame the child placements use (H-1) — so the AoI distance and the observer feed
-    // measure one geometry.
+    // `evaluate_realm_boundaries`) ∪ the up-relayed PROXY occupants (S2b-iii), each TAGGED with its
+    // `ObserverId` + reduced to frame-local `(pos, vel)` — the SAME own frame the child placements use (H-1) —
+    // so the AoI distance and the observer feed measure one geometry.
     let observers: Vec<(ObserverId, DVec3, DVec3)> = dots
         .0
         .iter()
@@ -4657,6 +4687,7 @@ fn aoi_decide(
                 .filter(|(_, t)| t.status.is_held())
                 .map(|(e, t)| (ObserverId::Transient(*e), t.pose.pos.offset(), t.pose.vel)),
         )
+        .chain(proxy_observers)
         .collect();
 
     // Zero-occupant self-report: this CHILD shard tells the orchestrator its OWN realm holds nobody
@@ -4715,12 +4746,17 @@ fn aoi_decide(
             }
             // VU AoI S1b — the RENDER delta rides the SAME per-observer transition (no new AoI math, HR3):
             // the child ENTERS this observer's view on ACQUIRE (`was_in` false→true), LEAVES on RELEASE (the
-            // latch drops after grace, true→gone). Accumulated per observer; emitted (dots only) below.
+            // latch drops after grace, true→gone). VU AoI S2b-iii gate: render deltas go ONLY to a DOT
+            // observer (a client this shard hosts). A PROXY occupant (or a held transient) runs the AoI/latch
+            // math above but gets NO render delta — the parent hosts no client connection for it — so it warms
+            // the sibling (demand) WITHOUT a mis-routed delta. Gated on `render_routes` (dots only).
             let next_in = next.is_some_and(|s| s.was_in);
-            if !state.was_in && next_in {
-                render_adds.entry(*obs).or_default().push(child_shape(region));
-            } else if state.was_in && !next_in {
-                render_removes.entry(*obs).or_default().push(region.realm);
+            if render_routes.contains_key(obs) {
+                if !state.was_in && next_in {
+                    render_adds.entry(*obs).or_default().push(child_shape(region));
+                } else if state.was_in && !next_in {
+                    render_removes.entry(*obs).or_default().push(region.realm);
+                }
             }
             match next {
                 Some(s) => {
@@ -5004,6 +5040,24 @@ fn retain_ttl_ticks(config: &StubConfig) -> u64 {
 /// OWN local clock (`saturating_sub` so a clock not yet past `last_seen` reads age 0). Monomorphic (HR5).
 fn proxy_alive(last_seen: TickId, now: TickId, ttl: u64) -> bool {
     now.0.saturating_sub(last_seen.0) <= ttl
+}
+
+/// VU AoI S2b-iii — lift ONE retained proxy occupant into the parent's AMBIENT-ROOT frame (the frame this
+/// shard's own dots + child placements are measured in) and reduce it to the `(pos, vel)` an observer needs,
+/// so the sibling-cull distance is commensurate. `None` (SAFE-DEGRADE — the proxy folds nothing, never a
+/// spurious warm) when the relayed pose's frame cannot be placed in this shard's context: a coarsen-ladder
+/// grand-child the parent does not host (S3) or a stale post-re-home relay. For a DIRECT-child occupant (the
+/// S2b scope) the child is always in the roster, so this always resolves. The `match` lives here, not in the
+/// generic `transfer_frame` body (whose branching is all in `transfer_frame_resolved`, HR5).
+fn proxy_observer(
+    entry: &RetainedOccupant,
+    root_frame: FrameRef,
+    ctx: &LocalFrames,
+) -> Option<(DVec3, DVec3)> {
+    match transfer_frame(&entry.occupant, root_frame, ctx) {
+        Ok(p) => Some((p.pos.offset(), p.vel)),
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -12834,6 +12888,192 @@ mod tests {
         assert!(
             !store.0.contains_key(&AccountId(2)),
             "a stale proxy (age > TTL) is pruned"
+        );
+    }
+
+    // ---- VU AoI S2b-iii — FOLD the retained proxy into the parent's cull (the payoff) ----------
+
+    /// A root System(7) PARENT shard with its realm granted and TWO armed Planet children — Planet(42) at the
+    /// origin and Planet(43) far away at `sibling_center` — the S2b-iii proxy-fold fixture.
+    fn parent_with_two_planet_children(sibling_center: DVec3) -> Rig {
+        let cfg = StubConfig {
+            realm: OWN_REALM,
+            held_realms: StubConfig::single_realm(OWN_REALM),
+            frame: frame_of(OWN_REALM),
+            own_coord: StubConfig::root_coord(OWN_REALM),
+            ..config()
+        };
+        let mut rig = Rig::with_config(cfg);
+        grant_realm_for(&mut rig, OWN_REALM);
+        let planet_a = aoi_child(RealmId::Planet(42), OWN_REALM, 1000.0, 0); // AoI band spin-up 1000, at origin
+        let planet_b = RealmRegion {
+            aoi: aoi_band(0),
+            ..region(RealmId::Planet(43), Some(OWN_REALM), sibling_center, 1000.0)
+        };
+        plant_aoi(&mut rig, vec![root_region(), own_region(), planet_a, planet_b]);
+        rig
+    }
+
+    /// Inject an ALIVE retained proxy (last_seen = the rig's current local tick) directly into the parent
+    /// store — the fold input, bypassing the separately-tested receive path for precise positioning.
+    fn inject_proxy(rig: &mut Rig, account: AccountId, frame: FrameRef, offset: DVec3) {
+        let now = rig.world.resource::<ClockSample>().local_tick;
+        rig.world.resource_mut::<RetainedOccupants>().0.insert(
+            account,
+            RetainedOccupant {
+                occupant: StampedPose::at_rest(frame, offset, UniverseTick(100)),
+                last_seen: now,
+            },
+        );
+    }
+
+    #[test]
+    fn aoi_up_relayed_proxy_warms_the_sibling_before_the_empty_gate() {
+        // THE PAYOFF (the bug the adversary caught): a parent with ZERO local dots still culls a DEEP
+        // traveller's siblings — because the proxy folds into `observers` BEFORE the emptiness gate. A proxy
+        // occupant (in Planet 42's frame, at P3 identity ⇒ position drives it) sitting out at Planet 43's
+        // location warms the SIBLING Planet 43, and NOT the far Planet 42.
+        let sibling = DVec3::new(10_000.0, 0.0, 0.0);
+        let mut rig = parent_with_two_planet_children(sibling);
+        inject_proxy(&mut rig, AccountId(9), frame_of(RealmId::Planet(42)), sibling);
+        let verbs: BTreeMap<RealmId, DemandVerb> = demands(&rig.tick(vec![]))
+            .iter()
+            .map(|d| (d.child.lowered(), d.verb))
+            .collect();
+        assert_eq!(
+            verbs.get(&RealmId::Planet(43)),
+            Some(&DemandVerb::SpinUp),
+            "the sibling warms ahead of the traveller — driven purely by the proxy"
+        );
+        assert!(
+            !verbs.contains_key(&RealmId::Planet(42)),
+            "the far planet the traveller is nowhere near is not warmed"
+        );
+        // ...and the proxy carries its OWN per-child hysteresis latch on the sibling.
+        let sib = child_coord_of(OWN_REALM, RealmId::Planet(43));
+        assert!(
+            rig.world
+                .resource::<AoiMembership>()
+                .0
+                .contains_key(&(ObserverId::Proxy(AccountId(9)), sib.path().clone())),
+            "the proxy has its own latch"
+        );
+    }
+
+    #[test]
+    fn a_live_proxy_keeps_the_parent_non_empty() {
+        let sibling = DVec3::new(10_000.0, 0.0, 0.0);
+        // No dots, no proxy ⇒ the parent self-reports Empty for its own realm.
+        let mut rig = parent_with_two_planet_children(sibling);
+        assert!(
+            demands(&rig.tick(vec![]))
+                .iter()
+                .any(|d| d.verb == DemandVerb::Empty),
+            "a truly empty parent self-reports Empty"
+        );
+        // A live proxy ⇒ NOT Empty; the sibling is demanded instead.
+        let mut rig = parent_with_two_planet_children(sibling);
+        inject_proxy(&mut rig, AccountId(9), frame_of(RealmId::Planet(42)), sibling);
+        let verbs: BTreeMap<RealmId, DemandVerb> = demands(&rig.tick(vec![]))
+            .iter()
+            .map(|d| (d.child.lowered(), d.verb))
+            .collect();
+        assert!(
+            !verbs.values().any(|v| *v == DemandVerb::Empty),
+            "a live proxy makes the parent non-empty"
+        );
+        assert_eq!(verbs.get(&RealmId::Planet(43)), Some(&DemandVerb::SpinUp));
+    }
+
+    #[test]
+    fn proxy_observer_safe_degrades_when_the_frame_is_unplaceable() {
+        // A relayed pose whose frame this shard cannot place (a coarsen-ladder grand-child it does not host,
+        // or a stale post-re-home relay) folds NOTHING — never a spurious warm.
+        let sibling = DVec3::new(10_000.0, 0.0, 0.0);
+        let mut rig = parent_with_two_planet_children(sibling);
+        // Direct: proxy_observer returns None for an unplaceable frame (transfer_frame Errs).
+        {
+            let regions = rig.world.resource::<RealmRegions>();
+            let ctx = regions.frame_context(20.0);
+            let entry = RetainedOccupant {
+                occupant: StampedPose::at_rest(
+                    frame_of(RealmId::Planet(999)),
+                    DVec3::ZERO,
+                    UniverseTick(100),
+                ),
+                last_seen: vd_core::TickId(0),
+            };
+            assert_eq!(proxy_observer(&entry, regions.root_frame(), &ctx), None);
+            transfer_frame(&entry.occupant, regions.root_frame(), &ctx)
+                .expect_err("an unplaceable source frame Errs");
+        }
+        // Via the pass: the unplaceable proxy folds nothing ⇒ with zero dots the observer set ends up empty ⇒
+        // the parent self-reports Empty (never a spurious sibling SpinUp).
+        inject_proxy(&mut rig, AccountId(9), frame_of(RealmId::Planet(999)), sibling);
+        assert!(
+            demands(&rig.tick(vec![]))
+                .iter()
+                .all(|d| d.verb == DemandVerb::Empty),
+            "an unplaceable proxy warms no sibling"
+        );
+    }
+
+    #[test]
+    fn a_proxy_observer_gets_no_render_delta_but_a_dot_does() {
+        let sibling = DVec3::new(10_000.0, 0.0, 0.0);
+        let mut rig = parent_with_two_planet_children(sibling);
+        // A proxy acquiring the sibling ⇒ NO render delta (the parent hosts no client for it).
+        inject_proxy(&mut rig, AccountId(9), frame_of(RealmId::Planet(42)), sibling);
+        assert!(
+            render_deltas(&rig.tick(vec![])).is_empty(),
+            "a proxy occupant never triggers a render delta"
+        );
+        // But a real local DOT acquiring a child DOES get one (the render path still works for dots).
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO); // at the origin ⇒ in range of Planet(42)
+        let deltas = render_deltas(&rig.tick(vec![]));
+        let dot_added: Vec<RealmId> = deltas
+            .iter()
+            .filter(|(_, acct, _, _)| *acct == AccountId(1))
+            .flat_map(|(_, _, added, _)| added.iter().map(|s| s.realm))
+            .collect();
+        assert!(
+            dot_added.contains(&RealmId::Planet(42)),
+            "a dot acquiring Planet(42) gets a render delta"
+        );
+    }
+
+    #[test]
+    fn a_retained_proxy_survives_a_lost_relay_then_expires() {
+        let sibling = DVec3::new(10_000.0, 0.0, 0.0);
+        let mut rig = parent_with_two_planet_children(sibling);
+        inject_proxy(&mut rig, AccountId(9), frame_of(RealmId::Planet(42)), sibling);
+        let sib_verb = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Option<DemandVerb> {
+            demands(sent)
+                .iter()
+                .find(|d| d.child.lowered() == RealmId::Planet(43))
+                .map(|d| d.verb)
+        };
+        // Tick 1 (local_tick 1): the sibling spins up.
+        assert_eq!(sib_verb(&rig.tick(vec![])), Some(DemandVerb::SpinUp));
+        // A LOST relay: advance one tick WITHOUT refreshing the proxy. It is still alive (age 1 ≤ TTL) ⇒ the
+        // sibling STAYS demanded (KeepAlive) — no blink.
+        rig.set_local_tick(2);
+        assert_eq!(
+            sib_verb(&rig.tick(vec![])),
+            Some(DemandVerb::KeepAlive),
+            "one lost relay never blinks the warmed sibling"
+        );
+        // After the TTL lapses ⇒ the proxy is pruned ⇒ it no longer warms the sibling.
+        let ttl = retain_ttl_ticks(&config());
+        rig.set_local_tick(2 + ttl + 5);
+        assert_eq!(
+            sib_verb(&rig.tick(vec![])),
+            None,
+            "after the TTL the pruned proxy stops warming the sibling"
+        );
+        assert!(
+            rig.world.resource::<RetainedOccupants>().0.is_empty(),
+            "the proxy is pruned once its TTL lapses"
         );
     }
 
