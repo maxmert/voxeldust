@@ -287,6 +287,14 @@ pub struct CoHostedAuthority(pub BTreeMap<RealmId, Fence>);
 #[derive(Resource, Debug, Default)]
 pub struct RealmConfirmedAt(pub TickId);
 
+/// VU AoI S2a-2b — the resolved live `NodeId` owning this shard's PARENT realm (`own_coord.parent()`),
+/// learned via a directory HeadRead round-trip and CACHED (resolve-once, re-read on the realm-recheck cadence
+/// so a parent RE-HOME is observed). `None` = root shard / pre-resolve / mid-CAS gap / walk-static (never
+/// armed) ⇒ the occupant-interest up-flow is inert. Overwritten on every parent-realm Head reply (the mirror
+/// of [`RealmAuthority`]'s fence overwrite). NOT a map — a shard has exactly one parent.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentRealmNode(pub Option<NodeId>);
+
 /// RLM 5f RG-1 — the reactive-greeting policy for a DEMAND-SPAWNED shard. A shard minted at spawn has a
 /// `NodeId` its peers never booked, so it makes itself reachable by GREETING every one of them: it sends a
 /// reliable [`ShardPresence`] and the peer's mesh learns the return connection (no address needed — the
@@ -653,6 +661,13 @@ impl RealmRegions {
     /// The detector short-circuits (inert) when no regions are planted — production through C-3.
     fn is_empty(&self) -> bool {
         self.regions.is_empty()
+    }
+
+    /// VU AoI S2a-2b — is ANY planted region's interest band armed (a non-zero spin-up radius)? The
+    /// walk/static `AoiConfig::inert()` bands are all `spin_up_r_m == 0`, so this is `false` there and the
+    /// whole up-relay stays byte-identical; it flips `true` only once a demand-scale forest is planted.
+    pub(crate) fn aoi_live(&self) -> bool {
+        self.regions.iter().any(|r| r.aoi.spin_up_r_m() > 0.0)
     }
 
     /// The per-shard ephemeris [`FrameContext`] (D-45(a) frame-authority FA-1/FA-2b). A region in the
@@ -1219,6 +1234,19 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // `held_realms` set is heap-backed).
     let mint_seed = config.mint_seed;
     let input_log_capacity = config.input_log_capacity;
+    // VU AoI S2a-2b [MAJOR guard] — the parent-realm resolve keys the parent's `HeadRead` on the LOSSY
+    // `RealmId` (`lowered()`), exactly like the directory. `RealmLevel::to_realm_id` collapses Galaxy →
+    // System(1), so a shard whose PARENT lowers to the SAME `RealmId` as itself would drive its own
+    // parent-Head reply through the PRIMARY-FOREIGN self-fence branch (a false self-fence of a healthy
+    // shard). That universe is UNREPRESENTABLE in today's lowered-keyed directory (the two realms would
+    // share a directory key), so this is a boot tripwire, not a runtime path — and it must migrate to
+    // `path()`-keying together with the directory (see DEFERRED.md). `debug_assert` (dev/test only): the
+    // release directory is already lowered-keyed, so a colliding universe cannot boot there either.
+    debug_assert!(
+        config.own_coord.parent().map(|p| p.lowered()) != Some(config.realm),
+        "own parent aliases own RealmId under lowered() — the parent resolve would self-fence; \
+         migrate parent-resolve + directory to path()-keying together (DEFERRED)",
+    );
     world.insert_resource(config);
     world.insert_resource(Dots::default());
     world.insert_resource(RealmAuthority::default());
@@ -1248,6 +1276,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // (early-returns) until regions are planted AND the shard is clock-synced, so this is byte-identical
     // through walk/canonical scale (inert AoI ⇒ no demand ⇒ never touched).
     world.insert_resource(AoiMembership::default());
+    world.insert_resource(ParentRealmNode::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -1543,6 +1572,9 @@ fn process_inbound(
     // latch/dwell stores, so grouping them is a mechanical arity fix. Destructured to two `&mut` below.
     crossing: (ResMut<RequestInFlight>, ResMut<CrossingProgress>),
     mut outbox: ResMut<OutboundBox>,
+    // VU AoI S2a-2b — the cached parent-realm node (written from the parent Head reply in on_directory_reply).
+    // This fills bevy's 16th and LAST top-level param slot; any FUTURE resource must join a bundled tuple.
+    mut parent_node: ResMut<ParentRealmNode>,
 ) {
     let (mut registration, mut mirror) = ghost_state;
     let (mut in_flight, mut progress) = crossing;
@@ -1589,6 +1621,7 @@ fn process_inbound(
                 &mut progress,
                 &mut stats,
                 &mut outbox,
+                &mut parent_node,
             ),
             // 1d.5b.3b: the SOURCE-side ghost feed consumer — Spawn/Delta/Despawn from the dest owner
             // refresh this shard's RETAINED ghost dot (kinematic collider; pose+GhostRefresh, never a
@@ -3907,6 +3940,27 @@ fn affirm_realm_head(
     }
 }
 
+/// VU AoI S2a-2b — cache the node owning this shard's PARENT realm from a realm Head reply, IFF the replied
+/// realm is THIS shard's parent (`own_coord.parent().lowered()`). Monomorphic (all branching HERE, HR5): the
+/// parent-match yes/no + the Shard / non-Shard / None record resolve. OVERWRITE (not merge) so a re-home's new
+/// owner replaces the old and a revoked/absent record clears to `None` (skip, never emit to a dead node). A
+/// no-op for any non-parent realm ⇒ purely additive to `affirm_realm_head` (byte-identical). NOTE: keys on the
+/// LOSSY `lowered()` `RealmId`, exactly like the directory itself does today — both must migrate to
+/// `path()`-keying together (DEFERRED); a boot `debug_assert` in `register_stub_shard` arms the alias case.
+fn update_parent_node(
+    realm: RealmId,
+    record: Option<&vd_wire::seams::directory::OwnerRecord>,
+    config: &StubConfig,
+    parent_node: &mut ParentRealmNode,
+) {
+    if Some(realm) == config.own_coord.parent().map(|p| p.lowered()) {
+        parent_node.0 = match record.map(|r| r.authority) {
+            Some(AuthorityRef::Shard(n)) => Some(n),
+            _ => None,
+        };
+    }
+}
+
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
 #[allow(clippy::too_many_arguments)]
 fn on_directory_reply(
@@ -3926,6 +3980,7 @@ fn on_directory_reply(
     progress: &mut CrossingProgress,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
+    parent_node: &mut ParentRealmNode,
 ) {
     // Decode the Saga-class envelope once and dispatch by arm. The orchestrator wraps a directory
     // answer in DirectoryReply; the 1d.1 transfer machinery adds the SOURCE's FlushSource request
@@ -4093,6 +4148,10 @@ fn on_directory_reply(
                 owned_transients,
                 stats,
             );
+            // VU AoI S2a-2b — ALSO cache the node IFF this head is THIS shard's PARENT realm (the up-flow
+            // target). Purely additive: `update_parent_node` no-ops for a non-parent realm, so the primary /
+            // co-hosted authority machinery above is byte-identical.
+            update_parent_node(realm, record.as_ref(), config, parent_node);
         }
         DirectoryReply::Head {
             key: DirectoryKey::Entity(entity),
@@ -4492,6 +4551,25 @@ fn evaluate_realm_aoi(
     );
 }
 
+/// VU AoI S2a-2b — is a parent-realm directory read DUE this tick? Returns the PARENT [`RealmCoord`] to
+/// resolve (its authoritative node is cached in [`ParentRealmNode`] from the reply), or `None` at the
+/// containment ROOT (no parent), when the interest bands are inert (walk/static), or off the recheck
+/// cadence. The parent node is where this shard up-relays each local occupant's interest (S2a-2b-ii) so a
+/// sealed parent can cull the occupant's SIBLINGS against it.
+fn parent_headread_due(
+    config: &StubConfig,
+    regions: &RealmRegions,
+    clock: &ClockSample,
+) -> Option<RealmCoord> {
+    let parent = config.own_coord.parent()?;
+    // BITWISE `&` (not `&&`): both operands are cheap + pure, and a short-circuit would leave the RHS a
+    // region HR5 can never cover from the false-LHS side (the discipline `AoiConfig::in_range` uses). The
+    // inert walk/static bands make `aoi_live()` false ⇒ this whole up-relay never fires ⇒ byte-identical.
+    (regions.aoi_live()
+        & crate::directory::due_this_tick(config.realm_recheck_interval, clock.local_tick.0))
+    .then_some(parent)
+}
+
 /// The monomorphic AoI decision (ALL branching HERE, HR5). PER-OBSERVER (VU S0): each occupant carries its
 /// OWN acquire/grace latch keyed `(observer, child.path())`, and the child-level demand is the UNION over
 /// observers ([`union_verb`]) — SpinUp the tick a child FIRST becomes demanded by anyone, KeepAlive while
@@ -4640,6 +4718,21 @@ fn aoi_decide(
                 added,
                 removed,
             },
+        );
+    }
+    // VU AoI S2a-2b-i — resolve THIS realm's PARENT node. Periodically HeadRead the parent's directory
+    // record so its authoritative node lands in `ParentRealmNode` (written from the reply in
+    // `on_directory_reply`), ready for the per-dot OccupantInterest up-relay (S2a-2b-ii). Reuses the SAME
+    // directory HeadRead/cadence the own-realm recheck uses (HR3), keyed on the parent `RealmCoord`
+    // (`lowered()`, like the directory — the boot guard rules out a self-aliasing parent). Inert at
+    // walk/static: `aoi_live()` is false ⇒ `parent_headread_due` returns `None` ⇒ nothing emitted.
+    if let Some(parent_coord) = parent_headread_due(config, regions, clock) {
+        outbox.push_flow(
+            config.orchestrator,
+            MsgClass::Saga,
+            &InterShardFlow::Directory(DirectoryOp::HeadRead {
+                key: DirectoryKey::Realm(parent_coord.lowered()),
+            }),
         );
     }
     // Evict any (observer, child-path) pair no longer live (an observer that left OR a child dropped from
@@ -12633,5 +12726,193 @@ mod tests {
             b[0].child,
             child_coord_of(RealmId::Planet(42), RealmId::Area(99))
         );
+    }
+
+    // ---- VU AoI S2a-2b-i — the parent-realm resolve/cache half ---------------------------------
+
+    /// Every parent-realm `HeadRead` directory key emitted this tick. The `_ => None` arm is exercised by
+    /// the demands + entity snapshots that ride the same tick.
+    fn headreads(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<DirectoryKey> {
+        sent.iter()
+            .filter_map(|(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                Ok(InterShardFlow::Directory(DirectoryOp::HeadRead { key })) => Some(key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn aoi_emits_the_parent_headread_when_armed_and_on_cadence() {
+        // A PLANET shard (own realm Planet(42)) nested under System(7): its `own_coord` carries the full
+        // lineage, so `parent()` is the System. With an ARMED child band + the recheck cadence live, the AoI
+        // pass resolves the parent by HeadRead-ing its directory record — its node lands in `ParentRealmNode`
+        // (S2a-2b-ii up-relays each occupant's interest to it so the parent can cull the occupant's siblings).
+        let cfg = StubConfig {
+            realm: OTHER_REALM,
+            held_realms: StubConfig::single_realm(OTHER_REALM),
+            frame: frame_of(OTHER_REALM),
+            own_coord: child_coord_of(OWN_REALM, OTHER_REALM),
+            realm_recheck_interval: 2,
+            ..config()
+        };
+        let mut rig = Rig::with_config(cfg);
+        grant_realm_for(&mut rig, OTHER_REALM);
+        plant_aoi(
+            &mut rig,
+            vec![
+                region(ROOT_REALM, None, DVec3::ZERO, 1.0e9),
+                region_framed(
+                    OTHER_REALM,
+                    Some(ROOT_REALM),
+                    DVec3::ZERO,
+                    100_000.0,
+                    frame_of(OTHER_REALM),
+                ),
+                aoi_child_framed(
+                    RealmId::Area(99),
+                    Some(OTHER_REALM),
+                    FrameRef::AreaLocal {
+                        planet_seed: 42,
+                        area_seed: 99,
+                    },
+                    0,
+                ),
+            ],
+        );
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        rig.set_local_tick(4); // 4 % 2 == 0 ⇒ due
+        let sent = rig.tick(vec![]);
+        let parent_key = DirectoryKey::Realm(StubConfig::root_coord(OWN_REALM).lowered());
+        assert!(
+            headreads(&sent).contains(&parent_key),
+            "the AoI pass HeadReads the PARENT realm on the recheck cadence"
+        );
+    }
+
+    #[test]
+    fn parent_headread_due_resolves_only_when_parented_armed_and_on_cadence() {
+        let clock = ClockSample {
+            local_tick: vd_core::TickId(4),
+            universe_tick: UniverseTick(100),
+            epoch: vd_core::EpochId(1),
+            synced: true,
+        };
+        let armed = RealmRegions::new(vec![aoi_child(RealmId::Planet(99), ROOT_REALM, 1000.0, 0)]);
+        let inert = RealmRegions::new(vec![region(
+            RealmId::Planet(99),
+            Some(ROOT_REALM),
+            DVec3::ZERO,
+            1000.0,
+        )]);
+        let parented = || StubConfig {
+            own_coord: child_coord_of(OWN_REALM, OTHER_REALM),
+            realm_recheck_interval: 2,
+            ..config()
+        };
+        // parented + armed + on cadence (4 % 2 == 0) ⇒ resolve the parent.
+        assert_eq!(
+            parent_headread_due(&parented(), &armed, &clock),
+            Some(StubConfig::root_coord(OWN_REALM)),
+        );
+        // parented + INERT bands ⇒ `aoi_live()` false ⇒ nothing (the walk/static byte-identity guard).
+        assert_eq!(parent_headread_due(&parented(), &inert, &clock), None);
+        // parented + armed but OFF cadence (4 % 3 != 0) ⇒ nothing.
+        let off = StubConfig {
+            own_coord: child_coord_of(OWN_REALM, OTHER_REALM),
+            realm_recheck_interval: 3,
+            ..config()
+        };
+        assert_eq!(parent_headread_due(&off, &armed, &clock), None);
+        // a ROOT shard (its `own_coord` has no parent) ⇒ nothing, ever.
+        let root = StubConfig {
+            own_coord: StubConfig::root_coord(OWN_REALM),
+            realm_recheck_interval: 2,
+            ..config()
+        };
+        assert_eq!(parent_headread_due(&root, &armed, &clock), None);
+    }
+
+    #[test]
+    fn update_parent_node_caches_the_parent_shard_overwrites_revokes_and_ignores_non_parents() {
+        let cfg = StubConfig {
+            own_coord: child_coord_of(OWN_REALM, OTHER_REALM),
+            ..config()
+        };
+        let parent = StubConfig::root_coord(OWN_REALM).lowered();
+        let rec = |auth: AuthorityRef| vd_wire::seams::directory::OwnerRecord {
+            authority: auth,
+            fence: Fence(1),
+            lease_expires: UniverseTick(1_000),
+            in_transfer: None,
+        };
+        let mut pn = ParentRealmNode::default();
+        // A parent Head with a Shard authority ⇒ the node is cached.
+        update_parent_node(
+            parent,
+            Some(&rec(AuthorityRef::Shard(NodeId(77)))),
+            &cfg,
+            &mut pn,
+        );
+        assert_eq!(pn.0, Some(NodeId(77)));
+        // Parent RE-HOME (a later reply naming a new node) ⇒ overwrite.
+        update_parent_node(
+            parent,
+            Some(&rec(AuthorityRef::Shard(NodeId(88)))),
+            &cfg,
+            &mut pn,
+        );
+        assert_eq!(pn.0, Some(NodeId(88)));
+        // A reply for a NON-parent realm — here the shard's OWN realm (Planet(42) ≠ the System(7) parent),
+        // i.e. its own-realm recheck reply — ⇒ the cache is untouched (the guard's false arm).
+        update_parent_node(
+            OTHER_REALM,
+            Some(&rec(AuthorityRef::Shard(NodeId(99)))),
+            &cfg,
+            &mut pn,
+        );
+        assert_eq!(
+            pn.0,
+            Some(NodeId(88)),
+            "a non-parent Head never touches the parent cache"
+        );
+        // A parent record held by a GATEWAY (not a shard) ⇒ cleared (no shard to relay to).
+        update_parent_node(
+            parent,
+            Some(&rec(AuthorityRef::Gateway(NodeId(5)))),
+            &cfg,
+            &mut pn,
+        );
+        assert_eq!(pn.0, None);
+        // A parent REVOKE (record gone) ⇒ cleared.
+        update_parent_node(
+            parent,
+            Some(&rec(AuthorityRef::Shard(NodeId(88)))),
+            &cfg,
+            &mut pn,
+        );
+        update_parent_node(parent, None, &cfg, &mut pn);
+        assert_eq!(pn.0, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "self-fence")]
+    fn register_stub_shard_rejects_a_parent_that_aliases_its_own_realm_id() {
+        use vd_core::realm_path::RealmKindTag;
+        // Galaxy → System(1) is the LOSSY `lowered()` collapse: a System(1) hosted DIRECTLY under a Galaxy
+        // has `parent().lowered() == System(1) == realm` — the unrepresentable self-alias the boot guard
+        // forbids (else the shard's own parent-Head reply drives the PRIMARY-FOREIGN self-fence branch).
+        let own_coord = RealmCoord::from_path(RealmPath::from_levels(vec![
+            RealmLevel::new(RealmKindTag::Galaxy, 5),
+            RealmLevel::new(RealmKindTag::System, 1),
+        ]))
+        .expect("a two-level path has a leaf");
+        let bad = StubConfig {
+            realm: RealmId::System(1),
+            held_realms: StubConfig::single_realm(RealmId::System(1)),
+            frame: frame_of(RealmId::System(1)),
+            own_coord,
+            ..config()
+        };
+        let _ = Rig::with_config(bad);
     }
 }
