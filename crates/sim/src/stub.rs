@@ -315,6 +315,14 @@ pub struct RetainedOccupants(pub BTreeMap<AccountId, RetainedOccupant>);
 #[derive(Resource, Debug, Default)]
 pub struct ProxySentScene(pub BTreeMap<AccountId, (NodeId, BTreeSet<RealmId>)>);
 
+/// VU AoI S2c-iii — the HOME shard's per-account FORWARDED baseline: the sibling realm-ids it has already
+/// drawn on this account's client. A parent's `ProxySceneSet` (the full current set) is DIFFED against this to
+/// derive the client add/remove, then the baseline is set to the new set. PURE home-side render bookkeeping —
+/// no fence, never persisted. Dropped when a `ProxySceneSet` arrives for a departed dot (lazy cleanup). EMPTY
+/// until a parent reflects a scene down (walk/static: none).
+#[derive(Resource, Debug, Default)]
+pub struct ForwardedProxyScene(pub BTreeMap<AccountId, BTreeSet<RealmId>>);
+
 /// One retained proxy occupant (VU AoI S2b): the last-relayed pose (in the CHILD realm's OWN frame — composed
 /// to the parent frame at fold time, never stored pre-composed, so a moving child re-composes fresh each tick)
 /// plus its last arrival tick on THIS shard's local clock (the anti-flicker TTL base).
@@ -1169,6 +1177,10 @@ pub struct StubStats {
     /// lower to THIS shard's realm (a recycled-NodeId mis-delivery across a parent re-home). Rejected on
     /// receive, never retained (the re-home stale-occupant guard). `0` healthy.
     pub misrouted_interest: u64,
+    /// VU AoI S2c-iii — parent-reflected `ProxySceneSet` frames whose account has NO dot on this (home) shard
+    /// (the dot departed / re-homed off it, or a mis-delivery): the forwarded baseline is dropped and nothing
+    /// is drawn. `0` in steady state; non-zero briefly across a crossing. Never a panic.
+    pub proxy_scene_orphaned: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -1327,6 +1339,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(ParentRealmNode::default());
     world.insert_resource(RetainedOccupants::default());
     world.insert_resource(ProxySentScene::default());
+    world.insert_resource(ForwardedProxyScene::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -1623,12 +1636,16 @@ fn process_inbound(
     crossing: (ResMut<RequestInFlight>, ResMut<CrossingProgress>),
     mut outbox: ResMut<OutboundBox>,
     // Bundled VU-AoI tuple `SystemParam` (bevy's 16-param, LAST slot): the cached parent-realm node (written
-    // from the parent Head reply in on_directory_reply) AND the retained up-relayed occupants (written from
-    // the OccupantInterest receive arm). Both are the parent-side up-flow stores, so grouping them is a
-    // mechanical arity fix; destructured to two `&mut` below.
-    vu_aoi: (ResMut<ParentRealmNode>, ResMut<RetainedOccupants>),
+    // from the parent Head reply), the retained up-relayed occupants (written from the OccupantInterest receive
+    // arm), AND the home-side forwarded baseline (written from the ProxySceneSet receive arm, S2c-iii). All are
+    // VU-AoI receive-side stores, so grouping them is a mechanical arity fix; destructured to three `&mut`.
+    vu_aoi: (
+        ResMut<ParentRealmNode>,
+        ResMut<RetainedOccupants>,
+        ResMut<ForwardedProxyScene>,
+    ),
 ) {
-    let (mut parent_node, mut retained) = vu_aoi;
+    let (mut parent_node, mut retained, mut forwarded) = vu_aoi;
     let (mut registration, mut mirror) = ghost_state;
     let (mut in_flight, mut progress) = crossing;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
@@ -1675,6 +1692,7 @@ fn process_inbound(
                 &mut stats,
                 &mut outbox,
                 &mut parent_node,
+                &mut forwarded,
             ),
             // 1d.5b.3b: the SOURCE-side ghost feed consumer — Spawn/Delta/Despawn from the dest owner
             // refresh this shard's RETAINED ghost dot (kinematic collider; pose+GhostRefresh, never a
@@ -4036,6 +4054,7 @@ fn on_directory_reply(
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
     parent_node: &mut ParentRealmNode,
+    forwarded: &mut ForwardedProxyScene,
 ) {
     // Decode the Saga-class envelope once and dispatch by arm. The orchestrator wraps a directory
     // answer in DirectoryReply; the 1d.1 transfer machinery adds the SOURCE's FlushSource request
@@ -4044,6 +4063,12 @@ fn on_directory_reply(
     // (Ghost/Directory/Saga/SagaAck/TransferAck) never target a stub inbound and are ignored.
     let reply = match postcard::from_bytes::<InterShardFlow>(bytes) {
         Ok(InterShardFlow::DirectoryReply(reply)) => reply,
+        // VU AoI S2c-iii — a parent's sibling-scene reflection: reconcile it onto this home shard's client
+        // (the sole holder of the dot's route). NOT a directory reply — a peer-to-peer render relay.
+        Ok(InterShardFlow::ProxySceneSet(pss)) => {
+            on_proxy_scene_set(pss, dots, forwarded, stats, outbox);
+            return;
+        }
         // SOURCE: ship the held subject's pose (1d.1).
         Ok(InterShardFlow::FlushSource(flush)) => {
             on_flush_source(flush, config, dots, outbox);
@@ -5078,6 +5103,54 @@ fn retain_occupant(
             home,
         },
     );
+}
+
+/// VU AoI S2c-iii — RECONCILE a parent-reflected sibling scene onto this (home) shard's client. Matches the
+/// dot by ACCOUNT alone (NO `simulates()` gate — during the pre-commit re-home window the dot is still in
+/// `dots.0` as Frozen/Ghost with a valid gateway, so its shrinking set still reaches the client). Diffs the
+/// FULL relayed set against the per-account forwarded baseline into the client `RealmSceneDelta` add/remove,
+/// then adopts the set as the new baseline — so a lost/shed reflect OR a re-home hand-off (full-set resend)
+/// self-heals. A frame for a DEPARTED dot drops the baseline (lazy cleanup) + is counted. Monomorphic (HR5).
+fn on_proxy_scene_set(
+    pss: ProxySceneSet,
+    dots: &Dots,
+    forwarded: &mut ForwardedProxyScene,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let Some(dot) = dots.0.values().find(|d| d.account == pss.observer) else {
+        stats.proxy_scene_orphaned += 1;
+        forwarded.0.remove(&pss.observer);
+        return;
+    };
+    let new_ids: BTreeSet<RealmId> = pss.realms.iter().map(|s| s.realm).collect();
+    let empty = BTreeSet::new();
+    let baseline = forwarded.0.get(&pss.observer).unwrap_or(&empty);
+    // `added` / `removed` are the client-edge deltas the sticky client needs (it holds a `RealmId`-keyed map).
+    let added: Vec<RealmShape> = pss
+        .realms
+        .iter()
+        .copied()
+        .filter(|s| !baseline.contains(&s.realm))
+        .collect();
+    let removed: Vec<RealmId> = baseline
+        .iter()
+        .copied()
+        .filter(|r| !new_ids.contains(r))
+        .collect();
+    // Bitwise `|` (no short-circuit region to leave uncovered): forward only when the client scene changed.
+    if !added.is_empty() | !removed.is_empty() {
+        push_session_reply(
+            outbox,
+            dot.gateway,
+            &ShardToGateway::RealmSceneDelta {
+                observer: dot.account,
+                added,
+                removed,
+            },
+        );
+    }
+    forwarded.0.insert(pss.observer, new_ids);
 }
 
 /// VU AoI S2b-ii — the survive-one-lost-datagram floor for the retained-occupant TTL (a tick COUNT). The relay
@@ -13251,6 +13324,111 @@ mod tests {
             sent.iter().map(|(to, _)| *to).collect::<Vec<_>>(),
             vec![node_b],
             "the full set resends to the NEW home even though the id-set is unchanged"
+        );
+    }
+
+    // ---- VU AoI S2c-iii — the home shard reconciles the reflected set onto its client ----------
+
+    /// A public `RealmShape` for `realm` (a Planet, so `frame_of` resolves) — the reflected geometry.
+    fn render_shape(realm: RealmId) -> RealmShape {
+        child_shape(&region(realm, Some(ROOT_REALM), DVec3::ZERO, 1000.0))
+    }
+
+    /// A `ProxySceneSet` inbound frame (on the Saga lane, as the parent emits it) for `account` carrying the
+    /// full current sibling set `realms`.
+    fn proxy_scene_inbound(account: AccountId, realms: &[RealmId]) -> Inbound {
+        let pss = vd_wire::intershard::ProxySceneSet {
+            observer: account,
+            realms: realms.iter().map(|r| render_shape(*r)).collect(),
+        };
+        wire_msg(SHARD, MsgClass::Saga, &InterShardFlow::ProxySceneSet(pss))
+    }
+
+    #[test]
+    fn on_proxy_scene_set_reconciles_add_unchanged_and_remove() {
+        let mut rig = Rig::new();
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO); // account AccountId(1), gateway GATEWAY
+        // FRESH baseline: the full set {42, 43} ⇒ both forwarded as `added` (this is also the re-home
+        // full-re-assert: a dot arriving at a new home has an empty baseline).
+        let deltas =
+            render_deltas(&rig.tick(vec![proxy_scene_inbound(
+                AccountId(1),
+                &[RealmId::Planet(42), RealmId::Planet(43)],
+            )]));
+        assert_eq!(deltas.len(), 1);
+        let (to, acct, added, removed) = &deltas[0];
+        assert_eq!(*to, GATEWAY);
+        assert_eq!(*acct, AccountId(1));
+        assert_eq!(
+            added.iter().map(|s| s.realm).collect::<BTreeSet<_>>(),
+            BTreeSet::from([RealmId::Planet(42), RealmId::Planet(43)])
+        );
+        assert!(removed.is_empty());
+        // UNCHANGED set ⇒ no client delta.
+        assert!(
+            render_deltas(&rig.tick(vec![proxy_scene_inbound(
+                AccountId(1),
+                &[RealmId::Planet(42), RealmId::Planet(43)]
+            )]))
+            .is_empty(),
+            "an unchanged set forwards nothing"
+        );
+        // SHRINKING set {42} ⇒ 43 removed, no new adds.
+        let deltas =
+            render_deltas(&rig.tick(vec![proxy_scene_inbound(AccountId(1), &[RealmId::Planet(42)])]));
+        assert_eq!(deltas.len(), 1);
+        assert!(deltas[0].2.is_empty(), "no new adds");
+        assert_eq!(deltas[0].3, vec![RealmId::Planet(43)], "the departed sibling removed");
+    }
+
+    #[test]
+    fn on_proxy_scene_set_for_a_departed_dot_drops_the_baseline() {
+        let mut rig = Rig::new();
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO); // account AccountId(1)
+        let _ = rig.tick(vec![proxy_scene_inbound(AccountId(1), &[RealmId::Planet(42)])]);
+        assert!(rig.world.resource::<ForwardedProxyScene>().0.contains_key(&AccountId(1)));
+        // A frame for an account with NO dot here ⇒ orphaned, no delta, no baseline.
+        let sent = rig.tick(vec![proxy_scene_inbound(AccountId(99), &[RealmId::Planet(43)])]);
+        assert!(render_deltas(&sent).is_empty());
+        assert_eq!(rig.world.resource::<StubStats>().proxy_scene_orphaned, 1);
+        assert!(!rig.world.resource::<ForwardedProxyScene>().0.contains_key(&AccountId(99)));
+        // The dot for account 1 DEPARTS (re-homed off this shard); a late frame ⇒ orphaned + its baseline is
+        // dropped (lazy cleanup — the removal is VU-6's re-stream, D-RLM-13).
+        rig.world.resource_mut::<Dots>().0.remove(&SESSION);
+        let _ = rig.tick(vec![proxy_scene_inbound(AccountId(1), &[RealmId::Planet(42)])]);
+        assert_eq!(rig.world.resource::<StubStats>().proxy_scene_orphaned, 2);
+        assert!(
+            !rig.world.resource::<ForwardedProxyScene>().0.contains_key(&AccountId(1)),
+            "a departed dot's forwarded baseline is dropped"
+        );
+    }
+
+    #[test]
+    fn e2e_parent_reflects_a_sibling_and_the_home_forwards_it_to_the_client() {
+        // The full sim-tier link: parent REFLECTS a proxy's sibling scene down (S2c-ii) → the home shard
+        // RECONCILES it into a client RealmSceneDelta (S2c-iii). (The cross-PROCESS e2e with a real client is
+        // harness-tier, like the demand-walk.)
+        let mut p = parent_with_two_planet_children(DVec3::new(500.0, 0.0, 0.0));
+        inject_proxy(&mut p, AccountId(1), frame_of(RealmId::Planet(42)), DVec3::ZERO);
+        let reflected = proxy_scene_sets(&p.tick(vec![]));
+        assert_eq!(reflected.len(), 1);
+        let (home_node, pss) = reflected.into_iter().next().expect("one reflect");
+        assert_eq!(home_node, HOME_SHARD);
+        // The HOME shard hosting the dot for account 1 receives the reflect and forwards the client delta.
+        let mut h = Rig::new();
+        insert_owned_dot(&mut h, SESSION, player(7), DVec3::ZERO); // account AccountId(1), gateway GATEWAY
+        let sent = h.tick(vec![wire_msg(
+            HOME_SHARD,
+            MsgClass::Saga,
+            &InterShardFlow::ProxySceneSet(pss),
+        )]);
+        let deltas = render_deltas(&sent);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].0, GATEWAY, "forwarded to the dot's gateway");
+        assert_eq!(
+            deltas[0].2.iter().map(|s| s.realm).collect::<BTreeSet<_>>(),
+            BTreeSet::from([RealmId::Planet(42), RealmId::Planet(43)]),
+            "the neighbour outlines reach the client"
         );
     }
 
