@@ -32,8 +32,8 @@ use bevy::render::render_graph::{
     self, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
 };
 use bevy::render::render_resource::{
-    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, Face, MapMode,
-    PollType, TexelCopyBufferInfo, TexelCopyBufferLayout, TextureFormat, TextureUsages,
+    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, PollType,
+    TexelCopyBufferInfo, TexelCopyBufferLayout, TextureFormat, TextureUsages,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
@@ -753,12 +753,13 @@ fn frame_scene_camera(net: Res<Net>, mut cam_tf: Query<&mut Transform, With<Foll
 
 /// Spawn one realm box from its lowered [`MeshPrim`]s (today exactly one per box): a Bevy `Mesh`
 /// built from the prim VERTICES + a TRANSLUCENT [`StandardMaterial`] (`AlphaMode::Blend`,
-/// BACK-face culling so a box renders only when viewed from OUTSIDE, `unlit` so the color is legible
-/// regardless of lighting). Back-face culling is what keeps the CONTAINER realm you are inside (e.g.
-/// the System) from washing the whole view with its translucent tint — from inside, all its faces
-/// are back-faces and cull away, leaving black space + stars + the child realm boxes; the boundary
-/// reappears as a shell only when you fly out and look back. Returns `None` if the box lowered to no
-/// prim (defensive).
+/// DOUBLE-SIDED (`cull_mode: None`) so the shell renders from BOTH sides, `unlit` so the color is
+/// legible regardless of lighting). Double-sided is the seamless mandate ("the moon does NOT
+/// disappear when you enter the building"): the CONTAINER realm you are inside (e.g. the System, the
+/// Galaxy) stays visible as the faint shell AROUND you, never culled to black — you see its far wall
+/// through the near wall (honest translucency) plus every child box + the starfield beyond. An
+/// earlier build back-face-culled these so a container you entered vanished from inside; that culling
+/// was the bug the user hit, not a feature. Returns `None` if the box lowered to no prim (defensive).
 fn spawn_realm_box(
     prims: &[MeshPrim],
     meshes: &mut Assets<Mesh>,
@@ -771,7 +772,7 @@ fn spawn_realm_box(
     let material = materials.add(StandardMaterial {
         base_color: Color::srgba(r, g, b, a),
         alpha_mode: AlphaMode::Blend,
-        cull_mode: Some(Face::Back),
+        cull_mode: None,
         unlit: true,
         ..default()
     });
