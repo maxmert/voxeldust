@@ -42,8 +42,8 @@ use vd_wire::channels::{
 };
 use vd_wire::intershard::{
     CrossingAborted, CrossingRequest, DemandVerb, DemoteCmd, FlushSource, GhostFlow,
-    InterShardFlow, OccupantInterest, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState,
-    RealmDemand,
+    InterShardFlow, OccupantInterest, PROMOTE_STEP, PromoteCmd, ProxySceneSet, RE_HOME_STEP, ReHomeCmd,
+    ReHomeState, RealmDemand,
     STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP,
     TRANSIENT_COMPLETE_STEP, TRANSIENT_DISCARD_STEP, TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP,
     ShardPresence, TransferAck, TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest,
@@ -307,6 +307,13 @@ pub struct ParentRealmNode(pub Option<NodeId>);
 /// on restart (the non-durability IS the re-home stale-occupant guard — it refills within one TTL window).
 #[derive(Resource, Debug, Default)]
 pub struct RetainedOccupants(pub BTreeMap<AccountId, RetainedOccupant>);
+
+/// VU AoI S2c-ii — the parent's per-proxy LAST-SENT `ProxySceneSet` state: `(home, in-range sibling id-set)`.
+/// The AoI pass sends a fresh set DOWN to the home ONLY when this differs (send-on-change keeps the reliable
+/// buffer lean, and a re-home changing `home` forces a full resend to the new home). PURE P-side render
+/// bookkeeping — no fence, never persisted (`BTreeMap`, sim determinism). EMPTY at walk/static (no proxy).
+#[derive(Resource, Debug, Default)]
+pub struct ProxySentScene(pub BTreeMap<AccountId, (NodeId, BTreeSet<RealmId>)>);
 
 /// One retained proxy occupant (VU AoI S2b): the last-relayed pose (in the CHILD realm's OWN frame — composed
 /// to the parent frame at fold time, never stored pre-composed, so a moving child re-composes fresh each tick)
@@ -1319,6 +1326,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(AoiMembership::default());
     world.insert_resource(ParentRealmNode::default());
     world.insert_resource(RetainedOccupants::default());
+    world.insert_resource(ProxySentScene::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -4578,6 +4586,9 @@ fn evaluate_realm_aoi(
     // VU AoI S2b — the up-relayed occupants this parent retains; `aoi_decide` prunes stale ones (S2b-ii) and
     // folds the alive ones in as proxy observers (S2b-iii). EMPTY at walk/static ⇒ inert.
     mut retained: ResMut<RetainedOccupants>,
+    // VU AoI S2c-ii — the per-proxy last-sent sibling-scene state; `aoi_decide` reflects a fresh set DOWN to
+    // the home shard only on change. EMPTY at walk/static ⇒ inert.
+    mut proxy_sent: ResMut<ProxySentScene>,
 ) {
     // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
     // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
@@ -4603,6 +4614,7 @@ fn evaluate_realm_aoi(
         &mut outbox,
         parent.0,
         &mut retained.0,
+        &mut proxy_sent.0,
     );
 }
 
@@ -4644,6 +4656,7 @@ fn aoi_decide(
     outbox: &mut OutboundBox,
     parent_node: Option<NodeId>,
     retained: &mut BTreeMap<AccountId, RetainedOccupant>,
+    proxy_sent: &mut BTreeMap<AccountId, (NodeId, BTreeSet<RealmId>)>,
 ) {
     let own_coord = &config.own_coord;
     let tick = clock.universe_tick;
@@ -4656,6 +4669,10 @@ fn aoi_decide(
     // relay is ever received — so the prune is a no-op ⇒ byte-identical).
     let retain_ttl = retain_ttl_ticks(config);
     retained.retain(|_, e| proxy_alive(e.last_seen, clock.local_tick, retain_ttl));
+    // VU AoI S2c-ii — evict the last-sent scene cache for any proxy the prune just dropped, BEFORE the
+    // emptiness gate below (a pruned proxy with no local dots would early-return past the emit loop, leaking
+    // the entry). Keyed to `retained`, so it tracks the store exactly.
+    proxy_sent.retain(|acct, _| retained.contains_key(acct));
 
     // VU AoI S2b-iii — the PROXY observers: each retained (post-prune ⇒ alive) up-relayed occupant, its pose
     // lifted from its own child frame into this shard's ambient-root frame (the frame the local dots + child
@@ -4720,6 +4737,11 @@ fn aoi_decide(
         .collect();
     let mut render_adds: BTreeMap<ObserverId, Vec<RealmShape>> = BTreeMap::new();
     let mut render_removes: BTreeMap<ObserverId, Vec<RealmId>> = BTreeMap::new();
+    // VU AoI S2c-ii — per PROXY observer, the FULL set of its CURRENTLY in-range sibling outlines (a LEVEL, not
+    // an edge). Reflected DOWN to the home shard below; the home diffs it into the client render stream. An
+    // entry appears only when the proxy has ≥1 in-range child; the emit loop iterates `retained` (so a proxy
+    // that dropped to ZERO in-range children still ships an empty set ⇒ the home removes its siblings).
+    let mut proxy_now: BTreeMap<AccountId, Vec<RealmShape>> = BTreeMap::new();
 
     // The UNIFIED direct-child placements (movers authored from ephemeris, static children at `center`),
     // stable seed-derived Vec order — the SAME code-path the observer feed reads (H-1/H-2, no reorder).
@@ -4762,6 +4784,15 @@ fn aoi_decide(
                 } else if state.was_in && !next_in {
                     render_removes.entry(*obs).or_default().push(region.realm);
                 }
+            }
+            // VU AoI S2c-ii — accumulate the PROXY's CURRENT in-range set (LEVEL): every child still in range
+            // after this tick's transition (`next_in`), reflected down to the home for the client to draw. The
+            // dot/transient branch above is edge (add/remove); the proxy branch is the full set (the home
+            // reconciles it), so a lost/shed reflect or a re-home hand-off self-heals on the next set.
+            if let ObserverId::Proxy(acct) = obs
+                && next_in
+            {
+                proxy_now.entry(*acct).or_default().push(child_shape(region));
             }
             match next {
                 Some(s) => {
@@ -4808,6 +4839,29 @@ fn aoi_decide(
                 removed,
             },
         );
+    }
+    // VU AoI S2c-ii — reflect each retained proxy's CURRENT sibling scene DOWN to its home shard, SEND-ON-
+    // CHANGE. Iterate `retained` (not `proxy_now`) so a proxy that dropped to ZERO in-range children still
+    // ships an EMPTY set (the home reconciles it to a removal). LEVEL, not edge: the home diffs the full set,
+    // so a lost/shed reflect OR a re-home (which last-wins `home`, so `(home, ids)` differs → a full resend to
+    // the new home) self-heals on the next change. The stored `home` is the up-relay's own return address, so
+    // the parent never learns the client connection (HR1 — Option C). Inert at walk/static (`retained` empty).
+    let no_shapes: Vec<RealmShape> = Vec::new();
+    for (acct, entry) in retained.iter() {
+        let shapes = proxy_now.get(acct).unwrap_or(&no_shapes);
+        let ids: BTreeSet<RealmId> = shapes.iter().map(|s| s.realm).collect();
+        let cur = (entry.home, ids);
+        if proxy_sent.get(acct) != Some(&cur) {
+            outbox.push_flow(
+                entry.home,
+                MsgClass::Saga,
+                &InterShardFlow::ProxySceneSet(ProxySceneSet {
+                    observer: *acct,
+                    realms: shapes.clone(),
+                }),
+            );
+            proxy_sent.insert(*acct, cur);
+        }
     }
     // VU AoI S2a-2b-i — resolve THIS realm's PARENT node. Periodically HeadRead the parent's directory
     // record so its authoritative node lands in `ParentRealmNode` (written from the reply in
@@ -13100,6 +13154,103 @@ mod tests {
         assert!(
             rig.world.resource::<RetainedOccupants>().0.is_empty(),
             "the proxy is pruned once its TTL lapses"
+        );
+    }
+
+    // ---- VU AoI S2c-ii — the parent reflects the sibling scene DOWN to the home shard --------------
+
+    /// Every `ProxySceneSet` reflected down this tick, with its destination (the home shard).
+    fn proxy_scene_sets(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<(NodeId, ProxySceneSet)> {
+        sent.iter()
+            .filter_map(|(to, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                Ok(InterShardFlow::ProxySceneSet(p)) => Some((*to, p)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn aoi_reflects_the_full_in_range_sibling_set_down_send_on_change() {
+        // A proxy in range of BOTH planets ⇒ the parent reflects the FULL set {42, 43} DOWN to the home shard
+        // (send-on-change). An unchanged tick re-sends nothing.
+        let mut rig = parent_with_two_planet_children(DVec3::new(500.0, 0.0, 0.0)); // both within 1000 of origin
+        inject_proxy(&mut rig, AccountId(9), frame_of(RealmId::Planet(42)), DVec3::ZERO);
+        let sent = proxy_scene_sets(&rig.tick(vec![]));
+        assert_eq!(sent.len(), 1, "one reflect to the home shard");
+        let (to, pss) = &sent[0];
+        assert_eq!(*to, HOME_SHARD, "reflected to the stored home (the up-relay's return address)");
+        assert_eq!(pss.observer, AccountId(9));
+        assert_eq!(
+            pss.realms.iter().map(|s| s.realm).collect::<BTreeSet<_>>(),
+            BTreeSet::from([RealmId::Planet(42), RealmId::Planet(43)]),
+            "the FULL current in-range set (a level, not an edge)"
+        );
+        // Unchanged tick ⇒ no re-send (send-on-change keeps the reliable buffer lean).
+        assert!(
+            proxy_scene_sets(&rig.tick(vec![])).is_empty(),
+            "an unchanged set is not re-sent"
+        );
+    }
+
+    #[test]
+    fn aoi_reflects_a_shrinking_set_then_evicts_on_expiry() {
+        let mut rig = parent_with_two_planet_children(DVec3::new(500.0, 0.0, 0.0));
+        inject_proxy(&mut rig, AccountId(9), frame_of(RealmId::Planet(42)), DVec3::ZERO);
+        let _ = rig.tick(vec![]); // sends {42, 43}
+        // BACK-AWAY: the proxy moves far out of range of both ⇒ the set shrinks to EMPTY ⇒ the home reconciles
+        // a removal of every sibling.
+        inject_proxy(
+            &mut rig,
+            AccountId(9),
+            frame_of(RealmId::Planet(42)),
+            DVec3::new(1.0e6, 0.0, 0.0),
+        );
+        let sent = proxy_scene_sets(&rig.tick(vec![]));
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].1.realms.is_empty(),
+            "an out-of-range proxy reflects an empty set (the home removes its siblings)"
+        );
+        // TTL-EXPIRY: the proxy is pruned ⇒ the last-sent cache is evicted (bounds memory).
+        let now = rig.world.resource::<ClockSample>().local_tick.0 + retain_ttl_ticks(&config()) + 5;
+        rig.set_local_tick(now);
+        let _ = rig.tick(vec![]);
+        assert!(
+            rig.world.resource::<ProxySentScene>().0.is_empty(),
+            "the last-sent cache is evicted once the proxy is pruned"
+        );
+    }
+
+    #[test]
+    fn aoi_resends_the_full_set_to_the_new_home_on_a_re_home() {
+        // A re-home makes the NEW home relay ⇒ the stored `home` flips (last-wins). Even with the id-set
+        // unchanged, the parent must re-send the FULL set to the NEW home (the old home's route is dead).
+        let mut rig = parent_with_two_planet_children(DVec3::new(500.0, 0.0, 0.0));
+        let node_a = NodeId(81);
+        let node_b = NodeId(82);
+        let now = rig.world.resource::<ClockSample>().local_tick;
+        rig.world.resource_mut::<RetainedOccupants>().0.insert(
+            AccountId(9),
+            RetainedOccupant {
+                occupant: StampedPose::at_rest(frame_of(RealmId::Planet(42)), DVec3::ZERO, UniverseTick(100)),
+                last_seen: now,
+                home: node_a,
+            },
+        );
+        let sent = proxy_scene_sets(&rig.tick(vec![]));
+        assert_eq!(sent.iter().map(|(to, _)| *to).collect::<Vec<_>>(), vec![node_a]);
+        // RE-HOME: same position + set, but the home flips A → B.
+        rig.world
+            .resource_mut::<RetainedOccupants>()
+            .0
+            .get_mut(&AccountId(9))
+            .expect("the retained proxy")
+            .home = node_b;
+        let sent = proxy_scene_sets(&rig.tick(vec![]));
+        assert_eq!(
+            sent.iter().map(|(to, _)| *to).collect::<Vec<_>>(),
+            vec![node_b],
+            "the full set resends to the NEW home even though the id-set is unchanged"
         );
     }
 
