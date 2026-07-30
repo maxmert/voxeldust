@@ -1725,13 +1725,26 @@ fn announce_own_entity(
 }
 
 /// Lower the SEED-DERIVED neighbourhood of `home` to the wire render subset a fully-agnostic client draws
-/// its whole world from (VU, proto_minor 5). The neighbourhood is `home`'s ancestor chain up to the ambient
-/// root ∪ its DIRECT children — never siblings ([`realm_neighbourhood_for_held_config`]) — each region
-/// lowered to a [`RealmShape`] (realm + authoritative frame + static center + boundary + parent), the RENDER
-/// fields ONLY, never the server-side AoI band. `root` is the parent-less ambient realm; it degrades to
-/// `home` when the neighbourhood is empty (a `home` not in the forest — a safe no-scene, never a panic).
-/// Closed-form `f(seed, home)`; the client REPLACES its whole scene with this on receipt.
-fn realm_registry_for_home(cfg: &SeedInjectorConfig, home: RealmId) -> ServerControlMsg {
+/// its whole world from (VU, proto_minor 5+). The seed neighbourhood is `home`'s ancestor chain up to the
+/// ambient root ∪ its DIRECT children — never siblings ([`realm_neighbourhood_for_held_config`]) — each
+/// region lowered to a [`RealmShape`] (realm + authoritative frame + static center + boundary + parent), the
+/// RENDER fields ONLY, never the server-side AoI band. `root` is the parent-less ambient realm; it degrades
+/// to `home` when the neighbourhood is empty (a `home` not in the forest — a safe no-scene, never a panic).
+/// Closed-form `f(seed, minor, home)`; the client REPLACES its whole scene with this on receipt.
+///
+/// A `negotiated_minor >= 6` peer receives ONLY the ancestor SHELL-CHAIN root→home (every direct child
+/// `parent == Some(home)` is DROPPED); those children arrive through the live scene-delta
+/// ([`ServerControlMsg::RealmSceneDelta`], a minor-6 variant) as they enter the observer's AoI. The
+/// ancestor-chain-in-registry vs children-via-delta split is a FACTORING, not a second visibility mechanism:
+/// a CONTAINING realm is the degenerate always-in-view case (you are physically INSIDE it, so its angular
+/// size is effectively infinite), while the children obey the one AoI band via the delta. Server-
+/// authoritative throughout. A `negotiated_minor == 5` peer never receives a `RealmSceneDelta`, so it keeps
+/// TODAY'S full ancestors∪children set — shrinking it would strand it with a permanently childless world.
+fn realm_registry_for_home(
+    cfg: &SeedInjectorConfig,
+    negotiated_minor: u16,
+    home: RealmId,
+) -> ServerControlMsg {
     let mut held = BTreeSet::new();
     held.insert(home);
     let neighbourhood =
@@ -1740,8 +1753,13 @@ fn realm_registry_for_home(cfg: &SeedInjectorConfig, home: RealmId) -> ServerCon
         .iter()
         .find(|r| r.parent.is_none())
         .map_or(home, |r| r.realm);
+    // The shrink gate, straight-line in ONE place. `keep_children` is the minor-5 back-compat path (full
+    // ancestors∪children); a minor-6+ peer keeps a region iff it is NOT a direct child of `home`. Bitwise `|`
+    // — both operands always evaluate, so there is no uncoverable short-circuit region (HR5).
+    let keep_children = negotiated_minor < 6;
     let regions = neighbourhood
         .iter()
+        .filter(|r| keep_children | (r.parent != Some(home)))
         .map(|r| RealmShape {
             realm: r.realm,
             frame: r.frame,
@@ -1771,7 +1789,11 @@ fn maybe_announce_realm_registry(
         return;
     }
     let Some(home) = home_rid else { return };
-    push_control(outbox, client, &realm_registry_for_home(cfg, home));
+    push_control(
+        outbox,
+        client,
+        &realm_registry_for_home(cfg, negotiated_minor, home),
+    );
 }
 
 fn push_to_shard(outbox: &mut OutboundBox, to: NodeId, class: MsgClass, msg: &GatewayToShard) {
@@ -7861,6 +7883,19 @@ mod tests {
             sent[0].0.iter().any(|s| s.realm == home),
             "the streamed neighbourhood contains the client's own home realm"
         );
+
+        // (5) armed + minor 6 (the PRODUCTION minor) + a known home → also EXACTLY ONE RealmRegistry. The
+        // gate admits both supported minors (5 and 6); they differ only in the child-shrink (asserted in the
+        // System-home test), never in WHETHER a render-scene streams. `home` here is a LEAF Area, so its
+        // shrunk and full projections coincide — it is present under either minor.
+        let mut outbox = OutboundBox::default();
+        maybe_announce_realm_registry(&mut outbox, client, &armed, 6, Some(home));
+        let sent = realm_registries(&outbox);
+        assert_eq!(sent.len(), 1, "a minor-6 peer also streams exactly one render-scene");
+        assert!(
+            sent[0].0.iter().any(|s| s.realm == home),
+            "the streamed neighbourhood contains the client's own home realm (a containing realm)"
+        );
     }
 
     #[test]
@@ -7882,7 +7917,9 @@ mod tests {
         // Round-trip the built registry through an outbox → the SAME covered decode the live seam uses (no
         // `let-else { panic }`, whose never-taken arm would be an uncoverable region under HR5).
         let mut ob = OutboundBox::default();
-        push_control(&mut ob, NodeId(7), &realm_registry_for_home(&cfg, home));
+        // The minor==5 back-compat path: the FULL ancestors∪children neighbourhood (this home is a LEAF Area,
+        // so it happens to have no children — the drop-children branch is covered by the System-home test).
+        push_control(&mut ob, NodeId(7), &realm_registry_for_home(&cfg, 5, home));
         let sent = realm_registries(&ob);
         assert_eq!(sent.len(), 1, "one RealmRegistry per home");
         let (regions, root) = &sent[0];
@@ -7908,7 +7945,11 @@ mod tests {
         // at runtime, never a static forest region) — the neighbourhood is empty, never a panic.
         let off_forest = RealmId::Ship(EntityId(0xDEAD));
         let mut ob = OutboundBox::default();
-        push_control(&mut ob, NodeId(7), &realm_registry_for_home(&cfg, off_forest));
+        push_control(
+            &mut ob,
+            NodeId(7),
+            &realm_registry_for_home(&cfg, 5, off_forest),
+        );
         let sent = realm_registries(&ob);
         assert_eq!(sent.len(), 1, "one RealmRegistry even for an off-forest home");
         let (regions, root) = &sent[0];
@@ -7916,6 +7957,87 @@ mod tests {
         assert_eq!(
             *root, off_forest,
             "root degrades to the home itself when the neighbourhood is empty"
+        );
+    }
+
+    #[test]
+    fn realm_registry_for_a_system_home_ships_the_ancestor_chain_and_defers_children_to_the_delta() {
+        // A home WITH children — System A (ancestors Universe→Galaxy→System A; direct children Planet A +
+        // Station A). A minor>=6 peer receives ONLY the ancestor SHELL-CHAIN root→home; every direct child is
+        // DROPPED (it arrives later via `RealmSceneDelta`). A minor==5 peer — which never receives a delta —
+        // keeps the full ancestors∪children set. The chain-in-registry vs children-via-delta split is a
+        // FACTORING (a containing realm is the degenerate always-in-view case), not a second visibility rule.
+        let home = RealmId::System(7); // System A — the seed-forest SYSTEM_A home, a realm WITH children
+        let cfg = armed_injector(BTreeMap::new());
+        let full = realm_neighbourhood_for_held_config(
+            cfg.universe_seed,
+            &BTreeSet::from([home]),
+            &cfg.universe_config,
+        );
+        // Partition the seed neighbourhood into the ancestor chain (`parent != Some(home)`) and the direct
+        // children (`parent == Some(home)`), so the test tracks the forest instead of hardcoding ids.
+        let ancestors: Vec<RealmId> = full
+            .iter()
+            .filter(|r| r.parent != Some(home))
+            .map(|r| r.realm)
+            .collect();
+        let children: Vec<RealmId> = full
+            .iter()
+            .filter(|r| r.parent == Some(home))
+            .map(|r| r.realm)
+            .collect();
+        assert!(
+            !children.is_empty(),
+            "the System A home has direct children to drop (else the drop-branch test is vacuous)"
+        );
+        assert!(
+            ancestors.contains(&home),
+            "the ancestor chain includes the home realm itself (a containing realm is always in view)"
+        );
+
+        // minor >= 6 → the SHRUNK registry is EXACTLY the ancestor chain root→home; every child is dropped.
+        let mut ob6 = OutboundBox::default();
+        push_control(&mut ob6, NodeId(7), &realm_registry_for_home(&cfg, 6, home));
+        let sent6 = realm_registries(&ob6);
+        assert_eq!(sent6.len(), 1, "one RealmRegistry per home");
+        let (shrunk_regions, root6) = &sent6[0];
+        let shrunk_realms: Vec<RealmId> = shrunk_regions.iter().map(|s| s.realm).collect();
+        // (a) the ancestors root→System are KEPT, same realms in the same forest order.
+        assert_eq!(
+            shrunk_realms, ancestors,
+            "a minor>=6 peer keeps exactly the ancestor chain root→home"
+        );
+        // (b) EVERY direct child is DROPPED from the login registry.
+        for child in &children {
+            assert!(
+                !shrunk_realms.contains(child),
+                "the direct child is deferred to the scene-delta, not shipped in the login registry"
+            );
+        }
+        let ambient_root = full
+            .iter()
+            .find(|r| r.parent.is_none())
+            .expect("the neighbourhood reaches the parent-less ambient root");
+        assert_eq!(*root6, ambient_root.realm, "root still names the ambient realm");
+
+        // minor == 5 → the FULL ancestors∪children set (a minor-5 peer gets no delta to fill children in).
+        let mut ob5 = OutboundBox::default();
+        push_control(&mut ob5, NodeId(7), &realm_registry_for_home(&cfg, 5, home));
+        let sent5 = realm_registries(&ob5);
+        assert_eq!(sent5.len(), 1, "one RealmRegistry per home");
+        let (full_regions, _) = &sent5[0];
+        let full_realms: Vec<RealmId> = full_regions.iter().map(|s| s.realm).collect();
+        let expected_full: Vec<RealmId> = full.iter().map(|r| r.realm).collect();
+        // (c) a minor==5 peer sees the full ancestors∪children set (byte-identical to today's projection).
+        assert_eq!(
+            full_realms, expected_full,
+            "a minor==5 peer keeps the full ancestors∪children neighbourhood"
+        );
+        // The split is real: shrunk (ancestors) + the dropped children exactly reconstruct the full set.
+        assert_eq!(
+            shrunk_realms.len() + children.len(),
+            full_realms.len(),
+            "the minor>=6 registry is strictly smaller — the children moved to the scene-delta"
         );
     }
 
@@ -8721,10 +8843,15 @@ mod tests {
                 ServerControlMsg::OwnEntity {
                     entity: EntityId(77)
                 },
-                // VU (proto_minor 5): a demand cluster streams the seed-derived render-scene at this
+                // VU (proto_minor 5+): a demand cluster streams the seed-derived render-scene at this
                 // home-entry seam — the client's home neighbourhood, built by the SAME production projection
-                // (so the assertion tracks the forest geometry instead of hardcoding it).
-                realm_registry_for_home(&armed_injector(BTreeMap::new()), home_realm()),
+                // at the SAME negotiated minor (CURRENT) as the live seam, so the assertion tracks the forest
+                // geometry instead of hardcoding it.
+                realm_registry_for_home(
+                    &armed_injector(BTreeMap::new()),
+                    ProtoVersion::CURRENT.minor,
+                    home_realm(),
+                ),
             ],
             "the login sub opened on the HOME shard (never config.shard), then the render-scene streamed"
         );
