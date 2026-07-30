@@ -104,8 +104,9 @@ const AREA_A: RealmId = RealmId::Area(7);
 /// fold identity, not a frame). Set between the galaxy (180) and the universe (1e9).
 pub const MAX_RENDERABLE_EXTENT_M: f64 = 200.0;
 
-// --- FA-5 (D-45(a)) VISUAL-scale single-system generator — the window-friendly synthetic scale whose
-// planets ORBIT visibly. Every visual geometry number is DERIVED (helpers below), not a literal. ---
+// --- FA-5 (D-45(a)) VISUAL-scale single-system generator — the COMPRESSED-REAL game scale (the ONE
+// geometry; `visual_scale` is its static-render expression, `visual_demand` its live demand-cluster
+// expression). Every visual geometry number is DERIVED (parameterized helpers below), not a literal. ---
 /// `child_seed` salt distinguishing PLANET-kind children under a system (a fixed kind discriminant;
 /// `child_seed` avalanches `(parent, salt, index)`, so a distinct salt keeps planet ids off other kinds).
 const PLANET_SALT: u64 = 0x504c_414e_4554; // "PLANET"
@@ -113,9 +114,14 @@ const PLANET_SALT: u64 = 0x504c_414e_4554; // "PLANET"
 /// `realm_path::system_path(SYSTEM_A_SEED).lineage_seeds()` so every shard hosting System A draws the
 /// IDENTICAL per-system stream by construction (HR1); consumed once by [`generate_system_forest`].
 const SYSTEM_A_LINEAGE: [u64; 3] = [UNIVERSE_SEED, GALAXY_SEED, SYSTEM_A_SEED];
-/// Visual-scale planet count — exercises the geometric spacing [`orbital_axis_au`] for n=0,1,2 (not a
-/// single-orbit special case); small so the whole system frames inside the render window.
-const VISUAL_N_PLANETS: u32 = 3;
+/// Compressed-real planet count — a 5-planet Kepler system: the inner 3 subtend ≥ the visibility angle
+/// from the star (drawn) while the outer 2 fall below it (culled) until an occupant closes in, so the
+/// one `cot(θ/2)` rule visibly culls by angular size. Exercises the geometric spacing for n=0..4.
+const VISUAL_N_PLANETS: u32 = 5;
+/// The compressed-real System SOI radius (render m): System 150 ⊂ Galaxy 180 < cull 200. FLAG: only
+/// 20 m of headroom below the cull — no one raises this past ~180 without also moving
+/// [`MAX_RENDERABLE_EXTENT_M`] in the same change.
+const VISUAL_SYSTEM_SOI_R_M: f64 = 150.0;
 /// Headroom (render m) between the OUTER planet's SOI face and the System SOI surface, so the outer
 /// body renders STRICTLY inside its System box ([`visual_au_to_render_m`] solves to place it here).
 const VISUAL_SYSTEM_MARGIN_M: f64 = 4.0;
@@ -123,11 +129,14 @@ const VISUAL_SYSTEM_MARGIN_M: f64 = 4.0;
 /// SOIs never overlap (the non-overlap invariant is a pinned test, not a hand-tuned coincidence).
 const VISUAL_SOI_GAP_FRACTION: f64 = 0.35;
 /// The OUTER (slowest) planet's orbital period in seconds — a MAJESTIC-but-visible pace for the human
-/// window view (the inner planets are faster by Kepler-3: `T ∝ a^1.5`, so ~37 s / ~81 s / 180 s for the
-/// 3 planets). Feeds the synthetic central mass via the Kepler-3 inversion. NOT tuned to a frantic
-/// few-second orbit: the automated 2-capture render gate samples universe ticks FAR ENOUGH apart to see
-/// the sweep, so the period is free to be leisurely for a human watching.
-const VISUAL_TARGET_OUTER_PERIOD_S: f64 = 180.0;
+/// window view (the inner planets are faster by Kepler-3: `T ∝ a^1.5`). Feeds the synthetic central
+/// mass via the Kepler-3 inversion. NOT tuned to a frantic few-second orbit: the automated 2-capture
+/// render gate samples universe ticks FAR ENOUGH apart to see the sweep, so the period is free to be
+/// leisurely for a human watching.
+const VISUAL_TARGET_OUTER_PERIOD_S: f64 = 300.0;
+/// The minimum angular size (radians) a realm must subtend to enter Area of Interest — 8°, a realm is
+/// visible (streams in) out to `extent · cot(θ/2) + velocity-lead`. ONE config constant, no kind-branch.
+const VISIBILITY_THETA_MIN_RAD: f64 = 0.139_626;
 /// One solar mass (kg) — the canonical/walk INERT central mass (those presets emit no `Orbital` body,
 /// so it is never read there; [`UniverseConfig::visual_scale`] overrides it with a synthetic mass).
 const CANONICAL_STAR_MASS_KG: f64 = 1.989e30;
@@ -315,6 +324,14 @@ pub fn moving_children_for(
 // The SAME generator serves the VISUAL synthetic-mass preset (window-friendly orbiting boxes) AND the
 // canonical real-mass preset (P4 real proportions) with ZERO kind-match — only the config differs.
 
+/// The Area-of-Interest visibility factor `cot(θ/2)` for a minimum angular size `theta_rad`: a realm of
+/// finite extent `e` subtends `≥ theta_rad` (is visible) out to `e · cot(θ/2)`. Straight-line, branchless
+/// (one region, HR5) — ALL AoI branching stays in [`AoiConfig::for_velocity_safe`]. At θ_min = 8° this is
+/// ≈ 14.301.
+fn visibility_factor(theta_rad: f64) -> f64 {
+    1.0 / (theta_rad / 2.0).tan()
+}
+
 /// Closed-form inversion of Kepler's third law `T = 2π·√(a³/μ)`, `μ = G·M` → the central mass (kg)
 /// that yields orbital period `target_period_s` at semi-major axis `sma_ref_m`. The SYNTHETIC-mass crux
 /// for the visual scale: a real star mass at tens-of-metres `sma` gives a sub-µs (invisible) period, so
@@ -323,29 +340,67 @@ fn synthetic_central_mass(sma_ref_m: f64, target_period_s: f64) -> f64 {
     TAU * TAU * sma_ref_m.powi(3) / (G * target_period_s * target_period_s)
 }
 
-/// The AU→render-metre compression solved so the OUTER planet's orbit + its SOI + [`VISUAL_SYSTEM_MARGIN_M`]
-/// sit EXACTLY at the System SOI surface (containment, vet far-plane fix). Denominator = the outer orbit
-/// axis (AU) + the planet SOI expressed in AU (a fraction of the smallest inter-orbit gap). Branchless.
-fn visual_au_to_render_m() -> f64 {
-    let outer_axis_au = orbital_axis_au(VISUAL_N_PLANETS - 1, ORBITAL_A0_AU, ORBITAL_RATIO);
-    let soi_au = VISUAL_SOI_GAP_FRACTION * ORBITAL_A0_AU * (ORBITAL_RATIO - 1.0);
-    (SYSTEM_SOI_R_M - VISUAL_SYSTEM_MARGIN_M) / (outer_axis_au + soi_au)
+/// The AU→render-metre compression solved so the OUTER planet's orbit + its SOI + `margin` sit EXACTLY
+/// at the System SOI surface (containment, vet far-plane fix). Denominator = the outer orbit axis (AU) +
+/// the planet SOI expressed in AU (a fraction of the smallest inter-orbit gap). Branchless. Parameterized
+/// (RLM realistic-demo Slice 0) so `visual_scale` (static) and `visual_demand` (live) derive the SAME
+/// geometry from the same compressed-real numbers.
+fn visual_au_to_render_m(
+    system_soi: f64,
+    margin: f64,
+    n: u32,
+    gap_fraction: f64,
+    a0: f64,
+    ratio: f64,
+) -> f64 {
+    let outer_axis_au = orbital_axis_au(n - 1, a0, ratio);
+    let soi_au = gap_fraction * a0 * (ratio - 1.0);
+    (system_soi - margin) / (outer_axis_au + soi_au)
 }
 
 /// The planet SOI radius (render m) = the gap-fraction × the SMALLEST inter-orbit gap → adjacent SOIs
 /// never overlap by construction. Straight-line f64.
-fn visual_planet_soi_r_m() -> f64 {
-    VISUAL_SOI_GAP_FRACTION * ORBITAL_A0_AU * (ORBITAL_RATIO - 1.0) * visual_au_to_render_m()
+fn visual_planet_soi_r_m(
+    system_soi: f64,
+    margin: f64,
+    n: u32,
+    gap_fraction: f64,
+    a0: f64,
+    ratio: f64,
+) -> f64 {
+    gap_fraction
+        * a0
+        * (ratio - 1.0)
+        * visual_au_to_render_m(system_soi, margin, n, gap_fraction, a0, ratio)
 }
 
 /// The OUTER (slowest) planet's semi-major axis in render metres — the period-tuning reference.
-fn visual_outer_sma_render_m() -> f64 {
-    orbital_axis_au(VISUAL_N_PLANETS - 1, ORBITAL_A0_AU, ORBITAL_RATIO) * visual_au_to_render_m()
+fn visual_outer_sma_render_m(
+    system_soi: f64,
+    margin: f64,
+    n: u32,
+    gap_fraction: f64,
+    a0: f64,
+    ratio: f64,
+) -> f64 {
+    orbital_axis_au(n - 1, a0, ratio)
+        * visual_au_to_render_m(system_soi, margin, n, gap_fraction, a0, ratio)
 }
 
-/// The synthetic central mass (kg) placing the OUTER planet's period at [`VISUAL_TARGET_OUTER_PERIOD_S`].
-fn visual_central_mass_kg() -> f64 {
-    synthetic_central_mass(visual_outer_sma_render_m(), VISUAL_TARGET_OUTER_PERIOD_S)
+/// The synthetic central mass (kg) placing the OUTER planet's period at `outer_period`.
+fn visual_central_mass_kg(
+    system_soi: f64,
+    margin: f64,
+    n: u32,
+    gap_fraction: f64,
+    a0: f64,
+    ratio: f64,
+    outer_period: f64,
+) -> f64 {
+    synthetic_central_mass(
+        visual_outer_sma_render_m(system_soi, margin, n, gap_fraction, a0, ratio),
+        outer_period,
+    )
 }
 
 /// Build one planet's [`OrbitalElements`] from the per-system `stream`, drawn in a FIXED order (ecc-u,
@@ -853,16 +908,15 @@ impl BandConfig {
 /// The universe seconds-per-tick the AoI widening is measured against — MUST equal `StubConfig.tick_dt_s`
 /// (a boot `debug_assert!` cross-checks it, M-2). Named, not inline.
 const AOI_TICK_DT_S: f64 = 0.05;
-/// Visual-scale AoI: spin a child up when an occupant is within this multiple of the child's own finite
-/// extent (SOI radius), release past the larger tear-down multiple — HR3 proportional, no kind-match.
-const VISUAL_AOI_SPIN_UP_FACTOR: f64 = 2.5;
-const VISUAL_AOI_TEAR_DOWN_FACTOR: f64 = 4.0;
 /// Grace ticks a would-be release is held (1 s at the visual 20 Hz).
 const VISUAL_AOI_GRACE_TICKS: u32 = 20;
 /// Extra velocity-safety margin folded into the dead-zone widening (beyond `K_SAFETY`).
 const VISUAL_AOI_K_SAFETY_EXTRA: f64 = 0.5;
 /// The visual occupant's max speed (m/s) — MUST equal `StubConfig.move_speed_mps · time_multiplier`
 /// (boot `debug_assert!`, M-2), so the anti-thrash pad is measured against the speed the sim integrates.
+/// Under the single visibility factor (`spin_up_factor == tear_down_factor`) the geometric dead-zone
+/// collapses, so THIS non-zero occupant speed is what keeps `tear_down > spin_up` (band validity requires
+/// `occupant_v_max + v_child > 0`; see [`UniverseConfig::visual_demand`]).
 const VISUAL_OCCUPANT_V_MAX_MPS: f64 = 2.0;
 
 /// Walk-demand-scale AoI (RLM 5f-4): the LIVE band for the WALK forest, so a WALKING occupant's AoI
@@ -1095,31 +1149,96 @@ impl UniverseConfig {
         }
     }
 
-    /// The VISUAL-scale preset (D-45(a) FA-5): the window-friendly synthetic-scale SINGLE system whose
-    /// planets ORBIT visibly. Reuses `walk_scale()`'s physics/taxonomy/band + ambient radii VERBATIM
-    /// (so the System/Galaxy render at the proven walk sizes, well under the camera far-plane) and
-    /// overrides ONLY the four fields the moving planets need: the AU→render compression + planet SOI
-    /// (both DERIVED so the outer orbit + SOI + margin land exactly at the System surface — provable
-    /// non-overlap + strict containment), the SYNTHETIC central mass (Kepler-3-tuned to a seconds-scale
-    /// period), and `n_planets`. Sibling of `walk_scale()`/`canonical()`; the SAME
-    /// [`generate_system_forest`] serves all three (canonical differs only in these values — zero new
-    /// generator code at P4).
+    /// The COMPRESSED-REAL visual geometry on a `walk_scale()` clone (system SOI 150, 5 Kepler planets,
+    /// outer period 300 s) WITHOUT an interest band — the ONE game geometry that `visual_scale` (static
+    /// render) and `visual_demand` (live demand cluster) both drive, so the two can NEVER disagree on
+    /// geometry (they call the SAME parameterized derive helpers with the SAME compressed-real numbers).
+    /// Mutates a `walk_scale()` CLONE (byte-identity: walk/canonical never call these helpers), overriding
+    /// only the System SOI + the four moving-planet fields (AU→render + planet SOI both DERIVED so the outer
+    /// orbit + SOI + margin land exactly at the System surface — provable non-overlap + strict containment,
+    /// the SYNTHETIC central mass Kepler-3-tuned to a seconds-scale period, and `n_planets`).
+    fn visual_geometry() -> UniverseConfig {
+        let mut cfg = UniverseConfig::walk_scale();
+        cfg.stellar.system_soi_r_m = VISUAL_SYSTEM_SOI_R_M;
+        cfg.scale.au_to_render_m = visual_au_to_render_m(
+            VISUAL_SYSTEM_SOI_R_M,
+            VISUAL_SYSTEM_MARGIN_M,
+            VISUAL_N_PLANETS,
+            VISUAL_SOI_GAP_FRACTION,
+            ORBITAL_A0_AU,
+            ORBITAL_RATIO,
+        );
+        cfg.stellar.central_mass_kg = visual_central_mass_kg(
+            VISUAL_SYSTEM_SOI_R_M,
+            VISUAL_SYSTEM_MARGIN_M,
+            VISUAL_N_PLANETS,
+            VISUAL_SOI_GAP_FRACTION,
+            ORBITAL_A0_AU,
+            ORBITAL_RATIO,
+            VISUAL_TARGET_OUTER_PERIOD_S,
+        );
+        cfg.planet.planet_soi_r_m = visual_planet_soi_r_m(
+            VISUAL_SYSTEM_SOI_R_M,
+            VISUAL_SYSTEM_MARGIN_M,
+            VISUAL_N_PLANETS,
+            VISUAL_SOI_GAP_FRACTION,
+            ORBITAL_A0_AU,
+            ORBITAL_RATIO,
+        );
+        cfg.planet.n_planets = VISUAL_N_PLANETS;
+        cfg
+    }
+
+    /// The VISUAL-scale preset (D-45(a) FA-5): the STATIC-render expression of the one compressed-real game
+    /// geometry (via [`visual_geometry`](UniverseConfig::visual_geometry)) — a 5-planet Kepler system whose
+    /// planets ORBIT visibly. Its interest band is the ONE visibility rule: `spin_up_factor ==
+    /// tear_down_factor == cot(θ/2)` (a realm streams in once it subtends ≥ θ_min), authored against the
+    /// static occupant speed [`VISUAL_OCCUPANT_V_MAX_MPS`]. Under a single visibility factor the geometric
+    /// dead-zone collapses, so band validity rests on `occupant_v_max + v_child > 0` (that non-zero speed);
+    /// [`visual_demand`](UniverseConfig::visual_demand) is the live demand-cluster expression of the SAME
+    /// geometry.
     #[must_use]
     pub fn visual_scale() -> UniverseConfig {
-        let mut cfg = UniverseConfig::walk_scale();
-        cfg.scale.au_to_render_m = visual_au_to_render_m();
-        cfg.stellar.central_mass_kg = visual_central_mass_kg();
-        cfg.planet.planet_soi_r_m = visual_planet_soi_r_m();
-        cfg.planet.n_planets = VISUAL_N_PLANETS;
-        // RLM Step 2: the ONE place LIVE AoI turns on — per-realm radii = factor × the realm's own
-        // extent (HR3), the anti-thrash pad measured against the visual occupant + tick_dt (M-2).
+        let vis_factor = visibility_factor(VISIBILITY_THETA_MIN_RAD);
+        let mut cfg = UniverseConfig::visual_geometry();
         cfg.interest = InterestConfig {
-            spin_up_factor: VISUAL_AOI_SPIN_UP_FACTOR,
-            tear_down_factor: VISUAL_AOI_TEAR_DOWN_FACTOR,
+            spin_up_factor: vis_factor,
+            tear_down_factor: vis_factor,
             grace_ticks: VISUAL_AOI_GRACE_TICKS,
             k_safety_extra: VISUAL_AOI_K_SAFETY_EXTRA,
             occupant_v_max_mps: VISUAL_OCCUPANT_V_MAX_MPS,
             tick_dt_s: AOI_TICK_DT_S,
+        };
+        cfg
+    }
+
+    /// The VISUAL-DEMAND preset (RLM realistic-demo Slice 0): the LIVE demand-cluster expression of the
+    /// SAME compressed-real geometry as [`visual_scale`](UniverseConfig::visual_scale) (via
+    /// [`visual_geometry`](UniverseConfig::visual_geometry)), with the interest band built the `walk_demand`
+    /// way — the two DYNAMICS inputs are ARGUMENTS from the live cluster (`occupant_v_max_mps` = the
+    /// occupant's max speed `move_speed · time_multiplier`, `tick_dt_s` = the cluster's seconds-per-tick),
+    /// the loiter grace converted from seconds ([`grace_ticks_from_seconds`]), and the SAME `cot(θ/2)`
+    /// visibility factor for both edges. It reuses [`generate_system_forest`]/[`planet_elements`]/
+    /// [`moving_children_for_config`] verbatim (zero new generator control flow).
+    ///
+    /// PRECONDITION (the equal-factor tripwire): under a single visibility factor
+    /// (`spin_up_factor == tear_down_factor`) the geometric dead-zone collapses, so band validity requires
+    /// `occupant_v_max_mps + v_child > 0` — a LIVE occupant. A zero-relative-velocity band is
+    /// [`BandError::InvalidEdges`], NEVER a valid inert band (and `to_regions`'s `.expect` would panic at
+    /// boot on one). The shipped callers thread a positive speed (the demand cluster's 15 m/s ship); an
+    /// idle-occupant (`v_rel = 0`) preset under one factor has no valid band (a deferred design choice, not
+    /// papered over with an epsilon — see `equal_visibility_factor_with_zero_v_rel_is_err_not_panic`).
+    #[must_use]
+    pub fn visual_demand(occupant_v_max_mps: f64, tick_dt_s: f64) -> UniverseConfig {
+        let vis_factor = visibility_factor(VISIBILITY_THETA_MIN_RAD);
+        let mut cfg = UniverseConfig::visual_geometry();
+        cfg.interest = InterestConfig {
+            spin_up_factor: vis_factor,
+            tear_down_factor: vis_factor,
+            grace_ticks: grace_ticks_from_seconds(WALK_DEMAND_AOI_GRACE_S, tick_dt_s),
+            k_safety_extra: WALK_DEMAND_AOI_K_SAFETY_EXTRA,
+            occupant_v_max_mps,
+            tick_dt_s,
         };
         cfg
     }
@@ -1778,9 +1897,13 @@ mod tests {
     fn interest_config_build_live() {
         let live = UniverseConfig::visual_scale().interest;
         assert!(live.is_live());
-        // spin_up_r = extent × spin_up_factor (v_child 0 ⇒ tear = base·tear_factor, no widening).
+        // spin_up_r = extent × the ONE visibility factor cot(θ/2) (v_child 0 ⇒ tear = spin_up widened by
+        // the occupant-speed lead, since spin_up_factor == tear_down_factor collapses the geometric gap).
         let band = live.build(100.0, 0.0).expect("valid live");
-        assert_eq!(band.spin_up_r_m(), 100.0 * VISUAL_AOI_SPIN_UP_FACTOR);
+        assert_eq!(
+            band.spin_up_r_m(),
+            100.0 * visibility_factor(VISIBILITY_THETA_MIN_RAD)
+        );
     }
 
     #[test]
@@ -1789,7 +1912,8 @@ mod tests {
         for r in realm_regions_for(0) {
             assert_eq!(r.aoi, AoiConfig::inert());
         }
-        // Visual: a Planet's spin_up = its own extent × factor; a bigger realm (System) reaches farther.
+        // Visual: a Planet's spin_up = its own extent × the visibility factor; a bigger realm (System)
+        // reaches farther (same factor, larger extent).
         let visual = realm_regions_for_config(0, &UniverseConfig::visual_scale());
         let planet = visual
             .iter()
@@ -1797,7 +1921,7 @@ mod tests {
             .expect("a planet");
         assert_eq!(
             planet.aoi.spin_up_r_m(),
-            planet.shape.finite_extent() * VISUAL_AOI_SPIN_UP_FACTOR
+            planet.shape.finite_extent() * visibility_factor(VISIBILITY_THETA_MIN_RAD)
         );
         let system = visual
             .iter()
@@ -1886,7 +2010,8 @@ mod tests {
 
     #[test]
     fn walk_and_canonical_keep_aoi_inert_while_visual_stays_live() {
-        // Byte-identity: walk + canonical keep AoI OFF (behaviour unchanged); visual is untouched (live).
+        // Byte-identity: walk + canonical keep AoI OFF (behaviour unchanged); the compressed-real visual
+        // band is LIVE under the ONE cot(θ/2) visibility factor.
         for r in realm_regions_for(0) {
             assert_eq!(r.aoi, AoiConfig::inert(), "walk regions stay AoI-inert");
         }
@@ -1899,7 +2024,7 @@ mod tests {
         }
         assert!(
             UniverseConfig::visual_scale().interest.is_live(),
-            "visual AoI is unchanged by 5f-4 (still live)"
+            "the visual band is live under the visibility factor"
         );
     }
 
@@ -2083,21 +2208,169 @@ mod tests {
         generate_system_forest(0, &UniverseConfig::visual_scale())
     }
 
+    // The parameterized derive helpers evaluated at the compressed-real geometry (the EXACT numbers
+    // `visual_geometry` threads) — so the helper-driven assertions below stay DRY and can't drift the args.
+    fn vis_planet_soi() -> f64 {
+        visual_planet_soi_r_m(
+            VISUAL_SYSTEM_SOI_R_M,
+            VISUAL_SYSTEM_MARGIN_M,
+            VISUAL_N_PLANETS,
+            VISUAL_SOI_GAP_FRACTION,
+            ORBITAL_A0_AU,
+            ORBITAL_RATIO,
+        )
+    }
+    fn vis_outer_sma() -> f64 {
+        visual_outer_sma_render_m(
+            VISUAL_SYSTEM_SOI_R_M,
+            VISUAL_SYSTEM_MARGIN_M,
+            VISUAL_N_PLANETS,
+            VISUAL_SOI_GAP_FRACTION,
+            ORBITAL_A0_AU,
+            ORBITAL_RATIO,
+        )
+    }
+    fn vis_central_mass() -> f64 {
+        visual_central_mass_kg(
+            VISUAL_SYSTEM_SOI_R_M,
+            VISUAL_SYSTEM_MARGIN_M,
+            VISUAL_N_PLANETS,
+            VISUAL_SOI_GAP_FRACTION,
+            ORBITAL_A0_AU,
+            ORBITAL_RATIO,
+            VISUAL_TARGET_OUTER_PERIOD_S,
+        )
+    }
+
+    // ===== RLM realistic-demo Slice 0: the one visibility constant + compressed-real geometry =========
+
+    // FROZEN compressed-real geometry goldens — EXACT f64, captured once from the derive helpers at the
+    // compressed-real numbers and pinned as literals here (NON-self-referential: a regression in a derive
+    // helper is caught, not silently re-captured). Approx: au→render 42.45 / planet SOI 4.16 / orbit
+    // semi-major axes 17,29,49,83,142 / synthetic central mass / visibility factor cot(4°) ≈ 14.301.
+    const FROZEN_VISIBILITY_FACTOR: f64 = 14.300701209730468;
+    const FROZEN_AU_TO_RENDER_M: f64 = 42.456177082969845;
+    const FROZEN_PLANET_SOI_R_M: f64 = 4.160705354131045;
+    const FROZEN_CENTRAL_MASS_KG: f64 = 18755157416108.99;
+    const FROZEN_ORBIT_SMA_M: [f64; 5] = [
+        16.98247083318794,
+        28.870200416419497,
+        49.07934070791314,
+        83.43487920345233,
+        141.83929464586896,
+    ];
+
+    /// The single most-distant planet region (its epoch orbital position magnitude is the largest) — the
+    /// OUTER planet, the one the star-view visibility rule culls until an occupant closes in.
+    fn outer_planet_region(regions: &[RealmRegion]) -> RealmRegion {
+        *regions
+            .iter()
+            .filter(|r| matches!(r.realm, RealmId::Planet(_)))
+            .max_by(|a, b| {
+                a.center
+                    .offset()
+                    .length()
+                    .total_cmp(&b.center.offset().length())
+            })
+            .expect("a planet region is present")
+    }
+
+    #[test]
+    fn visibility_factor_is_cot_half_theta() {
+        // cot(θ/2) at θ_min = 8° — the ONE visibility constant (≈ 14.301), frozen non-self-referentially.
+        assert_eq!(
+            visibility_factor(VISIBILITY_THETA_MIN_RAD),
+            FROZEN_VISIBILITY_FACTOR
+        );
+    }
+
+    #[test]
+    fn visual_demand_geometry_is_compressed_real() {
+        let c = UniverseConfig::visual_demand(15.0, 0.02);
+        // The compressed-real numbers + the DERIVED fields against FROZEN goldens (non-self-referential).
+        assert_eq!(c.stellar.system_soi_r_m, VISUAL_SYSTEM_SOI_R_M);
+        assert_eq!(c.planet.n_planets, VISUAL_N_PLANETS);
+        assert_eq!(c.scale.au_to_render_m, FROZEN_AU_TO_RENDER_M);
+        assert_eq!(c.planet.planet_soi_r_m, FROZEN_PLANET_SOI_R_M);
+        assert_eq!(c.stellar.central_mass_kg, FROZEN_CENTRAL_MASS_KG);
+        // The 5 planet orbit distances (semi-major axes, render m): ~17 / 29 / 49 / 83 / 142.
+        let bodies = generate_system_forest(0, &c);
+        let smas: Vec<f64> = bodies
+            .iter()
+            .skip(3)
+            .map(|b| orbital_of(b.placement).expect("a planet is Orbital").sma)
+            .collect();
+        assert_eq!(smas, FROZEN_ORBIT_SMA_M.to_vec());
+        // The SAME geometry as visual_scale (the static-render twin): one game geometry, two drive modes.
+        let vs = UniverseConfig::visual_scale();
+        assert_eq!(c.scale.au_to_render_m, vs.scale.au_to_render_m);
+        assert_eq!(c.stellar.system_soi_r_m, vs.stellar.system_soi_r_m);
+        assert_eq!(c.planet.planet_soi_r_m, vs.planet.planet_soi_r_m);
+        assert_eq!(c.stellar.central_mass_kg, vs.stellar.central_mass_kg);
+        assert_eq!(c.planet.n_planets, vs.planet.n_planets);
+    }
+
+    #[test]
+    fn visual_demand_band_is_crossable_for_the_outer_planet() {
+        // Non-vacuous now (unlike the toy where 1.2×extent swallowed everything): the OUTER planet is OUT
+        // of spin-up range at the star, so a ship flying out CROSSES its band — spin_up_r < outer orbit.
+        let regions = realm_regions_for_config(0, &UniverseConfig::visual_demand(15.0, 0.02));
+        let outer = outer_planet_region(&regions);
+        assert!(
+            outer.aoi.spin_up_r_m() < outer.center.offset().length(),
+            "the outer planet is out of spin-up range at the star (crossable)"
+        );
+    }
+
+    #[test]
+    fn visual_demand_is_releasable_at_the_star() {
+        // The mirror release fact: from the star the outer planet is past tear-down → released (reapable).
+        let regions = realm_regions_for_config(0, &UniverseConfig::visual_demand(15.0, 0.02));
+        let outer = outer_planet_region(&regions);
+        assert!(
+            outer.aoi.tear_down_r_m() < outer.center.offset().length(),
+            "the outer planet releases from the star (tear-down < outer orbit distance)"
+        );
+    }
+
+    #[test]
+    fn equal_visibility_factor_with_zero_v_rel_is_err_not_panic() {
+        // THE equal-factor tripwire: under a single visibility factor (spin_up_factor == tear_down_factor)
+        // the geometric dead-zone collapses, so a ZERO-relative-velocity band has spin_up == tear_down →
+        // Err(InvalidEdges), never a valid inert band (and to_regions' .expect would PANIC at boot on one).
+        // The precondition band validity requires occupant_v_max + v_child > 0 — a live occupant. Equality
+        // asserted via expect_err (NOT matches!). No epsilon is added to keep the factors exactly equal.
+        let factor = visibility_factor(VISIBILITY_THETA_MIN_RAD);
+        let err = AoiConfig::for_velocity_safe(
+            100.0,
+            factor,
+            factor,
+            0.0,
+            AOI_TICK_DT_S,
+            VISUAL_AOI_GRACE_TICKS,
+            VISUAL_AOI_K_SAFETY_EXTRA,
+        )
+        .expect_err("equal factors + zero v_rel collapse the dead-zone → InvalidEdges");
+        assert_eq!(err, BandError::InvalidEdges);
+    }
+
     #[test]
     fn visual_scale_preset_is_walk_physics_with_derived_visual_geometry() {
         let c = UniverseConfig::visual_scale();
-        // Ambient radii + render extent + eccentricity physics are REUSED from walk (proven under the
-        // far-plane); only the four moving-planet fields are overridden.
+        // Ambient radii (Galaxy/Universe) + render extent + eccentricity physics are REUSED from walk;
+        // the System SOI + the four moving-planet fields carry the compressed-real geometry.
         assert_eq!(c.scale.render_extent_m, MAX_RENDERABLE_EXTENT_M);
-        assert_eq!(c.stellar.system_soi_r_m, SYSTEM_SOI_R_M);
+        assert_eq!(c.stellar.system_soi_r_m, VISUAL_SYSTEM_SOI_R_M);
         assert_eq!(c.scale.galaxy_r_m, GALAXY_R_M);
         assert_eq!(c.planet.ecc_cap, KEPLER_ECC_MAX);
         assert_eq!(c.planet.ecc_sigma, ECC_SIGMA);
         assert_eq!(c.planet.incl_sigma, INCL_SIGMA);
-        // The four overridden fields are the DERIVED helper values (never literals).
-        assert_eq!(c.scale.au_to_render_m, visual_au_to_render_m());
-        assert_eq!(c.stellar.central_mass_kg, visual_central_mass_kg());
-        assert_eq!(c.planet.planet_soi_r_m, visual_planet_soi_r_m());
+        // The overridden fields match the FROZEN compressed-real goldens (non-self-referential — a
+        // regression in a derive helper is caught, not silently re-captured). Same goldens as
+        // `visual_demand_geometry_is_compressed_real` (visual_scale & visual_demand share visual_geometry).
+        assert_eq!(c.scale.au_to_render_m, FROZEN_AU_TO_RENDER_M);
+        assert_eq!(c.stellar.central_mass_kg, FROZEN_CENTRAL_MASS_KG);
+        assert_eq!(c.planet.planet_soi_r_m, FROZEN_PLANET_SOI_R_M);
         assert_eq!(c.planet.n_planets, VISUAL_N_PLANETS);
     }
 
@@ -2217,13 +2490,13 @@ mod tests {
     fn synthetic_central_mass_hits_the_target_outer_period() {
         // The OUTER planet's period is the tuning target (Kepler-3 inversion round-trips).
         let outer = OrbitalElements {
-            sma: visual_outer_sma_render_m(),
+            sma: vis_outer_sma(),
             ecc: 0.0,
             inclination: 0.0,
             raan: 0.0,
             arg_periapsis: 0.0,
             mean_anomaly_epoch: 0.0,
-            central_mass: visual_central_mass_kg(),
+            central_mass: vis_central_mass(),
         };
         let rel =
             (outer.period() - VISUAL_TARGET_OUTER_PERIOD_S).abs() / VISUAL_TARGET_OUTER_PERIOD_S;
@@ -2245,17 +2518,16 @@ mod tests {
     #[test]
     fn visual_geometry_respects_the_far_plane_and_soi_non_overlap() {
         let config = UniverseConfig::visual_scale();
-        // Far-plane: the largest FINITE renderable region (the System) is well under the vet 120 m cap,
-        // and the render extent covers it (each assert split — no `&&`).
-        assert!(config.stellar.system_soi_r_m <= 120.0);
-        assert!(visual_planet_soi_r_m() <= 120.0);
+        // Containment order + headroom (System 150 ⊂ Galaxy 180 < cull 200): the System nests strictly
+        // inside the renderable Galaxy, which nests strictly under the cull (each assert split — no `&&`).
+        assert!(config.stellar.system_soi_r_m < config.scale.galaxy_r_m);
+        assert!(config.scale.galaxy_r_m < config.scale.render_extent_m);
+        assert!(vis_planet_soi() < config.stellar.system_soi_r_m);
         assert!(config.scale.render_extent_m >= config.stellar.system_soi_r_m);
         // The OUTER planet (orbit + SOI) sits STRICTLY inside the System SOI surface (containment).
-        assert!(
-            visual_outer_sma_render_m() + visual_planet_soi_r_m() < config.stellar.system_soi_r_m
-        );
+        assert!(vis_outer_sma() + vis_planet_soi() < config.stellar.system_soi_r_m);
         // NON-OVERLAP: every adjacent orbit gap exceeds two planet SOIs (the smallest gap binds).
-        let two_soi = 2.0 * visual_planet_soi_r_m();
+        let two_soi = 2.0 * vis_planet_soi();
         for n in 1..VISUAL_N_PLANETS {
             let gap = (orbital_axis_au(n, ORBITAL_A0_AU, ORBITAL_RATIO)
                 - orbital_axis_au(n - 1, ORBITAL_A0_AU, ORBITAL_RATIO))
@@ -2289,13 +2561,18 @@ mod tests {
         // (the new generator is uncalled by any walk path).
         assert_eq!(realm_regions_for(0).len(), 7);
         assert!(moving_children_for(0, SYSTEM_A).is_empty());
-        // The 3 visual planet ids are mutually distinct and NONE aliases the walk Planet(7) — the
+        // The 5 visual planet ids are mutually distinct and NONE aliases the walk Planet(7) — the
         // child_seed salt/index avalanche keeps them off the roster ids (no silent alias).
         let ids: Vec<RealmId> = visual_forest().iter().skip(3).map(|b| b.realm).collect();
-        assert_eq!(ids.len(), 3);
-        assert_ne!(ids[0], ids[1]);
-        assert_ne!(ids[1], ids[2]);
-        assert_ne!(ids[0], ids[2]);
+        assert_eq!(ids.len(), VISUAL_N_PLANETS as usize);
+        let mut distinct = ids.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            VISUAL_N_PLANETS as usize,
+            "every visual planet id is distinct"
+        );
         for id in &ids {
             assert_ne!(*id, PLANET_A);
         }
