@@ -323,6 +323,18 @@ pub struct ProxySentScene(pub BTreeMap<AccountId, (NodeId, BTreeSet<RealmId>)>);
 #[derive(Resource, Debug, Default)]
 pub struct ForwardedProxyScene(pub BTreeMap<AccountId, BTreeSet<RealmId>>);
 
+/// VU AoI S1b (Slice 2) — the LOCAL-DOT render baseline: the EXACT twin of [`ForwardedProxyScene`], but for a
+/// dot this shard hosts directly (that resource is the parent-reflected PROXY path; this is the own-shard DOT
+/// path). Per durable `AccountId`, the sibling realm-ids currently DRAWN on that dot's client. Each tick the
+/// dot's LEVEL set (every child in its AoI band, `next_in`) is DIFFED against this baseline into the client
+/// `RealmSceneDelta` add/remove, then the new set is adopted UNCONDITIONALLY — so a dropped delta OR a
+/// fresh/re-homed shard (empty baseline) self-heals to a full re-stream. PURE home-side render bookkeeping —
+/// no fence, never persisted (`BTreeMap`, sim determinism). BYTE-IDENTICAL at inert scale (walk/canonical):
+/// an inert band puts no child in range ⇒ every dot's set is empty ⇒ `diff(∅,∅)=(∅,∅)` ⇒ NO delta is emitted;
+/// a bounded, OUTPUT-INERT empty-set `insert` per dot per tick may occur (pruned by `retain` to the live dots).
+#[derive(Resource, Debug, Default)]
+pub struct RenderSent(pub BTreeMap<AccountId, BTreeSet<RealmId>>);
+
 /// One retained proxy occupant (VU AoI S2b): the last-relayed pose (in the CHILD realm's OWN frame — composed
 /// to the parent frame at fold time, never stored pre-composed, so a moving child re-composes fresh each tick)
 /// plus its last arrival tick on THIS shard's local clock (the anti-flicker TTL base).
@@ -1340,6 +1352,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(RetainedOccupants::default());
     world.insert_resource(ProxySentScene::default());
     world.insert_resource(ForwardedProxyScene::default());
+    world.insert_resource(RenderSent::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -4614,6 +4627,9 @@ fn evaluate_realm_aoi(
     // VU AoI S2c-ii — the per-proxy last-sent sibling-scene state; `aoi_decide` reflects a fresh set DOWN to
     // the home shard only on change. EMPTY at walk/static ⇒ inert.
     mut proxy_sent: ResMut<ProxySentScene>,
+    // VU AoI S1b (Slice 2) — the per-DOT render baseline; `aoi_decide` diffs each dot's current in-AoI level
+    // set against it into the client `RealmSceneDelta`. EMPTY at walk/static (no child in range) ⇒ no delta.
+    mut render_sent: ResMut<RenderSent>,
 ) {
     // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
     // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
@@ -4640,6 +4656,7 @@ fn evaluate_realm_aoi(
         parent.0,
         &mut retained.0,
         &mut proxy_sent.0,
+        &mut render_sent.0,
     );
 }
 
@@ -4682,6 +4699,7 @@ fn aoi_decide(
     parent_node: Option<NodeId>,
     retained: &mut BTreeMap<AccountId, RetainedOccupant>,
     proxy_sent: &mut BTreeMap<AccountId, (NodeId, BTreeSet<RealmId>)>,
+    render_sent: &mut BTreeMap<AccountId, BTreeSet<RealmId>>,
 ) {
     let own_coord = &config.own_coord;
     let tick = clock.universe_tick;
@@ -4753,15 +4771,18 @@ fn aoi_decide(
 
     // VU AoI S1b — the RENDER route for each DOT observer (a player with a client): its DURABLE id + the
     // gateway to reach it. Only dots receive render deltas; held transients keep realms warm (lifecycle) but
-    // have no client to draw. The per-observer add/remove is accumulated below and emitted once per dot.
+    // have no client to draw. Each dot's LEVEL set is accumulated below and diffed into one delta per dot.
     let render_routes: BTreeMap<ObserverId, (AccountId, NodeId)> = dots
         .0
         .iter()
         .filter(|(_, d)| d.authority.simulates())
         .map(|(s, d)| (ObserverId::Dot(*s), (d.account, d.gateway)))
         .collect();
-    let mut render_adds: BTreeMap<ObserverId, Vec<RealmShape>> = BTreeMap::new();
-    let mut render_removes: BTreeMap<ObserverId, Vec<RealmId>> = BTreeMap::new();
+    // VU AoI S1b (Slice 2) — per DOT observer, the FULL set of children CURRENTLY in its AoI band (a LEVEL,
+    // not an edge — the SAME membership `next_in` that drives the demand union below). Diffed against the
+    // per-account `render_sent` baseline into one client `RealmSceneDelta` per dot. A dot with no in-range
+    // child never gets an entry ⇒ its level set is empty ⇒ `diff(∅,∅)=(∅,∅)` ⇒ no delta (walk/static inert).
+    let mut dot_visible: BTreeMap<ObserverId, Vec<RealmShape>> = BTreeMap::new();
     // VU AoI S2c-ii — per PROXY observer, the FULL set of its CURRENTLY in-range sibling outlines (a LEVEL, not
     // an edge). Reflected DOWN to the home shard below; the home diffs it into the client render stream. An
     // entry appears only when the proxy has ≥1 in-range child; the emit loop iterates `retained` (so a proxy
@@ -4796,19 +4817,19 @@ fn aoi_decide(
             if matches!(verb, Some(DemandVerb::SpinUp | DemandVerb::KeepAlive)) {
                 now_demanded = true;
             }
-            // VU AoI S1b — the RENDER delta rides the SAME per-observer transition (no new AoI math, HR3):
-            // the child ENTERS this observer's view on ACQUIRE (`was_in` false→true), LEAVES on RELEASE (the
-            // latch drops after grace, true→gone). VU AoI S2b-iii gate: render deltas go ONLY to a DOT
-            // observer (a client this shard hosts). A PROXY occupant (or a held transient) runs the AoI/latch
-            // math above but gets NO render delta — the parent hosts no client connection for it — so it warms
-            // the sibling (demand) WITHOUT a mis-routed delta. Gated on `render_routes` (dots only).
+            // VU AoI S1b (Slice 2) — the RENDER set rides the SAME per-observer band membership as the demand
+            // (no new AoI math, HR3): a child is DRAWN for this observer iff it is in-AoI this tick (`next_in`
+            // — the grace latch holds it true across a passed realm's whole grace window, so no flicker). This
+            // is a LEVEL push (the full current set), diffed against the per-account baseline below — render
+            // and demand read the SAME transition on the SAME band. VU AoI S2b-iii gate: only a DOT observer
+            // (a client this shard hosts) is a render route; a PROXY occupant (or held transient) runs the
+            // AoI/latch math above but draws nothing here — the parent hosts no client connection for it — so
+            // it warms the sibling (demand) WITHOUT a mis-routed delta. Bitwise `&` (not `&&`): both operands
+            // are pure bools, and a short-circuit would leave the RHS a region HR5 can never cover from the
+            // false-LHS side (the discipline `AoiConfig::in_range`/`on_proxy_scene_set` use).
             let next_in = next.is_some_and(|s| s.was_in);
-            if render_routes.contains_key(obs) {
-                if !state.was_in && next_in {
-                    render_adds.entry(*obs).or_default().push(child_shape(region));
-                } else if state.was_in && !next_in {
-                    render_removes.entry(*obs).or_default().push(region.realm);
-                }
+            if render_routes.contains_key(obs) & next_in {
+                dot_visible.entry(*obs).or_default().push(child_shape(region));
             }
             // VU AoI S2c-ii — accumulate the PROXY's CURRENT in-range set (LEVEL): every child still in range
             // after this tick's transition (`next_in`), reflected down to the home for the client to draw. The
@@ -4844,27 +4865,40 @@ fn aoi_decide(
             );
         }
     }
-    // VU AoI S1b — emit ONE render delta per DOT observer whose view changed this tick: the realms that
-    // ENTERED (`added` shapes) / LEFT (`removed` ids) its AoI, to its gateway, keyed by its DURABLE id. A
-    // dot with no change is skipped (so walk/static — no transitions — sends nothing: byte-identical). The
-    // stream rides the reliable Control lane ([`push_session_reply`]); the per-tick POSITION rides the
-    // separate unreliable realm datagram.
+    // VU AoI S1b (Slice 2) — emit ONE render delta per DOT observer whose DRAWN set changed this tick: DIFF
+    // its current in-AoI level set (`dot_visible`, empty if none in range) against the per-account baseline
+    // (`render_sent`, empty ⇒ full re-stream — a dropped delta or a fresh/re-homed shard self-heals), via the
+    // ONE shared [`diff_scene_into_delta`]. The emit gate is pinned to the DIFF being non-empty (bitwise `|`,
+    // no short-circuit region) — NOT the proxy reflect loop's `stored != current` gate: the dot emit iterates
+    // `render_routes` (NON-EMPTY at walk — there is a player), so a `!=` gate would leak a spurious empty
+    // delta on tick 1 and break production byte-identity. The `render_sent` adopt is UNCONDITIONAL (like
+    // `on_proxy_scene_set`), so at inert scale the loop writes a bounded, OUTPUT-INERT empty baseline per dot
+    // but emits NO delta. The stream rides the reliable Control lane ([`push_session_reply`]); the per-tick
+    // POSITION rides the separate unreliable realm datagram.
+    let no_shapes: Vec<RealmShape> = Vec::new();
+    let no_ids = BTreeSet::new();
     for (obs, (account, gateway)) in &render_routes {
-        let added = render_adds.remove(obs).unwrap_or_default();
-        let removed = render_removes.remove(obs).unwrap_or_default();
-        if added.is_empty() && removed.is_empty() {
-            continue;
+        let visible = dot_visible.get(obs).unwrap_or(&no_shapes);
+        let baseline = render_sent.get(account).unwrap_or(&no_ids);
+        let (added, removed) = diff_scene_into_delta(visible, baseline);
+        if !added.is_empty() | !removed.is_empty() {
+            push_session_reply(
+                outbox,
+                *gateway,
+                &ShardToGateway::RealmSceneDelta {
+                    observer: *account,
+                    added,
+                    removed,
+                },
+            );
         }
-        push_session_reply(
-            outbox,
-            *gateway,
-            &ShardToGateway::RealmSceneDelta {
-                observer: *account,
-                added,
-                removed,
-            },
-        );
+        let new_ids: BTreeSet<RealmId> = visible.iter().map(|s| s.realm).collect();
+        render_sent.insert(*account, new_ids);
     }
+    // Prune the baseline for any account no longer among the simulated dots (the twin of `proxy_sent.retain`)
+    // — bounds `render_sent` to the live dots exactly, and a returning account re-streams from empty.
+    let live_accounts: BTreeSet<AccountId> = render_routes.values().map(|(a, _)| *a).collect();
+    render_sent.retain(|acct, _| live_accounts.contains(acct));
     // VU AoI S2c-ii — reflect each retained proxy's CURRENT sibling scene DOWN to its home shard, SEND-ON-
     // CHANGE. Iterate `retained` (not `proxy_now`) so a proxy that dropped to ZERO in-range children still
     // ships an EMPTY set (the home reconciles it to a removal). LEVEL, not edge: the home diffs the full set,
@@ -5123,21 +5157,9 @@ fn on_proxy_scene_set(
         forwarded.0.remove(&pss.observer);
         return;
     };
-    let new_ids: BTreeSet<RealmId> = pss.realms.iter().map(|s| s.realm).collect();
     let empty = BTreeSet::new();
     let baseline = forwarded.0.get(&pss.observer).unwrap_or(&empty);
-    // `added` / `removed` are the client-edge deltas the sticky client needs (it holds a `RealmId`-keyed map).
-    let added: Vec<RealmShape> = pss
-        .realms
-        .iter()
-        .copied()
-        .filter(|s| !baseline.contains(&s.realm))
-        .collect();
-    let removed: Vec<RealmId> = baseline
-        .iter()
-        .copied()
-        .filter(|r| !new_ids.contains(r))
-        .collect();
+    let (added, removed) = diff_scene_into_delta(&pss.realms, baseline);
     // Bitwise `|` (no short-circuit region to leave uncovered): forward only when the client scene changed.
     if !added.is_empty() | !removed.is_empty() {
         push_session_reply(
@@ -5150,7 +5172,30 @@ fn on_proxy_scene_set(
             },
         );
     }
+    let new_ids: BTreeSet<RealmId> = pss.realms.iter().map(|s| s.realm).collect();
     forwarded.0.insert(pss.observer, new_ids);
+}
+
+/// Diff a fresh render scene (the FULL current in-AoI set) against a per-account drawn baseline into the
+/// client-edge `(added shapes, removed ids)` the sticky client needs (it holds a `RealmId`-keyed map). ONE
+/// monomorphic helper shared by BOTH [`on_proxy_scene_set`] (the parent-reflected PROXY path) and the local
+/// DOT emit in [`aoi_decide`] (HR5/DRY — one covered region for both callers). Straight-line, no branch.
+fn diff_scene_into_delta(
+    new: &[RealmShape],
+    baseline: &BTreeSet<RealmId>,
+) -> (Vec<RealmShape>, Vec<RealmId>) {
+    let new_ids: BTreeSet<RealmId> = new.iter().map(|s| s.realm).collect();
+    let added: Vec<RealmShape> = new
+        .iter()
+        .copied()
+        .filter(|s| !baseline.contains(&s.realm))
+        .collect();
+    let removed: Vec<RealmId> = baseline
+        .iter()
+        .copied()
+        .filter(|r| !new_ids.contains(r))
+        .collect();
+    (added, removed)
 }
 
 /// VU AoI S2b-ii — the survive-one-lost-datagram floor for the retained-occupant TTL (a tick COUNT). The relay
@@ -12819,9 +12864,10 @@ mod tests {
 
     #[test]
     fn evaluate_realm_aoi_streams_a_render_delta_on_acquire_and_release() {
-        // VU AoI S1b: the same per-observer transition that drives the lifecycle demand ALSO streams the
-        // client render delta — a child ENTERS the dot's view on acquire (its shape ADDED), LEAVES on release
-        // (its id REMOVED) — to the dot's gateway, keyed by its DURABLE id. Sustained view streams nothing.
+        // VU AoI S1b (Slice 2): the per-observer BAND MEMBERSHIP that drives the lifecycle demand is ALSO the
+        // dot's render LEVEL set — each tick it is diffed against the per-account baseline. A child entering
+        // the band ADDS its shape (baseline had it not); leaving REMOVES its id (baseline had it, level no
+        // longer does); an UNCHANGED level (`diff(S,S)=(∅,∅)`) emits NOTHING. Keyed by the dot's DURABLE id.
         let mut rig = Rig::new();
         rig.grant_realm();
         plant_aoi(
@@ -13173,15 +13219,17 @@ mod tests {
 
     #[test]
     fn a_proxy_observer_gets_no_render_delta_but_a_dot_does() {
+        // VU AoI S1b (Slice 2): the render LEVEL set is built ONLY for DOT observers — a PROXY runs the same
+        // band math but is not a render route, so it draws nothing here (the parent hosts no client for it).
         let sibling = DVec3::new(10_000.0, 0.0, 0.0);
         let mut rig = parent_with_two_planet_children(sibling);
-        // A proxy acquiring the sibling ⇒ NO render delta (the parent hosts no client for it).
+        // A proxy in range of the sibling ⇒ NO render delta (never a render route).
         inject_proxy(&mut rig, AccountId(9), frame_of(RealmId::Planet(42)), sibling);
         assert!(
             render_deltas(&rig.tick(vec![])).is_empty(),
             "a proxy occupant never triggers a render delta"
         );
-        // But a real local DOT acquiring a child DOES get one (the render path still works for dots).
+        // But a real local DOT with Planet(42) in its level set gets it added (empty baseline ⇒ full stream).
         insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO); // at the origin ⇒ in range of Planet(42)
         let deltas = render_deltas(&rig.tick(vec![]));
         let dot_added: Vec<RealmId> = deltas
@@ -13191,8 +13239,107 @@ mod tests {
             .collect();
         assert!(
             dot_added.contains(&RealmId::Planet(42)),
-            "a dot acquiring Planet(42) gets a render delta"
+            "a dot with Planet(42) in its level set gets it added"
         );
+    }
+
+    #[test]
+    fn diff_scene_into_delta_covers_add_remove_both_neither() {
+        // The ONE monomorphic diff shared by the proxy reflect (`on_proxy_scene_set`) and the dot emit — all
+        // four arms (added-only / removed-only / both / neither) covered ONCE here (HR5 per-mono discipline).
+        let shape = |r: RealmId| child_shape(&region(r, Some(OWN_REALM), DVec3::ZERO, 10.0));
+        let one = shape(RealmId::Planet(1));
+        let ids = |v: &[RealmShape]| v.iter().map(|s| s.realm).collect::<Vec<_>>();
+        // added-only: baseline empty, new = {1}.
+        let (added, removed) = diff_scene_into_delta(&[one], &BTreeSet::new());
+        assert_eq!(ids(&added), vec![RealmId::Planet(1)]);
+        assert!(removed.is_empty());
+        // removed-only: baseline = {2}, new empty.
+        let (added, removed) = diff_scene_into_delta(&[], &BTreeSet::from([RealmId::Planet(2)]));
+        assert!(added.is_empty());
+        assert_eq!(removed, vec![RealmId::Planet(2)]);
+        // both: baseline = {2}, new = {1} ⇒ add 1, remove 2.
+        let (added, removed) = diff_scene_into_delta(&[one], &BTreeSet::from([RealmId::Planet(2)]));
+        assert_eq!(ids(&added), vec![RealmId::Planet(1)]);
+        assert_eq!(removed, vec![RealmId::Planet(2)]);
+        // neither: baseline = {1}, new = {1} ⇒ no change.
+        let (added, removed) = diff_scene_into_delta(&[one], &BTreeSet::from([RealmId::Planet(1)]));
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn render_sent_prunes_a_departed_dot() {
+        // Twin of `aoi_decide_prunes_expired_retained_occupants`: the per-account render baseline is pruned
+        // for any account no longer among the simulated dots (render routes), bounding it exactly like
+        // `proxy_sent`. A live dot's baseline survives; a departed dot's stale baseline is dropped.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0),
+            ],
+        );
+        // A live dot (account 1) in range of the child ⇒ its baseline is written + kept.
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        // A DEPARTED dot's stale baseline (account 2 has no dot in `Dots`), injected directly.
+        rig.world
+            .resource_mut::<RenderSent>()
+            .0
+            .insert(AccountId(2), BTreeSet::from([RealmId::Planet(43)]));
+        let _ = rig.tick(vec![]);
+        let sent = rig.world.resource::<RenderSent>();
+        assert!(
+            sent.0.contains_key(&AccountId(1)),
+            "the live dot's baseline is kept"
+        );
+        assert!(
+            !sent.0.contains_key(&AccountId(2)),
+            "a departed dot's baseline is pruned"
+        );
+    }
+
+    #[test]
+    fn render_level_holds_a_passed_realm_across_grace() {
+        // No flicker: a realm the dot has PASSED stays in its drawn LEVEL set for the whole grace window (the
+        // grace latch holds `next_in` true), so NO delta fires until the grace lapses — then exactly one
+        // removal. This is the level set's anti-blink guarantee, the direct twin of the demand grace hold.
+        let grace = 3;
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 100.0, grace),
+            ],
+        );
+        insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        // Tick 1: acquire ⇒ the realm is ADDED.
+        let d = render_deltas(&rig.tick(vec![]));
+        assert_eq!(d.len(), 1, "one add on acquire");
+        assert_eq!(
+            d[0].2.iter().map(|s| s.realm).collect::<Vec<_>>(),
+            vec![OTHER_REALM]
+        );
+        // Move OUT of the AoI band ⇒ grace begins; the realm is HELD (still `next_in`) ⇒ NO delta for `grace`
+        // ticks.
+        move_dot(&mut rig, TRIG_SESSION, DVec3::new(3000.0, 0.0, 0.0));
+        for _ in 0..grace {
+            assert!(
+                render_deltas(&rig.tick(vec![])).is_empty(),
+                "a passed realm is held across the grace window — no flicker"
+            );
+        }
+        // Grace lapses ⇒ the realm finally LEAVES the drawn set (exactly one removal).
+        let d = render_deltas(&rig.tick(vec![]));
+        assert_eq!(d.len(), 1, "one removal once grace lapses");
+        assert!(d[0].2.is_empty(), "nothing added on the final release");
+        assert_eq!(d[0].3, vec![OTHER_REALM], "the passed realm's id is removed");
     }
 
     #[test]
