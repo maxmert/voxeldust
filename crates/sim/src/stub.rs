@@ -30,7 +30,7 @@ use vd_core::geometry::{
 };
 use vd_core::glam::{DQuat, DVec3};
 use vd_core::kinematics;
-use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
+use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose, Tier};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::realm_path::{RealmLevel, RealmPath};
 use vd_core::rng::SplitMix64;
@@ -1317,6 +1317,12 @@ pub struct StubStats {
     /// VU AoI cascade — `RealmCascade` frames DROPPED as MIS-ROUTED: the parent's routing key does not lower to
     /// THIS shard's realm (a recycled-NodeId mis-delivery across a hand-off). Rejected on receive. `0` healthy.
     pub misrouted_cascade: u64,
+    /// FLOATING-ORIGIN A4b — snapshot poses OMITTED because the frame they are stamped in has no folded
+    /// absolute (`compose_snap` returned `None`): under server-compose a raw frame-local value read as an
+    /// absolute would teleport the entity to the render origin, so it is dropped and the client HOLDS its
+    /// last sample. `0` through P4 (every neighbourhood frame resolves); non-zero only signals a chain the
+    /// bins forgot to wire.
+    pub poses_unresolved: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -4637,15 +4643,71 @@ fn emits(mirror: &SourceGhostMirror, d: &Dot) -> bool {
     d.authority.simulates() | is_fed_ghost(mirror, d) | is_retained_ghost(d)
 }
 
+/// FLOATING-ORIGIN A4b — compose a frame-local pose into its ABSOLUTE (root-frame) value for the wire,
+/// keyed on the frame the pose is STAMPED IN (`pose.frame`) — never the shard's own frame. A fed ghost
+/// (`refresh_source_ghost`) carries a pose stamped in the NEIGHBOUR's frame with a neighbour-local value;
+/// composing that against the shard's own absolute would teleport the avatar at the crossing seam, so the
+/// lookup keys on `pose.frame` and a pose whose frame has no folded absolute is UNRESOLVABLE (`None`) —
+/// the caller OMITS it (the client holds its last sample) rather than shipping a raw local value the
+/// server-authoritative client would read as an absolute.
+///
+/// The map is EMPTY until the bins wire origin chains (A5): with no fold in force every pose ships raw
+/// (`Some(pose)`), so pre-A5 rigs are byte-identical. Through P4 every neighbourhood frame resolves, so
+/// the `None` (omit) arm is unit-test-only.
+#[must_use]
+fn compose_snap(frame_abs: &FrameAbs, pose: StampedPose) -> Option<StampedPose> {
+    if frame_abs.0.is_empty() {
+        return Some(pose);
+    }
+    let (abs_pos, abs_vel) = *frame_abs.0.get(&pose.frame)?;
+    Some(
+        StampedPose {
+            frame: pose.frame,
+            pos: abs_pos,
+            vel: abs_vel,
+            orient: DQuat::IDENTITY,
+            universe_tick: pose.universe_tick,
+        }
+        .compose(pose, Tier::Fine),
+    )
+}
+
+/// Build the wire entity list from the EMITTING dots (`emits`), composing each pose to its absolute value
+/// (A4b) and returning how many were OMITTED because their frame had no folded absolute. Split out of
+/// `emit_frames` so the compose + degrade is unit-testable without a full shard schedule; the counting arm
+/// is unit-test-only (through P4 every neighbourhood frame resolves, so `unresolved` is always 0 in prod).
+#[must_use]
+fn compose_emitted_entities(
+    dots: &Dots,
+    mirror: &SourceGhostMirror,
+    frame_abs: &FrameAbs,
+) -> (Vec<EntitySnap>, u64) {
+    let mut entities: Vec<EntitySnap> = Vec::new();
+    let mut unresolved = 0u64;
+    for d in dots.0.values().filter(|d| emits(mirror, d)) {
+        match compose_snap(frame_abs, d.pose) {
+            Some(pose) => entities.push(EntitySnap {
+                entity: d.entity,
+                pose,
+            }),
+            None => unresolved += 1,
+        }
+    }
+    (entities, unresolved)
+}
+
 /// Emit one fence-stamped frame per tick to every gateway with an attached session.
 /// No realm authority ⇒ no frames (an unowned shard is silent, never speculative).
+#[allow(clippy::too_many_arguments)]
 fn emit_frames(
     config: Res<StubConfig>,
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     dots: Res<Dots>,
     mirror: Res<SourceGhostMirror>,
+    frame_abs: Res<FrameAbs>,
     mut counter: ResMut<FrameCounter>,
+    mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
 ) {
     let Some(realm_fence) = authority.0 else {
@@ -4667,15 +4729,13 @@ fn emit_frames(
     if gateways.is_empty() {
         return;
     }
-    let entities: Vec<EntitySnap> = dots
-        .0
-        .values()
-        .filter(|d| emits(&mirror, d))
-        .map(|d| EntitySnap {
-            entity: d.entity,
-            pose: d.pose,
-        })
-        .collect();
+    // SERVER-AUTHORITATIVE compose (A4b): each emitted pose is folded to its ABSOLUTE value keyed on the
+    // frame it is stamped in (a fed ghost against ITS neighbour frame, never the local one) BEFORE it rides
+    // the wire — the client renders the value verbatim. A pose whose frame has no folded absolute is OMITTED
+    // and counted (the client holds its last sample); it is NEVER shipped raw, which the client would misread
+    // as an absolute. Empty `FrameAbs` (pre-A5) composes every pose to itself ⇒ byte-identical.
+    let (entities, unresolved) = compose_emitted_entities(&dots, &mirror, &frame_abs);
+    stats.poses_unresolved += unresolved;
     // Partition BY CONTENT so no datagram exceeds the MTU budget (audit GW-1): a
     // full-world snapshot ships as several independent self-contained frames. Per
     // connection_plane.md §6.3 EVERY chunk of one tick carries the SAME frame_id +
@@ -9647,6 +9707,140 @@ mod tests {
                 .expect("root frame is placed")
                 .origin,
             DVec3::ZERO
+        );
+    }
+
+    #[test]
+    fn a4b_compose_snap_folds_a_pose_to_absolute_or_omits_an_unresolvable_frame() {
+        // A4b: `compose_snap` is the server-authoritative fold. An EMPTY map ships every pose raw
+        // (byte-identical, pre-A5). A RESOLVABLE frame yields the pose's ABSOLUTE (frame abs ∘ local, native
+        // label preserved). An UNRESOLVABLE frame (populated map, frame absent) yields `None` — the caller
+        // omits it (the client holds) rather than shipping a raw local the client would misread as absolute.
+        let frame_a = frame_of(OWN_REALM);
+        let pose = StampedPose {
+            frame: frame_a,
+            pos: LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::new(10.0, 20.0, 30.0)),
+            vel: DVec3::new(0.5, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(100),
+        };
+
+        // Empty ⇒ ship raw (the byte-floor every pre-A5 rig takes).
+        assert_eq!(
+            compose_snap(&FrameAbs::default(), pose),
+            Some(pose),
+            "an empty FrameAbs composes every pose to itself"
+        );
+
+        // Resolvable ⇒ absolute = frame abs ∘ local.
+        let abs_pos = LatticePos::at(
+            vd_core::glam::I64Vec3::ZERO,
+            DVec3::new(100.0, 200.0, 300.0),
+        );
+        let abs_vel = DVec3::new(1.0, 2.0, 3.0);
+        let mut map: BTreeMap<FrameRef, (LatticePos, DVec3)> = BTreeMap::new();
+        map.insert(frame_a, (abs_pos, abs_vel));
+        let composed = compose_snap(&FrameAbs(map.clone()), pose).expect("frame_a resolves");
+        assert_eq!(composed.frame, frame_a, "native frame label preserved");
+        assert_eq!(composed.pos.offset(), DVec3::new(110.0, 220.0, 330.0));
+        assert_eq!(composed.vel, DVec3::new(1.5, 2.0, 3.0));
+        assert_eq!(composed.universe_tick, UniverseTick(100));
+
+        // Unresolvable ⇒ omit (populated map missing this pose's frame).
+        let pose_b = StampedPose {
+            frame: frame_of(OTHER_REALM),
+            ..pose
+        };
+        assert_eq!(
+            compose_snap(&FrameAbs(map), pose_b),
+            None,
+            "a frame with no folded absolute is omitted, never shipped raw"
+        );
+    }
+
+    #[test]
+    fn a4b_compose_snap_composes_a_fed_ghost_against_its_own_frame_not_the_local() {
+        // A4b FED-GHOST HAZARD: a fed ghost's pose is stamped in the NEIGHBOUR's frame; `compose_snap` keys on
+        // `pose.frame`, folding it against the NEIGHBOUR frame's absolute — never the shard's own. With two
+        // DIFFERENT absolutes registered, a ghost stamped in the neighbour frame folds against the neighbour's,
+        // so its offset carries (0, 5000, 0) — NOT the local frame's (1000, 0, 0), which would teleport it.
+        let local_frame = frame_of(OWN_REALM);
+        let ghost_frame = frame_of(OTHER_REALM);
+        let mut map: BTreeMap<FrameRef, (LatticePos, DVec3)> = BTreeMap::new();
+        map.insert(
+            local_frame,
+            (
+                LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::new(1_000.0, 0.0, 0.0)),
+                DVec3::ZERO,
+            ),
+        );
+        map.insert(
+            ghost_frame,
+            (
+                LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::new(0.0, 5_000.0, 0.0)),
+                DVec3::ZERO,
+            ),
+        );
+        let ghost = StampedPose::at_rest(ghost_frame, DVec3::new(0.0, 0.0, 7.0), UniverseTick(100));
+        let composed = compose_snap(&FrameAbs(map), ghost).expect("the ghost frame resolves");
+        assert_eq!(
+            composed.pos.offset(),
+            DVec3::new(0.0, 5_000.0, 7.0),
+            "the ghost folds against ITS neighbour frame, never the local frame"
+        );
+    }
+
+    #[test]
+    fn a4b_compose_emitted_entities_composes_the_resolvable_and_counts_the_unresolvable() {
+        // A4b degrade: `compose_emitted_entities` composes each EMITTING dot's pose and returns how many were
+        // OMITTED (frame unresolved). One dot in a resolvable frame renders (composed to absolute); one in an
+        // unresolvable frame is dropped and counted — the client holds rather than reading a raw local as absolute.
+        let resolvable = frame_of(OWN_REALM);
+        let unresolvable = frame_of(OTHER_REALM);
+        let mk = |entity: EntityId, frame: FrameRef| Dot {
+            entity,
+            account: AccountId(1),
+            session_fence: Fence(1),
+            gateway: GATEWAY,
+            granted: true,
+            input_active: false,
+            adopting: false,
+            authority: Authority::Owned { fence: Fence(1) },
+            departing: false,
+            entity_fence: Fence(1),
+            pose: StampedPose::at_rest(frame, DVec3::new(1.0, 2.0, 3.0), UniverseTick(100)),
+            yaw: 0.0,
+            pitch: 0.0,
+            last_applied_seq: None,
+            prev_offset: DVec3::ZERO,
+        };
+        let e_ok = EntityId::pack(EntityKind::Player, 10, 1, 1);
+        let e_bad = EntityId::pack(EntityKind::Player, 10, 2, 2);
+        let mut dots = Dots::default();
+        dots.0.insert(SessionId(1), mk(e_ok, resolvable));
+        dots.0.insert(SessionId(2), mk(e_bad, unresolvable));
+
+        let mut map: BTreeMap<FrameRef, (LatticePos, DVec3)> = BTreeMap::new();
+        map.insert(
+            resolvable,
+            (
+                LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::new(100.0, 0.0, 0.0)),
+                DVec3::ZERO,
+            ),
+        );
+        let (entities, unresolved) =
+            compose_emitted_entities(&dots, &SourceGhostMirror::default(), &FrameAbs(map));
+
+        assert_eq!(
+            unresolved, 1,
+            "the unresolvable-frame dot is omitted + counted"
+        );
+        assert_eq!(entities.len(), 1, "only the resolvable-frame dot renders");
+        assert_eq!(entities[0].entity, e_ok);
+        assert_eq!(
+            entities[0].pose.pos.offset(),
+            DVec3::new(101.0, 2.0, 3.0),
+            "composed to absolute (100+1, 0+2, 0+3)"
         );
     }
 
