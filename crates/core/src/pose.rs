@@ -162,12 +162,36 @@ pub fn frame_for_realm(realm: RealmId, parent: Option<RealmId>) -> Option<FrameR
     }
 }
 
-/// FINE-tier cell edge: **one millimetre**. At the fine tier a [`LatticePos`] cell counts
-/// millimetres and the f64 `offset` is the sub-millimetre residual, so f64 precision stays at the
-/// ~10⁻¹⁹ m level ANYWHERE inside a star system. i64 millimetres span ≈ ±9.2×10¹⁵ m ≈ ±0.97 light-year
-/// before overflow — comfortably more than one system's active volume, and beyond that you are in the
-/// COARSE tier by construction (the tier boundary sits below where fine cells could overflow).
-pub const FINE_CELL_EDGE_M: f64 = 1.0e-3;
+/// FINE-tier cell edge: **2⁻¹⁰ m** (0.9765625 mm) — the largest power-of-two metre quantum ≤ 1 mm.
+/// At the fine tier a [`LatticePos`] cell counts these ~mm quanta and the f64 `offset` is the sub-quantum
+/// residual, so f64 precision stays at the ~10⁻¹⁹ m level ANYWHERE inside a star system. i64 quanta span
+/// ≈ ±9.0×10¹⁵ m ≈ ±0.952 light-year before overflow — comfortably more than one system's active volume,
+/// and beyond that you are in the COARSE tier by construction.
+///
+/// **Why a power of two (not 1e-3).** A power-of-two edge makes [`LatticePos::normalize`] EXACTLY
+/// idempotent — `offset / edge` is a bit-shift-clean division with no rounding, so `normalize(normalize(x))
+/// == normalize(x)` and the residual stays in `[0, edge)` bit-for-bit. At `1e-3` that fails: `17.9 / 1e-3`
+/// is not exact, so `normalize(17.9)` lands a *negative* residual and is NOT idempotent — and idempotence is
+/// the correctness basis of the cell-activation migration (a pre-activation `{cell 0, full offset}` and a
+/// post-activation `{cell N, residual}` must denote the same point, `re_anchor` a no-op on the anchored
+/// form). It also makes FINE↔COARSE an EXACT integer ratio ([`FINE_CELLS_PER_LY`]), retiring the
+/// remainder-carry hack. The edge is a compile-time constant, never serialized, so this moves zero bytes.
+pub const FINE_CELL_EDGE_M: f64 = 1.0 / 1024.0;
+
+/// FINE cells per COARSE cell (per light-year), EXACT. `COARSE_CELL_EDGE_M` is the exact-integer IAU
+/// light-year in metres (`9_460_730_472_580_800`) and the FINE edge is `2⁻¹⁰`, so one light-year is exactly
+/// `9_460_730_472_580_800 × 1024` fine quanta — an integer that exceeds `i64::MAX` (hence `i128`). This makes
+/// FINE↔COARSE tier conversion exact integer arithmetic (no float remainder carry): `coarse_cell` × this +
+/// fine residual is the exact fine position.
+pub const FINE_CELLS_PER_LY: i128 = 9_460_730_472_580_800_i128 * 1024;
+
+/// The bounded cell domain enforced at wire ingress ([`StampedPose::sanitized`]): each `LatticePos.cell`
+/// axis is clamped to `±CELL_DOMAIN_MAX`. Set to `i64::MAX / 2` so that a cell DIFFERENCE (`a.cell −
+/// b.cell` in [`LatticePos::delta_m`] and the crossing rebase) can never overflow `i64` — the operation a
+/// diverged/hostile sender would otherwise use to panic the receiver. Well beyond any real position: at the
+/// FINE 2⁻¹⁰ edge it spans ±0.476 light-year (half the tier's overflow limit), and every in-domain pose
+/// passes through BIT-FOR-BIT (`sanitized().cell() == self.cell()`), preserving determinism.
+pub const CELL_DOMAIN_MAX: i64 = i64::MAX / 2;
 
 /// COARSE-tier cell edge: **one light-year** (IAU julian light-year, exact metres). At the coarse tier
 /// a cell counts light-years and the f64 `offset` is the sub-light-year residual. Galaxy-scale positions
@@ -293,8 +317,20 @@ impl LatticePos {
     pub fn normalize(self, tier: Tier) -> LatticePos {
         let edge = tier.cell_edge_m();
         let carry = (self.offset / edge).floor();
+        // SATURATING cell carry: a finite-but-huge `offset` (a diverged sender, a hostile wire pose)
+        // makes `carry` exceed the i64 range; a plain `self.cell + carry.as_i64vec3()` PANICS in debug
+        // (i.e. across the whole test + coverage suite) on that overflow. Saturating keeps `normalize`
+        // TOTAL (never panics) while staying exact for every in-domain pose — the carry is the floored
+        // quotient, subtracted back off in the same units, so `cell*edge + offset` is preserved to f64
+        // wherever the cell does not saturate. Per-component so one saturated axis does not poison the
+        // others; the `as i64` cast already saturates the f64→i64 conversion (NaN → 0). At the 2⁻¹⁰ edge
+        // `offset / edge` is an exact bit-shift-scale, so `normalize` is exactly idempotent.
         LatticePos {
-            cell: self.cell + carry.as_i64vec3(),
+            cell: I64Vec3::new(
+                self.cell.x.saturating_add(carry.x as i64),
+                self.cell.y.saturating_add(carry.y as i64),
+                self.cell.z.saturating_add(carry.z as i64),
+            ),
             offset: self.offset - carry * edge,
         }
     }
@@ -306,12 +342,19 @@ impl LatticePos {
     /// is `ZERO`, so this reduces to `offset - origin.offset` — behaviour-identical to a plain vector
     /// subtraction; the exactness matters once S5 lights up non-zero cells.
     #[must_use]
-    pub fn rebase_to(self, origin: LatticePos, tier: Tier) -> LatticePos {
+    pub fn rebase_to(self, origin: LatticePos, _tier: Tier) -> LatticePos {
+        // PURE exact rebase — integer cell subtraction + f64 offset residual, NO trailing normalize.
+        // Re-bucketing here is WRONG: `normalize` forces the residual into `[0, edge)`, but a rebased
+        // position (a client subtracting its pinned origin) wants the SIGNED residual AROUND the origin,
+        // and re-quantizing it (a) is a pure no-op on the value it would then re-add and (b) broke
+        // idempotence at the old non-power-of-two edge. Exactness needs no normalize here: the integer
+        // cell difference is exact and the offset is one f64 subtract. The `_tier` is retained to mark
+        // this a same-tier op (callers pass it); re-quantize explicitly via `re_anchor` at an activation
+        // seam. Inverse of `compose`: `a.compose(b).rebase_to(a) == b` bit-for-bit (no normalize rounding).
         LatticePos {
             cell: self.cell - origin.cell,
             offset: self.offset - origin.offset,
         }
-        .normalize(tier)
     }
 
     /// Compose `self` (a frame ORIGIN's absolute position) with a `local` position expressed IN that
@@ -321,12 +364,17 @@ impl LatticePos {
     /// `a.compose(b).rebase_to(a) == b` (to f64). Through P3 (`cell == ZERO`) this is `self.offset +
     /// local.offset` — a plain vector add.
     #[must_use]
-    pub fn compose(self, local: LatticePos, tier: Tier) -> LatticePos {
+    pub fn compose(self, local: LatticePos, _tier: Tier) -> LatticePos {
+        // PURE exact compose — integer cell add + f64 offset sum, NO trailing normalize. `normalize`
+        // here would break byte-identity at the walk floor: `identity.compose({cell 0, offset 20 m})`
+        // would carry 20 m INTO the cell (`{cell 20480, offset 0}`) — different postcard bytes on every
+        // walk `EntitySnap` than the `{cell 0, offset 20 m}` the wire ships today. Exactness is preserved
+        // without it: the cell add is integer-exact and the offset sum is one f64 add. The `_tier` marks
+        // this a same-tier op; re-quantize explicitly via `re_anchor` only at a real activation seam.
         LatticePos {
             cell: self.cell + local.cell,
             offset: self.offset + local.offset,
         }
-        .normalize(tier)
     }
 
     /// Re-express this position from one tier's cell UNIT into another (e.g. a FINE mm-lattice position
@@ -344,6 +392,49 @@ impl LatticePos {
         let metres = self.offset + self.cell.as_dvec3() * from.cell_edge_m();
         LatticePos::local(metres).normalize(to)
     }
+
+    /// This position MINUS `origin` (both same frame + tier) expressed in **metres** — the render-plane
+    /// rebase the client runs at the ONE `world_pos` chokepoint (subtract the pinned origin), and the
+    /// server's distance measure (containment, ghost band, demand). The integer cell difference cancels
+    /// the huge galaxy-scale magnitude EXACTLY; only the small residual difference touches f64.
+    ///
+    /// **The honest bound.** Exact iff `|self.cell − origin.cell| ≤ 2⁵³` per axis (≈ 8.8×10¹² m ≈ 59 AU at
+    /// FINE) — beyond that the `.as_dvec3()` of the integer difference loses low bits and this degrades to a
+    /// plain f64 of the difference. That bound is never approached under the pin discipline (the pin is the
+    /// occupant's own star system, always within one FINE cell-span of it), so in-system rebases are exact;
+    /// cross-cell distances stay well inside it. `cell − origin.cell` is exact integer subtraction for every
+    /// in-domain cell (sanitized to a bounded domain at wire ingress, so no overflow reaches here).
+    #[must_use]
+    pub fn delta_m(self, origin: LatticePos, tier: Tier) -> DVec3 {
+        (self.cell - origin.cell).as_dvec3() * tier.cell_edge_m() + (self.offset - origin.offset)
+    }
+
+    /// THE single quantization decision point — re-bucket the offset into the cell, or don't, per a
+    /// statically-configured [`CellAnchor`]. `Inert` returns `self` BIT-FOR-BIT (the byte-floor: every
+    /// existing forest rides here, cell unchanged, wire identical); `Cell(tier)` runs [`normalize`] to carry
+    /// an accumulated offset into the cell. This is the ONLY place a pose is re-quantized — the integrator,
+    /// frame entry, and the generator call it, all `Inert` through P3/P4 and flipped to `Cell` only in the
+    /// gated galaxy-scale fixture (A8). Idempotent on an already-anchored pose (guaranteed by the 2⁻¹⁰ edge),
+    /// so a re-anchor on load is a no-op on the anchored form — the migration is a no-op, not a flag day.
+    #[must_use]
+    pub fn re_anchor(self, anchor: CellAnchor) -> LatticePos {
+        match anchor {
+            CellAnchor::Inert => self,
+            CellAnchor::Cell(tier) => self.normalize(tier),
+        }
+    }
+}
+
+/// The quantization mode for [`LatticePos::re_anchor`] — a coordinate-unit config, NOT a realm/shard-kind
+/// match (HR3). `Inert` keeps a pose at its shipped cell (the byte-floor, every forest through P4);
+/// `Cell(tier)` re-buckets accumulated offset into the integer cell at that tier (the gated galaxy-scale
+/// activation, A8). Planted here; flipped only by the `VD_UNIVERSE_SCALE` fixture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellAnchor {
+    /// No re-quantization — the pose passes through bit-for-bit (byte-floor, prod through P4).
+    Inert,
+    /// Re-bucket the offset into the cell at this tier (galaxy-scale activation).
+    Cell(Tier),
 }
 
 /// A pose + motion state bound to one frame at one analytic-clock instant.
@@ -369,6 +460,33 @@ impl StampedPose {
         }
     }
 
+    /// Compose `self` (a frame ORIGIN's absolute pose) with `local` (a pose expressed IN that frame) →
+    /// the local's absolute pose. This is the FULL rigid compose the server runs once per tick to author
+    /// every occupant's absolute (`self_abs ∘ occupant_local`): the position rides through
+    /// [`LatticePos::compose`] with the lever ROTATED by the origin's orientation, the velocity carries
+    /// the rotated local velocity, and the orientation composes. A position-only compose would be a
+    /// DEFECT — `place_child`'s mover arm authors a real orbital velocity, so shipping an absolute
+    /// position with a realm-local velocity yields a mixed-frame pose that contradicts this type's own
+    /// contract (the client's no-prediction firewall drops `vel` today, but every closed-form re-advance
+    /// and future consumer relies on it). The **native frame label is preserved** (`local.frame`): only
+    /// the VALUE becomes absolute, so the boundary detector, the saga, and the client re-pin trigger keep
+    /// reading the label they expect. Stamped at the local's tick (same-tick compose — box and rider agree
+    /// in time). The `cell` rides from `local.pos` (ZERO through P4); the rotation applies to the offset
+    /// residual (occupants live at offset scale, so this is exact wherever the cell is ZERO).
+    #[must_use]
+    pub fn compose(self, local: StampedPose, tier: Tier) -> StampedPose {
+        StampedPose {
+            frame: local.frame,
+            pos: self.pos.compose(
+                LatticePos::at(local.pos.cell(), self.orient * local.pos.offset()),
+                tier,
+            ),
+            vel: self.vel + self.orient * local.vel,
+            orient: self.orient * local.orient,
+            universe_tick: local.universe_tick,
+        }
+    }
+
     /// A copy with every non-finite component replaced by a safe default (`pos`/`vel`
     /// per-component → 0, `orient` → identity). Delivered poses ride the wire, so a
     /// corrupt/diverged sender could carry `NaN`/`Inf`; the CLIENT must never feed one
@@ -380,10 +498,16 @@ impl StampedPose {
     pub fn sanitized(self) -> StampedPose {
         StampedPose {
             frame: self.frame,
-            // Sanitize the local offset; the integer cell is exact (an i64 cannot be non-finite),
-            // so it passes through — preserving any future non-zero cell anchor.
+            // Sanitize the local offset (an f64 can be NaN/Inf); the integer cell is finite by type but
+            // a diverged/hostile sender can still ship one large enough to overflow a downstream cell
+            // DIFFERENCE (`delta_m`, the crossing rebase) and panic the receiver — so CLAMP it to the
+            // bounded `±CELL_DOMAIN_MAX` domain. Every in-domain pose (all of prod, cell ZERO) passes
+            // through BIT-FOR-BIT, so `sanitized().cell() == self.cell()` and byte-identity holds.
             pos: LatticePos {
-                cell: self.pos.cell,
+                cell: self.pos.cell.clamp(
+                    I64Vec3::splat(-CELL_DOMAIN_MAX),
+                    I64Vec3::splat(CELL_DOMAIN_MAX),
+                ),
                 offset: finite_or_zero(self.pos.offset),
             },
             vel: finite_or_zero(self.vel),
@@ -795,10 +919,13 @@ mod tests {
     }
 
     #[test]
-    fn cell_edge_is_a_millimetre_at_fine_and_a_light_year_at_coarse() {
+    fn cell_edge_is_the_power_of_two_quantum_at_fine_and_a_light_year_at_coarse() {
         assert_eq!(Tier::Fine.cell_edge_m(), FINE_CELL_EDGE_M);
         assert_eq!(Tier::Coarse.cell_edge_m(), COARSE_CELL_EDGE_M);
-        assert_eq!(Tier::Fine.cell_edge_m(), 1.0e-3);
+        // FINE = 2⁻¹⁰ m (0.9765625 mm) — the largest power-of-two metre quantum ≤ 1 mm, chosen so
+        // `normalize` is exactly idempotent and FINE↔COARSE is an exact integer ratio.
+        assert_eq!(Tier::Fine.cell_edge_m(), 1.0 / 1024.0);
+        assert_eq!(Tier::Fine.cell_edge_m(), 0.0009765625);
         // one light-year, IAU julian: 9_460_730_472_580_800 m.
         assert_eq!(Tier::Coarse.cell_edge_m(), 9_460_730_472_580_800.0);
     }
@@ -807,11 +934,11 @@ mod tests {
     fn normalize_rebuckets_a_large_offset_into_the_cell_exactly() {
         // An un-normalized fine pose (cell 0, offset carrying full metres — the P3 shipping form) folds
         // its integer millimetres into the cell, leaving a sub-millimetre residual, preserving the total.
-        let edge = FINE_CELL_EDGE_M; // 1 mm
+        let edge = FINE_CELL_EDGE_M; // 2⁻¹⁰ m ≈ 0.977 mm
         let lp = LatticePos::local(DVec3::new(1.2345, -0.0007, 2.0));
         let n = lp.normalize(Tier::Fine);
-        // cell = floor(offset / 1 mm) per axis.
-        assert_eq!(n.cell(), I64Vec3::new(1234, -1, 2000));
+        // cell = floor(offset / edge) = floor(offset × 1024) per axis.
+        assert_eq!(n.cell(), I64Vec3::new(1264, -1, 2048));
         // residual reconstructs the original total to f64 precision.
         let recon = n.cell().as_dvec3() * edge + n.offset();
         assert!((recon - lp.offset()).length() < 1e-9);
@@ -838,8 +965,8 @@ mod tests {
     }
 
     #[test]
-    fn compose_adds_cells_then_normalizes() {
-        // origin ∘ local sums the integer cells (offsets ZERO ⇒ exact).
+    fn compose_adds_cells_exactly() {
+        // origin ∘ local sums the integer cells — NO normalize (offsets ZERO ⇒ exact).
         let origin = LatticePos::at(I64Vec3::new(10, 20, 30), DVec3::ZERO);
         let local = LatticePos::at(I64Vec3::new(1, 2, 3), DVec3::ZERO);
         let c = origin.compose(local, Tier::Fine);
@@ -863,6 +990,177 @@ mod tests {
     }
 
     #[test]
+    fn compose_at_identity_is_bit_exact() {
+        // identity ∘ x == x, BIT-for-bit. Fails on the pre-A1 normalizing compose (which would carry x's
+        // whole offset into the cell). The one-line proof that compose no longer re-quantizes.
+        let x = LatticePos::at(I64Vec3::new(7, -3, 11), DVec3::new(1.5, -2.25, 0.125));
+        let id = LatticePos::at(I64Vec3::ZERO, DVec3::ZERO);
+        assert_eq!(id.compose(x, Tier::Fine), x);
+        assert_eq!(x.compose(id, Tier::Fine), x);
+    }
+
+    #[test]
+    fn normalize_is_idempotent_at_the_power_of_two_edge() {
+        // normalize(normalize(x)) == normalize(x), EXACT at the 2⁻¹⁰ edge (a bit-shift-clean division). At
+        // the old 1e-3 edge this FAILS for 17.9 (a negative residual that re-carries) — the visual fixture's
+        // orbital radius. Idempotence is the basis of the cell-activation migration being replay-safe.
+        for &v in &[17.9_f64, -3.3, 1234.5, 0.0009765625, -0.0009765625, 1.0e9] {
+            let n = LatticePos::local(DVec3::splat(v)).normalize(Tier::Fine);
+            assert_eq!(
+                n.normalize(Tier::Fine),
+                n,
+                "normalize not idempotent at {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_saturates_instead_of_panicking() {
+        // A finite-but-astronomical offset makes the cell carry exceed i64 — normalize must SATURATE, never
+        // panic (a panic here would take down the whole debug test + coverage suite). Both signs.
+        let hi =
+            LatticePos::at(I64Vec3::splat(i64::MAX), DVec3::splat(f64::MAX)).normalize(Tier::Fine);
+        assert_eq!(hi.cell(), I64Vec3::splat(i64::MAX));
+        let lo =
+            LatticePos::at(I64Vec3::splat(i64::MIN), DVec3::splat(f64::MIN)).normalize(Tier::Fine);
+        assert_eq!(lo.cell(), I64Vec3::splat(i64::MIN));
+    }
+
+    #[test]
+    fn sanitized_clamps_a_hostile_cell_and_passes_an_in_domain_one_through() {
+        // A hostile wire cell is CLAMPED to the bounded domain (so a downstream cell difference cannot
+        // overflow); an in-domain cell passes through BIT-FOR-BIT (the determinism contract, byte-identity).
+        let frame = FrameRef::SystemSpace { system_seed: 7 };
+        let hostile = StampedPose {
+            frame,
+            pos: LatticePos::at(I64Vec3::splat(i64::MAX), DVec3::new(0.5, 0.5, 0.5)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(0),
+        };
+        assert_eq!(
+            hostile.sanitized().pos.cell(),
+            I64Vec3::splat(CELL_DOMAIN_MAX)
+        );
+        let ok = StampedPose {
+            frame,
+            pos: LatticePos::at(I64Vec3::new(1000, -2000, 3000), DVec3::new(0.5, 0.5, 0.5)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(0),
+        };
+        assert_eq!(ok.sanitized().pos.cell(), I64Vec3::new(1000, -2000, 3000));
+    }
+
+    #[test]
+    fn delta_m_at_cell_zero_is_plain_subtraction() {
+        // The byte-floor for every distance the server + client compute: at cell 0, delta_m is exactly the
+        // offset difference (a plain vector subtract) — identical to the pre-lattice algebra.
+        let a = LatticePos::local(DVec3::new(3.0, -4.0, 5.0));
+        let b = LatticePos::local(DVec3::new(1.0, 1.0, 1.0));
+        assert_eq!(a.delta_m(b, Tier::Fine), DVec3::new(2.0, -5.0, 4.0));
+    }
+
+    #[test]
+    fn delta_m_is_exact_for_a_cell_difference_within_the_bound() {
+        // A cell difference well inside the 2⁵³ exact bound: delta_m = integer-cell-diff × edge + offset
+        // diff, bit-exact against the manual computation. (Beyond 2⁵³ the `.as_dvec3()` of the diff loses
+        // low bits — the honestly-stated ceiling, never approached under the pin discipline.)
+        let a = LatticePos::at(
+            I64Vec3::new(1_000_000, 2_000_000, -3_000_000),
+            DVec3::new(0.5, 0.0, 0.25),
+        );
+        let b = LatticePos::at(I64Vec3::new(4, 5, 6), DVec3::new(0.1, 0.0, 0.0));
+        let e = FINE_CELL_EDGE_M;
+        let want = DVec3::new(
+            (1_000_000 - 4) as f64 * e + (0.5 - 0.1),
+            (2_000_000 - 5) as f64 * e,
+            (-3_000_000 - 6) as f64 * e + (0.25 - 0.0),
+        );
+        assert_eq!(a.delta_m(b, Tier::Fine), want);
+    }
+
+    #[test]
+    fn delta_m_resolves_half_a_millimetre_at_interstellar_range() {
+        // THE precision win: two positions ~4.9×10¹² m out, 0.5 mm apart (the offset carries it, the integer
+        // cell is shared). delta_m keeps the 0.5 mm exactly; as plain f64 metres at that magnitude one ULP
+        // is ~1 mm, so the naive difference quantizes the 0.5 mm away. Same test asserts BOTH.
+        let cell = I64Vec3::new(5_000_000_000_000_000, 0, 0); // ~4.9e12 m at 2⁻¹⁰ edge, < 2⁵³ so f64-exact
+        let a = LatticePos::at(cell, DVec3::new(0.0005, 0.0, 0.0));
+        let b = LatticePos::at(cell, DVec3::ZERO);
+        assert!((a.delta_m(b, Tier::Fine).x - 0.0005).abs() < 1e-12);
+        let e = FINE_CELL_EDGE_M;
+        let naive = (cell.x as f64 * e + 0.0005) - cell.x as f64 * e;
+        assert!(
+            (naive - 0.0005).abs() > 1.0e-4,
+            "naive f64 metres lose the 0.5 mm at this magnitude (got {naive})"
+        );
+    }
+
+    #[test]
+    fn stamped_compose_rotates_the_lever_carries_velocity_and_preserves_the_native_frame() {
+        use std::f64::consts::FRAC_PI_2;
+        // origin: a frame at (10,0,0), rotated 90° about +Z, moving +Y at 2 m/s.
+        let origin = StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 7 },
+            pos: LatticePos::local(DVec3::new(10.0, 0.0, 0.0)),
+            vel: DVec3::new(0.0, 2.0, 0.0),
+            orient: DQuat::from_rotation_z(FRAC_PI_2),
+            universe_tick: UniverseTick(5),
+        };
+        // local: an occupant 1 m along +X in the origin's frame, at rest, in a PLANET frame, at tick 9.
+        let local = StampedPose {
+            frame: FrameRef::PlanetCentered { planet_seed: 3 },
+            pos: LatticePos::local(DVec3::new(1.0, 0.0, 0.0)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(9),
+        };
+        let c = origin.compose(local, Tier::Fine);
+        // lever (1,0,0) rotated 90° about Z → (0,1,0), added to the origin (10,0,0) → (10,1,0).
+        assert!((c.pos.offset() - DVec3::new(10.0, 1.0, 0.0)).length() < 1e-9);
+        // velocity carries the origin's (the local is at rest).
+        assert!((c.vel - DVec3::new(0.0, 2.0, 0.0)).length() < 1e-9);
+        // the NATIVE frame label is preserved (the VALUE is absolute, the label is the local's) and the
+        // stamp is the local's tick (same-tick compose).
+        assert_eq!(c.frame, FrameRef::PlanetCentered { planet_seed: 3 });
+        assert_eq!(c.universe_tick, UniverseTick(9));
+    }
+
+    #[test]
+    fn re_anchor_inert_passes_through_and_cell_re_buckets() {
+        // The byte-floor gate: Inert returns the pose BIT-FOR-BIT (every forest through P4); Cell re-buckets
+        // the offset into the cell (the gated galaxy-scale activation). Both CellAnchor arms + idempotence.
+        let x = LatticePos::local(DVec3::new(1.5, -2.0, 3.0));
+        assert_eq!(x.re_anchor(CellAnchor::Inert), x);
+        assert_eq!(
+            x.re_anchor(CellAnchor::Cell(Tier::Fine)),
+            x.normalize(Tier::Fine)
+        );
+        let anchored = x.re_anchor(CellAnchor::Cell(Tier::Fine));
+        assert_eq!(anchored.re_anchor(CellAnchor::Cell(Tier::Fine)), anchored);
+    }
+
+    #[test]
+    fn cell_anchor_derives_are_exercised() {
+        // Cover CellAnchor's derived Debug + PartialEq (it becomes a config value at A8; the derives must
+        // not sit as uncovered regions in the meantime — HR5).
+        assert_eq!(CellAnchor::Inert, CellAnchor::Inert);
+        assert_ne!(CellAnchor::Inert, CellAnchor::Cell(Tier::Fine));
+        assert_eq!(CellAnchor::Cell(Tier::Fine), CellAnchor::Cell(Tier::Fine));
+        assert!(format!("{:?}", CellAnchor::Cell(Tier::Coarse)).contains("Coarse"));
+    }
+
+    #[test]
+    fn fine_cells_per_ly_is_the_exact_integer_ratio() {
+        // FINE↔COARSE is exact integer arithmetic: one light-year is exactly FINE_CELLS_PER_LY fine quanta,
+        // an integer that exceeds i64 (hence i128) — retiring the float remainder-carry.
+        assert_eq!(FINE_CELLS_PER_LY, 9_460_730_472_580_800_i128 * 1024);
+        assert_eq!(FINE_CELLS_PER_LY / 1024, COARSE_CELL_EDGE_M as i128);
+        assert!(FINE_CELLS_PER_LY > i64::MAX as i128);
+    }
+
+    #[test]
     fn convert_tier_same_tier_is_the_identity_the_only_live_path() {
         // Through P3 every frame is FINE ⇒ convert_tier is always same-tier ⇒ a pure identity (it does
         // NOT re-bucket the un-normalized shipping pose) — the byte-floor for the dormant arm.
@@ -877,7 +1175,7 @@ mod tests {
         // The P10-deferred cross-tier plant: fold to total metres, re-bucket at the target edge. A small
         // FINE position (1000 m) lands in COARSE cell 0 with the metres carried in the offset (the
         // exact-integer carry for the full mm↔ly ratio finalizes at P10 with the COARSE unit).
-        let fine = LatticePos::at(I64Vec3::new(1_000_000, 0, 0), DVec3::ZERO); // 1e6 mm = 1000 m
+        let fine = LatticePos::at(I64Vec3::new(1_024_000, 0, 0), DVec3::ZERO); // 1_024_000 × 2⁻¹⁰ m = 1000 m
         let coarse = fine.convert_tier(Tier::Fine, Tier::Coarse);
         assert_eq!(coarse.cell(), I64Vec3::ZERO); // 1000 m ≪ 1 ly
         assert!((coarse.offset().x - 1000.0).abs() < 1e-6);

@@ -397,11 +397,12 @@ mod tests {
 
     #[test]
     fn sample_rebases_prev_into_currents_cell_so_the_blend_is_continuous_across_a_boundary() {
-        use vd_core::pose::LatticePos;
-        // FINE cell = 1 mm. `prev` sits one cell BELOW `current`, near the top of its cell: true position
-        // = −1·edge + 0.9·edge = −0.1·edge. `current` is at cell 0, offset 0.1·edge. Rebasing prev into
-        // cell 0 gives offset −0.1·edge, so the blend stays continuous across the boundary (no jump).
-        let edge = 1.0e-3;
+        use vd_core::pose::{FINE_CELL_EDGE_M, LatticePos};
+        // `prev` sits one cell BELOW `current`, near the top of its cell: true position = −1·edge +
+        // 0.9·edge = −0.1·edge. `current` is at cell 0, offset 0.1·edge. Rebasing prev into cell 0 gives
+        // offset −0.1·edge, so the blend stays continuous across the boundary (no jump). Edge-relative, so
+        // it holds at the real FINE edge (2⁻¹⁰ m) — use the constant, never a hard-coded literal.
+        let edge = FINE_CELL_EDGE_M;
         let sys = FrameRef::SystemSpace { system_seed: 1 };
         let prev = StampedPose {
             frame: sys,

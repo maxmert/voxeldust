@@ -334,7 +334,7 @@ mod tests {
         // non-zero source cell is NOT silently dropped. Under IdentityFrames a cross-frame transfer
         // re-expresses the frame while leaving the position unchanged — so the dest offset carries the
         // source cell's metres.
-        let cell = I64Vec3::new(1_000_000, 0, 0); // 1e6 mm at 1 mm/cell = 1000 m
+        let cell = I64Vec3::new(1_024_000, 0, 0); // 1_024_000 × 2⁻¹⁰ m/cell = 1000 m
         let pose = StampedPose {
             frame: sys(),
             pos: LatticePos::at(cell, DVec3::new(0.5, -0.25, 0.75)),
