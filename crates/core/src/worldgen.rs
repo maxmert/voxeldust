@@ -922,6 +922,34 @@ pub fn origin_chain_for_walk_config(config: &UniverseConfig, realm: RealmId) -> 
     origin_chain_over(&generate_walk_forest(config), realm)
 }
 
+/// Is this realm a STAR-SYSTEM-level container? Today (P3) `RealmId::System` stands in for Universe, Galaxy,
+/// AND star systems alike (dedicated `Universe`/`Galaxy` arms land at P4+, D-44); a `Planet`/`Station`/`Area`/
+/// `Ship` is never system-level. The one monomorphic discriminator [`pin_realm_of`] branches over (HR5) — its
+/// two arms covered by a `System` and a non-`System` realm.
+#[must_use]
+fn is_system_level(realm: RealmId) -> bool {
+    matches!(realm, RealmId::System(_))
+}
+
+/// The render-origin realm for a session whose ancestor chain (root→realm order) is `chain_realms`: the
+/// player's OWN star system — the DEEPEST system-level ancestor. A `Planet`/`Station`/`Area`/`Ship` is never
+/// system-level, so the deepest `System` is the innermost star-system container (the star directly holding the
+/// occupant), and since the ambient root is itself system-level a root-only chain folds to the root (the
+/// documented fall-back). The ONE centralized pin classifier — no caller writes an inline system-kind test
+/// (HR3). The client subtracts this realm's absolute so the render origin sits at the player's own star, NOT
+/// the galaxy (a renderable ancestor at visual scale whose selection would push the whole inter-system offset
+/// into the f64 residual and defeat the floating origin — verifier FINDING G).
+#[must_use]
+pub fn pin_realm_of(chain_realms: &[RealmId]) -> RealmId {
+    chain_realms
+        .iter()
+        .rev()
+        .copied()
+        .find(|&r| is_system_level(r))
+        .or_else(|| chain_realms.first().copied())
+        .unwrap_or(UNIVERSE)
+}
+
 // ===== UniverseConfig (D-45(a) Slice 3b) — the ONE config home ==========================
 //
 // The ~15 placeholder consts above become NAMED fields of six sub-structs (NOT a god-struct).
@@ -2660,6 +2688,26 @@ mod tests {
         assert_ne!(OriginLink::Fixed, orbital);
         assert!(format!("{orbital:?}").contains("Orbital"));
         assert!(format!("{:?}", OriginLink::Fixed).contains("Fixed"));
+    }
+
+    #[test]
+    fn pin_realm_of_selects_the_system_and_falls_back_to_the_root() {
+        // A5 render-origin classifier: the DEEPEST system-level ancestor is the player's own star system; a
+        // Planet is never system-level (so both `is_system_level` arms are exercised inside one chain).
+        // Realistic root→realm chain (Universe, Galaxy, System A, Planet) ⇒ the deepest System (System A) wins.
+        assert_eq!(
+            pin_realm_of(&[UNIVERSE, GALAXY, SYSTEM_A, RealmId::Planet(42)]),
+            SYSTEM_A
+        );
+        // A root-only chain folds to the root (itself system-level).
+        assert_eq!(pin_realm_of(&[UNIVERSE]), UNIVERSE);
+        // Defensive: a chain with NO system-level realm falls back to its first entry (find None → first).
+        assert_eq!(
+            pin_realm_of(&[RealmId::Planet(1), RealmId::Planet(2)]),
+            RealmId::Planet(1)
+        );
+        // Defensive: an empty chain folds to the ambient root (first None → UNIVERSE).
+        assert_eq!(pin_realm_of(&[]), UNIVERSE);
     }
 
     #[test]
