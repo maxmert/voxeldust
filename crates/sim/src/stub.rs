@@ -28,7 +28,7 @@ use vd_core::geometry::{
     DepthKey, OverlapBand, RealmRegion, container, region_depth, region_signed_distance,
     should_rehome,
 };
-use vd_core::glam::DVec3;
+use vd_core::glam::{DQuat, DVec3};
 use vd_core::kinematics;
 use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
@@ -842,12 +842,36 @@ impl RealmRegions {
     /// region's frame (defaulting to `GalaxySpace` for an empty forest, which the detector never
     /// evaluates — it short-circuits on `is_empty`).
     #[must_use]
-    pub fn frame_context(&self, tick_hz: f64) -> LocalFrames {
+    pub fn frame_context(&self, tick_hz: f64, tick: UniverseTick) -> LocalFrames {
+        // A4a — FOLD-DRIVEN. Place each neighbourhood frame at its seed-folded absolute (via
+        // `frame_abs_map`, the SAME fold `resolve_frame_abs` computes) expressed RELATIVE TO the ambient
+        // root. Recomputes the fold here rather than threading the `FrameAbs` resource through the saga
+        // crossing-rebind chain; the fold is deterministic, so both paths agree bit-for-bit. THE §0.2 FIX:
+        // on a demand planet shard `PlanetCentered{P}` goes from the identity (the double-count that dropped
+        // a departing occupant to the star) to its folded orbital placement.
         let mut ctx = LocalFrames::new(self.root_frame(), tick_hz);
+        let abs = self.frame_abs_map(tick_hz, tick);
+        let root_abs = abs.get(&self.root_frame()).copied();
         for r in &self.regions {
-            ctx = match self.moving.get(&r.realm) {
-                Some(elements) => ctx.with_moving_child(r.frame, *elements),
-                None => ctx.with_placed(r.frame, FramePlacement::identity()),
+            ctx = match (abs.get(&r.frame).copied(), root_abs) {
+                (Some((frame_pos, frame_vel)), Some((root_pos, root_vel))) => ctx.with_placed(
+                    r.frame,
+                    FramePlacement {
+                        origin_cell: frame_pos.cell() - root_pos.cell(),
+                        origin: frame_pos.offset() - root_pos.offset(),
+                        velocity: frame_vel - root_vel,
+                        orientation: DQuat::IDENTITY,
+                        angular_velocity: DVec3::ZERO,
+                    },
+                ),
+                // FALL BACK to today's construction when a frame has no folded absolute — a moving child
+                // authored from its ephemeris, every other region at the identity. An empty origin-chain
+                // roster (every rig until the bins wire chains at A5) takes this arm for EVERY region ⇒
+                // byte-identical.
+                _ => match self.moving.get(&r.realm) {
+                    Some(elements) => ctx.with_moving_child(r.frame, *elements),
+                    None => ctx.with_placed(r.frame, FramePlacement::identity()),
+                },
             };
         }
         ctx
@@ -2992,6 +3016,7 @@ fn on_flush_source(
     flush: FlushSource,
     config: &StubConfig,
     regions: &RealmRegions,
+    tick: UniverseTick,
     dots: &Dots,
     outbox: &mut OutboundBox,
 ) {
@@ -3007,7 +3032,7 @@ fn on_flush_source(
     // MOVING realm is frame-coherent: the dest reads the occupant at its own origin, agreeing with the
     // source, so the re-home cannot flap. The transfer machinery never touches the ephemeris (HR1). At
     // walk/static scale `frame_context` is all-identity ⇒ a pure frame relabel ⇒ byte-identical.
-    let frames = regions.frame_context(1.0 / config.tick_dt_s);
+    let frames = regions.frame_context(1.0 / config.tick_dt_s, tick);
     let pose = rebind_pose_to_dest(dot.pose, flush.to_realm, flush.to_parent, &frames);
     outbox.push_flow(
         config.orchestrator,
@@ -3280,7 +3305,7 @@ fn evaluate_realm_boundaries(
 
     // FA-1: the per-shard ephemeris frame context. At walk/static scale it is byte-equivalent to
     // IdentityFrames; FA-4 refreshes moving-child placements per tick. `tick_hz = 1/tick_dt_s`.
-    let frames = regions.frame_context(1.0 / config.tick_dt_s);
+    let frames = regions.frame_context(1.0 / config.tick_dt_s, clock.universe_tick);
     let ctx = CrossingCtx {
         config: &config,
         clock: &clock,
@@ -4264,7 +4289,7 @@ fn on_directory_reply(
         }
         // SOURCE: ship the held subject's pose (1d.1).
         Ok(InterShardFlow::FlushSource(flush)) => {
-            on_flush_source(flush, config, regions, dots, outbox);
+            on_flush_source(flush, config, regions, clock.universe_tick, dots, outbox);
             return;
         }
         // DEST: adopt the crossed entity state — a durable `StubCrossing` (1d.1) OR a `TransientBatch`
@@ -5018,7 +5043,7 @@ fn aoi_decide(
     let proxy_observers: Vec<(ObserverId, DVec3, DVec3)> = if retained.is_empty() {
         Vec::new()
     } else {
-        let ctx = regions.frame_context(tick_hz);
+        let ctx = regions.frame_context(tick_hz, tick);
         let root_frame = regions.root_frame();
         retained
             .iter()
@@ -9589,6 +9614,43 @@ mod tests {
     }
 
     #[test]
+    fn a4a_frame_context_places_a_frame_at_its_folded_orbit_when_a_chain_is_registered() {
+        // A4a: with origin chains registered, frame_context's FOLD-DRIVEN arm places a realm's frame at its
+        // folded absolute RELATIVE to the ambient root — THE §0.2 FIX (the frame rides its orbit instead of
+        // the identity double-count). The no-chain fall-back (byte-identical) is covered by the frame_context
+        // tests elsewhere. Root folds to identity ([Fixed]); OWN folds to the orbital position.
+        use vd_core::frame::FrameContext;
+        let elements = orbit();
+        let mut chains: BTreeMap<RealmId, Vec<OriginLink>> = BTreeMap::new();
+        chains.insert(ROOT_REALM, vec![OriginLink::Fixed]);
+        chains.insert(
+            OWN_REALM,
+            vec![OriginLink::Fixed, OriginLink::Orbital(elements)],
+        );
+        let regions =
+            RealmRegions::new(vec![root_region(), own_region()]).with_origin_chains(chains);
+        let (tick_hz, tick) = (20.0, UniverseTick(1_000));
+        let ctx = regions.frame_context(tick_hz, tick);
+        let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
+
+        let own = ctx
+            .placement(frame_of(OWN_REALM), tick)
+            .expect("OWN frame is placed via the fold-driven arm");
+        assert_eq!(
+            own.origin, state.position,
+            "OWN frame rides the folded orbit (root is identity)"
+        );
+        assert_eq!(own.velocity, state.velocity);
+        // The ambient root sits at the identity (folds to ZERO, relative to itself).
+        assert_eq!(
+            ctx.placement(frame_of(ROOT_REALM), tick)
+                .expect("root frame is placed")
+                .origin,
+            DVec3::ZERO
+        );
+    }
+
+    #[test]
     fn emit_realm_frames_ships_a_moving_child_only_to_a_present_observer_with_authority() {
         // FA-2c: the shard ships a moving child's box to observers ONLY when it (a) holds its realm, (b)
         // authors >=1 moving child, and (c) has an emitting observer — the emit_frames gating, verbatim.
@@ -10768,7 +10830,7 @@ mod tests {
         // before ever building this, but the default must still be well-formed): `GalaxySpace` resolves to
         // the identity via the `own` arm, and NO other frame is placed, so any other frame is `None`.
         let empty = RealmRegions::new(vec![]);
-        let ectx = empty.frame_context(20.0);
+        let ectx = empty.frame_context(20.0, UniverseTick(0));
         assert_eq!(
             ectx.placement(FrameRef::GalaxySpace, UniverseTick(0)),
             Some(FramePlacement::identity()),
@@ -10783,7 +10845,7 @@ mod tests {
         // placement at EVERY tick (static walk scale) — the byte-identity guarantee vs the retired
         // `IdentityFrames`. FA-4 will hand MOVING direct children a live orbital placement; here all static.
         let ctx = RealmRegions::new(vec![root_region(), own_region(), child_region()])
-            .frame_context(20.0);
+            .frame_context(20.0, UniverseTick(0));
         for r in [root_region(), own_region(), child_region()] {
             for tick in [UniverseTick(0), UniverseTick(1_000_000)] {
                 assert_eq!(
@@ -10819,7 +10881,7 @@ mod tests {
         let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
             .with_moving_children(moving);
         let tick_hz = 20.0;
-        let ctx = regions.frame_context(tick_hz);
+        let ctx = regions.frame_context(tick_hz, UniverseTick(1_000));
         // The MOVING child: authored from the ephemeris at the sampled tick (the `with_moving_child` arm).
         let tick = UniverseTick(1_000);
         let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
@@ -13784,7 +13846,7 @@ mod tests {
         // Direct: proxy_observer returns None for an unplaceable frame (transfer_frame Errs).
         {
             let regions = rig.world.resource::<RealmRegions>();
-            let ctx = regions.frame_context(20.0);
+            let ctx = regions.frame_context(20.0, UniverseTick(0));
             let entry = RetainedOccupant {
                 occupant: StampedPose::at_rest(
                     frame_of(RealmId::Planet(999)),
