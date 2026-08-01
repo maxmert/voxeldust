@@ -34,7 +34,7 @@ use crate::geometry::{
     region_signed_distance,
 };
 use crate::ids::UniverseTick;
-use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose, frame_for_realm};
+use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose, Tier, frame_for_realm};
 use crate::realm_coord::RealmCoord;
 use crate::realm_path::{RealmKindTag, RealmLevel, RealmPath};
 use crate::rng::{SplitMix64, child_seed, realm_stream};
@@ -807,6 +807,119 @@ fn ancestor_realms(all: &[RealmRegion], hosted_realm: RealmId) -> Vec<RealmId> {
         }
     }
     chain
+}
+
+// ===== A2: seed-derived origin chain (floating-origin server-authoritative rework) ================
+//
+// How a Derived realm's shard works out its OWN absolute position: it FOLDS its ancestor chain — re-derived
+// FROM SEED, walking UP parent links — and NEVER from its own child list, region center, or live pose (THE
+// IRON RULE the reverted attempt broke). Pure additions with no production consumer yet (A3 wires the
+// per-tick table), so byte-identical: nothing shipped changes.
+
+/// The PUBLIC lowered projection of a body's [`Placement`] — one link of an origin chain. `Fixed` covers a
+/// `StaticOffset`: its frame IS its parent's frame, so it contributes ZERO to the fold (the offset already
+/// lives in the region center + the pose value — re-adding it would DOUBLE-COUNT). `Orbital` carries the
+/// elements so the fold evaluates the live orbital position + velocity. Exhaustive, no `_`: the P6/P8
+/// `Dynamic` arm (a signal-placed realm / a ship — NOT closed-form) is appended THERE, and adding it must be
+/// a compile error at every match over this type.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OriginLink {
+    /// A static body — contributes ZERO to the origin fold (its frame is its parent's).
+    Fixed,
+    /// An orbiting body — contributes its live orbital position + velocity.
+    Orbital(OrbitalElements),
+}
+
+/// Lower a [`Placement`] to its public [`OriginLink`] — the monomorphic discriminator (HR5: the match is
+/// covered once, here).
+fn origin_link_of(placement: Placement) -> OriginLink {
+    match placement {
+        Placement::StaticOffset(_) => OriginLink::Fixed,
+        Placement::Orbital(elements) => OriginLink::Orbital(elements),
+    }
+}
+
+/// The (position, velocity) one link contributes to the origin fold at `secs`. `Fixed` → ZERO (THE §0.3
+/// rule: a static body's frame is its parent's, so NEVER re-add its offset — that offset already lives in
+/// the region center); `Orbital` → the live closed-form orbital state. Monomorphic (HR5).
+fn origin_link_state(link: OriginLink, secs: f64) -> (DVec3, DVec3) {
+    match link {
+        OriginLink::Fixed => (DVec3::ZERO, DVec3::ZERO),
+        OriginLink::Orbital(elements) => {
+            let state = orbital_state(&elements, secs);
+            (state.position, state.velocity)
+        }
+    }
+}
+
+/// Fold a root→realm origin chain into the realm's own absolute (position + velocity) in the universe-root
+/// frame, at `secs`. Each link adds its parent-relative contribution up the chain: a `Fixed` link adds
+/// nothing (its frame is its parent's), an `Orbital` link adds its live position + velocity. These frame
+/// placements carry NO rotation, so the fold is a straight positional + velocity SUM (no Coriolis) — the
+/// once-per-tick `self_abs` a Derived realm's shard computes LOCALLY from seed, NEVER from its child list
+/// (the iron rule). Byte-floor: `compose` does not re-quantize, so through P4 every produced position is
+/// `cell == 0` — an all-`Fixed` chain folds to identity, a mover chain to bare `orbital_state`.
+#[must_use]
+pub fn fold_origin(chain: &[OriginLink], secs: f64) -> (LatticePos, DVec3) {
+    let mut pos = LatticePos::local(DVec3::ZERO);
+    let mut vel = DVec3::ZERO;
+    for &link in chain {
+        let (link_pos, link_vel) = origin_link_state(link, secs);
+        pos = pos.compose(LatticePos::local(link_pos), Tier::Fine);
+        vel += link_vel;
+    }
+    (pos, vel)
+}
+
+/// Does this realm's own absolute VARY over time — i.e. does any ancestor link orbit? A boot constant (the
+/// chain is fixed at spin-up): `false` for an all-static chain (a walk shard, a star system — its own frame
+/// is fixed), `true` once any ancestor is `Orbital` (a planet shard — its frame rides the orbit).
+#[must_use]
+pub fn origin_varies(chain: &[OriginLink]) -> bool {
+    chain
+        .iter()
+        .any(|link| matches!(link, OriginLink::Orbital(_)))
+}
+
+/// The root→realm origin chain over an explicit body forest: walk PARENT links UPWARD from `realm` to the
+/// ambient root, lowering each body's placement, then reverse to root→realm order. Reads ONLY the parent
+/// edge of each body it visits — NEVER a realm's child list, region center, or live pose (THE IRON RULE). An
+/// unknown `realm` yields an empty chain (a safe degrade — its shard folds to identity). Mirrors
+/// [`ancestor_realms`]; bounded by the forest size.
+fn origin_chain_over(bodies: &[GeneratedBody], realm: RealmId) -> Vec<OriginLink> {
+    let mut chain = Vec::new();
+    let mut cur = realm;
+    for _ in 0..bodies.len() {
+        let Some(body) = bodies.iter().find(|b| b.realm == cur) else {
+            return Vec::new(); // unknown realm — no valid ancestry
+        };
+        chain.push(origin_link_of(body.placement));
+        match body.parent {
+            None => break, // reached the ambient root — the chain is complete
+            Some(parent) => cur = parent,
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+/// The root→realm origin chain over the config-driven SYSTEM forest — the twin of
+/// [`realm_regions_for_config`], built from the SAME `(seed, config)` so the folded absolutes and the regions
+/// can never disagree. An orbiting planet's chain ends in an `Orbital` link.
+#[must_use]
+pub fn origin_chain_for_config(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    realm: RealmId,
+) -> Vec<OriginLink> {
+    origin_chain_over(&generate_system_forest(seed_universe, config), realm)
+}
+
+/// The root→realm origin chain over the WALK forest — the twin of [`realm_regions_for_walk_config`] (the full
+/// mandate topology). Every body is `StaticOffset` ⇒ every link `Fixed` ⇒ folds to identity (the byte-floor).
+#[must_use]
+pub fn origin_chain_for_walk_config(config: &UniverseConfig, realm: RealmId) -> Vec<OriginLink> {
+    origin_chain_over(&generate_walk_forest(config), realm)
 }
 
 // ===== UniverseConfig (D-45(a) Slice 3b) — the ONE config home ==========================
@@ -2531,6 +2644,169 @@ mod tests {
             assert_eq!(planet.parent, Some(SYSTEM_A));
             assert!(orbital_of(planet.placement).is_some());
         }
+    }
+
+    // ---- A2: seed-derived origin chain + fold (the iron rule) ----
+
+    #[test]
+    fn origin_link_derives_are_exercised() {
+        let config = UniverseConfig::visual_scale();
+        let planet = generate_system_forest(0, &config)
+            .into_iter()
+            .find(|b| matches!(b.realm, RealmId::Planet(_)))
+            .expect("a planet");
+        let orbital = origin_link_of(planet.placement);
+        assert_eq!(OriginLink::Fixed, OriginLink::Fixed);
+        assert_ne!(OriginLink::Fixed, orbital);
+        assert!(format!("{orbital:?}").contains("Orbital"));
+        assert!(format!("{:?}", OriginLink::Fixed).contains("Fixed"));
+    }
+
+    #[test]
+    fn fold_origin_is_identity_for_an_all_fixed_chain() {
+        let (pos, vel) = fold_origin(
+            &[OriginLink::Fixed, OriginLink::Fixed, OriginLink::Fixed],
+            123.0,
+        );
+        assert_eq!(pos, LatticePos::local(DVec3::ZERO));
+        assert_eq!(vel, DVec3::ZERO);
+    }
+
+    #[test]
+    fn fold_origin_of_a_planet_chain_equals_its_orbital_state_at_cell_zero() {
+        let config = UniverseConfig::visual_scale();
+        let bodies = generate_system_forest(0, &config);
+        let planet = bodies
+            .iter()
+            .find(|b| matches!(b.realm, RealmId::Planet(_)))
+            .expect("a planet");
+        let elements = orbital_of(planet.placement).expect("a planet is Orbital");
+        let secs = 321.0;
+        let (pos, vel) = fold_origin(&origin_chain_for_config(0, &config, planet.realm), secs);
+        let state = orbital_state(&elements, secs);
+        // Ancestors are all StaticOffset(ZERO) ⇒ the fold is the bare orbital state, cell 0 (byte-floor).
+        assert!((pos.offset() - state.position).length() < 1e-9);
+        assert_eq!(pos.cell(), glam::I64Vec3::ZERO);
+        assert!((vel - state.velocity).length() < 1e-9);
+    }
+
+    #[test]
+    fn fold_origin_of_a_fixed_under_an_orbital_rides_the_orbit() {
+        // A static child (a station) under an orbiting parent: the Fixed link adds nothing, so the child's
+        // frame origin folds to the SAME orbital position as its parent — it rides the orbit.
+        let config = UniverseConfig::visual_scale();
+        let planet = generate_system_forest(0, &config)
+            .into_iter()
+            .find(|b| matches!(b.realm, RealmId::Planet(_)))
+            .expect("a planet");
+        let secs = 55.0;
+        let parent_chain = origin_chain_for_config(0, &config, planet.realm);
+        let mut child_chain = parent_chain.clone();
+        child_chain.push(OriginLink::Fixed);
+        assert_eq!(
+            fold_origin(&parent_chain, secs),
+            fold_origin(&child_chain, secs)
+        );
+    }
+
+    #[test]
+    fn fold_origin_sums_two_orbital_levels() {
+        let config = UniverseConfig::visual_scale();
+        let planet = generate_system_forest(0, &config)
+            .into_iter()
+            .find(|b| matches!(b.realm, RealmId::Planet(_)))
+            .expect("a planet");
+        let e = orbital_of(planet.placement).expect("Orbital");
+        let secs = 77.0;
+        let (pos, vel) = fold_origin(&[OriginLink::Orbital(e), OriginLink::Orbital(e)], secs);
+        let s = orbital_state(&e, secs);
+        assert!((pos.offset() - (s.position + s.position)).length() < 1e-9);
+        assert!((vel - (s.velocity + s.velocity)).length() < 1e-9);
+    }
+
+    #[test]
+    fn origin_varies_is_true_for_a_mover_chain_and_false_for_all_fixed() {
+        let config = UniverseConfig::visual_scale();
+        let planet = generate_system_forest(0, &config)
+            .into_iter()
+            .find(|b| matches!(b.realm, RealmId::Planet(_)))
+            .expect("a planet");
+        assert!(origin_varies(&origin_chain_for_config(
+            0,
+            &config,
+            planet.realm
+        )));
+        assert!(!origin_varies(&origin_chain_for_walk_config(
+            &UniverseConfig::walk_scale(),
+            SYSTEM_A
+        )));
+        assert!(!origin_varies(&[]));
+    }
+
+    #[test]
+    fn origin_chain_for_config_ends_in_an_orbital_link_for_a_planet() {
+        let config = UniverseConfig::visual_scale();
+        let planet = generate_system_forest(0, &config)
+            .into_iter()
+            .find(|b| matches!(b.realm, RealmId::Planet(_)))
+            .expect("a planet");
+        let chain = origin_chain_for_config(0, &config, planet.realm);
+        // Universe > Galaxy > System A > Planet: 4 links, the last Orbital, the rest Fixed.
+        assert_eq!(chain.len(), 4);
+        assert_eq!(chain[0], OriginLink::Fixed);
+        assert_eq!(chain[1], OriginLink::Fixed);
+        assert_eq!(chain[2], OriginLink::Fixed);
+        // the last link is Orbital — the only non-Fixed variant, so assert_ne avoids a matches! false arm.
+        assert_ne!(chain[3], OriginLink::Fixed);
+    }
+
+    #[test]
+    fn origin_chain_for_walk_config_is_all_fixed_and_folds_to_identity() {
+        let config = UniverseConfig::walk_scale();
+        // Area A is the deepest walk realm: Universe > Galaxy > System A > Planet A > Area A (5 links).
+        let chain = origin_chain_for_walk_config(&config, AREA_A);
+        assert_eq!(chain.len(), 5);
+        assert!(chain.iter().all(|l| *l == OriginLink::Fixed));
+        let (pos, vel) = fold_origin(&chain, 999.0);
+        assert_eq!(pos, LatticePos::local(DVec3::ZERO));
+        assert_eq!(vel, DVec3::ZERO);
+    }
+
+    #[test]
+    fn origin_chain_reads_no_child_list() {
+        // THE IRON RULE: a realm's origin chain walks UP its parents only. Adding a SIBLING (another child of
+        // the same parent) must leave the realm's chain AND its fold byte-identical — the chain never reads
+        // the parent's child set. (The reverted attempt derived a realm's own position from its children.)
+        let config = UniverseConfig::visual_scale();
+        let bodies = generate_system_forest(0, &config);
+        let planet = bodies
+            .iter()
+            .find(|b| matches!(b.realm, RealmId::Planet(_)))
+            .expect("a planet");
+        let planet_realm = planet.realm;
+        let planet_parent = planet.parent;
+        let elements = orbital_of(planet.placement).expect("Orbital");
+        let baseline = origin_chain_over(&bodies, planet_realm);
+        // A fresh forest + an appended SIBLING (same parent, different realm) — no clone of a body needed.
+        let mut with_sibling = generate_system_forest(0, &config);
+        with_sibling.push(GeneratedBody {
+            realm: RealmId::Planet(0xDEAD_BEEF),
+            parent: planet_parent,
+            shape: Boundary::Shell { r: 1.0 },
+            placement: Placement::Orbital(elements),
+        });
+        let after = origin_chain_over(&with_sibling, planet_realm);
+        assert_eq!(
+            baseline, after,
+            "a sibling must not change the realm's origin chain"
+        );
+        assert_eq!(fold_origin(&baseline, 42.0), fold_origin(&after, 42.0));
+    }
+
+    #[test]
+    fn origin_chain_of_an_unknown_realm_is_empty() {
+        let config = UniverseConfig::visual_scale();
+        assert!(origin_chain_for_config(0, &config, RealmId::Planet(0x00C0_FFEE)).is_empty());
     }
 
     #[test]
