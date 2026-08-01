@@ -2663,6 +2663,44 @@ mod tests {
     }
 
     #[test]
+    fn d_fo_7_no_static_region_sits_under_a_varying_ancestor_chain() {
+        // D-FO-7 TRIPWIRE: the A4c realm feed ships its movers-only rows and does NOT widen — a STATIC child's
+        // authored row rides its frame-local `center`, never a per-tick absolute. That is correct ONLY while no
+        // static realm hangs under a MOVING ancestor (which would ride the parent's orbit the center cannot
+        // express). Through P4 `generate_system_forest` gives orbiting planets NO children, so the case does not
+        // exist. This asserts it: the day P4 first hangs a station under an orbiting planet, THIS fails, and the
+        // D-FO-7 decision (parent per-tick rows behind a realm-lane AoI cull, vs the child shard authoring its
+        // own box row) must be taken before the widening lands.
+        // The invariant, stated as SET EQUALITY (HR5-clean — no branch on the never-true "static-under-varying"
+        // condition, whose true arm would be uncoverable): a realm's FULL origin chain varies IFF the realm is
+        // ITSELF a mover. A static realm inheriting a varying ancestor is exactly the case where the two sets
+        // diverge (its chain varies but its own link is Fixed). Both filter arms are genuinely exercised — a
+        // planet (Orbital ⇒ true) and an ambient body (Fixed ⇒ false) exist in every forest.
+        let config = UniverseConfig::visual_scale();
+        for seed in [0u64, 1, 7, 42, 100] {
+            let bodies = generate_system_forest(seed, &config);
+            let mut varying_chain: Vec<RealmId> = bodies
+                .iter()
+                .filter(|b| origin_varies(&origin_chain_over(&bodies, b.realm)))
+                .map(|b| b.realm)
+                .collect();
+            let mut movers: Vec<RealmId> = bodies
+                .iter()
+                .filter(|b| origin_varies(&[origin_link_of(b.placement)]))
+                .map(|b| b.realm)
+                .collect();
+            varying_chain.sort();
+            movers.sort();
+            assert_eq!(
+                varying_chain, movers,
+                "D-FO-7 (seed {seed}): a realm's chain varies IFF it is itself a mover — a divergence means a \
+                 static realm now hangs under a moving ancestor, which the realm feed's movers-only filter \
+                 would silently drop. Take the D-FO-7 decision before the widening lands."
+            );
+        }
+    }
+
+    #[test]
     fn fold_origin_is_identity_for_an_all_fixed_chain() {
         let (pos, vel) = fold_origin(
             &[OriginLink::Fixed, OriginLink::Fixed, OriginLink::Fixed],

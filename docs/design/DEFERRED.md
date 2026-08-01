@@ -3608,3 +3608,22 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 
 ### D-19 🟥 SPIKE-6a (rapier snapshot/restore + cross-binary determinism) blocks P5; SPIKE-10a (dual-frame ship-interior physics) blocks P8.
 - **Source:** `PLAN.md` SPIKE list.
+
+### D-FO-7 🟥 The realm feed has NO widening for a STATIC realm under a MOVING parent (floating-origin A4c)
+- **What's missing:** the server-authoritative realm feed (`authored_realm_snaps`, `crates/sim/src/stub.rs`)
+  ships only the **movers-only** rows and composes each to absolute; a *static* child rides its frame-local
+  `center`, never a per-tick absolute. That is correct only while no static realm hangs under a **moving**
+  ancestor (which would ride the parent's orbit the center cannot express). A4c **rejects** the S2/S3
+  `authors_live = moving | self_abs_varies` widening: the realm lane has **no AoI cull** (`emit_realm_frames`
+  ships all authored movers), so making every direct child of an orbiting realm ship per tick re-introduces
+  the O(children×tick) fan-out cliff `[FIX B-D3]` exists to prevent (a planet with 1000 stations → ~2 MB/s
+  per client, ~80 datagrams/tick against `CONSERVATIVE_DATAGRAM_BUDGET`).
+- **Where:** `authored_realm_snaps` / the movers-only filter, `crates/sim/src/stub.rs`; the tripwire is
+  `worldgen::tests::d_fo_7_no_static_region_sits_under_a_varying_ancestor_chain` (`crates/core/src/worldgen.rs`),
+  which asserts no CURRENT forest produces a static region under a varying ancestor chain.
+- **When:** the case does not exist through P4 — `generate_system_forest` gives orbiting planets no children.
+  The tripwire fails the day **P4** first hangs a station under an orbiting planet; at that point take the
+  **decision**: parent authors per-tick rows behind a realm-lane AoI cull, **vs** the child shard authors its
+  own box row (the DRY, SCALE-safe option). Discharged when the decision lands with the first moving-parent
+  containment forest.
+- **Source:** floating-origin server-authoritative rework, slice A4c (`scratchpad/fo_server_plan.md`).

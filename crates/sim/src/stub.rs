@@ -890,16 +890,26 @@ impl RealmRegions {
         own_realm: RealmId,
         tick_hz: f64,
         tick: UniverseTick,
+        frame_abs: &FrameAbs,
     ) -> Vec<RealmSnap> {
         // Movers-only view of the unified placements (RLM Step 2, H2): the observer feed ships only the
         // moving children (a static child rides its `center`, not a live snap). At walk/static scale
         // `moving` is empty ⇒ this drops every row ⇒ EMPTY ⇒ byte-identical to the pre-refactor feed.
+        //
+        // SERVER-AUTHORITATIVE compose (A4c): each surviving row is folded to its ABSOLUTE value via the SAME
+        // `compose_snap` the entity lane uses — keyed on the row's OWN (ambient-root) frame, so the client
+        // renders the value verbatim. A row whose frame has no folded absolute is OMITTED (the realm holds its
+        // last sample), never shipped raw. The AoI loop keeps consuming `child_placements` FRAME-LOCAL (the
+        // observer dots it measures against are frame-local) — only this feed composes. Empty `FrameAbs`
+        // (pre-A5) composes every row to itself ⇒ byte-identical.
         self.child_placements(own_realm, tick_hz, tick)
             .into_iter()
             .filter(|(r, _)| self.moving.contains_key(&r.realm))
-            .map(|(r, pose)| RealmSnap {
-                realm: r.realm,
-                pose,
+            .filter_map(|(r, pose)| {
+                compose_snap(frame_abs, pose).map(|pose| RealmSnap {
+                    realm: r.realm,
+                    pose,
+                })
             })
             .collect()
     }
@@ -4794,6 +4804,7 @@ fn emit_realm_frames(
     // VU AoI: the up-relayed occupants this parent retains (per account, from `aoi_decide`). Each holds the
     // HOME shard `NodeId` of a player who crossed INTO one of this parent's children — the cascade target.
     retained: Res<RetainedOccupants>,
+    frame_abs: Res<FrameAbs>,
     mut counter: ResMut<RealmFrameCounter>,
     mut outbox: ResMut<OutboundBox>,
 ) {
@@ -4803,7 +4814,9 @@ fn emit_realm_frames(
     let tick_hz = 1.0 / config.tick_dt_s;
     // The authored moving-child rows — EMPTY at walk/static scale ⇒ nothing ships, no counter bump, no
     // cascade (byte-identical). This early return is BEFORE the counter bump, so walk/static never advances it.
-    let realms = regions.authored_realm_snaps(config.realm, tick_hz, clock.universe_tick);
+    // A4c: `authored_realm_snaps` folds each row to its absolute via `frame_abs` (empty pre-A5 ⇒ raw rows).
+    let realms =
+        regions.authored_realm_snaps(config.realm, tick_hz, clock.universe_tick, &frame_abs);
     if realms.is_empty() {
         return;
     }
@@ -9616,7 +9629,7 @@ mod tests {
         let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
             .with_moving_children(moving);
         let (tick_hz, tick) = (20.0, UniverseTick(1_000));
-        let snaps = regions.authored_realm_snaps(OWN_REALM, tick_hz, tick);
+        let snaps = regions.authored_realm_snaps(OWN_REALM, tick_hz, tick, &FrameAbs::default());
         let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].realm, OTHER_REALM);
@@ -9631,9 +9644,45 @@ mod tests {
         // A static forest (no moving roster) authors NO realm snap — the byte-identity case.
         assert!(
             RealmRegions::new(vec![root_region(), own_region()])
-                .authored_realm_snaps(OWN_REALM, tick_hz, tick)
+                .authored_realm_snaps(OWN_REALM, tick_hz, tick, &FrameAbs::default())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a4c_authored_realm_snaps_composes_each_row_to_absolute_via_frame_abs() {
+        // A4c: with the row's OWN (root) frame registered in FrameAbs, `authored_realm_snaps` ships the child's
+        // ABSOLUTE pose (root abs ∘ child-local, native frame label preserved) — the server-authoritative realm
+        // feed. Empty FrameAbs (the test above) ships raw ⇒ byte-identical. The AoI loop still reads
+        // `child_placements` frame-local; only this feed composes.
+        let elements = orbit();
+        let mut moving = BTreeMap::new();
+        moving.insert(OTHER_REALM, elements);
+        let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
+            .with_moving_children(moving);
+        let (tick_hz, tick) = (20.0, UniverseTick(1_000));
+        let root_abs_pos = LatticePos::at(
+            vd_core::glam::I64Vec3::ZERO,
+            DVec3::new(1_000.0, 2_000.0, 3_000.0),
+        );
+        let root_abs_vel = DVec3::new(10.0, 20.0, 30.0);
+        let mut map: BTreeMap<FrameRef, (LatticePos, DVec3)> = BTreeMap::new();
+        map.insert(frame_of(ROOT_REALM), (root_abs_pos, root_abs_vel));
+        let snaps = regions.authored_realm_snaps(OWN_REALM, tick_hz, tick, &FrameAbs(map));
+        let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].realm, OTHER_REALM);
+        assert_eq!(
+            snaps[0].pose.frame,
+            frame_of(ROOT_REALM),
+            "native frame label preserved"
+        );
+        assert_eq!(
+            snaps[0].pose.pos.offset(),
+            DVec3::new(1_000.0, 2_000.0, 3_000.0) + state.position,
+            "composed to absolute: root abs ∘ child-local"
+        );
+        assert_eq!(snaps[0].pose.vel, root_abs_vel + state.velocity);
     }
 
     #[test]
