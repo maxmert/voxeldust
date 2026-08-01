@@ -17,6 +17,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use vd_client::view::DeliveredView;
+// Re-exported so the vd-tests render-capture sites can name the `RealmView` argument of
+// `DeliveredView::world_pos` without a direct vd-client dependency. The harness `ScriptedClient`
+// does not yet ingest realm snapshots, so an empty `RealmView` is the correct value at the capture
+// seam (world_pos falls back to the frame-local pose) until the harness grows realm awareness.
+pub use vd_client::realm_view::RealmView;
 use vd_core::pose::StampedPose;
 use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_node::TickReport;
@@ -229,6 +234,12 @@ impl ScriptedClient {
             // so this marker is INERT server-side — but the harness still stamps it (harmless) to
             // exercise the pause/resume input-partition primitive the input-conservation gates use.
             ServerControlMsg::RequestCut { .. } => self.emit_marker_next = true,
+            // VU realm-scene streaming (minor 5/6, `RealmRegistry`/`RealmSceneDelta`): this
+            // conservation/render test client draws its world from the ENTITY-snapshot lane, not the
+            // realm-scene lane, so it IGNORES these (the real `vd-client` net.rs consumes them into
+            // its `RealmView`). Explicit arms — NOT folded into `other` — so a genuinely unexpected
+            // control message still fails loudly.
+            ServerControlMsg::RealmRegistry { .. } | ServerControlMsg::RealmSceneDelta { .. } => {}
             // No pings reach a P1/P2 client; arriving here means a protocol regression worth failing loudly.
             other => panic!("unexpected control message: {other:?}"),
         }
@@ -568,6 +579,27 @@ mod tests {
             client.view.own_entity, own_before,
             "legacy AuthorityChanged does NOT change the own entity (only OwnEntity does)"
         );
+    }
+
+    #[test]
+    fn the_vu_realm_scene_controls_are_tolerated_by_the_scripted_client() {
+        // VU realm-scene streaming (minor 5/6): `RealmRegistry`/`RealmSceneDelta` carry the
+        // agnostic client's render scene. This conservation/render test client draws its world from
+        // the ENTITY-snapshot lane, not the realm-scene lane, so the exhaustive `on_control` match
+        // must tolerate them as NO-OPs — never panicking (they landed while these E2E were dark),
+        // staying Active. Guards the `RealmRegistry | RealmSceneDelta` arm.
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        activate(&fabric, &mut gw, &mut client);
+        send_control(
+            &mut gw,
+            &ServerControlMsg::RealmSceneDelta {
+                added: vec![],
+                removed: vec![],
+            },
+        );
+        fabric.pump(TickId(9));
+        let _ = client.step();
+        assert_eq!(client.phase(), ClientPhase::Active);
     }
 
     #[test]

@@ -31,7 +31,7 @@ use vd_core::entity_kind::EntityKind;
 use vd_core::glam::DVec3;
 use vd_core::pose::FrameRef;
 use vd_core::{AccountId, EntityId, Fence, NodeId, TickId};
-use vd_harness::client::ScriptedClient;
+use vd_harness::client::{RealmView, ScriptedClient};
 use vd_harness::fabric::{FaultFabric, LinkPolicy};
 use vd_harness::oracle::{RenderSample, verify_authority_settled, verify_authority_unique};
 use vd_harness::topology::{InspectReport, Topology};
@@ -93,7 +93,7 @@ fn capture_subject(topo: &mut Topology) -> CapturedTick {
                     sub,
                     frame: pose.frame,
                     raw_pos: pose.pos,
-                    world_pos: view.world_pos(&pose, TRACE_CURSOR),
+                    world_pos: view.world_pos(&pose, &RealmView::default(), TRACE_CURSOR),
                     orient: pose.orient,
                 })
         });
