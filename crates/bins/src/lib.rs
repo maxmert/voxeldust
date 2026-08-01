@@ -403,14 +403,23 @@ pub const DEV: DevClusterParams = DevClusterParams {
         as u32,
     realm_seed: 7,
     realm_seed_b: 8, // Track R / 1d.2 DEST realm (matches the harness `dest_stub_config` System(8)).
-    move_speed: 2.0,
+    // The realistic-demo flight speed (RLM Slice 3): a 15 m/s ship spends ~3.7 s flying from where a planet
+    // becomes VISIBLE (angular size crosses θ_min at ~59.5 m) to where it CROSSES containment (~4 m planet
+    // SOI), so the demand loop boots the child DURING that flight — the spin-up-ahead is a natural consequence
+    // of visibility-radius ≫ crossing-radius, not a predictive horizon (`boot_ticks_p99` stays 0). Rides
+    // `VD_SPEED` into the shard, so `visual_demand`'s `occupant_v_max` IS the sim's integrated speed.
+    move_speed: 15.0,
     tick_dt: 0.02,
     mint_seed: 11,
     input_log_cap: 4096,
+    // The self-fence realm-head recheck cadence (D-3), INERT (0) in dev — the self-fence is off (grace 0). The
+    // VU-AoI parent-resolution / up-relay the observation cascade needs is DECOUPLED from this in
+    // `parent_headread_due` (it falls back to a tick-derived demand cadence when this is 0), so leaving the
+    // self-fence off does not disable the cascade.
     realm_recheck: 0,
     snapshot_budget: 1100,
     boot_ticks_p99: 0, // reactive-only in dev (the login is the demand trigger); a visual walk-in bumps it.
-    universe_seed: 0,  // the default Walk-scale forest (matches the shard bin's VD_UNIVERSE_SEED default).
+    universe_seed: 0, // the default Walk-scale forest (matches the shard bin's VD_UNIVERSE_SEED default).
 };
 
 /// DEST-REALM-DISTINCT (compile-time, Track R / 1d.2): the DEST realm MUST differ from the source
@@ -967,13 +976,15 @@ fn demand_orchestrator_env(
         // externally pre-spawned static heads would reap them (they carry no demand cell).
         ("VD_DEMAND", "1".to_owned()),
         str_pair("VD_UNIVERSE_SEED", p.universe_seed),
-        // RLM demand-walk: a demand cluster is a WALK-DEMAND cluster — walk geometry with the AoI band LIVE, so
-        // a MOVING occupant's `evaluate_realm_aoi` emits SpinUp/Empty as it approaches/leaves a child realm
-        // (the whole point of the demand loop). `spawn_anchors_from_env` forwards this to every demand-spawned
-        // shard (VD_SPEED + VD_TICK_DT — the band's occupant-speed/tick inputs — already ride the anchors). A
-        // STATIONARY login (rlm_demand_login) is unaffected: the occupant sits at the home origin, nowhere near
-        // a child's spin-up band, so it emits no spurious demand.
-        ("VD_UNIVERSE_SCALE", "walk-demand".to_owned()),
+        // RLM realistic-demo Slice 3: a demand cluster is a VISUAL-DEMAND cluster — the compressed-real
+        // 5-planet Kepler geometry with the per-realm AoI band LIVE, so a MOVING occupant's
+        // `evaluate_realm_aoi` spins a child realm up as it crosses into visibility (angular size ≥ θ_min) and
+        // reaps it as it falls back out (the whole point of the demand loop). `spawn_anchors_from_env`
+        // forwards this to every demand-spawned shard (VD_SPEED + VD_TICK_DT — the band's occupant-speed/tick
+        // inputs — already ride the anchors). A STATIONARY login (rlm_demand_login) lands at the star (System
+        // 7): the inner planets already IN visibility spin up, the outer ones are culled — no spurious demand
+        // beyond what is genuinely in view.
+        ("VD_UNIVERSE_SCALE", "visual-demand".to_owned()),
         str_pair("VD_BOOT_TICKS_P99", p.boot_ticks_p99),
         str_pair("VD_RLM_FIRST_PORT", RLM_DEMAND_FIRST_PORT),
         str_pair("VD_RLM_PORT_LIMIT", RLM_DEMAND_PORT_LIMIT),
@@ -1965,7 +1976,9 @@ pub fn pid_alive(pid: u32) -> bool {
 /// If `launch.redb` cannot be reopened or a row fails to decode (a corrupt durable ledger is a hard test
 /// failure, not a tolerated state).
 #[must_use]
-pub fn launch_rows(path: &std::path::Path) -> Vec<(NodeId, vd_core::realm_coord::RealmCoord, Option<u32>)> {
+pub fn launch_rows(
+    path: &std::path::Path,
+) -> Vec<(NodeId, vd_core::realm_coord::RealmCoord, Option<u32>)> {
     use vd_sim::io::Store as _;
     let (store, _durability) =
         vd_io_prod::store::RedbStore::open(path, vd_io_prod::store::StoreTuning::default())
@@ -2169,21 +2182,27 @@ pub fn resolve_realm_boundaries(
 
 /// The world-SCALE a shard boots (D-45(a) FA-5). `Walk` is the production/byte-identity default (the P3
 /// walk-scale mandate forest — all `StaticOffset`, no movers); `Visual` is the FA-5 window test: a single
-/// star system whose planets ORBIT (the `worldgen::visual_scale` synthetic-scale preset).
+/// star system whose planets ORBIT (the `worldgen::visual_scale` synthetic-scale preset — the STATIC-render
+/// expression of the one compressed-real geometry); `VisualDemand` is that SAME geometry with the per-realm
+/// AoI band turned LIVE (`worldgen::visual_demand`) — the demand-cluster expression, so a moving occupant
+/// drives demand-driven realm spin-up/down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UniverseScale {
     Walk,
-    /// RLM 5f-4: the EXACT walk geometry with the AoI band LIVE (`VD_UNIVERSE_SCALE=walk-demand`) — a demand
-    /// cluster boots this so a WALKING occupant drives demand-driven realm spin-up/down. Geometry (and thus
-    /// containment) is byte-identical to `Walk`; only the per-realm AoI band differs.
-    WalkDemand,
     Visual,
+    /// RLM realistic-demo Slice 3: the compressed-real 5-planet Kepler geometry (IDENTICAL to `Visual`) with
+    /// the per-realm AoI band LIVE (`VD_UNIVERSE_SCALE=visual-demand`) — a demand cluster boots this so a
+    /// moving occupant's `evaluate_realm_aoi` spins the child realms up as they cross into visibility
+    /// (angular size ≥ θ_min, i.e. within `extent · cot(θ/2)`) and reaps them as they fall back out. The
+    /// STATIC-render twin is `Visual`; the two share `worldgen::visual_geometry` (one geometry, two drives).
+    VisualDemand,
 }
 
 /// Resolve `VD_UNIVERSE_SCALE`: ABSENT / empty / `walk` ⇒ [`UniverseScale::Walk`] (the byte-identical
-/// production default — EVERY existing shard boot is unchanged); `walk-demand` ⇒
-/// [`UniverseScale::WalkDemand`] (walk geometry, LIVE AoI); `visual` ⇒ [`UniverseScale::Visual`]; ANY other
-/// value fails LOUD at boot (never a silent degrade to Walk).
+/// production default — EVERY existing shard boot is unchanged); `visual` ⇒ [`UniverseScale::Visual`] (the
+/// compressed-real star system, STATIC render); `visual-demand` ⇒ [`UniverseScale::VisualDemand`] (the SAME
+/// geometry with the LIVE AoI band — the demand cluster); ANY other value fails LOUD at boot (never a silent
+/// degrade to Walk).
 ///
 /// # Errors
 /// [`ConfigError::Unparseable`] for an unrecognized value.
@@ -2195,8 +2214,8 @@ pub fn resolve_universe_scale(env: &EnvConfig) -> Result<UniverseScale, ConfigEr
 fn universe_scale_of(raw: &str) -> Result<UniverseScale, ConfigError> {
     match raw {
         "" | "walk" => Ok(UniverseScale::Walk),
-        "walk-demand" => Ok(UniverseScale::WalkDemand),
         "visual" => Ok(UniverseScale::Visual),
+        "visual-demand" => Ok(UniverseScale::VisualDemand),
         other => Err(ConfigError::Unparseable {
             key: "VD_UNIVERSE_SCALE".to_owned(),
             value: other.to_owned(),
@@ -2394,17 +2413,54 @@ fn parse_spawn_poses(
     Ok(map)
 }
 
+/// Build the containment forest + moving-child roster for a `Visual`/`VisualDemand` config, applying the
+/// DEV/TEST orbit-speed knob `VD_VISUAL_ORBIT_SLOWDOWN` (absent / <= 0 ⇒ 1.0 = the SHIPPED orbits,
+/// byte-identical): dividing the synthetic star mass by K² makes every Kepler period K× longer
+/// (`T = 2π·√(a³/GM)` ⇒ `T ∝ 1/√M`), so a pilot can CATCH a planet before real physics (P5) drags them
+/// along — a temporary flight-aid, server-side only (the client is untouched, and the tick-0 region centers
+/// the client's box scene loads are mass-INDEPENDENT, so the static scene still matches). Unset it to restore
+/// the shipped orbit speed. Shared by BOTH visual arms (DRY) so the static-render (`Visual`) and live-demand
+/// (`VisualDemand`) modes stay ONE geometry expression.
+fn visual_regions_and_movers(
+    mut config: vd_core::worldgen::UniverseConfig,
+    universe_seed: u64,
+    held: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    hosted: vd_core::pose::RealmId,
+) -> (
+    Vec<vd_core::geometry::RealmRegion>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::celestial::OrbitalElements>,
+) {
+    let orbit_slowdown = std::env::var("VD_VISUAL_ORBIT_SLOWDOWN")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|k| *k > 0.0)
+        .unwrap_or(1.0);
+    config.stellar.central_mass_kg /= orbit_slowdown * orbit_slowdown;
+    // The NEIGHBOURHOOD (own realm + ancestor chain + the children this shard authors) — NEVER its sibling
+    // planets. A shard cannot place a realm it does not author, so folding siblings collapses them to the
+    // origin and a hosted occupant reads as inside all of them at once (the production re-home flap). Scoping
+    // them out is the standalone cure; the movers stay `hosted`'s authored children (single-realm demand shard
+    // ⇒ exactly its own; the union-over-held is a co-hosting refinement not yet needed at visual scale).
+    let regions = vd_core::worldgen::realm_neighbourhood_for_config(universe_seed, held, &config);
+    let moving = vd_core::worldgen::moving_children_for_config(universe_seed, &config, hosted)
+        .into_iter()
+        .collect();
+    (regions, moving)
+}
+
 /// The containment region forest + the moving-child roster for a shard booting at `scale`, hosting
 /// `held_realms` (own realm `hosted`). `Walk` ⇒ the seed NEIGHBOURHOOD + an EMPTY roster — BYTE-IDENTICAL
 /// to the pre-FA-5 boot (the exact `realm_neighbourhood_for_held`, and `RealmRegions::with_moving_children`
-/// with an empty map is a no-op vs `new`). `WalkDemand` ⇒ the SAME neighbourhood geometry with the LIVE AoI
-/// band (`walk_demand(occupant_v_max_mps, tick_dt_s)`), empty roster — the shard demands its children as a
-/// walking occupant reaches them. `Visual` ⇒ the FA-5 single-system forest (`realm_regions_for_config`)
+/// with an empty map is a no-op vs `new`). `Visual` ⇒ the FA-5 single-system forest (`realm_regions_for_config`)
 /// plus its orbiting planets as movers (`moving_children_for_config`) — the SAME `(seed, visual config)`
 /// builds BOTH, so the regions and the moving roster can NEVER derive from different elements (the vet
 /// all-shard-seams-same-config rule; the shard authors each planet's live pose against the same region set).
-/// `occupant_v_max_mps` (= `move_speed · time_multiplier`) + `tick_dt_s` feed the WalkDemand AoI band ONLY
-/// (ignored by `Walk`/`Visual`); they close the M-2 two-home owe (the band's tick dt = the live cluster's).
+/// `VisualDemand` ⇒ that SAME compressed-real geometry with the AoI band LIVE (`visual_demand(occupant_v_max_mps,
+/// tick_dt_s)`) — the demand cluster spins its children up as a moving occupant crosses into their visibility
+/// and reaps them behind. `occupant_v_max_mps` (= `move_speed · time_multiplier`) + `tick_dt_s` feed the
+/// `VisualDemand` AoI band ONLY (ignored by `Walk`/`Visual`); they close the M-2 two-home owe (the band's tick
+/// dt = the live cluster's). Both visual arms route through [`visual_regions_and_movers`] (the orbit-slowdown
+/// knob + the one build path).
 #[must_use]
 pub fn boot_regions_and_movers(
     scale: UniverseScale,
@@ -2423,23 +2479,21 @@ pub fn boot_regions_and_movers(
             vd_core::worldgen::realm_neighbourhood_for_held(universe_seed, held_realms),
             BTreeMap::new(),
         ),
-        UniverseScale::WalkDemand => (
-            vd_core::worldgen::realm_neighbourhood_for_held_config(
-                universe_seed,
-                held_realms,
-                &vd_core::worldgen::UniverseConfig::walk_demand(occupant_v_max_mps, tick_dt_s),
-            ),
-            BTreeMap::new(),
+        UniverseScale::Visual => visual_regions_and_movers(
+            vd_core::worldgen::UniverseConfig::visual_scale(),
+            universe_seed,
+            held_realms,
+            hosted,
         ),
-        UniverseScale::Visual => {
-            let config = vd_core::worldgen::UniverseConfig::visual_scale();
-            let regions = vd_core::worldgen::realm_regions_for_config(universe_seed, &config);
-            let moving =
-                vd_core::worldgen::moving_children_for_config(universe_seed, &config, hosted)
-                    .into_iter()
-                    .collect::<BTreeMap<_, _>>();
-            (regions, moving)
-        }
+        // RLM realistic-demo Slice 3: the SAME compressed-real geometry as `Visual`, with the AoI band built
+        // LIVE from the cluster's occupant speed + tick dt (`visual_demand`). Both visual arms share the one
+        // build path (+ the orbit-slowdown knob) via `visual_regions_and_movers` (DRY).
+        UniverseScale::VisualDemand => visual_regions_and_movers(
+            vd_core::worldgen::UniverseConfig::visual_demand(occupant_v_max_mps, tick_dt_s),
+            universe_seed,
+            held_realms,
+            hosted,
+        ),
     }
 }
 
@@ -2803,7 +2857,10 @@ mod incarnation_tests {
     fn resolve_presence_greets_every_booked_peer_at_the_scaled_default() {
         let e = env(&[
             ("VD_INCARNATION_COOKIE", "abc123"),
-            ("VD_PEERS", "2=127.0.0.1:9000,3=127.0.0.1:9001,30=127.0.0.1:9002"),
+            (
+                "VD_PEERS",
+                "2=127.0.0.1:9000,3=127.0.0.1:9001,30=127.0.0.1:9002",
+            ),
         ]);
         let p = resolve_presence(&e, 0.02)
             .expect("ok")
@@ -3217,11 +3274,6 @@ mod incarnation_tests {
             resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "walk")])),
             Ok(UniverseScale::Walk),
         );
-        // RLM 5f-4: "walk-demand" is the demand-cluster scale (walk geometry, LIVE AoI).
-        assert_eq!(
-            resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "walk-demand")])),
-            Ok(UniverseScale::WalkDemand),
-        );
     }
 
     #[test]
@@ -3271,6 +3323,12 @@ mod incarnation_tests {
         assert_eq!(
             resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "visual")])),
             Ok(UniverseScale::Visual),
+        );
+        // RLM realistic-demo Slice 3: "visual-demand" is the demand-cluster scale (the compressed-real
+        // geometry with the LIVE AoI band).
+        assert_eq!(
+            resolve_universe_scale(&env(&[("VD_UNIVERSE_SCALE", "visual-demand")])),
+            Ok(UniverseScale::VisualDemand),
         );
         // Surrounding whitespace is trimmed.
         assert_eq!(
@@ -3377,40 +3435,47 @@ mod incarnation_tests {
     }
 
     #[test]
-    fn boot_regions_and_movers_walk_demand_is_walk_geometry_with_a_live_band() {
+    fn boot_regions_and_movers_visual_demand_is_the_visual_geometry_with_a_live_band() {
         use std::collections::BTreeSet;
+        // RLM realistic-demo Slice 3: `VisualDemand` builds the SAME compressed-real geometry as `Visual`,
+        // via `visual_demand(occupant_v_max, tick_dt)` — regions + the orbiting-planet mover roster from ONE
+        // config, with the per-realm AoI band LIVE. The occupant speed is the demand cluster's 15 m/s ship.
         let hosted = RealmId::System(7);
         let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
         let (regions, moving) =
-            boot_regions_and_movers(UniverseScale::WalkDemand, 0, &held, hosted, 2.0, 0.02);
-        // Same GEOMETRY as Walk (containment unchanged) — the SAME neighbourhood the config builder returns
-        // for walk_demand, and an EMPTY mover roster (static walk forest, no orbits).
-        let want = vd_core::worldgen::realm_neighbourhood_for_held_config(
-            0,
-            &held,
-            &vd_core::worldgen::UniverseConfig::walk_demand(2.0, 0.02),
+            boot_regions_and_movers(UniverseScale::VisualDemand, 0, &held, hosted, 15.0, 0.02);
+        // The SAME (seed, config) builds BOTH the regions and the mover roster (they can't disagree). The
+        // orbit-slowdown knob is unset in the unit rig ⇒ mass unchanged. Slice 1: the boot scopes to the
+        // NEIGHBOURHOOD (own realm + ancestors + authored children, NEVER sibling planets) — the origin-stacking
+        // re-home flap cure — so the regions are the neighbourhood of `held`, not the full system forest.
+        let config = vd_core::worldgen::UniverseConfig::visual_demand(15.0, 0.02);
+        assert_eq!(
+            regions,
+            vd_core::worldgen::realm_neighbourhood_for_config(0, &held, &config)
         );
-        assert_eq!(regions, want);
-        assert!(moving.is_empty());
-        // The band is LIVE (vs Walk's inert): every region carries a positive spin-up radius, and the
-        // geometry (realm/center/shape) matches Walk region-for-region — only the AoI differs.
-        let walk = boot_regions_and_movers(UniverseScale::Walk, 0, &held, hosted, 2.0, 0.02).0;
-        assert_eq!(regions.len(), walk.len());
-        for (d, w) in regions.iter().zip(walk.iter()) {
-            assert_eq!(d.realm, w.realm, "same realm");
-            assert_eq!(d.center, w.center, "same center (geometry unchanged)");
-            assert_eq!(d.shape, w.shape, "same shape (containment unchanged)");
-            assert!(
-                d.aoi.spin_up_r_m() > 0.0,
-                "walk-demand region has a LIVE AoI band"
-            );
-            assert_eq!(w.aoi.spin_up_r_m(), 0.0, "walk region stays AoI-inert");
+        assert_eq!(
+            moving,
+            vd_core::worldgen::moving_children_for_config(0, &config, hosted)
+                .into_iter()
+                .collect(),
+        );
+        // The visual-demand boot actually plants orbiting planets (vs the empty walk roster).
+        assert!(!moving.is_empty());
+        // Every mover is a region in the planted forest, so frame_context can author its live pose.
+        for realm in moving.keys() {
+            assert!(regions.iter().any(|r| r.realm == *realm));
         }
-        // The hosted realm IS in its own neighbourhood (membership sanity — a shard evaluates its own realm).
-        assert!(
-            regions.iter().any(|r| r.realm == hosted),
-            "hosted realm is in its neighbourhood"
-        );
+        // The AoI band is LIVE (vs Walk's inert): every planet region carries a positive spin-up radius, so a
+        // moving occupant's `evaluate_realm_aoi` can spin it up on visibility.
+        for r in regions
+            .iter()
+            .filter(|r| matches!(r.realm, vd_core::pose::RealmId::Planet(_)))
+        {
+            assert!(
+                r.aoi.spin_up_r_m() > 0.0,
+                "visual-demand planet region has a LIVE AoI band: {r:?}",
+            );
+        }
     }
 
     #[test]
@@ -3421,10 +3486,11 @@ mod incarnation_tests {
         let (regions, moving) =
             boot_regions_and_movers(UniverseScale::Visual, 0, &held, hosted, 2.0, 0.02);
         let config = vd_core::worldgen::UniverseConfig::visual_scale();
-        // The SAME (seed, config) builds BOTH the regions and the mover roster (they can't disagree).
+        // Slice 1: the boot scopes to the NEIGHBOURHOOD (own + ancestors + authored children, never sibling
+        // planets — the flap cure); the SAME (seed, config) still builds regions + movers so they can't disagree.
         assert_eq!(
             regions,
-            vd_core::worldgen::realm_regions_for_config(0, &config)
+            vd_core::worldgen::realm_neighbourhood_for_config(0, &held, &config)
         );
         assert_eq!(
             moving,
@@ -3585,9 +3651,10 @@ mod incarnation_tests {
             env_value(&d, "VD_UNIVERSE_SEED"),
             Some(DEV.universe_seed.to_string()).as_deref()
         );
-        // Demand-walk: the demand cluster arms LIVE AoI (walk geometry + live band) so a MOVING occupant's
-        // evaluate_realm_aoi emits SpinUp/Empty as it approaches/leaves a child realm.
-        assert_eq!(env_value(&d, "VD_UNIVERSE_SCALE"), Some("walk-demand"));
+        // RLM realistic-demo Slice 3: the demand cluster arms the compressed-real geometry with the LIVE AoI
+        // band (visual-demand) so a MOVING occupant's evaluate_realm_aoi spins a child up as it crosses into
+        // visibility and reaps it behind.
+        assert_eq!(env_value(&d, "VD_UNIVERSE_SCALE"), Some("visual-demand"));
         assert_eq!(
             env_value(&d, "VD_BOOT_TICKS_P99"),
             Some(DEV.boot_ticks_p99.to_string()).as_deref()
@@ -3617,7 +3684,10 @@ mod incarnation_tests {
         let g = gateway_env(&a, &clients, "pub", &DEV, ClusterShape::Demand);
         assert_eq!(env_value(&g, "VD_DEMAND"), Some("1"));
         // VD_SHARD stays the login-home DEFAULT id, but SHARD is NOT booked in VD_PEERS.
-        assert_eq!(env_value(&g, "VD_SHARD"), Some(SHARD.0.to_string()).as_deref());
+        assert_eq!(
+            env_value(&g, "VD_SHARD"),
+            Some(SHARD.0.to_string()).as_deref()
+        );
         let peers = env_value(&g, "VD_PEERS").expect("peers");
         assert!(
             !peers.contains(&format!("{}={}", SHARD.0, a.shard)),

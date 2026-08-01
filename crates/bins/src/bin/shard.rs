@@ -110,9 +110,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ORBIT. Build the containment forest + the moving-child roster from the SAME `(scale, seed, config)`,
     // so the authored own-frame and the moving planets can never derive from different elements.
     let scale = vd_bins::resolve_universe_scale(&env)?;
-    // RLM 5f-4: the WalkDemand AoI band is measured against the LIVE occupant speed the sim integrates
-    // (`move_speed · time_multiplier`) at the LIVE tick dt — closing the M-2 two-home owe. `Walk`/`Visual`
-    // ignore both.
+    // RLM realistic-demo Slice 3: the `VisualDemand` AoI band is measured against the LIVE occupant speed the
+    // sim integrates (`move_speed · time_multiplier`) at the LIVE tick dt — closing the M-2 two-home owe.
+    // `Walk`/`Visual` ignore both.
     let (seed_regions, moving) = vd_bins::boot_regions_and_movers(
         scale,
         universe_seed,

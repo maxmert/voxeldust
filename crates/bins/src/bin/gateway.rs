@@ -192,7 +192,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::sync::Arc::new(vd_io_prod::admin::PublishedSnapshot(std::sync::Arc::clone(
                 &cell,
             ))),
-            std::sync::Arc::new(vd_io_prod::admin::MeshMetrics(std::sync::Arc::clone(&control))),
+            std::sync::Arc::new(vd_io_prod::admin::MeshMetrics(std::sync::Arc::clone(
+                &control,
+            ))),
         );
         Some(cell)
     } else {

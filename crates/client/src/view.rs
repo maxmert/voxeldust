@@ -38,6 +38,7 @@ use vd_core::pose::FrameRef;
 use vd_wire::channels::{SnapshotDatagram, SnapshotVerdict, SubId, classify_snapshot};
 
 use crate::interp::{EntityTrack, RenderPose};
+use crate::realm_view::RealmView;
 
 /// The inert per-row "authoritative sub" a pure-renderer client reports for its diagnosis
 /// surface (`DevEntityRow.authoritative_sub`): a node-agnostic client no longer has a
@@ -219,22 +220,23 @@ impl DeliveredView {
     /// here — a snapshot-decode RESHAPE, NOT free. The chokepoint shape (one level) is right; only
     /// the version gate is owed at P8.
     #[must_use]
-    pub fn world_pos(&self, pose: &RenderPose, cursor: f64) -> DVec3 {
-        match pose.frame {
-            FrameRef::PlanetCentered { .. }
-            | FrameRef::SystemSpace { .. }
-            | FrameRef::GalaxySpace
-            // An AREA shares its parent planet's coordinate frame (a sub-region, no offset), so it
-            // renders at `pose.pos` PERMANENTLY. A STATION interior renders at its frame origin
-            // until P8 delivers a station HULL to compose against — the ShipLocal-style hull
-            // composite lands THEN, keyed on the station's hull entity, WITHOUT changing this
-            // one-level chokepoint (a station that orbits resolves its hull here like a ship).
-            | FrameRef::AreaLocal { .. }
-            | FrameRef::StationLocal { .. } => pose.pos,
-            FrameRef::ShipLocal { ship } => self
-                .hull_pose(ship, cursor)
-                .map_or(pose.pos, |hull| hull.pos + hull.orient * pose.pos),
-        }
+    pub fn world_pos(&self, pose: &RenderPose, realms: &RealmView, cursor: f64) -> DVec3 {
+        // The LIVE placement of the pose's BASIS. A `ShipLocal` interior composes against its hull ENTITY
+        // (the delivered dot named by the frame — pre-P8 interim, unchanged). Every REALM frame composes
+        // against its containing realm's STREAMED placement — the SAME `realm_latest` the box overlay draws
+        // the realm at (`realm_scene::overlaid`) — so a re-homed occupant RIDES its moving realm's orbit
+        // instead of hanging at the world origin (the "teleport" bug). `placement_anchor` sends an `Area`
+        // to its PLANET (it shares the planet frame; the planet carries the world placement). `None` ⇒
+        // walk/static scale, or the pinned root/System (never streamed, sits at the origin) ⇒ the identity
+        // FALLBACK returns `pose.pos` BIT-EXACT (byte-floor). ONE compose site (DRY across ship + realm) —
+        // and the single seam the S5 cell-aware fold upgrades (the `.cell` rides in on `realm_latest`).
+        let base: Option<RenderPose> = match pose.frame {
+            FrameRef::ShipLocal { ship } => self.hull_pose(ship, cursor),
+            other => other
+                .placement_anchor()
+                .and_then(|r| realms.realm_latest(r)),
+        };
+        base.map_or(pose.pos, |b| b.pos + b.orient * pose.pos)
     }
 
     /// The hull entity's rendered pose at `cursor` — the basis a `ShipLocal` interior pose
@@ -308,7 +310,7 @@ mod tests {
         assert_eq!(view.stale_frames_dropped(), 0);
         // world_pos is the identity for P1.5 static (system) frames.
         assert_eq!(
-            view.world_pos(&rendered[&ent(1)], 11.0),
+            view.world_pos(&rendered[&ent(1)], &RealmView::default(), 11.0),
             DVec3::new(5.0, 0.0, 0.0)
         );
     }
@@ -347,7 +349,10 @@ mod tests {
         // System-frame entity → identity.
         view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 7.0)]));
         let r = view.render(10.0);
-        assert_eq!(view.world_pos(&r[&ent(1)], 10.0), DVec3::new(7.0, 0.0, 0.0));
+        assert_eq!(
+            view.world_pos(&r[&ent(1)], &RealmView::default(), 10.0),
+            DVec3::new(7.0, 0.0, 0.0)
+        );
 
         // A hull (ent 1) at world x=100 and an interior entity in ShipLocal{ship=ent(1)} at
         // local x=5 → composes to world x=105 (hull orient identity).
@@ -373,7 +378,7 @@ mod tests {
         );
         let r = view.render(11.0);
         assert_eq!(
-            view.world_pos(&r[&interior], 11.0),
+            view.world_pos(&r[&interior], &RealmView::default(), 11.0),
             DVec3::new(105.0, 0.0, 0.0),
             "interior composes through the hull pose"
         );
@@ -382,24 +387,36 @@ mod tests {
         // trackless-hull arm of hull_pose: no panic, no stale pose from another entity).
         let orphan = RenderPose {
             frame: FrameRef::ShipLocal { ship: ent(99) },
+            cell: glam::I64Vec3::ZERO,
             pos: DVec3::new(3.0, 0.0, 0.0),
             orient: DQuat::IDENTITY,
         };
-        assert_eq!(view.world_pos(&orphan, 11.0), DVec3::new(3.0, 0.0, 0.0));
+        assert_eq!(
+            view.world_pos(&orphan, &RealmView::default(), 11.0),
+            DVec3::new(3.0, 0.0, 0.0)
+        );
 
         // Galaxy + Planet frames are identity too (the combined world-frame arm).
         let gal = RenderPose {
             frame: FrameRef::GalaxySpace,
+            cell: glam::I64Vec3::ZERO,
             pos: DVec3::new(1.0, 2.0, 3.0),
             orient: DQuat::IDENTITY,
         };
-        assert_eq!(view.world_pos(&gal, 11.0), DVec3::new(1.0, 2.0, 3.0));
+        assert_eq!(
+            view.world_pos(&gal, &RealmView::default(), 11.0),
+            DVec3::new(1.0, 2.0, 3.0)
+        );
         let planet = RenderPose {
             frame: FrameRef::PlanetCentered { planet_seed: 1 },
+            cell: glam::I64Vec3::ZERO,
             pos: DVec3::new(4.0, 0.0, 0.0),
             orient: DQuat::IDENTITY,
         };
-        assert_eq!(view.world_pos(&planet, 11.0), DVec3::new(4.0, 0.0, 0.0));
+        assert_eq!(
+            view.world_pos(&planet, &RealmView::default(), 11.0),
+            DVec3::new(4.0, 0.0, 0.0)
+        );
         // A sub-planet AREA shares the planet frame; a STATION interior renders at its frame
         // origin until a P8 station hull is delivered — both fall in the world-frame arm today.
         let area = RenderPose {
@@ -407,16 +424,117 @@ mod tests {
                 planet_seed: 1,
                 area_seed: 2,
             },
+            cell: glam::I64Vec3::ZERO,
             pos: DVec3::new(5.0, 6.0, 7.0),
             orient: DQuat::IDENTITY,
         };
-        assert_eq!(view.world_pos(&area, 11.0), DVec3::new(5.0, 6.0, 7.0));
+        assert_eq!(
+            view.world_pos(&area, &RealmView::default(), 11.0),
+            DVec3::new(5.0, 6.0, 7.0)
+        );
         let station = RenderPose {
             frame: FrameRef::StationLocal { station_seed: 9 },
+            cell: glam::I64Vec3::ZERO,
             pos: DVec3::new(8.0, 0.0, 0.0),
             orient: DQuat::IDENTITY,
         };
-        assert_eq!(view.world_pos(&station, 11.0), DVec3::new(8.0, 0.0, 0.0));
+        assert_eq!(
+            view.world_pos(&station, &RealmView::default(), 11.0),
+            DVec3::new(8.0, 0.0, 0.0)
+        );
+    }
+
+    /// A `RealmView` streaming ONE realm at `offset`/`orient` (in `SystemSpace{7}`) — the live placement
+    /// the box overlay draws it at, and that an occupant of that realm composes against.
+    fn realms_with(realm: vd_core::pose::RealmId, offset: DVec3, orient: glam::DQuat) -> RealmView {
+        use vd_core::ids::{TickId, UniverseTick};
+        use vd_core::pose::StampedPose;
+        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram, SubId};
+        let mut pose = StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            offset,
+            UniverseTick(10),
+        );
+        pose.orient = orient;
+        let mut v = RealmView::default();
+        v.on_realm_snapshot(RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 1,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(10),
+            realms: vec![RealmSnap { realm, pose }],
+        });
+        v
+    }
+
+    #[test]
+    fn world_pos_composes_a_planet_occupant_with_its_live_realm_placement() {
+        use glam::DQuat;
+        use vd_core::pose::RealmId;
+        // The occupant RIDES its realm: a planet streamed at world (100,0,0) + an occupant at planet-local
+        // (0,5,0) renders at (100,5,0) — NOT the bare (0,5,0) frame-local (the teleport-to-origin bug).
+        let realms = realms_with(
+            RealmId::Planet(1),
+            DVec3::new(100.0, 0.0, 0.0),
+            DQuat::IDENTITY,
+        );
+        let occ = RenderPose {
+            frame: FrameRef::PlanetCentered { planet_seed: 1 },
+            cell: glam::I64Vec3::ZERO,
+            pos: DVec3::new(0.0, 5.0, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        let w = DeliveredView::default().world_pos(&occ, &realms, 11.0);
+        assert!((w - DVec3::new(100.0, 5.0, 0.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn world_pos_composes_an_area_occupant_through_its_parent_planet() {
+        use glam::DQuat;
+        use vd_core::pose::RealmId;
+        // An Area shares its PLANET's frame and rides it: stream Planet(1) at (200,0,0); an AreaLocal{1,2}
+        // occupant at local (0,0,7) renders at (200,0,7) — composed against the PLANET (placement_anchor),
+        // NOT the area (which has no independent world placement). Proves the ONE generic rule.
+        let realms = realms_with(
+            RealmId::Planet(1),
+            DVec3::new(200.0, 0.0, 0.0),
+            DQuat::IDENTITY,
+        );
+        let occ = RenderPose {
+            frame: FrameRef::AreaLocal {
+                planet_seed: 1,
+                area_seed: 2,
+            },
+            cell: glam::I64Vec3::ZERO,
+            pos: DVec3::new(0.0, 0.0, 7.0),
+            orient: DQuat::IDENTITY,
+        };
+        let w = DeliveredView::default().world_pos(&occ, &realms, 11.0);
+        assert!((w - DVec3::new(200.0, 0.0, 7.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn world_pos_falls_back_when_the_occupants_own_realm_is_not_streamed() {
+        use glam::DQuat;
+        use vd_core::pose::RealmId;
+        // A non-empty view streaming a DIFFERENT realm (Station 2) does NOT compose a Planet 1 occupant —
+        // world_pos keys on the occupant's OWN realm, absent here ⇒ bit-exact frame-local fallback (the
+        // `and_then` None arm on a NON-empty view).
+        let realms = realms_with(
+            RealmId::Station(2),
+            DVec3::new(50.0, 0.0, 0.0),
+            DQuat::IDENTITY,
+        );
+        let occ = RenderPose {
+            frame: FrameRef::PlanetCentered { planet_seed: 1 },
+            cell: glam::I64Vec3::ZERO,
+            pos: DVec3::new(4.0, 0.0, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        assert_eq!(
+            DeliveredView::default().world_pos(&occ, &realms, 11.0),
+            DVec3::new(4.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -468,7 +586,7 @@ mod tests {
             },
         );
         let r = view.render(11.0);
-        let world = view.world_pos(&r[&interior], 11.0);
+        let world = view.world_pos(&r[&interior], &RealmView::default(), 11.0);
         assert!(
             (world - DVec3::new(95.0, 0.0, 0.0)).length() < 1e-9,
             "the hull orientation must rotate the interior offset, got {world:?}"

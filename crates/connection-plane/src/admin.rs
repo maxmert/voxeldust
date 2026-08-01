@@ -8,7 +8,7 @@ use bevy_ecs::prelude::World;
 use vd_sim::runtime::ClockSample;
 use vd_wire::admin::{AdminSnapshot, GatewayView};
 
-use crate::gateway::{GatewayStats, GatewaySessions};
+use crate::gateway::{GatewaySessions, GatewayStats};
 
 /// Project the gateway's live counters + gauges into the admin contract. EXHAUSTIVELY destructures
 /// [`GatewayStats`] (no `..`), so a future 23rd counter is a COMPILE ERROR here until it is surfaced on the

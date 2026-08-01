@@ -1566,6 +1566,64 @@ mod tests {
     }
 
     #[test]
+    fn a_keepalive_demand_on_the_crossing_dest_blocks_the_reap_that_freezes_the_return() {
+        // CONSUMER gate for the Symptom-B fix: reconcile reaps a drained, empty, out-of-closure realm — and
+        // for a RETURN crossing's dest System (mid-crossing) that reap FREEZES THE WHOLE GAME — UNLESS a
+        // KeepAlive demand keeps it desired. This proves the source shard's per-tick keep-alive
+        // (`redrive_stranded_crossings`) is SUFFICIENT to hold the dest alive. Mirrors
+        // `reconcile_kills_after_the_drain_window_elapses` above, adding the keep-alive variant.
+        let t = cloud();
+        let d = dir(&[(RealmId::System(7), 9, 3)]);
+        let now = UniverseTick(500);
+        let drained_empty_ledger = || {
+            let mut l = DemandLedger::default();
+            l.record_demand(
+                &sys(7),
+                DemandVerb::Empty,
+                UniverseTick(now.0 - 2),
+                Fence(1),
+            );
+            let mut open = LedgerDelta::default();
+            open.set_draining.insert(
+                sys(7).path().clone(),
+                Some(UniverseTick(now.0 - t.teardown_drain_ticks)),
+            );
+            l.apply_delta(&open);
+            l
+        };
+        let kill = LifecycleAction::Kill {
+            path: sys(7).path().clone(),
+            node: NodeId(9),
+            fence: Fence(3),
+        };
+        // WITHOUT a keep-alive → the reap fires (the return-freeze root cause).
+        let (killed, _) = reconcile(
+            &drained_empty_ledger(),
+            &d,
+            &|_n: NodeId| false,
+            &no_launch(),
+            &t,
+            now,
+            UniverseTick(0),
+        );
+        assert!(killed.contains(&kill));
+        // WITH a KeepAlive demand for the dest at `now` → it is desired → ancestor_close keeps its whole
+        // chain → teardown_ready is false → NO reap. The freeze cannot happen while a player is crossing in.
+        let mut l = drained_empty_ledger();
+        l.record_demand(&sys(7), DemandVerb::KeepAlive, now, Fence(3));
+        let (protected, _) = reconcile(
+            &l,
+            &d,
+            &|_n: NodeId| false,
+            &no_launch(),
+            &t,
+            now,
+            UniverseTick(0),
+        );
+        assert!(!protected.contains(&kill));
+    }
+
+    #[test]
     fn reconcile_reaps_child_before_parent() {
         let t = cloud();
         let d = dir(&[(RealmId::System(7), 9, 3), (RealmId::Planet(3), 8, 4)]);

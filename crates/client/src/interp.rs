@@ -12,7 +12,7 @@
 //! `advanced_ballistic`. A stalled entity FREEZES at its last delivered pose
 //! (the clamp), it does not coast.
 
-use glam::{DQuat, DVec3};
+use glam::{DQuat, DVec3, I64Vec3};
 use vd_core::UniverseTick;
 use vd_core::pose::{FrameRef, StampedPose};
 
@@ -53,6 +53,13 @@ where
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderPose {
     pub frame: FrameRef,
+    /// Integer CELL anchor of the rendered position (tier units for `frame`) — the exact-integer coarse
+    /// part carried alongside the `pos` offset (the tiered-i64 base, D-41). Through P3 it is `ZERO` and
+    /// `pos` carries the full frame-local metres (byte-identical to the pre-S1 bare-`DVec3` pose); it is
+    /// planted so the S3 origin-subtraction `world_pos` can rebase the FULL position (cell + offset) once
+    /// non-zero cells go live (S5). The interpolation blend rebases into this cell (see `sample`).
+    pub cell: I64Vec3,
+    /// Frame-local offset within `cell`. What the renderer draws / `world_pos` consumes.
     pub pos: DVec3,
     pub orient: DQuat,
 }
@@ -110,13 +117,17 @@ impl EntityTrack {
     pub fn sample(&self, cursor: f64) -> RenderPose {
         let prev_time = tick_to_f64(self.prev.universe_tick);
         let current_time = tick_to_f64(self.current.universe_tick);
-        // Blend the frame-local offsets (RenderPose is render-local DVec3). Through P3 cell is ZERO so
-        // the offset is the full frame-local position; prev/current share a cell so the lerp is valid.
-        // Cross-cell interpolation (rebasing prev into current's cell, or collapsing the window on a
-        // same-frame cell change the way `observe` does on a frame change) lands WITH P4/P5 re-centering
-        // — the first producer of a non-zero cell — galaxy ly-cells at P10. D-41.
+        // Rebase-before-lerp (S1): re-express `prev`'s offset in `current`'s CELL before blending, so the
+        // offset lerp is continuous ACROSS a cell boundary — `prev_in_cell = prev.offset + (prev.cell −
+        // cell)·edge` (raw, NOT re-normalized, so the blend stays continuous). Through P3 both cells are
+        // ZERO ⇒ this is exactly `prev.offset()` and the result rides `cell == ZERO` — byte-identical to
+        // the pre-S1 offset-only lerp. The result cell is `current`'s; `world_pos` (S3) subtracts the pinned
+        // origin over the full cell+offset. (`observe` already collapses the window on a FRAME change.)
+        let cell = self.current.pos.cell();
+        let edge = self.current.frame.tier().cell_edge_m();
+        let prev_offset = self.prev.pos.offset() + (self.prev.pos.cell() - cell).as_dvec3() * edge;
         let pos = lerp_at_game_time(
-            self.prev.pos.offset(),
+            prev_offset,
             prev_time,
             self.current.pos.offset(),
             current_time,
@@ -133,6 +144,7 @@ impl EntityTrack {
         );
         RenderPose {
             frame: self.current.frame,
+            cell,
             pos,
             orient,
         }
@@ -159,6 +171,7 @@ impl EntityTrack {
     pub fn current_render_pose(self) -> RenderPose {
         RenderPose {
             frame: self.current.frame,
+            cell: self.current.pos.cell(),
             pos: self.current.pos.offset(),
             orient: self.current.orient,
         }
@@ -367,5 +380,70 @@ mod tests {
         // Cursor at tick 11 → alpha 0.25 for BOTH.
         assert_eq!(a.sample(11.0).pos, DVec3::new(10.0, 0.0, 0.0)); // 0 + 0.25*40
         assert_eq!(b.sample(11.0).pos, DVec3::new(125.0, 0.0, 0.0)); // 100 + 0.25*100
+    }
+
+    // ---- S1 floating-origin: the cell rides the render pose (project_floating_origin_plan.md) ----
+
+    #[test]
+    fn sample_at_cell_zero_carries_a_zero_cell_and_the_plain_offset_blend() {
+        // Byte-floor: both poses at cell 0 (the P3 shipping form) ⇒ the rebase is a no-op and the result
+        // is the plain offset lerp with cell 0 — unchanged from the pre-S1 bare-DVec3 behaviour.
+        let mut track = EntityTrack::new(pose_at(10, 0.0));
+        track.observe(pose_at(11, 10.0));
+        let mid = track.sample(10.5);
+        assert_eq!(mid.cell, I64Vec3::ZERO);
+        assert!((mid.pos.x - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sample_rebases_prev_into_currents_cell_so_the_blend_is_continuous_across_a_boundary() {
+        use vd_core::pose::LatticePos;
+        // FINE cell = 1 mm. `prev` sits one cell BELOW `current`, near the top of its cell: true position
+        // = −1·edge + 0.9·edge = −0.1·edge. `current` is at cell 0, offset 0.1·edge. Rebasing prev into
+        // cell 0 gives offset −0.1·edge, so the blend stays continuous across the boundary (no jump).
+        let edge = 1.0e-3;
+        let sys = FrameRef::SystemSpace { system_seed: 1 };
+        let prev = StampedPose {
+            frame: sys,
+            pos: LatticePos::at(I64Vec3::new(-1, 0, 0), DVec3::new(0.9 * edge, 0.0, 0.0)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(10),
+        };
+        let current = StampedPose {
+            frame: sys,
+            pos: LatticePos::at(I64Vec3::ZERO, DVec3::new(0.1 * edge, 0.0, 0.0)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(11),
+        };
+        let mut track = EntityTrack::new(prev);
+        track.observe(current);
+        // At the prev edge → prev rebased into current's cell: offset −0.1·edge, cell 0.
+        let at_prev = track.sample(10.0);
+        assert_eq!(at_prev.cell, I64Vec3::ZERO);
+        assert!((at_prev.pos.x - (-0.1 * edge)).abs() < 1e-12);
+        // At the current edge → current's own offset, cell 0.
+        let at_current = track.sample(11.0);
+        assert_eq!(at_current.cell, I64Vec3::ZERO);
+        assert!((at_current.pos.x - 0.1 * edge).abs() < 1e-12);
+        // Midpoint → the true geometric midpoint (0.0), no cell-boundary jump.
+        let mid = track.sample(10.5);
+        assert!((mid.cell.x as f64 * edge + mid.pos.x).abs() < 1e-12);
+    }
+
+    #[test]
+    fn current_render_pose_carries_the_leading_edge_cell_and_offset() {
+        use vd_core::pose::LatticePos;
+        let p = StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            pos: LatticePos::at(I64Vec3::new(3, -4, 5), DVec3::new(0.25, 0.0, 0.0)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(7),
+        };
+        let rp = EntityTrack::new(p).current_render_pose();
+        assert_eq!(rp.cell, I64Vec3::new(3, -4, 5));
+        assert_eq!(rp.pos, DVec3::new(0.25, 0.0, 0.0));
     }
 }

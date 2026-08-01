@@ -453,7 +453,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn cluster_bootstrapped_iff_a_shard_holds_a_realm() {
         // Empty directory: not bootstrapped.

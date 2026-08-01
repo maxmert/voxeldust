@@ -81,6 +81,22 @@ impl FrameRef {
         }
     }
 
+    /// The realm whose STREAMED LIVE placement locates THIS frame's ORIGIN in world (pinned-root) space —
+    /// the anchor a pure-renderer client composes an occupant's frame-local pose against so it RIDES its
+    /// moving realm instead of hanging at the world origin. It is [`FrameRef::realm`] EXCEPT for an `Area`:
+    /// a sub-planet area shares its PARENT PLANET's coordinate frame with NO offset (its local coords ARE
+    /// planet-frame coords, and it never moves relative to its planet), so it anchors on the `Planet`
+    /// (whose placement is authored in world/`SystemSpace`), NEVER on the area itself (which has no
+    /// independent world placement — anchoring there would miss the planet's orbit, the exact mislocation
+    /// bug). A pure taxonomy fact, not a feature branch (HR3): every realm KIND flows through one compose.
+    #[must_use]
+    pub fn placement_anchor(self) -> Option<RealmId> {
+        match self {
+            FrameRef::AreaLocal { planet_seed, .. } => Some(RealmId::Planet(planet_seed)),
+            other => other.realm(),
+        }
+    }
+
     /// A short human-readable label for the player-stats HUD and the `vdctl` location
     /// readout — the player's "where am I", derived from their authoritative frame, NOT a
     /// raw shard id (the client never sees shard processes; this is fence-validated and
@@ -99,6 +115,24 @@ impl FrameRef {
                 planet_seed,
                 area_seed,
             } => format!("Area {area_seed} on Planet {planet_seed}"),
+        }
+    }
+
+    /// Which coordinate [`Tier`] this frame's lattice cells are measured in. Star-system space
+    /// and everything nested inside it (planets, ships, stations, sub-planet areas) share the
+    /// FINE tier (millimetre cells — sub-micron f64 offsets anywhere inside a system); galaxy
+    /// space and out is COARSE (light-year cells, P10). A pure geometric property of the frame,
+    /// NOT a feature fork on realm/shard KIND (HR3) — it selects a coordinate UNIT, nothing else.
+    /// Through P3 only `SystemSpace` is live, so every live frame is [`Tier::Fine`].
+    #[must_use]
+    pub fn tier(self) -> Tier {
+        match self {
+            FrameRef::GalaxySpace => Tier::Coarse,
+            FrameRef::PlanetCentered { .. }
+            | FrameRef::ShipLocal { .. }
+            | FrameRef::SystemSpace { .. }
+            | FrameRef::StationLocal { .. }
+            | FrameRef::AreaLocal { .. } => Tier::Fine,
         }
     }
 }
@@ -125,6 +159,44 @@ pub fn frame_for_realm(realm: RealmId, parent: Option<RealmId>) -> Option<FrameR
             }),
             _ => None,
         },
+    }
+}
+
+/// FINE-tier cell edge: **one millimetre**. At the fine tier a [`LatticePos`] cell counts
+/// millimetres and the f64 `offset` is the sub-millimetre residual, so f64 precision stays at the
+/// ~10⁻¹⁹ m level ANYWHERE inside a star system. i64 millimetres span ≈ ±9.2×10¹⁵ m ≈ ±0.97 light-year
+/// before overflow — comfortably more than one system's active volume, and beyond that you are in the
+/// COARSE tier by construction (the tier boundary sits below where fine cells could overflow).
+pub const FINE_CELL_EDGE_M: f64 = 1.0e-3;
+
+/// COARSE-tier cell edge: **one light-year** (IAU julian light-year, exact metres). At the coarse tier
+/// a cell counts light-years and the f64 `offset` is the sub-light-year residual. Galaxy-scale positions
+/// live here so f64 stays precise across interstellar distances (pure-f64 metres drift ~131 km/ULP at
+/// galaxy scale — the class this cures). **Planted, value revisable at P10** — no COARSE-tier pose is
+/// produced through P3 (only `SystemSpace`/FINE is live), and the exact-integer FINE↔COARSE remainder
+/// carry (the mm↔ly ratio exceeds one i64) is finalized when the galaxy tier activates (user-deferred).
+pub const COARSE_CELL_EDGE_M: f64 = 9_460_730_472_580_800.0;
+
+/// Which coordinate TIER a [`LatticePos`] cell is measured in. The cell UNIT differs by tier so the
+/// f64 in-cell `offset` keeps high precision at every scale — millimetres inside a star system
+/// ([`Tier::Fine`]), light-years across a galaxy ([`Tier::Coarse`], P10). Selected by
+/// [`FrameRef::tier`] from a frame's KIND — a coordinate unit, never a feature branch (HR3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    /// Star system and inward: millimetre cells ([`FINE_CELL_EDGE_M`]).
+    Fine,
+    /// Galaxy and out: light-year cells ([`COARSE_CELL_EDGE_M`], P10).
+    Coarse,
+}
+
+impl Tier {
+    /// Metres per cell edge at this tier — the exact quantum a [`LatticePos`] cell counts.
+    #[must_use]
+    pub fn cell_edge_m(self) -> f64 {
+        match self {
+            Tier::Fine => FINE_CELL_EDGE_M,
+            Tier::Coarse => COARSE_CELL_EDGE_M,
+        }
     }
 }
 
@@ -207,6 +279,70 @@ impl LatticePos {
             cell: self.cell,
             offset: f(self.offset),
         }
+    }
+
+    /// Re-bucket so the f64 `offset` lands back in `[0, cell_edge)` per axis, carrying the integer
+    /// overflow into the `cell` anchor — the operation that keeps offsets small (and f64-precise) after
+    /// any accumulation. Exact: the carry is the floored quotient `offset / edge`, subtracted back off in
+    /// the same units, so `cell * edge + offset` is preserved to f64. Straight-line (no branches); an
+    /// already-normalized pose is a fixed point. Through P3 no production code calls this (poses ride at
+    /// `cell == ZERO` with `offset` carrying the full frame-local metres — [`LatticePos::local`]); it is
+    /// the D-41 cell math planted for S5 activation, exercised now only by unit/proptests (byte-floor
+    /// holds: nothing in the shipped path re-buckets, so the wire stays cell-0 identical).
+    #[must_use]
+    pub fn normalize(self, tier: Tier) -> LatticePos {
+        let edge = tier.cell_edge_m();
+        let carry = (self.offset / edge).floor();
+        LatticePos {
+            cell: self.cell + carry.as_i64vec3(),
+            offset: self.offset - carry * edge,
+        }
+    }
+
+    /// Express this position RELATIVE TO `origin` (both in the same frame + tier) — exact integer cell
+    /// subtraction plus the f64 offset residual, then re-normalized. This is the zero-drift rebase at the
+    /// heart of the floating-origin model: the client subtracts its pinned star-system absolute here, and
+    /// the integer-cell part cancels EXACTLY (no ~131 km/ULP galaxy-scale f64 loss). Through P3 every cell
+    /// is `ZERO`, so this reduces to `offset - origin.offset` — behaviour-identical to a plain vector
+    /// subtraction; the exactness matters once S5 lights up non-zero cells.
+    #[must_use]
+    pub fn rebase_to(self, origin: LatticePos, tier: Tier) -> LatticePos {
+        LatticePos {
+            cell: self.cell - origin.cell,
+            offset: self.offset - origin.offset,
+        }
+        .normalize(tier)
+    }
+
+    /// Compose `self` (a frame ORIGIN's absolute position) with a `local` position expressed IN that
+    /// frame → the local's absolute position, same tier. Exact cell addition + offset sum, re-normalized.
+    /// This is the once-per-tick `self_abs ∘ occupant_local` the containing realm's shard runs to author
+    /// every occupant's absolute pose (author-once-ship-all). Inverse of [`LatticePos::rebase_to`]:
+    /// `a.compose(b).rebase_to(a) == b` (to f64). Through P3 (`cell == ZERO`) this is `self.offset +
+    /// local.offset` — a plain vector add.
+    #[must_use]
+    pub fn compose(self, local: LatticePos, tier: Tier) -> LatticePos {
+        LatticePos {
+            cell: self.cell + local.cell,
+            offset: self.offset + local.offset,
+        }
+        .normalize(tier)
+    }
+
+    /// Re-express this position from one tier's cell UNIT into another (e.g. a FINE mm-lattice position
+    /// re-quantized into COARSE ly-cells at a SOI/warp tier crossing). Same tier ⇒ identity — the ONLY
+    /// live path through P3 (all frames FINE). Cross-tier folds to total metres, then re-buckets at the
+    /// target edge. **Cross-tier is the P10-deferred plant** (user decision): it is precise only where the
+    /// magnitude is f64-representable — the full FINE↔COARSE ratio (mm↔ly ≈ 9.5×10¹⁸ : 1) exceeds one
+    /// i64, so the exact-integer remainder carry finalizes when the COARSE unit does at P10. No COARSE
+    /// pose exists before then, so this dormant arm never runs in the shipped path.
+    #[must_use]
+    pub fn convert_tier(self, from: Tier, to: Tier) -> LatticePos {
+        if from == to {
+            return self;
+        }
+        let metres = self.offset + self.cell.as_dvec3() * from.cell_edge_m();
+        LatticePos::local(metres).normalize(to)
     }
 }
 
@@ -332,6 +468,38 @@ mod tests {
             }
             .realm(),
             Some(RealmId::Area(8))
+        );
+    }
+
+    #[test]
+    fn placement_anchor_maps_an_area_to_its_planet_and_every_other_frame_to_its_realm() {
+        // The realm whose streamed placement a client composes an occupant AGAINST: an Area rides its
+        // PLANET (not the area — it has no independent world placement); every other frame anchors on its
+        // own realm; Galaxy has none.
+        assert_eq!(
+            FrameRef::AreaLocal {
+                planet_seed: 5,
+                area_seed: 8
+            }
+            .placement_anchor(),
+            Some(RealmId::Planet(5))
+        );
+        assert_eq!(
+            FrameRef::PlanetCentered { planet_seed: 5 }.placement_anchor(),
+            Some(RealmId::Planet(5))
+        );
+        assert_eq!(
+            FrameRef::SystemSpace { system_seed: 9 }.placement_anchor(),
+            Some(RealmId::System(9))
+        );
+        assert_eq!(
+            FrameRef::StationLocal { station_seed: 7 }.placement_anchor(),
+            Some(RealmId::Station(7))
+        );
+        assert_eq!(FrameRef::GalaxySpace.placement_anchor(), None);
+        assert_eq!(
+            FrameRef::ShipLocal { ship: ship_id() }.placement_anchor(),
+            Some(RealmId::Ship(ship_id()))
         );
     }
 
@@ -597,5 +765,204 @@ mod tests {
         assert_eq!(back, p);
         assert_eq!(back.pos.cell, I64Vec3::new(5, -7, 11));
         assert_eq!(back.pos.offset(), DVec3::new(0.25, -0.5, 0.75));
+    }
+
+    // ---- S0 floating-origin lattice math (project_floating_origin_plan.md) ----
+
+    #[test]
+    fn tier_is_fine_for_a_system_and_every_nested_frame_coarse_only_for_galaxy() {
+        // A pure coordinate-UNIT property, not a feature fork: everything inside a star system shares
+        // the FINE (millimetre) tier; only GalaxySpace is COARSE (light-year cells, P10).
+        assert_eq!(FrameRef::SystemSpace { system_seed: 9 }.tier(), Tier::Fine);
+        assert_eq!(
+            FrameRef::PlanetCentered { planet_seed: 5 }.tier(),
+            Tier::Fine
+        );
+        assert_eq!(FrameRef::ShipLocal { ship: ship_id() }.tier(), Tier::Fine);
+        assert_eq!(
+            FrameRef::StationLocal { station_seed: 7 }.tier(),
+            Tier::Fine
+        );
+        assert_eq!(
+            FrameRef::AreaLocal {
+                planet_seed: 5,
+                area_seed: 8
+            }
+            .tier(),
+            Tier::Fine
+        );
+        assert_eq!(FrameRef::GalaxySpace.tier(), Tier::Coarse);
+    }
+
+    #[test]
+    fn cell_edge_is_a_millimetre_at_fine_and_a_light_year_at_coarse() {
+        assert_eq!(Tier::Fine.cell_edge_m(), FINE_CELL_EDGE_M);
+        assert_eq!(Tier::Coarse.cell_edge_m(), COARSE_CELL_EDGE_M);
+        assert_eq!(Tier::Fine.cell_edge_m(), 1.0e-3);
+        // one light-year, IAU julian: 9_460_730_472_580_800 m.
+        assert_eq!(Tier::Coarse.cell_edge_m(), 9_460_730_472_580_800.0);
+    }
+
+    #[test]
+    fn normalize_rebuckets_a_large_offset_into_the_cell_exactly() {
+        // An un-normalized fine pose (cell 0, offset carrying full metres — the P3 shipping form) folds
+        // its integer millimetres into the cell, leaving a sub-millimetre residual, preserving the total.
+        let edge = FINE_CELL_EDGE_M; // 1 mm
+        let lp = LatticePos::local(DVec3::new(1.2345, -0.0007, 2.0));
+        let n = lp.normalize(Tier::Fine);
+        // cell = floor(offset / 1 mm) per axis.
+        assert_eq!(n.cell(), I64Vec3::new(1234, -1, 2000));
+        // residual reconstructs the original total to f64 precision.
+        let recon = n.cell().as_dvec3() * edge + n.offset();
+        assert!((recon - lp.offset()).length() < 1e-9);
+    }
+
+    #[test]
+    fn normalize_of_an_already_normalized_pose_is_a_fixed_point() {
+        // Offset already within one cell (sub-mm) ⇒ zero carry ⇒ unchanged, cell and offset exact.
+        let lp = LatticePos::at(I64Vec3::new(5, -7, 11), DVec3::new(0.0004, 0.0009, 0.0));
+        let n = lp.normalize(Tier::Fine);
+        assert_eq!(n.cell(), lp.cell());
+        assert_eq!(n.offset(), lp.offset());
+    }
+
+    #[test]
+    fn rebase_to_is_exact_integer_cell_subtraction() {
+        // Expressing one fine pose relative to another cancels the integer cell part EXACTLY (the
+        // zero-drift client origin-subtraction). Offsets ZERO so the equality is bit-exact.
+        let a = LatticePos::at(I64Vec3::new(1000, 2000, -3000), DVec3::ZERO);
+        let origin = LatticePos::at(I64Vec3::new(1, 2, 3), DVec3::ZERO);
+        let r = a.rebase_to(origin, Tier::Fine);
+        assert_eq!(r.cell(), I64Vec3::new(999, 1998, -3003));
+        assert_eq!(r.offset(), DVec3::ZERO);
+    }
+
+    #[test]
+    fn compose_adds_cells_then_normalizes() {
+        // origin ∘ local sums the integer cells (offsets ZERO ⇒ exact).
+        let origin = LatticePos::at(I64Vec3::new(10, 20, 30), DVec3::ZERO);
+        let local = LatticePos::at(I64Vec3::new(1, 2, 3), DVec3::ZERO);
+        let c = origin.compose(local, Tier::Fine);
+        assert_eq!(c.cell(), I64Vec3::new(11, 22, 33));
+        assert_eq!(c.offset(), DVec3::ZERO);
+    }
+
+    #[test]
+    fn compose_and_rebase_at_cell_zero_are_plain_vector_add_and_subtract() {
+        // THE byte-floor: the P3 shipping form is cell 0 with the offset carrying full metres. As long
+        // as the result stays within one cell (sub-mm test values ⇒ no carry), compose/rebase reduce to
+        // a plain add/subtract on the offset — identical to the pre-lattice DVec3 algebra, cell stays 0.
+        let origin = LatticePos::local(DVec3::new(0.0004, 0.0, 0.0));
+        let local = LatticePos::local(DVec3::new(0.0003, 0.0, 0.0));
+        let c = origin.compose(local, Tier::Fine);
+        assert_eq!(c.cell(), I64Vec3::ZERO);
+        assert!((c.offset() - DVec3::new(0.0007, 0.0, 0.0)).length() < 1e-12);
+        let r = c.rebase_to(origin, Tier::Fine);
+        assert_eq!(r.cell(), I64Vec3::ZERO);
+        assert!((r.offset() - local.offset()).length() < 1e-12);
+    }
+
+    #[test]
+    fn convert_tier_same_tier_is_the_identity_the_only_live_path() {
+        // Through P3 every frame is FINE ⇒ convert_tier is always same-tier ⇒ a pure identity (it does
+        // NOT re-bucket the un-normalized shipping pose) — the byte-floor for the dormant arm.
+        let lp = LatticePos::local(DVec3::new(12345.678, -9.0, 0.001));
+        let same = lp.convert_tier(Tier::Fine, Tier::Fine);
+        assert_eq!(same.cell(), lp.cell());
+        assert_eq!(same.offset(), lp.offset());
+    }
+
+    #[test]
+    fn convert_tier_cross_tier_reexpresses_the_total_metres_within_f64() {
+        // The P10-deferred cross-tier plant: fold to total metres, re-bucket at the target edge. A small
+        // FINE position (1000 m) lands in COARSE cell 0 with the metres carried in the offset (the
+        // exact-integer carry for the full mm↔ly ratio finalizes at P10 with the COARSE unit).
+        let fine = LatticePos::at(I64Vec3::new(1_000_000, 0, 0), DVec3::ZERO); // 1e6 mm = 1000 m
+        let coarse = fine.convert_tier(Tier::Fine, Tier::Coarse);
+        assert_eq!(coarse.cell(), I64Vec3::ZERO); // 1000 m ≪ 1 ly
+        assert!((coarse.offset().x - 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sub_millimetre_offsets_survive_at_a_billion_metre_cell_via_exact_integer_rebase() {
+        // THE floating-point win the lattice buys: two positions a billion metres out, half a millimetre
+        // apart. Expressed as integer-mm cells their SEPARATION is exact at ANY magnitude — rebasing one onto
+        // the other cancels the (equal) integer cell part and leaves the 0.5 mm offset difference to full f64
+        // precision, where pure-f64 metres would have lost sub-mm resolution long before this range.
+        let cell = I64Vec3::new(1_000_000_000_000, 0, 0); // 1e12 mm = 1e9 m out
+        let a = LatticePos::at(cell, DVec3::new(0.25e-3, 0.0, 0.0));
+        let b = LatticePos::at(cell, DVec3::new(0.75e-3, 0.0, 0.0)); // 0.5 mm further along x
+        let rel = b.rebase_to(a, Tier::Fine);
+        assert_eq!(rel.cell(), I64Vec3::ZERO); // the 1e9 m cell cancels EXACTLY — zero drift
+        assert!((rel.offset().x - 0.5e-3).abs() < 1e-15); // the 0.5 mm survives to full f64 precision
+    }
+
+    #[test]
+    fn an_occupant_composed_into_a_moving_realm_rides_it_and_a_pinned_client_sees_the_motion() {
+        // The floating-origin LAW that S2 (server compose) + S3 (client subtract) will wire live, proven here
+        // at the lattice level: a realm at absolute A authors its occupant's absolute = A ∘ local; when A
+        // MOVES between ticks the occupant's absolute moves WITH it (rides the realm). A client pinned to a
+        // DIFFERENT realm (the star at the universe origin) subtracts its pin, so it renders the occupant AT
+        // the moving absolute — the occupant visibly travels with its realm instead of hanging static (the
+        // reported bug). Exercised with non-zero integer cells (the floating-point regime).
+        let tier = Tier::Fine;
+        let star_pin = LatticePos::at(I64Vec3::ZERO, DVec3::ZERO); // client's pin: the star at the origin
+        let local = LatticePos::local(DVec3::new(3.0, 0.0, 0.0)); // the occupant, 3 m from its realm centre
+        // Tick 0: the realm (planet) sits at absolute A0, ~1e6 m out.
+        let a0 = LatticePos::at(
+            I64Vec3::new(1_000_000_000, 0, 0),
+            DVec3::new(0.4e-3, 0.0, 0.0),
+        );
+        let seen0 = a0.compose(local, tier).rebase_to(star_pin, tier);
+        // Tick 1: the realm has moved (+2 m along x, plus a sub-mm step).
+        let a1 = LatticePos::at(
+            I64Vec3::new(1_000_002_000, 0, 0),
+            DVec3::new(0.9e-3, 0.0, 0.0),
+        );
+        let seen1 = a1.compose(local, tier).rebase_to(star_pin, tier);
+        // The occupant RODE the realm: its rendered position advanced by exactly the realm's own motion.
+        let world = |p: LatticePos| p.cell().as_dvec3() * tier.cell_edge_m() + p.offset();
+        let occupant_moved = world(seen1) - world(seen0);
+        let realm_moved =
+            (a1.cell() - a0.cell()).as_dvec3() * tier.cell_edge_m() + (a1.offset() - a0.offset());
+        assert!((occupant_moved - realm_moved).length() < 1e-6);
+        // And it is NOT static — the regression guard against the "occupant hangs in place" bug.
+        assert!(occupant_moved.length() > 1.0);
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn normalize_preserves_total_position_and_bounds_the_offset(
+            cx in -1_000_000i64..1_000_000, cy in -1_000_000i64..1_000_000, cz in -1_000_000i64..1_000_000,
+            ox in -10.0f64..10.0, oy in -10.0f64..10.0, oz in -10.0f64..10.0,
+        ) {
+            let edge = FINE_CELL_EDGE_M;
+            let lp = LatticePos::at(I64Vec3::new(cx, cy, cz), DVec3::new(ox, oy, oz));
+            let n = lp.normalize(Tier::Fine);
+            // Total position (cell*edge + offset) is preserved to f64 precision.
+            let before = lp.cell().as_dvec3() * edge + lp.offset();
+            let after = n.cell().as_dvec3() * edge + n.offset();
+            prop_assert!((before - after).length() < 1e-6);
+            // Residual offset sits in [0, edge) per axis (small float slack at the boundary).
+            prop_assert!(n.offset().min_element() >= -1e-12);
+            prop_assert!(n.offset().max_element() <= edge + 1e-12);
+        }
+
+        #[test]
+        fn compose_then_rebase_recovers_the_local_position(
+            ax in -100_000i64..100_000, ay in -100_000i64..100_000, az in -100_000i64..100_000,
+            lx in -100_000i64..100_000, ly in -100_000i64..100_000, lz in -100_000i64..100_000,
+        ) {
+            // origin ∘ local, then rebase back to origin, recovers `local` EXACTLY (integer cells cancel;
+            // offsets ZERO ⇒ no float error): compose and rebase_to are inverses.
+            let origin = LatticePos::at(I64Vec3::new(ax, ay, az), DVec3::ZERO);
+            let local = LatticePos::at(I64Vec3::new(lx, ly, lz), DVec3::ZERO);
+            let composed = origin.compose(local, Tier::Fine);
+            let back = composed.rebase_to(origin, Tier::Fine);
+            prop_assert_eq!(back.cell(), local.cell());
+            prop_assert_eq!(back.offset(), local.offset());
+        }
     }
 }

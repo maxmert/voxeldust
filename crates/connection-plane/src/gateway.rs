@@ -3727,7 +3727,11 @@ mod tests {
         // A VALID but non-ShardPresence InterShardFlow on the shard→gateway Saga class counts
         // `undecodable` exactly as the pre-RG-3 fallthrough did (the Ok(_) arm) — no greeting miscount.
         let mut rig = Rig::new();
-        rig.tick(vec![wire(SHARD, MsgClass::Saga, &granted_head(SessionId(1)))]);
+        rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Saga,
+            &granted_head(SessionId(1)),
+        )]);
         assert_eq!(rig.stats().presence_announces, 0);
         assert_eq!(rig.stats().undecodable, 1);
     }
@@ -3777,7 +3781,9 @@ mod tests {
         let mut rig = Rig::new();
         let _ = rig.login();
         let snap = crate::admin::gateway_admin_snapshot(&mut rig.world);
-        let gw = snap.gateway.expect("a gateway snapshot carries the gateway view");
+        let gw = snap
+            .gateway
+            .expect("a gateway snapshot carries the gateway view");
         assert_eq!(gw.sessions_open, 1);
         assert_eq!(gw.dynamic_shards, 0);
         assert_eq!(snap.universe_tick, 50);
@@ -7849,9 +7855,13 @@ mod tests {
         // (1) static cluster (unarmed) → NOTHING, even at minor 5 with a valid home. The pre-seeded
         // `OwnEntity` on the outbox proves the decoder discriminates (it is not counted as a render-scene).
         let mut outbox = OutboundBox::default();
-        push_control(&mut outbox, client, &ServerControlMsg::OwnEntity {
-            entity: EntityId(1),
-        });
+        push_control(
+            &mut outbox,
+            client,
+            &ServerControlMsg::OwnEntity {
+                entity: EntityId(1),
+            },
+        );
         maybe_announce_realm_registry(&mut outbox, client, &inert, 5, Some(home));
         assert!(
             realm_registries(&outbox).is_empty(),
@@ -7891,7 +7901,11 @@ mod tests {
         let mut outbox = OutboundBox::default();
         maybe_announce_realm_registry(&mut outbox, client, &armed, 6, Some(home));
         let sent = realm_registries(&outbox);
-        assert_eq!(sent.len(), 1, "a minor-6 peer also streams exactly one render-scene");
+        assert_eq!(
+            sent.len(),
+            1,
+            "a minor-6 peer also streams exactly one render-scene"
+        );
         assert!(
             sent[0].0.iter().any(|s| s.realm == home),
             "the streamed neighbourhood contains the client's own home realm (a containing realm)"
@@ -7951,9 +7965,16 @@ mod tests {
             &realm_registry_for_home(&cfg, 5, off_forest),
         );
         let sent = realm_registries(&ob);
-        assert_eq!(sent.len(), 1, "one RealmRegistry even for an off-forest home");
+        assert_eq!(
+            sent.len(),
+            1,
+            "one RealmRegistry even for an off-forest home"
+        );
         let (regions, root) = &sent[0];
-        assert!(regions.is_empty(), "an off-forest home yields no render shapes");
+        assert!(
+            regions.is_empty(),
+            "an off-forest home yields no render shapes"
+        );
         assert_eq!(
             *root, off_forest,
             "root degrades to the home itself when the neighbourhood is empty"
@@ -7961,7 +7982,8 @@ mod tests {
     }
 
     #[test]
-    fn realm_registry_for_a_system_home_ships_the_ancestor_chain_and_defers_children_to_the_delta() {
+    fn realm_registry_for_a_system_home_ships_the_ancestor_chain_and_defers_children_to_the_delta()
+    {
         // A home WITH children — System A (ancestors Universe→Galaxy→System A; direct children Planet A +
         // Station A). A minor>=6 peer receives ONLY the ancestor SHELL-CHAIN root→home; every direct child is
         // DROPPED (it arrives later via `RealmSceneDelta`). A minor==5 peer — which never receives a delta —
@@ -8018,7 +8040,10 @@ mod tests {
             .iter()
             .find(|r| r.parent.is_none())
             .expect("the neighbourhood reaches the parent-less ambient root");
-        assert_eq!(*root6, ambient_root.realm, "root still names the ambient realm");
+        assert_eq!(
+            *root6, ambient_root.realm,
+            "root still names the ambient realm"
+        );
 
         // minor == 5 → the FULL ancestors∪children set (a minor-5 peer gets no delta to fill children in).
         let mut ob5 = OutboundBox::default();
@@ -8102,7 +8127,11 @@ mod tests {
                 &mut ob,
             );
             let sent = scene_deltas(&ob);
-            assert_eq!(sent.len(), 1, "the observer's delta is routed to its client");
+            assert_eq!(
+                sent.len(),
+                1,
+                "the observer's delta is routed to its client"
+            );
             assert_eq!(sent[0], (added.clone(), vec![RealmId::Planet(8)]));
         }
         // (2) an UNKNOWN durable id ⇒ nothing (a clean no-op). The pre-seeded OwnEntity proves the decoder
@@ -8110,10 +8139,20 @@ mod tests {
         {
             let sessions = rig.world.resource::<GatewaySessions>();
             let mut ob = OutboundBox::default();
-            push_control(&mut ob, CLIENT, &ServerControlMsg::OwnEntity {
-                entity: EntityId(1),
-            });
-            forward_realm_scene_delta(sessions, AccountId(0xBAD), added.clone(), Vec::new(), &mut ob);
+            push_control(
+                &mut ob,
+                CLIENT,
+                &ServerControlMsg::OwnEntity {
+                    entity: EntityId(1),
+                },
+            );
+            forward_realm_scene_delta(
+                sessions,
+                AccountId(0xBAD),
+                added.clone(),
+                Vec::new(),
+                &mut ob,
+            );
             assert!(
                 scene_deltas(&ob).is_empty(),
                 "no live session for the durable id ⇒ no delta"

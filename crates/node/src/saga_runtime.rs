@@ -42,7 +42,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use serde::{Deserialize, Serialize};
-use vd_core::frame::rebind_pose_to_dest;
+use vd_core::frame::{IdentityFrames, rebind_pose_to_dest};
 use vd_core::pose::{RealmId, StampedPose};
 use vd_core::{BatchId, EpochId, Fence, NodeId, SessionId, TransferId, UniverseTick};
 use vd_sim::capability::{CapRequest, ShardProfile};
@@ -812,7 +812,11 @@ fn build_crossing(
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let entity = ctx.subject.transfer_subject_entity()?;
-    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm, ctx.to_parent);
+    // The SOURCE already rebased the flushed pose into the dest realm's live frame (`on_flush_source`), so
+    // here it is a no-op relabel (same-frame ⇒ `IdentityFrames` returns it unchanged) — the transfer
+    // machinery never reads the ephemeris (HR1). Kept in the funnel so the ONE rebind machinery (HR3) still
+    // forms an `Area` dest frame from `to_parent` for a source path that had not pre-rebased.
+    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm, ctx.to_parent, &IdentityFrames);
     Some(InterShardFlow::Transfer(TransferEnvelope {
         transfer_id: ctx.transfer,
         universe_epoch: epoch,
@@ -870,7 +874,9 @@ fn build_rehome(
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let _entity = ctx.subject.transfer_subject_entity()?;
-    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm, ctx.to_parent);
+    // No-op relabel: the SOURCE pre-rebased the pose into the dest realm's live frame at flush (`IdentityFrames`
+    // returns a same-frame pose unchanged). The rebind stays in the funnel (HR3, one machinery).
+    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm, ctx.to_parent, &IdentityFrames);
     Some(InterShardFlow::ReHome(ReHomeCmd {
         transfer: ctx.transfer,
         universe_epoch: epoch,
@@ -952,6 +958,10 @@ fn run_to_quiescence(
                             transfer: ctx.transfer,
                             subject: ctx.subject,
                             step_id: FLUSH_SOURCE_STEP,
+                            // The SOURCE rebases the flushed pose into this dest realm's live frame before
+                            // shipping it (the moving-realm crossing fix); the saga already holds the dest.
+                            to_realm: ctx.to_realm,
+                            to_parent: ctx.to_parent,
                         }),
                     );
                 }
@@ -2564,7 +2574,7 @@ mod tests {
     /// through the P3 identity (position unchanged) and this stays byte-identical to the builder output.
     fn dest_flushed_pose() -> StampedPose {
         // `TO_REALM` is `System(8)` (a one-field frame) — no parent needed to name the dest frame.
-        super::rebind_pose_to_dest(flushed_pose(), TO_REALM, None)
+        super::rebind_pose_to_dest(flushed_pose(), TO_REALM, None, &IdentityFrames)
     }
 
     const ORCH: NodeId = NodeId(1);

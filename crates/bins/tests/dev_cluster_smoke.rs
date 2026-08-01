@@ -114,7 +114,9 @@ fn demand_cluster_up_boots_orchestrator_and_gateway_only_and_reaches_ready() {
     // static realm to wait for — its worlds spin up on login/AoI demand, proven by rlm_demand_login).
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     let slot = DEMAND_SMOKE_SLOT.to_string();
-    let _ = Command::new(launcher).args(["down", "--slot", &slot]).status(); // clean slate (idempotent)
+    let _ = Command::new(launcher)
+        .args(["down", "--slot", &slot])
+        .status(); // clean slate (idempotent)
     let _guard = DevClusterDown::new(launcher, DEMAND_SMOKE_SLOT);
 
     // `up --demand` exits 0 once the orchestrator is up + serving (no shard needs to grant a realm first).
@@ -122,7 +124,10 @@ fn demand_cluster_up_boots_orchestrator_and_gateway_only_and_reaches_ready() {
         .args(["up", "--demand", "--slot", &slot])
         .status()
         .expect("run up --demand");
-    assert!(status.success(), "up --demand should reach ready and exit 0");
+    assert!(
+        status.success(),
+        "up --demand should reach ready and exit 0"
+    );
 
     // Exactly TWO node PIDs recorded (orchestrator + gateway) — NO static login shard was booked.
     let pids = recorded_pids(DEMAND_SMOKE_SLOT);

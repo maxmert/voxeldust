@@ -136,6 +136,8 @@ fn every_arm() -> Vec<InterShardFlow> {
             transfer: TransferId(9),
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             step_id: FLUSH_SOURCE_STEP,
+            to_realm: RealmId::System(0),
+            to_parent: None,
         }),
         InterShardFlow::TransferAck(TransferAck::SourceFlushed {
             transfer_id: TransferId(10),
@@ -305,6 +307,12 @@ fn every_arm() -> Vec<InterShardFlow> {
             observer: AccountId(5),
             realms: vec![],
         }),
+        // Per-realm AoI observation cascade (parent → active child). FireAndForget / Unreliable — a per-tick
+        // latest-wins realm-pose relay, NOT producer-less, so the golden pin below still asserts exactly TWO.
+        InterShardFlow::RealmCascade(vd_wire::intershard::RealmCascade {
+            child: demand_child_coord(),
+            realm_snapshot_bytes: vec![1, 2, 3],
+        }),
     ]
 }
 
@@ -351,7 +359,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::RealmDemand(_)
         | InterShardFlow::ShardPresence(_)
         | InterShardFlow::OccupantInterest(_)
-        | InterShardFlow::ProxySceneSet(_) => {}
+        | InterShardFlow::ProxySceneSet(_)
+        | InterShardFlow::RealmCascade(_) => {}
     }
 }
 
@@ -439,6 +448,9 @@ fn durability_class_pins_the_producer_less_reliable_set() {
             // VU AoI S2a: the occupant-position up-flow is a latest-wins datagram (Unreliable), NOT
             // producer-less — so the golden `producer_less.len() == 2` pin below is unchanged.
             InterShardFlow::OccupantInterest(_) => FlowDurabilityClass::Unreliable,
+            // Per-realm observation cascade: latest-wins realm poses (Unreliable), NOT producer-less — so the
+            // golden `producer_less.len() == 2` pin below is unchanged.
+            InterShardFlow::RealmCascade(_) => FlowDurabilityClass::Unreliable,
             InterShardFlow::Transfer(env)
                 if matches!(env.payload, TransitionPayload::TransientBatch { .. }) =>
             {

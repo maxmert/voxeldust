@@ -166,11 +166,22 @@ enum Placement {
     Orbital(OrbitalElements),
 }
 
-/// The static tick-0 epoch center of a placement as a `cell == ZERO` [`LatticePos`] (D-41: step-1
-/// keeps `cell == ZERO`; the moving ephemeris re-derives the live origin per tick at step-2). A
-/// branchless shim over [`placement_offset`] (HR5: the one match lives in the monomorphic helper).
-fn epoch_offset_in_parent(placement: Placement) -> LatticePos {
-    LatticePos::local(placement_offset(placement))
+/// The region CENTER a body's boundary sits at IN ITS OWN FRAME, as a `cell == ZERO` [`LatticePos`]:
+/// - a **moving** (`Orbital`) body authors its position LIVE through its frame
+///   ([`LocalFrames::with_moving_child`](crate::frame::LocalFrames::with_moving_child)), so its boundary is
+///   at the frame ORIGIN — center **ZERO**, NEVER the epoch. (This is the moving-realm crossing-flap fix: a
+///   nonzero epoch center would be DOUBLE-COUNTED against the live frame placement in
+///   [`region_signed_distance`](crate::geometry::region_signed_distance) — shifting the SOI ~one orbit off
+///   the body, so the parent shard and the body's own shard disagree on containment and a crossing flaps.)
+/// - a **`StaticOffset`** body's frame is the identity, so its fixed offset IS the boundary center.
+///
+/// Walk scale is ALL `StaticOffset` ⇒ unchanged ⇒ byte-identical; only the visual/canonical movers flip to
+/// ZERO (whose live pose every other consumer — demand, AoI, feed, render — already reads from the frame).
+fn region_center_of(placement: Placement) -> LatticePos {
+    match placement {
+        Placement::Orbital(_) => LatticePos::local(DVec3::ZERO),
+        Placement::StaticOffset(_) => LatticePos::local(placement_offset(placement)),
+    }
 }
 
 /// The frame-local offset of a placement. `Orbital` evaluates [`orbital_state`] ONCE at tick 0
@@ -203,7 +214,7 @@ fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmReg
                 .expect("aoi band edges are valid by construction");
             RealmRegion {
                 realm: b.realm,
-                center: epoch_offset_in_parent(b.placement),
+                center: region_center_of(b.placement),
                 frame: frame_for_realm(b.realm, b.parent)
                     .expect("roster realms have a canonical frame"),
                 shape: b.shape,
@@ -549,6 +560,28 @@ pub fn container_coord_at(_seed_universe: u64, config: &UniverseConfig, pos: DVe
     coord
 }
 
+/// The full Universe-rooted lineage [`RealmCoord`] of `realm` within a neighbourhood forest — the
+/// un-lossy `RealmId`→`RealmCoord` the RLM demand ledger keys on (NOT a `lowered()` single level). This is
+/// what lets a source shard, holding only a crossing DEST's `RealmId`, address a `KeepAlive` demand at that
+/// dest's WHOLE ancestor chain (`ancestor_close` truncates the coord's parents) so the dest cannot be
+/// reaped out from under a player crossing INTO it. `None` only for a [`RealmId::Ship`] (entity-backed, no
+/// seed [`RealmLevel`] — a crossing dest is never a ship). Monomorphic (HR5): the ONE realm-KIND decision
+/// is [`level_of`]'s already-covered match; this just walks parent pointers root-ward.
+///
+/// CONTRACT: `realm` MUST be present in `regions` — an unknown realm yields a bogus 1-level coord
+/// (`ancestor_realms` returns `[realm]`). Callers satisfy this by only ever passing a dest the container
+/// fold produced from these SAME regions (`stub::RealmRegions::coord_of` is the sole caller).
+#[must_use]
+pub fn coord_of_realm(regions: &[RealmRegion], realm: RealmId) -> Option<RealmCoord> {
+    let chain = ancestor_realms(regions, realm); // leaf → root
+    let mut levels = Vec::with_capacity(chain.len());
+    for r in chain.iter().rev() {
+        // root → leaf
+        levels.push(level_of(*r)?); // `?` → None only on a ship (never a crossing dest)
+    }
+    RealmCoord::from_path(RealmPath::from_levels(levels))
+}
+
 /// The DEEPEST direct child of `parent` (a region with `.parent == Some(parent)`) whose boundary
 /// contains `pose`, or `None` when none does (the descend's stop). In a well-formed containment tree at
 /// most one direct child contains a point; [`region_depth`] is a deterministic tiebreak should a
@@ -716,12 +749,35 @@ pub fn realm_neighbourhood_for_held_config(
     held: &std::collections::BTreeSet<RealmId>,
     config: &UniverseConfig,
 ) -> Vec<RealmRegion> {
-    let all = realm_regions_for_walk_config(seed_universe, config);
-    // A realm is IN-SCOPE iff it is an ancestor of, or a child of, ANY held realm. Collect the qualifying
-    // realm set first (deduped), then filter the canonical forest ONCE so the output keeps forest order.
+    neighbourhood_scope(&realm_regions_for_walk_config(seed_universe, config), held)
+}
+
+/// The config twin of [`realm_neighbourhood_for_held_config`] over the SYSTEM forest (orbiting planets) — the
+/// scope a `Visual`/`VisualDemand` shard boots. A planet shard thus evaluates containment against its OWN
+/// realm + its ancestor chain + the children IT authors, and NEVER its sibling planets — the direct cure for
+/// the origin-stacking re-home flap (a shard cannot place a realm it does not author, so it must not fold it).
+/// Same ancestors-union-direct-children scope, over [`realm_regions_for_config`] instead of the walk forest.
+/// One filter (HR3). Closed-form `f(seed, held, config)`, replicated by construction (HR1).
+#[must_use]
+pub fn realm_neighbourhood_for_config(
+    seed_universe: u64,
+    held: &std::collections::BTreeSet<RealmId>,
+    config: &UniverseConfig,
+) -> Vec<RealmRegion> {
+    neighbourhood_scope(&realm_regions_for_config(seed_universe, config), held)
+}
+
+/// The ancestors-union-direct-children ("never siblings") filter over an ALREADY-BUILT forest — the shared
+/// core of both neighbourhood builders (HR3, DRY). A realm is IN-SCOPE iff it is an ancestor of, or a direct
+/// child of, ANY held realm. Collect the qualifying realm set first (deduped), then filter the forest ONCE so
+/// the output keeps forest order (deterministic boot depth-key/guard results).
+fn neighbourhood_scope(
+    all: &[RealmRegion],
+    held: &std::collections::BTreeSet<RealmId>,
+) -> Vec<RealmRegion> {
     let mut scope: std::collections::BTreeSet<RealmId> = std::collections::BTreeSet::new();
     for &hosted in held {
-        for a in ancestor_realms(&all, hosted) {
+        for a in ancestor_realms(all, hosted) {
             scope.insert(a);
         }
         for r in all.iter().filter(|r| r.parent == Some(hosted)) {
@@ -1505,6 +1561,32 @@ mod tests {
     }
 
     #[test]
+    fn coord_of_realm_resolves_the_full_root_rooted_lineage_and_is_none_for_a_ship() {
+        // The un-lossy RealmId→RealmCoord a source shard uses to KeepAlive-demand a crossing DEST's whole
+        // ancestor chain (the Symptom-B freeze fix). A System resolves to [Universe, Galaxy, System]; a
+        // Planet one level deeper; a ship (entity-backed, no seed level) resolves to None.
+        let regions = realm_regions_for(0);
+        let want_sys = RealmCoord::from_path(RealmPath::from_levels(vec![
+            level_of(UNIVERSE).expect("Universe is a seed realm"),
+            level_of(GALAXY).expect("Galaxy is a seed realm"),
+            level_of(SYSTEM_A).expect("System A is a seed realm"),
+        ]))
+        .expect("a 3-level path has a leaf");
+        let want_planet = want_sys.child(level_of(PLANET_A).expect("Planet A is a seed realm"));
+        assert_eq!(coord_of_realm(&regions, SYSTEM_A), Some(want_sys));
+        assert_eq!(want_planet.path().levels().len(), 4); // full lineage, never lowered()
+        assert_eq!(coord_of_realm(&regions, PLANET_A), Some(want_planet));
+        // A ship is entity-backed (no seed RealmLevel) ⇒ None — the `?` early-return arm.
+        let ship = RealmId::Ship(crate::ids::EntityId::pack(
+            crate::entity_kind::EntityKind::Ship,
+            1,
+            1,
+            1,
+        ));
+        assert_eq!(coord_of_realm(&regions, ship), None);
+    }
+
+    #[test]
     fn region_signed_distance_is_frame_aware_and_identity_at_p3() {
         let rs = regions();
         let system_a = rs
@@ -1640,6 +1722,47 @@ mod tests {
             realms.len(),
             6,
             "6 distinct regions (7-forest minus the sibling System B)"
+        );
+    }
+
+    #[test]
+    fn realm_neighbourhood_for_config_excludes_sibling_planets_over_the_visual_forest() {
+        // The flap cure at VISUAL scale: a planet shard's neighbourhood is its own realm + ancestors + the
+        // children it authors — NEVER its sibling planets. A shard cannot place a realm it does not author, so
+        // folding a sibling collapses it to the origin and a hosted occupant reads as inside all of them at
+        // once (the production hot-potato). Unlike the walk forest, the visual system forest has MULTIPLE
+        // orbiting planets, so this is where the exclusion actually bites.
+        let cfg = UniverseConfig::visual_scale();
+        let forest = realm_regions_for_config(0, &cfg);
+        let planets: Vec<RealmId> = forest
+            .iter()
+            .filter(|r| matches!(r.realm, RealmId::Planet(_)))
+            .map(|r| r.realm)
+            .collect();
+        assert!(
+            planets.len() >= 2,
+            "the visual forest must have sibling planets to distinguish (got {planets:?})",
+        );
+        let target = planets[0];
+        let sibling = planets[1];
+        let parent = forest
+            .iter()
+            .find(|r| r.realm == target)
+            .and_then(|r| r.parent)
+            .expect("a visual-forest planet has a parent system");
+        let scope: Vec<RealmId> =
+            realm_neighbourhood_for_config(0, &std::collections::BTreeSet::from([target]), &cfg)
+                .iter()
+                .map(|r| r.realm)
+                .collect();
+        assert!(scope.contains(&target), "own realm is in scope");
+        assert!(
+            scope.contains(&parent),
+            "the parent system (an ancestor) is in scope",
+        );
+        assert!(
+            !scope.contains(&sibling),
+            "a SIBLING planet is NEVER in scope — the origin-stacking flap cure",
         );
     }
 
@@ -1807,9 +1930,9 @@ mod tests {
     }
 
     #[test]
-    fn to_regions_lowers_an_orbital_body_to_a_static_cell_zero_center() {
-        // The Orbital placement arm (canonical/seed_derived bodies; not live at walk scale) lowers
-        // via orbital_state(e, 0.0) into a cell == ZERO center — the arm the walk gate never hits.
+    fn to_regions_gives_an_orbital_body_a_zero_center_position_authored_by_the_frame() {
+        // The Orbital placement arm: a moving body carries NO baked position — its boundary sits at the
+        // ZERO origin of its own frame; its live pose is authored through `LocalFrames::with_moving_child`.
         let elements = OrbitalElements {
             sma: 1.5e11,
             ecc: 0.1,
@@ -1828,8 +1951,28 @@ mod tests {
         let regions = to_regions(&[body], &UniverseConfig::canonical());
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].center.cell(), glam::I64Vec3::ZERO);
+        assert_eq!(regions[0].center.offset(), DVec3::ZERO);
+    }
+
+    #[test]
+    fn placement_offset_reads_static_verbatim_and_the_orbital_tick_zero_position() {
+        // The frame-local offset utility. `StaticOffset` returns its fixed vector verbatim; `Orbital`
+        // returns the tick-0 ephemeris position. `region_center_of` only ever feeds it `StaticOffset`
+        // (movers are frame-AUTHORED ⇒ ZERO center, the moving-frame fix), so its `Orbital` arm — the
+        // orbital-position fold the S2 own-absolute path reuses — is exercised directly here.
+        let v = DVec3::new(3.0, -4.0, 5.0);
+        assert_eq!(placement_offset(Placement::StaticOffset(v)), v);
+        let elements = OrbitalElements {
+            sma: 1.5e11,
+            ecc: 0.1,
+            inclination: 0.4,
+            raan: 0.3,
+            arg_periapsis: 0.9,
+            mean_anomaly_epoch: 0.2,
+            central_mass: 1.989e30,
+        };
         assert_eq!(
-            regions[0].center.offset(),
+            placement_offset(Placement::Orbital(elements)),
             orbital_state(&elements, 0.0).position
         );
     }
@@ -2260,19 +2403,23 @@ mod tests {
         141.83929464586896,
     ];
 
-    /// The single most-distant planet region (its epoch orbital position magnitude is the largest) — the
-    /// OUTER planet, the one the star-view visibility rule culls until an occupant closes in.
-    fn outer_planet_region(regions: &[RealmRegion]) -> RealmRegion {
-        *regions
+    /// The single most-distant planet region + its epoch ORBIT DISTANCE — the OUTER planet, the one the
+    /// star-view visibility rule culls until an occupant closes in. A moving realm's region.center is ZERO
+    /// (position authored via the frame), so the orbit distance is derived from the mover ELEMENTS, not the
+    /// region center.
+    fn outer_planet_orbit(config: &UniverseConfig) -> (RealmRegion, f64) {
+        let regions = realm_regions_for_config(0, config);
+        moving_children_for_config(0, config, SYSTEM_A)
             .iter()
-            .filter(|r| matches!(r.realm, RealmId::Planet(_)))
-            .max_by(|a, b| {
-                a.center
-                    .offset()
-                    .length()
-                    .total_cmp(&b.center.offset().length())
+            .map(|(realm, el)| {
+                let region = *regions
+                    .iter()
+                    .find(|r| r.realm == *realm)
+                    .expect("every mover has a region");
+                (region, orbital_state(el, 0.0).position.length())
             })
-            .expect("a planet region is present")
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("a planet mover is present")
     }
 
     #[test]
@@ -2314,10 +2461,9 @@ mod tests {
     fn visual_demand_band_is_crossable_for_the_outer_planet() {
         // Non-vacuous now (unlike the toy where 1.2×extent swallowed everything): the OUTER planet is OUT
         // of spin-up range at the star, so a ship flying out CROSSES its band — spin_up_r < outer orbit.
-        let regions = realm_regions_for_config(0, &UniverseConfig::visual_demand(15.0, 0.02));
-        let outer = outer_planet_region(&regions);
+        let (outer, orbit) = outer_planet_orbit(&UniverseConfig::visual_demand(15.0, 0.02));
         assert!(
-            outer.aoi.spin_up_r_m() < outer.center.offset().length(),
+            outer.aoi.spin_up_r_m() < orbit,
             "the outer planet is out of spin-up range at the star (crossable)"
         );
     }
@@ -2325,10 +2471,9 @@ mod tests {
     #[test]
     fn visual_demand_is_releasable_at_the_star() {
         // The mirror release fact: from the star the outer planet is past tear-down → released (reapable).
-        let regions = realm_regions_for_config(0, &UniverseConfig::visual_demand(15.0, 0.02));
-        let outer = outer_planet_region(&regions);
+        let (outer, orbit) = outer_planet_orbit(&UniverseConfig::visual_demand(15.0, 0.02));
         assert!(
-            outer.aoi.tear_down_r_m() < outer.center.offset().length(),
+            outer.aoi.tear_down_r_m() < orbit,
             "the outer planet releases from the star (tear-down < outer orbit distance)"
         );
     }
@@ -2389,21 +2534,83 @@ mod tests {
     }
 
     #[test]
-    fn realm_regions_for_config_bakes_each_planet_orbital_epoch_at_cell_zero() {
+    fn realm_regions_for_config_gives_each_moving_planet_a_zero_center() {
         let config = UniverseConfig::visual_scale();
         let bodies = generate_system_forest(0, &config);
         let regions = realm_regions_for_config(0, &config);
         assert_eq!(regions.len(), bodies.len());
-        // Each planet region lowers its Orbital placement to a cell==ZERO center at the tick-0 epoch —
-        // the `Placement::Orbital` lowering arm, now in a REAL (non-test) path.
+        // A moving (Orbital) planet authors its position LIVE through its frame, so its region carries NO
+        // baked position — center is the ZERO origin of its own frame. (The crossing-flap fix: a nonzero
+        // epoch center would be double-counted against the live frame placement in region_signed_distance.)
         for (body, region) in bodies.iter().zip(&regions).skip(3) {
-            let elements = orbital_of(body.placement).expect("a planet is Orbital");
+            assert!(orbital_of(body.placement).is_some(), "a planet is Orbital");
             assert_eq!(region.center.cell(), glam::I64Vec3::ZERO);
-            assert_eq!(
-                region.center.offset(),
-                orbital_state(&elements, 0.0).position
-            );
+            assert_eq!(region.center.offset(), DVec3::ZERO);
         }
+    }
+
+    /// FRAME-COHERENT CONTAINMENT (the moving-realm crossing fix): a moving planet's position is authored
+    /// ONCE — through its live frame placement (`LocalFrames::with_moving_child`) — and its region `center`
+    /// is ZERO (the boundary sits at the body's OWN frame origin). So an occupant sitting exactly at the
+    /// planet's live orbital position is judged INSIDE its SOI, and an occupant at the star (17.9 m away) is
+    /// OUTSIDE — the SAME geometry both the parent shard (planet as a moving child) and the planet's own
+    /// shard (planet at the identity) compute, so a crossing cannot flap. Regression guard against the epoch
+    /// `center` being double-counted against the frame placement (which put the SOI ~17.9 m off the planet).
+    #[test]
+    fn a_moving_planet_soi_is_centered_on_its_live_position_not_double_counted() {
+        use crate::celestial::secs_since_epoch;
+        use crate::frame::LocalFrames;
+        use crate::geometry::region_signed_distance;
+        use crate::pose::StampedPose;
+        let config = UniverseConfig::visual_scale();
+        let regions = realm_regions_for_config(0, &config);
+        let movers = moving_children_for_config(0, &config, SYSTEM_A);
+        let (realm, elements) = movers
+            .iter()
+            .min_by(|a, b| {
+                orbital_state(&a.1, 0.0)
+                    .position
+                    .length()
+                    .total_cmp(&orbital_state(&b.1, 0.0).position.length())
+            })
+            .cloned()
+            .expect("the visual forest has planet movers");
+        let region = regions
+            .iter()
+            .find(|r| r.realm == realm)
+            .expect("the mover realm has a region");
+        let root = regions
+            .iter()
+            .find(|r| r.parent.is_none())
+            .expect("the forest has a root")
+            .frame;
+        let tick_hz = 20.0;
+        let tick = crate::UniverseTick(200);
+        // A moving realm carries NO baked position — its center is the origin of its own frame.
+        assert_eq!(
+            region.center.offset(),
+            DVec3::ZERO,
+            "a moving planet's region.center must be ZERO (position authored via the frame)",
+        );
+        // The parent shard's ephemeris: the planet is a MOVING child at its live orbital position.
+        let ctx = LocalFrames::new(root, tick_hz).with_moving_child(region.frame, elements);
+        let live = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz)).position;
+        let soi = region.shape.finite_extent();
+        // Occupant sitting EXACTLY at the planet's live position (root frame) ⇒ INSIDE the SOI.
+        let at_planet = StampedPose::at_rest(root, live, tick);
+        let d_at =
+            region_signed_distance(&at_planet, region, &ctx).expect("the planet frame resolves");
+        // Occupant at the star origin (17.9 m from the planet) ⇒ OUTSIDE.
+        let at_star = StampedPose::at_rest(root, DVec3::ZERO, tick);
+        let d_star =
+            region_signed_distance(&at_star, region, &ctx).expect("the planet frame resolves");
+        // An occupant AT the planet's live position is inside its SOI (distance ≈ −SOI). Split asserts
+        // (not `a && b`) so neither short-circuit leaves an uncovered branch (HR5).
+        assert!(d_at < 0.0);
+        assert!((d_at + soi).abs() < 1e-9);
+        // An occupant at the star is outside by (orbit − SOI).
+        assert!(d_star > 0.0);
+        assert!((d_star - (live.length() - soi)).abs() < 1e-6);
     }
 
     #[test]

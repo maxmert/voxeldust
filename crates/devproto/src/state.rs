@@ -35,6 +35,19 @@ pub struct DevEntityRow {
     pub authoritative_sub: u32,
 }
 
+/// One DRAWN realm box (VU diagnosis): its realm id (canonical `Debug`) and the
+/// composited center it would render at (its `RealmBox.center_offset` in its own
+/// frame — through P3 the world-origin frames make this the world position). This is
+/// the render-plane twin of [`DevEntityRow`]: it exposes WHICH realms the client is
+/// drawing and WHERE, so a headless test can prove the streamed scene is present AND
+/// moving (a planet whose center changes across ticks is orbiting; a static container
+/// shell never moves). Always finite (sanitized).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevRealmBox {
+    pub realm: String,
+    pub center: [f64; 3],
+}
+
 /// The (P2) transfer view — empty-but-present so P2 transfer diagnosis is purely
 /// additive (a new variant), never a reshape of this type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +82,11 @@ pub struct DevState {
     pub universe_tick: Option<u64>,
     /// The composited render rows — each entity once, exactly what pixels show.
     pub entities: Vec<DevEntityRow>,
+    /// The DRAWN realm boxes (VU) — each realm the client is currently rendering, with
+    /// its composited center. Proves the streamed render-scene is present (a `Planet`
+    /// box appears once its `RealmSceneDelta` lands) and LIVE (its center moves as the
+    /// realm-pose feed overlays the orbit). Empty at walk scale (no realm scene streams).
+    pub realm_boxes: Vec<DevRealmBox>,
     // The honesty counters, classified so an agent reads them right: a nonzero FAULT
     // counter is a real problem; THROUGHPUT/BENIGN ones are not.
     /// THROUGHPUT: snapshots accepted by the §6.3 gate (proves frames are landing).
@@ -116,6 +134,10 @@ pub(crate) mod tests {
                 orient: [0.0, 0.0, 0.0, 1.0],
                 authoritative_sub: 0,
             }],
+            realm_boxes: vec![DevRealmBox {
+                realm: "Planet(7)".to_owned(),
+                center: [10.0, 0.0, 0.0],
+            }],
             snapshots_applied: 4,
             realm_frames_applied: 3,
             stale_frames_dropped: 1,
@@ -139,6 +161,8 @@ pub(crate) mod tests {
         assert!(json.contains("\"location\":\"System 7\""));
         // The orientation quat rides each row (x,y,z,w) — the identity here.
         assert!(json.contains("\"orient\":[0.0,0.0,0.0,1.0]"));
+        // The drawn realm box rides its realm id + composited center.
+        assert!(json.contains("\"realm\":\"Planet(7)\""));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         let back: DevState = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, state);

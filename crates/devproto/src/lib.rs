@@ -52,7 +52,7 @@ pub mod state;
 pub use codec::{decode_request, encode_response};
 pub use dispatch::{DevError, DevRequest, DevResponse, InputAction, MAX_ACTION_INDEX, action_bit};
 pub use predicate::{WaitField, WaitOp, WaitPredicate};
-pub use state::{DevEntityRow, DevPhase, DevState, DevTransferView};
+pub use state::{DevEntityRow, DevPhase, DevRealmBox, DevState, DevTransferView};
 
 /// Ports reserved at the front of every slot block for the fixed cluster nodes
 /// (orchestrator, gateway, shard, admin, the S3 per-node /healthz+/readyz probe

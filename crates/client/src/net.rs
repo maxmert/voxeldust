@@ -16,7 +16,7 @@
 //! invariant and forward-compatibility, enforced without a crash.
 
 use vd_core::{EntityId, NodeId, SessionId, TickId};
-use vd_devproto::{DevEntityRow, DevPhase, DevState, DevTransferView, InputAction};
+use vd_devproto::{DevEntityRow, DevPhase, DevRealmBox, DevState, DevTransferView, InputAction};
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
     ClientControlMsg, EventMsg, InputDatagram, RealmSnapshotDatagram, ServerControlMsg,
@@ -476,7 +476,13 @@ impl ClientState {
         } else {
             Arc::new(self.scene.overlaid(&self.realm_view))
         };
-        RenderSnapshot::with_scene(self.view.clone(), self.render_clock, self.phase, scene)
+        RenderSnapshot::with_scene(
+            self.view.clone(),
+            self.render_clock,
+            self.phase,
+            scene,
+            self.realm_view.clone(),
+        )
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
@@ -501,13 +507,29 @@ impl ClientState {
                     .into_iter()
                     .map(|(entity, sub, pose)| DevEntityRow {
                         entity: entity.to_string(),
-                        pos: sanitize_vec3(pose.pos),
+                        // The COMPOSITED WORLD pose (its doc's promise): map the frame-local delivered
+                        // pose through world_pos so an occupant on a moving realm reports where it RIDES
+                        // (composed with its realm's streamed placement), not its raw frame-local offset.
+                        pos: sanitize_vec3(self.view.world_pos(&pose, &self.realm_view, cursor)),
                         orient: sanitize_quat(pose.orient),
                         authoritative_sub: sub.0,
                     })
                     .collect()
             })
             .unwrap_or_default();
+        // The DRAWN realm boxes (VU diagnosis) — the SAME overlaid scene `render_snapshot`
+        // publishes to the renderer (boot/streamed boxes with each streamed realm's live
+        // pose overlaid). A `Planet` row proves its `RealmSceneDelta` landed; a center that
+        // moves across ticks proves the realm-pose feed is overlaying (the frozen-planet gate).
+        let realm_boxes = self
+            .render_snapshot()
+            .scene()
+            .iter()
+            .map(|(realm, b)| DevRealmBox {
+                realm: format!("{realm:?}"),
+                center: sanitize_vec3(b.center_offset),
+            })
+            .collect();
         DevState {
             phase: dev_phase(self.phase),
             session: self.session.map(|s| s.to_string()),
@@ -521,6 +543,7 @@ impl ClientState {
             render_cursor,
             universe_tick: self.latest_universe_tick,
             entities,
+            realm_boxes,
             snapshots_applied: self.snapshots_applied,
             realm_frames_applied: self.realm_view.frames_applied(),
             // SUM both feeds' faults — the realm feed computes+exposes its OWN stale/NaN counts, so a
@@ -1505,6 +1528,38 @@ mod tests {
         assert!(snap.scene().get(RealmId::System(7)).is_some());
     }
 
+    #[test]
+    fn devstate_exposes_the_overlaid_realm_boxes_for_the_agent_harness() {
+        // The `realm_boxes` diagnostic (HR6): `devstate` maps the SAME overlaid scene `render_snapshot`
+        // publishes into one `DevRealmBox` per drawn realm, so a `vdctl` run can assert a realm landed
+        // and its center moves. Load a one-box scene and confirm the row shows up labelled by its realm.
+        use vd_core::geometry::{CrossEffect, RealmBoundary};
+        use vd_core::pose::{LatticePos, RealmId};
+        let mut c = core();
+        let scene = RealmScene::from_boundaries(&[RealmBoundary::shell(
+            RealmId::System(7),
+            LatticePos::local(DVec3::ZERO),
+            1000.0,
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            RealmId::System(7),
+            CrossEffect::Authority,
+        )])
+        .expect("scene");
+        c.state_mut().load_scene(scene);
+        let dev = c.state().devstate(0.0, 0, 0);
+        assert_eq!(dev.realm_boxes.len(), 1);
+        assert_eq!(
+            dev.realm_boxes[0].realm,
+            format!("{:?}", RealmId::System(7))
+        );
+    }
+
     /// One streamed render shape (VU proto_minor 5): a realm at origin with a `Shell{r}` boundary — `r`
     /// large ⇒ an ambient (skipped) shell, `r` small ⇒ a finite drawn leaf.
     fn realm_shape(
@@ -1600,7 +1655,8 @@ mod tests {
     /// A `RealmSceneDelta` control-message fixture (VU AoI, minor 6): realms that entered (`added`) + left
     /// (`removed`).
     fn realm_scene_delta(added: Vec<RealmShape>, removed: Vec<vd_core::pose::RealmId>) -> Vec<u8> {
-        postcard::to_allocvec(&ServerControlMsg::RealmSceneDelta { added, removed }).expect("fixture")
+        postcard::to_allocvec(&ServerControlMsg::RealmSceneDelta { added, removed })
+            .expect("fixture")
     }
 
     #[test]
@@ -1611,7 +1667,10 @@ mod tests {
         c.transport.deliver(
             GATEWAY,
             MsgClass::Control,
-            realm_scene_delta(vec![realm_shape(RealmId::Planet(7), None, 10.0)], Vec::new()),
+            realm_scene_delta(
+                vec![realm_shape(RealmId::Planet(7), None, 10.0)],
+                Vec::new(),
+            ),
         );
         c.step(0.0);
         assert!(
@@ -1622,7 +1681,11 @@ mod tests {
                 .is_some(),
             "the entered realm streams onto the render seam"
         );
-        assert_eq!(c.state().dropped_counts().0, 0, "a well-formed delta is no error");
+        assert_eq!(
+            c.state().dropped_counts().0,
+            0,
+            "a well-formed delta is no error"
+        );
         // A follow-up delta REMOVING it ⇒ the box leaves the seam (the view moved on).
         c.transport.deliver(
             GATEWAY,
@@ -1647,7 +1710,10 @@ mod tests {
         c.transport.deliver(
             GATEWAY,
             MsgClass::Control,
-            realm_scene_delta(vec![realm_shape(RealmId::Planet(7), None, 10.0)], Vec::new()),
+            realm_scene_delta(
+                vec![realm_shape(RealmId::Planet(7), None, 10.0)],
+                Vec::new(),
+            ),
         );
         c.step(0.0);
         assert_eq!(c.state().render_snapshot().scene().len(), 1);

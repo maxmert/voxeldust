@@ -22,6 +22,7 @@ use vd_wire::channels::SubId;
 use crate::interp::RenderPose;
 use crate::net::ClientPhase;
 use crate::realm_scene::RealmScene;
+use crate::realm_view::RealmView;
 use crate::render_clock::RenderClock;
 use crate::view::DeliveredView;
 
@@ -39,29 +40,43 @@ pub struct RenderSnapshot {
     /// clone of the snapshot is a pointer bump, never a deep copy of the box map. Default EMPTY
     /// (no boxes until a scene is loaded), so every existing pose-only path is unchanged.
     scene: Arc<RealmScene>,
+    /// The streamed LIVE realm placements (the SAME `RealmView` that moves the scene boxes) — carried on
+    /// the render seam so [`RenderSnapshot::world_pos`] can compose an occupant against its containing
+    /// realm's placement (so it RIDES its moving realm). A `BTreeMap` of `Copy` tracks — clone is cheap.
+    /// Default EMPTY (walk/static scale), so every pose-only path stays byte-identical.
+    realm_view: RealmView,
 }
 
 impl RenderSnapshot {
     /// A snapshot with NO realm boxes (the pose-only default — every pre-V2 construction site).
     #[must_use]
     pub fn new(view: DeliveredView, clock: RenderClock, phase: ClientPhase) -> RenderSnapshot {
-        RenderSnapshot::with_scene(view, clock, phase, Arc::new(RealmScene::default()))
+        RenderSnapshot::with_scene(
+            view,
+            clock,
+            phase,
+            Arc::new(RealmScene::default()),
+            RealmView::default(),
+        )
     }
 
-    /// A snapshot carrying a boot-loaded [`RealmScene`] on the render seam (V2). The `Arc` is the
-    /// one the core holds — cloning the snapshot each step just bumps its refcount.
+    /// A snapshot carrying a boot-loaded [`RealmScene`] + the streamed realm placements on the render
+    /// seam (V2). The `Arc` is the one the core holds — cloning the snapshot each step just bumps its
+    /// refcount.
     #[must_use]
     pub fn with_scene(
         view: DeliveredView,
         clock: RenderClock,
         phase: ClientPhase,
         scene: Arc<RealmScene>,
+        realm_view: RealmView,
     ) -> RenderSnapshot {
         RenderSnapshot {
             view,
             clock,
             phase,
             scene,
+            realm_view,
         }
     }
 
@@ -104,7 +119,7 @@ impl RenderSnapshot {
     #[must_use]
     pub fn world_pos(&self, pose: &RenderPose, now_s: f64) -> DVec3 {
         let cursor = self.clock.cursor(now_s).unwrap_or(0.0);
-        self.view.world_pos(pose, cursor)
+        self.view.world_pos(pose, &self.realm_view, cursor)
     }
 
     /// The freshest delivered universe tick (the run-stable capture-alignment quantity);
@@ -200,6 +215,7 @@ mod tests {
             RenderClock::new(ClientInterpTuning::DEFAULT),
             ClientPhase::Active,
             Arc::new(scene),
+            RealmView::default(),
         );
         assert_eq!(s.scene().len(), 1, "the loaded box is carried on the seam");
         assert_eq!(
@@ -278,6 +294,7 @@ mod tests {
         // pose is still the identity, so it is finite and correct.
         let pose = RenderPose {
             frame: FrameRef::SystemSpace { system_seed: 1 },
+            cell: glam::I64Vec3::ZERO,
             pos: DVec3::new(1.0, 2.0, 3.0),
             orient: glam::DQuat::IDENTITY,
         };

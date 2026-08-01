@@ -290,6 +290,23 @@ pub enum InterShardFlow {
     /// `FireAndForget` (no fence, mutates no sim state — render bookkeeping only) + `ReDriven` (reliable; a
     /// lost set self-heals on the next change, re-sent from the parent's RAM — no durable outbox). APPENDED.
     ProxySceneSet(ProxySceneSet),
+    /// PARENT → active CHILD realm — the per-realm AoI OBSERVATION cascade (the sibling live-pose feed). A
+    /// parent AUTHORS every child's live pose, so once a child realm is ACTIVE (spun up, holding players) the
+    /// parent ships the moving realms it authors DOWN to that child's shard ONCE PER TICK, keyed PER REALM
+    /// (`child`), NOT per player — the parent reads the child's OWN authored position, never a player report.
+    /// The child re-fans the OPAQUE bytes to its own subscribers on the existing [`ShardToGateway::RealmFrame`]
+    /// path, so the crossed player keeps seeing the rest of the system orbit while it moves WITH the realm it
+    /// entered. Payload is an ALREADY-SERIALIZED [`crate::channels::RealmSnapshotDatagram`] (the PARENT's
+    /// `frame_id` sealed INSIDE) — carried opaquely so the relay is structurally UNABLE to re-stamp it (the
+    /// client's per-`RealmId` high-water demands the single authoring shard's monotone counter). Cross-server
+    /// cost is O(active child realms); the per-player fan is the gateway's existing `subscribers_of`. This is
+    /// the WHERE lane (positions); the WHAT lane (terrain/constructions at the LOD the observed realm controls)
+    /// is a future ADDITIVE payload on this SAME routing — the observation graph is the reusable foundation.
+    /// The idiomatic per-realm twin of [`InterShardFlow::OccupantInterest`] — the same unreliable transport
+    /// lane (`MsgClass::SignalDelta`, NOT the P9 Signal bus), `FireAndForget` + `Unreliable` (per-tick
+    /// latest-wins; a lost frame self-heals next tick). Carries ONLY the `child` lineage coord (public) + the
+    /// opaque public-geometry bytes — NO gateway / session (HR1). APPENDED.
+    RealmCascade(RealmCascade),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -487,6 +504,9 @@ impl InterShardFlow {
             // carries no transfer trigger or authority-gating state — a pure re-derivable position hint,
             // loss-tolerant (self-heals next tick) ⇒ FireAndForget.
             InterShardFlow::OccupantInterest(_) => EffectClass::FireAndForget,
+            // The per-realm observation cascade mutates no sim state at the child — it re-fans opaque
+            // render bytes (latest-wins), never a fence/transfer trigger.
+            InterShardFlow::RealmCascade(_) => EffectClass::FireAndForget,
             // VU AoI S2c — a public-geometry render reflection; no fence, no transfer trigger, mutates no sim
             // state at the home (render bookkeeping only). A re-delivered set is idempotent (full-set reconcile).
             InterShardFlow::ProxySceneSet(_) => EffectClass::FireAndForget,
@@ -565,6 +585,9 @@ impl InterShardFlow {
             // `GhostFlow::Delta`) — a lost hint self-heals on the next tick's re-assertion, never a durable
             // outbox burden ⇒ Unreliable (NOT producer-less; the golden pin below still asserts exactly TWO).
             InterShardFlow::OccupantInterest(_) => FlowDurabilityClass::Unreliable,
+            // Per-tick latest-wins realm poses — a lost frame self-heals next tick (the RealmSnapshot
+            // datagram contract), NOT reliable (would flood the ReDriven lane at 20 Hz).
+            InterShardFlow::RealmCascade(_) => FlowDurabilityClass::Unreliable,
             // VU AoI S2c — RELIABLE (a lost set-change would blink a neighbour) but RE-DRIVEN, not
             // producer-less: on any loss / crash / shed the parent re-sends the full set from its RAM store
             // and the home reconciles it — no durable outbox (the level full-set IS the recovery).
@@ -650,6 +673,21 @@ pub struct ProxySceneSet {
     pub realms: Vec<crate::channels::RealmShape>,
 }
 
+/// The per-realm observation-cascade payload (the sibling live-pose feed) — see
+/// [`InterShardFlow::RealmCascade`]. The parent ships THIS to each ACTIVE child realm per tick.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RealmCascade {
+    /// The TARGET child realm (routing key). The child validates `child.lowered() == own` (the same guard
+    /// the occupant up-relay uses) and drops a mis-route; lineage-anchored so it is globally unique.
+    pub child: RealmCoord,
+    /// An ALREADY-SERIALIZED [`crate::channels::RealmSnapshotDatagram`] — the moving realms the PARENT
+    /// authors, with the PARENT's `frame_id` sealed INSIDE. Carried OPAQUELY: the child never decodes it, it
+    /// drops these bytes verbatim into a [`crate::channels::ShardToGateway::RealmFrame`], so the frame_id is
+    /// STRUCTURALLY un-re-stampable at the relay (the client's per-`RealmId` high-water requires the one
+    /// authoring shard's monotone counter). One serialize at the authoring parent, refcount-cloned per child.
+    pub realm_snapshot_bytes: Vec<u8>,
+}
+
 /// Orchestrator → SOURCE shard pose-flush request (Slice 1d.1). The source finds the held dot for
 /// `subject` and replies [`TransferAck::SourceFlushed`] with the dot's authoritative pose. The
 /// `step_id` is always [`FLUSH_SOURCE_STEP`]; it is carried (not a bare const at the use site) so
@@ -659,6 +697,14 @@ pub struct FlushSource {
     pub transfer: TransferId,
     pub subject: DirectoryKey,
     pub step_id: u32,
+    /// The destination realm the crossing resolved to (the saga's `to_realm`) — carried so the SOURCE shard
+    /// REBASES the flushed pose into the dest realm's LIVE frame (via its own ephemeris) before shipping it.
+    /// The source is the frame-authority for its children, so IT authors the dest-frame pose; the transfer
+    /// machinery never reads another realm's ephemeris (HR1). `to_parent` supplies an `Area` dest's planet
+    /// (`frame_for_realm`); `None` for every one-field realm kind. A mesh type (one cluster build), so the
+    /// added fields are not client-negotiated. At walk scale the dest frame is identity ⇒ rebase is a no-op.
+    pub to_realm: RealmId,
+    pub to_parent: Option<RealmId>,
 }
 
 /// Orchestrator → SOURCE shard ORDERED-demote command (Slice 1d.5b). The source finds the held dot
@@ -1316,6 +1362,8 @@ mod tests {
             transfer: TransferId(11),
             subject: DirectoryKey::Entity(eid(EntityKind::Player)),
             step_id: FLUSH_SOURCE_STEP,
+            to_realm: RealmId::System(0),
+            to_parent: None,
         });
         assert_eq!(
             flush.effect_class(),
@@ -1781,6 +1829,8 @@ mod tests {
                 transfer: TransferId(1),
                 subject: DirectoryKey::Entity(eid(EntityKind::Player)),
                 step_id: FLUSH_SOURCE_STEP,
+                to_realm: RealmId::System(0),
+                to_parent: None,
             }),
             InterShardFlow::TransferAck(TransferAck::SourceFlushed {
                 transfer_id: TransferId(1),

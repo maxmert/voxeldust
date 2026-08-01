@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use glam::{DQuat, DVec3};
+use glam::{DQuat, DVec3, I64Vec3};
 
 use crate::celestial::{OrbitalElements, orbital_state, secs_since_epoch};
 use crate::ids::UniverseTick;
@@ -27,6 +27,13 @@ use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose, frame_for_realm};
 /// All four come from the ephemeris closed-form; P1 uses the identity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FramePlacement {
+    /// Integer CELL anchor of this frame's origin in the parent frame (parent tier units) — the
+    /// exact-integer coarse part of the origin position, companion to `origin` (its sub-cell f64
+    /// residual). Through P3 every placement is at `ZERO` (the ephemeris returns small system-local
+    /// origins that ride entirely in `origin`); the field is planted so the S5 cross-cell re-base in
+    /// [`transfer_frame`] carries the dest cell instead of the current cell-0 write. Byte-floor: with
+    /// `origin_cell == ZERO` the dest pose is exactly `LatticePos::local(new_pos)` as before.
+    pub origin_cell: I64Vec3,
     /// Parent-frame position of this frame's origin (metres).
     pub origin: DVec3,
     /// Parent-frame velocity of this frame's origin (m/s).
@@ -43,6 +50,7 @@ impl FramePlacement {
     #[must_use]
     pub fn identity() -> FramePlacement {
         FramePlacement {
+            origin_cell: I64Vec3::ZERO,
             origin: DVec3::ZERO,
             velocity: DVec3::ZERO,
             orientation: DQuat::IDENTITY,
@@ -55,6 +63,7 @@ impl FramePlacement {
     #[must_use]
     pub fn moving(origin: DVec3, velocity: DVec3) -> FramePlacement {
         FramePlacement {
+            origin_cell: I64Vec3::ZERO,
             origin,
             velocity,
             orientation: DQuat::IDENTITY,
@@ -126,12 +135,14 @@ fn transfer_frame_resolved(
     let from = from.ok_or(FrameError::UnknownSourceFrame)?;
     let dest = dest.ok_or(FrameError::UnknownDestFrame)?;
 
-    // 1. Lift the local pose into the common parent frame. (P1-P3: cell is ZERO, so `offset()` is the
-    // full frame-local position. The exact-integer cross-cell re-base — lift source cell+offset at the
-    // source tier, re-quantize `new_pos` into the DEST frame's cell at its tier unit, replacing the
-    // provisional `LatticePos::local(new_pos)` cell-0 write below — lands WITH P4/P5 re-centering, galaxy
-    // ly-cells at P10. D-41 plant-item 2 ["exact-integer re-base in transfer_frame"].)
-    let local = pose.pos.offset();
+    // 1. Lift the local pose into the common parent frame, reconstructing the FULL source-frame position
+    // = source-tier cell metres + the f64 offset, so a non-zero source cell is NOT silently dropped (S0
+    // of the floating-origin plan). Through P3 `cell == ZERO`, so this is exactly `offset()` —
+    // byte-identical. The origin CELL anchors (`from.origin_cell`/`dest.origin_cell`, `ZERO` through P3)
+    // and the DEST-side re-quantization of `new_pos` back into dest-tier cells (which would push the dest
+    // pose off cell-0 and change the wire bytes) fold in WITH the P4/P5 re-centering — the dest write
+    // stays cell-0 here to hold the byte-floor; galaxy ly-cells at P10. D-41 plant-item 2.
+    let local = pose.pos.offset() + pose.pos.cell().as_dvec3() * pose.frame.tier().cell_edge_m();
     let world_pos = from.origin + from.orientation * local;
     let lever = from.orientation * local;
     let world_vel =
@@ -250,10 +261,13 @@ impl FrameContext for LocalFrames {
 /// Rebind an authoritative pose into the frame of its destination realm — the ONE machinery (HR3) every
 /// cross-realm hand-off uses to re-express a source-frame pose so the dest reads it in its OWN frame: the
 /// durable crossing (`build_crossing`), the D-37 forward re-home (`build_rehome`), and the D-7 transient
-/// batch (`emit_transient_batch`) all funnel through here. Through P1-P3 [`IdentityFrames`] makes this a
-/// pure FRAME-field rebind — position/velocity/orientation UNCHANGED, only the frame label flips to the
-/// dest realm (the dot stays put while its HUD realm advances). P4/P8/P10 swap in the closed-form
-/// ephemeris `FrameContext` for the real transform with NO caller reshape (frozen signature).
+/// batch (`emit_transient_batch`) all funnel through here. The caller supplies the frame context `ctx`: a
+/// shard passes its LIVE ephemeris ([`LocalFrames`]) so a crossing INTO a MOVING realm REBASES the position
+/// by the dest realm's live placement (`transfer_frame` does the rigid-body transform) — so the source and
+/// the dest read the SAME containment and the crossing cannot flap. A context-free caller passes
+/// [`IdentityFrames`] for a pure FRAME-field relabel (position UNCHANGED — the dest realm is static, or walk
+/// scale where every placement is the identity, so the two are equivalent). Cell-0 today; the exact-integer
+/// cross-cell rebase (D-41) lands with P4/P5 re-centering, NO caller reshape (frozen signature).
 ///
 /// `to_parent` supplies the dest realm's PARENT provenance — the one field [`frame_for_realm`] needs to
 /// build the lossy arm: an `Area` frame carries `{planet_seed, area_seed}`, so re-expressing a pose into
@@ -266,9 +280,10 @@ pub fn rebind_pose_to_dest(
     pose: StampedPose,
     to_realm: RealmId,
     to_parent: Option<RealmId>,
+    ctx: &impl FrameContext,
 ) -> StampedPose {
     frame_for_realm(to_realm, to_parent)
-        .and_then(|dest_frame| transfer_frame(&pose, dest_frame, &IdentityFrames).ok())
+        .and_then(|dest_frame| transfer_frame(&pose, dest_frame, ctx).ok())
         .unwrap_or(pose)
 }
 
@@ -314,6 +329,47 @@ mod tests {
     }
 
     #[test]
+    fn transfer_preserves_a_nonzero_source_cell_in_the_lifted_position() {
+        // S0: the lift reconstructs the FULL source position (cell millimetres + f64 offset), so a
+        // non-zero source cell is NOT silently dropped. Under IdentityFrames a cross-frame transfer
+        // re-expresses the frame while leaving the position unchanged — so the dest offset carries the
+        // source cell's metres.
+        let cell = I64Vec3::new(1_000_000, 0, 0); // 1e6 mm at 1 mm/cell = 1000 m
+        let pose = StampedPose {
+            frame: sys(),
+            pos: LatticePos::at(cell, DVec3::new(0.5, -0.25, 0.75)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(100),
+        };
+        let out = transfer_frame(&pose, planet(), &IdentityFrames).expect("identity transfer");
+        let want = DVec3::new(1000.5, -0.25, 0.75);
+        assert!((out.pos.offset() - want).length() < 1e-9);
+        // The dest write stays cell-0 (byte-floor: re-quantizing new_pos into dest cells is P4/P5).
+        assert_eq!(out.pos.cell(), I64Vec3::ZERO);
+    }
+
+    #[test]
+    fn transfer_at_cell_zero_is_byte_identical_to_the_pre_lattice_lift() {
+        // THE byte-floor: with a cell-0 source (the P3 shipping form) the lift is exactly `offset()`, so
+        // the dest pose is unchanged from the pre-S0 behaviour — cell 0, offset = the transformed pos.
+        let ctx = StaticFrames({
+            let mut m = BTreeMap::new();
+            m.insert(sys(), FramePlacement::identity());
+            m.insert(
+                planet(),
+                FramePlacement::moving(DVec3::new(10.0, 0.0, 0.0), DVec3::ZERO),
+            );
+            m
+        });
+        let p = pose_in(sys(), DVec3::new(3.0, 4.0, 5.0), DVec3::ZERO);
+        let out = transfer_frame(&p, planet(), &ctx).expect("transfer");
+        assert_eq!(out.pos.cell(), I64Vec3::ZERO);
+        // planet origin at +10x ⇒ dest offset = (3-10, 4, 5).
+        assert!((out.pos.offset() - DVec3::new(-7.0, 4.0, 5.0)).length() < 1e-9);
+    }
+
+    #[test]
     fn unknown_frames_are_typed_errors_not_garbage() {
         let ctx = StaticFrames(BTreeMap::new());
         let p = pose_in(sys(), DVec3::ZERO, DVec3::ZERO);
@@ -352,7 +408,7 @@ mod tests {
         // into SystemSpace{8} — frame flips, position/velocity/orientation unchanged under IdentityFrames.
         let from = FrameRef::SystemSpace { system_seed: 7 };
         let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = rebind_pose_to_dest(p, RealmId::System(8), None);
+        let got = rebind_pose_to_dest(p, RealmId::System(8), None, &IdentityFrames);
         assert_eq!(got.frame, FrameRef::SystemSpace { system_seed: 8 });
         assert_eq!(got.pos.offset(), p.pos.offset());
         assert_eq!(got.vel, p.vel);
@@ -367,7 +423,12 @@ mod tests {
         // now carries makes the district frame form (Station/System/Planet needed no parent; Area does).
         let from = FrameRef::PlanetCentered { planet_seed: 7 };
         let p = pose_in(from, DVec3::new(25.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = rebind_pose_to_dest(p, RealmId::Area(99), Some(RealmId::Planet(7)));
+        let got = rebind_pose_to_dest(
+            p,
+            RealmId::Area(99),
+            Some(RealmId::Planet(7)),
+            &IdentityFrames,
+        );
         assert_eq!(
             got.frame,
             FrameRef::AreaLocal {
@@ -387,7 +448,7 @@ mod tests {
         // the detector always supplies the parent for an Area dest today).
         let from = FrameRef::SystemSpace { system_seed: 7 };
         let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = rebind_pose_to_dest(p, RealmId::Area(99), None);
+        let got = rebind_pose_to_dest(p, RealmId::Area(99), None, &IdentityFrames);
         assert_eq!(
             got, p,
             "an un-nameable dest returns the source pose verbatim"
@@ -431,6 +492,7 @@ mod tests {
         map.insert(
             planet(),
             FramePlacement {
+                origin_cell: I64Vec3::ZERO,
                 origin: DVec3::new(3.0, -7.0, 11.0),
                 velocity: DVec3::new(0.5, -0.25, 2.0),
                 orientation: DQuat::from_rotation_z(0.7) * DQuat::from_rotation_x(0.3),
@@ -468,6 +530,7 @@ mod tests {
         map.insert(
             planet(),
             FramePlacement {
+                origin_cell: I64Vec3::ZERO,
                 origin: DVec3::ZERO,
                 velocity: DVec3::ZERO,
                 orientation: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
@@ -582,5 +645,69 @@ mod tests {
         // (non-member by design; the root-seeded container fold preserves the decision).
         let ctx = LocalFrames::new(sys(), 20.0);
         assert_eq!(ctx.placement(planet(), UniverseTick(1)), None);
+    }
+
+    // ---- rehome COORDINATE correctness (successful rehomes + expected coords, incl. floating-point) ----
+
+    #[test]
+    fn rehome_system_to_a_moving_planet_lands_at_the_correct_planet_local_coordinate() {
+        // A player rehoming System→Planet: rebind_pose_to_dest re-expresses their System pose into the planet
+        // frame, REBASED by the planet's LIVE orbital position (LocalFrames derives it from the ephemeris). A
+        // player sitting AT the planet centre lands at the planet-local ORIGIN; one offset by delta lands at
+        // delta. This is the exact coordinate the dest planet shard must read (author-and-ship, same
+        // containment both sides).
+        let elem = test_elements();
+        let tick = UniverseTick(137);
+        let planet_pos = orbital_state(&elem, secs_since_epoch(tick.0, 20.0)).position;
+        let ctx = LocalFrames::new(sys(), 20.0).with_moving_child(planet(), elem);
+        // AT the planet centre ⇒ planet-local origin.
+        let at_centre = StampedPose::at_rest(sys(), planet_pos, tick);
+        let landed = rebind_pose_to_dest(at_centre, RealmId::Planet(2), None, &ctx);
+        assert_eq!(landed.frame, planet());
+        assert!(landed.pos.offset().length() < 1e-6);
+        // Offset by delta ⇒ planet-local delta.
+        let delta = DVec3::new(10.0, -5.0, 2.0);
+        let off = StampedPose::at_rest(sys(), planet_pos + delta, tick);
+        let landed_off = rebind_pose_to_dest(off, RealmId::Planet(2), None, &ctx);
+        assert!((landed_off.pos.offset() - delta).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_system_planet_system_round_trip_returns_the_original_world_position() {
+        // Rehome IN then OUT: System→Planet then Planet→System must return the ORIGINAL System pose (the frame
+        // transform and its inverse compose to the identity) — a player who steps onto a planet and back off
+        // is exactly where they started, no drift.
+        let elem = test_elements();
+        let tick = UniverseTick(42);
+        let ctx = LocalFrames::new(sys(), 20.0).with_moving_child(planet(), elem);
+        let start = StampedPose::at_rest(sys(), DVec3::new(1.0e6, 2.0e5, -3.0e5), tick);
+        let on_planet = rebind_pose_to_dest(start, RealmId::Planet(2), None, &ctx);
+        assert_eq!(on_planet.frame, planet());
+        let back = rebind_pose_to_dest(on_planet, RealmId::System(1), None, &ctx);
+        assert_eq!(back.frame, sys());
+        assert!((back.pos.offset() - start.pos.offset()).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_rehome_is_invariant_to_how_the_source_position_splits_across_cell_and_offset() {
+        // Floating-point robustness: the SAME physical System position, expressed either as a cell-0 full
+        // offset (today's shipping form) OR as an integer-millimetre CELL + sub-mm residual (the S5 form),
+        // rehomes to the SAME planet-local coordinate — the transfer reconstructs the full source position
+        // from cell+offset (S0), so how the position is split is invisible to the destination coordinate.
+        let elem = test_elements();
+        let tick = UniverseTick(7);
+        let planet_pos = orbital_state(&elem, secs_since_epoch(tick.0, 20.0)).position;
+        let ctx = LocalFrames::new(sys(), 20.0).with_moving_child(planet(), elem);
+        let world = planet_pos + DVec3::new(7.0, -3.0, 11.0);
+        // Rep 1: cell-0 full offset (the P3 shipping form).
+        let flat = StampedPose::at_rest(sys(), world, tick);
+        // Rep 2: normalized into integer-mm cells + residual (the S5 form) — the SAME physical position.
+        let mut split = flat;
+        split.pos = LatticePos::local(world).normalize(sys().tier());
+        let a = rebind_pose_to_dest(flat, RealmId::Planet(2), None, &ctx);
+        let b = rebind_pose_to_dest(split, RealmId::Planet(2), None, &ctx);
+        // Both land at the SAME planet-local coordinate (≈ the 7,-3,11 offset from the centre).
+        assert!((a.pos.offset() - b.pos.offset()).length() < 1e-6);
+        assert!((a.pos.offset() - DVec3::new(7.0, -3.0, 11.0)).length() < 1e-6);
     }
 }

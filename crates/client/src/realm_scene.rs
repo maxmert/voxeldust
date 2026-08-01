@@ -1345,7 +1345,7 @@ mod tests {
             .with_delta(
                 &[
                     shp(RealmId::Planet(7), Some(RealmId::System(7)), 10.0), // finite leaf — drawn
-                    shp(RealmId::System(0), None, 1_000_000_000.0),          // ambient shell — skipped
+                    shp(RealmId::System(0), None, 1_000_000_000.0), // ambient shell — skipped
                 ],
                 &[],
             )
@@ -1375,7 +1375,10 @@ mod tests {
         // Independent per-shard streams carry no cross-stream order: a child's delta can land BEFORE its
         // parent's. Depth is recomputed each delta, so once the parent arrives the child nests correctly.
         let child_first = RealmScene::default()
-            .with_delta(&[shp(RealmId::Planet(7), Some(RealmId::System(7)), 10.0)], &[])
+            .with_delta(
+                &[shp(RealmId::Planet(7), Some(RealmId::System(7)), 10.0)],
+                &[],
+            )
             .expect("the child arrives first");
         assert_eq!(
             child_first.get(RealmId::Planet(7)).expect("present").depth,

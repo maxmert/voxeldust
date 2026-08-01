@@ -692,6 +692,7 @@ fn sync_realm_boxes(
         // the world-origin frames through P3; a hull-borne station composes through its hull at P8).
         let frame_origin = RenderPose {
             frame: rbox.frame,
+            cell: bevy::math::I64Vec3::ZERO,
             pos: DVec3::ZERO,
             orient: DQuat::IDENTITY,
         };

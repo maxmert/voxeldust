@@ -144,6 +144,7 @@ mod tests {
             render_cursor: cursor,
             universe_tick,
             entities: Vec::new(),
+            realm_boxes: Vec::new(),
             snapshots_applied,
             realm_frames_applied: 0,
             stale_frames_dropped: 0,
