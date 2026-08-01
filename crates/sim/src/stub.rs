@@ -30,11 +30,11 @@ use vd_core::geometry::{
 };
 use vd_core::glam::DVec3;
 use vd_core::kinematics;
-use vd_core::pose::{FrameRef, RealmId, StampedPose};
+use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::realm_path::{RealmLevel, RealmPath};
 use vd_core::rng::SplitMix64;
-use vd_core::worldgen::level_of;
+use vd_core::worldgen::{OriginLink, fold_origin, level_of};
 use vd_core::{
     AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick,
 };
@@ -669,6 +669,29 @@ pub struct RequestInFlight(pub BTreeMap<EntityId, TransferId>);
 /// the directory, §2.3), so 64 is generous headroom, not a ceiling on how crowded a realm can be.
 pub const MAX_REGIONS: usize = 64;
 
+/// The absolute origin of every neighbourhood FRAME this shard hosts, folded once per tick from each
+/// realm's seed-derived origin chain (A3). The Derived path's per-tick output: `FrameAbs[frame]` is the
+/// frame origin's absolute (position + velocity) in the universe-root frame. DEFAULT EMPTY — no chain is
+/// registered until the bins wire them at A5 — so every consumer degrades to today's behaviour and the wire
+/// stays byte-identical. WRITTEN by [`resolve_frame_abs`]; READ by nobody yet (A4 wires the readers).
+#[derive(Resource, Debug, Default)]
+pub struct FrameAbs(pub BTreeMap<FrameRef, (LatticePos, DVec3)>);
+
+/// Recompute [`FrameAbs`] once per tick (A3) — ordered as the FIRST system of the boundary/feed group so
+/// the containment detector, the entity feed, the realm feed and the AoI loop all read ONE value for the
+/// tick (same-tick compose, no drift between a realm box and its rider). WRITES only; nothing reads
+/// `FrameAbs` yet, so at every current rig the origin-chain roster is empty ⇒ the map is empty ⇒
+/// byte-identical. The ordering is planted here for A4's readers.
+fn resolve_frame_abs(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    regions: Res<RealmRegions>,
+    mut frame_abs: ResMut<FrameAbs>,
+) {
+    let tick_hz = 1.0 / config.tick_dt_s;
+    frame_abs.0 = regions.frame_abs_map(tick_hz, clock.universe_tick);
+}
+
 /// The seed-derived realm REGIONS this shard evaluates CONTAINMENT against (task #135): the shard's own
 /// realm + its ancestor chain (+ a bounded child set). Holds the regions, their BOOT-COMPUTED depth keys
 /// (so the per-tick `container` fold never re-walks parents — O(entities × regions), not O(N·M²)), and the
@@ -686,6 +709,12 @@ pub struct RealmRegions {
     /// scale (`worldgen::moving_children_for` returns none — all `StaticOffset`), so the frame context is
     /// byte-identical to FA-1; the canonical seed generation (P4/FA-5) is what populates it.
     moving: BTreeMap<RealmId, OrbitalElements>,
+    /// Each neighbourhood realm's seed-derived origin chain (root→realm) — A3's input to the per-tick
+    /// `FrameAbs` fold. A builder ([`with_origin_chains`](Self::with_origin_chains)) populates it from
+    /// `worldgen::origin_chain_for_config`; EMPTY by default ⇒ [`origin_abs_of`](Self::origin_abs_of) /
+    /// [`frame_abs_map`](Self::frame_abs_map) resolve NOTHING ⇒ every consumer degrades to today's
+    /// behaviour ⇒ byte-identical. The bins wire the real chains at A5 (THE FLIP).
+    origin_chains: BTreeMap<RealmId, Vec<OriginLink>>,
 }
 
 impl RealmRegions {
@@ -705,6 +734,7 @@ impl RealmRegions {
             depths,
             root_realm,
             moving: BTreeMap::new(),
+            origin_chains: BTreeMap::new(),
         }
     }
 
@@ -719,6 +749,57 @@ impl RealmRegions {
     ) -> RealmRegions {
         self.moving = moving;
         self
+    }
+
+    /// Register each neighbourhood realm's seed-derived origin chain (A3) — a builder mirroring
+    /// [`with_moving_children`](Self::with_moving_children), so every `RealmRegions::new` site stays
+    /// byte-identical (an empty map resolves NO absolute). The bins build the map from the SAME
+    /// `(seed, config)` that built the regions (`worldgen::origin_chain_for_config`), so the folded
+    /// absolutes and the regions can never disagree.
+    #[must_use]
+    pub fn with_origin_chains(
+        mut self,
+        origin_chains: BTreeMap<RealmId, Vec<OriginLink>>,
+    ) -> RealmRegions {
+        self.origin_chains = origin_chains;
+        self
+    }
+
+    /// A realm's OWN absolute (position + velocity) at `tick`, folded LOCALLY from its seed-derived origin
+    /// chain (A3, the Derived path — never reads the child list). `None` when no chain is registered (the
+    /// byte-floor: every walk/static rig has no chain ⇒ `None` ⇒ the consumer keeps today's behaviour).
+    #[must_use]
+    pub fn origin_abs_of(
+        &self,
+        realm: RealmId,
+        tick_hz: f64,
+        tick: UniverseTick,
+    ) -> Option<(LatticePos, DVec3)> {
+        let secs = secs_since_epoch(tick.0, tick_hz);
+        self.origin_chains
+            .get(&realm)
+            .map(|chain| fold_origin(chain, secs))
+    }
+
+    /// The absolute origin of EVERY neighbourhood frame at `tick` — each region's frame mapped to its
+    /// realm's folded absolute (A3). Computed once per shard per tick into the [`FrameAbs`] resource. A
+    /// region without a registered chain contributes NO entry (the byte-floor: an empty roster ⇒ an empty
+    /// map ⇒ nothing reads a different value). O(neighbourhood × chain depth) ≤ `MAX_REGIONS` × depth.
+    #[must_use]
+    pub fn frame_abs_map(
+        &self,
+        tick_hz: f64,
+        tick: UniverseTick,
+    ) -> BTreeMap<FrameRef, (LatticePos, DVec3)> {
+        let secs = secs_since_epoch(tick.0, tick_hz);
+        self.regions
+            .iter()
+            .filter_map(|r| {
+                self.origin_chains
+                    .get(&r.realm)
+                    .map(|chain| (r.frame, fold_origin(chain, secs)))
+            })
+            .collect()
     }
 
     /// The detector short-circuits (inert) when no regions are planted — production through C-3.
@@ -1351,6 +1432,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(FrameCounter::default());
     world.insert_resource(RealmFrameCounter::default());
     world.insert_resource(StubStats::default());
+    world.insert_resource(FrameAbs::default());
     world.insert_resource(AppliedSteps::default());
     world.insert_resource(PendingCrossings::default());
     world.insert_resource(GhostColliderRegistration::default());
@@ -1420,6 +1502,14 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // on empty snaps/regions, so at walk/static scale this is inert (byte-identical); at visual scale the
     // first-sync boundary is exactly what must be gated. `ClockSample` is persistent and both systems sit
     // AFTER `observe_clock_syncs` on the shared schedule, so reading `synced` is order-correct.
+    // A3: recompute FrameAbs FIRST — ordered after group A's tail and before group B's head, so it is the
+    // single per-tick FrameAbs producer that the boundary/feed group (A4's readers) will read one value
+    // from. WRITES only today (an empty origin-chain roster ⇒ an empty map ⇒ byte-identical).
+    schedule.add_systems(
+        resolve_frame_abs
+            .after(self_fence_lapsed_realm)
+            .before(evaluate_realm_boundaries),
+    );
     schedule.add_systems(
         (
             evaluate_realm_boundaries.run_if(has_synced),
@@ -9459,6 +9549,43 @@ mod tests {
                 .authored_realm_snaps(OWN_REALM, tick_hz, tick)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a3_frame_abs_and_origin_abs_fold_registered_chains_and_default_to_none() {
+        // A3: with a registered origin chain, `origin_abs_of` folds it (the Derived self-abs) and
+        // `frame_abs_map` maps the realm's FRAME to that absolute. With NO chain (every walk/static rig)
+        // both resolve NOTHING — the byte-floor that keeps `FrameAbs` empty and the wire unchanged.
+        let elements = orbit();
+        let mut chains: BTreeMap<RealmId, Vec<OriginLink>> = BTreeMap::new();
+        chains.insert(OWN_REALM, vec![OriginLink::Orbital(elements)]);
+        let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
+            .with_origin_chains(chains);
+        let (tick_hz, tick) = (20.0, UniverseTick(1_000));
+        let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
+
+        let abs = regions
+            .origin_abs_of(OWN_REALM, tick_hz, tick)
+            .expect("a registered chain folds to Some");
+        assert_eq!(abs.0.offset(), state.position);
+        assert_eq!(abs.1, state.velocity);
+        assert_eq!(abs.0.cell(), vd_core::glam::I64Vec3::ZERO); // byte-floor: cell 0
+
+        let map = regions.frame_abs_map(tick_hz, tick);
+        assert_eq!(
+            map.len(),
+            1,
+            "only the realm WITH a chain contributes a frame"
+        );
+        assert_eq!(
+            map.values().next().map(|a| a.0.offset()),
+            Some(state.position)
+        );
+
+        // No chain registered ⇒ None + empty (the byte-floor every current rig takes).
+        let bare = RealmRegions::new(vec![root_region(), own_region()]);
+        assert!(bare.origin_abs_of(OWN_REALM, tick_hz, tick).is_none());
+        assert!(bare.frame_abs_map(tick_hz, tick).is_empty());
     }
 
     #[test]
