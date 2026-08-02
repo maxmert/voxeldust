@@ -2429,6 +2429,7 @@ fn visual_regions_and_movers(
 ) -> (
     Vec<vd_core::geometry::RealmRegion>,
     std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::celestial::OrbitalElements>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, Vec<vd_core::worldgen::OriginLink>>,
 ) {
     let orbit_slowdown = std::env::var("VD_VISUAL_ORBIT_SLOWDOWN")
         .ok()
@@ -2445,7 +2446,21 @@ fn visual_regions_and_movers(
     let moving = vd_core::worldgen::moving_children_for_config(universe_seed, &config, hosted)
         .into_iter()
         .collect();
-    (regions, moving)
+    // A5 — the seed origin chain for EVERY neighbourhood realm, built from the SAME (seed, mutated config) that
+    // just built the regions + movers, so the shard's folded absolutes (`FrameAbs`) can never derive from
+    // different elements than its region set or its authored orbits. The chains ARM the server-authoritative
+    // compose: `RealmRegions::origin_abs_of`/`frame_abs_map` fold them each tick, and every emitted pose is
+    // composed to root-absolute before it ships.
+    let origin_chains = regions
+        .iter()
+        .map(|r| {
+            (
+                r.realm,
+                vd_core::worldgen::origin_chain_for_config(universe_seed, &config, r.realm),
+            )
+        })
+        .collect();
+    (regions, moving, origin_chains)
 }
 
 /// The containment region forest + the moving-child roster for a shard booting at `scale`, hosting
@@ -2472,11 +2487,16 @@ pub fn boot_regions_and_movers(
 ) -> (
     Vec<vd_core::geometry::RealmRegion>,
     std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::celestial::OrbitalElements>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, Vec<vd_core::worldgen::OriginLink>>,
 ) {
     use std::collections::BTreeMap;
     match scale {
+        // Walk ⇒ an EMPTY chain roster: every walk body is `Fixed`, so a folded chain is the identity and an
+        // empty roster (`FrameAbs` stays empty ⇒ the compose short-circuits to the raw frame-local pose) is
+        // byte-identical to folding all-Fixed chains. Keeps the walk fixtures bit-for-bit unchanged post-flip.
         UniverseScale::Walk => (
             vd_core::worldgen::realm_neighbourhood_for_held(universe_seed, held_realms),
+            BTreeMap::new(),
             BTreeMap::new(),
         ),
         UniverseScale::Visual => visual_regions_and_movers(
@@ -3423,7 +3443,7 @@ mod incarnation_tests {
         let hosted = RealmId::System(7);
         let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
         // The two dynamics args are IGNORED by Walk — pass live-cluster-ish values to prove it.
-        let (regions, moving) =
+        let (regions, moving, chains) =
             boot_regions_and_movers(UniverseScale::Walk, 0, &held, hosted, 2.0, 0.02);
         // Walk ⇒ EXACTLY realm_neighbourhood_for_held + an EMPTY mover roster (the pre-FA-5 boot; the
         // empty map makes with_moving_children a no-op vs new — byte-identical).
@@ -3432,6 +3452,9 @@ mod incarnation_tests {
             vd_core::worldgen::realm_neighbourhood_for_held(0, &held),
         );
         assert!(moving.is_empty());
+        // A5 — Walk carries an EMPTY origin-chain roster (all Fixed ⇒ identity fold ⇒ FrameAbs empty ⇒ the
+        // server-authoritative compose short-circuits to raw ⇒ the walk fixtures stay bit-for-bit unchanged).
+        assert!(chains.is_empty());
     }
 
     #[test]
@@ -3442,7 +3465,7 @@ mod incarnation_tests {
         // config, with the per-realm AoI band LIVE. The occupant speed is the demand cluster's 15 m/s ship.
         let hosted = RealmId::System(7);
         let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
-        let (regions, moving) =
+        let (regions, moving, chains) =
             boot_regions_and_movers(UniverseScale::VisualDemand, 0, &held, hosted, 15.0, 0.02);
         // The SAME (seed, config) builds BOTH the regions and the mover roster (they can't disagree). The
         // orbit-slowdown knob is unset in the unit rig ⇒ mass unchanged. Slice 1: the boot scopes to the
@@ -3476,6 +3499,22 @@ mod incarnation_tests {
                 "visual-demand planet region has a LIVE AoI band: {r:?}",
             );
         }
+        // A5 — every region carries a seed origin chain (keyed by realm), built from the SAME (seed, config) as
+        // the regions + movers; every MOVING child's chain VARIES (ends in an Orbital link), so its folded
+        // absolute rides the orbit and the server ships it root-absolute.
+        for r in &regions {
+            assert!(
+                chains.contains_key(&r.realm),
+                "region {:?} has a chain",
+                r.realm
+            );
+        }
+        for realm in moving.keys() {
+            assert!(
+                vd_core::worldgen::origin_varies(&chains[realm]),
+                "mover {realm:?} has a varying (orbital) origin chain",
+            );
+        }
     }
 
     #[test]
@@ -3483,7 +3522,7 @@ mod incarnation_tests {
         use std::collections::BTreeSet;
         let hosted = RealmId::System(7);
         let held: BTreeSet<RealmId> = [hosted].into_iter().collect();
-        let (regions, moving) =
+        let (regions, moving, chains) =
             boot_regions_and_movers(UniverseScale::Visual, 0, &held, hosted, 2.0, 0.02);
         let config = vd_core::worldgen::UniverseConfig::visual_scale();
         // Slice 1: the boot scopes to the NEIGHBOURHOOD (own + ancestors + authored children, never sibling
@@ -3503,6 +3542,17 @@ mod incarnation_tests {
         // Every mover is a region in the planted forest, so frame_context can author its live pose.
         for realm in moving.keys() {
             assert!(regions.iter().any(|r| r.realm == *realm));
+        }
+        // A5 — the origin chains match origin_chain_for_config over the SAME (seed, config); a mover's chain
+        // varies (folds to its orbit), the star-system root's does not (all Fixed).
+        for r in &regions {
+            assert_eq!(
+                chains[&r.realm],
+                vd_core::worldgen::origin_chain_for_config(0, &config, r.realm),
+            );
+        }
+        for realm in moving.keys() {
+            assert!(vd_core::worldgen::origin_varies(&chains[realm]));
         }
     }
 

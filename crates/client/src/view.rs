@@ -34,11 +34,10 @@ use std::collections::BTreeMap;
 
 use glam::DVec3;
 use vd_core::EntityId;
-use vd_core::pose::FrameRef;
+use vd_core::pose::{FrameRef, LatticePos};
 use vd_wire::channels::{SnapshotDatagram, SnapshotVerdict, SubId, classify_snapshot};
 
 use crate::interp::{EntityTrack, RenderPose};
-use crate::realm_view::RealmView;
 
 /// The inert per-row "authoritative sub" a pure-renderer client reports for its diagnosis
 /// surface (`DevEntityRow.authoritative_sub`): a node-agnostic client no longer has a
@@ -61,6 +60,13 @@ pub struct DeliveredView {
     /// to be sanitized at ingress. A corrupt/diverged sender is a real fault, so it is
     /// COUNTED (not silently fixed) — the codebase's "never silent" discipline.
     nonfinite_poses: u64,
+    /// A5 — the SERVER-TOLD render origin (the last `pin_abs` from a `RealmRegistry`/`RealmSceneDelta`). Every
+    /// drawn point + the camera subtract it via [`DeliveredView::world_pos`]. Defaults to the identity (ZERO):
+    /// a walk cluster never sends a pin, and a walk pose is already root-absolute (identity fold), so
+    /// subtracting ZERO renders it verbatim (byte-identical). Once a pin is received it is CARRIED indefinitely
+    /// — never reset to ZERO — so a re-home whose fresh registry is momentarily in flight keeps the last origin
+    /// (never a teleport to the world origin; the pin rides the reliable Control lane).
+    render_origin: LatticePos,
 }
 
 impl DeliveredView {
@@ -199,52 +205,31 @@ impl DeliveredView {
         self.nonfinite_poses
     }
 
-    /// The frame-evaluation seam: map a rendered pose's FRAME-LOCAL position into world
-    /// space, composing through the view as the frame requires. Planet/System/Galaxy frames
-    /// are world-origin in P1.5 (identity). A `ShipLocal` interior pose composes through its
-    /// hull entity's LIVE pose — `hull.pos + hull.orient * interior.pos` — sampled at the
-    /// SAME `cursor` so interior and hull agree in time ("walk inside a flying ship", P8);
-    /// until a hull is delivered (no ships pre-P8) the lookup is `None` and the interior
-    /// renders at its frame origin. This is THE single chokepoint for that composition. (The P10
-    /// galaxy ly-cell offset is OWED here, NOT free: `RenderPose.pos` is a render-local `DVec3` and
-    /// `EntityTrack::sample` already drops the `LatticePos` cell, so composing the ly-cell needs a
-    /// `cell` on `RenderPose` — or a cell-rebase in `sample` — landing with the D-41 cross-cell interp
-    /// rebasing; the one-level chokepoint SHAPE is right, the cell DATA is owed.) Never panics; always
-    /// finite (poses sanitized at ingress).
-    ///
-    /// ⚠️ TIME-coherent only, NOT version-matched (DEFERRED D-35). When the ship rides its own
-    /// shard (P8), hull + interior arrive on DIFFERENT lossy subs; §8.1 (`transfer_protocol.md`,
-    /// `sealed_shards.md:132`) requires holding the newer stream until both match `(source_tick,
-    /// version)` or the passenger visibly JUMPS relative to the hull under datagram loss. That
-    /// needs a NEW `parent_version` wire field on `EntitySnap`/`SnapshotDatagram` + a hold-buffer
-    /// here — a snapshot-decode RESHAPE, NOT free. The chokepoint shape (one level) is right; only
-    /// the version gate is owed at P8.
+    /// The server-told render origin the renderer subtracts (A5). Identity (ZERO) until the first pin.
     #[must_use]
-    pub fn world_pos(&self, pose: &RenderPose, realms: &RealmView, cursor: f64) -> DVec3 {
-        // The LIVE placement of the pose's BASIS. A `ShipLocal` interior composes against its hull ENTITY
-        // (the delivered dot named by the frame — pre-P8 interim, unchanged). Every REALM frame composes
-        // against its containing realm's STREAMED placement — the SAME `realm_latest` the box overlay draws
-        // the realm at (`realm_scene::overlaid`) — so a re-homed occupant RIDES its moving realm's orbit
-        // instead of hanging at the world origin (the "teleport" bug). `placement_anchor` sends an `Area`
-        // to its PLANET (it shares the planet frame; the planet carries the world placement). `None` ⇒
-        // walk/static scale, or the pinned root/System (never streamed, sits at the origin) ⇒ the identity
-        // FALLBACK returns `pose.pos` BIT-EXACT (byte-floor). ONE compose site (DRY across ship + realm) —
-        // and the single seam the S5 cell-aware fold upgrades (the `.cell` rides in on `realm_latest`).
-        let base: Option<RenderPose> = match pose.frame {
-            FrameRef::ShipLocal { ship } => self.hull_pose(ship, cursor),
-            other => other
-                .placement_anchor()
-                .and_then(|r| realms.realm_latest(r)),
-        };
-        base.map_or(pose.pos, |b| b.pos + b.orient * pose.pos)
+    pub fn render_origin(&self) -> LatticePos {
+        self.render_origin
     }
 
-    /// The hull entity's rendered pose at `cursor` — the basis a `ShipLocal` interior pose
-    /// composes against. The hull is just-another-delivered-entity (the id named by the
-    /// frame), resolved by its per-entity track. `None` until the hull is delivered (no ships
-    /// pre-P8) ⇒ the interior renders at its frame origin.
-    fn hull_pose(&self, hull: EntityId, cursor: f64) -> Option<RenderPose> {
-        self.tracks.get(&hull).map(|track| track.sample(cursor))
+    /// Adopt a fresh server-told render origin (a `RealmRegistry`/`RealmSceneDelta` `pin_abs`). CARRY-last-pin:
+    /// it only ever moves to a real told value, never resets to identity, so a re-anchor never teleports the
+    /// scene to the world origin between the trigger and the fresh registry's arrival.
+    pub fn set_render_origin(&mut self, origin: LatticePos) {
+        self.render_origin = origin;
+    }
+
+    /// The RENDER range-reduction (A5 — the server is authoritative). The server COMPOSES every entity's
+    /// final position and ships it ROOT-ABSOLUTE (minor 7); the client only DRAWS. So this subtracts the
+    /// server-told render `origin` in EXACT lattice arithmetic — NO compose, NO fold, NO per-viewer position
+    /// derivation, NO fallback-to-origin. Through P4 the cell is ZERO and this reduces to `pose.pos - origin`
+    /// in metres; the cell-aware rebase (non-zero galaxy cells) lands at A8. At `origin == identity` it returns
+    /// `pose.pos` BIT-EXACT (the byte-floor — a walk pin folds to identity). Never panics; always finite (poses
+    /// sanitized at the decode ingress). The camera eye and every drawn point subtract this SAME `origin`, so a
+    /// re-pin shifts camera and content by one identical vector (invisible); it is computed FRESHLY per object,
+    /// never as a cached-scene translation (which would contaminate near objects with the far delta's rounding).
+    #[must_use]
+    pub fn world_pos(&self, pose: &RenderPose, origin: LatticePos) -> DVec3 {
+        LatticePos::at(pose.cell, pose.pos).delta_m(origin, pose.frame.tier())
     }
 }
 
@@ -308,9 +293,9 @@ mod tests {
         assert_eq!(rendered[&ent(1)].pos, DVec3::new(5.0, 0.0, 0.0));
         assert_eq!(rendered[&ent(2)].pos, DVec3::new(105.0, 0.0, 0.0));
         assert_eq!(view.stale_frames_dropped(), 0);
-        // world_pos is the identity for P1.5 static (system) frames.
+        // world_pos at the identity origin returns the pose verbatim (A5 pure range-reduction).
         assert_eq!(
-            view.world_pos(&rendered[&ent(1)], &RealmView::default(), 11.0),
+            view.world_pos(&rendered[&ent(1)], LatticePos::local(DVec3::ZERO)),
             DVec3::new(5.0, 0.0, 0.0)
         );
     }
@@ -342,254 +327,64 @@ mod tests {
     }
 
     #[test]
-    fn world_pos_is_identity_for_world_frames_and_composes_shiplocal_through_its_hull() {
+    fn world_pos_subtracts_the_render_origin_and_never_composes() {
         use glam::DQuat;
-        use vd_core::pose::StampedPose;
-        let mut view = DeliveredView::default();
-        // System-frame entity → identity.
-        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 7.0)]));
-        let r = view.render(10.0);
-        assert_eq!(
-            view.world_pos(&r[&ent(1)], &RealmView::default(), 10.0),
-            DVec3::new(7.0, 0.0, 0.0)
-        );
-
-        // A hull (ent 1) at world x=100 and an interior entity in ShipLocal{ship=ent(1)} at
-        // local x=5 → composes to world x=105 (hull orient identity).
-        let hull = ent(1);
-        let interior = ent(2);
-        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 2, 11, vec![(hull, 100.0)]));
-        view.on_snapshot(
-            &s(SubId(0)),
-            SnapshotDatagram {
-                sub: SubId(0),
-                frame_id: 3,
-                source_tick: TickId(1),
-                universe_tick: UniverseTick(11),
-                entities: vec![EntitySnap {
-                    entity: interior,
-                    pose: StampedPose::at_rest(
-                        FrameRef::ShipLocal { ship: hull },
-                        DVec3::new(5.0, 0.0, 0.0),
-                        UniverseTick(11),
-                    ),
-                }],
-            },
-        );
-        let r = view.render(11.0);
-        assert_eq!(
-            view.world_pos(&r[&interior], &RealmView::default(), 11.0),
-            DVec3::new(105.0, 0.0, 0.0),
-            "interior composes through the hull pose"
-        );
-
-        // ShipLocal whose hull entity is NOT delivered → falls back to the frame-local pos (the
-        // trackless-hull arm of hull_pose: no panic, no stale pose from another entity).
-        let orphan = RenderPose {
-            frame: FrameRef::ShipLocal { ship: ent(99) },
+        // A5 — the server ships ABSOLUTE positions; world_pos is a PURE range-reduction against the
+        // server-told render origin, IDENTICAL for every frame kind (no compose, no per-frame branch, no
+        // fallback-to-origin, no dependence on which realms are streamed). At the identity origin it returns
+        // pose.pos BIT-EXACT (the byte-floor a walk pin folds to).
+        let view = DeliveredView::default();
+        let pose = |frame: FrameRef, pos: DVec3| RenderPose {
+            frame,
             cell: glam::I64Vec3::ZERO,
-            pos: DVec3::new(3.0, 0.0, 0.0),
+            pos,
             orient: DQuat::IDENTITY,
         };
+        // Identity origin ⇒ pose.pos verbatim, for EVERY frame kind (a ShipLocal whose hull is undelivered no
+        // longer gets special-cased — the client never composes).
+        for (frame, pos) in [
+            (
+                FrameRef::SystemSpace { system_seed: 7 },
+                DVec3::new(7.0, 0.0, 0.0),
+            ),
+            (FrameRef::GalaxySpace, DVec3::new(1.0, 2.0, 3.0)),
+            (
+                FrameRef::PlanetCentered { planet_seed: 1 },
+                DVec3::new(4.0, 0.0, 0.0),
+            ),
+            (
+                FrameRef::AreaLocal {
+                    planet_seed: 1,
+                    area_seed: 2,
+                },
+                DVec3::new(5.0, 6.0, 7.0),
+            ),
+            (
+                FrameRef::StationLocal { station_seed: 9 },
+                DVec3::new(8.0, 0.0, 0.0),
+            ),
+            (
+                FrameRef::ShipLocal { ship: ent(99) },
+                DVec3::new(3.0, 0.0, 0.0),
+            ),
+        ] {
+            assert_eq!(
+                view.world_pos(&pose(frame, pos), LatticePos::local(DVec3::ZERO)),
+                pos
+            );
+        }
+        // A non-identity origin subtracts EXACTLY and never invents a value from a streamed realm: a Planet
+        // occupant at (4,0,0) with the origin at (100,0,0) renders at (-96,0,0) — never (4,0,0) (the old
+        // silent-identity-on-miss bug) nor a composed (104,..).
         assert_eq!(
-            view.world_pos(&orphan, &RealmView::default(), 11.0),
-            DVec3::new(3.0, 0.0, 0.0)
-        );
-
-        // Galaxy + Planet frames are identity too (the combined world-frame arm).
-        let gal = RenderPose {
-            frame: FrameRef::GalaxySpace,
-            cell: glam::I64Vec3::ZERO,
-            pos: DVec3::new(1.0, 2.0, 3.0),
-            orient: DQuat::IDENTITY,
-        };
-        assert_eq!(
-            view.world_pos(&gal, &RealmView::default(), 11.0),
-            DVec3::new(1.0, 2.0, 3.0)
-        );
-        let planet = RenderPose {
-            frame: FrameRef::PlanetCentered { planet_seed: 1 },
-            cell: glam::I64Vec3::ZERO,
-            pos: DVec3::new(4.0, 0.0, 0.0),
-            orient: DQuat::IDENTITY,
-        };
-        assert_eq!(
-            view.world_pos(&planet, &RealmView::default(), 11.0),
-            DVec3::new(4.0, 0.0, 0.0)
-        );
-        // A sub-planet AREA shares the planet frame; a STATION interior renders at its frame
-        // origin until a P8 station hull is delivered — both fall in the world-frame arm today.
-        let area = RenderPose {
-            frame: FrameRef::AreaLocal {
-                planet_seed: 1,
-                area_seed: 2,
-            },
-            cell: glam::I64Vec3::ZERO,
-            pos: DVec3::new(5.0, 6.0, 7.0),
-            orient: DQuat::IDENTITY,
-        };
-        assert_eq!(
-            view.world_pos(&area, &RealmView::default(), 11.0),
-            DVec3::new(5.0, 6.0, 7.0)
-        );
-        let station = RenderPose {
-            frame: FrameRef::StationLocal { station_seed: 9 },
-            cell: glam::I64Vec3::ZERO,
-            pos: DVec3::new(8.0, 0.0, 0.0),
-            orient: DQuat::IDENTITY,
-        };
-        assert_eq!(
-            view.world_pos(&station, &RealmView::default(), 11.0),
-            DVec3::new(8.0, 0.0, 0.0)
-        );
-    }
-
-    /// A `RealmView` streaming ONE realm at `offset`/`orient` (in `SystemSpace{7}`) — the live placement
-    /// the box overlay draws it at, and that an occupant of that realm composes against.
-    fn realms_with(realm: vd_core::pose::RealmId, offset: DVec3, orient: glam::DQuat) -> RealmView {
-        use vd_core::ids::{TickId, UniverseTick};
-        use vd_core::pose::StampedPose;
-        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram, SubId};
-        let mut pose = StampedPose::at_rest(
-            FrameRef::SystemSpace { system_seed: 7 },
-            offset,
-            UniverseTick(10),
-        );
-        pose.orient = orient;
-        let mut v = RealmView::default();
-        v.on_realm_snapshot(RealmSnapshotDatagram {
-            sub: SubId(0),
-            frame_id: 1,
-            source_tick: TickId(1),
-            universe_tick: UniverseTick(10),
-            realms: vec![RealmSnap { realm, pose }],
-        });
-        v
-    }
-
-    #[test]
-    fn world_pos_composes_a_planet_occupant_with_its_live_realm_placement() {
-        use glam::DQuat;
-        use vd_core::pose::RealmId;
-        // The occupant RIDES its realm: a planet streamed at world (100,0,0) + an occupant at planet-local
-        // (0,5,0) renders at (100,5,0) — NOT the bare (0,5,0) frame-local (the teleport-to-origin bug).
-        let realms = realms_with(
-            RealmId::Planet(1),
-            DVec3::new(100.0, 0.0, 0.0),
-            DQuat::IDENTITY,
-        );
-        let occ = RenderPose {
-            frame: FrameRef::PlanetCentered { planet_seed: 1 },
-            cell: glam::I64Vec3::ZERO,
-            pos: DVec3::new(0.0, 5.0, 0.0),
-            orient: DQuat::IDENTITY,
-        };
-        let w = DeliveredView::default().world_pos(&occ, &realms, 11.0);
-        assert!((w - DVec3::new(100.0, 5.0, 0.0)).length() < 1e-9);
-    }
-
-    #[test]
-    fn world_pos_composes_an_area_occupant_through_its_parent_planet() {
-        use glam::DQuat;
-        use vd_core::pose::RealmId;
-        // An Area shares its PLANET's frame and rides it: stream Planet(1) at (200,0,0); an AreaLocal{1,2}
-        // occupant at local (0,0,7) renders at (200,0,7) — composed against the PLANET (placement_anchor),
-        // NOT the area (which has no independent world placement). Proves the ONE generic rule.
-        let realms = realms_with(
-            RealmId::Planet(1),
-            DVec3::new(200.0, 0.0, 0.0),
-            DQuat::IDENTITY,
-        );
-        let occ = RenderPose {
-            frame: FrameRef::AreaLocal {
-                planet_seed: 1,
-                area_seed: 2,
-            },
-            cell: glam::I64Vec3::ZERO,
-            pos: DVec3::new(0.0, 0.0, 7.0),
-            orient: DQuat::IDENTITY,
-        };
-        let w = DeliveredView::default().world_pos(&occ, &realms, 11.0);
-        assert!((w - DVec3::new(200.0, 0.0, 7.0)).length() < 1e-9);
-    }
-
-    #[test]
-    fn world_pos_falls_back_when_the_occupants_own_realm_is_not_streamed() {
-        use glam::DQuat;
-        use vd_core::pose::RealmId;
-        // A non-empty view streaming a DIFFERENT realm (Station 2) does NOT compose a Planet 1 occupant —
-        // world_pos keys on the occupant's OWN realm, absent here ⇒ bit-exact frame-local fallback (the
-        // `and_then` None arm on a NON-empty view).
-        let realms = realms_with(
-            RealmId::Station(2),
-            DVec3::new(50.0, 0.0, 0.0),
-            DQuat::IDENTITY,
-        );
-        let occ = RenderPose {
-            frame: FrameRef::PlanetCentered { planet_seed: 1 },
-            cell: glam::I64Vec3::ZERO,
-            pos: DVec3::new(4.0, 0.0, 0.0),
-            orient: DQuat::IDENTITY,
-        };
-        assert_eq!(
-            DeliveredView::default().world_pos(&occ, &realms, 11.0),
-            DVec3::new(4.0, 0.0, 0.0)
-        );
-    }
-
-    #[test]
-    fn world_pos_rotates_a_shiplocal_interior_by_the_hull_orientation() {
-        // Pins the `hull.orient * interior.pos` ROTATION term (the literal "walk inside a
-        // flying ship" math) — not just the position add. A 180°-about-Y hull is
-        // sign-convention-independent: local +x (5,0,0) maps to (-5,0,0), so the interior
-        // lands at hull.pos + (-5,0,0) = (95,0,0) — vs (105,0,0) if orient were ignored.
-        use glam::DQuat;
-        use std::f64::consts::PI;
-        use vd_core::pose::StampedPose;
-        let mut view = DeliveredView::default();
-        let hull = ent(1);
-        let interior = ent(2);
-        let mut hull_pose = StampedPose::at_rest(
-            FrameRef::SystemSpace { system_seed: 1 },
-            DVec3::new(100.0, 0.0, 0.0),
-            UniverseTick(11),
-        );
-        hull_pose.orient = DQuat::from_rotation_y(PI); // 180° about Y
-        view.on_snapshot(
-            &s(SubId(0)),
-            SnapshotDatagram {
-                sub: SubId(0),
-                frame_id: 1,
-                source_tick: TickId(1),
-                universe_tick: UniverseTick(11),
-                entities: vec![EntitySnap {
-                    entity: hull,
-                    pose: hull_pose,
-                }],
-            },
-        );
-        view.on_snapshot(
-            &s(SubId(0)),
-            SnapshotDatagram {
-                sub: SubId(0),
-                frame_id: 2,
-                source_tick: TickId(1),
-                universe_tick: UniverseTick(11),
-                entities: vec![EntitySnap {
-                    entity: interior,
-                    pose: StampedPose::at_rest(
-                        FrameRef::ShipLocal { ship: hull },
-                        DVec3::new(5.0, 0.0, 0.0),
-                        UniverseTick(11),
-                    ),
-                }],
-            },
-        );
-        let r = view.render(11.0);
-        let world = view.world_pos(&r[&interior], &RealmView::default(), 11.0);
-        assert!(
-            (world - DVec3::new(95.0, 0.0, 0.0)).length() < 1e-9,
-            "the hull orientation must rotate the interior offset, got {world:?}"
+            view.world_pos(
+                &pose(
+                    FrameRef::PlanetCentered { planet_seed: 1 },
+                    DVec3::new(4.0, 0.0, 0.0)
+                ),
+                LatticePos::local(DVec3::new(100.0, 0.0, 0.0)),
+            ),
+            DVec3::new(-96.0, 0.0, 0.0)
         );
     }
 

@@ -135,6 +135,14 @@ pub enum ServerControlMsg {
     RealmRegistry {
         regions: Vec<RealmShape>,
         root: RealmId,
+        /// A5 — the SERVER-TOLD render origin (floating origin). `pin` is the realm the client subtracts (its
+        /// own star system, via `pin_realm_of`); `pin_abs` is that realm's tick-0 folded absolute (the exact
+        /// lattice origin every drawn point and the camera subtract); `anchor_epoch` bumps on a warp re-anchor
+        /// (A9) so the client can tell a genuine re-pin from a duplicate registry. ONE per-session scalar —
+        /// never per tick, never per entity. Postcard-additive trailing fields; gated on negotiated minor >= 7.
+        pin: RealmId,
+        pin_abs: LatticePos,
+        anchor_epoch: u32,
     },
     /// The INCREMENTAL realm render-scene update (VU AoI, proto_minor 6): realms that ENTERED this client's
     /// AoI (`added` — their static shapes) and realms that LEFT it (`removed` — their ids). The agnostic
@@ -147,6 +155,12 @@ pub enum ServerControlMsg {
     RealmSceneDelta {
         added: Vec<RealmShape>,
         removed: Vec<RealmId>,
+        /// A5 — the same server-told render origin as [`RealmRegistry`], re-carried on every scene delta so a
+        /// warp re-anchor (a fresh `pin`/`pin_abs`/`anchor_epoch`) rides the reliable scene lane. Between
+        /// systems the client CARRIES its last pin rather than adopting a shallower one. Gated on minor >= 7.
+        pin: RealmId,
+        pin_abs: LatticePos,
+        anchor_epoch: u32,
     },
 }
 
@@ -587,6 +601,9 @@ mod tests {
                 parent: Some(RealmId::System(7)),
             }],
             root: RealmId::System(0),
+            pin: RealmId::System(7),
+            pin_abs: LatticePos::local(DVec3::new(5.0, 0.0, 0.0)),
+            anchor_epoch: 2,
         };
         let bytes = postcard::to_allocvec(&reg).expect("encode");
         assert_eq!(
@@ -598,6 +615,9 @@ mod tests {
         let empty = ServerControlMsg::RealmRegistry {
             regions: Vec::new(),
             root: RealmId::System(0),
+            pin: RealmId::System(0),
+            pin_abs: LatticePos::local(DVec3::ZERO),
+            anchor_epoch: 0,
         };
         let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
         assert_eq!(
@@ -614,6 +634,9 @@ mod tests {
         let prior = ServerControlMsg::RealmRegistry {
             regions: Vec::new(),
             root: RealmId::System(0),
+            pin: RealmId::System(0),
+            pin_abs: LatticePos::local(DVec3::ZERO),
+            anchor_epoch: 0,
         };
         let prior_bytes = postcard::to_allocvec(&prior).expect("encode");
         assert_eq!(
@@ -630,6 +653,9 @@ mod tests {
                 parent: Some(RealmId::System(7)),
             }],
             removed: vec![RealmId::Planet(8)],
+            pin: RealmId::System(7),
+            pin_abs: LatticePos::local(DVec3::new(5.0, 0.0, 0.0)),
+            anchor_epoch: 2,
         };
         let bytes = postcard::to_allocvec(&delta).expect("encode");
         assert_eq!(
@@ -640,6 +666,9 @@ mod tests {
         let empty = ServerControlMsg::RealmSceneDelta {
             added: Vec::new(),
             removed: Vec::new(),
+            pin: RealmId::System(0),
+            pin_abs: LatticePos::local(DVec3::ZERO),
+            anchor_epoch: 0,
         };
         let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
         assert_eq!(

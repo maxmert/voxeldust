@@ -794,7 +794,7 @@ fn neighbourhood_scope(
 /// `all.len()` (a well-formed forest reaches the root well within that). If `hosted_realm` is not in the
 /// forest the chain is just `[hosted_realm]` (a shard hosting an unknown realm gets no ancestry → an empty
 /// neighbourhood → the detector is inert; a safe degrade).
-fn ancestor_realms(all: &[RealmRegion], hosted_realm: RealmId) -> Vec<RealmId> {
+pub fn ancestor_realms(all: &[RealmRegion], hosted_realm: RealmId) -> Vec<RealmId> {
     let mut chain = vec![hosted_realm];
     let mut cur = hosted_realm;
     for _ in 0..all.len() {

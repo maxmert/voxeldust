@@ -16,13 +16,12 @@ use std::sync::Arc;
 
 use glam::DVec3;
 use vd_core::EntityId;
-use vd_core::pose::FrameRef;
+use vd_core::pose::{FrameRef, LatticePos};
 use vd_wire::channels::SubId;
 
 use crate::interp::RenderPose;
 use crate::net::ClientPhase;
 use crate::realm_scene::RealmScene;
-use crate::realm_view::RealmView;
 use crate::render_clock::RenderClock;
 use crate::view::DeliveredView;
 
@@ -40,24 +39,13 @@ pub struct RenderSnapshot {
     /// clone of the snapshot is a pointer bump, never a deep copy of the box map. Default EMPTY
     /// (no boxes until a scene is loaded), so every existing pose-only path is unchanged.
     scene: Arc<RealmScene>,
-    /// The streamed LIVE realm placements (the SAME `RealmView` that moves the scene boxes) — carried on
-    /// the render seam so [`RenderSnapshot::world_pos`] can compose an occupant against its containing
-    /// realm's placement (so it RIDES its moving realm). A `BTreeMap` of `Copy` tracks — clone is cheap.
-    /// Default EMPTY (walk/static scale), so every pose-only path stays byte-identical.
-    realm_view: RealmView,
 }
 
 impl RenderSnapshot {
     /// A snapshot with NO realm boxes (the pose-only default — every pre-V2 construction site).
     #[must_use]
     pub fn new(view: DeliveredView, clock: RenderClock, phase: ClientPhase) -> RenderSnapshot {
-        RenderSnapshot::with_scene(
-            view,
-            clock,
-            phase,
-            Arc::new(RealmScene::default()),
-            RealmView::default(),
-        )
+        RenderSnapshot::with_scene(view, clock, phase, Arc::new(RealmScene::default()))
     }
 
     /// A snapshot carrying a boot-loaded [`RealmScene`] + the streamed realm placements on the render
@@ -69,14 +57,12 @@ impl RenderSnapshot {
         clock: RenderClock,
         phase: ClientPhase,
         scene: Arc<RealmScene>,
-        realm_view: RealmView,
     ) -> RenderSnapshot {
         RenderSnapshot {
             view,
             clock,
             phase,
             scene,
-            realm_view,
         }
     }
 
@@ -111,15 +97,21 @@ impl RenderSnapshot {
         }
     }
 
-    /// Map a rendered pose into WORLD space through the frame-eval seam
-    /// ([`DeliveredView::world_pos`]) — identity for world-origin frames, composing a
-    /// `ShipLocal` interior through its hull at the SAME display cursor `now_s` resolves to
-    /// (so interior + hull agree in time). Before the clock anchors there is nothing to
-    /// render; the seam falls back to the frame-local pos.
+    /// Reduce a rendered (already root-ABSOLUTE, A5) pose to render space: subtract the server-told render
+    /// [`RenderSnapshot::origin`] in exact lattice arithmetic ([`DeliveredView::world_pos`]). A pure
+    /// range-reduction — no compose, no cursor, no per-frame branch. Every point in one pass reads the SAME
+    /// immutable snapshot, so all agree on the origin within a frame.
     #[must_use]
-    pub fn world_pos(&self, pose: &RenderPose, now_s: f64) -> DVec3 {
-        let cursor = self.clock.cursor(now_s).unwrap_or(0.0);
-        self.view.world_pos(pose, &self.realm_view, cursor)
+    pub fn world_pos(&self, pose: &RenderPose) -> DVec3 {
+        self.view.world_pos(pose, self.origin())
+    }
+
+    /// The SERVER-TOLD render origin the renderer writes once per pass — every drawn point AND the camera eye
+    /// AND the capture camera subtract this ONE value (A5). Identity (ZERO) until the first pin is told; then
+    /// carried across re-anchors (never resets to the world origin).
+    #[must_use]
+    pub fn origin(&self) -> LatticePos {
+        self.view.render_origin()
     }
 
     /// The freshest delivered universe tick (the run-stable capture-alignment quantity);
@@ -215,7 +207,6 @@ mod tests {
             RenderClock::new(ClientInterpTuning::DEFAULT),
             ClientPhase::Active,
             Arc::new(scene),
-            RealmView::default(),
         );
         assert_eq!(s.scene().len(), 1, "the loaded box is carried on the seam");
         assert_eq!(
@@ -277,9 +268,9 @@ mod tests {
         assert_eq!(s.freshest_tick(), Some(10), "the anchored tick");
         let rendered = s.rendered(100.0);
         assert_eq!(rendered.len(), 1);
-        // A system-frame pose → world_pos is the identity (the sampled pos).
+        // At the identity render origin (no pin told), world_pos returns the sampled pos verbatim (A5).
         let pose = rendered[0].2;
-        assert_eq!(s.world_pos(&pose, 100.0), pose.pos);
+        assert_eq!(s.world_pos(&pose), pose.pos);
     }
 
     #[test]
@@ -290,15 +281,15 @@ mod tests {
             ClientPhase::Connecting,
         );
         assert_eq!(s.freshest_tick(), None);
-        // Unanchored clock → cursor is None → world_pos uses the 0.0 fallback; a world-frame
-        // pose is still the identity, so it is finite and correct.
+        // A5 — world_pos no longer depends on the clock/cursor: it is a pure subtraction of the render origin
+        // (identity here, no pin told), so a pose reduces to itself, finite and correct, even before the anchor.
         let pose = RenderPose {
             frame: FrameRef::SystemSpace { system_seed: 1 },
             cell: glam::I64Vec3::ZERO,
             pos: DVec3::new(1.0, 2.0, 3.0),
             orient: glam::DQuat::IDENTITY,
         };
-        assert_eq!(s.world_pos(&pose, 5.0), DVec3::new(1.0, 2.0, 3.0));
+        assert_eq!(s.world_pos(&pose), DVec3::new(1.0, 2.0, 3.0));
     }
 
     #[test]

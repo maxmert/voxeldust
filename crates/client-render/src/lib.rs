@@ -616,7 +616,7 @@ fn sync_world(
     let mut own_world: Option<DVec3> = None;
     for (id, _sub, pose) in &rendered {
         seen.insert(*id);
-        let world = snap.world_pos(pose, now_s); // the frame-eval seam (composes via the view)
+        let world = snap.world_pos(pose); // A5 — pure range-reduction against the server-told render origin
         if Some(*id) == own {
             own_world = Some(world);
         }
@@ -683,7 +683,6 @@ fn sync_realm_boxes(
     mut commands: Commands,
     mut box_tf: Query<&mut Transform, With<RealmBoxMarker>>,
 ) {
-    let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
     let mut seen: BTreeSet<RealmId> = BTreeSet::new();
     for (realm, rbox) in snap.scene().iter() {
@@ -696,7 +695,7 @@ fn sync_realm_boxes(
             pos: DVec3::ZERO,
             orient: DQuat::IDENTITY,
         };
-        let world_center = snap.world_pos(&frame_origin, now_s);
+        let world_center = snap.world_pos(&frame_origin);
         // Lower to render primitives (VERTICES) at that world center — no shape branch here.
         let prims = to_render_prims(rbox, world_center);
         match boxes.0.get(&realm) {

@@ -27,11 +27,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arc_swap::ArcSwap;
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
 use vd_core::glam::DVec3;
-use vd_core::pose::{FrameRef, RealmId, StampedPose};
+use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose, Tier};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::rng::SplitMix64;
 use vd_core::worldgen::{
-    UniverseConfig, container_coord_at, realm_neighbourhood_for_held_config, realm_regions_for,
+    UniverseConfig, ancestor_realms, container_coord_at, fold_origin, origin_chain_for_config,
+    pin_realm_of, realm_neighbourhood_for_held_config, realm_regions_for,
 };
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
@@ -1763,12 +1764,52 @@ fn realm_registry_for_home(
         .map(|r| RealmShape {
             realm: r.realm,
             frame: r.frame,
-            center: r.center,
+            center: realm_abs_center(cfg, r),
             shape: r.shape,
             parent: r.parent,
         })
         .collect();
-    ServerControlMsg::RealmRegistry { regions, root }
+    let (pin, pin_abs) = render_pin(cfg, home);
+    ServerControlMsg::RealmRegistry {
+        regions,
+        root,
+        pin,
+        pin_abs,
+        anchor_epoch: 0,
+    }
+}
+
+/// A5 — a realm's shipped ABSOLUTE center = its FRAME tick-0 fold (`fold_origin` at t=0) COMPOSED with its
+/// center-in-frame. A mover (center ZERO) rides its orbit start; a static realm (Fixed chain folds to ZERO)
+/// keeps `r.center` — a Fixed link adds nothing because that offset already lives in the center (§0.3). Built
+/// from the SAME `(seed, config)` as everything else, so registry + snapshot can't disagree. Walk folds to ZERO
+/// ⇒ `ZERO ∘ center == center` ⇒ byte-identical.
+fn realm_abs_center(cfg: &SeedInjectorConfig, r: &vd_core::geometry::RealmRegion) -> LatticePos {
+    let (frame_abs, _vel) = fold_origin(
+        &origin_chain_for_config(cfg.universe_seed, &cfg.universe_config, r.realm),
+        0.0,
+    );
+    frame_abs.compose(r.center, Tier::Fine)
+}
+
+/// A5 — the SERVER-TOLD render origin `(pin, pin_abs)` for a session whose home realm is `home`. `pin` = the
+/// session's own star system (`pin_realm_of` over its root→realm chain, reversed from `ancestor_realms`'
+/// realm→root order); `pin_abs` = that realm's tick-0 absolute. Self-contained `f(seed, config, home)` so BOTH
+/// the login registry and every scene delta ship the IDENTICAL origin (the client subtracts `pin_abs` from every
+/// shipped absolute). Walk pin folds to ZERO (identity) ⇒ subtracting ZERO ⇒ byte-identical render.
+fn render_pin(cfg: &SeedInjectorConfig, home: RealmId) -> (RealmId, LatticePos) {
+    let mut held = BTreeSet::new();
+    held.insert(home);
+    let neighbourhood =
+        realm_neighbourhood_for_held_config(cfg.universe_seed, &held, &cfg.universe_config);
+    let mut chain = ancestor_realms(&neighbourhood, home);
+    chain.reverse();
+    let pin = pin_realm_of(&chain);
+    let pin_abs = neighbourhood.iter().find(|r| r.realm == pin).map_or_else(
+        || LatticePos::local(vd_core::glam::DVec3::ZERO),
+        |r| realm_abs_center(cfg, r),
+    );
+    (pin, pin_abs)
 }
 
 /// Stream the client its seed-derived realm render-scene at the home-entry seam (VU, proto_minor 5) — IFF
@@ -2880,7 +2921,14 @@ fn on_shard_control(
             // VU AoI (proto_minor 6): route the shard's per-observer render delta to that observer's live
             // client. `observer` is the DURABLE player id; the shard emits only when armed, so a static/walk
             // cluster produces nothing here.
-            forward_realm_scene_delta(sessions, observer, added, removed, outbox);
+            forward_realm_scene_delta(
+                sessions,
+                &config.seed_injector,
+                observer,
+                added,
+                removed,
+                outbox,
+            );
         }
         ShardToGateway::Frame { .. } | ShardToGateway::RealmFrame { .. } => {
             // Entity/realm frames ride the Snapshot / RealmSnapshot datagram classes; one on the
@@ -2898,6 +2946,7 @@ fn on_shard_control(
 /// O(sessions) scan; an `AccountId -> SessionId` index is the 100K scale form (ledgered, VU-AoI-scale).
 fn forward_realm_scene_delta(
     sessions: &GatewaySessions,
+    cfg: &SeedInjectorConfig,
     observer: AccountId,
     added: Vec<RealmShape>,
     removed: Vec<RealmId>,
@@ -2909,10 +2958,24 @@ fn forward_realm_scene_delta(
     if session.negotiated_minor < 6 {
         return; // an older peer never receives the delta variant
     }
+    // A5 — re-carry the SERVER-TOLD render origin on every delta (a warp re-anchor refreshes it on the reliable
+    // scene lane; a same-pin delta is a no-op for the client). Derived from the session's STANDING home realm.
+    // A session with no resolved home yet has no render origin to tell, so the delta is WITHHELD — it self-heals
+    // the instant the home resolves and the scene re-broadcasts (never a delta that pins the client at nowhere).
+    let Some(home) = session.home_rid else {
+        return;
+    };
+    let (pin, pin_abs) = render_pin(cfg, home);
     push_control(
         outbox,
         session.client,
-        &ServerControlMsg::RealmSceneDelta { added, removed },
+        &ServerControlMsg::RealmSceneDelta {
+            added,
+            removed,
+            pin,
+            pin_abs,
+            anchor_epoch: 0,
+        },
     );
 }
 
@@ -7835,7 +7898,7 @@ mod tests {
                 match postcard::from_bytes::<ServerControlMsg>(bytes)
                     .expect("gateway test pushes only ServerControlMsg on this outbox")
                 {
-                    ServerControlMsg::RealmRegistry { regions, root } => Some((regions, root)),
+                    ServerControlMsg::RealmRegistry { regions, root, .. } => Some((regions, root)),
                     _ => None,
                 }
             })
@@ -8077,7 +8140,9 @@ mod tests {
                 match postcard::from_bytes::<ServerControlMsg>(bytes)
                     .expect("gateway test pushes only ServerControlMsg on this outbox")
                 {
-                    ServerControlMsg::RealmSceneDelta { added, removed } => Some((added, removed)),
+                    ServerControlMsg::RealmSceneDelta { added, removed, .. } => {
+                        Some((added, removed))
+                    }
                     _ => None,
                 }
             })
@@ -8115,12 +8180,41 @@ mod tests {
             shape: Boundary::Shell { r: 10.0 },
             parent: Some(RealmId::System(7)),
         }];
+        // A5 — the delta re-carries the server-told render origin, derived from the session's home realm; give
+        // this session a home so the routed-delta case exercises the SEND (not the no-home withhold), and a cfg
+        // whose forest resolves that home's pin.
+        let cfg = armed_injector(std::collections::BTreeMap::new());
+        // (0) A minor>=6 session with NO resolved home yet ⇒ the delta is WITHHELD (there is no render origin
+        // to tell; it self-heals the instant the home resolves and the scene re-broadcasts). The home_rid-None
+        // arm — never a delta that pins the client at nowhere.
+        rig.world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("session")
+            .home_rid = None;
+        {
+            let sessions = rig.world.resource::<GatewaySessions>();
+            let mut ob = OutboundBox::default();
+            forward_realm_scene_delta(sessions, &cfg, account, added.clone(), Vec::new(), &mut ob);
+            assert!(
+                scene_deltas(&ob).is_empty(),
+                "no resolved home ⇒ the delta is withheld (self-heals on home resolve)"
+            );
+        }
+        rig.world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("session")
+            .home_rid = Some(RealmId::System(7));
         // (1) matching durable id + minor 6 ⇒ the client gets exactly one delta with the same add/remove.
         {
             let sessions = rig.world.resource::<GatewaySessions>();
             let mut ob = OutboundBox::default();
             forward_realm_scene_delta(
                 sessions,
+                &cfg,
                 account,
                 added.clone(),
                 vec![RealmId::Planet(8)],
@@ -8148,6 +8242,7 @@ mod tests {
             );
             forward_realm_scene_delta(
                 sessions,
+                &cfg,
                 AccountId(0xBAD),
                 added.clone(),
                 Vec::new(),
@@ -8168,7 +8263,7 @@ mod tests {
         {
             let sessions = rig.world.resource::<GatewaySessions>();
             let mut ob = OutboundBox::default();
-            forward_realm_scene_delta(sessions, account, added.clone(), Vec::new(), &mut ob);
+            forward_realm_scene_delta(sessions, &cfg, account, added.clone(), Vec::new(), &mut ob);
             assert!(
                 scene_deltas(&ob).is_empty(),
                 "a minor<6 peer receives no delta"
@@ -8191,9 +8286,18 @@ mod tests {
                 removed: vec![RealmId::Planet(8)],
             },
         )]);
+        // A5 — the client-facing delta carries the server-told render origin the PROD path computes from the
+        // session's home (System(7)) over the rig's OWN config, so match it against the same `render_pin`.
+        let (pin, pin_abs) = render_pin(
+            &rig.world.resource::<GatewayConfig>().seed_injector,
+            RealmId::System(7),
+        );
         let expected = ServerControlMsg::RealmSceneDelta {
             added,
             removed: vec![RealmId::Planet(8)],
+            pin,
+            pin_abs,
+            anchor_epoch: 0,
         };
         assert!(
             decode_controls(&sent, CLIENT).contains(&expected),

@@ -5224,7 +5224,7 @@ fn aoi_decide(
                 dot_visible
                     .entry(*obs)
                     .or_default()
-                    .push(child_shape(region));
+                    .push(child_shape(regions, region, tick_hz));
             }
             // VU AoI S2c-ii — accumulate the PROXY's CURRENT in-range set (LEVEL): every child still in range
             // after this tick's transition (`next_in`), reflected down to the home for the client to draw. The
@@ -5236,7 +5236,7 @@ fn aoi_decide(
                 proxy_now
                     .entry(*acct)
                     .or_default()
-                    .push(child_shape(region));
+                    .push(child_shape(regions, region, tick_hz));
             }
             match next {
                 Some(s) => {
@@ -5367,11 +5367,25 @@ fn aoi_decide(
 /// The render subset of a direct-child region (VU AoI S1b) — realm + authoritative frame + STATIC center +
 /// boundary + parent, exactly what a client draws a box from. Twin of the [`realm_registry_for_home`]
 /// projection: the per-tick POSITION rides the separate realm datagram, not this static shape.
-fn child_shape(region: &RealmRegion) -> RealmShape {
+///
+/// A5 — the shipped `center` is the realm's TICK-0 ABSOLUTE (its origin chain folded at tick 0), so a mover's
+/// box sits at its real orbit-start under the server-told render origin instead of the world origin (removing
+/// the "box at origin until the first snap" flash). A realm with no chain (every walk region) folds to `None`
+/// ⇒ `region.center` ⇒ byte-identical to the pre-flip projection.
+fn child_shape(regions: &RealmRegions, region: &RealmRegion, tick_hz: f64) -> RealmShape {
+    // The realm's absolute = its FRAME's tick-0 absolute (`origin_abs_of`) COMPOSED with its center-in-frame:
+    // a mover's center is ZERO ⇒ its box rides its orbit start; a static realm's frame folds to ZERO ⇒ its box
+    // keeps `region.center` (§0.3 — a Fixed link adds nothing because the offset already lives in the center).
+    // No chain (walk) ⇒ `origin_abs_of` None ⇒ `region.center` verbatim ⇒ byte-identical.
+    let center = regions
+        .origin_abs_of(region.realm, tick_hz, UniverseTick(0))
+        .map_or(region.center, |(frame_abs, _vel)| {
+            frame_abs.compose(region.center, Tier::Fine)
+        });
     RealmShape {
         realm: region.realm,
         frame: region.frame,
-        center: region.center,
+        center,
         shape: region.shape,
         parent: region.parent,
     }
@@ -14151,10 +14165,61 @@ mod tests {
     }
 
     #[test]
+    fn a5_child_shape_center_is_the_tick0_absolute_when_a_chain_is_registered() {
+        // A5: child_shape ships the realm's absolute = FRAME tick-0 abs ∘ center-in-frame. A MOVER (center ZERO,
+        // Orbital chain) ⇒ its box rides its orbit start (NOT the world origin); a STATIC realm (Fixed chain
+        // folds to ZERO) ⇒ its box KEEPS region.center; NO chain ⇒ region.center verbatim. All three arms.
+        let elements = orbit();
+        let tick_hz = 20.0;
+        let t0_secs = secs_since_epoch(0, tick_hz);
+        let state0 = orbital_state(&elements, t0_secs);
+
+        // A MOVER: center ZERO, an Orbital chain ⇒ the shipped center is the tick-0 orbit position.
+        let mover = region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 10.0);
+        let mut mover_chains: BTreeMap<RealmId, Vec<OriginLink>> = BTreeMap::new();
+        mover_chains.insert(OTHER_REALM, vec![OriginLink::Orbital(elements)]);
+        let mover_regions = RealmRegions::new(vec![root_region(), own_region(), mover])
+            .with_origin_chains(mover_chains);
+        assert_eq!(
+            child_shape(&mover_regions, &mover, tick_hz).center.offset(),
+            state0.position,
+            "a mover box rides its tick-0 orbit position (the flash fix)"
+        );
+
+        // A STATIC realm: a non-zero center, an all-Fixed chain (folds to ZERO) ⇒ the center is PRESERVED.
+        let stat = region(
+            OTHER_REALM,
+            Some(OWN_REALM),
+            DVec3::new(1.0, 2.0, 3.0),
+            10.0,
+        );
+        let mut fixed_chains: BTreeMap<RealmId, Vec<OriginLink>> = BTreeMap::new();
+        fixed_chains.insert(OTHER_REALM, vec![OriginLink::Fixed, OriginLink::Fixed]);
+        let stat_regions = RealmRegions::new(vec![root_region(), own_region(), stat])
+            .with_origin_chains(fixed_chains);
+        assert_eq!(
+            child_shape(&stat_regions, &stat, tick_hz).center,
+            stat.center,
+            "a static realm keeps its region center (Fixed fold is ZERO)"
+        );
+
+        // No chain ⇒ region.center verbatim (the byte-identical fall-back).
+        let bare = RealmRegions::new(vec![root_region(), own_region()]);
+        assert_eq!(child_shape(&bare, &stat, tick_hz).center, stat.center);
+    }
+
+    #[test]
     fn diff_scene_into_delta_covers_add_remove_both_neither() {
         // The ONE monomorphic diff shared by the proxy reflect (`on_proxy_scene_set`) and the dot emit — all
         // four arms (added-only / removed-only / both / neither) covered ONCE here (HR5 per-mono discipline).
-        let shape = |r: RealmId| child_shape(&region(r, Some(OWN_REALM), DVec3::ZERO, 10.0));
+        let no_chains = RealmRegions::new(vec![]);
+        let shape = |r: RealmId| {
+            child_shape(
+                &no_chains,
+                &region(r, Some(OWN_REALM), DVec3::ZERO, 10.0),
+                20.0,
+            )
+        };
         let one = shape(RealmId::Planet(1));
         let ids = |v: &[RealmShape]| v.iter().map(|s| s.realm).collect::<Vec<_>>();
         // added-only: baseline empty, new = {1}.
@@ -14425,9 +14490,14 @@ mod tests {
 
     // ---- VU AoI S2c-iii — the home shard reconciles the reflected set onto its client ----------
 
-    /// A public `RealmShape` for `realm` (a Planet, so `frame_of` resolves) — the reflected geometry.
+    /// A public `RealmShape` for `realm` (a Planet, so `frame_of` resolves) — the reflected geometry. No origin
+    /// chains ⇒ the shipped center is the region center (byte-identical to the pre-A5 projection).
     fn render_shape(realm: RealmId) -> RealmShape {
-        child_shape(&region(realm, Some(ROOT_REALM), DVec3::ZERO, 1000.0))
+        child_shape(
+            &RealmRegions::new(vec![]),
+            &region(realm, Some(ROOT_REALM), DVec3::ZERO, 1000.0),
+            20.0,
+        )
     }
 
     /// A `ProxySceneSet` inbound frame (on the Saga lane, as the parent emits it) for `account` carrying the

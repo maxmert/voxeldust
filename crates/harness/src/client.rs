@@ -595,6 +595,9 @@ mod tests {
             &ServerControlMsg::RealmSceneDelta {
                 added: vec![],
                 removed: vec![],
+                pin: vd_core::pose::RealmId::System(0),
+                pin_abs: vd_core::pose::LatticePos::default(),
+                anchor_epoch: 0,
             },
         );
         fabric.pump(TickId(9));

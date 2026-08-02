@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // RLM realistic-demo Slice 3: the `VisualDemand` AoI band is measured against the LIVE occupant speed the
     // sim integrates (`move_speed · time_multiplier`) at the LIVE tick dt — closing the M-2 two-home owe.
     // `Walk`/`Visual` ignore both.
-    let (seed_regions, moving) = vd_bins::boot_regions_and_movers(
+    let (seed_regions, moving, seed_origin_chains) = vd_bins::boot_regions_and_movers(
         scale,
         universe_seed,
         &held_realms,
@@ -213,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // REPLACES the scale forest with a born-inside child crossing shell — a self-contained Walk-scale forest,
     // so its mover roster is EMPTY (the override never combines with the Visual orbiting planets). A
     // malformed file / a boundary for a realm this shard does NOT host fails LOUD. ABSENT ⇒ the scale forest.
-    let (regions, moving) = if let Some(boundaries) =
+    let (regions, moving, origin_chains) = if let Some(boundaries) =
         vd_bins::resolve_realm_boundaries(&env, hosted_realm).map_err(|e| e.to_string())?
     {
         tracing::info!(
@@ -221,6 +221,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             realm = %hosted_realm,
             "planting VD_REALM_BOUNDARIES OVERRIDE — the authored playground crossing forest is ARMED",
         );
+        // The override is a self-contained WALK-scale playground forest: EMPTY mover roster ⇒ EMPTY origin
+        // chains (all `Fixed` ⇒ identity fold ⇒ the compose short-circuits to raw ⇒ byte-identical).
         (
             vd_bins::override_regions_for_boundaries(
                 &boundaries,
@@ -228,6 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 move_speed,
                 tick_dt,
             ),
+            std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
         )
     } else {
@@ -238,7 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             scale = ?scale,
             "planting the scale-derived containment forest — the re-home detector is LIVE",
         );
-        (seed_regions, moving)
+        (seed_regions, moving, seed_origin_chains)
     };
     // The BOOT FENCE (C-5): pure-topology validation BEFORE the infallible `RealmRegions::new`, so a
     // malformed forest fails LOUD here rather than degrading to the detector's rootless no-op.
@@ -247,8 +250,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     *node
         .world_mut()
-        .resource_mut::<vd_sim::stub::RealmRegions>() =
-        vd_sim::stub::RealmRegions::new(regions).with_moving_children(moving);
+        .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)
+        .with_moving_children(moving)
+        .with_origin_chains(origin_chains);
     let mut pacer = TickPacer::new(tick_hz);
     // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its
     // heartbeat + THIS shard's readiness) and the /healthz+/readyz HTTP task reads. Slice 1: the SIGTERM flag

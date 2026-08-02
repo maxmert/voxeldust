@@ -236,7 +236,12 @@ impl ClientState {
             // at publish time — exactly as they did over the boot-file scene. `root` (the ambient container)
             // is unused until camera framing (VU-6). A malformed neighbourhood (a duplicate/cyclic realm — a
             // server bug) is counted on the shared decode counter and the previous scene kept, never a crash.
-            ServerControlMsg::RealmRegistry { regions, .. } => {
+            ServerControlMsg::RealmRegistry {
+                regions, pin_abs, ..
+            } => {
+                // A5 — adopt the SERVER-TOLD render origin (the client subtracts it from every absolute pose it
+                // draws). Carry-last-pin (never reset to identity), so a warp re-anchor never teleports the scene.
+                self.view.set_render_origin(pin_abs);
                 match RealmScene::from_shapes(&regions) {
                     Ok(scene) => self.scene = Arc::new(scene),
                     Err(_) => self.decode_errors += 1,
@@ -247,7 +252,15 @@ impl ClientState {
             // follows the view continuously. Atomic — a malformed delta (a cyclic parent chain, a server bug)
             // is counted and the previous scene kept, never a partial mutation. The live per-realm poses keep
             // riding `realm_view` and overlay onto whatever boxes are present.
-            ServerControlMsg::RealmSceneDelta { added, removed } => {
+            ServerControlMsg::RealmSceneDelta {
+                added,
+                removed,
+                pin_abs,
+                ..
+            } => {
+                // A5 — every scene delta re-carries the render origin (a warp re-anchor refreshes it on the
+                // reliable scene lane); adopt it the same carry-last-pin way as the registry.
+                self.view.set_render_origin(pin_abs);
                 match self.scene.with_delta(&added, &removed) {
                     Ok(scene) => self.scene = Arc::new(scene),
                     Err(_) => self.decode_errors += 1,
@@ -476,13 +489,7 @@ impl ClientState {
         } else {
             Arc::new(self.scene.overlaid(&self.realm_view))
         };
-        RenderSnapshot::with_scene(
-            self.view.clone(),
-            self.render_clock,
-            self.phase,
-            scene,
-            self.realm_view.clone(),
-        )
+        RenderSnapshot::with_scene(self.view.clone(), self.render_clock, self.phase, scene)
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
@@ -507,10 +514,10 @@ impl ClientState {
                     .into_iter()
                     .map(|(entity, sub, pose)| DevEntityRow {
                         entity: entity.to_string(),
-                        // The COMPOSITED WORLD pose (its doc's promise): map the frame-local delivered
-                        // pose through world_pos so an occupant on a moving realm reports where it RIDES
-                        // (composed with its realm's streamed placement), not its raw frame-local offset.
-                        pos: sanitize_vec3(self.view.world_pos(&pose, &self.realm_view, cursor)),
+                        // A5 — the RENDER pose: the server ships this absolute; reduce it against the server-told
+                        // render origin (the SAME subtraction the renderer draws it with), so the HR6 diagnosis
+                        // surface reports exactly what is drawn.
+                        pos: sanitize_vec3(self.view.world_pos(&pose, self.view.render_origin())),
                         orient: sanitize_quat(pose.orient),
                         authoritative_sub: sub.0,
                     })
@@ -527,7 +534,10 @@ impl ClientState {
             .iter()
             .map(|(realm, b)| DevRealmBox {
                 realm: format!("{realm:?}"),
-                center: sanitize_vec3(b.center_offset),
+                // A5 — the box center is ABSOLUTE (the server ships absolute realm centers); route it through
+                // the SAME render-origin subtraction as DevEntityRow.pos, so the diagnosis surface reports both
+                // in ONE frame (a raw absolute here would silently disagree the moment the pin is non-identity).
+                center: sanitize_vec3(b.center_offset - self.view.render_origin().offset()),
             })
             .collect();
         DevState {
@@ -1581,6 +1591,9 @@ mod tests {
         postcard::to_allocvec(&ServerControlMsg::RealmRegistry {
             regions,
             root: vd_core::pose::RealmId::System(0),
+            pin: vd_core::pose::RealmId::System(0),
+            pin_abs: vd_core::pose::LatticePos::default(),
+            anchor_epoch: 0,
         })
         .expect("test fixture")
     }
@@ -1655,8 +1668,14 @@ mod tests {
     /// A `RealmSceneDelta` control-message fixture (VU AoI, minor 6): realms that entered (`added`) + left
     /// (`removed`).
     fn realm_scene_delta(added: Vec<RealmShape>, removed: Vec<vd_core::pose::RealmId>) -> Vec<u8> {
-        postcard::to_allocvec(&ServerControlMsg::RealmSceneDelta { added, removed })
-            .expect("fixture")
+        postcard::to_allocvec(&ServerControlMsg::RealmSceneDelta {
+            added,
+            removed,
+            pin: vd_core::pose::RealmId::System(0),
+            pin_abs: vd_core::pose::LatticePos::default(),
+            anchor_epoch: 0,
+        })
+        .expect("fixture")
     }
 
     #[test]

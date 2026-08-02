@@ -81,22 +81,6 @@ impl FrameRef {
         }
     }
 
-    /// The realm whose STREAMED LIVE placement locates THIS frame's ORIGIN in world (pinned-root) space —
-    /// the anchor a pure-renderer client composes an occupant's frame-local pose against so it RIDES its
-    /// moving realm instead of hanging at the world origin. It is [`FrameRef::realm`] EXCEPT for an `Area`:
-    /// a sub-planet area shares its PARENT PLANET's coordinate frame with NO offset (its local coords ARE
-    /// planet-frame coords, and it never moves relative to its planet), so it anchors on the `Planet`
-    /// (whose placement is authored in world/`SystemSpace`), NEVER on the area itself (which has no
-    /// independent world placement — anchoring there would miss the planet's orbit, the exact mislocation
-    /// bug). A pure taxonomy fact, not a feature branch (HR3): every realm KIND flows through one compose.
-    #[must_use]
-    pub fn placement_anchor(self) -> Option<RealmId> {
-        match self {
-            FrameRef::AreaLocal { planet_seed, .. } => Some(RealmId::Planet(planet_seed)),
-            other => other.realm(),
-        }
-    }
-
     /// A short human-readable label for the player-stats HUD and the `vdctl` location
     /// readout — the player's "where am I", derived from their authoritative frame, NOT a
     /// raw shard id (the client never sees shard processes; this is fence-validated and
@@ -241,7 +225,7 @@ impl Tier {
 /// consumer lands (P4/P5 re-centering; P10 galaxy). It is not built yet (smallest-correct: no
 /// production caller exists until then). Fields are private so all construction flows through one
 /// point ([`LatticePos::local`] today) and the bounded-offset invariant has a single future home.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatticePos {
     cell: I64Vec3,
     offset: DVec3,
@@ -592,38 +576,6 @@ mod tests {
             }
             .realm(),
             Some(RealmId::Area(8))
-        );
-    }
-
-    #[test]
-    fn placement_anchor_maps_an_area_to_its_planet_and_every_other_frame_to_its_realm() {
-        // The realm whose streamed placement a client composes an occupant AGAINST: an Area rides its
-        // PLANET (not the area — it has no independent world placement); every other frame anchors on its
-        // own realm; Galaxy has none.
-        assert_eq!(
-            FrameRef::AreaLocal {
-                planet_seed: 5,
-                area_seed: 8
-            }
-            .placement_anchor(),
-            Some(RealmId::Planet(5))
-        );
-        assert_eq!(
-            FrameRef::PlanetCentered { planet_seed: 5 }.placement_anchor(),
-            Some(RealmId::Planet(5))
-        );
-        assert_eq!(
-            FrameRef::SystemSpace { system_seed: 9 }.placement_anchor(),
-            Some(RealmId::System(9))
-        );
-        assert_eq!(
-            FrameRef::StationLocal { station_seed: 7 }.placement_anchor(),
-            Some(RealmId::Station(7))
-        );
-        assert_eq!(FrameRef::GalaxySpace.placement_anchor(), None);
-        assert_eq!(
-            FrameRef::ShipLocal { ship: ship_id() }.placement_anchor(),
-            Some(RealmId::Ship(ship_id()))
         );
     }
 

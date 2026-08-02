@@ -26,7 +26,7 @@ use vd_core::entity_kind::DurabilityClass;
 use vd_core::glam::DVec3;
 use vd_core::pose::{FrameRef, RealmId};
 use vd_core::{AccountId, EntityId, NodeId, SessionId, TickId, TransferId};
-use vd_harness::client::{RealmView, ScriptedClient};
+use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::{FaultFabric, LinkPolicy};
 use vd_harness::oracle::{
     RenderSample, RenderTolerances, RenderTrace, verify_authority_settled, verify_authority_unique,
@@ -73,7 +73,7 @@ fn capture_subject(topo: &mut Topology) -> CapturedTick {
                     sub,
                     frame: pose.frame,
                     raw_pos: pose.pos,
-                    world_pos: view.world_pos(&pose, &RealmView::default(), TRACE_CURSOR),
+                    world_pos: view.world_pos(&pose, view.render_origin()),
                     orient: pose.orient,
                 })
         });

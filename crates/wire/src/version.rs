@@ -44,7 +44,14 @@ pub const PROTO_MAJOR: u16 = 1;
 /// the cold-start / warp re-anchor snapshot; the delta is the per-observer add/remove on top. The
 /// `ShardToGateway` arm is a mesh carrier (one cluster build), version-visible for the release-conformance
 /// ledger; the `ServerControlMsg` arm is the negotiated client-facing variant (gated on minor >= 6).
-pub const PROTO_MINOR: u16 = 6;
+///
+/// minor 7 (floating-origin A5 — THE FLIP) changes the VALUE SEMANTICS with no shape change: entity and realm
+/// positions are now ROOT-ABSOLUTE (the server composes and ships finished positions; the client range-reduces
+/// against a server-told render origin instead of composing). `ServerControlMsg::{RealmRegistry,RealmSceneDelta}`
+/// additively carry that origin (`pin`/`pin_abs`/`anchor_epoch`). This MUST refuse a mismatched peer loudly:
+/// client and server are separate binaries, and a stale minor-6 client would compose an already-absolute pose
+/// and render every orbit twice — a teleport that grows with the orbit. Not optional (verifier JUMP-7).
+pub const PROTO_MINOR: u16 = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -100,14 +107,14 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 6,
-            "minor 6 appended RealmSceneDelta (minor 5 RealmRegistry, minor 4 ShardPresence, minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate)"
+            PROTO_MINOR, 7,
+            "minor 7 made positions root-absolute + server-told the render origin (floating-origin A5); minor 6 appended RealmSceneDelta, minor 5 RealmRegistry, minor 4 ShardPresence, minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate"
         );
         assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.6");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.7");
         // Sender-gates-variants: talking to an older minor-1 peer negotiates DOWN to
         // minor 1, so the gateway withholds the minor-2 OwnEntity variant (falling back to
         // the retained-ghost/AuthorityChanged path). An even-older minor-0 peer negotiates
