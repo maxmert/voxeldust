@@ -2108,6 +2108,12 @@ fn on_gateway_msg(
                 // take-drained the buffer; OpenInputSlot is emitted once, the saga is
                 // forward-only past Committed) — the recovery producer is owed 1d/P3 (D-8).
                 stats.input_slots_deferred += 1;
+                tracing::warn!(
+                    ?session,
+                    ?subject,
+                    "OpenInputSlot DROPPED — no realm lease yet, and 1c.5 has NO re-drive (DEFERRED D-8): \
+                     the dest adopt is permanently stranded"
+                );
                 return;
             };
             // Extract the SUBJECT EntityId to ADOPT. A non-Entity subject (e.g. a Realm-subject
@@ -2592,20 +2598,31 @@ fn on_saga_promote(
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
-    match applied.journal_step(cmd.transfer, PROMOTE_STEP) {
-        StepOutcome::FirstApply => promote_apply(
-            cmd,
-            config,
-            self_node,
-            clock,
-            dots,
-            applied,
-            registration,
-            realm_fence,
-            stats,
-            outbox,
-        ),
-        StepOutcome::AlreadyApplied => stats.promotes_redelivered += 1,
+    // Journal PROMOTE_STEP only when the flip ACTUALLY lands. A promote that arrives before its precondition —
+    // the crossing pose journaled AND a granted crossing-target dot — cannot flip yet; journaling it anyway
+    // (the old unconditional `journal_step` here) marked it done FOREVER, so the standing Promoting-timeout
+    // re-emit hit `AlreadyApplied` and never re-ran the flip even after the crossing landed, leaving the entity
+    // a silent non-emitting Ghost (the return-crossing total-freeze). Withholding the journal on a non-flip
+    // keeps the promote RE-DRIVABLE: the next timeout window re-runs `promote_apply` and completes the flip once
+    // the fresh-adopt is granted and its buffered crossing has drained. A redelivery AFTER a real flip is the
+    // no-op `AlreadyApplied` (protects the strict no-re-flip-on-redelivery invariant).
+    if applied.is_applied(cmd.transfer, PROMOTE_STEP) {
+        stats.promotes_redelivered += 1;
+    } else if promote_apply(
+        cmd,
+        config,
+        self_node,
+        clock,
+        dots,
+        applied,
+        registration,
+        realm_fence,
+        stats,
+        outbox,
+    ) == PromoteOutcome::Flipped
+    {
+        // The flip landed — mark PROMOTE_STEP applied so a later redelivery is the no-op above.
+        let _ = applied.journal_step(cmd.transfer, PROMOTE_STEP);
     }
     // Ack UNCONDITIONALLY — the release gate (PromoteAcked AND DestDelivered) needs this ack even on
     // a redelivery / a deferred (pose-not-yet-landed) flip; never wedge the saga in Promoting.
@@ -2616,6 +2633,22 @@ fn on_saga_promote(
             transfer: cmd.transfer,
         }),
     );
+}
+
+/// The outcome of a DEST [`promote_apply`] attempt — whether the `Ghost→Owned` flip actually LANDED. The
+/// caller journals `PROMOTE_STEP` ONLY on `Flipped`, so a promote that arrives before its precondition is met
+/// (a fresh-adopt still un-granted, or the crossing pose not yet journaled — the case on a RETURN to a shard
+/// that despawned the entity's retained ghost and must re-adopt) stays RE-DRIVABLE by the standing Promoting
+/// timeout, instead of being journaled-as-done with the entity left a silent non-emitting Ghost FOREVER (the
+/// return-crossing total-freeze: no feed, input dropped as `PendingAuthority`, no `SubscriptionReady`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromoteOutcome {
+    /// The dot flipped to `Owned` — the caller journals `PROMOTE_STEP` applied.
+    Flipped,
+    /// The crossing pose has not landed (`STUB_CROSSING_STEP` unjournaled) — NOT journaled; re-drivable.
+    Deferred,
+    /// No granted crossing-target dot for the subject yet — NOT journaled; re-drivable (the adopt may still land).
+    NoDot,
 }
 
 /// The DEST promote effect (1d.5b.3b), monomorphic so every branch is covered ONCE here, not in a
@@ -2636,14 +2669,19 @@ fn promote_apply(
     realm_fence: Fence,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
-) {
+) -> PromoteOutcome {
     let Some(entity) = cmd.subject.transfer_subject_entity() else {
         stats.promote_no_dot += 1;
-        return;
+        return PromoteOutcome::NoDot;
     };
     let Some((session, dot)) = dots.0.iter_mut().find(|(_, d)| crossing_target(d, entity)) else {
         stats.promote_no_dot += 1;
-        return;
+        tracing::warn!(
+            %entity,
+            transfer = ?cmd.transfer,
+            "Promote found NO granted crossing-target dot — the dest adopt never established (the saga re-drives)"
+        );
+        return PromoteOutcome::NoDot;
     };
     if !applied.is_applied(cmd.transfer, STUB_CROSSING_STEP) {
         // The crossing pose has not landed yet — flipping now would emit a poseless origin frame. DEFER.
@@ -2655,7 +2693,12 @@ fn promote_apply(
         // FaultFabric the crossing always redelivers, so this DEFER is reached only as the transient
         // promote-before-crossing race, never a permanent wedge; the permanent case is a deploy precondition.
         stats.promote_before_crossing += 1;
-        return;
+        tracing::warn!(
+            %entity,
+            transfer = ?cmd.transfer,
+            "Promote DEFERRED — the crossing pose has not landed yet (the saga re-drives the Promote)"
+        );
+        return PromoteOutcome::Deferred;
     }
     let session = *session;
     // Ghost→Owned at the post-CAS fence. TWO cases, split by whether this is a SOURCE==DEST re-home (task
@@ -2710,6 +2753,7 @@ fn promote_apply(
         registration,
         outbox,
     );
+    PromoteOutcome::Flipped
 }
 
 /// Register the transfer/re-home SOURCE as a ghost-neighbor + SPAWN the source ghost so this shard (the new
@@ -3221,6 +3265,13 @@ fn apply_crossing(
 ) {
     if fence.is_stale_against(dot.entity_fence) {
         stats.crossings_stale += 1;
+        tracing::warn!(
+            entity = %dot.entity,
+            ?transfer,
+            ?fence,
+            entity_fence = ?dot.entity_fence,
+            "crossing DROPPED as stale — below the dot's recorded authority fence"
+        );
         return;
     }
     if applied.journal_step(transfer, step_id) == StepOutcome::FirstApply {
@@ -10173,6 +10224,52 @@ mod tests {
             "the Promote does NOT flip a dot whose crossing pose has not landed (stays Ghost)"
         );
         assert_eq!(rig.world.resource::<StubStats>().promote_before_crossing, 1);
+        assert!(saga_ack_to_orch(
+            &sent,
+            TransferControlAck::PromoteAck {
+                transfer: TransferId(7)
+            }
+        ));
+    }
+
+    #[test]
+    fn a_deferred_promote_flips_when_re_driven_after_the_crossing_lands() {
+        // FREEZE FIX (the return-crossing total-freeze): a Promote arriving BEFORE its crossing pose DEFERS
+        // WITHOUT journaling PROMOTE_STEP, so when the crossing later lands and the saga RE-DRIVES the Promote,
+        // the flip completes (Ghost→Owned). The old code journaled PROMOTE_STEP on the deferred delivery, so the
+        // re-drive hit AlreadyApplied and the flip NEVER happened — the entity stayed a silent non-emitting
+        // Ghost (no feed, input dropped as PendingAuthority), the exact freeze a RETURN to a re-adopting shard
+        // triggers when the ordered Promote outruns the crossing pose.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+        let _ = rig.tick(vec![adopted_head(Fence(2))]); // granted Ghost, NO crossing yet
+        // Promote arrives BEFORE the crossing ⇒ DEFER (stays Ghost; PROMOTE_STEP NOT journaled).
+        let _ = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        assert!(
+            !rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates(),
+            "deferred: stays Ghost"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().promotes_confirmed, 0);
+        // The crossing pose LANDS (STUB_CROSSING_STEP journaled for the transfer).
+        let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]);
+        // The saga RE-DRIVES the Promote (a redelivery of the same step). Pre-fix this hit AlreadyApplied and
+        // never re-ran the flip; with the fix PROMOTE_STEP was withheld on the defer, so the re-run COMPLETES it.
+        let sent = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        assert!(
+            rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates(),
+            "the re-driven Promote flips Ghost→Owned once the crossing has landed (no permanent freeze)"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().promotes_confirmed,
+            1,
+            "exactly one confirmed flip"
+        );
+        // The flip announces the dest read sub (so the client's feed re-opens) and acks.
         assert!(saga_ack_to_orch(
             &sent,
             TransferControlAck::PromoteAck {

@@ -1036,10 +1036,38 @@ impl GatewaySessions {
     /// next tick. A close of a shard this session does not subscribe to is a no-op. Called by
     /// `on_transfer_control` at `ReleaseSubscribe` (close the source sub) and defensively at
     /// `AbortTransfer` (close any dest sub).
-    fn close_sub(&mut self, session_id: SessionId, shard: NodeId, outbox: &mut OutboundBox) {
+    ///
+    /// **THE AUTHORITY-SUB INVARIANT (the read-plane half of claim-before-release):** never close
+    /// the subscription of the node that is CURRENTLY feeding this session
+    /// ([`session_target`] — the one definition of "the current authority", HR3). A SAME-NODE
+    /// re-home (`source == dest`) is an ordinary saga — task #149 deleted the node-placement
+    /// short-circuit precisely so EVERY re-home runs the one cross-node machinery — and on one the
+    /// "source sub" IS the live authority sub, because `subs` is keyed by shard `NodeId` (ONE entry
+    /// per node). Closing it there unsubscribes the player from their own owner: no snapshots, no
+    /// realm feed, no clock, no visible input response — a TOTAL client freeze while the shard
+    /// happily simulates them. The runtime roster already survives this case by claiming the dest a
+    /// SECOND time at `CommitAuthority` (claim-before-release); this is the same rule for the read
+    /// plane. Counted, never silent.
+    fn close_sub(
+        &mut self,
+        session_id: SessionId,
+        shard: NodeId,
+        config: &GatewayConfig,
+        outbox: &mut OutboundBox,
+        stats: &mut GatewayStats,
+    ) {
         let Some(session) = self.by_session.get_mut(&session_id) else {
             return;
         };
+        if session_target(session, config) == shard {
+            stats.sub_close_refused_authority += 1;
+            tracing::warn!(
+                shard = shard.0,
+                "refused to close the sub of the session's CURRENT authority (same-node re-home) \
+                 — closing it would freeze the client on its own owner"
+            );
+            return;
+        }
         let Some(rec) = session.subs.get_mut(&shard) else {
             return;
         };
@@ -1121,6 +1149,13 @@ pub struct GatewayStats {
     /// `continue` (C2 honesty floor). A straggler from a just-closed source is NOT this — that
     /// is the one-tick `Draining` grace, drained not dropped.
     pub frame_sub_desync: u64,
+    /// A sub close was REFUSED because the shard is the session's CURRENT authority
+    /// ([`GatewaySessions::close_sub`]'s authority-sub invariant). The reachable producer is a
+    /// SAME-NODE re-home (`source == dest`): its `ReleaseSubscribe` names a `src` that is also the
+    /// post-commit authority, and honouring that close would strand the client on its own owner
+    /// (the total-freeze class). `> 0` simply means the cluster ran a same-node re-home — expected
+    /// whenever an occupant re-enters the realm it just left; it is a health signal, not an error.
+    pub sub_close_refused_authority: u64,
     /// A `TransferControl` command (or cut marker, or a `SubscriptionReady` read-plane
     /// notice) for an unknown/absent session, or a phase command whose `TransferProgress`
     /// prerequisite is missing — dropped + counted, never panicked (mirrors `inputs_unroutable`).
@@ -2302,7 +2337,7 @@ fn on_transfer_control(
     // Then close the collected subs through the sole close primitive (Draining grace; the next-tick sweep
     // removes them). `close_sub` is idempotent and a no-op for a shard this session does not subscribe to.
     for shard in subs_to_close {
-        sessions.close_sub(session_id, shard, outbox);
+        sessions.close_sub(session_id, shard, config, outbox, stats);
     }
 }
 
@@ -6684,7 +6719,17 @@ mod tests {
         // index for one tick (a straggler is still routable); the next sweep removes it.
         let (mut sessions, sid, _) = one_active_session();
         let mut outbox = OutboundBox::default();
-        sessions.close_sub(sid, SHARD, &mut outbox);
+        let mut stats = GatewayStats::default();
+        // The production shape of a source-sub close: `CommitAuthority` already re-pointed the
+        // session's authority at the DEST, so SHARD (the source) is no longer the feeding node and
+        // the authority-sub invariant lets the release through.
+        sessions
+            .by_session
+            .get_mut(&sid)
+            .expect("the fixture session is present")
+            .home_shard = Some(DEST);
+        sessions.close_sub(sid, SHARD, &config(), &mut outbox, &mut stats);
+        assert_eq!(stats.sub_close_refused_authority, 0);
         assert_eq!(
             controls_in(&outbox, CLIENT),
             vec![ServerControlMsg::SubscriptionClosing { sub: SubId(0) }]
@@ -6703,7 +6748,7 @@ mod tests {
         );
         // A SECOND close is idempotent — no second SubscriptionClosing.
         let mut outbox2 = OutboundBox::default();
-        sessions.close_sub(sid, SHARD, &mut outbox2);
+        sessions.close_sub(sid, SHARD, &config(), &mut outbox2, &mut stats);
         assert!(outbox2.0.is_empty(), "already Draining: no second close");
         // The next-tick sweep removes it from BOTH the table and the index.
         sessions.sweep_draining();
@@ -6725,10 +6770,49 @@ mod tests {
         // subscribe to the named shard.
         let (mut sessions, sid, _) = one_active_session();
         let mut outbox = OutboundBox::default();
-        sessions.close_sub(SessionId(0xDEAD), SHARD, &mut outbox); // unknown session
-        sessions.close_sub(sid, DEST, &mut outbox); // session does not subscribe to DEST
+        let mut stats = GatewayStats::default();
+        let cfg = config();
+        sessions.close_sub(SessionId(0xDEAD), SHARD, &cfg, &mut outbox, &mut stats); // unknown session
+        sessions.close_sub(sid, DEST, &cfg, &mut outbox, &mut stats); // does not subscribe to DEST
         assert!(outbox.0.is_empty(), "neither path emits a close");
+        assert_eq!(stats.sub_close_refused_authority, 0, "neither is a refusal");
         // The original SHARD sub is untouched.
+        assert_eq!(sessions.subscribers_of(SHARD), vec![sid]);
+    }
+
+    #[test]
+    fn close_sub_refuses_to_close_the_sessions_current_authority() {
+        // THE AUTHORITY-SUB INVARIANT (the same-node re-home freeze, task #175). A re-home whose
+        // source and dest are the SAME node is an ordinary saga (#149 deleted the node-placement
+        // short-circuit), and its `ReleaseSubscribe` names a `src` that is ALSO the post-commit
+        // authority. `subs` is keyed by shard, so honouring that close would tear down the one
+        // subscription feeding the client — the player keeps being simulated while their client
+        // goes totally silent (no snapshots, no realm feed, no clock, no visible input response).
+        let (mut sessions, sid, _) = one_active_session();
+        let mut outbox = OutboundBox::default();
+        let mut stats = GatewayStats::default();
+        // A static session's authority IS `config.shard` (`session_target`'s `unwrap_or`), which is
+        // exactly the same-node shape: the node being released is still the one feeding the client.
+        sessions.close_sub(sid, SHARD, &config(), &mut outbox, &mut stats);
+        assert_eq!(stats.sub_close_refused_authority, 1, "refused + counted");
+        assert!(
+            outbox.0.is_empty(),
+            "no SubscriptionClosing reaches the client"
+        );
+        // The live sub survives, in BOTH the cold table and the hot projection.
+        assert_eq!(sessions.subscribers_of(SHARD), vec![sid]);
+        assert_eq!(
+            sessions.by_session[&sid]
+                .hot
+                .subs
+                .load()
+                .lookup(SHARD)
+                .map(|e| e.sub),
+            Some(SubId(0)),
+            "the authority sub stays live — the client keeps receiving its own owner's frames"
+        );
+        // And it is NOT swept away next tick either (it was never marked Draining).
+        sessions.sweep_draining();
         assert_eq!(sessions.subscribers_of(SHARD), vec![sid]);
     }
 
@@ -6801,9 +6885,21 @@ mod tests {
         let mut both = sessions.subscribers_of(SHARD);
         both.sort_unstable();
         assert_eq!(both, vec![sid_a, sid_b]);
-        // Close + sweep ONLY session A.
+        // Close + sweep ONLY session A. Its authority already moved to DEST (the post-commit shape),
+        // so the authority-sub invariant lets the source release through.
         let mut ob = OutboundBox::default();
-        sessions.close_sub(sid_a, SHARD, &mut ob);
+        sessions
+            .by_session
+            .get_mut(&sid_a)
+            .expect("fixture session A is present")
+            .home_shard = Some(DEST);
+        sessions.close_sub(
+            sid_a,
+            SHARD,
+            &config(),
+            &mut ob,
+            &mut GatewayStats::default(),
+        );
         sessions.sweep_draining();
         assert_eq!(
             sessions.subscribers_of(SHARD),
@@ -7192,12 +7288,11 @@ mod tests {
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
         let _ = rig.tick(vec![subscription_ready(DEST, sid)]); // SubId(1) on DEST
-        // Open a transfer progress so ReleaseSubscribe is bound.
-        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
-            transfer: XFER,
-            session: sid,
-            dest: DEST,
-        })]);
+        // Drive the REAL saga order (Prepare → RequestCut → Freeze → Commit) before the release: the
+        // commit is what re-points the session's authority at DEST, so SHARD is genuinely no longer
+        // the feeding node when its sub is released (the authority-sub invariant, task #175). A
+        // release can never precede its commit — it IS the success teardown of the demote tail.
+        let _ = cross_to(&mut rig, sid, XFER, DEST);
         let sent = rig.tick(vec![saga_cmd(TransferControl::ReleaseSubscribe {
             transfer: XFER,
             session: sid,
@@ -7241,11 +7336,9 @@ mod tests {
         // next-tick sweep stops routing.
         let mut rig = Rig::new();
         let (sid, _) = rig.login();
-        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
-            transfer: XFER,
-            session: sid,
-            dest: DEST,
-        })]);
+        // The real saga order — the commit re-points authority at DEST, so releasing SHARD's sub is
+        // permitted by the authority-sub invariant (task #175).
+        let _ = cross_to(&mut rig, sid, XFER, DEST);
         // Release + a co-arriving source frame in ONE tick batch: the close marks Draining, the
         // frame still fans (the sub is routable through the rest of the batch).
         let sent = rig.tick(vec![
@@ -7484,12 +7577,10 @@ mod tests {
         // `ReleaseSubscribe` closes the SOURCE sub.
         let mut rig = Rig::new();
         let (sid, _) = rig.login(); // login sub SubId(0) on SHARD, AuthorityChanged{77, SubId(0)}
-        // The transfer reaches commit: the dest adopts and announces its read-sub.
-        let _ = rig.tick(vec![saga_cmd(TransferControl::PrepareSubscribe {
-            transfer: XFER,
-            session: sid,
-            dest: DEST,
-        })]);
+        // The transfer reaches commit (the REAL saga order — the commit is also what re-points the
+        // session's authority at DEST, so the later source release is permitted by the
+        // authority-sub invariant, task #175): then the dest adopts and announces its read-sub.
+        let _ = cross_to(&mut rig, sid, XFER, DEST);
         // SubscriptionReady from DEST opens SubId(1) (at the DEST realm fence) + re-points
         // authority to SubId(1).
         let ready_sent = rig.tick(vec![subscription_ready(DEST, sid)]);

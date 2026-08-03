@@ -38,6 +38,7 @@ pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u6
         logins_held_pre_sync,
         sessions_self_fenced_revoked,
         presence_announces,
+        sub_close_refused_authority,
     } = *stats;
     GatewayView {
         logins_rejected,
@@ -62,6 +63,7 @@ pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u6
         logins_held_pre_sync,
         sessions_self_fenced_revoked,
         presence_announces,
+        sub_close_refused_authority,
         sessions_open,
         dynamic_shards,
     }
@@ -118,8 +120,9 @@ mod tests {
             logins_held_pre_sync: 20,
             sessions_self_fenced_revoked: 21,
             presence_announces: 22,
+            sub_close_refused_authority: 23,
         };
-        let view = gateway_view(&stats, 23, 24);
+        let view = gateway_view(&stats, 24, 25);
         assert_eq!(view.logins_rejected, 1);
         assert_eq!(view.version_rejected, 2);
         assert_eq!(view.sessions_refused_capacity, 3);
@@ -142,7 +145,8 @@ mod tests {
         assert_eq!(view.logins_held_pre_sync, 20);
         assert_eq!(view.sessions_self_fenced_revoked, 21);
         assert_eq!(view.presence_announces, 22);
-        assert_eq!(view.sessions_open, 23);
-        assert_eq!(view.dynamic_shards, 24);
+        assert_eq!(view.sub_close_refused_authority, 23);
+        assert_eq!(view.sessions_open, 24);
+        assert_eq!(view.dynamic_shards, 25);
     }
 }

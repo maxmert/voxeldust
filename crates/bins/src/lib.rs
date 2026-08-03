@@ -2413,6 +2413,15 @@ fn parse_spawn_poses(
     Ok(map)
 }
 
+/// A boot's seed-derived world: the shard's realm REGIONS, the per-realm orbital ELEMENTS of the movers it
+/// authors, and the per-realm ORIGIN CHAINS each realm folds its own absolute position from (A5). Named
+/// because both the visual and the scale boot arms return exactly this triple.
+type BootWorld = (
+    Vec<vd_core::geometry::RealmRegion>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::celestial::OrbitalElements>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, Vec<vd_core::worldgen::OriginLink>>,
+);
+
 /// Build the containment forest + moving-child roster for a `Visual`/`VisualDemand` config, applying the
 /// DEV/TEST orbit-speed knob `VD_VISUAL_ORBIT_SLOWDOWN` (absent / <= 0 ⇒ 1.0 = the SHIPPED orbits,
 /// byte-identical): dividing the synthetic star mass by K² makes every Kepler period K× longer
@@ -2426,11 +2435,7 @@ fn visual_regions_and_movers(
     universe_seed: u64,
     held: &std::collections::BTreeSet<vd_core::pose::RealmId>,
     hosted: vd_core::pose::RealmId,
-) -> (
-    Vec<vd_core::geometry::RealmRegion>,
-    std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::celestial::OrbitalElements>,
-    std::collections::BTreeMap<vd_core::pose::RealmId, Vec<vd_core::worldgen::OriginLink>>,
-) {
+) -> BootWorld {
     let orbit_slowdown = std::env::var("VD_VISUAL_ORBIT_SLOWDOWN")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
@@ -2484,11 +2489,7 @@ pub fn boot_regions_and_movers(
     hosted: vd_core::pose::RealmId,
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
-) -> (
-    Vec<vd_core::geometry::RealmRegion>,
-    std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::celestial::OrbitalElements>,
-    std::collections::BTreeMap<vd_core::pose::RealmId, Vec<vd_core::worldgen::OriginLink>>,
-) {
+) -> BootWorld {
     use std::collections::BTreeMap;
     match scale {
         // Walk ⇒ an EMPTY chain roster: every walk body is `Fixed`, so a folded chain is the identity and an

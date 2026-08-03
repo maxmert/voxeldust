@@ -1015,6 +1015,170 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     }
 }
 
+/// LIVE-BUG REPRO (the user's report): after SEVERAL Planet→System→Planet→System rehomes everything FROZE —
+/// the client stopped responding to WASD (input dead) and the planets stopped moving. ONE round-trip passes
+/// (`a_planet_to_system_return...`); this drives N cycles and asserts the player stays LIVE each cycle: every
+/// crossing COMPLETES (a freeze surfaces as a `location` that never flips), AND the own home shard's
+/// `universe_tick` keeps advancing across the return (a stalled clock == the sim stopped == WASD dead). The
+/// epoch-fixed fly targets (300× orbit slowdown) keep the crossings robust across cycles. Knob reset at the end.
+#[test]
+fn repeated_planet_system_roundtrips_do_not_freeze() {
+    unsafe {
+        std::env::set_var("VD_VISUAL_ORBIT_SLOWDOWN", "300");
+    }
+    let f = fixture("repeatroundtrip");
+    let gw_admin = reserve_tcp_addr();
+    let a = demand_addrs(gw_admin);
+    let p = DEV;
+    let client_quic = reserve_udp_addr();
+    let devctl_port = reserve_tcp_addr().port();
+    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
+    let deadline = Duration::from_secs(240);
+
+    let _reaper = ForkedReaper(f.launch_path.clone());
+    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+
+    let landed = await_active(devctl_port, gw_admin, deadline);
+    assert_eq!(
+        landed.location.as_deref(),
+        Some("System 7"),
+        "login at the star: {landed:?}"
+    );
+
+    let (planet, elements) = inner_planet_mover(&p);
+    let planet_seed = match planet {
+        vd_core::pose::RealmId::Planet(s) => s,
+        other => panic!("inner mover is a planet, got {other:?}"),
+    };
+    let epoch = vd_core::celestial::orbital_state(&elements, 0.0).position;
+    let want_planet = vd_core::pose::FrameRef::PlanetCentered { planet_seed }.label();
+
+    // The own home shard's sim clock (a stalled tick == the sim stopped == WASD dead). Short retry for blinks.
+    let tick_now = || -> u64 {
+        for _ in 0..30 {
+            if let Some(t) = poll_state(devctl_port).and_then(|s| s.universe_tick) {
+                return t;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        0
+    };
+    // Drive a crossing: WalkTo `target` until `location` flips to `loc`. On a timeout, SEPARATE the two
+    // failure modes this gate must never confuse — the whole point of the fixture is the FREEZE, and a
+    // crude open-loop walk that simply has not arrived yet is NOT one:
+    //   * the clock STALLED / the pose stopped moving  ⇒ THE FREEZE (the user's report: the player's
+    //     authority stopped feeding the client, so nothing the client does has any effect);
+    //   * the clock is live and the pose is still moving ⇒ the client is HEALTHY and merely still in
+    //     transit (a fixture-steering shortfall), reported as such and never as a freeze.
+    let cross_to = |loc: &str, target: DVec3, phase: &str, cycle: usize| {
+        let dl = Instant::now() + Duration::from_secs(90);
+        let t_start = tick_now();
+        let mut seen_poses: Vec<DVec3> = Vec::new();
+        while poll_state(devctl_port).and_then(|s| s.location).as_deref() != Some(loc) {
+            let _ = devctl(
+                devctl_port,
+                &DevRequest::WalkTo {
+                    target: target.to_array(),
+                    arrive_epsilon: 1.0,
+                    max_ticks: 40,
+                },
+            );
+            if let Some(p) = poll_state(devctl_port).as_ref().and_then(own_pos) {
+                seen_poses.push(p);
+            }
+            if Instant::now() >= dl {
+                let t_end = tick_now();
+                let moved = seen_poses
+                    .iter()
+                    .zip(seen_poses.iter().skip(1))
+                    .any(|(a, b)| a.distance(*b) > 1e-9);
+                assert!(
+                    t_end <= t_start || !moved,
+                    "at cycle {cycle} ({phase}) the client is LIVE (tick {t_start} -> {t_end}, own pose \
+                     moving) but did not reach {loc:?} inside the window — the open-loop WalkTo steering \
+                     did not arrive. NOT the freeze; tighten the fixture's steering, not the server.",
+                );
+                panic!(
+                    "FREEZE at cycle {cycle} ({phase}): the client STOPPED (tick {t_start} -> {t_end}, \
+                     pose moved: {moved}) and location never became {loc:?} — the player's authority \
+                     stopped feeding the client (the WASD-dead / frozen-planets report).",
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = devctl(
+            devctl_port,
+            &DevRequest::Move {
+                axes: [0.0, 0.0, 0.0],
+            },
+        );
+    };
+
+    const CYCLES: usize = 5;
+    for cycle in 0..CYCLES {
+        cross_to(&want_planet, epoch, "fly-in", cycle);
+        eprintln!("[repro] cycle {cycle}: crossed IN to {want_planet}");
+        std::thread::sleep(Duration::from_secs(3)); // reap window — System's retained proxy ages out
+        cross_to("System 7", -epoch * 1.5, "fly-out", cycle);
+        // DIAGNOSE which feed dies after the return: snapshots_applied = the ENTITY feed (the own pose — its
+        // stall is the real WASD-dead freeze); realm_frames_applied = the REALM feed (the D-RLM-14 silence);
+        // own pose moving under injected input proves input still lands. The steer target is the PLANET (the
+        // next cycle's fly-in), NEVER a point further out: dragging the avatar away from the loop's own
+        // target would leave each cycle a longer trip than the last and eventually time out for want of
+        // travel time — a fixture artifact that masquerades as a freeze.
+        let t0 = tick_now();
+        for i in 0..8 {
+            let _ = devctl(
+                devctl_port,
+                &DevRequest::WalkTo {
+                    target: epoch.to_array(),
+                    arrive_epsilon: 1.0,
+                    max_ticks: 40,
+                },
+            );
+            let s = poll_state(devctl_port);
+            eprintln!(
+                "[diag c{cycle}+{i}s] loc={:?} utick={:?} snaps={:?} realmf={:?} own={:?}",
+                s.as_ref().and_then(|s| s.location.clone()),
+                s.as_ref().and_then(|s| s.universe_tick),
+                s.as_ref().map(|s| s.snapshots_applied),
+                s.as_ref().map(|s| s.realm_frames_applied),
+                s.as_ref().and_then(own_pos),
+            );
+            if let Some(adm) = admin(gw_admin) {
+                let g = adm.gateway.as_ref();
+                eprintln!(
+                    "[adm  c{cycle}+{i}s] reaped={} force_reap={} in_unroutable={:?} in_buffered={:?} \
+                     in_dropped={:?} self_fenced_lapsed={:?} transfer_unroutable={:?} tc_parked={:?} \
+                     frame_sub_desync={:?} home_boot_to={:?}",
+                    adm.rlm.teardowns_reaped,
+                    adm.rlm.force_reaps,
+                    g.map(|g| g.inputs_unroutable),
+                    g.map(|g| g.inputs_buffered_for_dest),
+                    g.map(|g| g.dest_inputs_dropped),
+                    g.map(|g| g.sessions_self_fenced_lapsed),
+                    g.map(|g| g.transfer_unroutable),
+                    g.map(|g| g.transfer_control_parked),
+                    g.map(|g| g.frame_sub_desync),
+                    g.map(|g| g.home_bootstrap_timeouts),
+                );
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        let t1 = tick_now();
+        assert!(
+            t1 > t0,
+            "FREEZE at cycle {cycle} (post-return): the own shard's universe_tick STALLED ({t0} -> {t1}) — the \
+             player's authority stopped feeding the client (WASD dead), even though location is System 7.",
+        );
+        eprintln!("[repro] cycle {cycle}: returned to System 7 — tick live ({t0} -> {t1})");
+    }
+    eprintln!("[repro] survived {CYCLES} Planet↔System round-trips — no freeze");
+    unsafe {
+        std::env::remove_var("VD_VISUAL_ORBIT_SLOWDOWN");
+    }
+}
+
 // The bootstrap-TTL fail-safe leg (a demand login whose home never boots must be CLOSED at
 // `bootstrap_ttl_ticks`, not hang) is DEFERRED — see DEFERRED.md D-RLM-9. An empirical spike here found the
 // obvious inductions do NOT reach the TTL: with no orchestrator (or the gateway dropped from its peers) the

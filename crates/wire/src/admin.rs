@@ -141,6 +141,11 @@ pub struct GatewayView {
     /// Reactive-greeting `ShardPresence` frames received from demand-spawned shards (RG-3). Nonzero = a real
     /// forked shard greeted this gateway; the direct process-tier proof the reactive path fired.
     pub presence_announces: u64,
+    /// Sub closes REFUSED by the authority-sub invariant: the shard named for closing is the session's
+    /// CURRENT authority, so closing it would strand the client on its own owner (the total-freeze
+    /// class). Its reachable producer is a SAME-NODE re-home (`source == dest`) — expected whenever an
+    /// occupant re-enters the realm it just left — so nonzero is a health signal, not an error.
+    pub sub_close_refused_authority: u64,
     /// Gauge: sessions currently open on this gateway.
     pub sessions_open: u64,
     /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
@@ -441,8 +446,9 @@ mod tests {
                 logins_held_pre_sync: 20,
                 sessions_self_fenced_revoked: 21,
                 presence_announces: 22,
-                sessions_open: 23,
-                dynamic_shards: 24,
+                sub_close_refused_authority: 23,
+                sessions_open: 24,
+                dynamic_shards: 25,
             }),
         };
         let bytes = postcard::to_allocvec(&snap).expect("encode");
