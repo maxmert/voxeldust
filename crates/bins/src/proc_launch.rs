@@ -42,6 +42,14 @@ use vd_node::rlm_spawn::{LaunchBackend, LaunchSpec};
 /// Teardown poll cadence between SIGTERM and the SIGKILL escalation (the detached-thread grace loop).
 const TEARDOWN_POLL: Duration = Duration::from_millis(50);
 
+/// How long a freshly forked realm shard is watched for an IMMEDIATE death before its launch is called a
+/// success. Sized to comfortably cover a bind failure (which surfaces in low single-digit milliseconds — the
+/// child fails before it does any real work) while never gating a healthy boot, which stays alive and simply
+/// runs out the window. Not a boot timeout: a shard that is still coming up after this is a normal launch.
+const EARLY_DEATH_WINDOW: Duration = Duration::from_millis(250);
+/// Poll cadence inside [`EARLY_DEATH_WINDOW`].
+const EARLY_DEATH_POLL: Duration = Duration::from_millis(10);
+
 /// The operational parameters of the real spawner — the ONE config struct (no inline magic numbers), like
 /// the kernel's `SpawnTuning`. The orchestrator bin fills it at boot (5c-3); the process gate fills it for
 /// the smoke test.
@@ -160,9 +168,41 @@ impl LaunchBackend for ProcLaunchBackend {
         let log = std::fs::File::create(&log_path)
             .map_err(|e| format!("realm log {}: {e}", log_path.display()))?;
         let node_env = self.child_env(spec);
-        let child = crate::spawn_node_grouped(&exe, &self.tuning.anchors, &node_env, log)
+        let mut child = crate::spawn_node_grouped(&exe, &self.tuning.anchors, &node_env, log)
             .map_err(|e| format!("spawn realm {}: {e}", spec.node.0))?;
         let pid = child.id();
+
+        // A SUCCESSFUL FORK IS NOT A SUCCESSFUL LAUNCH. `spawn` returns as soon as the process exists, so a
+        // child that dies milliseconds later — the common case being `AddrInUse` when something already holds
+        // this realm's slot in the FIXED RLM port band — used to be recorded as a healthy launch. The
+        // reconciler then saw `desired > running`, asked again, and repeated FOREVER: nine consecutive instant
+        // deaths counted ZERO failures, no message named the port collision, and the player simply never got a
+        // world. Silence is the defect; a spawn that cannot survive its own first breath must SAY SO.
+        //
+        // So: give the child a brief window to fall over, and treat an exit inside it as a failed launch. This
+        // costs one short pause per spawn (spawns are demand-driven and rare) and NEVER waits on a healthy
+        // boot — a live child is still running at the end of the window, which is the overwhelmingly common
+        // case. A child that dies LATER is a different condition, caught by the liveness sweep, not here.
+        let deadline = Instant::now() + EARLY_DEATH_WINDOW;
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "realm {} died immediately (exit {status}) — it never bound its port. \
+                         Its own reason is in {}; the usual cause is a SURVIVOR from an earlier cluster \
+                         still holding this realm's slot in the fixed RLM port band \
+                         (VD_RLM_FIRST_PORT/VD_RLM_PORT_LIMIT), which `vd-devcluster down` now reaps",
+                        spec.node.0,
+                        log_path.display()
+                    ));
+                }
+                Ok(None) => {}
+                // The handle is unusable; do not invent a verdict — let the liveness sweep decide.
+                Err(_) => break,
+            }
+            std::thread::sleep(EARLY_DEATH_POLL);
+        }
+
         self.lock().insert(spec.node, Slot::Owned { child, pid });
         Ok(pid)
     }

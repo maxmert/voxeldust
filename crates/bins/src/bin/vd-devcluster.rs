@@ -526,6 +526,37 @@ fn admin_ready(admin_port: u16, shape: ClusterShape) -> bool {
     }
 }
 
+/// Reap every realm shard the orchestrator forked, named by the durable launch ledger this cluster wrote.
+///
+/// BEST-EFFORT BY DESIGN: a demand cluster that never spawned has no ledger, and a `down` after a crash may
+/// find a ledger it cannot open. Neither is a reason to refuse to tear the rest of the cluster down, so this
+/// reports and returns rather than failing `down`. What it must NEVER do is silently skip a live survivor —
+/// hence the count is printed whenever it is non-zero.
+fn reap_demand_spawned(work: &Path) {
+    let ledger = work.join(vd_bins::LAUNCH_STORE_NAME);
+    if !ledger.exists() {
+        return; // a static cluster, or a demand cluster that never spawned a realm
+    }
+    // `launch_rows` panics on a corrupt ledger (a hard failure for a test); here a corrupt ledger must not
+    // block teardown, so isolate it and fall through to the recorded-group reap below.
+    let rows = match std::panic::catch_unwind(|| vd_bins::launch_rows(&ledger)) {
+        Ok(rows) => rows,
+        Err(_) => {
+            eprintln!(
+                "dev-cluster: WARNING — could not read {} to reap demand-spawned shards; \
+                 if a later `up --demand` fails to spawn realms, check for survivors holding the RLM port band",
+                ledger.display()
+            );
+            return;
+        }
+    };
+    let live = rows.iter().filter(|(_, _, pid)| pid.is_some()).count();
+    if live > 0 {
+        println!("dev-cluster: reaping {live} demand-spawned realm shard(s)");
+    }
+    vd_bins::reap_forked(&rows);
+}
+
 /// Tear the cluster down: SIGTERM each recorded process group, escalate to SIGKILL
 /// after a grace period, and remove the runfile/workdir ONLY once every process is
 /// confirmed dead — otherwise report LOUD and leave the record for a retry.
@@ -568,6 +599,24 @@ fn down(work: &Path) -> Result<(), String> {
             runfile(work).display()
         ));
     }
+    // NOW reap the shards the ORCHESTRATOR forked (a demand cluster's realms). They are NOT in the runfile
+    // and they LEAD THEIR OWN PROCESS GROUPS (`spawn_node_grouped`), so the signalling above never reaches
+    // them — before this they simply outlived the cluster.
+    //
+    // WHY IT IS LOAD-BEARING, not tidiness: demand-spawned shards bind a FIXED port band
+    // (`VD_RLM_FIRST_PORT`/`VD_RLM_PORT_LIMIT`), never ephemeral ports. One survivor therefore squats that
+    // band FOREVER, and every later demand cluster's spawns die with `AddrInUse` the instant they start. The
+    // symptom is remote from the cause and was silent: the player sat in `awaiting_subscription` with no
+    // world while the orchestrator retried forever and nothing named the collision.
+    //
+    // ORDER MATTERS: this runs AFTER the recorded groups are confirmed dead, because the ledger is redb and
+    // the LIVE orchestrator holds its file lock — reaping first can only ever fail to open it. It runs
+    // BEFORE the workdir is removed, because the ledger lives in that directory.
+    //
+    // The reap primitive already existed, used by the kill-9 gate and the demand-login e2e: the TESTS
+    // cleaned up after themselves while the launcher people actually run did not. Same primitive, one reap
+    // path (HR3).
+    reap_demand_spawned(work);
     std::fs::remove_dir_all(work).map_err(|e| format!("clean work dir: {e}"))?;
     println!("dev-cluster DOWN ({})", work.display());
     Ok(())
