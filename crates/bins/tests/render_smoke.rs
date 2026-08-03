@@ -94,6 +94,9 @@ fn await_listener(port: u16, child: &mut Child) {
 
 #[test]
 fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     // Clean slate (idempotent) — and the SIGKILL-orphan reaper: if a previous run was
     // SIGKILLed, its capture client's PID is in this slot's runfile and dies here.

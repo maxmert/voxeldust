@@ -173,6 +173,9 @@ fn dest_owns_an_entity(rows: &[(String, String)]) -> bool {
 
 #[test]
 fn a_dot_re_homes_source_to_dest_over_the_process_dual_shard_tier() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     let slot = CROSSING_SLOT;
     let _ = devcluster(launcher, "down", slot); // clean slate (idempotent)

@@ -49,6 +49,9 @@ impl Drop for KillOnDrop {
 
 #[test]
 fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // ---- topology + trust ----
     let orch1 = reserve_udp_addr();
     let gateway = reserve_udp_addr(); // in the book; no gateway spawned (orch+shard alone bootstraps)
@@ -69,20 +72,7 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         gateway,
         shard,
         admin: admin1,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     let mut orch1_child = KillOnDrop(Some(
         spawn_node(
@@ -163,20 +153,7 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         gateway,
         shard,
         admin: admin2,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     cluster.push(
         "vd-orchestrator-restart",

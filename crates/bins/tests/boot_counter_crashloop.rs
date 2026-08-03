@@ -110,20 +110,7 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
         gateway,
         shard,
         admin: admin_addr,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     let mut cluster = Cluster::new(); // RAII-reaped
     cluster.push(
@@ -217,6 +204,9 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
 
 #[test]
 fn a_crashloop_restart_is_silently_deduped_at_a_fixed_incarnation_but_not_with_the_boot_counter() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // RED: a fixed (wall-clock-class) incarnation reused across the restart ⇒ the orchestrator dedups the
     // restarted shard's re-grant (the silent-loss hazard M3 exists to cure).
     let (red_dedup, red_stale) = crashloop_drop_delta(false);

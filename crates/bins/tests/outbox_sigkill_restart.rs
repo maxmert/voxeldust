@@ -138,6 +138,9 @@ fn spin_up_b(
 
 #[test]
 fn sigkill_restart_redrives_the_durable_outbox_row_and_boots_counter_by_exactly_one() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     const PAYLOAD: u8 = 0x5D;
     let paths = TempPaths::new("redrive");
     let (addr_src, addr_b) = (reserve_udp_addr(), reserve_udp_addr());
@@ -189,6 +192,9 @@ fn sigkill_restart_redrives_the_durable_outbox_row_and_boots_counter_by_exactly_
 
 #[test]
 fn fresh_outbox_re_drives_zero_rows() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // Anti-theater twin: NO seed ⇒ a fresh/empty outbox ⇒ boot-2 replay re-drives NOTHING, so B stays EMPTY
     // over a settle generous enough that the positive path would have landed. Proves the positive test is not
     // a false-positive from an unrelated delivery. Still asserts v2 == v1 + 1 (a genuine restart happened).

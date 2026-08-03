@@ -9,36 +9,16 @@
 //! (its `RealmConfirmedAt` freezes past the grace) yet stays LIVE — never routed to a zombie, never restarted.
 //! Tier-B process glue.
 
-use std::process::Child;
 use std::time::{Duration, Instant};
 
 use vd_bins::{
     Cluster, ClusterAddrs, DEV, common_env, dev_auth_pubkey_hex, gateway_env, http_get_status,
-    orchestrator_env, reserve_tcp_addr, reserve_udp_addr, shard_env, spawn_node,
+    orchestrator_env, shard_env, spawn_node,
 };
 use vd_io_prod::trust::ClusterTrust;
 
 fn addrs() -> ClusterAddrs {
-    ClusterAddrs {
-        orchestrator: reserve_udp_addr(),
-        gateway: reserve_udp_addr(),
-        shard: reserve_udp_addr(),
-        admin: reserve_tcp_addr(),
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
-    }
+    ClusterAddrs::reserve()
 }
 
 fn write_trust(tag: &str) -> std::path::PathBuf {
@@ -77,6 +57,9 @@ fn poll_status(
 
 #[test]
 fn cluster_converges_to_ready_and_all_endpoints_serve() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the Cluster reap that
+    // frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let addrs = addrs();
     let trust = write_trust("conv");
     let store = orch_store("conv");
@@ -138,6 +121,9 @@ fn cluster_converges_to_ready_and_all_endpoints_serve() {
 
 #[test]
 fn orchestrator_alone_is_ready_without_a_shard() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the Cluster reap that
+    // frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // The bootstrap-deadlock fix: the orchestrator's readiness is its OWN serving capability, NOT the
     // whole-cluster cluster_bootstrapped() latch — so it is Ready with NO shard registered (otherwise a
     // readiness-gated Service would never let the first shard reach it, and the cluster could never warm).
@@ -182,6 +168,9 @@ fn orchestrator_alone_is_ready_without_a_shard() {
 
 #[test]
 fn sigterm_de_routes_readyz_while_healthz_stays_live() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the Cluster reap that
+    // frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // SIGTERM (the k8s pod-stop signal) must flip /readyz to 503 IMMEDIATELY (the shutdown-edge publish — the
     // loop-head `!shutdown` would otherwise skip the in-body publish on the exit tick), while /healthz stays
     // LIVE through the drain (the `draining` bit — no SIGKILL mid-fsync). Test on the gateway (no durable
@@ -202,14 +191,19 @@ fn sigterm_de_routes_readyz_while_healthz_stays_live() {
         )
         .expect("spawn orch"),
     );
-    // The gateway as a STANDALONE child so we can grab its pid + SIGTERM it (Cluster only offers SIGKILL).
+    // The gateway rides INSIDE the `Cluster` (which offers a graceful `sigterm` alongside SIGKILL), so it
+    // stays RAII-killed for the whole drain window. It used to be a STANDALONE `Child`, which does NOT kill
+    // on drop: the readiness assertion below is exactly the one that fails when this binary is starved, and
+    // it fires BEFORE the SIGTERM — so a failure orphaned a 50 Hz gateway forever, raising the CPU floor for
+    // every later run and making the next failure likelier.
     // A drain LINGER holds it in Terminating for 1.5 s after de-routing, so the 503 window is observable
     // (without the linger a store-less gateway exits within ~1 tick, faster than a probe poll).
     let mut gw_env = gateway_env(&addrs, &[], &auth, &DEV, vd_bins::ClusterShape::Single);
     gw_env.push(("VD_SHUTDOWN_LINGER_MS", "1500".to_owned()));
-    let mut gateway: Child =
-        spawn_node(env!("CARGO_BIN_EXE_vd-gateway"), &common, &gw_env).expect("spawn gateway");
-    let _guard = cluster;
+    cluster.push(
+        "vd-gateway",
+        spawn_node(env!("CARGO_BIN_EXE_vd-gateway"), &common, &gw_env).expect("spawn gateway"),
+    );
 
     // Wait until the gateway is Ready, then SIGTERM it.
     assert_eq!(
@@ -217,13 +211,7 @@ fn sigterm_de_routes_readyz_while_healthz_stays_live() {
         Some(200),
         "gateway must be Ready before the SIGTERM"
     );
-    let pid = gateway.id() as libc::pid_t;
-    // SAFETY: `pid` is a live child we own (not yet reaped); SIGTERM is a valid signal.
-    assert_eq!(
-        unsafe { libc::kill(pid, libc::SIGTERM) },
-        0,
-        "SIGTERM the gateway"
-    );
+    cluster.sigterm("vd-gateway");
 
     // /readyz must go 503 (de-routed) while the pod is still draining; /healthz must stay 200 (drain-safe).
     assert_eq!(
@@ -240,13 +228,17 @@ fn sigterm_de_routes_readyz_while_healthz_stays_live() {
         Some(200),
         "/healthz must stay LIVE through the drain (no SIGKILL mid-fsync)"
     );
-    let _ = gateway.wait();
+    // It must exit BY ITSELF (never signalled again) — that is what proves the drain completes.
+    cluster.wait_for_exit("vd-gateway");
     let _ = std::fs::remove_dir_all(&trust);
     let _ = std::fs::remove_file(&store);
 }
 
 #[test]
 fn a_partitioned_shard_goes_not_ready_but_stays_live() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the Cluster reap that
+    // frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // THE partition-aware proof (the CRITICAL flap-fix's payoff): with an ACTIVE self-fence (grace/recheck),
     // the shard's readiness keys on RealmConfirmedAt staleness. Kill the orchestrator ⇒ the recheck round-trip
     // stops re-arming RealmConfirmedAt ⇒ after the grace it is stale ⇒ /readyz 503 (never route to a zombie),

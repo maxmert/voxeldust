@@ -161,6 +161,9 @@ fn nonclear_in_region(rgba: &[u8], w: usize, h: usize, clear: [u8; 4], region: S
 
 #[test]
 fn g_render_boxes_smoke_shows_a_translucent_box_pixel_visible_in_its_screen_region() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     // Clean slate (idempotent) — and the SIGKILL-orphan reaper.
     let _ = devcluster(launcher, "down", RENDER_BOXES_SLOT);

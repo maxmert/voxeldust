@@ -47,6 +47,9 @@ fn poll_state(port: u16) -> Option<DevState> {
 
 #[test]
 fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let k = DevPortScheme::DEFAULT.max_clients_per_worktree;
 
     // ---- topology + trust ----------------------------------------------------
@@ -72,20 +75,7 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     let client_book: Vec<(NodeId, SocketAddr)> = clients
         .iter()
@@ -253,6 +243,9 @@ fn pred(field: WaitField, op: WaitOp, value: u64) -> WaitPredicate {
 /// graceful `close` terminates the client PROCESS (freeing its listener + ports).
 #[test]
 fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let orch_addr = reserve_udp_addr();
     let gateway_addr = reserve_udp_addr();
     let shard_addr = reserve_udp_addr();
@@ -273,20 +266,7 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);

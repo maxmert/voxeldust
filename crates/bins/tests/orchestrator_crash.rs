@@ -51,6 +51,9 @@ fn admin(addr: std::net::SocketAddr) -> Option<AdminSnapshot> {
 
 #[test]
 fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // ---- topology + trust ----
     let orch1 = reserve_udp_addr();
     let gateway = reserve_udp_addr();
@@ -73,20 +76,7 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         gateway,
         shard,
         admin: admin1,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     let mut orch_env = orchestrator_env(&addrs1, &DEV, &store_str, vd_bins::ClusterShape::Single);
     orch_env.push(("VD_STORE_TEST_SENTINEL_SEED", SENTINEL_SEED.to_string()));
@@ -147,20 +137,7 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         gateway,
         shard,
         admin: admin2,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     cluster.push(
         "vd-orchestrator-restart",
@@ -236,6 +213,9 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
 
 #[test]
 fn grant_a_recovery_assertion_fails_against_a_fresh_store() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // ANTI-THEATER twin: the SAME `cluster_bootstrapped()` predicate the recovery test relies on for
     // "grant A survived" must be FALSE on a fresh store with NO shard granting a realm — so the recovery
     // assertion is falsifiable (it fails exactly when A was never durable), not vacuous.
@@ -255,20 +235,7 @@ fn grant_a_recovery_assertion_fails_against_a_fresh_store() {
         gateway,
         shard,
         admin: admin_addr,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     // NO shard ⇒ no realm is ever granted.
     let mut cluster = Cluster::new();

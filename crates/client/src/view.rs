@@ -169,6 +169,15 @@ impl DeliveredView {
         self.own_entity
     }
 
+    /// The newest universe tick across every delivered entity track — the ENTITY feed's freshness as
+    /// one number. SHAKE DIAGNOSIS: compared against the realm feed's equivalent, this is what shows
+    /// whether the ground under a player and the player themselves are being drawn from the same
+    /// moment. `None` before the first snapshot.
+    #[must_use]
+    pub fn newest_tick(&self) -> Option<vd_core::UniverseTick> {
+        self.tracks.values().map(|t| t.newest_tick()).max()
+    }
+
     /// The subs that currently hold a delivered track for `entity` — a pure-renderer client
     /// keeps ONE per-entity track (not per-sub), so this reports the inert [`RENDERED_SUB`]
     /// when a track exists and nothing otherwise. Retained as a read-only diagnosis surface

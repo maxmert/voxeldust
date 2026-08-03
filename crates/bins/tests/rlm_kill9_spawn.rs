@@ -32,8 +32,7 @@ use std::time::{Duration, Instant};
 
 use vd_bins::{
     Cluster, ClusterAddrs, ClusterShape, DEV, admin_get_body, common_env, launch_rows,
-    orchestrator_env, reap_forked, reserve_tcp_addr, reserve_udp_addr, shard_spawn_anchor_env,
-    spawn_node,
+    orchestrator_env, reap_forked, shard_spawn_anchor_env, spawn_node,
 };
 use vd_core::NodeId;
 use vd_core::realm_coord::RealmCoord;
@@ -78,26 +77,7 @@ fn admin(addr: SocketAddr) -> Option<AdminSnapshot> {
 /// A full `ClusterAddrs` with fresh reserved ports for one orchestrator boot (no gateway/shard peers are
 /// spawned — the orchestrator boots standalone, exactly as `orchestrator_crash.rs` does).
 fn addrs() -> ClusterAddrs {
-    ClusterAddrs {
-        orchestrator: reserve_udp_addr(),
-        gateway: reserve_udp_addr(),
-        shard: reserve_udp_addr(),
-        admin: reserve_tcp_addr(),
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
-    }
+    ClusterAddrs::reserve()
 }
 
 fn wait_for_marker(marker: &std::path::Path) {
@@ -185,6 +165,9 @@ fn orch_env(
 
 #[test]
 fn d1_sigkill_mid_fsync_forks_no_child_and_rehydrates_clean() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let f = fixture("d1");
     let hex = planet(2, 7, 7).path().to_env_string();
     let child_probe: SocketAddr = (Ipv4Addr::LOCALHOST, 42_001).into(); // FIRST_PORT 42000 ⇒ probe 42001
@@ -275,6 +258,9 @@ fn d1_sigkill_mid_fsync_forks_no_child_and_rehydrates_clean() {
 
 #[test]
 fn adopt_a_survivor_is_recovered_without_relaunch() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let f = fixture("adopt");
     let hex = planet(2, 7, 7).path().to_env_string();
     let child_probe: SocketAddr = (Ipv4Addr::LOCALHOST, 43_001).into(); // FIRST_PORT 43000 ⇒ probe 43001
@@ -345,6 +331,9 @@ fn adopt_a_survivor_is_recovered_without_relaunch() {
 
 #[test]
 fn d6_control_an_unseeded_rebuild_double_spawns_a_survivor() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let f = fixture("d6");
     let hex = planet(2, 7, 7).path().to_env_string();
     let child_probe: SocketAddr = (Ipv4Addr::LOCALHOST, 44_001).into(); // FIRST_PORT 44000 ⇒ probe 44001
@@ -414,6 +403,9 @@ fn d6_control_an_unseeded_rebuild_double_spawns_a_survivor() {
 
 #[test]
 fn demand_with_static_forest_fails_loud() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // RLM 5f-1 SAFETY: an ARMED demand reconciler must NEVER boot atop externally pre-spawned static heads
     // (it would reap them — they carry no demand cell). `orchestrator_env` marks the static-boot mode
     // (VD_STATIC_FOREST), so adding VD_DEMAND is the exact misconfig the XOR gate rejects: the orchestrator

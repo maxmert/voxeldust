@@ -602,6 +602,101 @@ pub struct ClusterAddrs {
     pub area_probe: SocketAddr,
 }
 
+impl ClusterAddrs {
+    /// Reserve a full, INTERNALLY DISTINCT set of loopback addresses for one process-tier cluster —
+    /// the one fixture every such test builds its addresses from.
+    ///
+    /// WHY THIS EXISTS RATHER THAN 17 SEPARATE CALLS. [`reserve_udp_addr`]/[`reserve_tcp_addr`] bind
+    /// `:0`, read the address, and DROP the socket immediately. Called seventeen times in a struct
+    /// literal, each reservation is released before the next is taken, so the OS is free to hand the
+    /// SAME ephemeral port back twice and two fields of one cluster silently alias. Holding all
+    /// seventeen sockets simultaneously and dropping them together makes that aliasing STRUCTURALLY
+    /// impossible. (It does NOT remove the machine-wide TOCTOU between the drop and the child's real
+    /// bind — see `D-GATE-1` in `docs/design/DEFERRED.md`; the complete fix is per-fixture port bands.)
+    ///
+    /// DISTINCTNESS IS PER PROTOCOL, AND THAT IS DELIBERATE. UDP and TCP are SEPARATE port
+    /// namespaces: a UDP field and a TCP field legitimately holding the same port number is not a
+    /// collision. Asserting all seventeen are distinct as one set would therefore invent a fresh
+    /// ~1-in-227 flake per call, across ~20 call sites — a flakiness fix that adds flakiness.
+    ///
+    /// `gateway_admin` is left `None` (the byte-identical default that keeps [`gateway_env`] from
+    /// emitting `VD_ADMIN_ADDR`); a cluster that wants it adds it with [`Self::with_gateway_admin`].
+    #[must_use]
+    pub fn reserve() -> ClusterAddrs {
+        // Every field bound AT ONCE. Each socket lives until the end of this function, so no two
+        // fields can be handed the same port within their own namespace.
+        let udp: [std::net::UdpSocket; 8] = std::array::from_fn(|_| {
+            std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve cluster udp")
+        });
+        let tcp: [std::net::TcpListener; 9] = std::array::from_fn(|_| {
+            std::net::TcpListener::bind("127.0.0.1:0").expect("reserve cluster tcp")
+        });
+        let u = |i: usize| udp[i].local_addr().expect("udp addr");
+        let t = |i: usize| tcp[i].local_addr().expect("tcp addr");
+        ClusterAddrs {
+            // QUIC binds (UDP) — every node's `VD_BIND`.
+            orchestrator: u(0),
+            gateway: u(1),
+            shard: u(2),
+            shard_b: u(3),
+            galaxy: u(4),
+            planet: u(5),
+            station: u(6),
+            area: u(7),
+            // Admin + k8s probe listeners (TCP) — `VD_ADMIN_ADDR` / `VD_PROBE_ADDR`.
+            admin: t(0),
+            orchestrator_probe: t(1),
+            gateway_probe: t(2),
+            shard_probe: t(3),
+            shard_b_probe: t(4),
+            galaxy_probe: t(5),
+            planet_probe: t(6),
+            station_probe: t(7),
+            area_probe: t(8),
+            gateway_admin: None,
+        }
+    }
+
+    /// Add the gateway's read-only admin HTTP bind (the Demand cluster + every cloud pod want it).
+    #[must_use]
+    pub fn with_gateway_admin(mut self, addr: SocketAddr) -> ClusterAddrs {
+        self.gateway_admin = Some(addr);
+        self
+    }
+
+    /// The eight QUIC (UDP) binds, in field order. Used by the distinctness tests.
+    #[must_use]
+    pub fn udp_binds(&self) -> [SocketAddr; 8] {
+        [
+            self.orchestrator,
+            self.gateway,
+            self.shard,
+            self.shard_b,
+            self.galaxy,
+            self.planet,
+            self.station,
+            self.area,
+        ]
+    }
+
+    /// The nine always-present admin/probe (TCP) listeners, in field order. `gateway_admin` is
+    /// excluded because it is optional; a caller that sets it supplies its own reservation.
+    #[must_use]
+    pub fn tcp_binds(&self) -> [SocketAddr; 9] {
+        [
+            self.admin,
+            self.orchestrator_probe,
+            self.gateway_probe,
+            self.shard_probe,
+            self.shard_b_probe,
+            self.galaxy_probe,
+            self.planet_probe,
+            self.station_probe,
+            self.area_probe,
+        ]
+    }
+}
+
 /// Format a peer address book as the `id=addr,…` string the nodes parse from
 /// `VD_PEERS` (`EnvConfig::peer_book`). ONE formatter (was `book`/`book_string`).
 #[must_use]
@@ -1887,6 +1982,17 @@ impl Drop for DevClusterDown {
 /// `vd-devcluster` launcher wraps this with process-group + log redirection it alone
 /// requires; the parity/load tests use this plain form.)
 ///
+/// TEST SUPPORT ONLY — every caller is a process-tier test under `crates/bins/tests/`; the launcher
+/// binary has its own wrapper over [`spawn_node_grouped`]. That is why this may assert the process
+/// tier: see [`cluster_tier`].
+///
+/// # Panics
+/// If the calling thread does not hold the process tier ([`cluster_tier`]) — forking a real node
+/// binary concurrently with another cluster is what makes the gate lie, so it fails LOUD with the
+/// remedy rather than flaking later. This is a tripwire, not the mechanism: it cannot see a test
+/// that shells out to the launcher or goes through [`spawn_node_grouped`], which is why the
+/// source-scanning test in this crate covers those bypass classes too.
+///
 /// # Errors
 /// Propagates the OS spawn error (e.g. the binary is missing).
 pub fn spawn_node(
@@ -1894,6 +2000,7 @@ pub fn spawn_node(
     common: &[(&'static str, String)],
     node_env: &[(&'static str, String)],
 ) -> std::io::Result<Child> {
+    assert!(tier_held_by_current_thread(), "{TIER_REMEDY}");
     let mut cmd = Command::new(bin);
     for (k, v) in common.iter().chain(node_env.iter()) {
         cmd.env(k, v);
@@ -1943,6 +2050,18 @@ pub fn signal_group(pid: u32, sig: &str) {
     let _ = Command::new("kill")
         .arg(format!("-{sig}"))
         .arg(format!("-{pid}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Send `sig` to the SINGLE process `pid` (the POSITIVE target) via the POSIX `kill` tool — the
+/// one-process twin of [`signal_group`], for a child spawned WITHOUT its own process group.
+/// Best-effort; a "No such process" on an already-exited child is expected and silenced.
+pub fn signal_pid(pid: u32, sig: &str) {
+    let _ = Command::new("kill")
+        .arg(format!("-{sig}"))
+        .arg(pid.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
@@ -2725,6 +2844,98 @@ fn guard_boundaries_in_realm(
     Ok(())
 }
 
+// ---- the process-tier lock ---------------------------------------------------
+
+/// THE lock every cluster-booting test holds for its whole body.
+///
+/// WHY IT EXISTS. `cargo test` runs the test fns inside ONE binary CONCURRENTLY (one thread per
+/// test). A test that boots real node binaries needs several CPUs for a few seconds AND needs the
+/// ports it reserved to still be free when the children actually bind them. Two such tests running
+/// at once contend for both, so whichever wins passes and the others see `/readyz` 503 or an
+/// unreachable listener — and WHICH ones fail shuffles run to run. That is a gate that lies: a real
+/// regression is indistinguishable from the noise. Serializing at the source makes a green run mean
+/// something, no matter how the binary is invoked — by `cargo test --workspace`, by a `just` recipe,
+/// or by a developer running it directly. It is deliberately NOT a `justfile` flag, because a flag
+/// leaves the documented `cargo test --workspace` still lying.
+///
+/// THREE THINGS THE CALLER MUST KNOW:
+///
+/// 1. **Declare it FIRST in the test body**, before any `Cluster` local:
+///    ```ignore
+///    #[test]
+///    fn my_process_test() {
+///        let _tier = vd_bins::cluster_tier();
+///        let mut cluster = Cluster::new();
+///        // ...
+///    }
+///    ```
+///    Rust drops locals in REVERSE declaration order, so declaring the guard first makes it outlive
+///    `Cluster::drop` ([`Cluster`]'s `Drop`, which kills AND `wait`s). That wait is what actually
+///    frees the bound ports — see [`Cluster::kill_and_reap`], whose doc explains why the reap is
+///    load-bearing. Releasing the tier before the reap would hand the next test a set of ports the
+///    previous cluster's children still hold.
+///
+/// 2. **Poison is recovered, deliberately.** A test that panics while holding the tier poisons the
+///    mutex; propagating that would turn ONE genuine failure into N spurious ones and re-create the
+///    exact "which failure is real?" problem this removes. The lock guards scheduling, not data, so
+///    there is no invariant a panic could have broken.
+///
+/// 3. **THE PREMISE — this is a PROCESS-LOCAL guard.** It is sufficient only because `cargo test`
+///    runs test EXECUTABLES sequentially while parallelising WITHIN each one. It gives NO protection
+///    under `cargo-nextest` (process per test), nor against two concurrent `cargo` invocations, nor
+///    against anything else on the machine holding a port. The complete fix is deterministic
+///    per-fixture port bands; see the ledger entry in `docs/design/DEFERRED.md`.
+static CLUSTER_TIER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The thread currently holding [`CLUSTER_TIER`], so [`spawn_node`] can refuse to fork a real binary
+/// from a test that forgot the guard. A separate, always-briefly-held lock rather than a field on the
+/// guard: the tripwire must be readable from code that does NOT hold the tier.
+static TIER_OWNER: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+
+/// RAII handle for the process tier. Hold it for the whole test body; see [`cluster_tier`].
+pub struct ClusterTier {
+    /// Held for the guard's lifetime. Never read — the lock IS the effect.
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for ClusterTier {
+    fn drop(&mut self) {
+        // Clear the owner BEFORE `_guard` drops (Drop::drop runs ahead of field drops), so the tier is
+        // never observably free-but-owned.
+        *TIER_OWNER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+/// Acquire THE process tier — the first statement of every test that boots real node binaries.
+/// Blocks until the previous holder's cluster is fully reaped. See [`CLUSTER_TIER`] for the rules.
+#[must_use]
+pub fn cluster_tier() -> ClusterTier {
+    let guard = CLUSTER_TIER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *TIER_OWNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::thread::current().id());
+    ClusterTier { _guard: guard }
+}
+
+/// Does the calling thread hold the process tier? The tripwire [`spawn_node`] checks.
+#[must_use]
+pub fn tier_held_by_current_thread() -> bool {
+    *TIER_OWNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        == Some(std::thread::current().id())
+}
+
+/// The remedy a forgotten-guard panic prints. One string so the message, the doc and the
+/// source-scanning test cannot drift apart.
+pub const TIER_REMEDY: &str = "this test forks a real node binary but does not hold the process tier — add \
+     `let _tier = vd_bins::cluster_tier();` as the FIRST statement of the test body \
+     (first, so it outlives the Cluster reap that frees the ports)";
+
 // ---- RAII child guard --------------------------------------------------------
 
 /// Owns spawned child processes and KILLS them on drop — so a partial spawn, an
@@ -2790,6 +3001,41 @@ impl Cluster {
         let _ = child.wait(); // reap (release the port + the redb lock + the zombie) — load-bearing, see doc
     }
 
+    /// SIGTERM (the GRACEFUL k8s pod-stop signal) the most-recently-pushed child labelled `name`,
+    /// and DELIBERATELY LEAVE IT IN THE REAP SET. Panics if no such child is present.
+    ///
+    /// This is the drain-observing twin of [`Cluster::kill_and_reap`] (which SIGKILLs and REMOVES).
+    /// Keeping the child owned is the whole point: a graceful-shutdown test must stay alive across
+    /// the drain window to observe it, and every assertion in that window can fail. A bare
+    /// `std::process::Child` does NOT kill on drop, so a child held outside the `Cluster` purely to
+    /// be signalled leaks a running node on the first failed assertion — which then competes for CPU
+    /// with every later test in the binary and makes the next failure MORE likely. Signalling
+    /// through the `Cluster` keeps RAII cover for the entire drain.
+    pub fn sigterm(&mut self, name: &'static str) {
+        let idx = self
+            .children
+            .iter()
+            .rposition(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("Cluster has no child named {name} to SIGTERM"));
+        signal_pid(self.children[idx].1.id(), "TERM");
+    }
+
+    /// Block until the most-recently-pushed child labelled `name` EXITS ON ITS OWN, then remove it
+    /// from the reap set. Panics if no such child is present. The graceful counterpart to
+    /// [`Cluster::kill_and_reap`]: it never signals, so it proves the child terminated by itself —
+    /// which is exactly what a SIGTERM-drain test must assert. Returns the exit status.
+    pub fn wait_for_exit(&mut self, name: &'static str) -> ExitStatus {
+        let idx = self
+            .children
+            .iter()
+            .rposition(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("Cluster has no child named {name} to wait for"));
+        let (_, mut child) = self.children.remove(idx);
+        child
+            .wait()
+            .unwrap_or_else(|e| panic!("wait for {name} to exit: {e}"))
+    }
+
     /// Disarm: hand back the PIDs and forget the children WITHOUT killing them
     /// (the runfile is now the kill record). Call only once bring-up succeeded.
     #[must_use]
@@ -2806,6 +3052,346 @@ impl Drop for Cluster {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod cluster_addrs_tests {
+    use super::ClusterAddrs;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn reserve_yields_eight_distinct_udp_and_nine_distinct_tcp() {
+        let a = ClusterAddrs::reserve();
+        // TWO separate sets, never one of seventeen — UDP and TCP are separate port namespaces, so a
+        // cross-protocol port match is legal and asserting against it would invent a flake.
+        let udp: BTreeSet<_> = a.udp_binds().into_iter().collect();
+        let tcp: BTreeSet<_> = a.tcp_binds().into_iter().collect();
+        assert_eq!(udp.len(), 8);
+        assert_eq!(tcp.len(), 9);
+        assert_eq!(a.gateway_admin, None);
+    }
+
+    #[test]
+    fn reserve_binds_each_field_at_its_real_protocol() {
+        // THE RED CONTROL for the reservation drift this fixture removes: `shard_b` becomes `VD_BIND`
+        // (a QUIC/UDP bind), but thirteen hand-rolled literals reserved it with the TCP helper — so
+        // they proved a TCP port free and then bound UDP on that number. Re-binding each field at the
+        // protocol it will actually be used with is what pins the mapping.
+        let a = ClusterAddrs::reserve();
+        for addr in a.udp_binds() {
+            std::net::UdpSocket::bind(addr)
+                .unwrap_or_else(|e| panic!("{addr} must be free as UDP: {e}"));
+        }
+        for addr in a.tcp_binds() {
+            std::net::TcpListener::bind(addr)
+                .unwrap_or_else(|e| panic!("{addr} must be free as TCP: {e}"));
+        }
+    }
+
+    #[test]
+    fn with_gateway_admin_sets_only_that_field() {
+        let base = ClusterAddrs::reserve();
+        let extra = super::reserve_tcp_addr();
+        let with = base.with_gateway_admin(extra);
+        assert_eq!(with.gateway_admin, Some(extra));
+        assert_eq!(with.udp_binds(), base.udp_binds());
+        assert_eq!(with.tcp_binds(), base.tcp_binds());
+    }
+
+    #[test]
+    fn two_reservations_do_not_overlap_within_a_protocol() {
+        // Holding BOTH sets alive at once is the point: it proves `reserve()` does not hand the same
+        // port to two live clusters, which a one-at-a-time reservation cannot promise.
+        let a = ClusterAddrs::reserve();
+        let b = ClusterAddrs::reserve();
+        let udp: BTreeSet<_> = a.udp_binds().into_iter().chain(b.udp_binds()).collect();
+        let tcp: BTreeSet<_> = a.tcp_binds().into_iter().chain(b.tcp_binds()).collect();
+        assert_eq!(udp.len(), 16);
+        assert_eq!(tcp.len(), 18);
+    }
+}
+
+#[cfg(test)]
+mod cluster_tier_tests {
+    use super::{TIER_REMEDY, cluster_tier, spawn_node, tier_held_by_current_thread};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Run `f` with the panic hook silenced, so a DELIBERATE panic does not spam the gate log and
+    /// make a green run look alarming. Restores the previous hook.
+    fn without_panic_noise<T>(f: impl FnOnce() -> T) -> T {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let out = f();
+        std::panic::set_hook(prev);
+        out
+    }
+
+    #[test]
+    fn the_tier_admits_exactly_one_holder_at_a_time() {
+        // THE property: N threads racing for the tier are serialized. `inside` counts concurrent
+        // holders; `peak` records the largest count ever observed. If the lock did nothing, several
+        // threads would overlap and peak would exceed 1.
+        let inside = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let inside = Arc::clone(&inside);
+                let peak = Arc::clone(&peak);
+                std::thread::spawn(move || {
+                    let _tier = cluster_tier();
+                    let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    // Hold long enough that a broken lock would demonstrably overlap.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    inside.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("tier thread");
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert_eq!(inside.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_panicking_holder_does_not_poison_the_tier() {
+        // One genuine failure must not cascade into N spurious ones — see the `CLUSTER_TIER` doc.
+        let panicked = without_panic_noise(|| {
+            std::thread::spawn(|| {
+                let _tier = cluster_tier();
+                panic!("a test failed while holding the tier");
+            })
+            .join()
+        });
+        assert!(panicked.is_err(), "the holder thread must have panicked");
+        // The tier is still usable afterwards.
+        let _tier = cluster_tier();
+        assert!(tier_held_by_current_thread());
+    }
+
+    #[test]
+    fn the_tier_is_still_held_while_a_later_declared_local_drops() {
+        // WHY THIS MATTERS: a `Cluster`'s drop is what kills AND reaps its children, and the reap is
+        // what actually frees the ports. Declaring the guard FIRST (so it drops LAST) is what keeps
+        // the tier held across that reap. This asserts the convention really has that effect.
+        struct Probe(Arc<AtomicBool>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.0
+                    .store(tier_held_by_current_thread(), Ordering::SeqCst);
+            }
+        }
+
+        let held_at_drop = Arc::new(AtomicBool::new(false));
+        {
+            let _tier = cluster_tier(); // FIRST  ⇒ drops LAST
+            let _probe = Probe(Arc::clone(&held_at_drop)); // SECOND ⇒ drops FIRST
+        }
+        assert!(held_at_drop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn declaring_the_guard_last_releases_the_tier_before_the_reap() {
+        // The NEGATIVE twin of the test above — the mistake the doc warns against. Keeping both
+        // arms makes the ordering rule an asserted property rather than a comment.
+        struct Probe(Arc<AtomicBool>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.0
+                    .store(tier_held_by_current_thread(), Ordering::SeqCst);
+            }
+        }
+
+        let held_at_drop = Arc::new(AtomicBool::new(true));
+        {
+            let _probe = Probe(Arc::clone(&held_at_drop)); // FIRST  ⇒ drops LAST
+            let _tier = cluster_tier(); // SECOND ⇒ drops FIRST
+        }
+        assert!(!held_at_drop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn spawn_node_without_the_tier_guard_fails_loud() {
+        // The tripwire fires BEFORE `Command::spawn`, so a path that does not exist is fine —
+        // reaching an OS error would itself mean the assert did not fire.
+        assert!(!tier_held_by_current_thread());
+        let caught = without_panic_noise(|| {
+            std::panic::catch_unwind(|| {
+                let _ = spawn_node("/nonexistent/vd-shard", &[], &[]);
+            })
+        });
+        let payload = caught.expect_err("spawn_node must panic without the tier");
+        let msg = payload
+            .downcast_ref::<String>()
+            .map_or("<not a String>", String::as_str);
+        assert!(
+            msg.contains("cluster_tier"),
+            "the panic must name the remedy; got: {msg}"
+        );
+        assert_eq!(msg, TIER_REMEDY);
+    }
+
+    // ---- the source-scanning completeness test --------------------------------------------------
+
+    /// Every call that ends up forking a real node binary. `spawn_node` is tripwired at runtime, but
+    /// the other three are not reachable by that assert — a test can shell out to the launcher, go
+    /// through the grouped spawner, or drive the RLM process backend — so the only way to prove
+    /// COMPLETE coverage is to read the sources.
+    const BOOT_CALLS: [&str; 5] = [
+        "Cluster::new(",
+        "spawn_node(",
+        "spawn_node_grouped(",
+        "ProcLaunchBackend::new(",
+        "devcluster(",
+    ];
+
+    /// `(name, is_test, body)` for every `fn` with a body in `src`.
+    fn functions(src: &str) -> Vec<(String, bool, String)> {
+        let bytes = src.as_bytes();
+        let mut out = Vec::new();
+        for (idx, _) in src.match_indices("fn ") {
+            // A real definition is preceded by whitespace or a keyword boundary, and the name is an
+            // identifier followed by `(` or `<`.
+            let after = &src[idx + 3..];
+            let name: String = after
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            let Some(rel) = src[idx..].find('{') else {
+                continue;
+            };
+            let open = idx + rel;
+            // Reject `fn` inside a string/comment cheaply: the char before must not be alphanumeric.
+            if idx > 0 && (bytes[idx - 1].is_ascii_alphanumeric() || bytes[idx - 1] == b'_') {
+                continue;
+            }
+            let mut depth = 0usize;
+            let mut end = open;
+            for (i, c) in src[open..].char_indices() {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+            }
+            // `#[test]` (or `#[tokio::test]`) within the attributes just above the fn. Step back by
+            // CHARS, not bytes — these sources contain multi-byte punctuation and a byte offset can
+            // land mid-character.
+            let start = src[..idx]
+                .char_indices()
+                .rev()
+                .nth(200)
+                .map_or(0, |(i, _)| i);
+            let is_test = src[start..idx].contains("test]");
+            out.push((name, is_test, src[open..=end].to_owned()));
+        }
+        out
+    }
+
+    /// Does `body` call `callee`? Substring plus a `(` is enough here: these are distinctive
+    /// snake_case fixture names, and a false POSITIVE only adds a guard that is harmless.
+    fn calls(body: &str, callee: &str) -> bool {
+        body.contains(&format!("{callee}("))
+    }
+
+    #[test]
+    fn every_cluster_booting_test_holds_the_tier() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        let mut guarded = 0usize;
+
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .collect();
+        entries.sort();
+        assert!(!entries.is_empty(), "no process-tier test sources found");
+
+        // ANTI-VACUITY, per file: if the parser ever regresses it would find nothing and the test
+        // would pass while measuring nothing. A file that NAMES a boot call must yield at least one
+        // booting test. Self-calibrating — no hard-coded count to drift.
+        let mut silent_files: Vec<String> = Vec::new();
+
+        for path in entries {
+            let src = std::fs::read_to_string(&path).expect("read test source");
+            let fns = functions(&src);
+            let file_names_a_boot = BOOT_CALLS.iter().any(|c| src.contains(c));
+            let mut found_here = 0usize;
+
+            // Seed: functions that name a boot call directly.
+            let mut boots: Vec<String> = fns
+                .iter()
+                .filter(|(_, _, body)| BOOT_CALLS.iter().any(|c| body.contains(c)))
+                .map(|(n, _, _)| n.clone())
+                .collect();
+            // Close transitively: a helper that calls a booting helper also boots. This is the
+            // bypass class the runtime tripwire structurally cannot see.
+            loop {
+                let before = boots.len();
+                for (name, _, body) in &fns {
+                    if !boots.contains(name) && boots.iter().any(|b| calls(body, b)) {
+                        boots.push(name.clone());
+                    }
+                }
+                if boots.len() == before {
+                    break;
+                }
+            }
+
+            for (name, is_test, body) in &fns {
+                if !is_test || !boots.contains(name) {
+                    continue;
+                }
+                checked += 1;
+                found_here += 1;
+                if body.contains("cluster_tier()") {
+                    guarded += 1;
+                } else {
+                    offenders.push(format!(
+                        "{}::{name}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                }
+            }
+
+            if file_names_a_boot && found_here == 0 {
+                silent_files.push(
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into(),
+                );
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "the scanner found no cluster-booting tests — it has stopped measuring anything"
+        );
+        assert_eq!(
+            silent_files,
+            Vec::<String>::new(),
+            "these files name a cluster boot call but the scanner attributed it to no test — \
+             the fn/attribute parser has regressed and is no longer measuring them"
+        );
+        assert_eq!(guarded, checked);
+        assert_eq!(
+            offenders,
+            Vec::<String>::new(),
+            "these tests boot a real cluster without the process tier. {TIER_REMEDY}"
+        );
     }
 }
 

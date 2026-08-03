@@ -136,6 +136,9 @@ fn anchors(trust_dir: &std::path::Path) -> Vec<(&'static str, String)> {
 
 #[test]
 fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let h = harness();
     let tuning = ProcSpawnTuning {
         exe: "vd-shard",

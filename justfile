@@ -76,8 +76,12 @@ lint-combos:
 
 # SCALE-1 (the K-client load/collapse gate): K real dev-control clients log into one
 # cluster concurrently — fan-out + per-client routing proven at the per-slot client cap.
+# `dev_control_nav` rides here because it is `#![cfg(feature = "dev-control")]` — so the
+# workspace run compiles it to NOTHING — and until now no recipe named it either, meaning
+# the WalkTo/LookAt closed loops were never executed by any gate at all.
 client-load:
     cargo test -p vd-bins --features dev-control --test client_load
+    cargo test -p vd-bins --features dev-control --test dev_control_nav
 
 # D-6 D-delta: the orchestrator durability crash gates. `orchestrator_crash` is the SIGKILL-mid-fsync proof
 # (a real kill-9 while a directory grant sits submitted-but-pre-fsync loses <=1 batch + recovers
@@ -87,6 +91,13 @@ client-load:
 # durable boot-counter (higher incarnation) keeps the orchestrator from silently DEDUP-dropping the restart's
 # reliable re-grant (RED control: a fixed incarnation DOES get deduped). Serial + single-threaded (each
 # spawns a real cluster + SIGKILLs a process — concurrent cluster tests would contend for CPU/ports).
+#
+# NOTE: the `--test-threads=1` flags below are now BELT-AND-BRACES, not the mechanism. Serialization is
+# enforced AT THE SOURCE by `vd_bins::cluster_tier()`, which every cluster-booting test holds for its whole
+# body (and `every_cluster_booting_test_holds_the_tier` proves none was missed). That is what makes the
+# plain `cargo test --workspace` honest too — a recipe flag could only ever fix the recipe, leaving the
+# documented workspace command still producing 1-3 shuffling false failures per run. The flags stay because
+# they cost nothing and keep these recipes correct even if invoked against an older tree.
 orch-crash:
     cargo test -p vd-bins --features store-test-hooks --test orchestrator_crash -- --test-threads=1
     cargo test -p vd-bins --test boot_guard -- --test-threads=1

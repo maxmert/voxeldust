@@ -9,32 +9,12 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use vd_bins::{
-    Cluster, ClusterAddrs, DEV, admin_get_body, common_env, orchestrator_env, reserve_tcp_addr,
-    reserve_udp_addr, spawn_node,
+    Cluster, ClusterAddrs, DEV, admin_get_body, common_env, orchestrator_env, spawn_node,
 };
 use vd_io_prod::trust::ClusterTrust;
 
 fn addrs() -> ClusterAddrs {
-    ClusterAddrs {
-        orchestrator: reserve_udp_addr(),
-        gateway: reserve_udp_addr(),
-        shard: reserve_udp_addr(),
-        admin: reserve_tcp_addr(),
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
-    }
+    ClusterAddrs::reserve()
 }
 
 #[test]
@@ -90,6 +70,9 @@ fn a_temp_store_without_ephemeral_ok_refuses_to_boot() {
 
 #[test]
 fn a_temp_store_with_ephemeral_ok_boots_past_the_guard() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // The ACCEPT arm: `orchestrator_env` keeps VD_STORE_EPHEMERAL_OK=1, so a temp store boots and serves
     // admin (the guard's accept + the "under a TEMP dir … dev/test" warn ran).
     let addrs = addrs();

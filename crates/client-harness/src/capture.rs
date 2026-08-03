@@ -143,6 +143,8 @@ mod tests {
             location: None,
             render_cursor: cursor,
             universe_tick,
+            entity_feed_newest_tick: universe_tick,
+            realm_feed_newest_tick: None,
             entities: Vec::new(),
             realm_boxes: Vec::new(),
             snapshots_applied,

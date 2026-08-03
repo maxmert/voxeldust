@@ -16,31 +16,12 @@ use std::time::{Duration, Instant};
 
 use vd_bins::{
     Cluster, ClusterAddrs, DEV, admin_get_body, common_env, dev_auth_pubkey_hex, gateway_env,
-    orchestrator_env, reserve_tcp_addr, reserve_udp_addr, spawn_node,
+    orchestrator_env, spawn_node,
 };
 use vd_io_prod::trust::ClusterTrust;
 
 fn addrs() -> ClusterAddrs {
-    ClusterAddrs {
-        orchestrator: reserve_udp_addr(),
-        gateway: reserve_udp_addr(),
-        shard: reserve_udp_addr(),
-        admin: reserve_tcp_addr(),
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
-    }
+    ClusterAddrs::reserve()
 }
 
 /// A trust bundle under `$TMPDIR` (a real DER dir every node needs before it reaches the preflight/store).
@@ -227,6 +208,9 @@ fn gateway_cloud_vetoes_the_built_in_dev_auth_key() {
 /// exceed ttl; the dev ttl would break `grace > ttl`).
 #[test]
 fn orchestrator_cloud_boots_green_with_a_coherent_config() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let addrs = addrs();
     let admin_addr = addrs.admin;
     let trust = write_trust("green");

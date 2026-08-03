@@ -52,6 +52,9 @@ fn run(launcher: &str, sub: &str, slot: u16) -> std::process::ExitStatus {
 
 #[test]
 fn dev_cluster_comes_up_over_quic_and_tears_down_without_leaking() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     let _ = run(launcher, "down", SMOKE_SLOT); // clean slate (idempotent)
     let _guard = DevClusterDown::new(launcher, SMOKE_SLOT);
@@ -159,6 +162,9 @@ fn two_launches_export_a_strictly_increasing_process_incarnation() {
 
 #[test]
 fn a_sigkill_mid_claim_crash_state_is_always_recoverable() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // A SIGKILL/Ctrl-C/OOM between the O_EXCL claim and the first recorded pid
     // leaves the runfile present but EMPTY (no pids). This must NOT wedge the slot:
     // `down` clears it and a fresh `up` succeeds. (The runfile IS the claim, so

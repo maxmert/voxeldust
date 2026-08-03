@@ -180,6 +180,9 @@ fn walk_leg(
 
 #[test]
 fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fence_thrash() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // ---- topology + trust (mirrors dev_control_nav.rs) -----------------------
     let admin_addr = reserve_tcp_addr();
     let client_quic = reserve_udp_addr();
@@ -196,24 +199,8 @@ fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fe
     // Each of the SIX realm-shards + the base nodes gets its OWN reserved QUIC + probe addr — one shard per
     // realm (NO co-hosting), so every re-home is a uniform CROSS-NODE saga.
     let addrs = ClusterAddrs {
-        orchestrator: reserve_udp_addr(),
-        gateway: reserve_udp_addr(),
-        shard: reserve_udp_addr(),
         admin: admin_addr,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_udp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     let shape = ClusterShape::Forest;
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];

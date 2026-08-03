@@ -66,24 +66,8 @@ fn gateway_view(addr: SocketAddr) -> Option<GatewayView> {
 /// is `Some` so the gateway serves the `/admin/snapshot` this test reads the proof from.
 fn demand_addrs(gateway_admin: SocketAddr) -> ClusterAddrs {
     ClusterAddrs {
-        orchestrator: reserve_udp_addr(),
-        gateway: reserve_udp_addr(),
-        shard: reserve_udp_addr(),
-        admin: reserve_tcp_addr(),
         gateway_admin: Some(gateway_admin),
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_udp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     }
 }
 
@@ -237,6 +221,9 @@ fn boot_demand_login(
 
 #[test]
 fn a_demand_login_spins_up_a_fresh_home_and_lands_with_no_prebooked_shard() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let f = fixture("login");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
@@ -291,6 +278,9 @@ fn a_demand_login_spins_up_a_fresh_home_and_lands_with_no_prebooked_shard() {
 
 #[test]
 fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greeting() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // The reactive greeting's SELF-HEAL property (RG-1): the connection between a demand-spawned shard and the
     // gateway is learned (not pre-booked), so it must survive a GATEWAY restart with no manual re-plumb. This
     // is the SERVER-side re-heal — the client's session does NOT resume (reconnect-without-replay is D-11,
@@ -349,6 +339,9 @@ fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greetin
 /// applied at least one live realm frame. FAIL here == the frozen-planet bug, reproduced.
 #[test]
 fn a_demand_login_applies_live_realm_frames_so_the_planets_are_not_frozen() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let f = fixture("realmframes");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
@@ -423,6 +416,9 @@ fn a_demand_login_applies_live_realm_frames_so_the_planets_are_not_frozen() {
 /// cluster sees FROZEN planets from the start; this pins WHICH of the two it is.
 #[test]
 fn a_demand_login_draws_moving_planets_not_a_frozen_scene() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let f = fixture("drawnplanets");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
@@ -511,6 +507,9 @@ fn a_demand_login_draws_moving_planets_not_a_frozen_scene() {
 /// shard (the speed-dependent freeze the human saw at full speed but not under the orbit-slowdown flag).
 #[test]
 fn a_parked_ship_keeps_the_planets_orbiting_at_full_speed() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let f = fixture("parkedfull");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
@@ -624,6 +623,9 @@ fn inner_planet_mover(
 /// planet shard (the whole system still orbits around the crossed-in player). A frozen counter here is the bug.
 #[test]
 fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // SAFETY: the process-wide env is set before any cluster boot; `--test-threads=1` serializes tests. It is
     // RESET the moment this test's crossing completes (below) so a later orbit-speed-dependent test
     // (`a_parked_ship…`) does not inherit the quasi-freeze — this shard reads the value only at boot, so
@@ -809,6 +811,9 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
 /// leak would quasi-freeze a later full-speed test).
 #[test]
 fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     unsafe {
         std::env::set_var("VD_VISUAL_ORBIT_SLOWDOWN", "300");
     }
@@ -1023,6 +1028,9 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
 /// epoch-fixed fly targets (300× orbit slowdown) keep the crossings robust across cycles. Knob reset at the end.
 #[test]
 fn repeated_planet_system_roundtrips_do_not_freeze() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     unsafe {
         std::env::set_var("VD_VISUAL_ORBIT_SLOWDOWN", "300");
     }
@@ -1291,6 +1299,9 @@ fn walk_leg(devctl_port: u16, leg: &str, target: DVec3, max_ticks: u64) -> DVec3
 
 #[test]
 fn a_flying_occupant_streams_a_culled_planet_in_ahead_then_the_vacated_realm_is_reaped() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // THE demand-FLY — warp as a consequence of movement, on the compressed-real 5-planet Kepler geometry. A
     // logged-in occupant sits at the star (System 7); the OUTER planet is culled (beyond the ~59.5 m
     // visibility band from the star, so its box + shard do NOT exist yet). The occupant flies TOWARD it: as it

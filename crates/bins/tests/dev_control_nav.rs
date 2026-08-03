@@ -56,6 +56,9 @@ fn own_forward(state: &DevState) -> Option<DVec3> {
 
 #[test]
 fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // ---- topology + trust ----------------------------------------------------
     let orch_addr = reserve_udp_addr();
     let gateway_addr = reserve_udp_addr();
@@ -76,20 +79,7 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
         gateway: gateway_addr,
         shard: shard_addr,
         admin: admin_addr,
-        gateway_admin: None,
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        shard_b: reserve_tcp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);

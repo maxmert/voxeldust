@@ -538,6 +538,10 @@ impl ClientState {
                 // the SAME render-origin subtraction as DevEntityRow.pos, so the diagnosis surface reports both
                 // in ONE frame (a raw absolute here would silently disagree the moment the pin is non-identity).
                 center: sanitize_vec3(b.center_offset - self.view.render_origin().offset()),
+                // SHAKE DIAGNOSIS: which moment THIS box is being drawn from. A box whose tick tracks
+                // `entity_feed_newest_tick` shares the player's moment; one that drifts is authored by a
+                // shard whose clock is running independently. `None` = never streamed (boot placement).
+                newest_tick: self.realm_view.realm_newest_tick(realm).map(|t| t.0),
             })
             .collect();
         DevState {
@@ -552,6 +556,10 @@ impl ClientState {
                 .map(vd_core::pose::FrameRef::label),
             render_cursor,
             universe_tick: self.latest_universe_tick,
+            // SHAKE DIAGNOSIS — the two feeds' freshest ticks, reported side by side so their drift is
+            // directly observable next to `render_cursor`. Read the field docs on `DevState` for why.
+            entity_feed_newest_tick: self.view.newest_tick().map(|t| t.0),
+            realm_feed_newest_tick: self.realm_view.newest_tick().map(|t| t.0),
             entities,
             realm_boxes,
             snapshots_applied: self.snapshots_applied,
@@ -973,6 +981,88 @@ mod tests {
             .deliver(GATEWAY, MsgClass::RealmSnapshot, vec![0xff, 0xff]);
         c.step(0.0);
         assert_eq!(c.state().dropped_counts().0, 1);
+    }
+
+    #[test]
+    fn devstate_reports_each_feeds_newest_tick_separately_so_their_drift_is_visible() {
+        // SHAKE DIAGNOSIS (slice 3): the ground under a player is placed by the realm feed while the
+        // player's own body comes from the entity feed, and the two are authored by DIFFERENT shards
+        // whose sense of universe time advances only when a clock sync arrives. If those two numbers
+        // drift, the horizon wobbles. Reporting ONE combined tick would hide exactly that, so the two
+        // are surfaced separately — and this test feeds them DELIBERATELY DIFFERENT ticks, so a change
+        // that collapsed them into one value (or transposed them) fails here.
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        activate(&mut c);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 40, 1.0));
+        c.step(0.0);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot(1, 37, RealmId::Planet(7), 1.0),
+        );
+        c.step(0.0);
+
+        let st = c.state().devstate(0.0, 0, 0);
+        assert_eq!(st.entity_feed_newest_tick, Some(40));
+        assert_eq!(st.realm_feed_newest_tick, Some(37));
+    }
+
+    #[test]
+    fn devstate_reports_no_feed_ticks_before_anything_is_delivered() {
+        // ABSENT IS NOT ZERO: before the first frame the honest answer is "nothing delivered", not
+        // tick 0 — a reader must be able to tell a silent feed from one sitting at the epoch.
+        let mut c = core();
+        activate(&mut c);
+        let st = c.state().devstate(0.0, 0, 0);
+        assert_eq!(st.entity_feed_newest_tick, None);
+        assert_eq!(st.realm_feed_newest_tick, None);
+    }
+
+    #[test]
+    fn a_streamed_realm_box_reports_the_tick_it_was_drawn_from_and_a_boot_box_reports_none() {
+        // The per-box half of the same measurement, and the FROZEN-box discriminator: a box the feed
+        // has streamed carries the tick it was last moved at (so a box that stops advancing is
+        // visible as such, and cannot satisfy a smoothness gate by simply not moving); a box that
+        // only ever came from the boot scene reports nothing, because no pose was ever delivered
+        // for it — not tick 0.
+        use vd_core::geometry::{CrossEffect, RealmBoundary};
+        use vd_core::pose::{LatticePos, RealmId};
+        let mut c = core();
+        activate(&mut c);
+        let scene = RealmScene::from_boundaries(&[RealmBoundary::shell(
+            RealmId::System(7),
+            LatticePos::local(DVec3::ZERO),
+            1000.0,
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            RealmId::System(7),
+            CrossEffect::Authority,
+        )])
+        .expect("scene");
+        c.state_mut().load_scene(scene);
+        // Stream a pose for a DIFFERENT realm than the boot box, so both arms are exercised at once.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot(1, 55, RealmId::Planet(7), 3.0),
+        );
+        c.step(0.0);
+
+        let dev = c.state().devstate(0.0, 0, 0);
+        let boot = dev
+            .realm_boxes
+            .iter()
+            .find(|b| b.realm == format!("{:?}", RealmId::System(7)))
+            .expect("the boot box is drawn");
+        assert_eq!(boot.newest_tick, None);
+        assert_eq!(dev.realm_feed_newest_tick, Some(55));
     }
 
     #[test]

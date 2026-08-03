@@ -151,6 +151,9 @@ impl ProcessClient {
 
 #[test]
 fn p1_parity_real_binaries_over_quic() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     // ---- topology: addresses, trust bundle, child processes ------------------
     let orch_addr = reserve_udp_addr();
     let gateway_addr = reserve_udp_addr();
@@ -182,22 +185,7 @@ fn p1_parity_real_binaries_over_quic() {
         shard: shard_addr,
         admin: admin_addr,
         gateway_admin: Some(gw_admin),
-        orchestrator_probe: reserve_tcp_addr(),
-        gateway_probe: reserve_tcp_addr(),
-        shard_probe: reserve_tcp_addr(),
-        // Track R / 1d.2: the DEST shard's addrs. This single-shard parity scenario passes `dual=false`
-        // to every `*_env` builder, so these are never booked (proven byte-identical by the inert-parity
-        // unit test `single_shard_env_is_byte_identical_to_dual_false`).
-        shard_b: reserve_udp_addr(),
-        shard_b_probe: reserve_tcp_addr(),
-        galaxy: reserve_udp_addr(),
-        galaxy_probe: reserve_tcp_addr(),
-        planet: reserve_udp_addr(),
-        planet_probe: reserve_tcp_addr(),
-        station: reserve_udp_addr(),
-        station_probe: reserve_tcp_addr(),
-        area: reserve_udp_addr(),
-        area_probe: reserve_tcp_addr(),
+        ..ClusterAddrs::reserve()
     };
     let clients = [
         (NodeId(CLIENT_NODE_BASE), client_a_addr),

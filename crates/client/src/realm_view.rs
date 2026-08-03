@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use vd_core::UniverseTick;
 use vd_core::pose::RealmId;
 use vd_wire::channels::{RealmSnapshotDatagram, is_stale};
 
@@ -141,6 +142,23 @@ impl RealmView {
     #[must_use]
     pub fn nonfinite_poses(&self) -> u64 {
         self.nonfinite_poses
+    }
+
+    /// The newest universe tick this realm's track has been fed — `None` for a realm the feed never
+    /// streamed. SHAKE DIAGNOSIS: the realm feed's rows are authored by the realm's PARENT shard while
+    /// an occupant's pose is composed on the shard it lives on, and each shard advances its own sense
+    /// of universe time only when a clock sync ARRIVES. So the two numbers on one screen can drift
+    /// apart, and their difference is the quantity that has to be measured before anything is built.
+    #[must_use]
+    pub fn realm_newest_tick(&self, realm: RealmId) -> Option<UniverseTick> {
+        self.placements.get(&realm).map(|t| t.newest_tick())
+    }
+
+    /// The newest universe tick across EVERY streamed realm — the realm feed's freshness as one
+    /// number, to be compared against the entity feed's. `None` before the first realm frame.
+    #[must_use]
+    pub fn newest_tick(&self) -> Option<UniverseTick> {
+        self.placements.values().map(|t| t.newest_tick()).max()
     }
 }
 

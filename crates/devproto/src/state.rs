@@ -46,6 +46,15 @@ pub struct DevEntityRow {
 pub struct DevRealmBox {
     pub realm: String,
     pub center: [f64; 3],
+    /// SHAKE DIAGNOSIS — the newest universe tick this realm's pose feed has delivered; `None` for a
+    /// box the feed never streamed (it is sitting at its boot placement). Read against
+    /// [`DevState::entity_feed_newest_tick`], this is what distinguishes the two candidate causes of a
+    /// wobbling horizon: a box whose tick TRACKS the entity feed is being drawn from the same moment
+    /// as the player, so any residual wobble is a render-path fault; a box whose tick drifts against
+    /// it is being authored by a shard whose sense of universe time is running independently. It also
+    /// separates a FROZEN box (tick stops advancing) from a live one, so a smoothness gate cannot be
+    /// satisfied by a box that simply stopped updating.
+    pub newest_tick: Option<u64>,
 }
 
 /// The (P2) transfer view — empty-but-present so P2 transfer diagnosis is purely
@@ -80,6 +89,22 @@ pub struct DevState {
     /// `snapshots_applied` count — is what `screenshot --at-tick` aligns on, so a
     /// capture lands on the same world state across runs.
     pub universe_tick: Option<u64>,
+    /// SHAKE DIAGNOSIS — the newest universe tick the ENTITY pose feed has delivered (across all
+    /// tracks). `None` before the first snapshot.
+    ///
+    /// WHY BOTH FEEDS' TICKS ARE REPORTED SEPARATELY. A player standing on a planet sees two things
+    /// that must agree: their own body, composed by the shard that owns the realm they are in, and the
+    /// ground under them, whose placement is authored by that realm's PARENT and relayed down. Each
+    /// shard advances its own sense of universe time only when a clock sync ARRIVES from the
+    /// orchestrator — there is no local per-tick advance — so the two numbers can drift apart, and the
+    /// relative motion that drift produces is visible as a wobbling horizon. Reporting both, next to
+    /// [`DevState::render_cursor`], is what tells a wobble caused by the render path apart from one
+    /// caused by two clocks. Measure before building: the fix spans four crates on a ~50-minute build.
+    pub entity_feed_newest_tick: Option<u64>,
+    /// SHAKE DIAGNOSIS — the newest universe tick the REALM pose feed has delivered (across all
+    /// streamed realms). `None` before the first realm frame. See
+    /// [`DevState::entity_feed_newest_tick`] for why this is reported alongside it.
+    pub realm_feed_newest_tick: Option<u64>,
     /// The composited render rows — each entity once, exactly what pixels show.
     pub entities: Vec<DevEntityRow>,
     /// The DRAWN realm boxes (VU) — each realm the client is currently rendering, with
@@ -128,6 +153,10 @@ pub(crate) mod tests {
             location: Some("System 7".to_owned()),
             render_cursor: Some(101.5),
             universe_tick: Some(101),
+            // Distinct from each other AND from `universe_tick`, so a round-trip that dropped or
+            // transposed one of the two feed ticks cannot still pass.
+            entity_feed_newest_tick: Some(102),
+            realm_feed_newest_tick: Some(100),
             entities: vec![DevEntityRow {
                 entity: "ent-7".to_owned(),
                 pos: [1.0, 2.0, 3.0],
@@ -137,6 +166,7 @@ pub(crate) mod tests {
             realm_boxes: vec![DevRealmBox {
                 realm: "Planet(7)".to_owned(),
                 center: [10.0, 0.0, 0.0],
+                newest_tick: Some(100),
             }],
             snapshots_applied: 4,
             realm_frames_applied: 3,

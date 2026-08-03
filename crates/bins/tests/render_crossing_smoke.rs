@@ -242,6 +242,9 @@ fn up_dual_with_trigger(launcher: &str, slot: u16, boundaries_path: &Path) -> bo
 
 #[test]
 fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
+    // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
+    // that frees the ports. See `vd_bins::cluster_tier`.
+    let _tier = vd_bins::cluster_tier();
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     let _ = devcluster(launcher, "down", RENDER_CROSSING_SLOT); // clean slate (idempotent)
     let _down = DevClusterDown::new(launcher, RENDER_CROSSING_SLOT);

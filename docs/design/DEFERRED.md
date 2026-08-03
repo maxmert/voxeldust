@@ -3627,3 +3627,27 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   own box row (the DRY, SCALE-safe option). Discharged when the decision lands with the first moving-parent
   containment forest.
 - **Source:** floating-origin server-authoritative rework, slice A4c (`scratchpad/fo_server_plan.md`).
+
+### D-GATE-1 🟧 Process-tier port reservation is still TOCTOU outside the test binary, and the tier lock is void under a process-per-test runner
+- **What's missing:** cluster-booting process tests are now serialized AT THE SOURCE by `vd_bins::cluster_tier()`
+  (a process-local `Mutex` every such test holds for its whole body; `every_cluster_booting_test_holds_the_tier`
+  in `crates/bins/src/lib.rs` proves none was missed, transitively — it closes over helper fns, so a test that
+  boots via a fixture is caught too). That makes the plain `cargo test --workspace` honest, which a `justfile`
+  flag could never do. TWO gaps remain, and both are stated in the guard's own doc so nobody mistakes it for
+  complete: (1) **the lock is PROCESS-LOCAL.** It is sufficient only because `cargo test` runs test EXECUTABLES
+  sequentially while parallelising WITHIN each one. Under `cargo-nextest` (a process per test), or two
+  concurrent `cargo` invocations, or a second worktree building at the same time, it protects nothing.
+  (2) **reservation stays TOCTOU.** `reserve_udp_addr`/`reserve_tcp_addr` bind `:0`, read the address, and drop
+  the listener — so between the drop and the child's real bind, any process on the machine can take that port.
+  Serialization removes the in-binary race, not the machine-wide one. `ClusterAddrs::reserve()` closes the
+  weaker intra-struct aliasing hazard (all sockets held simultaneously, distinctness asserted PER PROTOCOL —
+  UDP and TCP are separate namespaces, so a 17-element cross-protocol set assertion would itself flake).
+- **Where:** `cluster_tier` / `CLUSTER_TIER` / `TIER_OWNER` and the `reserve_*_addr` helpers,
+  `crates/bins/src/lib.rs`; the guard-first convention in every `crates/bins/tests/*.rs` cluster test.
+- **When:** before the k3d/cloud CI work (task #123), where a process-per-test runner and a shared build host
+  are both likely. Complete fix = deterministic per-fixture port BANDS — the `DevPortScheme` slot scheme
+  (`crates/devproto/src/lib.rs`) and the `VD_RLM_FIRST_PORT` pattern already do this for the demand-spawned
+  shards; retrofit the same onto the remaining ephemeral fixtures so no fixture ever races for a port at all.
+  That subsumes gap (2) entirely and makes gap (1) harmless.
+- **Source:** the five-item arc, gate-honesty slice (2026-08-03). RED control recorded before the fix:
+  `probe_endpoints` at default parallelism gave 1 passed / 3 failed with shuffling identities.
