@@ -715,6 +715,48 @@ pub struct RealmRegions {
     /// [`frame_abs_map`](Self::frame_abs_map) resolve NOTHING ⇒ every consumer degrades to today's
     /// behaviour ⇒ byte-identical. The bins wire the real chains at A5 (THE FLIP).
     origin_chains: BTreeMap<RealmId, Vec<OriginLink>>,
+    /// Region index of each realm — the inverse of `regions`, so a realm resolves to its bit without a scan.
+    ix_of: BTreeMap<RealmId, usize>,
+    /// SELF ∪ ANCESTORS as a region bitmask, per region index (task #177). Computed ONCE at boot by the same
+    /// parent walk the depth cache already does, bounded by [`MAX_REGIONS`] ⇒ at most 64×64 steps.
+    ///
+    /// WHY THIS EXISTS. Containment hysteresis needs to know whether you were ALREADY inside a region. That
+    /// used to be REMEMBERED per entity — and a hand-off leaves the two shards with OPPOSITE memories, so
+    /// anything parked in the ambiguous zone between the acquire and release edges ping-pongs forever. It is
+    /// also RAM-only, so a shard restart blanks every resident's memory at once and reproduces the bug at
+    /// full population in a single tick.
+    ///
+    /// The prior is instead DERIVED: you are always a hysteretic member of the realm you are AUTHORITATIVELY
+    /// in, and of every ancestor of it. That is a total function of committed state, so it survives a crash,
+    /// a replay, a re-drive and a lease change identically — there is nothing to get out of sync.
+    ancestor_mask: Vec<u64>,
+}
+
+/// SELF ∪ ANCESTORS of `realm` as a region bitmask. Mirrors [`region_depth`]'s parent walk exactly —
+/// same hop cap, same dangling-parent and cycle stops — so the two caches can never disagree about the
+/// shape of the forest. A realm not present in `ix_of` contributes no bit (it is not a region here).
+///
+/// Bits beyond [`MAX_REGIONS`] are unrepresentable and are DROPPED rather than wrapped: a forest that
+/// large is already rejected by the boot guard, and silently aliasing bit 64 onto bit 0 would hand a
+/// subject membership in an unrelated region.
+fn ancestry_bits(regions: &[RealmRegion], ix_of: &BTreeMap<RealmId, usize>, realm: RealmId) -> u64 {
+    let mut bits = 0u64;
+    let mut cur = realm;
+    for _ in 0..regions.len() {
+        if let Some(ix) = ix_of.get(&cur)
+            && *ix < MAX_REGIONS
+        {
+            bits |= 1u64 << ix;
+        }
+        let Some(region) = regions.iter().find(|r| r.realm == cur) else {
+            return bits; // dangling parent — stop where region_depth stops
+        };
+        let Some(parent) = region.parent else {
+            return bits; // reached the ambient root
+        };
+        cur = parent;
+    }
+    bits // hop cap hit — a cycle (boot-guard-rejected); a safe stop, never a hang
 }
 
 impl RealmRegions {
@@ -729,13 +771,37 @@ impl RealmRegions {
             .map(|(ix, r)| (region_depth(&regions, r.realm), r.realm, ix))
             .collect();
         let root_realm = regions.iter().find(|r| r.parent.is_none()).map(|r| r.realm);
+        let ix_of: BTreeMap<RealmId, usize> = regions
+            .iter()
+            .enumerate()
+            .map(|(ix, r)| (r.realm, ix))
+            .collect();
+        let ancestor_mask = regions
+            .iter()
+            .map(|r| ancestry_bits(&regions, &ix_of, r.realm))
+            .collect();
         RealmRegions {
             regions,
             depths,
             root_realm,
             moving: BTreeMap::new(),
             origin_chains: BTreeMap::new(),
+            ix_of,
+            ancestor_mask,
         }
+    }
+
+    /// SELF ∪ ANCESTORS as a region bitmask for the realm a subject is authoritatively in — the DERIVED
+    /// hysteresis prior. Zero for a realm this shard does not host, which degrades to the old blank-prior
+    /// behaviour rather than inventing membership; callers warn on that path rather than passing it off as
+    /// normal (a pose naming an unhosted realm means a rebind safe-degrade happened upstream).
+    #[must_use]
+    pub fn ancestor_mask_for(&self, realm: RealmId) -> u64 {
+        self.ix_of
+            .get(&realm)
+            .and_then(|ix| self.ancestor_mask.get(*ix))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Register the shard's DIRECT MOVING children (FA-2b): the `(realm, elements)` roster
@@ -11070,6 +11136,63 @@ mod tests {
     /// `OWN_REALM`. A dot clearly inside it ⇒ container == `OTHER_REALM` ⇒ re-home INWARD to `OTHER_REALM`.
     fn child_region() -> RealmRegion {
         region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 1000.0)
+    }
+
+    #[test]
+    fn ancestor_mask_marks_self_and_every_ancestor_and_nothing_else() {
+        // THE DERIVED HYSTERESIS PRIOR (task #177): being authoritatively in a realm makes you a member of
+        // that realm AND of every realm containing it — and of NOTHING else. A sibling must never be
+        // implied, or a subject would arrive already "inside" a realm it has never been in.
+        let regions = vec![root_region(), own_region(), child_region()];
+        let rr = RealmRegions::new(regions);
+        let bit = |ix: usize| 1u64 << ix;
+
+        // root=0, own=1, child=2 (construction order).
+        assert_eq!(rr.ancestor_mask_for(ROOT_REALM), bit(0));
+        assert_eq!(rr.ancestor_mask_for(OWN_REALM), bit(0) | bit(1));
+        assert_eq!(rr.ancestor_mask_for(OTHER_REALM), bit(0) | bit(1) | bit(2));
+    }
+
+    #[test]
+    fn ancestor_mask_excludes_a_sibling_branch() {
+        // The anti-vacuity twin of the test above: with TWO children under one parent, each child's mask
+        // must contain itself + the chain up, and must NOT contain the other child. A mask built by "every
+        // region at or below my depth" (a plausible wrong implementation) would fail exactly here.
+        let sibling = region(RealmId::Planet(43), Some(OWN_REALM), DVec3::ZERO, 1000.0);
+        let rr = RealmRegions::new(vec![root_region(), own_region(), child_region(), sibling]);
+        let bit = |ix: usize| 1u64 << ix;
+
+        assert_eq!(rr.ancestor_mask_for(OTHER_REALM), bit(0) | bit(1) | bit(2));
+        assert_eq!(
+            rr.ancestor_mask_for(RealmId::Planet(43)),
+            bit(0) | bit(1) | bit(3)
+        );
+    }
+
+    #[test]
+    fn ancestor_mask_is_zero_for_a_realm_this_shard_does_not_host() {
+        // The safe-degrade arm: a pose naming an unhosted realm resolves to NO bits, which reduces to
+        // today's blank-prior behaviour rather than inventing membership. Callers treat this as a loud
+        // condition, not a normal one — an unhosted realm in a pose means a rebind degraded upstream.
+        let rr = RealmRegions::new(vec![root_region(), own_region()]);
+        assert_eq!(rr.ancestor_mask_for(RealmId::Planet(9999)), 0);
+        // And on a forest with no regions at all (the inert default), every lookup is zero.
+        assert_eq!(RealmRegions::new(vec![]).ancestor_mask_for(OWN_REALM), 0);
+    }
+
+    #[test]
+    fn ancestor_mask_terminates_on_a_dangling_parent() {
+        // `region_depth` stops at a dangling parent rather than hanging; the mask walk mirrors it exactly,
+        // so the two caches can never disagree about the forest's shape. The boot guard rejects such a
+        // forest — this only proves the walk is safe if one ever slips through.
+        let orphan = region(
+            RealmId::Planet(77),
+            Some(RealmId::Planet(404)),
+            DVec3::ZERO,
+            10.0,
+        );
+        let rr = RealmRegions::new(vec![root_region(), orphan]);
+        assert_eq!(rr.ancestor_mask_for(RealmId::Planet(77)), 1u64 << 1);
     }
 
     /// Plant the STANDARD 3-level dock forest (root ⊃ own ⊃ child) into the world's `RealmRegions`. A dot
