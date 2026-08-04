@@ -64,14 +64,36 @@ pub struct RenderPose {
     pub orient: DQuat,
 }
 
-/// A per-entity two-snapshot interpolation buffer keyed on the shared
-/// `universe_tick` timeline. `current` is the freshest delivered pose; `prev` the
-/// one before it. Sampling between them at the render cursor gives smooth motion
-/// at 20 Hz snapshot rate without prediction.
+/// How many delivered poses one track retains (SLICE 6).
+///
+/// WHY A RING AND NOT TWO POSES. The render cursor deliberately sits `buffer_ticks` BEHIND the
+/// freshest delivered tick — that delay is what guarantees "there is ALWAYS a newer snapshot to
+/// interpolate toward" (see [`crate::tuning::ClientInterpTuning::interp_buffer_ms`]). Two poses span
+/// ONE tick, so the cursor was always OLDER than the oldest pose retained, [`lerp_at_game_time`] took
+/// its `target <= prev_time` branch every frame, and NOTHING was ever interpolated. The machinery was
+/// correct and completely inert.
+///
+/// THE DERIVATION (asserted by `depth_spans_every_supported_buffer`, never guessed). To bracket the
+/// cursor the retained span must EXCEED the buffer. With one pose per tick, `N` poses span `N-1`
+/// ticks, so the requirement is `N - 1 > interp_buffer_ms/1000 * tick_hz` for every configuration the
+/// server can impose. The client learns `tick_hz` from the wire (`ServerControlMsg::UniverseRate`), so
+/// the bound is taken over the SUPPORTED range, not the default: 150 ms at 50 Hz = 7.5 ticks is the
+/// worst case, and 12 poses span 11 ticks — comfortably clear with room for a dropped snapshot
+/// widening the gaps. 12 × 144 B = 1.7 KB per track; at a thousand entities that is 1.7 MB.
+pub const TRACK_POSES: usize = 12;
+
+/// A per-entity interpolation buffer keyed on the shared `universe_tick` timeline: a fixed ring of the
+/// last [`TRACK_POSES`] delivered poses, newest last. Sampling BETWEEN the two that bracket the render
+/// cursor gives smooth motion without prediction — past the newest the entity FREEZES (never coasts),
+/// before the oldest it clamps (the history ran out; the client does not invent).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EntityTrack {
-    prev: StampedPose,
-    current: StampedPose,
+    /// The ring. Only the first `len` slots starting at `head` are meaningful.
+    poses: [StampedPose; TRACK_POSES],
+    /// Index of the OLDEST retained pose.
+    head: usize,
+    /// How many slots are live (`1..=TRACK_POSES`; never 0 — a track is born with one pose).
+    len: usize,
     last_universe_tick: UniverseTick,
 }
 
@@ -81,10 +103,57 @@ impl EntityTrack {
     #[must_use]
     pub fn new(first: StampedPose) -> EntityTrack {
         EntityTrack {
-            prev: first,
-            current: first,
+            poses: [first; TRACK_POSES],
+            head: 0,
+            len: 1,
             last_universe_tick: first.universe_tick,
         }
+    }
+
+    /// Ring slot of the `i`-th retained pose, oldest-first (`i < self.len`). Monomorphic, branchless.
+    #[must_use]
+    fn slot(&self, i: usize) -> StampedPose {
+        self.poses[(self.head + i) % TRACK_POSES]
+    }
+
+    /// The newest retained pose (the leading edge).
+    #[must_use]
+    fn newest(&self) -> StampedPose {
+        self.slot(self.len - 1)
+    }
+
+    /// Append a strictly-newer pose, evicting the oldest once full.
+    fn push(&mut self, pose: StampedPose) {
+        if self.len < TRACK_POSES {
+            self.poses[(self.head + self.len) % TRACK_POSES] = pose;
+            self.len += 1;
+            return;
+        }
+        // Full: overwrite the oldest slot and advance the head — it becomes the newest.
+        self.poses[self.head] = pose;
+        self.head = (self.head + 1) % TRACK_POSES;
+    }
+
+    /// Replace the newest pose in place (a sibling chunk of the SAME tick — audit finding-25: this must
+    /// NOT collapse the window, so it never touches `head`/`len`).
+    fn replace_newest(&mut self, pose: StampedPose) {
+        let slot = (self.head + self.len - 1) % TRACK_POSES;
+        self.poses[slot] = pose;
+    }
+
+    /// Index of the newest retained pose at or before `cursor`, or `None` when the cursor precedes the
+    /// whole ring. Monomorphic linear scan from the newest end — the answer is at or near the tail
+    /// under normal play (the cursor sits a couple of ticks back), and `TRACK_POSES` is 12.
+    #[must_use]
+    fn bracket_start(&self, cursor: f64) -> Option<usize> {
+        let mut i = self.len;
+        while i > 0 {
+            i -= 1;
+            if tick_to_f64(self.slot(i).universe_tick) <= cursor {
+                return Some(i);
+            }
+        }
+        None
     }
 
     /// Fold in a delivered pose. A STRICTLY newer `universe_tick` shifts
@@ -93,20 +162,28 @@ impl EntityTrack {
     /// the interpolation span is preserved (audit finding-25). Stale poses never
     /// reach here — the §6.3 gate drops them upstream.
     pub fn observe(&mut self, pose: StampedPose) {
-        if pose.frame != self.current.frame {
-            // A FRAME CHANGE (P8 board-ship / P10 warp / P2 cross-frame): `prev` and
-            // the new pose live in DIFFERENT frames, so blending their raw
-            // coordinates would yield a garbage intermediate. Collapse the window to
-            // the new-frame pose — the next sample FREEZES there rather than
-            // interpolating across frames. (Re-expressing `prev` into the new frame
-            // via `transfer_frame` is the P8/P10 refinement; the seam is `world_pos`.)
+        if pose.frame.tier() != self.newest().frame.tier() {
+            // A TIER CHANGE (Fine <-> Coarse, i.e. in-system <-> galaxy at P10): the two poses count
+            // their integer cells in DIFFERENT UNITS, so the cell rebase in `sample` — which scales by
+            // ONE tier's `cell_edge_m` — cannot express both. Collapse to the new pose; the next sample
+            // FREEZES there rather than blending across incommensurable lattices.
+            //
+            // SLICE 6 S3 — this used to fire on any FRAME change, which is now WRONG and actively
+            // harmful. Since positions became ROOT-ABSOLUTE (A5), `StampedPose::compose` deliberately
+            // PRESERVES the native frame label while the VALUE becomes absolute (`pose.rs`), and
+            // `DeliveredView::world_pos` reads the label ONLY for `.tier()` (`view.rs`). Every
+            // in-system frame — `PlanetCentered`, `SystemSpace`, `ShipLocal`, `StationLocal`,
+            // `AreaLocal` — is `Tier::Fine`. So walking from a planet into open space RELABELS the pose
+            // without changing a single coordinate, and collapsing there discarded a perfectly
+            // blendable window. With the two-pose track that cost one tick; with the ring it would
+            // throw away the WHOLE buffer and stall for its full depth — planting a fresh hitch at
+            // exactly the moment that matters most (a crossing, boarding, warp).
             *self = EntityTrack::new(pose);
         } else if pose.universe_tick > self.last_universe_tick {
-            self.prev = self.current;
-            self.current = pose;
+            self.push(pose);
             self.last_universe_tick = pose.universe_tick;
         } else {
-            self.current = pose;
+            self.replace_newest(pose);
         }
     }
 
@@ -115,35 +192,47 @@ impl EntityTrack {
     /// past the freshest tick the entity FREEZES at `current` (never vel-projected).
     #[must_use]
     pub fn sample(&self, cursor: f64) -> RenderPose {
-        let prev_time = tick_to_f64(self.prev.universe_tick);
-        let current_time = tick_to_f64(self.current.universe_tick);
+        // SLICE 6: pick the two retained poses that BRACKET the cursor. Before the whole ring (history
+        // ran out, or a just-collapsed window) both ends are the oldest — clamp, never invent. At or
+        // past the newest both ends are the newest — FREEZE, never coast. In between, `prev` is the
+        // newest pose at-or-before the cursor and `current` the one after it, and the blend below runs
+        // for real. `lerp_at_game_time` is UNCHANGED; it simply now receives a window that contains the
+        // cursor instead of one that is always ahead of it.
+        let start = self.bracket_start(cursor);
+        let (prev, current) = match start {
+            None => (self.slot(0), self.slot(0)),
+            Some(i) if i + 1 < self.len => (self.slot(i), self.slot(i + 1)),
+            Some(i) => (self.slot(i), self.slot(i)),
+        };
+        let prev_time = tick_to_f64(prev.universe_tick);
+        let current_time = tick_to_f64(current.universe_tick);
         // Rebase-before-lerp (S1): re-express `prev`'s offset in `current`'s CELL before blending, so the
         // offset lerp is continuous ACROSS a cell boundary — `prev_in_cell = prev.offset + (prev.cell −
         // cell)·edge` (raw, NOT re-normalized, so the blend stays continuous). Through P3 both cells are
         // ZERO ⇒ this is exactly `prev.offset()` and the result rides `cell == ZERO` — byte-identical to
         // the pre-S1 offset-only lerp. The result cell is `current`'s; `world_pos` (S3) subtracts the pinned
         // origin over the full cell+offset. (`observe` already collapses the window on a FRAME change.)
-        let cell = self.current.pos.cell();
-        let edge = self.current.frame.tier().cell_edge_m();
-        let prev_offset = self.prev.pos.offset() + (self.prev.pos.cell() - cell).as_dvec3() * edge;
+        let cell = current.pos.cell();
+        let edge = current.frame.tier().cell_edge_m();
+        let prev_offset = prev.pos.offset() + (prev.pos.cell() - cell).as_dvec3() * edge;
         let pos = lerp_at_game_time(
             prev_offset,
             prev_time,
-            self.current.pos.offset(),
+            current.pos.offset(),
             current_time,
             cursor,
             DVec3::lerp,
         );
         let orient = lerp_at_game_time(
-            self.prev.orient,
+            prev.orient,
             prev_time,
-            self.current.orient,
+            current.orient,
             current_time,
             cursor,
             DQuat::slerp,
         );
         RenderPose {
-            frame: self.current.frame,
+            frame: current.frame,
             cell,
             pos,
             orient,
@@ -152,15 +241,15 @@ impl EntityTrack {
 
     /// The freshest delivered tick (the window's leading edge).
     #[must_use]
-    pub fn newest_tick(self) -> UniverseTick {
-        self.current.universe_tick
+    pub fn newest_tick(&self) -> UniverseTick {
+        self.newest().universe_tick
     }
 
     /// The frame the entity is currently expressed in (the leading edge) — the basis for
     /// the player-location stat. Frame does not interpolate, so no cursor is needed.
     #[must_use]
-    pub fn current_frame(self) -> FrameRef {
-        self.current.frame
+    pub fn current_frame(&self) -> FrameRef {
+        self.newest().frame
     }
 
     /// The freshest delivered pose as a [`RenderPose`] — the LATEST server-shipped position with NO
@@ -168,12 +257,13 @@ impl EntityTrack {
     /// (the realm-box overlay, FA-2c): a slow moving realm box shows its latest streamed placement per
     /// step; render-side cursor interpolation is an FA-5+ smoothness refinement (D-45).
     #[must_use]
-    pub fn current_render_pose(self) -> RenderPose {
+    pub fn current_render_pose(&self) -> RenderPose {
+        let n = self.newest();
         RenderPose {
-            frame: self.current.frame,
-            cell: self.current.pos.cell(),
-            pos: self.current.pos.offset(),
-            orient: self.current.orient,
+            frame: n.frame,
+            cell: n.pos.cell(),
+            pos: n.pos.offset(),
+            orient: n.orient,
         }
     }
 }
@@ -192,6 +282,128 @@ mod tests {
             DVec3::new(x, 0.0, 0.0),
             UniverseTick(tick),
         )
+    }
+
+    // ---- SLICE 6 (THE SHAKE): the buffer and the history contradict each other ----
+
+    /// GREEN (slice 6 S2 — this was the RED characterization test; the assertion is now INVERTED).
+    /// Same live timing: consecutive delivery, cursor `buffer_ticks` behind the freshest tick. With a
+    /// ring deep enough to span the buffer the cursor now falls BETWEEN two retained poses and the
+    /// blend runs for real. Before S2 this returned the oldest pose unblended, every frame, forever.
+    #[test]
+    fn slice6_the_cursor_now_lands_inside_the_window_and_the_blend_actually_runs() {
+        let buffer = crate::tuning::ClientInterpTuning::DEFAULT.buffer_ticks();
+        // Ten consecutive ticks at 1 m/tick, freshest = 100.
+        let mut track = EntityTrack::new(pose_at(91, 91.0));
+        for t in 92..=100 {
+            track.observe(pose_at(t, t as f64));
+        }
+        let cursor = 100.0 - buffer; // 97.6
+        let drawn = track.sample(cursor).pos;
+        assert_eq!(cursor, 97.6);
+        // STRICTLY between the poses at 97 and 98 — a real blend, not a clamp to either endpoint.
+        assert!(drawn.x > 97.0, "blended past the older endpoint: {drawn}");
+        assert!(drawn.x < 98.0, "blended short of the newer endpoint: {drawn}");
+        // Uniform motion => the blend is exactly the cursor.
+        assert!((drawn.x - 97.6).abs() < 1e-9, "expected 97.6, got {drawn}");
+    }
+
+    /// SLICE 6 S2 — the DERIVATION behind [`TRACK_POSES`], asserted rather than assumed. `N` poses span
+    /// `N-1` ticks at one pose per tick; that span must EXCEED the buffer for the cursor to be
+    /// bracketed. Checked against the default AND the worst configuration the server can impose over
+    /// the wire (150 ms at 50 Hz). If someone raises the buffer or the tick rate past this, THIS fails
+    /// — which is the point.
+    #[test]
+    fn slice6_depth_spans_every_supported_buffer() {
+        let span = (TRACK_POSES - 1) as f64;
+        let default = crate::tuning::ClientInterpTuning::DEFAULT.buffer_ticks();
+        assert!(span > default, "{span} ticks must exceed the {default}-tick default buffer");
+        let worst = crate::tuning::ClientInterpTuning {
+            interp_buffer_ms: 150.0,
+            tick_hz: 50.0,
+        };
+        assert_eq!(worst.buffer_ticks(), 7.5);
+        assert!(span > 7.5, "{span} ticks must exceed the 7.5-tick worst case");
+    }
+
+    /// SLICE 6 S2 — past the newest retained pose the entity FREEZES (the no-prediction mandate: it
+    /// must never coast on velocity).
+    #[test]
+    fn slice6_a_cursor_past_the_newest_pose_freezes_and_never_coasts() {
+        let mut track = EntityTrack::new(pose_at(10, 10.0));
+        track.observe(pose_at(11, 11.0));
+        assert_eq!(track.sample(11.0).pos, DVec3::new(11.0, 0.0, 0.0));
+        assert_eq!(track.sample(50.0).pos, DVec3::new(11.0, 0.0, 0.0));
+    }
+
+    /// SLICE 6 S2 — before the whole ring the sample CLAMPS to the oldest retained pose. The history
+    /// ran out; the client holds rather than inventing a position it was never told.
+    #[test]
+    fn slice6_a_cursor_before_the_whole_ring_clamps_to_the_oldest() {
+        let mut track = EntityTrack::new(pose_at(10, 10.0));
+        track.observe(pose_at(11, 11.0));
+        assert_eq!(track.sample(1.0).pos, DVec3::new(10.0, 0.0, 0.0));
+    }
+
+    /// SLICE 6 S2 — the ring WRAPS: after more than `TRACK_POSES` observations the oldest are evicted
+    /// and the newest survive, with the bracket still correct across the wrap point.
+    #[test]
+    fn slice6_the_ring_wraps_and_keeps_the_newest_poses() {
+        let mut track = EntityTrack::new(pose_at(0, 0.0));
+        for t in 1..=(TRACK_POSES as u64 + 5) {
+            track.observe(pose_at(t, t as f64));
+        }
+        let newest = TRACK_POSES as u64 + 5;
+        assert_eq!(track.newest_tick(), UniverseTick(newest));
+        // The oldest surviving pose is `TRACK_POSES - 1` ticks back; anything older clamps to it.
+        let oldest = newest - (TRACK_POSES as u64 - 1);
+        assert_eq!(track.sample(0.0).pos, DVec3::new(oldest as f64, 0.0, 0.0));
+        // A blend ACROSS the wrap point still interpolates correctly.
+        let mid = oldest as f64 + 0.5;
+        assert!((track.sample(mid).pos.x - mid).abs() < 1e-9);
+    }
+
+    /// SLICE 6 S2 — a sibling chunk of the SAME tick replaces the newest pose IN PLACE and does NOT
+    /// collapse the window (audit finding-25). The older history must survive so the blend keeps its
+    /// span.
+    #[test]
+    fn slice6_an_equal_tick_sibling_chunk_replaces_in_place_without_losing_history() {
+        let mut track = EntityTrack::new(pose_at(10, 10.0));
+        track.observe(pose_at(11, 11.0));
+        track.observe(pose_at(11, 99.0)); // same tick, corrected value
+        assert_eq!(track.newest_tick(), UniverseTick(11));
+        assert_eq!(track.sample(11.0).pos, DVec3::new(99.0, 0.0, 0.0));
+        // The tick-10 pose is still there — the window did not collapse.
+        assert_eq!(track.sample(10.0).pos, DVec3::new(10.0, 0.0, 0.0));
+    }
+
+    /// SLICE 6 S2 — a single-sample track is degenerate: every cursor returns that one pose.
+    #[test]
+    fn slice6_a_single_sample_track_returns_that_pose_at_any_cursor() {
+        let track = EntityTrack::new(pose_at(10, 10.0));
+        assert_eq!(track.sample(0.0).pos, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(track.sample(10.0).pos, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(track.sample(99.0).pos, DVec3::new(10.0, 0.0, 0.0));
+    }
+
+    /// SLICE 6 S2 — WHY DEPTH IS THE FIX, not the ring mechanism. This is the original RED
+    /// characterization test, kept: with only TWO poses retained the window still spans one tick and
+    /// the cursor still falls behind it, so the sample still clamps to the oldest. The ring changes
+    /// nothing on its own — it is the DEPTH that lets the cursor be bracketed. If someone shrinks
+    /// `TRACK_POSES` back toward 2, `slice6_depth_spans_every_supported_buffer` fails and this test
+    /// explains why that matters.
+    #[test]
+    fn slice6_a_two_pose_history_still_clamps_which_is_why_depth_is_the_fix() {
+        let buffer = crate::tuning::ClientInterpTuning::DEFAULT.buffer_ticks();
+        let mut track = EntityTrack::new(pose_at(99, 0.0));
+        track.observe(pose_at(100, 10.0));
+        let cursor = 100.0 - buffer;
+        assert_eq!(cursor, 97.6);
+        assert_eq!(
+            track.sample(cursor).pos,
+            DVec3::new(0.0, 0.0, 0.0),
+            "two poses span ONE tick, so a {buffer}-tick cursor is still behind them both",
+        );
     }
 
     // ---- ported lerp_at_game_time contract (legacy temporal_interp tests) -------
@@ -300,21 +512,44 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_change_collapses_the_window_instead_of_blending_across_frames() {
-        let mut track = EntityTrack::new(pose_at(10, 0.0)); // SystemSpace
+    fn a_tier_change_collapses_the_window_instead_of_blending_across_lattices() {
+        let mut track = EntityTrack::new(pose_at(10, 0.0)); // SystemSpace — Fine
         track.observe(pose_at(12, 10.0)); // same frame → window [10, 12]
-        // A pose in a DIFFERENT frame arrives.
+        // A pose on the COARSE lattice arrives (galaxy scale, P10 warp).
         let mut other = pose_at(14, 99.0);
-        other.frame = FrameRef::PlanetCentered { planet_seed: 5 };
+        other.frame = FrameRef::GalaxySpace;
         track.observe(other);
-        // The window collapsed: sampling freezes at the new-frame pose (x=99), never
-        // a garbage blend between the SystemSpace x and the PlanetCentered x.
+        // Collapsed: sampling freezes at the new pose (x=99), never a blend between two lattices
+        // whose integer cells count in different units.
         assert_eq!(track.sample(13.0).pos, DVec3::new(99.0, 0.0, 0.0));
+        assert_eq!(track.sample(14.0).frame, FrameRef::GalaxySpace);
+        assert_eq!(track.newest_tick(), UniverseTick(14));
+    }
+
+    /// SLICE 6 S3 — a SAME-TIER relabel (walking off a planet into open space) KEEPS the window and
+    /// keeps blending. Since positions became root-absolute the label is carried for its tier alone,
+    /// so `PlanetCentered` -> `SystemSpace` changes the name and not one coordinate. Collapsing here
+    /// would stall for the ring's whole depth at exactly the moment the user cares about most.
+    #[test]
+    fn slice6_a_same_tier_relabel_keeps_the_window_and_stays_continuous() {
+        let mut track = EntityTrack::new(pose_at(10, 10.0)); // SystemSpace — Fine
+        track.observe(pose_at(11, 11.0));
+        // Same tier, different name — and the coordinates continue smoothly through it.
+        let mut relabelled = pose_at(12, 12.0);
+        relabelled.frame = FrameRef::PlanetCentered { planet_seed: 5 };
         assert_eq!(
-            track.sample(14.0).frame,
+            relabelled.frame.tier(),
+            FrameRef::SystemSpace { system_seed: 1 }.tier(),
+        );
+        track.observe(relabelled);
+        // The window SURVIVED: the tick-10 pose is still retained and still blends.
+        assert!((track.sample(10.5).pos.x - 10.5).abs() < 1e-9, "history kept");
+        assert!((track.sample(11.5).pos.x - 11.5).abs() < 1e-9, "blends across the relabel");
+        // The label still tracks the leading edge, so the player's location readout still flips.
+        assert_eq!(
+            track.current_frame(),
             FrameRef::PlanetCentered { planet_seed: 5 }
         );
-        assert_eq!(track.newest_tick(), UniverseTick(14));
     }
 
     #[test]
