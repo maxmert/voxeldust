@@ -239,6 +239,29 @@ pub enum Boundary {
 }
 
 impl Boundary {
+    /// The FURTHEST any point of this shape lies from its own centre (the circumscribed radius). Used to
+    /// ask "how far does this child reach?" — deliberately the outer bound, so the nesting fence is
+    /// conservative: a child is rejected if ANY part of it could poke outside its parent.
+    #[must_use]
+    pub fn circumscribed_extent(&self) -> f64 {
+        match self {
+            Boundary::Shell { r } => *r,
+            // A box's far corner. Orientation cannot change the distance to the corner, so Obb reuses it.
+            Boundary::Aabb { half } | Boundary::Obb { half, .. } => half.length(),
+        }
+    }
+
+    /// The NEAREST any surface point lies to this shape's centre (the inscribed radius). Used to ask "how
+    /// much interior can this parent guarantee?" — the inner bound, again so the fence is conservative:
+    /// the parent only promises the sphere it fully contains.
+    #[must_use]
+    pub fn inscribed_extent(&self) -> f64 {
+        match self {
+            Boundary::Shell { r } => *r,
+            Boundary::Aabb { half } | Boundary::Obb { half, .. } => half.min_element(),
+        }
+    }
+
     /// Classify the swept segment `p0 -> p1` (center-relative) against this boundary.
     /// The anti-tunneling primitive — evaluates the whole motion segment, never a point
     /// sample. Obb rotates the segment into box-local and reuses the AABB algorithm.
@@ -1012,7 +1035,7 @@ fn region_signed_distance_resolved(
 /// so each is asserted with `expect_err` equality (HR5(d)), never `matches!`. These are PURE TOPOLOGY
 /// checks; the geometric child-⊆-parent volume subset check needs cross-frame Shape×Shape math and is
 /// LEDGERED to P4/P5 (DEFERRED D-45).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
 pub enum RegionNestError {
     #[error("the forest has {found} ambient roots (parent: None); exactly one is required")]
     RootCount { found: usize },
@@ -1026,6 +1049,42 @@ pub enum RegionNestError {
     CycleOrOrphan { realm: RealmId },
     #[error("the forest has {found} regions; the membership bitset holds at most {max}")]
     TooManyRegions { found: usize, max: usize },
+    #[error(
+        "region {realm:?} is not geometrically inside its parent {parent:?}: it reaches {reach} m from \
+         the parent's centre but the parent's usable interior ends at {limit} m"
+    )]
+    ChildEscapesParent {
+        realm: RealmId,
+        parent: RealmId,
+        reach: f64,
+        limit: f64,
+    },
+}
+
+/// Does a CO-FRAMED child region fit inside its parent's usable interior?
+///
+/// WHY THIS IS NOW A BOOT FENCE AND NOT A LEDGERED NICETY. Containment hysteresis derives a subject's
+/// prior from ANCESTRY: being authoritatively in a realm makes you a member of that realm and of every
+/// realm containing it (task #177). That inference is only sound if "containing" is geometrically TRUE.
+/// A child poking outside its parent would hand a subject membership of a region it is demonstrably
+/// outside — the derived prior would then assert a falsehood every tick, and the containment fold could
+/// pick a parent the subject has physically left.
+///
+/// SCOPE, stated honestly: this compares a child's REACH from its parent's centre against the parent's
+/// inscribed extent, and it only applies when the two share a frame. A cross-frame pair (a station in a
+/// planet's rotating frame) needs Shape×Shape math under a transform and stays ledgered. So this is a
+/// NECESSARY condition, not a sufficient one — it catches the placement mistakes a forest generator
+/// actually makes (a child centred too near the rim, or simply too big) rather than proving subset-ness.
+fn child_fits_in_parent(child: &RealmRegion, parent: &RealmRegion) -> Option<(f64, f64)> {
+    if child.frame != parent.frame {
+        return None; // cross-frame: not comparable here (ledgered)
+    }
+    let offset = (child.center.offset() - parent.center.offset()).length();
+    let reach = offset + child.shape.circumscribed_extent();
+    // The parent's interior MINUS its own hysteresis inset: a child sitting in the band would let a
+    // subject be "inside the child" while the parent is still releasing it.
+    let limit = parent.shape.inscribed_extent() - parent.band.inset();
+    (reach > limit).then_some((reach, limit))
 }
 
 /// The BOOT FENCE for a realm-region forest (task #135, C-5): pure topological validation run at shard
@@ -1045,6 +1104,29 @@ pub fn guard_regions_nest(regions: &[RealmRegion], max: usize) -> Result<(), Reg
     guard_unique_realms(regions)?;
     guard_parents_resolve(regions)?;
     guard_chains_reach_root(regions)?;
+    guard_children_fit_parents(regions)?;
+    Ok(())
+}
+
+/// Every CO-FRAMED child must sit inside its parent's usable interior — see [`child_fits_in_parent`]
+/// for why the ancestry-derived containment prior makes this load-bearing.
+fn guard_children_fit_parents(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+    for child in regions {
+        let Some(parent_id) = child.parent else {
+            continue; // the ambient root has nothing to fit inside
+        };
+        let Some(parent) = regions.iter().find(|r| r.realm == parent_id) else {
+            continue; // dangling — already rejected by `guard_parents_resolve`
+        };
+        if let Some((reach, limit)) = child_fits_in_parent(child, parent) {
+            return Err(RegionNestError::ChildEscapesParent {
+                realm: child.realm,
+                parent: parent_id,
+                reach,
+                limit,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1278,6 +1360,15 @@ mod tests {
         assert_eq!(should_rehome(dest, owning, None, &t), Some(owning));
     }
 
+    /// A test region with an explicit radius — so a fixture claiming to be a VALID forest can be
+    /// geometrically nested (child strictly inside parent), not merely topologically well-formed.
+    fn test_region_r(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
+        RealmRegion {
+            shape: Boundary::Shell { r },
+            ..test_region(realm, parent)
+        }
+    }
+
     fn test_region(realm: RealmId, parent: Option<RealmId>) -> RealmRegion {
         RealmRegion {
             realm,
@@ -1355,15 +1446,60 @@ mod tests {
     /// A well-formed forest: exactly one root, unique realms, resolvable acyclic parents, within `max`.
     fn valid_forest() -> Vec<RealmRegion> {
         vec![
-            test_region(RealmId::System(0), None), // the ambient root
-            test_region(RealmId::System(1), Some(RealmId::System(0))),
-            test_region(RealmId::Planet(1), Some(RealmId::System(1))),
+            // Concentric and STRICTLY nested: each child fits well inside its parent's interior, so
+            // this forest is valid GEOMETRICALLY as well as topologically. (It used to be three
+            // identical unit shells at one point — fine for the topology fences, but it asserted a
+            // containment relationship that was not actually true.)
+            test_region_r(RealmId::System(0), None, 100.0), // the ambient root
+            test_region_r(RealmId::System(1), Some(RealmId::System(0)), 10.0),
+            test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 1.0),
         ]
     }
 
     #[test]
     fn guard_regions_nest_accepts_a_valid_forest() {
         assert_eq!(guard_regions_nest(&valid_forest(), 64), Ok(()));
+    }
+
+    #[test]
+    fn guard_regions_nest_rejects_a_child_that_escapes_its_parent() {
+        // THE SOUNDNESS FENCE for the ancestry-derived containment prior (task #177): membership of a
+        // parent is INFERRED from membership of a child, so a child poking outside its parent would make
+        // that inference assert a falsehood every tick. Topology alone cannot catch it — this forest is
+        // perfectly well-formed as a tree.
+        let escaping = vec![
+            test_region_r(RealmId::System(0), None, 100.0),
+            test_region_r(RealmId::System(1), Some(RealmId::System(0)), 10.0),
+            // A "child" of the r=10 region that is itself r=50 — it engulfs its own parent.
+            test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 50.0),
+        ];
+        let err =
+            guard_regions_nest(&escaping, 64).expect_err("an escaping child must be rejected");
+        assert_eq!(
+            err,
+            RegionNestError::ChildEscapesParent {
+                realm: RealmId::Planet(1),
+                parent: RealmId::System(1),
+                reach: 50.0,
+                limit: 10.0 - 1.0, // the parent's interior minus its own hysteresis inset
+            }
+        );
+    }
+
+    #[test]
+    fn guard_regions_nest_allows_an_offset_child_that_still_fits() {
+        // The ACCEPT twin, and the reason the check measures REACH (offset + extent) rather than size
+        // alone: a small child placed off-centre is fine as long as its far side stays inside.
+        let offset_child = RealmRegion {
+            center: LatticePos::local(DVec3::new(5.0, 0.0, 0.0)),
+            ..test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 3.0)
+        };
+        let forest = vec![
+            test_region_r(RealmId::System(0), None, 100.0),
+            test_region_r(RealmId::System(1), Some(RealmId::System(0)), 10.0),
+            offset_child, // reaches 5 + 3 = 8, inside the parent's 10 - 1 = 9
+        ];
+        assert_eq!(guard_regions_nest(&forest, 64), Ok(()));
     }
 
     #[test]
