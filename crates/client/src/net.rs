@@ -17,7 +17,8 @@
 
 use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_devproto::{
-    DevEntityRow, DevPhase, DevRealmBox, DevRenderOrigin, DevState, DevTransferView, InputAction,
+    DevEntityRow, DevPhase, DevRealmBox, DevRenderOrigin, DevState, DevTransferView,
+    DevWindowCensus, InputAction,
 };
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
@@ -569,6 +570,16 @@ impl ClientState {
             // The origin BOTH of the above are relative to, published so a test reduces its own
             // absolute geometry the same exact way instead of assuming this is zero.
             render_origin: dev_render_origin(self.view.render_origin()),
+            // SLICE 6 S5 — how each feed classified AT THE REPORTED CURSOR. Both censuses are taken at
+            // the SAME cursor, so they are directly comparable; a feed sitting on `clamped_old` is the
+            // condition that WAS the shake, and it now shows up as a number instead of as a wobble the
+            // user has to notice.
+            entity_windows: window_census(render_cursor.map(|c| self.view.window_census(c))),
+            realm_windows: window_census(render_cursor.map(|c| self.realm_view.window_census(c))),
+            feed_skew_ticks: feed_skew(
+                self.view.newest_tick().map(|t| t.0),
+                self.realm_view.newest_tick().map(|t| t.0),
+            ),
             entities,
             realm_boxes,
             snapshots_applied: self.snapshots_applied,
@@ -609,6 +620,28 @@ fn sanitize_f64(x: f64) -> f64 {
 
 fn sanitize_vec3(v: glam::DVec3) -> [f64; 3] {
     [sanitize_f64(v.x), sanitize_f64(v.y), sanitize_f64(v.z)]
+}
+
+/// Map an optional `(blended, clamped_old, clamped_new)` tally to its wire twin (SLICE 6 S5). Before
+/// the clock is anchored there is no cursor and hence no classification — an all-zero census.
+fn window_census(counts: Option<(u32, u32, u32)>) -> DevWindowCensus {
+    match counts {
+        Some((blended, clamped_old, clamped_new)) => DevWindowCensus {
+            blended,
+            clamped_old,
+            clamped_new,
+        },
+        None => DevWindowCensus::default(),
+    }
+}
+
+/// The two feeds' newest ticks differenced (entity minus realm), `None` until BOTH have delivered —
+/// the arrival skew. Post-slice-6 this is harmless (both feeds are read at one cursor regardless), but
+/// a growing value still means one feed's authoring path is falling behind the other's.
+fn feed_skew(entity: Option<u64>, realm: Option<u64>) -> Option<i64> {
+    let e = i64::try_from(entity?).ok()?;
+    let r = i64::try_from(realm?).ok()?;
+    Some(e - r)
 }
 
 /// Publish the render origin as its two exact halves. The integer cell needs no sanitizing (it IS

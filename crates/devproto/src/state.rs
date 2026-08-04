@@ -76,6 +76,20 @@ pub struct DevRenderOrigin {
     pub offset: [f64; 3],
 }
 
+/// SLICE 6 S5 — how one feed's tracks classified at the render cursor. The shake was invisible for a
+/// long time because nothing reported that the interpolation machinery, though correct, never ran: a
+/// feed permanently on `clamped_old` means the cursor is falling behind the retained history, which IS
+/// that condition. A healthy live feed reads mostly `blended`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevWindowCensus {
+    /// Tracks genuinely interpolating (the cursor sits between two delivered poses).
+    pub blended: u32,
+    /// Tracks whose cursor precedes their whole history — clamped to the oldest pose.
+    pub clamped_old: u32,
+    /// Tracks at or past their newest pose — FROZEN (required; the client never coasts).
+    pub clamped_new: u32,
+}
+
 /// The (P2) transfer view — empty-but-present so P2 transfer diagnosis is purely
 /// additive (a new variant), never a reshape of this type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +143,15 @@ pub struct DevState {
     /// The server-told render origin every reported position is relative to (see
     /// [`DevRenderOrigin`]). Identity (all zero) until the first pin lands.
     pub render_origin: DevRenderOrigin,
+    /// SLICE 6 S5 — how the ENTITY feed's tracks classified at the reported cursor.
+    pub entity_windows: DevWindowCensus,
+    /// SLICE 6 S5 — how the REALM feed's placements classified at the same cursor.
+    pub realm_windows: DevWindowCensus,
+    /// SLICE 6 S5 — the two feeds' newest ticks, differenced (entity minus realm). `None` until both
+    /// have delivered. This is the arrival skew whose interaction with un-cursored drawing WAS the
+    /// shake; after the fix it should be small and, more importantly, harmless — both feeds are read
+    /// at one cursor regardless.
+    pub feed_skew_ticks: Option<i64>,
     /// The DRAWN realm boxes (VU) — each realm the client is currently rendering, with
     /// its composited center. Proves the streamed render-scene is present (a `Planet`
     /// box appears once its `RealmSceneDelta` lands) and LIVE (its center moves as the
@@ -185,6 +208,9 @@ pub(crate) mod tests {
                 cell: [7, -3, 11],
                 offset: [0.5, -0.25, 2.0],
             },
+            entity_windows: Default::default(),
+            realm_windows: Default::default(),
+            feed_skew_ticks: None,
             entities: vec![DevEntityRow {
                 entity: "ent-7".to_owned(),
                 pos: [1.0, 2.0, 3.0],

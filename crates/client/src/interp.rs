@@ -82,6 +82,39 @@ pub struct RenderPose {
 /// widening the gaps. 12 × 144 B = 1.7 KB per track; at a thousand entities that is 1.7 MB.
 pub const TRACK_POSES: usize = 12;
 
+/// Which branch [`EntityTrack::sample`] takes at a cursor — the SLICE 6 S5 diagnosis signal.
+///
+/// This exists because the shake was invisible for so long: the interpolation machinery was correct
+/// and completely inert, and nothing reported that. A feed sitting permanently on `ClampedOld` means
+/// the cursor is falling behind the retained history — exactly the condition that WAS the shake.
+/// `ClampedNew` means the feed has stalled and the entity is frozen (required, never coasting).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleWindow {
+    /// The cursor sits BETWEEN two retained poses — interpolation is genuinely running.
+    Blended,
+    /// The cursor precedes the whole ring; the sample clamps to the oldest retained pose.
+    ClampedOld,
+    /// The cursor is at or past the newest retained pose; the entity is FROZEN there.
+    ClampedNew,
+}
+
+/// Tally an iterator of [`SampleWindow`]s into `(blended, clamped_old, clamped_new)` — the ONE place
+/// the three-way count lives, shared by both feeds so their numbers are directly comparable.
+#[must_use]
+pub fn census(windows: impl Iterator<Item = SampleWindow>) -> (u32, u32, u32) {
+    let mut blended = 0;
+    let mut old = 0;
+    let mut new = 0;
+    for w in windows {
+        match w {
+            SampleWindow::Blended => blended += 1,
+            SampleWindow::ClampedOld => old += 1,
+            SampleWindow::ClampedNew => new += 1,
+        }
+    }
+    (blended, old, new)
+}
+
 /// A per-entity interpolation buffer keyed on the shared `universe_tick` timeline: a fixed ring of the
 /// last [`TRACK_POSES`] delivered poses, newest last. Sampling BETWEEN the two that bracket the render
 /// cursor gives smooth motion without prediction — past the newest the entity FREEZES (never coasts),
@@ -239,6 +272,17 @@ impl EntityTrack {
         }
     }
 
+    /// Which branch [`EntityTrack::sample`] takes at `cursor` — read-only diagnosis (S5), derived from
+    /// the SAME bracket the sample uses so the two can never disagree.
+    #[must_use]
+    pub fn window_at(&self, cursor: f64) -> SampleWindow {
+        match self.bracket_start(cursor) {
+            None => SampleWindow::ClampedOld,
+            Some(i) if i + 1 < self.len => SampleWindow::Blended,
+            Some(_) => SampleWindow::ClampedNew,
+        }
+    }
+
     /// The freshest delivered tick (the window's leading edge).
     #[must_use]
     pub fn newest_tick(&self) -> UniverseTick {
@@ -303,7 +347,10 @@ mod tests {
         assert_eq!(cursor, 97.6);
         // STRICTLY between the poses at 97 and 98 — a real blend, not a clamp to either endpoint.
         assert!(drawn.x > 97.0, "blended past the older endpoint: {drawn}");
-        assert!(drawn.x < 98.0, "blended short of the newer endpoint: {drawn}");
+        assert!(
+            drawn.x < 98.0,
+            "blended short of the newer endpoint: {drawn}"
+        );
         // Uniform motion => the blend is exactly the cursor.
         assert!((drawn.x - 97.6).abs() < 1e-9, "expected 97.6, got {drawn}");
     }
@@ -317,13 +364,19 @@ mod tests {
     fn slice6_depth_spans_every_supported_buffer() {
         let span = (TRACK_POSES - 1) as f64;
         let default = crate::tuning::ClientInterpTuning::DEFAULT.buffer_ticks();
-        assert!(span > default, "{span} ticks must exceed the {default}-tick default buffer");
+        assert!(
+            span > default,
+            "{span} ticks must exceed the {default}-tick default buffer"
+        );
         let worst = crate::tuning::ClientInterpTuning {
             interp_buffer_ms: 150.0,
             tick_hz: 50.0,
         };
         assert_eq!(worst.buffer_ticks(), 7.5);
-        assert!(span > 7.5, "{span} ticks must exceed the 7.5-tick worst case");
+        assert!(
+            span > 7.5,
+            "{span} ticks must exceed the 7.5-tick worst case"
+        );
     }
 
     /// SLICE 6 S2 — past the newest retained pose the entity FREEZES (the no-prediction mandate: it
@@ -404,6 +457,42 @@ mod tests {
             DVec3::new(0.0, 0.0, 0.0),
             "two poses span ONE tick, so a {buffer}-tick cursor is still behind them both",
         );
+    }
+
+    /// SLICE 6 S5 — the window classification MATCHES what `sample` actually did. A diagnosis signal
+    /// that can disagree with the thing it reports on is worse than none, so both are derived from the
+    /// same bracket and this pins that they agree on all three branches.
+    #[test]
+    fn slice6_the_reported_window_matches_what_sample_actually_did() {
+        let mut track = EntityTrack::new(pose_at(10, 10.0));
+        for t in 11..=14 {
+            track.observe(pose_at(t, t as f64));
+        }
+        // Blended: strictly inside, and the drawn value is strictly between two poses.
+        assert_eq!(track.window_at(12.5), SampleWindow::Blended);
+        let drawn = track.sample(12.5).pos.x;
+        assert!(drawn > 12.0 && drawn < 13.0);
+        // Clamped old: before the ring, drawn == the oldest.
+        assert_eq!(track.window_at(1.0), SampleWindow::ClampedOld);
+        assert_eq!(track.sample(1.0).pos.x, 10.0);
+        // Clamped new: at/past the newest, drawn == the newest (frozen).
+        assert_eq!(track.window_at(14.0), SampleWindow::ClampedNew);
+        assert_eq!(track.window_at(99.0), SampleWindow::ClampedNew);
+        assert_eq!(track.sample(99.0).pos.x, 14.0);
+    }
+
+    /// SLICE 6 S5 — the census tallies the three classes.
+    #[test]
+    fn slice6_census_tallies_each_class() {
+        let windows = [
+            SampleWindow::Blended,
+            SampleWindow::ClampedOld,
+            SampleWindow::Blended,
+            SampleWindow::ClampedNew,
+            SampleWindow::Blended,
+        ];
+        assert_eq!(census(windows.into_iter()), (3, 1, 1));
+        assert_eq!(census([].into_iter()), (0, 0, 0));
     }
 
     // ---- ported lerp_at_game_time contract (legacy temporal_interp tests) -------
@@ -543,8 +632,14 @@ mod tests {
         );
         track.observe(relabelled);
         // The window SURVIVED: the tick-10 pose is still retained and still blends.
-        assert!((track.sample(10.5).pos.x - 10.5).abs() < 1e-9, "history kept");
-        assert!((track.sample(11.5).pos.x - 11.5).abs() < 1e-9, "blends across the relabel");
+        assert!(
+            (track.sample(10.5).pos.x - 10.5).abs() < 1e-9,
+            "history kept"
+        );
+        assert!(
+            (track.sample(11.5).pos.x - 11.5).abs() < 1e-9,
+            "blends across the relabel"
+        );
         // The label still tracks the leading edge, so the player's location readout still flips.
         assert_eq!(
             track.current_frame(),

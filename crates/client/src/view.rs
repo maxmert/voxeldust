@@ -37,7 +37,7 @@ use vd_core::EntityId;
 use vd_core::pose::{FrameRef, LatticePos};
 use vd_wire::channels::{SnapshotDatagram, SnapshotVerdict, SubId, classify_snapshot};
 
-use crate::interp::{EntityTrack, RenderPose};
+use crate::interp::{EntityTrack, RenderPose, census};
 
 /// The inert per-row "authoritative sub" a pure-renderer client reports for its diagnosis
 /// surface (`DevEntityRow.authoritative_sub`): a node-agnostic client no longer has a
@@ -206,6 +206,14 @@ impl DeliveredView {
     #[must_use]
     pub fn stale_frames_dropped(&self) -> u64 {
         self.stale_frames_dropped
+    }
+
+    /// SLICE 6 S5 — how the tracks classify at `cursor`: `(blended, clamped_old, clamped_new)`.
+    /// A feed stuck on `clamped_old` is the condition that WAS the shake (the cursor falling behind
+    /// the retained history, so nothing ever blends); `clamped_new` counts stalled/frozen tracks.
+    #[must_use]
+    pub fn window_census(&self, cursor: f64) -> (u32, u32, u32) {
+        census(self.tracks.values().map(|t| t.window_at(cursor)))
     }
 
     /// FAULT count of delivered poses that were non-finite and had to be sanitized.

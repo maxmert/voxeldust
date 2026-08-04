@@ -114,6 +114,13 @@ impl RealmView {
             .map(|track| track.sample(cursor))
     }
 
+    /// SLICE 6 S5 — how the streamed realm placements classify at `cursor`; see
+    /// [`crate::view::DeliveredView::window_census`].
+    #[must_use]
+    pub fn window_census(&self, cursor: f64) -> (u32, u32, u32) {
+        crate::interp::census(self.placements.values().map(|t| t.window_at(cursor)))
+    }
+
     /// Whether the feed has streamed ANY realm placement yet — the byte-identity gate for the scene
     /// overlay (empty ⇒ the published scene is the boot scene by pointer-bump, walk-scale unchanged).
     #[must_use]
@@ -206,7 +213,8 @@ mod tests {
         assert_eq!(v.realm_pose(RealmId::Planet(99), 10.0), None);
         // realm_latest (the cursor-free overlay reader) mirrors: Some for a streamed realm, None else.
         assert_eq!(
-            v.realm_pose(RealmId::Planet(1), f64::INFINITY).map(|p| p.pos),
+            v.realm_pose(RealmId::Planet(1), f64::INFINITY)
+                .map(|p| p.pos),
             Some(DVec3::new(1.0e9, 0.0, 0.0)),
         );
         assert_eq!(v.realm_pose(RealmId::Planet(99), f64::INFINITY), None);
@@ -252,7 +260,8 @@ mod tests {
             RealmVerdict::Apply,
         );
         assert_eq!(
-            v.realm_pose(RealmId::Planet(8), f64::INFINITY).map(|p| p.pos),
+            v.realm_pose(RealmId::Planet(8), f64::INFINITY)
+                .map(|p| p.pos),
             Some(DVec3::new(0.0, 3.0, 0.0)),
             "B moved to its frame-31 pose — not frozen",
         );

@@ -10056,7 +10056,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// SLICE 6 S1 — a SIMULATED dot's emitted pose is stamped at the CURRENT tick, even on a tick where
     /// no input was applied. This is THE server half of the shake fix: the absolute VALUE is refolded
     /// every tick, so the label must say NOW. Before this, the label only advanced inside `integrate`
@@ -10207,8 +10206,7 @@ mod tests {
                 DVec3::ZERO,
             ),
         );
-        let (entities, unresolved) =
-            compose_emitted_entities(
+        let (entities, unresolved) = compose_emitted_entities(
             &dots,
             &SourceGhostMirror::default(),
             &FrameAbs(map),

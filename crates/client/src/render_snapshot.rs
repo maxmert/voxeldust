@@ -466,7 +466,10 @@ mod slice6_tests {
                 (centre - cursor).abs() < 1e-9,
                 "cursor {cursor} should draw the realm at {cursor}, got {centre}",
             );
-            assert!(centre > prev, "the centre must advance with the cursor, not step");
+            assert!(
+                centre > prev,
+                "the centre must advance with the cursor, not step"
+            );
             prev = centre;
         }
     }
