@@ -4861,6 +4861,7 @@ fn compose_emitted_entities(
     dots: &Dots,
     mirror: &SourceGhostMirror,
     frame_abs: &FrameAbs,
+    now: UniverseTick,
 ) -> (Vec<EntitySnap>, u64) {
     let mut entities: Vec<EntitySnap> = Vec::new();
     let mut unresolved = 0u64;
@@ -4868,12 +4869,43 @@ fn compose_emitted_entities(
         match compose_snap(frame_abs, d.pose) {
             Some(pose) => entities.push(EntitySnap {
                 entity: d.entity,
-                pose,
+                pose: stamp_emitted(pose, frame_abs, d.authority.simulates(), now),
             }),
             None => unresolved += 1,
         }
     }
     (entities, unresolved)
+}
+
+/// SLICE 6 S1 — THE HONEST EMIT STAMP. A simulated dot's absolute is REFOLDED every tick (`frame_abs` is
+/// rebuilt at the current clock tick and `compose_snap` composes against it), so the VALUE shipped is
+/// correct as of NOW. Its `universe_tick` LABEL, however, is only ever advanced by `integrate`, which
+/// runs solely on an applied input — and [`StampedPose::compose`] deliberately preserves the local
+/// label. So a shard ticking at 50 Hz against a client sending input at 20 Hz shipped a FRESH value
+/// carrying a STALE label, wrong by a wobbling input gap and badly wrong whenever an input datagram was
+/// lost.
+///
+/// The client keys its interpolation window on that label, so the two feeds sat on DIFFERENT time axes:
+/// sampling both at one render cursor did NOT sample them at one instant, and the residual is the
+/// SHAKE. Re-stamping here is the whole fix on this side — the value is already right.
+///
+/// A GHOST keeps its carried tick: its value was authored elsewhere and its label is the only honest
+/// record of WHEN. Empty `frame_abs` (pre-A5 / walk-scale rigs) also passes through untouched, so those
+/// rigs stay byte-identical — with no fold in force the pose ships raw and its local label is correct.
+#[must_use]
+fn stamp_emitted(
+    pose: StampedPose,
+    frame_abs: &FrameAbs,
+    simulates: bool,
+    now: UniverseTick,
+) -> StampedPose {
+    if frame_abs.0.is_empty() || !simulates {
+        return pose;
+    }
+    StampedPose {
+        universe_tick: now,
+        ..pose
+    }
 }
 
 /// Emit one fence-stamped frame per tick to every gateway with an attached session.
@@ -4914,7 +4946,8 @@ fn emit_frames(
     // the wire — the client renders the value verbatim. A pose whose frame has no folded absolute is OMITTED
     // and counted (the client holds its last sample); it is NEVER shipped raw, which the client would misread
     // as an absolute. Empty `FrameAbs` (pre-A5) composes every pose to itself ⇒ byte-identical.
-    let (entities, unresolved) = compose_emitted_entities(&dots, &mirror, &frame_abs);
+    let (entities, unresolved) =
+        compose_emitted_entities(&dots, &mirror, &frame_abs, clock.universe_tick);
     stats.poses_unresolved += unresolved;
     // Partition BY CONTENT so no datagram exceeds the MTU budget (audit GW-1): a
     // full-world snapshot ships as several independent self-contained frames. Per
@@ -10024,6 +10057,119 @@ mod tests {
     }
 
     #[test]
+    /// SLICE 6 S1 — a SIMULATED dot's emitted pose is stamped at the CURRENT tick, even on a tick where
+    /// no input was applied. This is THE server half of the shake fix: the absolute VALUE is refolded
+    /// every tick, so the label must say NOW. Before this, the label only advanced inside `integrate`
+    /// (input-driven), so a 50 Hz shard serving a 20 Hz input stream shipped a fresh value under a stale
+    /// label — and the client, which keys its interpolation window on that label, put the two feeds on
+    /// different time axes.
+    #[test]
+    fn slice6_a_simulated_dot_emits_at_the_current_tick_not_its_last_input_tick() {
+        let frame = frame_of(OWN_REALM);
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 1);
+        let mut dots = Dots::default();
+        dots.0.insert(
+            SessionId(1),
+            slice6_dot(entity, frame, Authority::Owned { fence: Fence(1) }),
+        );
+        let (entities, unresolved) = compose_emitted_entities(
+            &dots,
+            &SourceGhostMirror::default(),
+            &FrameAbs(slice6_frame_abs(frame)),
+            UniverseTick(500),
+        );
+        assert_eq!(unresolved, 0);
+        assert_eq!(entities.len(), 1);
+        // The dot's own pose still carries the LAST-INPUT tick 100; the emitted label says 500.
+        assert_eq!(dots.0[&SessionId(1)].pose.universe_tick, UniverseTick(100));
+        assert_eq!(entities[0].pose.universe_tick, UniverseTick(500));
+        // The VALUE is untouched by the re-stamp — only the label moves.
+        assert_eq!(entities[0].pose.pos.offset(), DVec3::new(101.0, 2.0, 3.0));
+    }
+
+    /// SLICE 6 S1 — a GHOST keeps its carried tick. Its value was authored by another shard and its
+    /// label is the only honest record of WHEN that authoring happened; re-stamping it here would claim
+    /// a freshness this shard cannot vouch for.
+    #[test]
+    fn slice6_a_ghost_keeps_the_tick_it_carried_from_its_author() {
+        let frame = frame_of(OWN_REALM);
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 2);
+        let mut dots = Dots::default();
+        let ghost = Authority::Ghost {
+            source_fence: Fence(1),
+            since_tick: TickId(1),
+        };
+        let mut dot = slice6_dot(entity, frame, ghost);
+        dot.granted = true;
+        dots.0.insert(SessionId(2), dot);
+        let (entities, _) = compose_emitted_entities(
+            &dots,
+            &SourceGhostMirror::default(),
+            &FrameAbs(slice6_frame_abs(frame)),
+            UniverseTick(500),
+        );
+        assert_eq!(entities.len(), 1, "a granted ghost still emits");
+        assert_eq!(entities[0].pose.universe_tick, UniverseTick(100));
+    }
+
+    /// SLICE 6 S1 — with NO fold in force (empty `FrameAbs`, the pre-A5 / walk-scale rigs) every pose
+    /// ships raw and its local label is already correct, so the re-stamp is a no-op and those rigs stay
+    /// byte-identical.
+    #[test]
+    fn slice6_an_unfolded_walk_scale_rig_is_byte_identical() {
+        let frame = frame_of(OWN_REALM);
+        let entity = EntityId::pack(EntityKind::Player, 10, 3, 3);
+        let mut dots = Dots::default();
+        dots.0.insert(
+            SessionId(3),
+            slice6_dot(entity, frame, Authority::Owned { fence: Fence(1) }),
+        );
+        let (entities, _) = compose_emitted_entities(
+            &dots,
+            &SourceGhostMirror::default(),
+            &FrameAbs(BTreeMap::new()),
+            UniverseTick(500),
+        );
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].pose.universe_tick, UniverseTick(100));
+        assert_eq!(entities[0].pose.pos.offset(), DVec3::new(1.0, 2.0, 3.0));
+    }
+
+    /// One emitting dot at local (1,2,3) stamped at tick 100 — the shared slice-6 fixture.
+    fn slice6_dot(entity: EntityId, frame: FrameRef, authority: Authority) -> Dot {
+        Dot {
+            entity,
+            account: AccountId(1),
+            session_fence: Fence(1),
+            gateway: GATEWAY,
+            granted: true,
+            input_active: false,
+            adopting: false,
+            authority,
+            departing: false,
+            entity_fence: Fence(1),
+            pose: StampedPose::at_rest(frame, DVec3::new(1.0, 2.0, 3.0), UniverseTick(100)),
+            yaw: 0.0,
+            pitch: 0.0,
+            last_applied_seq: None,
+            prev_offset: DVec3::ZERO,
+        }
+    }
+
+    /// A one-frame fold placing `frame`'s origin at absolute (100,0,0).
+    fn slice6_frame_abs(frame: FrameRef) -> BTreeMap<FrameRef, (LatticePos, DVec3)> {
+        let mut map: BTreeMap<FrameRef, (LatticePos, DVec3)> = BTreeMap::new();
+        map.insert(
+            frame,
+            (
+                LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::new(100.0, 0.0, 0.0)),
+                DVec3::ZERO,
+            ),
+        );
+        map
+    }
+
+    #[test]
     fn a4b_compose_emitted_entities_composes_the_resolvable_and_counts_the_unresolvable() {
         // A4b degrade: `compose_emitted_entities` composes each EMITTING dot's pose and returns how many were
         // OMITTED (frame unresolved). One dot in a resolvable frame renders (composed to absolute); one in an
@@ -10062,7 +10208,12 @@ mod tests {
             ),
         );
         let (entities, unresolved) =
-            compose_emitted_entities(&dots, &SourceGhostMirror::default(), &FrameAbs(map));
+            compose_emitted_entities(
+            &dots,
+            &SourceGhostMirror::default(),
+            &FrameAbs(map),
+            UniverseTick(0),
+        );
 
         assert_eq!(
             unresolved, 1,
