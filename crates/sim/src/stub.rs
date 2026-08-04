@@ -1189,6 +1189,10 @@ pub struct StubStats {
     /// `Transfer` envelopes whose payload kind 1d.1 does not consume (`InitialSpawn` /
     /// `TransientBatch`) — a counted no-op, never a panic. 0 in a 1d.1 crossing run.
     pub crossings_unhandled: u64,
+    /// FAULT (observability): subject evaluations whose pose frame named a realm this shard does not host,
+    /// so the DERIVED containment prior resolved to nothing and the stored-only (pre-fix) prior was used.
+    /// Nonzero means a rebind upstream safe-degraded and those subjects can still flap at a boundary.
+    pub containment_prior_unhosted: u64,
     /// `Transfer` envelopes carrying a `universe_epoch` that does NOT match this shard's current
     /// clock epoch — REFUSED at ingress (never applied, never buffered, never acked). The
     /// transfer_protocol §3.3 fail-safe: "a leg whose epoch_id mismatches the current epoch is
@@ -3444,6 +3448,8 @@ fn evaluate_realm_boundaries(
         clock: &clock,
         regions: &regions.regions,
         depths: &regions.depths,
+        ancestor_mask: &regions.ancestor_mask,
+        ix_of: &regions.ix_of,
         root_realm: regions.root_realm,
         realm_fence,
         frames: &frames,
@@ -3513,6 +3519,22 @@ struct CrossingCtx<'a> {
     /// each region's (possibly moving) frame through this before the signed distance. Byte-equivalent
     /// to [`IdentityFrames`] at walk/static scale (every region frame at the identity placement).
     frames: &'a LocalFrames,
+    /// The boot-computed SELF ∪ ANCESTORS bitmask per region index, and the realm→index map to address it
+    /// (task #177). Together they give the DERIVED hysteresis prior: a subject is always a member of the
+    /// realm it is authoritatively in and of every ancestor of it, so an arriving shard never starts from a
+    /// blank memory that contradicts the one the source held.
+    ancestor_mask: &'a [u64],
+    ix_of: &'a BTreeMap<RealmId, usize>,
+}
+
+/// The DERIVED hysteresis prior for a subject authoritatively in `owning` — SELF ∪ ANCESTORS as a region
+/// bitmask, or zero for a realm this shard does not host. Monomorphic so its branches are covered once.
+fn owned_prior_mask(ix_of: &BTreeMap<RealmId, usize>, mask: &[u64], owning: RealmId) -> u64 {
+    ix_of
+        .get(&owning)
+        .and_then(|ix| mask.get(*ix))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// Retain only the entries whose key is a LIVE subject (the DRY eviction primitive, Slice 3e; RLM Step 2
@@ -3585,6 +3607,37 @@ fn evaluate_one_subject(
     // FULL SCAN: advance each region's hysteretic membership bit and collect the members' depth keys.
     // Per-region + per-entity (the bitset) → each region's bit advances INDEPENDENTLY (no winner slot to
     // corrupt). Zips regions with their boot-computed depth keys (no per-tick parent walk, no index panic).
+    // The subject's OWNING realm from its POSE FRAME, hoisted ABOVE the scan because the derived prior
+    // below needs it. (`owning_realm` is unit-tested on both arms; on a single-realm shard the pose frame
+    // IS `config.frame`.)
+    let owning = owning_realm(pose.frame, ctx.config.realm);
+    // THE DERIVED HYSTERESIS PRIOR (task #177). A subject is ALWAYS a hysteretic member of the realm it is
+    // authoritatively in and of every ancestor of it — regardless of what this shard happens to remember.
+    //
+    // This is what stops the boundary re-firing. The stored bitset is per-shard and starts BLANK on an
+    // arriving shard, so after a hand-off the two sides held OPPOSITE priors for the same subject at the
+    // same place: the source thought "inside, stay inside", the destination thought "outside, must acquire".
+    // Anything resting in the band between the acquire and release edges therefore oscillated forever. OR-ing
+    // the derived prior in makes the answer a total function of COMMITTED state, so it is identical on both
+    // sides of a hand-off and survives a crash, a replay, a re-drive and a lease change — and, unlike the
+    // RAM-only bitset, a shard restart no longer blanks every resident at once.
+    //
+    // It is an OR, never a replacement: the stored bit still carries genuine hysteresis for regions BELOW the
+    // owning realm (a child you have entered but not yet re-homed into), which ancestry cannot express.
+    let owned_mask = owned_prior_mask(ctx.ix_of, ctx.ancestor_mask, owning);
+    if owned_mask == 0 {
+        // The realm named by the pose frame is not one this shard hosts, so there is no ancestry to derive
+        // and we fall back to today's stored-only prior. That is a SAFE degrade, not a normal path — it means
+        // a rebind upstream handed us a pose in a frame we cannot place — so it is counted and said out loud
+        // rather than silently reverting to the behaviour this slice exists to remove.
+        stats.containment_prior_unhosted += 1;
+        tracing::warn!(
+            realm = ?owning,
+            entity = entity.0,
+            "containment prior: the pose frame names a realm this shard does not host — \
+             falling back to the stored-only prior, which is the pre-fix behaviour for this subject"
+        );
+    }
     let bits = membership.entry(entity).or_default();
     let mut members: Vec<DepthKey> = Vec::new();
     for (ix, (region, &depth_key)) in ctx.regions.iter().zip(ctx.depths.iter()).enumerate() {
@@ -3594,7 +3647,10 @@ fn evaluate_one_subject(
         // gives moving direct children a live orbital placement per tick. A frame the shard cannot name
         // (`Err`) SAFE-DEGRADES to non-member (`f64::MAX`) — never a spurious container.
         let sd = region_signed_distance(pose, region, ctx.frames).unwrap_or(f64::MAX);
-        let now = region.band.member(bits.get(ix), sd);
+        // The prior is STORED-OR-DERIVED (see `owned_mask` above): the remembered bit, OR the fact that this
+        // region is the subject's owning realm or an ancestor of it.
+        let was_member = bits.get(ix) | (owned_mask & (1u64 << ix) != 0);
+        let now = region.band.member(was_member, sd);
         bits.set(ix, now);
         if now {
             members.push(depth_key);
@@ -3610,10 +3666,7 @@ fn evaluate_one_subject(
         .iter()
         .find(|r| r.realm == container_realm)
         .and_then(|r| r.parent);
-    // The subject's OWNING realm derived from its POSE FRAME (the relabel map is deleted): `pose.frame`'s
-    // realm, else `config.realm` for a frame with no nameable realm (`owning_realm`, unit-tested both arms).
-    // On a single-realm shard the pose frame IS `config.frame` (== `config.realm`'s frame) verbatim.
-    let owning = owning_realm(pose.frame, ctx.config.realm);
+    // (`owning` was computed above the region scan — the derived hysteresis prior needs it.)
     // The post-commit cooldown from the per-entity CrossingState.
     let state = progress.entry(entity).or_default();
     let since_commit = state
@@ -11405,6 +11458,71 @@ mod tests {
                 .all(|r| r.to_realm != OTHER_REALM),
             "an un-nameable pose frame safe-degrades to non-member ⇒ NEVER re-homes into the inner child",
         );
+    }
+
+    #[test]
+    fn the_crossing_decision_does_not_depend_on_whether_this_shard_remembers_the_subject() {
+        // THE INVARIANT THAT FIXES THE BOUNDARY RE-FIRE (task #177), stated as a property rather than a
+        // scenario. The stored membership bitset is per-shard and RAM-only: the source shard has one, an
+        // arriving shard (or any shard after a restart) has a BLANK one. Before the derived prior those two
+        // states produced DIFFERENT answers for the same subject at the same place — which is exactly why a
+        // subject resting between the acquire and release edges ping-ponged between two shards forever.
+        //
+        // So: run the identical setup twice, differing ONLY in whether the shard already remembers the
+        // subject as a member of its owning realm, and require the emitted crossings to be IDENTICAL.
+        //
+        // This is the RED control for the fix: with the stored-only prior the blank run acquires the realm
+        // from scratch and the seeded run does not, so the two disagree and this fails. It cannot pass
+        // vacuously either — `plant_dock_regions` gives a real nested forest and the dot sits where the
+        // hysteresis band is genuinely ambiguous, so the prior is load-bearing for the outcome.
+        let run = |seed_membership: bool| -> Vec<RealmId> {
+            let mut rig = Rig::new(); // owns System 7 == OWN_REALM
+            rig.grant_realm();
+            plant_dock_regions(&mut rig);
+            let entity = EntityId::pack(EntityKind::Player, 10, 1, 78);
+            // THE POSITION THAT MATTERS: just inside the inner child's shell (r=1000) but NOT far enough
+            // in to ACQUIRE it from scratch — the band's ambiguous zone, where the prior alone decides
+            // membership. This is exactly where a player who stops on a boundary ends up.
+            //
+            // The subject is OWNED BY the child (its pose frame names Planet 42), i.e. it has just been
+            // handed off inward. A correct shard therefore keeps it there and emits NO crossing. With the
+            // stored-only prior, a shard with no memory of it fails to acquire the child, folds its
+            // container out to the parent, and immediately re-homes it BACK OUT — the flap.
+            insert_owned_dot_framed(
+                &mut rig,
+                TRIG_SESSION,
+                entity,
+                FrameRef::PlanetCentered { planet_seed: 42 },
+                DVec3::new(990.0, 0.0, 0.0),
+            );
+            if seed_membership {
+                // The SOURCE shard's state: it already remembers this subject inside the child.
+                let mut bits = RegionMembership::default();
+                bits.set(0, true); // root
+                bits.set(1, true); // own
+                bits.set(2, true); // child — the bit an arriving shard does NOT have
+                rig.world
+                    .resource_mut::<ContainmentProgress>()
+                    .0
+                    .insert(entity, bits);
+            }
+            let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+            for t in 2..8 {
+                rig.set_local_tick(t);
+                all.extend(rig.tick(vec![]));
+            }
+            crossing_requests(&all).iter().map(|r| r.to_realm).collect()
+        };
+
+        let remembered = run(true);
+        let blank = run(false);
+        assert_eq!(
+            blank, remembered,
+            "a shard that has never seen this subject must decide EXACTLY as one that remembers it — \
+             otherwise the two sides of a hand-off disagree and the subject flaps at the boundary"
+        );
+        // And the correct shared answer is "no crossing at all": the dot is already in its owning realm.
+        assert_eq!(remembered, Vec::<RealmId>::new());
     }
 
     #[test]
