@@ -22,6 +22,7 @@ use vd_wire::channels::SubId;
 use crate::interp::RenderPose;
 use crate::net::ClientPhase;
 use crate::realm_scene::RealmScene;
+use crate::realm_view::RealmView;
 use crate::render_clock::RenderClock;
 use crate::view::DeliveredView;
 
@@ -39,6 +40,11 @@ pub struct RenderSnapshot {
     /// clone of the snapshot is a pointer bump, never a deep copy of the box map. Default EMPTY
     /// (no boxes until a scene is loaded), so every existing pose-only path is unchanged.
     scene: Arc<RealmScene>,
+    /// The streamed LIVE realm placements (SLICE 6 S4). Carried RAW — resolved to positions only at
+    /// [`RenderSnapshot::scene_at`], on the DISPLAY cursor. Previously the core thread baked an
+    /// overlaid scene once per 20 Hz step from whatever had most recently arrived, with no cursor, so
+    /// the ground was on a different time axis from the player standing on it.
+    realm_view: RealmView,
 }
 
 impl RenderSnapshot {
@@ -58,12 +64,60 @@ impl RenderSnapshot {
         phase: ClientPhase,
         scene: Arc<RealmScene>,
     ) -> RenderSnapshot {
+        RenderSnapshot::with_realms(view, clock, phase, scene, RealmView::default())
+    }
+
+    /// A snapshot carrying the boot scene AND the streamed live realm placements (SLICE 6 S4). Both
+    /// ride the render seam unresolved; [`RenderSnapshot::scene_at`] evaluates them at the display
+    /// cursor, so the ground and the entities standing on it are read at ONE instant.
+    #[must_use]
+    pub fn with_realms(
+        view: DeliveredView,
+        clock: RenderClock,
+        phase: ClientPhase,
+        scene: Arc<RealmScene>,
+        realm_view: RealmView,
+    ) -> RenderSnapshot {
         RenderSnapshot {
             view,
             clock,
             phase,
             scene,
+            realm_view,
         }
+    }
+
+    /// The scene to DRAW at `cursor`: the boot geometry with every streamed realm's placement
+    /// interpolated at that cursor — the SAME cursor [`RenderSnapshot::rendered`] samples entities at.
+    ///
+    /// This is the one-moment seam. An empty feed (walk/static scale, no moving realm) returns the boot
+    /// scene by clone-of-pointer-content, so those rigs are unchanged. The map rebuild is a handful of
+    /// boxes per drawn frame — deliberately preferred over caching, because a cache would have to be
+    /// invalidated per cursor and the whole point is that the cursor moves every frame.
+    #[must_use]
+    pub fn scene_at(&self, cursor: f64) -> RealmScene {
+        if self.realm_view.is_empty() {
+            return (*self.scene).clone();
+        }
+        self.scene.overlaid_at(&self.realm_view, cursor)
+    }
+
+    /// The scene to DRAW at wall-time `now_s` — [`RenderSnapshot::scene_at`] on this snapshot's own
+    /// render cursor. Before the clock is anchored (no snapshot has landed yet) there is no cursor and
+    /// nothing has been streamed, so this is the boot scene. THE ONE place the unanchored case is
+    /// decided, so no renderer site has to.
+    #[must_use]
+    pub fn scene_now(&self, now_s: f64) -> RealmScene {
+        match self.cursor(now_s) {
+            Some(cursor) => self.scene_at(cursor),
+            None => (*self.scene).clone(),
+        }
+    }
+
+    /// The freshest tick the REALM feed has delivered (diagnosis; see the dev state).
+    #[must_use]
+    pub fn realm_view(&self) -> &RealmView {
+        &self.realm_view
     }
 
     /// The boot-loaded realm-box scene to draw (empty until a `boxes.json` is loaded). The renderer
@@ -330,5 +384,107 @@ mod tests {
         // proving display-rate interpolation off one published frame.
         let later = snap.rendered(100.13);
         assert_eq!(later[0].2.pos, DVec3::new(10.0, 0.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod slice6_tests {
+    use super::*;
+    use vd_core::UniverseTick;
+    use vd_core::geometry::{CrossEffect, RealmBoundary};
+    use vd_core::pose::{RealmId, StampedPose};
+    use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
+
+    use crate::realm_scene::RealmScene;
+    use crate::tuning::ClientInterpTuning;
+
+    const REALM: RealmId = RealmId::Planet(1);
+
+    fn boot_scene() -> RealmScene {
+        RealmScene::from_boundaries(&[RealmBoundary::shell(
+            REALM,
+            LatticePos::local(DVec3::ZERO),
+            1.0,
+            1.15,
+            1.30,
+            0.0,
+            0.05,
+            0.5,
+            1.0,
+            None,
+            REALM,
+            CrossEffect::Authority,
+        )])
+        .expect("scene")
+    }
+
+    /// SLICE 6 S4 — THE SHAKE ACCEPTANCE. A realm moving at a constant 1 m/tick is streamed on
+    /// CONSECUTIVE ticks. Sampled at a continuous sweep of render cursors, the drawn centre must track
+    /// the cursor CONTINUOUSLY — no staircase.
+    ///
+    /// Before this slice the scene was baked from the newest ARRIVAL with no cursor at all, so the
+    /// drawn centre held flat between deliveries and jumped when one landed, while the player standing
+    /// on it moved smoothly at the cursor. That difference — a step against a slide — is the shake.
+    #[test]
+    fn slice6_the_drawn_realm_centre_tracks_the_cursor_continuously() {
+        let mut realms = RealmView::default();
+        for t in 10..=30u64 {
+            realms.on_realm_snapshot(RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id: t,
+                source_tick: vd_core::TickId(t),
+                universe_tick: UniverseTick(t),
+                realms: vec![RealmSnap {
+                    realm: REALM,
+                    pose: StampedPose::at_rest(
+                        FrameRef::SystemSpace { system_seed: 1 },
+                        DVec3::new(t as f64, 0.0, 0.0),
+                        UniverseTick(t),
+                    ),
+                }],
+            });
+        }
+        let snap = RenderSnapshot::with_realms(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Active,
+            Arc::new(boot_scene()),
+            realms,
+        );
+        // Sweep the cursor across a whole tick in tenths and require the centre to follow it exactly.
+        let mut prev = f64::NEG_INFINITY;
+        for step in 0..=10 {
+            let cursor = 20.0 + f64::from(step) / 10.0;
+            let centre = snap
+                .scene_at(cursor)
+                .get(REALM)
+                .expect("box")
+                .center
+                .offset()
+                .x;
+            assert!(
+                (centre - cursor).abs() < 1e-9,
+                "cursor {cursor} should draw the realm at {cursor}, got {centre}",
+            );
+            assert!(centre > prev, "the centre must advance with the cursor, not step");
+            prev = centre;
+        }
+    }
+
+    /// SLICE 6 S4 — a scene with NO streamed placements is the boot scene, so static/walk-scale rigs
+    /// are unchanged by the whole slice.
+    #[test]
+    fn slice6_an_unstreamed_scene_is_the_boot_scene() {
+        let boot = boot_scene();
+        let snap = RenderSnapshot::with_realms(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Active,
+            Arc::new(boot.clone()),
+            RealmView::default(),
+        );
+        assert_eq!(snap.scene_at(123.0), boot);
+        // And before the clock is anchored there is no cursor at all — still the boot scene.
+        assert_eq!(snap.scene_now(9.0), boot);
     }
 }

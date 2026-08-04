@@ -682,9 +682,15 @@ fn sync_realm_boxes(
     mut commands: Commands,
     mut box_tf: Query<&mut Transform, With<RealmBoxMarker>>,
 ) {
+    // SLICE 6 S4 — ONE MOMENT. Resolve the realm boxes at the SAME display cursor `sync_world` samples
+    // the entities at, so the ground and the player standing on it are drawn from one instant. This
+    // used to read a scene the core thread had baked from the newest arrival, on a different schedule
+    // entirely — which is what made their relative geometry jump.
+    let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
+    let scene = snap.scene_now(now_s);
     let mut seen: BTreeSet<RealmId> = BTreeSet::new();
-    for (realm, rbox) in snap.scene().iter() {
+    for (realm, rbox) in scene.iter() {
         seen.insert(realm);
         // The box's OWN position, reduced ONCE against the server-told render origin through the ONE
         // chokepoint. Slice 5: this used to FABRICATE a zero pose purely to extract `-pin` from
@@ -733,12 +739,16 @@ fn sync_realm_boxes(
 /// empty scene leaves the follow camera untouched (the existing behaviour). Tier-A math
 /// (`fit_camera_to_scene`); this only applies the returned pose to the Bevy transform.
 fn frame_scene_camera(net: Res<Net>, mut cam_tf: Query<&mut Transform, With<FollowCam>>) {
+    let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
+    // Framed on the SAME resolved-at-cursor scene the boxes are drawn from (slice 6 S4) — otherwise the
+    // fitted frustum would silently track a different instant than the pixels inside it.
+    let scene = snap.scene_now(now_s);
     // Framed in the SAME render space the boxes are drawn in — reduced against the server-told
     // render origin (slice 5). The pixel proof reconstructs this camera with the origin it reads
     // back from the client, so the two agree by construction instead of by both assuming zero.
     let Some(cam) = vd_client_harness::camera::fit_camera_to_scene(
-        snap.scene(),
+        &scene,
         snap.origin(),
         CAPTURE_W as usize,
         CAPTURE_H as usize,

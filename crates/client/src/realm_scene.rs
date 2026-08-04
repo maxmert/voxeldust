@@ -355,12 +355,12 @@ impl RealmScene {
     /// Shape / parent / depth / color are boot config and are kept. A boot box the feed never names stays
     /// boot-static. Callers skip this when the view is empty (walk scale → the boot scene, byte-identical).
     #[must_use]
-    pub fn overlaid(&self, view: &RealmView) -> RealmScene {
+    pub fn overlaid_at(&self, view: &RealmView, cursor: f64) -> RealmScene {
         let boxes = self
             .0
             .iter()
             .map(|(&realm, boot)| {
-                let overlaid = match view.realm_latest(realm) {
+                let overlaid = match view.realm_pose(realm, cursor) {
                     Some(live) => RealmBox {
                         frame: live.frame,
                         // The streamed pose carries its coarse cell SEPARATELY from its fine offset;
@@ -824,7 +824,7 @@ mod tests {
                 },
             }],
         });
-        let scene = boot.overlaid(&view);
+        let scene = boot.overlaid_at(&view, f64::INFINITY);
         // Planet 1 moved — BOTH its frame and its centre are the streamed (parent-frame) values, and
         // its frame CHANGED from the boot PlanetCentered (the must-fix: a moving realm renders in the
         // frame it was authored in, not its own boot frame). The centre carries the streamed COARSE
@@ -844,7 +844,7 @@ mod tests {
             boot.get(RealmId::Station(2))
         );
         // An EMPTY view overlays to the boot scene byte-identical (the walk-scale case).
-        assert_eq!(boot.overlaid(&RealmView::default()), boot);
+        assert_eq!(boot.overlaid_at(&RealmView::default(), f64::INFINITY), boot);
     }
 
     #[test]

@@ -98,24 +98,20 @@ impl RealmView {
         }
     }
 
-    /// The pose to render for `realm` at `cursor` (universe-tick f64 units) — `None` for a realm the feed
-    /// never streamed (its box stays boot-static). The scene overlay reads this to move a box live.
+    /// The streamed pose for `realm` AT `cursor` (universe-tick f64 units) — interpolated on the same
+    /// render clock, and by the same primitive, that every entity uses. `None` for a realm the feed
+    /// never streamed (its box stays boot-static).
+    ///
+    /// SLICE 6 S4 — this existed and was CORRECT, but nothing called it: the scene overlay read
+    /// `realm_latest` instead, taking whatever had most recently arrived with no cursor at all. That
+    /// put the ground on a different time axis from the player standing on it, so their RELATIVE
+    /// geometry moved every time either feed delivered. Reading BOTH at one cursor makes the drawn
+    /// difference between them the same difference the server computed — which is the shake fix.
     #[must_use]
     pub fn realm_pose(&self, realm: RealmId, cursor: f64) -> Option<RenderPose> {
         self.placements
             .get(&realm)
             .map(|track| track.sample(cursor))
-    }
-
-    /// The LATEST streamed pose for `realm` (no interpolation) — `None` for a realm the feed never
-    /// streamed. The scene overlay reads this to move a boot box to its live server-shipped placement;
-    /// the latest (not a cursor-interpolated blend) keeps the overlay cursor-free (FA-2c; render-side
-    /// interpolation is an FA-5+ smoothness refinement).
-    #[must_use]
-    pub fn realm_latest(&self, realm: RealmId) -> Option<RenderPose> {
-        self.placements
-            .get(&realm)
-            .map(|track| track.current_render_pose())
     }
 
     /// Whether the feed has streamed ANY realm placement yet — the byte-identity gate for the scene
@@ -210,10 +206,10 @@ mod tests {
         assert_eq!(v.realm_pose(RealmId::Planet(99), 10.0), None);
         // realm_latest (the cursor-free overlay reader) mirrors: Some for a streamed realm, None else.
         assert_eq!(
-            v.realm_latest(RealmId::Planet(1)).map(|p| p.pos),
+            v.realm_pose(RealmId::Planet(1), f64::INFINITY).map(|p| p.pos),
             Some(DVec3::new(1.0e9, 0.0, 0.0)),
         );
-        assert_eq!(v.realm_latest(RealmId::Planet(99)), None);
+        assert_eq!(v.realm_pose(RealmId::Planet(99), f64::INFINITY), None);
         assert!(!v.is_empty());
     }
 
@@ -256,7 +252,7 @@ mod tests {
             RealmVerdict::Apply,
         );
         assert_eq!(
-            v.realm_latest(RealmId::Planet(8)).map(|p| p.pos),
+            v.realm_pose(RealmId::Planet(8), f64::INFINITY).map(|p| p.pos),
             Some(DVec3::new(0.0, 3.0, 0.0)),
             "B moved to its frame-31 pose — not frozen",
         );

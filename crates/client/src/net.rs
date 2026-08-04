@@ -481,17 +481,19 @@ impl ClientState {
     /// `BTreeMap`s of `Copy` tracks.
     #[must_use]
     pub fn render_snapshot(&self) -> RenderSnapshot {
-        // FA-2c-3.3: OVERLAY the streamed live realm placements onto the boot scene. When the realm feed
-        // is EMPTY (walk/static scale — the server ships no moving realm) publish the boot `Arc` by
-        // pointer-bump, so the published scene is byte-identical to the pre-FA-2c wire; otherwise build a
-        // fresh immutable overlaid scene (the boot `Arc` is never mutated — no `make_mut` on the shared
-        // boot config; the render thread reads an immutable snapshot wait-free, as it already does).
-        let scene = if self.realm_view.is_empty() {
-            Arc::clone(&self.scene)
-        } else {
-            Arc::new(self.scene.overlaid(&self.realm_view))
-        };
-        RenderSnapshot::with_scene(self.view.clone(), self.render_clock, self.phase, scene)
+        // SLICE 6 S4 — publish the boot scene and the live placements UNRESOLVED. This used to BAKE an
+        // overlaid scene here, once per 20 Hz core step, from whatever had most recently arrived — no
+        // render cursor anywhere in it. The renderer then drew those baked centres alongside entities it
+        // sampled at its display cursor, so the ground and the player standing on it came from two
+        // different instants. `RenderSnapshot::scene_at` now resolves both at ONE cursor, per drawn
+        // frame, and this per-step allocation disappears.
+        RenderSnapshot::with_realms(
+            self.view.clone(),
+            self.render_clock,
+            self.phase,
+            Arc::clone(&self.scene),
+            self.realm_view.clone(),
+        )
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
@@ -526,13 +528,12 @@ impl ClientState {
                     .collect()
             })
             .unwrap_or_default();
-        // The DRAWN realm boxes (VU diagnosis) — the SAME overlaid scene `render_snapshot`
-        // publishes to the renderer (boot/streamed boxes with each streamed realm's live
-        // pose overlaid). A `Planet` row proves its `RealmSceneDelta` landed; a center that
-        // moves across ticks proves the realm-pose feed is overlaying (the frozen-planet gate).
-        let realm_boxes = self
-            .render_snapshot()
-            .scene()
+        // The DRAWN realm boxes (VU diagnosis) — resolved at the SAME cursor this state reports and the
+        // renderer draws at (slice 6 S4), so the diagnosis surface and the pixels agree by construction.
+        // A `Planet` row proves its `RealmSceneDelta` landed; a center that moves across ticks proves
+        // the realm-pose feed is being applied (the frozen-planet gate).
+        let drawn_scene = self.render_snapshot().scene_now(now_s);
+        let realm_boxes = drawn_scene
             .iter()
             .map(|(realm, b)| DevRealmBox {
                 realm: format!("{realm:?}"),
@@ -954,7 +955,7 @@ mod tests {
         assert_eq!(
             c.state()
                 .realm_view
-                .realm_latest(RealmId::Planet(7))
+                .realm_pose(RealmId::Planet(7), f64::INFINITY)
                 .map(|p| p.pos),
             Some(DVec3::new(1.0e9, 0.0, 0.0)),
         );
@@ -990,7 +991,7 @@ mod tests {
         assert_eq!(
             c.state()
                 .realm_view
-                .realm_latest(RealmId::Planet(7))
+                .realm_pose(RealmId::Planet(7), f64::INFINITY)
                 .map(|p| p.pos.x),
             Some(1.0),
         );
