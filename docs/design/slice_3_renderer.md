@@ -42,7 +42,13 @@ loop, `runs/<UTC>__<scenario>/` manifests, `vdctl record`; the permanent
 **G-RENDER-SMOKE** gate.
 
 **Out** (later phases, must not creep in): voxel meshes (P4), physics/collision (P5),
-ships/nested frames (P8), LOD (never), client-side prediction (never).
+ships/nested frames (P8), detail levels (P4 — see below), client-side prediction (never).
+
+> **SUPERSEDED 2026-08-03 — "LOD (never)" is RETRACTED by owner ruling.** Detail levels are now
+> REQUIRED ("we will need LODs everywhere, but in the smartest way"). They remain out of *this* slice,
+> which still ships one representation only; the ladder lands with terrain at P4. Design:
+> `scripts/block_system_design_addendum_2.md`. The wire already anticipated this — `intershard.rs`
+> reserves the WHAT lane "at the LOD the observed realm controls" plus a `coarsen_level` ladder.
 
 **Definition of Done:** a human opens the client, sees their own dot (distinct color)
 and other dots moving on one stub shard, drives their dot with WASD+mouse, smooth at the

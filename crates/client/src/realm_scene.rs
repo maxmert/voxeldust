@@ -544,7 +544,12 @@ pub struct MeshPrim {
 }
 
 /// The coarse UV-sphere longitude/latitude resolution for the proxy (low-poly, deterministic —
-/// NO LOD). Named consts (no magic numbers).
+/// ONE fixed tessellation today). Named consts (no magic numbers).
+///
+/// NOTE (2026-08-03): this comment previously read "NO LOD". That standing ban is RETRACTED — detail
+/// levels are now required (`scripts/block_system_design_addendum_2.md`). Nothing here changes yet:
+/// the realm proxy stays a single fixed tessellation, and it becomes the COARSEST rung of the terrain
+/// detail ladder when that lands at P4, rather than an exception to a rule.
 pub const SPHERE_SECTORS: usize = 12;
 pub const SPHERE_STACKS: usize = 8;
 
