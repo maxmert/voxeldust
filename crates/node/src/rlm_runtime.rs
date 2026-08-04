@@ -268,9 +268,23 @@ impl RlmReconcilerRes {
                     .insert(node, now);
                 self.launches.fail_streak.remove(&path);
             }
-            Err(_) => {
+            Err(e) => {
                 self.spins_failed += 1;
-                *self.launches.fail_streak.entry(path).or_default() += 1;
+                let streak = self.launches.fail_streak.entry(path.clone()).or_default();
+                *streak += 1;
+                // LOUD, not silent. This arm used to be `Err(_)` — it bumped the counter and threw the
+                // reason away, so a demand spawn that failed left NO trace of WHY. `SpawnError`
+                // carries a full `LaunchFailed { reason }` (the launcher already names the child's log
+                // and the likely cause), and discarding it is what made the standing 1-in-8 fly-out
+                // spawn failure undiagnosable: the gate could say a spawn failed but nothing could say
+                // what happened. Nothing in this file is worth knowing silently.
+                tracing::warn!(
+                    realm = ?path,
+                    error = %e,
+                    fail_streak = *streak,
+                    spins_failed = self.spins_failed,
+                    "demand spawn FAILED — the reconciler backs off and retries",
+                );
             }
         }
     }
