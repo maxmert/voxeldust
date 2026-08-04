@@ -36,8 +36,9 @@ pub struct DevEntityRow {
 }
 
 /// One DRAWN realm box (VU diagnosis): its realm id (canonical `Debug`) and the
-/// composited center it would render at (its `RealmBox.center_offset` in its own
-/// frame — through P3 the world-origin frames make this the world position). This is
+/// composited center it would render at (its `RealmBox` centre range-reduced against
+/// the server-told render origin — the same RENDER space [`DevEntityRow::pos`] is in,
+/// so a test may compare the two directly). This is
 /// the render-plane twin of [`DevEntityRow`]: it exposes WHICH realms the client is
 /// drawing and WHERE, so a headless test can prove the streamed scene is present AND
 /// moving (a planet whose center changes across ticks is orbiting; a static container
@@ -55,6 +56,24 @@ pub struct DevRealmBox {
     /// separates a FROZEN box (tick stops advancing) from a live one, so a smoothness gate cannot be
     /// satisfied by a box that simply stopped updating.
     pub newest_tick: Option<u64>,
+}
+
+/// The server-told RENDER ORIGIN the client subtracts from every absolute position before drawing
+/// (A5 pin), as its two exact halves: the integer lattice `cell` and the metre `offset` within it.
+///
+/// WHY THIS IS ON THE DIAGNOSIS SURFACE (slice 5). Everything the client reports — an entity's
+/// [`DevEntityRow::pos`], a box's [`DevRealmBox::center`] — is expressed RELATIVE to this origin,
+/// while a test's own copy of the world geometry is absolute. Without the origin published, a test
+/// comparing the two is silently assuming it to be zero: true today, and false the moment real
+/// galactic coordinates switch on, at which point the comparison keeps passing or failing for
+/// reasons unrelated to what it claims to check. Publishing it lets a test do the same exact-integer
+/// reduction the renderer does, so the two sides are always in one space by construction.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevRenderOrigin {
+    /// The integer cell anchor (exact; the half the client used to drop).
+    pub cell: [i64; 3],
+    /// The metre offset within that cell. Always finite (sanitized).
+    pub offset: [f64; 3],
 }
 
 /// The (P2) transfer view — empty-but-present so P2 transfer diagnosis is purely
@@ -107,6 +126,9 @@ pub struct DevState {
     pub realm_feed_newest_tick: Option<u64>,
     /// The composited render rows — each entity once, exactly what pixels show.
     pub entities: Vec<DevEntityRow>,
+    /// The server-told render origin every reported position is relative to (see
+    /// [`DevRenderOrigin`]). Identity (all zero) until the first pin lands.
+    pub render_origin: DevRenderOrigin,
     /// The DRAWN realm boxes (VU) — each realm the client is currently rendering, with
     /// its composited center. Proves the streamed render-scene is present (a `Planet`
     /// box appears once its `RealmSceneDelta` lands) and LIVE (its center moves as the
@@ -157,6 +179,12 @@ pub(crate) mod tests {
             // transposed one of the two feed ticks cannot still pass.
             entity_feed_newest_tick: Some(102),
             realm_feed_newest_tick: Some(100),
+            // A NON-ZERO origin in both halves, so a round-trip that dropped the coarse cell (the
+            // exact half — the whole point of publishing it) cannot still pass.
+            render_origin: DevRenderOrigin {
+                cell: [7, -3, 11],
+                offset: [0.5, -0.25, 2.0],
+            },
             entities: vec![DevEntityRow {
                 entity: "ent-7".to_owned(),
                 pos: [1.0, 2.0, 3.0],

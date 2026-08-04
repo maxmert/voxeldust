@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use glam::DVec3;
 use vd_core::geometry::{Boundary, RealmBoundary, RealmRegion};
-use vd_core::pose::{FrameRef, RealmId};
+use vd_core::pose::{FrameRef, LatticePos, RealmId};
 use vd_core::worldgen::MAX_RENDERABLE_EXTENT_M;
 use vd_wire::channels::RealmShape;
 
@@ -51,21 +51,51 @@ pub enum BoxShape {
 pub struct RealmBox {
     /// The render-relevant shape (sphere or box).
     pub shape: BoxShape,
-    /// The realm's authoritative reference frame — the box's `center_offset` is expressed in THIS
+    /// The realm's authoritative reference frame — the box's `center` is expressed in THIS
     /// frame, so the renderer places the box by composing the frame ORIGIN through the ONE
     /// `DeliveredView::world_pos` chokepoint (identity for the world-origin frames through P3; a
     /// Station-hull-borne box composes through its hull at P8, WITHOUT changing this shape). Carried
     /// here so the render glue never reconstructs a `FrameRef` from a `RealmId` — the `Area` arm
     /// can't (it needs the parent planet seed) and it would be a per-KIND match in a feature path.
     pub frame: FrameRef,
-    /// The box center as a frame-local offset from the realm's frame origin.
-    pub center_offset: DVec3,
+    /// The box centre as the server shipped it — a FULL tiered position (coarse cell + fine offset),
+    /// NOT a bare metre vector.
+    ///
+    /// WHY THE TYPE CHANGED (slice 5). This used to be a `DVec3` built by calling `.offset()` on the
+    /// streamed position, i.e. the coarse half was DISCARDED at every constructor. Drawing then worked
+    /// only because the whole world currently sits at cell zero: the drawn point was
+    /// `(minus the full render origin) + (centre with its cell thrown away)`, which equals the correct
+    /// exact delta ONLY while the centre's cell is zero. The client must be able to CARRY the coarse
+    /// half before the server ever emits a non-zero one, or every box lands wrong by a whole cell.
+    ///
+    /// Reduce it for drawing through the ONE chokepoint ([`crate::view::DeliveredView::world_pos`]),
+    /// which subtracts the server-told render origin in exact integer-cell arithmetic. Never subtract
+    /// an origin by hand here — that is the class of bug this field's type now prevents.
+    pub center: LatticePos,
     /// The parent realm, when this box nests inside another (`None` at the top level).
     pub parent: Option<RealmId>,
     /// The nesting depth (0 = top level, +1 per parent hop) — the deterministic parent-walk result.
     pub depth: u8,
     /// The TRANSLUCENT render color (identity-derived hue; alpha ~0.25 so nested boxes show through).
     pub color_rgba: [f32; 4],
+}
+
+impl RealmBox {
+    /// This box's centre in RENDER space — reduced against the server-told render `origin` in exact
+    /// integer-cell arithmetic.
+    ///
+    /// THE ONE WAY A BOX BECOMES DRAWABLE (slice 5). Every consumer — the renderer, the capture
+    /// camera, the containment verdicts, the diagnosis surface — asks for this instead of subtracting
+    /// an origin itself. Before, four call sites each spelled their own arithmetic and two of them got
+    /// it subtly wrong (dropping the origin's coarse half, or mixing a reduced point against a raw
+    /// centre), which is invisible while the world sits at cell zero and wrong the moment it does not.
+    ///
+    /// Same primitive the entity path uses (`LatticePos::delta_m`), so a box and a player standing on
+    /// it are reduced identically — which is what makes them agree on screen.
+    #[must_use]
+    pub fn draw_center(&self, origin: LatticePos) -> DVec3 {
+        self.center.delta_m(origin, self.frame.tier())
+    }
 }
 
 /// The source-agnostic scene: one [`RealmBox`] per realm, keyed by [`RealmId`] for a
@@ -129,7 +159,7 @@ impl RealmScene {
                 RealmBox {
                     shape: shape_of(b.shape),
                     frame: frame_of_realm(b.realm, b.parent),
-                    center_offset: b.center.offset(),
+                    center: b.center,
                     parent: b.parent,
                     depth,
                     color_rgba: color_for_realm(b.realm),
@@ -221,7 +251,7 @@ impl RealmScene {
                 RealmBox {
                     shape: shape_of(r.shape),
                     frame: r.frame,
-                    center_offset: r.center.offset(),
+                    center: r.center,
                     parent: r.parent,
                     depth,
                     color_rgba: color_for_realm(r.realm),
@@ -260,7 +290,7 @@ impl RealmScene {
                 RealmBox {
                     shape: shape_of(s.shape),
                     frame: s.frame,
-                    center_offset: s.center.offset(),
+                    center: s.center,
                     parent: s.parent,
                     depth: 0, // recomputed below over the merged parent map
                     color_rgba: color_for_realm(s.realm),
@@ -317,7 +347,7 @@ impl RealmScene {
     }
 
     /// Overlay a [`RealmView`]'s streamed live placements onto this BOOT scene (D-45(a) FA-2c-3.3): each
-    /// boot box whose realm the feed has streamed gets its `frame` AND `center_offset` REPLACED by the
+    /// boot box whose realm the feed has streamed gets its `frame` AND `center` REPLACED by the
     /// latest server-shipped pose. BOTH move because the pose is authored in the shard's PARENT frame
     /// (`SystemSpace` for a planet), NOT the realm's own boot frame (`PlanetCentered`) — the boot frame is
     /// only correct for a STATIC realm; a MOVING realm must render in the frame it was authored in (this is
@@ -333,7 +363,10 @@ impl RealmScene {
                 let overlaid = match view.realm_latest(realm) {
                     Some(live) => RealmBox {
                         frame: live.frame,
-                        center_offset: live.pos,
+                        // The streamed pose carries its coarse cell SEPARATELY from its fine offset;
+                        // recombine both. Taking `live.pos` alone (as this did) silently dropped the
+                        // cell every time the feed moved a realm.
+                        center: LatticePos::at(live.cell, live.pos),
                         ..*boot
                     },
                     None => *boot,
@@ -396,7 +429,7 @@ fn shape_of(boundary: Boundary) -> BoxShape {
     }
 }
 
-/// The realm's authoritative [`FrameRef`] — the frame its box's `center_offset` is expressed in,
+/// The realm's authoritative [`FrameRef`] — the frame its box's `center` is expressed in,
 /// so the render glue composes the box through the ONE `world_pos` chokepoint. A monomorphic helper
 /// (the realm-KIND destructure lives HERE in Tier-A, never in the Tier-B render feature path). An
 /// `Area` frame needs the PARENT planet seed (a `RealmId::Area` alone can't carry it): the parent is
@@ -547,20 +580,27 @@ pub struct MeshPrim {
 /// ONE fixed tessellation today). Named consts (no magic numbers).
 ///
 /// NOTE (2026-08-03): this comment previously read "NO LOD". That standing ban is RETRACTED — detail
-/// levels are now required (`scripts/block_system_design_addendum_2.md`). Nothing here changes yet:
+/// levels are now required (`docs/investigation/block_system_design_addendum_2.md`). Nothing here changes yet:
 /// the realm proxy stays a single fixed tessellation, and it becomes the COARSEST rung of the terrain
 /// detail ladder when that lands at P4, rather than an exception to a rule.
 pub const SPHERE_SECTORS: usize = 12;
 pub const SPHERE_STACKS: usize = 8;
 
-/// Lower a [`RealmBox`] to its render primitives at `world_center` (the box's world-space origin,
-/// computed by the caller through the `world_pos` composition seam). TESSELLATES the shape into
-/// VERTICES here in Tier-A (adversary H4): a `Box` → a unit cuboid (12 triangles) scaled by its
-/// half-extents; a `Sphere` → a coarse UV sphere scaled by `r`. Exactly one prim per box today;
-/// the block-mesh successor emits more prims (or more vertices) through the same shape.
+/// Lower a [`RealmBox`] to its render primitives at `draw_center` — the box's centre ALREADY reduced
+/// against the server-told render origin by the caller, through the ONE `world_pos` chokepoint.
+///
+/// ONE TERM, NOT TWO (slice 5). This used to take the box's FRAME ORIGIN in world space and add
+/// `rbox.center_offset` to it — a composition performed here, on the client, mixing an
+/// origin-reduced point with a raw centre whose coarse half had been discarded. The caller now
+/// reduces the box's own full position once and passes the finished value; there is nothing left to
+/// compose. Anything that needs a drawable point asks `world_pos`, never arithmetic of its own.
+///
+/// TESSELLATES the shape into VERTICES here in Tier-A (adversary H4): a `Box` → a unit cuboid (12
+/// triangles) scaled by its half-extents; a `Sphere` → a coarse UV sphere scaled by `r`. Exactly one
+/// prim per box today; the block-mesh successor emits more prims through the same shape.
 #[must_use]
-pub fn to_render_prims(rbox: &RealmBox, world_center: DVec3) -> Vec<MeshPrim> {
-    let center = world_center + rbox.center_offset;
+pub fn to_render_prims(rbox: &RealmBox, draw_center: DVec3) -> Vec<MeshPrim> {
+    let center = draw_center;
     let translation = [center.x as f32, center.y as f32, center.z as f32];
     match rbox.shape {
         BoxShape::Box { half } => {
@@ -679,12 +719,12 @@ fn push_tri(verts: &mut Vec<Vertex>, a: [f32; 3], b: [f32; 3], c: [f32; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::{DQuat, DVec3};
+    use glam::{DQuat, DVec3, I64Vec3};
     use vd_core::EntityId;
     use vd_core::geometry::{CrossEffect, RealmBoundary};
-    use vd_core::pose::{LatticePos, RealmId};
+    use vd_core::pose::{LatticePos, RealmId, Tier};
 
-    /// A `Shell` boundary for `realm` at `center_offset`, radius `r`, parent `parent`.
+    /// A `Shell` boundary for `realm` at `center`, radius `r`, parent `parent`.
     fn shell_boundary(
         realm: RealmId,
         center: DVec3,
@@ -765,7 +805,8 @@ mod tests {
         .expect("boot scene");
         // Stream a LIVE pose for Planet 1 ONLY, authored in the PARENT (System) frame at a new offset.
         let streamed_frame = FrameRef::SystemSpace { system_seed: 7 };
-        let streamed_offset = DVec3::new(1.0e9, 5.0e8, 0.0);
+        // A COARSE-CELL position: the cell is the half of the coordinate the client used to discard.
+        let streamed_center = LatticePos::at(I64Vec3::new(4, -2, 9), DVec3::new(1.0e9, 5.0e8, 0.0));
         let mut view = RealmView::default();
         view.on_realm_snapshot(RealmSnapshotDatagram {
             sub: SubId(0),
@@ -774,15 +815,23 @@ mod tests {
             universe_tick: UniverseTick(10),
             realms: vec![RealmSnap {
                 realm: RealmId::Planet(1),
-                pose: StampedPose::at_rest(streamed_frame, streamed_offset, UniverseTick(10)),
+                pose: StampedPose {
+                    frame: streamed_frame,
+                    pos: streamed_center,
+                    vel: DVec3::ZERO,
+                    orient: DQuat::IDENTITY,
+                    universe_tick: UniverseTick(10),
+                },
             }],
         });
         let scene = boot.overlaid(&view);
-        // Planet 1 moved — BOTH its frame and center_offset are the streamed (parent-frame) values, and
+        // Planet 1 moved — BOTH its frame and its centre are the streamed (parent-frame) values, and
         // its frame CHANGED from the boot PlanetCentered (the must-fix: a moving realm renders in the
-        // frame it was authored in, not its own boot frame).
+        // frame it was authored in, not its own boot frame). The centre carries the streamed COARSE
+        // CELL as well as the offset: dropping the cell here is the slice-5 defect.
         let moved = scene.get(RealmId::Planet(1)).expect("planet box");
-        assert_eq!(moved.center_offset, streamed_offset);
+        assert_eq!(moved.center, streamed_center);
+        assert_eq!(moved.center.cell(), I64Vec3::new(4, -2, 9));
         assert_eq!(moved.frame, streamed_frame);
         assert_ne!(
             moved.frame,
@@ -809,7 +858,7 @@ mod tests {
         assert!(!scene.is_empty());
         let sys = scene.get(RealmId::System(7)).expect("system box");
         assert_eq!(sys.shape, BoxShape::Sphere { r: 1000.0 });
-        assert_eq!(sys.center_offset, DVec3::new(1.0, 2.0, 3.0));
+        assert_eq!(sys.center, LatticePos::local(DVec3::new(1.0, 2.0, 3.0)));
         let stn = scene.get(RealmId::Station(9)).expect("station box");
         assert_eq!(
             stn.shape,
@@ -1041,6 +1090,34 @@ mod tests {
         assert_eq!(hsv_to_rgb(0.4, 0.0, 0.5), [0.5, 0.5, 0.5]);
     }
 
+    /// SLICE 5 — the box's centre reduces against the render origin by EXACT INTEGER CELL arithmetic,
+    /// the same way an entity's does. Both sit far from the universe origin (a huge shared cell) and
+    /// only their small difference reaches f64: the cancellation is exact, so a box and an occupant
+    /// standing on it agree to the bit. The old client kept only the box's offset and dropped its cell,
+    /// which is right ONLY while every cell is zero — this asserts the case that used to be wrong.
+    #[test]
+    fn draw_center_reduces_by_exact_cell_arithmetic_far_from_the_origin() {
+        let far = I64Vec3::new(1_000_000_007, -4, 0);
+        let rbox = RealmBox {
+            shape: BoxShape::Sphere { r: 1.0 },
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            center: LatticePos::at(far + I64Vec3::new(3, 0, 0), DVec3::new(0.25, 0.0, 0.0)),
+            parent: None,
+            depth: 0,
+            color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
+        };
+        // The origin shares the huge cell; only the 3-cell + 0.25 m residual survives.
+        let origin = LatticePos::at(far, DVec3::new(0.0, 0.0, 0.0));
+        let edge = Tier::Fine.cell_edge_m();
+        assert_eq!(
+            rbox.draw_center(origin),
+            DVec3::new(3.0 * edge + 0.25, 0.0, 0.0)
+        );
+        // Dropping the cell (the pre-slice-5 arithmetic) would have drawn it at 0.25 m — the box would
+        // sit on top of the camera instead of 3 cells away.
+        assert_ne!(rbox.draw_center(origin), rbox.center.offset());
+    }
+
     #[test]
     fn box_lowers_to_one_cuboid_prim_scaled_by_the_half_extents() {
         let rbox = RealmBox {
@@ -1048,20 +1125,24 @@ mod tests {
                 half: DVec3::new(2.0, 3.0, 4.0),
             },
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            center_offset: DVec3::new(1.0, 0.0, 0.0),
+            center: LatticePos::local(DVec3::new(1.0, 0.0, 0.0)),
             parent: None,
             depth: 0,
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
         };
-        let prims = to_render_prims(&rbox, DVec3::new(10.0, 0.0, 0.0));
+        // The centre is reduced against the server-told render origin ONCE, by the caller, through the
+        // one chokepoint; the prim lands exactly there (slice 5: ONE term, no composition in here).
+        let draw_center = rbox.draw_center(LatticePos::local(DVec3::new(-9.0, 0.0, 0.0)));
+        assert_eq!(draw_center, DVec3::new(10.0, 0.0, 0.0));
+        let prims = to_render_prims(&rbox, draw_center);
         assert_eq!(prims.len(), 1);
         let p = &prims[0];
         // 6 faces × 2 tris × 3 verts = 36.
         assert_eq!(p.vertices.len(), 36);
         assert_eq!(p.color_rgba, [0.1, 0.2, 0.3, BOX_ALPHA]);
         assert_eq!(p.transform.scale, [2.0, 3.0, 4.0]);
-        // world_center (10) + center_offset (1) = 11 on x.
-        assert_eq!(p.transform.translation, [11.0, 0.0, 0.0]);
+        // The prim translation IS the reduced centre — nothing is added to it.
+        assert_eq!(p.transform.translation, [10.0, 0.0, 0.0]);
         // Every cuboid vertex is a unit-cube corner with a unit face normal. `abs()==1.0` is a
         // single condition (no `||` short-circuit branch — HR5: no uncoverable region in a helper).
         for v in &p.vertices {
@@ -1078,7 +1159,7 @@ mod tests {
         let rbox = RealmBox {
             shape: BoxShape::Sphere { r: 5.0 },
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            center_offset: DVec3::ZERO,
+            center: LatticePos::local(DVec3::ZERO),
             parent: None,
             depth: 0,
             color_rgba: [0.4, 0.5, 0.6, BOX_ALPHA],

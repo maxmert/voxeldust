@@ -44,7 +44,6 @@ use bevy_egui::{
     EguiPrimaryContextPass, PrimaryEguiContext, egui,
 };
 use crossbeam_channel::{Receiver, Sender};
-use vd_client::interp::RenderPose;
 use vd_client::net::ClientPhase;
 use vd_client::realm_scene::{MeshPrim, to_render_prims};
 use vd_client::render_snapshot::RenderSnapshot;
@@ -53,7 +52,7 @@ use vd_client_harness::capture::capture_rel_path;
 use vd_client_harness::input_map::{MovementKeys, mouse_look};
 use vd_client_harness::manifest::CaptureKind;
 use vd_core::EntityId;
-use vd_core::glam::{DQuat, DVec3};
+use vd_core::glam::DVec3;
 use vd_core::pose::RealmId;
 use vd_devproto::InputAction;
 
@@ -687,17 +686,14 @@ fn sync_realm_boxes(
     let mut seen: BTreeSet<RealmId> = BTreeSet::new();
     for (realm, rbox) in snap.scene().iter() {
         seen.insert(realm);
-        // The box's frame ORIGIN in world space, composed through the ONE chokepoint (identity for
-        // the world-origin frames through P3; a hull-borne station composes through its hull at P8).
-        let frame_origin = RenderPose {
-            frame: rbox.frame,
-            cell: bevy::math::I64Vec3::ZERO,
-            pos: DVec3::ZERO,
-            orient: DQuat::IDENTITY,
-        };
-        let world_center = snap.world_pos(&frame_origin);
-        // Lower to render primitives (VERTICES) at that world center — no shape branch here.
-        let prims = to_render_prims(rbox, world_center);
+        // The box's OWN position, reduced ONCE against the server-told render origin through the ONE
+        // chokepoint. Slice 5: this used to FABRICATE a zero pose purely to extract `-pin` from
+        // `world_pos`, then add a centre whose coarse half had already been discarded — the client
+        // inventing an input to a server-authoritative seam in order to do arithmetic it should not
+        // be doing. The box carries its full position now, so there is one reduction and no compose.
+        let draw_center = rbox.draw_center(snap.origin());
+        // Lower to render primitives (VERTICES) at that drawn centre — no shape branch here.
+        let prims = to_render_prims(rbox, draw_center);
         match boxes.0.get(&realm) {
             // Existing box: the geometry is fixed (config, not delivered state) through P3, so only
             // the transform can move (a hull-borne box at P8). Update its translation.
@@ -738,8 +734,12 @@ fn sync_realm_boxes(
 /// (`fit_camera_to_scene`); this only applies the returned pose to the Bevy transform.
 fn frame_scene_camera(net: Res<Net>, mut cam_tf: Query<&mut Transform, With<FollowCam>>) {
     let snap = net.snapshot.load();
+    // Framed in the SAME render space the boxes are drawn in — reduced against the server-told
+    // render origin (slice 5). The pixel proof reconstructs this camera with the origin it reads
+    // back from the client, so the two agree by construction instead of by both assuming zero.
     let Some(cam) = vd_client_harness::camera::fit_camera_to_scene(
         snap.scene(),
+        snap.origin(),
         CAPTURE_W as usize,
         CAPTURE_H as usize,
     ) else {

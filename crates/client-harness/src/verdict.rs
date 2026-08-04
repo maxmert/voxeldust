@@ -27,7 +27,7 @@ use vd_client::realm_scene::{BoxShape, RealmScene};
 use vd_client::view::DeliveredView;
 use vd_core::EntityId;
 use vd_core::geometry::Boundary;
-use vd_core::pose::RealmId;
+use vd_core::pose::{LatticePos, RealmId};
 
 use crate::camera::{CaptureCamera, ScreenAabb, ScreenPos};
 
@@ -44,13 +44,20 @@ fn boundary_of(shape: BoxShape) -> Boundary {
 
 /// Is the world point `world_p` inside realm `realm`'s box? Point-in-box membership on the
 /// COMPOSITED world position, REUSING [`Boundary::signed_distance`] (`<= 0` = inside/on-surface,
-/// uniform for sphere and box). The box's world center is its `center_offset` (P3 zero-cell frame:
-/// world frames are identity, so the box sits at its offset). `false` for a realm not in the scene.
+/// uniform for sphere and box). `world_p` and the box are compared in the SAME render space: the box
+/// is reduced against `origin` through [`RealmBox::draw_center`], the one reduction the renderer uses.
+/// Slice 5: this used to subtract the box's RAW centre from an origin-reduced point — correct only
+/// while the world sits at cell zero. `false` for a realm not in the scene.
 #[must_use]
-pub fn entity_in_box(scene: &RealmScene, world_p: DVec3, realm: RealmId) -> bool {
+pub fn entity_in_box(
+    scene: &RealmScene,
+    origin: LatticePos,
+    world_p: DVec3,
+    realm: RealmId,
+) -> bool {
     match scene.get(realm) {
         Some(rbox) => {
-            let rel = world_p - rbox.center_offset;
+            let rel = world_p - rbox.draw_center(origin);
             boundary_of(rbox.shape).signed_distance(rel) <= 0.0
         }
         None => false,
@@ -62,10 +69,10 @@ pub fn entity_in_box(scene: &RealmScene, world_p: DVec3, realm: RealmId) -> bool
 /// inside ship-inside-station resolves to the player's ship, not the station), ties broken by the
 /// smaller `RealmId` (the scan keeps the first at a given depth, and iteration is `RealmId`-ordered).
 #[must_use]
-pub fn expected_box(scene: &RealmScene, world_p: DVec3) -> Option<RealmId> {
+pub fn expected_box(scene: &RealmScene, origin: LatticePos, world_p: DVec3) -> Option<RealmId> {
     let mut best: Option<(u8, RealmId)> = None;
     for (realm, rbox) in scene.iter() {
-        let rel = world_p - rbox.center_offset;
+        let rel = world_p - rbox.draw_center(origin);
         if boundary_of(rbox.shape).signed_distance(rel) <= 0.0 {
             let deeper = match best {
                 Some((best_depth, _)) => rbox.depth > best_depth,
@@ -248,39 +255,50 @@ mod tests {
         // Inside the sphere (origin, r=1000).
         assert!(entity_in_box(
             &scene,
+            LatticePos::default(),
             DVec3::new(500.0, 0.0, 0.0),
             RealmId::System(7)
         ));
         // On the sphere surface (== r) is inside (<= 0).
         assert!(entity_in_box(
             &scene,
+            LatticePos::default(),
             DVec3::new(1000.0, 0.0, 0.0),
             RealmId::System(7)
         ));
         // Just outside the sphere.
         assert!(!entity_in_box(
             &scene,
+            LatticePos::default(),
             DVec3::new(1000.1, 0.0, 0.0),
             RealmId::System(7)
         ));
         // Inside the box (center 5000, half 50).
         assert!(entity_in_box(
             &scene,
+            LatticePos::default(),
             DVec3::new(5000.0, 0.0, 0.0),
             RealmId::Station(9)
         ));
         assert!(entity_in_box(
             &scene,
+            LatticePos::default(),
             DVec3::new(5050.0, 0.0, 0.0),
             RealmId::Station(9)
         ));
         assert!(!entity_in_box(
             &scene,
+            LatticePos::default(),
             DVec3::new(5051.0, 0.0, 0.0),
             RealmId::Station(9)
         ));
         // A realm not in the scene → false (the None arm).
-        assert!(!entity_in_box(&scene, DVec3::ZERO, RealmId::Planet(1)));
+        assert!(!entity_in_box(
+            &scene,
+            LatticePos::default(),
+            DVec3::ZERO,
+            RealmId::Planet(1)
+        ));
     }
 
     #[test]
@@ -288,16 +306,19 @@ mod tests {
         let scene = two_realm_scene();
         // At the origin the dot is in the System sphere.
         assert_eq!(
-            expected_box(&scene, DVec3::new(0.0, 0.0, 0.0)),
+            expected_box(&scene, LatticePos::default(), DVec3::new(0.0, 0.0, 0.0)),
             Some(RealmId::System(7))
         );
         // At x=5000 it is in the Station box (the crossing destination).
         assert_eq!(
-            expected_box(&scene, DVec3::new(5000.0, 0.0, 0.0)),
+            expected_box(&scene, LatticePos::default(), DVec3::new(5000.0, 0.0, 0.0)),
             Some(RealmId::Station(9))
         );
         // Between the two, inside neither → None.
-        assert_eq!(expected_box(&scene, DVec3::new(3000.0, 0.0, 0.0)), None);
+        assert_eq!(
+            expected_box(&scene, LatticePos::default(), DVec3::new(3000.0, 0.0, 0.0)),
+            None
+        );
     }
 
     #[test]
@@ -340,20 +361,29 @@ mod tests {
         ])
         .expect("scene");
         // A point inside BOTH resolves to the child (depth 1 > depth 0).
-        assert_eq!(expected_box(&scene, DVec3::new(1.0, 1.0, 1.0)), Some(child));
+        assert_eq!(
+            expected_box(&scene, LatticePos::default(), DVec3::new(1.0, 1.0, 1.0)),
+            Some(child)
+        );
         // A point inside only the parent resolves to the parent.
         assert_eq!(
-            expected_box(&scene, DVec3::new(50.0, 0.0, 0.0)),
+            expected_box(&scene, LatticePos::default(), DVec3::new(50.0, 0.0, 0.0)),
             Some(parent)
         );
         // Outside both → None.
-        assert_eq!(expected_box(&scene, DVec3::new(500.0, 0.0, 0.0)), None);
+        assert_eq!(
+            expected_box(&scene, LatticePos::default(), DVec3::new(500.0, 0.0, 0.0)),
+            None
+        );
     }
 
     #[test]
     fn expected_box_of_an_empty_scene_is_none() {
         let scene = RealmScene::default();
-        assert_eq!(expected_box(&scene, DVec3::ZERO), None);
+        assert_eq!(
+            expected_box(&scene, LatticePos::default(), DVec3::ZERO),
+            None
+        );
     }
 
     fn snap_on(sub: SubId, frame_id: u64, tick: u64, entity: EntityId, x: f64) -> SnapshotDatagram {
@@ -574,7 +604,7 @@ mod tests {
                 half: DVec3::splat(10.0),
             },
             frame: FrameRef::StationLocal { station_seed: 1 },
-            center_offset: DVec3::new(100.0, 0.0, 0.0),
+            center: LatticePos::local(DVec3::new(100.0, 0.0, 0.0)),
             parent: None,
             depth: 0,
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
@@ -583,7 +613,7 @@ mod tests {
             // Reconstruct a one-box scene by hand via a boundary so entity_in_box has a realm key.
             RealmScene::from_boundaries(&[RealmBoundary::aabb(
                 RealmId::Station(1),
-                LatticePos::local(rbox.center_offset),
+                rbox.center,
                 DVec3::splat(10.0),
                 1.15,
                 1.30,
@@ -600,11 +630,13 @@ mod tests {
         };
         assert!(entity_in_box(
             &scene,
+            LatticePos::default(),
             DVec3::new(105.0, 0.0, 0.0),
             RealmId::Station(1)
         ));
         assert!(!entity_in_box(
             &scene,
+            LatticePos::default(),
             DVec3::new(120.0, 0.0, 0.0),
             RealmId::Station(1)
         ));
@@ -672,7 +704,7 @@ mod tests {
         let sphere = RealmBox {
             shape: BoxShape::Sphere { r: 3.0 },
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            center_offset: DVec3::ZERO,
+            center: LatticePos::local(DVec3::ZERO),
             parent: None,
             depth: 0,
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
@@ -690,7 +722,7 @@ mod tests {
                 half: DVec3::splat(2.0),
             },
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            center_offset: DVec3::ZERO,
+            center: LatticePos::local(DVec3::ZERO),
             parent: None,
             depth: 0,
             color_rgba: [0.4, 0.5, 0.6, BOX_ALPHA],

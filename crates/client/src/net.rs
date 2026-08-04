@@ -16,7 +16,9 @@
 //! invariant and forward-compatibility, enforced without a crash.
 
 use vd_core::{EntityId, NodeId, SessionId, TickId};
-use vd_devproto::{DevEntityRow, DevPhase, DevRealmBox, DevState, DevTransferView, InputAction};
+use vd_devproto::{
+    DevEntityRow, DevPhase, DevRealmBox, DevRenderOrigin, DevState, DevTransferView, InputAction,
+};
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
     ClientControlMsg, EventMsg, InputDatagram, RealmSnapshotDatagram, ServerControlMsg,
@@ -534,10 +536,13 @@ impl ClientState {
             .iter()
             .map(|(realm, b)| DevRealmBox {
                 realm: format!("{realm:?}"),
-                // A5 — the box center is ABSOLUTE (the server ships absolute realm centers); route it through
-                // the SAME render-origin subtraction as DevEntityRow.pos, so the diagnosis surface reports both
-                // in ONE frame (a raw absolute here would silently disagree the moment the pin is non-identity).
-                center: sanitize_vec3(b.center_offset - self.view.render_origin().offset()),
+                // THE SAME reduction the renderer draws with, through the ONE chokepoint — not a
+                // hand-rolled subtraction. This line used to spell `b.center_offset - origin.offset()`,
+                // which dropped the origin's COARSE half while `DevEntityRow.pos` twenty lines above
+                // went through `world_pos` correctly. Two arithmetics for one quantity, in the surface
+                // a test asserts against: the "player rides its realm" gate reads THIS value, so it was
+                // effectively comparing the client to itself.
+                center: sanitize_vec3(b.draw_center(self.view.render_origin())),
                 // SHAKE DIAGNOSIS: which moment THIS box is being drawn from. A box whose tick tracks
                 // `entity_feed_newest_tick` shares the player's moment; one that drifts is authored by a
                 // shard whose clock is running independently. `None` = never streamed (boot placement).
@@ -560,6 +565,9 @@ impl ClientState {
             // directly observable next to `render_cursor`. Read the field docs on `DevState` for why.
             entity_feed_newest_tick: self.view.newest_tick().map(|t| t.0),
             realm_feed_newest_tick: self.realm_view.newest_tick().map(|t| t.0),
+            // The origin BOTH of the above are relative to, published so a test reduces its own
+            // absolute geometry the same exact way instead of assuming this is zero.
+            render_origin: dev_render_origin(self.view.render_origin()),
             entities,
             realm_boxes,
             snapshots_applied: self.snapshots_applied,
@@ -600,6 +608,16 @@ fn sanitize_f64(x: f64) -> f64 {
 
 fn sanitize_vec3(v: glam::DVec3) -> [f64; 3] {
     [sanitize_f64(v.x), sanitize_f64(v.y), sanitize_f64(v.z)]
+}
+
+/// Publish the render origin as its two exact halves. The integer cell needs no sanitizing (it IS
+/// exact); only the metre offset can carry a non-finite from a corrupt sender.
+fn dev_render_origin(o: vd_core::pose::LatticePos) -> DevRenderOrigin {
+    let cell = o.cell();
+    DevRenderOrigin {
+        cell: [cell.x, cell.y, cell.z],
+        offset: sanitize_vec3(o.offset()),
+    }
 }
 
 /// Force a quaternion finite while PRESERVING a valid rotation: a non-finite quat (a

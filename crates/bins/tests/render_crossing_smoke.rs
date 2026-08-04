@@ -35,7 +35,7 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use vd_bins::crossing_playground::{self, BOX_A_CENTER, BOX_B_CENTER};
+use vd_bins::crossing_playground::{self, BOX_B_CENTER};
 use vd_bins::{
     DEV, DevClusterDown, admin_get_body, dev_auth_signing_key_hex, dev_roundtrip, devcluster,
     loopback, record_extra_pid, slot_trust_dir, slot_workdir,
@@ -48,8 +48,8 @@ use vd_client_harness::verdict::{
     dot_pixels_within_box_region, expected_box, projected_point_aabb,
 };
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
-use vd_core::glam::DVec3;
-use vd_core::pose::{FrameRef, RealmId};
+use vd_core::glam::{DVec3, I64Vec3};
+use vd_core::pose::{FrameRef, LatticePos, RealmId};
 use vd_devproto::{DevPortScheme, DevRequest, DevResponse, WORKTREE_SLOT_CEILING};
 
 const CLIENT_NAME: &str = "g-render-crossing";
@@ -59,7 +59,9 @@ const RENDER_CROSSING_SLOT: u16 = WORKTREE_SLOT_CEILING + 22; // 86: G-RENDER-CR
 
 // The playground geometry (box A@SOURCE origin, box B@DEST +X, the walk-into shell trigger + two-box
 // scene) is the SINGLE-SOURCED `vd_bins::crossing_playground` fixture set, shared with the human
-// `crossing-playground` launcher. BOX_A_CENTER/BOX_B_CENTER/BOX_HALF are imported for the projection math.
+// `crossing-playground` launcher. The box CENTRES are no longer imported for the projection (slice 5:
+// each box's centre is read from the scene and reduced through the one chokepoint); BOX_B_CENTER
+// remains as the server-side WalkTo target, which is an absolute world point, not a render-space one.
 /// The dot's on-screen world radius for its projected rectangle (brackets the billboard marker).
 const DOT_WORLD_RADIUS: f64 = 2.0;
 /// The AFTER capture waits for the dot to reach here (well past the ≈ +38.5 crossing point, near box B
@@ -184,14 +186,28 @@ fn box_screen_aabb(
     scene: &RealmScene,
     camera: &CaptureCamera,
     realm: RealmId,
-    center: DVec3,
+    origin: LatticePos,
 ) -> ScreenAabb {
-    let radius = match scene.get(realm).expect("box in scene").shape {
+    let rbox = scene.get(realm).expect("box in scene");
+    let radius = match rbox.shape {
         BoxShape::Box { half } => half.length(),
         BoxShape::Sphere { r } => r,
     };
-    projected_point_aabb(camera, center, radius)
+    // The centre reduced against the client's render origin through the ONE chokepoint — the same
+    // space the pixels are in. This test never spells the subtraction itself.
+    projected_point_aabb(camera, rbox.draw_center(origin), radius)
         .expect("the box center projects in front of the camera")
+}
+
+/// The render origin THIS state sample was expressed in: the space its reported positions, and the
+/// pixels drawn at that moment, both live in. Taken from the sample itself rather than fetched
+/// separately, so a position can never be paired with an origin from a different instant.
+fn state_origin(state: &vd_devproto::DevState) -> LatticePos {
+    let o = state.render_origin;
+    LatticePos::at(
+        I64Vec3::new(o.cell[0], o.cell[1], o.cell[2]),
+        DVec3::new(o.offset[0], o.offset[1], o.offset[2]),
+    )
 }
 
 /// Decode a captured PNG → (rgba, w, h, self-calibrated clear color from the top-right corner).
@@ -277,22 +293,6 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
     )
     .expect("write boxes.json");
 
-    // The ONE fitted camera the render frames with, and the two DISJOINT box screen rectangles.
-    let camera = fit_camera_to_scene(&scene, CAPTURE_W as usize, CAPTURE_H as usize)
-        .expect("the two-box scene frames to a camera");
-    let box_a_region = box_screen_aabb(
-        &scene,
-        &camera,
-        RealmId::System(DEV.realm_seed),
-        BOX_A_CENTER,
-    );
-    let box_b_region = box_screen_aabb(
-        &scene,
-        &camera,
-        RealmId::System(DEV.realm_seed_b),
-        BOX_B_CENTER,
-    );
-
     // Bring up the dual cluster with the injected walk-into trigger (C1 both-realms gate → exit 0).
     assert!(
         up_dual_with_trigger(launcher, RENDER_CROSSING_SLOT, &trigger_path),
@@ -357,12 +357,26 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
         }
     };
     let pos_before = own_pos(&before_state);
+
+    // THE ONE SPACE (slice 5). Everything below — the fitted camera, the two box rectangles, the
+    // containment verdicts — is computed against the client's LIVE render origin, the same origin it
+    // reduced `pos_before` with and drew its pixels with. Read from the client, never assumed to be
+    // zero: the scene this test holds is ABSOLUTE, the positions the client reports are RELATIVE, and
+    // comparing the two without the origin is only accidentally right while the origin happens to be
+    // zero. Fitted HERE (after the client is up) rather than before boot, because that is the first
+    // moment the origin is knowable.
+    let origin = state_origin(&before_state);
+    let camera = fit_camera_to_scene(&scene, origin, CAPTURE_W as usize, CAPTURE_H as usize)
+        .expect("the two-box scene frames to a camera");
+    let box_a_region = box_screen_aabb(&scene, &camera, RealmId::System(DEV.realm_seed), origin);
+    let box_b_region = box_screen_aabb(&scene, &camera, RealmId::System(DEV.realm_seed_b), origin);
+
     // S6 (pure renderer): the client is NODE-AGNOSTIC — it no longer tracks an authoritative sub.
     // The client-tier re-home proof is the OWN entity's LOCATION label flipping realms (source→dest),
     // which is the own entity's delivered authoritative FrameRef re-expressed by the server.
     let location_before = before_state.location.clone();
     assert_eq!(
-        expected_box(&scene, pos_before),
+        expected_box(&scene, origin, pos_before),
         Some(RealmId::System(DEV.realm_seed)),
         "BEFORE: the dot's world pos {pos_before} must be geometrically inside box A",
     );
@@ -427,7 +441,8 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
             // is geometrically inside box B; (3) it advanced past the crossing point (a pose only the DEST
             // could have delivered). The label is now a HARD gate, not a lagging cosmetic signal.
             if s.location.as_deref() == Some(system_b.as_str())
-                && expected_box(&scene, own_pos(&s)) == Some(RealmId::System(DEV.realm_seed_b))
+                && expected_box(&scene, state_origin(&s), own_pos(&s))
+                    == Some(RealmId::System(DEV.realm_seed_b))
                 && own_pos(&s).x >= CROSSING_CONFIRMED_X
             {
                 break s;
@@ -461,6 +476,18 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
         }
     };
     let pos_after = own_pos(&after_state);
+    // THE SHARED CAMERA'S PREMISE, made loud. The one fitted camera and the two box rectangles above
+    // were built against the BEFORE origin, and every check below reuses them for the AFTER frame.
+    // That is only sound while the crossing does not re-pin the client's render origin. It does not
+    // today; when re-anchoring on a crossing lands, this fires, and the fix is to fit a camera and
+    // rectangles per frame rather than to relax this line.
+    assert_eq!(
+        state_origin(&after_state),
+        origin,
+        "the render origin moved across the crossing — the shared camera and both box rectangles \
+         were fitted in the BEFORE space, so every geometric check below is comparing two different \
+         spaces. Fit the camera and the rectangles PER FRAME instead of loosening this assertion.",
+    );
 
     // ---- AFTER: capture the dot inside box B. ---------------------------------------------------------
     let after_shot = screenshot(devctl, "after");
@@ -503,7 +530,7 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
 
     // STATE: the composited world pos is now geometrically inside box B, and advanced far on +X.
     assert_eq!(
-        expected_box(&scene, pos_after),
+        expected_box(&scene, origin, pos_after),
         Some(RealmId::System(DEV.realm_seed_b)),
         "AFTER: the dot's world pos {pos_after} must be geometrically inside box B",
     );

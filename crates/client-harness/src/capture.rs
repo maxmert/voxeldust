@@ -145,6 +145,10 @@ mod tests {
             universe_tick,
             entity_feed_newest_tick: universe_tick,
             realm_feed_newest_tick: None,
+            render_origin: vd_devproto::DevRenderOrigin {
+                cell: [0, 0, 0],
+                offset: [0.0, 0.0, 0.0],
+            },
             entities: Vec::new(),
             realm_boxes: Vec::new(),
             snapshots_applied,
