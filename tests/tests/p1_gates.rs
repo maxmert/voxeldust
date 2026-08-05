@@ -73,10 +73,19 @@ fn p1_dod_two_dots_log_in_walk_and_see_each_other() {
     );
     let own = walker.own_entity.expect("authority announced");
     let own_pose = walker.poses[&own];
+    // The DELIVERED position must be read as a TOTAL — whole-number part plus leftover. The integrator
+    // now folds the leftover into the whole number every tick (so motion precision stops depending on how
+    // far from the origin you are), which means the leftover alone is a sub-millimetre remainder and says
+    // nothing about whether the walker moved.
+    let travelled = own_pose.pos.delta_m(
+        vd_core::pose::LatticePos::local(DVec3::ZERO),
+        vd_core::pose::Tier::Fine,
+    );
     assert!(
-        own_pose.pos.offset().distance(DVec3::ZERO) > 0.5,
-        "the walker's delivered pose moved: {:?}",
-        own_pose.pos
+        travelled.distance(DVec3::ZERO) > 0.5,
+        "the walker's delivered pose moved: {:?} (total {:?})",
+        own_pose.pos,
+        travelled
     );
     let idle = client_view(&mut topo, NodeId(101));
     assert_eq!(idle.poses.len(), 2, "the idle dot sees the walker too");

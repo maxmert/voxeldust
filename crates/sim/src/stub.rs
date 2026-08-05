@@ -2509,7 +2509,17 @@ fn integrate(dot: &mut Dot, input: &InputDatagram, config: &StubConfig, clock: &
     // that re-buckets a drifted offset back into the cell (the bounded-offset invariant) lands with
     // P4/P5 re-centering (galaxy ly-cells at P10), and is a PURE ADDITION here (a `.normalize()` on the
     // result) because the cell is already carried — NOT a clobber-and-replace.
-    dot.pose.pos = dot.pose.pos.map_offset(|o| o + step);
+    // THE FOLD. Adding the step into a raw metre triple is what made motion precision depend on how far
+    // you are from the origin: at star-system distances the result snaps to a ~2 mm grid, so walking
+    // carries a direction-dependent speed error and anything slower than ~4.9 cm/s never moves at all
+    // while still reporting the commanded speed. Folding the leftover into the whole number each tick
+    // means every tick only ever adds a ~2 cm step to a sub-millimetre leftover — the error is the same
+    // everywhere in the universe.
+    dot.pose.pos = dot
+        .pose
+        .pos
+        .map_offset(|o| o + step)
+        .normalize(dot.pose.frame.tier());
     dot.pose.vel = step / config.tick_dt_s;
     dot.pose.universe_tick = clock.universe_tick;
 }
@@ -8431,6 +8441,17 @@ mod tests {
         );
     }
 
+    /// A position's TOTAL displacement from its frame origin, in metres — whole-number part and leftover
+    /// combined. The integrator now folds the leftover into the whole number every tick, so reading the
+    /// leftover alone (which these assertions used to do) reports a sub-millimetre remainder rather than
+    /// where the subject actually is.
+    fn total_m(p: &vd_core::pose::LatticePos) -> DVec3 {
+        p.delta_m(
+            vd_core::pose::LatticePos::local(DVec3::ZERO),
+            vd_core::pose::Tier::Fine,
+        )
+    }
+
     #[test]
     fn applied_input_moves_the_dot_and_is_logged() {
         let mut rig = Rig::new();
@@ -8441,10 +8462,10 @@ mod tests {
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         let expected_step = 2.0 * 0.05; // speed * dt
         assert!(
-            (dot.pose.pos.offset().z + expected_step).abs() < 1e-12,
+            (total_m(&dot.pose.pos).z + expected_step).abs() < 1e-12,
             "moved -Z"
         );
-        assert_eq!(dot.pose.pos.offset().x, 0.0);
+        assert_eq!(total_m(&dot.pose.pos).x, 0.0);
         assert_eq!(dot.last_applied_seq, Some(1));
         assert_eq!(
             rig.world.resource::<InputLog>().applied(),
@@ -8470,10 +8491,10 @@ mod tests {
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         let expected_step = 2.0 * 0.05;
         assert!(
-            (dot.pose.pos.offset().x + expected_step).abs() < 1e-6,
+            (total_m(&dot.pose.pos).x + expected_step).abs() < 1e-6,
             "moved -X"
         );
-        assert!(dot.pose.pos.offset().z.abs() < 1e-6);
+        assert!(total_m(&dot.pose.pos).z.abs() < 1e-6);
     }
 
     #[test]
@@ -8503,11 +8524,11 @@ mod tests {
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         let expected_step = 2.0 * 0.05;
         assert!(
-            (dot.pose.pos.offset().x - expected_step).abs() < 1e-12,
+            (total_m(&dot.pose.pos).x - expected_step).abs() < 1e-12,
             "clamped strafe"
         );
         assert!(
-            (dot.pose.pos.offset().y - expected_step).abs() < 1e-12,
+            (total_m(&dot.pose.pos).y - expected_step).abs() < 1e-12,
             "vertical"
         );
     }
@@ -8525,11 +8546,7 @@ mod tests {
             let _ = rig.attach();
             // Pure forward input (movement = [forward, strafe, up]).
             let _ = rig.tick(vec![input_msg(1, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
-            rig.world.resource::<Dots>().0[&SESSION]
-                .pose
-                .pos
-                .offset()
-                .length()
+            total_m(&rig.world.resource::<Dots>().0[&SESSION].pose.pos).length()
         };
         // Default 1.0 = the un-multiplied step (`move_speed 2.0 · dt 0.05` = 0.1) — byte-identical.
         assert!((step_len_at(1.0) - 2.0 * 0.05).abs() < 1e-12);
@@ -8616,7 +8633,7 @@ mod tests {
         )]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(
-            dot.pose.pos.offset(),
+            total_m(&dot.pose.pos),
             vd_core::glam::DVec3::ZERO,
             "pose untouched"
         );
@@ -8634,11 +8651,11 @@ mod tests {
         );
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert!(
-            dot.pose.pos.offset().is_finite(),
+            total_m(&dot.pose.pos).is_finite(),
             "authoritative pose finite"
         );
         assert!(
-            dot.pose.pos.offset().z < 0.0,
+            total_m(&dot.pose.pos).z < 0.0,
             "the finite input integrated (moved -Z)"
         );
     }
