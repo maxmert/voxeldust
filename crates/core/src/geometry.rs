@@ -1026,9 +1026,18 @@ fn region_signed_distance_resolved(
     region: &RealmRegion,
 ) -> Result<f64, FrameError> {
     let p = reframed?;
+    // THE re-home decision, and the highest-severity place a position may not be truncated. This used to
+    // subtract one leftover from another and DISCARD the whole-number part of both. While every position
+    // carries a zero there that is exactly right; the moment one does not, it compares two fractions with
+    // the large part thrown away and answers, confidently, that you are somewhere you are not — deciding
+    // which realm contains you from the wrong numbers.
+    //
+    // `delta_m` is the exact form: it subtracts the whole numbers as integers (no rounding is possible)
+    // and the leftovers as floats, then combines. At a zero whole-number part it reduces to precisely the
+    // old expression, so this is byte-identical today and correct when the integrator starts folding.
     Ok(region
         .shape
-        .signed_distance(p.pos.offset() - region.center.offset()))
+        .signed_distance(p.pos.delta_m(region.center, p.frame.tier())))
 }
 
 /// Why a realm-region forest is malformed — the boot fence (task #135, C-5). ONE variant per REJECT arm
@@ -1362,6 +1371,49 @@ mod tests {
 
     /// A test region with an explicit radius — so a fixture claiming to be a VALID forest can be
     /// geometrically nested (child strictly inside parent), not merely topologically well-formed.
+    #[test]
+    fn the_containment_distance_is_exact_when_the_whole_number_part_is_not_zero() {
+        use crate::UniverseTick;
+        use crate::frame::IdentityFrames;
+        use crate::pose::FINE_CELL_EDGE_M;
+        use glam::I64Vec3;
+        // THE re-home decision. Today every position carries a zero whole-number part, so the old
+        // expression — subtract the leftovers, discard the rest — happened to be right. This asserts it
+        // is right for the reason that will still hold once the integrator starts folding.
+        //
+        // The subject and the region sit in the SAME place, expressed differently: the region at a
+        // whole-number cell with no leftover, the subject one cell lower with a leftover of exactly one
+        // cell edge. Distance from the region centre is therefore ZERO, and it is INSIDE. The discarding
+        // form computes the leftover difference alone — one whole cell edge — and would place it outside
+        // a region smaller than that, i.e. re-home a player who has not moved.
+        let edge = FINE_CELL_EDGE_M;
+        let region = RealmRegion {
+            center: LatticePos::at(I64Vec3::new(4, 0, 0), DVec3::ZERO),
+            shape: Boundary::Shell { r: edge / 2.0 },
+            ..test_region(RealmId::System(1), None)
+        };
+        let same_point = LatticePos::at(I64Vec3::new(3, 0, 0), DVec3::new(edge, 0.0, 0.0));
+        let mut pose = StampedPose::at_rest(region.frame, DVec3::ZERO, UniverseTick(1));
+        pose.pos = same_point;
+
+        assert_eq!(
+            region_signed_distance(&pose, &region, &IdentityFrames),
+            Ok(-edge / 2.0),
+            "the same point in two spellings is at distance zero from the centre, i.e. fully inside"
+        );
+
+        // And the control: the truncating form this replaced. Left in the test rather than in prose so
+        // the failure it would cause is a number on the screen, not an argument.
+        let truncated = region
+            .shape
+            .signed_distance(same_point.offset() - region.center.offset());
+        assert!(
+            truncated > 0.0,
+            "the discarding form reports the subject OUTSIDE its own region — the re-home that follows \
+             is a player teleported for standing still"
+        );
+    }
+
     fn test_region_r(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
         RealmRegion {
             shape: Boundary::Shell { r },
