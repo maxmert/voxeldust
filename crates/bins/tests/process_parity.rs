@@ -278,7 +278,19 @@ fn p1_parity_real_binaries_over_quic() {
                 walker
                     .poses
                     .get(&own)
-                    .is_some_and(|p| p.pos.offset().distance(DVec3::ZERO) > 0.5)
+                    .is_some_and(|p| {
+                        // TOTAL displacement — whole-number part plus leftover. The integrator folds the
+                        // leftover into the whole number every tick, so the leftover alone is a
+                        // sub-millimetre remainder and never reaches this threshold however far the
+                        // walker walks: this loop would spin until its deadline.
+                        p.pos
+                            .delta_m(
+                                vd_core::pose::LatticePos::local(DVec3::ZERO),
+                                vd_core::pose::Tier::Fine,
+                            )
+                            .distance(DVec3::ZERO)
+                            > 0.5
+                    })
             });
         if done {
             break;
