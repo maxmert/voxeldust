@@ -1369,8 +1369,79 @@ mod tests {
         assert_eq!(should_rehome(dest, owning, None, &t), Some(owning));
     }
 
-    /// A test region with an explicit radius — so a fixture claiming to be a VALID forest can be
-    /// geometrically nested (child strictly inside parent), not merely topologically well-formed.
+    proptest::proptest! {
+        /// THE MEASUREMENT, not the argument. The claim being made is "at a zero whole-number part the
+        /// exact form reduces to the old truncating one, so this change is byte-identical today". That is
+        /// a claim about bits, so it is checked as one: both forms are computed over a wide range of real
+        /// positions and compared by RAW BIT PATTERN, not by `==` (which would call +0.0 and -0.0 equal
+        /// and hide exactly the case worth knowing about). Every position here carries the zero
+        /// whole-number part that production carries today.
+        #[test]
+        fn at_a_zero_whole_number_part_the_exact_form_is_bit_identical_to_the_truncating_one(
+            px in -1.0e9f64..1.0e9,
+            py in -1.0e9f64..1.0e9,
+            pz in -1.0e9f64..1.0e9,
+            cx in -1.0e9f64..1.0e9,
+            cy in -1.0e9f64..1.0e9,
+            cz in -1.0e9f64..1.0e9,
+        ) {
+            let p = LatticePos::local(DVec3::new(px, py, pz));
+            let centre = LatticePos::local(DVec3::new(cx, cy, cz));
+            let exact = p.delta_m(centre, crate::pose::Tier::Fine);
+            let truncating = p.offset() - centre.offset();
+            proptest::prop_assert_eq!(
+                [exact.x.to_bits(), exact.y.to_bits(), exact.z.to_bits()],
+                [
+                    truncating.x.to_bits(),
+                    truncating.y.to_bits(),
+                    truncating.z.to_bits()
+                ],
+                "the two forms disagree in bits at a zero whole-number part: exact {:?} vs truncating {:?}",
+                exact,
+                truncating
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_forms_agree_on_negative_zero_the_one_case_the_random_range_will_not_reach() {
+        // The proptest above samples a wide range but will essentially never produce NEGATIVE zero, and
+        // this project has been bitten before by treating +0.0 and -0.0 as interchangeable (they are
+        // different bytes on the wire, and negative zero is reachable from the orbital maths). The exact
+        // form adds `0.0 * edge` to the difference, and `0.0 + (-0.0)` is `+0.0` — so if any component
+        // difference is negative zero the two forms DIVERGE IN BITS. Whether that happens is measured
+        // here, not reasoned about.
+        let p = LatticePos::local(DVec3::new(-0.0, 1.0, -0.0));
+        let centre = LatticePos::local(DVec3::new(0.0, 1.0, 0.0));
+        let exact = p.delta_m(centre, crate::pose::Tier::Fine);
+        let truncating = p.offset() - centre.offset();
+
+        // The measured answer: the bits DIFFER on the zero components (+0.0 versus -0.0)...
+        assert_eq!(truncating.x.to_bits(), (-0.0f64).to_bits());
+        assert_eq!(exact.x.to_bits(), 0.0f64.to_bits());
+        assert_ne!(exact.x.to_bits(), truncating.x.to_bits());
+
+        // ...and it does not reach any decision, because every shape reads this vector through a
+        // magnitude, and the magnitude of negative zero is positive zero. Asserted for all three shapes
+        // rather than argued for one.
+        for shape in [
+            Boundary::Shell { r: 1.0 },
+            Boundary::Aabb {
+                half: DVec3::splat(2.0),
+            },
+            Boundary::Obb {
+                half: DVec3::splat(2.0),
+                orient: DQuat::IDENTITY,
+            },
+        ] {
+            assert_eq!(
+                shape.signed_distance(exact).to_bits(),
+                shape.signed_distance(truncating).to_bits(),
+                "the sign of zero must not change a containment verdict for {shape:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_containment_distance_is_exact_when_the_whole_number_part_is_not_zero() {
         use crate::UniverseTick;
@@ -1414,6 +1485,8 @@ mod tests {
         );
     }
 
+    /// A test region with an explicit radius — so a fixture claiming to be a VALID forest can be
+    /// geometrically nested (child strictly inside parent), not merely topologically well-formed.
     fn test_region_r(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
         RealmRegion {
             shape: Boundary::Shell { r },
