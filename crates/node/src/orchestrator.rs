@@ -166,7 +166,19 @@ pub fn register_orchestrator_with_store(
     // MemSpawner; a live-AoI / harness / bootstrap boot supplies one tied to its own hub; Step 5 supplies
     // the real k8s launcher) — so this is the ONE construction site and no downstream rig has to re-insert
     // and clobber the boot-armed quiesce (RLM Step 4a — the E2E harness overwrite is gone).
-    let mut reconciler = RlmReconcilerRes::with_launch_seed(cfg.rlm, spawner, launch_seed);
+    // The arrival shield's leak bound is the ONE value that needs BOTH budgets — how long a hand-off can
+    // take (the saga deadlines) and how fast a realm can be reclaimed (the lifecycle windows). This is
+    // the only place they are both in scope, so it is derived here rather than guessed in either.
+    // An INERT reconciler leaves it at zero: a disarmed shield on a reconciler that never sweeps.
+    let rlm_tuning = vd_sim::rlm::RlmTuning {
+        arrival_shield_ticks: if cfg.rlm.reconcile_interval_ticks == 0 {
+            0
+        } else {
+            vd_sim::rlm::derive_arrival_shield_ticks(&cfg.rlm, &cfg.saga)
+        },
+        ..cfg.rlm
+    };
+    let mut reconciler = RlmReconcilerRes::with_launch_seed(rlm_tuning, spawner, launch_seed);
     // RLM Step 4a — arm the crash-recovery freeze on RECOVER (a no-op `arm_quiesce(0)` on GENESIS). Teardown
     // is blocked until `now >= rlm_quiesced_until`, so a rebuilt orchestrator with an empty demand ledger
     // never reaps a still-occupied realm before its parent's `KeepAlive` (or a login demand) re-accrues.
@@ -383,6 +395,8 @@ pub fn admin_snapshot(world: &mut bevy_ecs::prelude::World) -> vd_wire::admin::A
             desired_gauge: rlm.desired_gauge,
             running_gauge: rlm.running_gauge,
             boot_ticks_observed_max: rlm.boot_ticks_observed_max(),
+            arrival_shield_vetoes: rlm.arrival_shield_vetoes,
+            arrival_shield_gauge: rlm.arrival_shield_gauge,
         };
     }
     snapshot

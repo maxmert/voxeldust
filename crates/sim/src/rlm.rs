@@ -17,6 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use vd_core::pose::RealmId;
 use vd_core::realm_coord::RealmCoord;
 use vd_core::realm_path::RealmPath;
 use vd_core::{Fence, NodeId, UniverseTick};
@@ -56,6 +57,40 @@ pub struct RlmTuning {
     /// it). Its OWN knob (NOT the liveness/directory grace, which is sized for the dead-peer renewal
     /// cadence, a different clock). `0` in the inert default (nothing to freeze).
     pub recovery_grace_ticks: u64,
+    /// THE LEAK BOUND on the arrival shield: how long ONE pending hand-off may hold its destination
+    /// realm alive before the shield lifts LOUDLY and the realm becomes reapable again. `0` = the shield
+    /// is DISARMED (the inert default, and the honest reading of a budget nobody derived).
+    ///
+    /// This is NOT the safety mechanism — membership in the live hand-off set is, and that is zero ticks
+    /// wide by construction. The cap exists only so that a hand-off which is wedged rather than slow can
+    /// never pin a realm alive forever, which in a system meant for 100k players is one permanently
+    /// leaked realm per wedged hand-off. Derived, never a literal: see [`derive_arrival_shield_ticks`].
+    /// Left `0` by [`RlmTuning::cloud`] because the derivation needs the deployment's SAGA budget too;
+    /// the orchestrator fills it in at boot, where both budgets are in the same room.
+    pub arrival_shield_ticks: u64,
+}
+
+/// The number of post-commit phases a hand-off can DWELL in on its way to terminal, each bounded by one
+/// `redrive_deadline_ticks`. Durable: `Swapping → Demoting → Promoting → Releasing`. Transient: the four
+/// `BatchHandoff` phases. Pinned by `post_commit_dwell_count_matches_the_state_machine` in `saga.rs`, so
+/// adding a post-commit phase fails that test until this constant is re-decided.
+pub const POST_COMMIT_STEPS: u64 = 4;
+
+/// THE ARRIVAL-SHIELD BUDGET, derived from the two budgets that actually bound a hand-off — never a
+/// literal. It must comfortably outlast the worst HEALTHY post-commit completion, which is one
+/// destructive-abort budget plus one cheap re-drive per post-commit phase; and it must be longer than the
+/// reclaim window it is protecting against, or it could expire inside the very drain it exists to
+/// survive. `+ 1` makes that strict.
+#[must_use]
+pub fn derive_arrival_shield_ticks(rlm: &RlmTuning, saga: &crate::saga::SagaTuning) -> u64 {
+    let saga_budget = saga
+        .abort_deadline_ticks
+        .saturating_add(POST_COMMIT_STEPS.saturating_mul(saga.redrive_deadline_ticks));
+    let reclaim_floor = rlm
+        .teardown_drain_ticks
+        .saturating_add(rlm.teardown_cooldown_ticks)
+        .saturating_add(1);
+    saga_budget.max(reclaim_floor)
 }
 
 impl Default for RlmTuning {
@@ -71,6 +106,7 @@ impl Default for RlmTuning {
             launch_ttl_ticks: 0,
             reconcile_interval_ticks: 0,
             recovery_grace_ticks: 0,
+            arrival_shield_ticks: 0,
         }
     }
 }
@@ -119,6 +155,9 @@ impl RlmTuning {
             // ledger must let a parent's `KeepAlive` (or a login demand) re-accrue before any realm can be
             // reaped, so we hold teardown for exactly one demand TTL past the recovered ceiling.
             recovery_grace_ticks: demand_ttl,
+            // Filled in at boot by `derive_arrival_shield_ticks`, which needs the SAGA budget too. `0`
+            // here means the shield is disarmed, which is the honest state of a budget nobody derived.
+            arrival_shield_ticks: 0,
         }
     }
 
@@ -367,6 +406,13 @@ pub struct LedgerDelta {
     pub set_draining: BTreeMap<RealmPath, Option<UniverseTick>>,
     /// Retired paths — a dead, undesired, un-launching cell to drop (keeps the ledger bounded).
     pub retire: BTreeSet<RealmPath>,
+    /// REPORTED, NOT APPLIED (`apply_delta` ignores it): the realms a pending arrival is the SOLE
+    /// reason to keep alive this sweep — nothing else demanded them and they are not otherwise live-
+    /// and-occupied. Counting the shield BY NAME every time it is load-bearing is the answer to this
+    /// subsystem's history of silent guarantees: a wedged hand-off shows up as a climbing number
+    /// instead of as nothing at all. ZERO on every healthy sweep, including during a healthy crossing
+    /// (the source's own keep-alive already covers the destination while its latch is held).
+    pub arrival_shielded: BTreeSet<RealmPath>,
 }
 
 // ===== 4. THE LEAF PREDICATES (§1.4–1.6) — monomorphic, bitwise, take RESOLVED facts ==============
@@ -381,10 +427,16 @@ pub struct TeardownFacts {
     pub desired_in_closure: bool,
     /// Some desired descendant keeps this realm alive as its frame-authority ancestor.
     pub has_desired_descendant: bool,
-    /// The head is mid re-home saga (`in_transfer.is_some()`) — never reap a landing realm.
-    pub in_transfer: bool,
     /// The orchestrator-crash quiesce window has elapsed (`now >= rlm_quiesced_until`).
     pub quiesced: bool,
+    // RETIRED (slice 9c): there used to be an `in_transfer` clause here, meaning "do not shut this
+    // realm down, something is being handed over". Nothing in the running system ever set that flag on
+    // a REALM — the transfer lock is taken on the SUBJECT's key, and the commit CAS clears even that —
+    // so the clause was permanently true and shielded nothing, while the unit test that proved it
+    // load-bearing hand-built a value the real system cannot produce. Protecting a landing realm is now
+    // the arrival shield's job (`desired_alive`'s third arm), which is driven by the orchestrator's own
+    // list of in-progress hand-offs. See DEFERRED D-RLM-15 for the realm-keyed lock that would need a
+    // producer before anything like the old clause could return.
 }
 
 /// A realm has a LIVE lease: head present AND its owner is NOT latched-dead (BUG-A: a dead owner's lingering
@@ -450,22 +502,35 @@ pub fn empty_confirmed(cell: &LedgerCell, now: UniverseTick, grace: u64) -> bool
 /// THE desired-alive predicate (§1.5). Arm A = demand-driven (AoI OR player-spawn — source-agnostic). Arm
 /// B = LIVE and not affirmatively-empty (the NO-STRAND core: a live realm only LEAVES desired by saying
 /// `Empty`; demand-absence alone never un-desires it — a partitioned parent stops `KeepAlive`-ing but arm
-/// B holds). Bitwise (no short-circuit false-arm, HR5). `running_live` is resolved by the caller.
+/// B holds). Arm C = SOMEBODY IS ON THEIR WAY HERE (slice 9a): a hand-off the orchestrator itself is
+/// driving names this realm as its destination.
+///
+/// Arm C is deliberately a reason to WANT the realm alive rather than a veto on tearing it down, and that
+/// is the whole point: a want flows through the ancestor closure, so the destination's entire parent chain
+/// is held up with it. A veto would have left the player landing on a planet whose star system had just
+/// been shut down. It follows — argued explicitly, not hidden — that a pending arrival can also START a
+/// realm whose shard has vanished, through the same fenced minting path as any other demand. That is the
+/// correct self-heal for "your destination died while you were crossing", and it is a real action, not a
+/// passive refusal.
+///
+/// Bitwise (no short-circuit false-arm, HR5). `running_live` and `arrival_pending` are resolved by caller.
 #[must_use]
 pub fn desired_alive(
     cell: &LedgerCell,
     now: UniverseTick,
     tuning: &RlmTuning,
     running_live: bool,
+    arrival_pending: bool,
 ) -> bool {
     demanded_recently(cell, now, tuning.demand_ttl_ticks)
         | (running_live & !empty_confirmed(cell, now, tuning.empty_grace_ticks))
+        | arrival_pending
 }
 
 /// THE teardown-ready predicate (§1.6) — necessary-but-not-sufficient (the kill fires only after the drain,
 /// slice 3b). Every clause is a resolved boolean or a monomorphic arithmetic compare; bitwise `&` (HR5).
 /// A realm is reap-eligible ONLY when it is live, out of the whole AoI closure, affirmatively empty, past
-/// its boot+settle floor and its teardown cooldown, orphans no live child, is not mid-transfer, and the
+/// its boot+settle floor and its teardown cooldown, orphans no live child, and the
 /// crash-quiesce window has elapsed.
 #[must_use]
 pub fn teardown_ready(
@@ -483,7 +548,6 @@ pub fn teardown_ready(
         & past_dwell
         & past_cooldown
         & !facts.has_desired_descendant
-        & !facts.in_transfer
         & facts.quiesced
 }
 
@@ -590,18 +654,27 @@ pub fn reconcile(
     tuning: &RlmTuning,
     now: UniverseTick,
     quiesced_until: UniverseTick,
+    arriving: &BTreeSet<RealmId>,
 ) -> (Vec<LifecycleAction>, LedgerDelta) {
     // 1. The demand-driven / arm-B desired set (§1.5), then its ancestor-closure (§3.2).
+    let mut delta = LedgerDelta::default();
     let mut desired: BTreeMap<RealmPath, RealmCoord> = BTreeMap::new();
     for (path, cell) in ledger.iter() {
         let head = dir.head(DirectoryKey::Realm(cell.coord.lowered()));
-        if desired_alive(cell, now, tuning, running_live(head, liveness_dead)) {
+        let live = running_live(head, liveness_dead);
+        let arrival = arriving.contains(&cell.coord.lowered());
+        // Report the shield ONLY when the arrival is the SOLE reason this realm is wanted, so the
+        // counter's healthy baseline is zero and a non-zero reading always means something.
+        let otherwise_wanted = desired_alive(cell, now, tuning, live, false);
+        if arrival & !otherwise_wanted {
+            delta.arrival_shielded.insert(path.clone());
+        }
+        if desired_alive(cell, now, tuning, live, arrival) {
             desired.insert(path.clone(), cell.coord.clone());
         }
     }
     let closed = ancestor_close(&desired);
 
-    let mut delta = LedgerDelta::default();
     let mut force_reaps: Vec<LifecycleAction> = Vec::new();
     let mut spinups: Vec<LifecycleAction> = Vec::new();
     let mut kills: Vec<LifecycleAction> = Vec::new();
@@ -645,7 +718,6 @@ pub fn reconcile(
                     running_live: !liveness_dead(r.authority.node()),
                     desired_in_closure: closed.contains_key(path),
                     has_desired_descendant: has_desired_descendant(path, &closed),
-                    in_transfer: r.in_transfer.is_some(),
                     quiesced: now >= quiesced_until,
                 };
                 let ready = teardown_ready(cell, now, tuning, &facts);
@@ -720,7 +792,6 @@ mod tests {
             running_live,
             desired_in_closure: false,
             has_desired_descendant: false,
-            in_transfer: false,
             quiesced: true,
         }
     }
@@ -816,6 +887,7 @@ mod tests {
             spinup_cooldown_ticks: 1,
             launch_ttl_ticks: 1,
             recovery_grace_ticks: 1, // non-zero so `any_zero` passes and the reclaim-race check is reached
+            arrival_shield_ticks: 0,
         };
         assert_eq!(
             bad.validate(),
@@ -1039,11 +1111,12 @@ mod tests {
         let c = l.get(sys(7).path()).expect("cell present");
         let t = cloud();
         // Within TTL ⇒ desired even when NOT running (arm A).
-        assert!(desired_alive(c, UniverseTick(100), &t, false));
+        assert!(desired_alive(c, UniverseTick(100), &t, false, false));
         assert!(desired_alive(
             c,
             UniverseTick(100 + t.demand_ttl_ticks),
             &t,
+            false,
             false
         ));
         // Past TTL and not running ⇒ not desired.
@@ -1051,7 +1124,17 @@ mod tests {
             c,
             UniverseTick(101 + t.demand_ttl_ticks),
             &t,
+            false,
             false
+        ));
+        // ...unless somebody is on their way here (arm C): a pending hand-off wants it alive on its
+        // own, which is exactly what lets an arrival re-start a destination whose shard has vanished.
+        assert!(desired_alive(
+            c,
+            UniverseTick(101 + t.demand_ttl_ticks),
+            &t,
+            false,
+            true
         ));
     }
 
@@ -1065,9 +1148,9 @@ mod tests {
         let now = UniverseTick(10_000); // arm A long expired
         assert!(!demanded_recently(c, now, t.demand_ttl_ticks));
         // Arm B keeps it alive because it is running_live and never confirmed empty (NO-STRAND).
-        assert!(desired_alive(c, now, &t, true));
+        assert!(desired_alive(c, now, &t, true, false));
         // If it is NOT running, arm B is off ⇒ not desired.
-        assert!(!desired_alive(c, now, &t, false));
+        assert!(!desired_alive(c, now, &t, false, false));
     }
 
     #[test]
@@ -1164,8 +1247,8 @@ mod tests {
     fn teardown_ready_requires_every_clause() {
         let t = cloud();
         let mut l = DemandLedger::default();
-        // A realm that is live, FRESHLY empty (confirmed), past dwell + cooldown, orphans nothing, not in
-        // transfer. `now` is well past min_dwell (spawn_watermark 0); the Empty streak is within grace.
+        // A realm that is live, FRESHLY empty (confirmed), past dwell + cooldown, orphans nothing.
+        // `now` is well past min_dwell (spawn_watermark 0); the Empty streak is within grace.
         let now = UniverseTick(200);
         l.record_demand(&sys(7), DemandVerb::Empty, UniverseTick(195), Fence(1));
         let base = l.get(sys(7).path()).expect("cell present").clone();
@@ -1179,9 +1262,6 @@ mod tests {
         let mut has_desc = facts(true);
         has_desc.has_desired_descendant = true;
         assert!(!teardown_ready(&base, now, &t, &has_desc)); // a live child
-        let mut transferring = facts(true);
-        transferring.in_transfer = true;
-        assert!(!teardown_ready(&base, now, &t, &transferring)); // mid re-home
         let mut not_quiesced = facts(true);
         not_quiesced.quiesced = false;
         assert!(!teardown_ready(&base, now, &t, &not_quiesced)); // crash quiesce
@@ -1240,6 +1320,12 @@ mod tests {
         BTreeMap::new()
     }
 
+    /// No hand-off is delivering anyone anywhere — the state of a cluster with no crossing in flight,
+    /// which is what every pre-existing lifecycle scenario assumed and still gets.
+    fn no_arrivals() -> BTreeSet<RealmId> {
+        BTreeSet::new()
+    }
+
     // Lineage helpers for the ancestor tests: a Planet nested [U,G,System(7),Planet(3)].
     fn u_root() -> RealmCoord {
         deep(&[(RealmKindTag::Universe, 0)])
@@ -1277,6 +1363,7 @@ mod tests {
             &t,
             UniverseTick(100),
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert_eq!(actions, vec![LifecycleAction::SpinUp { coord: sys(7) }]);
         assert!(delta.set_draining.is_empty());
@@ -1297,6 +1384,7 @@ mod tests {
             &t,
             UniverseTick(100),
             UniverseTick(0),
+            &no_arrivals(),
         );
         // The whole chain spins up, ancestor-first (a shorter path prefix sorts before its extension).
         assert_eq!(
@@ -1342,6 +1430,7 @@ mod tests {
             &t,
             UniverseTick(100),
             UniverseTick(0),
+            &no_arrivals(),
         );
         // EXACTLY 5 SpinUps, ancestor-first, coord-for-coord — the whole Universe→Area chain from ONE leaf.
         // (All-SpinUp ⇒ no ForceReap/Kill.) The comparison is over the FULL `.path()` per level (each `deep`
@@ -1395,6 +1484,7 @@ mod tests {
             &t,
             UniverseTick(100),
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert!(
             actions.is_empty(),
@@ -1418,6 +1508,7 @@ mod tests {
             &t,
             UniverseTick(105),
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert!(early.is_empty());
         // past the cooldown (a silent-failed launch) ⇒ re-spawn (self-heal).
@@ -1429,6 +1520,7 @@ mod tests {
             &t,
             UniverseTick(100 + t.spinup_cooldown_ticks),
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert_eq!(late, vec![LifecycleAction::SpinUp { coord: sys(7) }]);
     }
@@ -1448,6 +1540,7 @@ mod tests {
             &t,
             UniverseTick(100),
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert_eq!(
             reap,
@@ -1466,6 +1559,7 @@ mod tests {
             &t,
             UniverseTick(100),
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert!(quiet.is_empty());
     }
@@ -1491,6 +1585,7 @@ mod tests {
             &t,
             now,
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert!(
             a.is_empty(),
@@ -1513,6 +1608,7 @@ mod tests {
             &t,
             UniverseTick(now.0 + 1),
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert!(b.is_empty(), "a rescuing demand aborts the kill (BUG-C)");
         assert_eq!(
@@ -1554,6 +1650,7 @@ mod tests {
             &t,
             now,
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert_eq!(
             actions,
@@ -1563,6 +1660,290 @@ mod tests {
                 fence: Fence(3),
             }]
         );
+    }
+
+    /// The exact fixture of [`reconcile_kills_after_the_drain_window_elapses`]: a live realm that has
+    /// gone affirmatively empty, is out of everyone's area of interest, and has sat out its drain.
+    fn drained_empty_realm(t: &RlmTuning, now: UniverseTick) -> DemandLedger {
+        let mut l = DemandLedger::default();
+        l.record_demand(
+            &sys(7),
+            DemandVerb::Empty,
+            UniverseTick(now.0 - 2),
+            Fence(1),
+        );
+        let mut open = LedgerDelta::default();
+        open.set_draining.insert(
+            sys(7).path().clone(),
+            Some(UniverseTick(now.0 - t.teardown_drain_ticks)),
+        );
+        l.apply_delta(&open);
+        l
+    }
+
+    /// Whether a hand-off in this phase is PAST the commit point and still short of terminal — the
+    /// phases whose dwell the arrival shield's budget has to cover. EXHAUSTIVE with no wildcard, so a
+    /// new phase does not compile until someone decides which side of the commit it falls on.
+    fn is_post_commit_dwell(s: &crate::saga::SagaState) -> bool {
+        use crate::saga::SagaState as S;
+        match s {
+            S::Swapping { .. } | S::Demoting { .. } | S::Promoting { .. } | S::Releasing { .. } => {
+                true
+            }
+            S::AwaitProvision
+            | S::Preparing
+            | S::Cutting
+            | S::Freezing { .. }
+            | S::CommittingCas { .. }
+            | S::BatchCommitting { .. }
+            // The transient tail is counted through its OWN phase enum below, not here.
+            | S::BatchHandoff { .. }
+            // A re-home never shields, so its dwell is not the shield's to cover.
+            | S::ReHoming { .. }
+            | S::Done { .. }
+            | S::Aborting { .. }
+            | S::Aborted { .. } => false,
+        }
+    }
+
+    #[test]
+    fn post_commit_steps_is_recounted_from_the_state_machine() {
+        use crate::saga::{BatchHandoffPhase as P, SagaState as S};
+        // The constant the shield's budget is sized from is RECOUNTED here from the machine itself,
+        // rather than trusted. Adding a phase breaks the exhaustive match above and this array, so the
+        // budget cannot silently stop covering a hand-off that grew a step.
+        let all = [
+            S::AwaitProvision,
+            S::Preparing,
+            S::Cutting,
+            S::Freezing {
+                marker_seq: 1,
+                frozen_drained: None,
+                flushed: false,
+            },
+            S::CommittingCas {
+                marker_seq: 1,
+                drained_seq: 1,
+            },
+            S::BatchCommitting { step_id: 1 },
+            S::BatchHandoff {
+                phase: P::AwaitAdopt,
+                new_fence: Fence(2),
+            },
+            S::Swapping {
+                new_fence: Fence(2),
+            },
+            S::Demoting {
+                new_fence: Fence(2),
+                dest_delivered: false,
+            },
+            S::Promoting {
+                new_fence: Fence(2),
+                promote_acked: false,
+                dest_delivered: false,
+                rehome_target: None,
+            },
+            S::Releasing {
+                new_fence: Fence(2),
+            },
+            S::ReHoming {
+                target: NodeId(1),
+                prev_fence: Fence(1),
+            },
+            S::Done {
+                new_fence: Fence(2),
+            },
+            S::Aborting {
+                reason: crate::saga::AbortReason::CasLost,
+                awaiting_thaw: false,
+                awaiting_abort_ack: false,
+            },
+            S::Aborted {
+                reason: crate::saga::AbortReason::CasLost,
+            },
+        ];
+        let durable = all.iter().filter(|s| is_post_commit_dwell(s)).count() as u64;
+        assert_eq!(durable, POST_COMMIT_STEPS, "the durable post-commit tail");
+
+        // The transient tail's four phases live inside ONE state, so they are counted separately.
+        let transient = [
+            P::AwaitAdopt,
+            P::AwaitRelease,
+            P::AwaitPromote,
+            P::AwaitComplete,
+        ];
+        assert_eq!(
+            transient.len() as u64,
+            POST_COMMIT_STEPS,
+            "the transient batch tail is the same length — one constant covers both (HR2)"
+        );
+    }
+
+    #[test]
+    fn the_arrival_shield_budget_outlasts_the_window_it_protects_against() {
+        // The invariant that makes the shield useful rather than decorative: its budget must span the
+        // whole window in which an unshielded realm would be reclaimed, or it could expire inside the
+        // very drain it exists to survive.
+        let rlm = cloud();
+        let saga = crate::saga::SagaTuning::default();
+        let cap = derive_arrival_shield_ticks(&rlm, &saga);
+        assert!(
+            cap > rlm.teardown_drain_ticks + rlm.teardown_cooldown_ticks,
+            "shield budget {cap} must outlast drain {} + cooldown {}",
+            rlm.teardown_drain_ticks,
+            rlm.teardown_cooldown_ticks
+        );
+        // And it must cover the worst HEALTHY completion: one destructive-abort budget plus a cheap
+        // re-drive for every post-commit phase.
+        assert!(
+            cap >= saga.abort_deadline_ticks + POST_COMMIT_STEPS * saga.redrive_deadline_ticks
+        );
+        // A deployment whose transfer budget is tiny still cannot get a shield shorter than the
+        // reclaim floor — the `max` is what stops a misconfigured saga budget disarming the shield.
+        let tiny = crate::saga::SagaTuning {
+            redrive_deadline_ticks: 1,
+            abort_deadline_ticks: 1,
+        };
+        assert_eq!(
+            derive_arrival_shield_ticks(&rlm, &tiny),
+            rlm.teardown_drain_ticks + rlm.teardown_cooldown_ticks + 1
+        );
+    }
+
+    #[test]
+    fn the_inert_default_leaves_the_arrival_shield_disarmed() {
+        // A reconciler that never sweeps carries no shield budget — zero, not a guessed number.
+        assert_eq!(RlmTuning::default().arrival_shield_ticks, 0);
+        assert_eq!(cloud().arrival_shield_ticks, 0, "derived at boot, not here");
+    }
+
+    #[test]
+    fn an_arrival_holds_the_realm_the_same_fixture_would_have_killed() {
+        // THE FLIP, at the kernel. The same drained, empty, out-of-everyone's-interest realm that gets
+        // killed in the test above is NOT killed once a hand-off is delivering somebody into it — and
+        // it is reported by name, because the arrival is the sole reason it is still standing.
+        let t = cloud();
+        let d = dir(&[(RealmId::System(7), 9, 3)]);
+        let now = UniverseTick(500);
+        let l = drained_empty_realm(&t, now);
+        let (actions, delta) = reconcile(
+            &l,
+            &d,
+            &|_n: NodeId| false,
+            &no_launch(),
+            &t,
+            now,
+            UniverseTick(0),
+            &BTreeSet::from([RealmId::System(7)]),
+        );
+        assert_eq!(
+            actions,
+            vec![],
+            "no kill: somebody is on their way here"
+        );
+        assert_eq!(
+            delta.arrival_shielded,
+            BTreeSet::from([sys(7).path().clone()]),
+            "and the shield is named, because nothing else was keeping this realm alive"
+        );
+    }
+
+    #[test]
+    fn an_arrival_holds_the_destinations_whole_parent_chain() {
+        // Why the arrival is a REASON TO WANT rather than a veto on tearing down: a want flows through
+        // the ancestor closure, so the destination's parents are held up with it. A veto would have let
+        // the player land on a planet whose star system had just been shut down.
+        let t = cloud();
+        // Both the planet and its parent system are live, drained and empty — reapable on their own.
+        let d = dir(&[(RealmId::System(7), 9, 3), (RealmId::Planet(3), 11, 3)]);
+        let now = UniverseTick(500);
+        let mut l = DemandLedger::default();
+        for c in [u_g_s(), u_g_s_p()] {
+            l.record_demand(&c, DemandVerb::Empty, UniverseTick(now.0 - 2), Fence(1));
+            let mut open = LedgerDelta::default();
+            open.set_draining.insert(
+                c.path().clone(),
+                Some(UniverseTick(now.0 - t.teardown_drain_ticks)),
+            );
+            l.apply_delta(&open);
+        }
+        let (actions, _delta) = reconcile(
+            &l,
+            &d,
+            &|_n: NodeId| false,
+            &no_launch(),
+            &t,
+            now,
+            UniverseTick(0),
+            &BTreeSet::from([RealmId::Planet(3)]),
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, LifecycleAction::Kill { .. }))
+                .count(),
+            0,
+            "neither the planet being arrived at NOR the star system holding it is reaped"
+        );
+        // The other half of "a want, not a veto", and worth naming: the arrival pulls the destination's
+        // WHOLE lineage into the desired set, so the ancestors above it that are not running get spun
+        // up rather than merely spared. That is a real action taken because of a hand-off, accepted
+        // deliberately — a player must have an entire chain of places to arrive into, not just a leaf.
+        assert_eq!(
+            actions,
+            vec![
+                LifecycleAction::SpinUp { coord: u_root() },
+                LifecycleAction::SpinUp { coord: u_g() },
+            ],
+            "the missing ancestors above the destination are started, ancestor-first"
+        );
+    }
+
+    #[test]
+    fn an_arrival_at_a_realm_someone_else_already_wants_is_not_reported() {
+        // The counter's healthy baseline is ZERO. During a healthy crossing the source shard's own
+        // keep-alive already holds the destination up, so the shield is not load-bearing and says
+        // nothing — which is what makes a NON-zero reading meaningful rather than routine.
+        let t = cloud();
+        let d = dir(&[(RealmId::System(7), 9, 3)]);
+        let now = UniverseTick(500);
+        let mut l = DemandLedger::default();
+        l.record_demand(&sys(7), DemandVerb::KeepAlive, now, Fence(1));
+        let (_actions, delta) = reconcile(
+            &l,
+            &d,
+            &|_n: NodeId| false,
+            &no_launch(),
+            &t,
+            now,
+            UniverseTick(0),
+            &BTreeSet::from([RealmId::System(7)]),
+        );
+        assert_eq!(delta.arrival_shielded, BTreeSet::new());
+    }
+
+    #[test]
+    fn reconcile_is_run_twice_identical_with_an_arriving_set() {
+        // The decision stays a pure function of its inputs: same ledger, same directory, same arrivals
+        // ⇒ same actions and the same report, every time.
+        let t = cloud();
+        let d = dir(&[(RealmId::System(7), 9, 3)]);
+        let now = UniverseTick(500);
+        let l = drained_empty_realm(&t, now);
+        let arriving = BTreeSet::from([RealmId::System(7)]);
+        let run = || {
+            reconcile(
+                &l,
+                &d,
+                &|_n: NodeId| false,
+                &no_launch(),
+                &t,
+                now,
+                UniverseTick(0),
+                &arriving,
+            )
+        };
+        assert_eq!(run(), run());
     }
 
     #[test]
@@ -1605,6 +1986,7 @@ mod tests {
             &t,
             now,
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert!(killed.contains(&kill));
         // WITH a KeepAlive demand for the dest at `now` → it is desired → ancestor_close keeps its whole
@@ -1619,6 +2001,7 @@ mod tests {
             &t,
             now,
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert!(!protected.contains(&kill));
     }
@@ -1654,6 +2037,7 @@ mod tests {
             &t,
             now,
             UniverseTick(0),
+            &no_arrivals(),
         );
         // The child (longer path) is reaped BEFORE its parent — never orphan a live child.
         assert_eq!(
@@ -1700,6 +2084,7 @@ mod tests {
             &t,
             now,
             UniverseTick(0),
+            &no_arrivals(),
         );
         // The System is NOT reaped (has a desired descendant); the Planet + its intermediate ancestors
         // that are not yet running get spun up. Crucially: no Kill for the System.
@@ -1731,6 +2116,7 @@ mod tests {
             &t,
             UniverseTick(10_000),
             UniverseTick(0),
+            &no_arrivals(),
         );
         assert!(actions.is_empty());
         assert_eq!(
@@ -1765,6 +2151,7 @@ mod tests {
             &t,
             now,
             UniverseTick(now.0 + 100),
+            &no_arrivals(),
         );
         assert!(actions.is_empty());
         assert!(
@@ -1789,6 +2176,7 @@ mod tests {
                 &t,
                 UniverseTick(500),
                 UniverseTick(0),
+                &no_arrivals(),
             )
         };
         assert_eq!(run(), run());
@@ -2166,6 +2554,7 @@ mod tests {
                             &t,
                             UniverseTick(now),
                             UniverseTick(quiesced_until),
+                            &BTreeSet::new(),
                         );
                         let in_freeze = now < quiesced_until;
                         let mut kills: BTreeSet<RealmPath> = BTreeSet::new();

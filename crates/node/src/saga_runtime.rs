@@ -38,7 +38,7 @@
 //! half-open — owed, P3) nor an orchestrator CRASH (no durable WAL, D-6). (Caught by Slice-1b audit
 //! CPO-1/CPO-2 + Slice-2a design `wf_9f22c70d`.)
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use serde::{Deserialize, Serialize};
@@ -264,6 +264,61 @@ struct LiveSaga {
     /// freeze), so no discard can fire until fresh notices re-accrue, and the dest's per-tick `BatchAdopted`
     /// re-drive re-establishes the latch long before then.
     dest_adopted: bool,
+    /// The universe tick this saga was INSERTED — the age anchor for the arrival shield's leak bound.
+    /// Deliberately NOT [`LiveSaga::since`], which `scan_deadlines` re-arms to `now` on every re-drive:
+    /// anchoring the cap there would refresh the shield forever on exactly the wedged saga the cap exists
+    /// to bound. RAM-ONLY (not in [`SagaSnapshot`]) — a rehydrated saga re-derives it to the recovered
+    /// clock, the established precedent of `dead_observed_since`/`dest_adopted`, so a restart grants a
+    /// fresh budget rather than instantly expiring a recovered arrival.
+    opened: UniverseTick,
+}
+
+/// One hand-off whose arrival shield ran out of budget — reported so the lift is LOUD. Carries what a
+/// 2am operator needs to find it: which transfer, which realm it was holding, what phase it is stuck in,
+/// and for how long.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpiredArrival {
+    pub transfer: TransferId,
+    pub realm: RealmId,
+    pub state: String,
+    pub age_ticks: u64,
+}
+
+/// THE ARRIVAL CLASSIFIER: the realm this saga is currently delivering its subject INTO, or `None` if
+/// nobody is on their way anywhere because of it. EXHAUSTIVE with no wildcard — a new saga shape does
+/// not compile until someone decides which side of this line it falls on.
+///
+/// `None` for the three terminal/compensating shapes (a compensating saga sends the subject BACK to the
+/// source, so the shield must drop immediately rather than after a timeout), and `None` for the two
+/// RE-HOME shapes. A re-home is a recovery hand-off between MACHINES, not a move between PLACES: the
+/// standing re-home fabricates its realm fields ([`rehome_ctx`]'s `PLACEHOLDERS` — an entity-derived
+/// `System(entity)` that names no real realm) and parks indefinitely by design, so including it would
+/// pin one garbage realm alive forever per orphaned entity on the first machine failure; and a crossing
+/// that DEGRADED into a re-home is re-targeting away from a destination whose node is already confirmed
+/// dead, where the zombie force-reap must be allowed to run.
+fn arrival_dest(live: &LiveSaga) -> Option<RealmId> {
+    match live.state {
+        SagaState::Aborting { .. } | SagaState::Aborted { .. } | SagaState::Done { .. } => None,
+        SagaState::ReHoming { .. }
+        | SagaState::Promoting {
+            rehome_target: Some(_),
+            ..
+        } => None,
+        SagaState::AwaitProvision
+        | SagaState::Preparing
+        | SagaState::Cutting
+        | SagaState::Freezing { .. }
+        | SagaState::CommittingCas { .. }
+        | SagaState::BatchCommitting { .. }
+        | SagaState::BatchHandoff { .. }
+        | SagaState::Swapping { .. }
+        | SagaState::Demoting { .. }
+        | SagaState::Promoting {
+            rehome_target: None,
+            ..
+        }
+        | SagaState::Releasing { .. } => Some(live.ctx.to_realm),
+    }
 }
 
 /// A pending create-on-trigger. Enqueued by [`SagaRuntimeRes::start_transfer`] and processed
@@ -633,6 +688,51 @@ impl SagaRuntimeRes {
     #[must_use]
     pub fn live(&self) -> usize {
         self.sagas.len()
+    }
+
+    /// THE ARRIVAL SET — every realm a live hand-off is currently delivering someone INTO, so the
+    /// lifecycle reconciler can refuse to shut down a place somebody is on their way to.
+    ///
+    /// DERIVED fresh from the live sagas on every call, never stored. That is the whole safety argument:
+    /// there is no clearing path to forget, no eviction rule, and no second source of truth that could
+    /// disagree. When `commit_result` tombstones a saga the realm leaves this set on the same sweep, for
+    /// free; when a crossing aborts, [`arrival_dest`] classifies it out immediately rather than after a
+    /// timeout; and because the saga snapshot persists its whole context, the set re-forms on the first
+    /// sweep after an orchestrator restart. The fact and the thing that needs the fact are the same
+    /// object, in the same process, on the same tick — there is no message to lose and no race to win.
+    /// `max_age` is the leak bound: a single hand-off may hold its destination for that many ticks and
+    /// no longer. `0` DISARMS the shield entirely (the inert default). Expiry is evaluated PER HAND-OFF,
+    /// not per realm, so one wedged crossing cannot drag down every other arrival at a busy destination.
+    /// Returns the shielded realms plus every hand-off whose budget ran out, so the caller can say so
+    /// loudly rather than dropping a player's protection in silence.
+    #[must_use]
+    pub fn arriving_dest_realms(
+        &self,
+        now: UniverseTick,
+        max_age: u64,
+    ) -> (BTreeSet<RealmId>, Vec<ExpiredArrival>) {
+        let mut shielded = BTreeSet::new();
+        let mut expired = Vec::new();
+        if max_age == 0 {
+            return (shielded, expired); // disarmed
+        }
+        for (transfer, live) in &self.sagas {
+            let Some(realm) = arrival_dest(live) else {
+                continue;
+            };
+            let age = now.0.saturating_sub(live.opened.0);
+            if age > max_age {
+                expired.push(ExpiredArrival {
+                    transfer: *transfer,
+                    realm,
+                    state: format!("{:?}", live.state),
+                    age_ticks: age,
+                });
+            } else {
+                shielded.insert(realm);
+            }
+        }
+        (shielded, expired)
     }
 
     /// Operator-facing view of every live (in-flight) saga — the admin snapshot's
@@ -1427,6 +1527,9 @@ pub(crate) fn rehydrate(
                 // restart never fires an immediate irreversible abandon; the RAM tracker is also empty).
                 dead_observed_since: None,
                 dest_adopted: false,
+                // The recovered clock IS this restart's `now`, so a rehydrated arrival starts its shield
+                // budget fresh here rather than at the `0` that would expire it on the first sweep.
+                opened: ceiling,
             },
         );
     }
@@ -1667,6 +1770,7 @@ fn process_starts(
                 flushed_pose: None, // filled when the source flushes (after Freezing)
                 dead_observed_since: None,
                 dest_adopted: false,
+                opened: now,
             },
         );
         // Durable start = PrepareSubscribe (no EmitCrossing yet); transient start = the go-token
@@ -2021,6 +2125,7 @@ fn process_rehome_starts(
                 flushed_pose: None, // HR1: the dead owner's store is sealed; the adopt pose is owed Slice 4
                 dead_observed_since: None,
                 dest_adopted: false,
+                opened: now,
             },
         );
         // Parks immediately (start_rehome emits no actions); run_to_quiescence + commit_result PERSIST the
@@ -3276,6 +3381,7 @@ mod tests {
                     flushed_pose: None,
                     dead_observed_since: None,
                     dest_adopted: false,
+                    opened: UniverseTick(0),
                 },
             );
         }
@@ -3908,6 +4014,38 @@ mod tests {
                 .head(subject())
                 .is_none(),
             "the revoked record is NOT resurrected by rehydrate (COMP-2: the barrier durably deleted it)"
+        );
+    }
+
+    #[test]
+    fn rehydrate_restores_the_arrival_shield_set() {
+        // RESTART-SAFE WITHOUT EXTRA WORK: the shield needs no durable family of its own, because the
+        // saga snapshot already persists the whole context including where the subject is going. A
+        // rebuilt orchestrator re-derives the identical arrival set on its first sweep — so a crash
+        // mid-crossing cannot leave a landing realm unprotected.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        rig.trigger(ctx(vd_core::entity_kind::DurabilityClass::Durable, Fence(1)));
+        rig.settle();
+        assert_eq!(
+            rig.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .arriving_dest_realms(UniverseTick(1), u64::MAX)
+                .0,
+            BTreeSet::from([TO_REALM]),
+            "the live crossing shields its destination before the crash"
+        );
+
+        rig.rebuild(); // KILL-9: the World's RAM is gone; only the committed WAL survives
+        assert_eq!(
+            rig.orch
+                .world_mut()
+                .resource::<SagaRuntimeRes>()
+                .arriving_dest_realms(UniverseTick(1), u64::MAX)
+                .0,
+            BTreeSet::from([TO_REALM]),
+            "and it shields the SAME destination after the rebuild, re-derived from the snapshot"
         );
     }
 
@@ -4548,6 +4686,7 @@ mod tests {
                 flushed_pose: None,
                 dead_observed_since: None,
                 dest_adopted: false,
+                opened: UniverseTick(0),
             },
         );
         assert_eq!(
@@ -4558,6 +4697,176 @@ mod tests {
                 dest: DEST,
             }],
         );
+    }
+
+    /// Build a live saga in `state` for the arrival-classifier tests.
+    fn live_in(state: SagaState, class: vd_core::entity_kind::DurabilityClass) -> LiveSaga {
+        LiveSaga {
+            ctx: ctx(class, Fence(1)),
+            state,
+            gateway: GATEWAY,
+            since: UniverseTick(0),
+            flushed_pose: None,
+            dead_observed_since: None,
+            dest_adopted: false,
+            opened: UniverseTick(0),
+        }
+    }
+
+    #[test]
+    fn arrival_dest_classifies_every_saga_shape() {
+        use vd_core::entity_kind::DurabilityClass::Durable;
+        // THE classification table. Every variant of the phase enum appears exactly once, so adding a
+        // phase without deciding whether someone is arriving during it breaks this test AND the
+        // wildcard-free match. `Done`/`Aborted` are unreachable through the live system (they tombstone
+        // in the same barrier they are reached in) — they are covered here or nowhere.
+        let arriving = [
+            SagaState::AwaitProvision,
+            SagaState::Preparing,
+            SagaState::Cutting,
+            SagaState::Freezing {
+                marker_seq: 1,
+                frozen_drained: None,
+                flushed: false,
+            },
+            SagaState::CommittingCas {
+                marker_seq: 1,
+                drained_seq: 1,
+            },
+            SagaState::BatchCommitting {
+                step_id: vd_wire::intershard::TRANSIENT_BATCH_STEP,
+            },
+            SagaState::BatchHandoff {
+                phase: BatchHandoffPhase::AwaitAdopt,
+                new_fence: Fence(2),
+            },
+            SagaState::Swapping {
+                new_fence: Fence(2),
+            },
+            SagaState::Demoting {
+                new_fence: Fence(2),
+                dest_delivered: false,
+            },
+            SagaState::Promoting {
+                new_fence: Fence(2),
+                promote_acked: false,
+                dest_delivered: false,
+                rehome_target: None,
+            },
+            SagaState::Releasing {
+                new_fence: Fence(2),
+            },
+        ];
+        for state in arriving {
+            assert_eq!(
+                arrival_dest(&live_in(state, Durable)),
+                Some(TO_REALM),
+                "somebody is on their way into the destination during {state:?}"
+            );
+        }
+
+        let not_arriving = [
+            // Compensating / terminal: the subject is going back to the source, or is already settled.
+            SagaState::Aborting {
+                reason: AbortReason::CasLost,
+                awaiting_thaw: false,
+                awaiting_abort_ack: false,
+            },
+            SagaState::Aborted {
+                reason: AbortReason::CasLost,
+            },
+            SagaState::Done {
+                new_fence: Fence(2),
+            },
+            // Re-home: a hand-off between MACHINES, not between PLACES.
+            SagaState::ReHoming {
+                target: DEST,
+                prev_fence: Fence(1),
+            },
+            SagaState::Promoting {
+                new_fence: Fence(2),
+                promote_acked: false,
+                dest_delivered: false,
+                rehome_target: Some(DEST),
+            },
+        ];
+        for state in not_arriving {
+            assert_eq!(
+                arrival_dest(&live_in(state, Durable)),
+                None,
+                "no arrival is pending during {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn arriving_dest_realms_excludes_a_parked_rehome_saga() {
+        // THE LEAK THAT WOULD HAVE SHIPPED. A standing re-home fabricates its realm fields and parks
+        // indefinitely BY DESIGN, so a naive "every live saga's destination" projection would pin one
+        // made-up realm alive forever per orphaned entity, starting at the first machine failure.
+        let mut rt = SagaRuntimeRes::default();
+        rt.sagas.insert(
+            XFER,
+            LiveSaga {
+                ctx: rehome_ctx(subject(), Fence(1), SOURCE, DEST),
+                state: SagaState::ReHoming {
+                    target: DEST,
+                    prev_fence: Fence(1),
+                },
+                gateway: SOURCE,
+                since: UniverseTick(0),
+                flushed_pose: None,
+                dead_observed_since: None,
+                dest_adopted: false,
+                opened: UniverseTick(0),
+            },
+        );
+        assert_eq!(rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0, BTreeSet::new());
+    }
+
+    #[test]
+    fn arriving_dest_realms_includes_a_transient_batch_dest() {
+        // The gap the source-side keep-alive never covered at all: a batch of non-persistent things
+        // (dropped items, debris) crossing over has no per-entity latch, so nothing was demanding its
+        // destination. The shield is class-blind — ONE machinery, both durability classes (HR2).
+        let mut rt = SagaRuntimeRes::default();
+        rt.sagas.insert(
+            XFER,
+            live_in(
+                SagaState::BatchHandoff {
+                    phase: BatchHandoffPhase::AwaitPromote,
+                    new_fence: Fence(2),
+                },
+                vd_core::entity_kind::DurabilityClass::Transient,
+            ),
+        );
+        assert_eq!(
+            rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0,
+            BTreeSet::from([TO_REALM]),
+            "a transient batch's destination is shielded exactly like a player's"
+        );
+    }
+
+    #[test]
+    fn arriving_dest_realms_is_empty_after_the_saga_tombstones() {
+        // The shield has no clearing path to forget because it is derived, not stored: the same
+        // `remove` that tombstones the saga retires the shield, in the same barrier, for free.
+        let mut rt = SagaRuntimeRes::default();
+        rt.sagas.insert(
+            XFER,
+            live_in(
+                SagaState::Promoting {
+                    new_fence: Fence(2),
+                    promote_acked: false,
+                    dest_delivered: false,
+                    rehome_target: None,
+                },
+                vd_core::entity_kind::DurabilityClass::Durable,
+            ),
+        );
+        assert_eq!(rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0, BTreeSet::from([TO_REALM]));
+        rt.sagas.remove(&XFER);
+        assert_eq!(rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0, BTreeSet::new());
     }
 
     #[test]
@@ -4650,6 +4959,7 @@ mod tests {
                 flushed_pose: None,
                 dead_observed_since: None,
                 dest_adopted: false,
+                opened: UniverseTick(0),
             },
         );
     }
@@ -6541,6 +6851,7 @@ mod tests {
                 flushed_pose: None,
                 dead_observed_since: None,
                 dest_adopted: false,
+                opened: UniverseTick(0),
             },
         );
     }

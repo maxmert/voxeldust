@@ -103,6 +103,12 @@ pub struct RlmView {
     /// The MAX observed launch→head-up latency in universe ticks (monotone). The measured pod boot the
     /// launch-TTL is tuned from (`VD_BOOT_TICKS_P99`, 5f-4j); 0 until a demand-spawned head first appears.
     pub boot_ticks_observed_max: u64,
+    /// MONOTONE count of realm-sweeps where a pending hand-off was the SOLE reason a realm stayed alive
+    /// — the arrival shield, counted by name. ZERO on every healthy run; a climbing value is the visible
+    /// signature of a hand-off that is wedged rather than merely slow.
+    pub arrival_shield_vetoes: u64,
+    /// How many realms the arrival shield is holding up right now (last sweep's gauge).
+    pub arrival_shield_gauge: u64,
 }
 
 /// The gateway's session/routing honesty counters + live gauges (RLM RG-4; the gateway half of the ledgered
@@ -421,6 +427,8 @@ mod tests {
                 desired_gauge: 3,
                 running_gauge: 2,
                 boot_ticks_observed_max: 37,
+                arrival_shield_vetoes: 5,
+                arrival_shield_gauge: 6,
             },
             // Every field a DISTINCT value so the round-trip catches a transposition.
             gateway: Some(GatewayView {

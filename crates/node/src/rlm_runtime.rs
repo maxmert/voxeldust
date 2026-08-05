@@ -9,7 +9,7 @@
 //! INERT by default: with `RlmTuning::reconcile_interval_ticks == 0` the reconcile sweep never runs, so an
 //! orchestrator that does not opt in is byte-identical (the walk/canonical gate).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use vd_sim::directory::{DirectoryCore, RevokeOutcome};
@@ -21,6 +21,7 @@ use vd_sim::runtime::InboundBox;
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::DirectoryKey;
 
+use vd_core::pose::RealmId;
 use vd_core::realm_coord::RealmCoord;
 use vd_core::realm_path::RealmPath;
 use vd_core::{Fence, NodeId, UniverseTick};
@@ -113,6 +114,20 @@ pub struct RlmReconcilerRes {
     /// the launch-TTL is tuned from (`VD_BOOT_TICKS_P99`, 5f-4j); 0 until a demand-spawned head first
     /// appears. Surfaced in the admin snapshot (RlmView).
     boot_ticks_observed_max: u64,
+    /// MONOTONE total of realm-sweeps where a pending arrival was the SOLE reason a realm stayed alive.
+    /// ZERO on every healthy run — a healthy crossing's destination is already held up by the source
+    /// shard's own keep-alive, so this only moves when that cover has lapsed and the arrival is genuinely
+    /// the last thing standing between a player and a reaped destination.
+    pub arrival_shield_vetoes: u64,
+    /// How many realms the arrival shield is holding up RIGHT NOW (last sweep's gauge).
+    pub arrival_shield_gauge: u64,
+    /// MONOTONE count of hand-offs whose arrival shield ran out of budget and was lifted. `> 0` means a
+    /// hand-off is wedged and a player may have been dropped onto the orphan-recovery path — the loudest
+    /// number in this struct, and 0 in every healthy run.
+    pub arrivals_shield_expired: u64,
+    /// Which hand-offs have already been alarmed about, so a wedged one alarms once rather than every
+    /// sweep forever. Pruned each sweep to the still-expiring set — bounded by the live saga count.
+    arrivals_shield_expired_seen: std::collections::BTreeSet<vd_core::TransferId>,
 }
 
 impl RlmReconcilerRes {
@@ -158,6 +173,10 @@ impl RlmReconcilerRes {
             desired_gauge: 0,
             running_gauge: 0,
             boot_ticks_observed_max: 0,
+            arrival_shield_vetoes: 0,
+            arrival_shield_gauge: 0,
+            arrivals_shield_expired: 0,
+            arrivals_shield_expired_seen: std::collections::BTreeSet::new(),
         }
     }
 
@@ -172,6 +191,34 @@ impl RlmReconcilerRes {
     #[must_use]
     pub fn ledger(&self) -> &DemandLedger {
         &self.ledger
+    }
+
+    /// LIFT THE SHIELD LOUDLY. A hand-off that has held its destination past the whole derived budget is
+    /// not slow, it is wedged; its protection is withdrawn so the realm can be reclaimed, and the player
+    /// falls back to the orphan-recovery path that already exists for someone whose owner is gone. This
+    /// is the failure mode chosen deliberately over pinning one realm forever per wedged hand-off.
+    ///
+    /// Alarms ONCE per hand-off, not once per sweep: a wedged saga re-reports every tick forever, and an
+    /// error line per tick is how a real alarm gets muted by the people who need to see it. The set of
+    /// already-alarmed transfers is pruned to the ones still expiring, so it cannot grow without bound.
+    pub fn report_expired_arrivals(&mut self, expired: &[crate::saga_runtime::ExpiredArrival]) {
+        for e in expired {
+            if self.arrivals_shield_expired_seen.insert(e.transfer) {
+                self.arrivals_shield_expired += 1;
+                tracing::error!(
+                    transfer = ?e.transfer,
+                    realm = %e.realm,
+                    state = %e.state,
+                    age_ticks = e.age_ticks,
+                    "ARRIVAL SHIELD EXPIRED — a hand-off has held its destination realm alive past its \
+                     whole budget and is wedged, not slow. The shield is lifting: the realm may now be \
+                     reclaimed and the subject falls back to orphan recovery.",
+                );
+            }
+        }
+        let still: std::collections::BTreeSet<vd_core::TransferId> =
+            expired.iter().map(|e| e.transfer).collect();
+        self.arrivals_shield_expired_seen.retain(|t| still.contains(t));
     }
 
     /// This reconciler's timing budget.
@@ -212,6 +259,7 @@ impl RlmReconcilerRes {
         dir: &mut DirectoryCore,
         liveness_dead: &dyn Fn(NodeId) -> bool,
         now: UniverseTick,
+        arriving: &BTreeSet<RealmId>,
     ) {
         let (actions, delta) = reconcile(
             &self.ledger,
@@ -221,7 +269,14 @@ impl RlmReconcilerRes {
             &self.tuning,
             now,
             self.rlm_quiesced_until,
+            arriving,
         );
+        // Count the shield BY NAME every sweep it is load-bearing — the cure for this subsystem's
+        // history of guarantees that held silently and then stopped holding just as silently. The
+        // gauge is this sweep's count; the total is monotone, so a wedged hand-off is a climbing
+        // number an operator can see rather than an absence nobody notices.
+        self.arrival_shield_gauge = delta.arrival_shielded.len() as u64;
+        self.arrival_shield_vetoes += self.arrival_shield_gauge;
         self.ledger.apply_delta(&delta);
         for action in actions {
             match action {
@@ -235,7 +290,7 @@ impl RlmReconcilerRes {
             }
         }
         self.reconcile_launches(dir, now);
-        self.update_gauges(dir, liveness_dead, now);
+        self.update_gauges(dir, liveness_dead, now, arriving);
     }
 
     /// Execute a `SpinUp` — with an exponential backoff on the per-coord failure streak so a transient
@@ -363,6 +418,7 @@ impl RlmReconcilerRes {
         dir: &DirectoryCore,
         liveness_dead: &dyn Fn(NodeId) -> bool,
         now: UniverseTick,
+        arriving: &BTreeSet<RealmId>,
     ) {
         let mut desired = 0u64;
         let mut running = 0u64;
@@ -370,7 +426,10 @@ impl RlmReconcilerRes {
             let head = dir.head(DirectoryKey::Realm(cell.coord.lowered()));
             let rl = running_live(head, liveness_dead);
             running += u64::from(rl);
-            desired += u64::from(desired_alive(cell, now, &self.tuning, rl));
+            // The same three arms the decision uses — a gauge that disagreed with the decision would
+            // be worse than no gauge.
+            let arrival = arriving.contains(&cell.coord.lowered());
+            desired += u64::from(desired_alive(cell, now, &self.tuning, rl, arrival));
         }
         self.desired_gauge = desired;
         self.running_gauge = running;
@@ -447,7 +506,11 @@ pub fn reconcile_realm_lifecycle(
         return; // scale cadence: sweep only every `interval` ticks.
     }
     let dead = |node: NodeId| runtime.is_node_latched_dead(node);
-    rlm.reconcile_and_drive(&mut dir.0, &dead, now);
+    // THE ARRIVAL SET, read from the same saga runtime this system already borrows, on the same tick,
+    // right after `drive_sagas_core` produced it. No message to lose, no countdown to beat.
+    let (arriving, expired) = runtime.arriving_dest_realms(now, rlm.tuning().arrival_shield_ticks);
+    rlm.report_expired_arrivals(&expired);
+    rlm.reconcile_and_drive(&mut dir.0, &dead, now, &arriving);
     // RLM 5f-4c: republish the live spawned-node roster so the clock broadcast (next tick) reaches every
     // demand-spawned shard — a node spawned in THIS sweep is included immediately, a reaped one drops next
     // sweep. Assigned (not merged) so the set can only shrink when the roster does (no unbounded growth).
@@ -676,14 +739,14 @@ mod tests {
         let mut d = dir();
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert_eq!(rlm.spins_requested, 1);
         assert_eq!(
             rlm.launches.minted.get(sys(7).path()).map(BTreeMap::len),
             Some(1)
         );
         // Next sweep: launching (minted, no head) ⇒ NO second spawn (BUG-B).
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101), &BTreeSet::new());
         assert_eq!(rlm.spins_requested, 1, "no double-spawn while launching");
         // RLM 5d C-1 idempotency-by-coord.path: a genuinely RE-ISSUED SpinUp on the still-launching coord
         // is ALSO a no-op. The suppression is keyed on the minted node under `sys(7).path()` (the lineage
@@ -691,7 +754,7 @@ mod tests {
         // for the path blocks the emit. So a re-issued demand can never orphan a second incarnation.
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(102), Fence(2));
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102), &BTreeSet::new());
         assert_eq!(
             rlm.spins_requested, 1,
             "a re-issued SpinUp on a live/launching coord is idempotent (path-keyed, not incarnation-keyed)"
@@ -742,7 +805,7 @@ mod tests {
         // reconcile+drive at tick 100 (NONZERO — a post-ClockSync tick).
         let mut rlm = run(vec![demand_frame(&deepest, DemandVerb::SpinUp, 100, 1)]);
         let mut d = dir();
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert_eq!(
             rlm.spins_requested, 5,
             "one leaf demand spins the whole 5-level home lineage in one sweep"
@@ -757,7 +820,7 @@ mod tests {
 
         // A SECOND sweep at the next tick is a NO-OP: the chain is launching (minted, no head) ⇒ nothing
         // re-spawns (idempotent, launching-not-double-spawned).
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101), &BTreeSet::new());
         assert_eq!(
             rlm.spins_requested, 5,
             "second sweep is idempotent — a launching chain is not re-spawned"
@@ -770,7 +833,7 @@ mod tests {
             rlm,
             vec![demand_frame(&deepest, DemandVerb::SpinUp, 102, 999)],
         );
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102), &BTreeSet::new());
         assert_eq!(
             rlm.spins_requested, 5,
             "a different parent_fence changes nothing — the fence is carried, never authorising"
@@ -794,7 +857,7 @@ mod tests {
         seeded
             .ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
-        seeded.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        seeded.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert_eq!(
             seeded.spins_requested, 0,
             "the recovered launch seed suppresses the re-spawn (path-keyed launch_present)"
@@ -806,7 +869,7 @@ mod tests {
         let mut d2 = dir();
         cold.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
-        cold.reconcile_and_drive(&mut d2, &|_n| false, UniverseTick(100));
+        cold.reconcile_and_drive(&mut d2, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert_eq!(
             cold.spins_requested, 1,
             "an unseeded (genesis) reconciler spawns the demanded realm"
@@ -819,14 +882,14 @@ mod tests {
         let mut d = dir();
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert_eq!(
             rlm.launches.minted.get(sys(7).path()).map(BTreeMap::len),
             Some(1)
         );
         // The shard self-grants its head ⇒ the launch reconcile drains the minted node.
         grant(&mut d, RealmId::System(7), 50, 1);
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(102), &BTreeSet::new());
         assert!(
             !rlm.launches.minted.contains_key(sys(7).path()),
             "head appeared ⇒ launch drained (BUG-B)"
@@ -851,7 +914,7 @@ mod tests {
             Some(UniverseTick(now.0 - rlm.tuning.teardown_drain_ticks)),
         );
         rlm.ledger.apply_delta(&open);
-        rlm.reconcile_and_drive(&mut d, &|_n| false, now);
+        rlm.reconcile_and_drive(&mut d, &|_n| false, now, &BTreeSet::new());
         assert_eq!(rlm.teardowns_reaped, 1);
         assert!(
             !head_present(&d, RealmId::System(7)),
@@ -870,7 +933,7 @@ mod tests {
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         // node 50 DEAD ⇒ zombie ⇒ ForceReap (force-revoke the stale head).
-        rlm.reconcile_and_drive(&mut d, &|n| n == NodeId(50), UniverseTick(100));
+        rlm.reconcile_and_drive(&mut d, &|n| n == NodeId(50), UniverseTick(100), &BTreeSet::new());
         assert_eq!(rlm.force_reaps, 1);
         assert!(
             !head_present(&d, RealmId::System(7)),
@@ -881,7 +944,7 @@ mod tests {
             "no spawn the same sweep as the reap"
         );
         // Next sweep: head gone, still demanded ⇒ re-spawn (self-heal).
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(101), &BTreeSet::new());
         assert_eq!(rlm.spins_requested, 1);
     }
 
@@ -894,7 +957,7 @@ mod tests {
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         // Sweep 1: spawn fails ⇒ streak 1.
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert_eq!(rlm.spins_requested, 1);
         assert_eq!(rlm.spins_failed, 1);
         assert_eq!(
@@ -902,10 +965,10 @@ mod tests {
             Some(1)
         );
         // Sweep 2 at now = 100 + cooldown: eligible per reconcile, but within the 2×cooldown backoff ⇒ skip.
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + cd));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + cd), &BTreeSet::new());
         assert_eq!(rlm.spins_requested, 1, "still backing off ⇒ no 2nd attempt");
         // Sweep 3 at now = 100 + 2×cooldown: past the backoff ⇒ retry (fails again).
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + 2 * cd));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + 2 * cd), &BTreeSet::new());
         assert_eq!(rlm.spins_requested, 2, "past backoff ⇒ retry");
         assert_eq!(rlm.spins_failed, 2);
         // The failing spawner still kills + lists cleanly (a launcher that can't create can still reap).
@@ -923,14 +986,14 @@ mod tests {
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         // Sweep 1: spawns (minted 999), NOT live yet, but within the launch TTL ⇒ HELD (a real pod may
         // still be registering — never drop a just-launched node).
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert!(
             rlm.launches.minted.contains_key(sys(7).path()),
             "a fresh launch is held through its TTL grace"
         );
         // Sweep past the TTL, still no head + never live ⇒ a silent-async-failure is dropped so a fresh
         // SpinUp re-fires next sweep (BUG-B silent-failure self-heal).
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + ttl));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + ttl), &BTreeSet::new());
         assert!(
             !rlm.launches.minted.contains_key(sys(7).path()),
             "a launch that never went live is dropped past its TTL"
@@ -947,7 +1010,7 @@ mod tests {
             .record_demand(&sys(7), DemandVerb::KeepAlive, UniverseTick(100), Fence(1));
         rlm.ledger
             .record_demand(&sys(8), DemandVerb::SpinUp, UniverseTick(100), Fence(1)); // desired, not running
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert_eq!(rlm.running_gauge, 1, "only sys7 has a live head");
         assert_eq!(rlm.desired_gauge, 2, "both are demanded");
     }
@@ -970,7 +1033,7 @@ mod tests {
             UniverseTick(now.0 - 2),
             Fence(1),
         );
-        rlm.reconcile_and_drive(&mut d, &|_n| false, now);
+        rlm.reconcile_and_drive(&mut d, &|_n| false, now, &BTreeSet::new());
         assert_eq!(rlm.teardowns_reaped, 0, "quiesce blocks the reap");
         assert!(head_present(&d, RealmId::System(7)));
     }
@@ -1119,7 +1182,7 @@ mod tests {
         // Demand + reconcile at tick 100 ⇒ sys(7) spins up (a node minted AT 100), no head yet ⇒ boot 0.
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
-        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(100));
+        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(100), &BTreeSet::new());
         assert_eq!(
             rlm.boot_ticks_observed_max(),
             0,
@@ -1132,7 +1195,7 @@ mod tests {
             Fence(1),
             UniverseTick(137),
         );
-        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(137));
+        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(137), &BTreeSet::new());
         assert_eq!(
             rlm.boot_ticks_observed_max(),
             37,
@@ -1141,14 +1204,14 @@ mod tests {
         // A LATER, SHORTER boot does NOT lower the monotone max (the `.max()` keep arm).
         rlm.ledger
             .record_demand(&sys(8), DemandVerb::SpinUp, UniverseTick(200), Fence(1));
-        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(200));
+        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(200), &BTreeSet::new());
         let _ = dir.grant(
             DirectoryKey::Realm(RealmId::System(8)),
             AuthorityRef::Shard(NodeId(51)),
             Fence(1),
             UniverseTick(203),
         );
-        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(203));
+        rlm.reconcile_and_drive(&mut dir, &dead, UniverseTick(203), &BTreeSet::new());
         assert_eq!(
             rlm.boot_ticks_observed_max(),
             37,
