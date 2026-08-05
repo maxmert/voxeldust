@@ -98,7 +98,14 @@ struct ShipThrustPort;
 impl CouplingPort for ShipThrustPort {
     type Output   = ShipOutputs;   // { thrust_vector: DVec3, torque: DVec3, power_state: PowerState,
                                    //   rcs_trim: DVec3, mass_kg: f64, com_offset: DVec3 }  : EffectFree
-    type Feedback = HullPose;      // { StampedPose, ang_vel, contact_flags }                : EffectFree
+    // ⚠️ REVISED 2026-08-05 (owner's reversal — see DEFERRED.md realm-unification): the feedback MUST
+    // NOT be a POSE. A realm is never told where it is; a hull's pose inside its own frame never changes.
+    // What the interior legitimately needs is FELT ACCELERATION + ORIENTATION — which way is "down" for
+    // someone walking inside at 3g or landed on a planet — plus contact state. That is an ambient-physics
+    // input for the child's own interior, not a coordinate. Re-name and re-scope it before building:
+    type Feedback = HullFelt;      // { linear_accel: DVec3, ang_vel, orientation, contact_flags } : EffectFree
+    // (the struck original: `HullPose { StampedPose, ang_vel, contact_flags }` — the StampedPose is the
+    //  part that violates the reversal; whether the interior needs the rest is still an OPEN question.)
     const ID = CouplingPortId::ShipThrust;
     const RATE = PortRate::Datagram20Hz;    // forces continuous, latest-wins, loss-tolerant
     const DEGRADED = DegradedMode::CoastBallistic;
@@ -107,7 +114,7 @@ impl CouplingPort for ShipThrustPort {
 
 **Wire frame** (one shape for ALL couplings — HR3): `CouplingFrame { port: CouplingPortId, fence: Fence, source_tick: u64, payload: P /* P: EffectFree */ }`. No `step_id` because it is provably effect-free; the conformance test verifies the payload implements `EffectFree`.
 
-**Dataflow (one tick):** (1) ship shard runs its `SignalGraph`+`FunctionalBlocks` capability systems, aggregates thruster outputs into `ShipOutputs` (the SAME aggregation as `OLD: core/src/block/aggregation.rs`). (2) emits `InterShardFlow::Coupling(CouplingFrame{port:ShipThrust, fence:Ship(ShipId).fence, source_tick, payload:ShipOutputs})` to the current hull-host (directory `Ship(ShipId)` owner). (3) host integrates the hull rapier body with those forces. (4) host returns `HullPose` feedback to the ship (interior "down" reference) AND emits the hull as a normal entity in its own snapshot stream (so observers + the piloting client see it move — no special path; the client never sees a `CouplingFrame`).
+**Dataflow (one tick):** (1) ship shard runs its `SignalGraph`+`FunctionalBlocks` capability systems, aggregates thruster outputs into `ShipOutputs` (the SAME aggregation as `OLD: core/src/block/aggregation.rs`). (2) emits `InterShardFlow::Coupling(CouplingFrame{port:ShipThrust, fence:Ship(ShipId).fence, source_tick, payload:ShipOutputs})` to the current hull-host (directory `Ship(ShipId)` owner). (3) host integrates the hull rapier body with those forces. (4) host returns `HullFelt` feedback to the ship — the interior "down" reference ONLY (felt acceleration + orientation + contact, **never a position**: 2026-08-05 reversal) — AND emits the hull as a normal entity in its own snapshot stream (so observers + the piloting client see it move — no special path; the client never sees a `CouplingFrame`).
 
 **Fencing + the NORMAL-TRANSFER hold-last-thrust fix (Finding #2 major).** Every `CouplingFrame` carries the `Ship(ShipId)` directory fence the ship shard believes current; the sink rejects `fence < highest_seen`. The flaw the original missed: during a NORMAL hull-host transfer A→B (saga bumps Ship fence E→E+1, ordered Demote-before-Promote), there is a control-RTT window where A is demoted (won't apply thrust), B rejects the ship's still-E-fenced frames, and the ship hasn't yet re-targeted — so thrust is applied by NOBODY for the whole window. At 3g burn crossing a SOI boundary that is a visible, repeatable thrust dropout on EVERY transfer.
 
