@@ -88,6 +88,7 @@ pub fn stub_config() -> StubConfig {
         // no `RealmRegions`, so `evaluate_realm_boundaries` early-returns — behaviour-identical).
         boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
         request_ttl_ticks: 0,
+        handoff_hold_ttl_ticks: 0,
     }
 }
 

@@ -183,6 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Slice 3d — the crossing-latch TTL fallback. INERT (0): the POSITIVE saga-terminal clear is
             // the sole driver until the 3f abort/TTL egress lands.
             request_ttl_ticks: 0,
+            handoff_hold_ttl_ticks: 0,
             // RLM 5f-3b — the per-account STORED spawn poses (the `VD_SPAWN_POSES` stand-in; the P7 durable
             // pose store swaps in behind this SAME map). ABSENT ⇒ empty ⇒ origin-at-rest (byte-identical).
             spawn_poses,

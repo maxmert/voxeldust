@@ -1093,6 +1093,7 @@ mod tests {
                 snapshot_datagram_budget: 1100,
                 boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
                 request_ttl_ticks: 0,
+                handoff_hold_ttl_ticks: 0,
             },
         );
         topo.add_node(Box::new(shard));
@@ -1304,6 +1305,7 @@ mod tests {
             self_fence_grace_ticks: 0,
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
             request_ttl_ticks: 0,
+            handoff_hold_ttl_ticks: 0,
         });
         // Primary realm HELD (so the co-hosting block is reached — it is gated on `RealmAuthority`).
         world.insert_resource(RealmAuthority(Some(Fence(1))));
@@ -1348,6 +1350,7 @@ mod tests {
             self_fence_grace_ticks: 0,
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
             request_ttl_ticks: 0,
+            handoff_hold_ttl_ticks: 0,
         });
         bare.insert_resource(RealmAuthority(Some(Fence(1))));
         // NO CoHostedAuthority inserted ⇒ the `if let Some(cohosted)` guard takes its skip path.
@@ -1455,6 +1458,7 @@ mod tests {
                     snapshot_datagram_budget: 1100,
                     boundary: BoundaryTuning::DEFAULT,
                     request_ttl_ticks: 0,
+                handoff_hold_ttl_ticks: 0,
                 },
             );
             shard
