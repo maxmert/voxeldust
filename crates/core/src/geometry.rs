@@ -1124,9 +1124,16 @@ fn guard_children_fit_parents(regions: &[RealmRegion]) -> Result<(), RegionNestE
         let Some(parent_id) = child.parent else {
             continue; // the ambient root has nothing to fit inside
         };
-        let Some(parent) = regions.iter().find(|r| r.realm == parent_id) else {
-            continue; // dangling — already rejected by `guard_parents_resolve`
-        };
+        // An INVARIANT, not a case to handle: `guard_parents_resolve` ran two checks earlier in
+        // `guard_regions_nest` and already refused any region naming a parent that is not present, so a
+        // dangling parent cannot reach this line. It used to be written as a `continue`, which read as
+        // defensiveness but was in fact an arm no input could take — permanently uncovered, and quietly
+        // asserting that the guard above might not have run. Stating the invariant is honest about which
+        // it is, and fails loudly if that ordering is ever broken.
+        let parent = regions
+            .iter()
+            .find(|r| r.realm == parent_id)
+            .expect("guard_parents_resolve already refused every unresolvable parent");
         if let Some((reach, limit)) = child_fits_in_parent(child, parent) {
             return Err(RegionNestError::ChildEscapesParent {
                 realm: child.realm,
@@ -1689,6 +1696,35 @@ mod tests {
     }
 
     #[test]
+    fn the_fit_check_declines_to_judge_a_child_measured_in_a_different_frame() {
+        // The fit check compares a child's reach against its parent's promised interior — but only when
+        // the two are measured in the SAME frame. Across frames the numbers are not commensurable, and
+        // pretending otherwise would reject perfectly legal placements (a planet's surface region sits at
+        // huge coordinates in system space and tiny ones in its own). It declines instead, and the real
+        // cross-frame check is ledgered.
+        //
+        // NOT a subset proof either way: this is the necessary condition that catches the placement
+        // mistakes a forest generator actually makes — a child too big, or centred too near the rim.
+        let parent = test_region_r(RealmId::System(0), None, 100.0);
+        let mut child = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 1.0);
+        child.frame = FrameRef::PlanetCentered { planet_seed: 1 };
+        assert_eq!(
+            guard_regions_nest(&[parent.clone(), child], 64),
+            Ok(()),
+            "a differently-framed child is not judged here, so the forest is accepted"
+        );
+
+        // The SAME child in the SAME frame IS judged — and a huge one is refused. Without this half the
+        // test above would pass for the wrong reason (nothing is ever judged).
+        let mut oversized = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 5_000.0);
+        oversized.frame = parent.frame;
+        assert!(
+            guard_regions_nest(&[parent, oversized], 64).is_err(),
+            "same-frame IS judged: a child larger than its parent's interior is refused"
+        );
+    }
+
+    #[test]
     fn guard_regions_nest_rejects_a_cycle() {
         // One valid root + a 2-region cycle whose parents resolve ⇒ passes count/root/unique/resolve,
         // then the chain walk exceeds `len` hops for the cycle members ⇒ CycleOrOrphan.
@@ -2074,6 +2110,39 @@ mod tests {
             .finite_extent(),
             5.0,
         );
+    }
+
+    #[test]
+    fn the_two_nesting_extents_bracket_every_shape() {
+        // The pair the boot-time nesting fence is built from: the FARTHEST any surface point can be from
+        // the centre (so a child's reach is over-estimated) and the NEAREST (so a parent's promise is
+        // under-estimated). Conservative in both directions, which is what makes the fence refuse a
+        // doubtful placement rather than wave it through.
+        //
+        // A SPHERE is the case both arms had never been tried with, and it is the interesting one: it is
+        // the only shape where the two answers are EQUAL, because every surface point is the same distance
+        // out. A box's are not, and that difference is the whole reason two functions exist.
+        let shell = Boundary::Shell { r: 40.0 };
+        assert_eq!(shell.circumscribed_extent(), 40.0);
+        assert_eq!(shell.inscribed_extent(), 40.0);
+
+        // A box: the far CORNER versus the nearest FACE — the corner is further out by the diagonal.
+        let boxy = Boundary::Aabb {
+            half: DVec3::new(2.0, 8.0, 4.0),
+        };
+        assert_eq!(
+            boxy.circumscribed_extent(),
+            DVec3::new(2.0, 8.0, 4.0).length()
+        );
+        assert_eq!(boxy.inscribed_extent(), 2.0);
+        // Orientation cannot move either bound — spinning a box changes neither its corner distance nor
+        // its nearest face.
+        let spun = Boundary::Obb {
+            half: DVec3::new(2.0, 8.0, 4.0),
+            orient: DQuat::from_rotation_z(0.7),
+        };
+        assert_eq!(spun.circumscribed_extent(), boxy.circumscribed_extent());
+        assert_eq!(spun.inscribed_extent(), boxy.inscribed_extent());
     }
 
     #[test]

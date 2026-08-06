@@ -375,6 +375,44 @@ mod tests {
     }
 
     #[test]
+    fn per_realm_freshness_is_readable_and_distinct_from_the_feeds_overall_freshness() {
+        // THE SHAKE DIAGNOSIS PAIR, and the reason both exist. A realm's rows are authored by its PARENT
+        // shard, while an occupant's pose is composed on the shard it lives on — and each shard advances
+        // its own sense of universe time only when a clock sync arrives. So two numbers on one screen can
+        // legitimately disagree, and telling ONE realm's freshness apart from the feed's newest is what
+        // makes that difference measurable instead of a guess.
+        let mut v = RealmView::default();
+        assert_eq!(
+            v.newest_tick(),
+            None,
+            "before the first frame the feed has no freshness at all"
+        );
+        assert_eq!(
+            v.realm_newest_tick(RealmId::Planet(1)),
+            None,
+            "and neither does a realm it has never streamed"
+        );
+
+        v.on_realm_snapshot(frame(1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]));
+        v.on_realm_snapshot(frame(2, 40, vec![(RealmId::Planet(2), pose(DVec3::Y, 40))]));
+
+        // Each realm reports ITS OWN newest tick — the older one is not dragged forward by the newer.
+        assert_eq!(
+            v.realm_newest_tick(RealmId::Planet(1)),
+            Some(UniverseTick(10))
+        );
+        assert_eq!(
+            v.realm_newest_tick(RealmId::Planet(2)),
+            Some(UniverseTick(40))
+        );
+        // …while the feed's overall freshness is the newest across all of them.
+        assert_eq!(v.newest_tick(), Some(UniverseTick(40)));
+        // A realm the feed never streamed stays None even once the feed is live — absence of a track is
+        // not the same as a stale one, and conflating them would hide a realm that never arrived.
+        assert_eq!(v.realm_newest_tick(RealmId::Planet(9)), None);
+    }
+
+    #[test]
     fn realm_pose_reflects_the_latest_streamed_pose_frozen_past_the_window() {
         let mut v = RealmView::default();
         v.on_realm_snapshot(frame(

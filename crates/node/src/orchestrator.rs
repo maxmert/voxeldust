@@ -438,6 +438,65 @@ mod tests {
     }
 
     #[test]
+    fn an_armed_reconciler_gets_a_derived_arrival_shield_an_inert_one_gets_none() {
+        // THE ONE PLACE the hand-off budget is computed, and until now only its INERT side ever ran in a
+        // test — the branch that derives the real number had never executed. That is the branch a live
+        // deployment always takes, so the tested path and the shipped path were opposites.
+        //
+        // It is derived HERE because this is the only place both inputs are in scope: how long a hand-off
+        // may legitimately take (the saga deadlines) and how fast a realm can be reclaimed (the lifecycle
+        // windows). Both ends of one hand-off read this same number.
+        let armed_rlm = vd_sim::rlm::RlmTuning::cloud(20);
+        assert_ne!(
+            armed_rlm.reconcile_interval_ticks, 0,
+            "fixture guard: a cloud tuning must actually sweep, or this test proves nothing"
+        );
+        let saga = vd_sim::saga::SagaTuning::default();
+        let expected = vd_sim::rlm::derive_arrival_shield_ticks(&armed_rlm, &saga);
+        assert_ne!(expected, 0, "the derivation yields a real window, not zero");
+
+        for (rlm, want, why) in [
+            (
+                armed_rlm,
+                expected,
+                "an armed reconciler derives the budget",
+            ),
+            (
+                RlmTuning::default(),
+                0,
+                "an inert one leaves the shield disarmed — nothing sweeps, nothing needs shielding",
+            ),
+        ] {
+            let hub = MemHub::new();
+            let mut orch = build_app(
+                NodeConfig {
+                    node_id: ORCH,
+                    kind: NodeKind::Orchestrator,
+                },
+                hub.register(ORCH, 64),
+            );
+            let (world, schedule) = orch.parts_mut();
+            register_orchestrator(
+                world,
+                schedule,
+                &OrchestratorConfig {
+                    rlm,
+                    saga: saga.clone(),
+                    ..cfg()
+                },
+            );
+            assert_eq!(
+                world
+                    .resource::<crate::rlm_runtime::RlmReconcilerRes>()
+                    .tuning()
+                    .arrival_shield_ticks,
+                want,
+                "{why}"
+            );
+        }
+    }
+
+    #[test]
     fn clock_advances_and_broadcasts_to_every_peer() {
         let hub = MemHub::new();
         let mut orch = build_app(

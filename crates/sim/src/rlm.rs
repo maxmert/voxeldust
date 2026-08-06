@@ -1795,9 +1795,7 @@ mod tests {
         );
         // And it must cover the worst HEALTHY completion: one destructive-abort budget plus a cheap
         // re-drive for every post-commit phase.
-        assert!(
-            cap >= saga.abort_deadline_ticks + POST_COMMIT_STEPS * saga.redrive_deadline_ticks
-        );
+        assert!(cap >= saga.abort_deadline_ticks + POST_COMMIT_STEPS * saga.redrive_deadline_ticks);
         // A deployment whose transfer budget is tiny still cannot get a shield shorter than the
         // reclaim floor — the `max` is what stops a misconfigured saga budget disarming the shield.
         let tiny = crate::saga::SagaTuning {
@@ -1836,11 +1834,7 @@ mod tests {
             UniverseTick(0),
             &BTreeSet::from([RealmId::System(7)]),
         );
-        assert_eq!(
-            actions,
-            vec![],
-            "no kill: somebody is on their way here"
-        );
+        assert_eq!(actions, vec![], "no kill: somebody is on their way here");
         assert_eq!(
             delta.arrival_shielded,
             BTreeSet::from([sys(7).path().clone()]),

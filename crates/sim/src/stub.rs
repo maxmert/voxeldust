@@ -4762,7 +4762,15 @@ fn on_directory_reply(
         // full abort EGRESS is Slice 3f, but the consumer arm lands now so the wire arm is used). A
         // mismatch (a stale abort for a superseded/re-latched transfer) is a counted no-op.
         Ok(InterShardFlow::CrossingAborted(a)) => {
-            on_crossing_aborted(a, in_flight, progress, holds, stats, outbox, config.orchestrator);
+            on_crossing_aborted(
+                a,
+                in_flight,
+                progress,
+                holds,
+                stats,
+                outbox,
+                config.orchestrator,
+            );
             return;
         }
         // DEST: the saga-pushed ordered Promote (1d.5b.3b) — the REAL Ghost→Owned promoter + the
@@ -12242,7 +12250,10 @@ mod tests {
     // ---- the hand-off hold ledger (inert until armed) ---------------------------------------------
 
     fn hold_key(seed: u64) -> (EntityId, HoldRole) {
-        (EntityId::pack(EntityKind::Player, 1, seed, 3), HoldRole::Source)
+        (
+            EntityId::pack(EntityKind::Player, 1, seed, 3),
+            HoldRole::Source,
+        )
     }
 
     #[test]
@@ -12332,7 +12343,11 @@ mod tests {
         open_hold(&mut holds, (e, HoldRole::Dest), Fence(2), TickId(1), 8);
         assert_eq!(holds.0.len(), 2);
         assert!(close_hold(&mut holds, (e, HoldRole::Source)));
-        assert_eq!(holds.0.len(), 1, "closing one end leaves the other standing");
+        assert_eq!(
+            holds.0.len(),
+            1,
+            "closing one end leaves the other standing"
+        );
     }
 
     #[test]
@@ -12341,7 +12356,10 @@ mod tests {
         // that has aged past its budget — plus the role split (a DEST hold is not this shard handing away).
         let mut holds = HandoffHolds::default();
         let e = EntityId::pack(EntityKind::Player, 1, 7, 3);
-        assert!(!handing_over(&holds, e, TickId(5), 4), "no hold, no hand-off");
+        assert!(
+            !handing_over(&holds, e, TickId(5), 4),
+            "no hold, no hand-off"
+        );
         open_hold(&mut holds, (e, HoldRole::Dest), Fence(2), TickId(5), 4);
         assert!(
             !handing_over(&holds, e, TickId(5), 4),
@@ -12349,7 +12367,10 @@ mod tests {
         );
         open_hold(&mut holds, (e, HoldRole::Source), Fence(2), TickId(5), 4);
         assert!(handing_over(&holds, e, TickId(5), 4));
-        assert!(handing_over(&holds, e, TickId(8), 4), "age 3 of 4 is still live");
+        assert!(
+            handing_over(&holds, e, TickId(8), 4),
+            "age 3 of 4 is still live"
+        );
         assert!(
             !handing_over(&holds, e, TickId(9), 4),
             "past the budget the hold stops answering even before the prune sweeps it"
@@ -12363,8 +12384,14 @@ mod tests {
             opened_at: TickId(10),
         };
         assert!(hold_live(&h, TickId(10), 4), "age 0 is live");
-        assert!(hold_live(&h, TickId(13), 4), "age 3 against a budget of 4 is live");
-        assert!(!hold_live(&h, TickId(14), 4), "age 4 is EXPIRED — the budget is exclusive");
+        assert!(
+            hold_live(&h, TickId(13), 4),
+            "age 3 against a budget of 4 is live"
+        );
+        assert!(
+            !hold_live(&h, TickId(14), 4),
+            "age 4 is EXPIRED — the budget is exclusive"
+        );
         assert!(!hold_live(&h, TickId(99), 4));
         // A BACKWARDS clock reads as age zero rather than wrapping to a colossal age and expiring the
         // whole ledger at once.
@@ -14304,7 +14331,13 @@ mod tests {
         let child = LatticePos::local(DVec3::ZERO);
         // A STATIC occupant (vel 0): pred == live == its distance.
         assert_eq!(
-            occupant_child_dist(seated_pos(DVec3::new(500.0, 0.0, 0.0)), DVec3::ZERO, child, t, 1.0),
+            occupant_child_dist(
+                seated_pos(DVec3::new(500.0, 0.0, 0.0)),
+                DVec3::ZERO,
+                child,
+                t,
+                1.0
+            ),
             500.0
         );
         // A MOVING occupant closing in: pred (300) beats live (1500) — the F7 predictive term.
@@ -14323,7 +14356,13 @@ mod tests {
         // at rest. Reading either endpoint's leftover alone answered ~0 here, which is how every moving
         // player came to be measured as standing at their realm's origin.
         assert_eq!(
-            occupant_child_dist(seated_pos(DVec3::new(500.0, 0.0, 0.0)), DVec3::ZERO, child, t, 1.0),
+            occupant_child_dist(
+                seated_pos(DVec3::new(500.0, 0.0, 0.0)),
+                DVec3::ZERO,
+                child,
+                t,
+                1.0
+            ),
             occupant_child_dist(
                 LatticePos::local(DVec3::new(500.0, 0.0, 0.0)),
                 DVec3::ZERO,

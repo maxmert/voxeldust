@@ -218,7 +218,8 @@ impl RlmReconcilerRes {
         }
         let still: std::collections::BTreeSet<vd_core::TransferId> =
             expired.iter().map(|e| e.transfer).collect();
-        self.arrivals_shield_expired_seen.retain(|t| still.contains(t));
+        self.arrivals_shield_expired_seen
+            .retain(|t| still.contains(t));
     }
 
     /// This reconciler's timing budget.
@@ -538,6 +539,57 @@ mod tests {
 
     fn spawner() -> Box<dyn RealmSpawner + Send + Sync> {
         Box::new(MemSpawner::new(MemHub::new(), NodeId(1000), 8))
+    }
+
+    /// One expired arrival, as the shield reports it when a hand-off runs out of budget.
+    fn expired(transfer: u128) -> crate::saga_runtime::ExpiredArrival {
+        crate::saga_runtime::ExpiredArrival {
+            transfer: vd_core::TransferId(transfer),
+            realm: RealmId::Planet(7),
+            state: "Promoting".to_owned(),
+            age_ticks: 999,
+        }
+    }
+
+    #[test]
+    fn a_wedged_handoff_alarms_once_and_can_alarm_again_after_it_clears() {
+        // AN ALARM NOBODY TESTED IS AN ALARM THAT FAILS QUIETLY. This is the operator-facing end of the
+        // arrival shield: it fires when a hand-off has held its destination realm alive past its ENTIRE
+        // budget, which means wedged rather than slow.
+        //
+        // ONCE PER HAND-OFF, not once per sweep — and that is the whole subtlety. A wedged saga re-reports
+        // every single tick, forever. An error line per tick at 20Hz is not an alarm; it is how a real
+        // alarm gets muted by the people who most need to see it.
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::default(), spawner());
+        assert_eq!(rlm.arrivals_shield_expired, 0);
+
+        rlm.report_expired_arrivals(&[expired(1)]);
+        assert_eq!(rlm.arrivals_shield_expired, 1, "the first sighting alarms");
+
+        // The same wedged hand-off, still wedged, sweep after sweep: counted ONCE.
+        rlm.report_expired_arrivals(&[expired(1)]);
+        rlm.report_expired_arrivals(&[expired(1)]);
+        assert_eq!(
+            rlm.arrivals_shield_expired, 1,
+            "a hand-off that stays wedged does not re-alarm every tick"
+        );
+
+        // A DIFFERENT wedged hand-off is its own alarm — the dedup is per hand-off, not a global latch
+        // that would swallow every later failure.
+        rlm.report_expired_arrivals(&[expired(1), expired(2)]);
+        assert_eq!(rlm.arrivals_shield_expired, 2);
+
+        // THE PRUNE, which is what stops the memory of alarmed hand-offs growing without bound — and what
+        // makes the alarm re-armable. Once a transfer stops being reported it is forgotten…
+        rlm.report_expired_arrivals(&[]);
+        // …so if it ever wedges again, that is a NEW event and it alarms again. Without the prune this
+        // would stay silent forever after the first occurrence, which is the failure mode that looks
+        // exactly like "the problem went away".
+        rlm.report_expired_arrivals(&[expired(1)]);
+        assert_eq!(
+            rlm.arrivals_shield_expired, 3,
+            "a hand-off that wedges, clears, and wedges again alarms both times"
+        );
     }
 
     #[test]
@@ -933,7 +985,12 @@ mod tests {
         rlm.ledger
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         // node 50 DEAD ⇒ zombie ⇒ ForceReap (force-revoke the stale head).
-        rlm.reconcile_and_drive(&mut d, &|n| n == NodeId(50), UniverseTick(100), &BTreeSet::new());
+        rlm.reconcile_and_drive(
+            &mut d,
+            &|n| n == NodeId(50),
+            UniverseTick(100),
+            &BTreeSet::new(),
+        );
         assert_eq!(rlm.force_reaps, 1);
         assert!(
             !head_present(&d, RealmId::System(7)),
@@ -965,10 +1022,20 @@ mod tests {
             Some(1)
         );
         // Sweep 2 at now = 100 + cooldown: eligible per reconcile, but within the 2×cooldown backoff ⇒ skip.
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + cd), &BTreeSet::new());
+        rlm.reconcile_and_drive(
+            &mut d,
+            &|_n| false,
+            UniverseTick(100 + cd),
+            &BTreeSet::new(),
+        );
         assert_eq!(rlm.spins_requested, 1, "still backing off ⇒ no 2nd attempt");
         // Sweep 3 at now = 100 + 2×cooldown: past the backoff ⇒ retry (fails again).
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + 2 * cd), &BTreeSet::new());
+        rlm.reconcile_and_drive(
+            &mut d,
+            &|_n| false,
+            UniverseTick(100 + 2 * cd),
+            &BTreeSet::new(),
+        );
         assert_eq!(rlm.spins_requested, 2, "past backoff ⇒ retry");
         assert_eq!(rlm.spins_failed, 2);
         // The failing spawner still kills + lists cleanly (a launcher that can't create can still reap).
@@ -993,7 +1060,12 @@ mod tests {
         );
         // Sweep past the TTL, still no head + never live ⇒ a silent-async-failure is dropped so a fresh
         // SpinUp re-fires next sweep (BUG-B silent-failure self-heal).
-        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100 + ttl), &BTreeSet::new());
+        rlm.reconcile_and_drive(
+            &mut d,
+            &|_n| false,
+            UniverseTick(100 + ttl),
+            &BTreeSet::new(),
+        );
         assert!(
             !rlm.launches.minted.contains_key(sys(7).path()),
             "a launch that never went live is dropped past its TTL"

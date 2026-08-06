@@ -4018,6 +4018,82 @@ mod tests {
     }
 
     #[test]
+    fn a_handoff_past_its_whole_budget_is_reported_expired_instead_of_shielded() {
+        // THE LEAK BOUND, exercised. Every other test reads the shield with an unbounded budget, which
+        // only ever takes the "still shielded" side — so the arm that LIFTS the shield had never run.
+        // That arm is the one an operator depends on: it is what distinguishes a hand-off that is slow
+        // from one that is wedged, and it is what stops a single wedged crossing pinning a realm alive
+        // for the lifetime of the process.
+        let mut rig = Rig::new();
+        rig.grant_subject(Fence(1));
+        rig.trigger(ctx(
+            vd_core::entity_kind::DurabilityClass::Durable,
+            Fence(1),
+        ));
+        rig.settle();
+
+        // Same live crossing, same instant — the ONLY difference is the budget it is measured against.
+        let (shielded, expired) = rig
+            .orch
+            .world_mut()
+            .resource::<SagaRuntimeRes>()
+            .arriving_dest_realms(UniverseTick(1), u64::MAX);
+        assert_eq!(shielded, BTreeSet::from([TO_REALM]), "inside budget: held");
+        assert!(expired.is_empty(), "inside budget: nothing to report");
+
+        // A budget of ZERO would prove nothing: that is the DISARMED early return, which reports no
+        // arrivals at all. The smallest ARMED budget is what puts a real hand-off past a real deadline.
+        let (disarmed, none_reported) = rig
+            .orch
+            .world_mut()
+            .resource::<SagaRuntimeRes>()
+            .arriving_dest_realms(UniverseTick(500), 0);
+        // SPLIT, not `a && b`: a short-circuit leaves the right-hand side unevaluated whenever the left is
+        // false, so one arm can never be reached and the crate cannot hit 100% (the project's own rule).
+        assert!(disarmed.is_empty(), "a zero budget shields nothing");
+        assert!(
+            none_reported.is_empty(),
+            "and reports nothing — disarmed is not expired"
+        );
+
+        let (shielded, expired) = rig
+            .orch
+            .world_mut()
+            .resource::<SagaRuntimeRes>()
+            .arriving_dest_realms(UniverseTick(500), 1);
+        assert!(
+            shielded.is_empty(),
+            "past budget the destination is NO LONGER held — the shield lifts, it does not linger"
+        );
+        assert_eq!(expired.len(), 1, "and the lift is REPORTED, never silent");
+        // What a 2am operator needs to find it: which realm was being held, and for how long.
+        assert_eq!(expired[0].realm, TO_REALM);
+        // The phase is carried so the report names WHERE it wedged. Asserted as non-empty rather than as a
+        // specific phase: which one a settled fixture parks in is an implementation detail of the rig, and
+        // pinning it would make this test fail for reasons that have nothing to do with the shield.
+        assert!(
+            !expired[0].state.is_empty(),
+            "the phase it is stuck in is carried"
+        );
+
+        // THE AGE IS A CLOCK READING, pinned by DIFFERENCE rather than by a magic number or a `>`. A
+        // hardcoded age depends on how many ticks the fixture takes to settle; a comparison leaves a false
+        // arm nothing can ever reach (the project's own HR5 rule — prefer an equality). Reading the same
+        // wedged hand-off a hundred ticks later must report exactly a hundred ticks more, which is the real
+        // property: the age tracks the universe clock tick for tick, and cannot be a constant.
+        let (_, later) = rig
+            .orch
+            .world_mut()
+            .resource::<SagaRuntimeRes>()
+            .arriving_dest_realms(UniverseTick(600), 1);
+        assert_eq!(
+            later[0].age_ticks.saturating_sub(expired[0].age_ticks),
+            100,
+            "the reported age advances with the clock"
+        );
+    }
+
+    #[test]
     fn rehydrate_restores_the_arrival_shield_set() {
         // RESTART-SAFE WITHOUT EXTRA WORK: the shield needs no durable family of its own, because the
         // saga snapshot already persists the whole context including where the subject is going. A
@@ -4025,7 +4101,10 @@ mod tests {
         // mid-crossing cannot leave a landing realm unprotected.
         let mut rig = Rig::new();
         rig.grant_subject(Fence(1));
-        rig.trigger(ctx(vd_core::entity_kind::DurabilityClass::Durable, Fence(1)));
+        rig.trigger(ctx(
+            vd_core::entity_kind::DurabilityClass::Durable,
+            Fence(1),
+        ));
         rig.settle();
         assert_eq!(
             rig.orch
@@ -4821,7 +4900,10 @@ mod tests {
                 opened: UniverseTick(0),
             },
         );
-        assert_eq!(rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0, BTreeSet::new());
+        assert_eq!(
+            rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0,
+            BTreeSet::new()
+        );
     }
 
     #[test]
@@ -4864,9 +4946,15 @@ mod tests {
                 vd_core::entity_kind::DurabilityClass::Durable,
             ),
         );
-        assert_eq!(rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0, BTreeSet::from([TO_REALM]));
+        assert_eq!(
+            rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0,
+            BTreeSet::from([TO_REALM])
+        );
         rt.sagas.remove(&XFER);
-        assert_eq!(rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0, BTreeSet::new());
+        assert_eq!(
+            rt.arriving_dest_realms(UniverseTick(1), u64::MAX).0,
+            BTreeSet::new()
+        );
     }
 
     #[test]

@@ -281,6 +281,13 @@ mod tests {
         assert!(snap.rendered(5.0).is_empty(), "no anchor ⇒ nothing to draw");
         assert_eq!(snap.own_entity(), None);
         assert_eq!(snap.location(), None);
+        // The realm feed's own freshness, read straight through — this is the diagnosis surface an agent
+        // and the dev overlay both read to tell "the feed is quiet" apart from "the feed is dead", so it
+        // must survive a refactor that has no other reason to keep it.
+        assert!(
+            snap.realm_view().is_empty(),
+            "a fresh snapshot has heard nothing from the realm feed yet"
+        );
     }
 
     #[test]
