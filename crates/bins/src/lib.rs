@@ -2388,6 +2388,33 @@ pub fn spawn_anchors_from_env(env: &EnvConfig) -> Vec<(&'static str, String)> {
         .collect()
 }
 
+/// THE HAND-OFF BUDGET a demand orchestrator hands every shard it launches, as a spawn anchor — or
+/// `None` when the reconciler is inert, which leaves the child's budget at zero and its behaviour exactly
+/// as it was before the hand-off ledger existed.
+///
+/// A hand-off has two ends and ONE duration. The destination is shielded from the reaper for it; the
+/// source keeps speaking for its departing occupant — telling its parent where they are, and counting
+/// itself occupied — for the same one. Both read `derive_arrival_shield_ticks`, so the two ends cannot
+/// drift apart under a later re-tune; a source that fell silent before its destination stopped waiting is
+/// the gap the whole ledger exists to close.
+///
+/// It is derived on the ORCHESTRATOR because that is the only place where both inputs are in scope: how
+/// long a hand-off may legitimately take (the saga deadlines) and how fast a realm can be reclaimed (the
+/// lifecycle windows). A shard re-deriving it from the half it happens to know would be guessing.
+#[must_use]
+pub fn handoff_hold_anchor(
+    demand: bool,
+    rlm: &vd_sim::rlm::RlmTuning,
+    saga: &vd_sim::saga::SagaTuning,
+) -> Option<(&'static str, String)> {
+    demand.then(|| {
+        (
+            "VD_HANDOFF_HOLD_TICKS",
+            vd_sim::rlm::derive_arrival_shield_ticks(rlm, saga).to_string(),
+        )
+    })
+}
+
 /// Resolve the shard's realm SUBJECTIVE time multiplier (D-45(a)): `VD_REALM_TIME_MULTIPLIER` (the
 /// per-realm override) else `VD_TIME_MULTIPLIER` (the orchestrator-wide default) else `1.0` (universe
 /// rate — byte-identical). Feeds `StubConfig::time_multiplier` (dilates OCCUPANT movement inside the
@@ -3923,6 +3950,28 @@ mod incarnation_tests {
             spawn_anchors_from_env(&env(&[("VD_BOOT_TICKS_P99", "")])).is_empty(),
             "an empty value is not forwarded"
         );
+    }
+
+    #[test]
+    fn the_handoff_budget_reaches_a_spawned_shard_and_matches_the_arrival_shield() {
+        // The two ends of one hand-off are handed the SAME duration — not by two derivations that happen
+        // to agree today, but by reading one. This test fails the day someone gives the source its own.
+        let rlm = vd_sim::rlm::RlmTuning::cloud(50);
+        let saga = vd_sim::saga::SagaTuning {
+            redrive_deadline_ticks: 40,
+            abort_deadline_ticks: 200,
+        };
+        let shield = vd_sim::rlm::derive_arrival_shield_ticks(&rlm, &saga);
+        assert_eq!(
+            handoff_hold_anchor(true, &rlm, &saga),
+            Some(("VD_HANDOFF_HOLD_TICKS", shield.to_string())),
+            "a demand orchestrator hands its shards the arrival-shield duration verbatim"
+        );
+        // The number is the real derivation, not an accidental zero that would make the equality vacuous.
+        assert!(shield > 0, "the derived budget is a real window: {shield}");
+        // An INERT reconciler hands down nothing, so the child parses no key, defaults to zero, and lets
+        // go of a departing occupant the instant it is told to — exactly as before the ledger existed.
+        assert_eq!(handoff_hold_anchor(false, &rlm, &saga), None);
     }
 
     #[test]

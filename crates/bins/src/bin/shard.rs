@@ -140,6 +140,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  the seed forest for this seed) — refusing to boot"
             )
         })?;
+    // How long this shard keeps speaking for an occupant it has handed away — telling its parent where
+    // they are, and counting itself occupied — when the take-over never lands. Handed down by the
+    // orchestrator that launched it, because only there are both budgets it depends on in scope: how long
+    // a hand-off may take, and how fast a realm can be reclaimed. ABSENT ⇒ 0 ⇒ the shard lets go the
+    // instant it is told to, exactly as before. Logged so a real run SHOWS which of the two it is running.
+    let handoff_hold_ttl_ticks: u32 = env.parse_or("VD_HANDOFF_HOLD_TICKS", 0)?;
+    tracing::info!(
+        ticks = handoff_hold_ttl_ticks,
+        armed = handoff_hold_ttl_ticks != 0,
+        "hand-off hold budget resolved — how long this shard speaks for an occupant it has handed away",
+    );
     register_stub_shard(
         world,
         schedule,
@@ -183,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Slice 3d — the crossing-latch TTL fallback. INERT (0): the POSITIVE saga-terminal clear is
             // the sole driver until the 3f abort/TTL egress lands.
             request_ttl_ticks: 0,
-            handoff_hold_ttl_ticks: 0,
+            handoff_hold_ttl_ticks,
             // RLM 5f-3b — the per-account STORED spawn poses (the `VD_SPAWN_POSES` stand-in; the P7 durable
             // pose store swaps in behind this SAME map). ABSENT ⇒ empty ⇒ origin-at-rest (byte-identical).
             spawn_poses,

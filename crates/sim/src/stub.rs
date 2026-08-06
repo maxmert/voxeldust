@@ -376,18 +376,22 @@ pub enum HoldRole {
 /// stops now FREEZES at its last pose rather than drifting — and it would freeze at exactly the moment a
 /// crossing happens, which is when the seamlessness rule is strictest.
 ///
-/// INERT UNTIL ARMED: every helper below returns immediately at `handoff_hold_ttl_ticks == 0`, which is
-/// the value at every config literal in the tree, so this whole structure is unreachable today.
+/// ARMED BY `handoff_hold_ttl_ticks`: every helper below returns immediately at `0`, so a shard with an
+/// unarmed budget behaves exactly as it did before the ledger existed.
+///
+/// NO POSE HERE (FG-2). The subject's pose is the retained ghost dot's, full stop — the dot is the single
+/// pose truth and `refresh_source_ghost` is its only writer. A copy kept here would be a second store that
+/// today provably agrees (a dest `GhostFlow::Delta` arriving before its `Spawn` is a counted stale drop, and
+/// `Spawn` itself closes the hold), which is precisely the kind of agreement that stops holding the day
+/// someone adds a writer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HandoffHold {
     /// The fence the TAKE-OVER will carry. A hold is closed by a FENCE COMPARE against this, never by a
     /// boolean latch — a PRIOR crossing's replayed take-over must be structurally refused rather than
     /// silently honoured, which on an at-least-once mesh is a reachable delivery, not a hypothetical.
     pub takeover_fence: Fence,
-    /// The subject's last pose under THIS shard's authority; `None` if the hold opened without one.
-    pub pose: Option<StampedPose>,
-    /// The local tick this hold OPENED. The budget is TOTAL from here: a same-fence re-open refreshes the
-    /// POSE only and never this, so a saga re-drive heartbeat can never keep a realm alive forever.
+    /// The local tick this hold OPENED. The budget is TOTAL from here: a same-fence re-open leaves it
+    /// untouched, so a saga re-drive heartbeat can never keep a realm alive forever.
     pub opened_at: TickId,
 }
 
@@ -407,7 +411,8 @@ pub enum HoldOutcome {
     Opened,
     /// A hold existed at an OLDER take-over fence — a genuinely newer crossing replaces it.
     Superseded,
-    /// A hold existed at the SAME fence — the pose is refreshed, the budget is NOT.
+    /// A hold existed at the SAME fence — a re-delivered Demote for the crossing already recorded. The
+    /// budget is deliberately NOT restarted; that is the whole immortality guard.
     Refreshed,
     /// A hold existed at a NEWER fence — a delayed redelivery of a PRIOR crossing arriving after a second
     /// crossing already opened a fresh hold. Refused, because honouring it would rewind the ledger to a
@@ -415,50 +420,45 @@ pub enum HoldOutcome {
     RefusedStale,
 }
 
-/// Open (or update) a hold. Monomorphic; every arm separately reachable and separately asserted.
+/// Open (or update) a hold. Monomorphic; every arm separately reachable and separately asserted. The
+/// compare reads the stored FENCE (not the entry) so the same-fence arm has nothing to bind and nothing
+/// to write — THE IMMORTALITY GUARD is that `opened_at` survives a re-delivered Demote untouched, so a
+/// saga that re-drives its demote every tick can never extend its own budget.
 fn open_hold(
     holds: &mut HandoffHolds,
     key: (EntityId, HoldRole),
     takeover_fence: Fence,
-    pose: Option<StampedPose>,
     now: TickId,
     ttl: u32,
 ) -> HoldOutcome {
     if ttl == 0 {
-        return HoldOutcome::Inert; // the byte-identity arm: nothing is ever inserted
+        return HoldOutcome::Inert; // the disarmed arm: nothing is ever inserted
     }
-    match holds.0.get_mut(&key) {
+    let opened = HandoffHold {
+        takeover_fence,
+        opened_at: now,
+    };
+    match holds.0.get(&key).map(|h| h.takeover_fence) {
         None => {
-            holds.0.insert(
-                key,
-                HandoffHold {
-                    takeover_fence,
-                    pose,
-                    opened_at: now,
-                },
-            );
+            holds.0.insert(key, opened);
             HoldOutcome::Opened
         }
-        Some(h) if takeover_fence > h.takeover_fence => {
-            *h = HandoffHold {
-                takeover_fence,
-                pose,
-                opened_at: now,
-            };
+        Some(existing) if takeover_fence > existing => {
+            holds.0.insert(key, opened);
             HoldOutcome::Superseded
         }
-        Some(h) if takeover_fence == h.takeover_fence => {
-            // THE IMMORTALITY GUARD: pose only. `opened_at` is untouched, so a saga that re-drives its
-            // demote every tick refreshes what the parent sees WITHOUT ever extending the budget.
-            h.pose = pose.or(h.pose);
-            HoldOutcome::Refreshed
-        }
+        Some(existing) if takeover_fence == existing => HoldOutcome::Refreshed,
         Some(_) => HoldOutcome::RefusedStale,
     }
 }
 
 /// Close a hold on a POSITIVE take-over proof: the fence must match exactly. A stale proof (a replayed
 /// take-over from a superseded crossing) leaves the hold standing.
+///
+/// The proof is the destination's ghost feed, which a SAME-NODE re-home does not send (there is nobody to
+/// send it to). Such a hold therefore runs to its budget rather than closing early — harmless, because on
+/// one shard the subject is simply Owned again by the receiving realm, so both consumers already answer
+/// yes through ownership and the stale entry only sits there until the prune takes it.
 fn close_hold_at_fence(holds: &mut HandoffHolds, key: (EntityId, HoldRole), proof: Fence) -> bool {
     match holds.0.get(&key) {
         None => false,
@@ -491,6 +491,34 @@ fn prune_holds(holds: &mut HandoffHolds, now: TickId, ttl: u32) -> usize {
     let before = holds.0.len();
     holds.0.retain(|_, h| hold_live(h, now, ttl));
     before - holds.0.len()
+}
+
+/// Is this shard STILL PARTY to a hand-off of `entity` — i.e. has it let go of the subject but not yet
+/// seen the take-over land? THE ARMED CONSUMER SIDE of the ledger, and the answer to two questions that
+/// used to be answered by ownership alone: does this realm still tell its parent where the subject is,
+/// and does this realm still count itself occupied.
+///
+/// Freshness is re-checked here rather than trusted from the inbound prune, because the prune runs on
+/// inbound and this runs during the authoring pass — a hold that aged out between them must read expired
+/// at the moment it is USED, never one tick late.
+#[must_use]
+fn handing_over(holds: &HandoffHolds, entity: EntityId, now: TickId, ttl: u32) -> bool {
+    holds
+        .0
+        .get(&(entity, HoldRole::Source))
+        .is_some_and(|h| hold_live(h, now, ttl))
+}
+
+/// Does this shard still SPEAK FOR this occupant — because it owns them, or because it is mid-hand-off
+/// of them? ONE answer serving both places that used to ask "do we own them": what this realm tells its
+/// parent, and whether this realm considers itself occupied. Deriving them from one predicate is what
+/// stops a realm reporting itself empty in the same tick it is still telling its parent someone is here.
+///
+/// Bitwise `|`, never `||` — both operands' false arms stay coverable (HR5). At a disarmed budget the
+/// right operand is constant-false and this reduces to the old `simulates()` filter exactly.
+#[must_use]
+fn speaks_for(holds: &HandoffHolds, d: &Dot, now: TickId, ttl: u32) -> bool {
+    d.authority.simulates() | handing_over(holds, d.entity, now, ttl)
 }
 
 /// RLM 5f RG-1 — the reactive-greeting policy for a DEMAND-SPAWNED shard. A shard minted at spawn has a
@@ -2636,13 +2664,13 @@ fn self_fence_foreign_entity(
     transfer: TransferId,
     at_tick: TickId,
     stats: &mut StubStats,
-) -> Option<StampedPose> {
+) {
     let Some(session) = dots
         .iter()
         .find(|(_, d)| foreign_takeover_target(d, entity))
         .map(|(session, _)| *session)
     else {
-        return None; // no matching dot: never held here — a clean no-op
+        return; // no matching dot: never held here — a clean no-op
     };
     let dot = dots
         .get_mut(&session)
@@ -2651,7 +2679,7 @@ fn self_fence_foreign_entity(
     // demotes; an already-Ghost redelivery is a COUNTED no-op (the covered guard arm).
     if !dot.authority.simulates() {
         stats.self_fence_skipped += 1;
-        return None;
+        return;
     }
     // Owned → Frozen (always legal) → Ghost (the foreign CAS fence is strictly newer than the
     // source's own grant fence — the directory CAS is fence-monotone). An Err here is a real
@@ -2669,11 +2697,9 @@ fn self_fence_foreign_entity(
     tracing::warn!(
         "entity {entity} now held at fence {new_owner_fence} — source self-demoted to a retained Ghost"
     );
-    // KEEP the dot (no remove) and KEEP `granted` == true — it survives as the retained Ghost.
-    // The pose at the moment of demotion is what a hand-off hold carries: it is the last thing this
-    // shard knows authoritatively, and the parent needs SOMETHING placeable while the subject is between
-    // owners.
-    Some(dot.pose)
+    // KEEP the dot (no remove) and KEEP `granted` == true — it survives as the retained Ghost, holding
+    // the pose it last had under this shard's authority. That dot IS the subject's pose truth across the
+    // hand-off (FG-2), which is why the hand-off hold stores no pose of its own.
 }
 
 /// SOURCE consumer of the saga-pushed ordered `Demote` (1d.5b.1, D-2): the binding fence-enforced
@@ -2697,7 +2723,7 @@ fn on_saga_demote(
 ) {
     match cmd.subject.transfer_subject_entity() {
         Some(entity) => {
-            let demoted_pose = self_fence_foreign_entity(
+            self_fence_foreign_entity(
                 &mut dots.0,
                 entity,
                 cmd.new_owner_fence,
@@ -2711,15 +2737,13 @@ fn on_saga_demote(
             if in_flight.0.remove(&entity).is_some() {
                 stats.crossing_latches_cleared += 1;
             }
-            // THIS TICK is where the shard used to go silent: the latch it just cleared is the ONLY thing
-            // that was keeping the destination's children warm, and the demote it just applied is what
-            // stops it relaying the occupant to its parent. Open a hold so it keeps doing both across the
-            // hand-off. Inert until the budget is armed.
+            // THIS TICK is where the shard used to go silent: the demote it just applied is what stops it
+            // relaying the occupant to its parent and what empties its own occupant set. Open a hold so it
+            // keeps doing both until the take-over lands (`GhostFlow::Spawn`) or the budget runs out.
             open_hold(
                 holds,
                 (entity, HoldRole::Source),
                 cmd.new_owner_fence,
-                demoted_pose,
                 clock.local_tick,
                 config.handoff_hold_ttl_ticks,
             );
@@ -5384,6 +5408,8 @@ fn evaluate_realm_aoi(
     regions: Res<RealmRegions>,
     dots: Res<Dots>,
     owned_transients: Res<OwnedTransients>,
+    // The hand-offs this shard is still party to — read-only here; `process_inbound` owns the writes.
+    holds: Res<HandoffHolds>,
     mut membership: ResMut<AoiMembership>,
     mut outbox: ResMut<OutboundBox>,
     // VU AoI S2a-2b-ii — the resolved parent node (from the cadence HeadRead), the OccupantInterest up-relay
@@ -5418,6 +5444,7 @@ fn evaluate_realm_aoi(
         &regions,
         &dots,
         &owned_transients,
+        &holds,
         realm_fence,
         &mut membership.0,
         &mut outbox,
@@ -5475,6 +5502,10 @@ fn aoi_decide(
     regions: &RealmRegions,
     dots: &Dots,
     owned: &OwnedTransients,
+    // The hand-offs this shard is still party to — the subjects it has let go of but not yet seen taken
+    // over. They count as present here exactly as an owned dot does (`speaks_for`). EMPTY at a disarmed
+    // budget ⇒ every filter below reduces to the old ownership test.
+    holds: &HandoffHolds,
     realm_fence: Fence,
     membership: &mut BTreeMap<(ObserverId, RealmPath), AoiState>,
     outbox: &mut OutboundBox,
@@ -5487,6 +5518,9 @@ fn aoi_decide(
     let tick = clock.universe_tick;
     let tick_hz = 1.0 / config.tick_dt_s;
     let horizon_s = f64::from(config.boot_ticks_p99) * config.tick_dt_s; // F7 predictive horizon
+    // The hand-off budget, read once — every `speaks_for` below asks the same question of the same clock.
+    let hold_ttl = config.handoff_hold_ttl_ticks;
+    let local = clock.local_tick;
 
     // VU AoI S2b-ii — EXPIRE stale proxies BEFORE they can fold: prune any retained occupant whose last relay
     // is older than the derived TTL. Bounds the store; the TTL window bridges a lost `Unreliable` relay so a
@@ -5518,14 +5552,19 @@ fn aoi_decide(
             .collect()
     };
 
-    // Observers = owned durable dots this shard SIMULATES ∪ held transients (mirror
+    // Observers = durable dots this shard SPEAKS FOR — owned, or mid-hand-off — ∪ held transients (mirror
     // `evaluate_realm_boundaries`) ∪ the up-relayed PROXY occupants (S2b-iii), each TAGGED with its
     // `ObserverId` + reduced to frame-local `(pos, vel)` — the SAME own frame the child placements use (H-1) —
     // so the AoI distance and the observer feed measure one geometry.
+    //
+    // A dot mid-hand-off is counted HERE, which is what stops a realm calling itself empty while somebody is
+    // still leaving it (the emptiness gate a few lines down reads this very list). It also holds the children
+    // that occupant could see warm across the window, so a crossing that aborts finds its neighbourhood
+    // exactly as it left it instead of re-spinning it.
     let observers: Vec<(ObserverId, DVec3, DVec3)> = dots
         .0
         .iter()
-        .filter(|(_, d)| d.authority.simulates())
+        .filter(|(_, d)| speaks_for(holds, d, local, hold_ttl))
         .map(|(s, d)| (ObserverId::Dot(*s), d.pose.pos.offset(), d.pose.vel))
         .chain(
             owned
@@ -5735,10 +5774,26 @@ fn aoi_decide(
     // leaves no unreachable region (the root shard skips at the coord arm; a parented-but-unresolved shard
     // skips at the node arm). Inert at walk/static: `parent_node` is set only on an armed shard (the resolve
     // HeadRead fires only when `aoi_live`), so an inert shard never reaches the loop body — byte-identical.
+    //
+    // A dot mid-hand-off is relayed too, from the retained ghost's own pose (FG-2 — the one pose truth, and
+    // the same one this shard is still drawing for the client). Without it the parent stops hearing about a
+    // traveller at the exact moment they are between two of its children, and loses both its cull of their
+    // siblings and its own reason to stay alive.
+    //
+    // HOW STALE THAT POSE MAY GET is the budget, and nothing else: while a hand-off is in flight NOBODY is
+    // integrating the subject, so the frozen pose is not a guess — it is genuinely the last thing anyone
+    // knows. It is re-STAMPED to the current tick like an owned dot's, which is what keeps the parent
+    // composing it through the CURRENT frame; a held occupant still rides its orbiting child realm. If the
+    // hand-off wedges, the budget expires and the parent forgets them — a bounded stale window, chosen over
+    // the alternative of dropping their whole neighbourhood the instant they stop being owned.
     if let Some(parent_coord) = config.own_coord.parent()
         && let Some(parent) = parent_node
     {
-        for (_, d) in dots.0.iter().filter(|(_, d)| d.authority.simulates()) {
+        for (_, d) in dots
+            .0
+            .iter()
+            .filter(|(_, d)| speaks_for(holds, d, local, hold_ttl))
+        {
             push_occupant_interest(
                 outbox,
                 parent,
@@ -12147,24 +12202,13 @@ mod tests {
         (EntityId::pack(EntityKind::Player, 1, seed, 3), HoldRole::Source)
     }
 
-    fn hold_pose(x: f64) -> StampedPose {
-        StampedPose::at_rest(config().frame, DVec3::new(x, 0.0, 0.0), UniverseTick(5))
-    }
-
     #[test]
     fn open_hold_is_inert_at_a_zero_ttl() {
-        // THE BYTE-IDENTITY ARM. A fully populated call at the shipped tuning leaves the ledger empty,
-        // so every existing rig reduces textually to today's behaviour and no wire byte can move.
+        // THE DISARMED ARM. A fully populated call at a zero budget leaves the ledger empty, so a shard
+        // that was never given a budget behaves exactly as it did before the ledger existed.
         let mut holds = HandoffHolds::default();
         assert_eq!(
-            open_hold(
-                &mut holds,
-                hold_key(7),
-                Fence(2),
-                Some(hold_pose(1.0)),
-                TickId(10),
-                0,
-            ),
+            open_hold(&mut holds, hold_key(7), Fence(2), TickId(10), 0),
             HoldOutcome::Inert
         );
         assert!(holds.0.is_empty());
@@ -12175,51 +12219,36 @@ mod tests {
         let mut holds = HandoffHolds::default();
         let k = hold_key(7);
         assert_eq!(
-            open_hold(&mut holds, k, Fence(2), Some(hold_pose(1.0)), TickId(10), 8),
+            open_hold(&mut holds, k, Fence(2), TickId(10), 8),
             HoldOutcome::Opened
         );
 
         // A GENUINELY newer crossing replaces the hold outright — and re-anchors the budget, because it
         // is a different hand-off, not a continuation of the old one.
         assert_eq!(
-            open_hold(&mut holds, k, Fence(3), Some(hold_pose(2.0)), TickId(14), 8),
+            open_hold(&mut holds, k, Fence(3), TickId(14), 8),
             HoldOutcome::Superseded
         );
         assert_eq!(holds.0[&k].opened_at, TickId(14));
 
-        // THE IMMORTALITY GUARD: a same-fence re-open (a saga re-driving its demote every tick) updates
-        // the pose and leaves the budget anchored where it was. Without this, a wedged hand-off would
-        // keep a realm alive forever by heartbeat alone.
+        // THE IMMORTALITY GUARD: a same-fence re-open (a saga re-driving its demote every tick) leaves the
+        // budget anchored where it was. Without this, a wedged hand-off would keep a realm alive forever by
+        // heartbeat alone — the one failure the budget exists to make impossible.
         assert_eq!(
-            open_hold(&mut holds, k, Fence(3), Some(hold_pose(9.0)), TickId(17), 8),
+            open_hold(&mut holds, k, Fence(3), TickId(17), 8),
             HoldOutcome::Refreshed
         );
         assert_eq!(holds.0[&k].opened_at, TickId(14));
-        assert_eq!(holds.0[&k].pose, Some(hold_pose(9.0)));
 
         // A DELAYED REDELIVERY of the FIRST crossing, arriving after the second opened its hold. On an
         // at-least-once mesh this is a real delivery, not a hypothetical, and honouring it would rewind
         // the ledger to a hand-off that has already been superseded.
         assert_eq!(
-            open_hold(&mut holds, k, Fence(2), Some(hold_pose(0.0)), TickId(19), 8),
+            open_hold(&mut holds, k, Fence(2), TickId(19), 8),
             HoldOutcome::RefusedStale
         );
         assert_eq!(holds.0[&k].takeover_fence, Fence(3));
-        assert_eq!(holds.0[&k].pose, Some(hold_pose(9.0)));
-    }
-
-    #[test]
-    fn a_same_fence_reopen_without_a_pose_keeps_the_one_it_had() {
-        // The refresh takes the NEWER pose when there is one and keeps the old one otherwise — so a
-        // pose-less re-drive can never blank a pose the parent is relying on.
-        let mut holds = HandoffHolds::default();
-        let k = hold_key(11);
-        open_hold(&mut holds, k, Fence(2), Some(hold_pose(4.0)), TickId(3), 8);
-        assert_eq!(
-            open_hold(&mut holds, k, Fence(2), None, TickId(4), 8),
-            HoldOutcome::Refreshed
-        );
-        assert_eq!(holds.0[&k].pose, Some(hold_pose(4.0)));
+        assert_eq!(holds.0[&k].opened_at, TickId(14));
     }
 
     #[test]
@@ -12229,7 +12258,7 @@ mod tests {
         // Nothing to close.
         assert!(!close_hold_at_fence(&mut holds, k, Fence(3)));
 
-        open_hold(&mut holds, k, Fence(3), None, TickId(1), 8);
+        open_hold(&mut holds, k, Fence(3), TickId(1), 8);
         // A REPLAYED take-over from the superseded crossing must not close the live hold.
         assert!(!close_hold_at_fence(&mut holds, k, Fence(2)));
         assert!(holds.0.contains_key(&k));
@@ -12244,7 +12273,7 @@ mod tests {
         let mut holds = HandoffHolds::default();
         let k = hold_key(7);
         assert!(!close_hold(&mut holds, k));
-        open_hold(&mut holds, k, Fence(3), None, TickId(1), 8);
+        open_hold(&mut holds, k, Fence(3), TickId(1), 8);
         assert!(close_hold(&mut holds, k));
         assert!(holds.0.is_empty());
     }
@@ -12256,18 +12285,38 @@ mod tests {
         // silently collapse the two and one end would be lost.
         let mut holds = HandoffHolds::default();
         let e = EntityId::pack(EntityKind::Player, 1, 7, 3);
-        open_hold(&mut holds, (e, HoldRole::Source), Fence(2), None, TickId(1), 8);
-        open_hold(&mut holds, (e, HoldRole::Dest), Fence(2), None, TickId(1), 8);
+        open_hold(&mut holds, (e, HoldRole::Source), Fence(2), TickId(1), 8);
+        open_hold(&mut holds, (e, HoldRole::Dest), Fence(2), TickId(1), 8);
         assert_eq!(holds.0.len(), 2);
         assert!(close_hold(&mut holds, (e, HoldRole::Source)));
         assert_eq!(holds.0.len(), 1, "closing one end leaves the other standing");
     }
 
     #[test]
+    fn handing_over_reads_the_source_end_only_and_expires_with_the_budget() {
+        // The consumer-side question, asked of the two ways it can be false — no hold at all, and a hold
+        // that has aged past its budget — plus the role split (a DEST hold is not this shard handing away).
+        let mut holds = HandoffHolds::default();
+        let e = EntityId::pack(EntityKind::Player, 1, 7, 3);
+        assert!(!handing_over(&holds, e, TickId(5), 4), "no hold, no hand-off");
+        open_hold(&mut holds, (e, HoldRole::Dest), Fence(2), TickId(5), 4);
+        assert!(
+            !handing_over(&holds, e, TickId(5), 4),
+            "a DEST hold is the other end — this shard is not handing anything away"
+        );
+        open_hold(&mut holds, (e, HoldRole::Source), Fence(2), TickId(5), 4);
+        assert!(handing_over(&holds, e, TickId(5), 4));
+        assert!(handing_over(&holds, e, TickId(8), 4), "age 3 of 4 is still live");
+        assert!(
+            !handing_over(&holds, e, TickId(9), 4),
+            "past the budget the hold stops answering even before the prune sweeps it"
+        );
+    }
+
+    #[test]
     fn hold_live_covers_both_edges_and_a_backwards_clock() {
         let h = HandoffHold {
             takeover_fence: Fence(2),
-            pose: None,
             opened_at: TickId(10),
         };
         assert!(hold_live(&h, TickId(10), 4), "age 0 is live");
@@ -12282,8 +12331,8 @@ mod tests {
     #[test]
     fn prune_drops_exactly_the_expired_holds_and_reports_how_many() {
         let mut holds = HandoffHolds::default();
-        open_hold(&mut holds, hold_key(1), Fence(2), None, TickId(0), 4);
-        open_hold(&mut holds, hold_key(2), Fence(2), None, TickId(6), 4);
+        open_hold(&mut holds, hold_key(1), Fence(2), TickId(0), 4);
+        open_hold(&mut holds, hold_key(2), Fence(2), TickId(6), 4);
         assert_eq!(prune_holds(&mut holds, TickId(8), 4), 1);
         assert_eq!(holds.0.len(), 1);
         assert!(holds.0.contains_key(&hold_key(2)));
@@ -15903,12 +15952,19 @@ mod tests {
     /// A parented PLANET shard (own Planet(42) under System(7)) with its OWN realm granted and an ARMED
     /// child band planted — the S2a-2b up-relay fixture. `recheck` arms the parent-resolve cadence.
     fn parented_aoi_rig(recheck: u64) -> Rig {
+        parented_aoi_rig_holding(recheck, 0)
+    }
+
+    /// The same fixture with the HAND-OFF BUDGET armed to `hold_ttl` local ticks — the shard keeps
+    /// speaking for a subject it has handed away for that long, or until the take-over lands.
+    fn parented_aoi_rig_holding(recheck: u64, hold_ttl: u32) -> Rig {
         let cfg = StubConfig {
             realm: OTHER_REALM,
             held_realms: StubConfig::single_realm(OTHER_REALM),
             frame: frame_of(OTHER_REALM),
             own_coord: child_coord_of(OWN_REALM, OTHER_REALM),
             realm_recheck_interval: recheck,
+            handoff_hold_ttl_ticks: hold_ttl,
             ..config()
         };
         let mut rig = Rig::with_config(cfg);
@@ -15995,6 +16051,189 @@ mod tests {
                 },
                 coarsen_level: 0,
             }
+        );
+    }
+
+    #[test]
+    fn a_demoted_dot_goes_silent_to_the_parent_on_the_very_tick_it_is_handed_over() {
+        // THE SILENCE the hand-off ledger exists to end — MEASURED, not argued. A source shard that has
+        // applied the ordered Demote still holds the dot (as a retained Ghost) and still knows exactly
+        // where it last was, but the up-relay filters on `simulates()`. So the parent stops hearing about
+        // the traveller at the precise moment the traveller is crossing between two of its children, and
+        // the parent's culling + its own emptiness verdict lose the only observer that was standing in for
+        // them. This test is the BEFORE reading; the armed budget below turns the second count back to 1.
+        const PARENT_NODE: NodeId = NodeId(55);
+        let mut rig = parented_aoi_rig(2);
+        resolve_parent_head(
+            &mut rig,
+            StubConfig::root_coord(OWN_REALM).lowered(),
+            PARENT_NODE,
+        );
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        assert_eq!(
+            occupant_interests(&rig.tick(vec![])).len(),
+            1,
+            "while OWNED the dot is relayed up every tick"
+        );
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::Demote(DemoteCmd {
+                transfer: TransferId(7),
+                subject: DirectoryKey::Entity(entity),
+                new_owner_fence: Fence(2),
+                step_id: DEMOTE_STEP,
+            }),
+        )]);
+        assert_eq!(
+            occupant_interests(&sent).len(),
+            0,
+            "the demote tick is the LAST the parent hears — at a zero budget the shard goes silent"
+        );
+    }
+
+    /// The ordered `Demote` for `entity` at the take-over fence — the message that starts a hand-off at
+    /// the source and, with a budget armed, opens the hold.
+    fn demote_msg(entity: EntityId, new_owner_fence: Fence) -> Inbound {
+        wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::Demote(DemoteCmd {
+                transfer: TransferId(7),
+                subject: DirectoryKey::Entity(entity),
+                new_owner_fence,
+                step_id: DEMOTE_STEP,
+            }),
+        )
+    }
+
+    #[test]
+    fn an_armed_shard_keeps_telling_its_parent_where_a_departing_occupant_is() {
+        // THE ARMED READING of the silence measured above. Same fixture, same demote, a budget of 8 —
+        // and the parent keeps hearing about the traveller for the whole window instead of losing them
+        // at the worst possible moment.
+        const PARENT_NODE: NodeId = NodeId(55);
+        let mut rig = parented_aoi_rig_holding(2, 8);
+        resolve_parent_head(
+            &mut rig,
+            StubConfig::root_coord(OWN_REALM).lowered(),
+            PARENT_NODE,
+        );
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let owned = occupant_interests(&rig.tick(vec![]));
+        assert_eq!(owned.len(), 1, "while OWNED, relayed");
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+
+        let handed = occupant_interests(&rig.tick(vec![demote_msg(entity, Fence(2))]));
+        assert_eq!(
+            handed.len(),
+            1,
+            "the shard keeps speaking for a subject it has handed away"
+        );
+        // The SAME pose it relayed while it owned them — the retained ghost's, which is also what this
+        // shard is still drawing for the client, so the parent and the client see one story (FG-2).
+        assert_eq!(handed[0].2.occupant.pos, owned[0].2.occupant.pos);
+        assert_eq!(handed[0].0, PARENT_NODE);
+        // …and it is doing so WITHOUT owning the dot. The hold is what carries the relay, not ownership.
+        assert!(
+            !rig.world.resource::<Dots>().0[&SESSION]
+                .authority
+                .simulates()
+        );
+
+        // Past the budget the shard falls silent on its own, so a hand-off that WEDGES rather than
+        // completes cannot hold the parent's attention — or, below, its own realm — open forever.
+        let opened = rig.world.resource::<HandoffHolds>().0[&(entity, HoldRole::Source)].opened_at;
+        rig.set_local_tick(opened.0 + 8);
+        assert!(
+            occupant_interests(&rig.tick(vec![])).is_empty(),
+            "the budget is a real cap, not a formality"
+        );
+    }
+
+    #[test]
+    fn the_take_over_landing_stops_the_relay_before_the_budget_does() {
+        // THE NORMAL TERMINAL. The destination's `GhostFlow::Spawn` is its proof that it has taken over —
+        // and from that moment IT relays the occupant, so this shard must stop. The budget is only the
+        // backstop for a hand-off that never gets here.
+        const PARENT_NODE: NodeId = NodeId(55);
+        let mut rig = parented_aoi_rig_holding(2, 8);
+        resolve_parent_head(
+            &mut rig,
+            StubConfig::root_coord(OWN_REALM).lowered(),
+            PARENT_NODE,
+        );
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        let _ = rig.tick(vec![demote_msg(entity, Fence(2))]);
+
+        // A REPLAYED take-over from a superseded crossing (an older fence) proves nothing and leaves the
+        // hold — and therefore the relay — standing.
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
+            entity,
+            pose: StampedPose::at_rest(
+                frame_of(OTHER_REALM),
+                DVec3::new(500.0, 0.0, 0.0),
+                UniverseTick(3),
+            ),
+            source_fence: Fence(1),
+            since_tick: vd_core::TickId(0),
+        })]);
+        assert_eq!(
+            occupant_interests(&sent).len(),
+            1,
+            "a stale take-over proof does not end this shard's hand-off"
+        );
+
+        // The matching proof does, well inside the budget.
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
+            entity,
+            pose: StampedPose::at_rest(
+                frame_of(OTHER_REALM),
+                DVec3::new(500.0, 0.0, 0.0),
+                UniverseTick(3),
+            ),
+            source_fence: Fence(2),
+            since_tick: vd_core::TickId(0),
+        })]);
+        assert!(
+            occupant_interests(&sent).is_empty(),
+            "once the destination has taken over, the source stops — no lingering double relay"
+        );
+    }
+
+    #[test]
+    fn a_realm_does_not_call_itself_empty_while_somebody_is_still_leaving_it() {
+        // THE SECOND CONSUMER, and the behaviour-changing half: emptiness is a claim about occupancy, and
+        // a subject mid-hand-off has not finished leaving. Without this a realm can report itself empty in
+        // the very window its own hand-off is running — the source-side twin of the arrival race.
+        let mut rig = parented_aoi_rig_holding(2, 8);
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        assert!(
+            !demands(&rig.tick(vec![]))
+                .iter()
+                .any(|d| d.verb == DemandVerb::Empty),
+            "an occupied realm never reports Empty"
+        );
+
+        assert!(
+            !demands(&rig.tick(vec![demote_msg(entity, Fence(2))]))
+                .iter()
+                .any(|d| d.verb == DemandVerb::Empty),
+            "nor does it the moment it hands that occupant away"
+        );
+
+        // And when the hand-off is over — here by running out of budget, the wedged case — the realm goes
+        // back to telling the truth, so an abandoned crossing cannot keep a realm alive indefinitely.
+        let opened = rig.world.resource::<HandoffHolds>().0[&(entity, HoldRole::Source)].opened_at;
+        rig.set_local_tick(opened.0 + 8);
+        assert!(
+            demands(&rig.tick(vec![]))
+                .iter()
+                .any(|d| d.verb == DemandVerb::Empty),
+            "past the budget the realm reports the truth again"
         );
     }
 
