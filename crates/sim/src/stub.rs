@@ -572,7 +572,12 @@ pub struct GhostNeighbor {
     /// bookkeeping — a reference point, NEVER a live pose (FG-2: the live pose is read from the `Dot`).
     /// Interim: a local-boundary approximation (the stub has no realm-center/SOI geometry); the real
     /// SOI band anchors at the realm center (`for_planet_soi`/`for_system_soi`, P4/P5).
-    pub anchor: DVec3,
+    ///
+    /// A POSITION, kept whole. It was a bare metre triple, and the distance from it was taken against
+    /// another bare triple — so once the integrator began folding a position's whole-number part out, both
+    /// terms were sub-millimetre remainders, the walk from here measured ~0 forever, and the ghost this
+    /// anchor exists to retire could never be retired.
+    pub anchor: LatticePos,
 }
 
 /// DEST-side ghost FEED registry (1d.5b.3b): for each entity this shard OWNS, the ghost-host
@@ -3069,7 +3074,7 @@ fn register_and_spawn_source_ghost(
         GhostNeighbor {
             source,
             seq: 0,
-            anchor: pose.pos.offset(),
+            anchor: pose.pos,
         },
     );
     outbox.push_flow(
@@ -4999,8 +5004,8 @@ fn feed_source_ghosts(
 /// (fully covered in `core`), so the dest's band-exit decision adds no uncovered branch here. The
 /// ghost was SPAWNED in-band at the crossing (distance 0 = a member), so `was_member` is always `true`.
 #[must_use]
-fn ghost_band_exited(band: &OverlapBand, anchor: DVec3, pose: &StampedPose) -> bool {
-    !band.update_membership(true, (pose.pos.offset() - anchor).length())
+fn ghost_band_exited(band: &OverlapBand, anchor: LatticePos, pose: &StampedPose) -> bool {
+    !band.update_membership(true, pose.pos.delta_m(anchor, pose.frame.tier()).length())
 }
 
 /// Whether a hosted ghost has a LIVE feed (1d.5b.3b): has-ever-been-fed-and-not-despawned (the
@@ -5521,6 +5526,9 @@ fn aoi_decide(
     // The hand-off budget, read once — every `speaks_for` below asks the same question of the same clock.
     let hold_ttl = config.handoff_hold_ttl_ticks;
     let local = clock.local_tick;
+    // The cell size the AoI arithmetic subtracts in. Observers and child placements are BOTH measured in
+    // this shard's own ambient frame (H-1), so one tier serves every distance below.
+    let own_tier = config.frame.tier();
 
     // VU AoI S2b-ii — EXPIRE stale proxies BEFORE they can fold: prune any retained occupant whose last relay
     // is older than the derived TTL. Bounds the store; the TTL window bridges a lost `Unreliable` relay so a
@@ -5539,7 +5547,7 @@ fn aoi_decide(
     // (`proxy_observer` → `None`). Built ONLY when the store is non-empty — EMPTY at walk/static ⇒ no
     // `frame_context` call, no rows ⇒ byte-identical. These fold into `observers` BELOW, BEFORE the emptiness
     // gate, so a parent whose own local set is empty still culls a deep traveller's siblings (the payoff).
-    let proxy_observers: Vec<(ObserverId, DVec3, DVec3)> = if retained.is_empty() {
+    let proxy_observers: Vec<(ObserverId, LatticePos, DVec3)> = if retained.is_empty() {
         Vec::new()
     } else {
         let ctx = regions.frame_context(tick_hz, tick);
@@ -5561,17 +5569,17 @@ fn aoi_decide(
     // still leaving it (the emptiness gate a few lines down reads this very list). It also holds the children
     // that occupant could see warm across the window, so a crossing that aborts finds its neighbourhood
     // exactly as it left it instead of re-spinning it.
-    let observers: Vec<(ObserverId, DVec3, DVec3)> = dots
+    let observers: Vec<(ObserverId, LatticePos, DVec3)> = dots
         .0
         .iter()
         .filter(|(_, d)| speaks_for(holds, d, local, hold_ttl))
-        .map(|(s, d)| (ObserverId::Dot(*s), d.pose.pos.offset(), d.pose.vel))
+        .map(|(s, d)| (ObserverId::Dot(*s), d.pose.pos, d.pose.vel))
         .chain(
             owned
                 .0
                 .iter()
                 .filter(|(_, t)| t.status.is_held())
-                .map(|(e, t)| (ObserverId::Transient(*e), t.pose.pos.offset(), t.pose.vel)),
+                .map(|(e, t)| (ObserverId::Transient(*e), t.pose.pos, t.pose.vel)),
         )
         .chain(proxy_observers)
         .collect();
@@ -5618,7 +5626,7 @@ fn aoi_decide(
         let level = region_level(region);
         let child_coord = own_coord.child(level);
         let path = child_coord.path().clone();
-        let child_pos = pose.pos.offset(); // own frame (== the placements' frame)
+        let child_pos = pose.pos; // own frame (== the placements' frame), carried WHOLE
 
         // Was the child kept-alive by ANY observer at tick START (its acquire latch held)? — the input to
         // the SpinUp-vs-KeepAlive union split, read BEFORE this tick's latch updates.
@@ -5633,7 +5641,7 @@ fn aoi_decide(
         for (obs, opos, ovel) in &observers {
             let key = (*obs, path.clone());
             live_keys.insert(key.clone());
-            let dist = occupant_child_dist(*opos, *ovel, child_pos, horizon_s);
+            let dist = occupant_child_dist(*opos, *ovel, child_pos, own_tier, horizon_s);
             let state = membership.get(&key).copied().unwrap_or_default();
             let now_in = region.aoi.in_range(state.was_in, dist);
             let (verb, next) = aoi_transition(state, now_in, region.aoi.grace_ticks());
@@ -5842,9 +5850,22 @@ fn child_shape(regions: &RealmRegions, region: &RealmRegion, tick_hz: f64) -> Re
 /// predictive distance (`occ_pos + occ_vel·horizon_s`) — so a fast occupant demands spin-up BEFORE it
 /// arrives (boot latency masked). A STATIC occupant has `vel == 0` ⇒ `pred == live` ⇒ no predictive term.
 /// Straight-line (monomorphic, HR5); the cross-observer UNION now lives in [`aoi_decide`]/[`union_verb`].
-fn occupant_child_dist(occ_pos: DVec3, occ_vel: DVec3, child_pos: DVec3, horizon_s: f64) -> f64 {
-    let live = (child_pos - occ_pos).length();
-    let pred = (child_pos - (occ_pos + occ_vel * horizon_s)).length();
+///
+/// BOTH ENDPOINTS ARE POSITIONS, and the ONE way to turn two positions into metres is `delta_m` — the
+/// exact-integer subtraction, the same rule the containment decision was corrected to in a35c294. They
+/// used to arrive here as bare metre triples, which silently discarded each one's whole-number part: from
+/// a player's first input the integrator folds their position into that part, so every occupant measured
+/// as standing at their realm's origin and the entire demand loop stopped depending on where anyone was.
+fn occupant_child_dist(
+    occ_pos: LatticePos,
+    occ_vel: DVec3,
+    child_pos: LatticePos,
+    tier: Tier,
+    horizon_s: f64,
+) -> f64 {
+    let to_child = child_pos.delta_m(occ_pos, tier);
+    let live = to_child.length();
+    let pred = (to_child - occ_vel * horizon_s).length();
     live.min(pred)
 }
 
@@ -6089,13 +6110,18 @@ fn proxy_alive(last_seen: TickId, now: TickId, ttl: u64) -> bool {
 /// grand-child the parent does not host (S3) or a stale post-re-home relay. For a DIRECT-child occupant (the
 /// S2b scope) the child is always in the roster, so this always resolves. The `match` lives here, not in the
 /// generic `transfer_frame` body (whose branching is all in `transfer_frame_resolved`, HR5).
+///
+/// The lifted POSITION is carried whole (not reduced to metres): a relayed occupant is correct here only
+/// by accident today — the cross-frame rebind usually zeroes the whole-number part — and the moment the
+/// frames happen to match, the rebind passes that part straight through and reducing to metres would throw
+/// it away.
 fn proxy_observer(
     entry: &RetainedOccupant,
     root_frame: FrameRef,
     ctx: &LocalFrames,
-) -> Option<(DVec3, DVec3)> {
+) -> Option<(LatticePos, DVec3)> {
     match transfer_frame(&entry.occupant, root_frame, ctx) {
-        Ok(p) => Some((p.pos.offset(), p.vel)),
+        Ok(p) => Some((p.pos, p.vel)),
         Err(_) => None,
     }
 }
@@ -9733,7 +9759,7 @@ mod tests {
                 GhostNeighbor {
                     source,
                     seq: 0,
-                    anchor: DVec3::ZERO,
+                    anchor: LatticePos::local(DVec3::ZERO),
                 },
             );
         let skipped_before = rig.world.resource::<StubStats>().ghost_feed_skipped;
@@ -9759,7 +9785,7 @@ mod tests {
                 GhostNeighbor {
                     source: NodeId(88),
                     seq: 0,
-                    anchor: DVec3::ZERO,
+                    anchor: LatticePos::local(DVec3::ZERO),
                 },
             );
         let sent = rig.tick(vec![]);
@@ -11684,7 +11710,10 @@ mod tests {
                 authority: Authority::Owned { fence: Fence(1) },
                 departing: false,
                 entity_fence: Fence(1),
-                pose: StampedPose::at_rest(config().frame, offset, UniverseTick(100)),
+                pose: StampedPose {
+                    pos: seated_pos(offset),
+                    ..StampedPose::at_rest(config().frame, offset, UniverseTick(100))
+                },
                 yaw: 0.0,
                 pitch: 0.0,
                 last_applied_seq: None,
@@ -11696,13 +11725,27 @@ mod tests {
     /// Move an owned dot's frame-local offset (its render/trigger position) without touching
     /// `prev_offset` (the trigger writes that itself each tick).
     fn move_dot(rig: &mut Rig, session: SessionId, offset: DVec3) {
+        let pos = seated_pos(offset);
         rig.world
             .resource_mut::<Dots>()
             .0
             .get_mut(&session)
             .expect("the owned dot")
             .pose
-            .pos = LatticePos::local(offset);
+            .pos = pos;
+    }
+
+    /// A position stored THE WAY THE INTEGRATOR STORES IT — whole-number part folded out, sub-cell
+    /// remainder left behind (`normalize`, exactly what `integrate` does every tick).
+    ///
+    /// WHY THE TEST HELPERS GO THROUGH THIS. Every fixture used to seat its dot at rest, which leaves the
+    /// whole-number part at zero and makes the remainder equal the whole position. That is a state no
+    /// moving player has been in since the movement fold, so no test in this file has ever exercised what
+    /// the game actually produces — which is why a consumer reading the remainder as if it were the
+    /// position went unnoticed. Seating dots the real way is what turns those consumers from arguable
+    /// into measurable.
+    fn seated_pos(offset: DVec3) -> LatticePos {
+        LatticePos::local(offset).normalize(vd_core::pose::Tier::Fine)
     }
 
     /// Every `CrossingRequest` in the outbox (decoded), so a test asserts the exact count.
@@ -14257,21 +14300,38 @@ mod tests {
 
     #[test]
     fn occupant_child_dist_takes_the_lesser_of_live_and_predictive() {
-        let child = DVec3::ZERO;
+        let t = vd_core::pose::Tier::Fine;
+        let child = LatticePos::local(DVec3::ZERO);
         // A STATIC occupant (vel 0): pred == live == its distance.
         assert_eq!(
-            occupant_child_dist(DVec3::new(500.0, 0.0, 0.0), DVec3::ZERO, child, 1.0),
+            occupant_child_dist(seated_pos(DVec3::new(500.0, 0.0, 0.0)), DVec3::ZERO, child, t, 1.0),
             500.0
         );
         // A MOVING occupant closing in: pred (300) beats live (1500) — the F7 predictive term.
         assert_eq!(
             occupant_child_dist(
-                DVec3::new(1500.0, 0.0, 0.0),
+                seated_pos(DVec3::new(1500.0, 0.0, 0.0)),
                 DVec3::new(-1200.0, 0.0, 0.0),
                 child,
+                t,
                 1.0
             ),
             300.0
+        );
+        // THE REGRESSION THIS FUNCTION EXISTS TO SURVIVE: the occupant seated the way the integrator
+        // stores a position (whole-number part folded out) must measure the SAME distance as one seated
+        // at rest. Reading either endpoint's leftover alone answered ~0 here, which is how every moving
+        // player came to be measured as standing at their realm's origin.
+        assert_eq!(
+            occupant_child_dist(seated_pos(DVec3::new(500.0, 0.0, 0.0)), DVec3::ZERO, child, t, 1.0),
+            occupant_child_dist(
+                LatticePos::local(DVec3::new(500.0, 0.0, 0.0)),
+                DVec3::ZERO,
+                child,
+                t,
+                1.0
+            ),
+            "where the whole-number part sits cannot change the distance",
         );
         // (The cross-observer MIN/union now lives in `aoi_decide`/`union_verb`, covered by
         // `evaluate_realm_aoi_demand_order_is_stable` + the two-observer tests below.)

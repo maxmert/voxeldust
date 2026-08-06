@@ -834,7 +834,14 @@ fn draw_hud(ctx: &egui::Context, net: &Net) {
         .find(|(id, _, _)| Some(*id) == own)
         .map_or_else(
             || "—".to_owned(),
-            |(_, _, pose)| format!("{:.1}, {:.1}, {:.1}", pose.pos.x, pose.pos.y, pose.pos.z),
+            // THROUGH THE ONE CHOKEPOINT, like everything that is drawn. `pose.pos` is only the sub-cell
+            // remainder of a position; since the server began folding the whole-number part out, reading it
+            // alone made this readout sit still while the player moved. It is the same call the geometry
+            // above already goes through — the HUD was the one consumer hand-rolling its own arithmetic.
+            |(_, _, pose)| {
+                let w = snap.world_pos(pose);
+                format!("{:.1}, {:.1}, {:.1}", w.x, w.y, w.z)
+            },
         );
     let location = snap.location().unwrap_or_else(|| "—".to_owned());
     let entity = own.map(|e| e.to_string()).unwrap_or_else(|| "—".to_owned());
