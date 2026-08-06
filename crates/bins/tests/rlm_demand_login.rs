@@ -971,20 +971,27 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         "[repro] RETURN committed — back on System 7 (reap survived; player on a live authority)"
     );
 
-    // ── OWED (D-RLM-14 / floating-origin S6 / VU-6): the SURROUNDING realm feed re-advancing on the return. ──
-    // The return COMMIT above is the Symptom-B (primary) gate — reaching "System 7" is unreachable if the
-    // return parked, so the total freeze is proven fixed. What is NOT yet guaranteed is that System re-ships
-    // its per-tick `RealmSnapshot` feed to the returned client: the dest read sub re-opens only from the
-    // `SubscriptionReady` at `on_saga_promote`, and the realm SCENE is re-streamed only at a home-entry
-    // `Active` promote (never on a cross). So we OBSERVE the neighbour feed here and LOG its status — we do
-    // NOT panic, because the re-establishment-on-cross is a ledgered next slice, not a regression. Flip this
-    // to a hard assert (`>= base + 20`) when D-RLM-14 lands.
+    // ── THE WORLD KEEPS MOVING AFTER YOU CROSS BACK — now a GATE, not an observation. ──
+    // This was an observe-and-log for a defect that was ledgered as owed (D-RLM-14 / floating-origin S6 /
+    // VU-6): "after a return crossing the surrounding realm feed does not re-advance". A 17-agent audit
+    // (2026-08-06) could not reproduce it — 3 runs at HEAD and 1 at 1bb73e8, all LIVE — and then found why
+    // it CANNOT happen: the per-tick placement forwarder gates on nothing but a live session and an open
+    // channel to the sending shard, and that channel is opened by the very event that makes the crossing
+    // commit. A committed crossing cannot leave this feed shut. The ledger described a stall with no
+    // mechanism.
+    //
+    // So the honest work of that slice is to LOCK IN what turned out to be already true. An observation
+    // that only logs cannot fail, and behaviour nobody asserts is behaviour waiting to regress quietly.
+    // This now fails the day anyone puts a staleness gate, a sequence check or an authority test on that
+    // delivery path — which is exactly the change that would break it.
     let base = poll(Instant::now() + Duration::from_secs(5)).realm_frames_applied;
     let observe_until = Instant::now() + Duration::from_secs(15);
     let mut neighbour_feed_live = false;
+    let mut last_seen = base;
     loop {
         std::thread::sleep(Duration::from_millis(300));
         let s = poll(observe_until);
+        last_seen = s.realm_frames_applied;
         if s.location.as_deref() == Some("System 7") && s.realm_frames_applied >= base + 20 {
             neighbour_feed_live = true;
             break;
@@ -1002,19 +1009,19 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         "RETURN REGRESSED: the player did not stay homed on System 7 after the return commit — the reap \
          keep-alive did not hold the return-dest live.",
     );
-    if neighbour_feed_live {
-        eprintln!(
-            "[repro] post-return neighbour feed LIVE on System 7 — the surrounding realms re-advanced on the \
-             cross (D-RLM-14 already satisfied here; keep the observation)"
-        );
-    } else {
-        eprintln!(
-            "[repro] OWED (D-RLM-14 / floating-origin S6 / VU-6): the return COMMITTED and the player is live \
-             on System 7, but the SURROUNDING realm feed did not re-advance within the window — the \
-             return-crossing read-sub / realm-scene re-stream is the next slice. NOT a regression (the total \
-             freeze is fixed); ledgered."
-        );
-    }
+    assert!(
+        neighbour_feed_live,
+        "POST-RETURN FREEZE: the player crossed back to System 7 and is live there, but the SURROUNDING \
+         realms stopped advancing — the per-tick placement feed did not resume. Applied frames went from \
+         {base} to {last_seen} in 15s (needed {} more). The planets are frozen on screen while the player \
+         moves among them. Look first at whatever now gates the gateway's per-tick placement forward: it \
+         used to gate on nothing but a live session plus an open channel to the sending shard.",
+        20,
+    );
+    eprintln!(
+        "[repro] post-return neighbour feed LIVE on System 7 ({base} -> {last_seen} applied frames) — the \
+         surrounding realms keep advancing across the cross"
+    );
     unsafe {
         std::env::remove_var("VD_VISUAL_ORBIT_SLOWDOWN");
     }
