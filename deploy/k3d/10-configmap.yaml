@@ -14,6 +14,10 @@ data:
   VD_PROFILE: "cloud"
   VD_TICK_HZ: "50"
   VD_TICK_DT: "0.02" # == 1/50; kept beside VD_TICK_HZ so they retune together
+  # The occupant's max speed. HERE, not on the shard pod, because BOTH the shard and the gateway build the
+  # world from it now — the gateway decides which realm a login lands in, and it must reach that answer with
+  # the same numbers the shard will then simulate by. Split across two files it would drift silently.
+  VD_SPEED: "2.0"
   VD_OUTBOUND_CAP: "256"
   VD_TRUST_DIR: "/etc/vd/trust"
   VD_STORE_DURABLE_ROOT: "/var/lib/vd"

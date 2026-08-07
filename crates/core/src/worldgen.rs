@@ -110,9 +110,14 @@ pub const MAX_RENDERABLE_EXTENT_M: f64 = 200.0;
 /// `child_seed` salt distinguishing PLANET-kind children under a system (a fixed kind discriminant;
 /// `child_seed` avalanches `(parent, salt, index)`, so a distinct salt keeps planet ids off other kinds).
 const PLANET_SALT: u64 = 0x504c_414e_4554; // "PLANET"
+/// `child_seed` salt distinguishing SYSTEM-kind children under a galaxy — the sibling-kind discriminant
+/// for stars, exactly as [`PLANET_SALT`] is for planets. A system's identity is `f(galaxy, index)`, so two
+/// galaxies never mint the same system id and a system's planets never collide with another system's.
+const SYSTEM_SALT: u64 = 0x5359_5354_454d; // "SYSTEM"
 /// SYSTEM_A's RNG lineage root→leaf `[Universe, Galaxy, System]` — MUST equal
 /// `realm_path::system_path(SYSTEM_A_SEED).lineage_seeds()` so every shard hosting System A draws the
 /// IDENTICAL per-system stream by construction (HR1); consumed once by [`generate_system_forest`].
+#[cfg(test)]
 const SYSTEM_A_LINEAGE: [u64; 3] = [UNIVERSE_SEED, GALAXY_SEED, SYSTEM_A_SEED];
 /// Compressed-real planet count — a 5-planet Kepler system: the inner 3 subtend ≥ the visibility angle
 /// from the star (drawn) while the outer 2 fall below it (culled) until an occupant closes in, so the
@@ -125,6 +130,13 @@ const VISUAL_SYSTEM_SOI_R_M: f64 = 150.0;
 /// Headroom (render m) between the OUTER planet's SOI face and the System SOI surface, so the outer
 /// body renders STRICTLY inside its System box ([`visual_au_to_render_m`] solves to place it here).
 const VISUAL_SYSTEM_MARGIN_M: f64 = 4.0;
+/// THROWAWAY (tiny world): how many stars the demo galaxy holds. Enough to fly between and to watch one
+/// wake ahead while another sleeps behind — the system-level expression of the rule already watched
+/// working on planets. A real galaxy draws this from its census range, not a constant.
+const VISUAL_N_SYSTEMS: u32 = 3;
+/// THROWAWAY (tiny world): how much wider than the wake radius the ring is. Above 1.0 a system is asleep
+/// when you set off and wakes as you close — which is the whole point of flying there.
+const VISUAL_RING_SLACK: f64 = 1.05;
 /// A planet's SOI radius as a fraction of the SMALLEST inter-orbit gap; `< 0.5` guarantees adjacent
 /// SOIs never overlap (the non-overlap invariant is a pinned test, not a hand-tuned coincidence).
 const VISUAL_SOI_GAP_FRACTION: f64 = 0.35;
@@ -134,9 +146,27 @@ const VISUAL_SOI_GAP_FRACTION: f64 = 0.35;
 /// render gate samples universe ticks FAR ENOUGH apart to see the sweep, so the period is free to be
 /// leisurely for a human watching.
 const VISUAL_TARGET_OUTER_PERIOD_S: f64 = 300.0;
-/// The minimum angular size (radians) a realm must subtend to enter Area of Interest — 8°, a realm is
-/// visible (streams in) out to `extent · cot(θ/2) + velocity-lead`. ONE config constant, no kind-branch.
-const VISIBILITY_THETA_MIN_RAD: f64 = 0.139_626;
+/// The minimum angular size (radians) a realm must subtend to enter Area of Interest — a realm is visible
+/// (streams in) out to `extent · cot(θ/2) + velocity-lead`. ONE config constant, no kind-branch: this
+/// single number sets how far away EVERY realm kind appears, from a planet to a galaxy.
+///
+/// 1.5° (was 8°). Two independent measurements forced it down, and both are about the same thing — at 8°
+/// a body only exists once it is ~14 of its own radii away, which is close enough to be already large:
+///
+/// 1. A planet was invisible from inside its own star system. Its wake radius was 59.5 m against a system
+///    150 m in radius, so you could cross a system's boundary and find it apparently empty — measured, and
+///    now pinned by `a_planet_is_visible_from_anywhere_inside_its_own_system`.
+/// 2. Bodies POPPED IN at full size instead of growing from a dot, which is the opposite of the owner's
+///    stated arrival/departure behaviour (a system shrinks to a dot as you leave, grows from one as you
+///    arrive). Angular size IS that behaviour: the smaller this angle, the smaller a body is when it first
+///    appears. At 1.5° it enters the scene ~76 radii out — a few pixels — and grows all the way in.
+///
+/// COST, stated because it is real and pays at every scale: every realm's wake radius grows by the same
+/// 5.3×, so more realms are awake at once and the demand loop carries more of them. That is the ONE knob's
+/// nature — it cannot be widened for planets alone without branching on kind, which is forbidden. Note the
+/// inter-system ring is DERIVED from this same factor ([`UniverseConfig::visual_geometry`]), so a system
+/// still sleeps until you approach it no matter what this is set to — that behaviour is invariant here.
+const VISIBILITY_THETA_MIN_RAD: f64 = 0.026_180;
 /// One solar mass (kg) — the canonical/walk INERT central mass (those presets emit no `Orbital` body,
 /// so it is never read there; [`UniverseConfig::visual_scale`] overrides it with a synthetic mass).
 const CANONICAL_STAR_MASS_KG: f64 = 1.989e30;
@@ -439,13 +469,132 @@ fn planet_elements(config: &UniverseConfig, stream: &mut SplitMix64, n: u32) -> 
     }
 }
 
-/// The config-driven star-system forest: Universe → Galaxy → System A → `config.planet.n_planets`
-/// `Orbital` planets (D-45(a) FA-5). The System shell at origin IS the star frame — the planets orbit
-/// its center and the star is DATA (`stellar.central_mass_kg`), never a `RealmId::Star` (HR3). The
-/// `0..n_planets` range is the ONLY control flow (branchless); `n_planets == 0` (walk/canonical) emits
-/// NO planet, so this degenerates to the ambient forest there. Pure `f(seed_universe)`: every planet's
-/// elements draw from the ONE per-system [`realm_stream`] in a fixed order (HR1). Makes the
-/// `Placement::Orbital` lowering arm LIVE in a real path for the first time (through [`to_regions`]).
+/// The seed of the `n`-th star system in a galaxy. System 0 keeps [`SYSTEM_A_SEED`] — it is the identity
+/// every existing fixture, label and gate already names — and the rest avalanche off the galaxy through
+/// the same [`child_seed`] every other sibling set uses, so a system's identity is a pure function of
+/// (galaxy, index) and no two galaxies ever collide.
+#[must_use]
+fn system_seed_at(n: u32) -> u64 {
+    // Branchless in the HR5 sense: ONE covered comparison, no nested control flow.
+    if n == 0 {
+        SYSTEM_A_SEED
+    } else {
+        child_seed(GALAXY_SEED, SYSTEM_SALT, u64::from(n))
+    }
+}
+
+/// How many star systems a galaxy holds — its CENSUS, drawn from the galaxy's own stream inside
+/// `[system_count_lo, system_count_hi]`. Pure `f(universe_seed)` against the galaxy lineage, so every
+/// shard agrees on the population without exchanging a byte, and two galaxies from one universe differ
+/// without anyone authoring either. `lo == hi` pins the count exactly (the walk roster's shape).
+///
+/// One draw, no rejection loop — the taxonomy discipline: a sampler is a closed-form map from one uniform.
+#[must_use]
+fn galaxy_system_count(seed_universe: u64, config: &UniverseConfig) -> u32 {
+    let lo = config.galaxy.system_count_lo;
+    let hi = config.galaxy.system_count_hi.max(lo);
+    let span = u64::from(hi - lo) + 1;
+    let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED]);
+    // `next_f64` is [0,1); scaling by the inclusive span and truncating lands in [lo, hi] with the last
+    // bucket reachable only at exactly 1.0, which the generator never produces — hence the `min`.
+    let draw = (stream.next_f64() * span as f64) as u64;
+    lo + u32::try_from(draw.min(span - 1)).unwrap_or(0)
+}
+
+/// Where the `n`-th system sits in its galaxy. System 0 is the galactic origin; the rest are spaced
+/// evenly around a ring of [`StellarConfig::system_ring_r_m`].
+///
+/// A RING, not random placement, and deliberately: two star systems whose boundaries overlap make
+/// containment ambiguous — a position would be inside two authorities at once, and the deepest-containing
+/// rule that decides which shard owns you would have no answer. A ring gives a closed-form minimum
+/// separation (`2·r·sin(π/(n-1))` between neighbours, `r` from the origin system) that a boot fence can
+/// check, where rejection-sampled positions would need a search. Seeded jitter belongs on top of this
+/// later; it changes nothing about the separation guarantee.
+#[must_use]
+fn system_center_at(config: &UniverseConfig, n_systems: u32, n: u32) -> DVec3 {
+    let ring_r = config.stellar.system_ring_r_m;
+    let others = n_systems.saturating_sub(1).max(1);
+    let theta = TAU * f64::from(n.saturating_sub(1)) / f64::from(others);
+    // `n == 0` yields cos/sin of the SAME angle as `n == 1` but is multiplied by zero, so the origin
+    // system needs no branch of its own — the multiplier is the whole decision.
+    let on_ring = f64::from(u32::from(n != 0));
+    DVec3::new(theta.cos() * ring_r, 0.0, theta.sin() * ring_r) * on_ring
+}
+
+/// Two sibling realms whose boundaries INTERSECT — the authoring mistake that makes "which realm contains
+/// this position" have two answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SiblingsOverlap {
+    /// The two siblings, ordered as authored.
+    pub a: RealmId,
+    pub b: RealmId,
+    /// Their shared parent.
+    pub parent: RealmId,
+}
+
+/// Refuse a forest in which two STATICALLY-placed siblings intersect.
+///
+/// WHY THIS IS A CORRECTNESS FENCE, not tidiness. Authority is decided by descending into the deepest
+/// child whose boundary contains you. If two siblings overlap, a position inside both has two equally
+/// valid answers, and which shard owns you depends on iteration order — a coin flip that decides where
+/// your input is applied and who simulates your collisions. It cannot be repaired downstream, because by
+/// then the ambiguity is already a routing decision.
+///
+/// STATIC SIBLINGS ONLY, and that limit is real rather than convenient: an orbiting body's lowered region
+/// sits at its frame ORIGIN (center zero — its position is authored live through its frame each tick), so
+/// two planets are indistinguishable from co-located by any static comparison. Judging orbits needs their
+/// SHELLS compared — two orbits are disjoint iff their radii differ by more than the sum of their
+/// boundaries, at every eccentricity — which is a separate check over the moving roster. Recorded rather
+/// than silently skipped: an unchecked orbital overlap is the same defect one level down.
+///
+/// Conservative on both sides: it compares FARTHEST-surface-point distances, so a doubtful placement is
+/// refused rather than waved through. Cross-frame siblings are not judged (their numbers are not
+/// comparable) — the same honest decline the parent-fit check makes.
+/// RUN AT TEST TIME, not at boot, and that is a decision rather than an omission: the generator is
+/// deterministic, so proving it over the shipped presets across a sweep of seeds proves every world that can
+/// actually be booted, while a per-boot pass would be quadratic in a galaxy's population for an answer that
+/// cannot change between runs. If worlds ever stop being purely seed-derived — the moment players place
+/// structures the generator did not — this moves to the placement path, where the new body is the only thing
+/// that needs judging.
+#[cfg(test)]
+fn siblings_disjoint(bodies: &[GeneratedBody]) -> Result<(), SiblingsOverlap> {
+    for (i, a) in bodies.iter().enumerate() {
+        let Placement::StaticOffset(a_at) = a.placement else {
+            continue; // an orbit is judged on its shell, not its epoch — see above
+        };
+        let Some(parent) = a.parent else {
+            continue; // the ambient root has no siblings
+        };
+        for b in bodies.iter().skip(i + 1).filter(|b| b.parent == a.parent) {
+            let Placement::StaticOffset(b_at) = b.placement else {
+                continue;
+            };
+            let reach = a.shape.circumscribed_extent() + b.shape.circumscribed_extent();
+            if (b_at - a_at).length() < reach {
+                return Err(SiblingsOverlap {
+                    a: a.realm,
+                    b: b.realm,
+                    parent,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The config-driven star-system forest: Universe → Galaxy → `stellar.n_systems` star systems, each with
+/// `planet.n_planets` `Orbital` planets (D-45(a) FA-5). A System shell IS its star's frame — the planets
+/// orbit its center and the star is DATA (`stellar.central_mass_kg`), never a `RealmId::Star` (HR3).
+///
+/// EVERY system is built by the SAME loop from its own seed — there is no "system A" special case beyond
+/// which seed index 0 carries. That is what makes a galaxy expressible at all: the previous shape named
+/// one system in code and hung the planets off a constant, so a second star could not exist at any scale,
+/// which is why the login side and the shard side ended up with two different worlds.
+///
+/// Pure `f(seed_universe, config)`: each system draws its planets from its OWN [`realm_stream`], keyed on
+/// its own lineage, in a fixed order — so a shard hosting system 4 generates byte-identical planets to
+/// every other shard's view of system 4, without any shared state (HR1). `n_planets == 0` emits no
+/// planet; `n_systems == 0` emits the ambient forest alone.
 fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<GeneratedBody> {
     let sc = &config.scale;
     let st = &config.stellar;
@@ -467,22 +616,28 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
             shape: shell(sc.galaxy_r_m),
             placement: origin,
         },
-        // System A: the star's SOI at the origin — the frame the planets orbit (the star is DATA).
-        GeneratedBody {
-            realm: SYSTEM_A,
+    ];
+    // HOW MANY STARS THIS GALAXY HOLDS — drawn from the galaxy's OWN stream against its census, so two
+    // galaxies in one universe differ without anyone choosing. `lo == hi` pins it exactly.
+    let n_systems = galaxy_system_count(seed_universe, config);
+    for s in 0..n_systems {
+        let seed = system_seed_at(s);
+        let system = RealmId::System(seed);
+        bodies.push(GeneratedBody {
+            realm: system,
             parent: Some(GALAXY),
             shape: shell(st.system_soi_r_m),
-            placement: origin,
-        },
-    ];
-    let mut stream = realm_stream(seed_universe, &SYSTEM_A_LINEAGE);
-    for n in 0..pl.n_planets {
-        bodies.push(GeneratedBody {
-            realm: RealmId::Planet(child_seed(SYSTEM_A_SEED, PLANET_SALT, u64::from(n))),
-            parent: Some(SYSTEM_A),
-            shape: shell(pl.planet_soi_r_m),
-            placement: Placement::Orbital(planet_elements(config, &mut stream, n)),
+            placement: Placement::StaticOffset(system_center_at(config, n_systems, s)),
         });
+        let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED, seed]);
+        for n in 0..pl.n_planets {
+            bodies.push(GeneratedBody {
+                realm: RealmId::Planet(child_seed(seed, PLANET_SALT, u64::from(n))),
+                parent: Some(system),
+                shape: shell(pl.planet_soi_r_m),
+                placement: Placement::Orbital(planet_elements(config, &mut stream, n)),
+            });
+        }
     }
     bodies
 }
@@ -534,8 +689,113 @@ pub fn moving_children_for_config(
 /// the SAME geometry the sim's `RealmRegions` and the client draw — not the FA-5 visual single-system
 /// forest ([`realm_regions_for_config`]); unifying the two under one seed-lazy generator is the P4 owe.
 #[must_use]
-pub fn container_coord_at(_seed_universe: u64, config: &UniverseConfig, pos: DVec3) -> RealmCoord {
-    let regions = to_regions(&generate_walk_forest(config), config);
+pub fn container_coord_at(seed_universe: u64, config: &UniverseConfig, pos: DVec3) -> RealmCoord {
+    // THE SAME FOREST THE SHARDS BUILD. This used to descend the WALK roster unconditionally — ignoring
+    // the world it was handed — so where a login was placed came from a different universe than the one
+    // that would then simulate them. With several star systems that is not merely inconsistent: the
+    // resolver would not know the star you logged in beside exists.
+    container_coord_in(&realm_regions_for_config(seed_universe, config), pos)
+}
+
+/// A WORLD, materialised once: the bodies that exist, and the containment regions they lower to.
+///
+/// WHY THIS TYPE EXISTS. The world used to be re-derived from `(seed, config)` at every question — where a
+/// login lands, which regions a shard evaluates, how a realm's origin folds. Three problems followed from
+/// that, and this type is the answer to all three at once:
+///
+/// 1. **Different questions could get different worlds.** The gateway resolved a player's home against the
+///    GENERATED world and then validated that answer against the HAND-PLACED one. With a single star the two
+///    agreed by accident; with several stars a login beside any other star resolves to a realm the check has
+///    never heard of, and the gateway panics on its own defence. Holding ONE world makes that class of bug
+///    unstateable rather than fixed.
+/// 2. **The world could not contain anything a seed does not produce.** Stations are built by players and
+///    areas mostly are; no seed ever emits one, so anything needing them had to reach for a second world
+///    builder — which is precisely the seam that let (1) happen. A world is now something you HOLD, so it
+///    can be generated content, generated content plus what players have built, or (in a test) content
+///    placed by hand. Same code path, different contents.
+/// 3. **It regenerated the entire forest per call.** A login rebuilt every star and planet to answer one
+///    question about one position.
+///
+/// HONEST SCOPE: this materialises the whole forest once. A universe too large to hold in memory needs the
+/// per-subtree lazy generator that is the P4 owe; this type is where that laziness will live, and moving it
+/// here first means no caller has to change when it lands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldView {
+    bodies: Vec<GeneratedBody>,
+    regions: Vec<RealmRegion>,
+}
+
+impl WorldView {
+    /// The world a SEED produces: stars and their planets, and nothing else. This is the production world —
+    /// what a player logs into today, before anyone has built anything.
+    #[must_use]
+    pub fn generated(seed_universe: u64, config: &UniverseConfig) -> WorldView {
+        WorldView::of(generate_system_forest(seed_universe, config), config)
+    }
+
+    /// A world with structures PLACED BY HAND — a station, an area, a planet at a known spot.
+    ///
+    /// TEST WORLD. The generator emits none of these on purpose: stations are built by players, and so are
+    /// areas in all but a few cases, so a seed-derived world contains no station to stand in and no area to
+    /// spin up. A test that needs one places it. This is the same shape player-built content will take when
+    /// it lands — a world is bodies, and where they came from is not something anything downstream asks.
+    ///
+    /// Everything below the placement is IDENTICAL to the generated path: the same lowering, the same bands,
+    /// the same descend. Nothing here is a second implementation of anything.
+    #[must_use]
+    pub fn hand_placed(config: &UniverseConfig) -> WorldView {
+        WorldView::of(generate_walk_forest(config), config)
+    }
+
+    /// Lower a body list to its regions once, and keep both — the regions answer containment questions, the
+    /// bodies answer placement ones (an orbit's elements do not survive lowering).
+    fn of(bodies: Vec<GeneratedBody>, config: &UniverseConfig) -> WorldView {
+        let regions = to_regions(&bodies, config);
+        WorldView { bodies, regions }
+    }
+
+    /// The containment forest — what a shard evaluates membership against.
+    #[must_use]
+    pub fn regions(&self) -> &[RealmRegion] {
+        &self.regions
+    }
+
+    /// The deepest realm containing `pos`, as a full root→leaf lineage. See [`container_coord_in`].
+    #[must_use]
+    pub fn container_coord(&self, pos: DVec3) -> RealmCoord {
+        container_coord_in(&self.regions, pos)
+    }
+
+    /// The regions a shard holding `held` evaluates: ancestors ∪ direct children, never siblings.
+    #[must_use]
+    pub fn neighbourhood(&self, held: &std::collections::BTreeSet<RealmId>) -> Vec<RealmRegion> {
+        neighbourhood_scope(&self.regions, held)
+    }
+
+    /// The root→realm origin chain, for folding a realm's absolute position.
+    #[must_use]
+    pub fn origin_chain(&self, realm: RealmId) -> Vec<OriginLink> {
+        origin_chain_over(&self.bodies, realm)
+    }
+
+    /// Is this realm part of this world? The honest form of the check that used to consult a DIFFERENT world
+    /// than the one that produced the answer being checked.
+    #[must_use]
+    pub fn contains_realm(&self, realm: RealmId) -> bool {
+        self.regions.iter().any(|r| r.realm == realm)
+    }
+}
+
+/// Resolve `pos` against an ALREADY-BUILT forest — the descend itself, separated from the question of
+/// which world to descend.
+///
+/// WHY THE SPLIT. Resolving a position and generating a world are different jobs, and fusing them meant
+/// the resolver could only ever answer about the world it built into itself. It also left tests no way to
+/// ask about a world containing PLAYER-BUILT structures: stations and areas are placed by people, never
+/// by the generator, so no seed-derived forest contains one and a test needing a station had to reach for
+/// a second world builder that did. That second builder was the seam.
+#[must_use]
+pub fn container_coord_in(regions: &[RealmRegion], pos: DVec3) -> RealmCoord {
     let pose = StampedPose::at_rest(
         FrameRef::SystemSpace { system_seed: 0 },
         pos,
@@ -553,7 +813,7 @@ pub fn container_coord_at(_seed_universe: u64, config: &UniverseConfig, pos: DVe
     .expect("a one-level path always has a leaf");
     let mut current = root.realm;
     // Descend the parent chain: extend into the deepest direct child that contains `pos`, until none.
-    while let Some(child) = deepest_containing_child(&regions, current, &pose) {
+    while let Some(child) = deepest_containing_child(regions, current, &pose) {
         coord = coord.child(level_of(child).expect("a seed-forest realm has a RealmLevel"));
         current = child;
     }
@@ -679,6 +939,18 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
     ]
 }
 
+/// A FIXTURE forest containing PLAYER-BUILT structures — a station and an area — hand-placed beside the
+/// generated bodies.
+///
+/// NOT A SECOND WORLD, and the distinction is the whole point. The seed generates what NATURE puts
+/// there: stars and their planets. Stations and areas are built by PLAYERS, so no seeded world contains
+/// one, at any scale. Tests that exercise crossing into a station therefore have to place it themselves —
+/// exactly as a player would — and that is what this is for. It is never called by a running game.
+///
+/// It previously masqueraded as world generation, which is how the login side ended up descending a
+/// roster with hand-placed bodies while the shards built the real thing: the two disagreed about what
+/// exists because one of them was a test fixture.
+///
 /// The single source of truth for realm→region geometry (see the module docs). At P3 returns the
 /// static WALK-scale mandate forest, now GENERATED from [`UniverseConfig::walk_scale`] via
 /// [`generate_walk_forest`] + [`to_regions`] (byte-identical to the pre-generator forest);
@@ -731,11 +1003,16 @@ pub fn realm_neighbourhood_for(seed_universe: u64, hosted_realm: RealmId) -> Vec
 /// [`realm_neighbourhood_for`] exactly (byte-identical). Closed-form `f(seed, held)`, replicated by
 /// construction (HR1) — the held-set is itself seed-derivable topology, not shared mutable state.
 #[must_use]
+// FIXTURE path — scopes the hand-placed roster (with its player-built station and area), NOT a generated
+// world. The `_config` twin is the real one.
 pub fn realm_neighbourhood_for_held(
     seed_universe: u64,
     held: &std::collections::BTreeSet<RealmId>,
 ) -> Vec<RealmRegion> {
-    realm_neighbourhood_for_held_config(seed_universe, held, &UniverseConfig::walk_scale())
+    // Scoped over the FIXTURE roster, matching its single-realm twin `realm_neighbourhood_for`. Both
+    // exist so a test can hold a station or an area — realms a player builds and no seed ever produces.
+    // Routing this at the generated world instead would silently disagree with its own twin.
+    neighbourhood_scope(&realm_regions_for(seed_universe), held)
 }
 
 /// The co-hosting neighbourhood for an EXPLICIT `config` (RLM 5f-4) — the config twin of
@@ -749,7 +1026,13 @@ pub fn realm_neighbourhood_for_held_config(
     held: &std::collections::BTreeSet<RealmId>,
     config: &UniverseConfig,
 ) -> Vec<RealmRegion> {
-    neighbourhood_scope(&realm_regions_for_walk_config(seed_universe, config), held)
+    // THE SEAM, CLOSED. This read the WALK roster while the shards built the SYSTEM forest, so the login
+    // side and the simulating side described different worlds from the same seed — the client was told a
+    // star system was 40 m across while the shards flew planets to 152. Two identical functions differing
+    // only in which world they consult is the same defect as branching on shard kind (HR3), wearing
+    // different clothes. There is now ONE forest, and this is a thin alias kept only so the call sites
+    // read naturally; it will collapse into its twin when the walk world goes.
+    realm_neighbourhood_for_config(seed_universe, held, config)
 }
 
 /// The config twin of [`realm_neighbourhood_for_held_config`] over the SYSTEM forest (orbiting planets) — the
@@ -1029,6 +1312,16 @@ pub struct StellarConfig {
     /// a kind (HR3). SYNTHETIC on the visual preset (Kepler-3-tuned to a seconds-scale period so orbits
     /// are visible), one solar mass on canonical(). Read ONLY on the `Orbital` path (inert on walk).
     pub central_mass_kg: f64,
+    /// The radius of the ring the non-origin systems are spaced around (system 0 sits at the galactic
+    /// origin). Must leave every system's boundary disjoint from every other's AND inside the galaxy —
+    /// overlapping systems would make "which realm contains this position" ambiguous, which is the one
+    /// question the whole authority model rests on.
+    ///
+    /// HOW MANY systems is NOT here: it is drawn from the galaxy's own census
+    /// ([`GalaxyConfig::system_count_lo`]..=[`GalaxyConfig::system_count_hi`]) against the galaxy's seed,
+    /// so two galaxies from one universe differ. A second count field here would be a second source of
+    /// truth for the same fact.
+    pub system_ring_r_m: f64,
 }
 
 /// Planet physics: SOI scale, orbital spacing, eccentricity/inclination, and the frost/mass
@@ -1255,6 +1548,10 @@ impl UniverseConfig {
                 mass_hi_msun: IMF_MASS_HI_MSUN,
                 mlr_segments: SpectralClass::MLR_SEGMENTS,
                 central_mass_kg: CANONICAL_STAR_MASS_KG, // INERT (walk emits no Orbital body).
+                // Where the walk roster's second star already sat. It is no longer inert: with ONE
+                // world, this preset drives the same generator as everything else, and a zero ring
+                // would stack both stars on the origin — two authorities over one point.
+                system_ring_r_m: SYSTEM_B_OFFSET_M,
             },
             planet: PlanetConfig {
                 planet_soi_r_m: PLANET_SOI_R_M,
@@ -1313,6 +1610,10 @@ impl UniverseConfig {
                 mass_hi_msun: IMF_MASS_HI_MSUN,
                 mlr_segments: SpectralClass::MLR_SEGMENTS,
                 central_mass_kg: CANONICAL_STAR_MASS_KG, // one solar mass (real).
+                // ONE system until the true-scale world is authored for real. This preset is NOT the
+                // starting point for that work — its astronomical-unit conversion is 2.5x the real value
+                // and its bodies do not nest correctly (an area sits outside the planet claiming it).
+                system_ring_r_m: CANONICAL_SYSTEM_B_OFFSET_M,
             },
             planet: PlanetConfig {
                 planet_soi_r_m: CANONICAL_PLANET_SOI_R_M,
@@ -1383,6 +1684,31 @@ impl UniverseConfig {
             ORBITAL_RATIO,
         );
         cfg.planet.n_planets = VISUAL_N_PLANETS;
+        // ╔══════════════════════════════════════════════════════════════════════════════════════════╗
+        // ║ THROWAWAY — THE TINY-WORLD NUMBERS. DELETE WHOLESALE WITH THIS PRESET.                    ║
+        // ║                                                                                          ║
+        // ║ These exist for ONE purpose: to fit several star systems into a metre-scale galaxy so the ║
+        // ║ realm wake/sleep rule can be watched working at SYSTEM level before the world goes true-  ║
+        // ║ scale. They are proportions of a toy and mean nothing in a real galaxy, where the count   ║
+        // ║ comes from the census, the spacing from real astronomy, and a system is ~1e13 m not 150.  ║
+        // ║                                                                                          ║
+        // ║ NOTHING above this block is throwaway — the N-system loop, the seed-drawn census, the     ║
+        // ║ per-system streams and the overlap fence are the final world's machinery.                 ║
+        // ║                                                                                          ║
+        // ║ SIZED SO THE RULE IS ACTUALLY EXERCISED: a system wakes once it subtends the visibility   ║
+        // ║ angle, i.e. from `soi * cot(theta/2)` away. At 150 m and 8 degrees that is ~2145 m, so the ║
+        // ║ ring must be WIDER than that or every system is awake from login and the rule never       ║
+        // ║ changes its answer — you would prove crossing but never observe waking.                   ║
+        // ╚══════════════════════════════════════════════════════════════════════════════════════════╝
+        cfg.galaxy.system_count_lo = VISUAL_N_SYSTEMS;
+        cfg.galaxy.system_count_hi = VISUAL_N_SYSTEMS;
+        cfg.stellar.system_ring_r_m =
+            VISUAL_SYSTEM_SOI_R_M * visibility_factor(VISIBILITY_THETA_MIN_RAD) * VISUAL_RING_SLACK;
+        // The galaxy must CONTAIN the ring, or a star sits outside its own galaxy and the space between
+        // stars belongs to nothing. It therefore exceeds the client's box-cull — which is CORRECT, not a
+        // regression: the owner's ruling is that a containment boundary is never drawn as an object. The
+        // galaxy stops being scenery and goes back to being what it is, an authority volume.
+        cfg.scale.galaxy_r_m = cfg.stellar.system_ring_r_m + VISUAL_SYSTEM_SOI_R_M * 2.0;
         cfg
     }
 
@@ -1608,7 +1934,10 @@ mod tests {
     /// The FULL-lineage container coord of `pos` under the P3 walk forest (`seed 0`, `walk_scale`) —
     /// the un-lossy `container_coord_at` twin of `container_at`.
     fn coord_at(pos: DVec3) -> RealmCoord {
-        container_coord_at(0, &UniverseConfig::walk_scale(), pos)
+        // Against the FIXTURE forest — the one with a hand-placed station and area, standing in for what
+        // a player would have built. The generated world contains neither, at any scale, so resolving a
+        // station chain against it would be asking about somewhere that does not exist.
+        container_coord_in(&realm_regions_for(0), pos)
     }
 
     /// An expected lineage from `(kind, seed)` pairs, root → leaf.
@@ -1690,12 +2019,14 @@ mod tests {
         // ancestor-closure is reproducible cross-host (HR1). Two independent resolves of the deepest
         // point (Area A) are equal, path and all.
         let a = coord_at(DVec3::new(AREA_OFFSET_M, 0.0, 0.0));
-        let b = container_coord_at(
-            0,
-            &UniverseConfig::walk_scale(),
-            DVec3::new(AREA_OFFSET_M, 0.0, 0.0),
-        );
+        let b = container_coord_in(&realm_regions_for(0), DVec3::new(AREA_OFFSET_M, 0.0, 0.0));
         assert_eq!(a, b);
+        // And the REAL resolver is deterministic too — over the generated world, which contains no
+        // player-built structure, so it stops at the star rather than descending to an area.
+        assert_eq!(
+            container_coord_at(0, &UniverseConfig::visual_scale(), DVec3::ZERO),
+            container_coord_at(0, &UniverseConfig::visual_scale(), DVec3::ZERO)
+        );
         // The lineage length is exactly depth + 1 (root at index 0, leaf last) — the descend appended a
         // level per hop, never truncating (the "full lineage, not lowered()" contract).
         assert_eq!(a.path().levels().len(), 5);
@@ -1913,7 +2244,9 @@ mod tests {
     fn walk_scale_equals_the_named_geometry_consts() {
         let c = UniverseConfig::walk_scale();
         assert_eq!(c.scale.universe_r_m, UNIVERSE_R_M);
-        assert_eq!(c.scale.galaxy_r_m, GALAXY_R_M);
+        // The galaxy is DERIVED to contain the ring of stars, no longer the walk constant: it must hold
+        // every system with its reach, or a star sits outside its own galaxy.
+        assert!(c.scale.galaxy_r_m > c.stellar.system_ring_r_m + c.stellar.system_soi_r_m);
         assert_eq!(c.scale.render_extent_m, MAX_RENDERABLE_EXTENT_M);
         assert_eq!(c.stellar.system_soi_r_m, SYSTEM_SOI_R_M);
         assert_eq!(c.planet.planet_soi_r_m, PLANET_SOI_R_M);
@@ -2178,6 +2511,191 @@ mod tests {
     }
 
     #[test]
+    fn one_world_answers_and_checks_with_the_same_contents() {
+        // THE DEFECT THIS TYPE RETIRES, measured. A home used to be RESOLVED against the generated world and
+        // then VALIDATED against the hand-placed one. With one star the two happened to agree; with several,
+        // the stars a seed draws are simply absent from the hand-placed world, so a perfectly valid home
+        // beside any other star fails its own defence — and the gateway panics on the spot.
+        let cfg = UniverseConfig::visual_scale();
+        let generated = WorldView::generated(0, &cfg);
+        let placed = WorldView::hand_placed(&cfg);
+        // The two worlds really do hold different things — otherwise the rest of this proves nothing.
+        let only_generated: Vec<RealmId> = generated
+            .regions()
+            .iter()
+            .map(|r| r.realm)
+            .filter(|realm| !placed.contains_realm(*realm))
+            .collect();
+        assert!(
+            !only_generated.is_empty(),
+            "the generated world holds stars the hand-placed one does not"
+        );
+        // …and EVERY one of them passes the check when the check reads the world that produced it.
+        for realm in only_generated {
+            assert!(generated.contains_realm(realm));
+        }
+    }
+
+    #[test]
+    fn a_resolved_home_is_always_in_the_world_that_resolved_it() {
+        // The invariant the gateway leans on, stated over the world itself rather than over a seed and a
+        // config that might build a different one. Swept across the volume so it is a property, not a point.
+        for config in [
+            UniverseConfig::visual_scale(),
+            UniverseConfig::walk_scale(),
+        ] {
+            for world in [WorldView::generated(0, &config), WorldView::hand_placed(&config)] {
+                for step in 0..40_i32 {
+                    let x = f64::from(step) * 60.0;
+                    let home = world.container_coord(DVec3::new(x, 0.0, 0.0));
+                    assert!(
+                        world.contains_realm(home.lowered()),
+                        "a home resolved at x={x} is in the world that resolved it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_hand_placed_world_is_the_one_with_structures_to_stand_in() {
+        // Stations are built by players and areas mostly are, so the generator emits neither — which is why
+        // a test that needs one places it. Pinned both ways: the placed world HAS them, the generated world
+        // has NONE, and that is the whole reason both exist.
+        let cfg = UniverseConfig::walk_scale();
+        let placed = WorldView::hand_placed(&cfg);
+        let generated = WorldView::generated(0, &cfg);
+        let structures = |w: &WorldView| -> usize {
+            w.regions()
+                .iter()
+                .filter(|r| matches!(r.realm, RealmId::Station(_) | RealmId::Area(_)))
+                .count()
+        };
+        assert_eq!(structures(&generated), 0);
+        assert_eq!(structures(&placed), 2);
+    }
+
+    #[test]
+    fn the_world_answers_neighbourhood_and_origin_chain_from_its_own_contents() {
+        // The remaining two questions a world is asked, each equal to the free function it delegates to —
+        // so holding a world can never mean a different answer than deriving one, only a cheaper one.
+        let cfg = UniverseConfig::visual_scale();
+        let world = WorldView::generated(0, &cfg);
+        let held = std::collections::BTreeSet::from([SYSTEM_A]);
+        assert_eq!(
+            world.neighbourhood(&held),
+            realm_neighbourhood_for_config(0, &held, &cfg)
+        );
+        assert_eq!(
+            world.origin_chain(SYSTEM_A),
+            origin_chain_for_config(0, &cfg, SYSTEM_A)
+        );
+        assert_eq!(world.regions(), realm_regions_for_config(0, &cfg));
+    }
+
+    #[test]
+    fn no_two_static_siblings_ever_overlap_in_any_shipped_world() {
+        // THE FENCE, RUN. A position inside two overlapping siblings has two equally valid owners, and
+        // which shard gets you falls out of iteration order — see `siblings_disjoint` for why that is
+        // unrepairable downstream. The generator is deterministic, so proving it over the shipped presets
+        // and a spread of seeds proves the worlds that can actually be booted.
+        //
+        // Seeds swept rather than one sampled: the star ring is drawn from the galaxy's own stream, so a
+        // seed that happened to draw a crowded galaxy is exactly the case a single-seed test would miss.
+        for seed in 0..64_u64 {
+            for config in [
+                UniverseConfig::visual_scale(),
+                UniverseConfig::visual_demand(15.0, 0.02),
+                UniverseConfig::canonical(),
+            ] {
+                let bodies = generate_system_forest(seed, &config);
+                assert_eq!(siblings_disjoint(&bodies), Ok(()));
+            }
+            assert_eq!(
+                siblings_disjoint(&generate_walk_forest(&UniverseConfig::walk_scale())),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn the_fence_refuses_two_siblings_that_reach_each_other() {
+        // The fence's OWN failing case, so passing above is a fact and not a fence that never says no.
+        // Two shells of radius 1 whose centres are 1.5 apart: their surfaces interpenetrate.
+        let shell = Boundary::Shell { r: 1.0 };
+        let at = |x: f64| Placement::StaticOffset(DVec3::new(x, 0.0, 0.0));
+        let body = |realm, placement| GeneratedBody {
+            realm,
+            parent: Some(GALAXY),
+            shape: shell,
+            placement,
+        };
+        let a = RealmId::System(1);
+        let b = RealmId::System(2);
+        assert_eq!(
+            siblings_disjoint(&[body(a, at(0.0)), body(b, at(1.5))]),
+            Err(SiblingsOverlap {
+                a,
+                b,
+                parent: GALAXY
+            })
+        );
+        // …and clears once they are pushed apart past the sum of their radii.
+        assert_eq!(
+            siblings_disjoint(&[body(a, at(0.0)), body(b, at(2.5))]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_first_system_draws_the_stream_its_realm_path_names() {
+        // HR1 restated as a measurement: every shard hosting a system must draw the IDENTICAL per-system
+        // stream, which holds only if the stream's lineage IS the realm's path from the universe down.
+        // Pinned on system zero because that is the one with a named seed to compare against.
+        assert_eq!(
+            [UNIVERSE_SEED, GALAXY_SEED, system_seed_at(0)],
+            SYSTEM_A_LINEAGE
+        );
+    }
+
+    #[test]
+    fn a_planet_is_visible_from_anywhere_inside_its_own_system() {
+        // THE REGRESSION THIS PINS (measured 2026-08-07, live): a planet's wake radius was 59.5 m while the
+        // system containing it was 150 m in radius, so crossing into a system showed you an EMPTY volume —
+        // its planets only existed once you were nearly on top of one.
+        //
+        // The requirement, stated geometrically: two points inside a sphere of radius R are at most 2R
+        // apart, so a planet reaching `2 · (its system's extent)` is visible from ANY point in that system,
+        // including the far side of the boundary you just crossed. Derived from the forest, never a pinned
+        // literal — so it keeps holding if the geometry is re-tuned, and fails loudly if the ONE visibility
+        // angle is widened back.
+        let regions = realm_regions_for_config(0, &UniverseConfig::visual_scale());
+        let extent_of = |realm: RealmId| {
+            regions
+                .iter()
+                .find(|r| r.realm == realm)
+                .map(|r| r.shape.circumscribed_extent())
+        };
+        let mut planets_checked = 0_u32;
+        for r in regions
+            .iter()
+            .filter(|r| matches!(r.realm, RealmId::Planet(_)))
+        {
+            let parent = r.parent.expect("a planet always sits inside its system");
+            let system_extent = extent_of(parent).expect("the parent system is in the same forest");
+            assert!(
+                r.aoi.spin_up_r_m() >= 2.0 * system_extent,
+                "planet reaches {:.1} m but must cross its own {:.1} m system",
+                r.aoi.spin_up_r_m(),
+                system_extent
+            );
+            planets_checked += 1;
+        }
+        // …and the loop actually ran, so a forest that stopped emitting planets cannot pass vacuously.
+        assert_eq!(planets_checked, VISUAL_N_PLANETS * VISUAL_N_SYSTEMS);
+    }
+
+    #[test]
     fn interest_config_build_live() {
         let live = UniverseConfig::visual_scale().interest;
         assert!(live.is_live());
@@ -2351,12 +2869,20 @@ mod tests {
             std::collections::BTreeSet::from([a_planet]),
             std::collections::BTreeSet::from([SYSTEM_A, a_planet]),
         ];
+        // The FIXTURE scoper agrees with its own single-realm twin over the same roster. It deliberately
+        // does NOT agree with the config scoper any more: that one reads the GENERATED world, which holds
+        // no player-built station or area. Asserting they match is what let a fixture masquerade as the
+        // world in the first place.
         for held in &sets {
-            assert_eq!(
-                realm_neighbourhood_for_held(0, held),
-                realm_neighbourhood_for_held_config(0, held, &UniverseConfig::walk_scale()),
-                "realm_neighbourhood_for_held delegates byte-identically"
-            );
+            let scoped = realm_neighbourhood_for_held(0, held);
+            for r in held {
+                for one in realm_neighbourhood_for(0, *r) {
+                    assert!(
+                        scoped.iter().any(|s| s.realm == one.realm),
+                        "the union over {held:?} covers every member's own neighbourhood"
+                    );
+                }
+            }
         }
     }
 
@@ -2531,8 +3057,8 @@ mod tests {
     // FROZEN compressed-real geometry goldens — EXACT f64, captured once from the derive helpers at the
     // compressed-real numbers and pinned as literals here (NON-self-referential: a regression in a derive
     // helper is caught, not silently re-captured). Approx: au→render 42.45 / planet SOI 4.16 / orbit
-    // semi-major axes 17,29,49,83,142 / synthetic central mass / visibility factor cot(4°) ≈ 14.301.
-    const FROZEN_VISIBILITY_FACTOR: f64 = 14.300701209730468;
+    // semi-major axes 17,29,49,83,142 / synthetic central mass / visibility factor cot(0.75°) ≈ 76.390.
+    const FROZEN_VISIBILITY_FACTOR: f64 = 76.38983065807547;
     const FROZEN_AU_TO_RENDER_M: f64 = 42.456177082969845;
     const FROZEN_PLANET_SOI_R_M: f64 = 4.160705354131045;
     const FROZEN_CENTRAL_MASS_KG: f64 = 18755157416108.99;
@@ -2565,7 +3091,7 @@ mod tests {
 
     #[test]
     fn visibility_factor_is_cot_half_theta() {
-        // cot(θ/2) at θ_min = 8° — the ONE visibility constant (≈ 14.301), frozen non-self-referentially.
+        // cot(θ/2) at θ_min = 1.5° — the ONE visibility constant (≈ 76.390), frozen non-self-referentially.
         assert_eq!(
             visibility_factor(VISIBILITY_THETA_MIN_RAD),
             FROZEN_VISIBILITY_FACTOR
@@ -2583,9 +3109,11 @@ mod tests {
         assert_eq!(c.stellar.central_mass_kg, FROZEN_CENTRAL_MASS_KG);
         // The 5 planet orbit distances (semi-major axes, render m): ~17 / 29 / 49 / 83 / 142.
         let bodies = generate_system_forest(0, &c);
+        // ONE star's planets. Orbit distances are a property of a SYSTEM, so a galaxy of several stars
+        // must not change them — reading every planet in the galaxy would be reading a different quantity.
         let smas: Vec<f64> = bodies
             .iter()
-            .skip(3)
+            .filter(|b| b.parent == Some(SYSTEM_A))
             .map(|b| orbital_of(b.placement).expect("a planet is Orbital").sma)
             .collect();
         assert_eq!(smas, FROZEN_ORBIT_SMA_M.to_vec());
@@ -2599,23 +3127,25 @@ mod tests {
     }
 
     #[test]
-    fn visual_demand_band_is_crossable_for_the_outer_planet() {
-        // Non-vacuous now (unlike the toy where 1.2×extent swallowed everything): the OUTER planet is OUT
-        // of spin-up range at the star, so a ship flying out CROSSES its band — spin_up_r < outer orbit.
-        let (outer, orbit) = outer_planet_orbit(&UniverseConfig::visual_demand(15.0, 0.02));
+    fn visual_demand_band_is_crossable_between_stars() {
+        // NON-VACUITY, the other half of `a_planet_is_visible_from_anywhere_inside_its_own_system`. Together
+        // they sandwich the band: a planet is awake everywhere inside its own system (so arriving shows you
+        // a populated system), and ASLEEP from the neighbouring star (so the interstellar leg crosses its
+        // band and the spin-up machinery is actually exercised). Without this the wider angle could swell
+        // until every planet in the galaxy is permanently awake and nothing would ever be measured waking.
+        //
+        // This USED to read `spin_up < orbit` — the outer planet asleep at its OWN star — which is the very
+        // property that made a system look empty on arrival. The band did not stop being crossable; it moved
+        // outward, so the crossing is now measured where it belongs, on the way in from another star.
+        let cfg = UniverseConfig::visual_demand(15.0, 0.02);
+        let (outer, orbit) = outer_planet_orbit(&cfg);
+        // The closest a neighbouring star ever gets to this planet: the ring, less its orbit at worst phase.
+        let from_the_next_star = cfg.stellar.system_ring_r_m - orbit;
         assert!(
-            outer.aoi.spin_up_r_m() < orbit,
-            "the outer planet is out of spin-up range at the star (crossable)"
-        );
-    }
-
-    #[test]
-    fn visual_demand_is_releasable_at_the_star() {
-        // The mirror release fact: from the star the outer planet is past tear-down → released (reapable).
-        let (outer, orbit) = outer_planet_orbit(&UniverseConfig::visual_demand(15.0, 0.02));
-        assert!(
-            outer.aoi.tear_down_r_m() < orbit,
-            "the outer planet releases from the star (tear-down < outer orbit distance)"
+            outer.aoi.tear_down_r_m() < from_the_next_star,
+            "the outer planet must be asleep from the next star ({:.1} m reach vs {:.1} m away)",
+            outer.aoi.tear_down_r_m(),
+            from_the_next_star
         );
     }
 
@@ -2647,7 +3177,9 @@ mod tests {
         // the System SOI + the four moving-planet fields carry the compressed-real geometry.
         assert_eq!(c.scale.render_extent_m, MAX_RENDERABLE_EXTENT_M);
         assert_eq!(c.stellar.system_soi_r_m, VISUAL_SYSTEM_SOI_R_M);
-        assert_eq!(c.scale.galaxy_r_m, GALAXY_R_M);
+        // The galaxy is DERIVED to contain the ring of stars, no longer the walk constant: it must hold
+        // every system with its reach, or a star sits outside its own galaxy.
+        assert!(c.scale.galaxy_r_m > c.stellar.system_ring_r_m + c.stellar.system_soi_r_m);
         assert_eq!(c.planet.ecc_cap, KEPLER_ECC_MAX);
         assert_eq!(c.planet.ecc_sigma, ECC_SIGMA);
         assert_eq!(c.planet.incl_sigma, INCL_SIGMA);
@@ -2663,15 +3195,124 @@ mod tests {
     #[test]
     fn generate_system_forest_emits_the_ambient_forest_plus_n_orbital_planets() {
         let bodies = visual_forest();
-        assert_eq!(bodies.len(), 3 + VISUAL_N_PLANETS as usize);
-        // The 3 ambient bodies are StaticOffset (orbital_of None); each planet is Orbital + System child.
+        // 2 ambient shells + every system + that system's planets. The galaxy's population is DRAWN from
+        // its census, so this reads the census rather than restating a number in two places.
+        let n_sys = VISUAL_N_SYSTEMS as usize;
+        assert_eq!(bodies.len(), 2 + n_sys * (1 + VISUAL_N_PLANETS as usize));
         assert_eq!(orbital_of(bodies[0].placement), None); // Universe
         assert_eq!(orbital_of(bodies[1].placement), None); // Galaxy
-        assert_eq!(orbital_of(bodies[2].placement), None); // System A
-        for planet in bodies.iter().skip(3) {
-            assert_eq!(planet.parent, Some(SYSTEM_A));
-            assert!(orbital_of(planet.placement).is_some());
+        // Every remaining body is either a system (static, under the galaxy) or one of its planets
+        // (orbital, under a system) — no third kind, and no planet parented anywhere but a star.
+        let systems: Vec<_> = bodies
+            .iter()
+            .filter(|b| b.parent == Some(GALAXY))
+            .map(|b| b.realm)
+            .collect();
+        assert_eq!(systems.len(), n_sys);
+        assert!(systems.contains(&SYSTEM_A), "system 0 keeps the named identity");
+        for b in bodies.iter().skip(2) {
+            if systems.contains(&b.realm) {
+                assert_eq!(orbital_of(b.placement), None, "a star does not orbit");
+            } else {
+                assert!(systems.contains(&b.parent.expect("a planet has a star")));
+                assert!(orbital_of(b.placement).is_some());
+            }
         }
+    }
+
+    #[test]
+    fn a_galaxy_of_several_systems_gives_each_its_own_seed_place_and_planets() {
+        // THE GENERALISATION. The previous shape named ONE system in code and hung the planets off a
+        // constant, so a second star could not exist at any scale — which is how the login side and the
+        // shard side ended up describing two different worlds. Every system now comes off the same loop.
+        let mut cfg = UniverseConfig::visual_scale();
+        cfg.galaxy.system_count_lo = 4;
+        cfg.galaxy.system_count_hi = 4;
+        cfg.stellar.system_ring_r_m = 4.0 * cfg.stellar.system_soi_r_m;
+        let bodies = generate_system_forest(0, &cfg);
+
+        let systems: Vec<_> = bodies.iter().filter(|b| b.parent == Some(GALAXY)).collect();
+        assert_eq!(systems.len(), 4, "a galaxy is N systems, not one");
+        // System 0 keeps the identity every existing fixture and label already names.
+        assert_eq!(systems[0].realm, SYSTEM_A);
+        // …and no two systems share an id, so their planets can never collide either.
+        let ids: std::collections::BTreeSet<_> = systems.iter().map(|s| s.realm).collect();
+        assert_eq!(ids.len(), 4, "system identities are distinct: {ids:?}");
+
+        // Each system carries its OWN planets, and a planet belongs to exactly one star.
+        for sys in &systems {
+            let mine = bodies
+                .iter()
+                .filter(|b| b.parent == Some(sys.realm))
+                .count();
+            assert_eq!(mine, VISUAL_N_PLANETS as usize, "{:?} has its own planets", sys.realm);
+        }
+        let planets: std::collections::BTreeSet<_> = bodies
+            .iter()
+            .filter(|b| b.parent.is_some_and(|p| ids.contains(&p)))
+            .map(|b| b.realm)
+            .collect();
+        assert_eq!(
+            planets.len(),
+            4 * VISUAL_N_PLANETS as usize,
+            "every planet across every system is a distinct realm"
+        );
+
+        // A DIFFERENT SEED DRAWS DIFFERENT ORBITS but the SAME structure — the world is a pure function
+        // of the seed, so two shards hosting system 3 agree without talking to each other.
+        let other = generate_system_forest(99, &cfg);
+        assert_eq!(other.len(), bodies.len(), "structure is seed-independent");
+        assert_ne!(
+            orbital_of(other[3].placement),
+            orbital_of(bodies[3].placement),
+            "orbits are seed-DERIVED, not fixed"
+        );
+    }
+
+    #[test]
+    fn a_forest_whose_star_systems_overlap_is_refused() {
+        // THE FENCE THAT MAKES SEVERAL SYSTEMS SAFE. Authority is "the deepest realm containing you". Two
+        // overlapping systems give a position two equally valid owners, and which shard simulates you
+        // would come down to iteration order — a coin flip deciding where your input lands.
+        let mut cfg = UniverseConfig::visual_scale();
+        cfg.galaxy.system_count_lo = 4;
+        cfg.galaxy.system_count_hi = 4;
+
+        // A ring TIGHTER than the systems on it: neighbours intersect.
+        cfg.stellar.system_ring_r_m = cfg.stellar.system_soi_r_m;
+        let overlapping = generate_system_forest(0, &cfg);
+        let err = siblings_disjoint(&overlapping).expect_err("touching systems must be refused");
+        assert_eq!(err.parent, GALAXY, "the ambiguity is between children of the galaxy");
+
+        // Spread them and the same forest is accepted — so the refusal is about the GEOMETRY, not about
+        // having more than one star.
+        cfg.stellar.system_ring_r_m = 4.0 * cfg.stellar.system_soi_r_m;
+        assert_eq!(siblings_disjoint(&generate_system_forest(0, &cfg)), Ok(()));
+
+        // And the single-system world every existing rig boots is accepted unchanged.
+        assert_eq!(
+            siblings_disjoint(&generate_system_forest(0, &UniverseConfig::visual_scale())),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_sibling_fence_declines_to_judge_orbits_rather_than_guessing() {
+        // AN HONEST LIMIT, pinned so nobody mistakes silence for a guarantee. An orbiting body's region
+        // sits at its frame ORIGIN — its position is authored live each tick — so every planet looks
+        // co-located to any static comparison. Judging orbits needs their SHELLS compared, which is a
+        // separate check over the moving roster; until it exists, orbital overlap is UNCHECKED.
+        let cfg = UniverseConfig::visual_scale();
+        let bodies = generate_system_forest(0, &cfg);
+        let orbiting = bodies.iter().filter(|b| orbital_of(b.placement).is_some()).count();
+        assert_eq!(
+            orbiting,
+            (VISUAL_N_SYSTEMS * VISUAL_N_PLANETS) as usize,
+            "the fixture really does orbit"
+        );
+        // The planets pass — NOT because they are proven disjoint, but because this fence does not judge
+        // orbits at all.
+        assert_eq!(siblings_disjoint(&bodies), Ok(()));
     }
 
     // ---- A2: seed-derived origin chain + fold (the iron rule) ----
@@ -2904,7 +3545,11 @@ mod tests {
         // A moving (Orbital) planet authors its position LIVE through its frame, so its region carries NO
         // baked position — center is the ZERO origin of its own frame. (The crossing-flap fix: a nonzero
         // epoch center would be double-counted against the live frame placement in region_signed_distance.)
-        for (body, region) in bodies.iter().zip(&regions).skip(3) {
+        for (body, region) in bodies
+            .iter()
+            .zip(&regions)
+            .filter(|(b, _)| matches!(b.realm, RealmId::Planet(_)))
+        {
             assert!(orbital_of(body.placement).is_some(), "a planet is Orbital");
             assert_eq!(region.center.cell(), glam::I64Vec3::ZERO);
             assert_eq!(region.center.offset(), DVec3::ZERO);
@@ -3031,7 +3676,7 @@ mod tests {
         for seed in [0u64, 1, 42, 999] {
             for body in generate_system_forest(seed, &UniverseConfig::visual_scale())
                 .iter()
-                .skip(3)
+                .filter(|b| matches!(b.realm, RealmId::Planet(_)))
             {
                 let e = orbital_of(body.placement).expect("a planet is Orbital");
                 assert!(e.ecc >= 0.0);
@@ -3074,8 +3719,13 @@ mod tests {
             rel < 1e-9,
             "outer period must equal the target within tolerance"
         );
-        // Every visual planet's period is seconds-scale — not sub-µs (invisible), not years.
-        for body in visual_forest().iter().skip(3) {
+        // Every visual planet's period is seconds-scale — not sub-µs (invisible), not years. Selected by
+        // KIND: a fixed offset used to mean "past the ambient shells and the one star", and now lands on
+        // another star instead.
+        for body in visual_forest()
+            .iter()
+            .filter(|b| matches!(b.realm, RealmId::Planet(_)))
+        {
             let p = orbital_of(body.placement)
                 .expect("a planet is Orbital")
                 .period();
@@ -3087,10 +3737,14 @@ mod tests {
     #[test]
     fn visual_geometry_respects_the_far_plane_and_soi_non_overlap() {
         let config = UniverseConfig::visual_scale();
-        // Containment order + headroom (System 150 ⊂ Galaxy 180 < cull 200): the System nests strictly
-        // inside the renderable Galaxy, which nests strictly under the cull (each assert split — no `&&`).
+        // Containment order: a system nests strictly inside its galaxy, and a planet inside its system.
         assert!(config.stellar.system_soi_r_m < config.scale.galaxy_r_m);
-        assert!(config.scale.galaxy_r_m < config.scale.render_extent_m);
+        // THE GALAXY IS NO LONGER DRAWN, and that is the ruling rather than a regression: a containment
+        // boundary is never an object. Once the galaxy has to hold several star systems far enough apart
+        // that a neighbour is genuinely ASLEEP until you approach, it necessarily exceeds any box-cull —
+        // so "the galaxy is scenery" and "systems wake as you fly to them" cannot both be true. The second
+        // is the mechanic; the first was a demo affordance.
+        assert!(config.scale.galaxy_r_m > config.scale.render_extent_m);
         assert!(vis_planet_soi() < config.stellar.system_soi_r_m);
         assert!(config.scale.render_extent_m >= config.stellar.system_soi_r_m);
         // The OUTER planet (orbit + SOI) sits STRICTLY inside the System SOI surface (containment).
@@ -3114,8 +3768,20 @@ mod tests {
         let mut canon = UniverseConfig::canonical();
         canon.planet.n_planets = VISUAL_N_PLANETS;
         let bodies = generate_system_forest(0, &canon);
-        assert_eq!(bodies.len(), 3 + VISUAL_N_PLANETS as usize);
-        let inner = orbital_of(bodies[3].placement).expect("a planet is Orbital");
+        // The canonical census is a RANGE, so how many stars this galaxy got is drawn from the seed —
+        // the count follows from the draw rather than from a number restated here.
+        let stars = bodies.iter().filter(|b| b.parent == Some(GALAXY)).count();
+        assert!(stars >= canon.galaxy.system_count_lo as usize);
+        assert!(stars <= canon.galaxy.system_count_hi as usize);
+        assert_eq!(bodies.len(), 2 + stars * (1 + VISUAL_N_PLANETS as usize));
+        let inner = orbital_of(
+            bodies
+                .iter()
+                .find(|b| b.parent == Some(SYSTEM_A))
+                .expect("system A has planets")
+                .placement,
+        )
+        .expect("a planet is Orbital");
         // A canonical planet's sma is REAL AU metres; its star is the real solar mass (not synthetic).
         assert_eq!(
             inner.sma,
@@ -3132,15 +3798,22 @@ mod tests {
         assert!(moving_children_for(0, SYSTEM_A).is_empty());
         // The 5 visual planet ids are mutually distinct and NONE aliases the walk Planet(7) — the
         // child_seed salt/index avalanche keeps them off the roster ids (no silent alias).
-        let ids: Vec<RealmId> = visual_forest().iter().skip(3).map(|b| b.realm).collect();
-        assert_eq!(ids.len(), VISUAL_N_PLANETS as usize);
+        // EVERY planet of EVERY star, not just one star's — the salt/index avalanche must keep them
+        // distinct ACROSS systems too, or two stars would quietly claim the same planet realm.
+        let ids: Vec<RealmId> = visual_forest()
+            .iter()
+            .filter(|b| matches!(b.realm, RealmId::Planet(_)))
+            .map(|b| b.realm)
+            .collect();
+        let expect = (VISUAL_N_SYSTEMS * VISUAL_N_PLANETS) as usize;
+        assert_eq!(ids.len(), expect);
         let mut distinct = ids.clone();
         distinct.sort();
         distinct.dedup();
         assert_eq!(
             distinct.len(),
-            VISUAL_N_PLANETS as usize,
-            "every visual planet id is distinct"
+            expect,
+            "every planet id is distinct across every system"
         );
         for id in &ids {
             assert_ne!(*id, PLANET_A);

@@ -322,4 +322,26 @@ fn shipped_cloud_manifests_pin_the_cloud_profile() {
              VD_PROFILE=cloud — fail-open into DevTest with every cloud veto disarmed"
         );
     }
+    // THE WORLD INPUTS, shared. Both the gateway and the shard build the world from these: the gateway
+    // decides which realm a login lands in, the shard simulates what is around them once there. If the two
+    // are handed different numbers they describe different universes from the same seed — a login placed by
+    // one geometry and then simulated by another. Pinned in the SHARED object so a retune cannot move one
+    // and not the other, and asserted absent from the per-pod manifests so nothing can locally override it.
+    for key in ["VD_TICK_DT", "VD_SPEED"] {
+        assert!(
+            configmap.contains(key),
+            "the vd-cluster-env ConfigMap MUST carry {key} — the gateway REFUSES to boot without it (it \
+             cannot build the world), and a per-pod copy would let the login and simulating sides drift"
+        );
+        // Matched as an ENV ENTRY (`name: VD_…`), not as any mention — the manifests DOCUMENT these keys in
+        // comments, and a substring search would read its own documentation as a violation.
+        let entry = format!("name: {key}");
+        for node in ["40-gateway.yaml", "50-shard.yaml"] {
+            assert!(
+                !read(node).contains(&entry),
+                "{node} must NOT set {key} itself — a per-pod value silently overrides the shared one and \
+                 lets the gateway resolve logins by different geometry than the shard simulates"
+            );
+        }
+    }
 }

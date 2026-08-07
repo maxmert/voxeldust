@@ -1709,7 +1709,7 @@ mod tests {
         let mut child = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 1.0);
         child.frame = FrameRef::PlanetCentered { planet_seed: 1 };
         assert_eq!(
-            guard_regions_nest(&[parent.clone(), child], 64),
+            guard_regions_nest(&[parent, child], 64),
             Ok(()),
             "a differently-framed child is not judged here, so the forest is accepted"
         );

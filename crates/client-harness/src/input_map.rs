@@ -11,6 +11,18 @@ use vd_devproto::InputAction;
 /// Mouse-look sensitivity — radians of look per pixel of motion.
 pub const LOOK_SENSITIVITY: f32 = 0.0025;
 
+/// THROWAWAY (tiny world): the fraction of full speed an un-boosted move commands.
+///
+/// Two scales cannot share one speed. Neighbouring stars sit kilometres apart while a star system is
+/// ~150 m across, so a speed that crosses interstellar space in seconds crosses a whole system in two —
+/// you arrive somewhere and blast out the far side before it resolves around you. Holding the boost key
+/// gives full speed for the crossing; releasing it gives this fraction for manoeuvring once there.
+///
+/// It is a stand-in for the real thing, which is a THROTTLE the player controls continuously and a warp
+/// that DECELERATES on approach. Nothing here belongs in the final game; the real lesson it encodes is
+/// that arrival needs its own phase, not that a magic key exists.
+const CRUISE_FRACTION: f32 = 0.03;
+
 /// The set of held movement keys this frame (idempotent — latest-wins on the wire).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MovementKeys {
@@ -20,6 +32,10 @@ pub struct MovementKeys {
     pub right: bool,
     pub up: bool,
     pub down: bool,
+    /// THROWAWAY: full speed while held, [`CRUISE_FRACTION`] otherwise. The axes already ride the wire
+    /// as a magnitude in `[-1, 1]` and the server integrates `axes · speed`, so throttling needs no new
+    /// message and no server change — a smaller number simply moves you slower.
+    pub boost: bool,
 }
 
 impl MovementKeys {
@@ -27,10 +43,12 @@ impl MovementKeys {
     /// normalization; matches the server's per-axis clamp).
     #[must_use]
     pub fn axes(self) -> [f32; 3] {
+        // Branchless scale: `f32::from(bool)` picks the multiplier with no arm to leave uncovered.
+        let scale = CRUISE_FRACTION + (1.0 - CRUISE_FRACTION) * f32::from(self.boost);
         [
-            axis(self.forward, self.back),
-            axis(self.right, self.left),
-            axis(self.up, self.down),
+            axis(self.forward, self.back) * scale,
+            axis(self.right, self.left) * scale,
+            axis(self.up, self.down) * scale,
         ]
     }
 
@@ -69,17 +87,21 @@ mod tests {
 
     #[test]
     fn axes_map_each_held_direction_per_axis() {
+        // Boosted throughout, so DIRECTION is asserted without the throttle scaling every number; the
+        // un-boosted magnitude is pinned separately below.
+        let held = |f: fn(&mut MovementKeys)| {
+            let mut k = MovementKeys {
+                boost: true,
+                ..Default::default()
+            };
+            f(&mut k);
+            k.axes()
+        };
         assert_eq!(MovementKeys::default().axes(), [0.0, 0.0, 0.0]);
-        let fwd = MovementKeys {
-            forward: true,
-            ..Default::default()
-        };
-        assert_eq!(fwd.axes(), [1.0, 0.0, 0.0]);
-        let back = MovementKeys {
-            back: true,
-            ..Default::default()
-        };
-        assert_eq!(back.axes(), [-1.0, 0.0, 0.0]);
+        assert_eq!(held(|k| k.forward = true), [1.0, 0.0, 0.0]);
+        assert_eq!(held(|k| k.back = true), [-1.0, 0.0, 0.0]);
+        assert_eq!(held(|k| k.left = true), [0.0, -1.0, 0.0]);
+        assert_eq!(held(|k| k.down = true), [0.0, 0.0, -1.0]);
         // opposing keys cancel; strafe + vertical resolve on their own axes.
         let mixed = MovementKeys {
             forward: true,
@@ -88,18 +110,28 @@ mod tests {
             up: true,
             down: true,
             left: false,
+            boost: true,
         };
         assert_eq!(mixed.axes(), [0.0, 1.0, 0.0]);
-        let strafe_left = MovementKeys {
-            left: true,
+    }
+
+    #[test]
+    fn cruise_is_a_fraction_of_boosted_speed_on_every_axis() {
+        // THE TWO SCALES. The axes ride the wire as a MAGNITUDE and the server integrates `axes · speed`,
+        // so releasing boost slows you without a new message, a new field, or a server change. Pinned on
+        // every axis because a throttle that only applied to forward would be a trap when manoeuvring.
+        let all = |boost: bool| MovementKeys {
+            forward: true,
+            right: true,
+            up: true,
+            boost,
             ..Default::default()
-        };
-        assert_eq!(strafe_left.axes(), [0.0, -1.0, 0.0]);
-        let down = MovementKeys {
-            down: true,
-            ..Default::default()
-        };
-        assert_eq!(down.axes(), [0.0, 0.0, -1.0]);
+        }
+        .axes();
+        assert_eq!(all(true), [1.0, 1.0, 1.0]);
+        assert_eq!(all(false), [CRUISE_FRACTION; 3]);
+        // …and stationary is stationary at either throttle — cruise scales movement, never invents it.
+        assert_eq!(MovementKeys { boost: true, ..Default::default() }.axes(), [0.0; 3]);
     }
 
     #[test]
@@ -109,7 +141,13 @@ mod tests {
             right: true,
             ..Default::default()
         };
-        assert_eq!(keys.move_action(), InputAction::Move([1.0, 1.0, 0.0]));
+        // Un-boosted is CRUISE speed; the axes carry the throttle as their magnitude.
+        assert_eq!(
+            keys.move_action(),
+            InputAction::Move([CRUISE_FRACTION, CRUISE_FRACTION, 0.0])
+        );
+        let fast = MovementKeys { boost: true, ..keys };
+        assert_eq!(fast.move_action(), InputAction::Move([1.0, 1.0, 0.0]));
     }
 
     #[test]

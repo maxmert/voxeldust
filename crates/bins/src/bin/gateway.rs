@@ -77,6 +77,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // P3 scope of `container_coord_at`; the visual/canonical lazy generator is the P4 owe).
     let demand_armed = vd_bins::parse_bool_env(&env, "VD_DEMAND")?;
     let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
+    // The SAME three inputs the shard threads into its own world build, read from the SAME env keys, so the
+    // AoI bands the gateway hands a client match the ones the shard evaluates it against.
+    let tick_dt: f64 = env.parse("VD_TICK_DT")?;
+    let move_speed: f64 = env.parse("VD_SPEED")?;
+    let time_multiplier = vd_bins::resolve_time_multiplier(&env)?;
+    vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
     let spawn_poses = vd_bins::resolve_spawn_poses(&env)?;
     // RLM 5f-3d — the DYNAMIC-HOME ROUTE budget. The gateway holds a login in `AwaitingHomeRealm` while its
     // demanded home shard boots, re-seeding the demand on a backed-off cadence; both the cadence and the
@@ -93,10 +99,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         boot_ticks_p99,
         settle_ticks,
     );
+    // THE WORLD, from the SAME scale the shards boot. This was hardcoded to walk-scale, so a visual-scale
+    // cluster placed its logins by the geometry of a different universe than the one it then simulated.
     let seed_injector = SeedInjectorConfig {
         armed: demand_armed,
-        universe_seed,
-        universe_config: vd_core::worldgen::UniverseConfig::walk_scale(),
+        world: vd_bins::boot_world(
+            vd_bins::resolve_universe_scale(&env)?,
+            universe_seed,
+            move_speed * time_multiplier,
+            tick_dt,
+        ),
         spawn_poses,
         demand_ttl_ticks: rlm.demand_ttl_ticks,
         bootstrap_ttl_ticks: SeedInjectorConfig::bootstrap_ttl_from_rlm(

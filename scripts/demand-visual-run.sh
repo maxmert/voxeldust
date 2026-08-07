@@ -41,6 +41,44 @@ cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --feature
 # DEMAND-SPAWNED home shard's resolve_universe_scale reads VD_UNIVERSE_SCALE=visual and authors the
 # window-friendly orbiting system when the reconciler spins it up on your login.
 export VD_UNIVERSE_SCALE=visual
+
+# ╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
+# ║ THROWAWAY — DELETE WITH THE TINY WORLD. Not a feature, and deliberately not one.                  ║
+# ║                                                                                                  ║
+# ║ There is nothing to aim at, BY DESIGN: a star is invisible until it is close enough to wake, and  ║
+# ║ the neighbours are placed beyond that on purpose so the waking can be watched. In the real game   ║
+# ║ knowing where anything is will be a MECHANIC — charts, scanners, an earned HUD — never something  ║
+# ║ the server volunteers. So this prints coordinates instead of building a marker stream that would  ║
+# ║ give that information away for free and then have to be taken back.                              ║
+# ║                                                                                                  ║
+# ║ Fly along X and watch the position readout in the corner.                                        ║
+# ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
+cat <<'NAV'
+
+  ── flying this test world ─────────────────────────────────────────────
+    controls
+      W A S D        move            mouse   look
+      SPACE / CTRL   up / down       SHIFT   hold for WARP speed
+
+    two speeds, because there are two scales
+      cruise (no shift)   15 m/s   — crossing a star system takes ~20 s
+      warp   (hold shift) 500 m/s  — crossing to the next star ~24 s
+
+    where the stars are
+      you start at   x = 0
+      a star sits at x = +12031
+      another at     x = -12031
+      a star wakes when you are within ~11460 m of it, so a neighbour
+      lights up shortly after you set off and grows as you close.
+
+    what to watch for
+      planets are visible from ANYWHERE inside their system now (~318 m
+      reach against a 150 m system), so arriving at a star should show
+      you a populated system, not an empty box. they should fade in as
+      small dots and grow, not pop in at full size.
+  ───────────────────────────────────────────────────────────────────────
+
+NAV
 "$ROOT/scripts/dev-cluster.sh" up --demand
 
 # Tear the cluster down when the client window closes / on Ctrl-C. `down` kills the RECORDED node groups;

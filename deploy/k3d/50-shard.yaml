@@ -1,6 +1,7 @@
 # S4b — the shard: the sim/realm authority. StatefulSet (per-pod M3 boot-counter PVC + the cloud-required
 # store root). Headless Service + publishNotReadyAddresses so the orch resolves it for the ClockSync
-# broadcast during cold start. Reads VD_TICK_DT from the ConfigMap and cross-checks it against VD_TICK_HZ at
+# broadcast during cold start. Reads VD_TICK_DT and VD_SPEED from the ConfigMap (shared with the gateway,
+# which now builds the same world from them) and cross-checks the tick pair against VD_TICK_HZ at
 # boot (vd_bins::validate_tick_pair).
 apiVersion: v1
 kind: Service
@@ -52,7 +53,6 @@ spec:
             - { name: VD_PROBE_ADDR, value: "0.0.0.0:9002" }
             - { name: VD_ORCH, value: "1" }
             - { name: VD_REALM_SEED, value: "7" }
-            - { name: VD_SPEED, value: "2.0" }
             - { name: VD_MINT_SEED, value: "11" }
             - { name: VD_INPUT_LOG_CAP, value: "4096" }
             - { name: VD_SNAPSHOT_BUDGET, value: "1100" } # <= CONSERVATIVE_DATAGRAM_BUDGET (asserted at boot)

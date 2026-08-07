@@ -31,8 +31,7 @@ use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose, Tier};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::rng::SplitMix64;
 use vd_core::worldgen::{
-    UniverseConfig, ancestor_realms, container_coord_at, fold_origin, origin_chain_for_config,
-    pin_realm_of, realm_neighbourhood_for_held_config, realm_regions_for,
+    UniverseConfig, WorldView, ancestor_realms, fold_origin, pin_realm_of,
 };
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
@@ -112,13 +111,19 @@ pub struct SeedInjectorConfig {
     /// live-arming veto (the mutual-exclusion safety with a static forest) is 5f-3e; this flag is only the
     /// on/off.
     pub armed: bool,
-    /// The ONE universe seed the whole cluster shares (the SAME `VD_UNIVERSE_SEED` the shard reads), so the
-    /// gateway resolves against the identical containment forest.
-    pub universe_seed: u64,
-    /// The containment-forest config [`container_coord_at`] descends. Walk-scale through P3 (the 5f-2
-    /// reality — `container_coord_at` resolves against the walk forest regardless of scale; the visual/
-    /// canonical lazy generator is the P4 owe).
-    pub universe_config: UniverseConfig,
+    /// THE WORLD this gateway resolves against — held, not re-derived per question.
+    ///
+    /// Every spatial answer the injector gives comes from this one value: where a login lands, which regions
+    /// its home's shard will evaluate, how that realm's origin folds, and whether the resolved home is real.
+    /// They used to come from `(seed, config)` re-run at each call site, and two of those call sites built
+    /// DIFFERENT worlds — a home resolved among the generated stars, then checked against a hand-placed
+    /// world that has never heard of them. That agreed by luck while there was one star; with several it
+    /// rejects a valid home and the gateway panics on its own defence. One held world makes the two
+    /// impossible to disagree.
+    ///
+    /// A cluster passes the world its shards will simulate: generated content in production, generated plus
+    /// hand-placed structures in a test that needs a station or an area to stand in.
+    pub world: WorldView,
     /// The per-account STORED spawn poses (the `VD_SPAWN_POSES` stand-in for the P7 durable pose store).
     pub spawn_poses: BTreeMap<AccountId, StampedPose>,
     /// RLM 5f-3d — the gateway's LOCAL copy of the ORCHESTRATOR's `RlmTuning::demand_ttl_ticks` (BOTH come
@@ -146,8 +151,7 @@ impl Default for SeedInjectorConfig {
     fn default() -> SeedInjectorConfig {
         SeedInjectorConfig {
             armed: false,
-            universe_seed: 0,
-            universe_config: UniverseConfig::walk_scale(),
+            world: WorldView::hand_placed(&UniverseConfig::walk_scale()),
             spawn_poses: BTreeMap::new(),
             demand_ttl_ticks: 0,
             bootstrap_ttl_ticks: 0,
@@ -1783,8 +1787,7 @@ fn realm_registry_for_home(
 ) -> ServerControlMsg {
     let mut held = BTreeSet::new();
     held.insert(home);
-    let neighbourhood =
-        realm_neighbourhood_for_held_config(cfg.universe_seed, &held, &cfg.universe_config);
+    let neighbourhood = cfg.world.neighbourhood(&held);
     let root = neighbourhood
         .iter()
         .find(|r| r.parent.is_none())
@@ -1821,7 +1824,7 @@ fn realm_registry_for_home(
 /// ⇒ `ZERO ∘ center == center` ⇒ byte-identical.
 fn realm_abs_center(cfg: &SeedInjectorConfig, r: &vd_core::geometry::RealmRegion) -> LatticePos {
     let (frame_abs, _vel) = fold_origin(
-        &origin_chain_for_config(cfg.universe_seed, &cfg.universe_config, r.realm),
+        &cfg.world.origin_chain(r.realm),
         0.0,
     );
     frame_abs.compose(r.center, Tier::Fine)
@@ -1835,8 +1838,7 @@ fn realm_abs_center(cfg: &SeedInjectorConfig, r: &vd_core::geometry::RealmRegion
 fn render_pin(cfg: &SeedInjectorConfig, home: RealmId) -> (RealmId, LatticePos) {
     let mut held = BTreeSet::new();
     held.insert(home);
-    let neighbourhood =
-        realm_neighbourhood_for_held_config(cfg.universe_seed, &held, &cfg.universe_config);
+    let neighbourhood = cfg.world.neighbourhood(&held);
     let mut chain = ancestor_realms(&neighbourhood, home);
     chain.reverse();
     let pin = pin_realm_of(&chain);
@@ -3170,18 +3172,6 @@ fn home_sentinel_fence(account: AccountId) -> Fence {
     Fence((a as u64) ^ ((a >> 64) as u64))
 }
 
-/// True iff `coord`'s leaf realm is a region in the seed forest [`container_coord_at`] resolves against
-/// (the walk-scale containment forest — `realm_regions_for` builds the IDENTICAL roster). A SERVER-derived
-/// home is in-forest by construction (the resolver only ever descends that forest); this is the injector's
-/// defense-in-depth re-check that a corrupted P7 pose stand-in cannot smuggle an OFF-forest realm onto the
-/// source-blind orchestrator inbound. A straight-line expression (the membership `any` is stdlib), so its
-/// true/false arms are proven directly in the unit test — no live branch escapes into [`home_coord`].
-fn coord_in_forest(coord: &RealmCoord, seed: u64) -> bool {
-    realm_regions_for(seed)
-        .iter()
-        .any(|r| r.realm == coord.lowered())
-}
-
 /// RLM 5f-3c — SERVER-DERIVE an authenticated login's HOME lineage: [`container_coord_at`] over the
 /// account's STORED spawn pose (or the origin) — the FULL root→leaf lineage, so demanding it spins up the
 /// whole ancestor chain (the 5f-3a ride). NOTHING client-supplied enters here: the client's only spatial
@@ -3200,8 +3190,9 @@ fn coord_in_forest(coord: &RealmCoord, seed: u64) -> bool {
 /// to name a different realm than the one the session is waiting on.
 fn home_coord(cfg: &SeedInjectorConfig, account: AccountId) -> RealmCoord {
     let pos = home_spawn_offset(cfg, account);
-    let child = container_coord_at(cfg.universe_seed, &cfg.universe_config, pos);
-    coord_in_forest(&child, cfg.universe_seed)
+    let child = cfg.world.container_coord(pos);
+    cfg.world
+        .contains_realm(child.lowered())
         .then_some(child)
         .expect("container_coord_at yields an in-forest home lineage by construction (5f-3c)")
 }
@@ -7934,8 +7925,7 @@ mod tests {
     fn armed_injector(poses: BTreeMap<AccountId, StampedPose>) -> SeedInjectorConfig {
         SeedInjectorConfig {
             armed: true,
-            universe_seed: 0,
-            universe_config: UniverseConfig::walk_scale(),
+            world: WorldView::hand_placed(&UniverseConfig::walk_scale()),
             spawn_poses: poses,
             demand_ttl_ticks: TEST_DEMAND_TTL,
             bootstrap_ttl_ticks: TEST_BOOTSTRAP_TTL,
@@ -8000,9 +7990,9 @@ mod tests {
     fn realm_registry_streams_only_for_an_armed_cluster_a_minor5_peer_and_a_known_home() {
         // The home-entry render-scene is gated on THREE conditions; each false arm emits nothing, so a static
         // cluster and an old client stay byte-identical to the pre-VU gateway.
-        let home = container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0))
-            .lowered();
         let armed = armed_injector(BTreeMap::new());
+        // Asked OF THE INJECTOR'S OWN WORLD, so the test cannot describe a different one than the code does.
+        let home = armed.world.container_coord(DVec3::new(25.0, 0.0, 0.0)).lowered();
         let inert = SeedInjectorConfig::default(); // unarmed = a static cluster
         let client = NodeId(7);
 
@@ -8070,14 +8060,9 @@ mod tests {
     fn realm_registry_for_home_is_the_faithful_seed_neighbourhood_and_degrades_empty_off_forest() {
         // The projection is a FAITHFUL render subset of the canonical seed neighbourhood: same realms, same
         // order, same frame/center/shape/parent — only the server-side AoI band is dropped.
-        let home = container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0))
-            .lowered();
         let cfg = armed_injector(BTreeMap::new());
-        let expected = realm_neighbourhood_for_held_config(
-            cfg.universe_seed,
-            &BTreeSet::from([home]),
-            &cfg.universe_config,
-        );
+        let home = cfg.world.container_coord(DVec3::new(25.0, 0.0, 0.0)).lowered();
+        let expected = cfg.world.neighbourhood(&BTreeSet::from([home]));
         assert!(
             !expected.is_empty(),
             "the (25,0,0) home has a real seed neighbourhood"
@@ -8138,18 +8123,22 @@ mod tests {
     #[test]
     fn realm_registry_for_a_system_home_ships_the_ancestor_chain_and_defers_children_to_the_delta()
     {
-        // A home WITH children — System A (ancestors Universe→Galaxy→System A; direct children Planet A +
-        // Station A). A minor>=6 peer receives ONLY the ancestor SHELL-CHAIN root→home; every direct child is
-        // DROPPED (it arrives later via `RealmSceneDelta`). A minor==5 peer — which never receives a delta —
-        // keeps the full ancestors∪children set. The chain-in-registry vs children-via-delta split is a
+        // A home WITH children — the first star system (ancestors Universe→Galaxy→System; direct children
+        // its planets). A minor>=6 peer receives ONLY the ancestor SHELL-CHAIN root→home; every direct child
+        // is DROPPED (it arrives later via `RealmSceneDelta`). A minor==5 peer — which never receives a delta
+        // — keeps the full ancestors∪children set. The chain-in-registry vs children-via-delta split is a
         // FACTORING (a containing realm is the degenerate always-in-view case), not a second visibility rule.
-        let home = RealmId::System(7); // System A — the seed-forest SYSTEM_A home, a realm WITH children
-        let cfg = armed_injector(BTreeMap::new());
-        let full = realm_neighbourhood_for_held_config(
-            cfg.universe_seed,
-            &BTreeSet::from([home]),
-            &cfg.universe_config,
-        );
+        //
+        // The children are GENERATED planets, not hand-placed fixtures. This test used to read them from the
+        // walk roster, which carried a station and a planet placed by hand; those left when stations and
+        // areas became player-built things the generator never emits. The walk preset emits no orbiting
+        // bodies at all, so asking IT for a system's children now correctly returns none — hence a preset
+        // that actually populates a system. The behaviour under test (what the registry keeps and what it
+        // defers) is the same either way; only the source of the children moved.
+        let home = RealmId::System(7); // the first star system — a realm WITH children
+        let mut cfg = armed_injector(BTreeMap::new());
+        cfg.world = WorldView::generated(0, &UniverseConfig::visual_scale());
+        let full = cfg.world.neighbourhood(&BTreeSet::from([home]));
         // Partition the seed neighbourhood into the ancestor chain (`parent != Some(home)`) and the direct
         // children (`parent == Some(home)`), so the test tracks the forest instead of hardcoding ids.
         let ancestors: Vec<RealmId> = full
@@ -8420,8 +8409,9 @@ mod tests {
         );
         // The child is the config-derived home lineage — NOT anything the client sent. (25,0,0) is the
         // Area-A box: the deep 5-level [Universe, Galaxy, System(7), Planet(7), Area(7)] home (5f-3a).
-        let expected_child =
-            container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0));
+        let expected_child = armed_injector(BTreeMap::new())
+            .world
+            .container_coord(DVec3::new(25.0, 0.0, 0.0));
         assert_eq!(
             demands[0].child, expected_child,
             "the child is the SERVER-derived home lineage from the stored pose"
@@ -8649,7 +8639,7 @@ mod tests {
             1,
             "an absent pose still injects one (origin) home demand"
         );
-        let expected = container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::ZERO);
+        let expected = WorldView::hand_placed(&UniverseConfig::walk_scale()).container_coord(DVec3::ZERO);
         assert_eq!(
             demands[0].child, expected,
             "an absent pose derives the origin home lineage (the P7-store-absent stand-in)"
@@ -8679,20 +8669,23 @@ mod tests {
     }
 
     #[test]
-    fn coord_in_forest_accepts_a_seed_home_and_rejects_an_off_forest_coord() {
-        // The injector's defense-in-depth predicate (both arms): a SERVER-derived home IS in-forest
-        // (true); a coord whose leaf is NOT a seed realm (a corrupted stand-in) is rejected (false).
+    fn the_defence_reads_the_same_world_that_produced_the_answer() {
+        // The injector's defence-in-depth predicate, both arms — now asked OF THE WORLD rather than of a
+        // freshly rebuilt one. It used to consult the hand-placed world while the home came from the
+        // generated one, which is only safe while those two happen to hold the same realms; the false arm
+        // below is exactly what a valid home beside a second star would have hit.
         use vd_core::realm_path::{RealmKindTag, RealmLevel};
-        let home = container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0));
+        let world = WorldView::hand_placed(&UniverseConfig::walk_scale());
+        let home = world.container_coord(DVec3::new(25.0, 0.0, 0.0));
         assert!(
-            coord_in_forest(&home, 0),
-            "a server-derived home resolves in the seed forest"
+            world.contains_realm(home.lowered()),
+            "a server-derived home is in the world that derived it"
         );
-        // Append a leaf realm that is NOT in the walk forest (Station(0xDEAD)) — an off-forest coord.
+        // Append a leaf realm no world contains (Station(0xDEAD)) — a corrupted stand-in.
         let off = home.child(RealmLevel::new(RealmKindTag::Station, 0xDEAD));
         assert!(
-            !coord_in_forest(&off, 0),
-            "an off-forest leaf (a corrupted stand-in) is rejected"
+            !world.contains_realm(off.lowered()),
+            "an off-world leaf (a corrupted stand-in) is rejected"
         );
     }
 
@@ -8710,7 +8703,8 @@ mod tests {
     /// derives (and `demand_for_home` demands), lowered to the `RealmId` the directory keys realms by
     /// (`DirectoryKey::Realm(coord.lowered())` — exactly what `rlm.rs` grants a spawned realm at).
     fn home_lineage() -> RealmCoord {
-        container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0))
+        WorldView::hand_placed(&UniverseConfig::walk_scale())
+            .container_coord(DVec3::new(25.0, 0.0, 0.0))
     }
 
     /// …lowered to the `RealmId` the directory keys realms by.
@@ -9184,7 +9178,8 @@ mod tests {
         assert_eq!(demands.len(), 1, "the home demand is RE-SEEDED on cadence");
         assert_eq!(
             demands[0].child,
-            container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0)),
+            WorldView::hand_placed(&UniverseConfig::walk_scale())
+            .container_coord(DVec3::new(25.0, 0.0, 0.0)),
             "the re-seed names the SAME server-derived home lineage"
         );
         assert_eq!(demands[0].verb, DemandVerb::SpinUp);

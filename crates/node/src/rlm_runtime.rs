@@ -830,10 +830,12 @@ mod tests {
         // hook, so passing proves the seed rode the ONE machinery.
         use RealmKindTag::{Area, Galaxy, Planet, System, Universe};
         use glam::DVec3;
-        use vd_core::worldgen::{UniverseConfig, container_coord_at};
+        use vd_core::worldgen::{container_coord_in, realm_regions_for};
 
-        let deepest =
-            container_coord_at(0, &UniverseConfig::walk_scale(), DVec3::new(25.0, 0.0, 0.0));
+        // Resolved against the FIXTURE forest: the deepest realm here is an AREA, which players build and
+        // the generator never makes. Asking the generated world would resolve to the star and the test
+        // would be proving a 3-level chain while claiming to prove a 5-level one.
+        let deepest = container_coord_in(&realm_regions_for(0), DVec3::new(25.0, 0.0, 0.0));
         let lin = |levels: &[(RealmKindTag, u64)]| -> RealmPath {
             RealmPath::from_levels(levels.iter().map(|&(k, s)| RealmLevel::new(k, s)).collect())
         };

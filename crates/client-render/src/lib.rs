@@ -89,20 +89,30 @@ const LANDMARK_COLORS: [Color; 8] = [
 /// real realm content you fly to, and the far field stays a backdrop. Deterministic (the same
 /// sky every session, on every machine) via `SplitMix64`.
 const STARFIELD_SEED: u64 = 0x5644_5354_4152_5300; // "VDSTARS\0"
-/// Star-sphere radius (render-m). 50x beyond the 40 render-m visual system, so the field reads
-/// as at infinity (parallax-free) yet sits inside [`STAR_FAR_PLANE`]. Revisited at the
-/// real-astronomy switch (a floating-origin / skybox pass supersedes this follow-sphere).
-const STAR_SPHERE_RADIUS: f32 = 2000.0;
-/// Windowed camera far plane — bumped from Bevy's default 1000 so the star sphere is drawn.
-const STAR_FAR_PLANE: f32 = 6000.0;
+/// Star-sphere radius (render-m) — the backdrop must sit BEYOND everything you can fly to, or the
+/// night sky would cut through real content. Raised from 2 000 when the inter-system spacing grew
+/// past it: the stars you can actually reach now sit ~12 km apart, and a backdrop closer than that
+/// would have painted over them. Revisited at the real-astronomy switch (a floating-origin / skybox
+/// pass supersedes this follow-sphere).
+const STAR_SPHERE_RADIUS: f32 = 60_000.0;
+/// Windowed camera far plane — must exceed [`STAR_SPHERE_RADIUS`], which in turn exceeds the farthest
+/// reachable content. THE FAILURE THIS PREVENTS: a realm the server has spun up and is streaming, drawn
+/// nowhere because the camera clipped it — indistinguishable, from the pilot's seat, from a realm that
+/// never woke. It cost real debugging time once; the far plane is now sized off the backdrop, not guessed.
+const STAR_FAR_PLANE: f32 = STAR_SPHERE_RADIUS * 2.0;
 /// Uniform all-sky star count + the extra Milky-Way band over-density.
 const STAR_COUNT_UNIFORM: usize = 1600;
 const STAR_COUNT_BAND: usize = 1200;
 /// Milky-Way band half-thickness (rad) — band stars cluster within this of the galactic plane.
 const STAR_BAND_HALF_ANGLE: f32 = 0.32;
-/// Apparent star size (render-m at [`STAR_SPHERE_RADIUS`]) — MIN≈1px, MAX≈3px in the 1280-wide view.
-const STAR_SIZE_MIN: f32 = 0.7;
-const STAR_SIZE_MAX: f32 = 2.4;
+/// Apparent star size as a FRACTION of [`STAR_SPHERE_RADIUS`] — MIN≈1px, MAX≈3px in the 1280-wide view.
+/// A fraction, not a length: what a star looks like is its ANGULAR size, so moving the backdrop must not
+/// change how big the sky looks. Pinned as lengths once, they silently shrank to nothing the first time
+/// the sphere moved out.
+const STAR_ANGULAR_MIN: f32 = 0.000_35;
+const STAR_ANGULAR_MAX: f32 = 0.001_2;
+const STAR_SIZE_MIN: f32 = STAR_ANGULAR_MIN * STAR_SPHERE_RADIUS;
+const STAR_SIZE_MAX: f32 = STAR_ANGULAR_MAX * STAR_SPHERE_RADIUS;
 /// Tilted galactic-plane normal (unnormalised; normalised at build) so the band is not axis-aligned.
 const GALACTIC_NORMAL: Vec3 = Vec3::new(0.30, 1.0, -0.20);
 /// Spectral-class palette `(base_color, emissive)` O/B..M — real-ish star colors. A star's tier
@@ -550,7 +560,9 @@ fn input_system(
         left: keys.pressed(KeyCode::KeyA),
         right: keys.pressed(KeyCode::KeyD),
         up: keys.pressed(KeyCode::Space),
-        down: keys.pressed(KeyCode::ShiftLeft),
+        // Descend moved to Ctrl so Shift can be the THROWAWAY boost (see CRUISE_FRACTION).
+        down: keys.pressed(KeyCode::ControlLeft),
+        boost: keys.pressed(KeyCode::ShiftLeft),
     };
     if movement != camera.last_movement {
         if net.input.try_send(movement.move_action()).is_err() {

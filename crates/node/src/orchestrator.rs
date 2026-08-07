@@ -481,7 +481,7 @@ mod tests {
                 schedule,
                 &OrchestratorConfig {
                     rlm,
-                    saga: saga.clone(),
+                    saga,
                     ..cfg()
                 },
             );

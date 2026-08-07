@@ -488,7 +488,7 @@ use vd_connection_plane::tickets;
 use vd_core::glam::DVec3;
 use vd_core::pose::{FrameRef, StampedPose};
 use vd_core::taxonomy::ProfileKind;
-use vd_core::worldgen::{UniverseConfig, container_coord_at};
+use vd_core::worldgen::{UniverseConfig, WorldView};
 use vd_core::{AccountId, EntityId, SessionId, TickId};
 use vd_node::follower::register_clock_follower;
 use vd_sim::capability::NodeKind;
@@ -512,11 +512,10 @@ const AVATAR: EntityId = EntityId(77);
 /// The login's SERVER-derived home lineage (what the gateway's injector resolves), and the `RealmId` the
 /// directory keys it by.
 fn home_lineage() -> RealmCoord {
-    container_coord_at(
-        0,
-        &UniverseConfig::walk_scale(),
-        DVec3::new(SPAWN_X, 0.0, 0.0),
-    )
+    // Asked of the SAME world the cluster's gateway holds, so the test and the code can never describe
+    // different universes — which is exactly how this drifted the last time.
+    WorldView::hand_placed(&UniverseConfig::walk_scale())
+        .container_coord(DVec3::new(SPAWN_X, 0.0, 0.0))
 }
 
 /// The cluster's ONE RLM budget: the orchestrator reconciles with it AND the gateway derives its
@@ -553,8 +552,9 @@ impl Gw {
         // `resolve_rlm_tuning` the orchestrator above reconciles with.
         let seed_injector = SeedInjectorConfig {
             armed: true,
-            universe_seed: 0,
-            universe_config: UniverseConfig::walk_scale(),
+            // THE HAND-PLACED WORLD — the one with a station to stand in and an area to spin up. The
+            // generator emits neither (players build them), so a test that needs a deep home places it.
+            world: WorldView::hand_placed(&UniverseConfig::walk_scale()),
             spawn_poses: std::collections::BTreeMap::from([(
                 LOGIN_ACCOUNT,
                 StampedPose::at_rest(

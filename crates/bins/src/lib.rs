@@ -403,12 +403,21 @@ pub const DEV: DevClusterParams = DevClusterParams {
         as u32,
     realm_seed: 7,
     realm_seed_b: 8, // Track R / 1d.2 DEST realm (matches the harness `dest_stub_config` System(8)).
-    // The realistic-demo flight speed (RLM Slice 3): a 15 m/s ship spends ~3.7 s flying from where a planet
-    // becomes VISIBLE (angular size crosses θ_min at ~59.5 m) to where it CROSSES containment (~4 m planet
-    // SOI), so the demand loop boots the child DURING that flight — the spin-up-ahead is a natural consequence
-    // of visibility-radius ≫ crossing-radius, not a predictive horizon (`boot_ticks_p99` stays 0). Rides
-    // `VD_SPEED` into the shard, so `visual_demand`'s `occupant_v_max` IS the sim's integrated speed.
-    move_speed: 15.0,
+    // The realistic-demo flight speed (RLM Slice 3). A ship spends real seconds flying from where a body
+    // becomes VISIBLE (angular size crosses θ_min — ~318 m for a planet) to where it CROSSES containment
+    // (~4 m planet SOI), so the demand loop boots the child DURING that flight — the spin-up-ahead is a
+    // natural consequence of visibility-radius ≫ crossing-radius, not a predictive horizon
+    // (`boot_ticks_p99` stays 0). Rides `VD_SPEED` into the shard, so `visual_demand`'s `occupant_v_max`
+    // IS the sim's integrated speed, and the AoI lead is measured against the speed actually flown.
+    //
+    // THROWAWAY (tiny world). This is the BOOST/warp figure — the number the pilot gets holding the boost
+    // key; releasing it cruises at a fraction of this (`CRUISE_FRACTION`, client-side, since the axes ride
+    // the wire as a magnitude). Sized for the interstellar leg: neighbouring stars sit ~12 km apart, so a
+    // hop is ~24 s — long enough to watch one star wake ahead while the one behind goes to sleep, short
+    // enough to fly repeatedly. Cruise then lands at 15 m/s, which crosses a 300 m system in ~20 s.
+    // Speed is a plain configured number with no cap anywhere — this is the whole reason warp needs no
+    // special machinery, only a bigger one of these.
+    move_speed: 500.0,
     tick_dt: 0.02,
     mint_seed: 11,
     input_log_cap: 4096,
@@ -1199,6 +1208,7 @@ fn demand_gateway_env(
         str_pair("VD_PROBE_ADDR", a.gateway_probe),
         ("VD_DEMAND", "1".to_owned()), // arm the dynamic-home login route + the trusted seed injector.
     ];
+    env.extend(world_env(p));
     if let Some(admin) = a.gateway_admin {
         env.push(str_pair("VD_ADMIN_ADDR", admin));
     }
@@ -1208,6 +1218,24 @@ fn demand_gateway_env(
 /// The gateway's node-specific env. `clients` are seeded into the gateway's peer
 /// book so it can route snapshots BACK to each dev-control client (the mesh dials
 /// by address book; a missing client entry = the gateway can never reach it).
+/// The inputs a node needs to BUILD THE WORLD — required by any node that answers a spatial question.
+///
+/// A shard has carried these forever (it integrates motion with them). The gateway needs them too and did
+/// not have them: it decides which realm a login lands in, and it was doing that against a hardcoded
+/// walk-scale world while the shards ran whatever `VD_UNIVERSE_SCALE` said — the login side and the
+/// simulating side describing different universes from the same seed. Shared here so the two node kinds
+/// cannot be handed different numbers by being edited in different places.
+///
+/// (`VD_UNIVERSE_SCALE` is deliberately absent: it is exported cluster-wide and inherited by every spawned
+/// node, so listing it here would make one value have two sources.)
+#[must_use]
+fn world_env(p: &DevClusterParams) -> [(&'static str, String); 2] {
+    [
+        str_pair("VD_TICK_DT", p.tick_dt),
+        str_pair("VD_SPEED", p.move_speed),
+    ]
+}
+
 #[must_use]
 pub fn gateway_env(
     a: &ClusterAddrs,
@@ -1260,6 +1288,7 @@ pub fn gateway_env(
         str_pair("VD_MAX_BUFFERED_INPUTS", p.max_buffered_inputs),
         str_pair("VD_PROBE_ADDR", a.gateway_probe),
     ];
+    env.extend(world_env(p));
     // RLM RG-4: the gateway publishes its /admin/snapshot (GatewayView) ONLY where the cluster booked an
     // admin bind (the Demand cluster + cloud pods). `None` ⇒ no VD_ADMIN_ADDR ⇒ byte-identical.
     if let Some(admin) = a.gateway_admin {
@@ -2660,6 +2689,37 @@ pub fn boot_regions_and_movers(
             universe_seed,
             held_realms,
             hosted,
+        ),
+    }
+}
+
+/// The WORLD a node boots into, for the SAME `scale` [`boot_regions_and_movers`] selects its regions from.
+///
+/// Both nodes must describe the same universe or the game is incoherent: the gateway decides which realm a
+/// login lands in, and the shard decides what is around them once there. The gateway used to hardcode the
+/// walk world regardless of what the shards were told to run, so a visual-scale cluster placed its players
+/// by walk-scale geometry — a login resolved in a world with different stars in different places than the
+/// one that would then simulate it. Deriving both from `scale` here is what makes that unstateable.
+///
+/// `Walk` is the HAND-PLACED world (its station and area are fixtures, not generated content); the visual
+/// arms are seed-generated. `occupant_v_max_mps`/`tick_dt_s` feed the live AoI band exactly as they do for
+/// the regions, so the world a gateway holds carries the same bands the shard evaluates.
+#[must_use]
+pub fn boot_world(
+    scale: UniverseScale,
+    universe_seed: u64,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+) -> vd_core::worldgen::WorldView {
+    use vd_core::worldgen::{UniverseConfig, WorldView};
+    match scale {
+        UniverseScale::Walk => WorldView::hand_placed(&UniverseConfig::walk_scale()),
+        UniverseScale::Visual => {
+            WorldView::generated(universe_seed, &UniverseConfig::visual_scale())
+        }
+        UniverseScale::VisualDemand => WorldView::generated(
+            universe_seed,
+            &UniverseConfig::visual_demand(occupant_v_max_mps, tick_dt_s),
         ),
     }
 }
@@ -4607,6 +4667,11 @@ mod incarnation_tests {
                     DEV.max_buffered_inputs.to_string()
                 ),
                 ("VD_PROBE_ADDR", a.gateway_probe.to_string()),
+                // The gateway now BUILDS THE WORLD (it decides which realm a login lands in), so it carries
+                // the same two world inputs every shard always has. It used to resolve logins against a
+                // hardcoded walk-scale universe no matter which one the shards were told to run.
+                ("VD_TICK_DT", DEV.tick_dt.to_string()),
+                ("VD_SPEED", DEV.move_speed.to_string()),
             ]
         );
 

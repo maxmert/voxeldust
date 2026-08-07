@@ -1,5 +1,8 @@
-# Rust build artifacts
+# Rust build artifacts. `target-*` catches the scratch build dirs a side-by-side check creates
+# (e.g. a second tree built to compare against HEAD) — one of those reached 2.3 GB untracked.
 /target/
+/target-*/
+**/target/
 
 # IDE
 .idea/
