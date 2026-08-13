@@ -108,7 +108,13 @@ pub const PROTO_MAJOR: u16 = 1;
 /// undecodable. The variants and their payload structs REMAIN because postcard discriminants are
 /// positional and may never be renumbered; the discriminants are reserved forever. Nothing is appended
 /// and no client-facing message changed, so the floor does not move.
-pub const PROTO_MINOR: u16 = 12;
+/// **13** TOMBSTONES `InterShardFlow::EntityInterest` and `InterShardFlow::EntityCascade` (Step 5
+/// slice E, owner-approved): the entity lane is DELETED — occupant poses no longer cross a realm
+/// boundary at steady state (SL2); a bystander sees the occupied realm itself as its occupants'
+/// proxy (SL7). Same tombstone discipline as minor 12: shapes kept, discriminants reserved forever,
+/// received frames count undecodable. A client's own-shard feed (the untouched client lane) is
+/// unchanged, so the floor does not move.
+pub const PROTO_MINOR: u16 = 13;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -258,8 +264,12 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 12,
-            "minor 12 TOMBSTONED the per-occupant lanes (OccupantInterest + ProxySceneSet — no \
+            PROTO_MINOR, 13,
+            "minor 13 TOMBSTONED the entity lane (EntityInterest + EntityCascade, Step 5 slice E — \
+             occupant poses no longer cross a realm boundary at steady state; the occupied realm is \
+             its occupants' proxy; no producer, no consumer, discriminants reserved forever, received \
+             frames count undecodable); minor 12 TOMBSTONED the per-occupant lanes (OccupantInterest \
+             + ProxySceneSet — no \
              producer, no consumer, discriminants reserved forever, received frames count \
              undecodable); minor 11 appended `InterShardFlow::RealmShapeObservation` (a live child's interior OUTLINES \
              one hop up — the static half of the observation lane, the approaching-star invisible-planets \
@@ -283,7 +293,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.12");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.13");
         // These three USED to negotiate down and be welcomed (minor 7 fully, minor 1 without the
         // minor-2 OwnEntity, minor 0 without that AND UniverseRate). They are now refused: the
         // sender-gates-variants rule only covers appended VARIANTS, and minor 8 appended a FIELD.

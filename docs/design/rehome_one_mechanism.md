@@ -1381,3 +1381,17 @@ carry alone, and the chain scenarios in `frame_conversion_e2e` now MEASURE SL2 (
 owner) and SL7 recursion (a planet live on its child's bit alone) instead of exercising the breach.
 Narrative record: `step5_sl7_lane_deletion.md` (slice D block). Remaining: slice E (owner sign-off
 owed — entity-lane tombstone), slice F (SpawnV2 cutover, `Delta` death), then the Stage C audit.
+
+## 4bb. STEP 5 SLICE E LANDED — the entity lane is dead; SL2's steady state is measured whole (2026-08-13)
+
+The owner approved the stated cost ("Commit and proceed with next steps") and the lane that shipped
+occupant poses across realm boundaries — SL2's enumerated forbidden case, and the carrier the §4v
+ghost-corruption rows travelled on — is tombstoned on the wire (minor 13) and deleted from
+production. A shard's client edge now ships ITS OWN occupants and nothing else; a bystander sees an
+occupied sibling realm as the realm ITSELF (SL7's proxy — its box, live on the lawful scene lanes);
+and the two-player chain scenario asserts the absence, the proxy, and a zero-frame window on every
+leg. What remains of the §4u corruption family after this: the ghost feed's foreign-frame write
+(`refresh_source_ghost`) — the LAST writer, slice F's kill — with `entity_rows_foreign_labelled`
+kept alive on the own-row emit as its tripwire, to be pinned `== 0` forever at slice F. The lawful
+future remote-avatar lane is ledgered (D-RLM-18, owner-gated). Narrative:
+`step5_sl7_lane_deletion.md` (slice E block).

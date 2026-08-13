@@ -306,50 +306,25 @@ pub enum InterShardFlow {
     /// Carries ONLY the `child` lineage coord (public) + the opaque public-geometry bytes — NO
     /// gateway / session (HR1). APPENDED.
     RealmCascade(RealmCascade),
-    /// CHILD → PARENT shard — THE ENTITY LANE'S UP-LEG (the occupants themselves, not where their realms
-    /// are). A shard ships every entity it emits to its parent, measured from its OWN centre, tagged with
-    /// its OWN realm coord. The parent adds the placement it authored for that child — the one number the
-    /// child cannot know — and can then state those entities in its own frame. (⚠ This lane carries
-    /// occupant poses ACROSS a realm boundary — the surviving SL2 breach after Step 5 slice D deleted
-    /// its per-occupant siblings; its own tombstoning is slice E/F's, gated on the owner's sign-off.)
-    ///
-    /// IT WAS A SEPARATE ARM FROM the per-occupant cull hint (`OccupantInterest`, now a tombstone
-    /// above) BECAUSE IT IS A SEPARATE THING: that lane carried ONE observer's pose so a sealed
-    /// ancestor could cull its own children against it, and losing one cost a cull. This carries the
-    /// whole EMITTED ENTITY SET of a realm — the thing a client DRAWS — and losing one costs a frame
-    /// of somebody else's avatar. One message serving both would have put a render feed on a cull
-    /// hint's contract — which is also why the hint could die (slice D) while this lane kept running.
-    ///
-    /// IT IS ALSO A SEPARATE ARM FROM ITS OWN DOWN-LEG, and the direction IS the arm. Both legs carry the
-    /// identical payload shape, so a single arm with a `direction: bool` would have been possible — and a
-    /// mis-set bool would send a batch straight back to the child it came from, which loops rows between
-    /// two levels forever at 20 Hz with nothing but a byte counter moving. A wrong ARM cannot exist: the
-    /// receive routes are distinct functions with distinct guards, so the loop is refused by the type
-    /// system rather than by a field being right. `RealmCascade` and its up-mirrors are separate arms
-    /// for the same reason.
-    ///
-    /// `FireAndForget` (no fence — the parent authorizes anything it emits with its own realm fence) +
-    /// `Unreliable` (a 20 Hz latest-wins datagram on `MsgClass::SignalDelta`; a lost batch self-heals on
-    /// the next tick, like `GhostFlow::Delta`). APPENDED (preserves every existing postcard discriminant).
+    /// ★TOMBSTONE (Step 5 slice E, minor 13) — THE ENTITY LANE'S UP-LEG, deleted. It shipped a
+    /// realm's whole emitted entity set — occupant poses — to its parent across a realm boundary:
+    /// SL2's enumerated forbidden case, and the owner accepted the loss (design §3/§8.2). What a
+    /// bystander sees of a sibling realm now is the realm ITSELF (its outline + live motion on the
+    /// lawful realm lanes) — the occupied realm is its occupants' proxy (SL7). The lawful future
+    /// lane for true remote avatars (a client holds read subs on visible realms' shards; each shard
+    /// streams its OWN occupants to its OWN subscribed clients) is designed-but-unbuilt, owner-gated.
+    /// The discriminant is reserved forever; the payload keeps its decodable shape; nothing produces
+    /// it, and a received frame counts `undecodable` at the shard (the SignalDelta dispatch's closed
+    /// fall-through — measured per carrier, the slice D lesson). Do not revive.
     EntityInterest(EntityRelay),
-    /// PARENT → active CHILD shard — THE ENTITY LANE'S DOWN-LEG, and the mirror of the above. The parent
-    /// restates the entities it holds (its own, plus the ones its OTHER children relayed up, plus the ones
-    /// its own parent handed down) in the frame of the child it is shipping to, by subtracting the
-    /// placement IT authored for that child. The child merges them into the feed it already emits, so its
-    /// client is handed one set of entities in ONE space and never has to relate two realms.
-    ///
-    /// THE ROWS A CHILD RELAYED UP ARE NEVER HANDED BACK DOWN TO THAT CHILD — [`EntityRelay::realm`] on the
-    /// up-leg is the origin tag that makes that checkable, and it is what stops a two-level ping-pong. Rows
-    /// that arrive on THIS arm are never relayed up again either; only what a shard AUTHORS, and what its
-    /// own children relayed to it, climbs. Together those two rules make the lane terminate on any shape of
-    /// tree without anybody counting hops.
-    ///
-    /// This is what closes the crossing: a session holding subs to two shards used to be handed two entity
-    /// feeds measured from two different realms' centres, and the only party that could relate them was
-    /// downstream of both — which is exactly the composition this arc is removing. Now the shared parent,
-    /// which authored BOTH children's placements and is the only party holding both numbers, does it once.
-    ///
-    /// Same classification as the up-leg: `FireAndForget` + `Unreliable`. APPENDED.
+    /// ★TOMBSTONE (Step 5 slice E, minor 13) — THE ENTITY LANE'S DOWN-LEG, deleted with its up-leg
+    /// (one lane, two arms — see the tombstone above for what replaces it and why the loss was
+    /// accepted). During a crossing the client legitimately holds subs on BOTH shards and each
+    /// streams its OWN occupants directly (the untouched client lane) — so the crossing window never
+    /// needed this arm; steady-state cross-realm avatars were its whole cargo. The discriminant is
+    /// reserved forever; the payload keeps its decodable shape; nothing produces it, and a received
+    /// frame counts `undecodable` at the shard (the SignalDelta dispatch's closed fall-through).
+    /// Do not revive.
     EntityCascade(EntityRelay),
     /// ORCHESTRATOR → GATEWAY — WHICH NODES THE OWNERSHIP RECORD SHOWS HOLDING A REALM, and therefore
     /// which nodes a router may listen to at all.
@@ -630,10 +605,9 @@ impl InterShardFlow {
             // with the arm (it mutated no sim state; a received frame today only counts `undecodable`):
             // a tombstone keeps classifying so the closed-taxonomy matches stay wildcard-free.
             InterShardFlow::ProxySceneSet(_) => EffectClass::FireAndForget,
-            // The entity lane, both legs: a batch of drawable poses. It mutates no sim state at either end
-            // (render bookkeeping only), carries no fence and triggers no transfer — the receiving level
-            // authorizes anything IT emits with its own realm fence. Latest-wins by `frame_id`, so a
-            // redelivery is idempotent ⇒ FireAndForget, exactly like the two lanes it runs beside.
+            // ★TOMBSTONE (Step 5 slice E) — the deleted entity lane, both legs. Classification frozen
+            // with the arms (a batch of drawable poses mutated no sim state; a received frame today only
+            // counts `undecodable`): a tombstone keeps classifying so the matches stay wildcard-free.
             InterShardFlow::EntityInterest(_) | InterShardFlow::EntityCascade(_) => {
                 EffectClass::FireAndForget
             }
@@ -735,10 +709,9 @@ impl InterShardFlow {
             // the arm: it was level-full-set re-driven, never producer-less ⇒ ReDriven forever (nothing
             // produces it; its living replacement `ChildSceneSet` carries the same class below).
             InterShardFlow::ProxySceneSet(_) => FlowDurabilityClass::ReDriven,
-            // Per-tick latest-wins entity poses, both legs — the entity twin of `RealmCascade`. A lost batch
-            // self-heals on the next tick's re-assertion; making it reliable would put a 20 Hz per-entity
-            // feed on the ReDriven lane. NOT producer-less (no durable outbox), so the golden pin still
-            // asserts exactly two.
+            // ★TOMBSTONE (Step 5 slice E) — the deleted entity lane's class, frozen with the arms: it was
+            // per-tick latest-wins ⇒ Unreliable forever (nothing produces either leg; the golden pin
+            // still asserts exactly two producer-less arms).
             InterShardFlow::EntityInterest(_) | InterShardFlow::EntityCascade(_) => {
                 FlowDurabilityClass::Unreliable
             }
@@ -946,42 +919,19 @@ pub struct RealmCascade {
     pub realm_snapshot_bytes: Vec<u8>,
 }
 
-/// The entity-lane relay payload — one batch of drawable entities, one stated space, one hop. Carried by
-/// BOTH [`InterShardFlow::EntityInterest`] (up) and [`InterShardFlow::EntityCascade`] (down); the arm says
-/// which way it is going, the payload says nothing about direction.
-///
-/// ONE MEANING FOR EVERY FIELD ON EVERY HOP. `frame` is the frame every row in `entities` is measured in,
-/// and it is the SENDER's answer, never the reader's inference: the sender restated the rows there before
-/// shipping and dropped anything it could not. A row whose own pose label disagrees with `frame` is not
-/// shipped at all — a field whose meaning depends on who sent it is the wire-level signature of the
-/// composition breach this arc exists to undo.
+/// ★TOMBSTONE payload (Step 5 slice E) — see the [`InterShardFlow::EntityInterest`] arm's tombstone
+/// note. Kept only so the two reserved discriminants keep a decodable shape; nothing produces it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntityRelay {
-    /// The routing key, and on the up-leg the ORIGIN TAG as well.
-    ///
-    /// UP (`EntityInterest`): the SENDER's own realm coord. The parent uses it twice — to find which of its
-    /// children authored these rows (so it can add that child's placement) and to make sure it never hands
-    /// the batch back down to that same child.
-    ///
-    /// DOWN (`EntityCascade`): the RECIPIENT child's realm coord, the mis-route guard
-    /// [`RealmCascade::child`] uses (`lowered()` compared against the receiver's own coord), so a stale
-    /// hand-off or a recycled node id is dropped and counted rather than drawn.
+    /// The routing key the deleted lane addressed by (origin tag up, recipient child down).
     pub realm: RealmCoord,
-    /// The frame EVERY row in `entities` is measured in — the sender's own frame going up, the recipient
-    /// child's own frame coming down. Carried explicitly so the receiver resolves ONE placement per batch
-    /// instead of re-deriving a moving realm's position per row.
+    /// The frame the deleted lane measured every row in.
     pub frame: FrameRef,
-    /// The AUTHORING shard's snapshot counter for this batch, carried through every hop untouched — the
-    /// receiver's latest-wins gate (a batch older than the one already held for this origin is dropped,
-    /// equal-numbered batches are chunks of one tick and accumulate). It is the sender's OWN counter, and a
-    /// relaying level never stamps its own on somebody else's rows, for the same reason
-    /// [`RealmCascade::realm_snapshot_bytes`] gives.
+    /// The deleted lane's per-origin latest-wins counter.
     pub frame_id: u64,
-    /// The instant every row was measured at. Each level resolves the placement it is about to add or
-    /// subtract AT THIS INSTANT, not at its own clock — an orbiting realm moves between the two, and the
-    /// difference would be a per-hop error the size of the relay's own latency.
+    /// The instant the deleted lane's rows were measured at.
     pub universe_tick: UniverseTick,
-    /// The drawable rows, measured in `frame`.
+    /// The occupant rows the deleted lane shipped — the SL2 breach that condemned it.
     pub entities: Vec<crate::channels::EntitySnap>,
 }
 
@@ -1537,7 +1487,8 @@ mod tests {
 
     #[test]
     fn entity_relay_arms_effect_and_durability_and_round_trip() {
-        // The entity lane's two appended arms. Classifier equality (never `matches!`): FireAndForget +
+        // ★TOMBSTONE classifier pin (Step 5 slice E) — the dead entity lane's frozen classes.
+        // Classifier equality (never `matches!`): FireAndForget +
         // Unreliable on BOTH legs, so the golden producer-less pin is unchanged. The round-trip runs a
         // NON-EMPTY row set, because an empty `entities` would encode identically whatever the row shape is
         // and would prove nothing about the payload actually crossing.
@@ -1573,11 +1524,9 @@ mod tests {
 
     #[test]
     fn the_entity_lane_legs_are_distinct_arms_on_the_wire() {
-        // THE DIRECTION IS THE ARM, and this is the assertion that says so. The two legs carry the
-        // IDENTICAL payload, so if the direction were a payload field the two encodings would be equal and
-        // a receiver would have to trust a bool to know whether to send a batch back where it came from.
-        // They differ in exactly one leading discriminant byte, which is why a wrong direction cannot be
-        // expressed at all rather than merely being unlikely.
+        // ★TOMBSTONE shape pin (Step 5 slice E): both legs are dead, but their reserved discriminants
+        // must stay DISTINCT and adjacent forever — the two encodings differing in exactly the leading
+        // byte is the shape this pin freezes (a drifted tombstone would re-label every later arm).
         let payload = EntityRelay {
             realm: demand_coord(),
             frame: FrameRef::SystemSpace { system_seed: 1 },

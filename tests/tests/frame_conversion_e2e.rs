@@ -1474,10 +1474,10 @@ fn child_bit(
 }
 
 /// Does `node`'s AUTHORITY store (`Dots`) hold a pose for `subject`, in any authority state? The
-/// anti-lane probe, honestly scoped: it answers "does anyone above the owner OWN the occupant",
-/// which the deleted per-occupant relay used to make true. It deliberately does NOT read the entity
-/// lane's render rows (`ForeignEntities`) — that remaining SL2 breach is slice E/F's to delete, and
-/// the climb scenario observes it as a separate number so the two lanes' fates stay distinguishable.
+/// anti-lane probe: it answers "does anyone above the owner OWN the occupant", which the deleted
+/// per-occupant relay used to make true. Since slice E there is no other store to ask — the entity
+/// lane's holding bay is a deleted type — so this plus the wire-silence window in the climb
+/// scenario covers SL2's steady state whole.
 fn holds_subject_pose(topo: &mut Topology, node: NodeId, subject: EntityId) -> bool {
     with_shard(topo, node, |s| {
         s.world_mut()
@@ -1641,32 +1641,31 @@ fn an_occupants_liveness_climbs_every_level_of_the_chain_one_bit_per_level() {
     );
     let top_bit = child_bit(&mut topo, CHAIN_TOP, PLANET).expect("the star holds its planet's bit");
 
-    // WHAT THE POSE PROBE MEANS, honestly scoped. `Dots` is the AUTHORITY store: nobody above the
-    // area OWNS the subject. The deleted lane's own store cannot be probed empty because slice D
-    // deleted the TYPE — absence is structural, not a runtime zero. The ENTITY lane
-    // (`EntityInterest`/`EntityCascade`) still relays render ROWS along the chain — the ledgered
-    // slice E/F breach — so it is OBSERVED here as a number, not asserted away: when slice F lands,
-    // this observation flips to a hard `assert_eq!(0)` and SL2 is fully discharged on this chain.
+    // WHAT THE POSE PROBE MEANS, and why it is now the WHOLE question. `Dots` is the AUTHORITY
+    // store: nobody above the area OWNS the subject. Both stores that ever held a foreign occupant's
+    // pose above its owner are deleted TYPES now (the per-occupant retained store, slice D; the
+    // entity lane's holding bay, slice E) — absence is structural, not a runtime zero. What remains
+    // measurable is the WIRE: over a settle window, not one entity-lane frame may arrive anywhere on
+    // the chain. That is SL2 at steady state, asserted on the transport rather than argued.
     assert!(
         !holds_subject_pose(&mut topo, CHAIN_MID, subject),
         "the planet OWNS no pose for the occupant — the liveness lane crossed one bit, not a pose",
     );
     assert!(
         !holds_subject_pose(&mut topo, CHAIN_TOP, subject),
-        "nor does the star — the deleted per-occupant relay left no authority pose above the owner",
+        "nor does the star — no per-occupant relay exists to put an authority pose above the owner",
     );
-    let subject_rows_above = with_shard(&mut topo, CHAIN_MID, |s| {
-        s.world_mut()
-            .resource::<vd_sim::stub::ForeignEntities>()
-            .from_below
-            .values()
-            .flat_map(|b| b.group.rows.iter())
-            .filter(|r| r.entity == subject)
-            .count()
-    });
-    println!(
-        "[climb] entity-lane rows for the subject held above the owner (slice E/F owes their \
-         death): {subject_rows_above}"
+    let mut entity_lane_frames = 0usize;
+    for _ in 0..20 {
+        topo.step();
+        set_shard_subject_pose_now(&mut topo, SHARD, subject, CHAIN_AREA_FRAME, at);
+        for node in [SHARD, CHAIN_MID, CHAIN_TOP] {
+            entity_lane_frames += entity_relays_delivered_to(&mut topo, node);
+        }
+    }
+    assert_eq!(
+        entity_lane_frames, 0,
+        "the entity lane is SILENT on every leg of an occupied chain — SL2 measured on the wire",
     );
 
     // The bit carries ordering guards and NOTHING else (the TYPE has no pose field), and its fence
@@ -2595,10 +2594,10 @@ fn the_room_the_player_is_standing_in_is_streamed_by_its_own_shard_before_the_ch
     );
 }
 
-/// The second client's connection node. A second live player is what the entity lane needs and the realm
-/// and outline lanes did not: those describe the WORLD, which exists whether or not anyone is in it, while
-/// this one carries the OCCUPANTS, and a fixture with one occupant cannot tell "everybody is drawn in one
-/// space" from "there is only one thing to draw".
+/// The second client's connection node. A second live player is what the ABSENCE contract needs (Step 5
+/// slice E): with one occupant, "nobody's figure crosses a realm boundary" is vacuous — there is no other
+/// figure to leak. Two players in two realms are the smallest world in which each edge's refusal to carry
+/// the OTHER's figure, and the lane's wire-silence, are non-trivial measurements.
 const CLIENT_B: NodeId = NodeId(101);
 
 /// Where the traveller is walked to before it crosses: `-7` in the area's own frame. That is past the
@@ -2613,12 +2612,9 @@ const TRAVELLER_FROM_AREA_M: f64 = -7.0;
 /// the area box (which spans 2..8 in the planet's frame) so the planet keeps it, and well inside the
 /// planet's own 10 m shell so it does not leave for the star.
 const TRAVELLER_FROM_PLANET_M: f64 = -6.0;
-/// The traveller as THE AREA must be told it, which is the number the area could not produce before this
-/// lane existed: the planet subtracts where it put the area, `-6 - 5`. Four metres from where the area last
-/// saw the traveller with its own eyes, so a stale mirror cannot pass for a live relay.
-const TRAVELLER_BACK_IN_AREA_M: f64 = -11.0;
-/// The stayer as THE PLANET must state it after adding where it put the area: `5 + 0.25`.
-const STAYER_FROM_PLANET_M: f64 = 5.25;
+// (The restated-position literals that lived here — the traveller at `-11` in the area's frame, the
+// stayer at `5.25` in the planet's — died with the entity relay in Step 5 slice E: no level states
+// another realm's occupant at all any more. The absence itself is what the scenario now asserts.)
 
 /// Boot the three-level chain with TWO logged-in players in the area, and return both avatars.
 ///
@@ -2723,47 +2719,28 @@ fn entity_rows_at_the_client_edge(
     })
 }
 
-/// One shard's entity-lane bookkeeping: batches heard from below, batches heard from above, rows restated,
-/// rows refused, batches sent up, batches sent down, mis-routes.
-fn entity_lane_counts(topo: &mut Topology, node: NodeId) -> (u64, u64, u64, u64, u64, u64, u64) {
-    with_shard(topo, node, |s| {
-        let st = s.world_mut().resource::<vd_sim::stub::StubStats>();
-        (
-            st.entity_interest_received,
-            st.entity_cascade_received,
-            st.entity_rows_restated,
-            st.entity_rows_dropped,
-            st.entity_relays_sent_up,
-            st.entity_relays_sent_down,
-            st.misrouted_entity_relay,
-        )
-    })
-}
-
-/// The entity-lane batches a shard was actually DELIVERED on its last step, read out of its own inbox —
-/// wire truth, both legs, with their byte sizes.
-fn entity_relays_delivered_to(
-    topo: &mut Topology,
-    node: NodeId,
-) -> Vec<(bool, vd_wire::intershard::EntityRelay, usize)> {
+/// How many TOMBSTONED entity-lane frames (either leg) a shard was delivered on its last step, read
+/// out of its own inbox — wire truth. The lane is dead (Step 5 slice E), so every caller asserts
+/// ZERO: the frames still DECODE (reserved discriminants), which is exactly what lets a silence
+/// assertion mean "nothing was sent" rather than "nothing could be read".
+fn entity_relays_delivered_to(topo: &mut Topology, node: NodeId) -> usize {
     with_shard(topo, node, |s| {
         s.world_mut()
             .resource::<vd_sim::runtime::InboundBox>()
             .0
             .iter()
-            .filter_map(|m| match m {
+            .filter(|m| match m {
                 vd_sim::io::Inbound::Wire {
                     class: vd_sim::io::MsgClass::SignalDelta,
                     bytes,
                     ..
-                } => match postcard::from_bytes::<InterShardFlow>(bytes) {
-                    Ok(InterShardFlow::EntityInterest(er)) => Some((true, er, bytes.len())),
-                    Ok(InterShardFlow::EntityCascade(er)) => Some((false, er, bytes.len())),
-                    _ => None,
-                },
-                _ => None,
+                } => matches!(
+                    postcard::from_bytes::<InterShardFlow>(bytes),
+                    Ok(InterShardFlow::EntityInterest(_) | InterShardFlow::EntityCascade(_))
+                ),
+                _ => false,
             })
-            .collect()
+            .count()
     })
 }
 
@@ -2784,22 +2761,22 @@ fn edge_row(
     hits.first().map(|r| r.pose)
 }
 
-/// THE ACCEPTANCE STORY FOR THE OCCUPANTS: two players standing in two different realms, and each one's
-/// client is handed BOTH of them measured from the centre of the realm ITS OWN player is standing in.
+/// THE ACCEPTANCE STORY FOR THE OCCUPANTS, under the Step 5 slice E contract (owner-decided, design
+/// §3/§8.2): two players standing in two different realms, and each one's client is handed ITS OWN
+/// realm's occupants and NOBODY else's figure. The other player's whereabouts are visible as A REALM
+/// — the occupied area's box, live in the scene — never as an avatar. SL2 at steady state: an
+/// occupant's pose exists on the shard that owns them and on that shard's own clients, full stop.
 ///
-/// This is the gap no other lane closed. The realm lane carries where the boxes are; the outline lane
-/// carries what shape they are; every entity feed reached the outside world from the shard the entity
-/// lives ON, measured from that shard's own centre. So a client that could see into two realms at once —
-/// which is exactly what a session holds during a crossing, subscribed to its source and its destination
-/// at the same time — was handed two feeds in two spaces, and the only party that could relate them sat
-/// downstream of both. That party is the composition this arc exists to remove.
-///
-/// The relating is done HERE, hop by hop, by the levels that authored the placements: the planet adds
-/// where it put the area to lift the area's occupants into its own frame, and subtracts the same number
-/// to state its own occupants in the area's. One addition and one subtraction, each made by the only
-/// party in the world that holds the number, and neither level ever learns where it itself sits.
+/// This scenario used to assert the opposite (each edge handed BOTH players, restated hop by hop by
+/// the entity relay). That relay shipped occupant poses across realm boundaries — the breach that
+/// condemned it — and the owner accepted the visual loss: at parent scale a sibling realm's
+/// occupants are sub-child-resolution, and the occupied realm IS their proxy (SL7). During a real
+/// crossing a client holds subs on BOTH shards; the LEAVER'S OWN avatar rides them cleanly (the
+/// one-space filter exempts it — the ride/round-trip gates cover exactly that), while a BYSTANDER's
+/// view of the leaver is the retained ghost's frozen fill until slice F lands the leaver-vanish
+/// eviction (D-4(a) escalation).
 #[test]
-fn two_players_in_two_realms_are_each_drawn_in_the_realm_they_are_standing_in() {
+fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
     let fabric = FaultFabric::new(4242, 2);
     let (mut topo, stayer, traveller) = boot_the_chain_with_two_players(&fabric);
 
@@ -2827,9 +2804,9 @@ fn two_players_in_two_realms_are_each_drawn_in_the_realm_they_are_standing_in() 
     assert!(report(&reports, SHARD).crossings_requested >= 1);
     assert!(report(&reports, ORCH).crossings_started >= 1);
 
-    // Now hold BOTH: the stayer in the area's frame on the area shard, the traveller in the planet's frame
-    // on the planet shard. Each is scripted only on the shard that owns it; what the OTHER level says about
-    // it is what is under test.
+    // Hold BOTH: the stayer in the area's frame on the area shard, the traveller in the planet's frame
+    // on the planet shard. Each is scripted only on the shard that owns it; what each level's client
+    // edge says — and refuses to say — is what is under test.
     let held = DVec3::new(TRAVELLER_FROM_PLANET_M, 0.0, 0.0);
     let planet_frame = FrameRef::PlanetCentered { planet_seed: 7 };
     let mut area_feed = Vec::new();
@@ -2839,18 +2816,16 @@ fn two_players_in_two_realms_are_each_drawn_in_the_realm_they_are_standing_in() 
         set_shard_subject_pose_now(t, CHAIN_MID, traveller, planet_frame, held);
         area_feed = entity_rows_at_the_client_edge(t, SHARD);
         planet_feed = entity_rows_at_the_client_edge(t, CHAIN_MID);
-        edge_row(&area_feed, traveller).is_some() & edge_row(&planet_feed, stayer).is_some()
+        edge_row(&area_feed, stayer).is_some() & edge_row(&planet_feed, traveller).is_some()
     });
     assert!(
         both,
-        "each level is told about the occupant of the other: area feed {area_feed:?}, planet feed \
+        "each level's client edge streams its OWN player: area feed {area_feed:?}, planet feed \
          {planet_feed:?}",
     );
-    // SETTLE, and read the feeds ONLY after. The lane is one delivery per level, so the first batch that
-    // mentions the traveller at all still carries the position it had when it crossed. Waiting for the
-    // arrival and then reading immediately would be reading the world one relay behind — and, worse, would
-    // have accepted a value equal to the expected one on a fixture where the two happened to coincide,
-    // which is exactly the trap the moved hold position above is there to spring.
+    // SETTLE, then read: give any straggler from the crossing window (the second sub's feed, the
+    // retained ghost fill) time to close, so the absence below is steady-state absence and not a
+    // lucky early read.
     const SETTLE_TICKS: u64 = 40;
     for _ in 0..SETTLE_TICKS {
         topo.step();
@@ -2860,155 +2835,90 @@ fn two_players_in_two_realms_are_each_drawn_in_the_realm_they_are_standing_in() 
         planet_feed = entity_rows_at_the_client_edge(&mut topo, CHAIN_MID);
     }
 
-    // (1) THE AREA'S CLIENT EDGE. One space — the area's own — for BOTH players.
+    // (1) EACH EDGE DRAWS ITS OWN PLAYER, in its own space, at the scripted point — the half that
+    // must keep working exactly as before.
     let stayer_here = edge_row(&area_feed, stayer).expect("the area draws its own player");
-    let traveller_here = edge_row(&area_feed, traveller).expect("and the one on the planet");
     assert_eq!(stayer_here.frame, CHAIN_AREA_FRAME);
-    assert_eq!(
-        traveller_here.frame, CHAIN_AREA_FRAME,
-        "the planet's occupant arrives measured from the AREA's centre — one feed, one space. A row \
-         still wearing the planet's label is the two-spaces defect this whole slice exists to close.",
-    );
     assert_eq!(stayer_here.pos.offset(), staying);
-    // ANTI-VACUITY: the expected value is NOT where the area last saw the traveller for itself, so the
-    // retained ghost it keeps across the hand-off cannot be what is being read here.
-    assert_ne!(TRAVELLER_BACK_IN_AREA_M, TRAVELLER_FROM_AREA_M);
-    assert_eq!(
-        traveller_here.pos.offset(),
-        DVec3::new(TRAVELLER_BACK_IN_AREA_M, 0.0, 0.0),
-        "the planet SUBTRACTED where it put the area: {TRAVELLER_FROM_PLANET_M} - \
-         {CHAIN_AREA_FROM_PLANET_M}. Reporting {TRAVELLER_FROM_PLANET_M} here would mean the number \
-         travelled unconverted under a label that says otherwise.",
-    );
-
-    // (2) THE PLANET'S CLIENT EDGE. The mirror, in the planet's own space.
     let traveller_there =
         edge_row(&planet_feed, traveller).expect("the planet draws its own player");
-    let stayer_there = edge_row(&planet_feed, stayer).expect("and the one in the area");
     assert_eq!(traveller_there.frame, planet_frame);
-    assert_eq!(stayer_there.frame, planet_frame);
     assert_eq!(traveller_there.pos.offset(), held);
-    assert_eq!(
-        stayer_there.pos.offset(),
-        DVec3::new(STAYER_FROM_PLANET_M, 0.0, 0.0),
-        "the planet ADDED where it put the area: {CHAIN_AREA_FROM_PLANET_M} + \
-         {CHAIN_OCCUPANT_FROM_AREA_M}",
+
+    // (2) AND NEITHER EDGE CARRIES THE OTHER'S FIGURE — the accepted loss, stated as the
+    // measurement it is. A row for the other realm's occupant here would mean a pose crossed a
+    // realm boundary at steady state: the exact breach slice E deleted.
+    assert!(
+        edge_row(&area_feed, traveller).is_none(),
+        "the area's edge carries NO figure for the planet's occupant — SL2 at steady state",
+    );
+    assert!(
+        edge_row(&planet_feed, stayer).is_none(),
+        "and the planet's edge carries NO figure for the area's occupant",
     );
 
-    // (3) THE SEPARATION IS THE SAME FACT SEEN FROM TWO PLACES. Two levels, two different pairs of
-    // numbers, one distance — which is what "one space per feed" means when written as a measurement
-    // rather than as two frame labels being equal.
-    let gap_here = (traveller_here.pos.offset() - stayer_here.pos.offset()).length();
-    let gap_there = (traveller_there.pos.offset() - stayer_there.pos.offset()).length();
-    println!(
-        "[entities across realms] area feed: stayer {:?} traveller {:?}; planet feed: stayer {:?} \
-         traveller {:?}; separation {gap_here} m vs {gap_there} m",
-        stayer_here.pos.offset(),
-        traveller_here.pos.offset(),
-        stayer_there.pos.offset(),
-        traveller_there.pos.offset(),
+    // (3) THE PROXY THAT REPLACES THE FIGURE (SL7) is a CONJUNCTION, and each probe below carries
+    // one half: the drawn set proves the area's BOX is on the traveller's client (pure AoI
+    // visibility — it would be drawn empty or full), and the BIT proves the area is genuinely
+    // OCCUPIED-live (the box on screen is a realm holding somebody). Together: the stayer's
+    // whereabouts reach the traveller as the occupied area itself, with error bounded by the area's
+    // own size — the resolution the parent's decision is meaningful at.
+    assert!(
+        child_bit(&mut topo, CHAIN_MID, CHAIN_AREA).is_some(),
+        "the occupied area's bit beats at the planet",
     );
-    assert!((gap_here - gap_there).abs() < CHAIN_DOWN_TOL_M);
-    assert!(gap_here > 1.0, "the two players are genuinely apart");
+    let traveller_scene_has_area = with_shard(&mut topo, CHAIN_MID, |s| {
+        s.world_mut()
+            .resource::<vd_sim::stub::RenderSent>()
+            .0
+            .values()
+            .any(|drawn| drawn.contains(&CHAIN_AREA))
+    });
+    assert!(
+        traveller_scene_has_area,
+        "the area's BOX is in the planet occupant's drawn scene (the visibility half of the proxy)",
+    );
 
-    // (4) THE NO-LEAK HALF, as an assertion that can fail rather than as prose. Every level of the chain
-    // is asked about every realm in the whole seed forest, and every one of them may answer for ITSELF and
-    // its OWN DIRECT CHILDREN and nothing else. A level that could place its own parent would be a level
-    // that had been told where it sits.
+    // (4) THE NO-LEAK HALF, unchanged. Every level of the chain is asked about every realm in the
+    // whole seed forest, and every one of them may answer for ITSELF and its OWN DIRECT CHILDREN
+    // and nothing else. A level that could place its own parent would be a level that had been told
+    // where it sits.
     for (node, own, children) in [
         (SHARD, "Area(7)", vec![]),
         (CHAIN_MID, "Planet(7)", vec!["Area(7)"]),
         (CHAIN_TOP, "System(7)", vec!["Planet(7)", "Station(7)"]),
     ] {
-        let answers = placeable_frames(&mut topo, node);
-        for (realm, answered) in &answers {
+        for (realm, answered) in placeable_frames(&mut topo, node) {
             let allowed = realm.as_str() == own || children.contains(&realm.as_str());
             assert_eq!(
-                *answered, allowed,
+                answered, allowed,
                 "{node:?} answered {realm} = {answered}; a shard knows where IT is only for itself \
                  and its own direct children, and nothing about any ancestor",
             );
         }
     }
 
-    // (5) WHO DID THE ARITHMETIC. The planet is the only level with a placement to apply for this pair, so
-    // it is the only level that restates anything; the levels either side of it accept what they are handed.
-    let (area_up, area_down, area_restated, area_dropped, area_sent_up, area_sent_down, area_mis) =
-        entity_lane_counts(&mut topo, SHARD);
-    let (mid_up, mid_down, mid_restated, mid_dropped, mid_sent_up, mid_sent_down, mid_mis) =
-        entity_lane_counts(&mut topo, CHAIN_MID);
-    let (top_up, _, top_restated, top_dropped, _, top_sent_down, top_mis) =
-        entity_lane_counts(&mut topo, CHAIN_TOP);
-    println!(
-        "[entities across realms] area: heard {area_up} up / {area_down} down, restated \
-         {area_restated}, sent {area_sent_up} up / {area_sent_down} down. planet: heard {mid_up} up / \
-         {mid_down} down, restated {mid_restated}, sent {mid_sent_up} up / {mid_sent_down} down. star: \
-         heard {top_up} up, restated {top_restated}, sent {top_sent_down} down.",
-    );
-    assert!(
-        mid_restated > 0,
-        "the planet is the level that relates the two"
-    );
-    assert_eq!(
-        area_restated, 0,
-        "THE LEAF COMPUTES NOTHING — it is handed rows already measured from its own centre",
-    );
-    assert!(area_sent_up > 0 && mid_sent_down > 0);
-    assert_eq!(
-        (area_dropped, mid_dropped, top_dropped),
-        (0, 0, 0),
-        "no row was refused anywhere",
-    );
-    assert_eq!(
-        (area_mis, mid_mis, top_mis),
-        (0, 0, 0),
-        "nothing mis-routed"
-    );
-    assert!(
-        top_up > 0,
-        "the chain still climbs past the level that relates"
-    );
-    assert!(
-        top_restated > 0,
-        "the star lifts what the planet relayed into its own frame",
-    );
-
-    // (6) THE BYTE VOLUME, measured on the real topology rather than argued. This is the one lane on which
-    // ENTITY-COUNT-SIZED data crosses a shard boundary it did not cross before, so the price is a number
-    // somebody printed.
+    // (5) THE LANE IS SILENT, measured on the real topology over a real window — the deletion's
+    // whole price tag: where entity-count-sized batches crossed every boundary of a live chain per
+    // tick, nothing crosses at all. Frames of the tombstoned arms still DECODE (reserved
+    // discriminants), so zero here means "nothing was sent", never "nothing could be read".
     const WINDOW_TICKS: u64 = 100;
-    let (mut up_bytes, mut up_msgs, mut down_bytes, mut down_msgs, mut rows) =
-        (0usize, 0u64, 0usize, 0u64, 0usize);
+    let mut lane_frames = 0usize;
     for _ in 0..WINDOW_TICKS {
         topo.step();
         set_shard_subject_pose_now(&mut topo, SHARD, stayer, CHAIN_AREA_FRAME, staying);
         set_shard_subject_pose_now(&mut topo, CHAIN_MID, traveller, planet_frame, held);
         for node in [SHARD, CHAIN_MID, CHAIN_TOP] {
-            for (up, er, bytes) in entity_relays_delivered_to(&mut topo, node) {
-                rows += er.entities.len();
-                if up {
-                    up_bytes += bytes;
-                    up_msgs += 1;
-                } else {
-                    down_bytes += bytes;
-                    down_msgs += 1;
-                }
-            }
+            lane_frames += entity_relays_delivered_to(&mut topo, node);
         }
     }
-    #[allow(clippy::cast_precision_loss)] // counts in the hundreds
-    let per = |n: u64| n as f64 / WINDOW_TICKS as f64;
     println!(
-        "[entities across realms cost] over {WINDOW_TICKS} ticks on a 3-level chain with 2 players: \
-         {up_msgs} up-leg batches ({up_bytes} B) and {down_msgs} down-leg batches ({down_bytes} B), \
-         {rows} rows total — {:.2} up + {:.2} down datagram/tick, {:.1} B/tick",
-        per(up_msgs),
-        per(down_msgs),
-        per((up_bytes + down_bytes) as u64),
+        "[entities across realms] over {WINDOW_TICKS} ticks on a 3-level chain with 2 players: \
+         {lane_frames} entity-lane frames delivered (the deleted lane's whole remaining cost)",
     );
-    assert!(
-        up_msgs > 0 && down_msgs > 0,
-        "the window observed the lane actually running in both directions",
+    assert_eq!(
+        lane_frames, 0,
+        "the tombstoned entity lane is SILENT on every leg while two realms are occupied",
     );
 }
 
@@ -3129,8 +3039,9 @@ fn ms(ticks: u64) -> f64 {
 /// stamp` would fold it in. See [`own_dot_stamp`] for the measurement that established that. The universe
 /// clock is cluster-wide, so the difference is elapsed time. Two legs, on ONE run of ONE topology:
 ///
-/// * UP — the player's own pose, authored in the AREA, climbing to the planet and then to the star. This
-///   is the leg another player standing higher up sees them over.
+/// * UP — the SL7 liveness beat, re-originated per level (the pose relay is dead — Step 5): the area's
+///   bit at the planet, the planet's bit at the star. This is the leg the parents' warm-ahead and
+///   cascade-targeting decisions ride on.
 /// * DOWN — a turning station authored by the STAR, descending to the planet, to the area, and out to the
 ///   client. This is the leg the player sees the world move over.
 ///

@@ -117,7 +117,42 @@ This slots into the ChildSceneSet rework this slice already owns.
   scenario so slice F flips it to a hard zero; (5) ~18 doc-residue sites (production comments,
   classifier rationale, test banners, the `RealmShape` hop contract, D-RLM-11/12/13 ledger notes)
   rewritten to tombstone tense — `proxy_alive` renamed `ttl_alive` with its store gone.
-Remaining: slice E (owner sign-off — entity-lane tombstone), slice F (SpawnV2 cutover, `Delta` death).
+**SLICE E LANDED, 2026-08-13 (PROTO_MINOR → 13; owner approved the same day — "Commit and proceed
+with next steps", after the cost was stated plainly).** The entity lane is DEAD:
+- **Wire:** `EntityInterest` and `EntityCascade` are TOMBSTONES (discriminants 27/28 reserved
+  forever; `EntityRelay` keeps its decodable shape; the positional-pin test's table is unchanged —
+  which is itself the proof no slot moved). Both legs rode the SignalDelta carrier, whose closed
+  fall-through counts a received tombstone `undecodable` — measured for BOTH legs by one test (the
+  slice D lesson applied on day one).
+- **Production deletions:** `relay_entity_chain` (both legs), the `ForeignEntities` holding bay and
+  its whole receive side, the client-edge merge of foreign rows (the emit ships OWN rows only and
+  an empty gateway list is a plain early return again), and the 8 lane-only stats.
+  `entity_rows_foreign_labelled` SURVIVES deliberately: it counts foreign-labelled poses in the
+  OWN-row emit — the §4u ghost-corruption tripwire slice F pins to zero.
+- **The contract rewrite (the accepted loss, measured):**
+  `two_players_in_two_realms_are_each_drawn_only_by_their_own_realm` now asserts each edge draws
+  its OWN player exactly (frame + scripted point), the OTHER player's figure is ABSENT from each
+  edge, the occupied AREA's box is in the planet occupant's drawn scene (SL7's proxy, probed on the
+  render baseline), the no-leak placement probe is unchanged, and the lane is SILENT — zero frames
+  on every leg over a 100-tick two-player window (frames still decode, so zero means "nothing
+  sent"). The climb scenario's entity observation became a 20-tick wire-silence assert: SL2's
+  steady state is now measured on the transport, whole.
+- **What was deliberately kept:** the client's own-shard feed (the LEAVER's own avatar rides its
+  dual subs cleanly — the one-space filter exempts it), the ghost fill (slice F's),
+  `hop_to_child`/`partition_entities` (shared machinery). The future lawful remote-avatar lane is
+  ledgered as D-RLM-18 (owner-gated read-sub design, §3).
+- **THE REVIEW'S REAL CATCH (29 agents, 16 confirmed):** beyond doc residue and three restored
+  over-deleted tests (surviving-machinery pins the section sweep took — coverage caught the strand
+  first), the review proved the BYSTANDER story end to end: a bystander's view of a leaver is the
+  retained ghost's FROZEN fill (the one-space filter drops the second sub's foreign-frame rows for
+  everyone but the own avatar; the live replacement row died with the relay), and once that ghost
+  despawns the client keeps a frozen track FOREVER — the client's only evictor is a reliable
+  removal message that has no producer and no carrier (D-4(a), whose deferral precondition slice E
+  invalidated — see its ★escalation note). The leaver-vanish eviction is therefore slice F's
+  PREREQUISITE and its mechanism (the D-4 `EventMsg` arm vs a client staleness TTL) is the owner's
+  call, put to the owner with the slice E report.
+Remaining: slice F (SpawnV2 cutover, `Delta` death, the permanent foreign-labelled==0 tripwire,
+the leaver-blink measurement) — then the Stage C audit.
 
 **THE COVERAGE-DEBT PUSH (same day, HR5):** the first coverage-fast run since Stage A found 423
 uncovered Tier-A regions accumulated across the whole arc. Two systemic causes, both cured

@@ -74,7 +74,9 @@ pub struct DeliveredView {
     /// own rows stated in THIS space are dropped while it is set, and it CLEARS when any held sub
     /// closes (`drop_sub` — the reliable end of the old feed, which is the echo's only source). A
     /// faster-than-the-grace return crossing is blocked at most until that close — bounded,
-    /// self-healing, and the whole echo lane is deleted by Step 5 slice E.
+    /// self-healing. Step 5 slice E deleted the RELAYED half of the echo (the live restated copy);
+    /// the surviving source is the retained ghost's frozen own-frame row, which keeps this pin
+    /// load-bearing until slice F retires that emit at hold closure — it retires WITH slice F.
     echo_space: Option<FrameRef>,
     /// Own-entity rows dropped as the ECHO (the old home's relayed copy of the leaver) — see
     /// `echo_space`. Non-zero during a crossing's grace window is normal.

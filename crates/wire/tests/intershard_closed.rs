@@ -314,10 +314,10 @@ fn every_arm() -> Vec<InterShardFlow> {
             child: demand_child_coord(),
             realm_snapshot_bytes: vec![1, 2, 3],
         }),
-        // The entity lane, UP leg (child → parent), tagged with the SENDER's own coord — the origin tag
-        // that keeps a batch from being handed back to the child it came from. FireAndForget / Unreliable
-        // (a per-tick latest-wins entity feed), NOT producer-less, so the golden pin below still asserts
-        // exactly TWO.
+        // ★TOMBSTONE (Step 5 slice E, minor 13) — the entity lane's UP leg. Nothing produces it; the
+        // discriminant is reserved forever, so its SHAPE stays pinned here (a drifted tombstone would
+        // silently re-label every later arm). Classification frozen: FireAndForget / Unreliable, NOT
+        // producer-less — the golden pin below still asserts exactly TWO.
         InterShardFlow::EntityInterest(vd_wire::intershard::EntityRelay {
             realm: demand_child_coord(),
             frame: FrameRef::SystemSpace { system_seed: 1 },
@@ -328,8 +328,8 @@ fn every_arm() -> Vec<InterShardFlow> {
                 pose: pose(),
             }],
         }),
-        // The entity lane, DOWN leg (parent → active child), tagged with the RECIPIENT's coord — the same
-        // mis-route guard `RealmCascade` uses. Same classification, same reason.
+        // ★TOMBSTONE (Step 5 slice E, minor 13) — the entity lane's DOWN leg; same reservation, same
+        // frozen classification as its up twin above.
         InterShardFlow::EntityCascade(vd_wire::intershard::EntityRelay {
             realm: demand_child_coord(),
             frame: FrameRef::SystemSpace { system_seed: 1 },
@@ -591,7 +591,7 @@ fn durability_class_pins_the_producer_less_reliable_set() {
             // Per-realm observation cascade: latest-wins realm poses (Unreliable), NOT producer-less — so the
             // golden `producer_less.len() == 2` pin below is unchanged.
             InterShardFlow::RealmCascade(_) => FlowDurabilityClass::Unreliable,
-            // The entity lane, both legs: per-tick latest-wins drawable poses (Unreliable), NOT
+            // ★TOMBSTONE (slice E) — the entity lane's frozen class, both legs: Unreliable, NOT
             // producer-less — so the golden `producer_less.len() == 2` pin below is unchanged.
             InterShardFlow::EntityInterest(_) | InterShardFlow::EntityCascade(_) => {
                 FlowDurabilityClass::Unreliable

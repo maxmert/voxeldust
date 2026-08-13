@@ -41,7 +41,7 @@ use vd_wire::channels::{
     SubId, partition_entities, partition_realms,
 };
 use vd_wire::intershard::{
-    CrossingAborted, CrossingRequest, DemandVerb, DemoteCmd, EntityRelay, FlushSource, GhostFlow,
+    CrossingAborted, CrossingRequest, DemandVerb, DemoteCmd, FlushSource, GhostFlow,
     InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP, ReHomeCmd, ReHomeState, RealmCascade,
     RealmDemand, STUB_CROSSING_STEP, ShardPresence, TRANSFER_SCHEMA_VERSION,
     TRANSIENT_ABANDON_STEP, TRANSIENT_BATCH_STEP, TRANSIENT_COMPLETE_STEP, TRANSIENT_DISCARD_STEP,
@@ -446,58 +446,6 @@ pub struct ChildSceneSent(pub BTreeMap<RealmId, (NodeId, BTreeSet<RealmId>)>);
 /// never persisted. EMPTY on the root and at walk/static ⇒ byte-identical there.
 #[derive(Resource, Debug, Default)]
 pub struct FromAboveScene(pub Vec<RealmShape>);
-
-/// One batch of entity rows this shard was handed by a neighbouring LEVEL, held for one hop.
-///
-/// The rows are stored ALREADY MEASURED FROM THIS SHARD'S OWN CENTRE — lifted on arrival if they came up
-/// from a child, and already in this frame if they came down from the parent (which subtracted where it put
-/// this shard before shipping). So everything in here is in the one space this shard is allowed to speak
-/// in, and nothing downstream has to ask where anybody else sits.
-#[derive(Clone, Debug)]
-pub struct ForeignEntityBatch {
-    /// The SENDING level's own per-tick counter for this hop — the latest-wins gate. A lower number than
-    /// the one already held for this origin is a reordered datagram and is dropped; the SAME number is
-    /// another MTU chunk of one tick and accumulates. It is the sender's counter for the hop, not the
-    /// authoring shard's for the row, because the dedup question here is "is this batch newer than the last
-    /// one that came from this neighbour" and the answer has to come from that neighbour.
-    pub frame_id: u64,
-    /// Arrival on THIS shard's local clock — the TTL base, the same discipline as the SL7 bit's. The lane is
-    /// unreliable, so a batch that stops arriving must age out rather than freeze somebody's avatar forever.
-    pub last_seen: TickId,
-    /// The rows, measured in this shard's own frame, still carrying the instant they were measured at —
-    /// which every level below or beside this one needs in order to resolve the right placement.
-    pub group: EntityGroup,
-}
-
-/// THE ENTITY LANE'S HOLDING BAY: the drawable entities of the levels either side of this one, kept for one
-/// hop so this shard can merge them into what it emits and pass them on.
-///
-/// WHY IT EXISTS. A session crossing between two realms holds subs to two shards at once, and each shard
-/// ships its entities measured from its OWN centre — so one client was handed two feeds in two spaces and
-/// nothing but a party downstream of both could relate them. That party is exactly the composition this arc
-/// is removing. The shared PARENT authored both children's placements and is the only one holding both
-/// numbers, so it does the relating: a child's rows climb to it, it restates them from the other child's
-/// centre, and hands them down. The crossing client then has one feed in one space.
-///
-/// THE TWO DIRECTIONS ARE STORED SEPARATELY BECAUSE THEY MAY TRAVEL DIFFERENTLY, and that is what makes the
-/// lane terminate. What came UP from a child may climb further and may be handed down to that child's
-/// SIBLINGS, but never back to the child it came from. What came DOWN from the parent may be handed further
-/// down, but never climbs again — otherwise every batch would ping-pong between two levels forever at 20 Hz
-/// with nothing but a byte counter moving. Nobody counts hops to achieve this; the two rules do it alone.
-///
-/// PURE render bookkeeping — no fence, never persisted, never an authority store (`BTreeMap`, sim
-/// determinism). EMPTY at walk/static and on any shard with no live chain around it ⇒ byte-identical there.
-#[derive(Resource, Debug, Default)]
-pub struct ForeignEntities {
-    /// Rows relayed UP by this shard's DIRECT CHILDREN, keyed by the child's own frame — which IS the
-    /// origin tag, and is the same key `active_children` compares, so "never hand a batch back to the child
-    /// it came from" is one equality and not a second bookkeeping scheme that could disagree.
-    pub from_below: BTreeMap<FrameRef, ForeignEntityBatch>,
-    /// Rows handed DOWN by this shard's parent — its own, its other children's, and whatever its own parent
-    /// gave it, all already restated from this shard's centre by the party that authored where this shard
-    /// sits. `None` on a chain root, or on any shard whose parent is not running.
-    pub from_above: Option<ForeignEntityBatch>,
-}
 
 /// VU AoI S1b (Slice 2) — the LOCAL-DOT render baseline, for a dot this shard hosts directly. (Its
 /// one-time twin for the parent-reflected PROXY path died with the per-occupant lane, Step 5 slice
@@ -1880,39 +1828,11 @@ pub struct StubStats {
     /// authors. Never normal: it means a pose reached this shard labelled with a realm nobody here can
     /// place, and the honest answer is to say nothing rather than to state positions in the wrong space.
     pub realm_rows_unplaceable_observer: u64,
-    /// THE ENTITY LANE, UP LEG: `EntityInterest` batches this shard RECEIVED from a direct child and lifted
-    /// into its own frame. `0` on a leaf and at walk/static; non-zero exactly where a level of a live chain
-    /// is holding somebody else's occupants so its OTHER children can be told about them.
-    pub entity_interest_received: u64,
-    /// THE ENTITY LANE, DOWN LEG: `EntityCascade` batches RECEIVED from this shard's parent, already
-    /// measured from this shard's own centre. `0` at the top of a live chain and at walk/static.
-    pub entity_cascade_received: u64,
-    /// Entity rows RESTATED by this shard — lifted from a child's frame into its own on the way up, or
-    /// pushed from its own into a child's on the way down. This shard authored where that child sits, so
-    /// this arithmetic cannot be done anywhere else; the count is where it was made.
-    pub entity_rows_restated: u64,
-    /// THE DEGRADE, made visible rather than shipped: an entity row this shard could NOT restate (the typed
-    /// [`FrameError`], or a batch whose origin frame is none of its direct children). DROPPED, never
-    /// forwarded still wearing the previous space's numbers. `0` healthy.
-    pub entity_rows_dropped: u64,
-    /// Entity batches this shard SENT UP to its parent (its own emitted rows plus whatever its children
-    /// relayed to it). `0` at a chain root and wherever no parent node has resolved.
-    pub entity_relays_sent_up: u64,
-    /// Entity batches this shard SENT DOWN to an active child. `0` on a leaf — a leaf has nowhere below it,
-    /// receives rows already measured from its own centre, and does no arithmetic at all.
-    pub entity_relays_sent_down: u64,
-    /// An entity batch DROPPED as MIS-ROUTED: an up-leg whose sender is not one of this shard's children,
-    /// or a down-leg whose routing key does not lower to this shard's realm (a recycled `NodeId` across a
-    /// hand-off). Rejected on receive. `0` healthy.
-    pub misrouted_entity_relay: u64,
-    /// An entity batch DROPPED as STALE: its `frame_id` is older than the one already held from that same
-    /// neighbour, i.e. a reordered datagram on an unreliable lane. `0` on an ordered link.
-    pub entity_relay_stale: u64,
-    /// Rows this shard emitted but did NOT relay up, because they are not measured from its own centre: a
-    /// FED GHOST's pose is authored by the neighbour that owns the entity and wears that neighbour's frame
-    /// label, and this shard has no idea where that neighbour sits. Restamping the label would claim the
-    /// number is measured from here. NOT a loss — the owning shard relays its own copy up itself — so this
-    /// is EXPECTED non-zero for as long as a crossing is in flight, and is here to show it happening.
+    /// A row in this shard's OWN client-edge emit whose pose label could not be restated into this
+    /// shard's own frame — a FOREIGN-LABELLED pose inside a locally-emitted row, i.e. the §4u ghost-feed
+    /// corruption made countable. (The entity RELAY lane died in Step 5 slice E; this counter outlives
+    /// it because it measures the emit path, not the relay.) EXPECTED non-zero only while the ghost
+    /// feed's foreign write survives; slice F deletes that writer and pins this to `0` forever.
     pub entity_rows_foreign_labelled: u64,
 }
 
@@ -2098,7 +2018,6 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(ObservedInteriorShapes::default());
     world.insert_resource(ChildSceneSent::default());
     world.insert_resource(FromAboveScene::default());
-    world.insert_resource(ForeignEntities::default());
     world.insert_resource(RenderSent::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
@@ -2385,9 +2304,6 @@ type VuAoiInbound<'w> = (
     ResMut<'w, ParentRealmNode>,
     // Step 5 slice C — the from-above holding the `ChildSceneSet` receive arm replaces whole.
     ResMut<'w, FromAboveScene>,
-    // The entity lane's holding bay — written by BOTH of its receive arms, and the last member of the
-    // same receive-side bundle for the same arity reason.
-    ResMut<'w, ForeignEntities>,
     // Step 5 slice A + the up-observation lane: the parent-side stores their receive arms write —
     // the bit table, the interior rows, and (slice C) the interior outlines.
     ResMut<'w, ChildLiveness>,
@@ -2440,7 +2356,6 @@ fn process_inbound(
         regions,
         mut parent_node,
         mut from_above,
-        mut foreign,
         mut child_liveness,
         mut observed,
         mut observed_shapes,
@@ -2510,9 +2425,10 @@ fn process_inbound(
             // Membership (clock sync) is consumed by the node-level follower system;
             // Snapshot / RealmSnapshot are gateway→client render datagrams and never target a shard.
             MsgClass::Membership | MsgClass::Snapshot | MsgClass::RealmSnapshot => {}
-            // The up-lanes' carrier. A malformed / mis-classed payload — and a frame of the
-            // TOMBSTONED per-occupant lane (`OccupantInterest`, deleted in Step 5 slice D; the
-            // discriminant is reserved forever) — is counted as undecodable, never a panic.
+            // The up-lanes' carrier. A malformed / mis-classed payload — and a frame of any
+            // TOMBSTONED lane that rode it (`OccupantInterest`, slice D; `EntityInterest`/
+            // `EntityCascade`, slice E; discriminants reserved forever) — is counted as
+            // undecodable, never a panic.
             MsgClass::SignalDelta => match postcard::from_bytes::<InterShardFlow>(bytes) {
                 // Step 5 slice A — a direct child's SL7 occupancy bit. Presence-is-the-bit; last-wins
                 // by (fence, at); the sender NodeId is the return address for the down-lanes.
@@ -2562,24 +2478,10 @@ fn process_inbound(
                         &mut outbox,
                     );
                 }
-                // THE ENTITY LANE, UP LEG: a direct child relayed the entities it draws, measured from ITS
-                // centre. This shard authored where that child sits, so it lifts them into its own frame
-                // once, here, and holds them for the tick.
-                Ok(InterShardFlow::EntityInterest(er)) => {
-                    on_entity_interest(
-                        er,
-                        &config,
-                        &regions,
-                        clock.local_tick,
-                        &mut foreign,
-                        &mut stats,
-                    );
-                }
-                // THE ENTITY LANE, DOWN LEG: the parent handed down the entities of the levels around this
-                // one, already measured from this shard's centre. Nothing to compute — validate and hold.
-                Ok(InterShardFlow::EntityCascade(er)) => {
-                    on_entity_cascade(er, &config, clock.local_tick, &mut foreign, &mut stats);
-                }
+                // ★TOMBSTONED lanes fall through here and are COUNTED: the per-occupant cull hint
+                // (`OccupantInterest`, slice D) and the entity lane's two legs
+                // (`EntityInterest`/`EntityCascade`, slice E) all rode this carrier; their frames
+                // still decode (reserved discriminants) and land in this closed fall-through.
                 _ => stats.undecodable += 1,
             },
         }
@@ -6487,63 +6389,21 @@ fn restate_for_own_clients(
     }
 }
 
-/// One instant's worth of entity rows on the relay lane.
-///
-/// THE INSTANT TRAVELS WITH THE ROWS, and grouping is what lets it. Every level resolves the placement it
-/// is about to add or subtract at the instant the rows were MEASURED at, not at its own clock — an orbiting
-/// realm moves between the two, and stamping a batch that arrived a tick ago with "now" would move
-/// everybody in it by the relay's own latency times the realm's speed. A shard therefore relays its own
-/// rows and each neighbour's rows as separate groups carrying separate instants, rather than flattening
-/// them into one batch under one number nobody measured anything at.
-#[derive(Clone, Debug)]
-pub struct EntityGroup {
-    pub tick: UniverseTick,
-    pub rows: Vec<EntitySnap>,
-}
-
-impl EntityGroup {
-    /// This group with every entity already accounted for removed, `seen` grown by what survives — the
-    /// group-shaped form of [`unseen_rows`], kept so the instant travels with the rows it belongs to.
-    fn without(&self, seen: &mut BTreeSet<EntityId>) -> EntityGroup {
-        EntityGroup {
-            tick: self.tick,
-            rows: unseen_rows(seen, &self.rows),
-        }
-    }
-}
-
-/// THE MERGE RULE, in one place: a row for an entity already accounted for is DROPPED, and the caller
-/// decides the order in which sources are offered — this shard's own rows first, so its own copy of an
-/// entity always wins.
-///
-/// IT IS NOT TIDINESS. Mid-crossing a shard holds a RETAINED GHOST of an entity whose authority has moved
-/// next door, and the neighbour that now owns it relays its live copy back through their shared parent. Both
-/// describe the same avatar. Shipping both puts one player in a client's feed twice at two positions, which
-/// the renderer resolves by whichever row it applied last — a visible flicker between two places, and the
-/// exact failure that would look most like a working lane. Local wins because the local copy is the one the
-/// transfer machinery is deliberately keeping alive for continuity across the hand-off, and because "prefer
-/// the row that travelled furthest" would make what a client draws depend on relay timing.
-fn unseen_rows(seen: &mut BTreeSet<EntityId>, rows: &[EntitySnap]) -> Vec<EntitySnap> {
-    rows.iter()
-        .copied()
-        .filter(|r| seen.insert(r.entity))
-        .collect()
-}
-
 /// Emit one fence-stamped frame per tick to every gateway with an attached session.
 /// No realm authority ⇒ no frames (an unowned shard is silent, never speculative).
 ///
-/// AND THIS IS WHERE THE ENTITY LANE'S TWO LEGS ARE SHIPPED, because they carry the same rows this system
-/// already computes and must not be able to disagree with them. What goes to the local clients is what this
-/// shard emits PLUS everything its neighbouring levels handed it, all measured from this shard's own
-/// centre — so a client is handed one world in one space and never has to relate two realms. What goes up
-/// is what this shard emits plus what its children relayed; what goes down is that plus what its parent
-/// handed down, minus, for each child, exactly the rows that child sent up. Nothing that came down ever
-/// goes back up. Those two rules are the whole of the loop-freedom argument; nobody counts hops.
-///
-/// The gateway list is a GUARD around the local fan-out, not an early return, for the same reason the realm
-/// cascade needed one: a middle level of a live chain usually hosts no player at all, and returning there
-/// would silence every chain of three or more levels at the first shard nobody is standing on.
+/// WHAT LEAVES HERE IS THIS SHARD'S OWN OCCUPANTS AND NOTHING ELSE (Step 5 slice E: the entity relay
+/// lane that used to merge neighbouring levels' rows into this feed — and ship this feed up and down
+/// the chain — is deleted; occupant poses no longer cross a realm boundary at steady state, SL2). At
+/// steady state a bystander sees an occupied sibling realm ITSELF as its occupants' proxy (SL7, the
+/// lawful scene lanes). During a crossing: the LEAVER'S OWN client is covered by its dual subs (the
+/// own-avatar row is exempt from the client's one-space filter and the cut flips cleanly); a
+/// BYSTANDER in the source realm gets the retained ghost's frozen fill until its band-exit Despawn,
+/// and then NOTHING — the client-side eviction that would make the leaver VANISH cleanly does not
+/// exist yet (D-4(a): tracks drop only on a reliable removal no producer emits). That eviction is
+/// slice F's leaver-vanish machinery, owner-gated (a new client-facing arm, or a staleness TTL on a
+/// deliberately reliable-only contract) — see D-4(a)'s slice E escalation note. An empty gateway
+/// list is a plain early return again: a shard with no attached session has nobody to draw for.
 #[allow(clippy::too_many_arguments)]
 fn emit_frames(
     config: Res<StubConfig>,
@@ -6552,14 +6412,6 @@ fn emit_frames(
     regions: Res<RealmRegions>,
     dots: Res<Dots>,
     mirror: Res<SourceGhostMirror>,
-    // Step 5 slice B: the direct children's SL7 bits — which of this shard's children are LIVE, and
-    // the shard to hand their level's rows down to. EMPTY at walk/static ⇒ the down-leg never fires.
-    child_liveness: Res<ChildLiveness>,
-    // The resolved parent node (from the AoI cadence HeadRead) — the up-leg's target. `None` at a chain
-    // root, or before the first parent head reply ⇒ the up-leg never fires.
-    parent: Res<ParentRealmNode>,
-    // The rows the levels either side handed this one. EMPTY ⇒ every merge below is the identity.
-    mut foreign: ResMut<ForeignEntities>,
     mut counter: ResMut<FrameCounter>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
@@ -6567,20 +6419,6 @@ fn emit_frames(
     let Some(realm_fence) = authority.0 else {
         return;
     };
-    // The unreliable lane means a neighbour that goes quiet must AGE OUT, not freeze: without this a
-    // departed traveller's avatar would stand in this realm forever, redrawn from a batch nobody is
-    // sending any more. Same TTL, same reasoning, as a retained occupant's.
-    let ttl = retain_ttl_ticks(&config);
-    foreign
-        .from_below
-        .retain(|_, b| ttl_alive(b.last_seen, clock.local_tick, ttl));
-    if !foreign
-        .from_above
-        .as_ref()
-        .is_none_or(|b| ttl_alive(b.last_seen, clock.local_tick, ttl))
-    {
-        foreign.from_above = None;
-    }
     // EMIT-eligibility is the DERIVED `simulates() | is_fed_ghost | is_retained_ghost` (1d.5b.3b):
     // an Owned dot (the authority truth) emits; ALSO a fed ghost (the dest-driven collider feed) and
     // a retained source ghost (self-emitting its last-Owned pose to fill the demote→Promote handoff)
@@ -6594,60 +6432,16 @@ fn emit_frames(
         .collect();
     gateways.sort_unstable();
     gateways.dedup();
-    // The emitted rows, every one of them measured from THIS shard's own centre — the single space every
-    // feed leaving here is in. The shard still knows nothing about where IT sits; the only arithmetic is
-    // adding where it put its own children, which is the one thing it does know.
-    let own_frame = regions.own_frame(config.realm);
-    let frames = regions.frame_context(config.realm, 1.0 / config.tick_dt_s, clock.universe_tick);
-    let own_rows = emitted_entities(&dots, &mirror, own_frame, &frames, &mut stats);
-    // Nothing of its own and nothing from anywhere else: the tick is genuinely silent and the counter must
-    // NOT advance (its only job is to order this shard's own batches). A shard with no EMITTING dot has no
-    // gateways AND no rows of its own, so at walk/static this is exactly the early return it has always
-    // been. What is new is the middle level of a live chain, which has no local player either and must
-    // NOT stop here — that is where a three-level chain used to go silent.
-    let has_foreign = !foreign.from_below.is_empty() | foreign.from_above.is_some();
-    if gateways.is_empty() & !has_foreign {
+    if gateways.is_empty() {
         return;
     }
-    // What the local clients are handed: this shard's own rows plus every row a neighbouring level gave it,
-    // all in this one space. The foreign rows are appended AFTER the local ones, so with nothing relayed
-    // the list is byte-for-byte the one this shard has always emitted.
-    //
-    // ONE ROW PER ENTITY, and WHICH copy survives is the load-bearing part. A shard mid-crossing holds a
-    // retained GHOST of an entity whose authority has moved next door, kept alive so the avatar does not
-    // vanish during the hand-off — a frozen snapshot of where it last was. Once the new owner's LIVE row
-    // reaches this shard through their shared parent, that mirror is strictly worse: it is the same avatar,
-    // at a position that has stopped moving. So a relayed row REPLACES a local mirror, and never replaces a
-    // row this shard actually simulates. Emitting both would put one player in a client's feed twice, and
-    // the renderer would pick whichever arrived last — a flicker between where they are and where they were.
-    let relayed_ids: BTreeSet<EntityId> = foreign
-        .from_above
-        .iter()
-        .chain(foreign.from_below.values())
-        .flat_map(|b| b.group.rows.iter().map(|r| r.entity))
-        .collect();
-    let superseded: BTreeSet<EntityId> = dots
-        .0
-        .values()
-        .filter(|d| emits(&mirror, d) && !d.authority.simulates())
-        .map(|d| d.entity)
-        .filter(|e| relayed_ids.contains(e))
-        .collect();
-    let mut seen: BTreeSet<EntityId> = BTreeSet::new();
-    let mut entities: Vec<EntitySnap> = own_rows
-        .iter()
-        .copied()
-        .filter(|r| !superseded.contains(&r.entity))
-        .inspect(|r| {
-            seen.insert(r.entity);
-        })
-        .collect();
-    if let Some(batch) = &foreign.from_above {
-        entities.extend(unseen_rows(&mut seen, &batch.group.rows));
-    }
-    for batch in foreign.from_below.values() {
-        entities.extend(unseen_rows(&mut seen, &batch.group.rows));
-    }
+    // The emitted rows, every one of them measured from THIS shard's own centre — the single space every
+    // feed leaving here is in. The shard still knows nothing about where IT sits. A row whose pose label
+    // cannot be restated into this frame is counted (`entity_rows_foreign_labelled` — the ghost feed's
+    // foreign write, the §4u corruption slice F deletes) rather than hidden.
+    let own_frame = regions.own_frame(config.realm);
+    let frames = regions.frame_context(config.realm, 1.0 / config.tick_dt_s, clock.universe_tick);
+    let entities = emitted_entities(&dots, &mirror, own_frame, &frames, &mut stats);
     // Partition BY CONTENT so no datagram exceeds the MTU budget (audit GW-1): a
     // full-world snapshot ships as several independent self-contained frames. Per
     // connection_plane.md §6.3 EVERY chunk of one tick carries the SAME frame_id +
@@ -6657,184 +6451,34 @@ fn emit_frames(
     // tick. The shared partitioner is the ONE place every shard type does this.
     let frame_id = counter.0;
     counter.0 += 1;
-    if !gateways.is_empty() {
-        for chunk in partition_entities(&entities, config.snapshot_datagram_budget) {
-            let snapshot = SnapshotDatagram {
-                // The shard always stamps sub 0; the gateway re-tags per session.
-                sub: SubId(0),
-                frame_id,
-                source_tick: clock.local_tick,
-                universe_tick: clock.universe_tick,
-                entities: chunk,
-            };
-            let snapshot_bytes =
-                postcard::to_allocvec(&snapshot).expect("closed wire enums serialize infallibly");
-            let frame = ShardToGateway::Frame {
-                realm_fence,
-                source_tick: clock.local_tick,
-                snapshot_bytes,
-            };
-            // ONE shared body per chunk, cloned (refcount bump) to every subscribing
-            // gateway — never an O(entities) copy per gateway (SCALE-1).
-            let bytes = crate::io::bytes(
-                postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
-            );
-            for &gateway in &gateways {
-                outbox.0.push((
-                    gateway,
-                    MsgClass::Snapshot,
-                    bytes.clone(),
-                    Durability::Ephemeral,
-                ));
-            }
-        }
-    }
-    // WHAT THIS SHARD RELAYS IS WHAT IT IS THE AUTHORITY FOR, and nothing else. A ghost mirror — fed or
-    // retained — is a copy of an entity somebody else owns, kept for local continuity; the shard that owns
-    // it relays its own live copy, so passing the mirror on as well would put a stale second answer into
-    // the world with no way for a receiver to tell which is which.
-    //
-    // Restated into this shard's own frame by the SAME rule the local fan-out uses, so the two lanes
-    // cannot come to disagree about which space a row is in. Without it an occupant standing in a child
-    // realm this shard also hosts was silently unspeakable — the relay's own-frame filter dropped it — and
-    // the level above never heard about a player who is plainly here.
-    let authored: Vec<EntitySnap> = dots
-        .0
-        .values()
-        .filter(|d| d.authority.simulates())
-        .map(|d| EntitySnap {
-            entity: d.entity,
-            pose: restate_for_own_clients(d.pose, own_frame, &frames, &mut stats),
-        })
-        .collect();
-    relay_entity_chain(
-        &config,
-        &clock,
-        &regions,
-        &child_liveness,
-        parent.0,
-        &foreign,
-        &authored,
-        frame_id,
-        &mut stats,
-        &mut outbox,
-    );
-}
-
-/// THE ENTITY LANE'S TWO LEGS, shipped from the rows [`emit_frames`] just computed.
-///
-/// UP: what this shard AUTHORS (its own emitted rows, in its own frame) plus what its CHILDREN relayed to
-/// it. Addressed to the parent, tagged with this shard's own coord — which the parent reads as the origin,
-/// so it can add the placement it authored for this shard and can avoid handing the batch straight back.
-///
-/// DOWN, per ACTIVE child: this shard's own rows, plus what its PARENT handed down, plus what its OTHER
-/// children relayed up — restated from that child's centre by subtracting the placement this shard
-/// authored for it. The child it came from is excluded, which is the second half of loop-freedom.
-///
-/// A ROW THIS SHARD CANNOT SPEAK FOR NEVER CLIMBS. A fed ghost's pose is authored by the neighbour that
-/// owns the entity, measured from THAT neighbour's centre and labelled with its frame; this shard has no
-/// idea where that neighbour is and must not restamp the label. It is counted and left where it is — and
-/// nothing is lost by that, because the shard that DOES own the entity relays its own copy up itself.
-#[allow(clippy::too_many_arguments)]
-fn relay_entity_chain(
-    config: &StubConfig,
-    clock: &ClockSample,
-    regions: &RealmRegions,
-    live: &ChildLiveness,
-    parent_node: Option<NodeId>,
-    foreign: &ForeignEntities,
-    own_rows: &[EntitySnap],
-    frame_id: u64,
-    stats: &mut StubStats,
-    outbox: &mut OutboundBox,
-) {
-    let tick_hz = 1.0 / config.tick_dt_s;
-    // NOWHERE TO SEND ⇒ NOTHING TO COMPUTE, and this guard is what keeps the whole lane inert on a shard
-    // with no live chain around it: no resolved parent above, no live child below. At walk/static both
-    // are structurally absent (the AoI bands are inert, so no parent is ever resolved and no bit is
-    // ever heartbeated), so not one number below is computed and not one counter moves.
-    let children = active_children(config, regions, live, tick_hz, clock.universe_tick);
-    let up = config.own_coord.parent().is_some() & parent_node.is_some();
-    if !up & children.is_empty() {
-        return;
-    }
-    let own_frame = regions.own_frame(config.realm);
-    // The rows this shard may SPEAK FOR: the ones measured from its own centre. Everything else it merely
-    // forwards to its own clients wearing the label it arrived with.
-    let speakable: Vec<EntitySnap> = own_rows
-        .iter()
-        .copied()
-        .filter(|r| r.pose.frame == own_frame)
-        .collect();
-    stats.entity_rows_foreign_labelled += (own_rows.len() - speakable.len()) as u64;
-    let own_group = EntityGroup {
-        tick: clock.universe_tick,
-        rows: speakable,
-    };
-    let own_ids: BTreeSet<EntityId> = own_group.rows.iter().map(|r| r.entity).collect();
-
-    // THE UP-LEG. It runs exactly as far as a parent coord and a resolved parent node exist, which is
-    // exactly as far as the players' area of interest spun realms up. No depth constant, no hop count.
-    if let Some(parent) = parent_node.filter(|_| up) {
-        let mut seen = own_ids.clone();
-        let mut groups = vec![own_group.clone()];
-        for b in foreign.from_below.values() {
-            groups.push(b.group.without(&mut seen));
-        }
-        for group in groups.iter().filter(|g| !g.rows.is_empty()) {
-            // The routing key on the way UP is THIS shard's OWN coord — the origin tag the parent reads
-            // to know whose placement to add and which child never to hand this batch back to.
-            push_entity_relay(
-                outbox,
-                parent,
-                true,
-                &config.own_coord,
-                own_frame,
-                frame_id,
-                group,
-                config.snapshot_datagram_budget,
-                stats,
-            );
-        }
-    }
-    // THE DOWN-LEG, one message per instant per active child.
-    for child in children {
-        let mut seen = own_ids.clone();
-        let mut groups = vec![own_group.clone()];
-        if let Some(b) = &foreign.from_above {
-            groups.push(b.group.without(&mut seen));
-        }
-        for (origin, b) in &foreign.from_below {
-            // NEVER back to the child it came from. This one equality is what stops a batch ping-ponging
-            // between two levels forever, and it is why the up-leg carries an origin tag at all.
-            if *origin != child.frame {
-                groups.push(b.group.without(&mut seen));
-            }
-        }
-        for group in groups.iter().filter(|g| !g.rows.is_empty()) {
-            // The placement is resolved at THE GROUP'S instant, not this shard's clock — see
-            // [`EntityGroup`]. One solve per group per child; `transfer_frame` would otherwise re-derive
-            // an orbiting child's position twice per row. The resolve is a stated INVARIANT, not a
-            // fallible lookup: `child` came out of `active_children`, which reads the SAME roster
-            // `hop_to_child` consults, and a roster child's placement resolves at every instant (a
-            // mover's ephemeris is total; a static's centre is constant).
-            let hop = hop_to_child(config, regions, own_frame, child.frame, tick_hz, group.tick)
-                .expect("an active child's frame resolves on the roster that produced it");
-            let rows = restate_entities(&group.rows, child.frame, &hop, stats);
-            push_entity_relay(
-                outbox,
-                child.home,
-                false,
-                &child.coord,
-                child.frame,
-                frame_id,
-                &EntityGroup {
-                    tick: group.tick,
-                    rows,
-                },
-                config.snapshot_datagram_budget,
-                stats,
-            );
+    for chunk in partition_entities(&entities, config.snapshot_datagram_budget) {
+        let snapshot = SnapshotDatagram {
+            // The shard always stamps sub 0; the gateway re-tags per session.
+            sub: SubId(0),
+            frame_id,
+            source_tick: clock.local_tick,
+            universe_tick: clock.universe_tick,
+            entities: chunk,
+        };
+        let snapshot_bytes =
+            postcard::to_allocvec(&snapshot).expect("closed wire enums serialize infallibly");
+        let frame = ShardToGateway::Frame {
+            realm_fence,
+            source_tick: clock.local_tick,
+            snapshot_bytes,
+        };
+        // ONE shared body per chunk, cloned (refcount bump) to every subscribing
+        // gateway — never an O(entities) copy per gateway (SCALE-1).
+        let bytes = crate::io::bytes(
+            postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
+        );
+        for &gateway in &gateways {
+            outbox.0.push((
+                gateway,
+                MsgClass::Snapshot,
+                bytes.clone(),
+                Durability::Ephemeral,
+            ));
         }
     }
 }
@@ -8062,7 +7706,7 @@ fn shape_hop_to(
 }
 
 /// THE ONE HOP RESOLVER: the conversion context for one direct child of this shard, at one instant. Both
-/// down-chain lanes and the entity lane's up-leg go through it, so "where this shard put that child" is one
+/// down-chain scene lanes go through it (the entity lane's legs died with it in slice E), so "where this shard put that child" is one
 /// expression however many lanes need it — two expressions of that is how the pose lane and the outline
 /// lane drifted apart before.
 ///
@@ -8090,204 +7734,6 @@ fn hop_to_child(
         child,
         child_at: at,
     })
-}
-
-/// THE ENTITY LANE'S UP-LEG RECEIVE: a direct child relayed the entities it draws, measured from ITS centre.
-/// This shard authored where that child sits, so this shard — and nobody else in the world — can restate
-/// them from its own centre, which is what it does here, once, on arrival.
-///
-/// Restating on ARRIVAL rather than at each use is deliberate: the placement to add is a function of the
-/// batch's own instant, and that instant is on the message. Deferring the arithmetic to send time would
-/// make it read a moving child's position at whatever clock the sender happened to run at.
-///
-/// Two refusals, both counted, neither guessed at. A batch whose sender is not one of this shard's children
-/// is mis-routed (a recycled node id across a hand-off) and is dropped whole. A batch older than the one
-/// already held from that same child is a reordered datagram on an unreliable lane and is dropped whole;
-/// the SAME number is another MTU chunk of the same tick and accumulates.
-fn on_entity_interest(
-    er: EntityRelay,
-    config: &StubConfig,
-    regions: &RealmRegions,
-    now: TickId,
-    foreign: &mut ForeignEntities,
-    stats: &mut StubStats,
-) {
-    // The sender names its OWN realm; it is one of ours only if its parent is us. One compare, on the same
-    // `lowered()` key the directory and `retain_child_live` use.
-    if er.realm.parent().map(|p| p.lowered()) != Some(config.own_coord.lowered()) {
-        stats.misrouted_entity_relay += 1;
-        return;
-    }
-    let tick_hz = 1.0 / config.tick_dt_s;
-    let own = regions.own_frame(config.realm);
-    let Some(hop) = hop_to_child(config, regions, own, er.frame, tick_hz, er.universe_tick) else {
-        // The coord says child, the geometry says this shard holds no such child. Nothing to add, so
-        // nothing may be said about where these entities are.
-        stats.entity_rows_dropped += er.entities.len() as u64;
-        return;
-    };
-    let held = foreign.from_below.get(&er.frame);
-    if held.is_some_and(|b| b.frame_id > er.frame_id) {
-        stats.entity_relay_stale += 1;
-        return;
-    }
-    stats.entity_interest_received += 1;
-    let same_frame = held.is_some_and(|b| b.frame_id == er.frame_id);
-    let lifted = restate_entities(&er.entities, hop.own, &hop, stats);
-    let batch = foreign
-        .from_below
-        .entry(er.frame)
-        .or_insert_with(|| empty_batch(er.frame_id, er.universe_tick, now));
-    apply_batch(
-        batch,
-        same_frame,
-        er.frame_id,
-        er.universe_tick,
-        now,
-        lifted,
-    );
-}
-
-/// THE ENTITY LANE'S DOWN-LEG RECEIVE: the parent handed down the entities of the levels around this one,
-/// ALREADY measured from this shard's own centre — it authored where this shard sits and did that
-/// subtraction itself. So this arm computes nothing at all; it validates the address and stores.
-///
-/// That "computes nothing" is structural, not a promise: there is no conversion in this function to get
-/// wrong. It is the same shape as a leaf on the realm cascade, and it is what makes the party at the bottom
-/// of a chain measurably a leaf rather than argued to be one.
-fn on_entity_cascade(
-    er: EntityRelay,
-    config: &StubConfig,
-    now: TickId,
-    foreign: &mut ForeignEntities,
-    stats: &mut StubStats,
-) {
-    if er.realm.lowered() != config.own_coord.lowered() {
-        stats.misrouted_entity_relay += 1;
-        return;
-    }
-    let held = foreign.from_above.as_ref();
-    if held.is_some_and(|b| b.frame_id > er.frame_id) {
-        stats.entity_relay_stale += 1;
-        return;
-    }
-    stats.entity_cascade_received += 1;
-    let same_frame = held.is_some_and(|b| b.frame_id == er.frame_id);
-    let batch = foreign
-        .from_above
-        .get_or_insert_with(|| empty_batch(er.frame_id, er.universe_tick, now));
-    apply_batch(
-        batch,
-        same_frame,
-        er.frame_id,
-        er.universe_tick,
-        now,
-        er.entities,
-    );
-}
-
-/// An empty slot for a neighbour heard from for the first time — filled by [`apply_batch`] immediately
-/// after, so the two together are one "insert or update" with the branching in one monomorphic place (HR5).
-fn empty_batch(frame_id: u64, tick: UniverseTick, now: TickId) -> ForeignEntityBatch {
-    ForeignEntityBatch {
-        frame_id,
-        last_seen: now,
-        group: EntityGroup {
-            tick,
-            rows: Vec::new(),
-        },
-    }
-}
-
-/// The adopt, shared by both legs so "a newer batch replaces, the same batch accumulates" has ONE
-/// expression and the two directions cannot drift on it. A new `frame_id` REPLACES the rows outright (it is
-/// a whole new tick's worth from that neighbour); the SAME one APPENDS, because a batch too big for one
-/// datagram arrives as several MTU chunks that are all one tick. Monomorphic (all branching here, HR5).
-fn apply_batch(
-    batch: &mut ForeignEntityBatch,
-    same_frame: bool,
-    frame_id: u64,
-    tick: UniverseTick,
-    now: TickId,
-    mut rows: Vec<EntitySnap>,
-) {
-    if same_frame {
-        batch.group.rows.append(&mut rows);
-    } else {
-        batch.group.rows = rows;
-    }
-    batch.frame_id = frame_id;
-    batch.group.tick = tick;
-    batch.last_seen = now;
-}
-
-/// Ship one group as one leg of the entity lane, MTU-partitioned by the SAME partitioner the client
-/// snapshot uses (audit GW-1) — a relayed feed is exactly as budget-bound as a direct one.
-///
-/// `up` picks the arm and nothing else: both legs carry the identical payload, and the direction is
-/// expressed in the type rather than in a field, so a batch can never be sent back the way it came by
-/// getting a boolean wrong on the wire. `realm` is this shard's own coord going up (the origin tag) and the
-/// recipient child's coming down (the mis-route guard).
-#[allow(clippy::too_many_arguments)]
-fn push_entity_relay(
-    outbox: &mut OutboundBox,
-    to: NodeId,
-    up: bool,
-    realm: &RealmCoord,
-    frame: FrameRef,
-    frame_id: u64,
-    group: &EntityGroup,
-    budget: usize,
-    stats: &mut StubStats,
-) {
-    for chunk in partition_entities(&group.rows, budget) {
-        let relay = EntityRelay {
-            realm: realm.clone(),
-            frame,
-            frame_id,
-            universe_tick: group.tick,
-            entities: chunk,
-        };
-        let flow = if up {
-            stats.entity_relays_sent_up += 1;
-            InterShardFlow::EntityInterest(relay)
-        } else {
-            stats.entity_relays_sent_down += 1;
-            InterShardFlow::EntityCascade(relay)
-        };
-        outbox.push_flow(to, MsgClass::SignalDelta, &flow);
-    }
-}
-
-/// THE LEVEL'S OWN ADDITION OR SUBTRACTION ON THE ENTITY LANE: restate every row into `into`, through the
-/// one-hop context `hop`. The exact twin of [`restate_rows_in_child_frame`] (realm poses) and
-/// [`restate_shapes_in_child_frame`] (outlines), and it runs BOTH ways: pass the shard's own frame to lift a
-/// child's rows up, pass the child's frame to push rows down. The direction is which frame you ask for; the
-/// arithmetic and the degrade rule are one piece of code either way.
-///
-/// DEGRADE LOUD: a row that cannot be restated is DROPPED and COUNTED. Shipping it on would mean a number
-/// measured from one centre travelling under a label that says another, which is the one failure mode this
-/// whole lane exists to make impossible.
-fn restate_entities(
-    rows: &[EntitySnap],
-    into: FrameRef,
-    hop: &ChildFrame,
-    stats: &mut StubStats,
-) -> Vec<EntitySnap> {
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        match transfer_frame(&row.pose, into, hop) {
-            Ok(pose) => {
-                stats.entity_rows_restated += 1;
-                out.push(EntitySnap {
-                    entity: row.entity,
-                    pose,
-                });
-            }
-            Err(_) => stats.entity_rows_dropped += 1,
-        }
-    }
-    out
 }
 
 /// THE LEVEL'S OWN SUBTRACTION ON THE SHAPE LANE: restate every outline in ONE direct child's frame.
@@ -14840,88 +14286,15 @@ mod tests {
         );
     }
 
-    // ---- Slice 5: the cross-realm ENTITY lane ---------------------------------------------------
-
-    /// THE ORIGIN TAG DOING ITS JOB, on a shard with TWO active children — the shape the crossing has, and
-    /// the only shape in which the rule can be observed at all. Rows relayed up by one child are restated
-    /// for the OTHER child and handed down; they are NEVER handed back to the child that sent them, which
-    /// is what keeps a batch from bouncing between two levels forever at 20 Hz.
-    #[test]
-    fn an_up_relayed_batch_reaches_the_sibling_and_never_returns_to_the_child_it_came_from() {
-        const HOME_A: NodeId = NodeId(77);
-        const HOME_B: NodeId = NodeId(78);
-        const A_AT: DVec3 = DVec3::new(30.0, -12.0, 4.0);
-        const B_AT: DVec3 = DVec3::new(-5.0, 6.0, 1.0);
-        const OCCUPANT_IN_A: DVec3 = DVec3::new(1.0, 2.0, 3.0);
-        const UP_FRAME_ID: u64 = 4242;
-
-        let entity = EntityId::pack(EntityKind::Player, 10, 3, 3);
-        let mut rig = Rig::new();
-        rig.grant_realm();
-        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
-            root_region(),
-            own_region(),
-            region(OTHER_REALM, Some(OWN_REALM), A_AT, 1000.0),
-            region(SIBLING_REALM, Some(OWN_REALM), B_AT, 1000.0),
-        ]);
-        // Both children are LIVE (a fresh bit from each — Step 5 slice B: the bit is the activity
-        // marker), which is exactly what a shard sees while a player is crossing between two of them.
-        for (realm, home) in [(OTHER_REALM, HOME_A), (SIBLING_REALM, HOME_B)] {
-            rig.world.resource_mut::<ChildLiveness>().0.insert(
-                realm,
-                ChildLiveEntry {
-                    home,
-                    fence: Fence(1),
-                    at: UniverseTick(1),
-                    last_seen: vd_core::TickId(1),
-                },
-            );
-        }
-        let a_coord = with_child_coord(&mut rig, OTHER_REALM);
-        let up = wire_msg(
-            HOME_A,
-            MsgClass::SignalDelta,
-            &InterShardFlow::EntityInterest(EntityRelay {
-                realm: a_coord,
-                frame: frame_of(OTHER_REALM),
-                frame_id: UP_FRAME_ID,
-                universe_tick: UniverseTick(1),
-                entities: vec![EntitySnap {
-                    entity,
-                    pose: StampedPose::at_rest(
-                        frame_of(OTHER_REALM),
-                        OCCUPANT_IN_A,
-                        UniverseTick(1),
-                    ),
-                }],
-            }),
-        );
-
-        let down = entity_cascades(&rig.tick(vec![up]));
-        assert_eq!(
-            down.iter().filter(|(to, _)| *to == HOME_A).count(),
-            0,
-            "NEVER back to the child it came from — an echo here is a two-level ping-pong that costs \
-             bandwidth forever and shows up nowhere but a byte counter",
-        );
-        let to_b: Vec<_> = down.iter().filter(|(to, _)| *to == HOME_B).collect();
-        assert_eq!(to_b.len(), 1, "one batch, to the sibling: {down:?}");
-        let er = &to_b[0].1;
-        assert_eq!(er.frame, frame_of(SIBLING_REALM));
-        assert_eq!(er.entities.len(), 1);
-        assert_eq!(
-            er.entities[0].pose.pos.offset(),
-            A_AT + OCCUPANT_IN_A - B_AT,
-            "THE SHARED PARENT'S WHOLE JOB: it ADDS where it put the child the occupant came from and \
-             SUBTRACTS where it put the child it is shipping to. Nobody else in the world holds both \
-             numbers, which is why this cannot be done anywhere downstream.",
-        );
-        assert_eq!(er.entities[0].pose.frame, frame_of(SIBLING_REALM));
-        // AND NOTHING CLIMBS FROM HERE, because this rig never resolved a parent node — which is the same
-        // structural reason the whole lane stays silent on any shard with no live chain above it. Stated as
-        // a measurement so the down-leg assertions above cannot be quietly reading an up-leg.
-        assert!(entity_relays_up(&rig.tick(vec![])).is_empty());
-    }
+    // ---- Slice 5 → Step 5 slice E: the cross-realm ENTITY lane is DEAD -------------------------
+    // The unit tests of the deleted relay (origin-tag loop-freedom, lift-on-arrival, staleness,
+    // mis-route, TTL age-out, from-above duties) died with the machinery. THREE tests that lived in
+    // this section pinned SURVIVING machinery and are RESTORED below (the first sweep took them too
+    // — coverage and the adversarial review both caught it): the up-lane wire dispatch, the
+    // observed-interior fan/up-recursion, and the unplaceable-observer refusal. What remains to pin
+    // beyond those: a tombstoned frame on the carrier is COUNTED, and the client-edge emit ships
+    // OWN rows only (the emit tests above). SL2's steady state — no occupant pose crossing a realm
+    // boundary — is measured at the scenario tier (`frame_conversion_e2e`), where the chain runs.
 
     /// The routing key of the child a test wants to address, built the way the shard itself builds it.
     fn with_child_coord(rig: &mut Rig, child: RealmId) -> RealmCoord {
@@ -14934,240 +14307,11 @@ mod tests {
         config.own_coord.child(region_level(region))
     }
 
-    /// The entity-lane DOWN batches a tick put on the wire, with their destination.
-    fn entity_cascades(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<(NodeId, EntityRelay)> {
-        sent.iter()
-            .filter_map(
-                |(to, _class, b)| match postcard::from_bytes::<InterShardFlow>(b) {
-                    Ok(InterShardFlow::EntityCascade(er)) => Some((*to, er)),
-                    _ => None,
-                },
-            )
-            .collect()
-    }
-
-    /// The entity-lane UP batches a tick put on the wire, with their destination.
-    fn entity_relays_up(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<(NodeId, EntityRelay)> {
-        sent.iter()
-            .filter_map(
-                |(to, _class, b)| match postcard::from_bytes::<InterShardFlow>(b) {
-                    Ok(InterShardFlow::EntityInterest(er)) => Some((*to, er)),
-                    _ => None,
-                },
-            )
-            .collect()
-    }
-
-    /// One entity row for the from-above fixtures, at `at` in this shard's OWN frame.
-    fn own_frame_row(tag: u32, at: DVec3) -> EntitySnap {
-        EntitySnap {
-            entity: EntityId::pack(EntityKind::Player, 10, 4, tag),
-            pose: StampedPose::at_rest(frame_of(OWN_REALM), at, UniverseTick(1)),
-        }
-    }
-
-    #[test]
-    fn on_entity_cascade_applies_replaces_appends_rejects_stale_and_misroutes() {
-        // THE DOWN-LEG RECEIVE, every arm: a fresh batch is held; the SAME frame_id accumulates (one
-        // tick split over MTU chunks); a NEWER one replaces; an OLDER one is refused as stale; and a
-        // batch addressed to some other realm is refused as mis-routed. The receive computes nothing
-        // — the rows are stored exactly as handed (the leaf property, measured).
-        let cfg = config();
-        let mut foreign = ForeignEntities::default();
-        let mut stats = StubStats::default();
-        let er = |frame_id: u64, tag: u32| EntityRelay {
-            realm: StubConfig::root_coord(OWN_REALM),
-            frame: frame_of(OWN_REALM),
-            frame_id,
-            universe_tick: UniverseTick(1),
-            entities: vec![own_frame_row(tag, DVec3::new(1.0, 0.0, 0.0))],
-        };
-        on_entity_cascade(er(5, 1), &cfg, vd_core::TickId(1), &mut foreign, &mut stats);
-        assert_eq!(stats.entity_cascade_received, 1);
-        assert_eq!(
-            foreign.from_above.as_ref().map(|b| b.group.rows.len()),
-            Some(1)
-        );
-        // SAME frame_id ⇒ another MTU chunk of the same tick ⇒ APPEND.
-        on_entity_cascade(er(5, 2), &cfg, vd_core::TickId(2), &mut foreign, &mut stats);
-        assert_eq!(
-            foreign.from_above.as_ref().map(|b| b.group.rows.len()),
-            Some(2)
-        );
-        // NEWER frame_id ⇒ a whole new tick from that neighbour ⇒ REPLACE.
-        on_entity_cascade(er(6, 3), &cfg, vd_core::TickId(3), &mut foreign, &mut stats);
-        assert_eq!(
-            foreign.from_above.as_ref().map(|b| b.group.rows.len()),
-            Some(1)
-        );
-        // OLDER frame_id ⇒ a reordered datagram ⇒ refused, nothing changes.
-        on_entity_cascade(er(4, 4), &cfg, vd_core::TickId(4), &mut foreign, &mut stats);
-        assert_eq!(stats.entity_relay_stale, 1);
-        assert_eq!(foreign.from_above.as_ref().map(|b| b.frame_id), Some(6));
-        // MIS-ROUTE ⇒ refused counted, held batch untouched.
-        let mis = EntityRelay {
-            realm: StubConfig::root_coord(RealmId::Planet(42)),
-            ..er(9, 5)
-        };
-        on_entity_cascade(mis, &cfg, vd_core::TickId(5), &mut foreign, &mut stats);
-        assert_eq!(stats.misrouted_entity_relay, 1);
-        assert_eq!(foreign.from_above.as_ref().map(|b| b.frame_id), Some(6));
-    }
-
-    #[test]
-    fn an_up_relay_for_an_unrostered_child_frame_drops_the_rows_counted() {
-        // The coord says "your child", the roster holds no such child (a spin-up/teardown race):
-        // there is no placement to add, so nothing may be said about where these entities are.
-        let mut rig = Rig::new();
-        rig.grant_realm();
-        *rig.world.resource_mut::<RealmRegions>() =
-            RealmRegions::new(vec![root_region(), own_region(), child_region()]);
-        let cfg = rig.world.resource::<StubConfig>().clone();
-        let phantom = cfg
-            .own_coord
-            .child(level_of(RealmId::Planet(999)).expect("planet level"));
-        let up = EntityRelay {
-            realm: phantom,
-            frame: frame_of(RealmId::Planet(999)),
-            frame_id: 1,
-            universe_tick: UniverseTick(1),
-            entities: vec![own_frame_row(1, DVec3::ZERO)],
-        };
-        let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()]);
-        let mut foreign = ForeignEntities::default();
-        let mut stats = StubStats::default();
-        on_entity_interest(
-            up,
-            &cfg,
-            &regions,
-            vd_core::TickId(1),
-            &mut foreign,
-            &mut stats,
-        );
-        assert_eq!(stats.entity_rows_dropped, 1);
-        assert!(foreign.from_below.is_empty(), "nothing was held");
-    }
-
-    #[test]
-    fn a_from_above_entity_batch_joins_the_local_emit_descends_to_a_live_child_and_expires() {
-        // The from-above holding's three duties, measured on one rig: its rows JOIN this shard's own
-        // client emit (a bystander from one level up is drawable here); they DESCEND into a live
-        // child's cascade (never back up); and the batch EXPIRES on the TTL once the parent goes
-        // quiet, so a stale avatar cannot freeze on screen forever.
-        const HOME: NodeId = NodeId(77);
-        // A PARENTED lineage (the default rig's coord is a root, and a root has no up-leg).
-        let own_coord = vd_core::realm_coord::RealmCoord::from_path(
-            vd_core::realm_path::RealmPath::from_levels(vec![
-                vd_core::realm_path::RealmLevel::new(vd_core::realm_path::RealmKindTag::Galaxy, 1),
-                vd_core::realm_path::RealmLevel::new(vd_core::realm_path::RealmKindTag::System, 7),
-            ]),
-        )
-        .expect("two-level path");
-        let mut rig = Rig::with_config(StubConfig {
-            own_coord,
-            ..config()
-        });
-        rig.grant_realm();
-        *rig.world.resource_mut::<RealmRegions>() =
-            RealmRegions::new(vec![root_region(), own_region(), child_region()]);
-        // A live child (the bit) so the down-leg has somewhere to go, and a resolved parent so the
-        // up-leg runs (from_below + own climb; from_above NEVER climbs back).
-        rig.world.resource_mut::<ChildLiveness>().0.insert(
-            OTHER_REALM,
-            ChildLiveEntry {
-                home: HOME,
-                fence: Fence(1),
-                at: UniverseTick(1),
-                last_seen: vd_core::TickId(1),
-            },
-        );
-        rig.world.resource_mut::<ParentRealmNode>().0 = Some(NodeId(40));
-        // A local dot so the emit fan has a route.
-        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO);
-        // The from-above batch, injected as held (its receive arm is covered above).
-        let stranger = own_frame_row(9, DVec3::new(3.0, 0.0, 0.0));
-        rig.world.resource_mut::<ForeignEntities>().from_above = Some(ForeignEntityBatch {
-            frame_id: 7,
-            last_seen: vd_core::TickId(1),
-            group: EntityGroup {
-                tick: UniverseTick(1),
-                rows: vec![stranger],
-            },
-        });
-        // And a batch from BELOW (already lifted into this frame at its receive): it climbs beside
-        // the own rows, and never descends back to the child it came from.
-        let climber = own_frame_row(11, DVec3::new(4.0, 0.0, 0.0));
-        rig.world
-            .resource_mut::<ForeignEntities>()
-            .from_below
-            .insert(
-                frame_of(OTHER_REALM),
-                ForeignEntityBatch {
-                    frame_id: 3,
-                    last_seen: vd_core::TickId(1),
-                    group: EntityGroup {
-                        tick: UniverseTick(1),
-                        rows: vec![climber],
-                    },
-                },
-            );
-        let sent = rig.tick(vec![]);
-        // (1) The stranger joins the local snapshot emit.
-        let snapshot_rows: Vec<EntityId> = decode_frames(&sent)
-            .into_iter()
-            .flat_map(|s| s.entities.into_iter().map(|e| e.entity))
-            .collect();
-        assert!(
-            snapshot_rows.contains(&stranger.entity),
-            "the from-above row joins the local emit: {snapshot_rows:?}"
-        );
-        // (2) ...and descends to the live child, restated in ITS frame. Groups keep their origin
-        // separation on the wire (the local dot's own group and the from-above group ship as two
-        // batches), so the assertion is on the union, not the message count.
-        let down = entity_cascades(&sent);
-        assert!(
-            down.iter().all(|(to, _)| *to == HOME),
-            "every descent goes to the live child: {down:?}"
-        );
-        assert!(
-            down.iter()
-                .flat_map(|(_, er)| er.entities.iter())
-                .any(|e| e.entity == stranger.entity),
-            "the stranger's row keeps descending"
-        );
-        // (3) The UP-leg carries the local dot's own row — and NEVER the from-above stranger (what
-        // came down may keep descending, but must not climb back and ping-pong at 20 Hz).
-        let own_entity = rig.world.resource::<Dots>().0[&SESSION].entity;
-        let climbed: Vec<EntityId> = entity_relays_up(&sent)
-            .into_iter()
-            .flat_map(|(_, er)| er.entities.into_iter().map(|e| e.entity))
-            .collect();
-        assert!(
-            climbed.contains(&own_entity),
-            "the local dot's row climbs: {climbed:?}"
-        );
-        assert!(
-            climbed.contains(&climber.entity),
-            "what came UP from below keeps climbing beside the own rows"
-        );
-        assert!(
-            !climbed.contains(&stranger.entity),
-            "what came down never climbs back"
-        );
-        // (4) TTL: the parent goes quiet ⇒ the held batch expires and the stranger vanishes.
-        let ttl = retain_ttl_ticks(rig.world.resource::<StubConfig>());
-        let now = rig.world.resource::<ClockSample>().local_tick.0;
-        rig.set_local_tick(now + ttl + 1);
-        let _ = rig.tick(vec![]);
-        assert!(
-            rig.world.resource::<ForeignEntities>().from_above.is_none(),
-            "the from-above batch expires with its silence"
-        );
-    }
-
     /// The up-observation lane's ROWS half, at its emit: a held interior batch FANS to every local
     /// emitting dot's gateway (the exited-system cure), RELAYS one hop further up (the recursion),
     /// and the shard's OWN authored rows ship up too — while a stale batch prunes on the TTL first.
+    /// (Restored after slice E: it pinned SURVIVING realm-lane machinery but lived in the deleted
+    /// entity-lane test section — coverage caught the strand.)
     #[test]
     fn emit_realm_frames_fans_held_interiors_and_ships_own_rows_up() {
         const PARENT: NodeId = NodeId(40);
@@ -15347,106 +14491,39 @@ mod tests {
         );
     }
 
-    /// BOTH REFUSALS ON THE ENTITY LANE, and both are refusals rather than guesses. A batch climbing from
-    /// a realm that is not one of this shard's children was mis-delivered (a recycled node id across a
-    /// hand-off); a batch handed down addressed to some other realm likewise. Neither is placed at an
-    /// assumed origin — they are dropped whole and counted.
+    /// A TOMBSTONED entity-lane frame (either leg) arriving on the SignalDelta carrier is counted
+    /// undecodable, never applied and never a panic — the discriminants are reserved forever, their
+    /// meaning is gone (Step 5 slice E). Measured per carrier: both legs rode SignalDelta, whose
+    /// closed fall-through is the counting arm (the slice D lesson — never assert a tombstone's
+    /// receiver behaviour without driving its actual dispatch).
     #[test]
-    fn a_misaddressed_entity_batch_is_refused_on_either_leg_and_counted() {
+    fn a_tombstoned_entity_lane_frame_is_counted_undecodable_on_both_legs() {
         let mut rig = Rig::new();
         rig.grant_realm();
-        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
-            root_region(),
-            own_region(),
-            region(
-                OTHER_REALM,
-                Some(OWN_REALM),
-                DVec3::new(3.0, 0.0, 0.0),
-                1000.0,
-            ),
-        ]);
-        let stranger = RealmCoord::from_path(vd_core::realm_path::RealmPath::from_levels(vec![
-            vd_core::realm_path::RealmLevel::new(vd_core::realm_path::RealmKindTag::Universe, 0),
-            vd_core::realm_path::RealmLevel::new(vd_core::realm_path::RealmKindTag::System, 55),
-        ]))
-        .expect("2-level path has a leaf");
-        let batch = |flow: InterShardFlow| wire_msg(NodeId(77), MsgClass::SignalDelta, &flow);
-        let relay = EntityRelay {
-            realm: stranger,
-            frame: frame_of(OTHER_REALM),
+        let relay = vd_wire::intershard::EntityRelay {
+            realm: StubConfig::root_coord(OWN_REALM),
+            frame: config().frame,
             frame_id: 1,
             universe_tick: UniverseTick(1),
-            entities: Vec::new(),
+            entities: vec![],
         };
-        let _ = rig.tick(vec![
-            batch(InterShardFlow::EntityInterest(relay.clone())),
-            batch(InterShardFlow::EntityCascade(relay)),
-        ]);
-        assert_eq!(
-            rig.world.resource::<StubStats>().misrouted_entity_relay,
-            2,
-            "one refusal per leg — the up-leg's sender is nobody's child here, the down-leg's key names \
-             a realm this shard does not hold",
-        );
-        assert!(
-            rig.world
-                .resource::<ForeignEntities>()
-                .from_below
-                .is_empty()
-        );
-        assert!(rig.world.resource::<ForeignEntities>().from_above.is_none());
-    }
-
-    /// THE LATEST-WINS GATE on an unreliable lane, both arms. A batch with a NEWER number from the same
-    /// neighbour replaces what is held (a whole new tick's worth); the SAME number ACCUMULATES (a batch too
-    /// big for one datagram arrives as several MTU chunks that are all one tick); an OLDER number is a
-    /// reordered datagram and is dropped whole rather than resurrecting a stale world.
-    #[test]
-    fn an_entity_batch_replaces_on_a_newer_number_accumulates_on_the_same_and_is_dropped_on_an_older()
-     {
-        let mut rig = Rig::new();
-        rig.grant_realm();
-        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
-            root_region(),
-            own_region(),
-            region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 1000.0),
-        ]);
-        let child = with_child_coord(&mut rig, OTHER_REALM);
-        let seq = |n: u64, at: f64| {
-            wire_msg(
-                NodeId(77),
-                MsgClass::SignalDelta,
-                &InterShardFlow::EntityInterest(EntityRelay {
-                    realm: child.clone(),
-                    frame: frame_of(OTHER_REALM),
-                    frame_id: n,
-                    universe_tick: UniverseTick(1),
-                    entities: vec![EntitySnap {
-                        entity: EntityId::pack(EntityKind::Player, 10, 1, at as u32),
-                        pose: StampedPose::at_rest(
-                            frame_of(OTHER_REALM),
-                            DVec3::new(at, 0.0, 0.0),
-                            UniverseTick(1),
-                        ),
-                    }],
-                }),
-            )
-        };
-        let held = |rig: &Rig| -> usize {
-            rig.world
-                .resource::<ForeignEntities>()
-                .from_below
-                .values()
-                .map(|b| b.group.rows.len())
-                .sum()
-        };
-        let _ = rig.tick(vec![seq(5, 1.0), seq(5, 2.0)]);
-        assert_eq!(held(&rig), 2, "two chunks of ONE tick accumulate");
-        let _ = rig.tick(vec![seq(6, 3.0)]);
-        assert_eq!(held(&rig), 1, "a newer number replaces the whole batch");
-        let _ = rig.tick(vec![seq(4, 9.0)]);
-        assert_eq!(held(&rig), 1, "a reordered older batch changes nothing");
-        assert_eq!(rig.world.resource::<StubStats>().entity_relay_stale, 1);
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: NodeId(9),
+            class: MsgClass::SignalDelta,
+            bytes: crate::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::EntityInterest(relay.clone()))
+                    .expect("encode"),
+            ),
+        }]);
+        assert_eq!(rig.world.resource::<StubStats>().undecodable, 1);
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: NodeId(9),
+            class: MsgClass::SignalDelta,
+            bytes: crate::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::EntityCascade(relay)).expect("encode"),
+            ),
+        }]);
+        assert_eq!(rig.world.resource::<StubStats>().undecodable, 2);
     }
 
     // ---- Slice 3d/3e/4b + C-3 (the CONTAINMENT re-home trigger) --------------------------------
@@ -20002,37 +19079,6 @@ mod tests {
             None,
             "a cycle has no chain, so it has no path"
         );
-    }
-
-    /// The entity restate's DEGRADE arm, at the one corner that can produce it (the same rotated
-    /// far-child placement the outline lane pins): the row is dropped and counted, never relayed
-    /// wearing the previous space's numbers.
-    #[test]
-    fn an_entity_row_that_cannot_be_restated_is_dropped_and_counted() {
-        let hop = ChildFrame {
-            own: frame_of(OWN_REALM),
-            child: frame_of(RealmId::Planet(42)),
-            child_at: FramePlacement {
-                origin_cell: glam::I64Vec3::new(1, 0, 0),
-                origin: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-                orientation: DQuat::from_rotation_z(0.5),
-                angular_velocity: DVec3::ZERO,
-            },
-        };
-        let row = EntitySnap {
-            entity: EntityId::pack(EntityKind::Player, 10, 5, 1),
-            pose: StampedPose::at_rest(
-                frame_of(OWN_REALM),
-                DVec3::new(2.0, 0.0, 0.0),
-                UniverseTick(1),
-            ),
-        };
-        let mut stats = StubStats::default();
-        let out = restate_entities(&[row], hop.child, &hop, &mut stats);
-        assert!(out.is_empty(), "the row is dropped, never relayed raw");
-        assert_eq!(stats.entity_rows_dropped, 1);
-        assert_eq!(stats.entity_rows_restated, 0);
     }
 
     /// Slice C — the lift is TOTAL even at the corner that refuses the DOWN direction (a child
