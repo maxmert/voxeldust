@@ -2,9 +2,10 @@
 //! in-module unit test to the design-named INTEGRATION location so the closed-set
 //! guarantee is a per-release gate, not a convention (audit SEAL-2).
 //!
-//! The closed taxonomy `InterShardFlow` (the FULL current 22-arm set — see `wire/src/lib.rs`
-//! for the canonical enumeration; this header does NOT re-list it to avoid a second copy that
-//! drifts, the exact staleness the `arm_tripwire` below structurally prevents) is the ONLY
+//! The closed taxonomy `InterShardFlow` (the FULL current arm set — see `wire/src/lib.rs`
+//! for the canonical enumeration; this header does NOT re-list it, and does not COUNT it, to
+//! avoid a second copy that drifts, the exact staleness the `arm_tripwire` below structurally
+//! prevents) is the ONLY
 //! shape that crosses a shard boundary; every arm has a
 //! coherent `EffectClass`, and every SIDE-EFFECTING arm carries an idempotency key (so
 //! an authority-gating payload can never ride a fire-and-forget channel). Two compile-
@@ -292,17 +293,17 @@ fn every_arm() -> Vec<InterShardFlow> {
         InterShardFlow::ShardPresence(vd_wire::intershard::ShardPresence {
             local_tick: vd_core::TickId(11),
         }),
-        // VU AoI S2a: the occupant-position up-flow (child → parent). FireAndForget / Unreliable — NOT
-        // producer-less, so the golden pin below still asserts exactly TWO producer-less arms. A durable
-        // `AccountId` observer, a Universe-rooted parent coord, a pose in the emitter's frame.
+        // ★TOMBSTONE (minor 12): the per-occupant position up-flow — no producer, no consumer; the
+        // discriminant is reserved forever, so its SHAPE stays pinned here (a drifted tombstone would
+        // silently re-label every later arm).
         InterShardFlow::OccupantInterest(vd_wire::intershard::OccupantInterest {
             observer: AccountId(5),
             to_realm: demand_child_coord(),
             occupant: pose(),
             coarsen_level: 0,
         }),
-        // VU AoI S2c: the parent's sibling-scene reflection DOWN to the home shard. FireAndForget / ReDriven —
-        // reliable but RE-DRIVEN, so the golden pin below still asserts exactly TWO producer-less arms.
+        // ★TOMBSTONE (minor 12): the per-occupant sibling-scene reflection — replaced by the
+        // child-keyed `ChildSceneSet`. Shape pinned for the same reserved-discriminant reason.
         InterShardFlow::ProxySceneSet(vd_wire::intershard::ProxySceneSet {
             observer: AccountId(5),
             realms: vec![],
@@ -475,6 +476,69 @@ fn demand_verb_tripwire(v: &vd_wire::intershard::DemandVerb) {
     match v {
         DemandVerb::SpinUp | DemandVerb::KeepAlive | DemandVerb::Empty | DemandVerb::TearDown => {}
     }
+}
+
+/// THE POSITIONAL PIN the tombstone discipline rests on. Postcard writes a variant's DECLARED
+/// index as the envelope's leading varint, so reordering the enum — or deleting a tombstoned
+/// arm — re-labels every later arm ON THE WIRE while every same-build roundtrip in this file
+/// stays green (encode and decode share the drifted table). The match below is the declaration
+/// order stated ONCE as data and asserted against the first byte of the REAL encoding: a drift
+/// fails here, in one test, instead of silently in production decode. Wildcard-free, so a new
+/// arm must take a pinned index to compile.
+#[test]
+fn every_arm_encodes_its_declared_discriminant_index() {
+    fn declared_index(flow: &InterShardFlow) -> u8 {
+        match flow {
+            InterShardFlow::Ghost(_) => 0,
+            InterShardFlow::Transfer(_) => 1,
+            InterShardFlow::Directory(_) => 2,
+            InterShardFlow::Saga(_) => 3,
+            InterShardFlow::SagaAck(_) => 4,
+            InterShardFlow::DirectoryReply(_) => 5,
+            InterShardFlow::FlushSource(_) => 6,
+            InterShardFlow::TransferAck(_) => 7,
+            InterShardFlow::Demote(_) => 8,
+            InterShardFlow::Promote(_) => 9,
+            InterShardFlow::TransientRelease(_) => 10,
+            InterShardFlow::TransientDrop(_) => 11,
+            InterShardFlow::ReleaseComplete(_) => 12,
+            InterShardFlow::TransientAbandon(_) => 13,
+            InterShardFlow::ReHome(_) => 14,
+            InterShardFlow::TransientDiscard(_) => 15,
+            InterShardFlow::ReSolicitBatch(_) => 16,
+            InterShardFlow::CrossingRequest(_) => 17,
+            InterShardFlow::TransientCrossingRequest(_) => 18,
+            InterShardFlow::TransientCrossingGrant(_) => 19,
+            InterShardFlow::CrossingAborted(_) => 20,
+            InterShardFlow::CrossingAbortedAck(_) => 21,
+            InterShardFlow::RealmDemand(_) => 22,
+            InterShardFlow::ShardPresence(_) => 23,
+            // The two Step 5 slice D tombstones hold 24 and 25 forever.
+            InterShardFlow::OccupantInterest(_) => 24,
+            InterShardFlow::ProxySceneSet(_) => 25,
+            InterShardFlow::RealmCascade(_) => 26,
+            InterShardFlow::EntityInterest(_) => 27,
+            InterShardFlow::EntityCascade(_) => 28,
+            InterShardFlow::ShardRoster(_) => 29,
+            InterShardFlow::ChildLive(_) => 30,
+            InterShardFlow::RealmObservation(_) => 31,
+            InterShardFlow::RealmShapeObservation(_) => 32,
+            InterShardFlow::ChildSceneSet(_) => 33,
+        }
+    }
+    // Every fixture's real leading byte matches its declared index (all indices < 128, so the
+    // varint IS the index byte)…
+    let mut seen = std::collections::BTreeSet::new();
+    for flow in every_arm() {
+        let bytes = postcard::to_allocvec(&flow).expect("closed arm encodes");
+        assert_eq!(bytes[0], declared_index(&flow));
+        seen.insert(bytes[0]);
+    }
+    // …and the fixture set spans the WHOLE contiguous index space, so a missing fixture (or a
+    // gap postcard would assign past a deleted arm) cannot pass vacuously.
+    assert_eq!(seen.len(), 34);
+    assert_eq!(seen.first().copied(), Some(0));
+    assert_eq!(seen.last().copied(), Some(33));
 }
 
 #[test]

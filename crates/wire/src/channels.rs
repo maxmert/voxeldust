@@ -242,12 +242,14 @@ pub struct EntitySnap {
 /// when the realm enters the client's AoI.
 ///
 /// `center` HAS ONE MEANING ON EVERY HOP: the realm's centre measured from the centre of the realm this
-/// message is ADDRESSED TO, in that realm's own frame. Shard → shard (inside
-/// [`crate::intershard::ProxySceneSet`]) the addressee is the child realm named in the envelope. Shard →
-/// gateway → client (inside `ShardToGateway::RealmSceneDelta` and the two
-/// [`ServerControlMsg`] scene messages) the addressee is the realm the receiving session is standing in,
-/// which is the emitting shard's own realm — so the value is unchanged from shard to screen, and the
-/// gateway forwards it without opening it.
+/// message is ADDRESSED TO, in that realm's own frame. Shard → shard DOWN (inside
+/// [`crate::intershard::ChildSceneSet`]) the addressee is the live child realm named in the envelope.
+/// Shard → shard UP (inside [`crate::intershard::RealmShapeObservation`]) the addressee is the PARENT,
+/// and the centres are measured from the SENDING child's own centre — the parent lifts them by the one
+/// placement it authored, which restores the same rule at its level. Shard → gateway → client (inside
+/// `ShardToGateway::RealmSceneDelta` and the two [`ServerControlMsg`] scene messages) the addressee is
+/// the realm the receiving session is standing in, which is the emitting shard's own realm — so the
+/// value is unchanged from shard to screen, and the gateway forwards it without opening it.
 ///
 /// A parent restates the value from the centre of the child it is shipping to, subtracting the ONE
 /// placement it authored, and does that at every level — so what reaches the bottom is measured from the

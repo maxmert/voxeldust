@@ -76,8 +76,48 @@ This slots into the ChildSceneSet rework this slice already owns.
   band ~10 km out, its shard spins up ahead + its planet BOXES stream in + they MOVE, `location`
   never flips; return ⇒ the vacated neighbour reaps behind (baselines settled so neither climb can
   be satisfied by the home system's own activity). First green 2026-08-13.
-Remaining: slice D (tombstone `OccupantInterest` + delete the up-relay/`RetainedOccupants`/parity
-gauge), slice E (owner sign-off — entity-lane tombstone), slice F (SpawnV2 cutover, `Delta` death).
+**SLICE D LANDED, 2026-08-13 (PROTO_MINOR → 12).** The per-occupant lanes are DEAD, not dormant:
+- **Wire:** `OccupantInterest` and `ProxySceneSet` are TOMBSTONES — the variants keep their exact
+  positional slots and payload shapes (postcard discriminants are positional; a drifted tombstone
+  would silently re-label every later arm), their `intershard_closed.rs` fixtures stay pinned for
+  the same reason, and a RECEIVED frame of either counts `undecodable` — by DIFFERENT mechanics per
+  carrier, both pinned by a test: `OccupantInterest` rode the SignalDelta class, whose closed
+  dispatch fall-through counts anything unmatched; `ProxySceneSet` rode the Saga class, whose
+  dispatch DECODES it fine and would have dropped it silently — the review caught that half
+  asserted-not-measured, and an explicit tombstone arm now counts it. Minor 12's pin test states it.
+- **Production deletions in `aoi_decide` and around it:** the per-dot `OccupantInterest` up-relay
+  and the proxy re-relay tail, `RetainedOccupants`/`RetainedOccupant` + `retain_occupant` + the
+  retained prune, `proxy_observer`, `push_occupant_interest`, `proxy_folded`, the parity gauge
+  (`child_live_parity_divergence` — its job was to die), and the stats only that lane fed
+  (`occupant_interest_received/rerelayed`, `max_coarsen_level`, `misrouted_interest`,
+  `proxy_scene_orphaned/relayed/unaddressable`). Liveness across the hand-off window rides the
+  bit + the `speaks_for` carry alone — measured by the rewritten hold tests.
+- **Scenarios REWRITTEN, never deleted (the standing law):** the chain climb now measures the bit
+  climbing every level (the planet stays live on its child's bit ALONE — recursion asserted — and
+  NO pose exists above the owner: SL2 stated as a measurement); the per-leg cost scenario measures
+  `ChildLive` bytes/rates per leg and TTL bridging on a lossy link ("the bit is STALE, never
+  GONE"); the latency scenario budgets bit-age per leg at one AoI cadence per level. Unit tests of
+  the deleted mechanism died with it; the hold tests re-pin silence/beat/stop on `child_live_bits`.
+- **THE ADVERSARIAL REVIEW PASS (39 agents, 4 lenses, per-finding refutation):** 30 confirmed
+  findings, all fixed before landing. The load-bearing ones: (1) the ProxySceneSet silent-drop
+  above (an asserted-never-measured wire claim — the ★NEVER-ASSUME class); (2) the wire suite had
+  NO positional pin — every roundtrip/tripwire test stays green across a variant reorder, the exact
+  drift a tombstone forbids — cured by `every_arm_encodes_its_declared_discriminant_index` (the
+  declaration order stated once as data, asserted against the real leading byte, span-checked
+  0..=33); (3) four scenario-honesty regressions in the rewritten chain tests — a near-tautological
+  ordering assert (now two fence-vs-live-lease pins), a measurement replaced by prose ("the chain
+  stops where the world does" — now `ParentRealmNode == None` measured at the top), an unasserted
+  recursion premise (the middle level is now PROVEN empty of its own occupants), a depth-scaled
+  up-latency budget that was slack past depth 1 (the bit is re-originated per level, so the budget
+  is ONE tick per hop at every level — tightened and green), the lossy no-blink claim (now asserted
+  every tick of the window, not sampled once after it), and the price-tag frame sized with a
+  fabricated tick literal (now the running shard's own clock); (4) the SL2 probe honesty: `Dots` is
+  the AUTHORITY store and nobody above the owner OWNS the subject, while the ENTITY lane still
+  relays render rows — the remaining ledgered breach, now OBSERVED as a printed number in the climb
+  scenario so slice F flips it to a hard zero; (5) ~18 doc-residue sites (production comments,
+  classifier rationale, test banners, the `RealmShape` hop contract, D-RLM-11/12/13 ledger notes)
+  rewritten to tombstone tense — `proxy_alive` renamed `ttl_alive` with its store gone.
+Remaining: slice E (owner sign-off — entity-lane tombstone), slice F (SpawnV2 cutover, `Delta` death).
 
 **THE COVERAGE-DEBT PUSH (same day, HR5):** the first coverage-fast run since Stage A found 423
 uncovered Tier-A regions accumulated across the whole arc. Two systemic causes, both cured

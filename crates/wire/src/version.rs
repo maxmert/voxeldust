@@ -103,7 +103,12 @@ pub const PROTO_MAJOR: u16 = 1;
 /// `InterShardFlow::ChildSceneSet` (the per-LIVE-CHILD rekey of the down-reflected sibling scene — the
 /// occupant-keyed `ProxySceneSet` stops being emitted; its `AccountId` leaves the wire). Purely
 /// server↔server again: the client keeps receiving the same `RealmSceneDelta`, the floor does not move.
-pub const PROTO_MINOR: u16 = 11;
+/// **12** TOMBSTONES `InterShardFlow::OccupantInterest` and `InterShardFlow::ProxySceneSet` (Step 5
+/// slice D): the per-occupant lanes are DELETED — no producer, no consumer; a received frame counts
+/// undecodable. The variants and their payload structs REMAIN because postcard discriminants are
+/// positional and may never be renumbered; the discriminants are reserved forever. Nothing is appended
+/// and no client-facing message changed, so the floor does not move.
+pub const PROTO_MINOR: u16 = 12;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -253,8 +258,10 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 11,
-            "minor 11 appended `InterShardFlow::RealmShapeObservation` (a live child's interior OUTLINES \
+            PROTO_MINOR, 12,
+            "minor 12 TOMBSTONED the per-occupant lanes (OccupantInterest + ProxySceneSet — no \
+             producer, no consumer, discriminants reserved forever, received frames count \
+             undecodable); minor 11 appended `InterShardFlow::RealmShapeObservation` (a live child's interior OUTLINES \
              one hop up — the static half of the observation lane, the approaching-star invisible-planets \
              cure) and `InterShardFlow::ChildSceneSet` (the per-live-child rekey of the down-reflected \
              sibling scene; the occupant-keyed ProxySceneSet stops being emitted). \
@@ -276,7 +283,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.11");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.12");
         // These three USED to negotiate down and be welcomed (minor 7 fully, minor 1 without the
         // minor-2 OwnEntity, minor 0 without that AND UniverseRate). They are now refused: the
         // sender-gates-variants rule only covers appended VARIANTS, and minor 8 appended a FIELD.

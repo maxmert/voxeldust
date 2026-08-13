@@ -1437,12 +1437,9 @@ const CHAIN_PLANET_FROM_STAR_M: f64 = 20.0;
 /// where they are: this gate is about what the levels above compute, and a player wandering out mid-run
 /// would replace the subject with a re-home.
 const CHAIN_OCCUPANT_FROM_AREA_M: f64 = 0.25;
-/// The occupant as the PLANET must state it after adding its own child's placement. A LITERAL: `5 + 0.25`.
-const CHAIN_UP_1_M: f64 = 5.25;
-/// The occupant as the STAR must state it after adding its own child's placement. A LITERAL: `20 + 5.25`.
-/// Two levels above the realm the player is standing in — the number that could not be produced at all
-/// before this chain existed.
-const CHAIN_UP_2_M: f64 = 25.25;
+// (The per-level restated-position literals that lived here — 5.25 at the planet, 25.25 at the star —
+// died with the occupant up-relay in Step 5 slice D: no level above the owner states an occupant's
+// position at all any more. The bit that replaced the lane has no number to pin.)
 
 /// Borrow one topology node as the concrete shard so the gate can read the resources the production code
 /// writes. Nothing here reaches past what a shard legitimately holds.
@@ -1460,54 +1457,34 @@ fn with_shard<R>(
     f(shard)
 }
 
-/// What a shard has been told about an occupant somewhere below it, exactly as it holds it: the pose in
-/// the frame it ARRIVED in (i.e. the direct child's), and how many legs it has already travelled.
-fn retained_occupant(
+/// The SL7 occupancy bit `node` holds for its direct child `child`, if fresh — the upward-liveness
+/// probe (Step 5: the ONE thing that crosses upward; the per-occupant pose relay is deleted).
+fn child_bit(
     topo: &mut Topology,
     node: NodeId,
-) -> Option<(vd_core::pose::StampedPose, u8)> {
+    child: vd_core::pose::RealmId,
+) -> Option<vd_sim::stub::ChildLiveEntry> {
     with_shard(topo, node, |s| {
         s.world_mut()
-            .resource::<vd_sim::stub::RetainedOccupants>()
+            .resource::<vd_sim::stub::ChildLiveness>()
             .0
-            .values()
-            .next()
-            .map(|e| (e.occupant, e.coarsen_level))
+            .get(&child)
+            .copied()
     })
 }
 
-/// When this shard last heard anything at all about that occupant, and what its own clock reads now —
-/// the two numbers a freshness measurement is made of.
-fn last_heard(topo: &mut Topology, node: NodeId) -> Option<(vd_core::TickId, vd_core::TickId)> {
+/// Does `node`'s AUTHORITY store (`Dots`) hold a pose for `subject`, in any authority state? The
+/// anti-lane probe, honestly scoped: it answers "does anyone above the owner OWN the occupant",
+/// which the deleted per-occupant relay used to make true. It deliberately does NOT read the entity
+/// lane's render rows (`ForeignEntities`) — that remaining SL2 breach is slice E/F's to delete, and
+/// the climb scenario observes it as a separate number so the two lanes' fates stay distinguishable.
+fn holds_subject_pose(topo: &mut Topology, node: NodeId, subject: EntityId) -> bool {
     with_shard(topo, node, |s| {
-        let seen = s
-            .world_mut()
-            .resource::<vd_sim::stub::RetainedOccupants>()
+        s.world_mut()
+            .resource::<vd_sim::stub::Dots>()
             .0
             .values()
-            .next()
-            .map(|e| e.last_seen)?;
-        let now = s
-            .world_mut()
-            .resource::<vd_sim::runtime::ClockSample>()
-            .local_tick;
-        Some((seen, now))
-    })
-}
-
-/// The shard's own restatement of that occupant, through the PRODUCTION fold — the same call
-/// `aoi_decide` makes every tick, against the shard's own live region roster and its own clock. This is
-/// the level's addition, read where the level makes it.
-fn folded_here(topo: &mut Topology, node: NodeId) -> Option<vd_core::pose::StampedPose> {
-    let (pose, _) = retained_occupant(topo, node)?;
-    with_shard(topo, node, |s| {
-        let cfg = s.world_mut().resource::<vd_sim::stub::StubConfig>();
-        // The shard's own frame, taken from the shard's own config — the same frame its region roster
-        // registers at the identity, which is what the production fold folds into.
-        let (realm, own, tick_hz) = (cfg.realm, cfg.frame, 1.0 / cfg.tick_dt_s);
-        let regions = s.world_mut().resource::<vd_sim::stub::RealmRegions>();
-        let ctx = regions.frame_context(realm, tick_hz, pose.universe_tick);
-        vd_core::frame::transfer_frame(&pose, own, &ctx).ok()
+            .any(|d| d.entity == subject)
     })
 }
 
@@ -1615,127 +1592,113 @@ fn boot_the_chain_with(
     (topo, subject)
 }
 
-/// THE ACCEPTANCE STORY, on the production relay path, over three hosts.
+/// THE ACCEPTANCE STORY, on the production liveness path, over three hosts (Step 5 rewrite).
 ///
-/// The area ships "0.25, in my frame". The planet adds the 5 it authored and states 5.25 in ITS frame.
-/// The star adds the 20 it authored and states 25.25 in ITS frame. Two levels above the realm the player
-/// is standing in, and the star is the only party that ever held the second number.
-///
-/// Before this, the relay carried only the occupants a shard SIMULATES, so the pose reached the planet
-/// and was thrown away there. The star could not say where that player was, at all — not approximately,
-/// not in the wrong frame: there was no message that would have told it.
+/// The scenario used to measure the occupant's POSE climbing the chain — the per-occupant relay slice
+/// D deleted, because a pose crossing a realm boundary is the SL2 breach. What climbs now is ONE BIT
+/// per level, recursively: the area holds the player, so its bit beats at the planet; the planet holds
+/// NOBODY of its own yet is live purely through its child's bit, so ITS bit beats at the star. No pose,
+/// no entity set, no depth counter — and the star knows exactly one thing about everything below its
+/// planet: somebody is in there.
 #[test]
-fn an_occupant_climbs_every_level_of_the_chain_gaining_one_authored_placement_per_level() {
+fn an_occupants_liveness_climbs_every_level_of_the_chain_one_bit_per_level() {
     let fabric = FaultFabric::new(4242, 2);
     let (mut topo, subject) = boot_the_chain(&fabric);
 
     // Hold the occupant at a known spot in the AREA's own frame, every tick, and wait for the chain to
-    // reach the top. Only the area's copy is ever written; everything above is what those shards compute.
+    // reach the top. Only the area's copy is ever written; everything above is recursion.
     let at = DVec3::new(CHAIN_OCCUPANT_FROM_AREA_M, 0.0, 0.0);
     let climbed = step_until(&mut topo, 600, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
-        retained_occupant(t, CHAIN_TOP).is_some()
+        child_bit(t, CHAIN_TOP, PLANET).is_some()
     });
     assert!(
         climbed,
-        "the occupant's position reaches TWO levels above the realm they stand in",
+        "liveness reaches TWO levels above the realm the player stands in",
     );
 
-    // LEVEL 1 — the planet. It was told a position measured from the AREA's centre, and it is the only
-    // party that can turn that into a position measured from its own.
-    let (mid_arrived, mid_legs) =
-        retained_occupant(&mut topo, CHAIN_MID).expect("the planet was told");
-    assert_eq!(
-        mid_arrived.frame, CHAIN_AREA_FRAME,
-        "what ARRIVES at the planet is still measured in its child's frame — the child cannot say \
-         anything else, because it does not know where it sits",
-    );
-    assert_eq!(
-        mid_arrived.pos.offset(),
-        at,
-        "and the number is the area's own, untouched in transit",
-    );
-    assert_eq!(mid_legs, 0, "one leg travelled: straight up from the area");
-    let mid_folded = folded_here(&mut topo, CHAIN_MID).expect("the planet can place its own area");
-    assert_eq!(
-        mid_folded.frame,
-        FrameRef::PlanetCentered { planet_seed: 7 },
-        "the planet restates it in the planet's own frame",
-    );
-    assert_eq!(
-        mid_folded.pos.offset(),
-        DVec3::new(CHAIN_UP_1_M, 0.0, 0.0),
-        "the planet adds where it put its area: {CHAIN_AREA_FROM_PLANET_M} + \
-         {CHAIN_OCCUPANT_FROM_AREA_M}",
-    );
-
-    // LEVEL 2 — the star. What arrives here is the PLANET's restatement, not the area's original: the
-    // addition already happened, once, at the level that owned it.
-    let (top_arrived, top_legs) =
-        retained_occupant(&mut topo, CHAIN_TOP).expect("the star was told");
-    assert_eq!(
-        top_arrived.frame,
-        FrameRef::PlanetCentered { planet_seed: 7 },
-        "the star hears about the occupant in its OWN child's frame — never the grandchild's, which it \
-         has no placement for and could do nothing with",
-    );
-    assert_eq!(
-        top_arrived.pos.offset(),
-        DVec3::new(CHAIN_UP_1_M, 0.0, 0.0),
-        "carrying the planet's restatement, not the area's original {CHAIN_OCCUPANT_FROM_AREA_M}",
-    );
-    assert_eq!(top_legs, 1, "two legs travelled: area to planet to star");
-    let top_folded = folded_here(&mut topo, CHAIN_TOP).expect("the star can place its own planet");
-    assert_eq!(
-        top_folded.frame,
-        FrameRef::SystemSpace { system_seed: 7 },
-        "the star restates it in the star's own frame",
-    );
-    assert_eq!(
-        top_folded.pos.offset(),
-        DVec3::new(CHAIN_UP_2_M, 0.0, 0.0),
-        "THE STORY'S ANSWER: {CHAIN_PLANET_FROM_STAR_M} + {CHAIN_UP_1_M}. Reporting {CHAIN_UP_1_M} here \
-         would mean the planet relayed without folding; reporting \
-         {CHAIN_OCCUPANT_FROM_AREA_M} would mean nothing was added anywhere.",
-    );
-
-    // ANTI-VACUITY, on the OBSERVED values rather than the literals: each level's statement is a
-    // different number from the one below it, so an implementation that dropped an addition somewhere
-    // could not pass by accident.
-    let stated: BTreeSet<String> = [
-        mid_arrived.pos.offset(),
-        mid_folded.pos.offset(),
-        top_folded.pos.offset(),
-    ]
-    .iter()
-    .map(|v| format!("{v:?}"))
-    .collect();
-    assert_eq!(
-        stated.len(),
-        3,
-        "each level must state a DIFFERENT number from the one below it, or the gate proves nothing: \
-         {stated:?}",
-    );
-
-    // AND THE CHAIN STOPS WHERE THE WORLD DOES. Above the star is a galaxy, and no shard is running it,
-    // so the star's parent lookup finds nobody and the pose goes no further. Nothing counted levels to
-    // decide that — the relay simply had nowhere to go.
-    assert_eq!(
-        with_shard(&mut topo, CHAIN_TOP, |s| {
+    // LEVEL 1 — the planet holds its AREA's fresh bit (the direct occupancy report).
+    let mid_bit =
+        child_bit(&mut topo, CHAIN_MID, CHAIN_AREA).expect("the planet holds its area's bit");
+    // LEVEL 2 — the star holds its PLANET's bit. This is SL7's recursion, and its PREMISE is pinned
+    // first: the planet itself holds NOBODY — no dot, no held transient — so the only thing that can
+    // be keeping its bit beating is its own child's bit (the occupied-child observer). Without these
+    // two probes a stray occupant at the middle level would satisfy the scenario without any
+    // recursion ever being exercised.
+    let (mid_dots, mid_transients) = with_shard(&mut topo, CHAIN_MID, |s| {
+        (
+            s.world_mut().resource::<vd_sim::stub::Dots>().0.len(),
             s.world_mut()
-                .resource::<vd_sim::stub::StubStats>()
-                .occupant_interest_rerelayed
-        }),
-        0,
-        "the star relays on to nobody, because nobody is running the realm above it",
+                .resource::<vd_sim::stub::OwnedTransients>()
+                .0
+                .len(),
+        )
+    });
+    assert_eq!(mid_dots, 0, "the planet holds no dot of its own");
+    assert_eq!(
+        mid_transients, 0,
+        "the planet holds no transient of its own"
+    );
+    let top_bit = child_bit(&mut topo, CHAIN_TOP, PLANET).expect("the star holds its planet's bit");
+
+    // WHAT THE POSE PROBE MEANS, honestly scoped. `Dots` is the AUTHORITY store: nobody above the
+    // area OWNS the subject. The deleted lane's own store cannot be probed empty because slice D
+    // deleted the TYPE — absence is structural, not a runtime zero. The ENTITY lane
+    // (`EntityInterest`/`EntityCascade`) still relays render ROWS along the chain — the ledgered
+    // slice E/F breach — so it is OBSERVED here as a number, not asserted away: when slice F lands,
+    // this observation flips to a hard `assert_eq!(0)` and SL2 is fully discharged on this chain.
+    assert!(
+        !holds_subject_pose(&mut topo, CHAIN_MID, subject),
+        "the planet OWNS no pose for the occupant — the liveness lane crossed one bit, not a pose",
     );
     assert!(
-        with_shard(&mut topo, CHAIN_MID, |s| {
-            s.world_mut()
-                .resource::<vd_sim::stub::StubStats>()
-                .occupant_interest_rerelayed
-        }) > 0,
-        "the planet, which does have a live parent, relays on every tick",
+        !holds_subject_pose(&mut topo, CHAIN_TOP, subject),
+        "nor does the star — the deleted per-occupant relay left no authority pose above the owner",
+    );
+    let subject_rows_above = with_shard(&mut topo, CHAIN_MID, |s| {
+        s.world_mut()
+            .resource::<vd_sim::stub::ForeignEntities>()
+            .from_below
+            .values()
+            .flat_map(|b| b.group.rows.iter())
+            .filter(|r| r.entity == subject)
+            .count()
+    });
+    println!(
+        "[climb] entity-lane rows for the subject held above the owner (slice E/F owes their \
+         death): {subject_rows_above}"
+    );
+
+    // The bit carries ordering guards and NOTHING else (the TYPE has no pose field), and its fence
+    // names the SENDER's own realm authority — the zombie guard's input. Measured against each
+    // sender's live lease, not restated from the receiver.
+    let area_fence = with_shard(&mut topo, SHARD, |s| {
+        s.world_mut().resource::<vd_sim::stub::RealmAuthority>().0
+    })
+    .expect("the area holds its realm lease");
+    let planet_fence = with_shard(&mut topo, CHAIN_MID, |s| {
+        s.world_mut().resource::<vd_sim::stub::RealmAuthority>().0
+    })
+    .expect("the planet holds its realm lease");
+    assert_eq!(
+        mid_bit.fence, area_fence,
+        "the area's bit carries the area's OWN realm authority",
+    );
+    assert_eq!(
+        top_bit.fence, planet_fence,
+        "the planet's bit carries the planet's OWN realm authority",
+    );
+
+    // AND THE CHAIN STOPS WHERE THE WORLD DOES. Above the star is a galaxy, and no shard is running
+    // it, so the star's parent resolve holds NOTHING — measured on the resource the emit gates on
+    // (`aoi_up_relays_nothing_from_a_root_shard` pins the gate itself: an unresolved parent emits no
+    // bit). Nothing counted levels to decide that — the beat simply has nowhere to go.
+    let top_parent = with_shard(&mut topo, CHAIN_TOP, |s| {
+        s.world_mut().resource::<vd_sim::stub::ParentRealmNode>().0
+    });
+    assert_eq!(
+        top_parent, None,
+        "the star resolved no parent node — its own bit goes no further",
     );
 }
 
@@ -2068,97 +2031,102 @@ fn the_authored_world_descends_one_subtraction_per_level_and_the_leaf_computes_n
     );
 }
 
-/// The COST of the chain, measured rather than assumed: what a relay costs on the wire per leg, and how
-/// many of them a real shard emits per tick. The chain deliberately trades one shard hop per level for
-/// the ground rule, and the price has to be a number somebody printed.
+/// The COST of the liveness chain, measured rather than assumed (Step 5 rewrite): what one beat costs
+/// on the wire per leg, how often the middle level's beat lands at the top, and how the TTL bridges a
+/// lossy link. The deleted pose relay cost a full pose + lineage per occupant per level per tick; the
+/// bit costs a fence and a tick per REALM per cadence, and that difference is the whole deletion's
+/// price tag, printed.
 #[test]
-fn the_per_leg_relay_cost_and_rate_are_measured() {
-    use vd_wire::intershard::OccupantInterest;
-
+fn the_per_leg_liveness_cost_and_rate_are_measured() {
     let fabric = FaultFabric::new(4242, 2);
     let (mut topo, subject) = boot_the_chain(&fabric);
     let at = DVec3::new(CHAIN_OCCUPANT_FROM_AREA_M, 0.0, 0.0);
     let climbed = step_until(&mut topo, 600, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
-        retained_occupant(t, CHAIN_TOP).is_some()
+        child_bit(t, CHAIN_TOP, PLANET).is_some()
     });
     assert!(climbed, "the chain is running before its cost is quoted");
 
-    // Bytes on the wire for each leg, built from what those legs actually carry — the deepest leg's
+    // Bytes on the wire for each leg, built from what those legs actually carry — the deeper sender's
     // lineage is longer, so the two are not the same size and the difference is the thing to know.
-    let mut leg = |node: NodeId, level: u8| -> usize {
-        let (pose, _) = retained_occupant(&mut topo, node).expect("this level was told");
-        let to_realm = with_shard(&mut topo, node, |s| {
-            s.world_mut()
+    let mut leg = |node: NodeId| -> usize {
+        // Every field read off the RUNNING shard — including the tick, because postcard varints are
+        // length-dependent and a fabricated stamp would size a frame the cluster never ships.
+        let (own_coord, fence, at) = with_shard(&mut topo, node, |s| {
+            let coord = s
+                .world_mut()
                 .resource::<vd_sim::stub::StubConfig>()
                 .own_coord
-                .clone()
+                .clone();
+            let fence = s
+                .world_mut()
+                .resource::<vd_sim::stub::RealmAuthority>()
+                .0
+                .expect("a running chain level holds its lease");
+            let at = s
+                .world_mut()
+                .resource::<vd_sim::runtime::ClockSample>()
+                .universe_tick;
+            (coord, fence, at)
         });
-        postcard::to_allocvec(&InterShardFlow::OccupantInterest(OccupantInterest {
-            observer: AccountId(1000),
-            to_realm,
-            occupant: pose,
-            coarsen_level: level,
+        postcard::to_allocvec(&InterShardFlow::ChildLive(vd_wire::intershard::ChildLive {
+            child: own_coord,
+            fence,
+            at,
         }))
         .expect("closed wire enums serialize infallibly")
         .len()
     };
-    let leg_1 = leg(CHAIN_MID, 0);
-    let leg_2 = leg(CHAIN_TOP, 1);
+    let leg_1 = leg(SHARD); // area -> planet
+    let leg_2 = leg(CHAIN_MID); // planet -> star
 
-    // The RATE, counted on a real shard over a real window: how many relays the middle level emits per
-    // tick with one player below it.
-    let before = with_shard(&mut topo, CHAIN_MID, |s| {
+    // The RATE, counted at the top over a real window: how many beats of the PLANET's bit actually
+    // land at the star per tick.
+    let before = with_shard(&mut topo, CHAIN_TOP, |s| {
         s.world_mut()
             .resource::<vd_sim::stub::StubStats>()
-            .occupant_interest_rerelayed
+            .child_live_received
     });
     const WINDOW_TICKS: u64 = 100;
     for _ in 0..WINDOW_TICKS {
         set_shard_subject_pose_now(&mut topo, SHARD, subject, CHAIN_AREA_FRAME, at);
         topo.step();
     }
-    let after = with_shard(&mut topo, CHAIN_MID, |s| {
+    let after = with_shard(&mut topo, CHAIN_TOP, |s| {
         s.world_mut()
             .resource::<vd_sim::stub::StubStats>()
-            .occupant_interest_rerelayed
+            .child_live_received
     });
-    let relays = after - before;
+    let beats = after - before;
     #[allow(clippy::cast_precision_loss)] // counts in the hundreds
-    let per_tick = relays as f64 / WINDOW_TICKS as f64;
-    #[allow(clippy::cast_precision_loss)] // a message size in the hundreds of bytes
+    let per_tick = beats as f64 / WINDOW_TICKS as f64;
+    #[allow(clippy::cast_precision_loss)] // a message size in the tens of bytes
     let bytes_per_s = per_tick * leg_2 as f64 / vd_tests::area_stub_config().tick_dt_s;
     println!(
-        "[chain relay] leg 1 (area->planet) {leg_1} B, leg 2 (planet->star) {leg_2} B; \
-         middle level re-relayed {relays} times in {WINDOW_TICKS} ticks = {per_tick:.2}/tick, \
-         {bytes_per_s:.0} B/s per occupant per level at {:.0} Hz",
+        "[liveness] leg 1 (area->planet) {leg_1} B, leg 2 (planet->star) {leg_2} B; the star heard \
+         {beats} beats in {WINDOW_TICKS} ticks = {per_tick:.2}/tick, {bytes_per_s:.0} B/s per REALM \
+         (not per occupant) at {:.0} Hz",
         1.0 / vd_tests::area_stub_config().tick_dt_s,
     );
-    assert!(relays > 0, "the window observed the chain actually running");
+    assert!(beats > 0, "the window observed the chain actually beating");
 
-    // DELIVERY at depth, on a perfect link first: how often each level actually hears something new.
-    // One leg costs one tick, so the top of the chain is a leg behind the middle by construction, and
-    // that is the shape the numbers below have to be read against.
-    let (top_pose, top_legs) =
-        retained_occupant(&mut topo, CHAIN_TOP).expect("the star still knows");
-    assert_eq!(top_legs, 1);
-    let clean_mid = freshness(&mut topo, CHAIN_MID, subject, at);
-    let clean_top = freshness(&mut topo, CHAIN_TOP, subject, at);
+    // DELIVERY at depth, on a perfect link first: how often each level hears a fresh beat.
+    let clean_mid = freshness(&mut topo, CHAIN_MID, CHAIN_AREA, subject, at);
+    let clean_top = freshness(&mut topo, CHAIN_TOP, PLANET, subject, at);
     println!(
-        "[chain delivery] perfect link: leg-1 level heard news on {clean_mid} of \
-         {FRESHNESS_TICKS} ticks, leg-2 level on {clean_top}; top holds the occupant at {:?}",
-        top_pose.pos.offset(),
+        "[liveness delivery] perfect link: leg-1 level heard a beat on {clean_mid} of \
+         {FRESHNESS_TICKS} ticks, leg-2 level on {clean_top}",
     );
 
-    // AND UNDER A LOSSY LINK, which is the question this carrier raises: it is unreliable and
-    // fire-and-forget, so a datagram that does not make it is simply a tick with no news, and the retain
-    // window is what bridges it — per level, so a 3-level chain bridges one gap per level rather than one
-    // gap in total.
+    // AND UNDER A LOSSY LINK: the carrier is unreliable fire-and-forget, so a dropped beat is a tick
+    // with no news, and the retain TTL is what bridges it — per level, so a 3-level chain bridges one
+    // gap per level rather than one gap in total. The property that must hold under loss is that the
+    // BIT NEVER BLINKS: staleness compounds, liveness does not flicker — asserted EVERY tick of the
+    // window inside `freshness`, at both levels, not sampled once after it.
     //
     // ⚠ WHAT THIS HARNESS ACTUALLY MODELS, stated so the number is not over-read: its `drop_p` drops a
-    // delivery ATTEMPT and re-queues the message, so a "lost" relay arrives LATE rather than never. So
-    // this measures how much staleness compounds per level, NOT the (1-p)^depth end-to-end delivery a
-    // genuinely lossy datagram lane would give. The reliability decision this feeds is not taken here.
+    // delivery ATTEMPT and re-queues the message, so a "lost" beat arrives LATE rather than never. So
+    // this measures how much staleness compounds per level, NOT a (1-p)^depth end-to-end delivery.
     for (from, to) in [(SHARD, CHAIN_MID), (CHAIN_MID, CHAIN_TOP)] {
         fabric.set_policy(
             from,
@@ -2169,28 +2137,42 @@ fn the_per_leg_relay_cost_and_rate_are_measured() {
             },
         );
     }
-    let lossy_mid = freshness(&mut topo, CHAIN_MID, subject, at);
-    let lossy_top = freshness(&mut topo, CHAIN_TOP, subject, at);
+    let lossy_mid = freshness(&mut topo, CHAIN_MID, CHAIN_AREA, subject, at);
+    let lossy_top = freshness(&mut topo, CHAIN_TOP, PLANET, subject, at);
     println!(
-        "[chain delivery] {LOSSY_LINK_DROP_P} attempt-drop on BOTH legs: leg-1 level heard news on \
-         {lossy_mid} of {FRESHNESS_TICKS} ticks, leg-2 level on {lossy_top}",
+        "[liveness delivery] drop_p {LOSSY_LINK_DROP_P} per leg: leg-1 level {lossy_mid} of \
+         {FRESHNESS_TICKS}, leg-2 level {lossy_top}",
     );
     assert!(
-        retained_occupant(&mut topo, CHAIN_TOP).is_some(),
-        "the retain window holds the occupant at the top of the chain across the gaps — losing them \
-         here is what would make an ancestor declare itself empty while somebody is standing below it",
+        child_bit(&mut topo, CHAIN_TOP, PLANET).is_some(),
+        "under a lossy link the bit is STALE, never GONE — the TTL bridges what the link drops",
     );
 }
 
-/// How many of [`FRESHNESS_TICKS`] ticks brought `node` NEWS about the occupant — its retained arrival
-/// stamp moved. The occupant is held in place throughout, so anything that changes is the transport.
-fn freshness(topo: &mut Topology, node: NodeId, subject: EntityId, at: DVec3) -> u64 {
+/// How many of [`FRESHNESS_TICKS`] ticks brought `node` NEWS about its NAMED direct child `child` —
+/// a tick counts iff that child's bit's `last_seen` stamp moved. The occupant is held in place
+/// throughout, so anything that changes is the transport. EVERY tick also asserts the bit is
+/// PRESENT: that is the no-blink half of the lossy claim measured per tick rather than sampled once
+/// after the window — under loss the bit may go stale (a tick with no news), never gone (the TTL
+/// bridges the gap).
+fn freshness(
+    topo: &mut Topology,
+    node: NodeId,
+    child: vd_core::pose::RealmId,
+    subject: EntityId,
+    at: DVec3,
+) -> u64 {
     let mut heard = 0;
-    let mut prev = last_heard(topo, node).map(|(seen, _)| seen);
+    let mut prev = child_bit(topo, node, child).map(|e| e.last_seen);
     for _ in 0..FRESHNESS_TICKS {
         set_shard_subject_pose_now(topo, SHARD, subject, CHAIN_AREA_FRAME, at);
         topo.step();
-        let now = last_heard(topo, node).map(|(seen, _)| seen);
+        let bit = child_bit(topo, node, child);
+        assert!(
+            bit.is_some(),
+            "the bit never blinks: stale under loss, never gone",
+        );
+        let now = bit.map(|e| e.last_seen);
         if now != prev {
             heard += 1;
         }
@@ -3170,7 +3152,7 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
     // fold the one-off spin-up into the steady-state figure and quote it as the per-hop price.
     let running = step_until(&mut topo, 600, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
-        retained_occupant(t, CHAIN_TOP).is_some()
+        child_bit(t, CHAIN_TOP, PLANET).is_some()
             && with_client(t, |c| c.realm_view.realm_newest_tick(CHAIN_STATION)).is_some()
     });
     assert!(
@@ -3210,14 +3192,18 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
         let authored_down = universe_now(&mut topo, CHAIN_TOP);
         topo.step();
 
-        // UP: how far behind the leaf's own copy each level above it is.
+        // UP: how stale each level's newest CHILD-BIT is, per hop. The pose relay is deleted
+        // (Step 5) and the bit is RE-ORIGINATED at every level — nothing forwards a stamp upward —
+        // so each sample is a one-hop age: the receiver's "now" (the leaf's own stamp, one shared
+        // universe clock) minus the tick the SENDING CHILD stamped at emit. Depth says WHERE the
+        // sample was taken, never how many hops the stamp travelled (always one).
         let authored_up =
             own_dot_stamp(&mut topo, SHARD, subject).expect("the area holds its own dot");
-        for (node, depth) in [(CHAIN_MID, 1u64), (CHAIN_TOP, 2)] {
-            if let Some((pose, _)) = retained_occupant(&mut topo, node) {
+        for (node, child, depth) in [(CHAIN_MID, CHAIN_AREA, 1u64), (CHAIN_TOP, PLANET, 2)] {
+            if let Some(bit) = child_bit(&mut topo, node, child) {
                 up.entry(depth)
                     .or_default()
-                    .push(authored_up.0.saturating_sub(pose.universe_tick.0));
+                    .push(authored_up.0.saturating_sub(bit.at.0));
             }
         }
 
@@ -3316,15 +3302,21 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
         CHAIN_LEVELS_ABOVE_LEAF,
         "the up leg was sampled at every level above the leaf",
     );
+    // THE UP BUDGET IS ONE TICK PER HOP AT EVERY LEVEL — depth never widens it, because the bit is
+    // re-originated per level (each sample above is a one-hop age by construction). A depth-scaled
+    // budget here would be slack at every level past the first and could hide a level sitting on a
+    // beat for a whole extra tick. The END-TO-END recursion is bounded elsewhere: each level's bit
+    // EXISTS only while its child's bit is fresh within the one TTL, and the climb scenario gates
+    // the chain forming at all.
     for (depth, a) in [(1u64, &up1), (2, &up2)] {
         assert!(
-            a.p99_ticks <= depth,
-            "the up leg costs more than one tick per level: at depth {depth} the p99 age is \
-             {} ticks ({:.0} ms) against a derived budget of {depth} ({:.0} ms). A level is holding a \
-             relay instead of folding and re-relaying it on the tick it arrives.",
+            a.p99_ticks <= 1,
+            "the up leg costs more than one tick per hop: at depth {depth} the p99 age is \
+             {} ticks ({:.0} ms) against the one-hop budget ({:.0} ms). A level is holding a \
+             beat instead of retaining it on the tick it arrives.",
             a.p99_ticks,
             ms(a.p99_ticks),
-            ms(depth),
+            ms(1),
         );
     }
     for (depth, a) in [(1u64, &dn1), (2, &dn2)] {

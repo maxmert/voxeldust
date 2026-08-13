@@ -1367,3 +1367,17 @@ Gate: `a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_re
    the corruption is more ammunition for doing it, not for patching it.
 4. The latch and dwell behaved exactly as designed this run (suppress lines at k_dwell spacing) — no
    cure needed there for THIS chain.
+
+## 4aa. STEP 5 SLICE D LANDED — the per-occupant lanes are dead (2026-08-13)
+
+The lanes §4 (Q4) ordered deleted are now deleted, not dormant. `OccupantInterest` and
+`ProxySceneSet` are wire TOMBSTONES (PROTO_MINOR → 12; positional discriminants kept, received
+frames count `undecodable`); the up-relay, `RetainedOccupants`, `proxy_observer`, the parity gauge
+and every stat only that machinery fed are gone from production. Point 3 of the Stage B cure list
+above is therefore discharged for THIS lane family: no per-occupant ghost feed exists to write a
+foreign frame (the §4u corruption's remaining writer, `refresh_source_ghost`, is the ENTITY lane —
+it dies in slice F). Liveness across the hand-off window rides the ChildLive bit + the `speaks_for`
+carry alone, and the chain scenarios in `frame_conversion_e2e` now MEASURE SL2 (no pose above the
+owner) and SL7 recursion (a planet live on its child's bit alone) instead of exercising the breach.
+Narrative record: `step5_sl7_lane_deletion.md` (slice D block). Remaining: slice E (owner sign-off
+owed — entity-lane tombstone), slice F (SpawnV2 cutover, `Delta` death), then the Stage C audit.

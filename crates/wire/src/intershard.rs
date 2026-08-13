@@ -270,32 +270,24 @@ pub enum InterShardFlow {
     /// one cadence — a `ReDriven` (the shard re-asserts) `FireAndForget` (carries no idempotency-keyed
     /// effect) flow. APPENDED (preserves every existing postcard discriminant).
     ShardPresence(ShardPresence),
-    /// CHILD → PARENT shard (VU AoI S2a — the occupant-position UP-flow): relay where an observer IS so a
-    /// sealed-off ancestor can cull ITS OWN children (the observer's siblings/cousins) against that position.
-    /// The render-AoI is the union of per-level culls up the containment chain; positions flow DOWN today
-    /// (parents author children's placements), and THIS is the upward counterpart. A pure re-derivable
-    /// POSITION HINT — it carries NO fence and mutates nothing at the parent (the parent authorizes any
-    /// `SpinUp` it emits with its OWN realm fence): `FireAndForget` + `Unreliable` (a 20 Hz latest-wins
-    /// datagram; a lost hint self-heals next tick, like `GhostFlow::Delta`). A DEDICATED infra arm, NOT the
-    /// P9-reserved generic `Signal` bus. APPENDED (preserves every existing postcard discriminant).
+    /// ★TOMBSTONE (Step 5 slice D, minor 12) — the per-occupant position up-relay is DELETED. It shipped
+    /// every simulated dot's pose one level up per tick so a sealed parent could cull siblings against
+    /// it — an SL2 breach by construction (an occupant pose crossing a realm boundary), and the store it
+    /// fed is gone. What replaced it carries strictly less: the ONE occupancy bit
+    /// ([`InterShardFlow::ChildLive`], SL7 verbatim) plus the occupied-child observer fold at the parent
+    /// (the child stands in for whoever is inside it, at the placement the parent already authors).
+    /// The variant REMAINS because postcard discriminants are positional and may never be renumbered
+    /// (renumbering re-labels every later arm on the wire); nothing produces it, and a received frame
+    /// counts `undecodable` at the shard. Do not revive; the discriminant is reserved forever.
     OccupantInterest(OccupantInterest),
-    /// VU AoI S2c — a PARENT's reflection of one proxy occupant's CURRENT in-range SIBLING set, sent DOWN
-    /// ONE LEVEL: to the direct child that relayed the occupant up (the up-relay's own return address, so the
-    /// parent never learns the client's connection). If the occupant stands on that child, it reconciles the
-    /// set into the client render stream it already owns; if the occupant stands further below, that child
-    /// merges the set with its OWN in-range children, restates the lot in the frame of the child on the path,
-    /// and reflects it one level further down. Hop by hop, one subtraction per level, exactly like
-    /// [`InterShardFlow::RealmCascade`] — the reliable-shape twin of that lane, and shipped that way so a box
-    /// and the occupant standing inside it land on one point by construction. It used to be addressed at the
-    /// relaying child and stop there, which on any chain deeper than two levels dropped the set on a shard
-    /// hosting no client for that account and left the player told about nothing above their own parent.
-    /// LEVEL-triggered (the FULL current set, not an add/remove edge): the addressed home changes UNDER a
-    /// crossing (a cross-node re-home), so an edge sent there would be delivered-then-dropped; a full set lets
-    /// whoever draws the client's world reconcile to the truth after a hand-off / crash / lost message — the
-    /// same self-healing shape as `RealmDemand`. Carries ONLY public parent-authored `RealmShape` geometry —
-    /// NO NodeId / gateway / session (HR1: the client-connection detail never leaves the home shard).
-    /// `FireAndForget` (no fence, mutates no sim state — render bookkeeping only) + `ReDriven` (reliable; a
-    /// lost set self-heals on the next change, re-sent from the parent's RAM — no durable outbox). APPENDED.
+    /// ★TOMBSTONE (Step 5 slice D, minor 12) — the per-OCCUPANT down-reflected sibling scene is DELETED.
+    /// It was keyed by `AccountId` and addressed at the occupant's home, which made the parent track WHO
+    /// is inside a child (more than SL7's one bit) and orphaned the set on any chain deeper than two
+    /// levels. Its replacement is [`InterShardFlow::ChildSceneSet`] (minor 11): the SAME parent-authored
+    /// geometry, keyed by the LIVE CHILD REALM — `AccountId` left the wire, and the depth≥3 case
+    /// dissolved structurally. The variant REMAINS because postcard discriminants are positional and may
+    /// never be renumbered; nothing produces it, and a received frame counts `undecodable` at the shard.
+    /// Do not revive; the discriminant is reserved forever.
     ProxySceneSet(ProxySceneSet),
     /// PARENT → active CHILD realm — the per-realm AoI OBSERVATION cascade (the sibling live-pose feed). A
     /// parent AUTHORS every child's live pose, so once a child realm is ACTIVE (spun up, holding players) the
@@ -309,31 +301,32 @@ pub enum InterShardFlow {
     /// cost is O(active child realms); the per-player fan is the gateway's existing `subscribers_of`. This is
     /// the WHERE lane (positions); the WHAT lane (terrain/constructions at the LOD the observed realm controls)
     /// is a future ADDITIVE payload on this SAME routing — the observation graph is the reusable foundation.
-    /// The idiomatic per-realm twin of [`InterShardFlow::OccupantInterest`] — the same unreliable transport
-    /// lane (`MsgClass::SignalDelta`, NOT the P9 Signal bus), `FireAndForget` + `Unreliable` (per-tick
-    /// latest-wins; a lost frame self-heals next tick). Carries ONLY the `child` lineage coord (public) + the
-    /// opaque public-geometry bytes — NO gateway / session (HR1). APPENDED.
+    /// Rides the unreliable transport lane (`MsgClass::SignalDelta`, NOT the P9 Signal bus),
+    /// `FireAndForget` + `Unreliable` (per-tick latest-wins; a lost frame self-heals next tick).
+    /// Carries ONLY the `child` lineage coord (public) + the opaque public-geometry bytes — NO
+    /// gateway / session (HR1). APPENDED.
     RealmCascade(RealmCascade),
     /// CHILD → PARENT shard — THE ENTITY LANE'S UP-LEG (the occupants themselves, not where their realms
     /// are). A shard ships every entity it emits to its parent, measured from its OWN centre, tagged with
     /// its OWN realm coord. The parent adds the placement it authored for that child — the one number the
-    /// child cannot know — and can then state those entities in its own frame, exactly as
-    /// [`InterShardFlow::OccupantInterest`] does for the single occupant it is a cull hint about.
+    /// child cannot know — and can then state those entities in its own frame. (⚠ This lane carries
+    /// occupant poses ACROSS a realm boundary — the surviving SL2 breach after Step 5 slice D deleted
+    /// its per-occupant siblings; its own tombstoning is slice E/F's, gated on the owner's sign-off.)
     ///
-    /// IT IS A SEPARATE ARM FROM `OccupantInterest` BECAUSE IT IS A SEPARATE THING, and widening that one
-    /// would have been the shortcut. `OccupantInterest` carries ONE observer's pose so a sealed ancestor
-    /// can cull ITS OWN children against it: it is per-observer, it names the observer's account so the
-    /// scene reflection can be addressed back, and losing one costs a cull. This carries the whole EMITTED
-    /// ENTITY SET of a realm — the thing a client DRAWS — and losing one costs a frame of somebody else's
-    /// avatar. Making one message serve both would have put a render feed on a cull hint's contract.
+    /// IT WAS A SEPARATE ARM FROM the per-occupant cull hint (`OccupantInterest`, now a tombstone
+    /// above) BECAUSE IT IS A SEPARATE THING: that lane carried ONE observer's pose so a sealed
+    /// ancestor could cull its own children against it, and losing one cost a cull. This carries the
+    /// whole EMITTED ENTITY SET of a realm — the thing a client DRAWS — and losing one costs a frame
+    /// of somebody else's avatar. One message serving both would have put a render feed on a cull
+    /// hint's contract — which is also why the hint could die (slice D) while this lane kept running.
     ///
     /// IT IS ALSO A SEPARATE ARM FROM ITS OWN DOWN-LEG, and the direction IS the arm. Both legs carry the
     /// identical payload shape, so a single arm with a `direction: bool` would have been possible — and a
     /// mis-set bool would send a batch straight back to the child it came from, which loops rows between
     /// two levels forever at 20 Hz with nothing but a byte counter moving. A wrong ARM cannot exist: the
     /// receive routes are distinct functions with distinct guards, so the loop is refused by the type
-    /// system rather than by a field being right. `OccupantInterest`/`RealmCascade` are the same shape for
-    /// the same reason.
+    /// system rather than by a field being right. `RealmCascade` and its up-mirrors are separate arms
+    /// for the same reason.
     ///
     /// `FireAndForget` (no fence — the parent authorizes anything it emits with its own realm fence) +
     /// `Unreliable` (a 20 Hz latest-wins datagram on `MsgClass::SignalDelta`; a lost batch self-heals on
@@ -626,16 +619,16 @@ impl InterShardFlow {
             // transfer trigger or authority-gating state — it is re-derivable (the shard re-greets) and
             // loss-tolerant (a dropped greeting is re-sent next silence cadence) ⇒ FireAndForget.
             InterShardFlow::ShardPresence(_) => EffectClass::FireAndForget,
-            // VU AoI S2a: the occupant-position up-flow mutates NOTHING at the parent (it folds a proxy
-            // occupant into its AoI cull; any `SpinUp` it emits is authorized by its OWN realm fence) and
-            // carries no transfer trigger or authority-gating state — a pure re-derivable position hint,
-            // loss-tolerant (self-heals next tick) ⇒ FireAndForget.
+            // ★TOMBSTONE (Step 5 slice D) — the deleted per-occupant cull hint. The classification is
+            // frozen with the arm: it mutated nothing (a pure position hint), and a tombstone must keep
+            // classifying so the closed-taxonomy matches stay wildcard-free ⇒ FireAndForget forever.
             InterShardFlow::OccupantInterest(_) => EffectClass::FireAndForget,
             // The per-realm observation cascade mutates no sim state at the child — it re-fans opaque
             // render bytes (latest-wins), never a fence/transfer trigger.
             InterShardFlow::RealmCascade(_) => EffectClass::FireAndForget,
-            // VU AoI S2c — a public-geometry render reflection; no fence, no transfer trigger, mutates no sim
-            // state at the home (render bookkeeping only). A re-delivered set is idempotent (full-set reconcile).
+            // ★TOMBSTONE (Step 5 slice D) — the deleted per-occupant scene reflect. Classification frozen
+            // with the arm (it mutated no sim state; a received frame today only counts `undecodable`):
+            // a tombstone keeps classifying so the closed-taxonomy matches stay wildcard-free.
             InterShardFlow::ProxySceneSet(_) => EffectClass::FireAndForget,
             // The entity lane, both legs: a batch of drawable poses. It mutates no sim state at either end
             // (render bookkeeping only), carries no fence and triggers no transfer — the receiving level
@@ -731,16 +724,16 @@ impl InterShardFlow {
             // self-heals next cadence — ReDriven, never producer-less (a lost greeting needs no durable
             // outbox; the next re-greet re-teaches the gateway's return connection).
             | InterShardFlow::ShardPresence(_) => FlowDurabilityClass::ReDriven,
-            // VU AoI S2a: the occupant-position up-flow is a 20 Hz latest-wins datagram (like
-            // `GhostFlow::Delta`) — a lost hint self-heals on the next tick's re-assertion, never a durable
-            // outbox burden ⇒ Unreliable (NOT producer-less; the golden pin below still asserts exactly TWO).
+            // ★TOMBSTONE (Step 5 slice D) — the deleted per-occupant cull hint's class, frozen with the
+            // arm: it was a 20 Hz latest-wins datagram ⇒ Unreliable forever (nothing produces it; the
+            // golden pin below still asserts exactly TWO producer-less arms).
             InterShardFlow::OccupantInterest(_) => FlowDurabilityClass::Unreliable,
             // Per-tick latest-wins realm poses — a lost frame self-heals next tick (the RealmSnapshot
             // datagram contract), NOT reliable (would flood the ReDriven lane at 20 Hz).
             InterShardFlow::RealmCascade(_) => FlowDurabilityClass::Unreliable,
-            // VU AoI S2c — RELIABLE (a lost set-change would blink a neighbour) but RE-DRIVEN, not
-            // producer-less: on any loss / crash / shed the parent re-sends the full set from its RAM store
-            // and the home reconciles it — no durable outbox (the level full-set IS the recovery).
+            // ★TOMBSTONE (Step 5 slice D) — the deleted per-occupant scene reflect's class, frozen with
+            // the arm: it was level-full-set re-driven, never producer-less ⇒ ReDriven forever (nothing
+            // produces it; its living replacement `ChildSceneSet` carries the same class below).
             InterShardFlow::ProxySceneSet(_) => FlowDurabilityClass::ReDriven,
             // Per-tick latest-wins entity poses, both legs — the entity twin of `RealmCascade`. A lost batch
             // self-heals on the next tick's re-assertion; making it reliable would put a 20 Hz per-entity
@@ -815,58 +808,23 @@ pub struct ShardPresence {
     pub local_tick: TickId,
 }
 
-/// The occupant-position up-flow payload (VU AoI S2a) — see [`InterShardFlow::OccupantInterest`]. Carries
-/// ONLY where an observer is, so a sealed ancestor can cull its own children against it; NO fence (the
-/// parent authorizes its own emitted demands with its OWN realm fence — a fence here would make it
-/// authority-gating, forcing `SideEffecting`/reliable and breaking the unreliable-scale premise). Field
-/// order is frozen once shipped (positional postcard).
-///
-/// THIS IS THE UPWARD CHAIN, one link of it. Every realm is centred on itself and has no idea where it
-/// sits, so an occupant's position can only ever be stated relative to the realm it stands in. Each level
-/// up, the PARENT — the one party that authored where its child sits — adds that one number and states the
-/// result in its own frame, then sends the same message on to ITS parent. A shard therefore only ever adds
-/// a number it already holds about a child, and never learns its own address. The message used to stop
-/// after one leg, so an occupant deep inside a planet was invisible to the galaxy that planet's star sits
-/// in, and the position that story needs could not be produced anywhere in a running cluster.
+/// ★TOMBSTONE payload (Step 5 slice D) — see the [`InterShardFlow::OccupantInterest`] arm's tombstone
+/// note. Kept only so the reserved discriminant keeps a decodable shape; nothing produces it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OccupantInterest {
-    /// The DURABLE player id whose scene this feeds (survives re-home; the gateway maps it to the live
-    /// session for the render-delta route).
+    /// The durable player id the deleted lane keyed on.
     pub observer: AccountId,
-    /// THIS hop's PARENT realm (`child.parent()`) — the routing key. Its `path()` dedups multi-hop relays.
+    /// The hop's parent realm the deleted lane routed by.
     pub to_realm: RealmCoord,
-    /// The observer's pose (position + velocity) expressed in the EMITTER's frame, stamped at its
-    /// `universe_tick`. The receiving parent re-expresses it into ITS OWN frame by adding the placement it
-    /// authored for the child it came from — the one number it holds and the child cannot know — and then
-    /// relays THAT on, so the addition happens once per level by the only party entitled to make it.
+    /// The occupant pose the deleted lane shipped — the SL2 breach that condemned it.
     pub occupant: StampedPose,
-    /// Hops from the observer's home realm: 0 on the leg out of the realm the occupant stands in, and one
-    /// more on each further leg up. PURELY DIAGNOSTIC — nothing reads it to decide anything, and in
-    /// particular NOTHING stops relaying at any value of it. The chain runs exactly as far as a parent coord
-    /// and a resolved parent node exist, which is exactly as far as the players' area of interest spun
-    /// realms up; a cap here would be a depth constant deciding what the world looks like. It saturates at
-    /// the type's maximum rather than wrapping, so a very deep chain reads as "deep" and never as "shallow".
-    /// The precision ladder that will eventually coarsen far ancestors' poses (S3) keys off this.
+    /// The deleted lane's legs-travelled diagnostic.
     pub coarsen_level: u8,
 }
 
-/// VU AoI S2c — a parent's LEVEL-triggered reflection of ONE proxy occupant's CURRENT in-range sibling set,
-/// sent DOWN one level to the child that relays the occupant. That child diffs `realms` against its
-/// per-account forwarded baseline to derive the client add/remove — so a lost/shed message or a re-home
-/// hand-off self-heals on the next set (an EDGE would be delivered-then-dropped to a route that changes under
-/// the crossing). Empty `realms` = "the proxy's AoI holds no sibling now" ⇒ every forwarded id for the account
-/// reconciles to `removed`. PUBLIC parent-authored geometry ONLY — no NodeId / gateway / session (HR1).
-///
-/// EVERY `center` IN HERE IS MEASURED FROM THE CENTRE OF THE REALM THIS MESSAGE IS ADDRESSED TO, because the
-/// sender authored where that realm sits and is the only party that could state it. It is therefore the same
-/// space the receiver's own children and its own occupants are already measured in — one meaning, one space,
-/// all the way to the client — and a level that has somewhere further to forward to restates them again from
-/// the centre of ITS child before passing them on. Nobody at any level learns where they themselves are: a
-/// level only ever subtracts a number about a child, which is the only number it holds.
-///
-/// BECAUSE IT IS A FULL SET AND NOT AN EDGE, exactly one of these may be in flight per occupant per hop. A
-/// level with both its own in-range children and a set from above MERGES them into one message; sending two
-/// would have each delete the other's realms on arrival, every tick.
+/// ★TOMBSTONE payload (Step 5 slice D) — see the [`InterShardFlow::ProxySceneSet`] arm's tombstone
+/// note; the living lane is [`ChildSceneSet`]. Kept only so the reserved discriminant keeps a
+/// decodable shape; nothing produces it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProxySceneSet {
     /// The DURABLE traveller id — the SAME key the home shard already streams `RealmSceneDelta` under.
@@ -956,7 +914,7 @@ pub struct ChildSceneSet {
 /// The per-realm observation-cascade payload (the sibling live-pose feed) — see
 /// [`InterShardFlow::RealmCascade`]. The parent ships THIS to each ACTIVE child realm per tick.
 ///
-/// ONE LINK OF THE DOWN-CHAIN, and the mirror of [`OccupantInterest`] going the other way. Each level
+/// ONE LINK OF THE DOWN-CHAIN — the down-mirror of the up-observation lanes. Each level
 /// subtracts the placement IT authored for the child it is shipping to, restates the rows in that child's
 /// frame, and ships; a level that has an active child of its own does the same again one hop further down.
 /// The party at the bottom accepts what it is handed and does no arithmetic at all. Nobody at any level

@@ -78,9 +78,9 @@ pub enum MsgClass {
     /// consumer (postcard is non-self-describing — the carrier class is the discriminator). UNROUTED
     /// through FA-2b; FA-2c wires the shard emit + gateway forward + client consume.
     RealmSnapshot,
-    /// Cross-shard SIGNAL DELTAs (`InterShardFlow::OccupantInterest`, VU AoI S2a): the UNRELIABLE
-    /// child→parent occupant-position up-flow — a 20 Hz latest-wins datagram (a lost hint self-heals next
-    /// tick). A dedicated lane, sent shard→shard directly (never to a gateway). APPEND-ONLY (see the header).
+    /// Cross-shard SIGNAL DELTAs (the SL7 `ChildLive` bit + the up-observation lanes): the UNRELIABLE
+    /// child→parent latest-wins datagrams (a lost one self-heals on the next cadence/tick). A dedicated
+    /// lane, sent shard→shard directly (never to a gateway). APPEND-ONLY (see the header).
     SignalDelta,
 }
 
@@ -124,8 +124,9 @@ impl MsgClass {
             | MsgClass::Input
             | MsgClass::GhostDelta
             | MsgClass::RealmSnapshot
-            // VU AoI S2a: the occupant-position up-flow is a 20 Hz latest-wins datagram (a lost hint
-            // self-heals next tick) — the UNRELIABLE lane, like the ghost pose delta.
+            // The SL7 `ChildLive` bit + the up/down observation cascades are per-tick latest-wins
+            // datagrams (a lost beat is bridged by the retain TTL; a lost frame self-heals next
+            // tick) — the UNRELIABLE lane, like the ghost pose delta.
             | MsgClass::SignalDelta => Reliability::Unreliable,
             MsgClass::Control | MsgClass::Saga | MsgClass::Membership | MsgClass::GhostReliable => {
                 Reliability::Reliable
