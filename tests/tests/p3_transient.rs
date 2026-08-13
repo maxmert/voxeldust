@@ -26,7 +26,8 @@ use vd_tests::{
     held_at_dest, live_sagas, liveness_notices, p1_client, p2_cluster, p2_cluster_staggered,
     read_subject, realm_fence, run_transient_dest_flap, run_transient_fault_scenario,
     seed_transient_burst, seed_transient_crossing, source_transients_emitted,
-    source_unreachable_resolutions, transient_dropped_total, trigger_transfer, walk_forward,
+    source_unreachable_resolutions, stamp_subject_pose_in_dest_frame, transient_dropped_total,
+    trigger_transfer, walk_forward,
 };
 use vd_wire::seams::directory::DirectoryKey;
 
@@ -513,6 +514,7 @@ fn warmup_durable(fabric: &FaultFabric) -> (Topology, EntityId, SessionId, Fence
         "durable warmup granted the avatar + the DEST realm lease"
     );
     let (session, entity, fence) = read_subject(&mut topo);
+    stamp_subject_pose_in_dest_frame(&mut topo, entity);
     (topo, entity, session, fence)
 }
 

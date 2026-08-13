@@ -35,19 +35,30 @@ impl WalkStep {
     }
 }
 
-/// Fixed-magnitude walk-to in the server's LOCAL movement frame: aims the per-tick step
-/// at the target with UNIT-clamped axes; `arrived` once within `arrive_epsilon`. It does
-/// NOT know the sim's per-tick step length (`move_speed_mps · tick_dt_s`), so it cannot
-/// taper near the target.
+/// Walk-to in the server's LOCAL movement frame: aims the per-tick step at the target with
+/// UNIT-clamped axes; `arrived` once within `arrive_epsilon`.
 ///
-/// CONTRACT: `arrive_epsilon` MUST exceed one sim step. Because the magnitude is fixed,
-/// a smaller tolerance makes the dot overshoot and oscillate around the target forever
-/// (it can never settle inside a sub-step band) — callers pick a waypoint tolerance ≥
-/// one step (pinned by `walk_to_oscillates_if_arrive_epsilon_is_below_the_step`).
+/// `max_step_m` is the BRAKING term (Stage B4): the caller's one-tick full-speed travel
+/// (`move_speed_mps · tick_dt_s`). Within that distance the axes scale down proportionally
+/// (`distance / max_step_m`), so the last tick's step lands ON the target instead of 10 m past
+/// it — the arrival phase, and the reason a sub-step `arrive_epsilon` can settle. The server
+/// integrates `axes · speed · dt`, so a smaller magnitude simply moves slower; no new message.
+///
+/// `max_step_m <= 0` (or non-finite) disables braking — full-magnitude axes throughout, the
+/// pre-B4 behaviour, where the ORIGINAL CONTRACT stands: `arrive_epsilon` MUST exceed one sim
+/// step, or the fixed step overshoots and oscillates around the target forever (pinned by
+/// `walk_to_oscillates_if_arrive_epsilon_is_below_the_step`).
 #[must_use]
-pub fn walk_to(own_pos: DVec3, own_orient: DQuat, target: DVec3, arrive_epsilon: f64) -> WalkStep {
+pub fn walk_to(
+    own_pos: DVec3,
+    own_orient: DQuat,
+    target: DVec3,
+    arrive_epsilon: f64,
+    max_step_m: f64,
+) -> WalkStep {
     let to_target = target - own_pos;
-    if to_target.length() <= arrive_epsilon {
+    let distance = to_target.length();
+    if distance <= arrive_epsilon {
         return WalkStep {
             movement: [0.0; 3],
             arrived: true,
@@ -56,8 +67,15 @@ pub fn walk_to(own_pos: DVec3, own_orient: DQuat, target: DVec3, arrive_epsilon:
     // Express the desired world direction in the entity's local frame, then invert the
     // server's axis map via the ONE shared convention (vd_core::kinematics).
     let local = (own_orient.conjugate() * to_target.normalize()).normalize();
+    // THE BRAKE: unit direction scaled by how many steps remain, capped at full. Monomorphic
+    // two-arm guard (HR5): a non-positive/non-finite max_step_m is the no-brake legacy arm.
+    let scale = if max_step_m.is_finite() && max_step_m > 0.0 {
+        (distance / max_step_m).min(1.0)
+    } else {
+        1.0
+    };
     WalkStep {
-        movement: kinematics::movement_from_local(local),
+        movement: kinematics::movement_from_local(local * scale),
         arrived: false,
     }
 }
@@ -152,7 +170,7 @@ mod tests {
     ) -> Option<u32> {
         let mut prev = f64::INFINITY;
         for tick in 0..max_ticks {
-            let s = walk_to(pos, orient, target, arrive_eps);
+            let s = walk_to(pos, orient, target, arrive_eps, 0.0);
             if s.arrived {
                 return Some(tick);
             }
@@ -205,7 +223,13 @@ mod tests {
 
     #[test]
     fn walk_to_arrives_within_epsilon() {
-        let step = walk_to(DVec3::new(0.5, 0.0, 0.0), DQuat::IDENTITY, DVec3::ZERO, 1.0);
+        let step = walk_to(
+            DVec3::new(0.5, 0.0, 0.0),
+            DQuat::IDENTITY,
+            DVec3::ZERO,
+            1.0,
+            0.0,
+        );
         assert!(step.arrived);
         assert_eq!(step.movement, [0.0, 0.0, 0.0]);
     }
@@ -219,6 +243,7 @@ mod tests {
             DQuat::IDENTITY,
             DVec3::new(0.0, 0.0, -10.0),
             0.1,
+            0.0,
         );
         assert!(!step.arrived);
         assert!(
@@ -246,7 +271,7 @@ mod tests {
         // points at the target.
         let orient = yawed(std::f64::consts::FRAC_PI_2, 0.0);
         let target = DVec3::new(5.0, 0.0, 0.0);
-        let step = walk_to(DVec3::ZERO, orient, target, 0.1);
+        let step = walk_to(DVec3::ZERO, orient, target, 0.1, 0.0);
         let m = step.movement;
         let axes = kinematics::local_axes_from_movement(m); // replay via the SHARED convention
         let world_step = (orient * axes).normalize();
@@ -336,7 +361,7 @@ mod tests {
         let mut min_dist = f64::INFINITY;
         let mut ever_arrived = false;
         for _ in 0..200 {
-            let s = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, arrive_eps);
+            let s = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, arrive_eps, 0.0);
             ever_arrived |= s.arrived; // accumulate with `|=` (no branch to leave uncovered)
             min_dist = min_dist.min(pos.length());
             let axes = kinematics::local_axes_from_movement(s.movement);
@@ -349,6 +374,36 @@ mod tests {
         assert!(
             min_dist <= step_len,
             "it does get within a step of the target, just never inside epsilon"
+        );
+    }
+
+    /// THE BRAKE (Stage B4): with `max_step_m` = the sim step, the SAME sub-step tolerance that
+    /// oscillates forever un-braked (the pinned test above) settles — inside the last step the
+    /// axes scale down, the final step lands on the target, and `arrived` fires. This is the
+    /// arrival phase that lets a flight-speed fixture park at a rendezvous point.
+    #[test]
+    fn walk_to_with_a_brake_settles_inside_a_sub_step_epsilon() {
+        let step_len = 0.1;
+        let arrive_eps = 0.02; // < step_len — the exact tolerance the un-braked contract forbids
+        let mut pos = DVec3::new(0.0, 0.0, -0.55);
+        let mut arrived_at = None;
+        for tick in 0..200 {
+            let s = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, arrive_eps, step_len);
+            if s.arrived {
+                arrived_at = Some(tick);
+                break;
+            }
+            let axes = kinematics::local_axes_from_movement(s.movement);
+            pos += DQuat::IDENTITY * axes * step_len;
+        }
+        assert!(
+            arrived_at.is_some(),
+            "the braked controller settles inside a sub-step epsilon"
+        );
+        let parked = pos.length();
+        assert!(
+            parked <= arrive_eps,
+            "parked inside the arrive ball: {parked} > {arrive_eps}"
         );
     }
 

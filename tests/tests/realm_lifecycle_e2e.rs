@@ -486,7 +486,7 @@ use vd_connection_plane::gateway::{
 };
 use vd_connection_plane::tickets;
 use vd_core::glam::DVec3;
-use vd_core::pose::{FrameRef, StampedPose};
+use vd_core::pose::FrameRef;
 use vd_core::taxonomy::ProfileKind;
 use vd_core::worldgen::{UniverseConfig, WorldView};
 use vd_core::{AccountId, EntityId, SessionId, TickId};
@@ -503,7 +503,13 @@ const CLIENT: NodeId = NodeId(100);
 /// The login account, and its STORED absolute spawn pose (the 5f-3b pose-store stand-in): the Area-A box at
 /// x=25, whose deepest containing realm is the 5-level [Universe, Galaxy, System(7), Planet(7), Area(7)] home.
 const LOGIN_ACCOUNT: AccountId = AccountId(5);
-const SPAWN_X: f64 = 25.0;
+/// THE LOGIN'S HOME REALM: the walk-scale world's deepest realm — an area inside a planet inside a star
+/// system — so demanding it spins up a four-level chain, which is what this suite watches.
+///
+/// It used to be said as a POSITION, 25 metres along `+x` from the ambient root, and the router descended
+/// the forest to work out which realm that fell in. It fell in exactly this one, at that area's own centre.
+/// Naming it says what the test always meant, and takes the descent out of the test as well as the code.
+const LOGIN_HOME_REALM: RealmId = RealmId::Area(7);
 /// The cluster tick rate EVERY budget in this section derives from (the shipped cloud rate).
 const TICK_HZ: u32 = 20;
 /// The avatar entity the modelled home shard reports on attach.
@@ -514,8 +520,11 @@ const AVATAR: EntityId = EntityId(77);
 fn home_lineage() -> RealmCoord {
     // Asked of the SAME world the cluster's gateway holds, so the test and the code can never describe
     // different universes — which is exactly how this drifted the last time.
-    WorldView::hand_placed(&UniverseConfig::walk_scale())
-        .container_coord(DVec3::new(SPAWN_X, 0.0, 0.0))
+    vd_core::worldgen::coord_of_realm(
+        WorldView::hand_placed(&UniverseConfig::walk_scale()).regions(),
+        LOGIN_HOME_REALM,
+    )
+    .expect("the login's home realm belongs to the world the cluster holds")
 }
 
 /// The cluster's ONE RLM budget: the orchestrator reconciles with it AND the gateway derives its
@@ -555,14 +564,18 @@ impl Gw {
             // THE HAND-PLACED WORLD — the one with a station to stand in and an area to spin up. The
             // generator emits neither (players build them), so a test that needs a deep home places it.
             world: WorldView::hand_placed(&UniverseConfig::walk_scale()),
-            spawn_poses: std::collections::BTreeMap::from([(
-                LOGIN_ACCOUNT,
-                StampedPose::at_rest(
-                    FrameRef::SystemSpace { system_seed: 0 },
-                    DVec3::new(SPAWN_X, 0.0, 0.0),
-                    UniverseTick(0),
-                ),
-            )]),
+            // The account lives in the deep home, at that realm's own centre. A home is a NAME plus a pose
+            // already measured from the named realm — there is nothing here for anybody to descend.
+            homes: {
+                let world = WorldView::hand_placed(&UniverseConfig::walk_scale());
+                let home = vd_core::home::StoredHome::in_realm(
+                    world.regions(),
+                    LOGIN_HOME_REALM,
+                    DVec3::ZERO,
+                )
+                .expect("the login's home realm belongs to the world the cluster holds");
+                vd_core::home::HomeRegistry::new(home)
+            },
             demand_ttl_ticks: rlm.demand_ttl_ticks,
             bootstrap_ttl_ticks: SeedInjectorConfig::bootstrap_ttl_from_rlm(
                 rlm.launch_ttl_ticks,

@@ -313,7 +313,76 @@ fn every_arm() -> Vec<InterShardFlow> {
             child: demand_child_coord(),
             realm_snapshot_bytes: vec![1, 2, 3],
         }),
+        // The entity lane, UP leg (child → parent), tagged with the SENDER's own coord — the origin tag
+        // that keeps a batch from being handed back to the child it came from. FireAndForget / Unreliable
+        // (a per-tick latest-wins entity feed), NOT producer-less, so the golden pin below still asserts
+        // exactly TWO.
+        InterShardFlow::EntityInterest(vd_wire::intershard::EntityRelay {
+            realm: demand_child_coord(),
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            frame_id: 5,
+            universe_tick: UniverseTick(10),
+            entities: vec![vd_wire::channels::EntitySnap {
+                entity: eid(EntityKind::Player),
+                pose: pose(),
+            }],
+        }),
+        // The entity lane, DOWN leg (parent → active child), tagged with the RECIPIENT's coord — the same
+        // mis-route guard `RealmCascade` uses. Same classification, same reason.
+        InterShardFlow::EntityCascade(vd_wire::intershard::EntityRelay {
+            realm: demand_child_coord(),
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            frame_id: 6,
+            universe_tick: UniverseTick(11),
+            entities: vec![vd_wire::channels::EntitySnap {
+                entity: eid(EntityKind::Player),
+                pose: pose(),
+            }],
+        }),
+        // The orchestrator's answer to "whose frames may a router read": the nodes the ownership record
+        // shows holding a realm. A LEVEL — two nodes here, ascending, so the round-trip also pins that a
+        // roster's encoding is one sequence of bytes for one set.
+        InterShardFlow::ShardRoster(vd_wire::intershard::ShardRoster {
+            nodes: vec![NodeId(1002), NodeId(1004)],
+            at: UniverseTick(12),
+        }),
+        // The SL7 occupancy bit: one heartbeat, presence-is-the-bit, fence+tick ordering guards only.
+        InterShardFlow::ChildLive(vd_wire::intershard::ChildLive {
+            child: demand_child_coord(),
+            fence: Fence(3),
+            at: UniverseTick(13),
+        }),
+        // The up-observation lane: a live child's OWN authored rows, opaque, one hop up — the sealed
+        // frame_id discipline pinned by carrying pre-serialized bytes exactly like RealmCascade.
+        InterShardFlow::RealmObservation(vd_wire::intershard::RealmObservation {
+            child: demand_child_coord(),
+            realm_snapshot_bytes: vec![7, 7, 7],
+        }),
+        // The observation lane's STATIC half (minor 11): a live child's interior outlines, one hop up,
+        // centers in the child's own frame — the full-set level the parent lifts and folds into scenes.
+        InterShardFlow::RealmShapeObservation(vd_wire::intershard::RealmShapeObservation {
+            child: demand_child_coord(),
+            shapes: vec![shape()],
+        }),
+        // The per-live-child down-reflected sibling scene (minor 11) — the occupant-keyed lane's rekey,
+        // addressed to the receiving child realm, centers already in that child's frame.
+        InterShardFlow::ChildSceneSet(vd_wire::intershard::ChildSceneSet {
+            child: demand_child_coord(),
+            realms: vec![shape()],
+        }),
     ]
+}
+
+/// One public-geometry outline for the two minor-11 shape-lane fixtures — small but field-complete,
+/// so the round-trip pins every field of the shared `RealmShape` payload on both new arms.
+fn shape() -> vd_wire::channels::RealmShape {
+    vd_wire::channels::RealmShape {
+        realm: RealmId::Planet(3),
+        frame: FrameRef::PlanetCentered { planet_seed: 3 },
+        center: vd_core::pose::LatticePos::local(vd_core::glam::DVec3::new(5.0, 0.0, 0.0)),
+        shape: vd_core::geometry::Boundary::Shell { r: 2.0 },
+        parent: Some(RealmId::System(7)),
+    }
 }
 
 /// A Universe-rooted `[Universe, Galaxy, System]` child coord for the `RealmDemand` fixture — a
@@ -360,7 +429,14 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::ShardPresence(_)
         | InterShardFlow::OccupantInterest(_)
         | InterShardFlow::ProxySceneSet(_)
-        | InterShardFlow::RealmCascade(_) => {}
+        | InterShardFlow::RealmCascade(_)
+        | InterShardFlow::EntityInterest(_)
+        | InterShardFlow::EntityCascade(_)
+        | InterShardFlow::ShardRoster(_)
+        | InterShardFlow::ChildLive(_)
+        | InterShardFlow::RealmObservation(_)
+        | InterShardFlow::RealmShapeObservation(_)
+        | InterShardFlow::ChildSceneSet(_) => {}
     }
 }
 
@@ -451,6 +527,25 @@ fn durability_class_pins_the_producer_less_reliable_set() {
             // Per-realm observation cascade: latest-wins realm poses (Unreliable), NOT producer-less — so the
             // golden `producer_less.len() == 2` pin below is unchanged.
             InterShardFlow::RealmCascade(_) => FlowDurabilityClass::Unreliable,
+            // The entity lane, both legs: per-tick latest-wins drawable poses (Unreliable), NOT
+            // producer-less — so the golden `producer_less.len() == 2` pin below is unchanged.
+            InterShardFlow::EntityInterest(_) | InterShardFlow::EntityCascade(_) => {
+                FlowDurabilityClass::Unreliable
+            }
+            // The roster is a LEVEL the reconciler re-pushes: losing one leaves a live shard mute, so it
+            // is never Unreliable — and it needs no durable outbox, so it is not producer-less either.
+            InterShardFlow::ShardRoster(_) => FlowDurabilityClass::ReDriven,
+            // The SL7 bit (TTL-bridged, ancestor_close-backstopped) and the up-observation rows
+            // (per-tick latest-wins) — both Unreliable, like the lanes they mirror; the golden
+            // `producer_less.len() == 2` pin below is unchanged.
+            InterShardFlow::ChildLive(_) | InterShardFlow::RealmObservation(_) => {
+                FlowDurabilityClass::Unreliable
+            }
+            // The interior-outline level (minor 11): re-asserted every AoI cadence, TTL-bridged like the
+            // bit it rides beside — Unreliable, NOT producer-less (the golden pin below is unchanged).
+            // (Its down-going sibling `ChildSceneSet` keeps ProxySceneSet's ReDriven class and lands in
+            // the wildcard arm below, exactly as ProxySceneSet does.)
+            InterShardFlow::RealmShapeObservation(_) => FlowDurabilityClass::Unreliable,
             InterShardFlow::Transfer(env)
                 if matches!(env.payload, TransitionPayload::TransientBatch { .. }) =>
             {

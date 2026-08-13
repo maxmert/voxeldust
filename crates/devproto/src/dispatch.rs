@@ -52,10 +52,19 @@ pub enum DevRequest {
     },
     /// Closed-loop: drive the own entity toward a world `target` (within
     /// `arrive_epsilon`) for up to `max_ticks`. Reply: `State` (arrived) / `Timeout`.
+    ///
+    /// `max_step_m` is the BRAKING term (Stage B4): the caller's one-tick full-speed travel
+    /// (`move_speed · tick_dt`). Inside that distance the axes scale down proportionally, so the
+    /// approach decelerates and the arrival can settle inside a sub-step `arrive_epsilon` — the
+    /// arrival phase the input map's cruise note names ("a warp that DECELERATES on approach").
+    /// `0.0` (the serde default, and every pre-B4 caller) = full-magnitude axes throughout, where
+    /// `arrive_epsilon` must exceed one step (the original `nav::walk_to` contract).
     WalkTo {
         target: [f64; 3],
         arrive_epsilon: f64,
         max_ticks: u64,
+        #[serde(default)]
+        max_step_m: f64,
     },
     /// Closed-loop: turn the own entity to face a world `target` (within
     /// `align_epsilon`) for up to `max_ticks`. Reply: `State` (aligned) / `Timeout`.
@@ -323,6 +332,7 @@ mod tests {
                 target: [1.0, 2.0, 3.0],
                 arrive_epsilon: 0.5,
                 max_ticks: 200,
+                max_step_m: 10.0,
             },
             DevRequest::LookAt {
                 target: [0.0, 1.0, -1.0],

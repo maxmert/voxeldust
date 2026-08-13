@@ -28,13 +28,8 @@ use serde::{Deserialize, Serialize};
 use core::f64::consts::TAU;
 
 use crate::celestial::{G, KEPLER_ECC_MAX, OrbitalElements, orbital_state};
-use crate::frame::IdentityFrames;
-use crate::geometry::{
-    AoiConfig, BandError, Boundary, ContainmentBand, RealmRegion, region_depth,
-    region_signed_distance,
-};
-use crate::ids::UniverseTick;
-use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose, Tier, frame_for_realm};
+use crate::geometry::{AoiConfig, BandError, Boundary, ContainmentBand, RealmRegion};
+use crate::pose::{LatticePos, RealmId, frame_for_realm};
 use crate::realm_coord::RealmCoord;
 use crate::realm_path::{RealmKindTag, RealmLevel, RealmPath};
 use crate::rng::{SplitMix64, child_seed, realm_stream};
@@ -72,10 +67,17 @@ const STATION_A_OFFSET_M: f64 = -25.0;
 /// Station A's box half-extent (a small docked-station volume). `|-25| + 5 = 30 < 40` ⇒ fully inside
 /// System A's r=40 SOI.
 const STATION_HALF_M: f64 = 5.0;
-/// Area A's center inside Planet A (Planet A is at +20, r=10). Placed at +25 so the box x∈[22,28] stays
-/// within Planet A's sphere yet is OFFSET from the (20,0,0) escape-SOI probe (which must still resolve to
-/// Planet 7, not the Area).
-const AREA_OFFSET_M: f64 = 25.0;
+/// Area A's center inside Planet A, MEASURED FROM PLANET A — every placement is an offset from its own
+/// parent, and Area A's parent is the planet, not the system. +5 puts it at +25 in the system's frame
+/// (Planet A is at +20, r=10), so its box still spans x∈[22,28] within the planet's sphere and is still
+/// OFFSET from the (20,0,0) escape-SOI probe, which must resolve to Planet 7 and not the Area.
+///
+/// This was written as +25 — the absolute, in the SYSTEM's frame, on a field that means "offset from my
+/// parent". Nothing caught it because the login descent carried one unconverted point all the way down
+/// and so compared every level's boundary in the system's frame, where the two agree. Once the descent
+/// converts as it steps — the parent doing the downward arithmetic, per the ground rule — an area sitting
+/// +25 from a planet that is itself only 10 wide is nowhere near it, and the world stops being coherent.
+const AREA_OFFSET_M: f64 = 5.0;
 /// Area A's box half-extent (a small sub-planet district volume).
 const AREA_HALF_M: f64 = 3.0;
 
@@ -661,42 +663,6 @@ pub fn moving_children_for_config(
     moving_children(&generate_system_forest(seed_universe, config), hosted)
 }
 
-// ===== RLM Slice 5f-2: the lazy position → full-lineage RealmCoord resolver ==========================
-
-/// Resolve `pos` — a FRAME-LOCAL [`DVec3`] in the Universe root's OWN frame (cell-zero through P3,
-/// exactly the pose the containment regions are expressed in; mirrors the test-only `container_at`'s
-/// `at(pos)`) — to the FULL-LINEAGE [`RealmCoord`] of the DEEPEST realm whose boundary contains it.
-///
-/// It DESCENDS from the Universe root: at each level it picks the DEEPEST DIRECT child (a region whose
-/// `.parent == Some(current)`) whose boundary contains `pos` (`region_signed_distance <= 0` under
-/// [`IdentityFrames`], the P3 no-op reframe), EXTENDS the lineage by that child's [`RealmLevel`], and
-/// recurses; it STOPS when no direct child contains `pos`. It ALWAYS returns at least the root coord —
-/// the ambient Universe contains all reachable space (the container-fold identity), so an entity is
-/// always in ≥ one realm and the result is never empty.
-///
-/// This returns the WHOLE root→leaf lineage (built by `root.child(level)…`), NOT the lossy [`RealmId`]
-/// and NOT [`RealmCoord::lowered`]: the RLM ancestor-closure the orchestrator runs off this needs the
-/// UN-collapsed lineage (a `Galaxy`/`Universe` level is LOST through `RealmId`, and a System seed
-/// collapses across galaxies). It is the un-lossy `f(seed, config, pos)` twin of the leaf-only
-/// [`RealmId`] contract the test-only `container_at` pins.
-///
-/// HONEST SCOPE (D-41 / P4): this materializes the WHOLE (single-galaxy, walk-scale) containment forest
-/// once per call — acceptable at walk / single-galaxy scale. A per-subtree LAZY generator that resolves
-/// a 100K-realm / multi-galaxy universe WITHOUT materializing the whole forest is the owed P4 piece;
-/// this 5f-2 function nails the LINEAGE shape + the descend structure, and ONLY the generator's laziness
-/// is deferred. It resolves against the P3 LIVE containment forest (the walk roster
-/// [`generate_walk_forest`]+[`to_regions`], byte-identical to [`realm_regions_for`] at `walk_scale`) —
-/// the SAME geometry the sim's `RealmRegions` and the client draw — not the FA-5 visual single-system
-/// forest ([`realm_regions_for_config`]); unifying the two under one seed-lazy generator is the P4 owe.
-#[must_use]
-pub fn container_coord_at(seed_universe: u64, config: &UniverseConfig, pos: DVec3) -> RealmCoord {
-    // THE SAME FOREST THE SHARDS BUILD. This used to descend the WALK roster unconditionally — ignoring
-    // the world it was handed — so where a login was placed came from a different universe than the one
-    // that would then simulate them. With several star systems that is not merely inconsistent: the
-    // resolver would not know the star you logged in beside exists.
-    container_coord_in(&realm_regions_for_config(seed_universe, config), pos)
-}
-
 /// A WORLD, materialised once: the bodies that exist, and the containment regions they lower to.
 ///
 /// WHY THIS TYPE EXISTS. The world used to be re-derived from `(seed, config)` at every question — where a
@@ -760,22 +726,10 @@ impl WorldView {
         &self.regions
     }
 
-    /// The deepest realm containing `pos`, as a full root→leaf lineage. See [`container_coord_in`].
-    #[must_use]
-    pub fn container_coord(&self, pos: DVec3) -> RealmCoord {
-        container_coord_in(&self.regions, pos)
-    }
-
     /// The regions a shard holding `held` evaluates: ancestors ∪ direct children, never siblings.
     #[must_use]
     pub fn neighbourhood(&self, held: &std::collections::BTreeSet<RealmId>) -> Vec<RealmRegion> {
         neighbourhood_scope(&self.regions, held)
-    }
-
-    /// The root→realm origin chain, for folding a realm's absolute position.
-    #[must_use]
-    pub fn origin_chain(&self, realm: RealmId) -> Vec<OriginLink> {
-        origin_chain_over(&self.bodies, realm)
     }
 
     /// Is this realm part of this world? The honest form of the check that used to consult a DIFFERENT world
@@ -784,40 +738,6 @@ impl WorldView {
     pub fn contains_realm(&self, realm: RealmId) -> bool {
         self.regions.iter().any(|r| r.realm == realm)
     }
-}
-
-/// Resolve `pos` against an ALREADY-BUILT forest — the descend itself, separated from the question of
-/// which world to descend.
-///
-/// WHY THE SPLIT. Resolving a position and generating a world are different jobs, and fusing them meant
-/// the resolver could only ever answer about the world it built into itself. It also left tests no way to
-/// ask about a world containing PLAYER-BUILT structures: stations and areas are placed by people, never
-/// by the generator, so no seed-derived forest contains one and a test needing a station had to reach for
-/// a second world builder that did. That second builder was the seam.
-#[must_use]
-pub fn container_coord_in(regions: &[RealmRegion], pos: DVec3) -> RealmCoord {
-    let pose = StampedPose::at_rest(
-        FrameRef::SystemSpace { system_seed: 0 },
-        pos,
-        UniverseTick(0),
-    );
-    // The root is ALWAYS the base of the lineage (an entity is in the Universe even beyond its shell —
-    // the container-fold identity). A well-formed forest has exactly one ambient root (`parent: None`).
-    let root = regions
-        .iter()
-        .find(|r| r.parent.is_none())
-        .expect("a well-formed forest has exactly one ambient root");
-    let mut coord = RealmCoord::from_path(RealmPath::from_levels(vec![
-        level_of(root.realm).expect("a seed-forest realm has a RealmLevel"),
-    ]))
-    .expect("a one-level path always has a leaf");
-    let mut current = root.realm;
-    // Descend the parent chain: extend into the deepest direct child that contains `pos`, until none.
-    while let Some(child) = deepest_containing_child(regions, current, &pose) {
-        coord = coord.child(level_of(child).expect("a seed-forest realm has a RealmLevel"));
-        current = child;
-    }
-    coord
 }
 
 /// The full Universe-rooted lineage [`RealmCoord`] of `realm` within a neighbourhood forest — the
@@ -842,32 +762,27 @@ pub fn coord_of_realm(regions: &[RealmRegion], realm: RealmId) -> Option<RealmCo
     RealmCoord::from_path(RealmPath::from_levels(levels))
 }
 
-/// The DEEPEST direct child of `parent` (a region with `.parent == Some(parent)`) whose boundary
-/// contains `pose`, or `None` when none does (the descend's stop). In a well-formed containment tree at
-/// most one direct child contains a point; [`region_depth`] is a deterministic tiebreak should a
-/// malformed forest overlap siblings (never at walk scale). A MONOMORPHIC helper (concrete types) so the
-/// containment predicate is covered ONCE here, keeping [`container_coord_at`] a straight-line descend.
-fn deepest_containing_child(
-    regions: &[RealmRegion],
-    parent: RealmId,
-    pose: &StampedPose,
-) -> Option<RealmId> {
-    regions
-        .iter()
-        .filter(|r| r.parent == Some(parent))
-        .filter(|r| region_contains(pose, r))
-        .max_by_key(|r| region_depth(regions, r.realm))
-        .map(|r| r.realm)
-}
-
-/// `pose` is on/inside `region`'s boundary — the P3 instantaneous containment predicate
-/// (`signed_distance <= 0`), reframed under [`IdentityFrames`] (a no-op at P3). `.expect` because
-/// identity never errors — a real `Err` would be a P4 ephemeris bug and must fail LOUD, never degrade to
-/// a wrong containment. Monomorphic (the compare region is covered here, HR5).
-fn region_contains(pose: &StampedPose, region: &RealmRegion) -> bool {
-    region_signed_distance(pose, region, &IdentityFrames)
-        .expect("IdentityFrames never errors at P3")
-        <= 0.0
+/// THE REALM AN ACCOUNT APPEARS IN until something says otherwise: the ambient root's first child, and
+/// that child's first child — a star system.
+///
+/// A NAME, chosen by lineage position, and nothing is measured to choose it. That is the whole reason this
+/// is allowed to exist in a world the router holds: naming a realm leaks nothing about where anything is,
+/// and the pose that goes with the name is authored in the named realm's OWN frame by
+/// [`crate::home::StoredHome::in_realm`], which reads no distance either.
+///
+/// The fallback pose that pairs with it is the realm's own centre — a home needs no magic offset, and in
+/// this world the nearest child's surface sits about twelve metres from that centre, so the origin of a
+/// star system is empty space by construction rather than by a chosen number.
+///
+/// `None` for a forest with no root, or a root with no grandchild — stated rather than substituted, so a
+/// cluster booted with a degenerate world fails where it can be seen instead of putting every account
+/// somewhere arbitrary.
+#[must_use]
+pub fn default_home_realm(regions: &[RealmRegion]) -> Option<RealmId> {
+    let root = regions.iter().find(|r| r.parent.is_none())?;
+    let galaxy = regions.iter().find(|r| r.parent == Some(root.realm))?;
+    let system = regions.iter().find(|r| r.parent == Some(galaxy.realm))?;
+    Some(system.realm)
 }
 
 /// The walk-scale mandate forest as config-driven bodies, in forest order (Universe → Galaxy →
@@ -1092,118 +1007,24 @@ pub fn ancestor_realms(all: &[RealmRegion], hosted_realm: RealmId) -> Vec<RealmI
     chain
 }
 
-// ===== A2: seed-derived origin chain (floating-origin server-authoritative rework) ================
+// ===== The render-origin PIN classifier =============================================================
 //
-// How a Derived realm's shard works out its OWN absolute position: it FOLDS its ancestor chain — re-derived
-// FROM SEED, walking UP parent links — and NEVER from its own child list, region center, or live pose (THE
-// IRON RULE the reverted attempt broke). Pure additions with no production consumer yet (A3 wires the
-// per-tick table), so byte-identical: nothing shipped changes.
-
-/// The PUBLIC lowered projection of a body's [`Placement`] — one link of an origin chain. `Fixed` covers a
-/// `StaticOffset`: its frame IS its parent's frame, so it contributes ZERO to the fold (the offset already
-/// lives in the region center + the pose value — re-adding it would DOUBLE-COUNT). `Orbital` carries the
-/// elements so the fold evaluates the live orbital position + velocity. Exhaustive, no `_`: the P6/P8
-/// `Dynamic` arm (a signal-placed realm / a ship — NOT closed-form) is appended THERE, and adding it must be
-/// a compile error at every match over this type.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum OriginLink {
-    /// A static body — contributes ZERO to the origin fold (its frame is its parent's).
-    Fixed,
-    /// An orbiting body — contributes its live orbital position + velocity.
-    Orbital(OrbitalElements),
-}
-
-/// Lower a [`Placement`] to its public [`OriginLink`] — the monomorphic discriminator (HR5: the match is
-/// covered once, here).
-fn origin_link_of(placement: Placement) -> OriginLink {
-    match placement {
-        Placement::StaticOffset(_) => OriginLink::Fixed,
-        Placement::Orbital(elements) => OriginLink::Orbital(elements),
-    }
-}
-
-/// The (position, velocity) one link contributes to the origin fold at `secs`. `Fixed` → ZERO (THE §0.3
-/// rule: a static body's frame is its parent's, so NEVER re-add its offset — that offset already lives in
-/// the region center); `Orbital` → the live closed-form orbital state. Monomorphic (HR5).
-fn origin_link_state(link: OriginLink, secs: f64) -> (DVec3, DVec3) {
-    match link {
-        OriginLink::Fixed => (DVec3::ZERO, DVec3::ZERO),
-        OriginLink::Orbital(elements) => {
-            let state = orbital_state(&elements, secs);
-            (state.position, state.velocity)
-        }
-    }
-}
-
-/// Fold a root→realm origin chain into the realm's own absolute (position + velocity) in the universe-root
-/// frame, at `secs`. Each link adds its parent-relative contribution up the chain: a `Fixed` link adds
-/// nothing (its frame is its parent's), an `Orbital` link adds its live position + velocity. These frame
-/// placements carry NO rotation, so the fold is a straight positional + velocity SUM (no Coriolis) — the
-/// once-per-tick `self_abs` a Derived realm's shard computes LOCALLY from seed, NEVER from its child list
-/// (the iron rule). Byte-floor: `compose` does not re-quantize, so through P4 every produced position is
-/// `cell == 0` — an all-`Fixed` chain folds to identity, a mover chain to bare `orbital_state`.
-#[must_use]
-pub fn fold_origin(chain: &[OriginLink], secs: f64) -> (LatticePos, DVec3) {
-    let mut pos = LatticePos::local(DVec3::ZERO);
-    let mut vel = DVec3::ZERO;
-    for &link in chain {
-        let (link_pos, link_vel) = origin_link_state(link, secs);
-        pos = pos.compose(LatticePos::local(link_pos), Tier::Fine);
-        vel += link_vel;
-    }
-    (pos, vel)
-}
-
-/// Does this realm's own absolute VARY over time — i.e. does any ancestor link orbit? A boot constant (the
-/// chain is fixed at spin-up): `false` for an all-static chain (a walk shard, a star system — its own frame
-/// is fixed), `true` once any ancestor is `Orbital` (a planet shard — its frame rides the orbit).
-#[must_use]
-pub fn origin_varies(chain: &[OriginLink]) -> bool {
-    chain
-        .iter()
-        .any(|link| matches!(link, OriginLink::Orbital(_)))
-}
-
-/// The root→realm origin chain over an explicit body forest: walk PARENT links UPWARD from `realm` to the
-/// ambient root, lowering each body's placement, then reverse to root→realm order. Reads ONLY the parent
-/// edge of each body it visits — NEVER a realm's child list, region center, or live pose (THE IRON RULE). An
-/// unknown `realm` yields an empty chain (a safe degrade — its shard folds to identity). Mirrors
-/// [`ancestor_realms`]; bounded by the forest size.
-fn origin_chain_over(bodies: &[GeneratedBody], realm: RealmId) -> Vec<OriginLink> {
-    let mut chain = Vec::new();
-    let mut cur = realm;
-    for _ in 0..bodies.len() {
-        let Some(body) = bodies.iter().find(|b| b.realm == cur) else {
-            return Vec::new(); // unknown realm — no valid ancestry
-        };
-        chain.push(origin_link_of(body.placement));
-        match body.parent {
-            None => break, // reached the ambient root — the chain is complete
-            Some(parent) => cur = parent,
-        }
-    }
-    chain.reverse();
-    chain
-}
-
-/// The root→realm origin chain over the config-driven SYSTEM forest — the twin of
-/// [`realm_regions_for_config`], built from the SAME `(seed, config)` so the folded absolutes and the regions
-/// can never disagree. An orbiting planet's chain ends in an `Orbital` link.
-#[must_use]
-pub fn origin_chain_for_config(
-    seed_universe: u64,
-    config: &UniverseConfig,
-    realm: RealmId,
-) -> Vec<OriginLink> {
-    origin_chain_over(&generate_system_forest(seed_universe, config), realm)
-}
-
-/// The root→realm origin chain over the WALK forest — the twin of [`realm_regions_for_walk_config`] (the full
-/// mandate topology). Every body is `StaticOffset` ⇒ every link `Fixed` ⇒ folds to identity (the byte-floor).
-#[must_use]
-pub fn origin_chain_for_walk_config(config: &UniverseConfig, realm: RealmId) -> Vec<OriginLink> {
-    origin_chain_over(&generate_walk_forest(config), realm)
-}
+// What used to sit here was the seed-derived ORIGIN CHAIN: a realm's shard folded its whole ancestor
+// chain up to the universe root to work out its own absolute position, and shipped every occupant at
+// that absolute. It is gone, and it must not come back under another name.
+//
+// Two reasons it had to go. It broke the ground rule — a realm is centred on ITSELF and is never told
+// where it sits; only its parent knows that, and the conversion belongs to the parent. And it destroyed
+// precision: a planet's surface position became the difference of two universe-scale doubles, so the
+// millimetres a player walks in were below the representable step long before they reached anyone. The
+// conversion now happens SHARD TO SHARD, one level at a time: each parent applies the single placement IT
+// authored for the child on the path and hands the result on, up or down, so no quantity on the path ever
+// exceeds the scale of the level applying it and nobody ever walks to the root. (A second attempt put that
+// walk in the gateway instead, over a copy of the whole forest. Same breach, one hop further out: a router
+// is the parent of nothing. It was deleted.)
+//
+// What survives is the PIN: which realm a session's whole scene is measured from. That is an identity,
+// not a position, so it stays here.
 
 /// Is this realm a STAR-SYSTEM-level container? Today (P3) `RealmId::System` stands in for Universe, Galaxy,
 /// AND star systems alike (dedicated `Universe`/`Galaxy` arms land at P4+, D-44); a `Planet`/`Station`/`Area`/
@@ -1766,6 +1587,28 @@ impl UniverseConfig {
         cfg
     }
 
+    /// **THE WORLD.** Not a preset, not a scale, not a variant — the only universe this program has.
+    ///
+    /// WHY THIS EXISTS AND WHY EVERYTHING ELSE HERE IS GOING. There used to be a knob, and on a live
+    /// cluster it was MEASURED holding two different values at once: the orchestrator booted one world
+    /// and the gateway another, in the same launch, from the same script. Logins were placed by one
+    /// universe's rules and simulated by another's. That is not a bug in either half — it is what a knob
+    /// IS, and no amount of care downstream removes it. The owner's ruling, twice now: one world, all the
+    /// time, with nothing to select.
+    ///
+    /// The two arguments are NOT a choice of world. They are facts about the cluster running it — how
+    /// fast an occupant may travel and how long a tick lasts — which the interest band has to be measured
+    /// against or it is measured against a number nobody uses.
+    ///
+    /// ⚠ ITS SIZES ARE NOT FINAL, and that is a separate, sequenced piece of work rather than a variant
+    /// hiding here: the geometry below still carries the tiny-world numbers, stations and areas are still
+    /// hand-placed rather than generated, and the galaxy is not yet a lattice of cells. Those land as
+    /// changes to THIS world's numbers. Never as a second one.
+    #[must_use]
+    pub fn world(occupant_v_max_mps: f64, tick_dt_s: f64) -> UniverseConfig {
+        UniverseConfig::visual_demand(occupant_v_max_mps, tick_dt_s)
+    }
+
     /// The WALK-demand preset (RLM 5f-4): the EXACT walk-scale geometry with the AoI band turned LIVE, so a
     /// WALKING occupant drives demand-driven spin-up/down over the static walk forest. Differs from
     /// [`walk_scale`](UniverseConfig::walk_scale) in the `interest` field ONLY (geometry byte-identical). The
@@ -1805,41 +1648,97 @@ impl UniverseConfig {
 mod tests {
     use super::*;
     use crate::frame::IdentityFrames;
-    use crate::geometry::{DepthKey, container, region_depth, region_signed_distance};
-    use crate::ids::UniverseTick;
-    use crate::pose::{FrameRef, StampedPose};
-    use glam::DQuat;
+    use crate::geometry::{region_depth, region_signed_distance};
 
     fn regions() -> Vec<RealmRegion> {
         realm_regions_for(0)
     }
 
-    /// A rest pose at `pos` in the Universe root frame (identity placements at P3 make the frame moot).
-    fn at(pos: DVec3) -> StampedPose {
-        StampedPose {
-            frame: FrameRef::SystemSpace { system_seed: 0 },
-            pos: LatticePos::local(pos),
-            vel: DVec3::ZERO,
-            orient: DQuat::IDENTITY,
-            universe_tick: UniverseTick(0),
-        }
+    #[test]
+    fn default_home_realm_walks_root_galaxy_system_and_refuses_a_degenerate_forest() {
+        // The login fallback home: the FIRST system under the first galaxy under the root — pure
+        // forest-walk, no seed knowledge. A degenerate forest (no root, or no chain below it) is
+        // `None`, so a cluster booted on one fails where it can be seen instead of placing every
+        // account somewhere arbitrary.
+        let world = boot_world_for_tests();
+        let home = default_home_realm(world.regions()).expect("THE world has a home system");
+        assert!(
+            matches!(home, RealmId::System(_)),
+            "the fallback home is a star system: {home:?}"
+        );
+        assert_eq!(default_home_realm(&[]), None, "an empty forest has no home");
+        // A root with nothing under it: the galaxy hop refuses.
+        let bare_root = [world
+            .regions()
+            .iter()
+            .find(|r| r.parent.is_none())
+            .copied()
+            .expect("the world has a root")];
+        assert_eq!(default_home_realm(&bare_root), None);
     }
 
-    /// The instantaneous (hysteresis-free) container realm of `pos`: the members are the regions whose
-    /// surface the point is on/inside (`signed_distance <= 0`), folded from the Universe root — the
-    /// GEOMETRIC CONTRACT the sim's stateful band membership (C-3) layers hysteresis on top of.
-    fn container_at(pos: DVec3) -> RealmId {
-        let rs = regions();
-        let members: Vec<DepthKey> = rs
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| {
-                region_signed_distance(&at(pos), r, &IdentityFrames).expect("identity never errors")
-                    <= 0.0
-            })
-            .map(|(ix, r)| (region_depth(&rs, r.realm), r.realm, ix))
-            .collect();
-        container(UNIVERSE, &members)
+    /// THE world at a nominal occupant speed — the config-driven twin the bins boot uses.
+    fn boot_world_for_tests() -> WorldView {
+        WorldView::generated(0, &UniverseConfig::world(15.0, 0.05))
+    }
+
+    #[test]
+    fn the_world_preset_is_the_visual_demand_geometry_and_the_alias_is_its_twin() {
+        // `UniverseConfig::world` IS `visual_demand` (SL5: one world, the name states the law), and
+        // the held-config alias builds the SAME neighbourhood as the fn it delegates to (HR3: the
+        // seam stays closed — two identical functions consulting different worlds is how the login
+        // side and the simulating side once described different universes from one seed).
+        let world = UniverseConfig::world(15.0, 0.05);
+        let demand = UniverseConfig::visual_demand(15.0, 0.05);
+        assert_eq!(
+            generate_system_forest(0, &world).len(),
+            generate_system_forest(0, &demand).len(),
+            "one geometry"
+        );
+        let held = std::collections::BTreeSet::from([RealmId::System(7)]);
+        assert_eq!(
+            realm_neighbourhood_for_held_config(0, &held, &world),
+            realm_neighbourhood_for_config(0, &held, &world),
+            "the alias is byte-equal to its twin"
+        );
+    }
+
+    #[test]
+    fn the_sibling_fence_judges_an_orbit_on_its_shell_never_its_epoch() {
+        // The overlap fence skips a KEPLER sibling on BOTH sides of the pair loop: an orbit is
+        // judged on its shell (the SOI nesting fence), not on where its epoch anchor happens to sit
+        // — an epoch-position overlap between an orbiting body and a static one is not a defect.
+        let orbital = Placement::Orbital(OrbitalElements {
+            sma: 1.0e11,
+            ecc: 0.0,
+            inclination: 0.0,
+            raan: 0.0,
+            arg_periapsis: 0.0,
+            mean_anomaly_epoch: 0.0,
+            central_mass: 1.989e30,
+        });
+        let body = |realm: RealmId, placement: Placement| GeneratedBody {
+            realm,
+            parent: Some(RealmId::System(1)),
+            shape: Boundary::Shell { r: 10.0 },
+            placement,
+        };
+        // A static + an ORBITING sibling at the "same place": no overlap verdict — the orbiter is
+        // skipped by the inner arm.
+        let mixed = [
+            body(RealmId::Planet(1), Placement::StaticOffset(DVec3::ZERO)),
+            body(RealmId::Planet(2), orbital),
+        ];
+        assert!(siblings_disjoint(&mixed).is_ok());
+        // Two STATIC siblings genuinely overlapping: the fence still fires (non-vacuity).
+        let clash = [
+            body(RealmId::Planet(1), Placement::StaticOffset(DVec3::ZERO)),
+            body(
+                RealmId::Planet(2),
+                Placement::StaticOffset(DVec3::new(5.0, 0.0, 0.0)),
+            ),
+        ];
+        assert!(siblings_disjoint(&clash).is_err());
     }
 
     #[test]
@@ -1900,139 +1799,6 @@ mod tests {
     }
 
     #[test]
-    fn containment_resolves_the_full_walk_scale_mandate_chain() {
-        // Inside planet A's SOI → the PLANET (deepest container).
-        assert_eq!(
-            container_at(DVec3::new(PLANET_A_OFFSET_M, 0.0, 0.0)),
-            PLANET_A
-        );
-        // Inside system A but outside planet A (the origin — the star) → the STAR SYSTEM.
-        assert_eq!(container_at(DVec3::ZERO), SYSTEM_A);
-        // Inside the Station BOX (at (-25,0,0), half=5) → STATION_A: the box is DEEPER (depth 3) than
-        // System 7 (depth 2), so the container fold picks the Station — the first-class box realm wins.
-        assert_eq!(
-            container_at(DVec3::new(STATION_A_OFFSET_M, 0.0, 0.0)),
-            STATION_A
-        );
-        // Inside the Area BOX (at (25,0,0), half=3) → AREA_A: the box (depth 4) is deeper than Planet 7
-        // (depth 3) which contains it, so the Area wins — the DEEPEST realm in the whole forest.
-        assert_eq!(container_at(DVec3::new(AREA_OFFSET_M, 0.0, 0.0)), AREA_A);
-        // In the walkable GAP between the two systems (x=50: outside A's r=40 and B at +100) → the GALAXY
-        // (escape the system → immediately the galaxy — the mandate).
-        assert_eq!(container_at(DVec3::new(50.0, 0.0, 0.0)), GALAXY);
-        // Inside sibling system B → SYSTEM_B (the other side of the round trip).
-        assert_eq!(
-            container_at(DVec3::new(SYSTEM_B_OFFSET_M, 0.0, 0.0)),
-            SYSTEM_B
-        );
-        // Beyond the galaxy but within the universe → the UNIVERSE root.
-        assert_eq!(container_at(DVec3::new(5_000.0, 0.0, 0.0)), UNIVERSE);
-        // Beyond EVERYTHING (outside the universe shell) → STILL the Universe, by fold identity.
-        assert_eq!(container_at(DVec3::new(1.0e15, 0.0, 0.0)), UNIVERSE);
-    }
-
-    /// The FULL-lineage container coord of `pos` under the P3 walk forest (`seed 0`, `walk_scale`) —
-    /// the un-lossy `container_coord_at` twin of `container_at`.
-    fn coord_at(pos: DVec3) -> RealmCoord {
-        // Against the FIXTURE forest — the one with a hand-placed station and area, standing in for what
-        // a player would have built. The generated world contains neither, at any scale, so resolving a
-        // station chain against it would be asking about somewhere that does not exist.
-        container_coord_in(&realm_regions_for(0), pos)
-    }
-
-    /// An expected lineage from `(kind, seed)` pairs, root → leaf.
-    fn lineage(levels: &[(RealmKindTag, u64)]) -> RealmPath {
-        RealmPath::from_levels(levels.iter().map(|&(k, s)| RealmLevel::new(k, s)).collect())
-    }
-
-    #[test]
-    fn container_coord_resolves_the_full_lineage_for_the_walk_mandate_chain() {
-        use RealmKindTag::{Area, Galaxy, Planet, Station, System, Universe};
-        // The WHOLE POINT of this function vs `container_at`: it returns the FULL root→leaf lineage, so
-        // every case asserts `.path()` level-for-level (not just the lossy leaf `.lowered()`).
-
-        // Inside Planet A's SOI (20,0,0) → the full [Universe, Galaxy, System A, Planet A] lineage, which
-        // LOWERS to the leaf Planet A (lineage + lowered agree).
-        let planet = coord_at(DVec3::new(PLANET_A_OFFSET_M, 0.0, 0.0));
-        assert_eq!(
-            planet.path(),
-            &lineage(&[(Universe, 0), (Galaxy, 1), (System, 7), (Planet, 7)])
-        );
-        assert_eq!(planet.lowered(), PLANET_A);
-
-        // The origin (the star) → [Universe, Galaxy, System A] (inside System A, outside Planet A).
-        let origin = coord_at(DVec3::ZERO);
-        assert_eq!(
-            origin.path(),
-            &lineage(&[(Universe, 0), (Galaxy, 1), (System, 7)])
-        );
-        assert_eq!(origin.lowered(), SYSTEM_A);
-
-        // The Station BOX (-25,0,0) → the Station lineage (depth 3 directly under System A).
-        let station = coord_at(DVec3::new(STATION_A_OFFSET_M, 0.0, 0.0));
-        assert_eq!(
-            station.path(),
-            &lineage(&[(Universe, 0), (Galaxy, 1), (System, 7), (Station, 7)])
-        );
-        assert_eq!(station.lowered(), STATION_A);
-
-        // The Area BOX (25,0,0) → the DEEPEST 5-level lineage [Universe, Galaxy, System A, Planet A,
-        // Area A] (the descend recurses past Planet A into its Area child).
-        let area = coord_at(DVec3::new(AREA_OFFSET_M, 0.0, 0.0));
-        assert_eq!(
-            area.path(),
-            &lineage(&[
-                (Universe, 0),
-                (Galaxy, 1),
-                (System, 7),
-                (Planet, 7),
-                (Area, 7)
-            ])
-        );
-        assert_eq!(area.lowered(), AREA_A);
-
-        // Inside the SIBLING System B (130,0,0) → its own [Universe, Galaxy, System B] lineage (System 8,
-        // NOT System 7 — the lineage disambiguates the two same-depth systems).
-        let system_b = coord_at(DVec3::new(SYSTEM_B_OFFSET_M, 0.0, 0.0));
-        assert_eq!(
-            system_b.path(),
-            &lineage(&[(Universe, 0), (Galaxy, 1), (System, 8)])
-        );
-        assert_eq!(system_b.lowered(), SYSTEM_B);
-
-        // Outside everything but inside the Universe (5000,0,0: beyond the Galaxy r=180, inside the
-        // Universe r=1e9) → JUST the root [Universe] (no direct child of the root contains it).
-        let root = coord_at(DVec3::new(5_000.0, 0.0, 0.0));
-        assert_eq!(root.path(), &lineage(&[(Universe, 0)]));
-        assert_eq!(root.lowered(), UNIVERSE);
-
-        // Beyond the Universe shell too (1e15) → STILL just [Universe] by the container-fold identity
-        // (the root is unconditional — its own boundary is never tested).
-        let beyond = coord_at(DVec3::new(1.0e15, 0.0, 0.0));
-        assert_eq!(beyond.path(), &lineage(&[(Universe, 0)]));
-        assert_eq!(beyond.lowered(), UNIVERSE);
-    }
-
-    #[test]
-    fn container_coord_at_is_a_deterministic_pure_function() {
-        // f(seed, config, pos): byte-identical across calls (no `Date::now`/rng), so the orchestrator's
-        // ancestor-closure is reproducible cross-host (HR1). Two independent resolves of the deepest
-        // point (Area A) are equal, path and all.
-        let a = coord_at(DVec3::new(AREA_OFFSET_M, 0.0, 0.0));
-        let b = container_coord_in(&realm_regions_for(0), DVec3::new(AREA_OFFSET_M, 0.0, 0.0));
-        assert_eq!(a, b);
-        // And the REAL resolver is deterministic too — over the generated world, which contains no
-        // player-built structure, so it stops at the star rather than descending to an area.
-        assert_eq!(
-            container_coord_at(0, &UniverseConfig::visual_scale(), DVec3::ZERO),
-            container_coord_at(0, &UniverseConfig::visual_scale(), DVec3::ZERO)
-        );
-        // The lineage length is exactly depth + 1 (root at index 0, leaf last) — the descend appended a
-        // level per hop, never truncating (the "full lineage, not lowered()" contract).
-        assert_eq!(a.path().levels().len(), 5);
-    }
-
-    #[test]
     fn coord_of_realm_resolves_the_full_root_rooted_lineage_and_is_none_for_a_ship() {
         // The un-lossy RealmId→RealmCoord a source shard uses to KeepAlive-demand a crossing DEST's whole
         // ancestor chain (the Symptom-B freeze fix). A System resolves to [Universe, Galaxy, System]; a
@@ -2066,7 +1832,12 @@ mod tests {
             .find(|r| r.realm == SYSTEM_A)
             .expect("system A is in the forest");
         // At the system center: signed distance = -r_soi (fully inside). Identity frame ⇒ pos unchanged.
-        let sd = region_signed_distance(&at(DVec3::ZERO), system_a, &IdentityFrames).expect("ok");
+        let at_centre = crate::pose::StampedPose::at_rest(
+            crate::pose::FrameRef::SystemSpace { system_seed: 0 },
+            DVec3::ZERO,
+            crate::ids::UniverseTick(0),
+        );
+        let sd = region_signed_distance(&at_centre, system_a, &IdentityFrames).expect("ok");
         assert!(
             (sd - (-SYSTEM_SOI_R_M)).abs() < 1e-9,
             "center is r_soi inside: {sd}"
@@ -2370,7 +2141,11 @@ mod tests {
             ),
             (
                 AREA_A,
-                DVec3::new(25.0, 0.0, 0.0),
+                // +5 FROM ITS PARENT, the planet at +20 — so still +25 in the system's frame, the same
+                // place it has always occupied. The golden used to read 25 here, an absolute on a field
+                // that means "offset from my parent"; it went unnoticed while nothing converted between
+                // levels. The number changed; the world did not.
+                DVec3::new(5.0, 0.0, 0.0),
                 Boundary::Aabb {
                     half: DVec3::splat(3.0),
                 },
@@ -2537,27 +2312,6 @@ mod tests {
     }
 
     #[test]
-    fn a_resolved_home_is_always_in_the_world_that_resolved_it() {
-        // The invariant the gateway leans on, stated over the world itself rather than over a seed and a
-        // config that might build a different one. Swept across the volume so it is a property, not a point.
-        for config in [
-            UniverseConfig::visual_scale(),
-            UniverseConfig::walk_scale(),
-        ] {
-            for world in [WorldView::generated(0, &config), WorldView::hand_placed(&config)] {
-                for step in 0..40_i32 {
-                    let x = f64::from(step) * 60.0;
-                    let home = world.container_coord(DVec3::new(x, 0.0, 0.0));
-                    assert!(
-                        world.contains_realm(home.lowered()),
-                        "a home resolved at x={x} is in the world that resolved it"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn the_hand_placed_world_is_the_one_with_structures_to_stand_in() {
         // Stations are built by players and areas mostly are, so the generator emits neither — which is why
         // a test that needs one places it. Pinned both ways: the placed world HAS them, the generated world
@@ -2576,19 +2330,17 @@ mod tests {
     }
 
     #[test]
-    fn the_world_answers_neighbourhood_and_origin_chain_from_its_own_contents() {
-        // The remaining two questions a world is asked, each equal to the free function it delegates to —
-        // so holding a world can never mean a different answer than deriving one, only a cheaper one.
+    fn the_world_answers_neighbourhood_from_its_own_contents() {
+        // The remaining questions a world is asked, each equal to the free function it delegates to — so
+        // holding a world can never mean a different answer than deriving one, only a cheaper one. It was
+        // also asked for a realm's ORIGIN CHAIN; that question no longer exists, because no realm is
+        // entitled to know where it sits.
         let cfg = UniverseConfig::visual_scale();
         let world = WorldView::generated(0, &cfg);
         let held = std::collections::BTreeSet::from([SYSTEM_A]);
         assert_eq!(
             world.neighbourhood(&held),
             realm_neighbourhood_for_config(0, &held, &cfg)
-        );
-        assert_eq!(
-            world.origin_chain(SYSTEM_A),
-            origin_chain_for_config(0, &cfg, SYSTEM_A)
         );
         assert_eq!(world.regions(), realm_regions_for_config(0, &cfg));
     }
@@ -2683,11 +2435,12 @@ mod tests {
         {
             let parent = r.parent.expect("a planet always sits inside its system");
             let system_extent = extent_of(parent).expect("the parent system is in the same forest");
+            // The reach and the bound as plain values FIRST (HR5: an expression inside a passing
+            // assert's message is a region no run evaluates), then a literal-message assert.
+            let (reach, must_cross) = (r.aoi.spin_up_r_m(), 2.0 * system_extent);
             assert!(
-                r.aoi.spin_up_r_m() >= 2.0 * system_extent,
-                "planet reaches {:.1} m but must cross its own {:.1} m system",
-                r.aoi.spin_up_r_m(),
-                system_extent
+                reach >= must_cross,
+                "a planet's reach must cross its own system"
             );
             planets_checked += 1;
         }
@@ -3141,11 +2894,10 @@ mod tests {
         let (outer, orbit) = outer_planet_orbit(&cfg);
         // The closest a neighbouring star ever gets to this planet: the ring, less its orbit at worst phase.
         let from_the_next_star = cfg.stellar.system_ring_r_m - orbit;
+        let reach = outer.aoi.tear_down_r_m();
         assert!(
-            outer.aoi.tear_down_r_m() < from_the_next_star,
-            "the outer planet must be asleep from the next star ({:.1} m reach vs {:.1} m away)",
-            outer.aoi.tear_down_r_m(),
-            from_the_next_star
+            reach < from_the_next_star,
+            "the outer planet must be asleep from the next star"
         );
     }
 
@@ -3209,7 +2961,10 @@ mod tests {
             .map(|b| b.realm)
             .collect();
         assert_eq!(systems.len(), n_sys);
-        assert!(systems.contains(&SYSTEM_A), "system 0 keeps the named identity");
+        assert!(
+            systems.contains(&SYSTEM_A),
+            "system 0 keeps the named identity"
+        );
         for b in bodies.iter().skip(2) {
             if systems.contains(&b.realm) {
                 assert_eq!(orbital_of(b.placement), None, "a star does not orbit");
@@ -3245,7 +3000,11 @@ mod tests {
                 .iter()
                 .filter(|b| b.parent == Some(sys.realm))
                 .count();
-            assert_eq!(mine, VISUAL_N_PLANETS as usize, "{:?} has its own planets", sys.realm);
+            assert_eq!(
+                mine, VISUAL_N_PLANETS as usize,
+                "{:?} has its own planets",
+                sys.realm
+            );
         }
         let planets: std::collections::BTreeSet<_> = bodies
             .iter()
@@ -3282,7 +3041,10 @@ mod tests {
         cfg.stellar.system_ring_r_m = cfg.stellar.system_soi_r_m;
         let overlapping = generate_system_forest(0, &cfg);
         let err = siblings_disjoint(&overlapping).expect_err("touching systems must be refused");
-        assert_eq!(err.parent, GALAXY, "the ambiguity is between children of the galaxy");
+        assert_eq!(
+            err.parent, GALAXY,
+            "the ambiguity is between children of the galaxy"
+        );
 
         // Spread them and the same forest is accepted — so the refusal is about the GEOMETRY, not about
         // having more than one star.
@@ -3304,7 +3066,10 @@ mod tests {
         // separate check over the moving roster; until it exists, orbital overlap is UNCHECKED.
         let cfg = UniverseConfig::visual_scale();
         let bodies = generate_system_forest(0, &cfg);
-        let orbiting = bodies.iter().filter(|b| orbital_of(b.placement).is_some()).count();
+        let orbiting = bodies
+            .iter()
+            .filter(|b| orbital_of(b.placement).is_some())
+            .count();
         assert_eq!(
             orbiting,
             (VISUAL_N_SYSTEMS * VISUAL_N_PLANETS) as usize,
@@ -3315,21 +3080,7 @@ mod tests {
         assert_eq!(siblings_disjoint(&bodies), Ok(()));
     }
 
-    // ---- A2: seed-derived origin chain + fold (the iron rule) ----
-
-    #[test]
-    fn origin_link_derives_are_exercised() {
-        let config = UniverseConfig::visual_scale();
-        let planet = generate_system_forest(0, &config)
-            .into_iter()
-            .find(|b| matches!(b.realm, RealmId::Planet(_)))
-            .expect("a planet");
-        let orbital = origin_link_of(planet.placement);
-        assert_eq!(OriginLink::Fixed, OriginLink::Fixed);
-        assert_ne!(OriginLink::Fixed, orbital);
-        assert!(format!("{orbital:?}").contains("Orbital"));
-        assert!(format!("{:?}", OriginLink::Fixed).contains("Fixed"));
-    }
+    // ---- the render-origin PIN classifier ----
 
     #[test]
     fn pin_realm_of_selects_the_system_and_falls_back_to_the_root() {
@@ -3361,179 +3112,83 @@ mod tests {
         // D-FO-7 decision (parent per-tick rows behind a realm-lane AoI cull, vs the child shard authoring its
         // own box row) must be taken before the widening lands.
         // The invariant, stated as SET EQUALITY (HR5-clean — no branch on the never-true "static-under-varying"
-        // condition, whose true arm would be uncoverable): a realm's FULL origin chain varies IFF the realm is
-        // ITSELF a mover. A static realm inheriting a varying ancestor is exactly the case where the two sets
-        // diverge (its chain varies but its own link is Fixed). Both filter arms are genuinely exercised — a
-        // planet (Orbital ⇒ true) and an ambient body (Fixed ⇒ false) exist in every forest.
+        // condition, whose true arm would be uncoverable): a realm moves-or-inherits-motion IFF the realm is
+        // ITSELF a mover. A static realm inheriting a moving ancestor is exactly the case where the two sets
+        // diverge. Both filter arms are genuinely exercised — a planet (Orbital ⇒ true) and an ambient body
+        // (Static ⇒ false) exist in every forest.
+        //
+        // This used to ask the question through the seed-derived ORIGIN CHAIN, which is gone: no realm folds
+        // its own absolute any more. The question itself survives untouched — it is about the FOREST's shape,
+        // not about anybody's absolute — so it is now asked directly of the parent links.
+        let moving_anywhere_above = |bodies: &[GeneratedBody], realm: RealmId| -> bool {
+            let mut cur = realm;
+            for _ in 0..bodies.len() {
+                let Some(body) = bodies.iter().find(|b| b.realm == cur) else {
+                    return false; // unknown realm — no ancestry to inherit motion from
+                };
+                if orbital_of(body.placement).is_some() {
+                    return true;
+                }
+                match body.parent {
+                    None => return false, // the ambient root — the walk is complete
+                    Some(parent) => cur = parent,
+                }
+            }
+            false // hop cap — a cycle, which the boot guard rejects; a safe stop, never a hang
+        };
+        // The walk's own edge arms, driven where the forest cannot produce them: an UNKNOWN realm has
+        // no ancestry to inherit motion from; a CYCLE (which the boot guard rejects at boot) stops at
+        // the hop cap instead of hanging — both answer "no motion", never a panic.
+        let unknown_only = [GeneratedBody {
+            realm: RealmId::System(1),
+            parent: None,
+            shape: Boundary::Shell { r: 1.0 },
+            placement: Placement::StaticOffset(DVec3::ZERO),
+        }];
+        assert!(
+            !moving_anywhere_above(&unknown_only, RealmId::Planet(999)),
+            "an unknown realm inherits nothing"
+        );
+        let cycle = [
+            GeneratedBody {
+                realm: RealmId::System(1),
+                parent: Some(RealmId::System(2)),
+                shape: Boundary::Shell { r: 1.0 },
+                placement: Placement::StaticOffset(DVec3::ZERO),
+            },
+            GeneratedBody {
+                realm: RealmId::System(2),
+                parent: Some(RealmId::System(1)),
+                shape: Boundary::Shell { r: 1.0 },
+                placement: Placement::StaticOffset(DVec3::ZERO),
+            },
+        ];
+        assert!(
+            !moving_anywhere_above(&cycle, RealmId::System(1)),
+            "a cycle stops at the hop cap — a safe no, never a hang"
+        );
         let config = UniverseConfig::visual_scale();
         for seed in [0u64, 1, 7, 42, 100] {
             let bodies = generate_system_forest(seed, &config);
             let mut varying_chain: Vec<RealmId> = bodies
                 .iter()
-                .filter(|b| origin_varies(&origin_chain_over(&bodies, b.realm)))
+                .filter(|b| moving_anywhere_above(&bodies, b.realm))
                 .map(|b| b.realm)
                 .collect();
             let mut movers: Vec<RealmId> = bodies
                 .iter()
-                .filter(|b| origin_varies(&[origin_link_of(b.placement)]))
+                .filter(|b| orbital_of(b.placement).is_some())
                 .map(|b| b.realm)
                 .collect();
             varying_chain.sort();
             movers.sort();
             assert_eq!(
                 varying_chain, movers,
-                "D-FO-7 (seed {seed}): a realm's chain varies IFF it is itself a mover — a divergence means a \
+                "D-FO-7 (seed {seed}): a realm inherits motion IFF it is itself a mover — a divergence means a \
                  static realm now hangs under a moving ancestor, which the realm feed's movers-only filter \
                  would silently drop. Take the D-FO-7 decision before the widening lands."
             );
         }
-    }
-
-    #[test]
-    fn fold_origin_is_identity_for_an_all_fixed_chain() {
-        let (pos, vel) = fold_origin(
-            &[OriginLink::Fixed, OriginLink::Fixed, OriginLink::Fixed],
-            123.0,
-        );
-        assert_eq!(pos, LatticePos::local(DVec3::ZERO));
-        assert_eq!(vel, DVec3::ZERO);
-    }
-
-    #[test]
-    fn fold_origin_of_a_planet_chain_equals_its_orbital_state_at_cell_zero() {
-        let config = UniverseConfig::visual_scale();
-        let bodies = generate_system_forest(0, &config);
-        let planet = bodies
-            .iter()
-            .find(|b| matches!(b.realm, RealmId::Planet(_)))
-            .expect("a planet");
-        let elements = orbital_of(planet.placement).expect("a planet is Orbital");
-        let secs = 321.0;
-        let (pos, vel) = fold_origin(&origin_chain_for_config(0, &config, planet.realm), secs);
-        let state = orbital_state(&elements, secs);
-        // Ancestors are all StaticOffset(ZERO) ⇒ the fold is the bare orbital state, cell 0 (byte-floor).
-        assert!((pos.offset() - state.position).length() < 1e-9);
-        assert_eq!(pos.cell(), glam::I64Vec3::ZERO);
-        assert!((vel - state.velocity).length() < 1e-9);
-    }
-
-    #[test]
-    fn fold_origin_of_a_fixed_under_an_orbital_rides_the_orbit() {
-        // A static child (a station) under an orbiting parent: the Fixed link adds nothing, so the child's
-        // frame origin folds to the SAME orbital position as its parent — it rides the orbit.
-        let config = UniverseConfig::visual_scale();
-        let planet = generate_system_forest(0, &config)
-            .into_iter()
-            .find(|b| matches!(b.realm, RealmId::Planet(_)))
-            .expect("a planet");
-        let secs = 55.0;
-        let parent_chain = origin_chain_for_config(0, &config, planet.realm);
-        let mut child_chain = parent_chain.clone();
-        child_chain.push(OriginLink::Fixed);
-        assert_eq!(
-            fold_origin(&parent_chain, secs),
-            fold_origin(&child_chain, secs)
-        );
-    }
-
-    #[test]
-    fn fold_origin_sums_two_orbital_levels() {
-        let config = UniverseConfig::visual_scale();
-        let planet = generate_system_forest(0, &config)
-            .into_iter()
-            .find(|b| matches!(b.realm, RealmId::Planet(_)))
-            .expect("a planet");
-        let e = orbital_of(planet.placement).expect("Orbital");
-        let secs = 77.0;
-        let (pos, vel) = fold_origin(&[OriginLink::Orbital(e), OriginLink::Orbital(e)], secs);
-        let s = orbital_state(&e, secs);
-        assert!((pos.offset() - (s.position + s.position)).length() < 1e-9);
-        assert!((vel - (s.velocity + s.velocity)).length() < 1e-9);
-    }
-
-    #[test]
-    fn origin_varies_is_true_for_a_mover_chain_and_false_for_all_fixed() {
-        let config = UniverseConfig::visual_scale();
-        let planet = generate_system_forest(0, &config)
-            .into_iter()
-            .find(|b| matches!(b.realm, RealmId::Planet(_)))
-            .expect("a planet");
-        assert!(origin_varies(&origin_chain_for_config(
-            0,
-            &config,
-            planet.realm
-        )));
-        assert!(!origin_varies(&origin_chain_for_walk_config(
-            &UniverseConfig::walk_scale(),
-            SYSTEM_A
-        )));
-        assert!(!origin_varies(&[]));
-    }
-
-    #[test]
-    fn origin_chain_for_config_ends_in_an_orbital_link_for_a_planet() {
-        let config = UniverseConfig::visual_scale();
-        let planet = generate_system_forest(0, &config)
-            .into_iter()
-            .find(|b| matches!(b.realm, RealmId::Planet(_)))
-            .expect("a planet");
-        let chain = origin_chain_for_config(0, &config, planet.realm);
-        // Universe > Galaxy > System A > Planet: 4 links, the last Orbital, the rest Fixed.
-        assert_eq!(chain.len(), 4);
-        assert_eq!(chain[0], OriginLink::Fixed);
-        assert_eq!(chain[1], OriginLink::Fixed);
-        assert_eq!(chain[2], OriginLink::Fixed);
-        // the last link is Orbital — the only non-Fixed variant, so assert_ne avoids a matches! false arm.
-        assert_ne!(chain[3], OriginLink::Fixed);
-    }
-
-    #[test]
-    fn origin_chain_for_walk_config_is_all_fixed_and_folds_to_identity() {
-        let config = UniverseConfig::walk_scale();
-        // Area A is the deepest walk realm: Universe > Galaxy > System A > Planet A > Area A (5 links).
-        let chain = origin_chain_for_walk_config(&config, AREA_A);
-        assert_eq!(chain.len(), 5);
-        assert!(chain.iter().all(|l| *l == OriginLink::Fixed));
-        let (pos, vel) = fold_origin(&chain, 999.0);
-        assert_eq!(pos, LatticePos::local(DVec3::ZERO));
-        assert_eq!(vel, DVec3::ZERO);
-    }
-
-    #[test]
-    fn origin_chain_reads_no_child_list() {
-        // THE IRON RULE: a realm's origin chain walks UP its parents only. Adding a SIBLING (another child of
-        // the same parent) must leave the realm's chain AND its fold byte-identical — the chain never reads
-        // the parent's child set. (The reverted attempt derived a realm's own position from its children.)
-        let config = UniverseConfig::visual_scale();
-        let bodies = generate_system_forest(0, &config);
-        let planet = bodies
-            .iter()
-            .find(|b| matches!(b.realm, RealmId::Planet(_)))
-            .expect("a planet");
-        let planet_realm = planet.realm;
-        let planet_parent = planet.parent;
-        let elements = orbital_of(planet.placement).expect("Orbital");
-        let baseline = origin_chain_over(&bodies, planet_realm);
-        // A fresh forest + an appended SIBLING (same parent, different realm) — no clone of a body needed.
-        let mut with_sibling = generate_system_forest(0, &config);
-        with_sibling.push(GeneratedBody {
-            realm: RealmId::Planet(0xDEAD_BEEF),
-            parent: planet_parent,
-            shape: Boundary::Shell { r: 1.0 },
-            placement: Placement::Orbital(elements),
-        });
-        let after = origin_chain_over(&with_sibling, planet_realm);
-        assert_eq!(
-            baseline, after,
-            "a sibling must not change the realm's origin chain"
-        );
-        assert_eq!(fold_origin(&baseline, 42.0), fold_origin(&after, 42.0));
-    }
-
-    #[test]
-    fn origin_chain_of_an_unknown_realm_is_empty() {
-        let config = UniverseConfig::visual_scale();
-        assert!(origin_chain_for_config(0, &config, RealmId::Planet(0x00C0_FFEE)).is_empty());
     }
 
     #[test]

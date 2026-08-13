@@ -7,6 +7,7 @@
 #
 #   scripts/client.sh --name walker  --agent-index 0            # headless (vdctl-driven)
 #   scripts/client.sh --name walker  --agent-index 0 --window   # Bevy window (walk a dot)
+#   scripts/client.sh --name walker  --agent-index 0 --window --fast   # ^ + fast relink
 #   scripts/client.sh --name watcher --agent-index 1
 #
 # The slot DEFAULTS to this worktree's stable value (matching what
@@ -26,6 +27,7 @@ AGENT=0
 NAME="client"
 WINDOW=0
 CAPTURE=0
+FAST=0
 REALM_BOXES=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,6 +36,9 @@ while [[ $# -gt 0 ]]; do
         --name) NAME="${2:?--name needs a value}"; shift 2 ;;
         --window) WINDOW=1; shift ;;
         --capture) CAPTURE=1; shift ;;
+        # Link Bevy as ONE shared library instead of statically into the client binary
+        # (see the FAST block below). Pure build-speed knob; changes no behaviour.
+        --fast) FAST=1; shift ;;
         # Boot-load a colored-box render scene (the Visual Crossing Playground): a boxes.json =
         # Vec<RealmBoundary>, drawn as translucent realm boxes the dot walks between.
         --realm-boxes) REALM_BOXES="${2:?--realm-boxes needs a value}"; shift 2 ;;
@@ -41,8 +46,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# NOT `-q` (here or at the client build below), deliberately — see the note in
+# dev-cluster.sh: `-q` hides "Blocking waiting for file lock on build directory", which is
+# what a build queued behind another cargo prints, and without it a queued build looks
+# exactly like a compiling one for as long as the queue lasts.
 [[ -x "$TARGET/vd-slot" && -x "$TARGET/vd-devcluster" ]] \
-    || cargo build -q --manifest-path "$ROOT/Cargo.toml" -p vd-bins
+    || cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins
 
 # Default the slot to this worktree's stable value (same derivation dev-cluster.sh used).
 if [[ -z "$SLOT" ]]; then
@@ -67,7 +76,26 @@ CLIENT_BIN="$TARGET/client"
 # is opt-in. Builds are incremental — effectively a no-op once current.
 FEATURES="dev-control"
 { [[ "$WINDOW" == "1" ]] || [[ "$CAPTURE" == "1" ]]; } && FEATURES="dev-control,render"
-cargo build -q --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features "$FEATURES"
+
+# `--fast`: swap the statically-linked Bevy for the dylib one (`render-dylib`). This is the
+# EDIT-REBUILD-LOOK loop's knob — with the graph warm, the client bin's link is what you
+# wait on, and linking against one shared library instead of relocating all of Bevy is the
+# bulk of it.
+#
+# OPT-IN, and it stays opt-in: `render-dylib` is a DIFFERENT feature set, so alternating
+# between `--fast` and a plain `--window`/`--capture` in the SAME build directory makes
+# cargo rebuild Bevy each way. Pick one per session. It is also NEVER what a gate or a
+# container builds — those link exactly what ships (`render`), which is why this is a
+# script flag and not a default.
+if [[ "$FAST" == "1" ]]; then
+    if [[ "$FEATURES" == "dev-control" ]]; then
+        echo "client.sh: --fast only affects the Bevy build; add --window or --capture" >&2
+        exit 1
+    fi
+    FEATURES="dev-control,render-dylib"
+fi
+
+cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features "$FEATURES"
 
 # The agent drives this client over the dev-control listener: input injection at
 # the same seam the keyboard uses, `state`/`wait-until` reads of the decoded
@@ -86,4 +114,20 @@ CMD=(
 [[ "$WINDOW" == "1" ]] && CMD+=(--window)
 [[ "$CAPTURE" == "1" ]] && CMD+=(--capture)
 [[ -n "$REALM_BOXES" ]] && CMD+=(--realm-boxes "$REALM_BOXES")
+
+# `--fast` only: hand the dynamic loader the search path it needs. A dylib build leaves the
+# binary asking for `@rpath/libstd-*.dylib` while carrying NO LC_RPATH at all, so running it
+# directly dies at load with "no LC_RPATH's found". `cargo run` hides this by injecting the
+# path into the child; we exec the binary ourselves (the env-var contract above requires it),
+# so we must do the same. Rust's own dylibs live in the toolchain; libbevy_dylib is referenced
+# by absolute path and needs no help, but deps/ is included so a future @rpath dep also
+# resolves. Set at LAUNCH, not build: adding `-C rpath` would change RUSTFLAGS and cost a full
+# rebuild for something the loader can be told at zero cost. Non-fast builds are static and
+# deliberately get no such variable.
+if [[ "$FAST" == "1" ]]; then
+    RUST_SYSROOT="$(rustc --print sysroot)"
+    RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
+    export DYLD_FALLBACK_LIBRARY_PATH="$RUST_SYSROOT/lib/rustlib/$RUST_HOST/lib:$TARGET/deps${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+fi
+
 exec "${CMD[@]}"

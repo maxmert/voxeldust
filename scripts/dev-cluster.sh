@@ -27,7 +27,13 @@ for bin in vd-devcluster vd-orchestrator vd-gateway vd-shard vd-slot; do
 done
 if [[ "$need_build" == 1 ]]; then
     echo "dev-cluster.sh: building the node binaries…" >&2
-    cargo build -q --manifest-path "$ROOT/Cargo.toml" -p vd-bins
+    # NOT `-q`, deliberately. Cargo takes an EXCLUSIVE lock on the build directory, so a
+    # second cargo anywhere on the machine (an agent session's check/test, another script)
+    # makes this call sit and wait — and `-q` suppresses the one line that says so
+    # ("Blocking waiting for file lock on build directory"). That turned a queued build
+    # into a silent 30-minute stall indistinguishable from compiling. Measured 2026-08-11:
+    # a 33m52s client build that wrote ZERO artifacts because it was queued the whole time.
+    cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins
 fi
 
 # Default the slot to this worktree's stable value unless the caller set --slot.

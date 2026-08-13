@@ -158,6 +158,11 @@ pub fn register_orchestrator_with_store(
     world.insert_resource(DirectoryRes(directory));
     world.insert_resource(ClockPeers(cfg.clock_peers.clone()));
     world.insert_resource(DynamicClockPeers::default());
+    // The roster publisher's memory of what it last sent. Inserted HERE, beside every other resource the
+    // schedule reads, because a system whose parameter is missing does not degrade — bevy fails the whole
+    // tick, so the orchestrator dies on its first one and every login hangs at `AwaitingWelcome` with
+    // nothing in any counter to explain why. That is precisely what happened when this line was absent.
+    world.insert_resource(PublishedShardRoster::default());
     world.insert_resource(OrchestratorStats::default());
     world.insert_resource(runtime);
     world.insert_resource(crate::saga_runtime::StoreRes(store));
@@ -198,10 +203,58 @@ pub fn register_orchestrator_with_store(
             serve_directory,
             crate::saga_runtime::drive_sagas_core,
             reconcile_realm_lifecycle,
+            publish_shard_roster,
             crate::saga_runtime::commit_barrier,
         )
             .chain(),
     );
+}
+
+/// The last roster this orchestrator published, so an unchanged one is not re-sent every tick.
+///
+/// Holding the sent VALUE rather than a dirty flag is deliberate: the roster is derived from the
+/// ownership record by a pure read, so "has it changed" is answerable by comparing the answer, and no
+/// mutator anywhere has to remember to raise a flag. A flag is a second thing to keep in step, and
+/// keeping two things in step is the defect this whole change exists to remove.
+#[derive(Resource, Default)]
+struct PublishedShardRoster(Vec<NodeId>);
+
+/// Tell every gateway which nodes the ownership record shows holding a realm — the fact a router needs
+/// to decide whose frames it may read at all.
+///
+/// WHY THE ORCHESTRATOR SAYS IT. A node cannot put itself on this list: it gets here by holding a realm
+/// in the record, and that record changes only through the fence commit, which this process performs.
+/// Node class is authority, and authority is derived from the record — it was the one authority fact in
+/// the system that a router was inferring from somewhere else, and the cost was measured: 14,884 frames
+/// from a running planet shard discarded on one cluster, including every position of the player who had
+/// just re-homed into it.
+///
+/// SENT ON CHANGE, AS A WHOLE LEVEL. An unchanged roster sends nothing, so a settled cluster pays
+/// nothing per tick; a changed one sends the complete set, so a gateway that missed a message is
+/// corrected by the next change rather than left permanently deaf to a live shard. The set is sorted and
+/// deduplicated at its source, so "changed" is a byte comparison and not a judgement.
+///
+/// ADDRESSED FROM THE SAME RECORD. The gateways are the nodes the record shows holding SESSIONS — so
+/// this needs no roster of gateways in config to drift out of date, and a gateway that holds no session
+/// is told nothing because it is routing nobody.
+fn publish_shard_roster(
+    clock: Res<ClockSample>,
+    dir: Res<DirectoryRes>,
+    mut published: ResMut<PublishedShardRoster>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    let nodes = dir.0.realm_holders();
+    if nodes == published.0 {
+        return; // nothing moved: a settled cluster costs nothing
+    }
+    published.0.clone_from(&nodes);
+    let flow = InterShardFlow::ShardRoster(vd_wire::intershard::ShardRoster {
+        nodes,
+        at: clock.universe_tick,
+    });
+    for gateway in dir.0.session_gateways() {
+        outbox.push_flow(gateway, MsgClass::Saga, &flow);
+    }
 }
 
 /// Advance the authoritative clock one tick and broadcast `ClockSync` to every
@@ -476,15 +529,7 @@ mod tests {
                 hub.register(ORCH, 64),
             );
             let (world, schedule) = orch.parts_mut();
-            register_orchestrator(
-                world,
-                schedule,
-                &OrchestratorConfig {
-                    rlm,
-                    saga,
-                    ..cfg()
-                },
-            );
+            register_orchestrator(world, schedule, &OrchestratorConfig { rlm, saga, ..cfg() });
             assert_eq!(
                 world
                     .resource::<crate::rlm_runtime::RlmReconcilerRes>()
@@ -541,6 +586,81 @@ mod tests {
         assert_eq!(
             orch.world_mut().resource::<ClockSample>().universe_tick,
             UniverseTick(201)
+        );
+    }
+
+    #[test]
+    fn the_shard_roster_publishes_on_change_to_session_gateways_and_settles_silent() {
+        // Minor 9's roster lane, at its source: the level ships ONLY when the record's realm-holder
+        // set changes, addressed to the nodes the record shows holding SESSIONS. A settled cluster
+        // pays nothing per tick; a gateway holding no session is told nothing (it routes nobody).
+        let hub = MemHub::new();
+        let mut orch = build_app(
+            NodeConfig {
+                node_id: ORCH,
+                kind: NodeKind::Orchestrator,
+            },
+            hub.register(ORCH, 64),
+        );
+        let (world, schedule) = orch.parts_mut();
+        register_orchestrator(world, schedule, &cfg());
+        let mut gateway_t = hub.register(GATEWAY, 64);
+        // The record: SHARD holds a realm (the roster's content), GATEWAY holds a session (the
+        // roster's address list).
+        {
+            let mut dir = orch.world_mut().resource_mut::<DirectoryRes>();
+            let _ = dir.0.grant(
+                DirectoryKey::Realm(RealmId::System(7)),
+                AuthorityRef::Shard(SHARD),
+                Fence(1),
+                UniverseTick(0),
+            );
+            let _ = dir.0.grant(
+                DirectoryKey::Session(SessionId(9)),
+                AuthorityRef::Gateway(GATEWAY),
+                Fence(1),
+                UniverseTick(0),
+            );
+        }
+        // Full-inbound VALUE equality, the clock test's own discipline — no filter, no arm to leave
+        // dead. Tick 1 delivers the ClockSync (every peer's) and the changed roster; tick 2, with
+        // the record settled, delivers the ClockSync alone (send-on-change measured as absence).
+        let sync_at = |tick: u64| Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Membership,
+            bytes: postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::ClockSync {
+                universe_tick: UniverseTick(tick),
+                epoch: EpochId(7),
+            }))
+            .expect("encode")
+            .into(),
+        };
+        let roster_msg = Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Saga,
+            bytes: postcard::to_allocvec(&InterShardFlow::ShardRoster(
+                vd_wire::intershard::ShardRoster {
+                    nodes: vec![SHARD],
+                    at: UniverseTick(1),
+                },
+            ))
+            .expect("encode")
+            .into(),
+        };
+        let _ = orch.step_tick();
+        hub.pump();
+        assert_eq!(
+            gateway_t.drain_inbound(),
+            vec![sync_at(1), roster_msg],
+            "the changed level ships once, beside the tick's ClockSync"
+        );
+        // SETTLED: the next tick ships no roster (send-on-change).
+        let _ = orch.step_tick();
+        hub.pump();
+        assert_eq!(
+            gateway_t.drain_inbound(),
+            vec![sync_at(2)],
+            "a settled record re-ships nothing"
         );
     }
 

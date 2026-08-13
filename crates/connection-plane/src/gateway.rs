@@ -26,13 +26,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, Schedule, World};
+use vd_core::UniverseTick;
 use vd_core::glam::DVec3;
-use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose, Tier};
+use vd_core::home::{HomeRegistry, StoredHome};
+use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::rng::SplitMix64;
-use vd_core::worldgen::{
-    UniverseConfig, WorldView, ancestor_realms, fold_origin, pin_realm_of,
-};
+use vd_core::worldgen::{UniverseConfig, WorldView, ancestor_realms, pin_realm_of};
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
@@ -124,8 +124,14 @@ pub struct SeedInjectorConfig {
     /// A cluster passes the world its shards will simulate: generated content in production, generated plus
     /// hand-placed structures in a test that needs a station or an area to stand in.
     pub world: WorldView,
-    /// The per-account STORED spawn poses (the `VD_SPAWN_POSES` stand-in for the P7 durable pose store).
-    pub spawn_poses: BTreeMap<AccountId, StampedPose>,
+    /// WHERE EVERY ACCOUNT APPEARS: a realm, and a pose inside that realm's own frame.
+    ///
+    /// It used to be a per-account universe-absolute position that this router walked the whole seed
+    /// forest downward to resolve. That walk subtracted each realm's STORED centre, which is zero for
+    /// anything that orbits, so every orbiting planet read as sitting on its own star and a login at a
+    /// star's centre landed inside a planet. A stored home has nothing to descend: the realm is a name and
+    /// the pose is already measured from that realm's own centre.
+    pub homes: HomeRegistry,
     /// RLM 5f-3d — the gateway's LOCAL copy of the ORCHESTRATOR's `RlmTuning::demand_ttl_ticks` (BOTH come
     /// from the SAME `resolve_rlm_tuning(tick_hz, …)` derivation, so they cannot drift while `VD_TICK_HZ` is
     /// cluster-wide). It sizes the home-demand RE-DRIVE cadence ([`Self::redrive_interval_ticks`]) — the
@@ -149,10 +155,21 @@ impl Default for SeedInjectorConfig {
     /// byte-identical to the pre-5f-3c gateway (`UniverseConfig` has no `Default`, so this is written out;
     /// walk-scale is the P3 forest `container_coord_at` descends).
     fn default() -> SeedInjectorConfig {
+        let world = WorldView::hand_placed(&UniverseConfig::walk_scale());
+        // The inert injector still needs a home to state, because "no home" is not an answer a login can
+        // be given. The ambient root at its own centre is the one home every forest has.
+        let root = world
+            .regions()
+            .iter()
+            .find(|r| r.parent.is_none())
+            .expect("every forest has exactly one ambient root")
+            .realm;
+        let fallback = StoredHome::in_realm(world.regions(), root, DVec3::ZERO)
+            .expect("the root realm is named by the very forest it came from");
         SeedInjectorConfig {
             armed: false,
-            world: WorldView::hand_placed(&UniverseConfig::walk_scale()),
-            spawn_poses: BTreeMap::new(),
+            world,
+            homes: HomeRegistry::new(fallback),
             demand_ttl_ticks: 0,
             bootstrap_ttl_ticks: 0,
         }
@@ -339,7 +356,86 @@ impl GatewayConfig {
 /// always empty, so the result is byte-identical to the pre-5f-3d config-only test.
 #[must_use]
 fn is_routable_shard(config: &GatewayConfig, sessions: &GatewaySessions, from: NodeId) -> bool {
-    config.is_known_shard(from) | sessions.dynamic_shards.contains_key(&from)
+    config.is_known_shard(from)
+        | sessions.dynamic_shards.contains_key(&from)
+        // A node that ANNOUNCED itself as a shard is one, for as long as it keeps announcing — see
+        // `on_shard_presence`. This is the clause that lets a demand-spawned realm be heard at all: the
+        // two above are the boot roster (which cannot know about it) and a transfer's claim (which is a
+        // fact about a hand-off, not about a process).
+        // The ownership record's answer — the one that DECIDES. A node is here by holding a realm
+        // through the fence commit, so it cannot put itself here.
+        | sessions.record_shards.contains(&from)
+        // The RESYNC path: a shard's own greeting, which keeps a restarted router working in the window
+        // before a record reaches it. Weaker on purpose (it is self-asserted), and no longer alone.
+        | sessions.announced_shards.contains(&from)
+}
+
+/// A frame from a node this router knows as NEITHER a shard NOR a client, on a class a stranger may not
+/// send. It is DISCARDED — but it now says so, by name.
+///
+/// WHY THIS EXISTS. It used to fall to `undecodable`, the bucket for a client sending malformed bytes.
+/// Those are two different facts: one is "these bytes are rubbish", the other is "I do not know who this
+/// is". Sharing an outcome hid an entire running shard — measured on the demand gate, 17,365 frames
+/// discarded in one run against a counter whose own comment says it must stay zero for a healthy login,
+/// with no gate watching it. The shard was up and simulating a player; everything it said about that
+/// player was thrown away, so the player kept being drawn by the realm they had already left.
+///
+/// TWO DIFFERENT FAULTS, and the split is the point. A node with a live session sending a class a client
+/// may not send is a PEER BUG — the same fault as a known shard sending the wrong class, and it stays
+/// `undecodable`. A node with NO session is a STRANGER, and if it happens to be a running shard then its
+/// whole output is being thrown away. Lumping the two is what let the second hide inside the first.
+///
+/// The warn fires on the FIRST refusal only — the `== 1` edge — so a node emitting at 20 Hz produces one
+/// line rather than twenty a second. The count carries the magnitude; the line names who started it.
+/// Deliberately stateless: [`GatewayStats`] is `Copy` and stays that way, so this adds a counter and not
+/// a set that would have to be swept.
+/// Apply the ownership record's list of realm-holding nodes — WHOSE FRAMES THIS ROUTER MAY READ.
+///
+/// A LEVEL, not a delta: the incoming set REPLACES the held one. That is what makes a missed message
+/// self-correcting — the next change carries the whole truth — and it is why a router that restarts is
+/// right again as soon as anything moves, rather than having to have witnessed every join and departure.
+///
+/// STALE VIEWS ARE REFUSED BY TICK, so a redelivered or reordered push cannot resurrect a roster that has
+/// already been superseded. Equal ticks are accepted: the same level re-sent is the same answer, and
+/// refusing it would make a harmless redelivery look like a fault.
+///
+/// It does NOT touch `announced_shards`. That set is now the RESYNC path — a shard that greets a router
+/// which has not yet been told anything is still heard, which is what keeps a restarted gateway working
+/// in the window before the next roster arrives. The record is how this router DECIDES; the greeting is
+/// how it COPES until the record reaches it.
+fn on_shard_roster(
+    roster: vd_wire::intershard::ShardRoster,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+) {
+    if roster.at < sessions.roster_at {
+        stats.shard_roster_stale += 1;
+        return;
+    }
+    sessions.roster_at = roster.at;
+    sessions.record_shards = roster.nodes.into_iter().collect();
+    stats.shard_rosters_applied += 1;
+}
+
+fn refuse_unknown_sender(
+    from: NodeId,
+    class: MsgClass,
+    sessions: &GatewaySessions,
+    stats: &mut GatewayStats,
+) {
+    if sessions.by_client.contains_key(&from) {
+        stats.undecodable += 1; // a KNOWN client sent a class it may not send: a peer bug, as before
+        return;
+    }
+    stats.refused_unknown_sender += 1;
+    if stats.refused_unknown_sender == 1 {
+        tracing::warn!(
+            node = from.0,
+            ?class,
+            "DISCARDING frames from a node this router knows as neither a shard nor a client — if it is \
+             a shard, everything it says about the players it owns is being thrown away"
+        );
+    }
 }
 
 /// RLM 5f-3d — THE ONE routing target for everything a session sends shard-ward (HR3: one routing path, NOT
@@ -628,6 +724,35 @@ struct Session {
     /// this is then the ONLY surviving name of the realm that failed to boot) and the
     /// [`GatewaySessions::end_home_wait`] index removal on every session exit. `None` ⇒ a static session.
     home_rid: Option<RealmId>,
+    /// THE RENDER PIN: a NAME for the realm this client's scene is measured from — its own star system.
+    /// A bare `RealmId` with no position beside it and no arithmetic hanging off it: the shard chain
+    /// already ships every position measured in that space, so the router holds the name and nothing else.
+    ///
+    /// It is STORED, never recomputed on a frame path. Deriving it costs a neighbourhood build plus an
+    /// ancestor walk — O(regions) — and that must not run on a 20 Hz lane. It is written where the session's
+    /// home realm is resolved and again when the read plane re-points the avatar at a new authority
+    /// (`SubscriptionReady`, which is the phase that actually carries the destination FRAME —
+    /// `CommitAuthority` names a node and a directory key, neither of which says which realm the player is
+    /// now in). Until a home resolves it is the forest root, which is a valid, if coarse, pin.
+    ///
+    /// ⚠ NOTHING READS IT TODAY. Its one reader was the per-pin conversion table, which is gone; the two
+    /// places that still NAME a pin to the client (the login registry and the per-observer scene delta)
+    /// re-derive it from `home_rid` instead, which is what they did before the field existed. Those two
+    /// answers agree on the login path and can DISAGREE after a crossing — `home_rid` is set once at the
+    /// committed lease and never cleared, while this field follows the avatar. Which of the two the client
+    /// should be told is a live question about what a pin means, not a cleanup, so it is left visible here
+    /// rather than settled by deleting one of them.
+    render_pin: RealmId,
+    /// WHERE THIS LOGIN'S AVATAR GOES, measured from its home realm's own centre and stamped with that
+    /// realm's frame. Resolved ONCE, in the same descent that resolves the home lineage, and then repeated
+    /// verbatim on every `AttachSession` (including the retries) so a re-attach cannot land the player
+    /// somewhere else than the first attempt would have.
+    ///
+    /// `None` for a session with no dynamic home — a static cluster attaches to a fixed shard that is not
+    /// in general the realm the stored position is in, and handing it a pose measured somewhere else is
+    /// exactly the confusion this field exists to end. The shard then births at its own origin, which is
+    /// what every rig does today.
+    spawn: Option<StampedPose>,
     /// RLM 5f-3d — the HARD deadline (gateway LOCAL tick) of the BOUNDED pre-Active dynamic-home bootstrap:
     /// `Some` EXACTLY while a dynamic session is booting — spanning `AwaitingHomeRealm` **and** the
     /// dynamic-target `AwaitingAttach` (a freshly spawned shard can die between head-resolve and
@@ -699,6 +824,30 @@ pub struct GatewaySessions {
     /// stays routable for as long as the client is still reading it (without which the player went blind for
     /// the whole tail after every crossing).
     dynamic_shards: BTreeMap<NodeId, u32>,
+    /// Nodes that ANNOUNCED themselves as shards over the authenticated mesh, and are therefore heard.
+    ///
+    /// A SET, not a refcount, because it is not a claim anybody holds — it is a fact about a process
+    /// being up. That is exactly why the previous arrangement failed: a transfer's refcount made node
+    /// class last as long as one hand-off, so a running shard went mute the moment its hand-off ended,
+    /// or never spoke at all if no hand-off ever named it.
+    ///
+    /// ⚠ REMOVAL IS OWED, and rides with the reaper: nothing takes a node OUT of this set today, so a
+    /// long-lived cluster with realm churn accumulates ids. Bounded by nodes ever spawned, which is fine
+    /// at the tier this runs at and is NOT fine in a real deployment. The signal to remove on is the same
+    /// one the reaper needs — the orchestrator tearing a realm down — so the two land together rather
+    /// than growing two half-answers to one lifecycle question.
+    announced_shards: BTreeSet<NodeId>,
+    /// The nodes the OWNERSHIP RECORD shows holding a realm — the authoritative answer to whose frames
+    /// this router may read, pushed by the orchestrator as a whole level (`on_shard_roster`).
+    ///
+    /// This is the one that DECIDES. `announced_shards` above is what a shard says about itself and is
+    /// now only the resync path for the window before a record arrives; a node cannot put itself HERE,
+    /// because getting here means holding a realm through the fence commit.
+    record_shards: BTreeSet<NodeId>,
+    /// The tick of the newest roster applied, so a reordered or redelivered push cannot resurrect a
+    /// superseded one. Starts at zero: before any roster arrives this router has been told nothing, and
+    /// every level is newer than nothing.
+    roster_at: UniverseTick,
     /// RLM 5f-3d — the per-REALM home-BOOTSTRAP index: `home realm -> the ONE wait every session booting
     /// into that realm shares`. Two independent things make it per-REALM rather than per-session, both
     /// load-bearing at 100K scale:
@@ -1147,6 +1296,24 @@ pub struct GatewayStats {
     pub inputs_malformed: u64,
     pub stale_frames_dropped: u64,
     pub undecodable: u64,
+    /// A frame from a node this router knows as NEITHER a shard NOR a client, on a class a stranger may
+    /// not send. It is DISCARDED, and until now it was discarded as `undecodable` — the same bucket as a
+    /// client sending malformed bytes.
+    ///
+    /// THE TWO ARE NOT THE SAME FACT, and lumping them hid a whole running shard. Measured on the demand
+    /// gate: 17,365 frames in one run, against a counter whose own comment says it must stay zero for a
+    /// healthy login, and no gate noticed. A shard that is up, simulating a player, and not on the roster
+    /// had its entire output thrown away in silence; the player it owned kept being drawn by the realm
+    /// they had already left.
+    pub refused_unknown_sender: u64,
+    /// Rosters applied from the ownership record — the router being TOLD whose frames it may read, rather
+    /// than inferring it. On a healthy demand cluster this moves a handful of times as realms spin up and
+    /// down, and then stops.
+    pub shard_rosters_applied: u64,
+    /// Rosters refused as older than the one held. Not a fault by itself — a redelivery on a re-driven
+    /// lane is expected — but a rising count next to a router that is missing shards means pushes are
+    /// arriving out of order and the tick guard is the only thing holding the line.
+    pub shard_roster_stale: u64,
     /// A session in the `subscribed_shards` reverse index for `from` had NO matching
     /// `SubEntry` in its hot `SubTable` (an index/table desync — an invariant breach the
     /// `publish_subs` co-republish makes impossible by construction). Counted, never a silent
@@ -1213,6 +1380,21 @@ pub struct GatewayStats {
     /// lifetime, and the roster is authority-refcounted). `0` on a static gateway (no shard ever greets). Its
     /// existence keeps a greeting from being miscounted `undecodable` (the honesty floor).
     pub presence_announces: u64,
+}
+
+/// The forest's ambient root realm — the fall-back render pin for a session whose home has not resolved
+/// yet.
+///
+/// A world with no root-less region is not a forest at all (a hand-built empty one in a test). For that
+/// case the answer comes from `pin_realm_of` over an EMPTY chain, which is the one centralized statement of
+/// "which realm when there is no ancestry" — reused rather than written out here, so a second copy of the
+/// ambient root's identity cannot drift from the first.
+fn forest_root(cfg: &SeedInjectorConfig) -> RealmId {
+    cfg.world
+        .regions()
+        .iter()
+        .find(|r| r.parent.is_none())
+        .map_or_else(|| pin_realm_of(&[]), |r| r.realm)
 }
 
 /// Install the gateway systems (composed by the harness/bin for `NodeKind::Gateway`).
@@ -1595,6 +1777,15 @@ fn process_gateway_inbound(
                         &mut stats,
                         &mut outbox,
                     ),
+                    // WHO MAY BE HEARD, from the party that decides it. The ownership record's list of
+                    // realm-holding nodes replaces three inferences: a boot roster that cannot know about
+                    // a realm spun up later, a node's own claim about itself, and a transfer's claim that
+                    // died with the transfer. Applied as a LEVEL — the whole set, latest tick wins — so a
+                    // missed message is corrected by the next change rather than leaving this router deaf
+                    // to a live shard.
+                    Ok(InterShardFlow::ShardRoster(roster)) => {
+                        on_shard_roster(roster, &mut sessions, &mut stats);
+                    }
                     Ok(_) | Err(_) => stats.undecodable += 1,
                 },
                 // Membership (clock sync) is consumed by the follower system.
@@ -1609,7 +1800,7 @@ fn process_gateway_inbound(
             // by REPLYING over that learned lane). Hoisted ABOVE `is_routable_shard` because a greeting arrives
             // BEFORE the shard is on the runtime roster (it becomes routable only when a session's home
             // resolves), so it would otherwise fall to the client arm and be miscounted `undecodable`.
-            on_shard_presence(from, bytes, &mut stats);
+            on_shard_presence(from, bytes, &mut sessions, &mut stats);
         } else if is_routable_shard(&config, &sessions, from) {
             match class {
                 MsgClass::Control => on_shard_control(
@@ -1645,7 +1836,10 @@ fn process_gateway_inbound(
                 MsgClass::Input => {
                     on_client_input(bytes, from, &config, &mut sessions, &mut stats, &mut outbox);
                 }
-                _ => stats.undecodable += 1,
+                // NEITHER a shard, NOR a class a client may send. That is a fact about the SENDER, not
+                // about the bytes, and it used to share an outcome with "a client sent rubbish". See
+                // `refuse_unknown_sender`.
+                _ => refuse_unknown_sender(from, *class, &sessions, &mut stats),
             }
         }
     }
@@ -1660,15 +1854,41 @@ fn process_gateway_inbound(
 /// frame, so this only decodes for a counter + a debug line and claims NOTHING (no `dynamic_shards` role —
 /// a presence has no session and no lifetime). A body that is not a `ShardPresence` (any other
 /// `InterShardFlow` arm, or undecodable bytes) counts `undecodable` exactly as the pre-RG-3 fallthrough did.
-fn on_shard_presence(from: NodeId, bytes: &[u8], stats: &mut GatewayStats) {
+fn on_shard_presence(
+    from: NodeId,
+    bytes: &[u8],
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+) {
     match postcard::from_bytes::<InterShardFlow>(bytes) {
         Ok(InterShardFlow::ShardPresence(ShardPresence { local_tick })) => {
             stats.presence_announces += 1;
-            tracing::debug!(
-                from = from.0,
-                local_tick = local_tick.0,
-                "demand shard reactive greeting — learned for reply, no roster claim",
-            );
+            // THE GREETING NOW ADMITS THE NODE, and this line is why the fleet was mute.
+            //
+            // It used to be "learned for reply, no roster claim": the mesh learned a return lane, and the
+            // node stayed a stranger for dispatch. So a demand-spawned shard could boot, hold a realm,
+            // own a player and speak every tick, and every word was discarded — measured on this gate at
+            // 14,884 refused frames from one cluster, all from the very planet the player had re-homed
+            // into. The player was authoritative there and had never once been told where they were.
+            //
+            // Node class is a LIFECYCLE fact and it now comes from the node's own announcement over the
+            // authenticated mesh, for as long as it keeps announcing. It is NOT a transfer's claim: the
+            // old admission rode `PrepareSubscribe`, so a node was a shard only while a hand-off said so,
+            // which is a fact about one hand-off standing in for a fact about a process.
+            //
+            // ⚠ WHAT THIS LEANS ON, stated rather than assumed: "I am a shard" is SELF-ASSERTED over the
+            // shared cluster credential — the same boundary every other inter-node claim already trusts,
+            // and the same one DEFERRED.md records as insufficient for a real deployment (D-RLM-8), with
+            // the cloud preflight already REFUSING demand mode until per-node trust lands (D-RLM-7). So
+            // this admits exactly what that veto already contains, and no more. The orchestrator-attested
+            // version is the upgrade that rides with per-node trust, not a second mechanism.
+            if sessions.announced_shards.insert(from) {
+                tracing::info!(
+                    from = from.0,
+                    local_tick = local_tick.0,
+                    "shard announced itself — admitted for dispatch, so what it says can reach players",
+                );
+            }
         }
         Ok(_) | Err(_) => stats.undecodable += 1,
     }
@@ -1764,27 +1984,31 @@ fn announce_own_entity(
     }
 }
 
-/// Lower the SEED-DERIVED neighbourhood of `home` to the wire render subset a fully-agnostic client draws
-/// its whole world from (VU, proto_minor 5+). The seed neighbourhood is `home`'s ancestor chain up to the
-/// ambient root ∪ its DIRECT children — never siblings ([`realm_neighbourhood_for_held_config`]) — each
-/// region lowered to a [`RealmShape`] (realm + authoritative frame + static center + boundary + parent), the
-/// RENDER fields ONLY, never the server-side AoI band. `root` is the parent-less ambient realm; it degrades
-/// to `home` when the neighbourhood is empty (a `home` not in the forest — a safe no-scene, never a panic).
-/// Closed-form `f(seed, minor, home)`; the client REPLACES its whole scene with this on receipt.
+/// THE LOGIN SCENE MESSAGE — and, as of Slice 6, a message that carries NO GEOMETRY AT ALL. It names the
+/// two things a router legitimately holds about a session (the space that session draws in, and the ambient
+/// realm at the top of its lineage) and RESETS the client's scene to empty; every outline then arrives from
+/// the shard chain through [`ServerControlMsg::RealmSceneDelta`], each one measured in the frame of the
+/// realm the client is standing in, by the levels that authored the placements.
 ///
-/// A `negotiated_minor >= 6` peer receives ONLY the ancestor SHELL-CHAIN root→home (every direct child
-/// `parent == Some(home)` is DROPPED); those children arrive through the live scene-delta
-/// ([`ServerControlMsg::RealmSceneDelta`], a minor-6 variant) as they enter the observer's AoI. The
-/// ancestor-chain-in-registry vs children-via-delta split is a FACTORING, not a second visibility mechanism:
-/// a CONTAINING realm is the degenerate always-in-view case (you are physically INSIDE it, so its angular
-/// size is effectively infinite), while the children obey the one AoI band via the delta. Server-
-/// authoritative throughout. A `negotiated_minor == 5` peer never receives a `RealmSceneDelta`, so it keeps
-/// TODAY'S full ancestors∪children set — shrinking it would strand it with a permanently childless world.
-fn realm_registry_for_home(
-    cfg: &SeedInjectorConfig,
-    negotiated_minor: u16,
-    home: RealmId,
-) -> ServerControlMsg {
+/// WHAT LEFT, AND WHY. This used to lower the router's OWN copy of the seed forest — `home`'s ancestor chain
+/// ∪ its direct children — into render shapes, and then re-express every centre into a space it picked. Both
+/// halves are the same breach: only the parent of a realm knows where that realm is, and the router is the
+/// parent of nothing. It got away with it because it holds a copy of the seed the shards are generated from,
+/// which makes it a second source of truth for every placement in the universe — so the login scene and the
+/// live scene were two independent derivations of the same geometry, free to disagree, and did (a
+/// neighbouring star announced at its true distance on login and at twice that distance once you flew).
+///
+/// The outlines that replace it: the shard that owns `home` states its own realm's outline at its own origin
+/// (`RealmRegions::own_shape` — the one geometric fact a realm holds about itself), its in-AoI direct
+/// children at the placements it authored, and everything above it as the shape lane relays it down, one
+/// subtraction per level. The scene is therefore exactly as deep as the chain is LIVE, which is what area of
+/// interest decides — not what a forest copy can enumerate.
+///
+/// PRE-EXISTING, FLAGGED RATHER THAN FOLDED IN: `root` and `pin` are still resolved out of that same forest
+/// copy. They are NAMES, not positions — nothing is measured from either, and the client ignores both today
+/// — but the copy itself remains a second source of truth for the shape of the lineage, and retiring it is
+/// a change to where an account's home is STORED (see the spawn-descent note on `home_placement`).
+fn realm_registry_for_home(cfg: &SeedInjectorConfig, home: RealmId) -> ServerControlMsg {
     let mut held = BTreeSet::new();
     held.insert(home);
     let neighbourhood = cfg.world.neighbourhood(&held);
@@ -1792,61 +2016,30 @@ fn realm_registry_for_home(
         .iter()
         .find(|r| r.parent.is_none())
         .map_or(home, |r| r.realm);
-    // The shrink gate, straight-line in ONE place. `keep_children` is the minor-5 back-compat path (full
-    // ancestors∪children); a minor-6+ peer keeps a region iff it is NOT a direct child of `home`. Bitwise `|`
-    // — both operands always evaluate, so there is no uncoverable short-circuit region (HR5).
-    let keep_children = negotiated_minor < 6;
-    let regions = neighbourhood
-        .iter()
-        .filter(|r| keep_children | (r.parent != Some(home)))
-        .map(|r| RealmShape {
-            realm: r.realm,
-            frame: r.frame,
-            center: realm_abs_center(cfg, r),
-            shape: r.shape,
-            parent: r.parent,
-        })
-        .collect();
-    let (pin, pin_abs) = render_pin(cfg, home);
     ServerControlMsg::RealmRegistry {
-        regions,
+        // NOT "no scene" — an EMPTY scene, deliberately. The client REPLACES its whole scene on this
+        // message, so a re-login starts from nothing drawn rather than from whatever the previous session
+        // left on screen. The chain then re-streams the lot: a shard's drawn baseline is pruned the moment
+        // its dot leaves, so an account that logs back in is diffed against empty and told everything again.
+        regions: Vec::new(),
         root,
-        pin,
-        pin_abs,
-        anchor_epoch: 0,
+        pin: render_pin(cfg, home),
     }
 }
 
-/// A5 — a realm's shipped ABSOLUTE center = its FRAME tick-0 fold (`fold_origin` at t=0) COMPOSED with its
-/// center-in-frame. A mover (center ZERO) rides its orbit start; a static realm (Fixed chain folds to ZERO)
-/// keeps `r.center` — a Fixed link adds nothing because that offset already lives in the center (§0.3). Built
-/// from the SAME `(seed, config)` as everything else, so registry + snapshot can't disagree. Walk folds to ZERO
-/// ⇒ `ZERO ∘ center == center` ⇒ byte-identical.
-fn realm_abs_center(cfg: &SeedInjectorConfig, r: &vd_core::geometry::RealmRegion) -> LatticePos {
-    let (frame_abs, _vel) = fold_origin(
-        &cfg.world.origin_chain(r.realm),
-        0.0,
-    );
-    frame_abs.compose(r.center, Tier::Fine)
-}
-
-/// A5 — the SERVER-TOLD render origin `(pin, pin_abs)` for a session whose home realm is `home`. `pin` = the
-/// session's own star system (`pin_realm_of` over its root→realm chain, reversed from `ancestor_realms`'
-/// realm→root order); `pin_abs` = that realm's tick-0 absolute. Self-contained `f(seed, config, home)` so BOTH
-/// the login registry and every scene delta ship the IDENTICAL origin (the client subtracts `pin_abs` from every
-/// shipped absolute). Walk pin folds to ZERO (identity) ⇒ subtracting ZERO ⇒ byte-identical render.
-fn render_pin(cfg: &SeedInjectorConfig, home: RealmId) -> (RealmId, LatticePos) {
+/// THE PIN for a session whose home realm is `home`: the player's own star system — the realm the whole
+/// session's scene is measured from, chosen by [`pin_realm_of`] over the home's root→realm ancestry.
+///
+/// A pure identity. It used to return the pin's ABSOLUTE POSITION beside it, which the client subtracted
+/// from every incoming position; there are no absolute positions any more, and the subtraction has been
+/// replaced by the server doing the conversion once, as a walk between two named realms.
+fn render_pin(cfg: &SeedInjectorConfig, home: RealmId) -> RealmId {
     let mut held = BTreeSet::new();
     held.insert(home);
     let neighbourhood = cfg.world.neighbourhood(&held);
     let mut chain = ancestor_realms(&neighbourhood, home);
     chain.reverse();
-    let pin = pin_realm_of(&chain);
-    let pin_abs = neighbourhood.iter().find(|r| r.realm == pin).map_or_else(
-        || LatticePos::local(vd_core::glam::DVec3::ZERO),
-        |r| realm_abs_center(cfg, r),
-    );
-    (pin, pin_abs)
+    pin_realm_of(&chain)
 }
 
 /// Stream the client its seed-derived realm render-scene at the home-entry seam (VU, proto_minor 5) — IFF
@@ -1867,11 +2060,7 @@ fn maybe_announce_realm_registry(
         return;
     }
     let Some(home) = home_rid else { return };
-    push_control(
-        outbox,
-        client,
-        &realm_registry_for_home(cfg, negotiated_minor, home),
-    );
+    push_control(outbox, client, &realm_registry_for_home(cfg, home));
 }
 
 fn push_to_shard(outbox: &mut OutboundBox, to: NodeId, class: MsgClass, msg: &GatewayToShard) {
@@ -1923,11 +2112,17 @@ fn on_client_control(
         ClientControlMsg::Hello { version, login } => {
             let Some(negotiated) = ProtoVersion::negotiate(ProtoVersion::CURRENT, version) else {
                 stats.version_rejected += 1;
+                // The refusal names its CAUSE (`refusal_reason`), because from minor 8 there are two and
+                // they call for different action: a major mismatch is "different protocol generation";
+                // a minor below the floor is "same generation, your build predates frame-anchored
+                // positions — update it". Both used to report the major-mismatch sentence, which would
+                // have sent an operator hunting a generation split that was not there. Both still land
+                // on the ONE `version_rejected` counter — the cause is in the sentence, not a new stat.
                 push_control(
                     outbox,
                     client,
                     &ServerControlMsg::Close {
-                        reason: "incompatible protocol major version".to_owned(),
+                        reason: ProtoVersion::CURRENT.refusal_reason(version),
                     },
                 );
                 return;
@@ -1977,6 +2172,12 @@ fn on_client_control(
                     // route is retargeted through the sole `store_route` primitive at the home resolve.
                     home_shard: None,
                     home_rid: None,
+                    // No home yet ⇒ pin at the forest root: coarse but valid, and a realm that exists.
+                    // It moves to the player's own star system the moment the home resolves.
+                    render_pin: forest_root(&config.seed_injector),
+                    // No home resolved yet ⇒ nowhere to measure a spawn from. Filled in the same place
+                    // (and by the same descent) as the home lineage, strictly after the committed lease.
+                    spawn: None,
                     bootstrap_deadline: None,
                     // Armed at the Active transition (the attach); irrelevant while still logging in.
                     confirmed_at: TickId(0),
@@ -2934,6 +3135,21 @@ fn on_shard_control(
             let sub = sessions
                 .open_sub(session_id, from, frame, realm_fence, outbox)
                 .expect("session present (held immutably just above this tick)");
+            // THE RENDER PIN follows the avatar across a crossing. THIS is the phase that can move it:
+            // `SubscriptionReady` carries the destination FRAME, so the realm the player is now in is
+            // nameable here. `CommitAuthority` cannot do it — it names a node and a directory key, neither
+            // of which says which realm that is. Re-derived ONCE per crossing (never on a frame path), and
+            // only when the frame names a realm at all (galaxy space names none).
+            if let Some(realm) = frame.realm() {
+                let pin = render_pin(&config.seed_injector, realm);
+                // The session is a stated invariant, not a lookup that can fail: `open_sub` above
+                // just resolved it (this is the borrow-split re-fetch, nothing else).
+                sessions
+                    .by_session
+                    .get_mut(&session_id)
+                    .expect("session present (held immutably just above this tick)")
+                    .render_pin = pin;
+            }
             let session = sessions
                 .by_session
                 .get(&session_id)
@@ -2981,6 +3197,14 @@ fn on_shard_control(
 /// (sender-gates-variants: an older peer is withheld the variant). An unroutable observer (no live session
 /// for that account — it left, or never attached) is a clean no-op. NOTE: the by-account lookup is an
 /// O(sessions) scan; an `AccountId -> SessionId` index is the 100K scale form (ledgered, VU-AoI-scale).
+///
+/// `added` and `removed` are FORWARDED VERBATIM. This used to re-derive every added shape's centre out of a
+/// world-wide placement graph the router held a copy of — which is the breach this whole arc removes: only
+/// the parent of a realm knows where that realm is, and a router is the parent of nothing. The shapes now
+/// arrive from the shard chain already measured in the frame of the realm the session is standing in, one
+/// subtraction per level, each performed by the level that authored the placement. Re-deriving them here
+/// applied a SECOND conversion to a value that was already right — the double-conversion that drew a
+/// neighbouring star at twice its true distance.
 fn forward_realm_scene_delta(
     sessions: &GatewaySessions,
     cfg: &SeedInjectorConfig,
@@ -2995,23 +3219,21 @@ fn forward_realm_scene_delta(
     if session.negotiated_minor < 6 {
         return; // an older peer never receives the delta variant
     }
-    // A5 — re-carry the SERVER-TOLD render origin on every delta (a warp re-anchor refreshes it on the reliable
-    // scene lane; a same-pin delta is a no-op for the client). Derived from the session's STANDING home realm.
-    // A session with no resolved home yet has no render origin to tell, so the delta is WITHHELD — it self-heals
-    // the instant the home resolves and the scene re-broadcasts (never a delta that pins the client at nowhere).
+    // Re-carry the pin on every delta (a warp re-anchor refreshes it on the reliable scene lane; a
+    // same-pin delta is a no-op for the client). Derived from the session's STANDING home realm. A session
+    // with no resolved home yet has no pin to NAME, so the delta is WITHHELD — it self-heals the instant
+    // the home resolves and the scene re-broadcasts (never a delta that pins the client at nowhere). The
+    // pin is a NAME for the space, with no position beside it and no arithmetic hanging off it.
     let Some(home) = session.home_rid else {
         return;
     };
-    let (pin, pin_abs) = render_pin(cfg, home);
     push_control(
         outbox,
         session.client,
         &ServerControlMsg::RealmSceneDelta {
             added,
             removed,
-            pin,
-            pin_abs,
-            anchor_epoch: 0,
+            pin: render_pin(cfg, home),
         },
     );
 }
@@ -3047,6 +3269,13 @@ fn on_shard_frame(
     // SCALE-1: re-tag the snapshot body ONCE per distinct sub-id into a SHARED `Arc`; the
     // per-session fan-out is then a cheap fence check + refcount bump, never an O(entities)
     // re-allocation per subscriber.
+    //
+    // There is NO per-pin memo beside it any more, because there is nothing to memoise: the shard already
+    // shipped every occupant measured in the frame of the realm the session is standing in. A router that
+    // re-expressed the body per pin had to hold every parent's authored placement of every child to do it —
+    // the world-wide graph this arc deleted — and it paid an O(entities) decode-and-re-encode per distinct
+    // pin on the one hop that must stay sub-millisecond. The re-tag below is a leading-varint splice with
+    // no decode at all.
     let mut retagged: BTreeMap<SubId, vd_sim::io::Bytes> = BTreeMap::new();
     for session_id in sessions.subscribers_of(from) {
         let Some(session) = sessions.by_session.get_mut(&session_id) else {
@@ -3112,6 +3341,12 @@ fn on_shard_frame(
 /// per-shard fence drop (a realm box is ambient world state, not per-session authority — a briefly stale
 /// box self-heals next tick). ONE shared body is refcount-cloned to every subscriber (SCALE-1). The
 /// gateway never decodes the payload.
+///
+/// THAT LAST SENTENCE IS THE POINT, and it was false for a while. The router opened this body to harvest a
+/// world-wide placement graph — every parent's authored placement of every child, pooled in a party that is
+/// the parent of none of them — and then re-expressed the rows per viewer out of it. Both halves are gone:
+/// the rows already arrive measured in the frame of the realm the viewer is standing in, restated once per
+/// level by the level that authored the placement. One `Arc` body, refcount-cloned, no decode.
 fn on_shard_realm_frame(
     from: NodeId,
     bytes: &[u8],
@@ -3149,18 +3384,6 @@ fn on_shard_realm_frame(
     }
 }
 
-/// The account's ABSOLUTE Universe-root spawn position (the frame [`container_coord_at`] reads), or the
-/// origin when no pose is stored. Through P3 a `LatticePos` is cell-`ZERO`, so `.offset()` IS the absolute
-/// position (5f-3b stores it via `StampedPose::at_rest(SystemSpace{0}, …)`). ABSENT (the empty stand-in /
-/// a fresh P7 store) ⇒ `DVec3::ZERO` ⇒ the root/origin home — a valid in-forest coord. Both arms are the
-/// `Option` combinators' (stdlib) so this stays a branchless shim (HR5); both are proven by the unit tests.
-fn home_spawn_offset(cfg: &SeedInjectorConfig, account: AccountId) -> DVec3 {
-    cfg.spawn_poses
-        .get(&account)
-        .map(|p| p.pos.offset())
-        .unwrap_or(DVec3::ZERO)
-}
-
 /// A DETERMINISTIC per-account sentinel [`Fence`] for the injected `RealmDemand`'s `parent_fence` — NOT a
 /// global constant (CRITIQUE-1 defense-in-depth: a single shared sentinel would collapse every login's
 /// `FencedKey` idempotency into one). It is NOT the auth: `record_demand` does NOT read `parent_fence` for
@@ -3172,29 +3395,42 @@ fn home_sentinel_fence(account: AccountId) -> Fence {
     Fence((a as u64) ^ ((a >> 64) as u64))
 }
 
-/// RLM 5f-3c — SERVER-DERIVE an authenticated login's HOME lineage: [`container_coord_at`] over the
-/// account's STORED spawn pose (or the origin) — the FULL root→leaf lineage, so demanding it spins up the
-/// whole ancestor chain (the 5f-3a ride). NOTHING client-supplied enters here: the client's only spatial
+/// RLM 5f-3c — SERVER-DERIVE an authenticated login's HOME lineage AND its spawn position: the descent over
+/// the account's STORED position (or the origin) yields the FULL root→leaf lineage, so demanding it spins up
+/// the whole ancestor chain (the 5f-3a ride). NOTHING client-supplied enters here: the client's only spatial
 /// input is its authenticated `AccountId`, so a raw client cannot steer which realm spins up (the abuse
 /// boundary).
 ///
-/// Defense-in-depth: the derived coord is asserted in-forest via [`coord_in_forest`]. This is NOT a live
-/// branch (`container_coord_at` yields an in-forest lineage by construction, so the `.expect` panic path —
-/// stdlib, uncounted — never fires in prod; `coord_in_forest`'s own arms are covered by its unit test).
-/// `container_coord_at`'s descend is already lineage-depth-bounded (`parent()` → `None` at the root), so no
-/// extra depth cap is needed. Concrete (non-generic), no wall-clock/rng.
+/// The descend is lineage-depth-bounded (`parent()` → `None` at the root), so no extra depth cap is needed.
+/// Concrete (non-generic), no wall-clock/rng.
 ///
 /// RLM 5f-3d SCALE: this DESCEND runs exactly ONCE per login. The resolved coord is then carried in
-/// [`SessionPhase::AwaitingHomeRealm`], so every re-drive rebuilds its demand off the STORED lineage via
-/// [`demand_for_home`] instead of re-descending the forest — which also makes it impossible for a re-seed
-/// to name a different realm than the one the session is waiting on.
-fn home_coord(cfg: &SeedInjectorConfig, account: AccountId) -> RealmCoord {
-    let pos = home_spawn_offset(cfg, account);
-    let child = cfg.world.container_coord(pos);
-    cfg.world
-        .contains_realm(child.lowered())
-        .then_some(child)
-        .expect("container_coord_at yields an in-forest home lineage by construction (5f-3c)")
+/// [`SessionPhase::AwaitingHomeRealm`] and the pose on the `Session`, so every re-drive rebuilds its demand
+/// (and repeats its attach) off the STORED answer instead of re-descending the forest — which also makes it
+/// impossible for a re-seed to name a different realm than the one the session is waiting on.
+///
+/// BOTH halves of a home, READ rather than resolved: the lineage to demand, and the pose to hand the shard
+/// in `AttachSession`, already measured from that realm's own centre and stamped with that realm's frame.
+///
+/// THE DESCENT THAT USED TO BE HERE IS GONE. It walked a private copy of the whole seed forest downward,
+/// subtracting each realm's stored centre. A realm that ORBITS stores its centre as zero — its live
+/// position rides its parent's per-tick lane — so the walk read every orbiting planet as sitting exactly on
+/// its own star, and a login at a star's centre resolved to *inside a planet*. Measured through the shipped
+/// boot: all five planets of the first star system answered `4.16 m INSIDE` to that walk while answering
+/// between `13.76` and `140.31 m OUTSIDE` in their own frames at their live placements.
+///
+/// The walk was also the one place a party that owns no realm did realm arithmetic. Both faults have the
+/// same cure and it is not a better walk: a home is STORED as a name plus a realm-local pose, so there is
+/// nothing to descend and nobody has to know where any realm is. The bootstrap circularity that blocked
+/// this — the chain cannot answer "where inside" until it is running, and it only runs because something
+/// demanded the answer to "which realm" — does not arise for a stored home, because neither question is
+/// asked of anybody.
+///
+/// Login is NOT a special path: the lineage returned here is demanded through the ordinary mechanics, and
+/// nothing downstream can tell where the first position came from.
+fn home_placement(cfg: &SeedInjectorConfig, account: AccountId) -> (RealmCoord, StampedPose) {
+    let home = cfg.homes.home_of(account);
+    (home.realm, home.pose)
 }
 
 /// RLM 5f-3c/5f-3d — THE one `RealmDemand{SpinUp}` constructor for a home lineage (HR3): the initial seed
@@ -3279,7 +3515,7 @@ fn on_home_realm_head(
         // the placeholder `config.shard`.
         store_route(&session.hot, home, session.hot.route.load().fence, None);
         session.phase = SessionPhase::AwaitingAttach;
-        let (fence, account) = (session.fence, session.account);
+        let (fence, account, spawn) = (session.fence, session.account, session.spawn);
         push_to_shard(
             outbox,
             home,
@@ -3288,6 +3524,9 @@ fn on_home_realm_head(
                 session: session_id,
                 fence,
                 account,
+                // THE realm this pose was measured against is the one we are attaching to — this arm is
+                // reached only after the `Realm(home_rid)` head named the node owning that very realm.
+                spawn,
             },
         );
         // The home joins the RUNTIME routable roster, so its `SessionAttached` + frames are node-class
@@ -3373,8 +3612,12 @@ fn on_directory_reply(
             return;
         }
         let home = if config.dynamic_home_mode(clock.synced) {
-            // The ONE forest descend per login (5f-3d: every later re-drive reuses this coord).
-            Some(home_coord(&config.seed_injector, session.account))
+            // The ONE forest descend per login (5f-3d: every later re-drive reuses this coord). It now
+            // yields BOTH halves of the answer — which realm, and where inside it — because they come from
+            // the same walk down and separating them is what let the two disagree.
+            let (coord, spawn) = home_placement(&config.seed_injector, session.account);
+            session.spawn = Some(spawn);
+            Some(coord)
         } else {
             None
         };
@@ -3390,6 +3633,12 @@ fn on_directory_reply(
         };
         // The STANDING home identity (never cleared — it outlives the phase payload); `None` when static.
         session.home_rid = home_rid;
+        // THE RENDER PIN, resolved once here rather than on any frame path: the star system the whole
+        // scene will be measured from. `render_pin` already walks the home's ancestry to pick it; a
+        // session with no dynamic home keeps the forest root, which is what it was already pinned to.
+        if let Some(home) = home_rid {
+            session.render_pin = render_pin(&config.seed_injector, home);
+        }
         push_control(
             outbox,
             session.client,
@@ -3429,6 +3678,10 @@ fn on_directory_reply(
                         session: session_id,
                         fence: session.fence,
                         account: session.account,
+                        // STATIC: nothing was descended, so there is no realm this pose belongs to and
+                        // nothing honest to send. `None` ⇒ the shard births at its own origin, which is
+                        // byte-identical to every static rig today.
+                        spawn: None,
                     },
                 );
                 None
@@ -3597,6 +3850,9 @@ fn drive_pending_sessions(
                             session: *session_id,
                             fence: session.fence,
                             account: session.account,
+                            // The retry repeats the SAME pose the first attach carried — a re-attach must
+                            // not be able to place the avatar anywhere else than the attempt it repeats.
+                            spawn: session.spawn,
                         },
                     );
                 }
@@ -3620,6 +3876,7 @@ mod tests {
         EntitySnap, InputDatagram, RealmSnap, RealmSnapshotDatagram, SnapshotDatagram,
     };
     use vd_wire::seams::directory::OwnerRecord;
+    use vd_wire::version::{PROTO_MAJOR, PROTO_MINOR_FLOOR};
 
     const GW: NodeId = NodeId(1);
     const SHARD: NodeId = NodeId(2);
@@ -3672,8 +3929,23 @@ mod tests {
         schedule: Schedule,
     }
 
+    /// HR5 — a TRACE sink so every tracing macro's lazy field closure evaluates on the paths the
+    /// tests drive; without a subscriber those closures are dead regions coverage cannot reach.
+    fn init_test_tracing() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+                .with_writer(std::io::sink)
+                .finish();
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
     impl Rig {
         fn new() -> Rig {
+            init_test_tracing();
             let mut world = World::new();
             world.insert_resource(InboundBox::default());
             world.insert_resource(OutboundBox::default());
@@ -3713,7 +3985,29 @@ mod tests {
             self.login_with(&hello_msg())
         }
 
+        /// Log in at the CURRENT minor, then FORCE the pending session's negotiated minor down to
+        /// `minor` before the grant/attach ticks.
+        ///
+        /// This exists because `PROTO_MINOR_FLOOR` now REFUSES a genuinely old peer at Hello, so a real
+        /// minor-0/1 handshake never produces a session to observe. The sender-gates-variants arms are
+        /// still live code — the floor is a property of THIS minor (a field append), and the next
+        /// purely variant-additive minor lowers it again — so they still have to be exercised. Forcing
+        /// the field is the honest way to do that; the alternative (deleting the gate tests because the
+        /// floor currently hides them) would leave the withholding logic unproven the day it matters.
+        #[allow(clippy::type_complexity)] // test helper: ticks of raw sends
+        fn login_at_minor(&mut self, minor: u16) -> (SessionId, LoginSends) {
+            self.login_inner(&hello_msg(), Some(minor))
+        }
+
         fn login_with(&mut self, hello: &ClientControlMsg) -> (SessionId, LoginSends) {
+            self.login_inner(hello, None)
+        }
+
+        fn login_inner(
+            &mut self,
+            hello: &ClientControlMsg,
+            force_minor: Option<u16>,
+        ) -> (SessionId, LoginSends) {
             let hello = self.tick(vec![wire(CLIENT, MsgClass::Control, hello)]);
             let session_id = *self
                 .world
@@ -3722,6 +4016,14 @@ mod tests {
                 .collect::<Vec<_>>()
                 .first()
                 .expect("session pending");
+            if let Some(minor) = force_minor {
+                self.world
+                    .resource_mut::<GatewaySessions>()
+                    .by_session
+                    .get_mut(&session_id)
+                    .expect("pending session")
+                    .negotiated_minor = minor;
+            }
             let granted = self.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(session_id))]);
             let attached = self.tick(vec![wire(
                 SHARD,
@@ -3752,19 +4054,53 @@ mod tests {
         }
     }
 
-    fn hello_msg_minor0() -> ClientControlMsg {
+    fn hello_msg_below_floor() -> ClientControlMsg {
         ClientControlMsg::Hello {
-            version: ProtoVersion { major: 1, minor: 0 },
+            version: ProtoVersion {
+                major: PROTO_MAJOR,
+                minor: PROTO_MINOR_FLOOR - 1,
+            },
             login: tickets::mint_login(&SIGNING_KEY, AccountId(5), EpochId(9), 1),
         }
     }
 
     #[test]
-    fn a_minor_0_client_is_welcomed_without_the_universe_rate_variant() {
-        // Sender-gates-variants: a peer that negotiated minor 0 must NOT be sent the
-        // minor-1 UniverseRate (it would desync an old decoder). Welcome only.
+    fn a_peer_below_the_protocol_floor_is_closed_with_the_floor_named() {
+        // proto_minor 8 appended a FIELD to `RealmSnap`, which postcard cannot skip and a sender cannot
+        // gate out — so an old peer is REFUSED rather than negotiated down. Before the floor, this exact
+        // Hello was welcomed and the peer then mis-framed every realm datagram it decoded: not one wrong
+        // field, a desynced stream. The reason NAMES the floor so the operator is told to update the
+        // client instead of hunting a protocol-generation split.
         let mut rig = Rig::new();
-        let (session_id, sends) = rig.login_with(&hello_msg_minor0());
+        let sent = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &hello_msg_below_floor(),
+        )]);
+        assert_eq!(
+            decode_controls(&sent, CLIENT),
+            vec![ServerControlMsg::Close {
+                reason:
+                    "protocol minor below the floor (8): positions are frame-anchored from v1.8"
+                        .to_owned()
+            }]
+        );
+        assert_eq!(rig.stats().version_rejected, 1);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().sessions().count(),
+            0,
+            "a refused peer mints NO session"
+        );
+    }
+
+    #[test]
+    fn a_minor_0_session_is_welcomed_without_the_universe_rate_variant() {
+        // Sender-gates-variants: a session at minor 0 must NOT be sent the minor-1 UniverseRate (it
+        // would desync an old decoder). Welcome only. The minor is FORCED rather than negotiated —
+        // the floor refuses a real minor-0 handshake now (see `login_at_minor`), but the withholding
+        // arm is live code that a future variant-additive minor will lower the floor back onto.
+        let mut rig = Rig::new();
+        let (session_id, sends) = rig.login_at_minor(0);
         let welcomes = decode_controls(&sends[1], CLIENT);
         assert_eq!(
             welcomes,
@@ -3774,7 +4110,7 @@ mod tests {
                 session_fence: Fence(1),
                 epoch: EpochId(9),
             }],
-            "a minor-0 client gets Welcome but NOT UniverseRate"
+            "a minor-0 session gets Welcome but NOT UniverseRate"
         );
     }
 
@@ -3794,6 +4130,26 @@ mod tests {
         // Pure observability — a greeting has NO routing effect (no roster claim, no reply here; the
         // reachability was the mesh learning the connection below the seam).
         assert!(sent.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_greeting_admits_once_and_keeps_counting() {
+        // The admit is an INSERT (idempotent): the first greeting logs the admission, a re-greet on
+        // the silence cadence counts the announce but does not re-admit (the roster set is a set).
+        let mut rig = Rig::new();
+        let greet = || {
+            wire(
+                SHARD,
+                MsgClass::Saga,
+                &InterShardFlow::ShardPresence(ShardPresence {
+                    local_tick: TickId(7),
+                }),
+            )
+        };
+        let _ = rig.tick(vec![greet()]);
+        let _ = rig.tick(vec![greet()]);
+        assert_eq!(rig.stats().presence_announces, 2, "every greeting counts");
+        assert_eq!(rig.stats().undecodable, 0);
     }
 
     #[test]
@@ -4169,24 +4525,10 @@ mod tests {
     /// A `ShardToGateway::RealmFrame` carrying one moving-realm placement (FA-2c) — the realm twin of
     /// [`frame_msg`].
     fn realm_frame_msg(realm: RealmId) -> ShardToGateway {
-        let snapshot = RealmSnapshotDatagram {
-            sub: SubId(0),
-            frame_id: 3,
-            source_tick: TickId(5),
-            universe_tick: UniverseTick(50),
-            realms: vec![RealmSnap {
-                realm,
-                pose: vd_core::pose::StampedPose::at_rest(
-                    FrameRef::SystemSpace { system_seed: 7 },
-                    vd_core::glam::DVec3::new(1.0e9, 0.0, 0.0),
-                    UniverseTick(50),
-                ),
-            }],
-        };
         ShardToGateway::RealmFrame {
             realm_fence: Fence(1),
             source_tick: TickId(5),
-            realm_snapshot_bytes: postcard::to_allocvec(&snapshot).expect("encode"),
+            realm_snapshot_bytes: realm_frame_payload(realm),
         }
     }
 
@@ -4277,9 +4619,10 @@ mod tests {
             "minor-2 attach announces AuthorityChanged THEN the node-agnostic OwnEntity",
         );
 
-        // A minor-0 client: OwnEntity is withheld — ONLY AuthorityChanged names its avatar.
+        // A minor-0 session: OwnEntity is withheld — ONLY AuthorityChanged names its avatar. Forced
+        // rather than negotiated (the floor refuses a real minor-0 handshake; see `login_at_minor`).
         let mut rig0 = Rig::new();
-        let (_sid0, sends0) = rig0.login_with(&hello_msg_minor0());
+        let (_sid0, sends0) = rig0.login_at_minor(0);
         let controls0 = decode_controls(&sends0[2], CLIENT);
         assert_eq!(
             controls0,
@@ -4293,7 +4636,7 @@ mod tests {
                     sub: SubId(0),
                 },
             ],
-            "a minor-0 client gets AuthorityChanged but NOT the minor-2 OwnEntity (sender-gates-variants)",
+            "a minor-0 session gets AuthorityChanged but NOT the minor-2 OwnEntity (sender-gates-variants)",
         );
     }
 
@@ -4833,6 +5176,7 @@ mod tests {
                 session: session_id,
                 fence: Fence(1),
                 account: AccountId(5),
+                spawn: None,
             }
         );
     }
@@ -4932,7 +5276,16 @@ mod tests {
                 undelivered: vd_core::MsgId(0),
             },
         ]);
-        assert_eq!(rig.stats().undecodable, 7);
+        // SIX, not seven — and the seventh moved rather than vanished. This rig never logs anybody in, so
+        // the `CLIENT` node has no session; a `Snapshot` from it is not "a client sent malformed bytes",
+        // it is a node the router does not know sending a class only a shard sends. That is now its own
+        // fact, because on the live cluster it was a running shard's entire output.
+        assert_eq!(rig.stats().undecodable, 6);
+        assert_eq!(
+            rig.stats().refused_unknown_sender,
+            1,
+            "the sessionless node's data frame is refused by SENDER, not miscounted as bad bytes"
+        );
         // CutEmitted/Pong are accepted no-ops (nothing to bind to in P1).
         let _ = rig.tick(vec![
             wire(
@@ -5038,6 +5391,98 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "hot path collapsed: 100k rounds took {elapsed:?}"
+        );
+    }
+
+    /// THE ROUTER HOT-PATH VOLUME GATE — a crowd-sized snapshot body through the real fan-out.
+    ///
+    /// WHAT IT USED TO MEASURE AND WHY THAT MATTERS. Until this slice the router RE-EXPRESSED every
+    /// snapshot body into each viewer's space, and this gate existed to keep that decode-and-re-encode from
+    /// collapsing under a crowd. The router does not do that any more: the shard chain ships every occupant
+    /// already measured in the frame of the realm its viewer is standing in, so the only per-body work left
+    /// here is the leading-varint re-tag and the refcounted fan. The gate is RE-AIMED at that remaining
+    /// work rather than deleted, because it is still the ONE 20 Hz path in the system with no latency gate
+    /// over it otherwise — `just spike3a` measures the mesh datagram transport on loopback with the router
+    /// outside its loop.
+    ///
+    /// WHAT IS NOT COVERED HERE, AND WHERE IT IS: the cost that MOVED — one conversion per level, one
+    /// shard hop per level — is measured by `just chain-latency`
+    /// (`vd-tests`'s `the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured` and
+    /// `the_chain_compounds_staleness_per_level_under_a_lossy_link`). That gate measures in TICKS rather
+    /// than wall-clock, because the moved cost is a delivery per hop and not CPU; the two gates are
+    /// complementary and neither substitutes for the other. Measured on a 3-level chain at 20 Hz: one tick
+    /// per hop each way, exactly, and 4 ticks (200 ms) from a star authoring a placement to a client
+    /// holding it.
+    ///
+    /// The ceiling is DERIVED, not written out: the gateway must finish a tick's work inside a tick, so one
+    /// frame per tick may take at most one tick period, and this asserts the whole 50k-round loop inside a
+    /// large multiple of that budget. It is a PROPERTY gate against contention collapse and accidental
+    /// O(n²) — a debug-build microbenchmark number would be meaningless — but a per-session full decode
+    /// (the shape this design exists to avoid) would blow it by two orders of magnitude.
+    #[test]
+    // The seam ban targets PRODUCTION reaching for wall-clock; a latency gate measuring elapsed time is
+    // exactly what Instant is for (justified exemption).
+    #[allow(clippy::disallowed_methods)]
+    fn the_router_hot_path_holds_a_crowd_sized_body_under_volume() {
+        const ENTITIES: usize = 128;
+        const ROUNDS: u32 = 50_000;
+        let tick_hz = 50u32;
+
+        let snapshot = SnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 1,
+            source_tick: TickId(5),
+            universe_tick: UniverseTick(0),
+            entities: (0..ENTITIES)
+                .map(|i| EntitySnap {
+                    entity: EntityId(i as u128),
+                    pose: vd_core::pose::StampedPose::at_rest(
+                        FrameRef::PlanetCentered { planet_seed: 7 },
+                        DVec3::new(i as f64, 0.0, 0.0),
+                        UniverseTick(0),
+                    ),
+                })
+                .collect(),
+        };
+        let shard_bytes = postcard::to_allocvec(&snapshot).expect("encode");
+        let frame = postcard::to_allocvec(&ShardToGateway::Frame {
+            realm_fence: Fence(1),
+            source_tick: TickId(5),
+            snapshot_bytes: shard_bytes.clone(),
+        })
+        .expect("encode");
+
+        let (mut sessions, _sid, _) = one_active_session();
+        let mut stats = GatewayStats::default();
+
+        let started = std::time::Instant::now();
+        let mut served = 0u32;
+        let mut last = Vec::new();
+        for _ in 0..ROUNDS {
+            let mut outbox = OutboundBox::default();
+            on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
+            served += u32::try_from(outbox.0.len()).expect("one push per round");
+            last = outbox.0[0].2.to_vec();
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(served, ROUNDS, "every round served the one subscriber");
+        // ANTI-VACUITY, and the byte-identity claim in one assertion: the body the subscriber received is
+        // the shard's own body, not a re-encoding of it. `one_active_session` holds SubId(0) and the
+        // datagram already leads with sub 0, so the re-tag rewrites the same varint and the bytes match
+        // exactly. A router that started composing again would fail here before it failed on time.
+        assert_eq!(
+            last, shard_bytes,
+            "the router forwarded the shard's own crowd-sized body byte for byte"
+        );
+
+        // The derived ceiling: `ROUNDS` tick-periods of headroom over what is nominally ROUNDS ticks of
+        // work. A debug build is ~an order of magnitude off release, hence the whole period rather than a
+        // fraction of it; the failure this catches is a per-session decode, which costs sessions× more.
+        let budget = std::time::Duration::from_secs_f64(f64::from(ROUNDS) / f64::from(tick_hz));
+        assert!(
+            elapsed < budget,
+            "the gateway fan-out collapsed: {ROUNDS} rounds of {ENTITIES} entities took {elapsed:?} \
+             (budget {budget:?} = one tick period per round at {tick_hz} Hz)"
         );
     }
 
@@ -6518,6 +6963,10 @@ mod tests {
                 // 5f-3d: a STATIC session (no dynamic home, no bootstrap window) — the byte-identical shape.
                 home_shard: None,
                 home_rid: None,
+                // A bare test session: pinned at the walk forest's root (no home resolved).
+                render_pin: RealmId::System(0),
+                // A bare test session: no home descended, so no spawn pose — the static shape.
+                spawn: None,
                 bootstrap_deadline: None,
                 confirmed_at: TickId(confirmed),
                 negotiated_minor: 1,
@@ -6597,6 +7046,10 @@ mod tests {
                 // 5f-3d: a STATIC session (no dynamic home, no bootstrap window) — the byte-identical shape.
                 home_shard: None,
                 home_rid: None,
+                // A bare test session: pinned at the walk forest's root (no home resolved).
+                render_pin: RealmId::System(0),
+                // A bare test session: no home descended, so no spawn pose — the static shape.
+                spawn: None,
                 bootstrap_deadline: None,
                 confirmed_at: TickId(0),
                 negotiated_minor: 1,
@@ -6845,6 +7298,10 @@ mod tests {
                 // 5f-3d: a STATIC session (no dynamic home, no bootstrap window) — the byte-identical shape.
                 home_shard: None,
                 home_rid: None,
+                // A bare test session: pinned at the walk forest's root (no home resolved).
+                render_pin: RealmId::System(0),
+                // A bare test session: no home descended, so no spawn pose — the static shape.
+                spawn: None,
                 bootstrap_deadline: None,
                 confirmed_at: TickId(0),
                 negotiated_minor: 1,
@@ -7008,15 +7465,47 @@ mod tests {
         assert!(outbox.0.is_empty(), "nothing forwarded on a malformed body");
     }
 
+    /// The realm datagram a `realm_frame_msg` envelope carries — the payload the shard authored, which is
+    /// exactly what the client must receive. The ONE builder, which `realm_frame_msg` wraps — so reading
+    /// the payload never destructures an enum a fixture just built (a dead refusal arm by construction).
+    fn realm_frame_payload(realm: RealmId) -> Vec<u8> {
+        let snapshot = RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 3,
+            source_tick: TickId(5),
+            universe_tick: UniverseTick(50),
+            realms: vec![RealmSnap {
+                realm,
+                // The edge HEAD (proto_minor 8): the CHILD's own frame. The gateway IGNORES it in this
+                // slice — it forwards realm bytes verbatim — but a row without it is not a placement
+                // edge, so the fixture ships a real one rather than a same-frame placeholder.
+                frame: vd_core::pose::frame_for_realm(realm, None)
+                    .expect("a Planet realm resolves"),
+                pose: vd_core::pose::StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    vd_core::glam::DVec3::new(1.0e9, 0.0, 0.0),
+                    UniverseTick(50),
+                ),
+            }],
+        };
+        postcard::to_allocvec(&snapshot).expect("encode")
+    }
+
     #[test]
-    fn on_shard_realm_frame_fans_to_an_active_subscribers_client() {
+    fn on_shard_realm_frame_forwards_the_shard_payload_byte_for_byte() {
         // FA-2c: a realm frame from a subscribed shard reaches the subscriber's client as a
         // MsgClass::RealmSnapshot datagram (sub-agnostic, RealmId-keyed) — the render-plane fan-out.
+        //
+        // AND THE BYTES ARE THE SHARD'S OWN. This lane once had every row's centre re-derived out of a
+        // placement graph the router kept a copy of, which is the breach the arc removes; the rows now
+        // arrive already measured in the frame of the realm the viewer stands in. Comparing the whole
+        // payload — not just the realm ids — is what makes a re-introduced conversion fail here.
         let (mut sessions, _sid, _) = one_active_session();
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
-        let msg = postcard::to_allocvec(&realm_frame_msg(RealmId::Planet(7))).expect("encode");
-        on_shard_realm_frame(SHARD, &msg, &mut sessions, &mut stats, &mut outbox);
+        let authored = realm_frame_payload(RealmId::Planet(7));
+        let envelope = postcard::to_allocvec(&realm_frame_msg(RealmId::Planet(7))).expect("encode");
+        on_shard_realm_frame(SHARD, &envelope, &mut sessions, &mut stats, &mut outbox);
         let got: Vec<&(NodeId, MsgClass, vd_sim::io::Bytes, vd_sim::io::Durability)> = outbox
             .0
             .iter()
@@ -7027,24 +7516,21 @@ mod tests {
             1,
             "the active subscriber's client got one realm frame"
         );
+        assert_eq!(
+            got[0].2.as_ref(),
+            authored.as_slice(),
+            "the router forwarded the shard's realm payload verbatim"
+        );
         let snap: RealmSnapshotDatagram = postcard::from_bytes(&got[0].2).expect("decode");
         assert_eq!(snap.realms.len(), 1);
         assert_eq!(snap.realms[0].realm, RealmId::Planet(7));
     }
 
     #[test]
-    fn on_shard_realm_frame_counts_undecodable_and_desync_and_skips_non_active() {
-        let msg = postcard::to_allocvec(&realm_frame_msg(RealmId::Planet(7))).expect("encode");
+    fn on_shard_realm_frame_counts_desync_and_skips_non_active() {
+        let envelope = postcard::to_allocvec(&realm_frame_msg(RealmId::Planet(7))).expect("encode");
 
-        // (a) undecodable: garbage bytes ⇒ counted, nothing sent.
-        let (mut sessions, _sid, _) = one_active_session();
-        let mut stats = GatewayStats::default();
-        let mut outbox = OutboundBox::default();
-        on_shard_realm_frame(SHARD, &[0xff, 0xff], &mut sessions, &mut stats, &mut outbox);
-        assert_eq!(stats.undecodable, 1);
-        assert!(outbox.0.is_empty());
-
-        // (b) forced desync: the reverse index references a session absent from `by_session` ⇒ counted,
+        // (a) forced desync: the reverse index references a session absent from `by_session` ⇒ counted,
         // never a silent drop (the C2 honesty floor, mirroring on_shard_frame).
         let mut sessions = GatewaySessions::default();
         sessions
@@ -7054,19 +7540,59 @@ mod tests {
             .insert(SessionId(0xC0DE));
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
-        on_shard_realm_frame(SHARD, &msg, &mut sessions, &mut stats, &mut outbox);
+        on_shard_realm_frame(SHARD, &envelope, &mut sessions, &mut stats, &mut outbox);
         assert_eq!(stats.frame_sub_desync, 1);
         assert!(outbox.0.is_empty());
 
-        // (c) a non-Active (self-fenced) subscriber is served no realm frame.
+        // (b) a non-Active (self-fenced) subscriber is served no realm frame.
         let (mut sessions, sid, _) = one_active_session();
         sessions.by_session.get_mut(&sid).expect("present").phase = SessionPhase::SelfFenced;
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
-        on_shard_realm_frame(SHARD, &msg, &mut sessions, &mut stats, &mut outbox);
+        on_shard_realm_frame(SHARD, &envelope, &mut sessions, &mut stats, &mut outbox);
         assert!(
             outbox.0.is_empty(),
             "a self-fenced session gets no realm frame"
+        );
+    }
+
+    #[test]
+    fn a_malformed_realm_envelope_is_counted_once_and_forwards_nothing() {
+        // `on_shard_realm_frame` is the ONE place the realm envelope is opened, so garbage on that class
+        // is counted exactly ONCE and forwards nothing.
+        let mut rig = Rig::new();
+        let (_, _) = rig.login();
+        let sent = rig.tick(vec![wire(SHARD, MsgClass::RealmSnapshot, &0xffu8)]);
+        assert_eq!(rig.world.resource::<GatewayStats>().undecodable, 1);
+        assert_eq!(to_client(&sent, MsgClass::RealmSnapshot), 0);
+    }
+
+    #[test]
+    fn the_router_forwards_the_realm_lane_through_the_real_schedule_without_opening_it() {
+        // THE ROUTING PATH, END TO END THROUGH THE REAL SCHEDULE, ASSERTED ON BYTES. A realm frame from a
+        // subscribed shard reaches the client as EXACTLY the payload the shard authored.
+        //
+        // This replaces a gate that asserted the router had learned a placement edge out of this datagram.
+        // It had to learn one because it was re-deriving every centre itself, out of a world-wide graph of
+        // every parent's authored placement of every child — a party that is the parent of none of them
+        // holding all of it. The rows arrive already measured in the frame of the realm the viewer stands
+        // in, so there is nothing to learn and nothing to open.
+        let mut rig = Rig::new();
+        let (_, _) = rig.login();
+        let authored = realm_frame_payload(RealmId::Planet(7));
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::RealmSnapshot,
+            &realm_frame_msg(RealmId::Planet(7)),
+        )]);
+        let got: Vec<&(NodeId, MsgClass, Vec<u8>)> = sent
+            .iter()
+            .filter(|(to, class, _)| (*to == CLIENT) & (*class == MsgClass::RealmSnapshot))
+            .collect();
+        assert_eq!(got.len(), 1, "one realm datagram reached the client");
+        assert_eq!(
+            got[0].2, authored,
+            "the router forwarded the shard's realm payload byte for byte"
         );
     }
 
@@ -7238,6 +7764,114 @@ mod tests {
         assert_eq!(
             rig.world.resource::<GatewaySessions>().subscribers_of(DEST),
             vec![sid]
+        );
+    }
+
+    #[test]
+    fn a_subscription_ready_naming_a_realm_moves_the_render_pin() {
+        // THE RENDER PIN follows the avatar: `SubscriptionReady` is the one phase that can move it
+        // (it carries the destination FRAME, so the realm the player is now in is nameable). A
+        // frame that names a realm re-derives the pin once; galaxy space names none and leaves it.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let before = rig.world.resource::<GatewaySessions>().by_session[&sid].render_pin;
+        let _ = rig.tick(vec![wire(
+            DEST,
+            MsgClass::Control,
+            &ShardToGateway::SubscriptionReady {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::PlanetCentered { planet_seed: 42 },
+                realm_fence: Fence(5),
+            },
+        )]);
+        let after = rig.world.resource::<GatewaySessions>().by_session[&sid].render_pin;
+        assert_ne!(before, after, "the pin re-derived for the entered realm");
+    }
+
+    #[test]
+    fn a_subscription_ready_into_galaxy_space_leaves_the_render_pin() {
+        // Galaxy space names no realm, so the pin has nothing to re-derive from and stays where the
+        // avatar last stood — the between-space is felt, not re-anchored.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let before = rig.world.resource::<GatewaySessions>().by_session[&sid].render_pin;
+        let _ = rig.tick(vec![wire(
+            DEST,
+            MsgClass::Control,
+            &ShardToGateway::SubscriptionReady {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::GalaxySpace,
+                realm_fence: Fence(5),
+            },
+        )]);
+        let after = rig.world.resource::<GatewaySessions>().by_session[&sid].render_pin;
+        assert_eq!(before, after, "no realm named, no pin moved");
+    }
+
+    #[test]
+    fn a_shard_roster_applies_fresh_rejects_stale_and_admits_for_dispatch() {
+        // Minor 9's roster receive: the orchestrator's level REPLACES the record set (latest tick
+        // wins); an older one is refused as stale — a reordered datagram must never resurrect a dead
+        // roster. The applied set is DECISIVE: a node the record shows holding a realm is heard for
+        // dispatch without ever greeting.
+        const RECORDED: NodeId = NodeId(77);
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let roster = |nodes: Vec<NodeId>, at: u64| {
+            wire(
+                ORCH,
+                MsgClass::Saga,
+                &InterShardFlow::ShardRoster(vd_wire::intershard::ShardRoster {
+                    nodes,
+                    at: UniverseTick(at),
+                }),
+            )
+        };
+        let _ = rig.tick(vec![roster(vec![RECORDED], 10)]);
+        assert_eq!(rig.stats().shard_rosters_applied, 1);
+        // STALE: an older level is refused; the held set is untouched.
+        let _ = rig.tick(vec![roster(vec![], 5)]);
+        assert_eq!(rig.stats().shard_roster_stale, 1);
+        assert_eq!(rig.stats().shard_rosters_applied, 1);
+        // DECISIVE: the recorded node's SubscriptionReady is heard (it is a shard by record), so the
+        // session opens a sub on it — a node outside roster+greetings would have been refused.
+        let _ = rig.tick(vec![wire(
+            RECORDED,
+            MsgClass::Control,
+            &ShardToGateway::SubscriptionReady {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 8 },
+                realm_fence: Fence(5),
+            },
+        )]);
+        assert_eq!(
+            sub_for(&rig, sid, RECORDED).map(|e| e.sub),
+            Some(SubId(1)),
+            "the record-admitted shard's ready opened a sub"
+        );
+    }
+
+    #[test]
+    fn a_known_clients_wrong_class_counts_undecodable_not_unknown_sender() {
+        // The refusal split: an UNKNOWN node on a data class is refused by sender; a node with a
+        // LIVE session sending a class it may not send is a peer bug, counted undecodable exactly
+        // as before the split existed.
+        let mut rig = Rig::new();
+        let _ = rig.login();
+        let before = rig.stats().undecodable;
+        let _ = rig.tick(vec![Inbound::Wire {
+            from: CLIENT,
+            class: MsgClass::Snapshot,
+            bytes: vec![1].into(),
+        }]);
+        assert_eq!(rig.stats().undecodable, before + 1);
+        assert_eq!(
+            rig.stats().refused_unknown_sender,
+            0,
+            "a KNOWN client is never refused as an unknown sender"
         );
     }
 
@@ -7769,6 +8403,10 @@ mod tests {
             // 5f-3d: a STATIC session (no dynamic home, no bootstrap window) — the byte-identical shape.
             home_shard: None,
             home_rid: None,
+            // A bare test session: pinned at the walk forest's root (no home resolved).
+            render_pin: RealmId::System(0),
+            // A bare test session: no home descended, so no spawn pose — the static shape.
+            spawn: None,
             bootstrap_deadline: None,
             confirmed_at: TickId(1),
             negotiated_minor: 1,
@@ -7901,15 +8539,15 @@ mod tests {
         sends.iter().map(|tick| demands_to_orch(tick).len()).sum()
     }
 
-    /// An at-rest ABSOLUTE spawn pose at `(x,0,0)` in the Universe-root frame (the frame
-    /// `container_coord_at` reads) — the same shape 5f-3b stores.
-    fn spawn_at(x: f64) -> StampedPose {
-        StampedPose::at_rest(
-            FrameRef::SystemSpace { system_seed: 0 },
-            DVec3::new(x, 0.0, 0.0),
-            UniverseTick(0),
-        )
-    }
+    /// THE DEEP HOME every armed rig here uses: the walk-scale world's deepest realm, an Area inside a
+    /// Planet inside a Star system. Demanding it therefore spins up a four-level chain, which is what these
+    /// tests are about.
+    ///
+    /// These rigs used to say the same thing as a POSITION — 25 metres along `+x` from the ambient root —
+    /// and let the router descend the forest to work out which realm that fell in. It fell in exactly this
+    /// one, at that area's own centre, so naming it states what the rig always meant and removes the
+    /// descent from the test as well as from the code.
+    const TEST_HOME_REALM: RealmId = RealmId::Area(7);
 
     /// RLM 5f-3d — the DEMAND TTL every armed test rig runs with: 8 ticks ⇒ a re-drive cadence of
     /// `8 / REDRIVE_DIVISOR = 2` ticks. Small enough that a handful of `set_tick` steps cross it, and NOT 1,
@@ -7918,18 +8556,72 @@ mod tests {
     /// RLM 5f-3d — the bootstrap TTL for rigs that must NOT expire while a test drives several ticks.
     const TEST_BOOTSTRAP_TTL: u64 = 100;
 
-    /// An ARMED injector over `poses`, walk-scale seed 0 (the forest `container_coord_at` descends), with a
-    /// LIVE 5f-3d bootstrap budget (a short re-drive cadence, a long bootstrap TTL). The pre-5f-3d 5f-3c
-    /// tests are unaffected by the budget: they hold `local_tick` at 1, so neither the re-drive nor the TTL
-    /// can fire during them.
-    fn armed_injector(poses: BTreeMap<AccountId, StampedPose>) -> SeedInjectorConfig {
+    /// An ARMED injector whose accounts live in `homes`, over the walk-scale world, with a LIVE 5f-3d
+    /// bootstrap budget (a short re-drive cadence, a long bootstrap TTL). The pre-5f-3d 5f-3c tests are
+    /// unaffected by the budget: they hold `local_tick` at 1, so neither the re-drive nor the TTL can fire
+    /// during them.
+    fn armed_injector(homes: HomeRegistry) -> SeedInjectorConfig {
         SeedInjectorConfig {
             armed: true,
             world: WorldView::hand_placed(&UniverseConfig::walk_scale()),
-            spawn_poses: poses,
+            homes,
             demand_ttl_ticks: TEST_DEMAND_TTL,
             bootstrap_ttl_ticks: TEST_BOOTSTRAP_TTL,
         }
+    }
+
+    /// The walk-scale world every armed rig here resolves homes against.
+    fn test_world() -> WorldView {
+        WorldView::hand_placed(&UniverseConfig::walk_scale())
+    }
+
+    /// `realm`'s full root→leaf lineage in that world — a NAME walk up the parent pointers, with no
+    /// distance read anywhere in it.
+    fn lineage_of(realm: RealmId) -> RealmCoord {
+        vd_core::worldgen::coord_of_realm(test_world().regions(), realm)
+            .expect("the rig names a realm of its own world")
+    }
+
+    /// The rig default: every account lives at the ambient root's own centre.
+    fn default_homes() -> HomeRegistry {
+        let world = test_world();
+        let root = world
+            .regions()
+            .iter()
+            .find(|r| r.parent.is_none())
+            .expect("a forest has one ambient root")
+            .realm;
+        homes_at(root)
+    }
+
+    /// A registry where every account lives at `realm`'s own centre — the rig equivalent of "the account
+    /// store says you live here", with no descent anywhere in it.
+    fn homes_at(realm: RealmId) -> HomeRegistry {
+        let world = test_world();
+        HomeRegistry::new(
+            StoredHome::in_realm(world.regions(), realm, DVec3::ZERO)
+                .expect("the rig names a realm of its own world"),
+        )
+    }
+
+    /// A registry where `account` lives at `realm`, `x` metres along `+x` from that realm's own centre, and
+    /// every other account lives at the ambient root.
+    fn homes_for(account: AccountId, realm: RealmId, x: f64) -> HomeRegistry {
+        let world = test_world();
+        let root = world
+            .regions()
+            .iter()
+            .find(|r| r.parent.is_none())
+            .expect("a forest has one ambient root")
+            .realm;
+        HomeRegistry::new(
+            StoredHome::in_realm(world.regions(), root, DVec3::ZERO).expect("the root is named"),
+        )
+        .with_account(
+            account,
+            StoredHome::in_realm(world.regions(), realm, DVec3::new(x, 0.0, 0.0))
+                .expect("the rig names a realm of its own world"),
+        )
     }
 
     /// Arm `rig`'s live `GatewayConfig` with `injector` + set the clock's `synced` latch (the same
@@ -7969,9 +8661,10 @@ mod tests {
     }
 
     /// The `RealmRegistry` render-scenes on an outbox (VU proto_minor 5), decoded off the control pushes —
-    /// each as its streamed neighbourhood + ambient root. The `_ => None` arm discriminates non-registry
-    /// control (e.g. `OwnEntity`), so a caller that pre-seeds one exercises it. Mirrors `demands_to_orch`.
-    fn realm_registries(outbox: &OutboundBox) -> Vec<(Vec<RealmShape>, RealmId)> {
+    /// each as its streamed neighbourhood + ambient root + the space it names. The `_ => None` arm
+    /// discriminates non-registry control (e.g. `OwnEntity`), so a caller that pre-seeds one exercises it.
+    /// Mirrors `demands_to_orch`.
+    fn realm_registries(outbox: &OutboundBox) -> Vec<(Vec<RealmShape>, RealmId, RealmId)> {
         outbox
             .0
             .iter()
@@ -7979,7 +8672,9 @@ mod tests {
                 match postcard::from_bytes::<ServerControlMsg>(bytes)
                     .expect("gateway test pushes only ServerControlMsg on this outbox")
                 {
-                    ServerControlMsg::RealmRegistry { regions, root, .. } => Some((regions, root)),
+                    ServerControlMsg::RealmRegistry {
+                        regions, root, pin, ..
+                    } => Some((regions, root, pin)),
                     _ => None,
                 }
             })
@@ -7990,9 +8685,13 @@ mod tests {
     fn realm_registry_streams_only_for_an_armed_cluster_a_minor5_peer_and_a_known_home() {
         // The home-entry render-scene is gated on THREE conditions; each false arm emits nothing, so a static
         // cluster and an old client stay byte-identical to the pre-VU gateway.
-        let armed = armed_injector(BTreeMap::new());
-        // Asked OF THE INJECTOR'S OWN WORLD, so the test cannot describe a different one than the code does.
-        let home = armed.world.container_coord(DVec3::new(25.0, 0.0, 0.0)).lowered();
+        let armed = armed_injector(default_homes());
+        // A realm OF THE INJECTOR'S OWN WORLD, so the test cannot describe a different one than the code does.
+        let home = TEST_HOME_REALM;
+        assert!(
+            armed.world.contains_realm(home),
+            "the rig's home realm must belong to the injector's own world",
+        );
         let inert = SeedInjectorConfig::default(); // unarmed = a static cluster
         let client = NodeId(7);
 
@@ -8028,80 +8727,92 @@ mod tests {
             "no home_rid ⇒ no render-scene (a safe no-op, never a panic)"
         );
 
-        // (4) armed + minor 5 + a known home → EXACTLY ONE RealmRegistry carrying the seed neighbourhood.
+        // (4) armed + minor 5 + a known home → EXACTLY ONE RealmRegistry, naming the session's space and
+        // carrying NO geometry. The outlines come from the shard chain, not from here.
         let mut outbox = OutboundBox::default();
         maybe_announce_realm_registry(&mut outbox, client, &armed, 5, Some(home));
         let sent = realm_registries(&outbox);
         assert_eq!(sent.len(), 1, "exactly one render-scene per home entry");
-        assert!(
-            sent[0].0.iter().any(|s| s.realm == home),
-            "the streamed neighbourhood contains the client's own home realm"
+        assert_eq!(
+            sent[0].0,
+            Vec::new(),
+            "the router ships no outlines: it is the parent of nothing"
+        );
+        assert_eq!(
+            sent[0].2,
+            render_pin(&armed, home),
+            "the registry names the space this session draws in"
         );
 
-        // (5) armed + minor 6 (the PRODUCTION minor) + a known home → also EXACTLY ONE RealmRegistry. The
-        // gate admits both supported minors (5 and 6); they differ only in the child-shrink (asserted in the
-        // System-home test), never in WHETHER a render-scene streams. `home` here is a LEAF Area, so its
-        // shrunk and full projections coincide — it is present under either minor.
-        let mut outbox = OutboundBox::default();
-        maybe_announce_realm_registry(&mut outbox, client, &armed, 6, Some(home));
-        let sent = realm_registries(&outbox);
+        // (5) armed + minor 6 (the PRODUCTION minor) + a known home → also EXACTLY ONE RealmRegistry, and
+        // IDENTICAL to the minor-5 one. The minor 5-vs-6 split used to decide how much of the router's
+        // forest copy went out in the login scene; nothing goes out now, so the two minors cannot differ.
+        let mut outbox6 = OutboundBox::default();
+        maybe_announce_realm_registry(&mut outbox6, client, &armed, 6, Some(home));
+        let sent6 = realm_registries(&outbox6);
         assert_eq!(
-            sent.len(),
+            sent6.len(),
             1,
             "a minor-6 peer also streams exactly one render-scene"
         );
-        assert!(
-            sent[0].0.iter().any(|s| s.realm == home),
-            "the streamed neighbourhood contains the client's own home realm (a containing realm)"
+        assert_eq!(
+            sent6, sent,
+            "the login scene no longer depends on the negotiated minor — there is no geometry to shrink"
         );
     }
 
     #[test]
-    fn realm_registry_for_home_is_the_faithful_seed_neighbourhood_and_degrades_empty_off_forest() {
-        // The projection is a FAITHFUL render subset of the canonical seed neighbourhood: same realms, same
-        // order, same frame/center/shape/parent — only the server-side AoI band is dropped.
-        let cfg = armed_injector(BTreeMap::new());
-        let home = cfg.world.container_coord(DVec3::new(25.0, 0.0, 0.0)).lowered();
-        let expected = cfg.world.neighbourhood(&BTreeSet::from([home]));
+    fn realm_registry_for_home_authors_no_geometry_and_names_the_session_space() {
+        // THE LOGIN SCENE CARRIES NOTHING THE ROUTER HAD TO KNOW WHERE ANYTHING IS TO PRODUCE.
+        //
+        // This test used to assert the opposite: that the registry was a faithful lowering of the router's
+        // own copy of the seed forest, every centre re-expressed into a space the router picked. Both halves
+        // were the ground rule's breach in the one message a player sees first — the router is the parent of
+        // no realm, so every number in it was worked out from a placement graph it had no business holding.
+        // The outlines now come from the shard chain (the home shard states its own realm's outline at its
+        // own origin; its children and everything above it arrive through the scene-delta, one subtraction
+        // per level), so the only honest content left here is a NAME.
+        let cfg = armed_injector(default_homes());
+        let home = TEST_HOME_REALM;
         assert!(
-            !expected.is_empty(),
-            "the (25,0,0) home has a real seed neighbourhood"
+            !cfg.world.neighbourhood(&BTreeSet::from([home])).is_empty(),
+            "the rig's home has a real seed neighbourhood — so an empty scene here is a CHOICE, not \
+             an accident of an off-forest home"
         );
-        // Round-trip the built registry through an outbox → the SAME covered decode the live seam uses (no
-        // `let-else { panic }`, whose never-taken arm would be an uncoverable region under HR5).
+        // Round-trip through an outbox → the SAME covered decode the live seam uses (no `let-else { panic }`,
+        // whose never-taken arm would be an uncoverable region under HR5).
         let mut ob = OutboundBox::default();
-        // The minor==5 back-compat path: the FULL ancestors∪children neighbourhood (this home is a LEAF Area,
-        // so it happens to have no children — the drop-children branch is covered by the System-home test).
-        push_control(&mut ob, NodeId(7), &realm_registry_for_home(&cfg, 5, home));
+        push_control(&mut ob, NodeId(7), &realm_registry_for_home(&cfg, home));
         let sent = realm_registries(&ob);
         assert_eq!(sent.len(), 1, "one RealmRegistry per home");
-        let (regions, root) = &sent[0];
+        let (regions, root, pin) = &sent[0];
         assert_eq!(
-            regions.len(),
-            expected.len(),
-            "one render shape per neighbourhood region"
+            *regions,
+            Vec::new(),
+            "the router authored no outline — every box arrives from the shard that owns the realm"
         );
-        for (shape, region) in regions.iter().zip(expected.iter()) {
-            assert_eq!(shape.realm, region.realm);
-            assert_eq!(shape.frame, region.frame);
-            assert_eq!(shape.center, region.center);
-            assert_eq!(shape.shape, region.shape);
-            assert_eq!(shape.parent, region.parent);
-        }
-        let ambient_root = expected
-            .iter()
+        let ambient_root = cfg
+            .world
+            .neighbourhood(&BTreeSet::from([home]))
+            .into_iter()
             .find(|r| r.parent.is_none())
             .expect("the neighbourhood reaches the parent-less ambient root");
         assert_eq!(*root, ambient_root.realm, "root names the ambient realm");
+        assert_eq!(
+            *pin,
+            render_pin(&cfg, home),
+            "pin names the session's space"
+        );
 
-        // A home NOT in the seed forest degrades to an EMPTY scene rooted at itself (a Ship realm is spawned
-        // at runtime, never a static forest region) — the neighbourhood is empty, never a panic.
+        // A home NOT in the seed forest (a Ship realm, spawned at runtime) still yields exactly one message:
+        // the root degrades to the home itself, never a panic. Nothing else can degrade — there is no
+        // geometry left to fail to relate.
         let off_forest = RealmId::Ship(EntityId(0xDEAD));
         let mut ob = OutboundBox::default();
         push_control(
             &mut ob,
             NodeId(7),
-            &realm_registry_for_home(&cfg, 5, off_forest),
+            &realm_registry_for_home(&cfg, off_forest),
         );
         let sent = realm_registries(&ob);
         assert_eq!(
@@ -8109,103 +8820,53 @@ mod tests {
             1,
             "one RealmRegistry even for an off-forest home"
         );
-        let (regions, root) = &sent[0];
-        assert!(
-            regions.is_empty(),
-            "an off-forest home yields no render shapes"
-        );
         assert_eq!(
-            *root, off_forest,
+            sent[0].1, off_forest,
             "root degrades to the home itself when the neighbourhood is empty"
         );
     }
 
     #[test]
-    fn realm_registry_for_a_system_home_ships_the_ancestor_chain_and_defers_children_to_the_delta()
-    {
-        // A home WITH children — the first star system (ancestors Universe→Galaxy→System; direct children
-        // its planets). A minor>=6 peer receives ONLY the ancestor SHELL-CHAIN root→home; every direct child
-        // is DROPPED (it arrives later via `RealmSceneDelta`). A minor==5 peer — which never receives a delta
-        // — keeps the full ancestors∪children set. The chain-in-registry vs children-via-delta split is a
-        // FACTORING (a containing realm is the degenerate always-in-view case), not a second visibility rule.
-        //
-        // The children are GENERATED planets, not hand-placed fixtures. This test used to read them from the
-        // walk roster, which carried a station and a planet placed by hand; those left when stations and
-        // areas became player-built things the generator never emits. The walk preset emits no orbiting
-        // bodies at all, so asking IT for a system's children now correctly returns none — hence a preset
-        // that actually populates a system. The behaviour under test (what the registry keeps and what it
-        // defers) is the same either way; only the source of the children moved.
-        let home = RealmId::System(7); // the first star system — a realm WITH children
-        let mut cfg = armed_injector(BTreeMap::new());
+    fn realm_registry_for_a_system_home_ships_no_children_and_no_ancestors_either() {
+        // The counterpart of the test above on a home that HAS children: the first star system, whose seed
+        // neighbourhood is a real ancestor chain (Universe→Galaxy→System) plus a set of generated planets.
+        // The registry used to ship the ancestor chain and defer the children to the delta — a split that
+        // only existed because the router could enumerate the chain out of its forest copy. It ships NEITHER
+        // now: the system's own outline comes from the system's own shard, its planets from that shard's AoI
+        // deltas, and its ancestors from whatever of the chain is LIVE, relayed down one level at a time.
+        let home = RealmId::System(7);
+        let mut cfg = armed_injector(default_homes());
         cfg.world = WorldView::generated(0, &UniverseConfig::visual_scale());
         let full = cfg.world.neighbourhood(&BTreeSet::from([home]));
-        // Partition the seed neighbourhood into the ancestor chain (`parent != Some(home)`) and the direct
-        // children (`parent == Some(home)`), so the test tracks the forest instead of hardcoding ids.
-        let ancestors: Vec<RealmId> = full
-            .iter()
-            .filter(|r| r.parent != Some(home))
-            .map(|r| r.realm)
-            .collect();
         let children: Vec<RealmId> = full
             .iter()
             .filter(|r| r.parent == Some(home))
             .map(|r| r.realm)
             .collect();
+        let ancestors: Vec<RealmId> = full
+            .iter()
+            .filter(|r| r.parent != Some(home))
+            .map(|r| r.realm)
+            .collect();
+        // ANTI-VACUITY on BOTH halves: this home really does have children to omit AND a chain above it to
+        // omit, so "the registry is empty" is a statement about the code and not about the fixture.
         assert!(
             !children.is_empty(),
-            "the System A home has direct children to drop (else the drop-branch test is vacuous)"
+            "the System 7 home has direct children (else the omit-children claim is vacuous)"
         );
         assert!(
-            ancestors.contains(&home),
-            "the ancestor chain includes the home realm itself (a containing realm is always in view)"
+            ancestors.len() > 1,
+            "the System 7 home has ancestors above it (else the omit-ancestors claim is vacuous)"
         );
 
-        // minor >= 6 → the SHRUNK registry is EXACTLY the ancestor chain root→home; every child is dropped.
-        let mut ob6 = OutboundBox::default();
-        push_control(&mut ob6, NodeId(7), &realm_registry_for_home(&cfg, 6, home));
-        let sent6 = realm_registries(&ob6);
-        assert_eq!(sent6.len(), 1, "one RealmRegistry per home");
-        let (shrunk_regions, root6) = &sent6[0];
-        let shrunk_realms: Vec<RealmId> = shrunk_regions.iter().map(|s| s.realm).collect();
-        // (a) the ancestors root→System are KEPT, same realms in the same forest order.
+        let mut ob = OutboundBox::default();
+        push_control(&mut ob, NodeId(7), &realm_registry_for_home(&cfg, home));
+        let sent = realm_registries(&ob);
+        assert_eq!(sent.len(), 1, "one RealmRegistry per home");
         assert_eq!(
-            shrunk_realms, ancestors,
-            "a minor>=6 peer keeps exactly the ancestor chain root→home"
-        );
-        // (b) EVERY direct child is DROPPED from the login registry.
-        for child in &children {
-            assert!(
-                !shrunk_realms.contains(child),
-                "the direct child is deferred to the scene-delta, not shipped in the login registry"
-            );
-        }
-        let ambient_root = full
-            .iter()
-            .find(|r| r.parent.is_none())
-            .expect("the neighbourhood reaches the parent-less ambient root");
-        assert_eq!(
-            *root6, ambient_root.realm,
-            "root still names the ambient realm"
-        );
-
-        // minor == 5 → the FULL ancestors∪children set (a minor-5 peer gets no delta to fill children in).
-        let mut ob5 = OutboundBox::default();
-        push_control(&mut ob5, NodeId(7), &realm_registry_for_home(&cfg, 5, home));
-        let sent5 = realm_registries(&ob5);
-        assert_eq!(sent5.len(), 1, "one RealmRegistry per home");
-        let (full_regions, _) = &sent5[0];
-        let full_realms: Vec<RealmId> = full_regions.iter().map(|s| s.realm).collect();
-        let expected_full: Vec<RealmId> = full.iter().map(|r| r.realm).collect();
-        // (c) a minor==5 peer sees the full ancestors∪children set (byte-identical to today's projection).
-        assert_eq!(
-            full_realms, expected_full,
-            "a minor==5 peer keeps the full ancestors∪children neighbourhood"
-        );
-        // The split is real: shrunk (ancestors) + the dropped children exactly reconstruct the full set.
-        assert_eq!(
-            shrunk_realms.len() + children.len(),
-            full_realms.len(),
-            "the minor>=6 registry is strictly smaller — the children moved to the scene-delta"
+            sent[0].0,
+            Vec::new(),
+            "neither the ancestor chain nor the children ride the login scene any more"
         );
     }
 
@@ -8253,17 +8914,20 @@ mod tests {
             ProtoVersion::CURRENT.minor,
             "the login negotiates CURRENT"
         );
+        // The shape carries the PLANET's own frame, not its parent's: `frame` is the head of the placement
+        // edge (whose occupants are measured in it) and `parent` is the tail. It used to be written with the
+        // system's frame here, which no consumer could tell apart from a realm placed inside itself.
         let added = vec![RealmShape {
             realm: RealmId::Planet(7),
-            frame: FrameRef::SystemSpace { system_seed: 7 },
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
             center: LatticePos::local(DVec3::new(20.0, 0.0, 0.0)),
             shape: Boundary::Shell { r: 10.0 },
             parent: Some(RealmId::System(7)),
         }];
-        // A5 — the delta re-carries the server-told render origin, derived from the session's home realm; give
-        // this session a home so the routed-delta case exercises the SEND (not the no-home withhold), and a cfg
-        // whose forest resolves that home's pin.
-        let cfg = armed_injector(std::collections::BTreeMap::new());
+        // The delta re-carries the pin NAME, derived from the session's home realm; give this session a home
+        // so the routed-delta case exercises the SEND (not the no-home withhold), and a cfg whose forest
+        // resolves that home's pin.
+        let cfg = armed_injector(default_homes());
         // (0) A minor>=6 session with NO resolved home yet ⇒ the delta is WITHHELD (there is no render origin
         // to tell; it self-heals the instant the home resolves and the scene re-broadcasts). The home_rid-None
         // arm — never a delta that pins the client at nowhere.
@@ -8366,18 +9030,17 @@ mod tests {
                 removed: vec![RealmId::Planet(8)],
             },
         )]);
-        // A5 — the client-facing delta carries the server-told render origin the PROD path computes from the
-        // session's home (System(7)) over the rig's OWN config, so match it against the same `render_pin`.
-        let (pin, pin_abs) = render_pin(
-            &rig.world.resource::<GatewayConfig>().seed_injector,
-            RealmId::System(7),
-        );
+        // The client-facing delta names the PIN the production path derives from the session's home
+        // (System(7)) over the rig's OWN config, so match it against the same `render_pin`. The added
+        // shapes are FORWARDED VERBATIM — the centre the shard shipped is already measured in the frame of
+        // the realm the session stands in, and a router that re-derived it applied a second conversion to a
+        // number that was already right. So the expectation is the shard's own shape, unmodified: if the
+        // router ever touches a centre again, this equality fails.
+        let injector = rig.world.resource::<GatewayConfig>().seed_injector.clone();
         let expected = ServerControlMsg::RealmSceneDelta {
-            added,
+            added: added.clone(),
             removed: vec![RealmId::Planet(8)],
-            pin,
-            pin_abs,
-            anchor_epoch: 0,
+            pin: render_pin(&injector, RealmId::System(7)),
         };
         assert!(
             decode_controls(&sent, CLIENT).contains(&expected),
@@ -8394,7 +9057,7 @@ mod tests {
         let mut rig = Rig::new();
         arm_injector(
             &mut rig,
-            armed_injector(BTreeMap::from([(account, spawn_at(25.0))])),
+            armed_injector(homes_for(account, TEST_HOME_REALM, 0.0)),
             true,
         );
         let (_sid, sends) = rig.login();
@@ -8407,14 +9070,12 @@ mod tests {
             1,
             "exactly one home demand per committed lease"
         );
-        // The child is the config-derived home lineage — NOT anything the client sent. (25,0,0) is the
-        // Area-A box: the deep 5-level [Universe, Galaxy, System(7), Planet(7), Area(7)] home (5f-3a).
-        let expected_child = armed_injector(BTreeMap::new())
-            .world
-            .container_coord(DVec3::new(25.0, 0.0, 0.0));
+        // The child is the STORED home's lineage — NOT anything the client sent. The Area-A box is the
+        // deep 5-level [Universe, Galaxy, System(7), Planet(7), Area(7)] home (5f-3a).
+        let expected_child = lineage_of(TEST_HOME_REALM);
         assert_eq!(
             demands[0].child, expected_child,
-            "the child is the SERVER-derived home lineage from the stored pose"
+            "the child is the stored home's lineage, read and not resolved"
         );
         assert_eq!(demands[0].verb, DemandVerb::SpinUp);
         assert_eq!(
@@ -8453,7 +9114,7 @@ mod tests {
         // the WRONG shard (or retry forever with no TTL). It emits NOTHING client-ward or shard-ward, stays in
         // `AwaitingDirectory`, is COUNTED, and the re-driven idempotent `LeaseGrant` takes the DYNAMIC arm
         // once the clock syncs.
-        let poses = BTreeMap::from([(AccountId(5), spawn_at(25.0))]);
+        let poses = homes_for(AccountId(5), TEST_HOME_REALM, 0.0);
         // pre-sync: armed, but the clock has not synced → NO demand.
         let mut rig = Rig::new();
         arm_injector(&mut rig, armed_injector(poses.clone()), false);
@@ -8468,7 +9129,7 @@ mod tests {
             "a pre-sync armed grant pushes NOTHING at the client (no Welcome, no Close — no artifact)"
         );
         assert!(
-            !saw_attach(&grant, SHARD, sid),
+            !saw_attach(&grant, SHARD, sid, None),
             "and NEVER attaches to the static config.shard on an armed cluster (MF3)"
         );
         assert_eq!(demands_to_orch(&grant).len(), 0, "and demands nothing");
@@ -8536,7 +9197,7 @@ mod tests {
         let mut rig = Rig::new();
         arm_injector(
             &mut rig,
-            armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))])),
+            armed_injector(homes_for(AccountId(5), TEST_HOME_REALM, 0.0)),
             true,
         );
         let hello = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
@@ -8582,7 +9243,7 @@ mod tests {
         let mut rig = Rig::new();
         arm_injector(
             &mut rig,
-            armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))])),
+            armed_injector(homes_for(AccountId(5), TEST_HOME_REALM, 0.0)),
             true,
         );
         let hello = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
@@ -8628,7 +9289,7 @@ mod tests {
         // The P7-store-absent stand-in: NO stored pose ⇒ the injector derives the ROOT/ORIGIN home coord
         // (still a valid in-forest lineage), NOT a skip. One demand, child == container_coord_at(origin).
         let mut rig = Rig::new();
-        arm_injector(&mut rig, armed_injector(BTreeMap::new()), true); // empty pose store
+        arm_injector(&mut rig, armed_injector(default_homes()), true); // empty pose store
         let (_sid, sends) = rig.login();
         let demands: Vec<RealmDemand> = sends
             .iter()
@@ -8639,10 +9300,10 @@ mod tests {
             1,
             "an absent pose still injects one (origin) home demand"
         );
-        let expected = WorldView::hand_placed(&UniverseConfig::walk_scale()).container_coord(DVec3::ZERO);
         assert_eq!(
-            demands[0].child, expected,
-            "an absent pose derives the origin home lineage (the P7-store-absent stand-in)"
+            demands[0].child,
+            default_homes().fallback().realm,
+            "an account with no home of its own is demanded at the registry's fallback home"
         );
     }
 
@@ -8676,10 +9337,10 @@ mod tests {
         // below is exactly what a valid home beside a second star would have hit.
         use vd_core::realm_path::{RealmKindTag, RealmLevel};
         let world = WorldView::hand_placed(&UniverseConfig::walk_scale());
-        let home = world.container_coord(DVec3::new(25.0, 0.0, 0.0));
+        let home = lineage_of(TEST_HOME_REALM);
         assert!(
             world.contains_realm(home.lowered()),
-            "a server-derived home is in the world that derived it"
+            "a stored home is in the world it is stored against"
         );
         // Append a leaf realm no world contains (Station(0xDEAD)) — a corrupted stand-in.
         let off = home.child(RealmLevel::new(RealmKindTag::Station, 0xDEAD));
@@ -8703,8 +9364,7 @@ mod tests {
     /// derives (and `demand_for_home` demands), lowered to the `RealmId` the directory keys realms by
     /// (`DirectoryKey::Realm(coord.lowered())` — exactly what `rlm.rs` grants a spawned realm at).
     fn home_lineage() -> RealmCoord {
-        WorldView::hand_placed(&UniverseConfig::walk_scale())
-            .container_coord(DVec3::new(25.0, 0.0, 0.0))
+        lineage_of(TEST_HOME_REALM)
     }
 
     /// …lowered to the `RealmId` the directory keys realms by.
@@ -8732,7 +9392,7 @@ mod tests {
         let mut rig = Rig::new();
         arm_injector(
             &mut rig,
-            armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))])),
+            armed_injector(homes_for(AccountId(5), TEST_HOME_REALM, 0.0)),
             true,
         );
         rig
@@ -8743,7 +9403,7 @@ mod tests {
         let mut rig = Rig::new();
         let injector = SeedInjectorConfig {
             bootstrap_ttl_ticks: ttl,
-            ..armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))]))
+            ..armed_injector(homes_for(AccountId(5), TEST_HOME_REALM, 0.0))
         };
         arm_injector(&mut rig, injector, true);
         rig
@@ -8815,15 +9475,31 @@ mod tests {
         (sid, granted)
     }
 
+    /// The spawn pose THIS rig's gateway derives for the test account — computed through the very
+    /// `home_placement` production uses, so an attach assertion can never drift from the derivation. `None`
+    /// on an unarmed rig, which is what a static attach carries.
+    fn attach_spawn(rig: &Rig) -> Option<StampedPose> {
+        let injector = &rig.world.resource::<GatewayConfig>().seed_injector;
+        injector
+            .armed
+            .then(|| home_placement(injector, AccountId(5)).1)
+    }
+
     /// Did the gateway send THIS session's `AttachSession` to `node`? Compares the EXACT expected bytes
     /// (never a speculative decode — postcard is not self-describing, so a client-bound `ServerControlMsg`
     /// on the same `Control` class can mis-decode as a `GatewayToShard`). Bitwise `&` (no short-circuit
     /// region — HR5).
-    fn saw_attach(sent: &[(NodeId, MsgClass, Vec<u8>)], node: NodeId, sid: SessionId) -> bool {
+    fn saw_attach(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+        node: NodeId,
+        sid: SessionId,
+        spawn: Option<StampedPose>,
+    ) -> bool {
         let expected = postcard::to_allocvec(&GatewayToShard::AttachSession {
             session: sid,
             fence: Fence(1),
             account: AccountId(5),
+            spawn,
         })
         .expect("encode");
         sent.iter().any(|(to, class, bytes)| {
@@ -8876,6 +9552,63 @@ mod tests {
     }
 
     #[test]
+    fn nothing_of_the_home_lineage_is_running_at_the_instant_the_login_descent_must_answer() {
+        // SLICE 6 (b) — THE BOOTSTRAP CIRCULARITY, AS AN ASSERTION RATHER THAN A PARAGRAPH.
+        //
+        // The other half of this slice was to move the login DESCENT into the chain: the galaxy's shard
+        // hands the star's shard a point in the star's frame, the star's hands the planet's a point in the
+        // planet's frame, and the planet accepts and computes nothing. That is the right shape and it is
+        // what every other lane in this arc now does.
+        //
+        // It cannot be built as things stand, and this gate is why. The descent answers TWO questions from
+        // ONE walk: WHICH realm the account lives in (a routing decision) and WHERE INSIDE IT they stand (the
+        // geometry). The chain can only be asked the second once it is running — and it only runs because
+        // something demanded the lineage, which is the first. At the instant the descent has to produce its
+        // answer the gateway holds an unresolved bootstrap wait and NOT ONE shard on the runtime routable
+        // roster: there is nobody to ask. The router answers from its forest copy precisely because nothing
+        // is running yet.
+        //
+        // This is an owner-visible design decision, not an implementation detail, and inventing a fallback
+        // here would be exactly the kind of quiet second source of truth this whole arc exists to remove.
+        // The two ways out both change WHERE AN ACCOUNT'S HOME IS STORED or WHAT IS ALWAYS UP, and neither is
+        // this slice's to pick:
+        //   (1) store a home as (lineage, pose in that realm's own frame) — the P7 durable per-realm store —
+        //       so there is no walk to run and no absolute to descend from; the router carries a NAME and a
+        //       number it did not compute; or
+        //   (2) make the ambient root always resident and descend it level by level, demanding as it goes:
+        //       the root names the child that contains you and hands it your point in that child's frame,
+        //       and the login waits one round-trip per level. Seamless (a login already waits), but it makes
+        //       "the root is up" a cluster invariant the demand loop does not have today.
+        let mut rig = dynamic_rig();
+        let (sid, _granted) = dynamic_login(&mut rig, CLIENT);
+        let sessions = rig.world.resource::<GatewaySessions>();
+        // The descent HAS run — the session is waiting on the realm it named, and carries the pose that walk
+        // produced. So the answer exists at this instant and was produced by the one party that holds no
+        // realm at all.
+        assert_eq!(sessions.home_realm_of(sid), Some(home_realm()));
+        assert!(
+            sessions
+                .by_session
+                .get(&sid)
+                .is_some_and(|s| s.spawn.is_some()),
+            "the login already carries a pose measured in its home realm's frame"
+        );
+        // And nothing of that lineage is reachable. `dynamic_shards` is the RUNTIME routable roster — the
+        // only place a demand-spawned shard can appear — and it is empty; `home_shard_of` is the same fact
+        // asked about this one realm.
+        assert_eq!(
+            sessions.dynamic_shard_count(),
+            0,
+            "no demand-spawned shard is routable yet — there is no chain to ask"
+        );
+        assert_eq!(
+            sessions.home_shard_of(sid),
+            None,
+            "and specifically not the home realm's own shard"
+        );
+    }
+
+    #[test]
     fn a_dynamic_login_is_welcomed_at_the_lease_then_held_with_no_attach_and_no_close() {
         // THE SEAMLESS HOLD. On the committed lease a dynamic login is WELCOMED exactly as a static one is
         // (same instant, same bytes), then HELD in `AwaitingHomeRealm`: no `AttachSession` to the static
@@ -8897,11 +9630,11 @@ mod tests {
             "a dynamic login is Welcome'd at the committed lease — and nothing else is pushed at it"
         );
         assert!(
-            !saw_attach(&granted, SHARD, sid),
+            !saw_attach(&granted, SHARD, sid, None),
             "a dynamic login never attaches to the static config.shard"
         );
         assert!(
-            !saw_attach(&granted, HOME, sid),
+            !saw_attach(&granted, HOME, sid, attach_spawn(&rig)),
             "and it cannot attach to its home before the head names the node"
         );
         assert_eq!(phase_of(&rig, sid), waiting_phase());
@@ -8996,7 +9729,7 @@ mod tests {
             "held, never dropped"
         );
         assert!(
-            !saw_attach(&after, SHARD, sid),
+            !saw_attach(&after, SHARD, sid, None),
             "and never fallen back onto the static shard"
         );
     }
@@ -9015,11 +9748,11 @@ mod tests {
         )]);
         assert_eq!(phase_of(&rig, sid), SessionPhase::AwaitingAttach);
         assert!(
-            saw_attach(&resolved, HOME, sid),
+            saw_attach(&resolved, HOME, sid, attach_spawn(&rig)),
             "the attach goes to the SPAWNED home shard"
         );
         assert!(
-            !saw_attach(&resolved, SHARD, sid),
+            !saw_attach(&resolved, SHARD, sid, None),
             "never to the static config.shard"
         );
         assert_eq!(
@@ -9075,11 +9808,7 @@ mod tests {
                 // home-entry seam — the client's home neighbourhood, built by the SAME production projection
                 // at the SAME negotiated minor (CURRENT) as the live seam, so the assertion tracks the forest
                 // geometry instead of hardcoding it.
-                realm_registry_for_home(
-                    &armed_injector(BTreeMap::new()),
-                    ProtoVersion::CURRENT.minor,
-                    home_realm(),
-                ),
+                realm_registry_for_home(&armed_injector(default_homes()), home_realm()),
             ],
             "the login sub opened on the HOME shard (never config.shard), then the render-scene streamed"
         );
@@ -9151,7 +9880,7 @@ mod tests {
         // reaps the half-booted realm) AND re-poll the head. But BACKED OFF: `demand_ttl / 4`, NOT every
         // tick — the 100K mass-login storm guard. Both arms of the due/not-due branch are exercised.
         let cadence = SeedInjectorConfig {
-            ..armed_injector(BTreeMap::new())
+            ..armed_injector(default_homes())
         }
         .redrive_interval_ticks();
         assert_eq!(cadence, 2, "demand_ttl 8 / REDRIVE_DIVISOR 4 = 2");
@@ -9178,9 +9907,8 @@ mod tests {
         assert_eq!(demands.len(), 1, "the home demand is RE-SEEDED on cadence");
         assert_eq!(
             demands[0].child,
-            WorldView::hand_placed(&UniverseConfig::walk_scale())
-            .container_coord(DVec3::new(25.0, 0.0, 0.0)),
-            "the re-seed names the SAME server-derived home lineage"
+            lineage_of(TEST_HOME_REALM),
+            "the re-seed names the SAME stored home lineage"
         );
         assert_eq!(demands[0].verb, DemandVerb::SpinUp);
         assert_eq!(
@@ -9227,7 +9955,7 @@ mod tests {
             MsgClass::Saga,
             &realm_head(home_realm(), Some(HOME)),
         )]);
-        assert!(saw_attach(&resolved, HOME, sid));
+        assert!(saw_attach(&resolved, HOME, sid, attach_spawn(&rig)));
         assert_eq!(phase_of(&rig, sid), SessionPhase::AwaitingAttach);
         // Now the attach is NEVER confirmed.
         set_tick(&mut rig, probe_tick);
@@ -9248,7 +9976,7 @@ mod tests {
             "…while the head POLL stays off — the node is already known (only the demand half continues)"
         );
         assert!(
-            saw_attach(&late, HOME, sid),
+            saw_attach(&late, HOME, sid, attach_spawn(&rig)),
             "the dynamic attach retry rides the SAME cadence tick (coalesced, not per-tick)"
         );
         // Off-cadence the whole thing is silent — the retry is a cadence, not a latch.
@@ -9256,7 +9984,7 @@ mod tests {
         let quiet = rig.tick(vec![]);
         assert_eq!(demands_to_orch(&quiet).len(), 0);
         assert!(
-            !saw_attach(&quiet, HOME, sid),
+            !saw_attach(&quiet, HOME, sid, attach_spawn(&rig)),
             "a DYNAMIC attach retry does not fire every tick (the mass-login storm guard)"
         );
         // Still held, still bounded, and it can still complete: the attach lands and the session goes Active.
@@ -9374,7 +10102,7 @@ mod tests {
         )]);
         assert_eq!(phase_of(&rig, sid_b), SessionPhase::AwaitingAttach);
         assert!(
-            saw_attach(&resolved, HOME, sid_b),
+            saw_attach(&resolved, HOME, sid_b, attach_spawn(&rig)),
             "the joiner's attach goes to the home shard"
         );
         assert_eq!(
@@ -9410,7 +10138,7 @@ mod tests {
         rig.world.insert_resource(GatewayConfig {
             lease_renew_interval_ticks: 4,
             session_recheck_interval: 4,
-            seed_injector: armed_injector(BTreeMap::from([(AccountId(5), spawn_at(25.0))])),
+            seed_injector: armed_injector(homes_for(AccountId(5), TEST_HOME_REALM, 0.0)),
             ..config()
         });
         let (sid, _) = dynamic_login(&mut rig, CLIENT);
@@ -9575,8 +10303,8 @@ mod tests {
             MsgClass::Saga,
             &realm_head(home_realm(), Some(HOME)),
         )]);
-        assert!(saw_attach(&resolved, HOME, sid_a));
-        assert!(saw_attach(&resolved, HOME, sid_b));
+        assert!(saw_attach(&resolved, HOME, sid_a, attach_spawn(&rig)));
+        assert!(saw_attach(&resolved, HOME, sid_b, attach_spawn(&rig)));
         assert_eq!(phase_of(&rig, sid_a), SessionPhase::AwaitingAttach);
         assert_eq!(phase_of(&rig, sid_b), SessionPhase::AwaitingAttach);
         assert_eq!(
@@ -9593,7 +10321,7 @@ mod tests {
             &realm_head(home_realm(), Some(HOME)),
         )]);
         assert!(
-            !saw_attach(&dup, HOME, sid_a),
+            !saw_attach(&dup, HOME, sid_a, attach_spawn(&rig)),
             "a duplicate Realm head does not re-attach an already-resolved member"
         );
         assert_eq!(
@@ -9695,7 +10423,7 @@ mod tests {
             "Welcome then UniverseRate, unchanged"
         );
         assert!(
-            saw_attach(&sends[1], SHARD, sid),
+            saw_attach(&sends[1], SHARD, sid, None),
             "the attach goes to the static config.shard at the SAME tick as the Welcome"
         );
         // The EXACT send fingerprint of the static grant tick: Welcome + UniverseRate client-ward, then the
@@ -9878,11 +10606,11 @@ mod tests {
         // windows are never read), an ARMED one needs both windows non-zero AND a bootstrap window that
         // contains at least one re-drive. All arms + both Display messages.
         assert_eq!(SeedInjectorConfig::default().validate(), Ok(()));
-        let armed = armed_injector(BTreeMap::new());
+        let armed = armed_injector(default_homes());
         assert_eq!(armed.validate(), Ok(()), "the live test budget is valid");
         let zero_demand = SeedInjectorConfig {
             demand_ttl_ticks: 0,
-            ..armed_injector(BTreeMap::new())
+            ..armed_injector(default_homes())
         };
         assert_eq!(
             zero_demand
@@ -9892,7 +10620,7 @@ mod tests {
         );
         let zero_bootstrap = SeedInjectorConfig {
             bootstrap_ttl_ticks: 0,
-            ..armed_injector(BTreeMap::new())
+            ..armed_injector(default_homes())
         };
         assert_eq!(
             zero_bootstrap
@@ -9902,7 +10630,7 @@ mod tests {
         );
         let too_tight = SeedInjectorConfig {
             bootstrap_ttl_ticks: 2, // == the cadence (8/4): no room for even one re-drive
-            ..armed_injector(BTreeMap::new())
+            ..armed_injector(default_homes())
         };
         assert_eq!(
             too_tight
@@ -10119,10 +10847,21 @@ mod tests {
             0,
             "and no realm frame either"
         );
+        // All three are still lost — but they are lost for TWO different reasons, and the counters now say
+        // which. The `SubscriptionReady` reaches the client branch and fails to decode as a client message,
+        // so it is genuinely `undecodable`. The two DATA frames have no client-branch arm at all: they are
+        // refused because the router does not know their sender. That split is the whole point of the new
+        // counter — on the live demand cluster this second number reached 17,365 while `undecodable` was
+        // the only thing anyone looked at.
         assert_eq!(
             rig.stats().undecodable,
-            3,
-            "all three of the dest's frames were counted undecodable, never served"
+            1,
+            "the SubscriptionReady fell to the client branch and failed the client decode"
+        );
+        assert_eq!(
+            rig.stats().refused_unknown_sender,
+            2,
+            "both DATA frames were refused because the sender is not known as a shard — never served"
         );
     }
 

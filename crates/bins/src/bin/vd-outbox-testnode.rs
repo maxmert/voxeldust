@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use vd_io_prod::trust::ClusterTrust;
     use vd_sim::io::MsgClass;
 
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    vd_bins::init_tracing();
     let env = EnvConfig::from_process_env();
 
     match env.string("VD_OUTBOX_TEST_SEED") {

@@ -4,6 +4,8 @@
 //! Standing rule: every phase ADDS scenarios; nothing is deleted. The accumulated
 //! suite re-running green is the release gate for every later phase.
 
+pub mod frame_fixture;
+
 use std::collections::{BTreeMap, BTreeSet};
 use vd_connection_plane::gateway::{
     GatewayConfig, GatewayStats, SeedInjectorConfig, TransportTuning, register_gateway,
@@ -105,6 +107,182 @@ pub fn dest_stub_config() -> StubConfig {
         mint_seed: 17,
         ..stub_config()
     }
+}
+
+/// The PLANET login shard for the frame-conversion gate: [`SHARD`] hosts `Planet(7)`, the seed forest's
+/// planet, which its star authors 20 m out from the system centre. A player logs in HERE, so the avatar is
+/// born in the PLANET's own frame — and walking out of the planet is then a genuine UPWARD hand-off, the
+/// direction only the parent can compute.
+///
+/// `own_coord` is the REAL root-rooted lineage (Universe → Galaxy → System → Planet), not a one-level
+/// stub: leaving a realm reads the shard's own lineage to decide who to hand the occupant to, so a shard
+/// that wrongly believes it is a root hands them to the ambient root instead of to its star.
+#[must_use]
+pub fn planet_stub_config() -> StubConfig {
+    StubConfig {
+        realm: RealmId::Planet(7),
+        own_coord: vd_core::worldgen::coord_of_realm(
+            &vd_core::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
+            RealmId::Planet(7),
+        )
+        .expect("the seed forest gives Planet 7 a lineage back to the root"),
+        held_realms: StubConfig::single_realm(RealmId::Planet(7)),
+        frame: FrameRef::PlanetCentered { planet_seed: 7 },
+        mint_seed: 29,
+        ..stub_config()
+    }
+}
+
+/// The universe seed the frame-conversion cluster's shards and their planted neighbourhoods share.
+pub const FRAME_UNIVERSE_SEED: u64 = 0;
+
+/// THE PARENT-AND-CHILD CLUSTER: orchestrator + gateway + [`SHARD`] hosting `Planet(7)` (where the player
+/// logs in) + [`DEST`] hosting `System(7)`, the planet's own star — the one party that holds "I put that
+/// planet at 20 m". An occupant leaving the planet is handed UP to it, which is the whole subject of the
+/// frame-conversion arc.
+#[must_use]
+pub fn p2_cluster_planet_in_system(fabric: &FaultFabric, max_sessions: usize) -> Topology {
+    build_cluster(
+        fabric,
+        max_sessions,
+        vec![GATEWAY, SHARD, DEST],
+        vec![(SHARD, planet_stub_config()), (DEST, stub_config())],
+        StaggerPlan::lockstep(),
+        MemStore::new(),
+        default_directory_tuning(),
+    )
+}
+
+/// The MIDDLE link of the three-level chain cluster: the node hosting `Planet(7)`.
+pub const CHAIN_MID: NodeId = NodeId(6);
+/// The TOP link of the three-level chain cluster: the node hosting `System(7)`, the planet's own star.
+pub const CHAIN_TOP: NodeId = NodeId(7);
+
+/// The DEEPEST login shard: [`SHARD`] hosts `Area(7)`, the box the seed forest puts 5 m from its planet's
+/// centre. A player logging in here stands three levels down, which is what makes the chain above them
+/// longer than one leg.
+///
+/// `own_coord` is the REAL root-rooted lineage (Universe → Galaxy → System → Planet → Area), so this shard
+/// knows who its parent is — and, per the ground rule, nothing else about where it sits.
+#[must_use]
+pub fn area_stub_config() -> StubConfig {
+    StubConfig {
+        realm: RealmId::Area(7),
+        own_coord: vd_core::worldgen::coord_of_realm(
+            &vd_core::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
+            RealmId::Area(7),
+        )
+        .expect("the seed forest gives Area 7 a lineage back to the root"),
+        held_realms: StubConfig::single_realm(RealmId::Area(7)),
+        frame: FrameRef::AreaLocal {
+            planet_seed: 7,
+            area_seed: 7,
+        },
+        mint_seed: 31,
+        ..stub_config()
+    }
+}
+
+/// The TOP of the chain cluster: `System(7)` with its REAL lineage coord rather than the one-level stub
+/// [`stub_config`] carries. That matters here: with the real lineage it knows it has a galaxy above it and
+/// asks the directory for it every cadence — and gets nothing, because no shard is running that realm. So
+/// the chain stops exactly where the world stops being spun up, which is the property under test, and not
+/// because anything counted levels.
+#[must_use]
+pub fn chain_system_stub_config() -> StubConfig {
+    StubConfig {
+        own_coord: vd_core::worldgen::coord_of_realm(
+            &vd_core::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
+            RealmId::System(7),
+        )
+        .expect("the seed forest gives System 7 a lineage back to the root"),
+        mint_seed: 37,
+        ..stub_config()
+    }
+}
+
+/// THE THREE-LEVEL CHAIN CLUSTER: orchestrator + gateway + [`SHARD`] hosting `Area(7)` (where the player
+/// logs in) + [`CHAIN_MID`] hosting `Planet(7)` (which holds "I put that area 5 m out") + [`CHAIN_TOP`]
+/// hosting `System(7)` (which holds "I put that planet 20 m out"). Three separate hosts, three separate
+/// realms, and two separate numbers no single party holds both of — which is what it takes to tell a
+/// per-level addition apart from one party folding a whole chain by itself.
+#[must_use]
+pub fn p2_cluster_area_in_planet_in_system(fabric: &FaultFabric, max_sessions: usize) -> Topology {
+    build_cluster(
+        fabric,
+        max_sessions,
+        vec![GATEWAY, SHARD, CHAIN_MID, CHAIN_TOP],
+        vec![
+            (SHARD, area_stub_config()),
+            (CHAIN_MID, planet_stub_config()),
+            (CHAIN_TOP, chain_system_stub_config()),
+        ],
+        StaggerPlan::lockstep(),
+        MemStore::new(),
+        default_directory_tuning(),
+    )
+}
+
+/// Plant the seed neighbourhood on `node` with its interest bands LIVE — the same geometry
+/// [`plant_seed_neighbourhood`] plants (the walk forest is byte-identical between the two presets; only
+/// the interest band differs), so a shard evaluates the identical world and additionally cares about
+/// where the players are. `occupant_v_max_mps` and `tick_dt_s` are the live cluster's, so the band's
+/// anti-thrash pad is measured against the speed the sim integrates and the rate it ticks at.
+///
+/// Without this a shard never asks the directory who its parent is, so nothing about an occupant ever
+/// leaves the realm they are standing in.
+pub fn plant_demand_neighbourhood(
+    topo: &mut Topology,
+    node: NodeId,
+    universe_seed: u64,
+    hosted_realm: RealmId,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+) {
+    plant_demand_neighbourhood_with_movers(
+        topo,
+        node,
+        universe_seed,
+        hosted_realm,
+        occupant_v_max_mps,
+        tick_dt_s,
+        &BTreeMap::new(),
+    );
+}
+
+/// [`plant_demand_neighbourhood`] plus the direct children that ORBIT — the pair of production builders
+/// `shard.rs` boots a demand shard with (`RealmRegions::new(..).with_moving_children(..)`).
+///
+/// The walk forest's own bodies are all STATIC, and a static child makes a shard's whole realm lane empty:
+/// it authors nothing per tick, so it ships nothing and cascades nothing. A scenario about what descends
+/// the chain therefore has to give some body a turn, exactly as a scenario about what a moving realm draws
+/// like already does — otherwise it is measuring an empty feed.
+pub fn plant_demand_neighbourhood_with_movers(
+    topo: &mut Topology,
+    node: NodeId,
+    universe_seed: u64,
+    hosted_realm: RealmId,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+    movers: &BTreeMap<RealmId, vd_core::celestial::OrbitalElements>,
+) {
+    let scope: BTreeSet<RealmId> =
+        vd_core::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm)
+            .iter()
+            .map(|r| r.realm)
+            .collect();
+    let regions: Vec<vd_core::geometry::RealmRegion> =
+        vd_core::worldgen::realm_regions_for_walk_config(
+            universe_seed,
+            &vd_core::worldgen::UniverseConfig::walk_demand(occupant_v_max_mps, tick_dt_s),
+        )
+        .into_iter()
+        .filter(|r| scope.contains(&r.realm))
+        .collect();
+    with_node(topo, node, |s| {
+        *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::new(regions).with_moving_children(movers.clone());
+    });
 }
 
 /// task #149 — the CO-HOSTING login shard: the SAME [`SHARD`] node HOSTS its System 7 realm AND co-hosts the
@@ -662,6 +840,106 @@ pub fn plant_seed_neighbourhood_held(
     });
 }
 
+/// Plant the seed-derived neighbourhood on `node` AND tell it which of its direct children ORBIT —
+/// `RealmRegions::new(..).with_moving_children(..)`, the exact pair of production builders `shard.rs`
+/// boots with.
+///
+/// The seed forest's own planets are STATIC (a hand-placed walk fixture), so without this no harness
+/// scenario contains a realm that MOVES — and a static realm makes every frame conversion the identity,
+/// which is precisely the case that proves nothing. A shard given a mover authors its live placement once
+/// per tick on the realm lane, which is the only lane that can tell anyone where an orbiting body is.
+/// Plant an EXPLICIT region forest (and mover roster) on `node` — the seed-free twin of
+/// [`plant_seed_neighbourhood_with_movers`].
+///
+/// WHY A TEST NEEDS THIS. The seed forests are the two worlds this tree ships, and their PROPORTIONS are
+/// what a whole class of fault depends on: an arrival error that lands comfortably inside the walk
+/// world's ten-metre planet lands OUTSIDE the demand world's four-metre one, on the same code and the
+/// same arithmetic. A gate that can only ask the question at one set of proportions cannot see that
+/// class at all, which is exactly how a suite stays green while the game is unplayable.
+pub fn plant_regions(
+    topo: &mut Topology,
+    node: NodeId,
+    regions: Vec<vd_core::geometry::RealmRegion>,
+    movers: std::collections::BTreeMap<RealmId, vd_core::celestial::OrbitalElements>,
+) {
+    with_node(topo, node, |s| {
+        *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::new(regions.clone()).with_moving_children(movers.clone());
+    });
+}
+
+pub fn plant_seed_neighbourhood_with_movers(
+    topo: &mut Topology,
+    node: NodeId,
+    universe_seed: u64,
+    hosted_realm: RealmId,
+    movers: BTreeMap<RealmId, vd_core::celestial::OrbitalElements>,
+) {
+    let regions = vd_core::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm);
+    with_node(topo, node, |s| {
+        *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
+            vd_sim::stub::RealmRegions::new(regions).with_moving_children(movers.clone());
+    });
+}
+
+/// Put the dot whose `entity == subject` on shard `node` at `off` in `frame`, stamped at that shard's OWN
+/// current universe tick — the whole pose, not one field of it.
+///
+/// The tick matters as much as the number here. The gateway composes each row at THAT ROW'S own instant,
+/// so an occupant carrying a stale tick is legitimately drawn against where its realm was at that stale
+/// instant. A gate about two feeds agreeing therefore has to state the instant it is asking about, or it
+/// is measuring the carry rather than the composition. Returns whether the dot was found.
+pub fn set_shard_subject_pose_now(
+    topo: &mut Topology,
+    node: NodeId,
+    subject: EntityId,
+    frame: FrameRef,
+    off: vd_core::glam::DVec3,
+) -> bool {
+    with_node(topo, node, |s| {
+        let at = s
+            .world_mut()
+            .resource::<vd_sim::runtime::ClockSample>()
+            .universe_tick;
+        let dots = s.world_mut().resource_mut::<vd_sim::stub::Dots>();
+        for dot in dots.into_inner().0.values_mut() {
+            if dot.entity == subject {
+                dot.pose = StampedPose::at_rest(frame, off, at);
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// [`set_shard_subject_pose_now`] with the OFFSET COMPUTED FROM THE STAMPED TICK: `off_at` receives
+/// the shard's current universe tick and returns the frame-local offset to script at that instant —
+/// the fixture for an occupant that must ride a MOVING target (the crossing-render gate scripts the
+/// rider at the area's live orbital placement, computed from the same elements the shard authors
+/// with, at the same tick the pose is stamped at). Returns whether the dot was found.
+pub fn set_shard_subject_pose_now_with(
+    topo: &mut Topology,
+    node: NodeId,
+    subject: EntityId,
+    frame: FrameRef,
+    off_at: impl Fn(vd_core::UniverseTick) -> vd_core::glam::DVec3,
+) -> bool {
+    with_node(topo, node, |s| {
+        let at = s
+            .world_mut()
+            .resource::<vd_sim::runtime::ClockSample>()
+            .universe_tick;
+        let dots = s.world_mut().resource_mut::<vd_sim::stub::Dots>();
+        for dot in dots.into_inner().0.values_mut() {
+            if dot.entity == subject {
+                dot.pose = StampedPose::at_rest(frame, off_at(at), at);
+                return true;
+            }
+        }
+        false
+    })
+}
+
 /// C-6c — set the dot whose `entity == subject` on shard `node` to frame-local `off` (find it in `Dots`).
 /// Returns true if found + set. The adopted/owned dot's manual write survives into
 /// `evaluate_realm_boundaries` the same tick (schedule order: process_inbound → evaluate_realm_boundaries),
@@ -682,6 +960,49 @@ pub fn set_shard_subject_offset(
         }
         false
     })
+}
+
+/// Stamp the dot whose `entity == subject` on shard `node` with `frame`, leaving its position untouched —
+/// the mis-routing driver. A pose carrying a frame the RECEIVER was never told the position of is exactly
+/// what a sibling hand-off looks like on the wire, and it used to land silently: the number stayed put and
+/// only the label changed. Returns whether the dot was found. Test-only, like its offset twin.
+pub fn set_shard_subject_frame(
+    topo: &mut Topology,
+    node: NodeId,
+    subject: EntityId,
+    frame: FrameRef,
+) -> bool {
+    with_node(topo, node, |s| {
+        let dots = s.world_mut().resource_mut::<vd_sim::stub::Dots>();
+        for dot in dots.into_inner().0.values_mut() {
+            if dot.entity == subject {
+                dot.pose.frame = frame;
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// State, on the SOURCE shard, the pre-conversion a real source would have computed — the one thing a
+/// HAND-FED transfer cannot do for itself.
+///
+/// The clusters that drive a transfer through [`trigger_transfer`] plant NO region forest: their subject
+/// is the saga, the cut and the directory, not the geometry. So the source shard has never been told where
+/// `System(8)` sits and ships the occupant's pose in its OWN frame — and a receiver may only accept a pose
+/// measured in its own frame or in one of its direct children's. This stamps the subject's pose in the
+/// destination's frame, which is exactly what a source that DID author the destination's placement would
+/// have shipped. The POSITION is untouched: every realm in these fixtures rests on the origin, so this
+/// moves no number and changes no byte of what the gates measure.
+///
+/// It used to be unnecessary because the saga RELABELLED the pose in flight — stamping the destination's
+/// frame onto a position measured somewhere else, which made every hand-off look well-formed and is the
+/// defect the frame-conversion arc removes.
+pub fn stamp_subject_pose_in_dest_frame(topo: &mut Topology, entity: EntityId) {
+    assert!(
+        set_shard_subject_frame(topo, SHARD, entity, dest_stub_config().frame),
+        "the hand-fed subject's pose is stamped in the destination's frame before the transfer",
+    );
 }
 
 /// task #149 — the AUTHORITATIVE pose FRAME of the dot whose `entity == subject` on shard `node`, or `None`
@@ -1254,6 +1575,15 @@ pub fn run_fault_scenario(seed: u64, sc: Scenario) -> (Topology, EntityId, BTree
                 .any(|(realm, _)| *realm == RealmId::System(8))
     });
     let (session, entity, fence) = read_subject(&mut topo);
+    // The pose is stamped for whoever will actually RECEIVE it. On every cell but one that is the
+    // destination, so the fixture states the pre-conversion a real source would compute. The exception is
+    // a PERMANENTLY KILLED destination: the subject never reaches it, and the orchestrator forward
+    // re-homes it back to the live SOURCE — whose own frame the pose is already in, so stamping it for
+    // the corpse would make the survivor refuse the entity it is meant to recover.
+    let dest_is_dead_for_good = sc.victim == DEST && matches!(sc.fault, Fault::Kill);
+    if !dest_is_dead_for_good {
+        stamp_subject_pose_in_dest_frame(&mut topo, entity);
+    }
     trigger_transfer(
         &mut topo,
         SagaCtx {
@@ -1911,6 +2241,7 @@ pub fn run_orch_kill_durable(seed: u64, at_phase: &str, durable_store: bool) -> 
                 .any(|(realm, _)| *realm == RealmId::System(8))
     });
     let (session, entity, fence) = read_subject(&mut topo);
+    stamp_subject_pose_in_dest_frame(&mut topo, entity);
     trigger_transfer(
         &mut topo,
         SagaCtx {

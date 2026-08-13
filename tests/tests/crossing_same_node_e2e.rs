@@ -44,13 +44,61 @@ use vd_tests::{
 const UNIVERSE_SEED: u64 = 0;
 const CLIENT: NodeId = NodeId(100);
 
-/// A point inside Planet 7 (SOI center x=20, r=10) but CLEAR of the Area 7 box (x∈[22,28]) by more than the
-/// containment OUTSET (2 m) so the hysteresis band cleanly EXITS Area 7 on the reverse leg: at x=15 the signed
-/// distance to the Area box is |15-25|-3 = +7 (well past the +2 outset) and to the planet surface is |15-20|-10
-/// = -5 (well inside). So x=15 unambiguously resolves the deepest container to Planet 7 both outbound + return.
-const PLANET_X: f64 = 15.0;
-/// Area 7's box center in the seed forest (x=25, half=3 ⇒ x∈[22,28]) — the deepest region.
-const AREA_X: f64 = 25.0;
+/// THE PLANET PARKING SPOT — ONE point in the world, stated separately in every frame the dot can be
+/// wearing on its way to and from it.
+///
+/// A bare offset is not a place. A pose carries the frame it is measured in, and a re-home CHANGES that
+/// frame, so writing the same three numbers every tick MOVES the dot by the whole distance between the two
+/// realms the instant it crosses. It used not to matter: a hand-off relabelled the frame and left the
+/// number untouched, so one triple appeared to describe every space at once — which is exactly the fault
+/// that drew the player a planet-radius off the surface they were standing on. With the hand-off actually
+/// converting, a scripted position has to name its frame.
+///
+/// The point: inside Planet 7 (radius 10, sitting 20 m from its star) and clear of the Area 7 box (centred
+/// 5 m from the planet, half-extent 3) by more than the 2 m containment outset, so the reverse leg cleanly
+/// EXITS the area. In the star's frame that is x = 15; in the planet's, 15 − 20 = −5; in the area's,
+/// −5 − 5 = −10. Each row is the SAME point, and the numbers below are what that point measures as from
+/// each of those three centres:
+///   star's frame    x =  15  →  |15−20|−10 = −5, inside the planet
+///   planet's frame  x =  −5  →  |−5|−10    = −5 inside; |−5−5|−3 = +7, well clear of the area
+///   area's frame    x = −10  →  |−10|−3    = +7 clear of the area, still −5 inside the planet
+const PLANET_SPOT: [(FrameRef, f64); 3] = [
+    (FrameRef::SystemSpace { system_seed: 7 }, 15.0),
+    (FrameRef::PlanetCentered { planet_seed: 7 }, -5.0),
+    (
+        FrameRef::AreaLocal {
+            planet_seed: 7,
+            area_seed: 7,
+        },
+        -10.0,
+    ),
+];
+/// THE AREA PARKING SPOT — the centre of Area 7's box, the same point in each frame the dot wears around
+/// that crossing: 25 from the star, 5 from the planet that carries it, 0 from its own centre.
+const AREA_SPOT: [(FrameRef, f64); 3] = [
+    (FrameRef::SystemSpace { system_seed: 7 }, 25.0),
+    (FrameRef::PlanetCentered { planet_seed: 7 }, 5.0),
+    (
+        FrameRef::AreaLocal {
+            planet_seed: 7,
+            area_seed: 7,
+        },
+        0.0,
+    ),
+];
+
+/// Hold the scripted dot at `spot`, choosing the row that matches the frame its pose is CURRENTLY stamped
+/// in. Answers `false` (and writes nothing) if the dot is missing or wearing a frame the table does not
+/// describe — a caller waiting on a frame flip then simply keeps waiting rather than teleporting the dot.
+fn park(topo: &mut Topology, subject: EntityId, spot: &[(FrameRef, f64)]) -> bool {
+    let Some(frame) = shard_subject_frame(topo, SHARD, subject) else {
+        return false;
+    };
+    let Some((_, x)) = spot.iter().find(|(f, _)| *f == frame) else {
+        return false;
+    };
+    set_shard_subject_offset(topo, SHARD, subject, DVec3::new(*x, 0.0, 0.0))
+}
 
 fn report(reports: &[(NodeId, InspectReport)], id: NodeId) -> &InspectReport {
     &reports
@@ -137,7 +185,7 @@ fn warm_cohost_cluster_at_planet(fabric: &FaultFabric) -> (Topology, EntityId) {
     // PARK at Planet 7's origin so the first (Planet) re-home settles — the dot's owning frame becomes
     // PlanetCentered{7} and its head STAYS on SHARD (Planet 7 is co-hosted). Bounded + deterministic.
     let at_planet = step_until(&mut topo, 200, |t| {
-        set_shard_subject_offset(t, SHARD, subject, DVec3::new(PLANET_X, 0.0, 0.0));
+        park(t, subject, &PLANET_SPOT);
         shard_subject_frame(t, SHARD, subject) == Some(FrameRef::PlanetCentered { planet_seed: 7 })
             && live_sagas(t) == 0
     });
@@ -172,7 +220,7 @@ fn source_equals_dest_rehome_into_area_flips_the_frame_and_stays_on_node() {
     // WALK into Area 7's box (x=25) — the deepest container flips to Area 7, a realm THIS node heads. The
     // crossing resolves `head(Realm(Area 7)) == SHARD` (source==dest) and drives the ONE uniform saga.
     let in_area = step_until(&mut topo, 260, |t| {
-        set_shard_subject_offset(t, SHARD, subject, DVec3::new(AREA_X, 0.0, 0.0));
+        park(t, subject, &AREA_SPOT);
         shard_subject_frame(t, SHARD, subject)
             == Some(FrameRef::AreaLocal {
                 planet_seed: 7,
@@ -214,7 +262,7 @@ fn source_equals_dest_rehome_into_area_flips_the_frame_and_stays_on_node() {
     // (3) THE REVERSE: walk back to Planet 7's origin (out of the Area box) — the frame drops back to
     //     PlanetCentered{7}, proving the return leg is ALSO the uniform saga, still on-node.
     let back_at_planet = step_until(&mut topo, 260, |t| {
-        set_shard_subject_offset(t, SHARD, subject, DVec3::new(PLANET_X, 0.0, 0.0));
+        park(t, subject, &PLANET_SPOT);
         shard_subject_frame(t, SHARD, subject) == Some(FrameRef::PlanetCentered { planet_seed: 7 })
             && live_sagas(t) == 0
     });
@@ -241,7 +289,7 @@ fn a_committed_source_equals_dest_rehome_does_not_re_fire() {
 
     // Drive into Area 7 and let the saga commit (frame flips + tombstones).
     let committed = step_until(&mut topo, 260, |t| {
-        set_shard_subject_offset(t, SHARD, subject, DVec3::new(AREA_X, 0.0, 0.0));
+        park(t, subject, &AREA_SPOT);
         shard_subject_frame(t, SHARD, subject)
             == Some(FrameRef::AreaLocal {
                 planet_seed: 7,
@@ -259,7 +307,7 @@ fn a_committed_source_equals_dest_rehome_does_not_re_fire() {
 
     // HOLD stationary inside Area 7 for >= 10 more ticks — NO new saga must start.
     for _ in 0..12 {
-        set_shard_subject_offset(&mut topo, SHARD, subject, DVec3::new(AREA_X, 0.0, 0.0));
+        park(&mut topo, subject, &AREA_SPOT);
         topo.step();
     }
 

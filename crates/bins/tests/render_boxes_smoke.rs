@@ -38,7 +38,7 @@ use vd_client_harness::manifest::{CaptureKind, MANIFEST_FILENAME, RunManifest};
 use vd_client_harness::verdict::projected_point_aabb;
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
 use vd_core::geometry::{CrossEffect, RealmBoundary};
-use vd_core::glam::{DVec3, I64Vec3};
+use vd_core::glam::DVec3;
 use vd_core::pose::{LatticePos, RealmId};
 use vd_devproto::WORKTREE_SLOT_CEILING;
 use vd_devproto::{DevPortScheme, DevRequest, DevResponse, WaitField, WaitOp, WaitPredicate};
@@ -125,8 +125,8 @@ fn await_listener(port: u16, child: &mut Child) {
 /// The box's projected screen rectangle via the SAME `fit_camera_to_scene` camera the offscreen
 /// render used — the box center + its bounding-sphere extent (the AABB corner distance) projected
 /// through the Tier-A `CaptureCamera`. This is where the box's pixels MUST land (H2).
-fn box_screen_aabb(scene: &RealmScene, origin: LatticePos) -> ScreenAabb {
-    let camera = fit_camera_to_scene(scene, origin, CAPTURE_W as usize, CAPTURE_H as usize)
+fn box_screen_aabb(scene: &RealmScene) -> ScreenAabb {
+    let camera = fit_camera_to_scene(scene, CAPTURE_W as usize, CAPTURE_H as usize)
         .expect("the one-box scene frames to a camera");
     let rbox = scene.get(BOX_REALM).expect("box in scene");
     // The bounding-sphere radius of the box: the AABB corner distance from the center.
@@ -134,29 +134,12 @@ fn box_screen_aabb(scene: &RealmScene, origin: LatticePos) -> ScreenAabb {
         BoxShape::Box { half } => half.length(),
         BoxShape::Sphere { r } => r,
     };
-    // The box's centre reduced against the client's LIVE render origin — the same space the pixels
-    // were drawn in. Projecting the ABSOLUTE centre would only agree while the origin is zero.
-    projected_point_aabb(&camera, rbox.draw_center(origin), radius)
+    // The box's centre through the ONE chokepoint — the same space the pixels were drawn in. There is
+    // exactly one such space: the server measures every position in the realm the session is drawn in
+    // before it ships. This used to read a render ORIGIN back from the client and subtract it, because
+    // the server shipped universe-absolute positions and the client did the reduction itself.
+    projected_point_aabb(&camera, rbox.draw_center(), radius)
         .expect("the box center projects in front of the fitted camera")
-}
-
-/// The client's LIVE render origin: the space every position it reports, and every pixel it drew,
-/// is expressed in. Read from the client rather than assumed to be zero, so this gate keeps
-/// checking the same thing once real galactic coordinates make the origin non-zero.
-fn live_render_origin(port: u16) -> LatticePos {
-    let o = dev_roundtrip_state(port).render_origin;
-    LatticePos::at(
-        I64Vec3::new(o.cell[0], o.cell[1], o.cell[2]),
-        DVec3::new(o.offset[0], o.offset[1], o.offset[2]),
-    )
-}
-
-/// The current delivered state (a `State` round-trip).
-fn dev_roundtrip_state(port: u16) -> vd_devproto::DevState {
-    match round_trip(port, &DevRequest::State) {
-        DevResponse::State { state } => state,
-        other => panic!("expected DevState, got {other:?}"),
-    }
 }
 
 /// Count non-clear pixels of `rgba` (top-left origin, `(y*w+x)*4`) inside `region`. The H2 verdict:
@@ -304,7 +287,7 @@ fn g_render_boxes_smoke_shows_a_translucent_box_pixel_visible_in_its_screen_regi
     // (2) The H2 box-pixel assertion: the box's color region is NON-EMPTY inside its projected
     // screen AABB (the SAME fit_camera_to_scene camera the render used). This pins "the box drew
     // WHERE it should", not a bare content fraction.
-    let region = box_screen_aabb(&scene, live_render_origin(devctl));
+    let region = box_screen_aabb(&scene);
     let box_pixels = nonclear_in_region(&buf, w, h, clear, region);
 
     println!(

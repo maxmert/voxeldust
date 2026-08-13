@@ -153,6 +153,21 @@ spike2a:
 spike3a:
     cargo test --release -p vd-io-prod --test mesh_snapshot_latency -- --nocapture --test-threads=1
 
+# THE CHAIN-LATENCY GATE (the 3rd hard latency gate): what the "only the parent knows where its children
+# are" rule COSTS. Every drawn value now crosses one shard per level of the live chain instead of leaving
+# the shard that authored it and going straight out, and until this recipe nothing measured that. The one
+# latency gate that ever sat over the render path measured the ROUTER re-expressing every body into every
+# viewer's space; that work no longer happens, so the tree carried a gate over something gone and none over
+# what replaced it.
+#
+# NOT a release recipe, deliberately, and that is the point: the cost is paid in TICKS (a message sent in
+# tick N lands no earlier than N+1), so the figure is the same integer on any machine and a debug build
+# measures it exactly. `--nocapture` because the numbers ARE the deliverable — the gate asserts a
+# topology-derived budget of one tick per hop, and PRINTS what the chain actually costs, up-leg, down-leg,
+# and under a lossy link at three depths.
+chain-latency:
+    cargo test -p vd-tests --test frame_conversion_e2e the_chain_ -- --nocapture --test-threads=1
+
 # RLM Step 4b (the crash-replay SOAK): a ~30k-op crash/reorder/dup stream through the REAL realm
 # reconcile kernel, asserting determinism + crash-no-reap + no-strand + bounded-ledger +
 # INV-SNAPSHOT-SAFETY throughout. RELEASE build (the `#[cfg(not(debug_assertions))]` soak is inert in
@@ -232,10 +247,18 @@ rlm-kill9:
 rlm-demand-login:
     cargo test -p vd-bins --features dev-control --test rlm_demand_login -- --test-threads=1 --nocapture
 
+# THE FLIGHT-SPEED CROSSING GATE (rehome_one_mechanism §4j/§4v): the inner re-home fixture at the
+# orbit speed the game is actually flown (slowdown 1, not the 300x default the suite otherwise
+# gates at). Every symptom of the 2026-08-12 defect arc — the mislanding, the flap, the strand —
+# was invisible at 300x and reproduced only here, so a merge must hold this gate at full speed.
+# The two round-trip tests still gate at the 300x default (their re-aim is owed with Step 5).
+rlm-demand-login-flight:
+    VD_TEST_ORBIT_SLOWDOWN=1 cargo test -p vd-bins --features dev-control --test rlm_demand_login a_flying_occupant_re_homes_into_an_inner_planet -- --test-threads=1 --nocapture
+
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login rlm-demand-login-flight coverage
 
 # One-time setup helper.
 coverage-setup:

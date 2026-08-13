@@ -148,6 +148,7 @@ fn walk_leg(
             target: target.to_array(),
             arrive_epsilon: ARRIVE_EPSILON,
             max_ticks,
+            max_step_m: 0.0,
         },
     )
     .unwrap_or_else(|| panic!("leg {leg}: no walk response"));
@@ -363,6 +364,7 @@ fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fe
                 target: target.to_array(),
                 arrive_epsilon: ARRIVE_EPSILON,
                 max_ticks: 8000,
+                max_step_m: 0.0,
             },
         );
         let _ = devctl(

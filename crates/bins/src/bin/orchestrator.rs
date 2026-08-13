@@ -28,7 +28,7 @@ use vd_wire::admin::AdminSnapshot;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    vd_bins::init_tracing();
     let env = EnvConfig::from_process_env();
     // Cloud-ready k3d Slice 2: run the footgun preflight FIRST — before ANY durable action (the M3 boot-counter
     // increment inside resolve_process_incarnation, the store open). DevTest = a no-op passthrough; Cloud fails

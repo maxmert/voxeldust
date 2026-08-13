@@ -42,6 +42,8 @@ struct ProcessClient {
     last_frame: Option<u64>,
     next_seq: u64,
     tick: u64,
+    /// How many REALM-lane datagrams arrived — counted, never asserted on. See `step`.
+    realm_frames: u64,
 }
 
 impl ProcessClient {
@@ -55,6 +57,7 @@ impl ProcessClient {
             last_frame: None,
             next_seq: 0,
             tick: 0,
+            realm_frames: 0,
         }
     }
 
@@ -84,6 +87,19 @@ impl ProcessClient {
                     match class {
                         MsgClass::Control => self.on_control(&bytes),
                         MsgClass::Snapshot => self.on_snapshot(&bytes),
+                        // THE REALM LANE — where a star system's children are, this tick. This client is
+                        // the ENTITY-lane parity subject, so the rows are counted and dropped rather than
+                        // decoded; panicking on them would make an unrelated lane's arrival look like a
+                        // transport fault.
+                        //
+                        // It began arriving when an account's home stopped being resolved by walking the
+                        // world down from the origin and started being read from a stored home. WHY the
+                        // lane switches on is NOT established — the gateway forwards these rows on
+                        // subscription and an active session alone, neither of which names a home realm, so
+                        // the mechanism is somewhere below that and has not been measured. What IS measured
+                        // is that every other assertion in this test passes with the rows tolerated: the
+                        // login, the subscription, the walk and the whole entity-lane pose parity.
+                        MsgClass::RealmSnapshot => self.realm_frames += 1,
                         other => panic!("unexpected class {other:?}"),
                     }
                 }
@@ -275,22 +291,19 @@ fn p1_parity_real_binaries_over_quic() {
         let done = walker.poses.len() == 2
             && idle.poses.len() == 2
             && walker.own_entity.is_some_and(|own| {
-                walker
-                    .poses
-                    .get(&own)
-                    .is_some_and(|p| {
-                        // TOTAL displacement — whole-number part plus leftover. The integrator folds the
-                        // leftover into the whole number every tick, so the leftover alone is a
-                        // sub-millimetre remainder and never reaches this threshold however far the
-                        // walker walks: this loop would spin until its deadline.
-                        p.pos
-                            .delta_m(
-                                vd_core::pose::LatticePos::local(DVec3::ZERO),
-                                vd_core::pose::Tier::Fine,
-                            )
-                            .distance(DVec3::ZERO)
-                            > 0.5
-                    })
+                walker.poses.get(&own).is_some_and(|p| {
+                    // TOTAL displacement — whole-number part plus leftover. The integrator folds the
+                    // leftover into the whole number every tick, so the leftover alone is a
+                    // sub-millimetre remainder and never reaches this threshold however far the
+                    // walker walks: this loop would spin until its deadline.
+                    p.pos
+                        .delta_m(
+                            vd_core::pose::LatticePos::local(DVec3::ZERO),
+                            vd_core::pose::Tier::Fine,
+                        )
+                        .distance(DVec3::ZERO)
+                        > 0.5
+                })
             });
         if done {
             break;

@@ -1201,7 +1201,15 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
             },
             match rehome_target {
                 Some(target) => vec![A::ReHomeAdopt { new_fence, target }],
-                None => vec![A::Promote { new_fence }],
+                // Stage B2 (§4v cure 2, the recovery the promote-defer comment prescribes): a normal
+                // Promoting re-drive re-emits the CROSSING beside the Promote — re-driving the Promote
+                // alone can never cure a lost/undrained crossing (the dest defers until
+                // `STUB_CROSSING_STEP` journals, and that journal dedups the re-emit, so the pair is
+                // idempotent — the proven D-37-2d template).
+                None => vec![
+                    A::EmitCrossing { fence: new_fence },
+                    A::Promote { new_fence },
+                ],
             },
         ),
         // ---- D-37 forward re-home: the committed owner was permanently KILLED ------------------------
@@ -2882,8 +2890,8 @@ mod tests {
 
     #[test]
     fn ordered_tail_timeouts_re_emit_forward_only() {
-        // A Demoting timeout re-emits the Demote; a Promoting timeout re-emits the Promote — both
-        // idempotent re-drives, never aborts (post-commit is forward-only). ✅ Slice 2a: the
+        // A Demoting timeout re-emits the Demote; a Promoting timeout re-emits the crossing AND the
+        // Promote (Stage B2) — idempotent re-drives, never aborts (post-commit is forward-only). ✅ Slice 2a: the
         // `saga_runtime::scan_deadlines` producer drives these in production (the FSM arms here are
         // the landing pads; the producer-driven path is covered in `saga_runtime`'s own tests).
         let c = ctx(false);
@@ -2910,11 +2918,17 @@ mod tests {
         };
         let (state, acts) = step(&c, promoting, SagaEvent::Timeout);
         assert_eq!(state, promoting, "the acked flags survive the re-drive");
+        // Stage B2: the Promoting re-drive re-emits the CROSSING beside the Promote — the promote alone
+        // can never cure a lost/undrained crossing (the dest defers until the crossing step journals,
+        // and that journal dedups the re-emit, so the pair stays idempotent).
         assert_eq!(
             acts,
-            vec![SagaAction::Promote {
-                new_fence: Fence(6)
-            }]
+            vec![
+                SagaAction::EmitCrossing { fence: Fence(6) },
+                SagaAction::Promote {
+                    new_fence: Fence(6)
+                },
+            ]
         );
     }
 

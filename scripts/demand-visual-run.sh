@@ -10,6 +10,7 @@
 #
 # Usage:
 #   scripts/demand-visual-run.sh          # boot the demand cluster, open the client window
+#   scripts/demand-visual-run.sh --fast   # ^ with Bevy linked as a shared library (faster relink)
 #
 # What you SEE (and what's still owed): your HOME system streams in on login (it is demand-spawned the
 # moment you connect — expect a ~1-2s warm-up while the home shard boots). WASD + mouse fly the dot. As
@@ -23,6 +24,29 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="$(cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Cargo.toml" \
     | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')/debug"
 
+# `--fast` links Bevy as ONE shared library instead of statically — the edit-rebuild-fly loop's
+# build-speed knob. It changes NOTHING about the world, the cluster or the client's behaviour;
+# only how the client binary is linked.
+#
+# The pre-build below and the client.sh launch at the bottom MUST agree on this: they are two
+# cargo invocations of the SAME binary, and a mismatched feature set means each one undoes the
+# other's Bevy build every single run. That is why one flag drives both, rather than being
+# passed by hand in two places.
+FAST=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fast) FAST=1; shift ;;
+        *) echo "demand-visual-run.sh: unexpected argument '$1'" >&2; exit 1 ;;
+    esac
+done
+
+CLIENT_FEATURES="dev-control,render"
+CLIENT_ARGS=(--window --name demand-walker)
+if [[ "$FAST" == "1" ]]; then
+    CLIENT_FEATURES="dev-control,render-dylib"
+    CLIENT_ARGS+=(--fast)
+fi
+
 # ALWAYS build the SERVER side. This used to be `[[ -x "$TARGET/vd-devcluster" ]] ||` — skip if the binary
 # merely EXISTS — which silently flew whatever server was built last, however old. That is the worst
 # possible failure mode for a fix-then-fly loop: the change appears to do nothing, and the obvious
@@ -31,16 +55,20 @@ TARGET="$(cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Car
 # when nothing changed this is a no-op, so the skip bought nothing and risked everything.
 cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins
 
-# Pre-build the WINDOWED client with progress VISIBLE (client.sh builds it with `-q`, which hides the
-# heavy Bevy first-build and makes it look frozen). Doing it here with output means you see the compile;
-# once done, client.sh's own `-q` build is a no-op and the window opens immediately.
+# Pre-build the WINDOWED client with progress visible. (This used to compensate for client.sh building
+# with `-q`; that flag is gone — it also hid "Blocking waiting for file lock on build directory", which
+# turned a build QUEUED behind another cargo into a silent stall indistinguishable from compiling.) The
+# pre-build stays: it keeps the heavy compile above the cluster bring-up, so a long first build does not
+# sit behind a booted cluster waiting on it.
 echo "building the windowed client (Bevy — the FIRST build is heavy, ~15-25 min on a slow box; progress below)…"
-cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features dev-control,render
+cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features "$CLIENT_FEATURES"
 
 # Boot the demand cluster in VISUAL scale. spawn_node inherits the parent env (no env_clear), so the
 # DEMAND-SPAWNED home shard's resolve_universe_scale reads VD_UNIVERSE_SCALE=visual and authors the
 # window-friendly orbiting system when the reconciler spins it up on your login.
-export VD_UNIVERSE_SCALE=visual
+# THE WORLD IS NO LONGER SELECTED, so there is nothing to export here. This line used to set a scale,
+# and a live cluster was read process by process with the orchestrator on one world and its own gateway on
+# another — from THIS script, in one launch. A knob that exists can be set twice; the fix was to delete it.
 
 # ╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
 # ║ THROWAWAY — DELETE WITH THE TINY WORLD. Not a feature, and deliberately not one.                  ║
@@ -98,4 +126,4 @@ trap cleanup EXIT
 # after). WASD + mouse fly the dot; the dev-control listener stays up so vdctl can also drive/inspect it.
 echo "launching the client window on the DEMAND cluster — your home system streams in on login (give the"
 echo "home shard ~1-2s to spawn); WASD + mouse to fly. Ctrl-C or close the window to stop."
-"$ROOT/scripts/client.sh" --window --name demand-walker
+"$ROOT/scripts/client.sh" "${CLIENT_ARGS[@]}"

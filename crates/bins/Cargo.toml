@@ -64,6 +64,12 @@ dev-control = ["dep:vd-client-harness"]
 # Bevy-free + fast: `--features render` pulls vd-client-render (the ~8.8 GB Bevy dep) and
 # enables the `client --window` mode. The default + dev-control builds contain no Bevy.
 render = ["dep:vd-client-render", "dep:vd-client-harness"]
+# `render`, but with Bevy linked as ONE shared library — the edit-rebuild-look loop's
+# build-speed knob, reached only via `scripts/client.sh --fast`. Behaviourally identical to
+# `render`; it differs ONLY in how Bevy is linked. NON-default and never used by a gate or a
+# container (those build `render`, i.e. exactly what ships). Note it is a DIFFERENT feature
+# set, so alternating it with `render` in one build directory rebuilds Bevy each way.
+render-dylib = ["render", "vd-client-render/dynamic_linking"]
 # TEST-ONLY (D-6 D-delta): forwards vd-io-prod/store-test-hooks so the orchestrator binary the crash test
 # spawns carries the writer-pause hook. NON-default + ABSENT from release (a compile fact). The
 # `orchestrator_crash` test is `#![cfg(feature = "store-test-hooks")]` and built via this flag.

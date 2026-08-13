@@ -22,6 +22,7 @@ pub mod entity_kind;
 pub mod fence;
 pub mod frame;
 pub mod geometry;
+pub mod home;
 pub mod ids;
 pub mod incarnation;
 pub mod kinematics;

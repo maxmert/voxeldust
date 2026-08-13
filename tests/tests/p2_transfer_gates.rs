@@ -36,7 +36,8 @@ use vd_harness::topology::{InspectReport, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
     DEST, GATEWAY, ORCH, SHARD, gateway_buffered_count, live_sagas, p1_client, p2_cluster,
-    read_subject, saga_states, stub_config, trigger_transfer, walk_forward,
+    read_subject, saga_states, stamp_subject_pose_in_dest_frame, stub_config, trigger_transfer,
+    walk_forward,
 };
 use vd_wire::channels::SubId;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
@@ -73,7 +74,7 @@ fn capture_subject(topo: &mut Topology) -> CapturedTick {
                     sub,
                     frame: pose.frame,
                     raw_pos: pose.pos,
-                    world_pos: view.world_pos(&pose, view.render_origin()),
+                    world_pos: view.world_pos(&pose),
                     orient: pose.orient,
                 })
         });
@@ -172,6 +173,7 @@ fn run_cut_transfer(
     // TRIGGER the REAL transfer of the avatar. The CAS expectation is the DIRECTORY record's
     // fence (read live), the subject the directory `Entity` key.
     let (session, entity, fence) = read_subject(&mut topo);
+    stamp_subject_pose_in_dest_frame(&mut topo, entity);
     trigger_transfer(
         &mut topo,
         SagaCtx {

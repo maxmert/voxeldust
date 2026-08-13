@@ -111,6 +111,12 @@ pub struct InspectReport {
     /// `CrossingRequest` resolved its three heads and BECAME a saga — the geometric trigger drove the
     /// transfer saga end-to-end (never hand-fed via `trigger_transfer`).
     pub crossings_started: u64,
+    /// Poses that ARRIVED at this shard in a frame it cannot measure — neither its own nor one of its
+    /// DIRECT CHILDREN — so the crossing / re-home was REFUSED and the entity was NOT placed (from
+    /// `StubStats.arrivals_unplaceable`). The ground truth for the sibling-hand-off gate: a mis-routed
+    /// pose used to land silently, relabelled into the receiver's frame with its number untouched, which
+    /// moved the occupant by the whole distance between the two realms. `0` on every healthy run.
+    pub arrivals_unplaceable: u64,
     /// Slice 3g — TRANSIENT geometric crossings REQUESTED by this shard (from
     /// `StubStats.transient_crossings_requested`). The transient (HR2 second-class) Leg-1 observable.
     pub transient_crossings_requested: u64,
@@ -287,6 +293,8 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         report.crossings_requested = stats.crossings_requested;
         report.crossings_applied = stats.crossings_applied;
         report.transient_crossings_requested = stats.transient_crossings_requested;
+        // The fail-loud pose ingress: an arrival this shard could not measure and therefore refused.
+        report.arrivals_unplaceable = stats.arrivals_unplaceable;
         report.crossing_latches_cleared = stats.crossing_latches_cleared;
     }
     if let Some(in_flight) = world.get_resource::<vd_sim::stub::RequestInFlight>() {
@@ -1148,6 +1156,9 @@ mod tests {
             session: vd_core::SessionId(7),
             fence: vd_core::Fence(1),
             account: vd_core::AccountId(1),
+            // No spawn pose: this rig has no forest to have measured one against, so the dot is born at
+            // the shard's own origin — the arm every static login takes.
+            spawn: None,
         };
         gateway_endpoint
             .send(
@@ -1458,7 +1469,7 @@ mod tests {
                     snapshot_datagram_budget: 1100,
                     boundary: BoundaryTuning::DEFAULT,
                     request_ttl_ticks: 0,
-                handoff_hold_ttl_ticks: 0,
+                    handoff_hold_ttl_ticks: 0,
                 },
             );
             shard

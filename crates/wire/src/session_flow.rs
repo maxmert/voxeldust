@@ -16,7 +16,7 @@
 //!   ([`peek_input_seq`]) for dedup and forwards the original bytes unmodified.
 
 use serde::{Deserialize, Serialize};
-use vd_core::pose::{FrameRef, RealmId};
+use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::{AccountId, EntityId, Fence, SessionId, TickId};
 
 use crate::channels::RealmShape;
@@ -25,7 +25,11 @@ use crate::channels::SubId;
 use crate::seams::directory::DirectoryKey;
 
 /// Gateway → shard session control and input.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but NOT `Eq`: `AttachSession` now carries a spawn pose, and a position is made of floats.
+/// Nothing compares these for total equality — the tests that compare them want "are these the same
+/// bytes on the wire", which is what `PartialEq` (and, where it matters, a postcard round-trip) answers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GatewayToShard {
     /// Attach a logged-in session: the shard spawns (or re-binds) the avatar and
     /// replies [`ShardToGateway::SessionAttached`]. Idempotent per (session, fence):
@@ -35,6 +39,32 @@ pub enum GatewayToShard {
         /// The Session-key fence the gateway holds authority under.
         fence: Fence,
         account: AccountId,
+        /// WHERE TO PUT THE AVATAR, already measured from the receiving realm's own centre and stamped
+        /// with that realm's frame. `None` ⇒ the shard births it at its own origin, at rest.
+        ///
+        /// The DESCENT — stepping down the lineage subtracting each realm's placement in turn — is right,
+        /// and each subtraction being one realm's own placement is right. WHO RUNS IT is a KNOWN OPEN
+        /// BREACH, recorded here rather than defended: today the gateway runs the whole walk over its own
+        /// copy of the forest, which is one party holding every parent's placement of every child. Only a
+        /// parent may hold where its child sits, so each step belongs in the shard that authored it — the
+        /// galaxy shard handing the system shard a point in the system's frame, the system shard handing
+        /// the planet shard a point in the planet's frame, and the planet accepting it and computing
+        /// nothing. What blocks the move is BOOTSTRAP ORDERING, not disagreement: at the instant the
+        /// descent must answer, not one shard of the home lineage is running, because the demand that
+        /// spins them up is what the same walk decides. `vd-connection-plane`'s
+        /// `nothing_of_the_home_lineage_is_running_at_the_instant_the_login_descent_must_answer` asserts
+        /// exactly that, so the blocker is a measurement and not an excuse. It closes when a home is
+        /// stored as (lineage, pose in that realm's own frame) — the P7 durable per-realm store — or when
+        /// the ambient root becomes permanently resident and the descent demands as it steps. That is an
+        /// owner-visible call and is deliberately not made here.
+        ///
+        /// This is NOT the earlier defect, which was worse and is fixed: the shard held a copy of the same
+        /// account→position map, in UNIVERSE-ROOT coordinates, and "converted" it by handing it to the
+        /// frame machinery with an identity context — which changed the label and moved no number. A
+        /// player stored three metres above a planet was planted three metres from the STAR. The receiving
+        /// shard now checks the frame and REFUSES a pose that is not measured in its own, rather than
+        /// wearing it, and that terminal behaviour is right and stays whoever ends up running the descent.
+        spawn: Option<StampedPose>,
     },
     /// One client input datagram, forwarded VERBATIM (`input_bytes` is the postcard
     /// [`crate::channels::InputDatagram`] exactly as the client sent it).
@@ -337,6 +367,22 @@ mod tests {
                 session: SessionId(1),
                 fence: Fence(2),
                 account: AccountId(3),
+                // The spawn pose is measured in the RECEIVING realm's frame, never the root's — a pose
+                // wearing `SystemSpace{0}` here would be the universe-absolute the shard used to be
+                // handed and silently relabel. Round-tripping a `Some` proves the field survives.
+                spawn: Some(StampedPose::at_rest(
+                    FrameRef::PlanetCentered { planet_seed: 7 },
+                    DVec3::new(3.0, 0.0, 0.0),
+                    UniverseTick(0),
+                )),
+            },
+            // The `None` arm — a login with nothing stored — must round-trip too (it is the byte-identical
+            // default every rig takes).
+            GatewayToShard::AttachSession {
+                session: SessionId(1),
+                fence: Fence(2),
+                account: AccountId(3),
+                spawn: None,
             },
             GatewayToShard::SessionInput {
                 session: SessionId(1),

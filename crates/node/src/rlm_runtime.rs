@@ -829,13 +829,15 @@ mod tests {
         // frame (`demand_frame` → `record_realm_demands`); it NEVER calls `spawn_realm` / a direct spawn
         // hook, so passing proves the seed rode the ONE machinery.
         use RealmKindTag::{Area, Galaxy, Planet, System, Universe};
-        use glam::DVec3;
-        use vd_core::worldgen::{container_coord_in, realm_regions_for};
+        use vd_core::pose::RealmId;
+        use vd_core::worldgen::{coord_of_realm, realm_regions_for};
 
-        // Resolved against the FIXTURE forest: the deepest realm here is an AREA, which players build and
-        // the generator never makes. Asking the generated world would resolve to the star and the test
-        // would be proving a 3-level chain while claiming to prove a 5-level one.
-        let deepest = container_coord_in(&realm_regions_for(0), DVec3::new(25.0, 0.0, 0.0));
+        // NAMED in the FIXTURE forest: the deepest realm there is an AREA, which players build and the
+        // generator never makes. Naming a generated realm instead would give a 3-level chain and the test
+        // would claim to prove a 5-level one. The realm used to be said as the position (25,0,0) and
+        // descended for; the descent is gone, so the test names what it always meant.
+        let deepest = coord_of_realm(&realm_regions_for(0), RealmId::Area(7))
+            .expect("the fixture forest holds the deep area home");
         let lin = |levels: &[(RealmKindTag, u64)]| -> RealmPath {
             RealmPath::from_levels(levels.iter().map(|&(k, s)| RealmLevel::new(k, s)).collect())
         };

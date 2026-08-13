@@ -1411,15 +1411,16 @@ mod tests {
     #[test]
     fn reconcile_5f3a_bootstrap_ride_spins_the_whole_area_lineage_from_one_leaf_demand() {
         use RealmKindTag::{Area, Galaxy, Planet, System, Universe};
-        use glam::DVec3;
-        use vd_core::worldgen::{container_coord_in, realm_regions_for};
+        use vd_core::pose::RealmId;
+        use vd_core::worldgen::{coord_of_realm, realm_regions_for};
 
         let t = cloud();
-        // The deepest home coord from the REAL resolver (NOT hand-built) — the Area-A box at x=25.
-        // FIXTURE forest: the deepest realm at this point is a player-built AREA, which the generator
-        // never makes. Resolving against the generated world would stop at the star, so the test would
-        // spin a 3-level chain while asserting it proved a 5-level one.
-        let deepest = container_coord_in(&realm_regions_for(0), DVec3::new(25.0, 0.0, 0.0));
+        // The deepest home lineage from the REAL forest (NOT hand-built) — the Area-A box. FIXTURE forest:
+        // the deepest realm there is a player-built AREA, which the generator never makes, so naming a
+        // generated realm would spin a 3-level chain while the test asserted it proved a 5-level one. This
+        // used to be said as the position (25,0,0) and descended for; the descent is gone.
+        let deepest = coord_of_realm(&realm_regions_for(0), RealmId::Area(7))
+            .expect("the fixture forest holds the deep area home");
         let mut l = DemandLedger::default();
         // tick NONZERO (a post-ClockSync tick) — a tick-0 seed is inert by `demanded_recently`.
         l.record_demand(&deepest, DemandVerb::SpinUp, UniverseTick(100), Fence(1));

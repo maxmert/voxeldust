@@ -120,18 +120,27 @@ mod tests {
         // THE TWO SCALES. The axes ride the wire as a MAGNITUDE and the server integrates `axes · speed`,
         // so releasing boost slows you without a new message, a new field, or a server change. Pinned on
         // every axis because a throttle that only applied to forward would be a trap when manoeuvring.
-        let all = |boost: bool| MovementKeys {
-            forward: true,
-            right: true,
-            up: true,
-            boost,
-            ..Default::default()
-        }
-        .axes();
+        let all = |boost: bool| {
+            MovementKeys {
+                forward: true,
+                right: true,
+                up: true,
+                boost,
+                ..Default::default()
+            }
+            .axes()
+        };
         assert_eq!(all(true), [1.0, 1.0, 1.0]);
         assert_eq!(all(false), [CRUISE_FRACTION; 3]);
         // …and stationary is stationary at either throttle — cruise scales movement, never invents it.
-        assert_eq!(MovementKeys { boost: true, ..Default::default() }.axes(), [0.0; 3]);
+        assert_eq!(
+            MovementKeys {
+                boost: true,
+                ..Default::default()
+            }
+            .axes(),
+            [0.0; 3]
+        );
     }
 
     #[test]
@@ -146,7 +155,10 @@ mod tests {
             keys.move_action(),
             InputAction::Move([CRUISE_FRACTION, CRUISE_FRACTION, 0.0])
         );
-        let fast = MovementKeys { boost: true, ..keys };
+        let fast = MovementKeys {
+            boost: true,
+            ..keys
+        };
         assert_eq!(fast.move_action(), InputAction::Move([1.0, 1.0, 0.0]));
     }
 

@@ -10,7 +10,7 @@ use vd_sim::capability::NodeKind;
 use vd_sim::stub::{RealmAuthority, RealmConfirmedAt, StubConfig, register_stub_shard};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    vd_bins::init_tracing();
     let env = EnvConfig::from_process_env();
     let local = env.node_id("VD_NODE_ID")?;
     // Cloud-ready k3d Slice 2: the footgun preflight + resolved D-3, BEFORE `boot_mesh_and_replay` (the
@@ -49,15 +49,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let realm_seed: u64 = env.parse("VD_REALM_SEED")?;
     let realm_kind = env.string("VD_REALM_KIND").unwrap_or_default();
     let own_realm = vd_bins::realm_from_kind_seed(&realm_kind, realm_seed)?;
-    let own_coord = match env.string("VD_OWN_COORD").ok().filter(|s| !s.is_empty()) {
-        Some(s) => vd_core::realm_coord::RealmCoord::from_path(
-            vd_core::realm_path::RealmPath::from_env_string(&s).map_err(|e| e.to_string())?,
-        )
-        .ok_or("VD_OWN_COORD is an empty lineage — refusing to boot")?,
-        None => vd_sim::stub::StubConfig::root_coord(own_realm),
+    let declared_coord = match env.string("VD_OWN_COORD").ok().filter(|s| !s.is_empty()) {
+        Some(s) => Some(
+            vd_core::realm_coord::RealmCoord::from_path(
+                vd_core::realm_path::RealmPath::from_env_string(&s).map_err(|e| e.to_string())?,
+            )
+            .ok_or("VD_OWN_COORD is an empty lineage — refusing to boot")?,
+        ),
+        None => None,
     };
-    let profile =
-        vd_sim::capability::profile_for(own_coord.profile_kind()).map_err(|e| e.to_string())?;
+    // The profile depends only on the LEAF level's kind, which is the same whether the lineage was declared
+    // or is about to be derived below (both end at `own_realm`), so it can be settled here — before the
+    // forest exists — without prejudging the chain above it.
+    let profile = vd_sim::capability::profile_for(
+        declared_coord
+            .clone()
+            .unwrap_or_else(|| vd_sim::stub::StubConfig::root_coord(own_realm))
+            .profile_kind(),
+    )
+    .map_err(|e| e.to_string())?;
     let mut node = build_app(
         NodeConfig {
             node_id: local,
@@ -86,10 +96,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The realm's SUBJECTIVE time factor (D-45(a)): dilates OCCUPANT movement inside this realm (never the
     // celestial orbit). `VD_REALM_TIME_MULTIPLIER` override / `VD_TIME_MULTIPLIER` global / 1.0 default.
     let time_multiplier = vd_bins::resolve_time_multiplier(&env)?;
-    // RLM 5f-3b: the per-account STORED spawn poses (the `VD_SPAWN_POSES` STAND-IN for the P7 durable pose
-    // store). ABSENT ⇒ an EMPTY map ⇒ every login births origin-at-rest (byte-identical). A login then
-    // loads the stored pose SHARD-SIDE (keyed by the account in the AttachSession arm) and admits at it.
-    let spawn_poses = vd_bins::resolve_spawn_poses(&env)?;
     vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
     // NODE-PER-REALM (task #149): a realm-shard hosts EXACTLY ONE realm. `own_realm` (its `RealmId`),
     // `own_coord` (its un-collapsed lineage), and its derived `ShardProfile` were all resolved ABOVE (before
@@ -107,14 +113,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
     // FA-5 (D-45(a)): the world SCALE (`VD_UNIVERSE_SCALE`, ABSENT ⇒ `Walk` = byte-identical). `Walk` ⇒
     // the seed neighbourhood + an EMPTY mover roster; `Visual` ⇒ the single-system forest whose planets
-    // ORBIT. Build the containment forest + the moving-child roster from the SAME `(scale, seed, config)`,
-    // so the authored own-frame and the moving planets can never derive from different elements.
-    let scale = vd_bins::resolve_universe_scale(&env)?;
-    // RLM realistic-demo Slice 3: the `VisualDemand` AoI band is measured against the LIVE occupant speed the
-    // sim integrates (`move_speed · time_multiplier`) at the LIVE tick dt — closing the M-2 two-home owe.
-    // `Walk`/`Visual` ignore both.
-    let (seed_regions, moving, seed_origin_chains) = vd_bins::boot_regions_and_movers(
-        scale,
+    // ORBIT. The containment forest + the moving-child roster, from the ONE world. There is no scale to
+    // resolve any more: this shard and its gateway build the same universe because there is only one, and
+    // the interest band is measured against the speed this cluster actually flies at and the tick it
+    // actually runs.
+    let (seed_regions, moving) = vd_bins::boot_regions_and_movers(
         universe_seed,
         &held_realms,
         own_realm,
@@ -140,6 +143,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  the seed forest for this seed) — refusing to boot"
             )
         })?;
+    let hosted_realm = own_realm;
+    // C-6b — the SEED-DERIVED containment boot (task #135). The shard computes its realm-region
+    // NEIGHBOURHOOD closed-form from the shared universe seed (`realm_neighbourhood_for`: own realm +
+    // ancestor chain to the ambient root + owned children — NEVER siblings, HR1 replicated-by-construction,
+    // no inter-shard bytes) and plants it, so the containment detector is LIVE from boot (no longer inert).
+    // `universe_seed` was read once above; a per-shard forest that fails `guard_regions_nest` (two roots, a
+    // dangling parent, a cycle, count > MAX_REGIONS) is a CODE bug in the generator — fail LOUD at boot
+    // (Display carries the actionable guidance for `kubectl logs`), never a silent detector no-op.
+    // `seed_regions` (built above from the scale) is the containment forest this shard EVALUATES against:
+    // Walk ⇒ the seed NEIGHBOURHOOD (the UNION of every held realm's neighbourhood — a co-hosting shard must
+    // see the deeper child regions, a Planet's Area being a GRANDCHILD, so the LOCAL re-home short-circuit
+    // can fire; single-realm ⇒ `realm_neighbourhood_for(hosted)` exactly, byte-identical); Visual ⇒ the FA-5
+    // single-system forest. `moving` is EMPTY on Walk, the orbiting planets on Visual.
+    // `VD_REALM_BOUNDARIES` OVERRIDE (kept for the dual-cluster / render-crossing PLAYGROUND smokes): an
+    // authored `boundaries.json` (a `Vec<RealmBoundary>`, SINGLE-SOURCED with the client's `--realm-boxes`)
+    // REPLACES the scale forest with a born-inside child crossing shell — a self-contained Walk-scale forest,
+    // so its mover roster is EMPTY (the override never combines with the Visual orbiting planets). A
+    // malformed file / a boundary for a realm this shard does NOT host fails LOUD. ABSENT ⇒ the scale forest.
+    let (regions, moving) = if let Some(boundaries) =
+        vd_bins::resolve_realm_boundaries(&env, hosted_realm).map_err(|e| e.to_string())?
+    {
+        tracing::info!(
+            count = boundaries.len(),
+            realm = %hosted_realm,
+            "planting VD_REALM_BOUNDARIES OVERRIDE — the authored playground crossing forest is ARMED",
+        );
+        // The override is a self-contained WALK-scale playground forest: EMPTY mover roster (nothing in it
+        // orbits, so the shard authors no live placement for any of it).
+        (
+            vd_bins::override_regions_for_boundaries(
+                &boundaries,
+                hosted_realm,
+                move_speed,
+                tick_dt,
+            ),
+            std::collections::BTreeMap::new(),
+        )
+    } else {
+        // This line used to print the SCALE this shard booted, and reading it across a live cluster is
+        // how the two-worlds defect was caught: the orchestrator said one thing and its gateway another.
+        // There is no scale to print now. The seed is, because one world generated from one seed is
+        // exactly what has to be true, and it is the thing worth being able to compare across processes.
+        tracing::info!(
+            count = seed_regions.len(),
+            realm = %hosted_realm,
+            seed = universe_seed,
+            "planting the containment forest for THE world — the re-home detector is LIVE",
+        );
+        (seed_regions, moving)
+    };
+    // THE SHARD'S LINEAGE, and where it comes from. `VD_OWN_COORD` when the launcher set one (the demand
+    // spawner does); otherwise DERIVED from the very forest just planted, by walking the parent pointers of
+    // this shard's own region up to the ambient root.
+    //
+    // It used to fall back to a ROOT-SHAPED coord — a one-level lineage claiming this realm has no parent —
+    // and every shipped launcher takes that path, so every statically launched shard has been running with
+    // a lineage that says it is the Universe. That is not a harmless label: leaving a realm now reads the
+    // shard's own lineage to decide who to hand the occupant to, so a shard that believes it is a root
+    // hands people to the ambient root instead of to the star system twenty metres away. (`outward_dest`
+    // has been papering over exactly this by consulting the region row when the coord had nothing; with the
+    // lineage derived from the same forest, the two sources agree by construction rather than by luck.)
+    //
+    // Deriving beats demanding an env var: the forest is the one source of truth about who contains whom,
+    // and a lineage handed in separately can drift from it — which is precisely what the fence below
+    // refuses. A realm absent from its own forest keeps the root shape, and the fence then has nothing to
+    // object to (nothing claims it has a parent).
+    let own_coord = match declared_coord {
+        Some(declared) => declared,
+        None => vd_core::worldgen::coord_of_realm(&regions, own_realm)
+            .unwrap_or_else(|| vd_sim::stub::StubConfig::root_coord(own_realm)),
+    };
+    // THE LINEAGE FENCE — the owner's rule: we cannot boot a realm without its parents all the way to the
+    // root. A shard whose world gives it a parent while its lineage claims none would MISROUTE every
+    // occupant that leaves it, silently, with nothing crashing; refusing to start beats that. Reachable
+    // only via an explicitly declared `VD_OWN_COORD` that disagrees with the forest, since a derived
+    // lineage cannot disagree with the forest it was derived from.
+    vd_core::geometry::guard_lineage_reaches_root(
+        &regions,
+        own_realm,
+        own_coord.parent().map(|p| p.lowered()),
+    )
+    .map_err(|e| format!("{e} — refusing to boot"))?;
     // How long this shard keeps speaking for an occupant it has handed away — telling its parent where
     // they are, and counting itself occupied — when the take-over never lands. Handed down by the
     // orchestrator that launched it, because only there are both budgets it depends on in scope: how long
@@ -151,6 +236,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         armed = handoff_hold_ttl_ticks != 0,
         "hand-off hold budget resolved — how long this shard speaks for an occupant it has handed away",
     );
+    // Step 5 slice B — THE HOLD IS MANDATORY ON AN AoI-ARMED SHARD (the boot fence, like the lineage
+    // fence above): armed interest bands mean live hand-offs, and a hand-off ledger with a zero
+    // budget lets a source fall silent about a departing occupant while its parent still counts on
+    // it — the exact gap the ledger closes. Every launcher of an armed world must state the budget
+    // (the demand orchestrator derives it in `handoff_hold_anchor`); refusing to boot beats running
+    // half a ledger. Walk/static worlds carry inert bands and boot exactly as before.
+    if regions.iter().any(|r| r.aoi.spin_up_r_m() > 0.0) && handoff_hold_ttl_ticks == 0 {
+        return Err(format!(
+            "this world arms the interest bands (demand scale) on realm {own_realm} but \
+             VD_HANDOFF_HOLD_TICKS is 0/unset — an AoI-armed shard must carry the hand-off hold \
+             budget its launcher derives (see vd_bins::handoff_hold_anchor) — refusing to boot"
+        )
+        .into());
+    }
     register_stub_shard(
         world,
         schedule,
@@ -195,9 +294,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // the sole driver until the 3f abort/TTL egress lands.
             request_ttl_ticks: 0,
             handoff_hold_ttl_ticks,
-            // RLM 5f-3b — the per-account STORED spawn poses (the `VD_SPAWN_POSES` stand-in; the P7 durable
-            // pose store swaps in behind this SAME map). ABSENT ⇒ empty ⇒ origin-at-rest (byte-identical).
-            spawn_poses,
+            // THIS REALM'S OWN stored poses — realm-local, in this realm's frame. EMPTY at boot, and
+            // deliberately so: the only pose store that exists today is a cluster-wide env var holding
+            // UNIVERSE-ABSOLUTE positions, which is not something a realm can hold. The shard used to load
+            // it anyway and "convert" by relabelling, planting a player stored above a planet next to that
+            // planet's star. A login's position now arrives already converted, in `AttachSession`, from the
+            // gateway — the only party that holds the whole forest and can therefore do the subtraction.
+            // The P7 durable PER-REALM store fills this map, whose contents are realm-local by construction.
+            spawn_poses: std::collections::BTreeMap::new(),
         },
     );
     // RLM 5f RG-2: a DEMAND-spawned shard (it carries the spawner's VD_INCARNATION_COOKIE) greets its booked
@@ -207,54 +311,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(presence) = vd_bins::resolve_presence(&env, tick_dt)? {
         world.insert_resource(presence);
     }
-    // C-6b — the SEED-DERIVED containment boot (task #135). The shard computes its realm-region
-    // NEIGHBOURHOOD closed-form from the shared universe seed (`realm_neighbourhood_for`: own realm +
-    // ancestor chain to the ambient root + owned children — NEVER siblings, HR1 replicated-by-construction,
-    // no inter-shard bytes) and plants it, so the containment detector is LIVE from boot (no longer inert).
-    // `universe_seed` was read once above; a per-shard forest that fails `guard_regions_nest` (two roots, a
-    // dangling parent, a cycle, count > MAX_REGIONS) is a CODE bug in the generator — fail LOUD at boot
-    // (Display carries the actionable guidance for `kubectl logs`), never a silent detector no-op.
-    let hosted_realm = own_realm;
-    // `seed_regions` (built above from the scale) is the containment forest this shard EVALUATES against:
-    // Walk ⇒ the seed NEIGHBOURHOOD (the UNION of every held realm's neighbourhood — a co-hosting shard must
-    // see the deeper child regions, a Planet's Area being a GRANDCHILD, so the LOCAL re-home short-circuit
-    // can fire; single-realm ⇒ `realm_neighbourhood_for(hosted)` exactly, byte-identical); Visual ⇒ the FA-5
-    // single-system forest. `moving` is EMPTY on Walk, the orbiting planets on Visual.
-    // `VD_REALM_BOUNDARIES` OVERRIDE (kept for the dual-cluster / render-crossing PLAYGROUND smokes): an
-    // authored `boundaries.json` (a `Vec<RealmBoundary>`, SINGLE-SOURCED with the client's `--realm-boxes`)
-    // REPLACES the scale forest with a born-inside child crossing shell — a self-contained Walk-scale forest,
-    // so its mover roster is EMPTY (the override never combines with the Visual orbiting planets). A
-    // malformed file / a boundary for a realm this shard does NOT host fails LOUD. ABSENT ⇒ the scale forest.
-    let (regions, moving, origin_chains) = if let Some(boundaries) =
-        vd_bins::resolve_realm_boundaries(&env, hosted_realm).map_err(|e| e.to_string())?
-    {
-        tracing::info!(
-            count = boundaries.len(),
-            realm = %hosted_realm,
-            "planting VD_REALM_BOUNDARIES OVERRIDE — the authored playground crossing forest is ARMED",
-        );
-        // The override is a self-contained WALK-scale playground forest: EMPTY mover roster ⇒ EMPTY origin
-        // chains (all `Fixed` ⇒ identity fold ⇒ the compose short-circuits to raw ⇒ byte-identical).
-        (
-            vd_bins::override_regions_for_boundaries(
-                &boundaries,
-                hosted_realm,
-                move_speed,
-                tick_dt,
-            ),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-        )
-    } else {
-        tracing::info!(
-            count = seed_regions.len(),
-            realm = %hosted_realm,
-            seed = universe_seed,
-            scale = ?scale,
-            "planting the scale-derived containment forest — the re-home detector is LIVE",
-        );
-        (seed_regions, moving, seed_origin_chains)
-    };
     // The BOOT FENCE (C-5): pure-topology validation BEFORE the infallible `RealmRegions::new`, so a
     // malformed forest fails LOUD here rather than degrading to the detector's rootless no-op.
     vd_core::geometry::guard_regions_nest(&regions, vd_sim::stub::MAX_REGIONS).map_err(|e| {
@@ -262,9 +318,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     *node
         .world_mut()
-        .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)
-        .with_moving_children(moving)
-        .with_origin_chains(origin_chains);
+        .resource_mut::<vd_sim::stub::RealmRegions>() =
+        vd_sim::stub::RealmRegions::new(regions).with_moving_children(moving);
     let mut pacer = TickPacer::new(tick_hz);
     // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its
     // heartbeat + THIS shard's readiness) and the /healthz+/readyz HTTP task reads. Slice 1: the SIGTERM flag

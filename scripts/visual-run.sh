@@ -30,7 +30,9 @@ echo "visual scene → $VD_VISUAL_SCENE"
 # 2. Boot the cluster with the shard in VISUAL scale. spawn_node inherits the parent env (no env_clear),
 #    so the System-7 shard's resolve_universe_scale reads VD_UNIVERSE_SCALE=visual and authors the orbiting
 #    planets (the gateway/orchestrator inherit it too but ignore it).
-export VD_UNIVERSE_SCALE=visual
+# THE WORLD IS NO LONGER SELECTED, so there is nothing to export here. This line used to set a scale,
+# and a live cluster was read process by process with the orchestrator on one world and its own gateway on
+# another — from THIS script, in one launch. A knob that exists can be set twice; the fix was to delete it.
 "$ROOT/scripts/dev-cluster.sh" up
 
 # 3. Tear the cluster down + clean the scene when the client window closes / on Ctrl-C.

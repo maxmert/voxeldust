@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use glam::DVec3;
 use vd_core::EntityId;
-use vd_core::pose::{FrameRef, LatticePos};
+use vd_core::pose::FrameRef;
 use vd_wire::channels::SubId;
 
 use crate::interp::RenderPose;
@@ -151,21 +151,12 @@ impl RenderSnapshot {
         }
     }
 
-    /// Reduce a rendered (already root-ABSOLUTE, A5) pose to render space: subtract the server-told render
-    /// [`RenderSnapshot::origin`] in exact lattice arithmetic ([`DeliveredView::world_pos`]). A pure
-    /// range-reduction — no compose, no cursor, no per-frame branch. Every point in one pass reads the SAME
-    /// immutable snapshot, so all agree on the origin within a frame.
+    /// Flatten a delivered pose to the drawn point — a PASSTHROUGH ([`DeliveredView::world_pos`]). The
+    /// chain of shards already expressed it from the centre of the realm this session stands in; the
+    /// client subtracts nothing and picks no unit (the pose carries the one it was shipped with).
     #[must_use]
     pub fn world_pos(&self, pose: &RenderPose) -> DVec3 {
-        self.view.world_pos(pose, self.origin())
-    }
-
-    /// The SERVER-TOLD render origin the renderer writes once per pass — every drawn point AND the camera eye
-    /// AND the capture camera subtract this ONE value (A5). Identity (ZERO) until the first pin is told; then
-    /// carried across re-anchors (never resets to the world origin).
-    #[must_use]
-    pub fn origin(&self) -> LatticePos {
-        self.view.render_origin()
+        self.view.world_pos(pose)
     }
 
     /// The freshest delivered universe tick (the run-stable capture-alignment quantity);
@@ -329,7 +320,8 @@ mod tests {
         assert_eq!(s.freshest_tick(), Some(10), "the anchored tick");
         let rendered = s.rendered(100.0);
         assert_eq!(rendered.len(), 1);
-        // At the identity render origin (no pin told), world_pos returns the sampled pos verbatim (A5).
+        // world_pos is a passthrough — the shard chain already measured this from the centre of the
+        // realm the session stands in, and the pose carries the unit its cell is counted in.
         let pose = rendered[0].2;
         assert_eq!(s.world_pos(&pose), pose.pos);
     }
@@ -342,13 +334,14 @@ mod tests {
             ClientPhase::Connecting,
         );
         assert_eq!(s.freshest_tick(), None);
-        // A5 — world_pos no longer depends on the clock/cursor: it is a pure subtraction of the render origin
-        // (identity here, no pin told), so a pose reduces to itself, finite and correct, even before the anchor.
+        // world_pos does not depend on the clock/cursor at all: it flattens the delivered position, so a
+        // pose reduces to itself, finite and correct, even before the anchor.
         let pose = RenderPose {
             frame: FrameRef::SystemSpace { system_seed: 1 },
             cell: glam::I64Vec3::ZERO,
             pos: DVec3::new(1.0, 2.0, 3.0),
             orient: glam::DQuat::IDENTITY,
+            tier: vd_core::pose::Tier::Fine,
         };
         assert_eq!(s.world_pos(&pose), DVec3::new(1.0, 2.0, 3.0));
     }
@@ -399,7 +392,7 @@ mod slice6_tests {
     use super::*;
     use vd_core::UniverseTick;
     use vd_core::geometry::{CrossEffect, RealmBoundary};
-    use vd_core::pose::{RealmId, StampedPose};
+    use vd_core::pose::{LatticePos, RealmId, StampedPose};
     use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
 
     use crate::realm_scene::RealmScene;
@@ -436,20 +429,26 @@ mod slice6_tests {
     fn slice6_the_drawn_realm_centre_tracks_the_cursor_continuously() {
         let mut realms = RealmView::default();
         for t in 10..=30u64 {
-            realms.on_realm_snapshot(RealmSnapshotDatagram {
-                sub: SubId(0),
-                frame_id: t,
-                source_tick: vd_core::TickId(t),
-                universe_tick: UniverseTick(t),
-                realms: vec![RealmSnap {
-                    realm: REALM,
-                    pose: StampedPose::at_rest(
-                        FrameRef::SystemSpace { system_seed: 1 },
-                        DVec3::new(t as f64, 0.0, 0.0),
-                        UniverseTick(t),
-                    ),
-                }],
-            });
+            realms.on_realm_snapshot(
+                None,
+                RealmSnapshotDatagram {
+                    sub: SubId(0),
+                    frame_id: t,
+                    source_tick: vd_core::TickId(t),
+                    universe_tick: UniverseTick(t),
+                    realms: vec![RealmSnap {
+                        realm: REALM,
+                        // The edge HEAD (proto_minor 8): REALM's own frame; `pose.frame` is the TAIL.
+                        frame: vd_core::pose::frame_for_realm(REALM, None)
+                            .expect("a seeded realm resolves"),
+                        pose: StampedPose::at_rest(
+                            FrameRef::SystemSpace { system_seed: 1 },
+                            DVec3::new(t as f64, 0.0, 0.0),
+                            UniverseTick(t),
+                        ),
+                    }],
+                },
+            );
         }
         let snap = RenderSnapshot::with_realms(
             DeliveredView::default(),

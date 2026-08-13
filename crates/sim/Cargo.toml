@@ -17,6 +17,10 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# HR5: unit tests install a TRACE sink so every tracing macro's lazy field closure
+# EVALUATES on the paths the tests already drive — without it the closures are dead
+# regions coverage can never reach (no subscriber ⇒ tracing skips them).
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

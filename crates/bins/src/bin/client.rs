@@ -61,7 +61,7 @@ const COMMAND_MAILBOX_CAP: usize = 256;
 const DEFAULT_STEP_HZ: u32 = 20;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    vd_bins::init_tracing();
     let args = parse_args()?;
     let env = EnvConfig::from_process_env();
     let signing_key = env.hex32("VD_AUTH_SIGNING_KEY")?;
@@ -107,13 +107,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let mut core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
 
-    // C-6b Visual Crossing Playground: boot-load the dev-config realm geometry (if given) into the render
-    // scene, which then rides every render_snapshot() onto the seam. SINGLE-SOURCED with the shard's
-    // containment plant. Preferred: a `regions.json` (a `Vec<RealmRegion>` = the SEED forest
-    // `worldgen::realm_regions_for(seed)` — the client draws EXACTLY what the sim's detector evaluates,
-    // ambient shells auto-skipped). Legacy fallback: a `boxes.json` (a `Vec<RealmBoundary>`) for the
-    // authored playground OVERRIDE smokes. A file that parses as NEITHER fails LOUD at boot (never a
-    // silent empty scene). Config injection — zero cross-process bytes (HR1-inert).
+    // THE DEBUG BOOT SCENE (dev-control builds only — `debug_scene_arg` refuses it otherwise). Local file
+    // geometry drawn while the client has been told nothing yet, so a playground smoke has something on
+    // screen before the first streamed scene message arrives; that message REPLACES this whole scene with
+    // what the shard chain shipped, and from then on the client draws only what it was sent.
+    //
+    // IT IS NOT CONVERTED AND MUST NOT BE. The centres in these files are each realm's placement in its
+    // PARENT's frame, which is not the space this session draws in. Converting them here would mean the
+    // client holding the whole forest and folding a chain of realms — the exact arrangement the server-side
+    // chain replaced. Preferred: a `regions.json` (`Vec<RealmRegion>` = the SEED forest, ambient shells
+    // auto-skipped). Legacy fallback: a `boxes.json` (`Vec<RealmBoundary>`) for the authored playground
+    // OVERRIDE smokes. A file that parses as NEITHER fails LOUD at boot (never a silent empty scene).
     if let Some(path) = &args.realm_boxes {
         let json =
             std::fs::read_to_string(path).map_err(|e| format!("read --realm-boxes {path}: {e}"))?;
@@ -482,10 +486,19 @@ struct ClientArgs {
     /// Headless offscreen render + wgpu readback for `vdctl screenshot` (Slice-3 T5) — the
     /// agent's eyes, no display. Requires `--features dev-control,render` + `--dev-control`.
     capture: bool,
-    /// Optional dev-config `boxes.json` — a JSON array of `RealmBoundary` (the IDENTICAL Vec the
-    /// shard plants) boot-loaded into the render scene so the realms render as translucent boxes
-    /// (Visual Crossing Playground V2). `None` ⇒ no boxes (the pose-only default). Single-sourced
-    /// with the shard boundary plant; adds ZERO cross-process bytes (HR1-inert config injection).
+    /// A DEBUG boot scene read off local disk — a `regions.json` (`Vec<RealmRegion>`, the seed forest)
+    /// or the legacy authored `boxes.json` (`Vec<RealmBoundary>`) — drawn as translucent realm boxes
+    /// while the client has been told nothing (Visual Crossing Playground V2). `None` ⇒ no boxes.
+    ///
+    /// IT IS NOT WORLD TRUTH AND IS NOT ON THE NETWORKED PATH. The centres in those files are each
+    /// realm's placement in its own PARENT's frame, which is not the space this session draws in, and
+    /// nothing converts them — nothing can, because converting them would mean the client holding the
+    /// whole forest and folding a chain of realms, which is precisely what the server-side chain exists
+    /// to stop. It survives only until the first streamed scene message, which REPLACES the whole scene
+    /// with what the shard chain shipped.
+    ///
+    /// It is therefore refused outright unless this is a `dev-control` build, so it cannot become a
+    /// second source of world geometry in anything a player runs.
     realm_boxes: Option<String>,
 }
 
@@ -517,7 +530,9 @@ fn parse_args() -> Result<ClientArgs, String> {
             "--step-hz" => step_hz = parse_val(&mut it, "--step-hz")?,
             "--window" => window = true,
             "--capture" => capture = true,
-            "--realm-boxes" => realm_boxes = Some(next_val(&mut it, "--realm-boxes")?),
+            "--realm-boxes" => {
+                realm_boxes = Some(debug_scene_arg(next_val(&mut it, "--realm-boxes")?)?);
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -539,6 +554,23 @@ fn parse_args() -> Result<ClientArgs, String> {
         capture,
         realm_boxes,
     })
+}
+
+/// Accept `--realm-boxes` ONLY in a dev-control build — the flag names a local file of world geometry
+/// nobody streamed, so it is a debugging affordance and is gated like one. See `ClientArgs::realm_boxes`.
+#[cfg(feature = "dev-control")]
+fn debug_scene_arg(path: String) -> Result<String, String> {
+    Ok(path)
+}
+
+/// The non-dev twin: refuse LOUD rather than silently drawing file geometry beside streamed geometry.
+#[cfg(not(feature = "dev-control"))]
+fn debug_scene_arg(_path: String) -> Result<String, String> {
+    Err(
+        "--realm-boxes is a debug-only boot scene (local file geometry, not the streamed world) and \
+         needs a `dev-control` build"
+            .to_owned(),
+    )
 }
 
 fn next_val(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -766,8 +798,16 @@ mod dev_control {
                     target,
                     arrive_epsilon,
                     max_ticks,
-                }) => match drive_walk_to(&handles, &mut framer, target, arrive_epsilon, max_ticks)
-                    .await
+                    max_step_m,
+                }) => match drive_walk_to(
+                    &handles,
+                    &mut framer,
+                    target,
+                    arrive_epsilon,
+                    max_ticks,
+                    max_step_m,
+                )
+                .await
                 {
                     Some(response) => response,
                     None => return Ok(()), // socket closed mid-drive
@@ -1011,10 +1051,11 @@ mod dev_control {
         target: [f64; 3],
         arrive_epsilon: f64,
         max_ticks: u64,
+        max_step_m: f64,
     ) -> Option<DevResponse> {
         let target = DVec3::from_array(target);
         drive_closed_loop(handles, framer, max_ticks, move |pos, orient| {
-            let step = nav::walk_to(pos, orient, target, arrive_epsilon);
+            let step = nav::walk_to(pos, orient, target, arrive_epsilon, max_step_m);
             LoopStep {
                 done: step.arrived,
                 action: step.action(),

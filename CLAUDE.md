@@ -42,6 +42,58 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 6. **HR6 agent-operable E2E** — client ships the `dev-control` harness (`vdctl`): input
    injection at the input-resource seam, wgpu readback screenshots/video, `runs/` manifests.
 
+## Standing laws (owner-stated; SAME WEIGHT as HR1–HR6; breaking one is a defect)
+
+Each of these was stated by the owner after a live defect. They are not preferences.
+
+7. **SL1 — ONLY THE PARENT KNOWS POSITIONS.** Every realm is centred on itself. A realm never
+   knows, stores, derives or is told its own position, velocity, orientation or spin — not even as
+   a zero field, because a field's PRESENCE is the leak. A parent authors its direct children's
+   placements in its own frame. Conversions ALWAYS happen in the parent: going down it subtracts
+   before shipping; going up the child ships its own-frame pose and the parent adds. Never fold a
+   realm's absolute from the root.
+8. **SL2 — NO OCCUPANT POSE CROSSES A REALM BOUNDARY.** Not up, not down, not for culling, warming,
+   or rendering. The realm you are INSIDE warms what comes next, from occupants it already holds;
+   travel is always out into the shared parent and in again, never sibling-to-sibling. Liveness
+   needs one bit per level: a live child keeps its parent alive.
+9. **SL3 — A REALM DRAWS ITSELF.** The parent authors WHERE a realm is; the realm itself authors
+   HOW IT LOOKS (extent, surface, detail, eventually meshes at a detail level it chooses). A
+   parent's per-child message carries a PLACEMENT and nothing else, and must shrink toward that,
+   never grow. A realm that is not running cannot be drawn — which is WHY visibility is the
+   spin-up trigger.
+10. **SL4 — PHYSICS AND RE-HOME ARE SEPARATE MACHINERY, one-way.** Physics (orbits, gravity,
+    thrust, drag — a per-realm capability) produces A PLACEMENT: where each child is, in my frame,
+    at this tick. Re-home/containment/hand-off CONSUMES placements and may never ask HOW a thing
+    moves. No orbit/gravity/thrust symbol on the crossing path — a ship, a station, a moon and a
+    rock cross by identical code because that code cannot tell them apart. A "does this child have
+    orbital elements?" test inside a placement lookup is STILL a specific and is forbidden. A
+    static flag may decide WHETHER TO RECOMPUTE, never WHAT ANYONE READS, and is derived from
+    whether a child actually has motion — never declared per shard kind. Enforce structurally (a
+    module/crate dependency rule), not by care.
+11. **SL5 — ONE WORLD.** One universe, generated from the seed, used by the game AND every test
+    including e2e. No scale knob, no preset, no reduced or test-only variant, no second generator.
+    Numbers change on THE world; a variant is never created. (True astronomical scale + generated
+    stations/areas + the galaxy cell lattice are owed changes to this one world.)
+12. **SL7 — AN OCCUPIED REALM IS ITS OWN OCCUPANTS' PROXY, AT ITS PARENT'S SCALE.** How area-of-
+    interest works at any nesting depth without a pose ever crossing, and without anything central:
+    - LIVENESS, decided by the realm itself, looking only at itself and ONE level down: *do I hold
+      occupants? do I have a live direct child?* Either ⇒ stay active. Neither ⇒ shut down after
+      the cooldown. A realm never reaches upward and has zero control over its parent.
+    - AREA OF INTEREST, decided by the PARENT, never by the realm about itself: for each of MY
+      direct children, is it within the interest of an occupant I hold, or of an OCCUPIED CHILD
+      treated at the placement I authored for it? Yes ⇒ demand it stays alive.
+    - So an occupied child stands in for whoever is inside it. The error is bounded by the child's
+      own size, which is exactly the resolution at which the parent's decision is meaningful —
+      a child is small relative to its parent, which is what nesting means.
+    - The parent also authors its children's VELOCITY, so warming-ahead needs nothing told to it.
+    - What crosses: ONE BIT of occupancy, upward, which already crosses today (a sealed parent
+      cannot see inside a child, so the child reports its own emptiness). Nothing else. No occupant
+      pose, no entity set, no central assembly of a global picture, no depth or hop count anywhere.
+13. **SL6 — ASK BEFORE NEW DATA CROSSES A REALM BOUNDARY, and before adding a wire arm.** Default
+    NO. Find the local formulation first; there usually is one. State what data, from which realm
+    to which, why the receiver cannot compute it from what it legitimately holds, and what doing
+    without costs.
+
 ## Workspace
 
 ```

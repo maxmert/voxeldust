@@ -102,6 +102,25 @@ opt-level = 2
 [profile.dev.package.fixedbitset]
 opt-level = 2
 
+# DEPENDENCIES CARRY NO DEBUG INFO in dev builds. Bevy's DWARF is the single largest
+# input to both the client bin's final LINK (the dominant cost of an edit-rebuild-run
+# cycle once the graph is warm) and to the size of target/ (~70 GB on an 89%-full disk).
+# Nobody sets a breakpoint inside wgpu; the renderer is proven by the HR6 visual gates,
+# not a debugger. WORKSPACE CRATES ARE UNAFFECTED — the `"*"` glob applies only to
+# dependencies, so our own code keeps full debuginfo where backtraces are actually read.
+# The named `opt-level` overrides above still apply (a named package entry wins over the
+# glob per key, so bevy_ecs keeps opt-level 2 AND loses its debuginfo).
+# TRADE: a panic raised INSIDE bevy/wgpu now yields a frame with no line number. Flip
+# this block to `debug = "line-tables-only"` for the session if you ever need that.
+[profile.dev.package."*"]
+debug = false
+
+# Build scripts + proc macros are NOT covered by the `"*"` glob (they compile under the
+# build-override profile). They are pure build-time machinery — debuginfo on them is
+# never read, and Bevy's graph carries a lot of them.
+[profile.dev.build-override]
+debug = false
+
 # NOTE: re-add `[profile.dev.package.noise] opt-level = 3` when terrain generation
 # lands (P4) — debug-profile noise is ~40x slower and unusable for terrain gen.
 

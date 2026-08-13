@@ -11,7 +11,7 @@ use vd_node::follower::{FollowerState, register_clock_follower};
 use vd_sim::capability::NodeKind;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    vd_bins::init_tracing();
     let env = EnvConfig::from_process_env();
     let local = env.node_id("VD_NODE_ID")?;
     // Cloud-ready k3d Slice 2: the footgun preflight + resolved D-3, BEFORE `boot_mesh_and_replay` (the
@@ -71,10 +71,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // of `main`): a CLOUD node of ANY role with `VD_DEMAND` set is REFUSED until per-node client-facing trust
     // exists (P7), because the source-blind demand route is a client-injectable spawn DoS on today's shared
     // cluster secret — so by the time control reaches here `VD_DEMAND` is only the on/off flag.
-    // `VD_UNIVERSE_SEED` is the SAME cluster seed the shard reads. The per-account STORED
-    // spawn poses REUSE 5f-3b's `resolve_spawn_poses` (the SAME `VD_SPAWN_POSES` map the shard admits at,
-    // so the gateway-DERIVED home coord and the shard-side admit pose agree). The forest is walk-scale (the
-    // P3 scope of `container_coord_at`; the visual/canonical lazy generator is the P4 owe).
+    // `VD_UNIVERSE_SEED` is the SAME cluster seed the shard reads. Where accounts appear is READ from the
+    // home registry below, never resolved: a home is a realm name plus a pose already measured from that
+    // realm's own centre, so the gateway hands the shard a number the shard can accept without converting
+    // anything, and nobody has to know where any realm sits.
     let demand_armed = vd_bins::parse_bool_env(&env, "VD_DEMAND")?;
     let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
     // The SAME three inputs the shard threads into its own world build, read from the SAME env keys, so the
@@ -83,7 +83,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let move_speed: f64 = env.parse("VD_SPEED")?;
     let time_multiplier = vd_bins::resolve_time_multiplier(&env)?;
     vd_bins::validate_tick_pair(tick_hz, tick_dt)?;
-    let spawn_poses = vd_bins::resolve_spawn_poses(&env)?;
     // RLM 5f-3d — the DYNAMIC-HOME ROUTE budget. The gateway holds a login in `AwaitingHomeRealm` while its
     // demanded home shard boots, re-seeding the demand on a backed-off cadence; both the cadence and the
     // bounded bootstrap TTL are DERIVED from the SAME `resolve_rlm_tuning(tick_hz, boot_p99, settle)` the
@@ -101,15 +100,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // THE WORLD, from the SAME scale the shards boot. This was hardcoded to walk-scale, so a visual-scale
     // cluster placed its logins by the geometry of a different universe than the one it then simulated.
+    // THE SAME world the shards build — not "the same function with whatever value each was handed",
+    // which is what this was and what a live cluster was measured doing wrong.
+    let universe = vd_bins::boot_world(universe_seed, move_speed * time_multiplier, tick_dt);
+    // WHERE ACCOUNTS APPEAR, resolved against that same world: a realm NAME plus a pose already measured
+    // from that realm's own centre. Nothing here descends anything.
+    let homes = vd_bins::resolve_homes(&env, &universe)?;
     let seed_injector = SeedInjectorConfig {
         armed: demand_armed,
-        world: vd_bins::boot_world(
-            vd_bins::resolve_universe_scale(&env)?,
-            universe_seed,
-            move_speed * time_multiplier,
-            tick_dt,
-        ),
-        spawn_poses,
+        world: universe,
+        homes,
         demand_ttl_ticks: rlm.demand_ttl_ticks,
         bootstrap_ttl_ticks: SeedInjectorConfig::bootstrap_ttl_from_rlm(
             rlm.launch_ttl_ticks,

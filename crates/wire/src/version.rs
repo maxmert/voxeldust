@@ -51,7 +51,71 @@ pub const PROTO_MAJOR: u16 = 1;
 /// additively carry that origin (`pin`/`pin_abs`/`anchor_epoch`). This MUST refuse a mismatched peer loudly:
 /// client and server are separate binaries, and a stale minor-6 client would compose an already-absolute pose
 /// and render every orbit twice — a teleport that grows with the orbit. Not optional (verifier JUMP-7).
-pub const PROTO_MINOR: u16 = 7;
+///
+/// minor 8 (the frame-anchored placement edge) appends `frame: FrameRef` to `RealmSnap` — the edge HEAD
+/// (the CHILD realm's own frame) next to the existing tail (`pose.frame`, the authoring parent's frame)
+/// and value. A struct FIELD append is NOT postcard-additive (see the module header above), so this is a
+/// FLAG DAY: a minor-7 decoder meeting a minor-8 realm datagram does not lose one field, it desyncs the
+/// rest of that row and every row after it. That is why minor 8 introduces [`PROTO_MINOR_FLOOR`] and
+/// [`ProtoVersion::negotiate`] REFUSES below it. It also discharges what minor 7 promised and never
+/// implemented: minor 7 changed position SEMANTICS with no shape change and said a mismatched peer must
+/// be refused loudly, but no refusal was ever written — so a stale client silently rendered every orbit
+/// twice instead of being told to update.
+///
+/// minor 8 also REMOVES `pin_abs` AND `anchor_epoch` from `RealmRegistry` and `RealmSceneDelta`. Those
+/// messages used to hand the client the pin realm's own absolute position so it could subtract it from
+/// every incoming position, plus a counter that bumped whenever that anchor moved. There are no absolute
+/// positions any more — no realm is entitled to know where it sits, so nothing can state one — and every
+/// position now arrives already measured from the centre of the realm it is being described to, each
+/// level's subtraction made by the parent that authored the placement. `pin_abs` is dropped rather than
+/// kept at zero: a field that must always be zero is an invitation to refill it, and refilling it would
+/// restore the double subtraction. `anchor_epoch` goes with it because an anchor epoch is only meaningful
+/// to a receiver that RE-DERIVES its scene when the anchor moves; this receiver derives nothing, reads
+/// neither field, and was shipped a hard-coded `0` at every emit site for its whole life. The remaining
+/// `pin` is kept: it NAMES a space and carries no number, which costs one enum tag and re-seeds nothing.
+/// Both removals ride the same flag day as the `RealmSnap` field append, so they need no separate floor.
+///
+/// THE DELIBERATE KEEP, recorded because it is the decision and not an oversight: `RealmSnap.frame` — the
+/// field that forced this floor — STAYS on the client-facing datagram even though no client reads it
+/// (`RealmView::on_realm_snapshot` reads `realm` and `pose`). The reason is that there is no separate
+/// client-facing datagram to keep it off: a `RealmSnapshotDatagram` travels parent→child as
+/// `InterShardFlow::RealmCascade` and the receiving level forwards those EXACT BYTES to its own gateway as
+/// `ShardToGateway::RealmFrame` without decoding them. A leaner client row would make the bottom level
+/// decode every row, strip a field and re-encode — the one thing a leaf is defined by not doing, and what
+/// its `cascade_rows_converted == 0` measures. The head is what the parent-to-parent hop uses to drop the
+/// recipient's own row (head == the child being shipped to) and it is not derivable from `realm`
+/// (`FrameRef::realm` is lossy). MEASURED price on the real type: 2 B per row for a `PlanetCentered` head,
+/// 3 B for an `AreaLocal` one at shipped-forest seeds, 21 B at full-width `u64` seeds — on rows bounded by
+/// MOVING DIRECT CHILDREN, tens, never by entities.
+/// If it is ever to leave the client lane, it leaves as a split row type with its own minor and its own
+/// flag day — not by being quietly dropped here.
+/// **9** appends `InterShardFlow::ShardRoster` — the orchestrator telling a router which nodes the
+/// ownership record shows holding a realm, so node class stops being inferred from a transfer's claim or
+/// asserted by the node itself. Purely a server↔server addition: no client-facing message changed, so the
+/// floor below does NOT move and every existing client negotiates exactly as before.
+/// **10** appends `InterShardFlow::ChildLive` (the SL7 occupancy bit, child→parent — Step 5 slice A)
+/// and `InterShardFlow::RealmObservation` (a live child's own authored rows, one hop up, for the parent
+/// to restate and re-fan — the "planets freeze when I exit the system" cure, owner-approved 2026-08-13).
+/// Purely server↔server additions again: no client-facing message changed, the floor does not move.
+/// **11** appends `InterShardFlow::RealmShapeObservation` (a live child's interior OUTLINES, one hop up
+/// — the STATIC half of the minor-10 observation lane, so a neighbour realm's interior gets scene boxes
+/// for the minor-10 rows to animate: the "approaching a star, its planets never appear" cure) and
+/// `InterShardFlow::ChildSceneSet` (the per-LIVE-CHILD rekey of the down-reflected sibling scene — the
+/// occupant-keyed `ProxySceneSet` stops being emitted; its `AccountId` leaves the wire). Purely
+/// server↔server again: the client keeps receiving the same `RealmSceneDelta`, the floor does not move.
+pub const PROTO_MINOR: u16 = 11;
+
+/// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
+/// refuses outright instead of negotiating down.
+///
+/// The sender-gates-new-variants rule makes a lower negotiated minor safe only while every change since
+/// is an APPENDED ENUM VARIANT the sender can withhold. Minor 8 is not that: it appended a FIELD to a
+/// struct that rides an unreliable datagram, and postcard is non-self-describing, so there is no gating
+/// a field out of a shape both ends must agree on byte-for-byte. A pre-8 peer therefore cannot be served
+/// at all, and the honest failure is a Close naming the floor rather than a stream that decodes into
+/// garbage. This is the protocol's first floor; raise it only alongside a change of the same kind, and
+/// say in the ledger above which change forced it.
+pub const PROTO_MINOR_FLOOR: u16 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -65,17 +129,44 @@ impl ProtoVersion {
         minor: PROTO_MINOR,
     };
 
-    /// Can we talk to a peer at `theirs`? Major must match; the conversation is then
-    /// conducted at the LOWER minor (the sender-gates-new-variants rule).
+    /// Can we talk to a peer at `theirs`? Major must match; the conversation is then conducted at the
+    /// LOWER minor (the sender-gates-new-variants rule) — but never below [`PROTO_MINOR_FLOOR`].
+    ///
+    /// The floor is checked AFTER the min, so it catches BOTH directions: an old peer talking to this
+    /// build, and this build talking to an old peer. Negotiating down past a field-append would leave
+    /// both ends encoding a shape the other cannot parse, and postcard would not report it as a bad
+    /// field — it would mis-frame the rest of the stream. Refusing is the only honest answer.
     #[must_use]
     pub fn negotiate(self, theirs: ProtoVersion) -> Option<ProtoVersion> {
         if self.major != theirs.major {
             return None;
         }
+        let minor = self.minor.min(theirs.minor);
+        if minor < PROTO_MINOR_FLOOR {
+            return None;
+        }
         Some(ProtoVersion {
             major: self.major,
-            minor: self.minor.min(theirs.minor),
+            minor,
         })
+    }
+
+    /// Why [`negotiate`](Self::negotiate) refused `theirs` — the exact sentence a refused peer is
+    /// Closed with. Two causes, and they need different words: a major mismatch means "different
+    /// protocol generation, this build cannot help you"; a minor below the floor means "same
+    /// generation, but your positions would be framed wrong — update". Reported as one message they
+    /// look like the same fault, and the operator chases the wrong one. The floor sentence is BUILT from
+    /// [`PROTO_MINOR_FLOOR`] rather than spelled out, so raising the floor cannot leave the message
+    /// quoting the old number. Cold path (one refused connection), so the allocation is free.
+    #[must_use]
+    pub fn refusal_reason(self, theirs: ProtoVersion) -> String {
+        if self.major != theirs.major {
+            "incompatible protocol major version".to_owned()
+        } else {
+            format!(
+                "protocol minor below the floor ({PROTO_MINOR_FLOOR}): positions are frame-anchored from v{PROTO_MAJOR}.{PROTO_MINOR_FLOOR}"
+            )
+        }
     }
 }
 
@@ -91,10 +182,30 @@ mod tests {
 
     #[test]
     fn same_major_negotiates_to_lower_minor() {
-        let a = ProtoVersion { major: 1, minor: 3 };
-        let b = ProtoVersion { major: 1, minor: 5 };
-        assert_eq!(a.negotiate(b), Some(ProtoVersion { major: 1, minor: 3 }));
-        assert_eq!(b.negotiate(a), Some(ProtoVersion { major: 1, minor: 3 }));
+        // The min still wins — but only ABOVE the floor, so this reads at floor+3 / floor+5 rather
+        // than the old 3 / 5 (both of which are now refused outright).
+        let a = ProtoVersion {
+            major: 1,
+            minor: PROTO_MINOR_FLOOR + 3,
+        };
+        let b = ProtoVersion {
+            major: 1,
+            minor: PROTO_MINOR_FLOOR + 5,
+        };
+        assert_eq!(
+            a.negotiate(b),
+            Some(ProtoVersion {
+                major: 1,
+                minor: PROTO_MINOR_FLOOR + 3
+            })
+        );
+        assert_eq!(
+            b.negotiate(a),
+            Some(ProtoVersion {
+                major: 1,
+                minor: PROTO_MINOR_FLOOR + 3
+            })
+        );
     }
 
     #[test]
@@ -105,30 +216,214 @@ mod tests {
     }
 
     #[test]
+    fn a_minor_below_the_floor_is_refused_in_both_directions_with_its_own_reason() {
+        // Minor 8 appended a FIELD to `RealmSnap`. postcard cannot skip it and a sender cannot gate it
+        // out, so a pre-8 peer is not served at a lower minor — it is refused. Before the floor existed
+        // this negotiated down happily and the peer went on to mis-frame every realm datagram it decoded.
+        let ours = ProtoVersion::CURRENT;
+        let below = ProtoVersion {
+            major: PROTO_MAJOR,
+            minor: PROTO_MINOR_FLOOR - 1,
+        };
+        assert_eq!(
+            ours.negotiate(below),
+            None,
+            "an old peer offering us minor 7"
+        );
+        assert_eq!(
+            below.negotiate(ours),
+            None,
+            "and the same seen from its side"
+        );
+        // The refusal SENTENCE distinguishes the two causes; reported identically they send an operator
+        // hunting a version generation mismatch when the real answer is "your client is stale".
+        assert_eq!(
+            ours.refusal_reason(below),
+            "protocol minor below the floor (8): positions are frame-anchored from v1.8"
+        );
+        assert_eq!(
+            ours.refusal_reason(ProtoVersion {
+                major: PROTO_MAJOR + 1,
+                minor: PROTO_MINOR,
+            }),
+            "incompatible protocol major version"
+        );
+    }
+
+    #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 7,
-            "minor 7 made positions root-absolute + server-told the render origin (floating-origin A5); minor 6 appended RealmSceneDelta, minor 5 RealmRegistry, minor 4 ShardPresence, minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate"
+            PROTO_MINOR, 11,
+            "minor 11 appended `InterShardFlow::RealmShapeObservation` (a live child's interior OUTLINES \
+             one hop up — the static half of the observation lane, the approaching-star invisible-planets \
+             cure) and `InterShardFlow::ChildSceneSet` (the per-live-child rekey of the down-reflected \
+             sibling scene; the occupant-keyed ProxySceneSet stops being emitted). \
+             SERVER-TO-SERVER ONLY again, so the floor stays where it is; minor 10 appended \
+             `InterShardFlow::ChildLive` (the SL7 occupancy bit, child→parent, Step 5 \
+             slice A) and `InterShardFlow::RealmObservation` (a live child's own authored rows one hop up, \
+             for the parent to restate and re-fan — the exit-the-system frozen-planets cure); minor 9 appended \
+             `InterShardFlow::ShardRoster` (which nodes the ownership record shows holding a realm); minor 8 appended the edge HEAD (`RealmSnap.frame`) and KEEPS it on the client lane (the cascade bytes ARE the client feed, re-fanned unopened), dropped BOTH the render-origin `pin_abs` and the re-anchor `anchor_epoch` from the scene messages (every position arrives measured from the realm it is described to, and nothing downstream re-derives), and, because a field append is not postcard-additive, introduced PROTO_MINOR_FLOOR; minor 7 made positions root-absolute + server-told the render origin (floating-origin A5); minor 6 appended RealmSceneDelta, minor 5 RealmRegistry, minor 4 ShardPresence, minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate"
+        );
+        assert_eq!(
+            PROTO_MINOR_FLOOR, 8,
+            "THEY HAVE NOW PARTED COMPANY, exactly as the previous version of this assertion predicted: \
+             minor 9 appends a VARIANT on a server-to-server arm, so a minor-8 client is fully correct \
+             and must not be refused. The floor tracks the last CLIENT-VISIBLE break — the minor-8 field \
+             append — not every bump. Raising it here would turn an internal addition into a flag day for \
+             every client, which is the opposite of what an append-only wire is for."
         );
         assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.7");
-        // Sender-gates-variants: talking to an older minor-1 peer negotiates DOWN to
-        // minor 1, so the gateway withholds the minor-2 OwnEntity variant (falling back to
-        // the retained-ghost/AuthorityChanged path). An even-older minor-0 peer negotiates
-        // down to minor 0, withholding BOTH UniverseRate and OwnEntity.
-        let old1 = ProtoVersion { major: 1, minor: 1 };
-        assert_eq!(
-            ProtoVersion::CURRENT.negotiate(old1),
-            Some(ProtoVersion { major: 1, minor: 1 })
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.11");
+        // These three USED to negotiate down and be welcomed (minor 7 fully, minor 1 without the
+        // minor-2 OwnEntity, minor 0 without that AND UniverseRate). They are now refused: the
+        // sender-gates-variants rule only covers appended VARIANTS, and minor 8 appended a FIELD.
+        // This flip IS the proof the floor is live — asserting `Some` here is what shipped a stale
+        // client a `RealmSnap` stream it would decode into garbage.
+        for stale in [7u16, 1, 0] {
+            assert_eq!(
+                ProtoVersion::CURRENT.negotiate(ProtoVersion {
+                    major: 1,
+                    minor: stale
+                }),
+                None,
+                "a minor-{stale} peer is below the floor"
+            );
+        }
+    }
+
+    /// THE CONTRACT MAY NOT NAME THE ROUTER AND A CONVERSION IN ONE BREATH.
+    ///
+    /// This crate's doc comments ARE the wire specification — the last three model changes were each
+    /// first believed because a comment said so. `RealmShape::center` used to define itself by WHERE its
+    /// value was re-expressed and by WHICH party did it — naming the router as that party in the same
+    /// sentence — which gave one field two meanings keyed on sender and re-seeded the router-composes
+    /// model in every reader. Deleting that sentence is not enough; nothing stopped it coming back.
+    ///
+    /// The rule is deliberately blunt and polarity-blind: no doc line in `src/` may mention the gateway AND
+    /// a conversion in the same breath, not even to deny it. The wire contract describes WHAT a field means
+    /// and who states it; a router's relationship to arithmetic is the router's own documentation. Scanning
+    /// the DIRECTORY rather than a fixed include list means a file added later is covered too.
+    /// The classifier, kept apart from the scan so BOTH its answers are exercised by a named example
+    /// rather than only by whatever happens to be in the tree (a green scan exercises the "no" answer
+    /// alone, which would leave the "yes" answer — the one that has to work — never run).
+    fn names_the_router_as_a_converter(line: &str) -> bool {
+        // Affirmative or negated, singular or plural — the point is that the two ideas never share a line.
+        // Stems, not whole words, and this matters: "convert" does NOT contain "conversion", so a list of
+        // whole verbs let the exact sentence that started all this through. Found by the positive example
+        // below failing, not by reading the list.
+        const CONVERSION: [&str; 8] = [
+            "conver",
+            "compos",
+            "re-express",
+            "rewrit",
+            "restat",
+            "subtract",
+            "pin space",
+            "pin-space",
+        ];
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("///") && !trimmed.starts_with("//!") {
+            return false;
+        }
+        let lower = line.to_lowercase();
+        if !lower.contains("gateway") {
+            return false;
+        }
+        CONVERSION.iter().any(|w| lower.contains(w))
+    }
+
+    #[test]
+    fn no_doc_line_in_this_crate_names_the_gateway_as_a_converter() {
+        // Both answers, on named examples. The second is a REAL line from `ShardToGateway::Frame` — the
+        // sentence this whole run's acceptance rests on — so the rule provably does not forbid the
+        // contract's own truthful statement about the router.
+        assert!(names_the_router_as_a_converter(
+            "/// the gateway performs that conversion with the SAME walk"
+        ));
+        assert!(!names_the_router_as_a_converter(
+            "    /// at byte level, and forwards. It never decodes the payload."
+        ));
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        let mut stack = vec![src.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("the crate's own src/ is readable") {
+                let path = entry.expect("a readable dir entry").path();
+                // Everything under src/ is source; recursing rather than listing means a module added
+                // later (or a new `seams/` sibling) is scanned without anyone remembering to add it.
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        // Non-vacuity: a scan that found nothing would pass for the wrong reason forever. (A plain
+        // literal message — an expression inside a passing assert's message is a region no run ever
+        // evaluates, HR5.)
+        assert!(
+            files.len() >= 5,
+            "the scan found almost no source files — it is measuring nothing"
         );
-        let old0 = ProtoVersion { major: 1, minor: 0 };
+        let offences: Vec<String> = files.iter().flat_map(|p| scan_file(p)).collect();
         assert_eq!(
-            ProtoVersion::CURRENT.negotiate(old0),
-            Some(ProtoVersion { major: 1, minor: 0 })
+            offences,
+            Vec::<String>::new(),
+            "the wire contract names the gateway alongside a conversion. Say what the FIELD means and \
+             who states it; where a router does or does not do arithmetic belongs in the router's own docs"
         );
+    }
+
+    /// One offence, formatted — the shape the scan reports in, exercised by a NAMED example so a
+    /// clean tree (where the scan loop pushes nothing) still covers the formatter.
+    fn offence_line(path: &std::path::Path, n: usize, line: &str) -> String {
+        format!(
+            "{}:{}: {}",
+            path.file_name().expect("a named file").to_string_lossy(),
+            n + 1,
+            line.trim()
+        )
+    }
+
+    /// Every offence of ONE file — the scan's per-file body, extracted so a manufactured guilty file
+    /// covers the offence path a clean tree can never take.
+    fn scan_file(path: &std::path::Path) -> Vec<String> {
+        let text = std::fs::read_to_string(path).expect("a readable source file");
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| names_the_router_as_a_converter(line))
+            .map(|(n, line)| offence_line(path, n, line))
+            .collect()
+    }
+
+    #[test]
+    fn the_offence_report_names_file_one_based_line_and_trimmed_text() {
+        assert_eq!(
+            offence_line(
+                std::path::Path::new("src/channels.rs"),
+                3,
+                "  guilty line  "
+            ),
+            "channels.rs:4: guilty line",
+        );
+        // The per-file scan, against a manufactured GUILTY file — the arm a clean tree cannot take.
+        let dir = std::env::temp_dir().join(format!("vd-wire-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let guilty = dir.join("guilty.rs");
+        std::fs::write(
+            &guilty,
+            "fn ok() {}\n/// the gateway converts every centre it relays\n",
+        )
+        .expect("write");
+        assert_eq!(
+            scan_file(&guilty),
+            vec!["guilty.rs:2: /// the gateway converts every centre it relays".to_owned()],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

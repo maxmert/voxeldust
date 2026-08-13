@@ -2843,6 +2843,49 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 
 ---
 
+### D-48 🟥 Nothing we write to disk carries a FORMAT version, and a shipped saga's PHASE SET cannot evolve — a code change that alters the persisted snapshot has no defined migration path
+- **What's missing:** the durable records are postcard-encoded values (`SagaSnapshot`, `OwnerRecord`, per-batch
+  `BatchGo`, `Tombstone`, `Clock`) under 1-byte-tagged `StoreKey`s, and **no format version exists anywhere** —
+  `grep` for `WAL_VERSION`/`STORE_VERSION`/`SCHEMA_VERSION` across `crates/` returns nothing. `TRANSFER_n`
+  (`wire/src/intershard.rs`) is the WIRE version and says nothing about the store. Two distinct consequences,
+  only the first of which is presently ledgered (as D-6's owed item #3, "WAL version+Tombstone"):
+  1. **Format.** Change a field in `SagaSnapshot`, redeploy over an existing store, and rehydrate decodes
+     postcard bytes against the wrong shape. Decode-to-`Default` is BANNED for Durable kinds, so the only
+     honest outcome is a LOUD REFUSAL — but nothing today *enforces* which outcome you get.
+  2. **Phase evolution (no home until now).** Recovery re-hydrates a QUIESCENT PHASE SNAPSHOT and re-drives it
+     through the existing per-phase `Timeout` arms. If a later slice inserts, removes, renumbers or reorders a
+     saga phase, an in-flight saga persisted under the OLD phase set has no defined meaning to the new binary.
+     This is not a wire problem (one process writes and reads it) and no version floor covers it. It is
+     invisible today only because we have never rolled a code change over a non-empty store with transfers in
+     flight — i.e. the first rolling redeploy is the first time it can bite.
+- **Changes to implement:**
+  1. A `StoreFormat` stamp (its own `StoreKey`) written once at init and verified on every `RedbStore::open` /
+     `rehydrate`. Mismatch = loud refusal — never a genesis, never a best-effort decode.
+  2. Per-family migration at rehydrate: read the old shape, convert **field-by-field**, write the new. NEVER
+     re-use bytes across versions and never a "same-bytes" shortcut, even when two versions look identical
+     today (the discipline in `scripts/rivet_codebase_analysis_20260811.md` §7.7). Add a writer-N+1/reader-N
+     test in the same shape as the `kind_blob_evolution` gate owed under D-31.
+  3. **The phase-evolution decision** — either (a) durable steps addressed by a stable, insertion-tolerant
+     LOCATION plus a per-step VERSION, so a step can be inserted into or removed from a saga that is already
+     mid-flight and replay detects divergence loudly (reference: Rivet's gasoline ordinate scheme —
+     `docs-internal/engine/GASOLINE/WORKFLOW_HISTORY.md` + `history/cursor.rs`, coordinates `{1}`, `{1,4}`,
+     `{0.1}`, `{2,11,4.1}` with a `HistoryDiverged` error; ranked #1 harvest item in
+     `scripts/rivet_codebase_analysis_20260811.md` §7.1), or (b) a WRITTEN policy that all in-flight transfers
+     are DRAINED before any deploy that changes the phase set. (b) is legitimate and much cheaper — it makes
+     the constraint operational rather than structural — but it must then be enforced by the deploy procedure,
+     not by hope, and it forecloses hot-patching a wedged transfer.
+  4. The `Tombstone` half already named in D-6 owed #3.
+- **Where:** `crates/io-prod/src/store.rs` (`RedbStore::open`); `crates/node/src/saga_runtime.rs`
+  (`SagaSnapshot`, the `commit_result` write-back, `rehydrate`); the `Store` seam + `StoreKey` in
+  `crates/sim/src/io`; and the deploy procedure itself for option 3(b).
+- **When:** item 1 lands **with the D-47 deploy preconditions** — it is the cheap half and it converts an
+  undefined decode into a refusal. Items 2–3 **before the first rolling redeploy over a live store**. Not
+  before: at in-process scale every store is fresh, so this is genuinely inert today.
+- **Source:** the durability audit of 2026-08-11 (grep-verified absence of a store format version), sharpened
+  by the Rivet codebase comparison. Extends D-6 owed item #3 with the phase-evolution half, which had no home.
+
+---
+
 ## CLOUD / DEPLOY (gated on a deploy-readiness signal from the user — no CI yet)
 
 ### D-12 🟥 Client reachability: static address book / gateway-dials-client (CA-1)
@@ -2947,6 +2990,60 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   but now a ZERO-mechanism-change move (co-hosting is pure placement; the saga is already uniform).
 - **Source:** dual-shard cluster design + adversary `scripts/dual_shard_cluster_design_adversary.md` (M-2);
   S5b is the acceptance capstone of the generic-coordinate-rehome arc.
+
+---
+
+### D-47 🟥 Durable state survives a process crash but NOT the loss of its HOST — one local redb file, no replication, no backup, and a volume-less rescheduled pod is indistinguishable from a legitimate first boot
+- **What IS proven (so this entry is not mistaken for the crash gap, which is closed):** `RedbStore` commits one
+  redb `WriteTransaction` at redb's **default** durability — verified in the dependency source, `redb-2.6.3`
+  `src/transactions.rs:835` sets `InternalDurability::Immediate` ("guaranteed to be persistent as soon as
+  `commit` returns"), and we never lower it. The off-tick writer bumps `last_durable` ONLY after that fsync
+  (Release), the bin gates effect egress on `is_durable_through(seq)`, and depth-1 commit-blocks-on-prior bounds
+  crash-loss to ≤1 batch — proven by a real `kill -9` parked in the submitted-but-pre-fsync window
+  (`crates/bins/tests/orchestrator_crash.rs`, sentinel-key writer park + a writer-written marker file), with an
+  anti-theater FRESH-store control. D-6 covers this and is silent on everything below.
+- **What's missing:** any durability beyond that ONE disk. `grep -i 'replica|replication|raft|paxos|quorum'`
+  over `crates/` returns no implementation. Three consequences:
+  1. **Permanent host/disk loss is unrecoverable.** Gone with it: every in-flight saga WAL, the durable
+     **directory head — THE commit point** — and the clock ceiling. The saga WAL tolerates re-drive; a lost
+     directory head cannot be reconstructed from anything else in the system.
+  2. **★ A volume-less pod looks exactly like a first boot.** `RedbStore::open` already refuses to treat a
+     NON-empty store as genesis (the `wf_66cb8f06` cure), but an ABSENT store legitimately IS genesis on first
+     init — so the dangerous case is indistinguishable from the safe one *by construction*. Under k3d/k8s a pod
+     rescheduled onto another node without its volume boots clean, and our own anti-theater control
+     (`p3_orchestrator_kill_9_without_a_durable_store_recovers_nothing`) states precisely what that means:
+     nothing recovers, silently, and the rebuilt orchestrator treats the reset clock as legitimate.
+  3. **No backup / point-in-time restore**, so operator error or a corrupt file has no recovery path at all.
+- **Changes to implement, in order:**
+  1. **The deploy precondition (minimum, before ANY multi-node deploy).** The store must live on a durable
+     volume whose identity is PINNED to the orchestrator identity, and boot must refuse to run as genesis
+     unless explicitly authorized: (a) a k8s StatefulSet with a PersistentVolumeClaim — never `emptyDir`,
+     never `hostPath`, never `/tmp` — one PVC per orchestrator identity; (b) a **store-identity stamp**
+     (cluster id + orchestrator id + universe epoch + the D-48 store format version) written at init and
+     verified on every open, mismatch = LOUD REFUSAL to boot; (c) an explicit opt-in
+     (`VD_STORE_ALLOW_GENESIS`, or the existing durable-root allow-list) REQUIRED for a legitimately empty
+     first boot, so "no volume attached" can never masquerade as one. This converts silent data loss into a
+     refusal — the house rule: **a refusal is never a loss.**
+  2. **Backup + restore:** a redb snapshot/copy hook, a restore path, and a restore test. Evaluate redb's
+     two-phase-commit ("Paranoid") durability and savepoints here — a knob we currently do not use.
+  3. **Replication (the proper solution).** Only the **directory family** strictly needs it (see consequence 1).
+     The `Store` seam already supports separate families/files (PLAN.md:126), so the directory family can move
+     to a replicated backend behind the SAME frozen seam with **no change in sim/node**. Backends to
+     investigate JOINTLY (investigate-libraries-together — do not adopt unilaterally). Reference read: Rivet's
+     Epoxy per-key Paxos, whose immutable-value design buys local reads —
+     `scripts/rivet_codebase_analysis_20260811.md` §4 and §7.2, **including the finding that their own scheme
+     cannot RELOCATE a key yet** (their "reservation chains" future work), which is why it is a reference and
+     not a drop-in for a directory whose whole job is relocation.
+- **Where:** `crates/io-prod/src/store.rs` (`RedbStore::open`, `apply_batch`, `DurabilityHandle`);
+  `crates/bins/src/bin/orchestrator.rs` (the `VD_STORE_PATH` wiring + the boot precondition warn); the
+  k3d/deploy packaging (task #123).
+- **When:** change 1 is a **HARD precondition of the first real multi-node deploy** (task #123 / D-44), sitting
+  alongside the existing at-most-once-transport precondition in D-6 — the boot warn should name both until they
+  land. Change 2 with the same slice. Change 3 on the same deploy-readiness signal and no earlier: at
+  in-process / single-host scale it is genuinely inert.
+- **Source:** the durability audit of 2026-08-11 (all facts measured from the tree this session), prompted by
+  the Rivet comparison in `scripts/rivet_codebase_analysis_20260811.md` §5. **Not previously ledgered** — D-6
+  proves crash durability and says nothing about host loss, so this was a silent gap in the registry itself.
 
 ---
 
@@ -3206,6 +3303,16 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **RULING — THE GALAXY IS A LATTICE OF CELL-REALMS, decided 2026-08-05, NOT deferred.** Each cell is an ordinary realm with its own origin, so coordinates are always local and slow movement stays smooth anywhere; crossing between cells is an ORDINARY crossing on the existing machinery — no new concept, no warp code path. This also answers the occupancy problem (a single galaxy realm would put every inter-system traveller on one server) — both reasons converge on the same answer.
   - **THE SIZING TENSION, unresolved and owed to the design pass:** a cell must be large enough to CONTAIN a star system (needs a half-extent ≳ 1e13 m, since the system's own sphere must nest inside it per the existing boot fence) yet small enough that local magnitudes stay under ~9e12 m for a smooth space-walk. Those two bounds nearly touch. Centring each system in its own cell makes it work with a few millimetres of quantisation at the cell corners (~3.5 mm against a ~20 mm per-tick walk step) — tight but probably acceptable. **Do not improvise this; it wants a design pass with the numbers in front of it.** The planted coarse+fine coordinate type STAYS in the wire as the cheaper alternative fix if subdivision proves awkward — it costs nothing to leave in place and removing it forecloses an option.
   - **WHEN:** the decision binds NOW (nothing may assume the galaxy is singular; addressing stays on the full lineage path). The BUILD waits for something to fly — there is no ship, no EVA and no warp yet, so building it now would be machinery with no user, which is precisely the mistake the deleted "received seat" slice made.
+
+### D-RLM-17 🟩 A CO-HOSTED occupied realm draws LIVE at one point — closed by the cross-lane space alignment (crossing-render slice, 2026-08-12)
+- **WHAT was owed, briefly:** a realm co-hosted on its parent's shard (an area on its planet's shard) had no drawn-position lane while occupied — the entity lift hid the delivered flip, and the realm lane (grouped by the dot's STORED frame) either starved the observer or spoke a different space than the lifted pose.
+- **HOW it closed, same slice:** the realm lane's direct-emit observers are now grouped by the SAME space the entity lift delivers (own frame for a dot standing in a placeable child), so a co-hosted stander receives its realm's row live, in the one space its own pose arrives in — the row is no longer 'the recipient's own row' in that group, so SL3's own-row drop does not starve it. Measured: `the_box_and_the_thing_standing_in_it_draw_at_one_point` half (2) — the OCCUPIED area's box keeps turning while stood upon and draws at the occupant, gap 0.
+- **What remains (the OWN-shard case):** a realm with its OWN shard flips the delivered frame at the crossing; the client's one-space rule forgets the old space and the realm draws from its streamed outline at the occupant's origin — pinned in vd-client's crossing-flip tests. The flush now converts along the full hosted chain (ascent + descent, each link in its authoring parent's context, authorship-constrained), which also cured the pre-existing co-host strand the §4i anchor fix left (`crossing_same_node_e2e`, 3/3 green again).
+
+### D-RLM-16 🟩 The spin-up-ahead scenario REWRITTEN against the multi-star ring — green (Step 5 slices B+C, 2026-08-13)
+- **WHAT was owed, briefly:** a truthful spin-up-AHEAD gate. The old scenario presumed an outer planet CULLED at login; 32fcc5c's wider visibility (8°→1.5°) made every planet of the home system visible at login, so the premise was unsatisfiable inside one system of THE world and the test sat expected-red.
+- **HOW it closed:** rewritten (never deleted — the standing scenario law) as `a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_is_reaped` (`crates/bins/tests/rlm_demand_login.rs`): the genuinely culled realm is the NEIGHBOUR STAR ~12 km down the ring (asleep by construction — the ring is 1.05× the wake radius). The occupant exits the home system, parks INSIDE the neighbour's wake band ~10 km outside its shell, and the gate asserts (1) the neighbour spins up AHEAD (spins climb above the settled login baseline), (2) its planet BOXES stream into the drawn scene (slice C's up-shape mirror), (3) those boxes MOVE (the up-rows lane animating them at full orbit speed) — all while `location` never leaves the between-space; the return leg asserts the vacated neighbour reaps BEHIND (above the settled reap baseline, so the home system's own outbound reaps cannot satisfy it). First green 2026-08-13, ~31 s. It doubles as the owner-flown gap's gate ("approaching another star system, its planets were not loading").
+- **The load-bearing fix it measured:** the parent-resolution HeadRead sat BELOW `aoi_decide`'s zero-occupant early-return, so a realm nobody had ever entered could never resolve its parent — its whole up-observation lane (rows + outlines) stayed structurally mute. Moved above the Empty return; the exited-system case only ever worked because the parent node had been resolved while the realm was occupied and stayed cached.
 
 ### D-RLM-15 🟥 A REALM-keyed transfer lock has no producer — the retired teardown clause must return WITH one (arrival-race slice 9c, 2026-08-05; design `scripts/arrival_race_8_9_design.md`)
 - **WHAT is deferred:** a directory `in_transfer` lock taken on a **Realm** key, and the teardown clause that reads it. The clause existed in `teardown_ready` from RLM Step 3 and was believed to shield a realm somebody was being handed into. It never could: `lock_transfer` is only ever called on the transfer SUBJECT's key (an Entity), `locks_directory_key(Transient) == false` takes no lock at all, and `commit_cas` clears even the subject's lock at the commit point — so on a Realm head the flag is permanently `None`, the clause is permanently true, and it shielded nothing. The unit test that proved it load-bearing hand-built a `TeardownFacts { in_transfer: true }` the running system cannot produce. **DELETED in slice 9c** rather than left as a comment correction, so nobody reasons from it again.

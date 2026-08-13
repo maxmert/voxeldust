@@ -48,8 +48,8 @@ use vd_client_harness::verdict::{
     dot_pixels_within_box_region, expected_box, projected_point_aabb,
 };
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
-use vd_core::glam::{DVec3, I64Vec3};
-use vd_core::pose::{FrameRef, LatticePos, RealmId};
+use vd_core::glam::DVec3;
+use vd_core::pose::{FrameRef, RealmId};
 use vd_devproto::{DevPortScheme, DevRequest, DevResponse, WORKTREE_SLOT_CEILING};
 
 const CLIENT_NAME: &str = "g-render-crossing";
@@ -182,32 +182,34 @@ fn own_pos(state: &vd_devproto::DevState) -> DVec3 {
 
 /// The box's projected screen rectangle via the SAME `fit_camera_to_scene` camera the render framed
 /// with — the box center + its bounding-sphere radius projected through the Tier-A `CaptureCamera`.
-fn box_screen_aabb(
-    scene: &RealmScene,
-    camera: &CaptureCamera,
-    realm: RealmId,
-    origin: LatticePos,
-) -> ScreenAabb {
+fn box_screen_aabb(scene: &RealmScene, camera: &CaptureCamera, realm: RealmId) -> ScreenAabb {
     let rbox = scene.get(realm).expect("box in scene");
     let radius = match rbox.shape {
         BoxShape::Box { half } => half.length(),
         BoxShape::Sphere { r } => r,
     };
-    // The centre reduced against the client's render origin through the ONE chokepoint — the same
-    // space the pixels are in. This test never spells the subtraction itself.
-    projected_point_aabb(camera, rbox.draw_center(origin), radius)
+    // The centre flattened through the ONE chokepoint — the same space the pixels are in. There is one
+    // space now: the server converts into the session's pin before shipping.
+    projected_point_aabb(camera, rbox.draw_center(), radius)
         .expect("the box center projects in front of the camera")
 }
 
-/// The render origin THIS state sample was expressed in: the space its reported positions, and the
-/// pixels drawn at that moment, both live in. Taken from the sample itself rather than fetched
-/// separately, so a position can never be paired with an origin from a different instant.
-fn state_origin(state: &vd_devproto::DevState) -> LatticePos {
-    let o = state.render_origin;
-    LatticePos::at(
-        I64Vec3::new(o.cell[0], o.cell[1], o.cell[2]),
-        DVec3::new(o.offset[0], o.offset[1], o.offset[2]),
-    )
+/// THE SCENE THE SESSION IS DRAWN IN, as the CLIENT itself reports drawing it: every realm box it is
+/// currently rendering, keyed by its realm label, with the centre it draws that box at (the same
+/// chokepoint the pixels go through). Sorted so two samples compare as values.
+///
+/// This is the observable stand-in for "which realm's frame these numbers are measured in". The client
+/// is a pure renderer and is never told that realm's name — it draws what it is handed — so the space
+/// itself is not directly reportable. But the boxes are the reference geometry: the space is the thing
+/// they are all measured from, and if it changed under the session, every centre would move with it.
+fn drawn_scene_centres(state: &vd_devproto::DevState) -> Vec<(String, [f64; 3])> {
+    let mut rows: Vec<(String, [f64; 3])> = state
+        .realm_boxes
+        .iter()
+        .map(|b| (b.realm.clone(), b.center))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
 }
 
 /// Decode a captured PNG → (rgba, w, h, self-calibrated clear color from the top-right corner).
@@ -358,25 +360,38 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
     };
     let pos_before = own_pos(&before_state);
 
-    // THE ONE SPACE (slice 5). Everything below — the fitted camera, the two box rectangles, the
-    // containment verdicts — is computed against the client's LIVE render origin, the same origin it
-    // reduced `pos_before` with and drew its pixels with. Read from the client, never assumed to be
-    // zero: the scene this test holds is ABSOLUTE, the positions the client reports are RELATIVE, and
-    // comparing the two without the origin is only accidentally right while the origin happens to be
-    // zero. Fitted HERE (after the client is up) rather than before boot, because that is the first
-    // moment the origin is knowable.
-    let origin = state_origin(&before_state);
-    let camera = fit_camera_to_scene(&scene, origin, CAPTURE_W as usize, CAPTURE_H as usize)
+    // THE ONE SPACE. Everything below — the fitted camera, the two box rectangles, the containment
+    // verdicts — is computed in the space the client reports positions in and drew its pixels in.
+    // There is exactly one such space now: the SERVER converts every position into the session's pin
+    // before it ships, so the scene this test holds and the numbers the client reports are already
+    // commensurable. This used to have to read a render ORIGIN back from the client and subtract it,
+    // because the server shipped universe-absolute positions and the client did the reduction.
+    let camera = fit_camera_to_scene(&scene, CAPTURE_W as usize, CAPTURE_H as usize)
         .expect("the two-box scene frames to a camera");
-    let box_a_region = box_screen_aabb(&scene, &camera, RealmId::System(DEV.realm_seed), origin);
-    let box_b_region = box_screen_aabb(&scene, &camera, RealmId::System(DEV.realm_seed_b), origin);
+    let box_a_region = box_screen_aabb(&scene, &camera, RealmId::System(DEV.realm_seed));
+    let box_b_region = box_screen_aabb(&scene, &camera, RealmId::System(DEV.realm_seed_b));
+    // The camera's PREMISE, sampled at the moment it is fitted: the scene the client says it is
+    // drawing, before the walk. Re-checked after the crossing (see the guard below). Non-vacuity: both
+    // boxes the two rectangles above were built from must actually be in it, or the guard would be
+    // comparing two empty lists and could never fail.
+    let drawn_before = drawn_scene_centres(&before_state);
+    let drawn_realms: Vec<String> = drawn_before.iter().map(|(r, _)| r.clone()).collect();
+    assert_eq!(
+        drawn_realms,
+        vec![
+            format!("{:?}", RealmId::System(DEV.realm_seed)),
+            format!("{:?}", RealmId::System(DEV.realm_seed_b)),
+        ],
+        "the client must report DRAWING both playground boxes before the walk — the guard below \
+         compares this scene against itself after the crossing and would be vacuous without them",
+    );
 
     // S6 (pure renderer): the client is NODE-AGNOSTIC — it no longer tracks an authoritative sub.
     // The client-tier re-home proof is the OWN entity's LOCATION label flipping realms (source→dest),
     // which is the own entity's delivered authoritative FrameRef re-expressed by the server.
     let location_before = before_state.location.clone();
     assert_eq!(
-        expected_box(&scene, origin, pos_before),
+        expected_box(&scene, pos_before),
         Some(RealmId::System(DEV.realm_seed)),
         "BEFORE: the dot's world pos {pos_before} must be geometrically inside box A",
     );
@@ -410,6 +425,7 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
             target: [BOX_B_CENTER.x, BOX_B_CENTER.y, BOX_B_CENTER.z],
             arrive_epsilon: 3.0,
             max_ticks: 6000,
+            max_step_m: 0.0,
         },
     );
     assert!(
@@ -441,8 +457,7 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
             // is geometrically inside box B; (3) it advanced past the crossing point (a pose only the DEST
             // could have delivered). The label is now a HARD gate, not a lagging cosmetic signal.
             if s.location.as_deref() == Some(system_b.as_str())
-                && expected_box(&scene, state_origin(&s), own_pos(&s))
-                    == Some(RealmId::System(DEV.realm_seed_b))
+                && expected_box(&scene, own_pos(&s)) == Some(RealmId::System(DEV.realm_seed_b))
                 && own_pos(&s).x >= CROSSING_CONFIRMED_X
             {
                 break s;
@@ -477,16 +492,27 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
     };
     let pos_after = own_pos(&after_state);
     // THE SHARED CAMERA'S PREMISE, made loud. The one fitted camera and the two box rectangles above
-    // were built against the BEFORE origin, and every check below reuses them for the AFTER frame.
-    // That is only sound while the crossing does not re-pin the client's render origin. It does not
-    // today; when re-anchoring on a crossing lands, this fires, and the fix is to fit a camera and
-    // rectangles per frame rather than to relax this line.
+    // were built from the BEFORE sample, and every check below reuses them for the AFTER frame. That is
+    // only sound while the realm the session is DRAWN IN does not change under it mid-crossing: the
+    // player's authority re-homes from box A's realm to box B's, and the space its positions are
+    // measured in must NOT follow it, or the two frames' numbers are in two different spaces and every
+    // geometric check below is comparing apples to oranges.
+    //
+    // The client cannot name that realm — it is a pure renderer and draws what it is handed — so the
+    // guard is stated on the reference geometry it CAN report: the boxes it says it is drawing, and
+    // where. A re-pin moves the whole scene, so every centre moves; unchanged centres mean the space
+    // held. This replaces the render-origin guard that stood here, which asserted the same premise
+    // about a number the client no longer computes.
+    //
+    // When re-anchoring on a crossing lands, this fires, and the fix is to fit a camera and rectangles
+    // PER FRAME rather than to relax this line.
     assert_eq!(
-        state_origin(&after_state),
-        origin,
-        "the render origin moved across the crossing — the shared camera and both box rectangles \
-         were fitted in the BEFORE space, so every geometric check below is comparing two different \
-         spaces. Fit the camera and the rectangles PER FRAME instead of loosening this assertion.",
+        drawn_scene_centres(&after_state),
+        drawn_before,
+        "the realm the session is drawn in changed across the crossing — the scene the client reports \
+         drawing moved, so the shared camera and both box rectangles (fitted in the BEFORE space) put \
+         every geometric check below in a different space than the AFTER pixels. Fit the camera and \
+         the rectangles PER FRAME instead of loosening this assertion.",
     );
 
     // ---- AFTER: capture the dot inside box B. ---------------------------------------------------------
@@ -530,7 +556,7 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
 
     // STATE: the composited world pos is now geometrically inside box B, and advanced far on +X.
     assert_eq!(
-        expected_box(&scene, origin, pos_after),
+        expected_box(&scene, pos_after),
         Some(RealmId::System(DEV.realm_seed_b)),
         "AFTER: the dot's world pos {pos_after} must be geometrically inside box B",
     );

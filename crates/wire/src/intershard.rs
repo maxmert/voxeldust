@@ -35,7 +35,7 @@
 
 use serde::{Deserialize, Serialize};
 use vd_core::entity_kind::DurabilityClass;
-use vd_core::pose::{RealmId, StampedPose};
+use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::{
     AccountId, EntityId, EpochId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick,
@@ -279,9 +279,16 @@ pub enum InterShardFlow {
     /// datagram; a lost hint self-heals next tick, like `GhostFlow::Delta`). A DEDICATED infra arm, NOT the
     /// P9-reserved generic `Signal` bus. APPENDED (preserves every existing postcard discriminant).
     OccupantInterest(OccupantInterest),
-    /// VU AoI S2c — a PARENT's reflection of one proxy occupant's CURRENT in-range SIBLING set, sent DOWN to
-    /// the home shard that relays the occupant (the up-relay's own return address, so the parent never learns
-    /// the client's connection). The home shard reconciles it into the client render stream it already owns.
+    /// VU AoI S2c — a PARENT's reflection of one proxy occupant's CURRENT in-range SIBLING set, sent DOWN
+    /// ONE LEVEL: to the direct child that relayed the occupant up (the up-relay's own return address, so the
+    /// parent never learns the client's connection). If the occupant stands on that child, it reconciles the
+    /// set into the client render stream it already owns; if the occupant stands further below, that child
+    /// merges the set with its OWN in-range children, restates the lot in the frame of the child on the path,
+    /// and reflects it one level further down. Hop by hop, one subtraction per level, exactly like
+    /// [`InterShardFlow::RealmCascade`] — the reliable-shape twin of that lane, and shipped that way so a box
+    /// and the occupant standing inside it land on one point by construction. It used to be addressed at the
+    /// relaying child and stop there, which on any chain deeper than two levels dropped the set on a shard
+    /// hosting no client for that account and left the player told about nothing above their own parent.
     /// LEVEL-triggered (the FULL current set, not an add/remove edge): the addressed home changes UNDER a
     /// crossing (a cross-node re-home), so an edge sent there would be delivered-then-dropped; a full set lets
     /// whoever draws the client's world reconcile to the truth after a hand-off / crash / lost message — the
@@ -307,6 +314,126 @@ pub enum InterShardFlow {
     /// latest-wins; a lost frame self-heals next tick). Carries ONLY the `child` lineage coord (public) + the
     /// opaque public-geometry bytes — NO gateway / session (HR1). APPENDED.
     RealmCascade(RealmCascade),
+    /// CHILD → PARENT shard — THE ENTITY LANE'S UP-LEG (the occupants themselves, not where their realms
+    /// are). A shard ships every entity it emits to its parent, measured from its OWN centre, tagged with
+    /// its OWN realm coord. The parent adds the placement it authored for that child — the one number the
+    /// child cannot know — and can then state those entities in its own frame, exactly as
+    /// [`InterShardFlow::OccupantInterest`] does for the single occupant it is a cull hint about.
+    ///
+    /// IT IS A SEPARATE ARM FROM `OccupantInterest` BECAUSE IT IS A SEPARATE THING, and widening that one
+    /// would have been the shortcut. `OccupantInterest` carries ONE observer's pose so a sealed ancestor
+    /// can cull ITS OWN children against it: it is per-observer, it names the observer's account so the
+    /// scene reflection can be addressed back, and losing one costs a cull. This carries the whole EMITTED
+    /// ENTITY SET of a realm — the thing a client DRAWS — and losing one costs a frame of somebody else's
+    /// avatar. Making one message serve both would have put a render feed on a cull hint's contract.
+    ///
+    /// IT IS ALSO A SEPARATE ARM FROM ITS OWN DOWN-LEG, and the direction IS the arm. Both legs carry the
+    /// identical payload shape, so a single arm with a `direction: bool` would have been possible — and a
+    /// mis-set bool would send a batch straight back to the child it came from, which loops rows between
+    /// two levels forever at 20 Hz with nothing but a byte counter moving. A wrong ARM cannot exist: the
+    /// receive routes are distinct functions with distinct guards, so the loop is refused by the type
+    /// system rather than by a field being right. `OccupantInterest`/`RealmCascade` are the same shape for
+    /// the same reason.
+    ///
+    /// `FireAndForget` (no fence — the parent authorizes anything it emits with its own realm fence) +
+    /// `Unreliable` (a 20 Hz latest-wins datagram on `MsgClass::SignalDelta`; a lost batch self-heals on
+    /// the next tick, like `GhostFlow::Delta`). APPENDED (preserves every existing postcard discriminant).
+    EntityInterest(EntityRelay),
+    /// PARENT → active CHILD shard — THE ENTITY LANE'S DOWN-LEG, and the mirror of the above. The parent
+    /// restates the entities it holds (its own, plus the ones its OTHER children relayed up, plus the ones
+    /// its own parent handed down) in the frame of the child it is shipping to, by subtracting the
+    /// placement IT authored for that child. The child merges them into the feed it already emits, so its
+    /// client is handed one set of entities in ONE space and never has to relate two realms.
+    ///
+    /// THE ROWS A CHILD RELAYED UP ARE NEVER HANDED BACK DOWN TO THAT CHILD — [`EntityRelay::realm`] on the
+    /// up-leg is the origin tag that makes that checkable, and it is what stops a two-level ping-pong. Rows
+    /// that arrive on THIS arm are never relayed up again either; only what a shard AUTHORS, and what its
+    /// own children relayed to it, climbs. Together those two rules make the lane terminate on any shape of
+    /// tree without anybody counting hops.
+    ///
+    /// This is what closes the crossing: a session holding subs to two shards used to be handed two entity
+    /// feeds measured from two different realms' centres, and the only party that could relate them was
+    /// downstream of both — which is exactly the composition this arc is removing. Now the shared parent,
+    /// which authored BOTH children's placements and is the only party holding both numbers, does it once.
+    ///
+    /// Same classification as the up-leg: `FireAndForget` + `Unreliable`. APPENDED.
+    EntityCascade(EntityRelay),
+    /// ORCHESTRATOR → GATEWAY — WHICH NODES THE OWNERSHIP RECORD SHOWS HOLDING A REALM, and therefore
+    /// which nodes a router may listen to at all.
+    ///
+    /// WHY THIS EXISTS, measured. A router decides whether an arriving frame is a shard's or a stranger's.
+    /// That fact used to come from three partial places — the boot roster (which cannot know about a realm
+    /// spun up later), a shard's own greeting (deliberately not believed), and a claim carried by a
+    /// TRANSFER (a fact about one hand-off standing in for a fact about a process). A demand-spawned realm
+    /// falls through all three, so on a live cluster **14,884 frames from a running planet shard were
+    /// discarded**, including every position of the player who had just re-homed into it. The player was
+    /// authoritative there and was still being drawn by the realm they had left.
+    ///
+    /// WHY IT IS THE OWNERSHIP RECORD AND NOT AN ASSERTION. A node cannot make itself a shard: it appears
+    /// here only by having been granted a realm through the fence commit, which one writer performs. That
+    /// is the same rule the rest of the design already runs on — authority is derived from the directory,
+    /// never from a peer notification — and node class IS authority. Self-assertion cannot reach this.
+    /// (It does NOT defeat impersonating a node id; that needs per-node credentials, ledgered, and the
+    /// cloud preflight already refuses demand mode until they land.)
+    ///
+    /// A LEVEL, NOT A DELTA, and that is deliberate: this ships the WHOLE current set every time it
+    /// changes. An edge feed ("node N joined", "node N left") strands a router that missed one message —
+    /// permanently mute to a live shard, or listening to a dead one — and the same lesson was already paid
+    /// for once on the scene feed. A full set self-heals on the next change and gives a restarted gateway
+    /// the whole picture in one message.
+    ///
+    /// `FireAndForget` + `ReDriven`: it carries no authority for any entity (the fence still gates every
+    /// frame) and it is a latest-wins level the reconciler re-pushes, so a lost one costs a moment, never
+    /// a permanent wrong answer. APPENDED (preserves every existing postcard discriminant).
+    ShardRoster(ShardRoster),
+    /// CHILD → PARENT shard — THE SL7 OCCUPANCY BIT (Step 5 slice A, owner-approved 2026-08-12/13). A
+    /// level-triggered liveness heartbeat: PRESENCE within the parent's TTL IS the bit — there is no
+    /// `live: bool` field, because absence past the TTL is the false state and a field would be a second
+    /// way to say it. Emitted iff the child's observer set is non-empty (its own occupants ∪ its own
+    /// fresh child bits — so the bit RECURSES level by level with no depth, no hop count, no pose), on
+    /// the AoI cadence plus once at adopt. The `fence` and `universe_tick` are ORDERING/ZOMBIE guards
+    /// only (a deposed incarnation's heartbeat is rejected; last-wins by `(fence, tick)`) — never
+    /// authorizing (the demand-fence law). This is SL7's "ONE BIT of occupancy, upward" verbatim, and
+    /// the ONLY new upward datum of the liveness redesign. `FireAndForget` + `Unreliable`
+    /// (`MsgClass::SignalDelta`; loss is bridged by the TTL and backstopped by the reconciler's
+    /// `ancestor_close`). Carries NO gateway/session/pose (HR1/SL2). APPENDED.
+    ChildLive(ChildLive),
+    /// CHILD → PARENT shard — THE UP-OBSERVATION LANE (owner-approved 2026-08-13, the SL6 ask: "when I
+    /// exit the system its planets freeze"). A LIVE child ships the per-tick rows IT AUTHORS — where it
+    /// put its OWN children, in its OWN frame; the identical `RealmSnapshotDatagram` bytes it already
+    /// streams to its own occupants — one hop UP. The parent adds the ONE placement it authors (where
+    /// it put that child; the number the child must never know — SL1) and re-fans the restated rows to
+    /// its own observers within visibility, and onward up one more link for ITS parent's observers —
+    /// the exact mirror of [`InterShardFlow::RealmCascade`], carrying a realm's own INTERIOR VIEW
+    /// outward (SL3: a realm draws itself; its authored placements are its look at this detail level).
+    /// NO occupant data crosses (SL2 untouched). The sealed `frame_id` discipline of the cascade holds
+    /// here unchanged: the AUTHOR's counter is never re-stamped at any relay level. `FireAndForget` +
+    /// `Unreliable` (per-tick latest-wins on `MsgClass::SignalDelta`; a lost frame self-heals next
+    /// tick). APPENDED.
+    RealmObservation(RealmObservation),
+    /// CHILD → PARENT shard — the STATIC half of the up-observation lane (Step 5 slice C, minor 11):
+    /// a live child ships its interior OUTLINES — one [`crate::channels::RealmShape`] per realm of its
+    /// own roster plus whatever ITS live children shipped it, centers measured in ITS OWN frame at the
+    /// shape lane's one instant — one hop UP, on the AoI cadence. The parent adds the ONE placement it
+    /// authors for that child (SL1) and folds the lifted outlines into the scene deltas of any observer
+    /// whose visibility reaches that child, and onward up one more link (the recursion the minor-10
+    /// rows lane already runs). WITHOUT this half a neighbour realm's interior had motion but no boxes:
+    /// the rows flowed and the client had nothing to draw them onto ("approaching another star system,
+    /// its planets never appear" — owner-flown 2026-08-13). SL3: the child authors what its interior
+    /// LOOKS like; the parent authors only where the child sits. NO occupant data (SL2). `FireAndForget`
+    /// + `Unreliable` (a level re-asserted every cadence; the parent's TTL bridges loss). APPENDED.
+    RealmShapeObservation(RealmShapeObservation),
+    /// PARENT → CHILD shard — the per-LIVE-CHILD rekey of the down-reflected sibling scene (Step 5
+    /// slice C, minor 11; replaces emitting the occupant-keyed `ProxySceneSet`, whose `AccountId`
+    /// leaves the wire — a data reduction). The FULL current set of outlines a child's occupants are
+    /// owed from ABOVE — the parent's own in-range siblings of that child plus what the parent itself
+    /// holds from ITS parent — restated in the CHILD's frame by the one party that authored the child's
+    /// placement, addressed to the child REALM (not to any occupant: HR1 — the parent never learns who
+    /// is inside, SL7 — the occupied child stands in for its occupants). The child fans it to its own
+    /// local observers and restates it onward into ITS live children (the depth≥3 orphan case of the
+    /// per-occupant lane dissolves structurally). `FireAndForget` + `ReDriven` (a full-set level,
+    /// re-sent on change from the parent's RAM store; the receiver reconciles). APPENDED.
+    ChildSceneSet(ChildSceneSet),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -510,6 +637,29 @@ impl InterShardFlow {
             // VU AoI S2c — a public-geometry render reflection; no fence, no transfer trigger, mutates no sim
             // state at the home (render bookkeeping only). A re-delivered set is idempotent (full-set reconcile).
             InterShardFlow::ProxySceneSet(_) => EffectClass::FireAndForget,
+            // The entity lane, both legs: a batch of drawable poses. It mutates no sim state at either end
+            // (render bookkeeping only), carries no fence and triggers no transfer — the receiving level
+            // authorizes anything IT emits with its own realm fence. Latest-wins by `frame_id`, so a
+            // redelivery is idempotent ⇒ FireAndForget, exactly like the two lanes it runs beside.
+            InterShardFlow::EntityInterest(_) | InterShardFlow::EntityCascade(_) => {
+                EffectClass::FireAndForget
+            }
+            // The roster carries authority for NOTHING — the fence still gates every frame, and this only
+            // decides whose frames are read at all. It is a latest-wins LEVEL keyed by its own tick, so a
+            // redelivery is idempotent and a reorder is refused by the tick rather than by an ack.
+            InterShardFlow::ShardRoster(_) => EffectClass::FireAndForget,
+            // The SL7 bit is a level-triggered heartbeat (presence IS the state) and the up-observation
+            // rows are per-tick latest-wins world observation — both idempotent under redelivery, refused
+            // by (fence, tick) / the client's per-realm high-water rather than by an ack.
+            InterShardFlow::ChildLive(_) | InterShardFlow::RealmObservation(_) => {
+                EffectClass::FireAndForget
+            }
+            // The two shape lanes (minor 11), both directions: full-set public-geometry render
+            // bookkeeping, no fence, no transfer trigger, no sim-state mutation at the receiver — a
+            // redelivered set replaces itself (full-set reconcile), exactly like the lane each rekeys.
+            InterShardFlow::RealmShapeObservation(_) | InterShardFlow::ChildSceneSet(_) => {
+                EffectClass::FireAndForget
+            }
         }
     }
 
@@ -592,6 +742,32 @@ impl InterShardFlow {
             // producer-less: on any loss / crash / shed the parent re-sends the full set from its RAM store
             // and the home reconciles it — no durable outbox (the level full-set IS the recovery).
             InterShardFlow::ProxySceneSet(_) => FlowDurabilityClass::ReDriven,
+            // Per-tick latest-wins entity poses, both legs — the entity twin of `RealmCascade`. A lost batch
+            // self-heals on the next tick's re-assertion; making it reliable would put a 20 Hz per-entity
+            // feed on the ReDriven lane. NOT producer-less (no durable outbox), so the golden pin still
+            // asserts exactly two.
+            InterShardFlow::EntityInterest(_) | InterShardFlow::EntityCascade(_) => {
+                FlowDurabilityClass::Unreliable
+            }
+            // NOT `Unreliable`, and the difference is the whole point: a lost frame costs one tick of one
+            // body's motion, whereas a lost roster leaves a running shard MUTE — every position of every
+            // player it owns discarded — until something else changes. The reconciler re-pushes the level
+            // it already computes each sweep, so this is `ReDriven` rather than needing a durable outbox.
+            InterShardFlow::ShardRoster(_) => FlowDurabilityClass::ReDriven,
+            // The bit is level-triggered on the AoI cadence (a lost heartbeat is re-asserted next
+            // cadence and bridged by the parent's TTL; liveness is centrally backstopped by
+            // `ancestor_close`), and the observation rows are the per-tick latest-wins feed (a lost
+            // frame self-heals next tick) — both Unreliable, exactly like the lanes they mirror.
+            InterShardFlow::ChildLive(_) | InterShardFlow::RealmObservation(_) => {
+                FlowDurabilityClass::Unreliable
+            }
+            // The interior-outline level is re-asserted every AoI cadence and bridged by the parent's
+            // TTL, exactly like the bit it rides beside — a lost one costs a cadence ⇒ Unreliable.
+            InterShardFlow::RealmShapeObservation(_) => FlowDurabilityClass::Unreliable,
+            // The down-reflected scene keeps `ProxySceneSet`'s reasoning verbatim: RELIABLE in spirit (a
+            // lost set-change would blink a neighbour) but RE-DRIVEN, not producer-less — on any loss the
+            // parent re-sends the full set from its RAM store and the child reconciles it.
+            InterShardFlow::ChildSceneSet(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -644,6 +820,14 @@ pub struct ShardPresence {
 /// parent authorizes its own emitted demands with its OWN realm fence — a fence here would make it
 /// authority-gating, forcing `SideEffecting`/reliable and breaking the unreliable-scale premise). Field
 /// order is frozen once shipped (positional postcard).
+///
+/// THIS IS THE UPWARD CHAIN, one link of it. Every realm is centred on itself and has no idea where it
+/// sits, so an occupant's position can only ever be stated relative to the realm it stands in. Each level
+/// up, the PARENT — the one party that authored where its child sits — adds that one number and states the
+/// result in its own frame, then sends the same message on to ITS parent. A shard therefore only ever adds
+/// a number it already holds about a child, and never learns its own address. The message used to stop
+/// after one leg, so an occupant deep inside a planet was invisible to the galaxy that planet's star sits
+/// in, and the position that story needs could not be produced anywhere in a running cluster.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OccupantInterest {
     /// The DURABLE player id whose scene this feeds (survives re-home; the gateway maps it to the live
@@ -652,19 +836,37 @@ pub struct OccupantInterest {
     /// THIS hop's PARENT realm (`child.parent()`) — the routing key. Its `path()` dedups multi-hop relays.
     pub to_realm: RealmCoord,
     /// The observer's pose (position + velocity) expressed in the EMITTER's frame, stamped at its
-    /// `universe_tick`. The parent re-expresses it into its own frame (compose with the child's placement).
+    /// `universe_tick`. The receiving parent re-expresses it into ITS OWN frame by adding the placement it
+    /// authored for the child it came from — the one number it holds and the child cannot know — and then
+    /// relays THAT on, so the addition happens once per level by the only party entitled to make it.
     pub occupant: StampedPose,
-    /// Hops from the observer's home realm (0 at the first parent). Drives the precision ladder: the
-    /// deepest ancestors get the full pose; far ancestors need only the lineage (the coarsening is S3).
+    /// Hops from the observer's home realm: 0 on the leg out of the realm the occupant stands in, and one
+    /// more on each further leg up. PURELY DIAGNOSTIC — nothing reads it to decide anything, and in
+    /// particular NOTHING stops relaying at any value of it. The chain runs exactly as far as a parent coord
+    /// and a resolved parent node exist, which is exactly as far as the players' area of interest spun
+    /// realms up; a cap here would be a depth constant deciding what the world looks like. It saturates at
+    /// the type's maximum rather than wrapping, so a very deep chain reads as "deep" and never as "shallow".
+    /// The precision ladder that will eventually coarsen far ancestors' poses (S3) keys off this.
     pub coarsen_level: u8,
 }
 
 /// VU AoI S2c — a parent's LEVEL-triggered reflection of ONE proxy occupant's CURRENT in-range sibling set,
-/// sent DOWN to the home shard that relays the occupant. The home shard diffs `realms` against its per-account
-/// forwarded baseline to derive the client add/remove — so a lost/shed message or a re-home hand-off self-heals
-/// on the next set (an EDGE would be delivered-then-dropped to a route that changes under the crossing). Empty
-/// `realms` = "the proxy's AoI holds no sibling now" ⇒ the home reconciles every forwarded id for the account
-/// to `removed`. PUBLIC parent-authored geometry ONLY — no NodeId / gateway / session (HR1).
+/// sent DOWN one level to the child that relays the occupant. That child diffs `realms` against its
+/// per-account forwarded baseline to derive the client add/remove — so a lost/shed message or a re-home
+/// hand-off self-heals on the next set (an EDGE would be delivered-then-dropped to a route that changes under
+/// the crossing). Empty `realms` = "the proxy's AoI holds no sibling now" ⇒ every forwarded id for the account
+/// reconciles to `removed`. PUBLIC parent-authored geometry ONLY — no NodeId / gateway / session (HR1).
+///
+/// EVERY `center` IN HERE IS MEASURED FROM THE CENTRE OF THE REALM THIS MESSAGE IS ADDRESSED TO, because the
+/// sender authored where that realm sits and is the only party that could state it. It is therefore the same
+/// space the receiver's own children and its own occupants are already measured in — one meaning, one space,
+/// all the way to the client — and a level that has somewhere further to forward to restates them again from
+/// the centre of ITS child before passing them on. Nobody at any level learns where they themselves are: a
+/// level only ever subtracts a number about a child, which is the only number it holds.
+///
+/// BECAUSE IT IS A FULL SET AND NOT AN EDGE, exactly one of these may be in flight per occupant per hop. A
+/// level with both its own in-range children and a set from above MERGES them into one message; sending two
+/// would have each delete the other's realms on arrival, every tick.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProxySceneSet {
     /// The DURABLE traveller id — the SAME key the home shard already streams `RealmSceneDelta` under.
@@ -673,19 +875,156 @@ pub struct ProxySceneSet {
     pub realms: Vec<crate::channels::RealmShape>,
 }
 
+/// The nodes the ownership record currently shows holding a realm — see [`InterShardFlow::ShardRoster`].
+///
+/// NODE IDS ONLY, deliberately. The router's question is "may I listen to this node", and that is answered
+/// by the node id alone; WHICH realm each one holds is the orchestrator's business and telling the router
+/// would be handing it a copy of the world it has no use for. The smallest true thing, so it stays small
+/// as the universe grows: a few dozen integers on a demand cluster, and bounded by RUNNING realms rather
+/// than by how many exist.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardRoster {
+    /// Every node holding at least one realm, ascending — SORTED so the encoding of one set of nodes is
+    /// one sequence of bytes, and an unchanged roster is byte-identical rather than merely equal. That is
+    /// what lets the sender skip re-pushing an unchanged level without keeping a second copy to compare.
+    pub nodes: Vec<NodeId>,
+    /// The tick this level was taken at. A receiver ignores a view older than the one it holds, so a
+    /// reordered or redelivered push can never resurrect a stale roster. It is the same discipline the
+    /// frame feeds use, for the same reason.
+    pub at: UniverseTick,
+}
+
+/// The SL7 occupancy bit — see [`InterShardFlow::ChildLive`]. Presence within the parent's TTL IS
+/// the bit; the fields are ordering/zombie guards, never authorizing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildLive {
+    /// The reporting child's full lineage coord (the routing key; the parent validates the child's
+    /// parent link lowers to its own realm and drops a mis-route, the up-relay's own guard).
+    pub child: RealmCoord,
+    /// The child's realm fence at emit — a deposed incarnation's heartbeat is rejected (last-wins by
+    /// `(fence, tick)`); carried, never authorizing (the demand-fence law).
+    pub fence: Fence,
+    /// The child's universe tick at emit — the freshness half of the last-wins key.
+    pub at: UniverseTick,
+}
+
+/// The up-observation payload — see [`InterShardFlow::RealmObservation`]. A live child's OWN
+/// authored per-tick rows, one hop up, for the parent to restate and re-fan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealmObservation {
+    /// The SENDING child's full lineage coord (the routing key; the parent validates the child's
+    /// parent link lowers to its own realm and drops a mis-route — the same guard every up-lane uses).
+    pub child: RealmCoord,
+    /// An ALREADY-SERIALIZED [`crate::channels::RealmSnapshotDatagram`] whose rows are measured in
+    /// the SENDING CHILD's own frame (the rows it authors for its own children — its interior view).
+    /// The parent restates them by adding the one placement it authors for `child`, then re-fans.
+    /// The `frame_id` inside belongs to the AUTHORING child and is NEVER re-stamped at any relay
+    /// level — the identical sealed-counter discipline as [`RealmCascade::realm_snapshot_bytes`],
+    /// for the identical per-`RealmId` client high-water reason.
+    pub realm_snapshot_bytes: Vec<u8>,
+}
+
+/// The up-observation lane's STATIC half — see [`InterShardFlow::RealmShapeObservation`]. A live
+/// child's interior outlines, one hop up, for the parent to lift and fold into its observers' scenes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RealmShapeObservation {
+    /// The SENDING child's full lineage coord (the routing key; the parent validates the child's
+    /// parent link lowers to its own realm and drops a mis-route — the same guard every up-lane uses).
+    pub child: RealmCoord,
+    /// The FULL current set of the child's interior outlines (public `RealmShape` geometry): its own
+    /// roster's children plus whatever its own live children shipped it, every `center` measured from
+    /// the SENDING CHILD's own centre at the shape lane's one instant. A full set, not an edge — the
+    /// parent replaces what it holds for this child, so a lost one costs a cadence, never a wrong
+    /// scene. NO occupant data, NO NodeId/gateway/session (HR1/SL2).
+    pub shapes: Vec<crate::channels::RealmShape>,
+}
+
+/// The per-live-child down-reflected sibling scene — see [`InterShardFlow::ChildSceneSet`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChildSceneSet {
+    /// The receiving child's full lineage coord (the routing key; the child validates it lowers to its
+    /// OWN realm and drops a mis-route — the same guard the realm cascade uses going the same way).
+    pub child: RealmCoord,
+    /// The FULL current set of outlines this child's occupants are owed from above, every `center`
+    /// measured from the RECEIVING CHILD's own centre (the sender authored that child's placement and
+    /// subtracted it — the receiver does no arithmetic on arrival). A full set, not an edge: the
+    /// receiver reconciles its whole from-above holding against it, so a lost or reordered set
+    /// self-heals on the next change. PUBLIC parent-authored geometry ONLY (HR1).
+    pub realms: Vec<crate::channels::RealmShape>,
+}
+
 /// The per-realm observation-cascade payload (the sibling live-pose feed) — see
 /// [`InterShardFlow::RealmCascade`]. The parent ships THIS to each ACTIVE child realm per tick.
+///
+/// ONE LINK OF THE DOWN-CHAIN, and the mirror of [`OccupantInterest`] going the other way. Each level
+/// subtracts the placement IT authored for the child it is shipping to, restates the rows in that child's
+/// frame, and ships; a level that has an active child of its own does the same again one hop further down.
+/// The party at the bottom accepts what it is handed and does no arithmetic at all. Nobody at any level
+/// learns where they themselves are — a level only ever subtracts a number about a child, which is the only
+/// number it holds. There is NO depth limit and no hop count: the chain runs as deep as live realms go.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RealmCascade {
     /// The TARGET child realm (routing key). The child validates `child.lowered() == own` (the same guard
     /// the occupant up-relay uses) and drops a mis-route; lineage-anchored so it is globally unique.
     pub child: RealmCoord,
-    /// An ALREADY-SERIALIZED [`crate::channels::RealmSnapshotDatagram`] — the moving realms the PARENT
-    /// authors, with the PARENT's `frame_id` sealed INSIDE. Carried OPAQUELY: the child never decodes it, it
-    /// drops these bytes verbatim into a [`crate::channels::ShardToGateway::RealmFrame`], so the frame_id is
-    /// STRUCTURALLY un-re-stampable at the relay (the client's per-`RealmId` high-water requires the one
-    /// authoring shard's monotone counter). One serialize at the authoring parent, refcount-cloned per child.
+    /// An ALREADY-SERIALIZED [`crate::channels::RealmSnapshotDatagram`] whose rows are measured in the frame
+    /// of the realm named by `child` — the sender restated them there before sending, because the sender is
+    /// the only party that holds where that child sits. The recipient can therefore drop these bytes
+    /// verbatim into a [`crate::channels::ShardToGateway::RealmFrame`] with nothing to compute.
+    ///
+    /// THE `frame_id` INSIDE BELONGS TO THE SHARD THAT AUTHORED THE ROWS AND IS NEVER RE-STAMPED, at any
+    /// level, however many times the rows are restated on the way down. That used to be guaranteed by the
+    /// relay being UNABLE to open what it forwarded; the down-chain must open it to do its subtraction, so
+    /// it is now a discipline instead — carried by the one function that builds this message. The reason is
+    /// unchanged: the client's staleness gate is a high-water keyed per `RealmId`, and each `RealmId` is
+    /// authored by exactly one shard running its own counter from zero. A relaying level that stamped its
+    /// own counter on someone else's rows would ratchet that realm's high-water past anything its author
+    /// will produce for thousands of ticks, and those boxes would freeze on the client with nothing but a
+    /// stale-drop counter to show for it.
+    ///
+    /// THE RECIPIENT'S OWN ROW IS ABSENT BY CONSTRUCTION. A realm's centre measured in its own frame is the
+    /// origin, every tick, forever; including it would say nothing and would make the row's head equal its
+    /// tail, which [`crate::channels::RealmSnap`] reserves for a realm claiming to be its own parent.
     pub realm_snapshot_bytes: Vec<u8>,
+}
+
+/// The entity-lane relay payload — one batch of drawable entities, one stated space, one hop. Carried by
+/// BOTH [`InterShardFlow::EntityInterest`] (up) and [`InterShardFlow::EntityCascade`] (down); the arm says
+/// which way it is going, the payload says nothing about direction.
+///
+/// ONE MEANING FOR EVERY FIELD ON EVERY HOP. `frame` is the frame every row in `entities` is measured in,
+/// and it is the SENDER's answer, never the reader's inference: the sender restated the rows there before
+/// shipping and dropped anything it could not. A row whose own pose label disagrees with `frame` is not
+/// shipped at all — a field whose meaning depends on who sent it is the wire-level signature of the
+/// composition breach this arc exists to undo.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EntityRelay {
+    /// The routing key, and on the up-leg the ORIGIN TAG as well.
+    ///
+    /// UP (`EntityInterest`): the SENDER's own realm coord. The parent uses it twice — to find which of its
+    /// children authored these rows (so it can add that child's placement) and to make sure it never hands
+    /// the batch back down to that same child.
+    ///
+    /// DOWN (`EntityCascade`): the RECIPIENT child's realm coord, the mis-route guard
+    /// [`RealmCascade::child`] uses (`lowered()` compared against the receiver's own coord), so a stale
+    /// hand-off or a recycled node id is dropped and counted rather than drawn.
+    pub realm: RealmCoord,
+    /// The frame EVERY row in `entities` is measured in — the sender's own frame going up, the recipient
+    /// child's own frame coming down. Carried explicitly so the receiver resolves ONE placement per batch
+    /// instead of re-deriving a moving realm's position per row.
+    pub frame: FrameRef,
+    /// The AUTHORING shard's snapshot counter for this batch, carried through every hop untouched — the
+    /// receiver's latest-wins gate (a batch older than the one already held for this origin is dropped,
+    /// equal-numbered batches are chunks of one tick and accumulate). It is the sender's OWN counter, and a
+    /// relaying level never stamps its own on somebody else's rows, for the same reason
+    /// [`RealmCascade::realm_snapshot_bytes`] gives.
+    pub frame_id: u64,
+    /// The instant every row was measured at. Each level resolves the placement it is about to add or
+    /// subtract AT THIS INSTANT, not at its own clock — an orbiting realm moves between the two, and the
+    /// difference would be a per-hop error the size of the relay's own latency.
+    pub universe_tick: UniverseTick,
+    /// The drawable rows, measured in `frame`.
+    pub entities: Vec<crate::channels::EntitySnap>,
 }
 
 /// Orchestrator → SOURCE shard pose-flush request (Slice 1d.1). The source finds the held dot for
@@ -1112,7 +1451,6 @@ mod tests {
     use vd_core::UniverseTick;
     use vd_core::entity_kind::EntityKind;
     use vd_core::glam::DVec3;
-    use vd_core::pose::FrameRef;
 
     fn pose() -> StampedPose {
         StampedPose::at_rest(
@@ -1237,6 +1575,64 @@ mod tests {
             postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
             flow
         );
+    }
+
+    #[test]
+    fn entity_relay_arms_effect_and_durability_and_round_trip() {
+        // The entity lane's two appended arms. Classifier equality (never `matches!`): FireAndForget +
+        // Unreliable on BOTH legs, so the golden producer-less pin is unchanged. The round-trip runs a
+        // NON-EMPTY row set, because an empty `entities` would encode identically whatever the row shape is
+        // and would prove nothing about the payload actually crossing.
+        let row = crate::channels::EntitySnap {
+            entity: eid(EntityKind::Player),
+            pose: pose(),
+        };
+        for flow in [
+            InterShardFlow::EntityInterest(EntityRelay {
+                realm: demand_coord(),
+                frame: FrameRef::SystemSpace { system_seed: 1 },
+                frame_id: 17,
+                universe_tick: UniverseTick(10),
+                entities: vec![row],
+            }),
+            InterShardFlow::EntityCascade(EntityRelay {
+                realm: galaxy_demand_coord(),
+                frame: FrameRef::SystemSpace { system_seed: 1 },
+                frame_id: 18,
+                universe_tick: UniverseTick(11),
+                entities: vec![row],
+            }),
+        ] {
+            assert_eq!(flow.effect_class(), EffectClass::FireAndForget);
+            assert_eq!(flow.durability_class(), FlowDurabilityClass::Unreliable);
+            let bytes = postcard::to_allocvec(&flow).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<InterShardFlow>(&bytes).expect("decode"),
+                flow
+            );
+        }
+    }
+
+    #[test]
+    fn the_entity_lane_legs_are_distinct_arms_on_the_wire() {
+        // THE DIRECTION IS THE ARM, and this is the assertion that says so. The two legs carry the
+        // IDENTICAL payload, so if the direction were a payload field the two encodings would be equal and
+        // a receiver would have to trust a bool to know whether to send a batch back where it came from.
+        // They differ in exactly one leading discriminant byte, which is why a wrong direction cannot be
+        // expressed at all rather than merely being unlikely.
+        let payload = EntityRelay {
+            realm: demand_coord(),
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            frame_id: 3,
+            universe_tick: UniverseTick(4),
+            entities: Vec::new(),
+        };
+        let up = postcard::to_allocvec(&InterShardFlow::EntityInterest(payload.clone()))
+            .expect("encode");
+        let down = postcard::to_allocvec(&InterShardFlow::EntityCascade(payload)).expect("encode");
+        assert_ne!(up, down);
+        assert_eq!(up.len(), down.len());
+        assert_eq!(up[1..], down[1..]);
     }
 
     /// G-SEALED: every arm has a coherent effect class, and side-effecting arms

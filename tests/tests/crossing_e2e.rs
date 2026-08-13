@@ -93,7 +93,7 @@ fn capture_subject(topo: &mut Topology) -> CapturedTick {
                     sub,
                     frame: pose.frame,
                     raw_pos: pose.pos,
-                    world_pos: view.world_pos(&pose, view.render_origin()),
+                    world_pos: view.world_pos(&pose),
                     orient: pose.orient,
                 })
         });

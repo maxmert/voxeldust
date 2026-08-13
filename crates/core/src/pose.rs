@@ -14,6 +14,7 @@
 use glam::{DQuat, DVec3, I64Vec3};
 use serde::{Deserialize, Serialize};
 
+use crate::frame::FrameError;
 use crate::ids::{EntityId, UniverseTick};
 
 /// A persistence/ownership realm: the unit of single-writer durable state.
@@ -526,6 +527,158 @@ impl StampedPose {
             vel: self.vel + accel * dt_s,
             orient: self.orient,
             universe_tick: new_tick,
+        }
+    }
+}
+
+/// ONE PLACEMENT AS A TRANSFORM — where a CHILD frame's origin sits, and how it moves, inside its
+/// PARENT's frame. It is the same content as a [`crate::frame::FramePlacement`] with the two pieces
+/// nothing composes (the integer anchor and the f64 remainder) already fused into a [`LatticePos`], so a
+/// CHAIN of placements can be folded into one transform and then applied to many poses.
+///
+/// WHY THIS TYPE EXISTS, and it is the whole point of the render-composition work. A pose arrives measured
+/// from the realm it lives in; the client draws everything measured from ONE pinned realm. Turning the
+/// first into the second is a walk UP from the pose's realm to the nearest common ancestor and back DOWN
+/// to the pin, and every step of that walk is one of these. Folding the walk ONCE per (frame, pin) and then
+/// applying the fold per entity is what keeps the per-entity cost a single vector add instead of a chain
+/// re-walk; the table it lives in is bounded by realms in view, never by entities.
+///
+/// It is a PLACEMENT, never an absolute. Nothing here can express "where this realm is in the universe" —
+/// there is no universe frame in the type at all — which is the structural half of the ground rule: only a
+/// parent knows where its children are, so a placement is the only shape a position relation can take.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameXform {
+    /// The child frame's origin, in the PARENT's frame (integer cell + f64 remainder).
+    pub pos: LatticePos,
+    /// The child frame's origin velocity, in the parent's frame (m/s).
+    pub vel: DVec3,
+    /// The rotation taking the CHILD's axes into the PARENT's axes.
+    pub orient: DQuat,
+}
+
+impl FrameXform {
+    /// The child frame IS the parent: no offset, no motion, no rotation. The value every walk-scale and
+    /// static forest is built entirely out of, which is what makes [`FrameXform::is_identity`] a usable
+    /// whole-table short-circuit.
+    pub const IDENTITY: FrameXform = FrameXform {
+        pos: LatticePos {
+            cell: I64Vec3::ZERO,
+            offset: DVec3::ZERO,
+        },
+        vel: DVec3::ZERO,
+        orient: DQuat::IDENTITY,
+    };
+
+    /// Is this EXACTLY the identity? Bit equality on every component, never an epsilon, and that is
+    /// deliberate: this predicate gates a whole-table "skip the composition entirely" short-circuit, so a
+    /// tolerance here would mean a realm rotating slowly enough to fall inside it silently STOPS ROTATING
+    /// for every client. A placement that is nearly the identity is not the identity.
+    #[must_use]
+    pub fn is_identity(self) -> bool {
+        self == FrameXform::IDENTITY
+    }
+
+    /// This placement expressed one level FURTHER OUT: `self` places a child inside its parent, `outer`
+    /// places that parent inside ITS parent, and the result places the child inside the grandparent. The
+    /// fold step of the up-walk.
+    ///
+    /// Delegates to [`StampedPose::compose`] — there is exactly ONE composition implementation in the
+    /// workspace and this is not a second one. The two feeds that draw a realm box and the thing standing
+    /// in it parted company once before precisely because two sites did the same arithmetic separately.
+    ///
+    /// # Errors
+    /// [`FrameError::RotatedFrameAcrossCells`] when `outer` is rotated and `self`'s origin sits a whole
+    /// number of integer cells out — see `FrameXform::rotatable` (a private helper, so plain backticks).
+    pub fn then(self, outer: FrameXform, tier: Tier) -> Result<FrameXform, FrameError> {
+        FrameXform::rotatable(outer.orient, self.pos.cell())?;
+        let composed = outer.as_origin_pose().compose(self.as_origin_pose(), tier);
+        Ok(FrameXform {
+            pos: composed.pos,
+            vel: composed.vel,
+            orient: composed.orient,
+        })
+    }
+
+    /// The placement read the other way round: `self` maps CHILD→PARENT, this maps PARENT→CHILD. The
+    /// down-walk half of a pin conversion (getting from the common ancestor down to the pinned realm).
+    ///
+    /// Exact for every unrotated placement: the integer cell is NEGATED as an integer, so the anchor
+    /// survives the round trip bit-for-bit. `_tier` marks this a same-tier operation, matching
+    /// [`LatticePos::compose`] and [`LatticePos::rebase_to`]; no re-quantization happens here.
+    ///
+    /// # Errors
+    /// [`FrameError::RotatedFrameAcrossCells`] when this placement is rotated AND its origin sits a whole
+    /// number of integer cells out — see `FrameXform::rotatable` (a private helper, so plain backticks).
+    pub fn inverse(self, _tier: Tier) -> Result<FrameXform, FrameError> {
+        FrameXform::rotatable(self.orient, self.pos.cell())?;
+        let inv = self.orient.inverse();
+        Ok(FrameXform {
+            // The cell negates as an INTEGER (the orientation is the identity on this arm, guarded above),
+            // so `x.inverse().then(x)` returns the anchor untouched rather than through f64 metres.
+            pos: LatticePos::at(-self.pos.cell(), -(inv * self.pos.offset())),
+            vel: -(inv * self.vel),
+            orient: inv,
+        })
+    }
+
+    /// Re-express `pose` — measured in the CHILD frame this placement describes — in the PARENT frame, and
+    /// RELABEL it `label`.
+    ///
+    /// The relabel is mandatory, not cosmetic. After composition the numbers are measured from a different
+    /// realm's centre; leaving the pose's native label on them produces a value wearing the wrong frame's
+    /// name, which is exactly the lie this whole arc exists to remove — a shipped absolute that still
+    /// claimed to be realm-local looked correct at walk scale, where every realm sits at the origin and the
+    /// two agree, and drew the player at the star everywhere else.
+    ///
+    /// # Errors
+    /// [`FrameError::RotatedFrameAcrossCells`] when this placement is rotated and the pose's own origin
+    /// sits a whole number of integer cells out — see `FrameXform::rotatable` (private, so plain backticks).
+    pub fn apply(
+        self,
+        pose: StampedPose,
+        tier: Tier,
+        label: FrameRef,
+    ) -> Result<StampedPose, FrameError> {
+        FrameXform::rotatable(self.orient, pose.pos.cell())?;
+        let mut out = self.as_origin_pose().compose(pose, tier);
+        out.frame = label;
+        Ok(out)
+    }
+
+    /// May a position whose integer anchor is `cell` be rotated by `orient`?
+    ///
+    /// A cell COUNT is measured along one frame's axes. Rotating a non-zero count into another frame's axes
+    /// does not yield a count — no rotation of an integer lattice vector is generally an integer lattice
+    /// vector — so the only ways to proceed are to fold the anchor into f64 metres, which is precisely the
+    /// precision loss this coordinate exists to prevent, or to refuse. It refuses. EXACT quaternion
+    /// equality for the same reason [`FrameXform::is_identity`] uses it: "nearly unrotated" is rotated, and
+    /// a tolerance would quietly resume the folding for every slowly-spinning realm.
+    ///
+    /// Unreachable in production today (every placement in the tree is identity-oriented and every anchor
+    /// is `ZERO`); it becomes live the first time a spinning realm is authored more than one cell-block
+    /// from its parent's origin. Mirrors the identical guard in [`crate::frame::transfer_frame`] — one
+    /// rule, one error, two call sites.
+    ///
+    /// # Errors
+    /// [`FrameError::RotatedFrameAcrossCells`] on the refused combination.
+    fn rotatable(orient: DQuat, cell: I64Vec3) -> Result<(), FrameError> {
+        if orient != DQuat::IDENTITY && cell != I64Vec3::ZERO {
+            return Err(FrameError::RotatedFrameAcrossCells);
+        }
+        Ok(())
+    }
+
+    /// This placement as the ORIGIN pose [`StampedPose::compose`] expects on its left-hand side. The frame
+    /// label and tick are never read by `compose` (it takes both from the local operand), so they are
+    /// placeholders; keeping them here rather than at each call site is what lets `then`/`apply` share the
+    /// ONE compose.
+    fn as_origin_pose(self) -> StampedPose {
+        StampedPose {
+            frame: FrameRef::GalaxySpace,
+            pos: self.pos,
+            vel: self.vel,
+            orient: self.orient,
+            universe_tick: UniverseTick(0),
         }
     }
 }
@@ -1178,6 +1331,195 @@ mod tests {
         assert!((occupant_moved - realm_moved).length() < 1e-6);
         // And it is NOT static — the regression guard against the "occupant hangs in place" bug.
         assert!(occupant_moved.length() > 1.0);
+    }
+
+    // ===== FrameXform — one placement, folded and applied =====================================
+
+    /// A placement 145 m out along +x with no motion and no rotation — the worked example's planet
+    /// inside its star system.
+    fn placed(x_m: f64) -> FrameXform {
+        FrameXform {
+            pos: LatticePos::local(DVec3::new(x_m, 0.0, 0.0)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+        }
+    }
+
+    fn planet_frame() -> FrameRef {
+        FrameRef::PlanetCentered { planet_seed: 7 }
+    }
+
+    fn system_frame() -> FrameRef {
+        FrameRef::SystemSpace { system_seed: 1 }
+    }
+
+    #[test]
+    fn is_identity_is_exact_and_a_nearly_unrotated_frame_does_not_collapse() {
+        assert!(FrameXform::IDENTITY.is_identity());
+        // A quaternion one ulp off the identity is ROTATED. If a tolerance crept in here, a realm
+        // spinning slowly enough to fall inside it would silently stop spinning for every client.
+        let nearly = FrameXform {
+            orient: DQuat::from_xyzw(0.0, 0.0, f64::EPSILON, 1.0),
+            ..FrameXform::IDENTITY
+        };
+        assert!(!nearly.is_identity());
+        assert!(!placed(1.0).is_identity());
+        assert!(
+            !FrameXform {
+                vel: DVec3::new(0.0, 0.0, 1.0),
+                ..FrameXform::IDENTITY
+            }
+            .is_identity()
+        );
+    }
+
+    #[test]
+    fn apply_adds_the_placement_and_relabels_to_the_parent() {
+        // The worked example's middle hop: the star system holds an occupant reported 3 m from its
+        // planet's centre and adds the 145 m it placed that planet at. The LABEL must move with the
+        // value — a composed value still wearing the child's frame name is the exact lie this work
+        // removes.
+        let pose = StampedPose::at_rest(planet_frame(), DVec3::new(3.0, 0.0, 0.0), UniverseTick(9));
+        let out = placed(145.0)
+            .apply(pose, Tier::Fine, system_frame())
+            .expect("an unrotated placement always applies");
+        assert_eq!(out.pos.offset(), DVec3::new(148.0, 0.0, 0.0));
+        assert_eq!(out.frame, system_frame());
+        assert_eq!(out.universe_tick, UniverseTick(9));
+    }
+
+    #[test]
+    fn then_folds_two_levels_into_one_add() {
+        // 3 inside the planet, the planet 145 inside the system, the system 12031 inside the galaxy.
+        // Folding the two placements first and applying once must equal applying them in turn.
+        let folded = placed(145.0)
+            .then(placed(12031.0), Tier::Fine)
+            .expect("unrotated placements always fold");
+        assert_eq!(folded.pos.offset(), DVec3::new(12176.0, 0.0, 0.0));
+        let pose = StampedPose::at_rest(planet_frame(), DVec3::new(3.0, 0.0, 0.0), UniverseTick(0));
+        let one_shot = folded
+            .apply(pose, Tier::Fine, FrameRef::GalaxySpace)
+            .expect("applies");
+        let step_by_step = placed(12031.0)
+            .apply(
+                placed(145.0)
+                    .apply(pose, Tier::Fine, system_frame())
+                    .expect("applies"),
+                Tier::Fine,
+                FrameRef::GalaxySpace,
+            )
+            .expect("applies");
+        assert_eq!(one_shot.pos.offset(), DVec3::new(12179.0, 0.0, 0.0));
+        assert_eq!(one_shot.pos.offset(), step_by_step.pos.offset());
+    }
+
+    #[test]
+    fn inverse_undoes_a_placement_exactly_including_the_integer_anchor() {
+        // A placement one whole anchor-block out, with motion. The round trip must return the pose
+        // BIT-for-bit — the cell negates as an integer, so the anchor never passes through f64.
+        let x = FrameXform {
+            pos: LatticePos::at(
+                I64Vec3::new(1_000_000_000_000, 0, 0),
+                DVec3::new(0.25, 0.0, 0.0),
+            ),
+            vel: DVec3::new(0.0, 7.5, 0.0),
+            orient: DQuat::IDENTITY,
+        };
+        let pose = StampedPose {
+            frame: planet_frame(),
+            pos: LatticePos::at(I64Vec3::new(4096, 0, 0), DVec3::new(0.5, -0.25, 0.75)),
+            vel: DVec3::new(1.0, 0.0, -2.0),
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(11),
+        };
+        let up = x.apply(pose, Tier::Fine, system_frame()).expect("applies");
+        assert_eq!(up.pos.cell(), I64Vec3::new(1_000_000_004_096, 0, 0));
+        let back = x
+            .inverse(Tier::Fine)
+            .expect("an unrotated placement always inverts")
+            .apply(up, Tier::Fine, planet_frame())
+            .expect("applies");
+        assert_eq!(back.pos.cell(), pose.pos.cell());
+        assert_eq!(back.pos.offset(), pose.pos.offset());
+        assert_eq!(back.vel, pose.vel);
+        assert_eq!(back.frame, planet_frame());
+    }
+
+    #[test]
+    fn a_rotated_placement_inverts_and_applies_while_every_anchor_is_zero() {
+        // The cell guard is about the INTEGER anchor, not about rotation as such: a rotated placement
+        // whose origin sits inside one cell is perfectly representable and must keep working.
+        let quarter = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        let x = FrameXform {
+            pos: LatticePos::local(DVec3::new(10.0, 0.0, 0.0)),
+            vel: DVec3::ZERO,
+            orient: quarter,
+        };
+        let pose = StampedPose::at_rest(planet_frame(), DVec3::new(2.0, 0.0, 0.0), UniverseTick(1));
+        let up = x.apply(pose, Tier::Fine, system_frame()).expect("applies");
+        // +x in the child's axes points along +y in the parent's after a quarter turn about z.
+        assert!((up.pos.offset() - DVec3::new(10.0, 2.0, 0.0)).length() < 1e-12);
+        let back = x
+            .inverse(Tier::Fine)
+            .expect("inverts")
+            .apply(up, Tier::Fine, planet_frame())
+            .expect("applies");
+        assert!((back.pos.offset() - DVec3::new(2.0, 0.0, 0.0)).length() < 1e-12);
+    }
+
+    #[test]
+    fn a_rotated_placement_across_integer_cells_is_refused_on_every_operation() {
+        // A cell COUNT is measured along one frame's axes; rotating a non-zero count does not give a
+        // count. The only alternatives are to fold the anchor into f64 metres — the precision loss this
+        // coordinate exists to prevent — or to refuse. All three entry points refuse.
+        let quarter = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        let far = LatticePos::at(I64Vec3::new(1_000_000_000_000, 0, 0), DVec3::ZERO);
+        let rotated_far = FrameXform {
+            pos: far,
+            vel: DVec3::ZERO,
+            orient: quarter,
+        };
+        assert_eq!(
+            rotated_far.inverse(Tier::Fine).expect_err("refused"),
+            FrameError::RotatedFrameAcrossCells
+        );
+        let pose_far = StampedPose {
+            frame: planet_frame(),
+            pos: far,
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(0),
+        };
+        let rotated_here = FrameXform {
+            pos: LatticePos::local(DVec3::ZERO),
+            vel: DVec3::ZERO,
+            orient: quarter,
+        };
+        assert_eq!(
+            rotated_here
+                .apply(pose_far, Tier::Fine, system_frame())
+                .expect_err("refused"),
+            FrameError::RotatedFrameAcrossCells
+        );
+        // `then` refuses on the OUTER placement's rotation against the INNER's anchor.
+        let inner_far = FrameXform {
+            pos: far,
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+        };
+        assert_eq!(
+            inner_far
+                .then(rotated_here, Tier::Fine)
+                .expect_err("refused"),
+            FrameError::RotatedFrameAcrossCells
+        );
+        // …and permits it once the anchor is zero (the other side of the same guard).
+        let inner_here = FrameXform {
+            pos: LatticePos::local(DVec3::new(1.0, 0.0, 0.0)),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+        };
+        assert!(inner_here.then(rotated_here, Tier::Fine).is_ok());
     }
 
     use proptest::prelude::*;

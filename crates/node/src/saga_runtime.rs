@@ -42,7 +42,6 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use serde::{Deserialize, Serialize};
-use vd_core::frame::{IdentityFrames, rebind_pose_to_dest};
 use vd_core::pose::{RealmId, StampedPose};
 use vd_core::{BatchId, EpochId, Fence, NodeId, SessionId, TransferId, UniverseTick};
 use vd_sim::capability::{CapRequest, ShardProfile};
@@ -912,11 +911,16 @@ fn build_crossing(
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let entity = ctx.subject.transfer_subject_entity()?;
-    // The SOURCE already rebased the flushed pose into the dest realm's live frame (`on_flush_source`), so
-    // here it is a no-op relabel (same-frame ⇒ `IdentityFrames` returns it unchanged) — the transfer
-    // machinery never reads the ephemeris (HR1). Kept in the funnel so the ONE rebind machinery (HR3) still
-    // forms an `Area` dest frame from `to_parent` for a source path that had not pre-rebased.
-    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm, ctx.to_parent, &IdentityFrames);
+    // THE POSE TRAVELS VERBATIM, carrying the SOURCE's own frame tag. The saga is a courier: it holds no
+    // ephemeris and knows where no realm sits, so there is nothing here it could correctly convert.
+    //
+    // This line used to call `rebind_pose_to_dest(.., &IdentityFrames)`, which RELABELS: it stamped the
+    // destination's frame onto the pose without moving the number. Measured on the worked example, that
+    // turned "3 m from the planet's centre" into "3 m from the star's centre" purely by renaming it — and
+    // because the receiver's own conversion then saw a pose already wearing its frame, it took the
+    // same-frame shortcut and added nothing. The player arrived at the star. Shipping the source's tag is
+    // what makes the receiver's conversion actually fire, so the parent adds its child's placement.
+    let pose = flush_pose?;
     Some(InterShardFlow::Transfer(TransferEnvelope {
         transfer_id: ctx.transfer,
         universe_epoch: epoch,
@@ -974,9 +978,9 @@ fn build_rehome(
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
     let _entity = ctx.subject.transfer_subject_entity()?;
-    // No-op relabel: the SOURCE pre-rebased the pose into the dest realm's live frame at flush (`IdentityFrames`
-    // returns a same-frame pose unchanged). The rebind stays in the funnel (HR3, one machinery).
-    let pose = rebind_pose_to_dest(flush_pose?, ctx.to_realm, ctx.to_parent, &IdentityFrames);
+    // VERBATIM, in the source's own frame — see `build_crossing` for the whole reason. The re-home adopt is
+    // the second place a pose enters a shard, and it is the receiver there that converts.
+    let pose = flush_pose?;
     Some(InterShardFlow::ReHome(ReHomeCmd {
         transfer: ctx.transfer,
         universe_epoch: epoch,
@@ -1633,12 +1637,42 @@ fn handle_crossing_request(
                 to_parent: req.to_parent,
             };
             let gateway = sess_rec.authority.node();
+            // Stage A (rehome_one_mechanism §4u): the request→saga binding line. The FLUSH runs on
+            // `flush_source_node` — the subject's CURRENT directory head — not on the shard whose scan
+            // fired the request (`from_realm`). When those part company, the flush ships a different
+            // realm's frame; this line beside the per-node HAND-OFF lines makes that visible per saga.
+            tracing::info!(
+                transfer = ?ctx.transfer,
+                subject = ?req.subject,
+                from_realm = ?req.from_realm,
+                to_realm = ?req.to_realm,
+                attempt = req.attempt,
+                flush_source_node = ?ctx.source,
+                dest_node = ?ctx.dest,
+                expected_fence = ?ctx.expected_fence,
+                "CROSSING SAGA STARTED",
+            );
             runtime.start_transfer(ctx, gateway);
             runtime.crossings_started += 1;
         }
         // The subject owner is known but the dest realm OR the session route is unresolved: no saga can start
         // this tick. COUNTED only (3f-B is happy-path; the source-latch-clearing abort-reply is 3f-D).
-        (Some(_subj), _, _) => runtime.crossing_unresolved += 1,
+        (Some(subj), _, _) => {
+            runtime.crossing_unresolved += 1;
+            // Stage A: THE SILENT STRAND (§4u refutation 6, 3f-D owed). This drop replies with nothing
+            // while the source's per-entity latch suppresses every further attempt and the ttl re-drive
+            // is inert on the live path — so a stranded latch starts exactly here. WARN, never silent.
+            tracing::warn!(
+                transfer = ?transfer,
+                subject = ?req.subject,
+                from_realm = ?req.from_realm,
+                to_realm = ?req.to_realm,
+                dest_head_missing = dir.head(DirectoryKey::Realm(req.to_realm)).is_none(),
+                session_head_missing = dir.head(DirectoryKey::Session(req.session)).is_none(),
+                source_node = ?subj.authority.node(),
+                "CROSSING UNRESOLVED: dropped with no reply — the source latch stays standing",
+            );
+        }
         // No directory owner for the subject at all (authority already moved/revoked): a counted drop.
         (None, _, _) => runtime.crossing_subject_gone += 1,
     }
@@ -2666,20 +2700,17 @@ mod tests {
 
     /// A non-origin pose the source "flushes" — distinct components so a test can confirm the
     /// EmitCrossing carried THIS pose (not a default).
+    ///
+    /// It is ALSO what the crossing/re-home now SHIPS, bit for bit: the saga is a courier and moves no
+    /// numbers. There used to be a second `dest_flushed_pose()` helper here that re-expressed this pose
+    /// into the dest's frame with the same relabel the builders applied — a helper whose only job was to
+    /// agree with the bug, so it could never catch it. Assert against THIS pose directly.
     fn flushed_pose() -> StampedPose {
         StampedPose::at_rest(
             FrameRef::SystemSpace { system_seed: 7 },
             DVec3::new(1.0, 2.0, 3.0),
             UniverseTick(5),
         )
-    }
-
-    /// The dest-frame pose a crossing/re-home now SHIPS: [`flushed_pose`] re-expressed into `TO_REALM`'s
-    /// frame via the SAME `rebind_pose_to_dest` the builders apply, so the frame flips SystemSpace{7}→{8}
-    /// through the P3 identity (position unchanged) and this stays byte-identical to the builder output.
-    fn dest_flushed_pose() -> StampedPose {
-        // `TO_REALM` is `System(8)` (a one-field frame) — no parent needed to name the dest frame.
-        super::rebind_pose_to_dest(flushed_pose(), TO_REALM, None, &IdentityFrames)
     }
 
     const ORCH: NodeId = NodeId(1);
@@ -2838,8 +2869,23 @@ mod tests {
         ))
     }
 
+    /// HR5 — a TRACE sink so every tracing macro's lazy field closure evaluates on the paths the
+    /// tests drive (the Stage-A log points); without a subscriber those closures are dead regions.
+    fn init_test_tracing() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+                .with_writer(std::io::sink)
+                .finish();
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
     impl Rig {
         fn new() -> Rig {
+            init_test_tracing();
             let hub = MemHub::new();
             let store = MemStore::new();
             let mut orch = build_app(
@@ -3277,7 +3323,7 @@ mod tests {
                         entity: subject_eid(),
                         from_realm: FROM_REALM,
                         to_realm: TO_REALM,
-                        pose: dest_flushed_pose(),
+                        pose: flushed_pose(),
                         state: vec![],
                     },
                 }))
@@ -5480,7 +5526,7 @@ mod tests {
             subject: subject(),
             new_fence: Fence(2),
             step_id: RE_HOME_STEP,
-            state: ReHomeState::PoseOnly(dest_flushed_pose()),
+            state: ReHomeState::PoseOnly(flushed_pose()),
             source: SOURCE,
         });
         assert!(
@@ -5543,7 +5589,7 @@ mod tests {
             subject: subject(),
             new_fence: Fence(2),
             step_id: RE_HOME_STEP,
-            state: ReHomeState::PoseOnly(dest_flushed_pose()),
+            state: ReHomeState::PoseOnly(flushed_pose()),
             source: SOURCE,
         });
         assert!(
@@ -6554,7 +6600,7 @@ mod tests {
                     entity: subject_eid(),
                     from_realm: FROM_REALM,
                     to_realm: TO_REALM,
-                    pose: dest_flushed_pose(),
+                    pose: flushed_pose(),
                     state: vec![],
                 },
             })

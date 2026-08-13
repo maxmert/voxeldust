@@ -8,6 +8,14 @@ description = "P1.5 Slice 3 Tier-B render glue: the Bevy app (window + offscreen
 # T4: the windowed Bevy app. Renderer-ONLY; ALL pure logic stays in vd-client-harness
 # (Tier-A) + vd-client (the renderer-free core). Coverage-exempt (absent from the Tier-A
 # set); proven by the human-in-the-loop window + (T6) G-RENDER-SMOKE, not llvm-cov.
+# DEV-LOOP ONLY. Links Bevy as ONE shared library instead of statically into the client
+# binary, which is where an edit-rebuild-look cycle spends its time once the dependency
+# graph is warm. Reached only via `scripts/client.sh --fast` (vd-bins' `render-dylib`).
+# NEVER enabled by a gate or a container build: those must link exactly what ships, and the
+# dylib build additionally leaves a .dylib the binary must find at run time.
+[features]
+dynamic_linking = ["bevy/dynamic_linking"]
+
 [dependencies]
 vd-core = { workspace = true }
 vd-client = { workspace = true }

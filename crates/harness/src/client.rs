@@ -17,18 +17,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use vd_client::view::DeliveredView;
-// Re-exported so the vd-tests render-capture sites can name the `RealmView` argument of
-// `DeliveredView::world_pos` without a direct vd-client dependency. The harness `ScriptedClient`
-// does not yet ingest realm snapshots, so an empty `RealmView` is the correct value at the capture
-// seam (world_pos falls back to the frame-local pose) until the harness grows realm awareness.
+// Re-exported so the vd-tests render-capture sites can name a `RealmView` without a direct
+// vd-client dependency. The client below now FEEDS one (see `realm_view`).
 pub use vd_client::realm_view::RealmView;
 use vd_core::pose::StampedPose;
 use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_node::TickReport;
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
-    ClientControlMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SnapshotVerdict, SubId,
-    classify_snapshot,
+    ClientControlMsg, InputDatagram, RealmSnapshotDatagram, ServerControlMsg, SnapshotDatagram,
+    SnapshotVerdict, SubId, classify_snapshot,
 };
 use vd_wire::seams::tickets::LoginTicket;
 use vd_wire::version::ProtoVersion;
@@ -56,6 +54,13 @@ pub struct DeliveredWorldView {
     pub last_frame: BTreeMap<SubId, u64>,
     /// Frames that arrived below the high-water mark (counted, never applied).
     pub stale_frames_dropped: u64,
+    /// How many entity rows each DELIVERED snapshot datagram carried — `rows -> how many datagrams`.
+    ///
+    /// Wire truth, counted before the staleness gate: this is what the transport actually moved, not what
+    /// the view chose to apply. It exists because the per-datagram row count is the number that decides
+    /// whether a per-datagram header would be cheaper than per-row data, and that had never been measured
+    /// on a real run — only assumed.
+    pub snapshot_rows: BTreeMap<usize, u64>,
 }
 
 /// Where the client is in its session lifecycle.
@@ -98,6 +103,19 @@ pub struct ScriptedClient {
     /// ONCE from the dest sub during the two-holder window — which the flat last-writer-wins `view`
     /// physically cannot represent. The flat `view` stays for the D-28 conservation gate.
     pub delivered_view: DeliveredView,
+    /// The REAL realm-placement view (`vd_client::realm_view::RealmView`), fed from the SAME realm
+    /// datagrams the production client consumes.
+    ///
+    /// It used to be absent, and the class was simply refused at the dispatch below ("unexpected class
+    /// toward a client") — which meant no harness scenario could ever have a MOVING realm in it, because
+    /// the first realm frame would panic the client. That is exactly the case the frame-conversion work
+    /// exists for, so the gate proving a realm box and the occupant standing in it draw at ONE point had
+    /// nowhere to read the box from. Now both lanes land in the two production consumers, and the drawn
+    /// point of each is `DeliveredView::world_pos` over a `RenderPose` sampled at ONE cursor.
+    pub realm_view: RealmView,
+    /// The space the avatar stood in at the last applied own frame — the one-space rule's flip
+    /// detector, mirroring the shipped client's net.rs field of the same name.
+    standing_space: Option<vd_core::pose::FrameRef>,
     next_input_seq: u64,
     sent_inputs: Vec<(SessionId, u64)>,
     close_reason: Option<String>,
@@ -131,6 +149,8 @@ impl ScriptedClient {
             held_subs: BTreeSet::new(),
             view: DeliveredWorldView::default(),
             delivered_view: DeliveredView::default(),
+            realm_view: RealmView::default(),
+            standing_space: None,
             next_input_seq: 0,
             sent_inputs: Vec::new(),
             close_reason: None,
@@ -249,13 +269,34 @@ impl ScriptedClient {
         let Ok(snap) = postcard::from_bytes::<SnapshotDatagram>(bytes) else {
             panic!("client received undecodable snapshot bytes from its gateway");
         };
+        *self
+            .view
+            .snapshot_rows
+            .entry(snap.entities.len())
+            .or_default() += 1;
         // SINGLE shared decode, TWO sinks (1d.3c): feed the SAME decoded `snap` into the REAL
         // composited `DeliveredView` AND the flat conservation `view`, so they cannot diverge in
         // what they admit (both run the SAME §6.3 `classify_snapshot` gate over the SAME held set).
         // The real view keeps per-(sub, entity) tracks (the cross-shard overlap shape); the flat
         // view is last-writer-wins (the D-28 conservation surface).
-        self.delivered_view
+        let delivered_verdict = self
+            .delivered_view
             .on_snapshot(&self.held_subs, snap.clone());
+        // THE SPACE FLIP (the one-space rule, crossing-render slice — the SAME rule the shipped
+        // client's net.rs runs, so the harness cannot admit what the real client forgets): a change
+        // in the avatar's delivered frame is a committed crossing, and every stored realm placement
+        // is a position in the OLD space. The first delivered frame (None → Some) is a login.
+        // Gated on APPLY exactly as the shipped client gates it — a dropped datagram must not run
+        // the detector (review mirror-divergence finding).
+        if delivered_verdict == SnapshotVerdict::Apply {
+            let now_standing = self.delivered_view.own_location_frame();
+            if now_standing != self.standing_space {
+                if self.standing_space.is_some() {
+                    self.realm_view.forget_space();
+                }
+                self.standing_space = now_standing;
+            }
+        }
 
         // THE §6.3 gate (shared with the real client via vd_wire, so they cannot
         // drift): a strictly-older frame_id is stale; an EQUAL frame_id is a sibling
@@ -273,6 +314,24 @@ impl ScriptedClient {
                 self.view.stale_frames_dropped += 1;
             }
         }
+    }
+
+    /// Fold one delivered REALM datagram into the production [`RealmView`] — the ambient world-observation
+    /// lane that carries where each MOVING realm's own centre sits, already measured from the centre of
+    /// the realm this session is standing in. The GATEWAY does not do that: it routes the shard's bytes
+    /// without opening them. Each parent shard on the chain restates the value from its child's centre,
+    /// subtracting the one placement it authored, so what lands here is finished.
+    ///
+    /// Sub-agnostic and un-fenced by design (see `RealmView`): a realm box is world observation, not
+    /// per-session authority. The gate is the per-`RealmId` strictly-older check inside `RealmView`, the
+    /// same one the shipped client runs, so the harness cannot admit a frame the real client would drop.
+    fn on_realm_snapshot(&mut self, bytes: &[u8]) {
+        let Ok(snap) = postcard::from_bytes::<RealmSnapshotDatagram>(bytes) else {
+            panic!("client received undecodable realm snapshot bytes from its gateway");
+        };
+        // The one-space ingress rule, identical to the shipped client's net.rs (see RealmView).
+        self.realm_view
+            .on_realm_snapshot(self.delivered_view.own_location_frame(), snap);
     }
 
     fn send_input(&mut self, cmd: InputCmd) {
@@ -334,6 +393,7 @@ impl SteppableNode for ScriptedClient {
                     match class {
                         MsgClass::Control => self.on_control(&bytes),
                         MsgClass::Snapshot => self.on_snapshot(&bytes),
+                        MsgClass::RealmSnapshot => self.on_realm_snapshot(&bytes),
                         other => panic!("unexpected class toward a client: {other:?}"),
                     }
                 }
@@ -596,8 +656,6 @@ mod tests {
                 added: vec![],
                 removed: vec![],
                 pin: vd_core::pose::RealmId::System(0),
-                pin_abs: vd_core::pose::LatticePos::default(),
-                anchor_epoch: 0,
             },
         );
         fabric.pump(TickId(9));
@@ -950,6 +1008,190 @@ mod tests {
             .expect("sent");
         fabric.pump(TickId(1));
         let _ = client.step();
+    }
+
+    #[test]
+    #[should_panic(expected = "undecodable realm snapshot bytes")]
+    fn garbage_realm_snapshot_bytes_panic_loudly() {
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        gw.send(CLIENT, MsgClass::RealmSnapshot, vec![0xFF].into())
+            .expect("sent");
+        fabric.pump(TickId(1));
+        let _ = client.step();
+    }
+
+    /// The REALM lane lands in the production `RealmView`. It used to panic the client outright
+    /// ("unexpected class toward a client"), which meant no harness scenario could contain a moving
+    /// realm — the one case the frame-conversion work exists for.
+    #[test]
+    fn a_delivered_frame_flip_forgets_the_realm_space_exactly_like_the_shipped_client() {
+        // The one-space rule's harness mirror (crossing-render slice): the avatar's delivered frame
+        // changing on an APPLIED snapshot is a committed crossing, and every stored realm placement
+        // is a position in the OLD space — forgotten at the flip, never blended. (The None→Some
+        // login flip is every other test; this drives the Some→Some crossing arm.)
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        activate(&fabric, &mut gw, &mut client);
+        // The LOGIN flip first (None → Some): the avatar's first delivered row sets the standing
+        // space without forgetting anything (there is nothing yet to forget).
+        send_snapshot(&mut gw, &snapshot(SubId(0), 5, 1.0));
+        fabric.pump(TickId(3));
+        let _ = client.step();
+        // A realm placement in the CURRENT space, held by the production realm view.
+        let dg = RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 0,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(10),
+            realms: vec![vd_wire::channels::RealmSnap {
+                realm: vd_core::pose::RealmId::Planet(7),
+                frame: FrameRef::PlanetCentered { planet_seed: 7 },
+                pose: StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 1 },
+                    DVec3::new(20.0, 0.0, 0.0),
+                    UniverseTick(10),
+                ),
+            }],
+        };
+        let bytes = postcard::to_allocvec(&dg).expect("encode");
+        gw.send(CLIENT, MsgClass::RealmSnapshot, bytes.into())
+            .expect("sent");
+        fabric.pump(TickId(4));
+        let _ = client.step();
+        assert!(
+            client
+                .realm_view
+                .realm_pose(vd_core::pose::RealmId::Planet(7), 10.0)
+                .is_some(),
+            "the placement is held before the flip"
+        );
+        // THE FLIP: the own avatar's next applied row arrives in a NEW frame (the crossing signal).
+        send_snapshot(
+            &mut gw,
+            &SnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 9,
+                source_tick: TickId(2),
+                universe_tick: UniverseTick(11),
+                entities: vec![EntitySnap {
+                    entity: EntityId(7),
+                    pose: StampedPose::at_rest(
+                        FrameRef::PlanetCentered { planet_seed: 7 },
+                        DVec3::ZERO,
+                        UniverseTick(11),
+                    ),
+                }],
+            },
+        );
+        fabric.pump(TickId(5));
+        let _ = client.step();
+        assert!(
+            client
+                .realm_view
+                .realm_pose(vd_core::pose::RealmId::Planet(7), 12.0)
+                .is_none(),
+            "the flip forgot every stored placement — the old space is unrepresentable"
+        );
+    }
+
+    #[test]
+    fn a_realm_datagram_lands_in_the_production_realm_view() {
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        let realm = vd_core::pose::RealmId::Planet(7);
+        let dg = RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 0,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(10),
+            realms: vec![vd_wire::channels::RealmSnap {
+                realm,
+                frame: FrameRef::PlanetCentered { planet_seed: 7 },
+                pose: StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    DVec3::new(20.0, 0.0, 0.0),
+                    UniverseTick(10),
+                ),
+            }],
+        };
+        let bytes = postcard::to_allocvec(&dg).expect("encode");
+        gw.send(CLIENT, MsgClass::RealmSnapshot, bytes.into())
+            .expect("sent");
+        fabric.pump(TickId(1));
+        let _ = client.step();
+        assert_eq!(client.realm_view.frames_applied(), 1);
+        let drawn = client
+            .realm_view
+            .realm_pose(realm, 10.0)
+            .expect("the realm the feed just streamed");
+        assert_eq!(
+            client.delivered_view.world_pos(&drawn),
+            DVec3::new(20.0, 0.0, 0.0),
+        );
+    }
+
+    /// THE ASSERTION THAT CAN TELL "TOLD" FROM "GUESSED" APART — which the number-only one above cannot.
+    ///
+    /// `a_realm_datagram_lands_in_the_production_realm_view` asserts a VALUE, so it passes whoever did
+    /// the arithmetic: it would have passed when the router composed, and it passes now that the shard
+    /// chain does. A test whose subject is "the client converts nothing" has to be able to fail when the
+    /// client converts something.
+    ///
+    /// This one ships the SAME integer cell twice, differing only in the UNIT the sender stated for it
+    /// (the frame label's tier), and requires the two drawn points to differ by exactly that ratio. A
+    /// client that picked metres-per-cell for itself — from a constant, or from any frame other than the
+    /// one attached to this value — draws both at the same place and fails here by a factor of ~10^19.
+    ///
+    /// The other half of the property (that no shard in the chain ever held its own address) is not
+    /// observable from a client: a client sees poses, never who computed them. It is asserted where the
+    /// shards are, in `vd-tests`' `frame_conversion_e2e`, by asking every level of a real three-node
+    /// chain about every realm in the forest and requiring each to answer only for itself and its own
+    /// direct children.
+    #[test]
+    fn the_client_draws_a_cell_in_the_unit_the_sender_stated_for_it() {
+        use vd_core::pose::{COARSE_CELL_EDGE_M, FINE_CELL_EDGE_M};
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        // Two realms, ONE integer cell each, identical value — but authored on the two different
+        // lattices the coordinate base supports.
+        let fine = vd_core::pose::RealmId::Planet(7);
+        let coarse = vd_core::pose::RealmId::System(9);
+        let row = |realm, frame| vd_wire::channels::RealmSnap {
+            realm,
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            pose: StampedPose {
+                frame,
+                pos: vd_core::pose::LatticePos::at(
+                    vd_core::glam::I64Vec3::new(1, 0, 0),
+                    DVec3::ZERO,
+                ),
+                vel: DVec3::ZERO,
+                orient: vd_core::glam::DQuat::IDENTITY,
+                universe_tick: UniverseTick(10),
+            },
+        };
+        let dg = RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 0,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(10),
+            realms: vec![
+                row(fine, FrameRef::SystemSpace { system_seed: 7 }),
+                row(coarse, FrameRef::GalaxySpace),
+            ],
+        };
+        let bytes = postcard::to_allocvec(&dg).expect("encode");
+        gw.send(CLIENT, MsgClass::RealmSnapshot, bytes.into())
+            .expect("sent");
+        fabric.pump(TickId(1));
+        let _ = client.step();
+
+        let drawn = |realm| {
+            let p = client
+                .realm_view
+                .realm_pose(realm, 10.0)
+                .expect("the feed streamed this realm");
+            client.delivered_view.world_pos(&p)
+        };
+        assert_eq!(drawn(fine), DVec3::new(FINE_CELL_EDGE_M, 0.0, 0.0));
+        assert_eq!(drawn(coarse), DVec3::new(COARSE_CELL_EDGE_M, 0.0, 0.0));
     }
 
     #[test]

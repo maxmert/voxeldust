@@ -14,9 +14,32 @@
 
 use glam::{DQuat, DVec3, I64Vec3};
 use vd_core::UniverseTick;
-use vd_core::pose::{FrameRef, StampedPose};
+use vd_core::pose::{FrameRef, StampedPose, Tier};
 
 use crate::tick_to_f64;
+
+/// THE ONE PLACE IN THE CLIENT WHERE A LABEL BECOMES A UNIT — and it reads a label the SHIPPER
+/// attached to the very value it describes, which is the whole difference between being told and
+/// guessing.
+///
+/// A `LatticePos` counts its integer cell in a unit that depends on the tier of the space the value is
+/// measured in: millimetre-ish quanta inside a star system, light-years out at galaxy scale. Get that
+/// wrong by one tier and every cell is off by a factor of 10^19 — which is why the client must never
+/// pick it. `StampedPose::frame` is the sender's statement of the space its `pos` is measured in: the
+/// emitting shard labels its own rows with its own frame, and every relay hop that restates a value
+/// re-labels it in the same operation (`vd_core::frame::transfer_frame` writes `frame: to` and routes
+/// the cell through `LatticePos::convert_tier`). So the tier read here is a value that was SHIPPED,
+/// not one the renderer inferred from context.
+///
+/// It is called at exactly three ingress points — [`EntityTrack::observe`] (are two delivered poses
+/// even commensurable?), [`EntityTrack::sample`] and [`EntityTrack::current_render_pose`] (stamp the
+/// unit onto the [`RenderPose`] that carries the value onward). Everything downstream — `world_pos`,
+/// `RealmBox::draw_center`, the capture camera, the containment verdicts, the HR6 diagnosis rows —
+/// multiplies by the unit it was HANDED and never looks a frame up again.
+#[must_use]
+pub fn stated_tier(frame: FrameRef) -> Tier {
+    frame.tier()
+}
 
 /// Linear interpolation between two value snapshots indexed on the
 /// server-authoritative analytic clock. Returns `current` at/after the window or
@@ -52,16 +75,29 @@ where
 /// could read to extrapolate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderPose {
+    /// The space the shipper said this value is measured in — carried for identity/diagnosis
+    /// (the player-location readout reads it), NEVER re-consulted for arithmetic. The UNIT that
+    /// arithmetic needs is `tier`, stamped beside it at the same instant from the same statement.
     pub frame: FrameRef,
-    /// Integer CELL anchor of the rendered position (tier units for `frame`) — the exact-integer coarse
+    /// Integer CELL anchor of the rendered position, counted in `tier` units — the exact-integer coarse
     /// part carried alongside the `pos` offset (the tiered-i64 base, D-41). Through P3 it is `ZERO` and
-    /// `pos` carries the full frame-local metres (byte-identical to the pre-S1 bare-`DVec3` pose); it is
-    /// planted so the S3 origin-subtraction `world_pos` can rebase the FULL position (cell + offset) once
-    /// non-zero cells go live (S5). The interpolation blend rebases into this cell (see `sample`).
+    /// `pos` carries the full frame-local metres (byte-identical to the pre-S1 bare-`DVec3` pose); the
+    /// flattening in `world_pos` scales it by `tier`. The interpolation blend rebases into this cell
+    /// (see `sample`).
     pub cell: I64Vec3,
     /// Frame-local offset within `cell`. What the renderer draws / `world_pos` consumes.
     pub pos: DVec3,
     pub orient: DQuat,
+    /// THE UNIT `cell` IS COUNTED IN, as stated by whoever shipped this value — captured ONCE by
+    /// [`stated_tier`] at the moment the delivered pose became a render pose, and multiplied by
+    /// downstream without any further lookup.
+    ///
+    /// It is a field rather than a `frame.tier()` call at each use site because the two are only the
+    /// same thing while every label happens to name the space its value is in. Reading the tier at the
+    /// point of DRAWING re-opens that question at every call site; reading it once, next to the value
+    /// it belongs to, closes it. A drawn point is then `cell * tier.cell_edge_m() + pos` — a
+    /// multiplication by a number the client was handed.
+    pub tier: Tier,
 }
 
 /// How many delivered poses one track retains (SLICE 6).
@@ -192,32 +228,58 @@ impl EntityTrack {
     /// Fold in a delivered pose. A STRICTLY newer `universe_tick` shifts
     /// `current → prev` and advances the window; an equal tick (a sibling chunk of
     /// the same tick) updates `current` in place WITHOUT collapsing the window, so
-    /// the interpolation span is preserved (audit finding-25). Stale poses never
-    /// reach here — the §6.3 gate drops them upstream.
+    /// the interpolation span is preserved (audit finding-25).
+    ///
+    /// THE FRAME-STABILITY GUARD (crossing-render review, CRITICAL finding): a non-strictly-newer
+    /// row whose FRAME differs from the newest is IGNORED, never folded. The in-place update exists
+    /// for sibling chunks of one tick, which are by definition one shard's one emission — one frame.
+    /// A same-or-older-tick row in a DIFFERENT frame is the other side of a crossing's grace window:
+    /// the demoted source keeps emitting the avatar (its retained ghost, frozen at the demote pose,
+    /// old stamp) on the still-open old sub, and per-sub `frame_id` gates cannot order across subs —
+    /// so without this guard every interleaved old-sub row overwrote the newest slot's FRAME,
+    /// flipping the delivered location backward per datagram (the forget-space storm + the drawn
+    /// avatar snapping between two spaces). The old comment's premise ("stale poses never reach
+    /// here — the §6.3 gate drops them upstream") was true per sub and false across two.
     pub fn observe(&mut self, pose: StampedPose) {
-        if pose.frame.tier() != self.newest().frame.tier() {
-            // A TIER CHANGE (Fine <-> Coarse, i.e. in-system <-> galaxy at P10): the two poses count
-            // their integer cells in DIFFERENT UNITS, so the cell rebase in `sample` — which scales by
-            // ONE tier's `cell_edge_m` — cannot express both. Collapse to the new pose; the next sample
-            // FREEZES there rather than blending across incommensurable lattices.
+        if stated_tier(pose.frame) != stated_tier(self.newest().frame) {
+            // A UNIT CHANGE (Fine <-> Coarse, i.e. in-system <-> galaxy at P10). The test is on the
+            // UNIT and not on the frame NAME, because what makes two delivered poses blendable is
+            // whether their integer cells are counted in the same quantum: the rebase below scales by
+            // ONE tier's `cell_edge_m`, so it cannot express a window whose two ends count in different
+            // ones. Collapse to the new pose; the next sample FREEZES there rather than producing a
+            // number that is a light-year out per cell.
             //
-            // SLICE 6 S3 — this used to fire on any FRAME change, which is now WRONG and actively
-            // harmful. Since positions became ROOT-ABSOLUTE (A5), `StampedPose::compose` deliberately
-            // PRESERVES the native frame label while the VALUE becomes absolute (`pose.rs`), and
-            // `DeliveredView::world_pos` reads the label ONLY for `.tier()` (`view.rs`). Every
-            // in-system frame — `PlanetCentered`, `SystemSpace`, `ShipLocal`, `StationLocal`,
-            // `AreaLocal` — is `Tier::Fine`. So walking from a planet into open space RELABELS the pose
-            // without changing a single coordinate, and collapsing there discarded a perfectly
-            // blendable window. With the two-pose track that cost one tick; with the ring it would
-            // throw away the WHOLE buffer and stall for its full depth — planting a fresh hitch at
-            // exactly the moment that matters most (a crossing, boarding, warp).
+            // SLICE 6 S3 — this used to fire on any FRAME change, which is both unnecessary and
+            // actively harmful. Every in-system frame — `PlanetCentered`, `SystemSpace`, `ShipLocal`,
+            // `StationLocal`, `AreaLocal` — is `Tier::Fine`, so a re-home that merely restates a pose
+            // in a neighbouring realm's frame changes the name and the numbers but not the lattice they
+            // are quantized on, and the window is still perfectly blendable. Collapsing there cost one
+            // tick with the two-pose track; with the ring it would throw away the WHOLE buffer and
+            // stall for its full depth — a fresh hitch at exactly the moment that matters most (a
+            // crossing, boarding, warp).
             *self = EntityTrack::new(pose);
         } else if pose.universe_tick > self.last_universe_tick {
-            self.push(pose);
-            self.last_universe_tick = pose.universe_tick;
-        } else {
+            if pose.frame != self.newest().frame {
+                // A SPACE CHANGE (the crossing-render slice's one-space model): under the one-space
+                // ingress every folded row is stated in the space the client stands in, so the only
+                // legitimate frame change left on a track is the OWN avatar's committed crossing —
+                // and a crossing is a CUT between two spaces, not a motion inside one. Blending
+                // across it lerps numbers measured from two different origins (MEASURED: the drawn
+                // own pose read 19.65 m in the old space beside a new-space box at the origin for
+                // the whole interpolation-buffer depth after the flip — the ride gate caught it).
+                // Collapse to the new pose; the next samples start clean in the new space. The
+                // slice-6 no-collapse rule was right when same-tier relabels of OTHER entities
+                // reached this fold; the one-space filter now keeps those out upstream.
+                *self = EntityTrack::new(pose);
+            } else {
+                self.push(pose);
+                self.last_universe_tick = pose.universe_tick;
+            }
+        } else if pose.frame == self.newest().frame {
             self.replace_newest(pose);
         }
+        // else: a non-newer row in another frame — the old feed's grace-window straggler; ignored
+        // (see the frame-stability guard above). The newest pose, its frame, and the window survive.
     }
 
     /// The pose to render at `cursor` (a continuous f64 in universe-tick units).
@@ -243,10 +305,14 @@ impl EntityTrack {
         // offset lerp is continuous ACROSS a cell boundary — `prev_in_cell = prev.offset + (prev.cell −
         // cell)·edge` (raw, NOT re-normalized, so the blend stays continuous). Through P3 both cells are
         // ZERO ⇒ this is exactly `prev.offset()` and the result rides `cell == ZERO` — byte-identical to
-        // the pre-S1 offset-only lerp. The result cell is `current`'s; `world_pos` (S3) subtracts the pinned
-        // origin over the full cell+offset. (`observe` already collapses the window on a FRAME change.)
+        // the pre-S1 offset-only lerp. The result cell is `current`'s, counted in `current`'s stated unit,
+        // and `world_pos` later flattens both together; it SUBTRACTS NOTHING (there is no pinned origin
+        // any more — the server ships every value already measured from the realm the client stands in).
+        // Using ONE end's unit for both ends is sound only because `observe` collapses the window
+        // whenever the unit changes, which is why that guard is on the unit rather than on the name.
         let cell = current.pos.cell();
-        let edge = current.frame.tier().cell_edge_m();
+        let tier = stated_tier(current.frame);
+        let edge = tier.cell_edge_m();
         let prev_offset = prev.pos.offset() + (prev.pos.cell() - cell).as_dvec3() * edge;
         let pos = lerp_at_game_time(
             prev_offset,
@@ -269,6 +335,7 @@ impl EntityTrack {
             cell,
             pos,
             orient,
+            tier,
         }
     }
 
@@ -308,6 +375,7 @@ impl EntityTrack {
             cell: n.pos.cell(),
             pos: n.pos.offset(),
             orient: n.orient,
+            tier: stated_tier(n.frame),
         }
     }
 }
@@ -326,6 +394,44 @@ mod tests {
             DVec3::new(x, 0.0, 0.0),
             UniverseTick(tick),
         )
+    }
+
+    /// THE FRAME-STABILITY GUARD (crossing-render review, the CRITICAL finding's root fix): a
+    /// non-strictly-newer row in a DIFFERENT frame is IGNORED — the newest pose, its frame, and the
+    /// window all survive. During a crossing's grace window the demoted source keeps emitting the
+    /// avatar (its retained ghost, frozen stamp, old frame) on the still-open old sub; before this
+    /// guard every such row overwrote the newest slot's FRAME and flipped the delivered location
+    /// backward per datagram. A same-frame equal-tick sibling chunk still updates in place.
+    #[test]
+    fn a_non_newer_row_in_another_frame_is_ignored_never_folded() {
+        let planet = FrameRef::PlanetCentered { planet_seed: 7 };
+        let mut track = EntityTrack::new(pose_at(10, 1.0));
+        // The crossing: a strictly-newer row in the NEW frame advances the window (same tier —
+        // the slice-6 no-collapse rule).
+        track.observe(StampedPose::at_rest(
+            planet,
+            DVec3::new(2.0, 0.0, 0.0),
+            UniverseTick(11),
+        ));
+        assert_eq!(track.current_frame(), planet, "the crossing row lands");
+        // The old feed's straggler: EQUAL tick, OLD frame — ignored (frame + pose survive).
+        track.observe(pose_at(11, 9.0));
+        assert_eq!(
+            track.current_frame(),
+            planet,
+            "an equal-tick old-frame row never flips the frame back"
+        );
+        assert_eq!(track.sample(11.0).pos, DVec3::new(2.0, 0.0, 0.0));
+        // OLDER tick, old frame — ignored too (the frozen retained-ghost row).
+        track.observe(pose_at(10, 9.0));
+        assert_eq!(track.current_frame(), planet);
+        // A same-frame equal-tick sibling chunk still updates in place (the replace_newest arm).
+        track.observe(StampedPose::at_rest(
+            planet,
+            DVec3::new(3.0, 0.0, 0.0),
+            UniverseTick(11),
+        ));
+        assert_eq!(track.sample(11.0).pos, DVec3::new(3.0, 0.0, 0.0));
     }
 
     // ---- SLICE 6 (THE SHAKE): the buffer and the history contradict each other ----
@@ -612,38 +718,68 @@ mod tests {
         // whose integer cells count in different units.
         assert_eq!(track.sample(13.0).pos, DVec3::new(99.0, 0.0, 0.0));
         assert_eq!(track.sample(14.0).frame, FrameRef::GalaxySpace);
+        // …and the sample carries the NEW unit, so whatever draws it scales the cell in light-years and
+        // not in millimetres. Before the unit rode the pose, this was re-derived at the drawing site.
+        assert_eq!(track.sample(14.0).tier, Tier::Coarse);
         assert_eq!(track.newest_tick(), UniverseTick(14));
     }
 
-    /// SLICE 6 S3 — a SAME-TIER relabel (walking off a planet into open space) KEEPS the window and
-    /// keeps blending. Since positions became root-absolute the label is carried for its tier alone,
-    /// so `PlanetCentered` -> `SystemSpace` changes the name and not one coordinate. Collapsing here
-    /// would stall for the ring's whole depth at exactly the moment the user cares about most.
+    /// THE UNIT IS STAMPED FROM THE LABEL THE SHIPPER PUT ON THIS VALUE, at the one ingress point, and
+    /// then travels with it. Both sampling paths do it, so the interpolated pose and the leading-edge
+    /// pose (the realm-box overlay reads that one) can never disagree about how big a cell is.
     #[test]
-    fn slice6_a_same_tier_relabel_keeps_the_window_and_stays_continuous() {
+    fn the_stated_unit_rides_every_render_pose_from_both_sampling_paths() {
+        let mut track = EntityTrack::new(pose_at(10, 0.0)); // SystemSpace — Fine
+        track.observe(pose_at(11, 10.0));
+        assert_eq!(track.sample(10.5).tier, Tier::Fine);
+        assert_eq!(track.current_render_pose().tier, Tier::Fine);
+        // A COARSE-lattice feed stamps Coarse on both.
+        let mut coarse = pose_at(12, 5.0);
+        coarse.frame = FrameRef::GalaxySpace;
+        let coarse_track = EntityTrack::new(coarse);
+        assert_eq!(coarse_track.sample(12.0).tier, Tier::Coarse);
+        assert_eq!(coarse_track.current_render_pose().tier, Tier::Coarse);
+    }
+
+    /// A frame change on a track is a SPACE CHANGE and COLLAPSES the window (the crossing-render
+    /// slice's one-space model — this REWRITES the slice-6 "same-tier relabel keeps the window"
+    /// contract). Positions are no longer root-absolute: every value is measured from the realm the
+    /// session stands in, so two frames on one track means two ORIGINS, and blending across them
+    /// lerps numbers from different spaces (MEASURED: the drawn own pose read the old space's 19.65 m
+    /// beside a new-space box at the origin for the whole buffer depth after a crossing flip — the
+    /// round-trip ride gate caught it). Under the one-space ingress, other entities' relabels never
+    /// reach this fold; the own avatar's crossing is the one legitimate frame change, and it is a cut.
+    #[test]
+    fn a_frame_change_collapses_the_window_to_the_new_space() {
         let mut track = EntityTrack::new(pose_at(10, 10.0)); // SystemSpace — Fine
         track.observe(pose_at(11, 11.0));
-        // Same tier, different name — and the coordinates continue smoothly through it.
-        let mut relabelled = pose_at(12, 12.0);
-        relabelled.frame = FrameRef::PlanetCentered { planet_seed: 5 };
+        // The crossing: same tier, NEW space, strictly newer — the window collapses to the new pose.
+        let mut crossed = pose_at(12, 0.4);
+        crossed.frame = FrameRef::PlanetCentered { planet_seed: 5 };
         assert_eq!(
-            relabelled.frame.tier(),
+            crossed.frame.tier(),
             FrameRef::SystemSpace { system_seed: 1 }.tier(),
         );
-        track.observe(relabelled);
-        // The window SURVIVED: the tick-10 pose is still retained and still blends.
+        track.observe(crossed);
+        // NO blend across the cut: a cursor BEHIND the crossing row clamps to the new space's pose —
+        // never to the old space's numbers, and never to a lerp of the two.
         assert!(
-            (track.sample(10.5).pos.x - 10.5).abs() < 1e-9,
-            "history kept"
+            (track.sample(10.5).pos.x - 0.4).abs() < 1e-9,
+            "the old space's history is gone; the sample clamps to the new space"
         );
-        assert!(
-            (track.sample(11.5).pos.x - 11.5).abs() < 1e-9,
-            "blends across the relabel"
-        );
-        // The label still tracks the leading edge, so the player's location readout still flips.
+        assert!((track.sample(12.0).pos.x - 0.4).abs() < 1e-9);
+        // The label tracks the leading edge, so the player's location readout flips with the cut.
         assert_eq!(
             track.current_frame(),
             FrameRef::PlanetCentered { planet_seed: 5 }
+        );
+        // And the window REFILLS in the new space: the next same-frame row blends normally again.
+        let mut next = pose_at(13, 1.4);
+        next.frame = FrameRef::PlanetCentered { planet_seed: 5 };
+        track.observe(next);
+        assert!(
+            (track.sample(12.5).pos.x - 0.9).abs() < 1e-9,
+            "blending resumes inside the new space"
         );
     }
 

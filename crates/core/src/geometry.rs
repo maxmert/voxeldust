@@ -251,6 +251,25 @@ impl Boundary {
         }
     }
 
+    /// The FURTHEST any point of this shape lies from a DIFFERENT origin, when the shape's own centre sits
+    /// at `offset` from it. The exact answer, not a bound: a sphere reaches `|offset| + r`; a box reaches
+    /// its farthest CORNER, which is what actually decides whether it pokes out of its parent.
+    ///
+    /// WHY EXACT AND NOT `|offset| + circumscribed_extent()`. That sum treats a box as the sphere around it,
+    /// which over-states a cube's reach by up to 73%. The nesting fence used it, and on the shipped walk
+    /// forest it condemned an area that is entirely inside its planet: the area's box spans x∈[2,8] with
+    /// half-extents 3 in a planet of radius 10, so its farthest corner is 9.06 m out, while the spherical
+    /// bound reported 10.20 and called it an escape. A fence that rejects correct worlds gets widened or
+    /// switched off; an exact one can stay armed.
+    #[must_use]
+    pub fn max_reach_from(&self, offset: DVec3) -> f64 {
+        match self {
+            Boundary::Shell { r } => offset.length() + r,
+            Boundary::Aabb { half } => farthest_corner(offset, *half, DQuat::IDENTITY),
+            Boundary::Obb { half, orient } => farthest_corner(offset, *half, *orient),
+        }
+    }
+
     /// The NEAREST any surface point lies to this shape's centre (the inscribed radius). Used to ask "how
     /// much interior can this parent guarantee?" — the inner bound, again so the fence is conservative:
     /// the parent only promises the sphere it fully contains.
@@ -316,6 +335,24 @@ impl Boundary {
             Boundary::Obb { half, orient } => box_signed_distance(orient.inverse() * p, *half),
         }
     }
+}
+
+/// The distance from the origin to the farthest of a box's eight corners, where the box has half-extents
+/// `half`, is rotated by `orient`, and its centre sits at `offset`. Monomorphic and exhaustive — eight
+/// corners, no closed form needed and none that stays exact under rotation. Boot-time only (the nesting
+/// fence), so the eight-way loop is free.
+#[must_use]
+fn farthest_corner(offset: DVec3, half: DVec3, orient: DQuat) -> f64 {
+    let mut max = 0.0_f64;
+    for sx in [-1.0, 1.0] {
+        for sy in [-1.0, 1.0] {
+            for sz in [-1.0, 1.0] {
+                let corner = offset + orient * (half * DVec3::new(sx, sy, sz));
+                max = max.max(corner.length());
+            }
+        }
+    }
+    max
 }
 
 /// The normalized Chebyshev norm of `p` against box half-extents `half`: the max over axes
@@ -894,10 +931,18 @@ impl AoiConfig {
 pub struct RealmRegion {
     /// The realm an entity IS IN while this is its deepest containing region.
     pub realm: RealmId,
-    /// The region center in the lattice (callers subtract it before the shape methods).
+    /// WHERE THIS REALM SITS INSIDE ITS PARENT, measured in the PARENT's frame. `None`-parented (the
+    /// ambient root) means the origin. Callers subtract it before the shape methods — that subtraction IS
+    /// the parent doing the downward conversion for its child.
     pub center: LatticePos,
-    /// The frame `center`/`shape` are expressed in. PLANTED now (P3: every region shares one identity
-    /// frame, so `transfer_frame(&IdentityFrames)` is a no-op) so the P4/P5 ephemeris swap is additive.
+    /// THIS REALM'S OWN frame — the space its `shape` is drawn in and the label anything standing inside
+    /// it wears. NOT the frame `center` is in: `center` is the parent's number, in the parent's frame.
+    ///
+    /// The comment here used to say "the frame `center`/`shape` are expressed in", from the days when
+    /// every region shared one identity frame and the two were indistinguishable. They are not the same
+    /// frame and never were on a real world; three separate pieces of code now depend on this field being
+    /// the CHILD's own frame (the child-roster lookups a source flush and an arriving pose go through, and
+    /// the realm feed's edge head), so the description had to stop describing the other one.
     pub frame: FrameRef,
     /// The region shape (`Shell` | `Aabb` | `Obb`) — reused verbatim from the portal model.
     pub shape: Boundary,
@@ -1026,18 +1071,26 @@ fn region_signed_distance_resolved(
     region: &RealmRegion,
 ) -> Result<f64, FrameError> {
     let p = reframed?;
-    // THE re-home decision, and the highest-severity place a position may not be truncated. This used to
-    // subtract one leftover from another and DISCARD the whole-number part of both. While every position
-    // carries a zero there that is exactly right; the moment one does not, it compares two fractions with
-    // the large part thrown away and answers, confidently, that you are somewhere you are not — deciding
-    // which realm contains you from the wrong numbers.
+    // EVERY REALM IS CENTRED ON ITSELF. The reframe above has already expressed the pose in this region's
+    // OWN frame, and in its own frame a region sits at its own origin — so the distance is measured from
+    // zero and there is NOTHING further to subtract.
     //
-    // `delta_m` is the exact form: it subtracts the whole numbers as integers (no rounding is possible)
-    // and the leftovers as floats, then combines. At a zero whole-number part it reduces to precisely the
-    // old expression, so this is byte-identical today and correct when the integrator starts folding.
-    Ok(region
-        .shape
-        .signed_distance(p.pos.delta_m(region.center, p.frame.tier())))
+    // This used to subtract `region.center` here as well, which counted the region's position TWICE the
+    // moment frames stopped being the identity: the reframe removed it, and then this removed it again.
+    // While every realm sat at the origin both were zero and nothing showed. Once a realm sat anywhere
+    // else, an occupant standing dead centre inside a five-metre box measured twenty metres OUTSIDE it,
+    // so entry could never latch and a crossing into it simply never happened.
+    //
+    // `region.center` is not wrong — it is where this realm sits IN ITS PARENT'S FRAME, which is exactly
+    // the thing a parent knows and a child does not. It belongs to the parent's downward question, which
+    // is [`child_signed_distance`]. It has no business in the child's own-frame answer.
+    //
+    // `delta_m` is the exact form: it subtracts whole numbers as integers (no rounding is possible) and
+    // leftovers as floats, then combines — so a position far from the origin is never truncated.
+    Ok(region.shape.signed_distance(
+        p.pos
+            .delta_m(LatticePos::local(DVec3::ZERO), p.frame.tier()),
+    ))
 }
 
 /// Why a realm-region forest is malformed — the boot fence (task #135, C-5). ONE variant per REJECT arm
@@ -1079,20 +1132,40 @@ pub enum RegionNestError {
 /// outside — the derived prior would then assert a falsehood every tick, and the containment fold could
 /// pick a parent the subject has physically left.
 ///
-/// SCOPE, stated honestly: this compares a child's REACH from its parent's centre against the parent's
-/// inscribed extent, and it only applies when the two share a frame. A cross-frame pair (a station in a
-/// planet's rotating frame) needs Shape×Shape math under a transform and stays ledgered. So this is a
-/// NECESSARY condition, not a sufficient one — it catches the placement mistakes a forest generator
-/// actually makes (a child centred too near the rim, or simply too big) rather than proving subset-ness.
+/// THE FENCE WAS INERT, AND THIS IS WHAT WAS WRONG WITH IT. It used to begin `if child.frame !=
+/// parent.frame { return None }` — and a parent and its child NEVER share a frame. Each realm is centred
+/// on itself and holds its own frame; a planet is `PlanetCentered`, its star system `SystemSpace`. So the
+/// early return fired on every pair in every real world and the check ran on nothing at all, while its
+/// doc-comment went on claiming the ancestry prior was guarded. The frame difference is not an obstacle
+/// here: `RealmRegion::center` MEANS "where I sit inside my parent, measured in my parent's frame", so the
+/// number is already in the frame the comparison needs.
+///
+/// The second half of the same mistake was subtracting the parent's own centre. The parent's centre is
+/// measured in ITS parent's frame — a different space again — so the subtraction mixed two frames and only
+/// looked right while every realm sat at its parent's origin. The child's placement needs no adjustment at
+/// all: it is already measured from the parent's centre.
+///
+/// SCOPE, stated honestly, three ways:
+/// - It compares the child's EXACT farthest point ([`Boundary::max_reach_from`]) against the parent's
+///   inscribed extent — the largest sphere the parent fully contains. Necessary, not sufficient: a box
+///   parent's corners are not promised to anybody.
+/// - It compares against the parent's BOUNDARY, deliberately NOT the boundary minus the parent's hysteresis
+///   inset. The prior this fence protects says "authoritatively inside the child ⇒ a member of the parent";
+///   that is falsified only by a child poking outside the parent's boundary. The inset is a release margin
+///   INSIDE that boundary — a subject there is still geometrically within the parent, so the prior holds.
+///   MEASURED: subtracting it condemns the shipped walk forest's Area A, whose farthest corner is 9.06 m
+///   from a planet of radius 10 with a 1 m inset. That forest is correct; the stricter bound was not.
+/// - A MOVING child is checked at its AUTHORED origin. An orbiting body's `center` is zero and its real
+///   placement comes from the ephemeris every tick, so for those this fence checks the SIZE and not the
+///   orbit. Saying so beats implying an orbit-wide guarantee it cannot give.
 fn child_fits_in_parent(child: &RealmRegion, parent: &RealmRegion) -> Option<(f64, f64)> {
-    if child.frame != parent.frame {
-        return None; // cross-frame: not comparable here (ledgered)
-    }
-    let offset = (child.center.offset() - parent.center.offset()).length();
-    let reach = offset + child.shape.circumscribed_extent();
-    // The parent's interior MINUS its own hysteresis inset: a child sitting in the band would let a
-    // subject be "inside the child" while the parent is still releasing it.
-    let limit = parent.shape.inscribed_extent() - parent.band.inset();
+    // `center` is expressed in the PARENT's frame, so the parent's tier is the one that scales its cell
+    // anchor into metres — never the child's own (which is what `RealmRegion::frame` names).
+    let center_in_parent = child
+        .center
+        .delta_m(LatticePos::local(DVec3::ZERO), parent.frame.tier());
+    let reach = child.shape.max_reach_from(center_in_parent);
+    let limit = parent.shape.inscribed_extent();
     (reach > limit).then_some((reach, limit))
 }
 
@@ -1107,6 +1180,58 @@ fn child_fits_in_parent(child: &RealmRegion, parent: &RealmRegion) -> Option<(f6
 ///
 /// # Errors
 /// [`RegionNestError`] — one variant per malformation above.
+/// A shard was booted claiming to be a ROOT while the world says its realm has a parent.
+///
+/// Carries both sides so the failure names itself: the realm booted, and the parent the world gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("shard hosts {realm:?}, whose parent is {parent:?}, but booted with a root lineage")]
+pub struct LineageNotRooted {
+    pub realm: RealmId,
+    pub parent: RealmId,
+}
+
+/// BOOT FENCE — a realm may not exist without its complete chain to the root.
+///
+/// The owner's rule: "We can't boot the Realm without parents to the whole root." The only parentless
+/// realm is the one true root, so a shard hosting anything else MUST know who contains it.
+///
+/// WHY THIS IS LOAD-BEARING NOW, and was not before. Leaving a realm used to be a geometric SEARCH: the
+/// shard scanned every boundary it knew, ancestors included, and worked out which one an occupant had
+/// ended up inside. A shard's declared lineage was a label nothing read, so a stub one was harmless.
+/// Leaving is now "am I outside myself? — then hand up to my parent", and a shard's own lineage is the
+/// ONLY place it learns who that is (knowing anything about where its ancestors ARE would be the leak
+/// this whole model removes). So a shard that wrongly believes it is a root hands occupants to the
+/// ambient root instead of to the star system twenty metres away — silently, with nothing crashing.
+/// Refusing to start beats misrouting players.
+///
+/// # Errors
+/// [`LineageNotRooted`] if `own_realm` has a parent in `regions` while `coord_parent` is `None`.
+pub fn guard_lineage_reaches_root(
+    regions: &[RealmRegion],
+    own_realm: RealmId,
+    coord_parent: Option<RealmId>,
+) -> Result<(), LineageNotRooted> {
+    let world_parent = regions
+        .iter()
+        .find(|r| r.realm == own_realm)
+        .and_then(|r| r.parent);
+    lineage_verdict(own_realm, world_parent, coord_parent)
+}
+
+/// The monomorphic core of [`guard_lineage_reaches_root`] — every branch covered once, here (HR5).
+fn lineage_verdict(
+    realm: RealmId,
+    world_parent: Option<RealmId>,
+    coord_parent: Option<RealmId>,
+) -> Result<(), LineageNotRooted> {
+    match (world_parent, coord_parent) {
+        // The world gives this realm a parent and the lineage omits it — the state that misroutes.
+        (Some(parent), None) => Err(LineageNotRooted { realm, parent }),
+        // A true root (no parent either side), or a lineage that names one. Both fine.
+        _ => Ok(()),
+    }
+}
+
 pub fn guard_regions_nest(regions: &[RealmRegion], max: usize) -> Result<(), RegionNestError> {
     guard_region_count(regions, max)?;
     guard_single_root(regions)?;
@@ -1449,49 +1574,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_containment_distance_is_exact_when_the_whole_number_part_is_not_zero() {
-        use crate::UniverseTick;
-        use crate::frame::IdentityFrames;
-        use crate::pose::FINE_CELL_EDGE_M;
-        use glam::I64Vec3;
-        // THE re-home decision. Today every position carries a zero whole-number part, so the old
-        // expression — subtract the leftovers, discard the rest — happened to be right. This asserts it
-        // is right for the reason that will still hold once the integrator starts folding.
-        //
-        // The subject and the region sit in the SAME place, expressed differently: the region at a
-        // whole-number cell with no leftover, the subject one cell lower with a leftover of exactly one
-        // cell edge. Distance from the region centre is therefore ZERO, and it is INSIDE. The discarding
-        // form computes the leftover difference alone — one whole cell edge — and would place it outside
-        // a region smaller than that, i.e. re-home a player who has not moved.
-        let edge = FINE_CELL_EDGE_M;
-        let region = RealmRegion {
-            center: LatticePos::at(I64Vec3::new(4, 0, 0), DVec3::ZERO),
-            shape: Boundary::Shell { r: edge / 2.0 },
-            ..test_region(RealmId::System(1), None)
-        };
-        let same_point = LatticePos::at(I64Vec3::new(3, 0, 0), DVec3::new(edge, 0.0, 0.0));
-        let mut pose = StampedPose::at_rest(region.frame, DVec3::ZERO, UniverseTick(1));
-        pose.pos = same_point;
-
-        assert_eq!(
-            region_signed_distance(&pose, &region, &IdentityFrames),
-            Ok(-edge / 2.0),
-            "the same point in two spellings is at distance zero from the centre, i.e. fully inside"
-        );
-
-        // And the control: the truncating form this replaced. Left in the test rather than in prose so
-        // the failure it would cause is a number on the screen, not an argument.
-        let truncated = region
-            .shape
-            .signed_distance(same_point.offset() - region.center.offset());
-        assert!(
-            truncated > 0.0,
-            "the discarding form reports the subject OUTSIDE its own region — the re-home that follows \
-             is a player teleported for standing still"
-        );
-    }
-
     /// A test region with an explicit radius — so a fixture claiming to be a VALID forest can be
     /// geometrically nested (child strictly inside parent), not merely topologically well-formed.
     fn test_region_r(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
@@ -1589,6 +1671,43 @@ mod tests {
     }
 
     #[test]
+    fn a_shard_hosting_a_child_realm_may_not_boot_claiming_to_be_a_root() {
+        // BOTH ARMS of the boot fence. The refused case is the one that used to be tolerated: a shard
+        // declaring a root lineage while hosting a realm the world puts inside another. Harmless while
+        // leaving was a geometric search that never read the lineage; now it is how a realm knows who to
+        // hand an occupant to, so a wrong answer delivers players to the ambient root in silence.
+        let forest = valid_forest();
+        let child = forest
+            .iter()
+            .find(|r| r.parent.is_some())
+            .copied()
+            .expect("a valid forest nests something");
+        let parent = child.parent.expect("just filtered on it");
+        assert_eq!(
+            guard_lineage_reaches_root(&forest, child.realm, None),
+            Err(LineageNotRooted {
+                realm: child.realm,
+                parent
+            })
+        );
+        // Naming the parent is accepted…
+        assert_eq!(
+            guard_lineage_reaches_root(&forest, child.realm, Some(parent)),
+            Ok(())
+        );
+        // …and the ONE true root legitimately has none.
+        let root = forest
+            .iter()
+            .find(|r| r.parent.is_none())
+            .copied()
+            .expect("a valid forest has one ambient root");
+        assert_eq!(
+            guard_lineage_reaches_root(&forest, root.realm, None),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn guard_regions_nest_accepts_a_valid_forest() {
         assert_eq!(guard_regions_nest(&valid_forest(), 64), Ok(()));
     }
@@ -1613,8 +1732,81 @@ mod tests {
                 realm: RealmId::Planet(1),
                 parent: RealmId::System(1),
                 reach: 50.0,
-                limit: 10.0 - 1.0, // the parent's interior minus its own hysteresis inset
+                // The parent's own boundary — NOT boundary-minus-inset. See `child_fits_in_parent`:
+                // the prior is falsified by leaving the parent, not by standing in its release band.
+                limit: 10.0,
             }
+        );
+    }
+
+    #[test]
+    fn the_nesting_fence_measures_a_child_across_a_frame_boundary() {
+        // THE ARM THAT WAS DEAD. Every real parent/child pair has DIFFERENT frames — a planet is
+        // `PlanetCentered`, its system `SystemSpace` — and the fence used to return early on exactly that,
+        // so it ran on nothing. This pair differs in frame and MUST still be judged.
+        let parent = RealmRegion {
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            ..test_region_r(RealmId::System(1), Some(RealmId::System(0)), 10.0)
+        };
+        let escaping = RealmRegion {
+            frame: FrameRef::PlanetCentered { planet_seed: 1 },
+            center: LatticePos::local(DVec3::new(8.0, 0.0, 0.0)),
+            ..test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 5.0)
+        };
+        assert_eq!(
+            child_fits_in_parent(&escaping, &parent),
+            Some((13.0, 10.0)),
+            "a cross-frame child that reaches 13 m out of a 10 m parent must be caught"
+        );
+        // …and the accept twin across the same frame boundary, so a fence that simply always rejects
+        // would fail here.
+        let fitting = RealmRegion {
+            center: LatticePos::local(DVec3::new(4.0, 0.0, 0.0)),
+            ..escaping
+        };
+        assert_eq!(child_fits_in_parent(&fitting, &parent), None);
+    }
+
+    #[test]
+    fn a_box_child_is_measured_by_its_farthest_corner_not_the_sphere_around_it() {
+        // The shipped walk forest's Area A, to the metre: a half-3 box centred 5 m out inside a planet of
+        // radius 10. Its farthest corner is at (8,3,3) ⇒ 9.06 m, so it FITS. The spherical over-estimate
+        // (5 + |(3,3,3)| = 10.20) called it an escape, which is why the exact corner is the measure.
+        let parent = test_region_r(RealmId::Planet(7), Some(RealmId::System(7)), 10.0);
+        let area = RealmRegion {
+            center: LatticePos::local(DVec3::new(5.0, 0.0, 0.0)),
+            shape: Boundary::Aabb {
+                half: DVec3::splat(3.0),
+            },
+            ..test_region_r(RealmId::Area(7), Some(RealmId::Planet(7)), 0.0)
+        };
+        let exact = Boundary::Aabb {
+            half: DVec3::splat(3.0),
+        }
+        .max_reach_from(DVec3::new(5.0, 0.0, 0.0));
+        assert_eq!(exact, DVec3::new(8.0, 3.0, 3.0).length());
+        assert!(exact < 10.0, "measured reach {exact} must be inside r=10");
+        assert_eq!(child_fits_in_parent(&area, &parent), None);
+    }
+
+    #[test]
+    fn a_rotated_box_reaches_the_same_distance_as_the_unrotated_one_about_its_own_centre() {
+        // `max_reach_from` on an `Obb`: a cube spun about its centre reaches exactly as far as before
+        // (its corner set is the same set of points), which is the property that lets a station be
+        // authored at any orientation without the fence changing its verdict.
+        let half = DVec3::splat(2.0);
+        let spun = Boundary::Obb {
+            half,
+            orient: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_4),
+        };
+        let flat = Boundary::Aabb { half };
+        assert!(
+            (spun.max_reach_from(DVec3::ZERO) - flat.max_reach_from(DVec3::ZERO)).abs() < 1e-12
+        );
+        // Off-centre the two DO differ (the spun corners point elsewhere), so this is not a vacuous pair.
+        assert_ne!(
+            spun.max_reach_from(DVec3::new(3.0, 0.0, 0.0)),
+            flat.max_reach_from(DVec3::new(3.0, 0.0, 0.0))
         );
     }
 
@@ -1629,7 +1821,7 @@ mod tests {
         let forest = vec![
             test_region_r(RealmId::System(0), None, 100.0),
             test_region_r(RealmId::System(1), Some(RealmId::System(0)), 10.0),
-            offset_child, // reaches 5 + 3 = 8, inside the parent's 10 - 1 = 9
+            offset_child, // reaches 5 + 3 = 8, inside the parent's 10
         ];
         assert_eq!(guard_regions_nest(&forest, 64), Ok(()));
     }

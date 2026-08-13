@@ -579,29 +579,65 @@ fn a_parked_ship_keeps_the_planets_orbiting_at_full_speed() {
     );
 }
 
+/// The orbit-slowdown knob, PANIC-SAFE (Stage B4). The crossing tests slow the orbits through
+/// `VD_VISUAL_ORBIT_SLOWDOWN` (value from `VD_TEST_ORBIT_SLOWDOWN`, default 300; set that to 1 for a
+/// flight-speed run). The old bare `set_var`/`remove_var` pair leaked the quasi-freeze into the
+/// FULL-SPEED tests that follow in this binary whenever an assert fired between the two calls — one
+/// crossing failure then cascaded into spurious "frozen world" failures downstream. The guard's `Drop`
+/// runs on unwind, so the knob clears however the test ends. (`--test-threads=1` serializes the
+/// binary and shards read the knob only at boot, so holding it for the whole test body is equivalent
+/// to the old mid-test reset.)
+struct OrbitSlowdown;
+
+impl OrbitSlowdown {
+    fn engage() -> OrbitSlowdown {
+        // SAFETY: set before any cluster boot; the binary runs single-threaded (`--test-threads=1`).
+        unsafe {
+            std::env::set_var(
+                "VD_VISUAL_ORBIT_SLOWDOWN",
+                std::env::var("VD_TEST_ORBIT_SLOWDOWN").unwrap_or_else(|_| "300".to_owned()),
+            );
+        }
+        OrbitSlowdown
+    }
+}
+
+impl Drop for OrbitSlowdown {
+    fn drop(&mut self) {
+        // SAFETY: same single-threaded discipline as `engage`.
+        unsafe { std::env::remove_var("VD_VISUAL_ORBIT_SLOWDOWN") }
+    }
+}
+
 /// The INNER planet's `(realm, elements)` — the mover whose EPOCH position is CLOSEST to the star (well
 /// inside System 7's 150 m SOI, so approaching it never crosses the System boundary).
+///
+/// THROUGH THE PRODUCTION BOOT (Stage B4): `vd_bins::boot_regions_and_movers` applies the
+/// `VD_VISUAL_ORBIT_SLOWDOWN` knob to the star mass exactly as the booting shard does, so the elements
+/// the fixture aims by ARE the elements the star authors with. The old direct
+/// `moving_children_for_config` read the UNMODIFIED config: under the gated 300x default the fixture's
+/// aim point orbited 300x faster than the real planet — a phantom target that merely swept the right
+/// circle. Call it AFTER the [`OrbitSlowdown`] guard engages.
 fn inner_planet_mover(
     p: &DevClusterParams,
 ) -> (vd_core::pose::RealmId, vd_core::celestial::OrbitalElements) {
-    let config = vd_core::worldgen::UniverseConfig::visual_demand(p.move_speed, p.tick_dt);
-    vd_core::worldgen::moving_children_for_config(
-        p.universe_seed,
-        &config,
-        vd_core::pose::RealmId::System(7),
-    )
-    .into_iter()
-    .min_by(|a, b| {
-        vd_core::celestial::orbital_state(&a.1, 0.0)
-            .position
-            .length()
-            .total_cmp(
-                &vd_core::celestial::orbital_state(&b.1, 0.0)
-                    .position
-                    .length(),
-            )
-    })
-    .expect("the visual-demand forest has planet movers")
+    let system = vd_core::pose::RealmId::System(7);
+    let held = std::collections::BTreeSet::from([system]);
+    let (_regions, moving) =
+        vd_bins::boot_regions_and_movers(p.universe_seed, &held, system, p.move_speed, p.tick_dt);
+    moving
+        .into_iter()
+        .min_by(|a, b| {
+            vd_core::celestial::orbital_state(&a.1, 0.0)
+                .position
+                .length()
+                .total_cmp(
+                    &vd_core::celestial::orbital_state(&b.1, 0.0)
+                        .position
+                        .length(),
+                )
+        })
+        .expect("the visual-demand forest has planet movers")
 }
 
 /// THE CROSSING PROOF (moving-frame crossing fix): flying an occupant INTO a demand-spawned orbiting planet
@@ -626,13 +662,7 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
-    // SAFETY: the process-wide env is set before any cluster boot; `--test-threads=1` serializes tests. It is
-    // RESET the moment this test's crossing completes (below) so a later orbit-speed-dependent test
-    // (`a_parked_ship…`) does not inherit the quasi-freeze — this shard reads the value only at boot, so
-    // resetting after its cluster is up does not affect this test.
-    unsafe {
-        std::env::set_var("VD_VISUAL_ORBIT_SLOWDOWN", "300");
-    }
+    let _slowdown = OrbitSlowdown::engage();
     let f = fixture("innerrehome");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
@@ -657,11 +687,38 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
         vd_core::pose::RealmId::Planet(s) => s,
         other => panic!("inner mover is a planet, got {other:?}"),
     };
-    // The epoch position is slowdown-invariant; with slowdown=300 the planet barely drifts over the approach.
-    let epoch = vd_core::celestial::orbital_state(&elements, 0.0).position;
+    // AIM AT WHERE THE PLANET IS NOW, re-aimed every leg — the way a pilot flies.
+    //
+    // It used to aim at the planet's EPOCH centre, which is where that planet sits only while it barely
+    // moves. That is exactly what the 300x orbit slowdown this fixture sets buys, and it made the fixture
+    // unable to fail on a world that moves: run it at flight speed and it chases a point the planet left
+    // long ago — measured, closest approach 17.93 m against a 4.16 m boundary while the occupant wandered
+    // 12, 31, 41 and 23 m out. A fixture that can only pass on a nearly-still world cannot gate a game
+    // that is played on a moving one.
+    let tick_hz = 1.0 / p.tick_dt;
+    let planet_at = |tick: u64| {
+        vd_core::celestial::orbital_state(
+            &elements,
+            vd_core::celestial::secs_since_epoch(tick, tick_hz),
+        )
+        .position
+    };
+    // RENDEZVOUS AND PARK (Stage B4; run-3/run-4 measurements). Chasing the live centre — even with a
+    // led aim — keeps the ship at chase speed through the band, and the flush re-validation then
+    // RIGHTLY refuses a crossing whose subject is already gone: ~19 m of travel between the decision
+    // and the flush, 15+ aborted attempts, best approach 0.39 m, zero commits. A pilot lands by
+    // ARRIVING EARLY: fly to where the planet WILL BE, stop, and let it sweep over the parked ship —
+    // the relative speed is then the planet's own ~6 m/s (~0.13 m per tick), the decision is still
+    // true at the flush, and the crossing commits. At the gated 300x default the rendezvous point is
+    // in effect the current centre, so this degenerates to fly-there-and-arrive.
+    const RENDEZVOUS_TICKS: u64 = 200;
+    // How long past the rendezvous instant to stay parked before re-planning: one full sweep of the
+    // planet's shell (~8.3 m at ~6.3 m/s ≈ 66 ticks) plus margin for the crossing pipeline.
+    const SWEEP_GRACE_TICKS: u64 = 120;
+    let epoch = planet_at(0);
     let want = vd_core::pose::FrameRef::PlanetCentered { planet_seed }.label();
     eprintln!(
-        "[repro] inner planet {planet:?} epoch_len={:.1} — flying to its FIXED epoch center, expect {want:?}",
+        "[repro] inner planet {planet:?} epoch_len={:.1} — flying to its LIVE centre, expect {want:?}",
         epoch.length(),
     );
 
@@ -694,28 +751,75 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
         if loc == want {
             break;
         }
-        if let Some(pos) = own_pos(&st) {
-            best = best.min((pos - epoch).length());
-        }
-        if leg.is_multiple_of(5) {
-            eprintln!(
-                "[repro] inner leg {leg}: tick={:?} loc={loc:?} own_len={:?} best={best:.2}",
-                st.universe_tick,
-                own_pos(&st).map(|v| v.length()),
-            );
-        }
+        // FLY TO THE RENDEZVOUS — where the planet will be `RENDEZVOUS_TICKS` from the client's last
+        // report (the star authors these elements; the fixture derives them through the same boot the
+        // star uses) — then PARK there and let the planet sweep over the stationary ship.
+        let now_tick = st.universe_tick.unwrap_or(0);
+        let target = planet_at(now_tick + RENDEZVOUS_TICKS);
+        eprintln!(
+            "[repro] inner leg {leg}: tick={now_tick} loc={loc:?} own_len={:?} best={best:.2} — \
+             rendezvous at tick {}",
+            own_pos(&st).map(|v| v.length()),
+            now_tick + RENDEZVOUS_TICKS,
+        );
         leg += 1;
-        let _ = devctl(
+        let flew = devctl(
             devctl_port,
             &DevRequest::WalkTo {
-                target: epoch.to_array(),
-                arrive_epsilon: 1.0,
-                max_ticks: 40,
+                target: target.to_array(),
+                arrive_epsilon: 0.5,
+                max_ticks: RENDEZVOUS_TICKS,
+                // THE BRAKE (nav::walk_to), sized to the FEEDBACK LAG (run-7 measurement): the
+                // controller steers by the DELIVERED pose, which trails the server by the
+                // interpolation buffer (~2-3 ticks). A brake sized to ONE step still overshoots
+                // and declares arrival on the lagged pose mid-hunt, parking 10-45 m off. Sizing
+                // it to (1 + lag) steps commands at most dist/4 per tick — a monotone, no-overshoot
+                // approach on which the lagged arrival test is honest.
+                max_step_m: 4.0 * p.move_speed * p.tick_dt,
             },
         );
+        // CUT THE THROTTLE before parking (run-6 measurement): the Move input is STICKY — a leg
+        // that times out leaves the last axes held, and a park that sleeps on a held throttle is
+        // a full-speed straight-line runaway (measured: ~1 km out of the system in one window).
+        let _ = devctl(
+            devctl_port,
+            &DevRequest::Move {
+                axes: [0.0, 0.0, 0.0],
+            },
+        );
+        eprintln!(
+            "[repro]   leg {}: walk outcome {}",
+            leg - 1,
+            match &flew {
+                Some(DevResponse::State { .. }) => "ARRIVED",
+                Some(DevResponse::Timeout { .. }) => "TIMEOUT",
+                other => {
+                    let _ = other;
+                    "OTHER"
+                }
+            },
+        );
+        // PARKED: hold until the sweep instant (plus grace) or the flip, whichever first.
+        let wait_until = now_tick + RENDEZVOUS_TICKS + SWEEP_GRACE_TICKS;
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let Some(s) = poll_state(devctl_port) else {
+                break;
+            };
+            loc = s.location.clone().unwrap_or_default();
+            if let Some(pos) = own_pos(&s) {
+                best = best.min((pos - planet_at(s.universe_tick.unwrap_or(0))).length());
+            }
+            if loc == want || s.universe_tick.unwrap_or(0) > wait_until {
+                break;
+            }
+        }
+        if loc == want {
+            break;
+        }
         assert!(
             started.elapsed() < deadline,
-            "NO CROSSING (inner): chased the inner planet {planet:?}'s fixed epoch center for {}s but \
+            "NO CROSSING (inner): flew rendezvous legs at the inner planet {planet:?} for {}s but \
              location never left \"System 7\" (loc {loc:?}); closest approach {best:.2} m vs ~4.16 m SOI.",
             started.elapsed().as_secs(),
         );
@@ -728,11 +832,7 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
     );
     eprintln!("[repro] inner location flipped to {loc:?} (closest approach {best:.2} m)");
     assert_eq!(loc, want);
-    // Reset the orbit-slowdown NOW (the crossing is done; this test's shards already booted with it) so a later
-    // full-speed-orbit test in this process never inherits the quasi-freeze.
-    unsafe {
-        std::env::remove_var("VD_VISUAL_ORBIT_SLOWDOWN");
-    }
+    // (The orbit-slowdown knob now clears at the `OrbitSlowdown` guard's drop — panic-safe, end of test.)
 
     // ── THE CASCADE PROOF (the "world stale after re-home" fix) ────────────────────────────────────────────
     // The player is now on the PLANET shard, which authors NOTHING itself (it has no moving children). WITHOUT
@@ -754,18 +854,24 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
     let mut on_planet_baseline: Option<u64> = None;
     let mut latest = 0u64;
     let mut saw_planet = false;
+    // PARKED IS RIDING (Stage B4): once ON the planet the player's pose is PLANET-LOCAL, and the
+    // planet's own motion is its parent's business — a parked occupant rides the realm by
+    // construction (the realm model's whole point). No station-keeping here: walking is exactly what
+    // pushed the run-2 player OFF the planet (a WalkTo target stated in the OLD system frame while
+    // the player's stream was already planet-local).
     loop {
         std::thread::sleep(Duration::from_millis(300));
-        if let Some(s) = poll_state(devctl_port)
-            && s.location
+        if let Some(s) = poll_state(devctl_port) {
+            if s.location
                 .as_deref()
                 .is_some_and(|l| l.starts_with("Planet"))
-        {
-            saw_planet = true;
-            latest = s.realm_frames_applied;
-            let base = *on_planet_baseline.get_or_insert(latest);
-            if latest >= base + CASCADE_MIN_FRAMES {
-                break;
+            {
+                saw_planet = true;
+                latest = s.realm_frames_applied;
+                let base = *on_planet_baseline.get_or_insert(latest);
+                if latest >= base + CASCADE_MIN_FRAMES {
+                    break;
+                }
             }
         }
         assert!(
@@ -814,9 +920,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
-    unsafe {
-        std::env::set_var("VD_VISUAL_ORBIT_SLOWDOWN", "300");
-    }
+    let _slowdown = OrbitSlowdown::engage();
     let f = fixture("returnnofreeze");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
@@ -857,24 +961,46 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         }
     };
 
-    // ── FLY IN: chase the planet's FIXED epoch center until `location` flips to the planet. ──
+    // ── FLY IN, park-then-nudge (the space-change trap): a WalkTo aimed at the epoch in SYSTEM ──
+    // numbers keeps driving after the crossing flips the avatar into PLANET space — the same target
+    // array is then 17.9 m away in the NEW space and the remaining budget walks the avatar straight
+    // back out of the 4.16 m shell (measured; the pre-B1 stale commits masked it). So: approach to a
+    // PARK POINT 6 m short of the epoch (outside the shell — no crossing can fire), settle, then
+    // nudge inward in 2-tick legs, polling the flip BETWEEN nudges — at most one nudge of
+    // misdirected drive (~a metre) can ever land after the flip.
     let in_deadline = Instant::now() + deadline;
+    // PARK INSIDE THE ACQUIRE EDGE: the shell is ~4.16 m and containment acquires at ≥1 m inside
+    // (~3.16 m from the centre), so an arrive tolerance of 2.5 m puts the PARKED ship past the edge
+    // — the crossing fires on a stationary avatar, and there is no remaining drive budget for the
+    // space-change trap to misdirect. The heavy brake (20× a full-speed step) keeps the terminal
+    // approach at walking pace, so the drive's own lag never overshoots the tolerance.
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::WalkTo {
+            target: epoch.to_array(),
+            arrive_epsilon: 2.5,
+            max_ticks: 600,
+            max_step_m: 20.0 * DEV.move_speed * DEV.tick_dt,
+        },
+    );
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Move {
+            axes: [0.0, 0.0, 0.0],
+        },
+    );
     loop {
         if poll(in_deadline).location.as_deref() == Some(want_planet.as_str()) {
             break;
         }
-        let _ = devctl(
-            devctl_port,
-            &DevRequest::WalkTo {
-                target: epoch.to_array(),
-                arrive_epsilon: 1.0,
-                max_ticks: 40,
-            },
-        );
         assert!(
             Instant::now() < in_deadline,
-            "NO CROSSING IN: location never became {want_planet:?}"
+            "NO CROSSING IN: location never became {want_planet:?}. The shards DO hand the player over \
+             (their logs show it), so the question this failure has to answer is what the ROUTER did with \
+             the frames afterwards — gateway: {:?}",
+            gateway_view(gw_admin),
         );
+        std::thread::sleep(Duration::from_millis(150));
     }
     let _ = devctl(
         devctl_port,
@@ -884,54 +1010,65 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     );
     eprintln!("[repro] crossed IN to {want_planet:?}");
 
-    // ── RIDE THE REALM (Symptom A): the own player's WORLD pose tracks the destination planet's streamed
-    // box center (rides the orbit), NOT the star origin (no "teleport"). `own_pos` is now the world_pos-
-    // mapped own pose; the planet box center is its streamed placement. Discriminates on the frozen
-    // geometry: inner orbit ≈17 m, planet SOI ≈4.16 m — so a tolerance of 8 m separates "rides it" (gap
-    // < SOI < 8, own.len ≈17 > 8) from the bug (raw frame-local: gap ≈17 > 8 AND own.len ≈0 < 8).
+    // ── RIDE THE REALM (Symptom A), THE SETTLED ONE-SPACE MODEL (crossing-render slice, §4x/§4y):
+    // standing ON the planet, the client stands IN the planet's space — its own pose AND the planet's
+    // box are BOTH planet-local, so they coincide near the origin, and "riding the orbit" is true by
+    // construction (the world moves around you; you do not chase your own ground). The assertion that
+    // still catches the ORIGINAL teleport bug is the GAP: a player rendered at raw frame-local against
+    // a box still drawn at its parent-space orbit reads a gap of the whole orbit (~17 m), and a stale
+    // pre-crossing box (the measured "I landed on the planet and I am outside it") reads metres. The
+    // OLD precondition here (`center.length() > 12`) asserted the pre-slice model — the box drawn in
+    // the PARENT's space while its rider drew in the planet's — which is exactly the two-space split
+    // the slice made unrepresentable; it flipped to red the moment the cure landed, as it should.
     let want_box = format!("Planet({planet_seed})");
-    let ride = {
+    // SETTLE, then assert: the saga tail (commit → the source's demote) legitimately overlaps two
+    // owners for a few ticks, and the drawn pose belongs to whichever space's row is freshest — a
+    // transient the crossing cut ends. Poll until the pair COINCIDES twice in a row (the settled
+    // one-space state), bounded; the assert then reads the settled values.
+    const PLANET_RIDE_TOL_M: f64 = 8.0;
+    let (own, center) = {
         let until = Instant::now() + Duration::from_secs(15);
+        let mut streak = 0u32;
+        let mut latest: Option<(DVec3, DVec3)> = None;
         loop {
             let s = poll(until);
-            if own_pos(&s).is_some() && s.realm_boxes.iter().any(|b| b.realm == want_box) {
-                break s;
+            if let (Some(own), Some(bx)) = (
+                own_pos(&s),
+                s.realm_boxes.iter().find(|b| b.realm == want_box),
+            ) {
+                let center = DVec3::from_array(bx.center);
+                latest = Some((own, center));
+                // BOTH halves of the settled state: the pair coincides AND the pair sits at the
+                // observer's own-space origin — a coincident pair out at the parent-space orbit is
+                // the stale pre-cut render, coherent but in the WRONG space (measured).
+                streak = if (own - center).length() < PLANET_RIDE_TOL_M
+                    && center.length() < PLANET_RIDE_TOL_M
+                {
+                    streak + 1
+                } else {
+                    0
+                };
+                if streak >= 2 {
+                    break latest.expect("just set");
+                }
             }
             assert!(
                 Instant::now() < until,
-                "own world pose / planet box never appeared after cross-in"
+                "RIDE NEVER SETTLED: own pose and the planet box never coincided after cross-in \
+                 (last {latest:?}) — two spaces in one picture (the pre-slice split, or a stale \
+                 pre-crossing box)."
             );
+            std::thread::sleep(Duration::from_millis(150));
         }
     };
-    let own = own_pos(&ride).expect("own world pose");
-    let center = DVec3::from_array(
-        ride.realm_boxes
-            .iter()
-            .find(|b| b.realm == want_box)
-            .expect("planet box")
-            .center,
-    );
-    const PLANET_RIDE_TOL_M: f64 = 8.0;
     assert!(
-        center.length() > 12.0,
-        "precondition: the planet box sits out at its orbit (was {:.2} m)",
-        center.length()
-    );
-    assert!(
-        (own - center).length() < PLANET_RIDE_TOL_M,
-        "RIDE FAILED: own world pose {own:?} did NOT ride the planet box {center:?} (gap {:.2} m of a \
-         {:.2} m orbit) — rendered at raw frame-local (teleport-to-origin), not composed with its realm.",
-        (own - center).length(),
+        center.length() < PLANET_RIDE_TOL_M,
+        "the OCCUPIED planet's box draws at the observer's own space origin (SL3: the realm you stand \
+         in draws itself at your origin), not at its parent-space orbit: {:.2} m",
         center.length(),
     );
-    assert!(
-        own.length() > PLANET_RIDE_TOL_M,
-        "RIDE FAILED: own world pose {own:?} sits at the star origin (len {:.2}) — did not ride the moving \
-         planet.",
-        own.length(),
-    );
     eprintln!(
-        "[repro] RIDES THE REALM: own {own:?} tracks the planet box {center:?} (gap {:.2} m) — no teleport",
+        "[repro] RIDES THE REALM (one space): own {own:?} beside the planet box {center:?} (gap {:.2} m)",
         (own - center).length()
     );
 
@@ -953,6 +1090,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
                 target: (-epoch * 1.5).to_array(),
                 arrive_epsilon: 1.0,
                 max_ticks: 40,
+                max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
             },
         );
         assert!(
@@ -987,7 +1125,9 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     let base = poll(Instant::now() + Duration::from_secs(5)).realm_frames_applied;
     let observe_until = Instant::now() + Duration::from_secs(15);
     let mut neighbour_feed_live = false;
-    let mut last_seen = base;
+    // Assigned by the first pass of the loop below (which always runs before either read of it), so
+    // seeding it with `base` would be a value nothing can observe — and `-D warnings` says so.
+    let mut last_seen;
     loop {
         std::thread::sleep(Duration::from_millis(300));
         let s = poll(observe_until);
@@ -1022,9 +1162,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         "[repro] post-return neighbour feed LIVE on System 7 ({base} -> {last_seen} applied frames) — the \
          surrounding realms keep advancing across the cross"
     );
-    unsafe {
-        std::env::remove_var("VD_VISUAL_ORBIT_SLOWDOWN");
-    }
+    // (The orbit-slowdown knob clears at the `OrbitSlowdown` guard's drop — panic-safe.)
 }
 
 /// LIVE-BUG REPRO (the user's report): after SEVERAL Planet→System→Planet→System rehomes everything FROZE —
@@ -1038,9 +1176,7 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
-    unsafe {
-        std::env::set_var("VD_VISUAL_ORBIT_SLOWDOWN", "300");
-    }
+    let _slowdown = OrbitSlowdown::engage();
     let f = fixture("repeatroundtrip");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
@@ -1096,6 +1232,7 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
                     target: target.to_array(),
                     arrive_epsilon: 1.0,
                     max_ticks: 40,
+                    max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
                 },
             );
             if let Some(p) = poll_state(devctl_port).as_ref().and_then(own_pos) {
@@ -1149,6 +1286,7 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
                     target: epoch.to_array(),
                     arrive_epsilon: 1.0,
                     max_ticks: 40,
+                    max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
                 },
             );
             let s = poll_state(devctl_port);
@@ -1189,9 +1327,117 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
         eprintln!("[repro] cycle {cycle}: returned to System 7 — tick live ({t0} -> {t1})");
     }
     eprintln!("[repro] survived {CYCLES} Planet↔System round-trips — no freeze");
-    unsafe {
-        std::env::remove_var("VD_VISUAL_ORBIT_SLOWDOWN");
+    // (The orbit-slowdown knob clears at the `OrbitSlowdown` guard's drop — panic-safe.)
+}
+
+/// THE EXIT-THE-SYSTEM GATE (owner report 2026-08-13: "when I exit the system planets are frozen").
+/// A logged-in occupant flies OUT of System 7's 150 m shell, re-homes UP to the galaxy, parks — and
+/// the system's planets MUST keep orbiting on its screen. The lane under test is the up-observation
+/// relay (owner-approved, PROTO_MINOR 10): the SYSTEM ships the rows it authors one hop up in its own
+/// frame; the GALAXY adds the one placement it authors and re-fans to its observers, so the rows the
+/// client folds are stated in the space it stands in (the one-space rule passes them). Runs at FULL
+/// orbit speed (no slowdown knob): the inner planets sweep several metres over the window, so a
+/// frozen feed cannot hide.
+#[test]
+fn exiting_the_system_keeps_its_planets_orbiting() {
+    let _tier = vd_bins::cluster_tier();
+    let f = fixture("exitfreeze");
+    let gw_admin = reserve_tcp_addr();
+    let a = demand_addrs(gw_admin);
+    let p = DEV;
+    let client_quic = reserve_udp_addr();
+    let devctl_port = reserve_tcp_addr().port();
+    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
+
+    let _reaper = ForkedReaper(f.launch_path.clone());
+    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+    let start = await_active(devctl_port, gw_admin, Duration::from_secs(150));
+    assert_eq!(
+        start.location.as_deref(),
+        Some("System 7"),
+        "login at the star: {start:?}"
+    );
+
+    // FLY OUT: +X to 220 m — past the 150 m shell into the galaxy — with the braked walk, then park.
+    let exit_deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let loc = poll_state(devctl_port).and_then(|s| s.location);
+        if loc.as_deref().is_some_and(|l| l != "System 7") {
+            eprintln!("[exit] re-homed OUT of System 7 into {loc:?}");
+            break;
+        }
+        let _ = devctl(
+            devctl_port,
+            &DevRequest::WalkTo {
+                target: [220.0, 0.0, 0.0],
+                arrive_epsilon: 1.0,
+                max_ticks: 200,
+                max_step_m: 4.0 * p.move_speed * p.tick_dt,
+            },
+        );
+        assert!(
+            Instant::now() < exit_deadline,
+            "NO EXIT: flew to 220 m but location never left \"System 7\"",
+        );
     }
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Move {
+            axes: [0.0, 0.0, 0.0],
+        },
+    );
+
+    // PARKED OUTSIDE: the system's planets must keep arriving AND keep moving on the drawn scene.
+    let planets = |st: &DevState| -> Vec<(String, [f64; 3])> {
+        st.realm_boxes
+            .iter()
+            .filter(|b| b.realm.starts_with("Planet("))
+            .map(|b| (b.realm.clone(), b.center))
+            .collect()
+    };
+    let base = poll_state(devctl_port).expect("state after exit");
+    let base_frames = base.realm_frames_applied;
+    let observe_until = Instant::now() + Duration::from_secs(25);
+    let mut latest = base.clone();
+    let mut feed_live = false;
+    while Instant::now() < observe_until {
+        std::thread::sleep(Duration::from_millis(300));
+        if let Some(st) = poll_state(devctl_port) {
+            latest = st;
+            if latest.realm_frames_applied >= base_frames + 20 {
+                feed_live = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        feed_live,
+        "PLANETS FROZEN AFTER EXIT: realm_frames_applied did not climb by 20 in 25 s outside the \
+         system ({} -> {}); the up-observation relay is not reaching the galaxy-standing observer.",
+        base_frames, latest.realm_frames_applied,
+    );
+    // And the DRAWN boxes moved — folding without drawing would be the stale-box defect reborn.
+    let (p0, p1) = (planets(&base), planets(&latest));
+    assert!(
+        !p0.is_empty(),
+        "the system's planet boxes are still in the drawn scene after exit"
+    );
+    let moved = p0
+        .iter()
+        .filter_map(|(r, c0)| {
+            p1.iter().find(|(r1, _)| r1 == r).map(|(_, c1)| {
+                ((c1[0] - c0[0]).powi(2) + (c1[1] - c0[1]).powi(2) + (c1[2] - c0[2]).powi(2)).sqrt()
+            })
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(
+        moved > 1.0,
+        "no drawn planet moved over the window from OUTSIDE the system — frozen (best {moved:.3} m)"
+    );
+    eprintln!(
+        "[exit] planets LIVE from the galaxy: feed {} -> {}, best box motion {moved:.2} m",
+        base_frames, latest.realm_frames_applied,
+    );
 }
 
 // The bootstrap-TTL fail-safe leg (a demand login whose home never boots must be CLOSED at
@@ -1204,28 +1450,18 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
 
 // ---- The demand-FLY: a MOVING occupant streams a culled planet in AHEAD + reaps the vacated realm BEHIND ---
 
-/// RLM realistic-demo Slice 3 — how far SHORT of the outer planet's center the ship stops on the fly-out. It
-/// must clear the planet's ~4.16 m SOI (so the occupant stays OUTSIDE the planet's containment and `location`
-/// never flips) yet fall well inside its ~59.5 m visibility band (so the planet's shard spins up AHEAD). 20 m
-/// sits between: ≫ the 4.16 m SOI, ≪ the 59.5 m band even after the outer planet's ~3 m/s orbital drift over
-/// the fly-out. The spin-up-ahead LEAD is a natural consequence of visibility-radius ≫ crossing-radius, NOT a
-/// predictive horizon — `boot_ticks_p99` stays 0 (its `DEV` value), so a realm boots exactly when it becomes
-/// VISIBLE, and the ~15 m/s ship then spends seconds flying the rest of the way toward containment.
-const OUTER_APPROACH_SHORT_M: f64 = 20.0;
-
-/// Poll the orchestrator's `spins_requested` until it holds STEADY for [`STABLE_HOLDS`] consecutive reads (the
-/// stationary occupant has finished spinning up every realm ALREADY in its visibility — the star + the inner
-/// planets) or `cap` elapses, then return the settled count. This is the baseline the fly-out must climb ABOVE
-/// for a NON-VACUOUS spin-up-ahead: the outer planet is culled at login (its ~142 m orbit is beyond the
-/// ~59.5 m band from the star), so it is NOT in this baseline — it can only spin up as the ship approaches.
+/// Poll one orchestrator RLM gauge until it holds STEADY for [`STABLE_HOLDS`] consecutive reads or
+/// `cap` elapses, then return the settled count — the shared settle for [`settle_spins`] (the
+/// stationary occupant has finished spinning up everything already in its visibility) and
+/// [`settle_reaps`] (the realms the occupant already vacated have finished draining out).
 const STABLE_HOLDS: u32 = 5;
-fn settle_spins(admin_addr: SocketAddr, cap: Duration) -> u64 {
+fn settle_gauge(admin_addr: SocketAddr, cap: Duration, read: impl Fn(&RlmView) -> u64) -> u64 {
     let started = Instant::now();
-    let mut last = orch_rlm(admin_addr).spins_requested;
+    let mut last = read(&orch_rlm(admin_addr));
     let mut holds = 0u32;
     while started.elapsed() < cap {
         std::thread::sleep(Duration::from_millis(300));
-        let now = orch_rlm(admin_addr).spins_requested;
+        let now = read(&orch_rlm(admin_addr));
         if now == last {
             holds += 1;
             if holds >= STABLE_HOLDS {
@@ -1237,6 +1473,20 @@ fn settle_spins(admin_addr: SocketAddr, cap: Duration) -> u64 {
         }
     }
     last
+}
+
+/// The settled `spins_requested` — the baseline a fly-out must climb ABOVE for a NON-VACUOUS
+/// spin-up-ahead: the neighbour star is asleep at login (the ring is wider than the wake radius),
+/// so it is NOT in this baseline and can only spin up as the ship approaches.
+fn settle_spins(admin_addr: SocketAddr, cap: Duration) -> u64 {
+    settle_gauge(admin_addr, cap, |r| r.spins_requested)
+}
+
+/// The settled `teardowns_reaped` — the baseline the return leg must climb ABOVE for a NON-VACUOUS
+/// reap-behind: the home system's own vacated planets reap during the outbound flight, so the
+/// return's assertion must start from wherever that left the gauge.
+fn settle_reaps(admin_addr: SocketAddr, cap: Duration) -> u64 {
+    settle_gauge(admin_addr, cap, |r| r.teardowns_reaped)
 }
 
 fn own_row(state: &DevState) -> Option<&DevEntityRow> {
@@ -1254,26 +1504,31 @@ fn orch_rlm(admin_addr: SocketAddr) -> RlmView {
     admin(admin_addr).map(|s| s.rlm).unwrap_or_default()
 }
 
-/// The outer (most distant) planet's EPOCH position under the demand cluster's `visual-demand` geometry — the
-/// deterministic aim point for the fly-out. Computed from the SAME `(seed, config)` the demand-spawned shard
-/// boots from (region centers are the tick-0 orbital epoch, mass-independent), so the test and the server
-/// agree on where the planet is. Since `occupant_v_max = move_speed · time_multiplier` (multiplier 1.0 by
-/// default) and no orbit-slowdown is set, this matches the shard's forest.
-fn outer_planet_pos(p: &DevClusterParams) -> DVec3 {
-    let config = vd_core::worldgen::UniverseConfig::visual_demand(p.move_speed, p.tick_dt);
-    // A mover's region `center` is ZERO — its position is AUTHORED by its frame/ephemeris each tick, not baked
-    // into the center (the moving-frame containment fix). So derive each planet's EPOCH position from its
-    // orbital elements at tick 0, exactly as the shard authors it (mirroring `inner_planet_mover`), and take the
-    // FARTHEST — the culled outer planet.
-    vd_core::worldgen::moving_children_for_config(
-        p.universe_seed,
-        &config,
-        vd_core::pose::RealmId::System(7),
-    )
-    .into_iter()
-    .map(|(_realm, elements)| vd_core::celestial::orbital_state(&elements, 0.0).position)
-    .max_by(|a, b| a.length().total_cmp(&b.length()))
-    .expect("the visual-demand forest has orbiting planets")
+/// The nearest ring NEIGHBOUR of the home star: its realm and its authored centre in the galaxy's
+/// frame — THROUGH THE PRODUCTION BOOT (the same discipline as `inner_planet_mover`): the regions come
+/// from `vd_bins::boot_regions_and_movers` hosted AT the galaxy, so the aim IS the placement the
+/// galaxy authors. The home star (System 7, ring index 0) sits at the galactic origin; every other
+/// star is a ring sibling, all equidistant from home — the lowest seed is picked for determinism.
+fn neighbour_system(p: &DevClusterParams) -> (vd_core::pose::RealmId, DVec3) {
+    let galaxy = vd_core::pose::RealmId::System(vd_bins::GALAXY_SEED);
+    let held = std::collections::BTreeSet::from([galaxy]);
+    let (regions, _moving) =
+        vd_bins::boot_regions_and_movers(p.universe_seed, &held, galaxy, p.move_speed, p.tick_dt);
+    let (seed, region) = regions
+        .into_iter()
+        .filter(|r| r.parent == Some(galaxy))
+        .filter_map(|r| match r.realm {
+            vd_core::pose::RealmId::System(seed) if seed != 7 => Some((seed, r)),
+            _ => None,
+        })
+        .min_by_key(|(seed, _)| *seed)
+        .expect("the multi-star galaxy has a ring neighbour");
+    assert_eq!(
+        region.center.cell(),
+        vd_core::glam::I64Vec3::ZERO,
+        "a ring placement fits inside one lattice cell",
+    );
+    (vd_core::pose::RealmId::System(seed), region.center.offset())
 }
 
 /// Drive ONE walk leg to the 3D `target`, settle the sticky Move, read the delivered own pose, and assert the
@@ -1286,6 +1541,7 @@ fn walk_leg(devctl_port: u16, leg: &str, target: DVec3, max_ticks: u64) -> DVec3
             target: target.to_array(),
             arrive_epsilon: 2.0,
             max_ticks,
+            max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
         },
     )
     .unwrap_or_else(|| panic!("leg {leg}: no walk response"));
@@ -1305,109 +1561,218 @@ fn walk_leg(devctl_port: u16, leg: &str, target: DVec3, max_ticks: u64) -> DVec3
 }
 
 #[test]
-fn a_flying_occupant_streams_a_culled_planet_in_ahead_then_the_vacated_realm_is_reaped() {
+fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_is_reaped() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
-    // THE demand-FLY — warp as a consequence of movement, on the compressed-real 5-planet Kepler geometry. A
-    // logged-in occupant sits at the star (System 7); the OUTER planet is culled (beyond the ~59.5 m
-    // visibility band from the star, so its box + shard do NOT exist yet). The occupant flies TOWARD it: as it
-    // crosses into the planet's visibility band its shard spins up AHEAD (the box streams in), while the
-    // occupant is STILL well outside the planet's ~4.16 m containment (`location` never flips — the box
-    // arrives ahead of any crossing, exactly because visibility 59.5 m ≫ containment 4 m). Flying back to the
-    // star, the vacated realm EMPTIES and its shard is reaped. No loading, no teleport, no predictive horizon
-    // (`boot_ticks_p99` = 0) — the lead is the geometry.
+    // THE demand-FLY, rewritten against the multi-star ring (the D-RLM-16 rewrite): since the
+    // wider-visibility world (32fcc5c) every planet of the HOME system is already visible at login,
+    // so the genuinely culled realm is the NEIGHBOUR STAR ~12 km down the ring — asleep, because the
+    // ring is deliberately 1.05× the wake radius. The occupant exits the home system, flies toward
+    // the neighbour, and parks INSIDE its wake band while still ~10 km outside its 150 m shell:
+    //   1. the neighbour's shard spins up AHEAD (the demand loop — spins climb above the settled
+    //      login baseline, warp as a consequence of movement);
+    //   2. its planets' BOXES stream into the drawn scene (slice C's shape mirror: the live system
+    //      ships its interior outlines one hop up, the galaxy adds the one placement it authors);
+    //   3. those boxes MOVE (the rows lane animating them at full orbit speed);
+    // all while `location` never leaves the between-space — the world arrives ahead of any crossing.
+    // Flying back out of the band, the vacated neighbour empties and is reaped BEHIND. This is the
+    // owner-flown gap of 2026-08-13 ("approaching another star system, its planets were not
+    // loading, though inside my AoI and visibility"), as a gate.
     let f = fixture("fly");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
-    let p = DEV; // move_speed 15 m/s, boot_ticks_p99 0 (no warm-ahead), the visual-demand scale.
+    let p = DEV;
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
-    // Spawn + a long fly-out/in + the drain/quiesce teardown windows ⇒ a materially longer budget than a login.
+    // Spawn + exit + a ~2 km flight + the drain/quiesce teardown windows ⇒ a materially longer
+    // budget than a login.
     let deadline = Duration::from_secs(120);
 
     let _reaper = ForkedReaper(f.launch_path.clone());
     let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
 
-    // The login lands the occupant at the star (System 7); the inner planets in view spin up, the outer are
-    // culled by angular size.
+    // The login lands the occupant at the home star; everything already in view spins up and settles
+    // — the baseline the approach must climb above for a NON-VACUOUS spin-up-ahead.
     let landed = await_active(devctl_port, gw_admin, deadline);
     assert_eq!(
         landed.location.as_deref(),
         Some("System 7"),
         "the login lands at the star home realm: {landed:?}",
     );
-    // Let the STATIONARY spin-ups (star + the inner planets already in visibility) settle — the baseline the
-    // fly-out must climb above for a non-vacuous spin-up-ahead of the CULLED outer planet.
     let settled_spins = settle_spins(a.admin, Duration::from_secs(30));
 
-    // ---- LEG 1: fly toward the CULLED outer planet → its box/shard streams in AHEAD of containment ----
-    // Aim at a point ~20 m short (radially) of the outer planet's epoch position: inside its ~59.5 m
-    // visibility band (spins it up) but well outside its ~4.16 m SOI (the occupant never enters containment).
-    let outer = outer_planet_pos(&p);
-    // Precondition tying the fly to the Slice-0 compressed-real geometry: the outer of the 5 Kepler planets
-    // orbits at ~142 render-m (its epoch magnitude within a small eccentricity) — CULLED from the star (142 m
-    // ≫ the ~59.5 m visibility band) yet still inside System 7's 150 m SOI. So the planet does NOT exist at
-    // login and approaching it is a NON-VACUOUS spin-up-ahead.
+    // The aim, through the production boot: the neighbour star's authored ring placement. The
+    // precondition ties the flight to the multi-star geometry — the neighbour is far beyond the home
+    // shell, so it CANNOT be in the settled baseline (the ring is wider than the wake radius).
+    let (neighbour, centre) = neighbour_system(&p);
+    let ring_r = centre.length();
     assert!(
-        (130.0..150.0).contains(&outer.length()),
-        "the outer planet is at its frozen ~142 m orbit, culled from the star: {}",
-        outer.length(),
+        ring_r > 1_000.0,
+        "the ring neighbour {neighbour} is far outside the home shell: {ring_r} m",
     );
-    let aim = outer.normalize() * (outer.length() - OUTER_APPROACH_SHORT_M);
-    walk_leg(devctl_port, "toward-outer-planet", aim, 3_000);
+
+    // ---- LEG 0: exit the home system (re-home UP into the galaxy) — the exit-gate pattern. ----
+    let exit_deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let loc = poll_state(devctl_port).and_then(|s| s.location);
+        if loc.as_deref().is_some_and(|l| l != "System 7") {
+            eprintln!("[fly] re-homed OUT of System 7 into {loc:?}");
+            break;
+        }
+        let _ = devctl(
+            devctl_port,
+            &DevRequest::WalkTo {
+                target: [220.0, 0.0, 0.0],
+                arrive_epsilon: 1.0,
+                max_ticks: 200,
+                max_step_m: 4.0 * p.move_speed * p.tick_dt,
+            },
+        );
+        assert!(
+            Instant::now() < exit_deadline,
+            "NO EXIT: flew to 220 m but location never left \"System 7\"",
+        );
+    }
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Move {
+            axes: [0.0, 0.0, 0.0],
+        },
+    );
+    let galaxy_loc = poll_state(devctl_port)
+        .and_then(|s| s.location)
+        .expect("a location outside the home system");
+
+    // The drawn scene BEFORE the approach: whatever planet boxes it holds are the HOME system's; the
+    // sleeping neighbour's interior is nowhere in it.
+    let planet_boxes = |st: &DevState| -> Vec<(String, [f64; 3])> {
+        st.realm_boxes
+            .iter()
+            .filter(|b| b.realm.starts_with("Planet("))
+            .map(|b| (b.realm.clone(), b.center))
+            .collect()
+    };
+    let baseline_planets: std::collections::BTreeSet<String> =
+        planet_boxes(&poll_state(devctl_port).expect("state after exit"))
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+
+    // ---- LEG 1: fly toward the neighbour, park INSIDE its wake band, far outside its shell. ----
+    // The wake radius is ring/1.05 (both derive from the one visibility angle), so parking at
+    // 0.85·ring leaves a >1 km margin inside the band and >10 km outside any containment.
+    walk_leg(devctl_port, "toward-neighbour-star", centre * 0.15, 3_000);
     let out = poll_state(devctl_port).expect("state after leg 1");
-    // The occupant is STILL outside every planet's containment (it stopped ~20 m short) — `location` did NOT
-    // flip to a planet. So any box that streamed in did so AHEAD of any containment entry.
     assert_eq!(
         out.location.as_deref(),
-        Some("System 7"),
-        "the occupant stays OUTSIDE planet containment across the fly-out (the box streams in ahead): {out:?}",
+        Some(galaxy_loc.as_str()),
+        "parked in the between-space — the world must arrive AHEAD of any crossing: {out:?}",
     );
     assert!(
         out.own_entity.is_some(),
-        "the occupant kept authority across the fly-out: {out:?}",
+        "the occupant kept authority across the approach: {out:?}",
     );
     assert_eq!(
         out.decode_errors, 0,
-        "the client saw no decode faults across the fly-out: {out:?}",
-    );
-    let flew = orch_rlm(a.admin);
-    // NON-VACUOUS: the culled outer planet was NOT in the settled baseline (beyond the star's 59.5 m band), so
-    // a climb above it is the outer planet's shard spinning up AHEAD as the ship crossed into its visibility.
-    assert!(
-        flew.spins_requested > settled_spins,
-        "the fly-out streamed a CULLED planet in ahead (spins {} > settled {settled_spins}): {flew:?}",
-        flew.spins_requested,
-    );
-    assert_eq!(
-        flew.spins_failed, 0,
-        "no spawn failed across the fly-out: {flew:?}"
+        "the client saw no decode faults across the approach: {out:?}",
     );
 
-    // ---- LEG 2: fly back to the star → the vacated realm reaps BEHIND ----
-    // Fly to the origin (the star). The realm(s) the occupant flew away from EMPTY → self-report Empty → the
-    // reconciler drains + quiesces + reaps them, while the still-occupied home (System 7) stays up.
-    walk_leg(devctl_port, "back-to-star", DVec3::ZERO, 3_000);
-    let back = poll_state(devctl_port).expect("state after leg 2");
-    assert_eq!(
-        back.location.as_deref(),
-        Some("System 7"),
-        "the occupant is back at the star: {back:?}",
+    // 1. Spin-up-AHEAD: entering the wake band demanded the sleeping neighbour (a climb above the
+    // settled baseline is that spin-up — nothing else was left to wake). Deliberately NO
+    // `spins_failed == 0` here: the serial suite reuses ONE fixed RLM port band, so a spawn can
+    // transiently collide with the previous test's not-yet-expired TIME_WAIT sockets — the
+    // reconciler backs off and retries by design, and the proof the spawn SUCCEEDED is step 2 (the
+    // boxes cannot stream from a shard that is not running). Asserting zero here measured fixture
+    // hygiene, not the product (flushed 2026-08-13: fail_streak 1, then a clean retry).
+    let started = Instant::now();
+    loop {
+        let flew = orch_rlm(a.admin);
+        if flew.spins_requested > settled_spins {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the neighbour star never spun up ahead (spins stayed {settled_spins}): {flew:?}",
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // 2. THE OWNER'S GAP, as a gate: planet boxes the baseline never held stream into the drawn
+    // scene while the ship sits parked 10 km out — the neighbour's interior, boxes ahead of arrival.
+    let discover_deadline = Instant::now() + Duration::from_secs(45);
+    let fresh: std::collections::BTreeMap<String, [f64; 3]> = loop {
+        let now: std::collections::BTreeMap<String, [f64; 3]> = poll_state(devctl_port)
+            .map(|st| {
+                planet_boxes(&st)
+                    .into_iter()
+                    .filter(|(name, _)| !baseline_planets.contains(name))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !now.is_empty() {
+            break now;
+        }
+        if Instant::now() >= discover_deadline {
+            let drawn: Vec<String> = poll_state(devctl_port)
+                .map(|st| st.realm_boxes.iter().map(|b| b.realm.clone()).collect())
+                .unwrap_or_default();
+            panic!(
+                "NO NEW PLANET BOXES: the neighbour's interior never reached the drawn scene \
+                 (baseline {baseline_planets:?}; full drawn scene now {drawn:?})",
+            );
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    eprintln!(
+        "[fly] the neighbour's interior streamed in ahead: {:?}",
+        fresh.keys().collect::<Vec<_>>()
     );
-    // The vacated realm is torn down + its real shard process reaped. Anti-thrash rests entirely on the ~1 s
-    // grace (equal AoI factors ⇒ no geometric dead-zone), so the reap LAGS the geometric exit by the grace
-    // TAIL + drain + quiesce — a polled assertion (never asserted instantly), bounded by the deadline.
+
+    // 3. ...and the streamed boxes MOVE — outlines alone would be the stale-box defect reborn.
+    let observe_until = Instant::now() + Duration::from_secs(25);
+    let mut best = 0.0_f64;
+    while Instant::now() < observe_until && best <= 1.0 {
+        std::thread::sleep(Duration::from_millis(300));
+        if let Some(st) = poll_state(devctl_port) {
+            for (name, c1) in planet_boxes(&st) {
+                if let Some(c0) = fresh.get(&name) {
+                    let d = ((c1[0] - c0[0]).powi(2)
+                        + (c1[1] - c0[1]).powi(2)
+                        + (c1[2] - c0[2]).powi(2))
+                    .sqrt();
+                    best = best.max(d);
+                }
+            }
+        }
+    }
+    assert!(
+        best > 1.0,
+        "the neighbour's streamed boxes never moved (best {best:.3} m) — outlines without rows",
+    );
+
+    // ---- LEG 2: fly back out of the band → the vacated neighbour reaps BEHIND. ----
+    // The home system's own vacated planets reap during the outbound flight; settle that first so
+    // the return's climb can only be the neighbour. Anti-thrash rests entirely on the ~1 s grace
+    // (equal AoI factors ⇒ no geometric dead-zone), so the reap LAGS the geometric exit by the grace
+    // tail + drain + quiesce — a polled assertion, bounded by the deadline.
+    let settled_reaps = settle_reaps(a.admin, Duration::from_secs(30));
+    walk_leg(
+        devctl_port,
+        "back-toward-home",
+        centre.normalize() * 220.0,
+        3_000,
+    );
     let started = Instant::now();
     loop {
         let r = orch_rlm(a.admin);
-        if r.teardowns_reaped >= 1 {
+        if r.teardowns_reaped > settled_reaps {
             break;
         }
         assert!(
             started.elapsed() < deadline,
-            "the vacated realm was never torn down/reaped (teardowns_reaped stayed 0): {r:?}",
+            "the vacated neighbour was never torn down/reaped (reaped stayed {settled_reaps}): {r:?}",
         );
         std::thread::sleep(Duration::from_millis(200));
     }

@@ -60,13 +60,25 @@ pub struct DeliveredView {
     /// to be sanitized at ingress. A corrupt/diverged sender is a real fault, so it is
     /// COUNTED (not silently fixed) — the codebase's "never silent" discipline.
     nonfinite_poses: u64,
-    /// A5 — the SERVER-TOLD render origin (the last `pin_abs` from a `RealmRegistry`/`RealmSceneDelta`). Every
-    /// drawn point + the camera subtract it via [`DeliveredView::world_pos`]. Defaults to the identity (ZERO):
-    /// a walk cluster never sends a pin, and a walk pose is already root-absolute (identity fold), so
-    /// subtracting ZERO renders it verbatim (byte-identical). Once a pin is received it is CARRIED indefinitely
-    /// — never reset to ZERO — so a re-home whose fresh registry is momentarily in flight keeps the last origin
-    /// (never a teleport to the world origin; the pin rides the reliable Control lane).
-    render_origin: LatticePos,
+    /// Entity rows SKIPPED by the one-space rule (crossing-render slice): a NON-own entity whose
+    /// pose is stated in a space other than the one this client stands in — the old home's
+    /// still-draining feed during a crossing's grace window. The own avatar is exempt (its new-frame
+    /// row is the crossing signal). Non-zero at a crossing is normal; non-zero at steady state means
+    /// a shard ships entities in a space its observer does not stand in.
+    foreign_space_rows: u64,
+    /// THE ECHO SPACE (crossing-render slice, measured on the round-trip ride): the space the avatar
+    /// most recently LEFT. During the demote grace the OLD home's anti-vanish relay streams the
+    /// leaver's LIVE row — old space, the same advancing ticks as the new home's — to the leaver's
+    /// own client through the still-open old sub, and an own row is otherwise exempt from the
+    /// one-space filter (a new-frame row IS the crossing signal). So the echo is named precisely:
+    /// own rows stated in THIS space are dropped while it is set, and it CLEARS when any held sub
+    /// closes (`drop_sub` — the reliable end of the old feed, which is the echo's only source). A
+    /// faster-than-the-grace return crossing is blocked at most until that close — bounded,
+    /// self-healing, and the whole echo lane is deleted by Step 5 slice E.
+    echo_space: Option<FrameRef>,
+    /// Own-entity rows dropped as the ECHO (the old home's relayed copy of the leaver) — see
+    /// `echo_space`. Non-zero during a crossing's grace window is normal.
+    echo_rows_dropped: u64,
 }
 
 impl DeliveredView {
@@ -86,10 +98,36 @@ impl DeliveredView {
     ) -> SnapshotVerdict {
         let high_water = self.high_water.get(&snap.sub).copied();
         let verdict = classify_snapshot(held_subs, high_water, snap.sub, snap.frame_id);
+        // THE ONE-SPACE RULE, entity lane (crossing-render review, MAJOR finding): the space this
+        // client stands in, read BEFORE the fold so the own row cannot re-anchor the filter that
+        // judges its siblings within one datagram. During a crossing's grace window the old home
+        // keeps emitting entities in the OLD realm's frame on its still-open sub; folding those
+        // beside the new home's rows draws two spaces into one picture (the measured jitter, cured
+        // on the realm lane by the same rule). The OWN avatar is EXEMPT: its strictly-newer row in
+        // a new frame IS the crossing signal (the track's own frame-stability guard ignores
+        // non-newer foreign rows; the residual is a rare one-tick flicker when datagram loss lets
+        // the relayed old-frame copy of a tick outrun the new home's copy — bounded, self-healing).
+        let standing = self.own_location_frame();
         match verdict {
             SnapshotVerdict::Apply => {
                 self.high_water.insert(snap.sub, snap.frame_id);
                 for entity in snap.entities {
+                    let own = self.own_entity == Some(entity.entity);
+                    if !own && standing.is_some_and(|s| entity.pose.frame != s) {
+                        self.foreign_space_rows += 1;
+                        continue;
+                    }
+                    // The ECHO drop (see `echo_space`): the old home's relayed copy of the OWN
+                    // avatar, in the space just left, must not fold — its ticks tie the new home's
+                    // and whichever row lands first would own each tick, leaving the drawn player
+                    // flickering between two spaces for the whole grace window (measured).
+                    if own
+                        && self.echo_space.is_some_and(|e| entity.pose.frame == e)
+                        && standing.is_some_and(|s| s != entity.pose.frame)
+                    {
+                        self.echo_rows_dropped += 1;
+                        continue;
+                    }
                     // Sanitize at the decode-ingress chokepoint: a corrupt/diverged
                     // sender could ship a non-finite pose, which must never reach the
                     // render transforms (it would poison the scene). Guarding here keeps
@@ -104,6 +142,12 @@ impl DeliveredView {
                         .entry(entity.entity)
                         .and_modify(|track| track.observe(pose))
                         .or_insert_with(|| EntityTrack::new(pose));
+                }
+                // The CUT detector: the avatar's delivered frame changed — remember the space just
+                // left as the echo space (armed until the old sub closes, see `drop_sub`).
+                let now_standing = self.own_location_frame();
+                if now_standing != standing && standing.is_some() {
+                    self.echo_space = standing;
                 }
             }
             SnapshotVerdict::DropForeignSub | SnapshotVerdict::DropStale => {
@@ -139,6 +183,9 @@ impl DeliveredView {
     /// for a sub never delivered is a harmless no-op.
     pub fn drop_sub(&mut self, sub: SubId) {
         self.high_water.remove(&sub);
+        // A held sub closing is the reliable END of the old home's feed — the echo's only source —
+        // so the echo pin lifts here, re-arming the own avatar's next genuine crossing cut.
+        self.echo_space = None;
     }
 
     /// The render poses at `cursor`: each entity rendered EXACTLY ONCE from its single
@@ -222,31 +269,42 @@ impl DeliveredView {
         self.nonfinite_poses
     }
 
-    /// The server-told render origin the renderer subtracts (A5). Identity (ZERO) until the first pin.
+    /// Entity rows skipped by the one-space rule — see [`DeliveredView::on_snapshot`].
     #[must_use]
-    pub fn render_origin(&self) -> LatticePos {
-        self.render_origin
+    pub fn foreign_space_rows(&self) -> u64 {
+        self.foreign_space_rows
     }
 
-    /// Adopt a fresh server-told render origin (a `RealmRegistry`/`RealmSceneDelta` `pin_abs`). CARRY-last-pin:
-    /// it only ever moves to a real told value, never resets to identity, so a re-anchor never teleports the
-    /// scene to the world origin between the trigger and the fresh registry's arrival.
-    pub fn set_render_origin(&mut self, origin: LatticePos) {
-        self.render_origin = origin;
+    /// Own-entity rows dropped as the old home's echo — see `echo_space`.
+    #[must_use]
+    pub fn echo_rows_dropped(&self) -> u64 {
+        self.echo_rows_dropped
     }
 
-    /// The RENDER range-reduction (A5 — the server is authoritative). The server COMPOSES every entity's
-    /// final position and ships it ROOT-ABSOLUTE (minor 7); the client only DRAWS. So this subtracts the
-    /// server-told render `origin` in EXACT lattice arithmetic — NO compose, NO fold, NO per-viewer position
-    /// derivation, NO fallback-to-origin. Through P4 the cell is ZERO and this reduces to `pose.pos - origin`
-    /// in metres; the cell-aware rebase (non-zero galaxy cells) lands at A8. At `origin == identity` it returns
-    /// `pose.pos` BIT-EXACT (the byte-floor — a walk pin folds to identity). Never panics; always finite (poses
-    /// sanitized at the decode ingress). The camera eye and every drawn point subtract this SAME `origin`, so a
-    /// re-pin shifts camera and content by one identical vector (invisible); it is computed FRESHLY per object,
-    /// never as a cached-scene translation (which would contaminate near objects with the far delta's rounding).
+    /// THE DRAWN POINT — and it is now a PASSTHROUGH, which is the whole of the client's job.
+    ///
+    /// Every chain of shards between the world and this session has already restated the value from the
+    /// centre of the realm the session is standing in — each level subtracting the ONE placement it
+    /// authored — so the number that arrives is already the number to draw. There is nothing to compose,
+    /// nothing to fold, nothing to subtract, and no per-viewer derivation of any kind. What is left is a
+    /// FLATTENING: a delivered position is an exact integer cell plus a metre offset, and the drawn point
+    /// is the two added up, which is what `delta_m` from the identity is.
+    ///
+    /// It used to subtract a server-told RENDER ORIGIN: a pin realm's own absolute position, sent on the
+    /// scene lane, because the server shipped every position measured from the universe root. That whole
+    /// arrangement is gone — no realm has an absolute any more, because no realm is entitled to know where
+    /// it sits — and with it goes the client's last piece of position arithmetic. If a subtraction ever
+    /// reappears here, something upstream has started shipping numbers measured from somewhere other than
+    /// the realm this session is in, and THAT is the bug to fix.
+    ///
+    /// THE UNIT IS TOLD, NOT CHOSEN. Adding the cell in needs metres-per-cell, and that is `pose.tier` —
+    /// stamped onto the render pose from the label the shipper attached to this very value (see
+    /// [`crate::interp::stated_tier`]). This function looks up nothing: it multiplies by what it was
+    /// handed. Picking the unit here instead, from whatever frame name happened to ride along, is wrong by
+    /// a light-year per cell the first time a galaxy-tier value reaches a client standing in a system.
     #[must_use]
-    pub fn world_pos(&self, pose: &RenderPose, origin: LatticePos) -> DVec3 {
-        LatticePos::at(pose.cell, pose.pos).delta_m(origin, pose.frame.tier())
+    pub fn world_pos(&self, pose: &RenderPose) -> DVec3 {
+        LatticePos::at(pose.cell, pose.pos).delta_m(LatticePos::default(), pose.tier)
     }
 }
 
@@ -310,9 +368,9 @@ mod tests {
         assert_eq!(rendered[&ent(1)].pos, DVec3::new(5.0, 0.0, 0.0));
         assert_eq!(rendered[&ent(2)].pos, DVec3::new(105.0, 0.0, 0.0));
         assert_eq!(view.stale_frames_dropped(), 0);
-        // world_pos at the identity origin returns the pose verbatim (A5 pure range-reduction).
+        // world_pos is a passthrough: the pose ships already measured from the realm this session is in.
         assert_eq!(
-            view.world_pos(&rendered[&ent(1)], LatticePos::local(DVec3::ZERO)),
+            view.world_pos(&rendered[&ent(1)]),
             DVec3::new(5.0, 0.0, 0.0)
         );
     }
@@ -344,18 +402,21 @@ mod tests {
     }
 
     #[test]
-    fn world_pos_subtracts_the_render_origin_and_never_composes() {
+    fn world_pos_draws_what_it_is_handed_and_never_composes() {
         use glam::DQuat;
-        // A5 — the server ships ABSOLUTE positions; world_pos is a PURE range-reduction against the
-        // server-told render origin, IDENTICAL for every frame kind (no compose, no per-frame branch, no
-        // fallback-to-origin, no dependence on which realms are streamed). At the identity origin it returns
-        // pose.pos BIT-EXACT (the byte-floor a walk pin folds to).
+        use vd_core::pose::Tier;
+        // The server ships every position already measured from the realm this session stands in; world_pos
+        // DRAWS it, IDENTICALLY for every frame kind — no compose, no per-frame branch, no
+        // fallback-to-origin, no dependence on which realms are streamed, and no origin to subtract. A
+        // cell-zero pose comes back BIT-EXACT. If this test ever needs an origin argument again, the server
+        // has stopped converting.
         let view = DeliveredView::default();
         let pose = |frame: FrameRef, pos: DVec3| RenderPose {
             frame,
             cell: glam::I64Vec3::ZERO,
             pos,
             orient: DQuat::IDENTITY,
+            tier: crate::interp::stated_tier(frame),
         };
         // Identity origin ⇒ pose.pos verbatim, for EVERY frame kind (a ShipLocal whose hull is undelivered no
         // longer gets special-cased — the client never composes).
@@ -385,23 +446,52 @@ mod tests {
                 DVec3::new(3.0, 0.0, 0.0),
             ),
         ] {
-            assert_eq!(
-                view.world_pos(&pose(frame, pos), LatticePos::local(DVec3::ZERO)),
-                pos
-            );
+            assert_eq!(view.world_pos(&pose(frame, pos)), pos);
         }
-        // A non-identity origin subtracts EXACTLY and never invents a value from a streamed realm: a Planet
-        // occupant at (4,0,0) with the origin at (100,0,0) renders at (-96,0,0) — never (4,0,0) (the old
-        // silent-identity-on-miss bug) nor a composed (104,..).
+        // The INTEGER CELL still reaches the drawn point: a pose three cells out draws three cell-edges
+        // away, not at its bare metre remainder. That half of the arithmetic survives the removal of the
+        // origin subtraction — it is a flattening, not a conversion.
+        let edge = Tier::Fine.cell_edge_m();
         assert_eq!(
-            view.world_pos(
-                &pose(
-                    FrameRef::PlanetCentered { planet_seed: 1 },
-                    DVec3::new(4.0, 0.0, 0.0)
-                ),
-                LatticePos::local(DVec3::new(100.0, 0.0, 0.0)),
-            ),
-            DVec3::new(-96.0, 0.0, 0.0)
+            view.world_pos(&RenderPose {
+                frame: FrameRef::PlanetCentered { planet_seed: 1 },
+                cell: glam::I64Vec3::new(3, 0, 0),
+                pos: DVec3::new(4.0, 0.0, 0.0),
+                orient: DQuat::IDENTITY,
+                tier: Tier::Fine,
+            }),
+            DVec3::new(3.0 * edge + 4.0, 0.0, 0.0)
+        );
+    }
+
+    /// THE SHIPPER DECIDES THE UNIT — and this is the assertion that can tell "told" from "guessed"
+    /// apart, which a same-tier test never can.
+    ///
+    /// Two poses with the IDENTICAL frame label and the IDENTICAL integer cell, differing only in the
+    /// unit that was stated for that cell, must draw a whole tier apart. A `world_pos` that picked the
+    /// unit off the frame name (`FrameRef::tier`, which answers `Fine` for every in-system frame) would
+    /// return the same point for both, and this fails by a factor of ~10^19. That is exactly the failure
+    /// waiting for the first galaxy-tier value delivered under an in-system label.
+    #[test]
+    fn world_pos_multiplies_by_the_unit_it_was_told_not_by_one_it_picks() {
+        use glam::DQuat;
+        use vd_core::pose::{COARSE_CELL_EDGE_M, FINE_CELL_EDGE_M, Tier};
+        let view = DeliveredView::default();
+        let at = |tier| RenderPose {
+            // The SAME label on both — so nothing about the label can explain the difference below.
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            cell: glam::I64Vec3::new(1, 0, 0),
+            pos: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            tier,
+        };
+        assert_eq!(
+            view.world_pos(&at(Tier::Fine)),
+            DVec3::new(FINE_CELL_EDGE_M, 0.0, 0.0)
+        );
+        assert_eq!(
+            view.world_pos(&at(Tier::Coarse)),
+            DVec3::new(COARSE_CELL_EDGE_M, 0.0, 0.0)
         );
     }
 
@@ -463,6 +553,140 @@ mod tests {
         // Re-announcing (idempotent — the dest re-point re-confirms the same avatar) is a no-op.
         view.set_own_entity(ent(7));
         assert_eq!(view.own_entity(), Some(ent(7)));
+    }
+
+    /// THE ONE-SPACE RULE on the entity lane (crossing-render review, MAJOR): a NON-own entity's
+    /// row stated in a space other than the one the avatar stands in is skipped + counted; the OWN
+    /// avatar is exempt (its new-frame row is the crossing signal); with no avatar the filter is
+    /// inert (spectator, byte-identical).
+    #[test]
+    fn a_foreign_space_entity_row_is_skipped_unless_it_is_the_own_avatar() {
+        let planet = FrameRef::PlanetCentered { planet_seed: 7 };
+        let mut view = DeliveredView::default();
+        let held = s(SubId(0));
+        // No avatar yet: rows in any frame fold (the spectator arm).
+        view.on_snapshot(&held, snap(SubId(0), 1, 10, vec![(ent(2), 5.0)]));
+        assert_eq!(view.foreign_space_rows(), 0);
+        assert_eq!(view.render(10.0).len(), 1);
+
+        // The avatar lands in the SYSTEM space; a sibling row in the SAME space folds...
+        view.set_own_entity(ent(1));
+        view.on_snapshot(
+            &held,
+            snap(SubId(0), 2, 11, vec![(ent(1), 0.0), (ent(2), 6.0)]),
+        );
+        assert_eq!(
+            view.foreign_space_rows(),
+            0,
+            "in-space rows are never counted"
+        );
+        // ...while a NON-own row in ANOTHER space is skipped + counted.
+        view.on_snapshot(
+            &held,
+            SnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 3,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(12),
+                entities: vec![EntitySnap {
+                    entity: ent(2),
+                    pose: StampedPose::at_rest(planet, DVec3::new(9.0, 0.0, 0.0), UniverseTick(12)),
+                }],
+            },
+        );
+        assert_eq!(
+            view.foreign_space_rows(),
+            1,
+            "the foreign-space row is counted"
+        );
+        assert_eq!(
+            view.render(12.0)[&ent(2)].pos,
+            DVec3::new(6.0, 0.0, 0.0),
+            "the foreign-space row never folded"
+        );
+        // The OWN avatar's new-frame row IS the crossing signal — admitted, and the location flips.
+        view.on_snapshot(
+            &held,
+            SnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 4,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(13),
+                entities: vec![EntitySnap {
+                    entity: ent(1),
+                    pose: StampedPose::at_rest(planet, DVec3::new(0.1, 0.0, 0.0), UniverseTick(13)),
+                }],
+            },
+        );
+        assert_eq!(view.foreign_space_rows(), 1, "the own avatar is exempt");
+        assert_eq!(
+            view.own_location_frame(),
+            Some(planet),
+            "the crossing flipped the location"
+        );
+    }
+
+    /// THE ECHO PIN (crossing-render slice, the round-trip ride's measurement): after the avatar's
+    /// cut into a new space, the old home keeps relaying the leaver's LIVE row in the OLD space with
+    /// the SAME advancing ticks through the still-open old sub. Those rows are dropped (whichever
+    /// row landed first would otherwise own each tick — a two-space flicker for the whole grace);
+    /// the pin lifts when a held sub closes, re-arming the next genuine crossing.
+    #[test]
+    fn the_old_homes_echo_of_the_own_avatar_is_dropped_until_the_old_sub_closes() {
+        let planet = FrameRef::PlanetCentered { planet_seed: 7 };
+        let sys = FrameRef::SystemSpace { system_seed: 1 };
+        let mut view = DeliveredView::default();
+        let both = BTreeSet::from([SubId(0), SubId(1)]);
+        view.set_own_entity(ent(1));
+        // Standing in the system…
+        view.on_snapshot(&both, snap(SubId(0), 1, 10, vec![(ent(1), 17.0)]));
+        assert_eq!(view.own_location_frame(), Some(sys));
+        // …the crossing cuts into the planet's space (the dest sub's row).
+        view.on_snapshot(
+            &both,
+            SnapshotDatagram {
+                sub: SubId(1),
+                frame_id: 1,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(11),
+                entities: vec![EntitySnap {
+                    entity: ent(1),
+                    pose: StampedPose::at_rest(planet, DVec3::new(0.4, 0.0, 0.0), UniverseTick(11)),
+                }],
+            },
+        );
+        assert_eq!(view.own_location_frame(), Some(planet), "the cut landed");
+        // The ECHO: the old sub relays the leaver's live row in the OLD space at a NEWER tick —
+        // dropped, counted; the standing frame and the drawn pose never flip back.
+        view.on_snapshot(&both, snap(SubId(0), 2, 12, vec![(ent(1), 17.4)]));
+        assert_eq!(view.echo_rows_dropped(), 1, "the echo is dropped");
+        assert_eq!(view.own_location_frame(), Some(planet), "no backward flip");
+        assert_eq!(
+            view.render(12.0)[&ent(1)].pos,
+            DVec3::new(0.4, 0.0, 0.0),
+            "the drawn pose stays in the new space"
+        );
+        // The old sub closes (the echo's end): the pin lifts, and a GENUINE return crossing back
+        // into the system space folds again.
+        view.drop_sub(SubId(0));
+        view.on_snapshot(
+            &both,
+            SnapshotDatagram {
+                sub: SubId(1),
+                frame_id: 2,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(20),
+                entities: vec![EntitySnap {
+                    entity: ent(1),
+                    pose: StampedPose::at_rest(sys, DVec3::new(18.0, 0.0, 0.0), UniverseTick(20)),
+                }],
+            },
+        );
+        assert_eq!(
+            view.own_location_frame(),
+            Some(sys),
+            "the return cut folds after the close"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use vd_core::{Fence, TickId, TransferId, UniverseTick};
+use vd_core::{Fence, NodeId, TickId, TransferId, UniverseTick};
 use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey, OwnerRecord};
 
 /// Directory-side operational parameters (ONE reviewed struct — never inline
@@ -445,6 +445,60 @@ impl DirectoryCore {
         !self.dirty.is_empty()
     }
 
+    /// THE SHARD ROSTER: every distinct node this record shows holding a REALM, ascending.
+    ///
+    /// This is the answer to "whose frames may a router read", and it is deliberately taken from HERE
+    /// rather than from anything a node says about itself. A node appears in this list only by having
+    /// been granted a realm through the fence commit, which one writer performs — so it cannot put
+    /// itself here. Node class is authority, and authority is derived from this record; it was the one
+    /// authority fact in the system that was being inferred somewhere else.
+    ///
+    /// REALM keys only. An `Entity`'s authority is a shard too, but it is a shard BECAUSE it holds the
+    /// realm that entity is in, so the realm set is both smaller and the truer statement. `Ship` and
+    /// `Session` are deliberately excluded: a session's authority is a GATEWAY, and a router admitting
+    /// gateways as shards would be admitting its own peers.
+    ///
+    /// Ascending + deduplicated, so one set of holders has ONE encoding and an unchanged roster is
+    /// byte-identical rather than merely equal — which is what lets the sender skip an unchanged push
+    /// without keeping a second copy to diff against.
+    /// The gateways this record shows holding a SESSION — the routers that currently have somebody to
+    /// route, and therefore the only ones that need to be told anything.
+    ///
+    /// Taken from the record for the same reason as [`realm_holders`](Self::realm_holders): a roster of
+    /// gateways in configuration is a second copy of a fact, and a second copy drifts. A gateway holding
+    /// no session is routing nobody, so telling it nothing is correct rather than an omission — it learns
+    /// the moment it takes a session, because taking one changes this record.
+    #[must_use]
+    pub fn session_gateways(&self) -> Vec<NodeId> {
+        let mut nodes: Vec<NodeId> = self
+            .records
+            .iter()
+            .filter(|(key, _)| matches!(key, DirectoryKey::Session(_)))
+            .filter_map(|(_, record)| match record.authority {
+                AuthorityRef::Gateway(node) => Some(node),
+                // A session held by a SHARD is not a thing this record can mean; if it ever appears it is
+                // a defect elsewhere, and silently addressing it as a gateway would spread it.
+                AuthorityRef::Shard(_) => None,
+            })
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
+    #[must_use]
+    pub fn realm_holders(&self) -> Vec<NodeId> {
+        let mut nodes: Vec<NodeId> = self
+            .records
+            .iter()
+            .filter(|(key, _)| matches!(key, DirectoryKey::Realm(_)))
+            .map(|(_, record)| record.authority.node())
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
     /// Assign authority at `fence`. Idempotent by fence; refuses stale fences,
     /// equal-fence owner changes, and transfer-locked keys.
     pub fn grant(
@@ -677,6 +731,57 @@ mod tests {
     }
     fn shard(n: u64) -> AuthorityRef {
         AuthorityRef::Shard(NodeId(n))
+    }
+
+    /// Minor 9's address list, from the record and nothing else: the gateways are the nodes holding
+    /// SESSION keys — sorted, deduplicated, and a session held by a SHARD (a defect elsewhere) is
+    /// never addressed as a gateway (silently spreading it is the failure the arm refuses).
+    #[test]
+    fn session_gateways_reads_the_record_sorted_deduped_and_refuses_a_shard_held_session() {
+        let mut dir = DirectoryCore::new(TUNING);
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(1)),
+            AuthorityRef::Gateway(NodeId(9)),
+            Fence(1),
+            NOW,
+        );
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(2)),
+            AuthorityRef::Gateway(NodeId(4)),
+            Fence(1),
+            NOW,
+        );
+        // A second session on the SAME gateway — the dedup input.
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(3)),
+            AuthorityRef::Gateway(NodeId(9)),
+            Fence(1),
+            NOW,
+        );
+        // A session held by a SHARD: a defect elsewhere, refused as an address here.
+        let _ = dir.grant(
+            DirectoryKey::Session(SessionId(4)),
+            AuthorityRef::Shard(NodeId(2)),
+            Fence(1),
+            NOW,
+        );
+        // A REALM key: never a session address, whatever holds it.
+        let _ = dir.grant(
+            DirectoryKey::Realm(RealmId::System(7)),
+            AuthorityRef::Shard(NodeId(2)),
+            Fence(1),
+            NOW,
+        );
+        assert_eq!(
+            dir.session_gateways(),
+            vec![NodeId(4), NodeId(9)],
+            "sorted, deduplicated, gateways only"
+        );
+        assert_eq!(
+            dir.realm_holders(),
+            vec![NodeId(2)],
+            "and the roster content is the realm holders, from the same record"
+        );
     }
 
     #[test]

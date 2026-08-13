@@ -56,6 +56,13 @@ pub struct RealmView {
     /// FAULT count: delivered realm poses that carried a non-finite (NaN/Inf) component and had to be
     /// sanitized at ingress (a corrupt/diverged shard is a real fault — COUNTED, never silently fixed).
     nonfinite_poses: u64,
+    /// Realm rows SKIPPED because their pose is stated in a space other than the one this client
+    /// stands in (the ONE-SPACE rule, crossing-render slice §4x): during a hand-off the client
+    /// legitimately holds two subs, and the OLD home keeps shipping rows in the OLD realm's frame
+    /// until its sub closes — folding those beside the new home's rows draws two spaces into one
+    /// picture (the measured jitter). Not a fault at a crossing; a non-zero steady-state value means
+    /// a shard is shipping rows in a space its observer does not stand in (the server-side bug).
+    foreign_space_rows: u64,
 }
 
 impl RealmView {
@@ -66,9 +73,25 @@ impl RealmView {
     /// (sanitize-at-ingress, latest-wins; an EQUAL `frame_id` — a sibling chunk of a partitioned frame —
     /// applies without collapsing the interp window). The datagram verdict is [`RealmVerdict::Apply`] iff
     /// ≥1 realm landed (so the caller anchors the render clock on real progress), else `DropStale`.
-    pub fn on_realm_snapshot(&mut self, snap: RealmSnapshotDatagram) -> RealmVerdict {
+    ///
+    /// THE ONE-SPACE RULE (crossing-render slice): `standing_in` is the frame the client's own avatar
+    /// currently stands in (`DeliveredView::own_location_frame`). When known, a row whose POSE is
+    /// stated in any other frame is skipped + counted (`foreign_space_rows`) — the shipping side
+    /// restates every row into its observer's space (rehome_one_mechanism §4c), so a row in another
+    /// space is by definition from the OLD home's still-draining feed (or a server bug), and folding
+    /// it would draw two spaces into one picture. `None` (no avatar yet — a spectator/boot client)
+    /// applies no filter, byte-identical to the pre-slice behaviour.
+    pub fn on_realm_snapshot(
+        &mut self,
+        standing_in: Option<vd_core::pose::FrameRef>,
+        snap: RealmSnapshotDatagram,
+    ) -> RealmVerdict {
         let mut any_applied = false;
         for row in snap.realms {
+            if standing_in.is_some_and(|own| row.pose.frame != own) {
+                self.foreign_space_rows += 1;
+                continue;
+            }
             // Per-REALM staleness: a co-subscribed higher-counter shard must never ratchet a
             // lower-counter shard's realm past `frame_id` (the freeze bug a feed-global scalar caused).
             if is_stale(self.high_water.get(&row.realm).copied(), snap.frame_id) {
@@ -96,6 +119,31 @@ impl RealmView {
         } else {
             RealmVerdict::DropStale
         }
+    }
+
+    /// FORGET every stored placement and high-water (the ONE-SPACE rule's other half, crossing-render
+    /// slice): called at the own-location frame flip — a crossing moved this client into a new realm,
+    /// and every stored track is a position in the OLD realm's space, meaningless in the new one. The
+    /// realm the client now stands in is the sharpest case: its own per-tick row NEVER ships again
+    /// (the realm you occupy draws itself — its outline arrives on the scene lane at your origin), so
+    /// without this its stale pre-crossing track would override that outline FOREVER (the measured
+    /// "I landed on the planet and I am outside it"). The new space refills within one feed period;
+    /// until then each box draws from its streamed scene outline (`RealmScene`), never from a stale
+    /// track. High-waters clear with the tracks: they gate a space that no longer exists, and the
+    /// one-space ingress filter keeps DIFFERENT-space stragglers out. HONEST RESIDUAL (review,
+    /// minor): a fast A→B→A re-entry re-arrives in the SAME frame as before, so one reordered old-A
+    /// straggler can pass the cleared gate and draw one stale placement for at most one feed period
+    /// (the realm's single-author `frame_id` stream is monotone, so the next fresh row overwrites) —
+    /// transient by construction, never a freeze or a permanent poisoning.
+    pub fn forget_space(&mut self) {
+        self.placements.clear();
+        self.high_water.clear();
+    }
+
+    /// Realm rows skipped by the one-space ingress rule — see [`RealmView::on_realm_snapshot`].
+    #[must_use]
+    pub fn foreign_space_rows(&self) -> u64 {
+        self.foreign_space_rows
     }
 
     /// The streamed pose for `realm` AT `cursor` (universe-tick f64 units) — interpolated on the same
@@ -187,22 +235,94 @@ mod tests {
             universe_tick: UniverseTick(tick),
             realms: rows
                 .into_iter()
-                .map(|(realm, pose)| RealmSnap { realm, pose })
+                .map(|(realm, pose)| RealmSnap {
+                    realm,
+                    // The edge HEAD (proto_minor 8): the CHILD's own frame. `RealmView` folds a track
+                    // per realm and does not read it, but a row without it is not a placement edge.
+                    frame: vd_core::pose::frame_for_realm(realm, None)
+                        .expect("a seeded realm resolves"),
+                    pose,
+                })
                 .collect(),
         }
+    }
+
+    /// THE ONE-SPACE RULE (crossing-render slice): a row stated in a space other than the one the
+    /// avatar stands in is skipped + counted, never folded — the old home's still-draining feed
+    /// must not draw its space into the new one. Rows in the standing space fold as always, and a
+    /// `None` standing space (spectator/boot) applies no filter.
+    #[test]
+    fn a_row_in_another_space_is_skipped_and_counted() {
+        let mut v = RealmView::default();
+        let planet_space = FrameRef::PlanetCentered { planet_seed: 9 };
+        // Standing in the planet's space: a SYSTEM-space row (the old home's feed) is skipped...
+        let verdict = v.on_realm_snapshot(
+            Some(planet_space),
+            frame(1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]),
+        );
+        assert_eq!(verdict, RealmVerdict::DropStale, "nothing folded");
+        assert_eq!(
+            v.foreign_space_rows(),
+            1,
+            "the foreign-space row is counted"
+        );
+        assert_eq!(v.realm_pose(RealmId::Planet(1), 10.0), None);
+        // ...while a row STATED in the standing space folds as always.
+        let in_space = StampedPose::at_rest(planet_space, DVec3::Y, UniverseTick(11));
+        let verdict = v.on_realm_snapshot(
+            Some(planet_space),
+            frame(2, 11, vec![(RealmId::Planet(2), in_space)]),
+        );
+        assert_eq!(verdict, RealmVerdict::Apply);
+        assert!(v.realm_pose(RealmId::Planet(2), 11.0).is_some());
+        assert_eq!(
+            v.foreign_space_rows(),
+            1,
+            "an in-space row is never counted foreign"
+        );
+    }
+
+    /// The space flip forgets EVERYTHING (placements + high-waters): every stored value is a
+    /// position in the old space. The new space then refills from zero — a fresh feed's LOWER
+    /// frame_id must be admitted, which is why the high-waters clear with the tracks.
+    #[test]
+    fn forget_space_clears_tracks_and_high_waters() {
+        let mut v = RealmView::default();
+        v.on_realm_snapshot(
+            None,
+            frame(9, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]),
+        );
+        assert!(!v.is_empty());
+        v.forget_space();
+        assert!(v.is_empty(), "every stored placement is forgotten");
+        assert_eq!(v.realm_pose(RealmId::Planet(1), 10.0), None);
+        // The new space's feed starts its own counter: a frame_id BELOW the forgotten high-water folds.
+        let verdict = v.on_realm_snapshot(
+            None,
+            frame(1, 12, vec![(RealmId::Planet(1), pose(DVec3::Y, 12))]),
+        );
+        assert_eq!(
+            verdict,
+            RealmVerdict::Apply,
+            "the forgotten high-water no longer gates"
+        );
+        assert!(v.realm_pose(RealmId::Planet(1), 12.0).is_some());
     }
 
     #[test]
     fn apply_folds_a_track_per_realm_and_advances_the_high_water() {
         let mut v = RealmView::default();
-        let verdict = v.on_realm_snapshot(frame(
-            3,
-            10,
-            vec![
-                (RealmId::Planet(1), pose(DVec3::new(1.0e9, 0.0, 0.0), 10)),
-                (RealmId::Station(2), pose(DVec3::new(0.0, 2.0e8, 0.0), 10)),
-            ],
-        ));
+        let verdict = v.on_realm_snapshot(
+            None,
+            frame(
+                3,
+                10,
+                vec![
+                    (RealmId::Planet(1), pose(DVec3::new(1.0e9, 0.0, 0.0), 10)),
+                    (RealmId::Station(2), pose(DVec3::new(0.0, 2.0e8, 0.0), 10)),
+                ],
+            ),
+        );
         assert_eq!(verdict, RealmVerdict::Apply);
         // Per-realm high-water: BOTH streamed realms are stamped at the datagram's frame_id.
         assert_eq!(v.high_water.get(&RealmId::Planet(1)), Some(&3));
@@ -231,20 +351,18 @@ mod tests {
         let mut v = RealmView::default();
         // Shard A (System 7): its planet at a high counter.
         assert_eq!(
-            v.on_realm_snapshot(frame(
-                500,
-                10,
-                vec![(RealmId::Planet(7), pose(DVec3::X, 10))]
-            )),
+            v.on_realm_snapshot(
+                None,
+                frame(500, 10, vec![(RealmId::Planet(7), pose(DVec3::X, 10))])
+            ),
             RealmVerdict::Apply,
         );
         // Shard B (System 8): its planet at a LOW counter — must NOT be rejected as "stale" vs A's 500.
         assert_eq!(
-            v.on_realm_snapshot(frame(
-                30,
-                10,
-                vec![(RealmId::Planet(8), pose(DVec3::Y, 10))]
-            )),
+            v.on_realm_snapshot(
+                None,
+                frame(30, 10, vec![(RealmId::Planet(8), pose(DVec3::Y, 10))])
+            ),
             RealmVerdict::Apply,
             "shard B's low-counter frame must apply — no cross-shard high-water conflation",
         );
@@ -252,11 +370,14 @@ mod tests {
         assert!(v.realm_pose(RealmId::Planet(8), 10.0).is_some());
         // B keeps advancing independently of A's counter — it is not frozen.
         assert_eq!(
-            v.on_realm_snapshot(frame(
-                31,
-                20,
-                vec![(RealmId::Planet(8), pose(DVec3::new(0.0, 3.0, 0.0), 20))]
-            )),
+            v.on_realm_snapshot(
+                None,
+                frame(
+                    31,
+                    20,
+                    vec![(RealmId::Planet(8), pose(DVec3::new(0.0, 3.0, 0.0), 20))]
+                )
+            ),
             RealmVerdict::Apply,
         );
         assert_eq!(
@@ -267,11 +388,10 @@ mod tests {
         );
         // A per-realm stale straggler (B at 30 after B advanced to 31) is STILL dropped.
         assert_eq!(
-            v.on_realm_snapshot(frame(
-                30,
-                10,
-                vec![(RealmId::Planet(8), pose(DVec3::ZERO, 10))]
-            )),
+            v.on_realm_snapshot(
+                None,
+                frame(30, 10, vec![(RealmId::Planet(8), pose(DVec3::ZERO, 10))])
+            ),
             RealmVerdict::DropStale,
         );
         assert_eq!(v.stale_frames_dropped(), 1);
@@ -281,16 +401,18 @@ mod tests {
     fn a_strictly_older_frame_is_dropped_and_counted_but_an_equal_sibling_applies() {
         let mut v = RealmView::default();
         assert_eq!(
-            v.on_realm_snapshot(frame(5, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))])),
+            v.on_realm_snapshot(
+                None,
+                frame(5, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))])
+            ),
             RealmVerdict::Apply,
         );
         // A STRICTLY-older frame is a late straggler — dropped + counted, the placement unchanged.
         assert_eq!(
-            v.on_realm_snapshot(frame(
-                4,
-                10,
-                vec![(RealmId::Planet(1), pose(DVec3::ZERO, 10))]
-            )),
+            v.on_realm_snapshot(
+                None,
+                frame(4, 10, vec![(RealmId::Planet(1), pose(DVec3::ZERO, 10))])
+            ),
             RealmVerdict::DropStale,
         );
         assert_eq!(v.stale_frames_dropped, 1);
@@ -300,11 +422,10 @@ mod tests {
         // An EQUAL frame_id (a sibling chunk of the partitioned frame 5) is NOT stale and applies —
         // a second realm lands from the same frame.
         assert_eq!(
-            v.on_realm_snapshot(frame(
-                5,
-                10,
-                vec![(RealmId::Station(2), pose(DVec3::Y, 10))]
-            )),
+            v.on_realm_snapshot(
+                None,
+                frame(5, 10, vec![(RealmId::Station(2), pose(DVec3::Y, 10))])
+            ),
             RealmVerdict::Apply,
         );
         assert!(v.realm_pose(RealmId::Station(2), 10.0).is_some());
@@ -315,14 +436,16 @@ mod tests {
     #[test]
     fn a_realm_absent_from_a_fresh_frame_persists_its_track_no_vanish() {
         let mut v = RealmView::default();
-        v.on_realm_snapshot(frame(1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]));
+        v.on_realm_snapshot(
+            None,
+            frame(1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]),
+        );
         // Frame 2 names ONLY Station 2 — Planet 1 is absent (packet loss is indistinguishable from
         // "not in this chunk"), so its track PERSISTS (never evicted on datagram-absence).
-        v.on_realm_snapshot(frame(
-            2,
-            20,
-            vec![(RealmId::Station(2), pose(DVec3::Y, 20))],
-        ));
+        v.on_realm_snapshot(
+            None,
+            frame(2, 20, vec![(RealmId::Station(2), pose(DVec3::Y, 20))]),
+        );
         assert!(
             v.realm_pose(RealmId::Planet(1), 20.0).is_some(),
             "no-vanish"
@@ -333,11 +456,14 @@ mod tests {
     #[test]
     fn a_nonfinite_pose_is_sanitized_and_counted_then_a_clean_pose_is_not() {
         let mut v = RealmView::default();
-        v.on_realm_snapshot(frame(
-            1,
-            10,
-            vec![(RealmId::Planet(1), pose(DVec3::new(f64::NAN, 0.0, 0.0), 10))],
-        ));
+        v.on_realm_snapshot(
+            None,
+            frame(
+                1,
+                10,
+                vec![(RealmId::Planet(1), pose(DVec3::new(f64::NAN, 0.0, 0.0), 10))],
+            ),
+        );
         assert_eq!(
             v.nonfinite_poses, 1,
             "a non-finite realm pose is a counted fault"
@@ -346,7 +472,10 @@ mod tests {
         let rp = v.realm_pose(RealmId::Planet(1), 10.0).expect("a track");
         assert!(rp.pos.is_finite(), "the sanitized pose is finite");
         // A subsequent CLEAN pose does NOT bump the fault count (the `pose != raw` false arm).
-        v.on_realm_snapshot(frame(2, 20, vec![(RealmId::Planet(1), pose(DVec3::X, 20))]));
+        v.on_realm_snapshot(
+            None,
+            frame(2, 20, vec![(RealmId::Planet(1), pose(DVec3::X, 20))]),
+        );
         assert_eq!(v.nonfinite_poses, 1);
     }
 
@@ -358,15 +487,21 @@ mod tests {
         assert_eq!(fresh.stale_frames_dropped(), 0);
         assert_eq!(fresh.nonfinite_poses(), 0);
         let mut v = RealmView::default();
-        v.on_realm_snapshot(frame(
-            2,
-            10,
-            vec![(
-                RealmId::Planet(1),
-                pose(DVec3::new(f64::INFINITY, 0.0, 0.0), 10),
-            )],
-        ));
-        v.on_realm_snapshot(frame(1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))])); // stale
+        v.on_realm_snapshot(
+            None,
+            frame(
+                2,
+                10,
+                vec![(
+                    RealmId::Planet(1),
+                    pose(DVec3::new(f64::INFINITY, 0.0, 0.0), 10),
+                )],
+            ),
+        );
+        v.on_realm_snapshot(
+            None,
+            frame(1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]),
+        ); // stale
         assert_eq!(v.nonfinite_poses(), 1);
         assert_eq!(v.stale_frames_dropped(), 1);
         let cloned = v.clone();
@@ -393,8 +528,14 @@ mod tests {
             "and neither does a realm it has never streamed"
         );
 
-        v.on_realm_snapshot(frame(1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]));
-        v.on_realm_snapshot(frame(2, 40, vec![(RealmId::Planet(2), pose(DVec3::Y, 40))]));
+        v.on_realm_snapshot(
+            None,
+            frame(1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]),
+        );
+        v.on_realm_snapshot(
+            None,
+            frame(2, 40, vec![(RealmId::Planet(2), pose(DVec3::Y, 40))]),
+        );
 
         // Each realm reports ITS OWN newest tick — the older one is not dragged forward by the newer.
         assert_eq!(
@@ -415,16 +556,22 @@ mod tests {
     #[test]
     fn realm_pose_reflects_the_latest_streamed_pose_frozen_past_the_window() {
         let mut v = RealmView::default();
-        v.on_realm_snapshot(frame(
-            1,
-            10,
-            vec![(RealmId::Planet(1), pose(DVec3::new(1.0, 0.0, 0.0), 10))],
-        ));
-        v.on_realm_snapshot(frame(
-            2,
-            20,
-            vec![(RealmId::Planet(1), pose(DVec3::new(2.0, 0.0, 0.0), 20))],
-        ));
+        v.on_realm_snapshot(
+            None,
+            frame(
+                1,
+                10,
+                vec![(RealmId::Planet(1), pose(DVec3::new(1.0, 0.0, 0.0), 10))],
+            ),
+        );
+        v.on_realm_snapshot(
+            None,
+            frame(
+                2,
+                20,
+                vec![(RealmId::Planet(1), pose(DVec3::new(2.0, 0.0, 0.0), 20))],
+            ),
+        );
         // Past the freshest tick the box FREEZES at the latest delivered pose (no extrapolation).
         let rp = v.realm_pose(RealmId::Planet(1), 1_000.0).expect("a track");
         assert_eq!(rp.pos, DVec3::new(2.0, 0.0, 0.0));

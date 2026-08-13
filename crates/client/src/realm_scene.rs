@@ -18,10 +18,11 @@ use std::collections::BTreeMap;
 
 use glam::DVec3;
 use vd_core::geometry::{Boundary, RealmBoundary, RealmRegion};
-use vd_core::pose::{FrameRef, LatticePos, RealmId};
+use vd_core::pose::{FrameRef, LatticePos, RealmId, Tier};
 use vd_core::worldgen::MAX_RENDERABLE_EXTENT_M;
 use vd_wire::channels::RealmShape;
 
+use crate::interp::stated_tier;
 use crate::realm_view::RealmView;
 
 /// The render-relevant shape of one realm's extent. A `RealmBoundary::shape` projects to this,
@@ -51,26 +52,47 @@ pub enum BoxShape {
 pub struct RealmBox {
     /// The render-relevant shape (sphere or box).
     pub shape: BoxShape,
-    /// The realm's authoritative reference frame — the box's `center` is expressed in THIS
-    /// frame, so the renderer places the box by composing the frame ORIGIN through the ONE
-    /// `DeliveredView::world_pos` chokepoint (identity for the world-origin frames through P3; a
-    /// Station-hull-borne box composes through its hull at P8, WITHOUT changing this shape). Carried
-    /// here so the render glue never reconstructs a `FrameRef` from a `RealmId` — the `Area` arm
-    /// can't (it needs the parent planet seed) and it would be a per-KIND match in a feature path.
+    /// THIS REALM'S OWN FRAME — the wire's `RealmShape::frame`, the frame this realm's occupants and
+    /// its own children are measured in. ONE meaning, and it is NOT the space `center` is measured in
+    /// (that is the frame of whoever the shape was addressed to). Carried so the render glue never
+    /// reconstructs a `FrameRef` from a `RealmId` — the `Area` arm can't (it needs the parent planet
+    /// seed) and it would be a per-KIND match in a feature path.
+    ///
+    /// It used to mean TWO things: the realm's own frame until the first streamed pose arrived, and the
+    /// frame the pose was authored in afterwards — because `overlaid_at` overwrote it, and it overwrote
+    /// it for exactly one reason: `draw_center` read `.tier()` off it to pick metres-per-cell, and only
+    /// the streamed pose's label states the space the streamed centre is in. That unit now travels as
+    /// `tier`, stated beside the value it belongs to, so this field no longer has to double as a unit
+    /// carrier and no longer changes meaning halfway through a session.
     pub frame: FrameRef,
+    /// THE UNIT `center`'s integer cell is counted in — the one number `draw_center` multiplies by.
+    ///
+    /// It is stated by whoever shipped the centre, never picked here: for a live streamed placement it
+    /// comes from the pose's own label (`RealmSnap`'s TAIL, which every relay hop rewrites in the same
+    /// operation that restates the value), through [`crate::interp::stated_tier`].
+    ///
+    /// KNOWN GAP, named rather than hidden. For a STATIC shape off the reliable scene lane there is no
+    /// such statement to read: `RealmShape` carries the realm's own frame (the head) and a `center`
+    /// measured in the ADDRESSEE's frame, and no field naming that addressee — the tail `RealmSnap`
+    /// gained at proto_minor 8 has no counterpart here. So the shape lane falls back to the tier of the
+    /// realm's own frame, which is right only while both are the same tier. Every in-system frame is
+    /// `Tier::Fine` and the one `Tier::Coarse` frame (`GalaxySpace`) belongs to an ambient shell that is
+    /// never drawn, so today the two always agree; `a_static_shape_and_a_streamed_pose_agree_on_the_unit
+    /// _only_because_every_drawn_realm_is_one_tier` pins that and fails the day it stops being true.
+    pub tier: Tier,
     /// The box centre as the server shipped it — a FULL tiered position (coarse cell + fine offset),
     /// NOT a bare metre vector.
     ///
     /// WHY THE TYPE CHANGED (slice 5). This used to be a `DVec3` built by calling `.offset()` on the
     /// streamed position, i.e. the coarse half was DISCARDED at every constructor. Drawing then worked
-    /// only because the whole world currently sits at cell zero: the drawn point was
-    /// `(minus the full render origin) + (centre with its cell thrown away)`, which equals the correct
-    /// exact delta ONLY while the centre's cell is zero. The client must be able to CARRY the coarse
-    /// half before the server ever emits a non-zero one, or every box lands wrong by a whole cell.
+    /// only because the whole world currently sits at cell zero — the drawn point was the centre with
+    /// its cell thrown away, which equals the exact position ONLY while that cell is zero. The client
+    /// must be able to CARRY the coarse half before the server ever emits a non-zero one, or every box
+    /// lands wrong by a whole cell.
     ///
-    /// Reduce it for drawing through the ONE chokepoint ([`crate::view::DeliveredView::world_pos`]),
-    /// which subtracts the server-told render origin in exact integer-cell arithmetic. Never subtract
-    /// an origin by hand here — that is the class of bug this field's type now prevents.
+    /// Reduce it for drawing through the ONE chokepoint ([`RealmBox::draw_center`]), which flattens the
+    /// tiered position in exact integer-cell arithmetic. Never do that arithmetic by hand here — that is
+    /// the class of bug this field's type now prevents.
     pub center: LatticePos,
     /// The parent realm, when this box nests inside another (`None` at the top level).
     pub parent: Option<RealmId>,
@@ -81,20 +103,25 @@ pub struct RealmBox {
 }
 
 impl RealmBox {
-    /// This box's centre in RENDER space — reduced against the server-told render `origin` in exact
-    /// integer-cell arithmetic.
+    /// This box's centre in RENDER space — the tiered position flattened to metres, exactly.
     ///
     /// THE ONE WAY A BOX BECOMES DRAWABLE (slice 5). Every consumer — the renderer, the capture
-    /// camera, the containment verdicts, the diagnosis surface — asks for this instead of subtracting
-    /// an origin itself. Before, four call sites each spelled their own arithmetic and two of them got
-    /// it subtly wrong (dropping the origin's coarse half, or mixing a reduced point against a raw
-    /// centre), which is invisible while the world sits at cell zero and wrong the moment it does not.
+    /// camera, the containment verdicts, the diagnosis surface — asks for this instead of doing its own
+    /// arithmetic. Before, four call sites each spelled their own and two of them got it subtly wrong
+    /// (dropping the coarse half, or mixing a reduced point against a raw centre), which is invisible
+    /// while the world sits at cell zero and wrong the moment it does not.
+    ///
+    /// It used to take a server-told render ORIGIN to subtract. Nothing is subtracted now: the chain of
+    /// shards restated this centre from the centre of the realm the session is standing in, the same
+    /// space the occupants standing in this box are measured in, which is what makes the box and its
+    /// riders agree on screen.
     ///
     /// Same primitive the entity path uses (`LatticePos::delta_m`), so a box and a player standing on
-    /// it are reduced identically — which is what makes them agree on screen.
+    /// it are reduced identically — and, like the entity path, it multiplies by a unit it was HANDED
+    /// (`self.tier`) rather than looking one up off a frame name at the moment of drawing.
     #[must_use]
-    pub fn draw_center(&self, origin: LatticePos) -> DVec3 {
-        self.center.delta_m(origin, self.frame.tier())
+    pub fn draw_center(&self) -> DVec3 {
+        self.center.delta_m(LatticePos::default(), self.tier)
     }
 }
 
@@ -154,11 +181,16 @@ impl RealmScene {
         let mut boxes: BTreeMap<RealmId, RealmBox> = BTreeMap::new();
         for b in boundaries {
             let depth = depth_of(b.realm, &parents)?;
+            let frame = frame_of_realm(b.realm, b.parent);
             boxes.insert(
                 b.realm,
                 RealmBox {
                     shape: shape_of(b.shape),
-                    frame: frame_of_realm(b.realm, b.parent),
+                    frame,
+                    // A hand-authored dev-config has no shipper to state a unit, so the realm's own
+                    // frame is the only statement there is — and it is the right one here, because the
+                    // file's centres are authored in that same space by construction.
+                    tier: stated_tier(frame),
                     center: b.center,
                     parent: b.parent,
                     depth,
@@ -251,6 +283,9 @@ impl RealmScene {
                 RealmBox {
                     shape: shape_of(r.shape),
                     frame: r.frame,
+                    // The shape lane states no tail (see `RealmBox::tier`), so the realm's own frame is
+                    // the only unit statement on the message. Sound while every drawn realm is one tier.
+                    tier: stated_tier(r.frame),
                     center: r.center,
                     parent: r.parent,
                     depth,
@@ -290,6 +325,8 @@ impl RealmScene {
                 RealmBox {
                     shape: shape_of(s.shape),
                     frame: s.frame,
+                    // Same statement, same gap, as `from_shapes` — see `RealmBox::tier`.
+                    tier: stated_tier(s.frame),
                     center: s.center,
                     parent: s.parent,
                     depth: 0, // recomputed below over the merged parent map
@@ -347,13 +384,21 @@ impl RealmScene {
     }
 
     /// Overlay a [`RealmView`]'s streamed live placements onto this BOOT scene (D-45(a) FA-2c-3.3): each
-    /// boot box whose realm the feed has streamed gets its `frame` AND `center` REPLACED by the
-    /// latest server-shipped pose. BOTH move because the pose is authored in the shard's PARENT frame
-    /// (`SystemSpace` for a planet), NOT the realm's own boot frame (`PlanetCentered`) — the boot frame is
-    /// only correct for a STATIC realm; a MOVING realm must render in the frame it was authored in (this is
-    /// invisible through P3 where all such frames are world-origin identity, but load-bearing at P4/P5).
-    /// Shape / parent / depth / color are boot config and are kept. A boot box the feed never names stays
-    /// boot-static. Callers skip this when the view is empty (walk scale → the boot scene, byte-identical).
+    /// boot box whose realm the feed has streamed gets its `center` REPLACED by the latest
+    /// server-shipped pose, and with it the UNIT that centre's integer cell is counted in. Shape /
+    /// frame / parent / depth / color are boot config and are kept. A boot box the feed never names
+    /// stays boot-static. Callers skip this when the view is empty (walk scale → the boot scene,
+    /// byte-identical).
+    ///
+    /// WHAT CHANGED, AND WHY IT IS NOT A BEHAVIOUR CHANGE. This used to replace the box's `frame` as
+    /// well, with the frame the streamed pose was authored in. Its stated reason was that a moving realm
+    /// must render in the frame it was authored in — but nothing here renders in a frame; the only thing
+    /// the field was ever read for downstream was `.tier()`, to pick metres-per-cell in `draw_center`.
+    /// So the replacement was really about the UNIT, and it bought that at the cost of `frame` meaning
+    /// the realm's own frame before the first streamed row and something else after — a field whose
+    /// meaning depends on how long you have been connected. The unit now moves on its own (`tier`, taken
+    /// from the pose's own label, the same statement the old code was reaching through `frame` to get),
+    /// the drawn point is bit-identical, and `frame` keeps one meaning for the whole session.
     #[must_use]
     pub fn overlaid_at(&self, view: &RealmView, cursor: f64) -> RealmScene {
         let boxes = self
@@ -362,11 +407,14 @@ impl RealmScene {
             .map(|(&realm, boot)| {
                 let overlaid = match view.realm_pose(realm, cursor) {
                     Some(live) => RealmBox {
-                        frame: live.frame,
                         // The streamed pose carries its coarse cell SEPARATELY from its fine offset;
                         // recombine both. Taking `live.pos` alone (as this did) silently dropped the
                         // cell every time the feed moved a realm.
                         center: LatticePos::at(live.cell, live.pos),
+                        // THE UNIT COMES WITH THE VALUE: `RenderPose::tier` was stamped from the label
+                        // the shipping shard put on this very pose, so a placement that arrives counted
+                        // in a different lattice than the boot shape draws at its true distance.
+                        tier: live.tier,
                         ..*boot
                     },
                     None => *boot,
@@ -586,14 +634,15 @@ pub struct MeshPrim {
 pub const SPHERE_SECTORS: usize = 12;
 pub const SPHERE_STACKS: usize = 8;
 
-/// Lower a [`RealmBox`] to its render primitives at `draw_center` — the box's centre ALREADY reduced
-/// against the server-told render origin by the caller, through the ONE `world_pos` chokepoint.
+/// Lower a [`RealmBox`] to its render primitives at `draw_center` — the box's centre ALREADY flattened
+/// to metres by the caller, through the ONE [`RealmBox::draw_center`] chokepoint.
 ///
 /// ONE TERM, NOT TWO (slice 5). This used to take the box's FRAME ORIGIN in world space and add
-/// `rbox.center_offset` to it — a composition performed here, on the client, mixing an
-/// origin-reduced point with a raw centre whose coarse half had been discarded. The caller now
-/// reduces the box's own full position once and passes the finished value; there is nothing left to
-/// compose. Anything that needs a drawable point asks `world_pos`, never arithmetic of its own.
+/// `rbox.center_offset` to it — a composition performed here, on the client, mixing a reduced point
+/// with a raw centre whose coarse half had been discarded. Nothing is composed and nothing is
+/// subtracted now: the server ships the centre already measured from the realm this session stands in,
+/// the caller flattens that one position once, and this places it. Anything that needs a drawable
+/// point asks the chokepoint, never arithmetic of its own.
 ///
 /// TESSELLATES the shape into VERTICES here in Tier-A (adversary H4): a `Box` → a unit cuboid (12
 /// triangles) scaled by its half-extents; a `Sphere` → a coarse UV sphere scaled by `r`. Exactly one
@@ -783,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn overlaid_moves_a_streamed_box_frame_and_offset_keeps_static_and_empty_is_boot_identical() {
+    fn overlaid_moves_a_streamed_box_centre_keeps_static_and_empty_is_boot_identical() {
         use vd_core::pose::StampedPose;
         use vd_core::{TickId, UniverseTick};
         use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram, SubId};
@@ -808,36 +857,45 @@ mod tests {
         // A COARSE-CELL position: the cell is the half of the coordinate the client used to discard.
         let streamed_center = LatticePos::at(I64Vec3::new(4, -2, 9), DVec3::new(1.0e9, 5.0e8, 0.0));
         let mut view = RealmView::default();
-        view.on_realm_snapshot(RealmSnapshotDatagram {
-            sub: SubId(0),
-            frame_id: 1,
-            source_tick: TickId(1),
-            universe_tick: UniverseTick(10),
-            realms: vec![RealmSnap {
-                realm: RealmId::Planet(1),
-                pose: StampedPose {
-                    frame: streamed_frame,
-                    pos: streamed_center,
-                    vel: DVec3::ZERO,
-                    orient: DQuat::IDENTITY,
-                    universe_tick: UniverseTick(10),
-                },
-            }],
-        });
+        view.on_realm_snapshot(
+            None,
+            RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 1,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(10),
+                realms: vec![RealmSnap {
+                    realm: RealmId::Planet(1),
+                    // The edge HEAD (proto_minor 8): Planet 1's OWN frame; `pose.frame` below is the TAIL,
+                    // the frame its parent authored the placement in.
+                    frame: FrameRef::PlanetCentered { planet_seed: 1 },
+                    pose: StampedPose {
+                        frame: streamed_frame,
+                        pos: streamed_center,
+                        vel: DVec3::ZERO,
+                        orient: DQuat::IDENTITY,
+                        universe_tick: UniverseTick(10),
+                    },
+                }],
+            },
+        );
         let scene = boot.overlaid_at(&view, f64::INFINITY);
-        // Planet 1 moved — BOTH its frame and its centre are the streamed (parent-frame) values, and
-        // its frame CHANGED from the boot PlanetCentered (the must-fix: a moving realm renders in the
-        // frame it was authored in, not its own boot frame). The centre carries the streamed COARSE
-        // CELL as well as the offset: dropping the cell here is the slice-5 defect.
+        // Planet 1 moved: its CENTRE is the streamed value, carrying the streamed COARSE CELL as well as
+        // the offset (dropping the cell here is the slice-5 defect), and the UNIT that cell is counted in
+        // is the one the streamed pose stated.
         let moved = scene.get(RealmId::Planet(1)).expect("planet box");
         assert_eq!(moved.center, streamed_center);
         assert_eq!(moved.center.cell(), I64Vec3::new(4, -2, 9));
-        assert_eq!(moved.frame, streamed_frame);
-        assert_ne!(
+        assert_eq!(moved.tier, crate::interp::stated_tier(streamed_frame));
+        // Its FRAME did NOT move, and that is the fix: the field means the realm's OWN frame for the
+        // whole session, not "the realm's own frame until a pose arrives and the author's frame after".
+        // The overlay used to overwrite it purely to get at the unit, which now travels on its own.
+        assert_eq!(
             moved.frame,
             boot.get(RealmId::Planet(1)).expect("boot planet").frame,
-            "the overlay REPLACES the boot frame (PlanetCentered → the authored SystemSpace)",
+            "the overlay does not touch the realm's own frame",
         );
+        assert_eq!(moved.frame, FrameRef::PlanetCentered { planet_seed: 1 });
         // Station 2 (not streamed) stays boot-static.
         assert_eq!(
             scene.get(RealmId::Station(2)),
@@ -1090,32 +1148,98 @@ mod tests {
         assert_eq!(hsv_to_rgb(0.4, 0.0, 0.5), [0.5, 0.5, 0.5]);
     }
 
-    /// SLICE 5 — the box's centre reduces against the render origin by EXACT INTEGER CELL arithmetic,
-    /// the same way an entity's does. Both sit far from the universe origin (a huge shared cell) and
-    /// only their small difference reaches f64: the cancellation is exact, so a box and an occupant
-    /// standing on it agree to the bit. The old client kept only the box's offset and dropped its cell,
-    /// which is right ONLY while every cell is zero — this asserts the case that used to be wrong.
+    /// SLICE 5 — the box's centre flattens to metres by EXACT INTEGER CELL arithmetic, the same way an
+    /// entity's does, so a box and an occupant standing on it agree to the bit. The old client kept only
+    /// the box's offset and dropped its cell, which is right ONLY while every cell is zero — this asserts
+    /// the case that used to be wrong.
     #[test]
-    fn draw_center_reduces_by_exact_cell_arithmetic_far_from_the_origin() {
-        let far = I64Vec3::new(1_000_000_007, -4, 0);
+    fn draw_center_carries_the_integer_cell_not_just_the_metre_offset() {
         let rbox = RealmBox {
             shape: BoxShape::Sphere { r: 1.0 },
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            center: LatticePos::at(far + I64Vec3::new(3, 0, 0), DVec3::new(0.25, 0.0, 0.0)),
+            tier: Tier::Fine,
+            center: LatticePos::at(I64Vec3::new(3, 0, 0), DVec3::new(0.25, 0.0, 0.0)),
             parent: None,
             depth: 0,
             color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
         };
-        // The origin shares the huge cell; only the 3-cell + 0.25 m residual survives.
-        let origin = LatticePos::at(far, DVec3::new(0.0, 0.0, 0.0));
         let edge = Tier::Fine.cell_edge_m();
-        assert_eq!(
-            rbox.draw_center(origin),
-            DVec3::new(3.0 * edge + 0.25, 0.0, 0.0)
-        );
+        assert_eq!(rbox.draw_center(), DVec3::new(3.0 * edge + 0.25, 0.0, 0.0));
         // Dropping the cell (the pre-slice-5 arithmetic) would have drawn it at 0.25 m — the box would
         // sit on top of the camera instead of 3 cells away.
-        assert_ne!(rbox.draw_center(origin), rbox.center.offset());
+        assert_ne!(rbox.draw_center(), rbox.center.offset());
+    }
+
+    /// THE SHIPPER DECIDES THE UNIT, on the box lane too — the twin of `view.rs`'s
+    /// `world_pos_multiplies_by_the_unit_it_was_told_not_by_one_it_picks`.
+    ///
+    /// Two boxes with the IDENTICAL frame label and the IDENTICAL integer cell, differing only in the
+    /// unit stated for that cell, must draw a whole tier apart. A `draw_center` that read the unit off
+    /// `frame` (which answers `Fine` for every in-system frame) would return the same point for both.
+    #[test]
+    fn draw_center_multiplies_by_the_unit_it_was_told_not_by_one_it_picks() {
+        use vd_core::pose::{COARSE_CELL_EDGE_M, FINE_CELL_EDGE_M};
+        let at = |tier| RealmBox {
+            shape: BoxShape::Sphere { r: 1.0 },
+            // The SAME label on both, so nothing about the label can explain the difference.
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            tier,
+            center: LatticePos::at(I64Vec3::new(1, 0, 0), DVec3::ZERO),
+            parent: None,
+            depth: 0,
+            color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
+        };
+        assert_eq!(
+            at(Tier::Fine).draw_center(),
+            DVec3::new(FINE_CELL_EDGE_M, 0.0, 0.0)
+        );
+        assert_eq!(
+            at(Tier::Coarse).draw_center(),
+            DVec3::new(COARSE_CELL_EDGE_M, 0.0, 0.0)
+        );
+    }
+
+    /// THE TRIPWIRE FOR THE ONE REMAINING GUESS, stated so it can fail rather than left as prose.
+    ///
+    /// A `RealmShape` off the reliable scene lane carries the realm's OWN frame and a `center` measured
+    /// in the frame of whoever the message was ADDRESSED to, and names that addressee nowhere — it has
+    /// no counterpart to the TAIL that `RealmSnap` gained at proto_minor 8. So `from_shapes` has to take
+    /// the unit from the realm's own frame, and that is right only while the two are the same tier.
+    ///
+    /// They are, today, and that is a property of the drawn set rather than luck: every frame except
+    /// `GalaxySpace` is `Tier::Fine`, and the only realm whose own frame is `GalaxySpace` is an ambient
+    /// shell whose extent exceeds `MAX_RENDERABLE_EXTENT_M` and is therefore never drawn. This asserts
+    /// exactly that, over the real seed forest, so the day a `Tier::Coarse` frame reaches a drawn box —
+    /// i.e. the day a player stands in the galaxy realm and its systems stream in — this fails and says
+    /// what to do about it, instead of every star silently landing 10^19 times too close.
+    #[test]
+    fn a_static_shape_and_a_streamed_pose_agree_on_the_unit_only_because_every_drawn_realm_is_one_tier()
+     {
+        let regions = vd_core::worldgen::realm_regions_for(0);
+        let scene = RealmScene::from_regions(&regions).expect("the seed forest projects");
+        assert!(!scene.is_empty(), "a vacuous scene would assert nothing");
+        for (realm, rbox) in scene.iter() {
+            assert_eq!(
+                rbox.tier,
+                Tier::Fine,
+                "{realm:?} is drawn at a unit taken from its own frame; the wire states no other, so a \
+                 non-Fine drawn realm means RealmShape now needs the addressee's frame on it",
+            );
+        }
+        // WHY it holds, measured rather than argued: the COARSE tier is not live anywhere yet. The only
+        // frame that answers Coarse is `GalaxySpace`, and the seed forest produces no region carrying it
+        // — every realm from the Universe root down is framed as an in-system `Tier::Fine` space. When
+        // the galaxy tier does light up (P10 warp), this count stops being zero and the assertion above
+        // is what has to be answered first.
+        assert_eq!(stated_tier(FrameRef::GalaxySpace), Tier::Coarse);
+        assert_eq!(
+            regions
+                .iter()
+                .filter(|r| stated_tier(r.frame) == Tier::Coarse)
+                .count(),
+            0,
+            "no realm is authored on the COARSE lattice yet, which is why one unit fits the whole scene",
+        );
     }
 
     #[test]
@@ -1125,15 +1249,16 @@ mod tests {
                 half: DVec3::new(2.0, 3.0, 4.0),
             },
             frame: FrameRef::SystemSpace { system_seed: 1 },
+            tier: Tier::Fine,
             center: LatticePos::local(DVec3::new(1.0, 0.0, 0.0)),
             parent: None,
             depth: 0,
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
         };
-        // The centre is reduced against the server-told render origin ONCE, by the caller, through the
-        // one chokepoint; the prim lands exactly there (slice 5: ONE term, no composition in here).
-        let draw_center = rbox.draw_center(LatticePos::local(DVec3::new(-9.0, 0.0, 0.0)));
-        assert_eq!(draw_center, DVec3::new(10.0, 0.0, 0.0));
+        // The centre is flattened ONCE, by the caller, through the one chokepoint; the prim lands
+        // exactly there (slice 5: ONE term, no composition in here).
+        let draw_center = rbox.draw_center();
+        assert_eq!(draw_center, DVec3::new(1.0, 0.0, 0.0));
         let prims = to_render_prims(&rbox, draw_center);
         assert_eq!(prims.len(), 1);
         let p = &prims[0];
@@ -1142,7 +1267,7 @@ mod tests {
         assert_eq!(p.color_rgba, [0.1, 0.2, 0.3, BOX_ALPHA]);
         assert_eq!(p.transform.scale, [2.0, 3.0, 4.0]);
         // The prim translation IS the reduced centre — nothing is added to it.
-        assert_eq!(p.transform.translation, [10.0, 0.0, 0.0]);
+        assert_eq!(p.transform.translation, [1.0, 0.0, 0.0]);
         // Every cuboid vertex is a unit-cube corner with a unit face normal. `abs()==1.0` is a
         // single condition (no `||` short-circuit branch — HR5: no uncoverable region in a helper).
         for v in &p.vertices {
@@ -1159,6 +1284,7 @@ mod tests {
         let rbox = RealmBox {
             shape: BoxShape::Sphere { r: 5.0 },
             frame: FrameRef::SystemSpace { system_seed: 1 },
+            tier: Tier::Fine,
             center: LatticePos::local(DVec3::ZERO),
             parent: None,
             depth: 0,

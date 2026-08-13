@@ -17,8 +17,7 @@
 
 use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_devproto::{
-    DevEntityRow, DevPhase, DevRealmBox, DevRenderOrigin, DevState, DevTransferView,
-    DevWindowCensus, InputAction,
+    DevEntityRow, DevPhase, DevRealmBox, DevState, DevTransferView, DevWindowCensus, InputAction,
 };
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
@@ -103,6 +102,11 @@ pub struct ClientState {
     /// (walk scale ships none, so the published scene stays the boot `scene` — byte-identical). Read
     /// by `render_snapshot()` to OVERLAY each moving box's live pose onto the boot scene.
     realm_view: RealmView,
+    /// The space the avatar stood in at the LAST applied own-entity frame (the ONE-SPACE rule's
+    /// flip detector, crossing-render slice): when the delivered own frame changes — a committed
+    /// crossing — every stored realm placement is a position in the OLD space and is forgotten
+    /// (`RealmView::forget_space`). `None` until the avatar's first delivered frame.
+    standing_space: Option<vd_core::pose::FrameRef>,
 }
 
 impl ClientState {
@@ -130,6 +134,7 @@ impl ClientState {
             latest_universe_tick: None,
             scene: Arc::new(RealmScene::default()),
             realm_view: RealmView::default(),
+            standing_space: None,
         }
     }
 
@@ -239,12 +244,10 @@ impl ClientState {
             // at publish time — exactly as they did over the boot-file scene. `root` (the ambient container)
             // is unused until camera framing (VU-6). A malformed neighbourhood (a duplicate/cyclic realm — a
             // server bug) is counted on the shared decode counter and the previous scene kept, never a crash.
-            ServerControlMsg::RealmRegistry {
-                regions, pin_abs, ..
-            } => {
-                // A5 — adopt the SERVER-TOLD render origin (the client subtracts it from every absolute pose it
-                // draws). Carry-last-pin (never reset to identity), so a warp re-anchor never teleports the scene.
-                self.view.set_render_origin(pin_abs);
+            ServerControlMsg::RealmRegistry { regions, .. } => {
+                // Nothing here re-anchors anything. The message used to carry the pin realm's own absolute
+                // position, which the client adopted and subtracted from every pose it drew; positions now
+                // arrive already measured in the pin's space, so the client's only job is to hold the shapes.
                 match RealmScene::from_shapes(&regions) {
                     Ok(scene) => self.scene = Arc::new(scene),
                     Err(_) => self.decode_errors += 1,
@@ -255,15 +258,7 @@ impl ClientState {
             // follows the view continuously. Atomic — a malformed delta (a cyclic parent chain, a server bug)
             // is counted and the previous scene kept, never a partial mutation. The live per-realm poses keep
             // riding `realm_view` and overlay onto whatever boxes are present.
-            ServerControlMsg::RealmSceneDelta {
-                added,
-                removed,
-                pin_abs,
-                ..
-            } => {
-                // A5 — every scene delta re-carries the render origin (a warp re-anchor refreshes it on the
-                // reliable scene lane); adopt it the same carry-last-pin way as the registry.
-                self.view.set_render_origin(pin_abs);
+            ServerControlMsg::RealmSceneDelta { added, removed, .. } => {
                 match self.scene.with_delta(&added, &removed) {
                     Ok(scene) => self.scene = Arc::new(scene),
                     Err(_) => self.decode_errors += 1,
@@ -307,6 +302,22 @@ impl ClientState {
             self.render_clock.observe(tick, now_s);
             self.snapshots_applied += 1;
             self.latest_universe_tick = Some(tick.0);
+            // THE SPACE FLIP (the ONE-SPACE rule, crossing-render slice): the avatar's delivered
+            // frame changed — a committed crossing moved this client into a new realm. Every stored
+            // realm placement is a position in the OLD space: forget them all. The new space refills
+            // within one feed period; the realm now stood in draws from its streamed scene OUTLINE at
+            // the avatar's origin (its own per-tick row never ships — the realm you occupy draws
+            // itself), which the stale track would otherwise override forever (the measured
+            // "I landed on the planet and I am outside it"). The first delivered frame (None → Some)
+            // is a login, not a crossing — nothing stored yet, and `forget_space` of nothing is a
+            // no-op, so one arm covers both.
+            let now_standing = self.view.own_location_frame();
+            if now_standing != self.standing_space {
+                if self.standing_space.is_some() {
+                    self.realm_view.forget_space();
+                }
+                self.standing_space = now_standing;
+            }
         }
     }
 
@@ -324,7 +335,10 @@ impl ClientState {
             return;
         };
         let tick = snap.universe_tick;
-        if self.realm_view.on_realm_snapshot(snap) == RealmVerdict::Apply {
+        // THE ONE-SPACE RULE (crossing-render slice): rows fold only when stated in the space the
+        // avatar stands in — the old home's still-draining feed is skipped, never mixed in.
+        let standing_in = self.view.own_location_frame();
+        if self.realm_view.on_realm_snapshot(standing_in, snap) == RealmVerdict::Apply {
             self.render_clock.observe(tick, now_s);
             self.latest_universe_tick = Some(tick.0);
         }
@@ -519,10 +533,9 @@ impl ClientState {
                     .into_iter()
                     .map(|(entity, sub, pose)| DevEntityRow {
                         entity: entity.to_string(),
-                        // A5 — the RENDER pose: the server ships this absolute; reduce it against the server-told
-                        // render origin (the SAME subtraction the renderer draws it with), so the HR6 diagnosis
-                        // surface reports exactly what is drawn.
-                        pos: sanitize_vec3(self.view.world_pos(&pose, self.view.render_origin())),
+                        // The RENDER pose, through the SAME chokepoint the renderer draws with, so the HR6
+                        // diagnosis surface reports exactly what is on screen.
+                        pos: sanitize_vec3(self.view.world_pos(&pose)),
                         orient: sanitize_quat(pose.orient),
                         authoritative_sub: sub.0,
                     })
@@ -544,7 +557,7 @@ impl ClientState {
                 // went through `world_pos` correctly. Two arithmetics for one quantity, in the surface
                 // a test asserts against: the "player rides its realm" gate reads THIS value, so it was
                 // effectively comparing the client to itself.
-                center: sanitize_vec3(b.draw_center(self.view.render_origin())),
+                center: sanitize_vec3(b.draw_center()),
                 // SHAKE DIAGNOSIS: which moment THIS box is being drawn from. A box whose tick tracks
                 // `entity_feed_newest_tick` shares the player's moment; one that drifts is authored by a
                 // shard whose clock is running independently. `None` = never streamed (boot placement).
@@ -567,9 +580,6 @@ impl ClientState {
             // directly observable next to `render_cursor`. Read the field docs on `DevState` for why.
             entity_feed_newest_tick: self.view.newest_tick().map(|t| t.0),
             realm_feed_newest_tick: self.realm_view.newest_tick().map(|t| t.0),
-            // The origin BOTH of the above are relative to, published so a test reduces its own
-            // absolute geometry the same exact way instead of assuming this is zero.
-            render_origin: dev_render_origin(self.view.render_origin()),
             // SLICE 6 S5 — how each feed classified AT THE REPORTED CURSOR. Both censuses are taken at
             // the SAME cursor, so they are directly comparable; a feed sitting on `clamped_old` is the
             // condition that WAS the shake, and it now shows up as a number instead of as a wobble the
@@ -642,16 +652,6 @@ fn feed_skew(entity: Option<u64>, realm: Option<u64>) -> Option<i64> {
     let e = i64::try_from(entity?).ok()?;
     let r = i64::try_from(realm?).ok()?;
     Some(e - r)
-}
-
-/// Publish the render origin as its two exact halves. The integer cell needs no sanitizing (it IS
-/// exact); only the metre offset can carry a non-finite from a corrupt sender.
-fn dev_render_origin(o: vd_core::pose::LatticePos) -> DevRenderOrigin {
-    let cell = o.cell();
-    DevRenderOrigin {
-        cell: [cell.x, cell.y, cell.z],
-        offset: sanitize_vec3(o.offset()),
-    }
 }
 
 /// Force a quaternion finite while PRESERVING a valid rotation: a non-finite quat (a
@@ -839,6 +839,10 @@ mod tests {
             universe_tick: UniverseTick(tick),
             realms: vec![RealmSnap {
                 realm,
+                // The edge HEAD (proto_minor 8): the CHILD realm's own frame, beside the TAIL
+                // (`pose.frame`, the authoring parent's).
+                frame: vd_core::pose::frame_for_realm(realm, None)
+                    .expect("a seeded realm resolves"),
                 pose: StampedPose::at_rest(
                     FrameRef::SystemSpace { system_seed: 7 },
                     DVec3::new(x, 0.0, 0.0),
@@ -1001,6 +1005,128 @@ mod tests {
         // empty by default, so the published scene is the empty overlay — the is_empty()==false arm).
         let rs = c.state().render_snapshot();
         assert!(rs.scene().is_empty());
+    }
+
+    /// A `RealmSnapshotDatagram` whose row is STATED in `space` — the one-space rule's fixture (the
+    /// plain [`realm_snapshot`] hardcodes `SystemSpace{7}`).
+    fn realm_snapshot_in(
+        frame_id: u64,
+        tick: u64,
+        realm: vd_core::pose::RealmId,
+        space: FrameRef,
+        x: f64,
+    ) -> Vec<u8> {
+        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
+        postcard::to_allocvec(&RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(tick),
+            realms: vec![RealmSnap {
+                realm,
+                frame: vd_core::pose::frame_for_realm(realm, None)
+                    .expect("a seeded realm resolves"),
+                pose: StampedPose::at_rest(space, DVec3::new(x, 0.0, 0.0), UniverseTick(tick)),
+            }],
+        })
+        .expect("test fixture")
+    }
+
+    /// An entity snapshot that puts the OWN avatar in `space` at `x` — the crossing fixture.
+    fn own_snapshot_in(frame_id: u64, tick: u64, space: FrameRef, x: f64) -> Vec<u8> {
+        postcard::to_allocvec(&SnapshotDatagram {
+            sub: SubId(0),
+            frame_id,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(tick),
+            entities: vec![EntitySnap {
+                entity: ent(),
+                pose: StampedPose::at_rest(space, DVec3::new(x, 0.0, 0.0), UniverseTick(tick)),
+            }],
+        })
+        .expect("test fixture")
+    }
+
+    /// THE ONE-SPACE RULE, end to end at the net layer (crossing-render slice): a committed crossing
+    /// flips the avatar's delivered frame; every stored realm placement is a position in the OLD
+    /// space and is forgotten at the flip; old-space rows still draining keep being skipped, never
+    /// mixed into the new space's picture. The realm the avatar now stands in then draws from its
+    /// streamed scene OUTLINE (its own per-tick row never ships), not from a stale track — the
+    /// measured "I landed on the planet and I am outside it".
+    #[test]
+    fn a_crossing_flips_the_space_and_the_old_spaces_placements_are_forgotten() {
+        use vd_core::pose::RealmId;
+        let sys = FrameRef::SystemSpace { system_seed: 1 };
+        let planet = RealmId::Planet(7);
+        let planet_space = FrameRef::PlanetCentered { planet_seed: 7 };
+        let mut c = core();
+        activate(&mut c);
+        let own =
+            postcard::to_allocvec(&ServerControlMsg::OwnEntity { entity: ent() }).expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, own);
+        // Standing in the system: the planet's row (stated in the system's space) folds normally.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Snapshot,
+            own_snapshot_in(1, 10, sys, 0.0),
+        );
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot_in(1, 10, planet, sys, 17.9),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state()
+                .realm_view
+                .realm_pose(planet, f64::INFINITY)
+                .map(|p| p.pos.x),
+            Some(17.9),
+            "pre-crossing: the planet's placement folds in the standing space"
+        );
+
+        // THE CROSSING COMMITS: the avatar's next delivered frame is the PLANET's own space.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Snapshot,
+            own_snapshot_in(2, 12, planet_space, 0.1),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().realm_view.realm_pose(planet, f64::INFINITY),
+            None,
+            "the flip forgot the old space's placements — the stale pre-crossing track is gone"
+        );
+
+        // An OLD-space straggler (the source's sub still draining) is skipped + counted, never folded.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot_in(2, 13, planet, sys, 18.4),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().realm_view.realm_pose(planet, f64::INFINITY),
+            None,
+            "an old-space row never re-creates the stale track"
+        );
+        assert_eq!(c.state().realm_view.foreign_space_rows(), 1);
+
+        // A NEW-space row (a sibling restated into the planet's space by the new home) folds.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot_in(1, 14, RealmId::Planet(9), planet_space, -3.0),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state()
+                .realm_view
+                .realm_pose(RealmId::Planet(9), f64::INFINITY)
+                .map(|p| p.pos.x),
+            Some(-3.0),
+            "the new space fills from the new home's feed (its own counter admitted from zero)"
+        );
     }
 
     #[test]
@@ -1734,8 +1860,6 @@ mod tests {
             regions,
             root: vd_core::pose::RealmId::System(0),
             pin: vd_core::pose::RealmId::System(0),
-            pin_abs: vd_core::pose::LatticePos::default(),
-            anchor_epoch: 0,
         })
         .expect("test fixture")
     }
@@ -1814,8 +1938,6 @@ mod tests {
             added,
             removed,
             pin: vd_core::pose::RealmId::System(0),
-            pin_abs: vd_core::pose::LatticePos::default(),
-            anchor_epoch: 0,
         })
         .expect("fixture")
     }

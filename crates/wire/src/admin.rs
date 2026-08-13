@@ -131,6 +131,16 @@ pub struct GatewayView {
     /// A frame the gateway could not decode/dispatch — the honesty floor; MUST stay 0 for a healthy demand
     /// login (a miscounted greeting would show up here instead of `presence_announces`).
     pub undecodable: u64,
+    /// Frames DISCARDED because the router knows their sender as neither a shard nor a client. A fact
+    /// about the SENDER, split out of `undecodable` (which is about the BYTES) — the two shared a bucket,
+    /// and that is how a running shard's whole output was thrown away in silence while a player it owned
+    /// went on being drawn by the realm they had already left. MUST be 0: a shard that is up and speaking
+    /// is either known or it is being ignored, and there is no third healthy state.
+    pub refused_unknown_sender: u64,
+    /// Rosters applied from the ownership record — the router being TOLD whose frames it may read.
+    pub shard_rosters_applied: u64,
+    /// Rosters refused as older than the one held (a redelivery on a re-driven lane is expected).
+    pub shard_roster_stale: u64,
     pub frame_sub_desync: u64,
     pub transfer_unroutable: u64,
     pub transfer_control_parked: u64,
@@ -442,6 +452,12 @@ mod tests {
                 inputs_malformed: 8,
                 stale_frames_dropped: 9,
                 undecodable: 10,
+                // 26, not 11: the sequence above is positional and renumbering it to slot this in would
+                // have rewritten every value below — which is exactly the transposition this fixture
+                // exists to catch, done by hand.
+                refused_unknown_sender: 26,
+                shard_rosters_applied: 27,
+                shard_roster_stale: 28,
                 frame_sub_desync: 11,
                 transfer_unroutable: 12,
                 transfer_control_parked: 13,

@@ -86,11 +86,16 @@ struct Hop {
 fn drive_hop(topo: &mut Topology, subject: EntityId, hop: &Hop) {
     let off = DVec3::new(hop.offset, 0.0, 0.0);
     // Re-assert the waypoint EVERY tick (the manual write lands before `evaluate_realm_boundaries`) on
-    // BOTH the current owner and the expected new owner, so the dot stays at the waypoint through the
-    // adopt (mirrors the transient twin's dual-write). Bounded + deterministic.
+    // the CURRENT OWNER only. Bounded + deterministic.
+    //
+    // It used to write the SAME offset on the expected new owner too, which assumed a position means the
+    // same thing in both realms' frames. That was true only while every realm sat on its parent's origin.
+    // The Galaxy authors System 8 at x = 130, so once the hand-off actually CONVERTS, the occupant the
+    // Galaxy sees at x = 100 is at −30 in System 8's own frame — and re-writing +100 there put it 100 m
+    // from System 8's centre, outside its 40 m boundary, so System 8 handed it straight back and the head
+    // never settled. The arriving shard's copy is whatever IT computed; that is the thing under test.
     let flipped = step_until(topo, 260, |t| {
         set_shard_subject_offset(t, hop.owner, subject, off);
-        set_shard_subject_offset(t, hop.expect_head, subject, off);
         // ANTI-VACUITY / the S3 proof: a well-behaved hop NEVER aborts. If the saga ever reached a
         // CutTimeout-driven Aborting, the head would not flip — this is exactly the multi-hop stall S3
         // fixes, so we assert its absence positively (below, via head-flip + live_sagas==0) rather than

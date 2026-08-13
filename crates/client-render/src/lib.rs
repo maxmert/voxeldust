@@ -627,7 +627,7 @@ fn sync_world(
     let mut own_world: Option<DVec3> = None;
     for (id, _sub, pose) in &rendered {
         seen.insert(*id);
-        let world = snap.world_pos(pose); // A5 — pure range-reduction against the server-told render origin
+        let world = snap.world_pos(pose); // a passthrough: the server ships pin-space positions
         if Some(*id) == own {
             own_world = Some(world);
         }
@@ -704,12 +704,13 @@ fn sync_realm_boxes(
     let mut seen: BTreeSet<RealmId> = BTreeSet::new();
     for (realm, rbox) in scene.iter() {
         seen.insert(realm);
-        // The box's OWN position, reduced ONCE against the server-told render origin through the ONE
-        // chokepoint. Slice 5: this used to FABRICATE a zero pose purely to extract `-pin` from
-        // `world_pos`, then add a centre whose coarse half had already been discarded — the client
-        // inventing an input to a server-authoritative seam in order to do arithmetic it should not
-        // be doing. The box carries its full position now, so there is one reduction and no compose.
-        let draw_center = rbox.draw_center(snap.origin());
+        // The box's OWN position, flattened ONCE through the ONE chokepoint. Slice 5: this used to
+        // FABRICATE a zero pose purely to extract `-pin` from `world_pos`, then add a centre whose
+        // coarse half had already been discarded — the client inventing an input to a
+        // server-authoritative seam in order to do arithmetic it should not be doing. The box carries
+        // its full position now, already measured from the realm this session stands in, and in the unit
+        // the shipper stated for it — so there is nothing to subtract and no unit to pick.
+        let draw_center = rbox.draw_center();
         // Lower to render primitives (VERTICES) at that drawn centre — no shape branch here.
         let prims = to_render_prims(rbox, draw_center);
         match boxes.0.get(&realm) {
@@ -756,12 +757,11 @@ fn frame_scene_camera(net: Res<Net>, mut cam_tf: Query<&mut Transform, With<Foll
     // Framed on the SAME resolved-at-cursor scene the boxes are drawn from (slice 6 S4) — otherwise the
     // fitted frustum would silently track a different instant than the pixels inside it.
     let scene = snap.scene_now(now_s);
-    // Framed in the SAME render space the boxes are drawn in — reduced against the server-told
-    // render origin (slice 5). The pixel proof reconstructs this camera with the origin it reads
-    // back from the client, so the two agree by construction instead of by both assuming zero.
+    // Framed in the SAME render space the boxes are drawn in. There is only one such space now — the
+    // session's pin — because the server converts into it before shipping, so the pixel proof and this
+    // camera agree by construction rather than by both assuming a zero origin.
     let Some(cam) = vd_client_harness::camera::fit_camera_to_scene(
         &scene,
-        snap.origin(),
         CAPTURE_W as usize,
         CAPTURE_H as usize,
     ) else {

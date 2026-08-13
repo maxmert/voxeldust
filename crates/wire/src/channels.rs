@@ -135,14 +135,22 @@ pub enum ServerControlMsg {
     RealmRegistry {
         regions: Vec<RealmShape>,
         root: RealmId,
-        /// A5 — the SERVER-TOLD render origin (floating origin). `pin` is the realm the client subtracts (its
-        /// own star system, via `pin_realm_of`); `pin_abs` is that realm's tick-0 folded absolute (the exact
-        /// lattice origin every drawn point and the camera subtract); `anchor_epoch` bumps on a warp re-anchor
-        /// (A9) so the client can tell a genuine re-pin from a duplicate registry. ONE per-session scalar —
-        /// never per tick, never per entity. Postcard-additive trailing fields; gated on negotiated minor >= 7.
+        /// THE PIN: a NAME for the space this session's scene is being described in — nothing else. It
+        /// carries no position and nobody may ask it for one; the client IGNORES it (it is a pure
+        /// renderer and never learns which realm it draws in). Every position on every lane already
+        /// states its own frame — a shape's `center` is measured from the realm this message is
+        /// addressed to, a pose row carries its own `pose.frame` — so no receiver needs this to know
+        /// what it was handed. It is here for operators and logs, and to make a re-pin legible.
+        ///
+        /// It used to be accompanied by `pin_abs`, this realm's own absolute position in a universe-wide
+        /// frame, which the client subtracted from every incoming position. That is gone with the whole
+        /// notion of a realm having an absolute: each level's subtraction is made by the parent that
+        /// authored the placement, in that parent's own shard. A field required to always be zero is an
+        /// invitation to refill it, so it is not kept as a placeholder — and `anchor_epoch`, the re-pin
+        /// counter that rode beside it, went with it for the same reason (see the minor-8 ledger entry in
+        /// [`crate::version`]): an epoch is only meaningful to a receiver that RE-DERIVES its scene when
+        /// the anchor moves, and this receiver derives nothing.
         pin: RealmId,
-        pin_abs: LatticePos,
-        anchor_epoch: u32,
     },
     /// The INCREMENTAL realm render-scene update (VU AoI, proto_minor 6): realms that ENTERED this client's
     /// AoI (`added` — their static shapes) and realms that LEFT it (`removed` — their ids). The agnostic
@@ -155,12 +163,10 @@ pub enum ServerControlMsg {
     RealmSceneDelta {
         added: Vec<RealmShape>,
         removed: Vec<RealmId>,
-        /// A5 — the same server-told render origin as [`RealmRegistry`], re-carried on every scene delta so a
-        /// warp re-anchor (a fresh `pin`/`pin_abs`/`anchor_epoch`) rides the reliable scene lane. Between
-        /// systems the client CARRIES its last pin rather than adopting a shallower one. Gated on minor >= 7.
+        /// The same pin as [`RealmRegistry`], re-carried on every scene delta so a warp re-anchor is
+        /// legible on the reliable scene lane. It names a space and carries no position — see
+        /// [`RealmRegistry`].
         pin: RealmId,
-        pin_abs: LatticePos,
-        anchor_epoch: u32,
     },
 }
 
@@ -234,10 +240,46 @@ pub struct EntitySnap {
 /// free to grow `#[serde(default)]` fields on its self-describing JSON boot path). The per-tick POSITION streams
 /// separately on [`RealmSnapshotDatagram`]; this static shape ships ONCE via [`ServerControlMsg::RealmRegistry`]
 /// when the realm enters the client's AoI.
+///
+/// `center` HAS ONE MEANING ON EVERY HOP: the realm's centre measured from the centre of the realm this
+/// message is ADDRESSED TO, in that realm's own frame. Shard → shard (inside
+/// [`crate::intershard::ProxySceneSet`]) the addressee is the child realm named in the envelope. Shard →
+/// gateway → client (inside `ShardToGateway::RealmSceneDelta` and the two
+/// [`ServerControlMsg`] scene messages) the addressee is the realm the receiving session is standing in,
+/// which is the emitting shard's own realm — so the value is unchanged from shard to screen, and the
+/// gateway forwards it without opening it.
+///
+/// A parent restates the value from the centre of the child it is shipping to, subtracting the ONE
+/// placement it authored, and does that at every level — so what reaches the bottom is measured from the
+/// bottom's own centre, in the one space that client draws everything in. Only a parent knows where its
+/// children are, so each subtraction is made by the party that authored that placement and by nobody else.
+/// NOBODY DOWNSTREAM CONVERTS: not the router, not the client. A meaning that varied by sender is what let
+/// a router insert itself as the converter, and re-seeded that model in every reader of this type.
+///
+/// KNOWN VIOLATOR, named rather than papered over: a shard that hosts SEVERAL realm levels at once emits
+/// its own realm's children in its own realm's frame while an occupant standing in a deeper level it also
+/// hosts is measured from that deeper centre — two frames, one sender, no hop between them to carry the
+/// subtraction. `vd-tests`' `frame_conversion_e2e::the_box_and_the_thing_standing_in_it_draw_at_one_point`
+/// fails on exactly that and is the live record of it; the contract above is what the code must reach, not
+/// a description of a gap.
+///
+/// THE PARENT-PRESENT INVARIANT (proto_minor 8, binding on every sender): a shape carrying
+/// `parent: Some(p)` is accompanied by the shape for `p` — in the SAME message, or in one the receiver
+/// has already applied. A receiver that meets a shape whose parent it does not hold REFUSES it and
+/// COUNTS the refusal (`scene_orphan_shape`); it never resolves the unknown parent to an assumed
+/// identity. That refusal is what lets a receiver build its parent-link table from the stream alone,
+/// with no hierarchy lookup and no seed knowledge of its own. Assuming the identity instead is the
+/// failure this rule exists to stop: an orphan silently rooted at the receiver's origin draws its whole
+/// subtree at the wrong place, and looks exactly like a correct scene until the parent moves.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RealmShape {
     pub realm: RealmId,
+    /// THIS realm's OWN frame — the frame its occupants and its own children are measured in.
     pub frame: FrameRef,
+    /// This realm's centre in the frame of WHOEVER THIS MESSAGE IS ADDRESSED TO — never an absolute, and
+    /// never a value the sender worked out by adding up a chain of realms it has no business knowing. Each
+    /// level of the chain subtracts the one placement IT authored before shipping onward, so the value stays
+    /// a difference between two things one party holds.
     pub center: LatticePos,
     pub shape: Boundary,
     pub parent: Option<RealmId>,
@@ -252,9 +294,48 @@ pub struct RealmShape {
 /// zero-signal degenerate case) and SHIPS it to observers as a latest-wins,
 /// FireAndForget row — never acked, always re-derivable (kept STRICTLY separate from the
 /// child-shard authority feed). Empty at walk/static scale ⇒ zero bytes on the wire.
+///
+/// SELF-DESCRIBING PLACEMENT EDGE (proto_minor 8). A row is the graph edge `(head, tail, value)`:
+/// `frame` is the HEAD — the CHILD's own frame, the frame that realm's occupants are measured in;
+/// `pose.frame` is the TAIL — the frame the value is measured in; `pose.pos`/`pose.vel` are the value,
+/// that realm's centre expressed in the tail's frame. Head and tail therefore DIFFER on every real row;
+/// a row where they are equal is a realm claiming to be its own parent.
+///
+/// THE TAIL IS WHOEVER IS SHIPPING THE ROW, which for a row a shard authors and emits directly is that
+/// shard's own frame — the child's parent — and stays so all the way to the client. On the observation
+/// cascade ([`crate::intershard::RealmCascade`]) it is instead the frame of the realm the row is being
+/// shipped DOWN to, because each level restates the value from that child's centre before sending it,
+/// and it does so precisely so the party at the bottom holds one space rather than two. The head never
+/// moves: it is a property of the row's own realm, not of the hop.
+///
+/// The head is carried rather than derived because [`FrameRef::realm`] is a LOSSY inverse: an
+/// `AreaLocal { planet_seed, area_seed }` collapses to `RealmId::Area(area_seed)`, and no receiver can
+/// invert that without already knowing which planet holds the area — i.e. without the very hierarchy it
+/// is trying to build. Carrying the head means a receiver needs no join against the reliable shape lane,
+/// no per-session scene mirror, and no ordering guarantee between the two lanes: the unreliable pose row
+/// is complete on its own. The cost is one discriminant byte plus one or two u64 varints, on rows bounded
+/// by MOVING DIRECT CHILDREN — tens — never by entities. MEASURED, encoding the real type: **2 B/row** for
+/// a `PlanetCentered` head and **3 B/row** for the two-seed `AreaLocal` head at the small seeds the shipped
+/// forest generates, and **21 B/row** at full-width `u64` seeds, which is the true worst case (an earlier
+/// estimate of "≤19 B" here was two bytes short — two 10-byte varints plus the discriminant).
+///
+/// THE HEAD RIDES THE CLIENT-FACING DATAGRAM TOO, deliberately, and the reason is that there is no other
+/// datagram to keep it off. The parent-to-parent hop and the client feed are ONE byte stream: a level
+/// receives a [`crate::intershard::RealmCascade`], and a level with nobody standing on it forwards those
+/// exact bytes to its own gateway as `ShardToGateway::RealmFrame` without decoding them. Giving the client
+/// a leaner row would mean the bottom level decoding every row, stripping a field and re-encoding — the
+/// one thing a leaf is defined by not doing, and the property `cascade_rows_converted == 0` is the
+/// measurement of. The client itself reads `realm` and `pose` and ignores the head; it pays two bytes a row
+/// on rows counted in tens, in exchange for the leaf staying a pass-through. Judged against re-splitting the
+/// type, that is the cheaper side.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RealmSnap {
     pub realm: RealmId,
+    /// The edge HEAD: the CHILD realm's OWN frame (see the type docs). Not derivable from `realm`.
+    pub frame: FrameRef,
+    /// The edge TAIL + VALUE: `pose.frame` is the frame of whoever is shipping this row, `pose.pos` this
+    /// realm's centre measured in it (see the type docs for why that is the authoring parent on one lane
+    /// and the receiving child on the other).
     pub pose: StampedPose,
 }
 
@@ -602,8 +683,6 @@ mod tests {
             }],
             root: RealmId::System(0),
             pin: RealmId::System(7),
-            pin_abs: LatticePos::local(DVec3::new(5.0, 0.0, 0.0)),
-            anchor_epoch: 2,
         };
         let bytes = postcard::to_allocvec(&reg).expect("encode");
         assert_eq!(
@@ -616,8 +695,6 @@ mod tests {
             regions: Vec::new(),
             root: RealmId::System(0),
             pin: RealmId::System(0),
-            pin_abs: LatticePos::local(DVec3::ZERO),
-            anchor_epoch: 0,
         };
         let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
         assert_eq!(
@@ -635,8 +712,6 @@ mod tests {
             regions: Vec::new(),
             root: RealmId::System(0),
             pin: RealmId::System(0),
-            pin_abs: LatticePos::local(DVec3::ZERO),
-            anchor_epoch: 0,
         };
         let prior_bytes = postcard::to_allocvec(&prior).expect("encode");
         assert_eq!(
@@ -654,8 +729,6 @@ mod tests {
             }],
             removed: vec![RealmId::Planet(8)],
             pin: RealmId::System(7),
-            pin_abs: LatticePos::local(DVec3::new(5.0, 0.0, 0.0)),
-            anchor_epoch: 2,
         };
         let bytes = postcard::to_allocvec(&delta).expect("encode");
         assert_eq!(
@@ -667,8 +740,6 @@ mod tests {
             added: Vec::new(),
             removed: Vec::new(),
             pin: RealmId::System(0),
-            pin_abs: LatticePos::local(DVec3::ZERO),
-            anchor_epoch: 0,
         };
         let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
         assert_eq!(
@@ -769,6 +840,7 @@ mod tests {
             realms: vec![
                 RealmSnap {
                     realm: RealmId::Planet(7),
+                    frame: FrameRef::PlanetCentered { planet_seed: 7 },
                     pose: StampedPose::at_rest(
                         FrameRef::SystemSpace { system_seed: 7 },
                         DVec3::new(1.496e11, 0.0, 0.0),
@@ -777,6 +849,7 @@ mod tests {
                 },
                 RealmSnap {
                     realm: RealmId::Station(3),
+                    frame: FrameRef::StationLocal { station_seed: 3 },
                     pose: StampedPose::at_rest(
                         FrameRef::SystemSpace { system_seed: 7 },
                         DVec3::new(0.0, 2.0e8, 0.0),
@@ -786,10 +859,28 @@ mod tests {
             ],
         };
         let bytes = postcard::to_allocvec(&populated).expect("encode");
+        let back = postcard::from_bytes::<RealmSnapshotDatagram>(&bytes).expect("decode");
+        assert_eq!(back, populated);
+
+        // proto_minor 8: the row is a self-describing edge, so the HEAD survives the wire on its own
+        // and — on a real parent/child pair — DIFFERS from the tail. This is the assertion that catches
+        // somebody "helpfully" restoring a same-frame label: a row whose head equals its tail is a realm
+        // claiming to be its own parent, and a receiver reading it would compose the placement twice.
         assert_eq!(
-            postcard::from_bytes::<RealmSnapshotDatagram>(&bytes).expect("decode"),
-            populated
+            back.realms[0].frame,
+            FrameRef::PlanetCentered { planet_seed: 7 },
+            "the HEAD is the CHILD's own frame — not derivable from `realm` (FrameRef::realm is lossy)"
         );
+        assert_eq!(
+            back.realms[0].pose.frame,
+            FrameRef::SystemSpace { system_seed: 7 },
+            "the TAIL is the authoring PARENT's own frame"
+        );
+        assert_ne!(
+            back.realms[0].frame, back.realms[0].pose.frame,
+            "head and tail differ on every real row: a planet is not its own star system"
+        );
+        assert_ne!(back.realms[1].frame, back.realms[1].pose.frame);
 
         // The zero-signal / static-scale case: an empty realm list still round-trips (and is
         // what a walk-scale shard would build — FA-2c never SENDS it, so zero bytes on the wire).
@@ -911,6 +1002,9 @@ mod tests {
     fn realm_snap(n: u32) -> RealmSnap {
         RealmSnap {
             realm: RealmId::Planet(u64::from(n)),
+            frame: FrameRef::PlanetCentered {
+                planet_seed: u64::from(n),
+            },
             pose: StampedPose::at_rest(
                 FrameRef::SystemSpace { system_seed: 7 },
                 DVec3::new(f64::from(n) * 1.0e9, 0.0, 0.0),

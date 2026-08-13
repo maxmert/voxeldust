@@ -36,7 +36,9 @@ cargo build -q --manifest-path "$ROOT/Cargo.toml" -p vd-bins
 
 # The demand cluster at VISUAL scale — the exact configuration the shake was reported in. `spawn_node`
 # inherits this env, so the demand-spawned home shard authors the window-friendly orbiting system.
-export VD_UNIVERSE_SCALE=visual
+# THE WORLD IS NO LONGER SELECTED, so there is nothing to export here. This line used to set a scale,
+# and a live cluster was read process by process with the orchestrator on one world and its own gateway on
+# another — from THIS script, in one launch. A knob that exists can be set twice; the fix was to delete it.
 "$ROOT/scripts/dev-cluster.sh" up --demand
 
 cleanup() {

@@ -26,6 +26,9 @@ pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u6
         inputs_malformed,
         stale_frames_dropped,
         undecodable,
+        refused_unknown_sender,
+        shard_rosters_applied,
+        shard_roster_stale,
         frame_sub_desync,
         transfer_unroutable,
         transfer_control_parked,
@@ -51,6 +54,9 @@ pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u6
         inputs_malformed,
         stale_frames_dropped,
         undecodable,
+        refused_unknown_sender,
+        shard_rosters_applied,
+        shard_roster_stale,
         frame_sub_desync,
         transfer_unroutable,
         transfer_control_parked,
@@ -108,6 +114,11 @@ mod tests {
             inputs_malformed: 8,
             stale_frames_dropped: 9,
             undecodable: 10,
+            // 26 rather than renumbering: the sequence is positional, and rewriting every value below to
+            // slot this in is the transposition this fixture exists to catch.
+            refused_unknown_sender: 26,
+            shard_rosters_applied: 27,
+            shard_roster_stale: 28,
             frame_sub_desync: 11,
             transfer_unroutable: 12,
             transfer_control_parked: 13,
@@ -133,6 +144,9 @@ mod tests {
         assert_eq!(view.inputs_malformed, 8);
         assert_eq!(view.stale_frames_dropped, 9);
         assert_eq!(view.undecodable, 10);
+        assert_eq!(view.refused_unknown_sender, 26);
+        assert_eq!(view.shard_rosters_applied, 27);
+        assert_eq!(view.shard_roster_stale, 28);
         assert_eq!(view.frame_sub_desync, 11);
         assert_eq!(view.transfer_unroutable, 12);
         assert_eq!(view.transfer_control_parked, 13);

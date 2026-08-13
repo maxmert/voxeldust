@@ -27,6 +27,15 @@
 //! persist-before-effect gate STALLS LOUD rather than ship an unjustified effect (a bounded fsync-retry /
 //! durable outbox is the owed refinement). A refusal is never a loss.
 //!
+//! KNOWN LIMIT — this store is CRASH-durable, not HOST-LOSS-durable (D-47), and its records carry NO format
+//! version (D-48). The fsync path above bounds a `kill -9` to ≤1 lost batch, but there is exactly ONE local
+//! file and no replication or backup anywhere: lose the disk and the in-flight saga WAL, the durable directory
+//! head (the commit point) and the clock ceiling go with it. Worse, `open` cannot distinguish "volume not
+//! attached" from a legitimate first boot — an ABSENT store IS genesis by construction — so a rescheduled pod
+//! without its volume boots clean and silently recovers nothing. The deploy preconditions (pinned volume per
+//! orchestrator identity + a store-identity stamp + an explicit allow-genesis opt-in) and the store format
+//! version are HARD requirements before any multi-node deploy; see DEFERRED.md D-47 / D-48.
+//!
 //! Tier-B (HR5): io-prod is excluded from the 100% region+branch gate; the redb adapter is process-tier
 //! covered at a ratcheted floor. The in-process durability tests here give high happy-path coverage; the
 //! real-process SIGKILL-mid-fsync crash proof lands with the orchestrator wiring (Slice D).
