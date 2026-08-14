@@ -800,36 +800,57 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 - **Source:** whole-codebase audits `wf_43fea0dd` (XSI-1 / SCALE-A) + `wf_2de9063f` (CSCALE-1, HIGH) +
   `wf_9a986473` (the scan_deadlines scale entry + the D-3 ledger sync); design `wf_24c1ecc5` (the 6 slices).
 
-### D-4 🟥 The reliable `EventMsg` client `MsgClass` arm — carrier for BOTH AoI eviction AND cross-shard signals
-- **Missing:** `MsgClass` has Control/Saga/Snapshot/Input/Membership — **no `Event`/`Bulk` arm** — so the
-  reliable G→C `EventMsg` family has no transport class to arrive on. TWO independent consumers need this ONE
-  arm (build it once; it is shared infra, never per-feature — HR3/DRY):
-  - **(a) Per-entity AoI eviction (P2):** the client `DeliveredView` is bounded per-SUB (`drop_sub` on
-    `SubscriptionClosing`), but a still-open sub's departed entities are not evicted — that needs
-    `EventMsg::EntityRemoved` routed to a per-entity `drop`. Retires the foundation-audit `scalability-1` root.
-  - **(b) Cross-shard functional-block SIGNALS → client (P9):** the signal system's gameplay events
-    (damage/destroyed/notice and functional-block signal deliveries that surface to the player) ride the SAME
-    reliable `EventMsg` arm to the client — opened causally after `SubscriptionOpened` (connection-plane X1).
+### D-4 🟧 The reliable `EventMsg` client lane — consumer (a) AoI eviction LANDED (minor 14, 2026-08-14); consumer (b) P9 signals still owed
+- **The lane as BUILT (2026-08-14; the paragraphs below are updated to the landed truth):** `EventMsg`
+  rides INSIDE `ServerControlMsg::Event` on the existing reliable Control lane — no new `MsgClass` arm
+  was needed (the original sketch below named one; the appended-variant pattern on the Control lane is
+  the established client-facing shape and serves both consumers identically). TWO independent consumers
+  share this ONE arm (built once — HR3/DRY):
+  - **(a) Per-entity AoI eviction — LANDED (minor 14):** `EventMsg::EntityRemoved{entity, at}` routed
+    to the client's per-entity eviction + resurrect guard. Retires the foundation-audit `scalability-1`
+    root for the entity-leaves case. **Residuals, both slice F's:** (i) OBSERVER-LEAVES is not covered —
+    when a player crosses away, nothing evicts the OLD realm's bystanders' figures from the LEAVER's
+    own view (their rows stop at the one-space filter; the tracks freeze off-screen-frame) — the VU-6
+    scene-reset re-stream or a sub-scoped eviction decision owns it; (ii) a LOGOUT MID-CROSSING strands
+    the source's retained ghost with no Despawn producer (the dest dot died at detach), so it emits
+    forever and no removal fires — dies structurally when slice F stops the retained-ghost emit at hold
+    closure (the composited-subs detach clause remains owed beside it).
+  - **(b) Cross-shard functional-block SIGNALS → client (P9) — still owed:** the signal system's gameplay
+    events (damage/destroyed/notice and functional-block signal deliveries that surface to the player) ride
+    the SAME `ServerControlMsg::Event` arm as appended `EventMsg` variants — opened causally after
+    `SubscriptionOpened` (connection-plane X1).
     The cross-SHARD half of signals rides `InterShardFlow::Signal` (a RESERVED arm, P9) over the N-peer mesh +
     Galaxy Relay; this `EventMsg` arm is only the final shard→gateway→client leg. **No rewrite to land it** —
     the whole-codebase audit `wwg7ydm9y` confirmed signals are additive into the current seams (effect_class
     is exhaustive, the capability lattice already carves `SignalGraphCap`/`GalaxyRelay`).
-- **Where:** `crates/client/src/view.rs` doc ("the remaining P2 piece"); `crates/sim/src/io/mod.rs` (`MsgClass`,
-  no Event arm); `crates/wire/src/channels.rs` (`EventMsg{Notice,EntityRemoved}` + `BulkMsg{Blob}` declared but
-  unroutable); `crates/client/src/net.rs` (routes only Control/Snapshot; others → `ignored`).
-- **When / proper:** **P2** adds the arm + `EntityRemoved` eviction (consumer a); **P9** adds the signal
-  deliveries (consumer b) on the same arm. Building the arm is registry-only here — no code lands today.
-- **★ESCALATED BY STEP 5 SLICE E (2026-08-13):** the deferral's stated precondition — "until the server
-  stops streaming a de-owned copy there is nothing for this to evict" — is now INVALIDATED: the entity
-  relay is deleted, so after a crossing the source realm's edge goes SILENT for the leaver once the
-  retained ghost despawns, and a bystander's client keeps a FROZEN track forever (tracks drop only on
-  the reliable removal nothing produces; no TTL; `rendered()` draws every track). The adversarial
-  review confirmed the full chain client-render-deep. Consumer (a) is therefore a SLICE F PREREQUISITE
-  (the "leaver VANISHES at hold closure" behaviour is impossible without eviction) and the mechanism is
-  an OWNER DECISION (SL6): the reliable `EventMsg::EntityRemoved` arm (this entry's design — new
-  client-facing wire), or a client-side staleness TTL (reverses the deliberate reliable-signal-only
-  drop rule). Until it lands, a bystander sees a departed player's figure freeze at the boundary
-  instead of vanishing — stated in the slice E owner report.
+- **Where (as landed):** `crates/wire/src/channels.rs` (`EventMsg` + `ServerControlMsg::Event`);
+  `crates/wire/src/session_flow.rs` (`ShardToGateway::EntityRemoved`, the mesh leg, RETAINED durability —
+  a producer-less reliable one-shot); `crates/sim/src/stub.rs` (`push_entity_removed` + the two
+  permanent-stop emit sites + the loud no-lease suppression counter); `crates/connection-plane/src/gateway.rs`
+  (`fan_entity_removed` — fence-checked, minor-gated, owner-session-skipped);
+  `crates/client/src/{net,view}.rs` (routing, eviction, resurrect guard at the wire-taught tick rate).
+  `BulkMsg{Blob}` remains declared-unroutable (P4/P6 terrain chunks).
+- **When / proper:** consumer (a) DONE; **P9** adds the signal deliveries (consumer b) on the same arm.
+- **★ESCALATED BY STEP 5 SLICE E (2026-08-13), RESOLVED (2026-08-14, owner picked the message):**
+  slice E invalidated the deferral's precondition (the entity relay was the thing keeping bystander
+  copies fresh; with it gone, every observed crossing stranded a FROZEN figure once the retained ghost
+  despawned). **CONSUMER (a) IS LANDED — THE REMOVE MESSAGE (PROTO_MINOR 14):** the shard emits
+  `ShardToGateway::EntityRemoved{realm_fence, entity, at}` at every permanent stop (the band-exit
+  ghost despawn; the detach completing at the directory; NOT the pre-grant provisional drop, which
+  never emitted); the gateway fans it to the shard's Active subscribers as
+  `ServerControlMsg::Event(EventMsg::EntityRemoved{entity, at})` — per-subscriber fence-checked
+  (`stale_removals_dropped`, its own counter: a wrongly-dropped removal strands a phantom) and
+  minor-gated ≥ 14; the client evicts the track and arms a RESURRECT GUARD (`removed_at`: a straggler
+  row stamped ≤ the removal is refused + counted; a strictly newer row is a genuine return and clears
+  it; pruned on a derived window). The own-identity marker deliberately SURVIVES its own removal (the
+  leaver's client legitimately receives one from the realm it just left — clearing would orphan the
+  one-space filter forever). Proven end to end in the two-player chain scenario: the bystander's real
+  client HOLDS the leaver's track at the crossing instant and it VANISHES through the production lane,
+  and stays gone. The reshape of `EventMsg::EntityRemoved` (gaining `at`) was lawful uniquely because
+  the enum had no producer since P1.5 — no negotiated wire ever carried its old shape.
+  **Consumer (b) — P9 gameplay signal deliveries — rides this SAME `Event` arm as appended `EventMsg`
+  variants; still owed at P9.** Slice F retimes the leaver's emit to hold closure (the despawn emit
+  stays for the band-exit case).
 - **Source:** P1.5 foundation audit (deferral) + whole-codebase audits `wf_43fea0dd` / `wwg7ydm9y` (SIG-1).
 
 ### D-5 🟥 Client cut cycle (the `net.rs` marker emit) — Slice 1e

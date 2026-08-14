@@ -264,6 +264,12 @@ impl ClientState {
                     Err(_) => self.decode_errors += 1,
                 }
             }
+            // THE REMOVE MESSAGE (proto_minor 14): a reliable discrete event — today only the
+            // per-entity eviction. Routed whole to `apply_event` so the client bin, the harness
+            // and the unit tests all drive the ONE handler.
+            ServerControlMsg::Event(event) => {
+                self.apply_event(event);
+            }
             // Node-AWARE legacy control a pure-renderer client no longer acts on: `AuthorityChanged`
             // (the sub re-point — superseded by `OwnEntity` + EntityId-keyed latest-wins render) and
             // `RequestCut` (the cut is server-timed now, S3 — the client stamps nothing). Both are
@@ -273,19 +279,17 @@ impl ClientState {
         }
     }
 
-    /// Evict one entity's delivered copy (the reliable `EventMsg::EntityRemoved`, S6): the
+    /// Evict one entity's delivered copy (the reliable `EventMsg::EntityRemoved`): the
     /// server-authoritative "this entity left your view" signal a pure-renderer client needs
-    /// because it keys tracks by `EntityId` (a `SubscriptionClosing` can no longer evict them).
+    /// because it keys tracks by `EntityId` (a `SubscriptionClosing` deliberately evicts nothing).
     /// Node-agnostic: it names only the entity, never a node.
     ///
-    /// ROUTING: `EventMsg` shares the reliable Control carrier but is a DISTINCT enum, so the
-    /// gateway will emit it on a dedicated reliable class (owed WITH the send-once server filter,
-    /// S0 — until the server stops streaming a de-owned copy there is nothing for this to evict).
-    /// This method is the client half, driven by the bin's inbound router and exercised directly in
-    /// the unit tests; it decodes an `EventMsg` and applies the eviction.
+    /// ROUTING (proto_minor 14 — LIVE): the gateway fans it as `ServerControlMsg::Event` on the
+    /// reliable Control lane; `on_control` routes it here. `at` rides through to the view's
+    /// resurrect guard (a straggler datagram row must not re-create the evicted track).
     pub fn apply_event(&mut self, event: EventMsg) {
         match event {
-            EventMsg::EntityRemoved { entity } => self.view.remove_entity(entity),
+            EventMsg::EntityRemoved { entity, at } => self.view.remove_entity(entity, at),
             // A cosmetic notice (no state) — ignored by the headless/pure-renderer core.
             EventMsg::Notice { .. } => self.ignored += 1,
         }
@@ -404,7 +408,11 @@ impl ClientState {
             return;
         }
         self.tick_hz_learned = true;
-        self.render_clock.set_tick_hz(f64::from(tick_hz).max(1.0));
+        let hz = f64::from(tick_hz).max(1.0);
+        self.render_clock.set_tick_hz(hz);
+        // The resurrect guard converts its wall-clock window at the same wire-taught rate the
+        // render cursor advances at — one rate, learned once, used by both.
+        self.view.set_tick_hz(hz);
     }
 
     fn send_bytes(&self, transport: &mut dyn Transport, class: MsgClass, buf: Vec<u8>) -> bool {
@@ -942,10 +950,34 @@ mod tests {
         );
     }
 
+    /// THE REMOVE MESSAGE arrives ON THE WIRE (proto_minor 14): a Control frame carrying
+    /// `ServerControlMsg::Event` routes through `on_control` to the ONE `apply_event` handler and
+    /// the track is evicted — the routing arm itself, not just the handler.
+    #[test]
+    fn a_wire_delivered_event_routes_through_on_control_and_evicts() {
+        let mut c = core();
+        activate(&mut c);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
+        c.step(10.0);
+        assert_eq!(c.state().view().render(100.0).len(), 1);
+        let ev = postcard::to_allocvec(&ServerControlMsg::Event(EventMsg::EntityRemoved {
+            entity: ent(),
+            at: UniverseTick(100),
+        }))
+        .expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, ev);
+        c.step(10.0);
+        assert!(
+            c.state().view().render(100.0).is_empty(),
+            "the wire-delivered removal evicted the track through on_control"
+        );
+    }
+
     #[test]
     fn entity_removed_evicts_a_de_owned_entity_copy() {
-        // S6: the reliable per-entity eviction (EventMsg::EntityRemoved) via the client's
-        // apply_event router. A de-owned copy is dropped; the own avatar's removal clears own_entity.
+        // The reliable per-entity eviction (EventMsg::EntityRemoved) via the client's
+        // apply_event router. A de-owned copy is dropped; the own identity marker survives.
         let mut c = core();
         activate(&mut c);
         let own =
@@ -964,16 +996,18 @@ mod tests {
         // A Notice event is benign (counted ignored). Then EntityRemoved evicts the avatar.
         c.state_mut()
             .apply_event(EventMsg::Notice { text: "hi".into() });
-        c.state_mut()
-            .apply_event(EventMsg::EntityRemoved { entity: ent() });
+        c.state_mut().apply_event(EventMsg::EntityRemoved {
+            entity: ent(),
+            at: UniverseTick(100),
+        });
         assert!(
             c.state().view().render(100.0).is_empty(),
             "the removed entity's track is evicted"
         );
         assert_eq!(
             c.state().own_entity(),
-            None,
-            "removing the avatar clears own_entity"
+            Some(ent()),
+            "the identity marker survives its own removal (see DeliveredView::remove_entity)"
         );
     }
 

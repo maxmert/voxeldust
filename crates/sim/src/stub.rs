@@ -1834,6 +1834,13 @@ pub struct StubStats {
     /// it because it measures the emit path, not the relay.) EXPECTED non-zero only while the ghost
     /// feed's foreign write survives; slice F deletes that writer and pins this to `0` forever.
     pub entity_rows_foreign_labelled: u64,
+    /// A remove message SUPPRESSED because this shard held no realm lease at the permanent stop
+    /// (a self-fenced shard tearing down a ghost, a lease race at a detach) — the emit discipline
+    /// says an unowned shard is silent, so the removal is withheld, but NEVER silently: each
+    /// suppression is a bystander who may keep a frozen figure until the realm's sub teardown or
+    /// take-over re-stream reaches them. `0` healthy; non-zero next to a self-fence is the
+    /// partition surfacing.
+    pub entity_removals_suppressed_no_lease: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -2420,7 +2427,17 @@ fn process_inbound(
             // refresh this shard's RETAINED ghost dot (kinematic collider; pose+GhostRefresh, never a
             // second authority store). On the dedicated Ghost carriers, NOT the Saga dispatch.
             MsgClass::GhostReliable | MsgClass::GhostDelta => {
-                on_ghost_flow(*from, bytes, &mut dots, &mut mirror, &mut holds, &mut stats);
+                on_ghost_flow(
+                    *from,
+                    bytes,
+                    &clock,
+                    authority.0,
+                    &mut dots,
+                    &mut mirror,
+                    &mut holds,
+                    &mut stats,
+                    &mut outbox,
+                );
             }
             // Membership (clock sync) is consumed by the node-level follower system;
             // Snapshot / RealmSnapshot are gateway→client render datagrams and never target a shard.
@@ -2677,7 +2694,9 @@ fn on_gateway_msg(
                     dot.departing = true;
                 }
                 Some(_) => {
-                    // A provisional dot has no directory record: safe to drop now.
+                    // A provisional dot has no directory record: safe to drop now. NO remove
+                    // message — a pre-grant provisional dot never emitted (`emits()` excludes
+                    // it), so no bystander's client ever held a track to evict.
                     dots.0.remove(&session);
                     push_session_reply(outbox, from, &ShardToGateway::SessionDetached { session });
                 }
@@ -2881,6 +2900,47 @@ fn push_session_reply(outbox: &mut OutboundBox, to: NodeId, reply: &ShardToGatew
         crate::io::bytes(bytes),
         Durability::Ephemeral,
     ));
+}
+
+/// THE REMOVE MESSAGE's shard emit (proto_minor 14, D-4(a)): this shard PERMANENTLY stopped
+/// emitting `entity`, so every gateway still holding a subscribed session here is told once, on the
+/// reliable Control lane, stamped with this realm's fence (the gateway refuses a demoted old
+/// owner's stale removal per subscriber) and this shard's universe tick (the client's resurrect
+/// guard against a straggler datagram). The fan is the REMAINING dots' gateways — after the
+/// removal, exactly the bystanders whose clients hold the departed figure's track. A shard whose
+/// last dot just left has nobody left to tell, and the sub teardown that follows is the client's
+/// realm-scene exit anyway. Called ONLY from a permanent-stop site (band-exit ghost despawn; a
+/// detach completing at the directory) — never from a demote, whose retained ghost keeps emitting.
+fn push_entity_removed(
+    dots: &Dots,
+    realm_fence: Fence,
+    entity: EntityId,
+    at: UniverseTick,
+    outbox: &mut OutboundBox,
+) {
+    let mut gateways: Vec<NodeId> = dots.0.values().map(|d| d.gateway).collect();
+    gateways.sort_unstable();
+    gateways.dedup();
+    for gateway in gateways {
+        // RETAINED, not Ephemeral (review-caught): this is a PRODUCER-LESS reliable one-shot —
+        // neither emit site re-fires (a redelivered Despawn finds the dot gone; a redelivered
+        // directory head finds nobody departing) — so a shard crash between the emit and the
+        // send would otherwise lose the removal FOREVER, and a lost removal is a permanent
+        // frozen figure on every bystander's screen. The same argument that puts
+        // `GhostFlow::Despawn` on the durable outbox (io/mod.rs `Durability`) puts this there.
+        let bytes = postcard::to_allocvec(&ShardToGateway::EntityRemoved {
+            realm_fence,
+            entity,
+            at,
+        })
+        .expect("closed wire enums serialize infallibly");
+        outbox.0.push((
+            gateway,
+            MsgClass::Control,
+            crate::io::bytes(bytes),
+            Durability::Retained,
+        ));
+    }
 }
 
 /// The input path: fence gate → decode → seq gate → integrate. Every outcome lands
@@ -3716,13 +3776,17 @@ fn refresh_source_ghost(dot: &mut Dot, pose: StampedPose, source_fence: Fence) -
 /// (`refresh_source_ghost`) so it stays a live kinematic collider AND keeps emitting on the source
 /// sub across the handoff (the seamless fill). `Delta` is deduped by `seq` (lossy datagram). A
 /// malformed body is counted + dropped, never mis-applied. Monomorphic.
+#[allow(clippy::too_many_arguments)]
 fn on_ghost_flow(
     from: NodeId,
     bytes: &[u8],
+    clock: &ClockSample,
+    realm_fence: Option<Fence>,
     dots: &mut Dots,
     mirror: &mut SourceGhostMirror,
     holds: &mut HandoffHolds,
     stats: &mut StubStats,
+    outbox: &mut OutboundBox,
 ) {
     let flow = match postcard::from_bytes::<InterShardFlow>(bytes) {
         Ok(InterShardFlow::Ghost(flow)) => flow,
@@ -3800,6 +3864,25 @@ fn on_ghost_flow(
                 stats.ghost_despawns += 1;
             } else {
                 stats.ghost_despawn_no_host += 1;
+            }
+            // THE REMOVE MESSAGE (D-4(a)): the retained ghost was the LAST emitter of this entity
+            // here — the band-exit teardown is the moment a bystander's drawn figure would freeze
+            // forever, so their clients are told to evict it now. Gated on the dot actually
+            // removed (a stale Despawn tore down nothing ⇒ nothing changed for any client) and on
+            // a held lease (an unowned shard is silent, never speculative — its subscribers are
+            // being torn down by the sub machinery instead).
+            match (removed_dot, realm_fence) {
+                (true, Some(fence)) => {
+                    push_entity_removed(dots, fence, entity, clock.universe_tick, outbox);
+                }
+                // The stop happened but this shard holds no lease (self-fenced mid-teardown):
+                // the removal is withheld (an unowned shard is silent) but COUNTED — see the
+                // stat's doc for what a bystander may see until the sub machinery catches up.
+                (true, None) => {
+                    stats.entity_removals_suppressed_no_lease += 1;
+                    tracing::warn!(%entity, "entity removal suppressed: no realm lease");
+                }
+                (false, _) => {}
             }
         }
     }
@@ -6206,6 +6289,7 @@ fn on_directory_reply(
                 .filter(|(_, d)| (d.entity == entity) & d.departing)
                 .map(|(s, _)| *s)
                 .collect();
+            let any_departed = !departed.is_empty();
             for session in departed {
                 let dot = dots.0.remove(&session).expect("just found");
                 push_session_reply(
@@ -6213,6 +6297,22 @@ fn on_directory_reply(
                     dot.gateway,
                     &ShardToGateway::SessionDetached { session },
                 );
+            }
+            // THE REMOVE MESSAGE (D-4(a)): a completed detach is a permanent stop — the departed
+            // player's figure must leave every bystander's screen, not freeze on it. Emitted once
+            // per entity (not per departed session), after the removals, so the fan reaches
+            // exactly the remaining bystanders. Lease-gated like every emit.
+            match (any_departed, authority.0) {
+                (true, Some(fence)) => {
+                    push_entity_removed(dots, fence, entity, clock.universe_tick, outbox);
+                }
+                // Same loud suppression as the despawn site: a detach completing on a shard
+                // whose lease lapsed withholds the removal, counted, never silent.
+                (true, None) => {
+                    stats.entity_removals_suppressed_no_lease += 1;
+                    tracing::warn!(%entity, "entity removal suppressed: no realm lease");
+                }
+                (false, _) => {}
             }
         }
         // Headless realm reads, CAS results, clock answers: no obligation in P1.
@@ -6399,11 +6499,10 @@ fn restate_for_own_clients(
 /// lawful scene lanes). During a crossing: the LEAVER'S OWN client is covered by its dual subs (the
 /// own-avatar row is exempt from the client's one-space filter and the cut flips cleanly); a
 /// BYSTANDER in the source realm gets the retained ghost's frozen fill until its band-exit Despawn,
-/// and then NOTHING — the client-side eviction that would make the leaver VANISH cleanly does not
-/// exist yet (D-4(a): tracks drop only on a reliable removal no producer emits). That eviction is
-/// slice F's leaver-vanish machinery, owner-gated (a new client-facing arm, or a staleness TTL on a
-/// deliberately reliable-only contract) — see D-4(a)'s slice E escalation note. An empty gateway
-/// list is a plain early return again: a shard with no attached session has nobody to draw for.
+/// and then THE REMOVE MESSAGE (D-4(a), minor 14): the teardown emits `EntityRemoved` and the
+/// bystander's client EVICTS the figure — it vanishes instead of freezing. Slice F retimes that
+/// emit to hold closure when the retained-ghost fill itself dies. An empty gateway list is a plain
+/// early return again: a shard with no attached session has nobody to draw for.
 #[allow(clippy::too_many_arguments)]
 fn emit_frames(
     config: Res<StubConfig>,
@@ -13873,6 +13972,201 @@ mod tests {
 
     /// The DEST owner node that feeds this shard's hosted ghosts in the consumer tests.
     const DEST_OWNER: NodeId = NodeId(99);
+
+    /// The remove messages a tick pushed, as `(gateway, entity, at)` — the shard half of the
+    /// D-4(a) lane, read off the wire.
+    fn entity_removals(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+    ) -> Vec<(NodeId, EntityId, UniverseTick)> {
+        sent.iter()
+            .filter(|(_, class, _)| *class == MsgClass::Control)
+            .filter_map(
+                |(to, _, bytes)| match postcard::from_bytes::<ShardToGateway>(bytes) {
+                    Ok(ShardToGateway::EntityRemoved { entity, at, .. }) => Some((*to, entity, at)),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// THE REMOVE MESSAGE at the band-exit teardown (D-4(a)): the Despawn that tears out the
+    /// retained ghost — the last emitter of a leaver here — tells every remaining dot's gateway to
+    /// evict the figure, ONE message per DISTINCT gateway (two bystanders behind one gateway share
+    /// one; a second gateway gets its own), each stamped with the realm fence and EXACTLY this
+    /// shard's universe tick (the resurrect guard's whole input — a wrong stamp mis-gates every
+    /// client refusal). A stale Despawn that removes nothing tells nobody, and a shard whose lease
+    /// lapsed (self-fenced) withholds the removal LOUDLY — counted, never silent.
+    #[test]
+    fn a_despawned_leavers_removal_is_told_once_per_bystander_gateway_and_stamped() {
+        const BYSTANDER_A: SessionId = SessionId(0xBB);
+        const BYSTANDER_B: SessionId = SessionId(0xBC);
+        const BYSTANDER_FAR: SessionId = SessionId(0xBD);
+        const OTHER_GATEWAY: NodeId = NodeId(21);
+        let mut rig = Rig::new();
+        let leaver = make_retained_ghost(&mut rig, Fence(2));
+        // THREE bystanders: two behind the default GATEWAY (the dedup half), one behind a second
+        // gateway (the multi-gateway half).
+        insert_owned_dot(&mut rig, BYSTANDER_A, player(9), DVec3::new(1.0, 0.0, 0.0));
+        insert_owned_dot(&mut rig, BYSTANDER_B, player(10), DVec3::new(2.0, 0.0, 0.0));
+        insert_owned_dot(
+            &mut rig,
+            BYSTANDER_FAR,
+            player(11),
+            DVec3::new(3.0, 0.0, 0.0),
+        );
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&BYSTANDER_FAR)
+            .expect("just inserted")
+            .gateway = OTHER_GATEWAY;
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
+            entity: leaver,
+            source_fence: Fence(2),
+        })]);
+        let removals = entity_removals(&sent);
+        // The stamp is THE shard clock, exactly (the Rig clock reads universe_tick 100).
+        assert_eq!(
+            removals,
+            vec![
+                (GATEWAY, leaver, UniverseTick(100)),
+                (OTHER_GATEWAY, leaver, UniverseTick(100)),
+            ],
+            "one removal per DISTINCT gateway, stamped with the shard's exact universe tick"
+        );
+        // A second Despawn removes nothing (already gone) ⇒ NO second removal fans out.
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
+            entity: leaver,
+            source_fence: Fence(2),
+        })]);
+        assert!(
+            entity_removals(&sent).is_empty(),
+            "a no-op Despawn tells nobody"
+        );
+    }
+
+    /// The despawn emit's NO-LEASE arm: a self-fenced shard (lease lapsed mid-teardown) withholds
+    /// the removal — an unowned shard is silent — but COUNTS the suppression, because each one is
+    /// a bystander who may keep a frozen figure until the sub machinery catches up.
+    #[test]
+    fn a_despawn_on_a_leaseless_shard_suppresses_the_removal_loudly() {
+        const BYSTANDER: SessionId = SessionId(0xBB);
+        let mut rig = Rig::new();
+        let leaver = make_retained_ghost(&mut rig, Fence(2));
+        insert_owned_dot(&mut rig, BYSTANDER, player(9), DVec3::new(1.0, 0.0, 0.0));
+        rig.world.resource_mut::<RealmAuthority>().0 = None; // the self-fenced shape
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
+            entity: leaver,
+            source_fence: Fence(2),
+        })]);
+        assert!(
+            entity_removals(&sent).is_empty(),
+            "an unowned shard is silent"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .entity_removals_suppressed_no_lease,
+            1,
+            "…but never silently: the suppression is counted"
+        );
+    }
+
+    /// THE REMOVE MESSAGE at detach completion (D-4(a)): the directory confirming a logout's
+    /// revoke is the permanent stop of that avatar here — the remaining bystander's gateway is
+    /// told to evict it, stamped with EXACTLY the shard's universe tick. The PROVISIONAL drop
+    /// tells nobody — driven here, not asserted in prose: an ungranted dot's detach removes it
+    /// with no removal fanned (it never emitted, so no client holds its figure). A lease lapse
+    /// at the completion instant withholds the removal loudly (counted).
+    #[test]
+    fn a_detached_dots_removal_is_told_to_the_bystanders_gateway() {
+        const BYSTANDER: SessionId = SessionId(0xBB);
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach();
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        insert_owned_dot(&mut rig, BYSTANDER, player(9), DVec3::new(1.0, 0.0, 0.0));
+        // Phase 1: detach → departing (held); no removal yet (the dot still emits).
+        let detach = GatewayToShard::DetachSession {
+            session: SESSION,
+            fence: Fence(1),
+        };
+        let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &detach)]);
+        assert!(
+            entity_removals(&sent).is_empty(),
+            "a departing dot still emits — nobody is told yet"
+        );
+        // Phase 2: the headless entity head confirms the revoke — despawn + THE removal, stamped
+        // with the shard clock exactly (the Rig clock reads universe_tick 100).
+        let gone = DirectoryReply::Head {
+            key: DirectoryKey::Entity(entity),
+            record: None,
+        };
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(gone),
+        )]);
+        assert_eq!(
+            entity_removals(&sent),
+            vec![(GATEWAY, entity, UniverseTick(100))],
+            "the bystander's gateway is told exactly once, at the shard's exact tick"
+        );
+    }
+
+    /// The detach path's two NEGATIVE arms, driven: (a) a PROVISIONAL (ungranted) dot's detach
+    /// drops it with NO removal — it never emitted, so no client holds a figure to evict;
+    /// (b) a detach completing on a LEASELESS shard withholds the removal loudly (counted).
+    #[test]
+    fn a_provisional_drop_and_a_leaseless_completion_fan_no_removal() {
+        const BYSTANDER: SessionId = SessionId(0xBB);
+        // (a) the provisional drop: attach_request WITHOUT the grant confirm — an ungranted dot.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach_request(SESSION, GATEWAY);
+        insert_owned_dot(&mut rig, BYSTANDER, player(9), DVec3::new(1.0, 0.0, 0.0));
+        let detach = GatewayToShard::DetachSession {
+            session: SESSION,
+            fence: Fence(1),
+        };
+        let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &detach)]);
+        assert!(
+            !rig.world.resource::<Dots>().0.contains_key(&SESSION),
+            "the provisional dot is dropped immediately (no directory round-trip)"
+        );
+        assert!(
+            entity_removals(&sent).is_empty(),
+            "…and NO removal fans — a pre-grant dot never emitted"
+        );
+        // (b) the completion on a leaseless shard: granted dot, detach, lease lapses, confirm.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let _ = rig.attach();
+        let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+        insert_owned_dot(&mut rig, BYSTANDER, player(9), DVec3::new(1.0, 0.0, 0.0));
+        let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &detach)]);
+        rig.world.resource_mut::<RealmAuthority>().0 = None;
+        let gone = DirectoryReply::Head {
+            key: DirectoryKey::Entity(entity),
+            record: None,
+        };
+        let sent = rig.tick(vec![wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(gone),
+        )]);
+        assert!(
+            entity_removals(&sent).is_empty(),
+            "an unowned shard is silent"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .entity_removals_suppressed_no_lease,
+            1,
+            "…but the suppression is counted"
+        );
+    }
 
     #[test]
     fn flush_source_ships_the_held_dots_pose() {

@@ -151,8 +151,15 @@ with next steps", after the cost was stated plainly).** The entity lane is DEAD:
   invalidated — see its ★escalation note). The leaver-vanish eviction is therefore slice F's
   PREREQUISITE and its mechanism (the D-4 `EventMsg` arm vs a client staleness TTL) is the owner's
   call, put to the owner with the slice E report.
+**THE REMOVE MESSAGE LANDED, 2026-08-14 (PROTO_MINOR → 14; owner picked it over a client TTL):**
+slice F's eviction prerequisite is DISCHARGED — see the D-4 entry in DEFERRED.md for the full lane
+(shard permanent-stop emits → gateway fence-checked minor-gated fan → client evict + resurrect
+guard + the surviving own-identity marker). The two-player scenario now carries the whole story:
+the bystander HOLDS the leaver's track at the crossing instant (the non-vacuity pin), and it
+VANISHES through the production lane — never a frozen phantom.
 Remaining: slice F (SpawnV2 cutover, `Delta` death, the permanent foreign-labelled==0 tripwire,
-the leaver-blink measurement) — then the Stage C audit.
+retime the leaver's removal emit to hold closure, the leaver-blink measurement) — then the Stage C
+audit.
 
 **THE COVERAGE-DEBT PUSH (same day, HR5):** the first coverage-fast run since Stage A found 423
 uncovered Tier-A regions accumulated across the whole arc. Two systemic causes, both cured

@@ -260,6 +260,16 @@ impl ScriptedClient {
             // its `RealmView`). Explicit arms — NOT folded into `other` — so a genuinely unexpected
             // control message still fails loudly.
             ServerControlMsg::RealmRegistry { .. } | ServerControlMsg::RealmSceneDelta { .. } => {}
+            // THE REMOVE MESSAGE (proto_minor 14, D-4(a)): the reliable per-entity eviction. Both
+            // stores this scripted client holds evict — the raw pose map (conservation probes) and
+            // the production `DeliveredView` (whose resurrect guard also arms, exactly as in the
+            // real client). Gameplay-event variants beyond the removal are ignored here.
+            ServerControlMsg::Event(event) => {
+                if let vd_wire::channels::EventMsg::EntityRemoved { entity, at } = event {
+                    self.view.poses.remove(&entity);
+                    self.delivered_view.remove_entity(entity, at);
+                }
+            }
             // No pings reach a P1/P2 client; arriving here means a protocol regression worth failing loudly.
             other => panic!("unexpected control message: {other:?}"),
         }
@@ -888,6 +898,47 @@ mod tests {
             client.delivered_view.rendered(10.0).len(),
             1,
             "the entity track survives a SubscriptionClosing (EntityId-keyed)",
+        );
+    }
+
+    /// THE REMOVE MESSAGE at the scripted client (proto_minor 14, D-4(a)): a wire-delivered
+    /// `ServerControlMsg::Event(EntityRemoved)` evicts BOTH stores — the raw pose map the
+    /// conservation probes read and the production `DeliveredView` — and a Notice event (the
+    /// non-removal variant) is a clean no-op, never a panic.
+    #[test]
+    fn a_wire_delivered_entity_removed_evicts_both_stores_and_a_notice_is_inert() {
+        let (fabric, mut gw, mut client) = rig(|_| None);
+        activate(&fabric, &mut gw, &mut client);
+        send_snapshot(&mut gw, &snapshot_of(SubId(0), 1, EntityId(7), 5.0));
+        fabric.pump(TickId(3));
+        let _ = client.step();
+        assert_eq!(client.delivered_view.rendered(10.0).len(), 1);
+        assert!(client.view.poses.contains_key(&EntityId(7)));
+        // A Notice is ignored (the non-removal Event variant) — both stores untouched.
+        send_control(
+            &mut gw,
+            &ServerControlMsg::Event(vd_wire::channels::EventMsg::Notice { text: "hi".into() }),
+        );
+        fabric.pump(TickId(4));
+        let _ = client.step();
+        assert_eq!(client.delivered_view.rendered(10.0).len(), 1);
+        // The removal evicts both stores.
+        send_control(
+            &mut gw,
+            &ServerControlMsg::Event(vd_wire::channels::EventMsg::EntityRemoved {
+                entity: EntityId(7),
+                at: UniverseTick(100),
+            }),
+        );
+        fabric.pump(TickId(5));
+        let _ = client.step();
+        assert!(
+            client.delivered_view.rendered(10.0).is_empty(),
+            "the production view evicted the track"
+        );
+        assert!(
+            !client.view.poses.contains_key(&EntityId(7)),
+            "the raw pose map evicted too — the conservation probes see the same world"
         );
     }
 

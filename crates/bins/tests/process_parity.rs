@@ -144,6 +144,10 @@ impl ProcessClient {
             // The cluster tick rate (minor 1) — this minimal parity client does not
             // interpolate; ignore it (the real client learns its render rate from it).
             ServerControlMsg::UniverseRate { .. } => {}
+            // The remove message (minor 14) — this single-avatar parity client tracks no
+            // bystander figures, so an eviction has nothing to evict; ignored, never a panic
+            // (the real client's eviction is unit- and e2e-tested where figures exist).
+            ServerControlMsg::Event(_) => {}
             other => panic!("unexpected control message in P1: {other:?}"),
         }
     }

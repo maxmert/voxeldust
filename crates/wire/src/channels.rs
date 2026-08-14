@@ -168,6 +168,13 @@ pub enum ServerControlMsg {
         /// [`RealmRegistry`].
         pin: RealmId,
     },
+    /// A reliable discrete event for this client (proto_minor 14) — TODAY only
+    /// [`EventMsg::EntityRemoved`], the per-entity eviction a pure-renderer client cannot derive
+    /// (its tracks are keyed by `EntityId` and a sub close deliberately evicts nothing); P9's
+    /// gameplay signal deliveries ride this SAME arm as appended `EventMsg` variants (D-4: one
+    /// carrier, two consumers, built once). Emitted only to a peer that negotiated minor >= 14.
+    /// Appended trailing variant (postcard additive rule).
+    Event(EventMsg),
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).
@@ -218,11 +225,28 @@ pub enum BulkKind {
     Catalog,
 }
 
-/// Reliable per-subscription discrete gameplay events.
+/// Reliable per-subscription discrete gameplay events (proto_minor 14 — the first minor that ever
+/// EMITS one; the enum was declared unroutable since P1.5, so reshaping `EntityRemoved` below was
+/// lawful: no producer existed, no peer ever negotiated a wire that carried it). Rides the reliable
+/// Control lane inside [`ServerControlMsg::Event`]; P9's gameplay signals append variants HERE.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EventMsg {
-    Notice { text: String },
-    EntityRemoved { entity: EntityId },
+    Notice {
+        text: String,
+    },
+    /// THE REMOVE MESSAGE (D-4(a), owner-picked 2026-08-13): the server-authoritative "this entity
+    /// left your view". The client evicts the entity's track on THIS and on nothing else — absence
+    /// from a datagram is never an eviction (the deliberate reliable-signal-only drop rule).
+    ///
+    /// `at` is the emitting shard's universe tick at the removal — the client's RESURRECT GUARD: the
+    /// removal races the unreliable snapshot lane, so a straggler row for this entity with a stamp
+    /// `<= at` is refused (it predates the removal), while a NEWER row is a genuine return (the
+    /// player flew back) and clears the guard. Without it a reordered datagram would silently
+    /// re-create the track this message just evicted — frozen forever, the exact defect again.
+    EntityRemoved {
+        entity: EntityId,
+        at: UniverseTick,
+    },
 }
 
 /// One entity's state inside a snapshot frame.
@@ -664,6 +688,29 @@ mod tests {
     }
 
     #[test]
+    fn event_is_additive_minor_14_and_prior_variants_decode_unchanged() {
+        // Appended AFTER RealmSceneDelta ⇒ a minor<14 sender's bytes (any prior variant, here
+        // OwnEntity) still decode unchanged on a minor-14 decoder — a trailing variant never
+        // shifts a prior discriminant/framing.
+        let prior = ServerControlMsg::OwnEntity { entity: eid() };
+        let prior_bytes = postcard::to_allocvec(&prior).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&prior_bytes).expect("decode"),
+            prior
+        );
+        // The new variant itself is a clean self-contained message, payload intact.
+        let ev = ServerControlMsg::Event(EventMsg::EntityRemoved {
+            entity: eid(),
+            at: UniverseTick(9),
+        });
+        let ev_bytes = postcard::to_allocvec(&ev).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&ev_bytes).expect("decode"),
+            ev
+        );
+    }
+
+    #[test]
     fn realm_registry_is_additive_minor_5_and_empty_is_render_neutral() {
         use vd_core::glam::DVec3;
         // Appended AFTER OwnEntity ⇒ a minor<5 sender's bytes (any prior variant, here OwnEntity itself) still
@@ -912,7 +959,10 @@ mod tests {
             bulk
         );
 
-        let ev = EventMsg::EntityRemoved { entity: eid() };
+        let ev = EventMsg::EntityRemoved {
+            entity: eid(),
+            at: UniverseTick(77),
+        };
         let bytes = postcard::to_allocvec(&ev).expect("encode");
         assert_eq!(
             postcard::from_bytes::<EventMsg>(&bytes).expect("decode"),

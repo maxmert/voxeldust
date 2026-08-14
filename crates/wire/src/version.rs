@@ -114,7 +114,16 @@ pub const PROTO_MAJOR: u16 = 1;
 /// proxy (SL7). Same tombstone discipline as minor 12: shapes kept, discriminants reserved forever,
 /// received frames count undecodable. A client's own-shard feed (the untouched client lane) is
 /// unchanged, so the floor does not move.
-pub const PROTO_MINOR: u16 = 13;
+/// **14** appends THE REMOVE MESSAGE (D-4(a), owner-picked): `ServerControlMsg::Event(EventMsg)` —
+/// the reliable per-entity eviction (`EventMsg::EntityRemoved{entity, at}`) a pure-renderer client
+/// needs because a sub close deliberately evicts nothing and absence from a datagram never does —
+/// plus its mesh leg `ShardToGateway::EntityRemoved{realm_fence, entity, at}` (one cluster build,
+/// ledger-visible). `EventMsg` itself was reshaped in place (`EntityRemoved` gained `at`, the
+/// client's resurrect guard) — LAWFUL, uniquely, because the enum had been declared but unroutable
+/// since P1.5: no producer ever existed, so no negotiated wire ever carried its old shape. Emitted
+/// only to a peer that negotiated minor >= 14; older peers keep the frozen-figure gap this message
+/// closes (the slice E accepted-loss escalation). The floor does not move.
+pub const PROTO_MINOR: u16 = 14;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -264,8 +273,11 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 13,
-            "minor 13 TOMBSTONED the entity lane (EntityInterest + EntityCascade, Step 5 slice E — \
+            PROTO_MINOR, 14,
+            "minor 14 appended the REMOVE MESSAGE (ServerControlMsg::Event carrying \
+             EventMsg::EntityRemoved(entity, at) + the ShardToGateway::EntityRemoved mesh leg — \
+             the reliable per-entity eviction + the client resurrect guard, D-4(a)); \
+             minor 13 TOMBSTONED the entity lane (EntityInterest + EntityCascade, Step 5 slice E — \
              occupant poses no longer cross a realm boundary at steady state; the occupied realm is \
              its occupants' proxy; no producer, no consumer, discriminants reserved forever, received \
              frames count undecodable); minor 12 TOMBSTONED the per-occupant lanes (OccupantInterest \
@@ -293,7 +305,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.13");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.14");
         // These three USED to negotiate down and be welcomed (minor 7 fully, minor 1 without the
         // minor-2 OwnEntity, minor 0 without that AND UniverseRate). They are now refused: the
         // sender-gates-variants rule only covers appended VARIANTS, and minor 8 appended a FIELD.

@@ -1295,6 +1295,12 @@ pub struct GatewayStats {
     pub inputs_unroutable: u64,
     pub inputs_malformed: u64,
     pub stale_frames_dropped: u64,
+    /// A shard's `EntityRemoved` refused for ONE subscriber because it carried a fence stale
+    /// against that session's per-shard accepted fence (rule 5 — a demoted old owner's removal
+    /// must not evict what the live owner still streams). The same discipline as
+    /// `stale_frames_dropped`, counted apart because a wrongly-dropped REMOVAL strands a frozen
+    /// figure (the D-4(a) defect) while a wrongly-dropped frame costs one tick of motion.
+    pub stale_removals_dropped: u64,
     pub undecodable: u64,
     /// A frame from a node this router knows as NEITHER a shard NOR a client, on a class a stranger may
     /// not send. It is DISCARDED, and until now it was discarded as `undecodable` — the same bucket as a
@@ -3183,12 +3189,76 @@ fn on_shard_control(
                 outbox,
             );
         }
+        // THE REMOVE MESSAGE's fan (proto_minor 14, D-4(a)): the shard permanently stopped
+        // emitting `entity` — every Active subscriber of that shard is told to evict its track,
+        // each checked against ITS per-shard accepted fence and ITS negotiated minor.
+        ShardToGateway::EntityRemoved {
+            realm_fence,
+            entity,
+            at,
+        } => {
+            fan_entity_removed(from, realm_fence, entity, at, sessions, stats, outbox);
+        }
         ShardToGateway::Frame { .. } | ShardToGateway::RealmFrame { .. } => {
             // Entity/realm frames ride the Snapshot / RealmSnapshot datagram classes; one on the
             // reliable Control stream is a peer bug (FA-2c: a RealmFrame is forwarded by
             // `on_shard_realm_frame`, dispatched from `MsgClass::RealmSnapshot`, never here).
             stats.undecodable += 1;
         }
+    }
+}
+
+/// Fan one shard's `EntityRemoved` to that shard's subscribers as [`ServerControlMsg::Event`] —
+/// the reliable per-entity eviction (the remove message, proto_minor 14). The same subscriber walk
+/// as the frame fan (`subscribers_of`, Active only, per-shard accepted fence), but TYPED and
+/// per-session minor-gated: a peer that negotiated below 14 is withheld the variant
+/// (sender-gates-variants) and keeps the frozen-figure gap this message closes. A removal stale
+/// against a session's accepted fence is refused for THAT session and counted apart
+/// (`stale_removals_dropped`) — a demoted old owner must not evict what the live owner streams.
+fn fan_entity_removed(
+    from: NodeId,
+    realm_fence: Fence,
+    entity: EntityId,
+    at: vd_core::UniverseTick,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    for session_id in sessions.subscribers_of(from) {
+        let Some(session) = sessions.by_session.get(&session_id) else {
+            stats.frame_sub_desync += 1;
+            continue;
+        };
+        // The OWNER of the removed entity is never told to evict its own avatar: the removal is a
+        // fact about the OLD realm (the ghost band closed there) while the owner's truth is its
+        // live dest sub — evicting would blink the one figure that must never blink, for exactly
+        // one datagram interval, in the middle of a crossing. Bystanders have no other source of
+        // the fact; the owner IS the fact's source.
+        let SessionPhase::Active { entity: own } = &session.phase else {
+            continue;
+        };
+        if *own == entity {
+            continue;
+        }
+        let table = session.hot.subs.load();
+        let Some(entry) = table.lookup(from) else {
+            stats.frame_sub_desync += 1;
+            continue;
+        };
+        let accepted = entry.accepted;
+        drop(table);
+        if realm_fence.is_stale_against(accepted) {
+            stats.stale_removals_dropped += 1;
+            continue;
+        }
+        if session.negotiated_minor < 14 {
+            continue;
+        }
+        push_control(
+            outbox,
+            session.client,
+            &ServerControlMsg::Event(vd_wire::channels::EventMsg::EntityRemoved { entity, at }),
+        );
     }
 }
 
@@ -9046,6 +9116,164 @@ mod tests {
             decode_controls(&sent, CLIENT).contains(&expected),
             "the delta routes through on_shard_control to the client"
         );
+    }
+
+    /// THE REMOVE MESSAGE's fan (proto_minor 14, D-4(a)): a shard's `EntityRemoved` reaches its
+    /// Active subscriber as a typed `ServerControlMsg::Event`, fence-checked per subscriber and
+    /// minor-gated per session — a stale removal is refused + counted apart (a wrongly-dropped
+    /// removal strands a frozen figure), and an older peer is withheld the variant.
+    #[test]
+    fn an_entity_removed_fans_to_subscribers_fence_checked_and_minor_gated() {
+        let mut rig = Rig::new();
+        let (sid, login_sends) = rig.login(); // Active session at CLIENT, subscribed to SHARD
+        let entity = EntityId(0xE1);
+        let at = vd_core::UniverseTick(500);
+        let removal = |fence: Fence| ShardToGateway::EntityRemoved {
+            realm_fence: fence,
+            entity,
+            at,
+        };
+        // (1) A live-fence removal reaches the client as the typed Event.
+        let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &removal(Fence(1)))]);
+        let expected =
+            ServerControlMsg::Event(vd_wire::channels::EventMsg::EntityRemoved { entity, at });
+        assert!(
+            decode_controls(&sent, CLIENT).contains(&expected),
+            "the removal routes through on_shard_control to the subscriber"
+        );
+        // (2) A STALE-fence removal (a demoted old owner) is refused for this subscriber + counted
+        // on its own counter — it must not evict what the live owner still streams.
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &removal(Fence::GENESIS),
+        )]);
+        assert!(
+            !decode_controls(&sent, CLIENT).contains(&expected),
+            "a stale removal is withheld"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewayStats>().stale_removals_dropped,
+            1
+        );
+        // (3) An older peer (minor < 14) is withheld the variant (sender-gates-variants) — it
+        // keeps the frozen-figure gap the message closes, but its wire never desyncs.
+        rig.world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("session")
+            .negotiated_minor = 13;
+        let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &removal(Fence(1)))]);
+        assert!(
+            decode_controls(&sent, CLIENT).is_empty(),
+            "a minor<14 peer receives no Event"
+        );
+        // (4) THE OWNER SKIP: a removal for the session's OWN avatar is never fanned to it — the
+        // removal is a fact about the OLD realm mid-crossing, while the owner's truth is its live
+        // dest sub; evicting would blink the one figure that must never blink. Restore minor 14
+        // first so the skip (not the gate) is what withholds it.
+        rig.world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("session")
+            .negotiated_minor = 14;
+        // The session's own entity, read off the wire the login itself announced (`OwnEntity`) —
+        // no fallible phase destructure, so no failure-only region (HR5).
+        let own = login_sends
+            .iter()
+            .flat_map(|tick| decode_controls(tick, CLIENT))
+            .find_map(|msg| match msg {
+                ServerControlMsg::OwnEntity { entity } => Some(entity),
+                _ => None,
+            })
+            .expect("the login announces the own entity");
+        let sent = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::EntityRemoved {
+                realm_fence: Fence(1),
+                entity: own,
+                at: vd_core::UniverseTick(501),
+            },
+        )]);
+        assert!(
+            decode_controls(&sent, CLIENT).is_empty(),
+            "the entity's own session is never told to evict its own avatar"
+        );
+    }
+
+    /// The removal fan's C2 honesty arms — the same dead-branch traps the frame fan carries:
+    /// (a) the reverse index names a session absent from `by_session`; (b) a present session
+    /// whose hot table holds no entry for the shard; (c) a non-Active session is skipped clean.
+    /// Each is COUNTED (or a clean skip), never a silent drop.
+    #[test]
+    fn an_entity_removed_fan_counts_desyncs_and_skips_non_active_sessions() {
+        let removal = ShardToGateway::EntityRemoved {
+            realm_fence: Fence(1),
+            entity: EntityId(0xE1),
+            at: vd_core::UniverseTick(500),
+        };
+        // (a) index points at a session that does not exist in by_session.
+        let mut sessions = GatewaySessions::default();
+        sessions
+            .subscribed_shards
+            .entry(SHARD)
+            .or_default()
+            .insert(SessionId(0xC0DE));
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        fan_entity_removed(
+            SHARD,
+            Fence(1),
+            EntityId(0xE1),
+            vd_core::UniverseTick(500),
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.frame_sub_desync, 1, "(a) missing session is counted");
+        assert!(outbox.0.is_empty());
+
+        // (b) a present session indexed under SHARD but with an EMPTY hot SubTable.
+        let (mut sessions, sid, _) = one_active_session();
+        sessions.by_session[&sid]
+            .hot
+            .subs
+            .store(Arc::new(SubTable::default()));
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        fan_entity_removed(
+            SHARD,
+            Fence(1),
+            EntityId(0xE1),
+            vd_core::UniverseTick(500),
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.frame_sub_desync, 1, "(b) lookup None is counted");
+        assert!(outbox.0.is_empty(), "no removal forwarded on a desync");
+
+        // (c) a subscribed but NON-Active session (self-fenced / still attaching) is skipped
+        // clean — served no removals, exactly as it is served no frames.
+        let (mut sessions, sid, _) = one_active_session();
+        sessions.by_session.get_mut(&sid).expect("session").phase = SessionPhase::AwaitingAttach;
+        let mut stats = GatewayStats::default();
+        let mut outbox = OutboundBox::default();
+        fan_entity_removed(
+            SHARD,
+            Fence(1),
+            EntityId(0xE1),
+            vd_core::UniverseTick(500),
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.frame_sub_desync, 0, "not a desync — a clean skip");
+        assert!(outbox.0.is_empty());
+        let _ = postcard::to_allocvec(&removal).expect("the fixture arm stays constructible");
     }
 
     #[test]

@@ -124,7 +124,16 @@ fn report(reports: &[(NodeId, InspectReport)], id: NodeId) -> &InspectReport {
 }
 
 fn with_client<R>(topo: &mut Topology, f: impl FnOnce(&mut ScriptedClient) -> R) -> R {
-    let node = topo.node_mut(CLIENT).expect("client present");
+    with_client_at(topo, CLIENT, f)
+}
+
+/// Like [`with_client`] but for a NAMED client node — the two-player scenario holds two.
+fn with_client_at<R>(
+    topo: &mut Topology,
+    node: NodeId,
+    f: impl FnOnce(&mut ScriptedClient) -> R,
+) -> R {
+    let node = topo.node_mut(node).expect("client present");
     let client = node
         .as_any_mut()
         .expect("clients opt into downcasting")
@@ -2798,6 +2807,22 @@ fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
         "the traveller re-homes from the area to its planet"
     );
 
+    // THE REMOVE MESSAGE's precondition, pinned at the crossing instant (D-4(a)): the BYSTANDER —
+    // the client whose own avatar is the stayer — HOLDS the traveller's delivered track from their
+    // co-located time. This is the track that froze forever before the remove message existed, so
+    // its presence here is what makes the eviction assert at the end non-vacuous.
+    let bystander_node = [CLIENT, CLIENT_B]
+        .into_iter()
+        .find(|n| with_client_at(&mut topo, *n, |c| c.delivered_view.own_entity()) == Some(stayer))
+        .expect("one of the two clients owns the stayer");
+    assert!(
+        with_client_at(&mut topo, bystander_node, |c| c
+            .delivered_view
+            .render(f64::from(u32::MAX))
+            .contains_key(&traveller)),
+        "the bystander holds the traveller's track from their co-located time",
+    );
+
     // The composition proof (anti-vacuity, causal): the area's own detector emitted the crossing and the
     // orchestrator turned it into a real saga. There is no `trigger_transfer` anywhere in this file.
     let reports = topo.inspect_all();
@@ -2919,6 +2944,42 @@ fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
     assert_eq!(
         lane_frames, 0,
         "the tombstoned entity lane is SILENT on every leg while two realms are occupied",
+    );
+
+    // (6) THE REMOVE MESSAGE, end to end (proto_minor 14, D-4(a)): when the traveller's retained
+    // ghost tears down at the band's destroy edge, the area emits `EntityRemoved`, the gateway
+    // fans it as the reliable Event, and the BYSTANDER's real client EVICTS the leaver's track —
+    // the figure VANISHES instead of freezing at the boundary forever. The whole lane, through
+    // the production shard, gateway and client, measured on the delivered view.
+    let vanished = step_until(&mut topo, 600, |t| {
+        set_shard_subject_pose_now(t, SHARD, stayer, CHAIN_AREA_FRAME, staying);
+        set_shard_subject_pose_now(t, CHAIN_MID, traveller, planet_frame, held);
+        !with_client_at(t, bystander_node, |c| {
+            c.delivered_view
+                .render(f64::from(u32::MAX))
+                .contains_key(&traveller)
+        })
+    });
+    assert!(
+        vanished,
+        "the bystander's drawn copy of the leaver is EVICTED by the remove message — never a \
+         frozen phantom at the boundary",
+    );
+    // And it STAYS gone. (On this ordered in-memory fabric no straggler exists to refuse — the
+    // resurrect guard's straggler/return/prune arms are pinned in the vd-client unit tests; this
+    // window measures only that nothing on the LIVE topology re-creates the evicted track.)
+    for _ in 0..20 {
+        topo.step();
+        set_shard_subject_pose_now(&mut topo, SHARD, stayer, CHAIN_AREA_FRAME, staying);
+        set_shard_subject_pose_now(&mut topo, CHAIN_MID, traveller, planet_frame, held);
+    }
+    assert!(
+        !with_client_at(&mut topo, bystander_node, |c| {
+            c.delivered_view
+                .render(f64::from(u32::MAX))
+                .contains_key(&traveller)
+        }),
+        "no straggler resurrects the evicted figure",
     );
 }
 

@@ -128,6 +128,10 @@ pub struct GatewayView {
     pub inputs_unroutable: u64,
     pub inputs_malformed: u64,
     pub stale_frames_dropped: u64,
+    /// A shard's `EntityRemoved` refused for one subscriber on a stale fence (the remove message,
+    /// proto_minor 14) — counted apart from `stale_frames_dropped` because a wrongly-dropped
+    /// removal strands a frozen figure, not a tick of motion.
+    pub stale_removals_dropped: u64,
     /// A frame the gateway could not decode/dispatch — the honesty floor; MUST stay 0 for a healthy demand
     /// login (a miscounted greeting would show up here instead of `presence_announces`).
     pub undecodable: u64,
@@ -451,6 +455,7 @@ mod tests {
                 inputs_unroutable: 7,
                 inputs_malformed: 8,
                 stale_frames_dropped: 9,
+                stale_removals_dropped: 29,
                 undecodable: 10,
                 // 26, not 11: the sequence above is positional and renumbering it to slot this in would
                 // have rewritten every value below — which is exactly the transposition this fixture

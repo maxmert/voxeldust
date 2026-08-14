@@ -169,6 +169,21 @@ pub enum ShardToGateway {
         added: Vec<RealmShape>,
         removed: Vec<RealmId>,
     },
+    /// THE REMOVE MESSAGE's mesh leg (proto_minor 14, D-4(a)): this shard PERMANENTLY stopped
+    /// emitting `entity` (a leaver's retained ghost tore down at band-exit; a detach completed at
+    /// the directory), so every client still subscribed here must evict its track — the reliable
+    /// signal a pure-renderer client needs because absence from a datagram is deliberately never an
+    /// eviction. The gateway fans it to the shard's subscribers as
+    /// [`crate::channels::ServerControlMsg::Event`] (typed, decoded, per-session minor-gated), each
+    /// checked against ITS per-shard accepted fence (rule 5 — a demoted old owner's stale removal
+    /// is dropped and counted, like a stale frame). `at` is the shard's universe tick at removal —
+    /// carried through to the client's resurrect guard. APPENDED variant (postcard-safe additive
+    /// shape — a prior arm's discriminant/framing is unchanged).
+    EntityRemoved {
+        realm_fence: Fence,
+        entity: EntityId,
+        at: vd_core::UniverseTick,
+    },
 }
 
 impl ShardToGateway {
@@ -182,7 +197,8 @@ impl ShardToGateway {
             | ShardToGateway::SessionDetached { .. }
             | ShardToGateway::SubscriptionReady { .. }
             | ShardToGateway::RealmFrame { .. }
-            | ShardToGateway::RealmSceneDelta { .. } => None,
+            | ShardToGateway::RealmSceneDelta { .. }
+            | ShardToGateway::EntityRemoved { .. } => None,
         }
     }
 
@@ -199,7 +215,8 @@ impl ShardToGateway {
             | ShardToGateway::SessionAttached { .. }
             | ShardToGateway::SessionDetached { .. }
             | ShardToGateway::SubscriptionReady { .. }
-            | ShardToGateway::RealmSceneDelta { .. } => None,
+            | ShardToGateway::RealmSceneDelta { .. }
+            | ShardToGateway::EntityRemoved { .. } => None,
         }
     }
 }

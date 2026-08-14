@@ -33,8 +33,8 @@
 use std::collections::BTreeMap;
 
 use glam::DVec3;
-use vd_core::EntityId;
 use vd_core::pose::{FrameRef, LatticePos};
+use vd_core::{EntityId, UniverseTick};
 use vd_wire::channels::{SnapshotDatagram, SnapshotVerdict, SubId, classify_snapshot};
 
 use crate::interp::{EntityTrack, RenderPose, census};
@@ -44,6 +44,15 @@ use crate::interp::{EntityTrack, RenderPose, census};
 /// per-entity authoritative sub, so [`DeliveredView::rendered`] reports this constant. Kept
 /// as a stable diagnostic field (not deleted) so `vdctl`/process-parity decode unchanged.
 pub const RENDERED_SUB: SubId = SubId(0);
+
+/// How long (in SECONDS) a removed entity's resurrect guard outlives its removal, measured against
+/// the newest APPLIED snapshot tick at the wire-taught tick rate. DERIVED, not fitted: the guard
+/// exists for the unreliable lane's reorder window, whose client-side model is the interpolation
+/// buffer (`ClientInterpTuning`, 100–150 ms — anything later is unusable to the interpolator), with
+/// one order of magnitude of headroom for a genuinely pathological link: 0.15 s × 10. Converting at
+/// the ACTUAL rate (not the compiled default) keeps the wall-clock meaning when the cluster runs
+/// faster or slower than 20 Hz.
+const RESURRECT_GUARD_S: f64 = 1.5;
 
 /// The decoded, delivered world view.
 #[derive(Clone, Debug, Default)]
@@ -81,6 +90,24 @@ pub struct DeliveredView {
     /// Own-entity rows dropped as the ECHO (the old home's relayed copy of the leaver) — see
     /// `echo_space`. Non-zero during a crossing's grace window is normal.
     echo_rows_dropped: u64,
+    /// THE RESURRECT GUARD (the remove message, proto_minor 14): per removed entity, the universe
+    /// tick its removal was stamped at. The reliable removal races the unreliable snapshot lane, so
+    /// a straggler row for a removed entity whose stamp is `<= at` is refused here — without this,
+    /// one reordered datagram silently re-creates the track the removal just evicted, and it
+    /// freezes forever (the exact defect the remove message exists to close). A STRICTLY NEWER row
+    /// is a genuine return (the player flew back): it clears the guard and folds normally. Bounded:
+    /// entries older than the newest applied tick by more than [`RESURRECT_GUARD_TICKS`] are pruned
+    /// (any row that stale is unusable to the interpolator regardless).
+    removed_at: BTreeMap<EntityId, UniverseTick>,
+    /// Rows refused by the resurrect guard — a straggler for a removed entity. Non-zero right
+    /// after a removal is normal (the unreliable lane drains); growth at steady state means a
+    /// shard keeps emitting an entity it told us was removed.
+    resurrect_rows_dropped: u64,
+    /// The universe-tick rate the wire taught this client (`ServerControlMsg::UniverseRate`) —
+    /// what converts [`RESURRECT_GUARD_S`] into ticks. `None` until taught; the guard prune then
+    /// converts at the tuning DEFAULT rate, which is only ever wrong by the same factor the
+    /// render cursor is until the same message arrives.
+    tick_hz: Option<f64>,
 }
 
 impl DeliveredView {
@@ -114,6 +141,20 @@ impl DeliveredView {
             SnapshotVerdict::Apply => {
                 self.high_water.insert(snap.sub, snap.frame_id);
                 for entity in snap.entities {
+                    // THE RESURRECT GUARD (see `removed_at`): a row at or before the entity's
+                    // removal is the straggler the reliable removal already superseded — refused,
+                    // counted. A strictly newer row is a genuine return — but the guard CLEARS
+                    // only at the fold below, never here: a filter downstream may still discard
+                    // this row (the one-space rule during a dual-sub window), and a guard
+                    // disarmed by a row that never folded would let the NEXT straggler re-create
+                    // the track with no removal left to evict it (review-caught, the exact
+                    // permanent-phantom this guard exists against).
+                    if let Some(&at) = self.removed_at.get(&entity.entity)
+                        && entity.pose.universe_tick <= at
+                    {
+                        self.resurrect_rows_dropped += 1;
+                        continue;
+                    }
                     let own = self.own_entity == Some(entity.entity);
                     if !own && standing.is_some_and(|s| entity.pose.frame != s) {
                         self.foreign_space_rows += 1;
@@ -140,6 +181,9 @@ impl DeliveredView {
                     if pose != raw {
                         self.nonfinite_poses += 1;
                     }
+                    // The genuine return CLEARS the guard exactly where the row folds — every
+                    // filter above has passed, so the track this row creates is a live one.
+                    self.removed_at.remove(&entity.entity);
                     self.tracks
                         .entry(entity.entity)
                         .and_modify(|track| track.observe(pose))
@@ -151,6 +195,19 @@ impl DeliveredView {
                 if now_standing != standing && standing.is_some() {
                     self.echo_space = standing;
                 }
+                // BOUND the resurrect guard, honestly: the prune trades an unbounded map for a
+                // bounded re-open window. An entry older than the window CAN in principle still
+                // matter (there is no second removal to re-evict a post-prune straggler), so the
+                // window is sized in wall-clock terms — the transport-reorder bound, ten times
+                // the interpolation buffer — at the tick rate the wire actually TAUGHT this
+                // client (`set_tick_hz`), not a compiled-in default. A datagram held longer than
+                // that by any real transport is a fault; the frozen figure it would draw is that
+                // fault surfacing, counted at the shard as it keeps NOT emitting the entity.
+                let horizon = snap
+                    .universe_tick
+                    .0
+                    .saturating_sub(self.resurrect_guard_ticks());
+                self.removed_at.retain(|_, at| at.0 >= horizon);
             }
             SnapshotVerdict::DropForeignSub | SnapshotVerdict::DropStale => {
                 self.stale_frames_dropped += 1;
@@ -167,22 +224,50 @@ impl DeliveredView {
         self.own_entity = Some(entity);
     }
 
+    /// Adopt the wire-taught universe-tick rate — the resurrect guard's seconds→ticks factor.
+    pub fn set_tick_hz(&mut self, tick_hz: f64) {
+        self.tick_hz = Some(tick_hz);
+    }
+
+    /// [`RESURRECT_GUARD_S`] in ticks, at the wire-taught rate (the tuning default until taught).
+    fn resurrect_guard_ticks(&self) -> u64 {
+        let hz = self
+            .tick_hz
+            .unwrap_or(crate::tuning::ClientInterpTuning::DEFAULT.tick_hz);
+        (RESURRECT_GUARD_S * hz).ceil() as u64
+    }
+
     /// Evict one entity's track (from the reliable `EventMsg::EntityRemoved`) — the SOUND
-    /// per-entity eviction signal (reliable + explicit, unlike datagram-absence). If the
-    /// removed entity is the own avatar, `own_entity` is cleared too (the server told us it
-    /// left our view). A remove for an entity we hold no track for is a harmless no-op.
-    pub fn remove_entity(&mut self, entity: EntityId) {
+    /// per-entity eviction signal (reliable + explicit, unlike datagram-absence). A remove for
+    /// an entity we hold no track for still ARMS the resurrect guard (the removal may simply
+    /// have outrun every row) — otherwise a harmless no-op. `at` is the removing shard's
+    /// universe tick — see `removed_at` for the race it closes.
+    ///
+    /// `own_entity` is DELIBERATELY NOT cleared: the marker names IDENTITY, not presence. The
+    /// one client that legitimately receives a removal of its own avatar is the LEAVER's — its
+    /// session still subscribes to the realm it just left, whose band-exit teardown removes the
+    /// avatar THERE while the new home streams it live. Its own newer rows re-fold through the
+    /// resurrect guard (a genuine return), but nothing would ever re-say `OwnEntity` — clearing
+    /// here would permanently orphan the one-space filter and the render centering. A client
+    /// whose avatar is removed because IT is leaving (logout) is on a closing session, where a
+    /// stale marker beside an evicted track draws nothing.
+    pub fn remove_entity(&mut self, entity: EntityId, at: UniverseTick) {
         self.tracks.remove(&entity);
-        if self.own_entity == Some(entity) {
-            self.own_entity = None;
-        }
+        // Last-wins on the stamp: a second removal (the entity returned and left again) must
+        // never REGRESS the guard to an older tick and re-open the straggler window.
+        let guard = self.removed_at.entry(entity).or_insert(at);
+        *guard = (*guard).max(at);
     }
 
     /// Forget a subscription's staleness high-water when the gateway RELIABLY closes it
     /// (`SubscriptionClosing`), so a later re-opened sub id is not rejected as stale. It does
     /// NOT evict entity tracks — those are EntityId-keyed and shared across subs, so per-entity
-    /// eviction is [`DeliveredView::remove_entity`]'s job (`EventMsg::EntityRemoved`). A close
-    /// for a sub never delivered is a harmless no-op.
+    /// eviction is [`DeliveredView::remove_entity`]'s job (`EventMsg::EntityRemoved`). ⚠ KNOWN
+    /// residual (D-4, slice F/VU-6): the remove message covers the ENTITY-leaves case only — when
+    /// the OBSERVER leaves (this client crosses away), the old realm's bystanders' tracks stay
+    /// here frozen in the departed frame (their rows stop at the one-space filter); the VU-6
+    /// authoritative scene re-stream on the crossing is the owed cure. A close for a sub never
+    /// delivered is a harmless no-op.
     pub fn drop_sub(&mut self, sub: SubId) {
         self.high_water.remove(&sub);
         // A held sub closing is the reliable END of the old home's feed — the echo's only source —
@@ -281,6 +366,12 @@ impl DeliveredView {
     #[must_use]
     pub fn echo_rows_dropped(&self) -> u64 {
         self.echo_rows_dropped
+    }
+
+    /// Rows refused by the resurrect guard — see `removed_at`.
+    #[must_use]
+    pub fn resurrect_rows_dropped(&self) -> u64 {
+        self.resurrect_rows_dropped
     }
 
     /// THE DRAWN POINT — and it is now a PASSTHROUGH, which is the whole of the client's job.
@@ -765,9 +856,11 @@ mod tests {
     }
 
     #[test]
-    fn remove_entity_evicts_the_track_and_clears_own_when_it_is_the_avatar() {
-        // EventMsg::EntityRemoved: the reliable per-entity eviction. Removing a non-own entity drops
-        // just its track; removing the OWN avatar also clears own_entity (the server said it left).
+    fn remove_entity_evicts_the_track_but_never_the_own_identity_marker() {
+        // EventMsg::EntityRemoved: the reliable per-entity eviction. Removing a non-own entity
+        // drops just its track; removing the OWN avatar drops its track but KEEPS `own_entity` —
+        // the marker names identity, not presence (the leaver's own client legitimately receives
+        // its avatar's removal from the realm it just left, and nothing would re-say OwnEntity).
         let mut view = DeliveredView::default();
         view.set_own_entity(ent(1));
         view.on_snapshot(
@@ -777,22 +870,74 @@ mod tests {
         assert_eq!(view.render(10.0).len(), 2);
 
         // Remove a NON-own entity: its track goes, own_entity is untouched.
-        view.remove_entity(ent(2));
+        view.remove_entity(ent(2), UniverseTick(10));
         let r = view.render(10.0);
         assert_eq!(r.len(), 1, "only ent(2) evicted");
         assert!(r.contains_key(&ent(1)));
         assert_eq!(view.own_entity(), Some(ent(1)), "own unchanged");
 
-        // Remove the OWN avatar: its track goes AND own_entity clears.
-        view.remove_entity(ent(1));
+        // Remove the OWN avatar: its track goes, the identity marker STAYS — the new home's
+        // strictly-newer rows re-fold through the resurrect guard and the client keeps knowing
+        // which entity is itself.
+        view.remove_entity(ent(1), UniverseTick(10));
         assert!(view.render(10.0).is_empty(), "the avatar track was evicted");
         assert_eq!(
             view.own_entity(),
-            None,
-            "own cleared when the avatar is removed"
+            Some(ent(1)),
+            "the identity marker survives its own removal"
         );
-        // Removing an entity we hold no track for is a harmless no-op.
-        view.remove_entity(ent(9));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 2, 11, vec![(ent(1), 3.0)]));
+        assert_eq!(
+            view.own_location_frame(),
+            Some(FrameRef::SystemSpace { system_seed: 1 }),
+            "the newer own row re-folds and the one-space filter stays anchored"
+        );
+        // Removing an entity we hold no track for still ARMS the resurrect guard (the removal may
+        // have outrun every row of a just-entered entity) — otherwise a harmless no-op.
+        view.remove_entity(ent(9), UniverseTick(10));
+    }
+
+    #[test]
+    fn the_resurrect_guard_refuses_stragglers_admits_returns_and_stays_bounded() {
+        let mut view = DeliveredView::default();
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 1, 10, vec![(ent(1), 1.0)]));
+        assert_eq!(view.render(10.0).len(), 1);
+        // The reliable removal at tick 12 evicts the track and arms the guard.
+        view.remove_entity(ent(1), UniverseTick(12));
+        assert!(view.render(12.0).is_empty());
+        // A STRAGGLER: a reordered datagram whose rows predate the removal (tick 11 <= 12). It
+        // must NOT re-create the track — that is the frozen-phantom defect the message closes.
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 2, 11, vec![(ent(1), 5.0)]));
+        assert!(
+            view.render(12.0).is_empty(),
+            "a straggler row never resurrects a removed track"
+        );
+        assert_eq!(view.resurrect_rows_dropped(), 1);
+        // A GENUINE RETURN: a strictly newer row (tick 13 > 12) clears the guard and folds.
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 3, 13, vec![(ent(1), 7.0)]));
+        assert_eq!(view.render(13.0).len(), 1, "the player flew back");
+        // And once cleared, the old stamp is forgotten — a fresh row folds unguarded.
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 4, 14, vec![(ent(1), 8.0)]));
+        assert_eq!(view.resurrect_rows_dropped(), 1, "no further refusals");
+
+        // A SECOND REMOVAL never regresses the guard (last-wins on the stamp)…
+        view.remove_entity(ent(1), UniverseTick(20));
+        view.remove_entity(ent(1), UniverseTick(15));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 5, 18, vec![(ent(1), 9.0)]));
+        assert!(
+            view.render(18.0).is_empty(),
+            "tick 18 <= the newest removal (20): still refused"
+        );
+        // …and the guard PRUNES once the applied clock moves past the derived window: a removal
+        // this stale protects against nothing (the row would be unusable to the interpolator),
+        // so an ancient stamp no longer blocks a fold.
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 6, 60, vec![(ent(2), 1.0)]));
+        view.on_snapshot(&s(SubId(0)), snap(SubId(0), 7, 19, vec![(ent(1), 9.5)]));
+        assert_eq!(
+            view.render(60.0).len(),
+            2,
+            "the pruned guard no longer refuses; the map stays sized to recent departures"
+        );
     }
 
     #[test]
@@ -811,7 +956,7 @@ mod tests {
             Some(FrameRef::SystemSpace { system_seed: 1 })
         );
         // (d) The own entity is removed → None again (no track to read).
-        view.remove_entity(ent(1));
+        view.remove_entity(ent(1), UniverseTick(10));
         assert_eq!(view.own_location_frame(), None);
     }
 }
