@@ -29,14 +29,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ExitCode};
 use std::time::{Duration, Instant};
 
-use vd_bins::GALAXY_SEED;
 use vd_bins::{
-    Cluster, ClusterAddrs, ClusterShape, DEV, ORCH_STORE_NAME, RUNFILE_NAME, TRUST_DIR_NAME,
-    admin_get_body, common_env, dev_auth_pubkey_hex, galaxy_env, gateway_env, loopback,
-    orchestrator_env, resolve_source_boundaries, sh_quote, shard_b_env, shard_env, slot_workdir,
+    Cluster, ClusterAddrs, ClusterShape, DEV, GALAXY, ORCH_STORE_NAME, PLANET_SHARD, RUNFILE_NAME,
+    TRUST_DIR_NAME, admin_get_body, common_env, dev_auth_pubkey_hex, gateway_env, loopback,
+    orchestrator_env, realm_shards, roster_realms, sh_quote, shard_env, slot_workdir,
 };
 use vd_core::NodeId;
-use vd_core::pose::RealmId;
 use vd_devproto::{CLIENT_NODE_BASE, DevPortScheme, SlotPorts};
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::AdminSnapshot;
@@ -60,7 +58,8 @@ fn main() -> ExitCode {
         Err(msg) => {
             eprintln!("vd-devcluster: {msg}");
             eprintln!(
-                "usage: vd-devcluster <up|down|status|env> --slot <N>  |  gen-trust <dir>  |  gen-authkey"
+                "usage: vd-devcluster <up|down|status|env> --slot <N>  |  gen-trust <dir>  |  \
+                 gen-authkey  |  emit-world-scene <dir>"
             );
             ExitCode::FAILURE
         }
@@ -85,37 +84,19 @@ fn run(args: &[String]) -> Result<(), String> {
     if cmd == "gen-authkey" {
         return gen_authkey();
     }
-    // `emit-crossing-fixtures <dir>` writes the Visual Crossing Playground fixtures (the walk-into shard
-    // trigger + the client's two-box scene) for the human `crossing-playground` launcher — single-sourced
-    // with the `render_crossing_smoke` gate via `vd_bins::crossing_playground`. No slot; dir arg only.
-    if cmd == "emit-crossing-fixtures" {
-        let dir = args.get(1).ok_or("emit-crossing-fixtures needs a <dir>")?;
-        let (trigger, scene) =
-            vd_bins::crossing_playground::write_fixtures(Path::new(dir), &vd_bins::DEV)?;
-        println!("VD_CROSSING_TRIGGER={trigger}");
-        println!("VD_CROSSING_SCENE={scene}");
+    // `emit-world-scene <dir>` writes THE world's home-shard neighbourhood (`regions.json`) for the
+    // client's `--realm-boxes` — the ONE scene emitter (SL5): the drawn geometry IS the detector's,
+    // single-sourced through `world_roster`/`boot_regions_and_movers` (which also runs the flight-law
+    // asserts, so a world change fails the emit loudly). No options, no selector; dir arg only.
+    if cmd == "emit-world-scene" {
+        let dir = args.get(1).ok_or("emit-world-scene needs a <dir>")?;
+        let scene = vd_bins::write_world_regions(Path::new(dir), &vd_bins::DEV)?;
+        println!("VD_WORLD_SCENE={scene}");
         return Ok(());
     }
-    // `emit-seed-fixtures <dir>` writes the SEED-FOREST scene (`regions.json` — the canonical
-    // `worldgen::realm_regions_for`, INCLUDING the Galaxy containing box, G1) for the human
-    // `crossing-playground --forest` launcher — single-sourced with the shards' detector geometry AND the
-    // `node_per_realm_walk` CI walk gate. The client's `--realm-boxes` loads it via `from_regions_json`.
-    if cmd == "emit-seed-fixtures" {
-        let dir = args.get(1).ok_or("emit-seed-fixtures needs a <dir>")?;
-        let scene = vd_bins::crossing_playground::write_seed_regions(Path::new(dir), 0)?;
-        println!("VD_SEED_SCENE={scene}");
-        return Ok(());
-    }
-    // `emit-visual-fixtures <dir>` writes the FA-5 VISUAL-scale seed forest (`regions.json` — the SAME
-    // `realm_regions_for_config(seed, visual_scale())` a `VD_UNIVERSE_SCALE=visual` shard plants) for the
-    // `visual-run` launcher: the client's `--realm-boxes` loads it, drawing the orbiting-planet system the
-    // shard authors + ships (the planets ORBIT via the realm-frame overlay). No slot; dir arg only.
-    if cmd == "emit-visual-fixtures" {
-        let dir = args.get(1).ok_or("emit-visual-fixtures needs a <dir>")?;
-        let scene = vd_bins::crossing_playground::write_visual_regions(Path::new(dir), 0)?;
-        println!("VD_VISUAL_SCENE={scene}");
-        return Ok(());
-    }
+    // (The `emit-crossing-fixtures` / `emit-seed-fixtures` / `emit-visual-fixtures` subcommands are
+    // DELETED — SL5: each emitted a scene of a world that is not THE world. `emit-world-scene` above
+    // is the ONE emitter, with nothing to choose.)
     let slot = parse_slot(args)?;
     let ports = DevPortScheme::DEFAULT
         .slot_ports(slot)
@@ -123,17 +104,15 @@ fn run(args: &[String]) -> Result<(), String> {
     let work = work_dir(slot);
     match cmd {
         // The cluster shape (how many stub shards spawn) is a DATA value the shared env builders fan out
-        // on (HR3 — never a shard-kind branch in a feature):
-        //   `up`            → Single: orchestrator + gateway + System 7 (byte-identical to the base `up`).
-        //   `up --dual`     → Dual: + the DEST shard (System 8) as a 4th node + the SOURCE's injected /
-        //                     born-inside geometric crossing trigger into realm B (a DIRECT 7→8 re-home,
-        //                     no Galaxy). Track R / 1d.2, the LOCAL 2-process crossing playground.
-        //   `up --triple`   → Triple: + the DEST (System 8) AND the GALAXY between-space shard (System 1)
-        //                     as a 5th node, each booting its SEED neighbourhood (NO boundary override) —
-        //                     the S5b canonical seed forest where a durable dot walks System 7 → Galaxy →
-        //                     System 8 and back, coordinate-driven, the Galaxy the containing box.
-        // `--triple` takes precedence over `--dual` (a `--triple` cluster IS a superset of `--dual`).
-        "up" => up(slot, ports, &work, cluster_shape(args)),
+        // on (HR3 — never a shard-kind branch in a feature). Every static shape pre-books realms OF THE
+        // WORLD via `roster_realms`/`realm_shards`:
+        //   `up`            → Single: orchestrator + gateway + the home shard (3 procs).
+        //   `up --dual`     → Dual: + the GALAXY shard (the home region's parent) — the one-hop
+        //                     autonomous crossing over THE world's own home shell (4 procs).
+        //   `up --chain`    → Chain: + GALAXY + the inner-planet shard + the sibling-star shard —
+        //                     down, up, out, sideways-through-parent, each realm its OWN node (6 procs).
+        //   `up --demand`   → Demand: orchestrator + gateway ONLY; worlds spin up on login/AoI demand.
+        "up" => up(slot, ports, &work, cluster_shape(args)?),
         "down" => down(&work),
         "status" => status(ports, &work),
         "env" => env_cmd(&work),
@@ -146,15 +125,31 @@ fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
 }
 
-/// The cluster shape from the `up` flags. `--forest` (NODE-PER-REALM: 8 nodes = orchestrator + gateway +
-/// SIX single-realm shards: System 7, Planet 7, Station 7, Area 7, Galaxy, System 8) wins over `--triple`
-/// (5 nodes: + DEST + GALAXY, co-hosting the System-7 children on the System-7 shard) over `--dual` (4
-/// nodes: + DEST), else Single (3 nodes). Each is a strict superset of the one below it.
-fn cluster_shape(args: &[String]) -> ClusterShape {
+/// The cluster shape from the `up` flags: `--chain` > `--dual` > `--demand` > Single.
+///
+/// `--triple` and `--forest` ERROR LOUDLY: both named realms THE world does not contain (System 8,
+/// Planet/Station/Area 7), so their extra shards died at boot and the shapes rotted invisibly —
+/// helped by the old parser, where an unrecognised flag fell silently to Single. Refusing beats
+/// silently standing up the wrong cluster.
+fn cluster_shape(args: &[String]) -> Result<ClusterShape, String> {
+    if has_flag(args, "--triple") {
+        return Err(
+            "`--triple` is retired: it named realms THE world does not contain (System 8 + the \
+             co-hosted System-7 children), so its shards could never boot. The sibling crossing is \
+             home → galaxy → sibling: use `up --chain`."
+                .to_owned(),
+        );
+    }
     if has_flag(args, "--forest") {
-        ClusterShape::Forest
-    } else if has_flag(args, "--triple") {
-        ClusterShape::Triple
+        return Err(
+            "`--forest` is retired: it named realms THE world does not contain (Planet/Station/Area 7, \
+             System 8), so four of its six shards could never boot. Use `up --chain` (home + galaxy + \
+             inner planet + sibling star, node-per-realm)."
+                .to_owned(),
+        );
+    }
+    Ok(if has_flag(args, "--chain") {
+        ClusterShape::Chain
     } else if has_flag(args, "--dual") {
         ClusterShape::Dual
     } else if has_flag(args, "--demand") {
@@ -164,7 +159,7 @@ fn cluster_shape(args: &[String]) -> ClusterShape {
         ClusterShape::Demand
     } else {
         ClusterShape::Single
-    }
+    })
 }
 
 /// Generate a fresh mTLS `ClusterTrust` bundle (`ca.der`/`node.der`/`key.der`) into `dir` — the
@@ -265,30 +260,10 @@ fn up_inner(
     let trust_str = trust_dir.display().to_string();
     let auth_pubkey = dev_auth_pubkey_hex();
 
-    let addrs = ClusterAddrs {
-        orchestrator: loopback(ports.orchestrator),
-        gateway: loopback(ports.gateway),
-        shard: loopback(ports.shard),
-        admin: loopback(ports.admin),
-        gateway_admin: None,
-        orchestrator_probe: loopback(ports.probe_orchestrator),
-        gateway_probe: loopback(ports.probe_gateway),
-        shard_probe: loopback(ports.probe_shard),
-        // Track R / 1d.2: the DEST shard's QUIC + probe (bound only when Dual/Triple spawns the 4th node).
-        shard_b: loopback(ports.shard_b),
-        shard_b_probe: loopback(ports.probe_shard_b),
-        // S5b: the GALAXY between-space shard's QUIC + probe (bound only when Triple/Forest spawns it).
-        galaxy: loopback(ports.galaxy),
-        galaxy_probe: loopback(ports.probe_galaxy),
-        // NODE-PER-REALM (Forest): the Planet/Station/Area 7 realm-shards' QUIC + probe (bound only when a
-        // `--forest` up spawns them; a single/dual/triple up leaves the ports free).
-        planet: loopback(ports.planet),
-        planet_probe: loopback(ports.probe_planet),
-        station: loopback(ports.station),
-        station_probe: loopback(ports.probe_station),
-        area: loopback(ports.area),
-        area_probe: loopback(ports.probe_area),
-    };
+    // ONE slot-port → address mapping (`ClusterAddrs::for_slot`), shared with the process smokes that
+    // read the same slot. Extra realm-shard addrs are bound only when the shape spawns them; the
+    // station/area slots stay RESERVED-unbound.
+    let addrs = ClusterAddrs::for_slot(ports);
     // CA-1 CRUTCH (fenced; deferred to M3): seed every dev-control client's QUIC
     // addr into the gateway book so the gateway can route snapshots back (the mesh
     // dials by static address book — `unknown_destinations_are_loud_backpressure`).
@@ -324,52 +299,23 @@ fn up_inner(
         ),
     ];
     // The static login shard: present for every STATIC shape, ABSENT for Demand — the home shard is spawned on
-    // the fly by the armed reconciler at login (that IS the demand cluster). The has_dest/has_galaxy/extra-shard
-    // branches below are all empty for Demand (byte-identical to a Single roster minus the one static shard).
+    // the fly by the armed reconciler at login (that IS the demand cluster). The realm-shard fan-out below is
+    // empty for Demand too (byte-identical to a Single roster minus the one static shard).
     if !shape.is_demand() {
         nodes.push(("vd-shard", "vd-shard", shard_env(&addrs, &DEV, shape)));
     }
-    if shape == ClusterShape::Dual {
-        // Track R / 1d.2 (the DIRECT-re-home playground): the SOURCE (realm 7) hosts the crossing trigger
-        // INTO realm B. Default: the born-inside System(7)→System(8) shell. A test/operator may OVERRIDE
-        // the source geometry via `VD_DEVCLUSTER_BOUNDARIES` (a readable boundaries.json) so a crossing
-        // test can plant its own WALK-INTO trigger; inert-by-default, so `dual_cluster_crossing_smoke` and
-        // a bare `up --dual` are unchanged. `resolve_source_boundaries` fails LOUD on a bad override path.
-        // TRIPLE deliberately does NOT inject a boundary override: its shards boot the SEED neighbourhood
-        // (`realm_neighbourhood_for`) — the canonical seed forest that routes System 7 → Galaxy → System 8
-        // through the Galaxy parent — NOT the born-inside DIRECT-re-home hack.
-        let boundaries_path =
-            resolve_source_boundaries(std::env::var("VD_DEVCLUSTER_BOUNDARIES").ok(), work, &DEV)?;
-        let source = nodes
-            .iter_mut()
-            .find(|(_, label, _)| *label == "vd-shard")
-            .expect("the source shard is in the spawn list");
-        source.2.push(("VD_REALM_BOUNDARIES", boundaries_path));
-    }
-    if shape.has_dest() {
-        // The DEST shard: the SAME `vd-shard` binary (HR3) with realm B, a distinct mint, its own
-        // bind+probe, booking the source (+ the Galaxy in Triple) — labelled `vd-shard-b` for its log.
-        nodes.push(("vd-shard", "vd-shard-b", shard_b_env(&addrs, &DEV, shape)));
-    }
-    if shape.has_galaxy() {
-        // S5b — the GALAXY between-space shard: the SAME `vd-shard` binary (HR3) hosting System(1), a
-        // distinct mint, its own bind+probe, booking BOTH systems (the sibling-routing shard). It boots the
-        // SEED neighbourhood ({Universe, Galaxy, System 7, System 8}), so its detector re-homes Galaxy→7 and
-        // Galaxy→8 by construction — no boundary override. Appended LAST so the earlier books tolerate its
-        // not-yet-bound peer with retry. Labelled `vd-galaxy` for its log + kill-record entry.
-        nodes.push(("vd-shard", "vd-galaxy", galaxy_env(&addrs, &DEV)));
-    }
-    // NODE-PER-REALM (Forest): each of the SIX realm-shards (Planet/Station/Area 7, Galaxy, System 8) on its
-    // OWN node so every re-home is a uniform CROSS-NODE saga (no `VD_HELD_REALMS` co-hosting). The SAME
-    // `vd-shard` binary (HR3); each carries its `VD_REALM_KIND` + `VD_REALM_SEED` so the shard boots the
-    // right realm KIND. Appended LAST so the earlier books tolerate the not-yet-bound peers with retry. Empty
-    // for Single/Dual/Triple (byte-identical). Distinct log/kill labels per realm.
-    for shard in shape.extra_realm_shards(&addrs, &DEV) {
-        let label: &'static str = match shard.realm {
-            vd_core::pose::RealmId::Planet(_) => "vd-planet-7",
-            vd_core::pose::RealmId::Station(_) => "vd-station-7",
-            vd_core::pose::RealmId::Area(_) => "vd-area-7",
-            vd_core::pose::RealmId::System(s) if s == vd_bins::GALAXY_SEED => "vd-galaxy",
+    // NODE-PER-REALM: every extra realm-shard of the shape (galaxy / inner planet / sibling star) on
+    // its OWN node so every re-home is a uniform CROSS-NODE saga (no `VD_HELD_REALMS` co-hosting). The
+    // SAME `vd-shard` binary (HR3); each carries its `VD_REALM_KIND` + `VD_REALM_SEED` so the shard
+    // boots the right realm KIND, and each boots THE world's SEED neighbourhood — NO boundary
+    // injection in ANY shape: the world's own shells ARE the crossing boundaries. Appended LAST so the
+    // earlier books tolerate the not-yet-bound peers with retry. Empty for Single/Demand
+    // (byte-identical). The label (log + kill-record naming only, never behaviour) keys on the fixed
+    // node slot.
+    for shard in realm_shards(shape, &addrs, &DEV) {
+        let label: &'static str = match shard.node {
+            n if n == GALAXY => "vd-galaxy",
+            n if n == PLANET_SHARD => "vd-planet",
             _ => "vd-shard-b",
         };
         nodes.push((
@@ -419,13 +365,10 @@ fn up_inner(
 }
 
 /// Wait until the cluster has bootstrapped with ALL node processes still alive — failing LOUD if a child
-/// exits or the deadline hits. In SINGLE-shard mode "bootstrapped" = any shard granted its realm
-/// ([`AdminSnapshot::cluster_bootstrapped`]). In DUAL mode (Track R / 1d.2, C1) it is the STRICT
-/// both-realms gate ([`AdminSnapshot::realms_present`] over `[System(7), System(8)]`); in TRIPLE mode
-/// (S5b) it is the STRICT ALL-THREE-realms gate over `[System(7), System(1), System(8)]` — the durable
-/// dot cannot be driven through the seed forest until the Galaxy (the between-space parent) AND both
-/// systems are in the ONE directory, or a hop's `head(Realm(...))` would resolve nothing and the crossing
-/// would only COUNT `crossing_unresolved` — it would never fire.
+/// exits or the deadline hits. ONE readiness rule for every shape: every realm the shape pre-books
+/// ([`roster_realms`]) rests with a shard in the ONE directory ([`AdminSnapshot::realms_present`]) —
+/// a crossing whose dest head resolves nothing would only COUNT `crossing_unresolved` and never fire,
+/// and (worse) an occupant steered at it strands permanently.
 fn await_ready(cluster: &mut Cluster, admin_port: u16, shape: ClusterShape) -> Result<(), String> {
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
@@ -442,65 +385,13 @@ fn await_ready(cluster: &mut Cluster, admin_port: u16, shape: ClusterShape) -> R
     }
 }
 
-/// The expected realms that must ALL be granted before a crossing can fire, derived from the shape + the
-/// DEV/GALAXY params (NEVER an inline `System(8)`/`System(1)` — HR3 / M-1):
-/// - Single: just the source realm.
-/// - Dual: source + DEST (the DIRECT-re-home pair).
-/// - Triple: source + GALAXY + DEST (the full seed-forest chain: a hop resolves `head(Realm(...))` for
-///   each, so all three must rest before the multi-hop walk).
-/// - Forest (NODE-PER-REALM): the source realm + EVERY extra realm-shard's realm (Planet 7, Station 7,
-///   Area 7, Galaxy, System 8) — a walk into any child must find its head resting on the child's OWN node,
-///   so all six realms must be granted before the node-per-realm walk drives.
-fn expected_realms(shape: ClusterShape) -> Vec<RealmId> {
-    let mut realms = vec![RealmId::System(DEV.realm_seed)];
-    if shape.has_galaxy() {
-        realms.push(RealmId::System(GALAXY_SEED));
-    }
-    if shape.has_dest() {
-        realms.push(RealmId::System(DEV.realm_seed_b));
-    }
-    // Forest folds in each realm-shard's realm as DATA (the source shard's System 7 is already above).
-    let addrs = forest_expected_addrs();
-    realms.extend(
-        shape
-            .extra_realm_shards(&addrs, &DEV)
-            .iter()
-            .map(|s| s.realm),
-    );
-    realms
-}
-
-/// A placeholder [`ClusterAddrs`] used ONLY to enumerate the shape's realm-shard REALMS in
-/// [`expected_realms`] — `extra_realm_shards` reads only the `realm` field, never the addrs, so loopback
-/// zeros are fine (the readiness gate cares about which realms rest, not where). Keeps `expected_realms`
-/// addr-free without threading the live `ClusterAddrs` through the readiness path.
-fn forest_expected_addrs() -> ClusterAddrs {
-    let z = loopback(0);
-    ClusterAddrs {
-        orchestrator: z,
-        gateway: z,
-        shard: z,
-        admin: z,
-        gateway_admin: None,
-        orchestrator_probe: z,
-        gateway_probe: z,
-        shard_probe: z,
-        shard_b: z,
-        shard_b_probe: z,
-        galaxy: z,
-        galaxy_probe: z,
-        planet: z,
-        planet_probe: z,
-        station: z,
-        station_probe: z,
-        area: z,
-        area_probe: z,
-    }
-}
-
 /// A blocking HTTP/1.1 GET of `/admin/snapshot`, parsed and judged by a Tier-A predicate (no brittle
-/// substring match): the single-shard `cluster_bootstrapped` OR, in a multi-shard cluster, the STRICT
-/// all-realms-present [`AdminSnapshot::realms_present`] gate over [`expected_realms`].
+/// substring match): ONE rule for every shape — [`AdminSnapshot::realms_present`] over
+/// [`roster_realms`], the realms this shape pre-books (derived from THE world, never an inline
+/// `System(…)` — the old Single `cluster_bootstrapped` special case is folded in, since Single's
+/// roster is exactly its home realm). A DEMAND cluster pre-books NOTHING, so its roster is EMPTY and
+/// `realms_present` is vacuously true the moment the snapshot parses — readiness is "the orchestrator
+/// is UP and serving"; a client login spawns the first world (proven by rlm_demand_login).
 fn admin_ready(admin_port: u16, shape: ClusterShape) -> bool {
     let Some(body) = admin_get_body(
         loopback(admin_port),
@@ -512,18 +403,7 @@ fn admin_ready(admin_port: u16, shape: ClusterShape) -> bool {
     let Ok(snap) = serde_json::from_str::<AdminSnapshot>(&body) else {
         return false;
     };
-    match shape {
-        ClusterShape::Single => snap.cluster_bootstrapped(),
-        ClusterShape::Dual | ClusterShape::Triple | ClusterShape::Forest => {
-            snap.realms_present(&expected_realms(shape))
-        }
-        // RLM demand-walk (VU): a demand cluster has NO static realm to wait for — its worlds spin up later, on
-        // login/AoI demand, so `cluster_bootstrapped` (a shard holds a realm) would NEVER become true and `up
-        // --demand` would hang. Readiness is instead just "the orchestrator is UP and serving" — we only reach
-        // this arm once its /admin/snapshot parsed, so it is accepting logins; a client login spawns the first
-        // world (proven by rlm_demand_login).
-        ClusterShape::Demand => true,
-    }
+    snap.realms_present(&roster_realms(shape, &DEV))
 }
 
 /// Reap every realm shard the orchestrator forked, named by the durable launch ledger this cluster wrote.
@@ -629,9 +509,9 @@ fn status(ports: SlotPorts, work: &Path) -> Result<(), String> {
     }
     let pids = read_pids(work).unwrap_or_default();
     let live = pids.iter().filter(|p| vd_bins::pid_alive(**p)).count();
-    // `status` reports the base bootstrap signal (any shard granted a realm) — it does not re-derive the
-    // shape (the pid count already reflects 3 vs 4 vs 5 nodes; a multi-shard cluster shows the base signal
-    // once the source grants).
+    // `status` reports the base bootstrap signal (the home realm granted) — it does not re-derive the
+    // shape (the pid count already reflects 3 vs 4 vs 6 nodes; a multi-shard cluster shows the base
+    // signal once the home shard grants).
     let ready = admin_ready(ports.admin, ClusterShape::Single);
     println!(
         "dev-cluster: {live}/{} node processes alive; admin {} => {}",

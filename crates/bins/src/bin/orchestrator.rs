@@ -357,13 +357,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             directory,
             saga,
             liveness,
-            // Track R / 1d.2: the D-37 re-home roster is the routable-shard SET from VD_ROSTER (parsed by
-            // the EXISTING `EnvConfig::node_list`), each an empty/stub `ShardProfile` (a P3 bare-point
-            // subject's `CapRequest::default()` ⇒ the empty profile satisfies). Absent VD_ROSTER ⇒ empty
-            // (a re-home parks; a single-shard `up` stays byte-identical). NOTE: `select_rehome_target` is
-            // realm-BLIND (it picks the lowest live capable NodeId) — a D-37 concern, NOT the crossing,
-            // which resolves via `head(Realm(to_realm))` (HR3-clean, roster-independent). SCOPE (M-2): this
-            // local playground is 2-shard; the N-entry k3d roster is ledgered to cloud #123 in DEFERRED.md.
+            // Track R / 1d.2: the D-37 capability roster from VD_ROSTER (parsed by the EXISTING
+            // `EnvConfig::node_list`), each an empty/stub `ShardProfile`. Since the Stage-C fix the
+            // roster is a CAPABILITY CHECK only — the re-home target itself is the live directory
+            // owner of the stashed pose's realm (`select_rehome_target`), never a roster pick, so an
+            // absent VD_ROSTER no longer changes who is chosen (a node without a profile is accepted
+            // on the strength of hosting the realm). SCOPE (M-2): this local playground is 2-shard;
+            // the N-entry k3d roster is ledgered to cloud #123 in DEFERRED.md.
             roster: {
                 let mut roster = std::collections::BTreeMap::new();
                 for node in env.node_list("VD_ROSTER").unwrap_or_default() {

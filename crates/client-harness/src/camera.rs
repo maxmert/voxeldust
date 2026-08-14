@@ -167,19 +167,38 @@ const FIT_VIEW_DIR: DVec3 = DVec3::new(0.3, -0.35, -0.887);
 
 /// Fit a [`CaptureCamera`] of pixel size `width`×`height` to the WHOLE scene: frame the union of
 /// every box's center ± its extent so all boxes land in the readback. Returns `None` for an empty
-/// scene (nothing to frame) or a degenerate viewport (zero-size). The eye sits back along
-/// [`FIT_VIEW_DIR`] far enough that the union's bounding sphere fits [`FIT_FOV_Y`] (× [`FIT_MARGIN`]),
-/// looking at the union center. Pure + deterministic — the box render camera the pixel proof uses.
+/// scene (nothing to frame) or a degenerate viewport (zero-size). Pure + deterministic — the box
+/// render camera the pixel proof uses. A straight-line delegate: [`scene_bounds`] →
+/// [`fit_camera_to_bounds`] (both guards live in the delegates; nothing branches here beyond the
+/// bounds `?`).
 #[must_use]
 pub fn fit_camera_to_scene(
     scene: &RealmScene,
     width: usize,
     height: usize,
 ) -> Option<CaptureCamera> {
+    let (center, radius) = scene_bounds(scene)?;
+    fit_camera_to_bounds(center, radius, width, height)
+}
+
+/// Fit a [`CaptureCamera`] of pixel size `width`×`height` to a bounding SPHERE (`center`,
+/// `radius`) — the extracted framing core `fit_camera_to_scene` delegates to. Returns `None` for a
+/// degenerate viewport (zero-size). The eye sits back along [`FIT_VIEW_DIR`] far enough that the
+/// sphere fits [`FIT_FOV_Y`] (× [`FIT_MARGIN`]), looking at `center`. EXPOSED so a process gate can
+/// reconstruct the client's ACTUAL live camera from the client's own reported drawn boxes (their
+/// live union bounds), instead of fitting its own camera over a static file — the two cameras drift
+/// the moment a drawn box moves (an orbiting planet), and rectangles projected through the wrong
+/// camera prove nothing.
+#[must_use]
+pub fn fit_camera_to_bounds(
+    center: DVec3,
+    radius: f64,
+    width: usize,
+    height: usize,
+) -> Option<CaptureCamera> {
     if width == 0 || height == 0 {
         return None;
     }
-    let (center, radius) = scene_bounds(scene)?;
     // Distance so the bounding sphere of `radius` subtends at most the vertical FOV: the half-angle
     // is fov_y/2, so `sin(half) = radius / dist` ⇒ `dist = radius / sin(half)`, padded by the
     // margin and floored so a single tiny (or zero-radius) box is still viewed from a sane range.
@@ -198,19 +217,19 @@ pub fn fit_camera_to_scene(
     })
 }
 
-/// The union bounding sphere of every box in the scene: its center (the midpoint of the union AABB)
-/// and radius (half the AABB diagonal, so the whole union fits). `None` for an empty scene. A
-/// monomorphic helper — the per-box extent branch lives here, off `fit_camera_to_scene`.
-fn scene_bounds(scene: &RealmScene) -> Option<(DVec3, f64)> {
+/// The union bounding sphere over `(center, per-axis half-extent)` items: its center (the midpoint
+/// of the union AABB) and radius (half the AABB diagonal, so the whole union fits). `None` for an
+/// empty iterator — the empty guard lives HERE (moved from the old `scene_bounds` body, not
+/// duplicated). EXPOSED beside [`fit_camera_to_bounds`] so a gate can union the client's reported
+/// live box centres (zipped with their world extents) exactly as the renderer's per-frame refit
+/// unions its drawn scene.
+#[must_use]
+pub fn bounds_union(items: impl Iterator<Item = (DVec3, DVec3)>) -> Option<(DVec3, f64)> {
     let mut min = DVec3::splat(f64::INFINITY);
     let mut max = DVec3::splat(f64::NEG_INFINITY);
     let mut any = false;
-    for (_realm, rbox) in scene.iter() {
+    for (c, extent) in items {
         any = true;
-        let extent = box_extent(rbox.shape);
-        // Frame the camera over DRAWN centres — the renderer draws in reduced space, so bounding
-        // raw absolutes would aim the capture camera somewhere nothing is.
-        let c = rbox.draw_center();
         min = min.min(c - extent);
         max = max.max(c + extent);
     }
@@ -220,6 +239,18 @@ fn scene_bounds(scene: &RealmScene) -> Option<(DVec3, f64)> {
     let center = (min + max) * 0.5;
     let radius = (max - min).length() * 0.5;
     Some((center, radius))
+}
+
+/// The union bounding sphere of every box in the scene — [`bounds_union`] over the boxes' DRAWN
+/// centres ± extents. A straight-line delegate: the renderer draws in reduced space, so bounding
+/// raw absolutes would aim the capture camera somewhere nothing is; the per-box extent branch is
+/// [`box_extent`]'s.
+fn scene_bounds(scene: &RealmScene) -> Option<(DVec3, f64)> {
+    bounds_union(
+        scene
+            .iter()
+            .map(|(_realm, rbox)| (rbox.draw_center(), box_extent(rbox.shape))),
+    )
 }
 
 /// A box's per-axis half-extent: a sphere is `r` on every axis; a box is its `half`. A monomorphic
@@ -539,5 +570,60 @@ mod tests {
         assert!(radius.is_finite());
         // The empty-scene None arm.
         assert_eq!(scene_bounds(&RealmScene::default()), None);
+    }
+
+    // ---- the extracted framing core (fit_camera_to_bounds + bounds_union), directly ------------
+
+    #[test]
+    fn fit_camera_to_bounds_frames_the_sphere_and_refuses_a_degenerate_viewport() {
+        // DIRECT (not via the scene delegate): the sphere's center lands at the viewport center and
+        // its ±radius extremes project on-screen — the fit distance actually fits the sphere.
+        let (w, h) = (128usize, 96usize);
+        let center = DVec3::new(10.0, -20.0, 30.0);
+        let radius = 75.0;
+        let cam = fit_camera_to_bounds(center, radius, w, h).expect("frames");
+        assert_eq!(cam.target, center);
+        assert_eq!(cam.fov_y, FIT_FOV_Y);
+        assert_eq!((cam.width, cam.height), (w, h));
+        let p = cam.project_point(center).expect("center projects");
+        assert!((p.x - w as f64 / 2.0).abs() < 1e-6, "center x {}", p.x);
+        assert!((p.y - h as f64 / 2.0).abs() < 1e-6, "center y {}", p.y);
+        for offset in [
+            DVec3::X,
+            DVec3::Y,
+            DVec3::Z,
+            -DVec3::X,
+            -DVec3::Y,
+            -DVec3::Z,
+        ] {
+            let q = cam
+                .project_point(center + offset * radius)
+                .expect("extreme projects (in front)");
+            assert!((0.0..=w as f64).contains(&q.x), "extreme x {} (w={w})", q.x);
+            assert!((0.0..=h as f64).contains(&q.y), "extreme y {} (h={h})", q.y);
+        }
+        // The MOVED zero-dimension guard (it lives here now, not in the scene delegate).
+        assert_eq!(fit_camera_to_bounds(center, radius, 0, h), None);
+        assert_eq!(fit_camera_to_bounds(center, radius, w, 0), None);
+    }
+
+    #[test]
+    fn bounds_union_spans_every_item_and_an_empty_iterator_is_none() {
+        // DIRECT (a Vec iterator — its own monomorphization, both arms): two items whose union AABB
+        // spans x from -110 (sphere-like splat extent) to +120 (box far corner) ⇒ center x = 5, and
+        // the radius is half the union diagonal.
+        let items = vec![
+            (DVec3::new(-100.0, 0.0, 0.0), DVec3::splat(10.0)),
+            (DVec3::new(100.0, 0.0, 0.0), DVec3::new(20.0, 5.0, 5.0)),
+        ];
+        let (center, radius) = bounds_union(items.into_iter()).expect("bounds");
+        assert!((center.x - 5.0).abs() < 1e-9, "center x {}", center.x);
+        let expected_radius = DVec3::new(230.0, 20.0, 20.0).length() * 0.5;
+        assert!(
+            (radius - expected_radius).abs() < 1e-9,
+            "radius {radius} vs {expected_radius}"
+        );
+        // The MOVED empty guard (it lives here now, not in the scene walk).
+        assert_eq!(bounds_union(Vec::new().into_iter()), None);
     }
 }

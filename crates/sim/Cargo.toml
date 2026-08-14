@@ -16,6 +16,8 @@ bevy_ecs = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# DEV-ONLY, deliberately (SL4): fixtures plant real motion; the shipped crate cannot name one.
+vd-physics = { workspace = true }
 proptest = { workspace = true }
 # HR5: unit tests install a TRACE sink so every tracing macro's lazy field closure
 # EVALUATES on the paths the tests already drive — without it the closures are dead

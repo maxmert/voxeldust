@@ -1215,7 +1215,7 @@ mod tests {
     #[test]
     fn a_static_shape_and_a_streamed_pose_agree_on_the_unit_only_because_every_drawn_realm_is_one_tier()
      {
-        let regions = vd_core::worldgen::realm_regions_for(0);
+        let regions = vd_physics::worldgen::realm_regions_for(0);
         let scene = RealmScene::from_regions(&regions).expect("the seed forest projects");
         assert!(!scene.is_empty(), "a vacuous scene would assert nothing");
         for (realm, rbox) in scene.iter() {
@@ -1383,7 +1383,7 @@ mod tests {
         // System 7/8 (r=40), Planet 7 (r=10), Station 7 (half=5), Area 7 (half=3) — AND the Galaxy (r=180)
         // as the CONTAINING box around the systems, so an entity in the between-space is visibly still
         // inside a realm (never orphaned). Only the ~unbounded Universe (r=1e9) is SKIPPED (extent > thresh).
-        let regions = vd_core::worldgen::realm_regions_for(0);
+        let regions = vd_physics::worldgen::realm_regions_for(0);
         let scene = RealmScene::from_regions(&regions).expect("the seed forest projects");
         // The finite renderable realms are present.
         assert!(scene.get(RealmId::System(7)).is_some(), "System 7 renders");
@@ -1477,7 +1477,7 @@ mod tests {
         // The playground `--realm-boxes` single-source: the seed forest serialized to `regions.json` loads
         // to the byte-identical scene `from_regions` builds directly — the client draws EXACTLY the sim's
         // containment geometry.
-        let regions = vd_core::worldgen::realm_regions_for(0);
+        let regions = vd_physics::worldgen::realm_regions_for(0);
         let json = serde_json::to_string(&regions).expect("serialize regions");
         let from_json = RealmScene::from_regions_json(&json).expect("loads");
         let from_vec = RealmScene::from_regions(&regions).expect("projects");
@@ -1506,7 +1506,7 @@ mod tests {
     fn from_regions_rejects_a_duplicate_realm_in_the_forest() {
         // A duplicate realm in the forest is a generator bug — rejected LOUD (not silently keeping the
         // first). Covers the DuplicateRealm arm of from_regions.
-        let mut regions = vd_core::worldgen::realm_regions_for(0);
+        let mut regions = vd_physics::worldgen::realm_regions_for(0);
         let dup = *regions.first().expect("non-empty forest");
         regions.push(dup);
         let err = RealmScene::from_regions(&regions).expect_err("a duplicate realm must reject");
@@ -1520,7 +1520,7 @@ mod tests {
         // pass-1's DuplicateRealm, which returns BEFORE the depth walk). Mutate the seed forest so
         // System 7 ⇄ System 8 (both finite, r=40) point at each other: no duplicate (pass 1 is clean), so
         // the cycle is caught only in the depth walk of a renderable region — exactly the `?` under test.
-        let mut regions = vd_core::worldgen::realm_regions_for(0);
+        let mut regions = vd_physics::worldgen::realm_regions_for(0);
         regions
             .iter_mut()
             .find(|r| r.realm == RealmId::System(7))

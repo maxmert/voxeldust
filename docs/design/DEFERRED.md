@@ -265,10 +265,15 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
     periodic entity-head self-fence on a held Owned dot whose `Entity` directory head advanced past its held fence.
     2c-UNREACHABLE (it requires the in-place resurrection the harness lacks; the dead-aware oracle excludes the
     corpse), so a sound deferral — the `re_home_without_realm` path is where the entity-head twin would attach.
-  - **The PROD roster is EMPTY:** `crates/bins/src/bin/orchestrator.rs` leaves `OrchestratorConfig.roster` empty (no
-    per-shard-profile config knob wired — no-unilateral-deps; P3 is harness-driven). A prod re-home PARKS
-    (`select_rehome_target` → None) until that config lands. The in-process cluster builds its own roster, so the
-    crash-matrix proof is unaffected.
+  - **~~The PROD roster is EMPTY~~ STALE, corrected by the Stage-C audit (2026-08-14):** the prod
+    orchestrator has filled its roster from `VD_ROSTER` (empty profiles) since Track R/1d.2, so the
+    old "a prod re-home PARKS" safety argument was FALSE — the selection was live and REALM-BLIND
+    (the audit's HR3 critical). ★FIXED: `select_rehome_target` now takes ONLY the live directory
+    owner of the stashed pose's own realm (the one node whose `place_arriving_pose` accepts the
+    frame; usually the source, or whoever the realm re-homed to) — no roster fallback exists; no
+    placeable owner ⇒ PARK (honest red, re-resolved each scan fire). The pose-less STANDING re-home
+    parks at the DEAD owner (no pose ⇒ nothing placeable to name) with the key locked; the Slice-4
+    adopt must select pose-aware when the checkpoint pose lands.
   - **The D-36 starved-watermark park after re-home:** the re-homed entity at a fresh target has no gateway sub
     delivering frames, so `DeliveredToObservers` may starve and the saga parks in `Promoting` (never Done). The entity
     IS recovered (directory + held-set), so the cell end-state holds; the client-input re-route to the new target is
@@ -2953,12 +2958,26 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 - **Source:** whole-codebase audits `wf_43fea0dd` (CAF-2) + `wwg7ydm9y` (CAF-NEW-1, stale stack removed).
 
 ### D-44 🟧 N-shard roster generalization for the k3d deploy (Track R / 1d.2 M-2 scope split) — 3-shard PROCESS cluster + acceptance capstone LANDED (S5b); the fully-GENERIC `Vec`-of-N still owed for k3d StatefulSet ordinals
+- **⚠ AMENDED (2026-08-14, THE-world cluster arc — see D-WORLD-1..9 below):** `ClusterShape` is now
+  `Single | Dual | Chain | Demand`, and every pre-booked realm DERIVES from `world_roster` (the one
+  derivation point) — never a named const. `Planet(7)`/`Station(7)`/`Area(7)`/`System(8)` named realms
+  THE world does not contain, so the six-shard `Forest` could never boot: four of its shards died at
+  `guard_regions_nest` (0 ambient roots) and stayed invisible because bring-up never polled
+  `Cluster::first_exited` (D-WORLD-7/8). The `Vec`-of-N k3d generalization below is UNCHANGED and still
+  owed — and now SMALLER, because `realm_shards(shape, addrs, p)` already returns a `Vec<RealmShard>`
+  that is a function of the world. The station/area addr + `DevPortScheme` slots stay RESERVED and
+  unused, retired with that work (no Tier-A port renumbering). Read the present-tense "PROVEN" claims
+  below through this amendment: they describe clusters that no longer exist, kept as history.
 - **Landed (Track R / 1d.2 Batch A):** the LOCAL 2-process dual-shard crossing playground — a single extra
   DEST shard (`SHARD_B = NodeId(4)`, realm `DEV.realm_seed_b`) wired as a clean 2-shard extension: the
   `--dual` launcher flag, `shard_b_env`, `ClusterAddrs.shard_b`, `DevPortScheme` `SHARD_B_OFFSET`/
   `PROBE_SHARD_B_OFFSET`, the gateway `VD_KNOWN_SHARDS` union + orchestrator `VD_ROSTER`, and the C1
-  both-realms readiness gate (`AdminSnapshot::realms_present`). PROVEN by
-  `crates/bins/tests/dual_cluster_crossing_smoke.rs` (a real dot re-homes SOURCE→DEST over process QUIC).
+  both-realms readiness gate (`AdminSnapshot::realms_present`). ~~PROVEN by
+  `crates/bins/tests/dual_cluster_crossing_smoke.rs` (a real dot re-homes SOURCE→DEST over process QUIC).~~
+  **⚠ CORRECTED (D-WORLD-8, 2026-08-14):** that proof stood on an INJECTED born-inside boundary file
+  whose geometry existed in no world, and the gate later sat RED for the one D-WORLD-8 cause (a cluster
+  naming realms THE world does not contain). The smoke is REWRITTEN on THE world's own 150 m home shell
+  (Dual, zero injection) and is green there — the sentence stays as history of what the old green meant.
 - **Landed (S5b, 2026-07-18) — the 3-shard PROCESS cluster + acceptance capstone:** the `--triple` launcher
   mode adds the GALAXY between-space shard (`GALAXY = NodeId(5)`, realm `System(GALAXY_SEED=1)`) as a THIRD
   stub shard, so a durable dot walks the FULL seed-forest chain `System 7 → Galaxy → System 8` and back over
@@ -2991,10 +3010,15 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   (before this a shard could only host `System(seed)`; the frame comes from the seed forest region). Added the
   `PLANET_A/STATION_A/AREA_A_SHARD` node consts, six `ClusterAddrs` fields + six `DevPortScheme` offsets
   (`RESERVED_NODE_PORTS` 11→17), `realm_shard_env` (twin of `shard_b_env`/`galaxy_env`), the `--forest` launcher
-  flag + all-six-realms readiness gate, and re-pointed `scripts/crossing-playground.sh` to `--forest`. PROVEN by
+  flag + all-six-realms readiness gate, and re-pointed `scripts/crossing-playground.sh` to `--forest`. ~~PROVEN by
   `crates/bins/tests/node_per_realm_walk.rs` (a REAL durable player, `WalkTo`-driven over process QUIC, walks
   System 7 → Planet 7 → Area 7 → Planet 7 → System 7 → Galaxy → System 8: every leg ARRIVES with no freeze, and
-  the subject Entity's directory fence stays ≤ 12 — one clean commit per crossing, no thrash). The `Dual`/`Triple`
+  the subject Entity's directory fence stays ≤ 12 — one clean commit per crossing, no thrash).~~
+  **⚠ CORRECTED (D-WORLD-7, 2026-08-14): the walk was structurally unrunnable AND inert.** Four of the
+  six Forest shards named realms THE world does not contain and died at boot — invisibly, because the
+  gate never polled `Cluster::first_exited` — and EVERY leg target (x = 15/25/35/65) sat INSIDE THE
+  world's 150 m home shell, so the green run crossed nothing. The gate is REWRITTEN on the Chain shapes
+  (see D-WORLD-7); this paragraph stays as the record of what the old green claimed. The `Dual`/`Triple`
   co-hosting shapes are KEPT unchanged (their `extra_realm_shards` is empty — byte-identical). This REPLACES the
   old `cohosted_input_freeze_repro.rs` (which reproduced the co-hosting FREEZE the source==dest patches tried to
   cure; those two sim-level patches were REVERTED — node-per-realm makes them unnecessary).
@@ -3377,7 +3401,7 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **C-4** the moving-container reverse-cross bound: `k_dwell ≥ commit-latency` is enforceable only at P3 (in-proc 1-tick commit); the cross-host bound (the redelivering transport's ack window) is LEDGERED to P6/P7 — do NOT claim a `debug_assert` forecloses it. Reverse-cross stability rests on (band dead-zone)+(per-entity `Occupied` serialization)+(fresh-state dest self-heal), NOT the cooldown (which does not survive the ownership handoff).
 - **C-5 🟩 LANDED:** `vd_core::geometry::guard_regions_nest(regions, max)` boot validator (exactly one `parent:None` root, unique `.realm`, parents resolve, no cycles, count ≤ `MAX_REGIONS`=64), each reject arm `expect_err`-tested. The detector's defensive rootless no-op stays covered by `a_rootless_region_forest_is_a_safe_no_op`.
 - **C-6 🟩 LANDED (worldgen forest):** `vd_core::worldgen::{realm_regions_for(seed), realm_neighbourhood_for(seed, hosted_realm), MAX_RENDERABLE_EXTENT_M}` — the WALK-scale Universe⊃Galaxy⊃{System 7⊃Planet 7, System 8} forest; `realm_neighbourhood_for` returns own+ancestors+owned-children, **NEVER siblings** (System 7 shard → {Universe,Galaxy,System 7,Planet 7}; Galaxy shard → {Universe,Galaxy,System 7,System 8}; System 8 shard → {Universe,Galaxy,System 8}). The CORRECTED sibling-routing model: a sibling crossing routes THROUGH the shared Galaxy parent (leave System 7 → land in the Galaxy ancestor; the Galaxy shard, owning both systems as children, sees the entry into System 8), so no shard needs a sibling in its scan.
-- **C-6b 🟩 LANDED (bins BOOT LIVE + client render single-source):** `shard.rs` now computes the seed neighbourhood from `VD_UNIVERSE_SEED` (default 0) via `realm_neighbourhood_for`, fences it with `guard_regions_nest` (fail-LOUD at boot), and plants it — **the containment detector is LIVE in prod** (no longer inert). The INTERIM `regions_for_source_plant` adapter is REMOVED (renamed `override_regions_for_boundaries` — see the RETAINED-OVERRIDE note); `resolve_realm_boundaries`/`VD_REALM_BOUNDARIES` are RETAINED as an OPTIONAL OVERRIDE that plants an authored born-inside CHILD crossing shell, so the process-tier `dual_cluster_crossing_smoke` / `render_crossing_smoke` still prove a DIRECT source→dest re-home over real binaries WITHOUT standing up a Galaxy shard. Client render: `RealmScene::from_regions(&[RealmRegion])` + `from_regions_json` project the FINITE renderable regions (`Boundary::finite_extent() <= MAX_RENDERABLE_EXTENT_M` — draw System 7/8/Planet 7, SKIP the ambient Galaxy/Universe shells), single-sourced with the shard via `vd_bins::crossing_playground::write_seed_regions`; the client `--realm-boxes` tries `from_regions_json` first, falls back to the legacy `from_boxes_json` override.
+- **C-6b 🟩 LANDED (bins BOOT LIVE + client render single-source):** `shard.rs` now computes the seed neighbourhood from `VD_UNIVERSE_SEED` (default 0) via `realm_neighbourhood_for`, fences it with `guard_regions_nest` (fail-LOUD at boot), and plants it — **the containment detector is LIVE in prod** (no longer inert). ~~The INTERIM `regions_for_source_plant` adapter is REMOVED (renamed `override_regions_for_boundaries` — see the RETAINED-OVERRIDE note); `resolve_realm_boundaries`/`VD_REALM_BOUNDARIES` are RETAINED as an OPTIONAL OVERRIDE that plants an authored born-inside CHILD crossing shell, so the process-tier `dual_cluster_crossing_smoke` / `render_crossing_smoke` still prove a DIRECT source→dest re-home over real binaries WITHOUT standing up a Galaxy shard.~~ **⚠ AMENDED (2026-08-14, SL5 sweep — D-WORLD-4):** the RETAINED-OVERRIDE decision is REVERSED and the whole override family is DELETED — the boundary-file env substitution in `shard.rs`, `resolve_realm_boundaries`/`RealmBoundariesError`/`parse_realm_boundaries`/`guard_boundaries_in_realm`, `override_regions_for_boundaries`/`override_containment_band`, `source_crossing_boundaries`/`write_source_boundaries`/`resolve_source_boundaries` + the launcher injection, the `crossing_playground` module (box consts/trigger/scene/`write_fixtures`) + `emit-crossing-fixtures`, `write_seed_regions` + `emit-seed-fixtures`, and `write_visual_regions` + `emit-visual-fixtures`. Its "single-sourced with the client's `--realm-boxes`" claim was the exact mechanism by which a Dual cluster simulated a 150 m star system while drawing an authored 40 m one. The crossing smokes now fly THE world's own home shell (Dual, zero injection), and the ONE emitter is `write_world_regions` (`emit-world-scene`). Client render: `RealmScene::from_regions(&[RealmRegion])` + `from_regions_json` project the FINITE renderable regions (`Boundary::finite_extent() <= MAX_RENDERABLE_EXTENT_M` — SKIP the ambient Galaxy/Universe shells), single-sourced with the shard via `vd_bins::write_world_regions`; the client `--realm-boxes` tries `from_regions_json` first, falls back to the legacy `from_boxes_json` reader (still exercised by unit fixtures).
 - **C-6c 🟩 LANDED (3-shard round-trip gate):** `tests/tests/three_shard_round_trip_e2e.rs` — a REAL 3-shard harness cluster (orchestrator + gateway + System 7 + **Galaxy** (`System(1)`, granted so `head(Realm(Galaxy))` resolves) + System 8), each shard planted with its seed neighbourhood, drives a subject origin→50→100→50→origin and asserts the AUTHORITATIVE HOLDER flips through the FULL chain **BOTH WAYS**: System 7 → Galaxy → System 8 → Galaxy → System 7 (the RETURN legs 8→Galaxy→7 are the reverse-cross proof). Each leg is a REAL autonomous saga-driven re-home (zero `trigger_transfer`). Plus sim unit tests `stub::tests::{symmetric_recross_resolves_the_full_container_sequence_both_ways, escape_soi_lands_in_the_immediate_parent_not_a_skipped_ancestor}` assert the `container()` sequence (not the emitted `to_realm`). **TIER + SUBJECT honesty:** the gate runs at the HARNESS tier (the process cluster machinery is fixed source/dest → N-shard process roster is D-44) with a TRANSIENT subject asserting `owned_transients` (the HR2 ownership head — a transient has no directory `OwnerRecord`). A DURABLE dot's DIRECTORY Entity-head multi-hop was BLOCKED at the harness tier (a `Cutting`→`CutTimeout` on the 2nd hop) — **RETIRED by S3 (server-timed cut, see below)**; NO session-route migration was needed (the gateway `store_commit` already re-routes on the current authority per hop — the only stall was the saga's dependency on a CLIENT `CUT_MARKER`). A FRESH transient per leg avoids the static-`Fence(1)` batch-id collision (`crossing_transfer_id(entity, src_realm_fence, 0)` re-mints a colliding id when the SAME entity re-visits a shard; production fences ADVANCE per re-home). **OWED at the process tier (D-44):** the 3-shard PROCESS cluster (roster generalization).
 - **S3 🟩 LANDED (server-timed cut — durable MULTI-HOP round-trip):** the transfer cut is now driven ENTIRELY server-side — the gateway `apply_request_cut` SELF-ACKS `CutConfirmed` (no client wait) and `apply_freeze` derives the input-cut seq from its OWN `last_input_seq` high-water at cut-INSTALL time (the leak-free partition point; the client `CUT_MARKER` / `on_cut_marker` observer is DELETED as inert). This retires the durable-multi-hop `CutTimeout`: on hop 2+ the client's session stays bound to the FIRST shard's port, so its marker never reached the current authority's saga — the old marker-driven `Cutting` starved into abort. GATE: `tests/tests/three_shard_round_trip_durable_e2e.rs` — a REAL DURABLE player (a logged-in avatar whose directory `Entity` head + fence ADVANCE per commit, NOT a transient) driven origin→50→100→50→origin, asserting `head(Entity(subject))` flips System 7 → Galaxy → System 8 → Galaxy → System 7 (both ways) with ZERO CutTimeouts / aborts and the fence advancing across four commits. Anti-vacuity PROVEN: reverting the self-ack fails the gate (the saga parks pre-`Freezing`, head stuck on System 7). Input-conservation preserved: D-28 (`p2_transfer_gates`) now checks the SERVER-derived cut = the source's actual last-applied seq (no leak, no double-apply), for ANY client behaviour (no client pause relied on).
 - **S2+S4+S6 🟩 LANDED (2026-07-18) — PURE-RENDERER, NODE-AGNOSTIC CLIENT:** the client no longer learns which node owns any entity. **S2 (wire, minor 1→2):** appended `ServerControlMsg::OwnEntity{entity}` (the own-avatar cue by `EntityId` ALONE — no sub/node) + the reliable `EventMsg::EntityRemoved{entity}` de-owned-copy eviction arm; additive roundtrip tests, `PROTO_MINOR=2`. **S4 (gateway):** `announce_own_entity` emits `OwnEntity` on `negotiated_minor >= 2` ALONGSIDE `AuthorityChanged` (kept for old minor<2 clients) at session-attach + the dest re-point; a minor-2 client reads `OwnEntity` and IGNORES `AuthorityChanged`/`RequestCut`. **S6 (client collapse):** `DeliveredView.tracks` re-keyed `(SubId,EntityId)`→`EntityId` (ONE track per entity, latest-wins via `EntityTrack::observe`'s frame-collapse — a cross-realm re-home flips the frame node-agnostically); DELETED `authoritative_sub`/`set_authority`/`chosen_subs` + the client `cut_marker_armed` stamp + the `RequestCut`/`AuthorityChanged` handlers; ADDED `set_own_entity`/`remove_entity` + the `OwnEntity` handler. `held_subs` STAYS a SET (multi-realm AoI). Three consumers migrated in lockstep (real client `net.rs`, harness `ScriptedClient`, `bins/tests/process_parity.rs`); `devproto DevEntityRow.authoritative_sub` kept as an INERT constant (`vd_client::view::RENDERED_SUB`=0) for decode compat. `p2_transfer_gates` crossing gate re-proves the crossing as the rendered REALM-FRAME flip (System 7→8), the old two-holder sub-overlap anti-vacuity deleted (the client folds both subs into one EntityId track); `client-harness::crossing_was_real` repurposed to "a delivered track exists".
@@ -3791,24 +3815,24 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 ### D-19 🟥 SPIKE-6a (rapier snapshot/restore + cross-binary determinism) blocks P5; SPIKE-10a (dual-frame ship-interior physics) blocks P8.
 - **Source:** `PLAN.md` SPIKE list.
 
-### D-FO-7 🟥 The realm feed has NO widening for a STATIC realm under a MOVING parent (floating-origin A4c)
-- **What's missing:** the server-authoritative realm feed (`authored_realm_snaps`, `crates/sim/src/stub.rs`)
-  ships only the **movers-only** rows and composes each to absolute; a *static* child rides its frame-local
-  `center`, never a per-tick absolute. That is correct only while no static realm hangs under a **moving**
-  ancestor (which would ride the parent's orbit the center cannot express). A4c **rejects** the S2/S3
-  `authors_live = moving | self_abs_varies` widening: the realm lane has **no AoI cull** (`emit_realm_frames`
-  ships all authored movers), so making every direct child of an orbiting realm ship per tick re-introduces
-  the O(children×tick) fan-out cliff `[FIX B-D3]` exists to prevent (a planet with 1000 stations → ~2 MB/s
-  per client, ~80 datagrams/tick against `CONSERVATIVE_DATAGRAM_BUDGET`).
-- **Where:** `authored_realm_snaps` / the movers-only filter, `crates/sim/src/stub.rs`; the tripwire is
-  `worldgen::tests::d_fo_7_no_static_region_sits_under_a_varying_ancestor_chain` (`crates/core/src/worldgen.rs`),
-  which asserts no CURRENT forest produces a static region under a varying ancestor chain.
-- **When:** the case does not exist through P4 — `generate_system_forest` gives orbiting planets no children.
-  The tripwire fails the day **P4** first hangs a station under an orbiting planet; at that point take the
-  **decision**: parent authors per-tick rows behind a realm-lane AoI cull, **vs** the child shard authors its
-  own box row (the DRY, SCALE-safe option). Discharged when the decision lands with the first moving-parent
-  containment forest.
-- **Source:** floating-origin server-authoritative rework, slice A4c (`scratchpad/fo_server_plan.md`).
+### D-FO-7 🟧 The MOVERS-ONLY realm-feed filter is DELETED (SL4/owner Q3); the realm-lane SCALE decision is the owed half
+- **What changed (the placement arc S3, 2026-08-14):** the movers-only filter on `authored_realm_snaps`
+  was the last surviving rival "does this child have an orbit?" test (audit finding 25 / the owner's Q3
+  ruling: *"'Movers only' is not available — it cannot be expressed without a motion test on the read
+  path"*). It is DELETED: the feed ships EVERY direct child's authored row per tick, static and moving
+  alike, level-triggered on the latest-wins lane (a lost datagram or a late joiner self-heals next
+  tick — send-on-change over an UNRELIABLE lane would starve both, which is why the plan's
+  per-observer-baseline variant did not land).
+- **What's still owed (the SCALE half A4c named, unchanged):** the realm lane has no AoI cull, so a
+  parent with MANY static children pays O(children×tick) fan-out — tolerable at THE world's tens of
+  rows, a cliff at a planet with 1000 stations. At **P4** take the decision: a realm-lane AoI cull /
+  send-on-change over a RELIABLE repair path, **vs** the child shard authoring its own box row (the
+  DRY, SCALE-safe option). Send-on-change bandwidth at true scale is UNMEASURED.
+- **Where:** `authored_realm_snaps`, `crates/sim/src/stub.rs`; the moving-parent tripwire
+  `d_fo_7_no_static_region_sits_under_a_varying_ancestor_chain` lives with the generator in
+  `crates/physics/src/worldgen.rs`.
+- **Source:** floating-origin A4c (`scratchpad/fo_server_plan.md`); superseded in part by the placement
+  arc (Stage-C SL4 findings 24-28) and owner Q3.
 
 ### D-GATE-1 🟧 Process-tier port reservation is still TOCTOU outside the test binary, and the tier lock is void under a process-per-test runner
 - **What's missing:** cluster-booting process tests are now serialized AT THE SOURCE by `vd_bins::cluster_tier()`
@@ -3833,3 +3857,173 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   That subsumes gap (2) entirely and makes gap (1) harmless.
 - **Source:** the five-item arc, gate-honesty slice (2026-08-03). RED control recorded before the fix:
   `probe_endpoints` at default parallelism gave 1 passed / 3 failed with shuffling identities.
+
+### D-WORLD-1 🟥 Station and Area crossings are UNPROVEN
+- **What's missing / lost:** the only process-tier exercise of the `AreaLocal{planet,area}` frame
+  (`crates/core/src/pose.rs` — the one frame that REFUSES to form without a parent), the `to_parent`
+  provenance conversion under real processes, and crossing depth 5 → 4. The retired walk fixture claimed
+  these legs; THE world cannot host them.
+- **Why:** `worldgen` has no Station/Area arm at all (`generate_system_forest` authors systems + planets
+  only) — stations are PLAYER-BUILT. The old "proof" stood on dead shards that never booted (they failed
+  `guard_regions_nest` with 0 ambient roots and exited), pinned green only because the walk gate never
+  called `Cluster::first_exited` (D-WORLD-7).
+- **Where pinned:** `world_roster`'s doc-comment (`crates/bins/src/lib.rs`) and the walk gate's header
+  (`crates/bins/tests/node_per_realm_walk.rs`).
+- **When:** the block/station slice that grows THE world; the legs return as `world_roster` entries and
+  Chain legs, not as authored fixtures.
+
+### D-WORLD-2 🟧 A static cluster hosts a SUBSET of THE world; an off-corridor crossing is a PERMANENT STRAND
+- **What:** an occupant steered at a realm no shard hosts is dropped with no reply while its source
+  per-entity latch stays standing ("CROSSING UNRESOLVED", `crates/node/src/saga_runtime.rs`) — a
+  permanent strand, not a soft failure (judge finding J-0).
+- **Why safe as shipped:** every static gate flies the ±Z polar corridor, and `world_roster` ASSERTS the
+  I-AXIS / I-POLE / I-RADIAL margins that make that corridor provably unable to reach an unhosted realm.
+  This FORBIDS free flight on a static cluster — which is why the human playground
+  (`scripts/crossing-playground.sh`) runs `up --demand`, where every realm the pilot approaches spins up.
+- **When it flips green:** when the unresolved-dest drop becomes loud/re-drivable (the D-43 family).
+
+### D-WORLD-3 🟩 The one-hop sibling crossing is RETIRED — it never existed on THE world
+- **What:** `System(7) → System(8)` in one hop came from an authored born-inside shell; THE world's
+  sibling stars are ~12.8 km apart under a shared parent, so the honest path is home → galaxy → sibling
+  (Chain legs A/E in `node_per_realm_walk`).
+- **Do NOT re-add:** a one-hop sibling crossing needs authored geometry, which SL5 forbids.
+
+### D-WORLD-4 🟩 The boundary-file override (`VD_REALM_BOUNDARIES` / `VD_DEVCLUSTER_BOUNDARIES`) is DELETED
+- **What:** the shard's boundary-file substitution, its resolver/error/parser/in-realm guard, the
+  source-shell writer + launcher injection, the two-box crossing playground, and the seed/visual scene
+  emitters — the whole family by which one process could boot geometry the rest of the cluster does not
+  have. Discharges the audit MAJOR on the retained override (:546-552 of the audit); the lib's "nothing
+  can select a different one" claim is true for the first time. ONE emitter remains:
+  `write_world_regions` (`vd-devcluster emit-world-scene`).
+- **Guard:** a grep for the two env keys over `crates/` + `scripts/` returns nothing (live code/scripts;
+  historical design notes under `scripts/*.md` keep their record), and the env-builder tests assert no
+  shape's env carries ANY `*BOUNDARIES*` key.
+
+### D-WORLD-4b 🟧 The shipped containment band is NOT speed-sized — and the only speed-sized band is now gone
+- **What:** `worldgen`'s `BandConfig::build` constructs every shipped band with `v_rel = 0.0` (the
+  velocity widening inert); the deleted `override_containment_band` was the only speed-sized band in the
+  tree. `crates/sim/src/stub.rs`'s containment-site comment claimed the shipped band "is sized from the
+  occupant's SPEED" — FIXED in the same sweep (the comment now states the static edges and names this
+  row), so deleting the override did not launder the audit MINOR (:846).
+- **When:** the velocity-safe widening mechanism is owed at P5 (physics), where relative speeds stop
+  being a configured constant.
+
+### D-WORLD-5 🟧 `generate_walk_forest` lost its last shipped-binary caller but still builds the in-process scenario tier
+- **What:** the hand-placed walk forest no longer reaches any bin (the seed/visual emitters that shipped
+  it to the client are deleted), but `tests/src/lib.rs` (+ the gateway's test fixtures) still build on
+  it — audit MAJOR :512-542, a sibling question to this arc.
+- **Flips green when:** `grep generate_walk_forest crates/` returns nothing outside its definition.
+
+### D-WORLD-6 🟧 Triple/Forest retired into Chain; NO launcher produces `VD_HELD_REALMS`
+- **What:** co-hosting keeps unit coverage only (`parse_held_realms` + the shard-side parse); no shape
+  emits the env. A shape with no consumer is exactly what rotted into the CRITICAL (a cluster naming
+  realms the world does not contain), so the parse is covered but the co-hosting path is declared
+  CONSUMERLESS here rather than left to look alive.
+
+### D-WORLD-7 🟩 CORRECTION — `node_per_realm_walk` was structurally unrunnable AND inert
+- **What it corrects:** the D-44 "PROVEN … System 7 → Planet 7 → Area 7 → Planet 7 → System 7 → Galaxy →
+  System 8" claim (amended in place above). Four of the six Forest shards named realms THE world does not
+  contain and DIED AT BOOT; the gate never polled `Cluster::first_exited`, so the deaths were invisible;
+  and every leg target (x = 15/25/35/65) sat INSIDE THE world's 150 m home shell, so the green run
+  crossed nothing.
+- **The rewrite:** shape Chain (home + galaxy + inner planet + sibling star, every name off
+  `world_roster`), legs C/D/A/E/F on the ±Z polar corridor, every leg asserting the REALM LABEL reached
+  (never a coordinate), `first_exited` polled through bring-up, deadline 300 s, and the observed max
+  entity fence PRINTED per run.
+- **NEW STANDING REQUIREMENT:** every in-test cluster bring-up polls `Cluster::first_exited` — a dead
+  child during bring-up is a loud failure, never a silent absence.
+
+### D-WORLD-8 🟩 CORRECTION — the two pre-arc reds had ONE cause
+- **What it corrects:** `dual_cluster_crossing_smoke` red and `rlm_proc_spawn_smoke` red were BOTH a
+  cluster naming realms THE world does not contain, dying in `guard_regions_nest` with 0 ambient roots
+  (`crates/bins/src/bin/shard.rs`). The D-44 present-tense "PROVEN by dual_cluster_crossing_smoke" and
+  the D-45 C-6b "RETAINED as an OPTIONAL OVERRIDE" texts are amended in place above. The
+  port-band-survivor diagnosis at `docs/design/rehome_one_mechanism.md` ("a SURVIVOR still holding this
+  realm's slot in the RLM port band") is RETRACTED there: that smoke reserves fresh EPHEMERAL loopback
+  ports, never the fixed band.
+- **Standing rule:** a red gate is ledgered with a RED row and an owner decision — never explained away
+  in commit prose.
+
+### D-WORLD-9 🟧 The demand suite's exit gates were a FALSE GREEN, not only a flake
+- **What:** both exit legs in `crates/bins/tests/rlm_demand_login.rs` flew `[220,0,0]` — straight
+  through the orbital annulus (orbit radii ~17–142 m in the near-XY plane) — and broke on ANY label
+  != "System 7", so an in-plane PLANET capture satisfied them.
+- **Fixed (slice 5):** both legs re-aimed at the ±Z polar corridor `(0,0,−220)` (what I-AXIS licenses)
+  through the shared `vd_bins::flight::cross_leg`, ASSERTING the destination label equals the GALAXY's.
+  AMBER, not green: the polar corridor is a fixture discipline, not a product guarantee — an in-plane
+  exit still captures a planet by design (containment doing its job); the row flips green when a gate
+  exists that distinguishes "captured en route" from "arrived" for arbitrary player flight (the demand
+  playground's own AoI/label surface).
+
+### D-PLACE-1 🟩 THE PLACEMENT ARC (Stage-C SL4 critical 24 + majors 25/26/27 + minor 28) — landed 2026-08-14
+- **What landed:** ONE writer (`author_placements`, head of every synced tick) authors per-instant
+  `PlacementBook`s into ONE `PlacementLedger`; every consumer (containment scan, crossing flush/arrival,
+  AoI, scene lanes, realm feed) SELECTS a book by an instant it holds as data and reads rows with NO
+  CLOCK (`vd_core::placement`; `transfer_frame`/`region_signed_distance` are monomorphic over
+  `&PlacementBook`, `FrameError::InstantMismatch` refuses mixed times). The `FrameContext` trait,
+  `LocalFrames`, `IdentityFrames`, `rebind_pose_to_dest`, the `_resolved` twins and `ChildFrame` are
+  DELETED. The four rival has-orbit tests collapsed into the one writer; the fifth (the `v_peri` AoI
+  width) became `Motion::closing_speed_mps` — a scalar handed to boot. `vd-physics` (Tier-A) now holds
+  ALL motion (celestial + `Motion` + the seed generator, split rule: reads-the-seed/mints-a-body moves,
+  reads-`&[RealmRegion]` stays); the crossing path carries NO edge to it —
+  `sl4_the_crossing_path_cannot_name_a_motion` in `tests/tests/crate_isolation.rs`, OBSERVED FAILING
+  with the edge added (2026-08-14). Motion reaches the sim only as opaque injected
+  `vd_core::placement::MotionFn` closures (the sim::io seam discipline) — a deviation from the plan's
+  writer-in-node shape that preserves its structural properties (sim cannot NAME a motion; the reader
+  cannot see time). The flush reads the world of NOW (the B-1 fix; latch→flush gap MEASURED at 1 tick
+  in-process = 0.17 m @50 Hz production against the 1.0 m inset, pinned to 0 by `crossing_e2e`). The
+  boot fence judges movers at APOAPSIS (`ChildReach`; the scalar-only planned form was REFUTED — walk
+  Area A needs box-corner exactness) and THE WORLD'S NUMBERS MOVED (owner lever 1: `ECC_CAP_SIGMAS=4`,
+  compression solved against apoapsis; planet SOI 4.1607→3.954 m with `VISUAL_SOI_GAP_FRACTION`
+  0.35→0.372 preserving the pinned visible-from-anywhere property the plan's arithmetic missed).
+  HR4/G-IDENTICAL: `a_kepler_child_and_a_thrusting_child_cross_by_identical_code` (one fixture, two
+  motions, two shard kinds, identical crossings).
+- **Golden instruments:** `crates/bins/tests/goldens/placement_rows.golden` (bit-for-bit rows through
+  the shipped boot; regenerate ONLY with a stated world-numbers change) + the apoapsis tripwire + the
+  flush-gap tripwire in `one_containment_answer.rs`/`crossing_e2e.rs`.
+
+### D-PLACE-2 🟥 `RealmRegion.center` still stores a position (finding 27's residual; SL1 presence-leak)
+- **What's missing:** the boot fence no longer reads a mover's zeroed centre (it takes the boot's
+  `ChildReach`), but the FIELD survives as the static children's stored position and every shard is
+  still planted with its own row's centre. The plan's full cure — positions living ONLY in authored
+  placement books, statics riding `Motion::Fixed` in the boot roster, the field deleted (E0609) —
+  is owed. Readers at HEAD: `placement_row`'s static arm, `child_shape`, the `--realm-boxes` on-disk
+  contract, `VD_REALM_BOUNDARIES`, client scene tests. **When:** with the motion-roster boot rework
+  (the writer-in-node move below).
+- **Where:** `crates/core/src/geometry.rs` (`RealmRegion.center`), `crates/sim/src/stub.rs`,
+  `crates/bins/src/lib.rs`.
+
+### D-PLACE-3 🟥 The shape lane still ships `RealmShape.center` at its tick-0 instant (owner Q2 undischarged)
+- **What's missing:** owner Q2 ("the outline carries no position") is decided but not landed: the
+  outline lane (`SHAPE_LANE_TICK`, `restate_shapes_in_child_frame`, `lift_shapes_from_child_frame`,
+  `shape_hop_to`, `child_shape`'s placement read) still restates outline centres at the pinned epoch
+  instant, and the client still reads `RealmShape.center`. With every direct child now shipping a
+  per-tick row (D-FO-7 above), the row lane carries everything Q2 needs; the wire arm change
+  (`channels.rs` `RealmShape` minus `center`, minor bump) owes an SL6 note even though Q2 decided the
+  semantics. **When:** the next wire minor bump.
+- **Where:** `crates/wire/src/channels.rs:RealmShape`, `crates/sim/src/stub.rs` shape lanes,
+  `crates/client/src/realm_scene.rs`.
+
+### D-PLACE-4 🟥 The placement WRITER lives in vd-sim behind the opaque seam; the plan's writer-in-node shape is owed
+- **What's missing:** the plan puts `author_placements` in vd-node reading a `vd_physics::MotionRoster`
+  so vd-sim holds NO motion data at all. Landed instead: the writer stays in vd-sim but every motion is
+  an opaque injected `MotionFn` (sim runs it, cannot name it; the crate edge is banned + the `publish`
+  mint is clippy-banned outside the one writer). Structurally equivalent for SL4's letter; the node
+  shape additionally removes the closure seam. **When:** with D-PLACE-2 (the same boot rework).
+- **Where:** `crates/sim/src/stub.rs::author_placements`, `crates/node/src/lib.rs`.
+
+### D-PLACE-5 🟥 `secs_since_epoch`'s per-shard `tick_hz` is an UNDEFENDED cross-shard dependency
+- **What's missing:** cross-shard placement agreement (the anti-flap property) silently requires parent
+  and child to share `tick_hz`; the per-shard knob is deliberate (`vd_core::kinematics`) and the local
+  pair is validated (`validate_tick_pair`), but nothing checks AGREEMENT between two shards' clocks.
+  A cross-shard fence would be new wire data (SL6: default NO — ask the owner before adding it, or
+  derive it from the ClockSync lane's existing fields). An undefended dependency, not a defect.
+- **Where:** `crates/core/src/kinematics.rs::secs_since_epoch`; every `author_book` caller.
+
+### D-PLACE-6 🟥 Ledger `span_ahead` + `PlacementBook::project` are ledgered NON-features
+- **What's missing (deliberately):** no lane asks for a FUTURE instant (the flush reads head), so no
+  clock-skew `span_ahead` exists — UNMEASURED machinery stays unbuilt. If a lane ever must span more
+  than the backward window, the ledgered fallback is `PlacementBook::project(row, dt)` — monomorphic,
+  kind-blind, refused past a writer-authored horizon `Δt_max = √(2·budget/a_max)` (0.05 m budget at
+  a_max 4.34 m/s² ⇒ 3 ticks @20 Hz / 7 @50 Hz; error ½aΔt² ≤ 48.8 mm / 7.8 mm).
+- **Where:** `vd_core::placement::PlacementLedger`.

@@ -16,7 +16,8 @@
 use glam::{DQuat, DVec3};
 use serde::{Deserialize, Serialize};
 
-use crate::frame::{FrameContext, FrameError, transfer_frame};
+use crate::frame::{FrameError, transfer_frame};
+use crate::placement::PlacementBook;
 use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose};
 
 /// Base star-system SOI radius in galaxy units (ported from the reference repo's
@@ -1046,31 +1047,22 @@ pub fn container(root_realm: RealmId, members: &[DepthKey]) -> RealmId {
 }
 
 /// The signed distance from `pose` to `region`'s surface, RE-EXPRESSED into the region's frame FIRST
-/// (the input-side frame seam — the containment twin of [`crate::frame::rebind_pose_to_dest`]'s output
-/// seam). At P3 `ctx` is [`crate::frame::IdentityFrames`] (a no-op reframe — position unchanged); at
-/// P4/P5 the ephemeris `FrameContext` makes it a real transform, ADDITIVELY, with no caller reshape. A
-/// BRANCHLESS generic shim (HR5): it looks the reframe up and delegates ALL branching to the MONOMORPHIC
-/// [`region_signed_distance_resolved`], so a new `FrameContext` monomorphization adds ZERO uncovered
-/// per-mono branch. The caller treats an `Err` region as "not a member" (safe degrade), never a container.
+/// (the input-side frame seam). The placements arrive as an authored [`PlacementBook`] — the region's
+/// PARENT's rows at the pose's own instant — so this measurement cannot ask how the region moves
+/// (SL4): it reads the same rows every other consumer reads. MONOMORPHIC: with one concrete book type
+/// there is no per-`FrameContext` monomorphization left to multiply branches across (the old
+/// `_resolved` split existed only to serve that genericity and is folded back in). The caller treats
+/// an `Err` region as "not a member" (safe degrade), never a container.
 ///
 /// # Errors
-/// [`FrameError`] if `ctx` has no placement for `pose`'s frame or `region.frame` (inert under identity).
+/// [`FrameError`] if the book speaks at a different instant than the pose's stamp, or has no placement
+/// for `pose`'s frame or `region.frame`.
 pub fn region_signed_distance(
     pose: &StampedPose,
     region: &RealmRegion,
-    ctx: &impl FrameContext,
+    book: &PlacementBook,
 ) -> Result<f64, FrameError> {
-    region_signed_distance_resolved(transfer_frame(pose, region.frame, ctx), region)
-}
-
-/// The MONOMORPHIC core of [`region_signed_distance`]: given the already-reframed pose (or its frame
-/// error), fail loud on the error else take the shape's signed distance from the region center. Holding
-/// the `?` branch here keeps [`region_signed_distance`] a straight-line generic shim (HR5).
-fn region_signed_distance_resolved(
-    reframed: Result<StampedPose, FrameError>,
-    region: &RealmRegion,
-) -> Result<f64, FrameError> {
-    let p = reframed?;
+    let p = transfer_frame(pose, region.frame, book)?;
     // EVERY REALM IS CENTRED ON ITSELF. The reframe above has already expressed the pose in this region's
     // OWN frame, and in its own frame a region sits at its own origin — so the distance is measured from
     // zero and there is NOTHING further to subtract.
@@ -1121,62 +1113,84 @@ pub enum RegionNestError {
         reach: f64,
         limit: f64,
     },
+    #[error(
+        "region {realm:?} has no stated reach — the boot must supply every child's worst-instant \
+         reach (a mover's apoapsis bound, a static's authored offset); a defaulted zero is banned"
+    )]
+    NoReachForChild { realm: RealmId },
 }
 
-/// Does a CO-FRAMED child region fit inside its parent's usable interior?
+/// A child's WORST-INSTANT reach description, supplied by the boot — the ONE party that may name how
+/// things move (the placement arc S4). The fence itself consumes this KIND-BLIND: it cannot ask how a
+/// child moves, only how far its motion can carry it.
+/// - [`Fixed`](ChildReach::Fixed): a child that never moves off its authored offset — judged EXACTLY
+///   at that point (a box's corners measured where they really are).
+/// - [`Excursion`](ChildReach::Excursion): a bound on how far the child's motion can carry its centre
+///   from the parent's origin (an orbit's APOAPSIS `a(1+e)`, a thruster budget at P8) — direction
+///   unknown, so the child is judged as a shell swept over the whole excursion.
 ///
-/// WHY THIS IS NOW A BOOT FENCE AND NOT A LEDGERED NICETY. Containment hysteresis derives a subject's
+/// This is a statement about GEOMETRY ("an exact point" vs "a radius bound"), never a motion kind: a
+/// moon, a ship on thrusters and a drifting rock all state an `Excursion`; the fence cannot tell them
+/// apart. (The scalar-only form the design sketched was REFUTED by the shipped world: sphere-izing a
+/// static box loses its corner exactness — walk Area A reaches 9.06 m of a 10 m planet measured
+/// exactly, but 10.196 m sphere-ized, and that forest is correct.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChildReach {
+    /// The child's exact authored offset in its parent's frame (metres).
+    Fixed(DVec3),
+    /// The worst-instant distance of the child's centre from the parent's origin (metres).
+    Excursion(f64),
+}
+
+/// Does a child region fit inside its parent's usable interior AT ITS WORST INSTANT?
+///
+/// WHY THIS IS A BOOT FENCE AND NOT A LEDGERED NICETY. Containment hysteresis derives a subject's
 /// prior from ANCESTRY: being authoritatively in a realm makes you a member of that realm and of every
-/// realm containing it (task #177). That inference is only sound if "containing" is geometrically TRUE.
-/// A child poking outside its parent would hand a subject membership of a region it is demonstrably
-/// outside — the derived prior would then assert a falsehood every tick, and the containment fold could
-/// pick a parent the subject has physically left.
+/// realm containing it (task #177). That inference is only sound if "containing" is geometrically TRUE
+/// — at EVERY instant, not just the epoch. A child poking outside its parent would hand a subject
+/// membership of a region it is demonstrably outside — the derived prior would then assert a falsehood
+/// every tick, and the containment fold could pick a parent the subject has physically left.
 ///
-/// THE FENCE WAS INERT, AND THIS IS WHAT WAS WRONG WITH IT. It used to begin `if child.frame !=
-/// parent.frame { return None }` — and a parent and its child NEVER share a frame. Each realm is centred
-/// on itself and holds its own frame; a planet is `PlanetCentered`, its star system `SystemSpace`. So the
-/// early return fired on every pair in every real world and the check ran on nothing at all, while its
-/// doc-comment went on claiming the ancestry prior was guarded. The frame difference is not an obstacle
-/// here: `RealmRegion::center` MEANS "where I sit inside my parent, measured in my parent's frame", so the
-/// number is already in the frame the comparison needs.
+/// THE FENCE USED TO GO SIZE-ONLY FOR EVERY MOVER: it read the stored region `center`, and a mover's
+/// stored centre is ZERO, so a planet whose orbit carried it outside its star system's shell booted
+/// clean — MEASURED on THE world before the cure: two of the three systems' outer planets crossed
+/// their own system's surface at apoapsis (152.57 m and 155.05 m against a 150 m shell). The fence now
+/// stops asking for a position — no single instant can answer it — and asks for a BOUND
+/// ([`ChildReach`]), which the boot derives from the one thing that may know how a child moves.
 ///
-/// The second half of the same mistake was subtracting the parent's own centre. The parent's centre is
-/// measured in ITS parent's frame — a different space again — so the subtraction mixed two frames and only
-/// looked right while every realm sat at its parent's origin. The child's placement needs no adjustment at
-/// all: it is already measured from the parent's centre.
-///
-/// SCOPE, stated honestly, three ways:
-/// - It compares the child's EXACT farthest point ([`Boundary::max_reach_from`]) against the parent's
-///   inscribed extent — the largest sphere the parent fully contains. Necessary, not sufficient: a box
-///   parent's corners are not promised to anybody.
-/// - It compares against the parent's BOUNDARY, deliberately NOT the boundary minus the parent's hysteresis
-///   inset. The prior this fence protects says "authoritatively inside the child ⇒ a member of the parent";
-///   that is falsified only by a child poking outside the parent's boundary. The inset is a release margin
-///   INSIDE that boundary — a subject there is still geometrically within the parent, so the prior holds.
-///   MEASURED: subtracting it condemns the shipped walk forest's Area A, whose farthest corner is 9.06 m
-///   from a planet of radius 10 with a 1 m inset. That forest is correct; the stricter bound was not.
-/// - A MOVING child is checked at its AUTHORED origin. An orbiting body's `center` is zero and its real
-///   placement comes from the ephemeris every tick, so for those this fence checks the SIZE and not the
-///   orbit. Saying so beats implying an orbit-wide guarantee it cannot give.
-fn child_fits_in_parent(child: &RealmRegion, parent: &RealmRegion) -> Option<(f64, f64)> {
-    // `center` is expressed in the PARENT's frame, so the parent's tier is the one that scales its cell
-    // anchor into metres — never the child's own (which is what `RealmRegion::frame` names).
-    let center_in_parent = child
-        .center
-        .delta_m(LatticePos::local(DVec3::ZERO), parent.frame.tier());
-    let reach = child.shape.max_reach_from(center_in_parent);
+/// SCOPE, stated honestly:
+/// - It compares the child's farthest point against the parent's inscribed extent — the largest sphere
+///   the parent fully contains. Necessary, not sufficient: a box parent's corners are not promised to
+///   anybody.
+/// - It compares against the parent's BOUNDARY, deliberately NOT the boundary minus the parent's
+///   hysteresis inset. The prior this fence protects says "authoritatively inside the child ⇒ a member
+///   of the parent"; that is falsified only by a child poking outside the parent's boundary. The inset
+///   is a release margin INSIDE that boundary — a subject there is still geometrically within the
+///   parent, so the prior holds. MEASURED: subtracting it condemns the shipped walk forest's Area A,
+///   whose farthest corner is 9.06 m from a planet of radius 10 with a 1 m inset. That forest is
+///   correct; the stricter bound was not.
+fn child_fits_in_parent(
+    reach: &ChildReach,
+    child: &RealmRegion,
+    parent: &RealmRegion,
+) -> Option<(f64, f64)> {
+    let reach_m = match reach {
+        ChildReach::Fixed(at) => child.shape.max_reach_from(*at),
+        ChildReach::Excursion(r) => r + child.shape.max_reach_from(DVec3::ZERO),
+    };
     let limit = parent.shape.inscribed_extent();
-    (reach > limit).then_some((reach, limit))
+    (reach_m > limit).then_some((reach_m, limit))
 }
 
-/// The BOOT FENCE for a realm-region forest (task #135, C-5): pure topological validation run at shard
-/// boot BEFORE the infallible [`RealmRegions::new`] (in `vd_sim`), so a malformed set fails LOUD rather
-/// than degrading to the detector's `root_realm == None` no-op. Rejects, in order (fail-fast + cheap-
-/// first): count > `max` (the membership-bitset width, passed by the caller — vd-core stays free of the
-/// bitset detail); not exactly one `parent: None` root; a duplicate `.realm`; a dangling parent; a parent
-/// chain that cycles or never reaches the root. A straight-line SHIM — each fallible arm is a monomorphic
-/// helper, so the `?` branch regions are covered once here (HR5). This validates only TOPOLOGY (the
-/// geometric child-⊆-parent subset check is P4/P5, D-45).
+/// The BOOT FENCE for a realm-region forest (task #135, C-5): validation run at shard boot BEFORE the
+/// infallible [`RealmRegions::new`] (in `vd_sim`), so a malformed set fails LOUD rather than degrading
+/// to the detector's `root_realm == None` no-op. Rejects, in order (fail-fast + cheap-first): count >
+/// `max` (the membership-bitset width, passed by the caller — vd-core stays free of the bitset
+/// detail); not exactly one `parent: None` root; a duplicate `.realm`; a dangling parent; a parent
+/// chain that cycles or never reaches the root; and — the GEOMETRIC half, live here, not deferred — a
+/// child whose worst-instant reach ([`ChildReach`], supplied by the boot per child) escapes its
+/// parent's usable interior, or a child the boot stated NO reach for. A straight-line SHIM — each
+/// fallible arm is a monomorphic helper, so the `?` branch regions are covered once here (HR5).
 ///
 /// # Errors
 /// [`RegionNestError`] — one variant per malformation above.
@@ -1232,19 +1246,28 @@ fn lineage_verdict(
     }
 }
 
-pub fn guard_regions_nest(regions: &[RealmRegion], max: usize) -> Result<(), RegionNestError> {
+pub fn guard_regions_nest(
+    regions: &[RealmRegion],
+    max: usize,
+    reaches: &std::collections::BTreeMap<RealmId, ChildReach>,
+) -> Result<(), RegionNestError> {
     guard_region_count(regions, max)?;
     guard_single_root(regions)?;
     guard_unique_realms(regions)?;
     guard_parents_resolve(regions)?;
     guard_chains_reach_root(regions)?;
-    guard_children_fit_parents(regions)?;
+    guard_children_fit_parents(regions, reaches)?;
     Ok(())
 }
 
-/// Every CO-FRAMED child must sit inside its parent's usable interior — see [`child_fits_in_parent`]
-/// for why the ancestry-derived containment prior makes this load-bearing.
-fn guard_children_fit_parents(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+/// Every child must sit inside its parent's usable interior AT ITS WORST INSTANT — see
+/// [`child_fits_in_parent`] for why the ancestry-derived containment prior makes this load-bearing.
+/// The boot supplies each child's [`ChildReach`]; a MISSING entry is a typed reject, never a defaulted
+/// zero (the same discipline as "decode-to-Default is banned for Durable kinds").
+fn guard_children_fit_parents(
+    regions: &[RealmRegion],
+    reaches: &std::collections::BTreeMap<RealmId, ChildReach>,
+) -> Result<(), RegionNestError> {
     for child in regions {
         let Some(parent_id) = child.parent else {
             continue; // the ambient root has nothing to fit inside
@@ -1259,7 +1282,10 @@ fn guard_children_fit_parents(regions: &[RealmRegion]) -> Result<(), RegionNestE
             .iter()
             .find(|r| r.realm == parent_id)
             .expect("guard_parents_resolve already refused every unresolvable parent");
-        if let Some((reach, limit)) = child_fits_in_parent(child, parent) {
+        let Some(reach) = reaches.get(&child.realm) else {
+            return Err(RegionNestError::NoReachForChild { realm: child.realm });
+        };
+        if let Some((reach, limit)) = child_fits_in_parent(reach, child, parent) {
             return Err(RegionNestError::ChildEscapesParent {
                 realm: child.realm,
                 parent: parent_id,
@@ -1642,16 +1668,22 @@ mod tests {
 
     #[test]
     fn region_signed_distance_resolves_ok_and_propagates_a_frame_error() {
-        let region = test_region(RealmId::System(7), None);
-        // Ok arm: an already-reframed pose at the unit shell's center ⇒ signed distance -r = -1.
+        // Ok arm: the pose stands in the book's anchor frame and the region IS that anchor's realm
+        // (its own frame == the anchor) ⇒ the reframe is the identity, and a pose at the unit shell's
+        // center measures signed distance -r = -1.
+        let mut region = test_region(RealmId::System(7), None);
+        region.frame = test_pose().frame;
+        let book = PlacementBook::new(test_pose().frame, test_pose().universe_tick, Vec::new());
         assert_eq!(
-            region_signed_distance_resolved(Ok(test_pose()), &region),
+            region_signed_distance(&test_pose(), &region, &book),
             Ok(-1.0)
         );
-        // Err arm: a frame error propagates (the P4/P5 unknown-frame degrade; inert under identity).
+        // Err arm: a frame error propagates — the region's frame has no row in the book (the
+        // unknown-frame degrade the detector maps to "not a member").
+        let stranger = test_region(RealmId::System(9), None);
         assert_eq!(
-            region_signed_distance_resolved(Err(FrameError::UnknownSourceFrame), &region),
-            Err(FrameError::UnknownSourceFrame)
+            region_signed_distance(&test_pose(), &stranger, &book),
+            Err(FrameError::UnknownDestFrame)
         );
     }
 
@@ -1707,9 +1739,77 @@ mod tests {
         );
     }
 
+    /// The reach map the boot would supply for an all-static fixture forest: every child judged
+    /// EXACTLY at its authored offset (the [`ChildReach::Fixed`] arm).
+    fn fixed_reaches(regions: &[RealmRegion]) -> std::collections::BTreeMap<RealmId, ChildReach> {
+        regions
+            .iter()
+            .filter(|r| r.parent.is_some())
+            .map(|r| {
+                let tier = regions
+                    .iter()
+                    .find(|p| Some(p.realm) == r.parent)
+                    .map_or(r.frame.tier(), |p| p.frame.tier());
+                (
+                    r.realm,
+                    ChildReach::Fixed(r.center.delta_m(LatticePos::local(DVec3::ZERO), tier)),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn guard_regions_nest_accepts_a_valid_forest() {
-        assert_eq!(guard_regions_nest(&valid_forest(), 64), Ok(()));
+        let forest = valid_forest();
+        assert_eq!(
+            guard_regions_nest(&forest, 64, &fixed_reaches(&forest)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn guard_regions_nest_rejects_a_child_with_no_stated_reach() {
+        // TOTALITY: the boot must state EVERY child's worst-instant reach — a missing entry is a
+        // typed reject, never a defaulted zero (the decode-to-Default discipline, applied to motion).
+        let forest = valid_forest();
+        let mut holes = fixed_reaches(&forest);
+        let removed = forest
+            .iter()
+            .find(|r| r.parent.is_some())
+            .expect("the valid forest has a child")
+            .realm;
+        holes.remove(&removed);
+        assert_eq!(
+            guard_regions_nest(&forest, 64, &holes),
+            Err(RegionNestError::NoReachForChild { realm: removed })
+        );
+    }
+
+    #[test]
+    fn guard_regions_nest_judges_a_mover_at_its_apoapsis_bound() {
+        // THE ARM THE OLD FENCE COULD NOT HAVE (finding 27): a mover's stored centre is zero, so the
+        // old read judged its SIZE only and a planet whose orbit left its system's shell booted clean.
+        // The boot now states the mover's worst-instant EXCURSION (apoapsis + nothing else — the fence
+        // cannot ask what produces it), and the same child passes or fails on that bound alone.
+        let forest = vec![
+            test_region_r(RealmId::System(0), None, 100.0),
+            // A mover of radius 5 whose centre can wander 80 m out: reaches 85, inside 100. Fits.
+            test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 5.0),
+        ];
+        let mut reaches = fixed_reaches(&forest);
+        reaches.insert(RealmId::Planet(1), ChildReach::Excursion(80.0));
+        assert_eq!(guard_regions_nest(&forest, 64, &reaches), Ok(()));
+        // The SAME child with an excursion of 98: reaches 103 > 100. Refused, with both numbers.
+        reaches.insert(RealmId::Planet(1), ChildReach::Excursion(98.0));
+        assert_eq!(
+            guard_regions_nest(&forest, 64, &reaches),
+            Err(RegionNestError::ChildEscapesParent {
+                realm: RealmId::Planet(1),
+                parent: RealmId::System(0),
+                reach: 103.0,
+                limit: 100.0,
+            })
+        );
     }
 
     #[test]
@@ -1724,8 +1824,8 @@ mod tests {
             // A "child" of the r=10 region that is itself r=50 — it engulfs its own parent.
             test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 50.0),
         ];
-        let err =
-            guard_regions_nest(&escaping, 64).expect_err("an escaping child must be rejected");
+        let err = guard_regions_nest(&escaping, 64, &fixed_reaches(&escaping))
+            .expect_err("an escaping child must be rejected");
         assert_eq!(
             err,
             RegionNestError::ChildEscapesParent {
@@ -1754,7 +1854,11 @@ mod tests {
             ..test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 5.0)
         };
         assert_eq!(
-            child_fits_in_parent(&escaping, &parent),
+            child_fits_in_parent(
+                &ChildReach::Fixed(DVec3::new(8.0, 0.0, 0.0)),
+                &escaping,
+                &parent
+            ),
             Some((13.0, 10.0)),
             "a cross-frame child that reaches 13 m out of a 10 m parent must be caught"
         );
@@ -1764,7 +1868,14 @@ mod tests {
             center: LatticePos::local(DVec3::new(4.0, 0.0, 0.0)),
             ..escaping
         };
-        assert_eq!(child_fits_in_parent(&fitting, &parent), None);
+        assert_eq!(
+            child_fits_in_parent(
+                &ChildReach::Fixed(DVec3::new(4.0, 0.0, 0.0)),
+                &fitting,
+                &parent
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1786,7 +1897,14 @@ mod tests {
         .max_reach_from(DVec3::new(5.0, 0.0, 0.0));
         assert_eq!(exact, DVec3::new(8.0, 3.0, 3.0).length());
         assert!(exact < 10.0, "measured reach {exact} must be inside r=10");
-        assert_eq!(child_fits_in_parent(&area, &parent), None);
+        assert_eq!(
+            child_fits_in_parent(
+                &ChildReach::Fixed(DVec3::new(5.0, 0.0, 0.0)),
+                &area,
+                &parent
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1823,14 +1941,17 @@ mod tests {
             test_region_r(RealmId::System(1), Some(RealmId::System(0)), 10.0),
             offset_child, // reaches 5 + 3 = 8, inside the parent's 10
         ];
-        assert_eq!(guard_regions_nest(&forest, 64), Ok(()));
+        assert_eq!(
+            guard_regions_nest(&forest, 64, &fixed_reaches(&forest)),
+            Ok(())
+        );
     }
 
     #[test]
     fn guard_regions_nest_rejects_too_many_regions() {
         // 3 regions with `max = 2` ⇒ the count fence trips FIRST (before any topology walk).
         assert_eq!(
-            guard_regions_nest(&valid_forest(), 2),
+            guard_regions_nest(&valid_forest(), 2, &fixed_reaches(&valid_forest())),
             Err(RegionNestError::TooManyRegions { found: 3, max: 2 })
         );
     }
@@ -1843,7 +1964,7 @@ mod tests {
             test_region(RealmId::System(1), None),
         ];
         assert_eq!(
-            guard_regions_nest(&two_roots, 64),
+            guard_regions_nest(&two_roots, 64, &fixed_reaches(&two_roots)),
             Err(RegionNestError::RootCount { found: 2 })
         );
         // ZERO roots (a pure cycle — caught by the root count BEFORE the chain walk).
@@ -1852,7 +1973,7 @@ mod tests {
             test_region(RealmId::System(2), Some(RealmId::System(1))),
         ];
         assert_eq!(
-            guard_regions_nest(&no_root, 64),
+            guard_regions_nest(&no_root, 64, &fixed_reaches(&no_root)),
             Err(RegionNestError::RootCount { found: 0 })
         );
     }
@@ -1865,7 +1986,7 @@ mod tests {
             test_region(RealmId::System(1), Some(RealmId::System(0))),
         ];
         assert_eq!(
-            guard_regions_nest(&dup, 64),
+            guard_regions_nest(&dup, 64, &fixed_reaches(&dup)),
             Err(RegionNestError::DuplicateRealm {
                 realm: RealmId::System(1)
             })
@@ -1879,7 +2000,7 @@ mod tests {
             test_region(RealmId::System(1), Some(RealmId::System(9))), // System(9) is not a region
         ];
         assert_eq!(
-            guard_regions_nest(&dangling, 64),
+            guard_regions_nest(&dangling, 64, &fixed_reaches(&dangling)),
             Err(RegionNestError::DanglingParent {
                 realm: RealmId::System(1),
                 parent: RealmId::System(9),
@@ -1901,7 +2022,7 @@ mod tests {
         let mut child = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 1.0);
         child.frame = FrameRef::PlanetCentered { planet_seed: 1 };
         assert_eq!(
-            guard_regions_nest(&[parent, child], 64),
+            guard_regions_nest(&[parent, child], 64, &fixed_reaches(&[parent, child])),
             Ok(()),
             "a differently-framed child is not judged here, so the forest is accepted"
         );
@@ -1911,7 +2032,12 @@ mod tests {
         let mut oversized = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 5_000.0);
         oversized.frame = parent.frame;
         assert!(
-            guard_regions_nest(&[parent, oversized], 64).is_err(),
+            guard_regions_nest(
+                &[parent, oversized],
+                64,
+                &fixed_reaches(&[parent, oversized])
+            )
+            .is_err(),
             "same-frame IS judged: a child larger than its parent's interior is refused"
         );
     }
@@ -1926,25 +2052,11 @@ mod tests {
             test_region(RealmId::System(2), Some(RealmId::System(1))),
         ];
         assert_eq!(
-            guard_regions_nest(&cyclic, 64),
+            guard_regions_nest(&cyclic, 64, &fixed_reaches(&cyclic)),
             Err(RegionNestError::CycleOrOrphan {
                 realm: RealmId::System(1)
             })
         );
-    }
-
-    #[test]
-    fn the_two_soi_functions_stay_distinct() {
-        // Pin both to reference ranges so a refactor cannot collapse them
-        // (generic_transfer.md §1.3 "a future refactor cannot collapse them").
-        // Earth-Sun planet SOI: ~9.2e8 METERS.
-        let planet = crate::celestial::planet_soi(1.496e11, 5.972e24, 1.989e30);
-        assert!((8.0e8..1.1e9).contains(&planet));
-        // Sun-like star (luminosity 1.0) system SOI: 300 GALAXY UNITS.
-        let system = system_soi(1.0);
-        assert!((system - 300.0).abs() < 1e-9);
-        // Different formulas, units, and magnitudes by construction.
-        assert!(planet / system > 1.0e5);
     }
 
     #[test]

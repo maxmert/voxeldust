@@ -163,7 +163,7 @@ implementation, which the standing laws forbid. They are listed here rather than
 |---|---|
 | `a_dot_re_homes_source_to_dest_over_the_process_dual_shard_tier` | names walk-forest realms 7/8 — suspected the same one-world-collapse fallout that `boot_guard` had |
 | `p1_parity_real_binaries_over_quic` | "unexpected class RealmSnapshot" — may be caused by the home move (the fallback home is now a star system, which streams realm rows) |
-| `proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard` | "realm 1000 died immediately… a SURVIVOR still holding this realm's slot in the RLM port band" — the known unreaped-child issue |
+| `proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard` | ~~"realm 1000 died immediately… a SURVIVOR still holding this realm's slot in the RLM port band" — the known unreaped-child issue~~ **RETRACTED (D-WORLD-8, 2026-08-14):** the port-band-survivor diagnosis was wrong — this smoke reserves fresh EPHEMERAL loopback ports (`reserve_udp_addr`/`reserve_tcp_addr`), never the fixed RLM band, so no survivor could squat anything. The red had the same ONE cause as the walk gate's: a spawned coord naming a realm THE world does not contain, dying in `guard_regions_nest` with 0 ambient roots. Fixed by deriving the coord from `world_roster`. |
 | `the_box_and_the_thing_standing_in_it_draw_at_one_point` | "the drawn box is measured from the STAR, not from the planet: 5 m" |
 
 `boot_guard` was ALSO failing before today's edits for the same one-world reason (it booted `planet:7`, a

@@ -10,13 +10,14 @@
 //!   `DurabilityClass`, `GhostPolicy`, `ContinuityModel`, `LossBudget`.
 //! - TLV-framed entity-state blobs with version-floor evolution (`docs/design/generic_transfer.md` §A1).
 //! - `StampedPose`/`FrameRef`: the one coordinate-frame transfer type.
-//! - Closed-form celestial math (Category A — analytic, bit-deterministic): Kepler solve,
-//!   `planet_soi` (Hill sphere) and `system_soi` (luminosity) — deliberately DISTINCT functions.
 //! - Overlap-band geometry: velocity-scaled widths, hysteresis, swept-segment crossing.
+//!
+//! The closed-form celestial math + the seed universe generator moved to `vd-physics` (the placement
+//! arc S5): this crate carries the crossing/containment path, and SL4 demands that path cannot name a
+//! motion — held by the crate graph (`tests/tests/crate_isolation.rs`), not by review.
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
-pub mod celestial;
 pub mod collections;
 pub mod entity_kind;
 pub mod fence;
@@ -26,6 +27,7 @@ pub mod home;
 pub mod ids;
 pub mod incarnation;
 pub mod kinematics;
+pub mod placement;
 pub mod pose;
 pub mod realm_coord;
 pub mod realm_path;

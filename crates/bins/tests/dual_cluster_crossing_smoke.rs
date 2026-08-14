@@ -1,51 +1,55 @@
-//! Track R / 1d.2 (Batch A) — THE dual-shard PROCESS-cluster crossing proof.
+//! THE dual-shard PROCESS-cluster crossing proof — a real-protocol client on the production mesh,
+//! with ZERO navigation, crosses THE WORLD'S OWN 150 m home shell and the directory CAS re-homes its
+//! `Entity` onto the pre-booked galaxy shard.
 //!
-//! Stands up the LOCAL 2-process crossing playground as REAL BINARIES over localhost QUIC under mTLS
-//! (`vd-devcluster up --dual`): a SOURCE shard (realm `System(7)`, the login shard) + a DEST shard
-//! (realm `System(8)`) + the orchestrator + gateway. The launcher plants the born-inside geometric
-//! crossing boundary (`System(7)`→`System(8)`) on the SOURCE via `VD_REALM_BOUNDARIES` and — the C1 gate
-//! — waits for BOTH realms to be granted before `up` returns, so the crossing can never count
-//! `crossing_unresolved`.
+//! Stands up `vd-devcluster up --dual` as REAL BINARIES over localhost QUIC under mTLS: orchestrator +
+//! gateway + the HOME shard + the GALAXY shard (the home region's parent), every realm derived through
+//! `world_roster` — NOTHING is injected. The old smoke planted an authored born-inside boundary
+//! file whose geometry existed nowhere in THE world; this one flies the world as
+//! shipped: the login spawns at the home star's centre, the client holds `movement: [1,0,0]` (world
+//! −Z at identity orientation — the ±Z polar corridor, licensed by the I-AXIS assert below) for
+//! EXACTLY `exit_ticks`, then holds zero. Leaving the shell, the home shard's containment detector
+//! fires the `CrossingRequest` AUTONOMOUSLY, the orchestrator resolves the directory heads, THE
+//! transfer saga runs (the client stamps the in-band CUT_MARKER on request), and the CAS re-homes the
+//! dot's `Entity` authority onto the galaxy shard.
 //!
-//! Then a real-protocol client (the production mesh transport) logs in on the SOURCE. Its avatar spawns
-//! INSIDE the planted shell, so the SOURCE's geometric dwell detector fires a `CrossingRequest`
-//! AUTONOMOUSLY (nothing hand-fed — no `trigger_transfer`), the orchestrator resolves the three directory
-//! heads and starts THE proven transfer saga, and the directory CAS re-homes the dot's `Entity` authority
-//! onto the DEST. The gate polls the orchestrator's `/admin/snapshot` until an `Entity` row's authority is
-//! `shard:node-4` (the DEST OWNS the dot) — the process-tier mirror of `crossing_e2e`'s dest-owns proof.
+//! ANTI-VACUITY: the crossing fires from THE world's own geometry (no `trigger`/`start_transfer`, no
+//! planted boundary file); the C1 gate (`AdminSnapshot::realms_present` over `roster_realms(Dual)`)
+//! guarantees every pre-booked head resolves before the flight, so the crossing can never count
+//! `crossing_unresolved` — which since J-0 is known to be a PERMANENT STRAND, not a soft failure.
+//! The flight is BOUNDED: `exit_ticks` parks the dot ~3 release-edges out, provably still inside the
+//! galaxy's own shell (asserted from THE world, never a literal), so no leg can reach a realm this
+//! cluster does not host.
 //!
-//! ANTI-VACUITY: the crossing fires from the GEOMETRIC trigger the launcher planted (born-inside dwell),
-//! not from any test-driven start; the C1 both-realms gate guarantees the DEST head resolves. A grep of
-//! this file finds ZERO `trigger`/`start_transfer` — the re-home is autonomous.
-//!
-//! SCOPE (M-2): the LOCAL 2-process playground. The N-shard k3d roster generalization is ledgered to
-//! cloud (#123) in `docs/design/DEFERRED.md`. This is Tier-B process glue (coverage-exempt); the Tier-A
-//! verdicts it stands on (the env builders, the port scheme, `AdminSnapshot::realms_present`) are
-//! 100%-covered by their own unit tests.
+//! SCOPE (M-2): the LOCAL process playground. The N-shard k3d roster generalization is ledgered to
+//! cloud (#123) in `docs/design/DEFERRED.md`. This is Tier-B process glue (coverage-exempt); the
+//! Tier-A verdicts it stands on (the env builders, the port scheme, `AdminSnapshot::realms_present`,
+//! the roster derivation) are covered by their own unit tests.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use vd_bins::{
-    CROSSING_SLOT, DEV, DEV_AUTH_SEED, DevClusterDown, GATEWAY, admin_get_body, devcluster,
-    loopback, slot_trust_dir,
+    CROSSING_SLOT, ClusterAddrs, ClusterShape, DEV, DEV_AUTH_SEED, DevClusterDown, GATEWAY, SHARD,
+    admin_get_body, devcluster, loopback, realm_shards, roster_realms, slot_trust_dir,
+    world_roster,
 };
 use vd_core::{AccountId, EpochId, NodeId, TickId};
 use vd_devproto::{CLIENT_NODE_BASE, DevPortScheme};
 use vd_io_prod::mesh::{MeshConfig, MeshTransport, spawn_mesh};
 use vd_io_prod::runtime::TickPacer;
 use vd_io_prod::trust::ClusterTrust;
+use vd_physics::worldgen::UniverseConfig;
 use vd_sim::io::{Inbound, MsgClass, Transport};
+use vd_wire::admin::AdminSnapshot;
 use vd_wire::channels::{ClientControlMsg, InputDatagram, ServerControlMsg};
 use vd_wire::version::ProtoVersion;
 
-/// A generous deadline: `up --dual` boots 4 processes + the C1 both-realms grant, then the client logs in
-/// and the born-inside dwell + saga self-drive to the directory CAS. Real QUIC handshakes over loopback.
+/// A generous deadline: `up --dual` boots 4 processes + the C1 all-realms grant, then the client logs
+/// in, flies the ~1 s bounded −Z exit leg, and the crossing + saga self-drive to the directory CAS.
+/// Real QUIC handshakes over loopback.
 const DEADLINE: Duration = Duration::from_secs(45);
-
-/// The DEST shard's rendered authority in the admin directory (`AuthorityRef::Shard(NodeId(4))`).
-const DEST_AUTHORITY: &str = "shard:node-4";
 
 /// Run one `vd-devcluster up --dual` against the crossing slot (the launcher path from `CARGO_BIN_EXE`).
 fn up_dual(launcher: &str, slot: u16) -> std::process::ExitStatus {
@@ -55,8 +59,8 @@ fn up_dual(launcher: &str, slot: u16) -> std::process::ExitStatus {
         .expect("run vd-devcluster up --dual")
 }
 
-/// A minimal real-protocol client that logs in and drains — enough to make the SOURCE grant its avatar
-/// (which spawns inside the planted shell) and open a session the crossing's route can resolve.
+/// A minimal real-protocol client that logs in, flies the BOUNDED −Z exit leg, then parks — enough to
+/// make the home shard grant its avatar and integrate it out of the home shell with zero navigation.
 struct LoginClient {
     transport: MeshTransport,
     session: bool,
@@ -65,17 +69,22 @@ struct LoginClient {
     /// `is_cut_marker = true` — the client's half of the transfer cut (mirrors the real client / the
     /// harness `ScriptedClient`). Without this the saga parks at `Cutting` forever and never CAS-commits.
     emit_marker_next: bool,
+    /// How many MOVING inputs remain before the throttle cuts to zero — the flight bound. Inputs keep
+    /// flowing every tick after it reaches zero (the cut marker must still have a carrier); only the
+    /// movement axes zero out, parking the dot well inside the galaxy shell.
+    move_ticks_left: u64,
     next_seq: u64,
     tick: u64,
 }
 
 impl LoginClient {
-    fn new(transport: MeshTransport) -> LoginClient {
+    fn new(transport: MeshTransport, exit_ticks: u64) -> LoginClient {
         LoginClient {
             transport,
             session: false,
             subscribed: false,
             emit_marker_next: false,
+            move_ticks_left: exit_ticks,
             next_seq: 0,
             tick: 0,
         }
@@ -97,11 +106,11 @@ impl LoginClient {
             .send(GATEWAY, MsgClass::Control, bytes.into());
     }
 
-    /// Drain inbound (noting the welcome + the first subscription), then WALK: once subscribed, send a
-    /// forward-movement input datagram every tick. The dot's avatar stays born-inside the 1150 m shell for
-    /// thousands of ticks (~0.04 m/tick), so the SOURCE's dwell detector fires the crossing after `n_entry`
-    /// in-band ticks — the SAME proven `should_commit` path the in-process `crossing_e2e` walks (nothing
-    /// hand-fed; the crossing is purely geometric). Walking also keeps the dot live + integrated on the shard.
+    /// Drain inbound (noting the welcome + the first subscription), then FLY: once subscribed, send a
+    /// forward input datagram every tick — `[1, 0, 0]` is world −Z at identity orientation, the polar
+    /// corridor — for `exit_ticks` ticks, then hold `[0, 0, 0]`. The bounded leg takes the dot out of
+    /// the home shell (the detector fires the crossing purely geometrically, nothing hand-fed) and
+    /// parks it; every later tick still carries an input so the cut marker has a carrier.
     fn step(&mut self) {
         for msg in self.transport.drain_inbound() {
             if let Inbound::Wire {
@@ -125,11 +134,17 @@ impl LoginClient {
             self.next_seq += 1;
             let is_cut_marker = self.emit_marker_next;
             self.emit_marker_next = false;
+            let movement = if self.move_ticks_left > 0 {
+                self.move_ticks_left -= 1;
+                [1.0, 0.0, 0.0] // forward = world −Z: the licensed polar corridor
+            } else {
+                [0.0, 0.0, 0.0] // PARKED — the flight is bounded by construction
+            };
             let input = InputDatagram {
                 seq: self.next_seq,
                 is_cut_marker,
                 client_tick: TickId(self.tick),
-                movement: [1.0, 0.0, 0.0],
+                movement,
                 look: [0.0, 0.0],
                 action_bits: 0,
             };
@@ -163,19 +178,58 @@ fn directory_rows(admin: SocketAddr) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// A directory row proving the DEST OWNS the transferred dot: an `Entity` key (`ent-…`, distinct from the
-/// DEST's own realm row `system-…`) whose authority is `shard:node-4`. This is the process-tier dest-owns
-/// verdict — the directory CAS moved the dot's authority off the source onto the DEST.
-fn dest_owns_an_entity(rows: &[(String, String)]) -> bool {
+/// A directory row proving the DEST OWNS the transferred dot: an `Entity` key (`ent-…`, distinct from
+/// the dest's own realm row) whose authority is the galaxy shard's — the directory CAS moved the
+/// dot's authority off the home shard onto the dest.
+fn dest_owns_an_entity(rows: &[(String, String)], dest_authority: &str) -> bool {
     rows.iter()
-        .any(|(key, authority)| key.starts_with("ent-") && authority == DEST_AUTHORITY)
+        .any(|(key, authority)| key.starts_with("ent-") && authority == dest_authority)
 }
 
 #[test]
-fn a_dot_re_homes_source_to_dest_over_the_process_dual_shard_tier() {
+fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
+
+    // ---- I-AXIS FIRST (the flight law's licence for the −Z leg) --------------------------------------
+    // `world_roster` asserts I-AXIS/I-POLE/I-RADIAL/J1 internally; re-stated here with the measured
+    // margin so a corridor regression names its number in THIS gate's failure, not a distant panic.
+    let roster = world_roster(&DEV);
+    let config = UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+    let axis_floor = 2.0 * config.planet.planet_soi_r_m;
+    assert!(
+        roster.axis_clearance_m > axis_floor,
+        "I-AXIS: the −Z corridor is licensed only while every orbit clears the polar axis by more \
+         than {axis_floor:.2} m (2× planet SOI); THE world measures {:.2} m",
+        roster.axis_clearance_m,
+    );
+
+    // ---- THE BOUNDED FLIGHT, computed from THE world (J3: exit bounds are computed, never inherited) --
+    // One tick integrates `move_speed · tick_dt` = 10 m. The release edge is the home shell plus the
+    // containment band's outset; flying 3 release-edges (~46 ticks, ~460 m) is provably OUT of the home
+    // shell and provably INSIDE the galaxy's own shell, so the parked dot can never reach the ring
+    // sibling (~12 km away) or any realm this cluster does not host.
+    let release_edge_m = config.stellar.system_soi_r_m + config.band.outset_m;
+    let step_m = DEV.move_speed * DEV.tick_dt;
+    let exit_ticks = (3.0 * release_edge_m / step_m).ceil() as u64;
+    let park_m = exit_ticks as f64 * step_m;
+    let world = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
+    let galaxy_shell_m = world
+        .regions()
+        .iter()
+        .find(|r| r.realm == roster.galaxy)
+        .map(|r| match r.shape {
+            vd_core::geometry::Boundary::Shell { r } => r,
+            other => panic!("the galaxy region is a shell, got {other:?}"),
+        })
+        .expect("THE world contains the galaxy region");
+    assert!(
+        park_m > release_edge_m && park_m < galaxy_shell_m,
+        "the bounded flight must park OUT of the home shell ({release_edge_m:.1} m) and INSIDE the \
+         galaxy shell ({galaxy_shell_m:.1} m); computed park {park_m:.1} m over {exit_ticks} ticks",
+    );
+
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     let slot = CROSSING_SLOT;
     let _ = devcluster(launcher, "down", slot); // clean slate (idempotent)
@@ -184,41 +238,45 @@ fn a_dot_re_homes_source_to_dest_over_the_process_dual_shard_tier() {
     let ports = DevPortScheme::DEFAULT
         .slot_ports(slot)
         .expect("crossing slot resolves");
+    let addrs = ClusterAddrs::for_slot(ports);
 
-    // ---- WIRING (Batch A): stand up the 4-process dual cluster --------------------------------------
-    // `up --dual` spawns orchestrator + gateway + SOURCE(realm 7) + DEST(realm 8), plants the born-inside
-    // System(7)→System(8) boundary on the SOURCE, and — the C1 gate — returns 0 ONLY after BOTH realms are
-    // granted to shards in the ONE directory (so the crossing's dest head resolves, never `unresolved`).
+    // The DEST authority DERIVED from the shape's own shard list — never a literal node string.
+    let dest_node = realm_shards(ClusterShape::Dual, &addrs, &DEV)
+        .first()
+        .map(|s| s.node)
+        .expect("Dual pre-books the galaxy realm-shard");
+    let dest_authority = format!("shard:{dest_node}");
+    let home_authority = format!("shard:{SHARD}");
+
+    // ---- WIRING: stand up the 4-process dual cluster ------------------------------------------------
+    // `up --dual` spawns orchestrator + gateway + the HOME shard + the GALAXY shard, every shard booting
+    // THE world's seed neighbourhood (NO boundary injection), and — the C1 gate — returns 0 ONLY after
+    // every pre-booked realm is granted in the ONE directory (so the crossing's dest head resolves,
+    // never `unresolved`).
     assert!(
         up_dual(launcher, slot).success(),
-        "up --dual must reach the C1 both-realms ready gate and exit 0 (gateway known_shards={{SHARD,DEST}}, \
-         orchestrator roster has DEST, the directory holds Realm(7)+Realm(8))",
+        "up --dual must reach the C1 all-realms ready gate and exit 0 (gateway known_shards={{GALAXY}}, \
+         orchestrator roster has the galaxy shard, the directory holds home + galaxy realm heads)",
     );
 
-    // The C1 gate proof, read straight off the admin directory: BOTH realm rows are present, each owned by
-    // a shard (`system-…` @ `shard:node-…`). Realm 7 → the source shard, realm 8 → the DEST shard.
+    // The C1 gate proof, read straight off the admin snapshot through the SAME Tier-A predicate the
+    // launcher's readiness poll uses: every roster realm rests with a shard.
     let admin = loopback(ports.admin);
-    let rows = directory_rows(admin);
-    let realm_rows: Vec<&(String, String)> = rows
-        .iter()
-        .filter(|(key, authority)| key.starts_with("system-") && authority.starts_with("shard:"))
-        .collect();
+    let snapshot = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2)))
+        .and_then(|body| serde_json::from_str::<AdminSnapshot>(&body).ok())
+        .expect("the orchestrator admin snapshot parses");
+    let expected_realms = roster_realms(ClusterShape::Dual, &DEV);
     assert!(
-        realm_rows
-            .iter()
-            .any(|(key, _)| *key == format!("{}", vd_core::pose::RealmId::System(DEV.realm_seed)))
-            && realm_rows.iter().any(|(key, _)| {
-                *key == format!("{}", vd_core::pose::RealmId::System(DEV.realm_seed_b))
-            }),
-        "C1: both realms {} + {} must be shard-granted in the ONE directory before the crossing drives: {rows:?}",
-        vd_core::pose::RealmId::System(DEV.realm_seed),
-        vd_core::pose::RealmId::System(DEV.realm_seed_b),
+        snapshot.realms_present(&expected_realms),
+        "C1: every pre-booked realm ({expected_realms:?}) must be shard-granted in the ONE directory \
+         before the flight: {:?}",
+        directory_rows(admin),
     );
 
-    // ---- THE CROSSING: a real client logs in; the born-inside dwell fires the re-home AUTONOMOUSLY -----
+    // ---- THE CROSSING: a real client logs in; the bounded −Z leg fires the re-home AUTONOMOUSLY ------
     // Load the launcher's mTLS trust bundle + bind at the client-0 QUIC port the gateway pre-booked
-    // (`CLIENT_NODE_BASE` → client_quic(0)), then log in on the SOURCE. The avatar spawns inside the
-    // planted shell, so the SOURCE's geometric dwell detector emits a `CrossingRequest` on its own.
+    // (`CLIENT_NODE_BASE` → client_quic(0)), then log in on the home shard. The avatar spawns at the
+    // home star's centre; the bounded forward flight takes it out of the shell.
     let trust =
         ClusterTrust::from_der_dir(&slot_trust_dir(slot)).expect("load launcher trust bundle");
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -237,7 +295,7 @@ fn a_dot_re_homes_source_to_dest_over_the_process_dual_shard_tier() {
     )
     .expect("client mesh");
     std::mem::forget(control); // keep the endpoint alive for the test's duration
-    let mut client = LoginClient::new(transport);
+    let mut client = LoginClient::new(transport, exit_ticks);
 
     let started = Instant::now();
     let mut pacer = TickPacer::new(DEV.tick_hz);
@@ -250,14 +308,15 @@ fn a_dot_re_homes_source_to_dest_over_the_process_dual_shard_tier() {
             hello_retry = Instant::now();
             client.send_hello(AccountId(1000));
         }
-        // THE PROOF: poll the ONE directory until the DEST owns an Entity — the dot re-homed SOURCE→DEST.
-        if dest_owns_an_entity(&directory_rows(admin)) {
+        // THE PROOF: poll the ONE directory until the galaxy owns an Entity — the dot re-homed
+        // home → galaxy across real processes.
+        if dest_owns_an_entity(&directory_rows(admin), &dest_authority) {
             break;
         }
         assert!(
             started.elapsed() < DEADLINE,
-            "the dot never re-homed to the DEST (session={}): the born-inside geometric crossing did not \
-             flip an Entity head to {DEST_AUTHORITY}. directory={:?}",
+            "the dot never re-homed to the galaxy (session={}): the world's-own-shell crossing did \
+             not flip an Entity head to {dest_authority}. directory={:?}",
             client.session,
             directory_rows(admin),
         );
@@ -265,23 +324,24 @@ fn a_dot_re_homes_source_to_dest_over_the_process_dual_shard_tier() {
     }
 
     // The dest-owns flip IS the proof; assert it once more explicitly for the failure message + to pin
-    // that the SOURCE no longer holds THAT entity under its own authority (the CAS moved it, not copied).
+    // that the home shard no longer holds THAT entity under its own authority (the CAS moved it, not copied).
     let final_rows = directory_rows(admin);
     assert!(
-        dest_owns_an_entity(&final_rows),
-        "the DEST must own the re-homed dot's Entity row: {final_rows:?}",
+        dest_owns_an_entity(&final_rows, &dest_authority),
+        "the galaxy shard must own the re-homed dot's Entity row: {final_rows:?}",
     );
-    let source_entity_rows = final_rows
+    let home_entity_rows = final_rows
         .iter()
-        .filter(|(key, authority)| key.starts_with("ent-") && authority == "shard:node-3")
+        .filter(|(key, authority)| key.starts_with("ent-") && *authority == home_authority)
         .count();
     let dest_entity_rows = final_rows
         .iter()
-        .filter(|(key, authority)| key.starts_with("ent-") && authority == DEST_AUTHORITY)
+        .filter(|(key, authority)| key.starts_with("ent-") && *authority == dest_authority)
         .count();
     assert!(
         dest_entity_rows >= 1,
-        "the DEST holds >= 1 re-homed Entity ({dest_entity_rows}); the directory CAS committed the crossing: {final_rows:?}",
+        "the galaxy holds >= 1 re-homed Entity ({dest_entity_rows}); the directory CAS committed the \
+         crossing: {final_rows:?}",
     );
     // Belt-and-suspenders anti-vacuity: the whole run's client actually established a session (the
     // crossing's `Session` head resolved), so the re-home was a real logged-in dot, not a phantom.
@@ -289,5 +349,5 @@ fn a_dot_re_homes_source_to_dest_over_the_process_dual_shard_tier() {
         client.session,
         "the client established a session (the crossing route's Session head resolved)"
     );
-    let _ = source_entity_rows; // observed for the failure message; the CAS may leave a source Ghost row transiently
+    let _ = home_entity_rows; // observed for the failure message; the CAS may leave a source Ghost row transiently
 }

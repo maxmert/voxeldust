@@ -137,6 +137,13 @@ pub struct InspectReport {
     /// (from `StubStats.crossing_latches_cleared`). Proves the POSITIVE latch clear on a committed
     /// crossing — the latch lifecycle END.
     pub crossing_latches_cleared: u64,
+    /// Placement arc S0 — the WIDEST latch→flush staleness this shard observed, in ticks (from
+    /// `StubStats.flush_stamp_gap_ticks_max`): how far the world's moving placements swept under the
+    /// flush's departure/entry re-validations. The crossing e2e pins it to 0 (the B-1 tripwire).
+    pub flush_stamp_gap_ticks_max: u64,
+    /// Placement arc S2 — ledger selections that MISSED their instant (from
+    /// `StubStats.placement_book_miss`). 0 in any healthy run; every miss is a loud lane degrade.
+    pub placement_book_miss: u64,
     /// Slice 3g — the entities currently latched in this shard's `RequestInFlight` (the standing
     /// durable-crossing latches; `RequestInFlight.0.keys()`, sorted). Empty once a crossing's terminal
     /// clears the latch — the abort/commit-leg "latch empty" ground truth.
@@ -306,6 +313,10 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         // The fail-loud pose ingress: an arrival this shard could not measure and therefore refused.
         report.arrivals_unplaceable = stats.arrivals_unplaceable;
         report.crossing_latches_cleared = stats.crossing_latches_cleared;
+        // Placement arc S0: the latch→flush staleness measurement (the B-1 tripwire's ground truth).
+        report.flush_stamp_gap_ticks_max = stats.flush_stamp_gap_ticks_max;
+        // Placement arc S2: the ledger-miss gate's ground truth.
+        report.placement_book_miss = stats.placement_book_miss;
     }
     if let Some(in_flight) = world.get_resource::<vd_sim::stub::RequestInFlight>() {
         // Slice 3g: the standing durable-crossing latches (the abort/commit-leg "latch empty" ground

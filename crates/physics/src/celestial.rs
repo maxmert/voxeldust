@@ -261,17 +261,6 @@ pub fn orbital_state(elements: &OrbitalElements, time_s: f64) -> OrbitalState {
     }
 }
 
-/// Elapsed seconds since epoch for a universe `tick`: `tick / tick_hz`. Time is SECONDS,
-/// not ticks — `tick_hz` is a per-shard knob passed in (a global `TICKS_PER_SECOND` const
-/// would be a magic number silently splitting a 10 Hz vs 50 Hz shard). Feed the result to
-/// [`orbital_state`] as `time_s`. Contract: `tick_hz > 0` — validated once at config load,
-/// not guarded here (a guard would reintroduce an HR5 branch for a caller-contract violation).
-#[must_use]
-#[allow(clippy::cast_precision_loss)] // universe ticks stay well below 2^53 for astronomical spans
-pub fn secs_since_epoch(tick: u64, tick_hz: f64) -> f64 {
-    tick as f64 / tick_hz
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,15 +409,6 @@ mod tests {
         // period = 2π / n.
         let t_expected = core::f64::consts::TAU / n_expected;
         assert!((e.period() - t_expected).abs() < 1e-6 * t_expected);
-    }
-
-    #[test]
-    fn secs_since_epoch_is_tick_over_hz() {
-        // A 50 Hz shard at tick 50 and a 10 Hz shard at tick 10 are BOTH 1.0 s — tick_hz
-        // is the per-shard knob, not a global const. Exact (these divide cleanly).
-        assert_eq!(secs_since_epoch(0, 50.0), 0.0);
-        assert_eq!(secs_since_epoch(50, 50.0), 1.0);
-        assert_eq!(secs_since_epoch(10, 10.0), 1.0);
     }
 
     #[test]
@@ -664,5 +644,21 @@ mod tests {
             prop_assert!((0.0..core::f64::consts::TAU).contains(&n));
             prop_assert!((normalize_angle(n) - n).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn the_two_soi_functions_stay_distinct() {
+        // Pin both to reference ranges so a refactor cannot collapse them
+        // (generic_transfer.md §1.3 "a future refactor cannot collapse them"). Lives HERE because the
+        // crates split (the placement arc S5): `planet_soi` is motion-crate math, `system_soi` stays
+        // core geometry — and this test holding both is what keeps them distinct ACROSS that boundary.
+        // Earth-Sun planet SOI: ~9.2e8 METERS.
+        let planet = planet_soi(1.496e11, 5.972e24, 1.989e30);
+        assert!((8.0e8..1.1e9).contains(&planet));
+        // Sun-like star (luminosity 1.0) system SOI: 300 GALAXY UNITS.
+        let system = vd_core::geometry::system_soi(1.0);
+        assert!((system - 300.0).abs() < 1e-9);
+        // Different formulas, units, and magnitudes by construction.
+        assert!(planet / system > 1.0e5);
     }
 }

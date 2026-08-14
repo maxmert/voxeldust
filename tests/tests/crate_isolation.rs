@@ -52,11 +52,34 @@ const FORBIDDEN_IN_TIER_A: &[&str] = &[
 /// The crates that must stay pure (reachable I/O only through the injected seam).
 const TIER_A: &[&str] = &[
     "vd-core",
+    "vd-physics",
     "vd-wire",
     "vd-sim",
     "vd-node",
     "vd-connection-plane",
     "vd-harness",
+];
+
+/// SL4: physics and re-home are separate machinery, one-way. Exactly these crates may name a motion —
+/// i.e. carry a NORMAL dependency edge to `vd-physics` — each for a stated reason. Everything else is
+/// a placement CONSUMER: it reads authored rows (and runs opaque injected `MotionFn`s) and must not be
+/// ABLE to ask how a thing moves — an orbit symbol on the crossing path is an unresolved-crate compile
+/// error, not a review finding. (Dev-dependency edges are exempt BY THE GRAPH PARSER, deliberately:
+/// fixtures may plant a moving child and keep every branch covered; dev deps never ship.)
+const MAY_NAME_MOTION: &[(&str, &str)] = &[
+    (
+        "vd-bins",
+        "the composition root: builds the motion roster, runs the boot fences, injects MotionFns",
+    ),
+    (
+        "vd-connection-plane",
+        "the gateway resolves logins against THE world (UniverseConfig + WorldView) — the one party \
+         holding both ends of every login conversion",
+    ),
+    (
+        "vd-tests",
+        "the scenario library builds THE world's fixtures; a test-only crate nothing ships or depends on",
+    ),
 ];
 
 #[test]
@@ -100,6 +123,39 @@ fn gateway_ticket_crypto_is_unreachable_from_shard_simulation() {
 }
 
 #[test]
+fn sl4_the_crossing_path_cannot_name_a_motion() {
+    // THE STRUCTURAL HALF OF SL4 (audit finding 26; standing law: "Enforce structurally (a module/
+    // crate dependency rule), not by care"). The crossing/containment path — core's frame/geometry
+    // math, the wire, the sim that runs the detector and the flush, the node runtime, the client and
+    // the harness — must not be able to NAME how anything moves: no normal edge to vd-physics, so
+    // `use vd_physics::celestial::OrbitalElements` (the exact import the sim used to carry) is E0432.
+    //
+    // OBSERVED FAILING (the standing ground rule: a gate never observed failing is an argument, not a
+    // measurement): with `vd-physics = { workspace = true }` added to vd-sim's `[dependencies]`, this
+    // test failed with the message below (2026-08-14), and passed again once the edge was removed.
+    let graph = dependency_graph();
+    let allowed: BTreeSet<&str> = MAY_NAME_MOTION.iter().map(|(name, _)| *name).collect();
+    for (name, deps) in &graph {
+        if !name.starts_with("vd-") || allowed.contains(name.as_str()) || name == "vd-physics" {
+            continue;
+        }
+        assert!(
+            !deps.contains("vd-physics"),
+            "SL4 VIOLATION: {name} carries a NORMAL dependency on vd-physics — the crossing path can \
+             name a motion. Physics produces placements; consumers read the authored rows. If this \
+             crate has a stated reason to hold motion, add it to MAY_NAME_MOTION with that reason."
+        );
+    }
+    // The allowlist itself must not rot: every allowlisted crate exists in the workspace.
+    for (name, reason) in MAY_NAME_MOTION {
+        assert!(
+            graph.contains_key(*name),
+            "MAY_NAME_MOTION names {name} ({reason}) but the workspace has no such crate"
+        );
+    }
+}
+
+#[test]
 fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
     // The layering rule: core depends on nothing internal; wire only on core; sim on
     // wire+core; node on sim+wire+core. Lower layers never depend up.
@@ -124,5 +180,12 @@ fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
     assert!(
         !sim.contains("vd-node") && !sim.contains("vd-connection-plane"),
         "vd-sim never depends UP the stack"
+    );
+    // The motion crate sits beside wire: on core, and on nothing else internal (SL4's producer half —
+    // physics may not reach into the machinery it produces placements for).
+    assert_eq!(
+        internal(&graph["vd-physics"]),
+        BTreeSet::from(["vd-core".to_owned()]),
+        "vd-physics depends only on core"
     );
 }

@@ -1911,6 +1911,7 @@ fn rehome_event_for(
     roster: &BTreeMap<NodeId, ShardProfile>,
     req: &CapRequest,
     subject_owner: NodeId,
+    pose_realm_owner: Option<NodeId>,
     dest_adopted: bool,
 ) -> SagaEvent {
     match state {
@@ -1993,10 +1994,11 @@ fn rehome_event_for(
         // (unlike CELL 1's Demoting source-death) there is no already-committed live owner to self-promote
         // (the dest IS the committed owner). DESTRUCTIVE-budget gated exactly like the BatchHandoff dest-dead
         // ladder (the CSCALE-1 cure: `dead_observed_since` so a recoverable blip that clears in time never
-        // re-homes a healthy dest). Once past budget, `select_rehome_target` picks the lowest live shard
-        // satisfying the subject's caps (`req` — empty for a P3 bare-point Entity, the D-31 KindDef seam):
-        // Some(target) ⇒ `ReHomeTo` (the FSM bumps the fence to `target`); None (no capable live shard —
-        // whole-pool death) ⇒ `Timeout`, the saga stays PARKED (honest RED, never a forced incapable re-home).
+        // re-homes a healthy dest). Once past budget, `select_rehome_target` picks THE live directory
+        // owner of the stashed pose's realm — the one node that can place the pose (Stage-C fix; the
+        // old lowest-live-roster pick sent the subject to a shard that refused the foreign frame):
+        // Some(target) ⇒ `ReHomeTo` (the FSM bumps the fence to `target`); None (no placeable live
+        // owner) ⇒ `Timeout`, the saga stays PARKED (honest RED, never a re-home a receiver refuses).
         //
         // ⚠️ The liveness check is on `subject_owner` — the CURRENT directory owner — NOT `ctx.dest` (the
         // original, now-stale dest). After ONE re-home the directory names the LIVE target, so a later fire
@@ -2010,7 +2012,7 @@ fn rehome_event_for(
                 if dead_budget_elapsed(dead_observed_since, subject_owner, now)
                     >= tuning.abort_deadline_ticks
                 {
-                    match select_rehome_target(req, roster, liveness, now) {
+                    match select_rehome_target(req, pose_realm_owner, roster, liveness, now) {
                         Some(target) => SagaEvent::ReHomeTo { target },
                         None => SagaEvent::Timeout, // no capable live target → stay parked
                     }
@@ -2028,25 +2030,35 @@ fn rehome_event_for(
     }
 }
 
-/// D-37 target selection (Slice 1): the LOWEST live `NodeId` in the roster whose profile SATISFIES the
-/// subject's required capabilities — the deterministic forward-re-home target. `BTreeMap` iterates
-/// ascending, so the first match IS the lowest (a deterministic tie-break the SEED-replay byte-identical
-/// canary depends on). HR3: a `ShardProfile` capability match (`satisfies`), NEVER a match on a shard-kind
-/// discriminant. Returns `None` when no capable live shard exists (whole-pool death / zero spare capacity)
-/// — the caller then leaves the saga PARKED (honest RED, never a forced re-home to a dead or incapable
-/// node). Bitwise `&` (HR5, no short-circuit branch gap): both predicates are evaluated for every
-/// candidate (`satisfies` on a dead node is harmless). For a P3 bare-point entity `req` is empty, so the
-/// selection degenerates to "the lowest live shard"; the capability match future-proofs ship/voxel realms.
+/// D-37 target selection (Stage-C fix of the realm-blind pick): the forward-re-home target is THE
+/// LIVE DIRECTORY OWNER OF THE POSE'S OWN REALM — the one node in the world that can lawfully place
+/// the stashed pose (the receiver's `place_arriving_pose` accepts only its own frame and its direct
+/// children's; the flushed pose is VERBATIM in the SOURCE realm's frame, so the source realm's
+/// current owner is the placeable target — usually the source shard itself, or whoever the realm
+/// re-homed to since). The old selection — the lowest live roster node satisfying the caps — was
+/// realm-blind: for a P3 bare-point entity it degenerated to "the lowest live NodeId", whose shard
+/// then rightly REFUSED the foreign-frame pose forever (the audit's HR3 critical).
+///
+/// `pose_realm_owner` is resolved by the caller from the directory head of the pose's frame realm —
+/// the SAME fenced source of truth every authority answer comes from (never a peer claim, never a
+/// roster guess). `None` (no stashed pose / a frame with no single realm owner / no live record) ⇒
+/// the saga stays PARKED (honest RED, never a forced re-home a receiver must refuse); the next scan
+/// fire re-resolves, so a demand-respawned realm is picked up as soon as its head lands. The
+/// capability match stays: a roster profile that cannot satisfy the subject's caps refuses (HR3 —
+/// a capability match, never a shard-kind test); a node absent from the static roster (a
+/// demand-spawned shard) carries the strongest capability statement available — it already hosts
+/// the realm the pose lives in — so it is accepted. Bitwise `&` (HR5).
 fn select_rehome_target(
     req: &CapRequest,
+    pose_realm_owner: Option<NodeId>,
     roster: &BTreeMap<NodeId, ShardProfile>,
     liveness: &LivenessTracker,
     now: UniverseTick,
 ) -> Option<NodeId> {
-    roster
-        .iter()
-        .find(|(node, profile)| !liveness.is_confirmed_dead(**node, now) & profile.satisfies(req))
-        .map(|(node, _)| *node)
+    let node = pose_realm_owner?;
+    let alive = !liveness.is_confirmed_dead(node, now);
+    let capable = roster.get(&node).is_none_or(|p| p.satisfies(req));
+    (alive & capable).then_some(node)
 }
 
 /// D-37 Slice 3: a DETERMINISTIC, replay-stable `TransferId` for an orchestrator-minted STANDING re-home.
@@ -2111,10 +2123,12 @@ fn rehome_ctx(
 }
 
 /// D-37 Slice 3: drain the standing re-home queue the reaper filled THIS sweep (a same-tick within-barrier
-/// hand-off) and ARM each through the ONE machinery. For each orphan: pick a LIVE capability-matched target
-/// (`select_rehome_target`); `None` (whole-pool death / no spare capacity) DROPS the entry — the reaper
-/// re-detects the still-unlocked record next sweep and retries once a target appears (interval-paced, never
-/// a tight spin, never a forced incapable re-home). `lock_transfer` makes the armed saga the SOLE owner of
+/// hand-off) and ARM each through the ONE machinery. The parked saga names NO forward target (Stage-C
+/// fix of the realm-blind pick): a pre-flush death has no recoverable pose, so no node in the world can
+/// be named as placeable — the park records the DEAD OWNER (truthful: authority stays at the corpse)
+/// and the Slice-4 adopt, which arrives WITH the checkpoint pose, must select its target pose-aware
+/// (`select_rehome_target` over the pose realm's live directory owner) at adopt time, never earlier.
+/// `lock_transfer` makes the armed saga the SOLE owner of
 /// the key's transfer lifecycle (so the next reaper sweep SKIPS it via the `in_transfer` gate — no
 /// re-detection churn); `false` = already locked → skip (one key → one re-home saga). The saga ARMS via
 /// `saga::start_rehome` and PARKS in `ReHoming` (CONSERVATIVE Slice-3 split: no `ReHomeCommit`, no adopt —
@@ -2130,17 +2144,16 @@ fn process_rehome_starts(
     epoch: EpochId,
     now: UniverseTick,
 ) {
-    let req = CapRequest::default();
     for PendingReHome {
         subject,
         dead_owner,
         prev_fence,
     } in std::mem::take(&mut runtime.pending_rehome)
     {
-        let Some(target) = select_rehome_target(&req, &runtime.roster, &runtime.liveness, now)
-        else {
-            continue; // no live capable shard → drop; the reaper re-detects + retries next sweep (honest)
-        };
+        // The park's target IS the dead owner — the only truthful value while no pose exists (see
+        // the fn doc). Slice 4 re-selects pose-aware; committing any live node here would be the
+        // realm-blind pick the Stage-C audit condemned, deferred one slice.
+        let target = dead_owner;
         let transfer = rehome_transfer_id(subject, prev_fence);
         if !dir.lock_transfer(subject, transfer) {
             continue; // already locked (a concurrent arm / a prior sweep's saga) → one key, one re-home
@@ -2211,6 +2224,14 @@ fn scan_deadlines(
             let subject_owner = dir
                 .head(live.ctx.subject)
                 .map_or(live.ctx.dest, |r| r.authority.node());
+            // The forward-re-home target's ONLY lawful value (see `select_rehome_target`): the live
+            // directory owner of the stashed pose's OWN realm — the node whose `place_arriving_pose`
+            // accepts that frame. Resolved from the SAME fenced directory as every authority answer.
+            let pose_realm_owner = live
+                .flushed_pose
+                .and_then(|p| p.frame.realm())
+                .and_then(|realm| dir.head(DirectoryKey::Realm(realm)))
+                .map(|r| r.authority.node());
             // The dead-aware deadline event: a re-drive toward a CONFIRMED-DEAD participant becomes a
             // RESOLUTION instead of looping at a corpse forever. ALL branching lives in the monomorphic
             // `rehome_event_for` helper (see its doc) so this scan stays a branchless dispatch (HR5). The
@@ -2226,6 +2247,7 @@ fn scan_deadlines(
                 roster,
                 &req,
                 subject_owner,
+                pose_realm_owner,
                 live.dest_adopted,
             );
             due.push((*transfer, event));
@@ -4510,7 +4532,9 @@ mod tests {
             "the reaper enqueues the orphan for a standing re-home (does NOT revoke it)"
         );
 
-        // ARM: a fresh re-home saga parks in ReHoming{target}; the key is locked; authority STAYS at corpse.
+        // ARM: a fresh re-home saga parks in ReHoming; the key is locked; authority STAYS at the
+        // corpse — and so does the parked TARGET (Stage-C fix): a pre-flush death has no pose, so
+        // no live node can be named placeable; Slice 4 selects pose-aware at adopt time.
         let mut outbox = OutboundBox::default();
         process_rehome_starts(
             &mut runtime,
@@ -4531,10 +4555,10 @@ mod tests {
         assert_eq!(
             live.state,
             SagaState::ReHoming {
-                target,
+                target: dead,
                 prev_fence: Fence(3),
             },
-            "the saga parks in ReHoming at the selected live target"
+            "the saga parks in ReHoming at the DEAD owner (no pose ⇒ no placeable target yet)"
         );
         let head = dir
             .head(entity)
@@ -4625,9 +4649,10 @@ mod tests {
 
     #[test]
     fn process_rehome_parks_when_no_live_target() {
-        // D-37 Slice 3: with NO live capable shard (empty roster — whole-pool death) select_rehome_target
-        // returns None and process_rehome_starts DROPS the entry: no saga, key stays UNLOCKED so the reaper
-        // re-detects + retries next sweep (interval-paced, never a forced incapable re-home). Covers None.
+        // D-37 Slice 3 → Stage-C fix: the standing re-home parks UNCONDITIONALLY (even at whole-pool
+        // death) — the park names the dead owner, the key LOCKS (no reaper churn), and the future
+        // Slice-4 adopt selects its target pose-aware. Nothing waits for a roster node any more,
+        // because no roster node can be named placeable without a pose.
         let dead = NodeId(5);
         let entity = DirectoryKey::Entity(subject_eid());
         let mut dir = DirectoryCore::new(DirectoryTuning {
@@ -4654,15 +4679,15 @@ mod tests {
         );
         assert_eq!(
             runtime.live(),
-            0,
-            "no live target → no saga armed (the entry is dropped, retried next sweep)"
+            1,
+            "the standing re-home parks unconditionally — even with an empty roster"
         );
         assert!(
             dir.head(entity)
                 .expect("record present")
                 .in_transfer
-                .is_none(),
-            "the key stays UNLOCKED so the reaper re-detects + retries once a target appears"
+                .is_some(),
+            "the key LOCKS with the park (no reaper re-detection churn)"
         );
     }
 
@@ -5278,7 +5303,7 @@ mod tests {
     }
 
     #[test]
-    fn select_rehome_target_picks_the_lowest_live_capable_shard() {
+    fn select_rehome_target_takes_only_the_pose_realms_live_capable_owner() {
         use std::collections::BTreeMap;
         use vd_sim::capability::{CapRequest, ShardProfile, VoxelGeometry};
         let empty = ShardProfile::build(CapRequest::default()).expect("empty profile");
@@ -5287,67 +5312,80 @@ mod tests {
             ..CapRequest::default()
         })
         .expect("cartesian profile");
-        // N2 dead + capable, N3 live but INCAPABLE (empty, no voxel), N4 + N5 live + capable.
         let roster: BTreeMap<NodeId, ShardProfile> = [
             (NodeId(2), cartesian),
             (NodeId(3), empty),
             (NodeId(4), cartesian),
-            (NodeId(5), cartesian),
         ]
         .into_iter()
         .collect();
         let mut liveness = LivenessTracker::new(LivenessTuning::default()); // n = 1
-        liveness.record_unreachable(NodeId(2), UniverseTick(5)); // N2 confirmed dead
         let req = CapRequest {
             voxel: Some(VoxelGeometry::Cartesian),
             ..CapRequest::default()
         };
-        // N2 dead (skip), N3 incapable (skip), N4 live + capable = the LOWEST live capable (< N5).
+        // The pose realm's live, capable owner IS the target — other live capable nodes are NEVER
+        // considered (the realm-blind pick was the audit's critical: a receiver refuses a pose it
+        // cannot place, so only the placeable owner may be named).
         assert_eq!(
-            select_rehome_target(&req, &roster, &liveness, UniverseTick(5)),
+            select_rehome_target(&req, Some(NodeId(4)), &roster, &liveness, UniverseTick(5)),
             Some(NodeId(4)),
-            "the lowest LIVE, CAPABLE shard is chosen (dead + incapable skipped, deterministic order)"
+            "the pose realm's live capable owner is the target"
+        );
+        // A DEAD owner ⇒ None (park; the next scan fire re-resolves the head) — even with other
+        // live capable nodes in the roster.
+        liveness.record_unreachable(NodeId(4), UniverseTick(5));
+        assert_eq!(
+            select_rehome_target(&req, Some(NodeId(4)), &roster, &liveness, UniverseTick(5)),
+            None,
+            "a dead owner parks the saga; no realm-blind fallback exists"
+        );
+        // An INCAPABLE owner (profile cannot satisfy the caps) ⇒ None — never a forced re-home.
+        assert_eq!(
+            select_rehome_target(&req, Some(NodeId(3)), &roster, &liveness, UniverseTick(5)),
+            None,
+            "an incapable owner parks the saga"
+        );
+        // An owner ABSENT from the static roster (a demand-spawned shard) is accepted: hosting the
+        // pose's realm is the strongest capability statement available.
+        assert_eq!(
+            select_rehome_target(&req, Some(NodeId(77)), &roster, &liveness, UniverseTick(5)),
+            Some(NodeId(77)),
+            "a demand-spawned owner outside the roster is accepted"
         );
     }
 
     #[test]
-    fn select_rehome_target_returns_none_when_no_capable_live_shard_and_serves_an_empty_req() {
+    fn select_rehome_target_parks_without_a_pose_realm_owner_and_serves_an_empty_req() {
         use std::collections::BTreeMap;
-        use vd_sim::capability::{CapRequest, ShardProfile, VoxelGeometry};
+        use vd_sim::capability::{CapRequest, ShardProfile};
         let empty = ShardProfile::build(CapRequest::default()).expect("empty profile");
         let liveness = LivenessTracker::new(LivenessTuning::default());
-        // Empty roster ⇒ None (no target — the caller leaves the saga PARKED, honest RED).
-        let none_roster: BTreeMap<NodeId, ShardProfile> = BTreeMap::new();
+        let only_stub: BTreeMap<NodeId, ShardProfile> = [(NodeId(3), empty)].into_iter().collect();
+        // NO resolvable pose-realm owner (no stashed pose / a frame with no single realm owner /
+        // no directory record) ⇒ None — the saga PARKS honestly; the roster is never scanned.
         assert_eq!(
             select_rehome_target(
                 &CapRequest::default(),
-                &none_roster,
+                None,
+                &only_stub,
                 &liveness,
                 UniverseTick(0)
             ),
-            None
-        );
-        // A roster of only INCAPABLE shards for a voxel req ⇒ None (never a forced incapable re-home).
-        let only_stub: BTreeMap<NodeId, ShardProfile> = [(NodeId(3), empty)].into_iter().collect();
-        let voxel_req = CapRequest {
-            voxel: Some(VoxelGeometry::Cartesian),
-            ..CapRequest::default()
-        };
-        assert_eq!(
-            select_rehome_target(&voxel_req, &only_stub, &liveness, UniverseTick(0)),
             None,
-            "no shard satisfies a voxel req ⇒ None"
+            "no placeable owner ⇒ park; there is no realm-blind fallback"
         );
-        // But for the P3 EMPTY (bare-point) req, that same live stub IS the target.
+        // For the P3 EMPTY (bare-point) req, a live stub owner IS the target.
         assert_eq!(
             select_rehome_target(
                 &CapRequest::default(),
+                Some(NodeId(3)),
                 &only_stub,
                 &liveness,
                 UniverseTick(0)
             ),
             Some(NodeId(3)),
-            "an empty bare-point req is satisfied by a live stub shard"
+            "an empty bare-point req is satisfied by the live stub owner"
         );
     }
 
@@ -5380,6 +5418,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
@@ -5399,6 +5438,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
@@ -5417,6 +5457,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(
@@ -5436,6 +5477,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(
@@ -5444,8 +5486,8 @@ mod tests {
             "past budget → forward re-home to the live target"
         );
 
-        // (iv) dest DEAD, PAST budget, NO capable live target (empty roster) → Timeout (stay PARKED, honest).
-        let empty_roster: BTreeMap<NodeId, ShardProfile> = BTreeMap::new();
+        // (iv) dest DEAD, PAST budget, NO placeable owner (no resolvable pose-realm head) → Timeout
+        // (stay PARKED, honest) — the roster is never a fallback.
         let mut dos = Some((DEST, UniverseTick(0)));
         let ev = rehome_event_for(
             &promoting,
@@ -5454,15 +5496,16 @@ mod tests {
             &mut dos,
             &tuning,
             UniverseTick(24),
-            &empty_roster,
+            &roster,
             &req,
             DEST,
+            None,
             false,
         );
         assert_eq!(
             ev,
             SagaEvent::Timeout,
-            "no capable live target → the saga stays parked (honest)"
+            "no placeable live owner → the saga stays parked (honest)"
         );
     }
 
@@ -5881,6 +5924,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
@@ -5900,6 +5944,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
@@ -5918,6 +5963,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(
@@ -5938,6 +5984,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(ev, SagaEvent::SourceUnreachablePreAdopt);
@@ -5961,6 +6008,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(
@@ -5986,6 +6034,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             true,
         );
         assert_eq!(
@@ -6031,6 +6080,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(ev, SagaEvent::Timeout);
@@ -6055,6 +6105,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(
@@ -6079,6 +6130,7 @@ mod tests {
             &roster,
             &req,
             DEST,
+            Some(NodeId(9)),
             false,
         );
         assert_eq!(

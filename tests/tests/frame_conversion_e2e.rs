@@ -38,15 +38,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use vd_core::UniverseTick;
-use vd_core::celestial::{G, OrbitalElements, orbital_state};
-use vd_core::frame::FrameContext;
 use vd_core::glam::DVec3;
 use vd_core::pose::{FrameRef, RealmId};
-use vd_core::worldgen::{UniverseConfig, WorldView, moving_children_for_config};
 use vd_core::{AccountId, EntityId, NodeId};
 use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::FaultFabric;
 use vd_harness::topology::{InspectReport, Topology};
+use vd_physics::celestial::{G, OrbitalElements, orbital_state};
+use vd_physics::worldgen::{UniverseConfig, WorldView, moving_children_for_config};
 use vd_sim::stub::PlacementCarry;
 use vd_tests::frame_fixture::{
     FAR_OCCUPANT_FROM_PLANET_M, FAR_SYSTEM_FROM_GALAXY_M, NEAR_PLANET_FROM_STAR_M, WorkedExample,
@@ -738,7 +737,7 @@ fn a_sibling_handover_is_refused_loudly() {
     // in it.
     let sibling_frame = FrameRef::SystemSpace { system_seed: 8 };
     assert!(
-        !vd_core::worldgen::realm_neighbourhood_for(FRAME_UNIVERSE_SEED, SYSTEM)
+        !vd_physics::worldgen::realm_neighbourhood_for(FRAME_UNIVERSE_SEED, SYSTEM)
             .iter()
             .any(|r| r.frame == sibling_frame),
         "the fixture is only meaningful if the star genuinely has no region for its sibling",
@@ -969,9 +968,9 @@ fn the_box_and_the_thing_standing_in_it_draw_at_one_point() {
     let elements = coherence_orbit();
     let tick_hz = 1.0 / vd_tests::stub_config().tick_dt_s;
     let area_at = move |tick: vd_core::UniverseTick| {
-        vd_core::celestial::orbital_state(
+        vd_physics::celestial::orbital_state(
             &elements,
-            vd_core::celestial::secs_since_epoch(tick.0, tick_hz),
+            vd_core::kinematics::secs_since_epoch(tick.0, tick_hz),
         )
         .position
     };
@@ -1107,7 +1106,7 @@ fn the_box_and_the_thing_standing_in_it_draw_at_one_point() {
 ///
 /// The story: the neighbour star system is 1e13 m out, the planet 145 m from its star, the occupant 3.001 m
 /// above the planet. The trip is PLANET → SYSTEM → GALAXY → SYSTEM → PLANET, every hop through the
-/// production `transfer_frame` over the production `frame_context`, each addition made by the one party
+/// production `transfer_frame` over the production authored books, each addition made by the one party
 /// that holds that number.
 ///
 /// THE CONTROL IS PART OF THE PROOF. It computes what the removed fold computed — inflate the occupant to
@@ -1133,16 +1132,16 @@ fn a_round_trip_returns_the_occupant_to_the_metre_it_left() {
     let start = fx.occupant_pose();
 
     // UP: the planet ships "3.001, in my frame"; the SYSTEM adds where it put that planet.
-    let at_system = transfer_frame(&start, fx.system_frame, &fx.frame_context(fx.system))
+    let at_system = transfer_frame(&start, fx.system_frame, &fx.placement_book(fx.system))
         .expect("the star places its own planet");
     // UP: the system ships "148.001, in my frame"; the GALAXY adds where it put that system.
-    let at_galaxy = transfer_frame(&at_system, fx.galaxy_frame, &fx.frame_context(fx.galaxy))
+    let at_galaxy = transfer_frame(&at_system, fx.galaxy_frame, &fx.placement_book(fx.galaxy))
         .expect("the galaxy places its own system");
     // DOWN: the GALAXY subtracts — it is the only party that holds the 1e13.
-    let back_system = transfer_frame(&at_galaxy, fx.system_frame, &fx.frame_context(fx.galaxy))
+    let back_system = transfer_frame(&at_galaxy, fx.system_frame, &fx.placement_book(fx.galaxy))
         .expect("the galaxy places its own system");
     // DOWN: the SYSTEM subtracts, and the planet then accepts the result and does no arithmetic at all.
-    let back_planet = transfer_frame(&back_system, fx.planet_frame, &fx.frame_context(fx.system))
+    let back_planet = transfer_frame(&back_system, fx.planet_frame, &fx.placement_book(fx.system))
         .expect("the star places its own planet");
 
     let departed = start.pos.offset().x;
@@ -1505,18 +1504,13 @@ fn placeable_frames(topo: &mut Topology, node: NodeId) -> BTreeMap<String, bool>
         let cfg = s.world_mut().resource::<vd_sim::stub::StubConfig>();
         let (realm, tick_hz) = (cfg.realm, 1.0 / cfg.tick_dt_s);
         let regions = s.world_mut().resource::<vd_sim::stub::RealmRegions>();
-        let ctx = regions.frame_context(realm, tick_hz, UniverseTick(0));
+        let book = regions.author_book(realm, tick_hz, UniverseTick(0));
         // Ask about EVERY frame the whole seed forest contains, not just the ones this shard holds — the
         // question is what it can answer, and a shard that could place something it was never told about
         // would only be caught by asking about that thing.
-        vd_core::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED)
+        vd_physics::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED)
             .iter()
-            .map(|r| {
-                (
-                    format!("{:?}", r.realm),
-                    ctx.placement(r.frame, UniverseTick(0)).is_some(),
-                )
-            })
+            .map(|r| (format!("{:?}", r.realm), book.of(r.frame).is_some()))
             .collect()
     })
 }
@@ -1839,9 +1833,9 @@ fn authored_by(
     with_shard(topo, node, |s| {
         let cfg = s.world_mut().resource::<vd_sim::stub::StubConfig>();
         let (realm, tick_hz) = (cfg.realm, 1.0 / cfg.tick_dt_s);
-        s.world_mut()
-            .resource::<vd_sim::stub::RealmRegions>()
-            .authored_realm_snaps(realm, tick_hz, tick)
+        let regions = s.world_mut().resource::<vd_sim::stub::RealmRegions>();
+        regions
+            .authored_realm_snaps(realm, &regions.author_book(realm, tick_hz, tick))
             .into_iter()
             .map(|r| (r.realm, r.pose))
             .collect()
@@ -2409,7 +2403,7 @@ fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_playe
     // back on. Each box either arrives with its parent's box beside it, or names a realm the session's
     // own realm hangs off, which its login registry already gave it.
     let ancestry: BTreeSet<RealmId> =
-        vd_core::worldgen::ancestor_realms(&vd_core::worldgen::realm_regions_for(0), CHAIN_AREA)
+        vd_core::worldgen::ancestor_realms(&vd_physics::worldgen::realm_regions_for(0), CHAIN_AREA)
             .into_iter()
             .collect();
     for s in scene.values() {

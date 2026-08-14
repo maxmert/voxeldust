@@ -18,16 +18,16 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Local, Res, ResMut, Resource, Schedule, World};
-use vd_core::celestial::{OrbitalElements, orbital_state, secs_since_epoch};
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
-use vd_core::frame::{FrameContext, FrameError, FramePlacement, LocalFrames, transfer_frame};
+use vd_core::frame::{FrameError, FramePlacement, transfer_frame};
 use vd_core::geometry::{
     DepthKey, OverlapBand, RealmRegion, container, region_depth, region_signed_distance,
     should_rehome,
 };
 use vd_core::glam::{DQuat, DVec3};
-use vd_core::kinematics;
+use vd_core::kinematics::{self, secs_since_epoch};
+use vd_core::placement::{MotionFn, PlacementBook, PlacementLedger};
 use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose, Tier, frame_for_realm};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::realm_path::{RealmLevel, RealmPath};
@@ -936,6 +936,66 @@ pub struct AoiState {
 #[derive(Resource, Debug, Default)]
 pub struct RequestInFlight(pub BTreeMap<EntityId, TransferId>);
 
+/// THE PLACEMENT LEDGER (the placement arc S2): every anchor this shard hosts × a bounded backward
+/// window of exact per-instant [`PlacementBook`]s. ONE writer ([`author_placements`], at the head of
+/// every synced tick) publishes; every consumer — containment, crossing, AoI, the scene lanes,
+/// realm-frame authoring — SELECTS a book by an instant it already holds as data and reads rows with
+/// no clock. `Res` everywhere downstream: Bevy's `Res`/`ResMut` split is itself a partial structural
+/// guarantee that no consumer can write the store.
+#[derive(Resource, Debug, Default)]
+pub struct Placements(pub PlacementLedger);
+
+/// The ledger's backward window, in ticks: wide enough that every message-carried instant a lane can
+/// legitimately ask for is still retained — the hand-off hold window (a retained ghost's stamp is at
+/// most `handoff_hold_ttl_ticks` old) and the relay retain TTL (an observed-interior row is pruned
+/// past it), plus ONE tick for the held transients' stamp-lags-by-one shape (they re-advance AFTER
+/// the containment scan reads them). Derived, never a magic number.
+fn placement_window_ticks(config: &StubConfig) -> u32 {
+    u32::try_from(
+        u64::from(config.handoff_hold_ttl_ticks)
+            .max(retain_ttl_ticks(config))
+            .saturating_add(1),
+    )
+    .unwrap_or(u32::MAX)
+}
+
+/// THE ONE PLACEMENT WRITER (the placement arc S2): at the head of every synced tick, author a
+/// [`PlacementBook`] for every anchor this shard can be asked about — every region with a direct
+/// child in its forest (its own realm, each co-hosted realm, and each ancestor whose visible child
+/// chain it holds) plus every held realm (so a childless leaf still publishes an empty book and the
+/// detector's head-selection is total). Everything downstream this tick reads THESE rows; nothing
+/// re-derives a placement, so what a body is doing cannot decide what any consumer reads (SL4).
+// THE ONE stated exemption from the crate-wide `publish` ban (clippy.toml): this IS the writer.
+#[allow(clippy::disallowed_methods)]
+fn author_placements(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    regions: Res<RealmRegions>,
+    mut placements: ResMut<Placements>,
+) {
+    let tick_hz = 1.0 / config.tick_dt_s;
+    for anchor in placement_anchors(&regions, &config) {
+        let book = regions.author_book(anchor, tick_hz, clock.universe_tick);
+        placements.0.publish(anchor, book);
+    }
+}
+
+/// The anchors the writer authors for. Deterministic (forest order, then the held set), deduped.
+fn placement_anchors(regions: &RealmRegions, config: &StubConfig) -> Vec<RealmId> {
+    let mut anchors: Vec<RealmId> = regions
+        .regions
+        .iter()
+        .filter(|r| regions.regions.iter().any(|c| c.parent == Some(r.realm)))
+        .map(|r| r.realm)
+        .collect();
+    for &held in &config.held_realms {
+        anchors.push(held);
+    }
+    anchors.sort_unstable();
+    anchors.dedup();
+    anchors
+}
+
 /// The bitset width bound: a shard's region set exceeding this fails LOUD at boot (`guard_regions_nest`,
 /// C-5). The scale answer is NOT a wider bitset — it is the own-realm + ~4-ancestor scoping (children via
 /// the directory, §2.3), so 64 is generous headroom, not a ceiling on how crowded a realm can be.
@@ -952,12 +1012,13 @@ pub struct RealmRegions {
     regions: Vec<RealmRegion>,
     depths: Vec<DepthKey>,
     root_realm: Option<RealmId>,
-    /// The shard's DIRECT MOVING children (FA-2b): realm → its `OrbitalElements`. A region in this map
-    /// is AUTHORED live each tick from its ephemeris (`frame_context` registers it `with_moving_child`);
-    /// a region absent from it rides its static `center` at the identity placement. EMPTY at walk/static
-    /// scale (`worldgen::moving_children_for` returns none — all `StaticOffset`), so the frame context is
-    /// byte-identical to FA-1; the canonical seed generation (P4/FA-5) is what populates it.
-    moving: BTreeMap<RealmId, OrbitalElements>,
+    /// The shard's DIRECT MOVING children (FA-2b → the placement arc S5): realm → the OPAQUE
+    /// [`MotionFn`] the boot injected for it. A region in this map has its book row authored live each
+    /// tick by RUNNING the closure at the book's instant; a region absent from it rides its static
+    /// `center`. The simulation can RUN a motion, never NAME one: the closure's contents live in the
+    /// motion crate, which this crate carries no edge to (SL4, `crate_isolation` law) — the same seam
+    /// discipline as `sim::io`. EMPTY at walk/static scale, so the writer is byte-identical to FA-1.
+    moving: BTreeMap<RealmId, MotionFn>,
     /// Region index of each realm — the inverse of `regions`, so a realm resolves to its bit without a scan.
     ix_of: BTreeMap<RealmId, usize>,
     /// SELF ∪ ANCESTORS as a region bitmask, per region index (task #177). Computed ONCE at boot by the same
@@ -1046,15 +1107,13 @@ impl RealmRegions {
             .unwrap_or(0)
     }
 
-    /// Register the shard's DIRECT MOVING children (FA-2b): the `(realm, elements)` roster
-    /// `worldgen::moving_children_for` derives for the hosted realm. A builder (not a `new` arg) so the
-    /// many `RealmRegions::new` call sites stay unchanged and byte-identical (the walk roster passes an
-    /// empty map). Only the frames of registered realms author live; every other region stays static.
+    /// Register the shard's DIRECT MOVING children (FA-2b): the `(realm, motion)` roster the BOOT
+    /// composition derives for the hosted realm and injects as opaque [`MotionFn`]s. A builder (not a
+    /// `new` arg) so the many `RealmRegions::new` call sites stay unchanged and byte-identical (the
+    /// walk roster passes an empty map). Only registered realms' rows author live; every other region
+    /// stays static.
     #[must_use]
-    pub fn with_moving_children(
-        mut self,
-        moving: BTreeMap<RealmId, OrbitalElements>,
-    ) -> RealmRegions {
+    pub fn with_moving_children(mut self, moving: BTreeMap<RealmId, MotionFn>) -> RealmRegions {
         self.moving = moving;
         self
     }
@@ -1170,98 +1229,53 @@ impl RealmRegions {
             .map(|r| r.realm)
     }
 
-    /// Whether this shard carries a region for `realm` at all — i.e. whether it can anchor a frame context
-    /// on it and evaluate containment from inside it.
+    /// THE ONE WRITER's per-instant output for `anchor` (the placement arc): where this shard puts
+    /// each of `anchor`'s DIRECT children at `at`, as a [`PlacementBook`] — the instant a PROPERTY OF
+    /// THE TABLE, never a parameter of a read. Every consumer (containment, crossing, AoI, the scene
+    /// lanes, realm-frame authoring) reads THESE rows; a book carries no clock and no elements, so
+    /// nothing downstream can ask HOW a child moves (SL4).
+    ///
+    /// THE GROUND RULE, in code: only a parent knows where its children are, and a child has no idea
+    /// of its own position. So a book holds EXACTLY two things and nothing else:
+    ///   - this shard's OWN realm, at the identity — it IS its own origin, and it never learns where
+    ///     that origin sits (the book's anchor; computed, never stored — SL1);
+    ///   - each DIRECT CHILD, at its placement IN THIS SHARD'S FRAME — which this shard authors, so it
+    ///     knows it by definition.
+    ///
+    /// A parent, grandparent or sibling is deliberately absent: nobody has told this shard where they
+    /// are, so a conversion involving one must fail LOUD (the typed error) rather than quietly pretend
+    /// the identity and answer confidently from the wrong numbers.
     #[must_use]
-    pub fn hosts(&self, realm: RealmId) -> bool {
-        self.ix_of.contains_key(&realm)
+    pub fn author_book(&self, anchor: RealmId, tick_hz: f64, at: UniverseTick) -> PlacementBook {
+        let secs = secs_since_epoch(at.0, tick_hz);
+        PlacementBook::new(
+            self.own_frame(anchor),
+            at,
+            self.direct_children(anchor)
+                .map(|r| (r.frame, placement_row(&self.moving, r, secs)))
+                .collect(),
+        )
     }
 
-    /// The per-shard ephemeris [`FrameContext`] (D-45(a) frame-authority FA-1/FA-2b). A region in the
-    /// [`moving`](Self::moving) roster is AUTHORED live from its `OrbitalElements` each tick
-    /// (`with_moving_child` — `placement()` re-derives its pose from `tick`); every other region rides
-    /// its static `center` at the identity placement (`with_placed`). At walk/static scale the moving
-    /// roster is EMPTY, so every region takes the identity arm ⇒ byte-equivalent to [`IdentityFrames`]
-    /// for the container decision (the FA-1 seam-swap regression gate). `own` is the ambient-root
-    /// region's frame (defaulting to `GalaxySpace` for an empty forest, which the detector never
-    /// evaluates — it short-circuits on `is_empty`).
+    /// The shard's authored placements for EVERY direct child as [`RealmSnap`] observer rows — the
+    /// book's rows verbatim, one per child, static and moving alike (owner Q3, the placement arc S3:
+    /// "movers only" was a motion test deciding WHAT THE REALM FEED SHIPS — the last of the rival
+    /// has-orbit tests, D-FO-7 — and it silently dropped any child placed by non-orbital means). A
+    /// static child's row repeats its authored value each tick; the lane is latest-wins/unreliable,
+    /// so level-triggered repetition IS its loss story (send-on-change over an unreliable lane would
+    /// starve a joiner or a lost datagram forever — bandwidth at true scale is the ledgered P4 owe).
+    ///
+    /// THE SHARD COMPOSES NOTHING. Each row ships exactly as this shard authored it: the child's
+    /// placement measured in THIS shard's own frame, which is the only frame it is entitled to speak
+    /// in. It used to be folded here to a universe-root ABSOLUTE, out of a per-tick table this shard
+    /// computed by walking its own ancestor chain from the seed — i.e. the shard worked out where IT
+    /// was, which is precisely the thing a realm may never know. The conversion into whatever space a
+    /// particular viewer draws in happens once, at the gateway, which is the only party holding both
+    /// ends of it.
     #[must_use]
-    pub fn frame_context(
-        &self,
-        own_realm: RealmId,
-        tick_hz: f64,
-        _tick: UniverseTick,
-    ) -> LocalFrames {
-        // THE GROUND RULE, in code: only a parent knows where its children are, and a child has no idea
-        // of its own position. So this registers EXACTLY two things and nothing else:
-        //   - this shard's OWN realm, at the identity — it IS its own origin, and it never learns where
-        //     that origin sits;
-        //   - each DIRECT CHILD, at its placement IN THIS SHARD'S FRAME — which this shard authors, so it
-        //     knows it by definition.
-        // A parent, grandparent or sibling is deliberately absent: nobody has told this shard where they
-        // are, so a conversion involving one must fail LOUD (the typed error) rather than quietly pretend
-        // the identity and answer confidently from the wrong numbers.
-        //
-        // This replaces a fold-driven construction that placed EVERY realm at its position folded from the
-        // universe root. That worked and it was the wrong layer: it made every realm derive its own
-        // absolute from the root — the leak this rule forbids — and it threw away the precision that makes
-        // a planet's surface deal in metres however far the planet is from anything else.
-        let mut ctx = LocalFrames::new(self.own_frame(own_realm), tick_hz);
-        for r in self
-            .regions
-            .iter()
-            .filter(|r| is_direct_child(r.parent, own_realm))
-        {
-            ctx = match self.moving.get(&r.realm) {
-                // A moving child: authored live from its ephemeris each tick.
-                Some(elements) => ctx.with_moving_child(r.frame, *elements),
-                // A static child: its region centre IS its position in this shard's frame. It used to be
-                // registered at the ORIGIN, which is why a galaxy handed occupants to a star system as
-                // though that system sat at the galaxy's own centre — and the system, finding them 12 km
-                // outside everything it holds, showed them an empty sky.
-                None => ctx.with_placed(
-                    r.frame,
-                    FramePlacement {
-                        origin_cell: r.center.cell(),
-                        origin: r.center.offset(),
-                        velocity: DVec3::ZERO,
-                        orientation: DQuat::IDENTITY,
-                        angular_velocity: DVec3::ZERO,
-                    },
-                ),
-            };
-        }
-        ctx
-    }
-
-    /// The shard's authored placements for its MOVING children as [`RealmSnap`] observer rows (FA-2c) —
-    /// each computed LIVE from its `OrbitalElements` at `tick` (the closed-form ephemeris `frame_context`
-    /// would derive; a passive orbiting body is LAW-1's zero-signal case). The pose is stamped in the
-    /// shard's OWN (ambient-root) frame — the parent authors its children THERE. BRANCHLESS + EMPTY at
-    /// walk/static scale (`moving` is empty ⇒ no rows ⇒ `emit_realm_frames` sends nothing ⇒ byte-identical).
-    /// Authored (signal-driven, `with_placed`) children join here when they exist (P6/P9); today only the
-    /// orbital roster moves.
-    #[must_use]
-    pub fn authored_realm_snaps(
-        &self,
-        own_realm: RealmId,
-        tick_hz: f64,
-        tick: UniverseTick,
-    ) -> Vec<RealmSnap> {
-        // Movers-only view of the unified placements (RLM Step 2, H2): the observer feed ships only the
-        // moving children (a static child rides its `center`, not a live snap). At walk/static scale
-        // `moving` is empty ⇒ this drops every row ⇒ EMPTY ⇒ byte-identical to the pre-refactor feed.
-        //
-        // THE SHARD COMPOSES NOTHING. Each surviving row ships exactly as this shard authored it: the
-        // child's placement measured in THIS shard's own frame, which is the only frame it is entitled to
-        // speak in. It used to be folded here to a universe-root ABSOLUTE, out of a per-tick table this
-        // shard computed by walking its own ancestor chain from the seed — i.e. the shard worked out where
-        // IT was, which is precisely the thing a realm may never know. The conversion into whatever space a
-        // particular viewer draws in now happens once, at the gateway, which is the only party holding both
-        // ends of it.
-        self.child_placements(own_realm, tick_hz, tick)
+    pub fn authored_realm_snaps(&self, own_realm: RealmId, book: &PlacementBook) -> Vec<RealmSnap> {
+        self.child_rows(own_realm, book)
             .into_iter()
-            .filter(|(r, _)| self.moving.contains_key(&r.realm))
             .map(|(r, pose)| RealmSnap {
                 realm: r.realm,
                 // proto_minor 8, the edge HEAD: the CHILD's OWN frame — the frame that realm's
@@ -1278,12 +1292,13 @@ impl RealmRegions {
             .collect()
     }
 
-    /// The UNIFIED per-tick placement of EVERY DIRECT child (RLM Step 2, H2): a mover authored from its
-    /// `OrbitalElements`, a static child at its region `center`. ONE position code-path both the observer
-    /// feed AND the AoI loop consume — no third position path. DIRECT children only (`parent == own`);
-    /// ancestor/self/root regions excluded. Poses stamped in the shard's OWN (ambient-root) frame — the
-    /// SAME frame `authored_realm_snaps` used, so the AoI distance and the feed measure one geometry
-    /// (H-1). Returns `(&RealmRegion, StampedPose)` so callers read extent/aoi/parent without a re-scan.
+    /// The UNIFIED per-tick placement of EVERY DIRECT child (RLM Step 2, H2): ONE authored book
+    /// ([`author_book`](Self::author_book)) joined back onto the child regions as stamped poses. ONE
+    /// position code-path both the observer feed AND the AoI loop consume — no third position path.
+    /// DIRECT children only (`parent == own`); ancestor/self/root regions excluded. Poses stamped in
+    /// the shard's OWN frame — the SAME frame `authored_realm_snaps` used, so the AoI distance and the
+    /// feed measure one geometry (H-1). Returns `(&RealmRegion, StampedPose)` so callers read
+    /// extent/aoi/parent without a re-scan.
     #[must_use]
     pub fn child_placements(
         &self,
@@ -1291,20 +1306,29 @@ impl RealmRegions {
         tick_hz: f64,
         tick: UniverseTick,
     ) -> Vec<(&RealmRegion, StampedPose)> {
-        // ONE anchor: THIS SHARD'S OWN frame. A parent authors its children's placements in its own frame —
-        // it has no other frame to author them in, and under the ground rule it does not know where the
-        // ambient root is.
-        //
-        // This used to stamp them with the ROOT's frame while the values were the shard's own — a label
-        // that disagreed with its own contents. It was invisible while every realm sat at the origin,
-        // because then the root's frame and the shard's own frame were the same numbers. The moment a shard
-        // sat anywhere else, the two feeds reaching one client parted company: the realm boxes composed
-        // against the root's absolute (zero) and the things standing in them against the shard's own, so the
-        // boxes and their occupants drew in spaces offset by the shard's own position.
-        let own_frame = self.own_frame(own_realm);
-        let secs = secs_since_epoch(tick.0, tick_hz);
+        let book = self.author_book(own_realm, tick_hz, tick);
+        self.child_rows(own_realm, &book)
+    }
+
+    /// Join an authored book's rows back onto this shard's DIRECT child regions as stamped poses.
+    ///
+    /// ONE anchor: THIS SHARD'S OWN frame (the book's anchor). A parent authors its children's
+    /// placements in its own frame — it has no other frame to author them in, and under the ground
+    /// rule it does not know where the ambient root is. The `expect` states an invariant, never a
+    /// hope: the book was authored over this SAME child roster, so every direct child has a row.
+    #[must_use]
+    pub fn child_rows<'a>(
+        &'a self,
+        own_realm: RealmId,
+        book: &PlacementBook,
+    ) -> Vec<(&'a RealmRegion, StampedPose)> {
         self.direct_children(own_realm)
-            .map(|r| (r, place_child(&self.moving, r, own_frame, secs, tick)))
+            .map(|r| {
+                let at = book
+                    .of(r.frame)
+                    .expect("the book was authored over this same child roster");
+                (r, pose_of_row(book, at))
+            })
             .collect()
     }
 
@@ -1326,37 +1350,46 @@ fn is_direct_child(region_parent: Option<RealmId>, own_realm: RealmId) -> bool {
     region_parent == Some(own_realm)
 }
 
-/// Place ONE child (RLM Step 2, H2): a mover from its ephemeris (`orbital_state`), a static child at its
-/// `center` (both in the parent's OWN frame — cell-0 identity through P3). The `match` is covered once
-/// here (a mover test + a static test), NOT per generic monomorphization (HR5).
-fn place_child(
-    moving: &BTreeMap<RealmId, OrbitalElements>,
+/// Author ONE child's placement row (the placement arc) — THE single motion test in this crate: a
+/// mover's row RUNS its injected [`MotionFn`] at the book's instant, a static child's row is its
+/// stored region `center`. Both arms write the SAME kind of value into the SAME row; nobody
+/// downstream can tell which arm ran — which is exactly SL4's demand (a static flag may decide
+/// WHETHER TO RECOMPUTE, never WHAT ANYONE READS). And the mover arm cannot even NAME what it runs:
+/// the closure was injected at boot from the motion crate, which this crate has no edge to.
+/// Monomorphic — the `match` is covered once here (a mover test + a static test), NOT per generic
+/// monomorphization (HR5).
+///
+/// The static arm carries the WHOLE stored position, integer cell anchor included. It used to read
+/// only the f64 remainder and silently threw the anchor away — invisible while every region is
+/// authored at cell ZERO, and it would have stayed invisible until the first child placed a
+/// cell-block out drew at the wrong place.
+fn placement_row(
+    moving: &BTreeMap<RealmId, MotionFn>,
     r: &RealmRegion,
-    own: FrameRef,
     secs: f64,
-    tick: UniverseTick,
-) -> StampedPose {
+) -> FramePlacement {
     match moving.get(&r.realm) {
-        Some(elements) => {
-            let st = orbital_state(elements, secs);
-            let mut p = StampedPose::at_rest(own, st.position, tick);
-            p.vel = st.velocity;
-            p
-        }
-        // The WHOLE stored position, integer cell anchor included. This used to be
-        // `at_rest(own, r.center.offset(), ...)`, which reads only the f64 remainder and silently
-        // threw the anchor away — the same defect `transfer_frame` had, one function along. It was
-        // invisible because every region in the forest today is authored at cell ZERO, and it would
-        // have stayed invisible until the first child placed a cell-block out drew at the wrong place.
-        // This row is the realm lane the gateway is about to key its placement table on, so a dropped
-        // anchor here would become every occupant's dropped anchor.
-        None => StampedPose {
-            frame: own,
-            pos: r.center,
-            vel: DVec3::ZERO,
-            orient: DQuat::IDENTITY,
-            universe_tick: tick,
+        Some(motion) => (motion.0)(secs),
+        None => FramePlacement {
+            origin_cell: r.center.cell(),
+            origin: r.center.offset(),
+            velocity: DVec3::ZERO,
+            orientation: DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
         },
+    }
+}
+
+/// A book row read back as a stamped pose in the book's own anchor frame, at the book's own instant —
+/// the ONE conversion between the two shapes of "where this child is" (the inverse of
+/// [`placement_of`]), so no lane can end up stamping a different frame or instant onto the same fact.
+fn pose_of_row(book: &PlacementBook, at: FramePlacement) -> StampedPose {
+    StampedPose {
+        frame: book.anchor(),
+        pos: LatticePos::at(at.origin_cell, at.origin),
+        vel: at.velocity,
+        orient: DQuat::IDENTITY,
+        universe_tick: book.at(),
     }
 }
 
@@ -1802,6 +1835,32 @@ pub struct StubStats {
     /// pose (the departure decision went stale — the occupant came back inside before the pose
     /// shipped). Same abort-and-keep shape as `flush_stale_entry`, for the flap's mirrored half.
     pub flush_stale_exit: u64,
+    /// Placement-book selections that MISSED: a consumer asked the ledger for an instant outside the
+    /// retained window (or an anchor with no books). Every miss is a degrade the lane handles loudly —
+    /// a skipped subject, a refused arrival, a dropped relay batch — never a silently substituted
+    /// nearby instant. 0 in any healthy run (the placement arc's S2 gate).
+    pub placement_book_miss: u64,
+    /// Cross-shard clock skew CLAMPED to the head: a message-carried instant fell outside this shard's
+    /// retained window — AHEAD (two followers observe the same ClockSync broadcasts at different
+    /// arrival phases) on any lane, or EITHER direction on the ARRIVING hand-off lane (a retained,
+    /// retried envelope's stamp never changes, so its age grows with every redelivery). The receiving
+    /// lane read its world of NOW — the head book, the pose re-stamped to the head's instant, the same
+    /// one-instant rule the flush follows and the same "an occupant rides its realm" answer the
+    /// up-observation ride measurement pinned. MEASURED at process tier (2026-08-14): the demand
+    /// round-trip's fly-out wedged on exactly this before the clamp (refused at `head−345` ticks, once
+    /// per redelivery, forever). Counted, never silent; the widest skew rides
+    /// `placement_skew_max_ticks`. A stale RELAY datagram still drops loudly (`placement_book_miss`).
+    pub placement_skew_clamped: u64,
+    /// The widest forward skew clamped, in ticks — the `span_ahead` measurement the placement arc owed.
+    pub placement_skew_max_ticks: u64,
+    /// The WIDEST latch→flush staleness observed on this shard, in ticks: at each pose flush, the gap
+    /// between this shard's clock and the flushed pose's stamp. A latched dot's stamp is FROZEN at the
+    /// latch (`readvance_dots` deliberately skips it), so this gap is exactly how far the world's moving
+    /// placements have swept under the departure/entry decisions the flush re-validates — the error is
+    /// `gap × tick_dt × v(fastest mover)` (7.68 m/s for THE world's inner planet, post the S4 re-solve) against a 1.0 m
+    /// containment inset. The S0 measurement of the frozen-flush-instant defect; the crossing e2e pins
+    /// it to 0 once the flush re-reads the world at the CURRENT placement book (the S2 fix).
+    pub flush_stamp_gap_ticks_max: u64,
     /// Local observers shipped NO realm rows because they stand in a frame this shard neither is nor
     /// authors. Never normal: it means a pose reached this shard labelled with a realm nobody here can
     /// place, and the honest answer is to say nothing rather than to state positions in the wrong space.
@@ -1966,7 +2025,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
         "own parent aliases own RealmId under lowered() — the parent resolve would self-fence; \
          migrate parent-resolve + directory to path()-keying together (DEFERRED)",
     );
+    // The placement ledger's window derives from the config BEFORE the config moves into the world.
+    let placement_window = placement_window_ticks(&config);
     world.insert_resource(config);
+    world.insert_resource(Placements(PlacementLedger::new(placement_window)));
     world.insert_resource(Dots::default());
     world.insert_resource(RealmAuthority::default());
     world.insert_resource(CoHostedAuthority::default());
@@ -2034,6 +2096,11 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // a mechanical arity workaround, NOT a semantics change.
     schedule.add_systems(
         (
+            // THE ONE PLACEMENT WRITER, at the head of the tick (the placement arc S2): after
+            // `observe_clock_syncs` (registered earlier on this SingleThreaded schedule), before any
+            // consumer — so every system this tick reads the SAME authored rows. `has_synced`-gated:
+            // a pre-sync clock must not author placements (D-Finding-1, same gate as every author).
+            author_placements.run_if(has_synced),
             request_pending_grants,
             process_inbound,
             // RLM 5f RG-1: the reactive greeting — UNGATED (fires pre-sync/pre-lease, reachability precedes
@@ -2285,6 +2352,9 @@ fn pending_grant_op(dot: &Dot, node: NodeId) -> Option<DirectoryOp> {
 /// individual borrows at the top of the system.
 type VuAoiInbound<'w> = (
     Res<'w, RealmRegions>,
+    // The placement ledger — READ-ONLY here (the one writer is `author_placements`): the arrival and
+    // flush ingress arms select their books from it.
+    Res<'w, Placements>,
     ResMut<'w, ParentRealmNode>,
     // Step 5 slice C — the from-above holding the `ChildSceneSet` receive arm replaces whole.
     ResMut<'w, FromAboveScene>,
@@ -2337,6 +2407,7 @@ fn process_inbound(
 ) {
     let (
         regions,
+        placements,
         mut parent_node,
         mut from_above,
         mut child_liveness,
@@ -2384,6 +2455,7 @@ fn process_inbound(
                 &config,
                 &clock,
                 &regions,
+                &placements.0,
                 &mut authority,
                 &mut confirmed,
                 &mut cohosted,
@@ -2439,7 +2511,15 @@ fn process_inbound(
                 // ADDS the one placement it authors for that child (SL1) and holds the restated bytes
                 // for `emit_realm_frames` to fan and to relay one hop further up.
                 Ok(InterShardFlow::RealmObservation(ro)) => {
-                    on_realm_observation(ro, &config, &clock, &regions, &mut observed, &mut stats);
+                    on_realm_observation(
+                        ro,
+                        &config,
+                        &clock,
+                        &regions,
+                        &placements.0,
+                        &mut observed,
+                        &mut stats,
+                    );
                 }
                 // The observation lane's STATIC half (slice C) — a live child's interior OUTLINES.
                 // This shard ADDS the one placement it authors for that child (SL1, at the shape
@@ -2464,6 +2544,7 @@ fn process_inbound(
                         &clock,
                         &authority,
                         &regions,
+                        &placements.0,
                         &child_liveness,
                         &dots,
                         &holds,
@@ -3592,6 +3673,7 @@ fn on_re_home(
     cmd: ReHomeCmd,
     config: &StubConfig,
     regions: &RealmRegions,
+    placements: &PlacementLedger,
     self_node: NodeId,
     clock: &ClockSample,
     dots: &mut Dots,
@@ -3621,8 +3703,8 @@ fn on_re_home(
         cmd,
         config,
         regions,
+        placements,
         self_node,
-        clock,
         dots,
         registration,
         stats,
@@ -3653,8 +3735,8 @@ fn re_home_apply(
     cmd: ReHomeCmd,
     config: &StubConfig,
     regions: &RealmRegions,
+    placements: &PlacementLedger,
     self_node: NodeId,
-    clock: &ClockSample,
     dots: &mut Dots,
     registration: &mut GhostColliderRegistration,
     stats: &mut StubStats,
@@ -3675,26 +3757,21 @@ fn re_home_apply(
     // the command, so the realm it re-homes into is that shard's own. (The durable crossing ingress reads
     // its destination off the envelope, because a crossing can name a co-hosted child.)
     let sanitized = raw.sanitized();
-    let pose = match place_arriving_pose(
-        sanitized,
-        config.realm,
-        config,
-        regions,
-        clock.universe_tick,
-    ) {
-        Ok(placed) => placed,
-        Err(err) => {
-            stats.arrivals_unplaceable += 1;
-            tracing::error!(
-                %err,
-                arriving = ?sanitized.frame,
-                own = ?config.realm,
-                %entity,
-                "refusing a re-home this shard cannot place — the entity is NOT reconstructed"
-            );
-            return false;
-        }
-    };
+    let pose =
+        match place_arriving_pose(sanitized, config.realm, config, regions, placements, stats) {
+            Ok(placed) => placed,
+            Err(err) => {
+                stats.arrivals_unplaceable += 1;
+                tracing::error!(
+                    %err,
+                    arriving = ?sanitized.frame,
+                    own = ?config.realm,
+                    %entity,
+                    "refusing a re-home this shard cannot place — the entity is NOT reconstructed"
+                );
+                return false;
+            }
+        };
     // Deterministic clientless session key (entity id ↦ session) so seed-replay stays byte-identical and
     // the oracle held-set sees exactly one Owned dot for this entity.
     let session = SessionId(entity.0);
@@ -3875,10 +3952,12 @@ fn foreign_takeover_target(dot: &Dot, entity: EntityId) -> bool {
 /// total paths, all covered: a non-Entity subject → no-op; the subject not held here → counted
 /// no-op (a stale/misrouted flush); held → ship. Monomorphic (the finder + ship are hoisted out of
 /// the decode arm — HR5 branchless shim).
+#[allow(clippy::too_many_arguments)]
 fn on_flush_source(
     flush: FlushSource,
     config: &StubConfig,
     regions: &RealmRegions,
+    placements: &PlacementLedger,
     tick: UniverseTick,
     dots: &Dots,
     stats: &mut StubStats,
@@ -3891,13 +3970,27 @@ fn on_flush_source(
         tracing::warn!(%entity, "FlushSource for an entity this shard does not hold — no pose to ship");
         return;
     };
-    let Some(pose) = flush_pose_for_dest(dot.pose, flush.to_realm, config, regions, tick, stats)
-    else {
+    let Some(pose) = flush_pose_for_dest(
+        dot.pose,
+        flush.to_realm,
+        config,
+        regions,
+        placements,
+        tick,
+        stats,
+    ) else {
         // A REAL fault, already counted + logged inside the helper. Ship NO `SourceFlushed`: the saga
         // then times out and aborts, and the source keeps authority — the entity stays somewhere real
         // rather than being handed over with a position nobody can vouch for.
         return;
     };
+    // THE B-1 MEASUREMENT (placement arc S0→S2): the instant the shipped pose SPEAKS AT against this
+    // shard's clock at the flush. Before the fix the pose shipped at its frozen latch stamp and this
+    // measured 1 tick in the in-process cluster; the flush now re-reads the world at the head book's
+    // instant, so any gap here is a re-opened frozen-instant defect (the crossing e2e pins it to 0).
+    stats.flush_stamp_gap_ticks_max = stats
+        .flush_stamp_gap_ticks_max
+        .max(tick.0.saturating_sub(pose.universe_tick.0));
     outbox.push_flow(
         config.orchestrator,
         MsgClass::Saga,
@@ -3927,6 +4020,11 @@ pub enum UnplaceableArrival {
     /// log anywhere.
     #[error("the arriving pose's frame is neither mine nor one of my direct children: {0}")]
     ForeignFrame(#[from] FrameError),
+    /// The pose's stamp is outside the placement window this shard retains (a stale or future-skewed
+    /// sender, or a just-booted receiver whose ledger does not reach back that far). Refused loudly —
+    /// the saga times out and re-drives — never placed against a book of the wrong instant.
+    #[error("no authored placement book at the arriving pose's instant: {0}")]
+    BookMiss(#[from] vd_core::placement::PlacementMiss),
 }
 
 /// THE RECEIVER'S HALF OF THE CONVERSION — the mirror of [`flush_pose_for_dest`], and the only place a
@@ -3958,7 +4056,8 @@ fn place_arriving_pose(
     to_realm: RealmId,
     config: &StubConfig,
     regions: &RealmRegions,
-    tick: UniverseTick,
+    placements: &PlacementLedger,
+    stats: &mut StubStats,
 ) -> Result<StampedPose, UnplaceableArrival> {
     let Some(own) = arrival_frame(to_realm, config, regions) else {
         return Err(UnplaceableArrival::UnnameableOwnFrame);
@@ -3980,11 +4079,27 @@ fn place_arriving_pose(
         );
         return Ok(pose);
     }
-    // The ephemeris registers the destination realm and its DIRECT CHILDREN and nothing else, so this call
-    // is itself the direct-child test: a sibling or an ancestor has no placement here and comes back as a
-    // typed `FrameError` rather than as a number.
-    let frames = regions.frame_context(to_realm, 1.0 / config.tick_dt_s, tick);
-    Ok(transfer_frame(&pose, own, &frames)?)
+    // The book holds the destination realm's DIRECT CHILDREN and nothing else, so this lookup is
+    // itself the direct-child test: a sibling or an ancestor has no row and comes back as a typed
+    // `FrameError` rather than as a number. Selected at the POSE's OWN stamp when the window retains
+    // it; an instant OUTSIDE the window (forward ClockSync phase skew, or a redelivered hand-off
+    // whose stamp aged past the window while the saga retried) clamps to the HEAD — the receiver
+    // reads its world of NOW, counted and measured — because refusing a retried, immutably-stamped
+    // hand-off forever is a wedge, not a degrade (see `arrival_book`). `BookMiss` remains only for a
+    // receiver with no authored book at all (its first synced tick has not run).
+    let Some((book, at)) = arrival_book(placements, to_realm, pose.universe_tick, stats) else {
+        stats.placement_book_miss += 1;
+        return Err(UnplaceableArrival::BookMiss(
+            placements
+                .at(to_realm, pose.universe_tick)
+                .expect_err("the selector returned None, so the exact selection misses"),
+        ));
+    };
+    let pose = StampedPose {
+        universe_tick: at,
+        ..pose
+    };
+    Ok(transfer_frame(&pose, own, book)?)
 }
 
 /// The frame the arriving occupant is to be measured in: the DESTINATION realm's own frame.
@@ -4050,9 +4165,26 @@ fn flush_pose_for_dest(
     to_realm: RealmId,
     config: &StubConfig,
     regions: &RealmRegions,
+    placements: &PlacementLedger,
     tick: UniverseTick,
     stats: &mut StubStats,
 ) -> Option<StampedPose> {
+    // THE FLUSH READS THE WORLD OF NOW (the placement arc S2 — the B-1 fix). The decision to leave was
+    // made ticks ago and a latched dot's stamp FROZE there, while every moving placement swept on: at
+    // the measured latch→flush gap the world moved gap × v(mover) under the very departure/entry
+    // decisions this function re-validates (measured 1 tick in the in-process cluster — 0.15 m at the
+    // 50 Hz production rate (7.68 m/s inner planet) against a 1.0 m containment inset, per flushed hand-off). So the pose is
+    // RE-STAMPED to the head book's instant — "the pose ships as re-read NOW" made true rather than
+    // claimed — and every link below converts through head books of that same instant.
+    let Some(head) = placements.head(config.realm) else {
+        stats.placement_book_miss += 1;
+        return None;
+    };
+    let head_at = head.at();
+    let pose = StampedPose {
+        universe_tick: head_at,
+        ..pose
+    };
     // THE ANCHOR IS THIS SHARD'S OWN REALM, and it may never be anything else.
     //
     // This used to be read off the OCCUPANT'S LABEL (`realm_of_frame(pose.frame)`). A shard's region set
@@ -4111,7 +4243,9 @@ fn flush_pose_for_dest(
         // and thaws ⇒ this shard keeps authority and the scan re-decides. A self-crossing
         // (`to_realm == from_realm`) skips the check: "still inside myself" is not a stale departure.
         if to_realm != from_realm {
-            let frames = regions.frame_context(from_realm, 1.0 / config.tick_dt_s, tick);
+            // The head book IS the departure book: `from_realm` is this shard's own realm, and the
+            // pose was just re-stamped to the head's own instant.
+            let book = head;
             let still_held = regions
                 .regions
                 .iter()
@@ -4119,7 +4253,7 @@ fn flush_pose_for_dest(
                 .is_some_and(|own_region| {
                     // An unplaceable pose reads MAX ⇒ not held ⇒ the guard stays out of the way and the
                     // pose ships exactly as before this guard existed (the receiver stays the judge).
-                    let sd = region_signed_distance(&pose, own_region, &frames).unwrap_or(f64::MAX);
+                    let sd = region_signed_distance(&pose, own_region, book).unwrap_or(f64::MAX);
                     own_region.band.member(true, sd)
                 });
             if still_held {
@@ -4173,8 +4307,14 @@ fn flush_pose_for_dest(
     let mut placed = pose;
     let mut last: Result<(), FrameError> = Ok(());
     for &(target, parent) in &steps {
-        let frames = regions.frame_context(parent, 1.0 / config.tick_dt_s, tick);
-        match transfer_frame(&placed, target, &frames) {
+        // Every link's parent was authored this same tick by the one writer, so each head book
+        // speaks at the flush's own instant; a missing one refuses the flush loudly (saga aborts,
+        // this shard keeps authority) rather than converting through a placement nobody authored.
+        let Ok(book) = placements.at(parent, placed.universe_tick) else {
+            stats.placement_book_miss += 1;
+            return None;
+        };
+        match transfer_frame(&placed, target, book) {
             Ok(next) => placed = next,
             Err(err) => {
                 last = Err(err);
@@ -4194,11 +4334,13 @@ fn flush_pose_for_dest(
             // (the dest is an ancestor: `downs` empty) has no entry to validate — the occupant is
             // leaving a child INTO the dest, and its exit was the scan's own decision; the dest
             // region trivially holds a pose one level inside it, so the check passes structurally.
-            let frames = regions.frame_context(
+            let Ok(book) = placements.at(
                 dest_region.parent.unwrap_or(from_realm),
-                1.0 / config.tick_dt_s,
-                tick,
-            );
+                placed.universe_tick,
+            ) else {
+                stats.placement_book_miss += 1;
+                return None;
+            };
             // RE-VALIDATE THE ENTRY (Stage B1, owner decision 2026-08-12, §4v cure 1). The scan decided
             // "inside" at its tick; the pose ships as re-read NOW, after the freeze drain — and the
             // measured mislandings were 12.15 / 23.00 / 20.72 m outside a 4.16 m boundary, each an
@@ -4207,7 +4349,7 @@ fn flush_pose_for_dest(
             // would not HOLD this pose, the entry is no longer true — refuse the flush, the saga aborts
             // PRE-commit, this shard keeps authority, and a fast pass-through costs one aborted saga
             // instead of a committed mislanding and a fence-burning flap.
-            let sd = region_signed_distance(&placed, dest_region, &frames).unwrap_or(f64::MAX);
+            let sd = region_signed_distance(&placed, dest_region, book).unwrap_or(f64::MAX);
             if !dest_region.band.member(true, sd) {
                 stats.flush_stale_entry += 1;
                 tracing::warn!(
@@ -4235,17 +4377,13 @@ fn flush_pose_for_dest(
             //
             // `child_at` is the placement subtracted at the FINAL link — the one number nobody else
             // can supply and the one that decides whether the occupant lands inside or outside.
-            let child_at = frames
-                .placement(dest_region.frame, pose.universe_tick)
-                .map(|p| p.origin);
+            let child_at = book.of(dest_region.frame).map(|p| p.origin);
             // AND WHERE THE OCCUPANT'S OWN FRAME SITS. Without it the line above cannot be checked: a
             // measured run showed `from_pos` at the origin and a landing 27.85 m out when the difference
             // of the two logged vectors is 16.55, which is only possible if the pose is labelled with a
             // frame that is NOT this shard's own. That label, and where this shard puts it, are the two
             // missing numbers.
-            let from_at = frames
-                .placement(pose.frame, pose.universe_tick)
-                .map(|p| p.origin);
+            let from_at = book.of(pose.frame).map(|p| p.origin);
             tracing::info!(
                 to = ?to_realm,
                 at_tick = pose.universe_tick.0,
@@ -4372,7 +4510,7 @@ fn on_transfer_envelope(
     current_epoch: EpochId,
     config: &StubConfig,
     regions: &RealmRegions,
-    tick: UniverseTick,
+    placements: &PlacementLedger,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
     pending: &mut PendingCrossings,
@@ -4433,7 +4571,7 @@ fn on_transfer_envelope(
     // that is a refusal). A pose this shard cannot measure is DROPPED, not applied: applying it would
     // put the entity at a number nobody computed — which, at the scales this arc exists for, is the
     // player standing at the star instead of on the planet.
-    let pose = match place_arriving_pose(pose, to_realm, config, regions, tick) {
+    let pose = match place_arriving_pose(pose, to_realm, config, regions, placements, stats) {
         Ok(placed) => placed,
         Err(err) => {
             stats.arrivals_unplaceable += 1;
@@ -4623,6 +4761,7 @@ fn evaluate_realm_boundaries(
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     regions: Res<RealmRegions>,
+    placements: Res<Placements>,
     mut dots: ResMut<Dots>,
     mut owned_transients: ResMut<OwnedTransients>,
     mut progress: ResMut<CrossingProgress>,
@@ -4652,30 +4791,6 @@ fn evaluate_realm_boundaries(
     retain_live(&mut membership.0, &live);
     retain_live(&mut in_flight.0, &live);
 
-    // FA-1: the per-shard ephemeris frame context. At walk/static scale it is byte-equivalent to
-    // IdentityFrames; FA-4 refreshes moving-child placements per tick. `tick_hz = 1/tick_dt_s`.
-    let tick_hz = 1.0 / config.tick_dt_s;
-    let frames = regions.frame_context(config.realm, tick_hz, clock.universe_tick);
-    // ONE EPHEMERIS PER REALM AN OCCUPANT IS ACTUALLY IN — because containment is a question about the
-    // occupant, and a realm can only answer it about ITSELF and its DIRECT CHILDREN. A shard hosting one
-    // realm builds nothing extra here (every occupant is in that realm, so the map is empty and every
-    // lookup falls through to `frames` — byte-identical). A shard co-hosting a chain does: an occupant
-    // standing on its Planet has to be measured against the Planet's own children, and the Area it is
-    // about to walk into is a GRANDCHILD of the shard's primary realm, which the primary ephemeris
-    // deliberately cannot place at all. That is why the co-hosted Planet → Area crossing never fired: the
-    // area was unplaceable, so it was never a member, so it could never become the deepest container.
-    //
-    // This is NOT a chain folded from anywhere. Each context is anchored on one realm and registers that
-    // realm at the identity plus the children IT authors — the same ground rule, asked once per realm this
-    // shard actually holds, so every crossing it decides is exactly one parent-child link.
-    let mut anchors: BTreeMap<RealmId, LocalFrames> = BTreeMap::new();
-    for owning in subject_realms(&dots, &owned_transients, &config) {
-        if owning != config.realm && regions.hosts(owning) {
-            anchors
-                .entry(owning)
-                .or_insert_with(|| regions.frame_context(owning, tick_hz, clock.universe_tick));
-        }
-    }
     let ctx = CrossingCtx {
         config: &config,
         clock: &clock,
@@ -4685,16 +4800,39 @@ fn evaluate_realm_boundaries(
         ix_of: &regions.ix_of,
         root_realm: regions.root_realm,
         realm_fence,
-        frames: &frames,
-        anchors: &anchors,
     };
     // Per owned dot (only those this shard SIMULATES) — the durable subjects. `.iter_mut()` (not
     // `.values_mut()`) so the `SessionId` key is in scope: a durable crossing carries the subject's
     // session for the saga's gateway-routed `PrepareSubscribe` (Slice 3f).
     for (session, dot) in dots.0.iter_mut().filter(|(_, d)| d.authority.simulates()) {
         let pose = dot.pose;
+        // S0 of the placement arc — PIN the Stage-B4 guarantee the instant table stands on: a
+        // non-latched simulating dot was re-stamped THIS tick by `readvance_dots` (group A, strictly
+        // before this system), so the scan measures it against the world of NOW. A latched dot's
+        // stamp is deliberately frozen (the up-observation ride measurement) and is exempt.
+        debug_assert!(
+            in_flight.0.contains_key(&dot.entity) || pose.universe_tick == clock.universe_tick,
+            "a non-latched simulating dot's stamp must equal the clock at the detector",
+        );
+        // A DURABLE dot reads the HEAD book — the world of NOW. For a non-latched dot the head's
+        // instant IS the pose's stamp (the `readvance_dots` guarantee pinned above), bit-identical to
+        // the old per-stamp solve; a LATCHED dot's frozen position is measured against the current
+        // world, the same one-instant rule the flush follows (its scan outputs are suppressed by the
+        // standing latch either way).
+        let anchor = book_anchor(
+            &regions.ix_of,
+            config.realm,
+            owning_realm(pose.frame, config.realm),
+        );
+        let Some(book) = placements.0.head(anchor) else {
+            // No book for a subject's anchor is a writer gap, never a silent skip: counted, and the
+            // subject is simply not evaluated this tick (the next authored tick picks it up).
+            stats.placement_book_miss += 1;
+            continue;
+        };
         let eval = evaluate_one_subject(
             &ctx,
+            book,
             dot.entity,
             &pose,
             dot.authority.fence(),
@@ -4716,8 +4854,25 @@ fn evaluate_realm_boundaries(
         .filter(|(_, t)| t.status.is_held())
     {
         let pose = t.pose;
+        // A HELD TRANSIENT reads the book at ITS OWN stamp (row 18 of the instant table): it
+        // re-advances AFTER this scan, so its stamp is the previously authored instant — inside the
+        // window by construction (the `+1` in `placement_window_ticks`). Bit-identical to the old
+        // per-stamp solve. Do NOT reorder the re-advance ahead of this scan in this arc.
+        let anchor = book_anchor(
+            &regions.ix_of,
+            config.realm,
+            owning_realm(pose.frame, config.realm),
+        );
+        let book = match placements.0.at(anchor, pose.universe_tick) {
+            Ok(b) => b,
+            Err(_) => {
+                stats.placement_book_miss += 1;
+                continue;
+            }
+        };
         let eval = evaluate_one_subject(
             &ctx,
+            book,
             *entity,
             &pose,
             realm_fence,
@@ -4734,28 +4889,74 @@ fn evaluate_realm_boundaries(
     }
 }
 
-/// Every realm a subject on this shard is currently standing in, as named by its pose frame — the set of
-/// ephemerides the containment pass needs this tick, and nothing more. Almost always the lone
-/// `config.realm`; a co-hosting shard adds one entry per co-hosted realm somebody is actually in, so the
-/// cost is bounded by the realms in play rather than by the number of occupants.
+/// Select the book for a RELAY-carried instant, tolerating FORWARD clock skew: the exact book when
+/// the window retains it; the HEAD book — with the instant clamped to the head's own — when the stamp
+/// runs AHEAD of everything this shard has authored (a source whose ClockSync arrival phase leads this
+/// receiver's). The clamp is COUNTED and its size MEASURED (`placement_skew_*`); a stamp BEHIND the
+/// window is `None` — a stale datagram on a per-tick stream, the caller's loud drop (the next tick's
+/// ship supersedes it). Monomorphic; every arm covered once.
+fn book_at_or_head<'a>(
+    placements: &'a PlacementLedger,
+    anchor: RealmId,
+    stamp: UniverseTick,
+    stats: &mut StubStats,
+) -> Option<(&'a PlacementBook, UniverseTick)> {
+    if let Ok(book) = placements.at(anchor, stamp) {
+        return Some((book, stamp));
+    }
+    match placements.head(anchor) {
+        Some(head) if stamp > head.at() => {
+            stats.placement_skew_clamped += 1;
+            stats.placement_skew_max_ticks = stats
+                .placement_skew_max_ticks
+                .max(stamp.0.saturating_sub(head.at().0));
+            Some((head, head.at()))
+        }
+        _ => None,
+    }
+}
+
+/// Select the book for an ARRIVING HAND-OFF's instant — clamped to the head in BOTH directions when
+/// the window no longer (or does not yet) retain it, because a hand-off is a RETAINED, RETRIED message
+/// whose pose stamp never changes across redeliveries: one missed delivery plus an exact-instant law
+/// wedged the saga PERMANENTLY (MEASURED at process tier, 2026-08-14 — `at_tick=2105` refused against
+/// a head that had advanced to 2450+, once per redelivery, forever; the demand round-trip froze on
+/// it). The receiver reads its world of NOW instead: the occupant lands relative to where the realm
+/// IS, not where it was at the stamp — the same "an occupant rides its realm" rule the up-observation
+/// ride measurement pinned, and the same one-instant rule the flush follows. Both directions are
+/// COUNTED with their size; `None` only before the writer's first pass (no head at all).
+fn arrival_book<'a>(
+    placements: &'a PlacementLedger,
+    anchor: RealmId,
+    stamp: UniverseTick,
+    stats: &mut StubStats,
+) -> Option<(&'a PlacementBook, UniverseTick)> {
+    if let Ok(book) = placements.at(anchor, stamp) {
+        return Some((book, stamp));
+    }
+    let head = placements.head(anchor)?;
+    stats.placement_skew_clamped += 1;
+    stats.placement_skew_max_ticks = stats
+        .placement_skew_max_ticks
+        .max(stamp.0.abs_diff(head.at().0));
+    Some((head, head.at()))
+}
+
+/// The anchor whose authored book measures a subject standing in `owning`: the realm itself when this
+/// shard hosts it (a co-hosted realm answers for its own children), else the shard's PRIMARY realm —
+/// the fallback for a subject in a realm this shard carries no region for (a fault, counted as
+/// `containment_prior_unhosted` by the scan). Monomorphic so both arms are covered once (HR5).
 #[must_use]
-fn subject_realms(
-    dots: &Dots,
-    owned_transients: &OwnedTransients,
-    config: &StubConfig,
-) -> BTreeSet<RealmId> {
-    dots.0
-        .values()
-        .filter(|d| d.authority.simulates())
-        .map(|d| owning_realm(d.pose.frame, config.realm))
-        .chain(
-            owned_transients
-                .0
-                .values()
-                .filter(|t| t.status.is_held())
-                .map(|t| owning_realm(t.pose.frame, config.realm)),
-        )
-        .collect()
+fn book_anchor(
+    ix_of: &BTreeMap<RealmId, usize>,
+    config_realm: RealmId,
+    owning: RealmId,
+) -> RealmId {
+    if owning != config_realm && ix_of.contains_key(&owning) {
+        owning
+    } else {
+        config_realm
+    }
 }
 
 /// Read-only per-tick context shared by every subject evaluation (task #135).
@@ -4773,15 +4974,7 @@ struct CrossingCtx<'a> {
     /// The realm-authority fence — the durable subject's `subject_fence` fallback AND the transient
     /// `src_realm_fence`.
     realm_fence: Fence,
-    /// The per-shard ephemeris frame context (FA-1): the input seam re-expresses a subject pose into
-    /// each region's (possibly moving) frame through this before the signed distance. Byte-equivalent
-    /// to [`IdentityFrames`] at walk/static scale (every region frame at the identity placement).
-    /// Anchored on this shard's PRIMARY realm — the fallback for a subject standing in a realm this shard
-    /// carries no region for (which is a fault, counted as `containment_prior_unhosted`).
-    frames: &'a LocalFrames,
-    /// One further ephemeris per CO-HOSTED realm an occupant is actually standing in, anchored on THAT
-    /// realm. Empty on a shard hosting a single realm, so every lookup falls through to `frames`.
-    anchors: &'a BTreeMap<RealmId, LocalFrames>,
+
     /// The boot-computed SELF ∪ ANCESTORS bitmask per region index, and the realm→index map to address it
     /// (task #177). Together they give the DERIVED hysteresis prior: a subject is always a member of the
     /// realm it is authoritatively in and of every ancestor of it, so an arriving shard never starts from a
@@ -4896,6 +5089,9 @@ fn outward_dest(
 #[allow(clippy::too_many_arguments)]
 fn evaluate_one_subject(
     ctx: &CrossingCtx<'_>,
+    // The authored book this subject is measured through — selected by the CALLER per lane (head for
+    // a durable dot, the pose's own instant for a held transient), never by a clock in here (SL4).
+    book: &PlacementBook,
     entity: EntityId,
     pose: &StampedPose,
     subject_fence: Fence,
@@ -4949,12 +5145,14 @@ fn evaluate_one_subject(
              falling back to the stored-only prior, which is the pre-fix behaviour for this subject"
         );
     }
-    // THE EPHEMERIS OF THE REALM THIS SUBJECT IS STANDING IN. On a single-realm shard `anchors` is empty
-    // and this IS the shard's own context — the same object, byte-identically. On a co-hosting shard it is
-    // the context anchored on the occupant's own realm, which is the only one that can place that realm's
-    // children; measuring against the shard's primary realm instead left a co-hosted grandchild
-    // unplaceable, so an occupant could never be found inside it and never crossed into it.
-    let frames = ctx.anchors.get(&owning).unwrap_or(ctx.frames);
+    // THE MEASUREMENT POSE: the subject's position, stamp-aligned to the book's own instant. For a
+    // non-latched dot and a held transient the two instants are already equal (the caller's selection),
+    // so this is the identity; for a LATCHED dot (frozen stamp, head book) it is the deliberate
+    // one-instant rule — the frozen position measured against the world of NOW.
+    let measured = StampedPose {
+        universe_tick: book.at(),
+        ..*pose
+    };
     let bits = membership.entry(entity).or_default();
     let mut members: Vec<DepthKey> = Vec::new();
     for (ix, (region, &depth_key)) in ctx.regions.iter().zip(ctx.depths.iter()).enumerate() {
@@ -4963,7 +5161,7 @@ fn evaluate_one_subject(
         // scale every region is at identity so this is byte-equal to the retired `IdentityFrames`; FA-4
         // gives moving direct children a live orbital placement per tick. A frame the shard cannot name
         // (`Err`) SAFE-DEGRADES to non-member (`f64::MAX`) — never a spurious container.
-        let sd = region_signed_distance(pose, region, frames).unwrap_or(f64::MAX);
+        let sd = region_signed_distance(&measured, region, book).unwrap_or(f64::MAX);
         // EVERY REGION'S ANSWER, AND THE PLACEMENT IT WAS MEASURED AGAINST, whenever a NON-OWNED region
         // claims this point. A wrong container is chosen somewhere on the live path and the label follows
         // the decision: an occupant in the star was measured carrying a frame of a planet it is nowhere
@@ -4991,13 +5189,13 @@ fn evaluate_one_subject(
                 // remainder, so reading it as a position says "at the origin" for something far away. That
                 // single habit produced three wrong root causes in this arc.
                 pose_full = ?pose.pos.delta_m(vd_core::pose::LatticePos::local(DVec3::ZERO), pose.frame.tier()),
-                placement = ?frames.placement(region.frame, pose.universe_tick).map(|p| p.origin),
+                placement = ?book.of(region.frame).map(|p| p.origin),
                 pose_at = ?pose.pos.offset(),
                 pose_frame = ?pose.frame,
                 // THE REFRAMED POSITION ITSELF — the number the boundary is actually measured against.
                 // Without it the line above cannot distinguish "the placement was wrong" from "the
                 // subtraction was wrong", and the two need different fixes.
-                reframed = ?vd_core::frame::transfer_frame(pose, region.frame, frames)
+                reframed = ?vd_core::frame::transfer_frame(&measured, region.frame, book)
                     .map(|p| (p.pos.offset(), p.pos.cell(), p.pos.offset().length())),
                 region_shape = ?region.shape,
                 region_frame = ?region.frame,
@@ -5009,10 +5207,12 @@ fn evaluate_one_subject(
         let was_member = bits.get(ix) | (owned_mask & (1u64 << ix) != 0);
         let now = region.band.member(was_member, sd);
         // MEMBERSHIP, which is what the container fold actually reads — not "geometrically inside", which
-        // is what the line below used to report. The band is sized from the occupant's SPEED, so at flight
-        // speed its release edge can reach past a sibling's acquire edge: an occupant can be a member of
-        // TWO siblings at once without being inside either. Two same-depth members are then resolved by
-        // `depth_beats`, which breaks the tie on realm id — the LOWER number, not the nearer realm.
+        // is what the line below used to report. The band's edges straddle the region's surface (an inset
+        // acquire edge inside it, an outset release edge past it — STATIC widths: the shipped band is built
+        // at v_rel = 0, and the speed-sized widening is still OWED, D-WORLD-4b), so where two siblings sit
+        // closer than those dead-zones an occupant can be a member of TWO siblings at once without being
+        // inside either. Two same-depth members are then resolved by `depth_beats`, which breaks the tie on
+        // realm id — the LOWER number, not the nearer realm.
         if now && region.parent == Some(owning) {
             tracing::debug!(
                 entity = entity.0,
@@ -5404,10 +5604,12 @@ fn readvance_transients(
 /// transition each emitted item to `Held{outbound: Some(batch)}` (still authoritative — the source
 /// holds it until the orchestrator's `TransientDrop`, adopt-before-drop). A shard without its realm
 /// lease ships nothing (the Crossing items were dropped on the self-fence).
+#[allow(clippy::too_many_arguments)]
 fn emit_transient_batch(
     config: Res<StubConfig>,
     clock: Res<ClockSample>,
     regions: Res<RealmRegions>,
+    placements: Res<Placements>,
     authority: Res<RealmAuthority>,
     mut owned: ResMut<OwnedTransients>,
     mut stats: ResMut<StubStats>,
@@ -5452,6 +5654,7 @@ fn emit_transient_batch(
                 to_realm,
                 &config,
                 &regions,
+                &placements.0,
                 clock.universe_tick,
                 &mut stats,
             ) else {
@@ -5942,6 +6145,7 @@ fn on_directory_reply(
     config: &StubConfig,
     clock: &ClockSample,
     regions: &RealmRegions,
+    placements: &PlacementLedger,
     authority: &mut RealmAuthority,
     confirmed: &mut RealmConfirmedAt,
     cohosted: &mut CoHostedAuthority,
@@ -5980,6 +6184,7 @@ fn on_directory_reply(
                 flush,
                 config,
                 regions,
+                placements,
                 clock.universe_tick,
                 dots,
                 stats,
@@ -5995,7 +6200,7 @@ fn on_directory_reply(
                 clock.epoch,
                 config,
                 regions,
-                clock.universe_tick,
+                placements,
                 dots,
                 applied,
                 pending,
@@ -6103,6 +6308,7 @@ fn on_directory_reply(
                 cmd,
                 config,
                 regions,
+                placements,
                 identity.node_id,
                 clock,
                 dots,
@@ -6381,31 +6587,45 @@ fn emitted_entities(
     dots: &Dots,
     holds: &HandoffHolds,
     own_frame: FrameRef,
-    frames: &LocalFrames,
+    placements: &PlacementLedger,
+    own_realm: RealmId,
     stats: &mut StubStats,
 ) -> Vec<EntitySnap> {
+    // Each row reads the ledger book AT ITS OWN STAMP (usually the head — every re-stamped dot is at
+    // NOW; a latched dot or a retained ghost carries an older stamp, inside the window by the window's
+    // own derivation). A miss is counted and the row ships VERBATIM under its own label — the same
+    // counted degrade a foreign-labelled row takes, never a silently substituted instant.
     dots.0
         .values()
         .filter(|d| emits(holds, d))
-        .map(|d| EntitySnap {
-            entity: d.entity,
-            pose: restate_for_own_clients(d.pose, own_frame, frames, stats),
+        .map(|d| {
+            let pose = match placements.at(own_realm, d.pose.universe_tick) {
+                Ok(book) => restate_for_own_clients(d.pose, own_frame, book, stats),
+                Err(_) => {
+                    stats.placement_book_miss += 1;
+                    d.pose
+                }
+            };
+            EntitySnap {
+                entity: d.entity,
+                pose,
+            }
         })
         .collect()
 }
 
-/// One row's restatement into `own_frame`, with the degrade counted rather than hidden. Monomorphic, so
-/// both arms are covered once here instead of once per `FrameContext` instantiation (HR5). A pose already
-/// in `own_frame` returns BIT-IDENTICAL — `transfer_frame` short-circuits a same-frame transfer — which is
-/// what makes this a no-op for every occupant standing in the shard's own realm.
+/// One row's restatement into `own_frame`, with the degrade counted rather than hidden. Monomorphic —
+/// both arms covered once here (HR5). A pose already in `own_frame` returns BIT-IDENTICAL —
+/// `transfer_frame` short-circuits a same-frame transfer — which is what makes this a no-op for every
+/// occupant standing in the shard's own realm.
 #[must_use]
 fn restate_for_own_clients(
     pose: StampedPose,
     own_frame: FrameRef,
-    frames: &LocalFrames,
+    book: &PlacementBook,
     stats: &mut StubStats,
 ) -> StampedPose {
-    match transfer_frame(&pose, own_frame, frames) {
+    match transfer_frame(&pose, own_frame, book) {
         Ok(restated) => restated,
         Err(_) => {
             stats.entity_rows_foreign_labelled += 1;
@@ -6434,6 +6654,7 @@ fn emit_frames(
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     regions: Res<RealmRegions>,
+    placements: Res<Placements>,
     dots: Res<Dots>,
     // Slice F: the emit gate consults the hand-off HOLD (a retained ghost fills exactly the
     // demote→take-over window; the leaver vanishes at hold closure).
@@ -6466,8 +6687,14 @@ fn emit_frames(
     // cannot be restated into this frame is counted (`entity_rows_foreign_labelled` — the ghost feed's
     // foreign write, the §4u corruption slice F deletes) rather than hidden.
     let own_frame = regions.own_frame(config.realm);
-    let frames = regions.frame_context(config.realm, 1.0 / config.tick_dt_s, clock.universe_tick);
-    let entities = emitted_entities(&dots, &holds, own_frame, &frames, &mut stats);
+    let entities = emitted_entities(
+        &dots,
+        &holds,
+        own_frame,
+        &placements.0,
+        config.realm,
+        &mut stats,
+    );
     // Partition BY CONTENT so no datagram exceeds the MTU budget (audit GW-1): a
     // full-world snapshot ships as several independent self-contained frames. Per
     // connection_plane.md §6.3 EVERY chunk of one tick carries the SAME frame_id +
@@ -6509,45 +6736,26 @@ fn emit_frames(
     }
 }
 
-/// THE DOWN-CHAIN'S CONVERSION CONTEXT, for ONE hop to ONE direct child: this shard at the identity (it IS
-/// its own origin and never learns where that origin sits), plus the ONE child the datagram is being
-/// restated for, at the placement THIS shard authored for it. Nothing else is answerable — a parent, a
-/// grandparent or a sibling asked here gets the typed refusal, because nobody ever told this shard where
-/// any of them are. That is the ground rule expressed as the smallest context that can do the job.
+/// THE DOWN-CHAIN'S HOP BOOK, for ONE hop to ONE direct child: this shard at the identity (the book's
+/// anchor — it IS its own origin and never learns where that origin sits), plus the ONE child the
+/// datagram is being restated for, at the placement THIS shard authored for it, at the datagram's own
+/// instant. Nothing else is answerable — a parent, a grandparent or a sibling asked of this book gets
+/// the typed refusal, because nobody ever told this shard where any of them are. The ground rule
+/// expressed as the smallest book that can do the job.
 ///
-/// IT EXISTS TO HOIST THE CHILD PLACEMENT OUT OF THE PER-ROW LOOP. [`LocalFrames`] re-derives a MOVING
-/// child's placement from its orbital elements on every single lookup, and [`transfer_frame`] looks up
-/// twice per row, so a datagram of N rows re-solved the same Kepler problem 2N times for one instant. The
-/// placement is a function of (child, tick) alone, so ONE solve per datagram is all the arithmetic there
-/// is. Measured both ways on an 8-row datagram by
-/// `the_per_hop_conversion_cost_is_measured_with_and_without_the_hoisted_placement` (DEBUG build, so the
-/// absolute figures are several times a release build's — the RATIO is the point): a static child cost
-/// 4340 ns per datagram looking the placement up per row and 3755 ns hoisted, an ORBITING one 15494 ns
-/// against 3740 ns. After the hoist the two are the same price, which is the real result: what a body is
-/// doing stops deciding what its neighbours cost to ship.
-struct ChildFrame {
-    /// This shard's own frame — the frame every row arrives measured in, and the only frame it may speak in.
+/// The hoist this shape preserves: the deleted clock-carrying context re-derived a MOVING child's
+/// placement on every lookup, and `transfer_frame` looks up twice per row, so a datagram of N rows
+/// re-solved the same Kepler problem 2N times for one instant. A book is authored ONCE per datagram —
+/// measured on an 8-row datagram (DEBUG build; the RATIO is the point): a static child cost 4340 ns
+/// per datagram per-lookup vs 3755 ns hoisted, an ORBITING one 15494 ns vs 3740 ns. After the hoist
+/// the two are the same price: what a body is doing stops deciding what its neighbours cost to ship.
+fn hop_book(
     own: FrameRef,
-    /// The one direct child this hop ships to.
     child: FrameRef,
-    /// Where this shard put that child, in its own frame, resolved ONCE at the datagram's instant.
     child_at: FramePlacement,
-}
-
-impl FrameContext for ChildFrame {
-    fn placement(&self, frame: FrameRef, _tick: UniverseTick) -> Option<FramePlacement> {
-        // MONOMORPHIC: all three arms are covered once here rather than per `transfer_frame`
-        // monomorphization (HR5). The `tick` is deliberately unused — `child_at` was resolved at the
-        // datagram's own instant by the caller, which is the instant every row in it is stamped at.
-        // Re-deriving per lookup from a different clock is exactly the cost this type removes.
-        if frame == self.own {
-            return Some(FramePlacement::identity());
-        }
-        if frame == self.child {
-            return Some(self.child_at);
-        }
-        None
-    }
+    at: UniverseTick,
+) -> PlacementBook {
+    PlacementBook::new(own, at, vec![(child, child_at)])
 }
 
 /// A LIVE direct child: the frame to restate rows in, where this shard put it, the routing key, and
@@ -6577,11 +6785,10 @@ fn active_children(
     config: &StubConfig,
     regions: &RealmRegions,
     live: &ChildLiveness,
-    tick_hz: f64,
-    tick: UniverseTick,
+    book: &PlacementBook,
 ) -> Vec<ActiveChild> {
     regions
-        .child_placements(config.realm, tick_hz, tick)
+        .child_rows(config.realm, book)
         .into_iter()
         .filter_map(|(region, pose)| {
             // The match FIRST, so an inactive child costs nothing but the lookup — no routing key
@@ -6647,9 +6854,10 @@ fn restate_rows_in_child_frame(
     rows: &[RealmSnap],
     own: FrameRef,
     child: &ActiveChild,
+    at: UniverseTick,
     stats: &mut StubStats,
 ) -> Vec<RealmSnap> {
-    restate_rows_in_frame(rows, own, child.frame, child.at, stats)
+    restate_rows_in_frame(rows, own, child.frame, child.at, at, stats)
 }
 
 /// THE ONE RESTATEMENT (HR3), by frame rather than by recipient: `rows`, measured from this shard's own
@@ -6672,19 +6880,20 @@ fn restate_rows_in_frame(
     own: FrameRef,
     child_frame: FrameRef,
     child_at: FramePlacement,
+    at: UniverseTick,
     stats: &mut StubStats,
 ) -> Vec<RealmSnap> {
-    let ctx = ChildFrame {
-        own,
-        child: child_frame,
-        child_at,
-    };
+    // The hop book, at the DATAGRAM's instant — which is the instant every row in it is stamped at
+    // (the author stamps its rows with its own tick and every relay preserves them), so the
+    // conversion's instant-match holds by construction; a row stamped at any OTHER instant is exactly
+    // the mixed-times hazard the typed refusal below counts and drops.
+    let book = hop_book(own, child_frame, child_at, at);
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         if row.frame == child_frame {
             continue; // the recipient's own row — the origin of the frame it would be stated in
         }
-        match transfer_frame(&row.pose, child_frame, &ctx) {
+        match transfer_frame(&row.pose, child_frame, &book) {
             Ok(pose) => {
                 stats.cascade_rows_converted += 1;
                 out.push(RealmSnap {
@@ -6743,9 +6952,9 @@ fn push_cascade(
     }
 }
 
-/// Emit the shard's authored REALM placements (moving planet/station/ship boxes) to observers each tick
-/// (FA-2c) — the render-plane twin of [`emit_frames`]. No realm authority ⇒ silent. NO moving child ⇒
-/// silent (byte-identical at walk/static scale — `authored_realm_snaps` is empty). Otherwise it ships a
+/// Emit the shard's authored REALM placements (planet/station/ship boxes) to observers each tick
+/// (FA-2c) — the render-plane twin of [`emit_frames`]. No realm authority ⇒ silent. No direct child ⇒
+/// silent (a leaf authors no rows). Otherwise it ships a
 /// [`RealmSnapshotDatagram`] (MTU-partitioned by the shared `partition_realms`) as a
 /// [`MsgClass::RealmSnapshot`] datagram to every gateway with an EMITTING observer — the SAME recipients
 /// the entity snapshot reaches. Latest-wins, unreliable; realms are world observation, never authority.
@@ -6755,6 +6964,7 @@ fn emit_realm_frames(
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     regions: Res<RealmRegions>,
+    placements: Res<Placements>,
     dots: Res<Dots>,
     // Slice F: the ghost-emit gate input (see `emits`).
     holds: Res<HandoffHolds>,
@@ -6880,11 +7090,18 @@ fn emit_realm_frames(
         }
     }
 
-    // The authored moving-child rows — EMPTY at walk/static scale ⇒ nothing ships, no counter bump, no
-    // cascade (byte-identical). This early return is BEFORE the counter bump, so walk/static never advances it.
-    // Each row is the child's placement in THIS shard's own frame, shipped as authored — the shard
-    // composes nothing and never learns where it sits.
-    let realms = regions.authored_realm_snaps(config.realm, tick_hz, clock.universe_tick);
+    // The authored child rows — one per DIRECT child, static and moving alike (owner Q3; the movers-
+    // only filter was the last rival motion test). EMPTY only for a childless leaf ⇒ nothing ships,
+    // no counter bump, no cascade. Each row is the child's placement in THIS shard's own frame,
+    // shipped as authored — the shard composes nothing and never learns where it sits.
+    // The HEAD book — authored this same tick by the one writer (`author_placements` runs first on
+    // the schedule and this system shares its `has_synced` gate), so the invariant is stated, never
+    // hoped. Every row and every cascade below reads THESE rows.
+    let head = placements
+        .0
+        .head(config.realm)
+        .expect("the writer authors every held anchor before the feed runs");
+    let realms = regions.authored_realm_snaps(config.realm, head);
     if realms.is_empty() {
         return;
     }
@@ -6932,24 +7149,9 @@ fn emit_realm_frames(
     // (a) DIRECT emit to LOCAL emitting-dot gateways (a player still on THIS realm) — the `emit_frames` gating,
     // verbatim, now a GUARD (not an early return) so the cascade below still runs when local players are absent.
     let own_frame = regions.own_frame(config.realm);
-    // Where this shard put each of its direct children, resolved ONCE for this instant — the same per-tick
-    // placement path the cascade and the interest loop read, never a second solve.
-    let child_at: BTreeMap<FrameRef, FramePlacement> = regions
-        .child_placements(config.realm, tick_hz, clock.universe_tick)
-        .into_iter()
-        .map(|(r, pose)| {
-            (
-                r.frame,
-                FramePlacement {
-                    origin_cell: pose.pos.cell(),
-                    origin: pose.pos.offset(),
-                    velocity: pose.vel,
-                    orientation: DQuat::IDENTITY,
-                    angular_velocity: DVec3::ZERO,
-                },
-            )
-        })
-        .collect();
+    // Where this shard put each of its direct children — the head book's rows verbatim: the same
+    // authored table the cascade and the interest loop read, never a second solve.
+    let child_at: BTreeMap<FrameRef, FramePlacement> = head.rows().collect();
 
     // GROUPED BY THE SPACE THE OBSERVER'S DELIVERED POSE IS STATED IN — the same lift the entity lane
     // applies (`restate_for_own_clients`): a dot standing in a placeable direct child is DELIVERED in
@@ -7055,14 +7257,14 @@ fn emit_realm_frames(
         universe_tick: clock.universe_tick,
         realms: Vec::new(),
     };
-    for child in active_children(
-        &config,
-        &regions,
-        &child_liveness,
-        tick_hz,
-        clock.universe_tick,
-    ) {
-        let rows = restate_rows_in_child_frame(&realms, own_frame, &child, &mut stats);
+    for child in active_children(&config, &regions, &child_liveness, head) {
+        let rows = restate_rows_in_child_frame(
+            &realms,
+            own_frame,
+            &child,
+            clock.universe_tick,
+            &mut stats,
+        );
         push_cascade(
             &header,
             &rows,
@@ -7102,6 +7304,7 @@ fn on_realm_cascade(
     clock: &ClockSample,
     authority: &RealmAuthority,
     regions: &RealmRegions,
+    placements: &PlacementLedger,
     live: &ChildLiveness,
     dots: &Dots,
     holds: &HandoffHolds,
@@ -7160,13 +7363,33 @@ fn on_realm_cascade(
         stats.undecodable += 1;
         return;
     };
-    let tick_hz = 1.0 / config.tick_dt_s;
-    // Every child's placement is resolved at the DATAGRAM's instant, not at this shard's current clock:
-    // these rows were authored one level up at that instant, and subtracting where an ORBITING child sat at
-    // a different one would introduce a per-hop error proportional to the relay's own latency.
+    // Every child's placement is read from the book at the DATAGRAM's instant, not at this shard's
+    // current clock: these rows were authored one level up at that instant, and subtracting where an
+    // ORBITING child sat at a different one would introduce a per-hop error proportional to the
+    // relay's own latency. An instant outside the window drops the relay leg, counted — the next
+    // tick's cascade self-heals (one of the three deliberately fallible selections).
+    let Some((book, at)) = book_at_or_head(placements, config.realm, snapshot.universe_tick, stats)
+    else {
+        stats.placement_book_miss += 1;
+        return;
+    };
+    // If the datagram's instant was clamped to this shard's head (forward skew), the rows re-stamp to
+    // the same instant — one time per datagram, never a mix.
+    let rows_in: Vec<RealmSnap> = snapshot
+        .realms
+        .iter()
+        .map(|r| RealmSnap {
+            realm: r.realm,
+            frame: r.frame,
+            pose: StampedPose {
+                universe_tick: at,
+                ..r.pose
+            },
+        })
+        .collect();
     let own_frame = regions.own_frame(config.realm);
-    for child in active_children(config, regions, live, tick_hz, snapshot.universe_tick) {
-        let rows = restate_rows_in_child_frame(&snapshot.realms, own_frame, &child, stats);
+    for child in active_children(config, regions, live, book) {
+        let rows = restate_rows_in_child_frame(&rows_in, own_frame, &child, at, stats);
         stats.realm_cascade_relayed += 1;
         push_cascade(
             &snapshot,
@@ -7207,6 +7430,7 @@ fn evaluate_realm_aoi(
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     regions: Res<RealmRegions>,
+    ledger: Res<Placements>,
     dots: Res<Dots>,
     owned_transients: Res<OwnedTransients>,
     // The hand-offs this shard is still party to — read-only here; `process_inbound` owns the writes.
@@ -7248,10 +7472,16 @@ fn evaluate_realm_aoi(
     // For node-per-realm (the base) that is complete; a co-hosting shard's co-hosted realms' children are
     // simply not evaluated here (D-44 dormant — see `register_stub_shard`). No panic: dormant co-hosting
     // tests legitimately run this with `held_realms.len() > 1` and inert bands, emitting nothing.
+    // The HEAD book — the writer ran first on this same gated schedule, so the invariant is stated.
+    let head = ledger
+        .0
+        .head(config.realm)
+        .expect("the writer authors every held anchor before the AoI pass runs");
     aoi_decide(
         &config,
         &clock,
         &regions,
+        head,
         &dots,
         &owned_transients,
         &holds,
@@ -7313,6 +7543,7 @@ fn aoi_decide(
     config: &StubConfig,
     clock: &ClockSample,
     regions: &RealmRegions,
+    book: &PlacementBook,
     dots: &Dots,
     owned: &OwnedTransients,
     // The hand-offs this shard is still party to — the subjects it has let go of but not yet seen taken
@@ -7384,10 +7615,10 @@ fn aoi_decide(
         );
     }
 
-    // The UNIFIED direct-child placements (movers authored from ephemeris, static children at `center`),
-    // stable seed-derived Vec order — the SAME code-path the observer feed reads (H-1/H-2, no reorder).
-    // Resolved BEFORE the observer fold now: the SL7 child observers below stand AT these placements.
-    let placements = regions.child_placements(config.realm, tick_hz, tick);
+    // The UNIFIED direct-child placements — the HEAD book's rows joined back onto the child regions,
+    // stable seed-derived Vec order — the SAME authored table the observer feed reads (H-1/H-2, no
+    // reorder). Resolved BEFORE the observer fold: the SL7 child observers below stand AT these rows.
+    let placements = regions.child_rows(config.realm, book);
 
     // Step 5 slice B — THE SL7 OCCUPIED-CHILD PROXY, verbatim: for each of MY direct children with a
     // FRESH occupancy bit, one synthetic observer at the placement AND velocity I already author for
@@ -7664,7 +7895,7 @@ fn aoi_decide(
         // placements came from, so the resolve states an invariant, never a hope.
         let hop = shape_hop_to(config, regions, region.frame, tick_hz)
             .expect("a rostered child region resolves on the shape lane's own roster");
-        let shapes = restate_shapes_in_child_frame(&merged, &hop, stats);
+        let shapes = restate_shapes_in_child_frame(&merged, &hop, region.frame, stats);
         let ids: BTreeSet<RealmId> = shapes.iter().map(|s| s.realm).collect();
         let cur = (entry.home, ids);
         if child_scene_sent.get(&region.realm) != Some(&cur) {
@@ -7721,7 +7952,7 @@ fn shape_hop_to(
     regions: &RealmRegions,
     occupant_frame: FrameRef,
     tick_hz: f64,
-) -> Option<ChildFrame> {
+) -> Option<PlacementBook> {
     hop_to_child(
         config,
         regions,
@@ -7750,17 +7981,13 @@ fn hop_to_child(
     child: FrameRef,
     tick_hz: f64,
     tick: UniverseTick,
-) -> Option<ChildFrame> {
+) -> Option<PlacementBook> {
     let at = regions
         .child_placements(config.realm, tick_hz, tick)
         .into_iter()
         .find(|(r, _)| r.frame == child)
         .map(|(_, pose)| placement_of(&pose))?;
-    Some(ChildFrame {
-        own,
-        child,
-        child_at: at,
-    })
+    Some(hop_book(own, child, at, tick))
 }
 
 /// THE LEVEL'S OWN SUBTRACTION ON THE SHAPE LANE: restate every outline in ONE direct child's frame.
@@ -7783,7 +8010,8 @@ fn hop_to_child(
 /// directly rather than left to be believed.
 fn restate_shapes_in_child_frame(
     shapes: &[RealmShape],
-    hop: &ChildFrame,
+    hop: &PlacementBook,
+    child: FrameRef,
     stats: &mut StubStats,
 ) -> Vec<RealmShape> {
     let mut out = Vec::with_capacity(shapes.len());
@@ -7793,13 +8021,13 @@ fn restate_shapes_in_child_frame(
         // a set this shard built itself was measured from here by construction. Stated explicitly so the
         // ONE subtraction in the codebase does the arithmetic, never a second expression of it.
         let stated = StampedPose {
-            frame: hop.own,
+            frame: hop.anchor(),
             pos: shape.center,
             vel: DVec3::ZERO,
             orient: DQuat::IDENTITY,
             universe_tick: SHAPE_LANE_TICK,
         };
-        match transfer_frame(&stated, hop.child, hop) {
+        match transfer_frame(&stated, child, hop) {
             Ok(pose) => {
                 stats.proxy_scene_shapes_restated += 1;
                 out.push(RealmShape {
@@ -8028,6 +8256,7 @@ fn on_realm_observation(
     config: &StubConfig,
     clock: &ClockSample,
     regions: &RealmRegions,
+    placements: &PlacementLedger,
     observed: &mut ObservedInterior,
     stats: &mut StubStats,
 ) {
@@ -8041,10 +8270,25 @@ fn on_realm_observation(
         return;
     };
     let own_frame = regions.own_frame(config.realm);
-    let frames = regions.frame_context(config.realm, 1.0 / config.tick_dt_s, clock.universe_tick);
+    // Each row reads the book AT ITS OWN STAMP (in practice one per datagram — an author stamps every
+    // row at its own tick and every relay preserves the stamps): the lift adds where this shard put
+    // the child AT THE INSTANT THE ROW SPEAKS AT, never at this relay's own clock — a per-hop error
+    // proportional to relay latency otherwise. A stamp outside the window drops the batch, counted —
+    // the child's next per-tick ship self-heals (a deliberately fallible selection).
     let mut rows = Vec::with_capacity(snap.realms.len());
     for row in snap.realms {
-        match transfer_frame(&row.pose, own_frame, &frames) {
+        let Some((book, at)) =
+            book_at_or_head(placements, config.realm, row.pose.universe_tick, stats)
+        else {
+            stats.placement_book_miss += 1;
+            stats.realm_observation_unplaceable += 1;
+            return;
+        };
+        let row_pose = StampedPose {
+            universe_tick: at,
+            ..row.pose
+        };
+        match transfer_frame(&row_pose, own_frame, book) {
             Ok(pose) => rows.push(RealmSnap {
                 realm: row.realm,
                 frame: row.frame,
@@ -8120,12 +8364,13 @@ fn on_realm_shape_observation(
                 tick_hz,
                 SHAPE_LANE_TICK,
             )
+            .map(|book| (book, r.frame))
         });
-    let Some(hop) = hop else {
+    let Some((hop, child_frame)) = hop else {
         stats.realm_shape_observation_unplaceable += 1;
         return;
     };
-    let lifted = lift_shapes_from_child_frame(&rso.shapes, &hop, stats);
+    let lifted = lift_shapes_from_child_frame(&rso.shapes, &hop, child_frame, stats);
     stats.realm_shape_observation_received += 1;
     tracing::debug!(
         child = %child,
@@ -8148,7 +8393,8 @@ fn on_realm_shape_observation(
 /// this call and the `expect` states an invariant, never a hope.
 fn lift_shapes_from_child_frame(
     shapes: &[RealmShape],
-    hop: &ChildFrame,
+    hop: &PlacementBook,
+    child: FrameRef,
     stats: &mut StubStats,
 ) -> Vec<RealmShape> {
     let mut out = Vec::with_capacity(shapes.len());
@@ -8156,13 +8402,13 @@ fn lift_shapes_from_child_frame(
         // The outline's centre as a pose in the CHILD's frame — which is what it is: the sender of an
         // up-shipped set is always the direct child, stating its interior from its own centre.
         let stated = StampedPose {
-            frame: hop.child,
+            frame: child,
             pos: shape.center,
             vel: DVec3::ZERO,
             orient: DQuat::IDENTITY,
             universe_tick: SHAPE_LANE_TICK,
         };
-        let pose = transfer_frame(&stated, hop.own, hop)
+        let pose = transfer_frame(&stated, hop.anchor(), hop)
             .expect("the up-lift's destination is this shard's own frame at the identity");
         stats.interior_shapes_lifted += 1;
         out.push(RealmShape {
@@ -8248,9 +8494,12 @@ mod tests {
     use super::*;
     use crate::capability::NodeKind;
     use glam::I64Vec3; // only the tests name a cell anchor directly (prod poses ride at cell ZERO)
-    use vd_core::frame::IdentityFrames; // the retired identity ctx — tests use it as the byte-identity oracle
+    // DEV-ONLY motion (SL4): fixtures plant real Kepler movers through the SAME opaque seam the boot
+    // injects; the shipped crate cannot name any of this (vd-physics is a dev-dependency).
     use vd_core::pose::LatticePos; // only the tests construct a LatticePos directly; prod uses .map_offset/.offset
     use vd_core::{MsgId, UniverseTick};
+    use vd_physics::celestial::{OrbitalElements, orbital_state};
+    use vd_physics::motion::kepler_motion_fns;
     use vd_wire::intershard::{
         DEMOTE_STEP, FLUSH_SOURCE_STEP, RE_SOLICIT_STEP, STUB_CROSSING_STEP,
     };
@@ -12430,9 +12679,10 @@ mod tests {
         let mut moving = BTreeMap::new();
         moving.insert(OTHER_REALM, elements);
         let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
-            .with_moving_children(moving);
+            .with_moving_children(kepler_motion_fns(moving));
         let (tick_hz, tick) = (20.0, UniverseTick(1_000));
-        let snaps = regions.authored_realm_snaps(OWN_REALM, tick_hz, tick);
+        let snaps =
+            regions.authored_realm_snaps(OWN_REALM, &regions.author_book(OWN_REALM, tick_hz, tick));
         let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].realm, OTHER_REALM);
@@ -12449,9 +12699,9 @@ mod tests {
         assert_eq!(snaps[0].pose.vel, state.velocity);
         assert_eq!(snaps[0].pose.universe_tick, tick);
         // A static forest (no moving roster) authors NO realm snap — the byte-identity case.
+        let bare = RealmRegions::new(vec![root_region(), own_region()]);
         assert!(
-            RealmRegions::new(vec![root_region(), own_region()])
-                .authored_realm_snaps(OWN_REALM, tick_hz, tick)
+            bare.authored_realm_snaps(OWN_REALM, &bare.author_book(OWN_REALM, tick_hz, tick))
                 .is_empty()
         );
     }
@@ -12468,8 +12718,11 @@ mod tests {
         let mut moving = BTreeMap::new();
         moving.insert(OTHER_REALM, orbit());
         let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
-            .with_moving_children(moving);
-        let snaps = regions.authored_realm_snaps(OWN_REALM, 20.0, UniverseTick(1_000));
+            .with_moving_children(kepler_motion_fns(moving));
+        let snaps = regions.authored_realm_snaps(
+            OWN_REALM,
+            &regions.author_book(OWN_REALM, 20.0, UniverseTick(1_000)),
+        );
         assert_eq!(snaps.len(), 1);
         assert_eq!(
             snaps[0].frame,
@@ -12489,13 +12742,56 @@ mod tests {
         );
     }
 
-    /// The `(own_frame, ephemeris)` pair the client-facing emit restates every row against, for a shard
-    /// whose own realm is `OWN_REALM` and whose forest is `regions`.
-    fn emit_context(regions: &RealmRegions) -> (FrameRef, LocalFrames) {
-        (
-            regions.own_frame(OWN_REALM),
-            regions.frame_context(OWN_REALM, 20.0, UniverseTick(100)),
-        )
+    /// The own frame the client-facing emit restates every row against, for a shard whose own realm
+    /// is `OWN_REALM` (each row selects its book from the ledger at its own pose stamp).
+    fn emit_context(regions: &RealmRegions) -> FrameRef {
+        regions.own_frame(OWN_REALM)
+    }
+
+    /// The empty-forest shard's ledger: what `author_placements` publishes over `RealmRegions::default()`
+    /// — an EMPTY head book per held anchor (anchored on the `GalaxySpace` fallback), so an arrival is
+    /// refused on the missing FRAME, not on a missing book.
+    // Test twin of the ONE writer — the same stated exemption from the publish ban.
+    #[allow(clippy::disallowed_methods)]
+    fn bare_ledger(cfg: &StubConfig) -> PlacementLedger {
+        let regions = RealmRegions::default();
+        let mut ledger = PlacementLedger::new(64);
+        for anchor in placement_anchors(&regions, cfg) {
+            ledger.publish(
+                anchor,
+                regions.author_book(anchor, STORY_TICK_HZ, UniverseTick(0)),
+            );
+        }
+        ledger
+    }
+
+    /// The ledger a shard holds at `clock`'s universe tick — one head book per anchor the writer
+    /// covers, exactly as `author_placements` publishes them.
+    // Test twin of the ONE writer — the same stated exemption from the publish ban.
+    #[allow(clippy::disallowed_methods)]
+    fn obs_ledger(
+        regions: &RealmRegions,
+        cfg: &StubConfig,
+        clock: &ClockSample,
+    ) -> PlacementLedger {
+        let mut ledger = PlacementLedger::new(64);
+        for anchor in placement_anchors(regions, cfg) {
+            ledger.publish(
+                anchor,
+                regions.author_book(anchor, 1.0 / cfg.tick_dt_s, clock.universe_tick),
+            );
+        }
+        ledger
+    }
+
+    /// A test ledger holding what `author_placements` would have published for `OWN_REALM` at `tick`
+    /// (a generous window so multi-instant fixtures stay inside it).
+    // Test twin of the ONE writer — the same stated exemption from the publish ban.
+    #[allow(clippy::disallowed_methods)]
+    fn ledger_at(regions: &RealmRegions, tick_hz: f64, tick: UniverseTick) -> PlacementLedger {
+        let mut ledger = PlacementLedger::new(64);
+        ledger.publish(OWN_REALM, regions.author_book(OWN_REALM, tick_hz, tick));
+        ledger
     }
 
     #[test]
@@ -12518,7 +12814,7 @@ mod tests {
                 1000.0,
             ),
         ]);
-        let (own_frame, frames) = emit_context(&regions);
+        let own_frame = emit_context(&regions);
         let entity = EntityId::pack(EntityKind::Player, 10, 11, 11);
         let mut dot = slice6_dot(entity, own_frame, Authority::Owned { fence: Fence(1) });
         dot.pose = StampedPose::at_rest(
@@ -12534,7 +12830,8 @@ mod tests {
             &dots,
             &HandoffHolds::default(),
             own_frame,
-            &frames,
+            &ledger_at(&regions, 20.0, UniverseTick(100)),
+            OWN_REALM,
             &mut stats,
         );
         assert_eq!(entities.len(), 1);
@@ -12579,13 +12876,14 @@ mod tests {
         // The forest holds this shard's own realm and NOT the ghost's, so the ghost's frame is one this
         // shard has genuinely never been told the position of — the case the rule is about.
         let regions = RealmRegions::new(vec![root_region(), own_region()]);
-        let (own_frame, frames) = emit_context(&regions);
+        let own_frame = emit_context(&regions);
         let mut stats = StubStats::default();
         let entities = emitted_entities(
             &dots,
             &HandoffHolds::default(),
             own_frame,
-            &frames,
+            &ledger_at(&regions, 20.0, UniverseTick(100)),
+            OWN_REALM,
             &mut stats,
         );
         assert_eq!(entities.len(), 1);
@@ -12708,9 +13006,16 @@ mod tests {
         // Every dot here already stands in this shard's OWN realm, so the restatement is the identity and
         // "bit-identical" below is asserted through the same-frame short-circuit, not through a degrade.
         let regions = RealmRegions::new(vec![root_region(), own_region()]);
-        let (own_frame, frames) = emit_context(&regions);
+        let own_frame = emit_context(&regions);
         let mut stats = StubStats::default();
-        let entities = emitted_entities(&dots, &holds, own_frame, &frames, &mut stats);
+        let entities = emitted_entities(
+            &dots,
+            &holds,
+            own_frame,
+            &ledger_at(&regions, 20.0, UniverseTick(100)),
+            OWN_REALM,
+            &mut stats,
+        );
         assert_eq!(
             stats.entity_rows_foreign_labelled, 0,
             "an occupant in this shard's own realm is never a degrade",
@@ -12747,7 +13052,7 @@ mod tests {
             moving.insert(OTHER_REALM, orbit());
             *rig.world.resource_mut::<RealmRegions>() =
                 RealmRegions::new(vec![root_region(), own_region(), child_region()])
-                    .with_moving_children(moving);
+                    .with_moving_children(kepler_motion_fns(moving));
         };
         // A dot INSIDE own but OUTSIDE the child (container == owning ⇒ it emits, never re-homes).
         let observer = |rig: &mut Rig, tag: u32| {
@@ -12852,7 +13157,7 @@ mod tests {
                 child_region(),
                 sibling_region(),
             ])
-            .with_moving_children(moving);
+            .with_moving_children(kepler_motion_fns(moving));
         };
         let mut rig = Rig::new();
         rig.grant_realm();
@@ -12893,10 +13198,12 @@ mod tests {
         // subtraction, read from the one place that makes it, so the expectation below is not a second copy
         // of the arithmetic. Sampling it at any other instant would measure the orbit, not the conversion.
         let tick_hz = 1.0 / rig.world.resource::<StubConfig>().tick_dt_s;
-        let authored: BTreeMap<RealmId, StampedPose> = rig
-            .world
-            .resource::<RealmRegions>()
-            .authored_realm_snaps(OWN_REALM, tick_hz, snap.universe_tick)
+        let rig_regions = rig.world.resource::<RealmRegions>();
+        let authored: BTreeMap<RealmId, StampedPose> = rig_regions
+            .authored_realm_snaps(
+                OWN_REALM,
+                &rig_regions.author_book(OWN_REALM, tick_hz, snap.universe_tick),
+            )
             .into_iter()
             .map(|s| (s.realm, s.pose))
             .collect();
@@ -12945,7 +13252,7 @@ mod tests {
         one.insert(OTHER_REALM, orbit());
         *only.world.resource_mut::<RealmRegions>() =
             RealmRegions::new(vec![root_region(), own_region(), child_region()])
-                .with_moving_children(one);
+                .with_moving_children(kepler_motion_fns(one));
         only.world.resource_mut::<ChildLiveness>().0.insert(
             OTHER_REALM,
             ChildLiveEntry {
@@ -13063,11 +13370,11 @@ mod tests {
         // THE PRICE OF THE DOWN-CHAIN, in numbers rather than in argument, and the correctness claim the
         // hoist rests on.
         //
-        // `LocalFrames` answers "where is that child" by re-deriving it — for an ORBITING child that is a
-        // full Kepler solve — and `transfer_frame` asks twice per row, so an N-row datagram re-solved the
-        // same instant 2N times. The cascade resolves it ONCE per datagram instead. Where the child is is a
-        // function of (child, tick) alone, so the two must agree bit for bit, and that equality is asserted
-        // here: a faster answer that is a different answer would be worthless.
+        // Authoring a book per ROW re-solves every mover once per row — for an ORBITING child a full
+        // Kepler solve each time (the deleted trait context was worse still: two lookups per row). The
+        // cascade authors ONCE per datagram instead. Where the child is is a function of (child, tick)
+        // alone, so the two must agree bit for bit, and that equality is asserted here: a faster answer
+        // that is a different answer would be worthless.
         const ROWS: usize = 8;
         const REPS: usize = 5_000;
         let tick = UniverseTick(1_000);
@@ -13081,7 +13388,10 @@ mod tests {
             region(OTHER_REALM, Some(OWN_REALM), STATIC_AT, 1000.0),
             sibling_region(),
         ])
-        .with_moving_children(BTreeMap::from([(SIBLING_REALM, orbit())]));
+        .with_moving_children(kepler_motion_fns(BTreeMap::from([(
+            SIBLING_REALM,
+            orbit(),
+        )])));
         let rows: Vec<RealmSnap> = (0..ROWS)
             .map(|i| {
                 let f = i as f64;
@@ -13094,12 +13404,15 @@ mod tests {
             })
             .collect();
 
-        // The UN-HOISTED shape, verbatim: the shard's own production context, one placement lookup per
-        // `transfer_frame` call, two calls per row.
-        let ctx = regions.frame_context(OWN_REALM, tick_hz, tick);
+        // The UN-HOISTED shape: one authored book PER ROW (the smallest correct grain — the arrival
+        // ingress's shape), a full re-author of every child per row. The deleted trait context was
+        // worse still (two lookups per row, each a solve); this is the honest present-tense baseline.
         let unhoisted = |to: FrameRef| -> Vec<StampedPose> {
             rows.iter()
-                .map(|r| transfer_frame(&r.pose, to, &ctx).expect("a direct child is placeable"))
+                .map(|r| {
+                    let book = regions.author_book(OWN_REALM, tick_hz, r.pose.universe_tick);
+                    transfer_frame(&r.pose, to, &book).expect("a direct child is placeable")
+                })
                 .collect()
         };
         // The HOISTED shape: exactly what the cascade ships, placement resolved once per datagram.
@@ -13116,7 +13429,7 @@ mod tests {
         };
         let hoisted = |child: &ActiveChild| -> Vec<StampedPose> {
             let mut stats = StubStats::default();
-            restate_rows_in_child_frame(&rows, own, child, &mut stats)
+            restate_rows_in_child_frame(&rows, own, child, tick, &mut stats)
                 .into_iter()
                 .map(|r| r.pose)
                 .collect()
@@ -13197,6 +13510,9 @@ mod tests {
         const FROM_ABOVE_AT: DVec3 = DVec3::new(100.0, 50.0, -8.0);
         const ABOVE_FRAME_ID: u64 = 4242;
         let own_coord = rig.world.resource::<StubConfig>().own_coord.clone();
+        // The datagram speaks at the rig's CURRENT universe tick: the relay's book selection is the
+        // ledger at the datagram's own instant, and a healthy relay is at most a few ticks behind —
+        // an ancient instant is now a counted drop, not a silently re-solved orbit.
         let above = |rows: Vec<RealmSnap>| {
             wire_msg(
                 PARENT,
@@ -13207,7 +13523,7 @@ mod tests {
                         sub: SubId(0),
                         frame_id: ABOVE_FRAME_ID,
                         source_tick: vd_core::TickId(11),
-                        universe_tick: UniverseTick(1),
+                        universe_tick: UniverseTick(100),
                         realms: rows,
                     })
                     .expect("closed wire enums serialize infallibly"),
@@ -13217,7 +13533,7 @@ mod tests {
         let row = |realm: RealmId, at: DVec3| RealmSnap {
             realm,
             frame: frame_of(realm),
-            pose: StampedPose::at_rest(config().frame, at, UniverseTick(1)),
+            pose: StampedPose::at_rest(config().frame, at, UniverseTick(100)),
         };
 
         let sent = rig.tick(vec![above(vec![row(FROM_ABOVE, FROM_ABOVE_AT)])]);
@@ -13245,7 +13561,7 @@ mod tests {
         // it is what stops a relaying level ratcheting a realm's per-`RealmId` high-water on the client past
         // anything its author will produce for thousands of ticks — which freezes those boxes for good.
         assert_eq!(snap.frame_id, ABOVE_FRAME_ID);
-        assert_eq!(snap.universe_tick, UniverseTick(1));
+        assert_eq!(snap.universe_tick, UniverseTick(100));
         assert_eq!(rig.world.resource::<StubStats>().realm_cascade_relayed, 1);
         assert_eq!(rig.world.resource::<StubStats>().cascade_rows_converted, 1);
 
@@ -14634,7 +14950,7 @@ mod tests {
         moving.insert(OTHER_REALM, orbit());
         *rig.world.resource_mut::<RealmRegions>() =
             RealmRegions::new(vec![root_region(), own_region(), child_region()])
-                .with_moving_children(moving);
+                .with_moving_children(kepler_motion_fns(moving));
         rig.world.resource_mut::<ParentRealmNode>().0 = Some(PARENT);
         // A local emitting dot — the fan's route.
         insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO);
@@ -14718,7 +15034,7 @@ mod tests {
         moving.insert(OTHER_REALM, orbit());
         *rig.world.resource_mut::<RealmRegions>() =
             RealmRegions::new(vec![root_region(), own_region(), child_region()])
-                .with_moving_children(moving);
+                .with_moving_children(kepler_motion_fns(moving));
         // A dot standing in the CHILD's frame (lifts to own) and one in a FOREIGN frame (refused).
         // Both route to the one test GATEWAY; the split is measured on the group COUNT (one own-frame
         // group with rows) plus the refusal counter (the foreign group shipped nothing).
@@ -15117,20 +15433,19 @@ mod tests {
     }
 
     #[test]
-    fn frame_context_places_every_region_at_identity_and_defaults_own_to_galaxyspace() {
-        use vd_core::frame::FrameContext;
-        // (a) EMPTY forest → `own` defaults to `GalaxySpace` (the detector short-circuits on `is_empty`
-        // before ever building this, but the default must still be well-formed): `GalaxySpace` resolves to
-        // the identity via the `own` arm, and NO other frame is placed, so any other frame is `None`.
+    fn author_book_places_the_anchor_a_child_and_refuses_a_parent() {
+        // (a) EMPTY forest → the anchor defaults to `GalaxySpace` (the detector short-circuits on
+        // `is_empty` before ever authoring, but the default must still be well-formed): `GalaxySpace`
+        // resolves to the identity via the anchor arm, and NO other frame has a row.
         let empty = RealmRegions::new(vec![]);
-        let ectx = empty.frame_context(OWN_REALM, 20.0, UniverseTick(0));
+        let ebook = empty.author_book(OWN_REALM, 20.0, UniverseTick(0));
         assert_eq!(
-            ectx.placement(FrameRef::GalaxySpace, UniverseTick(0)),
+            ebook.of(FrameRef::GalaxySpace),
             Some(FramePlacement::identity()),
-            "empty-forest own defaults to GalaxySpace ⇒ identity",
+            "empty-forest anchor defaults to GalaxySpace ⇒ identity",
         );
         assert_eq!(
-            ectx.placement(frame_of(OWN_REALM), UniverseTick(7)),
+            ebook.of(frame_of(OWN_REALM)),
             None,
             "an unplaced frame in an empty forest resolves to None",
         );
@@ -15140,15 +15455,13 @@ mod tests {
         // assumption that made an arriving traveller find a neighbouring star system empty.
         let child_at = DVec3::new(300.0, -40.0, 7.5);
         let placed_child = region(OTHER_REALM, Some(OWN_REALM), child_at, 1000.0);
-        let ctx = RealmRegions::new(vec![root_region(), own_region(), placed_child]).frame_context(
-            OWN_REALM,
-            20.0,
-            UniverseTick(0),
-        );
+        let regions = RealmRegions::new(vec![root_region(), own_region(), placed_child]);
         for tick in [UniverseTick(0), UniverseTick(1_000_000)] {
+            let book = regions.author_book(OWN_REALM, 20.0, tick);
+            assert_eq!(book.at(), tick, "the instant is a property of the table");
             // The shard's OWN realm: the identity, always. It IS its own origin.
             assert_eq!(
-                ctx.placement(own_region().frame, tick),
+                book.of(own_region().frame),
                 Some(FramePlacement::identity()),
                 "the shard's own realm is its own origin at tick {}",
                 tick.0,
@@ -15157,7 +15470,7 @@ mod tests {
             // else green asserts this, which is exactly why registering children at the origin survived so
             // long unnoticed.
             assert_eq!(
-                ctx.placement(placed_child.frame, tick)
+                book.of(placed_child.frame)
                     .map(|p| (p.origin_cell, p.origin)),
                 Some((placed_child.center.cell(), child_at)),
                 "a static direct child rides the placement its parent authored, at tick {}",
@@ -15167,7 +15480,7 @@ mod tests {
             // the ground rule nobody ever will — so a conversion involving it must fail loudly rather than
             // quietly assume the identity and answer confidently from the wrong numbers.
             assert_eq!(
-                ctx.placement(root_region().frame, tick),
+                book.of(root_region().frame),
                 None,
                 "a shard is never told where its parent is, at tick {}",
                 tick.0,
@@ -15176,13 +15489,11 @@ mod tests {
     }
 
     #[test]
-    fn frame_context_authors_a_registered_moving_child_from_its_ephemeris() {
-        use vd_core::celestial::{orbital_state, secs_since_epoch};
-        use vd_core::frame::FrameContext;
-        // FA-2b: a region in the MOVING roster is authored LIVE from its `OrbitalElements` each tick
-        // (`with_moving_child`) — its placement TRACKS the orbit; a region ABSENT from the roster stays
-        // static at the identity (the byte-identity arm). The moving child is `child_region`
-        // (`OTHER_REALM` = Planet 42); the roster maps its realm to a Kepler orbit.
+    fn author_book_writes_a_registered_moving_childs_row_from_its_ephemeris() {
+        // FA-2b, restated on the one writer: a region in the MOVING roster gets its row solved from its
+        // `OrbitalElements` at the BOOK's instant; a region ABSENT from the roster stays static at its
+        // stored centre (the byte-identity arm). Both arms write the SAME kind of row — downstream
+        // cannot tell which ran (SL4). The moving child is `child_region` (`OTHER_REALM` = Planet 42).
         let elements = OrbitalElements {
             sma: 1.5e11,
             ecc: 0.1,
@@ -15195,20 +15506,20 @@ mod tests {
         let mut moving = BTreeMap::new();
         moving.insert(OTHER_REALM, elements);
         let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()])
-            .with_moving_children(moving);
+            .with_moving_children(kepler_motion_fns(moving));
         let tick_hz = 20.0;
-        let ctx = regions.frame_context(OWN_REALM, tick_hz, UniverseTick(1_000));
-        // The MOVING child: authored from the ephemeris at the sampled tick (the `with_moving_child` arm).
         let tick = UniverseTick(1_000);
+        let book = regions.author_book(OWN_REALM, tick_hz, tick);
+        // The MOVING child's row: the ephemeris solved at the book's instant (the mover arm).
         let state = orbital_state(&elements, secs_since_epoch(tick.0, tick_hz));
         assert_eq!(
-            ctx.placement(frame_of(OTHER_REALM), tick),
+            book.of(frame_of(OTHER_REALM)),
             Some(FramePlacement::moving(state.position, state.velocity)),
-            "a registered moving child is authored live from its orbit, not the static identity",
+            "a registered moving child's row is authored live from its orbit, not the static identity",
         );
-        // A region ABSENT from the roster (`own`) stays static at the identity — the byte-identity arm.
+        // A region ABSENT from the roster (`own`): the anchor identity — the byte-identity arm.
         assert_eq!(
-            ctx.placement(frame_of(OWN_REALM), tick),
+            book.of(frame_of(OWN_REALM)),
             Some(FramePlacement::identity()),
             "a non-roster region stays at the identity placement (byte-identical to FA-1)",
         );
@@ -15268,8 +15579,8 @@ mod tests {
 
     /// The three levels of the story, as a production-generated world plus the realms that play the parts.
     struct Story {
-        world: vd_core::worldgen::WorldView,
-        config: vd_core::worldgen::UniverseConfig,
+        world: vd_physics::worldgen::WorldView,
+        config: vd_physics::worldgen::UniverseConfig,
         universe: RealmId,
         galaxy: RealmId,
         system: RealmId,
@@ -15284,7 +15595,7 @@ mod tests {
         /// forest rather than naming their seeds — a system's seed is a `child_seed` avalanche of
         /// (galaxy, salt, index), so writing one down would be copying a hash into a test.
         fn new() -> Story {
-            let mut config = vd_core::worldgen::UniverseConfig::walk_scale();
+            let mut config = vd_physics::worldgen::UniverseConfig::walk_scale();
             // Exactly two stars: at `n_systems == 2` the ring angle for index 1 is `TAU * 0 / 1 == 0`, so
             // the neighbour's authored centre is exactly `(12031, 0, 0)` — one axis, nothing rounded.
             config.galaxy.system_count_lo = 2;
@@ -15307,7 +15618,7 @@ mod tests {
                 * core::f64::consts::PI
                 * STORY_PLANET_FROM_STAR_M.powi(3)
                 / (STORY_ORBIT_PERIOD_S * STORY_ORBIT_PERIOD_S);
-            config.stellar.central_mass_kg = mu / vd_core::celestial::G;
+            config.stellar.central_mass_kg = mu / vd_physics::celestial::G;
             // Every shell derived from what it has to hold, so no radius is left behind by a later edit.
             config.planet.planet_soi_r_m = STORY_PLANET_FROM_STAR_M / STORY_SHELL_HEADROOM;
             config.stellar.system_soi_r_m = (STORY_PLANET_FROM_STAR_M
@@ -15318,7 +15629,7 @@ mod tests {
                 (STORY_SYSTEM_FROM_GALAXY_M + config.stellar.system_soi_r_m) * STORY_SHELL_HEADROOM;
             config.scale.universe_r_m = config.scale.galaxy_r_m * STORY_SHELL_HEADROOM;
 
-            let world = vd_core::worldgen::WorldView::generated(0, &config);
+            let world = vd_physics::worldgen::WorldView::generated(0, &config);
             let universe = world
                 .regions()
                 .iter()
@@ -15343,7 +15654,7 @@ mod tests {
             // the planet sits at tick 0 and nothing else — without it the planet sits at a seed-drawn
             // angle and the second addition becomes `12031 + 145·(some direction)`, a true statement about
             // a rotated triangle and a useless one to read.
-            let mut elements = vd_core::worldgen::moving_children_for_config(0, &config, system)
+            let mut elements = vd_physics::worldgen::moving_children_for_config(0, &config, system)
                 .into_iter()
                 .find(|(r, _)| *r == planets[0])
                 .map(|(_, e)| e)
@@ -15364,7 +15675,7 @@ mod tests {
             }
         }
 
-        fn children(world: &vd_core::worldgen::WorldView, realm: RealmId) -> Vec<RealmId> {
+        fn children(world: &vd_physics::worldgen::WorldView, realm: RealmId) -> Vec<RealmId> {
             world
                 .regions()
                 .iter()
@@ -15373,7 +15684,7 @@ mod tests {
                 .collect()
         }
 
-        fn centre(world: &vd_core::worldgen::WorldView, realm: RealmId) -> DVec3 {
+        fn centre(world: &vd_physics::worldgen::WorldView, realm: RealmId) -> DVec3 {
             world
                 .regions()
                 .iter()
@@ -15395,7 +15706,7 @@ mod tests {
         /// The `RealmRegions` the shard hosting `held` boots with: the PRODUCTION neighbourhood scope
         /// (own realm, ancestors, direct children — never a sibling) through the PRODUCTION builders.
         fn regions(&self, held: RealmId) -> RealmRegions {
-            let moving = vd_core::worldgen::moving_children_for_config(0, &self.config, held)
+            let moving = vd_physics::worldgen::moving_children_for_config(0, &self.config, held)
                 .into_iter()
                 .map(|(realm, e)| {
                     if realm == self.planet {
@@ -15409,13 +15720,30 @@ mod tests {
                 self.world
                     .neighbourhood(&std::collections::BTreeSet::from([held])),
             )
-            .with_moving_children(moving)
+            .with_moving_children(kepler_motion_fns(moving))
         }
 
-        /// The ephemeris that shard converts through, at tick 0 — the production `frame_context`.
-        fn ctx(&self, held: RealmId) -> vd_core::frame::LocalFrames {
+        /// The authored book that shard converts through, at tick 0 — the production `author_book`.
+        fn ctx(&self, held: RealmId) -> vd_core::placement::PlacementBook {
             self.regions(held)
-                .frame_context(held, STORY_TICK_HZ, UniverseTick(0))
+                .author_book(held, STORY_TICK_HZ, UniverseTick(0))
+        }
+
+        /// The placement ledger that shard holds at tick 0 — one head book per anchor the writer
+        /// covers, exactly as `author_placements` would have published them.
+        // Test twin of the ONE writer — the same stated exemption from the publish ban.
+        #[allow(clippy::disallowed_methods)]
+        fn ledger(&self, held: RealmId) -> PlacementLedger {
+            let regions = self.regions(held);
+            let cfg = story_config(self, held);
+            let mut ledger = PlacementLedger::new(64);
+            for anchor in placement_anchors(&regions, &cfg) {
+                ledger.publish(
+                    anchor,
+                    regions.author_book(anchor, STORY_TICK_HZ, UniverseTick(0)),
+                );
+            }
+            ledger
         }
 
         /// A pose `x` metres along `+x` in `frame`, at rest at tick 0.
@@ -15426,19 +15754,18 @@ mod tests {
 
     /// THE MOST VALUABLE TEST IN THIS ARC, and the reason it is planted before anything moves: it is what
     /// stops a realm learning its own address again under some other name. At EVERY level of the story the
-    /// shard's frame context knows its own realm and its direct children and NOTHING ELSE — asking it to
+    /// shard's authored book knows its own realm and its direct children and NOTHING ELSE — asking it to
     /// place its own parent, or a sibling, is `None`, and asking `transfer_frame` to re-express a pose into
     /// an ancestor's frame is a TYPED REFUSAL rather than a number.
     ///
     /// The parent is not merely missing from the world: for the galaxy and the system it is a REGION the
-    /// shard holds and evaluates containment against. It is deliberately absent from the frame context
+    /// shard holds and evaluates containment against. It is deliberately absent from the authored book
     /// anyway, because containment is a question a realm answers about its own volume and placement is a
     /// question only its parent can answer.
     #[test]
     fn no_shard_can_place_its_own_parent_or_a_sibling() {
-        use vd_core::frame::{FrameContext, FrameError, transfer_frame};
+        use vd_core::frame::{FrameError, transfer_frame};
         let story = Story::new();
-        let tick = UniverseTick(0);
         for (own, parent, sibling) in [
             // The galaxy: its parent is the ambient universe; the deepest realm in the world stands in
             // for "somebody else's realm" (the galaxy has no sibling — the universe holds one galaxy).
@@ -15446,19 +15773,19 @@ mod tests {
             (story.system, story.galaxy, story.sibling_system),
             (story.planet, story.system, story.sibling_planet),
         ] {
-            let ctx = story.ctx(own);
+            let book = story.ctx(own);
             assert_eq!(
-                ctx.placement(story.frame(own), tick),
+                book.of(story.frame(own)),
                 Some(FramePlacement::identity()),
                 "{own:?} IS its own origin",
             );
             assert_eq!(
-                ctx.placement(story.frame(parent), tick),
+                book.of(story.frame(parent)),
                 None,
                 "{own:?} is never told where its parent {parent:?} is",
             );
             assert_eq!(
-                ctx.placement(story.frame(sibling), tick),
+                book.of(story.frame(sibling)),
                 None,
                 "{own:?} is never told where {sibling:?} is either",
             );
@@ -15599,6 +15926,7 @@ mod tests {
     /// approximate assertion would let slide.
     #[test]
     fn an_arrival_already_in_my_own_frame_is_accepted_bit_identical() {
+        let mut stats = StubStats::default();
         let story = Story::new();
         let cfg = story_config(&story, story.planet);
         let arriving = story.pose_in(story.frame(story.planet), STORY_OCCUPANT_FROM_PLANET_M);
@@ -15608,7 +15936,8 @@ mod tests {
                 story.planet,
                 &cfg,
                 &story.regions(story.planet),
-                UniverseTick(0)
+                &story.ledger(story.planet),
+                &mut stats,
             )
             .expect("a realm always knows its own frame"),
             arriving,
@@ -15620,6 +15949,7 @@ mod tests {
     /// the SYSTEM — the only party that holds "I put that planet at 145" — adds it and gets 148.
     #[test]
     fn an_arrival_from_a_direct_child_gets_that_childs_placement_added() {
+        let mut stats = StubStats::default();
         let story = Story::new();
         let cfg = story_config(&story, story.system);
         let placed = place_arriving_pose(
@@ -15627,7 +15957,8 @@ mod tests {
             story.system,
             &cfg,
             &story.regions(story.system),
-            UniverseTick(0),
+            &story.ledger(story.system),
+            &mut stats,
         )
         .expect("a star can place its own planet");
         assert_eq!(placed.frame, story.frame(story.system));
@@ -15644,6 +15975,7 @@ mod tests {
     /// planets. Nobody told this planet where its sibling is, so there is nothing it could add.
     #[test]
     fn an_arrival_from_a_sibling_is_refused_never_relabelled() {
+        let mut stats = StubStats::default();
         let story = Story::new();
         let cfg = story_config(&story, story.planet);
         assert_eq!(
@@ -15655,7 +15987,8 @@ mod tests {
                 story.planet,
                 &cfg,
                 &story.regions(story.planet),
-                UniverseTick(0),
+                &story.ledger(story.planet),
+                &mut stats,
             )
             .expect_err("a planet must not be able to place its sibling's occupants"),
             UnplaceableArrival::ForeignFrame(FrameError::UnknownSourceFrame),
@@ -15670,6 +16003,7 @@ mod tests {
     /// this is the degenerate boot the guard must survive without inventing a position.
     #[test]
     fn an_arrival_at_a_shard_with_no_forest_is_refused_on_whichever_side_is_missing() {
+        let mut stats = StubStats::default();
         let story = Story::new();
         let cfg = story_config(&story, story.system);
         assert_eq!(
@@ -15678,7 +16012,8 @@ mod tests {
                 story.system,
                 &cfg,
                 &RealmRegions::default(),
-                UniverseTick(0),
+                &bare_ledger(&cfg),
+                &mut stats,
             )
             .expect_err("no forest ⇒ no child placements ⇒ nothing to add"),
             UnplaceableArrival::ForeignFrame(FrameError::UnknownSourceFrame),
@@ -15692,7 +16027,8 @@ mod tests {
                 story.system,
                 &cfg,
                 &RealmRegions::default(),
-                UniverseTick(0),
+                &bare_ledger(&cfg),
+                &mut stats,
             )
             .expect_err("a shard with no forest cannot place its own realm either"),
             UnplaceableArrival::ForeignFrame(FrameError::UnknownDestFrame),
@@ -15703,6 +16039,7 @@ mod tests {
     /// carries its planet's seed as well as its own), so it has no space to measure an arrival in.
     #[test]
     fn an_arrival_at_a_shard_that_cannot_name_its_own_frame_is_refused() {
+        let mut stats = StubStats::default();
         let story = Story::new();
         let cfg = StubConfig {
             realm: RealmId::Area(9),
@@ -15716,7 +16053,8 @@ mod tests {
                 RealmId::Area(9),
                 &cfg,
                 &RealmRegions::default(),
-                UniverseTick(0),
+                &bare_ledger(&cfg),
+                &mut stats,
             )
             .expect_err("an area with no planet has no frame of its own"),
             UnplaceableArrival::UnnameableOwnFrame,
@@ -15735,6 +16073,7 @@ mod tests {
             story.planet,
             &cfg,
             &story.regions(story.system),
+            &story.ledger(story.system),
             UniverseTick(0),
             &mut stats,
         )
@@ -15769,6 +16108,7 @@ mod tests {
                 story.system,
                 &cfg,
                 &story.regions(story.planet),
+                &story.ledger(story.planet),
                 UniverseTick(0),
                 &mut stats,
             )
@@ -15786,6 +16126,406 @@ mod tests {
         );
     }
 
+    /// EVERY LEDGER-MISS ARM, exercised loudly (the placement arc S2 — HR5: a fallible selection's
+    /// refusal is a region, and an unexercised refusal is a belief). Each case hands the pure function
+    /// a ledger that genuinely lacks the book it asks for and asserts the LOUD half: the typed refusal
+    /// or the counted degrade, never a silently substituted instant.
+    #[test]
+    fn every_ledger_miss_arm_refuses_loudly() {
+        let story = Story::new();
+        let t0 = UniverseTick(0);
+
+        // (a) THE FLUSH'S HEAD MISS: no head book for this shard's own realm ⇒ the flush refuses
+        // outright (no `SourceFlushed` ⇒ the saga aborts ⇒ this shard keeps authority).
+        let cfg = story_config(&story, story.planet);
+        let mut stats = StubStats::default();
+        assert_eq!(
+            flush_pose_for_dest(
+                story.pose_in(story.frame(story.planet), STORY_OCCUPANT_DEPARTED_M),
+                story.system,
+                &cfg,
+                &story.regions(story.planet),
+                &PlacementLedger::new(8),
+                t0,
+                &mut stats,
+            ),
+            None,
+        );
+        assert_eq!(stats.placement_book_miss, 1);
+
+        // A CO-HOSTING shard (galaxy + system) — the multi-link paths live here.
+        let held = std::collections::BTreeSet::from([story.galaxy, story.system]);
+        let co_regions = RealmRegions::new(story.world.neighbourhood(&held));
+        let co_cfg = StubConfig {
+            realm: story.galaxy,
+            held_realms: held.clone(),
+            frame: story.frame(story.galaxy),
+            own_coord: vd_core::worldgen::coord_of_realm(
+                &story.world.neighbourhood(&held),
+                story.galaxy,
+            )
+            .expect("the galaxy has a lineage"),
+            ..config()
+        };
+        // Test twin of the ONE writer — the same stated exemption from the publish ban.
+        #[allow(clippy::disallowed_methods)]
+        let ledger_with = |anchors: &[RealmId]| -> PlacementLedger {
+            let mut ledger = PlacementLedger::new(8);
+            for &anchor in anchors {
+                ledger.publish(anchor, co_regions.author_book(anchor, STORY_TICK_HZ, t0));
+            }
+            ledger
+        };
+
+        // (b) A PER-LINK MISS: descending galaxy → system → planet with the SYSTEM's book absent ⇒
+        // the second link refuses the flush. (The pose starts far outside the galaxy so the departure
+        // re-validation lets it leave.)
+        let mut stats = StubStats::default();
+        let outside = story.pose_in(story.frame(story.galaxy), 1.0e6);
+        assert_eq!(
+            flush_pose_for_dest(
+                outside,
+                story.planet,
+                &co_cfg,
+                &co_regions,
+                &ledger_with(&[story.galaxy]),
+                t0,
+                &mut stats,
+            ),
+            None,
+        );
+        assert_eq!(stats.placement_book_miss, 1);
+
+        // (c) THE ENTRY RE-VALIDATION'S MISS: a pure ASCENT (planet-labelled pose, dest = the galaxy
+        // itself) converts through system and galaxy, then re-validates the entry in the galaxy's own
+        // PARENT's book (the universe) — absent ⇒ refused. Links hit; only the entry book is missing.
+        let mut stats = StubStats::default();
+        assert_eq!(
+            flush_pose_for_dest(
+                story.pose_in(story.frame(story.planet), STORY_OCCUPANT_FROM_PLANET_M),
+                story.galaxy,
+                &co_cfg,
+                &co_regions,
+                &ledger_with(&[story.galaxy, story.system]),
+                t0,
+                &mut stats,
+            ),
+            None,
+        );
+        assert_eq!(stats.placement_book_miss, 1);
+
+        // (d) THE ENTITY FEED'S MISS: a row whose stamp has no book ships VERBATIM under its own
+        // label, counted — the same counted degrade a foreign-labelled row takes.
+        let mut stats = StubStats::default();
+        let entity = EntityId::pack(EntityKind::Player, 10, 9, 9);
+        let own_frame = story.frame(story.system);
+        let mut dots = Dots::default();
+        dots.0.insert(
+            SessionId(77),
+            slice6_dot(entity, own_frame, Authority::Owned { fence: Fence(1) }),
+        );
+        let rows = emitted_entities(
+            &dots,
+            &HandoffHolds::default(),
+            own_frame,
+            &PlacementLedger::new(8),
+            story.system,
+            &mut stats,
+        );
+        assert_eq!(rows.len(), 1, "the row still ships");
+        assert_eq!(
+            rows[0].pose,
+            dots.0[&SessionId(77)].pose,
+            "verbatim, never re-spaced"
+        );
+        assert_eq!(stats.placement_book_miss, 1);
+    }
+
+    /// The DETECTOR's two ledger selections, refused loudly through the FULL schedule: a durable dot
+    /// standing in a leaf child (an anchor the writer never authors — head miss) and a held transient
+    /// whose stamp fell behind the retained window (an at() miss). Each is COUNTED and the subject is
+    /// simply not evaluated that tick — no crossing is invented from a book nobody authored.
+    #[test]
+    fn the_detector_counts_a_missing_book_and_skips_the_subject() {
+        // (a) Dot in a leaf child's frame: `book_anchor` resolves to the child, which has no children
+        // and is not held ⇒ never authored ⇒ head miss.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vec![root_region(), own_region(), child_region()]);
+        let entity = EntityId::pack(EntityKind::Player, 10, 2, 0x60);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(1.0, 0.0, 0.0));
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&TRIG_SESSION)
+            .expect("just inserted")
+            .pose
+            .frame = frame_of(OTHER_REALM);
+        let sent = rig.tick(vec![]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().placement_book_miss,
+            1,
+            "the head miss is counted"
+        );
+        assert!(
+            crossing_requests(&sent).is_empty(),
+            "no crossing is invented from a missing book"
+        );
+
+        // (b) A held transient whose stamp is older than the retained window.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vec![root_region(), own_region()]);
+        let stale = StampedPose::at_rest(
+            frame_of(OWN_REALM),
+            DVec3::new(1.0, 0.0, 0.0),
+            UniverseTick(10),
+        );
+        rig.world.resource_mut::<OwnedTransients>().0.insert(
+            EntityId::pack(EntityKind::Debris, 10, 2, 0x61),
+            Transient {
+                pose: stale,
+                anchor_fence: Fence(1),
+                status: TransientStatus::Held { outbound: None },
+                prev_offset: stale.pos.offset(),
+            },
+        );
+        rig.tick(vec![]);
+        assert_eq!(
+            rig.world.resource::<StubStats>().placement_book_miss,
+            1,
+            "the stale-stamp miss is counted (rig clock 100, window far narrower than 90 ticks)"
+        );
+    }
+
+    /// The co-hosted OUTWARD destination: an occupant leaving a realm this shard co-hosts (not its
+    /// primary) falls to THAT realm's roster parent — one level up from where it stood, never from
+    /// where the shard is named.
+    #[test]
+    fn outward_dest_of_a_cohosted_realm_is_that_realms_own_parent() {
+        let story = Story::new();
+        let held = std::collections::BTreeSet::from([story.system, story.planet]);
+        let regions = story.world.neighbourhood(&held);
+        let cfg = story_config(&story, story.system);
+        assert_eq!(
+            outward_dest(&cfg, &regions, story.universe, story.planet),
+            story.system,
+            "leaving the co-hosted planet lands in the SYSTEM (its parent), not the shard's own parent"
+        );
+    }
+
+    /// The two RELAY-lane ledger misses (rows 12 and 14 of the instant table): a cascade datagram and
+    /// an up-observation row whose instant fell outside the retained window are DROPPED and counted —
+    /// the next tick's ship self-heals; nothing is ever converted through a book of the wrong instant.
+    #[test]
+    fn the_relay_lanes_drop_an_out_of_window_instant_counted() {
+        let story = Story::new();
+        let cfg = story_config(&story, story.system);
+        let regions = story.regions(story.system);
+        let clock = ClockSample {
+            local_tick: vd_core::TickId(4),
+            universe_tick: UniverseTick(0),
+            epoch: vd_core::EpochId(1),
+            synced: true,
+        };
+        let empty = PlacementLedger::new(8);
+
+        // (a) THE UP-OBSERVATION LIFT (row 14): a row stamped at an instant no book retains.
+        let child_coord = cfg
+            .own_coord
+            .child(level_of(story.planet).expect("planet level"));
+        let inner = RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 7,
+            source_tick: vd_core::TickId(3),
+            universe_tick: UniverseTick(0),
+            realms: vec![RealmSnap {
+                realm: story.sibling_planet,
+                frame: story.frame(story.sibling_planet),
+                pose: StampedPose::at_rest(
+                    story.frame(story.planet),
+                    DVec3::new(2.0, 0.0, 0.0),
+                    UniverseTick(0),
+                ),
+            }],
+        };
+        let mut observed = ObservedInterior::default();
+        let mut stats = StubStats::default();
+        on_realm_observation(
+            vd_wire::intershard::RealmObservation {
+                child: child_coord.clone(),
+                realm_snapshot_bytes: postcard::to_allocvec(&inner).expect("fixture"),
+            },
+            &cfg,
+            &clock,
+            &regions,
+            &empty,
+            &mut observed,
+            &mut stats,
+        );
+        assert_eq!(stats.placement_book_miss, 1);
+        assert_eq!(stats.realm_observation_unplaceable, 1);
+        assert!(
+            observed.0.is_empty(),
+            "nothing is held under a missing book"
+        );
+
+        // (b) THE DOWN-CASCADE RELAY (row 12): a datagram at an unretained instant reaches a level
+        // with a live child — its local re-fan is untouched (verbatim bytes), the RELAY leg drops.
+        let mut live = ChildLiveness::default();
+        live.0.insert(
+            story.planet,
+            ChildLiveEntry {
+                home: NodeId(77),
+                fence: Fence(1),
+                at: UniverseTick(0),
+                last_seen: vd_core::TickId(4),
+            },
+        );
+        let mut stats = StubStats::default();
+        let mut outbox = OutboundBox::default();
+        on_realm_cascade(
+            RealmCascade {
+                child: cfg.own_coord.clone(),
+                realm_snapshot_bytes: postcard::to_allocvec(&inner).expect("fixture"),
+            },
+            &cfg,
+            &clock,
+            &RealmAuthority(Some(Fence(1))),
+            &regions,
+            &empty,
+            &live,
+            &Dots::default(),
+            &HandoffHolds::default(),
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.placement_book_miss, 1);
+        assert_eq!(stats.realm_cascade_relayed, 0, "the relay leg dropped");
+    }
+
+    /// A receiver with NO AUTHORED BOOK AT ALL (its first synced tick has not run) is the ONE case
+    /// the arrival still refuses — typed, counted, and retried by the saga until the writer's first
+    /// pass lands: nothing can be placed against a world nobody has authored yet.
+    #[test]
+    fn an_arrival_before_the_first_authored_book_is_refused_typed() {
+        let story = Story::new();
+        let cfg = story_config(&story, story.system);
+        let mut stats = StubStats::default();
+        let err = place_arriving_pose(
+            story.pose_in(story.frame(story.planet), STORY_OCCUPANT_FROM_PLANET_M),
+            story.system,
+            &cfg,
+            &story.regions(story.system),
+            &PlacementLedger::new(8),
+            &mut stats,
+        )
+        .expect_err("no head book ⇒ nothing to place against");
+        assert_eq!(
+            err,
+            UnplaceableArrival::BookMiss(vd_core::placement::PlacementMiss {
+                anchor: story.system,
+                wanted: UniverseTick(0),
+                head: None,
+                span: 8,
+            })
+        );
+        assert_eq!(stats.placement_book_miss, 1);
+        assert_eq!(stats.placement_skew_clamped, 0);
+    }
+
+    /// FORWARD CLOCK SKEW is CLAMPED and MEASURED, never a refusal and never silent (the process-tier
+    /// wedge's cure): a message-carried instant AHEAD of this shard's head reads the head book with the
+    /// instant clamped to the head's own; behind-the-window stays the loud miss; an exact hit stays
+    /// exact. The arrival lane then accepts the hand-off it used to refuse.
+    #[test]
+    fn a_forward_skewed_instant_clamps_to_the_head_counted_and_measured() {
+        let story = Story::new();
+        let ledger = story.ledger(story.system); // heads at tick 0
+        let mut stats = StubStats::default();
+        // Exact hit: tick 0 is retained.
+        let (b, at) = book_at_or_head(&ledger, story.system, UniverseTick(0), &mut stats)
+            .expect("the exact instant is retained");
+        assert_eq!(at, UniverseTick(0));
+        assert_eq!(b.at(), UniverseTick(0));
+        assert_eq!(stats.placement_skew_clamped, 0);
+        // AHEAD of the head: clamped to the head's instant, counted, the skew size measured.
+        let (b, at) = book_at_or_head(&ledger, story.system, UniverseTick(3), &mut stats)
+            .expect("a forward-skewed instant clamps to the head");
+        assert_eq!(at, UniverseTick(0));
+        assert_eq!(b.at(), UniverseTick(0));
+        assert_eq!(stats.placement_skew_clamped, 1);
+        assert_eq!(stats.placement_skew_max_ticks, 3);
+        // An anchor with no books at all: None (the caller's loud miss).
+        assert!(
+            book_at_or_head(&ledger, story.sibling_planet, UniverseTick(0), &mut stats).is_none()
+        );
+
+        // THE ARRIVAL LANE ACCEPTS THE SKEWED HAND-OFF (the wedge's cure), re-stamped to the
+        // receiver's own instant: an upward planet→system hand-off whose pose is stamped one tick
+        // ahead of everything the system has authored.
+        let cfg = story_config(&story, story.system);
+        let mut ahead = story.pose_in(story.frame(story.planet), STORY_OCCUPANT_FROM_PLANET_M);
+        ahead.universe_tick = UniverseTick(1);
+        let placed = place_arriving_pose(
+            ahead,
+            story.system,
+            &cfg,
+            &story.regions(story.system),
+            &ledger,
+            &mut stats,
+        )
+        .expect("a skewed but healthy hand-off is accepted, never wedged");
+        assert_eq!(placed.frame, story.frame(story.system));
+        assert_eq!(
+            placed.universe_tick,
+            UniverseTick(0),
+            "the pose speaks at the receiver's own instant after the clamp"
+        );
+        assert_eq!(
+            placed.pos.offset(),
+            DVec3::new(STORY_UP_1_M, 0.0, 0.0),
+            "the system adds its child's placement exactly as an un-skewed arrival: 145 + 3"
+        );
+        assert_eq!(stats.placement_skew_clamped, 2);
+
+        // …and a RETRIED hand-off whose stamp aged BEHIND the window (the process-tier wedge: an
+        // immutably-stamped envelope redelivered while the head advanced) is ALSO accepted at the
+        // receiver's now — never refused forever.
+        #[allow(clippy::disallowed_methods)] // test twin of the ONE writer
+        let aged = {
+            let mut ledger = PlacementLedger::new(2);
+            for t in [100u64, 101, 102] {
+                ledger.publish(
+                    story.system,
+                    story.regions(story.system).author_book(
+                        story.system,
+                        STORY_TICK_HZ,
+                        UniverseTick(t),
+                    ),
+                );
+            }
+            ledger
+        };
+        let mut stats = StubStats::default();
+        let mut stale = story.pose_in(story.frame(story.planet), STORY_OCCUPANT_FROM_PLANET_M);
+        stale.universe_tick = UniverseTick(10); // 90 ticks behind the head, window 2
+        let placed = place_arriving_pose(
+            stale,
+            story.system,
+            &cfg,
+            &story.regions(story.system),
+            &aged,
+            &mut stats,
+        )
+        .expect("an aged but healthy hand-off is accepted at the receiver's now, never wedged");
+        assert_eq!(placed.universe_tick, UniverseTick(102));
+        assert_eq!(stats.placement_skew_clamped, 1);
+        assert_eq!(stats.placement_skew_max_ticks, 92);
+    }
+
     /// STAGE B1's mirrored half (§4v cure 1): the departure was decided, and by flush time the occupant
     /// is back INSIDE its own realm (the run-1 measurement: 2.37 m against a 4.16 m boundary). The flush
     /// refuses — no `SourceFlushed`, the saga aborts pre-commit, this shard keeps authority.
@@ -15800,6 +16540,7 @@ mod tests {
                 story.system,
                 &cfg,
                 &story.regions(story.planet),
+                &story.ledger(story.planet),
                 UniverseTick(0),
                 &mut stats,
             ),
@@ -15829,6 +16570,7 @@ mod tests {
                 story.planet,
                 &cfg,
                 &story.regions(story.system),
+                &story.ledger(story.system),
                 UniverseTick(0),
                 &mut stats,
             ),
@@ -15856,6 +16598,7 @@ mod tests {
                 story.planet,
                 &cfg,
                 &story.regions(story.planet),
+                &story.ledger(story.planet),
                 UniverseTick(0),
                 &mut stats,
             ),
@@ -15885,6 +16628,7 @@ mod tests {
                 story.planet,
                 &cfg,
                 &story.regions(story.system),
+                &story.ledger(story.system),
                 UniverseTick(0),
                 &mut stats,
             ),
@@ -15914,6 +16658,7 @@ mod tests {
                 story.planet,
                 &cfg,
                 &story.regions(story.system),
+                &story.ledger(story.system),
                 UniverseTick(0),
                 &mut stats,
             ),
@@ -15943,12 +16688,19 @@ mod tests {
                 .expect("every neighbourhood carries the ambient root"),
         ]);
         let held = story.pose_in(story.frame(story.planet), STORY_OCCUPANT_FROM_PLANET_M);
+        let clock0 = ClockSample {
+            local_tick: vd_core::TickId(0),
+            universe_tick: UniverseTick(0),
+            epoch: vd_core::EpochId(1),
+            synced: true,
+        };
         assert_eq!(
             flush_pose_for_dest(
                 held,
                 story.system,
                 &cfg,
                 &roster,
+                &obs_ledger(&roster, &cfg, &clock0),
                 UniverseTick(0),
                 &mut stats
             ),
@@ -15979,6 +16731,7 @@ mod tests {
                 story.planet,
                 &cfg,
                 &story.regions(story.system),
+                &story.ledger(story.system),
                 UniverseTick(0),
                 &mut stats,
             ),
@@ -16557,7 +17310,7 @@ mod tests {
         // Station 7} (Station 7 is System 7's first-class child, task #133), a 5-region fold per subject — NOT
         // a hand-authored fixture, so this exercises the scan the bins run. The crowd clears the Station box.
         *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(
-            vd_core::worldgen::realm_neighbourhood_for(0, RealmId::System(7)),
+            vd_physics::worldgen::realm_neighbourhood_for(0, RealmId::System(7)),
         );
         // Pack N dots into a tight ~3.5 m cube at the star (origin): every dot is well inside System 7 (r=40)
         // and ≥ ~16 m from Planet 7's centre (20,0,0) ⇒ its deepest container is System 7 == its owning realm
@@ -16695,7 +17448,7 @@ mod tests {
         let mut rig = Rig::new(); // owns System 7 (config().realm)
         rig.grant_realm();
         *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(
-            vd_core::worldgen::realm_neighbourhood_for(0, RealmId::System(7)),
+            vd_physics::worldgen::realm_neighbourhood_for(0, RealmId::System(7)),
         );
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 33);
         // Origin: well inside System 7 (r=40), clear of the Station box (x∈[-30,-20]) ⇒ container == System 7.
@@ -16756,7 +17509,7 @@ mod tests {
         let mut rig = Rig::with_config(station_cfg);
         grant_realm_for(&mut rig, STATION_A);
         *rig.world.resource_mut::<RealmRegions>() =
-            RealmRegions::new(vd_core::worldgen::realm_neighbourhood_for(0, STATION_A));
+            RealmRegions::new(vd_physics::worldgen::realm_neighbourhood_for(0, STATION_A));
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 34);
         // Inside the Station box, at its CENTRE — which in the Station's OWN frame is zero, because every
         // realm is centred on itself. This used to read -25: the station's position in SYSTEM 7's frame,
@@ -16818,7 +17571,7 @@ mod tests {
         let mut rig = Rig::with_config(planet_cfg);
         grant_realm_for(&mut rig, RealmId::Planet(7));
         *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(
-            vd_core::worldgen::realm_neighbourhood_for(0, RealmId::Planet(7)),
+            vd_physics::worldgen::realm_neighbourhood_for(0, RealmId::Planet(7)),
         );
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 35);
         // Planet 7's centre, which in the PLANET'S OWN frame is zero — every realm is centred on itself.
@@ -16877,7 +17630,7 @@ mod tests {
         grant_realm_for(rig, RealmId::System(7)); // primary → RealmAuthority
         grant_realm_for(rig, RealmId::Planet(7)); // co-hosted child → CoHostedAuthority
         *rig.world.resource_mut::<RealmRegions>() =
-            RealmRegions::new(vd_core::worldgen::realm_neighbourhood_for_held(
+            RealmRegions::new(vd_physics::worldgen::realm_neighbourhood_for_held(
                 0,
                 &BTreeSet::from([RealmId::System(7), RealmId::Planet(7)]),
             ));
@@ -17339,13 +18092,107 @@ mod tests {
     }
 
     /// The signed distance from a frame-local `offset` to a region's surface (the exact scalar the
-    /// containment band consumes). Under `IdentityFrames` at P3 the reframe is a no-op, so this is the
-    /// same value the detector reads.
+    /// containment band consumes). The book places the region's frame at the identity — the P3 walk
+    /// shape — so the reframe is a no-op and this is the same value the detector reads.
     fn child_signed_distance(region: &RealmRegion, offset: DVec3) -> f64 {
         use vd_core::geometry::region_signed_distance;
         let pose = StampedPose::at_rest(config().frame, offset, UniverseTick(100));
-        region_signed_distance(&pose, region, &IdentityFrames)
-            .expect("identity reframe never errors")
+        let book = PlacementBook::new(
+            pose.frame,
+            pose.universe_tick,
+            vec![(region.frame, FramePlacement::identity())],
+        );
+        region_signed_distance(&pose, region, &book).expect("identity reframe never errors")
+    }
+
+    /// S6 of the placement arc — SL4's own acceptance line, MEASURED: *"a ship, a station, a moon and
+    /// a rock cross by identical code because that code cannot tell them apart."* ONE fixture parks an
+    /// occupant while its realm's MOVING child sweeps over it. The fixture takes the child's motion as
+    /// the OPAQUE injected seam closure and CANNOT branch on what is inside — `MotionFn` has no arms
+    /// to match and this crate has no edge to the crate that could name them. The parked dot is Stage
+    /// B4's case: its stamp re-advances every tick, so the sweeping world is measured against NOW.
+    /// Returns the filtered re-home requests plus the child's distance to the dot at the sweep's start
+    /// and end (read THROUGH the seam — anti-vacuity without motion knowledge).
+    fn drive_swept_crossing_feature(
+        motion: MotionFn,
+        kind: NodeKind,
+    ) -> (Vec<CrossingRequest>, f64, f64) {
+        let mut rig = Rig::with_config_and_kind(config(), kind);
+        rig.grant_realm();
+        let child = region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 100.0);
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vec![root_region(), own_region(), child])
+                .with_moving_children(BTreeMap::from([(OTHER_REALM, motion.clone())]));
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 0x53);
+        let parked = DVec3::new(1000.0, 0.0, 0.0);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, parked);
+        let tick_hz = 20.0;
+        let dist_at = |tick: u64| ((motion.0)(tick as f64 / tick_hz).origin - parked).length();
+        let (start, end) = (100u64, 160u64);
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in start..=end {
+            rig.set_local_tick(t);
+            rig.world.resource_mut::<ClockSample>().universe_tick = UniverseTick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        let reqs: Vec<CrossingRequest> = crossing_requests(&all)
+            .into_iter()
+            .filter(|r| r.to_realm == OTHER_REALM)
+            .collect();
+        (reqs, dist_at(start), dist_at(end))
+    }
+
+    /// The HR4/G-IDENTICAL extension proof (the placement arc S6): the IDENTICAL swept-crossing
+    /// fixture, run with a KEPLER child and an INTEGRATED (ballistic burn) child, on TWO shard kinds —
+    /// each run commits exactly ONE re-home with identical subject/source/destination/attempt. The
+    /// motions are built in the motion crate (a dev-dependency: fixtures may plant real motion; the
+    /// shipped crate cannot name one) and enter ONLY as opaque closures, so the fixture is measurably
+    /// blind to HOW the child moves and to WHAT KIND of shard runs it.
+    #[test]
+    fn a_kepler_child_and_a_thrusting_child_cross_by_identical_code() {
+        use vd_physics::motion::{Motion, motion_fn};
+        let tick_hz = 20.0;
+        // KEPLER: a circular 1000 m orbit phased so the child sits far off the dot at tick 100
+        // (√2·1000 m away) and EXACTLY on it at tick 160 (M(8 s) ≡ 0 ⇒ position (1000, 0, 0)).
+        let n = std::f64::consts::FRAC_PI_2 / 3.0; // rad/s across the 3 s sweep window
+        let kepler = motion_fn(Motion::Kepler(OrbitalElements {
+            sma: 1000.0,
+            ecc: 0.0,
+            inclination: 0.0,
+            raan: 0.0,
+            arg_periapsis: 0.0,
+            mean_anomaly_epoch: -n * (160.0 / tick_hz),
+            central_mass: n * n * 1000.0_f64.powi(3) / vd_physics::celestial::G,
+        }));
+        // INTEGRATED: a ballistic burn along -Y that carries the child from 1200 m off the dot at
+        // tick 100 onto it at tick 160 (y(t) = 1600 + 120·t − 40·t²: y(5) = 1200, y(8) = 0).
+        let burn = motion_fn(Motion::Integrated {
+            placement: FramePlacement::moving(
+                DVec3::new(1000.0, 1600.0, 0.0),
+                DVec3::new(0.0, 120.0, 0.0),
+            ),
+            acceleration: DVec3::new(0.0, -80.0, 0.0),
+        });
+
+        let (k_reqs, k_start, k_end) = drive_swept_crossing_feature(kepler, NodeKind::StubShard);
+        let planet = crate::capability::profiles::planet().expect("planet profile");
+        let (b_reqs, b_start, b_end) = drive_swept_crossing_feature(burn, NodeKind::Shard(planet));
+
+        // Anti-vacuity: both children genuinely swept from far OUTSIDE the shell onto the dot.
+        assert!(k_start > 200.0);
+        assert!(b_start > 200.0);
+        assert!(k_end < 1.0);
+        assert!(b_end < 1.0);
+        // Exactly ONE re-home each — the latch suppressed every later tick of the dwell.
+        assert_eq!(k_reqs.len(), 1, "the Kepler sweep commits one re-home");
+        assert_eq!(b_reqs.len(), 1, "the burn sweep commits one re-home");
+        // IDENTICAL crossing, field by field: the code cannot tell an orbit from a burn, and cannot
+        // tell a stub shard from a planet-profile shard (HR4's G-IDENTICAL, both axes at once).
+        assert_eq!(k_reqs[0].subject, b_reqs[0].subject);
+        assert_eq!(k_reqs[0].from_realm, b_reqs[0].from_realm);
+        assert_eq!(k_reqs[0].to_realm, b_reqs[0].to_realm);
+        assert_eq!(k_reqs[0].attempt, b_reqs[0].attempt);
+        assert_eq!(k_reqs[0].session, b_reqs[0].session);
     }
 
     /// DISCHARGES D-38: the G-IDENTICAL assert_feature_anywhere — ONE containment re-home fixture,
@@ -18371,8 +19218,8 @@ mod tests {
         // Two assertions, one arrival, because they are two faces of one defect:
         //   (1) you land ON the boundary you crossed, carrying a position no larger than the realm itself;
         //   (2) standing there, that system's planets are in range — the empty-neighbour-system bug.
-        let cfg = vd_core::worldgen::UniverseConfig::visual_demand(500.0, 0.02);
-        let world = vd_core::worldgen::WorldView::generated(0, &cfg);
+        let cfg = vd_physics::worldgen::UniverseConfig::visual_demand(500.0, 0.02);
+        let world = vd_physics::worldgen::WorldView::generated(0, &cfg);
         let system = world
             .regions()
             .iter()
@@ -18390,19 +19237,22 @@ mod tests {
             .copied()
             .expect("its parent is in the same world");
         let held = BTreeSet::from([system.realm]);
-        let regions = RealmRegions::new(world.neighbourhood(&held)).with_moving_children(
-            vd_core::worldgen::moving_children_for_config(0, &cfg, system.realm)
-                .into_iter()
-                .collect(),
-        );
+        let regions =
+            RealmRegions::new(world.neighbourhood(&held)).with_moving_children(kepler_motion_fns(
+                vd_physics::worldgen::moving_children_for_config(0, &cfg, system.realm)
+                    .into_iter()
+                    .collect(),
+            ));
         // THE SOURCE shard — the one the occupant is leaving, which holds the PARENT realm. It is the only
         // side that can do this conversion, and under the ground rule it is the side that must: it authored
         // where this system sits, so it knows; the system itself does not and never will.
         let src_held = BTreeSet::from([parent.realm]);
         let src_regions = RealmRegions::new(world.neighbourhood(&src_held)).with_moving_children(
-            vd_core::worldgen::moving_children_for_config(0, &cfg, parent.realm)
-                .into_iter()
-                .collect(),
+            kepler_motion_fns(
+                vd_physics::worldgen::moving_children_for_config(0, &cfg, parent.realm)
+                    .into_iter()
+                    .collect(),
+            ),
         );
         let tick_hz = 50.0;
         let tick = UniverseTick(0);
@@ -18411,17 +19261,20 @@ mod tests {
         // occupant about to cross in genuinely is.
         let at_the_face = system.center.offset() - DVec3::new(extent, 0.0, 0.0);
         let approaching = StampedPose::at_rest(parent.frame, at_the_face, tick);
-        // The PARENT'S context does the rebase. An earlier draft built this from the DESTINATION and so
-        // asked the arriving realm to place itself — the one thing it cannot do. It answered with the pose
-        // unchanged, still measured from the galaxy, which is exactly the 12 km error the owner flew into.
-        use vd_core::frame::rebind_pose_to_dest;
-        let src_frames = src_regions.frame_context(parent.realm, tick_hz, tick);
-        let arrived = rebind_pose_to_dest(approaching, system.realm, system.parent, &src_frames);
-        // …and the DESTINATION re-runs the same conversion on receipt, which must be a no-op: the pose
-        // already arrives in its frame. That idempotence is what lets ONE line serve both directions.
-        let frames = regions.frame_context(system.realm, tick_hz, tick);
+        // The PARENT'S authored book does the rebase. An earlier draft built this from the DESTINATION
+        // and so asked the arriving realm to place itself — the one thing it cannot do. It answered with
+        // the pose unchanged, still measured from the galaxy, which is exactly the 12 km error the owner
+        // flew into.
+        let src_book = src_regions.author_book(parent.realm, tick_hz, tick);
+        let arrived = vd_core::frame::transfer_frame(&approaching, system.frame, &src_book)
+            .expect("a galaxy can place its own star system");
+        // …and the DESTINATION re-runs the receiver's conversion on receipt, which must be a no-op: the
+        // pose already arrives in its frame ("the child does nothing" — the same-frame accept arm).
+        let frames = regions.author_book(system.realm, tick_hz, tick);
         assert_eq!(
-            rebind_pose_to_dest(arrived, system.realm, system.parent, &frames).pos,
+            vd_core::frame::transfer_frame(&arrived, system.frame, &frames)
+                .expect("a same-frame transfer is the identity")
+                .pos,
             arrived.pos,
             "the receiver's re-run must be a no-op downward — converting a pose into the frame it is \
              already in cannot move it"
@@ -19136,7 +19989,15 @@ mod tests {
             child: child_coord.clone(),
             realm_snapshot_bytes: postcard::to_allocvec(&inner).expect("fixture"),
         };
-        on_realm_observation(ro, &cfg, &clock, &regions, &mut observed, &mut stats);
+        on_realm_observation(
+            ro,
+            &cfg,
+            &clock,
+            &regions,
+            &obs_ledger(&regions, &cfg, &clock),
+            &mut observed,
+            &mut stats,
+        );
         assert_eq!(stats.realm_observation_received, 1);
         let (_seen, batches) = &observed.0[&story.planet];
         assert_eq!(batches.len(), 1);
@@ -19177,6 +20038,7 @@ mod tests {
             &cfg,
             &clock,
             &regions,
+            &obs_ledger(&regions, &cfg, &clock),
             &mut observed,
             &mut stats,
         );
@@ -19203,6 +20065,7 @@ mod tests {
             &cfg,
             &clock,
             &regions,
+            &obs_ledger(&regions, &cfg, &clock),
             &mut observed,
             &mut stats,
         );
@@ -19401,17 +20264,19 @@ mod tests {
     /// into this shard's axes rather than dropped — the stated invariant behind the lift's `expect`.
     #[test]
     fn the_lift_is_total_even_from_a_rotated_far_child() {
-        let hop = ChildFrame {
-            own: frame_of(OWN_REALM),
-            child: frame_of(RealmId::Planet(42)),
-            child_at: FramePlacement {
+        let child = frame_of(RealmId::Planet(42));
+        let hop = hop_book(
+            frame_of(OWN_REALM),
+            child,
+            FramePlacement {
                 origin_cell: glam::I64Vec3::new(1, 0, 0),
                 origin: DVec3::ZERO,
                 velocity: DVec3::ZERO,
                 orientation: DQuat::from_rotation_z(0.5),
                 angular_velocity: DVec3::ZERO,
             },
-        };
+            SHAPE_LANE_TICK,
+        );
         let outline = RealmShape {
             realm: RealmId::Planet(43),
             frame: frame_of(RealmId::Planet(43)),
@@ -19420,7 +20285,7 @@ mod tests {
             parent: Some(RealmId::Planet(42)),
         };
         let mut stats = StubStats::default();
-        let out = lift_shapes_from_child_frame(&[outline], &hop, &mut stats);
+        let out = lift_shapes_from_child_frame(&[outline], &hop, child, &mut stats);
         assert_eq!(out.len(), 1, "the outline is lifted, never dropped");
         assert_eq!(stats.interior_shapes_lifted, 1);
         // The centre kept the child's integer anchor AS AN INTEGER (the tiered-coordinate law), and
@@ -19674,6 +20539,7 @@ mod tests {
             &cfg,
             &clock_at(4),
             &regions,
+            &obs_ledger(&regions, &cfg, &clock_at(4)),
             &mut observed,
             &mut stats,
         );
@@ -19685,6 +20551,7 @@ mod tests {
             &cfg,
             &clock_at(5),
             &regions,
+            &obs_ledger(&regions, &cfg, &clock_at(5)),
             &mut observed,
             &mut stats,
         );
@@ -19693,6 +20560,7 @@ mod tests {
             &cfg,
             &clock_at(5),
             &regions,
+            &obs_ledger(&regions, &cfg, &clock_at(5)),
             &mut observed,
             &mut stats,
         );
@@ -19703,6 +20571,7 @@ mod tests {
             &cfg,
             &clock_at(6),
             &regions,
+            &obs_ledger(&regions, &cfg, &clock_at(6)),
             &mut observed,
             &mut stats,
         );
@@ -19908,7 +20777,7 @@ mod tests {
         let mut moving = BTreeMap::new();
         moving.insert(OTHER_REALM, elements);
         let mover_regions = RealmRegions::new(vec![root_region(), own_region(), mover])
-            .with_moving_children(moving);
+            .with_moving_children(kepler_motion_fns(moving));
         assert_eq!(
             child_shape(&mover_regions, &mover, tick_hz).center.offset(),
             state0.position,
@@ -20624,17 +21493,19 @@ mod tests {
         // `transfer_frame` refuses rather than folding the integer truth into f64 metres. Unreachable on the
         // shipped tree (every placement on it is unrotated) and reachable the moment a spinning realm is
         // authored far out, which is why it is a counted drop and not an assumption.
-        let hop = ChildFrame {
-            own: frame_of(OWN_REALM),
-            child: frame_of(RealmId::Planet(42)),
-            child_at: FramePlacement {
+        let child = frame_of(RealmId::Planet(42));
+        let hop = hop_book(
+            frame_of(OWN_REALM),
+            child,
+            FramePlacement {
                 origin_cell: glam::I64Vec3::new(1, 0, 0),
                 origin: DVec3::ZERO,
                 velocity: DVec3::ZERO,
                 orientation: DQuat::from_rotation_z(0.5),
                 angular_velocity: DVec3::ZERO,
             },
-        };
+            SHAPE_LANE_TICK,
+        );
         let outline = RealmShape {
             realm: RealmId::Planet(43),
             frame: frame_of(RealmId::Planet(43)),
@@ -20643,7 +21514,7 @@ mod tests {
             parent: Some(OWN_REALM),
         };
         let mut stats = StubStats::default();
-        let out = restate_shapes_in_child_frame(&[outline], &hop, &mut stats);
+        let out = restate_shapes_in_child_frame(&[outline], &hop, child, &mut stats);
         assert!(out.is_empty(), "the outline is dropped, never shipped raw");
         assert_eq!(stats.proxy_scene_shapes_dropped, 1);
         assert_eq!(stats.proxy_scene_shapes_restated, 0);

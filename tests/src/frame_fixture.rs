@@ -63,12 +63,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use vd_core::celestial::{G, OrbitalElements};
 use vd_core::geometry::RealmRegion;
 use vd_core::glam::DVec3;
 use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
-use vd_core::worldgen::{UniverseConfig, WorldView};
-use vd_core::{UniverseTick, frame::LocalFrames};
+use vd_core::{UniverseTick, placement::PlacementBook};
+use vd_physics::celestial::{G, OrbitalElements};
+use vd_physics::worldgen::{UniverseConfig, WorldView};
 use vd_sim::stub::RealmRegions;
 use vd_wire::channels::RealmSnap;
 
@@ -120,7 +120,7 @@ const SHELL_HEADROOM: f64 = 4.0;
 /// Build one with [`near`](WorkedExample::near), [`far`](WorkedExample::far) or
 /// [`moving`](WorkedExample::moving), then ask it for the pieces a shard boots with —
 /// [`realm_regions`](WorkedExample::realm_regions) for the containment forest a given realm's shard holds,
-/// [`frame_context`](WorkedExample::frame_context) for the ephemeris it converts through.
+/// [`placement_book`](WorkedExample::placement_book) for the authored book it converts through.
 #[derive(Clone, Debug)]
 pub struct WorkedExample {
     /// Which variant this is, for test failure messages.
@@ -304,7 +304,7 @@ impl WorkedExample {
         let sibling_planet = planets[1];
 
         // The story planet's elements: the config's, with the phase pinned. See the module docs.
-        let generated = vd_core::worldgen::moving_children_for_config(seed, &config, system);
+        let generated = vd_physics::worldgen::moving_children_for_config(seed, &config, system);
         let mut elements = generated
             .iter()
             .find(|(r, _)| *r == planet)
@@ -355,7 +355,7 @@ impl WorkedExample {
     /// generator's verbatim).
     #[must_use]
     pub fn moving_for(&self, held: RealmId) -> BTreeMap<RealmId, OrbitalElements> {
-        vd_core::worldgen::moving_children_for_config(self.seed, &self.config, held)
+        vd_physics::worldgen::moving_children_for_config(self.seed, &self.config, held)
             .into_iter()
             .map(|(realm, e)| {
                 if realm == self.planet {
@@ -371,14 +371,16 @@ impl WorkedExample {
     /// production builders the bins use (`RealmRegions::new` + `with_moving_children`).
     #[must_use]
     pub fn realm_regions(&self, held: RealmId) -> RealmRegions {
-        RealmRegions::new(self.regions_for(held)).with_moving_children(self.moving_for(held))
+        RealmRegions::new(self.regions_for(held))
+            .with_moving_children(vd_physics::motion::kepler_motion_fns(self.moving_for(held)))
     }
 
-    /// The ephemeris that shard converts through — the production `frame_context`, at this variant's tick.
+    /// The authored book that shard converts through — the production `author_book`, at this
+    /// variant's tick.
     #[must_use]
-    pub fn frame_context(&self, held: RealmId) -> LocalFrames {
+    pub fn placement_book(&self, held: RealmId) -> PlacementBook {
         self.realm_regions(held)
-            .frame_context(held, self.tick_hz, self.tick)
+            .author_book(held, self.tick_hz, self.tick)
     }
 
     /// The realm rows the shard hosting `held` AUTHORS this tick — the production
@@ -389,8 +391,8 @@ impl WorkedExample {
     /// so a receiver that ignores these rows draws every moving body at its parent's origin.
     #[must_use]
     pub fn authored_realm_rows(&self, held: RealmId) -> Vec<RealmSnap> {
-        self.realm_regions(held)
-            .authored_realm_snaps(held, self.tick_hz, self.tick)
+        let regions = self.realm_regions(held);
+        regions.authored_realm_snaps(held, &regions.author_book(held, self.tick_hz, self.tick))
     }
 
     /// THE WHOLE FOREST — the GATEWAY's view, and only the gateway's.
@@ -522,7 +524,7 @@ pub fn lattice_of(pose: &StampedPose) -> LatticePos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vd_core::frame::{FrameContext, FrameError, transfer_frame};
+    use vd_core::frame::{FrameError, transfer_frame};
 
     /// THE ANTI-DRIFT GUARD. The story's three distances are asserted against what the PRODUCTION
     /// generator actually planted, so the literals above cannot quietly stop describing the world the
@@ -567,9 +569,9 @@ mod tests {
     #[test]
     fn the_pinned_phase_puts_the_planet_exactly_on_plus_x_at_tick_zero() {
         let fx = WorkedExample::near();
-        let ctx = fx.frame_context(fx.system);
-        let placement = ctx
-            .placement(fx.planet_frame, fx.tick)
+        let book = fx.placement_book(fx.system);
+        let placement = book
+            .of(fx.planet_frame)
             .expect("the star authors its own planet");
         assert_eq!(
             placement.origin,
@@ -580,8 +582,8 @@ mod tests {
         // instead of the live placement would be caught by this.
         let mv = WorkedExample::moving();
         let moved = mv
-            .frame_context(mv.system)
-            .placement(mv.planet_frame, mv.tick)
+            .placement_book(mv.system)
+            .of(mv.planet_frame)
             .expect("the star authors its own planet")
             .origin;
         assert_ne!(
@@ -601,26 +603,26 @@ mod tests {
         let at_system = transfer_frame(
             &fx.occupant_pose(),
             fx.system_frame,
-            &fx.frame_context(fx.system),
+            &fx.placement_book(fx.system),
         )
         .expect("the star can place its own planet");
         assert_eq!(at_system.frame, fx.system_frame);
         assert_eq!(at_system.pos.offset(), DVec3::new(fx.up_1_m, 0.0, 0.0));
 
-        let at_galaxy = transfer_frame(&at_system, fx.galaxy_frame, &fx.frame_context(fx.galaxy))
+        let at_galaxy = transfer_frame(&at_system, fx.galaxy_frame, &fx.placement_book(fx.galaxy))
             .expect("the galaxy can place its own system");
         assert_eq!(at_galaxy.frame, fx.galaxy_frame);
         assert_eq!(at_galaxy.pos.offset(), DVec3::new(fx.up_2_m, 0.0, 0.0));
 
         let back_to_system =
-            transfer_frame(&at_galaxy, fx.system_frame, &fx.frame_context(fx.galaxy))
+            transfer_frame(&at_galaxy, fx.system_frame, &fx.placement_book(fx.galaxy))
                 .expect("the galaxy can place its own system");
         assert_eq!(back_to_system.pos.offset(), DVec3::new(fx.up_1_m, 0.0, 0.0));
 
         let back_to_planet = transfer_frame(
             &back_to_system,
             fx.planet_frame,
-            &fx.frame_context(fx.system),
+            &fx.placement_book(fx.system),
         )
         .expect("the star can place its own planet");
         assert_eq!(
@@ -639,15 +641,15 @@ mod tests {
             (fx.system, fx.galaxy_frame, fx.sibling_system_frame),
             (fx.planet, fx.system_frame, fx.sibling_planet_frame),
         ] {
-            let ctx = fx.frame_context(own);
-            assert_eq!(ctx.placement(parent_frame, fx.tick), None);
-            assert_eq!(ctx.placement(sibling_frame, fx.tick), None);
+            let book = fx.placement_book(own);
+            assert_eq!(book.of(parent_frame), None);
+            assert_eq!(book.of(sibling_frame), None);
         }
         assert_eq!(
             transfer_frame(
                 &fx.occupant_pose(),
                 fx.galaxy_frame,
-                &fx.frame_context(fx.planet),
+                &fx.placement_book(fx.planet),
             )
             .expect_err("a planet must not be able to answer where it is in its galaxy"),
             FrameError::UnknownDestFrame,
@@ -660,14 +662,12 @@ mod tests {
     /// it does not, and the fold costs most of a millimetre.
     #[test]
     fn the_far_moving_variant_puts_the_placement_off_the_galaxy_scale_grid() {
-        use vd_core::frame::FrameContext;
-
         let at_epoch = WorkedExample::far();
         let moved = WorkedExample::far_moving();
         for (fx, expect_lossless) in [(&at_epoch, true), (&moved, false)] {
             let placement = fx
-                .frame_context(fx.system)
-                .placement(fx.planet_frame, fx.tick)
+                .placement_book(fx.system)
+                .of(fx.planet_frame)
                 .expect("the star authors its own planet")
                 .origin;
             let far = DVec3::new(fx.system_from_galaxy_m, 0.0, 0.0);

@@ -6241,6 +6241,7 @@ dependencies = [
  "vd-devproto",
  "vd-io-prod",
  "vd-node",
+ "vd-physics",
  "vd-sim",
  "vd-wire",
 ]
@@ -6255,6 +6256,7 @@ dependencies = [
  "thiserror 2.0.18",
  "vd-core",
  "vd-devproto",
+ "vd-physics",
  "vd-sim",
  "vd-wire",
 ]
@@ -6305,6 +6307,7 @@ dependencies = [
  "tracing-subscriber",
  "vd-core",
  "vd-harness",
+ "vd-physics",
  "vd-sim",
  "vd-wire",
 ]
@@ -6384,8 +6387,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vd-core",
+ "vd-physics",
  "vd-sim",
  "vd-wire",
+]
+
+[[package]]
+name = "vd-physics"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "postcard",
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
+ "vd-core",
 ]
 
 [[package]]
@@ -6401,6 +6417,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vd-core",
+ "vd-physics",
  "vd-wire",
 ]
 
@@ -6417,6 +6434,7 @@ dependencies = [
  "vd-core",
  "vd-harness",
  "vd-node",
+ "vd-physics",
  "vd-sim",
  "vd-wire",
 ]

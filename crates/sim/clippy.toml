@@ -4,6 +4,10 @@
 # crates exempt from these bans (they ARE the I/O implementation). Empirically
 # checked: injecting a banned call here produces a clippy diagnostic (SEAL-1).
 disallowed-methods = [
+    # SL4 (the placement arc): sim CONSUMES books from the ledger; the ONE writer (`author_placements`,
+    # explicitly allowed at its definition) is the only sim site that may publish. Minting a rival
+    # placement history anywhere else is how two consumers end up reading two pasts.
+    { path = "vd_core::placement::PlacementLedger::publish", reason = "only the ONE placement writer (author_placements) publishes books; every other sim system is a consumer and selects from the ledger (SL4)" },
     { path = "std::time::SystemTime::now", reason = "use the injected sim::io::Clock (R6/R7: wall-clock-derived state caused km-scale drift and forgeable identity)" },
     { path = "std::time::Instant::now", reason = "use the injected sim::io::Clock; prod tick pacing lives in io-prod only" },
     { path = "std::thread::sleep", reason = "the sim thread never sleeps; pacing belongs to the prod tick loop behind sim::io" },

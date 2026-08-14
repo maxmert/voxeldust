@@ -15,5 +15,9 @@ postcard = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+# DEV-ONLY: scene tests build THE world; the shipped client never names a motion (SL4).
+vd-physics = { workspace = true }
+
 [lints]
 workspace = true

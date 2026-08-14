@@ -101,21 +101,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `own_coord` (its un-collapsed lineage), and its derived `ShardProfile` were all resolved ABOVE (before
     // build_app) from `VD_OWN_COORD` or, absent it, `VD_REALM_KIND`/`VD_REALM_SEED` (ABSENT/empty ⇒
     // `System(seed)` — the pre-NODE-PER-REALM default, so every legacy shard boot stays byte-identical).
-    // CO-HOSTING (the un-hosted-child cure, KEPT for the --triple LEGACY shape): a shard may host its own
-    // realm PLUS deeper CHILD realms it co-hosts (`VD_HELD_REALMS`, set by the --triple launcher). ABSENT ⇒
-    // single-realm ({own realm} — the byte-identical default, and the NODE-PER-REALM Forest case: each shard
-    // holds exactly its own realm). A malformed value fails LOUD at boot (a co-hosting misconfig must never
-    // silently degrade to single-realm and re-open the orphan gap). The own realm is always included.
+    // CO-HOSTING (`VD_HELD_REALMS`): a shard may host its own realm PLUS deeper CHILD realms it co-hosts.
+    // NO launcher produces it since the co-hosting shapes retired into NODE-PER-REALM (D-WORLD-6 — the
+    // parse keeps unit coverage so it cannot rot silently). ABSENT ⇒ single-realm ({own realm} — the
+    // byte-identical default: each shard holds exactly its own realm). A malformed value fails LOUD at boot
+    // (a co-hosting misconfig must never silently degrade to single-realm and re-open the orphan gap). The
+    // own realm is always included.
     let held_realms =
         vd_bins::parse_held_realms(&env.string("VD_HELD_REALMS").unwrap_or_default(), own_realm)?;
     // `VD_UNIVERSE_SEED` (default 0) is the ONE seed every shard shares — read ONCE here (reused for the
     // frame lookup below AND the seed-neighbourhood plant further down).
     let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
-    // FA-5 (D-45(a)): the world SCALE (`VD_UNIVERSE_SCALE`, ABSENT ⇒ `Walk` = byte-identical). `Walk` ⇒
-    // the seed neighbourhood + an EMPTY mover roster; `Visual` ⇒ the single-system forest whose planets
-    // ORBIT. The containment forest + the moving-child roster, from the ONE world. There is no scale to
-    // resolve any more: this shard and its gateway build the same universe because there is only one, and
-    // the interest band is measured against the speed this cluster actually flies at and the tick it
+    // The containment forest + the moving-child roster, from the ONE world (SL5). There is no scale to
+    // resolve: this shard and its gateway build the same universe because there is only one, and the
+    // interest band is measured against the speed this cluster actually flies at and the tick it
     // actually runs.
     let (seed_regions, moving) = vd_bins::boot_regions_and_movers(
         universe_seed,
@@ -151,48 +150,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `universe_seed` was read once above; a per-shard forest that fails `guard_regions_nest` (two roots, a
     // dangling parent, a cycle, count > MAX_REGIONS) is a CODE bug in the generator — fail LOUD at boot
     // (Display carries the actionable guidance for `kubectl logs`), never a silent detector no-op.
-    // `seed_regions` (built above from the scale) is the containment forest this shard EVALUATES against:
-    // Walk ⇒ the seed NEIGHBOURHOOD (the UNION of every held realm's neighbourhood — a co-hosting shard must
-    // see the deeper child regions, a Planet's Area being a GRANDCHILD, so the LOCAL re-home short-circuit
-    // can fire; single-realm ⇒ `realm_neighbourhood_for(hosted)` exactly, byte-identical); Visual ⇒ the FA-5
-    // single-system forest. `moving` is EMPTY on Walk, the orbiting planets on Visual.
-    // `VD_REALM_BOUNDARIES` OVERRIDE (kept for the dual-cluster / render-crossing PLAYGROUND smokes): an
-    // authored `boundaries.json` (a `Vec<RealmBoundary>`, SINGLE-SOURCED with the client's `--realm-boxes`)
-    // REPLACES the scale forest with a born-inside child crossing shell — a self-contained Walk-scale forest,
-    // so its mover roster is EMPTY (the override never combines with the Visual orbiting planets). A
-    // malformed file / a boundary for a realm this shard does NOT host fails LOUD. ABSENT ⇒ the scale forest.
-    let (regions, moving) = if let Some(boundaries) =
-        vd_bins::resolve_realm_boundaries(&env, hosted_realm).map_err(|e| e.to_string())?
-    {
-        tracing::info!(
-            count = boundaries.len(),
-            realm = %hosted_realm,
-            "planting VD_REALM_BOUNDARIES OVERRIDE — the authored playground crossing forest is ARMED",
-        );
-        // The override is a self-contained WALK-scale playground forest: EMPTY mover roster (nothing in it
-        // orbits, so the shard authors no live placement for any of it).
-        (
-            vd_bins::override_regions_for_boundaries(
-                &boundaries,
-                hosted_realm,
-                move_speed,
-                tick_dt,
-            ),
-            std::collections::BTreeMap::new(),
-        )
-    } else {
-        // This line used to print the SCALE this shard booted, and reading it across a live cluster is
-        // how the two-worlds defect was caught: the orchestrator said one thing and its gateway another.
-        // There is no scale to print now. The seed is, because one world generated from one seed is
-        // exactly what has to be true, and it is the thing worth being able to compare across processes.
-        tracing::info!(
-            count = seed_regions.len(),
-            realm = %hosted_realm,
-            seed = universe_seed,
-            "planting the containment forest for THE world — the re-home detector is LIVE",
-        );
-        (seed_regions, moving)
-    };
+    // There is NO boundary-file override any more (SL5): the authored playground forest a shard could once
+    // load in place of THE world let a cluster simulate geometry the world does not contain, and the gates
+    // that leaned on it proved nothing about the game as shipped. THE world's own shells are the only
+    // crossing boundaries a shard ever arms.
+    let regions = seed_regions;
+    // This line used to print the SCALE this shard booted, and reading it across a live cluster is
+    // how the two-worlds defect was caught: the orchestrator said one thing and its gateway another.
+    // There is no scale to print now. The seed is, because one world generated from one seed is
+    // exactly what has to be true, and it is the thing worth being able to compare across processes.
+    tracing::info!(
+        count = regions.len(),
+        realm = %hosted_realm,
+        seed = universe_seed,
+        "planting the containment forest for THE world — the re-home detector is LIVE",
+    );
     // THE SHARD'S LINEAGE, and where it comes from. `VD_OWN_COORD` when the launcher set one (the demand
     // spawner does); otherwise DERIVED from the very forest just planted, by walking the parent pointers of
     // this shard's own region up to the ambient root.
@@ -311,15 +283,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(presence) = vd_bins::resolve_presence(&env, tick_dt)? {
         world.insert_resource(presence);
     }
-    // The BOOT FENCE (C-5): pure-topology validation BEFORE the infallible `RealmRegions::new`, so a
-    // malformed forest fails LOUD here rather than degrading to the detector's rootless no-op.
-    vd_core::geometry::guard_regions_nest(&regions, vd_sim::stub::MAX_REGIONS).map_err(|e| {
+    // The BOOT FENCE (C-5): topology + WORST-INSTANT geometry validation BEFORE the infallible
+    // `RealmRegions::new`, so a malformed forest fails LOUD here rather than degrading to the
+    // detector's rootless no-op. The reach map is the boot's statement of how far each child's motion
+    // can carry it — a mover judged at its APOAPSIS, a static child exactly at its authored offset
+    // (the placement arc S4: the fence used to read a mover's zeroed centre and go size-only).
+    vd_core::geometry::guard_regions_nest(
+        &regions,
+        vd_sim::stub::MAX_REGIONS,
+        &vd_bins::child_reaches(&regions, &moving),
+    )
+    .map_err(|e| {
         format!("malformed realm-region forest for {hosted_realm}: {e} — refusing to boot")
     })?;
     *node
         .world_mut()
-        .resource_mut::<vd_sim::stub::RealmRegions>() =
-        vd_sim::stub::RealmRegions::new(regions).with_moving_children(moving);
+        .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)
+        .with_moving_children(vd_physics::motion::kepler_motion_fns(moving));
     let mut pacer = TickPacer::new(tick_hz);
     // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its
     // heartbeat + THIS shard's readiness) and the /healthz+/readyz HTTP task reads. Slice 1: the SIGTERM flag

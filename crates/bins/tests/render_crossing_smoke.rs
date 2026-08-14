@@ -1,33 +1,36 @@
-//! G-RENDER-CROSSING-SMOKE — the Visual Crossing Playground pixel proof (Slice V4): a real dot
-//! WALKS ACROSS a live realm boundary and the PROVEN transfer is captured in actual pixels — the
-//! dot's pixels move from box A's screen region to box B's, over the wire, end to end.
+//! G-RENDER-CROSSING-SMOKE — the crossing pixel proof on THE WORLD ITSELF: a real dot flies the ±Z
+//! polar corridor OUT of THE world's own 150 m home shell, the directory CAS re-homes its authority
+//! onto the pre-booked galaxy shard, and the round trip is captured in actual pixels — INSIDE the
+//! home system's drawn shell, OUTSIDE it in the between-space, and back INSIDE on the return. The
+//! RETURN leg gets pixel coverage for the first time (the owner's "everything froze on the way
+//! back").
 //!
-//! It stands up the DUAL-shard process cluster (`up --dual`) with an INJECTED walk-into crossing
-//! trigger (via the `VD_DEVCLUSTER_BOUNDARIES` launcher hook, in place of the default born-inside
-//! shell — which re-homes authority WITHOUT moving the dot and so cannot show a pixel crossing).
-//! A headless `client --capture --realm-boxes` renders TWO translucent colored boxes — box A
-//! (`System(7)`, at the origin) and box B (`System(8)`, offset on +X). The client's avatar spawns
-//! inside box A; `WalkTo` drives it +X across the boundary; the SOURCE's geometric dwell detector
-//! fires the crossing AUTONOMOUSLY, the real client stamps the in-band CUT_MARKER (its passive,
-//! server-authoritative half of the cut), the directory CAS re-homes authority onto the DEST, and
-//! the client auto-acquires the DEST subscription (a server-side route swap it never initiates).
+//! It stands up the DUAL process cluster (`up --dual`) with NO injected geometry — the old gate
+//! planted an authored two-box playground through a boundary-override hook; THE world's own home
+//! shell IS the crossing boundary now (SL5: one world, nothing to select). A headless
+//! `client --capture --realm-boxes` draws the scene `emit-world-scene` writes (`regions.json`, the
+//! home shard's own boot neighbourhood — the drawn geometry IS the detector's, single-sourced).
 //!
-//! CAPTURE + VERDICT. BEFORE (dot in box A) and AFTER (dot in box B) screenshots, each asserting:
-//! - STATE (deterministic): `location` flips `System 7` → `System 8` (the client's OWN authoritative
-//!   FrameRef re-homed — it received + composited a DEST-authoritative track); `expected_box` flips
-//!   A → B (the composited world pos is geometrically inside the other box); and the world pos
-//!   ADVANCED on +X well past the crossing point — a pose that ONLY the DEST could have delivered
-//!   (the source sub's last pose is behind the crossing; the dot at box B center proves DEST
-//!   delivery, a STRONGER non-vacuity gate than a transient both-subs overlap).
-//! - PIXELS (corroboration): the dot's projected screen region holds non-clear pixels INSIDE box A's
-//!   rectangle BEFORE and box B's rectangle AFTER (the two rectangles are DISJOINT by construction),
-//!   and NOT inside box A's rectangle after — the pixels moved. Zero magenta on both frames.
+//! THE CAMERA (judge fix A1): the client's offscreen capture camera is `fit_camera_to_scene` over
+//! the LIVE overlaid scene, refit EVERY frame — and THE world's planets ORBIT, so a camera this
+//! gate fitted over the static boot file would drift from the client's the moment an outer planet
+//! swings wide. Each capture therefore RECONSTRUCTS the client's actual camera from the client's
+//! own reported drawn boxes (`DevState.realm_boxes` centres, zipped with THE world's extents by
+//! realm label → `bounds_union` → `fit_camera_to_bounds`) — the identical per-frame refit, fed the
+//! identical inputs. Residual skew is sub-frame (one tick of orbital motion against a ~260 m scene
+//! radius, ≤ ~0.14 m).
+//!
+//! J1, ASSERTED IN-TEST: the home system sits at the GALACTIC ORIGIN (`world_roster` asserts the
+//! galaxy authors its placement at ZERO), so a home↔galaxy crossing is numerically an IDENTITY in
+//! the drawn space — which is exactly why this ONE file-based scene stays valid across both
+//! crossings, and why `expected_box == None` at the middle capture is honest: the galaxy's 12331 m
+//! extent exceeds the renderable ceiling and SL3 says a containment boundary is never drawn.
 //!
 //! GPU PRECONDITION (same as the other visual gates): renders through wgpu, REQUIRES a working GPU
 //! adapter, LOCAL-only (no CI, no software-raster fallback). Run via `just render-crossing-smoke`.
 //! Under a plain `cargo test --workspace` (no features) this file compiles to ZERO tests. Tier-B
 //! process glue (coverage-exempt); the Tier-A verdicts it stands on are 100%-covered by their own
-//! unit tests, and the client's cut handling is covered in `vd_client::net`.
+//! unit tests.
 #![cfg(all(feature = "dev-control", feature = "render"))]
 
 use std::net::TcpStream;
@@ -35,21 +38,23 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use vd_bins::crossing_playground::{self, BOX_B_CENTER};
+use vd_bins::flight::cross_leg;
+use vd_bins::scene_camera::{extent_by_label, live_scene_camera};
 use vd_bins::{
-    DEV, DevClusterDown, admin_get_body, dev_auth_signing_key_hex, dev_roundtrip, devcluster,
-    loopback, record_extra_pid, slot_trust_dir, slot_workdir,
+    ClusterAddrs, ClusterShape, DEV, DevClusterDown, admin_get_body, dev_auth_signing_key_hex,
+    dev_roundtrip, devcluster, loopback, realm_shards, record_extra_pid, slot_trust_dir,
+    slot_workdir, world_roster, write_world_regions,
 };
 use vd_client::realm_scene::{BoxShape, RealmScene};
 use vd_client_harness::assert::magenta_pixel_count;
-use vd_client_harness::camera::{CaptureCamera, ScreenAabb, fit_camera_to_scene};
+use vd_client_harness::camera::{CaptureCamera, ScreenAabb};
 use vd_client_harness::manifest::{CaptureKind, MANIFEST_FILENAME, RunManifest};
 use vd_client_harness::verdict::{
     dot_pixels_within_box_region, expected_box, projected_point_aabb,
 };
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
 use vd_core::glam::DVec3;
-use vd_core::pose::{FrameRef, RealmId};
+use vd_core::pose::{RealmId, frame_for_realm};
 use vd_devproto::{DevPortScheme, DevRequest, DevResponse, WORKTREE_SLOT_CEILING};
 
 const CLIENT_NAME: &str = "g-render-crossing";
@@ -57,21 +62,26 @@ const CLIENT_NAME: &str = "g-render-crossing";
 /// gates (render-smoke +18, render-boxes/crossing-e2e +19) so a live cluster can never collide.
 const RENDER_CROSSING_SLOT: u16 = WORKTREE_SLOT_CEILING + 22; // 86: G-RENDER-CROSSING-SMOKE
 
-// The playground geometry (box A@SOURCE origin, box B@DEST +X, the walk-into shell trigger + two-box
-// scene) is the SINGLE-SOURCED `vd_bins::crossing_playground` fixture set, shared with the human
-// `crossing-playground` launcher. The box CENTRES are no longer imported for the projection (slice 5:
-// each box's centre is read from the scene and reduced through the one chokepoint); BOX_B_CENTER
-// remains as the server-side WalkTo target, which is an absolute world point, not a render-space one.
 /// The dot's on-screen world radius for its projected rectangle (brackets the billboard marker).
 const DOT_WORLD_RADIUS: f64 = 2.0;
-/// The AFTER capture waits for the dot to reach here (well past the ≈ +38.5 crossing point, near box B
-/// center): a pose the source sub can NEVER have delivered, so it proves the DEST stream delivered.
-const CROSSING_CONFIRMED_X: f64 = 44.0;
-/// A generous LOCAL deadline: boot + login + a ≈ 50 m walk at `DEV.move_speed` + the re-home propagation.
-const CROSSING_DEADLINE: Duration = Duration::from_secs(70);
+/// The OUTSIDE park (flight law leg A, continued down the corridor): stated in the space the
+/// session stands in — home-frame on the way out, and numerically the SAME point in the galaxy
+/// frame (J1). The crossing itself fires at the ~152 m release edge; the park is 2 km down the pole
+/// because of the CAMERA's geometry (measured): the fitted view direction is mostly −Z — nearly
+/// parallel to the corridor — so a dot parked just past the shell projects INSIDE the shell's
+/// silhouette by foreshortening (at 220 m: a 91 px offset against a 167 px rect). Past ~1.2 km the
+/// projection clears the rect; 2 km gives ~50 px of margin per axis. Still deep inside the galaxy's
+/// own 12331 m shell, still on the polar corridor (the sibling stars sit on the ±X ring).
+const OUTSIDE_PARK: DVec3 = DVec3::new(0.0, 0.0, -2000.0);
+/// The RETURN park (flight law leg B): inside the ~149 m acquire edge, comfortably inside the home
+/// shell for the third capture's pixels.
+const RETURN_PARK: DVec3 = DVec3::new(0.0, 0.0, -60.0);
+/// A generous LOCAL deadline per crossing leg: the ~2 km corridor flight + the re-home propagation.
+const LEG_DEADLINE: Duration = Duration::from_secs(60);
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(200);
-const CROSSING_POLL: Duration = Duration::from_millis(100);
+const DELIVERY_DEADLINE: Duration = Duration::from_secs(90);
+const DELIVERY_POLL: Duration = Duration::from_millis(100);
 
 /// Kill the capture client on drop — the 5th process beyond the dual cluster's 4 nodes.
 struct ChildGuard(Child);
@@ -108,9 +118,9 @@ fn await_listener(port: u16, child: &mut Child) {
     }
 }
 
-/// The orchestrator admin directory as `(key, authority)` rows (diagnosis on a crossing timeout:
-/// distinguishes "never fired / source still owns" from "committed on the DEST but the client did
-/// not observe it"). Empty on a not-yet-answering endpoint.
+/// The orchestrator admin directory as `(key, authority)` rows (diagnosis on a failed non-vacuity
+/// gate: distinguishes "never fired / source still owns" from "committed but unobserved"). Empty on
+/// a not-yet-answering endpoint.
 fn directory_rows(admin: std::net::SocketAddr) -> Vec<(String, String)> {
     let Some(body) = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2))) else {
         return Vec::new();
@@ -126,31 +136,6 @@ fn directory_rows(admin: std::net::SocketAddr) -> Vec<(String, String)> {
                     Some((
                         e["key"].as_str()?.to_owned(),
                         e["authority"].as_str()?.to_owned(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The orchestrator's in-flight saga states as `(transfer, state)` — the leg diagnostic: a saga parked
-/// in `Promoting` means the DEST promoted but the client-delivery watermark (D-36) starved; a saga stuck
-/// in an earlier state (`Cutting`/`Preparing`) means the crossing never got past that leg.
-fn saga_states(admin: std::net::SocketAddr) -> Vec<(String, String)> {
-    let Some(body) = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2))) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
-        return Vec::new();
-    };
-    value["sagas"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|e| {
-                    Some((
-                        e["transfer"].as_str()?.to_owned(),
-                        e["state"].as_str()?.to_owned(),
                     ))
                 })
                 .collect()
@@ -180,36 +165,60 @@ fn own_pos(state: &vd_devproto::DevState) -> DVec3 {
     DVec3::new(row.pos[0], row.pos[1], row.pos[2])
 }
 
-/// The box's projected screen rectangle via the SAME `fit_camera_to_scene` camera the render framed
-/// with — the box center + its bounding-sphere radius projected through the Tier-A `CaptureCamera`.
-fn box_screen_aabb(scene: &RealmScene, camera: &CaptureCamera, realm: RealmId) -> ScreenAabb {
-    let rbox = scene.get(realm).expect("box in scene");
-    let radius = match rbox.shape {
+/// The client-reported DRAWN centre of `realm`'s box (`DevState.realm_boxes`, the same chokepoint
+/// the pixels go through) — panics if the client is not drawing it.
+fn drawn_centre(state: &vd_devproto::DevState, realm: RealmId) -> DVec3 {
+    let label = format!("{realm:?}");
+    let row = state
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == label)
+        .unwrap_or_else(|| {
+            panic!(
+                "the client is not drawing {label} — drawn scene: {:?}",
+                state.realm_boxes
+            )
+        });
+    DVec3::from_array(row.center)
+}
+
+/// A realm box's projected screen rectangle through the RECONSTRUCTED live camera: the client's
+/// reported drawn centre + the box's bounding-sphere radius from the file scene.
+fn drawn_box_screen_aabb(
+    state: &vd_devproto::DevState,
+    scene: &RealmScene,
+    camera: &CaptureCamera,
+    realm: RealmId,
+) -> ScreenAabb {
+    let radius = match scene.get(realm).expect("box in scene").shape {
         BoxShape::Box { half } => half.length(),
         BoxShape::Sphere { r } => r,
     };
-    // The centre flattened through the ONE chokepoint — the same space the pixels are in. There is one
-    // space now: the server converts into the session's pin before shipping.
-    projected_point_aabb(camera, rbox.draw_center(), radius)
+    projected_point_aabb(camera, drawn_centre(state, realm), radius)
         .expect("the box center projects in front of the camera")
 }
 
-/// THE SCENE THE SESSION IS DRAWN IN, as the CLIENT itself reports drawing it: every realm box it is
-/// currently rendering, keyed by its realm label, with the centre it draws that box at (the same
-/// chokepoint the pixels go through). Sorted so two samples compare as values.
-///
-/// This is the observable stand-in for "which realm's frame these numbers are measured in". The client
-/// is a pure renderer and is never told that realm's name — it draws what it is handed — so the space
-/// itself is not directly reportable. But the boxes are the reference geometry: the space is the thing
-/// they are all measured from, and if it changed under the session, every centre would move with it.
-fn drawn_scene_centres(state: &vd_devproto::DevState) -> Vec<(String, [f64; 3])> {
-    let mut rows: Vec<(String, [f64; 3])> = state
-        .realm_boxes
-        .iter()
-        .map(|b| (b.realm.clone(), b.center))
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    rows
+/// Park the dot at `target` (stated in the space the session currently stands in), throttle cut.
+fn park_at(devctl: u16, target: DVec3) {
+    let walk = round_trip(
+        devctl,
+        &DevRequest::WalkTo {
+            target: target.to_array(),
+            arrive_epsilon: 3.0,
+            max_ticks: 3000,
+            max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
+        },
+    );
+    assert!(
+        matches!(walk, DevResponse::State { .. }),
+        "the park WalkTo at {target} should arrive, got {walk:?}",
+    );
+    let _ = round_trip(
+        devctl,
+        &DevRequest::Move {
+            axes: [0.0, 0.0, 0.0],
+        },
+    );
 }
 
 /// Decode a captured PNG → (rgba, w, h, self-calibrated clear color from the top-right corner).
@@ -247,25 +256,86 @@ fn screenshot(port: u16, label: &str) -> String {
     }
 }
 
-/// `vd-devcluster up --slot N --dual` with the SOURCE crossing geometry INJECTED via the
-/// `VD_DEVCLUSTER_BOUNDARIES` launcher hook (the approved bin dev-config override).
-fn up_dual_with_trigger(launcher: &str, slot: u16, boundaries_path: &Path) -> bool {
-    Command::new(launcher)
-        .args(["up", "--slot", &slot.to_string(), "--dual"])
-        .env("VD_DEVCLUSTER_BOUNDARIES", boundaries_path)
-        .status()
-        .expect("run vd-devcluster up --dual")
-        .success()
+/// One capture: sample the state, screenshot, reconstruct the client's live camera from THAT state,
+/// and return everything a verdict needs. The J1 drawn identity is asserted at EVERY capture: the
+/// home box draws at the session origin on both sides of the crossing (the galaxy authors the home
+/// placement at ZERO), or the one shared file scene would be lying about one of the frames.
+struct Capture {
+    state: vd_devproto::DevState,
+    camera: CaptureCamera,
+    home_rect: ScreenAabb,
+    pos: DVec3,
+    dot_rect: ScreenAabb,
+    rgba: Vec<u8>,
+    w: usize,
+    h: usize,
+    clear: [u8; 4],
+    /// The run-relative screenshot path (the HR6 manifest check at the end).
+    shot: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture(
+    devctl: u16,
+    cwd: &Path,
+    label: &str,
+    scene: &RealmScene,
+    extents: &std::collections::BTreeMap<String, DVec3>,
+    home: RealmId,
+) -> Capture {
+    let state = poll_state(devctl);
+    let shot = screenshot(devctl, label);
+    let camera = live_scene_camera(&state, extents, CAPTURE_W as usize, CAPTURE_H as usize);
+    assert_eq!(
+        drawn_centre(&state, home),
+        DVec3::ZERO,
+        "J1 (drawn identity, capture '{label}'): the home box draws at the session origin on BOTH \
+         sides of the home↔galaxy crossing — the galaxy authors the home placement at ZERO, which \
+         is why the one file scene stays valid across it",
+    );
+    let home_rect = drawn_box_screen_aabb(&state, scene, &camera, home);
+    let pos = own_pos(&state);
+    let dot_rect = projected_point_aabb(&camera, pos, DOT_WORLD_RADIUS)
+        .unwrap_or_else(|| panic!("the dot projects in front of the camera ({label})"));
+    let (rgba, w, h, clear) = decode_capture(cwd, &shot);
+    assert_eq!(
+        magenta_pixel_count(&rgba),
+        0,
+        "the '{label}' frame must be magenta-free"
+    );
+    Capture {
+        state,
+        camera,
+        home_rect,
+        pos,
+        dot_rect,
+        rgba,
+        w,
+        h,
+        clear,
+        shot,
+    }
 }
 
 #[test]
-fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
+fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
     let _ = devcluster(launcher, "down", RENDER_CROSSING_SLOT); // clean slate (idempotent)
     let _down = DevClusterDown::new(launcher, RENDER_CROSSING_SLOT);
+
+    // THE ROSTER + THE LABELS. `world_roster` itself asserts I-AXIS/I-POLE/I-RADIAL and J1 (the
+    // home placement is ZERO in the galaxy frame; the sibling's is not) — deriving it here IS the
+    // in-test flight-law + J1 gate, run before any process spawns.
+    let roster = world_roster(&DEV);
+    let home_label = frame_for_realm(roster.home, None)
+        .expect("the home realm has a frame")
+        .label();
+    let galaxy_label = frame_for_realm(roster.galaxy, None)
+        .expect("the galaxy realm has a frame")
+        .label();
 
     let ports = DevPortScheme::DEFAULT
         .slot_ports(RENDER_CROSSING_SLOT)
@@ -278,30 +348,49 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
     let cwd = slot_workdir(RENDER_CROSSING_SLOT).join("capture-cwd");
     std::fs::create_dir_all(&cwd).expect("make client cwd");
 
-    // Two files (single-sourcing is impossible for a crossing — see crossing_playground::scene): the SHARD
-    // trigger (injected via the launcher hook) and the CLIENT two-box scene.
-    let trigger_path = cwd.join("trigger.json");
-    std::fs::write(
-        &trigger_path,
-        serde_json::to_string(&crossing_playground::trigger(&DEV)).expect("serialize trigger"),
-    )
-    .expect("write trigger.json");
-    let scene_boundaries = crossing_playground::scene(&DEV);
-    let scene = RealmScene::from_boundaries(&scene_boundaries).expect("the scene projects");
-    let boxes_json = cwd.join("boxes.json");
-    std::fs::write(
-        &boxes_json,
-        serde_json::to_string(&scene_boundaries).expect("serialize boxes.json"),
-    )
-    .expect("write boxes.json");
-
-    // Bring up the dual cluster with the injected walk-into trigger (C1 both-realms gate → exit 0).
-    assert!(
-        up_dual_with_trigger(launcher, RENDER_CROSSING_SLOT, &trigger_path),
-        "up --dual with the injected trigger must reach the C1 both-realms ready gate and exit 0",
+    // ONE scene, from THE world (`emit-world-scene`'s body): the home shard's own boot
+    // neighbourhood — the drawn geometry IS the detector's. The same file feeds the client
+    // (`--realm-boxes`), the in-test membership verdict (`expected_box`), and the extent map the
+    // camera reconstruction joins the drawn boxes against.
+    let regions_path = write_world_regions(&cwd, &DEV).expect("emit THE world scene");
+    let regions_json = std::fs::read_to_string(&regions_path).expect("read regions.json");
+    let regions: Vec<vd_core::geometry::RealmRegion> =
+        serde_json::from_str(&regions_json).expect("regions.json parses");
+    let extents = extent_by_label(&regions);
+    let scene = RealmScene::from_regions_json(&regions_json).expect("the world scene projects");
+    // J1, on the file scene: the home box is AT the origin of the emitted scene (the shard's own
+    // frame — SL1), so the drawn-identity assert below compares against a genuine zero.
+    assert_eq!(
+        scene
+            .get(roster.home)
+            .expect("the home box is renderable")
+            .draw_center(),
+        DVec3::ZERO,
+        "J1: the emitted scene draws the home system at its own origin",
     );
 
-    // Launch the headless capture client with the two-box scene (the 5th process).
+    // Bring up the DUAL cluster — THE world as shipped, NO injected geometry. `up` exits 0 only
+    // after every pre-booked realm (home + galaxy) is granted in the ONE directory (C1), so the
+    // crossing's dest head can never resolve to nothing (J-0: an unresolved dest is a PERMANENT
+    // STRAND, not a soft failure).
+    assert!(
+        Command::new(launcher)
+            .args(["up", "--slot", &RENDER_CROSSING_SLOT.to_string(), "--dual"])
+            .status()
+            .expect("run vd-devcluster up --dual")
+            .success(),
+        "up --dual must reach the C1 all-realms ready gate and exit 0",
+    );
+
+    // The DEST authority DERIVED from the shape's own shard list — never a literal node string.
+    let addrs = ClusterAddrs::for_slot(ports);
+    let dest_node = realm_shards(ClusterShape::Dual, &addrs, &DEV)
+        .first()
+        .map(|s| s.node)
+        .expect("Dual pre-books the galaxy realm-shard");
+    let dest_authority = format!("shard:{dest_node}");
+
+    // Launch the headless capture client drawing THE world scene (the 5th process).
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_client"));
     cmd.current_dir(&cwd)
         .env("VD_AUTH_SIGNING_KEY", &signing_key)
@@ -321,7 +410,7 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
             "--allow-dev-control",
             "--capture",
             "--realm-boxes",
-            boxes_json.to_str().expect("utf8 boxes.json path"),
+            &regions_path,
         ]);
     #[cfg(unix)]
     {
@@ -332,277 +421,137 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
     record_extra_pid(RENDER_CROSSING_SLOT, child.0.id()).expect("record capture-client pid");
     await_listener(devctl, &mut child.0);
 
-    // ---- BEFORE: the dot spawns inside box A (System 7). Wait for a delivered frame, then capture. --
-    let system_a = FrameRef::SystemSpace {
-        system_seed: DEV.realm_seed,
-    }
-    .label();
-    let system_b = FrameRef::SystemSpace {
-        system_seed: DEV.realm_seed_b,
-    }
-    .label();
-    let before_state = {
-        let deadline = Instant::now() + CROSSING_DEADLINE;
+    // ---- INSIDE: the dot spawns at the home star's centre. Wait for a delivered frame, capture. --
+    {
+        let deadline = Instant::now() + DELIVERY_DEADLINE;
         loop {
             let s = poll_state(devctl);
             if s.own_entity.is_some()
                 && !s.entities.is_empty()
-                && s.location.as_deref() == Some(system_a.as_str())
+                && s.location.as_deref() == Some(home_label.as_str())
             {
-                break s;
+                break;
             }
             assert!(
                 Instant::now() < deadline,
-                "the dot never delivered inside box A (System 7): {s:?}"
+                "the dot never delivered inside the home system ({home_label}): {s:?}"
             );
-            std::thread::sleep(CROSSING_POLL);
+            std::thread::sleep(DELIVERY_POLL);
         }
-    };
-    let pos_before = own_pos(&before_state);
-
-    // THE ONE SPACE. Everything below — the fitted camera, the two box rectangles, the containment
-    // verdicts — is computed in the space the client reports positions in and drew its pixels in.
-    // There is exactly one such space now: the SERVER converts every position into the session's pin
-    // before it ships, so the scene this test holds and the numbers the client reports are already
-    // commensurable. This used to have to read a render ORIGIN back from the client and subtract it,
-    // because the server shipped universe-absolute positions and the client did the reduction.
-    let camera = fit_camera_to_scene(&scene, CAPTURE_W as usize, CAPTURE_H as usize)
-        .expect("the two-box scene frames to a camera");
-    let box_a_region = box_screen_aabb(&scene, &camera, RealmId::System(DEV.realm_seed));
-    let box_b_region = box_screen_aabb(&scene, &camera, RealmId::System(DEV.realm_seed_b));
-    // The camera's PREMISE, sampled at the moment it is fitted: the scene the client says it is
-    // drawing, before the walk. Re-checked after the crossing (see the guard below). Non-vacuity: both
-    // boxes the two rectangles above were built from must actually be in it, or the guard would be
-    // comparing two empty lists and could never fail.
-    let drawn_before = drawn_scene_centres(&before_state);
-    let drawn_realms: Vec<String> = drawn_before.iter().map(|(r, _)| r.clone()).collect();
+    }
+    let inside = capture(devctl, &cwd, "inside", &scene, &extents, roster.home);
     assert_eq!(
-        drawn_realms,
-        vec![
-            format!("{:?}", RealmId::System(DEV.realm_seed)),
-            format!("{:?}", RealmId::System(DEV.realm_seed_b)),
-        ],
-        "the client must report DRAWING both playground boxes before the walk — the guard below \
-         compares this scene against itself after the crossing and would be vacuous without them",
-    );
-
-    // S6 (pure renderer): the client is NODE-AGNOSTIC — it no longer tracks an authoritative sub.
-    // The client-tier re-home proof is the OWN entity's LOCATION label flipping realms (source→dest),
-    // which is the own entity's delivered authoritative FrameRef re-expressed by the server.
-    let location_before = before_state.location.clone();
-    assert_eq!(
-        expected_box(&scene, pos_before),
-        Some(RealmId::System(DEV.realm_seed)),
-        "BEFORE: the dot's world pos {pos_before} must be geometrically inside box A",
-    );
-    let before_shot = screenshot(devctl, "before");
-    let (before_rgba, w, h, before_clear) = decode_capture(&cwd, &before_shot);
-    let dot_region_before = projected_point_aabb(&camera, pos_before, DOT_WORLD_RADIUS)
-        .expect("the dot projects in front of the camera (before)");
-    assert_eq!(
-        magenta_pixel_count(&before_rgba),
-        0,
-        "BEFORE frame must be magenta-free"
+        inside.state.location.as_deref(),
+        Some(home_label.as_str()),
+        "INSIDE: the session stands in the home system",
     );
     assert!(
         dot_pixels_within_box_region(
-            &before_rgba,
-            w,
-            h,
-            before_clear,
-            dot_region_before,
-            box_a_region
+            &inside.rgba,
+            inside.w,
+            inside.h,
+            inside.clear,
+            inside.dot_rect,
+            inside.home_rect
         ),
-        "BEFORE: the dot's pixels must fall inside box A's projected region",
+        "INSIDE: the dot's pixels must fall inside the home shell's projected region \
+         (dot {:?} home {:?})",
+        inside.dot_rect,
+        inside.home_rect,
     );
 
-    // ---- DRIVE: WalkTo box B center. The dot walks +X across the trigger; the SOURCE dwell detector
-    // fires the crossing AUTONOMOUSLY, the real client stamps the CUT_MARKER, and authority re-homes. --
+    // ---- OUT (flight law leg A): the ±Z polar corridor to the galaxy — the label is the arrival. --
+    cross_leg(
+        devctl,
+        "A home->galaxy (polar corridor)",
+        |_tick| OUTSIDE_PARK,
+        &galaxy_label,
+        LEG_DEADLINE,
+    );
+    // Park AT the corridor waypoint. The target is numerically the same point in both frames (J1),
+    // so restating it after the flip is sound — the one crossing where that is true.
+    park_at(devctl, OUTSIDE_PARK);
     let admin = loopback(ports.admin);
-    let walk = round_trip(
-        devctl,
-        &DevRequest::WalkTo {
-            target: [BOX_B_CENTER.x, BOX_B_CENTER.y, BOX_B_CENTER.z],
-            arrive_epsilon: 3.0,
-            max_ticks: 6000,
-            max_step_m: 0.0,
-        },
-    );
-    assert!(
-        matches!(
-            walk,
-            DevResponse::State { .. } | DevResponse::Timeout { .. }
-        ),
-        "WalkTo should return a delivered state, got {walk:?}",
-    );
-    // STOP the dot at box B: WalkTo's last Move is sticky (the client keeps applying it), so without a
-    // zero-Move the dot walks straight through box B. It stops INSIDE box B's SOI, so the saga (which
-    // needs the subject in-band) can still complete.
-    let _ = round_trip(
-        devctl,
-        &DevRequest::Move {
-            axes: [0.0, 0.0, 0.0],
-        },
-    );
-
-    // ---- WAIT for the CLIENT-observed re-home: location flips to System 8 AND the dot advanced to box B
-    // center — a pose ONLY the DEST could have delivered (the source sub is behind the crossing point). --
-    let after_state = {
-        let deadline = Instant::now() + CROSSING_DEADLINE;
-        loop {
-            let s = poll_state(devctl);
-            // The client-observed re-home, on THREE signals: (1) the HUD `location` label reads the DEST
-            // realm ("System 8") — the frame-rebinding re-expresses the crossed pose into System(8)'s frame,
-            // so the authoritative FrameRef (and its label) flips; (2) the composited authoritative world pos
-            // is geometrically inside box B; (3) it advanced past the crossing point (a pose only the DEST
-            // could have delivered). The label is now a HARD gate, not a lagging cosmetic signal.
-            if s.location.as_deref() == Some(system_b.as_str())
-                && expected_box(&scene, own_pos(&s)) == Some(RealmId::System(DEV.realm_seed_b))
-                && own_pos(&s).x >= CROSSING_CONFIRMED_X
-            {
-                break s;
-            }
-            if Instant::now() >= deadline {
-                // CLIENT-SIDE leg diagnostic (printed BEFORE the panic): did the DEST sub ever open
-                // (own row's authoritative_sub changed off the login sub 0)? is the client receiving
-                // frames (snapshots_applied)? authoritative_sub still 0 ⇒ the client never got the DEST
-                // sub (SubscriptionReady never reached it: promote deferred, or the reply was lost).
-                eprintln!(
-                    "CLIENT LEG: phase={:?} snapshots_applied={} entities={:?}",
-                    s.phase,
-                    s.snapshots_applied,
-                    s.entities
-                        .iter()
-                        .map(|r| (r.entity.clone(), r.authoritative_sub, r.pos[0]))
-                        .collect::<Vec<_>>(),
-                );
-                panic!(
-                    "the dot never re-homed to box B (System 8) with pos.x >= {CROSSING_CONFIRMED_X}: \
-                     location={:?} pos={:?}. admin directory (ent-* @ shard:node-4 = DEST owns ⇒ the \
-                     crossing COMMITTED but the client did not observe it): {:?}. SAGA STATES \
-                     (Promoting parked = D-36 watermark; empty/Done = a different leg): {:?}",
-                    s.location,
-                    s.own_entity.as_ref().map(|_| own_pos(&s)),
-                    directory_rows(admin),
-                    saga_states(admin),
-                );
-            }
-            std::thread::sleep(CROSSING_POLL);
-        }
-    };
-    let pos_after = own_pos(&after_state);
-    // THE SHARED CAMERA'S PREMISE, made loud. The one fitted camera and the two box rectangles above
-    // were built from the BEFORE sample, and every check below reuses them for the AFTER frame. That is
-    // only sound while the realm the session is DRAWN IN does not change under it mid-crossing: the
-    // player's authority re-homes from box A's realm to box B's, and the space its positions are
-    // measured in must NOT follow it, or the two frames' numbers are in two different spaces and every
-    // geometric check below is comparing apples to oranges.
-    //
-    // The client cannot name that realm — it is a pure renderer and draws what it is handed — so the
-    // guard is stated on the reference geometry it CAN report: the boxes it says it is drawing, and
-    // where. A re-pin moves the whole scene, so every centre moves; unchanged centres mean the space
-    // held. This replaces the render-origin guard that stood here, which asserted the same premise
-    // about a number the client no longer computes.
-    //
-    // When re-anchoring on a crossing lands, this fires, and the fix is to fit a camera and rectangles
-    // PER FRAME rather than to relax this line.
+    let outside = capture(devctl, &cwd, "outside", &scene, &extents, roster.home);
     assert_eq!(
-        drawn_scene_centres(&after_state),
-        drawn_before,
-        "the realm the session is drawn in changed across the crossing — the scene the client reports \
-         drawing moved, so the shared camera and both box rectangles (fitted in the BEFORE space) put \
-         every geometric check below in a different space than the AFTER pixels. Fit the camera and \
-         the rectangles PER FRAME instead of loosening this assertion.",
+        outside.state.location.as_deref(),
+        Some(galaxy_label.as_str()),
+        "OUTSIDE: the session stands in the galaxy between-space",
     );
-
-    // ---- AFTER: capture the dot inside box B. ---------------------------------------------------------
-    let after_shot = screenshot(devctl, "after");
-    let (after_rgba, aw, ah, after_clear) = decode_capture(&cwd, &after_shot);
-    let dot_region_after = projected_point_aabb(&camera, pos_after, DOT_WORLD_RADIUS)
-        .expect("the dot projects in front of the camera (after)");
-
-    let location_after = after_state.location.clone();
-    let final_directory = directory_rows(admin);
-    let dest_owns = final_directory
-        .iter()
-        .any(|(key, authority)| key.starts_with("ent-") && authority == "shard:node-4");
-    println!(
-        "G-RENDER-CROSSING-SMOKE: {w}x{h} · box A screen {:?} box B screen {:?} · pos {pos_before} → \
-         {pos_after} · location {location_before:?} → {location_after:?} · DEST-owns={dest_owns} \
-         (the location label flipped to the DEST realm — the frame-rebinding re-expresses the pose)",
-        (box_a_region.min.x as i32, box_a_region.max.x as i32),
-        (box_b_region.min.x as i32, box_b_region.max.x as i32),
-    );
-
-    // NON-VACUITY: this must be a REAL transfer, not just the dot walking into box B's region.
-    // (a) the directory CAS committed authority onto the DEST; (b) the CLIENT (a NODE-AGNOSTIC pure
-    // renderer, S6) observed the re-home — the own dot's LOCATION label flipped realms (source→dest),
-    // i.e. its delivered authoritative FrameRef re-homed. This is the client-tier proof (not pixels),
-    // and it needs NO node awareness (the client never learns which shard owns the avatar).
+    // NON-VACUITY: a REAL transfer, not a label cosmetic — the directory CAS committed the dot's
+    // Entity authority onto the pre-booked galaxy shard.
+    let rows = directory_rows(admin);
     assert!(
-        dest_owns,
-        "the DEST (shard:node-4) must OWN the re-homed dot — the transfer committed, not just a walk: {final_directory:?}",
+        rows.iter()
+            .any(|(key, authority)| key.starts_with("ent-") && authority == &dest_authority),
+        "the galaxy shard ({dest_authority}) must OWN the re-homed dot's Entity row: {rows:?}",
     );
-    assert_ne!(
-        location_after, location_before,
-        "the client must have observed the authority re-home (own dot's LOCATION label flips off \
-         the source realm {location_before:?} onto the DEST realm) — the client-tier proof, not just pixels",
-    );
+    // HONEST at the middle capture: nothing drawable contains the dot out here — the galaxy's
+    // 12331 m shell exceeds the renderable ceiling and SL3 never draws a containment boundary.
     assert_eq!(
-        location_after.as_deref(),
-        Some(system_b.as_str()),
-        "the client's location label reads the DEST realm (System 8) after the re-home",
-    );
-
-    // STATE: the composited world pos is now geometrically inside box B, and advanced far on +X.
-    assert_eq!(
-        expected_box(&scene, pos_after),
-        Some(RealmId::System(DEV.realm_seed_b)),
-        "AFTER: the dot's world pos {pos_after} must be geometrically inside box B",
-    );
-    assert!(
-        pos_after.x - pos_before.x > 30.0,
-        "AFTER: the dot must have physically advanced far on +X ({} → {})",
-        pos_before.x,
-        pos_after.x,
-    );
-    // PIXELS: the dot's pixels are now inside box B's region and NO LONGER inside box A's — they moved.
-    assert_eq!(
-        magenta_pixel_count(&after_rgba),
-        0,
-        "AFTER frame must be magenta-free"
-    );
-    assert!(
-        dot_pixels_within_box_region(
-            &after_rgba,
-            aw,
-            ah,
-            after_clear,
-            dot_region_after,
-            box_b_region
-        ),
-        "AFTER: the dot's pixels must fall inside box B's projected region",
+        expected_box(&scene, outside.pos),
+        None,
+        "OUTSIDE: no drawn box contains the parked dot at {}",
+        outside.pos,
     );
     assert!(
         !dot_pixels_within_box_region(
-            &after_rgba,
-            aw,
-            ah,
-            after_clear,
-            dot_region_after,
-            box_a_region
+            &outside.rgba,
+            outside.w,
+            outside.h,
+            outside.clear,
+            outside.dot_rect,
+            outside.home_rect
         ),
-        "AFTER: the dot's pixels must NO LONGER fall inside box A's region (they moved A→B)",
+        "OUTSIDE: the dot's pixels must NOT fall inside the home shell's projected region \
+         (dot {:?} home {:?})",
+        outside.dot_rect,
+        outside.home_rect,
     );
 
-    // HR6: both screenshots recorded in the run manifest (the capture pipeline ran end to end).
-    let run_dir = cwd.join(&after_shot);
+    // ---- RETURN (flight law leg B): back through the acquire edge — the leg the owner watched
+    // freeze, now under pixels. --
+    cross_leg(
+        devctl,
+        "B galaxy->home (0,0,-60)",
+        |_tick| RETURN_PARK,
+        &home_label,
+        LEG_DEADLINE,
+    );
+    park_at(devctl, RETURN_PARK);
+    let returned = capture(devctl, &cwd, "returned", &scene, &extents, roster.home);
+    assert_eq!(
+        returned.state.location.as_deref(),
+        Some(home_label.as_str()),
+        "RETURNED: the session stands in the home system again",
+    );
+    assert!(
+        dot_pixels_within_box_region(
+            &returned.rgba,
+            returned.w,
+            returned.h,
+            returned.clear,
+            returned.dot_rect,
+            returned.home_rect
+        ),
+        "RETURNED: the dot's pixels must fall inside the home shell's projected region again \
+         (dot {:?} home {:?})",
+        returned.dot_rect,
+        returned.home_rect,
+    );
+
+    // HR6: all three screenshots recorded in the run manifest (the capture pipeline ran end to end).
+    let run_dir = cwd.join(&returned.shot);
     let run_dir = run_dir.parent().and_then(Path::parent).expect("run dir");
     let manifest = RunManifest::from_json(
         &std::fs::read_to_string(run_dir.join(MANIFEST_FILENAME)).expect("read manifest.json"),
     )
     .expect("parse manifest");
-    for (label, shot) in [("before", &before_shot), ("after", &after_shot)] {
+    for (label, shot) in [
+        ("inside", &inside.shot),
+        ("outside", &outside.shot),
+        ("returned", &returned.shot),
+    ] {
         assert!(
             manifest
                 .captures
@@ -612,4 +561,19 @@ fn g_render_crossing_smoke_dot_pixels_move_from_box_a_to_box_b() {
             manifest.captures,
         );
     }
+
+    println!(
+        "G-RENDER-CROSSING-SMOKE: {}x{} · pos {} → {} → {} · location {:?} → {:?} → {:?} · \
+         home rect (inside) {:?} · camera eye (inside) {:?}",
+        inside.w,
+        inside.h,
+        inside.pos,
+        outside.pos,
+        returned.pos,
+        inside.state.location,
+        outside.state.location,
+        returned.state.location,
+        (inside.home_rect.min.x as i32, inside.home_rect.max.x as i32),
+        inside.camera.eye,
+    );
 }

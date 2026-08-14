@@ -129,6 +129,19 @@ pub fn advance_continuity(
     }
 }
 
+/// Elapsed seconds since epoch for a universe `tick`: `tick / tick_hz`. Time is SECONDS,
+/// not ticks — `tick_hz` is a per-shard knob passed in (a global `TICKS_PER_SECOND` const
+/// would be a magic number silently splitting a 10 Hz vs 50 Hz shard). A pure clock-to-seconds
+/// conversion — NOT a motion symbol, which is why it lives here and not in the motion crate: the
+/// placement writer needs it to name a book's instant in seconds, and naming an instant is not
+/// asking how anything moves (SL4). Contract: `tick_hz > 0` — validated once at config load,
+/// not guarded here (a guard would reintroduce an HR5 branch for a caller-contract violation).
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // universe ticks stay well below 2^53 for astronomical spans
+pub fn secs_since_epoch(tick: u64, tick_hz: f64) -> f64 {
+    tick as f64 / tick_hz
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +308,14 @@ mod tests {
             movement_from_local(DVec3::new(9.0, 0.0, -9.0)),
             [1.0, 1.0, 0.0]
         );
+    }
+
+    #[test]
+    fn secs_since_epoch_is_tick_over_hz() {
+        // A 50 Hz shard at tick 50 and a 10 Hz shard at tick 10 are BOTH 1.0 s — tick_hz
+        // is the per-shard knob, not a global const. Exact (these divide cleanly).
+        assert_eq!(secs_since_epoch(0, 50.0), 0.0);
+        assert_eq!(secs_since_epoch(50, 50.0), 1.0);
+        assert_eq!(secs_since_epoch(10, 10.0), 1.0);
     }
 }

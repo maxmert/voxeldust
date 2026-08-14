@@ -32,8 +32,12 @@ use vd_core::home::{HomeRegistry, StoredHome};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::rng::SplitMix64;
-use vd_core::worldgen::{UniverseConfig, WorldView, ancestor_realms, pin_realm_of};
+use vd_core::worldgen::{ancestor_realms, pin_realm_of};
+// The gateway is the ONE party holding both ends of every login conversion, so it may hold THE world
+// (the stated `crate_isolation` allowlist entry): it resolves logins against the generated forest and
+// converts between the spaces its sessions draw in.
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
+use vd_physics::worldgen::{UniverseConfig, WorldView};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 use vd_wire::channels::{ClientControlMsg, RealmShape, ServerControlMsg, SubId};

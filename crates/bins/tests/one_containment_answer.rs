@@ -31,17 +31,17 @@
 //! - the world comes from [`vd_bins::boot_world`] — the ONE world, the gateway's own entry point;
 //! - the star's regions and its moving-child roster come from [`vd_bins::boot_regions_and_movers`] — the
 //!   exact call the shard binary makes, with the exact speed and tick the dev cluster flies at;
-//! - the frame context comes from the two production builders (`RealmRegions::new` +
-//!   `with_moving_children`) and the shard's own `frame_context`, at the same tick as the point.
+//! - the placement book comes from the two production builders (`RealmRegions::new` +
+//!   `with_moving_children`) and the shard's own `author_book`, at the same tick as the point.
 
 use std::collections::BTreeSet;
 
 use vd_core::UniverseTick;
-use vd_core::frame::{FrameContext, LocalFrames};
 use vd_core::geometry::{RealmRegion, region_signed_distance};
 use vd_core::glam::DVec3;
+use vd_core::placement::PlacementBook;
 use vd_core::pose::{RealmId, StampedPose};
-use vd_core::worldgen::WorldView;
+use vd_physics::worldgen::WorldView;
 use vd_sim::stub::RealmRegions;
 
 /// THE SURFACE, at zero. A signed distance is negative inside a realm, positive outside, and zero exactly
@@ -109,7 +109,8 @@ fn star_shard(star: RealmId) -> (Vec<RealmRegion>, RealmRegions) {
         occupant_v_max_mps(),
         vd_bins::DEV.tick_dt,
     );
-    let planted = RealmRegions::new(regions.clone()).with_moving_children(moving);
+    let planted = RealmRegions::new(regions.clone())
+        .with_moving_children(vd_physics::motion::kepler_motion_fns(moving));
     (regions, planted)
 }
 
@@ -133,8 +134,8 @@ fn child_regions(regions: &[RealmRegion], star: RealmId) -> Vec<RealmRegion> {
 
 /// THE SHARD'S OWN-FRAME ANSWER: re-express the same point into the child's own frame through the live
 /// placement, then measure from the child's own origin.
-fn own_frame_answer(point_in_star: &StampedPose, child: &RealmRegion, ctx: &LocalFrames) -> f64 {
-    region_signed_distance(point_in_star, child, ctx).unwrap_or_else(|e| {
+fn own_frame_answer(point_in_star: &StampedPose, child: &RealmRegion, book: &PlacementBook) -> f64 {
+    region_signed_distance(point_in_star, child, book).unwrap_or_else(|e| {
         panic!(
             "a star authors every one of its own direct children, so re-expressing a point into \
              {:?} must be available; got {e:?}",
@@ -158,10 +159,10 @@ fn no_child_of_a_star_is_wider_than_its_own_distance_from_that_star() {
     let (regions, planted) = star_shard(star);
     let mut swallowing = Vec::new();
     for tick in SAMPLED_TICKS {
-        let ctx = planted.frame_context(star, f64::from(vd_bins::DEV.tick_hz), tick);
+        let ctx = planted.author_book(star, f64::from(vd_bins::DEV.tick_hz), tick);
         for child in child_regions(&regions, star) {
             let at = ctx
-                .placement(child.frame, tick)
+                .of(child.frame)
                 .expect("a star places every direct child of its own");
             let distance = at.origin.length();
             let radius = child.shape.circumscribed_extent();
@@ -205,7 +206,7 @@ fn no_child_of_a_star_claims_to_hold_the_stars_own_centre() {
 
     let mut claims = Vec::new();
     for tick in SAMPLED_TICKS {
-        let ctx = planted.frame_context(star, f64::from(vd_bins::DEV.tick_hz), tick);
+        let ctx = planted.author_book(star, f64::from(vd_bins::DEV.tick_hz), tick);
         let star_centre = StampedPose::at_rest(star_frame, DVec3::ZERO, tick);
         for child in child_regions(&regions, star) {
             let own = own_frame_answer(&star_centre, &child, &ctx);
@@ -242,12 +243,12 @@ fn the_per_tick_feed_and_the_conversion_context_place_a_child_identically() {
 
     let mut splits = Vec::new();
     for tick in SAMPLED_TICKS {
-        let ctx = planted.frame_context(star, f64::from(vd_bins::DEV.tick_hz), tick);
+        let ctx = planted.author_book(star, f64::from(vd_bins::DEV.tick_hz), tick);
         for (child, feed_pose) in
             planted.child_placements(star, f64::from(vd_bins::DEV.tick_hz), tick)
         {
             let converted = ctx
-                .placement(child.frame, tick)
+                .of(child.frame)
                 .expect("a star holds a placement for every direct child of its own");
             if feed_pose.pos.offset() != converted.origin {
                 splits.push(format!(
@@ -269,6 +270,124 @@ fn the_per_tick_feed_and_the_conversion_context_place_a_child_identically() {
     );
 }
 
+/// THE GOLDEN VECTOR (placement arc S0): every anchor's child rows, bit for bit, through the shipped
+/// boot. For each realm of THE world that has direct children, boot the shard exactly as its binary
+/// would and record where it places every direct child at each sampled tick — every f64 as its raw
+/// bits, so a change of ONE ulp anywhere on the placement path fails this diff. A byte-identity claim
+/// in the placement arc is a diff of this file, never an argument. Regenerate DELIBERATELY (a slice
+/// that changes the world's numbers says so) with `VD_UPDATE_GOLDEN=1`.
+#[test]
+fn every_anchors_child_rows_match_the_golden_vector() {
+    let world = the_world();
+    let anchors: Vec<RealmId> = world
+        .regions()
+        .iter()
+        .filter(|r| world.regions().iter().any(|c| c.parent == Some(r.realm)))
+        .map(|r| r.realm)
+        .collect();
+    let mut lines = Vec::new();
+    for anchor in anchors {
+        let (regions, planted) = star_shard(anchor);
+        for tick in SAMPLED_TICKS {
+            let ctx = planted.author_book(anchor, f64::from(vd_bins::DEV.tick_hz), tick);
+            for child in child_regions(&regions, anchor) {
+                let at = ctx
+                    .of(child.frame)
+                    .expect("an anchor places every direct child of its own");
+                lines.push(format!(
+                    "{:?} {:?} tick={} pos={:016x},{:016x},{:016x} vel={:016x},{:016x},{:016x}",
+                    anchor,
+                    child.realm,
+                    tick.0,
+                    at.origin.x.to_bits(),
+                    at.origin.y.to_bits(),
+                    at.origin.z.to_bits(),
+                    at.velocity.x.to_bits(),
+                    at.velocity.y.to_bits(),
+                    at.velocity.z.to_bits(),
+                ));
+            }
+        }
+    }
+    let got = lines.join("\n") + "\n";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/goldens/placement_rows.golden"
+    );
+    if std::env::var_os("VD_UPDATE_GOLDEN").is_some() {
+        std::fs::write(path, &got).expect("golden vector written");
+        return;
+    }
+    let want = std::fs::read_to_string(path)
+        .expect("the golden vector exists (regenerate deliberately with VD_UPDATE_GOLDEN=1)");
+    assert_eq!(
+        got, want,
+        "\nTHE PLACEMENT ROWS MOVED. If this slice claims byte-identity it is wrong; if it \
+         deliberately moves the world's numbers, regenerate with VD_UPDATE_GOLDEN=1 and say so.\n",
+    );
+}
+
+/// THE FENCE-IN-WAITING (placement arc S0, tripwire 2): a planet's WORST instant is its apoapsis
+/// `a(1+e)`; add the planet's own SOI reach and it must still be inside the system shell it nests in.
+/// The shipped boot fence cannot see this — a mover's stored centre is ZERO, so `child_fits_in_parent`
+/// checks the SIZE and not the orbit (its own words) — and the AU compression solves the outer
+/// SEMI-MAJOR AXIS against the shell, not the apoapsis, so any eccentric outer planet can cross its
+/// own system's surface at apoapsis. Red until the world's numbers move (the compression re-solved
+/// against apoapsis); the failure lists every escaping planet with its numbers.
+#[test]
+fn every_planets_apoapsis_plus_its_soi_stays_inside_its_systems_shell() {
+    let world = the_world();
+    let anchors: Vec<RealmId> = world
+        .regions()
+        .iter()
+        .filter(|r| world.regions().iter().any(|c| c.parent == Some(r.realm)))
+        .map(|r| r.realm)
+        .collect();
+    let mut escapes = Vec::new();
+    for anchor in anchors {
+        let held = BTreeSet::from([anchor]);
+        let (regions, moving) = vd_bins::boot_regions_and_movers(
+            SEED,
+            &held,
+            anchor,
+            occupant_v_max_mps(),
+            vd_bins::DEV.tick_dt,
+        );
+        let shell = regions
+            .iter()
+            .find(|r| r.realm == anchor)
+            .expect("a shard's own realm is in the neighbourhood it boots with")
+            .shape
+            .circumscribed_extent();
+        for (realm, elements) in &moving {
+            let soi = regions
+                .iter()
+                .find(|r| r.realm == *realm)
+                .expect("a mover is a region of the shard authoring it")
+                .shape
+                .circumscribed_extent();
+            let apoapsis = elements.sma * (1.0 + elements.ecc);
+            if apoapsis + soi > shell {
+                escapes.push(format!(
+                    "  {:?} under {:?}: apoapsis {:.6} m + soi {:.6} m = {:.6} m > shell {:.6} m",
+                    realm,
+                    anchor,
+                    apoapsis,
+                    soi,
+                    apoapsis + soi,
+                    shell,
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        escapes.join("\n"),
+        "",
+        "\nA PLANET LEAVES ITS OWN SYSTEM AT APOAPSIS:\n{}\n",
+        escapes.join("\n"),
+    );
+}
+
 /// THE SYMPTOM, stated as a property: an occupant standing where the star says a child IS must be
 /// INSIDE that child.
 ///
@@ -283,12 +402,12 @@ fn an_occupant_where_the_star_puts_a_child_is_inside_that_child() {
     let (regions, planted) = star_shard(star);
     let star_frame = own_frame(&regions, star);
     let tick = SAMPLED_TICKS[1];
-    let ctx = planted.frame_context(star, f64::from(vd_bins::DEV.tick_hz), tick);
+    let ctx = planted.author_book(star, f64::from(vd_bins::DEV.tick_hz), tick);
 
     let mut misses = Vec::new();
     for child in child_regions(&regions, star) {
         let placement = ctx
-            .placement(child.frame, tick)
+            .of(child.frame)
             .expect("a star holds a placement for every direct child of its own");
         let at_the_child = StampedPose::at_rest(star_frame, placement.origin, tick);
         let own = own_frame_answer(&at_the_child, &child, &ctx);

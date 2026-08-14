@@ -1412,7 +1412,8 @@ mod tests {
     fn reconcile_5f3a_bootstrap_ride_spins_the_whole_area_lineage_from_one_leaf_demand() {
         use RealmKindTag::{Area, Galaxy, Planet, System, Universe};
         use vd_core::pose::RealmId;
-        use vd_core::worldgen::{coord_of_realm, realm_regions_for};
+        use vd_core::worldgen::coord_of_realm;
+        use vd_physics::worldgen::realm_regions_for;
 
         let t = cloud();
         // The deepest home lineage from the REAL forest (NOT hand-built) — the Area-A box. FIXTURE forest:

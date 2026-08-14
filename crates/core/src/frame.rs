@@ -4,36 +4,35 @@
 //! pod entering a ship's ShipLocal frame, a debris chunk falling planet-ward.
 //!
 //! Category-A and PURE: the transform is a closed-form rigid-body composition given the
-//! frames' placements; the placements themselves come from the ephemeris (also
-//! closed-form `f(seed, universe_tick)`). Authority never depends on cross-binary float
-//! reproducibility — the SOURCE shard computes the destination pose and ships it, the
-//! dest sanity-bounds it against the orchestrator's Ephemeris Authority.
+//! frames' placements. The placements arrive as a [`PlacementBook`] — one anchor's rows
+//! at ONE named instant, authored by the one physics writer — so this conversion CANNOT
+//! ask how anything moves (SL4): it has no clock to hand an ephemeris and no ephemeris
+//! to hand it to. It used to take a `FrameContext` trait whose implementor ran the
+//! Kepler solve inside the lookup on a tick it was handed; that trait is deleted — the
+//! injection seam it provided is exactly where a solver could hide.
 //!
-//! P1 has one live frame (SystemSpace) so every placement is the identity; the algebra
-//! is exercised and round-trips. P4 (planets) / P8 (ships) / P10 (warp) supply a real
-//! ephemeris-backed [`FrameContext`] — the SIGNATURE landing now is what lets those
-//! phases add the function bodies WITHOUT reshaping the frozen `StampedPose`/`FrameRef`.
-
-use std::collections::BTreeMap;
+//! Authority never depends on cross-binary float reproducibility — the SOURCE shard
+//! computes the destination pose and ships it, the dest sanity-bounds it against the
+//! orchestrator's Ephemeris Authority.
 
 use glam::{DQuat, DVec3, I64Vec3};
 
-use crate::celestial::{OrbitalElements, orbital_state, secs_since_epoch};
 use crate::ids::UniverseTick;
-use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose, frame_for_realm};
+use crate::placement::PlacementBook;
+use crate::pose::{FrameRef, LatticePos, StampedPose};
 
 /// Where a frame's origin sits — and how it moves — relative to the COMMON PARENT at a
 /// universe tick. A rigid placement: position, velocity, orientation, angular velocity.
-/// All four come from the ephemeris closed-form; P1 uses the identity.
+/// All four are authored by the parent's physics writer; P1 uses the identity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FramePlacement {
     /// Integer CELL anchor of this frame's origin in the parent frame (parent tier units) — the
     /// exact-integer coarse part of the origin position, companion to `origin` (its sub-cell f64
-    /// residual). Through P3 every placement is at `ZERO` (the ephemeris returns small system-local
+    /// residual). Through P3 every placement is at `ZERO` (the authored rows carry small system-local
     /// origins that ride entirely in `origin`), so the two anchors cancel and the dest pose is exactly
     /// `LatticePos::local(new_pos)` as it was — the byte-floor.
     ///
-    /// [`transfer_frame`] now SUBTRACTS the two anchors as integers and carries the difference into the
+    /// [`transfer_frame`] SUBTRACTS the two anchors as integers and carries the difference into the
     /// dest pose. It used to read neither field and write cell `0` unconditionally, which quietly
     /// destroyed the anchor on every hop: a pose one anchor-block out came back as ~9.8×10⁸ f64 metres
     /// with the integer truth gone, and a multi-level ladder compounds that loss once per hop. The whole
@@ -78,22 +77,25 @@ impl FramePlacement {
     }
 }
 
-/// Resolves a frame's placement relative to the common parent at a tick — the seam the
-/// ephemeris implements. Returning `None` means the frame is unknown to this context
-/// (e.g. a realm this shard has no ephemeris for): the caller treats that as a transfer
-/// precondition failure, never a silent garbage pose.
-pub trait FrameContext {
-    fn placement(&self, frame: FrameRef, tick: UniverseTick) -> Option<FramePlacement>;
-}
-
 /// Why a frame re-expression could not be computed (a typed precondition failure, never
 /// a silent garbage spawn — the R6 km-scale-error class made loud).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
-    #[error("no ephemeris placement for the source frame at this tick")]
+    #[error("no authored placement for the source frame in this book")]
     UnknownSourceFrame,
-    #[error("no ephemeris placement for the destination frame at this tick")]
+    #[error("no authored placement for the destination frame in this book")]
     UnknownDestFrame,
+    /// The book speaks at one instant and the pose is stamped at another. A book's rows are true at
+    /// exactly its own instant, so converting a differently-stamped pose through them would move the
+    /// pose by however far the world swept between the two — silently. Refused LOUD instead, which
+    /// makes every consumer's book SELECTION explicit, auditable and testable: a consumer that means
+    /// "now" re-stamps its pose to the head book's instant and says so; a consumer that means "then"
+    /// selects the book at the pose's own stamp.
+    #[error("the placement book speaks at tick {} but the pose is stamped at tick {}", book_at.0, pose_at.0)]
+    InstantMismatch {
+        book_at: UniverseTick,
+        pose_at: UniverseTick,
+    },
     /// The two frames' origins sit in DIFFERENT integer cells and the destination frame is rotated
     /// relative to the common parent. The cell difference is a count of parent-axis cells; turning it
     /// into the destination's axes is a rotation, and a rotated cell COUNT is not a cell count. Folding
@@ -105,56 +107,45 @@ pub enum FrameError {
     RotatedFrameAcrossCells,
 }
 
-/// Re-express `pose` (in its current frame) into `to` using the ephemeris `ctx`. The
-/// closed-form rigid-body transform: lift the local pose into the common parent, then
-/// into the destination frame, carrying velocity (with the Coriolis term for rotating
-/// frames) and orientation.
+/// Re-express `pose` (in its current frame) into `to` using the authored placement `book`. The
+/// closed-form rigid-body transform: lift the local pose into the common parent (the book's anchor),
+/// then into the destination frame, carrying velocity (with the Coriolis term for rotating frames)
+/// and orientation.
 ///
-/// Same-frame transfer is the identity (and needs no context). The `universe_tick` is
-/// preserved: a pose is meaningful only with the instant it was stamped at.
+/// Same-frame transfer is the identity (and reads no book). The `universe_tick` is preserved: a pose
+/// is meaningful only with the instant it was stamped at — and the book must speak at that SAME
+/// instant ([`FrameError::InstantMismatch`]), so a conversion can never mix two times.
+///
+/// MONOMORPHIC, deliberately: the deleted generic-over-`FrameContext` form needed a branchless-shim
+/// split (`transfer_frame_resolved`) so its branches would not multiply per monomorphization (HR5).
+/// With one concrete parameter type every branch lives here, covered once — and there is no seam left
+/// where an implementor could hand the crossing path a clock-reading context.
 ///
 /// The two origins' INTEGER cell anchors subtract as integers and the difference rides through to the
 /// destination pose — the big part of a position never passes through f64, which is what keeps a
 /// planet's surface millimetre-exact however far the planet sits from its star.
 ///
 /// # Errors
-/// [`FrameError`] if either frame has no placement at the pose's tick, or if the two origins sit in
-/// different integer cells while the destination frame is rotated (an integer cell count cannot be
-/// rotated into another frame's axes — see [`FrameError::RotatedFrameAcrossCells`]).
+/// [`FrameError`] if the book speaks at a different instant than the pose's stamp, if either frame
+/// has no placement in the book, or if the two origins sit in different integer cells while the
+/// destination frame is rotated (an integer cell count cannot be rotated into another frame's axes —
+/// see [`FrameError::RotatedFrameAcrossCells`]).
 pub fn transfer_frame(
     pose: &StampedPose,
     to: FrameRef,
-    ctx: &impl FrameContext,
-) -> Result<StampedPose, FrameError> {
-    // A BRANCHLESS generic shim (HR5): look up both placements as straight-line expressions and
-    // delegate ALL branching — the same-frame short-circuit, the missing-placement errors, and the
-    // transform — to the MONOMORPHIC `transfer_frame_resolved`. So a new `FrameContext`
-    // monomorphization (e.g. the always-`Some` `IdentityFrames`) adds ZERO uncovered per-mono branch;
-    // the error arms are covered ONCE in the resolved helper. (Same-frame looks the placements up but
-    // ignores them — the resolved short-circuit still returns `Ok(*pose)`, unchanged behaviour.)
-    transfer_frame_resolved(
-        pose,
-        to,
-        ctx.placement(pose.frame, pose.universe_tick),
-        ctx.placement(to, pose.universe_tick),
-    )
-}
-
-/// The MONOMORPHIC core of [`transfer_frame`]: given the already-looked-up source + dest placements,
-/// short-circuit a same-frame transfer, fail LOUD (a typed error, never a garbage pose) on a missing
-/// placement, else compose the rigid-body transform. Holding every branch here keeps [`transfer_frame`]
-/// a straight-line generic shim so its coverage does not multiply per `FrameContext` instantiation.
-fn transfer_frame_resolved(
-    pose: &StampedPose,
-    to: FrameRef,
-    from: Option<FramePlacement>,
-    dest: Option<FramePlacement>,
+    book: &PlacementBook,
 ) -> Result<StampedPose, FrameError> {
     if pose.frame == to {
         return Ok(*pose);
     }
-    let from = from.ok_or(FrameError::UnknownSourceFrame)?;
-    let dest = dest.ok_or(FrameError::UnknownDestFrame)?;
+    if book.at() != pose.universe_tick {
+        return Err(FrameError::InstantMismatch {
+            book_at: book.at(),
+            pose_at: pose.universe_tick,
+        });
+    }
+    let from = book.of(pose.frame).ok_or(FrameError::UnknownSourceFrame)?;
+    let dest = book.of(to).ok_or(FrameError::UnknownDestFrame)?;
 
     // 1. THE LEVER — where the pose sits inside its OWN realm, reconstructing the FULL source-frame
     // position (source-tier cell metres + the f64 offset) so a non-zero source cell is not silently
@@ -217,151 +208,22 @@ fn transfer_frame_resolved(
     })
 }
 
-/// A tick-independent [`FrameContext`] whose every frame is the IDENTITY placement (origin at the
-/// common parent, no motion, no rotation). This is the P1-P3 reality: only `SystemSpace` is live and
-/// every placement is the identity (see the module docs), so a cross-realm `transfer_frame` re-expresses
-/// the FRAME field while leaving position/velocity/orientation UNCHANGED — exactly what the crossing
-/// needs to rebind the authoritative pose into the dest realm's frame today. P4/P8/P10 replace this with
-/// the closed-form ephemeris `FrameContext`; because the signature is frozen, that swap adds the real
-/// transform WITHOUT reshaping any caller. Total + branchless: `placement` is `Some` for every frame.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct IdentityFrames;
-
-impl FrameContext for IdentityFrames {
-    fn placement(&self, _frame: FrameRef, _tick: UniverseTick) -> Option<FramePlacement> {
-        Some(FramePlacement::identity())
-    }
-}
-
-/// A per-shard ephemeris [`FrameContext`] — the moving-frame successor to [`IdentityFrames`]
-/// (D-45(a) frame-authority). Each shard is the SOLE AUTHOR of the placements of its DIRECT
-/// CHILDREN, expressed in its OWN frame, and evaluates containment in that frame:
-/// - **own** → [`FramePlacement::identity`]: this shard IS its own local origin; its boundary is a
-///   static shell/box at the origin, never moving under it.
-/// - a **moving direct child** → placed LIVE this tick from its orbital elements
-///   (`origin`/`velocity` = [`orbital_state`]`(elements, secs_since_epoch(tick, tick_hz))`) — the
-///   child's position IN THIS SHARD'S frame, which the shard AUTHORS.
-/// - a **static direct child** or the **direct parent** → a stored [`FramePlacement`] (identity for a
-///   walk-scale body whose position rides its region `center`; the RECEIVED parent placement
-///   otherwise — parent authors it, this shard receives it).
-/// - anything else (an ancestor ABOVE the direct parent — grandparent, root — a sibling, an
-///   unrelated realm) → `None`.
-///
-/// **Why grandparent+ → `None` is correct (not a bug):** an entity re-homes to its DIRECT parent
-/// the instant it leaves this realm, before it could reach a grandparent boundary; and the
-/// root-seeded `container` fold resolves a member-of-nothing subject to the root. So dropping
-/// grandparent MEMBERSHIP never changes the container DECISION — only the raw membership bitset,
-/// which nothing observes. On the walk-scale forest every neighbourhood frame is stored at the
-/// identity (children ride their center; the parent is static), so `LocalFrames` is byte-equivalent
-/// to [`IdentityFrames`] for the decision — the proof the FA-1 seam swap gates.
-///
-/// Two shards at a SHARED boundary read DIFFERENT frames: the parent evaluates a child's moving SOI
-/// at the child's AUTHORED position in the parent frame; the child evaluates its OWN boundary as a
-/// static shell at the local origin. No cross-host bit-equality is ever invoked (author-and-ship) —
-/// the ephemeris SPIKE-6a gate the replicated-by-seed oracle needed is retired.
-#[derive(Clone, Debug)]
-pub struct LocalFrames {
-    own: FrameRef,
-    moving: BTreeMap<FrameRef, OrbitalElements>,
-    placed: BTreeMap<FrameRef, FramePlacement>,
-    tick_hz: f64,
-}
-
-impl LocalFrames {
-    /// A context for a shard whose realm frame is `own`, advancing at `tick_hz` (the per-shard clock
-    /// the ephemeris samples). Register children/parent placements with the builder methods.
-    #[must_use]
-    pub fn new(own: FrameRef, tick_hz: f64) -> LocalFrames {
-        LocalFrames {
-            own,
-            moving: BTreeMap::new(),
-            placed: BTreeMap::new(),
-            tick_hz,
-        }
-    }
-
-    /// Register a MOVING direct child: its placement is derived live from `elements` each tick.
-    #[must_use]
-    pub fn with_moving_child(mut self, frame: FrameRef, elements: OrbitalElements) -> LocalFrames {
-        self.moving.insert(frame, elements);
-        self
-    }
-
-    /// Register a STATIC direct child or the DIRECT PARENT at a fixed placement (identity for a
-    /// walk-scale body whose position rides its region `center`; the received parent placement
-    /// otherwise).
-    #[must_use]
-    pub fn with_placed(mut self, frame: FrameRef, placement: FramePlacement) -> LocalFrames {
-        self.placed.insert(frame, placement);
-        self
-    }
-}
-
-impl FrameContext for LocalFrames {
-    fn placement(&self, frame: FrameRef, tick: UniverseTick) -> Option<FramePlacement> {
-        if self.own == frame {
-            return Some(FramePlacement::identity());
-        }
-        if let Some(elements) = self.moving.get(&frame) {
-            let state = orbital_state(elements, secs_since_epoch(tick.0, self.tick_hz));
-            return Some(FramePlacement::moving(state.position, state.velocity));
-        }
-        self.placed.get(&frame).copied()
-    }
-}
-
-/// Rebind an authoritative pose into the frame of its destination realm — the ONE machinery (HR3) every
-/// cross-realm hand-off uses to re-express a source-frame pose so the dest reads it in its OWN frame: the
-/// durable crossing (`build_crossing`), the D-37 forward re-home (`build_rehome`), and the D-7 transient
-/// batch (`emit_transient_batch`) all funnel through here. The caller supplies the frame context `ctx`: a
-/// shard passes its LIVE ephemeris ([`LocalFrames`]) so a crossing INTO a MOVING realm REBASES the position
-/// by the dest realm's live placement (`transfer_frame` does the rigid-body transform) — so the source and
-/// the dest read the SAME containment and the crossing cannot flap. A context-free caller passes
-/// [`IdentityFrames`] for a pure FRAME-field relabel (position UNCHANGED — the dest realm is static, or walk
-/// scale where every placement is the identity, so the two are equivalent). The exact-integer cross-cell
-/// rebase (D-41) is live inside [`transfer_frame`] and needed no caller reshape (frozen signature); every
-/// placement in the tree is still anchored at cell `ZERO`, so it is inert here today.
-///
-/// `to_parent` supplies the dest realm's PARENT provenance — the one field [`frame_for_realm`] needs to
-/// build the lossy arm: an `Area` frame carries `{planet_seed, area_seed}`, so re-expressing a pose into
-/// an `Area` requires its enclosing `Planet`. Every other realm kind is a one-field lift and ignores
-/// `to_parent`. The caller threads it from the crossing carrier (`CrossingRequest.to_parent`), which the
-/// SOURCE detector fills from the container region's `parent` — a deterministic worldgen fact. SAFE
-/// DEGRADE: a dest realm with no nameable frame (an `Area` genuinely given without its planet parent) or a
-/// transform error returns the SOURCE-frame pose UNCHANGED (the label lags) — NEVER a dropped hand-off.
-pub fn rebind_pose_to_dest(
-    pose: StampedPose,
-    to_realm: RealmId,
-    to_parent: Option<RealmId>,
-    ctx: &impl FrameContext,
-) -> StampedPose {
-    frame_for_realm(to_realm, to_parent)
-        .and_then(|dest_frame| transfer_frame(&pose, dest_frame, ctx).ok())
-        .unwrap_or(pose)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collections::DetHashMap;
     use crate::pose::FINE_CELL_EDGE_M;
-    use std::collections::BTreeMap;
-
-    /// A static, tick-independent ephemeris for tests and the P1 trivial case: a map
-    /// from frame to placement. (P4+ replaces this with a closed-form ephemeris.)
-    struct StaticFrames(BTreeMap<FrameRef, FramePlacement>);
-
-    impl FrameContext for StaticFrames {
-        fn placement(&self, frame: FrameRef, _tick: UniverseTick) -> Option<FramePlacement> {
-            self.0.get(&frame).copied()
-        }
-    }
 
     fn sys() -> FrameRef {
         FrameRef::SystemSpace { system_seed: 1 }
     }
     fn planet() -> FrameRef {
         FrameRef::PlanetCentered { planet_seed: 2 }
+    }
+
+    /// A book anchored on the SYSTEM at tick 100 (the tick every test pose is stamped at), holding
+    /// one row per given child placement.
+    fn book(rows: Vec<(FrameRef, FramePlacement)>) -> PlacementBook {
+        PlacementBook::new(sys(), UniverseTick(100), rows)
     }
 
     fn pose_in(frame: FrameRef, pos: DVec3, vel: DVec3) -> StampedPose {
@@ -375,19 +237,40 @@ mod tests {
     }
 
     #[test]
-    fn same_frame_is_the_identity_without_a_context() {
-        // An empty context (no placements) still returns the pose unchanged.
-        let ctx = StaticFrames(BTreeMap::new());
+    fn same_frame_is_the_identity_and_reads_no_book() {
+        // An empty book — at a DIFFERENT instant, even — still returns the pose unchanged: the
+        // same-frame short-circuit precedes the instant check because no row is read at all.
+        let b = PlacementBook::new(sys(), UniverseTick(9), Vec::new());
         let p = pose_in(sys(), DVec3::new(1.0, 2.0, 3.0), DVec3::new(0.1, 0.0, 0.0));
-        assert_eq!(transfer_frame(&p, sys(), &ctx), Ok(p));
+        assert_eq!(transfer_frame(&p, sys(), &b), Ok(p));
+    }
+
+    #[test]
+    fn a_book_at_another_instant_is_refused_loud() {
+        // The instant discipline: a consumer that wants "now" must re-stamp its pose to the head
+        // book's instant, and a consumer that wants "then" must select the book at the pose's stamp —
+        // mixing the two is never silent.
+        let b = PlacementBook::new(
+            sys(),
+            UniverseTick(101),
+            vec![(planet(), FramePlacement::identity())],
+        );
+        let p = pose_in(sys(), DVec3::ZERO, DVec3::ZERO);
+        assert_eq!(
+            transfer_frame(&p, planet(), &b),
+            Err(FrameError::InstantMismatch {
+                book_at: UniverseTick(101),
+                pose_at: UniverseTick(100),
+            })
+        );
     }
 
     #[test]
     fn transfer_preserves_a_nonzero_source_cell_in_the_lifted_position() {
         // S0: the lift reconstructs the FULL source position (cell millimetres + f64 offset), so a
-        // non-zero source cell is NOT silently dropped. Under IdentityFrames a cross-frame transfer
-        // re-expresses the frame while leaving the position unchanged — so the dest offset carries the
-        // source cell's metres.
+        // non-zero source cell is NOT silently dropped. With the dest row at the identity a
+        // cross-frame transfer re-expresses the frame while leaving the position unchanged — so the
+        // dest offset carries the source cell's metres.
         let cell = I64Vec3::new(1_024_000, 0, 0); // 1_024_000 × 2⁻¹⁰ m/cell = 1000 m
         let pose = StampedPose {
             frame: sys(),
@@ -396,7 +279,8 @@ mod tests {
             orient: DQuat::IDENTITY,
             universe_tick: UniverseTick(100),
         };
-        let out = transfer_frame(&pose, planet(), &IdentityFrames).expect("identity transfer");
+        let b = book(vec![(planet(), FramePlacement::identity())]);
+        let out = transfer_frame(&pose, planet(), &b).expect("identity transfer");
         let want = DVec3::new(1000.5, -0.25, 0.75);
         assert!((out.pos.offset() - want).length() < 1e-9);
         // The dest write stays cell-0 (byte-floor: re-quantizing new_pos into dest cells is P4/P5).
@@ -407,17 +291,12 @@ mod tests {
     fn transfer_at_cell_zero_is_byte_identical_to_the_pre_lattice_lift() {
         // THE byte-floor: with a cell-0 source (the P3 shipping form) the lift is exactly `offset()`, so
         // the dest pose is unchanged from the pre-S0 behaviour — cell 0, offset = the transformed pos.
-        let ctx = StaticFrames({
-            let mut m = BTreeMap::new();
-            m.insert(sys(), FramePlacement::identity());
-            m.insert(
-                planet(),
-                FramePlacement::moving(DVec3::new(10.0, 0.0, 0.0), DVec3::ZERO),
-            );
-            m
-        });
+        let b = book(vec![(
+            planet(),
+            FramePlacement::moving(DVec3::new(10.0, 0.0, 0.0), DVec3::ZERO),
+        )]);
         let p = pose_in(sys(), DVec3::new(3.0, 4.0, 5.0), DVec3::ZERO);
-        let out = transfer_frame(&p, planet(), &ctx).expect("transfer");
+        let out = transfer_frame(&p, planet(), &b).expect("transfer");
         assert_eq!(out.pos.cell(), I64Vec3::ZERO);
         // planet origin at +10x ⇒ dest offset = (3-10, 4, 5).
         assert!((out.pos.offset() - DVec3::new(-7.0, 4.0, 5.0)).length() < 1e-9);
@@ -425,31 +304,29 @@ mod tests {
 
     #[test]
     fn unknown_frames_are_typed_errors_not_garbage() {
-        let ctx = StaticFrames(BTreeMap::new());
+        // A pose in a frame the book has no row for (and which is not its anchor): the source is
+        // unknowable. A book anchored on the pose's own frame with no row for the dest: the dest is.
+        let foreign = PlacementBook::new(planet(), UniverseTick(100), Vec::new());
         let p = pose_in(sys(), DVec3::ZERO, DVec3::ZERO);
         assert_eq!(
-            transfer_frame(&p, planet(), &ctx),
+            transfer_frame(&p, planet(), &foreign),
             Err(FrameError::UnknownSourceFrame)
         );
-        let mut map = BTreeMap::new();
-        map.insert(sys(), FramePlacement::identity());
-        let ctx = StaticFrames(map);
+        let empty = book(Vec::new());
         assert_eq!(
-            transfer_frame(&p, planet(), &ctx),
+            transfer_frame(&p, planet(), &empty),
             Err(FrameError::UnknownDestFrame)
         );
     }
 
     #[test]
-    fn identity_frames_reframes_without_moving_the_pose() {
-        // The P1-P3 crossing fix: re-express a pose from SystemSpace{7} into SystemSpace{8} under
-        // IdentityFrames — the FRAME field flips but position/velocity/orientation are UNCHANGED (every
-        // placement is the identity). This is exactly what rebinds a crossed pose to the dest realm today.
-        let from = FrameRef::SystemSpace { system_seed: 7 };
-        let to = FrameRef::SystemSpace { system_seed: 8 };
-        let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = transfer_frame(&p, to, &IdentityFrames).expect("identity reframe");
-        assert_eq!(got.frame, to);
+    fn an_identity_row_reframes_without_moving_the_pose() {
+        // The P1-P3 crossing shape: re-express a pose from the anchor into a child whose authored row
+        // is the identity — the FRAME field flips but position/velocity/orientation are UNCHANGED.
+        let b = book(vec![(planet(), FramePlacement::identity())]);
+        let p = pose_in(sys(), DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
+        let got = transfer_frame(&p, planet(), &b).expect("identity reframe");
+        assert_eq!(got.frame, planet());
         assert_eq!(got.pos.offset(), p.pos.offset());
         assert_eq!(got.vel, p.vel);
         assert_eq!(got.orient, p.orient);
@@ -457,72 +334,16 @@ mod tests {
     }
 
     #[test]
-    fn rebind_pose_to_dest_flips_the_frame_to_a_nameable_realm() {
-        // The Some arm (the live P3 path): a System dest is always nameable, so the pose is re-expressed
-        // into SystemSpace{8} — frame flips, position/velocity/orientation unchanged under IdentityFrames.
-        let from = FrameRef::SystemSpace { system_seed: 7 };
-        let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = rebind_pose_to_dest(p, RealmId::System(8), None, &IdentityFrames);
-        assert_eq!(got.frame, FrameRef::SystemSpace { system_seed: 8 });
-        assert_eq!(got.pos.offset(), p.pos.offset());
-        assert_eq!(got.vel, p.vel);
-        assert_eq!(got.orient, p.orient);
-    }
-
-    #[test]
-    fn rebind_pose_to_dest_flips_into_an_area_frame_given_its_planet_parent() {
-        // The lossy arm: an Area dest IS nameable once its enclosing planet is threaded as `to_parent`, so
-        // the pose re-expresses into AreaLocal{planet_seed, area_seed} — the frame flips, position/velocity
-        // unchanged under IdentityFrames. This is the Area-label fix: the parent provenance the crossing
-        // now carries makes the district frame form (Station/System/Planet needed no parent; Area does).
-        let from = FrameRef::PlanetCentered { planet_seed: 7 };
-        let p = pose_in(from, DVec3::new(25.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = rebind_pose_to_dest(
-            p,
-            RealmId::Area(99),
-            Some(RealmId::Planet(7)),
-            &IdentityFrames,
-        );
-        assert_eq!(
-            got.frame,
-            FrameRef::AreaLocal {
-                planet_seed: 7,
-                area_seed: 99,
-            }
-        );
-        assert_eq!(got.pos.offset(), p.pos.offset());
-        assert_eq!(got.vel, p.vel);
-    }
-
-    #[test]
-    fn rebind_pose_to_dest_safe_degrades_an_unnameable_dest_to_the_source_pose() {
-        // The None fallback arm: an Area realm has no nameable frame WITHOUT its planet parent, so
-        // `frame_for_realm` is None and the pose is returned UNCHANGED — the hand-off is never dropped,
-        // only the frame label lags. This exercises `unwrap_or(pose)` (a caller precondition failure —
-        // the detector always supplies the parent for an Area dest today).
-        let from = FrameRef::SystemSpace { system_seed: 7 };
-        let p = pose_in(from, DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
-        let got = rebind_pose_to_dest(p, RealmId::Area(99), None, &IdentityFrames);
-        assert_eq!(
-            got, p,
-            "an un-nameable dest returns the source pose verbatim"
-        );
-    }
-
-    #[test]
     fn translated_moving_frame_subtracts_origin_and_velocity() {
         // The planet's origin sits at (1000, 0, 0) in SystemSpace, moving +Y at 5 m/s.
         // A body at rest in SystemSpace at (1000, 0, 0) is at the planet ORIGIN, and in
         // the planet frame moves -Y at 5 m/s (the planet moves out from under it).
-        let mut map = BTreeMap::new();
-        map.insert(sys(), FramePlacement::identity());
-        map.insert(
+        let b = book(vec![(
             planet(),
             FramePlacement::moving(DVec3::new(1000.0, 0.0, 0.0), DVec3::new(0.0, 5.0, 0.0)),
-        );
-        let ctx = StaticFrames(map);
+        )]);
         let p = pose_in(sys(), DVec3::new(1000.0, 0.0, 0.0), DVec3::ZERO);
-        let got = transfer_frame(&p, planet(), &ctx).expect("transformed");
+        let got = transfer_frame(&p, planet(), &b).expect("transformed");
         assert!(
             got.pos.offset().length() < 1e-9,
             "at the planet origin: {:?}",
@@ -540,10 +361,8 @@ mod tests {
     #[test]
     fn round_trip_through_a_moving_rotated_frame_is_the_identity() {
         // A->B->A must return the original pose for ANY placement (the algebra is a
-        // rigid transform and its inverse).
-        let mut map = BTreeMap::new();
-        map.insert(sys(), FramePlacement::identity());
-        map.insert(
+        // rigid transform and its inverse) — through the SAME book both ways.
+        let b = book(vec![(
             planet(),
             FramePlacement {
                 origin_cell: I64Vec3::ZERO,
@@ -552,15 +371,14 @@ mod tests {
                 orientation: DQuat::from_rotation_z(0.7) * DQuat::from_rotation_x(0.3),
                 angular_velocity: DVec3::new(0.0, 0.0, 0.4),
             },
-        );
-        let ctx = StaticFrames(map);
+        )]);
         let original = pose_in(
             sys(),
             DVec3::new(13.0, 5.0, -2.0),
             DVec3::new(1.0, -2.0, 0.5),
         );
-        let in_planet = transfer_frame(&original, planet(), &ctx).expect("to planet");
-        let back = transfer_frame(&in_planet, sys(), &ctx).expect("back to system");
+        let in_planet = transfer_frame(&original, planet(), &b).expect("to planet");
+        let back = transfer_frame(&in_planet, sys(), &b).expect("back to system");
         assert!(
             (back.pos.offset() - original.pos.offset()).length() < 1e-9,
             "pos round-trips: {:?} vs {:?}",
@@ -579,9 +397,7 @@ mod tests {
     fn rotation_only_frame_reorients_position_and_velocity() {
         // A frame rotated 90° about Z: a body at +X (1,0,0) in the parent reads as
         // +Y... actually inv(R_z(90))*(+X) = -Y. Verify the orientation composes.
-        let mut map = BTreeMap::new();
-        map.insert(sys(), FramePlacement::identity());
-        map.insert(
+        let b = book(vec![(
             planet(),
             FramePlacement {
                 origin_cell: I64Vec3::ZERO,
@@ -590,10 +406,9 @@ mod tests {
                 orientation: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
                 angular_velocity: DVec3::ZERO,
             },
-        );
-        let ctx = StaticFrames(map);
+        )]);
         let p = pose_in(sys(), DVec3::new(1.0, 0.0, 0.0), DVec3::ZERO);
-        let got = transfer_frame(&p, planet(), &ctx).expect("rotated");
+        let got = transfer_frame(&p, planet(), &b).expect("rotated");
         assert!(
             (got.pos.offset() - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-9,
             "rotated into frame axes: {:?}",
@@ -602,42 +417,33 @@ mod tests {
     }
 
     #[test]
-    fn placement_constructors_and_det_hashmap_context_work() {
-        // FrameContext can be backed by a DetHashMap too (deterministic ordering is
-        // irrelevant for a point lookup, but the seam accepts any map).
-        let mut map: DetHashMap<FrameRef, FramePlacement> = DetHashMap::default();
-        map.insert(sys(), FramePlacement::identity());
-        map.insert(
-            planet(),
-            FramePlacement::moving(DVec3::new(2.0, 0.0, 0.0), DVec3::ZERO),
-        );
-        struct DetCtx(DetHashMap<FrameRef, FramePlacement>);
-        impl FrameContext for DetCtx {
-            fn placement(&self, frame: FrameRef, _t: UniverseTick) -> Option<FramePlacement> {
-                self.0.get(&frame).copied()
-            }
-        }
-        let ctx = DetCtx(map);
-        // A CROSS-frame transfer invokes the DetCtx placement lookup.
-        let p = pose_in(sys(), DVec3::new(2.0, 0.0, 0.0), DVec3::ZERO);
-        let got = transfer_frame(&p, planet(), &ctx).expect("cross-frame via DetCtx");
-        assert!(got.pos.offset().length() < 1e-9, "at the planet origin");
+    fn placement_constructors_hold_their_fields() {
         assert_eq!(FramePlacement::identity().origin, DVec3::ZERO);
+        assert_eq!(FramePlacement::identity().orientation, DQuat::IDENTITY);
         assert_eq!(
             FramePlacement::moving(DVec3::X, DVec3::Y).velocity,
             DVec3::Y
         );
+        assert_eq!(FramePlacement::moving(DVec3::X, DVec3::Y).origin, DVec3::X);
     }
 
     #[test]
     fn frame_errors_display() {
         assert_eq!(
             FrameError::UnknownSourceFrame.to_string(),
-            "no ephemeris placement for the source frame at this tick"
+            "no authored placement for the source frame in this book"
         );
         assert_eq!(
             FrameError::UnknownDestFrame.to_string(),
-            "no ephemeris placement for the destination frame at this tick"
+            "no authored placement for the destination frame in this book"
+        );
+        assert_eq!(
+            FrameError::InstantMismatch {
+                book_at: UniverseTick(7),
+                pose_at: UniverseTick(5),
+            }
+            .to_string(),
+            "the placement book speaks at tick 7 but the pose is stamped at tick 5"
         );
         assert_eq!(
             FrameError::RotatedFrameAcrossCells.to_string(),
@@ -652,16 +458,14 @@ mod tests {
 
     #[test]
     fn a_transfer_preserves_the_integer_cell_anchor() {
-        // THE defect this slice removes. A planet's origin sits one anchor block plus 145 m out inside
-        // its star system. The transfer used to write `LatticePos::local(new_pos)`, which pins the cell
-        // to ZERO unconditionally, so the anchor was destroyed on every hop and f64 was left holding the
-        // whole nine-digit distance. MEASURED on the pre-change code: cell 0, offset 976_562_645.5 m.
-        // Now the two anchors subtract as integers and the difference rides through to the dest pose.
+        // THE defect the floating-origin slice removed. A planet's origin sits one anchor block plus
+        // 145 m out inside its star system. The transfer used to write `LatticePos::local(new_pos)`,
+        // which pins the cell to ZERO unconditionally, so the anchor was destroyed on every hop and
+        // f64 was left holding the whole nine-digit distance. MEASURED on the pre-change code: cell 0,
+        // offset 976_562_645.5 m. Now the two anchors subtract as integers and the difference rides
+        // through to the dest pose.
         let anchor = I64Vec3::new(ANCHOR_CELLS, 0, 0);
-        let mut map = BTreeMap::new();
-        // The system IS the common parent here, so its own placement is the identity.
-        map.insert(sys(), FramePlacement::identity());
-        map.insert(
+        let b = book(vec![(
             planet(),
             FramePlacement {
                 origin_cell: anchor,
@@ -670,8 +474,7 @@ mod tests {
                 orientation: DQuat::IDENTITY,
                 angular_velocity: DVec3::ZERO,
             },
-        );
-        let ctx = StaticFrames(map);
+        )]);
         // A dot standing half a metre from the planet's centre — and itself anchored a block out, to
         // pin down what happens to the POSE's own cell as well as the placement's.
         let pose = StampedPose {
@@ -681,7 +484,7 @@ mod tests {
             orient: DQuat::IDENTITY,
             universe_tick: UniverseTick(100),
         };
-        let got = transfer_frame(&pose, sys(), &ctx).expect("planet -> system");
+        let got = transfer_frame(&pose, sys(), &b).expect("planet -> system");
         assert_eq!(
             got.pos.cell(),
             anchor,
@@ -700,7 +503,7 @@ mod tests {
         // physical point, to the bit, with no accumulated f64 drift. (The split between cell and offset
         // differs on the way back only because the pose's own cell was folded into the lever on the way
         // out; the total is identical, which is what a position means.)
-        let back = transfer_frame(&got, planet(), &ctx).expect("system -> planet");
+        let back = transfer_frame(&got, planet(), &b).expect("system -> planet");
         assert_eq!(back.pos.cell(), I64Vec3::new(-ANCHOR_CELLS, 0, 0));
         let total_out = |p: LatticePos| p.offset().x + p.cell().as_dvec3().x * FINE_CELL_EDGE_M;
         assert_eq!(total_out(back.pos), total_out(pose.pos));
@@ -718,9 +521,7 @@ mod tests {
         let p = pose_in(sys(), DVec3::new(1.0, 0.0, 0.0), DVec3::ZERO);
 
         // Rotated dest, anchors in DIFFERENT cells -> typed refusal.
-        let mut map = BTreeMap::new();
-        map.insert(sys(), FramePlacement::identity());
-        map.insert(
+        let b = book(vec![(
             planet(),
             FramePlacement {
                 origin_cell: I64Vec3::new(ANCHOR_CELLS, 0, 0),
@@ -729,16 +530,14 @@ mod tests {
                 orientation: spun,
                 angular_velocity: DVec3::ZERO,
             },
-        );
+        )]);
         assert_eq!(
-            transfer_frame(&p, planet(), &StaticFrames(map)),
+            transfer_frame(&p, planet(), &b),
             Err(FrameError::RotatedFrameAcrossCells)
         );
 
         // Rotated dest, anchors in the SAME cell -> the count is zero, nothing needs rotating, allowed.
-        let mut map = BTreeMap::new();
-        map.insert(sys(), FramePlacement::identity());
-        map.insert(
+        let b = book(vec![(
             planet(),
             FramePlacement {
                 origin_cell: I64Vec3::ZERO,
@@ -747,133 +546,79 @@ mod tests {
                 orientation: spun,
                 angular_velocity: DVec3::ZERO,
             },
-        );
-        let got = transfer_frame(&p, planet(), &StaticFrames(map)).expect("same-cell rotated dest");
+        )]);
+        let got = transfer_frame(&p, planet(), &b).expect("same-cell rotated dest");
         assert_eq!(got.pos.cell(), I64Vec3::ZERO);
         assert!((got.pos.offset() - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-9);
-    }
-
-    // ---- D-45(a) frame-authority FA-0: LocalFrames ----------------------------------
-
-    fn test_elements() -> OrbitalElements {
-        OrbitalElements {
-            sma: 1.0e6,
-            ecc: 0.0,
-            inclination: 0.0,
-            raan: 0.0,
-            arg_periapsis: 0.0,
-            mean_anomaly_epoch: 0.0,
-            central_mass: 1.989e30,
-        }
-    }
-
-    #[test]
-    fn local_frames_own_is_the_identity() {
-        // A shard IS its own local origin: its boundary is static at the origin.
-        let ctx = LocalFrames::new(sys(), 20.0);
-        assert_eq!(
-            ctx.placement(sys(), UniverseTick(5)),
-            Some(FramePlacement::identity())
-        );
-    }
-
-    #[test]
-    fn local_frames_moving_child_tracks_the_authored_orbit() {
-        let elem = test_elements();
-        let ctx = LocalFrames::new(sys(), 20.0).with_moving_child(planet(), elem);
-        // The child's placement equals the shard's AUTHORED orbital state at that tick.
-        for t in [0u64, 1, 137, 5000] {
-            let state = orbital_state(&elem, secs_since_epoch(t, 20.0));
-            assert_eq!(
-                ctx.placement(planet(), UniverseTick(t)),
-                Some(FramePlacement::moving(state.position, state.velocity)),
-            );
-        }
-        // Tick-dependent: the planet is at a different place a tick later (it orbits).
-        assert_ne!(
-            ctx.placement(planet(), UniverseTick(0)),
-            ctx.placement(planet(), UniverseTick(1)),
-        );
-    }
-
-    #[test]
-    fn local_frames_placed_returns_the_stored_placement() {
-        // A static child / the received parent placement.
-        let station = FrameRef::StationLocal { station_seed: 3 };
-        let p = FramePlacement::moving(DVec3::new(4.0, 0.0, 0.0), DVec3::ZERO);
-        let ctx = LocalFrames::new(sys(), 20.0).with_placed(station, p);
-        assert_eq!(ctx.placement(station, UniverseTick(9)), Some(p));
-    }
-
-    #[test]
-    fn local_frames_unknown_frame_is_none() {
-        // A grandparent (above the direct parent), a sibling, or an unrelated frame -> None
-        // (non-member by design; the root-seeded container fold preserves the decision).
-        let ctx = LocalFrames::new(sys(), 20.0);
-        assert_eq!(ctx.placement(planet(), UniverseTick(1)), None);
     }
 
     // ---- rehome COORDINATE correctness (successful rehomes + expected coords, incl. floating-point) ----
 
     #[test]
     fn rehome_system_to_a_moving_planet_lands_at_the_correct_planet_local_coordinate() {
-        // A player rehoming System→Planet: rebind_pose_to_dest re-expresses their System pose into the planet
-        // frame, REBASED by the planet's LIVE orbital position (LocalFrames derives it from the ephemeris). A
-        // player sitting AT the planet centre lands at the planet-local ORIGIN; one offset by delta lands at
-        // delta. This is the exact coordinate the dest planet shard must read (author-and-ship, same
-        // containment both sides).
-        let elem = test_elements();
-        let tick = UniverseTick(137);
-        let planet_pos = orbital_state(&elem, secs_since_epoch(tick.0, 20.0)).position;
-        let ctx = LocalFrames::new(sys(), 20.0).with_moving_child(planet(), elem);
+        // A player rehoming System→Planet: `transfer_frame` re-expresses their System pose into the
+        // planet frame, REBASED by the planet's authored placement at this instant. A player sitting
+        // AT the planet centre lands at the planet-local ORIGIN; one offset by delta lands at delta.
+        // This is the exact coordinate the dest planet shard must read (author-and-ship, same
+        // containment both sides). The placement is a hand-authored row — where it came from (an
+        // orbit, a thruster, a hand) is exactly what this conversion must not be able to ask.
+        let planet_at = DVec3::new(83.0, 0.0, -12.5);
+        let b = book(vec![(
+            planet(),
+            FramePlacement::moving(planet_at, DVec3::new(0.0, 4.2, 0.0)),
+        )]);
         // AT the planet centre ⇒ planet-local origin.
-        let at_centre = StampedPose::at_rest(sys(), planet_pos, tick);
-        let landed = rebind_pose_to_dest(at_centre, RealmId::Planet(2), None, &ctx);
+        let at_centre = StampedPose::at_rest(sys(), planet_at, UniverseTick(100));
+        let landed = transfer_frame(&at_centre, planet(), &b).expect("placed");
         assert_eq!(landed.frame, planet());
         assert!(landed.pos.offset().length() < 1e-6);
         // Offset by delta ⇒ planet-local delta.
         let delta = DVec3::new(10.0, -5.0, 2.0);
-        let off = StampedPose::at_rest(sys(), planet_pos + delta, tick);
-        let landed_off = rebind_pose_to_dest(off, RealmId::Planet(2), None, &ctx);
+        let off = StampedPose::at_rest(sys(), planet_at + delta, UniverseTick(100));
+        let landed_off = transfer_frame(&off, planet(), &b).expect("placed");
         assert!((landed_off.pos.offset() - delta).length() < 1e-6);
     }
 
     #[test]
     fn a_system_planet_system_round_trip_returns_the_original_world_position() {
-        // Rehome IN then OUT: System→Planet then Planet→System must return the ORIGINAL System pose (the frame
-        // transform and its inverse compose to the identity) — a player who steps onto a planet and back off
-        // is exactly where they started, no drift.
-        let elem = test_elements();
-        let tick = UniverseTick(42);
-        let ctx = LocalFrames::new(sys(), 20.0).with_moving_child(planet(), elem);
-        let start = StampedPose::at_rest(sys(), DVec3::new(1.0e6, 2.0e5, -3.0e5), tick);
-        let on_planet = rebind_pose_to_dest(start, RealmId::Planet(2), None, &ctx);
+        // Rehome IN then OUT: System→Planet then Planet→System must return the ORIGINAL System pose
+        // (the frame transform and its inverse compose to the identity) — a player who steps onto a
+        // planet and back off is exactly where they started, no drift.
+        let b = book(vec![(
+            planet(),
+            FramePlacement::moving(DVec3::new(1.0e5, -3.0e4, 7.0e3), DVec3::new(1.0, 2.0, 3.0)),
+        )]);
+        let start =
+            StampedPose::at_rest(sys(), DVec3::new(1.0e6, 2.0e5, -3.0e5), UniverseTick(100));
+        let on_planet = transfer_frame(&start, planet(), &b).expect("in");
         assert_eq!(on_planet.frame, planet());
-        let back = rebind_pose_to_dest(on_planet, RealmId::System(1), None, &ctx);
+        let back = transfer_frame(&on_planet, sys(), &b).expect("out");
         assert_eq!(back.frame, sys());
         assert!((back.pos.offset() - start.pos.offset()).length() < 1e-6);
     }
 
     #[test]
     fn a_rehome_is_invariant_to_how_the_source_position_splits_across_cell_and_offset() {
-        // Floating-point robustness: the SAME physical System position, expressed either as a cell-0 full
-        // offset (today's shipping form) OR as an integer-millimetre CELL + sub-mm residual (the S5 form),
-        // rehomes to the SAME planet-local coordinate — the transfer reconstructs the full source position
-        // from cell+offset (S0), so how the position is split is invisible to the destination coordinate.
-        let elem = test_elements();
-        let tick = UniverseTick(7);
-        let planet_pos = orbital_state(&elem, secs_since_epoch(tick.0, 20.0)).position;
-        let ctx = LocalFrames::new(sys(), 20.0).with_moving_child(planet(), elem);
-        let world = planet_pos + DVec3::new(7.0, -3.0, 11.0);
+        // Floating-point robustness: the SAME physical System position, expressed either as a cell-0
+        // full offset (today's shipping form) OR as an integer-millimetre CELL + sub-mm residual (the
+        // S5 form), rehomes to the SAME planet-local coordinate — the transfer reconstructs the full
+        // source position from cell+offset (S0), so how the position is split is invisible to the
+        // destination coordinate.
+        let planet_at = DVec3::new(141.0, 9.0, -3.0);
+        let b = book(vec![(
+            planet(),
+            FramePlacement::moving(planet_at, DVec3::ZERO),
+        )]);
+        let world = planet_at + DVec3::new(7.0, -3.0, 11.0);
         // Rep 1: cell-0 full offset (the P3 shipping form).
-        let flat = StampedPose::at_rest(sys(), world, tick);
+        let flat = StampedPose::at_rest(sys(), world, UniverseTick(100));
         // Rep 2: normalized into integer-mm cells + residual (the S5 form) — the SAME physical position.
         let mut split = flat;
         split.pos = LatticePos::local(world).normalize(sys().tier());
-        let a = rebind_pose_to_dest(flat, RealmId::Planet(2), None, &ctx);
-        let b = rebind_pose_to_dest(split, RealmId::Planet(2), None, &ctx);
+        let a = transfer_frame(&flat, planet(), &b).expect("flat");
+        let c = transfer_frame(&split, planet(), &b).expect("split");
         // Both land at the SAME planet-local coordinate (≈ the 7,-3,11 offset from the centre).
-        assert!((a.pos.offset() - b.pos.offset()).length() < 1e-6);
+        assert!((a.pos.offset() - c.pos.offset()).length() < 1e-6);
         assert!((a.pos.offset() - DVec3::new(7.0, -3.0, 11.0)).length() < 1e-6);
     }
 }

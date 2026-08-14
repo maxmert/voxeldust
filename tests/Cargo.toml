@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 vd-core = { workspace = true }
+vd-physics = { workspace = true }
 vd-wire = { workspace = true }
 vd-sim = { workspace = true }
 vd-node = { workspace = true }

@@ -7,6 +7,7 @@ description = "Gateway internals as a LIBRARY: lock-free route table (ArcSwap), 
 
 [dependencies]
 vd-core = { workspace = true }
+vd-physics = { workspace = true }
 vd-wire = { workspace = true }
 vd-sim = { workspace = true }
 serde = { workspace = true }

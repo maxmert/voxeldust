@@ -9,7 +9,7 @@ coverage_toolchain := env_var_or_default("VD_COVERAGE_TOOLCHAIN", "nightly-2026-
 # Tier-A: the 100%-region+branch domain (HR5). Each crate's OWN tests must cover
 # its full surface (llvm counts regions per compiled instance, so leaning on the
 # vd-tests binary would double-instance every crate — learned in P1.7).
-tier_a := "-p vd-core -p vd-devproto -p vd-wire -p vd-sim -p vd-node -p vd-connection-plane -p vd-harness -p vd-client -p vd-client-harness"
+tier_a := "-p vd-core -p vd-physics -p vd-devproto -p vd-wire -p vd-sim -p vd-node -p vd-connection-plane -p vd-harness -p vd-client -p vd-client-harness"
 
 # Inner loop: full deterministic suite (in-process tiers, fast).
 test:
@@ -200,25 +200,28 @@ render-smoke:
 render-boxes-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_boxes_smoke -- --nocapture
 
-# G-RENDER-CROSSING-SMOKE (Visual Crossing Playground V4 pixel proof): bring up the DUAL cluster with
-# an injected walk-into crossing trigger (VD_DEVCLUSTER_BOUNDARIES), launch a HEADLESS
-# `client --capture --realm-boxes` (TWO translucent boxes A@System(7) / B@System(8)), WalkTo the
-# avatar across the boundary, and capture BEFORE (dot in box A) + AFTER (dot in box B) — asserting
-# the location/expected_box flip + world-motion (state) AND the dot's pixels move A→B (H2) + zero
-# magenta. Same GPU-required, LOCAL-gate preconditions as render-smoke.
+# G-RENDER-CROSSING-SMOKE (the crossing pixel proof on THE world): bring up the DUAL cluster with NO
+# injected geometry, launch a HEADLESS `client --capture --realm-boxes` drawing the emit-world-scene
+# regions, fly the ±Z polar corridor OUT of the home system's own 150 m shell and BACK, and capture
+# THREE frames — INSIDE (dot pixels in the home shell's rect), OUTSIDE (label = the galaxy, pixels
+# NOT in the home rect, expected_box == None: the between-space is never drawn), RETURNED (inside
+# again — the return leg's first pixel coverage). The camera is RECONSTRUCTED per capture from the
+# client's own reported drawn boxes (the planets orbit, so a static-file camera would drift). Zero
+# magenta on all three. Same GPU-required, LOCAL-gate preconditions as render-smoke.
 render-crossing-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
 
-# NODE-PER-REALM WALK GATE (task #149) — the HEADLESS process-tier walk proof (supersedes the retired
-# `triple-crossing-smoke`, whose --triple co-hosting cluster now thrashes under node-per-realm). Brings up the
-# `--forest` cluster (orchestrator + gateway + SIX single-realm shards: System 7, Planet 7, Station 7, Area 7,
-# Galaxy, System 8, NO co-hosting), logs in a REAL headless durable player over localhost QUIC, and drives it
-# with dev-control `WalkTo` along +X through the chain of CROSS-NODE re-homes. Asserts the player ARRIVES at
-# every leg (movement never freezes across a crossing) and the subject Entity's directory fence stays SMALL
-# (one clean commit per crossing — the thrash guard). No GPU: this is the CI walk gate; the live window is the
-# interim visual proof (DEFERRED.md — the GPU pixel-capture walk is owed a re-base onto the --forest cluster).
+# NODE-PER-REALM WALK GATE (task #149) — the HEADLESS process-tier chain proof on THE world. Brings up
+# the CHAIN cluster (orchestrator + gateway + FOUR realm-shards derived through world_roster: the home
+# system, the galaxy, the inner planet, the sibling star — NO co-hosting), logs in a REAL headless
+# durable player over localhost QUIC, and flies the ±Z polar-corridor legs C,D,A,E,F (rendezvous into
+# the inner planet, polar lift home, out to the galaxy, the 12.8 km boost to the sibling, and back).
+# EVERY leg asserts the realm LABEL reached — never a coordinate — and the subject Entity's directory
+# fence stays SMALL, with the observed maximum PRINTED per run (the thrash guard; the bound is
+# unmeasured for this chain until a green history accumulates). In-test deadline 300 s (real flight
+# distances; was 120 s for the retired inert walk). No GPU: this is the CI walk gate.
 node-per-realm-walk:
-    cargo test -p vd-bins --features dev-control --test node_per_realm_walk -- --nocapture
+    cargo test -p vd-bins --features dev-control --test node_per_realm_walk -- --test-threads=1 --nocapture
 
 # RLM 5c-2b: the real-process ProcLaunchBackend gate — forks a real vd-shard (Planet 7 + Galaxy), asserts
 # it boots + echoes its incarnation cookie on /whoami + teardown reaps it (pid gone, no zombie). Tier-B
@@ -247,18 +250,14 @@ rlm-kill9:
 rlm-demand-login:
     cargo test -p vd-bins --features dev-control --test rlm_demand_login -- --test-threads=1 --nocapture
 
-# THE FLIGHT-SPEED CROSSING GATE (rehome_one_mechanism §4j/§4v): the inner re-home fixture at the
-# orbit speed the game is actually flown (slowdown 1, not the 300x default the suite otherwise
-# gates at). Every symptom of the 2026-08-12 defect arc — the mislanding, the flap, the strand —
-# was invisible at 300x and reproduced only here, so a merge must hold this gate at full speed.
-# The two round-trip tests still gate at the 300x default (their re-aim is owed with Step 5).
-rlm-demand-login-flight:
-    VD_TEST_ORBIT_SLOWDOWN=1 cargo test -p vd-bins --features dev-control --test rlm_demand_login a_flying_occupant_re_homes_into_an_inner_planet -- --test-threads=1 --nocapture
+# (Stage-C: the orbit-slowdown knob is DELETED — SL5. The whole demand suite now flies at full
+# orbit speed through the ONE shared rendezvous, so the separate flight-speed recipe is retired:
+# `rlm-demand-login` above IS the flight-speed gate for every crossing test.)
 
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login rlm-demand-login-flight coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login coverage
 
 # One-time setup helper.
 coverage-setup:

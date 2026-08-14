@@ -319,7 +319,10 @@ pub struct RealmShape {
 /// ({input signals} + {ambient physics} → pose; a passive orbiting body is the
 /// zero-signal degenerate case) and SHIPS it to observers as a latest-wins,
 /// FireAndForget row — never acked, always re-derivable (kept STRICTLY separate from the
-/// child-shard authority feed). Empty at walk/static scale ⇒ zero bytes on the wire.
+/// child-shard authority feed). EVERY direct child ships a row, static and moving alike
+/// (owner Q3, the placement arc): "movers only" was a motion test deciding what the feed
+/// ships, which SL4 forbids — so a walk/static forest with children now puts rows on the
+/// wire too (the old zero-bytes floor was that filter's artifact, re-baselined with it).
 ///
 /// SELF-DESCRIBING PLACEMENT EDGE (proto_minor 8). A row is the graph edge `(head, tail, value)`:
 /// `frame` is the HEAD — the CHILD's own frame, the frame that realm's occupants are measured in;

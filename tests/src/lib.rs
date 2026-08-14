@@ -136,7 +136,7 @@ pub fn planet_stub_config() -> StubConfig {
     StubConfig {
         realm: RealmId::Planet(7),
         own_coord: vd_core::worldgen::coord_of_realm(
-            &vd_core::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
+            &vd_physics::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
             RealmId::Planet(7),
         )
         .expect("the seed forest gives Planet 7 a lineage back to the root"),
@@ -183,7 +183,7 @@ pub fn area_stub_config() -> StubConfig {
     StubConfig {
         realm: RealmId::Area(7),
         own_coord: vd_core::worldgen::coord_of_realm(
-            &vd_core::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
+            &vd_physics::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
             RealmId::Area(7),
         )
         .expect("the seed forest gives Area 7 a lineage back to the root"),
@@ -206,7 +206,7 @@ pub fn area_stub_config() -> StubConfig {
 pub fn chain_system_stub_config() -> StubConfig {
     StubConfig {
         own_coord: vd_core::worldgen::coord_of_realm(
-            &vd_core::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
+            &vd_physics::worldgen::realm_regions_for(FRAME_UNIVERSE_SEED),
             RealmId::System(7),
         )
         .expect("the seed forest gives System 7 a lineage back to the root"),
@@ -278,24 +278,25 @@ pub fn plant_demand_neighbourhood_with_movers(
     hosted_realm: RealmId,
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
-    movers: &BTreeMap<RealmId, vd_core::celestial::OrbitalElements>,
+    movers: &BTreeMap<RealmId, vd_physics::celestial::OrbitalElements>,
 ) {
     let scope: BTreeSet<RealmId> =
-        vd_core::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm)
+        vd_physics::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm)
             .iter()
             .map(|r| r.realm)
             .collect();
     let regions: Vec<vd_core::geometry::RealmRegion> =
-        vd_core::worldgen::realm_regions_for_walk_config(
+        vd_physics::worldgen::realm_regions_for_walk_config(
             universe_seed,
-            &vd_core::worldgen::UniverseConfig::walk_demand(occupant_v_max_mps, tick_dt_s),
+            &vd_physics::worldgen::UniverseConfig::walk_demand(occupant_v_max_mps, tick_dt_s),
         )
         .into_iter()
         .filter(|r| scope.contains(&r.realm))
         .collect();
     with_node(topo, node, |s| {
         *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
-            vd_sim::stub::RealmRegions::new(regions).with_moving_children(movers.clone());
+            vd_sim::stub::RealmRegions::new(regions)
+                .with_moving_children(vd_physics::motion::kepler_motion_fns(movers.clone()));
     });
 }
 
@@ -818,7 +819,7 @@ pub fn plant_crossing_boundaries(
     });
 }
 
-/// C-6c — plant the SEED-DERIVED containment neighbourhood (`vd_core::worldgen::realm_neighbourhood_for`)
+/// C-6c — plant the SEED-DERIVED containment neighbourhood (`vd_physics::worldgen::realm_neighbourhood_for`)
 /// on the shard `node` (its own realm + ancestors + owned children — the EXACT geometry the production
 /// `shard.rs` boot computes). ARMS the containment detector on that shard against the canonical forest,
 /// so a re-home is driven by real seed geometry, not an authored fixture. `universe_seed` matches the
@@ -829,7 +830,7 @@ pub fn plant_seed_neighbourhood(
     universe_seed: u64,
     hosted_realm: RealmId,
 ) {
-    let regions = vd_core::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm);
+    let regions = vd_physics::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm);
     with_node(topo, node, |s| {
         *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
             vd_sim::stub::RealmRegions::new(regions);
@@ -837,7 +838,7 @@ pub fn plant_seed_neighbourhood(
 }
 
 /// task #149 — plant the seed-derived containment neighbourhood for the UNION of a CO-HOSTED held set
-/// (`vd_core::worldgen::realm_neighbourhood_for_held`), the EXACT geometry the production `shard.rs` boot
+/// (`vd_physics::worldgen::realm_neighbourhood_for_held`), the EXACT geometry the production `shard.rs` boot
 /// computes for a multi-realm shard. A single-realm `plant_seed_neighbourhood` gives only its own realm +
 /// ancestors + DIRECT children — so a shard co-hosting `{System 7, Planet 7, Area 7}` needs THIS to evaluate
 /// Area 7 (a GRANDCHILD of System 7, absent from System 7's own neighbourhood).
@@ -847,7 +848,7 @@ pub fn plant_seed_neighbourhood_held(
     universe_seed: u64,
     held: &BTreeSet<RealmId>,
 ) {
-    let regions = vd_core::worldgen::realm_neighbourhood_for_held(universe_seed, held);
+    let regions = vd_physics::worldgen::realm_neighbourhood_for_held(universe_seed, held);
     with_node(topo, node, |s| {
         *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
             vd_sim::stub::RealmRegions::new(regions);
@@ -874,11 +875,12 @@ pub fn plant_regions(
     topo: &mut Topology,
     node: NodeId,
     regions: Vec<vd_core::geometry::RealmRegion>,
-    movers: std::collections::BTreeMap<RealmId, vd_core::celestial::OrbitalElements>,
+    movers: std::collections::BTreeMap<RealmId, vd_physics::celestial::OrbitalElements>,
 ) {
     with_node(topo, node, |s| {
         *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
-            vd_sim::stub::RealmRegions::new(regions.clone()).with_moving_children(movers.clone());
+            vd_sim::stub::RealmRegions::new(regions.clone())
+                .with_moving_children(vd_physics::motion::kepler_motion_fns(movers.clone()));
     });
 }
 
@@ -887,12 +889,13 @@ pub fn plant_seed_neighbourhood_with_movers(
     node: NodeId,
     universe_seed: u64,
     hosted_realm: RealmId,
-    movers: BTreeMap<RealmId, vd_core::celestial::OrbitalElements>,
+    movers: BTreeMap<RealmId, vd_physics::celestial::OrbitalElements>,
 ) {
-    let regions = vd_core::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm);
+    let regions = vd_physics::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm);
     with_node(topo, node, |s| {
         *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
-            vd_sim::stub::RealmRegions::new(regions).with_moving_children(movers.clone());
+            vd_sim::stub::RealmRegions::new(regions)
+                .with_moving_children(vd_physics::motion::kepler_motion_fns(movers.clone()));
     });
 }
 

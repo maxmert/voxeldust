@@ -159,16 +159,31 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
     let peers = vec![(NodeId(1), SocketAddr::from((Ipv4Addr::LOCALHOST, 1)))];
 
     // --- 1+2: a Planet and a Galaxy shard both boot; the Planet echoes its EXACT cookie on /whoami. ---
+    // The spawned coord is THE world's own inner planet, derived through `world_roster` — never a
+    // stated seed: a realm THE world does not contain has an empty containment forest and the shard
+    // refuses to boot (0 ambient roots), which is exactly the death the retired walk-forest coords
+    // hid (D-WORLD-8).
+    let roster = vd_bins::world_roster(&DEV);
+    let vd_core::pose::RealmId::System(galaxy_seed) = roster.galaxy else {
+        panic!(
+            "the galaxy realm is the System(1) stand-in, got {}",
+            roster.galaxy
+        );
+    };
+    let vd_core::pose::RealmId::System(home_seed) = roster.home else {
+        panic!("the home realm is a System, got {}", roster.home);
+    };
+    let vd_core::pose::RealmId::Planet(inner_seed) = roster.inner else {
+        panic!("the inner mover is a Planet, got {}", roster.inner);
+    };
     let planet_node = NodeId(1_000);
     let planet_bind = reserve_udp_addr();
     let planet_probe = reserve_tcp_addr();
     let planet_cookie = backend.mint_cookie(planet_node);
     let planet_pid = backend
         .launch(&LaunchSpec {
-            // Planet 7 — a realm that EXISTS in the Walk-scale seed forest (worldgen); an arbitrary seed
-            // has an empty containment forest and the shard refuses to boot (0 ambient roots).
             node: planet_node,
-            coord: planet(2, 7, 7),
+            coord: planet(galaxy_seed, home_seed, inner_seed),
             addr: planet_bind,
             probe: planet_probe,
             cookie: planet_cookie,
@@ -182,6 +197,11 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
     let galaxy_pid = backend
         .launch(&LaunchSpec {
             node: galaxy_node,
+            // A Galaxy LEVEL lowers to the `System(1)` stand-in whatever its level seed says
+            // (`RealmLevel::to_realm_id`), so this shard hosts THE world's own galaxy realm and boots
+            // its real neighbourhood — the seed `2` exercises exactly that collapse. What this leg
+            // pins is the PROFILE: `profile_for(Galaxy)` must not refuse (the un-collapsed
+            // `VD_OWN_COORD` carries `signal_relay`).
             coord: galaxy(2),
             addr: reserve_udp_addr(),
             probe: galaxy_probe,

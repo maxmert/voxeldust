@@ -1,0 +1,19 @@
+[package]
+name = "vd-physics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "THE motion crate (SL4): closed-form celestial math, the Motion discriminant, and the seed universe generator. The one place in the tree that knows HOW anything moves; the crossing path cannot name it (crate_isolation gate)."
+
+[dependencies]
+vd-core = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+glam = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

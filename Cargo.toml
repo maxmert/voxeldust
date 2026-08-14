@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/physics",
     "crates/devproto",
     "crates/wire",
     "crates/sim",
@@ -24,6 +25,7 @@ rust-version = "1.94"
 [workspace.dependencies]
 # Workspace crates (dependency rule: bins -> node -> sim -> wire -> core; harness -> node + sim; nothing depends on a bin)
 vd-core = { path = "crates/core" }
+vd-physics = { path = "crates/physics" }
 vd-devproto = { path = "crates/devproto" }
 vd-wire = { path = "crates/wire" }
 vd-sim = { path = "crates/sim" }

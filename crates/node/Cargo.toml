@@ -17,6 +17,8 @@ bevy_ecs = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# DEV-ONLY: the rlm runtime test builds THE world; shipped node code reads books, never motion (SL4).
+vd-physics = { workspace = true }
 proptest = { workspace = true }
 # HR5: unit tests install a TRACE sink so every tracing macro's lazy field closure
 # EVALUATES on the paths the tests already drive — without it the closures are dead

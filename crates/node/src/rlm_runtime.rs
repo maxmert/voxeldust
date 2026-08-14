@@ -830,7 +830,8 @@ mod tests {
         // hook, so passing proves the seed rode the ONE machinery.
         use RealmKindTag::{Area, Galaxy, Planet, System, Universe};
         use vd_core::pose::RealmId;
-        use vd_core::worldgen::{coord_of_realm, realm_regions_for};
+        use vd_core::worldgen::coord_of_realm;
+        use vd_physics::worldgen::realm_regions_for;
 
         // NAMED in the FIXTURE forest: the deepest realm there is an AREA, which players build and the
         // generator never makes. Naming a generated realm instead would give a 3-level chain and the test

@@ -19,7 +19,7 @@
 //! were captured on the dev host (macOS / aarch64; the coverage `nightly-2026-06-06` and
 //! stable `1.94.1` agree on this machine).
 
-use vd_core::celestial::{OrbitalElements, orbital_state};
+use vd_physics::celestial::{OrbitalElements, orbital_state};
 
 /// A representative non-trivial orbit — all six elements + the parent mass exercised, at
 /// ~1 AU / solar mass so the numbers are astronomically realistic.

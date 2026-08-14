@@ -278,6 +278,30 @@ fn crossing_e2e_durable_dot_crosses_a_planted_boundary() {
         .expect("exactly one holder of the crossed entity, fence-matching the directory");
     verify_authority_settled(&reports)
         .expect("no lingering pending/departing anywhere after the crossing tail");
+
+    // (6) PLACEMENT-ARC S0 TRIPWIRE — the B-1 measurement. A latched dot's stamp freezes at the latch
+    // (`readvance_dots` skips it), and the flush's departure/entry re-validations measure the world at
+    // the POSE's instant — so the world every moving placement lives in has swept on for exactly this
+    // many ticks under decisions the flush claims to re-read "NOW". This pins the gap at ZERO; its
+    // failure message IS the measured bound (gap × tick_dt × 7.68 m/s, THE world's fastest planet,
+    // against a 1.0 m containment inset). Red until the flush reads the CURRENT placement book (S2).
+    assert_eq!(
+        src.flush_stamp_gap_ticks_max,
+        0,
+        "the flush measured a world {} ticks older than its own clock — at THE world's fastest \
+         planet speed that is {:.3} m of unmeasured sweep against a 1.0 m containment inset",
+        src.flush_stamp_gap_ticks_max,
+        src.flush_stamp_gap_ticks_max as f64 * 0.05 * 7.68,
+    );
+
+    // (7) PLACEMENT-ARC S2 GATE: no ledger selection missed its instant anywhere in the run — every
+    // consumer found the exact book it asked for, so no lane silently degraded.
+    for (node, r) in &reports {
+        assert_eq!(
+            r.placement_book_miss, 0,
+            "node {node:?} recorded a placement-book miss — a lane degraded loudly somewhere",
+        );
+    }
 }
 
 /// TEST 2 — THE DEST RENDERS THE CROSSED POSE (SEPARATE from Test 1's authority gate — HR5(d): never

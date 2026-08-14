@@ -1,63 +1,64 @@
-//! NODE-PER-REALM WALK GATE (task #149) — the headless process-tier proof that a durable player walks
-//! CLEANLY through a chain of cross-node re-homes without freezing, and that each crossing is ONE clean
-//! directory commit (NO fence thrash).
+//! NODE-PER-REALM WALK GATE (task #149) — the headless process-tier proof that a durable player
+//! flies CLEANLY through a chain of cross-node re-homes on THE WORLD ITSELF, without freezing and
+//! without fence thrash.
 //!
-//! This REPLACES the old `cohosted_input_freeze_repro.rs`. That repro stood up ONE co-hosting shard (System 7
-//! holding Planet/Station/Area 7 via `VD_HELD_REALMS`) and reproduced a limit-cycle FREEZE on the source==dest
-//! re-home. The USER has since decided re-home should be NODE-PER-REALM: each realm on its OWN node, so EVERY
-//! re-home is a uniform CROSS-NODE saga and the source==dest degenerate case never arises. With no co-hosting
-//! there is no thrash — so this test asserts the OPPOSITE of the repro: the player ARRIVES at every leg and the
-//! subject Entity's directory fence stays SMALL (one clean commit per crossing).
+//! Topology: the [`ClusterShape::Chain`] cluster — orchestrator + gateway + FOUR realm-shards, one
+//! per realm of THE world's flight chain, every name derived through `world_roster` (never stated):
+//! the HOME system, the GALAXY between-space (its parent), the home's INNER planet (smallest
+//! semi-major axis), and the galaxy's lowest-seed ring SIBLING star. The retired walk fixture named
+//! realms THE world does not contain (Planet/Station/Area 7, System 8), so four of its six shards
+//! died at boot — invisibly, because bring-up never polled `Cluster::first_exited` — and every leg
+//! target sat INSIDE the home system's 150 m shell, so a green run proved no crossing at all
+//! (ledgered D-WORLD-7; the Station/Area legs return when the block/station slice grows THE world,
+//! D-WORLD-1).
 //!
-//! Topology: the [`ClusterShape::Forest`] cluster — orchestrator + gateway + SIX single-realm shards, one per
-//! realm of the System-7 sub-forest: System 7, Planet 7, Station 7, Area 7, Galaxy (System 1), System 8. NO
-//! `VD_HELD_REALMS`. A REAL headless `client` binary logs in over localhost QUIC and is driven by dev-control
-//! `WalkTo` along the +X axis (NO client prediction — the server stays sole authority; the loop steers on the
-//! delivered, lagged pose).
+//! THE FLIGHT LAW (the clusters plan §2.3): every leg flies the ±Z POLAR corridor — orbits lie near
+//! the XY plane and the star ring near XZ, so ±Z is clear of both by the I-AXIS/I-POLE/I-RADIAL
+//! margins `world_roster` asserts at derivation. The legs, in order (C, D, A, E, F):
 //!
-//! The seed forest (`vd_core::worldgen`) on the +X axis:
-//!   System 7  : shell r=40 @ x=0    → x∈[-40,40]
-//!   Planet 7  : shell r=10 @ x=20   → x∈[10,30]  (deepest at +X except the Area box)
-//!   Area 7    : box half=3 @ x=25   → x∈[22,28]  (DEEPEST — nested under Planet 7)
-//!   Galaxy    : shell r=180 @ x=0   → the between-space; System 7 far-face 40, System 8 near-face 90
-//!   System 8  : shell r=40 @ x=130  → x∈[90,170]
+//!   C  home → inner planet   the shared rendezvous-and-park (`vd_bins::flight`), full orbit speed
+//!   D  inner planet → home   planet-frame (0,0,−2·pole_altitude) — the polar lift, I-RADIAL-licensed
+//!   A  home → galaxy         (0,0,−220) — out the pole, past the ~152 m release edge
+//!   E  galaxy → sibling      waypoint sibling_centre+(0,0,−300), then a held-throttle CREEP up
+//!                            the pole — the 12.8 km boost leg, ≥140 m below every sibling
+//!                            planet (J2); no coordinate in flight across the commit
+//!   F  sibling → galaxy      (0,0,−300) in the sibling's own frame — back out the pole
 //!
-//! Legs (each asserts ARRIVAL within an epsilon — movement never freezes across the cross-node re-home):
-//!   1. System 7 origin (x≈0) → Planet 7   (x=15)   [re-home System 7 → Planet 7]
-//!   2.                       → Area 7      (x=25)   [re-home Planet 7 → Area 7]
-//!   3.                       → back Planet 7 (x=15) [re-home Area 7 → Planet 7]
-//!   4.                       → System 7    (x=35)   [re-home Planet 7 → System 7, past the planet]
-//!   5.                       → the Galaxy   (x=65)  [re-home System 7 → Galaxy — the between-space gap]
-//!      (best-effort onward to System 8 x=100 within a spare budget — proves the multi-hop chain end-to-end.)
-//!
-//! Then it asserts the subject Entity's directory fence is SMALL (≤ a modest bound) — the thrash guard: a
-//! single clean re-home per crossing commits at a small fence; the co-hosting bug ballooned it to ~20.
+//! EVERY leg asserts the REALM LABEL reached (`FrameRef::label` via the delivered `location`), never
+//! a coordinate: at a crossing the pose reframes and a target stated in the old frame is
+//! meaningless. Then the thrash guard: the subject Entity's directory fence stays SMALL (one clean
+//! CAS commit per crossing), and the observed maximum is PRINTED every run — the bound is UNMEASURED
+//! for this chain until a green history accumulates.
 //!
 //! Gated on `dev-control`. Run with:
-//!   cargo test -p vd-bins --features dev-control --test node_per_realm_walk -- --nocapture
+//!   cargo test -p vd-bins --features dev-control --test node_per_realm_walk -- --test-threads=1 --nocapture
 #![cfg(feature = "dev-control")]
 
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use vd_bins::flight::{creep_into, cross_leg, rendezvous_into_planet};
 use vd_bins::{
-    Cluster, ClusterAddrs, ClusterShape, DEV, admin_get_body, common_env, dev_auth_pubkey_hex,
-    dev_auth_signing_key_hex, dev_roundtrip, galaxy_env, gateway_env, orchestrator_env,
-    realm_shard_env, reserve_tcp_addr, reserve_udp_addr, shard_env,
+    Cluster, ClusterAddrs, ClusterShape, DEV, GALAXY, PLANET_SHARD, admin_get_body, common_env,
+    dev_auth_pubkey_hex, dev_auth_signing_key_hex, dev_roundtrip, gateway_env, orchestrator_env,
+    realm_shard_env, realm_shards, reserve_tcp_addr, reserve_udp_addr, shard_env, world_roster,
 };
 use vd_core::NodeId;
 use vd_core::glam::DVec3;
+use vd_core::pose::frame_for_realm;
 use vd_devproto::{CLIENT_NODE_BASE, DevEntityRow, DevPhase, DevRequest, DevResponse, DevState};
 
-const DEADLINE: Duration = Duration::from_secs(120);
-/// Arrival tolerance per leg: above one sim step (fixed-magnitude Move never oscillates) AND above the
-/// ~100-150 ms delivered-pose lag. Each leg's target sits well inside its realm past the containment
-/// hysteresis band (inset 1 m / outset 2 m), so this epsilon never straddles a boundary.
-const ARRIVE_EPSILON: f64 = 2.0;
-/// The thrash guard: a single CLEAN re-home per crossing commits the subject Entity at a small directory
-/// fence. The whole walk makes ~6 crossings (7→P7→A7→P7→7→Galaxy[→8]); one clean commit each keeps the fence
-/// well under this bound. The co-hosting freeze bug ballooned it past 20. Chosen with headroom (a couple of
-/// legitimate re-drives) yet far below the thrash signature.
+/// The whole gate's budget: bring-up (6 real processes) + login + the rendezvous (the slowest,
+/// least deterministic leg — proven ≤ ~60 s at full orbit speed) + four corridor legs. Was 120 s
+/// for the old inert walk; the real chain flies real distances.
+const DEADLINE: Duration = Duration::from_secs(300);
+/// Per-crossing-leg budget (the label flip, not a coordinate): the corridor legs are seconds of
+/// flight plus the saga tail; generous so a slow commit never times a healthy leg out.
+const LEG_DEADLINE: Duration = Duration::from_secs(60);
+/// The thrash guard: a single CLEAN re-home per crossing commits the subject Entity at a small
+/// directory fence. The chain makes 5 crossings (C,D,A,E,F); one clean commit each keeps the fence
+/// well under this bound (the co-hosting freeze bug ballooned it past 20). UNMEASURED for the new
+/// chain until a green history accumulates — the observed value is PRINTED every run; tighten later.
 const MAX_ENTITY_FENCE: u64 = 12;
 
 fn devctl(port: u16, request: &DevRequest) -> Option<DevResponse> {
@@ -76,13 +77,9 @@ fn own_row(state: &DevState) -> Option<&DevEntityRow> {
     state.entities.iter().find(|r| r.entity == own)
 }
 
-fn own_pos(state: &DevState) -> Option<DVec3> {
-    own_row(state).map(|r| DVec3::from_array(r.pos))
-}
-
-/// The highest directory `fence` on any `ent-…` (Entity) row — the thrash signature. A single clean re-home
-/// per crossing commits the subject Entity at a small fence; the co-hosting bug re-fired the re-home in a limit
-/// cycle, each cycle a full CAS that bumped the fence, so it ballooned. Node-per-realm has no such cycle.
+/// The highest directory `fence` on any `ent-…` (Entity) row — the thrash signature. A single clean
+/// re-home per crossing commits the subject Entity at a small fence; a re-home re-firing in a limit
+/// cycle bumps it per cycle, so it balloons.
 fn max_entity_fence(admin: std::net::SocketAddr) -> u64 {
     let Some(body) = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2))) else {
         return 0;
@@ -102,8 +99,8 @@ fn max_entity_fence(admin: std::net::SocketAddr) -> u64 {
         .unwrap_or(0)
 }
 
-/// The orchestrator `/admin/snapshot` directory rows as human strings — printed on a leg failure so the
-/// process-tier state (which realm heads rest where, at what fence) is captured for debugging the wiring.
+/// The orchestrator `/admin/snapshot` directory rows as human strings — printed on a failure so the
+/// process-tier state (which realm heads rest where, at what fence) is captured for debugging.
 fn admin_directory(admin: std::net::SocketAddr) -> Vec<String> {
     let Some(body) = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2))) else {
         return Vec::new();
@@ -129,81 +126,71 @@ fn admin_directory(admin: std::net::SocketAddr) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Drive ONE leg: `WalkTo` the world x-target (on the +X axis), then read the delivered own pos. Returns the
-/// landed pose. Asserts the dot ARRIVED near the target — movement did NOT freeze across the cross-node
-/// re-home. On failure it dumps the orchestrator directory so a wiring bug (a head that never rested on the
-/// dest node) is visible. `max_ticks` is generous so a slow saga never times out mid-leg (the point is whether
-/// the dot keeps MOVING, not raw speed).
-fn walk_leg(
-    devctl_port: u16,
-    admin: std::net::SocketAddr,
-    leg: &str,
-    target_x: f64,
-    max_ticks: u64,
-) -> DVec3 {
-    let target = DVec3::new(target_x, 0.0, 0.0);
+/// A plain in-frame ROUTE step (no crossing, no label flip expected): WalkTo `target` in the space
+/// the session currently stands in, then settle the sticky Move. Used only for leg E's approach
+/// waypoint — the crossing itself is always a [`cross_leg`] with a label.
+fn fly_waypoint(devctl_port: u16, leg: &str, target: DVec3, max_ticks: u64) {
     let outcome = devctl(
         devctl_port,
         &DevRequest::WalkTo {
             target: target.to_array(),
-            arrive_epsilon: ARRIVE_EPSILON,
+            arrive_epsilon: 2.0,
             max_ticks,
-            max_step_m: 0.0,
+            max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
         },
     )
-    .unwrap_or_else(|| panic!("leg {leg}: no walk response"));
-    // Settle the sticky last Move so the dot rests.
+    .unwrap_or_else(|| panic!("waypoint {leg}: no walk response"));
+    assert!(
+        matches!(outcome, DevResponse::State { .. }),
+        "waypoint {leg}: the route step should arrive within its budget, got {outcome:?}",
+    );
     let _ = devctl(
         devctl_port,
         &DevRequest::Move {
             axes: [0.0, 0.0, 0.0],
         },
     );
-    let landed = own_pos(&poll_state(devctl_port).expect("state after leg")).expect("own pos");
-    eprintln!(
-        "NODE-PER-REALM leg {leg}: outcome={} landed x={:.3} (target x={target_x})",
-        match &outcome {
-            DevResponse::State { .. } => "State(arrived)",
-            DevResponse::Timeout { .. } => "Timeout(budget)",
-            _ => "other",
-        },
-        landed.x,
-    );
-    assert!(
-        (landed.x - target_x).abs() <= ARRIVE_EPSILON,
-        "leg {leg} FROZE: the player stalled at x={:.3} and never reached the target x={target_x} across the \
-         cross-node re-home. A node-per-realm walk must never freeze (no source==dest thrash). DIRECTORY={:#?}",
-        landed.x,
-        admin_directory(admin),
-    );
-    landed
 }
 
 #[test]
-fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fence_thrash() {
+fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thrash() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
-    // ---- topology + trust (mirrors dev_control_nav.rs) -----------------------
+
+    // THE ROSTER + THE LABELS — derived from THE world (`world_roster` asserts I-AXIS/I-POLE/
+    // I-RADIAL/J1 at derivation, so an invalidated corridor fails HERE, before a process spawns).
+    let roster = world_roster(&DEV);
+    let home_label = frame_for_realm(roster.home, None)
+        .expect("the home realm has a frame")
+        .label();
+    let galaxy_label = frame_for_realm(roster.galaxy, None)
+        .expect("the galaxy realm has a frame")
+        .label();
+    let sibling_label = frame_for_realm(roster.sibling, None)
+        .expect("the sibling realm has a frame")
+        .label();
+
+    // ---- topology + trust -----------------------------------------------------------------------
     let admin_addr = reserve_tcp_addr();
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
 
-    let trust_dir = std::env::temp_dir().join(format!("vd-forest-{}", std::process::id()));
-    let trust = vd_io_prod::trust::ClusterTrust::generate("vd-forest").expect("trust");
+    let trust_dir = std::env::temp_dir().join(format!("vd-chain-{}", std::process::id()));
+    let trust = vd_io_prod::trust::ClusterTrust::generate("vd-chain").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     let orch_store =
-        std::env::temp_dir().join(format!("vd-forest-{}-orch.redb", std::process::id()));
+        std::env::temp_dir().join(format!("vd-chain-{}-orch.redb", std::process::id()));
     let _ = std::fs::remove_file(&orch_store);
     let orch_store = orch_store.display().to_string();
 
-    // Each of the SIX realm-shards + the base nodes gets its OWN reserved QUIC + probe addr — one shard per
-    // realm (NO co-hosting), so every re-home is a uniform CROSS-NODE saga.
+    // Each realm-shard + the base nodes gets its OWN reserved QUIC + probe addr — one shard per
+    // realm of the chain (NO co-hosting), so every re-home is a uniform CROSS-NODE saga.
     let addrs = ClusterAddrs {
         admin: admin_addr,
         ..ClusterAddrs::reserve()
     };
-    let shape = ClusterShape::Forest;
+    let shape = ClusterShape::Chain;
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);
     let spawn_node = |bin: &str, node_env: Vec<(&'static str, String)>| -> Child {
@@ -225,7 +212,7 @@ fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fe
             gateway_env(&addrs, &client_book, &dev_auth_pubkey_hex(), &DEV, shape),
         ),
     );
-    // The System-7 SOURCE shard (single-realm — NO VD_HELD_REALMS in Forest).
+    // The HOME login shard (single-realm — no shape carries VD_HELD_REALMS).
     nodes.push(
         "vd-shard",
         spawn_node(
@@ -233,20 +220,23 @@ fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fe
             shard_env(&addrs, &DEV, shape),
         ),
     );
-    // The five extra realm-shards (Planet 7, Station 7, Area 7, Galaxy, System 8) — each hosting EXACTLY its
-    // own realm via `realm_shard_env` (VD_REALM_KIND + VD_REALM_SEED, no co-hosting). `galaxy_env` is unused
-    // in Forest (the Galaxy rides `realm_shard_env` like the rest); reference it so the import stays honest.
-    let _ = galaxy_env;
-    for shard in shape.extra_realm_shards(&addrs, &DEV) {
+    // The three extra realm-shards (galaxy / inner planet / sibling star) — each hosting EXACTLY its
+    // own realm via `realm_shard_env` (VD_REALM_KIND + VD_REALM_SEED), booting THE world's seed
+    // neighbourhood. The label only names the log/kill entry (HR3: one `vd-shard` binary).
+    for shard in realm_shards(shape, &addrs, &DEV) {
+        let label: &'static str = match shard.node {
+            n if n == GALAXY => "vd-galaxy",
+            n if n == PLANET_SHARD => "vd-planet",
+            _ => "vd-shard-b",
+        };
         nodes.push(
-            "vd-shard",
+            label,
             spawn_node(
                 env!("CARGO_BIN_EXE_vd-shard"),
                 realm_shard_env(&addrs, &DEV, shape, shard),
             ),
         );
     }
-    let _nodes = nodes; // RAII: reaps the whole cluster on test end or panic
 
     struct KillOnDrop(Child);
     impl Drop for KillOnDrop {
@@ -264,7 +254,7 @@ fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fe
         cmd.env("VD_AUTH_SIGNING_KEY", dev_auth_signing_key_hex());
         cmd.args([
             "--name",
-            "forest",
+            "chain",
             "--agent-index",
             "0",
             "--gateway",
@@ -280,115 +270,117 @@ fn a_durable_player_walks_the_whole_forest_node_per_realm_without_freezing_or_fe
         KillOnDrop(cmd.spawn().expect("spawn client"))
     };
 
-    // ---- wait until Active AND the own row is delivered ----------------------
+    // ---- bring-up: Active + an own row, POLLING Cluster::first_exited THROUGHOUT ------------------
+    // The old fixture never polled it, which is exactly how four dead shards stayed invisible while
+    // the gate ran green on the two survivors (D-WORLD-7's standing requirement).
     let started = Instant::now();
-    let origin = loop {
-        if let Some(pos) = poll_state(devctl_port)
-            .filter(|s| s.phase == DevPhase::Active)
-            .as_ref()
-            .and_then(own_pos)
+    loop {
+        if let Some((name, status)) = nodes.first_exited() {
+            panic!(
+                "{name} exited during bring-up ({status}) — a Chain shard died; DIRECTORY={:#?}",
+                admin_directory(admin_addr),
+            );
+        }
+        if let Some(state) = poll_state(devctl_port).filter(|s| s.phase == DevPhase::Active)
+            && own_row(&state).is_some()
         {
-            break pos;
+            assert_eq!(
+                state.location.as_deref(),
+                Some(home_label.as_str()),
+                "the login lands in the home system: {state:?}",
+            );
+            break;
         }
         assert!(
             started.elapsed() < DEADLINE,
-            "client never became Active with an own row (the Forest cluster failed to bring up — \
+            "client never became Active with an own row (the Chain cluster failed to bring up — \
              DIRECTORY={:#?})",
             admin_directory(admin_addr),
         );
         std::thread::sleep(Duration::from_millis(100));
-    };
-    eprintln!("NODE-PER-REALM: client Active at origin x={:.3}", origin.x);
-    // The dot spawns at the System-7 origin, well inside System 7 (x≈0) and clear of Planet 7's SOI (x≥10).
-    assert!(
-        origin.x < 10.0 - ARRIVE_EPSILON,
-        "the dot must spawn well inside System 7 (origin x={:.3}) so the first walk crosses INTO Planet 7",
-        origin.x,
+    }
+    let _nodes = nodes; // RAII: reaps the whole cluster on test end or panic
+    eprintln!("NODE-PER-REALM: client Active in {home_label:?}");
+
+    // ---- the chain: five label-asserted crossings, ONE pilot (`vd_bins::flight`) ------------------
+    // C — home → inner planet: the shared rendezvous-and-park at full orbit speed. The slowest,
+    // least deterministic leg (the plan's stated fallback if it flakes: drop C/D from the walk — a
+    // decision, not a quiet descope).
+    rendezvous_into_planet(
+        devctl_port,
+        &DEV,
+        roster.inner,
+        &roster.inner_elements,
+        Duration::from_secs(150),
+    );
+    eprintln!("NODE-PER-REALM leg C: crossed into the inner planet");
+
+    // D — inner planet → home: the polar lift, stated in the PLANET's frame (the space the session
+    // now stands in): 2× the pole altitude clears the planet's release reach (I-RADIAL licenses the
+    // lift; I-POLE keeps the park inside the home shell).
+    let lift = DVec3::new(0.0, 0.0, -2.0 * roster.pole_altitude_m);
+    cross_leg(
+        devctl_port,
+        "D planet->home (polar lift)",
+        |_tick| lift,
+        &home_label,
+        LEG_DEADLINE,
     );
 
-    // ---- the walk: each leg ARRIVES (never freezes across the cross-node re-home) ----
-    // Generous per-leg budgets; the between-realm hops are short (a few metres) except the final Galaxy leg.
-    let mut arrivals: Vec<(&str, f64)> = Vec::new();
-    let p7 = walk_leg(
+    // A — home → galaxy: out the pole past the ~152 m release edge (flight law leg A).
+    cross_leg(
         devctl_port,
-        admin_addr,
-        "1 System7->Planet7 (x=15)",
-        15.0,
-        4000,
+        "A home->galaxy (0,0,-220)",
+        |_tick| DVec3::new(0.0, 0.0, -220.0),
+        &galaxy_label,
+        LEG_DEADLINE,
     );
-    arrivals.push(("Planet7@15", p7.x));
-    let a7 = walk_leg(
-        devctl_port,
-        admin_addr,
-        "2 Planet7->Area7 (x=25)",
-        25.0,
-        4000,
-    );
-    arrivals.push(("Area7@25", a7.x));
-    let p7b = walk_leg(
-        devctl_port,
-        admin_addr,
-        "3 Area7->Planet7 (x=15)",
-        15.0,
-        4000,
-    );
-    arrivals.push(("Planet7@15(back)", p7b.x));
-    let s7 = walk_leg(
-        devctl_port,
-        admin_addr,
-        "4 Planet7->System7 (x=35)",
-        35.0,
-        4000,
-    );
-    arrivals.push(("System7@35", s7.x));
-    // Leg 5: out past System 7's far face (40) into the between-space Galaxy gap (System 8 near-face is 90).
-    // x=65 is pure Galaxy — a System 7 → Galaxy cross-node re-home. A longer walk, so a bigger budget.
-    let gx = walk_leg(
-        devctl_port,
-        admin_addr,
-        "5 System7->Galaxy (x=65)",
-        65.0,
-        8000,
-    );
-    arrivals.push(("Galaxy@65", gx.x));
 
-    // Best-effort onward to System 8 (x=100, inside its r=40 SOI @ x=130). A long haul over process QUIC; NOT
-    // asserted for arrival (the spare-budget leg proves the chain reaches System 8 when it lands, but the
-    // primary gate is legs 1-5 above + the fence thrash guard below). Still driven so the walk exercises the
-    // Galaxy → System 8 cross-node hop when the budget allows.
-    let s8 = {
-        let target = DVec3::new(100.0, 0.0, 0.0);
-        let _ = devctl(
-            devctl_port,
-            &DevRequest::WalkTo {
-                target: target.to_array(),
-                arrive_epsilon: ARRIVE_EPSILON,
-                max_ticks: 8000,
-                max_step_m: 0.0,
-            },
-        );
-        let _ = devctl(
-            devctl_port,
-            &DevRequest::Move {
-                axes: [0.0, 0.0, 0.0],
-            },
-        );
-        own_pos(&poll_state(devctl_port).expect("state after s8 leg")).expect("own pos")
-    };
-    arrivals.push(("System8@100(best-effort)", s8.x));
+    // E — galaxy → sibling: the 12.8 km boost leg. First a ROUTE waypoint 300 m below the sibling's
+    // pole (still outside its 150 m shell — no crossing), staying ≥140 m under every sibling planet
+    // (J2: the ring is XZ, orbits are near-XY); the waypoint budget covers the ~26 s full-speed run.
+    // Then the crossing itself is a held-throttle CREEP up the pole with NO coordinate in flight —
+    // a WalkTo aimed inside the shell straddles the commit and its absolute target re-reads in the
+    // sibling's frame as a point 12 km away, driving the dot straight back out (measured as a
+    // fence-burning sibling↔galaxy ping-pong; see `flight::creep_into`). The arrival criterion IS
+    // the label.
+    let approach = roster.sibling_centre + DVec3::new(0.0, 0.0, -300.0);
+    fly_waypoint(
+        devctl_port,
+        "E.1 galaxy route to the sibling pole",
+        approach,
+        3000,
+    );
+    creep_into(
+        devctl_port,
+        "E.2 galaxy->sibling (pole creep)",
+        vd_bins::flight::creep_axes_plus_z(),
+        &sibling_label,
+        LEG_DEADLINE,
+    );
 
-    eprintln!("NODE-PER-REALM arrivals: {arrivals:?}");
+    // F — sibling → galaxy: back out the pole, stated in the SIBLING's frame (the session's space).
+    cross_leg(
+        devctl_port,
+        "F sibling->galaxy (0,0,-300)",
+        |_tick| DVec3::new(0.0, 0.0, -300.0),
+        &galaxy_label,
+        LEG_DEADLINE,
+    );
 
-    // ---- the THRASH GUARD: the subject Entity's directory fence stays SMALL ----
-    // One clean re-home per crossing commits at a small fence. Node-per-realm has no source==dest limit cycle,
-    // so the fence never balloons. (The co-hosting freeze bug drove it past 20.)
+    // ---- the THRASH GUARD: the subject Entity's directory fence stays SMALL -----------------------
+    // One clean re-home per crossing commits at a small fence; a ballooning fence means a re-home is
+    // re-firing in a limit cycle. PRINTED every run: the bound is UNMEASURED for this chain until a
+    // green history accumulates (do not claim it as proof until a number exists — tighten later).
     let entity_fence = max_entity_fence(admin_addr);
-    eprintln!("NODE-PER-REALM: max entity directory fence = {entity_fence}");
+    eprintln!(
+        "NODE-PER-REALM: observed max entity directory fence = {entity_fence} (bound {MAX_ENTITY_FENCE})"
+    );
     assert!(
         entity_fence <= MAX_ENTITY_FENCE,
-        "FENCE THRASH: the subject Entity's directory fence ballooned to {entity_fence} (a clean node-per-realm \
-         walk commits ONE fence per crossing, staying <= {MAX_ENTITY_FENCE}). A ballooning fence means a re-home \
-         is re-firing in a limit cycle — the cluster wiring is wrong. DIRECTORY={:#?}",
+        "FENCE THRASH: the subject Entity's directory fence ballooned to {entity_fence} (a clean \
+         node-per-realm chain commits ONE fence per crossing, staying <= {MAX_ENTITY_FENCE}). \
+         DIRECTORY={:#?}",
         admin_directory(admin_addr),
     );
 
