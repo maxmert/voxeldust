@@ -73,7 +73,7 @@ impl OutboundBox {
     }
 
     /// [`push_flow`](Self::push_flow) with an explicit [`Durability`](crate::io::Durability) — the producer-
-    /// less one-shots (`TransientBatch`, `GhostFlow::Despawn`, per `FlowDurabilityClass`) pass `Retained` so
+    /// less one-shots (`TransientBatch`, `GhostFlow::Despawn`, `GhostFlow::SpawnV2`, per `FlowDurabilityClass`) pass `Retained` so
     /// the R-6d durable outbox mirrors + replays them across a source crash (D-6 #1).
     pub fn push_flow_durable(
         &mut self,

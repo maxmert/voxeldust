@@ -123,7 +123,13 @@ pub const PROTO_MAJOR: u16 = 1;
 /// since P1.5: no producer ever existed, so no negotiated wire ever carried its old shape. Emitted
 /// only to a peer that negotiated minor >= 14; older peers keep the frozen-figure gap this message
 /// closes (the slice E accepted-loss escalation). The floor does not move.
-pub const PROTO_MINOR: u16 = 14;
+/// **15** (Step 5 slice F): `GhostFlow::Spawn` and `GhostFlow::Delta` are TOMBSTONED — the dest→
+/// source ghost pose feed is DELETED (every write was a foreign-frame pose into a promotable dot:
+/// the §4u corruption at its root) — and `GhostFlow::SpawnV2` is APPENDED: the same take-over proof
+/// with the pose gone. The retained ghost emits only while the hand-off hold is open; a bystander's
+/// leaver VANISHES at hold closure (the minor-14 remove message, retimed). Mesh-only (one cluster
+/// build, ledger-visible); no client-facing message changed, so the floor does not move.
+pub const PROTO_MINOR: u16 = 15;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -273,8 +279,10 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 14,
-            "minor 14 appended the REMOVE MESSAGE (ServerControlMsg::Event carrying \
+            PROTO_MINOR, 15,
+            "minor 15 TOMBSTONED the ghost pose feed (GhostFlow::Spawn + Delta — the foreign-frame \
+             pose writer died with it) and appended GhostFlow::SpawnV2, the pose-free take-over \
+             proof; minor 14 appended the REMOVE MESSAGE (ServerControlMsg::Event carrying \
              EventMsg::EntityRemoved(entity, at) + the ShardToGateway::EntityRemoved mesh leg — \
              the reliable per-entity eviction + the client resurrect guard, D-4(a)); \
              minor 13 TOMBSTONED the entity lane (EntityInterest + EntityCascade, Step 5 slice E — \
@@ -305,7 +313,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.14");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.15");
         // These three USED to negotiate down and be welcomed (minor 7 fully, minor 1 without the
         // minor-2 OwnEntity, minor 0 without that AND UniverseRate). They are now refused: the
         // sender-gates-variants rule only covers appended VARIANTS, and minor 8 appended a FIELD.

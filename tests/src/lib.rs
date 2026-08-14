@@ -90,8 +90,22 @@ pub fn stub_config() -> StubConfig {
         // no `RealmRegions`, so `evaluate_realm_boundaries` early-returns — behaviour-identical).
         boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
         request_ttl_ticks: 0,
-        handoff_hold_ttl_ticks: 0,
+        // ARMED, via THE production derivation (slice F review finding: the fixtures ran 0 while
+        // the shipped boot fence REFUSES an armed world at 0 — the whole demote→take-over fill was
+        // inert in every in-process scenario). Same two inputs the demand spawner and the static
+        // launcher read (`static_handoff_hold_env`), so the fixtures run the shipped posture.
+        handoff_hold_ttl_ticks: armed_handoff_hold_ticks(1.0 / 0.05),
     }
+}
+
+/// The hand-off hold budget, derived exactly as production derives it (`vd-bins`
+/// `static_handoff_hold_env` = the demand spawner's arrival-shield duration) — the fixtures must
+/// run the SHIPPED posture, not a disarmed variant the boot fence would refuse.
+#[must_use]
+pub fn armed_handoff_hold_ticks(tick_hz: f64) -> u32 {
+    let rlm = vd_node::rlm_runtime::resolve_rlm_tuning(true, tick_hz as u32, 0, 0);
+    let saga = vd_sim::saga::SagaTuning::default();
+    u32::try_from(vd_sim::rlm::derive_arrival_shield_ticks(&rlm, &saga)).unwrap_or(u32::MAX)
 }
 
 /// The DEST stub's params: a DISTINCT realm (`System(8)`) + frame + mint seed so it is a

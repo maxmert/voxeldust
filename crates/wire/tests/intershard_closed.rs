@@ -55,12 +55,15 @@ fn every_arm() -> Vec<InterShardFlow> {
         })
     };
     vec![
+        // ★TOMBSTONE (Step 5 slice F, minor 15) — the old pose-carrying take-over proof. Nothing
+        // produces it; the nested discriminant is reserved forever, so its SHAPE stays pinned here.
         InterShardFlow::Ghost(GhostFlow::Spawn {
             entity: eid(EntityKind::Ship),
             pose: pose(),
             source_fence: Fence(1),
             since_tick: TickId(2),
         }),
+        // ★TOMBSTONE (Step 5 slice F, minor 15) — the dest→source ghost pose feed; same reservation.
         InterShardFlow::Ghost(GhostFlow::Delta {
             entity: eid(EntityKind::Ship),
             pose: pose(),
@@ -69,6 +72,11 @@ fn every_arm() -> Vec<InterShardFlow> {
             seq: 1,
         }),
         InterShardFlow::Ghost(GhostFlow::Despawn {
+            entity: eid(EntityKind::Ship),
+            source_fence: Fence(1),
+        }),
+        // The pose-free take-over proof (slice F, minor 15) — Spawn's lawful replacement.
+        InterShardFlow::Ghost(GhostFlow::SpawnV2 {
             entity: eid(EntityKind::Ship),
             source_fence: Fence(1),
         }),
@@ -463,7 +471,10 @@ fn payload_tripwire(p: &TransitionPayload) {
 #[allow(dead_code)]
 fn ghost_tripwire(g: &GhostFlow) {
     match g {
-        GhostFlow::Spawn { .. } | GhostFlow::Delta { .. } | GhostFlow::Despawn { .. } => {}
+        GhostFlow::Spawn { .. }
+        | GhostFlow::Delta { .. }
+        | GhostFlow::Despawn { .. }
+        | GhostFlow::SpawnV2 { .. } => {}
     }
 }
 
@@ -541,6 +552,36 @@ fn every_arm_encodes_its_declared_discriminant_index() {
     assert_eq!(seen.last().copied(), Some(33));
 }
 
+/// The NESTED positional pin for `GhostFlow` — the same reorder/deletion hole the outer
+/// declared-index table closes for `InterShardFlow`: the tombstoned `Spawn`/`Delta` hold nested
+/// slots 0/1 forever, and postcard writes the nested index right after the outer `Ghost` tag, so
+/// the second byte of the real encoding is asserted against the declaration order stated as data.
+#[test]
+fn ghost_flow_encodes_its_declared_nested_discriminant_index() {
+    fn declared_index(g: &GhostFlow) -> u8 {
+        match g {
+            GhostFlow::Spawn { .. } => 0,
+            GhostFlow::Delta { .. } => 1,
+            GhostFlow::Despawn { .. } => 2,
+            GhostFlow::SpawnV2 { .. } => 3,
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for flow in every_arm() {
+        let InterShardFlow::Ghost(g) = &flow else {
+            continue;
+        };
+        let bytes = postcard::to_allocvec(&flow).expect("closed arm encodes");
+        assert_eq!(bytes[0], 0, "Ghost holds outer slot 0");
+        assert_eq!(bytes[1], declared_index(g));
+        seen.insert(bytes[1]);
+    }
+    // The fixture set spans the whole nested index space — a missing fixture cannot pass vacuously.
+    assert_eq!(seen.len(), 4);
+    assert_eq!(seen.first().copied(), Some(0));
+    assert_eq!(seen.last().copied(), Some(3));
+}
+
 #[test]
 fn every_arm_roundtrips_postcard_and_classifies_coherently() {
     for flow in every_arm() {
@@ -575,15 +616,19 @@ fn durability_class_pins_the_producer_less_reliable_set() {
     // R-6d §7 conformance: the wildcard-free `durability_class` match makes the classification TOTAL (a new
     // arm / GhostFlow / TransitionPayload variant fails to compile until classified). This golden pin asserts
     // the PRODUCER-LESS-RELIABLE set — the arms whose `push_flow` site MUST carry `Durability::Retained`, or
-    // the one-shot is silently lost on a source crash — is EXACTLY {Ghost::Despawn, Transfer(TransientBatch)}.
-    // Growing it is a deliberate edit that trips BOTH this pin AND (at R-6d2b) the marker-on-push test — so a
-    // future durable Signal / block-edit forward cannot slip in producer-less without a marker.
+    // the one-shot is silently lost on a source crash — is EXACTLY {Ghost::Despawn, Ghost::SpawnV2,
+    // Transfer(TransientBatch)} (SpawnV2 joined at slice F: the take-over proof is a one-shot at promote
+    // with no re-driver — a promote redelivery re-acks without re-spawning). Growing it is a deliberate
+    // edit that trips BOTH this pin AND the marker-on-push test — so a future durable Signal / block-edit
+    // forward cannot slip in producer-less without a marker.
     let mut producer_less = Vec::new();
     for flow in every_arm() {
         let expect = match &flow {
-            InterShardFlow::Ghost(GhostFlow::Despawn { .. }) => {
+            InterShardFlow::Ghost(GhostFlow::Despawn { .. })
+            | InterShardFlow::Ghost(GhostFlow::SpawnV2 { .. }) => {
                 FlowDurabilityClass::ProducerLessReliable
             }
+            // ★TOMBSTONE (slice F) — the dead pose feed's frozen class.
             InterShardFlow::Ghost(GhostFlow::Delta { .. }) => FlowDurabilityClass::Unreliable,
             // VU AoI S2a: the occupant-position up-flow is a latest-wins datagram (Unreliable), NOT
             // producer-less — so the golden `producer_less.len() == 2` pin below is unchanged.
@@ -628,8 +673,9 @@ fn durability_class_pins_the_producer_less_reliable_set() {
     }
     assert_eq!(
         producer_less.len(),
-        2,
-        "exactly two producer-less-reliable arms today (Ghost::Despawn + TransientBatch): {producer_less:?}"
+        3,
+        "exactly three producer-less-reliable arms today (Ghost::Despawn + Ghost::SpawnV2 + \
+         TransientBatch): {producer_less:?}"
     );
 }
 

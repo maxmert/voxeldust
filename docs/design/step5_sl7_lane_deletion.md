@@ -157,9 +157,35 @@ slice F's eviction prerequisite is DISCHARGED — see the D-4 entry in DEFERRED.
 guard + the surviving own-identity marker). The two-player scenario now carries the whole story:
 the bystander HOLDS the leaver's track at the crossing instant (the non-vacuity pin), and it
 VANISHES through the production lane — never a frozen phantom.
-Remaining: slice F (SpawnV2 cutover, `Delta` death, the permanent foreign-labelled==0 tripwire,
-retime the leaver's removal emit to hold closure, the leaver-blink measurement) — then the Stage C
-audit.
+**SLICE F LANDED, 2026-08-14 (PROTO_MINOR → 15) — STEP 5 IS COMPLETE.** The ghost pose feed is dead:
+- **Wire:** `GhostFlow::Spawn` and `GhostFlow::Delta` are nested TOMBSTONES (slots 0/1 reserved; a
+  new nested-discriminant pin locks GhostFlow's order the way the outer table locks the enum's);
+  `GhostFlow::SpawnV2 {entity, source_fence}` is APPENDED — the same take-over proof (the review
+  also dropped the never-read `since_tick` while the arm was still uncommitted — the one lawful moment)
+  with the pose gone, classified ProducerLessReliable and pushed RETAINED (the golden producer-less
+  pin grew to THREE; the Retained marker test covers its push site).
+- **The §4u corruption is dead at the root:** `refresh_source_ghost` — the LAST writer of a
+  foreign-frame pose into a promotable dot — is deleted, with the whole feed bookkeeping
+  (`SourceGhostMirror`, the fed-ghost emit category, the per-Delta stats). The dest-side pass is a
+  pure band-exit sweep now (Despawn + deregister; nothing ever streams).
+- **The leaver vanishes at hold closure:** `emits()` gates the retained ghost on its OPEN Source
+  hold — the fill covers exactly the demote→take-over window — and the minor-14 remove message
+  RETIMES there: fanned at the SpawnV2 proof (fence-matched) AND at hold TTL expiry (`prune_holds`
+  returns its dropped keys; an expired Source hold with a hosted ghost fans the eviction). The TTL
+  arm is the LOGOUT-MID-CROSSING cure: the proof that never comes still ends in a vanish, never a
+  frozen phantom. Both arms lease-gated with the loud suppression counter. The retained DOT stays
+  (silent) as the return-crossing target until band-exit tears it down.
+- **The permanent tripwire:** the two-player chain scenario asserts `entity_rows_foreign_labelled`
+  does not GROW from a post-boot baseline through a real crossing (growth-based because the FIXTURE
+  logs avatars in before planting its region forests — a boot window production does not have: it
+  plants regions at spawn, before any session).
+- **The §4(c) leaver-blink measurement DISSOLVED with slice E:** a bystander's leaver now vanishes
+  permanently at hold closure (the accepted §7 change — no tracking, no reappearance, hence no
+  blink to measure); the leaver's OWN continuity across the cut stays covered by the ride gates.
+STEP 5's remaining owed items live in the ledgers: D-RLM-18 (the lawful remote-avatar read-sub
+lane, owner-gated), D-4 residual (i) (observer-leaves eviction → VU-6), the dest-side registration
+leak on a logout mid-crossing (bounded: the no-dot skip is counted, and the entry dies with the
+realm). NEXT: the Stage C audit — every machine vs HR1–6/SL1–7.
 
 **THE COVERAGE-DEBT PUSH (same day, HR5):** the first coverage-fast run since Stage A found 423
 uncovered Tier-A regions accumulated across the whole arc. Two systemic causes, both cured

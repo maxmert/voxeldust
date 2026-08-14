@@ -17,6 +17,16 @@ use vd_wire::seams::directory::{DirectoryKey, OwnerRecord};
 
 use crate::fabric::{CrashWhen, FaultFabric};
 
+/// The hand-off hold budget the SHIPPED launchers derive (`static_handoff_hold_env` — the demand
+/// arrival-shield duration at this rig's 20 Hz). The fixtures run the armed posture the boot fence
+/// enforces, never a disarmed variant.
+#[cfg(test)]
+fn armed_hold_ticks() -> u32 {
+    let rlm = vd_node::rlm_runtime::resolve_rlm_tuning(true, 20, 0, 0);
+    let saga = vd_sim::saga::SagaTuning::default();
+    u32::try_from(vd_sim::rlm::derive_arrival_shield_ticks(&rlm, &saga)).unwrap_or(u32::MAX)
+}
+
 /// What one node EXPOSES to the oracles, on request: the orchestrator's directory
 /// view, a shard's held-set + input logs, a client's sent log. Ground truth for
 /// AUTHORITY-UNIQUE / INPUT-CONSERVATION — nodes report, oracles audit.
@@ -1101,7 +1111,9 @@ mod tests {
                 snapshot_datagram_budget: 1100,
                 boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
                 request_ttl_ticks: 0,
-                handoff_hold_ttl_ticks: 0,
+                // ARMED via the production derivation (see vd-tests `armed_handoff_hold_ticks`; the
+                // boot fence refuses an armed world at 0 — fixtures run the shipped posture).
+                handoff_hold_ttl_ticks: armed_hold_ticks(),
             },
         );
         topo.add_node(Box::new(shard));
@@ -1316,7 +1328,9 @@ mod tests {
             self_fence_grace_ticks: 0,
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
             request_ttl_ticks: 0,
-            handoff_hold_ttl_ticks: 0,
+            // ARMED via the production derivation (see vd-tests `armed_handoff_hold_ticks`; the
+            // boot fence refuses an armed world at 0 — fixtures run the shipped posture).
+            handoff_hold_ttl_ticks: armed_hold_ticks(),
         });
         // Primary realm HELD (so the co-hosting block is reached — it is gated on `RealmAuthority`).
         world.insert_resource(RealmAuthority(Some(Fence(1))));
@@ -1361,7 +1375,9 @@ mod tests {
             self_fence_grace_ticks: 0,
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
             request_ttl_ticks: 0,
-            handoff_hold_ttl_ticks: 0,
+            // ARMED via the production derivation (see vd-tests `armed_handoff_hold_ticks`; the
+            // boot fence refuses an armed world at 0 — fixtures run the shipped posture).
+            handoff_hold_ttl_ticks: armed_hold_ticks(),
         });
         bare.insert_resource(RealmAuthority(Some(Fence(1))));
         // NO CoHostedAuthority inserted ⇒ the `if let Some(cohosted)` guard takes its skip path.
@@ -1469,7 +1485,9 @@ mod tests {
                     snapshot_datagram_budget: 1100,
                     boundary: BoundaryTuning::DEFAULT,
                     request_ttl_ticks: 0,
-                    handoff_hold_ttl_ticks: 0,
+                    // ARMED via the production derivation (see vd-tests `armed_handoff_hold_ticks`; the
+                    // boot fence refuses an armed world at 0 — fixtures run the shipped posture).
+                    handoff_hold_ttl_ticks: armed_hold_ticks(),
                 },
             );
             shard

@@ -1395,3 +1395,16 @@ leg. What remains of the §4u corruption family after this: the ghost feed's for
 kept alive on the own-row emit as its tripwire, to be pinned `== 0` forever at slice F. The lawful
 future remote-avatar lane is ledgered (D-RLM-18, owner-gated). Narrative:
 `step5_sl7_lane_deletion.md` (slice E block).
+
+## 4cc. STEP 5 SLICE F LANDED — the corruption's last writer is deleted; Step 5 is complete (2026-08-14)
+
+The ghost pose feed — the lane §4v measured writing DEST-frame poses verbatim into the source's
+promotable retained dot (fact 2: the label-corruption / launder-self-crossing root) — is tombstoned
+on the wire (minor 15) and its writer (`refresh_source_ghost`) deleted. The take-over proof is
+pose-free (`GhostFlow::SpawnV2`, durable one-shot); the retained ghost fills exactly the
+demote→take-over window and the leaver VANISHES from bystanders' screens at hold closure (the
+minor-14 remove message, retimed; hold-TTL expiry is the logout-mid-crossing backstop). The
+permanent tripwire — no growth of foreign-labelled emitted rows across a real crossing — is in the
+two-player chain gate. With slices A–F all landed, Q4/SL7's order ("delete both occupant relay
+lanes") is DISCHARGED IN FULL, and point 3 of the §4z Stage-B cure list closes with it. What
+remains of this arc is the Stage C audit (every machine vs HR1–6/SL1–7).

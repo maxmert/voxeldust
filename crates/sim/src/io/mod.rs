@@ -110,7 +110,7 @@ pub enum Durability {
     #[default]
     Ephemeral,
     /// Write-through to the durable outbox before send, replayed on boot. Producer-less reliable one-shots
-    /// ONLY (`FlowDurabilityClass::ProducerLessReliable`): `TransientBatch` + `GhostFlow::Despawn`.
+    /// ONLY (`FlowDurabilityClass::ProducerLessReliable`): `TransientBatch` + `GhostFlow::Despawn` + `GhostFlow::SpawnV2` (slice F).
     Retained,
 }
 

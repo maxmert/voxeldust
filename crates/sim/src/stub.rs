@@ -590,12 +590,22 @@ fn hold_live(h: &HandoffHold, now: TickId, ttl: u32) -> bool {
     now.0.saturating_sub(h.opened_at.0) < u64::from(ttl)
 }
 
-/// Drop every expired hold, returning how many went. Called UNGATED at the top of the inbound pass so an
-/// expired hold is reclaimed even on a shard that has lost its lease and is doing nothing else.
-fn prune_holds(holds: &mut HandoffHolds, now: TickId, ttl: u32) -> usize {
-    let before = holds.0.len();
-    holds.0.retain(|_, h| hold_live(h, now, ttl));
-    before - holds.0.len()
+/// Drop every expired hold, returning the DROPPED KEYS. Called UNGATED at the top of the inbound
+/// pass so an expired hold is reclaimed even on a shard that has lost its lease and is doing
+/// nothing else. The keys go back to the caller because an expired SOURCE hold is a leaver-vanish
+/// moment (slice F): the retained ghost stops emitting the instant the hold dies, and the
+/// bystanders' clients must be told — the TTL backstop covers the take-over proof that never
+/// arrives (a logout mid-crossing kills the dest dot before it can send one).
+fn prune_holds(holds: &mut HandoffHolds, now: TickId, ttl: u32) -> Vec<(EntityId, HoldRole)> {
+    let mut dropped = Vec::new();
+    holds.0.retain(|key, h| {
+        let live = hold_live(h, now, ttl);
+        if !live {
+            dropped.push(*key);
+        }
+        live
+    });
+    dropped
 }
 
 /// Is this shard STILL PARTY to a hand-off of `entity` — i.e. has it let go of the subject but not yet
@@ -662,15 +672,14 @@ impl PresenceAnnounce {
     }
 }
 
-/// One ghost-neighbor this shard FEEDS (1d.5b.3b): the node hosting a kinematic ghost of an entity
-/// we OWN, plus the monotone egress `seq` stamped on each `GhostFlow::Delta`. Holds NO pose/authority
-/// — the fed pose is read LIVE from the owned `Dot` each tick (FG-2 single-truth).
+/// One ghost-neighbor this shard registered at promote (1d.5b.3b → slice F): the node that RETAINS
+/// a ghost dot of an entity we OWN. Since slice F no pose is ever fed to it — the entry exists only
+/// to drive the band-exit `Despawn` (and it is the P5 cross-boundary collision seam's retained
+/// skeleton). Holds NO pose/authority — distances are read LIVE from the owned `Dot` (FG-2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GhostNeighbor {
     /// The node hosting the ghost (the transfer SOURCE in 1d.5b.3b; any band-neighbor at P-band).
     pub source: NodeId,
-    /// The next `GhostFlow::Delta.seq` to stamp (monotone per neighbor — the lossy-stream cursor).
-    pub seq: u64,
     /// The boundary ANCHOR (1d.5b.3c): the fixed pose POSITION at which the entity crossed into this
     /// realm, captured once at promote. The dest measures the owned entity's distance from here each
     /// tick; when it exits the overlap band the dest Despawns the ghost (band-exit). IMMUTABLE
@@ -693,27 +702,6 @@ pub struct GhostNeighbor {
 /// Torn down on band-exit `Despawn` (1d.5b.3c). One entry per owned, ghosted entity.
 #[derive(Resource, Debug, Default)]
 pub struct GhostColliderRegistration(pub BTreeMap<EntityId, GhostNeighbor>);
-
-/// One fed source-ghost's freshness/dedup state (1d.5b.3b): the feeding owner `from`, the
-/// last-seen `Delta.seq` (lossy latest-wins dedup), and `fed` = has-ever-been-fed-and-not-despawned
-/// (the `is_fed_ghost` emit-eligibility latch — NOT fed-this-tick, since `GhostDelta` is lossy and a
-/// dropped delta must not blink the avatar). Holds NO pose/authority copy — the fed pose is written
-/// INTO the retained ghost `Dot.pose` + `AuthorityCmd::GhostRefresh` (FG-2 single-truth).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GhostFeedState {
-    /// The owner feeding this ghost (validated on `Despawn`).
-    pub from: NodeId,
-    /// The highest `Delta.seq` applied — a `seq <= last_seq` redelivery is a counted stale drop.
-    pub last_seq: u64,
-    /// Has-ever-been-fed-and-not-despawned (the `is_fed_ghost` emit latch).
-    pub fed: bool,
-}
-
-/// SOURCE-side mirror of the ghosts this shard HOSTS for owners elsewhere (1d.5b.3b): per entity,
-/// the feed freshness/dedup state. The retained source `Dot` IS the ghost (1d.4b kept it); this is
-/// pure bookkeeping beside it (no second pose/authority store). One entry per hosted ghost.
-#[derive(Resource, Debug, Default)]
-pub struct SourceGhostMirror(pub BTreeMap<EntityId, GhostFeedState>);
 
 /// One TRANSIENT (debris/projectile) this shard tracks (D-7). Pose-only for D-7a — the ballistic
 /// `(pose0, v0)` blob that lets the dest re-advance closed-form is D-7b (`TransientItem.state`). The
@@ -1593,20 +1581,10 @@ pub struct StubStats {
     /// restart — exactly the player/ship re-home + P7 checkpoint-reload paths that must never place an
     /// entity at a stale celestial position.
     pub re_home_epoch_mismatch: u64,
-    /// SOURCE `GhostFlow::Delta` (1d.5b.3b) APPLIED — the fed pose + `GhostRefresh` written into the
-    /// retained ghost dot. The headline ghost-feed counter.
-    pub ghost_delta_applied: u64,
-    /// SOURCE `GhostFlow::Delta` DROPPED as stale — `seq <= last_seq` (lossy latest-wins dedup) or
-    /// no mirror entry for the entity. Expected under datagram reorder/loss; 0 in lockstep.
-    pub ghost_delta_stale: u64,
-    /// SOURCE `GhostFlow::Delta` whose refresh was REFUSED — a stale `source_fence` against the
-    /// ghost dot (the `GhostRefresh` `is_stale_against` guard), or a FOREIGN-frame fed pose (the
-    /// Step 5 slice-F guard: a fed pose whose frame differs from the dot's own would poison the
-    /// pose a later promote resurrects — §4v fact 2). A counted no-op. 0 in a healthy run.
-    pub ghost_refresh_stale: u64,
-    /// SOURCE `GhostFlow::Despawn` (1d.5b.3c band-exit) received and TORN DOWN — the `SourceGhostMirror`
-    /// entry + the retained ghost `Dot` removed (the ghost lifecycle ENDS; the source stops self-emitting
-    /// + stops being a collider). The headline band-exit teardown counter.
+    /// SOURCE `GhostFlow::Despawn` (1d.5b.3c band-exit) received and TORN DOWN — the retained ghost
+    /// `Dot` removed (the ghost lifecycle ENDS; the return-crossing target is gone). Its clients were
+    /// told to evict at hold closure already (slice F), so nothing visible changes here. The headline
+    /// band-exit teardown counter. (The per-Delta feed counters died with the pose feed, slice F.)
     pub ghost_despawns: u64,
     /// SOURCE `GhostFlow::Despawn` that tore down NOTHING (1d.5b.3c) — no mirror entry AND no retained
     /// ghost dot to remove: an at-least-once REDELIVERY after teardown, or a stale Despawn for an entity
@@ -2005,7 +1983,6 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(PendingCrossings::default());
     world.insert_resource(PendingInputSlots::default());
     world.insert_resource(GhostColliderRegistration::default());
-    world.insert_resource(SourceGhostMirror::default());
     world.insert_resource(OwnedTransients::default());
     // task #135 — the CONTAINMENT trigger state. `RealmRegions` defaults EMPTY, so
     // `evaluate_realm_boundaries` early-returns in prod (inert through C-3; seed boot-population is
@@ -2342,10 +2319,9 @@ fn process_inbound(
     // entity-state crossing awaiting its adopt (1d.1) and the input slot awaiting the realm lease
     // (Stage B2). Both are the adopt-ordering stores, so grouping them is a mechanical arity fix.
     pending: (ResMut<PendingCrossings>, ResMut<PendingInputSlots>),
-    // Bundled into ONE tuple `SystemParam` (bevy caps a system at 16 top-level params; Slice 3e's
-    // `RequestInFlight` addition would make 17). Both are the ghost-path stores, so grouping them is a
-    // mechanical arity fix, not a coupling change — destructured back to the two `&mut` at the call sites.
-    ghost_state: (ResMut<GhostColliderRegistration>, ResMut<SourceGhostMirror>),
+    // The ghost-path store (slice F shrank the pair to one: the source-side feed mirror died with
+    // the pose feed).
+    mut registration: ResMut<GhostColliderRegistration>,
     mut owned_transients: ResMut<OwnedTransients>,
     // Bundled tuple `SystemParam` (bevy's 16-param ceiling): 3f-D threads `CrossingProgress` into the
     // `CrossingAborted` demux (for the L1 dwell re-arm + attempt bump) — both are the crossing-trigger
@@ -2367,13 +2343,15 @@ fn process_inbound(
         mut observed,
         mut observed_shapes,
     ) = vu_aoi;
-    let (mut registration, mut mirror) = ghost_state;
     let (mut in_flight, mut progress, mut holds) = crossing;
     let (mut pending, mut pending_slots) = pending;
+    let (mut authority, mut confirmed, mut cohosted) = realm_auth;
     // UNGATED, and first: an expired hold must be reclaimed even on a shard that has lost its lease and
     // is doing nothing else, or the ledger would outlive the thing it describes. Inert at a zero budget.
-    prune_holds(&mut holds, clock.local_tick, config.handoff_hold_ttl_ticks);
-    let (mut authority, mut confirmed, mut cohosted) = realm_auth;
+    // The EVICTION for an expired Source hold fans AFTER the inbound loop below (review-caught): the
+    // lease it is gated on may arrive in THIS tick's directory replies, and a one-shot suppressed on a
+    // lease that was one message away would strand the phantom it exists to clear.
+    let expired_holds = prune_holds(&mut holds, clock.local_tick, config.handoff_hold_ttl_ticks);
     for msg in &inbox.0 {
         let Inbound::Wire { from, class, bytes } = msg else {
             // Unreachability notices are observed by the node shell (TickReport);
@@ -2428,12 +2406,10 @@ fn process_inbound(
             // second authority store). On the dedicated Ghost carriers, NOT the Saga dispatch.
             MsgClass::GhostReliable | MsgClass::GhostDelta => {
                 on_ghost_flow(
-                    *from,
                     bytes,
                     &clock,
                     authority.0,
                     &mut dots,
-                    &mut mirror,
                     &mut holds,
                     &mut stats,
                     &mut outbox,
@@ -2490,7 +2466,7 @@ fn process_inbound(
                         &regions,
                         &child_liveness,
                         &dots,
-                        &mirror,
+                        &holds,
                         &mut stats,
                         &mut outbox,
                     );
@@ -2501,6 +2477,26 @@ fn process_inbound(
                 // still decode (reserved discriminants) and land in this closed fall-through.
                 _ => stats.undecodable += 1,
             },
+        }
+    }
+    // The expired-hold evictions, fanned with the lease as THIS TICK's inbound left it (see the
+    // prune note above): an expired Source hold with a still-hosted retained ghost is a
+    // leaver-vanish the take-over proof never delivered (a logout mid-crossing) — lease-gated,
+    // loud on suppression, exactly like the proof-driven emit.
+    for (entity, role) in expired_holds {
+        let ghost_hosted = dots
+            .0
+            .values()
+            .any(|d| (d.entity == entity) & is_retained_ghost(d));
+        match (matches!(role, HoldRole::Source) & ghost_hosted, authority.0) {
+            (true, Some(fence)) => {
+                push_entity_removed(&dots, fence, entity, clock.universe_tick, &mut outbox);
+            }
+            (true, None) => {
+                stats.entity_removals_suppressed_no_lease += 1;
+                tracing::warn!(%entity, "entity removal suppressed: no realm lease");
+            }
+            (false, _) => {}
         }
     }
 }
@@ -2909,8 +2905,11 @@ fn push_session_reply(outbox: &mut OutboundBox, to: NodeId, reply: &ShardToGatew
 /// guard against a straggler datagram). The fan is the REMAINING dots' gateways — after the
 /// removal, exactly the bystanders whose clients hold the departed figure's track. A shard whose
 /// last dot just left has nobody left to tell, and the sub teardown that follows is the client's
-/// realm-scene exit anyway. Called ONLY from a permanent-stop site (band-exit ghost despawn; a
-/// detach completing at the directory) — never from a demote, whose retained ghost keeps emitting.
+/// realm-scene exit anyway. Called ONLY from a stop-emitting site: the HOLD-CLOSURE pair (the
+/// SpawnV2 take-over proof; the hold-TTL expiry — slice F's vanish moment, while the retained dot
+/// lives on silently as the return target), the band-exit ghost despawn (idempotent on clients
+/// that already evicted at closure), and a detach completing at the directory. Never from the
+/// demote itself — the retained ghost emits through the whole hold window.
 fn push_entity_removed(
     dots: &Dots,
     realm_fence: Fence,
@@ -3317,10 +3316,16 @@ fn on_crossing_aborted(
     };
     // Clear ONLY on an exact id match (`== Some(&abort.transfer)`) — equality over the value so the
     // false arm is a covered no-op, not an uncoverable `matches!` region (HR5(d)).
-    // The hand-off is OVER and nobody took over — there is no take-over fence to prove, so this closes
-    // unconditionally. Left open, the hold would keep this shard speaking for a subject that never left.
-    close_hold(holds, (entity, HoldRole::Source));
     if in_flight.0.get(&entity) == Some(&abort.transfer) {
+        // The hand-off is OVER and nobody took over — no take-over fence to prove, so the hold (if
+        // any) closes with the latch. INSIDE the id match (slice F review): an abort is pre-CAS, so
+        // a hold from THIS transfer cannot exist (holds open at the post-CAS demote) — the only
+        // hold an abort could ever find is a NEWER committed crossing's, and a STALE abort closing
+        // it would mute that crossing's retained-ghost fill with no eviction fanned (a frozen
+        // bystander figure until band exit). Closing under the match keeps the stated intent
+        // ("never keep speaking for a subject that never left") while a superseded abort touches
+        // nothing.
+        close_hold(holds, (entity, HoldRole::Source));
         in_flight.0.remove(&entity);
         // Re-arm (audit-L1 + H2): reset the cooldown so the re-home can re-fire, and BUMP the attempt so the
         // re-latch mints a fresh id. `entry().or_default()` (not `if let`) so
@@ -3354,7 +3359,6 @@ fn on_saga_promote(
     cmd: PromoteCmd,
     config: &StubConfig,
     self_node: NodeId,
-    clock: &ClockSample,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
     registration: &mut GhostColliderRegistration,
@@ -3376,7 +3380,6 @@ fn on_saga_promote(
         cmd,
         config,
         self_node,
-        clock,
         dots,
         applied,
         registration,
@@ -3426,7 +3429,6 @@ fn promote_apply(
     cmd: PromoteCmd,
     config: &StubConfig,
     self_node: NodeId,
-    clock: &ClockSample,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
     registration: &mut GhostColliderRegistration,
@@ -3513,7 +3515,6 @@ fn promote_apply(
         self_node,
         pose,
         cmd.new_fence,
-        clock.local_tick,
         registration,
         outbox,
     );
@@ -3542,7 +3543,6 @@ fn register_and_spawn_source_ghost(
     self_node: NodeId,
     pose: StampedPose,
     source_fence: Fence,
-    since_tick: TickId,
     registration: &mut GhostColliderRegistration,
     outbox: &mut OutboundBox,
 ) {
@@ -3555,19 +3555,20 @@ fn register_and_spawn_source_ghost(
         entity,
         GhostNeighbor {
             source,
-            seq: 0,
             anchor: pose.pos,
         },
     );
-    outbox.push_flow(
+    // The pose-free proof (slice F), RETAINED: a promote redelivery re-acks without re-spawning,
+    // so nothing re-sends this — a crash between the emit and the send would otherwise leave the
+    // source's hold to its TTL and delay every bystander's leaver-vanish.
+    outbox.push_flow_durable(
         source,
         MsgClass::GhostReliable,
-        &InterShardFlow::Ghost(GhostFlow::Spawn {
+        &InterShardFlow::Ghost(GhostFlow::SpawnV2 {
             entity,
-            pose,
             source_fence,
-            since_tick,
         }),
+        Durability::Retained,
     );
 }
 
@@ -3730,60 +3731,25 @@ fn re_home_apply(
         self_node,
         pose,
         cmd.new_fence,
-        clock.local_tick,
         registration,
         outbox,
     );
     true
 }
 
-/// Refresh a hosted ghost dot from a fed pose (1d.5b.3b): write the (sanitized) pose INTO `dot.pose`
-/// and advance the kinematic mirror via `AuthorityCmd::GhostRefresh` (fence-monotone; a stale
-/// `source_fence` is refused). FG-2: the dot IS the single authority/pose truth — this is the only
-/// writer of a hosted ghost's pose, never a second store. Returns `true` on apply, `false` on a
-/// refused (stale-fence / non-Ghost / foreign-frame) refresh — ALL the branching lives in THIS
-/// monomorphic helper.
-///
-/// THE FOREIGN-FRAME GUARD (Step 5 slice F's core, landed early — rehome_one_mechanism §4v fact 2,
-/// owner-approved 2026-08-12): the feed ships the NEW owner's pose in the NEW owner's frame, and
-/// writing it verbatim into a dot that `promote_apply` can later flip Ghost→Owned poisons the
-/// promoted pose with a frame this shard may not even be able to place — measured live as the
-/// Planet→Planet launder self-crossing whose parent-frame pose the destination rightly refuses
-/// forever (the cycle-1 freeze). A fed pose whose frame differs from the dot's own is REFUSED: the
-/// retained ghost keeps its demote-instant own-frame pose (the render fill stays lawful), and the
-/// promoted pose is always the one `apply_crossing` converted through `place_arriving_pose`. The
-/// whole feed lane dies with Step 5 slice F; this guard is the poison stopped today.
-fn refresh_source_ghost(dot: &mut Dot, pose: StampedPose, source_fence: Fence) -> bool {
-    if pose.frame != dot.pose.frame {
-        return false;
-    }
-    match dot
-        .authority
-        .apply(AuthorityCmd::GhostRefresh { source_fence })
-    {
-        Ok(refreshed) => {
-            dot.authority = refreshed;
-            dot.pose = pose.sanitized();
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-/// SOURCE-side ghost feed consumer (1d.5b.3b): the dest (new owner) drives `GhostFlow` to this shard
-/// (the ghost-host) — `Spawn` establishes the feed, `Delta` is the 20Hz latest-wins pose stream,
-/// `Despawn` ends it (1d.5b.3c band-exit). Each refreshes the RETAINED ghost dot's pose + fence
-/// (`refresh_source_ghost`) so it stays a live kinematic collider AND keeps emitting on the source
-/// sub across the handoff (the seamless fill). `Delta` is deduped by `seq` (lossy datagram). A
-/// malformed body is counted + dropped, never mis-applied. Monomorphic.
+/// SOURCE-side ghost lifecycle consumer (1d.5b.3b → slice F): the dest (new owner) drives
+/// `GhostFlow` to this shard (the ghost-host) — `SpawnV2` is the pose-free take-over proof (closes
+/// the hold, stops the retained ghost's emit, evicts the bystanders' figures) and `Despawn` ends
+/// the lifecycle (1d.5b.3c band-exit tears the retained DOT out). NOTHING here ever writes a pose:
+/// `refresh_source_ghost` — the §4u corruption's LAST writer, the fn that painted a foreign-frame
+/// pose into a promotable dot — died with the feed (the tombstoned `Spawn`/`Delta` arms are counted
+/// no-ops). A malformed body is counted + dropped, never mis-applied. Monomorphic.
 #[allow(clippy::too_many_arguments)]
 fn on_ghost_flow(
-    from: NodeId,
     bytes: &[u8],
     clock: &ClockSample,
     realm_fence: Option<Fence>,
     dots: &mut Dots,
-    mirror: &mut SourceGhostMirror,
     holds: &mut HandoffHolds,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
@@ -3797,70 +3763,51 @@ fn on_ghost_flow(
         }
     };
     match flow {
-        GhostFlow::Spawn {
-            entity,
-            pose,
-            source_fence,
-            ..
-        } => {
-            // THE TAKE-OVER PROOF. The destination is now feeding this entity back to us as a ghost, at
-            // the fence it took over on — so our part in the hand-off is positively done. A FENCE COMPARE,
-            // not a flag: a replayed spawn from a SUPERSEDED crossing cannot close a newer hold.
-            close_hold_at_fence(holds, (entity, HoldRole::Source), source_fence);
-            // Establish the feed (reliable): the mirror's `fed` latch + the dedup cursor. Refresh the
-            // retained ghost dot's pose from the spawn snapshot (it may already be live from the
-            // self-emit fill; this overwrites with the owner's authoritative pose).
-            mirror.0.insert(
-                entity,
-                GhostFeedState {
-                    from,
-                    last_seq: 0,
-                    fed: true,
-                },
-            );
-            if let Some(dot) = dots.0.values_mut().find(|d| d.entity == entity) {
-                let _ = refresh_source_ghost(dot, pose, source_fence);
-            }
+        // ★TOMBSTONED arms (slice F): the old pose-carrying proof and the 20 Hz pose feed. Their
+        // frames still decode (reserved discriminants) and land here as counted no-ops — the pose
+        // they carry is exactly the foreign-frame write this slice deleted, so nothing may apply it.
+        GhostFlow::Spawn { .. } | GhostFlow::Delta { .. } => {
+            stats.undecodable += 1;
         }
-        GhostFlow::Delta {
+        // THE TAKE-OVER PROOF, pose-free (slice F). The destination owns the entity at
+        // `source_fence`, so our part in the hand-off is positively done. A FENCE COMPARE, not a
+        // flag: a replayed proof from a SUPERSEDED crossing cannot close a newer hold. Closing the
+        // hold is what stops the retained ghost EMITTING (`emits` consults the hold), so this is
+        // ALSO the moment every bystander's drawn copy of the leaver must be evicted — the remove
+        // message, retimed here from the band-exit despawn (the leaver VANISHES at hold closure).
+        // The retained DOT stays: it is the return-crossing target until band-exit tears it down.
+        GhostFlow::SpawnV2 {
             entity,
-            pose,
             source_fence,
-            seq,
             ..
         } => {
-            // Latest-wins dedup: no mirror entry, or a `seq <= last_seq` redelivery, is a stale drop.
-            let Some(state) = mirror.0.get_mut(&entity) else {
-                stats.ghost_delta_stale += 1;
-                return;
-            };
-            if seq <= state.last_seq {
-                stats.ghost_delta_stale += 1;
-                return;
-            }
-            state.last_seq = seq;
-            let applied = dots
+            let closed = close_hold_at_fence(holds, (entity, HoldRole::Source), source_fence);
+            let emitting_ghost = dots
                 .0
-                .values_mut()
-                .find(|d| d.entity == entity)
-                .is_some_and(|dot| refresh_source_ghost(dot, pose, source_fence));
-            if applied {
-                stats.ghost_delta_applied += 1;
-            } else {
-                // A fresh-seq Delta whose `source_fence` was stale against the ghost (or no hosted
-                // dot) — the `GhostRefresh` guard refused it; counted, pose unchanged.
-                stats.ghost_refresh_stale += 1;
+                .values()
+                .any(|d| (d.entity == entity) & is_retained_ghost(d));
+            match (closed & emitting_ghost, realm_fence) {
+                (true, Some(fence)) => {
+                    push_entity_removed(dots, fence, entity, clock.universe_tick, outbox);
+                }
+                // The stop happened but this shard holds no lease: withheld (an unowned shard is
+                // silent), counted — never silently (see the stat's doc).
+                (true, None) => {
+                    stats.entity_removals_suppressed_no_lease += 1;
+                    tracing::warn!(%entity, "entity removal suppressed: no realm lease");
+                }
+                (false, _) => {}
             }
         }
         GhostFlow::Despawn { entity, .. } => {
-            // Band-exit TEARDOWN (1d.5b.3c): the ghost lifecycle ENDS — remove the mirror bookkeeping
-            // AND the retained ghost DOT (the source stops self-emitting + stops being a collider).
-            // IDEMPOTENT: a reliable redelivery, or a stale Despawn for an entity the source has since
-            // RE-OWNED (the `Owned` dot is structurally refused by `remove_retained_ghost`), tears down
-            // nothing — a counted no-op (`ghost_despawn_no_host`), never a panic.
-            let had_mirror = mirror.0.remove(&entity).is_some();
+            // Band-exit TEARDOWN (1d.5b.3c → slice F): the ghost lifecycle ENDS — remove the
+            // retained ghost DOT (it stopped EMITTING at hold closure; this removes the
+            // return-crossing target too). IDEMPOTENT: a reliable redelivery, or a stale Despawn
+            // for an entity the source has since RE-OWNED (the `Owned` dot is structurally refused
+            // by `remove_retained_ghost`), tears down nothing — a counted no-op
+            // (`ghost_despawn_no_host`), never a panic.
             let removed_dot = remove_retained_ghost(dots, entity);
-            if had_mirror | removed_dot {
+            if removed_dot {
                 stats.ghost_despawns += 1;
             } else {
                 stats.ghost_despawn_no_host += 1;
@@ -6135,7 +6082,6 @@ fn on_directory_reply(
                 cmd,
                 config,
                 identity.node_id,
-                clock,
                 dots,
                 applied,
                 registration,
@@ -6320,17 +6266,14 @@ fn on_directory_reply(
     }
 }
 
-/// DEST-side ghost collider FEED (1d.5b.3b): for each registered ghost-neighbor, stream a
-/// `GhostFlow::Delta` of the OWNED entity's live pose to the ghost-host (the transfer source). The
-/// owner DRIVES the feed (owner → ghost-host). Runs AFTER `process_inbound` (this tick's promote
-/// registered the neighbor + the dot is Owned) and BEFORE `emit_frames` (the source consumes the
-/// delta it received this tick before emitting). A registration whose entity is not currently Owned
-/// here (no dot / a non-`simulates()` dot) is a counted no-op. SCALE: single-neighbor today; a
-/// band-driven multi-neighbor owner fans Delta to every neighbor — the `seq` is per-neighbor in the
-/// body, so multi-neighbor breaks encode-once (a band-ghost-era optimization, DEFERRED).
+/// DEST-side ghost band-exit SWEEP (1d.5b.3b → slice F): for each registered ghost-neighbor, watch
+/// the OWNED entity's distance from its crossing anchor and DESPAWN the neighbour's retained ghost
+/// when it exits the overlap band. NO pose ever streams (slice F deleted `GhostFlow::Delta` — every
+/// fed pose was a foreign-frame write into a promotable dot, the §4u corruption); the registration
+/// is also the P5 cross-boundary collision seam's retained skeleton. A registration whose entity is
+/// not currently Owned here (no dot / a non-`simulates()` dot) is a counted no-op.
 fn feed_source_ghosts(
     config: Res<StubConfig>,
-    clock: Res<ClockSample>,
     dots: Res<Dots>,
     mut registration: ResMut<GhostColliderRegistration>,
     mut stats: ResMut<StubStats>,
@@ -6338,11 +6281,11 @@ fn feed_source_ghosts(
 ) {
     // The overlap band, seed-derived from the shard's per-tick travel (no inline literal — the
     // factors live in `core::geometry`). Velocity-safe by construction; its destroy edge is many
-    // per-tick steps out, so a ghost SPAWNED in-band at the crossing exits only after the entity has
-    // walked well past the demote→promote→release handoff (band-exit is strictly POST-release).
+    // per-tick steps out, so a ghost registered in-band at the crossing exits only after the entity
+    // has walked well past the demote→promote→release handoff (band-exit is strictly POST-release).
     let band = OverlapBand::for_motion(config.move_speed_mps * config.tick_dt_s);
     let mut exited: Vec<EntityId> = Vec::new();
-    for (entity, neighbor) in registration.0.iter_mut() {
+    for (entity, neighbor) in registration.0.iter() {
         let Some(dot) = dots.0.values().find(|d| d.entity == *entity) else {
             stats.ghost_feed_skipped += 1;
             continue;
@@ -6353,9 +6296,9 @@ fn feed_source_ghosts(
         }
         if ghost_band_exited(&band, neighbor.anchor, &dot.pose) {
             // BAND-EXIT (1d.5b.3c): the owned entity left the overlap band — DESPAWN the ghost on the
-            // RELIABLE carrier (a lost Despawn would leak the collider) + DEREGISTER the feed. The
-            // source tears the ghost down on receipt (`on_ghost_flow`). No vanish: the dest is the
-            // sole render source by now (the destroy edge is sized past the handoff window).
+            // RELIABLE carrier (a lost Despawn would leak the collider) + DEREGISTER. The source
+            // tears the ghost DOT down on receipt (`on_ghost_flow`); its clients were already told
+            // to evict at hold closure (the SpawnV2 proof), so nothing visible changes there.
             outbox.push_flow_durable(
                 neighbor.source,
                 MsgClass::GhostReliable,
@@ -6367,22 +6310,9 @@ fn feed_source_ghosts(
             );
             exited.push(*entity);
             stats.ghost_band_exits += 1;
-        } else {
-            outbox.push_flow(
-                neighbor.source,
-                MsgClass::GhostDelta,
-                &InterShardFlow::Ghost(GhostFlow::Delta {
-                    entity: *entity,
-                    pose: dot.pose,
-                    source_fence: dot.authority.fence(),
-                    source_tick: clock.local_tick,
-                    seq: neighbor.seq,
-                }),
-            );
-            neighbor.seq += 1;
         }
     }
-    // Deregister the exited ghosts (the feed stops; the source teardown is driven by the Despawn).
+    // Deregister the exited ghosts (the sweep stops; the source teardown is driven by the Despawn).
     for entity in exited {
         registration.0.remove(&entity);
     }
@@ -6398,18 +6328,9 @@ fn ghost_band_exited(band: &OverlapBand, anchor: LatticePos, pose: &StampedPose)
     !band.update_membership(true, pose.pos.delta_m(anchor, pose.frame.tier()).length())
 }
 
-/// Whether a hosted ghost has a LIVE feed (1d.5b.3b): has-ever-been-fed-and-not-despawned (the
-/// mirror's `fed` latch). NOT fed-this-tick — `GhostDelta` is lossy, so a dropped delta must NOT
-/// blink the avatar (it holds its last fed pose). Monomorphic (the Some/None split is here).
-#[must_use]
-fn is_fed_ghost(mirror: &SourceGhostMirror, d: &Dot) -> bool {
-    mirror.0.get(&d.entity).is_some_and(|s| s.fed)
-}
-
 /// Whether a dot is a RETAINED source ghost (1d.5b.3b): a granted, non-departing `Ghost` whose
-/// `source_fence` is POST-GENESIS — it holds its last-Owned pose, so it SELF-EMITS that pose on its
-/// sub from the demote instant, filling the demote→Promote window the dest feed cannot reach
-/// (nothing is Owned then to produce the pose). The `source_fence != GENESIS` term EXCLUDES the
+/// `source_fence` is POST-GENESIS — it holds its OWN-frame demote pose (slice F: nothing ever
+/// refreshes it; the pose feed is dead). The `source_fence != GENESIS` term EXCLUDES the
 /// pre-promote DEST-adopt Ghost (which holds `GENESIS` and has no real pose — it must stay silent
 /// until `on_saga_promote` flips it Owned); `granted & !departing` excludes a pre-grant provisional
 /// Ghost. Monomorphic (the state destructure + guard live here, not in the filter closure).
@@ -6422,13 +6343,17 @@ fn is_retained_ghost(d: &Dot) -> bool {
     retained_source & d.granted & !d.departing
 }
 
-/// EMIT-eligibility (1d.5b.3b): a dot's pose is emitted if it SIMULATES (Owned — the authority
-/// truth) OR is a fed ghost OR is a retained source ghost — the DERIVED union via BITWISE `|` (never
-/// `||`, so each operand's false arm stays coverable; HR5). Authority/input/oracle truth remains
-/// `simulates()` ALONE — a ghost emits its kinematic mirror but integrates/accepts NOTHING (FG-2).
+/// EMIT-eligibility (1d.5b.3b → slice F): a dot's pose is emitted if it SIMULATES (Owned — the
+/// authority truth) OR is a retained source ghost WHOSE HAND-OFF HOLD IS STILL OPEN — the fill
+/// covers exactly the demote→take-over window, and the leaver VANISHES from bystanders' screens at
+/// hold closure (the SpawnV2 proof + the remove message), never freezing at the boundary. The
+/// DERIVED union rides BITWISE `&`/`|` (never `&&`/`||`, so each operand's false arm stays
+/// coverable; HR5). Authority/input/oracle truth remains `simulates()` ALONE — a ghost emits its
+/// kinematic mirror but integrates/accepts NOTHING (FG-2).
 #[must_use]
-fn emits(mirror: &SourceGhostMirror, d: &Dot) -> bool {
-    d.authority.simulates() | is_fed_ghost(mirror, d) | is_retained_ghost(d)
+fn emits(holds: &HandoffHolds, d: &Dot) -> bool {
+    d.authority.simulates()
+        | (is_retained_ghost(d) & holds.0.contains_key(&(d.entity, HoldRole::Source)))
 }
 
 /// Build the wire entity list from the EMITTING dots (`emits`), every row RESTATED into the one space this
@@ -6454,14 +6379,14 @@ fn emits(mirror: &SourceGhostMirror, d: &Dot) -> bool {
 #[must_use]
 fn emitted_entities(
     dots: &Dots,
-    mirror: &SourceGhostMirror,
+    holds: &HandoffHolds,
     own_frame: FrameRef,
     frames: &LocalFrames,
     stats: &mut StubStats,
 ) -> Vec<EntitySnap> {
     dots.0
         .values()
-        .filter(|d| emits(mirror, d))
+        .filter(|d| emits(holds, d))
         .map(|d| EntitySnap {
             entity: d.entity,
             pose: restate_for_own_clients(d.pose, own_frame, frames, stats),
@@ -6510,7 +6435,9 @@ fn emit_frames(
     authority: Res<RealmAuthority>,
     regions: Res<RealmRegions>,
     dots: Res<Dots>,
-    mirror: Res<SourceGhostMirror>,
+    // Slice F: the emit gate consults the hand-off HOLD (a retained ghost fills exactly the
+    // demote→take-over window; the leaver vanishes at hold closure).
+    holds: Res<HandoffHolds>,
     mut counter: ResMut<FrameCounter>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
@@ -6526,7 +6453,7 @@ fn emit_frames(
     let mut gateways: Vec<NodeId> = dots
         .0
         .values()
-        .filter(|d| emits(&mirror, d))
+        .filter(|d| emits(&holds, d))
         .map(|d| d.gateway)
         .collect();
     gateways.sort_unstable();
@@ -6540,7 +6467,7 @@ fn emit_frames(
     // foreign write, the §4u corruption slice F deletes) rather than hidden.
     let own_frame = regions.own_frame(config.realm);
     let frames = regions.frame_context(config.realm, 1.0 / config.tick_dt_s, clock.universe_tick);
-    let entities = emitted_entities(&dots, &mirror, own_frame, &frames, &mut stats);
+    let entities = emitted_entities(&dots, &holds, own_frame, &frames, &mut stats);
     // Partition BY CONTENT so no datagram exceeds the MTU budget (audit GW-1): a
     // full-world snapshot ships as several independent self-contained frames. Per
     // connection_plane.md §6.3 EVERY chunk of one tick carries the SAME frame_id +
@@ -6829,7 +6756,8 @@ fn emit_realm_frames(
     authority: Res<RealmAuthority>,
     regions: Res<RealmRegions>,
     dots: Res<Dots>,
-    mirror: Res<SourceGhostMirror>,
+    // Slice F: the ghost-emit gate input (see `emits`).
+    holds: Res<HandoffHolds>,
     // Step 5 slice B: the direct children's SL7 occupancy bits. Each fresh entry holds the HOME shard
     // `NodeId` of a live child — the cascade target (pruned on the shared TTL by `aoi_decide`).
     child_liveness: Res<ChildLiveness>,
@@ -6863,7 +6791,7 @@ fn emit_realm_frames(
         let mut interior_gateways: Vec<NodeId> = dots
             .0
             .values()
-            .filter(|d| emits(&mirror, d))
+            .filter(|d| emits(&holds, d))
             .map(|d| d.gateway)
             .collect();
         interior_gateways.sort_unstable();
@@ -7034,7 +6962,7 @@ fn emit_realm_frames(
     let mut observers: Vec<(FrameRef, NodeId)> = dots
         .0
         .values()
-        .filter(|d| emits(&mirror, d))
+        .filter(|d| emits(&holds, d))
         .map(|d| {
             let delivered_in = if d.pose.frame == own_frame || child_at.contains_key(&d.pose.frame)
             {
@@ -7176,7 +7104,7 @@ fn on_realm_cascade(
     regions: &RealmRegions,
     live: &ChildLiveness,
     dots: &Dots,
-    mirror: &SourceGhostMirror,
+    holds: &HandoffHolds,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
@@ -7193,7 +7121,7 @@ fn on_realm_cascade(
     let mut gateways: Vec<NodeId> = dots
         .0
         .values()
-        .filter(|d| emits(mirror, d))
+        .filter(|d| emits(holds, d))
         .map(|d| d.gateway)
         .collect();
     gateways.sort_unstable();
@@ -10134,6 +10062,14 @@ mod tests {
         wire_msg(GATEWAY, MsgClass::Input, &msg)
     }
 
+    /// The EntityIds this tick's snapshot frames carried to the gateway — the emit-set probe.
+    fn entity_rows_to_gateway(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<EntityId> {
+        decode_frames(sent)
+            .iter()
+            .flat_map(|s| s.entities.iter().map(|e| e.entity))
+            .collect()
+    }
+
     fn decode_frames(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<SnapshotDatagram> {
         sent.iter()
             .filter(|(_, class, _)| *class == MsgClass::Snapshot)
@@ -11860,19 +11796,16 @@ mod tests {
             "the source ghost-neighbor is registered"
         );
         assert!(
-            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Spawn {
+            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::SpawnV2 {
                 entity: SUBJECT,
-                pose: crossing_pose().sanitized(),
                 source_fence: Fence(2),
-                since_tick: vd_core::TickId(5),
             })),
-            "the source ghost is Spawned at the crossed pose + the new fence: {sent:?}"
+            "the take-over proof is sent — pose-free (slice F): {sent:?}"
         );
 
-        // Redelivery: re-ack only, NO re-flip / re-register / re-Spawn — the journal returns
-        // AlreadyApplied, so `promote_apply` (which holds the flip + register + Spawn) is NOT entered.
-        // `promotes_confirmed` staying 1 proves it. (The ongoing feed `Delta` to `source` continues
-        // every tick — that is the running collider feed, not a re-Spawn.)
+        // Redelivery: re-ack only, NO re-flip / re-register / re-proof — the journal returns
+        // AlreadyApplied, so `promote_apply` (which holds the flip + register + proof) is NOT
+        // entered. `promotes_confirmed` staying 1 proves it.
         let sent = rig.tick(vec![promote_msg(Fence(2), source)]);
         assert_eq!(rig.world.resource::<StubStats>().promotes_redelivered, 1);
         assert_eq!(
@@ -11987,13 +11920,11 @@ mod tests {
             "the source ghost-neighbor is registered"
         );
         assert!(
-            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Spawn {
+            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::SpawnV2 {
                 entity: SUBJECT,
-                pose: crossing_pose().sanitized(),
                 source_fence: Fence(2),
-                since_tick: vd_core::TickId(5),
             })),
-            "the source ghost is Spawned at the re-homed pose + the new fence: {sent:?}"
+            "the take-over proof is sent — pose-free (slice F): {sent:?}"
         );
 
         // Redelivery: re-ack only, NO re-adopt (journal AlreadyApplied ⇒ re_home_apply not entered).
@@ -12100,39 +12031,27 @@ mod tests {
         assert_eq!(rig2.world.resource::<StubStats>().re_home_adopted, 0);
     }
 
+    /// Slice F: the dest-side pass STREAMS NOTHING — no pose ever crosses back to the source (the
+    /// Delta feed is dead; the registration only drives the band-exit Despawn). A registration with
+    /// no Owned dot is still a counted skip.
     #[test]
-    fn the_dest_feed_pass_streams_monotone_deltas_and_skips_unowned_registrations() {
-        // 1d.5b.3b: feed_source_ghosts streams GhostFlow::Delta to each registered neighbor whose
-        // entity is OWNED here, with a MONOTONE seq; a registration with no Owned dot is skipped.
+    fn the_dest_sweep_streams_no_poses_and_skips_unowned_registrations() {
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
         let _ = rig.tick(vec![adopted_head(Fence(2))]);
         let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]);
         let source = NodeId(99);
-        let _ = rig.tick(vec![promote_msg(Fence(2), source)]); // Owned + registered; first feed (seq 0)
-
-        // The next tick feeds the SECOND delta (seq 1) of the Owned dot's live pose to the source.
-        // The pose's stamp is the CURRENT shard tick (Stage B4: `readvance_dots` re-stamps every
-        // simulating dot per tick), position untouched.
-        let now = rig.world.resource::<ClockSample>().universe_tick;
+        let _ = rig.tick(vec![promote_msg(Fence(2), source)]); // Owned + registered
+        // The next ticks send the source NOTHING while the entity stays in-band: no Delta exists
+        // to send, and Despawn waits for band-exit.
         rig.set_local_tick(6);
         let sent = rig.tick(vec![]);
         assert!(
-            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Delta {
-                entity: SUBJECT,
-                pose: StampedPose {
-                    universe_tick: now,
-                    ..crossing_pose().sanitized()
-                },
-                source_fence: Fence(2),
-                source_tick: vd_core::TickId(6),
-                seq: 1,
-            })),
-            "the feed streams the next monotone-seq Delta of the Owned pose: {sent:?}"
+            flows_to(&sent, source).is_empty(),
+            "the sweep streams no poses to the ghost host: {sent:?}"
         );
-
-        // A registration whose entity is NOT owned here (no dot) is a counted no-op (no feed).
+        // A registration whose entity is NOT owned here (no dot) is a counted no-op.
         rig.world
             .resource_mut::<GhostColliderRegistration>()
             .0
@@ -12140,7 +12059,6 @@ mod tests {
                 EntityId(0xABCD),
                 GhostNeighbor {
                     source,
-                    seq: 0,
                     anchor: LatticePos::local(DVec3::ZERO),
                 },
             );
@@ -12166,7 +12084,6 @@ mod tests {
                 entity,
                 GhostNeighbor {
                     source: NodeId(88),
-                    seq: 0,
                     anchor: LatticePos::local(DVec3::ZERO),
                 },
             );
@@ -12178,139 +12095,137 @@ mod tests {
         assert!(rig.world.resource::<StubStats>().ghost_feed_skipped >= 1);
     }
 
+    /// Slice F, THE CORE: the pose feed is dead and the take-over proof is pose-free. A tombstoned
+    /// `Spawn`/`Delta` frame is a counted no-op whose pose NEVER lands (the §4u poison is
+    /// structurally impossible — its writer is deleted); `SpawnV2` closes the source hold at the
+    /// exact fence, stops the retained ghost's emit, and evicts the bystanders' figures (the remove
+    /// message, retimed to hold closure); a stale-fence proof closes nothing; Despawn still tears
+    /// the dot out; a malformed body is counted, never mis-applied.
     #[test]
-    fn the_source_ghost_consumer_refreshes_and_dedups_the_feed() {
-        // 1d.5b.3b: the SOURCE ghost-host consumes the dest-driven feed — Spawn establishes it +
-        // refreshes the retained ghost's pose; a fresh Delta refreshes; a stale-seq / no-mirror /
-        // stale-fence Delta is dropped; Despawn clears the latch; a malformed body is undecodable.
+    fn the_take_over_proof_closes_the_hold_stops_the_emit_and_evicts() {
+        const BYSTANDER: SessionId = SessionId(0xBB);
         let mut rig = Rig::new();
         let entity = make_retained_ghost(&mut rig, Fence(2)); // retained source Ghost{Fence(2)}
-        let pose_a = crossing_pose();
-        let pose_b = StampedPose::at_rest(
-            FrameRef::SystemSpace { system_seed: 7 },
-            DVec3::new(9.0, 8.0, 7.0),
-            UniverseTick(3),
-        );
-
-        // Spawn: establish the mirror (fed) + refresh the hosted ghost's pose at the owner fence.
-        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
-            entity,
-            pose: pose_a,
-            source_fence: Fence(2),
-            since_tick: vd_core::TickId(0),
-        })]);
-        assert_eq!(
-            rig.world.resource::<Dots>().0[&SESSION].pose,
-            pose_a.sanitized(),
-            "Spawn refreshes the hosted ghost pose"
-        );
+        let demote_pose = rig.world.resource::<Dots>().0[&SESSION].pose;
+        insert_owned_dot(&mut rig, BYSTANDER, player(9), DVec3::new(1.0, 0.0, 0.0));
+        // The demote opened the SOURCE hold, so the retained ghost EMITS its own-frame demote pose
+        // (the fill), alongside the bystander.
         assert!(
             rig.world
-                .resource::<SourceGhostMirror>()
+                .resource::<HandoffHolds>()
                 .0
-                .get(&entity)
-                .is_some_and(|s| s.fed),
-            "the feed is established (fed)"
+                .contains_key(&(entity, HoldRole::Source)),
+            "DEBUG: the demote opened the Source hold"
+        );
+        let sent = rig.tick(vec![]);
+        let emitted: Vec<EntityId> = entity_rows_to_gateway(&sent);
+        assert!(
+            emitted.contains(&entity),
+            "the retained ghost fills the hand-off window: {emitted:?}"
         );
 
-        // THE FOREIGN-FRAME GUARD (Step 5 slice F's core, landed early — §4v fact 2): a fed pose
-        // whose FRAME differs from the hosted ghost's own is REFUSED even at a fresh seq and fence.
-        // Writing it would poison the pose `promote_apply` later resurrects — the measured
-        // Planet→Planet launder whose parent-frame pose the destination refuses forever.
+        // A TOMBSTONED Spawn (the old pose-carrying proof) is a counted no-op: the pose does not
+        // land and the hold does not close.
         let foreign = StampedPose::at_rest(
             FrameRef::PlanetCentered { planet_seed: 42 },
             DVec3::new(1.0, 2.0, 3.0),
             UniverseTick(2),
         );
+        let undec_before = rig.world.resource::<StubStats>().undecodable;
+        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
+            entity,
+            pose: foreign,
+            source_fence: Fence(2),
+            since_tick: vd_core::TickId(0),
+        })]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].pose,
+            demote_pose,
+            "a tombstoned Spawn's pose NEVER lands — the poison's writer is deleted"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().undecodable,
+            undec_before + 1
+        );
+        // ...and so is a tombstoned Delta.
         let _ = rig.tick(vec![ghost_delta(entity, foreign, Fence(2), 1)]);
         assert_eq!(
             rig.world.resource::<Dots>().0[&SESSION].pose,
-            pose_a.sanitized(),
-            "a foreign-frame Delta is refused (pose unchanged)"
+            demote_pose,
+            "a tombstoned Delta's pose NEVER lands"
         );
         assert_eq!(
-            rig.world.resource::<StubStats>().ghost_refresh_stale,
-            1,
-            "the foreign-frame refusal is counted on the refresh-refused counter"
+            rig.world.resource::<StubStats>().undecodable,
+            undec_before + 2
+        );
+        assert!(
+            rig.world
+                .resource::<HandoffHolds>()
+                .0
+                .contains_key(&(entity, HoldRole::Source)),
+            "a tombstoned frame closes no hold"
         );
 
-        // A fresh Delta (seq 2 > 1, fence 2 >= 2) in the ghost's OWN frame applies the new pose.
-        let _ = rig.tick(vec![ghost_delta(entity, pose_b, Fence(2), 2)]);
-        assert_eq!(
-            rig.world.resource::<Dots>().0[&SESSION].pose,
-            pose_b.sanitized(),
-            "a fresh Delta refreshes the pose"
-        );
-        assert_eq!(rig.world.resource::<StubStats>().ghost_delta_applied, 1);
-
-        // A stale-seq Delta (seq 1 <= last_seq 1) is dropped — the pose is unchanged.
-        let _ = rig.tick(vec![ghost_delta(entity, pose_a, Fence(2), 1)]);
-        assert_eq!(
-            rig.world.resource::<Dots>().0[&SESSION].pose,
-            pose_b.sanitized(),
-            "a stale-seq Delta is dropped"
-        );
-        assert_eq!(rig.world.resource::<StubStats>().ghost_delta_stale, 1);
-
-        // A fresh-seq Delta with a STALE fence (1 < the ghost's 2) is REFUSED by GhostRefresh.
-        let _ = rig.tick(vec![ghost_delta(entity, pose_a, Fence(1), 3)]);
-        assert_eq!(
-            rig.world.resource::<Dots>().0[&SESSION].pose,
-            pose_b.sanitized(),
-            "a stale-fence Delta is refused (pose unchanged)"
-        );
-        assert_eq!(rig.world.resource::<StubStats>().ghost_refresh_stale, 2);
-
-        // A Delta for an UNregistered entity (no mirror) is dropped.
-        let _ = rig.tick(vec![ghost_delta(EntityId(0xCAFE), pose_a, Fence(2), 9)]);
-        assert_eq!(
-            rig.world.resource::<StubStats>().ghost_delta_stale,
-            2,
-            "a no-mirror Delta is dropped"
+        // A STALE-fence proof (a replayed take-over from a superseded crossing) closes nothing.
+        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::SpawnV2 {
+            entity,
+            source_fence: Fence(1),
+        })]);
+        assert!(
+            rig.world
+                .resource::<HandoffHolds>()
+                .0
+                .contains_key(&(entity, HoldRole::Source)),
+            "a stale-fence proof closes no hold"
         );
 
-        // Despawn TEARS DOWN the hosted ghost (1d.5b.3c): the mirror entry AND the retained ghost dot
-        // are removed — the ghost lifecycle ENDS (the source stops self-emitting + being a collider).
-        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
+        // THE PROOF at the exact fence: the hold closes, the removal fans to the bystander's
+        // gateway at the shard's exact tick, and the ghost STOPS emitting — the leaver vanishes at
+        // hold closure, never freezing at the boundary.
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::SpawnV2 {
             entity,
             source_fence: Fence(2),
         })]);
         assert!(
             !rig.world
-                .resource::<SourceGhostMirror>()
+                .resource::<HandoffHolds>()
                 .0
-                .contains_key(&entity),
-            "Despawn removes the mirror entry"
+                .contains_key(&(entity, HoldRole::Source)),
+            "the exact-fence proof closes the hold"
         );
-        // The retained ghost dot (keyed by SESSION via `make_retained_ghost`) is GONE. A direct key
-        // check, NOT `.values().any(|d| ...)`: after teardown the map is empty, so an `any` closure
-        // would never run (an uncoverable region) — assert absence by the key that was removed.
+        assert_eq!(
+            entity_removals(&sent),
+            vec![(GATEWAY, entity, UniverseTick(100))],
+            "the bystanders' eviction fans at hold closure"
+        );
+        let emitted: Vec<EntityId> = entity_rows_to_gateway(&sent);
+        assert!(
+            !emitted.contains(&entity),
+            "the retained ghost stopped emitting at hold closure: {emitted:?}"
+        );
+        assert!(
+            rig.world.resource::<Dots>().0.contains_key(&SESSION),
+            "the retained DOT stays (the return-crossing target) until band-exit"
+        );
+
+        // A REPLAYED proof after the close is a clean no-op (no hold to close, no second eviction).
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::SpawnV2 {
+            entity,
+            source_fence: Fence(2),
+        })]);
+        assert!(entity_removals(&sent).is_empty(), "a replay evicts nobody");
+
+        // Despawn still TEARS the dot out at band-exit (idempotent; no-host counted).
+        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
+            entity,
+            source_fence: Fence(2),
+        })]);
         assert!(
             !rig.world.resource::<Dots>().0.contains_key(&SESSION),
             "Despawn removes the retained ghost dot (the lifecycle ends)"
         );
         assert_eq!(rig.world.resource::<StubStats>().ghost_despawns, 1);
-
-        // A Spawn for an entity this shard does NOT host (no dot) records the mirror but refreshes
-        // nothing — the no-dot arm of the Spawn handler.
-        let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
-            entity: EntityId(0xDEAD),
-            pose: pose_a,
-            source_fence: Fence(2),
-            since_tick: vd_core::TickId(0),
-        })]);
-        assert!(
-            rig.world
-                .resource::<SourceGhostMirror>()
-                .0
-                .contains_key(&EntityId(0xDEAD)),
-            "a Spawn with no hosted dot still records the mirror"
-        );
-
-        // A Despawn for an entity with NO mirror AND no hosted dot tears down nothing — a counted
-        // idempotent no-op (`ghost_despawn_no_host`), never a panic, and never bumps the teardown count.
         let no_host_before = rig.world.resource::<StubStats>().ghost_despawn_no_host;
-        let despawns_before = rig.world.resource::<StubStats>().ghost_despawns;
         let _ = rig.tick(vec![ghost_lifecycle(GhostFlow::Despawn {
             entity: EntityId(0x12345),
             source_fence: Fence(2),
@@ -12319,11 +12234,6 @@ mod tests {
             rig.world.resource::<StubStats>().ghost_despawn_no_host,
             no_host_before + 1,
             "a Despawn for an unhosted entity is a counted no-op"
-        );
-        assert_eq!(
-            rig.world.resource::<StubStats>().ghost_despawns,
-            despawns_before,
-            "...and does NOT bump the teardown counter"
         );
 
         // A malformed ghost body is counted undecodable, never mis-applied.
@@ -12342,9 +12252,10 @@ mod tests {
 
     #[test]
     fn the_dest_feed_despawns_on_band_exit_and_deregisters() {
-        // 1d.5b.3c: the dest (owner) drives the source-ghost lifecycle END. While the owned entity is
-        // IN the overlap band (anchored at its crossing) the feed streams Delta; once it walks PAST the
-        // band's destroy edge the dest emits GhostFlow::Despawn (reliable) + DEREGISTERS the feed.
+        // 1d.5b.3c → slice F: the dest (owner) drives the source-ghost lifecycle END. While the
+        // owned entity is IN the overlap band (anchored at its crossing) the sweep sends NOTHING
+        // (the pose feed is dead); once it walks PAST the band's destroy edge the dest emits
+        // GhostFlow::Despawn (reliable) + DEREGISTERS.
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
@@ -12354,24 +12265,13 @@ mod tests {
         // Owned + registered; the anchor is the crossed pose position (the boundary it entered through).
         let _ = rig.tick(vec![promote_msg(Fence(2), source)]);
 
-        // IN-BAND (the dot is at the anchor, distance 0): the feed streams the next monotone Delta and
-        // KEEPS the registration — the `else` (feed) arm of the band-exit decision. The pose's stamp is
-        // the CURRENT shard tick (Stage B4 re-stamp), position untouched.
-        let now = rig.world.resource::<ClockSample>().universe_tick;
+        // IN-BAND (the dot is at the anchor, distance 0): nothing streams and the registration is
+        // KEPT — the false arm of the band-exit decision.
         rig.set_local_tick(6);
         let sent = rig.tick(vec![]);
         assert!(
-            flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Delta {
-                entity: SUBJECT,
-                pose: StampedPose {
-                    universe_tick: now,
-                    ..crossing_pose().sanitized()
-                },
-                source_fence: Fence(2),
-                source_tick: vd_core::TickId(6),
-                seq: 1,
-            })),
-            "in-band: the feed streams a Delta (not a Despawn): {sent:?}"
+            flows_to(&sent, source).is_empty(),
+            "in-band: the sweep streams nothing (no Delta exists; Despawn waits for band-exit): {sent:?}"
         );
         assert!(
             rig.world
@@ -12462,10 +12362,10 @@ mod tests {
 
     #[test]
     fn a_retained_ghost_self_emits_but_an_unfed_genesis_ghost_does_not() {
-        // 1d.5b.3b emit-widening: a RETAINED source Ghost (post-GENESIS fence) SELF-EMITS its
-        // last-Owned pose (the demote→Promote fill); a pre-promote DEST-adopt Ghost (GENESIS, no real
-        // pose) emits NOTHING.
-        // (a) retained source ghost → emits.
+        // 1d.5b.3b → slice F: a RETAINED source Ghost SELF-EMITS its own-frame demote pose while
+        // its Source HOLD is open (the demote→take-over fill); a pre-promote DEST-adopt Ghost
+        // (GENESIS, no real pose) emits NOTHING.
+        // (a) retained source ghost, hold open (make_retained_ghost arms the budget) → emits.
         let mut rig = Rig::new();
         let _entity = make_retained_ghost(&mut rig, Fence(2));
         let sent = rig.tick(vec![]);
@@ -12632,7 +12532,7 @@ mod tests {
         let mut stats = StubStats::default();
         let entities = emitted_entities(
             &dots,
-            &SourceGhostMirror::default(),
+            &HandoffHolds::default(),
             own_frame,
             &frames,
             &mut stats,
@@ -12683,7 +12583,7 @@ mod tests {
         let mut stats = StubStats::default();
         let entities = emitted_entities(
             &dots,
-            &SourceGhostMirror::default(),
+            &HandoffHolds::default(),
             own_frame,
             &frames,
             &mut stats,
@@ -12727,18 +12627,19 @@ mod tests {
 
     #[test]
     fn emitted_entities_ships_the_emitting_union_bit_identical_and_drops_the_silent() {
-        // The EMIT UNION, unchanged by the removal of the fold: an Owned dot emits (the authority truth),
-        // a FED ghost emits (the dest-driven collider mirror) and a RETAINED source ghost emits (its
-        // last-Owned pose, filling the demote→promote window). A pre-grant provisional Ghost and a Frozen
-        // dot emit NOTHING.
+        // The EMIT UNION, slice F's shape: an Owned dot emits (the authority truth); a RETAINED
+        // source ghost emits ONLY while its hand-off hold is open (the demote→take-over fill —
+        // hold closed means the leaver already vanished from bystanders' screens). A pre-grant
+        // provisional Ghost, a Frozen dot, and a hold-CLOSED retained ghost emit NOTHING. (The
+        // fed-ghost category died with the pose feed.)
         //
-        // And the new half, which is the whole point of the slice: every surviving row's pose is
-        // BIT-IDENTICAL to the dot's own — value, velocity, tick AND frame label. There is no compose, no
-        // re-stamp, no omit-because-unresolvable arm left to take. A shard ships what it holds.
+        // And every surviving row's pose is BIT-IDENTICAL to the dot's own — value, velocity, tick
+        // AND frame label. There is no compose, no re-stamp, no feed to overwrite it. A shard ships
+        // what it holds.
         let frame = frame_of(OWN_REALM);
         let owned = EntityId::pack(EntityKind::Player, 10, 1, 1);
-        let fed = EntityId::pack(EntityKind::Player, 10, 2, 2);
         let retained = EntityId::pack(EntityKind::Player, 10, 3, 3);
+        let lapsed = EntityId::pack(EntityKind::Player, 10, 2, 2);
         let provisional = EntityId::pack(EntityKind::Player, 10, 4, 4);
         let frozen = EntityId::pack(EntityKind::Player, 10, 5, 5);
 
@@ -12747,19 +12648,7 @@ mod tests {
             SessionId(1),
             slice6_dot(owned, frame, Authority::Owned { fence: Fence(1) }),
         );
-        // A FED ghost: registered in the mirror as fed. Its own authority is the pre-promote adopt Ghost
-        // holding GENESIS, so it emits ONLY because the mirror says the dest is feeding it.
-        let mut fed_dot = slice6_dot(
-            fed,
-            frame,
-            Authority::Ghost {
-                source_fence: Fence::GENESIS,
-                since_tick: TickId(1),
-            },
-        );
-        fed_dot.granted = false;
-        dots.0.insert(SessionId(2), fed_dot);
-        // A RETAINED source ghost: granted, not departing, post-GENESIS source fence.
+        // A RETAINED source ghost with an OPEN hold: granted, not departing, post-GENESIS fence.
         dots.0.insert(
             SessionId(3),
             slice6_dot(
@@ -12767,6 +12656,19 @@ mod tests {
                 frame,
                 Authority::Ghost {
                     source_fence: Fence(1),
+                    since_tick: TickId(1),
+                },
+            ),
+        );
+        // A RETAINED source ghost whose hold CLOSED (no HandoffHolds entry) — silent: the leaver
+        // vanished at hold closure and must not reappear frozen.
+        dots.0.insert(
+            SessionId(2),
+            slice6_dot(
+                lapsed,
+                frame,
+                Authority::Ghost {
+                    source_fence: Fence(2),
                     since_tick: TickId(1),
                 },
             ),
@@ -12794,13 +12696,12 @@ mod tests {
             ),
         );
 
-        let mut mirror = SourceGhostMirror::default();
-        mirror.0.insert(
-            fed,
-            GhostFeedState {
-                from: GATEWAY,
-                last_seq: 0,
-                fed: true,
+        let mut holds = HandoffHolds::default();
+        holds.0.insert(
+            (retained, HoldRole::Source),
+            HandoffHold {
+                opened_at: TickId(1),
+                takeover_fence: Fence(1),
             },
         );
 
@@ -12809,16 +12710,19 @@ mod tests {
         let regions = RealmRegions::new(vec![root_region(), own_region()]);
         let (own_frame, frames) = emit_context(&regions);
         let mut stats = StubStats::default();
-        let entities = emitted_entities(&dots, &mirror, own_frame, &frames, &mut stats);
+        let entities = emitted_entities(&dots, &holds, own_frame, &frames, &mut stats);
         assert_eq!(
             stats.entity_rows_foreign_labelled, 0,
             "an occupant in this shard's own realm is never a degrade",
         );
         let mut got: Vec<EntityId> = entities.iter().map(|e| e.entity).collect();
         got.sort_unstable();
-        let mut want = vec![owned, fed, retained];
+        let mut want = vec![owned, retained];
         want.sort_unstable();
-        assert_eq!(got, want, "Owned | fed ghost | retained source ghost emit");
+        assert_eq!(
+            got, want,
+            "Owned | retained-with-open-hold emit; a closed-hold ghost is silent"
+        );
 
         for snap in &entities {
             let dot = dots
@@ -13956,7 +13860,12 @@ mod tests {
 
     /// Demote the SESSION dot to a RETAINED source Ghost at `new_owner_fence` (the consumer/emit
     /// fixture): a granted Owned dot → the saga `Demote` → `Ghost`. Returns the dot's entity.
+    /// ARMS the hand-off budget first (slice F: the retained ghost emits only while its Source
+    /// hold is open, and a hold only opens on an armed budget — the shipped posture everywhere).
     fn make_retained_ghost(rig: &mut Rig, new_owner_fence: Fence) -> EntityId {
+        rig.world
+            .resource_mut::<StubConfig>()
+            .handoff_hold_ttl_ticks = 1_000;
         rig.grant_realm();
         let _ = rig.attach();
         let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
@@ -14069,6 +13978,34 @@ mod tests {
                 .entity_removals_suppressed_no_lease,
             1,
             "…but never silently: the suppression is counted"
+        );
+        // The SAME suppression at the take-over proof: a fresh rig, lease dropped before the
+        // exact-fence SpawnV2 lands — the hold closes, the eviction is withheld + counted.
+        let mut rig = Rig::new();
+        let leaver = make_retained_ghost(&mut rig, Fence(2));
+        insert_owned_dot(&mut rig, BYSTANDER, player(9), DVec3::new(1.0, 0.0, 0.0));
+        rig.world.resource_mut::<RealmAuthority>().0 = None;
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::SpawnV2 {
+            entity: leaver,
+            source_fence: Fence(2),
+        })]);
+        assert!(
+            !rig.world
+                .resource::<HandoffHolds>()
+                .0
+                .contains_key(&(leaver, HoldRole::Source)),
+            "the proof still closes the hold"
+        );
+        assert!(
+            entity_removals(&sent).is_empty(),
+            "an unowned shard is silent at the proof too"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .entity_removals_suppressed_no_lease,
+            1,
+            "…and counted"
         );
     }
 
@@ -14517,12 +14454,13 @@ mod tests {
 
     #[test]
     fn producer_less_reliable_flows_push_with_the_retained_marker() {
-        // R-6d §7 CONFORMANCE: the two `FlowDurabilityClass::ProducerLessReliable` flows — the source-shard
-        // `TransientBatch` emit (D-6 #1) and the band-exit `Ghost::Despawn` — have NO scan_deadlines
-        // re-driver, so their push MUST carry `Durability::Retained` (the R-6d durable outbox mirrors +
-        // replays them across a source crash). The `send`/`push_flow` default is Ephemeral, so THIS test is
-        // the guarantee that these two sites opted into durability; a future producer-less flow (compile-
-        // forced-classified by `durability_class`, R-6d2a) whose author forgets the marker trips this.
+        // R-6d §7 CONFORMANCE: the three `FlowDurabilityClass::ProducerLessReliable` flows — the
+        // source-shard `TransientBatch` emit (D-6 #1), the band-exit `Ghost::Despawn`, and slice F's
+        // `Ghost::SpawnV2` take-over proof — have NO scan_deadlines re-driver, so their push MUST
+        // carry `Durability::Retained` (the R-6d durable outbox mirrors + replays them across a
+        // source crash). The `send`/`push_flow` default is Ephemeral, so THIS test is the guarantee
+        // that these sites opted into durability; a future producer-less flow (compile-forced-
+        // classified by `durability_class`, R-6d2a) whose author forgets the marker trips this.
         use vd_wire::intershard::FlowDurabilityClass;
         let producer_less = |sent: &[(NodeId, MsgClass, InterShardFlow, Durability)]| {
             sent.iter()
@@ -14562,9 +14500,16 @@ mod tests {
         let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
         let _ = rig.tick(vec![adopted_head(Fence(2))]);
         let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), crossing_pose())]);
-        let _ = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+        // (c, folded into (b)'s rig) the PROMOTE tick itself pushes the SpawnV2 proof — read it
+        // off the raw outbox before stepping further.
+        let promote_sends = rig.tick_raw(vec![promote_msg(Fence(2), NodeId(99))]);
+        assert_eq!(
+            producer_less(&promote_sends),
+            Some(Durability::Retained),
+            "the take-over proof Ghost::SpawnV2 MUST push Durability::Retained (no re-driver)"
+        );
         rig.set_local_tick(6);
-        let _ = rig.tick(vec![]); // in-band: streams a Delta, keeps the feed
+        let _ = rig.tick(vec![]); // in-band: the sweep streams nothing, keeps the registration
         let exit_pos = crossing_pose().pos.offset() + DVec3::new(3.0, 0.0, 0.0);
         rig.world
             .resource_mut::<Dots>()
@@ -14577,6 +14522,79 @@ mod tests {
             producer_less(&rig.tick_raw(vec![])),
             Some(Durability::Retained),
             "the band-exit Ghost::Despawn MUST push Durability::Retained (no re-driver)"
+        );
+    }
+
+    /// Slice F's TTL BACKSTOP: a Source hold that EXPIRES (the take-over proof never came — a
+    /// logout mid-crossing kills the dest before it can send one) still evicts the bystanders'
+    /// figures: the retained ghost stops emitting the tick the hold dies, and the removal fans at
+    /// the shard's exact tick. The lane's loss-mode ends in a vanish, never a frozen phantom.
+    #[test]
+    fn an_expired_hold_evicts_the_bystanders_like_the_proof_that_never_came() {
+        const BYSTANDER: SessionId = SessionId(0xBB);
+        let mut rig = Rig::new();
+        let entity = make_retained_ghost(&mut rig, Fence(2)); // arms the budget (1_000 ticks)
+        insert_owned_dot(&mut rig, BYSTANDER, player(9), DVec3::new(1.0, 0.0, 0.0));
+        let sent = rig.tick(vec![]);
+        assert!(
+            entity_rows_to_gateway(&sent).contains(&entity),
+            "the fill emits while the hold lives"
+        );
+        // Jump past the budget: the prune drops the hold and the eviction fans in the same pass.
+        let opened = rig.world.resource::<HandoffHolds>().0[&(entity, HoldRole::Source)].opened_at;
+        rig.set_local_tick(opened.0 + 1_001);
+        let sent = rig.tick(vec![]);
+        assert_eq!(
+            entity_removals(&sent),
+            vec![(GATEWAY, entity, UniverseTick(100))],
+            "the expiry fans the eviction — the TTL backstop of the take-over proof"
+        );
+        assert!(
+            !entity_rows_to_gateway(&sent).contains(&entity),
+            "…and the ghost stopped emitting the same tick"
+        );
+
+        // The LEASELESS expiry (the suppression arm at the prune): same setup, lease gone before
+        // the budget runs out — the removal is withheld, counted, never silent.
+        let mut rig = Rig::new();
+        let entity = make_retained_ghost(&mut rig, Fence(2));
+        insert_owned_dot(&mut rig, BYSTANDER, player(9), DVec3::new(1.0, 0.0, 0.0));
+        rig.world.resource_mut::<RealmAuthority>().0 = None;
+        let opened = rig.world.resource::<HandoffHolds>().0[&(entity, HoldRole::Source)].opened_at;
+        rig.set_local_tick(opened.0 + 1_001);
+        let sent = rig.tick(vec![]);
+        assert!(
+            entity_removals(&sent).is_empty(),
+            "an unowned shard is silent"
+        );
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .entity_removals_suppressed_no_lease,
+            1,
+            "…but the suppression is counted"
+        );
+
+        // A DEST-role hold expiring fans nothing (the false arm): only a SOURCE hold guards a
+        // retained ghost's emit.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world
+            .resource_mut::<StubConfig>()
+            .handoff_hold_ttl_ticks = 4;
+        let stranger = player(7);
+        open_hold(
+            &mut rig.world.resource_mut::<HandoffHolds>(),
+            (stranger, HoldRole::Dest),
+            Fence(2),
+            TickId(1),
+            4,
+        );
+        rig.set_local_tick(20);
+        let sent = rig.tick(vec![]);
+        assert!(
+            entity_removals(&sent).is_empty(),
+            "an expired Dest hold is bookkeeping, never an eviction"
         );
     }
 
@@ -16493,11 +16511,13 @@ mod tests {
         let mut holds = HandoffHolds::default();
         open_hold(&mut holds, hold_key(1), Fence(2), TickId(0), 4);
         open_hold(&mut holds, hold_key(2), Fence(2), TickId(6), 4);
-        assert_eq!(prune_holds(&mut holds, TickId(8), 4), 1);
+        // The DROPPED KEYS come back (slice F: an expired Source hold is a leaver-vanish moment
+        // the caller must fan the eviction for).
+        assert_eq!(prune_holds(&mut holds, TickId(8), 4), vec![hold_key(1)]);
         assert_eq!(holds.0.len(), 1);
         assert!(holds.0.contains_key(&hold_key(2)));
-        // A second prune with nothing due reports zero — the arm that proves it is not simply clearing.
-        assert_eq!(prune_holds(&mut holds, TickId(8), 4), 0);
+        // A second prune with nothing due reports nothing — the arm that proves it is not clearing.
+        assert_eq!(prune_holds(&mut holds, TickId(8), 4), Vec::new());
     }
 
     #[test]
@@ -21282,15 +21302,9 @@ mod tests {
 
         // A REPLAYED take-over from a superseded crossing (an older fence) proves nothing and leaves the
         // hold — and therefore the relay — standing.
-        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::SpawnV2 {
             entity,
-            pose: StampedPose::at_rest(
-                frame_of(OTHER_REALM),
-                DVec3::new(500.0, 0.0, 0.0),
-                UniverseTick(3),
-            ),
             source_fence: Fence(1),
-            since_tick: vd_core::TickId(0),
         })]);
         assert_eq!(
             child_live_bits(&sent).len(),
@@ -21299,15 +21313,9 @@ mod tests {
         );
 
         // The matching proof does, well inside the budget.
-        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::Spawn {
+        let sent = rig.tick(vec![ghost_lifecycle(GhostFlow::SpawnV2 {
             entity,
-            pose: StampedPose::at_rest(
-                frame_of(OTHER_REALM),
-                DVec3::new(500.0, 0.0, 0.0),
-                UniverseTick(3),
-            ),
             source_fence: Fence(2),
-            since_tick: vd_core::TickId(0),
         })]);
         assert!(
             child_live_bits(&sent).is_empty(),

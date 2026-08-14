@@ -641,13 +641,17 @@ impl InterShardFlow {
     #[must_use]
     pub fn durability_class(&self) -> FlowDurabilityClass {
         match self {
-            // Ghost lifecycle: Spawn re-derives from band geometry (the feed re-spawns); Delta is the 20Hz
-            // latest-wins datagram; Despawn is a band-exit ONE-SHOT — a direct shard↔shard emit with NO saga
-            // re-driver, so it needs the durable outbox.
+            // Ghost lifecycle. Spawn/Delta are ★TOMBSTONES (slice F) — classes frozen with the arms
+            // (nothing produces them; a tombstone keeps classifying so the matches stay
+            // wildcard-free). Despawn is the band-exit ONE-SHOT and SpawnV2 the promote-time
+            // take-over proof — both direct shard↔shard emits with NO re-driver, so both need the
+            // durable outbox (a lost Despawn leaks a collider; a lost SpawnV2 leaves the hold to
+            // its TTL and delays every bystander's leaver-vanish).
             InterShardFlow::Ghost(g) => match g {
                 GhostFlow::Spawn { .. } => FlowDurabilityClass::ReDriven,
                 GhostFlow::Delta { .. } => FlowDurabilityClass::Unreliable,
                 GhostFlow::Despawn { .. } => FlowDurabilityClass::ProducerLessReliable,
+                GhostFlow::SpawnV2 { .. } => FlowDurabilityClass::ProducerLessReliable,
             },
             // The entity crossing: InitialSpawn/StubCrossing are saga steps (the orchestrator re-drives them
             // via scan_deadlines); TransientBatch is the SOURCE-shard emit that precedes the saga's AwaitAdopt
@@ -1172,17 +1176,25 @@ pub fn crossing_transfer_id(
 /// display state — the authoritative hit is still applied at the ghost's OWNER (D-39.1 forward path).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GhostFlow {
-    /// RELIABLE delivery ([`MsgClass::GhostReliable`]): the ghost-host inserts a kinematic ghost (a
-    /// lost Spawn would strand a never-spawned collider). EffectClass is `FireAndForget` (no
-    /// idempotency key); the receiver's insert is idempotent (a redelivery overwrites the same entry).
+    /// ★TOMBSTONE (Step 5 slice F, minor 15) — the old take-over proof, deleted because it carried
+    /// the DEST-frame `pose` the source wrote VERBATIM into its retained dot: the §4u/§4v label
+    /// corruption's carrier, and an SL2 breach. Its living replacement is [`GhostFlow::SpawnV2`]
+    /// below — the same proof with the pose gone (postcard forbids removing a field in place; the
+    /// discriminant is reserved forever; nothing produces it; a received frame counts `undecodable`
+    /// at the shard). Do not revive.
     Spawn {
         entity: EntityId,
         pose: StampedPose,
         source_fence: Fence,
         since_tick: TickId,
     },
-    /// Datagram, 20 Hz, latest-wins. Deltas older than the ghost's `since_tick`
-    /// or carrying a stale fence are dropped by data, not by stream ordering.
+    /// ★TOMBSTONE (Step 5 slice F, minor 15) — the 20 Hz dest→source ghost pose feed, deleted with
+    /// [`GhostFlow::Spawn`] above (one lane: it existed to keep the retained dot's pose live, and
+    /// every write was a foreign-frame pose into a promotable dot — the corruption itself). The
+    /// retained ghost now holds its OWN-frame demote pose, emits only while the hand-off hold is
+    /// open, and the bystander's figure VANISHES at hold closure via the remove message (minor 14)
+    /// instead of tracking. Reserved forever; nothing produces it; a received frame counts
+    /// `undecodable`. Do not revive.
     Delta {
         entity: EntityId,
         pose: StampedPose,
@@ -1200,6 +1212,20 @@ pub enum GhostFlow {
     /// orchestrator's one-saga-per-key lock. The proper orchestrator-side teardown gate is owed
     /// (`docs/design/DEFERRED.md` D-2, Slice-2).
     Despawn {
+        entity: EntityId,
+        source_fence: Fence,
+    },
+    /// THE TAKE-OVER PROOF, pose-free (Step 5 slice F, minor 15 — [`GhostFlow::Spawn`]'s lawful
+    /// replacement): the destination OWNS the crossed entity as of `source_fence`, so the source's
+    /// part in the hand-off is positively done — it closes its hold (fence-compared, so a replayed
+    /// proof from a superseded crossing closes nothing), stops emitting the retained ghost, and
+    /// tells its bystanders' clients to evict the figure (the remove message). NO pose crosses:
+    /// what the old proof's pose did — repainting the leaver in the source realm — was the exact
+    /// corruption this slice deletes. RELIABLE one-shot on [`MsgClass::GhostReliable`], pushed
+    /// RETAINED (producer-less: a promote redelivery re-acks without re-spawning, so nothing
+    /// re-sends this; the hold TTL is the loss backstop, not a re-driver). APPENDED (postcard
+    /// discriminants are positional — the tombstones above keep their slots).
+    SpawnV2 {
         entity: EntityId,
         source_fence: Fence,
     },

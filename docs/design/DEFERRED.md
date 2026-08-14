@@ -560,6 +560,15 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   DEREGISTERS the feed (`GhostColliderRegistration`). The source `on_ghost_flow` Despawn arm now TEARS DOWN: removes
   the `SourceGhostMirror` entry AND the retained ghost DOT (the source stops self-emitting + being a collider) —
   IDEMPOTENT + counted (`ghost_despawns` / `ghost_despawn_no_host` / dest `ghost_band_exits`). Strictly POST-release
+  **[SUPERSEDED IN PART by Step 5 slice F, 2026-08-14 (minor 15):** the POSE FEED half of this machinery
+  (`Spawn`+`Delta`+`refresh_source_ghost`+`SourceGhostMirror`+the fed-ghost emit) is DELETED — it was the §4u/§4v
+  foreign-frame corruption's carrier. The take-over proof is the pose-free `GhostFlow::SpawnV2` (RETAINED —
+  which also RETIRES the ⚠️ lost-Spawn instance of the producer-less class noted above); the retained ghost
+  self-emits only while the Source hold is open, and bystanders' clients EVICT the leaver at hold closure via
+  the minor-14 remove message (TTL expiry = the no-proof backstop). Band-exit Despawn + the anchor sweep are
+  UNCHANGED and still owed the redelivering-transport cure for a lost Despawn — though its blast radius shrank:
+  the leaked dot no longer self-emits (hold closed) and no longer strands a drawn phantom (the eviction already
+  landed); the leak is now a silent inert dot + a collider skeleton until realm teardown.]**
   (the destroy edge is many per-tick steps out, so the entity walks well past the demote→promote→release handoff before
   exiting), so the source ghost is removed only once the dest is the SOLE render source — the capstone
   `p2_dod_band_exit_tears_down_the_source_ghost_seamlessly` proves NO vanish across it (`max_absent_run==0`, on the
@@ -811,10 +820,12 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     root for the entity-leaves case. **Residuals, both slice F's:** (i) OBSERVER-LEAVES is not covered —
     when a player crosses away, nothing evicts the OLD realm's bystanders' figures from the LEAVER's
     own view (their rows stop at the one-space filter; the tracks freeze off-screen-frame) — the VU-6
-    scene-reset re-stream or a sub-scoped eviction decision owns it; (ii) a LOGOUT MID-CROSSING strands
-    the source's retained ghost with no Despawn producer (the dest dot died at detach), so it emits
-    forever and no removal fires — dies structurally when slice F stops the retained-ghost emit at hold
-    closure (the composited-subs detach clause remains owed beside it).
+    scene-reset re-stream or a sub-scoped eviction decision owns it; (ii) LOGOUT MID-CROSSING — ★CURED by slice F
+    (2026-08-14): the retained ghost emits only while its Source hold is open, and the hold-TTL expiry
+    fans the eviction the take-over proof never delivered — the strand ends in a vanish. Residue: the
+    DEST-side `GhostColliderRegistration` entry leaks until realm teardown (its no-dot skip is counted
+    per tick, `ghost_feed_skipped`) and the silent retained dot lingers as an inert return target — both
+    bounded by the realm's own lifetime; the composited-subs detach clause remains owed beside them.
   - **(b) Cross-shard functional-block SIGNALS → client (P9) — still owed:** the signal system's gameplay
     events (damage/destroyed/notice and functional-block signal deliveries that surface to the player) ride
     the SAME `ServerControlMsg::Event` arm as appended `EventMsg` variants — opened causally after
@@ -849,8 +860,9 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   and stays gone. The reshape of `EventMsg::EntityRemoved` (gaining `at`) was lawful uniquely because
   the enum had no producer since P1.5 — no negotiated wire ever carried its old shape.
   **Consumer (b) — P9 gameplay signal deliveries — rides this SAME `Event` arm as appended `EventMsg`
-  variants; still owed at P9.** Slice F retimes the leaver's emit to hold closure (the despawn emit
-  stays for the band-exit case).
+  variants; still owed at P9.** ★Slice F LANDED (2026-08-14): the leaver's eviction is fanned at hold
+  closure (the SpawnV2 proof + the TTL expiry); the despawn-site emit stays for band-exit (idempotent
+  on clients that already evicted).
 - **Source:** P1.5 foundation audit (deferral) + whole-codebase audits `wf_43fea0dd` / `wwg7ydm9y` (SIG-1).
 
 ### D-5 🟥 Client cut cycle (the `net.rs` marker emit) — Slice 1e

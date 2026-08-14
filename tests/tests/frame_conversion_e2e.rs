@@ -2789,6 +2789,22 @@ fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
     let fabric = FaultFabric::new(4242, 2);
     let (mut topo, stayer, traveller) = boot_the_chain_with_two_players(&fabric);
 
+    // THE PERMANENT TRIPWIRE's BASELINE (Step 5 slice F), taken after boot: the fixture logs both
+    // avatars in BEFORE it plants the region forests, and in that pre-plant window a shard briefly
+    // cannot NAME its own realm's local frame (production plants regions at spawn, before any
+    // session — the window is fixture-only). From here — through a REAL crossing with a retained
+    // ghost — the counter may never grow: the §4u corruption's last writer is deleted.
+    let foreign_baseline: Vec<u64> = [SHARD, CHAIN_MID, CHAIN_TOP]
+        .into_iter()
+        .map(|node| {
+            with_shard(&mut topo, node, |s| {
+                s.world_mut()
+                    .resource::<vd_sim::stub::StubStats>()
+                    .entity_rows_foreign_labelled
+            })
+        })
+        .collect();
+
     // Hold the stayer where it is and walk the traveller OUT of the area box. The crossing is driven by
     // the real seed-forest detector and carried by the real saga; nothing here hands anything to anyone.
     let staying = DVec3::new(CHAIN_OCCUPANT_FROM_AREA_M, 0.0, 0.0);
@@ -2945,6 +2961,26 @@ fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
         lane_frames, 0,
         "the tombstoned entity lane is SILENT on every leg while two realms are occupied",
     );
+
+    // (5b) THE PERMANENT TRIPWIRE (Step 5 slice F): since the post-boot baseline, no shard on this
+    // chain emitted a row whose pose label it could not restate into its own frame — through a REAL
+    // crossing whose retained ghost filled the hand-off window. The §4u corruption's last writer
+    // (the ghost pose feed) is deleted; growth here is the deleted class resurfacing.
+    for (node, base) in [SHARD, CHAIN_MID, CHAIN_TOP]
+        .into_iter()
+        .zip(&foreign_baseline)
+    {
+        let foreign = with_shard(&mut topo, node, |s| {
+            s.world_mut()
+                .resource::<vd_sim::stub::StubStats>()
+                .entity_rows_foreign_labelled
+        });
+        assert_eq!(
+            foreign, *base,
+            "{node:?}: a foreign-labelled pose entered a locally-emitted row AFTER boot — the \
+             deleted corruption class resurfaced",
+        );
+    }
 
     // (6) THE REMOVE MESSAGE, end to end (proto_minor 14, D-4(a)): when the traveller's retained
     // ghost tears down at the band's destroy edge, the area emits `EntityRemoved`, the gateway
