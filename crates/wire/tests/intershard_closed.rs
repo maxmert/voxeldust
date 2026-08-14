@@ -26,7 +26,9 @@ use vd_wire::intershard::{
     InterShardFlow, STUB_CROSSING_STEP, TransferAck, TransferEnvelope, TransferStepRejectReason,
     TransitionPayload,
 };
-use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
+use vd_wire::seams::directory::{
+    AuthorityRef, CasOutcome, DirectoryKey, DirectoryOp, DirectoryReply,
+};
 use vd_wire::seams::transfer_control::{PrepareResult, TransferControl, TransferControlAck};
 
 fn pose() -> StampedPose {
@@ -124,20 +126,111 @@ fn every_arm() -> Vec<InterShardFlow> {
         InterShardFlow::Directory(DirectoryOp::HeadRead {
             key: DirectoryKey::Realm(RealmId::System(1)),
         }),
+        // The remaining four `DirectoryOp` variants (audit :650 — `every_arm` used to represent 3 of
+        // 7, so the nested-payload halves of the roundtrip + classification gates ran vacuously on
+        // the absent ones): renewal + clock are FireAndForget; revoke keys on its fence, abort-CAS
+        // on `(expected, transfer)`.
+        InterShardFlow::Directory(DirectoryOp::LeaseRenew {
+            key: DirectoryKey::Realm(RealmId::System(1)),
+            fence: Fence(5),
+        }),
+        InterShardFlow::Directory(DirectoryOp::LeaseRevoke {
+            key: DirectoryKey::Realm(RealmId::System(1)),
+            fence: Fence(5),
+        }),
+        InterShardFlow::Directory(DirectoryOp::AbortCas {
+            key: DirectoryKey::Realm(RealmId::System(1)),
+            expected: Fence(5),
+            transfer: TransferId(6),
+        }),
+        InterShardFlow::Directory(DirectoryOp::ClockSync {
+            universe_tick: UniverseTick(9),
+            epoch: EpochId(1),
+        }),
         // P2 arms (the route-swap saga) — SIDE-EFFECTING (TransferStep) for the command
-        // + its ack; FIRE-AND-FORGET for the directory reply envelope.
+        // + its ack; FIRE-AND-FORGET for the directory reply envelope. EVERY nested variant of
+        // `TransferControl` (7), `TransferControlAck` (10) and `DirectoryReply` (3) is represented
+        // (audit :650 — one apiece used to stand in for the whole enum).
         InterShardFlow::Saga(TransferControl::PrepareSubscribe {
             transfer: TransferId(7),
             session: SessionId(1),
             dest: NodeId(2),
         }),
+        InterShardFlow::Saga(TransferControl::RequestCut {
+            transfer: TransferId(7),
+            session: SessionId(1),
+        }),
+        InterShardFlow::Saga(TransferControl::FreezeSource {
+            transfer: TransferId(7),
+            session: SessionId(1),
+            marker_seq: 12,
+            dest: NodeId(2),
+        }),
+        InterShardFlow::Saga(TransferControl::CommitAuthority {
+            transfer: TransferId(7),
+            session: SessionId(1),
+            new_fence: Fence(6),
+            subject: DirectoryKey::Entity(eid(EntityKind::Player)),
+        }),
+        InterShardFlow::Saga(TransferControl::ThawSource {
+            transfer: TransferId(7),
+            session: SessionId(1),
+        }),
+        InterShardFlow::Saga(TransferControl::AbortTransfer {
+            transfer: TransferId(7),
+            session: SessionId(1),
+        }),
+        InterShardFlow::Saga(TransferControl::ReleaseSubscribe {
+            transfer: TransferId(7),
+            session: SessionId(1),
+            src: NodeId(3),
+        }),
         InterShardFlow::SagaAck(TransferControlAck::Prepared {
             transfer: TransferId(8),
             result: PrepareResult::Ready,
         }),
+        InterShardFlow::SagaAck(TransferControlAck::CutConfirmed {
+            transfer: TransferId(8),
+            marker_seq: 12,
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::SourceFrozen {
+            transfer: TransferId(8),
+            drained_seq: 12,
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::Committed {
+            transfer: TransferId(8),
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::SourceThawed {
+            transfer: TransferId(8),
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::Aborted {
+            transfer: TransferId(8),
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::Released {
+            transfer: TransferId(8),
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::DemoteAck {
+            transfer: TransferId(8),
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::PromoteAck {
+            transfer: TransferId(8),
+        }),
+        InterShardFlow::SagaAck(TransferControlAck::DeliveredToObservers {
+            transfer: TransferId(8),
+        }),
         InterShardFlow::DirectoryReply(DirectoryReply::Head {
             key: DirectoryKey::Realm(RealmId::System(1)),
             record: None,
+        }),
+        InterShardFlow::DirectoryReply(DirectoryReply::CasResult {
+            key: DirectoryKey::Realm(RealmId::System(1)),
+            outcome: CasOutcome::Won {
+                new_fence: Fence(6),
+            },
+        }),
+        InterShardFlow::DirectoryReply(DirectoryReply::ClockNow {
+            universe_tick: UniverseTick(9),
+            epoch: EpochId(1),
         }),
         // 1d.1 arms: the pose-flush request + the entity-state ack family (SIDE-EFFECTING,
         // TransferStep-keyed by their step phase).
@@ -449,8 +542,9 @@ fn arm_tripwire(flow: &InterShardFlow) {
     }
 }
 
-/// NESTED-VARIANT tripwires (R-6d2b review). `arm_tripwire` is exhaustive only at the OUTER `InterShardFlow`
-/// level (`Transfer(_)`/`Ghost(_)`), so a new NESTED `TransitionPayload`/`GhostFlow` variant — the natural
+/// NESTED-VARIANT tripwires (R-6d2b review; completed to ALL EIGHT nested enums by the Stage-C audit,
+/// finding :650). `arm_tripwire` is exhaustive only at the OUTER `InterShardFlow`
+/// level (`Transfer(_)`/`Ghost(_)`), so a new NESTED variant of any payload enum — the natural
 /// shape of a FUTURE producer-less durable flow (P9 cross-shard Signal, P6 durable BlockEdit forward) —
 /// would NOT break compilation, would be omitted from `every_arm`, and would slip the `durability_class`
 /// golden pin (which iterates `every_arm`) VACUOUSLY: it would ship pushed with the `Durability::Ephemeral`
@@ -459,6 +553,9 @@ fn arm_tripwire(flow: &InterShardFlow) {
 /// the golden pin + the stub marker test it points at) forces representing it in `every_arm` and verifying
 /// its push-site `Retained` marker. This is the exhaustive-by-construction guard the per-send-`Durability`
 /// default relies on instead of the vetted explicit-4-arg. Never called; the body is the assertion.
+/// The eight: `TransitionPayload`, `GhostFlow`, `DemandVerb` (below), plus `DirectoryOp`,
+/// `DirectoryReply`, `TransferControl`, `TransferControlAck`, `TransferAck` (further below — the five
+/// whose only production classification is `durability_class`'s blanket `ReDriven` group).
 #[allow(dead_code)]
 fn payload_tripwire(p: &TransitionPayload) {
     match p {
@@ -486,6 +583,77 @@ fn demand_verb_tripwire(v: &vd_wire::intershard::DemandVerb) {
     use vd_wire::intershard::DemandVerb;
     match v {
         DemandVerb::SpinUp | DemandVerb::KeepAlive | DemandVerb::Empty | DemandVerb::TearDown => {}
+    }
+}
+
+// NESTED-VARIANT tripwires for the five payload enums the wildcard `Directory(_) | Saga(_) |
+// SagaAck(_) | DirectoryReply(_) | TransferAck(_)` group in `durability_class` never destructures
+// (audit :650 — only 3 of the 8 nested enums carried one). Four of the five would still break SOME
+// compile elsewhere (their own wildcard-free accessors); `DirectoryReply` had NO wildcard-free match
+// anywhere — a new variant compiled, skipped `every_arm`, and rode the blanket `ReDriven` default
+// with a GREEN suite, the exact vacuity the header above describes. Same discipline as
+// `payload_tripwire`: never called; the wildcard-free match IS the assertion, forcing the author
+// back to `every_arm` (and the durability golden pin) for every new nested variant.
+
+#[allow(dead_code)]
+fn directory_op_tripwire(op: &DirectoryOp) {
+    match op {
+        DirectoryOp::LeaseGrant { .. }
+        | DirectoryOp::LeaseRenew { .. }
+        | DirectoryOp::LeaseRevoke { .. }
+        | DirectoryOp::CommitCas { .. }
+        | DirectoryOp::AbortCas { .. }
+        | DirectoryOp::HeadRead { .. }
+        | DirectoryOp::ClockSync { .. } => {}
+    }
+}
+
+#[allow(dead_code)]
+fn directory_reply_tripwire(r: &DirectoryReply) {
+    match r {
+        DirectoryReply::Head { .. }
+        | DirectoryReply::CasResult { .. }
+        | DirectoryReply::ClockNow { .. } => {}
+    }
+}
+
+#[allow(dead_code)]
+fn transfer_control_tripwire(c: &TransferControl) {
+    match c {
+        TransferControl::PrepareSubscribe { .. }
+        | TransferControl::RequestCut { .. }
+        | TransferControl::FreezeSource { .. }
+        | TransferControl::CommitAuthority { .. }
+        | TransferControl::ThawSource { .. }
+        | TransferControl::AbortTransfer { .. }
+        | TransferControl::ReleaseSubscribe { .. } => {}
+    }
+}
+
+#[allow(dead_code)]
+fn transfer_control_ack_tripwire(a: &TransferControlAck) {
+    match a {
+        TransferControlAck::Prepared { .. }
+        | TransferControlAck::CutConfirmed { .. }
+        | TransferControlAck::SourceFrozen { .. }
+        | TransferControlAck::Committed { .. }
+        | TransferControlAck::SourceThawed { .. }
+        | TransferControlAck::Aborted { .. }
+        | TransferControlAck::Released { .. }
+        | TransferControlAck::DemoteAck { .. }
+        | TransferControlAck::PromoteAck { .. }
+        | TransferControlAck::DeliveredToObservers { .. } => {}
+    }
+}
+
+#[allow(dead_code)]
+fn transfer_ack_tripwire(a: &TransferAck) {
+    match a {
+        TransferAck::SourceFlushed { .. }
+        | TransferAck::Accepted { .. }
+        | TransferAck::Rejected { .. }
+        | TransferAck::BatchAdopted { .. }
+        | TransferAck::DropApplied { .. } => {}
     }
 }
 

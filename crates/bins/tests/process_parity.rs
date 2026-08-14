@@ -25,8 +25,8 @@ use vd_io_prod::runtime::TickPacer;
 use vd_io_prod::trust::ClusterTrust;
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
-    ClientControlMsg, InputDatagram, ServerControlMsg, SnapshotDatagram, SnapshotVerdict, SubId,
-    classify_snapshot,
+    ClientControlMsg, EventMsg, InputDatagram, RealmSnapshotDatagram, ServerControlMsg,
+    SnapshotDatagram, SnapshotVerdict, SubId, classify_snapshot,
 };
 use vd_wire::version::ProtoVersion;
 
@@ -42,8 +42,16 @@ struct ProcessClient {
     last_frame: Option<u64>,
     next_seq: u64,
     tick: u64,
-    /// How many REALM-lane datagrams arrived — counted, never asserted on. See `step`.
+    /// How many REALM-lane datagrams arrived, each DECODED (a decode failure is a panic — a
+    /// transport fault). Asserted `> 0` at the end: the lane is ON by construction here. See `step`.
     realm_frames: u64,
+    /// Total realm ROWS delivered across those datagrams — asserted `> 0` for the walker (the home
+    /// system's five planets are movers, so the lane carries real placements, not empty headers).
+    realm_rows: u64,
+    /// `EntityRemoved` evictions applied (mirroring the production client's rule). Asserted `== 0`
+    /// at the end: NOBODY leaves in this static two-avatar scenario, so any eviction is a defect —
+    /// e.g. a fan that violated the minor-14 owner-skip rule (see `on_control`).
+    evictions: u64,
 }
 
 impl ProcessClient {
@@ -58,6 +66,8 @@ impl ProcessClient {
             next_seq: 0,
             tick: 0,
             realm_frames: 0,
+            realm_rows: 0,
+            evictions: 0,
         }
     }
 
@@ -87,19 +97,21 @@ impl ProcessClient {
                     match class {
                         MsgClass::Control => self.on_control(&bytes),
                         MsgClass::Snapshot => self.on_snapshot(&bytes),
-                        // THE REALM LANE — where a star system's children are, this tick. This client is
-                        // the ENTITY-lane parity subject, so the rows are counted and dropped rather than
-                        // decoded; panicking on them would make an unrelated lane's arrival look like a
-                        // transport fault.
-                        //
-                        // It began arriving when an account's home stopped being resolved by walking the
-                        // world down from the origin and started being read from a stored home. WHY the
-                        // lane switches on is NOT established — the gateway forwards these rows on
-                        // subscription and an active session alone, neither of which names a home realm, so
-                        // the mechanism is somewhere below that and has not been measured. What IS measured
-                        // is that every other assertion in this test passes with the rows tolerated: the
-                        // login, the subscription, the walk and the whole entity-lane pose parity.
-                        MsgClass::RealmSnapshot => self.realm_frames += 1,
+                        // THE REALM LANE — where a star system's children are, this tick. The
+                        // mechanism is ESTABLISHED (audit :774 — this arm used to tolerate the lane
+                        // with a comment admitting it was unmeasured): the Single-shape shard hosts
+                        // THE world's home System (`DEV.realm_seed`), whose FIVE planets are movers,
+                        // so `emit_realm_frames` authors per-tick placement rows the moment it holds
+                        // authority + a present observer, and the gateway fans the realm lane to
+                        // every subscribed session. MEASURED here: every datagram must DECODE (a
+                        // failure IS a transport fault) and the lane + its rows are asserted `> 0`
+                        // at the end — a measured comparison, not a tolerance.
+                        MsgClass::RealmSnapshot => {
+                            let snap: RealmSnapshotDatagram =
+                                postcard::from_bytes(&bytes).expect("decode realm snapshot");
+                            self.realm_frames += 1;
+                            self.realm_rows += snap.realms.len() as u64;
+                        }
                         other => panic!("unexpected class {other:?}"),
                     }
                 }
@@ -144,10 +156,18 @@ impl ProcessClient {
             // The cluster tick rate (minor 1) — this minimal parity client does not
             // interpolate; ignore it (the real client learns its render rate from it).
             ServerControlMsg::UniverseRate { .. } => {}
-            // The remove message (minor 14) — this single-avatar parity client tracks no
-            // bystander figures, so an eviction has nothing to evict; ignored, never a panic
-            // (the real client's eviction is unit- and e2e-tested where figures exist).
-            ServerControlMsg::Event(_) => {}
+            // The remove message (minor 14) — applied, measured, never swallowed (audit :774: the
+            // old blanket-ignore arm justified itself with "tracks no bystander figures", which the
+            // convergence gate two screens down falsifies — BOTH avatars' poses are tracked). This
+            // client mirrors the production rule (evict the entity's track) and COUNTS it; the gate
+            // asserts ZERO evictions at the end, because nobody leaves in this static two-avatar
+            // scenario — a spurious fan (e.g. one violating the minor-14 owner-skip rule) now turns
+            // this gate red instead of passing silently.
+            ServerControlMsg::Event(EventMsg::EntityRemoved { entity, .. }) => {
+                self.poses.remove(&entity);
+                self.evictions += 1;
+            }
+            ServerControlMsg::Event(other) => panic!("unexpected event in P1: {other:?}"),
             other => panic!("unexpected control message in P1: {other:?}"),
         }
     }
@@ -345,6 +365,26 @@ fn p1_parity_real_binaries_over_quic() {
         idle.poses[&idle_own].pos.offset(),
         DVec3::ZERO,
         "the idle dot never moved"
+    );
+    // THE REALM LANE, measured (audit :774): the home System shard authors per-tick rows for its
+    // five moving planets and the gateway fans them to every subscribed session — so by convergence
+    // BOTH clients have decoded realm datagrams, and the walker's carried real placement rows.
+    assert!(
+        walker.realm_frames > 0 && idle.realm_frames > 0,
+        "the realm lane is ON for both subscribed sessions (walker={}, idle={})",
+        walker.realm_frames,
+        idle.realm_frames,
+    );
+    assert!(
+        walker.realm_rows > 0,
+        "the realm datagrams carried real placement rows (the home system's movers)"
+    );
+    // THE REMOVE LANE, measured: nobody left, so nothing may have been evicted — a spurious
+    // `EntityRemoved` (e.g. an owner-skip violation) is a red gate, not a swallowed message.
+    assert_eq!(
+        walker.evictions + idle.evictions,
+        0,
+        "no EntityRemoved is lawful in this static two-avatar scenario"
     );
 
     // ---- the 2am curl: the admin endpoint shows the live directory -----------

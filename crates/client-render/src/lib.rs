@@ -64,7 +64,10 @@ const WINDOW_H: u32 = 720;
 /// G-RENDER-SMOKE content check measures content against the one true background). Deep-space
 /// BLACK: the starfield is the only sky, so the gaps between stars must read as empty space.
 const CLEAR_SRGB: [f32; 3] = [0.0, 0.0, 0.0];
-const DOT_RADIUS: f32 = 0.5;
+/// The dot marker's BASE world radius (m). `pub` so the pixel gates size the dot's projected
+/// rectangle from the SAME base the renderer draws — through the one shared
+/// `vd_client_harness::camera::marker_world_radius` floor (see `sync_world`'s marker scale).
+pub const DOT_RADIUS: f32 = 0.5;
 /// Reference-scene extents so motion is VISIBLE in the empty stub world (P1.5 has no
 /// terrain): a ground plate + a ring of distinct landmark pillars for parallax. Pure
 /// render scaffolding — replaced wholesale by real terrain at P4, never extended.
@@ -354,8 +357,11 @@ struct ReferenceScaffold;
 /// Despawn the reference scaffolding ONCE real realm content (any [`RealmBox`]) is present. The visual
 /// universe — and the eventual game — ALWAYS has realm spheres, so the ground/pillars belong ONLY to the
 /// empty P1.5 stub world (`render_smoke`, launched with NO `--realm-boxes`), never the SPACE view. Seamless:
-/// they vanish as the boot realm scene loads. Windowed-only — the capture path deliberately keeps them so
-/// `render_smoke`'s empty-world content floor still holds (`render_boxes_smoke` checks the box, not these).
+/// they vanish as the boot realm scene loads. Registered in BOTH schedules: the capture path used to keep
+/// them under a stale justification ("render_boxes_smoke checks the box, not these") — in fact the slab sat
+/// at the origin of every realm-scene capture, inside every projected rectangle the pixel gates counted, so
+/// the gates could pass with no realm box drawn at all (batch review). `render_smoke`'s empty-world content
+/// floor is untouched: with no realm content this is a no-op.
 fn despawn_reference_scaffold(
     boxes: Res<RealmBoxEntities>,
     scaffold: Query<Entity, With<ReferenceScaffold>>,
@@ -617,11 +623,51 @@ fn sync_world(
     mut commands: Commands,
     mut dot_tf: Query<&mut Transform, With<Dot>>,
     mut cam_tf: Query<&mut Transform, (With<FollowCam>, Without<Dot>)>,
+    cam_props: Query<(&Camera, &Projection), With<FollowCam>>,
 ) {
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
     let own = snap.own_entity();
     let rendered = snap.rendered(now_s);
+
+    // THE MARKER FLOOR context (the VU marker phase; batch review): a 0.5 m dot at a scene-fitted
+    // camera's ~780 m eye subtends well under a pixel, so whether it rasterized AT ALL was sampling
+    // luck — no pixel gate could be dot-sensitive, and a distant player was invisible in the window
+    // too. Each dot is scaled so its apparent radius never falls below the shared
+    // `DOT_MIN_APPARENT_RADIUS_PX` floor (`marker_world_radius` — the SAME derivation the gates
+    // size their rectangles from). The camera pose read here is LAST frame's (the capture refit
+    // runs after this system); the fitted camera moves sub-frame per tick, so the scale error is
+    // O(0.1%), far inside the gates' 2× rect bracketing. First-person (windowed) the own dot sits
+    // at the eye ⇒ the base radius stands, byte-identical to the unscaled marker.
+    let marker_eye = cam_tf.iter().next().map(|t| t.translation);
+    let marker_view = cam_props.iter().next().map(|(cam, projection)| {
+        let fov_y = match projection {
+            Projection::Perspective(p) => f64::from(p.fov),
+            // Non-perspective projections do not occur here (both cameras declare Perspective);
+            // fall back to the declared default rather than a magic number.
+            _ => f64::from(PerspectiveProjection::default().fov),
+        };
+        let viewport_h = cam
+            .physical_viewport_size()
+            .map_or(f64::from(CAPTURE_H), |s| f64::from(s.y));
+        (fov_y, viewport_h)
+    });
+    let marker_scale = |world: DVec3| -> Vec3 {
+        let scaled = match (marker_eye, marker_view) {
+            (Some(eye), Some((fov_y, viewport_h))) => {
+                let dist_m = (world - eye.as_dvec3()).length();
+                vd_client_harness::camera::marker_world_radius(
+                    f64::from(DOT_RADIUS),
+                    dist_m,
+                    fov_y,
+                    viewport_h,
+                ) / f64::from(DOT_RADIUS)
+            }
+            // No camera yet (the first frame): the unscaled marker.
+            _ => 1.0,
+        };
+        Vec3::splat(scaled as f32)
+    };
 
     let mut seen: BTreeSet<EntityId> = BTreeSet::new();
     let mut own_world: Option<DVec3> = None;
@@ -636,6 +682,7 @@ fn sync_world(
             Some(&entity) => {
                 if let Ok(mut transform) = dot_tf.get_mut(entity) {
                     transform.translation = world.as_vec3();
+                    transform.scale = marker_scale(world);
                 }
             }
             // New dot: spawn it with the right material (own highlighted).
@@ -649,7 +696,8 @@ fn sync_world(
                     .spawn((
                         Mesh3d(assets.mesh.clone()),
                         MeshMaterial3d(material),
-                        Transform::from_translation(world.as_vec3()),
+                        Transform::from_translation(world.as_vec3())
+                            .with_scale(marker_scale(world)),
                         Dot,
                     ))
                     .id();
@@ -979,7 +1027,13 @@ fn run_capture(handles: RenderHandles) {
             Update,
             (
                 sync_world,
-                sync_realm_boxes,
+                // Sync the realm boxes, then despawn the stub-world scaffolding once they exist —
+                // the SAME pair the windowed schedule runs. The capture path used to keep the
+                // ground plate + pillars forever, which parked a 500 m slab at the origin of every
+                // realm-scene capture and let the pixel gates pass on scaffold paint alone (batch
+                // review: the H2 confound). render_smoke (NO --realm-boxes) still keeps them: with
+                // no realm content the despawn is a no-op, so its content floor stands.
+                (sync_realm_boxes, despawn_reference_scaffold).chain(),
                 // AFTER sync_world so, with a scene loaded, the box-framing view overrides the
                 // follow-the-dot camera (chain: the box camera is the last word on the transform).
                 frame_scene_camera.after(sync_world),
@@ -1018,6 +1072,15 @@ fn setup_capture(
     commands.spawn(ImageCopier::new(handle.clone(), size, &render_device));
     commands.spawn((
         Camera3d::default(),
+        // The SAME projection the windowed camera declares (far bumped past the star sphere) —
+        // parity, so the two cameras cannot diverge on a projection field (batch review: the
+        // capture camera silently kept the 1000 m default `far` while the windowed one overrode it;
+        // Bevy's perspective is infinite-reverse so `far` clips nothing, but an asymmetric
+        // declaration is a drift seed either way).
+        Projection::Perspective(PerspectiveProjection {
+            far: STAR_FAR_PLANE,
+            ..default()
+        }),
         Transform::from_xyz(0.0, 1.6, 0.0).looking_at(Vec3::NEG_Z, Vec3::Y),
         // In Bevy 0.18 RenderTarget is a SEPARATE component (not a Camera field).
         RenderTarget::Image(handle.into()),

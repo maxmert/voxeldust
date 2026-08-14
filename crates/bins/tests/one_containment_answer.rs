@@ -276,6 +276,13 @@ fn the_per_tick_feed_and_the_conversion_context_place_a_child_identically() {
 /// bits, so a change of ONE ulp anywhere on the placement path fails this diff. A byte-identity claim
 /// in the placement arc is a diff of this file, never an argument. Regenerate DELIBERATELY (a slice
 /// that changes the world's numbers says so) with `VD_UPDATE_GOLDEN=1`.
+///
+/// PROVENANCE RIDES IN THE FILE (batch review): the golden's header names WHICH world these bits pin
+/// — the seed and the derived world numbers, read off the same config the boot uses — so a diff from
+/// a world-numbers change NAMES the moved numbers in its own hunk, and a silent regeneration against
+/// a different world is visibly a different world, not 57 indistinguishable data lines. (This golden
+/// was FIRST CAPTURED inside the S4 slice that moved the numbers, so it post-dates S4 by
+/// construction and is a baseline going forward, not evidence about S4 itself.)
 #[test]
 fn every_anchors_child_rows_match_the_golden_vector() {
     let world = the_world();
@@ -286,6 +293,24 @@ fn every_anchors_child_rows_match_the_golden_vector() {
         .map(|r| r.realm)
         .collect();
     let mut lines = Vec::new();
+    // The provenance header — the WORLD IDENTITY these bits pin, from the shipped config itself.
+    let config =
+        vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps(), vd_bins::DEV.tick_dt);
+    lines.push(
+        "# THE world's placement rows, bit-for-bit, through the shipped boot (placement arc S0)."
+            .to_owned(),
+    );
+    lines.push(format!(
+        "# world: seed={SEED} au_to_render_m={} planet_soi_r_m={} ecc_cap={} central_mass_kg={}",
+        config.scale.au_to_render_m,
+        config.planet.planet_soi_r_m,
+        config.planet.ecc_cap,
+        config.stellar.central_mass_kg,
+    ));
+    lines.push(
+        "# Regenerate ONLY with a stated world-numbers change (VD_UPDATE_GOLDEN=1); the slice says so."
+            .to_owned(),
+    );
     for anchor in anchors {
         let (regions, planted) = star_shard(anchor);
         for tick in SAMPLED_TICKS {
@@ -327,13 +352,19 @@ fn every_anchors_child_rows_match_the_golden_vector() {
     );
 }
 
-/// THE FENCE-IN-WAITING (placement arc S0, tripwire 2): a planet's WORST instant is its apoapsis
-/// `a(1+e)`; add the planet's own SOI reach and it must still be inside the system shell it nests in.
-/// The shipped boot fence cannot see this — a mover's stored centre is ZERO, so `child_fits_in_parent`
-/// checks the SIZE and not the orbit (its own words) — and the AU compression solves the outer
-/// SEMI-MAJOR AXIS against the shell, not the apoapsis, so any eccentric outer planet can cross its
-/// own system's surface at apoapsis. Red until the world's numbers move (the compression re-solved
-/// against apoapsis); the failure lists every escaping planet with its numbers.
+/// THE RELEASE-EDGE TRIPWIRE (placement arc S0 tripwire 2, re-scoped after S4 — batch review): a
+/// planet's WORST instant is its apoapsis `a(1+e)` (deliberately RESTATED here rather than read off
+/// `Motion::max_excursion_m`, so a generator regression and an accessor regression are caught by
+/// different tests); add the planet's own SOI **and the containment band's release outset** — the
+/// edge containment actually RELEASES at, 2 m past the SOI face — and it must still sit inside the
+/// system shell. GREEN since the world's numbers moved (the S4 apoapsis-solved compression,
+/// D-PLACE-1; this doc used to still call the test "red until the world's numbers move" long after
+/// they had — the batch review's stale-known-red class). The generator solves `apoapsis + soi` to
+/// `shell − 4 m` at the ecc cap, so the bare SOI-face half holds BY CONSTRUCTION and would only fire
+/// on a solve regression; the release-outset term is what this gate adds beyond the solve
+/// (146 + 2 = 148 < 150 today) — the tripwire that fires if the outset ever outgrows the solve's
+/// stated headroom. The shipped boot fence (`child_reaches` → `guard_regions_nest`) independently
+/// judges every mover at its apoapsis; the failure here lists every escaping planet with its numbers.
 #[test]
 fn every_planets_apoapsis_plus_its_soi_stays_inside_its_systems_shell() {
     let world = the_world();
@@ -343,6 +374,12 @@ fn every_planets_apoapsis_plus_its_soi_stays_inside_its_systems_shell() {
         .filter(|r| world.regions().iter().any(|c| c.parent == Some(r.realm)))
         .map(|r| r.realm)
         .collect();
+    // The release outset from the SAME config the boot builds THE world with — the 2 m past the SOI
+    // face at which containment actually lets go of an occupant.
+    let release_outset_m =
+        vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps(), vd_bins::DEV.tick_dt)
+            .band
+            .outset_m;
     let mut escapes = Vec::new();
     for anchor in anchors {
         let held = BTreeSet::from([anchor]);
@@ -367,14 +404,16 @@ fn every_planets_apoapsis_plus_its_soi_stays_inside_its_systems_shell() {
                 .shape
                 .circumscribed_extent();
             let apoapsis = elements.sma * (1.0 + elements.ecc);
-            if apoapsis + soi > shell {
+            if apoapsis + soi + release_outset_m > shell {
                 escapes.push(format!(
-                    "  {:?} under {:?}: apoapsis {:.6} m + soi {:.6} m = {:.6} m > shell {:.6} m",
+                    "  {:?} under {:?}: apoapsis {:.6} m + soi {:.6} m + release outset {:.6} m \
+                     = {:.6} m > shell {:.6} m",
                     realm,
                     anchor,
                     apoapsis,
                     soi,
-                    apoapsis + soi,
+                    release_outset_m,
+                    apoapsis + soi + release_outset_m,
                     shell,
                 ));
             }
@@ -383,9 +422,64 @@ fn every_planets_apoapsis_plus_its_soi_stays_inside_its_systems_shell() {
     assert_eq!(
         escapes.join("\n"),
         "",
-        "\nA PLANET LEAVES ITS OWN SYSTEM AT APOAPSIS:\n{}\n",
+        "\nA PLANET'S CONTAINMENT RELEASE EDGE LEAVES ITS OWN SYSTEM AT APOAPSIS:\n{}\n",
         escapes.join("\n"),
     );
+}
+
+/// THE ZERO-REACH HOLE, closed (batch review, MAJOR): a shard that does NOT host a mover's parent
+/// still PLANTS that mover's row — its own row on a planet shard, an ancestor's mover elsewhere —
+/// and a mover's stored centre is ZERO by construction. The reach map used to key on the hosted
+/// shard's own moving roster, so that row fell to `ChildReach::Fixed(0,0,0)`: the size-only verdict
+/// the fence was rebuilt to ban (`RegionNestError::NoReachForChild`'s own words call a defaulted
+/// zero banned), and ONE forest got a DIFFERENT verdict per shard. `child_reaches` now derives its
+/// roster from THE world for every parent the neighbourhood names, so the mover is judged at its
+/// apoapsis on EVERY shard that plants it — an Excursion, never a defaulted Fixed(0).
+#[test]
+fn a_shard_that_does_not_host_a_movers_parent_still_judges_it_at_apoapsis() {
+    let world = the_world();
+    let (star, _) = a_star_and_its_children(&world);
+    // The mover as its PARENT authors it: the star shard's own roster (the strict verdict's source).
+    let held_star = BTreeSet::from([star]);
+    let (_, star_movers) = vd_bins::boot_regions_and_movers(
+        SEED,
+        &held_star,
+        star,
+        occupant_v_max_mps(),
+        vd_bins::DEV.tick_dt,
+    );
+    let (planet, elements) = star_movers
+        .iter()
+        .min_by(|a, b| a.1.sma.total_cmp(&b.1.sma))
+        .map(|(realm, elements)| (*realm, *elements))
+        .expect("THE world's home system authors movers");
+
+    // The PLANET shard's own boot — the shard that does NOT host the mover's parent.
+    let held = BTreeSet::from([planet]);
+    let (regions, moving) = vd_bins::boot_regions_and_movers(
+        SEED,
+        &held,
+        planet,
+        occupant_v_max_mps(),
+        vd_bins::DEV.tick_dt,
+    );
+    assert!(
+        moving.is_empty(),
+        "the hole's precondition: a planet of THE world authors no movers of its own, so a reach \
+         map keyed on ITS roster would know nothing of the planet's orbit"
+    );
+    let reaches =
+        vd_bins::child_reaches(SEED, &regions, occupant_v_max_mps(), vd_bins::DEV.tick_dt);
+    assert_eq!(
+        reaches[&planet],
+        vd_core::geometry::ChildReach::Excursion(elements.sma * (1.0 + elements.ecc)),
+        "the mover's own row is judged at its APOAPSIS on the shard it homes — never the defaulted \
+         Fixed(0,0,0) its zeroed stored centre used to become"
+    );
+    // And the whole fence reaches the SAME verdict this forest gets on the parent's shard: one
+    // forest, one answer, on every shard.
+    vd_core::geometry::guard_regions_nest(&regions, vd_sim::stub::MAX_REGIONS, &reaches)
+        .expect("the planet shard's boot fence passes with the mover judged at apoapsis");
 }
 
 /// THE SYMPTOM, stated as a property: an occupant standing where the star says a child IS must be

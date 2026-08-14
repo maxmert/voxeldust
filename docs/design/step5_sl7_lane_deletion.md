@@ -251,7 +251,8 @@ gateway is not a realm-boundary crossing; that lane (EntitySnap, channels.rs:230
   stores ONE `FromAboveScene` (replaces Forwarded/RelayedProxyScene), and restates into its own
   live children — the depth≥3 orphan case dissolves structurally. ⚠ Named SL3 debt, carried
   knowingly: the parent still ships sibling OUTLINES down; it retires when a realm authors its
-  own look (SL3 end-state), ledgered in DEFERRED.md.
+  own look (SL3 end-state), ledgered as D-LANE-4 in DEFERRED.md (held on an owner world-design
+  ruling — a non-running realm drawing nothing means an empty system is invisible until spun up).
 - **Ghost feed shrunk to its lawful residue**: KEEP the retained dot at demote (return-crossing
   target + the render fill at its OWN-frame demote pose), `HandoffHolds`/`speaks_for`, and
   `Despawn` (band-exit, carries no pose). ADD `GhostFlow::SpawnV2 { entity, source_fence,

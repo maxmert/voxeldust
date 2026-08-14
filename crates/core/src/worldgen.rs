@@ -177,6 +177,47 @@ pub fn ancestor_realms(all: &[RealmRegion], hosted_realm: RealmId) -> Vec<RealmI
 
 // ===== The render-origin PIN classifier =============================================================
 //
+/// THE LOWERED WORLD — the containment forest held as a value, answering exactly the questions the
+/// connection plane asks of a world: what regions exist, which of them a holder evaluates, and
+/// whether a named realm is real. It is `vd_physics::worldgen::WorldView` AFTER lowering — the
+/// bodies (and every orbit element) do not survive into it, which is what lets the gateway hold a
+/// world without a dependency edge to the motion crate (SL4: the routing plane is a placement
+/// CONSUMER; the batch review found the crate-fence carved open for it). Built by the composition
+/// root from a `WorldView` (`WorldView::lowered`); never constructed from a seed here — vd-core
+/// cannot mint a body (the split rule above).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldRealms {
+    regions: Vec<RealmRegion>,
+}
+
+impl WorldRealms {
+    /// Hold an already-lowered forest. The caller (the composition root) is the party that decided
+    /// which world this is; nothing here can generate one.
+    #[must_use]
+    pub fn new(regions: Vec<RealmRegion>) -> WorldRealms {
+        WorldRealms { regions }
+    }
+
+    /// The containment forest — what a shard evaluates membership against.
+    #[must_use]
+    pub fn regions(&self) -> &[RealmRegion] {
+        &self.regions
+    }
+
+    /// The regions a shard holding `held` evaluates: ancestors ∪ direct children, never siblings.
+    #[must_use]
+    pub fn neighbourhood(&self, held: &std::collections::BTreeSet<RealmId>) -> Vec<RealmRegion> {
+        neighbourhood_scope(&self.regions, held)
+    }
+
+    /// Is this realm part of this world? (The honest form of the check that once consulted a
+    /// DIFFERENT world than the one that produced the answer being checked.)
+    #[must_use]
+    pub fn contains_realm(&self, realm: RealmId) -> bool {
+        self.regions.iter().any(|r| r.realm == realm)
+    }
+}
+
 // What used to sit here was the seed-derived ORIGIN CHAIN: a realm's shard folded its whole ancestor
 // chain up to the universe root to work out its own absolute position, and shipped every occupant at
 // that absolute. It is gone, and it must not come back under another name.
@@ -225,10 +266,10 @@ pub fn pin_realm_of(chain_realms: &[RealmId]) -> RealmId {
 // ===== UniverseConfig (D-45(a) Slice 3b) — the ONE config home ==========================
 //
 // The ~15 placeholder consts above become NAMED fields of six sub-structs (NOT a god-struct).
-// `walk_scale()` reproduces today's EXACT metre-scale geometry (the byte-identity source);
-// `canonical()` is the real-scale (AU/ly) tuning — PLANTED but not live as containment regions
-// until the D-41 non-zero-cell re-quantization (P4/P5); `seed_derived()` perturbs canonical
-// within documented bounds. Nothing consumes this yet — 3c wires the generator onto it.
+// `walk_scale()` reproduces today's EXACT metre-scale geometry (the byte-identity source).
+// (The `canonical()`/`seed_derived()` real-scale presets are DELETED — SL5, Stage-C audit :866:
+// zero production callers; true astronomical scale is an owed change to THE ONE world, never a
+// parallel preset.)
 
 /// The loiter grace as a DURATION (seconds) — converted to ticks against the live `tick_dt_s` at boot
 /// ([`grace_ticks_from_seconds`]), so it is correct at any tick rate. The SINGLE loiter-duration constant in
@@ -377,6 +418,39 @@ mod tests {
             1,
         ));
         assert_eq!(level_of(ship), None);
+    }
+
+    #[test]
+    fn a_lowered_world_answers_the_connection_planes_three_questions() {
+        // WorldRealms: regions() is the held forest verbatim; neighbourhood() is the shared
+        // ancestors-∪-direct-children scope; contains_realm() is a membership test with both
+        // verdicts exercised (the `any` closure's true AND false arms — HR5).
+        use crate::geometry::{AoiConfig, Boundary, ContainmentBand, RealmRegion};
+        use crate::pose::{FrameRef, LatticePos};
+        let region = |realm: RealmId, parent: Option<RealmId>| RealmRegion {
+            realm,
+            center: LatticePos::local(DVec3::ZERO),
+            frame: FrameRef::SystemSpace { system_seed: 0 },
+            shape: Boundary::Shell { r: 1.0 },
+            band: ContainmentBand::for_containment_velocity_safe(1.0, 2.0, 0.0, 1.0, 0.0)
+                .expect("valid test band"),
+            aoi: AoiConfig::inert(),
+            parent,
+        };
+        let forest = vec![
+            region(UNIVERSE, None),
+            region(GALAXY, Some(UNIVERSE)),
+            region(SYSTEM_A, Some(GALAXY)),
+            region(SYSTEM_B, Some(GALAXY)),
+        ];
+        let world = WorldRealms::new(forest.clone());
+        assert_eq!(world.regions(), forest.as_slice());
+        // Ancestors ∪ direct children of the held realm — never its sibling.
+        let held = std::collections::BTreeSet::from([SYSTEM_A]);
+        let scoped: Vec<RealmId> = world.neighbourhood(&held).iter().map(|r| r.realm).collect();
+        assert_eq!(scoped, vec![UNIVERSE, GALAXY, SYSTEM_A]);
+        assert!(world.contains_realm(SYSTEM_B));
+        assert!(!world.contains_realm(PLANET_A));
     }
 
     #[test]

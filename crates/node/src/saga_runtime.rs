@@ -1632,8 +1632,9 @@ fn handle_crossing_request(
                 needs_provision: false,
                 from_realm: req.from_realm,
                 to_realm: req.to_realm,
-                // Thread the dest realm's parent provenance the SOURCE detector filled — so `build_crossing`'s
-                // `rebind_pose_to_dest` forms an Area frame (the "Area label never flips" fix).
+                // Thread the request's `to_parent` VERBATIM — a ★DEAD wire field kept for shape only
+                // (its consumer `rebind_pose_to_dest` is deleted, D-PLACE-1; the dest forms an Area
+                // frame from its own roster at adopt). Flag-day removal ledgered D-WIRE-1.
                 to_parent: req.to_parent,
             };
             let gateway = sess_rec.authority.node();
@@ -2084,12 +2085,13 @@ fn rehome_transfer_id(subject: DirectoryKey, prev_fence: Fence) -> TransferId {
 /// checkpoint reload (D-6/P7), NOT this ctx — so `session`/`from_realm` are NEVER read by the re-home path;
 /// they are derived from the entity for replay-determinism + the shared WAL snapshot shape.
 ///
-/// `to_realm` CAVEAT (frame-rebinding): `build_rehome` now rebinds the flushed pose into `to_realm`'s frame,
-/// so `to_realm` IS read WHEN a pose is present. This standing-reaper path is safe because it ALWAYS parks
-/// with `flushed_pose: None` (a pre-flush death has no recoverable pose — see `process_rehome_starts`), so
-/// the `rebind_pose_to_dest` call is never reached and the entity-derived placeholder stays inert. WHEN
-/// Slice-4/P7 sources a REAL pose from the RealmId-keyed checkpoint, it MUST supply the true destination
-/// realm here (not the `System(entity)` placeholder) or the pose will be rebound into the wrong frame.
+/// `to_realm` CAVEAT: `build_rehome` ships the flushed pose VERBATIM (the RECEIVER places it —
+/// `place_arriving_pose`; the old rebind consumer is deleted, D-PLACE-1), so `to_realm` matters WHEN a
+/// pose is present. This standing-reaper path is safe because it ALWAYS parks with `flushed_pose: None`
+/// (a pre-flush death has no recoverable pose — see `process_rehome_starts`), so the entity-derived
+/// placeholder stays inert. WHEN Slice-4/P7 sources a REAL pose from the RealmId-keyed checkpoint, it
+/// MUST supply the true destination realm here (not the `System(entity)` placeholder) or the receiver
+/// will place the pose against the wrong realm.
 fn rehome_ctx(
     subject: DirectoryKey,
     prev_fence: Fence,
@@ -2114,10 +2116,9 @@ fn rehome_ctx(
         dest: target,
         class: vd_core::entity_kind::DurabilityClass::Durable,
         needs_provision: false,
-        // `None`: the standing reaper ALWAYS parks with `flushed_pose: None` (a pre-flush death has no
-        // recoverable pose — see the `to_realm` CAVEAT above), so `build_rehome`'s `rebind_pose_to_dest` is
-        // never reached and this parent is inert. WHEN Slice-4/P7 sources a REAL pose from the RealmId-keyed
-        // checkpoint, it must supply the true dest parent here (with the true `to_realm`) for an Area target.
+        // `None`: a ★DEAD wire field either way (its consumer is deleted, D-PLACE-1/D-WIRE-1) — and the
+        // standing reaper ALWAYS parks with `flushed_pose: None` (a pre-flush death has no recoverable
+        // pose — see the `to_realm` CAVEAT above), so nothing downstream could even reach a pose here.
         to_parent: None,
     }
 }
@@ -6760,8 +6761,9 @@ mod tests {
         assert_eq!(ctx.class, DurabilityClass::Durable);
         assert_eq!(ctx.from_realm, FROM_REALM);
         assert_eq!(ctx.to_realm, TO_REALM);
-        // The parent-provenance the SOURCE detector supplied was threaded VERBATIM onto the saga ctx (so
-        // `build_crossing`'s `rebind_pose_to_dest` can form an Area frame) — never dropped at the resolver.
+        // The parent-provenance the SOURCE detector supplied was threaded VERBATIM onto the saga ctx —
+        // a wire-SHAPE pin: the field is ★DEAD (its consumer is deleted, D-PLACE-1/D-WIRE-1), but the
+        // resolver must still carry it unchanged until the flag-day removal.
         assert_eq!(ctx.to_parent, Some(FROM_REALM));
         assert_eq!(rig.live(), 1);
         assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 1);

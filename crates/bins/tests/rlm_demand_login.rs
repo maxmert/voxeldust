@@ -606,7 +606,7 @@ fn galaxy_label(p: &DevClusterParams) -> String {
 /// WHY IT NOW WORKS (was the flap): (1) a mover's `region.center` is ZERO, so the planet's SOI is centered
 /// on the planet itself (not shifted ~one orbit off) — the source + the planet shard compute the SAME
 /// containment; (2) the SOURCE rebases the flushed pose into the planet's LIVE frame at flush
-/// (`on_flush_source` via `LocalFrames`), so the planet shard reads the occupant at its own origin (inside),
+/// (`flush_pose_for_dest`, reading the authored placement book), so the planet shard reads the occupant at its own origin (inside),
 /// AGREEING with the source. Both together ⇒ the two shards no longer disagree ⇒ no flap ⇒ the re-home
 /// completes. (Was `#[ignore]`d as the known-failing repro before the fix landed.)
 ///
@@ -728,8 +728,9 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
 /// user's report) is fixed; this narrower residual is the next slice. The tail below OBSERVES it (logs the
 /// owed status) rather than panicking, so the landed fixes gate green; flip it to a hard assert when D-RLM-14
 /// lands. This is a ROUND-TRIP: two rehomes, proving the crossing machinery survives repeated System↔Planet
-/// moves. A large epoch-invariant orbit slowdown keeps the fly targets fixed; the knob is reset at the END (a
-/// leak would quasi-freeze a later full-speed test).
+/// moves — at FULL orbit speed (the slowdown knob is DELETED, SL5): the fly-in is the shared rendezvous
+/// and the fly-out steers at a fixed far waypoint whose exact heading is immaterial (any sustained
+/// displacement exits the ~4 m planet SOI into open System space).
 #[test]
 fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
@@ -847,10 +848,12 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     // Dwell so System's retained proxy ages out — the exact reap window the keep-alive must survive/re-spin.
     std::thread::sleep(Duration::from_secs(3));
 
-    // ── FLY OUT INWARD toward the star (≈ -epoch in the planet frame) until `location` returns to System 7. ──
-    // The inner planet is the CLOSEST to the star and well inside System 7's 150 m SOI, so heading INWARD
-    // exits the planet's tiny SOI straight into OPEN System space — no sibling confound (siblings orbit
-    // farther out). This is the RETURN crossing whose dest is the OLD, reap-eligible System.
+    // ── FLY OUT at a fixed far waypoint (−1.5× the planet's tick-0 epoch position, planet frame) until
+    // `location` returns to System 7. At FULL orbit speed that direction is "toward the star" only at
+    // tick 0 — which is fine, and stated honestly (batch review: the old comment kept the epoch-fixed
+    // rationale after the slowdown knob died): the waypoint's ~23 m magnitude dwarfs the planet's ~4 m
+    // SOI, so ANY sustained displacement exits into open System space, and the loop re-issues the walk
+    // until the label flips. This is the RETURN crossing whose dest is the OLD, reap-eligible System.
     let out_deadline = Instant::now() + Duration::from_secs(90);
     loop {
         if poll(out_deadline).location.as_deref() == Some("System 7") {
@@ -1045,10 +1048,11 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
         cross_to("System 7", -epoch * 1.5, "fly-out", cycle);
         // DIAGNOSE which feed dies after the return: snapshots_applied = the ENTITY feed (the own pose — its
         // stall is the real WASD-dead freeze); realm_frames_applied = the REALM feed (the D-RLM-14 silence);
-        // own pose moving under injected input proves input still lands. The steer target is the PLANET (the
-        // next cycle's fly-in), NEVER a point further out: dragging the avatar away from the loop's own
-        // target would leave each cycle a longer trip than the last and eventually time out for want of
-        // travel time — a fixture artifact that masquerades as a freeze.
+        // own pose moving under injected input proves input still lands. The steer target is the planet's
+        // TICK-0 EPOCH POSITION — a fixed in-system point roughly where the next cycle's rendezvous begins,
+        // NEVER a point further out: dragging the avatar away from the loop's own target would leave each
+        // cycle a longer trip than the last and eventually time out for want of travel time — a fixture
+        // artifact that masquerades as a freeze.
         let t0 = tick_now();
         for i in 0..8 {
             let _ = devctl(
@@ -1098,7 +1102,6 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
         eprintln!("[repro] cycle {cycle}: returned to System 7 — tick live ({t0} -> {t1})");
     }
     eprintln!("[repro] survived {CYCLES} Planet↔System round-trips — no freeze");
-    // (The orbit-slowdown knob clears at the `OrbitSlowdown` guard's drop — panic-safe.)
 }
 
 /// THE EXIT-THE-SYSTEM GATE (owner report 2026-08-13: "when I exit the system planets are frozen").

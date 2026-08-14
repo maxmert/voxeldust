@@ -214,6 +214,25 @@ mod tests {
     }
 
     #[test]
+    fn a_roster_wraps_every_mover_into_the_motion_made_opaque() {
+        // The MAP form (`kepler_motion_fns`) — covered IN THIS CRATE, at the production `RealmId`
+        // instantiation (HR5 discipline (b): llvm counts a generic's regions per monomorphization
+        // per test binary, and every other instantiation site rides vd-sim's DEV-ONLY edge, which
+        // the planned writer-in-node rework (D-PLACE-4) deletes — without an in-crate test this fn
+        // would silently VANISH from the 100% gate rather than fail it; batch review).
+        use vd_core::pose::RealmId;
+        let movers = std::collections::BTreeMap::from([
+            (RealmId::Planet(7), elements()),
+            (RealmId::Planet(8), elements()),
+        ]);
+        let fns = kepler_motion_fns(movers);
+        assert_eq!(fns.len(), 2, "one opaque fn per mover, keyed identically");
+        for f in fns.values() {
+            assert_eq!((f.0)(42.0), Motion::Kepler(elements()).state_at(42.0));
+        }
+    }
+
+    #[test]
     fn a_motion_fn_is_the_motion_made_opaque() {
         // The seam: the closure's answers are the motion's answers, bit for bit — and its type names
         // nothing (the simulation can run it, never ask what it is).

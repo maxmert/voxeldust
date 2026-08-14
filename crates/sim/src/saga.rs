@@ -53,11 +53,11 @@ pub struct SagaCtx {
     /// the dest finds the adopted dot by entity, so these are faithful provenance, not a key.
     pub from_realm: RealmId,
     pub to_realm: RealmId,
-    /// The dest realm's PARENT provenance — threaded from `CrossingRequest.to_parent` (the SOURCE detector
-    /// fills it from the container region's `parent`). The saga carries it VERBATIM to
-    /// `rebind_pose_to_dest(flush_pose, to_realm, to_parent)` so an `Area` dest's `{planet_seed, area_seed}`
-    /// frame forms (the "Area label never flips" fix). `None` for every non-Area re-home and for the
-    /// non-crossing constructions (D-37 standing re-home, which parks pre-flush and never rebinds).
+    /// ★DEAD FIELD — threaded VERBATIM from `CrossingRequest.to_parent`, whose consumer
+    /// (`rebind_pose_to_dest`) has since been DELETED (D-PLACE-1): nothing reads it on the saga path;
+    /// the RECEIVER forms an `Area` dest's frame from its own roster at adopt (`place_arriving_pose`).
+    /// Kept because the saga ctx mirrors the frozen wire carriers (postcard is positional); flag-day
+    /// removal ledgered D-WIRE-1. `None` for every non-crossing construction.
     pub to_parent: Option<RealmId>,
 }
 

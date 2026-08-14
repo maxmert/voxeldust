@@ -560,39 +560,66 @@ fn the_client_is_told_the_realm_it_is_standing_in_after_a_crossing() {
 //
 // Every gate above runs on the walk world, whose planet is a TEN-METRE body sitting still twenty metres
 // from its star. The world the game actually boots is not that: a 150 m star system holding planets whose
-// whole authority sphere is about FOUR metres, orbiting seventeen metres out at four and a half metres a
-// second. The numbers below are that world's, taken from its own generator and from a live cluster run.
+// whole authority sphere is about FOUR metres, orbiting some fifteen metres out at metres a second. The
+// numbers below are that world's — DERIVED from its generator AT USE, never transcribed: the transcribed
+// copies this section used to carry stayed at the pre-S4 values when the S4 apoapsis re-solve moved the
+// world (planet SOI 4.1607 → 3.954 m), so the fixture quietly proved an EASIER arrival than the game
+// ships (batch review, MAJOR — the exact drift class the walk gates were indicted for).
 //
 // WHY IT MATTERS, and it is the reason a green suite sat beside an unplayable game all day: the entry
 // margin is a FIXED one metre. On a ten-metre planet that is a tenth of the body and an arrival can be a
 // metre or two out and still land comfortably inside. On a four-metre planet it is a quarter, and the same
 // arithmetic error puts the occupant OUTSIDE the realm that just accepted it — whereupon that realm hands
 // it straight back, the parent hands it down again, and the player is trapped in the loop the owner flew.
-//
-/// The star system's own boundary in the shipped demand world.
-const DEMAND_SYSTEM_SOI_M: f64 = 150.0;
-/// A planet's WHOLE authority sphere there — a quarter the size of the walk world's, against the SAME
-/// one-metre entry margin. This is the number that turns a tolerable arrival error into a trap.
-const DEMAND_PLANET_SOI_M: f64 = 4.16;
-/// How far out the inner planet orbits (`epoch_len` printed by the live demand gate).
-const DEMAND_PLANET_ORBIT_M: f64 = 17.9;
-/// Its period, derived from the speed the live cluster measured (13.27 m in 3 s ⇒ 4.42 m/s over a
-/// circumference of 2·pi·17.9), so the planet sweeps the waiting occupant at the speed it really does.
-const DEMAND_ORBIT_PERIOD_S: f64 = 25.4;
 
-/// The demand world's turn for the planet: circular, in-plane, phase at zero, on its real shell.
+/// THE world's config, exactly as the shipped boot builds it. The two arguments feed the AoI band
+/// only — inert in these fixtures (`AoiConfig::inert()`); the geometry (shells, orbits, mass) is the
+/// same for any values, so the walk fixtures' own speed/tick pair is passed for parity.
+fn demand_config() -> UniverseConfig {
+    UniverseConfig::world(15.0, 0.05)
+}
+
+/// The star system's own boundary in the shipped demand world — read off the generator.
+fn demand_system_soi_m() -> f64 {
+    demand_config().stellar.system_soi_r_m
+}
+
+/// A planet's WHOLE authority sphere there — a fraction of the walk world's, against the SAME
+/// one-metre entry margin. This is the number that turns a tolerable arrival error into a trap, and
+/// the one the S4 re-solve moved (4.1607 → 3.954 m) while the transcribed copy sat still.
+fn demand_planet_soi_m() -> f64 {
+    demand_config().planet.planet_soi_r_m
+}
+
+/// THE world's own INNER mover (smallest semi-major axis), from the same generator call the shipped
+/// boot makes — its orbit radius and its real central mass (so the sweep speed is the world's own).
+fn demand_inner_elements() -> OrbitalElements {
+    moving_children_for_config(0, &demand_config(), SYSTEM)
+        .into_iter()
+        .min_by(|a, b| a.1.sma.total_cmp(&b.1.sma))
+        .map(|(_, e)| e)
+        .expect("THE world's home system authors movers")
+}
+
+/// How far out the fixture's planet orbits — the real inner mover's semi-major axis.
+fn demand_planet_orbit_m() -> f64 {
+    demand_inner_elements().sma
+}
+
+/// The demand world's turn for the planet: circular, in-plane, phase at zero, on the REAL inner
+/// mover's shell around the REAL central mass — so the planet sweeps the waiting occupant at the
+/// speed the shipped world actually turns at (the draw-dependent shape — ecc, inclination, phase —
+/// is stripped so the wait-point geometry stays deterministic across seeds).
 fn demand_orbit() -> OrbitalElements {
-    let a = DEMAND_PLANET_ORBIT_M;
-    let mu = 4.0 * std::f64::consts::PI * std::f64::consts::PI * a.powi(3)
-        / (DEMAND_ORBIT_PERIOD_S * DEMAND_ORBIT_PERIOD_S);
+    let real = demand_inner_elements();
     OrbitalElements {
-        sma: a,
+        sma: real.sma,
         ecc: 0.0,
         inclination: 0.0,
         raan: 0.0,
         arg_periapsis: 0.0,
         mean_anomaly_epoch: 0.0,
-        central_mass: mu / G,
+        central_mass: real.central_mass,
     }
 }
 
@@ -622,7 +649,7 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
             center: vd_core::pose::LatticePos::local(DVec3::ZERO),
             frame: FrameRef::SystemSpace { system_seed: 7 },
             shape: Boundary::Shell {
-                r: DEMAND_SYSTEM_SOI_M,
+                r: demand_system_soi_m(),
             },
             band,
             aoi: AoiConfig::inert(),
@@ -634,7 +661,7 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
             center: vd_core::pose::LatticePos::local(DVec3::ZERO),
             frame: FrameRef::PlanetCentered { planet_seed: 7 },
             shape: Boundary::Shell {
-                r: DEMAND_PLANET_SOI_M,
+                r: demand_planet_soi_m(),
             },
             band,
             aoi: AoiConfig::inert(),
@@ -669,7 +696,7 @@ fn entering_a_real_sized_planet_lands_inside_it_and_does_not_trade_the_player_ba
     plant_regions(&mut topo, SHARD, demand_forest(), BTreeMap::new());
 
     // OUT to the star first, so the hand-off INTO the planet is made by the star, from the star.
-    let out = DVec3::new(DEMAND_PLANET_SOI_M * 3.0, 0.0, 0.0);
+    let out = DVec3::new(demand_planet_soi_m() * 3.0, 0.0, 0.0);
     assert!(
         step_until(&mut topo, 600, |t| {
             set_shard_subject_offset(t, SHARD, subject, out);
@@ -681,7 +708,7 @@ fn entering_a_real_sized_planet_lands_inside_it_and_does_not_trade_the_player_ba
     // WAIT ON THE ORBIT: hold the occupant at the planet's epoch point, in the star's frame. The planet
     // is on that shell for its whole turn, so it sweeps over the waiting occupant — which is exactly how
     // the owner met it, and how the live demand gate drives it.
-    let wait_at = DVec3::new(DEMAND_PLANET_ORBIT_M, 0.0, 0.0);
+    let wait_at = DVec3::new(demand_planet_orbit_m(), 0.0, 0.0);
     let mut arrival: Option<vd_core::pose::StampedPose> = None;
     let landed = step_until(&mut topo, 1200, |t| {
         set_shard_subject_offset(t, DEST, subject, wait_at);
@@ -696,14 +723,15 @@ fn entering_a_real_sized_planet_lands_inside_it_and_does_not_trade_the_player_ba
     );
     let arrived = arrival.expect("just captured");
     let from_centre = arrived.pos.offset().length();
+    let planet_soi_m = demand_planet_soi_m();
     println!(
         "[real-sized arrival] {from_centre:.6} m from the planet's centre, boundary \
-         {DEMAND_PLANET_SOI_M} m, entry margin 1 m"
+         {planet_soi_m} m, entry margin 1 m"
     );
 
     assert!(
-        from_centre < DEMAND_PLANET_SOI_M,
-        "the occupant landed {from_centre} m from the centre of a {DEMAND_PLANET_SOI_M} m planet — \
+        from_centre < planet_soi_m,
+        "the occupant landed {from_centre} m from the centre of a {planet_soi_m} m planet — \
          OUTSIDE the realm that just accepted it. The planet sees that on its next tick and hands them \
          back; the star sees them inside its planet and hands them down; and the player cannot leave. \
          This is the owner's loop, and the walk-scale gates cannot see it because their planet is two \
@@ -1515,6 +1543,56 @@ fn placeable_frames(topo: &mut Topology, node: NodeId) -> BTreeMap<String, bool>
     })
 }
 
+/// The chain's PLAYER-BUILT sibling at the STAR level: a second planet beside Planet 7, in range of the
+/// occupied planet's own interest. The box the SL1 filter leaves as the lawful carrier of the two-
+/// subtraction descent: the area IS entitled to see it, and it can only arrive through the star's
+/// reflect (subtract 20) and the planet's onward reflect (subtract 5) — two hosts, two subtractions.
+const CHAIN_PLANET2: RealmId = RealmId::Planet(8);
+/// ...and at the PLANET level: a second area beside Area 7, in range of the occupied area's interest.
+const CHAIN_AREA2: RealmId = RealmId::Area(8);
+/// Where the fixture puts the second planet, in the STAR's frame. Off Planet 7 on a DIFFERENT axis
+/// (21 m of +Y against the chain's all-X offsets), so a descent that subtracted on the wrong axis — or
+/// twice — cannot pass; and 21 m centre-to-centre keeps the two 10 m shells disjoint while staying
+/// inside the occupied planet's interest band (dist 21 − reach 10 = 11 ≤ spin-up 12).
+const CHAIN_PLANET2_FROM_STAR: DVec3 = DVec3::new(CHAIN_PLANET_FROM_STAR_M, 21.0, 0.0);
+/// Where it puts the second area, in the PLANET's frame — same different-axis discipline (7 m of +Y),
+/// inside the planet's 10 m shell, disjoint from Area 7's box, inside the occupied area's interest.
+const CHAIN_AREA2_FROM_PLANET: DVec3 = DVec3::new(CHAIN_AREA_FROM_PLANET_M, 7.0, 0.0);
+/// The second planet's boundary — a shell the size a walk-scale planet takes (the seed forest's own
+/// planet is the precedent; a player-built body carries its size as per-entity data).
+const CHAIN_PLANET2_SOI_R_M: f64 = 10.0;
+/// The second area's box half-extent — the size the seed forest's own area takes.
+const CHAIN_AREA2_HALF_M: f64 = 3.0;
+
+/// A PLAYER-BUILT sibling region with the SAME live band derivation the planted seed neighbourhood
+/// carries (`walk_demand`'s one interest formula over the body's own extent — no second band source).
+fn chain_sibling_region(
+    realm: RealmId,
+    parent: RealmId,
+    center: DVec3,
+    shape: vd_core::geometry::Boundary,
+    v_max: f64,
+    dt: f64,
+) -> vd_core::geometry::RealmRegion {
+    let cfg = UniverseConfig::walk_demand(v_max, dt);
+    vd_core::geometry::RealmRegion {
+        realm,
+        center: vd_core::pose::LatticePos::local(center),
+        frame: vd_core::pose::frame_for_realm(realm, Some(parent))
+            .expect("a planet/area sibling has a canonical frame"),
+        shape,
+        band: cfg
+            .band
+            .build()
+            .expect("containment band edges are valid by construction"),
+        aoi: cfg
+            .interest
+            .build(shape.finite_extent(), 0.0)
+            .expect("aoi band edges are valid by construction"),
+        parent: Some(parent),
+    }
+}
+
 /// Boot the three-level chain with a real logged-in player standing in the AREA, every shard armed with
 /// the REAL seed geometry and LIVE interest bands, and return the topology plus the avatar's entity id.
 fn boot_the_chain(fabric: &FaultFabric) -> (Topology, EntityId) {
@@ -1566,13 +1644,37 @@ fn boot_the_chain_with(
         let cfg = vd_tests::area_stub_config();
         (cfg.move_speed_mps * cfg.time_multiplier, cfg.tick_dt_s)
     };
+    // The PLAYER-BUILT siblings, one per level (the SL1 gate rewrite's lawful boxes): the star gets a
+    // second planet on its roster, the planet a second area — placed exactly as a player would place
+    // a structure, beside the seed neighbourhood, never inside a second world.
+    let planet2 = chain_sibling_region(
+        CHAIN_PLANET2,
+        SYSTEM,
+        CHAIN_PLANET2_FROM_STAR,
+        vd_core::geometry::Boundary::Shell {
+            r: CHAIN_PLANET2_SOI_R_M,
+        },
+        v_max,
+        dt,
+    );
+    let area2 = chain_sibling_region(
+        CHAIN_AREA2,
+        PLANET,
+        CHAIN_AREA2_FROM_PLANET,
+        vd_core::geometry::Boundary::Aabb {
+            half: DVec3::splat(CHAIN_AREA2_HALF_M),
+        },
+        v_max,
+        dt,
+    );
     let none = BTreeMap::new();
-    for (node, realm) in [
-        (SHARD, CHAIN_AREA),
-        (CHAIN_MID, PLANET),
-        (CHAIN_TOP, SYSTEM),
+    let no_extras: Vec<vd_core::geometry::RealmRegion> = Vec::new();
+    for (node, realm, extras) in [
+        (SHARD, CHAIN_AREA, no_extras.clone()),
+        (CHAIN_MID, PLANET, vec![area2]),
+        (CHAIN_TOP, SYSTEM, vec![planet2]),
     ] {
-        vd_tests::plant_demand_neighbourhood_with_movers(
+        vd_tests::plant_demand_neighbourhood_with_movers_and_regions(
             &mut topo,
             node,
             FRAME_UNIVERSE_SEED,
@@ -1584,6 +1686,7 @@ fn boot_the_chain_with(
             } else {
                 &none
             },
+            &extras,
         );
     }
 
@@ -1883,10 +1986,13 @@ fn the_authored_world_descends_one_subtraction_per_level_and_the_leaf_computes_n
         for d in cascades_delivered_to(t, CHAIN_MID) {
             ids_at_the_middle.insert((d.frame_id, d.universe_tick.0));
         }
+        // Followed PER BOX: the leaf also receives the planet's OWN cascade (its sibling area's row)
+        // at the same instants, so the star's world is the datagrams carrying the STATION row.
         for d in cascades_delivered_to(t, SHARD) {
-            if at_the_leaf
-                .last()
-                .is_none_or(|p| p.universe_tick != d.universe_tick)
+            if d.realms.iter().any(|r| r.realm == CHAIN_STATION)
+                && at_the_leaf
+                    .last()
+                    .is_none_or(|p| p.universe_tick != d.universe_tick)
             {
                 ids_at_the_leaf.insert((d.frame_id, d.universe_tick.0));
                 at_the_leaf.push(d);
@@ -2110,7 +2216,17 @@ fn the_per_leg_liveness_cost_and_rate_are_measured() {
          (not per occupant) at {:.0} Hz",
         1.0 / vd_tests::area_stub_config().tick_dt_s,
     );
-    assert!(beats > 0, "the window observed the chain actually beating");
+    // THE RATE IS THE ASSERTION, not a print (finding 41 — `assert!(beats > 0)` is why the drift from
+    // the contract's stated cadence was never caught): the bit beats at 1/cadence, measured against
+    // the SENDER's own production expression (the planet ships the counted bit), within one beat for
+    // the window's edges plus one for a possible occupancy-edge beat outside the cadence.
+    let cadence = vd_sim::stub::aoi_recheck_cadence(&vd_tests::planet_stub_config());
+    let expected = WINDOW_TICKS / cadence;
+    assert!(
+        (beats >= expected.saturating_sub(1)) && (beats <= expected + 1),
+        "the star heard {beats} beats in {WINDOW_TICKS} ticks; the contract says 1 per {cadence}-tick \
+         cadence (~{expected}), ± one beat (window edge / occupancy edge)",
+    );
 
     // DELIVERY at depth, on a perfect link first: how often each level hears a fresh beat.
     let clean_mid = freshness(&mut topo, CHAIN_MID, CHAIN_AREA, subject, at);
@@ -2310,6 +2426,9 @@ fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_playe
     let (mut t_area_leaf, mut t_area_edge) = (None, None);
     // The client edge is a STREAM of add/remove deltas, so the scene is what reconciling them leaves —
     // exactly what the party at the other end holds. Reading one message would measure message boundaries.
+    // The box traced down every leg is the SIBLING PLANET — the star-authored box the area is entitled
+    // to see. (The planet's own box no longer descends at all: restated one hop down it would state the
+    // area's own placement, sign-flipped — the SL1 breach this gate used to assert as a feature.)
     let mut scene: BTreeMap<RealmId, vd_wire::channels::RealmShape> = BTreeMap::new();
     let arrived = step_until(&mut topo, 900, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
@@ -2320,10 +2439,10 @@ fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_playe
         };
         let to_mid = scene_sets_delivered_to(t, CHAIN_MID);
         let to_leaf = scene_sets_delivered_to(t, SHARD);
-        if holds(&to_mid, PLANET) {
+        if holds(&to_mid, CHAIN_PLANET2) {
             t_mid = t_mid.or(Some(now));
         }
-        if holds(&to_leaf, PLANET) {
+        if holds(&to_leaf, CHAIN_PLANET2) {
             t_leaf = t_leaf.or(Some(now));
         }
         if holds(&to_leaf, CHAIN_AREA) {
@@ -2331,7 +2450,7 @@ fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_playe
         }
         for (_, added, removed) in scene_deltas_at_the_client_edge(t) {
             for s in added {
-                if s.realm == PLANET {
+                if s.realm == CHAIN_PLANET2 {
                     t_edge = t_edge.or(Some(now));
                 }
                 if s.realm == CHAIN_AREA {
@@ -2343,12 +2462,12 @@ fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_playe
                 scene.remove(&r);
             }
         }
-        scene.len() >= 2
+        scene.len() >= 3
     });
     assert!(
         arrived,
-        "the star's box and the planet's box both reach the client edge of the realm the player is \
-         standing in: scene {scene:?}",
+        "the star's sibling-planet box, the planet's sibling-area box and the room itself all reach \
+         the client edge of the realm the player is standing in: scene {scene:?}",
     );
 
     // ONE MEANING, ONE SPACE — every box the client is handed, measured from the player's own realm.
@@ -2363,13 +2482,29 @@ fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_playe
         "the box the player is STANDING IN is measured from its own centre, which is the origin. \
          {CHAIN_AREA_FROM_PLANET_M2} means the planet reflected without subtracting.",
     );
+    // THE SL1 INVERSION (finding 17): the planet's own box does NOT reach the area — not culled,
+    // UNCOMPUTABLE. The only number that could place it here is −(the area's placement inside the
+    // planet), and telling the area that is telling it where it sits — the one thing a realm may
+    // never learn. This assert used to read `drawn[&PLANET] == −5` and asserted the breach.
+    assert!(
+        !drawn.contains_key(&PLANET),
+        "no box for the realm the player's room sits INSIDE — nobody is entitled to compute it (SL1)",
+    );
     assert_eq!(
-        drawn[&PLANET],
-        DVec3::new(-CHAIN_AREA_FROM_PLANET_M2, 0.0, 0.0),
-        "the box the STAR authored arrives measured from the AREA's centre. \
-         {CHAIN_PLANET_FROM_STAR_M2} means the star reflected without subtracting; \
-         {CHAIN_AREA_FROM_PLANET_M2} means the planet passed it on without subtracting; a number the \
-         size of {CHAIN_DOWN_2_M} means a level subtracted something it does not hold.",
+        drawn[&CHAIN_PLANET2],
+        CHAIN_PLANET2_FROM_STAR
+            - DVec3::new(CHAIN_PLANET_FROM_STAR_M2, 0.0, 0.0)
+            - DVec3::new(CHAIN_AREA_FROM_PLANET_M2, 0.0, 0.0),
+        "the box the STAR authored (the sibling planet) arrives measured from the AREA's centre — \
+         two subtractions by two hosts. Off by {CHAIN_PLANET_FROM_STAR_M2} means the star reflected \
+         without subtracting; off by {CHAIN_AREA_FROM_PLANET_M2} means the planet passed it on \
+         without subtracting; a number the size of {CHAIN_DOWN_2_M} the other way means a level \
+         subtracted something it does not hold.",
+    );
+    assert_eq!(
+        drawn[&CHAIN_AREA2],
+        CHAIN_AREA2_FROM_PLANET - DVec3::new(CHAIN_AREA_FROM_PLANET_M2, 0.0, 0.0),
+        "the box the PLANET authored (the sibling area) arrives through its one subtraction",
     );
 
     // THE BOX AND THE THING STANDING IN IT, on one point by construction. The area shard has always held
@@ -2461,9 +2596,9 @@ fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_playe
     // the authoring shard straight to the shard that relayed the occupant; it is now one delivery per
     // level, and that is what the ground rule costs on this lane.
     let (t_mid, t_leaf, t_edge) = (
-        t_mid.expect("the star's box reached the planet"),
-        t_leaf.expect("the star's box reached the area"),
-        t_edge.expect("the star's box reached the client edge"),
+        t_mid.expect("the star's sibling-planet box reached the planet"),
+        t_leaf.expect("the star's sibling-planet box reached the area"),
+        t_edge.expect("the star's sibling-planet box reached the client edge"),
     );
     let (t_area_leaf, t_area_edge) = (
         t_area_leaf.expect("the planet's box reached the area"),
@@ -2976,11 +3111,12 @@ fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
         );
     }
 
-    // (6) THE REMOVE MESSAGE, end to end (proto_minor 14, D-4(a)): when the traveller's retained
-    // ghost tears down at the band's destroy edge, the area emits `EntityRemoved`, the gateway
-    // fans it as the reliable Event, and the BYSTANDER's real client EVICTS the leaver's track —
-    // the figure VANISHES instead of freezing at the boundary forever. The whole lane, through
-    // the production shard, gateway and client, measured on the delivered view.
+    // (6) THE REMOVE MESSAGE, end to end (proto_minor 14, D-4(a)): the leaver's `EntityRemoved` is
+    // fanned at HOLD CLOSURE (slice F retimed it there from the band-exit despawn — the SpawnV2
+    // take-over proof closes the Source hold; the later band-exit emit is an idempotent re-send),
+    // the gateway fans it as the reliable Event, and the BYSTANDER's real client EVICTS the
+    // leaver's track — the figure VANISHES instead of freezing at the boundary forever. The whole
+    // lane, through the production shard, gateway and client, measured on the delivered view.
     let vanished = step_until(&mut topo, 600, |t| {
         set_shard_subject_pose_now(t, SHARD, stayer, CHAIN_AREA_FRAME, staying);
         set_shard_subject_pose_now(t, CHAIN_MID, traveller, planet_frame, held);
@@ -3304,21 +3440,35 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
         CHAIN_LEVELS_ABOVE_LEAF,
         "the up leg was sampled at every level above the leaf",
     );
-    // THE UP BUDGET IS ONE TICK PER HOP AT EVERY LEVEL — depth never widens it, because the bit is
-    // re-originated per level (each sample above is a one-hop age by construction). A depth-scaled
-    // budget here would be slack at every level past the first and could hide a level sitting on a
-    // beat for a whole extra tick. The END-TO-END recursion is bounded elsewhere: each level's bit
-    // EXISTS only while its child's bit is fresh within the one TTL, and the climb scenario gates
-    // the chain forming at all.
-    for (depth, a) in [(1u64, &up1), (2, &up2)] {
+    // THE UP BUDGET IS ONE TICK PER HOP PLUS THE BIT'S OWN CADENCE (finding 41): the bit beats on
+    // its SENDER's AoI cadence — the contract's stated rate, ~25× less traffic than per-tick — so
+    // between beats the held stamp ages by up to one full cadence, and that ageing is the
+    // contract's own price, never a level sitting on a beat. Depth never widens it further: the bit
+    // is re-originated per level (each sample above is a one-hop age by construction). The budget
+    // is DERIVED from each sender's production expression, so a cadence change moves the gate and
+    // the code together. The END-TO-END recursion is bounded elsewhere: each level's bit EXISTS
+    // only while its child's bit is fresh within the one TTL (itself sized in cadences), and the
+    // climb scenario gates the chain forming at all.
+    for (depth, sender_cadence, a) in [
+        (
+            1u64,
+            vd_sim::stub::aoi_recheck_cadence(&vd_tests::area_stub_config()),
+            &up1,
+        ),
+        (
+            2,
+            vd_sim::stub::aoi_recheck_cadence(&vd_tests::planet_stub_config()),
+            &up2,
+        ),
+    ] {
         assert!(
-            a.p99_ticks <= 1,
-            "the up leg costs more than one tick per hop: at depth {depth} the p99 age is \
-             {} ticks ({:.0} ms) against the one-hop budget ({:.0} ms). A level is holding a \
-             beat instead of retaining it on the tick it arrives.",
+            a.p99_ticks <= sender_cadence,
+            "the up leg ages past its own beat: at depth {depth} the p99 age is \
+             {} ticks ({:.0} ms) against one hop + the sender's {sender_cadence}-tick cadence \
+             ({:.0} ms). A level is holding a beat instead of retaining it on the tick it arrives.",
             a.p99_ticks,
             ms(a.p99_ticks),
-            ms(1),
+            ms(sender_cadence),
         );
     }
     for (depth, a) in [(1u64, &dn1), (2, &dn2)] {

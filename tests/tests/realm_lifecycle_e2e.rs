@@ -562,8 +562,9 @@ impl Gw {
         let seed_injector = SeedInjectorConfig {
             armed: true,
             // THE HAND-PLACED WORLD — the one with a station to stand in and an area to spin up. The
-            // generator emits neither (players build them), so a test that needs a deep home places it.
-            world: WorldView::hand_placed(&UniverseConfig::walk_scale()),
+            // generator emits neither (players build them), so a test that needs a deep home places
+            // it — LOWERED, because the gateway only ever receives a region forest (SL4).
+            world: WorldView::hand_placed(&UniverseConfig::walk_scale()).lowered(),
             // The account lives in the deep home, at that realm's own centre. A home is a NAME plus a pose
             // already measured from the named realm — there is nothing here for anybody to descend.
             homes: {

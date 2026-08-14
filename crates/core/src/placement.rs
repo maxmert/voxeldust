@@ -333,8 +333,11 @@ mod tests {
                 span: 2,
             })
         );
-        // Ahead of the head: the same typed miss (no lane asks for the future; span_ahead is a
-        // ledgered non-feature until one does).
+        // Ahead of the head: the same typed miss. Forward asks DO happen (a sender's ClockSync
+        // phase can lead the receiver's) — the LANES answer them by clamping to the head
+        // (`book_at_or_head`/`arrival_book` in vd-sim, counted + measured per direction); the
+        // LEDGER itself stays exact-instant, and forward RETENTION is the ledgered non-feature
+        // (D-PLACE-6).
         assert!(ledger.at(anchor_realm(), UniverseTick(15)).is_err());
         // An anchor with no books at all: head is None in the miss.
         assert_eq!(

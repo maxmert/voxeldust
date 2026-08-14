@@ -20,15 +20,19 @@
 //!   D  inner planet → home   planet-frame (0,0,−2·pole_altitude) — the polar lift, I-RADIAL-licensed
 //!   A  home → galaxy         (0,0,−220) — out the pole, past the ~152 m release edge
 //!   E  galaxy → sibling      waypoint sibling_centre+(0,0,−300), then a held-throttle CREEP up
-//!                            the pole — the 12.8 km boost leg, ≥140 m below every sibling
-//!                            planet (J2); no coordinate in flight across the commit
+//!                            the pole — the 12.8 km boost leg, clear of every sibling planet by
+//!                            the SIBLING's own I-AXIS/I-POLE margins, which `world_roster` now
+//!                            ASSERTS over the sibling's movers too (batch review: this clearance
+//!                            was a bare comment); no coordinate in flight across the commit
 //!   F  sibling → galaxy      (0,0,−300) in the sibling's own frame — back out the pole
 //!
 //! EVERY leg asserts the REALM LABEL reached (`FrameRef::label` via the delivered `location`), never
 //! a coordinate: at a crossing the pose reframes and a target stated in the old frame is
-//! meaningless. Then the thrash guard: the subject Entity's directory fence stays SMALL (one clean
-//! CAS commit per crossing), and the observed maximum is PRINTED every run — the bound is UNMEASURED
-//! for this chain until a green history accumulates.
+//! meaningless. Then the TWO-SIDED thrash guard: the subject Entity's directory fence stays SMALL
+//! (one clean CAS commit per crossing) AND at least one commit per crossing was actually recorded
+//! (the floor — a zero-commit run or an admin blink used to satisfy the one-sided ceiling); the
+//! observed maximum is PRINTED every run — the exact ceiling is UNMEASURED for this chain until a
+//! green history accumulates.
 //!
 //! Gated on `dev-control`. Run with:
 //!   cargo test -p vd-bins --features dev-control --test node_per_realm_walk -- --test-threads=1 --nocapture
@@ -55,11 +59,18 @@ const DEADLINE: Duration = Duration::from_secs(300);
 /// Per-crossing-leg budget (the label flip, not a coordinate): the corridor legs are seconds of
 /// flight plus the saga tail; generous so a slow commit never times a healthy leg out.
 const LEG_DEADLINE: Duration = Duration::from_secs(60);
-/// The thrash guard: a single CLEAN re-home per crossing commits the subject Entity at a small
-/// directory fence. The chain makes 5 crossings (C,D,A,E,F); one clean commit each keeps the fence
-/// well under this bound (the co-hosting freeze bug ballooned it past 20). UNMEASURED for the new
-/// chain until a green history accumulates — the observed value is PRINTED every run; tighten later.
+/// The thrash guard's CEILING: a single CLEAN re-home per crossing commits the subject Entity at a
+/// small directory fence. The chain makes [`CROSSINGS`] crossings (C,D,A,E,F); one clean commit
+/// each keeps the fence well under this bound (the co-hosting freeze bug ballooned it past 20).
+/// The exact ceiling is UNMEASURED for the new chain until a green history accumulates — the
+/// observed value is PRINTED every run; tighten later.
 const MAX_ENTITY_FENCE: u64 = 12;
+/// The label-asserted crossings the chain flies — and therefore the thrash guard's FLOOR: every
+/// crossing commits the subject at a STRICTLY newer fence, so a run whose five label flips were
+/// real leaves the fence at least this high. The guard used to be one-sided (batch review): a run
+/// in which the directory recorded ZERO entity commits — or an admin blink read as 0 — satisfied
+/// "one clean CAS commit per crossing" without a single commit observed.
+const CROSSINGS: u64 = 5;
 
 fn devctl(port: u16, request: &DevRequest) -> Option<DevResponse> {
     dev_roundtrip(port, request).ok()
@@ -79,14 +90,19 @@ fn own_row(state: &DevState) -> Option<&DevEntityRow> {
 
 /// The highest directory `fence` on any `ent-…` (Entity) row — the thrash signature. A single clean
 /// re-home per crossing commits the subject Entity at a small fence; a re-home re-firing in a limit
-/// cycle bumps it per cycle, so it balloons.
+/// cycle bumps it per cycle, so it balloons. An unreachable or unparseable admin endpoint PANICS
+/// (batch review: it used to return 0, which silently satisfied the one-sided guard — the guard
+/// self-disabled on exactly the blink it should have surfaced).
 fn max_entity_fence(admin: std::net::SocketAddr) -> u64 {
-    let Some(body) = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2))) else {
-        return 0;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
-        return 0;
-    };
+    let body = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2)))
+        .unwrap_or_else(|| {
+            panic!(
+                "the thrash guard could not read /admin/snapshot at {admin} — an admin blink \
+                     is a loud failure, never a fence of 0"
+            )
+        });
+    let v = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("the admin snapshot parses as JSON");
     v["directory"]
         .as_array()
         .map(|arr| {
@@ -337,8 +353,10 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
     );
 
     // E — galaxy → sibling: the 12.8 km boost leg. First a ROUTE waypoint 300 m below the sibling's
-    // pole (still outside its 150 m shell — no crossing), staying ≥140 m under every sibling planet
-    // (J2: the ring is XZ, orbits are near-XY); the waypoint budget covers the ~26 s full-speed run.
+    // pole (still outside its 150 m shell — no crossing), clear of every sibling planet by the
+    // SIBLING system's own asserted corridor margins (`world_roster` computes I-AXIS/I-POLE/I-RADIAL
+    // over the sibling's movers too — measured, no longer a bare "≥140 m" claim; the ring is XZ,
+    // orbits are near-XY); the waypoint budget covers the ~26 s full-speed run.
     // Then the crossing itself is a held-throttle CREEP up the pole with NO coordinate in flight —
     // a WalkTo aimed inside the shell straddles the commit and its absolute target re-reads in the
     // sibling's frame as a point 12 km away, driving the dot straight back out (measured as a
@@ -374,7 +392,19 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
     // green history accumulates (do not claim it as proof until a number exists — tighten later).
     let entity_fence = max_entity_fence(admin_addr);
     eprintln!(
-        "NODE-PER-REALM: observed max entity directory fence = {entity_fence} (bound {MAX_ENTITY_FENCE})"
+        "NODE-PER-REALM: observed max entity directory fence = {entity_fence} \
+         (floor {CROSSINGS}, bound {MAX_ENTITY_FENCE})"
+    );
+    // TWO-SIDED (batch review): the FLOOR is what makes "one clean CAS commit per crossing" the
+    // assert's content and not just its message — five real crossings each advance the subject's
+    // fence at least once, so a directory that recorded fewer commits than crossings (or none at
+    // all) now fails here instead of passing silently.
+    assert!(
+        entity_fence >= CROSSINGS,
+        "MISSING COMMITS: the chain flew {CROSSINGS} label-asserted crossings but the subject \
+         Entity's directory fence is only {entity_fence} — the directory did not record one CAS \
+         commit per crossing. DIRECTORY={:#?}",
+        admin_directory(admin_addr),
     );
     assert!(
         entity_fence <= MAX_ENTITY_FENCE,

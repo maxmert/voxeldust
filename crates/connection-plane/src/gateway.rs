@@ -32,12 +32,13 @@ use vd_core::home::{HomeRegistry, StoredHome};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::rng::SplitMix64;
-use vd_core::worldgen::{ancestor_realms, pin_realm_of};
-// The gateway is the ONE party holding both ends of every login conversion, so it may hold THE world
-// (the stated `crate_isolation` allowlist entry): it resolves logins against the generated forest and
-// converts between the spaces its sessions draw in.
+// The gateway is the ONE party holding both ends of every login conversion, so it holds THE world —
+// LOWERED: a `WorldRealms` region forest it can query but not regenerate. It RECEIVES that value
+// from the composition root (`WorldView::lowered`); the crate carries NO edge to the motion crate,
+// so an orbit symbol here is an unresolved-crate compile error again (SL4 — the batch review found
+// this crate allowlisted out of the fence, and the allowlist entry is deleted with the edge).
+use vd_core::worldgen::{WorldRealms, ancestor_realms, pin_realm_of};
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
-use vd_physics::worldgen::{UniverseConfig, WorldView};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
 use vd_wire::channels::{ClientControlMsg, RealmShape, ServerControlMsg, SubId};
@@ -97,10 +98,12 @@ impl TransportTuning {
 /// RLM 5f-3c/5f-3d — the DYNAMIC-HOME config: the SERVER-side inputs the gateway derives an
 /// authenticated login's HOME realm from (never anything the client supplies), PLUS (5f-3d) the timing of
 /// the pre-Active hold while that home's shard boots. Grouped in ONE struct (the
-/// operational-params-in-one-struct convention) so it grows [`GatewayConfig`] by a SINGLE field, and its
-/// [`Default`] is the fully-INERT case (unarmed, empty pose store, walk-scale forest, zero windows) —
-/// byte-identical to the pre-5f-3c gateway: no `RealmDemand` is ever emitted and no login ever enters
-/// [`SessionPhase::AwaitingHomeRealm`].
+/// operational-params-in-one-struct convention) so it grows [`GatewayConfig`] by a SINGLE field. The
+/// fully-INERT case (unarmed, empty pose store, zero windows) is byte-identical to the pre-5f-3c
+/// gateway: no `RealmDemand` is ever emitted and no login ever enters
+/// [`SessionPhase::AwaitingHomeRealm`]. There is NO `Default` — a world is a decision, and the old
+/// `Default` silently built a hand-placed walk-scale one inside the shipped library (the D-WORLD-5
+/// residue the batch review re-flagged); every composer states its world explicitly.
 ///
 /// The `spawn_poses` map is the SAME `VD_SPAWN_POSES` stand-in the shard admits at (5f-3b), so the
 /// gateway-DERIVED home coord and the shard-side admit pose agree; the P7 durable per-account pose store
@@ -126,8 +129,10 @@ pub struct SeedInjectorConfig {
     /// impossible to disagree.
     ///
     /// A cluster passes the world its shards will simulate: generated content in production, generated plus
-    /// hand-placed structures in a test that needs a station or an area to stand in.
-    pub world: WorldView,
+    /// hand-placed structures in a test that needs a station or an area to stand in. LOWERED
+    /// (`WorldView::lowered`): the region forest alone — the composition root builds the world; this
+    /// crate can only query it (SL4).
+    pub world: WorldRealms,
     /// WHERE EVERY ACCOUNT APPEARS: a realm, and a pose inside that realm's own frame.
     ///
     /// It used to be a per-account universe-absolute position that this router walked the whole seed
@@ -154,14 +159,20 @@ pub struct SeedInjectorConfig {
     pub bootstrap_ttl_ticks: u64,
 }
 
-impl Default for SeedInjectorConfig {
-    /// The fully-INERT injector: unarmed, empty pose store, walk-scale forest, zero windows —
-    /// byte-identical to the pre-5f-3c gateway (`UniverseConfig` has no `Default`, so this is written out;
-    /// walk-scale is the P3 forest `container_coord_at` descends).
-    fn default() -> SeedInjectorConfig {
-        let world = WorldView::hand_placed(&UniverseConfig::walk_scale());
-        // The inert injector still needs a home to state, because "no home" is not an answer a login can
-        // be given. The ambient root at its own centre is the one home every forest has.
+impl SeedInjectorConfig {
+    /// The fully-INERT injector over an EXPLICIT world: unarmed, empty pose store, zero windows —
+    /// byte-identical to the pre-5f-3c gateway. This replaced `Default`, which silently built a
+    /// hand-placed walk-scale world inside the shipped library (SL5's second-world foot-gun,
+    /// D-WORLD-5): the world is now always the composer's decision, and this crate cannot build
+    /// one at all (no edge to the generator).
+    ///
+    /// The inert injector still needs a home to state, because "no home" is not an answer a login
+    /// can be given: the ambient root at its own centre — the one home every forest has.
+    ///
+    /// # Panics
+    /// When `world` holds no ambient root (a degenerate forest — refused where it can be seen).
+    #[must_use]
+    pub fn inert(world: WorldRealms) -> SeedInjectorConfig {
         let root = world
             .regions()
             .iter()
@@ -178,9 +189,6 @@ impl Default for SeedInjectorConfig {
             bootstrap_ttl_ticks: 0,
         }
     }
-}
-
-impl SeedInjectorConfig {
     /// RLM 5f-3d — the re-drive cadence divisor: the home demand is re-seeded every `demand_ttl / 4` local
     /// ticks. NAMED (never an inline literal) and chosen so the re-seed keeps the reconciler's arm-A alive
     /// with ~4x headroom (three consecutive lost re-seeds still leave the demand fresh) while cutting a
@@ -309,7 +317,7 @@ pub struct GatewayConfig {
     /// decider (`apply_prepare` hardcodes `Ready` today).
     pub reject_next_prepare: Option<PrepareReject>,
     /// RLM 5f-3c/5f-3d — the trusted-gateway dynamic-home inputs (server-derived home realm + the
-    /// bootstrap hold timing). [`Default`] is fully INERT (unarmed) ⇒ byte-identical to the pre-5f-3c
+    /// bootstrap hold timing). [`SeedInjectorConfig::inert`] is fully INERT (unarmed) ⇒ byte-identical to the pre-5f-3c
     /// gateway.
     pub seed_injector: SeedInjectorConfig,
     pub tuning: TransportTuning,
@@ -3945,6 +3953,8 @@ mod tests {
     use vd_core::pose::FrameRef;
     use vd_core::pose::RealmId;
     use vd_core::{EpochId, TickId, UniverseTick};
+    // DEV-ONLY (SL4): the fixtures BUILD worlds; the shipped crate only receives lowered ones.
+    use vd_physics::worldgen::{UniverseConfig, WorldView};
     use vd_sim::capability::NodeKind;
     use vd_wire::channels::{
         EntitySnap, InputDatagram, RealmSnap, RealmSnapshotDatagram, SnapshotDatagram,
@@ -3984,9 +3994,10 @@ mod tests {
             session_recheck_interval: 0,
             self_fence_grace_ticks: 0,
             reject_next_prepare: None, // 3g abort-leg lever INERT by default (behaviour-identical)
-            // 5f-3c: the injector is UNARMED by default ⇒ INERT (byte-identical: no RealmDemand emitted).
-            // The armed tests below override this via `..config()`.
-            seed_injector: SeedInjectorConfig::default(),
+            // 5f-3c: the injector is UNARMED ⇒ INERT (byte-identical: no RealmDemand emitted).
+            // The armed tests below override this via `..config()`. The world is EXPLICIT — the
+            // walk fixture, lowered — because `Default` (which built one silently) is deleted.
+            seed_injector: SeedInjectorConfig::inert(test_world().lowered()),
             tuning: TransportTuning {
                 max_sessions: 4,
                 max_buffered_inputs: 8,
@@ -8637,7 +8648,7 @@ mod tests {
     fn armed_injector(homes: HomeRegistry) -> SeedInjectorConfig {
         SeedInjectorConfig {
             armed: true,
-            world: WorldView::hand_placed(&UniverseConfig::walk_scale()),
+            world: test_world().lowered(),
             homes,
             demand_ttl_ticks: TEST_DEMAND_TTL,
             bootstrap_ttl_ticks: TEST_BOOTSTRAP_TTL,
@@ -8766,7 +8777,7 @@ mod tests {
             armed.world.contains_realm(home),
             "the rig's home realm must belong to the injector's own world",
         );
-        let inert = SeedInjectorConfig::default(); // unarmed = a static cluster
+        let inert = SeedInjectorConfig::inert(test_world().lowered()); // unarmed = a static cluster
         let client = NodeId(7);
 
         // (1) static cluster (unarmed) → NOTHING, even at minor 5 with a valid home. The pre-seeded
@@ -8910,7 +8921,7 @@ mod tests {
         // deltas, and its ancestors from whatever of the chain is LIVE, relayed down one level at a time.
         let home = RealmId::System(7);
         let mut cfg = armed_injector(default_homes());
-        cfg.world = WorldView::generated(0, &UniverseConfig::visual_scale());
+        cfg.world = WorldView::generated(0, &UniverseConfig::visual_scale()).lowered();
         let full = cfg.world.neighbourhood(&BTreeSet::from([home]));
         let children: Vec<RealmId> = full
             .iter()
@@ -9326,7 +9337,7 @@ mod tests {
     fn an_unarmed_injector_emits_no_home_demand_byte_identical() {
         // Default (VD_DEMAND unset) ⇒ the injector is INERT: a login emits NO RealmDemand (the byte-
         // identical default; covers the `armed == false` short-circuit arm of the emit gate).
-        let mut rig = Rig::new(); // config() ⇒ SeedInjectorConfig::default() (unarmed)
+        let mut rig = Rig::new(); // config() ⇒ the inert injector (unarmed)
         let (_sid, sends) = rig.login();
         assert_eq!(
             demand_count(&sends),
@@ -9568,7 +9579,8 @@ mod tests {
         // generated one, which is only safe while those two happen to hold the same realms; the false arm
         // below is exactly what a valid home beside a second star would have hit.
         use vd_core::realm_path::{RealmKindTag, RealmLevel};
-        let world = WorldView::hand_placed(&UniverseConfig::walk_scale());
+        // The LOWERED world — the exact value the shipped injector holds and queries.
+        let world = test_world().lowered();
         let home = lineage_of(TEST_HOME_REALM);
         assert!(
             world.contains_realm(home.lowered()),
@@ -10632,7 +10644,7 @@ mod tests {
         // BYTE-IDENTITY (CRITIQUE-2): with the injector UNARMED (the default) a login follows the EXACT
         // pre-5f-3d flow — `AwaitingDirectory → AwaitingAttach → config.shard` — with NO `AwaitingHomeRealm`,
         // NO extra head-read, NO RealmDemand, and no reordering of Welcome/UniverseRate/AttachSession.
-        let mut rig = Rig::new(); // config() ⇒ SeedInjectorConfig::default() (unarmed)
+        let mut rig = Rig::new(); // config() ⇒ the inert injector (unarmed)
         let (sid, sends) = rig.login();
         assert_eq!(
             phase_of(&rig, sid),
@@ -10837,7 +10849,10 @@ mod tests {
         // Fail-LOUD at boot (mirrors `RlmTuning::validate`): an UNARMED injector is vacuously valid (its
         // windows are never read), an ARMED one needs both windows non-zero AND a bootstrap window that
         // contains at least one re-drive. All arms + both Display messages.
-        assert_eq!(SeedInjectorConfig::default().validate(), Ok(()));
+        assert_eq!(
+            SeedInjectorConfig::inert(test_world().lowered()).validate(),
+            Ok(())
+        );
         let armed = armed_injector(default_homes());
         assert_eq!(armed.validate(), Ok(()), "the live test budget is valid");
         let zero_demand = SeedInjectorConfig {
@@ -10902,9 +10917,9 @@ mod tests {
         // The cadence divisor is the named constant, and a zero TTL still yields a usable cadence.
         assert_eq!(SeedInjectorConfig::REDRIVE_DIVISOR, 4);
         assert_eq!(
-            SeedInjectorConfig::default().redrive_interval_ticks(),
+            SeedInjectorConfig::inert(test_world().lowered()).redrive_interval_ticks(),
             1,
-            "the inert default floors at 1 (never a divide-by-zero cadence)"
+            "the inert injector floors at 1 (never a divide-by-zero cadence)"
         );
     }
 

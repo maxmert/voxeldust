@@ -108,7 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let homes = vd_bins::resolve_homes(&env, &universe)?;
     let seed_injector = SeedInjectorConfig {
         armed: demand_armed,
-        world: universe,
+        // LOWERED (SL4): the gateway library receives the region forest alone — the bodies (and
+        // every orbit element) stay in this composition root; the routing plane cannot name them.
+        world: universe.lowered(),
         homes,
         demand_ttl_ticks: rlm.demand_ttl_ticks,
         bootstrap_ttl_ticks: SeedInjectorConfig::bootstrap_ttl_from_rlm(

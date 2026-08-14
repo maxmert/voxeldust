@@ -36,8 +36,8 @@ use vd_harness::topology::{InspectReport, Topology};
 use vd_sim::saga::SagaCtx;
 use vd_tests::{
     DEST, GATEWAY, ORCH, SHARD, gateway_buffered_count, live_sagas, p1_client, p2_cluster,
-    read_subject, saga_states, stamp_subject_pose_in_dest_frame, stub_config, trigger_transfer,
-    walk_forward,
+    read_subject, saga_states, shard_stat, source_hold_open, stamp_subject_pose_in_dest_frame,
+    stub_config, trigger_transfer, walk_forward,
 };
 use vd_wire::channels::SubId;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
@@ -622,16 +622,31 @@ fn p2_dod_a_slow_but_alive_transfer_never_aborts() {
     );
 }
 
-/// 1d.5b.3c DoD — THE SOURCE-GHOST LIFECYCLE END (band-exit). After the transfer settles, the SOURCE
-/// retains the avatar as a kinematic collider GHOST fed by the dest (`GhostFlow`). As the dest-owned
-/// avatar keeps walking AWAY from the boundary it crossed, it leaves the overlap band: the dest emits
-/// `GhostFlow::Despawn` + deregisters the feed, and the source TEARS THE GHOST DOWN (removes the dot).
-/// The teardown is strictly POST-release (the destroy edge is many per-tick steps out), so the source
-/// ghost is gone only once the dest is the sole render source — the avatar renders CONTINUOUSLY across
-/// the band-exit (NO vanish). The mechanics are unit-proven (`vd_sim::stub`); THIS gate is the
-/// integrated seamless proof over the real fabric.
+/// 1d.5b.3c DoD — THE SOURCE-GHOST LIFECYCLE END, measured as slice F actually ships it (audit :229:
+/// the old form of this gate asserted `max_absent_run == 0` as "NO vanish across the band-exit
+/// teardown", a property that could no longer fail — the retained ghost stops emitting at HOLD
+/// CLOSURE, long before band exit, and the leaver's own client is dest-fed from the route swap on).
+/// What slice F ships is TWO separately-falsifiable halves, asserted separately here:
+///
+/// (a) THE LEAVER VANISHES AT HOLD CLOSURE: the dest's promote sends the pose-free `SpawnV2`
+///     take-over proof; the source's Source-role hold CLOSES on it; the slice-F emit gate
+///     (`simulates() | (retained-ghost & hold-open)`) goes false, so the retained ghost stops
+///     emitting and the remove message evicts the leaver from bystanders — all during the transfer
+///     settle. Asserted structurally: at settle the hold is ALREADY closed while the retained dot
+///     still stands. (The bystander's client-visible half of this vanish is the two-player
+///     frame-conversion e2e's remove-message leg.)
+///
+/// (b) THE RETAINED DOT DIES AT BAND EXIT: the dot survives hold closure as the return-crossing
+///     target; as the dest-owned avatar walks past the destroy edge the dest emits
+///     `GhostFlow::Despawn` + deregisters the feed and the source removes the dot. Asserted with the
+///     mechanism counters (`ghost_band_exits`/`ghost_despawns`, exactly once each, zero before the
+///     walk-out), so a teardown by any OTHER path — or none — turns this red.
+///
+/// The render trace still runs and still must show zero absence: a continuity floor over the whole
+/// run (the avatar's own view), stated as such — the teardown-ordering claims live in (a)/(b); the
+/// crossing-window no-vanish is the crossing capstone's measurement.
 #[test]
-fn p2_dod_band_exit_tears_down_the_source_ghost_seamlessly() {
+fn p2_dod_band_exit_tears_down_the_retained_dot_after_the_leaver_vanished_at_hold_closure() {
     let fabric = FaultFabric::new(909, 2);
     let mut caps: Vec<CapturedTick> = Vec::new();
     let (mut topo, _session, entity, _m) =
@@ -648,9 +663,30 @@ fn p2_dod_band_exit_tears_down_the_source_ghost_seamlessly() {
         "precondition: the source hosts the avatar as a retained collider ghost before band-exit",
     );
 
-    // RESUME walking + keep sampling the render until the SOURCE tears the ghost down (bounded). The
-    // dest-owned avatar walks past the destroy edge, the dest Despawns + deregisters, the source
-    // removes the ghost dot — driven over the real fabric, not hand-fed.
+    // (a) THE LEAVER VANISHED AT HOLD CLOSURE — the hold is already CLOSED at settle (the SpawnV2
+    // proof landed inside `run_cut_transfer`) while the retained dot still stands, so the ghost's
+    // self-emit ended with the hold, not with the band. A regression that keeps the hold open past
+    // the promote (re-arming a stale self-emit of the leaver) turns THIS red.
+    assert!(
+        !source_hold_open(&mut topo, SHARD, entity),
+        "the Source hand-off hold closed at the dest's promote — the retained ghost stopped \
+         emitting (and the leaver's eviction fanned) long before band exit",
+    );
+    // ...and no band-exit machinery has fired yet (the two halves are genuinely separate events).
+    assert_eq!(
+        shard_stat(&mut topo, DEST, |s| s.ghost_band_exits),
+        0,
+        "no band exit before the walk-out",
+    );
+    assert_eq!(
+        shard_stat(&mut topo, SHARD, |s| s.ghost_despawns),
+        0,
+        "the retained dot is untouched before band exit",
+    );
+
+    // (b) RESUME walking + keep sampling the render until the SOURCE tears the dot down (bounded).
+    // The dest-owned avatar walks past the destroy edge, the dest Despawns + deregisters, the source
+    // removes the retained dot — driven over the real fabric, not hand-fed.
     with_client(&mut topo, ScriptedClient::resume_input);
     step_until(&mut topo, 80, &mut |t| caps.push(capture_subject(t)), |t| {
         !report(&t.inspect_all(), SHARD).ghost_dots.contains(&entity)
@@ -659,7 +695,7 @@ fn p2_dod_band_exit_tears_down_the_source_ghost_seamlessly() {
     let reports = topo.inspect_all();
     assert!(
         !report(&reports, SHARD).ghost_dots.contains(&entity),
-        "the source ghost is torn down on band-exit",
+        "the retained dot is torn down on band-exit",
     );
     assert!(
         report(&reports, DEST)
@@ -668,13 +704,27 @@ fn p2_dod_band_exit_tears_down_the_source_ghost_seamlessly() {
             .any(|(e, _)| *e == entity),
         "the dest still holds the avatar after band-exit",
     );
+    // THE MECHANISM (non-vacuous): the teardown was the dest-driven band-exit Despawn, exactly once
+    // on each side — not a TTL expiry, not a self-fence, not a silent no-op.
+    assert_eq!(
+        shard_stat(&mut topo, DEST, |s| s.ghost_band_exits),
+        1,
+        "the dest detected exactly one band exit and emitted the Despawn",
+    );
+    assert_eq!(
+        shard_stat(&mut topo, SHARD, |s| s.ghost_despawns),
+        1,
+        "the source tore down exactly one retained dot, via the band-exit Despawn",
+    );
+    // The continuity floor (see the doc): the avatar's own render never gapped across the whole run.
     assert_eq!(
         max_absent_run(&caps),
         0,
-        "ZERO vanish across the band-exit teardown (the dest is the sole render source by then)",
+        "the avatar rendered continuously across crossing + band exit (its own client is dest-fed \
+         from the route swap on; the teardown-ordering claims are the hold/counter asserts above)",
     );
     verify_authority_unique(&reports)
-        .expect("exactly one holder after band-exit (the source ghost is gone, the dest owns)");
+        .expect("exactly one holder after band-exit (the retained dot is gone, the dest owns)");
 }
 
 /// The transfer run is fully deterministic under one seed — the standing in-process replay gate

@@ -96,7 +96,10 @@ occupancy, upward, which already crosses today. Nothing else, at any depth, with
   to hold a realm ABOVE its own would author its own parent's children — itself among them — and end up
   holding its own position: refuse at boot, loudly, like the existing lineage fence.
 - **Q6 — the client's box scene.** The client holds no stored position and takes every position from the
-  live feed. Nothing is drawn before a realm streams itself (SL3).
+  live feed. Nothing is drawn before a realm streams itself (SL3). ⚠ OWED — the code contradicts the
+  second sentence today: a box is drawn from its PARENT's roster shipping (`child_shape`), whether or
+  not the realm itself runs (and the `--realm-boxes` boot file draws with no running evidence at all).
+  True only when outline authorship lands — DEFERRED.md D-LANE-4 (+ D-LANE-6), held on an owner ruling.
 
 ## 4b. MEASURED 2026-08-12, AFTER Step 0 — the order below changed
 

@@ -25,9 +25,9 @@ use vd_tests::{
     assert_transient_end_state, dest_stub_config, dest_unreachable_resolutions, durable_subset,
     held_at_dest, live_sagas, liveness_notices, p1_client, p2_cluster, p2_cluster_staggered,
     read_subject, realm_fence, run_transient_dest_flap, run_transient_fault_scenario,
-    seed_transient_burst, seed_transient_crossing, source_transients_emitted,
-    source_unreachable_resolutions, stamp_subject_pose_in_dest_frame, transient_dropped_total,
-    trigger_transfer, walk_forward,
+    seed_transient_burst, seed_transient_crossing, seed_transient_crossing_in_frame, shard_stat,
+    source_transients_emitted, source_unreachable_resolutions, stamp_subject_pose_in_dest_frame,
+    stub_config, transient_dropped_total, trigger_transfer, walk_forward,
 };
 use vd_wire::seams::directory::DirectoryKey;
 
@@ -71,6 +71,14 @@ fn assert_debris_on_ballistic_trajectory(topo: &mut Topology, debris: EntityId, 
         .find(|(e, _)| *e == debris)
         .map(|(_, p)| *p)
         .expect("the dest holds the debris pose");
+    // FRAME-SENSITIVE (audit :374): the adopted pose is stated in the DEST realm's OWN frame — the
+    // receiver guard (`place_arriving_pose`) admits nothing it cannot measure, so a foreign label
+    // can never sit in `OwnedTransients` to be read as an own-frame number by AoI/containment.
+    assert_eq!(
+        dest_pose.frame,
+        dest_stub_config().frame,
+        "the settled transient pose is stated in the dest realm's own frame"
+    );
     let dt_s =
         (dest_pose.universe_tick.0 - TRANSIENT_SEED_TICK0.0) as f64 * dest_stub_config().tick_dt_s;
     let expected = TRANSIENT_SEED_POS0 + vel * dt_s;
@@ -190,6 +198,61 @@ fn p3_transient_debris_batch_crosses_adopt_before_drop() {
     assert_eq!(
         debris_rows, 0,
         "a transient is NEVER a directory OwnerRecord"
+    );
+}
+
+/// THE FRAME-SENSITIVITY gate (audit :105/:374/:384 — the p3 suite was structurally blind to the
+/// transient adopt storing the wire pose VERBATIM): a batch whose item pose is left in the SOURCE's
+/// frame — a sibling frame the dest was never told the placement of — is REFUSED at the dest's
+/// receiver guard (`place_arriving_pose`), counted, and NEVER adopted; the choreography still
+/// completes (the batch acks; the refusal is a per-item accounted loss within the Transient class
+/// budget). Under the pre-fix code the dest adopted this pose verbatim and this test's holder
+/// assertion fails — which is exactly the sensitivity the old sibling/co-origin fixture lacked.
+#[test]
+fn p3_transient_misframed_batch_is_refused_at_the_dest_counted_never_adopted() {
+    let fabric = FaultFabric::new(0xD7AF, 4);
+    let mut topo = p2_cluster(&fabric, 4);
+    for _ in 0..10 {
+        topo.step();
+    }
+    let src_fence = realm_fence(&mut topo, SRC_REALM);
+    let dst_fence = realm_fence(&mut topo, DST_REALM);
+    let debris = EntityId::pack(EntityKind::Debris, SHARD.0 as u32, 9, 0);
+    let batch = TransferId(0xD7A_00FF);
+    // The pose STAYS in the source's own frame — the lawless sibling hand-off the guard refuses
+    // (SL2: sibling-to-sibling travel is not a thing; nothing on this path can convert it).
+    seed_transient_crossing_in_frame(
+        &mut topo,
+        debris,
+        batch,
+        src_fence,
+        dst_fence,
+        DVec3::ZERO,
+        stub_config().frame,
+    );
+    trigger_transfer(&mut topo, transient_batch_ctx(batch, dst_fence));
+    step_asserting_conservation(&mut topo, 24);
+
+    let reports = topo.inspect_all();
+    let holders: Vec<NodeId> = reports
+        .iter()
+        .filter(|(_, r)| r.owned_transients.iter().any(|(e, _)| *e == debris))
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(
+        holders,
+        Vec::<NodeId>::new(),
+        "the mis-framed item was adopted NOWHERE — refused at the dest, released by the source"
+    );
+    assert_eq!(
+        shard_stat(&mut topo, DEST, |s| s.transient_arrivals_unplaceable),
+        1,
+        "the dest counted exactly one refused arrival (convert-or-refuse, loud)"
+    );
+    assert_eq!(
+        live_sagas(&mut topo),
+        0,
+        "the batch choreography still completed — the refusal is per-item, never a wedge"
     );
 }
 

@@ -6,7 +6,9 @@
 //!
 //! The flight law (the clusters plan §2.3): every static-cluster leg flies the ±Z POLAR corridor —
 //! orbits lie near the XY plane and the star ring near XZ, so ±Z is clear of both by the I-AXIS /
-//! I-POLE / I-RADIAL margins `world_roster` asserts. A leg's outcome is always a REALM LABEL, never
+//! I-POLE / I-RADIAL margins `world_roster` asserts — for the HOME system AND the ring SIBLING the
+//! chain gate creeps into (per-system asserts; the sibling's orbits are their own seed draw, so the
+//! home's margins never licensed them — batch review). A leg's outcome is always a REALM LABEL, never
 //! a coordinate: past a crossing the pose reframes, and a target stated in the old frame is
 //! meaningless (the demand suite's own run-2 lesson).
 
@@ -70,11 +72,21 @@ pub fn rendezvous_into_planet(
     // a led aim — keeps the ship at chase speed through the band, and the flush re-validation then
     // RIGHTLY refuses a crossing whose subject is already gone. A pilot lands by ARRIVING EARLY:
     // fly to where the planet WILL BE, stop, and let it sweep over the parked ship — the relative
-    // speed is then the planet's own ~6 m/s, the decision is still true at the flush, and the
+    // speed is then the planet's own orbital ~m/s, the decision is still true at the flush, and the
     // crossing commits.
     const RENDEZVOUS_TICKS: u64 = 200;
-    // One full sweep of the planet's shell (~8.3 m at ~6.3 m/s ≈ 66 ticks) plus pipeline margin.
+    // One full sweep of the planet's shell — its diameter at the planet's own orbital speed, about
+    // a second on THE world — plus generous pipeline margin. A budget with slack, deliberately not
+    // a derived world number: the deadline loop re-plans anyway, so slack costs one extra leg at
+    // worst. (The old "~8.3 m at ~6.3 m/s" arithmetic here was the pre-S4 world's — batch review.)
     const SWEEP_GRACE_TICKS: u64 = 120;
+    // THE world's own SOI + acquire edge, derived at use for the failure diagnostics — never a
+    // transcribed literal (batch review: this message still said "~4.16 m SOI" after the S4
+    // re-solve moved the planet SOI to ~3.95 m, mislabelling a 4.05 m closest approach as inside;
+    // and the SOI face was the wrong quantity anyway — containment ACQUIRES at soi − inset).
+    let config = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
+    let soi_m = config.planet.planet_soi_r_m;
+    let acquire_edge_m = soi_m - config.band.inset_m;
     let want = vd_core::pose::FrameRef::PlanetCentered { planet_seed }.label();
     let started = Instant::now();
     let mut best = f64::INFINITY;
@@ -169,7 +181,8 @@ pub fn rendezvous_into_planet(
         assert!(
             started.elapsed() < deadline,
             "NO CROSSING: flew rendezvous legs at {planet:?} for {}s but location never flipped \
-             (loc {loc:?}); closest approach {best:.2} m vs ~4.16 m SOI.",
+             (loc {loc:?}); closest approach {best:.2} m vs the {soi_m:.2} m SOI (containment \
+             acquires at {acquire_edge_m:.2} m).",
             started.elapsed().as_secs(),
         );
     }

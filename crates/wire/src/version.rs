@@ -20,9 +20,11 @@ pub const PROTO_MAJOR: u16 = 1;
 /// Additive revision within the major — minor 1 added `ServerControlMsg::UniverseRate`;
 /// minor 2 added `ServerControlMsg::OwnEntity` (the pure-renderer own-entity signal);
 /// minor 3 appended `to_parent: Option<RealmId>` to the shard↔orch crossing carriers
-/// (`CrossingRequest`/`TransientCrossingRequest`/`TransientCrossingGrant`) so an `Area` dest's frame
-/// forms — the parent-provenance the re-home threads to `rebind_pose_to_dest` (the "Area label never
-/// flips" fix). NOTE these are `InterShardFlow` (mesh) carriers, whose whole cluster runs ONE build in
+/// (`CrossingRequest`/`TransientCrossingRequest`/`TransientCrossingGrant`) — the parent-provenance the
+/// "Area label never flips" fix threaded to a consumer (`rebind_pose_to_dest`) that has since been
+/// DELETED (D-PLACE-1): the field is now a ★DEAD carried-but-unread tombstone (the receiver forms an
+/// `Area` frame from its own roster), owed a flag-day removal (D-WIRE-1). NOTE these are
+/// `InterShardFlow` (mesh) carriers, whose whole cluster runs ONE build in
 /// dev-greenfield; the field-append is version-visible here for the release-conformance ledger, not for a
 /// mixed-minor mesh negotiation (which does not exist — the negotiated minor gates the CLIENT↔gateway
 /// `ServerControlMsg` variants).

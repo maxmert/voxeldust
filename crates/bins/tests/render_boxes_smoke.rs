@@ -92,6 +92,42 @@ fn await_listener(port: u16, child: &mut Child) {
     }
 }
 
+/// The rim-probe half-size (px): small squares straddling the shell's silhouette edge.
+const RIM_PROBE_HALF_PX: f64 = 3.0;
+/// The inner probe's centre inset from the projected rect radius — deep enough that pixelization
+/// cannot push it outside the disc (the silhouette only ever EXCEEDS the projected chord).
+const RIM_INNER_INSET_PX: f64 = 7.0;
+/// The outer probe's centre outset — past the silhouette bulge (≤ 2 % of the ~167 px radius
+/// ≈ 3.3 px) plus MSAA edge blending, so the probe sits in provably-empty space.
+const RIM_OUTER_OUTSET_PX: f64 = 9.0;
+/// How much each planet's drawn rect is inflated in the probe-angle search — covers the planets'
+/// orbital drift between the state sample and the screenshot's own frame.
+const RIM_PLANET_DRIFT_PX: f64 = 12.0;
+/// The probe-angle search step (deg) around the rim circle.
+const RIM_ANGLE_STEP_DEG: f64 = 5.0;
+
+/// A square probe rect of half-size `half`, centred `radius` px from `(cx, cy)` along `theta`
+/// (pixel coords, y down).
+fn rim_probe(cx: f64, cy: f64, theta_rad: f64, radius: f64, half: f64) -> ScreenAabb {
+    let px = cx + theta_rad.cos() * radius;
+    let py = cy + theta_rad.sin() * radius;
+    ScreenAabb {
+        min: vd_client_harness::camera::ScreenPos {
+            x: px - half,
+            y: py - half,
+        },
+        max: vd_client_harness::camera::ScreenPos {
+            x: px + half,
+            y: py + half,
+        },
+    }
+}
+
+/// Two screen rectangles share no pixel.
+fn rects_disjoint(a: ScreenAabb, b: ScreenAabb) -> bool {
+    a.max.x < b.min.x || b.max.x < a.min.x || a.max.y < b.min.y || b.max.y < a.min.y
+}
+
 /// Count non-clear pixels of `rgba` (top-left origin, `(y*w+x)*4`) inside `region`. The H2 verdict:
 /// the box's color region must be NON-EMPTY inside its projected screen AABB — "the box drew where
 /// it should", not merely "something drew somewhere".
@@ -285,13 +321,122 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
     );
     assert!(
         box_pixels > 0,
-        "THE world's home shell is NOT pixel-visible inside its projected screen region \
-         [{:.1},{:.1}]-[{:.1},{:.1}] — a bare content fraction would miss this (H2). \
-         Did the shell mesh/material draw, and did the reconstructed camera frame it?",
+        "THE world's home shell region holds NO pixels at all inside \
+         [{:.1},{:.1}]-[{:.1},{:.1}] — a bare content fraction would miss this. \
+         Did anything draw, and did the reconstructed camera frame the scene?",
         region.min.x,
         region.min.y,
         region.max.x,
         region.max.y,
+    );
+
+    // ---- H2, ISOLATED TO THE SHELL (batch review): the whole-region count above is satisfied by
+    // ANY paint inside the rect — five nested planet boxes and the avatar dot sit in it, so a single
+    // planet disc used to pass it with the shell never rasterized (and before the capture schedule
+    // despawned the reference scaffold, the 500 m ground slab did too). The shell-isolating proof is
+    // the RIM: only the home shell can reach its own silhouette edge — the generator solves every
+    // planet's worst apoapsis face strictly inside the shell, and the probe ANGLE is chosen clear of
+    // every planet's CURRENT drawn disc (drift-inflated) — so a probe just inside the rim must hold
+    // paint, and its mirror just outside must hold NONE ("the shell drew WHERE it should", both
+    // edges of "where").
+    let cx = (region.min.x + region.max.x) * 0.5;
+    let cy = (region.min.y + region.max.y) * 0.5;
+    let rim_r = (region.max.x - region.min.x) * 0.5;
+    let planet_rects: Vec<(String, ScreenAabb)> = scene
+        .iter()
+        .filter(|&(realm, _)| realm != roster.home)
+        .map(|(realm, rbox)| {
+            let label = format!("{realm:?}");
+            let centre = state
+                .realm_boxes
+                .iter()
+                .find(|b| b.realm == label)
+                .map(|b| DVec3::from_array(b.center))
+                .expect("every renderable realm is drawn (assert above)");
+            let radius = match rbox.shape {
+                BoxShape::Sphere { r } => r,
+                BoxShape::Box { half } => half.length(),
+            };
+            let rect = projected_point_aabb(&camera, centre, radius)
+                .expect("a drawn planet projects in front of the fitted camera");
+            (
+                label,
+                ScreenAabb {
+                    min: vd_client_harness::camera::ScreenPos {
+                        x: rect.min.x - RIM_PLANET_DRIFT_PX,
+                        y: rect.min.y - RIM_PLANET_DRIFT_PX,
+                    },
+                    max: vd_client_harness::camera::ScreenPos {
+                        x: rect.max.x + RIM_PLANET_DRIFT_PX,
+                        y: rect.max.y + RIM_PLANET_DRIFT_PX,
+                    },
+                },
+            )
+        })
+        .collect();
+    // The probe angle: swept from the disc's BOTTOM (far from the top-left HUD; the rim's topmost
+    // row already sits ~190 px below the HUD block, guarded below anyway) until both probes are
+    // in-image and clear of every drift-inflated planet disc. The avatar dot sits at the projected
+    // session origin — the disc centre, ~160 px from any rim probe — and cannot collide.
+    let (inner_probe, outer_probe) = {
+        let mut found = None;
+        let mut step = 0u32;
+        while step < 72 {
+            let theta = (90.0 + f64::from(step) * RIM_ANGLE_STEP_DEG).to_radians();
+            let inner = rim_probe(cx, cy, theta, rim_r - RIM_INNER_INSET_PX, RIM_PROBE_HALF_PX);
+            let outer = rim_probe(
+                cx,
+                cy,
+                theta,
+                rim_r + RIM_OUTER_OUTSET_PX,
+                RIM_PROBE_HALF_PX,
+            );
+            let in_image = |r: &ScreenAabb| {
+                r.min.x >= 0.0 && r.min.y > 130.0 && r.max.x <= w as f64 && r.max.y <= h as f64
+            };
+            if in_image(&inner)
+                && in_image(&outer)
+                && planet_rects
+                    .iter()
+                    .all(|(_, p)| rects_disjoint(inner, *p) && rects_disjoint(outer, *p))
+            {
+                found = Some((inner, outer));
+                break;
+            }
+            step += 1;
+        }
+        found.unwrap_or_else(|| {
+            panic!(
+                "no rim angle clears every planet's drift-inflated disc ({planet_rects:?}) — THE \
+                 world's projected layout changed; restate the probe search, never the rim asserts"
+            )
+        })
+    };
+    let rim_inside = nonclear_in_region(&buf, w, h, clear, inner_probe);
+    let rim_outside = nonclear_in_region(&buf, w, h, clear, outer_probe);
+    println!(
+        "G-RENDER-BOXES-SMOKE rim: inside probe [{:.1},{:.1}]-[{:.1},{:.1}] → {rim_inside} px, \
+         outside probe [{:.1},{:.1}]-[{:.1},{:.1}] → {rim_outside} px",
+        inner_probe.min.x,
+        inner_probe.min.y,
+        inner_probe.max.x,
+        inner_probe.max.y,
+        outer_probe.min.x,
+        outer_probe.min.y,
+        outer_probe.max.x,
+        outer_probe.max.y,
+    );
+    assert!(
+        rim_inside > 0,
+        "H2 (shell-isolated): the home SHELL is not pixel-visible at its own rim — the probe just \
+         inside the silhouette (clear of every planet disc) holds no paint, so whatever filled the \
+         whole-region count was NOT the shell",
+    );
+    assert_eq!(
+        rim_outside, 0,
+        "H2 (shell-isolated): paint OUTSIDE the home shell's silhouette where nothing may draw \
+         (the capture scaffold is despawned; the galaxy is never drawn) — the shell's edge is not \
+         where the camera math says it is",
     );
 
     // The HR6 manifest aligns the capture to its tick + state — confirm it recorded this screenshot.

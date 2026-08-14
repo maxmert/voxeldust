@@ -1,5 +1,11 @@
 # Seed Universe Generator — design (D-45(a), pre-P4)
 
+> **⚠ 2026-08-14 correction (SL5, Stage-C audit :866):** every mention of `canonical()` /
+> `seed_derived()` below is HISTORICAL — those real-scale presets were DELETED with zero production
+> callers (their own doc conceded the AU conversion was 2.5× real and the bodies did not nest). THE
+> ONE world (`UniverseConfig::world`) is the only shipped world; true astronomical scale is an owed
+> change to IT, never a parallel preset.
+
 Status: **Slices 0–2 LANDED**; Slices 3–4 + step-2 DESIGNED + adversarially vetted, not yet
 implemented (Jul 2026). Slice 0 (seed-tree RNG) `07a2c1d`; Slice 1 (3D Kepler ephemeris math)
 `3ae580f`; Slice 2 (taxonomy as data) on this branch — all HR5 100%, full workspace gate green. This is the plan of
@@ -124,7 +130,10 @@ children — never the whole tree.
 - **Tiers (D-41):** galaxy/nav in the COARSE ly/AU tier; system-and-inward in the FINE mm tier. The
   tier keys off `FrameRef`; the fine↔coarse flip lands ON the SOI crossing — which IS the re-home
   event. Map/travel/tier boundaries all coincide on the SOI.
-- **Step-1 stays IdentityFrames — PROVABLY does not touch the re-home.** The re-home reads frames at
+- **Step-1 stays IdentityFrames — PROVABLY does not touch the re-home.** *(Historical: the two seam
+  symbols named here — `IdentityFrames`, `rebind_pose_to_dest` — were later DELETED by the placement
+  arc, D-PLACE-1; the seam is now `flush_pose_for_dest`/`place_arriving_pose`. Kept as the record of
+  what step-1 proved at the time.)* The re-home reads frames at
   exactly two seam sites, both hardcoding `IdentityFrames`: input `region_signed_distance` (stub.rs:2750)
   and output `rebind_pose_to_dest` (frame.rs:191). Step-1 supplies ONLY a static `center` and NEVER a
   non-identity `FrameContext`, so the arithmetic (`p.pos.offset() - region.center.offset()`), the depth

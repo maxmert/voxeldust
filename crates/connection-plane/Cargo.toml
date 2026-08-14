@@ -7,7 +7,6 @@ description = "Gateway internals as a LIBRARY: lock-free route table (ArcSwap), 
 
 [dependencies]
 vd-core = { workspace = true }
-vd-physics = { workspace = true }
 vd-wire = { workspace = true }
 vd-sim = { workspace = true }
 serde = { workspace = true }
@@ -21,6 +20,11 @@ sha2 = { workspace = true }
 ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
+# DEV-ONLY, deliberately (SL4): test fixtures BUILD worlds (`WorldView::hand_placed`/`generated`);
+# the shipped gateway only RECEIVES a lowered `vd_core::worldgen::WorldRealms` and cannot name a
+# motion — the batch review found the crate fence carved open by a NORMAL edge here, and the
+# carve-out is deleted with it (`sl4_the_crossing_path_cannot_name_a_motion` covers this crate again).
+vd-physics = { workspace = true }
 proptest = { workspace = true }
 # HR5: unit tests install a TRACE sink so every tracing macro's lazy field closure
 # EVALUATES on the paths the tests already drive — without it the closures are dead

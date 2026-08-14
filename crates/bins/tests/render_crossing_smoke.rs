@@ -47,10 +47,12 @@ use vd_bins::{
 };
 use vd_client::realm_scene::{BoxShape, RealmScene};
 use vd_client_harness::assert::magenta_pixel_count;
+use vd_client_harness::camera::marker_world_radius;
 use vd_client_harness::camera::{CaptureCamera, ScreenAabb};
 use vd_client_harness::manifest::{CaptureKind, MANIFEST_FILENAME, RunManifest};
 use vd_client_harness::verdict::{
-    dot_pixels_within_box_region, expected_box, projected_point_aabb,
+    dot_pixels_distinct_from_surround, dot_pixels_within_box_region, expected_box,
+    projected_point_aabb,
 };
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
 use vd_core::glam::DVec3;
@@ -62,8 +64,28 @@ const CLIENT_NAME: &str = "g-render-crossing";
 /// gates (render-smoke +18, render-boxes/crossing-e2e +19) so a live cluster can never collide.
 const RENDER_CROSSING_SLOT: u16 = WORKTREE_SLOT_CEILING + 22; // 86: G-RENDER-CROSSING-SMOKE
 
-/// The dot's on-screen world radius for its projected rectangle (brackets the billboard marker).
-const DOT_WORLD_RADIUS: f64 = 2.0;
+/// The dot rectangle's BRACKET over the marker's floored world radius
+/// (`marker_world_radius(DOT_RADIUS, …)` — the SAME derivation the renderer scales the marker by,
+/// so the asserted rectangle and the drawn footprint cannot drift): 2× covers the reconstruction
+/// skew, the sphere-silhouette bulge and the rect pixelization.
+const DOT_RECT_BRACKET: f64 = 2.0;
+/// The surround-ring width (px) for the dot-presence verdict: the local background sampled just
+/// outside the dot's rectangle (`dot_pixels_distinct_from_surround`).
+const DOT_SURROUND_RING_PX: f64 = 4.0;
+/// Extra clearance (px) beyond the dot's rectangle when choosing an in-home capture park clear of
+/// every planet's whole projected orbit annulus (phase-independent — see `clean_home_park`).
+const PARK_RECT_CLEARANCE_PX: f64 = 2.0;
+/// The park plane's world |z| (m): planets hug the XY plane (inclination σ 0.02 rad) and their
+/// containment reach is soi + outset ≈ 6 m, so 20 m of z clears every planet's SOI in WORLD space —
+/// the park can never fire a planet crossing, whatever its (x, y).
+const PARK_PLANE_Z_M: f64 = 20.0;
+/// The park search range/step along +Y (the most screen-transverse world axis under the fitted
+/// view), bounded well inside the home shell's ~149 m acquire edge.
+const PARK_MAX_OFFSET_M: f64 = 135.0;
+const PARK_SEARCH_STEP_M: f64 = 1.0;
+/// A sphere's SILHOUETTE slightly exceeds its projected chord under perspective (≤ 2 % at this
+/// scene's depth ratios) — the factor the annulus bounds inflate an SOI disc by.
+const SILHOUETTE_BULGE: f64 = 1.02;
 /// The OUTSIDE park (flight law leg A, continued down the corridor): stated in the space the
 /// session stands in — home-frame on the way out, and numerically the SAME point in the galaxy
 /// frame (J1). The crossing itself fires at the ~152 m release edge; the park is 2 km down the pole
@@ -73,8 +95,9 @@ const DOT_WORLD_RADIUS: f64 = 2.0;
 /// projection clears the rect; 2 km gives ~50 px of margin per axis. Still deep inside the galaxy's
 /// own 12331 m shell, still on the polar corridor (the sibling stars sit on the ±X ring).
 const OUTSIDE_PARK: DVec3 = DVec3::new(0.0, 0.0, -2000.0);
-/// The RETURN park (flight law leg B): inside the ~149 m acquire edge, comfortably inside the home
-/// shell for the third capture's pixels.
+/// The RETURN leg's AIM (flight law leg B): inside the ~149 m acquire edge so the label flips. The
+/// capture itself then re-parks at the annulus-clear point (`clean_home_park`) — the aim only has to
+/// commit the crossing, never to host pixels.
 const RETURN_PARK: DVec3 = DVec3::new(0.0, 0.0, -60.0);
 /// A generous LOCAL deadline per crossing leg: the ~2 km corridor flight + the re-home propagation.
 const LEG_DEADLINE: Duration = Duration::from_secs(60);
@@ -198,6 +221,114 @@ fn drawn_box_screen_aabb(
         .expect("the box center projects in front of the camera")
 }
 
+/// The dot's projected rectangle at `pos`: [`DOT_RECT_BRACKET`] × the marker's floored world radius
+/// (the SAME `marker_world_radius` derivation the renderer scales the marker by — batch review: the
+/// pixel verdicts are dot-sensitive only because the marker has a floor AND the rectangle brackets
+/// exactly that floor).
+fn dot_screen_aabb(camera: &CaptureCamera, pos: DVec3) -> ScreenAabb {
+    let dist_m = (pos - camera.eye).length();
+    let marker_r = marker_world_radius(
+        f64::from(vd_client_render::DOT_RADIUS),
+        dist_m,
+        camera.fov_y,
+        camera.height as f64,
+    );
+    projected_point_aabb(camera, pos, DOT_RECT_BRACKET * marker_r)
+        .expect("the dot projects in front of the camera")
+}
+
+/// Two screen rectangles share no pixel.
+fn rects_disjoint(a: ScreenAabb, b: ScreenAabb) -> bool {
+    a.max.x < b.min.x || b.max.x < a.min.x || a.max.y < b.min.y || b.max.y < a.min.y
+}
+
+/// Screen px per world metre, transverse, at the fitted camera's target depth — measured off the
+/// camera itself (project the target and a point 1 m right of it), never re-derived arithmetic.
+fn px_per_metre(camera: &CaptureCamera) -> f64 {
+    let forward = (camera.target - camera.eye).normalize();
+    let right = forward.cross(camera.up).normalize();
+    let a = camera
+        .project_point(camera.target)
+        .expect("the target projects");
+    let b = camera
+        .project_point(camera.target + right)
+        .expect("1 m off the target projects");
+    ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt()
+}
+
+/// One planet's whole projected ORBIT ANNULUS `[min, max]`, in px of radial distance from the drawn
+/// home centre: every screen position the planet's drawn disc can EVER occupy, over all orbital
+/// phases. The min folds the worst XY-plane foreshortening (`|forward·ẑ|` — orbits hug the XY
+/// plane); both edges inflate the SOI disc by [`SILHOUETTE_BULGE`]. Phase-independent, which is what
+/// makes a park chosen outside every annulus immune to capture timing.
+fn planet_annulus_px(
+    camera: &CaptureCamera,
+    elements: &vd_physics::celestial::OrbitalElements,
+    soi_m: f64,
+) -> (f64, f64) {
+    let pxm = px_per_metre(camera);
+    let fore = ((camera.target - camera.eye).normalize().z).abs();
+    let soi_px = soi_m * SILHOUETTE_BULGE;
+    let min = (elements.sma * (1.0 - elements.ecc) * fore - soi_px) * pxm;
+    let max = (elements.sma * (1.0 + elements.ecc) + soi_px) * pxm;
+    (min.max(0.0), max)
+}
+
+/// A capture park INSIDE the home shell whose dot RECTANGLE provably clears every planet's whole
+/// projected orbit annulus — so no planet pixel can ever sit inside the dot's rectangle, at any
+/// orbital phase, however long the flight to the park takes. The surround ring may still graze a
+/// planet (it only ADDS colors to the background set; the pure-shell color always remains on the
+/// ring's far side), so only the rectangle needs the clearance. Searched along +Y (the most
+/// screen-transverse world axis under the fitted view) on the |z| = [`PARK_PLANE_Z_M`] plane (clear
+/// of every planet's SOI in world space). Panics — loudly, naming the annuli — if THE world's
+/// orbit layout ever tiles the whole disc.
+fn clean_home_park(camera: &CaptureCamera, annuli: &[(f64, f64)]) -> DVec3 {
+    let marker_px = vd_client_harness::camera::DOT_MIN_APPARENT_RADIUS_PX;
+    let clearance = DOT_RECT_BRACKET * marker_px + PARK_RECT_CLEARANCE_PX;
+    let centre = camera
+        .project_point(DVec3::ZERO)
+        .expect("the home centre projects");
+    let mut offset_m = 0.0_f64;
+    while offset_m <= PARK_MAX_OFFSET_M {
+        let world = DVec3::new(0.0, offset_m, -PARK_PLANE_Z_M);
+        let p = camera
+            .project_point(world)
+            .expect("an in-shell park projects");
+        let r_px = ((p.x - centre.x).powi(2) + (p.y - centre.y).powi(2)).sqrt();
+        if annuli
+            .iter()
+            .all(|(lo, hi)| r_px + clearance < *lo || r_px - clearance > *hi)
+        {
+            return world;
+        }
+        offset_m += PARK_SEARCH_STEP_M;
+    }
+    panic!(
+        "no capture park inside the home shell clears every planet's projected orbit annulus \
+         (annuli {annuli:?} px, clearance {clearance:.1} px) — THE world's orbit layout changed; \
+         restate the park search, never the pixel asserts"
+    )
+}
+
+/// Capture-state belt over the phase-independent park: every OTHER drawn box's projected rect at
+/// THIS capture is disjoint from the dot's rectangle — so a pixel in the dot rect unlike its
+/// surround can only be the dot.
+fn assert_dot_rect_clear_of_planets(cap: &Capture, scene: &RealmScene, home: RealmId, label: &str) {
+    for (realm, _) in scene.iter() {
+        if realm == home {
+            continue;
+        }
+        let rect = drawn_box_screen_aabb(&cap.state, scene, &cap.camera, realm);
+        assert!(
+            rects_disjoint(cap.dot_rect, rect),
+            "{label}: the dot's rectangle {:?} must be clear of {realm:?}'s drawn disc {rect:?} — \
+             the annulus-clear park guarantees this at every orbital phase, so a collision means \
+             the park search and the world disagree",
+            cap.dot_rect,
+        );
+    }
+}
+
 /// Park the dot at `target` (stated in the space the session currently stands in), throttle cut.
 fn park_at(devctl: u16, target: DVec3) {
     let walk = round_trip(
@@ -295,8 +426,7 @@ fn capture(
     );
     let home_rect = drawn_box_screen_aabb(&state, scene, &camera, home);
     let pos = own_pos(&state);
-    let dot_rect = projected_point_aabb(&camera, pos, DOT_WORLD_RADIUS)
-        .unwrap_or_else(|| panic!("the dot projects in front of the camera ({label})"));
+    let dot_rect = dot_screen_aabb(&camera, pos);
     let (rgba, w, h, clear) = decode_capture(cwd, &shot);
     assert_eq!(
         magenta_pixel_count(&rgba),
@@ -421,7 +551,7 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     record_extra_pid(RENDER_CROSSING_SLOT, child.0.id()).expect("record capture-client pid");
     await_listener(devctl, &mut child.0);
 
-    // ---- INSIDE: the dot spawns at the home star's centre. Wait for a delivered frame, capture. --
+    // ---- INSIDE: the dot spawns at the home star's centre. Wait for a delivered frame. --
     {
         let deadline = Instant::now() + DELIVERY_DEADLINE;
         loop {
@@ -439,12 +569,37 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
             std::thread::sleep(DELIVERY_POLL);
         }
     }
+    // THE ANNULUS-CLEAR CAPTURE PARK (batch review: the pixel verdicts must isolate the DOT — its
+    // rectangle may never share a pixel with a planet's disc, and that is guaranteed against every
+    // ORBITAL PHASE, so no flight-time or capture-latency race can slide a planet under it). Both
+    // in-home captures (INSIDE + RETURNED) park here.
+    let home_park = {
+        let plan_state = poll_state(devctl);
+        let plan_camera = live_scene_camera(
+            &plan_state,
+            &extents,
+            CAPTURE_W as usize,
+            CAPTURE_H as usize,
+        );
+        let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+        let annuli: Vec<(f64, f64)> = vd_physics::worldgen::moving_children_for_config(
+            DEV.universe_seed,
+            &config,
+            roster.home,
+        )
+        .iter()
+        .map(|(_, e)| planet_annulus_px(&plan_camera, e, config.planet.planet_soi_r_m))
+        .collect();
+        clean_home_park(&plan_camera, &annuli)
+    };
+    park_at(devctl, home_park);
     let inside = capture(devctl, &cwd, "inside", &scene, &extents, roster.home);
     assert_eq!(
         inside.state.location.as_deref(),
         Some(home_label.as_str()),
         "INSIDE: the session stands in the home system",
     );
+    assert_dot_rect_clear_of_planets(&inside, &scene, roster.home, "INSIDE");
     assert!(
         dot_pixels_within_box_region(
             &inside.rgba,
@@ -458,6 +613,22 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
          (dot {:?} home {:?})",
         inside.dot_rect,
         inside.home_rect,
+    );
+    // DOT-SENSITIVE (batch review): the containment assert above is satisfied by the shell disc's
+    // own pixels, dot or no dot — this one is not: at least one pixel inside the dot's rect must
+    // differ from EVERYTHING on the ring around it (the shell disc is uniform there; the planets
+    // provably cannot reach the rect), and that pixel can only be the dot.
+    assert!(
+        dot_pixels_distinct_from_surround(
+            &inside.rgba,
+            inside.w,
+            inside.h,
+            inside.dot_rect,
+            DOT_SURROUND_RING_PX
+        ),
+        "INSIDE: the dot itself must be pixel-visible against the shell disc (rect {:?}) — an \
+         empty or background-only dot region is a FAIL, never a vacuous pass",
+        inside.dot_rect,
     );
 
     // ---- OUT (flight law leg A): the ±Z polar corridor to the galaxy — the label is the arrival. --
@@ -508,6 +679,30 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
         outside.dot_rect,
         outside.home_rect,
     );
+    // DOT-SENSITIVE (batch review): the negated containment above passes on an EMPTY frame too (the
+    // two rectangles are disjoint by construction), so it carried no pixel information. State the
+    // geometry as its own assert…
+    assert!(
+        rects_disjoint(outside.dot_rect, outside.home_rect),
+        "OUTSIDE: the 2 km park exists exactly so the dot's rect {:?} clears the home silhouette \
+         {:?} — a collision means the park or the camera geometry changed",
+        outside.dot_rect,
+        outside.home_rect,
+    );
+    // …and require the dot to have DRAWN out there: pixels unlike the empty space around its rect.
+    // An empty dot region FAILS this — the middle capture is no longer satisfiable by nothing.
+    assert!(
+        dot_pixels_distinct_from_surround(
+            &outside.rgba,
+            outside.w,
+            outside.h,
+            outside.dot_rect,
+            DOT_SURROUND_RING_PX
+        ),
+        "OUTSIDE: the dot itself must be pixel-visible in the between-space (rect {:?}) — an empty \
+         dot region is a FAIL, never a vacuous pass",
+        outside.dot_rect,
+    );
 
     // ---- RETURN (flight law leg B): back through the acquire edge — the leg the owner watched
     // freeze, now under pixels. --
@@ -518,13 +713,16 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
         &home_label,
         LEG_DEADLINE,
     );
-    park_at(devctl, RETURN_PARK);
+    // Re-park at the SAME annulus-clear capture point the INSIDE capture used (the return AIM only
+    // committed the crossing; pixels are always taken where the dot's rect is provably planet-free).
+    park_at(devctl, home_park);
     let returned = capture(devctl, &cwd, "returned", &scene, &extents, roster.home);
     assert_eq!(
         returned.state.location.as_deref(),
         Some(home_label.as_str()),
         "RETURNED: the session stands in the home system again",
     );
+    assert_dot_rect_clear_of_planets(&returned, &scene, roster.home, "RETURNED");
     assert!(
         dot_pixels_within_box_region(
             &returned.rgba,
@@ -538,6 +736,19 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
          (dot {:?} home {:?})",
         returned.dot_rect,
         returned.home_rect,
+    );
+    // DOT-SENSITIVE (batch review): the return leg is the one the owner watched freeze — the pixels
+    // must show the DOT back inside, not merely the shell disc that was there all along.
+    assert!(
+        dot_pixels_distinct_from_surround(
+            &returned.rgba,
+            returned.w,
+            returned.h,
+            returned.dot_rect,
+            DOT_SURROUND_RING_PX
+        ),
+        "RETURNED: the dot itself must be pixel-visible against the shell disc again (rect {:?})",
+        returned.dot_rect,
     );
 
     // HR6: all three screenshots recorded in the run manifest (the capture pipeline ran end to end).

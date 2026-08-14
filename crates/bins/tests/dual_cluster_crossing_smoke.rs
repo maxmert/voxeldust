@@ -14,7 +14,10 @@
 //! dot's `Entity` authority onto the galaxy shard.
 //!
 //! ANTI-VACUITY: the crossing fires from THE world's own geometry (no `trigger`/`start_transfer`, no
-//! planted boundary file); the C1 gate (`AdminSnapshot::realms_present` over `roster_realms(Dual)`)
+//! planted boundary file); the SOURCE side is ESTABLISHED first — the home shard is observed owning
+//! the admitted dot's Entity row BEFORE the leg, and afterwards THAT SAME row rests with the dest
+//! while the home owns none (moved, never copied — batch review: the poll used to break on ANY
+//! dest-owned row); the C1 gate (`AdminSnapshot::realms_present` over `roster_realms(Dual)`)
 //! guarantees every pre-booked head resolves before the flight, so the crossing can never count
 //! `crossing_unresolved` — which since J-0 is known to be a PERMANENT STRAND, not a soft failure.
 //! The flight is BOUNDED: `exit_ticks` parks the dot ~3 release-edges out, provably still inside the
@@ -178,12 +181,14 @@ fn directory_rows(admin: SocketAddr) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// A directory row proving the DEST OWNS the transferred dot: an `Entity` key (`ent-…`, distinct from
-/// the dest's own realm row) whose authority is the galaxy shard's — the directory CAS moved the
-/// dot's authority off the home shard onto the dest.
-fn dest_owns_an_entity(rows: &[(String, String)], dest_authority: &str) -> bool {
+/// A directory row proving `authority` OWNS a player Entity: an `ent-…` key (distinct from a realm
+/// row) resting with that shard. Asked twice — of the HOME shard before the leg (the source side
+/// ESTABLISHED, batch review: any galaxy-owned `ent-` row used to end the poll with no proof the
+/// home ever held it) and of the GALAXY shard after (the CAS moved it).
+fn owns_an_entity(rows: &[(String, String)], authority: &str) -> Option<String> {
     rows.iter()
-        .any(|(key, authority)| key.starts_with("ent-") && authority == dest_authority)
+        .find(|(key, a)| key.starts_with("ent-") && a == authority)
+        .map(|(key, _)| key.clone())
 }
 
 #[test]
@@ -301,16 +306,38 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     let mut pacer = TickPacer::new(DEV.tick_hz);
     let mut hello_retry = Instant::now();
     client.send_hello(AccountId(1000));
-    loop {
+
+    // ---- SOURCE SIDE ESTABLISHED (batch review): the HOME shard owns the freshly admitted dot's
+    // Entity row BEFORE the crossing can commit — measured off the ONE directory, so the headline
+    // below is provably a MOVE off the home shard, never satisfiable by an entity that somehow
+    // began life on the dest. The admit lands within the login handshake; the exit leg takes
+    // ~`exit_ticks` more ticks and the saga longer still, so this poll always wins the race.
+    let subject_key = loop {
         client.step();
         // Children may still be settling the QUIC handshake; re-send Hello until welcomed (idempotent).
         if !client.session && hello_retry.elapsed() > Duration::from_millis(500) {
             hello_retry = Instant::now();
             client.send_hello(AccountId(1000));
         }
+        if let Some(key) = owns_an_entity(&directory_rows(admin), &home_authority) {
+            break key;
+        }
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the HOME shard never owned the admitted dot's Entity row (session={}) — the source \
+             side was never established, so a crossing could prove nothing. directory={:?}",
+            client.session,
+            directory_rows(admin),
+        );
+        let _ = pacer.wait();
+    };
+    eprintln!("DUAL-CROSSING: source established — {home_authority} owns {subject_key}");
+
+    loop {
+        client.step();
         // THE PROOF: poll the ONE directory until the galaxy owns an Entity — the dot re-homed
         // home → galaxy across real processes.
-        if dest_owns_an_entity(&directory_rows(admin), &dest_authority) {
+        if owns_an_entity(&directory_rows(admin), &dest_authority).is_some() {
             break;
         }
         assert!(
@@ -323,12 +350,23 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
         let _ = pacer.wait();
     }
 
-    // The dest-owns flip IS the proof; assert it once more explicitly for the failure message + to pin
-    // that the home shard no longer holds THAT entity under its own authority (the CAS moved it, not copied).
+    // The dest-owns flip IS the proof; assert it once more explicitly for the failure message, and
+    // pin MOVED-NOT-COPIED (batch review: the count below used to be computed and then discarded):
+    // THE established subject row flipped to the dest, and the home shard is left owning NO Entity
+    // row at all.
     let final_rows = directory_rows(admin);
     assert!(
-        dest_owns_an_entity(&final_rows, &dest_authority),
+        owns_an_entity(&final_rows, &dest_authority).is_some(),
         "the galaxy shard must own the re-homed dot's Entity row: {final_rows:?}",
+    );
+    assert_eq!(
+        final_rows
+            .iter()
+            .find(|(key, _)| *key == subject_key)
+            .map(|(_, authority)| authority.as_str()),
+        Some(dest_authority.as_str()),
+        "THE SAME Entity row the home shard owned before the leg ({subject_key}) rests with the \
+         dest after it — the CAS moved the established subject, not some other row: {final_rows:?}",
     );
     let home_entity_rows = final_rows
         .iter()
@@ -343,11 +381,16 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
         "the galaxy holds >= 1 re-homed Entity ({dest_entity_rows}); the directory CAS committed the \
          crossing: {final_rows:?}",
     );
+    assert_eq!(
+        home_entity_rows, 0,
+        "MOVED, NOT COPIED: the home shard holds no Entity authority after the commit (the \
+         directory keys one row per entity — a lingering home-owned row would be a rival \
+         authority): {final_rows:?}",
+    );
     // Belt-and-suspenders anti-vacuity: the whole run's client actually established a session (the
     // crossing's `Session` head resolved), so the re-home was a real logged-in dot, not a phantom.
     assert!(
         client.session,
         "the client established a session (the crossing route's Session head resolved)"
     );
-    let _ = home_entity_rows; // observed for the failure message; the CAS may leave a source Ghost row transiently
 }

@@ -17,13 +17,15 @@ test:
 
 # Inner-loop coverage check: Tier-A only, 100% region + branch, fails the build under 100%.
 # (cargo-llvm-cov has no --fail-under-branches; the report step enforces it from the
-#  same profdata via the JSON summary.)
+#  same profdata via the JSON summary, scoped to the SAME {{tier_a}} package set — without
+#  the -p list the report's denominator spans whatever objects the target dir holds from a
+#  prior recipe, so the branch figure was not provably the Tier-A figure. Audit :741.)
 coverage-fast:
     cargo +{{coverage_toolchain}} llvm-cov --branch {{tier_a}} \
         --ignore-filename-regex '(/bin/|/tests/)' \
         --fail-under-regions 100 --fail-under-functions 100 \
         -- --quiet
-    cargo +{{coverage_toolchain}} llvm-cov report --branch \
+    cargo +{{coverage_toolchain}} llvm-cov report --branch {{tier_a}} \
         --ignore-filename-regex '(/bin/|/tests/)' \
         --json --summary-only | python3 -c "import json,sys; \
         t=json.load(sys.stdin)['data'][0]['totals']['branches']; \
@@ -33,10 +35,14 @@ coverage-fast:
 # io-prod Tier-B RATCHETED FLOOR (HR5: io-prod is process-tier, never 100% — a SIGKILL can lose the final
 # counter flush). This measures io-prod's OWN in-process unit tests (deterministic — no SIGKILL counter loss)
 # and fails under a recorded floor, so the crash-durability (RedbStore) + mesh (quinn) code can never regress
-# in coverage silently. The floor is conservative (below the ~92% measured baseline, absorbing quinn-loopback
-# timing variance) and RATCHETS UP — raise it as coverage stabilizes/improves, never lower it. The DEEPER
+# in coverage silently. The floor is conservative (below the measured baseline, absorbing quinn-loopback
+# timing variance) and RATCHETS UP — raise it as coverage stabilizes/improves, never lower it.
+# RATCHETED 90 → 94 (2026-08-14, audit :195 — the floor had never moved since it was minted): the ledgered
+# series measured ≥ 94.4 across six consecutive recorded runs (94.41 / 94.43 / 94.45+94.74 / 94.61+94.90 /
+# 94.81+95.11 / 95.06+95.09, DEFERRED.md) with the largest observed run-to-run drop < 0.4 — so 94 sits below
+# every recorded value of that series and still absorbs the loopback timing variance. The DEEPER
 # process-tier %c merge (the spawned node BINARIES via `orch-crash-cov`) is owed (DEFERRED.md D-40).
-tier_b_floor := "90"
+tier_b_floor := "94"
 coverage-io-prod:
     cargo +{{coverage_toolchain}} llvm-cov -p vd-io-prod --fail-under-regions {{tier_b_floor}}
 
@@ -192,22 +198,28 @@ fmt-check:
 render-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
 
-# G-RENDER-BOXES-SMOKE (Visual Crossing Playground V3 pixel proof): bring up the cluster, launch a
-# HEADLESS `client --capture --realm-boxes <boxes.json>` (ONE translucent colored realm box),
-# capture a real wgpu-readback frame, and assert the box is PIXEL-VISIBLE inside its projected
-# screen region (H2 — not a bare content fraction) + zero magenta. Same GPU-required, LOCAL-gate
-# preconditions as render-smoke (no CI, no software fallback; steer with WGPU_BACKENDS).
+# G-RENDER-BOXES-SMOKE (THE world's realm-box pixel proof): bring up the cluster, launch a HEADLESS
+# `client --capture --realm-boxes` drawing the emit-world-scene regions, capture a real
+# wgpu-readback frame, and assert the HOME SHELL ITSELF drew where it should — paint at a rim probe
+# just inside its silhouette (at an angle chosen clear of every planet's drawn disc) and NONE just
+# outside it (H2, isolated to the shell — batch review: the whole-region count was satisfied by a
+# planet disc or the capture scaffold with the shell never rasterized) + zero magenta. Same
+# GPU-required, LOCAL-gate preconditions as render-smoke (no CI, no software fallback; steer with
+# WGPU_BACKENDS).
 render-boxes-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_boxes_smoke -- --nocapture
 
 # G-RENDER-CROSSING-SMOKE (the crossing pixel proof on THE world): bring up the DUAL cluster with NO
 # injected geometry, launch a HEADLESS `client --capture --realm-boxes` drawing the emit-world-scene
 # regions, fly the ±Z polar corridor OUT of the home system's own 150 m shell and BACK, and capture
-# THREE frames — INSIDE (dot pixels in the home shell's rect), OUTSIDE (label = the galaxy, pixels
-# NOT in the home rect, expected_box == None: the between-space is never drawn), RETURNED (inside
-# again — the return leg's first pixel coverage). The camera is RECONSTRUCTED per capture from the
-# client's own reported drawn boxes (the planets orbit, so a static-file camera would drift). Zero
-# magenta on all three. Same GPU-required, LOCAL-gate preconditions as render-smoke.
+# THREE frames — each DOT-SENSITIVE (batch review): the dot marker carries a minimum apparent size,
+# its rectangle is parked provably clear of every planet's orbit annulus, and every capture requires
+# dot pixels DISTINCT from their surround — INSIDE (dot in the home shell's rect), OUTSIDE (label =
+# the galaxy, dot rect disjoint from the home rect AND the dot drew out there; expected_box == None:
+# the between-space is never drawn), RETURNED (inside again — the return leg's pixel coverage). The
+# camera is RECONSTRUCTED per capture from the client's own reported drawn boxes (the planets orbit,
+# so a static-file camera would drift). Zero magenta on all three. Same GPU-required, LOCAL-gate
+# preconditions as render-smoke.
 render-crossing-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
 

@@ -1154,6 +1154,45 @@ mod tests {
     }
 
     #[test]
+    fn an_outward_crossings_parent_stays_alive_without_an_upward_demand() {
+        // Lane cure, finding 37 — the deterministic twin of the shard-side refusal gate
+        // (`stub`'s `an_outward_crossing_emits_no_demand_and_counts_the_refusal`): an occupant
+        // crossing OUT of a system toward its parent produces NO demand naming the parent — and none
+        // is needed. While the hand-off latch stands the source still speaks for the crosser
+        // (`speaks_for`), so it never reports Empty: arm B holds the SOURCE desired, and
+        // `ancestor_close` pulls its whole parent chain — the parent is alive through CLOSURE, never
+        // through the upward demand SL7 forbids. (The process-tier experiment is the return-crossing
+        // gate `a_planet_to_system_return_commits_both_rehomes_and_the_player_rides`.)
+        let mut l = DemandLedger::default();
+        // The source was demanded once, long ago (arm A stale by `now`), and never reported Empty
+        // (its mid-crossing observer fold keeps it non-empty for the whole hand-off window).
+        l.record_demand(&u_g_s(), DemandVerb::SpinUp, UniverseTick(1), Fence(1));
+        let c = l.get(u_g_s().path()).expect("cell present");
+        let t = cloud();
+        let now = UniverseTick(10_000);
+        assert!(
+            !demanded_recently(c, now, t.demand_ttl_ticks),
+            "no demand from anyone — the upward keep-alive is deleted and arm A is stale"
+        );
+        assert!(
+            desired_alive(c, now, &t, true, false),
+            "arm B alone holds the source: running and not affirmatively empty"
+        );
+        // The closure pulls the parent chain: every ancestor of the desired source stays alive.
+        let mut desired = BTreeMap::new();
+        desired.insert(u_g_s().path().clone(), u_g_s());
+        let closed = ancestor_close(&desired);
+        assert!(
+            closed.contains_key(u_g().path()),
+            "the crossing dest (the parent) is alive through the closure"
+        );
+        assert!(
+            closed.contains_key(u_root().path()),
+            "…and so is the whole chain above it"
+        );
+    }
+
+    #[test]
     fn demanded_recently_ignores_the_never_demanded_sentinel() {
         let t = cloud();
         let mut l = DemandLedger::default();

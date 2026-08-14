@@ -135,6 +135,75 @@ pub fn dot_pixels_within_box_region(
     saw_dot_pixel
 }
 
+/// **Dot presence, background-differential (the dot-SENSITIVE half of the pixel verdicts — batch
+/// review):** does `dot_screen_aabb` hold at least one pixel whose color differs from EVERY color on
+/// the surrounding ring (`dot_screen_aabb` inflated by `ring_px`, minus its interior)? The ring
+/// samples the LOCAL background — the translucent shell's uniform disc, or empty space — so a pixel
+/// unlike all of it can only be the dot (no color contract needed: the dot's exact tonemapped value
+/// is never assumed, only that it differs from what surrounds it). `false` when the dot region holds
+/// no scannable pixel, or when everything in it matches the surround — a dot that did not draw FAILS
+/// this, where the rect-containment verdict alone was satisfied by the background (its non-clear
+/// pixels are anything at all, so a shell disc under the rect passed it dot or no dot).
+///
+/// DETERMINISTIC and threshold-free: exact byte equality against the ring's color SET, so a uniform
+/// background of any color works and an MSAA-blended dot edge already differs. Callers must place
+/// the ring where the background is locally uniform (deep inside one shell disc, or empty space) —
+/// the render smokes assert that placement geometrically before asking this.
+#[must_use]
+pub fn dot_pixels_distinct_from_surround(
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    dot_screen_aabb: ScreenAabb,
+    ring_px: f64,
+) -> bool {
+    let inner = clamp_aabb_to_image(dot_screen_aabb, w, h);
+    let outer = clamp_aabb_to_image(
+        ScreenAabb {
+            min: ScreenPos {
+                x: dot_screen_aabb.min.x - ring_px,
+                y: dot_screen_aabb.min.y - ring_px,
+            },
+            max: ScreenPos {
+                x: dot_screen_aabb.max.x + ring_px,
+                y: dot_screen_aabb.max.y + ring_px,
+            },
+        },
+        w,
+        h,
+    );
+    // The surround's color set: every pixel of the outer rect that is NOT inside the inner rect.
+    let mut surround: std::collections::BTreeSet<[u8; 4]> = std::collections::BTreeSet::new();
+    let (ox0, oy0, ox1, oy1) = outer;
+    let (ix0, iy0, ix1, iy1) = inner;
+    for py in oy0..oy1 {
+        for px in ox0..ox1 {
+            let in_inner = (px >= ix0) & (px < ix1) & (py >= iy0) & (py < iy1);
+            if in_inner {
+                continue;
+            }
+            let idx = (py * w + px) * CHANNELS;
+            let Some(pixel) = rgba.get(idx..idx + CHANNELS) else {
+                continue; // an off-buffer pixel is skipped (an oversized AABB cannot panic)
+            };
+            surround.insert([pixel[0], pixel[1], pixel[2], pixel[3]]);
+        }
+    }
+    // The dot region: any pixel unlike EVERYTHING on the ring is the dot.
+    for py in iy0..iy1 {
+        for px in ix0..ix1 {
+            let idx = (py * w + px) * CHANNELS;
+            let Some(pixel) = rgba.get(idx..idx + CHANNELS) else {
+                continue;
+            };
+            if !surround.contains(&[pixel[0], pixel[1], pixel[2], pixel[3]]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// RGBA8: 4 bytes per pixel (mirrors `assert.rs`).
 const CHANNELS: usize = 4;
 
@@ -542,6 +611,67 @@ mod tests {
         assert!(dot_pixels_within_box_region(
             &buf, w, h, CLEAR, big, box_region
         ));
+    }
+
+    #[test]
+    fn a_dot_unlike_its_surround_is_present_a_matching_or_absent_one_is_not() {
+        let (w, h) = (10usize, 10usize);
+        let dot_region = ScreenAabb {
+            min: ScreenPos { x: 4.0, y: 4.0 },
+            max: ScreenPos { x: 6.0, y: 6.0 },
+        };
+        // PRESENT: a pixel inside the dot rect unlike everything on the ring (uniform background).
+        let mut buf = solid(w, h, CLEAR);
+        set_px(&mut buf, w, 4, 5, DOT);
+        assert!(dot_pixels_distinct_from_surround(
+            &buf, w, h, dot_region, 2.0
+        ));
+        // ABSENT: an all-background frame — the dot rect holds nothing the ring lacks.
+        let flat = solid(w, h, CLEAR);
+        assert!(!dot_pixels_distinct_from_surround(
+            &flat, w, h, dot_region, 2.0
+        ));
+        // CAMOUFLAGED: the candidate's color ALSO appears on the ring (a second background tone),
+        // so it proves nothing — the verdict refuses it.
+        let mut two_tone = solid(w, h, CLEAR);
+        set_px(&mut two_tone, w, 3, 3, DOT); // on the ring
+        set_px(&mut two_tone, w, 5, 5, DOT); // in the dot rect, same color
+        assert!(!dot_pixels_distinct_from_surround(
+            &two_tone, w, h, dot_region, 2.0
+        ));
+        // OFF-IMAGE dot rect: clamped to empty — never a vacuous pass.
+        let off = ScreenAabb {
+            min: ScreenPos { x: 50.0, y: 50.0 },
+            max: ScreenPos { x: 60.0, y: 60.0 },
+        };
+        assert!(!dot_pixels_distinct_from_surround(&buf, w, h, off, 2.0));
+        // A CORNER rect: the ring clamps at the image edge and the verdict still works.
+        let corner = ScreenAabb {
+            min: ScreenPos { x: 0.0, y: 0.0 },
+            max: ScreenPos { x: 2.0, y: 2.0 },
+        };
+        let mut corner_buf = solid(w, h, CLEAR);
+        set_px(&mut corner_buf, w, 1, 1, DOT);
+        assert!(dot_pixels_distinct_from_surround(
+            &corner_buf,
+            w,
+            h,
+            corner,
+            2.0
+        ));
+    }
+
+    #[test]
+    fn a_truncated_buffer_is_skipped_in_both_scans_never_a_panic() {
+        // The two `rgba.get` None arms (ring scan + dot scan): `w`/`h` claim a full image but the
+        // buffer ends after one row, so later indices fall past the slice and are skipped.
+        let (w, h) = (6usize, 6usize);
+        let buf = solid(w, h, CLEAR)[..6 * CHANNELS].to_vec();
+        let region = ScreenAabb {
+            min: ScreenPos { x: 1.0, y: 1.0 },
+            max: ScreenPos { x: 5.0, y: 5.0 },
+        };
+        assert!(!dot_pixels_distinct_from_surround(&buf, w, h, region, 1.0));
     }
 
     #[test]

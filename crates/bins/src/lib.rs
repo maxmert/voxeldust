@@ -2017,8 +2017,10 @@ pub fn spawn_anchors_from_env(env: &EnvConfig) -> Vec<(&'static str, String)> {
 /// as it was before the hand-off ledger existed.
 ///
 /// A hand-off has two ends and ONE duration. The destination is shielded from the reaper for it; the
-/// source keeps speaking for its departing occupant — telling its parent where they are, and counting
-/// itself occupied — for the same one. Both read `derive_arrival_shield_ticks`, so the two ends cannot
+/// source keeps speaking for its departing occupant — counting itself occupied, so its one-bit
+/// `ChildLive` heartbeat keeps beating to its parent (NO pose crosses: the per-occupant position
+/// up-relay is DELETED, Step 5 slice D / SL2) — for the same one. Both read
+/// `derive_arrival_shield_ticks`, so the two ends cannot
 /// drift apart under a later re-tune; a source that fell silent before its destination stopped waiting is
 /// the gap the whole ledger exists to close.
 ///
@@ -2279,23 +2281,50 @@ fn visual_regions_and_movers(
 /// The WORST-INSTANT reach of every child region — what the boot hands `guard_regions_nest` so the
 /// fence can judge a mover at its APOAPSIS instead of at the zeroed centre it stores (the placement
 /// arc S4; audit finding 27's cure). The boot is the one party that may name how a child moves: a
-/// mover's bound is `a·(1+e)` from its elements; a static child is judged EXACTLY at its authored
-/// offset. The fence itself consumes the map kind-blind.
+/// mover's bound is [`vd_physics::motion::Motion::max_excursion_m`] — THE one closed-form
+/// worst-instant accessor, never a re-derived `a·(1+e)` beside it (the batch-review DRY finding: the
+/// declared single writer was the one expression nobody called); a static child is judged EXACTLY at
+/// its authored offset. The fence itself consumes the map kind-blind.
+///
+/// THE MOVER ROSTER IS THE NEIGHBOURHOOD'S, NOT THE HOSTED REALM'S (batch review, MAJOR — the
+/// zero-reach hole): a shard plants rows it does not author — its OWN row, its ancestors' — and a
+/// MOVER among them stores a zeroed centre by construction, so keying the reach on the hosted
+/// shard's own moving roster judged that mover at `Fixed(0,0,0)`: the size-only verdict the fence
+/// was rebuilt to ban, silently lenient on every shard that does not host the mover's parent (one
+/// forest, a different verdict per shard). The roster is therefore derived HERE, from THE world
+/// itself, for EVERY parent a region row names — so every mover row gets its Excursion on every
+/// shard that plants it, and the `None` arm below is reachable only by a genuinely static child.
+/// Boot-time-only knowledge, discarded after the guard: the sim's runtime roster stays the hosted
+/// realm's own authored children (SL1 — a realm is never handed its own placement to run with).
 #[must_use]
 pub fn child_reaches(
+    universe_seed: u64,
     regions: &[vd_core::geometry::RealmRegion],
-    moving: &std::collections::BTreeMap<
-        vd_core::pose::RealmId,
-        vd_physics::celestial::OrbitalElements,
-    >,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
 ) -> std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::geometry::ChildReach> {
     use vd_core::geometry::ChildReach;
+    use vd_physics::motion::Motion;
+    let config = vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps, tick_dt_s);
+    // Every mover of this neighbourhood, keyed by realm: the union of THE world's moving children
+    // over every parent a region row names. The regions and this roster derive from the SAME
+    // `(seed, config)` forest, so a mover row missing from it is unrepresentable — which is what
+    // makes the static `None` arm honest rather than a defaulted zero wearing a `Fixed` label.
+    let parents: std::collections::BTreeSet<vd_core::pose::RealmId> =
+        regions.iter().filter_map(|r| r.parent).collect();
+    let movers: std::collections::BTreeMap<
+        vd_core::pose::RealmId,
+        vd_physics::celestial::OrbitalElements,
+    > = parents
+        .iter()
+        .flat_map(|p| vd_physics::worldgen::moving_children_for_config(universe_seed, &config, *p))
+        .collect();
     regions
         .iter()
         .filter(|r| r.parent.is_some())
         .map(|r| {
-            let reach = match moving.get(&r.realm) {
-                Some(e) => ChildReach::Excursion(e.sma * (1.0 + e.ecc)),
+            let reach = match movers.get(&r.realm) {
+                Some(e) => ChildReach::Excursion(Motion::Kepler(*e).max_excursion_m()),
                 None => {
                     // The stored offset is measured in the PARENT's frame, so the parent's tier
                     // scales its cell anchor into metres.
@@ -2399,20 +2428,102 @@ pub struct WorldRoster {
     /// The sibling's authored placement in the GALAXY's frame — read from the galaxy-hosted boot, the
     /// parent that authors it (SL1), never folded from the root.
     pub sibling_centre: vd_core::glam::DVec3,
-    /// I-POLE: the farthest any home mover reaches out of the orbital plane PLUS its whole containment
-    /// reach (`max over movers of sma·(1+e)·|sin i| + planet_soi + outset`). Every polar waypoint a
-    /// flight plan states uses `|z| >= 2 · pole_altitude_m` — clear of every planet at every orbital
-    /// phase by construction.
+    /// I-POLE: the farthest any mover reaches out of the orbital plane PLUS its whole containment
+    /// reach (`max over movers of sma·(1+e)·|sin i| + planet_soi + outset`), taken over BOTH systems
+    /// the static legs fly — the HOME system and its ring SIBLING, whose orbits are a different
+    /// per-system draw (batch review: the sibling's margins used to be a bare comment). Every polar
+    /// waypoint a flight plan states uses `|z| >= 2 · pole_altitude_m` — clear of every planet at
+    /// every orbital phase by construction.
     pub pole_altitude_m: f64,
-    /// I-AXIS: the closest any home orbit comes to the polar (±Z) axis
-    /// (`min over movers of sma·(1−e)·cos i`). Asserted `> 2 · planet_soi` — what licenses every ±Z
-    /// corridor leg.
+    /// I-AXIS: the closest any orbit — home OR ring sibling — comes to the polar (±Z) axis
+    /// (`min over movers of sma·(1−e)·cos i`). Asserted `> 2 · planet_soi` per system — what
+    /// licenses every ±Z corridor leg, including the chain gate's creep into the sibling.
     pub axis_clearance_m: f64,
-    /// I-RADIAL: the smallest clear gap between adjacent home orbits
-    /// (`min over adjacent movers of sma_{n+1}·(1−e_{n+1}) − sma_n·(1+e_n)`). Asserted wider than one
-    /// planet's containment release reach — what licenses the rendezvous and the lift off the inner
-    /// planet.
+    /// I-RADIAL: the smallest clear gap between adjacent orbits, in the home system AND the ring
+    /// sibling (`min over adjacent movers of sma_{n+1}·(1−e_{n+1}) − sma_n·(1+e_n)`). Asserted wider
+    /// than one planet's containment release reach per system — what licenses the rendezvous and the
+    /// lift off the inner planet.
     pub radial_gap_m: f64,
+}
+
+/// The three ±Z corridor margins over ONE system's mover set — one derivation for the home system
+/// AND its ring sibling, so the two cannot be computed by different arithmetic (the chain gate flies
+/// the same polar corridor into both).
+struct CorridorMargins {
+    axis_clearance_m: f64,
+    pole_altitude_m: f64,
+    radial_gap_m: f64,
+}
+
+fn corridor_margins(
+    movers: &std::collections::BTreeMap<
+        vd_core::pose::RealmId,
+        vd_physics::celestial::OrbitalElements,
+    >,
+    release_reach: f64,
+) -> CorridorMargins {
+    use vd_physics::motion::Motion;
+    // The apoapsis terms read THE one worst-instant accessor (`Motion::max_excursion_m`) — never a
+    // re-derived `a·(1+e)` beside it (the batch-review DRY finding).
+    let axis_clearance_m = movers
+        .values()
+        .map(|e| e.sma * (1.0 - e.ecc) * e.inclination.cos())
+        .fold(f64::INFINITY, f64::min);
+    let pole_altitude_m = movers
+        .values()
+        .map(|e| Motion::Kepler(*e).max_excursion_m() * e.inclination.sin().abs() + release_reach)
+        .fold(0.0_f64, f64::max);
+    let mut by_sma: Vec<&vd_physics::celestial::OrbitalElements> = movers.values().collect();
+    by_sma.sort_by(|a, b| a.sma.total_cmp(&b.sma));
+    let radial_gap_m = by_sma
+        .windows(2)
+        .map(|w| w[1].sma * (1.0 - w[1].ecc) - Motion::Kepler(*w[0]).max_excursion_m())
+        .fold(f64::INFINITY, f64::min);
+    CorridorMargins {
+        axis_clearance_m,
+        pole_altitude_m,
+        radial_gap_m,
+    }
+}
+
+/// Assert the I-AXIS / I-POLE / I-RADIAL flight-law preconditions for ONE system's margins — run for
+/// the home system AND the ring sibling, naming the system so a violated corridor names its world.
+fn assert_corridor_margins(
+    system: &str,
+    m: &CorridorMargins,
+    planet_soi: f64,
+    release_reach: f64,
+    system_soi_r_m: f64,
+) {
+    // I-AXIS: no orbit may come within 2× the planet SOI of the polar (±Z) axis, or a ±Z corridor leg
+    // could thread a planet's shell and strand the dot on an unhosted realm (J-0).
+    assert!(
+        m.axis_clearance_m > 2.0 * planet_soi,
+        "I-AXIS violated ({system}): an orbit approaches the polar (±Z) axis to {:.2} m, inside \
+         2× the planet SOI ({:.2} m) — a ±Z corridor leg could thread a planet shell; the world \
+         changed under the static flight law, so restate the corridor, never this assert",
+        m.axis_clearance_m,
+        2.0 * planet_soi,
+    );
+    // I-POLE: the polar park height (2 × pole_altitude) must itself stay INSIDE the system shell, or a
+    // "lift off the planet" polar waypoint would exit the system and fire an unintended crossing.
+    assert!(
+        2.0 * m.pole_altitude_m + release_reach < system_soi_r_m,
+        "I-POLE violated ({system}): the polar park height 2×{:.2} m (+ the planet release reach \
+         {release_reach:.2} m) does not fit inside the system shell ({system_soi_r_m:.2} m) — an \
+         in-system polar waypoint would exit the system; restate the corridor, never this assert",
+        m.pole_altitude_m,
+    );
+    // I-RADIAL: adjacent orbits must be separated by more than one planet's release reach, so a ship
+    // parked at one orbit's rendezvous is provably clear of both neighbours (and the lift off the
+    // inner planet never grazes the next orbit out).
+    assert!(
+        m.radial_gap_m > release_reach,
+        "I-RADIAL violated ({system}): adjacent orbits leave only {:.2} m of clear gap, within one \
+         planet's containment release reach ({release_reach:.2} m) — the rendezvous/park and the \
+         inner-planet lift-off are no longer licensed; restate the corridor, never this assert",
+        m.radial_gap_m,
+    );
 }
 
 /// Derive [`WorldRoster`] from THE world and ASSERT the flight-law preconditions (I-AXIS / I-POLE /
@@ -2456,48 +2567,14 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
     let planet_soi = config.planet.planet_soi_r_m;
     let release_reach = planet_soi + config.band.outset_m;
 
-    // I-AXIS: no orbit may come within 2× the planet SOI of the polar (±Z) axis, or a ±Z corridor leg
-    // could thread a planet's shell and strand the dot on an unhosted realm (J-0).
-    let axis_clearance_m = movers
-        .values()
-        .map(|e| e.sma * (1.0 - e.ecc) * e.inclination.cos())
-        .fold(f64::INFINITY, f64::min);
-    assert!(
-        axis_clearance_m > 2.0 * planet_soi,
-        "I-AXIS violated: an orbit approaches the polar (±Z) axis to {axis_clearance_m:.2} m, inside \
-         2× the planet SOI ({:.2} m) — a ±Z corridor leg could thread a planet shell; the world \
-         changed under the static flight law, so restate the corridor, never this assert",
-        2.0 * planet_soi,
-    );
-
-    // I-POLE: the polar park height (2 × pole_altitude) must itself stay INSIDE the home shell, or a
-    // "lift off the planet" polar waypoint would exit the system and fire an unintended crossing.
-    let pole_altitude_m = movers
-        .values()
-        .map(|e| e.sma * (1.0 + e.ecc) * e.inclination.sin().abs() + release_reach)
-        .fold(0.0_f64, f64::max);
-    assert!(
-        2.0 * pole_altitude_m + release_reach < config.stellar.system_soi_r_m,
-        "I-POLE violated: the polar park height 2×{pole_altitude_m:.2} m (+ the planet release reach \
-         {release_reach:.2} m) does not fit inside the home shell ({:.2} m) — an in-system polar \
-         waypoint would exit the system; restate the corridor, never this assert",
+    // I-AXIS / I-POLE / I-RADIAL over the HOME system's movers.
+    let home_margins = corridor_margins(&movers, release_reach);
+    assert_corridor_margins(
+        "the home system",
+        &home_margins,
+        planet_soi,
+        release_reach,
         config.stellar.system_soi_r_m,
-    );
-
-    // I-RADIAL: adjacent orbits must be separated by more than one planet's release reach, so a ship
-    // parked at one orbit's rendezvous is provably clear of both neighbours (and the lift off the
-    // inner planet never grazes the next orbit out).
-    let mut by_sma: Vec<&vd_physics::celestial::OrbitalElements> = movers.values().collect();
-    by_sma.sort_by(|a, b| a.sma.total_cmp(&b.sma));
-    let radial_gap_m = by_sma
-        .windows(2)
-        .map(|w| w[1].sma * (1.0 - w[1].ecc) - w[0].sma * (1.0 + w[0].ecc))
-        .fold(f64::INFINITY, f64::min);
-    assert!(
-        radial_gap_m > release_reach,
-        "I-RADIAL violated: adjacent orbits leave only {radial_gap_m:.2} m of clear gap, within one \
-         planet's containment release reach ({release_reach:.2} m) — the rendezvous/park and the \
-         inner-planet lift-off are no longer licensed; restate the corridor, never this assert",
     );
 
     // The GALAXY-hosted boot: the ring placements the galaxy authors for its systems — read from the
@@ -2547,6 +2624,29 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
          over one position",
     );
 
+    // The SIBLING shard's own boot: the chain gate's leg E flies the SAME ±Z polar corridor into the
+    // ring sibling, whose planets are a DIFFERENT per-system draw (ecc/inclination come off the
+    // sibling's own seed stream) — so its corridor margins are ASSERTED here too, never argued from
+    // the home's (batch review: the "≥140 m under every sibling planet" clearance was a bare
+    // comment; a seed or world-number change widening the sibling's inclinations would have strung
+    // the creep through a planet shell with every assert still green).
+    let held_sib = std::collections::BTreeSet::from([sibling]);
+    let (_, sib_movers) =
+        boot_regions_and_movers(p.universe_seed, &held_sib, sibling, p.move_speed, p.tick_dt);
+    assert!(
+        !sib_movers.is_empty(),
+        "THE world's ring sibling authors orbiting movers — a moverless sibling has no corridor \
+         margins to check",
+    );
+    let sib_margins = corridor_margins(&sib_movers, release_reach);
+    assert_corridor_margins(
+        "the ring sibling",
+        &sib_margins,
+        planet_soi,
+        release_reach,
+        config.stellar.system_soi_r_m,
+    );
+
     WorldRoster {
         home,
         galaxy,
@@ -2554,9 +2654,15 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
         inner_elements,
         sibling,
         sibling_centre,
-        pole_altitude_m,
-        axis_clearance_m,
-        radial_gap_m,
+        // The roster carries the WORST case over both systems, so a flight plan sized by these
+        // fields is licensed in whichever system a leg flies.
+        pole_altitude_m: home_margins
+            .pole_altitude_m
+            .max(sib_margins.pole_altitude_m),
+        axis_clearance_m: home_margins
+            .axis_clearance_m
+            .min(sib_margins.axis_clearance_m),
+        radial_gap_m: home_margins.radial_gap_m.min(sib_margins.radial_gap_m),
     }
 }
 

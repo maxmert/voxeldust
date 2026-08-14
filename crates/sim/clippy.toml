@@ -7,6 +7,14 @@ disallowed-methods = [
     # SL4 (the placement arc): sim CONSUMES books from the ledger; the ONE writer (`author_placements`,
     # explicitly allowed at its definition) is the only sim site that may publish. Minting a rival
     # placement history anywhere else is how two consumers end up reading two pasts.
+    # Empirically checked (2026-08-14, batch review — the SEAL-1 control above predates this entry
+    # and covered only the std bans): an injected `ledger.publish(anchor, book)` in vd-sim produced
+    # `warning: use of a disallowed method vd_core::placement::PlacementLedger::publish` (a -D
+    # warnings failure under `just lint`), and clippy passed again once removed. SCOPE, stated
+    # honestly: this ban binds vd-sim ONLY — `PlacementLedger::publish` is `pub` and `Placements`
+    # exposes the ledger through a public field, so vd-node/vd-bins/vd-tests could mint a rival
+    # history with no diagnostic; today `Placements` is named by no crate outside vd-sim, which is
+    # the (unfenced) rest of the claim.
     { path = "vd_core::placement::PlacementLedger::publish", reason = "only the ONE placement writer (author_placements) publishes books; every other sim system is a consumer and selects from the ledger (SL4)" },
     { path = "std::time::SystemTime::now", reason = "use the injected sim::io::Clock (R6/R7: wall-clock-derived state caused km-scale drift and forgeable identity)" },
     { path = "std::time::Instant::now", reason = "use the injected sim::io::Clock; prod tick pacing lives in io-prod only" },

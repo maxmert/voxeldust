@@ -359,7 +359,9 @@ pub enum InterShardFlow {
     /// `live: bool` field, because absence past the TTL is the false state and a field would be a second
     /// way to say it. Emitted iff the child's observer set is non-empty (its own occupants ∪ its own
     /// fresh child bits — so the bit RECURSES level by level with no depth, no hop count, no pose), on
-    /// the AoI cadence plus once at adopt. The `fence` and `universe_tick` are ORDERING/ZOMBIE guards
+    /// the AoI cadence, plus immediately when the realm becomes occupied (the occupancy transition
+    /// itself — derived, not hooked into any adopt path; the receiver's retain TTL is sized in
+    /// cadences). The `fence` and `universe_tick` are ORDERING/ZOMBIE guards
     /// only (a deposed incarnation's heartbeat is rejected; last-wins by `(fence, tick)`) — never
     /// authorizing (the demand-fence law). This is SL7's "ONE BIT of occupancy, upward" verbatim, and
     /// the ONLY new upward datum of the liveness redesign. `FireAndForget` + `Unreliable`
@@ -369,37 +371,44 @@ pub enum InterShardFlow {
     /// CHILD → PARENT shard — THE UP-OBSERVATION LANE (owner-approved 2026-08-13, the SL6 ask: "when I
     /// exit the system its planets freeze"). A LIVE child ships the per-tick rows IT AUTHORS — where it
     /// put its OWN children, in its OWN frame; the identical `RealmSnapshotDatagram` bytes it already
-    /// streams to its own occupants — one hop UP. The parent adds the ONE placement it authors (where
-    /// it put that child; the number the child must never know — SL1) and re-fans the restated rows to
-    /// its own observers within visibility, and onward up one more link for ITS parent's observers —
-    /// the exact mirror of [`InterShardFlow::RealmCascade`], carrying a realm's own INTERIOR VIEW
-    /// outward (SL3: a realm draws itself; its authored placements are its look at this detail level).
-    /// NO occupant data crosses (SL2 untouched). The sealed `frame_id` discipline of the cascade holds
-    /// here unchanged: the AUTHOR's counter is never re-stamped at any relay level. `FireAndForget` +
+    /// streams to its own occupants — one hop UP, AND NO FURTHER. The parent adds the ONE placement it
+    /// authors (where it put that child; the number the child must never know — SL1) and re-fans the
+    /// restated rows to its own observers, bounded by each observer's own AoI band on that child. A
+    /// level NEVER relays what it was relayed: every lane carries exactly two levels — what I author
+    /// about my children, and what my children authored about themselves — so a receiver sees its
+    /// children (it authors) plus its grandchildren (each child's own ship), and the volume at any
+    /// level is bounded by its own band rather than the whole live subtree. Carries a realm's own
+    /// INTERIOR VIEW outward (SL3: a realm draws itself; its authored placements are its look at this
+    /// detail level). NO occupant data crosses (SL2 untouched). The sealed `frame_id` discipline of
+    /// the cascade holds here unchanged: the AUTHOR's counter is never re-stamped. `FireAndForget` +
     /// `Unreliable` (per-tick latest-wins on `MsgClass::SignalDelta`; a lost frame self-heals next
     /// tick). APPENDED.
     RealmObservation(RealmObservation),
     /// CHILD → PARENT shard — the STATIC half of the up-observation lane (Step 5 slice C, minor 11):
     /// a live child ships its interior OUTLINES — one [`crate::channels::RealmShape`] per realm of its
-    /// own roster plus whatever ITS live children shipped it, centers measured in ITS OWN frame at the
-    /// shape lane's one instant — one hop UP, on the AoI cadence. The parent adds the ONE placement it
-    /// authors for that child (SL1) and folds the lifted outlines into the scene deltas of any observer
-    /// whose visibility reaches that child, and onward up one more link (the recursion the minor-10
-    /// rows lane already runs). WITHOUT this half a neighbour realm's interior had motion but no boxes:
-    /// the rows flowed and the client had nothing to draw them onto ("approaching another star system,
-    /// its planets never appear" — owner-flown 2026-08-13). SL3: the child authors what its interior
-    /// LOOKS like; the parent authors only where the child sits. NO occupant data (SL2). `FireAndForget`
-    /// + `Unreliable` (a level re-asserted every cadence; the parent's TTL bridges loss). APPENDED.
+    /// OWN ROSTER and nothing deeper (two levels per lane, the same law as the rows: what its own
+    /// children shipped IT stays home, folded into its local scenes only), centers measured in ITS OWN
+    /// frame at the shape lane's one instant — one hop UP, on the AoI cadence. The parent adds the ONE
+    /// placement it authors for that child (SL1) and folds the lifted outlines into the scene deltas
+    /// of any observer whose visibility reaches that child. WITHOUT this half a neighbour realm's
+    /// interior had motion but no boxes: the rows flowed and the client had nothing to draw them onto
+    /// ("approaching another star system, its planets never appear" — owner-flown 2026-08-13). SL3:
+    /// the child authors what its interior LOOKS like; the parent authors only where the child sits.
+    /// NO occupant data (SL2). `FireAndForget` + `Unreliable` (a level re-asserted every cadence; the
+    /// parent's TTL is sized in cadences and bridges loss). APPENDED.
     RealmShapeObservation(RealmShapeObservation),
     /// PARENT → CHILD shard — the per-LIVE-CHILD rekey of the down-reflected sibling scene (Step 5
     /// slice C, minor 11; replaces emitting the occupant-keyed `ProxySceneSet`, whose `AccountId`
     /// leaves the wire — a data reduction). The FULL current set of outlines a child's occupants are
     /// owed from ABOVE — the parent's own in-range siblings of that child plus what the parent itself
-    /// holds from ITS parent — restated in the CHILD's frame by the one party that authored the child's
-    /// placement, addressed to the child REALM (not to any occupant: HR1 — the parent never learns who
-    /// is inside, SL7 — the occupied child stands in for its occupants). The child fans it to its own
-    /// local observers and restates it onward into ITS live children (the depth≥3 orphan case of the
-    /// per-occupant lane dissolves structurally). `FireAndForget` + `ReDriven` (a full-set level,
+    /// holds from ITS parent, MINUS the parent's own outline (SL1, finding 17: the sender's own box
+    /// sits at ITS origin, and restated one hop down it would state −(the child's placement) — the one
+    /// number a realm may never learn; a message never tells its receiver about itself) — restated in
+    /// the CHILD's frame by the one party that authored the child's placement, addressed to the child
+    /// REALM (not to any occupant: HR1 — the parent never learns who is inside, SL7 — the occupied
+    /// child stands in for its occupants). The child fans it to its own local observers and restates
+    /// it onward into ITS live children, filtering its own outline in turn (the depth≥3 orphan case of
+    /// the per-occupant lane dissolves structurally). `FireAndForget` + `ReDriven` (a full-set level,
     /// re-sent on change from the parent's RAM store; the receiver reconciles). APPENDED.
     ChildSceneSet(ChildSceneSet),
 }
@@ -948,13 +957,17 @@ pub struct FlushSource {
     pub transfer: TransferId,
     pub subject: DirectoryKey,
     pub step_id: u32,
-    /// The destination realm the crossing resolved to (the saga's `to_realm`) — carried so the SOURCE shard
-    /// REBASES the flushed pose into the dest realm's LIVE frame (via its own ephemeris) before shipping it.
-    /// The source is the frame-authority for its children, so IT authors the dest-frame pose; the transfer
-    /// machinery never reads another realm's ephemeris (HR1). `to_parent` supplies an `Area` dest's planet
-    /// (`frame_for_realm`); `None` for every one-field realm kind. A mesh type (one cluster build), so the
-    /// added fields are not client-negotiated. At walk scale the dest frame is identity ⇒ rebase is a no-op.
+    /// The destination realm the crossing resolved to (the saga's `to_realm`) — the SOURCE converts the
+    /// flushed pose ONLY into a realm it authors the placement of (`flush_pose_for_dest`'s descending
+    /// arm); every other direction ships VERBATIM in the source's own frame and the RECEIVER places it
+    /// (`place_arriving_pose` — SL1: going up, the parent adds). A mesh type (one cluster build), so the
+    /// added fields are not client-negotiated.
     pub to_realm: RealmId,
+    /// ★DEAD FIELD (tombstone discipline): appended for a consumer (`rebind_pose_to_dest`) that has
+    /// since been DELETED (D-PLACE-1) — no production code reads it; the receiver forms an `Area`
+    /// dest's frame from its own ROSTER (`hosted_frame`, which carries the planet parent losslessly).
+    /// Postcard is positional, so the field cannot be removed in place without re-labelling every
+    /// later field: it stays carried-but-unread until the flag-day wire MAJOR (ledgered D-WIRE-1).
     pub to_parent: Option<RealmId>,
 }
 
@@ -1070,12 +1083,13 @@ pub struct CrossingRequest {
     pub subject_fence: Fence,
     pub session: SessionId,
     pub attempt: u32,
-    /// The dest realm's PARENT provenance (the fix for the "Area label never flips" bug). An `AreaLocal`
-    /// frame carries `{planet_seed, area_seed}`, so re-expressing a pose into an `Area` needs its enclosing
-    /// `Planet` — which only the SOURCE detector knows (the container region's `parent`, a deterministic
-    /// worldgen fact). The saga threads it VERBATIM to `rebind_pose_to_dest(.., to_realm, to_parent)` so an
-    /// Area frame forms; every other realm kind is a one-field lift and ignores it (`None`). APPENDED
-    /// (postcard field-append — preserves the arm's discriminant).
+    /// ★DEAD FIELD (tombstone discipline). Appended (postcard field-append — preserves the arm's
+    /// discriminant) as the "Area label never flips" fix, feeding a `rebind_pose_to_dest(.., to_realm,
+    /// to_parent)` that has since been DELETED (D-PLACE-1): no production code reads it anywhere on the
+    /// thread (saga ctx → flush → adopt). The receiver forms an `AreaLocal { planet_seed, area_seed }`
+    /// frame from its own ROSTER (`hosted_frame` carries the planet parent losslessly), so the datum
+    /// never needed to cross. Postcard is positional — removal in place would re-label every later
+    /// field — so it stays carried-but-unread until the flag-day wire MAJOR (ledgered D-WIRE-1).
     pub to_parent: Option<RealmId>,
 }
 
@@ -1089,10 +1103,10 @@ pub struct TransientCrossingRequest {
     pub from_realm: RealmId,
     pub to_realm: RealmId,
     pub src_realm_fence: Fence,
-    /// The dest realm's PARENT provenance — see [`CrossingRequest::to_parent`]. The source detector fills it
-    /// from the container region's `parent`; the orchestrator copies it into the [`TransientCrossingGrant`],
-    /// which the source stamps onto `TransientStatus::Crossing` so the batch's `rebind_pose_to_dest` forms an
-    /// Area frame. `None` for every non-Area dest. APPENDED (postcard field-append).
+    /// ★DEAD FIELD — see [`CrossingRequest::to_parent`] (same tombstone: its consumer is deleted,
+    /// D-PLACE-1; the batch's receiver places each item from its own roster at adopt). Still threaded
+    /// source → orchestrator → [`TransientCrossingGrant`] → `TransientStatus::Crossing` for wire-shape
+    /// compatibility only; flag-day removal ledgered D-WIRE-1. APPENDED (postcard field-append).
     pub to_parent: Option<RealmId>,
 }
 
@@ -1108,10 +1122,10 @@ pub struct TransientCrossingGrant {
     pub to_realm: RealmId,
     pub dst_realm_fence: Fence,
     pub batch: TransferId,
-    /// The dest realm's PARENT provenance — copied VERBATIM from the [`TransientCrossingRequest`] the
-    /// orchestrator resolved (see [`CrossingRequest::to_parent`]). The source stamps it onto
-    /// `TransientStatus::Crossing` so `emit_transient_batch`'s `rebind_pose_to_dest` forms an Area frame.
-    /// `None` for every non-Area dest. APPENDED (postcard field-append).
+    /// ★DEAD FIELD — copied VERBATIM from the [`TransientCrossingRequest`] the orchestrator resolved
+    /// (see [`CrossingRequest::to_parent`] for the tombstone: its consumer is deleted, D-PLACE-1; the
+    /// dest places each adopted item from its own roster). Carried for wire-shape compatibility only;
+    /// flag-day removal ledgered D-WIRE-1. APPENDED (postcard field-append).
     pub to_parent: Option<RealmId>,
 }
 

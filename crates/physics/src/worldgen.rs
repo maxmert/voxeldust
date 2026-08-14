@@ -19,10 +19,12 @@ use serde::{Deserialize, Serialize};
 
 use core::f64::consts::TAU;
 
-use crate::celestial::{G, KEPLER_ECC_MAX, OrbitalElements, orbital_state};
+use crate::celestial::{G, OrbitalElements, orbital_state};
+use crate::motion::Motion;
 use crate::taxonomy::{
     FrostThresholds, GalaxyType, SpectralClass, orbital_axis_au, sample_rayleigh,
 };
+use vd_core::frame::FramePlacement;
 use vd_core::geometry::{AoiConfig, BandError, Boundary, ContainmentBand, RealmRegion};
 use vd_core::pose::{LatticePos, RealmId, frame_for_realm};
 use vd_core::realm_path::RealmLevel;
@@ -149,13 +151,13 @@ const VISUAL_TARGET_OUTER_PERIOD_S: f64 = 300.0;
 /// inter-system ring is DERIVED from this same factor ([`UniverseConfig::visual_geometry`]), so a system
 /// still sleeps until you approach it no matter what this is set to — that behaviour is invariant here.
 const VISIBILITY_THETA_MIN_RAD: f64 = 0.026_180;
-/// One solar mass (kg) — the canonical/walk INERT central mass (those presets emit no `Orbital` body,
-/// so it is never read there; [`UniverseConfig::visual_scale`] overrides it with a synthetic mass).
+/// One solar mass (kg) — the walk preset's INERT central mass (walk emits no `Orbital` body, so it
+/// is never read there; [`UniverseConfig::visual_scale`] overrides it with a synthetic mass).
 const CANONICAL_STAR_MASS_KG: f64 = 1.989e30;
 
 /// A body the generator emits before lowering — its realm, parent, shape, and placement. The
-/// walk roster uses `StaticOffset` placements (the byte-identity source); real bodies
-/// (canonical/seed_derived) use `Orbital`, whose static tick-0 anchor is baked at boot. [`to_regions`]
+/// walk roster uses `StaticOffset` placements (the byte-identity source); THE world's planets use
+/// `Orbital`, whose static tick-0 anchor is baked at boot. [`to_regions`]
 /// lowers a slice of these to the frozen [`RealmRegion`] forest.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct GeneratedBody {
@@ -180,8 +182,8 @@ enum Placement {
 }
 
 /// The region CENTER a body's boundary sits at IN ITS OWN FRAME, as a `cell == ZERO` [`LatticePos`]:
-/// - a **moving** (`Orbital`) body authors its position LIVE through its frame
-///   ([`LocalFrames::with_moving_child`](vd_core::frame::LocalFrames::with_moving_child)), so its boundary is
+/// - a **moving** (`Orbital`) body authors its position LIVE through the placement book its parent's
+///   shard writes each tick (`author_placements` over the injected `MotionFn`s), so its boundary is
 ///   at the frame ORIGIN — center **ZERO**, NEVER the epoch. (This is the moving-realm crossing-flap fix: a
 ///   nonzero epoch center would be DOUBLE-COUNTED against the live frame placement in
 ///   [`region_signed_distance`](vd_core::geometry::region_signed_distance) — shifting the SOI ~one orbit off
@@ -215,7 +217,8 @@ fn placement_offset(placement: Placement) -> DVec3 {
 /// Lower generated bodies to the frozen `RealmRegion` forest under `config`. Every region shares
 /// the one static containment band; the frame is the realm's canonical authority frame
 /// (`frame_for_realm`) with parent-provenance from the body (so the Area `.expect` cannot fire),
-/// keeping the input-side containment seam and the output-side `rebind_pose_to_dest` in agreement.
+/// keeping the input-side containment seam and the output-side `transfer_frame` conversions in
+/// agreement.
 fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmRegion> {
     let band = config
         .band
@@ -225,8 +228,11 @@ fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmReg
         .iter()
         .map(|b| {
             // RLM Step 2: per-realm AoI = factor × the body's OWN finite extent, the dead-zone widened
-            // by the occupant speed + THIS child's own orbital closing speed (v_peri; 0 if static).
-            let v_child = orbital_of(b.placement).map_or(0.0, |e| e.v_peri());
+            // by the occupant speed + THIS child's own closing speed. THE scalar comes from the ONE
+            // motion discriminant ([`Motion::closing_speed_mps`]) — the fifth rival has-orbit test
+            // (`orbital_of(..).map_or(0.0, v_peri)`) collapsed into that accessor (D-PLACE-1; the
+            // batch review caught the accessor dead beside the still-live test).
+            let v_child = motion_of(b.placement).closing_speed_mps();
             let aoi = config
                 .interest
                 .build(b.shape.finite_extent(), v_child)
@@ -248,7 +254,8 @@ fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmReg
 /// The DIRECT MOVING children a shard hosting `hosted_realm` AUTHORS (D-45(a) realm-unification FA-2b):
 /// each direct child (`parent == hosted_realm`) whose placement is a live `Orbital`. Under LAW-1 a
 /// passive orbiting body is the ZERO-SIGNAL case — the parent shard re-authors its live pose each tick
-/// from these `OrbitalElements` (`LocalFrames::with_moving_child`), never a static region `center`.
+/// from these `OrbitalElements` (the boot wraps them as injected `MotionFn`s for the placement
+/// writer), never a static region `center`.
 /// Returned `(realm, elements)` so the sim keys it against each region by realm. A branchless-shim (HR5):
 /// the `Orbital`/`StaticOffset` match lives in the monomorphic [`orbital_of`] helper, not this closure.
 /// The walk roster is ALL `StaticOffset`, so this is EMPTY at walk scale (byte-identity); the canonical
@@ -270,6 +277,18 @@ fn orbital_of(placement: Placement) -> Option<OrbitalElements> {
     match placement {
         Placement::Orbital(elements) => Some(elements),
         Placement::StaticOffset(_) => None,
+    }
+}
+
+/// The [`Motion`] a generated placement lowers to — Kepler for an orbital body, [`Motion::Fixed`] at
+/// the stored offset otherwise. THE one lowering from "what the generator drew" onto the motion
+/// discriminant, so every scalar motion property the lowering needs (`closing_speed_mps` today) is
+/// read off the accessor instead of re-running a has-orbit test beside it (D-PLACE-1's fifth rival).
+/// Monomorphic; both arms covered by the `to_regions` AoI tests.
+fn motion_of(placement: Placement) -> Motion {
+    match placement {
+        Placement::Orbital(elements) => Motion::Kepler(elements),
+        Placement::StaticOffset(at) => Motion::Fixed(FramePlacement::moving(at, DVec3::ZERO)),
     }
 }
 
@@ -686,6 +705,16 @@ impl WorldView {
     pub fn contains_realm(&self, realm: RealmId) -> bool {
         self.regions.iter().any(|r| r.realm == realm)
     }
+
+    /// This world LOWERED for the connection plane: the region forest alone, held as
+    /// [`vd_core::worldgen::WorldRealms`]. The bodies — and every orbit element — deliberately do
+    /// NOT survive the lowering, so the gateway can hold a world it queries without a dependency
+    /// edge to this crate (SL4: the batch review found the crate fence carved open for
+    /// vd-connection-plane precisely so it could hold a `WorldView`; it now receives this instead).
+    #[must_use]
+    pub fn lowered(&self) -> vd_core::worldgen::WorldRealms {
+        vd_core::worldgen::WorldRealms::new(self.regions.clone())
+    }
 }
 
 /// The walk-scale mandate forest as config-driven bodies, in forest order (Universe → Galaxy →
@@ -893,25 +922,15 @@ const INCL_SIGMA: f64 = 0.02;
 /// Per-system occurrence probability of a station / a sub-planet area district.
 const STATION_OCCURRENCE_PROB: f64 = 0.3;
 const AREA_OCCURRENCE_PROB: f64 = 0.3;
-/// The band by which `seed_derived` jitters the galaxy-type census (peak-to-peak).
-const TYPE_MIX_JITTER: f64 = 0.1;
 
-// --- Canonical (real-scale) geometry — planted; live at P4 after D-41 (illustrative values) ---
-const CANONICAL_UNIVERSE_R_M: f64 = 8.8e26; // ~observable-universe radius
-const CANONICAL_GALAXY_R_M: f64 = 5.0e20; // ~Milky-Way disc radius (~52k ly)
-const CANONICAL_RENDER_EXTENT_M: f64 = 1.5e11; // ~1 AU renderable neighbourhood
-const CANONICAL_SYSTEM_SOI_R_M: f64 = 1.0e13; // ~system SOI (~65 AU)
-const CANONICAL_PLANET_SOI_R_M: f64 = 9.0e8; // ~Earth SOI
-const CANONICAL_PLANET_OFFSET_M: f64 = 1.496e11; // ~1 AU
-const CANONICAL_SYSTEM_B_OFFSET_M: f64 = 4.0e16; // ~4 ly to the next system
-const CANONICAL_STATION_OFFSET_M: f64 = 4.0e8;
-const CANONICAL_STATION_HALF_M: f64 = 5.0e3;
-const CANONICAL_AREA_OFFSET_M: f64 = 1.0e5;
-const CANONICAL_AREA_HALF_M: f64 = 1.0e4;
-/// Canonical local galaxy population range (the real galaxy has millions; only a bounded set
-/// generates locally — the DENSE ambient scan is the D-45 spatial index).
-const CANONICAL_SYSTEM_COUNT_LO: u32 = 1;
-const CANONICAL_SYSTEM_COUNT_HI: u32 = 8;
+// (The `canonical()`/`seed_derived()` real-scale presets and their CANONICAL_* geometry constants
+// are DELETED — SL5, Stage-C audit :866: two complete world variants with zero production callers,
+// whose own doc conceded they were not even the starting point for the true-scale work ("its
+// astronomical-unit conversion is 2.5x the real value and its bodies do not nest correctly"). The
+// true-astronomical-scale numbers are an owed change to THE ONE world, never a parallel preset.
+// `CANONICAL_STAR_MASS_KG` and the taxonomy's `CANONICAL_*` census/threshold data survive — they are
+// physical constants THE world reads, not preset geometry.)
+
 /// The walk forest is exactly two systems (A + its disjoint sibling B).
 const WALK_SYSTEM_COUNT: u32 = 2;
 
@@ -921,9 +940,10 @@ pub struct ScaleConfig {
     pub universe_r_m: f64,
     pub galaxy_r_m: f64,
     pub render_extent_m: f64,
-    /// AU→render-metre compression (FA-5). VISUAL scale shrinks AU orbits into the render window;
-    /// canonical() is the real 1-AU metre factor. Read ONLY on the `Orbital` generator path (inert on
-    /// the walk/StaticOffset path), so its value is self-consistent-but-unused on walk_scale().
+    /// AU→render-metre compression (FA-5). VISUAL scale shrinks AU orbits into the render window
+    /// (true scale would carry the real 1-AU metre factor — an owed change to THE world, SL5). Read
+    /// ONLY on the `Orbital` generator path (inert on the walk/StaticOffset path), so its value is
+    /// self-consistent-but-unused on walk_scale().
     pub au_to_render_m: f64,
 }
 
@@ -946,7 +966,7 @@ pub struct StellarConfig {
     pub mlr_segments: [(f64, f64, f64); 3],
     /// The parent star mass (kg) fed into every planet's [`OrbitalElements::central_mass`] — DATA, never
     /// a kind (HR3). SYNTHETIC on the visual preset (Kepler-3-tuned to a seconds-scale period so orbits
-    /// are visible), one solar mass on canonical(). Read ONLY on the `Orbital` path (inert on walk).
+    /// are visible). Read ONLY on the `Orbital` path (inert on walk).
     pub central_mass_kg: f64,
     /// The radius of the ring the non-origin systems are spaced around (system 0 sits at the galactic
     /// origin). Must leave every system's boundary disjoint from every other's AND inside the galaxy —
@@ -978,7 +998,7 @@ pub struct PlanetConfig {
     pub m_gas_mearth: f64,
     pub m_core_crit_mearth: f64,
     /// The number of `Orbital` planets [`generate_system_forest`] emits for THIS system. `0` on
-    /// walk_scale()/canonical() (no planet body ⇒ ambient-only forest, byte-identity); the visual
+    /// walk_scale() (no planet body ⇒ ambient-only forest, byte-identity); the visual
     /// preset sets [`VISUAL_N_PLANETS`]. The `0..n_planets` range is the generator's only control flow.
     pub n_planets: u32,
 }
@@ -1194,73 +1214,11 @@ impl UniverseConfig {
         }
     }
 
-    /// The canonical real-scale (AU/ly) preset — PLANTED; its bodies go LIVE as containment
-    /// regions only after the D-41 cross-cell re-quantization (P4/P5). Physics is shared with
-    /// `walk_scale`; only the metre-scale geometry differs.
-    #[must_use]
-    pub fn canonical() -> UniverseConfig {
-        UniverseConfig {
-            scale: ScaleConfig {
-                universe_r_m: CANONICAL_UNIVERSE_R_M,
-                galaxy_r_m: CANONICAL_GALAXY_R_M,
-                render_extent_m: CANONICAL_RENDER_EXTENT_M,
-                // Real 1-AU metres: the canonical planet offset (1.496e11 m) IS 1 AU = orbital_a0 * this.
-                au_to_render_m: CANONICAL_PLANET_OFFSET_M / ORBITAL_A0_AU,
-            },
-            galaxy: GalaxyConfig {
-                type_cumulative: GalaxyType::CANONICAL_CUMULATIVE,
-                system_count_lo: CANONICAL_SYSTEM_COUNT_LO,
-                system_count_hi: CANONICAL_SYSTEM_COUNT_HI,
-            },
-            stellar: StellarConfig {
-                system_soi_r_m: CANONICAL_SYSTEM_SOI_R_M,
-                imf_slope: IMF_SLOPE,
-                mass_lo_msun: IMF_MASS_LO_MSUN,
-                mass_hi_msun: IMF_MASS_HI_MSUN,
-                mlr_segments: SpectralClass::MLR_SEGMENTS,
-                central_mass_kg: CANONICAL_STAR_MASS_KG, // one solar mass (real).
-                // ONE system until the true-scale world is authored for real. This preset is NOT the
-                // starting point for that work — its astronomical-unit conversion is 2.5x the real value
-                // and its bodies do not nest correctly (an area sits outside the planet claiming it).
-                system_ring_r_m: CANONICAL_SYSTEM_B_OFFSET_M,
-            },
-            planet: PlanetConfig {
-                planet_soi_r_m: CANONICAL_PLANET_SOI_R_M,
-                orbital_a0_au: ORBITAL_A0_AU,
-                orbital_ratio: ORBITAL_RATIO,
-                ecc_sigma: ECC_SIGMA,
-                incl_sigma: INCL_SIGMA,
-                ecc_cap: KEPLER_ECC_MAX,
-                frost_coeff_au: crate::taxonomy::FROST_COEFF_AU,
-                m_ocean_lo_mearth: FrostThresholds::CANONICAL.m_ocean_lo_mearth,
-                m_gas_mearth: FrostThresholds::CANONICAL.m_gas_mearth,
-                m_core_crit_mearth: FrostThresholds::CANONICAL.m_core_crit_mearth,
-                n_planets: 0, // ambient-only forest (no Orbital body) — visual_scale() sets N.
-            },
-            satellite: SatelliteConfig {
-                station_prob: STATION_OCCURRENCE_PROB,
-                area_prob: AREA_OCCURRENCE_PROB,
-                station_half_m: CANONICAL_STATION_HALF_M,
-                area_half_m: CANONICAL_AREA_HALF_M,
-                station_offset_m: CANONICAL_STATION_OFFSET_M,
-                area_offset_m: CANONICAL_AREA_OFFSET_M,
-                planet_offset_m: CANONICAL_PLANET_OFFSET_M,
-                system_b_offset_m: CANONICAL_SYSTEM_B_OFFSET_M,
-            },
-            band: BandConfig {
-                inset_m: CONTAINMENT_INSET_M,
-                outset_m: CONTAINMENT_OUTSET_M,
-                k_safety_extra: 0.0,
-            },
-            interest: InterestConfig::inert(), // canonical: AoI OFF until D-41 (byte-identity).
-        }
-    }
-
     /// The COMPRESSED-REAL visual geometry on a `walk_scale()` clone (system SOI 150, 5 Kepler planets,
     /// outer period 300 s) WITHOUT an interest band — the ONE game geometry that `visual_scale` (static
     /// render) and `visual_demand` (live demand cluster) both drive, so the two can NEVER disagree on
     /// geometry (they call the SAME parameterized derive helpers with the SAME compressed-real numbers).
-    /// Mutates a `walk_scale()` CLONE (byte-identity: walk/canonical never call these helpers), overriding
+    /// Mutates a `walk_scale()` CLONE (byte-identity: walk never calls these helpers), overriding
     /// only the System SOI + the four moving-planet fields (AU→render + planet SOI both DERIVED so the outer
     /// orbit + SOI + margin land exactly at the System surface — provable non-overlap + strict containment,
     /// the SYNTHETIC central mass Kepler-3-tuned to a seconds-scale period, and `n_planets`).
@@ -1420,24 +1378,12 @@ impl UniverseConfig {
         };
         cfg
     }
-
-    /// Perturb `canonical()` deterministically within documented bounds, so different seeds yield
-    /// different galaxy morphologies. Physics + geometry stay canonical; only the galaxy-type
-    /// census is jittered (kept ordered + within `[0.1, 0.99]`). `ecc_cap` stays `KEPLER_ECC_MAX`.
-    #[must_use]
-    pub fn seed_derived(seed: u64) -> UniverseConfig {
-        let mut rng = SplitMix64::new(seed);
-        let mut cfg = UniverseConfig::canonical();
-        let jitter = (rng.next_f64() - 0.5) * TYPE_MIX_JITTER;
-        let c_spiral = (cfg.galaxy.type_cumulative[0] + jitter).clamp(0.1, 0.85);
-        cfg.galaxy.type_cumulative = [c_spiral, (c_spiral + 0.18).min(0.99)];
-        cfg
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::celestial::KEPLER_ECC_MAX;
     use vd_core::geometry::{region_depth, region_signed_distance};
     use vd_core::realm_coord::RealmCoord;
     use vd_core::realm_path::{RealmKindTag, RealmPath};
@@ -1754,13 +1700,7 @@ mod tests {
 
     #[test]
     fn universe_config_presets_serde_round_trip() {
-        for c in [
-            UniverseConfig::walk_scale(),
-            UniverseConfig::visual_scale(),
-            UniverseConfig::canonical(),
-            UniverseConfig::seed_derived(3),
-            UniverseConfig::seed_derived(999),
-        ] {
+        for c in [UniverseConfig::walk_scale(), UniverseConfig::visual_scale()] {
             let bytes = postcard::to_allocvec(&c).expect("encode");
             let back: UniverseConfig = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(c, back);
@@ -1773,10 +1713,6 @@ mod tests {
         // solver's convergence domain (KEPLER_ECC_MAX).
         assert!(UniverseConfig::walk_scale().planet.ecc_cap <= KEPLER_ECC_MAX);
         assert!(UniverseConfig::visual_scale().planet.ecc_cap <= KEPLER_ECC_MAX);
-        assert!(UniverseConfig::canonical().planet.ecc_cap <= KEPLER_ECC_MAX);
-        for seed in [0u64, 1, 42, 999] {
-            assert!(UniverseConfig::seed_derived(seed).planet.ecc_cap <= KEPLER_ECC_MAX);
-        }
     }
 
     #[test]
@@ -1791,25 +1727,6 @@ mod tests {
     fn frost_thresholds_reads_the_planet_config() {
         let ft = UniverseConfig::walk_scale().planet.frost_thresholds();
         assert_eq!(ft, FrostThresholds::CANONICAL);
-    }
-
-    #[test]
-    fn seed_derived_is_deterministic_and_bounded() {
-        assert_eq!(
-            UniverseConfig::seed_derived(7),
-            UniverseConfig::seed_derived(7)
-        );
-        assert_ne!(
-            UniverseConfig::seed_derived(1).galaxy.type_cumulative,
-            UniverseConfig::seed_derived(2).galaxy.type_cumulative,
-        );
-        for seed in [0u64, 1, 5, 100, 9999] {
-            let c = UniverseConfig::seed_derived(seed).galaxy.type_cumulative;
-            assert!(c[0] >= 0.1, "spiral cumulative >= floor: {c:?}");
-            assert!(c[0] <= 0.85, "spiral cumulative <= ceiling: {c:?}");
-            assert!(c[1] > c[0], "type cumulative ordered: {c:?}");
-            assert!(c[1] <= 0.99, "second cumulative capped: {c:?}");
-        }
     }
 
     // ---- D-45(a) Slice 3c: generate -> to_regions lowering (byte-identity) -----------
@@ -1896,7 +1813,7 @@ mod tests {
     #[test]
     fn to_regions_gives_an_orbital_body_a_zero_center_position_authored_by_the_frame() {
         // The Orbital placement arm: a moving body carries NO baked position — its boundary sits at the
-        // ZERO origin of its own frame; its live pose is authored through `LocalFrames::with_moving_child`.
+        // ZERO origin of its own frame; its live pose is authored per tick into the placement book.
         let elements = OrbitalElements {
             sma: 1.5e11,
             ecc: 0.1,
@@ -1912,7 +1829,7 @@ mod tests {
             shape: Boundary::Shell { r: 9.0e8 },
             placement: Placement::Orbital(elements),
         };
-        let regions = to_regions(&[body], &UniverseConfig::canonical());
+        let regions = to_regions(&[body], &UniverseConfig::visual_scale());
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].center.cell(), glam::I64Vec3::ZERO);
         assert_eq!(regions[0].center.offset(), DVec3::ZERO);
@@ -2061,6 +1978,16 @@ mod tests {
     }
 
     #[test]
+    fn the_lowered_world_is_the_regions_and_nothing_else() {
+        // `WorldView::lowered` hands the connection plane the region forest VERBATIM — the same
+        // slice `regions()` answers with — and (by its type) nothing a body knows: the lowered
+        // value is `vd_core::worldgen::WorldRealms`, a crate with no path back to an orbit (SL4).
+        let cfg = UniverseConfig::visual_scale();
+        let world = WorldView::generated(0, &cfg);
+        assert_eq!(world.lowered().regions(), world.regions());
+    }
+
+    #[test]
     fn no_two_static_siblings_ever_overlap_in_any_shipped_world() {
         // THE FENCE, RUN. A position inside two overlapping siblings has two equally valid owners, and
         // which shard gets you falls out of iteration order — see `siblings_disjoint` for why that is
@@ -2073,7 +2000,6 @@ mod tests {
             for config in [
                 UniverseConfig::visual_scale(),
                 UniverseConfig::visual_demand(15.0, 0.02),
-                UniverseConfig::canonical(),
             ] {
                 let bodies = generate_system_forest(seed, &config);
                 assert_eq!(siblings_disjoint(&bodies), Ok(()));
@@ -2208,18 +2134,11 @@ mod tests {
     }
 
     #[test]
-    fn walk_and_canonical_keep_aoi_inert_while_visual_stays_live() {
-        // Byte-identity: walk + canonical keep AoI OFF (behaviour unchanged); the compressed-real visual
+    fn walk_keeps_aoi_inert_while_visual_stays_live() {
+        // Byte-identity: walk keeps AoI OFF (behaviour unchanged); the compressed-real visual
         // band is LIVE under the ONE cot(θ/2) visibility factor.
         for r in realm_regions_for(0) {
             assert_eq!(r.aoi, AoiConfig::inert(), "walk regions stay AoI-inert");
-        }
-        for r in realm_regions_for_walk_config(0, &UniverseConfig::canonical()) {
-            assert_eq!(
-                r.aoi,
-                AoiConfig::inert(),
-                "canonical regions stay AoI-inert"
-            );
         }
         assert!(
             UniverseConfig::visual_scale().interest.is_live(),
@@ -2402,7 +2321,9 @@ mod tests {
         assert_eq!(c.scale.au_to_render_m, FROZEN_AU_TO_RENDER_M);
         assert_eq!(c.planet.planet_soi_r_m, FROZEN_PLANET_SOI_R_M);
         assert_eq!(c.stellar.central_mass_kg, FROZEN_CENTRAL_MASS_KG);
-        // The 5 planet orbit distances (semi-major axes, render m): ~17 / 29 / 49 / 83 / 142.
+        // The 5 planet orbit distances (semi-major axes, render m): ~15 / 26 / 44 / 75 / 127
+        // (the S4 apoapsis-solved compression — the batch review caught this line still carrying
+        // the pre-S4 distances beside the re-captured pins).
         let bodies = generate_system_forest(0, &c);
         // ONE star's planets. Orbit distances are a property of a SYSTEM, so a galaxy of several stars
         // must not change them — reading every planet in the galaxy would be reading a different quantity.
@@ -2738,7 +2659,7 @@ mod tests {
     }
 
     /// FRAME-COHERENT CONTAINMENT (the moving-realm crossing fix): a moving planet's position is authored
-    /// ONCE — through its live frame placement (`LocalFrames::with_moving_child`) — and its region `center`
+    /// ONCE — into the placement book, off its injected `MotionFn` — and its region `center`
     /// is ZERO (the boundary sits at the body's OWN frame origin). So an occupant sitting exactly at the
     /// planet's live orbital position is judged INSIDE its SOI, and an occupant at the star (17.9 m away) is
     /// OUTSIDE — the SAME geometry both the parent shard (planet as a moving child) and the planet's own
@@ -2951,34 +2872,6 @@ mod tests {
                 "orbit gap {gap} must exceed two SOIs {two_soi}"
             );
         }
-    }
-
-    #[test]
-    fn the_canonical_preset_shares_the_generator_at_real_proportions() {
-        // The SAME generate_system_forest serves canonical() — only the config VALUES differ (no-corner).
-        let mut canon = UniverseConfig::canonical();
-        canon.planet.n_planets = VISUAL_N_PLANETS;
-        let bodies = generate_system_forest(0, &canon);
-        // The canonical census is a RANGE, so how many stars this galaxy got is drawn from the seed —
-        // the count follows from the draw rather than from a number restated here.
-        let stars = bodies.iter().filter(|b| b.parent == Some(GALAXY)).count();
-        assert!(stars >= canon.galaxy.system_count_lo as usize);
-        assert!(stars <= canon.galaxy.system_count_hi as usize);
-        assert_eq!(bodies.len(), 2 + stars * (1 + VISUAL_N_PLANETS as usize));
-        let inner = orbital_of(
-            bodies
-                .iter()
-                .find(|b| b.parent == Some(SYSTEM_A))
-                .expect("system A has planets")
-                .placement,
-        )
-        .expect("a planet is Orbital");
-        // A canonical planet's sma is REAL AU metres; its star is the real solar mass (not synthetic).
-        assert_eq!(
-            inner.sma,
-            orbital_axis_au(0, ORBITAL_A0_AU, ORBITAL_RATIO) * canon.scale.au_to_render_m
-        );
-        assert_eq!(inner.central_mass, CANONICAL_STAR_MASS_KG);
     }
 
     #[test]

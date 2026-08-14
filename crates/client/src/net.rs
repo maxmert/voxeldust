@@ -611,6 +611,15 @@ impl ClientState {
             ignored: self.ignored,
             foreign_peer_drops: self.foreign_peer_drops,
             nonfinite_poses: self.view.nonfinite_poses() + self.realm_view.nonfinite_poses(),
+            // The three row-drop honesty counters (audit :304): row refusal is a NORMAL client
+            // behaviour since Step 5, so the diagnosis surface must distinguish "the shard stopped
+            // emitting this entity" from "the client refused every row it sent" — above all for a
+            // wrongly-armed resurrect guard (the permanently-undrawable-figure class).
+            resurrect_rows_dropped: self.view.resurrect_rows_dropped(),
+            // One-space skips happen on BOTH feeds; summed like the other two-feed fault counters.
+            foreign_space_rows: self.view.foreign_space_rows()
+                + self.realm_view.foreign_space_rows(),
+            echo_rows_dropped: self.view.echo_rows_dropped(),
             dev_commands_applied,
             dev_commands_dropped,
             transfer: DevTransferView::None,

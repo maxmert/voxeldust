@@ -306,11 +306,12 @@ pub struct Dot {
     /// The per-entity authority TRUTH (`authority.rs` FSM, attached 1d.4b/D-27): `Owned`
     /// simulates+holds, `Ghost` is a retained read-only mirror, `Frozen` is mid-transfer.
     /// `authority.simulates()` is the SINGLE answer to "does this shard ACCEPT-BY-AUTHORITY / HOLD
-    /// this entity" — half the `apply_input` gate and the oracle held-set. EMIT-eligibility (1d.5b.3b)
-    /// is the strictly-DERIVED `simulates() | is_fed_ghost | is_retained_ghost` (`emit_frames`): a fed
-    /// or retained Ghost emits its kinematic mirror to keep the cross-shard handoff seamless but
-    /// integrates/accepts NOTHING (FG-2 — emit-eligibility is derived from authority + the feed
-    /// registration, never a competing authority store). Login AND the transfer-dest both mint
+    /// this entity" — half the `apply_input` gate and the oracle held-set. EMIT-eligibility (slice F)
+    /// is the strictly-DERIVED `simulates() | (is_retained_ghost & Source-hold-open)` (`emits`): a
+    /// retained Ghost emits its kinematic mirror ONLY while the hand-off hold is open — the leaver
+    /// vanishes at hold closure — and the fed-ghost lane is DELETED (slice F). It integrates/accepts
+    /// NOTHING (FG-2 — emit-eligibility is derived from authority + the hold,
+    /// never a competing authority store). Login AND the transfer-dest both mint
     /// `Ghost{GENESIS}` (simulate nothing
     /// pre-grant) and Promote `Ghost→Owned` via the IDENTICAL machinery (login at the grant fence,
     /// dest at the crossing fence) — kind-generic: a ship/block/signal entity uses the SAME states
@@ -380,6 +381,20 @@ pub struct RealmConfirmedAt(pub TickId);
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentRealmNode(pub Option<NodeId>);
 
+/// The resolved live `NodeId` owning each of this shard's DIRECT CHILD realms — [`ParentRealmNode`]'s
+/// downward twin, learned via the SAME directory HeadRead round-trip on the SAME cadence (HR3) and
+/// written by the SAME realm-Head reply arm. This is the up-lanes' ADMISSION authority: a `ChildLive`
+/// bit / `RealmObservation` / `RealmShapeObservation` is believed ONLY when its sender matches the
+/// directory's record for that child — the same head the fence CAS already trusts, resolved locally.
+/// The learned frame sender stays the ROUTE (`ChildLiveEntry::home` — the mesh routes only to
+/// booked-or-learned peers, so a directory-derived NodeId may be unroutable); the two are DELIBERATELY
+/// different jobs. Absent entry = fail closed (refuse and count; a refusal arms a lazy re-read).
+/// Keys on the LOSSY `lowered()` `RealmId`, exactly like the directory and [`ParentRealmNode`] — all
+/// three migrate to `path()`-keying together (DEFERRED, D-RLM-10). EMPTY at walk/static (no read is
+/// ever emitted) ⇒ byte-identical.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct ChildRealmNodes(pub BTreeMap<RealmId, NodeId>);
+
 /// One direct child's SL7 occupancy bit as this PARENT holds it (Step 5 slice A) — written by the
 /// `ChildLive` receive arm, pruned on the ONE retain TTL (`retain_ttl_ticks`). Presence within the
 /// TTL IS the bit; `fence`+`at` are the last-wins ordering key (a deposed incarnation's heartbeat
@@ -403,9 +418,11 @@ pub struct ChildLiveness(pub BTreeMap<RealmId, ChildLiveEntry>);
 /// A live child's INTERIOR VIEW as this parent holds it (the up-observation lane, owner-approved
 /// 2026-08-13): per child, the latest batch of `RealmSnapshotDatagram` bytes ALREADY RESTATED into
 /// this shard's own frame (the one addition this parent may make — SL1). `emit_realm_frames` fans
-/// them to local observers beside this shard's own authored rows, and relays them one hop further
-/// up inside this shard's own up-observation ship (the recursion that lets a grandparent watch).
-/// Pruned by the same TTL as the bits: a child that stops shipping stops being drawn, never freezes.
+/// them to local observers beside this shard's own authored rows — bounded by each observer's own
+/// AoI band on that child (finding 39a) — and NEVER relays them onward: every lane carries exactly
+/// two levels, what I author about my children and what my children authored about themselves
+/// (finding 39b). Pruned by the same TTL as the bits: a child that stops shipping stops being drawn,
+/// never freezes.
 #[derive(Resource, Debug, Default)]
 pub struct ObservedInterior(pub BTreeMap<RealmId, (TickId, Vec<crate::io::Bytes>)>);
 
@@ -415,9 +432,10 @@ pub struct ObservedInterior(pub BTreeMap<RealmId, (TickId, Vec<crate::io::Bytes>
 /// instant). [`aoi_decide`] folds them into the scene delta of every observer whose visibility reaches
 /// that child, beside the child's own outline — which is what gives a neighbour realm's interior BOXES
 /// for the rows the moving half already streams ("approaching another star system, its planets never
-/// appear": the rows flowed, the client had nothing to draw them onto). [`emit_realm_frames`] re-ships
-/// them one hop further up inside this shard's own outline ship (the recursion). Pruned on the same
-/// TTL as the bits: a child that stops shipping stops being drawn, never freezes.
+/// appear": the rows flowed, the client had nothing to draw them onto). Held HOME, never relayed
+/// onward (finding 39b — two levels per lane): this shard's own outline ship carries its own roster
+/// only. Pruned on the same TTL as the bits: a child that stops shipping stops being drawn, never
+/// freezes.
 #[derive(Resource, Debug, Default)]
 pub struct ObservedInteriorShapes(pub BTreeMap<RealmId, (TickId, Vec<RealmShape>)>);
 
@@ -460,6 +478,18 @@ pub struct FromAboveScene(pub Vec<RealmShape>);
 #[derive(Resource, Debug, Default)]
 pub struct RenderSent(pub BTreeMap<AccountId, BTreeSet<RealmId>>);
 
+/// Step 5 lane cure (finding 41) — HAS THE PARENT BEEN TOLD this realm is occupied, since it last went
+/// empty? The SL7 bit beats on the AoI cadence (its contract's stated rate), and this latch is what
+/// derives the ADOPT EDGE with no hook in any adopt path: `aoi_decide` flips it false at the Empty
+/// self-report and true when a bit actually ships, so the first occupied tick the parent is resolved
+/// emits immediately — the occupancy transition itself, which is what the bit MEANS — and every later
+/// tick waits for the cadence. Deliberately "told", not "was occupied": a realm whose parent is still
+/// unresolved keeps the edge armed, so the first resolve ships the bit at once rather than waiting out
+/// a cadence. PURE emit bookkeeping — no fence, never persisted. Never flips at walk/static (no parent
+/// ever resolves, no bit ever ships) ⇒ byte-identical.
+#[derive(Resource, Debug, Default)]
+pub struct WasOccupied(pub bool);
+
 /// WHICH END of a hand-off this shard is holding — never a shard KIND (HR3). The compound key
 /// `(EntityId, HoldRole)` is what lets a SAME-NODE re-home hold BOTH ends at once; a bare entity key
 /// could not express that, and a same-node re-home is the common case on a co-hosting shard.
@@ -485,10 +515,10 @@ pub enum HoldRole {
 /// unarmed budget behaves exactly as it did before the ledger existed.
 ///
 /// NO POSE HERE (FG-2). The subject's pose is the retained ghost dot's, full stop — the dot is the single
-/// pose truth and `refresh_source_ghost` is its only writer. A copy kept here would be a second store that
-/// today provably agrees (a dest `GhostFlow::Delta` arriving before its `Spawn` is a counted stale drop, and
-/// `Spawn` itself closes the hold), which is precisely the kind of agreement that stops holding the day
-/// someone adds a writer.
+/// pose truth (slice F deleted its last cross-shard writer, `refresh_source_ghost`, with the whole fed-ghost
+/// pose feed; the surviving writers are the input integrator and the crossing adopt). A copy kept here would
+/// be a second store that would only provably agree today, which is precisely the kind of agreement that
+/// stops holding the day someone adds a writer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HandoffHold {
     /// The fence the TAKE-OVER will carry. A hold is closed by a FENCE COMPARE against this, never by a
@@ -610,8 +640,9 @@ fn prune_holds(holds: &mut HandoffHolds, now: TickId, ttl: u32) -> Vec<(EntityId
 
 /// Is this shard STILL PARTY to a hand-off of `entity` — i.e. has it let go of the subject but not yet
 /// seen the take-over land? THE ARMED CONSUMER SIDE of the ledger, and the answer to two questions that
-/// used to be answered by ownership alone: does this realm still tell its parent where the subject is,
-/// and does this realm still count itself occupied.
+/// used to be answered by ownership alone: does this realm still count the subject at its Empty gate
+/// (so its one-bit `ChildLive` heartbeat keeps beating — no pose crosses; the per-occupant position
+/// up-relay is DELETED, Step 5 slice D), and does this realm still count itself occupied.
 ///
 /// Freshness is re-checked here rather than trusted from the inbound prune, because the prune runs on
 /// inbound and this runs during the authoring pass — a hold that aged out between them must read expired
@@ -625,9 +656,11 @@ fn handing_over(holds: &HandoffHolds, entity: EntityId, now: TickId, ttl: u32) -
 }
 
 /// Does this shard still SPEAK FOR this occupant — because it owns them, or because it is mid-hand-off
-/// of them? ONE answer serving both places that used to ask "do we own them": what this realm tells its
-/// parent, and whether this realm considers itself occupied. Deriving them from one predicate is what
-/// stops a realm reporting itself empty in the same tick it is still telling its parent someone is here.
+/// of them? ONE answer serving both places that used to ask "do we own them": whether this realm's
+/// one-bit occupancy heartbeat keeps beating to its parent, and whether this realm considers itself
+/// occupied (the Empty gate). Both are LOCAL — no pose leaves the shard (the per-occupant up-relay is
+/// DELETED, Step 5 slice D). Deriving them from one predicate is what stops a realm reporting itself
+/// empty in the same tick its bit still says someone is here.
 ///
 /// Bitwise `|`, never `||` — both operands' false arms stay coverable (HR5). At a disarmed budget the
 /// right operand is constant-false and this reduces to the old `simulates()` filter exactly.
@@ -741,8 +774,10 @@ pub enum TransientStatus {
         to_realm: RealmId,
         dst_realm_fence: Fence,
         batch: TransferId,
-        /// The dest realm's PARENT provenance — carried from the [`TransientCrossingGrant`] so
-        /// `emit_transient_batch`'s `rebind_pose_to_dest` forms an `Area` frame. `None` for a non-Area dest.
+        /// ★DEAD FIELD — carried from the [`TransientCrossingGrant`] and read by NOTHING: the
+        /// consumer it existed for (`rebind_pose_to_dest`) is DELETED (D-PLACE-1); the DEST forms
+        /// its frame from its own ROSTER (`arrival_frame`). Kept only because the grant's wire shape
+        /// carries it (postcard is positional); flag-day removal ledgered D-WIRE-1.
         to_parent: Option<RealmId>,
     },
     /// A mid-flight adopted copy at the DEST (UNCOUNTED — the Ghost analogue: excluded from the
@@ -941,7 +976,10 @@ pub struct RequestInFlight(pub BTreeMap<EntityId, TransferId>);
 /// every synced tick) publishes; every consumer — containment, crossing, AoI, the scene lanes,
 /// realm-frame authoring — SELECTS a book by an instant it already holds as data and reads rows with
 /// no clock. `Res` everywhere downstream: Bevy's `Res`/`ResMut` split is itself a partial structural
-/// guarantee that no consumer can write the store.
+/// guarantee that no consumer can write the store. SCOPE of the "one writer" fence, stated honestly
+/// (batch review): the clippy `publish` ban binds THIS crate only (measured — see clippy.toml), and
+/// this field is `pub` — the crates above the seam are held to it by the observation that none of
+/// them names `Placements`, until the writer-in-node rework (D-PLACE-4) closes the surface.
 #[derive(Resource, Debug, Default)]
 pub struct Placements(pub PlacementLedger);
 
@@ -1592,10 +1630,17 @@ pub struct StubStats {
     /// the Promote) — DROPPED as a counted no-op (degrade, never panic), the saga re-drives. 0 in P2
     /// (no realm-revoke producer); reachable only at P8/P10 realm mobility (the re-drive is owed).
     pub promote_without_realm: u64,
-    /// D-37 forward re-home ADOPTS: a `ReHome` CREATED an Owned dot at the target from `ReHomeState`
-    /// (no pre-existing ghost — the target is fresh, unlike a `Promote` flip). `> 0` proves CELL-2
-    /// recovery actually adopted the re-homed entity.
+    /// D-37 forward re-home ADOPTS: a `ReHome` landed the subject Owned at the target — a fresh dot
+    /// built from `ReHomeState`, or (see `re_home_flipped`) a held same-entity dot flipped in place.
+    /// `> 0` proves CELL-2 recovery actually adopted the re-homed entity.
     pub re_home_adopted: u64,
+    /// The SUBSET of `re_home_adopted` where the target ALREADY held a dot for the subject entity —
+    /// the retained Ghost its own outward demote left behind (the forward re-home resolves its
+    /// target from the flushed pose's frame realm, which on an UPWARD hand-off is the SOURCE realm,
+    /// so a dead dest re-homes the entity straight back here). The held dot is FLIPPED in place;
+    /// minting a second dot under the synthetic key was the batch-review MAJOR (the orphan Ghost's
+    /// hold ran to TTL and the expiry fan broadcast `EntityRemoved` for an entity this shard OWNS).
+    pub re_home_flipped: u64,
     /// `ReHome` REDELIVERIES (already-journaled `(transfer, RE_HOME_STEP)`) — a counted re-ack-only no-op
     /// (at-least-once). 0 in a healthy single-delivery run.
     pub re_home_redelivered: u64,
@@ -1637,6 +1682,22 @@ pub struct StubStats {
     /// DEST: transient items ADOPTED as `Arriving` on the FIRST delivery of a `TransientBatch` (the
     /// uncounted mid-flight tier). The headline transient-adopt counter.
     pub transients_adopted: u64,
+    /// DEST: transient items REFUSED at adopt — the arriving pose could not be placed in the dest
+    /// realm's frame ([`place_arriving_pose`], the SAME receiver-side conversion the durable
+    /// crossing and the D-37 re-home run; HR2 — one machinery, policy fan-out, audit :105/:374/:384).
+    /// The item is NOT adopted: a counted, logged loss within the Transient class budget (the
+    /// durable twin refuses the whole crossing instead, so the source keeps authority). 0 in every
+    /// lawful hand-off — the source flushes through `flush_pose_for_dest`, so the pose arrives in
+    /// the dest realm's own frame or a direct child's.
+    pub transient_arrivals_unplaceable: u64,
+    /// A hosted DIRECT-child region whose realm the seed-lineage coordinate cannot name — an
+    /// entity-backed `Ship` realm (`level_of` = `None`; `RealmKindTag` has six seed-keyed tags and
+    /// no Ship arm until P8, DEFERRED D-SHIP-1). The AoI/demand fold, the scene reflect, the
+    /// cascade targeting and the interior fan each EXCLUDE such a region — a graceful typed
+    /// exclusion, counted per lane pass, NEVER a panic (audit :713: the old `expect` aborted the
+    /// whole shard). Always 0 through P3 — no producer plants a Ship region; the P8 ship-realm
+    /// work gives ships a lineage coordinate and retires this counter.
+    pub ship_child_regions_excluded: u64,
     /// DEST: `TransientBatch` REDELIVERIES (already-journaled `(transfer, TRANSIENT_BATCH_STEP)`) — a
     /// counted re-ack-only no-op (at-least-once). 0 in a healthy single-delivery run.
     pub transients_adopt_redelivered: u64,
@@ -1758,6 +1819,36 @@ pub struct StubStats {
     /// Step 5 slice A — `ChildLive` bits DROPPED as stale by `(fence, at)` (a reorder or a deposed
     /// incarnation). Expected under datagram reorder; a flood means a zombie.
     pub child_live_stale: u64,
+    /// Lane cure (findings 0/43, up half) — `ChildLive` bits DROPPED because the sender does not match
+    /// the directory's record for that child in [`ChildRealmNodes`] (fail closed; each refusal arms a
+    /// head re-read). Expected transiently across a child's spin-up or re-home (up to one cadence);
+    /// a flood means a zombie incarnation still beating from its old node.
+    pub child_live_unattested: u64,
+    /// Lane cure (findings 0/43, up half) — `RealmObservation` batches DROPPED as unattested (sender ≠
+    /// the directory's record for that child). Same window as `child_live_unattested`; `0` at steady
+    /// state.
+    pub realm_observation_unattested: u64,
+    /// Lane cure (findings 0/43, up half) — `RealmShapeObservation` sets DROPPED as unattested (sender
+    /// ≠ the directory's record for that child). Same window as `child_live_unattested`; `0` at steady
+    /// state.
+    pub realm_shape_observation_unattested: u64,
+    /// Lane cure (findings 0/43, down half) — `RealmCascade` frames DROPPED because the sender is not
+    /// this shard's resolved [`ParentRealmNode`] (fail closed — an unresolved parent refuses too, and
+    /// self-heals on the next cadence head-read). Distinct from `misrouted_cascade`, which answers
+    /// WHICH REALM was addressed; this answers WHICH NODE spoke. Never normal past a parent re-home
+    /// window.
+    pub cascade_unauthored: u64,
+    /// Lane cure (findings 0/43, down half) — `ChildSceneSet`s DROPPED as not from this shard's
+    /// resolved [`ParentRealmNode`] (fail closed). The one that matters most: one unattested frame
+    /// used to replace the whole from-above holding. Never normal past a parent re-home window.
+    pub child_scene_unauthored: u64,
+    /// Lane cure (finding 37) — demands REFUSED by [`push_demand`]'s structural gate: a demand this
+    /// shard emits names its OWN realm (the Empty self-report) or a DIRECT CHILD (the AoI union) —
+    /// SL7's two allowed shapes — and anything else is refused here, counted, one place (HR3).
+    /// Non-zero exactly while an OUTWARD crossing's keep-alive window stands (the dest is the parent,
+    /// which stays alive through arm B + `ancestor_close` instead — measured by the return-crossing
+    /// gate).
+    pub demand_refused_not_own_or_child: u64,
     /// Up-observation — `RealmObservation` batches RECEIVED, restated into this shard's frame, held.
     pub realm_observation_received: u64,
     /// Up-observation — batches DROPPED as mis-routed (not this shard's direct child). Never normal.
@@ -1848,11 +1939,18 @@ pub struct StubStats {
     /// one-instant rule the flush follows and the same "an occupant rides its realm" answer the
     /// up-observation ride measurement pinned. MEASURED at process tier (2026-08-14): the demand
     /// round-trip's fly-out wedged on exactly this before the clamp (refused at `head−345` ticks, once
-    /// per redelivery, forever). Counted, never silent; the widest skew rides
-    /// `placement_skew_max_ticks`. A stale RELAY datagram still drops loudly (`placement_book_miss`).
+    /// per redelivery, forever). Counted, never silent; the widest skew rides the per-direction
+    /// gauges below. A stale RELAY datagram still drops loudly (`placement_book_miss`).
     pub placement_skew_clamped: u64,
-    /// The widest forward skew clamped, in ticks — the `span_ahead` measurement the placement arc owed.
-    pub placement_skew_max_ticks: u64,
+    /// The widest FORWARD (ahead-of-the-head) skew clamped, in ticks — the `span_ahead` measurement
+    /// the placement arc owed: how far a sender's ClockSync arrival phase has led this receiver's.
+    /// One direction per gauge (batch review: one two-directional magnitude destroyed exactly this
+    /// measurement — the arrival lane's redelivery staleness dominated it).
+    pub placement_skew_ahead_max_ticks: u64,
+    /// The widest BACKWARD (behind-the-window) staleness clamped, in ticks — the ARRIVING hand-off
+    /// lane only (a retained, retried envelope's stamp never changes, so its age grows per
+    /// redelivery; the relay lane drops stale datagrams loudly instead of clamping them).
+    pub placement_skew_behind_max_ticks: u64,
     /// The WIDEST latch→flush staleness observed on this shard, in ticks: at each pose flush, the gap
     /// between this shard's clock and the flushed pose's stamp. A latched dot's stamp is FROZEN at the
     /// latch (`readvance_dots` deliberately skips it), so this gap is exactly how far the world's moving
@@ -2059,6 +2157,8 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // through walk/canonical scale (inert AoI ⇒ no demand ⇒ never touched).
     world.insert_resource(AoiMembership::default());
     world.insert_resource(ParentRealmNode::default());
+    world.insert_resource(ChildRealmNodes::default());
+    world.insert_resource(WasOccupied::default());
     world.insert_resource(ChildLiveness::default());
     world.insert_resource(ObservedInterior::default());
     world.insert_resource(ObservedInteriorShapes::default());
@@ -2356,6 +2456,9 @@ type VuAoiInbound<'w> = (
     // flush ingress arms select their books from it.
     Res<'w, Placements>,
     ResMut<'w, ParentRealmNode>,
+    // Lane cure (findings 0/43) — the directory-derived admission map for this shard's direct children:
+    // written by the realm-Head reply arm, consulted by every up-lane receive.
+    ResMut<'w, ChildRealmNodes>,
     // Step 5 slice C — the from-above holding the `ChildSceneSet` receive arm replaces whole.
     ResMut<'w, FromAboveScene>,
     // Step 5 slice A + the up-observation lane: the parent-side stores their receive arms write —
@@ -2409,6 +2512,7 @@ fn process_inbound(
         regions,
         placements,
         mut parent_node,
+        mut child_nodes,
         mut from_above,
         mut child_liveness,
         mut observed,
@@ -2451,6 +2555,7 @@ fn process_inbound(
             }
             MsgClass::Saga => on_directory_reply(
                 bytes,
+                *from,
                 &identity,
                 &config,
                 &clock,
@@ -2470,6 +2575,7 @@ fn process_inbound(
                 &mut stats,
                 &mut outbox,
                 &mut parent_node,
+                &mut child_nodes,
                 &mut from_above,
                 &mut holds,
             ),
@@ -2504,19 +2610,24 @@ fn process_inbound(
                         cl,
                         clock.local_tick,
                         *from,
+                        &child_nodes,
                         &mut stats,
+                        &mut outbox,
                     );
                 }
                 // The up-observation lane — a live child's own authored rows, one hop up. This shard
                 // ADDS the one placement it authors for that child (SL1) and holds the restated bytes
-                // for `emit_realm_frames` to fan and to relay one hop further up.
+                // for `emit_realm_frames` to fan to its own band-bounded observers (never relayed
+                // onward — two levels per lane, finding 39).
                 Ok(InterShardFlow::RealmObservation(ro)) => {
                     on_realm_observation(
                         ro,
+                        *from,
                         &config,
                         &clock,
                         &regions,
                         &placements.0,
+                        &child_nodes,
                         &mut observed,
                         &mut stats,
                     );
@@ -2524,13 +2635,15 @@ fn process_inbound(
                 // The observation lane's STATIC half (slice C) — a live child's interior OUTLINES.
                 // This shard ADDS the one placement it authors for that child (SL1, at the shape
                 // lane's one instant) and holds the lifted set for `aoi_decide` to fold into scenes
-                // and for `emit_realm_frames` to re-ship one hop further up.
+                // — held HOME, never re-shipped (two levels per lane, finding 39).
                 Ok(InterShardFlow::RealmShapeObservation(rso)) => {
                     on_realm_shape_observation(
                         rso,
+                        *from,
                         &config,
                         &clock,
                         &regions,
+                        &child_nodes,
                         &mut observed_shapes,
                         &mut stats,
                     );
@@ -2540,6 +2653,8 @@ fn process_inbound(
                 Ok(InterShardFlow::RealmCascade(rc)) => {
                     on_realm_cascade(
                         rc,
+                        *from,
+                        &parent_node,
                         &config,
                         &clock,
                         &authority,
@@ -3722,11 +3837,17 @@ fn on_re_home(
 }
 
 /// The D-37 re-home effect (monomorphic so every branch is covered ONCE here — HR5). DIVERGES from
-/// `promote_apply` by CONSTRUCTING an Owned dot from the payload pose rather than flipping a ghost: the
-/// re-home target is FRESH (the killed dest never replicated a ghost here). A non-Entity subject is a
-/// counted no-op (`re_home_no_entity`). The created dot is clientless (no session route — the client
-/// re-subscribes via the D-37/D-36 connection-plane path, owed): `AccountId(0)` + the orchestrator as an
-/// inert reply sentinel, `granted` so it simulates + emits frames, born `Owned` at `cmd.new_fence`.
+/// `promote_apply` by taking the pose from the PAYLOAD rather than a crossing journal, and it has TWO
+/// landing shapes: the target usually holds NOTHING for the subject (the killed dest was elsewhere)
+/// and a fresh Owned dot is BUILT; but when the flushed pose's frame realm resolved the re-home right
+/// back to the SOURCE shard (an upward hand-off ships the pose verbatim in the source's own frame),
+/// the target still holds the subject's RETAINED GHOST — and that dot is FLIPPED in place, never
+/// doubled (the batch-review MAJOR: a second dot for one EntityId left an orphan ghost whose expiring
+/// hold broadcast `EntityRemoved` for a live entity). A non-Entity subject is a counted no-op
+/// (`re_home_no_entity`). A FRESH-built dot is clientless (no session route — the client re-subscribes
+/// via the D-37/D-36 connection-plane path, owed): `AccountId(0)` + the orchestrator as an inert reply
+/// sentinel, `granted` so it simulates + emits frames, born `Owned` at `cmd.new_fence`; a FLIPPED dot
+/// keeps the client linkage it retained.
 ///
 /// Returns whether the entity is ACTUALLY HERE NOW. `false` means this shard refused the adopt and holds
 /// nothing — the caller must not journal it and must not ack it (see [`on_re_home`]).
@@ -3772,32 +3893,66 @@ fn re_home_apply(
                 return false;
             }
         };
-    // Deterministic clientless session key (entity id ↦ session) so seed-replay stays byte-identical and
-    // the oracle held-set sees exactly one Owned dot for this entity.
-    let session = SessionId(entity.0);
-    dots.0.insert(
-        session,
-        Dot {
-            entity,
-            account: AccountId(0), // orphan: no client account until the session re-homes (D-37/D-36)
-            session_fence: Fence::GENESIS,
-            gateway: config.orchestrator, // inert reply sentinel — push_session_reply is never called here
-            granted: true,
-            input_active: false,
-            adopting: false,
-            authority: Authority::Owned {
-                fence: cmd.new_fence,
+    // SAME-ENTITY GUARD (batch review, MAJOR): the target may ALREADY hold a dot for this entity —
+    // the retained Ghost its own outward demote left behind, found here whenever the forward
+    // re-home's target resolution (the flushed pose's frame realm) lands the entity back on its
+    // SOURCE shard. Inserting under the synthetic key would mint a SECOND dot for one EntityId: the
+    // orphan Ghost's hand-off hold then runs to TTL and the expiry fan broadcasts `EntityRemoved`
+    // for an entity this shard now OWNS and emits, and a later stale band-exit `Despawn` tears out
+    // whichever ghost-shaped dot it finds. So the held dot is FLIPPED in place — same session key,
+    // keeping the client linkage it retained — and AUTHORITY-UNIQUE stays ≤ 1 dot per entity.
+    if let Some(session) = dots
+        .0
+        .iter()
+        .find(|(_, d)| d.entity == entity)
+        .map(|(s, _)| *s)
+    {
+        let dot = dots
+            .0
+            .get_mut(&session)
+            .expect("the same-entity dot was just found");
+        // The directory CAS committed THIS shard as the owner at `cmd.new_fence`, so re-own the held
+        // dot at that exact fence — the same direct re-own the source==dest Promote arm performs
+        // (a strict-newer FSM Promote would `StaleFence` against the demote that landed this fence).
+        dot.authority = Authority::Owned {
+            fence: cmd.new_fence,
+        };
+        dot.entity_fence = cmd.new_fence;
+        dot.granted = true;
+        dot.departing = false;
+        dot.adopting = false;
+        dot.pose = pose;
+        // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
+        dot.prev_offset = pose.pos.offset();
+        stats.re_home_flipped += 1;
+    } else {
+        // Deterministic clientless session key (entity id ↦ session) so seed-replay stays byte-identical and
+        // the oracle held-set sees exactly one Owned dot for this entity.
+        let session = SessionId(entity.0);
+        dots.0.insert(
+            session,
+            Dot {
+                entity,
+                account: AccountId(0), // orphan: no client account until the session re-homes (D-37/D-36)
+                session_fence: Fence::GENESIS,
+                gateway: config.orchestrator, // inert reply sentinel — push_session_reply is never called here
+                granted: true,
+                input_active: false,
+                adopting: false,
+                authority: Authority::Owned {
+                    fence: cmd.new_fence,
+                },
+                departing: false,
+                entity_fence: cmd.new_fence,
+                pose,
+                yaw: 0.0,
+                pitch: 0.0,
+                last_applied_seq: None,
+                // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
+                prev_offset: pose.pos.offset(),
             },
-            departing: false,
-            entity_fence: cmd.new_fence,
-            pose,
-            yaw: 0.0,
-            pitch: 0.0,
-            last_applied_seq: None,
-            // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
-            prev_offset: pose.pos.offset(),
-        },
-    );
+        );
+    }
     stats.re_home_adopted += 1;
     // Register the (re-home) source as a ghost-neighbor + spawn its ghost — the target (owner) now drives
     // the collider feed to it, exactly as `promote_apply` does. Shared tail — see the fn doc. `self_node`
@@ -4545,16 +4700,22 @@ fn on_transfer_envelope(
         // D-7: the DEST adopts a transient batch into its uncounted `Arriving` tier + acks
         // `BatchAdopted` (the gate that lets the orchestrator emit the adopt-before-drop
         // `TransientDrop`). Handled fully here — never the durable StubCrossing dot machinery.
+        // `to_realm` is READ here too (audit :105/:374/:384 — it used to be discarded by `..`):
+        // the adopt runs the SAME receiver-side conversion as the durable arm below.
         TransitionPayload::TransientBatch {
+            to_realm,
             dst_realm_fence,
             items,
             ..
         } => {
             adopt_transient_batch(
                 env.transfer_id,
+                to_realm,
                 dst_realm_fence,
                 items,
-                config.orchestrator,
+                config,
+                regions,
+                placements,
                 owned,
                 applied,
                 stats,
@@ -4907,8 +5068,8 @@ fn book_at_or_head<'a>(
     match placements.head(anchor) {
         Some(head) if stamp > head.at() => {
             stats.placement_skew_clamped += 1;
-            stats.placement_skew_max_ticks = stats
-                .placement_skew_max_ticks
+            stats.placement_skew_ahead_max_ticks = stats
+                .placement_skew_ahead_max_ticks
                 .max(stamp.0.saturating_sub(head.at().0));
             Some((head, head.at()))
         }
@@ -4936,9 +5097,18 @@ fn arrival_book<'a>(
     }
     let head = placements.head(anchor)?;
     stats.placement_skew_clamped += 1;
-    stats.placement_skew_max_ticks = stats
-        .placement_skew_max_ticks
-        .max(stamp.0.abs_diff(head.at().0));
+    // PER-DIRECTION gauges (batch review): a forward stamp measures clock-phase lead (`span_ahead`);
+    // a backward one measures redelivery staleness. One |Δ| magnitude conflated the two, and the
+    // arrival lane's staleness (345 ticks at the measured wedge) drowned the forward bound.
+    if stamp > head.at() {
+        stats.placement_skew_ahead_max_ticks = stats
+            .placement_skew_ahead_max_ticks
+            .max(stamp.0.saturating_sub(head.at().0));
+    } else {
+        stats.placement_skew_behind_max_ticks = stats
+            .placement_skew_behind_max_ticks
+            .max(head.at().0.saturating_sub(stamp.0));
+    }
     Some((head, head.at()))
 }
 
@@ -5003,7 +5173,7 @@ fn retain_live<K: Ord, V>(map: &mut BTreeMap<K, V>, live: &BTreeSet<K>) {
 /// The result of one subject's containment evaluation — the frame-local offset the caller records as
 /// `prev_offset`. (Every re-home is now the uniform orchestrator saga — source==dest is the degenerate
 /// case — so the detector emits a `CrossingRequest`/`TransientCrossingRequest` and NEVER rewrites the pose
-/// in place; the crossed pose is rebound at the DEST's adopt via `rebind_pose_to_dest`, which is the same
+/// in place; the crossed pose is placed at the DEST's adopt via `place_arriving_pose`, which is the same
 /// node's adopt on a co-hosted re-home.)
 struct SubjectEval {
     prev_offset: DVec3,
@@ -5157,9 +5327,9 @@ fn evaluate_one_subject(
     let mut members: Vec<DepthKey> = Vec::new();
     for (ix, (region, &depth_key)) in ctx.regions.iter().zip(ctx.depths.iter()).enumerate() {
         // The input-side frame seam (§2.5, FA-1): re-express the pose into the region's frame BEFORE the
-        // signed distance, through the shard's own `LocalFrames` ephemeris (`ctx.frames`). At walk/static
-        // scale every region is at identity so this is byte-equal to the retired `IdentityFrames`; FA-4
-        // gives moving direct children a live orbital placement per tick. A frame the shard cannot name
+        // signed distance, through the shard's own AUTHORED placement book (`book` — the placement arc's
+        // one position source; at walk/static scale every row is at identity, and FA-4 gives moving
+        // direct children a live placement per tick). A frame the shard cannot name
         // (`Err`) SAFE-DEGRADES to non-member (`f64::MAX`) — never a spurious container.
         let sd = region_signed_distance(&measured, region, book).unwrap_or(f64::MAX);
         // EVERY REGION'S ANSWER, AND THE PLACEMENT IT WAS MEASURED AGAINST, whenever a NON-OWNED region
@@ -5242,10 +5412,10 @@ fn evaluate_one_subject(
     // shard's own lineage, and WHERE the occupant lands there is the parent's arithmetic, not this shard's.
     let outside_dest = outward_dest(ctx.config, ctx.regions, root_realm, owning);
     let container_realm = container(outside_dest, &members);
-    // The container region's PARENT provenance — the one field a `rebind_pose_to_dest` into an `Area` needs
-    // (its enclosing `Planet`). A deterministic worldgen fact carried on every `RealmRegion`; threaded onto
-    // the crossing request so the dest's Area frame forms. `None` for a non-Area dest (a one-field lift) and
-    // when the container is the root (no matching region — never re-homes to it anyway).
+    // The container region's PARENT provenance — ★DEAD on the wire: the consumer it was appended for
+    // (`rebind_pose_to_dest`) is DELETED (D-PLACE-1); the dest forms an `Area` frame from its own
+    // ROSTER (`arrival_frame` — the region carries the planet parent there). Still stamped because the
+    // frozen request shape carries the field (postcard is positional); flag-day removal D-WIRE-1.
     let to_parent = ctx
         .regions
         .iter()
@@ -5310,8 +5480,9 @@ fn fan_out_crossing(
     subject_fence: Fence,
     subject_session: Option<SessionId>,
     to_realm: RealmId,
-    // The dest realm's PARENT provenance (the container region's `parent`) — carried onto BOTH class arms'
-    // requests so the dest's `rebind_pose_to_dest` forms an `Area` frame. `None` for a non-Area dest.
+    // ★DEAD wire field, threaded for shape only: the consumer it was appended for
+    // (`rebind_pose_to_dest`) is DELETED (D-PLACE-1) — the dest forms its frame from its own ROSTER
+    // (`arrival_frame`). Flag-day removal ledgered D-WIRE-1.
     to_parent: Option<RealmId>,
     state: &mut CrossingState,
     in_flight: &mut BTreeMap<EntityId, TransferId>,
@@ -5448,13 +5619,19 @@ fn redrive_stranded_crossings(
     let Some(realm_fence) = authority.0 else {
         return;
     };
-    // On an ARMED (demand-scale) shard, KEEP the crossing DEST — and, via `ancestor_close`, its whole
-    // Universe→…→dest chain — demand-alive for EXACTLY the crossing window, so a player crossing INTO a
-    // realm cannot have it reaped out from under them (the Planet→System return-freeze fix). The in-flight
-    // latch IS the lifecycle: taken at `fan_out_crossing`, cleared POSITIVELY at commit / pre-CAS abort /
-    // vanish. A cleared latch is simply not scanned ⇒ the keep-alive stops and the dest self-heals — on
-    // commit the arriving player's own arm-B liveness carries it (the last keep-alive's `demand_ttl`
-    // overlaps, no gap); on abort it ages out after at most `demand_ttl`, a bounded tail, never a leak.
+    // On an ARMED (demand-scale) shard, KEEP an INWARD crossing DEST — and, via `ancestor_close`, its
+    // whole Universe→…→dest chain — demand-alive for EXACTLY the crossing window, so a player crossing
+    // INTO a realm cannot have it reaped out from under them (the Planet→System return-freeze fix). The
+    // in-flight latch IS the lifecycle: taken at `fan_out_crossing`, cleared POSITIVELY at commit /
+    // pre-CAS abort / vanish. A cleared latch is simply not scanned ⇒ the keep-alive stops and the dest
+    // self-heals — on commit the arriving player's own arm-B liveness carries it (the last keep-alive's
+    // `demand_ttl` overlaps, no gap); on abort it ages out after at most `demand_ttl`, a bounded tail,
+    // never a leak. An OUTWARD crossing's dest is this shard's PARENT, which a shard may never demand
+    // (SL7 — a realm speaks about itself or a direct child, never upward): `push_demand`'s structural
+    // gate refuses it, counted, and the parent stays alive anyway — the latch keeps the departing
+    // occupant in this shard's observer fold (`speaks_for`), so this realm never reports `Empty`, arm B
+    // of `desired_alive` holds it, and `ancestor_close` pulls the parent chain. Measured by the
+    // return-crossing gate (`a_planet_to_system_return_commits_both_rehomes_and_the_player_rides`).
     let armed = regions.aoi_live();
     let ttl = config.request_ttl_ticks;
     // Walk/static scale (inert AoI) with the ttl re-drive disabled is byte-identical to the old early-out.
@@ -5472,18 +5649,22 @@ fn redrive_stranded_crossings(
             .latched_crossing
             .expect("a held durable latch carries its re-emit payload");
         if armed {
-            // The full lineage coord of the dest — always resolvable (a crossing dest is a seed-lineage
-            // region in this shard's neighbourhood, never an entity-backed ship), mirroring `region_level`.
+            // The full lineage coord of the dest — always resolvable: a crossing dest is a seed-lineage
+            // region in this shard's neighbourhood, never an entity-backed ship (no producer plants a
+            // Ship region through P3, and the hosted-child lanes EXCLUDE one — `region_level`, D-SHIP-1;
+            // the P8 ship-realm work re-visits this expect with the lineage arm it adds).
             let coord = regions
                 .coord_of(lc.to_realm)
                 .expect("a crossing dest is a seed-lineage realm (never an entity-backed ship)");
             push_demand(
                 &mut outbox,
                 config.orchestrator,
+                &config.own_coord,
                 coord,
                 realm_fence,
                 DemandVerb::KeepAlive,
                 clock.universe_tick,
+                &mut stats,
             );
         }
         if ttl != 0 {
@@ -5640,15 +5821,15 @@ fn emit_transient_batch(
             // (HR3, one rule): convert only into a realm this shard AUTHORS the placement of, and
             // otherwise ship the pose VERBATIM in this shard's own frame, for whoever does know.
             //
-            // This was the FOURTH relabel — an unconditional `rebind_pose_to_dest(.., &IdentityFrames)`
-            // that stamped the destination's frame onto the pose without moving the number. See
+            // This was the FOURTH relabel — an unconditional identity rebind that stamped the
+            // destination's frame onto the pose without moving the number. See
             // `flush_pose_for_dest` for what that costs once realms stop sitting on top of each other.
             //
-            // KNOWN GAP, stated rather than hidden: the transient ADOPT (`adopt_transient_batch`) has no
-            // receiver-side conversion at all, so an UPWARD transient hand-off arrives in the child's
-            // frame and nobody adds the child's placement. That is invisible today (every transient rig
-            // is walk-scale, where a placement is the identity) and it is the transient twin of the
-            // durable `place_arriving_pose` ingress.
+            // The RECEIVER'S half now exists too: `adopt_transient_batch` runs the SAME
+            // `place_arriving_pose` guard as the durable ingress (the KNOWN GAP this comment used to
+            // state is CLOSED — audit :105/:374/:384), so an UPWARD hand-off's child-frame pose gets
+            // the child's placement ADDED by the receiver, and a pose the receiver cannot measure is
+            // refused + counted, never stored verbatim.
             let Some(pose) = flush_pose_for_dest(
                 t.pose,
                 to_realm,
@@ -5712,16 +5893,31 @@ fn emit_transient_batch(
 }
 
 /// DEST adopt of a transient batch (D-7): journal the batch step idempotently; on FIRST delivery,
-/// insert each item into `OwnedTransients` as the uncounted `Arriving` tier (anchored to the batch's
-/// committed realm fence); ALWAYS ack `BatchAdopted` to the orchestrator (at-least-once — the ack
-/// GATES the adopt-before-drop `TransientDrop`, so a lost ack must be re-ackable). A redelivery
-/// re-acks WITHOUT re-adopting (the items are already Arriving/Held).
+/// run THE RECEIVER'S CONVERSION on each item ([`place_arriving_pose`] — the SAME rule the durable
+/// crossing and the D-37 re-home ingresses run; this was the third place a pose enters a shard and
+/// the only one without the guard, audit :105/:374/:384) and insert the placed items into
+/// `OwnedTransients` as the uncounted `Arriving` tier (anchored to the batch's committed realm
+/// fence); ALWAYS ack `BatchAdopted` to the orchestrator (at-least-once — the ack GATES the
+/// adopt-before-drop `TransientDrop`, so a lost ack must be re-ackable). A redelivery re-acks
+/// WITHOUT re-adopting (the items are already Arriving/Held).
+///
+/// CONVERT-OR-REFUSE, as policy fan-out on the ONE machinery (HR2), not a fork: an item whose pose
+/// this shard cannot measure (a frame it was never told the placement of, or an instant its book
+/// does not retain) is REFUSED — counted (`transient_arrivals_unplaceable`) + logged, NEVER stored
+/// verbatim to be read later as an own-frame number by AoI/containment. Where a DURABLE refusal
+/// aborts the whole crossing (the source keeps authority until the saga re-drives), a TRANSIENT
+/// item is one of a batched swarm whose source releases on the batch ack, so the refusal is an
+/// accounted per-item loss within the Transient class budget — the batch still acks and the
+/// placeable items still adopt.
 #[allow(clippy::too_many_arguments)]
 fn adopt_transient_batch(
     transfer: TransferId,
+    to_realm: RealmId,
     dst_realm_fence: Fence,
     items: Vec<TransientItem>,
-    orchestrator: NodeId,
+    config: &StubConfig,
+    regions: &RealmRegions,
+    placements: &PlacementLedger,
     owned: &mut OwnedTransients,
     applied: &mut AppliedSteps,
     stats: &mut StubStats,
@@ -5729,12 +5925,33 @@ fn adopt_transient_batch(
 ) {
     match applied.journal_step(transfer, TRANSIENT_BATCH_STEP) {
         StepOutcome::FirstApply => {
-            let adopted = items.len() as u64;
             for item in items {
                 // SANITIZE network input at the decode-ingress chokepoint (D-7b): a corrupt /
                 // diverged sender could carry NaN/Inf, which would poison the ballistic
                 // re-advance + the render — never trust the wire pose.
-                let pose = item.pose.sanitized();
+                let sanitized = item.pose.sanitized();
+                // THE RECEIVER'S CONVERSION — an UPWARD hand-off arrives in the child's frame and
+                // only THIS realm can add where it put that child (SL1); a pose already in this
+                // realm's frame passes verbatim; anything else is the refusal arm below.
+                let pose = match place_arriving_pose(
+                    sanitized, to_realm, config, regions, placements, stats,
+                ) {
+                    Ok(placed) => placed,
+                    Err(err) => {
+                        stats.transient_arrivals_unplaceable += 1;
+                        tracing::error!(
+                            %err,
+                            transfer = ?transfer,
+                            entity = %item.entity,
+                            arriving = ?sanitized.frame,
+                            into = ?to_realm,
+                            own = ?config.realm,
+                            "refusing a transient item this shard cannot place — NOT adopted (a \
+                             counted loss within the Transient class budget)"
+                        );
+                        continue;
+                    }
+                };
                 owned.0.insert(
                     item.entity,
                     Transient {
@@ -5745,13 +5962,13 @@ fn adopt_transient_batch(
                         prev_offset: pose.pos.offset(),
                     },
                 );
+                stats.transients_adopted += 1;
             }
-            stats.transients_adopted += adopted;
         }
         StepOutcome::AlreadyApplied => stats.transients_adopt_redelivered += 1,
     }
     outbox.push_flow(
-        orchestrator,
+        config.orchestrator,
         MsgClass::Saga,
         &InterShardFlow::TransferAck(TransferAck::BatchAdopted {
             transfer_id: transfer,
@@ -6137,10 +6354,50 @@ fn update_parent_node(
     }
 }
 
+/// Lane cure (findings 0/43, up half) — [`update_parent_node`]'s DOWNWARD twin: cache the node owning one
+/// of this shard's DIRECT CHILD realms from a realm Head reply, IFF the replied realm is on this shard's
+/// own roster. Monomorphic (all branching HERE, HR5): the roster-membership yes/no + the Shard /
+/// non-Shard / None record resolve. `Some(Shard)` inserts (OVERWRITE — a re-home's new owner replaces the
+/// old); anything else REMOVES (a revoked/absent record fails the up-lanes closed — refuse, never believe
+/// a node the directory no longer names). This is the ADMISSION side only; the learned frame sender stays
+/// the ROUTE (`ChildLiveEntry::home` — see [`ChildRealmNodes`]). A no-op for any non-child realm ⇒ purely
+/// additive to `affirm_realm_head`/`update_parent_node` (byte-identical). Keys on the LOSSY `lowered()`
+/// `RealmId`, exactly like the directory itself (D-RLM-10).
+fn update_child_node(
+    realm: RealmId,
+    record: Option<&vd_wire::seams::directory::OwnerRecord>,
+    config: &StubConfig,
+    regions: &RealmRegions,
+    child_nodes: &mut ChildRealmNodes,
+) {
+    if regions
+        .direct_children(config.realm)
+        .any(|c| c.realm == realm)
+    {
+        match record.map(|r| r.authority) {
+            Some(AuthorityRef::Shard(n)) => {
+                child_nodes.0.insert(realm, n);
+            }
+            _ => {
+                child_nodes.0.remove(&realm);
+            }
+        }
+        tracing::debug!(
+            child = %realm,
+            node = ?child_nodes.0.get(&realm),
+            realm = %config.realm,
+            "CHILD RESOLVED: the up-lanes' admission authority",
+        );
+    }
+}
+
 /// Handle a directory reply: realm-lease and entity-grant confirmations.
 #[allow(clippy::too_many_arguments)]
 fn on_directory_reply(
     bytes: &[u8],
+    // The frame's sender — the down-lane attestation input (`ChildSceneSet` rides this carrier), passed
+    // through exactly like the Control arm's (stub dispatch, findings 0/43).
+    from: NodeId,
     identity: &NodeIdentity,
     config: &StubConfig,
     clock: &ClockSample,
@@ -6160,6 +6417,9 @@ fn on_directory_reply(
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
     parent_node: &mut ParentRealmNode,
+    // Lane cure (findings 0/43, up half) — the directory-derived ADMISSION map for this shard's direct
+    // children, written by the same realm-Head arm that writes `parent_node`.
+    child_nodes: &mut ChildRealmNodes,
     // Step 5 slice C — the from-above holding the `ChildSceneSet` receive replaces whole.
     from_above: &mut FromAboveScene,
     holds: &mut HandoffHolds,
@@ -6175,7 +6435,7 @@ fn on_directory_reply(
         // replace the holding whole (the AoI pass folds it into every local occupant's scene and
         // restates it onward into every live child's). NOT a directory reply — a peer-to-peer relay.
         Ok(InterShardFlow::ChildSceneSet(cs)) => {
-            on_child_scene_set(cs, config, from_above, stats);
+            on_child_scene_set(cs, from, parent_node, config, from_above, stats);
             return;
         }
         // SOURCE: ship the held subject's pose (1d.1).
@@ -6379,6 +6639,9 @@ fn on_directory_reply(
             // target). Purely additive: `update_parent_node` no-ops for a non-parent realm, so the primary /
             // co-hosted authority machinery above is byte-identical.
             update_parent_node(realm, record.as_ref(), config, parent_node);
+            // Lane cure (findings 0/43, up half) — and IFF it is one of this shard's DIRECT CHILDREN,
+            // cache its node as the up-lanes' admission authority (same reply arm, same cadence, HR3).
+            update_child_node(realm, record.as_ref(), config, regions, child_nodes);
         }
         DirectoryReply::Head {
             key: DirectoryKey::Entity(entity),
@@ -6666,11 +6929,11 @@ fn emit_frames(
     let Some(realm_fence) = authority.0 else {
         return;
     };
-    // EMIT-eligibility is the DERIVED `simulates() | is_fed_ghost | is_retained_ghost` (1d.5b.3b):
-    // an Owned dot (the authority truth) emits; ALSO a fed ghost (the dest-driven collider feed) and
-    // a retained source ghost (self-emitting its last-Owned pose to fill the demote→Promote handoff)
-    // emit their kinematic mirror — so the avatar renders CONTINUOUSLY across the strict handoff (no
-    // vanish). A Frozen or pre-grant-provisional Ghost still emits NOTHING.
+    // EMIT-eligibility is the DERIVED `simulates() | (is_retained_ghost & Source-hold-open)` (slice
+    // F — see `emits`): an Owned dot (the authority truth) emits; a retained source ghost emits its
+    // last-Owned pose ONLY while its hand-off hold is open, filling exactly the demote→take-over
+    // window — the leaver VANISHES at hold closure (the SpawnV2 proof + the remove message). The
+    // fed-ghost lane is DELETED (slice F). A Frozen or pre-grant-provisional Ghost emits NOTHING.
     let mut gateways: Vec<NodeId> = dots
         .0
         .values()
@@ -6786,6 +7049,7 @@ fn active_children(
     regions: &RealmRegions,
     live: &ChildLiveness,
     book: &PlacementBook,
+    stats: &mut StubStats,
 ) -> Vec<ActiveChild> {
     regions
         .child_rows(config.realm, book)
@@ -6794,10 +7058,16 @@ fn active_children(
             // The match FIRST, so an inactive child costs nothing but the lookup — no routing key
             // minted for a realm nobody is standing in.
             let home = home_of_active_child(region, live)?;
+            // A Ship child has no lineage coord to cascade by until P8 (D-SHIP-1): excluded,
+            // counted, never a panic — see `region_level`.
+            let Some(level) = region_level(region) else {
+                stats.ship_child_regions_excluded += 1;
+                return None;
+            };
             Some(ActiveChild {
                 frame: region.frame,
                 at: placement_of(&pose),
-                coord: config.own_coord.child(region_level(region)),
+                coord: config.own_coord.child(level),
                 home,
             })
         })
@@ -6971,9 +7241,15 @@ fn emit_realm_frames(
     // Step 5 slice B: the direct children's SL7 occupancy bits. Each fresh entry holds the HOME shard
     // `NodeId` of a live child — the cascade target (pruned on the shared TTL by `aoi_decide`).
     child_liveness: Res<ChildLiveness>,
+    // Lane cure (finding 39a) — LAST tick's per-(observer, child) AoI membership (`evaluate_realm_aoi`
+    // runs after this system on the same schedule): the interior fan below is bounded by the SAME band
+    // the child's own box rides, so the two halves of one scene obey one rule. One tick of lag on
+    // entry; the grace latch holds a departing child's rows through its whole grace window — bounded,
+    // no flicker, self-healing.
+    membership: Res<AoiMembership>,
     // The up-observation lane (owner-approved 2026-08-13): the restated interior batches held from
-    // live children, their interior OUTLINES (slice C's static half), and the resolved parent to
-    // relay observation up to.
+    // live children, their interior OUTLINES (slice C's static half), and the resolved parent the
+    // level-1 ships go up to.
     mut observed: ResMut<ObservedInterior>,
     mut observed_shapes: ResMut<ObservedInteriorShapes>,
     parent_node: Res<ParentRealmNode>,
@@ -6993,54 +7269,73 @@ fn emit_realm_frames(
     // observer who just flew out of it ("when I exit the system the planets freeze"). Entries prune
     // on the same TTL as the retained proxies (one knob); rows are already in THIS shard's frame
     // (restated once, at receive), so every local observer group is the identity — one space.
+    //
+    // BOUNDED BY THE BAND THE CHILD'S OWN BOX RIDES (lane cure, finding 39a): a child's interior rows
+    // fan to a dot's gateway ONLY while that child is in that dot's AoI band (`was_in` — the grace
+    // latch keeps a departing child flowing through its whole grace window). The box at the scene fold
+    // and the rows here used to sit on two different rules — authority state there, nothing here — and
+    // two halves of one scene on two rules is how volume escapes the eye that must bound it. Iterating
+    // the ROSTER (not the store) also stops fanning batches from a child that has left it. Bitwise `&`
+    // (both operands pure, HR5).
     let observe_ttl = retain_ttl_ticks(&config);
     observed
         .0
         .retain(|_, (seen, _)| ttl_alive(*seen, clock.local_tick, observe_ttl));
     if !observed.0.is_empty() {
-        let mut interior_gateways: Vec<NodeId> = dots
-            .0
-            .values()
-            .filter(|d| emits(&holds, d))
-            .map(|d| d.gateway)
-            .collect();
-        interior_gateways.sort_unstable();
-        interior_gateways.dedup();
-        for (_child, (_seen, batches)) in observed.0.iter() {
+        for region in regions.direct_children(config.realm) {
+            let Some((_seen, batches)) = observed.0.get(&region.realm) else {
+                continue;
+            };
+            // A Ship child has no lineage coord to key the fan's membership by until P8
+            // (D-SHIP-1): excluded, counted, never a panic — see `region_level`.
+            let Some(child_level) = region_level(region) else {
+                stats.ship_child_regions_excluded += 1;
+                continue;
+            };
+            let child_path = config.own_coord.child(child_level).path().clone();
+            let mut interior_gateways: Vec<NodeId> = dots
+                .0
+                .iter()
+                .filter(|(s, d)| {
+                    emits(&holds, d)
+                        & membership
+                            .0
+                            .get(&(ObserverId::Dot(**s), child_path.clone()))
+                            .is_some_and(|st| st.was_in)
+                })
+                .map(|(_, d)| d.gateway)
+                .collect();
+            interior_gateways.sort_unstable();
+            interior_gateways.dedup();
+            if interior_gateways.is_empty() {
+                continue;
+            }
             for bytes in batches {
-                if !interior_gateways.is_empty() {
-                    let frame = ShardToGateway::RealmFrame {
-                        realm_fence,
-                        source_tick: clock.local_tick,
-                        realm_snapshot_bytes: bytes.to_vec(),
-                    };
-                    let framed = crate::io::bytes(
-                        postcard::to_allocvec(&frame)
-                            .expect("closed wire enums serialize infallibly"),
-                    );
-                    for &gateway in &interior_gateways {
-                        outbox.0.push((
-                            gateway,
-                            MsgClass::RealmSnapshot,
-                            framed.clone(),
-                            Durability::Ephemeral,
-                        ));
-                    }
-                }
-                // THE RECURSION: relay the (already my-frame) interior rows one hop further up inside
-                // MY OWN observation ship — my parent adds ITS one placement and the grandparent's
-                // observers see two levels down. Visibility culls naturally with distance.
-                if let Some(parent) = parent_node.0 {
-                    outbox.push_flow(
-                        parent,
-                        MsgClass::SignalDelta,
-                        &InterShardFlow::RealmObservation(vd_wire::intershard::RealmObservation {
-                            child: config.own_coord.clone(),
-                            realm_snapshot_bytes: bytes.to_vec(),
-                        }),
-                    );
+                let frame = ShardToGateway::RealmFrame {
+                    realm_fence,
+                    source_tick: clock.local_tick,
+                    realm_snapshot_bytes: bytes.to_vec(),
+                };
+                let framed = crate::io::bytes(
+                    postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
+                );
+                for &gateway in &interior_gateways {
+                    outbox.0.push((
+                        gateway,
+                        MsgClass::RealmSnapshot,
+                        framed.clone(),
+                        Durability::Ephemeral,
+                    ));
                 }
             }
+            // THERE IS DELIBERATELY NO RE-RELAY HERE ANY MORE (lane cure, finding 39b — L-4): every
+            // lane carries exactly two levels — what I author about my children, and what my children
+            // authored about themselves. A level never relays what it was relayed: the old "one hop
+            // further up" line made the volume at the top O(the entire live subtree) per link per
+            // tick, under a comment claiming visibility culls it, and nothing did. What a grandparent
+            // sees is its own children (it authors) plus its grandchildren (each child's own ship) —
+            // two levels per lane, sized by the receiver's own band. Depth 3 is an owner decision
+            // (D-LANE-3), not a default.
         }
     }
 
@@ -7049,12 +7344,13 @@ fn emit_realm_frames(
     // roster (the galaxy) authors no per-tick rows yet is exactly the level whose parent would need
     // them. This shard's interior look is one outline per roster child at the placement THIS shard
     // authored (SL3: the realm authors how its interior looks; centers at the shape lane's one
-    // instant — the per-tick rows lane corrects the moving ones every tick thereafter), plus the
-    // sets its own live children shipped it, already lifted into this frame at receive — the
-    // recursion, so a grandparent's observers get boxes two levels down. A FULL SET, re-asserted on
-    // the AoI cadence (the receiver's TTL is sized in cadences); own children lead so every shipped
-    // parent link names an outline earlier in the same set. INERT at walk/static: the parent node
-    // only ever resolves on an AoI-armed shard, so nothing is built and nothing ships.
+    // instant — the per-tick rows lane corrects the moving ones every tick thereafter). ITS OWN
+    // ROSTER AND NOTHING DEEPER (lane cure, finding 39b): the sets its live children shipped it stay
+    // HOME, folded into local scenes only — a level never relays what it was relayed, so the parent
+    // sees exactly two levels down (this realm's box, which it authors, plus this set). A FULL SET,
+    // re-asserted on the AoI cadence (the receiver's TTL is sized in cadences). INERT at walk/static:
+    // the parent node only ever resolves on an AoI-armed shard, so nothing is built and nothing
+    // ships.
     let shape_ship_due =
         crate::directory::due_this_tick(aoi_recheck_cadence(&config), clock.local_tick.0);
     observed_shapes
@@ -7063,13 +7359,10 @@ fn emit_realm_frames(
     if let Some(parent) = parent_node.0
         && shape_ship_due
     {
-        let mut shapes: Vec<RealmShape> = regions
+        let shapes: Vec<RealmShape> = regions
             .direct_children(config.realm)
             .map(|r| child_shape(&regions, r, tick_hz))
             .collect();
-        for (_seen, lifted) in observed_shapes.0.values() {
-            shapes.extend_from_slice(lifted);
-        }
         if !shapes.is_empty() {
             tracing::debug!(
                 count = shapes.len(),
@@ -7257,7 +7550,7 @@ fn emit_realm_frames(
         universe_tick: clock.universe_tick,
         realms: Vec::new(),
     };
-    for child in active_children(&config, &regions, &child_liveness, head) {
+    for child in active_children(&config, &regions, &child_liveness, head, &mut stats) {
         let rows = restate_rows_in_child_frame(
             &realms,
             own_frame,
@@ -7300,6 +7593,8 @@ fn emit_realm_frames(
 #[allow(clippy::too_many_arguments)]
 fn on_realm_cascade(
     rc: RealmCascade,
+    from: NodeId,
+    parent_node: &ParentRealmNode,
     config: &StubConfig,
     clock: &ClockSample,
     authority: &RealmAuthority,
@@ -7313,8 +7608,21 @@ fn on_realm_cascade(
 ) {
     // Mis-route guard — the parent addressed this to a specific child realm; drop if it is not us (a recycled
     // NodeId / stale hand-off). The SAME `lowered()` compare `retain_child_live` uses for the up-flow.
+    // Answers WHICH REALM was addressed; the sender gate below answers WHICH NODE spoke — two different
+    // questions, two different counters.
     if rc.child.lowered() != config.own_coord.lowered() {
         stats.misrouted_cascade += 1;
+        return;
+    }
+    // Lane attestation (findings 0/43, down half — L-1: the directory says WHO; the frame is only an
+    // address): a cascade is believed ONLY from the node the directory names as this shard's PARENT —
+    // the cadence head-read's cached answer. An unresolved parent (`None`) refuses too — FAIL CLOSED,
+    // and that costs nothing: a parent only ever learned this shard's address from its own `ChildLive`
+    // bit, which is emitted only once the parent resolved, so every down-lane recipient has necessarily
+    // already resolved its parent. The refusal arm is reachable only across a parent RE-HOME, where the
+    // lane is latest-wins and self-heals on the next cadence.
+    if parent_node.0 != Some(from) {
+        stats.cascade_unauthored += 1;
         return;
     }
     let Some(realm_fence) = authority.0 else {
@@ -7388,7 +7696,7 @@ fn on_realm_cascade(
         })
         .collect();
     let own_frame = regions.own_frame(config.realm);
-    for child in active_children(config, regions, live, book) {
+    for child in active_children(config, regions, live, book, stats) {
         let rows = restate_rows_in_child_frame(&rows_in, own_frame, &child, at, stats);
         stats.realm_cascade_relayed += 1;
         push_cascade(
@@ -7451,6 +7759,8 @@ fn evaluate_realm_aoi(
         Res<FromAboveScene>,
         Res<ObservedInteriorShapes>,
     ),
+    // Lane cure (finding 41) — the bit's "parent has been told" latch (the adopt-edge derivation).
+    mut was_occupied: ResMut<WasOccupied>,
     // VU AoI S1b (Slice 2) — the per-DOT render baseline; `aoi_decide` diffs each dot's current in-AoI level
     // set against it into the client `RealmSceneDelta`. EMPTY at walk/static (no child in range) ⇒ no delta.
     mut render_sent: ResMut<RenderSent>,
@@ -7489,6 +7799,7 @@ fn evaluate_realm_aoi(
         &mut membership.0,
         &mut outbox,
         parent.0,
+        &mut was_occupied.0,
         &mut child_liveness.0,
         &mut child_scene_sent.0,
         &from_above.0,
@@ -7501,20 +7812,26 @@ fn evaluate_realm_aoi(
 /// VU AoI S2a-2b — is a parent-realm directory read DUE this tick? Returns the PARENT [`RealmCoord`] to
 /// resolve (its authoritative node is cached in [`ParentRealmNode`] from the reply), or `None` at the
 /// containment ROOT (no parent), when the interest bands are inert (walk/static), or off the recheck
-/// cadence. The parent node is where this shard up-relays each local occupant's interest (S2a-2b-ii) so a
-/// sealed parent can cull the occupant's SIBLINGS against it.
+/// cadence. The parent node is the send target of this shard's UP-lanes — the one-bit `ChildLive`
+/// heartbeat and the up-observation rows/outlines. (The per-occupant interest up-relay this resolve was
+/// built for is DELETED — Step 5 slice D; no occupant data crosses, SL2.)
 fn parent_headread_due(
     config: &StubConfig,
     regions: &RealmRegions,
     clock: &ClockSample,
 ) -> Option<RealmCoord> {
     let parent = config.own_coord.parent()?;
-    // BITWISE `&` (not `&&`): both operands are cheap + pure, and a short-circuit would leave the RHS a
-    // region HR5 can never cover from the false-LHS side (the discipline `AoiConfig::in_range` uses). The
-    // inert walk/static bands make `aoi_live()` false ⇒ this whole up-relay never fires ⇒ byte-identical.
-    (regions.aoi_live()
-        & crate::directory::due_this_tick(aoi_recheck_cadence(config), clock.local_tick.0))
-    .then_some(parent)
+    head_reads_due(config, regions, clock).then_some(parent)
+}
+
+/// THE ONE FOLD for "are directory head-reads due this tick" (lane cure, findings 0/43 — HR3: the parent
+/// resolve and the child admission reads share one cadence and one gate, so the two can never drift).
+/// BITWISE `&` (not `&&`): both operands are cheap + pure, and a short-circuit would leave the RHS a
+/// region HR5 can never cover from the false-LHS side (the discipline `AoiConfig::in_range` uses). The
+/// inert walk/static bands make `aoi_live()` false ⇒ no read is ever emitted ⇒ byte-identical.
+fn head_reads_due(config: &StubConfig, regions: &RealmRegions, clock: &ClockSample) -> bool {
+    regions.aoi_live()
+        & crate::directory::due_this_tick(aoi_recheck_cadence(config), clock.local_tick.0)
 }
 
 /// The AoI parent-resolution / occupant up-relay cadence — the observation cascade rides it to learn (and keep
@@ -7523,7 +7840,9 @@ fn parent_headread_due(
 /// turns the self-fence off) the up-relay STILL must run in demand mode, so it falls back to a tick-DERIVED
 /// demand cadence (~half a second at the shard's tick rate) — never a magic literal, never a self-fence
 /// dependency. Monomorphic (all branching HERE, HR5), so `parent_headread_due` stays a straight expression.
-fn aoi_recheck_cadence(config: &StubConfig) -> u64 {
+/// `pub` for ONE reader: the e2e beat-rate gate asserts the bit lands at 1/cadence against THIS expression,
+/// so the gate and the production rate cannot drift apart (finding 41).
+pub fn aoi_recheck_cadence(config: &StubConfig) -> u64 {
     if config.realm_recheck_interval > 0 {
         config.realm_recheck_interval
     } else {
@@ -7554,6 +7873,9 @@ fn aoi_decide(
     membership: &mut BTreeMap<(ObserverId, RealmPath), AoiState>,
     outbox: &mut OutboundBox,
     parent_node: Option<NodeId>,
+    // Lane cure (finding 41) — the "parent has been told" latch that derives the bit's adopt edge;
+    // false again at every Empty self-report.
+    was_occupied: &mut bool,
     // Step 5 slice B — the direct children's SL7 occupancy bits: pruned here on the derived TTL,
     // then folded as one synthetic observer per FRESH bit (SL7's occupied-child proxy).
     child_liveness: &mut BTreeMap<RealmId, ChildLiveEntry>,
@@ -7588,6 +7910,13 @@ fn aoi_decide(
     let retain_ttl = retain_ttl_ticks(config);
     child_liveness.retain(|_, e| ttl_alive(e.last_seen, clock.local_tick, retain_ttl));
     child_scene_sent.retain(|realm, _| child_liveness.contains_key(realm));
+
+    // THE LANE CADENCE, resolved once per pass (lane cure, findings 41 + 0/43): the SL7 bit beats on
+    // it (`bit_due`, plus the adopt edge — the same expression the shape ship uses, HR3), and the
+    // admission head-reads ride it behind the same `aoi_live` gate the parent resolve uses
+    // (`heads_due` — one fold, `head_reads_due`).
+    let bit_due = crate::directory::due_this_tick(aoi_recheck_cadence(config), clock.local_tick.0);
+    let heads_due = head_reads_due(config, regions, clock);
 
     // VU AoI S2a-2b-i — resolve THIS realm's PARENT node. Periodically HeadRead the parent's directory
     // record so its authoritative node lands in `ParentRealmNode` (written from the reply in
@@ -7669,29 +7998,44 @@ fn aoi_decide(
     // Zero-occupant self-report: this CHILD shard tells the orchestrator its OWN realm holds nobody
     // (`child == own_coord`). Fence = this shard's own realm authority over its emptiness.
     if observers.is_empty() {
+        // Lane cure (finding 41): going empty re-arms the adopt edge — the NEXT occupant's first tick
+        // ships the bit immediately, off-cadence, because that transition is what the bit means.
+        *was_occupied = false;
         push_demand(
             outbox,
             config.orchestrator,
+            own_coord,
             own_coord.clone(),
             realm_fence,
             DemandVerb::Empty,
             tick,
+            stats,
         );
         return;
     }
 
     // Step 5 slice A — THE SL7 OCCUPANCY BIT, upward: observers are non-empty from here (the Empty
     // arm returned above), so this realm is LIVE and says so to its parent — one heartbeat, presence
-    // is the bit, level-triggered per tick (the TTL bridges loss; the reconciler's `ancestor_close`
-    // backstops liveness centrally). A shard whose parent is unresolved (the root; a lease race at
-    // boot) emits nothing and the next tick catches up — the same posture as every other up-lane.
+    // is the bit. ON THE AoI CADENCE, plus immediately at the occupancy transition (lane cure,
+    // finding 41 — the rate its own contract states): `was_occupied` latches "the parent has been
+    // told", so the first tick somebody is inside (an adopted crosser, a login) ships the bit at once
+    // — the transition itself, derived here with no hook in any adopt path — and every later tick
+    // waits for the cadence beat. The receiver's TTL is sized in cadences (`retain_ttl_ticks`), so a
+    // lost datagram still only costs staleness, never a blink; the reconciler's `ancestor_close`
+    // backstops liveness centrally. A shard whose parent is unresolved (the root; a lease race at
+    // boot) emits nothing and keeps the edge armed — the first resolve ships the bit immediately.
+    // Bitwise `|` (both operands pure, HR5).
     if let Some(parent) = parent_node {
-        let bit = InterShardFlow::ChildLive(vd_wire::intershard::ChildLive {
-            child: own_coord.clone(),
-            fence: realm_fence,
-            at: tick,
-        });
-        outbox.push_flow(parent, MsgClass::SignalDelta, &bit);
+        let adopt_edge = !*was_occupied;
+        if bit_due | adopt_edge {
+            let bit = InterShardFlow::ChildLive(vd_wire::intershard::ChildLive {
+                child: own_coord.clone(),
+                fence: realm_fence,
+                at: tick,
+            });
+            outbox.push_flow(parent, MsgClass::SignalDelta, &bit);
+            *was_occupied = true;
+        }
     }
 
     // VU AoI S1b — the RENDER route for each DOT observer (a player with a client): its DURABLE id + the
@@ -7717,7 +8061,12 @@ fn aoi_decide(
 
     let mut live_keys = BTreeSet::<(ObserverId, RealmPath)>::new();
     for (region, pose) in &placements {
-        let level = region_level(region);
+        // A Ship child has no lineage coord to demand/draw by until P8 (D-SHIP-1): excluded from
+        // the AoI/demand/render fold, counted, never a panic — see `region_level`.
+        let Some(level) = region_level(region) else {
+            stats.ship_child_regions_excluded += 1;
+            continue;
+        };
         let child_coord = own_coord.child(level);
         let path = child_coord.path().clone();
         let child_pos = pose.pos; // own frame (== the placements' frame), carried WHOLE
@@ -7791,7 +8140,8 @@ fn aoi_decide(
             }
         }
         // ONE demand per child = the observer union (deterministic — independent of observer order).
-        if let Some(v) = union_verb(was_demanded, now_demanded) {
+        let verb = union_verb(was_demanded, now_demanded);
+        if let Some(v) = verb {
             debug_assert!(
                 v != DemandVerb::TearDown,
                 "Step 2 never emits parent TearDown — the Step-3 closure is the sole kill authority (M-1)"
@@ -7799,10 +8149,28 @@ fn aoi_decide(
             push_demand(
                 outbox,
                 config.orchestrator,
+                own_coord,
                 child_coord,
                 realm_fence,
                 v,
                 tick,
+                stats,
+            );
+        }
+        // Lane cure (findings 0/43, up half) — EAGER admission pre-resolve: on the same cadence as the
+        // parent head-read (one `head_reads_due`, HR3), read the directory head of every child this
+        // shard is currently DEMANDING or holds a LIVE BIT for. Eager-for-demanded is what makes
+        // fail-closed free: the head resolves DURING the spin-up boot window, so it is in hand before
+        // the child's first bit arrives — zero added spin-up-to-visible latency — and the read count is
+        // bounded by in-band children, never roster size. The lazy re-read armed by an unattested bit
+        // (`retain_child_live`) is the re-home backstop (D-RLM-6 mechanism C). Bitwise `|`/`&` (HR5).
+        if heads_due & (verb.is_some() | child_liveness.contains_key(&region.realm)) {
+            outbox.push_flow(
+                config.orchestrator,
+                MsgClass::Saga,
+                &InterShardFlow::Directory(DirectoryOp::HeadRead {
+                    key: DirectoryKey::Realm(region.realm),
+                }),
             );
         }
     }
@@ -7884,11 +8252,29 @@ fn aoi_decide(
         let Some(entry) = child_liveness.get(&region.realm) else {
             continue; // not live — nothing below to owe a scene to
         };
+        // A Ship child has no lineage coord to address a scene set to until P8 (D-SHIP-1):
+        // excluded, counted, never a panic — see `region_level`.
+        let Some(scene_level) = region_level(region) else {
+            stats.ship_child_regions_excluded += 1;
+            continue;
+        };
         let mut merged: Vec<RealmShape> = child_visible
             .get(&region.realm)
             .cloned()
             .unwrap_or_default();
-        merged.extend_from_slice(from_above);
+        // THE SL1 SELF-PLACEMENT FILTER (lane cure, finding 17 — L-2: a message never tells its
+        // receiver about itself). This shard's OWN outline sits in `from_above` at the origin (its
+        // parent's reflect keeps the path-child's box there), and restated one hop down it becomes
+        // THIS SHARD at −(the child's placement) — handing the child its own placement, sign-flipped:
+        // the one number a realm may never learn. So the sender's own outline stays home, at EVERY
+        // hop (the leaking shape is the sender's own at each level) — the exact mirror of the rule
+        // the pose lane already enforces (the recipient's own row is dropped before the cascade).
+        merged.extend(
+            from_above
+                .iter()
+                .copied()
+                .filter(|s| s.realm != config.realm),
+        );
         let mut once = BTreeSet::new();
         merged.retain(|s| once.insert(s.realm));
         // The one hop, at the shape lane's one instant — the region rides the same roster the
@@ -7903,7 +8289,7 @@ fn aoi_decide(
                 entry.home,
                 MsgClass::Saga,
                 &InterShardFlow::ChildSceneSet(vd_wire::intershard::ChildSceneSet {
-                    child: own_coord.child(region_level(region)),
+                    child: own_coord.child(scene_level),
                     realms: shapes,
                 }),
             );
@@ -7972,8 +8358,9 @@ fn shape_hop_to(
 /// Nobody ever told this shard where such a realm is, so there is no placement and no honest answer; the
 /// caller counts it and ships nothing rather than moving numbers by an assumed zero.
 ///
-/// The placement is resolved ONCE here, at the instant the caller names, because [`LocalFrames`] re-derives
-/// a moving child's position on every lookup and [`transfer_frame`] looks up twice per row.
+/// The placement is resolved ONCE here, at the instant the caller names: the book row is the single
+/// authored fact ([`transfer_frame`] looks up twice per row, and the retired per-lookup frame context
+/// used to re-derive a moving child's position on every query).
 fn hop_to_child(
     config: &StubConfig,
     regions: &RealmRegions,
@@ -8003,6 +8390,12 @@ fn hop_to_child(
 /// and a row whose head equals its tail is a realm claiming to be its own parent. An outline states no
 /// edge — it is the box itself — and the box a player is standing inside is the one box that must be
 /// drawn centred on them. Dropping it would leave the player standing in nothing.
+///
+/// The SENDER's own outline, by contrast, never reaches this function at all: the merge upstream filters
+/// it out of the from-above contribution (finding 17), because restated here it would land at −(the
+/// child's placement) — the child's own address, sign-flipped, the one number a realm may never learn
+/// (SL1). Kept-at-origin and filtered-out are the two halves of one rule: a box may say where OTHERS are
+/// in YOUR frame, never where YOU are in somebody else's.
 ///
 /// DEGRADE LOUD: an outline that cannot be restated is DROPPED and COUNTED. In production every placement
 /// on the tree is unrotated, so the refusal arm is the far corner [`FrameError::RotatedFrameAcrossCells`]
@@ -8169,11 +8562,16 @@ fn aoi_transition(
 
 /// The `RealmId → RealmLevel` for a hosted child region — sourced un-lossily from the seed via
 /// [`level_of`] (the `System(0)`/`System(1)` stand-ins recover to Universe/Galaxy; keyed kinds pass
-/// through). Monomorphic (HR5: the kind match is covered once inside `level_of`). A hosted child region is
-/// ALWAYS a seed-lineage realm — never an entity-backed ship — so the `None` arm is unreachable here.
-fn region_level(region: &RealmRegion) -> RealmLevel {
+/// through). Monomorphic (HR5: the kind match is covered once inside `level_of`).
+///
+/// `None` for an entity-backed `Ship` realm: the lineage coordinate cannot name one — `RealmKindTag`
+/// carries six seed-keyed tags and no Ship arm until the P8 ship-realm work (DEFERRED D-SHIP-1). Every
+/// lane that needs a child COORD (demand/AoI, cascade, scene reflect, interior fan) EXCLUDES such a
+/// region gracefully — counted (`StubStats::ship_child_regions_excluded`), NEVER a panic: this used to
+/// be an `expect` that aborted the whole shard on one unrepresentable region (audit :713), structurally
+/// excluding a first-class realm kind by crashing instead of by a typed, visible skip.
+fn region_level(region: &RealmRegion) -> Option<RealmLevel> {
     level_of(region.realm)
-        .expect("a hosted child region is a seed-lineage realm (never an entity-backed ship)")
 }
 
 /// Emit ONE [`RealmDemand`] toward the orchestrator (the RLM emit seam). Rides `MsgClass::Saga` (Reliable)
@@ -8181,18 +8579,42 @@ fn region_level(region: &RealmRegion) -> RealmLevel {
 /// `RealmDemand` is `ReDriven` (self-heals on the next re-assertion), NOT producer-less-reliable, so the
 /// durability guard passes.
 ///
+/// THE ONE STRUCTURAL GATE ON WHAT A DEMAND MAY NAME (lane cure, finding 37 — L-3: a realm speaks about
+/// itself or a direct child, never upward). SL7 allows a shard exactly two demand shapes: its OWN realm
+/// (the Empty self-report) and a DIRECT CHILD (the AoI union). Anything else — above all a crossing
+/// dest that is this shard's PARENT on an outward hand-off — is refused HERE, counted, one place (HR3).
+/// The parent needs no upward demand to stay alive: while the hand-off latch stands the source still
+/// speaks for the departing occupant (`speaks_for`), so it never reports `Empty`, arm B of
+/// `desired_alive` holds it, and `ancestor_close` pulls its whole chain — measured by the return-
+/// crossing gate, not argued. Monomorphic; bitwise `|` (both shape tests are pure and covered, HR5).
+///
 /// The wire field is named `parent_fence` but carries the EMITTER's authority fence: the PARENT's realm
 /// fence for SpinUp/KeepAlive (proving authority over the child), the CHILD-shard's own realm fence for
 /// Empty (its authority over its own emptiness). Step 3 keys the Empty idempotency on `parent_fence`
 /// accordingly (`IdempotencyKey::FencedKey`).
+#[allow(clippy::too_many_arguments)]
 fn push_demand(
     outbox: &mut OutboundBox,
     orch: NodeId,
+    own: &RealmCoord,
     child: RealmCoord,
     fence: Fence,
     verb: DemandVerb,
     tick: UniverseTick,
+    stats: &mut StubStats,
 ) {
+    let names_self = child == *own;
+    let names_direct_child = child.parent().as_ref() == Some(own);
+    if !(names_self | names_direct_child) {
+        stats.demand_refused_not_own_or_child += 1;
+        tracing::warn!(
+            named = %child.lowered(),
+            own = %own.lowered(),
+            ?verb,
+            "demand refused: a shard demands only itself or a direct child (SL7)",
+        );
+        return;
+    }
     outbox.push_flow(
         orch,
         MsgClass::Saga,
@@ -8206,16 +8628,24 @@ fn push_demand(
 }
 
 /// Step 5 slice A — upsert a direct child's SL7 occupancy bit. Mis-routes drop by the same
-/// `lowered()` compare every up-lane uses (the child's PARENT link must be this realm); a stale
+/// `lowered()` compare every up-lane uses (the child's PARENT link must be this realm); an UNATTESTED
+/// sender drops fail-closed (findings 0/43: the directory head is the admission authority — the stored
+/// `home` route is believed only once attested) and arms a lazy head re-read (D-RLM-6 mechanism C, the
+/// re-home backstop; the eager cadence read normally resolves during the spin-up boot window); a stale
 /// `(fence, at)` never regresses a fresher entry (a deposed incarnation's heartbeat is rejected);
-/// `last_seen` is the local-tick TTL base every retained store in this file prunes on.
+/// `last_seen` is the local-tick TTL base every retained store in this file prunes on. This is what
+/// bounds the ZOMBIE window deterministically: a deposed child still beating fails the head compare, its
+/// `home` is never refreshed, and the entry TTLs out independent of the child.
+#[allow(clippy::too_many_arguments)]
 fn retain_child_live(
     store: &mut ChildLiveness,
     config: &StubConfig,
     cl: vd_wire::intershard::ChildLive,
     now: TickId,
     home: NodeId,
+    child_nodes: &ChildRealmNodes,
     stats: &mut StubStats,
+    outbox: &mut OutboundBox,
 ) {
     let parent_ok = cl.child.parent().map(|p| p.lowered()) == Some(config.realm);
     if !parent_ok {
@@ -8223,6 +8653,17 @@ fn retain_child_live(
         return;
     }
     let child = cl.child.lowered();
+    if child_nodes.0.get(&child) != Some(&home) {
+        stats.child_live_unattested += 1;
+        outbox.push_flow(
+            config.orchestrator,
+            MsgClass::Saga,
+            &InterShardFlow::Directory(DirectoryOp::HeadRead {
+                key: DirectoryKey::Realm(child),
+            }),
+        );
+        return;
+    }
     let fresh = store
         .0
         .get(&child)
@@ -8246,23 +8687,34 @@ fn retain_child_live(
 /// The up-observation receive (owner-approved 2026-08-13): a live child shipped the rows IT authors,
 /// in ITS OWN frame. This parent ADDS the one placement it authors for that child — the single
 /// number the child must never know (SL1) — restating every row into this shard's own frame, and
-/// holds the re-encoded datagram for `emit_realm_frames` to fan to local observers and to relay one
-/// hop further up. The AUTHOR's `frame_id` is preserved verbatim (the sealed-counter discipline the
+/// holds the re-encoded datagram for `emit_realm_frames` to fan to its own band-bounded observers —
+/// and never further: two levels per lane (finding 39), a level never relays what it was relayed.
+/// The AUTHOR's `frame_id` is preserved verbatim (the sealed-counter discipline the
 /// down-cascade pins: the client's per-`RealmId` high-water demands one monotone counter per realm).
 /// A row already unplaceable (the child not in this shard's roster this tick) drops the whole batch,
 /// counted — never shipped under numbers nobody computed.
+#[allow(clippy::too_many_arguments)]
 fn on_realm_observation(
     ro: vd_wire::intershard::RealmObservation,
+    from: NodeId,
     config: &StubConfig,
     clock: &ClockSample,
     regions: &RealmRegions,
     placements: &PlacementLedger,
+    child_nodes: &ChildRealmNodes,
     observed: &mut ObservedInterior,
     stats: &mut StubStats,
 ) {
     let parent_ok = ro.child.parent().map(|p| p.lowered()) == Some(config.realm);
     if !parent_ok {
         stats.realm_observation_misrouted += 1;
+        return;
+    }
+    // Lane attestation (findings 0/43, up half): believed only from the node the directory names for
+    // that child (the same compare `retain_child_live` admits the bit on). Fail closed; the bit's own
+    // refusal already arms the head re-read, so this arm only counts.
+    if child_nodes.0.get(&ro.child.lowered()) != Some(&from) {
+        stats.realm_observation_unattested += 1;
         return;
     }
     let Ok(snap) = postcard::from_bytes::<RealmSnapshotDatagram>(&ro.realm_snapshot_bytes) else {
@@ -8335,11 +8787,14 @@ fn on_realm_observation(
 /// a cadence and a stale one cannot linger past the TTL prune. A child not in this shard's roster
 /// this tick (a spin-up/teardown race) drops the whole set, counted — outlines are never held under
 /// a placement nobody computed. Monomorphic (all branching HERE, HR5).
+#[allow(clippy::too_many_arguments)]
 fn on_realm_shape_observation(
     rso: vd_wire::intershard::RealmShapeObservation,
+    from: NodeId,
     config: &StubConfig,
     clock: &ClockSample,
     regions: &RealmRegions,
+    child_nodes: &ChildRealmNodes,
     observed: &mut ObservedInteriorShapes,
     stats: &mut StubStats,
 ) {
@@ -8349,6 +8804,12 @@ fn on_realm_shape_observation(
         return;
     }
     let child = rso.child.lowered();
+    // Lane attestation (findings 0/43, up half): same admission compare as the bit and the rows;
+    // fail closed, count only (the bit's refusal arms the head re-read).
+    if child_nodes.0.get(&child) != Some(&from) {
+        stats.realm_shape_observation_unattested += 1;
+        return;
+    }
     let tick_hz = 1.0 / config.tick_dt_s;
     // The one hop, resolved at the shape lane's one instant — the same context the down lane
     // subtracts with, so the two directions can never disagree about where the child sits.
@@ -8426,15 +8887,26 @@ fn lift_shapes_from_child_frame(
 /// one self-heals on the parent's next change, and there is nothing to diff here — the AoI pass folds
 /// the holding into every local occupant's scene delta against the ONE per-account baseline it
 /// already keeps, and restates it onward into every live child (the recursion that dissolved the
-/// per-occupant lane's depth≥3 orphan case). Monomorphic (HR5): mis-route drop, on-target replace.
+/// per-occupant lane's depth≥3 orphan case). Monomorphic (HR5): mis-route drop, unattested-sender
+/// drop, on-target replace.
 fn on_child_scene_set(
     cs: vd_wire::intershard::ChildSceneSet,
+    from: NodeId,
+    parent_node: &ParentRealmNode,
     config: &StubConfig,
     from_above: &mut FromAboveScene,
     stats: &mut StubStats,
 ) {
     if cs.child.lowered() != config.own_coord.lowered() {
         stats.child_scene_misrouted += 1;
+        return;
+    }
+    // Lane attestation (findings 0/43, down half) — the gate that matters most on this lane: ONE
+    // unattested frame used to replace the WHOLE from-above holding. Believed only from the node the
+    // directory names as this shard's parent; `None` refuses too (fail closed — see `on_realm_cascade`
+    // for why that is free: every down-lane recipient has necessarily already resolved its parent).
+    if parent_node.0 != Some(from) {
+        stats.child_scene_unauthored += 1;
         return;
     }
     stats.child_scene_received += 1;
@@ -8465,21 +8937,32 @@ fn diff_scene_into_delta(
 
 /// The survive-one-lost-datagram floor for the retain TTL (a tick COUNT) every TTL-pruned store shares. The lane
 /// is `Unreliable`/`FireAndForget`, so one loss is a one-tick gap; retaining ≥ 2 ticks past `last_seen`
-/// bridges it regardless of intra-tick prune-vs-receive order. Operative ONLY under a degenerate test
-/// `tick_dt_s`; at a real cluster rate the derived 1 s term dominates. Independent of `GRACE_TICKS_FLOOR`.
+/// bridges it regardless of intra-tick prune-vs-receive order. The cadence-beats term now always sits
+/// above it (2 beats + 1 ≥ 3), so this floor is the stated invariant's own name rather than a live
+/// bound — kept so the derivation says all three of its reasons. Independent of `GRACE_TICKS_FLOOR`.
 const RETAIN_TTL_FLOOR: u64 = 2;
+
+/// How many CADENCE BEATS the retain TTL must span, now that the SL7 bit beats on the AoI cadence
+/// rather than per tick (lane cure, finding 41): ≥ 2, so ONE lost beat is bridged by the next — the
+/// same one-loss posture [`RETAIN_TTL_FLOOR`] states in ticks. The `+ 1` in [`retain_ttl_ticks`] is the
+/// intra-tick prune-vs-receive slack; without it, 2 beats against a TTL of exactly 2 cadences is a
+/// zero-slack coincidence, not a derivation (the shipped 50 Hz / recheck-25 profile landed on exactly
+/// that equality before this was derived).
+const RETAIN_TTL_CADENCE_BEATS: u64 = 2;
 
 /// The ONE retain TTL as a tick COUNT (a duration, not an instant — hence `u64`, not `TickId`): prunes the
 /// `ChildLiveness` bits, the observed-interior stores and the foreign-entity holding bay alike.
-/// DERIVED from the ONE loiter constant ([`WALK_DEMAND_AOI_GRACE_S`], ~1 s) via the SAME converter the region
-/// grace uses, so it is never a magic number and is automatically consistent with an armed region's
-/// `grace_ticks`; floored at [`RETAIN_TTL_FLOOR`]. At the dev cluster's 20-50 Hz the derived term (20-50
-/// ticks) is what actually bridges a lost relay.
+/// DERIVED — never a literal — as the WIDEST of: the ONE loiter constant ([`WALK_DEMAND_AOI_GRACE_S`],
+/// ~1 s, via the SAME converter the region grace uses, so it stays consistent with an armed region's
+/// `grace_ticks`); [`RETAIN_TTL_CADENCE_BEATS`] beats of the bit's own cadence plus one tick of slack
+/// (the bit beats per cadence, not per tick — finding 41); and [`RETAIN_TTL_FLOOR`]. `max` only ever
+/// WIDENS, so every store sharing this TTL keeps at least its previous window.
 fn retain_ttl_ticks(config: &StubConfig) -> u64 {
     u64::from(vd_core::worldgen::grace_ticks_from_seconds(
         vd_core::worldgen::WALK_DEMAND_AOI_GRACE_S,
         config.tick_dt_s,
     ))
+    .max(RETAIN_TTL_CADENCE_BEATS * aoi_recheck_cadence(config) + 1)
     .max(RETAIN_TTL_FLOOR)
 }
 
@@ -9284,6 +9767,9 @@ mod tests {
     fn adopt_transient_batch_adopts_arriving_acks_and_dedups() {
         let batch = TransferId(0xB1);
         let entity = EntityId::pack(EntityKind::Debris, 1, 7, 0);
+        let cfg = config();
+        let regions = RealmRegions::default();
+        let placements = PlacementLedger::default();
         let mut owned = OwnedTransients::default();
         let mut applied = AppliedSteps::default();
         let mut stats = StubStats::default();
@@ -9295,11 +9781,15 @@ mod tests {
         }];
 
         // FIRST delivery: adopt as Arriving (uncounted) anchored to the dst fence + ack BatchAdopted.
+        // The pose is in the dest realm's OWN frame, so the receiver conversion's verbatim arm runs.
         adopt_transient_batch(
             batch,
+            cfg.realm,
             Fence(5),
             items.clone(),
-            ORCH,
+            &cfg,
+            &regions,
+            &placements,
             &mut owned,
             &mut applied,
             &mut stats,
@@ -9308,6 +9798,7 @@ mod tests {
         assert_eq!(owned.0[&entity].status, TransientStatus::Arriving { batch });
         assert_eq!(owned.0[&entity].anchor_fence, Fence(5));
         assert_eq!(stats.transients_adopted, 1);
+        assert_eq!(stats.transient_arrivals_unplaceable, 0);
         assert_eq!(stats.transients_adopt_redelivered, 0);
         assert_eq!(
             decode_flows(&mut outbox),
@@ -9323,9 +9814,12 @@ mod tests {
         // REDELIVERY: no re-adopt, re-ack only (at-least-once — the ack may have been lost).
         adopt_transient_batch(
             batch,
+            cfg.realm,
             Fence(5),
             items,
-            ORCH,
+            &cfg,
+            &regions,
+            &placements,
             &mut owned,
             &mut applied,
             &mut stats,
@@ -9334,6 +9828,66 @@ mod tests {
         assert_eq!(stats.transients_adopted, 1, "not re-adopted");
         assert_eq!(stats.transients_adopt_redelivered, 1);
         assert_eq!(decode_flows(&mut outbox).len(), 1, "re-acked exactly once");
+    }
+
+    #[test]
+    fn adopt_transient_batch_refuses_an_unplaceable_item_counted_still_acks() {
+        // THE RECEIVER-SIDE FRAME GUARD on the transient tier (audit :105/:374/:384 — the adopt used
+        // to store the wire pose VERBATIM): an item whose pose this shard cannot measure — here a
+        // frame it holds no placement book for — is REFUSED + counted, never inserted, while the
+        // batch itself still journals + acks (adopt-before-drop proceeds; the loss is per-item and
+        // accounted, the Transient class budget discipline).
+        let batch = TransferId(0xB4);
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 9);
+        let cfg = config();
+        let regions = RealmRegions::default();
+        let placements = PlacementLedger::default();
+        let mut owned = OwnedTransients::default();
+        let mut applied = AppliedSteps::default();
+        let mut stats = StubStats::default();
+        let mut outbox = OutboundBox::default();
+        let misframed = StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 99 }, // a sibling frame — nobody told us its placement
+            DVec3::new(3.0, 0.0, 0.0),
+            UniverseTick(5),
+        );
+        adopt_transient_batch(
+            batch,
+            cfg.realm,
+            Fence(5),
+            vec![TransientItem {
+                entity,
+                pose: misframed,
+                state: vec![],
+            }],
+            &cfg,
+            &regions,
+            &placements,
+            &mut owned,
+            &mut applied,
+            &mut stats,
+            &mut outbox,
+        );
+        assert!(
+            owned.0.is_empty(),
+            "the mis-framed item is NOT adopted — nothing stored verbatim"
+        );
+        assert_eq!(
+            stats.transient_arrivals_unplaceable, 1,
+            "the refusal is counted"
+        );
+        assert_eq!(stats.transients_adopted, 0);
+        assert_eq!(
+            decode_flows(&mut outbox),
+            vec![(
+                ORCH,
+                InterShardFlow::TransferAck(TransferAck::BatchAdopted {
+                    transfer_id: batch,
+                    step_id: TRANSIENT_BATCH_STEP,
+                })
+            )],
+            "the batch still acks — the refusal is per-item, the choreography completes"
+        );
     }
 
     #[test]
@@ -9912,15 +10466,19 @@ mod tests {
         );
 
         // The LATE batch replay: the adopt hits its `AlreadyApplied` arm (poisoned) — no insert.
+        let cfg = config();
         adopt_transient_batch(
             this,
+            cfg.realm,
             Fence(5),
             vec![TransientItem {
                 entity,
                 pose: transient_pose(),
                 state: vec![],
             }],
-            ORCH,
+            &cfg,
+            &RealmRegions::default(),
+            &PlacementLedger::default(),
             &mut owned,
             &mut applied,
             &mut stats,
@@ -12240,6 +12798,92 @@ mod tests {
     }
 
     #[test]
+    fn a_re_home_colliding_with_the_retained_ghost_flips_it_and_never_mints_a_second_dot() {
+        // THE COLLISION (batch review, MAJOR — re_home_apply had no same-entity guard): an upward
+        // hand-off demotes this shard's dot to a RETAINED GHOST; the committed dest dies; the
+        // forward re-home resolves its target from the flushed pose's frame realm — which on an
+        // upward hand-off IS this source realm — so the `ReHome` lands exactly where the ghost
+        // still lives. The re-home must FLIP that held dot (same session key, Owned at the CAS
+        // fence), never insert a rival under the synthetic `SessionId(entity.0)` key: the orphan
+        // ghost's hold would run to TTL and the expiry fan would broadcast `EntityRemoved` for an
+        // entity this shard now OWNS and emits.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.set_local_tick(5);
+        insert_owned_dot(&mut rig, SESSION, SUBJECT, DVec3::new(3.0, 0.0, 0.0));
+        // The outward demote: the dot survives as the retained Ghost under its ORIGINAL session key
+        // (0xAA — which also sorts BELOW the synthetic 0xBEEF key, the order that made the doubled
+        // state pick the ghost first).
+        let _ = rig.tick(vec![demote_msg(SUBJECT, Fence(2))]);
+        {
+            let dot = rig.world.resource::<Dots>().0[&SESSION];
+            assert!(
+                is_retained_ghost(&dot),
+                "precondition: the demote left the retained Ghost in place: {dot:?}"
+            );
+        }
+
+        // The colliding re-home: source == SHARD (this very node — the CELL-2 shape that resolves
+        // the target back onto the source).
+        let sent = rig.tick(vec![re_home_msg(
+            Fence(3),
+            SHARD,
+            DirectoryKey::Entity(SUBJECT),
+        )]);
+
+        // ONE dot for the entity — flipped in place, never doubled.
+        let dots = rig.world.resource::<Dots>();
+        assert_eq!(
+            dots.0.values().filter(|d| d.entity == SUBJECT).count(),
+            1,
+            "exactly one dot holds the entity after the colliding re-home: {:?}",
+            dots.0,
+        );
+        assert!(
+            !dots.0.contains_key(&SessionId(SUBJECT.0)),
+            "no rival dot under the synthetic clientless key — the held session key is reused",
+        );
+        let dot = dots.0[&SESSION];
+        assert_eq!(
+            dot.authority,
+            Authority::Owned { fence: Fence(3) },
+            "the held ghost re-owns at the exact CAS fence"
+        );
+        assert_eq!(dot.entity_fence, Fence(3));
+        assert!(dot.granted & !dot.departing & !dot.adopting);
+        assert!(
+            !is_retained_ghost(&dot),
+            "the flipped dot is the live owner — the expiry fan has no retained ghost to evict"
+        );
+        assert_eq!(
+            (dot.account, dot.gateway),
+            (AccountId(1), GATEWAY),
+            "the flip keeps the client linkage the ghost retained (a fresh build would be clientless)"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().re_home_flipped,
+            1,
+            "the collision shape is counted apart from the fresh-build adopts"
+        );
+        assert_eq!(rig.world.resource::<StubStats>().re_home_adopted, 1);
+        // The saga still gets its landing proof, and no self-ghost is registered (source == self).
+        assert!(saga_ack_to_orch(
+            &sent,
+            TransferControlAck::PromoteAck {
+                transfer: TransferId(7)
+            }
+        ));
+        assert_eq!(
+            rig.world
+                .resource::<GhostColliderRegistration>()
+                .0
+                .get(&SUBJECT),
+            None,
+            "a source==dest re-home registers NO self-ghost neighbor",
+        );
+    }
+
+    #[test]
     fn on_re_home_no_ops_for_a_non_entity_subject_or_a_target_without_its_realm() {
         // re_home_apply BAILS on a non-Entity subject; the dispatch BAILS (no adopt) when the target does
         // not hold its realm — both counted degrade-never-panic no-ops.
@@ -12671,10 +13315,11 @@ mod tests {
     }
 
     #[test]
-    fn authored_realm_snaps_computes_a_moving_child_pose_in_the_own_frame_and_is_empty_when_static()
-    {
+    fn authored_realm_snaps_computes_a_moving_child_pose_in_the_own_frame_and_ships_static_children()
+     {
         // FA-2c: a moving child's authored `RealmSnap` is its ephemeris pose (position + velocity) at the
-        // tick, stamped in the shard's OWN (ambient-root) frame; a forest with NO moving child yields none.
+        // tick, stamped in the shard's OWN (ambient-root) frame — and the feed ships EVERY direct child,
+        // static and moving alike (owner Q3 / D-FO-7: "movers only" was the last rival has-orbit test).
         let elements = orbit();
         let mut moving = BTreeMap::new();
         moving.insert(OTHER_REALM, elements);
@@ -12698,7 +13343,24 @@ mod tests {
         assert_eq!(snaps[0].pose.pos.offset(), state.position);
         assert_eq!(snaps[0].pose.vel, state.velocity);
         assert_eq!(snaps[0].pose.universe_tick, tick);
-        // A static forest (no moving roster) authors NO realm snap — the byte-identity case.
+        // D-FO-7: a STATIC direct child ships a row too — its stored placement, zero velocity, in the
+        // same own frame. This is the arm a re-introduced movers-only filter turns RED (batch review:
+        // the old form asserted `is_empty()` over a CHILDLESS forest and called it "the static case",
+        // so deleting the filter changed nothing here and re-adding it would not have either).
+        let static_forest = RealmRegions::new(vec![root_region(), own_region(), child_region()]);
+        let static_snaps = static_forest.authored_realm_snaps(
+            OWN_REALM,
+            &static_forest.author_book(OWN_REALM, tick_hz, tick),
+        );
+        assert_eq!(
+            static_snaps.len(),
+            1,
+            "a static direct child ships a row — the feed is every direct child, never movers-only"
+        );
+        assert_eq!(static_snaps[0].realm, OTHER_REALM);
+        assert_eq!(static_snaps[0].pose.frame, frame_of(OWN_REALM));
+        assert_eq!(static_snaps[0].pose.vel, DVec3::ZERO);
+        // A CHILDLESS forest authors NO rows — empty means "no direct children", never "no movers".
         let bare = RealmRegions::new(vec![root_region(), own_region()]);
         assert!(
             bare.authored_realm_snaps(OWN_REALM, &bare.author_book(OWN_REALM, tick_hz, tick))
@@ -13272,8 +13934,13 @@ mod tests {
     #[test]
     fn on_realm_cascade_refans_on_target_and_drops_misroute_nolease_noobserver() {
         // VU AoI cascade RECEIVE: an active child re-fans the OPAQUE parent bytes VERBATIM to its LOCAL player
-        // on the RealmFrame path — but only ON-TARGET, WITH a lease, WITH an observer. Covers all four arms.
+        // on the RealmFrame path — but only FROM ITS RESOLVED PARENT NODE (findings 0/43, fail closed),
+        // ON-TARGET, WITH a lease, WITH an observer. Covers all six arms.
         const PARENT: NodeId = NodeId(99);
+        // The receive believes only the directory-resolved parent — seed the cache the head-read fills.
+        let resolve_parent = |rig: &mut Rig| {
+            rig.world.resource_mut::<ParentRealmNode>().0 = Some(PARENT);
+        };
         // The re-fanned opaque payload(s) reaching a local gateway this tick (extracted VERBATIM — never
         // decoded, proving the parent frame_id passes through un-re-stamped).
         let refanned = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<Vec<u8>> {
@@ -13299,9 +13966,11 @@ mod tests {
             )
         };
 
-        // (a) HAPPY: on-target + lease + a local emitting dot ⇒ the opaque bytes re-fan verbatim, counted.
+        // (a) HAPPY: attested + on-target + lease + a local emitting dot ⇒ the opaque bytes re-fan
+        // verbatim, counted.
         let mut rig = Rig::new();
         rig.grant_realm();
+        resolve_parent(&mut rig);
         insert_owned_dot(
             &mut rig,
             TRIG_SESSION,
@@ -13326,6 +13995,7 @@ mod tests {
         // (b) MIS-ROUTE: routing key names a DIFFERENT realm ⇒ dropped + counted, nothing re-fans.
         let mut rig = Rig::new();
         rig.grant_realm();
+        resolve_parent(&mut rig);
         insert_owned_dot(
             &mut rig,
             TRIG_SESSION,
@@ -13339,6 +14009,7 @@ mod tests {
 
         // (c) NO LEASE: an ungranted shard drops it BEFORE counting received (nothing to re-fan under).
         let mut rig = Rig::new();
+        resolve_parent(&mut rig);
         insert_owned_dot(
             &mut rig,
             TRIG_SESSION,
@@ -13353,10 +14024,45 @@ mod tests {
         // (d) NO OBSERVER: on-target + lease but NO local dot ⇒ counted received, but nothing to draw it on.
         let mut rig = Rig::new();
         rig.grant_realm();
+        resolve_parent(&mut rig);
         let target = on_target(&rig);
         let sent = rig.tick(vec![cascade(target)]);
         assert!(refanned(&sent).is_empty(), "no local observer ⇒ no re-fan");
         assert_eq!(rig.world.resource::<StubStats>().realm_cascade_received, 1);
+
+        // (e) FORGED SENDER (findings 0/43): on-target + lease + observer, but the frame's sender is
+        // not the resolved parent ⇒ dropped + counted, the from-above world untouched.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        rig.world.resource_mut::<ParentRealmNode>().0 = Some(NodeId(98));
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            EntityId::pack(EntityKind::Player, 10, 1, 4),
+            DVec3::new(1.0, 0.0, 0.0),
+        );
+        let target = on_target(&rig);
+        let sent = rig.tick(vec![cascade(target)]);
+        assert!(refanned(&sent).is_empty(), "a forged sender ⇒ no re-fan");
+        assert_eq!(rig.world.resource::<StubStats>().cascade_unauthored, 1);
+        assert_eq!(rig.world.resource::<StubStats>().realm_cascade_received, 0);
+
+        // (f) UNRESOLVED PARENT (fail closed): before the first parent Head reply, nothing is believed
+        // — reachable only across a parent re-home (the bit that invited this cascade required a
+        // resolved parent), self-healing on the next cadence head-read.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            EntityId::pack(EntityKind::Player, 10, 1, 5),
+            DVec3::new(1.0, 0.0, 0.0),
+        );
+        let target = on_target(&rig);
+        let sent = rig.tick(vec![cascade(target)]);
+        assert!(refanned(&sent).is_empty(), "unresolved parent ⇒ no re-fan");
+        assert_eq!(rig.world.resource::<StubStats>().cascade_unauthored, 1);
+        assert_eq!(rig.world.resource::<StubStats>().realm_cascade_received, 0);
     }
 
     #[test]
@@ -13487,6 +14193,8 @@ mod tests {
 
         let mut rig = Rig::new();
         rig.grant_realm();
+        // The cascade believes only the resolved parent node (findings 0/43) — seed the cache.
+        rig.world.resource_mut::<ParentRealmNode>().0 = Some(PARENT);
         // A STATIC child (its region centre IS where this shard put it) so the number under test is the
         // fixture's own literal rather than an ephemeris this test would have to recompute.
         const CHILD_AT: DVec3 = DVec3::new(30.0, -12.0, 4.0);
@@ -14932,12 +15640,15 @@ mod tests {
             .direct_children(config.realm)
             .find(|r| r.realm == child)
             .expect("the fixture registered that child");
-        config.own_coord.child(region_level(region))
+        config
+            .own_coord
+            .child(region_level(region).expect("a seed-lineage child region"))
     }
 
-    /// The up-observation lane's ROWS half, at its emit: a held interior batch FANS to every local
-    /// emitting dot's gateway (the exited-system cure), RELAYS one hop further up (the recursion),
-    /// and the shard's OWN authored rows ship up too — while a stale batch prunes on the TTL first.
+    /// The up-observation lane's ROWS half, at its emit: a held interior batch FANS to the local
+    /// emitting dots whose band holds the child (the exited-system cure, bounded — finding 39a),
+    /// NEVER relays onward (finding 39b: a level never relays what it was relayed), and the shard's
+    /// OWN authored rows ship up (the level-1 ship) — while a stale batch prunes on the TTL first.
     /// (Restored after slice E: it pinned SURVIVING realm-lane machinery but lived in the deleted
     /// entity-lane test section — coverage caught the strand.)
     #[test]
@@ -14952,8 +15663,24 @@ mod tests {
             RealmRegions::new(vec![root_region(), own_region(), child_region()])
                 .with_moving_children(kepler_motion_fns(moving));
         rig.world.resource_mut::<ParentRealmNode>().0 = Some(PARENT);
-        // A local emitting dot — the fan's route.
+        // A local emitting dot — the fan's route — whose AoI band HOLDS the child (finding 39a: the
+        // interior fan is bounded by the same band the child's own box rides; last tick's membership
+        // is what the fan reads).
         insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO);
+        let child_path = rig
+            .world
+            .resource::<StubConfig>()
+            .own_coord
+            .child(region_level(&child_region()).expect("a seed-lineage child region"))
+            .path()
+            .clone();
+        rig.world.resource_mut::<AoiMembership>().0.insert(
+            (ObserverId::Dot(SESSION), child_path),
+            AoiState {
+                was_in: true,
+                grace_remaining: 0,
+            },
+        );
         // A held interior batch from a live child (fresh) + a STALE one (pruned before the fan).
         let inner = postcard::to_allocvec(&RealmSnapshotDatagram {
             sub: SubId(0),
@@ -14994,7 +15721,8 @@ mod tests {
             fanned.contains(&inner),
             "the held interior reaches the local observer byte-for-byte"
         );
-        // (2) ...and relayed one hop further up, plus the shard's OWN authored rows ship up.
+        // (2) ...and the shard's OWN authored rows ship up — and NOTHING it was relayed (finding
+        // 39b: two levels per lane; the held interior stays home, fanned to local observers only).
         let up: Vec<vd_wire::intershard::RealmObservation> = sent
             .iter()
             .filter(|(to, _, _)| *to == PARENT)
@@ -15006,12 +15734,12 @@ mod tests {
             )
             .collect();
         assert!(
-            up.iter().any(|ro| ro.realm_snapshot_bytes == inner),
-            "the held interior keeps climbing (the grandparent's observers see two levels down)"
+            up.iter().all(|ro| ro.realm_snapshot_bytes != inner),
+            "a level never relays what it was relayed — the held interior does not climb"
         );
         assert!(
-            up.iter().any(|ro| ro.realm_snapshot_bytes != inner),
-            "the shard's OWN authored rows ship up beside the relayed interior"
+            !up.is_empty(),
+            "the shard's OWN authored rows still ship up (the level-1 ship is not the relay)"
         );
         // (3) The stale batch pruned — nothing of its garbage bytes anywhere.
         assert!(
@@ -15020,6 +15748,96 @@ mod tests {
                 .0
                 .contains_key(&RealmId::Planet(43)),
             "a batch whose child went quiet ages out"
+        );
+    }
+
+    #[test]
+    fn the_interior_fan_is_bounded_by_each_dots_own_band_on_the_child() {
+        // Lane cure, finding 39a: a child's held interior rows fan to a dot's gateway ONLY while that
+        // child is in that dot's AoI band — the SAME rule its box rides — so a dot whose band dropped
+        // the child stops receiving its interior while another dot's fan continues.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // The SIBLING is on the roster with NO held batch — the fan's per-child lookup skips it.
+        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
+            root_region(),
+            own_region(),
+            child_region(),
+            sibling_region(),
+        ]);
+        // Two dots on two gateways: A holds the child in-band; B does not.
+        const GATEWAY_B: NodeId = NodeId(21);
+        insert_owned_dot(&mut rig, SessionId(1), player(1), DVec3::ZERO);
+        insert_owned_dot(&mut rig, SessionId(2), player(2), DVec3::ZERO);
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&SessionId(2))
+            .expect("dot B present")
+            .gateway = GATEWAY_B;
+        let child_path = rig
+            .world
+            .resource::<StubConfig>()
+            .own_coord
+            .child(region_level(&child_region()).expect("a seed-lineage child region"))
+            .path()
+            .clone();
+        rig.world.resource_mut::<AoiMembership>().0.insert(
+            (ObserverId::Dot(SessionId(1)), child_path),
+            AoiState {
+                was_in: true,
+                grace_remaining: 0,
+            },
+        );
+        // A held interior batch from the live child.
+        let inner = postcard::to_allocvec(&RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 77,
+            source_tick: vd_core::TickId(3),
+            universe_tick: UniverseTick(100),
+            realms: Vec::new(),
+        })
+        .expect("fixture");
+        let now = rig.world.resource::<ClockSample>().local_tick;
+        rig.world
+            .resource_mut::<ObservedInterior>()
+            .0
+            .insert(OTHER_REALM, (now, vec![crate::io::bytes(inner.clone())]));
+        let sent = rig.tick(vec![]);
+        let fanned_to = |gateway: NodeId| -> bool {
+            sent.iter()
+                .filter(|(to, class, _)| (*to == gateway) & (*class == MsgClass::RealmSnapshot))
+                .filter_map(|(_, _, b)| {
+                    postcard::from_bytes::<ShardToGateway>(b)
+                        .ok()
+                        .and_then(|f| f.into_realm_snapshot_bytes())
+                })
+                .any(|bytes| bytes == inner)
+        };
+        assert!(
+            fanned_to(GATEWAY),
+            "the in-band dot's gateway receives the child's interior"
+        );
+        assert!(
+            !fanned_to(GATEWAY_B),
+            "the out-of-band dot's gateway does NOT — the fan obeys the box's own rule"
+        );
+        // And when the LAST in-band observer drops the child, the fan stops entirely (the batch is
+        // still held and fresh — nothing is entitled to it).
+        rig.world.resource_mut::<AoiMembership>().0.clear();
+        let sent = rig.tick(vec![]);
+        let refanned_anywhere = sent
+            .iter()
+            .filter(|(_, class, _)| *class == MsgClass::RealmSnapshot)
+            .filter_map(|(_, _, b)| {
+                postcard::from_bytes::<ShardToGateway>(b)
+                    .ok()
+                    .and_then(|f| f.into_realm_snapshot_bytes())
+            })
+            .any(|bytes| bytes == inner);
+        assert!(
+            !refanned_anywhere,
+            "no in-band observer ⇒ the held interior fans to nobody"
         );
     }
 
@@ -15079,6 +15897,12 @@ mod tests {
         rig.grant_realm();
         *rig.world.resource_mut::<RealmRegions>() =
             RealmRegions::new(vec![root_region(), own_region(), child_region()]);
+        // The up-lanes admit only the directory-attested child node (findings 0/43) — seed the map
+        // the realm-Head reply arm fills.
+        rig.world
+            .resource_mut::<ChildRealmNodes>()
+            .0
+            .insert(OTHER_REALM, NodeId(70));
         let child = with_child_coord(&mut rig, OTHER_REALM);
         let bit = InterShardFlow::ChildLive(vd_wire::intershard::ChildLive {
             child: child.clone(),
@@ -15179,8 +16003,9 @@ mod tests {
             .expect("valid containment band")
     }
 
-    /// The frame `realm`'s region is expressed in. System/Planet always resolve; under `IdentityFrames`
-    /// the frame is a no-op at P3, so positions are frame-invariant regardless.
+    /// The frame `realm`'s region is expressed in. System/Planet always resolve; at walk scale every
+    /// placement is the identity, so positions are frame-invariant regardless. (`IdentityFrames` itself
+    /// is DELETED — D-PLACE-1.)
     fn frame_of(realm: RealmId) -> FrameRef {
         frame_for_realm(realm, None).expect("System/Planet realm always resolves a frame")
     }
@@ -16353,15 +17178,19 @@ mod tests {
         };
         let mut observed = ObservedInterior::default();
         let mut stats = StubStats::default();
+        // Attested sender (findings 0/43): the head names the child's node before any batch is believed.
+        let attested = ChildRealmNodes(BTreeMap::from([(story.planet, NodeId(77))]));
         on_realm_observation(
             vd_wire::intershard::RealmObservation {
                 child: child_coord.clone(),
                 realm_snapshot_bytes: postcard::to_allocvec(&inner).expect("fixture"),
             },
+            NodeId(77),
             &cfg,
             &clock,
             &regions,
             &empty,
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -16391,6 +17220,8 @@ mod tests {
                 child: cfg.own_coord.clone(),
                 realm_snapshot_bytes: postcard::to_allocvec(&inner).expect("fixture"),
             },
+            NodeId(99),
+            &ParentRealmNode(Some(NodeId(99))),
             &cfg,
             &clock,
             &RealmAuthority(Some(Fence(1))),
@@ -16457,7 +17288,13 @@ mod tests {
         assert_eq!(at, UniverseTick(0));
         assert_eq!(b.at(), UniverseTick(0));
         assert_eq!(stats.placement_skew_clamped, 1);
-        assert_eq!(stats.placement_skew_max_ticks, 3);
+        assert_eq!(stats.placement_skew_ahead_max_ticks, 3);
+        assert_eq!(
+            stats.placement_skew_behind_max_ticks, 0,
+            "a FORWARD clamp writes the ahead gauge only — the two directions are separate \
+             measurements (batch review: one |Δ| magnitude let redelivery staleness drown the \
+             span_ahead bound)"
+        );
         // An anchor with no books at all: None (the caller's loud miss).
         assert!(
             book_at_or_head(&ledger, story.sibling_planet, UniverseTick(0), &mut stats).is_none()
@@ -16490,6 +17327,11 @@ mod tests {
             "the system adds its child's placement exactly as an un-skewed arrival: 145 + 3"
         );
         assert_eq!(stats.placement_skew_clamped, 2);
+        assert_eq!(
+            stats.placement_skew_ahead_max_ticks, 3,
+            "the arrival's 1-tick lead rides the ahead gauge (already at 3 from the relay clamp)"
+        );
+        assert_eq!(stats.placement_skew_behind_max_ticks, 0);
 
         // …and a RETRIED hand-off whose stamp aged BEHIND the window (the process-tier wedge: an
         // immutably-stamped envelope redelivered while the head advanced) is ALSO accepted at the
@@ -16523,7 +17365,21 @@ mod tests {
         .expect("an aged but healthy hand-off is accepted at the receiver's now, never wedged");
         assert_eq!(placed.universe_tick, UniverseTick(102));
         assert_eq!(stats.placement_skew_clamped, 1);
-        assert_eq!(stats.placement_skew_max_ticks, 92);
+        assert_eq!(
+            stats.placement_skew_behind_max_ticks, 92,
+            "a BACKWARD (redelivery-staleness) clamp writes the behind gauge only"
+        );
+        assert_eq!(stats.placement_skew_ahead_max_ticks, 0);
+
+        // …while the RELAY lane's selector still refuses the same aged stamp (behind the window
+        // WITH a head): `book_at_or_head` clamps FORWARD only — a stale per-tick datagram is the
+        // caller's loud drop, superseded by the next tick's ship, never a backwards clamp.
+        let mut relay_stats = StubStats::default();
+        assert!(
+            book_at_or_head(&aged, story.system, UniverseTick(10), &mut relay_stats).is_none(),
+            "a behind-the-window relay stamp is a loud None, not a clamp"
+        );
+        assert_eq!(relay_stats.placement_skew_clamped, 0);
     }
 
     /// STAGE B1's mirrored half (§4v cure 1): the departure was decided, and by flush time the occupant
@@ -17405,7 +18261,7 @@ mod tests {
 
     /// Insert an OWNED durable dot at frame-local `offset` expressed in `frame` (the frame-aware sibling of
     /// [`insert_owned_dot`], which pins the pose frame to `config().frame`). Needed for a Station-owning
-    /// shard, whose dots live in the StationLocal frame. Under `IdentityFrames` the frame is inert for the
+    /// shard, whose dots live in the StationLocal frame. At walk scale the frame is inert for the
     /// container decision, but carrying the OWNING realm's frame keeps the fixture honest.
     fn insert_owned_dot_framed(
         rig: &mut Rig,
@@ -17727,8 +18583,9 @@ mod tests {
         // that walks from System 7 into CO-HOSTED Planet 7's SOI emits the SAME `CrossingRequest` as a
         // foreign crossing — there is NO local short-circuit. `head(Realm(Planet 7))` resolves to THIS node
         // (source==dest), which the ONE orchestrator saga handles as the degenerate case. The request carries
-        // Planet 7 as `to_realm` and its enclosing System 7 as `to_parent` (the container region's parent) so
-        // the dest's `rebind_pose_to_dest` forms the child frame. The pose is NOT rewritten in place here (the
+        // Planet 7 as `to_realm` and its enclosing System 7 as `to_parent` — a WIRE-SHAPE pin only: the field
+        // is DEAD (its consumer `rebind_pose_to_dest` is deleted, D-PLACE-1/D-WIRE-1; the dest forms the child
+        // frame from its own ROSTER via `arrival_frame`). The pose is NOT rewritten in place here (the
         // detector only requests); the frame flips at the dest's adopt (same node on a co-hosted re-home).
         let mut rig = Rig::with_config(cohost_planet_config());
         boot_cohost_planet(&mut rig);
@@ -17810,7 +18667,8 @@ mod tests {
     {
         // The TRANSIENT twin (HR2 — the SAME machinery, no per-kind fork, no local short-circuit): a held
         // Debris transient inside CO-HOSTED Planet 7 emits ONE `TransientCrossingRequest` carrying Planet 7's
-        // enclosing System 7 as `to_parent` (so the batch's `rebind_pose_to_dest` forms the child frame). The
+        // enclosing System 7 as `to_parent` — a WIRE-SHAPE pin only (the field is DEAD: its consumer is
+        // deleted, D-PLACE-1/D-WIRE-1; the dest places the pose from its own roster at adopt). The
         // pose is not rewritten in place; the frame flips at the dest's adopt.
         let mut rig = Rig::with_config(cohost_planet_config());
         boot_cohost_planet(&mut rig);
@@ -18632,15 +19490,69 @@ mod tests {
     }
 
     #[test]
-    fn an_armed_shard_keepalive_demands_the_crossing_dest_full_lineage() {
-        // The PRODUCER gate of the Symptom-B fix: on an ARMED (demand-scale) shard, every tick a durable
-        // crossing latch stands, `redrive_stranded_crossings` emits a KeepAlive `RealmDemand` for the
-        // DEST's FULL lineage coord — so the dest cannot be reaped mid-crossing. ARMED escape forest
-        // root(Sys0) ⊃ parent(Sys77) ⊃ own_small(Sys7): a dot OUTSIDE own_small (still inside the parent)
-        // re-homes OUT to PARENT_REALM, latching the crossing. Crossing OUT (dest = the PARENT) is chosen
-        // so the AoI child-demands (which target the shard's CHILDREN, inward) cannot collide with the
-        // keep-alive (which targets the parent, outward). `request_ttl_ticks == 0` keeps the ttl re-drive
-        // inert, so the ONLY emit under test is the keep-alive.
+    fn an_armed_shard_keepalive_demands_an_inward_crossing_dest() {
+        // The PRODUCER gate of the Symptom-B fix, on the LAWFUL shape (finding 37): on an ARMED
+        // (demand-scale) shard, every tick a durable crossing latch stands,
+        // `redrive_stranded_crossings` emits a KeepAlive `RealmDemand` for an INWARD dest — a DIRECT
+        // CHILD, the one crossing shape SL7 lets a shard demand (`ancestor_close` pulls the chain
+        // above it at the orchestrator). The child's own AoI band is INERT and only the root's is
+        // armed, so the keep-alive is the SOLE demand under test (no AoI-union collision);
+        // `request_ttl_ticks == 0` keeps the ttl re-drive inert too.
+        let armed_root = RealmRegion {
+            aoi: aoi_band(1), // arms `aoi_live` without adding any direct-child AoI demand
+            ..region(ROOT_REALM, None, DVec3::ZERO, 1.0e9)
+        };
+        let forest = RealmRegions::new(vec![
+            armed_root,
+            region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 100_000.0),
+            region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 1000.0),
+        ]);
+        // `own_coord` comes from the SAME forest the demand coord will (exactly the production boot:
+        // one lineage source), or the parent-of-child compare would be measuring two derivations.
+        let own_coord = forest.coord_of(OWN_REALM).expect("own realm is rostered");
+        let want = forest
+            .coord_of(OTHER_REALM)
+            .expect("the child is a seed-lineage realm");
+        let mut rig = Rig::with_config(StubConfig {
+            own_coord,
+            ..config()
+        });
+        grant_realm_for(&mut rig, OWN_REALM);
+        *rig.world.resource_mut::<RealmRegions>() = forest;
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 99);
+        // INSIDE the child (r=1000, off-centre) ⇒ container == OTHER_REALM ⇒ cross IN, latching the
+        // crossing (no orchestrator in the rig ⇒ the latch STRANDS and keeps emitting).
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(500.0, 0.0, 0.0));
+        rig.set_local_tick(2);
+        let _ = rig.tick(vec![]); // cross IN + latch
+        rig.set_local_tick(3);
+        let out = rig.tick(vec![]); // the latch stands ⇒ the keep-alive fires this tick
+        let dest_keepalives = realm_demands(&out)
+            .into_iter()
+            .filter(|d| d.child == want)
+            .filter(|d| d.verb == DemandVerb::KeepAlive)
+            .count();
+        assert!(dest_keepalives >= 1);
+        // The lawful shape passed the structural gate uncounted; the ttl re-drive stayed inert.
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .demand_refused_not_own_or_child,
+            0
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossings_redriven, 0);
+    }
+
+    #[test]
+    fn an_outward_crossing_emits_no_demand_and_counts_the_refusal() {
+        // The OTHER half of the finding-37 cure, measured: an OUTWARD crossing's dest is this shard's
+        // PARENT, which a shard may never demand (SL7 — a realm speaks about itself or a direct child,
+        // never upward). `push_demand`'s structural gate refuses it, counted; the latch stands
+        // untouched. The parent needs no upward demand: the latch keeps the departing occupant in this
+        // shard's observer fold (`speaks_for`), so this realm never reports Empty, arm B of
+        // `desired_alive` holds it, and `ancestor_close` pulls the chain — the deterministic twin is
+        // `rlm::tests::an_outward_crossings_parent_stays_alive_without_an_upward_demand`, the
+        // process-tier experiment the return-crossing gate.
         let mut rig = Rig::new();
         rig.grant_realm();
         let armed = |realm, parent, r| RealmRegion {
@@ -18657,26 +19569,42 @@ mod tests {
             armed(PARENT_REALM, Some(ROOT_REALM), 100_000.0),
             armed(OWN_REALM, Some(PARENT_REALM), 1000.0),
         ]);
-        let want = rig
+        let parent_coord = rig
             .world
             .resource::<RealmRegions>()
             .coord_of(PARENT_REALM)
             .expect("the parent is a seed-lineage realm");
         let entity = EntityId::pack(EntityKind::Player, 10, 1, 99);
-        // OUTSIDE own_small (r=1000) but inside the parent (r=100_000) ⇒ container == PARENT_REALM ⇒ cross
-        // OUT, latching the crossing (no orchestrator in the rig ⇒ the latch STRANDS and keeps emitting).
+        // OUTSIDE own_small (r=1000) but inside the parent (r=100_000) ⇒ container == PARENT_REALM ⇒
+        // cross OUT, latching the crossing (no orchestrator ⇒ the latch STRANDS).
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(5000.0, 0.0, 0.0));
         rig.set_local_tick(2);
         let _ = rig.tick(vec![]); // cross OUT + latch
         rig.set_local_tick(3);
-        let out = rig.tick(vec![]); // the latch stands ⇒ the keep-alive fires this tick
-        let dest_keepalives = realm_demands(&out)
-            .into_iter()
-            .filter(|d| d.child == want)
-            .filter(|d| d.verb == DemandVerb::KeepAlive)
-            .count();
-        assert!(dest_keepalives >= 1);
-        // The ttl re-drive stayed inert (request_ttl_ticks == 0) — the keep-alive is the sole new emit.
+        let out = rig.tick(vec![]); // the latch stands ⇒ the refusal fires this tick
+        // The WHOLE demand list is empty — the only candidate emitter this tick was the outward
+        // keep-alive (the own realm has no AoI children here), so this is the strongest claim, by
+        // equality (a filtering closure would carry an uncoverable never-matching region, HR5).
+        assert_eq!(
+            realm_demands(&out),
+            vec![],
+            "no demand at all leaves the shard — the upward emit toward {parent_coord:?} is \
+             structurally gone"
+        );
+        assert!(
+            rig.world
+                .resource::<StubStats>()
+                .demand_refused_not_own_or_child
+                >= 1,
+            "the refusal is counted where the shape law lives"
+        );
+        assert!(
+            rig.world
+                .resource::<RequestInFlight>()
+                .0
+                .contains_key(&entity),
+            "the crossing latch stands regardless — only a saga terminal clears it"
+        );
         assert_eq!(rig.world.resource::<StubStats>().crossings_redriven, 0);
     }
 
@@ -19402,7 +20330,7 @@ mod tests {
                 DVec3::ZERO,
                 1.0
             )),
-            RealmLevel::new(RealmKindTag::Planet, 42)
+            Some(RealmLevel::new(RealmKindTag::Planet, 42))
         );
         assert_eq!(
             region_level(&region(
@@ -19411,7 +20339,83 @@ mod tests {
                 DVec3::ZERO,
                 1.0
             )),
-            RealmLevel::new(RealmKindTag::System, 7)
+            Some(RealmLevel::new(RealmKindTag::System, 7))
+        );
+        // An entity-backed Ship realm has no lineage tag until P8 (D-SHIP-1): `None`, the typed
+        // graceful exclusion — never a panic (audit :713).
+        assert_eq!(
+            region_level(&region(
+                RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 7, 3)),
+                Some(OWN_REALM),
+                DVec3::ZERO,
+                1.0
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic() {
+        // Audit :713 — `region_level` used to `expect` on an entity-backed Ship realm, so the FIRST
+        // hosted ship region would abort the whole shard the moment any lane touched it. Until P8
+        // gives ships a lineage coordinate (D-SHIP-1), the four coord-needing lanes — the AoI/demand
+        // fold + the scene reflect (`aoi_decide`), the cascade targeting (`active_children`) and the
+        // interior fan (`emit_realm_frames`) — must EXCLUDE it: typed, counted, never a panic. The
+        // ship still counts where no coord is needed (its live bit is a child OBSERVER, so an
+        // occupied ship keeps its parent warm — SL7).
+        const SHIP_HOME: NodeId = NodeId(77);
+        let ship_realm = RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 7, 3));
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
+            root_region(),
+            own_region(),
+            child_region(),
+            // The hosted ship: a direct child placed far from the dot (never a containment member).
+            region(
+                ship_realm,
+                Some(OWN_REALM),
+                DVec3::new(50_000.0, 0.0, 0.0),
+                10.0,
+            ),
+        ]);
+        // An occupant (the realm is not Empty), inside OWN only — outside the child and the ship.
+        insert_owned_dot(
+            &mut rig,
+            SessionId(1),
+            player(7),
+            DVec3::new(5_000.0, 0.0, 0.0),
+        );
+        // The ship is LIVE (a fresh occupancy bit — the cascade + scene lanes would target it) AND
+        // holds an observed interior batch (the fan lane would key membership by its coord).
+        let now = rig.world.resource::<ClockSample>().local_tick;
+        rig.world.resource_mut::<ChildLiveness>().0.insert(
+            ship_realm,
+            ChildLiveEntry {
+                home: SHIP_HOME,
+                fence: Fence(1),
+                at: UniverseTick(1),
+                last_seen: now,
+            },
+        );
+        rig.world
+            .resource_mut::<ObservedInterior>()
+            .0
+            .insert(ship_realm, (now, vec![crate::io::bytes(vec![1, 2, 3])]));
+        let sent = rig.tick(vec![]);
+        // All four lanes excluded the ship, once each this tick: the interior fan + the cascade
+        // targeting (emit_realm_frames) and the AoI/demand fold + the scene reflect (aoi_decide).
+        assert_eq!(
+            rig.world
+                .resource::<StubStats>()
+                .ship_child_regions_excluded,
+            4,
+            "each coord-needing lane skipped the ship exactly once, counted"
+        );
+        // Nothing was addressed TO the unaddressable child.
+        assert!(
+            sent.iter().all(|(to, _, _)| *to != SHIP_HOME),
+            "no cascade/scene lane targeted the ship's home"
         );
     }
 
@@ -19863,15 +20867,36 @@ mod tests {
         assert_eq!(rig.world.resource::<StubStats>().undecodable, 1);
     }
 
-    /// Step 5 slice A — the SL7 bit's receive arm: on-target upsert, mis-route drop, stale-(fence,at)
-    /// drop, last-wins overwrite including the home NodeId (a re-homed child heartbeats from its new
-    /// node and the down-lanes must follow it).
+    /// Step 5 slice A — the SL7 bit's receive arm: attested upsert, mis-route drop, stale-(fence,at)
+    /// drop, and the lane cure's ADMISSION (findings 0/43): a sender the directory head does not name
+    /// is refused fail-closed — counted, a head re-read armed, the stored route untouched — until the
+    /// head is re-read, at which point the re-homed child's new node is believed and last-wins
+    /// overwrites the home (the down-lanes follow it).
     #[test]
     fn retain_child_live_upserts_misroutes_and_rejects_stale() {
         use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
         let cfg = config(); // own realm System(7), own_coord [System(7)]
         let mut store = ChildLiveness::default();
         let mut stats = StubStats::default();
+        let mut outbox = OutboundBox::default();
+        // The admission map: the directory head names NodeId(41) for Planet(42).
+        let mut attested = ChildRealmNodes(BTreeMap::from([(RealmId::Planet(42), NodeId(41))]));
+        // The armed-head-read probe: EVERYTHING the receive pushed, decoded — asserted by equality
+        // (never a filtering match: its catch-all arm would be an uncoverable region, HR5).
+        let flows = |outbox: &OutboundBox| -> Vec<InterShardFlow> {
+            outbox
+                .0
+                .iter()
+                .map(|(_, _, b, _)| {
+                    postcard::from_bytes::<InterShardFlow>(b).expect("a pushed flow decodes")
+                })
+                .collect()
+        };
+        let head_read_for = |realm: RealmId| {
+            InterShardFlow::Directory(DirectoryOp::HeadRead {
+                key: DirectoryKey::Realm(realm),
+            })
+        };
         let child_coord =
             vd_core::realm_coord::RealmCoord::from_path(RealmPath::from_levels(vec![
                 RealmLevel::new(RealmKindTag::System, 7),
@@ -19883,14 +20908,16 @@ mod tests {
             fence: Fence(fence),
             at: UniverseTick(at),
         };
-        // On-target (the child's parent lowers to this realm) ⇒ upserted, home = the sender.
+        // On-target + attested (the head names the sender) ⇒ upserted, home = the sender.
         retain_child_live(
             &mut store,
             &cfg,
             bit(1, 10),
             vd_core::TickId(5),
             NodeId(41),
+            &attested,
             &mut stats,
+            &mut outbox,
         );
         assert_eq!(stats.child_live_received, 1);
         let held = store.0[&RealmId::Planet(42)];
@@ -19898,14 +20925,16 @@ mod tests {
             (held.home, held.fence, held.at),
             (NodeId(41), Fence(1), UniverseTick(10))
         );
-        // STALE by (fence, at): an older heartbeat never regresses the entry.
+        // STALE by (fence, at): an older heartbeat from the attested node never regresses the entry.
         retain_child_live(
             &mut store,
             &cfg,
             bit(1, 9),
             vd_core::TickId(6),
-            NodeId(43),
+            NodeId(41),
+            &attested,
             &mut stats,
+            &mut outbox,
         );
         assert_eq!(stats.child_live_stale, 1);
         assert_eq!(
@@ -19913,17 +20942,64 @@ mod tests {
             NodeId(41),
             "the stale bit changed nothing"
         );
-        // LAST-WINS: a fresher fence from a NEW node overwrites (the re-homed child's new home).
+        assert_eq!(flows(&outbox), vec![], "no refusal ⇒ no re-read armed");
+        // UNATTESTED (the re-homed child's FIRST bit from its new node, before the head re-read):
+        // refused fail-closed — counted, the route untouched, ONE head re-read armed for that child.
         retain_child_live(
             &mut store,
             &cfg,
             bit(2, 9),
             vd_core::TickId(7),
             NodeId(44),
+            &attested,
             &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.child_live_unattested, 1);
+        assert_eq!(
+            store.0[&RealmId::Planet(42)].home,
+            NodeId(41),
+            "an unattested bit never refreshes the route — the zombie window is bounded here"
+        );
+        assert_eq!(
+            flows(&outbox),
+            vec![head_read_for(RealmId::Planet(42))],
+            "the refusal armed the lazy head re-read (D-RLM-6 mechanism C)"
+        );
+        // THE HEAD RE-READ LANDS (the same reply arm the parent resolve rides): the new node is now
+        // the admission answer, and the SAME bit is believed — last-wins overwrites the home.
+        attested.0.insert(RealmId::Planet(42), NodeId(44));
+        retain_child_live(
+            &mut store,
+            &cfg,
+            bit(2, 9),
+            vd_core::TickId(7),
+            NodeId(44),
+            &attested,
+            &mut stats,
+            &mut outbox,
         );
         assert_eq!(store.0[&RealmId::Planet(42)].home, NodeId(44));
-        // MIS-ROUTE: a child whose parent is NOT this realm is dropped + counted.
+        // NO HEAD AT ALL (fail closed): a child the directory has no record for is refused too.
+        attested.0.remove(&RealmId::Planet(42));
+        retain_child_live(
+            &mut store,
+            &cfg,
+            bit(3, 11),
+            vd_core::TickId(8),
+            NodeId(44),
+            &attested,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.child_live_unattested, 2);
+        assert_eq!(
+            store.0[&RealmId::Planet(42)].home,
+            NodeId(44),
+            "the no-head refusal stored nothing new"
+        );
+        // MIS-ROUTE: a child whose parent is NOT this realm is dropped + counted (before admission —
+        // WHICH REALM precedes WHO SENT).
         let foreign = vd_core::realm_coord::RealmCoord::from_path(RealmPath::from_levels(vec![
             RealmLevel::new(RealmKindTag::System, 9),
             RealmLevel::new(RealmKindTag::Planet, 42),
@@ -19939,7 +21015,9 @@ mod tests {
             },
             vd_core::TickId(8),
             NodeId(45),
+            &attested,
             &mut stats,
+            &mut outbox,
         );
         assert_eq!(stats.child_live_misrouted, 1);
         assert_eq!(store.0.len(), 1, "the mis-route stored nothing");
@@ -19989,12 +21067,16 @@ mod tests {
             child: child_coord.clone(),
             realm_snapshot_bytes: postcard::to_allocvec(&inner).expect("fixture"),
         };
+        // Attested sender (findings 0/43): the head names the child's node before any batch is believed.
+        let attested = ChildRealmNodes(BTreeMap::from([(story.planet, NodeId(70))]));
         on_realm_observation(
-            ro,
+            ro.clone(),
+            NodeId(70),
             &cfg,
             &clock,
             &regions,
             &obs_ledger(&regions, &cfg, &clock),
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20024,6 +21106,21 @@ mod tests {
             (r - STORY_PLANET_FROM_STAR_M).abs() <= 2.0 + 2.0,
             "the row gained the authored placement: {r} vs ~{STORY_PLANET_FROM_STAR_M}",
         );
+        // UNATTESTED (findings 0/43): a sender the head does not name is refused fail-closed, counted,
+        // and the holding is untouched.
+        on_realm_observation(
+            ro,
+            NodeId(71),
+            &cfg,
+            &clock,
+            &regions,
+            &obs_ledger(&regions, &cfg, &clock),
+            &attested,
+            &mut observed,
+            &mut stats,
+        );
+        assert_eq!(stats.realm_observation_unattested, 1);
+        assert_eq!(stats.realm_observation_received, 1, "nothing new believed");
         // MIS-ROUTE: a sender whose parent is not this realm drops counted.
         let foreign = vd_core::realm_coord::RealmCoord::from_path(RealmPath::from_levels(vec![
             RealmLevel::new(RealmKindTag::System, 999),
@@ -20035,10 +21132,12 @@ mod tests {
                 child: foreign,
                 realm_snapshot_bytes: postcard::to_allocvec(&inner).expect("fixture"),
             },
+            NodeId(70),
             &cfg,
             &clock,
             &regions,
             &obs_ledger(&regions, &cfg, &clock),
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20062,10 +21161,12 @@ mod tests {
                 child: child_coord,
                 realm_snapshot_bytes: postcard::to_allocvec(&unplaceable).expect("fixture"),
             },
+            NodeId(70),
             &cfg,
             &clock,
             &regions,
             &obs_ledger(&regions, &cfg, &clock),
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20104,14 +21205,23 @@ mod tests {
                 level_of(story.planet).expect("planet level"),
             ]))
             .expect("two-level path");
+        // Attested sender (findings 0/43) — the unrostered child of the last arm is deliberately
+        // attested too, so that arm measures the ROSTER refusal, not the admission one (the roster can
+        // change between the head reply and the receipt — a teardown race).
+        let attested = ChildRealmNodes(BTreeMap::from([
+            (story.planet, NodeId(70)),
+            (RealmId::Planet(999), NodeId(70)),
+        ]));
         on_realm_shape_observation(
             vd_wire::intershard::RealmShapeObservation {
                 child: child_coord.clone(),
                 shapes: vec![outline, outline],
             },
+            NodeId(70),
             &cfg,
             &clock,
             &regions,
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20141,12 +21251,14 @@ mod tests {
         // FULL-SET REPLACE: the next receipt is the child's whole current interior, never an append.
         on_realm_shape_observation(
             vd_wire::intershard::RealmShapeObservation {
-                child: child_coord,
+                child: child_coord.clone(),
                 shapes: vec![outline],
             },
+            NodeId(70),
             &cfg,
             &clock,
             &regions,
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20154,6 +21266,27 @@ mod tests {
             observed.0[&story.planet].1.len(),
             1,
             "replaced, not appended"
+        );
+        // UNATTESTED (findings 0/43): a sender the head does not name is refused fail-closed, counted,
+        // and the held set is untouched.
+        on_realm_shape_observation(
+            vd_wire::intershard::RealmShapeObservation {
+                child: child_coord,
+                shapes: vec![outline, outline],
+            },
+            NodeId(71),
+            &cfg,
+            &clock,
+            &regions,
+            &attested,
+            &mut observed,
+            &mut stats,
+        );
+        assert_eq!(stats.realm_shape_observation_unattested, 1);
+        assert_eq!(
+            observed.0[&story.planet].1.len(),
+            1,
+            "the unattested set replaced nothing"
         );
         // MIS-ROUTE: a sender whose parent is not this realm drops counted, stores nothing.
         let foreign = vd_core::realm_coord::RealmCoord::from_path(RealmPath::from_levels(vec![
@@ -20166,9 +21299,11 @@ mod tests {
                 child: foreign,
                 shapes: vec![outline],
             },
+            NodeId(70),
             &cfg,
             &clock,
             &regions,
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20186,9 +21321,11 @@ mod tests {
                 child: unrostered,
                 shapes: vec![outline],
             },
+            NodeId(70),
             &cfg,
             &clock,
             &regions,
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20394,12 +21531,12 @@ mod tests {
     }
 
     /// Slice C, the ship: with a resolved parent, on the AoI cadence, this shard ships its interior
-    /// look — one outline per roster child, then the sets its own live children shipped it (the
-    /// recursion) — with NO observer anywhere (an unoccupied neighbour realm is exactly the case the
-    /// lane exists for). A stale observed set prunes on the TTL; off-cadence and parent-unresolved
-    /// ticks ship nothing.
+    /// look — one outline per roster child and NOTHING DEEPER (finding 39b: two levels per lane; the
+    /// sets its own live children shipped it stay home, folded into local scenes only) — with NO
+    /// observer anywhere (an unoccupied neighbour realm is exactly the case the lane exists for). A
+    /// stale observed set prunes on the TTL; off-cadence and parent-unresolved ticks ship nothing.
     #[test]
-    fn the_up_shape_ship_sends_the_roster_then_observed_interiors_on_the_cadence() {
+    fn the_up_shape_ship_sends_the_roster_only_on_the_cadence() {
         let interior = RealmId::Planet(77);
         let mut rig = Rig::new();
         rig.grant_realm();
@@ -20461,8 +21598,15 @@ mod tests {
                 .iter()
                 .map(|s| s.realm)
                 .collect::<Vec<_>>(),
-            vec![OTHER_REALM, interior],
-            "roster children lead, observed interiors follow; the stale set was pruned"
+            vec![OTHER_REALM],
+            "the roster and NOTHING deeper — a level never relays what it was relayed (finding 39b)"
+        );
+        assert!(
+            rig.world
+                .resource::<ObservedInteriorShapes>()
+                .0
+                .contains_key(&OTHER_REALM),
+            "the fresh observed set stays HOME, folded into local scenes only"
         );
         assert!(
             !rig.world
@@ -20530,16 +21674,20 @@ mod tests {
             })
             .expect("fixture"),
         };
+        // Attested sender (findings 0/43): the head names the child's node before any batch is believed.
+        let attested = ChildRealmNodes(BTreeMap::from([(story.planet, NodeId(70))]));
         // GARBAGE: counted, never a panic, nothing held.
         on_realm_observation(
             vd_wire::intershard::RealmObservation {
                 child: child_coord.clone(),
                 realm_snapshot_bytes: vec![0xFF, 0xFF, 0xFF],
             },
+            NodeId(70),
             &cfg,
             &clock_at(4),
             &regions,
             &obs_ledger(&regions, &cfg, &clock_at(4)),
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20548,19 +21696,23 @@ mod tests {
         // SAME tick: two datagrams of one tick accumulate.
         on_realm_observation(
             batch(1),
+            NodeId(70),
             &cfg,
             &clock_at(5),
             &regions,
             &obs_ledger(&regions, &cfg, &clock_at(5)),
+            &attested,
             &mut observed,
             &mut stats,
         );
         on_realm_observation(
             batch(2),
+            NodeId(70),
             &cfg,
             &clock_at(5),
             &regions,
             &obs_ledger(&regions, &cfg, &clock_at(5)),
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20568,10 +21720,12 @@ mod tests {
         // NEW tick: the batch replaces.
         on_realm_observation(
             batch(3),
+            NodeId(70),
             &cfg,
             &clock_at(6),
             &regions,
             &obs_ledger(&regions, &cfg, &clock_at(6)),
+            &attested,
             &mut observed,
             &mut stats,
         );
@@ -20580,19 +21734,35 @@ mod tests {
 
     #[test]
     fn ttl_alive_and_retain_ttl_are_derived_and_bridge_one_loss() {
-        // TTL is DERIVED from the 1 s loiter constant via the shared converter — at a real dt it dominates the
-        // floor (round(1.0 / 0.05) = 20 ticks), never a magic number.
+        // TTL is DERIVED, never a magic number: the widest of the 1 s loiter constant (round(1.0 /
+        // 0.05) = 20 ticks) and TWO beats of the bit's own cadence plus one tick of slack (finding 41
+        // — the bit beats per cadence now, so the TTL must bridge one LOST BEAT, not one lost tick).
+        // Here the disarmed recheck derives cadence hz/2 = 10 ⇒ the beats term (21) edges out the
+        // loiter term (20).
         let normal = StubConfig {
             tick_dt_s: 0.05,
             ..config()
         };
-        assert_eq!(retain_ttl_ticks(&normal), 20);
-        // A degenerate dt falls back to the survive-one-lost-datagram floor.
+        assert_eq!(aoi_recheck_cadence(&normal), 10);
+        assert_eq!(retain_ttl_ticks(&normal), 21);
+        // The SHIPPED dev profile (50 Hz, recheck 25): loiter 50 vs beats 51 — the old exactly-two-
+        // beats-zero-slack coincidence is now a derivation with slack.
+        let shipped = StubConfig {
+            tick_dt_s: 0.02,
+            realm_recheck_interval: 25,
+            ..config()
+        };
+        assert_eq!(retain_ttl_ticks(&shipped), 51);
+        // A degenerate dt: the cadence term dominates everything (an absurd dt derives an absurd
+        // cadence; every REAL profile has dt > 0, where the two derived terms above decide).
         let degenerate = StubConfig {
             tick_dt_s: 0.0,
             ..config()
         };
-        assert_eq!(retain_ttl_ticks(&degenerate), RETAIN_TTL_FLOOR);
+        assert_eq!(
+            retain_ttl_ticks(&degenerate),
+            RETAIN_TTL_CADENCE_BEATS * aoi_recheck_cadence(&degenerate) + 1
+        );
         // Alive predicate: age 0 and age == ttl are alive; age == ttl + 1 has expired.
         assert!(ttl_alive(vd_core::TickId(10), vd_core::TickId(10), 3));
         assert!(ttl_alive(vd_core::TickId(10), vd_core::TickId(13), 3));
@@ -21186,6 +22356,8 @@ mod tests {
         let mut rig = Rig::new();
         rig.grant_realm();
         plant_aoi(&mut rig, vec![root_region(), own_region()]);
+        // The scene-set sender must be the resolved parent (findings 0/43 — fail closed).
+        rig.world.resource_mut::<ParentRealmNode>().0 = Some(SHARD);
         insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO); // account AccountId(1), gateway GATEWAY
         // FRESH baseline: the full set {42, 43} arrives ⇒ own outline + both forwarded as `added`
         // (this is also the re-home full-re-assert: a dot arriving at a new home has an empty baseline).
@@ -21228,27 +22400,63 @@ mod tests {
     #[test]
     fn on_child_scene_set_replaces_whole_and_drops_a_misroute() {
         // The receive is a whole-set replace keyed to THIS realm; a set addressed to any other realm
-        // (a recycled NodeId / stale hand-off) is dropped counted and the holding is untouched.
+        // (a recycled NodeId / stale hand-off) is dropped counted and the holding is untouched — and
+        // (findings 0/43) ONLY the resolved parent node is believed at all: a forged or unresolved
+        // sender is refused fail-closed before it can replace the whole holding.
+        const PARENT: NodeId = NodeId(88);
         let cfg = config();
         let mut from_above = FromAboveScene::default();
         let mut stats = StubStats::default();
+        let resolved = ParentRealmNode(Some(PARENT));
         on_child_scene_set(
             vd_wire::intershard::ChildSceneSet {
                 child: StubConfig::root_coord(OWN_REALM),
                 realms: vec![render_shape(RealmId::Planet(42))],
             },
+            PARENT,
+            &resolved,
             &cfg,
             &mut from_above,
             &mut stats,
         );
         assert_eq!(from_above.0.len(), 1);
         assert_eq!(stats.child_scene_received, 1);
+        // FORGED SENDER: on-target but not the resolved parent ⇒ counted, the holding untouched.
+        on_child_scene_set(
+            vd_wire::intershard::ChildSceneSet {
+                child: StubConfig::root_coord(OWN_REALM),
+                realms: Vec::new(),
+            },
+            NodeId(89),
+            &resolved,
+            &cfg,
+            &mut from_above,
+            &mut stats,
+        );
+        assert_eq!(stats.child_scene_unauthored, 1);
+        assert_eq!(from_above.0.len(), 1, "a forged frame replaced nothing");
+        // UNRESOLVED PARENT (fail closed): before the first parent Head reply nothing is believed.
+        on_child_scene_set(
+            vd_wire::intershard::ChildSceneSet {
+                child: StubConfig::root_coord(OWN_REALM),
+                realms: Vec::new(),
+            },
+            PARENT,
+            &ParentRealmNode(None),
+            &cfg,
+            &mut from_above,
+            &mut stats,
+        );
+        assert_eq!(stats.child_scene_unauthored, 2);
+        assert_eq!(from_above.0.len(), 1, "an unresolved parent admits nothing");
         // REPLACE, not append — and an EMPTY set clears the holding (the parent's removal reconciles).
         on_child_scene_set(
             vd_wire::intershard::ChildSceneSet {
                 child: StubConfig::root_coord(OWN_REALM),
                 realms: Vec::new(),
             },
+            PARENT,
+            &resolved,
             &cfg,
             &mut from_above,
             &mut stats,
@@ -21260,6 +22468,8 @@ mod tests {
                 child: StubConfig::root_coord(RealmId::Planet(42)),
                 realms: vec![render_shape(RealmId::Planet(43))],
             },
+            PARENT,
+            &resolved,
             &cfg,
             &mut from_above,
             &mut stats,
@@ -21296,6 +22506,8 @@ mod tests {
             vec![region(RealmId::Planet(42), None, DVec3::ZERO, 1000.0)],
         );
         insert_owned_dot(&mut h, SESSION, player(7), DVec3::ZERO); // account AccountId(1), gateway GATEWAY
+        // The child believes the set only from its resolved parent node (findings 0/43).
+        h.world.resource_mut::<ParentRealmNode>().0 = Some(HOME_SHARD);
         let sent = h.tick(vec![wire_msg(
             HOME_SHARD,
             MsgClass::Saga,
@@ -21398,6 +22610,8 @@ mod tests {
         // ONE message, not two. The set is the receiver's whole from-above holding, so two senders of
         // a full set would each delete the other's realms on arrival, every tick, forever.
         let mut rig = parent_with_an_offset_path_child();
+        // The scene-set sender must be the resolved parent (findings 0/43 — fail closed).
+        rig.world.resource_mut::<ParentRealmNode>().0 = Some(ABOVE_NODE);
         inject_bit(&mut rig, RealmId::Planet(42));
         // From above: a realm this shard does not author at all, stated in THIS shard's frame (which is
         // what its own parent restated it to before sending it here).
@@ -21410,12 +22624,22 @@ mod tests {
             shape: Boundary::Shell { r: 10.0 },
             parent: Some(OWN_REALM),
         };
+        // The parent's reflect keeps the path-child's own box at the origin — for THIS shard, its OWN
+        // outline. Restated one hop down it would state −(the child's placement): the SL1 leak the
+        // merge filter exists to stop (finding 17).
+        let own_outline = RealmShape {
+            realm: OWN_REALM,
+            frame: frame_of(OWN_REALM),
+            center: LatticePos::local(DVec3::ZERO),
+            shape: Boundary::Shell { r: 100_000.0 },
+            parent: None,
+        };
         let sent = rig.tick(vec![wire_msg(
             ABOVE_NODE,
             MsgClass::Saga,
             &InterShardFlow::ChildSceneSet(vd_wire::intershard::ChildSceneSet {
                 child: StubConfig::root_coord(OWN_REALM),
-                realms: vec![outline],
+                realms: vec![own_outline, outline],
             }),
         )]);
         let reflected = child_scene_sets(&sent);
@@ -21424,7 +22648,9 @@ mod tests {
         assert_eq!(
             at.keys().copied().collect::<BTreeSet<_>>(),
             BTreeSet::from([RealmId::Planet(42), RealmId::Planet(43), from_above]),
-            "what this shard can see and what it was told about, in one set",
+            "what this shard can see and what it was told about, in one set — and NOT this shard's \
+             own outline: restated it would hand the child its own placement, sign-flipped (SL1, \
+             finding 17)",
         );
         assert_eq!(
             at[&from_above],
@@ -21549,6 +22775,8 @@ mod tests {
         // set IS the truth, so an emptied set clears it (the removals reconcile through the per-dot
         // baselines) and nothing lingers waiting to be re-shipped to whoever next stands here.
         let mut rig = parent_with_an_offset_path_child();
+        // The scene-set sender must be the resolved parent (findings 0/43 — fail closed).
+        rig.world.resource_mut::<ParentRealmNode>().0 = Some(ABOVE_NODE);
         let _ = rig.tick(vec![wire_msg(
             ABOVE_NODE,
             MsgClass::Saga,
@@ -21776,8 +23004,9 @@ mod tests {
     fn aoi_emits_the_parent_headread_when_armed_and_on_cadence() {
         // A PLANET shard (own realm Planet(42)) nested under System(7): its `own_coord` carries the full
         // lineage, so `parent()` is the System. With an ARMED child band + the recheck cadence live, the AoI
-        // pass resolves the parent by HeadRead-ing its directory record — its node lands in `ParentRealmNode`
-        // (S2a-2b-ii up-relays each occupant's interest to it so the parent can cull the occupant's siblings).
+        // pass resolves the parent by HeadRead-ing its directory record — its node lands in `ParentRealmNode`,
+        // the send target of the UP-lanes (the ChildLive bit + the up-observation rows/outlines; the
+        // per-occupant interest up-relay is DELETED, Step 5 slice D).
         let cfg = StubConfig {
             realm: OTHER_REALM,
             held_realms: StubConfig::single_realm(OTHER_REALM),
@@ -21953,6 +23182,102 @@ mod tests {
     }
 
     #[test]
+    fn update_child_node_caches_a_rostered_childs_shard_revokes_and_ignores_non_children() {
+        // The downward twin (findings 0/43): a realm-Head reply for a ROSTERED direct child caches its
+        // node as the up-lanes' admission answer; a re-home overwrites; a non-Shard or absent record
+        // REMOVES (fail closed); a reply for anything not on the roster is a no-op.
+        let cfg = config(); // own realm System(7)
+        let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()]);
+        let rec = |auth: AuthorityRef| vd_wire::seams::directory::OwnerRecord {
+            authority: auth,
+            fence: Fence(1),
+            lease_expires: UniverseTick(1_000),
+            in_transfer: None,
+        };
+        let mut cn = ChildRealmNodes::default();
+        // A rostered child's Head with a Shard authority ⇒ cached.
+        update_child_node(
+            OTHER_REALM,
+            Some(&rec(AuthorityRef::Shard(NodeId(61)))),
+            &cfg,
+            &regions,
+            &mut cn,
+        );
+        assert_eq!(cn.0.get(&OTHER_REALM), Some(&NodeId(61)));
+        // A child RE-HOME (a later reply naming a new node) ⇒ overwrite.
+        update_child_node(
+            OTHER_REALM,
+            Some(&rec(AuthorityRef::Shard(NodeId(62)))),
+            &cfg,
+            &regions,
+            &mut cn,
+        );
+        assert_eq!(cn.0.get(&OTHER_REALM), Some(&NodeId(62)));
+        // A NON-child realm (here the shard's own) ⇒ the map is untouched (the roster guard's false arm).
+        update_child_node(
+            OWN_REALM,
+            Some(&rec(AuthorityRef::Shard(NodeId(63)))),
+            &cfg,
+            &regions,
+            &mut cn,
+        );
+        assert_eq!(cn.0.len(), 1, "a non-child Head never touches the map");
+        // A child record held by a GATEWAY (not a shard) ⇒ REMOVED — the up-lanes fail closed.
+        update_child_node(
+            OTHER_REALM,
+            Some(&rec(AuthorityRef::Gateway(NodeId(5)))),
+            &cfg,
+            &regions,
+            &mut cn,
+        );
+        assert!(cn.0.is_empty());
+        // A child REVOKE (record gone) ⇒ removed too.
+        update_child_node(
+            OTHER_REALM,
+            Some(&rec(AuthorityRef::Shard(NodeId(62)))),
+            &cfg,
+            &regions,
+            &mut cn,
+        );
+        update_child_node(OTHER_REALM, None, &cfg, &regions, &mut cn);
+        assert!(cn.0.is_empty());
+    }
+
+    #[test]
+    fn admission_head_reads_ride_the_aoi_cadence_for_demanded_children() {
+        // Findings 0/43, the EAGER pre-resolve: on the same cadence (and behind the same `aoi_live`
+        // gate) as the parent head-read, the shard reads the directory head of every child it is
+        // currently demanding or holds a live bit for — so the admission answer is in hand before the
+        // child's first bit ever arrives (zero added spin-up-to-visible latency). Off-cadence ticks
+        // read nothing.
+        let mut rig = Rig::with_config(StubConfig {
+            realm_recheck_interval: 2,
+            ..config()
+        });
+        rig.grant_realm();
+        plant_aoi(
+            &mut rig,
+            vec![
+                root_region(),
+                own_region(),
+                aoi_child(OTHER_REALM, OWN_REALM, 1000.0, 0),
+            ],
+        );
+        // An occupant inside the child's band ⇒ the child is demanded every tick.
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        rig.set_local_tick(4); // on the cadence
+        assert!(
+            headreads(&rig.tick(vec![])).contains(&DirectoryKey::Realm(OTHER_REALM)),
+            "a demanded child's head is read on the cadence beat"
+        );
+        rig.set_local_tick(5); // off the cadence
+        assert!(
+            !headreads(&rig.tick(vec![])).contains(&DirectoryKey::Realm(OTHER_REALM)),
+            "off-cadence ticks read nothing — the count is bounded by beats, not ticks"
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "self-fence")]
     fn register_stub_shard_rejects_a_parent_that_aliases_its_own_realm_id() {
         use vd_core::realm_path::RealmKindTag;
@@ -22064,7 +23389,7 @@ mod tests {
         assert_eq!(
             child_live_bits(&rig.tick(vec![])).len(),
             1,
-            "while OWNED the realm's bit beats to the parent every tick"
+            "while OWNED the realm's bit ships (the occupancy edge here; cadence beats follow)"
         );
         let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
         let sent = rig.tick(vec![wire_msg(
@@ -22119,7 +23444,10 @@ mod tests {
         // and the parent keeps hearing about the traveller for the whole window instead of losing them
         // at the worst possible moment.
         const PARENT_NODE: NodeId = NodeId(55);
-        let mut rig = parented_aoi_rig_holding(2, 8);
+        // recheck 1 ⇒ the bit's cadence is every tick (finding 41): this test measures the HOLD
+        // budget tick by tick, so it pins the densest beat; the cadence itself has its own gate
+        // (`the_bit_beats_on_the_cadence_plus_the_occupancy_edge`).
+        let mut rig = parented_aoi_rig_holding(1, 8);
         resolve_parent_head(
             &mut rig,
             StubConfig::root_coord(OWN_REALM).lowered(),
@@ -22161,7 +23489,8 @@ mod tests {
         // and from that moment IT relays the occupant, so this shard must stop. The budget is only the
         // backstop for a hand-off that never gets here.
         const PARENT_NODE: NodeId = NodeId(55);
-        let mut rig = parented_aoi_rig_holding(2, 8);
+        // recheck 1 ⇒ the bit beats every tick (see the hold-budget test above for why).
+        let mut rig = parented_aoi_rig_holding(1, 8);
         resolve_parent_head(
             &mut rig,
             StubConfig::root_coord(OWN_REALM).lowered(),
@@ -22272,6 +23601,55 @@ mod tests {
         assert!(
             child_live_bits(&sent).is_empty(),
             "no bit until the parent node is resolved — the next tick catches up"
+        );
+    }
+
+    #[test]
+    fn the_bit_beats_on_the_cadence_plus_the_occupancy_edge() {
+        // Lane cure, finding 41 — the bit's contract-stated rate, measured: on the AoI cadence, plus
+        // immediately when the realm becomes occupied (the adopt edge, derived from the occupancy
+        // transition itself — no hook in any adopt path), and re-armed by going empty.
+        const PARENT_NODE: NodeId = NodeId(55);
+        let mut rig = parented_aoi_rig(4); // cadence 4 — beats land on multiples of 4
+        resolve_parent_head(
+            &mut rig,
+            StubConfig::root_coord(OWN_REALM).lowered(),
+            PARENT_NODE,
+        );
+        // OCCUPANCY EDGE: the first occupied tick ships the bit at once, OFF the cadence.
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        rig.set_local_tick(5);
+        assert_eq!(
+            child_live_bits(&rig.tick(vec![])).len(),
+            1,
+            "the occupancy transition ships immediately, off-cadence"
+        );
+        // Sustained occupancy off the cadence: silent — the parent has been told, the TTL holds it.
+        rig.set_local_tick(6);
+        assert!(
+            child_live_bits(&rig.tick(vec![])).is_empty(),
+            "off-cadence, already told ⇒ no beat"
+        );
+        // The cadence beat re-asserts the level.
+        rig.set_local_tick(8);
+        assert_eq!(
+            child_live_bits(&rig.tick(vec![])).len(),
+            1,
+            "the cadence beat ships"
+        );
+        // GOING EMPTY re-arms the edge: the next occupant's first tick ships at once again.
+        rig.world.resource_mut::<Dots>().0.clear();
+        rig.set_local_tick(9);
+        assert!(
+            child_live_bits(&rig.tick(vec![])).is_empty(),
+            "an empty realm ships no bit (it self-reports Empty instead)"
+        );
+        insert_owned_dot(&mut rig, SESSION, player(8), DVec3::new(500.0, 0.0, 0.0));
+        rig.set_local_tick(10);
+        assert_eq!(
+            child_live_bits(&rig.tick(vec![])).len(),
+            1,
+            "re-occupied ⇒ the edge fires again, off-cadence"
         );
     }
 }

@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a Planet shard is `PlanetCentered`, a Station `StationLocal`, an Area `AreaLocal{planet,area}` — an Area
     // REQUIRES its Planet parent, which the forest region carries). Looked up from `seed_regions` — the
     // SAME scale-built forest the containment detector uses — so the frame + parent are the SAME
-    // deterministic worldgen fact the detector + `rebind_pose_to_dest` use, never a per-kind inline (a
+    // deterministic worldgen fact the detector + the arrival placement (`place_arriving_pose`) use, never a per-kind inline (a
     // `System(seed)` shard resolves to `SystemSpace{seed}`, byte-identical to the old hardcoded frame, on
     // both scales). If the realm is absent from the forest (an unknown seed) fall back to its parentless
     // canonical frame (an Area then has no frame — rejected LOUD, never a silent wrong frame).
@@ -197,8 +197,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         own_coord.parent().map(|p| p.lowered()),
     )
     .map_err(|e| format!("{e} — refusing to boot"))?;
-    // How long this shard keeps speaking for an occupant it has handed away — telling its parent where
-    // they are, and counting itself occupied — when the take-over never lands. Handed down by the
+    // How long this shard keeps speaking for an occupant it has handed away — counting itself occupied,
+    // so its one-bit ChildLive heartbeat keeps beating (no pose crosses; the per-occupant position
+    // up-relay is DELETED, Step 5 slice D) — when the take-over never lands. Handed down by the
     // orchestrator that launched it, because only there are both budgets it depends on in scope: how long
     // a hand-off may take, and how fast a realm can be reclaimed. ABSENT ⇒ 0 ⇒ the shard lets go the
     // instant it is told to, exactly as before. Logged so a real run SHOWS which of the two it is running.
@@ -291,7 +292,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     vd_core::geometry::guard_regions_nest(
         &regions,
         vd_sim::stub::MAX_REGIONS,
-        &vd_bins::child_reaches(&regions, &moving),
+        // The reach roster derives from THE world for EVERY parent this neighbourhood names —
+        // never from this shard's own `moving` subset, whose gaps judged a non-hosted mover at
+        // its zeroed centre (the batch-review zero-reach hole; one forest, one verdict, on
+        // every shard).
+        &vd_bins::child_reaches(
+            universe_seed,
+            &regions,
+            move_speed * time_multiplier,
+            tick_dt,
+        ),
     )
     .map_err(|e| {
         format!("malformed realm-region forest for {hosted_realm}: {e} — refusing to boot")

@@ -14,9 +14,10 @@
 //!
 //! ## WIRED (P2 Slice 1d.4b attached it)
 //! This FSM is the per-entity authority TRUTH on the stub `Dot`: `simulates()` is half the
-//! `apply_input` gate and the `topology.rs` oracle held-set. EMIT-eligibility (1d.5b.3b) is the
-//! strictly-DERIVED `simulates() | is_fed_ghost | is_retained_ghost` (`stub.rs` `emit_frames`): a
-//! fed or retained Ghost EMITS its kinematic mirror (to keep the cross-shard handoff seamless) but
+//! `apply_input` gate and the `topology.rs` oracle held-set. EMIT-eligibility (slice F) is the
+//! strictly-DERIVED `simulates() | (is_retained_ghost & Source-hold-open)` (`stub.rs` `emits`): a
+//! retained Ghost EMITS its kinematic mirror only while the hand-off hold is open — the leaver
+//! vanishes at hold closure; the fed-ghost lane is DELETED (slice F) — and it
 //! integrates/accepts NOTHING. Login mints `Ghost{GENESIS}` then Promotes `Ghost→Owned` (`flip_grant`);
 //! the transfer-dest mints `Ghost{GENESIS}`, stores the crossed pose (`apply_crossing`), and Promotes
 //! ONLY on the saga `Promote` (`on_saga_promote`, 1d.5b.3b — strict demote-before-promote). The

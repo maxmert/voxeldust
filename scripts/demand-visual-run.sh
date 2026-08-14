@@ -63,10 +63,9 @@ cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins
 echo "building the windowed client (Bevy — the FIRST build is heavy, ~15-25 min on a slow box; progress below)…"
 cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features "$CLIENT_FEATURES"
 
-# Boot the demand cluster in VISUAL scale. spawn_node inherits the parent env (no env_clear), so the
-# DEMAND-SPAWNED home shard's resolve_universe_scale reads VD_UNIVERSE_SCALE=visual and authors the
-# window-friendly orbiting system when the reconciler spins it up on your login.
-# THE WORLD IS NO LONGER SELECTED, so there is nothing to export here. This line used to set a scale,
+# Boot the demand cluster on THE world (the demand-spawned shards boot `UniverseConfig::world`;
+# `resolve_universe_scale` / `VD_UNIVERSE_SCALE` were deleted with the scale knob, Stage-C batch 1).
+# THE WORLD IS NO LONGER SELECTED, so there is nothing to export here. This block used to set a scale,
 # and a live cluster was read process by process with the orchestrator on one world and its own gateway on
 # another — from THIS script, in one launch. A knob that exists can be set twice; the fix was to delete it.
 

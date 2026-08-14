@@ -145,6 +145,28 @@ pub const NEAR_PLANE: f64 = 0.1;
 /// The perspective far plane (m) — generous so any capture-scale point projects.
 pub const FAR_PLANE: f64 = 1.0e12;
 
+/// The minimum apparent radius, in pixels, a DOT MARKER may shrink to under perspective — the VU
+/// marker-phase visibility floor (a dot is the avatar's marker until meshes land, and a marker that
+/// falls below a pixel is not a marker). Load-bearing for the pixel gates too (batch review): the
+/// 0.5 m dot at a scene-fitted camera's ~780 m eye subtends ~0.6 px — whether it covered ANY sample
+/// was luck — so no pixel verdict could be made dot-sensitive until the marker's footprint had a
+/// floor. THE one constant both the renderer (the marker scale) and the gates (the projected rect)
+/// derive from, via [`marker_world_radius`] — two derivations of it is how they would drift.
+pub const DOT_MIN_APPARENT_RADIUS_PX: f64 = 3.0;
+
+/// The dot marker's WORLD radius after the minimum-apparent-size floor: `base_radius_m`, or the
+/// world size of [`DOT_MIN_APPARENT_RADIUS_PX`] at view distance `dist_m` under a symmetric vertical
+/// `fov_y` over `viewport_h_px` rows — whichever is larger. Pure, branchless (HR5), shared by the
+/// Tier-B renderer (which scales the marker mesh by it) and the pixel gates (which size the dot's
+/// projected rectangle from it), so the drawn footprint and the asserted rectangle cannot disagree.
+/// `dist_m` is the euclidean eye→marker distance on BOTH sides (a slight over-estimate of view
+/// depth off-axis, absorbed by the callers' bracketing factor).
+#[must_use]
+pub fn marker_world_radius(base_radius_m: f64, dist_m: f64, fov_y: f64, viewport_h_px: f64) -> f64 {
+    let m_per_px = 2.0 * dist_m.max(0.0) * (fov_y * 0.5).tan() / viewport_h_px;
+    base_radius_m.max(DOT_MIN_APPARENT_RADIUS_PX * m_per_px)
+}
+
 // ---------------------------------------------------------------------------
 // Scene framing (Slice V3): fit a CaptureCamera to the whole realm-box scene so
 // every box is visible in the readback — Tier-A math the Tier-B renderer only APPLIES.
@@ -268,6 +290,24 @@ mod tests {
 
     fn close(a: DVec3, b: DVec3) -> bool {
         (a - b).length() < 1e-9
+    }
+
+    #[test]
+    fn the_marker_radius_floors_at_the_apparent_size_and_never_shrinks_the_base() {
+        // NEAR: the base radius already subtends more than the floor — returned unchanged. At
+        // fov 90° over 100 rows, 1 px ≙ 2·d·tan(45°)/100 = d/50 m; at d = 10 m the 3 px floor is
+        // 0.6 m, under the 1 m base.
+        let fov = std::f64::consts::FRAC_PI_2;
+        assert_eq!(marker_world_radius(1.0, 10.0, fov, 100.0), 1.0);
+        // FAR: the floor wins — exactly DOT_MIN_APPARENT_RADIUS_PX pixels' worth of world at depth
+        // (~60 m at d = 1000 m over 100 rows), stated by the same expression so no tan() ulp can
+        // split the two sides.
+        assert_eq!(
+            marker_world_radius(1.0, 1000.0, fov, 100.0),
+            DOT_MIN_APPARENT_RADIUS_PX * (2.0 * 1000.0 * (fov * 0.5).tan() / 100.0)
+        );
+        // A degenerate (behind-the-eye) distance clamps to zero depth ⇒ the base radius stands.
+        assert_eq!(marker_world_radius(0.5, -5.0, fov, 100.0), 0.5);
     }
 
     #[test]

@@ -280,12 +280,40 @@ pub fn plant_demand_neighbourhood_with_movers(
     tick_dt_s: f64,
     movers: &BTreeMap<RealmId, vd_physics::celestial::OrbitalElements>,
 ) {
+    plant_demand_neighbourhood_with_movers_and_regions(
+        topo,
+        node,
+        universe_seed,
+        hosted_realm,
+        occupant_v_max_mps,
+        tick_dt_s,
+        movers,
+        &[],
+    );
+}
+
+/// [`plant_demand_neighbourhood_with_movers`] plus PLAYER-BUILT structures appended to the shard's
+/// roster — exactly the shape player-built content takes when it lands (see the fixture-forest note in
+/// `vd_physics::worldgen`): a world is bodies, and where a region came from is not something anything
+/// downstream asks. NOT a second world — the seed neighbourhood is planted verbatim and the extras ride
+/// beside it, as a placed station or area would.
+#[allow(clippy::too_many_arguments)]
+pub fn plant_demand_neighbourhood_with_movers_and_regions(
+    topo: &mut Topology,
+    node: NodeId,
+    universe_seed: u64,
+    hosted_realm: RealmId,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+    movers: &BTreeMap<RealmId, vd_physics::celestial::OrbitalElements>,
+    extra_regions: &[vd_core::geometry::RealmRegion],
+) {
     let scope: BTreeSet<RealmId> =
         vd_physics::worldgen::realm_neighbourhood_for(universe_seed, hosted_realm)
             .iter()
             .map(|r| r.realm)
             .collect();
-    let regions: Vec<vd_core::geometry::RealmRegion> =
+    let mut regions: Vec<vd_core::geometry::RealmRegion> =
         vd_physics::worldgen::realm_regions_for_walk_config(
             universe_seed,
             &vd_physics::worldgen::UniverseConfig::walk_demand(occupant_v_max_mps, tick_dt_s),
@@ -293,6 +321,7 @@ pub fn plant_demand_neighbourhood_with_movers(
         .into_iter()
         .filter(|r| scope.contains(&r.realm))
         .collect();
+    regions.extend_from_slice(extra_regions);
     with_node(topo, node, |s| {
         *s.world_mut().resource_mut::<vd_sim::stub::RealmRegions>() =
             vd_sim::stub::RealmRegions::new(regions)
@@ -497,7 +526,14 @@ fn build_cluster(
             reject_next_prepare: None,
             // 5f-3c: the trusted-gateway seed injector is UNARMED here ⇒ INERT (byte-identical: the
             // cluster scenarios pre-spawn their shards, so no login-driven RealmDemand is emitted).
-            seed_injector: SeedInjectorConfig::default(),
+            // The world is EXPLICIT (the walk fixture, lowered): `Default` — which built a world
+            // silently inside the shipped gateway library — is deleted (D-WORLD-5, batch review).
+            seed_injector: SeedInjectorConfig::inert(
+                vd_physics::worldgen::WorldView::hand_placed(
+                    &vd_physics::worldgen::UniverseConfig::walk_scale(),
+                )
+                .lowered(),
+            ),
             tuning: TransportTuning {
                 max_sessions,
                 max_buffered_inputs: TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS,
@@ -738,14 +774,38 @@ pub fn seed_transient_crossing(
     dst_realm_fence: Fence,
     vel: vd_core::glam::DVec3,
 ) {
+    // The seeded pose is stated in the DEST realm's frame — what a LAWFUL travel chain delivers
+    // (SL2: out into the shared parent and in again; these two systems are SIBLINGS with no shared
+    // parent region planted, so nothing on the way could convert). The dest's receiver guard
+    // (`place_arriving_pose`, audit :105/:374/:384) now REFUSES what it cannot measure: a pose left
+    // in the SOURCE's frame no longer adopts — see `seed_transient_crossing_in_frame` and the
+    // p3 mis-framed refusal gate.
+    seed_transient_crossing_in_frame(
+        topo,
+        entity,
+        batch,
+        anchor,
+        dst_realm_fence,
+        vel,
+        dest_stub_config().frame,
+    );
+}
+
+/// [`seed_transient_crossing`] with an EXPLICIT pose frame — the p3 frame-sensitivity gate seeds a
+/// crossing whose pose stays in the SOURCE's frame to prove the dest's convert-or-refuse guard.
+pub fn seed_transient_crossing_in_frame(
+    topo: &mut Topology,
+    entity: EntityId,
+    batch: TransferId,
+    anchor: Fence,
+    dst_realm_fence: Fence,
+    vel: vd_core::glam::DVec3,
+    frame: vd_core::pose::FrameRef,
+) {
     with_node(topo, SHARD, |s| {
         let pose = vd_core::pose::StampedPose {
             vel,
-            ..vd_core::pose::StampedPose::at_rest(
-                stub_config().frame,
-                TRANSIENT_SEED_POS0,
-                TRANSIENT_SEED_TICK0,
-            )
+            ..vd_core::pose::StampedPose::at_rest(frame, TRANSIENT_SEED_POS0, TRANSIENT_SEED_TICK0)
         };
         s.world_mut()
             .resource_mut::<vd_sim::stub::OwnedTransients>()
@@ -820,10 +880,11 @@ pub fn plant_crossing_boundaries(
 }
 
 /// C-6c — plant the SEED-DERIVED containment neighbourhood (`vd_physics::worldgen::realm_neighbourhood_for`)
-/// on the shard `node` (its own realm + ancestors + owned children — the EXACT geometry the production
-/// `shard.rs` boot computes). ARMS the containment detector on that shard against the canonical forest,
-/// so a re-home is driven by real seed geometry, not an authored fixture. `universe_seed` matches the
-/// shard's boot seed.
+/// on the shard `node` (its own realm + ancestors + owned children). ARMS the containment detector on that
+/// shard so a re-home is driven by seed geometry, not an authored fixture. `universe_seed` matches the
+/// shard's boot seed. NOTE (D-WORLD-5): the geometry comes from the walk-forest FIXTURE path
+/// (`realm_regions_for` → `generate_walk_forest`), NOT the world the production `shard.rs` boot computes
+/// (`generate_system_forest`); the scenario-tier re-base onto THE world is ledgered.
 pub fn plant_seed_neighbourhood(
     topo: &mut Topology,
     node: NodeId,
@@ -838,8 +899,9 @@ pub fn plant_seed_neighbourhood(
 }
 
 /// task #149 — plant the seed-derived containment neighbourhood for the UNION of a CO-HOSTED held set
-/// (`vd_physics::worldgen::realm_neighbourhood_for_held`), the EXACT geometry the production `shard.rs` boot
-/// computes for a multi-realm shard. A single-realm `plant_seed_neighbourhood` gives only its own realm +
+/// (`vd_physics::worldgen::realm_neighbourhood_for_held`) — the same UNION FOLD the production `shard.rs`
+/// boot runs for a multi-realm shard, over the walk-forest FIXTURE geometry, not THE world (D-WORLD-5,
+/// see `plant_seed_neighbourhood` above). A single-realm `plant_seed_neighbourhood` gives only its own realm +
 /// ancestors + DIRECT children — so a shard co-hosting `{System 7, Planet 7, Area 7}` needs THIS to evaluate
 /// Area 7 (a GRANDCHILD of System 7, absent from System 7's own neighbourhood).
 pub fn plant_seed_neighbourhood_held(
@@ -1024,7 +1086,7 @@ pub fn stamp_subject_pose_in_dest_frame(topo: &mut Topology, entity: EntityId) {
 
 /// task #149 — the AUTHORITATIVE pose FRAME of the dot whose `entity == subject` on shard `node`, or `None`
 /// if that shard holds no such dot. The frame flips to the dest realm's canonical frame once a re-home's
-/// dest adopt runs `rebind_pose_to_dest` — on a co-hosted (source==dest) re-home that adopt is THIS node's
+/// dest adopt runs `place_arriving_pose` — on a co-hosted (source==dest) re-home that adopt is THIS node's
 /// own promote, so the frame advances to the child realm (Planet/Area) here. The source==dest e2e reads
 /// this to prove the crossed pose ends in the `AreaLocal` frame (the "Area label never flips" fix).
 #[must_use]
@@ -1226,6 +1288,31 @@ pub fn source_transients_emitted(topo: &mut Topology) -> u64 {
         s.world_mut()
             .resource::<vd_sim::stub::StubStats>()
             .transients_emitted
+    })
+}
+
+/// Read ONE `StubStats` counter off a shard node — for gate assertions that need a counter
+/// `InspectReport` does not carry (e.g. the band-exit Despawn mechanism counters, the transient
+/// adopt's convert-or-refuse counter).
+pub fn shard_stat(
+    topo: &mut Topology,
+    node: NodeId,
+    read: impl FnOnce(&vd_sim::stub::StubStats) -> u64,
+) -> u64 {
+    with_node(topo, node, |s| {
+        read(s.world_mut().resource::<vd_sim::stub::StubStats>())
+    })
+}
+
+/// Is the SOURCE-role hand-off HOLD for `entity` still OPEN on `node`? The slice-F emit gate reads
+/// exactly this key (`emits` = `simulates() | (retained-ghost & Source-hold-open)`), so the band-exit
+/// capstone asserts the leaver's self-emit stopped AT HOLD CLOSURE — long before band exit.
+pub fn source_hold_open(topo: &mut Topology, node: NodeId, entity: EntityId) -> bool {
+    with_node(topo, node, |s| {
+        s.world_mut()
+            .resource::<vd_sim::stub::HandoffHolds>()
+            .0
+            .contains_key(&(entity, vd_sim::stub::HoldRole::Source))
     })
 }
 

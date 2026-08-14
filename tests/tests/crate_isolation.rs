@@ -71,11 +71,15 @@ const MAY_NAME_MOTION: &[(&str, &str)] = &[
         "vd-bins",
         "the composition root: builds the motion roster, runs the boot fences, injects MotionFns",
     ),
-    (
-        "vd-connection-plane",
-        "the gateway resolves logins against THE world (UniverseConfig + WorldView) — the one party \
-         holding both ends of every login conversion",
-    ),
+    // vd-connection-plane WAS allowlisted here ("the gateway resolves logins against THE world").
+    // DELETED (batch review, MAJOR): the gateway only ever QUERIED the world — regions, the
+    // neighbourhood scope, realm membership — so it now RECEIVES the lowered
+    // `vd_core::worldgen::WorldRealms` from the composition root and carries a vd-physics edge only
+    // in [dev-dependencies] (fixtures build worlds; the shipped library cannot). The universal
+    // assert below covers the routing plane again — an orbit symbol there is a build break, not a
+    // review finding. OBSERVED FAILING for this crate too (2026-08-14): with
+    // `vd-physics = { workspace = true }` restored to vd-connection-plane's `[dependencies]`, this
+    // test failed naming the crate, and passed again once the edge was removed.
     (
         "vd-tests",
         "the scenario library builds THE world's fixtures; a test-only crate nothing ships or depends on",

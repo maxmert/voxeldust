@@ -159,6 +159,23 @@ pub struct DevState {
     /// ingress. Nonzero means a sender (gateway/shard) is shipping corrupt floats — a
     /// real fault, surfaced (not silently fixed).
     pub nonfinite_poses: u64,
+    /// FAULT at steady state / BENIGN right after a removal: entity rows refused by the client's
+    /// RESURRECT GUARD (a straggler for an entity the reliable remove message already evicted).
+    /// A brief burst after a removal is the unreliable lane draining; GROWTH at steady state means
+    /// a shard keeps emitting an entity it told this client was removed — OR the guard is wrongly
+    /// armed and the entity is permanently undrawable (the frozen/invisible-figure class). Surfaced
+    /// here (audit :304) so `vdctl state` can tell "the shard stopped emitting" from "the client
+    /// refused every row it sent".
+    pub resurrect_rows_dropped: u64,
+    /// BENIGN during a crossing's grace window / FAULT at steady state: rows skipped by the
+    /// ONE-SPACE rule, summed across the entity AND realm feeds — a pose stated in a space other
+    /// than the one this client stands in. Steady-state growth means a shard ships entities/realms
+    /// in a space its observer does not stand in.
+    pub foreign_space_rows: u64,
+    /// BENIGN during a crossing's grace window: own-entity rows dropped as the ECHO (the old home's
+    /// still-draining copy of the leaver in the space just left). Growth OUTSIDE a crossing means
+    /// the echo filter is eating live rows.
+    pub echo_rows_dropped: u64,
     /// THROUGHPUT: dev-control actions dequeued and applied (incl. Close/Reset).
     pub dev_commands_applied: u64,
     /// FAULT (overload): dev commands shed because the bounded mailbox was full.
@@ -204,6 +221,11 @@ pub(crate) mod tests {
             ignored: 0,
             foreign_peer_drops: 0,
             nonfinite_poses: 0,
+            // Distinct non-zero values so a round-trip that dropped or transposed one of the three
+            // row-drop counters cannot still pass (the same discipline as the feed ticks above).
+            resurrect_rows_dropped: 5,
+            foreign_space_rows: 6,
+            echo_rows_dropped: 7,
             dev_commands_applied: 2,
             dev_commands_dropped: 0,
             transfer: DevTransferView::None,
@@ -222,6 +244,11 @@ pub(crate) mod tests {
         // The drawn realm box rides its realm id + composited center.
         assert!(json.contains("\"realm\":\"Planet(7)\""));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
+        // The three row-drop honesty counters ride the surface (audit :304 — a wrongly-armed
+        // resurrect guard must be VISIBLE to `vdctl state`), each with its distinct sample value.
+        assert!(json.contains("\"resurrect_rows_dropped\":5"));
+        assert!(json.contains("\"foreign_space_rows\":6"));
+        assert!(json.contains("\"echo_rows_dropped\":7"));
         let back: DevState = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, state);
     }
