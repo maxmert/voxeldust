@@ -4208,3 +4208,67 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **WHAT LANDED NOW (the interim):** `region_level` returns `Option` and every coord-needing lane excludes a Ship region GRACEFULLY — counted per lane pass (`StubStats::ship_child_regions_excluded`), never a panic (it was an `expect` that aborted the whole shard on one hosted ship region). A ship still counts where no coord is needed: its `ChildLive` bit is a child OBSERVER, so an occupied ship keeps its parent warm (SL7). Pinned by `stub::tests::a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic` (all four lanes, one tick, counter == 4) and the `None` arm in `region_level_recovers_seed_lineage_kinds`. No producer plants a Ship region through P3, so the counter reads 0 in every shipped world.
 - **WHEN:** P8 (the ship-realm work) — a new lineage arm PLUS a payload widening (the `u64` seed cannot hold an `EntityId`), i.e. a deliberate wire change on the frozen `RealmPath`, not an append; the counter and the exclusions retire with it.
 - **Where:** `crates/core/src/realm_path.rs` (`RealmKindTag`), `crates/core/src/worldgen.rs::level_of`, `crates/sim/src/stub.rs::region_level` + the four lane guards, `crates/bins/src/lib.rs::realm_from_kind_seed`.
+
+### D-WINDOW-1 🟧 THE WINDOW LANE — the observer chain that replaces the bucket cascade (owner-approved 2026-08-15/16, docs/design/window_lane.md; slice 0 landing)
+- **WHAT this is:** the binding slice ladder for the window lane (`docs/design/window_lane.md`; the signed
+  five-topic approval + Q1/Q2/Q3 rulings live in `docs/design/owner_decisions_2026-08-15.md`, 2026-08-16
+  addendum). Each world level states only what it lawfully owns — placements, one hop row per occupied child,
+  its own look, one marker per direct child, its SL7 membership verdict — straight to the observer's gateway;
+  the connection plane stacks the statements per observer at ONE universe tick; the client only draws.
+  Zero new realm→realm data; four inter-shard scenery arms end producer-less and are tombstoned.
+- **The ladder (a slice is not done until its owner-visible outcome is real):**
+  - **Slice 0 — the skeleton (🟧 THIS ROW'S STATUS: landing now).** The signed record in-repo; the wire
+    types (`WindowOpen`/`WindowClose` + `WindowScope`, `WindowFrame`/`WindowBody` with typed
+    `BodyStmt`/`WindowMembership` + `WindowId`/`HopRow`), attestation predicates, positional/roundtrip
+    pins, mesh minor 16 with the owner citation; the per-system photometric draw in
+    `generate_system_forest` (pinned f(seed) values). *Owner-visible outcome:* the signed ask + the wire
+    contract. NOTHING MOVES — no producer, no consumer, no behavior change.
+  - **Slice A — shard emits the window** (old lanes still running; no client change). Window registry +
+    derived TTLs (2 beats + 1), hop-row inversion at the author, look/marker/membership emits.
+    *Owner-visible outcome:* every realm publishes its window statements; the old picture unchanged.
+    Gates: G-IDENTICAL (≥2 shard profiles), attestation fail-closed, TTL-expiry chaos,
+    INV-BODY-AT-ORIGIN pin, inversion-inertness pin, the two-level live-sibling pin (per Q1).
+  - **Slice B — gateway composition engine, SHADOW mode.** `window.rs` complete (rings, `transfer_frame`
+    fold, per-stratum hold + dead-hop exit, origin + epoch, session-only chain derivation, the dependency
+    gate replacing the router-converter doc scan). Output compared, never shipped.
+    *Owner-visible outcome:* a measured proof the new picture equals the old one (parity MEASUREMENT with
+    mismatch classes + a soak; G-SHEAR unit half incl. the deliberate mixed-tick FAILURE; exact-cadence
+    boot pin; dedup f64 measured bound; zero-state teardown; G-COMPOSE-LOAD both sides).
+  - **Slice C1 — THE FLAG DAY** (client minor, floor moves; owner item 9: no shims, no dual-decode).
+    Client consumes the composed lane; `RealmShape.center` leaves; origin/epoch scene swap replaces
+    `forget_space`; `pin`/`render_pin` deleted; the `--realm-boxes` boot file + emitter + scripts deleted
+    (D-LANE-6 flips 🟩); picture gates re-based. *Owner-visible outcome:* the game runs on the composed
+    picture; boxes come only from the stream.
+  - **Slice C2 — the deletion + tombstones.** FIRST re-walk the §2.9 deletion map against the tree (drift
+    proven); then the four inter-shard scenery arms (`RealmCascade` 26, `RealmObservation` 31,
+    `RealmShapeObservation` 32, `ChildSceneSet` 33) tombstone; the SL1 self-placement filter is deleted
+    WITH its lane (per Q3 — the ruling MUST be cited in the C2 ledger entry); cascade/down-reflect/
+    shape-hop/observed-interior machinery removed. *Owner-visible outcome:* four world-to-world scenery
+    lanes gone forever; nothing changes on screen (the suite stays green).
+  - **Slice D — THE WARP ACCEPTANCE (capstone).** Marker point-sprite rendering, roster-driven look
+    pruning, symmetric handover budgets. *Owner-visible outcome:* the warp experience in pixels on THE
+    world — fly A → B: B a point of light at departure, grows monotonically, hands over flicker-free; A
+    shrinks to a dot behind and tears down. Gates: G-WARP-PIXELS, G-HANDOVER (both directions, incl. the
+    Q2 relay hop at the wake moment), G-TWO-SHIPS (owner-ordered, see the addendum), G-SHEAR full.
+    DEFERRED flips: D-LANE-4 🟩, D-LANE-6 🟩, D-PLACE-3 🟩; D-PLACE-2 residual shrinks but stays open;
+    new owed rows registered (census-scale photometric derivation; P10 rotated-hop composition).
+- **Where:** `crates/wire/src/session_flow.rs` (the lane's types + attestation predicates),
+  `crates/wire/src/version.rs` (minor 16), `crates/physics/src/worldgen.rs` (the photometric draw),
+  `docs/design/window_lane.md` (the binding spec), `docs/design/owner_decisions_2026-08-15.md` (the
+  2026-08-16 addendum).
+
+### D-WINDOW-2 🟥 The DIRECT live-sibling window is the ledgered upgrade path — taken ONLY on a measured G-HANDOVER failure (owner Q2 ruling, 2026-08-16)
+- **WHAT is deferred (deliberately, by ruling):** `WindowScope::Observed` — a gateway subscribing DIRECTLY
+  to a live realm the observer is NOT inside. The owner ruled Q2 = PARENT RELAY: the parent forwards its
+  live children's self-authored statements verbatim (fence + attestation intact; no store, no merge, no
+  re-state, no read), so "am I observed from outside" stays UNREPRESENTABLE in every realm and the variant
+  NEVER ships (it does not exist on the wire — `crates/wire/src/session_flow.rs::WindowScope` is
+  `Occupants | Child` only, and its docs say why).
+- **THE ONE TRIGGER that re-opens this:** the relay costs one hop of look latency at exactly the wake
+  moment. G-HANDOVER (Slice D) MEASURES that hop inside the symmetric wake-footprint budget. If — and only
+  if — that measurement FAILS its derived budget on THE world, the direct window is proposed to the owner
+  as the named per-realm upgrade (a fresh SL6 ask: it tells a realm-adjacent process "some gateway watches
+  me from outside", which is genuinely new information — default NO stands until then). Never adopted for
+  convenience, never pre-built.
+- **Where:** `docs/design/window_lane.md` §2.3/§2.8/§5-RULINGS; `docs/design/owner_decisions_2026-08-15.md`
+  2026-08-16 addendum (Q2); G-HANDOVER lands in Slice D (see [[D-WINDOW-1]]).

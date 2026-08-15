@@ -135,3 +135,71 @@ orchestrator MEASURES: mismatched or unresolvable senders are counted and warned
 demand is processed UNCHANGED — the warm-ahead path must never eat a blind window.
 Refusal is deferred to cloud deployment (where mTLS names the sender). Implemented
 2026-08-15 as the orchestrator's `demand_sender_mismatch` counter.
+
+## Addendum — 2026-08-16: the window lane (docs/design/window_lane.md)
+
+The owner walked the window-lane design component by component on 2026-08-15/16 and
+approved all five topics (the five-topic walk; full record in
+`docs/design/window_lane.md` §4.5). The SL6 formal ask (window_lane.md §1.1 — what data,
+from which realm to which, why the receiver cannot compute it, cost of doing without) is
+APPROVED through that walk. This addendum is the in-repo signed record; wire ledger
+entries and test doc comments for the lane cite HERE and window_lane.md.
+
+- **Topic 1 — the wire contract: APPROVED.** Five realm→gateway statement kinds (hop /
+  placements / self-look / marker / membership) plus the window control lane; ZERO new
+  realm→realm scenery data — four inter-shard scenery arms become producer-less and are
+  tombstoned in Slice C2.
+- **Topic 2 — the shards: APPROVED.** A shard is a witness, never a courier: serialize
+  authored rows once; the three foreign stores, the relay transforms and the four audited
+  scenery receive paths are deleted with the lane (Slice C2).
+- **Topic 3 — the gateway composer: APPROVED.** Fold once per occupied realm per tick,
+  shared across sessions; no physics crate linked (structurally unable to author a
+  placement); the load gate asserts p99 compose+fan < one tick (not the mean), with the
+  sessions-per-occupied-realm ratio on the diagnosis surface.
+- **Topic 4 — the client: APPROVED.** One feed, one frame; the origin-epoch scene swap
+  replaces client inference; the `--realm-boxes` boot file and the guessing code are
+  deleted; the one-space/echo guards die only in the commit that removes their cause
+  (post-C1).
+- **Topic 5 — the proof ladder: APPROVED.** Shadow parity before any client cut, mismatch
+  CLASSES reported, a soak on slice B's exit, pixel gates DevState-driven, old lanes
+  deleted never disabled.
+
+### The three rulings (2026-08-16)
+
+- **Q1 = YES, and GENERIC.** One level into ANY live realm you are next to — never a
+  planet-specific case. A live station shows its areas' outlines; a live ship shows its
+  rooms' outlines; identical code path, pinned on ≥2 realm kinds (the G-IDENTICAL
+  discipline).
+- **Q2 = PARENT RELAY.** The parent forwards its live children's self-authored statements
+  VERBATIM (the child's fence and attestation intact; no store, no merge, no re-state, no
+  read) to interested gateways. `WindowScope::Observed` NEVER ships — the variant does not
+  exist on the wire. The no-flicker gate (G-HANDOVER) explicitly measures the relay hop at
+  the wake moment; the direct per-realm window is ledgered (DEFERRED.md D-WINDOW-2) as the
+  named upgrade taken ONLY if that measurement fails. Rationale: zero new edges (reuses
+  child→parent + parent→gateway, both TTL-guarded/attested/chaos-tested); re-home followed
+  automatically by the parent's existing holder tracking; "am I observed from outside"
+  stays UNREPRESENTABLE in every realm.
+- **Q3 = APPROVED.** The SL1 self-placement filter is DELETED in Slice C2 together with
+  the lane it guards — the behavioral guard is replaced by the structural one (no
+  realm-inbound message type carries a placement field: a compile-time pin plus the
+  absence assertion re-based onto the composed stream). This AMENDS decision 1 above
+  ("the filter stays") by the owner's own ruling; the C2 commit MUST cite this ruling in
+  the ledger so the audit trail shows retirement by amendment, not erosion.
+
+### G-TWO-SHIPS (owner-ordered named pixel gate, Slice D)
+
+Ordered by the owner 2026-08-16: ship X (player 1) in the System, ship Y (player 2) on
+the Planet, hulls mutually visible across the Planet boundary. Asserts, in pixels on THE
+world: (a) each observer draws the OTHER hull at its same-tick composed position
+(mixed-age strata forbidden — the shear law across two chains of different depth);
+(b) player 2 draws the Planet's own body around them (the hop row — the decision-1 hole
+closed, in pixels); (c) each hull's look is the REALM'S OWN statement, delivered via the
+Q2 relay, provenance attested in the manifest; (d) one crossing while both watch: X
+crosses into the Planet; both observers' pictures stay continuous (screen delta ≤ one
+tick of true motion; epoch bumps exactly once for X's own client; the WATCHING client's
+picture never jumps as X's position author flips at the commit); (e) occupant figures
+through windows are asserted ABSENT (the D-RLM-18 remote-figure lane is a future
+owner-gated ask; it must not sneak in). Exercises Q1-generic, Q2-relay, the hop row and
+the crossing swap in one scene. Gate order within Slice D: G-WARP-PIXELS, then
+G-HANDOVER both directions (including the Q2 relay hop measured at the wake moment),
+then G-TWO-SHIPS, then G-SHEAR full.

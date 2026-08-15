@@ -15,13 +15,16 @@
 //! - Client input crosses verbatim: the gateway reads ONLY the leading `seq` varint
 //!   ([`peek_input_seq`]) for dedup and forwards the original bytes unmodified.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
+use vd_core::frame::FramePlacement;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
-use vd_core::{AccountId, EntityId, Fence, SessionId, TickId};
+use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, UniverseTick};
 
 use crate::channels::RealmShape;
 
-use crate::channels::SubId;
+use crate::channels::{RealmSnap, SubId};
 use crate::seams::directory::DirectoryKey;
 
 /// Gateway → shard session control and input.
@@ -103,6 +106,29 @@ pub enum GatewayToShard {
         /// The transfer subject the dest adopts (the `Entity` becomes the dot's id).
         subject: DirectoryKey,
     },
+    /// THE WINDOW LANE's subscription open (gateway → shard, mesh minor 16; SL6 ask APPROVED —
+    /// owner 2026-08-15/16, `docs/design/window_lane.md` §1.1/§2.3/§4.5): "serve the picture for
+    /// `scope`" on the window id the gateway minted. Carries NO account and NO pose — an
+    /// [`WindowScope::Occupants`]/[`WindowScope::Child`] scope is information-equivalent to the
+    /// SL7 occupancy bit that already crosses (SL2 intact). RELIABLE control with DERIVED
+    /// keep-alive semantics: the subscriber re-asserts it on a derived cadence, and the shard
+    /// drops a window not refreshed within the derived TTL of **2 beats + 1** (owner law 3(a),
+    /// `docs/design/owner_decisions_2026-08-15.md` item 3: retention is FOREVER DERIVED — at
+    /// least two cadences plus one, never a free literal), so a dead subscriber can never leak a
+    /// fan. Idempotent per `window` (a re-open refreshes the TTL). APPENDED variant (postcard-safe
+    /// additive shape — a prior arm's discriminant/framing is unchanged). Slice 0 plants the
+    /// SHAPE: no producer exists until the Slice-B window engine; the shard-side registry that
+    /// consumes it is Slice A (a control frame arriving before then is dropped + counted).
+    WindowOpen {
+        window: WindowId,
+        scope: WindowScope,
+    },
+    /// THE WINDOW LANE's subscription close (gateway → shard, mesh minor 16; same SL6 approval as
+    /// [`GatewayToShard::WindowOpen`]). RELIABLE control, idempotent (closing an unknown window is
+    /// a counted no-op); the derived keep-alive TTL above is the crash backstop — this message is
+    /// only the polite fast path. APPENDED variant (postcard-safe additive shape). Slice 0 plants
+    /// the shape; producer/consumer land with Slices B/A.
+    WindowClose { window: WindowId },
 }
 
 /// Shard → gateway session replies and world frames.
@@ -184,6 +210,80 @@ pub enum ShardToGateway {
         entity: EntityId,
         at: vd_core::UniverseTick,
     },
+    /// THE WINDOW LANE's per-tick unit of one window level (shard → gateway, mesh minor 16;
+    /// SL6 ask APPROVED — owner 2026-08-15/16, `docs/design/window_lane.md` §1.1/§2.2/§4.5): the
+    /// stating realm's FULL direct-child placement roster (dormant children included — markers are
+    /// never membership-filtered) plus, for a [`WindowScope::Child`] window, ONE pre-inverted hop
+    /// row. ONE message per tick per open window, everything inside stamped at the one `at` —
+    /// intra-level same-tickness is by construction, never by matching. Cadence: the realm-lane
+    /// tick (20 Hz), stamped off the follower clock. Classification: **FireAndForget /
+    /// Unreliable**, full-state latest-wins per tick (owner law 3(b),
+    /// `docs/design/owner_decisions_2026-08-15.md` item 3: only FULL STATE rides a drop lane — a
+    /// delta here would be a defect, not a tuning choice); a lost frame self-heals next tick.
+    /// Attestation (fail-closed, measured now / refused at cloud mTLS — owner item 11 pattern):
+    /// the receiver drops + counts any frame whose sender node is not the `ShardRoster` head for
+    /// the stating realm ([`window_sender_is_head`]), and any stale `realm_fence` (zombie guard).
+    /// APPENDED variant (postcard-safe additive shape). Slice 0 plants the SHAPE: the shard-side
+    /// emitter is Slice A, the receiving engine Slice B — a frame arriving before then is dropped
+    /// + counted, never guessed at.
+    WindowFrame {
+        realm_fence: Fence,
+        /// The subscription id the receiving side minted at [`GatewayToShard::WindowOpen`].
+        window: WindowId,
+        /// The ONE universe-tick stamp for everything inside this frame.
+        at: UniverseTick,
+        /// `Some` on a [`WindowScope::Child`] window (the author's own body expressed in that
+        /// child's frame at `at`); `None` on the observer's-own-level [`WindowScope::Occupants`]
+        /// window (an occupant already stands in the author's own frame — there is no hop).
+        /// Boxed for enum-size hygiene ONLY (a full rigid placement is ~150 B and would balloon
+        /// every holder of this enum): a `Box` is serde-transparent, so the WIRE SHAPE is exactly
+        /// the design's `Option<HopRow>` — byte-identical either way.
+        hop: Option<Box<HopRow>>,
+        /// The TYPED authored child rows, in the sender's own frame (no nested
+        /// serialize-inside-serialize — the judge fix; same row type as the realm-lane feed).
+        rows: Vec<RealmSnap>,
+    },
+    /// THE WINDOW LANE's look/marker lane (shard → gateway, mesh minor 16; same SL6 approval as
+    /// [`ShardToGateway::WindowFrame`]): one body statement about `subject` — the two nested
+    /// [`BodyStmt`] kinds are structurally exclusive (a look CANNOT carry a position, a marker
+    /// CANNOT carry a look; the third pixel source is unrepresentable in the types). Cadence:
+    /// send-on-change + on-open, NEVER per-tick. Classification: **ReDriven, reliable** (rides
+    /// the session-reply lane) — mirroring `InterShardFlow::ShardRoster`'s reasoning: a lost look
+    /// is an invisible realm at exactly the no-flicker moment, so it is never Unreliable; and its
+    /// sender re-drives it from live state, so it needs no durable outbox (not producer-less).
+    /// Attestation (fail-closed): sender must be the roster head for its own realm, AND the
+    /// subject rule of [`window_body_admissible`] holds — `SelfLook` only about the sender's own
+    /// realm (SL3: a realm draws itself), `Marker` only about the sender's DIRECT children (the
+    /// owner-ruled photometric datum for a sleeping child, R4; superseded by data presence the
+    /// moment the child states its own look). A mis-authored body is dropped + counted, never
+    /// patched. APPENDED variant (postcard-safe additive shape). Slice 0 plants the shape;
+    /// emitter Slice A, receiving engine Slice B.
+    WindowBody {
+        realm_fence: Fence,
+        window: WindowId,
+        /// The realm this statement is ABOUT (the sender itself, or one of its direct children).
+        subject: RealmId,
+        stmt: BodyStmt,
+        /// When the author stated it (send-on-change: NOT a per-tick stamp; the newest wins).
+        authored_at: UniverseTick,
+    },
+    /// THE WINDOW LANE's membership verdict (shard → gateway, mesh minor 16; same SL6 approval):
+    /// the parent's OWN SL7 band/hysteresis decision — which of its direct children are inside
+    /// the interest band of an occupant it holds (or of an occupied child standing proxy) —
+    /// shipped as ids only, so the receiver NEVER re-derives AoI. Scope: membership gates BODIES
+    /// and live-child INTERIOR windows only; marker/placement rows always ship (the full roster —
+    /// stars stay in the sky by construction). Cadence: the AoI cadence (the same
+    /// `aoi_recheck_cadence` the SL7 bit beats on). Classification: **ReDriven, reliable** — a
+    /// lost delta would desynchronize the drawn set until the next edge, so it rides the
+    /// session-reply lane like [`ShardToGateway::WindowBody`]. Attestation (fail-closed): sender
+    /// must be the roster head for the stating realm ([`window_sender_is_head`]). APPENDED
+    /// variant (postcard-safe additive shape). Slice 0 plants the shape; emitter Slice A,
+    /// receiving engine Slice B.
+    WindowMembership {
+        window: WindowId,
+        added: Vec<RealmId>,
+        removed: Vec<RealmId>,
+    },
 }
 
 impl ShardToGateway {
@@ -198,7 +298,10 @@ impl ShardToGateway {
             | ShardToGateway::SubscriptionReady { .. }
             | ShardToGateway::RealmFrame { .. }
             | ShardToGateway::RealmSceneDelta { .. }
-            | ShardToGateway::EntityRemoved { .. } => None,
+            | ShardToGateway::EntityRemoved { .. }
+            | ShardToGateway::WindowFrame { .. }
+            | ShardToGateway::WindowBody { .. }
+            | ShardToGateway::WindowMembership { .. } => None,
         }
     }
 
@@ -216,8 +319,112 @@ impl ShardToGateway {
             | ShardToGateway::SessionDetached { .. }
             | ShardToGateway::SubscriptionReady { .. }
             | ShardToGateway::RealmSceneDelta { .. }
-            | ShardToGateway::EntityRemoved { .. } => None,
+            | ShardToGateway::EntityRemoved { .. }
+            | ShardToGateway::WindowFrame { .. }
+            | ShardToGateway::WindowBody { .. }
+            | ShardToGateway::WindowMembership { .. } => None,
         }
+    }
+}
+
+// ===== THE WINDOW LANE's types (mesh minor 16; SL6 ask APPROVED — owner 2026-08-15/16,
+// `docs/design/window_lane.md` §1.1/§2.2/§2.3/§4.5; rulings record:
+// `docs/design/owner_decisions_2026-08-15.md`, 2026-08-16 addendum) ==========================
+
+/// A window subscription id, minted by the SUBSCRIBING side at [`GatewayToShard::WindowOpen`]
+/// (monotone per subscriber, never reused — the [`crate::channels::SubId`] discipline): every
+/// window-lane row names the subscription it answers, so a straggler from a closed window is
+/// dropped by id mismatch, never guessed at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WindowId(pub u64);
+
+/// What a [`GatewayToShard::WindowOpen`] asks the shard to serve (`docs/design/window_lane.md`
+/// §2.3 — the typed scope that dissolved the `child: None` overload, judge hole H7).
+///
+/// **There is deliberately NO `Observed` variant** (owner Q2 ruling, 2026-08-16 — see
+/// `docs/design/window_lane.md` §5 RULINGS and DEFERRED.md D-WINDOW-2): watching a live realm
+/// from OUTSIDE rides the PARENT RELAY — the parent forwards its live children's self-authored
+/// statements verbatim (fence + attestation intact; no store, no merge, no read) — so "am I
+/// observed from outside" stays UNREPRESENTABLE in every realm. The direct window is the
+/// ledgered per-realm upgrade taken ONLY on a measured G-HANDOVER failure, via a fresh SL6 ask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowScope {
+    /// Serve the picture for MY OWN occupants (the observer's-own-level window; frames carry
+    /// `hop: None`). Information-equivalent to the occupancy bit that already crosses (SL2).
+    Occupants,
+    /// Serve the picture for the occupants under my DIRECT child (frames carry the hop row for
+    /// that child). Same occupancy-bit equivalence as `Occupants` — the child realm itself is
+    /// told nothing.
+    Child(RealmId),
+}
+
+/// ONE hop of the observer chain (`docs/design/window_lane.md` §2.2, R1): the AUTHOR's own frame
+/// expressed in `child`'s frame at the enclosing [`ShardToGateway::WindowFrame::at`] — a full
+/// rigid transform, PRE-INVERTED by the author, who authors that child's placement (SL1's
+/// "conversion in the parent" held hop-by-hop; the one inversion happens at the author, nowhere
+/// downstream). INV-BODY-AT-ORIGIN (named invariant, pinned in Slice A): a realm's own body sits
+/// at its own frame origin, so `inv`'s origin IS "the author's body in the child's frame". This
+/// type exists ONLY on the shard→gateway leg — no `InterShardFlow` arm carries it, so the type
+/// system keeps a reversed placement out of every realm (a realm can never hear where it is).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HopRow {
+    /// The direct child whose frame `inv` is expressed in.
+    pub child: RealmId,
+    /// "My frame expressed in the child's frame at `at`" — pre-inverted by the author. A rotated
+    /// cross-cell inversion inherits `transfer_frame`'s refusal semantics (dropped + counted;
+    /// owed with P10 cell math — the measurement pin lands with Slice A, never argued).
+    pub inv: FramePlacement,
+}
+
+/// A body statement's two STRUCTURALLY EXCLUSIVE kinds (`docs/design/window_lane.md` §2.2 — the
+/// type graft that makes a third pixel source unrepresentable): a look cannot carry a position
+/// (no such field EXISTS), a marker cannot carry a look. Body selection downstream is a presence
+/// gate — self-look if one was received (only a running realm can ship one), else the parent's
+/// marker — THE DRAW LAW by absence of data, never an if-running flag.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum BodyStmt {
+    /// The subject's OWN look: outline + display tags as a canonical [`vd_core::tlv`] blob
+    /// (TAG_LOOK; tags grow additively forever, unknown tags are skipped). Legal ONLY when the
+    /// subject IS the sender's own realm — a realm states a look about ITSELF alone
+    /// (SL3/R7/D-LANE-4; enforced by [`window_body_admissible`], fail-closed).
+    SelfLook { bag: Vec<u8> },
+    /// The parent-authored point-of-light datum for a SLEEPING direct child: photometric scalars
+    /// as a canonical [`vd_core::tlv`] blob (TAG_LUMA), drawn from the same seed stream that
+    /// generated the child (`vd-physics` worldgen's per-system draw, pinned f(seed) values).
+    /// Legal ONLY when the subject is one of the sender's DIRECT children (the owner-ruled R4
+    /// bend of SL3, named in the ask; superseded by data presence the instant the child states
+    /// its own look). NO look field exists here — a marker can never carry an outline.
+    Marker { luma: Vec<u8> },
+}
+
+/// THE WINDOW-LANE ADMISSION RULE for placement frames and membership verdicts
+/// (`docs/design/window_lane.md` §2.2, fail-closed): the sender node must BE the `ShardRoster`
+/// head for the stating realm. Pure — the resolved head comes in as an argument (no I/O, no
+/// directory read here); `None` (no head resolved) refuses, because fail-closed means an
+/// unattestable row is dropped + counted, never served on faith (owner item 11 pattern:
+/// measured now, refused at cloud mTLS).
+#[must_use]
+pub fn window_sender_is_head(sender: NodeId, roster_head: Option<NodeId>) -> bool {
+    roster_head == Some(sender)
+}
+
+/// THE WINDOW-LANE ADMISSION RULE for body statements (`docs/design/window_lane.md` §2.2,
+/// fail-closed; applied ON TOP of [`window_sender_is_head`] for the sender's own realm): the two
+/// authorships are structurally exclusive — [`BodyStmt::SelfLook`] is legal iff the subject IS
+/// the sender's own realm (a realm draws itself, SL3), [`BodyStmt::Marker`] is legal iff the
+/// subject is one of the sender's DIRECT children (the roster check). Pure — the sender's realm
+/// and its direct-child set come in as arguments (no I/O). A `false` is a mis-authored body:
+/// dropped + counted (`window_misauthored_body`), never patched.
+#[must_use]
+pub fn window_body_admissible(
+    stmt: &BodyStmt,
+    subject: RealmId,
+    sender_realm: RealmId,
+    sender_children: &BTreeSet<RealmId>,
+) -> bool {
+    match stmt {
+        BodyStmt::SelfLook { .. } => subject == sender_realm,
+        BodyStmt::Marker { .. } => sender_children.contains(&subject),
     }
 }
 
@@ -666,6 +873,359 @@ mod tests {
         assert_eq!(peek_is_cut_marker(&[0x05, 0x02]), Err(HeaderError::BadBool));
         assert_eq!(peek_is_cut_marker(&[0x00, 0xFF]), Err(HeaderError::BadBool));
         assert!(postcard::from_bytes::<InputDatagram>(&[0x00, 0xFF, 0, 0, 0, 0, 0, 0, 0]).is_err());
+    }
+
+    // ===== THE WINDOW LANE (mesh minor 16) — pins, roundtrips, admission rules ============
+
+    /// One typed authored child row for the window fixtures — head ≠ tail (the child's own frame
+    /// vs the authoring parent's frame), every field non-default so a dropped field cannot pass
+    /// as a lucky zero.
+    fn window_row() -> RealmSnap {
+        RealmSnap {
+            realm: RealmId::Planet(7),
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 1 },
+                DVec3::new(20.0, -3.0, 5.0),
+                UniverseTick(100),
+            ),
+        }
+    }
+
+    /// One full-width pre-inverted hop row (no zero field, a real rotation) — the author's own
+    /// frame expressed in the child's frame.
+    fn hop_row() -> HopRow {
+        HopRow {
+            child: RealmId::Planet(7),
+            inv: FramePlacement {
+                origin_cell: vd_core::glam::I64Vec3::new(1, -2, 3),
+                origin: DVec3::new(-20.0, 3.0, -5.0),
+                velocity: DVec3::new(0.25, -0.5, 1.0),
+                orientation: vd_core::glam::DQuat::from_xyzw(0.5, 0.5, 0.5, 0.5),
+                angular_velocity: DVec3::new(0.0, 0.125, 0.0),
+            },
+        }
+    }
+
+    /// EVERY `ShardToGateway` arm, one fixture each, in declaration order — the session lane's
+    /// per-release surface set (the `intershard_closed::every_arm` discipline brought in-crate).
+    fn every_shard_to_gateway_arm() -> Vec<ShardToGateway> {
+        vec![
+            ShardToGateway::SessionAttached {
+                session: SessionId(1),
+                entity: EntityId(9),
+                frame: FrameRef::SystemSpace { system_seed: 4 },
+                realm_fence: Fence(1),
+            },
+            ShardToGateway::Frame {
+                realm_fence: Fence(1),
+                source_tick: TickId(8),
+                snapshot_bytes: vec![1, 2, 3],
+            },
+            ShardToGateway::SessionDetached {
+                session: SessionId(1),
+            },
+            ShardToGateway::SubscriptionReady {
+                session: SessionId(1),
+                entity: EntityId(9),
+                frame: FrameRef::SystemSpace { system_seed: 8 },
+                realm_fence: Fence(2),
+            },
+            ShardToGateway::RealmFrame {
+                realm_fence: Fence(1),
+                source_tick: TickId(8),
+                realm_snapshot_bytes: vec![7, 8, 9],
+            },
+            ShardToGateway::RealmSceneDelta {
+                observer: AccountId(5),
+                added: Vec::new(),
+                removed: vec![RealmId::Planet(8)],
+            },
+            ShardToGateway::EntityRemoved {
+                realm_fence: Fence(1),
+                entity: EntityId(9),
+                at: UniverseTick(11),
+            },
+            // The window lane (mesh minor 16) — the `Some(hop)` arm of a Child-scope frame.
+            ShardToGateway::WindowFrame {
+                realm_fence: Fence(3),
+                window: WindowId(2),
+                at: UniverseTick(100),
+                hop: Some(Box::new(hop_row())),
+                rows: vec![window_row()],
+            },
+            ShardToGateway::WindowBody {
+                realm_fence: Fence(3),
+                window: WindowId(2),
+                subject: RealmId::System(4),
+                stmt: BodyStmt::SelfLook { bag: vec![9, 9] },
+                authored_at: UniverseTick(100),
+            },
+            ShardToGateway::WindowMembership {
+                window: WindowId(2),
+                added: vec![RealmId::Planet(7)],
+                removed: vec![RealmId::Planet(8)],
+            },
+        ]
+    }
+
+    /// EVERY `GatewayToShard` arm, one fixture each, in declaration order.
+    fn every_gateway_to_shard_arm() -> Vec<GatewayToShard> {
+        vec![
+            GatewayToShard::AttachSession {
+                session: SessionId(1),
+                fence: Fence(2),
+                account: AccountId(3),
+                spawn: None,
+            },
+            GatewayToShard::SessionInput {
+                session: SessionId(1),
+                fence: Fence(2),
+                input_bytes: vec![5],
+            },
+            GatewayToShard::DetachSession {
+                session: SessionId(1),
+                fence: Fence(2),
+            },
+            GatewayToShard::OpenInputSlot {
+                session: SessionId(1),
+                fence: Fence(2),
+                account: AccountId(3),
+                resume_from_seq: 42,
+                subject: DirectoryKey::Entity(EntityId(9)),
+            },
+            // The window lane (mesh minor 16) — the Child scope carries a realm id.
+            GatewayToShard::WindowOpen {
+                window: WindowId(2),
+                scope: WindowScope::Child(RealmId::Planet(7)),
+            },
+            GatewayToShard::WindowClose {
+                window: WindowId(2),
+            },
+        ]
+    }
+
+    /// THE POSITIONAL PIN for BOTH session-lane enums (the `intershard_closed` tombstone
+    /// discipline): postcard writes a variant's DECLARED index as the leading varint, so
+    /// reordering — or deleting — an arm re-labels every later arm ON THE WIRE while every
+    /// same-build roundtrip stays green. Declaration order stated ONCE as data (wildcard-free,
+    /// so a new arm must take a pinned index to compile), asserted against the real first byte,
+    /// and the fixture set must span the whole contiguous index space (no vacuous pass).
+    #[test]
+    fn every_session_flow_arm_encodes_its_declared_discriminant_index() {
+        fn s2g_index(msg: &ShardToGateway) -> u8 {
+            match msg {
+                ShardToGateway::SessionAttached { .. } => 0,
+                ShardToGateway::Frame { .. } => 1,
+                ShardToGateway::SessionDetached { .. } => 2,
+                ShardToGateway::SubscriptionReady { .. } => 3,
+                ShardToGateway::RealmFrame { .. } => 4,
+                ShardToGateway::RealmSceneDelta { .. } => 5,
+                ShardToGateway::EntityRemoved { .. } => 6,
+                // The window lane holds 7/8/9 (mesh minor 16) forever.
+                ShardToGateway::WindowFrame { .. } => 7,
+                ShardToGateway::WindowBody { .. } => 8,
+                ShardToGateway::WindowMembership { .. } => 9,
+            }
+        }
+        fn g2s_index(msg: &GatewayToShard) -> u8 {
+            match msg {
+                GatewayToShard::AttachSession { .. } => 0,
+                GatewayToShard::SessionInput { .. } => 1,
+                GatewayToShard::DetachSession { .. } => 2,
+                GatewayToShard::OpenInputSlot { .. } => 3,
+                // The window control lane holds 4/5 (mesh minor 16) forever.
+                GatewayToShard::WindowOpen { .. } => 4,
+                GatewayToShard::WindowClose { .. } => 5,
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for msg in every_shard_to_gateway_arm() {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(bytes[0], s2g_index(&msg));
+            seen.insert(bytes[0]);
+        }
+        assert_eq!(seen.len(), 10);
+        assert_eq!(seen.first().copied(), Some(0));
+        assert_eq!(seen.last().copied(), Some(9));
+        let mut seen = std::collections::BTreeSet::new();
+        for msg in every_gateway_to_shard_arm() {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(bytes[0], g2s_index(&msg));
+            seen.insert(bytes[0]);
+        }
+        assert_eq!(seen.len(), 6);
+        assert_eq!(seen.first().copied(), Some(0));
+        assert_eq!(seen.last().copied(), Some(5));
+    }
+
+    /// The NESTED positional pins for the window lane's two payload enums — the same
+    /// reorder/deletion hole the outer table closes, at the nested level ([`BodyStmt`] and
+    /// [`WindowScope`] each lead with their own declared index).
+    #[test]
+    fn window_nested_enums_encode_their_declared_discriminant_indices() {
+        // Standalone: the nested enum's own leading byte IS its declared index.
+        let look = BodyStmt::SelfLook { bag: vec![1] };
+        let marker = BodyStmt::Marker { luma: vec![2] };
+        assert_eq!(postcard::to_allocvec(&look).expect("encode")[0], 0);
+        assert_eq!(postcard::to_allocvec(&marker).expect("encode")[0], 1);
+        let occupants = WindowScope::Occupants;
+        let child = WindowScope::Child(RealmId::Planet(7));
+        assert_eq!(postcard::to_allocvec(&occupants).expect("encode")[0], 0);
+        assert_eq!(postcard::to_allocvec(&child).expect("encode")[0], 1);
+        // In context: `WindowOpen{window: WindowId(1), scope}` puts the scope tag at byte 2
+        // (outer tag 4, then the one-byte WindowId varint) — the nested index rides the real
+        // message exactly where the declaration says.
+        let open_occ = GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Occupants,
+        };
+        let open_child = GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Child(RealmId::Planet(7)),
+        };
+        assert_eq!(
+            postcard::to_allocvec(&open_occ).expect("encode")[..3],
+            [4, 1, 0]
+        );
+        assert_eq!(
+            postcard::to_allocvec(&open_child).expect("encode")[..3],
+            [4, 1, 1]
+        );
+    }
+
+    /// Same-build roundtrips for EVERY arm of both enums (the new window arms ride the same
+    /// fixture set as the frozen ones), plus the shapes the surface set does not carry: the
+    /// `hop: None` own-level frame, the `Marker` body, the `Occupants` scope, and an EMPTY
+    /// membership delta (byte-cheap-when-empty, never a decode fault).
+    #[test]
+    fn window_lane_arms_roundtrip_postcard() {
+        for msg in every_shard_to_gateway_arm() {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<ShardToGateway>(&bytes).expect("decode"),
+                msg
+            );
+        }
+        for msg in every_gateway_to_shard_arm() {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<GatewayToShard>(&bytes).expect("decode"),
+                msg
+            );
+        }
+        let own_level = ShardToGateway::WindowFrame {
+            realm_fence: Fence(3),
+            window: WindowId(2),
+            at: UniverseTick(100),
+            hop: None, // the Occupants-scope frame: no hop — the observer stands in this frame
+            rows: vec![window_row()],
+        };
+        let marker = ShardToGateway::WindowBody {
+            realm_fence: Fence(3),
+            window: WindowId(2),
+            subject: RealmId::Planet(7),
+            stmt: BodyStmt::Marker { luma: vec![4, 2] },
+            authored_at: UniverseTick(100),
+        };
+        let empty_membership = ShardToGateway::WindowMembership {
+            window: WindowId(2),
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        let open_occupants = GatewayToShard::WindowOpen {
+            window: WindowId(2),
+            scope: WindowScope::Occupants,
+        };
+        for msg in [own_level, marker, empty_membership] {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<ShardToGateway>(&bytes).expect("decode"),
+                msg
+            );
+        }
+        let bytes = postcard::to_allocvec(&open_occupants).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<GatewayToShard>(&bytes).expect("decode"),
+            open_occupants
+        );
+        // The Box on `hop` is a MEASURED no-op on the wire (never-assume): a boxed hop row
+        // encodes byte-identically to the bare row, so the wire shape is the design's
+        // `Option<HopRow>` exactly.
+        assert_eq!(
+            postcard::to_allocvec(&Box::new(hop_row())).expect("encode boxed"),
+            postcard::to_allocvec(&hop_row()).expect("encode bare"),
+        );
+    }
+
+    /// The additive-decode discipline (mesh minor 16): the window arms are APPENDED, so bytes a
+    /// minor-15 sender produced (any prior variant — here the newest prior arm on each enum)
+    /// still decode unchanged, and each new variant is a clean self-contained message. A trailing
+    /// variant never shifts a prior variant's discriminant or framing.
+    #[test]
+    fn window_lane_is_additive_minor_16_and_prior_variants_decode_unchanged() {
+        let prior_s2g = ShardToGateway::EntityRemoved {
+            realm_fence: Fence(1),
+            entity: EntityId(9),
+            at: UniverseTick(11),
+        };
+        let bytes = postcard::to_allocvec(&prior_s2g).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ShardToGateway>(&bytes).expect("decode"),
+            prior_s2g
+        );
+        let prior_g2s = GatewayToShard::OpenInputSlot {
+            session: SessionId(1),
+            fence: Fence(2),
+            account: AccountId(3),
+            resume_from_seq: 42,
+            subject: DirectoryKey::Entity(EntityId(9)),
+        };
+        let bytes = postcard::to_allocvec(&prior_g2s).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<GatewayToShard>(&bytes).expect("decode"),
+            prior_g2s
+        );
+        // The extractor sugar declines every window arm (they are typed rows, never opaque
+        // frames) — the exhaustive matches stay honest.
+        for msg in every_shard_to_gateway_arm().into_iter().skip(7) {
+            assert_eq!(msg.clone().into_snapshot_bytes(), None);
+            assert_eq!(msg.into_realm_snapshot_bytes(), None);
+        }
+    }
+
+    /// The frame/membership admission rule (`window_lane.md` §2.2): the sender must BE the
+    /// resolved roster head — a mismatched head refuses, and an UNRESOLVED head refuses too
+    /// (fail-closed: unattestable is dropped, never served on faith).
+    #[test]
+    fn window_sender_is_head_admits_only_the_resolved_head() {
+        use vd_core::NodeId;
+        assert!(window_sender_is_head(NodeId(1002), Some(NodeId(1002))));
+        assert!(!window_sender_is_head(NodeId(1002), Some(NodeId(1004))));
+        assert!(!window_sender_is_head(NodeId(1002), None));
+    }
+
+    /// The body admission rule (`window_lane.md` §2.2): `SelfLook` only about the sender's own
+    /// realm; `Marker` only about a DIRECT child. Both answers of BOTH arms driven — including
+    /// the cross cases (a look about a child, a marker about the sender itself) that a lazier
+    /// fixture would leave unrun.
+    #[test]
+    fn window_body_admissible_enforces_the_two_exclusive_authorships() {
+        let sender = RealmId::System(4);
+        let child = RealmId::Planet(7);
+        let stranger = RealmId::Planet(8);
+        let children: BTreeSet<RealmId> = [child].into_iter().collect();
+        let look = BodyStmt::SelfLook { bag: vec![1] };
+        let marker = BodyStmt::Marker { luma: vec![2] };
+        // A realm states a look ONLY about itself.
+        assert!(window_body_admissible(&look, sender, sender, &children));
+        assert!(!window_body_admissible(&look, child, sender, &children));
+        // A marker ONLY about a direct child — never about itself, never about a stranger.
+        assert!(window_body_admissible(&marker, child, sender, &children));
+        assert!(!window_body_admissible(&marker, sender, sender, &children));
+        assert!(!window_body_admissible(
+            &marker, stranger, sender, &children
+        ));
     }
 
     proptest! {

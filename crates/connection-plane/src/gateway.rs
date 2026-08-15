@@ -1398,6 +1398,13 @@ pub struct GatewayStats {
     /// lifetime, and the roster is authority-refcounted). `0` on a static gateway (no shard ever greets). Its
     /// existence keeps a greeting from being miscounted `undecodable` (the honesty floor).
     pub presence_announces: u64,
+    /// THE WINDOW LANE arriving before its engine exists (mesh minor 16, Slice 0 — the lane is
+    /// owner-approved 2026-08-15/16, docs/design/window_lane.md §1.1 + §4.5, but NOTHING moves in
+    /// Slice 0): a `WindowFrame`/`WindowBody`/`WindowMembership` row is dropped FAIL-CLOSED +
+    /// counted here — never guessed at, never miscounted `undecodable` (the honesty floor, same
+    /// as `presence_announces`). No producer exists until Slice A and no per-window state until
+    /// the Slice-B engine, so this reads 0 in every shipped run; it retires when Slice B lands.
+    pub window_rows_unconsumed: u64,
 }
 
 /// The forest's ambient root realm — the fall-back render pin for a session whose home has not resolved
@@ -3216,6 +3223,18 @@ fn on_shard_control(
             // reliable Control stream is a peer bug (FA-2c: a RealmFrame is forwarded by
             // `on_shard_realm_frame`, dispatched from `MsgClass::RealmSnapshot`, never here).
             stats.undecodable += 1;
+        }
+        ShardToGateway::WindowFrame { .. }
+        | ShardToGateway::WindowBody { .. }
+        | ShardToGateway::WindowMembership { .. } => {
+            // THE WINDOW LANE, Slice 0 (mesh minor 16; the lane is owner-approved 2026-08-15/16,
+            // docs/design/window_lane.md §1.1 + §4.5): the wire SHAPE exists but nothing moves —
+            // no shard emits these until Slice A, and the per-window engine that will consume
+            // them lands in Slice B (`window.rs`, shadow-first). A row arriving today is dropped
+            // FAIL-CLOSED + counted (owner decision 3: drop undeliverable data, never guess),
+            // and counted APART from `undecodable` (this is a well-formed peer speaking a lane
+            // whose consumer does not exist yet — not garbage; the honesty floor).
+            stats.window_rows_unconsumed += 1;
         }
     }
 }
@@ -5106,6 +5125,45 @@ mod tests {
         // active session receives NOTHING and the failure is counted exactly once.
         assert_eq!(sent.len(), 0, "no output from a corrupt body");
         assert_eq!(rig.stats().undecodable, 1, "counted exactly once");
+    }
+
+    #[test]
+    fn a_window_row_before_its_engine_is_dropped_fail_closed_and_counted_apart() {
+        // THE WINDOW LANE, Slice 0 (mesh minor 16): the shapes exist, nothing moves. Each of the
+        // three shard→gateway window rows arriving on Control today is dropped FAIL-CLOSED and
+        // counted on its OWN counter — a well-formed peer speaking a lane whose Slice-B engine
+        // does not exist yet is NOT `undecodable` garbage (the honesty floor), and no output is
+        // ever produced from one (nothing is guessed at — owner decision 3).
+        use vd_wire::session_flow::{BodyStmt, WindowId};
+        let mut rig = Rig::new();
+        let (_, _) = rig.login();
+        let frame = ShardToGateway::WindowFrame {
+            realm_fence: Fence(1),
+            window: WindowId(1),
+            at: vd_core::UniverseTick(5),
+            hop: None,
+            rows: Vec::new(),
+        };
+        let body = ShardToGateway::WindowBody {
+            realm_fence: Fence(1),
+            window: WindowId(1),
+            subject: RealmId::System(0),
+            stmt: BodyStmt::SelfLook { bag: vec![1] },
+            authored_at: vd_core::UniverseTick(5),
+        };
+        let membership = ShardToGateway::WindowMembership {
+            window: WindowId(1),
+            added: vec![RealmId::Planet(7)],
+            removed: Vec::new(),
+        };
+        let sent = rig.tick(vec![
+            wire(SHARD, MsgClass::Control, &frame),
+            wire(SHARD, MsgClass::Control, &body),
+            wire(SHARD, MsgClass::Control, &membership),
+        ]);
+        assert_eq!(sent.len(), 0, "no output from an unconsumed window row");
+        assert_eq!(rig.stats().window_rows_unconsumed, 3, "each row counted");
+        assert_eq!(rig.stats().undecodable, 0, "a window row is NOT garbage");
     }
 
     #[test]

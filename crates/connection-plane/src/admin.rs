@@ -43,6 +43,7 @@ pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u6
         sessions_self_fenced_revoked,
         presence_announces,
         sub_close_refused_authority,
+        window_rows_unconsumed,
     } = *stats;
     GatewayView {
         logins_rejected,
@@ -72,6 +73,7 @@ pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u6
         sessions_self_fenced_revoked,
         presence_announces,
         sub_close_refused_authority,
+        window_rows_unconsumed,
         sessions_open,
         dynamic_shards,
     }
@@ -135,6 +137,9 @@ mod tests {
             sessions_self_fenced_revoked: 21,
             presence_announces: 22,
             sub_close_refused_authority: 23,
+            // 30, not 24: appended after the fixture reached 29 (the same positional-sequence
+            // reasoning as refused_unknown_sender's 26 above).
+            window_rows_unconsumed: 30,
         };
         let view = gateway_view(&stats, 24, 25);
         assert_eq!(view.logins_rejected, 1);
@@ -164,6 +169,7 @@ mod tests {
         assert_eq!(view.sessions_self_fenced_revoked, 21);
         assert_eq!(view.presence_announces, 22);
         assert_eq!(view.sub_close_refused_authority, 23);
+        assert_eq!(view.window_rows_unconsumed, 30);
         assert_eq!(view.sessions_open, 24);
         assert_eq!(view.dynamic_shards, 25);
     }

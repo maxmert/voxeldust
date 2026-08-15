@@ -2010,6 +2010,14 @@ pub struct StubStats {
     /// take-over re-stream reaches them. `0` healthy; non-zero next to a self-fence is the
     /// partition surfacing.
     pub entity_removals_suppressed_no_lease: u64,
+    /// THE WINDOW LANE's control arriving before its registry exists (mesh minor 16, Slice 0 —
+    /// the lane is owner-approved 2026-08-15/16, docs/design/window_lane.md §1.1 + §4.5, but
+    /// NOTHING moves in Slice 0): a `WindowOpen`/`WindowClose` is dropped FAIL-CLOSED + counted
+    /// here — never mis-counted `undecodable` (a well-formed subscriber speaking a lane whose
+    /// shard-side registry lands in Slice A is not garbage; the honesty floor). No producer
+    /// exists until the Slice-B engine opens windows, so this reads 0 in every shipped run; it
+    /// retires when the Slice-A registry lands.
+    pub window_control_unconsumed: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -2985,6 +2993,17 @@ fn on_gateway_msg(
                 dots,
                 stats,
             );
+        }
+        GatewayToShard::WindowOpen { .. } | GatewayToShard::WindowClose { .. } => {
+            // THE WINDOW LANE, Slice 0 (mesh minor 16; the lane is owner-approved 2026-08-15/16,
+            // docs/design/window_lane.md §1.1 + §2.3 + §4.5): the wire SHAPE exists but nothing
+            // moves — the shard-side window registry (per-window fans, hop-row inversion at the
+            // author, the DERIVED 2-beats+1 keep-alive TTL) lands in Slice A, and nothing opens
+            // windows until the Slice-B engine. A control frame arriving today is dropped
+            // FAIL-CLOSED + counted (owner decision 3: drop undeliverable data, never guess) —
+            // counted APART from `undecodable`, because a well-formed subscriber speaking a lane
+            // whose consumer does not exist yet is not garbage (the honesty floor).
+            stats.window_control_unconsumed += 1;
         }
     }
 }
@@ -12142,6 +12161,44 @@ mod tests {
             .filter(|(to, class, _)| (*to == GATEWAY) & (*class == MsgClass::Control))
             .count();
         assert_eq!(confirms, 1);
+    }
+
+    #[test]
+    fn window_control_before_its_registry_is_dropped_fail_closed_and_counted_apart() {
+        // THE WINDOW LANE, Slice 0 (mesh minor 16): the shapes exist, nothing moves. Both window
+        // control arms arriving today are dropped FAIL-CLOSED and counted on their OWN counter —
+        // a well-formed subscriber speaking a lane whose Slice-A registry does not exist yet is
+        // NOT `undecodable` garbage (the honesty floor), and no reply/fan/dot is ever produced.
+        use vd_wire::session_flow::{WindowId, WindowScope};
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let open = GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Occupants,
+        };
+        let close = GatewayToShard::WindowClose {
+            window: WindowId(1),
+        };
+        let sent = rig.tick(vec![
+            wire_msg(GATEWAY, MsgClass::Control, &open),
+            wire_msg(GATEWAY, MsgClass::Control, &close),
+        ]);
+        let replies = sent
+            .iter()
+            .filter(|(to, class, _)| (*to == GATEWAY) & (*class == MsgClass::Control))
+            .count();
+        assert_eq!(replies, 0, "no reply from an unconsumed window control");
+        assert_eq!(rig.world.resource::<Dots>().0.len(), 0, "no dot minted");
+        assert_eq!(
+            rig.world.resource::<StubStats>().window_control_unconsumed,
+            2,
+            "each control frame counted"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().undecodable,
+            0,
+            "a window control frame is NOT garbage"
+        );
     }
 
     #[test]

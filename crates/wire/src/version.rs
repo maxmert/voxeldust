@@ -139,7 +139,20 @@ pub const PROTO_MAJOR: u16 = 1;
 /// build, ledger-visible); no client-facing message changed, so the floor does not move. SpawnV2 and
 /// the Spawn/Delta tombstones are owner-approved 2026-08-12 (docs/design/step5_sl7_lane_deletion.md
 /// §8 answer 1).
-pub const PROTO_MINOR: u16 = 15;
+/// **16** appends THE WINDOW LANE's skeleton (Slice 0 — nothing moves yet: no producer, no consumer):
+/// `ShardToGateway::WindowFrame` (per-tick typed child rows + the pre-inverted hop row, one stamp,
+/// FireAndForget/Unreliable full-state latest-wins), `ShardToGateway::WindowBody` (the typed
+/// look/marker statement, ReDriven/reliable — a lost look is an invisible realm at the no-flicker
+/// moment), `ShardToGateway::WindowMembership` (the parent's SL7 verdict as ids, ReDriven on the AoI
+/// cadence), and `GatewayToShard::WindowOpen`/`WindowClose` (reliable control; a fan not refreshed
+/// within the DERIVED TTL of 2 beats + 1 dies shard-side). `WindowScope` is `Occupants | Child` ONLY —
+/// the `Observed` variant NEVER ships (Q2 = parent relay). Mesh-only (one cluster build,
+/// ledger-visible): no client-facing message changed, so the floor does not move; the owner-mandated
+/// flag day (RealmShape loses `center`, the scene messages reshape, floor moves) is Slice C1's OWN
+/// later minor, not this one. The lane is owner-approved 2026-08-15/16, docs/design/window_lane.md §1.1 + §4.5
+/// (the five-topic walk + Q1/Q2/Q3 rulings; in-repo record:
+/// docs/design/owner_decisions_2026-08-15.md, 2026-08-16 addendum).
+pub const PROTO_MINOR: u16 = 16;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -289,8 +302,13 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 15,
-            "minor 15 TOMBSTONED the ghost pose feed (GhostFlow::Spawn + Delta — the foreign-frame \
+            PROTO_MINOR, 16,
+            "minor 16 appended THE WINDOW LANE's skeleton (owner-approved 2026-08-15/16, \
+             docs/design/window_lane.md §1.1 + §4.5): ShardToGateway::WindowFrame/WindowBody/\
+             WindowMembership + GatewayToShard::WindowOpen/WindowClose, WindowScope = Occupants | \
+             Child ONLY (Q2 = parent relay; Observed never ships) — mesh-only, Slice 0, nothing \
+             moves yet, the floor stays; \
+             minor 15 TOMBSTONED the ghost pose feed (GhostFlow::Spawn + Delta — the foreign-frame \
              pose writer died with it) and appended GhostFlow::SpawnV2, the pose-free take-over \
              proof; minor 14 appended the REMOVE MESSAGE (ServerControlMsg::Event carrying \
              EventMsg::EntityRemoved(entity, at) + the ShardToGateway::EntityRemoved mesh leg — \
@@ -323,7 +341,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.15");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.16");
         // These three USED to negotiate down and be welcomed (minor 7 fully, minor 1 without the
         // minor-2 OwnEntity, minor 0 without that AND UniverseRate). They are now refused: the
         // sender-gates-variants rule only covers appended VARIANTS, and minor 8 appended a FIELD.

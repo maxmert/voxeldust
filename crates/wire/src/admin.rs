@@ -170,6 +170,13 @@ pub struct GatewayView {
     /// class). Its reachable producer is a SAME-NODE re-home (`source == dest`) — expected whenever an
     /// occupant re-enters the realm it just left — so nonzero is a health signal, not an error.
     pub sub_close_refused_authority: u64,
+    /// THE WINDOW LANE arriving before its engine exists (mesh minor 16, Slice 0): a
+    /// `WindowFrame`/`WindowBody`/`WindowMembership` row dropped FAIL-CLOSED because no per-window
+    /// engine consumes it yet (Slice B). Counted apart from `undecodable` (a well-formed peer on a
+    /// not-yet-consumed lane is not garbage). 0 in every shipped run until Slice A produces rows;
+    /// retires with the Slice-B engine. JSON-only appended field — a JSON reader ignores fields it
+    /// does not know, so an older operator tool keeps reading a newer snapshot.
+    pub window_rows_unconsumed: u64,
     /// Gauge: sessions currently open on this gateway.
     pub sessions_open: u64,
     /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
@@ -481,6 +488,9 @@ mod tests {
                 sessions_self_fenced_revoked: 21,
                 presence_announces: 22,
                 sub_close_refused_authority: 23,
+                // 30, not 24: appended after the fixture reached 29 (same positional-sequence
+                // reasoning as refused_unknown_sender's 26 above).
+                window_rows_unconsumed: 30,
                 sessions_open: 24,
                 dynamic_shards: 25,
             }),

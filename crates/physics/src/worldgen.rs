@@ -22,7 +22,8 @@ use core::f64::consts::TAU;
 use crate::celestial::{G, OrbitalElements, orbital_state};
 use crate::motion::Motion;
 use crate::taxonomy::{
-    FrostThresholds, GalaxyType, SpectralClass, orbital_axis_au, sample_rayleigh,
+    FrostThresholds, GalaxyType, SpectralClass, classify_spectral, main_sequence_luminosity,
+    orbital_axis_au, sample_imf_mass, sample_rayleigh,
 };
 use vd_core::frame::FramePlacement;
 use vd_core::geometry::{AoiConfig, BandError, Boundary, ContainmentBand, RealmRegion};
@@ -165,6 +166,32 @@ struct GeneratedBody {
     parent: Option<RealmId>,
     shape: Boundary,
     placement: Placement,
+    /// The body's photometric identity, drawn from the SAME per-realm seed stream that generated
+    /// it (the window lane's marker datum — owner-approved 2026-08-15/16,
+    /// `docs/design/window_lane.md` §2.2/§2.8: a sleeping child's point of light is authored by
+    /// its parent from the child's own generation stream). `Some` on every SYSTEM the seed
+    /// generator emits (the star's mass → class → luminosity); `None` on the ambient
+    /// Universe/Galaxy shells, on planets (their photometric ladder is an owed later draw), and
+    /// on every hand-placed walk body (a player-built station has no seed stream). Stored on the
+    /// body row exactly as the sibling derived field (`placement`'s orbital elements) is —
+    /// NEVER lowered onto `RealmRegion` and never on the wire: the Slice-A marker emit reads it
+    /// off the booted forest and ships TLV scalars, not this struct.
+    photometrics: Option<StarPhotometrics>,
+}
+
+/// A star system's drawn photometric identity — pure `f(seed)` through the taxonomy layer
+/// (`sample_imf_mass` → `classify_spectral` → `main_sequence_luminosity`), drawn ONCE per system
+/// at generation from the system's own [`realm_stream`]. Off-wire DATA (HR1): the window lane's
+/// marker (`BodyStmt::Marker`) will carry TLV-framed scalars derived from this at Slice A, and
+/// the pinned-values test freezes each system's draw on THE world so any stream drift is loud.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StarPhotometrics {
+    /// The star's drawn mass (solar masses) — the ONE u01 draw everything below derives from.
+    pub mass_msun: f64,
+    /// Morgan-Keenan class from the drawn mass (the marker's color class).
+    pub class: SpectralClass,
+    /// Main-sequence luminosity `L/Lsun` from the drawn mass (the marker's luma scalar).
+    pub luma_lsun: f64,
 }
 
 /// Where a body sits in its parent inertial frame.
@@ -497,6 +524,27 @@ fn planet_elements(config: &UniverseConfig, stream: &mut SplitMix64, n: u32) -> 
     }
 }
 
+/// Draw one star system's photometric identity from ITS OWN per-system `stream` (the window
+/// lane's per-system draw — owner-approved 2026-08-15/16, `docs/design/window_lane.md` §2.2:
+/// "luma drawn from the same seed stream the parent generated the child from"). ONE u01 draw:
+/// mass through the bounded-IMF inverse-CDF, then class + luminosity as closed-form derivations
+/// of that mass — the taxonomy discipline (no rejection loop, bit-reproducible). Straight-line,
+/// monomorphic (HR5). Parameters are DATA off [`StellarConfig`] (no magic numbers); the MK mass
+/// bounds are the taxonomy's canonical passable table, the MLR segments the config's.
+fn draw_star_photometrics(st: &StellarConfig, stream: &mut SplitMix64) -> StarPhotometrics {
+    let mass_msun = sample_imf_mass(
+        stream.next_f64(),
+        st.imf_slope,
+        st.mass_lo_msun,
+        st.mass_hi_msun,
+    );
+    StarPhotometrics {
+        mass_msun,
+        class: classify_spectral(mass_msun, &SpectralClass::MASS_BOUNDS),
+        luma_lsun: main_sequence_luminosity(mass_msun, &st.mlr_segments),
+    }
+}
+
 /// The seed of the `n`-th star system in a galaxy. System 0 keeps [`SYSTEM_A_SEED`] — it is the identity
 /// every existing fixture, label and gate already names — and the rest avalanche off the galaxy through
 /// the same [`child_seed`] every other sibling set uses, so a system's identity is a pure function of
@@ -768,6 +816,7 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
             parent: None,
             shape: shell(sc.universe_r_m),
             placement: origin,
+            photometrics: None,
         },
         // Galaxy: the finite between-systems space, nested in the Universe.
         GeneratedBody {
@@ -775,6 +824,7 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
             parent: Some(UNIVERSE),
             shape: shell(sc.galaxy_r_m),
             placement: origin,
+            photometrics: None,
         },
     ];
     // HOW MANY STARS THIS GALAXY HOLDS — drawn from the galaxy's OWN stream against its census, so two
@@ -783,11 +833,14 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
     for s in 0..n_systems {
         let seed = system_seed_at(s);
         let system = RealmId::System(seed);
+        let system_ix = bodies.len();
         bodies.push(GeneratedBody {
             realm: system,
             parent: Some(GALAXY),
             shape: shell(st.system_soi_r_m),
             placement: Placement::StaticOffset(system_center_at(config, n_systems, s)),
+            // Filled below, AFTER the planet draws — see the stream-order note there.
+            photometrics: None,
         });
         let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED, seed]);
         for n in 0..pl.n_planets {
@@ -796,10 +849,35 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
                 parent: Some(system),
                 shape: shell(pl.planet_soi_r_m),
                 placement: Placement::Orbital(planet_elements(config, &mut stream, n)),
+                photometrics: None,
             });
         }
+        // The per-system photometric draw (the window lane's marker datum, Slice 0), from the
+        // SAME per-system stream the planets drew from — APPENDED after the planet draws,
+        // deliberately: a stream is positional exactly like the wire, so drawing the star FIRST
+        // would shift every planet's (ecc, incl, Ω, ω, M₀) and re-roll every orbit of THE world.
+        // Appending keeps every existing draw byte-identical (the additive discipline), and the
+        // draw stays pure f(seed, config) like every sibling derived value.
+        bodies[system_ix].photometrics = Some(draw_star_photometrics(st, &mut stream));
     }
     bodies
+}
+
+/// Every system's drawn [`StarPhotometrics`] over the config-driven forest — `(realm, draw)`
+/// pairs, forest order; the config twin of [`moving_children_for_config`] (the SAME
+/// `(seed, config)` builds the SAME forest, so the marker roster and the regions can never
+/// disagree). The Slice-A marker emit reads THIS; Slice 0 lands it consumer-less (nothing moves),
+/// pinned by the THE-world goldens below. The closure is a branchless shim (HR5): the
+/// `Some`/`None` split lives in `Option::map`'s monomorphic body over `photometrics`.
+#[must_use]
+pub fn system_photometrics_for_config(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> Vec<(RealmId, StarPhotometrics)> {
+    generate_system_forest(seed_universe, config)
+        .iter()
+        .filter_map(|b| b.photometrics.map(|p| (b.realm, p)))
+        .collect()
 }
 
 /// [`to_regions`] over the config-driven system forest — the config-parameterised twin of
@@ -931,6 +1009,7 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
             parent: None,
             shape: shell(sc.universe_r_m),
             placement: origin,
+            photometrics: None,
         },
         // Galaxy: the finite between-systems space, nested in the Universe.
         GeneratedBody {
@@ -938,6 +1017,7 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
             parent: Some(UNIVERSE),
             shape: shell(sc.galaxy_r_m),
             placement: origin,
+            photometrics: None,
         },
         // Star system A: nested in the Galaxy at the origin.
         GeneratedBody {
@@ -945,6 +1025,7 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
             parent: Some(GALAXY),
             shape: shell(st.system_soi_r_m),
             placement: origin,
+            photometrics: None,
         },
         // Planet A: nested in system A, offset from the star.
         GeneratedBody {
@@ -952,6 +1033,7 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
             parent: Some(SYSTEM_A),
             shape: shell(pl.planet_soi_r_m),
             placement: at_x(sa.planet_offset_m),
+            photometrics: None,
         },
         // Star system B: a DISJOINT sibling of system A under the Galaxy (a walkable galaxy gap between).
         GeneratedBody {
@@ -959,6 +1041,7 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
             parent: Some(GALAXY),
             shape: shell(st.system_soi_r_m),
             placement: at_x(sa.system_b_offset_m),
+            photometrics: None,
         },
         // Station A: a first-class Station BOX under System A (depth 3), on the -X side opposite Planet A.
         GeneratedBody {
@@ -966,6 +1049,7 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
             parent: Some(SYSTEM_A),
             shape: boxed(sa.station_half_m),
             placement: at_x(sa.station_offset_m),
+            photometrics: None,
         },
         // Area A: a first-class sub-planet Area BOX under Planet A (depth 4) — the DEEPEST region.
         GeneratedBody {
@@ -973,6 +1057,7 @@ fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody> {
             parent: Some(PLANET_A),
             shape: boxed(sa.area_half_m),
             placement: at_x(sa.area_offset_m),
+            photometrics: None,
         },
     ]
 }
@@ -1652,6 +1737,7 @@ mod tests {
             parent: Some(RealmId::System(1)),
             shape: Boundary::Shell { r: 10.0 },
             placement,
+            photometrics: None,
         };
         // A static + an ORBITING sibling at the "same place": no overlap verdict — the orbiter is
         // skipped by the inner arm.
@@ -2042,6 +2128,7 @@ mod tests {
             parent: Some(RealmId::System(42)),
             shape: Boundary::Shell { r: 9.0e8 },
             placement: Placement::Orbital(elements),
+            photometrics: None,
         };
         let regions = to_regions(&[body], &UniverseConfig::visual_scale());
         assert_eq!(regions.len(), 1);
@@ -2091,18 +2178,21 @@ mod tests {
             parent: Some(RealmId::System(7)),
             shape: Boundary::Shell { r: 9.0e8 },
             placement: Placement::Orbital(elements),
+            photometrics: None,
         };
         let static_child = GeneratedBody {
             realm: RealmId::Station(2),
             parent: Some(RealmId::System(7)),
             shape: Boundary::Shell { r: 1.0e6 },
             placement: Placement::StaticOffset(DVec3::new(5.0, 0.0, 0.0)),
+            photometrics: None,
         };
         let orbital_non_child = GeneratedBody {
             realm: RealmId::Planet(3),
             parent: Some(RealmId::System(99)),
             shape: Boundary::Shell { r: 9.0e8 },
             placement: Placement::Orbital(elements),
+            photometrics: None,
         };
         let bodies = [orbital_child, static_child, orbital_non_child];
         assert_eq!(
@@ -2236,6 +2326,7 @@ mod tests {
             parent: Some(GALAXY),
             shape: shell,
             placement,
+            photometrics: None,
         };
         let a = RealmId::System(1);
         let b = RealmId::System(2);
@@ -2713,18 +2804,21 @@ mod tests {
                 parent: None,
                 shape: Boundary::Shell { r: 1000.0 },
                 placement: Placement::StaticOffset(DVec3::ZERO),
+                photometrics: None,
             },
             GeneratedBody {
                 realm: child,
                 parent: Some(root),
                 shape: Boundary::Shell { r: 200.0 },
                 placement: Placement::StaticOffset(DVec3::new(100.0, 0.0, 0.0)),
+                photometrics: None,
             },
             GeneratedBody {
                 realm: grand,
                 parent: Some(child),
                 shape: Boundary::Shell { r: 20.0 },
                 placement: Placement::StaticOffset(DVec3::new(0.0, 0.0, 50.0)),
+                photometrics: None,
             },
         ];
         let offences = grandchild_visibility_offences(&bodies, VISIBILITY_THETA_MIN_RAD);
@@ -3024,6 +3118,7 @@ mod tests {
             parent: None,
             shape: Boundary::Shell { r: 1.0 },
             placement: Placement::StaticOffset(DVec3::ZERO),
+            photometrics: None,
         }];
         assert!(
             !moving_anywhere_above(&unknown_only, RealmId::Planet(999)),
@@ -3035,12 +3130,14 @@ mod tests {
                 parent: Some(RealmId::System(2)),
                 shape: Boundary::Shell { r: 1.0 },
                 placement: Placement::StaticOffset(DVec3::ZERO),
+                photometrics: None,
             },
             GeneratedBody {
                 realm: RealmId::System(2),
                 parent: Some(RealmId::System(1)),
                 shape: Boundary::Shell { r: 1.0 },
                 placement: Placement::StaticOffset(DVec3::ZERO),
+                photometrics: None,
             },
         ];
         assert!(
@@ -3525,4 +3622,126 @@ mod tests {
     const FROZEN_TWO_LEVEL_CLEARANCE_M: f64 = 452.058663384243;
     const FROZEN_GALAXY_SHELL_R_M: f64 = 12483.45699203113;
     const FROZEN_TWO_LEVEL_WORST_MARGIN_M: f64 = 11.127605697744457;
+
+    // ===== THE WINDOW LANE Slice 0: the per-system photometric draw (the marker datum) =========
+    // Owner-approved 2026-08-15/16, docs/design/window_lane.md §2.2/§2.8: a sleeping child's point
+    // of light is authored by its parent from the child's OWN generation stream. Slice 0 lands the
+    // draw consumer-less (nothing moves); the Slice-A marker emit reads it.
+
+    #[test]
+    fn the_worlds_systems_draw_their_pinned_photometrics() {
+        // FROZEN per-system draw goldens on THE world (seed 0) — EXACT f64, captured once from the
+        // taxonomy chain (sample_imf_mass → classify_spectral → main_sequence_luminosity) at THE
+        // world's stellar config and pinned as literals (NON-self-referential: a stream drift, a
+        // re-ordered draw, or a retuned IMF is caught, not silently re-captured). All three stars
+        // land M-class — the honest Salpeter answer (α = 2.35 concentrates mass draws at the low
+        // bound; the u01 that would draw a G star is a ~1e-3 sliver). Sub-solar luma is expected:
+        // the marker's DERIVED brightness knob (coordinate-scale model) is a later, separate owe.
+        let cfg = UniverseConfig::world(VISUAL_OCCUPANT_V_MAX_MPS, AOI_TICK_DT_S);
+        let draws = system_photometrics_for_config(0, &cfg);
+        assert_eq!(
+            draws,
+            vec![
+                (
+                    RealmId::System(7),
+                    StarPhotometrics {
+                        mass_msun: 0.09287894638451702,
+                        class: SpectralClass::M,
+                        luma_lsun: 0.0009726074241780799,
+                    },
+                ),
+                (
+                    RealmId::System(10487570625701098367),
+                    StarPhotometrics {
+                        mass_msun: 0.1081418058358058,
+                        class: SpectralClass::M,
+                        luma_lsun: 0.0013801082634453568,
+                    },
+                ),
+                (
+                    RealmId::System(13979593561158050752),
+                    StarPhotometrics {
+                        mass_msun: 0.16179874709518627,
+                        class: SpectralClass::M,
+                        luma_lsun: 0.00348634764331354,
+                    },
+                ),
+            ],
+        );
+        // Provenance: the three pinned realms ARE the seed lineage's systems, in forest order
+        // (system 0 keeps the named SYSTEM_A_SEED; the rest avalanche off the galaxy). Plain
+        // equality, no destructuring match — a non-System draw fails the vec compare (HR5: no
+        // uncoverable panic arm).
+        let realms: Vec<RealmId> = draws.iter().map(|(realm, _)| *realm).collect();
+        assert_eq!(
+            realms,
+            vec![
+                RealmId::System(system_seed_at(0)),
+                RealmId::System(system_seed_at(1)),
+                RealmId::System(system_seed_at(2)),
+            ]
+        );
+        assert_eq!(realms[0], RealmId::System(SYSTEM_A_SEED));
+        // Coherence: each pinned (class, luma) IS the taxonomy derivation of its pinned mass —
+        // the chain cannot silently decouple from the one drawn u01.
+        for (_, p) in &draws {
+            assert_eq!(
+                p.class,
+                classify_spectral(p.mass_msun, &SpectralClass::MASS_BOUNDS)
+            );
+            assert_eq!(
+                p.luma_lsun,
+                main_sequence_luminosity(p.mass_msun, &cfg.stellar.mlr_segments)
+            );
+        }
+    }
+
+    #[test]
+    fn the_photometric_draw_is_deterministic_and_dynamics_blind() {
+        // Two generations, identical draws (pure f(seed, config) — HR1: every shard hosting the
+        // galaxy authors byte-identical markers with no shared state)…
+        let cfg = UniverseConfig::world(VISUAL_OCCUPANT_V_MAX_MPS, AOI_TICK_DT_S);
+        assert_eq!(
+            system_photometrics_for_config(0, &cfg),
+            system_photometrics_for_config(0, &cfg)
+        );
+        // …and blind to the two CLUSTER-dynamics arguments (occupant speed / tick dt): they size
+        // the interest band, never the world — the same draw whatever cluster runs it (SL5).
+        let other_dynamics = UniverseConfig::world(15.0, 0.02);
+        assert_eq!(
+            system_photometrics_for_config(0, &cfg),
+            system_photometrics_for_config(0, &other_dynamics)
+        );
+        // A DIFFERENT universe seed draws differently (the stream is real, not a constant): seed 1
+        // shares no system seed with seed 0 beyond the named system 0, whose draw must move.
+        let seed1 = system_photometrics_for_config(1, &cfg);
+        assert_eq!(
+            seed1.len(),
+            3,
+            "the census is config-pinned, not seed-pinned"
+        );
+        assert_ne!(
+            seed1[0].1,
+            system_photometrics_for_config(0, &cfg)[0].1,
+            "system 0's draw must differ under a different universe seed"
+        );
+        // The ambient shells and the planets carry NO draw — only systems do (the draw roster is
+        // exactly the star roster; the planets' photometric ladder is a later, separate owe).
+        // ONE equality over the whole forest (HR5: no matches!/count with uncoverable arms): the
+        // bodies carrying a draw are exactly the three systems, in forest order.
+        let world = WorldView::generated(0, &cfg);
+        let starred: Vec<RealmId> = world
+            .bodies
+            .iter()
+            .filter_map(|b| b.photometrics.map(|_| b.realm))
+            .collect();
+        assert_eq!(
+            starred,
+            vec![
+                RealmId::System(system_seed_at(0)),
+                RealmId::System(system_seed_at(1)),
+                RealmId::System(system_seed_at(2)),
+            ]
+        );
+    }
 }

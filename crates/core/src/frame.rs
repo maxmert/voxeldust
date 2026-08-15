@@ -16,6 +16,7 @@
 //! orchestrator's Ephemeris Authority.
 
 use glam::{DQuat, DVec3, I64Vec3};
+use serde::{Deserialize, Serialize};
 
 use crate::ids::UniverseTick;
 use crate::placement::PlacementBook;
@@ -24,7 +25,14 @@ use crate::pose::{FrameRef, LatticePos, StampedPose};
 /// Where a frame's origin sits — and how it moves — relative to the COMMON PARENT at a
 /// universe tick. A rigid placement: position, velocity, orientation, angular velocity.
 /// All four are authored by the parent's physics writer; P1 uses the identity.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Serde-carried since the window lane (owner-approved 2026-08-15/16,
+/// `docs/design/window_lane.md` §2.2): the pre-inverted hop row (`vd-wire`
+/// `session_flow::HopRow.inv` — "my frame expressed in the child's frame at `at`", authored
+/// and inverted by the parent) ships this exact type shard→gateway, so the placement that
+/// crosses is the one the frame core already folds — never a second rigid-transform shape.
+/// It remains OFF every realm-inbound lane: no `InterShardFlow` arm carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FramePlacement {
     /// Integer CELL anchor of this frame's origin in the parent frame (parent tier units) — the
     /// exact-integer coarse part of the origin position, companion to `origin` (its sub-cell f64
@@ -620,5 +628,32 @@ mod tests {
         // Both land at the SAME planet-local coordinate (≈ the 7,-3,11 offset from the centre).
         assert!((a.pos.offset() - c.pos.offset()).length() < 1e-6);
         assert!((a.pos.offset() - DVec3::new(7.0, -3.0, 11.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_frame_placement_roundtrips_postcard_field_complete() {
+        // The window lane's hop row (owner-approved 2026-08-15/16, docs/design/window_lane.md §2.2)
+        // ships this exact type shard→gateway, so its serde carry is wire contract: every field —
+        // integer cell anchor included — survives a postcard roundtrip byte-exactly. A full-width
+        // fixture (no zero field) so a dropped/reordered field cannot pass as a lucky zero.
+        let full = FramePlacement {
+            origin_cell: I64Vec3::new(3, -7, 11),
+            origin: DVec3::new(1.5, -2.25, 9.0),
+            velocity: DVec3::new(0.5, 4.0, -1.0),
+            orientation: DQuat::from_xyzw(0.5, 0.5, 0.5, 0.5),
+            angular_velocity: DVec3::new(0.0625, -0.125, 0.25),
+        };
+        let bytes = postcard::to_allocvec(&full).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<FramePlacement>(&bytes).expect("decode"),
+            full
+        );
+        // The identity — the P1..P3 shipping value — roundtrips too.
+        let id = FramePlacement::identity();
+        let id_bytes = postcard::to_allocvec(&id).expect("encode identity");
+        assert_eq!(
+            postcard::from_bytes::<FramePlacement>(&id_bytes).expect("decode identity"),
+            id
+        );
     }
 }
