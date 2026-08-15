@@ -209,6 +209,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         armed = handoff_hold_ttl_ticks != 0,
         "hand-off hold budget resolved — how long this shard speaks for an occupant it has handed away",
     );
+    // D-WORLD-2 cure — the crossing-request ttl + re-drive budget, handed down by the launcher
+    // (`crossing_redrive_env`: derived from the deployment's SAGA deadlines, the only place both
+    // budgets are in scope — a shard re-deriving from a default it happens to know would be guessing).
+    // ABSENT ⇒ 0 ⇒ disarmed, exactly the pre-cure posture: an unresolved-dest crossing then strands
+    // its entity's latch forever, which is why every shipped launcher sets the pair. Logged so a real
+    // run SHOWS which posture it is flying.
+    let request_ttl_ticks: u32 = env.parse_or("VD_CROSSING_TTL_TICKS", 0)?;
+    let crossing_redrive_budget: u32 = env.parse_or("VD_CROSSING_REDRIVE_BUDGET", 0)?;
+    tracing::info!(
+        ttl = request_ttl_ticks,
+        budget = crossing_redrive_budget,
+        armed = request_ttl_ticks != 0,
+        "crossing re-drive posture resolved — how a strand-latched crossing self-heals (D-WORLD-2)",
+    );
     // Step 5 slice B — THE HOLD IS MANDATORY ON AN AoI-ARMED SHARD (the boot fence, like the lineage
     // fence above): armed interest bands mean live hand-offs, and a hand-off ledger with a zero
     // budget lets a source fall silent about a departing occupant while its parent still counts on
@@ -263,9 +277,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // trigger's `RealmBoundaries` registry is empty ⇒ `evaluate_realm_boundaries` early-returns,
             // behaviour-identical); the tuning is validated at `register_stub_shard` regardless.
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
-            // Slice 3d — the crossing-latch TTL fallback. INERT (0): the POSITIVE saga-terminal clear is
-            // the sole driver until the 3f abort/TTL egress lands.
-            request_ttl_ticks: 0,
+            // D-WORLD-2 — the crossing-latch ttl + re-drive budget (resolved from the launcher-derived
+            // env above): a delivered-but-unresolved crossing re-drives a bounded number of times, then
+            // takes the LOCAL pre-CAS abort that clears the strand latch.
+            request_ttl_ticks,
+            crossing_redrive_budget,
             handoff_hold_ttl_ticks,
             // THIS REALM'S OWN stored poses — realm-local, in this realm's frame. EMPTY at boot, and
             // deliberately so: the only pose store that exists today is a cluster-wide env var holding

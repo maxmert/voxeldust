@@ -89,7 +89,11 @@ pub fn stub_config() -> StubConfig {
         // Slice 3e / C-3: the containment re-home trigger tuning. INERT here (the cluster scenarios plant
         // no `RealmRegions`, so `evaluate_realm_boundaries` early-returns — behaviour-identical).
         boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
-        request_ttl_ticks: 0,
+        // D-WORLD-2: ARMED via THE production derivation (`crossing_redrive_env` — the same pair
+        // every launcher hands its shards), so an unresolved-dest crossing re-drives a bounded
+        // number of times and then aborts locally instead of stranding the entity forever.
+        request_ttl_ticks: armed_request_ttl_ticks(),
+        crossing_redrive_budget: armed_crossing_redrive_budget(),
         // ARMED, via THE production derivation (slice F review finding: the fixtures ran 0 while
         // the shipped boot fence REFUSES an armed world at 0 — the whole demote→take-over fill was
         // inert in every in-process scenario). Same two inputs the demand spawner and the static
@@ -106,6 +110,22 @@ pub fn armed_handoff_hold_ticks(tick_hz: f64) -> u32 {
     let rlm = vd_node::rlm_runtime::resolve_rlm_tuning(true, tick_hz as u32, 0, 0);
     let saga = vd_sim::saga::SagaTuning::default();
     u32::try_from(vd_sim::rlm::derive_arrival_shield_ticks(&rlm, &saga)).unwrap_or(u32::MAX)
+}
+
+/// The armed crossing-request ttl, derived exactly as production derives it (`vd-bins`
+/// `crossing_redrive_env` — the D-WORLD-2 cure): the window strictly outlasting the worst HEALTHY
+/// saga resolve, after which a stranded latch re-emits its request.
+#[must_use]
+pub fn armed_request_ttl_ticks() -> u32 {
+    vd_sim::saga::derive_request_ttl_ticks(&vd_sim::saga::SagaTuning::default())
+}
+
+/// The crossing re-drive budget, derived exactly as production derives it (`vd-bins`
+/// `crossing_redrive_env` — the D-WORLD-2 cure): re-drives spent before the source-local
+/// exhaustion abort clears the strand latch.
+#[must_use]
+pub fn armed_crossing_redrive_budget() -> u32 {
+    vd_sim::saga::derive_crossing_redrive_budget(&vd_sim::saga::SagaTuning::default())
 }
 
 /// The DEST stub's params: a DISTINCT realm (`System(8)`) + frame + mint seed so it is a

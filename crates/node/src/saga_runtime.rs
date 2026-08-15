@@ -848,7 +848,10 @@ impl SagaRuntimeRes {
     }
 
     /// Slice 3f-B — durable `CrossingRequest`s the subject was known for but the dest-realm OR session head
-    /// was unresolved (no saga started this tick; the abort-reply that clears the source latch is 3f-D).
+    /// was unresolved (no saga started this tick). The drop is source-healed (D-WORLD-2): the source's
+    /// armed ttl re-drive re-presents the SAME request a budgeted number of times, then aborts LOCALLY
+    /// (its latch clears; the entity's next crossing fires) — so a persistent count here is an
+    /// unhosted/unresolvable realm being retried, never a permanent strand.
     #[must_use]
     pub fn crossing_unresolved(&self) -> u64 {
         self.crossing_unresolved
@@ -1595,9 +1598,11 @@ pub(crate) fn rehydrate(
 /// CAS expectation), which is distinct from the id fence by design.
 ///
 /// MONOMORPHIC (no generic body): ALL branching is the single 3-arm `match` on the three head reads (NOT a
-/// let-else), so each outcome — start / unresolved / subject-gone — is a covered region (HR5). The
-/// abort-reply egress that clears the source latch on an unresolved dest is a LATER sub-slice (3f-D); here an
-/// unresolved crossing is only COUNTED (the source re-drives it — the `ReDriven` class), never replied to.
+/// let-else), so each outcome — start / unresolved / subject-gone — is a covered region (HR5). An
+/// unresolved crossing is COUNTED + warned, never replied to (no saga ⇒ no abort machinery to reply
+/// from); the SOURCE heals it (D-WORLD-2): its armed ttl re-drive re-presents the SAME id (absorbed
+/// by the `contains_key` guard if a dup DID start), and on budget exhaustion it aborts locally,
+/// clearing its own latch — so this arm is a bounded retry window, not a strand.
 fn handle_crossing_request(
     runtime: &mut SagaRuntimeRes,
     dir: &DirectoryCore,
@@ -1657,12 +1662,15 @@ fn handle_crossing_request(
             runtime.crossings_started += 1;
         }
         // The subject owner is known but the dest realm OR the session route is unresolved: no saga can start
-        // this tick. COUNTED only (3f-B is happy-path; the source-latch-clearing abort-reply is 3f-D).
+        // this tick. COUNTED only — no saga exists, so there is no abort machinery to reply from; the
+        // SOURCE heals the drop (D-WORLD-2): its armed ttl re-drive re-presents this same request a
+        // budgeted number of times, then aborts locally and clears its own latch.
         (Some(subj), _, _) => {
             runtime.crossing_unresolved += 1;
-            // Stage A: THE SILENT STRAND (§4u refutation 6, 3f-D owed). This drop replies with nothing
-            // while the source's per-entity latch suppresses every further attempt and the ttl re-drive
-            // is inert on the live path — so a stranded latch starts exactly here. WARN, never silent.
+            // Stage A: the unresolved drop (§4u refutation 6 — a permanent strand before the D-WORLD-2
+            // cure armed the source re-drive/exhaustion). Still WARN, never silent: a run of these is
+            // an unhosted/unresolvable realm being retried, and the source's exhaustion abort is the
+            // matching "CROSSING EXHAUSTED" line in its shard log.
             tracing::warn!(
                 transfer = ?transfer,
                 subject = ?req.subject,
@@ -1671,7 +1679,7 @@ fn handle_crossing_request(
                 dest_head_missing = dir.head(DirectoryKey::Realm(req.to_realm)).is_none(),
                 session_head_missing = dir.head(DirectoryKey::Session(req.session)).is_none(),
                 source_node = ?subj.authority.node(),
-                "CROSSING UNRESOLVED: dropped with no reply — the source latch stays standing",
+                "CROSSING UNRESOLVED: dropped with no reply — the source ttl re-drive owns the retry",
             );
         }
         // No directory owner for the subject at all (authority already moved/revoked): a counted drop.

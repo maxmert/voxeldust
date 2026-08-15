@@ -19,7 +19,8 @@
 //! while the home owns none (moved, never copied — batch review: the poll used to break on ANY
 //! dest-owned row); the C1 gate (`AdminSnapshot::realms_present` over `roster_realms(Dual)`)
 //! guarantees every pre-booked head resolves before the flight, so the crossing can never count
-//! `crossing_unresolved` — which since J-0 is known to be a PERMANENT STRAND, not a soft failure.
+//! `crossing_unresolved` — which since J-0 was a PERMANENT STRAND (now a bounded ttl-redrive +
+//! local-abort self-heal, D-WORLD-2 — still a crossing this smoke must never need).
 //! The flight is BOUNDED: `exit_ticks` parks the dot ~3 release-edges out, provably still inside the
 //! galaxy's own shell (asserted from THE world, never a literal), so no leg can reach a realm this
 //! cluster does not host.

@@ -132,6 +132,39 @@ impl SagaTuning {
     }
 }
 
+/// THE ARMED CROSSING-REQUEST TTL (D-WORLD-2 cure) — the window after which a still-standing
+/// `RequestInFlight` latch re-emits its `CrossingRequest`, DERIVED from the saga deadline family the
+/// way [`crate::rlm::derive_arrival_shield_ticks`] derives, never a literal. A re-drive must never
+/// race a LIVE-but-slow saga (the re-emit is absorbed idempotently, but firing inside a healthy
+/// window would be noise and would let the exhaustion abort below pre-empt a saga that is merely
+/// slow), so the window is the worst HEALTHY resolve a started crossing saga can take: one
+/// destructive pre-CAS budget (`abort_deadline_ticks`) plus one cheap re-drive per post-commit phase
+/// (`POST_COMMIT_STEPS · redrive_deadline_ticks`) — the exact saga term the arrival shield uses —
+/// `+ 1` to make the bound strict. Saturating into the `u32` config field
+/// (`StubConfig::request_ttl_ticks`); defaults derive to `24 + 4·8 + 1 = 57`.
+#[must_use]
+pub fn derive_request_ttl_ticks(saga: &SagaTuning) -> u32 {
+    let ticks = saga
+        .abort_deadline_ticks
+        .saturating_add(crate::rlm::POST_COMMIT_STEPS.saturating_mul(saga.redrive_deadline_ticks))
+        .saturating_add(1);
+    u32::try_from(ticks).unwrap_or(u32::MAX)
+}
+
+/// THE CROSSING RE-DRIVE BUDGET (D-WORLD-2 cure) — how many ttl re-drives a stranded latch spends
+/// before the source declares the dest UNRESOLVABLE and takes the LOCAL pre-CAS abort (clear the
+/// latch, bump the attempt, arm the containment cooldown; the entity stays simulated at the source).
+/// DERIVED as the saga's own patience ratio — as many cheap re-drive windows as fit inside one
+/// destructive abort budget (`abort_deadline_ticks / redrive_deadline_ticks`; defaults derive to
+/// `24 / 8 = 3`). The `.max(1)` floors a degenerate hand-built pair at one honest re-drive, and the
+/// `.max(1)` on the divisor keeps a (validate-rejected) zero redrive deadline from panicking here.
+/// Total strand-to-self-heal bound: `(budget + 1) · ttl` ticks (`4 · 57 = 228` at the defaults).
+#[must_use]
+pub fn derive_crossing_redrive_budget(saga: &SagaTuning) -> u32 {
+    let ratio = saga.abort_deadline_ticks / saga.redrive_deadline_ticks.max(1);
+    u32::try_from(ratio.max(1)).unwrap_or(u32::MAX)
+}
+
 /// D-3 dead-vs-slow discriminator tuning (ONE reviewed home, beside [`SagaTuning`]). A peer is
 /// confirmed dead only after `n_consecutive_unreachable` `NodeUnreachable` notices within
 /// `unreachable_window_ticks` with NO intervening successful inbound — so a single recoverable blip
@@ -2085,6 +2118,70 @@ mod tests {
                 redrive: 8,
                 abort: 4
             })
+        );
+    }
+
+    #[test]
+    fn the_request_ttl_derivation_outlasts_the_worst_healthy_saga_resolve() {
+        // D-WORLD-2 cure: the armed crossing-request ttl is DERIVED, never picked. At the defaults it
+        // is one destructive pre-CAS budget + one cheap re-drive per post-commit phase, strictly:
+        // 24 + 4*8 + 1 = 57. The value equality doubles as the formula pin (a re-tuned constant that
+        // silently changed the derivation would fail here).
+        let saga = SagaTuning::default();
+        assert_eq!(derive_request_ttl_ticks(&saga), 57);
+        assert_eq!(
+            u64::from(derive_request_ttl_ticks(&saga)),
+            saga.abort_deadline_ticks
+                + crate::rlm::POST_COMMIT_STEPS * saga.redrive_deadline_ticks
+                + 1,
+        );
+        // The u32 saturation arm: a (nonsense) u64::MAX budget must clamp, never wrap.
+        assert_eq!(
+            derive_request_ttl_ticks(&SagaTuning {
+                redrive_deadline_ticks: u64::MAX,
+                abort_deadline_ticks: u64::MAX,
+            }),
+            u32::MAX,
+        );
+    }
+
+    #[test]
+    fn the_redrive_budget_derivation_is_the_saga_patience_ratio() {
+        // D-WORLD-2 cure: as many cheap re-drive windows as fit inside one destructive abort budget.
+        // Defaults: 24 / 8 = 3 re-drives before the local exhaustion abort.
+        assert_eq!(derive_crossing_redrive_budget(&SagaTuning::default()), 3);
+        // An equal pair derives to exactly one re-drive (the ratio floor is reached, not the .max).
+        assert_eq!(
+            derive_crossing_redrive_budget(&SagaTuning {
+                redrive_deadline_ticks: 8,
+                abort_deadline_ticks: 8,
+            }),
+            1,
+        );
+        // A validate-rejected inverted pair still derives the honest floor of ONE re-drive (defensive
+        // — the `.max(1)` on the ratio).
+        assert_eq!(
+            derive_crossing_redrive_budget(&SagaTuning {
+                redrive_deadline_ticks: 8,
+                abort_deadline_ticks: 4,
+            }),
+            1,
+        );
+        // A validate-rejected zero redrive deadline must not divide by zero (the `.max(1)` divisor).
+        assert_eq!(
+            derive_crossing_redrive_budget(&SagaTuning {
+                redrive_deadline_ticks: 0,
+                abort_deadline_ticks: 24,
+            }),
+            24,
+        );
+        // The u32 saturation arm: a u64::MAX ratio must clamp, never wrap.
+        assert_eq!(
+            derive_crossing_redrive_budget(&SagaTuning {
+                redrive_deadline_ticks: 0,
+                abort_deadline_ticks: u64::MAX,
+            }),
+            u32::MAX,
         );
     }
 

@@ -1064,7 +1064,7 @@ pub fn spawn_peer_resolver_if_configured(
 /// The env every node shares (trust bundle + transport knobs + the per-launch process incarnation).
 #[must_use]
 pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, String)> {
-    vec![
+    let mut env = vec![
         ("VD_TRUST_DIR", trust_dir.to_owned()),
         str_pair("VD_OUTBOUND_CAP", p.outbound_cap),
         str_pair("VD_TICK_HZ", p.tick_hz),
@@ -1074,6 +1074,38 @@ pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, S
         // harvest key, so a demand orchestrator still hands its children `handoff_hold_anchor`'s
         // value (the same derivation, from its own live tunings).
         static_handoff_hold_env(p),
+    ];
+    // D-WORLD-2 cure — every STATICALLY launched shard flies the armed crossing re-drive posture.
+    // A static cluster hosts a SUBSET of THE world, which is exactly where an unresolved-dest
+    // crossing bites (an unhosted realm's head can NEVER resolve), so the static path derives the
+    // same pair the demand orchestrator hands its spawned children — from the default saga budget a
+    // static cluster runs (its orchestrator env sets no VD_SAGA_* override).
+    env.extend(crossing_redrive_env(&vd_sim::saga::SagaTuning::default()));
+    env
+}
+
+/// THE CROSSING RE-DRIVE PAIR every shard boots with (the D-WORLD-2 cure): the request ttl and the
+/// re-drive budget that turn an unresolved-dest crossing drop from a PERMANENT STRAND (latched
+/// forever, no reply, no re-emit) into a bounded self-heal — re-drive `budget` times at the `ttl`
+/// cadence, then abort locally, clear the latch, and let the entity's next crossing fire. DERIVED on
+/// the launcher, never a literal, from the deployment's SAGA deadlines (the only inputs it has):
+/// `ttl = abort + POST_COMMIT_STEPS·redrive + 1` (strictly outlasting the worst HEALTHY saga resolve,
+/// so a re-drive never races a live-but-slow saga — [`vd_sim::saga::derive_request_ttl_ticks`]) and
+/// `budget = abort / redrive` (the saga's own patience ratio —
+/// [`vd_sim::saga::derive_crossing_redrive_budget`]). The static launcher feeds the default budget
+/// ([`common_env`]); a DEMAND orchestrator feeds its LIVE budget into its spawn anchors, so the two
+/// launch modes cannot disagree with the saga tuning they actually run.
+#[must_use]
+pub fn crossing_redrive_env(saga: &vd_sim::saga::SagaTuning) -> [(&'static str, String); 2] {
+    [
+        (
+            "VD_CROSSING_TTL_TICKS",
+            vd_sim::saga::derive_request_ttl_ticks(saga).to_string(),
+        ),
+        (
+            "VD_CROSSING_REDRIVE_BUDGET",
+            vd_sim::saga::derive_crossing_redrive_budget(saga).to_string(),
+        ),
     ]
 }
 
@@ -2402,8 +2434,10 @@ pub fn boot_world(
 /// the block/station slice grows THE world), and a sibling star's seed is generated, never `8`. A
 /// cluster naming a realm the world does not contain boots a shard that fails `guard_regions_nest`
 /// with 0 ambient roots and DIES — and an occupant steered toward an unhosted realm is dropped with no
-/// reply while its source latch stays standing: a PERMANENT STRAND (`saga_runtime`'s "CROSSING
-/// UNRESOLVED"). So this struct is the ONLY place allowed to name a realm of THE world, and it derives
+/// reply (`saga_runtime`'s "CROSSING UNRESOLVED"). That drop WAS a permanent strand; since the
+/// D-WORLD-2 cure the source's armed ttl re-drive retries it a budgeted number of times and then
+/// aborts locally, clearing its latch — bounded self-heal, but still a crossing the cluster cannot
+/// serve. So this struct is the ONLY place allowed to name a realm of THE world, and it derives
 /// every name through [`boot_regions_and_movers`] — the SAME call the shard bin boots with — so the
 /// roster and the booted world cannot disagree.
 ///
@@ -3809,6 +3843,43 @@ mod incarnation_tests {
         // An INERT reconciler hands down nothing, so the child parses no key, defaults to zero, and lets
         // go of a departing occupant the instant it is told to — exactly as before the ledger existed.
         assert_eq!(handoff_hold_anchor(false, &rlm, &saga), None);
+    }
+
+    #[test]
+    fn the_crossing_redrive_pair_reaches_every_shard_and_matches_the_derivations() {
+        // D-WORLD-2: the launcher hands its shards the SAME ttl/budget the vd-sim derivations state —
+        // one derivation, read at both launch modes. Fails the day someone plants a literal.
+        let saga = vd_sim::saga::SagaTuning {
+            redrive_deadline_ticks: 40,
+            abort_deadline_ticks: 200,
+        };
+        assert_eq!(
+            crossing_redrive_env(&saga),
+            [
+                (
+                    "VD_CROSSING_TTL_TICKS",
+                    vd_sim::saga::derive_request_ttl_ticks(&saga).to_string(),
+                ),
+                (
+                    "VD_CROSSING_REDRIVE_BUDGET",
+                    vd_sim::saga::derive_crossing_redrive_budget(&saga).to_string(),
+                ),
+            ],
+        );
+        // Every STATIC cluster's shared env carries the pair (the walk gate's cluster is static — the
+        // exact rig whose unhosted-planet graze stranded the dot before the cure).
+        let common = common_env("trust", &DEV);
+        let pair = crossing_redrive_env(&vd_sim::saga::SagaTuning::default());
+        for (k, v) in pair {
+            assert_eq!(
+                common.iter().find(|(ck, _)| *ck == k).map(|(_, cv)| cv),
+                Some(&v),
+                "common_env must carry {k} at the derived value",
+            );
+        }
+        // The defaults derive to a REAL armed posture (never a vacuous zero).
+        let armed = vd_sim::saga::derive_request_ttl_ticks(&vd_sim::saga::SagaTuning::default());
+        assert!(armed > 0, "the derived ttl is a real window: {armed}");
     }
 
     #[test]

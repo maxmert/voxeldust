@@ -199,12 +199,28 @@ pub struct StubConfig {
     /// INERT in production through P3: the trigger is gated on a NON-EMPTY `RealmBoundaries` registry,
     /// which the composer leaves empty (behaviour-identical); only tests populate it.
     pub boundary: vd_core::geometry::BoundaryTuning,
-    /// Slice 3d — how long (ticks) a `RequestInFlight` crossing latch may stand before the geometric
-    /// trigger is permitted to re-request (a belt-and-braces bound on top of the POSITIVE saga terminal
-    /// clear via `on_saga_demote` / `CrossingAborted`). `0` = INERT (the positive clear is the sole
-    /// driver; the pre-3f default and every current rig). Reserved for the 3f abort/TTL egress — carried
-    /// now so the config surface is frozen before the consumer lands.
+    /// Slice 3d → ARMED by the D-WORLD-2 cure: how long (local ticks) a `RequestInFlight` crossing
+    /// latch may stand before `redrive_stranded_crossings` re-emits the SAME `CrossingRequest` (on top
+    /// of the POSITIVE saga-terminal clear via `on_saga_demote` / `CrossingAborted`, which covers every
+    /// request that actually STARTED a saga — this ttl covers the one that never did: a
+    /// delivered-but-UNRESOLVED dest, dropped with no reply). DERIVED, never a literal:
+    /// [`crate::saga::derive_request_ttl_ticks`] = `abort_deadline_ticks + POST_COMMIT_STEPS ·
+    /// redrive_deadline_ticks + 1` — strictly outlasting the worst HEALTHY saga resolve, so a re-drive
+    /// (and the exhaustion abort behind it) never races a live-but-slow saga. Every launcher arms it
+    /// (`VD_CROSSING_TTL_TICKS` in the bins; the derivation call in the fixtures); `0` = disarmed
+    /// (unit-rig only — a disarmed unresolved-dest drop is the D-WORLD-2 permanent strand).
     pub request_ttl_ticks: u32,
+    /// D-WORLD-2 cure — how many ttl re-drives a stranded latch spends before the source declares the
+    /// dest UNRESOLVABLE and takes the LOCAL pre-CAS abort ([`abort_crossing_latch`], the same
+    /// machinery the wire `CrossingAborted` consumer runs): the latch clears, the attempt bumps (a
+    /// later crossing of the same entity mints a fresh id and fires), and the containment cooldown
+    /// arms at the abort tick — so a dot PARKED inside an unresolved region re-fires at the bounded
+    /// cadence of the EXISTING `should_rehome` `k_dwell` dwell plus the full ttl cycle, never a
+    /// per-tick storm, while a GRAZE (already outside) simply continues unharmed. DERIVED, never a
+    /// literal: [`crate::saga::derive_crossing_redrive_budget`] = `abort_deadline_ticks /
+    /// redrive_deadline_ticks` (the saga's own patience ratio, `.max(1)`). Inert while
+    /// `request_ttl_ticks == 0` (the exhaustion path sits behind the ttl arm).
+    pub crossing_redrive_budget: u32,
     /// How long (local ticks) a shard keeps acting on behalf of a subject it is handing over — keeping the
     /// destination's children warm and keeping the parent informed — after it stops owning them. `0` =
     /// INERT (every literal in the tree today), which makes the whole hand-off ledger unreachable and the
@@ -882,10 +898,16 @@ pub struct CrossingState {
     /// The re-emit payload for the durable latch this state armed (3f-D4). `Some` iff a durable
     /// `RequestInFlight` latch is currently held for this subject — set alongside the latch in
     /// `fan_out_crossing`'s durable `Vacant` arm, read by `redrive_stranded_crossings` to re-mint the
-    /// SAME `CrossingRequest`. Left `None` on a transient crossing (no latch) and after an abort clear
-    /// (the abort resets the whole `CrossingState`). `Option` keeps `LatchedCrossing` (a non-`Default`
-    /// payload) off the `Default` path.
+    /// SAME `CrossingRequest`. Left `None` on a transient crossing (no latch) and cleared by the
+    /// pre-CAS abort ([`abort_crossing_latch`] — wire OR local-exhaustion). `Option` keeps
+    /// `LatchedCrossing` (a non-`Default` payload) off the `Default` path.
     pub latched_crossing: Option<LatchedCrossing>,
+    /// D-WORLD-2 cure — the ttl re-drives ALREADY SPENT on the currently-held latch. Reset to `0`
+    /// when a new latch is taken (`fan_out_crossing`'s `Vacant` arm) and by the pre-CAS abort clear;
+    /// incremented per re-emit by `redrive_stranded_crossings`. Once it reaches
+    /// `StubConfig::crossing_redrive_budget` the next ttl expiry takes the LOCAL exhaustion abort
+    /// instead of another re-emit. Meaningful only while the latch is held.
+    pub redrives_spent: u32,
 }
 
 /// The containment trigger's per-entity cooldown/latch state (task #135). One entry per evaluated
@@ -967,7 +989,11 @@ pub struct AoiState {
 /// `CrossingRequest` is latched here (keyed by subject entity → the deterministic
 /// [`crossing_transfer_id`]) so the trigger emits EXACTLY ONE request per crossing. Cleared POSITIVELY
 /// by the saga terminal — `on_saga_demote` on a durable COMMIT, or `CrossingAborted` on a pre-CAS abort
-/// (the 3f abort egress) — never by a bounded TTL window. Lazily evicted when the subject leaves.
+/// (the 3f abort egress) — and, since the D-WORLD-2 cure, by the SOURCE-LOCAL exhaustion abort: a
+/// request whose dest never resolves (no saga ever starts, so no terminal can ever arrive) is
+/// re-driven `crossing_redrive_budget` times at the `request_ttl_ticks` cadence and then aborted
+/// locally through the SAME pre-CAS clear ([`abort_crossing_latch`]), so an unhosted-dest graze can
+/// never suppress this entity's crossings forever. Lazily evicted when the subject leaves.
 #[derive(Resource, Debug, Default)]
 pub struct RequestInFlight(pub BTreeMap<EntityId, TransferId>);
 
@@ -1760,12 +1786,20 @@ pub struct StubStats {
     /// steady-state.
     pub crossings_suppressed_in_flight: u64,
     /// Slice 3f-D4 — a STRANDED durable latch RE-DRIVEN by `redrive_stranded_crossings`: a
-    /// delivered-but-unresolved dest (`head(Realm(to))` transiently absent at P4/P5) left the
-    /// `RequestInFlight` latch standing with no rising edge to re-emit it, so the per-tick latch-scan
-    /// re-emitted the SAME `CrossingRequest` once `local_tick - last_commit_tick >= request_ttl_ticks`.
-    /// `0` while `request_ttl_ticks == 0` (the INERT default / every current rig) and on every happy path
-    /// (the saga terminal clears the latch before the ttl elapses).
+    /// delivered-but-unresolved dest (`head(Realm(to))` absent — e.g. an UNHOSTED realm on a static
+    /// cluster, D-WORLD-2) left the `RequestInFlight` latch standing with no rising edge to re-emit
+    /// it, so the per-tick latch-scan re-emitted the SAME `CrossingRequest` once `local_tick -
+    /// last_commit_tick >= request_ttl_ticks`. ARMED in every launcher/fixture since the D-WORLD-2
+    /// cure (`0` only in disarmed unit rigs); `0` on every happy path (the saga terminal clears the
+    /// latch before the ttl elapses).
     pub crossings_redriven: u64,
+    /// D-WORLD-2 cure — stranded latches ABORTED LOCALLY on re-drive EXHAUSTION: the latch stood
+    /// through `crossing_redrive_budget` re-drives with no saga terminal (the dest never resolved),
+    /// so the source took the pre-CAS abort itself ([`abort_crossing_latch`]): latch cleared, attempt
+    /// bumped, containment cooldown armed — the entity stays simulated at the source and its NEXT
+    /// crossing fires. `0` on every happy path and while `request_ttl_ticks == 0`; a non-zero value
+    /// is a realm the cluster genuinely could not resolve for a whole `(budget+1)·ttl` window.
+    pub crossings_exhausted: u64,
     /// Slice 3e (robustness, goal-audit L4) — a Durable-TAGGED subject reached the durable crossing arm from
     /// the held-transient loop (a kind/loop mismatch — e.g. a mis-tagged batch item) and so carried no
     /// session: DEGRADED (counted, emitted nothing) instead of panicking. Must be `0` in a well-formed mesh;
@@ -3478,9 +3512,43 @@ fn on_transient_crossing_grant(
     }
 }
 
+/// THE ONE PRE-CAS CROSSING-ABORT LATCH CLEAR (Slice 3f-D + the D-WORLD-2 cure) — the body shared by
+/// the wire `CrossingAborted` consumer ([`on_crossing_aborted`], a saga that STARTED and aborted) and
+/// the SOURCE-LOCAL exhaustion abort ([`redrive_stranded_crossings`], a request that never started a
+/// saga because its dest never resolved). It clears the `RequestInFlight` latch, closes any source
+/// hand-off hold (an abort is pre-CAS, so a hold from THIS transfer cannot exist — holds open at the
+/// post-CAS demote; the only hold this could find is a NEWER committed crossing's, and both callers
+/// gate against that: the wire path by the exact id match, the local path by holding the live latch),
+/// BUMPS the attempt (H2 — the re-latch mints a FRESH [`crossing_transfer_id`], so a stale
+/// wire abort arriving later is the counted `crossing_abort_stale` no-op, never a wrong-clear),
+/// drops the re-emit payload + the spent-re-drive count, and sets the containment cooldown to
+/// `cooldown`: `None` re-fires the re-home NEXT tick (the wire abort — the container still differs,
+/// audit-L1); `Some(now)` arms the EXISTING `should_rehome` `k_dwell` dwell (the exhaustion abort —
+/// a dot PARKED inside an unresolved region must re-fire at a bounded cadence, never per-tick).
+/// `entry().or_default()` (not `if let`) so there is no uncoverable `None` region — a latched entity
+/// always has a `CrossingState`, but a default is harmless if absent. NOT a drop: dropping would
+/// reset the attempt to 0 → id aliasing. Monomorphic, straight-line (HR5).
+fn abort_crossing_latch(
+    entity: EntityId,
+    cooldown: Option<TickId>,
+    in_flight: &mut RequestInFlight,
+    progress: &mut CrossingProgress,
+    holds: &mut HandoffHolds,
+    stats: &mut StubStats,
+) {
+    close_hold(holds, (entity, HoldRole::Source));
+    in_flight.0.remove(&entity);
+    let st = progress.0.entry(entity).or_default();
+    st.crossing_attempt = st.crossing_attempt.saturating_add(1);
+    st.latched_crossing = None;
+    st.redrives_spent = 0;
+    st.last_commit_tick = cooldown;
+    stats.crossing_latches_cleared += 1;
+}
+
 /// SOURCE consumer of the orchestrator's `CrossingAborted` (Slice 3f-D): the crossing resolve/start saga
-/// aborted pre-CAS, so CLEAR the subject's `RequestInFlight` latch (the positive re-cross signal, never a
-/// bounded TTL) — but ONLY if it still holds THIS aborted transfer id (a stale abort for a superseded /
+/// aborted pre-CAS, so CLEAR the subject's `RequestInFlight` latch (the positive re-cross signal) — but
+/// ONLY if it still holds THIS aborted transfer id (a stale abort for a superseded /
 /// re-latched transfer must not free a live crossing; the per-attempt id makes that exact).
 ///
 /// ALWAYS acks `CrossingAbortedAck` (all three paths): the orchestrator keeps its durable
@@ -3511,28 +3579,12 @@ fn on_crossing_aborted(
         return;
     };
     // Clear ONLY on an exact id match (`== Some(&abort.transfer)`) — equality over the value so the
-    // false arm is a covered no-op, not an uncoverable `matches!` region (HR5(d)).
+    // false arm is a covered no-op, not an uncoverable `matches!` region (HR5(d)). The clear itself
+    // is THE shared pre-CAS abort body ([`abort_crossing_latch`] — hold close under the match, latch
+    // clear, attempt bump). `cooldown: None` (audit-L1): the container still differs from the owner
+    // (the entity did not move), so `should_rehome` re-fires NEXT tick with a fresh id.
     if in_flight.0.get(&entity) == Some(&abort.transfer) {
-        // The hand-off is OVER and nobody took over — no take-over fence to prove, so the hold (if
-        // any) closes with the latch. INSIDE the id match (slice F review): an abort is pre-CAS, so
-        // a hold from THIS transfer cannot exist (holds open at the post-CAS demote) — the only
-        // hold an abort could ever find is a NEWER committed crossing's, and a STALE abort closing
-        // it would mute that crossing's retained-ghost fill with no eviction fanned (a frozen
-        // bystander figure until band exit). Closing under the match keeps the stated intent
-        // ("never keep speaking for a subject that never left") while a superseded abort touches
-        // nothing.
-        close_hold(holds, (entity, HoldRole::Source));
-        in_flight.0.remove(&entity);
-        // Re-arm (audit-L1 + H2): reset the cooldown so the re-home can re-fire, and BUMP the attempt so the
-        // re-latch mints a fresh id. `entry().or_default()` (not `if let`) so
-        // there is no uncoverable `None` region — a latched entity always has a `CrossingState`, but a
-        // default is harmless if absent. NOT a drop: dropping would reset the attempt to 0 → aliasing.
-        let st = progress.0.entry(entity).or_default();
-        st.crossing_attempt = st.crossing_attempt.saturating_add(1);
-        // Reset the cooldown so the re-home can re-fire without a physical re-cross — the container still
-        // differs from the owner (the entity did not move), so `should_rehome` fires again next tick.
-        st.last_commit_tick = None;
-        stats.crossing_latches_cleared += 1;
+        abort_crossing_latch(entity, None, in_flight, progress, holds, stats);
     } else {
         stats.crossing_abort_stale += 1;
     }
@@ -5555,6 +5607,8 @@ fn fan_out_crossing(
                         session,
                         to_parent,
                     });
+                    // D-WORLD-2: a fresh latch starts a fresh re-drive budget.
+                    state.redrives_spent = 0;
                     stats.crossings_requested += 1;
                     // Stage A: the emit line pairs with "CROSSING DECIDED" above and with the
                     // orchestrator's "CROSSING SAGA STARTED" via the transfer id.
@@ -5571,8 +5625,9 @@ fn fan_out_crossing(
                 Entry::Occupied(held) => {
                     stats.crossings_suppressed_in_flight += 1;
                     // Stage A: fires per tick while the occupant dwells over a boundary with a latch
-                    // standing. A latch whose lines never stop is the stranded-latch leak (3f-D owed):
-                    // the request was dropped upstream with no reply and nothing re-emits it.
+                    // standing. Bounded since the D-WORLD-2 cure: a latch nothing terminates is
+                    // re-driven `crossing_redrive_budget` times at the `request_ttl_ticks` cadence and
+                    // then aborted locally, so these lines can never run forever.
                     tracing::debug!(
                         entity = entity.0,
                         latched = ?held.get(),
@@ -5603,20 +5658,30 @@ fn fan_out_crossing(
     }
 }
 
-/// Slice 3f-D4 (DEFERRED D-43 #2) — the per-tick RE-DRIVE of a STRANDED durable crossing latch. A
-/// DELIVERED-but-unresolved dest (`head(Realm(to))` transiently absent — a realm shard mid-lease /
-/// partitioned at P4/P5) leaves the `RequestInFlight` latch standing with NO re-emit: under CONTAINMENT
-/// (task #135) `should_rehome` returns `Some(container)` every tick the container differs, but the still-
+/// Slice 3f-D4 (DEFERRED D-43 #2) + the D-WORLD-2 exhaustion cure — the per-tick RE-DRIVE of a
+/// STRANDED durable crossing latch, BOUNDED. A DELIVERED-but-unresolved dest (`head(Realm(to))`
+/// absent — an UNHOSTED realm on a static cluster, or a realm shard mid-lease/partitioned at P4/P5)
+/// leaves the `RequestInFlight` latch standing with NO re-emit: under CONTAINMENT (task #135)
+/// `should_rehome` returns `Some(container)` every tick the container differs, but the still-
 /// latched dot hits `fan_out_crossing`'s `Occupied` SUPPRESS arm each tick, so nothing re-fires while the
 /// dot dwells in the (unresolved) region. This scan re-emits the SAME latched
 /// `CrossingRequest` (same `(subject, subject_fence, attempt)` → byte-identical [`crossing_transfer_id`];
 /// the orchestrator's `contains_key` guard absorbs a dup that already started, an unresolved one re-tries
-/// the head reads) once `local_tick - last_commit_tick >= request_ttl_ticks`, then re-arms the ttl timer.
-/// `request_ttl_ticks == 0` (the INERT default / every current rig) → an early return before any
-/// iteration. Authority-gated exactly like `evaluate_realm_boundaries`. A BRANCHLESS shim over the
+/// the head reads) once `local_tick - last_commit_tick >= request_ttl_ticks`, then re-arms the ttl timer —
+/// but only `crossing_redrive_budget` times: a latch still standing at the NEXT expiry has spent one
+/// full destructive-abort window per re-drive with no terminal, so the dest is UNRESOLVABLE and the
+/// source takes the LOCAL pre-CAS abort ([`abort_crossing_latch`], the same body the wire
+/// `CrossingAborted` runs): latch cleared, attempt bumped, containment cooldown armed at the abort tick
+/// (the `k_dwell` dwell bounds a parked dweller's re-fire; a graze that already left simply continues —
+/// its container matches its owner again, so nothing re-fires). The entity stays simulated at the
+/// source throughout — no saga ever started, so there is nothing to thaw beyond the latch itself.
+/// `request_ttl_ticks == 0` (disarmed — unit rigs only since the D-WORLD-2 cure armed every launcher)
+/// → an early return before any iteration; the exhaustion arm sits behind the same ttl gate.
+/// Authority-gated exactly like `evaluate_realm_boundaries`. A BRANCHLESS shim over the
 /// re-emit payload the latch carried at emit time ([`LatchedCrossing`]) — no recovery from live geometry;
-/// the only branches are the ttl early-return, the authority gate, and the `>= ttl` window, each covered
-/// once (HR5). Determinism: `in_flight.0` / `progress.0` are `BTreeMap`s (ordered iteration), the
+/// the only branches are the ttl early-return, the authority gate, the `>= ttl` window, and the
+/// budget split, each covered once (HR5). Determinism: `in_flight.0` / `progress.0` are `BTreeMap`s
+/// (ordered iteration; the exhausted set is collected in that order and drained after the scan), the
 /// re-mint is a pure fn of the latched fields + the universe clock, `.min(u32::MAX)` guards the cast
 /// (mirrors `evaluate_one_subject`'s `since_commit` compute). The `.expect()`s are STRAIGHT-LINE
 /// invariants (a held latch always carries its `CrossingState` — `retain_live` syncs both on the same
@@ -5628,8 +5693,9 @@ fn redrive_stranded_crossings(
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     regions: Res<RealmRegions>,
-    in_flight: Res<RequestInFlight>,
+    mut in_flight: ResMut<RequestInFlight>,
     mut progress: ResMut<CrossingProgress>,
+    mut holds: ResMut<HandoffHolds>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
 ) {
@@ -5655,8 +5721,11 @@ fn redrive_stranded_crossings(
     if !armed && ttl == 0 {
         return;
     }
-    // `in_flight` (immutable) and `progress` (mutable) are DISTINCT resources — no aliasing — so the scan
-    // reads the held latches while mutating each subject's `CrossingState` in one deterministic pass.
+    // `in_flight` and `progress` are DISTINCT resources — no aliasing — so the scan reads the held
+    // latches while mutating each subject's `CrossingState` in one deterministic pass. Exhausted
+    // latches are collected (in the same `BTreeMap` order) and aborted AFTER the pass — the abort
+    // removes from `in_flight`, which must not happen under its own iteration borrow.
+    let mut exhausted: Vec<EntityId> = Vec::new();
     for (entity, _latched) in in_flight.0.iter() {
         let state = progress
             .0
@@ -5694,29 +5763,63 @@ fn redrive_stranded_crossings(
                 .saturating_sub(last.0)
                 .min(u32::MAX as u64) as u32;
             if elapsed >= ttl {
-                let subject = DirectoryKey::Entity(*entity);
-                outbox.push_flow(
-                    config.orchestrator,
-                    MsgClass::Saga,
-                    &InterShardFlow::CrossingRequest(CrossingRequest {
-                        subject,
-                        from_realm: config.realm,
-                        to_realm: lc.to_realm,
-                        subject_fence: lc.subject_fence,
-                        session: lc.session,
-                        // The SAME attempt (unchanged since the latch — the attempt bumps only on a
-                        // post-abort re-latch), so the re-emitted id is byte-identical to the standing latch.
-                        attempt: state.crossing_attempt,
-                        // The SAME parent provenance the latch captured — so the re-drive re-mints the
-                        // identical request (an Area dest's frame still forms on the re-drive).
-                        to_parent: lc.to_parent,
-                    }),
-                );
-                // Re-arm the ttl timer so the next re-drive is another `ttl` ticks out.
-                state.last_commit_tick = Some(clock.local_tick);
-                stats.crossings_redriven += 1;
+                if state.redrives_spent < config.crossing_redrive_budget {
+                    let subject = DirectoryKey::Entity(*entity);
+                    outbox.push_flow(
+                        config.orchestrator,
+                        MsgClass::Saga,
+                        &InterShardFlow::CrossingRequest(CrossingRequest {
+                            subject,
+                            from_realm: config.realm,
+                            to_realm: lc.to_realm,
+                            subject_fence: lc.subject_fence,
+                            session: lc.session,
+                            // The SAME attempt (unchanged since the latch — the attempt bumps only on a
+                            // post-abort re-latch), so the re-emitted id is byte-identical to the standing latch.
+                            attempt: state.crossing_attempt,
+                            // The SAME parent provenance the latch captured — so the re-drive re-mints the
+                            // identical request (an Area dest's frame still forms on the re-drive).
+                            to_parent: lc.to_parent,
+                        }),
+                    );
+                    // Re-arm the ttl timer so the next re-drive is another `ttl` ticks out, and spend
+                    // one unit of the D-WORLD-2 budget.
+                    state.last_commit_tick = Some(clock.local_tick);
+                    state.redrives_spent = state.redrives_spent.saturating_add(1);
+                    stats.crossings_redriven += 1;
+                } else {
+                    // D-WORLD-2 EXHAUSTION: the budget is spent and the latch STILL stands — every
+                    // re-drive window (each ≥ the worst healthy saga resolve) passed with no terminal,
+                    // so the dest is unresolvable from here. Collected; aborted after the pass.
+                    exhausted.push(*entity);
+                }
             }
         }
+    }
+    for entity in exhausted {
+        // The SOURCE-LOCAL pre-CAS abort (the D-WORLD-2 cure): the same clear the wire `CrossingAborted`
+        // runs, minus the wire (no saga ever started — SL6: nothing new crosses a boundary here). The
+        // cooldown arms at THIS tick, so a dot parked inside the unresolved region re-fires only past
+        // the existing `should_rehome` `k_dwell` dwell — the bounded sit-inside cadence — while a graze
+        // that already left continues unharmed (its container matches its owner again). WARN, never
+        // silent: this is a realm the cluster could not resolve for a whole `(budget+1)·ttl` window.
+        tracing::warn!(
+            entity = entity.0,
+            from_realm = ?config.realm,
+            wanted_to = ?progress.0.get(&entity).and_then(|st| st.latched_crossing).map(|lc| lc.to_realm),
+            redrives_spent = config.crossing_redrive_budget,
+            ttl,
+            "CROSSING EXHAUSTED: dest never resolved — aborting locally, latch cleared, entity stays at the source",
+        );
+        abort_crossing_latch(
+            entity,
+            Some(clock.local_tick),
+            &mut in_flight,
+            &mut progress,
+            &mut holds,
+            &mut stats,
+        );
+        stats.crossings_exhausted += 1;
     }
 }
 
@@ -9108,6 +9211,7 @@ mod tests {
             snapshot_datagram_budget: 1100,
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
             request_ttl_ticks: 0,
+            crossing_redrive_budget: 0,
             handoff_hold_ttl_ticks: 0,
             own_coord: StubConfig::root_coord(RealmId::System(7)),
             boot_ticks_p99: 0,
@@ -19439,10 +19543,21 @@ mod tests {
     }
 
     /// 3f-D4 config: the shared trigger fixture with a NON-ZERO `request_ttl_ticks` so
-    /// `redrive_stranded_crossings` is armed (every other rig uses the INERT `0`).
+    /// `redrive_stranded_crossings` is armed (every other rig uses the disarmed `0`). The re-drive
+    /// budget rides THE production derivation (D-WORLD-2) so the re-drive tests run the shipped
+    /// patience ratio; the exhaustion tests pick smaller windows via [`config_with_ttl_and_budget`].
     fn config_with_ttl(ttl: u32) -> StubConfig {
+        config_with_ttl_and_budget(
+            ttl,
+            crate::saga::derive_crossing_redrive_budget(&crate::saga::SagaTuning::default()),
+        )
+    }
+
+    /// D-WORLD-2 config: ttl AND re-drive budget explicit, for the exhaustion/backoff arcs.
+    fn config_with_ttl_and_budget(ttl: u32, budget: u32) -> StubConfig {
         StubConfig {
             request_ttl_ticks: ttl,
+            crossing_redrive_budget: budget,
             handoff_hold_ttl_ticks: 0,
             ..config()
         }
@@ -19538,6 +19653,214 @@ mod tests {
             crossing_requests(&after).len(),
             0,
             "the re-drive re-armed the ttl timer — no storm before the next window",
+        );
+    }
+
+    /// D-WORLD-2 arc fixture: ttl 3, budget 2, `k_dwell` = `BoundaryTuning::DEFAULT.k_dwell` (5).
+    /// Timeline for a dot latched at tick 2 whose dest NEVER resolves (no orchestrator in the rig):
+    /// re-drives at 5 and 8, EXHAUSTION abort at 11, cooldown until 15, re-fire (attempt 1) at 16.
+    const XTTL: u32 = 3;
+    const XBUDGET: u32 = 2;
+
+    #[test]
+    fn an_exhausted_latch_aborts_locally_and_the_next_crossing_fires() {
+        // THE D-WORLD-2 headline arc: unresolved-dest request → bounded ttl re-drives (count measured)
+        // → exhaustion → the LOCAL pre-CAS abort (latch cleared, attempt bumped, entity stays simulated
+        // at the source) → a LATER crossing of the SAME entity fires with a FRESH id. Before the cure
+        // this latch stood FOREVER (the permanent strand the walk gate hit live on an unhosted planet).
+        let mut rig = Rig::with_config(config_with_ttl_and_budget(XTTL, XBUDGET));
+        rig.grant_realm();
+        plant_dock_regions(&mut rig);
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 44);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+
+        // Ticks 2..=10: the rising-edge request (t2) + exactly XBUDGET re-drives (t5, t8), all attempt 0.
+        let mut before_exhaust: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..=10 {
+            rig.set_local_tick(t);
+            before_exhaust.extend(rig.tick(vec![]));
+        }
+        let reqs = crossing_requests(&before_exhaust);
+        assert_eq!(
+            reqs.len(),
+            1 + XBUDGET as usize,
+            "one rising edge + exactly the budgeted re-drives before exhaustion",
+        );
+        assert!(
+            reqs.iter().all(|r| r.attempt == 0),
+            "every pre-exhaustion emit is the SAME attempt (byte-identical id)"
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_redriven,
+            u64::from(XBUDGET)
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossings_exhausted, 0);
+
+        // Tick 11: the third expiry finds the budget spent → the LOCAL exhaustion abort.
+        rig.set_local_tick(11);
+        let exhaust_out = rig.tick(vec![]);
+        assert_eq!(
+            crossing_requests(&exhaust_out).len(),
+            0,
+            "exhaustion emits NO further request — it aborts instead",
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossings_exhausted, 1);
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossing_latches_cleared,
+            1,
+            "the exhaustion abort rides the ONE pre-CAS latch clear",
+        );
+        assert_eq!(
+            rig.world.resource::<RequestInFlight>().0.get(&entity),
+            None,
+            "THE LATCH CLEARS — the strand is over",
+        );
+        let st = *rig
+            .world
+            .resource::<CrossingProgress>()
+            .0
+            .get(&entity)
+            .expect("the crossing state survives the abort");
+        assert_eq!(st.crossing_attempt, 1, "the abort bumped the attempt (H2)");
+        assert_eq!(st.latched_crossing, None, "the re-emit payload is dropped");
+        assert_eq!(st.redrives_spent, 0, "the budget resets for the next latch");
+        assert_eq!(
+            st.last_commit_tick,
+            Some(TickId(11)),
+            "the cooldown arms AT the abort tick — the sit-inside backoff rides k_dwell",
+        );
+        // THAW: the entity stays simulated at the source (no saga ever started; nothing was frozen).
+        assert!(
+            rig.world
+                .resource::<Dots>()
+                .0
+                .get(&TRIG_SESSION)
+                .expect("the dot is still here")
+                .authority
+                .simulates(),
+            "the entity stays simulated at the source after the local abort",
+        );
+
+        // Ticks 12..=15: since_commit 1..4 < k_dwell(5) → the EXISTING dwell suppresses the re-fire.
+        let mut cooldown_out: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 12..=15 {
+            rig.set_local_tick(t);
+            cooldown_out.extend(rig.tick(vec![]));
+        }
+        assert_eq!(
+            crossing_requests(&cooldown_out).len(),
+            0,
+            "the k_dwell cooldown bounds the refire — no per-tick abort/latch storm",
+        );
+
+        // Tick 16: the cooldown elapsed and the dot is STILL in-band → the SAME entity's crossing
+        // FIRES AGAIN, re-latched under a FRESH id (attempt 1) — the strand cure's whole point.
+        rig.set_local_tick(16);
+        let refire_out = rig.tick(vec![]);
+        let refire = crossing_requests(&refire_out);
+        assert_eq!(refire.len(), 1, "a later crossing of the SAME entity fires");
+        assert_eq!(refire[0].attempt, 1, "the re-fire mints the bumped attempt");
+        assert_eq!(
+            rig.world.resource::<RequestInFlight>().0.get(&entity),
+            Some(&crossing_transfer_id(
+                DirectoryKey::Entity(entity),
+                Fence(1),
+                1
+            )),
+            "the re-latch id is FRESH (attempt-stamped) — a stale abort can never wrong-clear it",
+        );
+    }
+
+    #[test]
+    fn a_sit_inside_dweller_is_bounded_to_the_derived_refire_cycle() {
+        // D-WORLD-2 sit-inside backoff: a dot PARKED inside an unresolvable region refires scan →
+        // re-drives → abort FOREVER — but at a BOUNDED cadence derived from the existing machinery:
+        // one full cycle is `(budget+1)·ttl` (the latch's re-drive life) + `k_dwell` (the containment
+        // cooldown the abort arms), and each cycle emits exactly `budget+1` requests. No sleep
+        // literal anywhere: the bound is computed from the same config the systems read.
+        let cfg = config_with_ttl_and_budget(XTTL, XBUDGET);
+        let cycle = (u64::from(XBUDGET) + 1) * u64::from(XTTL) + u64::from(cfg.boundary.k_dwell);
+        let per_cycle = u64::from(XBUDGET) + 1;
+        let mut rig = Rig::with_config(cfg);
+        rig.grant_realm();
+        plant_dock_regions(&mut rig);
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 45);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+
+        // Two full cycles, starting at the first evaluated tick (2): 2 ..= 2 + 2·cycle − 1.
+        let window = 2 * cycle;
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..(2 + window) {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        let total = crossing_requests(&all).len() as u64;
+        // The derived bound, computed (never a literal): ⌈window/cycle⌉ cycles × (budget+1) requests.
+        let bound = window.div_ceil(cycle) * per_cycle;
+        assert!(
+            total <= bound,
+            "refire count over {window} ticks must stay within the derived bound {bound}, got {total}",
+        );
+        // Deterministic rig ⇒ the exact count is the bound itself (2 cycles × 3 requests): t2/t5/t8
+        // then (post-abort at 11, cooldown to 15) t16/t19/t22 — pinning the cadence, not just the cap.
+        assert_eq!(total, 2 * per_cycle);
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_exhausted,
+            2,
+            "one exhaustion abort per cycle",
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().crossings_redriven,
+            2 * u64::from(XBUDGET),
+            "the budgeted re-drives per cycle, twice",
+        );
+    }
+
+    #[test]
+    fn a_graze_continues_unharmed_after_the_exhaustion_abort() {
+        // D-WORLD-2 graze: the dot PASSES THROUGH the unresolvable region (the walk gate's live
+        // failure: a fly-in grazing an unhosted planet's 3.95 m SOI) and is long gone by exhaustion.
+        // The abort clears the latch; the container then MATCHES the owning realm, so nothing
+        // re-fires — the graze simply continues, and the entity's later crossings are free again.
+        let mut rig = Rig::with_config(config_with_ttl_and_budget(XTTL, XBUDGET));
+        rig.grant_realm();
+        plant_dock_regions(&mut rig);
+        let entity = EntityId::pack(EntityKind::Player, 10, 1, 46);
+        insert_owned_dot(&mut rig, TRIG_SESSION, entity, DVec3::new(100.0, 0.0, 0.0));
+        // Tick 2: in-band → the rising-edge request latches (the graze's entry).
+        rig.set_local_tick(2);
+        let first = rig.tick(vec![]);
+        assert_eq!(crossing_requests(&first).len(), 1);
+        // The graze leaves: well past the child's destroy edge (r 1000 + outset), still inside OWN.
+        move_dot(&mut rig, TRIG_SESSION, DVec3::new(5000.0, 0.0, 0.0));
+
+        // Through the re-drives (5, 8 — the scan re-emits the LATCHED payload regardless of where the
+        // dot now is) and the exhaustion (11), then a long quiet tail.
+        let mut rest: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 3..=30 {
+            rig.set_local_tick(t);
+            rest.extend(rig.tick(vec![]));
+        }
+        assert_eq!(
+            crossing_requests(&rest).len(),
+            XBUDGET as usize,
+            "only the budgeted re-drives — after the abort the departed graze NEVER re-fires",
+        );
+        assert_eq!(rig.world.resource::<StubStats>().crossings_exhausted, 1);
+        assert_eq!(
+            rig.world.resource::<RequestInFlight>().0.get(&entity),
+            None,
+            "the latch is gone — the entity's future crossings are unsuppressed",
+        );
+        let dot = rig
+            .world
+            .resource::<Dots>()
+            .0
+            .get(&TRIG_SESSION)
+            .expect("the dot is still here");
+        assert!(
+            dot.authority.simulates(),
+            "the graze continues unharmed — still owned and simulated at the source",
         );
     }
 

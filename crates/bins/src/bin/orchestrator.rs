@@ -254,6 +254,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // arrival shield, single-sourced + unit-tested in `vd_bins`. Inert reconciler ⇒ no key ⇒ the child
     // stays disarmed and boots byte-identically.
     spawn_anchors.extend(vd_bins::handoff_hold_anchor(demand, &rlm, &saga));
+    // D-WORLD-2 — the crossing re-drive pair every demand-spawned shard inherits, derived from THIS
+    // orchestrator's LIVE saga budget (the same derivation the static launcher runs over the default).
+    spawn_anchors.extend(vd_bins::crossing_redrive_env(&saga));
     // The child's VD_PEERS anchors: this orchestrator (self) + the gateway (if booked). The per-realm
     // ANCESTOR closure is computed per-spawn by SpawnCore; only these static anchors are held here.
     let mut anchor_peers: Vec<(vd_core::NodeId, std::net::SocketAddr)> =

@@ -1040,6 +1040,12 @@ claim carrying file:line. Spot-checked by hand afterwards. Verdicts that CHANGE 
    suppresses every further attempt (stub.rs:4848) and the only re-emitter is disabled on the live path
    (`request_ttl_ticks: 0`, shard.rs:281). The entity keeps simulating but can never cross again from
    that shard. This fits §4f's "reaches 0.43 m and is NEVER re-homed" with no frame mislabel needed.
+   **CURED (D-WORLD-2, 2026-08-15):** the re-emitter is now ARMED on every launch path (the ttl and a
+   bounded re-drive budget are DERIVED from the saga deadlines — `derive_request_ttl_ticks` /
+   `derive_crossing_redrive_budget`, handed down as `VD_CROSSING_TTL_TICKS`/`VD_CROSSING_REDRIVE_BUDGET`),
+   and budget exhaustion takes a SOURCE-LOCAL pre-CAS abort (`abort_crossing_latch`) that clears the
+   latch, bumps the attempt, and arms the containment cooldown — the entity's next crossing fires.
+   This finding stands as the record of the pre-cure behaviour.
 
 7. **The containment band is NOT speed-sized in production.** stub.rs:4705-4706 ("the band is sized
    from the occupant's SPEED") is a stale comment. The shipped band is static inset 1 m / outset 2 m,

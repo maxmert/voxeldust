@@ -27,6 +27,17 @@ fn armed_hold_ticks() -> u32 {
     u32::try_from(vd_sim::rlm::derive_arrival_shield_ticks(&rlm, &saga)).unwrap_or(u32::MAX)
 }
 
+/// The armed crossing-request ttl + re-drive budget the SHIPPED launchers derive (D-WORLD-2 cure —
+/// `crossing_redrive_env`): the fixtures run the armed posture, never the disarmed strand-prone `0`.
+#[cfg(test)]
+fn armed_crossing_redrive() -> (u32, u32) {
+    let saga = vd_sim::saga::SagaTuning::default();
+    (
+        vd_sim::saga::derive_request_ttl_ticks(&saga),
+        vd_sim::saga::derive_crossing_redrive_budget(&saga),
+    )
+}
+
 /// What one node EXPOSES to the oracles, on request: the orchestrator's directory
 /// view, a shard's held-set + input logs, a client's sent log. Ground truth for
 /// AUTHORITY-UNIQUE / INPUT-CONSERVATION — nodes report, oracles audit.
@@ -1121,7 +1132,10 @@ mod tests {
                 self_fence_grace_ticks: 0,
                 snapshot_datagram_budget: 1100,
                 boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
-                request_ttl_ticks: 0,
+                // D-WORLD-2: ARMED via the production derivation (`crossing_redrive_env`) — an
+                // unresolved-dest crossing re-drives then aborts locally, never strands forever.
+                request_ttl_ticks: armed_crossing_redrive().0,
+                crossing_redrive_budget: armed_crossing_redrive().1,
                 // ARMED via the production derivation (see vd-tests `armed_handoff_hold_ticks`; the
                 // boot fence refuses an armed world at 0 — fixtures run the shipped posture).
                 handoff_hold_ttl_ticks: armed_hold_ticks(),
@@ -1338,7 +1352,10 @@ mod tests {
             snapshot_datagram_budget: 1100,
             self_fence_grace_ticks: 0,
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
-            request_ttl_ticks: 0,
+            // D-WORLD-2: ARMED via the production derivation (`crossing_redrive_env`) — an
+            // unresolved-dest crossing re-drives then aborts locally, never strands forever.
+            request_ttl_ticks: armed_crossing_redrive().0,
+            crossing_redrive_budget: armed_crossing_redrive().1,
             // ARMED via the production derivation (see vd-tests `armed_handoff_hold_ticks`; the
             // boot fence refuses an armed world at 0 — fixtures run the shipped posture).
             handoff_hold_ttl_ticks: armed_hold_ticks(),
@@ -1385,7 +1402,10 @@ mod tests {
             snapshot_datagram_budget: 1100,
             self_fence_grace_ticks: 0,
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
-            request_ttl_ticks: 0,
+            // D-WORLD-2: ARMED via the production derivation (`crossing_redrive_env`) — an
+            // unresolved-dest crossing re-drives then aborts locally, never strands forever.
+            request_ttl_ticks: armed_crossing_redrive().0,
+            crossing_redrive_budget: armed_crossing_redrive().1,
             // ARMED via the production derivation (see vd-tests `armed_handoff_hold_ticks`; the
             // boot fence refuses an armed world at 0 — fixtures run the shipped posture).
             handoff_hold_ttl_ticks: armed_hold_ticks(),
@@ -1495,7 +1515,10 @@ mod tests {
                     self_fence_grace_ticks: 0,
                     snapshot_datagram_budget: 1100,
                     boundary: BoundaryTuning::DEFAULT,
-                    request_ttl_ticks: 0,
+                    // D-WORLD-2: ARMED via the production derivation (`crossing_redrive_env`) — an
+                    // unresolved-dest crossing re-drives then aborts locally, never strands forever.
+                    request_ttl_ticks: armed_crossing_redrive().0,
+                    crossing_redrive_budget: armed_crossing_redrive().1,
                     // ARMED via the production derivation (see vd-tests `armed_handoff_hold_ticks`; the
                     // boot fence refuses an armed world at 0 — fixtures run the shipped posture).
                     handoff_hold_ttl_ticks: armed_hold_ticks(),
