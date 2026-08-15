@@ -50,6 +50,37 @@ worst-instant positions). Per the ruling, no world number was changed; the check
 test-only (the pinned measurement test in `vd-physics` worldgen) and is NOT wired into
 the boot fence until the owner rules on the galaxy shell / threshold / planet extent.
 
+**Owner addendum (2026-08-15) — the re-solve ruling.** Re-solve THE world's numbers so the
+check passes, under three binding constraints:
+
+- **(a) The generator SOLVES the margin — a general constraint, never a hand-tuned
+  number:** for every ancestor `p` and every descendant `g` two-or-more levels below,
+  `R_p ≥ worst_instant_dist(g in p) + r_g + visibility_range(r_g)`. Written as a
+  derivation the generator applies when placing children, so ANY future world re-solve —
+  including the owed near-real-scale world — satisfies it automatically. Direction:
+  prefer pulling the ring placement inward (galaxy unchanged); if that collides with an
+  existing derived constraint (inter-system spacing / warp-gap compression / the ±Z
+  corridor laws), grow the galaxy shell instead — whichever falls out of the constraint
+  solve, NEVER a hand-picked value. The constraint algebra is SCALE-INDEPENDENT: at
+  near-real scale it must be trivially satisfied, not accidentally binding.
+- **(b) Today's world is interim IN SCALE ONLY** — nothing may over-fit to today's
+  magnitudes; every new bound is expressed in terms of extents/thresholds, never
+  literals.
+- **(c) World generation is ALGORITHMS FROM SEED ONLY** — any file-read or hand-authored
+  table found on the generation path is REPORTED to the owner, never fixed unasked.
+
+Implemented 2026-08-15 in `vd-physics` worldgen: `two_level_clearance_m` /
+`galaxy_shell_r_m` solve the shell as the ring plus the LARGER of the containment
+headroom (two system SOIs) and the worst descendant's two-level visibility clearance.
+The solve GREW THE SHELL (12 331.40 m → 12 483.46 m): the ring could not move inward
+because it already sits at the wake law's lower bound (`system_soi · cot(θ/2) · slack` —
+a star must be asleep at departure), which is exactly the ruling's stated fallback. The
+guard is now WIRED into the shard boot fence beside the nest guard (a violating world
+refuses to boot), and the failing measurement test is flipped into the green pin
+(`the_two_level_bound_re_solved_on_the_world_…`; the pre-solve offence numbers survive
+as history in its doc comment and as a live measurement in
+`the_guard_refuses_a_shell_that_hugs_its_ring`).
+
 ## 6. Heartbeat with fast-alive / lazy-empty asymmetry confirmed
 
 The liveness heartbeat stays, with its deliberate asymmetry CONFIRMED: going alive is
@@ -89,6 +120,12 @@ Every pixel has a lawful author: a RUNNING realm draws itself; a NOT-RUNNING rea
 appears ONLY as its parent's placement marker; there is never a third source. Enforced
 STRUCTURALLY, not by care. The star map is the galaxy's own 3D parallax map of real
 placements — dormant stars get no servers.
+
+**Owner addendum (2026-08-15):** the item-5 re-solve addenda (b) and (c) apply here with
+the same force — the draw law's geometric guarantee (the two-level visibility bound) is
+solved from extents and thresholds, never from today's magnitudes, and never from an
+authored table: today's world is interim in scale only, and generation stays algorithms
+from seed.
 
 ## 11. Demand provenance: measure now, enforce at cloud
 

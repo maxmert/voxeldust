@@ -334,6 +334,65 @@ fn visibility_factor(theta_rad: f64) -> f64 {
     1.0 / (theta_rad / 2.0).tan()
 }
 
+/// The TWO-LEVEL VISIBILITY CLEARANCE (owner ruling 2026-08-15, items 5/10 + the 2026-08-15
+/// addendum) — how far an ancestor's shell must extend BEYOND a child's placement radius so that no
+/// descendant two or more levels down subtends the visibility threshold from just outside the
+/// ancestor. The GENERAL constraint, solved rather than tuned: for every ancestor `p` and every
+/// descendant `g` two-or-more levels below,
+///
+/// > `R_p ≥ worst_instant_dist(g in p) + r_g + r_g · cot(θ_min/2)`
+///
+/// With the child placed at some radius and its worst descendant's centre reaching
+/// `worst_descendant_reach_m` inside that child (its worst-instant excursion BOUND — a mover judged
+/// at the apoapsis of the eccentricity CAP, never at a sampled epoch), the shell owes the child's
+/// placement radius plus this clearance. `margin_m` keeps the bound STRICT: the Rayleigh
+/// eccentricity draw is CLAMPED to the cap, so a seed can land a planet exactly ON the bound
+/// (probability `e^{-ECC_CAP_SIGMAS²/2}` per planet), and the guard refuses `d_min ≤ required` —
+/// equality included. Every term is an extent, a threshold, or the world's one containment-headroom
+/// parameter — no literal enters here (owner addendum (B)). Straight-line f64 (HR5).
+fn two_level_clearance_m(
+    worst_descendant_reach_m: f64,
+    descendant_extent_m: f64,
+    theta_min_rad: f64,
+    margin_m: f64,
+) -> f64 {
+    worst_descendant_reach_m
+        + descendant_extent_m * (1.0 + visibility_factor(theta_min_rad))
+        + margin_m
+}
+
+/// The GALAXY SHELL radius SOLVED from what it must hold (the placement derivation, owner ruling
+/// 2026-08-15): the ring of star systems, plus the LARGER of
+/// - the pre-existing CONTAINMENT headroom (two system SOIs — every system nests inside the shell
+///   with a full system of clearance), and
+/// - the TWO-LEVEL VISIBILITY clearance of the worst descendant ([`two_level_clearance_m`]) — so no
+///   grandchild is ever visible from just outside the shell.
+///
+/// `.max` is a branchless clamp (HR5), and the algebra is SCALE-INDEPENDENT: at near-real scale a
+/// system SOI dwarfs a planet's visibility reach (`r_g · cot(θ/2)` ≪ `system_soi`), so the
+/// containment arm dominates and the visibility bound is trivially slack; at the interim tiny scale
+/// the visibility arm binds (the 2026-08-15 measured failure). The solve GROWS THE SHELL rather
+/// than pulling the ring inward, and that direction is forced, not chosen: the ring radius is
+/// already the LOWER bound the wake law states (`system_soi · cot(θ/2) · slack` — a star must be
+/// ASLEEP at departure and wake on approach), so an inward pull breaks the inter-system spacing law
+/// and the shell is the only free direction — exactly the ruling's stated fallback.
+fn galaxy_shell_r_m(
+    ring_r_m: f64,
+    system_soi_m: f64,
+    worst_descendant_reach_m: f64,
+    descendant_extent_m: f64,
+    theta_min_rad: f64,
+    margin_m: f64,
+) -> f64 {
+    ring_r_m
+        + (2.0 * system_soi_m).max(two_level_clearance_m(
+            worst_descendant_reach_m,
+            descendant_extent_m,
+            theta_min_rad,
+            margin_m,
+        ))
+}
+
 /// Closed-form inversion of Kepler's third law `T = 2π·√(a³/μ)`, `μ = G·M` → the central mass (kg)
 /// that yields orbital period `target_period_s` at semi-major axis `sma_ref_m`. The SYNTHETIC-mass crux
 /// for the visual scale: a real star mass at tens-of-metres `sma` gives a sub-µs (invisible) period, so
@@ -586,20 +645,22 @@ fn worst_hop_excursion_m(placement: &Placement) -> f64 {
     }
 }
 
-/// Every `(body, ancestor)` pair — ancestor two or more levels up — where the body would still be
-/// VISIBLE (subtend ≥ `theta_min_rad`) to a viewer standing just outside the ancestor's boundary at
-/// closest approach, with the body at its worst-instant position. PURE GEOMETRY over the roster: no
-/// realm kinds, no motion kinds (a hop's excursion is a magnitude whichever way it is produced).
-/// The threshold enters as the SAME `cot(θ/2)` the interest band uses ([`visibility_factor`]) — the
-/// condition `angular_size(extent, d_min) < θ_min` is exactly `d_min > extent · cot(θ_min/2)`.
-fn grandchild_visibility_offences(
+/// The two-level VERDICT NUMBERS for EVERY `(body, ancestor)` pair — ancestor two or more levels
+/// up — with the body at its worst-instant position and the viewer just outside the ancestor's
+/// boundary at closest approach. PURE GEOMETRY over the roster: no realm kinds, no motion kinds (a
+/// hop's excursion is a magnitude whichever way it is produced). The threshold enters as the SAME
+/// `cot(θ/2)` the interest band uses ([`visibility_factor`]) — the condition
+/// `angular_size(extent, d_min) < θ_min` is exactly `d_min > extent · cot(θ_min/2)`. A pair is an
+/// OFFENCE iff `d_min ≤ required` ([`grandchild_visibility_offences`] filters); a green pair's
+/// margin `d_min − required` is the measured headroom the re-solve pins.
+fn grandchild_visibility_pairs(
     bodies: &[GeneratedBody],
     theta_min_rad: f64,
 ) -> Vec<GrandchildVisibleOutside> {
     let by_id: std::collections::BTreeMap<RealmId, &GeneratedBody> =
         bodies.iter().map(|b| (b.realm, b)).collect();
     let factor = visibility_factor(theta_min_rad);
-    let mut offences = Vec::new();
+    let mut pairs = Vec::new();
     for body in bodies {
         let extent_m = body.shape.finite_extent();
         // Walk the ancestor chain, accumulating the worst-instant centre distance hop by hop.
@@ -613,23 +674,34 @@ fn grandchild_visibility_offences(
             if hops >= 2 {
                 let d_min_m = ancestor.shape.finite_extent() - worst_dist_m - extent_m;
                 let required_m = extent_m * factor;
-                if d_min_m <= required_m {
-                    offences.push(GrandchildVisibleOutside {
-                        body: body.realm,
-                        ancestor: ancestor_id,
-                        worst_dist_m,
-                        extent_m,
-                        d_min_m,
-                        required_m,
-                    });
-                }
+                pairs.push(GrandchildVisibleOutside {
+                    body: body.realm,
+                    ancestor: ancestor_id,
+                    worst_dist_m,
+                    extent_m,
+                    d_min_m,
+                    required_m,
+                });
             }
             worst_dist_m += worst_hop_excursion_m(&ancestor.placement);
             hops += 1;
             cursor = ancestor.parent;
         }
     }
-    offences
+    pairs
+}
+
+/// Every pair of [`grandchild_visibility_pairs`] that IS an offence — the body would still be
+/// VISIBLE (subtend ≥ `theta_min_rad`) from just outside its ancestor, equality included (the
+/// margin the shell solve reserves is what keeps the worst lawful seed strictly clear).
+fn grandchild_visibility_offences(
+    bodies: &[GeneratedBody],
+    theta_min_rad: f64,
+) -> Vec<GrandchildVisibleOutside> {
+    grandchild_visibility_pairs(bodies, theta_min_rad)
+        .into_iter()
+        .filter(|p| p.d_min_m <= p.required_m)
+        .collect()
 }
 
 /// The FAIL-LOUD shape of the offence list — split out so both arms are driven by named examples
@@ -650,12 +722,13 @@ fn first_offence(offences: Vec<GrandchildVisibleOutside>) -> Result<(), Grandchi
 /// viewer at the ancestor's boundary at closest approach, and the ONE visibility threshold the
 /// interest band uses — never a second literal.
 ///
-/// TODO(owner report owed, 2026-08-15): MEASURED FAILING on THE world — every ring-placed system's
-/// planets stay visible from just outside the galaxy shell (see the pinned measurement test
-/// `the_two_level_bound_measured_on_the_world_…`). Owner ruled a failure is a REPORT, never a
-/// silent re-solve: the world's numbers stay untouched and this guard stays TEST-ONLY — do NOT
-/// wire it into the boot fence beside `guard_regions_nest` until the owner rules on the galaxy
-/// shell / threshold / planet extent.
+/// RESOLVED (owner ruling 2026-08-15, the addendum to items 5/10): the 2026-08-15 measurement — every
+/// ring-placed system's planets visible from just outside the galaxy shell — was reported, and the
+/// owner ruled the generator SOLVES the margin as a general constraint ([`galaxy_shell_r_m`] /
+/// [`two_level_clearance_m`]), never a hand-tuned number. THE world now passes (the green pin
+/// `the_two_level_bound_re_solved_on_the_world_…` keeps the old failing numbers as history), and
+/// this guard is WIRED into the shard boot fence beside `guard_regions_nest` (the same fail-loud
+/// pattern): a world that violates it refuses to boot.
 ///
 /// # Errors
 /// [`GrandchildVisibleOutside`] naming the first offending `(body, ancestor)` pair with its numbers.
@@ -1396,7 +1469,30 @@ impl UniverseConfig {
         // stars belongs to nothing. It therefore exceeds the client's box-cull — which is CORRECT, not a
         // regression: the owner's ruling is that a containment boundary is never drawn as an object. The
         // galaxy stops being scenery and goes back to being what it is, an authority volume.
-        cfg.scale.galaxy_r_m = cfg.stellar.system_ring_r_m + VISUAL_SYSTEM_SOI_R_M * 2.0;
+        //
+        // AND it must clear the TWO-LEVEL BOUND (owner ruling 2026-08-15): no planet — a grandchild of
+        // the galaxy — may subtend the visibility threshold from just outside the shell. The shell is
+        // SOLVED from both constraints ([`galaxy_shell_r_m`]), never picked: the worst descendant is the
+        // OUTER planet judged at the apoapsis of the eccentricity CAP (the same worst-instant bound the
+        // `ChildReach` fence and the compression solve use), reaching
+        // `outer_sma · (1 + ecc_cap) + planet_soi` from its star at the worst instant of the worst seed.
+        let worst_descendant_reach_m = visual_outer_sma_render_m(
+            VISUAL_SYSTEM_SOI_R_M,
+            VISUAL_SYSTEM_MARGIN_M,
+            VISUAL_N_PLANETS,
+            VISUAL_SOI_GAP_FRACTION,
+            ORBITAL_A0_AU,
+            ORBITAL_RATIO,
+            cfg.planet.ecc_cap,
+        ) * (1.0 + cfg.planet.ecc_cap);
+        cfg.scale.galaxy_r_m = galaxy_shell_r_m(
+            cfg.stellar.system_ring_r_m,
+            VISUAL_SYSTEM_SOI_R_M,
+            worst_descendant_reach_m,
+            cfg.planet.planet_soi_r_m,
+            VISIBILITY_THETA_MIN_RAD,
+            VISUAL_SYSTEM_MARGIN_M,
+        );
         cfg
     }
 
@@ -2430,101 +2526,155 @@ mod tests {
         );
     }
 
-    // ===== The generator visibility check (owner ruling 2026-08-15, item 5) ==========================
+    // ===== The generator visibility check (owner ruling 2026-08-15, item 5 + the re-solve addendum) ==
 
-    /// THE MEASUREMENT ON THE WORLD, pinned verbatim — the two-level bound FAILS today.
+    /// THE MEASUREMENT ON THE WORLD, pinned verbatim — the two-level bound HOLDS after the
+    /// 2026-08-15 shell solve.
     ///
-    /// TODO(owner report owed, 2026-08-15): the owner approved this check with "see what will
-    /// happen" — a failure is a REPORT, never a silent re-solve. MEASURED on THE world (seed 0):
-    /// every planet of BOTH ring-placed systems stays visible from just outside the GALAXY shell —
-    /// a 3.954 m planet is visible out to 302.06 m, but the galaxy's surface passes within
-    /// 161–281 m of the planets' worst-instant positions (the ring systems sit ~12.03 km out and
-    /// the shell hugs them). The origin system's planets pass. NO world number was changed, and the
-    /// check is deliberately NOT wired into the boot fence until the owner rules on the galaxy
-    /// shell / threshold / planet extent; this test pins the measured offence list EXACTLY, so any
-    /// re-solve of the world flips it loudly and the report stays honest in-repo.
+    /// HISTORY (the failing measurement this green pin replaces, kept as provenance). Before the
+    /// solve the shell was containment-only (`ring + 2·system_soi = 12_331.398_328_646_887 m`) and
+    /// THE world (seed 0) MEASURED FAILING on 2026-08-15: every planet of BOTH ring-placed systems
+    /// stayed visible from just outside the galaxy — a 3.954_173_752_999_557_8 m planet visible out
+    /// to 302.058_663_384_242_95 m while the shell passed within d_min 161.127_605_697_744_3 …
+    /// 280.730_889_197_954 m of the ten ring planets' worst-instant positions (worst_dist
+    /// 12_046.713_265_695_933 … 12_166.316_549_196_143 m; the origin system's planets passed). The
+    /// owner ruled (addendum to items 5/10): the generator SOLVES the margin as a general
+    /// constraint — [`galaxy_shell_r_m`] grows the shell by the worst descendant's two-level
+    /// clearance; the ring could not move inward because it already sits at the wake law's LOWER
+    /// bound. The exact pre-solve offence stays a live measurement in
+    /// `the_guard_refuses_a_shell_that_hugs_its_ring`, which restores the old shell and pins the
+    /// first offence verbatim.
     #[test]
-    fn the_two_level_bound_measured_on_the_world_every_ring_systems_planet_is_visible_past_the_galaxy()
-     {
+    fn the_two_level_bound_re_solved_on_the_world_no_body_is_visible_past_any_two_level_ancestor() {
         let config = UniverseConfig::world(15.0, 0.05);
-        let offences = grandchild_visibility_offences(
+        // The SOLVED shell, frozen non-self-referentially: ring 12_031.398_328_646_887 m + the
+        // two-level clearance (which out-binds the 300 m containment headroom — the interim
+        // scale's binding regime).
+        assert_eq!(config.scale.galaxy_r_m, FROZEN_GALAXY_SHELL_R_M);
+        let pairs = grandchild_visibility_pairs(
             &generate_system_forest(0, &config),
             VISIBILITY_THETA_MIN_RAD,
         );
-        // Every offence names the GALAXY (its interim `RealmId` stand-in) as the ancestor, every
-        // offending body is a planet of the two RING systems (forest order), and the numbers are
-        // the frozen measurement of 2026-08-15.
-        let extent_m = 3.954_173_752_999_557_8;
-        let required_m = 302.058_663_384_242_95;
-        let measured: Vec<(u64, f64, f64)> = vec![
-            (
-                2790672799213891506,
-                12_046.713_265_695_933,
-                280.730_889_197_954,
+        // Non-vacuity: every planet is judged against its galaxy AND the universe (15 + 15), every
+        // system against the universe (3) — the walk really visited every two-level pair.
+        assert_eq!(pairs.len(), 33);
+        // The WORST margin across every pair of THE world — a ring system's OUTER planet against
+        // the galaxy shell. Positive (the bound holds strictly), larger than the reserved solve
+        // margin (the drawn eccentricities sit below the cap the solve bounds against), and pinned
+        // EXACTLY so any re-solve of the world flips this loudly and the numbers stay honest
+        // in-repo.
+        let worst_margin_m = pairs
+            .iter()
+            .map(|p| p.d_min_m - p.required_m)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(worst_margin_m, FROZEN_TWO_LEVEL_WORST_MARGIN_M);
+        assert!(
+            worst_margin_m >= VISUAL_SYSTEM_MARGIN_M,
+            "the measured margin covers at least the reserved solve margin"
+        );
+        // …and the check the boot fence runs: no offence anywhere in THE world.
+        assert_eq!(
+            grandchild_visibility_offences(
+                &generate_system_forest(0, &config),
+                VISIBILITY_THETA_MIN_RAD,
             ),
-            (
-                3841899291686128089,
-                12_058.747_411_467_62,
-                268.696_743_426_266_3,
-            ),
-            (
-                8247822661730161032,
-                12_076.883_553_010_532,
-                250.560_601_883_355_33,
-            ),
-            (
-                9379240996657725013,
-                12_110.446_243_218_734,
-                216.997_911_675_153_15,
-            ),
-            (
-                5205406834676993625,
-                12_166.316_549_196_143,
-                161.127_605_697_744_3,
-            ),
-            (
-                2450373923031213019,
-                12_046.864_645_009_122,
-                280.579_509_884_765_06,
-            ),
-            (
-                996452844033318080,
-                12_058.597_612_191_366,
-                268.846_542_702_520_6,
-            ),
-            (
-                3286337890091842052,
-                12_077.300_035_746_319,
-                250.144_119_147_568_12,
-            ),
-            (
-                2085084207741349801,
-                12_107.875_227_715_764,
-                219.568_927_178_123_26,
-            ),
-            (
-                5355024293581681330,
-                12_160.744_305_540_742,
-                166.699_849_353_144_88,
-            ),
-        ];
-        let expected: Vec<GrandchildVisibleOutside> = measured
-            .into_iter()
-            .map(|(seed, worst_dist_m, d_min_m)| GrandchildVisibleOutside {
-                body: RealmId::Planet(seed),
-                ancestor: GALAXY,
-                worst_dist_m,
-                extent_m,
-                d_min_m,
-                required_m,
-            })
-            .collect();
-        assert_eq!(offences, expected);
-        // The boot-facing guard reports the FIRST offence — the refusal the boot would make once
-        // the owner rules and it is wired (covers the wrapper's real arm).
+            vec![]
+        );
+        assert_eq!(guard_grandchildren_invisible_outside(0, &config), Ok(()));
+    }
+
+    /// The refusal the boot fence makes, measured on the exact PRE-SOLVE geometry: restoring the
+    /// containment-only shell (`ring + 2·system_soi` — the world as measured failing 2026-08-15)
+    /// makes the guard name the FIRST ring planet with the very numbers of that measurement —
+    /// history kept live, and the guard's `Err` arm covered on the boot-facing wrapper.
+    #[test]
+    fn the_guard_refuses_a_shell_that_hugs_its_ring() {
+        let mut config = UniverseConfig::world(15.0, 0.05);
+        config.scale.galaxy_r_m =
+            config.stellar.system_ring_r_m + 2.0 * config.stellar.system_soi_r_m;
         assert_eq!(
             guard_grandchildren_invisible_outside(0, &config),
-            Err(expected[0])
+            Err(GrandchildVisibleOutside {
+                body: RealmId::Planet(2790672799213891506),
+                ancestor: GALAXY,
+                worst_dist_m: 12_046.713_265_695_933,
+                extent_m: 3.954_173_752_999_557_8,
+                d_min_m: 280.730_889_197_954,
+                required_m: 302.058_663_384_242_95,
+            })
+        );
+    }
+
+    /// The derivation itself, BINDING regime (the interim scale): the worst descendant's two-level
+    /// clearance exceeds the containment headroom, so the solved shell is the ring plus the
+    /// clearance — the general constraint's terms frozen non-self-referentially at THE world's
+    /// numbers (`reach = outer_sma·(1+ecc_cap)`, extent = the planet SOI, θ the ONE visibility
+    /// threshold, margin the world's one containment-headroom parameter).
+    #[test]
+    fn the_shell_solve_binds_on_the_visibility_clearance_at_the_interim_scale() {
+        let reach_m = vis_outer_sma() * (1.0 + ECC_SIGMA * ECC_CAP_SIGMAS);
+        let clearance_m = two_level_clearance_m(
+            reach_m,
+            vis_planet_soi(),
+            VISIBILITY_THETA_MIN_RAD,
+            VISUAL_SYSTEM_MARGIN_M,
+        );
+        assert_eq!(clearance_m, FROZEN_TWO_LEVEL_CLEARANCE_M);
+        assert!(
+            clearance_m > 2.0 * VISUAL_SYSTEM_SOI_R_M,
+            "the visibility arm binds at the interim scale"
+        );
+        let cfg = UniverseConfig::visual_scale();
+        assert_eq!(
+            galaxy_shell_r_m(
+                cfg.stellar.system_ring_r_m,
+                VISUAL_SYSTEM_SOI_R_M,
+                reach_m,
+                vis_planet_soi(),
+                VISIBILITY_THETA_MIN_RAD,
+                VISUAL_SYSTEM_MARGIN_M,
+            ),
+            FROZEN_GALAXY_SHELL_R_M
+        );
+        // …and the preset applies EXACTLY this derivation (one solve, no second formula).
+        assert_eq!(cfg.scale.galaxy_r_m, FROZEN_GALAXY_SHELL_R_M);
+    }
+
+    /// The derivation itself, SLACK regime (owner constraint: the algebra is SCALE-INDEPENDENT —
+    /// at near-real scale it must be TRIVIALLY satisfied, not accidentally binding). Near-real
+    /// magnitudes: a ~100 AU system SOI (1.5e13 m) dwarfs an Earth-like planet SOI's visibility
+    /// reach (9.2e8 m · cot(θ/2) ≈ 7.0e10 m), so the containment arm wins the max and the
+    /// two-level bound holds with orders of magnitude to spare.
+    #[test]
+    fn the_shell_solve_is_slack_at_near_real_scale_containment_binds() {
+        let (ring_m, soi_m, reach_m, ext_m) = (3.0e16, 1.5e13, 1.4e13, 9.2e8);
+        let clearance_m = two_level_clearance_m(
+            reach_m,
+            ext_m,
+            VISIBILITY_THETA_MIN_RAD,
+            VISUAL_SYSTEM_MARGIN_M,
+        );
+        assert!(
+            clearance_m < 2.0 * soi_m,
+            "the containment arm binds at near-real scale"
+        );
+        assert_eq!(
+            galaxy_shell_r_m(
+                ring_m,
+                soi_m,
+                reach_m,
+                ext_m,
+                VISIBILITY_THETA_MIN_RAD,
+                VISUAL_SYSTEM_MARGIN_M,
+            ),
+            ring_m + 2.0 * soi_m
+        );
+        // The containment-solved shell still clears the general constraint, with room: the worst
+        // descendant's visibility range fits far inside the headroom.
+        let d_min_m = (ring_m + 2.0 * soi_m) - (ring_m + reach_m) - ext_m;
+        assert!(
+            d_min_m > ext_m * visibility_factor(VISIBILITY_THETA_MIN_RAD),
+            "the two-level bound is trivially satisfied at near-real scale"
         );
     }
 
@@ -2601,6 +2751,7 @@ mod tests {
         assert_eq!(c.scale.au_to_render_m, FROZEN_AU_TO_RENDER_M);
         assert_eq!(c.planet.planet_soi_r_m, FROZEN_PLANET_SOI_R_M);
         assert_eq!(c.stellar.central_mass_kg, FROZEN_CENTRAL_MASS_KG);
+        assert_eq!(c.scale.galaxy_r_m, FROZEN_GALAXY_SHELL_R_M);
         // The 5 planet orbit distances (semi-major axes, render m): ~15 / 26 / 44 / 75 / 127
         // (the S4 apoapsis-solved compression — the batch review caught this line still carrying
         // the pre-S4 distances beside the re-captured pins).
@@ -2675,6 +2826,8 @@ mod tests {
         // The galaxy is DERIVED to contain the ring of stars, no longer the walk constant: it must hold
         // every system with its reach, or a star sits outside its own galaxy.
         assert!(c.scale.galaxy_r_m > c.stellar.system_ring_r_m + c.stellar.system_soi_r_m);
+        // …and it is the SOLVED shell exactly (the 2026-08-15 two-level bound, frozen).
+        assert_eq!(c.scale.galaxy_r_m, FROZEN_GALAXY_SHELL_R_M);
         assert_eq!(
             c.planet.ecc_cap,
             ECC_SIGMA * ECC_CAP_SIGMAS,
@@ -3361,4 +3514,15 @@ mod tests {
         74.60390033981116,
         126.82663057767897,
     ];
+    // The 2026-08-15 SHELL SOLVE (owner ruling, items 5/10 addendum) — EXACT f64, captured once
+    // from the derivation at THE world's numbers and pinned as literals (non-self-referential).
+    // The two-level clearance of the worst descendant (the outer planet at the ecc-cap apoapsis,
+    // 142.046 m reach + 3.954 m extent × (1 + cot(θ/2)) + the 4 m solve margin ≈ 452.06 m)
+    // OUT-BINDS the 300 m containment headroom, so the shell is ring + clearance ≈ 12_483.46 m
+    // (was ring + 300 = 12_331.40 m, the 2026-08-15 measured failure). The worst measured margin
+    // on THE world (seed 0) is ≈ 11.13 m — the 4 m reserved margin plus the slack of the worst
+    // planet's DRAWN eccentricity sitting below the cap the solve bounds against.
+    const FROZEN_TWO_LEVEL_CLEARANCE_M: f64 = 452.058663384243;
+    const FROZEN_GALAXY_SHELL_R_M: f64 = 12483.45699203113;
+    const FROZEN_TWO_LEVEL_WORST_MARGIN_M: f64 = 11.127605697744457;
 }

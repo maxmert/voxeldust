@@ -306,6 +306,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .map_err(|e| {
         format!("malformed realm-region forest for {hosted_realm}: {e} — refusing to boot")
     })?;
+    // THE GENERATOR VISIBILITY CHECK (owner ruling 2026-08-15, items 5/10 + the re-solve addendum):
+    // no body two or more levels deep may be visible from just outside its ancestor — the two-level
+    // bound (SL3/SL7: a not-running realm is drawable ONLY as its parent's one-level placement
+    // marker) turned into a boot refusal, the same fail-loud pattern as the nest fence above. THE
+    // world satisfies it BY CONSTRUCTION (the shell solve `galaxy_shell_r_m`); a world whose numbers
+    // stop satisfying it must never boot a shard that would owe unauthorable pixels.
+    vd_physics::worldgen::guard_grandchildren_invisible_outside(
+        universe_seed,
+        &vd_physics::worldgen::UniverseConfig::world(move_speed * time_multiplier, tick_dt),
+    )
+    .map_err(|e| {
+        format!("THE world violates the two-level visibility bound: {e} — refusing to boot")
+    })?;
     *node
         .world_mut()
         .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)

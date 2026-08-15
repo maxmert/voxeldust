@@ -23,7 +23,7 @@
 //! J1, ASSERTED IN-TEST: the home system sits at the GALACTIC ORIGIN (`world_roster` asserts the
 //! galaxy authors its placement at ZERO), so a home↔galaxy crossing is numerically an IDENTITY in
 //! the drawn space — which is exactly why this ONE file-based scene stays valid across both
-//! crossings, and why `expected_box == None` at the middle capture is honest: the galaxy's 12331 m
+//! crossings, and why `expected_box == None` at the middle capture is honest: the galaxy's ~12483 m
 //! extent exceeds the renderable ceiling and SL3 says a containment boundary is never drawn.
 //!
 //! GPU PRECONDITION (same as the other visual gates): renders through wgpu, REQUIRES a working GPU
@@ -93,7 +93,7 @@ const SILHOUETTE_BULGE: f64 = 1.02;
 /// parallel to the corridor — so a dot parked just past the shell projects INSIDE the shell's
 /// silhouette by foreshortening (at 220 m: a 91 px offset against a 167 px rect). Past ~1.2 km the
 /// projection clears the rect; 2 km gives ~50 px of margin per axis. Still deep inside the galaxy's
-/// own 12331 m shell, still on the polar corridor (the sibling stars sit on the ±X ring).
+/// own ~12483 m shell, still on the polar corridor (the sibling stars sit on the ±X ring).
 const OUTSIDE_PARK: DVec3 = DVec3::new(0.0, 0.0, -2000.0);
 /// The RETURN leg's AIM (flight law leg B): inside the ~149 m acquire edge so the label flips. The
 /// capture itself then re-parks at the annulus-clear point (`clean_home_park`) — the aim only has to
@@ -658,7 +658,7 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
         "the galaxy shard ({dest_authority}) must OWN the re-homed dot's Entity row: {rows:?}",
     );
     // HONEST at the middle capture: nothing drawable contains the dot out here — the galaxy's
-    // 12331 m shell exceeds the renderable ceiling and SL3 never draws a containment boundary.
+    // ~12483 m shell exceeds the renderable ceiling and SL3 never draws a containment boundary.
     assert_eq!(
         expected_box(&scene, outside.pos),
         None,
