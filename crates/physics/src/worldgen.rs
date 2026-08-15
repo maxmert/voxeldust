@@ -880,6 +880,17 @@ pub fn system_photometrics_for_config(
         .collect()
 }
 
+/// One sleeping child's marker datum as the window lane's `TAG_LUMA` bag (Slice A,
+/// `docs/design/window_lane.md` §2.2/§2.8): the spectral class as its stable code (color) plus the
+/// main-sequence luminosity (brightness) — exactly the two scalars the owner-ruled R4 datum names,
+/// framed by the ONE shared codec (`vd_core::look`) so the parent's emit and every later reader
+/// can never frame the bag two ways. The boot plumbs these bags onto the shard's roster
+/// (`vd-sim` `ChildLuma`) — boot/config path, never a wire-struct change.
+#[must_use]
+pub fn marker_luma_bag(p: &StarPhotometrics) -> Vec<u8> {
+    vd_core::look::luma_bag(p.class as u8, p.luma_lsun)
+}
+
 /// [`to_regions`] over the config-driven system forest — the config-parameterised twin of
 /// [`realm_regions_for`] (S2 wraps it with [`UniverseConfig::visual_scale`]). Reuses `to_regions` verbatim.
 #[must_use]
@@ -1328,8 +1339,9 @@ impl BandConfig {
 
 // ---- RLM Step 2: per-realm AoI radii (all seed-relative factors, no magic numbers) ----------------
 /// The universe seconds-per-tick the AoI widening is measured against — MUST equal `StubConfig.tick_dt_s`
-/// (a boot `debug_assert!` cross-checks it, M-2). Named, not inline.
-const AOI_TICK_DT_S: f64 = 0.05;
+/// (a boot `debug_assert!` cross-checks it, M-2). Named, not inline. `pub` so THE-world pins in
+/// sibling crates state the shipped posture from THIS one place instead of copying the literal.
+pub const AOI_TICK_DT_S: f64 = 0.05;
 /// Grace ticks a would-be release is held (1 s at the visual 20 Hz).
 const VISUAL_AOI_GRACE_TICKS: u32 = 20;
 /// Extra velocity-safety margin folded into the dead-zone widening (beyond `K_SAFETY`).
@@ -1338,8 +1350,9 @@ const VISUAL_AOI_K_SAFETY_EXTRA: f64 = 0.5;
 /// (boot `debug_assert!`, M-2), so the anti-thrash pad is measured against the speed the sim integrates.
 /// Under the single visibility factor (`spin_up_factor == tear_down_factor`) the geometric dead-zone
 /// collapses, so THIS non-zero occupant speed is what keeps `tear_down > spin_up` (band validity requires
-/// `occupant_v_max + v_child > 0`; see [`UniverseConfig::visual_demand`]).
-const VISUAL_OCCUPANT_V_MAX_MPS: f64 = 2.0;
+/// `occupant_v_max + v_child > 0`; see [`UniverseConfig::visual_demand`]). `pub` for the same
+/// one-place reason as [`AOI_TICK_DT_S`].
+pub const VISUAL_OCCUPANT_V_MAX_MPS: f64 = 2.0;
 
 /// Walk-demand-scale AoI (RLM 5f-4): the LIVE band for the WALK forest, so a WALKING occupant's AoI
 /// crosses each separated child's band. Tighter than visual (a walking player over metres, not AU): spin a
@@ -3692,6 +3705,31 @@ mod tests {
             assert_eq!(
                 p.luma_lsun,
                 main_sequence_luminosity(p.mass_msun, &cfg.stellar.mlr_segments)
+            );
+        }
+    }
+
+    #[test]
+    fn the_marker_luma_bag_frames_the_pinned_draw_through_the_one_shared_codec() {
+        // Slice A: the parent's marker datum for a sleeping child rides the ONE window-body codec
+        // (`vd_core::look`) — encode every system of THE world, decode through the shared reader,
+        // and get back exactly the pinned (class code, luma) pair. A re-framed bag, a transposed
+        // field, or a codec fork fails here, not on a live wire.
+        let cfg = UniverseConfig::world(VISUAL_OCCUPANT_V_MAX_MPS, AOI_TICK_DT_S);
+        let draws = system_photometrics_for_config(0, &cfg);
+        assert_eq!(draws.len(), 3, "THE world's marker roster is non-vacuous");
+        for (_, p) in &draws {
+            let bag = marker_luma_bag(p);
+            assert_eq!(
+                vd_core::look::luma_of(&bag),
+                Ok((p.class as u8, p.luma_lsun))
+            );
+            // A marker bag can never answer for a look (the structural exclusivity, decoded side).
+            assert_eq!(
+                vd_core::look::look_of(&bag),
+                Err(vd_core::tlv::TlvError::MissingRequiredTag(
+                    vd_core::look::TAG_LOOK
+                ))
             );
         }
     }

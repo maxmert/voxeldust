@@ -187,8 +187,33 @@ chain-latency:
 # INV-SNAPSHOT-SAFETY throughout. RELEASE build (the `#[cfg(not(debug_assertions))]` soak is inert in
 # debug; `just test` still runs the 1024-case fixed-seed proptest + the 6 named witnesses). A sustained
 # ARM-A≠ARM-B divergence here is the concrete trigger to promote the deferred durable snapshot (D-RLM-2).
+# THE WINDOW LANE rides the same soak recipe on the SHADOW configuration (window_lane.md §4.5 Topic 5):
+# ~30k ticks of session/window churn + lossy/reordered/forged ingest through the REAL composer pass,
+# asserting memory/counters MONOTONE-BOUNDED every tick (rings ≤ the derived span, pending ≤ the derived
+# cap, realm-heads ≤ the named set) and ZERO composer state after the last session leaves — no leak,
+# asserted, never eyeballed.
 rlm-soak:
     cargo test --release -p vd-sim rlm_soak -- --nocapture --test-threads=1
+    cargo test --release -p vd-connection-plane window_shadow_soak -- --nocapture --test-threads=1
+
+# G-COMPOSE-LOAD (window_lane.md §2.6.7/§4.5 Topic 3 — the owner-adopted AAA refinement: gate the
+# p99, never the mean): BOTH sides of the Slice-B engine under a DERIVED load — the ingest-DECODE
+# side (postcard `WindowFrame` levels at MTU-full row counts × the live window fan) and the
+# compose+fan side (per-tick folds at max_sessions across chain depth 6) — p99 per-tick cost under
+# ONE realm-lane tick (50 ms at 20 Hz). RELEASE build (the SPIKE-3a latency-gate pattern: a
+# debug/coverage tail is meaningless; `just test` still runs the same bodies functionally).
+window-compose-load:
+    cargo test --release -p vd-connection-plane g_compose_load -- --nocapture --test-threads=1
+
+# THE WINDOW LANE's SHADOW-PARITY GATE (window_lane.md §4 Slice B): the composition engine live in
+# real processes beside the old lane — a real demand cluster, TWO real logins, a real crossing leg —
+# measured per realm per tick against the old-lane client feed. Zero UNEXPLAINED mismatches; every
+# explained divergence a NAMED, COUNTED class printed by the gate (the sibling-interior exclusion is
+# the recorded Q2-carrier gap, D-WINDOW-1). Also carries the exact-cadence boot pin
+# (window_full_chain_folds > 0) and both dedup f64 measurements. Same port band + serialization
+# posture as rlm-demand-login.
+window-parity:
+    cargo test -p vd-bins --features dev-control --test window_shadow_parity -- --test-threads=1 --nocapture
 
 fmt:
     cargo fmt --all
@@ -277,7 +302,7 @@ rlm-demand-login:
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity coverage
 
 # One-time setup helper.
 coverage-setup:

@@ -160,6 +160,37 @@ fn sl4_the_crossing_path_cannot_name_a_motion() {
 }
 
 #[test]
+fn the_window_composer_cannot_name_a_motion_or_generate_a_world() {
+    // THE WINDOW LANE's structural guard 1 (docs/design/window_lane.md §2.6.1, the T1
+    // resolution — build-level, not care): the gateway's composition engine
+    // (`vd-connection-plane::window`) folds ATTESTED statements through the frame core and must
+    // be STRUCTURALLY UNABLE to evaluate a placement or generate a world — so the crate that
+    // carries it may hold NO normal edge to `vd-physics`. The universal SL4 sweep above already
+    // covers every crate; this pin names the COMPOSER's crate specifically so the guard cannot
+    // be silently dissolved by allowlisting vd-connection-plane into MAY_NAME_MOTION for some
+    // other reason: the composer's crate must ALSO never appear there.
+    //
+    // (Dev-dependency edges are exempt by the graph parser, deliberately: the crate's fixtures
+    // build worlds; the shipped library cannot — the same posture as the SL4 sweep.)
+    let graph = dependency_graph();
+    let deps = &graph["vd-connection-plane"];
+    assert!(
+        !deps.contains("vd-physics"),
+        "WINDOW-LANE §2.6.1 VIOLATION: vd-connection-plane (the composer's crate) carries a \
+         NORMAL vd-physics dependency — the gateway could evaluate motion/worldgen on the \
+         composition path. The composer folds attested statements only; keep vd-physics in \
+         [dev-dependencies]."
+    );
+    assert!(
+        !MAY_NAME_MOTION
+            .iter()
+            .any(|(name, _)| *name == "vd-connection-plane"),
+        "WINDOW-LANE §2.6.1 VIOLATION: vd-connection-plane was allowlisted into MAY_NAME_MOTION \
+         — the composer's crate may never hold a stated reason to name a motion."
+    );
+}
+
+#[test]
 fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
     // The layering rule: core depends on nothing internal; wire only on core; sim on
     // wire+core; node on sim+wire+core. Lower layers never depend up.

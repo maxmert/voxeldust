@@ -14,7 +14,12 @@ use crate::gateway::{GatewaySessions, GatewayStats};
 /// [`GatewayStats`] (no `..`), so a future 23rd counter is a COMPILE ERROR here until it is surfaced on the
 /// operator view — the same completeness guard the io-prod metrics renderer uses. Branchless (HR5).
 #[must_use]
-pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u64) -> GatewayView {
+pub fn gateway_view(
+    stats: &GatewayStats,
+    sessions_open: u64,
+    dynamic_shards: u64,
+    windows_open: u64,
+) -> GatewayView {
     let GatewayStats {
         logins_rejected,
         version_rejected,
@@ -43,7 +48,45 @@ pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u6
         sessions_self_fenced_revoked,
         presence_announces,
         sub_close_refused_authority,
-        window_rows_unconsumed,
+        window_rows_ingested,
+        window_sender_mismatch,
+        window_misauthored_body,
+        window_unknown_row,
+        window_open_sent,
+        window_close_sent,
+        window_keepalives_sent,
+        window_level_refused,
+        window_body_stale,
+        window_body_preroster,
+        window_folds,
+        window_fold_hits,
+        window_fold_divergence,
+        window_full_chain_folds,
+        window_chains_held,
+        window_compose_hold_ticks,
+        window_hop_dead,
+        window_t_monotone_stalled,
+        window_chain_cycle,
+        window_instant_mismatch,
+        window_rotated_refused,
+        window_alien_rows,
+        window_hop_invalid,
+        window_unresolved_standing,
+        window_dedup_disagree,
+        window_dedup_max_dev_nm,
+        window_head_reads_sent,
+        window_composed_rows,
+        parity_rows_matched,
+        parity_pose_mismatch,
+        parity_max_pos_dev_nm,
+        parity_missing_composed,
+        parity_sibling_interior_excluded,
+        parity_unwindowed_ancestor,
+        parity_no_fold_at_tick,
+        parity_offframe_rows,
+        parity_origin_rows,
+        parity_pending_shed,
+        parity_undecodable,
     } = *stats;
     GatewayView {
         logins_rejected,
@@ -73,9 +116,48 @@ pub fn gateway_view(stats: &GatewayStats, sessions_open: u64, dynamic_shards: u6
         sessions_self_fenced_revoked,
         presence_announces,
         sub_close_refused_authority,
-        window_rows_unconsumed,
+        window_rows_ingested,
+        window_sender_mismatch,
+        window_misauthored_body,
+        window_unknown_row,
+        window_open_sent,
+        window_close_sent,
+        window_keepalives_sent,
+        window_level_refused,
+        window_body_stale,
+        window_body_preroster,
+        window_folds,
+        window_fold_hits,
+        window_fold_divergence,
+        window_full_chain_folds,
+        window_chains_held,
+        window_compose_hold_ticks,
+        window_hop_dead,
+        window_t_monotone_stalled,
+        window_chain_cycle,
+        window_instant_mismatch,
+        window_rotated_refused,
+        window_alien_rows,
+        window_hop_invalid,
+        window_unresolved_standing,
+        window_dedup_disagree,
+        window_dedup_max_dev_nm,
+        window_head_reads_sent,
+        window_composed_rows,
+        parity_rows_matched,
+        parity_pose_mismatch,
+        parity_max_pos_dev_nm,
+        parity_missing_composed,
+        parity_sibling_interior_excluded,
+        parity_unwindowed_ancestor,
+        parity_no_fold_at_tick,
+        parity_offframe_rows,
+        parity_origin_rows,
+        parity_pending_shed,
+        parity_undecodable,
         sessions_open,
         dynamic_shards,
+        windows_open,
     }
 }
 
@@ -90,13 +172,22 @@ pub fn gateway_admin_snapshot(world: &mut World) -> AdminSnapshot {
         let clock = world.resource::<ClockSample>();
         (clock.universe_tick, clock.epoch)
     };
-    let (sessions_open, dynamic_shards) = {
+    let (sessions_open, dynamic_shards, windows_open) = {
         let sessions = world.resource::<GatewaySessions>();
-        (sessions.len() as u64, sessions.dynamic_shard_count() as u64)
+        (
+            sessions.len() as u64,
+            sessions.dynamic_shard_count() as u64,
+            sessions.windows_open_count() as u64,
+        )
     };
     let stats = *world.resource::<GatewayStats>();
     let mut snapshot = AdminSnapshot::shaped_empty(universe_tick, epoch);
-    snapshot.gateway = Some(gateway_view(&stats, sessions_open, dynamic_shards));
+    snapshot.gateway = Some(gateway_view(
+        &stats,
+        sessions_open,
+        dynamic_shards,
+        windows_open,
+    ));
     snapshot
 }
 
@@ -139,9 +230,50 @@ mod tests {
             sub_close_refused_authority: 23,
             // 30, not 24: appended after the fixture reached 29 (the same positional-sequence
             // reasoning as refused_unknown_sender's 26 above).
-            window_rows_unconsumed: 30,
+            window_rows_ingested: 30,
+            // 31..36: the Slice-A window-lane counters, appended in declaration order.
+            window_sender_mismatch: 31,
+            window_misauthored_body: 32,
+            window_unknown_row: 33,
+            window_open_sent: 34,
+            window_close_sent: 35,
+            window_keepalives_sent: 36,
+            // 38..69: the Slice-B composer + shadow-parity counters, declaration order (37 is
+            // the windows_open gauge below, minted before this block landed).
+            window_level_refused: 38,
+            window_body_stale: 39,
+            window_body_preroster: 40,
+            window_folds: 41,
+            window_fold_hits: 42,
+            window_fold_divergence: 43,
+            window_full_chain_folds: 44,
+            window_chains_held: 45,
+            window_compose_hold_ticks: 46,
+            window_hop_dead: 47,
+            window_t_monotone_stalled: 48,
+            window_chain_cycle: 49,
+            window_instant_mismatch: 50,
+            window_rotated_refused: 51,
+            window_alien_rows: 52,
+            window_hop_invalid: 53,
+            window_unresolved_standing: 54,
+            window_dedup_disagree: 55,
+            window_dedup_max_dev_nm: 56,
+            window_head_reads_sent: 57,
+            window_composed_rows: 58,
+            parity_rows_matched: 59,
+            parity_pose_mismatch: 60,
+            parity_max_pos_dev_nm: 61,
+            parity_missing_composed: 62,
+            parity_sibling_interior_excluded: 63,
+            parity_unwindowed_ancestor: 64,
+            parity_no_fold_at_tick: 65,
+            parity_offframe_rows: 66,
+            parity_origin_rows: 67,
+            parity_pending_shed: 68,
+            parity_undecodable: 69,
         };
-        let view = gateway_view(&stats, 24, 25);
+        let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);
         assert_eq!(view.version_rejected, 2);
         assert_eq!(view.sessions_refused_capacity, 3);
@@ -169,8 +301,47 @@ mod tests {
         assert_eq!(view.sessions_self_fenced_revoked, 21);
         assert_eq!(view.presence_announces, 22);
         assert_eq!(view.sub_close_refused_authority, 23);
-        assert_eq!(view.window_rows_unconsumed, 30);
+        assert_eq!(view.window_rows_ingested, 30);
+        assert_eq!(view.window_sender_mismatch, 31);
+        assert_eq!(view.window_misauthored_body, 32);
+        assert_eq!(view.window_unknown_row, 33);
+        assert_eq!(view.window_open_sent, 34);
+        assert_eq!(view.window_close_sent, 35);
+        assert_eq!(view.window_keepalives_sent, 36);
+        assert_eq!(view.window_level_refused, 38);
+        assert_eq!(view.window_body_stale, 39);
+        assert_eq!(view.window_body_preroster, 40);
+        assert_eq!(view.window_folds, 41);
+        assert_eq!(view.window_fold_hits, 42);
+        assert_eq!(view.window_fold_divergence, 43);
+        assert_eq!(view.window_full_chain_folds, 44);
+        assert_eq!(view.window_chains_held, 45);
+        assert_eq!(view.window_compose_hold_ticks, 46);
+        assert_eq!(view.window_hop_dead, 47);
+        assert_eq!(view.window_t_monotone_stalled, 48);
+        assert_eq!(view.window_chain_cycle, 49);
+        assert_eq!(view.window_instant_mismatch, 50);
+        assert_eq!(view.window_rotated_refused, 51);
+        assert_eq!(view.window_alien_rows, 52);
+        assert_eq!(view.window_hop_invalid, 53);
+        assert_eq!(view.window_unresolved_standing, 54);
+        assert_eq!(view.window_dedup_disagree, 55);
+        assert_eq!(view.window_dedup_max_dev_nm, 56);
+        assert_eq!(view.window_head_reads_sent, 57);
+        assert_eq!(view.window_composed_rows, 58);
+        assert_eq!(view.parity_rows_matched, 59);
+        assert_eq!(view.parity_pose_mismatch, 60);
+        assert_eq!(view.parity_max_pos_dev_nm, 61);
+        assert_eq!(view.parity_missing_composed, 62);
+        assert_eq!(view.parity_sibling_interior_excluded, 63);
+        assert_eq!(view.parity_unwindowed_ancestor, 64);
+        assert_eq!(view.parity_no_fold_at_tick, 65);
+        assert_eq!(view.parity_offframe_rows, 66);
+        assert_eq!(view.parity_origin_rows, 67);
+        assert_eq!(view.parity_pending_shed, 68);
+        assert_eq!(view.parity_undecodable, 69);
         assert_eq!(view.sessions_open, 24);
         assert_eq!(view.dynamic_shards, 25);
+        assert_eq!(view.windows_open, 37);
     }
 }

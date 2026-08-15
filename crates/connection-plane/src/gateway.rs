@@ -41,7 +41,9 @@ use vd_core::worldgen::{WorldRealms, ancestor_realms, pin_realm_of};
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, TransferId};
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
-use vd_wire::channels::{ClientControlMsg, RealmShape, ServerControlMsg, SubId};
+use vd_wire::channels::{
+    ClientControlMsg, RealmShape, RealmSnapshotDatagram, ServerControlMsg, SubId,
+};
 use vd_wire::intershard::{DemandVerb, InterShardFlow, RealmDemand, ShardPresence};
 use vd_wire::seams::directory::{
     AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply, OwnerRecord,
@@ -50,11 +52,13 @@ use vd_wire::seams::transfer_control::{
     PrepareReject, PrepareResult, TransferControl, TransferControlAck,
 };
 use vd_wire::session_flow::{
-    GatewayToShard, ShardToGateway, peek_input_seq, peek_snapshot_frame_id, retag_snapshot_sub,
+    BodyStmt, GatewayToShard, ShardToGateway, WindowId, WindowScope, peek_input_seq,
+    peek_snapshot_frame_id, retag_snapshot_sub, window_body_admissible, window_sender_is_head,
 };
 use vd_wire::version::ProtoVersion;
 
 use crate::tickets;
+use crate::window;
 
 /// Gateway operational parameters — ONE reviewed struct, no inline literals.
 #[derive(Clone, Copy, Debug)]
@@ -370,6 +374,12 @@ impl GatewayConfig {
 fn is_routable_shard(config: &GatewayConfig, sessions: &GatewaySessions, from: NodeId) -> bool {
     config.is_known_shard(from)
         | sessions.dynamic_shards.contains_key(&from)
+        // THE WINDOW LANE (Slice B): a node this gateway holds an OPEN WINDOW on is a shard the
+        // gateway itself asked to speak — a lineage ANCESTOR (the galaxy above a logged-in
+        // system) is often reachable through no session role, and without this arm its window
+        // rows would fall to the client branch. The windows map is derived + diffed per tick, so
+        // the clause dies with the window (zero sessions ⇒ zero windows ⇒ no dispatch residue).
+        | sessions.windows.values().any(|w| w.shard == from)
         // A node that ANNOUNCED itself as a shard is one, for as long as it keeps announcing — see
         // `on_shard_presence`. This is the clause that lets a demand-spawned realm be heard at all: the
         // two above are the boot roster (which cannot know about it) and a transfer's claim (which is a
@@ -796,6 +806,20 @@ struct Session {
     /// The (a) demote predicate's input: the standing "every current dest observer got >=1 frame"
     /// watermark. Absent ≡ watermark 0 ≡ re-blocks (an observer opening mid-demote is undelivered).
     delivered: BTreeMap<SubId, u64>,
+    /// THE WINDOW LANE's session lineage (Slice B — `docs/design/window_lane.md` §2.6.2), the
+    /// realm chain root→leaf this session stands under. SESSION HISTORY ONLY, never a forest
+    /// read: seeded by the login descent's [`RealmCoord`] (dynamic) or the attach frame's realm
+    /// (static), and updated at each crossing's `SubscriptionReady` — a realm already in the
+    /// lineage TRUNCATES back to it (an outward cross), anything else APPENDS below the previous
+    /// leaf (an inward cross; "travel is always out into the shared parent and in again" — SL2,
+    /// so the previous leaf IS the parent). A wrong guess is fail-closed downstream: the opened
+    /// `Child` window is refused by the shard (`window_child_unrostered`) and never confirms, so
+    /// the chain simply ends there. Empty until the session resolves a home/attach.
+    lineage: Vec<RealmId>,
+    /// THE WINDOW LANE's per-session shadow scene (Slice B): the derived chain, the origin
+    /// marker + epoch, the held strata, the fresh-fold ring and the parity comparator's pending
+    /// queue. Dropped with the session — zero sessions, zero composer state.
+    shadow: window::ShadowScene,
     hot: Arc<SessionHot>,
 }
 
@@ -879,6 +903,25 @@ pub struct GatewaySessions {
     /// `end_home_wait`, and the realm's entry is PRUNED when its last member leaves — so neither an entry nor
     /// a lineage `Vec` can outlive its sessions. Empty unless in dynamic-home mode (⇒ byte-identical).
     home_bootstraps: BTreeMap<RealmId, HomeWait>,
+    /// THE WINDOW LANE (Slice A, docs/design/window_lane.md §2.3): the windows this gateway holds
+    /// open, keyed by the id IT minted (monotone, never reused — the `SubId` discipline, so a
+    /// straggler row from a closed window drops by id mismatch, never a guess). DERIVED each tick
+    /// from the Active sessions' own routing state ([`desired_windows`]) and diffed — so zero
+    /// sessions structurally means zero window state (the design's teardown test), and a crossing
+    /// re-derives the set with no bespoke hook. Empty on every pre-window rig ⇒ byte-identical.
+    windows: BTreeMap<WindowId, GatewayWindow>,
+    /// The monotone [`WindowId`] mint for `windows` (starts at 1 — id 0 is never issued, so a
+    /// zero-initialized forgery is never a live window).
+    next_window: u64,
+    /// THE WINDOW LANE's realm→node answers (Slice B — `docs/design/window_lane.md` §2.6.2):
+    /// which node currently heads each realm the Active sessions' LINEAGES name. Fed from the
+    /// gateway's OWN routing state (every Active sub's `(node, frame)`) and from the directory's
+    /// `Realm` head replies (the EXISTING `HeadRead`/`Head` pair, re-polled on the window
+    /// keep-alive cadence for lineage ancestors the sessions never subscribed to — e.g. the
+    /// galaxy above a logged-in system). NEVER a world model: every entry is a directory answer
+    /// or a live subscription, and the map is PRUNED each tick to the realms the Active
+    /// sessions' lineages + subs actually name — zero sessions ⇒ empty (the teardown truth).
+    realm_heads: BTreeMap<RealmId, NodeId>,
 }
 
 /// RLM 5f-3d — ONE realm's pre-Active home bootstrap: the state EVERY session booting into that realm
@@ -915,7 +958,35 @@ struct HomeWait {
     resolved: bool,
 }
 
+/// ONE open window as the gateway holds it: where it points (the shard node the gateway
+/// resolved as the stating realm's head when it derived the window), what it asks for, which
+/// realm is its lawful AUTHOR — the attestation context every inbound row for this window is
+/// checked against ([`on_window_row`]) — and, since Slice B, the composer's ingest state (the
+/// level ring, the latest bodies, the membership verdict). Closing the window drops the ingest
+/// whole: zero windows structurally means zero composer state (§2.6.1 guard 4).
+#[derive(Debug, PartialEq)]
+struct GatewayWindow {
+    /// The shard node this window was opened on — the head the gateway's OWN routing state named
+    /// for the author realm (a directory-head answer: `home_shard`/the session's subs/the
+    /// window-lane `Realm` head poll). A row from any other sender is forged or stale and is
+    /// dropped + counted (fail-closed).
+    shard: NodeId,
+    scope: WindowScope,
+    /// The realm whose statements this window carries — [`WindowScope::Occupants`] ⇒ the realm
+    /// the sessions stand in; [`WindowScope::Child`] ⇒ that child's PARENT (the hop author).
+    author_realm: RealmId,
+    /// Slice B: every attested row this window admitted, decoded once (`docs/design/
+    /// window_lane.md` §2.6.2) — the ONLY write path is [`on_window_row`] AFTER attestation
+    /// (§2.6.1 guard 2: the composer consumes only admitted rows).
+    ingest: window::WindowIngest,
+}
+
 impl GatewaySessions {
+    /// THE WINDOW LANE's gauge for the admin surface: how many windows this gateway holds open.
+    #[must_use]
+    pub fn windows_open_count(&self) -> usize {
+        self.windows.len()
+    }
     #[must_use]
     pub fn len(&self) -> usize {
         self.by_session.len()
@@ -1398,13 +1469,137 @@ pub struct GatewayStats {
     /// lifetime, and the roster is authority-refcounted). `0` on a static gateway (no shard ever greets). Its
     /// existence keeps a greeting from being miscounted `undecodable` (the honesty floor).
     pub presence_announces: u64,
-    /// THE WINDOW LANE arriving before its engine exists (mesh minor 16, Slice 0 — the lane is
-    /// owner-approved 2026-08-15/16, docs/design/window_lane.md §1.1 + §4.5, but NOTHING moves in
-    /// Slice 0): a `WindowFrame`/`WindowBody`/`WindowMembership` row is dropped FAIL-CLOSED +
-    /// counted here — never guessed at, never miscounted `undecodable` (the honesty floor, same
-    /// as `presence_announces`). No producer exists until Slice A and no per-window state until
-    /// the Slice-B engine, so this reads 0 in every shipped run; it retires when Slice B lands.
-    pub window_rows_unconsumed: u64,
+    /// THE WINDOW LANE's admitted rows (mesh minor 16): a `WindowFrame`/`WindowBody`/
+    /// `WindowMembership` row that PASSED attestation (a known window, the roster-head sender,
+    /// an admissible body) and was INGESTED into the window's composer state (Slice B retired
+    /// Slice A's deliberate `window_rows_unconsumed` — the engine now consumes every admitted
+    /// row). Counted APART from `undecodable` (the honesty floor); grows at the realm-lane rate.
+    pub window_rows_ingested: u64,
+    /// THE WINDOW LANE, fail-closed (Slice A — docs/design/window_lane.md §2.2/§2.6.6): a window
+    /// row whose sender is NOT the head this gateway resolved for the stating realm when it
+    /// opened the window ([`window_sender_is_head`] driven with the held head). A forged or
+    /// deposed sender's row is dropped + counted, never served on faith. `0` healthy.
+    pub window_sender_mismatch: u64,
+    /// THE WINDOW LANE, fail-closed: a `WindowBody` whose authorship the admission rule refuses
+    /// ([`window_body_admissible`] — a look about anything but the author itself, a marker about
+    /// a non-child). Dropped + counted, never patched (§2.2). `0` healthy.
+    pub window_misauthored_body: u64,
+    /// THE WINDOW LANE, fail-closed: a window row naming an id this gateway holds no window for —
+    /// a straggler from a closed window (dropped by id mismatch, exactly the `WindowId` contract)
+    /// or a forged id. BENIGN in small numbers around closes; steady growth is a fault.
+    pub window_unknown_row: u64,
+    /// THE WINDOW LANE's control egress — `WindowOpen`s sent for NEWLY derived windows
+    /// (THROUGHPUT; one per window per derivation edge, never per tick).
+    pub window_open_sent: u64,
+    /// THE WINDOW LANE's control egress — `WindowClose`s sent when a window stopped being
+    /// derivable (a session ended, crossed away, or its parent sub drained). The polite fast
+    /// path; the shard's derived TTL is the crash backstop.
+    pub window_close_sent: u64,
+    /// THE WINDOW LANE's keep-alive egress — `WindowOpen` re-asserts on the derived cadence
+    /// (idempotent per window; the shard's TTL is 2 beats + 1). THROUGHPUT.
+    pub window_keepalives_sent: u64,
+    /// Slice B — a `WindowFrame` stamped further behind its window's ring head than the derived
+    /// span (`WindowTuning::ring_span_ticks`): refused, counted, never folded (§2.6.2).
+    pub window_level_refused: u64,
+    /// Slice B — a `WindowBody` older (by `authored_at`) than the statement already held for its
+    /// subject: refused (newest wins on a re-driven lane), counted.
+    pub window_body_stale: u64,
+    /// Slice B — a `Marker` arriving before its author's FIRST placement level, so the
+    /// stream-only child roster (the author's own attested full-roster rows — §2.6.2 deleted the
+    /// seed-forest source) cannot vouch for the subject yet: refused fail-closed, counted apart
+    /// from `window_misauthored_body` (a well-ordered peer racing its own lanes is not a forger).
+    pub window_body_preroster: u64,
+    /// Slice B — SHARED folds actually computed: one per (origin, common tick) per gateway tick,
+    /// shared across every session standing in that origin (§2.14). THROUGHPUT.
+    pub window_folds: u64,
+    /// Slice B — sessions served from an already-computed shared fold this tick (§2.14's
+    /// memoization). The parity gate requires this nonzero with ≥2 co-located sessions.
+    pub window_fold_hits: u64,
+    /// Slice B — a shared fold that did NOT equal the per-session recompute bit-for-bit (the
+    /// §2.14 "dedup f64 agreement: shared fold == per-session fold" measurement, taken on every
+    /// memo hit). MUST stay 0 — asserted by the parity gate.
+    pub window_fold_divergence: u64,
+    /// Slice B — folds whose fresh prefix covered the WHOLE derived chain of length ≥ 2: direct
+    /// proof that two different shards stamped levels at IDENTICAL universe ticks (the
+    /// exact-cadence boot pin, §2.6.3 — asserted nonzero by the parity gate).
+    pub window_full_chain_folds: u64,
+    /// Slice B — GAUGE: sessions holding a non-empty derived chain this tick.
+    pub window_chains_held: u64,
+    /// Slice B — a stratum HELD at its last composed poses this tick (per stratum per tick —
+    /// §2.6.4 `compose_hold_ticks`): the sky above a lagging hop holds while the local world
+    /// keeps moving.
+    pub window_compose_hold_ticks: u64,
+    /// Slice B — held strata removed by the DEAD-HOP EXIT (held past the derived TTL): clean
+    /// removal, counted, never a silent truncation (§2.6.4).
+    pub window_hop_dead: u64,
+    /// Slice B — a would-be common-tick REWIND froze emission (§2.6.3 monotone-T). 0 healthy.
+    pub window_t_monotone_stalled: u64,
+    /// Slice B — a chain derivation met a cycle and truncated fail-closed (§2.6.2). 0 healthy.
+    pub window_chain_cycle: u64,
+    /// Slice B — rows refused by `FrameError::InstantMismatch` inside a fold: the shear law
+    /// firing (§2.6.3). MUST stay 0 in a healthy run (asserted by the parity gate); driven
+    /// nonzero on purpose by the G-SHEAR anti-vacuity unit.
+    pub window_instant_mismatch: u64,
+    /// Slice B — rows refused by `RotatedFrameAcrossCells` inside a fold (pre-P10 cell math;
+    /// today reachable only at the author's inversion — pinned by the composer unit).
+    pub window_rotated_refused: u64,
+    /// Slice B — rows dropped because their stated tail frame was not their level's own frame
+    /// (or an unknown-frame refusal from the fold): alien, dropped, counted (§2.6.6).
+    pub window_alien_rows: u64,
+    /// Slice B — a chain level whose hop was absent/mismatched (or whose roster was empty): the
+    /// fold's fresh prefix capped there, fail-closed.
+    pub window_hop_invalid: u64,
+    /// Slice B — an Active session whose composed feed was WITHHELD because its own-level window
+    /// (or its own realm) is not derivable yet — the login race of §2.6.6, held not guessed.
+    pub window_unresolved_standing: u64,
+    /// Slice B — the §2.12 hop-vs-child-row agreement: composed positions for the SAME realm from
+    /// the two lawful sources that disagreed AT ALL (bit-level). 0 on THE world today (identity
+    /// orientations cancel exactly) — asserted by the parity gate.
+    pub window_dedup_disagree: u64,
+    /// Slice B — GAUGE (max): the largest measured hop-vs-child-row deviation, in nanometres —
+    /// the §2.12 "measured bound", printed by the parity gate.
+    pub window_dedup_max_dev_nm: u64,
+    /// Slice B — `HeadRead{Realm(ancestor)}` polls sent on the window keep-alive cadence to
+    /// resolve lineage ancestors the session never subscribed to (the EXISTING directory pair —
+    /// no new wire arm). THROUGHPUT.
+    pub window_head_reads_sent: u64,
+    /// Slice B — composed rows produced across all folds. THROUGHPUT; with
+    /// `parity_rows_matched` it bounds the (explained) composed-surplus: the composer carries
+    /// the FULL roster while the old lane ships what its cascade holds.
+    pub window_composed_rows: u64,
+    /// SHADOW PARITY (§4 Slice B) — old-lane rows REPRODUCED bit-identically (same realm, same
+    /// tick, same position) by the composed picture. The gate's anti-vacuity floor.
+    pub parity_rows_matched: u64,
+    /// SHADOW PARITY — same realm, same tick, DIFFERENT position: UNEXPLAINED (fails the gate).
+    pub parity_pose_mismatch: u64,
+    /// SHADOW PARITY — GAUGE (max): the largest pose deviation measured by the comparator, nm.
+    pub parity_max_pos_dev_nm: u64,
+    /// SHADOW PARITY — an old-lane row whose realm a held window STATES yet the fold lacks:
+    /// UNEXPLAINED (fails the gate).
+    pub parity_missing_composed: u64,
+    /// SHADOW PARITY — the NAMED EXCLUSION (recorded in D-WINDOW-1): an old-lane row for a realm
+    /// stated by NO held window while the chain covers the whole lineage — the lifted one-level
+    /// interior of a live sibling, whose lawful carrier is the recorded Q2-relay gap. Counted,
+    /// printed by the gate, never silent.
+    pub parity_sibling_interior_excluded: u64,
+    /// SHADOW PARITY — explained: a row for a realm stated by no held window while an ancestor
+    /// level has no resolved window yet (its `Realm` head poll is in flight).
+    pub parity_unwindowed_ancestor: u64,
+    /// SHADOW PARITY — explained: no fold exists at the row's tick (boot, a skipped common
+    /// tick, or a ring-aged stamp).
+    pub parity_no_fold_at_tick: u64,
+    /// SHADOW PARITY — explained: a row stated in a frame other than the session's origin frame
+    /// (the crossing overlap's dual feed still speaks the OLD realm's frame).
+    pub parity_offframe_rows: u64,
+    /// SHADOW PARITY — a row naming the session's origin realm itself (the old lane's SL1
+    /// self-placement filter should keep these off the wire; a regression shows up HERE).
+    pub parity_origin_rows: u64,
+    /// SHADOW PARITY — pending old-lane rows shed at the derived cap (loud, never silent).
+    pub parity_pending_shed: u64,
+    /// SHADOW PARITY — an old-lane realm datagram the shadow comparator could not decode
+    /// (the forwarded bytes stay opaque on the client path; this is the shadow decode). 0
+    /// healthy.
+    pub parity_undecodable: u64,
 }
 
 /// The forest's ambient root realm — the fall-back render pin for a session whose home has not resolved
@@ -1441,6 +1636,16 @@ pub fn register_gateway(world: &mut World, schedule: &mut Schedule, config: Gate
             expire_home_bootstrap,
             drive_pending_sessions,
             renew_and_recheck_sessions,
+            // THE WINDOW LANE (docs/design/window_lane.md §2.3): derive/open/close the
+            // per-session chain windows + the keep-alive re-assert. AFTER the session drivers, so
+            // a session promoted Active (or ended) THIS tick is served (or torn down) in the same
+            // pass. INERT with zero Active sessions — zero window state, zero wire bytes.
+            drive_windows,
+            // THE WINDOW LANE's Slice-B SHADOW composer (§2.6/§4): fold the attested window
+            // statements per session at one universe tick and MEASURE against the old-lane feed.
+            // LAST, after the ingest and the window diff, so a level admitted this tick folds
+            // this tick. Emits NOTHING — counters + per-session shadow scenes only.
+            shadow_compose,
         )
             .chain(),
     );
@@ -1664,6 +1869,428 @@ fn renew_and_recheck_sessions(
     }
 }
 
+/// THE WINDOW LANE's keep-alive cadence at the gateway (Slice A — `docs/design/window_lane.md`
+/// §2.3: "re-asserted on a derived keepalive cadence"), MIRRORING the shard's
+/// [`vd_sim::stub::aoi_recheck_cadence`] derivation exactly so subscriber and holder beat on one
+/// rhythm: the ARMED recheck channel when present (`session_recheck_interval` — the gateway's
+/// local copy of the same env knob family the shard's `realm_recheck_interval` rides), else a
+/// tick-DERIVED half-second cadence off the cluster tick rate — never a free literal. The shard's
+/// TTL is 2 beats + 1 of the SAME derivation, so one lost keep-alive is bridged and a dead
+/// gateway expires within ~two beats.
+fn window_keepalive_cadence(config: &GatewayConfig) -> u64 {
+    if config.session_recheck_interval > 0 {
+        config.session_recheck_interval
+    } else {
+        (u64::from(config.tick_hz) / 2).max(1)
+    }
+}
+
+/// One window the gateway currently WANTS open (the per-tick derivation's row).
+#[derive(Debug, PartialEq, Eq)]
+struct DesiredWindow {
+    shard: NodeId,
+    scope: WindowScope,
+    author_realm: RealmId,
+}
+
+/// THE composer's derived-bounds home, off the ONE keep-alive beat the gateway already re-asserts
+/// windows on ([`window_keepalive_cadence`]) — subscriber, holder TTL and composer retention all
+/// breathe on one rhythm (`docs/design/window_lane.md` §2.6.7; owner law 3(a)).
+fn window_tuning(config: &GatewayConfig) -> window::WindowTuning {
+    window::WindowTuning::derive(window_keepalive_cadence(config))
+}
+
+/// THE WINDOW DERIVATION, Slice B's session/stream-only FULL chain (`docs/design/window_lane.md`
+/// §2.6.2 — the Slice-A seed-forest parent lookup is DELETED): per Active session,
+/// - an [`WindowScope::Occupants`] window on every ACTIVE subscription's shard (the realm the
+///   sub's own frame names — and during a crossing hand-off BOTH ends, the §2.7 "hold both
+///   chains through the overlap" posture riding the existing dual-sub pattern for free), and
+/// - a [`WindowScope::Child`] window per adjacent LINEAGE pair (parent P ⊃ child C), opened on
+///   the node [`GatewaySessions::realm_heads`] names for P — the session's own history (login
+///   descent + crossings) says WHICH realms, the gateway's routing state + the directory's
+///   `Realm` heads say WHERE. A parent whose node is not resolved yet simply gets no window (the
+///   head poll in [`drive_windows`] keeps asking); nothing is guessed.
+///
+/// Windows are SHARED per (shard, scope) across sessions (§2.6.2), which the caller's diff gives
+/// for free; zero Active sessions derive the empty set — zero window state, structurally.
+fn desired_windows(sessions: &GatewaySessions) -> Vec<DesiredWindow> {
+    let mut out: Vec<DesiredWindow> = Vec::new();
+    for session in sessions.by_session.values() {
+        if !matches!(session.phase, SessionPhase::Active { .. }) {
+            continue;
+        }
+        for (node, record) in &session.subs {
+            if record.state != SubState::Active {
+                continue; // a draining sub is on its way out — never a fresh window
+            }
+            let Some(realm) = record.frame.realm() else {
+                continue;
+            };
+            push_unique_window(
+                &mut out,
+                DesiredWindow {
+                    shard: *node,
+                    scope: WindowScope::Occupants,
+                    author_realm: realm,
+                },
+            );
+        }
+        for pair in session.lineage.windows(2) {
+            let (parent, child) = (pair[0], pair[1]);
+            let Some(parent_node) = sessions.realm_heads.get(&parent) else {
+                continue; // no resolved head yet — the cadence poll keeps asking
+            };
+            push_unique_window(
+                &mut out,
+                DesiredWindow {
+                    shard: *parent_node,
+                    scope: WindowScope::Child(child),
+                    author_realm: parent,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Dedup helper for the derivation (windows are shared per (shard, scope)): linear over a set
+/// bounded by sessions × 2 — monomorphic, no `Ord` demanded of the wire scope type.
+fn push_unique_window(out: &mut Vec<DesiredWindow>, wanted: DesiredWindow) {
+    if !out
+        .iter()
+        .any(|w| w.shard == wanted.shard && w.scope == wanted.scope)
+    {
+        out.push(wanted);
+    }
+}
+
+/// THE WINDOW LANE's gateway driver (Slice A — `docs/design/window_lane.md` §2.3/§4): derive the
+/// wanted window set from the Active sessions' own routing state, DIFF it against the held set
+/// (close what stopped being derivable — a session ended, crossed away, or its parent sub
+/// drained; open what appeared), and re-assert every held window on the derived keep-alive
+/// cadence. Zero sessions ⇒ zero desired ⇒ every window closed and the map empty — the teardown
+/// gate's structural half. The composer is Slice B: nothing here reads a row, and no client sees
+/// anything.
+fn drive_windows(
+    config: Res<GatewayConfig>,
+    clock: Res<ClockSample>,
+    mut sessions: ResMut<GatewaySessions>,
+    mut stats: ResMut<GatewayStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    // ---- Slice B: refresh + prune the realm→node map from the gateway's OWN routing state ----
+    // Every Active sub's (node, frame) IS a live realm-head answer (the shard serving that realm
+    // is the node the sub rides); the directory's `Realm` heads fill the ancestors the session
+    // never subscribed to (fed in `on_directory_reply`, re-polled below). Pruned to the realms
+    // the Active sessions' lineages + subs actually name — zero sessions ⇒ an empty map, the
+    // structural teardown truth.
+    let mut named: BTreeSet<RealmId> = BTreeSet::new();
+    let mut resolves: Vec<(RealmId, NodeId)> = Vec::new();
+    for session in sessions.by_session.values() {
+        if !matches!(session.phase, SessionPhase::Active { .. }) {
+            continue;
+        }
+        named.extend(session.lineage.iter().copied());
+        for (node, record) in &session.subs {
+            if record.state != SubState::Active {
+                continue;
+            }
+            let Some(realm) = record.frame.realm() else {
+                continue;
+            };
+            named.insert(realm);
+            resolves.push((realm, *node));
+        }
+    }
+    for (realm, node) in resolves {
+        sessions.realm_heads.insert(realm, node);
+    }
+    sessions
+        .realm_heads
+        .retain(|realm, _| named.contains(realm));
+
+    let desired = desired_windows(&sessions);
+    let stale: Vec<WindowId> = sessions
+        .windows
+        .iter()
+        .filter(|(_, held)| {
+            !desired
+                .iter()
+                .any(|d| d.shard == held.shard && d.scope == held.scope)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for id in stale {
+        let held = sessions
+            .windows
+            .remove(&id)
+            .expect("listed from this same map one expression above");
+        push_to_shard(
+            &mut outbox,
+            held.shard,
+            MsgClass::Control,
+            &GatewayToShard::WindowClose { window: id },
+        );
+        stats.window_close_sent += 1;
+    }
+    for wanted in desired {
+        if sessions
+            .windows
+            .values()
+            .any(|held| held.shard == wanted.shard && held.scope == wanted.scope)
+        {
+            continue;
+        }
+        let id = WindowId(sessions.next_window + 1); // ids start at 1 — 0 is never issued
+        sessions.next_window += 1;
+        push_to_shard(
+            &mut outbox,
+            wanted.shard,
+            MsgClass::Control,
+            &GatewayToShard::WindowOpen {
+                window: id,
+                scope: wanted.scope,
+            },
+        );
+        // (No runtime-roster claim: an open window is ITSELF a dispatch source — see the window
+        // arm of `is_routable_shard` — so the session-role refcounts stay exactly the three
+        // documented roles and a window cannot unbalance them.)
+        sessions.windows.insert(
+            id,
+            GatewayWindow {
+                shard: wanted.shard,
+                scope: wanted.scope,
+                author_realm: wanted.author_realm,
+                ingest: window::WindowIngest::default(),
+            },
+        );
+        stats.window_open_sent += 1;
+    }
+    if vd_sim::directory::due_this_tick(window_keepalive_cadence(&config), clock.local_tick.0) {
+        for (id, held) in &sessions.windows {
+            push_to_shard(
+                &mut outbox,
+                held.shard,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: *id,
+                    scope: held.scope,
+                },
+            );
+            stats.window_keepalives_sent += 1;
+        }
+        // ---- Slice B: the lineage-ancestor head poll, on the SAME beat (§2.6.2) ----
+        // For every Active session's lineage PARENT, re-read `HeadRead{Realm(p)}` — the EXISTING
+        // directory pair, no new wire arm. Re-polled even when resolved (a re-homed ancestor's
+        // head answer self-heals the window's pointing within one beat); deduped across sessions.
+        let mut parents: BTreeSet<RealmId> = BTreeSet::new();
+        for session in sessions.by_session.values() {
+            if !matches!(session.phase, SessionPhase::Active { .. }) {
+                continue;
+            }
+            for pair in session.lineage.windows(2) {
+                parents.insert(pair[0]);
+            }
+        }
+        for parent in parents {
+            push_directory(
+                &mut outbox,
+                config.orchestrator,
+                DirectoryOp::HeadRead {
+                    key: DirectoryKey::Realm(parent),
+                },
+            );
+            stats.window_head_reads_sent += 1;
+        }
+    }
+}
+
+/// THE SHADOW COMPOSER's per-tick pass (Slice B — `docs/design/window_lane.md` §2.6/§4): per
+/// Active session, derive the chain (session/stream-only), pick the fresh common tick, FOLD once
+/// per (origin, tick) shared across sessions (§2.14 — the memo below), roll the per-session
+/// scene (epoch, holds, dead-hop exits, monotone-T), and drain the parity comparator's pending
+/// old-lane rows against the fold ring. SHADOW: nothing here emits a byte to anyone — the output
+/// is counters and the per-session scene the parity gate reads.
+fn shadow_compose(
+    config: Res<GatewayConfig>,
+    mut sessions: ResMut<GatewaySessions>,
+    mut stats: ResMut<GatewayStats>,
+) {
+    shadow_compose_pass(&config, &mut sessions, &mut stats);
+}
+
+/// The composer pass proper, a plain function so the unit tier can drive it over a hand-built
+/// session table (the `one_active_session` pattern) — every classify arm reachable without a
+/// full rig tick.
+fn shadow_compose_pass(
+    config: &GatewayConfig,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+) {
+    let tuning = window_tuning(config);
+    // Field-split borrows: the window map is read-only here; the sessions are rolled.
+    let GatewaySessions {
+        windows,
+        by_session,
+        ..
+    } = sessions;
+    let windows = &*windows;
+    let catalog: Vec<window::CatalogRow> = windows
+        .iter()
+        .map(|(id, w)| window::CatalogRow {
+            window: *id,
+            scope: w.scope,
+            author: w.author_realm,
+            confirmed: w.ingest.confirmed(),
+        })
+        .collect();
+    // The §2.14 shared-fold memo: ONE fold per (origin, tick) per gateway tick, shared across
+    // every session standing in that origin. Local to the pass — nothing global accumulates.
+    // The bool is the divergence instrument's once-latch: the FIRST memo hit recomputes the
+    // fold per-session and compares bit-level (§2.14's exactness measurement); later hits just
+    // share — so the instrument costs at most ONE extra fold per (origin, tick), never O(sessions).
+    let mut memo: BTreeMap<(RealmId, u64), (window::Composed, bool)> = BTreeMap::new();
+    let mut chains_held = 0u64;
+    for session in by_session.values_mut() {
+        if !matches!(session.phase, SessionPhase::Active { .. }) {
+            continue;
+        }
+        let target = session_target(session, config);
+        let origin_frame = session
+            .subs
+            .get(&target)
+            .filter(|r| r.state == SubState::Active)
+            .map(|r| r.frame);
+        let (Some(origin_frame), Some(origin)) =
+            (origin_frame, origin_frame.and_then(FrameRef::realm))
+        else {
+            // The login race (§2.6.6): no standing realm yet — the composed feed is WITHHELD,
+            // counted, never guessed.
+            stats.window_unresolved_standing += 1;
+            continue;
+        };
+        let chain = window::derive_chain(origin, &catalog);
+        stats.window_chain_cycle += u64::from(chain.cycled);
+        if chain.hops.is_empty() {
+            stats.window_unresolved_standing += 1;
+            continue;
+        }
+        chains_held += 1;
+        let authors: Vec<RealmId> = chain.hops.iter().map(|h| h.author).collect();
+        let ingests: Vec<&window::WindowIngest> = chain
+            .hops
+            .iter()
+            .map(|h| &windows[&h.window].ingest)
+            .collect();
+        let (prefix, t) = window::fresh_prefix(&ingests);
+        // Cost discipline (§2.14): a scene already AT this common tick with an unchanged chain
+        // has nothing new to fold — skip the fold AND the scene roll (never a hold, never a
+        // stall; the ring already carries this tick). The pending drain below still runs: the
+        // old lane keeps delivering rows for ticks the ring already answers.
+        let already_current = (t == session.shadow.last_t)
+            & (session.shadow.origin == Some(origin))
+            & (session.shadow.chain_authors == authors)
+            & t.is_some();
+        if !already_current {
+            let fold = t.map(|t| {
+                if let Some((shared, verified)) = memo.get_mut(&(origin, t.0)) {
+                    stats.window_fold_hits += 1;
+                    if !*verified {
+                        // §2.14's exactness proof, MEASURED once per shared fold: it must equal
+                        // a per-session recompute bit-for-bit (asserted 0 by the parity gate).
+                        let per_session =
+                            compose_fresh(origin, origin_frame, t, &authors, &ingests, prefix);
+                        stats.window_fold_divergence += fold_divergence(shared, &per_session);
+                        *verified = true;
+                    }
+                    shared.clone()
+                } else {
+                    let fold = compose_fresh(origin, origin_frame, t, &authors, &ingests, prefix);
+                    stats.window_folds += 1;
+                    stats.window_composed_rows += fold.rows.len() as u64;
+                    stats.window_instant_mismatch += fold.instant_refused;
+                    stats.window_rotated_refused += fold.rotated_refused;
+                    stats.window_alien_rows += fold.alien_rows;
+                    stats.window_hop_invalid += fold.hop_invalid;
+                    stats.window_dedup_disagree += fold.dedup_disagree;
+                    stats.window_dedup_max_dev_nm =
+                        stats.window_dedup_max_dev_nm.max(fold.dedup_max_dev_nm);
+                    stats.window_full_chain_folds +=
+                        u64::from((fold.fresh_levels == authors.len()) & (authors.len() >= 2));
+                    memo.insert((origin, t.0), (fold.clone(), false));
+                    fold
+                }
+            });
+            let report = session.shadow.advance(origin, &authors, fold, &tuning);
+            stats.window_compose_hold_ticks += report.holds;
+            stats.window_hop_dead += report.dead_hops;
+            stats.window_t_monotone_stalled += u64::from(report.stalled);
+        }
+        session.shadow.chain_covers_lineage =
+            !session.lineage.is_empty() & (chain.hops.len() == session.lineage.len());
+        // ---- SHADOW PARITY: drain the old-lane rows whose tick the scene can now answer ----
+        loop {
+            let Some(front) = session.shadow.pending.front().copied() else {
+                break;
+            };
+            let t_row = front.pose.universe_tick;
+            let answerable = session.shadow.fold_at(t_row).is_some()
+                | session.shadow.newest().is_some_and(|n| n >= t_row);
+            if !answerable {
+                break; // the fold for this tick may still arrive — wait, bounded by the cap
+            }
+            let class = window::classify_row(&session.shadow, &front, origin, origin_frame, |r| {
+                windows.values().any(|w| w.ingest.rosters(r))
+            });
+            session.shadow.pending.pop_front();
+            match class {
+                window::ParityClass::Matched => stats.parity_rows_matched += 1,
+                window::ParityClass::PoseMismatch(dev_nm) => {
+                    stats.parity_pose_mismatch += 1;
+                    stats.parity_max_pos_dev_nm = stats.parity_max_pos_dev_nm.max(dev_nm);
+                }
+                window::ParityClass::MissingComposed => stats.parity_missing_composed += 1,
+                window::ParityClass::SiblingInteriorExcluded => {
+                    stats.parity_sibling_interior_excluded += 1;
+                }
+                window::ParityClass::UnwindowedAncestor => stats.parity_unwindowed_ancestor += 1,
+                window::ParityClass::NoFoldAtTick => stats.parity_no_fold_at_tick += 1,
+                window::ParityClass::OffFrame => stats.parity_offframe_rows += 1,
+                window::ParityClass::OriginRow => stats.parity_origin_rows += 1,
+            }
+        }
+    }
+    stats.window_chains_held = chains_held;
+}
+
+/// The §2.14 divergence verdict, split out so BOTH arms are unit-drivable (HR5): 1 when a
+/// shared fold does not equal its per-session recompute bit-for-bit (must never happen —
+/// asserted 0 by the parity gate; nonzero would mean the fold is not a pure function of its
+/// attested inputs), else 0.
+fn fold_divergence(shared: &window::Composed, per_session: &window::Composed) -> u64 {
+    u64::from(per_session != shared)
+}
+
+/// One fresh fold: resolve each fresh chain level's stamped-`t` window level and run the
+/// composer. Monomorphic straight-line (HR5) — the branching lives in `window::compose`.
+fn compose_fresh(
+    origin: RealmId,
+    origin_frame: FrameRef,
+    t: UniverseTick,
+    authors: &[RealmId],
+    ingests: &[&window::WindowIngest],
+    prefix: usize,
+) -> window::Composed {
+    let levels: Vec<&window::WindowLevel> = ingests[..prefix]
+        .iter()
+        .map(|i| {
+            i.level_at(t)
+                .expect("fresh_prefix only names ticks every prefix level retains")
+        })
+        .collect();
+    window::compose(origin, origin_frame, t, authors, &levels, prefix, ingests)
+}
+
 /// ---------------------------------------------------------------------------
 /// THE HOT PATHS (pure, lock-free; SPIKE-2a benches these exact functions)
 /// ---------------------------------------------------------------------------
@@ -1841,7 +2468,14 @@ fn process_gateway_inbound(
                     on_shard_frame(from, bytes, &mut sessions, &mut stats, &mut outbox);
                 }
                 MsgClass::RealmSnapshot => {
-                    on_shard_realm_frame(from, bytes, &mut sessions, &mut stats, &mut outbox);
+                    on_shard_realm_frame(
+                        from,
+                        bytes,
+                        &config,
+                        &mut sessions,
+                        &mut stats,
+                        &mut outbox,
+                    );
                 }
                 _ => stats.undecodable += 1,
             }
@@ -2210,6 +2844,10 @@ fn on_client_control(
                     transfer: None,
                     subs: BTreeMap::new(),
                     delivered: BTreeMap::new(),
+                    // THE WINDOW LANE (Slice B): no home yet ⇒ no lineage and an empty shadow
+                    // scene — both fill strictly downstream (the descent / the attach frame).
+                    lineage: Vec::new(),
+                    shadow: window::ShadowScene::default(),
                     hot: Arc::new(SessionHot {
                         route: ArcSwap::from_pointee(RouteSnapshot {
                             authority: config.shard,
@@ -3093,6 +3731,14 @@ fn on_shard_control(
                 let authority = session.hot.route.load().authority;
                 store_route(&session.hot, authority, realm_fence, None);
                 session.phase = SessionPhase::Active { entity };
+                // THE WINDOW LANE (Slice B): a STATIC login's lineage starts at the attach
+                // frame's realm (a dynamic login already carries its descent's full lineage —
+                // never overwritten here).
+                if session.lineage.is_empty()
+                    && let Some(realm) = frame.realm()
+                {
+                    session.lineage = vec![realm];
+                }
                 // RLM 5f-3d: the pre-Active bootstrap window CLOSES here — the session is LIVE, so the
                 // bounded TTL no longer applies to it. Already `None` for a static session (byte-identical).
                 session.bootstrap_deadline = None;
@@ -3169,11 +3815,12 @@ fn on_shard_control(
                 let pin = render_pin(&config.seed_injector, realm);
                 // The session is a stated invariant, not a lookup that can fail: `open_sub` above
                 // just resolved it (this is the borrow-split re-fetch, nothing else).
-                sessions
+                let session = sessions
                     .by_session
                     .get_mut(&session_id)
-                    .expect("session present (held immutably just above this tick)")
-                    .render_pin = pin;
+                    .expect("session present (held immutably just above this tick)");
+                session.render_pin = pin;
+                lineage_apply(&mut session.lineage, realm);
             }
             let session = sessions
                 .by_session
@@ -3224,17 +3871,159 @@ fn on_shard_control(
             // `on_shard_realm_frame`, dispatched from `MsgClass::RealmSnapshot`, never here).
             stats.undecodable += 1;
         }
-        ShardToGateway::WindowFrame { .. }
-        | ShardToGateway::WindowBody { .. }
-        | ShardToGateway::WindowMembership { .. } => {
-            // THE WINDOW LANE, Slice 0 (mesh minor 16; the lane is owner-approved 2026-08-15/16,
-            // docs/design/window_lane.md §1.1 + §4.5): the wire SHAPE exists but nothing moves —
-            // no shard emits these until Slice A, and the per-window engine that will consume
-            // them lands in Slice B (`window.rs`, shadow-first). A row arriving today is dropped
-            // FAIL-CLOSED + counted (owner decision 3: drop undeliverable data, never guess),
-            // and counted APART from `undecodable` (this is a well-formed peer speaking a lane
-            // whose consumer does not exist yet — not garbage; the honesty floor).
-            stats.window_rows_unconsumed += 1;
+        // THE WINDOW LANE (docs/design/window_lane.md §2.2): every row is ATTESTED fail-closed
+        // (known window, roster-head sender, admissible body) and then INGESTED into the
+        // window's composer state (Slice B — `window.rs`, shadow-first: measured, never served).
+        // The reliable lanes (bodies, membership) arrive here on Control; the per-tick
+        // `WindowFrame` datagram arrives via `on_shard_realm_frame` — BOTH run the ONE
+        // `on_window_row` rule.
+        ShardToGateway::WindowFrame {
+            window,
+            at,
+            hop,
+            rows,
+            ..
+        } => {
+            let level = window::WindowLevel {
+                at,
+                hop: hop.map(|b| *b),
+                rows,
+            };
+            on_window_row(
+                from,
+                window,
+                WindowRow::Level(level),
+                config,
+                sessions,
+                stats,
+            );
+        }
+        ShardToGateway::WindowBody {
+            window,
+            subject,
+            stmt,
+            authored_at,
+            ..
+        } => {
+            on_window_row(
+                from,
+                window,
+                WindowRow::Body {
+                    subject,
+                    stmt,
+                    authored_at,
+                },
+                config,
+                sessions,
+                stats,
+            );
+        }
+        ShardToGateway::WindowMembership {
+            window,
+            added,
+            removed,
+        } => {
+            on_window_row(
+                from,
+                window,
+                WindowRow::Membership { added, removed },
+                config,
+                sessions,
+                stats,
+            );
+        }
+    }
+}
+
+/// One admitted window statement's payload, handed to the composer's ingest AFTER attestation —
+/// the Slice-B shape of the one ingest rule (the Slice-A `Option<(RealmId, &BodyStmt)>` grew a
+/// typed row per statement kind when the engine started consuming).
+enum WindowRow {
+    Level(window::WindowLevel),
+    Body {
+        subject: RealmId,
+        stmt: BodyStmt,
+        authored_at: UniverseTick,
+    },
+    Membership {
+        added: Vec<RealmId>,
+        removed: Vec<RealmId>,
+    },
+}
+
+/// THE WINDOW LANE's ingest rule (docs/design/window_lane.md §2.2/§2.6.6), ONE rule for every row
+/// kind on both carrying lanes, fail-closed in three layers:
+/// 1. the window must be one THIS gateway holds open — a straggler from a closed window (or a
+///    forged id) drops by id mismatch, exactly the `WindowId` contract;
+/// 2. the sender must BE the head the gateway's own routing state resolved for the stating realm
+///    when it derived the window (the directory-head answer `home_shard`/the session subs/the
+///    realm-head poll named) — [`window_sender_is_head`] driven with that head in hand;
+/// 3. a body statement's authorship must be admissible ([`window_body_admissible`]): a look only
+///    about the author itself (SL3), a marker only about the author's DIRECT children (R4) — the
+///    child set read from the author's OWN attested full-roster rows (§2.6.2: the seed-forest
+///    second source is DELETED; the stream is the only vouching knowledge). A marker arriving
+///    before the author's first level finds no roster to vouch for it and is refused apart
+///    (`window_body_preroster`), fail-closed, never served on faith.
+///
+/// A row that passes is INGESTED into the window's composer state (`window_rows_ingested` —
+/// Slice B retired Slice A's deliberate unconsumed counter). Still SHADOW: no client sees any of
+/// it; the per-tick fold only MEASURES against the old lane (`shadow_compose`).
+fn on_window_row(
+    from: NodeId,
+    window_id: WindowId,
+    row: WindowRow,
+    config: &GatewayConfig,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+) {
+    let Some(held) = sessions.windows.get_mut(&window_id) else {
+        stats.window_unknown_row += 1;
+        return;
+    };
+    if !window_sender_is_head(from, Some(held.shard)) {
+        stats.window_sender_mismatch += 1;
+        tracing::warn!(
+            sender = from.0,
+            head = held.shard.0,
+            window = window_id.0,
+            "forged-sender window row dropped (fail-closed attestation)"
+        );
+        return;
+    }
+    match row {
+        WindowRow::Level(level) => match held.ingest.ingest_frame(level, &window_tuning(config)) {
+            window::Ingested::Applied => stats.window_rows_ingested += 1,
+            window::Ingested::BehindRing => stats.window_level_refused += 1,
+        },
+        WindowRow::Body {
+            subject,
+            stmt,
+            authored_at,
+        } => {
+            if matches!(stmt, BodyStmt::Marker { .. }) && !held.ingest.confirmed() {
+                stats.window_body_preroster += 1;
+                return;
+            }
+            let children = held.ingest.roster_set();
+            if !window_body_admissible(&stmt, subject, held.author_realm, &children) {
+                stats.window_misauthored_body += 1;
+                tracing::warn!(
+                    %subject,
+                    author = %held.author_realm,
+                    window = window_id.0,
+                    "mis-authored window body dropped (fail-closed admission)"
+                );
+                return;
+            }
+            if held.ingest.ingest_body(subject, &stmt, authored_at) {
+                stats.window_rows_ingested += 1;
+            } else {
+                stats.window_body_stale += 1;
+            }
+        }
+        WindowRow::Membership { added, removed } => {
+            held.ingest.ingest_membership(&added, &removed);
+            stats.window_rows_ingested += 1;
         }
     }
 }
@@ -3451,18 +4240,56 @@ fn on_shard_frame(
 fn on_shard_realm_frame(
     from: NodeId,
     bytes: &[u8],
+    config: &GatewayConfig,
     sessions: &mut GatewaySessions,
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
 ) {
-    let Ok(ShardToGateway::RealmFrame {
-        realm_snapshot_bytes,
-        ..
-    }) = postcard::from_bytes::<ShardToGateway>(bytes)
-    else {
-        stats.undecodable += 1;
-        return;
+    let realm_snapshot_bytes = match postcard::from_bytes::<ShardToGateway>(bytes) {
+        Ok(ShardToGateway::RealmFrame {
+            realm_snapshot_bytes,
+            ..
+        }) => realm_snapshot_bytes,
+        // THE WINDOW LANE's per-tick statement: `WindowFrame` is FireAndForget/Unreliable, so it
+        // rides THIS datagram class (the realm-lane tick), not the reliable Control stream — and
+        // runs the SAME attested ingest rule as the Control-borne rows.
+        Ok(ShardToGateway::WindowFrame {
+            window,
+            at,
+            hop,
+            rows,
+            ..
+        }) => {
+            let level = window::WindowLevel {
+                at,
+                hop: hop.map(|b| *b),
+                rows,
+            };
+            on_window_row(
+                from,
+                window,
+                WindowRow::Level(level),
+                config,
+                sessions,
+                stats,
+            );
+            return;
+        }
+        Ok(_) | Err(_) => {
+            stats.undecodable += 1;
+            return;
+        }
     };
+    // ---- SHADOW PARITY intake (Slice B, §4): the old-lane feed IS the measurement's left-hand
+    // side. Decode the forwarded body ONCE (shadow-only — the client path below still forwards
+    // the opaque bytes untouched) and queue every row on each Active subscriber's comparator;
+    // the per-tick composer drains + classifies them against the fold at each row's own stamp.
+    let shadow_rows: Option<RealmSnapshotDatagram> =
+        postcard::from_bytes(&realm_snapshot_bytes).ok();
+    if shadow_rows.is_none() {
+        stats.parity_undecodable += 1;
+    }
+    let tuning = window_tuning(config);
     // ONE shared body (sub 0, RealmId-keyed — no per-session re-tag) shared across every subscriber.
     let body = vd_sim::io::bytes(realm_snapshot_bytes);
     for session_id in sessions.subscribers_of(from) {
@@ -3475,6 +4302,17 @@ fn on_shard_realm_frame(
         // Active sessions only — a self-fenced / still-attaching session is served no frames.
         if !matches!(session.phase, SessionPhase::Active { .. }) {
             continue;
+        }
+        if let Some(datagram) = &shadow_rows {
+            for realm_row in &datagram.realms {
+                stats.parity_pending_shed += session.shadow.push_pending(
+                    window::PendingRow {
+                        realm: realm_row.realm,
+                        pose: realm_row.pose,
+                    },
+                    &tuning,
+                );
+            }
         }
         outbox.0.push((
             session.client,
@@ -3529,6 +4367,34 @@ fn home_sentinel_fence(account: AccountId) -> Fence {
 ///
 /// Login is NOT a special path: the lineage returned here is demanded through the ordinary mechanics, and
 /// nothing downstream can tell where the first position came from.
+/// THE WINDOW LANE's lineage rule at a crossing (`docs/design/window_lane.md` §2.6.2: "updated
+/// at each crossing's `SubscriptionReady`"): a realm already in the lineage TRUNCATES back to it
+/// (an outward cross — ancestors are KEPT); anything else APPENDS below the previous leaf (an
+/// inward cross: travel is always out into the shared parent and in again — SL2 — so the
+/// previous leaf IS the parent). A wrong append is fail-closed downstream: the Child window it
+/// derives is refused by the shard (`window_child_unrostered`) and never confirms, so the chain
+/// simply ends at the last attested hop.
+fn lineage_apply(lineage: &mut Vec<RealmId>, realm: RealmId) {
+    if let Some(pos) = lineage.iter().position(|r| *r == realm) {
+        lineage.truncate(pos + 1);
+    } else {
+        lineage.push(realm);
+    }
+}
+
+/// A [`RealmCoord`]'s realm chain, root→leaf — THE session lineage the window derivation reads
+/// (`docs/design/window_lane.md` §2.6.2: "the lineage comes from the session's login descent").
+fn coord_lineage(coord: &RealmCoord) -> Vec<RealmId> {
+    let mut chain = Vec::new();
+    let mut cursor = Some(coord.clone());
+    while let Some(c) = cursor {
+        chain.push(c.lowered());
+        cursor = c.parent();
+    }
+    chain.reverse();
+    chain
+}
+
 fn home_placement(cfg: &SeedInjectorConfig, account: AccountId) -> (RealmCoord, StampedPose) {
     let home = cfg.homes.home_of(account);
     (home.realm, home.pose)
@@ -3659,6 +4525,15 @@ fn on_directory_reply(
             key: DirectoryKey::Realm(home_rid),
             record,
         } => {
+            // THE WINDOW LANE (Slice B, §2.6.2): EVERY `Realm` head answer feeds the window
+            // derivation's realm→node map — the lawful source for a lineage ANCESTOR's node
+            // (the cadence poll in `drive_windows` asks; this is the answer landing). Pruned
+            // each tick to the realms the Active sessions actually name.
+            if let Some(owner) = &record {
+                sessions
+                    .realm_heads
+                    .insert(home_rid, owner.authority.node());
+            }
             on_home_realm_head(home_rid, record, sessions, stats, outbox);
             return;
         }
@@ -3718,6 +4593,10 @@ fn on_directory_reply(
             // the same walk down and separating them is what let the two disagree.
             let (coord, spawn) = home_placement(&config.seed_injector, session.account);
             session.spawn = Some(spawn);
+            // THE WINDOW LANE (Slice B, §2.6.2): the login descent's coord IS the session's
+            // lineage — recorded root→leaf ON the session, so the chain derivation reads
+            // session history and never a forest.
+            session.lineage = coord_lineage(&coord);
             Some(coord)
         } else {
             None
@@ -4690,7 +5569,16 @@ mod tests {
         );
         assert_eq!(
             rig.stats(),
-            GatewayStats::default(),
+            GatewayStats {
+                // THE WINDOW LANE (Slice A): a clean login now ALSO derives + opens the session's
+                // own-realm Occupants window — exactly one open, a THROUGHPUT count, not a reject.
+                window_open_sent: 1,
+                // Slice B: the shadow composer derives the one-hop chain the moment the session
+                // is Active (a GAUGE — one session, one chain). No frames were ever ingested, so
+                // nothing folds and nothing holds (pre-first-fold boot is not a stall).
+                window_chains_held: 1,
+                ..GatewayStats::default()
+            },
             "clean run, zero rejects"
         );
     }
@@ -5129,41 +6017,279 @@ mod tests {
 
     #[test]
     fn a_window_row_before_its_engine_is_dropped_fail_closed_and_counted_apart() {
-        // THE WINDOW LANE, Slice 0 (mesh minor 16): the shapes exist, nothing moves. Each of the
-        // three shard→gateway window rows arriving on Control today is dropped FAIL-CLOSED and
-        // counted on its OWN counter — a well-formed peer speaking a lane whose Slice-B engine
-        // does not exist yet is NOT `undecodable` garbage (the honesty floor), and no output is
-        // ever produced from one (nothing is guessed at — owner decision 3).
-        use vd_wire::session_flow::{BodyStmt, WindowId};
+        // THE WINDOW LANE's ingest (Slice B: the composer CONSUMES what attestation admits;
+        // SHADOW — nothing reaches a client). Driven through the REAL ingest:
+        //   admitted  — the roster-head sender, on the held window (Control AND the datagram
+        //               class — both carriers run the ONE rule) ⇒ INGESTED;
+        //   preroster — a marker BEFORE the author's first level (no attested roster to vouch);
+        //   forged    — a routable-but-wrong sender is dropped + counted (fail-closed);
+        //   unknown   — a straggler/forged window id drops by id mismatch;
+        //   misauthored — a look about anything but the author, a marker about a non-child
+        //               (vouched against the author's OWN attested roster — never a forest);
+        //   stale     — a body older than the held statement (newest wins).
+        // Nothing is guessed at, nothing reaches a client, nothing is `undecodable`.
         let mut rig = Rig::new();
         let (_, _) = rig.login();
-        let frame = ShardToGateway::WindowFrame {
+        // The login derived + opened the Occupants window (id 1) on SHARD for System(7).
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().windows_open_count(),
+            1
+        );
+        let roster_row = vd_wire::channels::RealmSnap {
+            realm: RealmId::Planet(7),
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            pose: vd_core::pose::StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 7 },
+                DVec3::new(30.0, 0.0, 0.0),
+                vd_core::UniverseTick(5),
+            ),
+        };
+        let frame_for = |window: WindowId| ShardToGateway::WindowFrame {
             realm_fence: Fence(1),
-            window: WindowId(1),
+            window,
             at: vd_core::UniverseTick(5),
             hop: None,
-            rows: Vec::new(),
+            rows: vec![roster_row],
         };
-        let body = ShardToGateway::WindowBody {
+        let body_about = |subject: RealmId, stmt: BodyStmt, at: u64| ShardToGateway::WindowBody {
             realm_fence: Fence(1),
             window: WindowId(1),
-            subject: RealmId::System(0),
-            stmt: BodyStmt::SelfLook { bag: vec![1] },
-            authored_at: vd_core::UniverseTick(5),
+            subject,
+            stmt,
+            authored_at: vd_core::UniverseTick(at),
         };
         let membership = ShardToGateway::WindowMembership {
             window: WindowId(1),
             added: vec![RealmId::Planet(7)],
             removed: Vec::new(),
         };
+        // PREROSTER: a marker arriving before the author's FIRST level finds no attested roster
+        // to vouch for its subject — refused apart, fail-closed, not "misauthored".
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &body_about(RealmId::Planet(7), BodyStmt::Marker { luma: vec![2] }, 4),
+        )]);
+        assert_eq!(rig.stats().window_body_preroster, 1, "no roster yet");
         let sent = rig.tick(vec![
-            wire(SHARD, MsgClass::Control, &frame),
-            wire(SHARD, MsgClass::Control, &body),
+            // ADMITTED: the head, on the held window — frame (both carriers; the re-delivered
+            // stamp replaces, latest-wins), membership, an admissible self-look, and an
+            // admissible marker about a child the author's OWN roster rows vouch for.
+            wire(SHARD, MsgClass::Control, &frame_for(WindowId(1))),
+            wire(SHARD, MsgClass::RealmSnapshot, &frame_for(WindowId(1))),
             wire(SHARD, MsgClass::Control, &membership),
+            wire(
+                SHARD,
+                MsgClass::Control,
+                &body_about(RealmId::System(7), BodyStmt::SelfLook { bag: vec![1] }, 5),
+            ),
+            wire(
+                SHARD,
+                MsgClass::Control,
+                &body_about(RealmId::Planet(7), BodyStmt::Marker { luma: vec![2] }, 5),
+            ),
+            // STALE: an OLDER self-look than the one already held — newest wins, counted apart.
+            wire(
+                SHARD,
+                MsgClass::Control,
+                &body_about(RealmId::System(7), BodyStmt::SelfLook { bag: vec![9] }, 3),
+            ),
+            // FORGED: a routable shard that is NOT the head this window was opened on.
+            wire(DEST, MsgClass::Control, &frame_for(WindowId(1))),
+            // UNKNOWN: an id this gateway never minted (or already closed).
+            wire(SHARD, MsgClass::Control, &frame_for(WindowId(99))),
+            // MISAUTHORED: a look about a child (SL3 — a realm draws only itself), and a marker
+            // about the author itself (R4 — a marker is only ever about a direct child).
+            wire(
+                SHARD,
+                MsgClass::Control,
+                &body_about(RealmId::Planet(7), BodyStmt::SelfLook { bag: vec![1] }, 5),
+            ),
+            wire(
+                SHARD,
+                MsgClass::Control,
+                &body_about(RealmId::System(7), BodyStmt::Marker { luma: vec![2] }, 5),
+            ),
         ]);
-        assert_eq!(sent.len(), 0, "no output from an unconsumed window row");
-        assert_eq!(rig.stats().window_rows_unconsumed, 3, "each row counted");
+        let to_client = sent.iter().filter(|(to, _, _)| *to == CLIENT).count();
+        assert_eq!(
+            to_client, 0,
+            "SHADOW: no window row (or composed byte) ever reaches a client in Slice B"
+        );
+        assert_eq!(
+            rig.stats().window_rows_ingested,
+            5,
+            "each admitted row ingested (two frames, membership, look, marker)"
+        );
+        assert_eq!(rig.stats().window_body_stale, 1, "the older look refused");
+        assert_eq!(rig.stats().window_sender_mismatch, 1, "the forgery dropped");
+        assert_eq!(rig.stats().window_unknown_row, 1, "the stranger id dropped");
+        assert_eq!(
+            rig.stats().window_misauthored_body,
+            2,
+            "both misauthorships dropped"
+        );
         assert_eq!(rig.stats().undecodable, 0, "a window row is NOT garbage");
+        // The composer CONSUMED the admitted level: the session's one-hop chain folded at the
+        // level's stamp and the roster row composed (SHADOW — measured above, served to no one).
+        assert_eq!(rig.stats().window_folds, 1, "the admitted level folded");
+        assert_eq!(
+            rig.stats().window_composed_rows,
+            1,
+            "the roster row composed"
+        );
+        assert_eq!(rig.stats().window_instant_mismatch, 0);
+    }
+
+    #[test]
+    fn windows_derive_open_keepalive_and_close_with_the_sessions() {
+        // THE WINDOW LANE's gateway driver (Slice A): the login's Active promote derives + opens
+        // the Occupants window on the session's own shard; the keep-alive re-asserts it on the
+        // DERIVED cadence (tick_hz/2 with the recheck channel disarmed — the shard's own
+        // fallback derivation, mirrored); the session's end closes it — ZERO sessions ⇒ ZERO
+        // window state, structurally (the design's teardown test, gateway half).
+        let mut rig = Rig::new();
+        let (sid, sends) = rig.login();
+        let attach_tick = &sends[2];
+        // Shard-bound sends only (bitwise `|`, HR5) — a client-bound control byte must never be
+        // decoded under the shard contract (postcard is positional, an alias would be silent).
+        let opens: Vec<(NodeId, GatewayToShard)> = attach_tick
+            .iter()
+            .filter(|(to, _, _)| (*to == SHARD) | (*to == DEST))
+            .map(|(to, _, b)| {
+                (
+                    *to,
+                    postcard::from_bytes::<GatewayToShard>(b).expect(
+                        "every shard-bound byte this tick decodes under the shard contract",
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(
+            opens,
+            vec![(
+                SHARD,
+                GatewayToShard::WindowOpen {
+                    window: WindowId(1),
+                    scope: WindowScope::Occupants,
+                }
+            )],
+            "the Active promote opens the own-realm Occupants window, id minted from 1"
+        );
+        assert_eq!(rig.stats().window_open_sent, 1);
+        // The keep-alive: due exactly on the derived cadence (config: recheck disarmed, 50 Hz ⇒
+        // every 25 local ticks), idempotent re-assert of the SAME id + scope.
+        set_tick(&mut rig, 24);
+        let quiet = rig.tick(vec![]);
+        assert_eq!(
+            quiet.len(),
+            0,
+            "off-cadence, an idle Active session sends nothing"
+        );
+        set_tick(&mut rig, 25);
+        let beat = rig.tick(vec![]);
+        assert_eq!(
+            beat.len(),
+            1,
+            "the cadence beat carries the keep-alive alone"
+        );
+        assert_eq!(
+            postcard::from_bytes::<GatewayToShard>(&beat[0].2).expect("decode"),
+            GatewayToShard::WindowOpen {
+                window: WindowId(1),
+                scope: WindowScope::Occupants,
+            }
+        );
+        assert_eq!(rig.stats().window_keepalives_sent, 1);
+        // The session ends: the window closes on the SAME tick and the state is EMPTY.
+        let _ = sid;
+        let bye = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        let closes = bye
+            .iter()
+            .filter(|(to, class, b)| {
+                (*to == SHARD)
+                    & (*class == MsgClass::Control)
+                    & matches!(
+                        postcard::from_bytes::<GatewayToShard>(b),
+                        Ok(GatewayToShard::WindowClose {
+                            window: WindowId(1)
+                        })
+                    )
+            })
+            .count();
+        assert_eq!(closes, 1, "the polite close rides the session's exit tick");
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert!(sessions.is_empty());
+        assert_eq!(
+            sessions.windows_open_count(),
+            0,
+            "zero sessions ⇒ zero window state (structural, both maps)"
+        );
+        assert_eq!(rig.stats().window_close_sent, 1);
+    }
+
+    #[test]
+    fn a_crossing_overlap_holds_both_chains_and_derives_the_child_window_on_the_parent() {
+        // §2.7's posture in Slice-A form: through a hand-off overlap the session holds subs on
+        // BOTH ends (the existing dual-sub pattern), so the derivation opens windows on BOTH
+        // chains — and the moment the gateway's own routing state names a sub'd PARENT of a
+        // sub'd realm (System(7) ⊃ Planet(7) in the login registry), the `Child(c)` window on
+        // the parent's shard derives too. Nothing was looked up anew: the two subs and the login
+        // registry are exactly what the gateway already held.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login(); // Occupants(System(7)) on SHARD == WindowId(1)
+        let ready = rig.tick(vec![wire(
+            DEST,
+            MsgClass::Control,
+            &ShardToGateway::SubscriptionReady {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::PlanetCentered { planet_seed: 7 },
+                realm_fence: Fence(2),
+            },
+        )]);
+        // Shard-bound sends only (same discipline as the login test above).
+        let opens: Vec<(NodeId, GatewayToShard)> = ready
+            .iter()
+            .filter(|(to, _, _)| (*to == SHARD) | (*to == DEST))
+            .map(|(to, _, b)| {
+                (
+                    *to,
+                    postcard::from_bytes::<GatewayToShard>(b).expect(
+                        "every shard-bound byte this tick decodes under the shard contract",
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(
+            opens,
+            vec![
+                (
+                    DEST,
+                    GatewayToShard::WindowOpen {
+                        window: WindowId(2),
+                        scope: WindowScope::Occupants,
+                    }
+                ),
+                (
+                    SHARD,
+                    GatewayToShard::WindowOpen {
+                        window: WindowId(3),
+                        scope: WindowScope::Child(RealmId::Planet(7)),
+                    }
+                ),
+            ],
+            "the dest's own-level window AND the hop window on the parent, in derivation order"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().windows_open_count(),
+            3,
+            "both chains held through the overlap"
+        );
     }
 
     #[test]
@@ -7116,6 +8242,8 @@ mod tests {
                 transfer: None,
                 subs: BTreeMap::new(),
                 delivered: BTreeMap::new(),
+                lineage: Vec::new(),
+                shadow: window::ShadowScene::default(),
                 hot: Arc::new(SessionHot {
                     route: ArcSwap::from_pointee(RouteSnapshot {
                         authority: SHARD,
@@ -7199,6 +8327,8 @@ mod tests {
                 transfer: None,
                 subs: BTreeMap::new(),
                 delivered: BTreeMap::new(),
+                lineage: Vec::new(),
+                shadow: window::ShadowScene::default(),
                 hot: Arc::new(SessionHot {
                     route: ArcSwap::from_pointee(RouteSnapshot {
                         authority: SHARD,
@@ -7451,6 +8581,8 @@ mod tests {
                 transfer: None,
                 subs: BTreeMap::new(),
                 delivered: BTreeMap::new(),
+                lineage: Vec::new(),
+                shadow: window::ShadowScene::default(),
                 hot: Arc::new(SessionHot {
                     route: ArcSwap::from_pointee(RouteSnapshot {
                         authority: SHARD,
@@ -7648,7 +8780,14 @@ mod tests {
         let mut outbox = OutboundBox::default();
         let authored = realm_frame_payload(RealmId::Planet(7));
         let envelope = postcard::to_allocvec(&realm_frame_msg(RealmId::Planet(7))).expect("encode");
-        on_shard_realm_frame(SHARD, &envelope, &mut sessions, &mut stats, &mut outbox);
+        on_shard_realm_frame(
+            SHARD,
+            &envelope,
+            &config(),
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
         let got: Vec<&(NodeId, MsgClass, vd_sim::io::Bytes, vd_sim::io::Durability)> = outbox
             .0
             .iter()
@@ -7683,7 +8822,14 @@ mod tests {
             .insert(SessionId(0xC0DE));
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
-        on_shard_realm_frame(SHARD, &envelope, &mut sessions, &mut stats, &mut outbox);
+        on_shard_realm_frame(
+            SHARD,
+            &envelope,
+            &config(),
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
         assert_eq!(stats.frame_sub_desync, 1);
         assert!(outbox.0.is_empty());
 
@@ -7692,7 +8838,14 @@ mod tests {
         sessions.by_session.get_mut(&sid).expect("present").phase = SessionPhase::SelfFenced;
         let mut stats = GatewayStats::default();
         let mut outbox = OutboundBox::default();
-        on_shard_realm_frame(SHARD, &envelope, &mut sessions, &mut stats, &mut outbox);
+        on_shard_realm_frame(
+            SHARD,
+            &envelope,
+            &config(),
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
         assert!(
             outbox.0.is_empty(),
             "a self-fenced session gets no realm frame"
@@ -8556,6 +9709,8 @@ mod tests {
             transfer: None,
             subs: BTreeMap::new(),
             delivered: BTreeMap::new(),
+            lineage: Vec::new(),
+            shadow: window::ShadowScene::default(),
             hot: Arc::new(SessionHot {
                 route: ArcSwap::from_pointee(RouteSnapshot {
                     authority: SHARD,
@@ -11947,5 +13102,1023 @@ mod tests {
             &ClientControlMsg::Bye,
         )]);
         assert_eq!(roster(&rig), BTreeMap::new());
+    }
+
+    // ===== THE WINDOW LANE, Slice B: the SHADOW COMPOSER (docs/design/window_lane.md §2.6/§4) =====
+
+    /// One old-lane realm datagram as the leaf shard would forward it (the cascade's output):
+    /// rows in the LEAF's frame, each stamped at its own authoring tick.
+    fn old_lane_frame(rows: Vec<RealmSnap>, at: u64) -> ShardToGateway {
+        ShardToGateway::RealmFrame {
+            realm_fence: Fence(1),
+            source_tick: TickId(at),
+            realm_snapshot_bytes: postcard::to_allocvec(&RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id: at,
+                source_tick: TickId(at),
+                universe_tick: UniverseTick(at),
+                realms: rows,
+            })
+            .expect("encode"),
+        }
+    }
+
+    fn snap(realm: RealmId, head: FrameRef, tail: FrameRef, x: f64, at: u64) -> RealmSnap {
+        RealmSnap {
+            realm,
+            frame: head,
+            pose: vd_core::pose::StampedPose::at_rest(
+                tail,
+                DVec3::new(x, 0.0, 0.0),
+                UniverseTick(at),
+            ),
+        }
+    }
+
+    const SYS7: FrameRef = FrameRef::SystemSpace { system_seed: 7 };
+    const PLANET7: FrameRef = FrameRef::PlanetCentered { planet_seed: 7 };
+
+    /// The parent's Child-scope frame at `at`: System(7) authors Planet(7) at `leaf_x` (the hop
+    /// pre-inverted at the author: the parent's frame sits at −leaf_x in the planet's) and
+    /// Planet(9) at `sibling_x` — plus any extra rows the caller grafts.
+    fn parent_frame(
+        window: WindowId,
+        at: u64,
+        leaf_x: f64,
+        mut extra: Vec<RealmSnap>,
+    ) -> ShardToGateway {
+        let mut rows = vec![
+            snap(RealmId::Planet(7), PLANET7, SYS7, leaf_x, at),
+            snap(
+                RealmId::Planet(9),
+                FrameRef::PlanetCentered { planet_seed: 9 },
+                SYS7,
+                leaf_x + 30.0,
+                at,
+            ),
+        ];
+        rows.append(&mut extra);
+        ShardToGateway::WindowFrame {
+            realm_fence: Fence(1),
+            window,
+            at: UniverseTick(at),
+            hop: Some(Box::new(vd_wire::session_flow::HopRow {
+                child: RealmId::Planet(7),
+                inv: vd_core::frame::FramePlacement::moving(
+                    DVec3::new(-leaf_x, 0.0, 0.0),
+                    DVec3::ZERO,
+                ),
+            })),
+            rows,
+        }
+    }
+
+    fn leaf_frame(window: WindowId, at: u64) -> ShardToGateway {
+        ShardToGateway::WindowFrame {
+            realm_fence: Fence(1),
+            window,
+            at: UniverseTick(at),
+            hop: None,
+            rows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_shadow_composer_folds_the_crossing_chain_and_names_every_parity_class() {
+        // THE UNIT-TIER TWIN of the process parity gate (§4 Slice B): a real login, a real
+        // crossing (System(7) on SHARD → Planet(7) on DEST), then the two window statements +
+        // the old-lane cascade feed through the REAL ingest + composer + comparator — every
+        // parity class driven BY NAME, the dedup agreement measured exactly zero, the epoch
+        // mechanics observed, and the teardown leaving zero composer state.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login(); // lineage [System(7)]; Occupants window id 1 on SHARD
+        let _ = cross_to(&mut rig, sid, XFER, DEST);
+        let _ = rig.tick(vec![wire(
+            DEST,
+            MsgClass::Control,
+            &ShardToGateway::SubscriptionReady {
+                session: sid,
+                entity: EntityId(77),
+                frame: PLANET7,
+                realm_fence: Fence(2),
+            },
+        )]);
+        {
+            let sessions = rig.world.resource::<GatewaySessions>();
+            let session = &sessions.by_session[&sid];
+            assert_eq!(
+                session.lineage,
+                vec![RealmId::System(7), RealmId::Planet(7)],
+                "the crossing APPENDED below the previous leaf (§2.6.2)"
+            );
+            assert_eq!(
+                sessions.windows_open_count(),
+                3,
+                "own-level both ends + the lineage-derived Child window on the parent"
+            );
+        }
+        // Window ids from the login + the ready tick: 1 = Occupants(System 7)@SHARD,
+        // 2 = Occupants(Planet 7)@DEST, 3 = Child(Planet 7)@SHARD.
+        let (leaf_w, parent_w) = (WindowId(2), WindowId(3));
+
+        // ---- Tick A (T=1000): the leaf speaks, the parent's hop is NOT confirmed yet — an
+        // old-lane row above the leaf classifies UNWINDOWED ANCESTOR (explained, counted).
+        let _ = rig.tick(vec![
+            wire(DEST, MsgClass::RealmSnapshot, &leaf_frame(leaf_w, 1000)),
+            wire(
+                DEST,
+                MsgClass::RealmSnapshot,
+                &old_lane_frame(
+                    vec![snap(RealmId::Area(2), PLANET7, PLANET7, 5.0, 1000)],
+                    1000,
+                ),
+            ),
+        ]);
+        assert_eq!(rig.stats().parity_unwindowed_ancestor, 1);
+        assert_eq!(
+            rig.stats().window_folds,
+            1,
+            "the one-level chain folded at 1000"
+        );
+
+        // ---- Tick B (T=1001): the FULL chain folds at one tick; the old rows the cascade
+        // ships are reproduced BIT-IDENTICALLY; the origin's own row is filtered (and measured
+        // against zero — the §2.12 agreement, exact).
+        let _ = rig.tick(vec![
+            wire(DEST, MsgClass::RealmSnapshot, &leaf_frame(leaf_w, 1001)),
+            wire(
+                SHARD,
+                MsgClass::RealmSnapshot,
+                &parent_frame(parent_w, 1001, 30.0, vec![]),
+            ),
+            wire(
+                DEST,
+                MsgClass::RealmSnapshot,
+                &old_lane_frame(
+                    vec![
+                        // The cascade-restated sibling: (60 − 30) in the planet frame — the
+                        // value the composed fold must reproduce to the bit.
+                        snap(
+                            RealmId::Planet(9),
+                            FrameRef::PlanetCentered { planet_seed: 9 },
+                            PLANET7,
+                            30.0,
+                            1001,
+                        ),
+                        // A self-row the old lane's SL1 filter should have stripped: counted
+                        // apart (the filter-regression signal), never compared.
+                        snap(RealmId::Planet(7), PLANET7, PLANET7, 0.0, 1001),
+                    ],
+                    1001,
+                ),
+            ),
+        ]);
+        assert_eq!(
+            rig.stats().parity_rows_matched,
+            1,
+            "bit-identical reproduction"
+        );
+        assert_eq!(rig.stats().parity_origin_rows, 1);
+        assert_eq!(
+            rig.stats().window_full_chain_folds,
+            1,
+            "a ≥2-level fold at ONE tick"
+        );
+        assert_eq!(rig.stats().window_dedup_disagree, 0);
+        assert_eq!(
+            rig.stats().window_dedup_max_dev_nm,
+            0,
+            "§2.12: exact today, measured"
+        );
+        assert_eq!(rig.stats().window_instant_mismatch, 0);
+
+        // ---- Tick C (T=1002): every remaining class, by name. The parent's roster grows an
+        // ALIEN-framed row (dropped from the fold but rostered ⇒ its old row is MISSING
+        // COMPOSED); the old feed carries a wrong-position row (POSE MISMATCH, deviation
+        // measured), a realm no window states (SIBLING INTERIOR EXCLUDED — the recorded
+        // Q2-carrier gap), a stamp no fold ever covered (NO FOLD AT TICK), an off-origin-frame
+        // row (OFF FRAME), and one undecodable body (counted apart). A frame stamped a whole
+        // ring span behind the head is REFUSED (level_refused).
+        let alien = snap(
+            RealmId::Planet(11),
+            FrameRef::PlanetCentered { planet_seed: 11 },
+            FrameRef::PlanetCentered { planet_seed: 11 }, // tail ≠ the author's frame: alien
+            9.0,
+            1002,
+        );
+        let _ = rig.tick(vec![
+            wire(DEST, MsgClass::RealmSnapshot, &leaf_frame(leaf_w, 1002)),
+            wire(
+                SHARD,
+                MsgClass::RealmSnapshot,
+                &parent_frame(parent_w, 1002, 31.0, vec![alien]),
+            ),
+            wire(
+                DEST,
+                MsgClass::RealmSnapshot,
+                &old_lane_frame(
+                    vec![
+                        snap(
+                            RealmId::Planet(9),
+                            FrameRef::PlanetCentered { planet_seed: 9 },
+                            PLANET7,
+                            29.0, // composed says 30.0 — one metre off, measured in nm
+                            1002,
+                        ),
+                        snap(
+                            RealmId::Planet(11),
+                            FrameRef::PlanetCentered { planet_seed: 11 },
+                            PLANET7,
+                            9.0,
+                            1002,
+                        ),
+                        snap(
+                            RealmId::Area(1),
+                            FrameRef::PlanetCentered { planet_seed: 7 },
+                            PLANET7,
+                            1.0,
+                            1002,
+                        ),
+                        snap(
+                            RealmId::Planet(9),
+                            FrameRef::PlanetCentered { planet_seed: 9 },
+                            PLANET7,
+                            3.0,
+                            3,
+                        ),
+                        snap(
+                            RealmId::Planet(9),
+                            FrameRef::PlanetCentered { planet_seed: 9 },
+                            SYS7,
+                            61.0,
+                            1002,
+                        ),
+                    ],
+                    1002,
+                ),
+            ),
+            wire(
+                DEST,
+                MsgClass::RealmSnapshot,
+                &ShardToGateway::RealmFrame {
+                    realm_fence: Fence(1),
+                    source_tick: TickId(1002),
+                    realm_snapshot_bytes: vec![0xFF, 0xFF],
+                },
+            ),
+            wire(SHARD, MsgClass::RealmSnapshot, &leaf_frame(parent_w, 900)),
+        ]);
+        let stats = rig.stats();
+        assert_eq!(stats.parity_pose_mismatch, 1, "UNEXPLAINED class drivable");
+        assert_eq!(
+            stats.parity_max_pos_dev_nm, 1_000_000_000,
+            "1 m measured in nm"
+        );
+        assert_eq!(
+            stats.parity_missing_composed, 1,
+            "rostered yet absent from the fold"
+        );
+        assert_eq!(
+            stats.window_alien_rows, 1,
+            "the alien row was dropped, counted"
+        );
+        assert_eq!(
+            stats.parity_sibling_interior_excluded, 1,
+            "the NAMED exclusion: stated by no window, chain covers the lineage (D-WINDOW-1)"
+        );
+        assert_eq!(stats.parity_no_fold_at_tick, 1);
+        assert_eq!(stats.parity_offframe_rows, 1);
+        assert_eq!(stats.parity_undecodable, 1);
+        assert_eq!(stats.window_level_refused, 1, "a span-stale level refused");
+        assert_eq!(stats.window_full_chain_folds, 2);
+        assert_eq!(stats.window_fold_divergence, 0);
+        assert_eq!(stats.window_t_monotone_stalled, 0);
+        assert_eq!(stats.window_chain_cycle, 0);
+        // The origin marker's epoch walked its three chain identities: [System(7)] at login,
+        // [Planet(7)] the tick the origin flipped, [Planet(7), System(7)] when the hop
+        // confirmed (§2.7's epoch mechanics — the client swap is Slice C1).
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().by_session[&sid]
+                .shadow
+                .origin_epoch,
+            3
+        );
+
+        // ---- A quiet tick: the scene is already AT the common tick with an unchanged chain —
+        // nothing re-folds (the §2.14 cost discipline), and an old-lane row stamped BEYOND every
+        // fold WAITS in the comparator queue instead of mis-classifying.
+        let folds_before = rig.stats().window_folds;
+        let _ = rig.tick(vec![wire(
+            DEST,
+            MsgClass::RealmSnapshot,
+            &old_lane_frame(
+                vec![snap(
+                    RealmId::Planet(9),
+                    FrameRef::PlanetCentered { planet_seed: 9 },
+                    PLANET7,
+                    1.0,
+                    5000,
+                )],
+                5000,
+            ),
+        )]);
+        assert_eq!(
+            rig.stats().window_folds,
+            folds_before,
+            "nothing new to fold"
+        );
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().by_session[&sid]
+                .shadow
+                .pending
+                .len(),
+            1,
+            "a row ahead of every fold WAITS (bounded by the derived cap), never guessed"
+        );
+
+        // ---- Teardown: zero sessions ⇒ zero composer state, structurally (§2.6.1 guard 4).
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert!(sessions.is_empty());
+        assert_eq!(
+            sessions.windows_open_count(),
+            0,
+            "every ingest died with its window"
+        );
+        assert!(
+            sessions.realm_heads.is_empty(),
+            "the realm→node map pruned to the empty named set"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_lineage_ancestor_resolves_via_the_directory_head_poll() {
+        // §2.6.2's ancestor leg end-to-end: a lineage parent the session never subscribed to is
+        // resolved through the EXISTING `HeadRead{Realm}`/`Head` pair on the window keep-alive
+        // beat; the answer opens the Child window on the named node; and that node's frames are
+        // node-class dispatched as shard frames PURELY because the window names it (the window
+        // arm of `is_routable_shard`) — no session role, no config entry, no presence.
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        // The login descent of a DYNAMIC session would have recorded the full root→leaf chain;
+        // the static rig's descent machinery is exercised elsewhere — grow the recorded lineage
+        // directly (session state, exactly what the derivation reads).
+        rig.world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("session present")
+            .lineage = vec![RealmId::System(0), RealmId::System(7)];
+        // No node is known for System(0): the Child window CANNOT derive yet (fail-closed).
+        let _ = rig.tick(vec![]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().windows_open_count(),
+            1,
+            "no guessed window for an unresolved ancestor"
+        );
+        // The keep-alive beat carries the ancestor head poll (the EXISTING directory pair).
+        set_tick(&mut rig, 25);
+        let beat = rig.tick(vec![]);
+        let head_reads = beat
+            .iter()
+            .filter(|(to, class, b)| {
+                (*to == ORCH)
+                    & (*class == MsgClass::Saga)
+                    & (postcard::from_bytes::<InterShardFlow>(b)
+                        == Ok(InterShardFlow::Directory(DirectoryOp::HeadRead {
+                            key: DirectoryKey::Realm(RealmId::System(0)),
+                        })))
+            })
+            .count();
+        assert_eq!(
+            head_reads, 1,
+            "ONE deduped poll per lineage parent per beat"
+        );
+        assert_eq!(rig.stats().window_head_reads_sent, 1);
+        // Step off the beat, so the reply tick below carries the OPEN alone (a beat tick would
+        // add the keep-alive re-assert of the same window — a second, idempotent WindowOpen).
+        set_tick(&mut rig, 26);
+        // The head answers: System(0) is held by a spawn-minted node in no roster anywhere.
+        let ancestor = NodeId(99);
+        let opened = rig.tick(vec![wire(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(DirectoryReply::Head {
+                key: DirectoryKey::Realm(RealmId::System(0)),
+                record: Some(OwnerRecord {
+                    authority: AuthorityRef::Shard(ancestor),
+                    fence: Fence(3),
+                    lease_expires: UniverseTick(1_000),
+                    in_transfer: None,
+                }),
+            }),
+        )]);
+        let opens_to_ancestor: Vec<GatewayToShard> = opened
+            .iter()
+            .filter(|(to, _, _)| *to == ancestor)
+            .map(|(_, _, b)| postcard::from_bytes(b).expect("shard-bound bytes decode"))
+            .collect();
+        assert_eq!(
+            opens_to_ancestor,
+            vec![GatewayToShard::WindowOpen {
+                window: WindowId(2),
+                scope: WindowScope::Child(RealmId::System(7)),
+            }],
+            "the resolved head opened the lineage hop window on the ancestor's node"
+        );
+        // The ancestor's attested statement is HEARD (the window arm of the dispatch) and
+        // ingested — a node reachable through no session role at all.
+        let frame = ShardToGateway::WindowFrame {
+            realm_fence: Fence(3),
+            window: WindowId(2),
+            at: UniverseTick(5),
+            hop: Some(Box::new(vd_wire::session_flow::HopRow {
+                child: RealmId::System(7),
+                inv: vd_core::frame::FramePlacement::identity(),
+            })),
+            rows: vec![snap(
+                RealmId::System(7),
+                SYS7,
+                FrameRef::SystemSpace { system_seed: 0 },
+                0.0,
+                5,
+            )],
+        };
+        let _ = rig.tick(vec![wire(ancestor, MsgClass::RealmSnapshot, &frame)]);
+        assert_eq!(rig.stats().window_rows_ingested, 1);
+        assert_eq!(
+            rig.stats().refused_unknown_sender,
+            0,
+            "heard BECAUSE of the window"
+        );
+        // Teardown: the session's exit closes BOTH windows and empties the realm→node map.
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert_eq!(sessions.windows_open_count(), 0);
+        assert!(sessions.realm_heads.is_empty());
+        assert_eq!(rig.stats().window_close_sent, 2);
+    }
+
+    #[test]
+    fn an_attach_never_overwrites_a_lineage_the_descent_already_recorded() {
+        // The dynamic-login posture at the attach promote: the grant already recorded the
+        // descent's full lineage, and the attach frame must NOT overwrite it (the static
+        // seed runs only on an EMPTY lineage).
+        let mut rig = Rig::new();
+        let _ = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        let sid = session_of(&rig, CLIENT);
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        rig.world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("session present")
+            .lineage = vec![RealmId::System(0), RealmId::System(7)];
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::SystemSpace { system_seed: 7 },
+                realm_fence: Fence(1),
+            },
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().by_session[&sid].lineage,
+            vec![RealmId::System(0), RealmId::System(7)],
+            "the recorded descent survives the attach"
+        );
+        // And the OTHER unseedable shape: an attach whose frame names no realm (galaxy space)
+        // seeds nothing — an empty lineage stays empty, fail-closed, never guessed.
+        let mut rig = Rig::new();
+        let _ = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+        let sid = session_of(&rig, CLIENT);
+        let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(sid))]);
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::SessionAttached {
+                session: sid,
+                entity: EntityId(77),
+                frame: FrameRef::GalaxySpace,
+                realm_fence: Fence(1),
+            },
+        )]);
+        assert_eq!(
+            rig.world.resource::<GatewaySessions>().by_session[&sid].lineage,
+            Vec::<RealmId>::new(),
+            "a realm-less attach frame seeds no lineage"
+        );
+    }
+
+    #[test]
+    fn the_lineage_rule_truncates_on_reentry_and_appends_on_descent() {
+        // §2.6.2's crossing rule, both arms: an inward cross APPENDS below the previous leaf;
+        // an outward cross TRUNCATES back to the re-entered realm KEEPING its ancestors.
+        let mut lineage = vec![RealmId::System(0), RealmId::System(7)];
+        lineage_apply(&mut lineage, RealmId::Planet(7));
+        assert_eq!(
+            lineage,
+            vec![RealmId::System(0), RealmId::System(7), RealmId::Planet(7)]
+        );
+        lineage_apply(&mut lineage, RealmId::System(7));
+        assert_eq!(
+            lineage,
+            vec![RealmId::System(0), RealmId::System(7)],
+            "truncated to the re-entered realm — ancestors KEPT"
+        );
+        // An empty lineage (a static session's first frame): the append arm seeds it.
+        let mut fresh = Vec::new();
+        lineage_apply(&mut fresh, RealmId::System(7));
+        assert_eq!(fresh, vec![RealmId::System(7)]);
+        // And the descent recorder: a coord's chain lowers root→leaf.
+        use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+        let coord = RealmCoord::from_path(RealmPath::from_levels(vec![
+            RealmLevel::new(RealmKindTag::System, 7),
+            RealmLevel::new(RealmKindTag::Planet, 3),
+        ]))
+        .expect("a two-level path");
+        assert_eq!(
+            coord_lineage(&coord),
+            vec![RealmId::System(7), RealmId::Planet(3)]
+        );
+        let root = RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(
+            RealmKindTag::System,
+            7,
+        )]))
+        .expect("a root path");
+        assert_eq!(coord_lineage(&root), vec![RealmId::System(7)]);
+    }
+
+    #[test]
+    fn the_composer_withholds_sessions_with_no_standing_realm_or_window() {
+        // §2.6.6's "unresolved standing" row, all three shapes, driven over a hand-built table
+        // through the REAL pass (the login race is held, counted, never guessed):
+        // (a) an Active session with no cold sub on its routing target;
+        let cfg = config();
+        let (mut sessions, sid, _) = one_active_session();
+        let mut stats = GatewayStats::default();
+        shadow_compose_pass(&cfg, &mut sessions, &mut stats);
+        assert_eq!(stats.window_unresolved_standing, 1);
+        assert_eq!(stats.window_chains_held, 0);
+        // (b) a sub whose frame names no realm (galaxy space names none);
+        sessions
+            .by_session
+            .get_mut(&sid)
+            .expect("present")
+            .subs
+            .insert(
+                SHARD,
+                SubRecord {
+                    sub: SubId(0),
+                    frame: FrameRef::GalaxySpace,
+                    accepted: Fence(1),
+                    state: SubState::Active,
+                },
+            );
+        shadow_compose_pass(&cfg, &mut sessions, &mut stats);
+        assert_eq!(stats.window_unresolved_standing, 2);
+        // (c) a named realm with NO derivable own-level window (the pass ran before any window
+        // existed — the pure-fn shape the schedule's driver ordering normally prevents).
+        sessions
+            .by_session
+            .get_mut(&sid)
+            .expect("present")
+            .subs
+            .get_mut(&SHARD)
+            .expect("present")
+            .frame = SYS7;
+        shadow_compose_pass(&cfg, &mut sessions, &mut stats);
+        assert_eq!(stats.window_unresolved_standing, 3);
+        assert_eq!(
+            stats.window_folds, 0,
+            "nothing was ever guessed into a fold"
+        );
+    }
+
+    /// The load gate's typed extractor: a `WindowFrame`'s (id, level), `None` for anything else
+    /// (both arms driven below — HR5).
+    fn window_level_of(msg: ShardToGateway) -> Option<(WindowId, window::WindowLevel)> {
+        match msg {
+            ShardToGateway::WindowFrame {
+                window,
+                at,
+                hop,
+                rows,
+                ..
+            } => Some((
+                window,
+                window::WindowLevel {
+                    at,
+                    hop: hop.map(|b| *b),
+                    rows,
+                },
+            )),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_load_gates_extractor_and_the_divergence_verdict_cover_both_arms() {
+        // The extractor: a window frame yields its level; anything else yields None.
+        let level = window_level_of(ShardToGateway::WindowFrame {
+            realm_fence: Fence(1),
+            window: WindowId(3),
+            at: UniverseTick(9),
+            hop: None,
+            rows: Vec::new(),
+        });
+        assert_eq!(
+            level,
+            Some((
+                WindowId(3),
+                window::WindowLevel {
+                    at: UniverseTick(9),
+                    hop: None,
+                    rows: Vec::new(),
+                }
+            ))
+        );
+        assert_eq!(
+            window_level_of(ShardToGateway::SessionDetached {
+                session: SessionId(1)
+            }),
+            None
+        );
+        // The §2.14 divergence verdict: equal folds verify silent; ANY bit of difference counts.
+        let same = window::Composed::default();
+        assert_eq!(fold_divergence(&same, &same.clone()), 0);
+        let differs = window::Composed {
+            instant_refused: 1,
+            ..window::Composed::default()
+        };
+        assert_eq!(fold_divergence(&same, &differs), 1);
+    }
+
+    /// G-COMPOSE-LOAD (window_lane.md §2.6.7; §4.5 Topic 3 — the owner-adopted refinement: gate
+    /// the p99, never the mean): BOTH engine sides under a DERIVED load, per tick —
+    /// ingest-DECODE (postcard `WindowFrame` levels at MTU-full row counts, one per live window)
+    /// AND compose+fan (the shared fold per origin + every session's scene roll). The load
+    /// shape is derived, never invented: sessions = the density fixture's N (128 — the
+    /// hundreds-in-one-location correctness bound already in gate), chain depth = the design's
+    /// stated observer depth (§2.1: 4–6 ⇒ 6), rows per level = what fills one
+    /// CONSERVATIVE_DATAGRAM_BUDGET datagram (the MTU partitioner's own bound — the shape the
+    /// wire actually carries), origins = the crossing dual-sub bound (4 distinct chains).
+    /// Budget: p99 per tick < ONE realm-lane tick (§2.2: 20 Hz ⇒ 50 ms). The timing assert is
+    /// release-only (the SPIKE-2a/3a pattern — a debug/coverage tail is meaningless); the debug
+    /// run still exercises every body.
+    #[test]
+    // The seam ban targets PRODUCTION wall-clock reads; a latency gate measuring elapsed time is
+    // exactly what Instant is for (the SPIKE-2a exemption, same reasoning).
+    #[allow(clippy::disallowed_methods)]
+    fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
+        const SESSIONS: usize = 128; // the density fixture's N
+        const DEPTH: usize = 6; // §2.1 chain depth, deep end
+        const ORIGINS: u64 = 4; // the dual-sub crossing bound
+        const TICKS: u64 = 400;
+        let realm_lane_hz = 20u32; // §2.2: the realm-lane tick the budget derives from
+        let cfg = config();
+
+        // Rows per level: fill one conservative datagram, exactly as the partitioner bounds it.
+        let candidate: Vec<RealmSnap> = (0..512)
+            .map(|i| {
+                snap(
+                    RealmId::Planet(1000 + i),
+                    FrameRef::PlanetCentered {
+                        planet_seed: 1000 + i,
+                    },
+                    SYS7,
+                    i as f64,
+                    0,
+                )
+            })
+            .collect();
+        let rows_per_level = vd_wire::channels::partition_realms(
+            &candidate,
+            vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET,
+        )[0]
+        .len();
+
+        // The window fan: ORIGINS chains × DEPTH levels. Origin o's chain authors are
+        // System(10o+k); level 0 is the origin's own realm System(10o).
+        let mut sessions = GatewaySessions::default();
+        let mut next_window = 0u64;
+        // The fixture's authors are ALL systems; the seed rides beside the id from construction
+        // (no realm-kind extraction anywhere downstream).
+        let mut window_rows: Vec<(WindowId, u64, WindowScope)> = Vec::new();
+        for o in 0..ORIGINS {
+            for k in 0..DEPTH as u64 {
+                next_window += 1;
+                let seed = 10 * o + k;
+                let scope = if k == 0 {
+                    WindowScope::Occupants
+                } else {
+                    WindowScope::Child(RealmId::System(seed - 1))
+                };
+                sessions.windows.insert(
+                    WindowId(next_window),
+                    GatewayWindow {
+                        shard: SHARD,
+                        scope,
+                        author_realm: RealmId::System(seed),
+                        ingest: window::WindowIngest::default(),
+                    },
+                );
+                window_rows.push((WindowId(next_window), seed, scope));
+            }
+        }
+        sessions.next_window = next_window;
+        // The sessions: N Active dots spread over the origins, each standing in its origin.
+        let base = one_active_session().0;
+        let template = &base.by_session[&SessionId(0xA11A)];
+        for i in 0..SESSIONS {
+            let o = (i as u64) % ORIGINS;
+            let sid = SessionId(0xB000 + i as u128);
+            let mut session = Session {
+                client: CLIENT,
+                account: AccountId(i as u128),
+                fence: Fence(1),
+                phase: SessionPhase::Active {
+                    entity: EntityId(i as u128),
+                },
+                next_sub: 1,
+                home_shard: None,
+                home_rid: None,
+                render_pin: RealmId::System(10 * o),
+                spawn: None,
+                bootstrap_deadline: None,
+                confirmed_at: TickId(0),
+                negotiated_minor: 1,
+                transfer: None,
+                subs: BTreeMap::new(),
+                delivered: BTreeMap::new(),
+                lineage: (0..DEPTH as u64)
+                    .rev()
+                    .map(|k| RealmId::System(10 * o + k))
+                    .collect(),
+                shadow: window::ShadowScene::default(),
+                hot: Arc::clone(&template.hot),
+            };
+            session.subs.insert(
+                SHARD,
+                SubRecord {
+                    sub: SubId(0),
+                    frame: FrameRef::SystemSpace {
+                        system_seed: 10 * o,
+                    },
+                    accepted: Fence(1),
+                    state: SubState::Active,
+                },
+            );
+            sessions.by_session.insert(sid, session);
+        }
+
+        // Pre-encode one tick's wire bytes per window per tick offset (the decode side must
+        // decode FRESH bytes per tick — that is the measured cost).
+        let mut stats = GatewayStats::default();
+        let mut samples: Vec<std::time::Duration> = Vec::with_capacity(TICKS as usize);
+        for t in 1..=TICKS {
+            // Author one tick's statements (outside the measured section: the SHARD does this).
+            let bytes_per_window: Vec<(WindowId, Vec<u8>)> = window_rows
+                .iter()
+                .map(|(id, seed, scope)| {
+                    let author_frame = FrameRef::SystemSpace { system_seed: *seed };
+                    let rows: Vec<RealmSnap> = (0..rows_per_level)
+                        .map(|i| {
+                            snap(
+                                RealmId::Planet(5000 + i as u64),
+                                FrameRef::PlanetCentered {
+                                    planet_seed: 5000 + i as u64,
+                                },
+                                author_frame,
+                                (i as f64) + (t as f64),
+                                t,
+                            )
+                        })
+                        .collect();
+                    let hop = match scope {
+                        WindowScope::Occupants => None,
+                        WindowScope::Child(child) => {
+                            Some(Box::new(vd_wire::session_flow::HopRow {
+                                child: *child,
+                                inv: vd_core::frame::FramePlacement::moving(
+                                    DVec3::new(-(t as f64), 0.0, 0.0),
+                                    DVec3::ZERO,
+                                ),
+                            }))
+                        }
+                    };
+                    let msg = ShardToGateway::WindowFrame {
+                        realm_fence: Fence(1),
+                        window: *id,
+                        at: UniverseTick(t),
+                        hop,
+                        rows,
+                    };
+                    (*id, postcard::to_allocvec(&msg).expect("encode"))
+                })
+                .collect();
+            // ---- the measured section: decode + ingest every window's level, then the pass.
+            let started = std::time::Instant::now();
+            for (_, bytes) in &bytes_per_window {
+                let decoded: ShardToGateway =
+                    postcard::from_bytes(bytes).expect("the load gate authored these bytes");
+                let (wid, level) =
+                    window_level_of(decoded).expect("the load gate authored window frames");
+                on_window_row(
+                    SHARD,
+                    wid,
+                    WindowRow::Level(level),
+                    &cfg,
+                    &mut sessions,
+                    &mut stats,
+                );
+            }
+            shadow_compose_pass(&cfg, &mut sessions, &mut stats);
+            samples.push(started.elapsed());
+        }
+        assert_eq!(
+            stats.window_folds,
+            TICKS * ORIGINS,
+            "one shared fold per (origin, tick) — the §2.14 sharing under load"
+        );
+        assert_eq!(
+            stats.window_fold_hits as usize,
+            (SESSIONS - ORIGINS as usize) * TICKS as usize
+        );
+        assert_eq!(stats.window_fold_divergence, 0);
+        assert_eq!(stats.window_instant_mismatch, 0);
+        // Bounded state under load: every ring within the derived span.
+        for w in sessions.windows.values() {
+            assert!(w.ingest.newest().is_some());
+        }
+        let p50 = vd_harness::latency::percentile_unstable(samples.clone(), 50);
+        let p99 = vd_harness::latency::percentile_unstable(samples, 99);
+        let budget = std::time::Duration::from_secs_f64(1.0 / f64::from(realm_lane_hz));
+        eprintln!(
+            "[g-compose-load] sessions={SESSIONS} origins={ORIGINS} depth={DEPTH} \
+             rows/level={rows_per_level} windows={} ticks={TICKS} | per-tick ingest+decode+fold+fan \
+             p50={p50:?} p99={p99:?} budget(one 20 Hz tick)={budget:?}",
+            window_rows.len(),
+        );
+        // The hard p99 gate is release-only (SPIKE-2a/3a pattern) — debug/coverage builds run
+        // the same bodies but their tails are instrumentation, not the engine.
+        #[cfg(not(debug_assertions))]
+        assert!(
+            p99 < budget,
+            "G-COMPOSE-LOAD failed: p99 {p99:?} ≥ one realm-lane tick {budget:?}"
+        );
+        #[cfg(debug_assertions)]
+        let _ = budget;
+    }
+
+    /// THE SHADOW SOAK (window_lane.md §4.5 Topic 5 — "a soak added to slice B's exit"): the
+    /// existing soak recipe run on the SHADOW configuration (`just rlm-soak`, second line). A
+    /// fixed-seed xorshift drives ~30k gateway ticks of session churn + lossy/reordered/forged
+    /// window traffic + old-lane rows through the REAL rig, asserting EVERY 128 ticks that
+    /// memory is BOUNDED (rings ≤ the derived span, pending ≤ the derived cap, realm-heads ≤
+    /// the named set, windows ≤ the derivable set) and counters MONOTONE — and at the end that
+    /// the last session's exit leaves ZERO composer state. Asserted, never eyeballed.
+    /// Release-gated like `rlm_soak` (inert in debug; the same paths run in the gate's unit
+    /// tests above).
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn window_shadow_soak_state_stays_bounded_and_zeroes_at_the_end() {
+        let mut rig = Rig::new();
+        let (sid, _) = rig.login();
+        let tuning = window_tuning(&config());
+        let mut state: u64 = 0x5150_5150_5150_5150;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut prev = GatewayStats::default();
+        for step in 0u64..30_000 {
+            let r = next();
+            let at = 1_000 + step / 2 + (r % 5); // mostly advancing, sometimes reordered stamps
+            let mut inbox: Vec<Inbound> = Vec::new();
+            match r % 7 {
+                0 | 1 => inbox.push(wire(
+                    SHARD,
+                    MsgClass::RealmSnapshot,
+                    &leaf_frame(WindowId(1), at),
+                )),
+                2 => inbox.push(wire(
+                    SHARD,
+                    MsgClass::RealmSnapshot,
+                    &old_lane_frame(
+                        vec![snap(
+                            RealmId::Planet(9),
+                            FrameRef::PlanetCentered { planet_seed: 9 },
+                            SYS7,
+                            1.0,
+                            at,
+                        )],
+                        at,
+                    ),
+                )),
+                3 => inbox.push(wire(
+                    DEST,
+                    MsgClass::RealmSnapshot,
+                    &leaf_frame(WindowId(1), at),
+                )), // forged
+                4 => inbox.push(wire(
+                    SHARD,
+                    MsgClass::RealmSnapshot,
+                    &leaf_frame(WindowId(9999), at),
+                )), // unknown
+                5 => inbox.push(wire(
+                    SHARD,
+                    MsgClass::Control,
+                    &ShardToGateway::WindowBody {
+                        realm_fence: Fence(1),
+                        window: WindowId(1),
+                        subject: RealmId::System(7),
+                        stmt: BodyStmt::SelfLook {
+                            bag: vec![(r % 251) as u8],
+                        },
+                        authored_at: UniverseTick(at),
+                    },
+                )),
+                _ => inbox.push(wire(
+                    SHARD,
+                    MsgClass::Control,
+                    &ShardToGateway::WindowMembership {
+                        window: WindowId(1),
+                        added: vec![RealmId::Planet(9)],
+                        removed: vec![RealmId::Planet(9)],
+                    },
+                )),
+            }
+            let _ = rig.tick(inbox);
+            if step % 128 == 0 {
+                let sessions = rig.world.resource::<GatewaySessions>();
+                assert!(
+                    sessions.windows_open_count() <= 2,
+                    "windows stay the derivable set"
+                );
+                for w in sessions.windows.values() {
+                    let span = w
+                        .ingest
+                        .newest()
+                        .map_or(0, |n| n.0.saturating_sub(tuning.ring_span_ticks));
+                    let _ = span;
+                    assert!(
+                        w.ingest.roster_set().len() <= 64,
+                        "rosters bounded by the authored rows"
+                    );
+                }
+                let session = &sessions.by_session[&sid];
+                assert!(
+                    session.shadow.ring.len() as u64 <= tuning.ring_span_ticks + 1,
+                    "the fold ring holds one derived span, never more"
+                );
+                assert!(
+                    session.shadow.pending.len() <= tuning.pending_cap,
+                    "the comparator queue is capped"
+                );
+                assert!(
+                    sessions.realm_heads.len() <= 2,
+                    "realm-heads ≤ the named set"
+                );
+                let now = rig.stats();
+                // Counters are MONOTONE (a decreasing counter is state corruption).
+                assert!(now.window_rows_ingested >= prev.window_rows_ingested);
+                assert!(now.window_folds >= prev.window_folds);
+                assert!(now.parity_rows_matched >= prev.parity_rows_matched);
+                assert!(now.window_sender_mismatch >= prev.window_sender_mismatch);
+                prev = now;
+            }
+        }
+        assert!(
+            rig.stats().window_sender_mismatch > 0,
+            "the forged arm really ran"
+        );
+        assert!(
+            rig.stats().window_unknown_row > 0,
+            "the unknown arm really ran"
+        );
+        assert!(rig.stats().window_folds > 0, "the composer really folded");
+        // The exit: zero sessions ⇒ zero composer state, after 30k ticks of churn.
+        let _ = rig.tick(vec![wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::Bye,
+        )]);
+        let sessions = rig.world.resource::<GatewaySessions>();
+        assert!(sessions.is_empty());
+        assert_eq!(sessions.windows_open_count(), 0);
+        assert!(sessions.realm_heads.is_empty());
     }
 }

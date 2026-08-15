@@ -155,6 +155,19 @@ pub struct InspectReport {
     /// Placement arc S2 — ledger selections that MISSED their instant (from
     /// `StubStats.placement_book_miss`). 0 in any healthy run; every miss is a loud lane degrade.
     pub placement_book_miss: u64,
+    /// THE WINDOW LANE (Slice A) — the shard's windows-open GAUGE (from `StubStats.windows_open`,
+    /// post-TTL-prune). 0 at zero subscribers — the structural teardown truth.
+    pub windows_open: u64,
+    /// THE WINDOW LANE (Slice A) — the shard's window egress meters (from `StubStats`):
+    /// `WindowFrame` messages, the authored rows inside them, `WindowBody` statements, and
+    /// `WindowMembership` verdicts shipped (the §4.5 Topic-1 per-realm egress metering).
+    pub window_frames_sent: u64,
+    /// See [`Self::window_frames_sent`].
+    pub window_frame_rows_sent: u64,
+    /// See [`Self::window_frames_sent`].
+    pub window_bodies_sent: u64,
+    /// See [`Self::window_frames_sent`].
+    pub window_memberships_sent: u64,
     /// Slice 3g — the entities currently latched in this shard's `RequestInFlight` (the standing
     /// durable-crossing latches; `RequestInFlight.0.keys()`, sorted). Empty once a crossing's terminal
     /// clears the latch — the abort/commit-leg "latch empty" ground truth.
@@ -328,6 +341,13 @@ fn inspect_world(world: &mut bevy_ecs::prelude::World) -> InspectReport {
         report.flush_stamp_gap_ticks_max = stats.flush_stamp_gap_ticks_max;
         // Placement arc S2: the ledger-miss gate's ground truth.
         report.placement_book_miss = stats.placement_book_miss;
+        // THE WINDOW LANE (Slice A): the diagnosis surface — the open-window gauge + the four
+        // egress meters, surfaced the way every sibling StubStats counter is.
+        report.windows_open = stats.windows_open;
+        report.window_frames_sent = stats.window_frames_sent;
+        report.window_frame_rows_sent = stats.window_frame_rows_sent;
+        report.window_bodies_sent = stats.window_bodies_sent;
+        report.window_memberships_sent = stats.window_memberships_sent;
     }
     if let Some(in_flight) = world.get_resource::<vd_sim::stub::RequestInFlight>() {
         // Slice 3g: the standing durable-crossing latches (the abort/commit-leg "latch empty" ground

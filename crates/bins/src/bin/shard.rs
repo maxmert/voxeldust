@@ -335,6 +335,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .map_err(|e| {
         format!("THE world violates the two-level visibility bound: {e} — refusing to boot")
     })?;
+    // THE WINDOW LANE's marker roster (Slice A, docs/design/window_lane.md §2.2/§2.8): per DIRECT
+    // child this shard parents, the pre-encoded TAG_LUMA bag drawn from the child's own generation
+    // stream — plumbed at BOOT the way the region forest and the motion roster are (the boot/config
+    // path; the sim crate receives opaque bags and keeps no vd-physics edge). Computed BEFORE the
+    // forest is moved into the resource below. Empty wherever no direct child carries a draw (walk
+    // stations/areas, planets — their photometric ladder is an owed later draw) ⇒ inert.
+    let child_luma = vd_bins::child_luma_bags(
+        universe_seed,
+        move_speed * time_multiplier,
+        tick_dt,
+        &regions,
+        &held_realms,
+    );
+    *node.world_mut().resource_mut::<vd_sim::stub::ChildLuma>() =
+        vd_sim::stub::ChildLuma(child_luma);
     *node
         .world_mut()
         .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)

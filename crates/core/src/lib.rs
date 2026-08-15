@@ -27,6 +27,7 @@ pub mod home;
 pub mod ids;
 pub mod incarnation;
 pub mod kinematics;
+pub mod look;
 pub mod placement;
 pub mod pose;
 pub mod realm_coord;

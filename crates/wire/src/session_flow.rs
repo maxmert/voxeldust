@@ -116,9 +116,10 @@ pub enum GatewayToShard {
     /// `docs/design/owner_decisions_2026-08-15.md` item 3: retention is FOREVER DERIVED — at
     /// least two cadences plus one, never a free literal), so a dead subscriber can never leak a
     /// fan. Idempotent per `window` (a re-open refreshes the TTL). APPENDED variant (postcard-safe
-    /// additive shape — a prior arm's discriminant/framing is unchanged). Slice 0 plants the
-    /// SHAPE: no producer exists until the Slice-B window engine; the shard-side registry that
-    /// consumes it is Slice A (a control frame arriving before then is dropped + counted).
+    /// additive shape — a prior arm's discriminant/framing is unchanged). LIVE since Slice A: the
+    /// gateway derives + opens the MINIMAL per-session chain windows (own-realm `Occupants`, and
+    /// `Child(c)` on the parent where its own routing state already names it — the FULL chain
+    /// derivation is Slice B), and the shard-side registry consumes it (`vd-sim` `OpenWindows`).
     WindowOpen {
         window: WindowId,
         scope: WindowScope,
@@ -126,8 +127,9 @@ pub enum GatewayToShard {
     /// THE WINDOW LANE's subscription close (gateway → shard, mesh minor 16; same SL6 approval as
     /// [`GatewayToShard::WindowOpen`]). RELIABLE control, idempotent (closing an unknown window is
     /// a counted no-op); the derived keep-alive TTL above is the crash backstop — this message is
-    /// only the polite fast path. APPENDED variant (postcard-safe additive shape). Slice 0 plants
-    /// the shape; producer/consumer land with Slices B/A.
+    /// only the polite fast path. APPENDED variant (postcard-safe additive shape). LIVE since
+    /// Slice A (the gateway closes windows that stop being derivable — structurally, zero
+    /// sessions ⇒ zero windows; the shard registry consumes it).
     WindowClose { window: WindowId },
 }
 
@@ -223,9 +225,11 @@ pub enum ShardToGateway {
     /// Attestation (fail-closed, measured now / refused at cloud mTLS — owner item 11 pattern):
     /// the receiver drops + counts any frame whose sender node is not the `ShardRoster` head for
     /// the stating realm ([`window_sender_is_head`]), and any stale `realm_fence` (zombie guard).
-    /// APPENDED variant (postcard-safe additive shape). Slice 0 plants the SHAPE: the shard-side
-    /// emitter is Slice A, the receiving engine Slice B — a frame arriving before then is dropped
-    /// + counted, never guessed at.
+    /// APPENDED variant (postcard-safe additive shape). The shard-side emitter is LIVE since
+    /// Slice A (one frame per tick per open window, the authored rows serialized once); the
+    /// receiving ENGINE is LIVE since Slice B — the gateway ATTESTS fail-closed (unknown window
+    /// / forged sender dropped + counted) and INGESTS an admitted frame into its shadow
+    /// composer (`window_rows_ingested`), measured against the old lane, served to no one yet.
     WindowFrame {
         realm_fence: Fence,
         /// The subscription id the receiving side minted at [`GatewayToShard::WindowOpen`].
@@ -256,8 +260,9 @@ pub enum ShardToGateway {
     /// realm (SL3: a realm draws itself), `Marker` only about the sender's DIRECT children (the
     /// owner-ruled photometric datum for a sleeping child, R4; superseded by data presence the
     /// moment the child states its own look). A mis-authored body is dropped + counted, never
-    /// patched. APPENDED variant (postcard-safe additive shape). Slice 0 plants the shape;
-    /// emitter Slice A, receiving engine Slice B.
+    /// patched. APPENDED variant (postcard-safe additive shape). The emitter is LIVE since
+    /// Slice A (send-on-change + on-open; the look from the realm's OWN boot extent, the marker
+    /// bags from the boot roster's photometrics); the receiving engine is Slice B.
     WindowBody {
         realm_fence: Fence,
         window: WindowId,
@@ -277,8 +282,9 @@ pub enum ShardToGateway {
     /// lost delta would desynchronize the drawn set until the next edge, so it rides the
     /// session-reply lane like [`ShardToGateway::WindowBody`]. Attestation (fail-closed): sender
     /// must be the roster head for the stating realm ([`window_sender_is_head`]). APPENDED
-    /// variant (postcard-safe additive shape). Slice 0 plants the shape; emitter Slice A,
-    /// receiving engine Slice B.
+    /// variant (postcard-safe additive shape). The emitter is LIVE since Slice A (the verdict
+    /// diffed per window out of the ONE existing `aoi_decide` fold — per-dot for `Occupants`,
+    /// the occupied-child proxy fold for `Child` scopes); the receiving engine is Slice B.
     WindowMembership {
         window: WindowId,
         added: Vec<RealmId>,

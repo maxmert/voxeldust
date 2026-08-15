@@ -4209,7 +4209,7 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **WHEN:** P8 (the ship-realm work) — a new lineage arm PLUS a payload widening (the `u64` seed cannot hold an `EntityId`), i.e. a deliberate wire change on the frozen `RealmPath`, not an append; the counter and the exclusions retire with it.
 - **Where:** `crates/core/src/realm_path.rs` (`RealmKindTag`), `crates/core/src/worldgen.rs::level_of`, `crates/sim/src/stub.rs::region_level` + the four lane guards, `crates/bins/src/lib.rs::realm_from_kind_seed`.
 
-### D-WINDOW-1 🟧 THE WINDOW LANE — the observer chain that replaces the bucket cascade (owner-approved 2026-08-15/16, docs/design/window_lane.md; slice 0 landing)
+### D-WINDOW-1 🟧 THE WINDOW LANE — the observer chain that replaces the bucket cascade (owner-approved 2026-08-15/16, docs/design/window_lane.md; slices 0/A/B landed, C1 next)
 - **WHAT this is:** the binding slice ladder for the window lane (`docs/design/window_lane.md`; the signed
   five-topic approval + Q1/Q2/Q3 rulings live in `docs/design/owner_decisions_2026-08-15.md`, 2026-08-16
   addendum). Each world level states only what it lawfully owns — placements, one hop row per occupied child,
@@ -4217,23 +4217,76 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   the connection plane stacks the statements per observer at ONE universe tick; the client only draws.
   Zero new realm→realm data; four inter-shard scenery arms end producer-less and are tombstoned.
 - **The ladder (a slice is not done until its owner-visible outcome is real):**
-  - **Slice 0 — the skeleton (🟧 THIS ROW'S STATUS: landing now).** The signed record in-repo; the wire
+  - **Slice 0 — the skeleton (🟩 landed).** The signed record in-repo; the wire
     types (`WindowOpen`/`WindowClose` + `WindowScope`, `WindowFrame`/`WindowBody` with typed
     `BodyStmt`/`WindowMembership` + `WindowId`/`HopRow`), attestation predicates, positional/roundtrip
     pins, mesh minor 16 with the owner citation; the per-system photometric draw in
     `generate_system_forest` (pinned f(seed) values). *Owner-visible outcome:* the signed ask + the wire
     contract. NOTHING MOVES — no producer, no consumer, no behavior change.
-  - **Slice A — shard emits the window** (old lanes still running; no client change). Window registry +
-    derived TTLs (2 beats + 1), hop-row inversion at the author, look/marker/membership emits.
-    *Owner-visible outcome:* every realm publishes its window statements; the old picture unchanged.
-    Gates: G-IDENTICAL (≥2 shard profiles), attestation fail-closed, TTL-expiry chaos,
-    INV-BODY-AT-ORIGIN pin, inversion-inertness pin, the two-level live-sibling pin (per Q1).
-  - **Slice B — gateway composition engine, SHADOW mode.** `window.rs` complete (rings, `transfer_frame`
-    fold, per-stratum hold + dead-hop exit, origin + epoch, session-only chain derivation, the dependency
-    gate replacing the router-converter doc scan). Output compared, never shipped.
-    *Owner-visible outcome:* a measured proof the new picture equals the old one (parity MEASUREMENT with
-    mismatch classes + a soak; G-SHEAR unit half incl. the deliberate mixed-tick FAILURE; exact-cadence
-    boot pin; dedup f64 measured bound; zero-state teardown; G-COMPOSE-LOAD both sides).
+  - **Slice A — shard emits the window (🟧 THIS ROW'S STATUS: landed now;** old lanes still running,
+    untouched; no client change). The shard-side window registry (`vd-sim` `OpenWindows`, keyed
+    (opener, id)) + the DERIVED keep-alive TTL (2 beats + 1 of the ONE `aoi_recheck_cadence` — owner
+    law 3(a)); per tick per open window ONE `WindowFrame` (the authored rows built once, the hop row
+    inverted AT the author THROUGH `transfer_frame` itself — refusal semantics inherited, dropped +
+    counted); `WindowBody` send-on-change + on-open (the look from the realm's OWN boot extent via the
+    `vd_core::look` bag codec; markers from the boot-planted `ChildLuma` roster — `vd-bins`
+    `child_luma_bags`, the boot/config path); `WindowMembership` diffed per window out of the ONE
+    existing `aoi_decide` fold. Gateway side: the MINIMAL derivation (per Active sub: own-realm
+    `Occupants`; `Child(c)` on the parent where the session's own subs + the login registry already
+    name it — both chains held through a crossing overlap), keep-alive on the derived cadence, close
+    on session end (zero sessions ⇒ zero windows, both sides), and fail-closed ingest (unknown window /
+    forged sender / mis-authored body dropped + counted; admitted rows deliberately unconsumed until
+    the Slice-B engine). Diagnosis: `windows_open` + the four egress meters on `StubStats`/the harness
+    report; the gateway counters + `windows_open` gauge on `GatewayView`/`/admin/snapshot`.
+    Gates LANDED: G-IDENTICAL (`assert_window_emission_feature_anywhere`, System/Planet profiles),
+    attestation fail-closed (`a_window_row_before_its_engine_is_dropped_fail_closed_and_counted_apart`),
+    TTL-expiry chaos (`a_dead_gateways_windows_die_by_the_derived_ttl_with_zero_leaked_emissions`),
+    INV-BODY-AT-ORIGIN + inversion-inertness pins on THE world
+    (`inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world`), the Q1 two-level
+    live-sibling pin (`the_live_siblings_interior_is_one_level_out_and_never_deeper_q1`), zero-state
+    teardown both sides. **STOPPED SUB-ITEM (owner-gated, reported):** the Q2 PARENT-RELAY emission —
+    the child→parent VERBATIM `WindowBody` ship has NO lawful carrier on the existing mesh:
+    `RealmShapeObservation` is a typed `Vec<RealmShape>` with no fence and no bag field (it cannot
+    carry the self-look TLV without a wire-shape change to a frozen struct), a parent-minted
+    `WindowBody` would violate both the admission rule and Q2's "no re-state", and a NEW
+    `InterShardFlow` arm is forbidden by the design itself (§2.5) and owner-gated (SL6). Costs
+    nothing in Slice A (no gateway opens a live-sibling window before the Slice-B chain engine);
+    the lawful shape of the relay leg goes back to the owner with Slice B. **SLICE B'S HANDLING
+    (design-first, as ordered):** every enumerated carrier needs an owner ruling — (i) evolving
+    the INTERIM `RealmShapeObservation` content into the verbatim relay is a frozen-struct wire
+    change only the owner can authorize (his recorded "content evolves" intent, item 7,
+    contemplates it — the postcard freeze still gates it); (ii) any new relay arm/variant is
+    §2.5-forbidden + SL6-gated; (iii) the interim parent-authored restatement contradicts Q2's
+    "no re-state" and would be unreachable dead code today (no gate topology holds a live sibling
+    with interior children — measured: the exclusion class below counts 0). So Slice B EXCLUDES
+    those rows from parity BY NAME (`parity_sibling_interior_excluded`, counted + printed by the
+    gate) and the SL6-form ask rides the Slice-B report. The old lane keeps serving the pixels
+    until the ruling.
+  - **Slice B — gateway composition engine, SHADOW mode (🟩 landed).** `crates/connection-plane/src/window.rs`
+    complete: level rings + newest-wins bodies + membership store per open window; the `transfer_frame`
+    fold at ONE common tick (mixed ticks refused by `InstantMismatch`, per row, counted); per-stratum hold
+    + the derived dead-hop exit; origin marker + epoch mechanics (bump on chain/origin change); the
+    session/stream-only chain derivation (lineage recorded on the session from the login descent +
+    crossings; parenthood confirmed by attested hop levels; realm→node from the gateway's own subs + the
+    EXISTING `HeadRead{Realm}`/`Head` directory pair re-polled on the window keep-alive beat — the
+    Slice-A seed-forest parent lookup AND the forest-read marker admission are DELETED, the roster now
+    vouches markers). Output compared, never shipped (`shadow_compose` emits zero bytes). Gates landed:
+    the process-tier parity MEASUREMENT with named mismatch classes (`window_shadow_parity.rs` /
+    `just window-parity`, in `gate`); G-SHEAR unit half incl. the deliberate mixed-tick FAILURE
+    (`g_shear_the_deliberate_mixed_tick_compose_must_fail`); the exact-cadence boot pin
+    (`window_full_chain_folds > 0` asserted in the parity run — a ≥2-level fold exists only at an
+    identical cross-shard stamp); BOTH dedup f64 measured bounds (hop-vs-child-row
+    `window_dedup_disagree == 0` + max-dev gauge; shared-vs-per-session `window_fold_divergence == 0`,
+    non-vacuous via 2 co-located sessions); zero-state teardown (windows + realm-heads + scenes all die
+    with the sessions); G-COMPOSE-LOAD both sides (`just window-compose-load`, p99 < one realm-lane
+    tick, release); the shadow soak riding the `rlm-soak` recipe (state monotone-bounded, asserted).
+    **THE NAMED PARITY EXCLUSION (recorded per the Slice-B plan):** old-lane rows lifted from a LIVE
+    SIBLING's interior are EXCLUDED from parity as the counted, printed class
+    `parity_sibling_interior_excluded` — their lawful carrier is the recorded Q2-relay gap (Slice A's
+    stopped sub-item: the child→parent VERBATIM statement leg has no lawful mesh carrier; every
+    candidate needs an owner ask — see the Slice-B report's SL6 ask text). The class counts 0 in the
+    landed parity run (no live-sibling interior exists in its topology); it goes nonzero — loudly, by
+    name — the day one does, and flips to composed rows when the owner rules the carrier.
   - **Slice C1 — THE FLAG DAY** (client minor, floor moves; owner item 9: no shims, no dual-decode).
     Client consumes the composed lane; `RealmShape.center` leaves; origin/epoch scene swap replaces
     `forget_space`; `pin`/`render_pin` deleted; the `--realm-boxes` boot file + emitter + scripts deleted

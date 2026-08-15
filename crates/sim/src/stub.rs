@@ -51,7 +51,7 @@ use vd_wire::intershard::{
 };
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
 use vd_wire::seams::transfer_control::TransferControlAck;
-use vd_wire::session_flow::{GatewayToShard, ShardToGateway};
+use vd_wire::session_flow::{BodyStmt, GatewayToShard, ShardToGateway, WindowId, WindowScope};
 
 use crate::authority::{Authority, AuthorityCmd};
 use crate::io::{Durability, Inbound, MsgClass};
@@ -464,6 +464,56 @@ pub struct ObservedInteriorShapes(pub BTreeMap<RealmId, (TickId, Vec<RealmShape>
 /// fence, never persisted (`BTreeMap`, sim determinism). EMPTY at walk/static (no bit ever arrives).
 #[derive(Resource, Debug, Default)]
 pub struct ChildSceneSent(pub BTreeMap<RealmId, (NodeId, BTreeSet<RealmId>)>);
+
+/// THE WINDOW REGISTRY (Slice A — docs/design/window_lane.md §2.3/§2.9): the windows this shard
+/// currently serves, keyed `(opened_by, window)` — the OPENER rides the key because a `WindowId`
+/// is minted per SUBSCRIBER (monotone per gateway, the `SubId` discipline), so two gateways'
+/// ids may collide and only the pair is unambiguous. Rows ship back to `opened_by` alone.
+///
+/// Consumed from [`GatewayToShard::WindowOpen`]/[`GatewayToShard::WindowClose`] (idempotent: a
+/// duplicate open refreshes the TTL; a close is the polite fast path). The crash backstop is the
+/// DERIVED keep-alive TTL ([`window_ttl_ticks`], 2 beats + 1 — owner law 3(a)): a window not
+/// re-asserted within it is dropped by the emitter's per-tick prune, so a dead gateway can never
+/// leak a fan. EMPTY by default ⇒ every existing rig is byte-identical (no window, no emission).
+#[derive(Resource, Debug, Default)]
+pub struct OpenWindows(pub(crate) BTreeMap<(NodeId, WindowId), OpenWindow>);
+
+/// One open window's shard-side state: its scope, its keep-alive freshness, and the two
+/// send-on-change baselines its reliable lanes diff against (bodies + the SL7 membership
+/// verdict). The baselines reset with the window — a re-opened window is re-served its full
+/// body set and full verdict, exactly what a fresh subscriber needs.
+#[derive(Debug, PartialEq)]
+pub(crate) struct OpenWindow {
+    pub(crate) scope: WindowScope,
+    /// The holder's LOCAL tick of the last `WindowOpen` (open or keep-alive re-assert).
+    pub(crate) last_refresh: TickId,
+    /// Send-on-change: the last [`ShardToGateway::WindowBody`] bag shipped per subject
+    /// (the own look under this realm's id, one marker per direct child — disjoint keys).
+    sent_bodies: BTreeMap<RealmId, Vec<u8>>,
+    /// Send-on-change: the last SL7 membership verdict shipped (ids only).
+    membership_sent: BTreeSet<RealmId>,
+}
+
+impl OpenWindow {
+    fn opened(scope: WindowScope, now: TickId) -> OpenWindow {
+        OpenWindow {
+            scope,
+            last_refresh: now,
+            sent_bodies: BTreeMap::new(),
+            membership_sent: BTreeSet::new(),
+        }
+    }
+}
+
+/// THE MARKER ROSTER (Slice A — docs/design/window_lane.md §2.2/§2.8, the owner-ruled R4 datum):
+/// per DIRECT child, the pre-encoded `TAG_LUMA` bag drawn from the child's own generation stream
+/// (`vd-physics` `system_photometrics_for_config` → `marker_luma_bag`), planted by the BOOT the
+/// way the region forest and the motion roster are — the boot/config path, never a wire-struct
+/// change, and never a `vd-physics` edge from this crate (the bags arrive opaque). A child with
+/// no entry (a planet — its photometric ladder is an owed later draw; a hand-placed walk body)
+/// states no marker: absence of data, never a default. DEFAULT EMPTY ⇒ byte-identical rigs.
+#[derive(Resource, Debug, Default)]
+pub struct ChildLuma(pub BTreeMap<RealmId, Vec<u8>>);
 
 /// Step 5 slice C — THE FROM-ABOVE HOLDING: the outlines this realm's PARENT reflected down for this
 /// realm's occupants (this realm's in-range siblings, their observed interiors, and whatever the
@@ -2010,14 +2060,47 @@ pub struct StubStats {
     /// take-over re-stream reaches them. `0` healthy; non-zero next to a self-fence is the
     /// partition surfacing.
     pub entity_removals_suppressed_no_lease: u64,
-    /// THE WINDOW LANE's control arriving before its registry exists (mesh minor 16, Slice 0 —
-    /// the lane is owner-approved 2026-08-15/16, docs/design/window_lane.md §1.1 + §4.5, but
-    /// NOTHING moves in Slice 0): a `WindowOpen`/`WindowClose` is dropped FAIL-CLOSED + counted
-    /// here — never mis-counted `undecodable` (a well-formed subscriber speaking a lane whose
-    /// shard-side registry lands in Slice A is not garbage; the honesty floor). No producer
-    /// exists until the Slice-B engine opens windows, so this reads 0 in every shipped run; it
-    /// retires when the Slice-A registry lands.
-    pub window_control_unconsumed: u64,
+    /// THE WINDOW LANE (Slice A, docs/design/window_lane.md §2.3/§2.9) — a window REGISTERED
+    /// (a fresh open, or a live id re-used under a new scope). THROUGHPUT.
+    pub windows_opened: u64,
+    /// THE WINDOW LANE (Slice A, docs/design/window_lane.md §2.3/§2.9) — GAUGE, not a counter:
+    /// how many windows this shard currently holds open (refreshed each tick by the emitter,
+    /// post-TTL-prune). The diagnosis surface's "windows_open"; `0` at zero subscribers is the
+    /// structural teardown truth (zero sessions ⇒ zero windows).
+    pub windows_open: u64,
+    /// EGRESS — `WindowFrame` messages shipped (one per tick per open window; the per-realm
+    /// egress meter the owner-approved design names in §4.5 Topic 1).
+    pub window_frames_sent: u64,
+    /// EGRESS — authored child rows shipped inside `WindowFrame`s (the row-volume meter beside
+    /// the message meter: rows/tick is O(direct children), bounded by the lattice — §2.13).
+    pub window_frame_rows_sent: u64,
+    /// EGRESS — `WindowBody` statements shipped (send-on-change + on-open, NEVER per-tick; a
+    /// steady non-zero rate here means a look/marker source is flapping).
+    pub window_bodies_sent: u64,
+    /// EGRESS — `WindowMembership` verdicts shipped (diffs of the parent's SL7 fold, on the
+    /// fold's own change rhythm).
+    pub window_memberships_sent: u64,
+    /// A duplicate `WindowOpen` re-asserting a live window (the derived keep-alive) — refreshed
+    /// its TTL, idempotent, THROUGHPUT (this beats once per keep-alive cadence per subscriber).
+    pub window_reasserted: u64,
+    /// A window dropped by the DERIVED keep-alive TTL (2 beats + 1 — owner law 3(a)): its
+    /// subscriber stopped re-asserting (a dead gateway). The crash backstop working as designed;
+    /// steady growth WITHOUT a gateway death means the subscriber's cadence stopped clearing
+    /// the TTL.
+    pub window_ttl_expired: u64,
+    /// A `WindowClose` naming a window this shard does not hold — a counted no-op (the polite
+    /// fast path racing the TTL backstop, or a malformed/unknown id). BENIGN in small numbers.
+    pub window_close_unknown: u64,
+    /// A `Child(c)` window whose `c` is not one of this shard's DIRECT children (counted per
+    /// emission pass, like the ship exclusion): the subscriber's routing state and this roster
+    /// disagree — nothing is emitted for it, never guessed at. FAULT if it persists.
+    pub window_child_unrostered: u64,
+    /// A `Child(c)` hop-row inversion REFUSED by the frame core (rotated frame across integer
+    /// cells — `transfer_frame`'s own refusal, owed P10 cell math): the frame is dropped +
+    /// counted, never shipped with folded-precision numbers. Pinned unreachable on THE world
+    /// today (the inversion-inertness measurement); non-zero means the world grew a spinning
+    /// realm a cell-block out before P10 landed.
+    pub window_hop_refused: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -2207,6 +2290,8 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(ChildSceneSent::default());
     world.insert_resource(FromAboveScene::default());
     world.insert_resource(RenderSent::default());
+    world.insert_resource(OpenWindows::default());
+    world.insert_resource(ChildLuma::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -2532,8 +2617,13 @@ fn process_inbound(
     mut applied: ResMut<AppliedSteps>,
     // Bundled tuple `SystemParam` (bevy's 16-param ceiling): the two dest-side pending buffers — the
     // entity-state crossing awaiting its adopt (1d.1) and the input slot awaiting the realm lease
-    // (Stage B2). Both are the adopt-ordering stores, so grouping them is a mechanical arity fix.
-    pending: (ResMut<PendingCrossings>, ResMut<PendingInputSlots>),
+    // (Stage B2) — plus the window registry the gateway-lane control arms register into (Slice A;
+    // riding this tuple is the same mechanical arity fix). Destructured below.
+    pending: (
+        ResMut<PendingCrossings>,
+        ResMut<PendingInputSlots>,
+        ResMut<OpenWindows>,
+    ),
     // The ghost-path store (slice F shrank the pair to one: the source-side feed mirror died with
     // the pose feed).
     mut registration: ResMut<GhostColliderRegistration>,
@@ -2561,7 +2651,7 @@ fn process_inbound(
         mut observed_shapes,
     ) = vu_aoi;
     let (mut in_flight, mut progress, mut holds) = crossing;
-    let (mut pending, mut pending_slots) = pending;
+    let (mut pending, mut pending_slots, mut open_windows) = pending;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
     // UNGATED, and first: an expired hold must be reclaimed even on a shard that has lost its lease and
     // is doing nothing else, or the ledger would outlive the thing it describes. Inert at a zero budget.
@@ -2591,6 +2681,7 @@ fn process_inbound(
                     &mut mint,
                     &mut log,
                     &mut pending_slots,
+                    &mut open_windows,
                     &mut stats,
                     &mut outbox,
                 );
@@ -2816,6 +2907,7 @@ fn on_gateway_msg(
     mint: &mut EntityMint,
     log: &mut InputLog,
     pending_slots: &mut PendingInputSlots,
+    windows: &mut OpenWindows,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
@@ -2994,17 +3086,57 @@ fn on_gateway_msg(
                 stats,
             );
         }
-        GatewayToShard::WindowOpen { .. } | GatewayToShard::WindowClose { .. } => {
-            // THE WINDOW LANE, Slice 0 (mesh minor 16; the lane is owner-approved 2026-08-15/16,
-            // docs/design/window_lane.md §1.1 + §2.3 + §4.5): the wire SHAPE exists but nothing
-            // moves — the shard-side window registry (per-window fans, hop-row inversion at the
-            // author, the DERIVED 2-beats+1 keep-alive TTL) lands in Slice A, and nothing opens
-            // windows until the Slice-B engine. A control frame arriving today is dropped
-            // FAIL-CLOSED + counted (owner decision 3: drop undeliverable data, never guess) —
-            // counted APART from `undecodable`, because a well-formed subscriber speaking a lane
-            // whose consumer does not exist yet is not garbage (the honesty floor).
-            stats.window_control_unconsumed += 1;
+        GatewayToShard::WindowOpen { window, scope } => {
+            on_window_open(windows, from, window, scope, ctx.clock.local_tick, stats);
         }
+        GatewayToShard::WindowClose { window } => {
+            on_window_close(windows, from, window, stats);
+        }
+    }
+}
+
+/// THE WINDOW LANE's subscription open (Slice A — docs/design/window_lane.md §2.3): register the
+/// window under `(opener, id)` — the opener is the transport sender, exactly the attestation
+/// source every other gateway-lane arm trusts (`dot.gateway = from`). IDEMPOTENT per the wire
+/// contract: a duplicate open of the SAME scope is the derived keep-alive and only refreshes the
+/// TTL; an open REUSING a live id under a DIFFERENT scope replaces the window whole (fresh
+/// send-on-change baselines — the subscriber is served its full set again), because the id mint
+/// is monotone per subscriber and a reuse is a new subscription, never a refresh.
+fn on_window_open(
+    windows: &mut OpenWindows,
+    from: NodeId,
+    window: WindowId,
+    scope: WindowScope,
+    now: TickId,
+    stats: &mut StubStats,
+) {
+    match windows.0.entry((from, window)) {
+        std::collections::btree_map::Entry::Occupied(mut held) if held.get().scope == scope => {
+            held.get_mut().last_refresh = now;
+            stats.window_reasserted += 1;
+        }
+        std::collections::btree_map::Entry::Occupied(mut held) => {
+            *held.get_mut() = OpenWindow::opened(scope, now);
+            stats.windows_opened += 1;
+        }
+        std::collections::btree_map::Entry::Vacant(fresh) => {
+            fresh.insert(OpenWindow::opened(scope, now));
+            stats.windows_opened += 1;
+        }
+    }
+}
+
+/// THE WINDOW LANE's subscription close (Slice A): the polite fast path — the DERIVED TTL is the
+/// crash backstop. Closing an unknown window is a COUNTED no-op per the wire contract (a close
+/// racing the TTL, or a malformed id — never a panic, never guessed at).
+fn on_window_close(
+    windows: &mut OpenWindows,
+    from: NodeId,
+    window: WindowId,
+    stats: &mut StubStats,
+) {
+    if windows.0.remove(&(from, window)).is_none() {
+        stats.window_close_unknown += 1;
     }
 }
 
@@ -7361,6 +7493,203 @@ fn push_cascade(
     }
 }
 
+/// THE WINDOW KEEP-ALIVE TTL, a tick COUNT (owner law 3(a), `docs/design/
+/// owner_decisions_2026-08-15.md` item 3: retention is FOREVER DERIVED — at least two cadences
+/// plus one, never a free literal): [`RETAIN_TTL_CADENCE_BEATS`] beats of the SAME AoI cadence
+/// the SL7 bit and the shape lane already beat on ([`aoi_recheck_cadence`] — one cadence source,
+/// HR3), plus one tick of intra-tick prune-vs-receive slack. A subscriber re-asserting once per
+/// cadence survives ONE lost keep-alive; a dead one expires within ~two beats and its fan dies
+/// with it (`docs/design/window_lane.md` §2.3).
+fn window_ttl_ticks(config: &StubConfig) -> u64 {
+    RETAIN_TTL_CADENCE_BEATS * aoi_recheck_cadence(config) + 1
+}
+
+/// Drop every window whose keep-alive lapsed (the crash backstop — a dead gateway can never leak
+/// a fan; chaos-pinned). Runs at the head of the per-tick emitter, BEFORE anything ships, so an
+/// expired window leaks zero emissions past its TTL. Counted per drop.
+fn prune_expired_windows(
+    windows: &mut OpenWindows,
+    config: &StubConfig,
+    now: TickId,
+    stats: &mut StubStats,
+) {
+    let ttl = window_ttl_ticks(config);
+    let before = windows.0.len();
+    windows.0.retain(|_, w| ttl_alive(w.last_refresh, now, ttl));
+    stats.window_ttl_expired += (before - windows.0.len()) as u64;
+}
+
+/// THE HOP-ROW INVERSION AT THE AUTHOR (`docs/design/window_lane.md` §2.2, R1): "my frame
+/// expressed in the child's frame at the book's instant" — computed THROUGH [`transfer_frame`]
+/// itself, by re-expressing the author's own frame ORIGIN (its own body's seat,
+/// INV-BODY-AT-ORIGIN) into the child's frame. One arithmetic, the frame core's own: the f64
+/// path, the integer cell subtraction and the rotated-cross-cell REFUSAL are all inherited, never
+/// a second implementation (the refusal is exactly the design's "inherits `transfer_frame`'s
+/// refusal semantics"). The one field the pose transform does not carry is the angular term: the
+/// parent's spin seen from the child is the child's own spin, reversed and re-axed into the
+/// child's axes — `-(q⁻¹·ω)`, where `q⁻¹` IS the transferred orientation (the origin pose rides
+/// in with the identity, so what comes back is exactly the child orientation's inverse).
+fn invert_hop_placement(
+    own: FrameRef,
+    child: FrameRef,
+    book: &PlacementBook,
+) -> Result<FramePlacement, FrameError> {
+    let child_at = book.of(child).ok_or(FrameError::UnknownDestFrame)?;
+    let origin = StampedPose::at_rest(own, DVec3::ZERO, book.at());
+    let inv = transfer_frame(&origin, child, book)?;
+    Ok(FramePlacement {
+        origin_cell: inv.pos.cell(),
+        origin: inv.pos.offset(),
+        velocity: inv.vel,
+        orientation: inv.orient,
+        angular_velocity: -(inv.orient * child_at.angular_velocity),
+    })
+}
+
+/// THE WINDOW LANE's per-tick placement statements (`docs/design/window_lane.md` §2.9 steps 1–3):
+/// the authored rows were built ONCE this tick (the caller's `realms` — the same Vec every old
+/// lane reads); per open window they ship as ONE [`ShardToGateway::WindowFrame`] stamped at the
+/// one universe tick, `hop: None` on an [`WindowScope::Occupants`] window, the pre-inverted
+/// [`HopRow`] on a [`WindowScope::Child`] window. FireAndForget/Unreliable — the realm-lane
+/// datagram class, full-state latest-wins (owner law 3(b)); a lost frame self-heals next tick.
+/// Kind-BLIND: no realm-kind test anywhere on this path (HR3/HR4).
+#[allow(clippy::too_many_arguments)]
+fn emit_window_frames(
+    config: &StubConfig,
+    clock: &ClockSample,
+    realm_fence: Fence,
+    regions: &RealmRegions,
+    head: &PlacementBook,
+    realms: &[RealmSnap],
+    windows: &OpenWindows,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let own_frame = regions.own_frame(config.realm);
+    for ((gateway, window), held) in &windows.0 {
+        let hop = match held.scope {
+            // The observer's-own-level window: an occupant already stands in this frame — no hop.
+            WindowScope::Occupants => None,
+            WindowScope::Child(child) => {
+                // The hop row exists only for a DIRECT child this shard actually authors: a
+                // subscriber naming a stranger gets nothing, counted, never a guess.
+                let Some(region) = regions
+                    .direct_children(config.realm)
+                    .find(|r| r.realm == child)
+                else {
+                    stats.window_child_unrostered += 1;
+                    tracing::warn!(
+                        %child,
+                        realm = %config.realm,
+                        "Child-scope window names a realm this shard does not parent — no frame"
+                    );
+                    continue;
+                };
+                // A Ship child has no lineage coord to serve a window by until P8 (D-SHIP-1):
+                // excluded, counted, never a panic — see `region_level`.
+                if region_level(region).is_none() {
+                    stats.ship_child_regions_excluded += 1;
+                    continue;
+                }
+                match invert_hop_placement(own_frame, region.frame, head) {
+                    Ok(inv) => Some(Box::new(vd_wire::session_flow::HopRow { child, inv })),
+                    // The frame core's refusal (rotated frame across integer cells — owed with
+                    // P10 cell math): dropped + counted, never shipped with folded numbers.
+                    Err(refusal) => {
+                        stats.window_hop_refused += 1;
+                        tracing::warn!(
+                            %child,
+                            realm = %config.realm,
+                            ?refusal,
+                            "hop-row inversion refused — the window frame is withheld this tick"
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
+        let frame = ShardToGateway::WindowFrame {
+            realm_fence,
+            window: *window,
+            at: clock.universe_tick,
+            hop,
+            rows: realms.to_vec(),
+        };
+        let bytes = crate::io::bytes(
+            postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
+        );
+        outbox.0.push((
+            *gateway,
+            MsgClass::RealmSnapshot,
+            bytes,
+            Durability::Ephemeral,
+        ));
+        stats.window_frames_sent += 1;
+        stats.window_frame_rows_sent += realms.len() as u64;
+    }
+}
+
+/// THE WINDOW LANE's look/marker statements (`docs/design/window_lane.md` §2.9 step 4):
+/// send-on-change + on-open, NEVER per-tick. The realm's CURRENT body set is its OWN look —
+/// derived from what it knows about ITSELF (its boot-config extent via [`RealmRegions::own_shape`],
+/// never any parent's row about it — SL3) — plus one photometric marker per DIRECT child the
+/// boot roster carries a luma bag for (the owner-ruled R4 datum; absence of a bag is absence of
+/// data, never a default). Each window diffs the set against what IT was already sent, so a fresh
+/// window is served everything once and a static world then ships nothing. ReDriven/reliable —
+/// the session-reply lane (a lost look is an invisible realm at exactly the no-flicker moment).
+#[allow(clippy::too_many_arguments)]
+fn emit_window_bodies(
+    config: &StubConfig,
+    clock: &ClockSample,
+    realm_fence: Fence,
+    regions: &RealmRegions,
+    child_luma: &BTreeMap<RealmId, Vec<u8>>,
+    windows: &mut OpenWindows,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    // The current body set, built once per tick (subjects are disjoint by construction: a realm
+    // is never its own direct child).
+    let mut bodies: Vec<(RealmId, BodyStmt)> = Vec::new();
+    if let Some(own) = regions.own_shape(config.realm) {
+        bodies.push((
+            config.realm,
+            BodyStmt::SelfLook {
+                bag: vd_core::look::look_bag(&own.shape),
+            },
+        ));
+    }
+    for region in regions.direct_children(config.realm) {
+        if let Some(bag) = child_luma.get(&region.realm) {
+            bodies.push((region.realm, BodyStmt::Marker { luma: bag.clone() }));
+        }
+    }
+    for ((gateway, window), held) in &mut windows.0 {
+        for (subject, stmt) in &bodies {
+            let bag = match stmt {
+                BodyStmt::SelfLook { bag } => bag,
+                BodyStmt::Marker { luma } => luma,
+            };
+            if held.sent_bodies.get(subject) == Some(bag) {
+                continue; // unchanged — send-on-change holds its tongue
+            }
+            push_session_reply(
+                outbox,
+                *gateway,
+                &ShardToGateway::WindowBody {
+                    realm_fence,
+                    window: *window,
+                    subject: *subject,
+                    stmt: stmt.clone(),
+                    authored_at: clock.universe_tick,
+                },
+            );
+            held.sent_bodies.insert(*subject, bag.clone());
+            stats.window_bodies_sent += 1;
+        }
+    }
+}
+
 /// Emit the shard's authored REALM placements (planet/station/ship boxes) to observers each tick
 /// (FA-2c) — the render-plane twin of [`emit_frames`]. No realm authority ⇒ silent. No direct child ⇒
 /// silent (a leaf authors no rows). Otherwise it ships a
@@ -7395,7 +7724,12 @@ fn emit_realm_frames(
     mut counter: ResMut<RealmFrameCounter>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
+    // THE WINDOW LANE (Slice A) — the registry this emitter serves + the boot-planted marker
+    // roster, bundled as ONE tuple `SystemParam` (bevy's 16-param ceiling — the established
+    // mechanical arity fix). Destructured below.
+    window_lane: (ResMut<OpenWindows>, Res<ChildLuma>),
 ) {
+    let (mut windows, child_luma) = window_lane;
     let Some(realm_fence) = authority.0 else {
         return;
     };
@@ -7534,6 +7868,39 @@ fn emit_realm_frames(
         .head(config.realm)
         .expect("the writer authors every held anchor before the feed runs");
     let realms = regions.authored_realm_snaps(config.realm, head);
+
+    // ===== THE WINDOW LANE (Slice A — docs/design/window_lane.md §2.9): per tick, per open
+    // window, ONE code path for every realm kind (HR3/HR4; ships excluded + counted per the
+    // D-SHIP-1 pattern). DELIBERATELY BEFORE the authored-empty return: a childless LEAF realm
+    // authors no rows, yet its own-level window still owes its per-tick stamp (`at` is what the
+    // Slice-B composer aligns chains on) and its self-look. The OLD lanes below are untouched —
+    // they keep running byte-identically until the Slice-C1 flag day retires them.
+    prune_expired_windows(&mut windows, &config, clock.local_tick, &mut stats);
+    stats.windows_open = windows.0.len() as u64;
+    if !windows.0.is_empty() {
+        emit_window_frames(
+            &config,
+            &clock,
+            realm_fence,
+            &regions,
+            head,
+            &realms,
+            &windows,
+            &mut stats,
+            &mut outbox,
+        );
+        emit_window_bodies(
+            &config,
+            &clock,
+            realm_fence,
+            &regions,
+            &child_luma.0,
+            &mut windows,
+            &mut stats,
+            &mut outbox,
+        );
+    }
+
     if realms.is_empty() {
         return;
     }
@@ -7857,6 +8224,19 @@ fn has_synced(clock: Res<ClockSample>) -> bool {
     clock.synced
 }
 
+/// The SL7/scene stores bundled into ONE tuple `SystemParam` (bevy's 16-param ceiling; a mechanical
+/// arity fix, destructured right back inside [`evaluate_realm_aoi`]): the children's occupancy bits
+/// (pruned + folded as observers), the per-live-child send-on-change cache, the from-above holding,
+/// the observed interior outlines (READ-ONLY — `emit_realm_frames` owns their writes/prune), and —
+/// Slice A — the window registry whose membership baselines the AoI pass diffs against.
+type Sl7Stores<'w> = (
+    ResMut<'w, ChildLiveness>,
+    ResMut<'w, ChildSceneSent>,
+    Res<'w, FromAboveScene>,
+    Res<'w, ObservedInteriorShapes>,
+    ResMut<'w, OpenWindows>,
+);
+
 /// RLM Step 2 — the demand-driven realm-lifecycle detector (the SIBLING of [`evaluate_realm_boundaries`]):
 /// per tick, this shard computes which of its DIRECT children an occupant's Area-of-Interest reaches and
 /// emits a [`RealmDemand`] toward the orchestrator so those child realms spin up (and self-reports its own
@@ -7892,12 +8272,7 @@ fn evaluate_realm_aoi(
     // folded as observers), the per-live-child send-on-change cache, the from-above holding (folded
     // into every occupant's scene + restated onward), and the observed interior outlines (READ-ONLY —
     // `emit_realm_frames` owns their writes/prune, and it runs earlier on the same schedule).
-    sl7: (
-        ResMut<ChildLiveness>,
-        ResMut<ChildSceneSent>,
-        Res<FromAboveScene>,
-        Res<ObservedInteriorShapes>,
-    ),
+    sl7: Sl7Stores,
     // Lane cure (finding 41) — the bit's "parent has been told" latch (the adopt-edge derivation).
     mut was_occupied: ResMut<WasOccupied>,
     // VU AoI S1b (Slice 2) — the per-DOT render baseline; `aoi_decide` diffs each dot's current in-AoI level
@@ -7907,7 +8282,8 @@ fn evaluate_realm_aoi(
     // Read nowhere in the sim — a counter, never a control input.
     mut stats: ResMut<StubStats>,
 ) {
-    let (mut child_liveness, mut child_scene_sent, from_above, interior_shapes) = sl7;
+    let (mut child_liveness, mut child_scene_sent, from_above, interior_shapes, mut open_windows) =
+        sl7;
     // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
     // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
     let Some(realm_fence) = authority.0 else {
@@ -7944,6 +8320,7 @@ fn evaluate_realm_aoi(
         &from_above.0,
         &mut render_sent.0,
         &interior_shapes.0,
+        &mut open_windows,
         &mut stats,
     );
 }
@@ -8027,6 +8404,9 @@ fn aoi_decide(
     render_sent: &mut BTreeMap<AccountId, BTreeSet<RealmId>>,
     // Slice C — per direct child, the interior outlines it shipped up, already in THIS shard's frame.
     interior_shapes: &BTreeMap<RealmId, (TickId, Vec<RealmShape>)>,
+    // THE WINDOW LANE (Slice A, §2.9 step 5): the open windows whose SL7 membership verdicts
+    // this SAME fold ships — never a second AoI derivation (HR3).
+    windows: &mut OpenWindows,
     stats: &mut StubStats,
 ) {
     let own_coord = &config.own_coord;
@@ -8150,6 +8530,11 @@ fn aoi_decide(
             tick,
             stats,
         );
+        // THE WINDOW LANE (Slice A): with zero observers every window's SL7 verdict IS the empty
+        // set — the diff below ships the removals once, so a subscriber's drawn-set gate never
+        // holds bodies for a realm whose occupants all left (the same emptiness truth the
+        // self-report above states to the orchestrator).
+        emit_window_membership(windows, &BTreeMap::new(), &BTreeMap::new(), outbox, stats);
         return;
     }
 
@@ -8197,6 +8582,12 @@ fn aoi_decide(
     // only when the child has ≥1 in-range sibling; the emit loop iterates the LIVE BITS (so a child
     // whose in-range set dropped to ZERO still ships an empty set ⇒ its occupants' scenes reconcile).
     let mut child_visible: BTreeMap<RealmId, Vec<RealmShape>> = BTreeMap::new();
+    // THE WINDOW LANE (Slice A, §2.9 step 5) — the SAME per-observer `next_in` transitions,
+    // accumulated as ids only (the membership verdict's shape): per DOT observer its in-band
+    // DIRECT children (the Occupants-window fold), per OCCUPIED-CHILD observer its in-band
+    // siblings (the existing `child_visible` SL7 proxy fold). No new AoI math — the two inserts
+    // below ride the two branches that already exist.
+    let mut in_band: BTreeMap<ObserverId, BTreeSet<RealmId>> = BTreeMap::new();
 
     let mut live_keys = BTreeSet::<(ObserverId, RealmPath)>::new();
     for (region, pose) in &placements {
@@ -8246,6 +8637,7 @@ fn aoi_decide(
             // false-LHS side (the discipline `AoiConfig::in_range` and every AoI fold here use).
             let next_in = next.is_some_and(|s| s.was_in);
             if render_routes.contains_key(obs) & next_in {
+                in_band.entry(*obs).or_default().insert(region.realm);
                 let drawn = dot_visible.entry(*obs).or_default();
                 drawn.push(child_shape(regions, region, tick_hz));
                 // Slice C — the child's own INTERIOR outlines ride its visibility: already lifted
@@ -8265,6 +8657,7 @@ fn aoi_decide(
             if let ObserverId::Child(child_realm) = obs
                 && next_in
             {
+                in_band.entry(*obs).or_default().insert(region.realm);
                 let reflected = child_visible.entry(*child_realm).or_default();
                 reflected.push(child_shape(regions, region, tick_hz));
                 reflected.extend_from_slice(interior_of(interior_shapes, region.realm));
@@ -8369,6 +8762,11 @@ fn aoi_decide(
     // — bounds `render_sent` to the live dots exactly, and a returning account re-streams from empty.
     let live_accounts: BTreeSet<AccountId> = render_routes.values().map(|(a, _)| *a).collect();
     render_sent.retain(|acct, _| live_accounts.contains(acct));
+    // THE WINDOW LANE (Slice A, §2.9 step 5): ship each open window its SL7 membership verdict —
+    // the fold above, diffed per window against what THAT window was already told (ids only; the
+    // receiver never re-derives AoI). Hysteresis, bands, grace and the demand path are untouched:
+    // this reads the verdict, it never makes one.
+    emit_window_membership(windows, &render_routes, &in_band, outbox, stats);
     // Step 5 slice C — reflect each LIVE child's CURRENT from-above scene DOWN one level, SEND-ON-CHANGE,
     // keyed by the CHILD REALM rather than by any occupant (the parent never learns who is inside — HR1;
     // the occupied child stands in for its occupants — SL7). Iterating the placements (not `child_visible`)
@@ -9072,6 +9470,64 @@ fn diff_scene_into_delta(
         .filter(|r| !new_ids.contains(r))
         .collect();
     (added, removed)
+}
+
+/// One window's SL7 membership VERDICT (`docs/design/window_lane.md` §2.2/§2.9): for an
+/// [`WindowScope::Occupants`] window, the union over the opener's OWN dots of their in-band
+/// direct children (the per-dot fold — the same per-account verdict the render delta ships,
+/// filtered to the one gateway the window belongs to); for a [`WindowScope::Child`] window, the
+/// occupied child's own proxy set (the existing `child_visible` fold, ids only). Monomorphic —
+/// every arm a covered region (HR5).
+fn window_verdict(
+    scope: WindowScope,
+    opener: NodeId,
+    render_routes: &BTreeMap<ObserverId, (AccountId, NodeId)>,
+    in_band: &BTreeMap<ObserverId, BTreeSet<RealmId>>,
+) -> BTreeSet<RealmId> {
+    match scope {
+        WindowScope::Occupants => render_routes
+            .iter()
+            .filter(|(_, (_, gateway))| *gateway == opener)
+            .filter_map(|(obs, _)| in_band.get(obs))
+            .flat_map(|ids| ids.iter().copied())
+            .collect(),
+        WindowScope::Child(child) => in_band
+            .get(&ObserverId::Child(child))
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+/// Ship each open window its membership DIFF (`added`/`removed` vs what THAT window already
+/// holds), reliable on the session-reply lane — send-on-change, so a stable verdict ships
+/// nothing and a fresh window is served its full set as one `added` batch. The scope note the
+/// wire contract states holds here by construction: the verdict gates BODIES and interiors
+/// downstream, never the placement/marker rows (those always ship the full roster).
+fn emit_window_membership(
+    windows: &mut OpenWindows,
+    render_routes: &BTreeMap<ObserverId, (AccountId, NodeId)>,
+    in_band: &BTreeMap<ObserverId, BTreeSet<RealmId>>,
+    outbox: &mut OutboundBox,
+    stats: &mut StubStats,
+) {
+    for ((gateway, window), held) in &mut windows.0 {
+        let verdict = window_verdict(held.scope, *gateway, render_routes, in_band);
+        let added: Vec<RealmId> = verdict.difference(&held.membership_sent).copied().collect();
+        let removed: Vec<RealmId> = held.membership_sent.difference(&verdict).copied().collect();
+        if !added.is_empty() | !removed.is_empty() {
+            push_session_reply(
+                outbox,
+                *gateway,
+                &ShardToGateway::WindowMembership {
+                    window: *window,
+                    added,
+                    removed,
+                },
+            );
+            held.membership_sent = verdict;
+            stats.window_memberships_sent += 1;
+        }
+    }
 }
 
 /// The survive-one-lost-datagram floor for the retain TTL (a tick COUNT) every TTL-pruned store shares. The lane
@@ -12164,41 +12620,73 @@ mod tests {
     }
 
     #[test]
-    fn window_control_before_its_registry_is_dropped_fail_closed_and_counted_apart() {
-        // THE WINDOW LANE, Slice 0 (mesh minor 16): the shapes exist, nothing moves. Both window
-        // control arms arriving today are dropped FAIL-CLOSED and counted on their OWN counter —
-        // a well-formed subscriber speaking a lane whose Slice-A registry does not exist yet is
-        // NOT `undecodable` garbage (the honesty floor), and no reply/fan/dot is ever produced.
-        use vd_wire::session_flow::{WindowId, WindowScope};
+    fn window_control_registers_refreshes_and_closes_the_registry_idempotently() {
+        // THE WINDOW LANE, Slice A (rebased from the Slice-0 fail-closed drop — the registry this
+        // control lane was owed now EXISTS): an open REGISTERS under (opener, id); a duplicate
+        // open of the same scope is the keep-alive (refreshes the TTL, counted apart); a re-used
+        // id under a NEW scope replaces the window whole; a close removes it; a close of an
+        // unknown id is a COUNTED no-op (the polite fast path racing the TTL backstop). Never
+        // `undecodable`, never a reply, never a dot.
         let mut rig = Rig::new();
         rig.grant_realm();
         let open = GatewayToShard::WindowOpen {
             window: WindowId(1),
             scope: WindowScope::Occupants,
         };
-        let close = GatewayToShard::WindowClose {
-            window: WindowId(1),
-        };
         let sent = rig.tick(vec![
             wire_msg(GATEWAY, MsgClass::Control, &open),
-            wire_msg(GATEWAY, MsgClass::Control, &close),
+            wire_msg(GATEWAY, MsgClass::Control, &open), // the keep-alive re-assert
         ]);
-        let replies = sent
+        // A registered Occupants window on a region-less rig: the emitter runs (empty roster ⇒
+        // an empty-rows WindowFrame each tick — the leaf's per-tick stamp) — nothing else.
+        let control_replies = sent
             .iter()
             .filter(|(to, class, _)| (*to == GATEWAY) & (*class == MsgClass::Control))
             .count();
-        assert_eq!(replies, 0, "no reply from an unconsumed window control");
+        assert_eq!(control_replies, 0, "no Control reply from a window open");
         assert_eq!(rig.world.resource::<Dots>().0.len(), 0, "no dot minted");
+        {
+            let stats = rig.world.resource::<StubStats>();
+            assert_eq!(stats.windows_opened, 1, "one window registered");
+            assert_eq!(stats.window_reasserted, 1, "the duplicate refreshed it");
+            assert_eq!(stats.windows_open, 1, "the gauge reads the registry");
+            assert_eq!(stats.undecodable, 0, "window control is NOT garbage");
+        }
+        let held = rig.world.resource::<OpenWindows>();
+        assert_eq!(held.0.len(), 1);
         assert_eq!(
-            rig.world.resource::<StubStats>().window_control_unconsumed,
-            2,
-            "each control frame counted"
+            held.0.get(&(GATEWAY, WindowId(1))).map(|w| w.scope),
+            Some(WindowScope::Occupants)
         );
+        // A re-used id under a NEW scope replaces the window (fresh baselines, counted as opened).
+        let rescope = GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Child(RealmId::Planet(9)),
+        };
+        let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &rescope)]);
+        assert_eq!(rig.world.resource::<StubStats>().windows_opened, 2);
         assert_eq!(
-            rig.world.resource::<StubStats>().undecodable,
-            0,
-            "a window control frame is NOT garbage"
+            rig.world
+                .resource::<OpenWindows>()
+                .0
+                .get(&(GATEWAY, WindowId(1)))
+                .map(|w| w.scope),
+            Some(WindowScope::Child(RealmId::Planet(9)))
         );
+        // Close removes it; a second close of the now-unknown id is a counted no-op.
+        let close = GatewayToShard::WindowClose {
+            window: WindowId(1),
+        };
+        let _ = rig.tick(vec![
+            wire_msg(GATEWAY, MsgClass::Control, &close),
+            wire_msg(GATEWAY, MsgClass::Control, &close),
+        ]);
+        assert_eq!(rig.world.resource::<OpenWindows>().0.len(), 0);
+        {
+            let stats = rig.world.resource::<StubStats>();
+            assert_eq!(stats.window_close_unknown, 1, "the second close counted");
+            assert_eq!(stats.windows_open, 0, "zero subscribers ⇒ zero windows");
+        }
     }
 
     #[test]
@@ -24082,6 +24570,892 @@ mod tests {
             child_live_bits(&rig.tick(vec![])).len(),
             1,
             "re-occupied ⇒ the edge fires again, off-cadence"
+        );
+    }
+
+    // ===== THE WINDOW LANE, Slice A (docs/design/window_lane.md §2.9/§4) ======================
+
+    /// Every `ShardToGateway::WindowFrame` in the outbox, decoded — `(to, window, at, hop, rows)`.
+    /// The `_ => None` arm is exercised by the entity/realm frames + demands riding the same tick.
+    #[allow(clippy::type_complexity)]
+    fn window_frames(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+    ) -> Vec<(
+        NodeId,
+        WindowId,
+        UniverseTick,
+        Option<vd_wire::session_flow::HopRow>,
+        Vec<RealmSnap>,
+    )> {
+        sent.iter()
+            .filter_map(
+                |(node, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
+                    Ok(ShardToGateway::WindowFrame {
+                        window,
+                        at,
+                        hop,
+                        rows,
+                        ..
+                    }) => Some((*node, window, at, hop.map(|h| *h), rows)),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Every `ShardToGateway::WindowBody` in the outbox, decoded — `(to, window, subject, stmt)`.
+    fn window_bodies(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+    ) -> Vec<(NodeId, WindowId, RealmId, BodyStmt)> {
+        sent.iter()
+            .filter_map(
+                |(node, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
+                    Ok(ShardToGateway::WindowBody {
+                        window,
+                        subject,
+                        stmt,
+                        ..
+                    }) => Some((*node, window, subject, stmt)),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Every `ShardToGateway::WindowMembership` in the outbox, decoded.
+    fn window_memberships(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+    ) -> Vec<(NodeId, WindowId, Vec<RealmId>, Vec<RealmId>)> {
+        sent.iter()
+            .filter_map(
+                |(node, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
+                    Ok(ShardToGateway::WindowMembership {
+                        window,
+                        added,
+                        removed,
+                    }) => Some((*node, window, added, removed)),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Where the window fixtures place the armed child — off-axis and non-zero on every
+    /// component, so a dropped or transposed coordinate cannot pass as a lucky zero.
+    const WINDOW_CHILD_CENTER: DVec3 = DVec3::new(500.0, -20.0, 3.0);
+
+    /// One System(7) shard with an ARMED direct child at [`WINDOW_CHILD_CENTER`], a second STATIC
+    /// child (no luma, inert band — the marker-absent / verdict-absent arms), a marker bag for the
+    /// armed child, and one in-band occupant. The window fixtures' shared base.
+    fn window_rig() -> Rig {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let armed = RealmRegion {
+            aoi: aoi_band(3),
+            ..region(OTHER_REALM, Some(OWN_REALM), WINDOW_CHILD_CENTER, 100.0)
+        };
+        let quiet = region(
+            RealmId::Planet(43),
+            Some(OWN_REALM),
+            DVec3::new(-40_000.0, 0.0, 0.0),
+            100.0,
+        );
+        plant_aoi(&mut rig, vec![root_region(), own_region(), armed, quiet]);
+        rig.world
+            .resource_mut::<ChildLuma>()
+            .0
+            .insert(OTHER_REALM, vd_core::look::luma_bag(6, 0.25));
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        rig
+    }
+
+    #[test]
+    fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
+        // §2.9 steps 1/3/4/5 on an Occupants window: ONE WindowFrame per tick (hop: None, the
+        // authored roster verbatim, stamped at the one universe tick), the self-look + the armed
+        // child's marker ON OPEN, the SL7 verdict as one added-batch — then a SECOND tick ships
+        // the per-tick frame again and NOTHING else (send-on-change holds its tongue).
+        let mut rig = window_rig();
+        let open = GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Occupants,
+        };
+        let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+        let frames = window_frames(&sent);
+        assert_eq!(frames.len(), 1, "ONE frame per tick per open window");
+        let (to, window, at, hop, rows) = &frames[0];
+        assert_eq!(*to, GATEWAY);
+        assert_eq!(*window, WindowId(1));
+        assert_eq!(*at, UniverseTick(100), "stamped at the one universe tick");
+        assert_eq!(*hop, None, "an occupant already stands in this frame");
+        // The FULL direct-child roster, static and armed alike, in the sender's own frame.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].realm, OTHER_REALM);
+        assert_eq!(rows[0].frame, frame_of(OTHER_REALM));
+        assert_eq!(rows[0].pose.frame, frame_of(OWN_REALM));
+        assert_eq!(rows[0].pose.pos.offset(), WINDOW_CHILD_CENTER);
+        assert_eq!(rows[1].realm, RealmId::Planet(43));
+        // The bodies: the realm's OWN look (its boot extent, SL3) + the armed child's marker (the
+        // planted bag verbatim); the quiet child carries NO luma ⇒ NO marker (absence of data).
+        let bodies = window_bodies(&sent);
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0].2, OWN_REALM);
+        assert_eq!(
+            bodies[0].3,
+            BodyStmt::SelfLook {
+                bag: vd_core::look::look_bag(&Boundary::Shell { r: 100_000.0 })
+            },
+            "the look IS the realm's own boot extent, framed by the one shared codec"
+        );
+        assert_eq!(
+            bodies[1],
+            (
+                GATEWAY,
+                WindowId(1),
+                OTHER_REALM,
+                BodyStmt::Marker {
+                    luma: vd_core::look::luma_bag(6, 0.25)
+                }
+            )
+        );
+        // The verdict: the armed child is in the dot's band; the quiet child (inert band) is not.
+        assert_eq!(
+            window_memberships(&sent),
+            vec![(GATEWAY, WindowId(1), vec![OTHER_REALM], vec![])]
+        );
+        // Second tick: the per-tick frame repeats; bodies + membership are send-on-change quiet.
+        rig.set_local_tick(2);
+        let sent = rig.tick(vec![]);
+        assert_eq!(window_frames(&sent).len(), 1);
+        assert_eq!(window_bodies(&sent), vec![]);
+        assert_eq!(window_memberships(&sent), vec![]);
+        let stats = rig.world.resource::<StubStats>();
+        assert_eq!(stats.window_frames_sent, 2);
+        assert_eq!(stats.window_frame_rows_sent, 4);
+        assert_eq!(stats.window_bodies_sent, 2);
+        assert_eq!(stats.window_memberships_sent, 1);
+        assert_eq!(stats.windows_open, 1);
+    }
+
+    #[test]
+    fn a_child_window_ships_the_hop_row_pre_inverted_at_the_author() {
+        // §2.2 R1: the hop row is the author's own frame expressed in the child's frame, the ONE
+        // inversion made at the author. Identity orientation + zero spin (every placement of THE
+        // world today) ⇒ the inversion is exactly the negated placement — asserted EXACTLY.
+        let mut rig = window_rig();
+        let open = GatewayToShard::WindowOpen {
+            window: WindowId(2),
+            scope: WindowScope::Child(OTHER_REALM),
+        };
+        let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+        let frames = window_frames(&sent);
+        assert_eq!(frames.len(), 1);
+        let (_, window, _, hop, rows) = &frames[0];
+        assert_eq!(*window, WindowId(2));
+        assert_eq!(rows.len(), 2, "the same authored roster rides every scope");
+        let hop = hop.as_ref().expect("a Child window carries the hop row");
+        assert_eq!(hop.child, OTHER_REALM);
+        assert_eq!(hop.inv.origin, -WINDOW_CHILD_CENTER);
+        assert_eq!(hop.inv.origin_cell, vd_core::glam::I64Vec3::ZERO);
+        assert_eq!(hop.inv.velocity, DVec3::ZERO);
+        assert_eq!(hop.inv.orientation, DQuat::IDENTITY);
+        assert_eq!(hop.inv.angular_velocity, DVec3::ZERO);
+    }
+
+    #[test]
+    fn the_hop_inversion_carries_velocity_and_spin_through_the_frame_core() {
+        // A MOVING, SPINNING child (identity orientation, cell zero — invertible today): the hop
+        // row's velocity is the frame core's own answer (the parent origin as seen from the
+        // rotating child: q⁻¹(ω×o − v)) and the angular term is the child's spin reversed and
+        // re-axed (−(q⁻¹·ω)) — exact numbers, no epsilon.
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let mover = RealmId::Planet(45);
+        let spin = RealmRegion {
+            aoi: aoi_band(0),
+            ..region(mover, Some(OWN_REALM), DVec3::ZERO, 100.0)
+        };
+        let placed = FramePlacement {
+            origin_cell: vd_core::glam::I64Vec3::ZERO,
+            origin: DVec3::new(7.0, 0.0, 0.0),
+            velocity: DVec3::new(0.0, 1.0, 0.0),
+            orientation: DQuat::IDENTITY,
+            angular_velocity: DVec3::new(0.0, 0.0, 0.5),
+        };
+        let motions: BTreeMap<RealmId, MotionFn> =
+            [(mover, MotionFn(std::sync::Arc::new(move |_| placed)))]
+                .into_iter()
+                .collect();
+        *rig.world.resource_mut::<RealmRegions>() =
+            RealmRegions::new(vec![root_region(), own_region(), spin])
+                .with_moving_children(motions);
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let open = GatewayToShard::WindowOpen {
+            window: WindowId(3),
+            scope: WindowScope::Child(mover),
+        };
+        let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+        let frames = window_frames(&sent);
+        assert_eq!(frames.len(), 1);
+        let hop = frames[0].3.as_ref().expect("hop row");
+        assert_eq!(hop.inv.origin, DVec3::new(-7.0, 0.0, 0.0));
+        // ω×o − v = (0,0,0.5)×(7,0,0) − (0,1,0) = (0,3.5,0) − (0,1,0) = (0,2.5,0).
+        assert_eq!(hop.inv.velocity, DVec3::new(0.0, 2.5, 0.0));
+        assert_eq!(hop.inv.angular_velocity, DVec3::new(0.0, 0.0, -0.5));
+    }
+
+    /// Drive ONE window-emission tick for a shard of `kind` hosting `own_realm` with an armed
+    /// `child` at [`WINDOW_CHILD_CENTER`], one in-band occupant, the SAME marker bag, and BOTH
+    /// window scopes open — returning (frames, bodies, memberships). The HR4 fixture runs this on
+    /// two shard kinds (G-IDENTICAL).
+    #[allow(clippy::type_complexity)]
+    fn drive_window_emit(
+        kind: NodeKind,
+        own_realm: RealmId,
+        own_frame: FrameRef,
+        child: RealmRegion,
+    ) -> (
+        Vec<(
+            NodeId,
+            WindowId,
+            UniverseTick,
+            Option<vd_wire::session_flow::HopRow>,
+            Vec<RealmSnap>,
+        )>,
+        Vec<(NodeId, WindowId, RealmId, BodyStmt)>,
+        Vec<(NodeId, WindowId, Vec<RealmId>, Vec<RealmId>)>,
+    ) {
+        let cfg = StubConfig {
+            realm: own_realm,
+            held_realms: StubConfig::single_realm(own_realm),
+            frame: own_frame,
+            own_coord: StubConfig::root_coord(own_realm),
+            ..config()
+        };
+        let child_realm = child.realm;
+        let mut rig = Rig::with_config_and_kind(cfg, kind);
+        grant_realm_for(&mut rig, own_realm);
+        let root = region(ROOT_REALM, None, DVec3::ZERO, 1.0e9);
+        let own = region_framed(
+            own_realm,
+            Some(ROOT_REALM),
+            DVec3::ZERO,
+            100_000.0,
+            own_frame,
+        );
+        plant_aoi(&mut rig, vec![root, own, child]);
+        rig.world
+            .resource_mut::<ChildLuma>()
+            .0
+            .insert(child_realm, vd_core::look::luma_bag(6, 0.25));
+        insert_owned_dot_framed(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            own_frame,
+            DVec3::new(500.0, 0.0, 0.0),
+        );
+        let sent = rig.tick(vec![
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(1),
+                    scope: WindowScope::Occupants,
+                },
+            ),
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(2),
+                    scope: WindowScope::Child(child_realm),
+                },
+            ),
+        ]);
+        (
+            window_frames(&sent),
+            window_bodies(&sent),
+            window_memberships(&sent),
+        )
+    }
+
+    #[test]
+    fn assert_window_emission_feature_anywhere() {
+        // HR4 G-IDENTICAL: the IDENTICAL window-emission feature — one frame per tick per window,
+        // the pre-inverted hop at the author, the look/marker bodies, the SL7 verdict — on a
+        // SYSTEM shard (child = Planet) AND a PLANET shard (child = Area), under their REAL
+        // capability profiles. The emitter is kind-BLIND, so the two runs differ ONLY in the
+        // realm ids they name: every VALUE (poses, hop numbers, bags, stamps) is byte-equal.
+        let a = drive_window_emit(
+            NodeKind::Shard(crate::capability::profiles::system().expect("system profile")),
+            OWN_REALM,
+            FrameRef::SystemSpace { system_seed: 7 },
+            RealmRegion {
+                aoi: aoi_band(3),
+                ..region_framed(
+                    OTHER_REALM,
+                    Some(OWN_REALM),
+                    WINDOW_CHILD_CENTER,
+                    100.0,
+                    FrameRef::PlanetCentered { planet_seed: 42 },
+                )
+            },
+        );
+        let b = drive_window_emit(
+            NodeKind::Shard(crate::capability::profiles::planet().expect("planet profile")),
+            RealmId::Planet(42),
+            FrameRef::PlanetCentered { planet_seed: 42 },
+            RealmRegion {
+                aoi: aoi_band(3),
+                ..region_framed(
+                    RealmId::Area(99),
+                    Some(RealmId::Planet(42)),
+                    WINDOW_CHILD_CENTER,
+                    100.0,
+                    FrameRef::AreaLocal {
+                        planet_seed: 42,
+                        area_seed: 99,
+                    },
+                )
+            },
+        );
+        let (a_frames, a_bodies, a_members) = a;
+        let (b_frames, b_bodies, b_members) = b;
+        assert_eq!(a_frames.len(), 2, "one frame per open window (System run)");
+        assert_eq!(b_frames.len(), 2, "one frame per open window (Planet run)");
+        for ((_, aw, aat, ahop, arows), (_, bw, bat, bhop, brows)) in
+            a_frames.iter().zip(b_frames.iter())
+        {
+            assert_eq!(aw, bw, "same window order");
+            assert_eq!(aat, bat, "same universe stamp");
+            assert_eq!(arows.len(), 1);
+            assert_eq!(brows.len(), 1);
+            // The VALUES are identical — only the realm names differ (kind-blind emission).
+            assert_eq!(arows[0].pose.pos, brows[0].pose.pos);
+            assert_eq!(arows[0].pose.vel, brows[0].pose.vel);
+            assert_eq!(arows[0].realm, OTHER_REALM);
+            assert_eq!(brows[0].realm, RealmId::Area(99));
+            // Option equality on the INV alone (HR5: plain equality, no match with an
+            // uncoverable divergence arm): both absent on the Occupants frame, both the SAME
+            // pre-inverted numbers on the Child frame — the shape and the values in one compare.
+            assert_eq!(
+                ahop.as_ref().map(|h| h.inv),
+                bhop.as_ref().map(|h| h.inv),
+                "the hop inversion is shape- and value-identical across kinds"
+            );
+            if let Some(h) = ahop {
+                assert_eq!(h.child, OTHER_REALM);
+            }
+            if let Some(h) = bhop {
+                assert_eq!(h.child, RealmId::Area(99));
+            }
+        }
+        // The bodies, as WHOLE expected sets (HR5: plain equality, never matches!): the look and
+        // marker BAGS are the same byte strings in both runs — the same boot extent through the
+        // one codec, the same planted datum — and only the subject ids differ per run.
+        let look = vd_core::look::look_bag(&Boundary::Shell { r: 100_000.0 });
+        let luma = vd_core::look::luma_bag(6, 0.25);
+        let expected = |own: RealmId, child: RealmId| {
+            vec![
+                (
+                    GATEWAY,
+                    WindowId(1),
+                    own,
+                    BodyStmt::SelfLook { bag: look.clone() },
+                ),
+                (
+                    GATEWAY,
+                    WindowId(1),
+                    child,
+                    BodyStmt::Marker { luma: luma.clone() },
+                ),
+                (
+                    GATEWAY,
+                    WindowId(2),
+                    own,
+                    BodyStmt::SelfLook { bag: look.clone() },
+                ),
+                (
+                    GATEWAY,
+                    WindowId(2),
+                    child,
+                    BodyStmt::Marker { luma: luma.clone() },
+                ),
+            ]
+        };
+        assert_eq!(a_bodies, expected(OWN_REALM, OTHER_REALM));
+        assert_eq!(b_bodies, expected(RealmId::Planet(42), RealmId::Area(99)));
+        // The verdicts: the Occupants window ships the dot's in-band child; the Child window's
+        // occupied-child proxy verdict is EMPTY here (no live bit) ⇒ exactly ONE message per run.
+        assert_eq!(a_members.len(), 1);
+        assert_eq!(b_members.len(), 1);
+        assert_eq!(a_members[0].1, WindowId(1));
+        assert_eq!(b_members[0].1, WindowId(1));
+        assert_eq!(a_members[0].2, vec![OTHER_REALM]);
+        assert_eq!(b_members[0].2, vec![RealmId::Area(99)]);
+    }
+
+    #[test]
+    fn a_dead_gateways_windows_die_by_the_derived_ttl_with_zero_leaked_emissions() {
+        // THE SLICE-A CHAOS GATE (window_lane.md §4 Slice A "TTL-expiry chaos"), in-proc form of
+        // the process-tier gateway kill (`rlm_demand_login`'s `kill_and_reap`): a gateway opens
+        // windows, then DIES — its keep-alives stop. The shard's windows must expire on the
+        // DERIVED TTL (2 beats + 1, owner law 3(a)) and not one emission may leak past expiry.
+        let mut rig = window_rig();
+        let sent = rig.tick(vec![
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(1),
+                    scope: WindowScope::Occupants,
+                },
+            ),
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(2),
+                    scope: WindowScope::Child(OTHER_REALM),
+                },
+            ),
+        ]);
+        assert_eq!(window_frames(&sent).len(), 2, "both windows serve");
+        let ttl = window_ttl_ticks(&config());
+        assert_eq!(
+            ttl,
+            RETAIN_TTL_CADENCE_BEATS * aoi_recheck_cadence(&config()) + 1,
+            "the TTL is the derived 2-beats+1, never a literal"
+        );
+        // The LAST tick inside the window: a whole TTL of silence is still served (one lost
+        // keep-alive never blinks a live subscriber).
+        rig.set_local_tick(1 + ttl);
+        let sent = rig.tick(vec![]);
+        assert_eq!(window_frames(&sent).len(), 2, "alive at the TTL edge");
+        assert_eq!(rig.world.resource::<StubStats>().windows_open, 2);
+        // One past: BOTH windows die BEFORE anything ships — zero leaked emissions after expiry.
+        rig.set_local_tick(2 + ttl);
+        let sent = rig.tick(vec![]);
+        assert_eq!(window_frames(&sent), vec![], "no frame leaks past the TTL");
+        assert_eq!(window_bodies(&sent), vec![], "no body leaks past the TTL");
+        assert_eq!(
+            window_memberships(&sent),
+            vec![],
+            "no verdict leaks past the TTL"
+        );
+        assert_eq!(rig.world.resource::<OpenWindows>().0.len(), 0);
+        let stats = rig.world.resource::<StubStats>();
+        assert_eq!(stats.window_ttl_expired, 2, "each expiry counted");
+        assert_eq!(stats.windows_open, 0, "the gauge reads the empty registry");
+        // And a keep-alive RESETS the clock: a re-opened window re-asserted at the edge survives
+        // the next whole TTL from THAT refresh.
+        let open = GatewayToShard::WindowOpen {
+            window: WindowId(9),
+            scope: WindowScope::Occupants,
+        };
+        rig.set_local_tick(100);
+        let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+        rig.set_local_tick(100 + ttl);
+        let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]); // the re-assert
+        rig.set_local_tick(100 + ttl + ttl);
+        let sent = rig.tick(vec![]);
+        assert_eq!(
+            window_frames(&sent).len(),
+            1,
+            "the refreshed window outlives the original TTL horizon"
+        );
+    }
+
+    #[test]
+    fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
+        // TWO NAMED PINS ON THE WORLD (window_lane.md §2.12; SL5 — the one seed universe, at the
+        // shipped posture the boot fences enforce):
+        // 1. INV-BODY-AT-ORIGIN — a realm's own body sits at its own frame origin, so the origin
+        //    of ITS frame, re-expressed through its parent's authored book, IS the parent's
+        //    placement row, exactly; and the pre-inverted hop row round-trips back to the origin
+        //    exactly.
+        // 2. ROTATED-CROSS-CELL INERTNESS — the hop inversion cannot be refused on THE world
+        //    today (a MEASUREMENT that fails the day the world grows a spinning realm a
+        //    cell-block out before the P10 cell math lands — never an argument).
+        let cfg = vd_physics::worldgen::UniverseConfig::world(
+            vd_physics::worldgen::VISUAL_OCCUPANT_V_MAX_MPS,
+            vd_physics::worldgen::AOI_TICK_DT_S,
+        );
+        let forest = vd_physics::worldgen::realm_regions_for_config(0, &cfg);
+        let anchors: BTreeSet<RealmId> = forest.iter().filter_map(|r| r.parent).collect();
+        let mut movers: BTreeMap<RealmId, vd_physics::celestial::OrbitalElements> = BTreeMap::new();
+        for &anchor in &anchors {
+            movers.extend(vd_physics::worldgen::moving_children_for_config(
+                0, &cfg, anchor,
+            ));
+        }
+        let regions = RealmRegions::new(forest).with_moving_children(kepler_motion_fns(movers));
+        let tick_hz = 1.0 / vd_physics::worldgen::AOI_TICK_DT_S;
+        let mut rows_pinned = 0usize;
+        let mut moved_since_epoch = 0usize;
+        for &t in &[UniverseTick(0), UniverseTick(50_000)] {
+            for &anchor in &anchors {
+                let own = regions.own_frame(anchor);
+                let book = regions.author_book(anchor, tick_hz, t);
+                for (region, pose) in regions.child_rows(anchor, &book) {
+                    rows_pinned += 1;
+                    // (1a) The child's own body — the ORIGIN of its own frame — maps through the
+                    // parent's book onto EXACTLY the authored placement row.
+                    let body = transfer_frame(
+                        &StampedPose::at_rest(region.frame, DVec3::ZERO, t),
+                        own,
+                        &book,
+                    )
+                    .expect("every direct child of THE world resolves through its parent's book");
+                    assert_eq!(
+                        body.pos, pose.pos,
+                        "{anchor} -> {}: body at origin",
+                        region.realm
+                    );
+                    assert_eq!(body.vel, pose.vel);
+                    // (2) The inversion is NEVER refused on THE world today — the inertness pin.
+                    let inv = invert_hop_placement(own, region.frame, &book).expect(
+                        "THE world grew a rotated cross-cell placement before P10's cell math \
+                         landed — the window hop inversion would now refuse in production",
+                    );
+                    // (1b) ...and it round-trips: the parent's body, as the hop states it in the
+                    // child's frame, maps back to the parent's own origin EXACTLY (identity
+                    // orientations everywhere today ⇒ bit-exact, no epsilon).
+                    let back = transfer_frame(
+                        &StampedPose {
+                            frame: region.frame,
+                            pos: LatticePos::at(inv.origin_cell, inv.origin),
+                            vel: inv.velocity,
+                            orient: inv.orientation,
+                            universe_tick: t,
+                        },
+                        own,
+                        &book,
+                    )
+                    .expect("the inverse rides the same book");
+                    assert_eq!(back.pos.cell(), vd_core::glam::I64Vec3::ZERO);
+                    assert_eq!(back.pos.offset(), DVec3::ZERO);
+                    assert_eq!(back.vel, DVec3::ZERO);
+                    if t == UniverseTick(50_000) && pose.pos.offset() != region.center.offset() {
+                        moved_since_epoch += 1;
+                    }
+                }
+            }
+        }
+        // NON-VACUITY, pinned: THE world's parent-authored rows — the galaxy under the universe,
+        // three systems under the galaxy, five planets under each system — at BOTH instants.
+        assert_eq!(
+            rows_pinned,
+            2 * (1 + 3 + 15),
+            "THE world's full child-row set"
+        );
+        // ...and the movers actually MOVED between the two instants (the pin measured a live
+        // world, not a static fixture): every planet is off its zeroed region center at t=50000.
+        assert_eq!(
+            moved_since_epoch, 15,
+            "all fifteen planets author live placements"
+        );
+    }
+
+    #[test]
+    fn the_live_siblings_interior_is_one_level_out_and_never_deeper_q1() {
+        // THE Q1 FENCE PIN (owner ruling 2026-08-16, window_lane.md §5 RULINGS + §2.12): one
+        // level into ANY live realm you are next to — generic, never a planet-specific case —
+        // and NEVER deeper. Structurally: a parent's window statements name AT MOST its direct
+        // children (its held interior outlines for a live child do NOT enter the window lane —
+        // the parent's per-child message stays a placement and nothing else, SL3); the ONE level
+        // of interior comes from the live realm's OWN window lane. Chained, an observer's
+        // windows reach exactly two levels — inside the two-level visibility guarantee the boot
+        // fence (`guard_grandchildren_invisible_outside`) proves on THE world.
+        let near = DVec3::new(500.0, 0.0, 0.0);
+        let mut rig = parent_with_two_planet_children(near);
+        inject_bit(&mut rig, RealmId::Planet(42));
+        // The live child's interior outline, held from the up-shape lane (lifted at receive).
+        rig.world.resource_mut::<ObservedInteriorShapes>().0.insert(
+            RealmId::Planet(42),
+            (
+                TickId(1),
+                vec![RealmShape {
+                    realm: RealmId::Area(99),
+                    frame: FrameRef::AreaLocal {
+                        planet_seed: 42,
+                        area_seed: 99,
+                    },
+                    center: LatticePos::local(DVec3::new(1.0, 2.0, 3.0)),
+                    shape: Boundary::Shell { r: 5.0 },
+                    parent: Some(RealmId::Planet(42)),
+                }],
+            ),
+        );
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let sent = rig.tick(vec![
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(1),
+                    scope: WindowScope::Occupants,
+                },
+            ),
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(2),
+                    scope: WindowScope::Child(RealmId::Planet(42)),
+                },
+            ),
+        ]);
+        // HALF 1 — the PARENT's lane: every realm the window statements name is a DIRECT child
+        // (or the parent itself, as a body subject). The held grandchild outline is NOWHERE.
+        let direct: BTreeSet<RealmId> = [RealmId::Planet(42), RealmId::Planet(43)]
+            .into_iter()
+            .collect();
+        let frames = window_frames(&sent);
+        assert_eq!(frames.len(), 2, "both windows serve (non-vacuous)");
+        for (_, _, _, _, rows) in &frames {
+            assert!(
+                !rows.is_empty(),
+                "the roster rides every frame (non-vacuous)"
+            );
+            for row in rows {
+                assert!(
+                    direct.contains(&row.realm),
+                    "a window frame row names a non-direct-child: {}",
+                    row.realm
+                );
+            }
+        }
+        for (_, _, subject, _) in &window_bodies(&sent) {
+            // Bitwise `|` (both operands pure, HR5 — a short-circuit RHS is an uncoverable region).
+            assert!(
+                (*subject == OWN_REALM) | direct.contains(subject),
+                "a body subject beyond one level: {subject}"
+            );
+        }
+        for (_, _, added, removed) in &window_memberships(&sent) {
+            for id in added.iter().chain(removed.iter()) {
+                assert!(direct.contains(id), "a verdict id beyond one level: {id}");
+            }
+        }
+        // HALF 2 — the LIVE realm's OWN lane states the one level of interior (Q1 = YES), on a
+        // DIFFERENT realm kind (a Planet shard with an Area child — the G-IDENTICAL discipline):
+        // its window frame names ITS direct children and nothing deeper exists to leak.
+        let planet = RealmId::Planet(42);
+        let cfg = StubConfig {
+            realm: planet,
+            held_realms: StubConfig::single_realm(planet),
+            frame: frame_of(planet),
+            own_coord: StubConfig::root_coord(planet),
+            ..config()
+        };
+        let mut inner = Rig::with_config(cfg);
+        grant_realm_for(&mut inner, planet);
+        plant_aoi(
+            &mut inner,
+            vec![
+                region_framed(planet, None, DVec3::ZERO, 100_000.0, frame_of(planet)),
+                region_framed(
+                    RealmId::Area(99),
+                    Some(planet),
+                    DVec3::new(1.0, 2.0, 3.0),
+                    5.0,
+                    FrameRef::AreaLocal {
+                        planet_seed: 42,
+                        area_seed: 99,
+                    },
+                ),
+            ],
+        );
+        insert_owned_dot_framed(
+            &mut inner,
+            TRIG_SESSION,
+            player(8),
+            frame_of(planet),
+            DVec3::new(50.0, 0.0, 0.0),
+        );
+        let sent = inner.tick(vec![wire_msg(
+            GATEWAY,
+            MsgClass::Control,
+            &GatewayToShard::WindowOpen {
+                window: WindowId(1),
+                scope: WindowScope::Occupants,
+            },
+        )]);
+        let frames = window_frames(&sent);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].4.iter().map(|r| r.realm).collect::<Vec<_>>(),
+            vec![RealmId::Area(99)],
+            "one level INTO the live realm — stated by that realm itself"
+        );
+    }
+
+    #[test]
+    fn a_child_window_guards_unrostered_ship_and_rotated_hops_counted() {
+        // The Child-scope guards, each dropped + counted, never a guess and never a panic:
+        // a stranger realm (`window_child_unrostered`), a Ship child (D-SHIP-1 — no lineage
+        // coord until P8, the SAME counter every coord lane uses), and a ROTATED CROSS-CELL
+        // placement (the frame core's own refusal, inherited — `window_hop_refused`). The
+        // Occupants window beside them keeps serving: one bad hop never mutes the lane.
+        let ship_realm = RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 7, 3));
+        let rotated = RealmId::Planet(44);
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let placed = FramePlacement {
+            origin_cell: vd_core::glam::I64Vec3::new(1, 0, 0),
+            origin: DVec3::new(5.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            orientation: DQuat::from_rotation_z(0.3),
+            angular_velocity: DVec3::ZERO,
+        };
+        let motions: BTreeMap<RealmId, MotionFn> =
+            [(rotated, MotionFn(std::sync::Arc::new(move |_| placed)))]
+                .into_iter()
+                .collect();
+        *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
+            root_region(),
+            own_region(),
+            region(rotated, Some(OWN_REALM), DVec3::ZERO, 100.0),
+            region(
+                ship_realm,
+                Some(OWN_REALM),
+                DVec3::new(50_000.0, 0.0, 0.0),
+                10.0,
+            ),
+        ])
+        .with_moving_children(motions);
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(5_000.0, 0.0, 0.0));
+        let opens: Vec<Inbound> = [
+            (WindowId(1), WindowScope::Occupants),
+            (WindowId(2), WindowScope::Child(RealmId::Planet(555))), // rostered NOWHERE
+            (WindowId(3), WindowScope::Child(ship_realm)),           // D-SHIP-1
+            (WindowId(4), WindowScope::Child(rotated)),              // the P10-owed refusal
+        ]
+        .into_iter()
+        .map(|(window, scope)| {
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen { window, scope },
+            )
+        })
+        .collect();
+        let sent = rig.tick(opens);
+        let frames = window_frames(&sent);
+        assert_eq!(
+            frames.iter().map(|f| f.1).collect::<Vec<_>>(),
+            vec![WindowId(1)],
+            "only the Occupants window serves — every guarded Child window is withheld"
+        );
+        let stats = rig.world.resource::<StubStats>();
+        assert_eq!(stats.window_child_unrostered, 1);
+        // The ship exclusion counts once in the AoI/demand fold and once on the window lane —
+        // the SAME per-lane-pass counting the other D-SHIP-1 guards use.
+        assert_eq!(stats.ship_child_regions_excluded, 2);
+        assert_eq!(stats.window_hop_refused, 1);
+        assert_eq!(
+            stats.windows_open, 4,
+            "guarded windows stay open — only their frames are withheld"
+        );
+        // The refusal is the frame core's own (one rule, inherited): asserted directly, plus the
+        // unknown-frame arm the emitter can never reach (the roster resolves first).
+        let book = rig
+            .world
+            .resource::<Placements>()
+            .0
+            .head(OWN_REALM)
+            .expect("authored")
+            .clone();
+        assert_eq!(
+            invert_hop_placement(frame_of(OWN_REALM), frame_of(rotated), &book),
+            Err(FrameError::RotatedFrameAcrossCells)
+        );
+        assert_eq!(
+            invert_hop_placement(
+                frame_of(OWN_REALM),
+                FrameRef::PlanetCentered { planet_seed: 777 },
+                &book
+            ),
+            Err(FrameError::UnknownDestFrame)
+        );
+    }
+
+    #[test]
+    fn window_membership_rides_the_one_fold_and_clears_with_the_last_observer() {
+        // §2.9 step 5: the verdict is THE existing aoi_decide fold — per-dot for Occupants
+        // (scoped to the OPENER's own dots: a second gateway's window holds an EMPTY verdict),
+        // the occupied-child proxy set for Child scopes — and when the LAST observer leaves, the
+        // emptiness pass clears every window's verdict (the removals ship once).
+        let near = DVec3::new(500.0, 0.0, 0.0);
+        let mut rig = parent_with_two_planet_children(near);
+        inject_bit(&mut rig, RealmId::Planet(42));
+        insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+        let sent = rig.tick(vec![
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(1),
+                    scope: WindowScope::Occupants,
+                },
+            ),
+            // A SECOND subscriber (another gateway) with no dots here: its per-dot verdict is
+            // empty — the fold is scoped per opener, never a global union.
+            wire_msg(
+                ANCESTOR,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(1),
+                    scope: WindowScope::Occupants,
+                },
+            ),
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowClose {
+                    window: WindowId(7), // unknown — the counted no-op rides the same tick
+                },
+            ),
+            wire_msg(
+                GATEWAY,
+                MsgClass::Control,
+                &GatewayToShard::WindowOpen {
+                    window: WindowId(2),
+                    scope: WindowScope::Child(RealmId::Planet(42)),
+                },
+            ),
+        ]);
+        let members = window_memberships(&sent);
+        // GATEWAY's dot stands in BOTH armed bands (42 at the origin, 43 at 500) ⇒ its Occupants
+        // verdict is both; the occupied child 42 (reach = its own 1000 m extent) also reaches
+        // both ⇒ the Child(42) verdict is both; ANCESTOR's window ships NOTHING (empty verdict).
+        let both = vec![RealmId::Planet(42), RealmId::Planet(43)];
+        assert_eq!(
+            members,
+            vec![
+                (GATEWAY, WindowId(1), both.clone(), vec![]),
+                (GATEWAY, WindowId(2), both.clone(), vec![]),
+            ]
+        );
+        // The LAST observer leaves (the dot detaches, the child bit expires): the emptiness pass
+        // ships the removals — every window's verdict returns to the empty set, exactly once.
+        rig.world.resource_mut::<Dots>().0.clear();
+        rig.world.resource_mut::<ChildLiveness>().0.clear();
+        rig.set_local_tick(2);
+        let sent = rig.tick(vec![]);
+        assert_eq!(
+            window_memberships(&sent),
+            vec![
+                (GATEWAY, WindowId(1), vec![], both.clone()),
+                (GATEWAY, WindowId(2), vec![], both),
+            ]
+        );
+        assert_eq!(
+            rig.world.resource::<StubStats>().window_close_unknown,
+            1,
+            "the unknown close counted"
         );
     }
 }

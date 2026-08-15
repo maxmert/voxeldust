@@ -2424,6 +2424,34 @@ pub fn boot_world(
     )
 }
 
+/// THE WINDOW LANE's marker roster for one shard boot (Slice A, docs/design/window_lane.md
+/// §2.2/§2.8): per DIRECT child of a held realm, the pre-encoded `TAG_LUMA` bag drawn from that
+/// child's own generation stream (the owner-ruled R4 datum — the parent authors a sleeping
+/// child's point of light). Derived from THE world (`system_photometrics_for_config`, the SAME
+/// `(seed, config)` every other boot seam reads — SL5) and FILTERED to the booted forest's
+/// direct children of the held realms, so a shard holds bags for exactly the children it may
+/// state markers about and nothing else. Empty wherever no child carries a draw (walk
+/// stations/areas; planets — their photometric ladder is an owed later draw).
+#[must_use]
+pub fn child_luma_bags(
+    universe_seed: u64,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+    regions: &[vd_core::geometry::RealmRegion],
+    held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+) -> std::collections::BTreeMap<vd_core::pose::RealmId, Vec<u8>> {
+    let config = vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps, tick_dt_s);
+    vd_physics::worldgen::system_photometrics_for_config(universe_seed, &config)
+        .into_iter()
+        .filter(|(realm, _)| {
+            regions.iter().any(|r| {
+                r.realm == *realm && r.parent.is_some_and(|parent| held_realms.contains(&parent))
+            })
+        })
+        .map(|(realm, draw)| (realm, vd_physics::worldgen::marker_luma_bag(&draw)))
+        .collect()
+}
+
 // ---- THE WORLD ROSTER — the ONE derivation point for every named realm of THE world -----------
 
 /// THE named realms every process cluster stands on — DERIVED from THE world, never stated.
@@ -3361,6 +3389,53 @@ mod world_roster_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn child_luma_bags_cover_exactly_the_held_realms_direct_system_children() {
+        // THE WINDOW LANE's boot plumbing (Slice A): the marker roster a shard boots with holds a
+        // TAG_LUMA bag for EXACTLY the direct children of its held realms that carry a draw — on
+        // THE world (DEV posture), the galaxy shard gets its three systems; a system shard gets
+        // NOTHING (planets' photometric ladder is an owed later draw), so the map stays inert.
+        let world = boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
+        let regions = world.regions();
+        // Named via the lineage, never a seed literal: a planet's parent IS a star system, and
+        // that system's parent IS the galaxy (the ambient Universe/Galaxy shells are System-tagged
+        // shells too, so kind-matching alone cannot pick a star system out).
+        let a_planet = regions
+            .iter()
+            .find(|r| matches!(r.realm, vd_core::pose::RealmId::Planet(_)))
+            .expect("THE world holds planets");
+        let a_system = a_planet.parent.expect("a planet nests under its system");
+        let galaxy = regions
+            .iter()
+            .find(|r| r.realm == a_system)
+            .and_then(|r| r.parent)
+            .expect("a system nests under the galaxy");
+        let bags = child_luma_bags(
+            DEV.universe_seed,
+            DEV.move_speed,
+            DEV.tick_dt,
+            regions,
+            &std::collections::BTreeSet::from([galaxy]),
+        );
+        assert_eq!(bags.len(), 3, "one marker bag per system of THE world");
+        for (realm, bag) in &bags {
+            assert!(matches!(realm, vd_core::pose::RealmId::System(_)));
+            vd_core::look::luma_of(bag).expect("a well-formed TAG_LUMA bag");
+        }
+        let none = child_luma_bags(
+            DEV.universe_seed,
+            DEV.move_speed,
+            DEV.tick_dt,
+            regions,
+            &std::collections::BTreeSet::from([a_system]),
+        );
+        assert_eq!(
+            none,
+            std::collections::BTreeMap::new(),
+            "a system's planets carry no draw yet — the roster is honestly empty"
+        );
     }
 
     #[test]

@@ -170,18 +170,103 @@ pub struct GatewayView {
     /// class). Its reachable producer is a SAME-NODE re-home (`source == dest`) — expected whenever an
     /// occupant re-enters the realm it just left — so nonzero is a health signal, not an error.
     pub sub_close_refused_authority: u64,
-    /// THE WINDOW LANE arriving before its engine exists (mesh minor 16, Slice 0): a
-    /// `WindowFrame`/`WindowBody`/`WindowMembership` row dropped FAIL-CLOSED because no per-window
-    /// engine consumes it yet (Slice B). Counted apart from `undecodable` (a well-formed peer on a
-    /// not-yet-consumed lane is not garbage). 0 in every shipped run until Slice A produces rows;
-    /// retires with the Slice-B engine. JSON-only appended field — a JSON reader ignores fields it
-    /// does not know, so an older operator tool keeps reading a newer snapshot.
-    pub window_rows_unconsumed: u64,
+    /// THE WINDOW LANE's admitted + INGESTED rows (mesh minor 16): a `WindowFrame`/`WindowBody`/
+    /// `WindowMembership` row that PASSED attestation and fed the Slice-B composer (the Slice-A
+    /// `window_rows_unconsumed` retired when the engine started consuming). Counted apart from
+    /// `undecodable`. JSON-only appended field — a JSON reader ignores fields it does not know,
+    /// so an older operator tool keeps reading a newer snapshot.
+    pub window_rows_ingested: u64,
+    /// THE WINDOW LANE, fail-closed (Slice A): a window row whose sender is not the head this
+    /// gateway resolved for the stating realm — forged or deposed, dropped + counted. 0 healthy.
+    pub window_sender_mismatch: u64,
+    /// THE WINDOW LANE, fail-closed (Slice A): a `WindowBody` refused by the admission rule (a
+    /// look not about its author; a marker not about a direct child). 0 healthy.
+    pub window_misauthored_body: u64,
+    /// THE WINDOW LANE, fail-closed (Slice A): a window row naming an id this gateway holds no
+    /// window for — a straggler around a close (benign in small numbers) or a forged id.
+    pub window_unknown_row: u64,
+    /// THE WINDOW LANE's control egress (Slice A): `WindowOpen`s for newly derived windows.
+    pub window_open_sent: u64,
+    /// THE WINDOW LANE's control egress (Slice A): `WindowClose`s for windows that stopped being
+    /// derivable (a session ended or crossed away).
+    pub window_close_sent: u64,
+    /// THE WINDOW LANE's keep-alive egress (Slice A): `WindowOpen` re-asserts on the derived
+    /// cadence (the shard's TTL is 2 beats + 1 of the same derivation).
+    pub window_keepalives_sent: u64,
+    /// Slice B — a `WindowFrame` stamped behind its window's derived ring span: refused.
+    pub window_level_refused: u64,
+    /// Slice B — a `WindowBody` older than the held statement for its subject: refused.
+    pub window_body_stale: u64,
+    /// Slice B — a `Marker` before its author's first level (no attested roster to vouch): refused.
+    pub window_body_preroster: u64,
+    /// Slice B — shared folds computed (one per (origin, tick) per gateway tick — §2.14).
+    pub window_folds: u64,
+    /// Slice B — sessions served from an already-computed shared fold (§2.14 memoization).
+    pub window_fold_hits: u64,
+    /// Slice B — shared-vs-per-session fold bit-level divergences (MUST stay 0 — parity-gated).
+    pub window_fold_divergence: u64,
+    /// Slice B — folds whose fresh prefix covered a whole ≥2-level chain: the exact-cadence
+    /// boot pin's direct proof (two shards stamped identical universe ticks).
+    pub window_full_chain_folds: u64,
+    /// Slice B — GAUGE: sessions holding a non-empty derived chain this tick.
+    pub window_chains_held: u64,
+    /// Slice B — strata held at last composed poses (per stratum per tick — §2.6.4).
+    pub window_compose_hold_ticks: u64,
+    /// Slice B — held strata removed by the dead-hop exit (§2.6.4).
+    pub window_hop_dead: u64,
+    /// Slice B — would-be common-tick rewinds frozen (§2.6.3 monotone-T). 0 healthy.
+    pub window_t_monotone_stalled: u64,
+    /// Slice B — chain derivations truncated on a cycle, fail-closed. 0 healthy.
+    pub window_chain_cycle: u64,
+    /// Slice B — fold rows refused by `InstantMismatch` (the shear law). 0 healthy — parity-gated.
+    pub window_instant_mismatch: u64,
+    /// Slice B — fold rows refused by `RotatedFrameAcrossCells` (pre-P10 cell math).
+    pub window_rotated_refused: u64,
+    /// Slice B — rows whose stated frame was not their level's own: alien, dropped.
+    pub window_alien_rows: u64,
+    /// Slice B — chain levels whose hop was absent/mismatched/rosterless: prefix capped there.
+    pub window_hop_invalid: u64,
+    /// Slice B — Active sessions whose composed feed was withheld (no standing realm/window yet).
+    pub window_unresolved_standing: u64,
+    /// Slice B — §2.12 hop-vs-child-row agreement: bit-level disagreements. 0 — parity-gated.
+    pub window_dedup_disagree: u64,
+    /// Slice B — GAUGE (max): the measured hop-vs-child-row deviation bound, nanometres.
+    pub window_dedup_max_dev_nm: u64,
+    /// Slice B — lineage-ancestor `HeadRead{Realm}` polls sent on the keep-alive cadence.
+    pub window_head_reads_sent: u64,
+    /// Slice B — composed rows produced across all folds.
+    pub window_composed_rows: u64,
+    /// SHADOW PARITY — old-lane rows reproduced bit-identically by the composed picture.
+    pub parity_rows_matched: u64,
+    /// SHADOW PARITY — same realm+tick, different position: UNEXPLAINED (fails the gate).
+    pub parity_pose_mismatch: u64,
+    /// SHADOW PARITY — GAUGE (max): largest measured pose deviation, nanometres.
+    pub parity_max_pos_dev_nm: u64,
+    /// SHADOW PARITY — a windowed realm absent from its tick's fold: UNEXPLAINED (fails the gate).
+    pub parity_missing_composed: u64,
+    /// SHADOW PARITY — the NAMED EXCLUSION: live-sibling interior rows (the recorded Q2-carrier
+    /// gap, D-WINDOW-1) — counted + printed by the gate, never silent.
+    pub parity_sibling_interior_excluded: u64,
+    /// SHADOW PARITY — explained: rows above an ancestor level with no resolved window yet.
+    pub parity_unwindowed_ancestor: u64,
+    /// SHADOW PARITY — explained: no fold at the row's tick (boot / skipped / ring-aged).
+    pub parity_no_fold_at_tick: u64,
+    /// SHADOW PARITY — explained: rows stated off the origin frame (crossing overlap dual feed).
+    pub parity_offframe_rows: u64,
+    /// SHADOW PARITY — rows naming the origin realm itself (SL1 self-filter regression signal).
+    pub parity_origin_rows: u64,
+    /// SHADOW PARITY — pending rows shed at the derived cap (loud, never silent).
+    pub parity_pending_shed: u64,
+    /// SHADOW PARITY — old-lane datagrams the shadow decode could not read. 0 healthy.
+    pub parity_undecodable: u64,
     /// Gauge: sessions currently open on this gateway.
     pub sessions_open: u64,
     /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
     /// resolve fired (the single call site of `claim_dynamic_shard`), i.e. a login routed to a spawned node.
     pub dynamic_shards: u64,
+    /// Gauge: windows this gateway currently holds open (THE WINDOW LANE, Slice A) — zero at zero
+    /// sessions, structurally (the design's teardown test).
+    pub windows_open: u64,
 }
 
 /// The whole read-only snapshot one `GET /admin/snapshot` returns. Empty-but-shaped
@@ -490,9 +575,50 @@ mod tests {
                 sub_close_refused_authority: 23,
                 // 30, not 24: appended after the fixture reached 29 (same positional-sequence
                 // reasoning as refused_unknown_sender's 26 above).
-                window_rows_unconsumed: 30,
+                window_rows_ingested: 30,
+                // 31..37: the Slice-A window-lane counters + gauge, appended in declaration order.
+                window_sender_mismatch: 31,
+                window_misauthored_body: 32,
+                window_unknown_row: 33,
+                window_open_sent: 34,
+                window_close_sent: 35,
+                window_keepalives_sent: 36,
+                // 38..69: the Slice-B composer + shadow-parity counters, declaration order.
+                window_level_refused: 38,
+                window_body_stale: 39,
+                window_body_preroster: 40,
+                window_folds: 41,
+                window_fold_hits: 42,
+                window_fold_divergence: 43,
+                window_full_chain_folds: 44,
+                window_chains_held: 45,
+                window_compose_hold_ticks: 46,
+                window_hop_dead: 47,
+                window_t_monotone_stalled: 48,
+                window_chain_cycle: 49,
+                window_instant_mismatch: 50,
+                window_rotated_refused: 51,
+                window_alien_rows: 52,
+                window_hop_invalid: 53,
+                window_unresolved_standing: 54,
+                window_dedup_disagree: 55,
+                window_dedup_max_dev_nm: 56,
+                window_head_reads_sent: 57,
+                window_composed_rows: 58,
+                parity_rows_matched: 59,
+                parity_pose_mismatch: 60,
+                parity_max_pos_dev_nm: 61,
+                parity_missing_composed: 62,
+                parity_sibling_interior_excluded: 63,
+                parity_unwindowed_ancestor: 64,
+                parity_no_fold_at_tick: 65,
+                parity_offframe_rows: 66,
+                parity_origin_rows: 67,
+                parity_pending_shed: 68,
+                parity_undecodable: 69,
                 sessions_open: 24,
                 dynamic_shards: 25,
+                windows_open: 37,
             }),
         };
         let bytes = postcard::to_allocvec(&snap).expect("encode");

@@ -26,3 +26,4 @@
 pub mod admin;
 pub mod gateway;
 pub mod tickets;
+pub mod window;
