@@ -96,6 +96,10 @@ pub struct RlmView {
     pub force_reaps: u64,
     /// Saga frames that did not decode to a `RealmDemand` (honesty; 0 in a healthy run).
     pub undecodable_demands: u64,
+    /// Demands whose sender the directory head shows holding neither the demanded realm's parent nor
+    /// the realm itself (or whose heads are unresolvable). MEASURE-ONLY — the demand is honored
+    /// unchanged (owner ruling 2026-08-15; enforcement waits for cloud mTLS).
+    pub demand_sender_mismatch: u64,
     /// Last sweep's desired-realm count (gauge).
     pub desired_gauge: u64,
     /// Last sweep's running-realm count (gauge).
@@ -438,6 +442,7 @@ mod tests {
                 teardowns_reaped: 2,
                 force_reaps: 1,
                 undecodable_demands: 0,
+                demand_sender_mismatch: 7,
                 desired_gauge: 3,
                 running_gauge: 2,
                 boot_ticks_observed_max: 37,

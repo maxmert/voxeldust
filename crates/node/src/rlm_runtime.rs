@@ -106,6 +106,12 @@ pub struct RlmReconcilerRes {
     pub force_reaps: u64,
     /// Saga-class frames that did not decode to a `RealmDemand` payload (ROB honesty; 0 in a healthy run).
     pub undecodable_demands: u64,
+    /// Demands whose SENDER the directory head does not show holding the demanded realm's PARENT or the
+    /// realm ITSELF (own-coord keep-alive) — including demands whose realm resolves to no head at all.
+    /// MEASURE-ONLY (owner ruling 2026-08-15, docs/design/owner_decisions_2026-08-15.md item 11): counted
+    /// and warned, and the demand is processed UNCHANGED — the warm-ahead path must never eat a blind
+    /// window. Refusal is deferred to cloud, where mTLS names the sender.
+    pub demand_sender_mismatch: u64,
     /// Last sweep's desired-realm count (gauge).
     pub desired_gauge: u64,
     /// Last sweep's running-realm count (gauge).
@@ -170,6 +176,7 @@ impl RlmReconcilerRes {
             teardowns_reaped: 0,
             force_reaps: 0,
             undecodable_demands: 0,
+            demand_sender_mismatch: 0,
             desired_gauge: 0,
             running_gauge: 0,
             boot_ticks_observed_max: 0,
@@ -451,14 +458,35 @@ fn apply_revoke(dir: &mut DirectoryCore, path: &RealmPath, fence: Fence) -> bool
     }
 }
 
+/// Demand PROVENANCE (owner ruling 2026-08-15, docs/design/owner_decisions_2026-08-15.md item 11): when
+/// a demand names realm X, the LAWFUL senders are the process the directory head shows holding X's
+/// PARENT, or the process holding X ITSELF (the own-coord keep-alive). Anything else — including a
+/// realm whose heads are unresolvable — is a mismatch the caller counts. Pure head-reads, no realm-kind
+/// branch (a system's demand and an area's resolve identically).
+fn demand_sender_is_lawful(dir: &DirectoryCore, child: &RealmCoord, from: NodeId) -> bool {
+    let own = dir.head(DirectoryKey::Realm(child.lowered()));
+    let parent = child
+        .path()
+        .parent_realm()
+        .and_then(|rid| dir.head(DirectoryKey::Realm(rid)));
+    own.is_some_and(|record| record.authority.node() == from)
+        || parent.is_some_and(|record| record.authority.node() == from)
+}
+
 /// Slice 3c — INGEST: fold every re-asserted `RealmDemand` on the `Saga` class into the kernel ledger
 /// (the SOURCE-AGNOSTIC ingress — an AoI demand and a player-spawn demand are indistinguishable). Mirrors
 /// `serve_directory`'s decode; a Saga frame that is not a `RealmDemand` is skipped (it is another
 /// service's — `Directory`/`SagaAck`), and an undecodable one is counted (honesty, parity with
-/// `orchestrator.rs`).
-pub fn record_realm_demands(inbox: Res<InboundBox>, mut rlm: ResMut<RlmReconcilerRes>) {
+/// `orchestrator.rs`). Sender provenance is MEASURED per demand ([`demand_sender_is_lawful`]) and never
+/// gates: a mismatch counts + warns and the demand is honored unchanged (owner ruling 2026-08-15 —
+/// observe mode only; enforcement waits for cloud mTLS).
+pub fn record_realm_demands(
+    inbox: Res<InboundBox>,
+    dir: Res<crate::orchestrator::DirectoryRes>,
+    mut rlm: ResMut<RlmReconcilerRes>,
+) {
     for msg in &inbox.0 {
-        let Inbound::Wire { class, bytes, .. } = msg else {
+        let Inbound::Wire { from, class, bytes } = msg else {
             continue;
         };
         if *class != MsgClass::Saga {
@@ -475,6 +503,15 @@ pub fn record_realm_demands(inbox: Res<InboundBox>, mut rlm: ResMut<RlmReconcile
         let InterShardFlow::RealmDemand(demand) = flow else {
             continue;
         };
+        if !demand_sender_is_lawful(&dir.0, &demand.child, *from) {
+            rlm.demand_sender_mismatch += 1;
+            tracing::warn!(
+                from = from.0,
+                child = ?demand.child.path(),
+                "realm demand from a sender the directory shows holding neither the realm's \
+                 parent nor the realm itself — measured, demand honored (observe mode)"
+            );
+        }
         rlm.ledger.record_demand(
             &demand.child,
             demand.verb,
@@ -608,6 +645,17 @@ mod tests {
     }
 
     fn demand_frame(coord: &RealmCoord, verb: DemandVerb, tick: u64, fence: u64) -> Inbound {
+        demand_frame_from(coord, verb, tick, fence, NodeId(7))
+    }
+
+    /// [`demand_frame`] with a caller-chosen SENDER — the provenance tests name who is demanding.
+    fn demand_frame_from(
+        coord: &RealmCoord,
+        verb: DemandVerb,
+        tick: u64,
+        fence: u64,
+        from: NodeId,
+    ) -> Inbound {
         let bytes = postcard::to_allocvec(&InterShardFlow::RealmDemand(RealmDemand {
             child: coord.clone(),
             parent_fence: Fence(fence),
@@ -616,15 +664,38 @@ mod tests {
         }))
         .expect("encode");
         Inbound::Wire {
-            from: NodeId(7),
+            from,
             class: MsgClass::Saga,
             bytes: bytes.into(),
         }
     }
 
+    /// HR5 — a TRACE sink so every tracing macro's lazy field closure evaluates on the paths the
+    /// tests drive (the provenance warn); without a subscriber those closures are dead regions.
+    fn init_test_tracing() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+                .with_writer(std::io::sink)
+                .finish();
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
     fn run(inbound: Vec<Inbound>) -> RlmReconcilerRes {
+        // No directory heads: every sender is UNRESOLVABLE — measured, never gating (the demand
+        // still folds; the provenance tests below pin all four sender classes explicitly).
+        run_with_dir(DirectoryCore::new(DirectoryTuning::default()), inbound)
+    }
+
+    /// [`run`] with caller-built directory heads — the provenance tests grant who holds what.
+    fn run_with_dir(dir: DirectoryCore, inbound: Vec<Inbound>) -> RlmReconcilerRes {
+        init_test_tracing();
         let mut world = World::new();
         world.insert_resource(InboundBox(inbound));
+        world.insert_resource(crate::orchestrator::DirectoryRes(dir));
         world.insert_resource(RlmReconcilerRes::new(RlmTuning::cloud(20), spawner()));
         let mut schedule = Schedule::default();
         schedule.add_systems(record_realm_demands);
@@ -635,8 +706,12 @@ mod tests {
     /// Ingest `inbound` into an EXISTING reconciler through the UNCHANGED `record_realm_demands` system
     /// (mirrors [`run`] but folds into a res that already carries state), returning it for the next drive.
     fn ingest_into(rlm: RlmReconcilerRes, inbound: Vec<Inbound>) -> RlmReconcilerRes {
+        init_test_tracing();
         let mut world = World::new();
         world.insert_resource(InboundBox(inbound));
+        world.insert_resource(crate::orchestrator::DirectoryRes(DirectoryCore::new(
+            DirectoryTuning::default(),
+        )));
         world.insert_resource(rlm);
         let mut schedule = Schedule::default();
         schedule.add_systems(record_realm_demands);
@@ -717,6 +792,106 @@ mod tests {
         assert_eq!(
             rlm.undecodable_demands, 0,
             "a valid non-demand frame is not undecodable"
+        );
+    }
+
+    // ---- demand provenance (owner ruling 2026-08-15, item 11: measure-only) ----------------------
+
+    /// A two-level coord (System 1 → Planet `seed`) so the PARENT arm of the provenance check has a
+    /// resolvable head to name.
+    fn planet_in_sys1(seed: u64) -> RealmCoord {
+        RealmCoord::from_path(RealmPath::from_levels(vec![
+            RealmLevel::new(RealmKindTag::System, 1),
+            RealmLevel::new(RealmKindTag::Planet, seed),
+        ]))
+        .expect("two-level path has a leaf")
+    }
+
+    #[test]
+    fn a_demand_from_the_parents_holder_or_the_realms_own_holder_is_lawful() {
+        // OWN-holder arm: node 7 holds System(7) itself (the own-coord keep-alive) — no mismatch.
+        let mut own = dir();
+        grant(&mut own, RealmId::System(7), 7, 1);
+        let rlm = run_with_dir(
+            own,
+            vec![demand_frame_from(
+                &sys(7),
+                DemandVerb::KeepAlive,
+                100,
+                1,
+                NodeId(7),
+            )],
+        );
+        assert_eq!(
+            rlm.demand_sender_mismatch, 0,
+            "the realm's own holder is lawful"
+        );
+        assert_eq!(rlm.ledger().len(), 1);
+
+        // PARENT-holder arm: node 7 holds System(1); it demands the planet UNDER it — no mismatch
+        // (the child's own head does not exist yet; that is exactly the warm-ahead spin-up shape).
+        let mut parent = dir();
+        grant(&mut parent, RealmId::System(1), 7, 1);
+        let rlm = run_with_dir(
+            parent,
+            vec![demand_frame_from(
+                &planet_in_sys1(4),
+                DemandVerb::SpinUp,
+                100,
+                1,
+                NodeId(7),
+            )],
+        );
+        assert_eq!(
+            rlm.demand_sender_mismatch, 0,
+            "the parent's holder is lawful"
+        );
+        assert_eq!(rlm.ledger().len(), 1);
+    }
+
+    #[test]
+    fn a_mismatched_sender_is_counted_and_the_demand_is_still_honored() {
+        // BOTH heads resolve — to node 8 — and node 7 demands: a mismatch, counted + warned, and the
+        // demand folds into the ledger UNCHANGED (observe mode: the warm-ahead path never eats a
+        // blind window; enforcement waits for cloud mTLS).
+        let mut d = dir();
+        grant(&mut d, RealmId::System(1), 8, 1);
+        grant(&mut d, RealmId::Planet(4), 8, 1);
+        let rlm = run_with_dir(
+            d,
+            vec![demand_frame_from(
+                &planet_in_sys1(4),
+                DemandVerb::SpinUp,
+                100,
+                1,
+                NodeId(7),
+            )],
+        );
+        assert_eq!(rlm.demand_sender_mismatch, 1, "the stranger is measured");
+        assert_eq!(
+            rlm.ledger()
+                .get(planet_in_sys1(4).path())
+                .expect("the demand was honored despite the mismatch")
+                .last_demand_tick,
+            UniverseTick(100)
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_head_is_counted_and_the_demand_is_still_honored() {
+        // NO head resolves (empty directory — e.g. a rebuilt orchestrator before re-grants): counted
+        // as unresolvable, and the demand is still honored (the same observe-only rule).
+        let rlm = run(vec![demand_frame(&sys(7), DemandVerb::SpinUp, 100, 1)]);
+        assert_eq!(
+            rlm.demand_sender_mismatch, 1,
+            "unresolvable is measured too"
+        );
+        assert_eq!(
+            rlm.ledger()
+                .get(sys(7).path())
+                .expect("the demand was honored despite no resolvable head")
+                .last_demand_tick,
+            UniverseTick(100)
         );
     }
 

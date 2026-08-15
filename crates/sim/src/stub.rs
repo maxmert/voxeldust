@@ -4967,13 +4967,11 @@ fn evaluate_realm_boundaries(
     // session for the saga's gateway-routed `PrepareSubscribe` (Slice 3f).
     for (session, dot) in dots.0.iter_mut().filter(|(_, d)| d.authority.simulates()) {
         let pose = dot.pose;
-        // S0 of the placement arc — PIN the Stage-B4 guarantee the instant table stands on: a
-        // non-latched simulating dot was re-stamped THIS tick by `readvance_dots` (group A, strictly
-        // before this system), so the scan measures it against the world of NOW. A latched dot's
-        // stamp is deliberately frozen (the up-observation ride measurement) and is exempt.
-        debug_assert!(
-            in_flight.0.contains_key(&dot.entity) || pose.universe_tick == clock.universe_tick,
-            "a non-latched simulating dot's stamp must equal the clock at the detector",
+        debug_assert_nonlatched_stamp_is_current(
+            &in_flight.0,
+            dot.entity,
+            pose.universe_tick,
+            clock.universe_tick,
         );
         // A DURABLE dot reads the HEAD book — the world of NOW. For a non-latched dot the head's
         // instant IS the pose's stamp (the `readvance_dots` guarantee pinned above), bit-identical to
@@ -5168,6 +5166,25 @@ fn owned_prior_mask(ix_of: &BTreeMap<RealmId, usize>, mask: &[u64], owning: Real
 /// `BTreeMap<K, V>` — no per-monomorphization branch trap (HR5).
 fn retain_live<K: Ord, V>(map: &mut BTreeMap<K, V>, live: &BTreeSet<K>) {
     map.retain(|k, _| live.contains(k));
+}
+
+/// S0 of the placement arc — the Stage-B4 guarantee the instant table stands on, PINNED where the
+/// detector reads a dot: a non-latched simulating dot was re-stamped THIS tick by `readvance_dots`
+/// (group A, strictly before the detector), so the scan measures it against the world of NOW. A
+/// LATCHED dot (an in-flight crossing) is exempt: its stamp is deliberately frozen (the
+/// up-observation ride measurement). A monomorphic helper so the detector stays a branchless shim
+/// and every arm of the invariant — the latch exemption, the holding stamp, and the panic — is
+/// coverable by name (HR5); debug-only, like every stated invariant.
+fn debug_assert_nonlatched_stamp_is_current(
+    in_flight: &BTreeMap<EntityId, TransferId>,
+    entity: EntityId,
+    stamp: UniverseTick,
+    now: UniverseTick,
+) {
+    debug_assert!(
+        in_flight.contains_key(&entity) || stamp == now,
+        "a non-latched simulating dot's stamp must equal the clock at the detector",
+    );
 }
 
 /// The result of one subject's containment evaluation — the frame-local offset the caller records as
@@ -9035,6 +9052,41 @@ mod tests {
             PlacementCarry {
                 max_skew_ticks: PlacementCarry::skew_ticks_for(50)
             }
+        );
+    }
+
+    /// The detector's stamp invariant, all three arms by name (HR5): a LATCHED dot is exempt even
+    /// with a frozen stamp; a non-latched dot holding the clock's stamp passes.
+    #[test]
+    fn the_stamp_invariant_exempts_a_latched_dot_and_accepts_a_current_stamp() {
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        let mut latched = BTreeMap::new();
+        latched.insert(entity, TransferId(1));
+        debug_assert_nonlatched_stamp_is_current(
+            &latched,
+            entity,
+            UniverseTick(1),
+            UniverseTick(9),
+        );
+        debug_assert_nonlatched_stamp_is_current(
+            &BTreeMap::new(),
+            entity,
+            UniverseTick(9),
+            UniverseTick(9),
+        );
+    }
+
+    /// …and the panic arm: a non-latched dot whose stamp trails the clock is the `readvance_dots`
+    /// ordering guarantee broken — the invariant fails loudly rather than scanning a stale world.
+    #[test]
+    #[should_panic(expected = "a non-latched simulating dot's stamp must equal the clock")]
+    fn the_stamp_invariant_panics_on_a_non_latched_stale_stamp() {
+        let entity = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        debug_assert_nonlatched_stamp_is_current(
+            &BTreeMap::new(),
+            entity,
+            UniverseTick(1),
+            UniverseTick(9),
         );
     }
 

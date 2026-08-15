@@ -377,6 +377,18 @@ mod tests {
         );
     }
 
+    /// The no-brake guard's OTHER refusal arm (HR5): a NON-FINITE `max_step_m` disables braking
+    /// exactly like a non-positive one — the same full-magnitude step, equality-pinned against
+    /// the `0.0` legacy arm the oscillation contract above drives.
+    #[test]
+    fn walk_to_treats_a_non_finite_brake_as_no_brake() {
+        let pos = DVec3::new(0.0, 0.0, -0.55);
+        let braked_off = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, 0.02, 0.0);
+        let non_finite = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, 0.02, f64::NAN);
+        assert_eq!(non_finite, braked_off);
+        assert!(!non_finite.arrived);
+    }
+
     /// THE BRAKE (Stage B4): with `max_step_m` = the sim step, the SAME sub-step tolerance that
     /// oscillates forever un-braked (the pinned test above) settles — inside the last step the
     /// axes scale down, the final step lands on the target, and `arrived` fires. This is the

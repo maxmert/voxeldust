@@ -94,7 +94,8 @@ pub const PROTO_MAJOR: u16 = 1;
 /// **9** appends `InterShardFlow::ShardRoster` — the orchestrator telling a router which nodes the
 /// ownership record shows holding a realm, so node class stops being inferred from a transfer's claim or
 /// asserted by the node itself. Purely a server↔server addition: no client-facing message changed, so the
-/// floor below does NOT move and every existing client negotiates exactly as before.
+/// floor below does NOT move and every existing client negotiates exactly as before. Retroactively
+/// owner-approved 2026-08-15 (docs/design/owner_decisions_2026-08-15.md item 7).
 /// **10** appends `InterShardFlow::ChildLive` (the SL7 occupancy bit, child→parent — Step 5 slice A)
 /// and `InterShardFlow::RealmObservation` (a live child's own authored rows, one hop up, for the parent
 /// to restate and re-fan — the "planets freeze when I exit the system" cure, owner-approved 2026-08-13).
@@ -105,11 +106,16 @@ pub const PROTO_MAJOR: u16 = 1;
 /// `InterShardFlow::ChildSceneSet` (the per-LIVE-CHILD rekey of the down-reflected sibling scene — the
 /// occupant-keyed `ProxySceneSet` stops being emitted; its `AccountId` leaves the wire). Purely
 /// server↔server again: the client keeps receiving the same `RealmSceneDelta`, the floor does not move.
+/// `RealmShapeObservation` is retroactively owner-approved 2026-08-15
+/// (docs/design/owner_decisions_2026-08-15.md item 7) — the shape lane is INTERIM: its content evolves
+/// to self-authored looks with the observer chain.
 /// **12** TOMBSTONES `InterShardFlow::OccupantInterest` and `InterShardFlow::ProxySceneSet` (Step 5
 /// slice D): the per-occupant lanes are DELETED — no producer, no consumer; a received frame counts
 /// undecodable. The variants and their payload structs REMAIN because postcard discriminants are
 /// positional and may never be renumbered; the discriminants are reserved forever. Nothing is appended
-/// and no client-facing message changed, so the floor does not move.
+/// and no client-facing message changed, so the floor does not move. The tombstones are owner-approved
+/// 2026-08-12 (docs/design/step5_sl7_lane_deletion.md §8 answer 1: "the four pose-carrying arms
+/// tombstone").
 /// **13** TOMBSTONES `InterShardFlow::EntityInterest` and `InterShardFlow::EntityCascade` (Step 5
 /// slice E, owner-approved): the entity lane is DELETED — occupant poses no longer cross a realm
 /// boundary at steady state (SL2); a bystander sees the occupied realm itself as its occupants'
@@ -130,7 +136,9 @@ pub const PROTO_MAJOR: u16 = 1;
 /// the §4u corruption at its root) — and `GhostFlow::SpawnV2` is APPENDED: the same take-over proof
 /// with the pose gone. The retained ghost emits only while the hand-off hold is open; a bystander's
 /// leaver VANISHES at hold closure (the minor-14 remove message, retimed). Mesh-only (one cluster
-/// build, ledger-visible); no client-facing message changed, so the floor does not move.
+/// build, ledger-visible); no client-facing message changed, so the floor does not move. SpawnV2 and
+/// the Spawn/Delta tombstones are owner-approved 2026-08-12 (docs/design/step5_sl7_lane_deletion.md
+/// §8 answer 1).
 pub const PROTO_MINOR: u16 = 15;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
@@ -331,6 +339,150 @@ mod tests {
                 "a minor-{stale} peer is below the floor"
             );
         }
+    }
+
+    /// THE APPROVAL-CITATION GATE (owner ruling 2026-08-15, docs/design/owner_decisions_2026-08-15.md
+    /// item 7): every version-ledger minor entry from 9 upward must carry an owner citation — a new
+    /// wire minor documented without one FAILS THE BUILD. The ledger IS the doc comment on
+    /// [`PROTO_MINOR`], so the gate reads this file's own source (the same discipline as the
+    /// router-converter scan below) and parses the entries off their real structure: an entry starts
+    /// at a doc line opening with `**N**` (the style every entry since 9 uses) or `minor N` (the
+    /// pre-9 style, kept so the parser sees the whole ledger and the completeness check below stays
+    /// honest). ACCEPTED MARKERS — the minimal set the entries actually use: `owner-approved` (which
+    /// "retroactively owner-approved" contains) and `owner-picked`. Two asserts, both load-bearing:
+    /// (1) COMPLETENESS — minors 9..=PROTO_MINOR each own exactly one parseable entry, in order, so a
+    /// bump cannot dodge the gate by writing an entry the parser cannot see (or none at all);
+    /// (2) CITATION — no gated entry lacks a marker.
+    ///
+    /// The helpers are exercised on named examples for BOTH answers of every arm (HR5: a green tree
+    /// alone would leave the guilty arms unrun).
+    fn ledger_entry_start(line: &str) -> Option<u16> {
+        let text = line.trim_start().strip_prefix("/// ")?;
+        if let Some(rest) = text.strip_prefix("**") {
+            let (num, _) = rest.split_once("**")?;
+            return num.parse().ok();
+        }
+        if let Some(rest) = text.strip_prefix("minor ") {
+            let first = rest.split_whitespace().next()?;
+            return first.parse().ok();
+        }
+        None
+    }
+
+    /// The contiguous doc block sitting directly on `pub const PROTO_MINOR` — the ledger itself.
+    fn ledger_block(source: &str) -> Vec<String> {
+        let lines: Vec<&str> = source.lines().collect();
+        let const_ix = lines
+            .iter()
+            .position(|l| l.starts_with("pub const PROTO_MINOR:"))
+            .expect("version.rs declares PROTO_MINOR");
+        let block: Vec<String> = lines[..const_ix]
+            .iter()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .map(|l| (*l).to_owned())
+            .collect();
+        block.into_iter().rev().collect()
+    }
+
+    /// Split the ledger block into `(minor, entry text)` rows. Lines before the first entry are the
+    /// ledger preamble and belong to no entry.
+    fn ledger_entries(block: &[String]) -> Vec<(u16, String)> {
+        let mut entries: Vec<(u16, String)> = Vec::new();
+        for line in block {
+            if let Some(minor) = ledger_entry_start(line) {
+                entries.push((minor, line.clone()));
+            } else if let Some((_, text)) = entries.last_mut() {
+                text.push('\n');
+                text.push_str(line);
+            }
+        }
+        entries
+    }
+
+    /// The citation classifier — true means the entry lacks every accepted marker.
+    fn uncited(entry: &str) -> bool {
+        !entry.contains("owner-approved") && !entry.contains("owner-picked")
+    }
+
+    #[test]
+    fn ledger_entry_start_reads_both_entry_styles_and_refuses_the_rest() {
+        // The two real styles.
+        assert_eq!(ledger_entry_start("/// **9** appends ShardRoster"), Some(9));
+        assert_eq!(
+            ledger_entry_start("/// minor 4 appended ShardPresence"),
+            Some(4)
+        );
+        // Refusals, one per arm: not a doc line; a doc line that starts no entry; bold that is
+        // not a number; an unterminated bold opener; a non-numeric minor; a bare "minor ".
+        assert_eq!(ledger_entry_start("pub const PROTO_MINOR: u16 = 15;"), None);
+        assert_eq!(ledger_entry_start("/// the floor does not move."), None);
+        assert_eq!(ledger_entry_start("/// **bold** emphasis"), None);
+        assert_eq!(ledger_entry_start("/// **unterminated"), None);
+        assert_eq!(ledger_entry_start("/// minor tweak to prose"), None);
+        assert_eq!(ledger_entry_start("/// minor "), None);
+    }
+
+    #[test]
+    fn ledger_entries_attach_continuations_and_skip_the_preamble() {
+        let block: Vec<String> = [
+            "/// Additive revision within the major — a preamble line owned by no entry.",
+            "/// **9** appends a lane",
+            "/// and this wrapped line belongs to entry 9.",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        assert_eq!(
+            ledger_entries(&block),
+            vec![(
+                9,
+                "/// **9** appends a lane\n/// and this wrapped line belongs to entry 9."
+                    .to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn uncited_recognises_each_marker_and_flags_a_bare_entry() {
+        assert!(!uncited(
+            "/// **9** ... retroactively owner-approved 2026-08-15"
+        ));
+        assert!(!uncited("/// **14** ... (D-4(a), owner-picked)"));
+        assert!(uncited(
+            "/// **16** appends a lane with no approval on record"
+        ));
+    }
+
+    #[test]
+    fn every_ledger_minor_from_9_up_carries_an_owner_citation() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/version.rs"),
+        )
+        .expect("the crate's own source is readable");
+        let entries = ledger_entries(&ledger_block(&source));
+        let gated: Vec<(u16, String)> = entries.into_iter().filter(|(n, _)| *n >= 9).collect();
+        // COMPLETENESS: every minor from 9 to current owns exactly one parseable entry, in order.
+        // A new PROTO_MINOR bump whose ledger entry the parser cannot see fails HERE, so the
+        // citation assert below can never be dodged by malformed (or missing) documentation.
+        let minors: Vec<u16> = gated.iter().map(|(n, _)| *n).collect();
+        let expected: Vec<u16> = (9..=PROTO_MINOR).collect();
+        assert_eq!(
+            minors, expected,
+            "the version ledger must hold ONE parseable entry per minor from 9 to PROTO_MINOR"
+        );
+        // CITATION: an entry without an owner marker is a wire change nobody approved.
+        let offenders: Vec<u16> = gated
+            .iter()
+            .filter(|(_, text)| uncited(text))
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            offenders,
+            Vec::<u16>::new(),
+            "every wire minor from 9 up needs an owner citation in its ledger entry \
+             (owner ruling 2026-08-15; accepted markers: owner-approved / owner-picked)"
+        );
     }
 
     /// THE CONTRACT MAY NOT NAME THE ROUTER AND A CONVERSION IN ONE BREATH.

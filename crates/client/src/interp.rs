@@ -575,9 +575,12 @@ mod tests {
             track.observe(pose_at(t, t as f64));
         }
         // Blended: strictly inside, and the drawn value is strictly between two poses.
+        // (Two asserts, not one `&&` — a short-circuit inside an assert is an uncoverable
+        // branch arm, HR5.)
         assert_eq!(track.window_at(12.5), SampleWindow::Blended);
         let drawn = track.sample(12.5).pos.x;
-        assert!(drawn > 12.0 && drawn < 13.0);
+        assert!(drawn > 12.0);
+        assert!(drawn < 13.0);
         // Clamped old: before the ring, drawn == the oldest.
         assert_eq!(track.window_at(1.0), SampleWindow::ClampedOld);
         assert_eq!(track.sample(1.0).pos.x, 10.0);

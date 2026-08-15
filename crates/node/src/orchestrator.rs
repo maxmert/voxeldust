@@ -445,6 +445,7 @@ pub fn admin_snapshot(world: &mut bevy_ecs::prelude::World) -> vd_wire::admin::A
             teardowns_reaped: rlm.teardowns_reaped,
             force_reaps: rlm.force_reaps,
             undecodable_demands: rlm.undecodable_demands,
+            demand_sender_mismatch: rlm.demand_sender_mismatch,
             desired_gauge: rlm.desired_gauge,
             running_gauge: rlm.running_gauge,
             boot_ticks_observed_max: rlm.boot_ticks_observed_max(),
@@ -984,12 +985,14 @@ mod tests {
         rlm.spins_failed = 1;
         rlm.teardowns_reaped = 2;
         rlm.running_gauge = 3;
+        rlm.demand_sender_mismatch = 5;
         world.insert_resource(rlm);
         let snap = admin_snapshot(&mut world);
         assert_eq!(snap.rlm.spins_requested, 4);
         assert_eq!(snap.rlm.spins_failed, 1);
         assert_eq!(snap.rlm.teardowns_reaped, 2);
         assert_eq!(snap.rlm.running_gauge, 3);
+        assert_eq!(snap.rlm.demand_sender_mismatch, 5);
         assert_eq!(
             snap.rlm.boot_ticks_observed_max, 0,
             "no head up ⇒ no boot measured"

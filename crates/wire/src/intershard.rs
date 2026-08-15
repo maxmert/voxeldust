@@ -353,6 +353,8 @@ pub enum InterShardFlow {
     /// `FireAndForget` + `ReDriven`: it carries no authority for any entity (the fence still gates every
     /// frame) and it is a latest-wins level the reconciler re-pushes, so a lost one costs a moment, never
     /// a permanent wrong answer. APPENDED (preserves every existing postcard discriminant).
+    ///
+    /// Retroactively owner-approved 2026-08-15 (docs/design/owner_decisions_2026-08-15.md item 7).
     ShardRoster(ShardRoster),
     /// CHILD → PARENT shard — THE SL7 OCCUPANCY BIT (Step 5 slice A, owner-approved 2026-08-12/13). A
     /// level-triggered liveness heartbeat: PRESENCE within the parent's TTL IS the bit — there is no
@@ -396,6 +398,9 @@ pub enum InterShardFlow {
     /// the child authors what its interior LOOKS like; the parent authors only where the child sits.
     /// NO occupant data (SL2). `FireAndForget` + `Unreliable` (a level re-asserted every cadence; the
     /// parent's TTL is sized in cadences and bridges loss). APPENDED.
+    ///
+    /// Retroactively owner-approved 2026-08-15 (docs/design/owner_decisions_2026-08-15.md item 7);
+    /// the shape lane is INTERIM — its content evolves to self-authored looks with the observer chain.
     RealmShapeObservation(RealmShapeObservation),
     /// PARENT → CHILD shard — the per-LIVE-CHILD rekey of the down-reflected sibling scene (Step 5
     /// slice C, minor 11; replaces emitting the occupant-keyed `ProxySceneSet`, whose `AccountId`

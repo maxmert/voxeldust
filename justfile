@@ -15,22 +15,30 @@ tier_a := "-p vd-core -p vd-physics -p vd-devproto -p vd-wire -p vd-sim -p vd-no
 test:
     cargo test --workspace
 
-# Inner-loop coverage check: Tier-A only, 100% region + branch, fails the build under 100%.
-# (cargo-llvm-cov has no --fail-under-branches; the report step enforces it from the
-#  same profdata via the JSON summary, scoped to the SAME {{tier_a}} package set — without
-#  the -p list the report's denominator spans whatever objects the target dir holds from a
-#  prior recipe, so the branch figure was not provably the Tier-A figure. Audit :741.)
+# Inner-loop coverage check: Tier-A only, 100% of the MERGED report, fails the build under 100%.
+# The pass/fail decision lives in scripts/coverage_gate.py (owner ruling 2026-08-15, coverage
+# option 3 — docs/design/owner_decisions_2026-08-15.md item 8; DEFERRED.md carries the ledger row):
+# cargo-llvm-cov's raw --fail-under-* gates count rows PER COMPILED RECORD, so rows owning no
+# source-line miss in the merged report (`?` early-return micro-regions, lazy closure bodies,
+# per-crate-hash duplicate instantiations) held the gate red on nothing a source line backs. The
+# script drops those by the OBJECTIVE no-source-line rule (never a blessed location list), PRINTS
+# the dropped count every run (shed-loud), and still fails on every real miss: a merged-lcov DA
+# line with zero hits or a BRDA side never taken. The report steps stay scoped to the SAME
+# {{tier_a}} package set — without the -p list the denominator spans whatever objects the target
+# dir holds from a prior recipe (audit :741). A toolchain bump was tried first (2026-08-15,
+# nightly-2026-07-21 + cargo-llvm-cov 0.8.7): byte-identical artifact rows — rejected.
 coverage-fast:
     cargo +{{coverage_toolchain}} llvm-cov --branch {{tier_a}} \
         --ignore-filename-regex '(/bin/|/tests/)' \
-        --fail-under-regions 100 --fail-under-functions 100 \
+        --no-report \
         -- --quiet
     cargo +{{coverage_toolchain}} llvm-cov report --branch {{tier_a}} \
         --ignore-filename-regex '(/bin/|/tests/)' \
-        --json --summary-only | python3 -c "import json,sys; \
-        t=json.load(sys.stdin)['data'][0]['totals']['branches']; \
-        missed=t['count']-t['covered']; \
-        sys.exit(0 if missed==0 else print(f'BRANCH GATE: {missed} missed branches ({t[\"percent\"]:.2f}%)') or 1)"
+        --json > target/coverage-fast.json
+    cargo +{{coverage_toolchain}} llvm-cov report --branch {{tier_a}} \
+        --ignore-filename-regex '(/bin/|/tests/)' \
+        --lcov > target/coverage-fast.lcov
+    python3 scripts/coverage_gate.py target/coverage-fast.json target/coverage-fast.lcov
 
 # io-prod Tier-B RATCHETED FLOOR (HR5: io-prod is process-tier, never 100% — a SIGKILL can lose the final
 # counter flush). This measures io-prod's OWN in-process unit tests (deterministic — no SIGKILL counter loss)

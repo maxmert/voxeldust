@@ -551,6 +551,124 @@ fn siblings_disjoint(bodies: &[GeneratedBody]) -> Result<(), SiblingsOverlap> {
     Ok(())
 }
 
+/// A grandchild-or-deeper body that would be VISIBLE from just outside one of its ancestors — the
+/// two-level bound broken by geometry. Carries every number of the verdict so the failure names
+/// itself: the worst-instant distance of the body's centre from the ancestor's centre, the body's
+/// extent, the resulting minimum viewer distance, and the distance the visibility rule requires.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+#[error(
+    "{body:?} subtends >= the visibility threshold from just outside its ancestor {ancestor:?}: \
+     worst-instant centre distance {worst_dist_m} m, extent {extent_m} m, minimum viewer distance \
+     {d_min_m} m, but the interest band keeps it visible out to {required_m} m — a not-running \
+     realm two levels down would owe pixels its parent's placement marker cannot author"
+)]
+pub struct GrandchildVisibleOutside {
+    pub body: RealmId,
+    pub ancestor: RealmId,
+    /// Worst-instant distance of the body's centre from the ancestor's centre (triangle bound —
+    /// each hop contributes its own worst-instant offset magnitude).
+    pub worst_dist_m: f64,
+    /// The body's finite extent (the same extent the interest band judges visibility on).
+    pub extent_m: f64,
+    /// `R_ancestor − worst_dist − extent`: how close a viewer just outside the ancestor can get.
+    pub d_min_m: f64,
+    /// `extent · cot(θ_min/2)`: the distance out to which the interest band keeps the body visible.
+    pub required_m: f64,
+}
+
+/// One hop's WORST-INSTANT offset magnitude — the same machinery the boot's `ChildReach` roster
+/// states: a static child's authored offset, a mover's closed-form worst-instant excursion
+/// ([`Motion::max_excursion_m`], the apoapsis — never a re-derived `a·(1+e)` beside it).
+fn worst_hop_excursion_m(placement: &Placement) -> f64 {
+    match placement {
+        Placement::StaticOffset(at) => at.length(),
+        Placement::Orbital(elements) => Motion::Kepler(*elements).max_excursion_m(),
+    }
+}
+
+/// Every `(body, ancestor)` pair — ancestor two or more levels up — where the body would still be
+/// VISIBLE (subtend ≥ `theta_min_rad`) to a viewer standing just outside the ancestor's boundary at
+/// closest approach, with the body at its worst-instant position. PURE GEOMETRY over the roster: no
+/// realm kinds, no motion kinds (a hop's excursion is a magnitude whichever way it is produced).
+/// The threshold enters as the SAME `cot(θ/2)` the interest band uses ([`visibility_factor`]) — the
+/// condition `angular_size(extent, d_min) < θ_min` is exactly `d_min > extent · cot(θ_min/2)`.
+fn grandchild_visibility_offences(
+    bodies: &[GeneratedBody],
+    theta_min_rad: f64,
+) -> Vec<GrandchildVisibleOutside> {
+    let by_id: std::collections::BTreeMap<RealmId, &GeneratedBody> =
+        bodies.iter().map(|b| (b.realm, b)).collect();
+    let factor = visibility_factor(theta_min_rad);
+    let mut offences = Vec::new();
+    for body in bodies {
+        let extent_m = body.shape.finite_extent();
+        // Walk the ancestor chain, accumulating the worst-instant centre distance hop by hop.
+        let mut worst_dist_m = worst_hop_excursion_m(&body.placement);
+        let mut hops = 1_usize;
+        let mut cursor = body.parent;
+        while let Some(ancestor_id) = cursor {
+            let ancestor = by_id
+                .get(&ancestor_id)
+                .expect("the generated forests resolve every parent (guarded at boot)");
+            if hops >= 2 {
+                let d_min_m = ancestor.shape.finite_extent() - worst_dist_m - extent_m;
+                let required_m = extent_m * factor;
+                if d_min_m <= required_m {
+                    offences.push(GrandchildVisibleOutside {
+                        body: body.realm,
+                        ancestor: ancestor_id,
+                        worst_dist_m,
+                        extent_m,
+                        d_min_m,
+                        required_m,
+                    });
+                }
+            }
+            worst_dist_m += worst_hop_excursion_m(&ancestor.placement);
+            hops += 1;
+            cursor = ancestor.parent;
+        }
+    }
+    offences
+}
+
+/// The FAIL-LOUD shape of the offence list — split out so both arms are driven by named examples
+/// (a green world alone would leave the `Err` arm unrun, HR5).
+fn first_offence(offences: Vec<GrandchildVisibleOutside>) -> Result<(), GrandchildVisibleOutside> {
+    match offences.first() {
+        Some(offence) => Err(*offence),
+        None => Ok(()),
+    }
+}
+
+/// THE GENERATOR VISIBILITY CHECK (owner ruling 2026-08-15, docs/design/owner_decisions_2026-08-15.md
+/// item 5) — the two-level bound turned into a PROOF over the generated world: no body two or more
+/// levels deep may ever be visible from outside its ancestor. SL7/SL3 make a not-running realm
+/// drawable only as its parent's placement marker, one level down; a grandchild that subtends the
+/// visibility threshold from outside its grandparent would owe pixels nothing is entitled to author.
+/// Worst-instant positions (the same apoapsis machinery the `ChildReach` nest fence consumes), the
+/// viewer at the ancestor's boundary at closest approach, and the ONE visibility threshold the
+/// interest band uses — never a second literal.
+///
+/// TODO(owner report owed, 2026-08-15): MEASURED FAILING on THE world — every ring-placed system's
+/// planets stay visible from just outside the galaxy shell (see the pinned measurement test
+/// `the_two_level_bound_measured_on_the_world_…`). Owner ruled a failure is a REPORT, never a
+/// silent re-solve: the world's numbers stay untouched and this guard stays TEST-ONLY — do NOT
+/// wire it into the boot fence beside `guard_regions_nest` until the owner rules on the galaxy
+/// shell / threshold / planet extent.
+///
+/// # Errors
+/// [`GrandchildVisibleOutside`] naming the first offending `(body, ancestor)` pair with its numbers.
+pub fn guard_grandchildren_invisible_outside(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> Result<(), GrandchildVisibleOutside> {
+    first_offence(grandchild_visibility_offences(
+        &generate_system_forest(seed_universe, config),
+        VISIBILITY_THETA_MIN_RAD,
+    ))
+}
+
 /// The config-driven star-system forest: Universe → Galaxy → `stellar.n_systems` star systems, each with
 /// `planet.n_planets` `Orbital` planets (D-45(a) FA-5). A System shell IS its star's frame — the planets
 /// orbit its center and the star is DATA (`stellar.central_mass_kg`), never a `RealmId::Star` (HR3).
@@ -2310,6 +2428,168 @@ mod tests {
             visibility_factor(VISIBILITY_THETA_MIN_RAD),
             FROZEN_VISIBILITY_FACTOR
         );
+    }
+
+    // ===== The generator visibility check (owner ruling 2026-08-15, item 5) ==========================
+
+    /// THE MEASUREMENT ON THE WORLD, pinned verbatim — the two-level bound FAILS today.
+    ///
+    /// TODO(owner report owed, 2026-08-15): the owner approved this check with "see what will
+    /// happen" — a failure is a REPORT, never a silent re-solve. MEASURED on THE world (seed 0):
+    /// every planet of BOTH ring-placed systems stays visible from just outside the GALAXY shell —
+    /// a 3.954 m planet is visible out to 302.06 m, but the galaxy's surface passes within
+    /// 161–281 m of the planets' worst-instant positions (the ring systems sit ~12.03 km out and
+    /// the shell hugs them). The origin system's planets pass. NO world number was changed, and the
+    /// check is deliberately NOT wired into the boot fence until the owner rules on the galaxy
+    /// shell / threshold / planet extent; this test pins the measured offence list EXACTLY, so any
+    /// re-solve of the world flips it loudly and the report stays honest in-repo.
+    #[test]
+    fn the_two_level_bound_measured_on_the_world_every_ring_systems_planet_is_visible_past_the_galaxy()
+     {
+        let config = UniverseConfig::world(15.0, 0.05);
+        let offences = grandchild_visibility_offences(
+            &generate_system_forest(0, &config),
+            VISIBILITY_THETA_MIN_RAD,
+        );
+        // Every offence names the GALAXY (its interim `RealmId` stand-in) as the ancestor, every
+        // offending body is a planet of the two RING systems (forest order), and the numbers are
+        // the frozen measurement of 2026-08-15.
+        let extent_m = 3.954_173_752_999_557_8;
+        let required_m = 302.058_663_384_242_95;
+        let measured: Vec<(u64, f64, f64)> = vec![
+            (
+                2790672799213891506,
+                12_046.713_265_695_933,
+                280.730_889_197_954,
+            ),
+            (
+                3841899291686128089,
+                12_058.747_411_467_62,
+                268.696_743_426_266_3,
+            ),
+            (
+                8247822661730161032,
+                12_076.883_553_010_532,
+                250.560_601_883_355_33,
+            ),
+            (
+                9379240996657725013,
+                12_110.446_243_218_734,
+                216.997_911_675_153_15,
+            ),
+            (
+                5205406834676993625,
+                12_166.316_549_196_143,
+                161.127_605_697_744_3,
+            ),
+            (
+                2450373923031213019,
+                12_046.864_645_009_122,
+                280.579_509_884_765_06,
+            ),
+            (
+                996452844033318080,
+                12_058.597_612_191_366,
+                268.846_542_702_520_6,
+            ),
+            (
+                3286337890091842052,
+                12_077.300_035_746_319,
+                250.144_119_147_568_12,
+            ),
+            (
+                2085084207741349801,
+                12_107.875_227_715_764,
+                219.568_927_178_123_26,
+            ),
+            (
+                5355024293581681330,
+                12_160.744_305_540_742,
+                166.699_849_353_144_88,
+            ),
+        ];
+        let expected: Vec<GrandchildVisibleOutside> = measured
+            .into_iter()
+            .map(|(seed, worst_dist_m, d_min_m)| GrandchildVisibleOutside {
+                body: RealmId::Planet(seed),
+                ancestor: GALAXY,
+                worst_dist_m,
+                extent_m,
+                d_min_m,
+                required_m,
+            })
+            .collect();
+        assert_eq!(offences, expected);
+        // The boot-facing guard reports the FIRST offence — the refusal the boot would make once
+        // the owner rules and it is wired (covers the wrapper's real arm).
+        assert_eq!(
+            guard_grandchildren_invisible_outside(0, &config),
+            Err(expected[0])
+        );
+    }
+
+    #[test]
+    fn worst_hop_excursion_is_the_offset_for_a_static_and_the_apoapsis_for_a_mover() {
+        // Static: the authored offset's magnitude, exactly.
+        assert_eq!(
+            worst_hop_excursion_m(&Placement::StaticOffset(DVec3::new(3.0, 0.0, 4.0))),
+            5.0
+        );
+        // Mover: THE one closed-form worst-instant accessor — never a re-derived `a·(1+e)` beside it.
+        let bodies = generate_system_forest(0, &UniverseConfig::world(15.0, 0.05));
+        let mover = bodies
+            .iter()
+            .find(|b| matches!(b.placement, Placement::Orbital(_)))
+            .expect("THE world has orbital movers");
+        let elements = orbital_of(mover.placement).expect("a mover is Orbital");
+        assert_eq!(
+            worst_hop_excursion_m(&mover.placement),
+            Motion::Kepler(elements).max_excursion_m()
+        );
+    }
+
+    #[test]
+    fn a_visible_grandchild_is_named_with_its_exact_numbers() {
+        // A synthetic guilty forest — the arm THE (green) world can never take: root shell 1000 m,
+        // a child 100 m off the root's centre, and a 20 m grandchild 50 m off the child's centre.
+        // From just outside the root the grandchild can close to 1000 − (100+50) − 20 = 830 m, and
+        // the band keeps a 20 m body visible out to 20·cot(θ_min/2) ≈ 1527.8 m — an offence.
+        let root = RealmId::System(900);
+        let child = RealmId::Planet(901);
+        let grand = RealmId::Station(902);
+        let bodies = vec![
+            GeneratedBody {
+                realm: root,
+                parent: None,
+                shape: Boundary::Shell { r: 1000.0 },
+                placement: Placement::StaticOffset(DVec3::ZERO),
+            },
+            GeneratedBody {
+                realm: child,
+                parent: Some(root),
+                shape: Boundary::Shell { r: 200.0 },
+                placement: Placement::StaticOffset(DVec3::new(100.0, 0.0, 0.0)),
+            },
+            GeneratedBody {
+                realm: grand,
+                parent: Some(child),
+                shape: Boundary::Shell { r: 20.0 },
+                placement: Placement::StaticOffset(DVec3::new(0.0, 0.0, 50.0)),
+            },
+        ];
+        let offences = grandchild_visibility_offences(&bodies, VISIBILITY_THETA_MIN_RAD);
+        let expected = GrandchildVisibleOutside {
+            body: grand,
+            ancestor: root,
+            worst_dist_m: 150.0,
+            extent_m: 20.0,
+            d_min_m: 1000.0 - 150.0 - 20.0,
+            required_m: 20.0 * visibility_factor(VISIBILITY_THETA_MIN_RAD),
+        };
+        assert_eq!(offences, vec![expected]);
+        // The fail-loud shape: the first offence IS the boot refusal; an empty list is a pass.
+        assert_eq!(first_offence(offences), Err(expected));
+        assert_eq!(first_offence(Vec::new()), Ok(()));
     }
 
     #[test]

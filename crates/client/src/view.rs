@@ -782,6 +782,53 @@ mod tests {
         );
     }
 
+    /// The echo pin's THIRD condition, its other answer (HR5): the pin protects a LIVE standing
+    /// frame. When the reliable removal has evicted the own avatar's track there IS no standing
+    /// frame, so a strictly-newer own row in the echo space is the genuine return the resurrect
+    /// guard admits — eating it as an echo would leave the avatar permanently undrawn (the track
+    /// is gone and no other row is coming).
+    #[test]
+    fn an_own_row_in_the_echo_space_folds_when_no_standing_frame_remains() {
+        let planet = FrameRef::PlanetCentered { planet_seed: 7 };
+        let sys = FrameRef::SystemSpace { system_seed: 1 };
+        let mut view = DeliveredView::default();
+        let both = BTreeSet::from([SubId(0), SubId(1)]);
+        view.set_own_entity(ent(1));
+        // Standing in the system…
+        view.on_snapshot(&both, snap(SubId(0), 1, 10, vec![(ent(1), 17.0)]));
+        // …the cut into the planet arms the echo pin (echo space = the system).
+        view.on_snapshot(
+            &both,
+            SnapshotDatagram {
+                sub: SubId(1),
+                frame_id: 1,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(11),
+                entities: vec![EntitySnap {
+                    entity: ent(1),
+                    pose: StampedPose::at_rest(planet, DVec3::new(0.4, 0.0, 0.0), UniverseTick(11)),
+                }],
+            },
+        );
+        assert_eq!(view.own_location_frame(), Some(planet), "the cut landed");
+        // The reliable removal evicts the track — no standing frame remains; the pin stays armed
+        // (only a sub close clears it).
+        view.remove_entity(ent(1), UniverseTick(12));
+        assert_eq!(view.own_location_frame(), None, "no standing frame");
+        // A strictly-newer own row in the ECHO space is the genuine return, not an echo: it folds.
+        view.on_snapshot(&both, snap(SubId(0), 2, 13, vec![(ent(1), 18.0)]));
+        assert_eq!(
+            view.echo_rows_dropped(),
+            0,
+            "no live standing frame — nothing for the echo pin to protect"
+        );
+        assert_eq!(
+            view.own_location_frame(),
+            Some(sys),
+            "the return row folded"
+        );
+    }
+
     #[test]
     fn a_re_homed_entity_renders_once_latest_wins_across_subs() {
         // THE pure-renderer node-agnostic property: an entity arrives on the source sub, then the

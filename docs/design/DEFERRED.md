@@ -2944,6 +2944,38 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 
 ---
 
+### D-49 🟩 The coverage-fast artifact class: per-record report rows owning no source-line miss in the merged report — filtered by an objective rule (owner: option 3, 2026-08-15)
+
+- **The artifact class, measured:** cargo-llvm-cov counts coverage rows PER COMPILED RECORD, and Tier-A
+  compiles the same source into many objects (each crate's own test binary plus every dependent crate's).
+  Three shapes of row therefore show as "missed" while every source LINE and every BRANCH SIDE of the
+  MERGED report is covered: (1) a `?` operator's never-taken early-return micro-region (a one-column span
+  on a covered line); (2) a lazy closure argument's body (`map_or_else` defaults, assert messages) never
+  evaluated; (3) a per-crate-hash duplicate instantiation of a span another record fully covers. Measured
+  2026-08-15 on the pinned toolchain: 27 such rows (17 regions, 4 functions, 5 lines, 1 branch shadow)
+  and ZERO missed lines in the merged lcov — the raw `--fail-under-*` gate was red on rows no source line
+  backs. A toolchain bump was tried first and rejected by measurement: nightly-2026-07-21 +
+  cargo-llvm-cov 0.8.7 reproduced the identical totals (no artifact drop, no new miss), so the pin stays
+  at nightly-2026-06-06.
+- **The rule (owner-picked option 3, 2026-08-15 — docs/design/owner_decisions_2026-08-15.md item 8),
+  objective, never a blessed location list:** `scripts/coverage_gate.py` makes the coverage-fast pass/fail
+  decision from the merged report. A REAL miss — a merged-lcov `DA` line with zero hits, or a `BRDA` side
+  never taken — still FAILS the build with its location. Every other missed row is DROPPED, and the
+  dropped count is PRINTED every run (shed-loud), with the never-executed micro-spans listed, so growth
+  in the artifact class stays visible in review even though it does not fail the build.
+- **The accepted residual, stated honestly:** a genuinely-new never-evaluated closure body or `?` early
+  return on an otherwise-covered line is dropped by the same rule (it owns no missed line). The printed
+  per-run counter + span listing is the tripwire for that class; a genuinely dead function or arm still
+  fails (its lines go unhit ⇒ real missed `DA` rows).
+- **Where:** `scripts/coverage_gate.py` (the decision), `justfile` `coverage-fast` (produces the merged
+  json+lcov and delegates the verdict).
+- **When flipped:** 2026-08-15 — the four real branch misses the merged report DID back (nav's non-finite
+  brake arm, an `assert!(a && b)` split, the echo pin's third condition, the detector stamp invariant's
+  panic arm) were covered by tests in the same change, never exempted; `coverage-exemptions.toml` stays
+  empty.
+
+---
+
 ## CLOUD / DEPLOY (gated on a deploy-readiness signal from the user — no CI yet)
 
 ### D-12 🟥 Client reachability: static address book / gateway-dials-client (CA-1)
