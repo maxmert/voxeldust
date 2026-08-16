@@ -87,6 +87,8 @@ pub fn gateway_view(
         window_relay_stale,
         window_relay_rows_composed,
         window_relay_unplaceable,
+        window_looks_pruned,
+        window_relay_levels_pruned,
     } = *stats;
     GatewayView {
         logins_rejected,
@@ -155,6 +157,8 @@ pub fn gateway_view(
         window_relay_stale,
         window_relay_rows_composed,
         window_relay_unplaceable,
+        window_looks_pruned,
+        window_relay_levels_pruned,
         sessions_open,
         dynamic_shards,
         windows_open,
@@ -274,6 +278,8 @@ mod tests {
             window_relay_stale: 67,
             window_relay_rows_composed: 68,
             window_relay_unplaceable: 69,
+            window_looks_pruned: 80,
+            window_relay_levels_pruned: 81,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);
@@ -342,6 +348,8 @@ mod tests {
         assert_eq!(view.window_relay_stale, 67);
         assert_eq!(view.window_relay_rows_composed, 68);
         assert_eq!(view.window_relay_unplaceable, 69);
+        assert_eq!(view.window_looks_pruned, 80);
+        assert_eq!(view.window_relay_levels_pruned, 81);
         assert_eq!(view.sessions_open, 24);
         assert_eq!(view.dynamic_shards, 25);
         assert_eq!(view.windows_open, 37);

@@ -1607,6 +1607,13 @@ pub struct GatewayStats {
     /// Q2 relay — a relay refused by the CHILD's fence order (a deposed incarnation still
     /// shipping) or a relayed level older than the held one. Never normal past a re-home window.
     pub window_relay_stale: u64,
+    /// Slice D (§2.8 departure mirror): SELF-LOOKs dropped by the derived roster-loss window — the
+    /// realm behind them stopped speaking, so its parent's marker resumes and the body it drew
+    /// shrinks to a point of light.
+    pub window_looks_pruned: u64,
+    /// Slice D: relayed interior LEVELS dropped by the same window — a dead live-child's interior
+    /// cannot keep composing rows after its statements stop.
+    pub window_relay_levels_pruned: u64,
 }
 
 pub fn register_gateway(world: &mut World, schedule: &mut Schedule, config: GatewayConfig) {
@@ -2129,6 +2136,16 @@ fn compose_scenes_pass(
     outbox: &mut OutboundBox,
 ) {
     let tuning = window_tuning(config);
+    // THE ROSTER-DRIVEN PRUNE (`docs/design/window_lane.md` §2.8's departure mirror, Slice D),
+    // before anything is composed from these stores: a realm that stopped stating its own look —
+    // it tore down, or its parent's relay holder TTL-expired it — loses that look after the
+    // derived roster-loss window, and the presence gate falls through to its parent's ever-present
+    // marker. Markers never expire (the floor: never zero drawn).
+    for held in sessions.windows.values_mut() {
+        let (looks, relays) = held.ingest.prune_stale(clock.universe_tick, &tuning);
+        stats.window_looks_pruned += looks;
+        stats.window_relay_levels_pruned += relays;
+    }
     // Field-split borrows: the window map is read-only here; the sessions are rolled.
     let GatewaySessions {
         windows,

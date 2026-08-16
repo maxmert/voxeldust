@@ -259,6 +259,36 @@ render-boxes-smoke:
 render-crossing-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
 
+# G-WARP-PIXELS + G-HANDOVER (window_lane.md §2.8/§4 Slice D — THE WARP ACCEPTANCE): one DEMAND
+# cluster (no shard pre-booked), one headless capture client in the PILOT VIEW (`--capture-pilot`),
+# and one flight down THE world's own star ring — out of the home system, across the 12 031.398 m
+# gap, into the ring sibling. Asserts, in real pixels: the destination is its PARENT'S point of
+# light at departure (it is asleep because the ring is wider than the 11 458.475 m wake radius, by
+# the world's own 572.924 m margin); its footprint never shrinks while you approach; its own look
+# takes over flicker-free; the system behind hands back to its parent's marker and shrinks to a dot;
+# and every drawn row's provenance is in the run manifest (HR6). G-HANDOVER measures BOTH
+# directions against budgets DERIVED in ticks from the landed cadences and the cluster's own boot
+# latency, with the Q2 RELAY HOP asserted APART (the owner's ruling: if the relay breaks the wake
+# budget, that is the one measurement D-WINDOW-2 is gated on). The companion test closes the
+# derivation before any process runs, so a world-numbers change fails in milliseconds.
+# Same GPU-required, LOCAL-gate preconditions as render-smoke.
+warp-pixels:
+    cargo test -p vd-bins --features dev-control,render --test warp_pixels -- --nocapture --test-threads=1
+
+# G-TWO-SHIPS (owner-ordered 2026-08-16, window_lane.md §5 RULINGS): TWO real capture clients on one
+# demand cluster, standing in two realms of DIFFERENT DEPTH (the star System and one of its
+# Planets), with mutual hull visibility across the realm boundary and one crossing while both watch.
+# The five assertions: (a) each observer draws the OTHER hull at its same-tick composed position —
+# the two chains must agree on the star-to-planet separation to within the planet's own travel over
+# the sampling gap; (b) the inner observer draws the Planet's own body around itself, in pixels (the
+# hop row); (c) each hull's look is the REALM'S OWN statement delivered by the Q2 parent relay,
+# attested in the manifest; (d) one crossing while both watch — the crossing client's epoch bumps
+# exactly once, the WATCHING client's epoch does not move, and its picture is sampled continuously
+# through the commit with every body inside its own motion allowance; (e) occupant figures through
+# WINDOWS are absent, and nobody standing inside a realm is shown to an observer outside it.
+two-ships:
+    cargo test -p vd-bins --features dev-control,render --test two_ships -- --nocapture --test-threads=1
+
 # NODE-PER-REALM WALK GATE (task #149) — the HEADLESS process-tier chain proof on THE world. Brings up
 # the CHAIN cluster (orchestrator + gateway + FOUR realm-shards derived through world_roster: the home
 # system, the galaxy, the inner planet, the sibling star — NO co-hosting), logs in a REAL headless
@@ -305,7 +335,7 @@ rlm-demand-login:
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels two-ships node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity coverage
 
 # One-time setup helper.
 coverage-setup:

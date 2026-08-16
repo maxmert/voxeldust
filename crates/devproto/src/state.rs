@@ -57,6 +57,12 @@ pub struct DevRealmBox {
     /// realm's own self-authored outline; `"marker"` — its parent's photometric point-of-light
     /// datum. The pixel gates' body-kind assert (§2.11) reads this.
     pub body_kind: String,
+    /// THE MARKER'S PHOTOMETRIC DATUM `(class_code, luma_lsun)` as the parent stated it —
+    /// `None` on a LOOK body (a marker cannot carry a look, and a look never carries luma).
+    /// The pixel gates size a point sprite's projected rectangle from exactly this, through the
+    /// SAME Tier-A `marker_look` + `marker_world_radius` pair the renderer scales the sprite by
+    /// (window lane Slice D), so the drawn footprint and the asserted rectangle cannot disagree.
+    pub luma: Option<(u8, f64)>,
     /// SHAKE DIAGNOSIS — the newest universe tick this realm's pose feed has delivered; `None` for a
     /// box the feed never streamed (it is sitting at its boot placement). Read against
     /// [`DevState::entity_feed_newest_tick`], this is what distinguishes the two candidate causes of a
@@ -231,6 +237,7 @@ pub(crate) mod tests {
                 center: [10.0, 0.0, 0.0],
                 extent_m: 4.0,
                 body_kind: "look".to_owned(),
+                luma: None,
                 newest_tick: Some(100),
             }],
             origin: Some(("System(7)".to_owned(), 1)),

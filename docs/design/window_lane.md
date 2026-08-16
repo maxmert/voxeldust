@@ -443,8 +443,14 @@ at 20 Hz), ring-bounded worst case — inside the client's 100–150 ms buffer. 
   the derived TTL ⇒ the ever-present marker resumes ⇒ the system shrinks to a dot, literally.
 - **No pop**: AoI spin-up leads visibility (θ_min band + velocity lead + boot-horizon
   prediction), so S runs and its look has arrived while S subtends ≈ a point. Gate preconditions
-  pinned from THE world's solved geometry (CF graft): swap at the 1.5° line ≈ 11 458.6 m; ring at
-  12 031.4 m; ~573 m asleep-at-departure margin.
+  pinned from THE world's solved geometry (CF graft), RE-DERIVED against the live world at Slice D
+  and read from the shipped config rather than restated: the 1.5° swap line is
+  **11 458.474 599 m** (`system_soi_r_m 150 × cot(θ_min/2) 76.389 830 658`), the ring is
+  **12 031.398 329 m** (× the 1.05 slack), the asleep-at-departure margin is **572.923 730 m**, and
+  the tear-down radius is **11 483.474 599 m** (the band's whole width IS the velocity lead:
+  `|v_rel| · dt · (K_SAFETY + extra)` = 25.0 m at the shipped speed). The galaxy shell moved to
+  **12 483.456 992 m** with the two-level clearance re-solve; it is not a term of either handover
+  budget.
 - **G-HANDOVER is SYMMETRIC (judge fix, closes A-3/B-4)**: the wake footprint budget (spin-up
   geometry + boot p99 + one look cadence) AND the departure footprint budget (teardown band +
   roster-loss TTL) are both derived bounds the pixel gate asserts; ε from |v_rel| × frame-dt.
@@ -508,7 +514,16 @@ D-LANE-6 flips 🟩. Scenarios are re-based, never deleted:
   `{body_kind: marker|look, newest_tick}` — the diagnosis surface every gate reads.
 - **Dot detection is DevState-driven (judge fix)**: gates assert from DevState projected-position
   + body-kind plus LOCAL pixel probes at the projected location — never a full-frame pixel
-  search at ~1 px scale.
+  search at ~1 px scale. `DevRealmBox` also carries the marker's `luma` datum since Slice D, so a
+  gate sizes a point sprite's rectangle through the SAME Tier-A pair the renderer scales it by.
+- **THE PILOT VIEW (Slice D, `client --capture-pilot`)**: the scene-fitting capture framing above
+  is the DEFAULT and stays so — but it fits the union of everything drawn, so on a flight between
+  two FIXED points of the star ring it barely moves and a system you fly toward cannot grow on
+  screen. The warp acceptance is a statement about what the PILOT sees, so a capture run may
+  instead place the camera at the avatar's eye along its DELIVERED facing, through the one Tier-A
+  expression (`pilot_capture_camera`) the gate reconstructs it by. No local view state is involved:
+  a headless run has no mouse, so the server-authored orientation is the only honest facing, and an
+  injected `LookAt` turns the avatar and the agent's eyes together.
 
 ## 2.12 Named invariants and pins (new with this design)
 
@@ -654,22 +669,67 @@ cascade/down-reflect/shape-hop/observed-interior machinery removed.
 screen (proven by the suite staying green).
 *Gates*: intershard_closed pins (producer-less golden set +4); full suite green; coverage 100 %.
 
-**Slice D — THE WARP ACCEPTANCE (capstone, R6).**
+**Slice D — THE WARP ACCEPTANCE (capstone, R6). 🟩 LANDED 2026-08-16.**
 Marker point-sprite rendering (luma-driven), roster-driven look pruning, symmetric handover
-budgets.
-*Owner-visible outcome*: **the warp experience in pixels, on THE world** — fly system A → B:
-B is a point of light at departure, grows monotonically, hands over flicker-free into a live
-system; A shrinks to a dot behind and tears down; same-tick composition throughout; every drawn
-row's provenance attested in the manifest.
-*Gates*: **G-WARP-PIXELS** (the acceptance bar, DevState-driven dot detection + local pixel
-probes); **G-HANDOVER** both directions with symmetric derived budgets — including the Q2
-relay hop measured at the wake moment; **G-TWO-SHIPS** (owner-ordered 2026-08-16: two ships,
-two realms of different depth, mutual hull visibility, one watched crossing — see §5 RULINGS
-for the five assertions); G-SHEAR full.
-DEFERRED flips: D-LANE-4 🟩 (outlines; richer looks registered), D-LANE-6 🟩, D-PLACE-3 🟩;
-D-PLACE-2 residual SHRINKS but stays open (noted, not silently claimed); new owed rows
-registered (census-scale photometric derivation; P10 rotated-hop composition). Global
-progression report to the owner.
+budgets — all three landed, plus the PILOT VIEW the acceptance turned out to require.
+
+*Owner-visible outcome, delivered*: **the warp experience in pixels, on THE world.** Fly system
+A → B: B is its parent's point of light at departure (3.00 px, 35 pixels painted at a local
+probe), its footprint never shrinks while you approach (2018 samples, 3.00 px → 90.21 px, worst
+sample-to-sample shrink 0.000 px), its own look takes over flicker-free, and it fills the view on
+arrival (92.78 px, 25 150 pixels). A hands back to its parent's marker behind you and is drawn at
+the shared point-of-light floor. Same-tick composition throughout; every drawn row's provenance
+attested in the run manifest's state dumps.
+
+*What landed, beyond the plan.* **The pilot view** (`client --capture-pilot`,
+`vd_client_harness::camera::pilot_capture_camera`): the default capture framing fits the whole
+drawn scene, and on a flight between two FIXED points of the star ring that frustum barely moves,
+so a system you fly toward could not grow on screen at all. The warp is a statement about what the
+PILOT sees, so the agent's eyes now look through the pilot's eyes — at the avatar's own eye, along
+its DELIVERED facing, through the ONE Tier-A expression the gates reconstruct the camera by. The
+scene-fitting framing stays the default; every existing box gate is byte-identical.
+**★ And a REAL DEFECT the gate exposed**, root-caused by measurement: `nav::look_at` had no brake
+against the delivered-pose feedback lag (the one `walk_to` has had since Stage B4). A 90° `LookAt`
+reported ALIGNED at 0.0030 rad and then rotated another **0.6030 rad** as the in-flight deltas
+landed — a 425 m miss over the ring, which is how the first flight sailed past its destination.
+Cured with `LOOK_FEEDBACK_STEPS = 4`, the same measured lag the walk brake is sized to.
+
+*Gates, with their measured numbers (THE world, seed 0, 500 m/s, 50 Hz, 10.0 m per tick).*
+Budgets are counted in TICKS off the landed cadences and reported in metres by the occupant's own
+travel — which is what makes a handover honest whether the ship is flying or parked when it lands.
+- **G-WARP-PIXELS** (`just warp-pixels`) — the acceptance bar, DevState-driven detection + LOCAL
+  pixel probes at the projected position, never a full-frame search; every wait on the demand
+  loop's own signal.
+- **G-HANDOVER**, both directions, symmetric derived budgets. WAKE = 2×25 AoI cadence + 1
+  reconcile + the cluster's OWN measured boot + 2 Q2 relay + 1 compose + 1 draw: **measured 14
+  ticks / 140 m vs 61 ticks / 610 m**. DEPARTURE = 51 grace-hold + 25 cadence + 1 hop + 1 compose
+  + 1 draw: **measured 47 ticks / 470 m vs 83 ticks / 830 m**. **THE Q2 RELAY HOP, asserted APART
+  per the owner's ruling: 13 ticks / 130 m vs 60 ticks / 600 m — it does NOT break the wake
+  budget, so D-WINDOW-2 stays closed and the direct window remains a fresh owner ask.** A
+  companion test closes the derivation before any process runs, so a world-numbers change fails in
+  milliseconds rather than only in a four-minute flight.
+- **G-TWO-SHIPS** (`just two-ships`, owner-ordered) — two real capture clients, two realms of
+  different depth: (a) the two chains agree on the star-to-planet separation to 0.0612 m against
+  the planet's own 1.4646 m of travel over the sampling gap, each hull drawn by its OWN look and
+  pixel-probed at 50 px; (b) the inner observer draws the Planet's own body around itself AT THE
+  ORIGIN, in pixels; (c) 2139 relayed statements ingested, 0 undecodable, attested in both
+  manifests; (d) one watched crossing — the crossing client's epoch bumps exactly once, the
+  watcher's does not move, and its picture is sampled continuously through the commit (412 samples,
+  3288 continuity checks, worst 1.088 m against its own 10.814 m allowance); (e) occupant figures
+  ABSENT from the window lane and ABSENT out of a realm. NOTE on "ship X / ship Y": `RealmId::Ship`
+  realms are structurally impossible before P8 (D-SHIP-1), so the two hulls are the two REALMS the
+  players stand in — the star System and one of its Planets — which is exactly what each assertion
+  tests. THE WORLD IS UNCHANGED (SL5).
+- **G-SHEAR full**: the pixel half joins the Slice-B unit half — every captured frame's drawn rows
+  are inside the composer's declared retention (measured spreads 0–2 ticks).
+
+DEFERRED flips: D-LANE-4 🟩 (its owed client-side half — the point sprites and the pruning — is
+what landed here), D-LANE-6 🟩, D-PLACE-3 🟩; **D-WINDOW-1 flips 🟩, the ladder complete**.
+D-PLACE-2's residual SHRINKS but STAYS OPEN — Slice D touched neither of its two live readers, and
+saying otherwise would be a claim rather than a measurement. New owed rows registered: D-WINDOW-3
+(census-scale photometric derivation + the HDR exposure model the point sprite stands in for),
+D-WINDOW-4 (P10 rotated-hop composition), D-WINDOW-5 (the §2.14 LOD tier seam for P4+), D-WINDOW-6
+(two things this slice MEASURED and did not assert). Global progression report to the owner.
 
 ---
 

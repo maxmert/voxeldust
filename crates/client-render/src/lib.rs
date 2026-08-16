@@ -45,7 +45,10 @@ use bevy_egui::{
 };
 use crossbeam_channel::{Receiver, Sender};
 use vd_client::net::ClientPhase;
-use vd_client::realm_scene::{MeshPrim, to_render_prims};
+use vd_client::realm_scene::{
+    BodyKind, MARKER_CLASS_SRGB, MeshPrim, PrimTransform, RealmBox, Vertex, marker_look,
+    point_sprite_vertices, to_render_prims,
+};
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client_harness::camera::FollowCamera;
 use vd_client_harness::capture::capture_rel_path;
@@ -67,7 +70,11 @@ const CLEAR_SRGB: [f32; 3] = [0.0, 0.0, 0.0];
 /// The dot marker's BASE world radius (m). `pub` so the pixel gates size the dot's projected
 /// rectangle from the SAME base the renderer draws — through the one shared
 /// `vd_client_harness::camera::marker_world_radius` floor (see `sync_world`'s marker scale).
-pub const DOT_RADIUS: f32 = 0.5;
+///
+/// TAKEN FROM Tier-A (`vd_client::realm_scene::POINT_SOURCE_BASE_RADIUS_M`), never restated: the
+/// avatar dot and a unit-luminosity star marker are the SAME point-source ladder (window lane
+/// Slice D), and two spellings of one convention is how they would drift.
+pub const DOT_RADIUS: f32 = vd_client::realm_scene::POINT_SOURCE_BASE_RADIUS_M as f32;
 /// Reference-scene extents so motion is VISIBLE in the empty stub world (P1.5 has no
 /// terrain): a ground plate + a ring of distinct landmark pillars for parallax. Pure
 /// render scaffolding — replaced wholesale by real terrain at P4, never extended.
@@ -203,6 +210,23 @@ pub struct RenderHandles {
     pub captures: Option<Receiver<CaptureJob>>,
     /// Where capture PNGs land (Capture mode); the bin creates the run dir.
     pub runs_dir: PathBuf,
+    /// PILOT VIEW (Capture mode only; window lane Slice D): render the capture from the AVATAR'S
+    /// EYE along its DELIVERED FACING instead of the scene-fitting diagnostic framing.
+    ///
+    /// `false` (the default) keeps every existing box gate byte-identical: the offscreen camera
+    /// frames the union of the whole drawn scene so every box lands in the readback. `true` is
+    /// what the warp acceptance needs — the union framing barely moves on a flight between two
+    /// fixed ring positions, so a system you fly toward cannot grow on screen, and the warp is a
+    /// statement about what the PILOT sees. The camera itself is Tier-A
+    /// (`vd_client_harness::camera::pilot_capture_camera`), so the pixel gate reconstructs exactly
+    /// the camera the renderer used from the delivered pose it already reads.
+    pub pilot_view: bool,
+}
+
+/// The capture framing choice, held as a Bevy resource so both camera systems read one value.
+#[derive(Resource)]
+struct CaptureView {
+    pilot: bool,
 }
 
 /// The bin's handles, held as a Bevy resource (read by every system).
@@ -228,15 +252,31 @@ struct CameraState {
 #[derive(Resource, Default)]
 struct DotEntities(BTreeMap<EntityId, Entity>);
 
-/// The map from a realm to its spawned translucent box entity — the SIBLING of [`DotEntities`]
-/// (the binary-render rule: the realm-box render is a DISTINCT path, never bolted onto the dot
-/// path). Keyed by [`RealmId`] for a deterministic spawn/despawn order.
+/// The map from a realm to its spawned body entity AND the lawful author that drew it — the
+/// SIBLING of [`DotEntities`] (the binary-render rule: the realm-box render is a DISTINCT path,
+/// never bolted onto the dot path). Keyed by [`RealmId`] for a deterministic spawn/despawn order.
+///
+/// The stored [`BodyKind`] is what makes THE HANDOVER (window lane §2.8) mechanical: a realm whose
+/// bag flips marker⇒self-look (it woke and states its own outline) or self-look⇒marker (it tore
+/// down and its parent's ever-present point of light resumes) despawns and respawns IN THE SAME
+/// FRAME, so exactly one of {marker, body} is ever on screen — never zero, never both.
 #[derive(Resource, Default)]
-struct RealmBoxEntities(BTreeMap<RealmId, Entity>);
+struct RealmBoxEntities(BTreeMap<RealmId, (Entity, BodyKind)>);
 
 /// Marker: a rendered realm box (a translucent colored volume).
 #[derive(Component)]
 struct RealmBoxMarker;
+
+/// The SHARED marker point-sprite assets: ONE unit vertex buffer for every point of light plus one
+/// unlit emissive material per Morgan-Keenan spectral class (`vd_client::realm_scene::
+/// MARKER_CLASS_SRGB`), built once at setup. This is what "a dot never costs a mesh" means in the
+/// renderer (window lane §2.14's tier-0 rung): a sleeping star adds an entity and a transform, no
+/// mesh build and no material allocation, however many of them the sky holds.
+#[derive(Resource)]
+struct MarkerAssets {
+    mesh: Handle<Mesh>,
+    class: Vec<Handle<StandardMaterial>>,
+}
 
 /// Shared dot render assets (one sphere mesh; own/other materials) built once at setup.
 #[derive(Resource)]
@@ -284,6 +324,9 @@ fn run_windowed(handles: RenderHandles) {
             cam: FollowCamera::new(DVec3::Y),
             last_movement: MovementKeys::default(),
         })
+        // A window is always the human's own first-person view; the pilot-view switch exists only
+        // for the HEADLESS capture path (there is no scene-fitting framing here to decline).
+        .insert_resource(CaptureView { pilot: false })
         .init_resource::<DotEntities>()
         .init_resource::<RealmBoxEntities>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -435,6 +478,24 @@ fn setup_world(
             emissive: LinearRgba::rgb(0.12, 0.10, 0.0),
             ..default()
         }),
+    });
+    // The SHARED marker point-sprite assets (window lane Slice D): one unit vertex buffer + one
+    // unlit emissive material per spectral class. `unlit` so a point of light reads at its stated
+    // colour regardless of where the key light is — a star is not lit, it emits — which also makes
+    // the pixel gates' local probes deterministic.
+    commands.insert_resource(MarkerAssets {
+        mesh: meshes.add(mesh_from_vertices(&point_sprite_vertices())),
+        class: MARKER_CLASS_SRGB
+            .iter()
+            .map(|&[r, g, b]| {
+                materials.add(StandardMaterial {
+                    base_color: Color::srgb(r, g, b),
+                    emissive: LinearRgba::rgb(r, g, b),
+                    unlit: true,
+                    ..default()
+                })
+            })
+            .collect(),
     });
     // The stats HUD is drawn each frame by `hud_primary` via egui (no entity to spawn).
 }
@@ -618,6 +679,7 @@ fn cursor_grab(
 fn sync_world(
     net: Res<Net>,
     camera: Res<CameraState>,
+    view: Res<CaptureView>,
     assets: Res<DotAssets>,
     mut dots: ResMut<DotEntities>,
     mut commands: Commands,
@@ -671,11 +733,15 @@ fn sync_world(
 
     let mut seen: BTreeSet<EntityId> = BTreeSet::new();
     let mut own_world: Option<DVec3> = None;
+    // The own entity's SERVER-DELIVERED facing — the pilot capture camera's basis (never a local
+    // view state: a headless run has no mouse, so the delivered orientation is the honest facing).
+    let mut own_orient = vd_core::glam::DQuat::IDENTITY;
     for (id, _sub, pose) in &rendered {
         seen.insert(*id);
         let world = snap.world_pos(pose); // a passthrough: the server ships pin-space positions
         if Some(*id) == own {
             own_world = Some(world);
+            own_orient = pose.orient;
         }
         match dots.0.get(id) {
             // Existing dot: move it (available from the frame after it was spawned).
@@ -715,14 +781,28 @@ fn sync_world(
         }
     });
 
-    // First-person camera at the own entity's eye, looking along the LOCAL camera basis.
+    // First-person camera at the own entity's eye. WINDOWED (and the default capture framing):
+    // along the LOCAL camera basis, so mouse-look turns the view immediately. PILOT VIEW (the
+    // headless warp acceptance): along the entity's DELIVERED facing, through the ONE Tier-A
+    // expression the pixel gates reconstruct the camera from — so an injected `LookAt` turns the
+    // avatar and the agent's eyes together, with no local view state to drift.
     if let Some(mut transform) = cam_tf.iter_mut().next()
         && let Some(own_pos) = own_world
     {
-        let eye = camera.cam.eye(own_pos);
-        let target = eye + camera.cam.forward();
-        *transform = Transform::from_translation(eye.as_vec3())
-            .looking_at(target.as_vec3(), camera.cam.up.as_vec3());
+        let (eye, target, up) = if view.pilot {
+            let cam = vd_client_harness::camera::pilot_capture_camera(
+                own_pos,
+                own_orient,
+                CAPTURE_W as usize,
+                CAPTURE_H as usize,
+            );
+            (cam.eye, cam.target, cam.up)
+        } else {
+            let eye = camera.cam.eye(own_pos);
+            (eye, eye + camera.cam.forward(), camera.cam.up)
+        };
+        *transform =
+            Transform::from_translation(eye.as_vec3()).looking_at(target.as_vec3(), up.as_vec3());
     }
 }
 
@@ -734,13 +814,16 @@ fn sync_world(
 /// NEVER a shape variant), and spawn a translucent [`StandardMaterial`] volume. Straight-line glue:
 /// every geometry/color/placement decision is a Tier-A call (`to_render_prims`, `world_pos`); this
 /// only builds Bevy `Mesh`/`Transform`/material handles and spawns/despawns to match the scene.
+#[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
 fn sync_realm_boxes(
     net: Res<Net>,
     mut boxes: ResMut<RealmBoxEntities>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    markers: Res<MarkerAssets>,
     mut commands: Commands,
-    mut box_tf: Query<&mut Transform, With<RealmBoxMarker>>,
+    mut box_tf: Query<&mut Transform, (With<RealmBoxMarker>, Without<FollowCam>)>,
+    cam: FollowCamQuery,
 ) {
     // SLICE 6 S4 — ONE MOMENT. Resolve the realm boxes at the SAME display cursor `sync_world` samples
     // the entities at, so the ground and the player standing on it are drawn from one instant. This
@@ -749,17 +832,13 @@ fn sync_realm_boxes(
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
     let scene = snap.scene_now(now_s);
+    // The camera facts the apparent-size floor needs, read the SAME way `sync_world` reads them
+    // for the avatar dot (LAST frame's pose — the capture refit runs after this system; the fitted
+    // camera moves sub-frame per tick, so the scale error is O(0.1%), far inside the gates' 2×
+    // rect bracketing).
+    let view = camera_view(&cam);
     let mut seen: BTreeSet<RealmId> = BTreeSet::new();
     for (realm, rbox) in scene.iter() {
-        // A MARKER body is a zero-extent POINT until Slice D's luma-driven point sprites land
-        // (THE DRAW LAW's other arm — its parent's placement datum, sub-pixel at these
-        // distances): tracked on the scene + the diagnosis surface, no mesh spawned (a
-        // placeholder mesh for a point of light would be a lie the pixel gates would then
-        // measure). It stays OUT of `seen`, so a body that DEGRADES to a marker (its look
-        // withdrawn) despawns its mesh below.
-        if rbox.body == vd_client::realm_scene::BodyKind::Marker {
-            continue;
-        }
         seen.insert(realm);
         // The box's OWN position, flattened ONCE through the ONE chokepoint. Slice 5: this used to
         // FABRICATE a zero pose purely to extract `-pin` from `world_pos`, then add a centre whose
@@ -768,30 +847,59 @@ fn sync_realm_boxes(
         // its full position now, already measured from the realm this session stands in, and in the unit
         // the shipper stated for it — so there is nothing to subtract and no unit to pick.
         let draw_center = rbox.draw_center();
-        // Lower to render primitives (VERTICES) at that drawn centre — no shape branch here.
-        let prims = to_render_prims(rbox, draw_center);
+        // Lower to render primitives (VERTICES) at that drawn centre — no shape branch here. THE
+        // DRAW LAW's two arms are the two lawful AUTHORS, decided by the row's bag upstream in
+        // Tier-A: a self-authored outline lowers through the shape tessellation; a parent-authored
+        // point of light lowers to the ONE shared point sprite, sized by the apparent-size floor.
+        let prims = match rbox.body {
+            BodyKind::Look => to_render_prims(rbox, draw_center),
+            BodyKind::Marker => marker_prims(rbox, draw_center, view),
+        };
         match boxes.0.get(&realm) {
-            // Existing box: the geometry is fixed (config, not delivered state) through P3, so only
-            // the transform can move (a hull-borne box at P8). Update its translation.
-            Some(&entity) => {
+            // Existing body drawn by the SAME author: the outline geometry is fixed (config, not
+            // delivered state) through P3, so only the transform can move (a hull-borne box at P8);
+            // a marker's scale also breathes with its distance, so both ride the transform.
+            Some(&(entity, kind)) if kind == rbox.body => {
                 if let Ok(mut transform) = box_tf.get_mut(entity)
                     && let Some(prim) = prims.first()
                 {
                     transform.translation = Vec3::from_array(prim.transform.translation);
+                    transform.scale = Vec3::from_array(prim.transform.scale);
                 }
             }
-            // New box: build the translucent mesh + material once and spawn it.
-            None => {
-                if let Some(entity) =
-                    spawn_realm_box(&prims, &mut meshes, &mut materials, &mut commands)
-                {
-                    boxes.0.insert(realm, entity);
-                }
+            // THE HANDOVER, both ways (window lane §2.8): the author changed — a sleeping child
+            // woke and now states its own outline, or a departed one's look was pruned and its
+            // parent's ever-present point of light resumed. Despawn and respawn IN THIS FRAME, so
+            // the swap is atomic on screen: never zero drawn, never both.
+            Some(&(entity, _)) => {
+                commands.entity(entity).despawn();
+                spawn_body(
+                    realm,
+                    rbox,
+                    &prims,
+                    &markers,
+                    &mut meshes,
+                    &mut materials,
+                    &mut commands,
+                    &mut boxes,
+                );
             }
+            // New body: build it once and spawn it.
+            None => spawn_body(
+                realm,
+                rbox,
+                &prims,
+                &markers,
+                &mut meshes,
+                &mut materials,
+                &mut commands,
+                &mut boxes,
+            ),
         }
     }
-    // Despawn boxes no longer in the scene (empty through P3, but the seam supports dynamic scenes).
-    boxes.0.retain(|realm, entity| {
+    // Despawn bodies no longer in the scene (a realm that left the drawn set entirely — neither a
+    // look nor a marker statement reached the composer, so nothing may be drawn for it).
+    boxes.0.retain(|realm, (entity, _)| {
         if seen.contains(realm) {
             true
         } else {
@@ -801,6 +909,117 @@ fn sync_realm_boxes(
     });
 }
 
+/// The follow camera's own query, named once so the system signature and the reader agree on it.
+type FollowCamQuery<'w, 's> =
+    Query<'w, 's, (&'static Transform, &'static Camera, &'static Projection), FollowCamOnly>;
+/// The filter that keeps the follow camera's `Transform` disjoint from the realm bodies' — Bevy
+/// needs the two queries provably non-overlapping to run them in one system.
+type FollowCamOnly = (With<FollowCam>, Without<RealmBoxMarker>);
+
+/// The camera facts the shared apparent-size floor needs: `(eye, vertical fov, viewport rows)`.
+/// `None` before the first frame has a camera — the caller then draws at the base radius.
+fn camera_view(cam: &FollowCamQuery) -> Option<(Vec3, f64, f64)> {
+    let (transform, camera, projection) = cam.iter().next()?;
+    let fov_y = match projection {
+        Projection::Perspective(p) => f64::from(p.fov),
+        // Non-perspective projections do not occur here (both cameras declare Perspective);
+        // fall back to the declared default rather than a magic number.
+        _ => f64::from(PerspectiveProjection::default().fov),
+    };
+    let viewport_h = camera
+        .physical_viewport_size()
+        .map_or(f64::from(CAPTURE_H), |s| f64::from(s.y));
+    Some((transform.translation, fov_y, viewport_h))
+}
+
+/// One MARKER body's render primitive: the SHARED unit point sprite at the drawn centre, scaled to
+/// its luma-derived base radius after the ONE apparent-size floor
+/// (`vd_client_harness::camera::marker_world_radius` — the same expression the pixel gates size
+/// their rectangles from, so the drawn footprint and the asserted rectangle cannot disagree).
+///
+/// A marker with no luma datum cannot occur (Tier-A's presence gate only mints a marker body FROM
+/// a `TAG_LUMA` bag); if one ever did, it draws at the bare floor rather than vanishing — the
+/// presence law is "never zero".
+fn marker_prims(
+    rbox: &RealmBox,
+    draw_center: DVec3,
+    view: Option<(Vec3, f64, f64)>,
+) -> Vec<MeshPrim> {
+    let (class_code, luma_lsun) = rbox.luma.unwrap_or_default();
+    let look = marker_look(class_code, luma_lsun);
+    let radius = match view {
+        Some((eye, fov_y, viewport_h)) => vd_client_harness::camera::marker_world_radius(
+            look.base_radius_m,
+            (draw_center - eye.as_dvec3()).length(),
+            fov_y,
+            viewport_h,
+        ),
+        None => look.base_radius_m,
+    };
+    let r = radius as f32;
+    vec![MeshPrim {
+        vertices: point_sprite_vertices(),
+        color_rgba: look.color_rgba,
+        transform: PrimTransform {
+            translation: [
+                draw_center.x as f32,
+                draw_center.y as f32,
+                draw_center.z as f32,
+            ],
+            scale: [r, r, r],
+        },
+    }]
+}
+
+/// Spawn one realm's body and record WHICH lawful author drew it. A marker reuses the SHARED point
+/// sprite mesh + its spectral-class material (no mesh build, no material allocation — §2.14's
+/// tier-0 rung); an outline builds its own translucent volume.
+#[allow(clippy::too_many_arguments)]
+fn spawn_body(
+    realm: RealmId,
+    rbox: &RealmBox,
+    prims: &[MeshPrim],
+    markers: &MarkerAssets,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    commands: &mut Commands,
+    boxes: &mut RealmBoxEntities,
+) {
+    let spawned = match rbox.body {
+        BodyKind::Look => spawn_realm_box(prims, meshes, materials, commands),
+        BodyKind::Marker => spawn_marker(prims, rbox, markers, commands),
+    };
+    if let Some(entity) = spawned {
+        boxes.0.insert(realm, (entity, rbox.body));
+    }
+}
+
+/// Spawn one MARKER point sprite from the shared assets. Returns `None` if the marker lowered to no
+/// prim (defensive — `marker_prims` always emits exactly one).
+fn spawn_marker(
+    prims: &[MeshPrim],
+    rbox: &RealmBox,
+    markers: &MarkerAssets,
+    commands: &mut Commands,
+) -> Option<Entity> {
+    let prim = prims.first()?;
+    let (class_code, _) = rbox.luma.unwrap_or_default();
+    let material = markers
+        .class
+        .get(usize::from(class_code))
+        .or_else(|| markers.class.last())?;
+    let entity = commands
+        .spawn((
+            Mesh3d(markers.mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(Vec3::from_array(prim.transform.translation))
+                .with_scale(Vec3::from_array(prim.transform.scale)),
+            RealmBoxMarker,
+        ))
+        .id();
+    Some(entity)
+}
+
 /// Frame the OFFSCREEN capture camera on the whole realm-box scene (capture-only, V3): when a
 /// `boxes.json` scene is loaded, point the camera at `fit_camera_to_scene` so EVERY box lands in the
 /// readback — the deterministic capture camera the pixel proof (`render_boxes_smoke`) reconstructs
@@ -808,7 +1027,17 @@ fn sync_realm_boxes(
 /// box-framing view WINS over the follow-the-dot camera (a loaded scene means "show the boxes"). An
 /// empty scene leaves the follow camera untouched (the existing behaviour). Tier-A math
 /// (`fit_camera_to_scene`); this only applies the returned pose to the Bevy transform.
-fn frame_scene_camera(net: Res<Net>, mut cam_tf: Query<&mut Transform, With<FollowCam>>) {
+fn frame_scene_camera(
+    net: Res<Net>,
+    view: Res<CaptureView>,
+    mut cam_tf: Query<&mut Transform, With<FollowCam>>,
+) {
+    // PILOT VIEW: the scene-fitting framing is DECLINED whole — `sync_world` already placed the
+    // camera at the avatar's eye along its delivered facing, and this system is the only thing
+    // that would override it (it is registered `.after(sync_world)` precisely to be the last word).
+    if view.pilot {
+        return;
+    }
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
     // Framed on the SAME resolved-at-cursor scene the boxes are drawn from (slice 6 S4) — otherwise the
@@ -872,8 +1101,14 @@ fn spawn_realm_box(
 /// it). PURE glue: no shape branch, no logic — exactly the H4 seam (P4 greedy quads slot in here
 /// unchanged, more vertices through the same path).
 fn mesh_from_prim(prim: &MeshPrim) -> Mesh {
-    let positions: Vec<[f32; 3]> = prim.vertices.iter().map(|v| v.pos).collect();
-    let normals: Vec<[f32; 3]> = prim.vertices.iter().map(|v| v.normal).collect();
+    mesh_from_vertices(&prim.vertices)
+}
+
+/// Build a Bevy `Mesh` from a Tier-A vertex buffer — the shared body of [`mesh_from_prim`] and the
+/// one-time marker point-sprite build.
+fn mesh_from_vertices(vertices: &[Vertex]) -> Mesh {
+    let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.pos).collect();
+    let normals: Vec<[f32; 3]> = vertices.iter().map(|v| v.normal).collect();
     Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
@@ -1004,6 +1239,9 @@ fn run_capture(handles: RenderHandles) {
         .insert_resource(CameraState {
             cam: FollowCamera::new(DVec3::Y),
             last_movement: MovementKeys::default(),
+        })
+        .insert_resource(CaptureView {
+            pilot: handles.pilot_view,
         })
         .insert_resource(CaptureChannel(captures))
         .insert_resource(CaptureCfg {

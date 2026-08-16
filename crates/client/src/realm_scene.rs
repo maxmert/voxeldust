@@ -414,6 +414,86 @@ pub fn color_for_realm(realm: RealmId) -> [f32; 4] {
     [r, g, b, BOX_ALPHA]
 }
 
+// ---------------------------------------------------------------------------
+// THE MARKER POINT SPRITE (window lane Slice D — `docs/design/window_lane.md` §2.8/§2.10)
+// ---------------------------------------------------------------------------
+
+/// The world radius the client draws a UNIT-luminosity (1 L☉) point source at — and the base
+/// radius of the avatar dot, which `vd_client_render::DOT_RADIUS` takes FROM here so the two
+/// cannot drift. THE convention it states, once: *a solar-luminosity point of light is drawn the
+/// same size as one player marker*; every other luminosity scales off it by
+/// [`marker_look`]'s √L law, and every point then passes through the ONE apparent-size floor
+/// (`vd_client_harness::camera::marker_world_radius`), so a point of light is never sub-pixel.
+///
+/// A rendering convention, not a world number: nothing on the wire and nothing in the sim reads
+/// it. The physically-exposed successor (an HDR apparent-magnitude exposure model) is one of the
+/// owner-pending rendering decisions and is registered in DEFERRED, not guessed at here.
+pub const POINT_SOURCE_BASE_RADIUS_M: f64 = 0.5;
+
+/// The drawn sRGB of each Morgan-Keenan spectral class, indexed by the `TAG_LUMA` bag's
+/// `class_code` (`vd_physics::taxonomy::SpectralClass`: `O=0, B=1, A=2, F=3, G=4, K=5, M=6`).
+/// These are the blackbody colours of each class's effective-temperature band (Charity's
+/// blackbody→sRGB table at ~30 000 / 15 000 / 8 500 / 6 600 / 5 700 / 4 400 / 3 200 K) — the
+/// published sequence, not a picked palette. A REFLECTOR (a planet) carries its illuminator's
+/// class by construction (`reflected_photometrics`), so a moon reads in its star's colour, which
+/// is what reflected light does.
+///
+/// A class code the wire never mints (≥ 7) draws as the coolest class rather than vanishing —
+/// the presence law is "never zero", so an unknown colour is still a point of light.
+pub const MARKER_CLASS_SRGB: [[f32; 3]; 7] = [
+    [0.608, 0.686, 1.000], // O — blue
+    [0.671, 0.749, 1.000], // B — blue-white
+    [0.792, 0.843, 1.000], // A — white
+    [0.973, 0.969, 1.000], // F — yellow-white
+    [1.000, 0.957, 0.918], // G — yellow
+    [1.000, 0.839, 0.667], // K — orange
+    [1.000, 0.714, 0.427], // M — red
+];
+
+/// How one MARKER body is drawn: an opaque, unlit point sprite of [`MarkerLook::color_rgba`] at
+/// [`MarkerLook::base_radius_m`] — the two things the parent's `TAG_LUMA` datum lawfully states
+/// about a sleeping child (§1.1 item 3b: brightness and colour, and nothing else).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MarkerLook {
+    /// The sprite's colour. OPAQUE (alpha 1.0), unlike a shell's [`BOX_ALPHA`]: a point of light
+    /// emits, it does not enclose.
+    pub color_rgba: [f32; 4],
+    /// The sprite's base world radius BEFORE the shared apparent-size floor. `√L · `
+    /// [`POINT_SOURCE_BASE_RADIUS_M`] — the equal-surface-brightness radius (a sphere whose
+    /// radius goes as √L has flux ∝ L), i.e. the classic "size encodes magnitude" convention,
+    /// which is also what the ambient backdrop starfield already draws.
+    pub base_radius_m: f64,
+}
+
+/// The point sprite for one `TAG_LUMA` datum — the client half of THE DRAW LAW's marker arm
+/// (`docs/design/window_lane.md` §2.8: "only the LOOK payload upgrades: marker ⇒ self-look").
+/// Pure and monomorphic (HR5): the two branches — an out-of-range class code, and a
+/// negative/NaN luminosity — are both exercised here, so the renderer stays a straight-line shim.
+///
+/// The apparent SIZE floor is deliberately NOT applied here: it needs the camera, and it is the
+/// ONE shared `vd_client_harness::camera::marker_world_radius` both the renderer and the pixel
+/// gates call, so the drawn footprint and the asserted rectangle cannot disagree.
+#[must_use]
+pub fn marker_look(class_code: u8, luma_lsun: f64) -> MarkerLook {
+    let last = MARKER_CLASS_SRGB.len() - 1;
+    let [r, g, b] = MARKER_CLASS_SRGB[usize::from(class_code).min(last)];
+    MarkerLook {
+        color_rgba: [r, g, b, 1.0],
+        // `f64::max` returns the non-NaN side, so a malformed datum floors at zero luminosity
+        // (a point at the apparent-size floor) rather than producing a NaN transform.
+        base_radius_m: POINT_SOURCE_BASE_RADIUS_M * luma_lsun.max(0.0).sqrt(),
+    }
+}
+
+/// The ONE unit point-sprite vertex buffer every marker shares — the same coarse unit sphere the
+/// `Sphere` proxy tessellates to (H4: the tessellation lives in Tier-A, never in the renderer).
+/// The renderer builds this ONCE and scales it per marker, so a point of light never costs a mesh
+/// (§2.14's tier-0 rung: "a dot never costs a mesh").
+#[must_use]
+pub fn point_sprite_vertices() -> Vec<Vertex> {
+    unit_sphere_vertices()
+}
+
 /// The base `(hue, sat, val)` for a realm ROLE — the ONE place a realm KIND maps to a look (a cosmetic
 /// table, not a feature branch — HR3-safe because it drives only rendering, never behaviour). Planet =
 /// blue; System (also the Galaxy/Universe `System` stand-ins) = warm star; Ship = amber; Station = steel;
@@ -847,6 +927,73 @@ mod tests {
         assert_eq!(look.body, BodyKind::Look);
         assert_eq!(look.luma, None);
         assert_ne!(look.body, marker.body);
+    }
+
+    #[test]
+    fn a_markers_point_sprite_is_its_class_colour_at_the_root_luminosity_radius() {
+        // THE MARKER POINT SPRITE (window lane Slice D §2.8). A unit-luminosity source is drawn at
+        // exactly the shared point-source base radius — the convention `POINT_SOURCE_BASE_RADIUS_M`
+        // states — and in its spectral class's own colour, OPAQUE (a point of light emits; it does
+        // not enclose like a translucent shell).
+        let sun = marker_look(4, 1.0);
+        assert_eq!(sun.base_radius_m, POINT_SOURCE_BASE_RADIUS_M);
+        let [r, g, b] = MARKER_CLASS_SRGB[4];
+        assert_eq!(sun.color_rgba, [r, g, b, 1.0]);
+        // BRIGHTNESS DRIVES SIZE by the equal-surface-brightness law (radius ∝ √L, so flux ∝ L):
+        // a quarter-luminosity source is drawn at HALF the radius, exactly.
+        assert_eq!(
+            marker_look(4, 0.25).base_radius_m,
+            POINT_SOURCE_BASE_RADIUS_M * 0.5
+        );
+        // THE world's pinned M-dwarf datum (`System(7)`): class 6 draws red, and its faint
+        // luminosity lands far below the base radius — which is why the shared apparent-size floor
+        // exists at all (`marker_world_radius`), not because the sprite has a minimum of its own.
+        let dwarf = marker_look(6, 0.000_972_607_424_178_079_9);
+        assert_eq!(dwarf.color_rgba, [1.000, 0.714, 0.427, 1.0]);
+        assert!(
+            dwarf.base_radius_m < POINT_SOURCE_BASE_RADIUS_M,
+            "a sub-solar source is drawn smaller: {}",
+            dwarf.base_radius_m
+        );
+        // A REFLECTOR keeps its illuminator's class, so a planet reads in its star's colour — the
+        // same class code yields the same colour whatever the luminosity.
+        assert_eq!(marker_look(6, 1e-9).color_rgba, dwarf.color_rgba);
+    }
+
+    #[test]
+    fn a_malformed_marker_datum_still_draws_a_point_and_never_a_nan() {
+        // THE PRESENCE LAW is "never zero", so neither malformed input may make a marker vanish or
+        // produce a NaN transform. A class code the wire never mints draws as the coolest class.
+        let coolest = MARKER_CLASS_SRGB[MARKER_CLASS_SRGB.len() - 1];
+        assert_eq!(marker_look(7, 1.0).color_rgba[0], coolest[0]);
+        assert_eq!(
+            marker_look(u8::MAX, 1.0).color_rgba,
+            marker_look(6, 1.0).color_rgba
+        );
+        // A negative or NaN luminosity floors at zero radius (the apparent-size floor then carries
+        // it), rather than yielding NaN through `sqrt`.
+        assert_eq!(marker_look(0, -1.0).base_radius_m, 0.0);
+        assert_eq!(marker_look(0, f64::NAN).base_radius_m, 0.0);
+    }
+
+    #[test]
+    fn every_point_sprite_shares_one_unit_vertex_buffer() {
+        // "A dot never costs a mesh" (§2.14's tier-0 rung): the renderer builds THIS buffer once
+        // and scales it per marker, so the buffer cannot depend on the marker.
+        let a = point_sprite_vertices();
+        assert_eq!(a, point_sprite_vertices());
+        assert!(!a.is_empty(), "the point sprite has geometry");
+        // It is the same unit sphere the `Sphere` proxy tessellates to, at unit radius — the
+        // tessellation lives here in Tier-A, never in the coverage-exempt renderer (H4).
+        let far = a
+            .iter()
+            .map(|v| {
+                f64::from(v.pos[0])
+                    .hypot(f64::from(v.pos[1]))
+                    .hypot(f64::from(v.pos[2]))
+            })
+            .fold(0.0_f64, f64::max);
+        assert!((far - 1.0).abs() < 1e-6, "unit radius, got {far}");
     }
 
     #[test]

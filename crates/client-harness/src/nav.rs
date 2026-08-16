@@ -12,6 +12,23 @@ use vd_devproto::InputAction;
 /// Max look delta per tick (radians) — caps the turn rate so look-at is smooth.
 pub const MAX_LOOK_STEP: f64 = 0.2;
 
+/// THE LOOK BRAKE (window lane Slice D, MEASURED): how many ticks of commanded turn may be in
+/// flight before the entity's own delivered orientation reports them. The controller steers by the
+/// DELIVERED pose, which lags the server by ~2-3 ticks — the SAME feedback lag `walk_to`'s
+/// `max_step_m` brake is sized to ("(1 + lag) steps commands at most dist/4 per tick", the run-7
+/// measurement recorded in `vd_bins::flight`) — so commanding the WHOLE observed error every tick
+/// puts three more full corrections on the wire before the first one is seen, and the turn
+/// overshoots by roughly twice the last correction.
+///
+/// THE DEFECT THIS CURES, measured on THE world 2026-08-16: a 90° `LookAt` reported ALIGNED at an
+/// error of 0.0030 rad and then kept rotating for another **0.6030 rad (34.5°)** as the in-flight
+/// deltas landed — the aim froze a third of a right angle off target while the closed loop said it
+/// had arrived. `walk_to` has had this brake since Stage B4; `look_at` never did.
+///
+/// Commanding `error / LOOK_FEEDBACK_STEPS` makes the in-flight sum strictly smaller than the
+/// remaining error, so the turn converges geometrically and cannot overshoot.
+pub const LOOK_FEEDBACK_STEPS: f64 = 4.0;
+
 /// `|forward.y|` at/above which a direction is treated as "at the gimbal pole" (within
 /// ~0.8° of straight up/down): there yaw is ill-defined (`atan2` of ~0/~0), so a yaw
 /// correction is meaningless. Inside this band `look_at` holds yaw and drives pitch only
@@ -95,9 +112,11 @@ impl LookStep {
 }
 
 /// Closed-loop look-at: turn the entity to face `target`, emitting a per-tick `Look`
-/// delta (clamped to ±[`MAX_LOOK_STEP`]); `aligned` once the facing is within
-/// `align_epsilon` of the target (the true 3-D angle, so it stays honest at the pole).
-/// Uses the delivered orient as the current facing.
+/// delta (BRAKED by [`LOOK_FEEDBACK_STEPS`], then clamped to ±[`MAX_LOOK_STEP`]); `aligned` once
+/// the facing is within `align_epsilon` of the target (the true 3-D angle, so it stays honest at
+/// the pole). Uses the delivered orient as the current facing — which is exactly why the brake is
+/// load-bearing: that pose lags the server, so an unbraked loop over-rotates by whatever it has
+/// already put on the wire (measured: 0.6030 rad past an "aligned" 90° turn before the brake).
 #[must_use]
 pub fn look_at(own_pos: DVec3, own_orient: DQuat, target: DVec3, align_epsilon: f64) -> LookStep {
     let to_target = target - own_pos;
@@ -143,8 +162,10 @@ fn wrap_pi(angle: f64) -> f64 {
     (angle + PI).rem_euclid(TAU) - PI
 }
 
+/// One commanded look delta: the observed error BRAKED by the feedback lag, then capped at the
+/// smooth-turn ceiling. Branchless (HR5) — a divide and a clamp, no arm to leave uncovered.
 fn clamp_step(v: f64) -> f32 {
-    v.clamp(-MAX_LOOK_STEP, MAX_LOOK_STEP) as f32
+    (v / LOOK_FEEDBACK_STEPS).clamp(-MAX_LOOK_STEP, MAX_LOOK_STEP) as f32
 }
 
 #[cfg(test)]
@@ -304,7 +325,8 @@ mod tests {
 
     #[test]
     fn look_at_yaw_error_drives_a_clamped_turn() {
-        // Target to the +X side: needs a yaw turn -> not aligned, yaw look clamped.
+        // Target to the +X side: a 90° yaw error. BRAKED to a quarter (0.3927 rad) it still exceeds
+        // the smooth-turn ceiling, so the commanded delta is the CLAMP.
         let step = look_at(
             DVec3::ZERO,
             DQuat::IDENTITY,
@@ -315,6 +337,38 @@ mod tests {
         assert!(
             (f64::from(step.look[0]).abs() - MAX_LOOK_STEP).abs() < 1e-6,
             "yaw clamped"
+        );
+    }
+
+    #[test]
+    fn the_look_brake_commands_a_fraction_of_the_error_so_the_turn_cannot_overshoot() {
+        // THE DEFECT THIS PINS (measured on THE world 2026-08-16): the controller steers by the
+        // DELIVERED orientation, which lags the server by ~2-3 ticks, so commanding the WHOLE
+        // observed error puts three more full corrections on the wire before the first is seen —
+        // a 90° LookAt reported ALIGNED at 0.0030 rad and then rotated another 0.6030 rad as the
+        // in-flight deltas landed. The brake commands `error / LOOK_FEEDBACK_STEPS`, so the sum
+        // still in flight is strictly SMALLER than the error that remains.
+        //
+        // A small error (well under the clamp) is commanded at exactly its braked fraction.
+        let small = 0.08_f64; // rad of yaw error, below MAX_LOOK_STEP · LOOK_FEEDBACK_STEPS
+        let orient = kinematics::orient_from_yaw_pitch(small, 0.0);
+        let step = look_at(DVec3::ZERO, orient, DVec3::new(0.0, 0.0, -5.0), 0.001);
+        assert!(!step.aligned);
+        // Captured inline, so the failure message costs no region a passing run never executes
+        // (HR5's own test discipline: a lazily-evaluated argument on its own line is an
+        // uncoverable source line).
+        let commanded = f64::from(step.look[0]).abs();
+        assert!(
+            (commanded - small / LOOK_FEEDBACK_STEPS).abs() < 1e-6,
+            "the commanded yaw {commanded} is the error {small} braked by {LOOK_FEEDBACK_STEPS}",
+        );
+        // THE PROPERTY that makes the loop stable under the lag: even with LOOK_FEEDBACK_STEPS − 1
+        // identical commands already in flight, their sum is less than the error still to correct,
+        // so the facing approaches the target and never crosses it.
+        let in_flight = (LOOK_FEEDBACK_STEPS - 1.0) * commanded;
+        assert!(
+            in_flight < small,
+            "in-flight sum {in_flight} must stay under the remaining error {small}",
         );
     }
 

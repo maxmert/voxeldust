@@ -4112,6 +4112,10 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   used to name are GONE: `child_shape` died with the parent-authored outline — window lane Slice C2,
   minor 19 — and the `--realm-boxes` on-disk contract died at the Slice-C1 flag day. `VD_REALM_BOUNDARIES`
   was listed here too; the symbol was DELETED by the Stage-C batch-1 cluster rework and reads nothing.)
+  **★ SLICE D (2026-08-16) TOUCHED NEITHER READER.** The window lane's capstone added drawing, pruning
+  and pixel gates; it did not go near the boot roster or `placement_row`'s static arm, so this row's
+  residual is exactly where Slice C2 left it — SHRUNK by two dead readers, and OPEN. Said plainly rather
+  than quietly rolled into the slice's flips.
   **When:** with the motion-roster boot rework (the writer-in-node move below).
 - **Where:** `crates/core/src/geometry.rs` (`RealmRegion.center`), `crates/sim/src/stub.rs`,
   `crates/bins/src/lib.rs`.
@@ -4185,7 +4189,7 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **HOW it resolved (owner-approved 2026-08-15/16, `docs/design/window_lane.md` §2.10 + §5 RULINGS):** a realm now states its own look on `ShardToGateway::WindowBody::SelfLook`, built from what it knows about ITSELF (its own boot extent via `RealmRegions::own_shape`), straight to the connection plane — and the two lanes a parent used to author outlines on are DELETED with their machinery: `InterShardFlow::ChildSceneSet` and `ShardToGateway::RealmSceneDelta` are tombstoned (minor 19) and `child_shape` no longer exists. What a parent may still say about a child is a PLACEMENT (`WindowFrame` rows) and, for a DORMANT child only, one photometric marker (§1.1 item 3b — the owner-ruled R4 datum, superseded the instant the child speaks for itself). Attestation makes the split structural, not careful: a `SelfLook` is legal only when `subject == the sender's own realm`.
 - **THE OWNER RULING IT WAITED ON — answered by the marker model.** The question was: if a non-running realm draws nothing, is an empty star system invisible? The answer is that a dormant child is its PARENT's point of light, positioned by the parent's placement row before, during and after spin-up; only the LOOK payload upgrades (marker ⇒ self-look) when the child starts speaking, by data presence, never both and never zero. So the draw IS liveness-gated structurally, and nothing goes dark.
 - **MEASURED, not argued:** `tests/tests/frame_conversion_e2e.rs::the_room_the_player_is_standing_in_has_exactly_one_author` (the room's look crosses the shard→gateway edge stated by its OWN shard and by no other host, and no host ever states a look about a realm it is not).
-- **What Slice D still owes (registered there, not here):** the marker point-sprite RENDERING and roster-driven look pruning — the client-side half of the handover. Authorship is done.
+- **THE CLIENT-SIDE HALF LANDED AT SLICE D (2026-08-16), so this row owes nothing further:** markers draw as luma-driven point sprites (`vd_client::realm_scene::marker_look` — the MK class's own blackbody colour, radius `√L` off the one shared point-source base, then the shared apparent-size floor; one unit vertex buffer + one material per class, so a point of light never costs a mesh), and a self-look that stops being re-asserted is PRUNED after the derived roster-loss window so the parent's ever-present marker resumes (`WindowTuning::look_ttl_ticks` + `WindowIngest::prune_stale`). Both directions of the handover are measured in pixels by `just warp-pixels` — see [[D-WINDOW-1]]'s Slice-D entry for the numbers.
 - **Where:** `crates/sim/src/stub.rs` (`emit_window_bodies`, `current_bodies`), `crates/wire/src/session_flow.rs` (`BodyStmt`, `window_body_admissible`), `docs/design/window_lane.md` §2.10.
 
 ### D-LANE-5 🟩 The SL7 bit beats on its contract's cadence; the retain TTL is derived in cadence beats (Step-5 lane cure, finding 41 — landed 2026-08-14)
@@ -4210,7 +4214,7 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **WHEN:** P8 (the ship-realm work) — a new lineage arm PLUS a payload widening (the `u64` seed cannot hold an `EntityId`), i.e. a deliberate wire change on the frozen `RealmPath`, not an append; the counter and the exclusions retire with it.
 - **Where:** `crates/core/src/realm_path.rs` (`RealmKindTag`), `crates/core/src/worldgen.rs::level_of`, `crates/sim/src/stub.rs::region_level` + the four lane guards, `crates/bins/src/lib.rs::realm_from_kind_seed`.
 
-### D-WINDOW-1 🟧 THE WINDOW LANE — the observer chain that replaces the bucket cascade (owner-approved 2026-08-15/16, docs/design/window_lane.md; slices 0/A/B/C1/C2 landed, D next)
+### D-WINDOW-1 🟩 RESOLVED (2026-08-16) — THE WINDOW LANE: the observer chain that replaced the bucket cascade, LADDER COMPLETE (slices 0/A/B/C1/C2/D all landed; owner-approved 2026-08-15/16, docs/design/window_lane.md)
 - **WHAT this is:** the binding slice ladder for the window lane (`docs/design/window_lane.md`; the signed
   five-topic approval + Q1/Q2/Q3 rulings live in `docs/design/owner_decisions_2026-08-15.md`, 2026-08-16
   addendum). Each world level states only what it lawfully owns — placements, one hop row per occupied child,
@@ -4376,18 +4380,175 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
     own-level age at the gateway edge fell from p99 16 ticks to p99 1.
     *Owner-visible outcome:* four world-to-world scenery lanes gone forever; nothing changes on screen
     (the suite stays green).
-  - **Slice D — THE WARP ACCEPTANCE (capstone).** Marker point-sprite rendering, roster-driven look
-    pruning, symmetric handover budgets. *Owner-visible outcome:* the warp experience in pixels on THE
-    world — fly A → B: B a point of light at departure, grows monotonically, hands over flicker-free; A
-    shrinks to a dot behind and tears down. Gates: G-WARP-PIXELS, G-HANDOVER (both directions, incl. the
-    Q2 relay hop at the wake moment), G-TWO-SHIPS (owner-ordered, see the addendum), G-SHEAR full.
-    DEFERRED flips: D-LANE-4 🟩, D-LANE-6 🟩 and D-PLACE-3 🟩 all landed EARLY (C1/C2 discharged
-    their substance — see those rows); D-PLACE-2's residual shrank (two readers gone) but stays open;
-    new owed rows registered (census-scale photometric derivation; P10 rotated-hop composition).
+  - **Slice D — THE WARP ACCEPTANCE (🟩 landed 2026-08-16; the capstone).**
+    **MARKER POINT SPRITES.** A sleeping realm now DRAWS. `vd_core::look`'s `TAG_LUMA` datum
+    `(class_code, luma_lsun)` reaches the client on the composed row and is turned into a point of
+    light by ONE Tier-A expression (`vd_client::realm_scene::marker_look`): the colour is the
+    Morgan-Keenan class's own blackbody sRGB (`MARKER_CLASS_SRGB`, the published sequence — a
+    REFLECTOR carries its illuminator's class, so a planet reads in its star's colour), and the
+    radius is `√L · POINT_SOURCE_BASE_RADIUS_M` — the equal-surface-brightness law, anchored on the
+    ONE base radius the avatar dot is drawn at (`vd_client_render::DOT_RADIUS` now TAKES that
+    constant rather than restating it). Every point then passes the shared apparent-size floor
+    (`marker_world_radius`), so a marker is never sub-pixel and the pixel gates size their
+    rectangles from the same two calls the renderer scales the sprite by. **A MARKER NEVER COSTS A
+    MESH** (§2.14's tier-0 rung): the renderer builds ONE unit point-sprite vertex buffer and one
+    unlit emissive material per spectral class at setup, and a sleeping star adds an entity and a
+    transform, nothing more. **THE HANDOVER IS ATOMIC IN THE RENDERER:** the drawn body is keyed by
+    `(entity, BodyKind)`, so a realm whose author flips (it woke and states its own outline, or its
+    look was pruned and its parent's marker resumed) despawns and respawns IN THE SAME FRAME —
+    exactly one of {marker, body} on screen, never zero, never both.
+    **ROSTER-DRIVEN LOOK PRUNING** (§2.8's departure mirror). `WindowTuning` gained
+    `look_ttl_ticks` (the same 2-beats-+-1 law off the same beat) and `WindowIngest::prune_stale`
+    drops any SELF-LOOK — and any relayed interior LEVEL — not re-asserted inside it, counted
+    `window_looks_pruned` / `window_relay_levels_pruned`. MARKERS ARE DELIBERATELY EXEMPT: a marker
+    is the presence gate's FLOOR, and expiring it would blank a star rather than shrink a system to
+    a dot. What makes the TTL sound is the other half of the change: a keep-alive `WindowOpen` now
+    RE-ASSERTS every send-on-change lane shard-side (`OpenWindow::reset_baselines`), so a statement
+    that stops arriving means the realm behind it stopped speaking rather than that nothing changed
+    — and the beat is the SUBSCRIBER's own, needing no cross-process cadence agreement (the C2
+    tick_hz lesson). Without the prune, a departed realm's last look would sit in the composer
+    forever and the NEXT approach would draw a realm whose shard was not running — a body with no
+    author, and a vacuous wake handover.
+    **THE PILOT VIEW** (`client --capture-pilot`; `vd_client_harness::camera::pilot_capture_camera`).
+    The default capture framing fits the whole drawn scene, and on a flight between two FIXED points
+    of the star ring that frustum barely moves — so a system you fly toward could not grow on screen
+    at all, and the warp acceptance is a statement about what the PILOT sees. The capture camera can
+    now be placed at the avatar's eye along its DELIVERED facing (never a local view state — a
+    headless run has no mouse), through the ONE Tier-A expression the pixel gates reconstruct it by.
+    The scene-fitting framing stays the default, so every existing box gate is byte-identical.
+    **★ A REAL DEFECT THE GATE EXPOSED, root-caused by measurement and fixed:**
+    `vd_client_harness::nav::look_at` had NO brake against the delivered-pose feedback lag — the one
+    `walk_to` has had since Stage B4. Measured on THE world: a 90° `LookAt` reported ALIGNED at an
+    error of 0.0030 rad and then kept rotating for another **0.6030 rad (34.5°)** as the in-flight
+    deltas landed; the aim froze a third of a right angle off target while the closed loop said it
+    had arrived, and over the 12 031 m ring that is a 425 m miss — which is how the first warp
+    flight sailed straight past its destination. Cure: `LOOK_FEEDBACK_STEPS = 4` (the same measured
+    lag the walk brake is sized to), so the commanded delta is `error / 4` and the sum still in
+    flight is strictly smaller than the error still to correct. Pinned by
+    `the_look_brake_commands_a_fraction_of_the_error_so_the_turn_cannot_overshoot`.
+    **THE GATES, with their measured numbers (2026-08-16, THE world, seed 0, 500 m/s, 50 Hz).**
+    Budgets are counted in TICKS off the landed cadences and reported in metres by the occupant's
+    own travel per tick (10.0 m) — measuring in ticks is what makes a handover honest whether the
+    ship is flying or parked when it lands.
+    - `just warp-pixels` (`crates/bins/tests/warp_pixels.rs`) — **G-WARP-PIXELS**: departure, the
+      destination is its PARENT'S point of light at 3.00 px with 35 pixels painted at a LOCAL probe
+      (asleep because the ring 12 031.398 m exceeds the wake radius 11 458.475 m by the world's own
+      572.924 m margin); the growth curve holds over 2018 samples, 3.00 px → 90.21 px, worst
+      sample-to-sample shrink 0.000 px; arrival 92.78 px, 25 150 pixels painted; the system behind
+      hands back to its parent's marker and is drawn at the shared 3.00 px point-of-light floor; the
+      ship then crosses in and STANDS in the sibling. Every drawn row's provenance is attested in
+      the run manifest's state dumps (HR6).
+    - **G-HANDOVER, both directions, symmetric.** WAKE budget = 2×25 AoI cadence + 1 reconcile +
+      the cluster's OWN measured boot + 2 Q2 relay + 1 compose + 1 draw (+ the gate's own sampling
+      resolution): **measured 14 ticks / 140 m against 61 ticks / 610 m**. DEPARTURE budget =
+      51 grace-hold + 25 AoI cadence + 1 hop + 1 compose + 1 draw: **measured 47 ticks / 470 m
+      against 83 ticks / 830 m**. THE Q2 RELAY HOP, asserted APART per the owner's ruling
+      (everything after the shard is up): **measured 13 ticks / 130 m against 60 ticks / 600 m — it
+      does NOT break the wake budget, so [[D-WINDOW-2]] stays closed and the direct window stays a
+      fresh owner ask.** A companion test closes the whole derivation before any process runs (both
+      budgets must FIT the geometry that provides for them), so a world-numbers change fails in
+      milliseconds rather than only in a four-minute flight.
+    - `just two-ships` (`crates/bins/tests/two_ships.rs`) — **G-TWO-SHIPS**, the owner-ordered gate,
+      TWO real capture clients in realms of different depth: (a) the two chains agree on the
+      star-to-planet separation to 0.0612 m against the planet's own 1.4646 m of travel over the
+      8-tick sampling gap, each hull drawn by its OWN self-authored look and pixel-probed (50 px
+      each); (b) the inner observer draws the Planet's own body around itself AT THE ORIGIN, in
+      pixels — the hop row's other half; (c) 2139 relayed statements ingested, 0 undecodable — the
+      hulls' looks rode the Q2 PARENT RELAY, attested in both manifests; (d) one crossing while both
+      watch: the crossing client's epoch bumps EXACTLY once, the WATCHING client's does not move,
+      and its picture is sampled continuously through the commit — 412 samples, 3288 body-to-body
+      continuity checks, worst 1.088 m against its own 10.814 m allowance; (e) occupant figures are
+      ABSENT from the window lane (every drawn row names a realm) and ABSENT out of a realm (the
+      observer OUTSIDE the Planet is shown nobody standing inside it).
+    - **G-SHEAR, the pixel half** (joining the Slice-B unit half): every captured frame's drawn rows
+      are asserted inside the composer's declared retention — no row newer than the fold, none older
+      than the window a held stratum or a relayed interior may lawfully carry, which those state per
+      row by design. Measured spreads of 0–2 ticks across every capture of both gates.
+    *Owner-visible outcome:* **the warp experience in pixels on THE world.**
+    **DEFERRED flips:** D-LANE-4 🟩, D-LANE-6 🟩 and D-PLACE-3 🟩 all landed EARLY (C1/C2 discharged
+    their substance — see those rows; Slice D's owed half of D-LANE-4, "the marker point-sprite
+    RENDERING and roster-driven look pruning", is what landed here). **D-PLACE-2's residual SHRANK
+    but STAYS OPEN** (🟥): `RealmRegion.center` still stores a position, still read by
+    `placement_row`'s static arm and the boot roster — nothing in this slice touched either, and
+    saying otherwise would be a claim rather than a measurement.
+    **NEWLY OWED ROWS registered by this slice:** [[D-WINDOW-3]] (census-scale photometric
+    derivation + the HDR exposure model the point sprite stands in for), [[D-WINDOW-4]] (P10
+    rotated-hop composition), [[D-WINDOW-5]] (the §2.14 LOD tier seam for P4+), and
+    [[D-WINDOW-6]] (two measurements this slice took and did not assert: a re-homed occupant is
+    still shown its PARENT realm's occupants over the entity lane, and relayed interior LEVELS
+    refuse at the fold in the two-ships topology).
 - **Where:** `crates/wire/src/session_flow.rs` (the lane's types + attestation predicates),
   `crates/wire/src/version.rs` (minor 16), `crates/physics/src/worldgen.rs` (the photometric draw),
   `docs/design/window_lane.md` (the binding spec), `docs/design/owner_decisions_2026-08-15.md` (the
   2026-08-16 addendum).
+
+### D-WINDOW-3 🟥 The marker's photometrics are a RENDERING convention, not an exposure model — and the census-scale roster bound is still owed (window lane Slice D, 2026-08-16)
+- **WHAT is deferred, and stated honestly:** a point of light's DRAWN size today is
+  `√(L/L☉) · POINT_SOURCE_BASE_RADIUS_M`, floored at the shared minimum apparent radius — the classic
+  "size encodes magnitude" convention (which is also what the ambient backdrop starfield already draws),
+  anchored on the ONE base radius the avatar dot uses so the two cannot drift. It is NOT an exposure
+  model: apparent FLUX (`L/4πd²`) never reaches the pixels, so two markers of very different brightness
+  at very different ranges can draw at the same floored size. The physically-exposed successor is an HDR
+  apparent-magnitude/exposure pass — and **exposure is one of the eight rendering decisions already
+  awaiting the owner** (`scripts/snowflow_technique_analysis.md`), so inventing one here would have been
+  a guess dressed as a result.
+- **THE OTHER HALF (ALL-2, promised at Slice D by the design's §2.10 and hole register):** the
+  CENSUS-SCALE marker roster bound. Markers ship the FULL direct-child roster, unfiltered, so "all direct
+  children in the sky" is a WIRE-VOLUME question, not a visibility one. At true galactic scale the bound
+  holds only because the galaxy becomes the P10 cell-realm lattice, which caps any one author's direct
+  children. That is an argument, not a measurement: the DERIVATION (rows/tick per author × the lattice's
+  own fan-out, against `WindowTuning`'s budgets) is owed, and it is owed as a derivation, never a literal.
+- **WHEN:** with the owner's rendering-decisions pass (exposure) and P10 (the lattice), whichever lands first.
+- **Where:** `crates/client/src/realm_scene.rs` (`marker_look`, `MARKER_CLASS_SRGB`,
+  `POINT_SOURCE_BASE_RADIUS_M`), `crates/physics/src/worldgen.rs` (`StarPhotometrics`,
+  `reflected_photometrics`), `docs/design/window_lane.md` §2.8/§2.10.
+
+### D-WINDOW-4 🟥 Rotated cross-cell hop composition is REFUSED, counted, and owed with P10's cell math (window lane, re-registered at Slice D)
+- **WHAT is deferred:** folding a hop whose frame is ROTATED across integer lattice cells. Today every
+  placement of THE world carries the identity orientation at cell zero, so the composition is exact; a
+  rotated cross-cell inversion is refused by the frame core itself and counted
+  (`window_rotated_refused` at the gateway, `window_hop_refused` at the author) rather than shipped with
+  folded numbers. The inertness is MEASURED, not argued — `inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world`
+  fails the day it stops being true.
+- **WHEN:** P10, with `convert_tier` and the cell math the galaxy lattice needs.
+- **Where:** `crates/core/src/frame.rs`, `crates/connection-plane/src/window.rs` (`count_refusal`),
+  `crates/sim/src/stub.rs` (`emit_realm_frames`'s hop inversion).
+
+### D-WINDOW-5 🟥 The LOD tier seam is DESIGNED and unbuilt — detail tiers are more tags in the same look bag (window lane §2.14, registered at Slice D for P4+)
+- **WHAT is deferred:** the ladder's middle rungs. The model already carries its top and bottom: tier 0 is
+  the parent-authored marker (~30 B, and since Slice D a real drawn point of light), tier 1 the
+  self-authored outline (~100 B). Detail tiers become MORE TAGS IN THE SAME LOOK BAG, authored by the
+  realm itself (SL3: a realm chooses its own detail; fractal terrain coarsens free by dropping octaves),
+  and SELECTION lives where the knowledge lawfully lives — the gateway knows every observer's angular
+  size because it composes the chain, so it forwards only the tier a band needs and asks for a higher one
+  with a plain tier number on the window subscription ("serve tier 2" — nothing about who watches, or
+  from where). Nothing of that is built. Collision and entities never coarsen (standing law, untouched:
+  this lane is render-only).
+- **WHEN:** P4+ (with real terrain), or earlier if a realm's drawn footprint outgrows its outline.
+- **Where:** `docs/design/window_lane.md` §2.14, `crates/wire/src/session_flow.rs` (`WindowScope`,
+  `BodyStmt`), `crates/core/src/look.rs` (the bag codec the tags would join).
+
+### D-WINDOW-6 🟥 Two things Slice D MEASURED and did not assert — recorded so neither becomes a silent claim (2026-08-16)
+- **(1) A RE-HOMED OCCUPANT IS STILL SHOWN ITS PARENT REALM'S OCCUPANTS.** Measured in `two_ships.rs`,
+  stable over ten seconds of polling: after ship Y re-homes from the star System down into a Planet, Y's
+  client keeps being delivered the avatar of ship X, which is still standing in the System (Y's
+  `foreign_space_rows` sits at 2). The SEALING DIRECTION the law protects is intact and IS asserted —
+  ship X, standing OUTSIDE the Planet, is shown nobody who stands inside it — and the WINDOW lane
+  carries no occupant figure in either direction (every drawn row names a realm, asserted). This is the
+  ENTITY/subscription lane, not the window lane: the question is whether a session should retain its
+  source subscription after the crossing commits, which is a containment/hand-off matter and outside
+  this slice's scope. Printed by the gate every run so a change is visible, never asserted, never
+  claimed clean.
+- **(2) RELAYED INTERIOR LEVELS REFUSE AT THE FOLD in the two-ships topology.** The same run reads
+  `window_relay_rows_composed: 0` beside `window_relay_unplaceable: 50–87`. The relayed BODIES land in
+  the one body store (which is how an outside observer sees a live realm's own look at all — assertion
+  (c) is green on it), so nothing user-visible depends on the interior fold there; and the fold DOES
+  compose in the demand-walk topology `rlm_demand_login` proves (a neighbour system's planets stream in
+  ahead of arrival). What is owed is the diagnosis of WHICH `descent_at` refusal class fires in the
+  two-ships shape, and whether the refusal is lawful there.
+- **WHEN:** with the next containment/hand-off pass (1) and the next window-lane pass (2).
+- **Where:** `crates/bins/tests/two_ships.rs` (both measurements, printed), `crates/connection-plane/src/window.rs`
+  (`descent_at`, the relay fold), `crates/client/src/net.rs` (`foreign_space_rows`).
 
 ### D-WINDOW-2 🟥 The DIRECT live-sibling window is the ledgered upgrade path — taken ONLY on a measured G-HANDOVER failure (owner Q2 ruling, 2026-08-16)
 - **WHAT is deferred (deliberately, by ruling):** `WindowScope::Observed` — a gateway subscribing DIRECTLY
@@ -4396,11 +4557,14 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   re-state, no read), so "am I observed from outside" stays UNREPRESENTABLE in every realm and the variant
   NEVER ships (it does not exist on the wire — `crates/wire/src/session_flow.rs::WindowScope` is
   `Occupants | Child` only, and its docs say why).
-- **THE ONE TRIGGER that re-opens this:** the relay costs one hop of look latency at exactly the wake
-  moment. G-HANDOVER (Slice D) MEASURES that hop inside the symmetric wake-footprint budget. If — and only
-  if — that measurement FAILS its derived budget on THE world, the direct window is proposed to the owner
-  as the named per-realm upgrade (a fresh SL6 ask: it tells a realm-adjacent process "some gateway watches
-  me from outside", which is genuinely new information — default NO stands until then). Never adopted for
-  convenience, never pre-built.
+- **THE ONE TRIGGER that re-opens this — MEASURED 2026-08-16, and it did NOT fire.** The relay costs one
+  hop of look latency at exactly the wake moment. G-HANDOVER (Slice D, `just warp-pixels`) measures that
+  hop APART inside the symmetric wake-footprint budget — everything after the woken shard is up, so a slow
+  relay fails BY NAME instead of hiding inside a boot number. On THE world, flying the ring at the shipped
+  speed: **the Q2 relay share was 13 ticks (130 m of travel) against a derived 60 ticks (600 m)**, and the
+  whole wake was 14 ticks (140 m) against 61 (610 m). The relay hop does not break the budget, so this row
+  STAYS CLOSED. It re-opens only if that measurement fails on a future world, and then only as a fresh SL6
+  ask (it tells a realm-adjacent process "some gateway watches me from outside", which is genuinely new
+  information — default NO stands until then). Never adopted for convenience, never pre-built.
 - **Where:** `docs/design/window_lane.md` §2.3/§2.8/§5-RULINGS; `docs/design/owner_decisions_2026-08-15.md`
   2026-08-16 addendum (Q2); G-HANDOVER lands in Slice D (see [[D-WINDOW-1]]).

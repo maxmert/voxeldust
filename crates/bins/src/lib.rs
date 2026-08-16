@@ -21,6 +21,10 @@ pub mod proc_launch;
 pub mod flight;
 #[cfg(feature = "dev-control")]
 pub mod scene_camera;
+// The Slice-D pixel-gate instrument (window lane §2.8/§2.11): the straddled capture, the pilot
+// camera reconstruction and the drawn-footprint reading the three acceptance gates share.
+#[cfg(feature = "dev-control")]
+pub mod pixel;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

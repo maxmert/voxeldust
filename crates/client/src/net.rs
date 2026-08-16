@@ -563,6 +563,9 @@ impl ClientState {
                     crate::realm_scene::BodyKind::Look => "look".to_owned(),
                     crate::realm_scene::BodyKind::Marker => "marker".to_owned(),
                 },
+                // The parent's photometric datum, verbatim — what a pixel gate sizes the point
+                // sprite's rectangle from, through the SAME Tier-A pair the renderer scales by.
+                luma: b.luma,
                 // THE SAME reduction the renderer draws with, through the ONE chokepoint — not a
                 // hand-rolled subtraction. This line used to spell `b.center_offset - origin.offset()`,
                 // which dropped the origin's COARSE half while `DevEntityRow.pos` twenty lines above

@@ -210,6 +210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vd_client_render::RenderMode::Windowed,
             None,
             std::path::PathBuf::from("runs"),
+            false,
         );
         drop(control);
         return Ok(());
@@ -243,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vd_client_render::RenderMode::Capture,
             Some(capture_rx),
             runs_dir,
+            args.pilot_view,
         );
         drop(control);
         return Ok(());
@@ -286,6 +288,7 @@ fn run_render(
     mode: vd_client_render::RenderMode,
     captures: Option<crossbeam_channel::Receiver<vd_client_render::CaptureJob>>,
     runs_dir: std::path::PathBuf,
+    pilot_view: bool,
 ) {
     // Reliable, BIDIRECTIONAL shutdown — independent of the bounded input mailbox:
     //  - `stop` (window → worker): set when the window closes; the worker checks it every
@@ -334,6 +337,7 @@ fn run_render(
         mode,
         captures,
         runs_dir,
+        pilot_view,
     });
     // Window/app exited → reliably ask the core to close (AtomicBool — never shed), join.
     stop.store(true, Ordering::Relaxed);
@@ -469,6 +473,21 @@ struct ClientArgs {
     /// Headless offscreen render + wgpu readback for `vdctl screenshot` (Slice-3 T5) — the
     /// agent's eyes, no display. Requires `--features dev-control,render` + `--dev-control`.
     capture: bool,
+    /// PILOT VIEW (`--capture-pilot`, capture runs only; window lane Slice D): render the capture
+    /// from the AVATAR'S EYE along its DELIVERED FACING instead of the scene-fitting diagnostic
+    /// framing. The default framing fits the whole drawn scene, which is what the box gates need
+    /// and what makes a flight between two FIXED ring positions show no growth at all — so the
+    /// warp acceptance, which is a statement about what the pilot sees, asks for this instead.
+    ///
+    /// Read only by the capture front-end, so a build without BOTH features never reads it — the
+    /// flag is still PARSED there (and rejected without `--capture`), exactly like the rest of the
+    /// render argv, so an unsupported build fails loudly on the argument rather than silently
+    /// accepting a run it cannot honour.
+    #[cfg_attr(
+        not(all(feature = "dev-control", feature = "render")),
+        allow(dead_code)
+    )]
+    pilot_view: bool,
 }
 
 fn parse_args() -> Result<ClientArgs, String> {
@@ -483,6 +502,7 @@ fn parse_args() -> Result<ClientArgs, String> {
     let mut step_hz: u32 = DEFAULT_STEP_HZ;
     let mut window = false;
     let mut capture = false;
+    let mut pilot_view = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -498,11 +518,15 @@ fn parse_args() -> Result<ClientArgs, String> {
             "--step-hz" => step_hz = parse_val(&mut it, "--step-hz")?,
             "--window" => window = true,
             "--capture" => capture = true,
+            "--capture-pilot" => pilot_view = true,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
     if window && capture {
         return Err("--window and --capture are mutually exclusive".to_owned());
+    }
+    if pilot_view && !capture {
+        return Err("--capture-pilot only applies to --capture (headless) runs".to_owned());
     }
 
     Ok(ClientArgs {
@@ -517,6 +541,7 @@ fn parse_args() -> Result<ClientArgs, String> {
         step_hz,
         window,
         capture,
+        pilot_view,
     })
 }
 

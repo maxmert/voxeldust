@@ -260,6 +260,10 @@ pub struct GatewayView {
     pub window_relay_rows_composed: u64,
     /// Q2 relay — relayed interiors refused at the fold (stamp/placement/hop unavailable).
     pub window_relay_unplaceable: u64,
+    /// Slice D (§2.8 departure mirror): self-looks dropped by the derived roster-loss window.
+    pub window_looks_pruned: u64,
+    /// Slice D: relayed interior levels dropped by the same window.
+    pub window_relay_levels_pruned: u64,
     /// Gauge: sessions currently open on this gateway.
     pub sessions_open: u64,
     /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
@@ -618,6 +622,8 @@ mod tests {
                 window_relay_stale: 67,
                 window_relay_rows_composed: 68,
                 window_relay_unplaceable: 69,
+                window_looks_pruned: 80,
+                window_relay_levels_pruned: 81,
                 sessions_open: 24,
                 dynamic_shards: 25,
                 windows_open: 37,

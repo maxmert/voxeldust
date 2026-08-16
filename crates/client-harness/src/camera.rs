@@ -187,6 +187,42 @@ pub const FIT_MARGIN: f64 = 1.15;
 /// not axis-parallel to world-Y (so `look_at_rh`'s up basis is well-defined). Named, deterministic.
 const FIT_VIEW_DIR: DVec3 = DVec3::new(0.3, -0.35, -0.887);
 
+/// THE PILOT'S OWN CAPTURE CAMERA (window lane Slice D — `docs/design/window_lane.md` §4): the
+/// headless capture rendered from the AVATAR'S EYE, along the AVATAR'S DELIVERED FACING, instead
+/// of the scene-fitting diagnostic framing.
+///
+/// WHY IT EXISTS. [`fit_camera_to_scene`] frames the union of everything drawn, so on a flight
+/// BETWEEN two star systems — whose centres are fixed points of the world's ring — the fitted
+/// frustum barely moves and a system you are flying toward cannot grow on screen. The warp
+/// acceptance is a statement about what the PILOT sees, so the agent's eyes must look through the
+/// pilot's eyes. The scene-fitting camera stays the default (every existing box gate frames its
+/// whole scene by it); this is opted into per run.
+///
+/// It reads only DELIVERED state — the own entity's position and its SERVER-AUTHORED orientation
+/// (`orient · -Z` is the one facing convention, shared with `vd_client_harness::nav::look_at` and
+/// the stub server's `orient_from_yaw_pitch`) — so a `LookAt` injected through dev-control turns
+/// the avatar AND the eyes together, and a pixel gate reconstructs the very camera the renderer
+/// used from the same `DevState` poll it reads the positions from. No prediction, no local view
+/// state: unlike the windowed [`FollowCamera`] (whose mouse-look is a local, view-only response),
+/// a headless run has no mouse, so the delivered orientation is the only honest facing.
+#[must_use]
+pub fn pilot_capture_camera(
+    own_pos: DVec3,
+    own_orient: glam::DQuat,
+    width: usize,
+    height: usize,
+) -> CaptureCamera {
+    let eye = own_pos + DVec3::Y * DEFAULT_EYE_OFFSET;
+    CaptureCamera {
+        eye,
+        target: eye + own_orient * DVec3::NEG_Z,
+        up: own_orient * DVec3::Y,
+        fov_y: FIT_FOV_Y,
+        width,
+        height,
+    }
+}
+
 /// Fit a [`CaptureCamera`] of pixel size `width`×`height` to the WHOLE scene: frame the union of
 /// every box's center ± its extent so all boxes land in the readback. Returns `None` for an empty
 /// scene (nothing to frame) or a degenerate viewport (zero-size). Pure + deterministic — the box
@@ -308,6 +344,35 @@ mod tests {
         );
         // A degenerate (behind-the-eye) distance clamps to zero depth ⇒ the base radius stands.
         assert_eq!(marker_world_radius(0.5, -5.0, fov, 100.0), 0.5);
+    }
+
+    #[test]
+    fn the_pilot_capture_camera_sits_at_the_eye_and_looks_along_the_delivered_facing() {
+        use glam::DQuat;
+        // AT REST the delivered facing is the shared convention's `-Z`, the eye is one offset above
+        // the avatar along world-up, and the framing FOV is the one both cameras declare.
+        let pos = DVec3::new(10.0, 0.0, -5.0);
+        let cam = pilot_capture_camera(pos, DQuat::IDENTITY, 1284, 720);
+        assert_eq!(cam.eye, pos + DVec3::Y * DEFAULT_EYE_OFFSET);
+        assert_eq!(cam.target, cam.eye + DVec3::NEG_Z);
+        assert_eq!(cam.up, DVec3::Y);
+        assert_eq!(cam.fov_y, FIT_FOV_Y);
+        assert_eq!((cam.width, cam.height), (1284, 720));
+        // TURNED (yaw +90° about world-up) the eye is unmoved and the facing follows the DELIVERED
+        // orientation — which is what makes an injected `LookAt` turn the avatar and the agent's
+        // eyes together, with no local view state in between.
+        let yawed = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
+        let turned = pilot_capture_camera(pos, yawed, 1284, 720);
+        assert_eq!(turned.eye, cam.eye);
+        assert!((turned.target - (cam.eye + DVec3::NEG_X)).length() < 1e-12);
+        assert!((turned.up - DVec3::Y).length() < 1e-12);
+        // A point straight ahead of the turned camera projects at the frame centre — the gate
+        // reconstructs exactly the camera the renderer used, so its rectangles land on the pixels.
+        let ahead = turned
+            .project_point(cam.eye + DVec3::NEG_X * 100.0)
+            .expect("in front");
+        assert!((ahead.x - 642.0).abs() < 1e-6, "centred in x: {ahead:?}");
+        assert!((ahead.y - 360.0).abs() < 1e-6, "centred in y: {ahead:?}");
     }
 
     #[test]

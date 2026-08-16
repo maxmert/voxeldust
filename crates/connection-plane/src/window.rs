@@ -53,6 +53,18 @@ pub struct WindowTuning {
     /// How long a held stratum may hold before the dead-hop exit removes it (§2.6.4): the same
     /// 2-beats-+-1 confirmation window after which the shard side would have TTL-expired the fan.
     pub hold_ttl_ticks: u64,
+    /// THE ROSTER-LOSS CONFIRMATION WINDOW (§2.8's departure mirror): how long a SELF-LOOK — or a
+    /// relayed interior level — may sit un-re-asserted before it is pruned and the parent's
+    /// ever-present marker resumes. Same 2-beats-+-1 law, off the same beat, and sound because the
+    /// keep-alive re-assert is what makes a statement arrive again: a shard re-served its whole
+    /// body/relay set on every keep-alive `WindowOpen` (`vd_sim` `on_window_open`), so a statement
+    /// missing for two whole beats means the realm behind it stopped speaking — it tore down, or
+    /// its relay holder TTL-expired.
+    ///
+    /// MARKERS ARE DELIBERATELY EXEMPT. A marker is the presence gate's FLOOR ("never zero"): it
+    /// is the parent's own datum about a sleeping child, and expiring it would blank a star rather
+    /// than shrink a system to a dot.
+    pub look_ttl_ticks: u64,
 }
 
 impl WindowTuning {
@@ -64,6 +76,7 @@ impl WindowTuning {
         WindowTuning {
             ring_span_ticks: two_beats_one,
             hold_ttl_ticks: two_beats_one,
+            look_ttl_ticks: two_beats_one,
         }
     }
 }
@@ -171,6 +184,26 @@ impl WindowIngest {
         };
         slot.insert(subject, (authored_at, bag));
         true
+    }
+
+    /// THE ROSTER-DRIVEN LOOK PRUNE (`docs/design/window_lane.md` §2.8's departure mirror, Slice D)
+    /// — the handover run backwards. A realm that tore down stops stating its own look: the child
+    /// stops relaying, the parent's holder TTL-expires it, and nothing re-serves it on the next
+    /// keep-alive re-assert. Two whole beats later (+1 tick) its stored look is dropped here, the
+    /// presence gate falls through to its parent's ever-present marker, and the system it drew
+    /// shrinks to a dot. Relayed interior LEVELS age out on the same window for the same reason.
+    ///
+    /// This is what keeps THE DRAW LAW honest across a round trip: without it, a realm's last look
+    /// would sit in this store forever and the NEXT approach would draw the realm before its shard
+    /// was running again — a body with no author, and a vacuous wake handover.
+    ///
+    /// Markers are never pruned (the floor — see [`WindowTuning::look_ttl_ticks`]). Returns
+    /// `(looks pruned, relayed levels pruned)` for the two counters.
+    pub fn prune_stale(&mut self, now: UniverseTick, tuning: &WindowTuning) -> (u64, u64) {
+        let cutoff = now.0.saturating_sub(tuning.look_ttl_ticks);
+        let looks = prune_older_than(&mut self.look_of, cutoff);
+        let relays = prune_older_than(&mut self.relay_levels, cutoff);
+        (looks, relays)
     }
 
     /// Apply one attested `WindowMembership` diff onto the held verdict.
@@ -708,6 +741,16 @@ fn map_down(
     Ok(pose)
 }
 
+/// Drop every stamped entry older than `cutoff`, returning how many went. Generic over the stored
+/// payload (a look is a TLV bag, a relayed level is typed rows) and deliberately BRANCHLESS per
+/// HR5's generic-code discipline: the retain predicate is ONE comparison expression, so there is
+/// no arm inside a generic body to leave uncovered in some monomorphization.
+fn prune_older_than<T>(store: &mut BTreeMap<RealmId, (UniverseTick, T)>, cutoff: u64) -> u64 {
+    let before = store.len();
+    store.retain(|_, (at, _)| at.0 >= cutoff);
+    (before - store.len()) as u64
+}
+
 /// Route one fold refusal onto its named counter (§2.6.6 — every class its own row, never a
 /// shared bucket).
 fn count_refusal(out: &mut Composed, e: FrameError) {
@@ -1023,6 +1066,47 @@ mod tests {
         let t = WindowTuning::derive(10);
         assert_eq!(t.ring_span_ticks, 21);
         assert_eq!(t.hold_ttl_ticks, 21);
+        assert_eq!(t.look_ttl_ticks, 21);
+    }
+
+    #[test]
+    fn a_look_that_stops_being_re_asserted_prunes_and_the_marker_is_the_floor() {
+        // THE DEPARTURE MIRROR (§2.8), as a measurement. A live realm re-asserts its look on every
+        // keep-alive beat; one that tore down stops. Past the derived roster-loss window its look
+        // is dropped, the presence gate falls through to the parent's marker, and the body it drew
+        // shrinks to a point of light.
+        let t = tuning(); // look ttl 5
+        let subject = RealmId::System(7);
+        let child = RealmId::Planet(7);
+        let mut ingest = WindowIngest::default();
+        assert!(ingest.ingest_body(
+            subject,
+            &BodyStmt::SelfLook {
+                bag: vd_core::look::look_bag(&vd_core::geometry::Boundary::Shell { r: 150.0 }),
+            },
+            UniverseTick(100),
+        ));
+        assert!(ingest.ingest_body(
+            subject,
+            &BodyStmt::Marker { luma: vec![9] },
+            UniverseTick(100)
+        ));
+        assert!(ingest.ingest_relay_level(child, UniverseTick(100), Vec::new()));
+        // INSIDE the window (age exactly the TTL): everything survives — a live realm re-asserting
+        // one beat late is not a dead one.
+        assert_eq!(ingest.prune_stale(UniverseTick(105), &t), (0, 0));
+        assert!(ingest.look_of(subject).is_some());
+        assert_eq!(ingest.relayed_levels().count(), 1);
+        // ONE TICK PAST IT: the look and the relayed level go; the MARKER stays (the floor — the
+        // presence law is "never zero", so a departed system becomes a dot, not a hole).
+        assert_eq!(ingest.prune_stale(UniverseTick(106), &t), (1, 1));
+        assert_eq!(ingest.look_of(subject), None);
+        assert_eq!(ingest.relayed_levels().count(), 0);
+        assert_eq!(ingest.marker_of(subject), Some(&[9u8][..]));
+        // And the presence gate now answers MARKER for the same realm it answered LOOK for.
+        assert_eq!(scene_bag(subject, &[subject], &[&ingest]), vec![9u8]);
+        // A gateway whose universe clock has not passed the window yet prunes nothing (saturating).
+        assert_eq!(ingest.prune_stale(UniverseTick(0), &t), (0, 0));
     }
 
     #[test]

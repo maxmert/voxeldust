@@ -436,7 +436,8 @@ pub struct ChildLiveness(pub BTreeMap<RealmId, ChildLiveEntry>);
 /// ids may collide and only the pair is unambiguous. Rows ship back to `opened_by` alone.
 ///
 /// Consumed from [`GatewayToShard::WindowOpen`]/[`GatewayToShard::WindowClose`] (idempotent: a
-/// duplicate open refreshes the TTL; a close is the polite fast path). The crash backstop is the
+/// duplicate open refreshes the TTL AND re-asserts every send-on-change lane (Slice D — see
+/// [`OpenWindow::reset_baselines`]); a close is the polite fast path). The crash backstop is the
 /// DERIVED keep-alive TTL ([`window_ttl_ticks`], 2 beats + 1 — owner law 3(a)): a window not
 /// re-asserted within it is dropped by the emitter's per-tick prune, so a dead gateway can never
 /// leak a fan. EMPTY by default ⇒ every existing rig is byte-identical (no window, no emission).
@@ -472,6 +473,15 @@ impl OpenWindow {
             membership_sent: BTreeSet::new(),
             sent_relays: BTreeMap::new(),
         }
+    }
+
+    /// Forget every send-on-change baseline, so this subscriber is served the full body set, the
+    /// full membership verdict and every held relay batch again. Called on the derived keep-alive
+    /// re-assert (window lane Slice D) — the beat that makes a gateway-side roster-loss TTL sound.
+    fn reset_baselines(&mut self) {
+        self.sent_bodies.clear();
+        self.membership_sent.clear();
+        self.sent_relays.clear();
     }
 }
 
@@ -2965,8 +2975,9 @@ fn on_gateway_msg(
 /// THE WINDOW LANE's subscription open (Slice A — docs/design/window_lane.md §2.3): register the
 /// window under `(opener, id)` — the opener is the transport sender, exactly the attestation
 /// source every other gateway-lane arm trusts (`dot.gateway = from`). IDEMPOTENT per the wire
-/// contract: a duplicate open of the SAME scope is the derived keep-alive and only refreshes the
-/// TTL; an open REUSING a live id under a DIFFERENT scope replaces the window whole (fresh
+/// contract: a duplicate open of the SAME scope is the derived keep-alive — it refreshes the TTL
+/// AND re-asserts every send-on-change lane (Slice D); an open REUSING a live id under a
+/// DIFFERENT scope replaces the window whole (fresh
 /// send-on-change baselines — the subscriber is served its full set again), because the id mint
 /// is monotone per subscriber and a reuse is a new subscription, never a refresh.
 fn on_window_open(
@@ -2979,7 +2990,18 @@ fn on_window_open(
 ) {
     match windows.0.entry((from, window)) {
         std::collections::btree_map::Entry::Occupied(mut held) if held.get().scope == scope => {
-            held.get_mut().last_refresh = now;
+            let w = held.get_mut();
+            w.last_refresh = now;
+            // THE KEEP-ALIVE IS ALSO THE RE-ASSERT (window lane Slice D — §2.3's "re-asserted on a
+            // derived keepalive cadence", made real for the send-on-change lanes). Clearing the
+            // baselines re-serves this subscriber its whole body set, its whole membership verdict
+            // and every held relay batch on the beat the SUBSCRIBER chose, so the gateway's
+            // roster-loss window (`WindowTuning::look_ttl_ticks`, two of ITS OWN beats + 1) is
+            // sound with no cross-process cadence agreement: a statement that stops arriving means
+            // the realm behind it stopped speaking, not that nothing changed. Without this a
+            // static realm would state its look once, forever, and a torn-down realm's last look
+            // would be indistinguishable from a live one's silence.
+            w.reset_baselines();
             stats.window_reasserted += 1;
         }
         std::collections::btree_map::Entry::Occupied(mut held) => {
@@ -7263,7 +7285,10 @@ fn emit_window_frames(
 /// never any parent's row about it — SL3) — plus one photometric marker per DIRECT child the
 /// boot roster carries a luma bag for (the owner-ruled R4 datum; absence of a bag is absence of
 /// data, never a default). Each window diffs the set against what IT was already sent, so a fresh
-/// window is served everything once and a static world then ships nothing. ReDriven/reliable —
+/// window is served everything once and a static world then ships nothing UNTIL its next keep-alive
+/// re-assert, which clears the baseline on the SUBSCRIBER's own beat (Slice D — the gateway's
+/// roster-loss window is derived from that beat, so silence past it means the realm behind a
+/// statement stopped speaking, not that nothing changed). ReDriven/reliable —
 /// the session-reply lane (a lost look is an invisible realm at exactly the no-flicker moment).
 #[allow(clippy::too_many_arguments)]
 fn emit_window_bodies(
@@ -21656,6 +21681,40 @@ mod tests {
         assert_eq!(stats.window_bodies_sent, 2);
         assert_eq!(stats.window_memberships_sent, 1);
         assert_eq!(stats.windows_open, 1);
+    }
+
+    #[test]
+    fn the_keep_alive_re_assert_re_serves_the_whole_set_so_silence_means_a_dead_realm() {
+        // WINDOW LANE SLICE D — the beat the gateway's roster-loss window is derived from. A
+        // send-on-change lane that only ever speaks on CHANGE cannot distinguish "nothing changed"
+        // from "the realm behind this statement stopped speaking", so a keep-alive `WindowOpen`
+        // (which the subscriber already sends on its own derived cadence) clears the baselines and
+        // re-serves the whole body set and the whole membership verdict. Without this, a departed
+        // system's last look would sit in the composer forever and never shrink back to a dot.
+        let mut rig = window_rig();
+        let open = GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Occupants,
+        };
+        let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+        let first_bodies = window_bodies(&sent);
+        let first_membership = window_memberships(&sent);
+        assert_eq!(first_bodies.len(), 2, "the full set on open");
+        assert_eq!(first_membership.len(), 1);
+        // A quiet tick is still quiet — the re-assert is the BEAT, not every tick.
+        rig.set_local_tick(2);
+        assert_eq!(window_bodies(&rig.tick(vec![])), vec![]);
+        // The keep-alive: the SAME window, the SAME scope. Byte-for-byte the same statements come
+        // back out (the realm is still stating exactly what it stated), counted as a re-assert.
+        rig.set_local_tick(3);
+        let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+        assert_eq!(window_bodies(&sent), first_bodies);
+        assert_eq!(window_memberships(&sent), first_membership);
+        let stats = rig.world.resource::<StubStats>();
+        assert_eq!(stats.window_reasserted, 1);
+        assert_eq!(stats.windows_opened, 1, "a keep-alive is not a new window");
+        assert_eq!(stats.window_bodies_sent, 4, "two served twice");
+        assert_eq!(stats.window_memberships_sent, 2);
     }
 
     #[test]
