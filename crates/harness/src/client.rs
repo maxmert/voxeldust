@@ -113,9 +113,6 @@ pub struct ScriptedClient {
     /// nowhere to read the box from. Now both lanes land in the two production consumers, and the drawn
     /// point of each is `DeliveredView::world_pos` over a `RenderPose` sampled at ONE cursor.
     pub realm_view: RealmView,
-    /// The space the avatar stood in at the last applied own frame — the one-space rule's flip
-    /// detector, mirroring the shipped client's net.rs field of the same name.
-    standing_space: Option<vd_core::pose::FrameRef>,
     next_input_seq: u64,
     sent_inputs: Vec<(SessionId, u64)>,
     close_reason: Option<String>,
@@ -150,7 +147,6 @@ impl ScriptedClient {
             view: DeliveredWorldView::default(),
             delivered_view: DeliveredView::default(),
             realm_view: RealmView::default(),
-            standing_space: None,
             next_input_seq: 0,
             sent_inputs: Vec::new(),
             close_reason: None,
@@ -254,12 +250,21 @@ impl ScriptedClient {
             // so this marker is INERT server-side — but the harness still stamps it (harmless) to
             // exercise the pause/resume input-partition primitive the input-conservation gates use.
             ServerControlMsg::RequestCut { .. } => self.emit_marker_next = true,
-            // VU realm-scene streaming (minor 5/6, `RealmRegistry`/`RealmSceneDelta`): this
-            // conservation/render test client draws its world from the ENTITY-snapshot lane, not the
-            // realm-scene lane, so it IGNORES these (the real `vd-client` net.rs consumes them into
-            // its `RealmView`). Explicit arms — NOT folded into `other` — so a genuinely unexpected
-            // control message still fails loudly.
-            ServerControlMsg::RealmRegistry { .. } | ServerControlMsg::RealmSceneDelta { .. } => {}
+            // The composed scene lane (proto_minor 18): this conservation/render test client
+            // draws its world from the ENTITY-snapshot lane and holds no box scene, but it MUST
+            // track the scene EPOCH — the composed realm datagrams carry it, and a client that
+            // ignored the level would hold every post-swap datagram forever (§2.7). Adopt the
+            // level's epoch (the same swap the shipped net.rs runs) and replay the one-beat hold.
+            ServerControlMsg::RealmRegistry { origin_epoch, .. } => {
+                if let Some(held) = self.realm_view.swap_epoch(origin_epoch) {
+                    let standing = self.delivered_view.own_location_frame();
+                    let _ = self.realm_view.on_realm_snapshot(standing, held);
+                }
+            }
+            // The composed delta carries no pose feed this client reads — tolerated (the real
+            // vd-client applies it to its box scene). Explicit arm — NOT folded into `other` —
+            // so a genuinely unexpected control message still fails loudly.
+            ServerControlMsg::RealmSceneDelta { .. } => {}
             // THE REMOVE MESSAGE (proto_minor 14, D-4(a)): the reliable per-entity eviction. Both
             // stores this scripted client holds evict — the raw pose map (conservation probes) and
             // the production `DeliveredView` (whose resurrect guard also arms, exactly as in the
@@ -289,24 +294,12 @@ impl ScriptedClient {
         // what they admit (both run the SAME §6.3 `classify_snapshot` gate over the SAME held set).
         // The real view keeps per-(sub, entity) tracks (the cross-shard overlap shape); the flat
         // view is last-writer-wins (the D-28 conservation surface).
-        let delivered_verdict = self
+        // (The old space-flip INFERENCE that ran here is GONE — §2.7: the composed level's epoch
+        // swap, consumed in `on_control`, is the one scene-change signal, exactly as in the
+        // shipped net.rs. The one-space row filter inside `RealmView` stays alive through C1.)
+        let _delivered_verdict = self
             .delivered_view
             .on_snapshot(&self.held_subs, snap.clone());
-        // THE SPACE FLIP (the one-space rule, crossing-render slice — the SAME rule the shipped
-        // client's net.rs runs, so the harness cannot admit what the real client forgets): a change
-        // in the avatar's delivered frame is a committed crossing, and every stored realm placement
-        // is a position in the OLD space. The first delivered frame (None → Some) is a login.
-        // Gated on APPLY exactly as the shipped client gates it — a dropped datagram must not run
-        // the detector (review mirror-divergence finding).
-        if delivered_verdict == SnapshotVerdict::Apply {
-            let now_standing = self.delivered_view.own_location_frame();
-            if now_standing != self.standing_space {
-                if self.standing_space.is_some() {
-                    self.realm_view.forget_space();
-                }
-                self.standing_space = now_standing;
-            }
-        }
 
         // THE §6.3 gate (shared with the real client via vd_wire, so they cannot
         // drift): a strictly-older frame_id is stale; an EQUAL frame_id is a sibling
@@ -652,25 +645,39 @@ mod tests {
     }
 
     #[test]
-    fn the_vu_realm_scene_controls_are_tolerated_by_the_scripted_client() {
-        // VU realm-scene streaming (minor 5/6): `RealmRegistry`/`RealmSceneDelta` carry the
-        // agnostic client's render scene. This conservation/render test client draws its world from
-        // the ENTITY-snapshot lane, not the realm-scene lane, so the exhaustive `on_control` match
-        // must tolerate them as NO-OPs — never panicking (they landed while these E2E were dark),
-        // staying Active. Guards the `RealmRegistry | RealmSceneDelta` arm.
+    fn the_composed_scene_controls_adopt_the_epoch_and_tolerate_the_delta() {
+        // The composed scene lane (proto_minor 18): this conservation/render test client draws
+        // its world from the ENTITY-snapshot lane and holds no box scene, but it MUST track the
+        // scene EPOCH off the level (§2.7 — a client that ignored it would hold every post-swap
+        // composed datagram forever), and the delta stays a tolerated no-op. Guards both arms:
+        // never a panic, staying Active, the epoch adopted.
         let (fabric, mut gw, mut client) = rig(|_| None);
         activate(&fabric, &mut gw, &mut client);
         send_control(
             &mut gw,
+            &ServerControlMsg::RealmRegistry {
+                origin: vd_core::pose::RealmId::System(7),
+                origin_epoch: 3,
+                rows: vec![],
+            },
+        );
+        send_control(
+            &mut gw,
             &ServerControlMsg::RealmSceneDelta {
+                origin: vd_core::pose::RealmId::System(7),
+                origin_epoch: 3,
                 added: vec![],
                 removed: vec![],
-                pin: vd_core::pose::RealmId::System(0),
             },
         );
         fabric.pump(TickId(9));
         let _ = client.step();
         assert_eq!(client.phase(), ClientPhase::Active);
+        assert_eq!(
+            client.realm_view.epoch(),
+            3,
+            "the level's epoch was adopted — post-swap composed datagrams stay applicable"
+        );
     }
 
     #[test]
@@ -1075,24 +1082,24 @@ mod tests {
     /// ("unexpected class toward a client"), which meant no harness scenario could contain a moving
     /// realm — the one case the frame-conversion work exists for.
     #[test]
-    fn a_delivered_frame_flip_forgets_the_realm_space_exactly_like_the_shipped_client() {
-        // The one-space rule's harness mirror (crossing-render slice): the avatar's delivered frame
-        // changing on an APPLIED snapshot is a committed crossing, and every stored realm placement
-        // is a position in the OLD space — forgotten at the flip, never blended. (The None→Some
-        // login flip is every other test; this drives the Some→Some crossing arm.)
+    fn an_epoch_swap_forgets_the_realm_scene_exactly_like_the_shipped_client() {
+        // THE FLAG DAY's rewrite of the old frame-flip inference (Slice C1, §2.7): the crossing
+        // is STATED by the server as a composed LEVEL with a bumped epoch — never inferred from
+        // the entity feed. The harness client mirrors the shipped net.rs: adopting the level's
+        // epoch forgets every stored placement (positions in the OLD origin's frame), an
+        // old-epoch straggler is dropped counted, and the feed refills at the new epoch.
         let (fabric, mut gw, mut client) = rig(|_| None);
         activate(&fabric, &mut gw, &mut client);
-        // The LOGIN flip first (None → Some): the avatar's first delivered row sets the standing
-        // space without forgetting anything (there is nothing yet to forget).
         send_snapshot(&mut gw, &snapshot(SubId(0), 5, 1.0));
         fabric.pump(TickId(3));
         let _ = client.step();
-        // A realm placement in the CURRENT space, held by the production realm view.
+        // A realm placement at the boot epoch (0), held by the production realm view.
         let dg = RealmSnapshotDatagram {
             sub: SubId(0),
             frame_id: 0,
             source_tick: TickId(1),
             universe_tick: UniverseTick(10),
+            origin_epoch: 0,
             realms: vec![vd_wire::channels::RealmSnap {
                 realm: vd_core::pose::RealmId::Planet(7),
                 frame: FrameRef::PlanetCentered { planet_seed: 7 },
@@ -1113,35 +1120,85 @@ mod tests {
                 .realm_view
                 .realm_pose(vd_core::pose::RealmId::Planet(7), 10.0)
                 .is_some(),
-            "the placement is held before the flip"
+            "the placement is held before the swap"
         );
-        // THE FLIP: the own avatar's next applied row arrives in a NEW frame (the crossing signal).
-        send_snapshot(
+        // An EARLY next-epoch datagram (racing its own level on the reliable lane): held one
+        // beat, invisible now, REPLAYED by the swap below (§2.7's one-beat hold).
+        let early = RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 1,
+            source_tick: TickId(2),
+            universe_tick: UniverseTick(11),
+            origin_epoch: 1,
+            realms: vec![vd_wire::channels::RealmSnap {
+                realm: vd_core::pose::RealmId::Station(9),
+                frame: FrameRef::StationLocal { station_seed: 9 },
+                pose: StampedPose::at_rest(
+                    // Stated in the avatar's standing space (the one-space ingress rule the
+                    // replay rides through — a foreign-space row would be skipped, not held).
+                    FrameRef::SystemSpace { system_seed: 1 },
+                    DVec3::new(3.0, 0.0, 0.0),
+                    UniverseTick(11),
+                ),
+            }],
+        };
+        let early_bytes = postcard::to_allocvec(&early).expect("encode");
+        gw.send(CLIENT, MsgClass::RealmSnapshot, early_bytes.into())
+            .expect("sent");
+        fabric.pump(TickId(5));
+        let _ = client.step();
+        assert!(
+            client
+                .realm_view
+                .realm_pose(vd_core::pose::RealmId::Station(9), 11.0)
+                .is_none(),
+            "a next-epoch datagram is HELD, not applied"
+        );
+        // THE SWAP: the composed LEVEL lands with a bumped epoch (the crossing's one signal) —
+        // and the held datagram REPLAYS through the same production ingest.
+        send_control(
             &mut gw,
-            &SnapshotDatagram {
-                sub: SubId(0),
-                frame_id: 9,
-                source_tick: TickId(2),
-                universe_tick: UniverseTick(11),
-                entities: vec![EntitySnap {
-                    entity: EntityId(7),
-                    pose: StampedPose::at_rest(
-                        FrameRef::PlanetCentered { planet_seed: 7 },
-                        DVec3::ZERO,
-                        UniverseTick(11),
-                    ),
-                }],
+            &ServerControlMsg::RealmRegistry {
+                origin: vd_core::pose::RealmId::Planet(7),
+                origin_epoch: 1,
+                rows: vec![],
             },
         );
-        fabric.pump(TickId(5));
+        fabric.pump(TickId(6));
         let _ = client.step();
         assert!(
             client
                 .realm_view
                 .realm_pose(vd_core::pose::RealmId::Planet(7), 12.0)
                 .is_none(),
-            "the flip forgot every stored placement — the old space is unrepresentable"
+            "the swap forgot every stored placement — the old epoch's space is unrepresentable"
         );
+        assert_eq!(client.realm_view.epoch(), 1);
+        assert!(
+            client
+                .realm_view
+                .realm_pose(vd_core::pose::RealmId::Station(9), 11.0)
+                .is_some(),
+            "the held next-epoch datagram REPLAYED at the swap (the one-beat hold, §2.7)"
+        );
+
+        // An OLD-epoch straggler (the swapped-away scene's feed still draining) drops counted.
+        let stale = postcard::to_allocvec(&dg).expect("encode");
+        gw.send(CLIENT, MsgClass::RealmSnapshot, stale.into())
+            .expect("sent");
+        fabric.pump(TickId(7));
+        let _ = client.step();
+        assert!(
+            client
+                .realm_view
+                .realm_pose(vd_core::pose::RealmId::Planet(7), 12.0)
+                .is_none(),
+            "an old-epoch row never re-creates the stale track"
+        );
+        // ≥ 1, not == 1: the fabric is at-least-once, and this pump's retry window also
+        // redelivers the PRE-swap epoch-0 datagram — every copy is an old-epoch straggler and
+        // every one must be counted (the measurement fails at 0: a swallowed straggler).
+        assert!(client.realm_view.stale_epoch_rows() >= 1);
     }
 
     #[test]
@@ -1153,6 +1210,7 @@ mod tests {
             frame_id: 0,
             source_tick: TickId(1),
             universe_tick: UniverseTick(10),
+            origin_epoch: 0,
             realms: vec![vd_wire::channels::RealmSnap {
                 realm,
                 frame: FrameRef::PlanetCentered { planet_seed: 7 },
@@ -1223,6 +1281,7 @@ mod tests {
             frame_id: 0,
             source_tick: TickId(1),
             universe_tick: UniverseTick(10),
+            origin_epoch: 0,
             realms: vec![
                 row(fine, FrameRef::SystemSpace { system_seed: 7 }),
                 row(coarse, FrameRef::GalaxySpace),

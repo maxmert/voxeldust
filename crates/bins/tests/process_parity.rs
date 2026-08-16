@@ -52,6 +52,12 @@ struct ProcessClient {
     /// at the end: NOBODY leaves in this static two-avatar scenario, so any eviction is a defect —
     /// e.g. a fan that violated the minor-14 owner-skip rule (see `on_control`).
     evictions: u64,
+    /// Composed scene LEVELs received (minor 18). Asserted `== 1` at the end: login bumps the
+    /// origin epoch exactly once here, and nothing else may (no crossing in this scenario).
+    scene_levels: u64,
+    /// The origin epoch carried by the newest level — pinned to `Some(1)` at the end, and every
+    /// scene delta must match it on arrival (see `on_control`).
+    scene_epoch: Option<u64>,
 }
 
 impl ProcessClient {
@@ -68,6 +74,8 @@ impl ProcessClient {
             realm_frames: 0,
             realm_rows: 0,
             evictions: 0,
+            scene_levels: 0,
+            scene_epoch: None,
         }
     }
 
@@ -166,6 +174,33 @@ impl ProcessClient {
             ServerControlMsg::Event(EventMsg::EntityRemoved { entity, .. }) => {
                 self.poses.remove(&entity);
                 self.evictions += 1;
+            }
+            // THE COMPOSED SCENE LANE (minor 18, the C1 flag day): the gateway ships every session
+            // one full level at each origin-epoch bump (login = 1) and bag-diff deltas between
+            // bumps. Measured, never swallowed: a level must LEAD with the session's own origin
+            // (the origin-marker law, window_lane.md §2.7), and the end gate pins the epoch to
+            // exactly 1 — this single-shard scenario never crosses, so any re-origin is a defect.
+            ServerControlMsg::RealmRegistry {
+                origin,
+                origin_epoch,
+                rows,
+            } => {
+                assert_eq!(
+                    rows.first().map(|row| row.realm),
+                    Some(origin),
+                    "the origin marker leads every composed level"
+                );
+                self.scene_levels += 1;
+                self.scene_epoch = Some(origin_epoch);
+            }
+            // A delta may only refine the CURRENT epoch's scene — an off-epoch delta on the
+            // ordered control lane is a composer-ordering defect, so it panics rather than skews.
+            ServerControlMsg::RealmSceneDelta { origin_epoch, .. } => {
+                assert_eq!(
+                    self.scene_epoch,
+                    Some(origin_epoch),
+                    "a scene delta rides the epoch of the level that preceded it"
+                );
             }
             ServerControlMsg::Event(other) => panic!("unexpected event in P1: {other:?}"),
             other => panic!("unexpected control message in P1: {other:?}"),
@@ -379,6 +414,20 @@ fn p1_parity_real_binaries_over_quic() {
         walker.realm_rows > 0,
         "the realm datagrams carried real placement rows (the home system's movers)"
     );
+    // THE COMPOSED SCENE LANE, measured (minor 18): login shipped each session EXACTLY ONE full
+    // level (the one epoch bump this scenario lawfully has), stamped epoch 1 and led by the home
+    // origin (asserted on arrival). A second level here would mean a spurious re-origin.
+    for (name, client) in [("walker", &walker), ("idle", &idle)] {
+        assert_eq!(
+            client.scene_levels, 1,
+            "{name}: one login level, no re-origin in a single-shard scenario"
+        );
+        assert_eq!(
+            client.scene_epoch,
+            Some(1),
+            "{name}: the origin epoch never moved past login"
+        );
+    }
     // THE REMOVE LANE, measured: nobody left, so nothing may have been evicted — a spurious
     // `EntityRemoved` (e.g. an owner-skip violation) is a red gate, not a swallowed message.
     assert_eq!(

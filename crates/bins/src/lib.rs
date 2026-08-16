@@ -1527,11 +1527,10 @@ fn realm_seed_of(realm: vd_core::pose::RealmId) -> u64 {
 
 // THE AUTHORED PLAYGROUND IS GONE (SL5) — the born-inside source shell, the two-box crossing
 // playground, the seed-forest and visual-scale scene emitters, and the boundary-file override that
-// planted them. Each was a second world a cluster could stand up in place of THE one: a Dual cluster
-// simulated a 150 m star system while drawing an authored 40 m one, and the gates that leaned on the
-// override proved nothing about the game as shipped. The ONE emitter left is
-// [`write_world_regions`] (`vd-devcluster emit-world-scene`) — THE world's home neighbourhood,
-// derived through [`world_roster`], with nothing to choose.
+// planted them. Each was a second world a cluster could stand up in place of THE one. The LAST
+// emitter (`write_world_regions` / `vd-devcluster emit-world-scene`, the `--realm-boxes` file) is
+// DELETED too (Slice C1, window_lane.md §2.11 — D-LANE-6 🟩, owner decision 10 THE DRAW LAW): the
+// client draws its world from the COMPOSED STREAM alone. One world, one source — the stream.
 
 // ---- shell-safe value quoting ------------------------------------------------
 
@@ -2728,27 +2727,6 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
     }
 }
 
-/// Write THE world's HOME-shard neighbourhood as `<dir>/regions.json` — the ONE scene emitter (SL5).
-/// The client's `--realm-boxes` draws EXACTLY the geometry the home shard's detector evaluates,
-/// because both come from the same [`boot_regions_and_movers`] call; there are no options and no
-/// selector, because there is nothing to choose. Exposed as `vd-devcluster emit-world-scene <dir>`.
-/// Routing through [`world_roster`] also runs the flight-law asserts, so a world change fails the
-/// emit loudly instead of shipping a stale scene.
-///
-/// # Errors
-/// A directory-create, serialize, or write failure.
-pub fn write_world_regions(dir: &std::path::Path, p: &DevClusterParams) -> Result<String, String> {
-    let roster = world_roster(p);
-    let held = std::collections::BTreeSet::from([roster.home]);
-    let (regions, _) =
-        boot_regions_and_movers(p.universe_seed, &held, roster.home, p.move_speed, p.tick_dt);
-    std::fs::create_dir_all(dir).map_err(|e| format!("create regions dir: {e}"))?;
-    let path = dir.join("regions.json");
-    let json = serde_json::to_string(&regions).map_err(|e| format!("serialize regions: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("write regions: {e}"))?;
-    Ok(path.display().to_string())
-}
-
 /// Serialize a co-hosted realm SET to the `VD_HELD_REALMS` env format (`kind:seed` comma-separated, e.g.
 /// `system:7,planet:7,station:7,area:7`). NO launcher produces it since co-hosting retired with the
 /// --triple shape (D-WORLD-6); the codec + the shard-side [`parse_held_realms`] keep unit coverage so
@@ -3378,25 +3356,15 @@ mod cluster_tier_tests {
 mod world_roster_tests {
     use super::*;
 
-    /// A unique temp dir per case, removed on drop.
-    struct TempDir(std::path::PathBuf);
-    impl TempDir {
-        fn new(tag: &str) -> TempDir {
-            TempDir(std::env::temp_dir().join(format!("vd-roster-{tag}-{}", std::process::id())))
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    // (The per-case TempDir helper died with the deleted scene emitter's test — Slice C1,
+    // D-LANE-6 🟩: nothing in this module writes a file any more.)
 
     #[test]
     fn child_luma_bags_cover_exactly_the_held_realms_direct_system_children() {
-        // THE WINDOW LANE's boot plumbing (Slice A): the marker roster a shard boots with holds a
-        // TAG_LUMA bag for EXACTLY the direct children of its held realms that carry a draw — on
-        // THE world (DEV posture), the galaxy shard gets its three systems; a system shard gets
-        // NOTHING (planets' photometric ladder is an owed later draw), so the map stays inert.
+        // THE WINDOW LANE's boot plumbing (Slice A + C1): the marker roster a shard boots with
+        // holds a TAG_LUMA bag for EXACTLY the direct children of its held realms that carry a
+        // draw — on THE world, the galaxy shard gets its three systems (the stellar draws) and a
+        // system shard gets its planets (the Slice-C1 REFLECTED draws).
         let world = boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
         let regions = world.regions();
         // Named via the lineage, never a seed literal: a planet's parent IS a star system, and
@@ -3424,18 +3392,29 @@ mod world_roster_tests {
             assert!(matches!(realm, vd_core::pose::RealmId::System(_)));
             vd_core::look::luma_of(bag).expect("a well-formed TAG_LUMA bag");
         }
-        let none = child_luma_bags(
+        // A SYSTEM shard's roster (Slice C1): its planets carry the REFLECTED marker draw
+        // (window_lane.md §1.1 item 3b, per direct child — the flag day made it load-bearing:
+        // a sleeping realm appears ONLY as its parent's marker).
+        let planets = child_luma_bags(
             DEV.universe_seed,
             DEV.move_speed,
             DEV.tick_dt,
             regions,
             &std::collections::BTreeSet::from([a_system]),
         );
+        let expected_planets = regions
+            .iter()
+            .filter(|r| r.parent == Some(a_system))
+            .count();
         assert_eq!(
-            none,
-            std::collections::BTreeMap::new(),
-            "a system's planets carry no draw yet — the roster is honestly empty"
+            planets.len(),
+            expected_planets,
+            "one reflected marker bag per planet of the held system"
         );
+        for (realm, bag) in &planets {
+            assert!(matches!(realm, vd_core::pose::RealmId::Planet(_)));
+            vd_core::look::luma_of(bag).expect("a well-formed TAG_LUMA bag");
+        }
     }
 
     #[test]
@@ -3496,39 +3475,6 @@ mod world_roster_tests {
             roster.axis_clearance_m,
             roster.pole_altitude_m,
             roster.radial_gap_m,
-        );
-    }
-
-    #[test]
-    fn write_world_regions_emits_the_home_shards_own_neighbourhood() {
-        // The emitted regions.json IS the home shard's booted neighbourhood — byte-for-byte the same
-        // regions the detector evaluates, so the drawn scene can never describe a different world.
-        let dir = TempDir::new("scene");
-        let path = write_world_regions(&dir.0, &DEV).expect("emit the world scene");
-        assert!(path.ends_with("regions.json"), "one fixed filename: {path}");
-        let roster = world_roster(&DEV);
-        let held = std::collections::BTreeSet::from([roster.home]);
-        let (want, _) = boot_regions_and_movers(
-            DEV.universe_seed,
-            &held,
-            roster.home,
-            DEV.move_speed,
-            DEV.tick_dt,
-        );
-        // BYTE-for-byte at the FILE level — the file the client loads IS the serialization of the
-        // detector's regions. (A parse-then-compare would test serde_json's float parser instead:
-        // without its `float_roundtrip` feature a re-parsed f64 can sit 1 ULP off.)
-        let emitted = std::fs::read_to_string(&path).expect("read the emitted scene");
-        assert_eq!(
-            emitted,
-            serde_json::to_string(&want).expect("serialize the wanted forest"),
-        );
-        // And it still PARSES as the client's RealmRegion forest (fs → serde), realm-for-realm.
-        let got: Vec<vd_core::geometry::RealmRegion> = serde_json::from_str(&emitted)
-            .expect("the emitted scene parses as a RealmRegion forest");
-        assert_eq!(
-            got.iter().map(|r| (r.realm, r.parent)).collect::<Vec<_>>(),
-            want.iter().map(|r| (r.realm, r.parent)).collect::<Vec<_>>(),
         );
     }
 }

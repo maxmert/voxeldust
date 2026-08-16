@@ -48,6 +48,15 @@ pub struct DevEntityRow {
 pub struct DevRealmBox {
     pub realm: String,
     pub center: [f64; 3],
+    /// The drawn EXTENT in metres (a sphere's radius; a box's half-diagonal length; 0 for a
+    /// MARKER point) — read STREAMED, straight off the composed row's look bag (window_lane.md
+    /// §2.11: camera reconstruction and harness verdicts read streamed extents; the regions.json
+    /// join is dead with the boot file).
+    pub extent_m: f64,
+    /// WHICH LAWFUL AUTHOR drew this box (THE DRAW LAW, owner decision 10): `"look"` — the
+    /// realm's own self-authored outline; `"marker"` — its parent's photometric point-of-light
+    /// datum. The pixel gates' body-kind assert (§2.11) reads this.
+    pub body_kind: String,
     /// SHAKE DIAGNOSIS — the newest universe tick this realm's pose feed has delivered; `None` for a
     /// box the feed never streamed (it is sitting at its boot placement). Read against
     /// [`DevState::entity_feed_newest_tick`], this is what distinguishes the two candidate causes of a
@@ -132,11 +141,20 @@ pub struct DevState {
     /// shake; after the fix it should be small and, more importantly, harmless — both feeds are read
     /// at one cursor regardless.
     pub feed_skew_ticks: Option<i64>,
-    /// The DRAWN realm boxes (VU) — each realm the client is currently rendering, with
-    /// its composited center. Proves the streamed render-scene is present (a `Planet`
-    /// box appears once its `RealmSceneDelta` lands) and LIVE (its center moves as the
-    /// realm-pose feed overlays the orbit). Empty at walk scale (no realm scene streams).
+    /// The DRAWN realm boxes — each realm the client is currently rendering, with its
+    /// composited center, streamed extent and body kind. Proves the composed scene is present
+    /// (a box appears once its level/delta lands) and LIVE (its center moves as the composed
+    /// pose feed overlays the orbit).
     pub realm_boxes: Vec<DevRealmBox>,
+    /// THE ORIGIN MARKER (window_lane.md §2.7/§2.11): the realm the current scene is composed
+    /// in (canonical `Debug` label) and its epoch — `(origin, origin_epoch)` as the last level
+    /// stated them. `None` before the first level. The pixel gates read this: origin == home
+    /// realm at login; the epoch bumps EXACTLY once per crossing.
+    pub origin: Option<(String, u64)>,
+    /// FAULT/diagnosis: composed datagram rows dropped for carrying a PREVIOUS scene epoch
+    /// (§2.6.6 `stale_epoch_rows`). Brief at a crossing; steady growth means the feed and the
+    /// reliable lane disagree about the current scene.
+    pub stale_epoch_rows: u64,
     // The honesty counters, classified so an agent reads them right: a nonzero FAULT
     // counter is a real problem; THROUGHPUT/BENIGN ones are not.
     /// THROUGHPUT: snapshots accepted by the §6.3 gate (proves frames are landing).
@@ -211,8 +229,12 @@ pub(crate) mod tests {
             realm_boxes: vec![DevRealmBox {
                 realm: "Planet(7)".to_owned(),
                 center: [10.0, 0.0, 0.0],
+                extent_m: 4.0,
+                body_kind: "look".to_owned(),
                 newest_tick: Some(100),
             }],
+            origin: Some(("System(7)".to_owned(), 1)),
+            stale_epoch_rows: 8,
             snapshots_applied: 4,
             realm_frames_applied: 3,
             stale_frames_dropped: 1,
@@ -241,8 +263,13 @@ pub(crate) mod tests {
         assert!(json.contains("\"location\":\"System 7\""));
         // The orientation quat rides each row (x,y,z,w) — the identity here.
         assert!(json.contains("\"orient\":[0.0,0.0,0.0,1.0]"));
-        // The drawn realm box rides its realm id + composited center.
+        // The drawn realm box rides its realm id + composited center + streamed extent + body kind.
         assert!(json.contains("\"realm\":\"Planet(7)\""));
+        assert!(json.contains("\"extent_m\":4.0"));
+        assert!(json.contains("\"body_kind\":\"look\""));
+        // The origin marker rides as (label, epoch) — the pixel gates' J1 surface.
+        assert!(json.contains("\"origin\":[\"System(7)\",1]"));
+        assert!(json.contains("\"stale_epoch_rows\":8"));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         // The three row-drop honesty counters ride the surface (audit :304 — a wrongly-armed
         // resurrect guard must be VISIBLE to `vdctl state`), each with its distinct sample value.

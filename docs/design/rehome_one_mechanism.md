@@ -1,3 +1,11 @@
+> ★ SCOPE NOTE (2026-08-16): the SCENERY lanes this document analyses — the down-cascade
+> (`RealmCascade`, `restate_rows_in_child_frame`/`restate_rows_in_frame`, `active_children`), the
+> up-observation (`RealmObservation`) and the parent-authored outline (`child_shape`) — are DELETED
+> as of window lane Slice C2 (mesh minor 19, owner-approved 2026-08-16; `docs/design/window_lane.md`
+> §2.5/§2.9). Every level now states its own rows straight to the observer's gateway, which stacks
+> the chain at ONE universe tick. The RE-HOME analysis in this document is unaffected — the entity
+> and saga lanes are untouched — but read every scenery-lane passage as provenance.
+
 # Re-home: one mechanism — the settled design (2026-08-12)
 
 BINDING. Agreed with the owner in full, decision by decision, on 2026-08-12. The laws it rests on are

@@ -751,6 +751,15 @@ fn sync_realm_boxes(
     let scene = snap.scene_now(now_s);
     let mut seen: BTreeSet<RealmId> = BTreeSet::new();
     for (realm, rbox) in scene.iter() {
+        // A MARKER body is a zero-extent POINT until Slice D's luma-driven point sprites land
+        // (THE DRAW LAW's other arm — its parent's placement datum, sub-pixel at these
+        // distances): tracked on the scene + the diagnosis surface, no mesh spawned (a
+        // placeholder mesh for a point of light would be a lie the pixel gates would then
+        // measure). It stays OUT of `seen`, so a body that DEGRADES to a marker (its look
+        // withdrawn) despawns its mesh below.
+        if rbox.body == vd_client::realm_scene::BodyKind::Marker {
+            continue;
+        }
         seen.insert(realm);
         // The box's OWN position, flattened ONCE through the ONE chokepoint. Slice 5: this used to
         // FABRICATE a zero pose purely to extract `-pin` from `world_pos`, then add a centre whose

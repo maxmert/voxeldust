@@ -152,19 +152,64 @@ pub const PROTO_MAJOR: u16 = 1;
 /// later minor, not this one. The lane is owner-approved 2026-08-15/16, docs/design/window_lane.md §1.1 + §4.5
 /// (the five-topic walk + Q1/Q2/Q3 rulings; in-repo record:
 /// docs/design/owner_decisions_2026-08-15.md, 2026-08-16 addendum).
-pub const PROTO_MINOR: u16 = 16;
+/// **17** — THE SIBLING-INTERIOR CARRIER (window lane Slice C1, owner-approved 2026-08-16:
+/// docs/design/owner_decisions_2026-08-15.md addendum + docs/design/window_lane.md §5 RULINGS —
+/// the Q2 = parent-relay ruling made carrier-real). TOMBSTONES `InterShardFlow::
+/// RealmShapeObservation` (disc 32 reserved forever; the interim shape lane's content EVOLVED,
+/// exactly as its minor-11 entry promised; variant + payload struct remain, classifications
+/// frozen, a received frame counts `undecodable` at its real carrier) and APPENDS its successor
+/// pair: `InterShardFlow::WindowRelay` (disc 34 — child→parent, the child's VERBATIM
+/// self-authored window statements as SEALED bytes + the child's own fence; the parent's whole
+/// lawful vocabulary is forward-or-drop) and `ShardToGateway::WindowRelayed` (disc 10 — the
+/// forward leg to a subscriber holding a window on the parent, admitted against the CHILD's
+/// identity by the existing predicates). Mesh-only (one cluster build, ledger-visible): no
+/// client-facing message changed, the floor does not move.
+/// **18** — THE FLAG DAY (window lane Slice C1, `docs/design/window_lane.md` §2.4; owner-approved
+/// 2026-08-15/16 — items 1/9/10 of docs/design/owner_decisions_2026-08-15.md + the five-topic
+/// walk). ONE owner-mandated in-place reshape (zero deployed clients ⇒ no shims, no dual-decode):
+/// `RealmShape` loses `center` (a shape is pure self-description — the one-meaning law);
+/// `ServerControlMsg::RealmRegistry` becomes the composed LEVEL `{origin, origin_epoch, rows:
+/// Vec<SceneRow>}` with `pin` DELETED (the origin marker is its lawful successor, owner item 9);
+/// `ServerControlMsg::RealmSceneDelta` becomes `{origin, origin_epoch, added, removed}`;
+/// `SceneRow` is born (a pose in the ORIGIN frame + a tagged skip-unknown TLV bag — the VU
+/// streaming contract realized); `RealmSnapshotDatagram` gains `origin_epoch`. Because in-place
+/// reshapes are NOT postcard-additive, [`PROTO_MINOR_FLOOR`] moves to 18: a pre-flag-day peer is
+/// refused loudly, never served bytes it would mis-frame.
+/// **19** — THE DELETION (window lane Slice C2, `docs/design/window_lane.md` §2.5 + §2.9;
+/// owner-approved 2026-08-16 — docs/design/window_lane.md §5 RULINGS, including the Q3 ruling
+/// that retires the SL1 self-placement filter BY AMENDMENT, together with the lane it guarded,
+/// never by silent removal). The four old inter-realm SCENERY lanes are now producer-less and
+/// TOMBSTONED: `InterShardFlow::RealmCascade` (disc 26 — the parent's down-cascade of restated
+/// rows), `InterShardFlow::RealmObservation` (disc 31 — the child's up-ship the parent restated
+/// and re-fanned), `InterShardFlow::ChildSceneSet` (disc 33 — the parent's down-reflect of
+/// outlines, the SL1 filter's lane); `RealmShapeObservation` (disc 32) was tombstoned at minor 17.
+/// TWO shard→gateway carriers go with them, their producers deleted in the same commit:
+/// `ShardToGateway::RealmFrame` (disc 4 — the old per-tick realm datagram; the composed lane has
+/// been the client's only scene author since the minor-18 flag day, and its `Occupants`
+/// `WindowFrame` subsumes this emit per §2.9 step 3) and `ShardToGateway::RealmSceneDelta` (the
+/// per-dot shape push, which shrinks to the ids-only `WindowMembership` verdict per §2.9).
+/// Same tombstone discipline as minors 12/13/15/17 throughout: variants AND payload structs
+/// remain, discriminants reserved forever, both exhaustive classifications frozen, a received
+/// frame counts `undecodable` at its REAL carrier. ZERO arms added; sealing strictly increases —
+/// no realm-to-realm scenery data exists any more, and no realm-inbound message type carries a
+/// placement or a centre at all (the structural successor to the deleted filter, pinned in
+/// `crates/wire/tests/intershard_closed.rs`). Mesh-only (one cluster build, ledger-visible): no
+/// client-facing message changed, so the floor does not move.
+pub const PROTO_MINOR: u16 = 19;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
 ///
 /// The sender-gates-new-variants rule makes a lower negotiated minor safe only while every change since
-/// is an APPENDED ENUM VARIANT the sender can withhold. Minor 8 is not that: it appended a FIELD to a
-/// struct that rides an unreliable datagram, and postcard is non-self-describing, so there is no gating
-/// a field out of a shape both ends must agree on byte-for-byte. A pre-8 peer therefore cannot be served
-/// at all, and the honest failure is a Close naming the floor rather than a stream that decodes into
-/// garbage. This is the protocol's first floor; raise it only alongside a change of the same kind, and
-/// say in the ledger above which change forced it.
-pub const PROTO_MINOR_FLOOR: u16 = 8;
+/// is an APPENDED ENUM VARIANT the sender can withhold. Minor 18 is not that: it is the window lane's
+/// owner-mandated flag day — client-facing payloads RESHAPED IN PLACE (`RealmShape` lost a field, the
+/// two scene messages changed shape, the realm datagram gained a field), and postcard is
+/// non-self-describing, so there is no gating a reshape out of bytes both ends must agree on
+/// byte-for-byte. A pre-18 peer therefore cannot be served at all, and the honest failure is a Close
+/// naming the floor rather than a stream that decodes into garbage. (The floor's first move was 8 —
+/// the `RealmSnap.frame` field append — for the identical reason.) Raise it only alongside a change of
+/// the same kind, and say in the ledger above which change forced it.
+pub const PROTO_MINOR_FLOOR: u16 = 18;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -213,7 +258,7 @@ impl ProtoVersion {
             "incompatible protocol major version".to_owned()
         } else {
             format!(
-                "protocol minor below the floor ({PROTO_MINOR_FLOOR}): positions are frame-anchored from v{PROTO_MAJOR}.{PROTO_MINOR_FLOOR}"
+                "protocol minor below the floor ({PROTO_MINOR_FLOOR}): the scene is server-composed from v{PROTO_MAJOR}.{PROTO_MINOR_FLOOR}"
             )
         }
     }
@@ -277,7 +322,7 @@ mod tests {
         assert_eq!(
             ours.negotiate(below),
             None,
-            "an old peer offering us minor 7"
+            "an old peer offering us a pre-flag-day minor"
         );
         assert_eq!(
             below.negotiate(ours),
@@ -288,7 +333,7 @@ mod tests {
         // hunting a version generation mismatch when the real answer is "your client is stale".
         assert_eq!(
             ours.refusal_reason(below),
-            "protocol minor below the floor (8): positions are frame-anchored from v1.8"
+            "protocol minor below the floor (18): the scene is server-composed from v1.18"
         );
         assert_eq!(
             ours.refusal_reason(ProtoVersion {
@@ -302,52 +347,61 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 16,
-            "minor 16 appended THE WINDOW LANE's skeleton (owner-approved 2026-08-15/16, \
+            PROTO_MINOR, 19,
+            "minor 19 is THE DELETION (window lane Slice C2, owner-approved 2026-08-16 — \
+             window_lane.md §5 RULINGS, Q3 retiring the SL1 self-placement filter BY AMENDMENT \
+             together with the lane it guarded): the old inter-realm scenery lanes are \
+             producer-less and TOMBSTONED — InterShardFlow::RealmCascade (26), RealmObservation \
+             (31), ChildSceneSet (33) — beside RealmShapeObservation (32, minor 17); and their two \
+             shard→gateway carriers go with them, producers deleted — ShardToGateway::RealmFrame \
+             (4, subsumed by the Occupants WindowFrame per §2.9 step 3) and \
+             ShardToGateway::RealmSceneDelta (the per-dot shape push, shrunk to the ids-only \
+             WindowMembership verdict). Zero arms added; mesh-only, so the floor does not move; \
+             minor 18 is THE FLAG DAY (window lane Slice C1, owner-approved 2026-08-15/16 items \
+             1/9/10): RealmShape lost `center` (pure self-description), RealmRegistry became the \
+             composed level {{origin, origin_epoch, rows: Vec<SceneRow>}} with `pin` deleted (the \
+             origin marker is its lawful successor), RealmSceneDelta became {{origin, origin_epoch, \
+             added, removed}}, SceneRow was born (pose in the ORIGIN frame + tagged skip-unknown \
+             TLV bag), RealmSnapshotDatagram gained origin_epoch — in-place reshapes, so the floor \
+             moved to 18; \
+             minor 17 tombstoned InterShardFlow::RealmShapeObservation (its interim content EVOLVED \
+             as the minor-11 entry promised — owner-approved 2026-08-16, \
+             owner_decisions_2026-08-15.md addendum + window_lane.md §5 RULINGS) and appended the \
+             Q2-relay pair: InterShardFlow::WindowRelay (sealed verbatim child statements, one hop \
+             up, forward-or-drop) + ShardToGateway::WindowRelayed (the forward leg, admitted \
+             against the CHILD's identity); \
+             minor 16 appended THE WINDOW LANE's skeleton (owner-approved 2026-08-15/16, \
              docs/design/window_lane.md §1.1 + §4.5): ShardToGateway::WindowFrame/WindowBody/\
              WindowMembership + GatewayToShard::WindowOpen/WindowClose, WindowScope = Occupants | \
-             Child ONLY (Q2 = parent relay; Observed never ships) — mesh-only, Slice 0, nothing \
-             moves yet, the floor stays; \
-             minor 15 TOMBSTONED the ghost pose feed (GhostFlow::Spawn + Delta — the foreign-frame \
-             pose writer died with it) and appended GhostFlow::SpawnV2, the pose-free take-over \
-             proof; minor 14 appended the REMOVE MESSAGE (ServerControlMsg::Event carrying \
-             EventMsg::EntityRemoved(entity, at) + the ShardToGateway::EntityRemoved mesh leg — \
-             the reliable per-entity eviction + the client resurrect guard, D-4(a)); \
-             minor 13 TOMBSTONED the entity lane (EntityInterest + EntityCascade, Step 5 slice E — \
-             occupant poses no longer cross a realm boundary at steady state; the occupied realm is \
-             its occupants' proxy; no producer, no consumer, discriminants reserved forever, received \
-             frames count undecodable); minor 12 TOMBSTONED the per-occupant lanes (OccupantInterest \
-             + ProxySceneSet — no \
-             producer, no consumer, discriminants reserved forever, received frames count \
-             undecodable); minor 11 appended `InterShardFlow::RealmShapeObservation` (a live child's interior OUTLINES \
-             one hop up — the static half of the observation lane, the approaching-star invisible-planets \
-             cure) and `InterShardFlow::ChildSceneSet` (the per-live-child rekey of the down-reflected \
-             sibling scene; the occupant-keyed ProxySceneSet stops being emitted). \
-             SERVER-TO-SERVER ONLY again, so the floor stays where it is; minor 10 appended \
-             `InterShardFlow::ChildLive` (the SL7 occupancy bit, child→parent, Step 5 \
-             slice A) and `InterShardFlow::RealmObservation` (a live child's own authored rows one hop up, \
-             for the parent to restate and re-fan — the exit-the-system frozen-planets cure); minor 9 appended \
-             `InterShardFlow::ShardRoster` (which nodes the ownership record shows holding a realm); minor 8 appended the edge HEAD (`RealmSnap.frame`) and KEEPS it on the client lane (the cascade bytes ARE the client feed, re-fanned unopened), dropped BOTH the render-origin `pin_abs` and the re-anchor `anchor_epoch` from the scene messages (every position arrives measured from the realm it is described to, and nothing downstream re-derives), and, because a field append is not postcard-additive, introduced PROTO_MINOR_FLOOR; minor 7 made positions root-absolute + server-told the render origin (floating-origin A5); minor 6 appended RealmSceneDelta, minor 5 RealmRegistry, minor 4 ShardPresence, minor 3 to_parent on the crossing carriers, minor 2 OwnEntity, minor 1 UniverseRate"
+             Child ONLY (Q2 = parent relay; Observed never ships); \
+             minor 15 TOMBSTONED the ghost pose feed (GhostFlow::Spawn + Delta) and appended \
+             GhostFlow::SpawnV2; minor 14 appended the REMOVE MESSAGE (D-4(a)); minor 13 TOMBSTONED \
+             the entity lane (EntityInterest + EntityCascade); minor 12 TOMBSTONED the per-occupant \
+             lanes (OccupantInterest + ProxySceneSet); minor 11 appended RealmShapeObservation + \
+             ChildSceneSet; minor 10 appended ChildLive + RealmObservation; minor 9 appended \
+             ShardRoster; minor 8 appended the edge HEAD (RealmSnap.frame), dropped pin_abs + \
+             anchor_epoch, and introduced PROTO_MINOR_FLOOR; minor 7 floating-origin A5; minor 6 \
+             RealmSceneDelta, minor 5 RealmRegistry, minor 4 ShardPresence, minor 3 to_parent, \
+             minor 2 OwnEntity, minor 1 UniverseRate"
         );
         assert_eq!(
-            PROTO_MINOR_FLOOR, 8,
-            "THEY HAVE NOW PARTED COMPANY, exactly as the previous version of this assertion predicted: \
-             minor 9 appends a VARIANT on a server-to-server arm, so a minor-8 client is fully correct \
-             and must not be refused. The floor tracks the last CLIENT-VISIBLE break — the minor-8 field \
-             append — not every bump. Raising it here would turn an internal addition into a flag day for \
-             every client, which is the opposite of what an append-only wire is for."
+            PROTO_MINOR_FLOOR, 18,
+            "the floor tracks the last CLIENT-VISIBLE break, and minor 18 IS one: the flag day \
+             reshaped client-facing payloads in place (owner item 9 — zero deployed clients, no \
+             shims, no dual-decode), so every pre-18 peer would mis-frame the scene stream and \
+             must be refused loudly. Do not raise this again except alongside a change of the \
+             same kind, named in the ledger."
         );
         assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.16");
-        // These three USED to negotiate down and be welcomed (minor 7 fully, minor 1 without the
-        // minor-2 OwnEntity, minor 0 without that AND UniverseRate). They are now refused: the
-        // sender-gates-variants rule only covers appended VARIANTS, and minor 8 appended a FIELD.
-        // This flip IS the proof the floor is live — asserting `Some` here is what shipped a stale
-        // client a `RealmSnap` stream it would decode into garbage.
-        for stale in [7u16, 1, 0] {
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.19");
+        // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
+        // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
+        // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is
+        // what would ship a stale client a scene stream it decodes into garbage.
+        for stale in [17u16, 16, 8, 0] {
             assert_eq!(
                 ProtoVersion::CURRENT.negotiate(ProtoVersion {
                     major: 1,
@@ -503,137 +557,14 @@ mod tests {
         );
     }
 
-    /// THE CONTRACT MAY NOT NAME THE ROUTER AND A CONVERSION IN ONE BREATH.
-    ///
-    /// This crate's doc comments ARE the wire specification — the last three model changes were each
-    /// first believed because a comment said so. `RealmShape::center` used to define itself by WHERE its
-    /// value was re-expressed and by WHICH party did it — naming the router as that party in the same
-    /// sentence — which gave one field two meanings keyed on sender and re-seeded the router-composes
-    /// model in every reader. Deleting that sentence is not enough; nothing stopped it coming back.
-    ///
-    /// The rule is deliberately blunt and polarity-blind: no doc line in `src/` may mention the gateway AND
-    /// a conversion in the same breath, not even to deny it. The wire contract describes WHAT a field means
-    /// and who states it; a router's relationship to arithmetic is the router's own documentation. Scanning
-    /// the DIRECTORY rather than a fixed include list means a file added later is covered too.
-    /// The classifier, kept apart from the scan so BOTH its answers are exercised by a named example
-    /// rather than only by whatever happens to be in the tree (a green scan exercises the "no" answer
-    /// alone, which would leave the "yes" answer — the one that has to work — never run).
-    fn names_the_router_as_a_converter(line: &str) -> bool {
-        // Affirmative or negated, singular or plural — the point is that the two ideas never share a line.
-        // Stems, not whole words, and this matters: "convert" does NOT contain "conversion", so a list of
-        // whole verbs let the exact sentence that started all this through. Found by the positive example
-        // below failing, not by reading the list.
-        const CONVERSION: [&str; 8] = [
-            "conver",
-            "compos",
-            "re-express",
-            "rewrit",
-            "restat",
-            "subtract",
-            "pin space",
-            "pin-space",
-        ];
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("///") && !trimmed.starts_with("//!") {
-            return false;
-        }
-        let lower = line.to_lowercase();
-        if !lower.contains("gateway") {
-            return false;
-        }
-        CONVERSION.iter().any(|w| lower.contains(w))
-    }
-
-    #[test]
-    fn no_doc_line_in_this_crate_names_the_gateway_as_a_converter() {
-        // Both answers, on named examples. The second is a REAL line from `ShardToGateway::Frame` — the
-        // sentence this whole run's acceptance rests on — so the rule provably does not forbid the
-        // contract's own truthful statement about the router.
-        assert!(names_the_router_as_a_converter(
-            "/// the gateway performs that conversion with the SAME walk"
-        ));
-        assert!(!names_the_router_as_a_converter(
-            "    /// at byte level, and forwards. It never decodes the payload."
-        ));
-
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files: Vec<std::path::PathBuf> = Vec::new();
-        let mut stack = vec![src.clone()];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("the crate's own src/ is readable") {
-                let path = entry.expect("a readable dir entry").path();
-                // Everything under src/ is source; recursing rather than listing means a module added
-                // later (or a new `seams/` sibling) is scanned without anyone remembering to add it.
-                if path.is_dir() {
-                    stack.push(path);
-                } else {
-                    files.push(path);
-                }
-            }
-        }
-        // Non-vacuity: a scan that found nothing would pass for the wrong reason forever. (A plain
-        // literal message — an expression inside a passing assert's message is a region no run ever
-        // evaluates, HR5.)
-        assert!(
-            files.len() >= 5,
-            "the scan found almost no source files — it is measuring nothing"
-        );
-        let offences: Vec<String> = files.iter().flat_map(|p| scan_file(p)).collect();
-        assert_eq!(
-            offences,
-            Vec::<String>::new(),
-            "the wire contract names the gateway alongside a conversion. Say what the FIELD means and \
-             who states it; where a router does or does not do arithmetic belongs in the router's own docs"
-        );
-    }
-
-    /// One offence, formatted — the shape the scan reports in, exercised by a NAMED example so a
-    /// clean tree (where the scan loop pushes nothing) still covers the formatter.
-    fn offence_line(path: &std::path::Path, n: usize, line: &str) -> String {
-        format!(
-            "{}:{}: {}",
-            path.file_name().expect("a named file").to_string_lossy(),
-            n + 1,
-            line.trim()
-        )
-    }
-
-    /// Every offence of ONE file — the scan's per-file body, extracted so a manufactured guilty file
-    /// covers the offence path a clean tree can never take.
-    fn scan_file(path: &std::path::Path) -> Vec<String> {
-        let text = std::fs::read_to_string(path).expect("a readable source file");
-        text.lines()
-            .enumerate()
-            .filter(|(_, line)| names_the_router_as_a_converter(line))
-            .map(|(n, line)| offence_line(path, n, line))
-            .collect()
-    }
-
-    #[test]
-    fn the_offence_report_names_file_one_based_line_and_trimmed_text() {
-        assert_eq!(
-            offence_line(
-                std::path::Path::new("src/channels.rs"),
-                3,
-                "  guilty line  "
-            ),
-            "channels.rs:4: guilty line",
-        );
-        // The per-file scan, against a manufactured GUILTY file — the arm a clean tree cannot take.
-        let dir = std::env::temp_dir().join(format!("vd-wire-scan-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let guilty = dir.join("guilty.rs");
-        std::fs::write(
-            &guilty,
-            "fn ok() {}\n/// the gateway converts every centre it relays\n",
-        )
-        .expect("write");
-        assert_eq!(
-            scan_file(&guilty),
-            vec!["guilty.rs:2: /// the gateway converts every centre it relays".to_owned()],
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // The old router-converter doc scan that lived here ("no doc line may name the gateway and
+    // a conversion in one breath") guarded the REJECTED world-wide-graph model and is REPLACED,
+    // per docs/design/window_lane.md §2.6.1 (ledgered with the owner citation on the minor-17/18
+    // entries above): the structural guard is now the dependency gate
+    // `tests/tests/crate_isolation.rs::the_window_composer_cannot_name_a_motion_or_generate_a_world`
+    // — the connection plane is BUILD-UNABLE to evaluate a placement, so the contract may state
+    // the flag-day truth plainly: the composed level's rows are stacked at one tick by the
+    // observer's connection process from attested statements, and the client draws them.
 
     #[test]
     fn serde_roundtrip() {

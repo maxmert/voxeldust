@@ -208,7 +208,12 @@ fn run_cut_transfer(
     // drives it the rest of the way: Demote→DemoteAck advances Demoting→Promoting + pushes Promote;
     // PromoteAck AND DeliveredToObservers (the Promoting gate) emit ReleaseSubscribe, the gateway
     // acks Released → Done → Tombstone, so the saga reaches `live() == 0` (no longer parks).
-    step_until(&mut topo, 40, observe, |t| live_sagas(t) == 0);
+    // The budget is a REALIZATION bound, not the property: the fabric draws every delivery's
+    // delay from ONE seeded stream, so any change in cluster chatter (Slice C1 added the window
+    // lane's statements) re-deals the saga links' delays under the same seed. 80 covers the
+    // slow-policy worst case with headroom while staying far inside the test's real property —
+    // NO ABORT (asserted below), which no budget here can mask.
+    step_until(&mut topo, 80, observe, |t| live_sagas(t) == 0);
 
     // QUIESCE: stop emitting and let every in-flight post-marker input settle at the dest AND the
     // source's saga-driven Entity self-fence (`on_saga_demote`) land — the source dot demotes to a

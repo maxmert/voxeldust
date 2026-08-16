@@ -1,13 +1,15 @@
-//! The source-agnostic realm-geometry projection + the box→block-mesh lowering IR
-//! (Visual Crossing Playground, Slice V0).
+//! The realm-scene projection + the box→block-mesh lowering IR.
 //!
-//! A dev-config (`Vec<RealmBoundary>`) — and, later, a reviewed wire arm — projects to
-//! ONE [`RealmScene`] (`BTreeMap<RealmId, RealmBox>`); the renderer binds to the scene and
-//! its lowering [`MeshPrim`]s, NEVER to `RealmBoundary` (which leaks the shard-authority-internal
-//! `to_realm`/`band`/`effect`) and NEVER to a source. This crate carries NO Bevy types: a
-//! `MeshPrim` is a plain vertex buffer + a translucent color + a translation/scale transform,
-//! so the Tier-B renderer does `Mesh::from(prim.vertices)` with ZERO shape branch — the seam
-//! that keeps A→B (dev-config→wire) and box→block-mesh (P4 greedy quads) non-cornering.
+//! ONE source since the flag day (proto_minor 18, `docs/design/window_lane.md` §2.4/§2.11 —
+//! owner-approved 2026-08-15/16 items 1/9/10): the COMPOSED STREAM. A
+//! [`ServerControlMsg::RealmRegistry`] level (and its deltas) of [`SceneRow`]s projects to ONE
+//! [`RealmScene`] (`BTreeMap<RealmId, RealmBox>`); the renderer binds to the scene and its
+//! lowering [`MeshPrim`]s, never to a source. The `--realm-boxes` boot file and its JSON loaders
+//! are DELETED (D-LANE-6 🟩, owner decision 10 — THE DRAW LAW): a realm that is not running
+//! cannot be drawn, so the drawn set comes only from what the stream states. This crate carries
+//! NO Bevy types: a `MeshPrim` is a plain vertex buffer + a translucent color + a
+//! translation/scale transform, so the Tier-B renderer does `Mesh::from(prim.vertices)` with
+//! ZERO shape branch.
 //!
 //! HR3 (one tooling, never `match` on a realm KIND): [`stable_seed`] hashes the
 //! POSTCARD BYTES of the whole [`RealmId`] — discriminant + payload uniformly — so the hue
@@ -17,10 +19,10 @@
 use std::collections::BTreeMap;
 
 use glam::DVec3;
-use vd_core::geometry::{Boundary, RealmBoundary, RealmRegion};
-use vd_core::pose::{FrameRef, LatticePos, RealmId, Tier};
+use vd_core::geometry::Boundary;
+use vd_core::pose::{LatticePos, RealmId, Tier};
 use vd_core::worldgen::MAX_RENDERABLE_EXTENT_M;
-use vd_wire::channels::RealmShape;
+use vd_wire::channels::SceneRow;
 
 use crate::interp::stated_tier;
 use crate::realm_view::RealmView;
@@ -44,41 +46,43 @@ pub enum BoxShape {
     Box { half: DVec3 },
 }
 
+/// Which lawful author drew a box's pixels — THE DRAW LAW's two arms (owner decision 10), decided
+/// by DATA PRESENCE on the row's bag, never a kind or an if-running flag. There is deliberately
+/// no third variant: the wire types cannot represent a third pixel source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyKind {
+    /// The realm's OWN self-authored outline (`TAG_LOOK`) — a running realm draws itself.
+    Look,
+    /// The parent's photometric point-of-light datum (`TAG_LUMA`) — a sleeping realm appears
+    /// only as its parent's placement marker. Pixel rendering (luma-driven point sprites) lands
+    /// in Slice D; until then a marker is a tracked zero-extent point on the diagnosis surface.
+    Marker,
+}
+
 /// One realm's render description: its render-relevant shape, its center OFFSET from the realm's
 /// frame origin, its parent link (nesting), its nesting `depth` (0 = top level), and its
 /// TRANSLUCENT color. Carries ONLY render-relevant fields — the `RealmBoundary`'s
 /// `to_realm`/`band`/`effect` are shard-authority-internal and are dropped at projection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RealmBox {
-    /// The render-relevant shape (sphere or box).
+    /// The render-relevant shape (sphere or box). A MARKER body is a POINT — a zero-radius
+    /// sphere — until Slice D's luma-driven point sprites land (the drawn footprint of a
+    /// sleeping star at these distances IS sub-pixel; a placeholder mesh would be a lie).
     pub shape: BoxShape,
-    /// THIS REALM'S OWN FRAME — the wire's `RealmShape::frame`, the frame this realm's occupants and
-    /// its own children are measured in. ONE meaning, and it is NOT the space `center` is measured in
-    /// (that is the frame of whoever the shape was addressed to). Carried so the render glue never
-    /// reconstructs a `FrameRef` from a `RealmId` — the `Area` arm can't (it needs the parent planet
-    /// seed) and it would be a per-KIND match in a feature path.
-    ///
-    /// It used to mean TWO things: the realm's own frame until the first streamed pose arrived, and the
-    /// frame the pose was authored in afterwards — because `overlaid_at` overwrote it, and it overwrote
-    /// it for exactly one reason: `draw_center` read `.tier()` off it to pick metres-per-cell, and only
-    /// the streamed pose's label states the space the streamed centre is in. That unit now travels as
-    /// `tier`, stated beside the value it belongs to, so this field no longer has to double as a unit
-    /// carrier and no longer changes meaning halfway through a session.
-    pub frame: FrameRef,
-    /// THE UNIT `center`'s integer cell is counted in — the one number `draw_center` multiplies by.
-    ///
-    /// It is stated by whoever shipped the centre, never picked here: for a live streamed placement it
-    /// comes from the pose's own label (`RealmSnap`'s TAIL, which every relay hop rewrites in the same
-    /// operation that restates the value), through [`crate::interp::stated_tier`].
-    ///
-    /// KNOWN GAP, named rather than hidden. For a STATIC shape off the reliable scene lane there is no
-    /// such statement to read: `RealmShape` carries the realm's own frame (the head) and a `center`
-    /// measured in the ADDRESSEE's frame, and no field naming that addressee — the tail `RealmSnap`
-    /// gained at proto_minor 8 has no counterpart here. So the shape lane falls back to the tier of the
-    /// realm's own frame, which is right only while both are the same tier. Every in-system frame is
-    /// `Tier::Fine` and the one `Tier::Coarse` frame (`GalaxySpace`) belongs to an ambient shell that is
-    /// never drawn, so today the two always agree; `a_static_shape_and_a_streamed_pose_agree_on_the_unit
-    /// _only_because_every_drawn_realm_is_one_tier` pins that and fails the day it stops being true.
+    /// WHICH LAWFUL AUTHOR drew this pixel (owner decision 10, THE DRAW LAW — by data presence,
+    /// never a kind flag): [`BodyKind::Look`] = the realm's OWN self-authored outline (`TAG_LOOK`
+    /// in the row's bag); [`BodyKind::Marker`] = its parent's photometric point-of-light datum
+    /// (`TAG_LUMA`). A third source is unrepresentable in the wire types. The diagnosis surface
+    /// (`DevState.realm_boxes[].body_kind`) reads this.
+    pub body: BodyKind,
+    /// The photometric datum `(class_code, luma_lsun)` for a MARKER body — Slice D's point-sprite
+    /// input. `None` on a look body (a marker cannot carry a look, and a look never carries luma).
+    pub luma: Option<(u8, f64)>,
+    /// THE UNIT `center`'s integer cell is counted in — the one number `draw_center` multiplies
+    /// by. Stated by whoever shipped the value, never picked here: the composed level/delta row
+    /// states it on `pose.frame` (§2.4: tier rides `pose.frame` explicitly), and the live
+    /// per-tick overlay re-states it per pose ([`crate::interp::stated_tier`]). The old
+    /// static-shape tier-inference gap is GONE: every row now carries the statement.
     pub tier: Tier,
     /// The box centre as the server shipped it — a FULL tiered position (coarse cell + fine offset),
     /// NOT a bare metre vector.
@@ -131,21 +135,17 @@ impl RealmBox {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RealmScene(BTreeMap<RealmId, RealmBox>);
 
-/// Why a `Vec<RealmBoundary>` (or a `boxes.json` dev-config) failed to project to a [`RealmScene`].
+/// Why a composed level/delta failed to project to a [`RealmScene`].
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SceneError {
-    /// Two boundaries named the same realm — the map key would collide, so the source is rejected
+    /// Two rows named the same realm — the map key would collide, so the source is rejected
     /// loudly rather than silently keeping whichever the input happened to list first.
-    #[error("duplicate realm id in the boundary set")]
+    #[error("duplicate realm id in the scene rows")]
     DuplicateRealm,
     /// A parent link formed a cycle, or the parent chain exceeded [`MAX_NEST_DEPTH`] — a bounded,
     /// loud stop instead of an unbounded walk (adversary H7 cycle/again-guard).
     #[error("parent chain cycles or exceeds the max nesting depth")]
     CycleOrDepthExceeded,
-    /// The `boxes.json` dev-config was not a valid JSON array of `RealmBoundary` — the (owned)
-    /// serde message so a bad hand-authored file fails LOUD at load, never silently empty.
-    #[error("malformed boxes.json: {0}")]
-    MalformedJson(String),
 }
 
 /// The nesting-depth ceiling: the parent walk stops (loud, [`SceneError::CycleOrDepthExceeded`])
@@ -158,205 +158,78 @@ pub const MAX_NEST_DEPTH: u8 = 16;
 pub const BOX_ALPHA: f32 = 0.25;
 
 impl RealmScene {
-    /// Project a boundary set into the render scene: build the `BTreeMap<RealmId, RealmBox>`
-    /// FIRST (rejecting a duplicate realm id, [`SceneError::DuplicateRealm`]), then compute each
-    /// box's `depth` by walking its `parent` links via MAP LOOKUP (not a linear Vec scan — H7),
-    /// bounded by [`MAX_NEST_DEPTH`] (a cycle/over-deep chain is a loud
-    /// [`SceneError::CycleOrDepthExceeded`], not an infinite loop). Order-independent: the depth is
-    /// a pure function of the realm SET, never the input Vec order.
+    /// Project one COMPOSED LEVEL's rows (`ServerControlMsg::RealmRegistry`, proto_minor 18 —
+    /// the flag day, `docs/design/window_lane.md` §2.4) into the render scene. Per row the bag
+    /// decides BY PRESENCE (THE DRAW LAW, owner decision 10): `TAG_LOOK` ⇒ a body (the realm's
+    /// own outline; an outline wider than `MAX_RENDERABLE_EXTENT_M` is an ambient shell — felt,
+    /// not framed — and is skipped); else `TAG_LUMA` ⇒ a marker point; else the row is TRACKED
+    /// but NOT DRAWN (a missing statement means the thing is not drawn) — unknown tags are
+    /// skipped, so signals extend forever with zero change here. Depth is computed over the FULL
+    /// level's parent links, so a drawn realm keeps its true nesting depth even when its ambient
+    /// parent is skipped.
     ///
     /// # Errors
-    /// [`SceneError::DuplicateRealm`] on a repeated realm id; [`SceneError::CycleOrDepthExceeded`]
-    /// on a cyclic/over-deep parent chain.
-    pub fn from_boundaries(boundaries: &[RealmBoundary]) -> Result<RealmScene, SceneError> {
-        // Pass 1: the parent map (realm → its parent), rejecting duplicates. Keyed by RealmId so the
-        // depth walk below is a LOOKUP, never a linear find (order-independent, H7).
+    /// [`SceneError::DuplicateRealm`] on a repeated realm id (the composer dedups — a duplicate
+    /// is a server bug); [`SceneError::CycleOrDepthExceeded`] on a cyclic/over-deep parent chain.
+    pub fn from_scene_rows(rows: &[SceneRow]) -> Result<RealmScene, SceneError> {
+        // Pass 1: the parent map over the WHOLE level (drawn + tracked), rejecting duplicates —
+        // the depth walk is a LOOKUP over the true nesting, not just the drawn subset.
         let mut parents: BTreeMap<RealmId, Option<RealmId>> = BTreeMap::new();
-        for b in boundaries {
-            if parents.insert(b.realm, b.parent).is_some() {
-                return Err(SceneError::DuplicateRealm);
-            }
-        }
-        // Pass 2: project each boundary, computing depth over the map (a pure function of the set).
-        let mut boxes: BTreeMap<RealmId, RealmBox> = BTreeMap::new();
-        for b in boundaries {
-            let depth = depth_of(b.realm, &parents)?;
-            let frame = frame_of_realm(b.realm, b.parent);
-            boxes.insert(
-                b.realm,
-                RealmBox {
-                    shape: shape_of(b.shape),
-                    frame,
-                    // A hand-authored dev-config has no shipper to state a unit, so the realm's own
-                    // frame is the only statement there is — and it is the right one here, because the
-                    // file's centres are authored in that same space by construction.
-                    tier: stated_tier(frame),
-                    center: b.center,
-                    parent: b.parent,
-                    depth,
-                    color_rgba: color_for_realm(b.realm),
-                },
-            );
-        }
-        Ok(RealmScene(boxes))
-    }
-
-    /// Project a `boxes.json` dev-config into the render scene. The JSON is a plain array of
-    /// [`RealmBoundary`] — the IDENTICAL `Vec<RealmBoundary>` the shard plants into its
-    /// `RealmBoundaries` resource (single-sourced: the same authored file feeds both the shard
-    /// authority and the client render), so a box's extent can never disagree with the shard's
-    /// crossing geometry. Deserializes then delegates to [`RealmScene::from_boundaries`] — so a
-    /// malformed file and a duplicate/cyclic set both fail LOUD ([`SceneError`]), never a silent
-    /// empty scene.
-    ///
-    /// # Errors
-    /// [`SceneError::MalformedJson`] if the text is not a valid `RealmBoundary` array;
-    /// [`SceneError::DuplicateRealm`] / [`SceneError::CycleOrDepthExceeded`] as
-    /// [`RealmScene::from_boundaries`].
-    pub fn from_boxes_json(json: &str) -> Result<RealmScene, SceneError> {
-        let boundaries = parse_boundaries(json)?;
-        RealmScene::from_boundaries(&boundaries)
-    }
-
-    /// Project the SEED-DERIVED containment [`RealmRegion`] forest (`worldgen::realm_regions_for`) into
-    /// the render scene — the C-6b SINGLE-SOURCE so the client draws EXACTLY the sim's containment
-    /// geometry (no authored `boxes.json`, no drift). Only FINITE LEAF realms are drawn: a region whose
-    /// shape extent (`Boundary::finite_extent`) is `<= worldgen::MAX_RENDERABLE_EXTENT_M` (systems r=40,
-    /// planets r=10) becomes a box; the ~unbounded ambient shells (Galaxy r=1000, Universe r=1e9) are
-    /// SKIPPED — the between-space is FELT, not framed. Depth is computed over the FULL forest's parent
-    /// links (so a rendered System keeps its true nesting depth even though its Galaxy parent is skipped),
-    /// then only the renderable subset is kept. A `RealmRegion` has NO `to_realm`/`effect` to leak (unlike
-    /// `RealmBoundary`), so this is the cleaner projection; it produces the identical [`RealmBox`] type.
-    ///
-    /// # Errors
-    /// [`SceneError::DuplicateRealm`] on a repeated realm id (the seed forest guarantees uniqueness — a
-    /// duplicate is a generator bug); [`SceneError::CycleOrDepthExceeded`] on a cyclic/over-deep chain.
-    pub fn from_regions(regions: &[RealmRegion]) -> Result<RealmScene, SceneError> {
-        // A `RealmRegion` (seed forest / `regions.json`) lowers 1:1 to the wire render subset
-        // [`RealmShape`] — realm + frame + static center + boundary + parent — dropping the server-side AoI
-        // band. The projection then lives ONCE in [`RealmScene::from_shapes`], so the boot-file path and the
-        // STREAMED-scene path (VU proto_minor 5) draw byte-identical geometry from a single algorithm.
-        let shapes: Vec<RealmShape> = regions
-            .iter()
-            .map(|r| RealmShape {
-                realm: r.realm,
-                frame: r.frame,
-                center: r.center,
-                shape: r.shape,
-                parent: r.parent,
-            })
-            .collect();
-        RealmScene::from_shapes(&shapes)
-    }
-
-    /// Project a slice of wire render [`RealmShape`]s — the AoI-scoped realm SHAPES a fully-agnostic client
-    /// receives on `ServerControlMsg::RealmRegistry` (VU proto_minor 5) — into the render scene. THE
-    /// streamed single-source: the client draws its world
-    /// from the STREAM ALONE (no `--realm-boxes` file), and [`from_regions`](Self::from_regions) delegates
-    /// here so the file path is byte-identical. Only FINITE LEAF realms are drawn (extent
-    /// `<= worldgen::MAX_RENDERABLE_EXTENT_M`); the ~unbounded ambient shells (Galaxy/Universe) are SKIPPED —
-    /// the between-space is FELT, not framed. Depth is computed over the FULL neighbourhood's parent links so
-    /// a rendered System keeps its true nesting depth even though its skipped ambient parent is not drawn.
-    ///
-    /// # Errors
-    /// [`SceneError::DuplicateRealm`] on a repeated realm id (the seed neighbourhood guarantees uniqueness —
-    /// a duplicate is a server bug); [`SceneError::CycleOrDepthExceeded`] on a cyclic/over-deep chain.
-    pub fn from_shapes(shapes: &[RealmShape]) -> Result<RealmScene, SceneError> {
-        // Pass 1: the parent map over the WHOLE neighbourhood (renderable + ambient), rejecting duplicates —
-        // so the depth walk is a LOOKUP over the true nesting, not just the renderable subset.
-        let mut parents: BTreeMap<RealmId, Option<RealmId>> = BTreeMap::new();
-        for r in shapes {
+        for r in rows {
             if parents.insert(r.realm, r.parent).is_some() {
                 return Err(SceneError::DuplicateRealm);
             }
         }
-        // Pass 2: project ONLY the finite renderable shapes (skip the ambient Galaxy/Universe shells),
-        // computing depth over the FULL map so a rendered System keeps its true depth.
+        // Pass 2: project the DRAWN rows (a look or a marker), depth over the full map.
         let mut boxes: BTreeMap<RealmId, RealmBox> = BTreeMap::new();
-        for r in shapes {
-            if r.shape.finite_extent() > MAX_RENDERABLE_EXTENT_M {
-                continue; // ambient (non-renderable) shell — felt, not framed
-            }
-            let depth = depth_of(r.realm, &parents)?;
-            boxes.insert(
-                r.realm,
-                RealmBox {
-                    shape: shape_of(r.shape),
-                    frame: r.frame,
-                    // The shape lane states no tail (see `RealmBox::tier`), so the realm's own frame is
-                    // the only unit statement on the message. Sound while every drawn realm is one tier.
-                    tier: stated_tier(r.frame),
-                    center: r.center,
-                    parent: r.parent,
-                    depth,
-                    color_rgba: color_for_realm(r.realm),
-                },
-            );
+        for r in rows {
+            let Some(rbox) = row_box(r, depth_of(r.realm, &parents)?) else {
+                continue; // no drawable statement — tracked, never drawn
+            };
+            boxes.insert(r.realm, rbox);
         }
         Ok(RealmScene(boxes))
     }
 
-    /// Apply an INCREMENTAL AoI update (VU AoI, `ServerControlMsg::RealmSceneDelta`) — the realms that ENTERED
-    /// this client's view (`added`, their static shapes) and those that LEFT (`removed`, their ids) — returning
-    /// a NEW scene (ATOMIC: the caller swaps only on `Ok`, so a malformed delta leaves the live scene intact).
-    /// Added ambient shells (`finite_extent > MAX_RENDERABLE_EXTENT_M`) are skipped — the between-space is felt,
-    /// not framed (mirrors [`from_shapes`](Self::from_shapes)). Every box's nesting depth is RECOMPUTED over the
-    /// merged parent links, so a child whose delta arrived before its parent's (independent per-shard streams
-    /// carry no cross-stream order) nests correctly once the parent lands.
+    /// Apply an INCREMENTAL composed update (`ServerControlMsg::RealmSceneDelta`, same epoch —
+    /// the caller gates the epoch) — rows that ENTERED the drawn set (complete [`SceneRow`]s,
+    /// drawable on arrival) and realms that LEFT (`removed`) — returning a NEW scene (ATOMIC: the
+    /// caller swaps only on `Ok`, so a malformed delta leaves the live scene intact). A row whose
+    /// bag carries no drawable statement REMOVES any previous box for that realm (its look was
+    /// withdrawn — e.g. a body that fell out of the membership band keeps only its marker or
+    /// nothing). Every box's nesting depth is RECOMPUTED over the merged parent links.
     ///
     /// # Errors
-    /// [`SceneError::CycleOrDepthExceeded`] if the merged parent links form a cycle / over-deep chain (a server
-    /// bug) — the caller counts it and keeps the previous scene, never a partial mutation.
+    /// [`SceneError::CycleOrDepthExceeded`] if the merged parent links form a cycle / over-deep
+    /// chain (a server bug) — the caller counts it and keeps the previous scene, never a partial
+    /// mutation.
     pub fn with_delta(
         &self,
-        added: &[RealmShape],
+        added: &[SceneRow],
         removed: &[RealmId],
     ) -> Result<RealmScene, SceneError> {
         let mut boxes = self.0.clone();
         for realm in removed {
             boxes.remove(realm);
         }
-        for s in added {
-            if s.shape.finite_extent() > MAX_RENDERABLE_EXTENT_M {
-                continue; // ambient (non-renderable) shell — felt, not framed
+        for r in added {
+            match row_box(r, 0) {
+                Some(rbox) => {
+                    boxes.insert(r.realm, rbox); // depth recomputed below
+                }
+                None => {
+                    boxes.remove(&r.realm); // the drawable statement was withdrawn
+                }
             }
-            boxes.insert(
-                s.realm,
-                RealmBox {
-                    shape: shape_of(s.shape),
-                    frame: s.frame,
-                    // Same statement, same gap, as `from_shapes` — see `RealmBox::tier`.
-                    tier: stated_tier(s.frame),
-                    center: s.center,
-                    parent: s.parent,
-                    depth: 0, // recomputed below over the merged parent map
-                    color_rgba: color_for_realm(s.realm),
-                },
-            );
         }
-        // Recompute every box's depth over the merged parent links (the neighbourhood is bounded, so a full
-        // pass is cheap and covers the out-of-order-arrival case in one place).
+        // Recompute every box's depth over the merged parent links (the drawn set is bounded, so
+        // a full pass is cheap and covers the out-of-order-arrival case in one place).
         let parents: BTreeMap<RealmId, Option<RealmId>> =
             boxes.iter().map(|(r, b)| (*r, b.parent)).collect();
         for (realm, b) in &mut boxes {
             b.depth = depth_of(*realm, &parents)?;
         }
         Ok(RealmScene(boxes))
-    }
-
-    /// Project a `regions.json` dev-config (a JSON array of [`RealmRegion`] — the IDENTICAL forest the
-    /// shard computes from `worldgen::realm_regions_for(seed)` and plants into its `RealmRegions`) into the
-    /// render scene. The C-6b SINGLE-SOURCE for the playground `--realm-boxes`: the client draws EXACTLY the
-    /// sim's containment geometry (byte-identical to what the shard's detector evaluates). Deserializes then
-    /// delegates to [`RealmScene::from_regions`] — a malformed file and a duplicate/cyclic set both fail
-    /// LOUD ([`SceneError`]), never a silent empty scene.
-    ///
-    /// # Errors
-    /// [`SceneError::MalformedJson`] if the text is not a valid `RealmRegion` array;
-    /// [`SceneError::DuplicateRealm`] / [`SceneError::CycleOrDepthExceeded`] as [`RealmScene::from_regions`].
-    pub fn from_regions_json(json: &str) -> Result<RealmScene, SceneError> {
-        let regions = parse_regions(json)?;
-        RealmScene::from_regions(&regions)
     }
 
     /// The box for a realm, if present.
@@ -426,22 +299,38 @@ impl RealmScene {
     }
 }
 
-/// Parse a `boxes.json` text into a `Vec<RealmBoundary>`, mapping the serde error into an owned
-/// [`SceneError::MalformedJson`] — a monomorphic helper so the fallible decode + error map live
-/// here, off [`RealmScene::from_boxes_json`] (which stays a straight-line delegate).
-fn parse_boundaries(json: &str) -> Result<Vec<RealmBoundary>, SceneError> {
-    serde_json::from_str(json).map_err(|e| SceneError::MalformedJson(e.to_string()))
-}
-
-/// Parse a `regions.json` text into a `Vec<RealmRegion>`, mapping the serde error into an owned
-/// [`SceneError::MalformedJson`] — the twin of [`parse_boundaries`] for the C-6b seed-forest single-source
-/// (all fallible decode + error map here, so [`RealmScene::from_regions_json`] stays a straight-line delegate).
-fn parse_regions(json: &str) -> Result<Vec<RealmRegion>, SceneError> {
-    serde_json::from_str(json).map_err(|e| SceneError::MalformedJson(e.to_string()))
+/// One composed row's drawable box, or `None` when the row carries no drawable statement — THE
+/// DRAW LAW's presence gate in one monomorphic place (HR5: every branch here, off the two
+/// straight-line scene builders). `TAG_LOOK` wins (a running realm draws itself); an outline
+/// wider than `MAX_RENDERABLE_EXTENT_M` is an ambient shell (felt, not framed); else `TAG_LUMA`
+/// is the parent's point-of-light datum (a zero-radius point until Slice D's sprites); else —
+/// including unknown future tags, skipped by the TLV codec's own law — the row is not drawn.
+fn row_box(r: &SceneRow, depth: u8) -> Option<RealmBox> {
+    let (shape, body, luma) = if let Ok(outline) = vd_core::look::look_of(&r.bag) {
+        if outline.finite_extent() > MAX_RENDERABLE_EXTENT_M {
+            return None; // ambient (non-renderable) shell — felt, not framed
+        }
+        (shape_of(outline), BodyKind::Look, None)
+    } else if let Ok(datum) = vd_core::look::luma_of(&r.bag) {
+        (BoxShape::Sphere { r: 0.0 }, BodyKind::Marker, Some(datum))
+    } else {
+        return None; // no drawable statement — tracked, never drawn
+    };
+    Some(RealmBox {
+        shape,
+        body,
+        luma,
+        // §2.4: the tier rides the row's own pose frame, stated beside the value it counts.
+        tier: stated_tier(r.pose.frame),
+        center: r.pose.pos,
+        parent: r.parent,
+        depth,
+        color_rgba: color_for_realm(r.realm),
+    })
 }
 
 /// The nesting depth of `realm` by walking `parents` up to the root — a monomorphic, bounded
-/// map-lookup walk (all branching here, so [`RealmScene::from_boundaries`] stays a straight-line
+/// map-lookup walk (all branching here, so [`RealmScene::from_scene_rows`] stays a straight-line
 /// shim). Stops loud past [`MAX_NEST_DEPTH`] hops so a cycle or an over-deep chain cannot loop.
 fn depth_of(
     realm: RealmId,
@@ -474,34 +363,6 @@ fn shape_of(boundary: Boundary) -> BoxShape {
         Boundary::Aabb { half } => BoxShape::Box { half },
         // Obb orientation DEFERRED: render the axis-aligned bounding proxy for now.
         Boundary::Obb { half, orient: _ } => BoxShape::Box { half },
-    }
-}
-
-/// The realm's authoritative [`FrameRef`] — the frame its box's `center` is expressed in,
-/// so the render glue composes the box through the ONE `world_pos` chokepoint. A monomorphic helper
-/// (the realm-KIND destructure lives HERE in Tier-A, never in the Tier-B render feature path). An
-/// `Area` frame needs the PARENT planet seed (a `RealmId::Area` alone can't carry it): the parent is
-/// the boundary's `parent` link when it is a `Planet`, else `0` (a top-level area — defensive, no
-/// panic). A `Ship`'s frame is keyed by its hull entity; the rest map their seed directly.
-fn frame_of_realm(realm: RealmId, parent: Option<RealmId>) -> FrameRef {
-    match realm {
-        RealmId::Planet(planet_seed) => FrameRef::PlanetCentered { planet_seed },
-        RealmId::System(system_seed) => FrameRef::SystemSpace { system_seed },
-        RealmId::Ship(ship) => FrameRef::ShipLocal { ship },
-        RealmId::Station(station_seed) => FrameRef::StationLocal { station_seed },
-        RealmId::Area(area_seed) => FrameRef::AreaLocal {
-            planet_seed: parent_planet_seed(parent),
-            area_seed,
-        },
-    }
-}
-
-/// The parent planet's seed for an `Area` frame: the `parent` link when it names a `Planet`, else
-/// `0` (a top-level or non-planet-parented area — defensive). Monomorphic so both arms are covered.
-fn parent_planet_seed(parent: Option<RealmId>) -> u64 {
-    match parent {
-        Some(RealmId::Planet(seed)) => seed,
-        _ => 0,
     }
 }
 
@@ -768,91 +629,82 @@ fn push_tri(verts: &mut Vec<Vertex>, a: [f32; 3], b: [f32; 3], c: [f32; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::{DQuat, DVec3, I64Vec3};
-    use vd_core::EntityId;
-    use vd_core::geometry::{CrossEffect, RealmBoundary};
-    use vd_core::pose::{LatticePos, RealmId, Tier};
+    use glam::{DQuat, I64Vec3};
+    use vd_core::UniverseTick;
+    use vd_core::look::{look_bag, luma_bag};
+    use vd_core::pose::{FrameRef, StampedPose};
 
-    /// A `Shell` boundary for `realm` at `center`, radius `r`, parent `parent`.
-    fn shell_boundary(
+    /// ONE COMPOSED ROW — the whole client-facing contract in four fields (§2.4). Every fixture row
+    /// is stamped in one ORIGIN frame at one tick, which is the shape a composed level arrives in:
+    /// the client applies no transform and asks no source anything.
+    fn row(realm: RealmId, parent: Option<RealmId>, pos: DVec3, bag: Vec<u8>) -> SceneRow {
+        row_framed(
+            realm,
+            parent,
+            FrameRef::SystemSpace { system_seed: 7 },
+            pos,
+            bag,
+        )
+    }
+
+    /// [`row`] with the origin frame stated explicitly. The frame is the row's statement of the UNIT
+    /// its position's integer cell is counted in, so the tier pin has to be able to vary it.
+    fn row_framed(
         realm: RealmId,
-        center: DVec3,
-        r: f64,
         parent: Option<RealmId>,
-    ) -> RealmBoundary {
-        RealmBoundary::shell(
+        frame: FrameRef,
+        pos: DVec3,
+        bag: Vec<u8>,
+    ) -> SceneRow {
+        SceneRow {
             realm,
-            LatticePos::local(center),
-            r,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
             parent,
-            realm,
-            CrossEffect::Authority,
-        )
+            pose: StampedPose::at_rest(frame, pos, UniverseTick(100)),
+            bag,
+        }
     }
 
-    /// An `Aabb` boundary for `realm`, half-extents `half`, parent `parent`.
-    fn aabb_boundary(realm: RealmId, half: DVec3, parent: Option<RealmId>) -> RealmBoundary {
-        RealmBoundary::aabb(
-            realm,
-            LatticePos::local(DVec3::ZERO),
-            half,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            parent,
-            realm,
-            CrossEffect::Authority,
-        )
-        .expect("valid aabb band")
+    /// A `TAG_LOOK` bag for a spherical outline — what a RUNNING realm says about itself (SL3).
+    fn look_shell(r: f64) -> Vec<u8> {
+        look_bag(&Boundary::Shell { r })
     }
 
-    /// An `Obb` boundary for `realm` (orientation should be DROPPED at projection).
-    fn obb_boundary(realm: RealmId, half: DVec3) -> RealmBoundary {
-        RealmBoundary::boxed(
-            realm,
-            LatticePos::local(DVec3::ZERO),
-            half,
-            Some(DQuat::from_rotation_z(0.5)),
-            1.15,
-            1.30,
-            None,
-            realm,
-            CrossEffect::Interest,
-        )
-        .expect("valid obb band")
+    /// A `TAG_LOOK` bag for a box outline (a station / area volume).
+    fn look_aabb(half: DVec3) -> Vec<u8> {
+        look_bag(&Boundary::Aabb { half })
+    }
+
+    /// THE ONE WORLD (SL5) as a composed level: every region of the seed forest becomes a row
+    /// carrying its own outline. The client draws exactly what the world states — no second
+    /// generator, no reduced fixture universe.
+    fn one_world_level() -> Vec<SceneRow> {
+        vd_physics::worldgen::realm_regions_for(0)
+            .iter()
+            .map(|r| row(r.realm, r.parent, r.center.offset(), look_bag(&r.shape)))
+            .collect()
     }
 
     #[test]
     fn overlaid_moves_a_streamed_box_centre_keeps_static_and_empty_is_boot_identical() {
-        use vd_core::pose::StampedPose;
-        use vd_core::{TickId, UniverseTick};
+        use vd_core::TickId;
         use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram, SubId};
-        // A boot scene: Planet 1 (boot frame PlanetCentered) + Station 2, both boot-static.
-        let boot = RealmScene::from_boundaries(&[
-            shell_boundary(
+        // A level: Planet 1 + Station 2, both drawn from their own look statements.
+        let level = RealmScene::from_scene_rows(&[
+            row(
                 RealmId::Planet(1),
+                Some(RealmId::System(7)),
                 DVec3::new(20.0, 0.0, 0.0),
-                5.0,
-                Some(RealmId::System(7)),
+                look_shell(5.0),
             ),
-            shell_boundary(
+            row(
                 RealmId::Station(2),
-                DVec3::new(-25.0, 0.0, 0.0),
-                3.0,
                 Some(RealmId::System(7)),
+                DVec3::new(-25.0, 0.0, 0.0),
+                look_shell(3.0),
             ),
         ])
-        .expect("boot scene");
-        // Stream a LIVE pose for Planet 1 ONLY, authored in the PARENT (System) frame at a new offset.
+        .expect("the level projects");
+        // Stream a LIVE pose for Planet 1 ONLY, authored in the origin frame at a new offset.
         let streamed_frame = FrameRef::SystemSpace { system_seed: 7 };
         // A COARSE-CELL position: the cell is the half of the coordinate the client used to discard.
         let streamed_center = LatticePos::at(I64Vec3::new(4, -2, 9), DVec3::new(1.0e9, 5.0e8, 0.0));
@@ -864,10 +716,11 @@ mod tests {
                 frame_id: 1,
                 source_tick: TickId(1),
                 universe_tick: UniverseTick(10),
+                origin_epoch: 0,
                 realms: vec![RealmSnap {
                     realm: RealmId::Planet(1),
-                    // The edge HEAD (proto_minor 8): Planet 1's OWN frame; `pose.frame` below is the TAIL,
-                    // the frame its parent authored the placement in.
+                    // The edge HEAD: Planet 1's OWN frame; `pose.frame` below is the TAIL, the frame
+                    // its parent authored the placement in.
                     frame: FrameRef::PlanetCentered { planet_seed: 1 },
                     pose: StampedPose {
                         frame: streamed_frame,
@@ -879,44 +732,61 @@ mod tests {
                 }],
             },
         );
-        let scene = boot.overlaid_at(&view, f64::INFINITY);
-        // Planet 1 moved: its CENTRE is the streamed value, carrying the streamed COARSE CELL as well as
-        // the offset (dropping the cell here is the slice-5 defect), and the UNIT that cell is counted in
-        // is the one the streamed pose stated.
+        let scene = level.overlaid_at(&view, f64::INFINITY);
+        // Planet 1 moved: its CENTRE is the streamed value, carrying the streamed COARSE CELL as well
+        // as the offset (dropping the cell here is the slice-5 defect), and the UNIT that cell is
+        // counted in is the one the streamed pose stated.
         let moved = scene.get(RealmId::Planet(1)).expect("planet box");
         assert_eq!(moved.center, streamed_center);
         assert_eq!(moved.center.cell(), I64Vec3::new(4, -2, 9));
-        assert_eq!(moved.tier, crate::interp::stated_tier(streamed_frame));
-        // Its FRAME did NOT move, and that is the fix: the field means the realm's OWN frame for the
-        // whole session, not "the realm's own frame until a pose arrives and the author's frame after".
-        // The overlay used to overwrite it purely to get at the unit, which now travels on its own.
-        assert_eq!(
-            moved.frame,
-            boot.get(RealmId::Planet(1)).expect("boot planet").frame,
-            "the overlay does not touch the realm's own frame",
-        );
-        assert_eq!(moved.frame, FrameRef::PlanetCentered { planet_seed: 1 });
-        // Station 2 (not streamed) stays boot-static.
+        assert_eq!(moved.tier, stated_tier(streamed_frame));
+        // EVERYTHING THE ROW ITSELF AUTHORED SURVIVES the overlay — the live feed restates a
+        // placement, never an appearance (SL3: the parent says where, the realm says how it looks).
+        let stated = level.get(RealmId::Planet(1)).expect("the level's planet");
+        assert_eq!(moved.shape, stated.shape);
+        assert_eq!(moved.body, stated.body);
+        assert_eq!(moved.luma, stated.luma);
+        assert_eq!(moved.parent, stated.parent);
+        assert_eq!(moved.depth, stated.depth);
+        assert_eq!(moved.color_rgba, stated.color_rgba);
+        // Station 2 (not streamed) stays exactly as the level stated it.
         assert_eq!(
             scene.get(RealmId::Station(2)),
-            boot.get(RealmId::Station(2))
+            level.get(RealmId::Station(2))
         );
-        // An EMPTY view overlays to the boot scene byte-identical (the walk-scale case).
-        assert_eq!(boot.overlaid_at(&RealmView::default(), f64::INFINITY), boot);
+        // An EMPTY view overlays to the level scene byte-identical (the walk-scale case).
+        assert_eq!(
+            level.overlaid_at(&RealmView::default(), f64::INFINITY),
+            level
+        );
     }
 
     #[test]
-    fn shell_projects_to_a_sphere_and_aabb_to_a_box() {
-        let scene = RealmScene::from_boundaries(&[
-            shell_boundary(RealmId::System(7), DVec3::new(1.0, 2.0, 3.0), 1000.0, None),
-            aabb_boundary(RealmId::Station(9), DVec3::new(10.0, 20.0, 30.0), None),
+    fn a_look_bag_projects_a_shell_to_a_sphere_and_an_aabb_to_a_box() {
+        let scene = RealmScene::from_scene_rows(&[
+            row(
+                RealmId::System(7),
+                None,
+                DVec3::new(1.0, 2.0, 3.0),
+                look_shell(100.0),
+            ),
+            row(
+                RealmId::Station(9),
+                None,
+                DVec3::ZERO,
+                look_aabb(DVec3::new(10.0, 20.0, 30.0)),
+            ),
         ])
         .expect("projects");
         assert_eq!(scene.len(), 2);
         assert!(!scene.is_empty());
         let sys = scene.get(RealmId::System(7)).expect("system box");
-        assert_eq!(sys.shape, BoxShape::Sphere { r: 1000.0 });
+        assert_eq!(sys.shape, BoxShape::Sphere { r: 100.0 });
         assert_eq!(sys.center, LatticePos::local(DVec3::new(1.0, 2.0, 3.0)));
+        // A look body is the realm's OWN statement and carries no photometrics (a look never
+        // carries luma — the two statements are structurally exclusive).
+        assert_eq!(sys.body, BodyKind::Look);
+        assert_eq!(sys.luma, None);
         let stn = scene.get(RealmId::Station(9)).expect("station box");
         assert_eq!(
             stn.shape,
@@ -927,14 +797,15 @@ mod tests {
     }
 
     #[test]
-    fn obb_projects_to_an_axis_aligned_box_dropping_orientation() {
+    fn an_obb_look_projects_to_an_axis_aligned_box_dropping_orientation() {
         // The Obb-orient arm of shape_of: the orientation is deferred, so an Obb renders as its
         // axis-aligned bounding proxy (Box{half}).
-        let scene = RealmScene::from_boundaries(&[obb_boundary(
-            RealmId::Area(3),
-            DVec3::new(4.0, 5.0, 6.0),
-        )])
-        .expect("projects");
+        let bag = look_bag(&Boundary::Obb {
+            half: DVec3::new(4.0, 5.0, 6.0),
+            orient: DQuat::from_rotation_z(0.5),
+        });
+        let scene = RealmScene::from_scene_rows(&[row(RealmId::Area(3), None, DVec3::ZERO, bag)])
+            .expect("projects");
         let area = scene.get(RealmId::Area(3)).expect("area box");
         assert_eq!(
             area.shape,
@@ -945,74 +816,167 @@ mod tests {
     }
 
     #[test]
-    fn frame_of_realm_maps_every_kind_and_derives_the_area_parent_seed() {
-        use vd_core::entity_kind::EntityKind;
-        // Every realm KIND maps to its authoritative frame (the Tier-A destructure, all arms).
-        assert_eq!(
-            frame_of_realm(RealmId::Planet(4), None),
-            FrameRef::PlanetCentered { planet_seed: 4 }
-        );
-        assert_eq!(
-            frame_of_realm(RealmId::System(5), None),
-            FrameRef::SystemSpace { system_seed: 5 }
-        );
-        let hull = EntityId::pack(EntityKind::Player, 1, 1, 1);
-        assert_eq!(
-            frame_of_realm(RealmId::Ship(hull), None),
-            FrameRef::ShipLocal { ship: hull }
-        );
-        assert_eq!(
-            frame_of_realm(RealmId::Station(6), None),
-            FrameRef::StationLocal { station_seed: 6 }
-        );
-        // An Area under a Planet parent carries the parent's planet seed.
-        assert_eq!(
-            frame_of_realm(RealmId::Area(9), Some(RealmId::Planet(7))),
-            FrameRef::AreaLocal {
-                planet_seed: 7,
-                area_seed: 9
-            }
-        );
-        // An Area with a NON-planet parent (or no parent) defaults the planet seed to 0 — the
-        // `_ => 0` arm of parent_planet_seed.
-        assert_eq!(
-            frame_of_realm(RealmId::Area(9), Some(RealmId::System(3))),
-            FrameRef::AreaLocal {
-                planet_seed: 0,
-                area_seed: 9
-            }
-        );
-        assert_eq!(
-            frame_of_realm(RealmId::Area(9), None),
-            FrameRef::AreaLocal {
-                planet_seed: 0,
-                area_seed: 9
-            }
-        );
+    fn a_marker_row_is_a_zero_radius_point_carrying_its_photometrics() {
+        // THE DRAW LAW's second arm (owner decision 10): a SLEEPING realm cannot draw itself, so its
+        // parent states a point-of-light datum instead. The box is a tracked POINT — no placeholder
+        // mesh, because a sleeping star's drawn footprint at these distances IS sub-pixel.
+        let scene = RealmScene::from_scene_rows(&[
+            row(
+                RealmId::System(7),
+                None,
+                DVec3::new(3.0, 0.0, 0.0),
+                luma_bag(6, 0.000_972_607_424_178_079_9),
+            ),
+            row(
+                RealmId::Planet(7),
+                Some(RealmId::System(7)),
+                DVec3::ZERO,
+                look_shell(10.0),
+            ),
+        ])
+        .expect("projects");
+        let marker = scene.get(RealmId::System(7)).expect("marker box");
+        assert_eq!(marker.body, BodyKind::Marker);
+        assert_eq!(marker.luma, Some((6, 0.000_972_607_424_178_079_9)));
+        assert_eq!(marker.shape, BoxShape::Sphere { r: 0.0 });
+        // A marker is a full row otherwise: it holds its placement and its nesting like any other.
+        assert_eq!(marker.center, LatticePos::local(DVec3::new(3.0, 0.0, 0.0)));
+        assert_eq!(marker.depth, 0);
+        // The two authors are DISTINGUISHABLE on the box (the diagnosis surface reads exactly this).
+        let look = scene.get(RealmId::Planet(7)).expect("look box");
+        assert_eq!(look.body, BodyKind::Look);
+        assert_eq!(look.luma, None);
+        assert_ne!(look.body, marker.body);
     }
 
     #[test]
-    fn a_projected_box_carries_its_realm_frame() {
-        // The projection captures each realm's authoritative frame on its box (so the render glue
-        // composes through the chokepoint without reconstructing a FrameRef).
-        let scene = RealmScene::from_boundaries(&[shell_boundary(
-            RealmId::System(7),
-            DVec3::ZERO,
-            1000.0,
+    fn every_realm_kind_projects_through_the_same_row_and_no_frame_is_derived_here() {
+        // WHAT THIS REPLACES: the client used to DERIVE each realm's frame from its KIND (a match
+        // over Planet/System/Ship/Station/Area, plus an Area's parent-planet-seed lookup). That
+        // derivation is gone — a row states its own frame — so five different KINDS carrying the
+        // identical row project to identical boxes, and an Area needs no planet parent to exist.
+        let hull = vd_core::ids::EntityId(1);
+        let kinds = [
+            RealmId::Planet(4),
+            RealmId::System(5),
+            RealmId::Ship(hull),
+            RealmId::Station(6),
+            RealmId::Area(9),
+        ];
+        for realm in kinds {
+            let scene = RealmScene::from_scene_rows(&[row(
+                realm,
+                None,
+                DVec3::new(1.0, 0.0, 0.0),
+                look_shell(12.0),
+            )])
+            .expect("projects");
+            let b = scene.get(realm).expect("box");
+            assert_eq!(b.shape, BoxShape::Sphere { r: 12.0 });
+            assert_eq!(b.tier, Tier::Fine);
+            assert_eq!(b.center, LatticePos::local(DVec3::new(1.0, 0.0, 0.0)));
+            assert_eq!(b.depth, 0);
+            assert_eq!(b.body, BodyKind::Look);
+            assert_eq!(b.parent, None);
+        }
+        // An Area under a SYSTEM and an Area under a PLANET project identically — the old code had
+        // to ask what kind the parent was to fill in a planet seed; nothing asks now.
+        let under_system = RealmScene::from_scene_rows(&[
+            row(RealmId::System(3), None, DVec3::ZERO, look_shell(40.0)),
+            row(
+                RealmId::Area(9),
+                Some(RealmId::System(3)),
+                DVec3::ZERO,
+                look_shell(3.0),
+            ),
+        ])
+        .expect("projects");
+        let under_planet = RealmScene::from_scene_rows(&[
+            row(RealmId::Planet(7), None, DVec3::ZERO, look_shell(40.0)),
+            row(
+                RealmId::Area(9),
+                Some(RealmId::Planet(7)),
+                DVec3::ZERO,
+                look_shell(3.0),
+            ),
+        ])
+        .expect("projects");
+        let a = under_system
+            .get(RealmId::Area(9))
+            .expect("area under a system");
+        let p = under_planet
+            .get(RealmId::Area(9))
+            .expect("area under a planet");
+        assert_eq!(a.shape, p.shape);
+        assert_eq!(a.tier, p.tier);
+        assert_eq!(a.depth, p.depth);
+        assert_eq!(a.color_rgba, p.color_rgba);
+    }
+
+    /// THE UNIT IS STATED, NEVER INFERRED (§2.4) — the successor of the deleted `frame` field.
+    ///
+    /// A box used to carry the realm's own frame and the drawing side had to work the unit out from
+    /// it. Now every composed row states the space its position is measured in, and the tier is read
+    /// off THAT row: two rows for the same realm, identical but for the frame they were authored in,
+    /// draw a whole tier apart. What the unit then does to the drawn point is pinned by
+    /// `draw_center_multiplies_by_the_unit_it_was_told_not_by_one_it_picks`.
+    #[test]
+    fn a_boxs_unit_is_stated_by_its_own_rows_pose_frame() {
+        let galaxy = RealmScene::from_scene_rows(&[row_framed(
+            RealmId::System(1),
             None,
+            FrameRef::GalaxySpace,
+            DVec3::ZERO,
+            look_shell(100.0),
         )])
         .expect("projects");
+        let system = RealmScene::from_scene_rows(&[row(
+            RealmId::System(1),
+            None,
+            DVec3::ZERO,
+            look_shell(100.0),
+        )])
+        .expect("projects");
+        let coarse = galaxy.get(RealmId::System(1)).expect("galaxy-framed box");
+        let fine = system.get(RealmId::System(1)).expect("system-framed box");
+        assert_eq!(coarse.tier, Tier::Coarse);
+        assert_eq!(fine.tier, Tier::Fine);
+        assert_ne!(coarse.tier, fine.tier);
+        // The box reads exactly what `stated_tier` reads off the row's own frame — one statement,
+        // one reader, no context.
+        assert_eq!(coarse.tier, stated_tier(FrameRef::GalaxySpace));
         assert_eq!(
-            scene.get(RealmId::System(7)).expect("box").frame,
-            FrameRef::SystemSpace { system_seed: 7 }
+            fine.tier,
+            stated_tier(FrameRef::SystemSpace { system_seed: 7 })
         );
+        // Nothing else about the two rows differs, so nothing else can explain the difference.
+        assert_eq!(coarse.shape, fine.shape);
+        assert_eq!(coarse.center, fine.center);
     }
 
     #[test]
     fn a_duplicate_realm_id_is_rejected() {
-        let err = RealmScene::from_boundaries(&[
-            shell_boundary(RealmId::System(7), DVec3::ZERO, 100.0, None),
-            aabb_boundary(RealmId::System(7), DVec3::splat(5.0), None),
+        let err = RealmScene::from_scene_rows(&[
+            row(RealmId::System(7), None, DVec3::ZERO, look_shell(100.0)),
+            row(
+                RealmId::System(7),
+                None,
+                DVec3::ZERO,
+                look_aabb(DVec3::splat(5.0)),
+            ),
+        ])
+        .expect_err("duplicate realm must reject");
+        assert_eq!(err, SceneError::DuplicateRealm);
+    }
+
+    #[test]
+    fn a_duplicate_is_caught_over_the_whole_level_even_when_neither_row_is_drawn() {
+        // Pass 1 runs over the WHOLE level — drawn and merely-tracked rows alike — so a composer bug
+        // that repeats a realm is loud even when neither copy would have produced a box. (This is
+        // what the old JSON entrypoint's duplicate propagation guarded, on the lane that replaced it.)
+        let err = RealmScene::from_scene_rows(&[
+            row(RealmId::System(7), None, DVec3::ZERO, Vec::new()),
+            row(RealmId::System(7), None, DVec3::ZERO, Vec::new()),
         ])
         .expect_err("duplicate realm must reject");
         assert_eq!(err, SceneError::DuplicateRealm);
@@ -1024,11 +988,21 @@ mod tests {
         let station = RealmId::Station(1);
         let ship = RealmId::System(2); // any distinct realm id stands in for the middle
         let player = RealmId::Planet(3);
-        let scene = RealmScene::from_boundaries(&[
+        let scene = RealmScene::from_scene_rows(&[
             // Deliberately NOT in depth order, to prove order-independence.
-            aabb_boundary(player, DVec3::splat(1.0), Some(ship)),
-            aabb_boundary(station, DVec3::splat(100.0), None),
-            aabb_boundary(ship, DVec3::splat(10.0), Some(station)),
+            row(
+                player,
+                Some(ship),
+                DVec3::ZERO,
+                look_aabb(DVec3::splat(1.0)),
+            ),
+            row(station, None, DVec3::ZERO, look_aabb(DVec3::splat(100.0))),
+            row(
+                ship,
+                Some(station),
+                DVec3::ZERO,
+                look_aabb(DVec3::splat(10.0)),
+            ),
         ])
         .expect("projects");
         assert_eq!(scene.get(station).expect("station").depth, 0);
@@ -1038,12 +1012,13 @@ mod tests {
 
     #[test]
     fn a_parent_link_to_an_out_of_scene_realm_is_a_root() {
-        // The `Some(None-in-map)` terminal arm of depth_of: a parent not present in the set ends
-        // the chain (that realm is a root for depth purposes) — depth 0.
-        let scene = RealmScene::from_boundaries(&[aabb_boundary(
+        // The `Some(not-in-map)` terminal arm of depth_of: a parent not present in the level ends the
+        // chain (that realm is a root for depth purposes) — depth 0.
+        let scene = RealmScene::from_scene_rows(&[row(
             RealmId::Station(5),
-            DVec3::splat(1.0),
-            Some(RealmId::System(99)), // System(99) is NOT in the set
+            Some(RealmId::System(99)), // System(99) is NOT in the level
+            DVec3::ZERO,
+            look_aabb(DVec3::splat(1.0)),
         )])
         .expect("projects");
         assert_eq!(scene.get(RealmId::Station(5)).expect("box").depth, 0);
@@ -1051,14 +1026,40 @@ mod tests {
 
     #[test]
     fn a_parent_cycle_is_a_bounded_loud_error() {
-        // A ⇄ B cycle: the walk must stop loud at MAX_NEST_DEPTH, never loop forever (H7 guard).
+        // A ⇄ B cycle among DRAWN rows: the pass-2 depth walk stops loud at MAX_NEST_DEPTH and
+        // from_scene_rows propagates it (the `depth_of(..)?` Err arm — distinct from pass 1's
+        // DuplicateRealm, which returns BEFORE the walk). Never an unbounded loop (H7 guard).
         let a = RealmId::System(1);
         let b = RealmId::System(2);
-        let err = RealmScene::from_boundaries(&[
-            aabb_boundary(a, DVec3::splat(1.0), Some(b)),
-            aabb_boundary(b, DVec3::splat(1.0), Some(a)),
+        let err = RealmScene::from_scene_rows(&[
+            row(a, Some(b), DVec3::ZERO, look_aabb(DVec3::splat(1.0))),
+            row(b, Some(a), DVec3::ZERO, look_aabb(DVec3::splat(1.0))),
         ])
         .expect_err("a cycle must reject");
+        assert_eq!(err, SceneError::CycleOrDepthExceeded);
+    }
+
+    #[test]
+    fn an_over_deep_parent_chain_stops_loud_at_the_ceiling() {
+        // The OTHER way past the ceiling: an acyclic but pathologically deep chain. Same bounded,
+        // loud stop — the walk is capped by hops, not by whether it ever revisits a realm.
+        const CHAIN: u64 = MAX_NEST_DEPTH as u64 + 2;
+        let level: Vec<SceneRow> = (0..CHAIN)
+            .map(|i| {
+                let parent = if i + 1 < CHAIN {
+                    Some(RealmId::System(i + 1))
+                } else {
+                    None
+                };
+                row(
+                    RealmId::System(i),
+                    parent,
+                    DVec3::ZERO,
+                    look_aabb(DVec3::splat(1.0)),
+                )
+            })
+            .collect();
+        let err = RealmScene::from_scene_rows(&level).expect_err("an over-deep chain must reject");
         assert_eq!(err, SceneError::CycleOrDepthExceeded);
     }
 
@@ -1156,7 +1157,8 @@ mod tests {
     fn draw_center_carries_the_integer_cell_not_just_the_metre_offset() {
         let rbox = RealmBox {
             shape: BoxShape::Sphere { r: 1.0 },
-            frame: FrameRef::SystemSpace { system_seed: 1 },
+            body: BodyKind::Look,
+            luma: None,
             tier: Tier::Fine,
             center: LatticePos::at(I64Vec3::new(3, 0, 0), DVec3::new(0.25, 0.0, 0.0)),
             parent: None,
@@ -1173,16 +1175,16 @@ mod tests {
     /// THE SHIPPER DECIDES THE UNIT, on the box lane too — the twin of `view.rs`'s
     /// `world_pos_multiplies_by_the_unit_it_was_told_not_by_one_it_picks`.
     ///
-    /// Two boxes with the IDENTICAL frame label and the IDENTICAL integer cell, differing only in the
-    /// unit stated for that cell, must draw a whole tier apart. A `draw_center` that read the unit off
-    /// `frame` (which answers `Fine` for every in-system frame) would return the same point for both.
+    /// Two boxes with the IDENTICAL integer cell, differing only in the unit stated for that cell, must
+    /// draw a whole tier apart. A `draw_center` that looked the unit up for itself at drawing time would
+    /// return the same point for both.
     #[test]
     fn draw_center_multiplies_by_the_unit_it_was_told_not_by_one_it_picks() {
         use vd_core::pose::{COARSE_CELL_EDGE_M, FINE_CELL_EDGE_M};
         let at = |tier| RealmBox {
             shape: BoxShape::Sphere { r: 1.0 },
-            // The SAME label on both, so nothing about the label can explain the difference.
-            frame: FrameRef::SystemSpace { system_seed: 1 },
+            body: BodyKind::Look,
+            luma: None,
             tier,
             center: LatticePos::at(I64Vec3::new(1, 0, 0), DVec3::ZERO),
             parent: None,
@@ -1199,48 +1201,11 @@ mod tests {
         );
     }
 
-    /// THE TRIPWIRE FOR THE ONE REMAINING GUESS, stated so it can fail rather than left as prose.
-    ///
-    /// A `RealmShape` off the reliable scene lane carries the realm's OWN frame and a `center` measured
-    /// in the frame of whoever the message was ADDRESSED to, and names that addressee nowhere — it has
-    /// no counterpart to the TAIL that `RealmSnap` gained at proto_minor 8. So `from_shapes` has to take
-    /// the unit from the realm's own frame, and that is right only while the two are the same tier.
-    ///
-    /// They are, today, and that is a property of the drawn set rather than luck: every frame except
-    /// `GalaxySpace` is `Tier::Fine`, and the only realm whose own frame is `GalaxySpace` is an ambient
-    /// shell whose extent exceeds `MAX_RENDERABLE_EXTENT_M` and is therefore never drawn. This asserts
-    /// exactly that, over the real seed forest, so the day a `Tier::Coarse` frame reaches a drawn box —
-    /// i.e. the day a player stands in the galaxy realm and its systems stream in — this fails and says
-    /// what to do about it, instead of every star silently landing 10^19 times too close.
-    #[test]
-    fn a_static_shape_and_a_streamed_pose_agree_on_the_unit_only_because_every_drawn_realm_is_one_tier()
-     {
-        let regions = vd_physics::worldgen::realm_regions_for(0);
-        let scene = RealmScene::from_regions(&regions).expect("the seed forest projects");
-        assert!(!scene.is_empty(), "a vacuous scene would assert nothing");
-        for (realm, rbox) in scene.iter() {
-            assert_eq!(
-                rbox.tier,
-                Tier::Fine,
-                "{realm:?} is drawn at a unit taken from its own frame; the wire states no other, so a \
-                 non-Fine drawn realm means RealmShape now needs the addressee's frame on it",
-            );
-        }
-        // WHY it holds, measured rather than argued: the COARSE tier is not live anywhere yet. The only
-        // frame that answers Coarse is `GalaxySpace`, and the seed forest produces no region carrying it
-        // — every realm from the Universe root down is framed as an in-system `Tier::Fine` space. When
-        // the galaxy tier does light up (P10 warp), this count stops being zero and the assertion above
-        // is what has to be answered first.
-        assert_eq!(stated_tier(FrameRef::GalaxySpace), Tier::Coarse);
-        assert_eq!(
-            regions
-                .iter()
-                .filter(|r| stated_tier(r.frame) == Tier::Coarse)
-                .count(),
-            0,
-            "no realm is authored on the COARSE lattice yet, which is why one unit fits the whole scene",
-        );
-    }
+    // RETIRED (Slice C1 flag day, owner-approved 2026-08-15/16 items 1/9/10 — window_lane.md §2.4):
+    // the tier-agreement pin test guarded the shape lane's tier-inference gap ("a static shape states
+    // no tail"). The gap is CLOSED structurally: every composed row states its unit on its own
+    // pose.frame, read per row. The RealmBox tier fields are pinned per-row by
+    // `a_boxs_unit_is_stated_by_its_own_rows_pose_frame`.
 
     #[test]
     fn box_lowers_to_one_cuboid_prim_scaled_by_the_half_extents() {
@@ -1248,7 +1213,8 @@ mod tests {
             shape: BoxShape::Box {
                 half: DVec3::new(2.0, 3.0, 4.0),
             },
-            frame: FrameRef::SystemSpace { system_seed: 1 },
+            body: BodyKind::Look,
+            luma: None,
             tier: Tier::Fine,
             center: LatticePos::local(DVec3::new(1.0, 0.0, 0.0)),
             parent: None,
@@ -1283,7 +1249,8 @@ mod tests {
     fn sphere_lowers_to_one_prim_of_unit_positions_scaled_by_radius() {
         let rbox = RealmBox {
             shape: BoxShape::Sphere { r: 5.0 },
-            frame: FrameRef::SystemSpace { system_seed: 1 },
+            body: BodyKind::Look,
+            luma: None,
             tier: Tier::Fine,
             center: LatticePos::local(DVec3::ZERO),
             parent: None,
@@ -1310,9 +1277,19 @@ mod tests {
 
     #[test]
     fn iter_yields_boxes_in_realmid_order() {
-        let scene = RealmScene::from_boundaries(&[
-            aabb_boundary(RealmId::System(9), DVec3::splat(1.0), None),
-            aabb_boundary(RealmId::Planet(2), DVec3::splat(1.0), None),
+        let scene = RealmScene::from_scene_rows(&[
+            row(
+                RealmId::System(9),
+                None,
+                DVec3::ZERO,
+                look_aabb(DVec3::splat(1.0)),
+            ),
+            row(
+                RealmId::Planet(2),
+                None,
+                DVec3::ZERO,
+                look_aabb(DVec3::splat(1.0)),
+            ),
         ])
         .expect("projects");
         let realms: Vec<RealmId> = scene.iter().map(|(r, _)| r).collect();
@@ -1321,71 +1298,95 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_boundary_set_projects_to_an_empty_scene() {
-        let scene = RealmScene::from_boundaries(&[]).expect("empty projects");
+    fn an_empty_level_projects_to_an_empty_scene() {
+        let scene = RealmScene::from_scene_rows(&[]).expect("an empty level projects");
         assert!(scene.is_empty());
         assert_eq!(scene.len(), 0);
-        assert!(scene.get(RealmId::System(1)).is_none());
+        assert_eq!(scene.get(RealmId::System(1)), None);
         assert_eq!(scene, RealmScene::default());
     }
 
     #[test]
-    fn from_boxes_json_loads_the_same_scene_as_the_boundaries_it_serializes() {
-        // The dev-config path is SINGLE-SOURCED with the shard plant: the same `Vec<RealmBoundary>`
-        // serialized to JSON must load to the byte-identical scene `from_boundaries` builds.
-        let boundaries = vec![
-            shell_boundary(RealmId::System(7), DVec3::new(1.0, 2.0, 3.0), 1000.0, None),
-            aabb_boundary(RealmId::Station(9), DVec3::new(4.0, 5.0, 6.0), None),
+    fn a_level_projects_deterministically_and_the_same_rows_as_a_delta_agree() {
+        // WHAT THIS REPLACES: the deleted `boxes.json` loader's "the dev-config load matches the
+        // plant" pin. There is one lane now, so the equivalent claim is that the lane is a FUNCTION —
+        // the same rows always project to the same scene — and that the level and delta entrypoints
+        // share the one row projection rather than each having their own.
+        let rows = vec![
+            row(
+                RealmId::System(7),
+                None,
+                DVec3::new(1.0, 2.0, 3.0),
+                look_shell(100.0),
+            ),
+            row(
+                RealmId::Station(9),
+                Some(RealmId::System(7)),
+                DVec3::new(4.0, 5.0, 6.0),
+                look_aabb(DVec3::splat(2.0)),
+            ),
         ];
-        let json = serde_json::to_string(&boundaries).expect("serialize boundaries");
-        let from_json = RealmScene::from_boxes_json(&json).expect("loads");
-        let from_vec = RealmScene::from_boundaries(&boundaries).expect("projects");
-        assert_eq!(from_json, from_vec, "the dev-config load matches the plant");
+        let once = RealmScene::from_scene_rows(&rows).expect("projects");
+        let twice = RealmScene::from_scene_rows(&rows).expect("projects");
+        assert_eq!(once, twice, "the projection is a function of the rows");
+        let as_delta = RealmScene::default()
+            .with_delta(&rows, &[])
+            .expect("the same rows apply as a delta");
+        assert_eq!(as_delta, once, "one row projection, two entrypoints");
         // And it really carries the boxes (not a silent empty).
-        assert_eq!(from_json.len(), 2);
+        assert_eq!(once.len(), 2);
         assert_eq!(
-            from_json.get(RealmId::System(7)).expect("system").shape,
-            BoxShape::Sphere { r: 1000.0 }
+            once.get(RealmId::System(7)).expect("system").shape,
+            BoxShape::Sphere { r: 100.0 }
+        );
+        assert_eq!(once.get(RealmId::Station(9)).expect("station").depth, 1);
+    }
+
+    #[test]
+    fn a_bag_with_no_drawable_statement_is_tracked_but_never_drawn() {
+        // WHAT THIS REPLACES: the deleted JSON loader's loud malformed-input rejection. The composed
+        // lane's law is the opposite and stronger — a row whose bag states nothing drawable is not an
+        // error, it is simply NOT DRAWN (every pixel has exactly one lawful author, so an absent
+        // statement can never be guessed at). An EMPTY bag and a CORRUPT one both land there; the
+        // unknown-tag case rides the TLV codec's own skip law (pinned in `vd_core::look`).
+        let scene = RealmScene::from_scene_rows(&[
+            row(RealmId::System(7), None, DVec3::ZERO, Vec::new()),
+            row(
+                RealmId::Planet(7),
+                None,
+                DVec3::ZERO,
+                vec![0xFF, 0x00, 0x7F],
+            ),
+            row(RealmId::Station(9), None, DVec3::ZERO, look_shell(5.0)),
+        ])
+        .expect("a level of undrawable rows is not an error");
+        assert_eq!(
+            scene.get(RealmId::System(7)),
+            None,
+            "an empty bag draws nothing"
+        );
+        assert_eq!(
+            scene.get(RealmId::Planet(7)),
+            None,
+            "a corrupt bag draws nothing — never a guessed shape"
+        );
+        assert_eq!(scene.len(), 1, "only the row that stated a look is drawn");
+        assert_eq!(
+            scene.get(RealmId::Station(9)).expect("the drawn row").shape,
+            BoxShape::Sphere { r: 5.0 }
         );
     }
 
     #[test]
-    fn from_boxes_json_rejects_malformed_json_loud() {
-        // Not JSON at all → a MalformedJson error carrying the serde message (never a silent empty).
-        // Discriminant equality (not `assert!(matches!(..))`, whose `_ => false` arm is an
-        // uncoverable region — CLAUDE.md HR5) to check the variant without the (varying) payload.
-        let malformed = std::mem::discriminant(&SceneError::MalformedJson(String::new()));
-        let err =
-            RealmScene::from_boxes_json("{not valid json").expect_err("malformed must reject");
-        assert_eq!(std::mem::discriminant(&err), malformed, "got {err:?}");
-        // Valid JSON but the WRONG shape (an object, not a RealmBoundary array) also rejects.
-        let err = RealmScene::from_boxes_json("{}").expect_err("wrong shape must reject");
-        assert_eq!(std::mem::discriminant(&err), malformed, "got {err:?}");
-    }
-
-    #[test]
-    fn from_boxes_json_propagates_a_duplicate_realm_from_the_projection() {
-        // A well-formed JSON array that still violates the projection contract (duplicate realm)
-        // surfaces the SAME `from_boundaries` error through the JSON entrypoint.
-        let boundaries = vec![
-            shell_boundary(RealmId::System(7), DVec3::ZERO, 100.0, None),
-            aabb_boundary(RealmId::System(7), DVec3::splat(5.0), None),
-        ];
-        let json = serde_json::to_string(&boundaries).expect("serialize");
-        let err = RealmScene::from_boxes_json(&json).expect_err("duplicate must reject");
-        assert_eq!(err, SceneError::DuplicateRealm);
-    }
-
-    #[test]
-    fn from_regions_draws_only_finite_leaf_realms_and_skips_the_ambient_shells() {
-        // C-6b SINGLE-SOURCE: the client's scene is projected from the SAME seed forest the sim's
-        // containment detector consumes (`worldgen::realm_regions_for`). The finite realms are drawn —
-        // System 7/8 (r=40), Planet 7 (r=10), Station 7 (half=5), Area 7 (half=3) — AND the Galaxy (r=180)
-        // as the CONTAINING box around the systems, so an entity in the between-space is visibly still
-        // inside a realm (never orphaned). Only the ~unbounded Universe (r=1e9) is SKIPPED (extent > thresh).
-        let regions = vd_physics::worldgen::realm_regions_for(0);
-        let scene = RealmScene::from_regions(&regions).expect("the seed forest projects");
-        // The finite renderable realms are present.
+    fn the_one_worlds_level_draws_the_finite_realms_and_skips_the_ambient_shells() {
+        // SL5 SINGLE SOURCE: the client's scene is projected from rows carrying the SAME seed forest
+        // the sim's containment detector consumes. The finite realms are drawn — System 7/8 (r=40),
+        // Planet 7 (r=10), Station 7 (half=5), Area 7 (half=3) — AND the Galaxy (r=180) as the
+        // CONTAINING box around the systems, so an entity in the between-space is visibly still inside
+        // a realm (never orphaned). Only the ~unbounded Universe (r=1e9) is SKIPPED (ambient: felt,
+        // not framed).
+        let scene =
+            RealmScene::from_scene_rows(&one_world_level()).expect("the one world projects");
         assert!(scene.get(RealmId::System(7)).is_some(), "System 7 renders");
         assert!(scene.get(RealmId::System(8)).is_some(), "System 8 renders");
         assert!(scene.get(RealmId::Planet(7)).is_some(), "Planet 7 renders");
@@ -1394,16 +1395,14 @@ mod tests {
             "Station 7 renders"
         );
         assert!(scene.get(RealmId::Area(7)).is_some(), "Area 7 renders");
-        // The Galaxy IS drawn now — the CONTAINING box (a Sphere of its radius) at depth 1, enclosing both
-        // systems; an entity in the gap between them is visibly inside it (never orphaned).
         let galaxy = scene
             .get(RealmId::System(1))
             .expect("the Galaxy renders as the containing box");
         assert_eq!(galaxy.shape, BoxShape::Sphere { r: 180.0 });
         assert_eq!(galaxy.depth, 1, "the Galaxy is depth 1 (Universe ⊃ Galaxy)");
-        // Only the ~unbounded ambient Universe root is SKIPPED (felt, not framed).
-        assert!(
-            scene.get(RealmId::System(0)).is_none(),
+        assert_eq!(
+            scene.get(RealmId::System(0)),
+            None,
             "the Universe ambient root is NOT rendered"
         );
         assert_eq!(
@@ -1411,30 +1410,25 @@ mod tests {
             6,
             "the 5 finite leaf realms + the Galaxy containing box"
         );
-        // A rendered System keeps its TRUE nesting depth (Universe 0 ⊃ Galaxy 1 ⊃ System 2), even though
-        // its Galaxy parent is skipped from the drawn set — depth is over the FULL forest.
+        // A rendered System keeps its TRUE nesting depth (Universe 0 ⊃ Galaxy 1 ⊃ System 2), even
+        // though its Universe ancestor is skipped from the drawn set — depth is over the FULL level.
         assert_eq!(
             scene.get(RealmId::System(7)).expect("system 7 box").depth,
             2,
-            "System 7 is depth 2 (Universe ⊃ Galaxy ⊃ System) even with the ambient parents skipped"
+            "System 7 is depth 2 even with the ambient parent skipped"
         );
         assert_eq!(
             scene.get(RealmId::Planet(7)).expect("planet 7 box").depth,
             3,
             "Planet 7 is depth 3 (… ⊃ System ⊃ Planet)"
         );
-        // A System renders as a sphere of its SOI radius; the box carries the realm's own frame.
         assert_eq!(
             scene.get(RealmId::System(7)).expect("system 7 box").shape,
             BoxShape::Sphere { r: 40.0 }
         );
-        assert_eq!(
-            scene.get(RealmId::System(7)).expect("system 7 box").frame,
-            FrameRef::SystemSpace { system_seed: 7 }
-        );
-        // The Aabb→Box projection is the "client render is FREE" proof: a Station/Area PLANTED as a first-
-        // class box realm draws — with ZERO station/area-specific render code — as a Box of its half-extents
-        // at its true forest depth (Station 3 under System 7; Area 4 under Planet 7, the deepest realm).
+        // The Aabb→Box projection is the "client render is FREE" proof: a Station/Area PLANTED as a
+        // first-class box realm draws — with ZERO station/area-specific render code — as a Box of its
+        // half-extents at its true forest depth.
         let station = scene.get(RealmId::Station(7)).expect("station 7 box");
         assert_eq!(
             station.shape,
@@ -1445,11 +1439,6 @@ mod tests {
         assert_eq!(
             station.depth, 3,
             "Station 7 is depth 3 (… ⊃ System ⊃ Station)"
-        );
-        assert_eq!(
-            station.frame,
-            FrameRef::StationLocal { station_seed: 7 },
-            "the Station box carries its own StationLocal frame"
         );
         let area = scene.get(RealmId::Area(7)).expect("area 7 box");
         assert_eq!(
@@ -1462,102 +1451,63 @@ mod tests {
             area.depth, 4,
             "Area 7 is depth 4 (… ⊃ Planet ⊃ Area) — the deepest realm"
         );
-        assert_eq!(
-            area.frame,
-            FrameRef::AreaLocal {
-                planet_seed: 7,
-                area_seed: 7
-            },
-            "the Area box carries its AreaLocal frame (parent planet seed 7 from the Planet parent link)"
-        );
     }
 
     #[test]
-    fn from_regions_json_loads_the_same_scene_as_the_seed_forest_it_serializes() {
-        // The playground `--realm-boxes` single-source: the seed forest serialized to `regions.json` loads
-        // to the byte-identical scene `from_regions` builds directly — the client draws EXACTLY the sim's
-        // containment geometry.
+    fn the_drawn_set_is_exactly_the_finite_subset_of_the_one_worlds_forest() {
+        // WHAT THIS REPLACES: the deleted `regions.json` single-source pin. The claim survives the
+        // lane change — the client draws EXACTLY the sim's geometry — but it is now stated as a
+        // property computed from the forest rather than a file round-trip: a region is drawn iff its
+        // own outline fits the renderable extent, with no per-realm list anywhere.
         let regions = vd_physics::worldgen::realm_regions_for(0);
-        let json = serde_json::to_string(&regions).expect("serialize regions");
-        let from_json = RealmScene::from_regions_json(&json).expect("loads");
-        let from_vec = RealmScene::from_regions(&regions).expect("projects");
-        assert_eq!(
-            from_json, from_vec,
-            "the regions.json load matches the plant"
-        );
-        assert_eq!(
-            from_json.len(),
-            6,
-            "the 5 finite leaf realms + the Galaxy containing box"
-        );
+        let scene = RealmScene::from_scene_rows(&one_world_level()).expect("projects");
+        let mut expected: Vec<RealmId> = regions
+            .iter()
+            .filter(|r| r.shape.finite_extent() <= MAX_RENDERABLE_EXTENT_M)
+            .map(|r| r.realm)
+            .collect();
+        expected.sort_unstable();
+        let drawn: Vec<RealmId> = scene.iter().map(|(realm, _)| realm).collect();
+        assert_eq!(drawn, expected, "the drawn set is the finite subset");
+        assert!(!drawn.is_empty(), "a vacuous scene would assert nothing");
     }
 
     #[test]
-    fn from_regions_json_rejects_malformed_json_loud() {
-        // Not a RealmRegion array → a MalformedJson error (never a silent empty). Discriminant equality
-        // (HR5: matches!'s _ => false arm is uncoverable).
-        let malformed = std::mem::discriminant(&SceneError::MalformedJson(String::new()));
-        let err =
-            RealmScene::from_regions_json("{not valid json").expect_err("malformed must reject");
-        assert_eq!(std::mem::discriminant(&err), malformed, "got {err:?}");
-    }
-
-    #[test]
-    fn from_regions_rejects_a_duplicate_realm_in_the_forest() {
-        // A duplicate realm in the forest is a generator bug — rejected LOUD (not silently keeping the
-        // first). Covers the DuplicateRealm arm of from_regions.
-        let mut regions = vd_physics::worldgen::realm_regions_for(0);
-        let dup = *regions.first().expect("non-empty forest");
-        regions.push(dup);
-        let err = RealmScene::from_regions(&regions).expect_err("a duplicate realm must reject");
+    fn a_duplicate_realm_in_the_one_worlds_level_rejects() {
+        // A repeated realm in the composed level is a composer bug — rejected LOUD (never silently
+        // keeping whichever copy the input happened to list first).
+        let mut level = one_world_level();
+        level.push(level.first().expect("a non-empty world").clone());
+        let err = RealmScene::from_scene_rows(&level).expect_err("a duplicate realm must reject");
         assert_eq!(err, SceneError::DuplicateRealm);
     }
 
     #[test]
-    fn from_regions_rejects_a_cyclic_renderable_chain_loud() {
-        // A FINITE (renderable) region whose parent chain CYCLES → the pass-2 depth walk stops loud at
-        // MAX_NEST_DEPTH and `from_regions` propagates it (the `depth_of(..)?` Err arm — distinct from
-        // pass-1's DuplicateRealm, which returns BEFORE the depth walk). Mutate the seed forest so
-        // System 7 ⇄ System 8 (both finite, r=40) point at each other: no duplicate (pass 1 is clean), so
-        // the cycle is caught only in the depth walk of a renderable region — exactly the `?` under test.
-        let mut regions = vd_physics::worldgen::realm_regions_for(0);
-        regions
-            .iter_mut()
-            .find(|r| r.realm == RealmId::System(7))
-            .expect("System 7 in the seed forest")
-            .parent = Some(RealmId::System(8));
-        regions
-            .iter_mut()
-            .find(|r| r.realm == RealmId::System(8))
-            .expect("System 8 in the seed forest")
-            .parent = Some(RealmId::System(7));
-        let err =
-            RealmScene::from_regions(&regions).expect_err("a cyclic renderable chain must reject");
-        assert_eq!(err, SceneError::CycleOrDepthExceeded);
-    }
-
-    /// A wire render shape at origin with a `Shell{r}` boundary — `r` large ⇒ an ambient (skipped) shell,
-    /// small ⇒ a finite drawn leaf.
-    fn shp(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmShape {
-        RealmShape {
-            realm,
-            frame: FrameRef::SystemSpace { system_seed: 0 },
-            center: LatticePos::local(DVec3::ZERO),
-            shape: Boundary::Shell { r },
-            parent,
-        }
-    }
-
-    #[test]
     fn with_delta_adds_finite_skips_ambient_and_removes() {
-        // VU AoI: a delta ADDS the realms that entered view (finite leaves framed, ambient shells felt-not-
-        // framed) and REMOVES those that left. Atomic — returns a new scene the caller swaps.
-        let base = RealmScene::from_shapes(&[shp(RealmId::System(7), None, 40.0)]).expect("base");
+        // VU AoI: a delta ADDS the realms that entered view (finite outlines framed, ambient shells
+        // felt-not-framed) and REMOVES those that left. Atomic — returns a new scene the caller swaps.
+        let base = RealmScene::from_scene_rows(&[row(
+            RealmId::System(7),
+            None,
+            DVec3::ZERO,
+            look_shell(40.0),
+        )])
+        .expect("base");
         let added = base
             .with_delta(
                 &[
-                    shp(RealmId::Planet(7), Some(RealmId::System(7)), 10.0), // finite leaf — drawn
-                    shp(RealmId::System(0), None, 1_000_000_000.0), // ambient shell — skipped
+                    row(
+                        RealmId::Planet(7),
+                        Some(RealmId::System(7)),
+                        DVec3::new(10.0, 0.0, 0.0),
+                        look_shell(10.0),
+                    ), // finite outline — drawn
+                    row(
+                        RealmId::System(0),
+                        None,
+                        DVec3::ZERO,
+                        look_shell(1_000_000_000.0),
+                    ), // ambient shell — skipped
                 ],
                 &[],
             )
@@ -1566,8 +1516,9 @@ mod tests {
             added.get(RealmId::Planet(7)).is_some(),
             "the entered leaf is framed"
         );
-        assert!(
-            added.get(RealmId::System(0)).is_none(),
+        assert_eq!(
+            added.get(RealmId::System(0)),
+            None,
             "the ambient shell is felt, not framed"
         );
         assert_eq!(added.len(), 2, "System 7 (base) + Planet 7 (entered)");
@@ -1575,20 +1526,72 @@ mod tests {
         let removed = added
             .with_delta(&[], &[RealmId::Planet(7)])
             .expect("a remove applies");
-        assert!(
-            removed.get(RealmId::Planet(7)).is_none(),
+        assert_eq!(
+            removed.get(RealmId::Planet(7)),
+            None,
             "the departed realm is removed"
         );
         assert_eq!(removed.len(), 1);
     }
 
     #[test]
+    fn with_delta_withdraws_a_box_when_its_row_stops_stating_one() {
+        // THE WITHDRAWAL ARM. A row can arrive for a realm the client is already drawing and state
+        // nothing drawable — the realm went to sleep, so its own outline is gone and no parent datum
+        // replaced it. The previous box must go with the statement that authored it: keeping it would
+        // leave a picture on screen that nothing on the wire claims any more.
+        let drawn = RealmScene::from_scene_rows(&[row(
+            RealmId::Planet(7),
+            None,
+            DVec3::new(10.0, 0.0, 0.0),
+            look_shell(10.0),
+        )])
+        .expect("the look is drawn");
+        assert_eq!(drawn.len(), 1);
+        let withdrawn = drawn
+            .with_delta(
+                &[row(
+                    RealmId::Planet(7),
+                    None,
+                    DVec3::new(10.0, 0.0, 0.0),
+                    Vec::new(),
+                )],
+                &[],
+            )
+            .expect("a withdrawal applies");
+        assert_eq!(withdrawn.get(RealmId::Planet(7)), None);
+        assert!(withdrawn.is_empty());
+        // A row that states a MARKER instead is a replacement, not a withdrawal — the sleeping realm
+        // keeps a point of light. (Same arm of with_delta, the other outcome.)
+        let marked = drawn
+            .with_delta(
+                &[row(
+                    RealmId::Planet(7),
+                    None,
+                    DVec3::new(10.0, 0.0, 0.0),
+                    luma_bag(3, 1.5),
+                )],
+                &[],
+            )
+            .expect("a marker applies");
+        assert_eq!(
+            marked.get(RealmId::Planet(7)).expect("marker box").body,
+            BodyKind::Marker
+        );
+    }
+
+    #[test]
     fn with_delta_recomputes_depth_when_a_parent_arrives_after_its_child() {
-        // Independent per-shard streams carry no cross-stream order: a child's delta can land BEFORE its
+        // Independent streams carry no cross-stream order: a child's delta can land BEFORE its
         // parent's. Depth is recomputed each delta, so once the parent arrives the child nests correctly.
         let child_first = RealmScene::default()
             .with_delta(
-                &[shp(RealmId::Planet(7), Some(RealmId::System(7)), 10.0)],
+                &[row(
+                    RealmId::Planet(7),
+                    Some(RealmId::System(7)),
+                    DVec3::ZERO,
+                    look_shell(10.0),
+                )],
                 &[],
             )
             .expect("the child arrives first");
@@ -1598,7 +1601,10 @@ mod tests {
             "no parent in the scene yet ⇒ the child renders as a root (depth 0)"
         );
         let with_parent = child_first
-            .with_delta(&[shp(RealmId::System(7), None, 40.0)], &[])
+            .with_delta(
+                &[row(RealmId::System(7), None, DVec3::ZERO, look_shell(40.0))],
+                &[],
+            )
             .expect("the parent arrives next");
         assert_eq!(
             with_parent.get(RealmId::System(7)).expect("present").depth,
@@ -1614,13 +1620,23 @@ mod tests {
 
     #[test]
     fn with_delta_rejects_a_cyclic_parent_chain_loud() {
-        // A delta whose merged parent links CYCLE is a server bug → the depth recompute stops loud and the
-        // caller keeps the previous scene (atomic — never a partial mutation).
+        // A delta whose merged parent links CYCLE is a server bug → the depth recompute stops loud and
+        // the caller keeps the previous scene (atomic — never a partial mutation).
         let err = RealmScene::default()
             .with_delta(
                 &[
-                    shp(RealmId::System(7), Some(RealmId::System(8)), 40.0),
-                    shp(RealmId::System(8), Some(RealmId::System(7)), 40.0),
+                    row(
+                        RealmId::System(7),
+                        Some(RealmId::System(8)),
+                        DVec3::ZERO,
+                        look_shell(40.0),
+                    ),
+                    row(
+                        RealmId::System(8),
+                        Some(RealmId::System(7)),
+                        DVec3::ZERO,
+                        look_shell(40.0),
+                    ),
                 ],
                 &[],
             )
@@ -1630,26 +1646,20 @@ mod tests {
 
     #[test]
     fn scene_error_variants_render_their_loud_display_messages() {
-        // The thiserror `#[error(...)]` Display arms — rendered so a bad dev-config `boxes.json`
-        // fails LOUD at load (never a silent empty). The other tests compare by value/discriminant
-        // and never format, so without this the Display arms stay uncovered.
+        // The thiserror `#[error(...)]` Display arms — rendered so a malformed composed level fails
+        // LOUD (never a silent empty). The other tests compare by value and never format, so without
+        // this the Display arms stay uncovered.
         assert_eq!(
             SceneError::DuplicateRealm.to_string(),
-            "duplicate realm id in the boundary set"
+            "duplicate realm id in the scene rows"
         );
         assert_eq!(
             SceneError::CycleOrDepthExceeded.to_string(),
             "parent chain cycles or exceeds the max nesting depth"
         );
-        assert_eq!(
-            SceneError::MalformedJson("bad".into()).to_string(),
-            "malformed boxes.json: bad"
-        );
-        // Exercise the derived Clone + PartialEq FIELD comparison for the payload variant (the two
-        // regions V2's `MalformedJson(String)` added — the other tests compare unit variants or use
-        // `matches!`, so the String-carrying arm's clone/eq stays uncovered without this).
-        let m = SceneError::MalformedJson("x".into());
-        assert_eq!(m.clone(), m);
-        assert_ne!(m, SceneError::MalformedJson("y".into()));
+        // Exercise the derived Clone + PartialEq (the caller counts and logs these).
+        let e = SceneError::CycleOrDepthExceeded;
+        assert_eq!(e.clone(), e);
+        assert_ne!(e, SceneError::DuplicateRealm);
     }
 }

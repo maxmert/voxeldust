@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 use vd_core::geometry::Boundary;
-use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
+use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, SessionId, TickId, TransferId, UniverseTick};
 
 use crate::seams::tickets::{LoginTicket, ResumeTicket};
@@ -124,49 +124,46 @@ pub enum ServerControlMsg {
     OwnEntity {
         entity: EntityId,
     },
-    /// The AoI-scoped realm SHAPES the client renders — the wire-delivered render scene (VU, proto_minor 5),
-    /// so a FULLY-AGNOSTIC client draws its world from the STREAM ALONE (retiring the `--realm-boxes` boot file
-    /// as the networked source; the client never knows a seed or a shard). `regions` is the
-    /// ancestors-∪-direct-children neighbourhood the gateway derives seed-side (NEVER siblings, NEVER the whole
-    /// galaxy); `root` names the ambient container. It is the COMPLETE current neighbourhood each time (the
-    /// client REPLACES its scene), re-sent on a warp/cross into a new realm. The STATIC shape ships here ONCE
-    /// on realm-entry; the per-tick POSITION streams separately on the unreliable `RealmSnapshotDatagram`.
-    /// Emitted only to a peer that negotiated minor >= 5. Appended trailing variant (postcard additive rule).
+    /// THE COMPOSED SCENE LEVEL (the window lane's flag day, proto_minor 18 —
+    /// `docs/design/window_lane.md` §2.4; owner-approved 2026-08-15/16, items 1/9/10): the COMPLETE
+    /// drawable scene for this session, stacked from attested per-realm window statements at ONE
+    /// universe tick and expressed in the ORIGIN realm's frame. The client draws it and computes
+    /// nothing — every row arrives ready (pose + bag), so a row is drawable the instant it lands
+    /// (no "shape before first pose row" gap exists, at login or crossing). Sent on (re)login and
+    /// on every origin change (a crossing); the per-tick POSITIONS stream on the unreliable
+    /// [`RealmSnapshotDatagram`]; incremental membership/body changes ride [`RealmSceneDelta`].
+    /// Reshaped IN PLACE at the flag day (owner item 9: zero deployed clients ⇒ no shims, no
+    /// dual-decode; [`crate::version::PROTO_MINOR_FLOOR`] moved so no pre-flag-day peer is served).
     RealmRegistry {
-        regions: Vec<RealmShape>,
-        root: RealmId,
-        /// THE PIN: a NAME for the space this session's scene is being described in — nothing else. It
-        /// carries no position and nobody may ask it for one; the client IGNORES it (it is a pure
-        /// renderer and never learns which realm it draws in). Every position on every lane already
-        /// states its own frame — a shape's `center` is measured from the realm this message is
-        /// addressed to, a pose row carries its own `pose.frame` — so no receiver needs this to know
-        /// what it was handed. It is here for operators and logs, and to make a re-pin legible.
-        ///
-        /// It used to be accompanied by `pin_abs`, this realm's own absolute position in a universe-wide
-        /// frame, which the client subtracted from every incoming position. That is gone with the whole
-        /// notion of a realm having an absolute: each level's subtraction is made by the parent that
-        /// authored the placement, in that parent's own shard. A field required to always be zero is an
-        /// invitation to refill it, so it is not kept as a placeholder — and `anchor_epoch`, the re-pin
-        /// counter that rode beside it, went with it for the same reason (see the minor-8 ledger entry in
-        /// [`crate::version`]): an epoch is only meaningful to a receiver that RE-DERIVES its scene when
-        /// the anchor moves, and this receiver derives nothing.
-        pin: RealmId,
+        /// THE ORIGIN MARKER (§2.7, owner item 9's explicit successor of the deleted `pin`): the
+        /// realm this scene is composed in — the observer's standing realm. Stamped at the
+        /// composition point, ON the level itself (no separate origin message exists that could
+        /// desync from it). The origin realm never appears as a row: it draws from its own look
+        /// AT the origin.
+        origin: RealmId,
+        /// The origin's epoch: bumps on every origin/chain change. The client swaps scenes
+        /// ATOMICALLY on the bump — the old scene renders until the new level lands; early
+        /// new-epoch datagrams are held one beat (§2.7). This REPLACES the client's old
+        /// `forget_space` inference.
+        origin_epoch: u64,
+        /// The composed rows — the full drawn set at one tick.
+        rows: Vec<SceneRow>,
     },
-    /// The INCREMENTAL realm render-scene update (VU AoI, proto_minor 6): realms that ENTERED this client's
-    /// AoI (`added` — their static shapes) and realms that LEFT it (`removed` — their ids). The agnostic
-    /// client APPLIES this onto its scene (insert added boxes, drop removed) so its world follows its view
-    /// continuously — a realm streams IN as it comes into range and OUT as it leaves, with no pop. Unlike
-    /// [`RealmRegistry`] (the cold-start / warp re-anchor SNAPSHOT that alone carries `root`), this is a
-    /// DELTA. Reliable `Control` (an add/remove must not be lost — contrast the latest-wins pose datagram).
-    /// Emitted only on a real membership change and only to a peer that negotiated minor >= 6 (a static
-    /// cluster or older peer receives nothing). Appended trailing variant (postcard additive rule).
+    /// The INCREMENTAL composed-scene update (reliable): rows that ENTERED the drawn set (`added`
+    /// — complete [`SceneRow`]s, drawable on arrival) and realms that LEFT it (`removed`). Rides
+    /// the same origin marker + epoch as [`RealmRegistry`]; a delta whose epoch is not the
+    /// client's current one is refused (it belongs to a scene the client no longer — or does not
+    /// yet — hold). Emitted only on a real membership/body change. Reshaped IN PLACE at the
+    /// proto_minor-18 flag day (same owner citation as [`RealmRegistry`]).
     RealmSceneDelta {
-        added: Vec<RealmShape>,
+        /// The same origin marker as [`RealmRegistry`] (§2.7) — re-carried on every delta so the
+        /// reliable scene lane is self-describing.
+        origin: RealmId,
+        /// The same epoch as [`RealmRegistry`]; the client applies a delta only at its current
+        /// epoch.
+        origin_epoch: u64,
+        added: Vec<SceneRow>,
         removed: Vec<RealmId>,
-        /// The same pin as [`RealmRegistry`], re-carried on every scene delta so a warp re-anchor is
-        /// legible on the reliable scene lane. It names a space and carries no position — see
-        /// [`RealmRegistry`].
-        pin: RealmId,
     },
     /// A reliable discrete event for this client (proto_minor 14) — TODAY only
     /// [`EventMsg::EntityRemoved`], the per-entity eviction a pure-renderer client cannot derive
@@ -256,59 +253,60 @@ pub struct EntitySnap {
     pub pose: StampedPose,
 }
 
-/// One realm's STATIC render shape (VU, proto_minor 5) — exactly what a fully-agnostic client needs to DRAW a
-/// realm's box from the stream ALONE (no `--realm-boxes` file): its id, authoritative frame, static center,
-/// boundary (shape + extent), and parent link (the hierarchy). Carries ONLY realm identities + geometry —
-/// NEVER a `NodeId`/`SubId`/shard (node-agnostic) and NEVER server-only config (the AoI band + hysteresis stay
-/// off the wire; that is why this is a render SUBSET, not the full `RealmRegion`, which also keeps `RealmRegion`
-/// free to grow `#[serde(default)]` fields on its self-describing JSON boot path). The per-tick POSITION streams
-/// separately on [`RealmSnapshotDatagram`]; this static shape ships ONCE via [`ServerControlMsg::RealmRegistry`]
-/// when the realm enters the client's AoI.
+/// One realm's PURE SELF-DESCRIPTION — its id, its own frame, its boundary and its parent link.
+/// A shape says WHAT a realm looks like and NEVER where it is (the proto_minor-18 flag day,
+/// `docs/design/window_lane.md` §2.4; owner-approved 2026-08-15 item 9): the one-meaning law.
+/// WHERE a realm sits is exactly one party's statement — its parent's placement row — and rides
+/// the placement lanes ([`RealmSnap`]) or arrives already composed ([`SceneRow`]). This type used
+/// to carry a `center` whose meaning was "measured from whoever this message is addressed to",
+/// which made one field mean a different number on every hop and required a chain of restating
+/// parties to keep it true; the field is DELETED, not zeroed — a field that must be re-derived on
+/// every hop is an invitation to re-derive it wrongly. THE CURE for the old known violator (a
+/// multi-level shard emitting two frames with no hop between them) is structural: with no
+/// position field, a shape cannot state a position in anyone's frame, so the violation is
+/// unrepresentable.
 ///
-/// `center` HAS ONE MEANING ON EVERY HOP: the realm's centre measured from the centre of the realm this
-/// message is ADDRESSED TO, in that realm's own frame. Shard → shard DOWN (inside
-/// [`crate::intershard::ChildSceneSet`]) the addressee is the live child realm named in the envelope.
-/// Shard → shard UP (inside [`crate::intershard::RealmShapeObservation`]) the addressee is the PARENT,
-/// and the centres are measured from the SENDING child's own centre — the parent lifts them by the one
-/// placement it authored, which restores the same rule at its level. Shard → gateway → client (inside
-/// `ShardToGateway::RealmSceneDelta` and the two [`ServerControlMsg`] scene messages) the addressee is
-/// the realm the receiving session is standing in, which is the emitting shard's own realm — so the
-/// value is unchanged from shard to screen, and the gateway forwards it without opening it.
-///
-/// A parent restates the value from the centre of the child it is shipping to, subtracting the ONE
-/// placement it authored, and does that at every level — so what reaches the bottom is measured from the
-/// bottom's own centre, in the one space that client draws everything in. Only a parent knows where its
-/// children are, so each subtraction is made by the party that authored that placement and by nobody else.
-/// NOBODY DOWNSTREAM CONVERTS: not the router, not the client. A meaning that varied by sender is what let
-/// a router insert itself as the converter, and re-seeded that model in every reader of this type.
-///
-/// KNOWN VIOLATOR, named rather than papered over: a shard that hosts SEVERAL realm levels at once emits
-/// its own realm's children in its own realm's frame while an occupant standing in a deeper level it also
-/// hosts is measured from that deeper centre — two frames, one sender, no hop between them to carry the
-/// subtraction. `vd-tests`' `frame_conversion_e2e::the_box_and_the_thing_standing_in_it_draw_at_one_point`
-/// fails on exactly that and is the live record of it; the contract above is what the code must reach, not
-/// a description of a gap.
-///
-/// THE PARENT-PRESENT INVARIANT (proto_minor 8, binding on every sender): a shape carrying
-/// `parent: Some(p)` is accompanied by the shape for `p` — in the SAME message, or in one the receiver
-/// has already applied. A receiver that meets a shape whose parent it does not hold REFUSES it and
-/// COUNTS the refusal (`scene_orphan_shape`); it never resolves the unknown parent to an assumed
-/// identity. That refusal is what lets a receiver build its parent-link table from the stream alone,
-/// with no hierarchy lookup and no seed knowledge of its own. Assuming the identity instead is the
-/// failure this rule exists to stop: an orphan silently rooted at the receiver's origin draws its whole
-/// subtree at the wrong place, and looks exactly like a correct scene until the parent moves.
+/// Post-flag-day consumers are the still-running mesh scene lanes only
+/// (`ShardToGateway::RealmSceneDelta`, [`crate::intershard::ChildSceneSet`]) — the client never
+/// receives this type any more ([`SceneRow`] is the client's row). Those lanes are deleted whole
+/// in Slice C2 and this type retires with them.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RealmShape {
     pub realm: RealmId,
     /// THIS realm's OWN frame — the frame its occupants and its own children are measured in.
     pub frame: FrameRef,
-    /// This realm's centre in the frame of WHOEVER THIS MESSAGE IS ADDRESSED TO — never an absolute, and
-    /// never a value the sender worked out by adding up a chain of realms it has no business knowing. Each
-    /// level of the chain subtracts the one placement IT authored before shipping onward, so the value stays
-    /// a difference between two things one party holds.
-    pub center: LatticePos,
     pub shape: Boundary,
     pub parent: Option<RealmId>,
+}
+
+/// ONE ROW OF THE COMPOSED SCENE (proto_minor 18, `docs/design/window_lane.md` §2.4 — the VU
+/// streaming contract realized: *a pose + a bag of signals*). The row arrives ready to draw: the
+/// pose is already expressed in the level's ORIGIN frame at one stamp, and the bag carries the
+/// row's whole appearance as tagged TLV (`vd_core::look` codec). The client applies zero
+/// transforms and branches on NO realm kind — only on data presence:
+///
+/// - `TAG_LOOK` present  ⇒ a BODY: the realm's OWN self-authored outline (a running realm draws
+///   itself — THE DRAW LAW, owner decision 10).
+/// - `TAG_LOOK` absent + `TAG_LUMA` present ⇒ a MARKER: the parent-authored point-of-light datum
+///   for a sleeping realm (photometric scalars, never an outline).
+/// - Unknown tags are SKIPPED — signals extend forever with zero client change.
+///
+/// A third pixel source is unrepresentable: the two tags come from wire types
+/// ([`crate::session_flow::BodyStmt`]) that structurally cannot carry each other's payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneRow {
+    pub realm: RealmId,
+    /// Hierarchy identity only — which realm authored this row's placement. Never a position.
+    pub parent: Option<RealmId>,
+    /// The row's ready-to-draw pose in the ORIGIN frame, stamp explicit PER ROW: held strata
+    /// lawfully carry an older stamp than their level-mates (`window_lane.md` §2.6.4), declared
+    /// here rather than hidden. `pose.frame` names the origin frame, which also states the tier
+    /// (the drawn unit) explicitly — no receiver-side tier inference exists.
+    pub pose: StampedPose,
+    /// The tagged skip-unknown TLV bag (`vd_core::look`): the row's appearance. Empty ⇒ the
+    /// realm is tracked but NOT drawn (a missing statement means the thing is not drawn — every
+    /// pixel has exactly one lawful author, by construction).
+    pub bag: Vec<u8>,
 }
 
 /// One REALM's authored placement inside a realm-snapshot frame (the frame-authority
@@ -393,12 +391,23 @@ pub struct SnapshotDatagram {
 pub struct RealmSnapshotDatagram {
     pub sub: SubId,
     /// Monotonic per-sub frame counter (stale frames dropped) — the realm feed's own
-    /// counter, independent of the entity snapshot's `frame_id`.
+    /// counter, independent of the entity snapshot's `frame_id`. On the composed client feed
+    /// (proto_minor 18) this is the per-session monotone counter the connection plane stamps —
+    /// lawful because a composed row is a NEW row it authors from attested inputs — so the
+    /// client's staleness gate collapses to ONE feed counter (single author) plus the epoch.
     pub frame_id: u64,
     /// The SENDER's local sim tick (there is NO global sim tick).
     pub source_tick: TickId,
     /// The analytic clock value this frame's placements are authored against.
     pub universe_tick: UniverseTick,
+    /// The scene epoch these rows belong to (proto_minor 18, `docs/design/window_lane.md`
+    /// §2.4/§2.7) — the same counter [`ServerControlMsg::RealmRegistry`] carries. The client
+    /// applies rows only at its CURRENT epoch: an older epoch is a straggler from the previous
+    /// scene (dropped + counted `stale_epoch_rows`), a NEWER epoch raced its own level on the
+    /// reliable lane and is held one beat (§2.7). On the still-running shard-authored mesh
+    /// lanes (dead in Slice C2 with their lanes) this field is stamped 0 — those bytes reach
+    /// no client any more; only the composed feed carries a live epoch.
+    pub origin_epoch: u64,
     pub realms: Vec<RealmSnap>,
 }
 
@@ -713,40 +722,81 @@ mod tests {
         );
     }
 
-    #[test]
-    fn realm_registry_is_additive_minor_5_and_empty_is_render_neutral() {
+    /// One full-width composed row for the scene-message fixtures: every field non-default
+    /// (a dropped field cannot pass as a lucky zero), the bag a real `vd_core::look` blob.
+    fn scene_row() -> SceneRow {
         use vd_core::glam::DVec3;
-        // Appended AFTER OwnEntity ⇒ a minor<5 sender's bytes (any prior variant, here OwnEntity itself) still
-        // decode unchanged on a minor-5 decoder — a trailing variant never shifts a prior discriminant/framing.
-        let prior = ServerControlMsg::OwnEntity { entity: eid() };
-        let prior_bytes = postcard::to_allocvec(&prior).expect("encode");
-        assert_eq!(
-            postcard::from_bytes::<ServerControlMsg>(&prior_bytes).expect("decode"),
-            prior
-        );
-        // The new variant round-trips with a full realm shape (id + frame + static center + boundary + parent).
+        SceneRow {
+            realm: RealmId::Planet(7),
+            parent: Some(RealmId::System(7)),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 7 },
+                DVec3::new(20.0, -3.0, 5.0),
+                UniverseTick(100),
+            ),
+            bag: vd_core::look::look_bag(&Boundary::Shell { r: 10.0 }),
+        }
+    }
+
+    #[test]
+    fn the_composed_level_roundtrips_with_its_origin_marker_and_empty_is_render_neutral() {
+        // The proto_minor-18 flag day (window_lane.md §2.4, owner item 9: reshape IN PLACE — no
+        // shims, no dual-decode; the floor moved so no pre-flag-day peer is ever served): the
+        // level carries the origin marker + epoch ON itself and complete drawable rows.
         let reg = ServerControlMsg::RealmRegistry {
-            regions: vec![RealmShape {
-                realm: RealmId::Planet(7),
-                frame: FrameRef::SystemSpace { system_seed: 7 },
-                center: LatticePos::local(DVec3::new(20.0, 0.0, 0.0)),
-                shape: Boundary::Shell { r: 10.0 },
-                parent: Some(RealmId::System(7)),
-            }],
-            root: RealmId::System(0),
-            pin: RealmId::System(7),
+            origin: RealmId::System(7),
+            origin_epoch: 3,
+            rows: vec![scene_row()],
         };
         let bytes = postcard::to_allocvec(&reg).expect("encode");
         assert_eq!(
             postcard::from_bytes::<ServerControlMsg>(&bytes).expect("decode"),
             reg
         );
-        // An EMPTY neighbourhood round-trips (the byte-cheap-when-empty precedent — a client with nothing in
-        // AoI gets a well-formed empty scene, never a decode fault).
+        // An EMPTY level round-trips (the byte-cheap-when-empty precedent — a session whose
+        // windows have not confirmed yet gets a well-formed empty scene, never a decode fault).
         let empty = ServerControlMsg::RealmRegistry {
-            regions: Vec::new(),
-            root: RealmId::System(0),
-            pin: RealmId::System(0),
+            origin: RealmId::System(7),
+            origin_epoch: 1,
+            rows: Vec::new(),
+        };
+        let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&empty_bytes).expect("decode"),
+            empty
+        );
+        // The row's bag is the REAL look codec: TAG_LOOK decodes back to the outline (presence
+        // IS the body/marker gate — the client never branches on a realm kind). Read off the
+        // fixture directly (HR5: destructuring the value constructed above would carry an
+        // unreachable refusal arm).
+        assert_eq!(
+            vd_core::look::look_of(&scene_row().bag),
+            Ok(Boundary::Shell { r: 10.0 })
+        );
+    }
+
+    #[test]
+    fn the_composed_delta_roundtrips_at_its_epoch_and_empty_is_neutral() {
+        // The reliable incremental half of the composed lane (same flag day, same citation): a
+        // delta names its origin + epoch so the client can refuse one from a scene it no longer
+        // (or does not yet) hold.
+        let delta = ServerControlMsg::RealmSceneDelta {
+            origin: RealmId::System(7),
+            origin_epoch: 3,
+            added: vec![scene_row()],
+            removed: vec![RealmId::Planet(8)],
+        };
+        let bytes = postcard::to_allocvec(&delta).expect("encode");
+        assert_eq!(
+            postcard::from_bytes::<ServerControlMsg>(&bytes).expect("decode"),
+            delta
+        );
+        // The EMPTY delta round-trips (the codec is total — though the server never SENDS one).
+        let empty = ServerControlMsg::RealmSceneDelta {
+            origin: RealmId::System(7),
+            origin_epoch: 3,
+            added: Vec::new(),
+            removed: Vec::new(),
         };
         let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
         assert_eq!(
@@ -756,47 +806,20 @@ mod tests {
     }
 
     #[test]
-    fn realm_scene_delta_is_additive_minor_6_and_empty_is_neutral() {
-        use vd_core::glam::DVec3;
-        // Appended AFTER RealmRegistry ⇒ a minor<6 sender's bytes (here the minor-5 RealmRegistry itself)
-        // still decode on a minor-6 decoder — a trailing variant never shifts a prior discriminant/framing.
-        let prior = ServerControlMsg::RealmRegistry {
-            regions: Vec::new(),
-            root: RealmId::System(0),
-            pin: RealmId::System(0),
+    fn a_realm_shape_is_pure_self_description_with_no_position_field() {
+        // The flag-day cure is STRUCTURAL: the type has no field that could state a position in
+        // anyone's frame (window_lane.md §2.4; owner item 9). A shape round-trips as identity +
+        // geometry + parent link and nothing else.
+        let shape = RealmShape {
+            realm: RealmId::Planet(7),
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            shape: Boundary::Shell { r: 10.0 },
+            parent: Some(RealmId::System(7)),
         };
-        let prior_bytes = postcard::to_allocvec(&prior).expect("encode");
+        let bytes = postcard::to_allocvec(&shape).expect("encode");
         assert_eq!(
-            postcard::from_bytes::<ServerControlMsg>(&prior_bytes).expect("decode"),
-            prior
-        );
-        // A real delta (one realm ENTERED AoI, one LEFT) round-trips.
-        let delta = ServerControlMsg::RealmSceneDelta {
-            added: vec![RealmShape {
-                realm: RealmId::Planet(7),
-                frame: FrameRef::SystemSpace { system_seed: 7 },
-                center: LatticePos::local(DVec3::new(20.0, 0.0, 0.0)),
-                shape: Boundary::Shell { r: 10.0 },
-                parent: Some(RealmId::System(7)),
-            }],
-            removed: vec![RealmId::Planet(8)],
-            pin: RealmId::System(7),
-        };
-        let bytes = postcard::to_allocvec(&delta).expect("encode");
-        assert_eq!(
-            postcard::from_bytes::<ServerControlMsg>(&bytes).expect("decode"),
-            delta
-        );
-        // The EMPTY delta round-trips (the codec is total — though the server never SENDS an empty delta).
-        let empty = ServerControlMsg::RealmSceneDelta {
-            added: Vec::new(),
-            removed: Vec::new(),
-            pin: RealmId::System(0),
-        };
-        let empty_bytes = postcard::to_allocvec(&empty).expect("encode");
-        assert_eq!(
-            postcard::from_bytes::<ServerControlMsg>(&empty_bytes).expect("decode"),
-            empty
+            postcard::from_bytes::<RealmShape>(&bytes).expect("decode"),
+            shape
         );
     }
 
@@ -889,6 +912,7 @@ mod tests {
             frame_id: 77,
             source_tick: TickId(9),
             universe_tick: UniverseTick(3000),
+            origin_epoch: 2,
             realms: vec![
                 RealmSnap {
                     realm: RealmId::Planet(7),
@@ -941,6 +965,7 @@ mod tests {
             frame_id: 78,
             source_tick: TickId(10),
             universe_tick: UniverseTick(3001),
+            origin_epoch: 2,
             realms: Vec::new(),
         };
         let bytes = postcard::to_allocvec(&empty).expect("encode");
@@ -1087,6 +1112,7 @@ mod tests {
                 frame_id: i as u64,
                 source_tick: TickId(1),
                 universe_tick: UniverseTick(10),
+                origin_epoch: 0,
                 realms: chunk.clone(),
             };
             let encoded = postcard::to_allocvec(&datagram).expect("encode").len();

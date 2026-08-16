@@ -289,22 +289,24 @@ pub enum InterShardFlow {
     /// never be renumbered; nothing produces it, and a received frame counts `undecodable` at the shard.
     /// Do not revive; the discriminant is reserved forever.
     ProxySceneSet(ProxySceneSet),
-    /// PARENT → active CHILD realm — the per-realm AoI OBSERVATION cascade (the sibling live-pose feed). A
-    /// parent AUTHORS every child's live pose, so once a child realm is ACTIVE (spun up, holding players) the
-    /// parent ships the moving realms it authors DOWN to that child's shard ONCE PER TICK, keyed PER REALM
-    /// (`child`), NOT per player — the parent reads the child's OWN authored position, never a player report.
-    /// The child re-fans the OPAQUE bytes to its own subscribers on the existing [`ShardToGateway::RealmFrame`]
-    /// path, so the crossed player keeps seeing the rest of the system orbit while it moves WITH the realm it
-    /// entered. Payload is an ALREADY-SERIALIZED [`crate::channels::RealmSnapshotDatagram`] (the PARENT's
-    /// `frame_id` sealed INSIDE) — carried opaquely so the relay is structurally UNABLE to re-stamp it (the
-    /// client's per-`RealmId` high-water demands the single authoring shard's monotone counter). Cross-server
-    /// cost is O(active child realms); the per-player fan is the gateway's existing `subscribers_of`. This is
-    /// the WHERE lane (positions); the WHAT lane (terrain/constructions at the LOD the observed realm controls)
-    /// is a future ADDITIVE payload on this SAME routing — the observation graph is the reusable foundation.
-    /// Rides the unreliable transport lane (`MsgClass::SignalDelta`, NOT the P9 Signal bus),
-    /// `FireAndForget` + `Unreliable` (per-tick latest-wins; a lost frame self-heals next tick).
-    /// Carries ONLY the `child` lineage coord (public) + the opaque public-geometry bytes — NO
-    /// gateway / session (HR1). APPENDED.
+    /// ★TOMBSTONE (window lane Slice C2, minor 19; owner-approved 2026-08-16 —
+    /// docs/design/owner_decisions_2026-08-15.md addendum + docs/design/window_lane.md §5 RULINGS)
+    /// — THE DOWN-CASCADE OF SCENERY IS DELETED. It shipped a parent's authored rows DOWN into a
+    /// live child's process every tick, restated into the child's own frame, so the child could
+    /// re-fan them to its occupants' gateways. Its cost was a serialized hop per level and a
+    /// mixture of moments; its hazard was a level that had to OPEN and RE-STATE another level's
+    /// rows to relay them.
+    ///
+    /// Its replacement carries strictly less across a realm boundary — nothing at all: every chain
+    /// level now states its own authored rows DIRECTLY to the observer's gateway
+    /// (`ShardToGateway::WindowFrame`, `window_lane.md` §2.2), pre-inverted once by the lawful
+    /// author, and the GATEWAY stacks them at one universe tick. Depth adds parallel statements,
+    /// never serialized hops (§2.13). The variant and its payload struct REMAIN because postcard
+    /// discriminants are positional and may never be renumbered (renumbering re-labels every later
+    /// arm on the wire); discriminant 26 is reserved forever; nothing produces it, and a received
+    /// frame counts `undecodable` at the shard (the `MsgClass::SignalDelta` dispatch's closed
+    /// fall-through — its real carrier, measured per the slice-D lesson). Both classifications are
+    /// frozen with the arm. Do not revive.
     RealmCascade(RealmCascade),
     /// ★TOMBSTONE (Step 5 slice E, minor 13) — THE ENTITY LANE'S UP-LEG, deleted. It shipped a
     /// realm's whole emitted entity set — occupant poses — to its parent across a realm boundary:
@@ -370,52 +372,94 @@ pub enum InterShardFlow {
     /// (`MsgClass::SignalDelta`; loss is bridged by the TTL and backstopped by the reconciler's
     /// `ancestor_close`). Carries NO gateway/session/pose (HR1/SL2). APPENDED.
     ChildLive(ChildLive),
-    /// CHILD → PARENT shard — THE UP-OBSERVATION LANE (owner-approved 2026-08-13, the SL6 ask: "when I
-    /// exit the system its planets freeze"). A LIVE child ships the per-tick rows IT AUTHORS — where it
-    /// put its OWN children, in its OWN frame; the identical `RealmSnapshotDatagram` bytes it already
-    /// streams to its own occupants — one hop UP, AND NO FURTHER. The parent adds the ONE placement it
-    /// authors (where it put that child; the number the child must never know — SL1) and re-fans the
-    /// restated rows to its own observers, bounded by each observer's own AoI band on that child. A
-    /// level NEVER relays what it was relayed: every lane carries exactly two levels — what I author
-    /// about my children, and what my children authored about themselves — so a receiver sees its
-    /// children (it authors) plus its grandchildren (each child's own ship), and the volume at any
-    /// level is bounded by its own band rather than the whole live subtree. Carries a realm's own
-    /// INTERIOR VIEW outward (SL3: a realm draws itself; its authored placements are its look at this
-    /// detail level). NO occupant data crosses (SL2 untouched). The sealed `frame_id` discipline of
-    /// the cascade holds here unchanged: the AUTHOR's counter is never re-stamped. `FireAndForget` +
-    /// `Unreliable` (per-tick latest-wins on `MsgClass::SignalDelta`; a lost frame self-heals next
-    /// tick). APPENDED.
-    RealmObservation(RealmObservation),
-    /// CHILD → PARENT shard — the STATIC half of the up-observation lane (Step 5 slice C, minor 11):
-    /// a live child ships its interior OUTLINES — one [`crate::channels::RealmShape`] per realm of its
-    /// OWN ROSTER and nothing deeper (two levels per lane, the same law as the rows: what its own
-    /// children shipped IT stays home, folded into its local scenes only), centers measured in ITS OWN
-    /// frame at the shape lane's one instant — one hop UP, on the AoI cadence. The parent adds the ONE
-    /// placement it authors for that child (SL1) and folds the lifted outlines into the scene deltas
-    /// of any observer whose visibility reaches that child. WITHOUT this half a neighbour realm's
-    /// interior had motion but no boxes: the rows flowed and the client had nothing to draw them onto
-    /// ("approaching another star system, its planets never appear" — owner-flown 2026-08-13). SL3:
-    /// the child authors what its interior LOOKS like; the parent authors only where the child sits.
-    /// NO occupant data (SL2). `FireAndForget` + `Unreliable` (a level re-asserted every cadence; the
-    /// parent's TTL is sized in cadences and bridges loss). APPENDED.
+    /// ★TOMBSTONE (window lane Slice C2, minor 19; owner-approved 2026-08-16 —
+    /// docs/design/owner_decisions_2026-08-15.md addendum + docs/design/window_lane.md §5 RULINGS)
+    /// — THE UP-OBSERVATION LANE IS DELETED. A live child shipped its own authored rows one hop UP,
+    /// and the PARENT then ADDED the placement it authors for that child and re-fanned the restated
+    /// rows to its own observers. That addition is exactly the restatement the window lane's draw
+    /// law removes from the middle of the picture: a level had to open, convert and re-ship another
+    /// level's scenery, mixing that level's moment with its own.
     ///
-    /// Retroactively owner-approved 2026-08-15 (docs/design/owner_decisions_2026-08-15.md item 7);
-    /// the shape lane is INTERIM — its content evolves to self-authored looks with the observer chain.
+    /// Its replacements are TWO, and neither crosses a realm boundary with scenery a receiver did
+    /// not author: (a) every level states its own rows DIRECTLY to the observer's gateway
+    /// (`ShardToGateway::WindowFrame`) and the gateway stacks them at ONE tick; (b) for a live realm
+    /// the observer is beside rather than inside, the parent forwards the child's SEALED,
+    /// self-authored statements BYTE-FOR-BYTE ([`InterShardFlow::WindowRelay`] — the Q2 ruling:
+    /// no store, no merge, no re-state, no read). The variant and its payload struct REMAIN because
+    /// postcard discriminants are positional and may never be renumbered; discriminant 31 is
+    /// reserved forever; nothing produces it, and a received frame counts `undecodable` at the shard
+    /// (the `MsgClass::SignalDelta` dispatch's closed fall-through — its real carrier). Both
+    /// classifications are frozen with the arm. Do not revive.
+    RealmObservation(RealmObservation),
+    /// ★TOMBSTONE (window lane Slice C1, minor 17) — the INTERIM shape lane is DELETED, its content
+    /// EVOLVED into its successor exactly as the minor-11 entry promised ("the shape lane is INTERIM
+    /// — its content evolves to self-authored looks with the observer chain"): the evolution is
+    /// owner-approved 2026-08-16 (docs/design/owner_decisions_2026-08-15.md addendum +
+    /// docs/design/window_lane.md §5 RULINGS, the Q2 = parent-relay ruling). It shipped a live
+    /// child's interior OUTLINES one hop up with centers the parent then LIFTED — a parent
+    /// restating a child's scenery, which the window lane's draw law forbids (a realm draws
+    /// ITSELF; the parent authors only placements). Its successor is
+    /// [`InterShardFlow::WindowRelay`]: the child's VERBATIM self-authored window statements,
+    /// sealed so the parent structurally CANNOT restate them (forward-or-drop). The variant and
+    /// its payload struct REMAIN because postcard discriminants are positional and may never be
+    /// renumbered; discriminant 32 is reserved forever; nothing produces it, and a received frame
+    /// counts `undecodable` at the shard (the SignalDelta dispatch's closed fall-through — its
+    /// real carrier, measured per the slice-D lesson). Classifications frozen with the arm.
+    /// Do not revive.
     RealmShapeObservation(RealmShapeObservation),
-    /// PARENT → CHILD shard — the per-LIVE-CHILD rekey of the down-reflected sibling scene (Step 5
-    /// slice C, minor 11; replaces emitting the occupant-keyed `ProxySceneSet`, whose `AccountId`
-    /// leaves the wire — a data reduction). The FULL current set of outlines a child's occupants are
-    /// owed from ABOVE — the parent's own in-range siblings of that child plus what the parent itself
-    /// holds from ITS parent, MINUS the parent's own outline (SL1, finding 17: the sender's own box
-    /// sits at ITS origin, and restated one hop down it would state −(the child's placement) — the one
-    /// number a realm may never learn; a message never tells its receiver about itself) — restated in
-    /// the CHILD's frame by the one party that authored the child's placement, addressed to the child
-    /// REALM (not to any occupant: HR1 — the parent never learns who is inside, SL7 — the occupied
-    /// child stands in for its occupants). The child fans it to its own local observers and restates
-    /// it onward into ITS live children, filtering its own outline in turn (the depth≥3 orphan case of
-    /// the per-occupant lane dissolves structurally). `FireAndForget` + `ReDriven` (a full-set level,
-    /// re-sent on change from the parent's RAM store; the receiver reconciles). APPENDED.
+    /// ★TOMBSTONE (window lane Slice C2, minor 19; owner-approved 2026-08-16 —
+    /// docs/design/owner_decisions_2026-08-15.md addendum + docs/design/window_lane.md §5 RULINGS)
+    /// — THE DOWN-REFLECT OF SCENERY IS DELETED, and with it the last message that could tell a
+    /// realm something about itself. It carried the outlines a child's occupants were owed from
+    /// ABOVE, restated into the child's frame by the parent, MINUS the parent's own outline — that
+    /// subtraction was the SL1 SELF-PLACEMENT FILTER (finding 17), a behavioural guard standing
+    /// between this lane and a realm learning −(its own placement).
+    ///
+    /// THE GUARD RETIRES BY AMENDMENT, NOT BY EROSION (owner ruling Q3, 2026-08-16,
+    /// docs/design/window_lane.md §5 RULINGS): the owner had said the filter stays; the owner then
+    /// approved deleting it TOGETHER WITH THE LANE IT GUARDED, because the hazard ceases to exist —
+    /// no realm-inbound message type carries a placement or a centre at all any more, which is
+    /// strictly stronger protection than a runtime filter on one lane. That absence is pinned
+    /// structurally (`crates/wire/tests/intershard_closed.rs` —
+    /// `no_realm_inbound_payload_carries_a_placement_or_a_centre`) and end-to-end
+    /// (`tests/tests/frame_conversion_e2e.rs` — the composed-stream absence assertions).
+    ///
+    /// What a child's occupants are owed from above now reaches them WITHOUT entering the child at
+    /// all: each ancestor states its own rows straight to the observer's gateway
+    /// (`ShardToGateway::WindowFrame`), which stacks the chain at one tick. The variant and its
+    /// payload struct REMAIN because postcard discriminants are positional and may never be
+    /// renumbered; discriminant 33 is reserved forever; nothing produces it, and a received frame
+    /// counts `undecodable` at the shard (the reliable Saga-class dispatch's closed fall-through —
+    /// its real carrier). Both classifications are frozen with the arm. Do not revive.
     ChildSceneSet(ChildSceneSet),
+    /// CHILD → PARENT shard — THE Q2 RELAY LEG of the window lane (mesh minor 17; owner-approved
+    /// 2026-08-16, docs/design/owner_decisions_2026-08-15.md addendum + docs/design/window_lane.md
+    /// §5 RULINGS — the successor [`InterShardFlow::RealmShapeObservation`]'s tombstone names): a
+    /// live child's VERBATIM self-authored window statements (its own look, its markers for its
+    /// own direct children, its own interior level — the same payloads its direct
+    /// `ShardToGateway::WindowBody`/`WindowFrame` lanes carry), one hop UP AND NO FURTHER, for the
+    /// parent to FORWARD to subscribers holding windows on the parent
+    /// (`ShardToGateway::WindowRelayed`).
+    ///
+    /// THE PARENT CANNOT RE-STATE, structurally: `statements` is a SEALED blob (postcard
+    /// `Vec<RelayedStatement>`, `crate::session_flow`) the parent holds and forwards
+    /// byte-for-byte — no store-merge, no read, no re-stamp (the Q2 ruling's exact words: fence +
+    /// attestation intact). The child's `realm_fence` rides OUTSIDE the seal so the final
+    /// receiver's zombie guard needs no decode to consult it, and the receiver admits every inner
+    /// statement against the CHILD's identity with the existing predicates
+    /// (`window_body_admissible`, the child vouched by the parent's own attested roster). This is
+    /// how "one level into any live realm you are next to" (Q1, GENERIC) gets its look/interior
+    /// data without `WindowScope::Observed` ever existing — "am I observed from outside" stays
+    /// unrepresentable in every realm; the direct window remains the D-WINDOW-2 ledgered upgrade
+    /// taken only on a measured G-HANDOVER failure.
+    ///
+    /// Producer: the child ships on look-change and on its parent resolving (the
+    /// relay-subscription moment), and re-asserts on the AoI cadence so a restarted parent
+    /// re-learns it. Consumer: the parent holds the LATEST blob per child under the derived TTL
+    /// (2 cadences + 1 — owner law 3(a)) and forwards on receipt-change + on window-open.
+    /// `FireAndForget` (carries no authority; the fence gates zombies) + `ReDriven` (the child
+    /// re-drives from live state — mirrors `ShardRoster`'s reasoning). APPENDED.
+    WindowRelay(WindowRelay),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -612,8 +656,11 @@ impl InterShardFlow {
             // frozen with the arm: it mutated nothing (a pure position hint), and a tombstone must keep
             // classifying so the closed-taxonomy matches stay wildcard-free ⇒ FireAndForget forever.
             InterShardFlow::OccupantInterest(_) => EffectClass::FireAndForget,
-            // The per-realm observation cascade mutates no sim state at the child — it re-fans opaque
-            // render bytes (latest-wins), never a fence/transfer trigger.
+            // ★TOMBSTONE (window lane Slice C2, minor 19) — the deleted per-realm observation
+            // cascade's class, frozen with the arm: it mutated no sim state at the child (it
+            // re-fanned opaque render bytes, latest-wins, never a fence/transfer trigger) ⇒
+            // FireAndForget forever. A tombstone keeps classifying so the closed-taxonomy matches
+            // stay wildcard-free.
             InterShardFlow::RealmCascade(_) => EffectClass::FireAndForget,
             // ★TOMBSTONE (Step 5 slice D) — the deleted per-occupant scene reflect. Classification frozen
             // with the arm (it mutated no sim state; a received frame today only counts `undecodable`):
@@ -629,18 +676,27 @@ impl InterShardFlow {
             // decides whose frames are read at all. It is a latest-wins LEVEL keyed by its own tick, so a
             // redelivery is idempotent and a reorder is refused by the tick rather than by an ack.
             InterShardFlow::ShardRoster(_) => EffectClass::FireAndForget,
-            // The SL7 bit is a level-triggered heartbeat (presence IS the state) and the up-observation
-            // rows are per-tick latest-wins world observation — both idempotent under redelivery, refused
-            // by (fence, tick) / the client's per-realm high-water rather than by an ack.
-            InterShardFlow::ChildLive(_) | InterShardFlow::RealmObservation(_) => {
-                EffectClass::FireAndForget
-            }
+            // The SL7 bit is a level-triggered heartbeat (presence IS the state) — idempotent under
+            // redelivery, refused by (fence, tick) rather than by an ack. LIVING (liveness/demand).
+            InterShardFlow::ChildLive(_) => EffectClass::FireAndForget,
+            // ★TOMBSTONE (window lane Slice C2, minor 19) — the deleted up-observation lane's class,
+            // frozen with the arm: its rows were per-tick latest-wins world observation, refused by
+            // the client's per-realm high-water rather than by an ack ⇒ FireAndForget forever.
+            InterShardFlow::RealmObservation(_) => EffectClass::FireAndForget,
             // The two shape lanes (minor 11), both directions: full-set public-geometry render
             // bookkeeping, no fence, no transfer trigger, no sim-state mutation at the receiver — a
             // redelivered set replaces itself (full-set reconcile), exactly like the lane each rekeys.
-            InterShardFlow::RealmShapeObservation(_) | InterShardFlow::ChildSceneSet(_) => {
-                EffectClass::FireAndForget
-            }
+            // ★TOMBSTONE (window lane Slice C1, minor 17) — the deleted interim shape lane's class,
+            // frozen with the arm (it re-fanned drawable outlines, mutated no sim state; a received
+            // frame today only counts `undecodable`): a tombstone keeps classifying so the
+            // closed-taxonomy matches stay wildcard-free. Its successor is `WindowRelay` below.
+            InterShardFlow::RealmShapeObservation(_) => EffectClass::FireAndForget,
+            // ★TOMBSTONE (window lane Slice C2, minor 19) — the deleted down-reflect lane's class,
+            // frozen with the arm (full-set render bookkeeping, no fence, no sim-state mutation).
+            InterShardFlow::ChildSceneSet(_) => EffectClass::FireAndForget,
+            // The Q2 relay carries authority for NOTHING (sealed self-statements; the child fence
+            // gates zombies at the final receiver) and is latest-wins per child ⇒ FireAndForget.
+            InterShardFlow::WindowRelay(_) => EffectClass::FireAndForget,
         }
     }
 
@@ -720,8 +776,9 @@ impl InterShardFlow {
             // arm: it was a 20 Hz latest-wins datagram ⇒ Unreliable forever (nothing produces it; the
             // golden pin below still asserts exactly TWO producer-less arms).
             InterShardFlow::OccupantInterest(_) => FlowDurabilityClass::Unreliable,
-            // Per-tick latest-wins realm poses — a lost frame self-heals next tick (the RealmSnapshot
-            // datagram contract), NOT reliable (would flood the ReDriven lane at 20 Hz).
+            // ★TOMBSTONE (window lane Slice C2, minor 19) — the deleted cascade's class, frozen with
+            // the arm: per-tick latest-wins realm poses, a lost frame self-healing next tick ⇒
+            // Unreliable forever, never producer-less (no durable outbox is owed to a dead lane).
             InterShardFlow::RealmCascade(_) => FlowDurabilityClass::Unreliable,
             // ★TOMBSTONE (Step 5 slice D) — the deleted per-occupant scene reflect's class, frozen with
             // the arm: it was level-full-set re-driven, never producer-less ⇒ ReDriven forever (nothing
@@ -740,18 +797,26 @@ impl InterShardFlow {
             InterShardFlow::ShardRoster(_) => FlowDurabilityClass::ReDriven,
             // The bit is level-triggered on the AoI cadence (a lost heartbeat is re-asserted next
             // cadence and bridged by the parent's TTL; liveness is centrally backstopped by
-            // `ancestor_close`), and the observation rows are the per-tick latest-wins feed (a lost
-            // frame self-heals next tick) — both Unreliable, exactly like the lanes they mirror.
-            InterShardFlow::ChildLive(_) | InterShardFlow::RealmObservation(_) => {
-                FlowDurabilityClass::Unreliable
-            }
-            // The interior-outline level is re-asserted every AoI cadence and bridged by the parent's
-            // TTL, exactly like the bit it rides beside — a lost one costs a cadence ⇒ Unreliable.
+            // `ancestor_close`) ⇒ Unreliable. LIVING (liveness/demand, SL7 — not draw).
+            InterShardFlow::ChildLive(_) => FlowDurabilityClass::Unreliable,
+            // ★TOMBSTONE (window lane Slice C2, minor 19) — the deleted up-observation lane's class,
+            // frozen with the arm: its rows were the per-tick latest-wins feed (a lost frame
+            // self-healed next tick) ⇒ Unreliable forever, never producer-less.
+            InterShardFlow::RealmObservation(_) => FlowDurabilityClass::Unreliable,
+            // ★TOMBSTONE (window lane Slice C1, minor 17) — the deleted interim shape lane's class,
+            // frozen with the arm: it was a cadence-re-asserted level ⇒ Unreliable forever (nothing
+            // produces it; its successor `WindowRelay` carries its own class below).
             InterShardFlow::RealmShapeObservation(_) => FlowDurabilityClass::Unreliable,
-            // The down-reflected scene keeps `ProxySceneSet`'s reasoning verbatim: RELIABLE in spirit (a
-            // lost set-change would blink a neighbour) but RE-DRIVEN, not producer-less — on any loss the
-            // parent re-sends the full set from its RAM store and the child reconciles it.
+            // ★TOMBSTONE (window lane Slice C2, minor 19) — the deleted down-reflect lane's class,
+            // frozen with the arm: it kept `ProxySceneSet`'s reasoning verbatim (RELIABLE in spirit,
+            // but RE-DRIVEN from the parent's RAM store on any loss) ⇒ ReDriven forever, never
+            // producer-less — a dead lane is owed no durable outbox.
             InterShardFlow::ChildSceneSet(_) => FlowDurabilityClass::ReDriven,
+            // The Q2 relay mirrors `WindowBody`'s reasoning (a lost look is an invisible realm at
+            // exactly the no-flicker moment G-HANDOVER measures) and `ShardRoster`'s recovery: the
+            // CHILD re-drives it from live state (look-change / parent-resolve / cadence re-assert),
+            // so it needs no durable outbox ⇒ ReDriven, never producer-less.
+            InterShardFlow::WindowRelay(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -857,8 +922,9 @@ pub struct ChildLive {
     pub at: UniverseTick,
 }
 
-/// The up-observation payload — see [`InterShardFlow::RealmObservation`]. A live child's OWN
-/// authored per-tick rows, one hop up, for the parent to restate and re-fan.
+/// ★TOMBSTONED payload (window lane Slice C2, minor 19) — see [`InterShardFlow::RealmObservation`]
+/// for why the lane died and what carries its cargo now. Kept only so the reserved discriminant
+/// keeps a decodable shape; nothing produces it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealmObservation {
     /// The SENDING child's full lineage coord (the routing key; the parent validates the child's
@@ -888,7 +954,9 @@ pub struct RealmShapeObservation {
     pub shapes: Vec<crate::channels::RealmShape>,
 }
 
-/// The per-live-child down-reflected sibling scene — see [`InterShardFlow::ChildSceneSet`].
+/// ★TOMBSTONED payload (window lane Slice C2, minor 19) — see [`InterShardFlow::ChildSceneSet`]
+/// for why the lane died, and for the Q3 retirement-by-amendment of the SL1 self-placement filter
+/// it carried. Kept only so the reserved discriminant keeps a decodable shape; nothing produces it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChildSceneSet {
     /// The receiving child's full lineage coord (the routing key; the child validates it lowers to its
@@ -902,8 +970,28 @@ pub struct ChildSceneSet {
     pub realms: Vec<crate::channels::RealmShape>,
 }
 
-/// The per-realm observation-cascade payload (the sibling live-pose feed) — see
-/// [`InterShardFlow::RealmCascade`]. The parent ships THIS to each ACTIVE child realm per tick.
+/// THE Q2 RELAY payload — see [`InterShardFlow::WindowRelay`]. A live child's verbatim
+/// self-authored window statements, sealed for the one-hop-up-then-forward path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowRelay {
+    /// The SENDING child's full lineage coord (the routing key; the parent validates the child's
+    /// parent link lowers to its own realm and drops a mis-route — the same guard every up-lane
+    /// uses).
+    pub child: RealmCoord,
+    /// The child's OWN realm fence at authoring — carried OUTSIDE the seal so the final receiver's
+    /// zombie guard needs no decode, forwarded INTACT (the parent never re-stamps it).
+    pub realm_fence: Fence,
+    /// The SEALED statements (postcard `Vec<crate::session_flow::RelayedStatement>`): built only
+    /// by the authoring child (`crate::session_flow::seal_relay_statements`), opened only by the
+    /// final receiver (`crate::session_flow::open_relay_statements`). The parent holds and
+    /// forwards these bytes UNOPENED — forward-or-drop is its whole lawful vocabulary.
+    pub statements: Vec<u8>,
+}
+
+/// ★TOMBSTONED payload (window lane Slice C2, minor 19) — see [`InterShardFlow::RealmCascade`] for
+/// why the lane died and what carries its cargo now. Kept only so the reserved discriminant keeps a
+/// decodable shape; nothing produces it. The paragraphs below record what it DID, for the audit
+/// trail, and are history rather than contract.
 ///
 /// ONE LINK OF THE DOWN-CHAIN — the down-mirror of the up-observation lanes. Each level
 /// subtracts the placement IT authored for the child it is shipping to, restates the rows in that child's

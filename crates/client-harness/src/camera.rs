@@ -463,44 +463,36 @@ mod tests {
     // ---- fit_camera_to_scene (Slice V3 framing) --------------------------------
 
     use vd_client::realm_scene::RealmScene;
-    use vd_core::geometry::{CrossEffect, RealmBoundary};
-    use vd_core::pose::{LatticePos, RealmId};
+    use vd_core::geometry::Boundary;
+    use vd_core::pose::RealmId;
+    use vd_wire::channels::SceneRow;
 
     /// A `Shell` boundary at `center`, radius `r`.
-    fn shell_b(realm: RealmId, center: DVec3, r: f64) -> RealmBoundary {
-        RealmBoundary::shell(
+    fn shell_b(realm: RealmId, center: DVec3, r: f64) -> SceneRow {
+        SceneRow {
             realm,
-            LatticePos::local(center),
-            r,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            None,
-            realm,
-            CrossEffect::Authority,
-        )
+            parent: None,
+            pose: vd_core::pose::StampedPose::at_rest(
+                vd_core::pose::FrameRef::SystemSpace { system_seed: 0 },
+                center,
+                vd_core::UniverseTick(1),
+            ),
+            bag: vd_core::look::look_bag(&Boundary::Shell { r }),
+        }
     }
 
     /// An `Aabb` boundary at `center`, half-extents `half`.
-    fn aabb_b(realm: RealmId, center: DVec3, half: DVec3) -> RealmBoundary {
-        RealmBoundary::aabb(
+    fn aabb_b(realm: RealmId, center: DVec3, half: DVec3) -> SceneRow {
+        SceneRow {
             realm,
-            LatticePos::local(center),
-            half,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            None,
-            realm,
-            CrossEffect::Authority,
-        )
-        .expect("aabb")
+            parent: None,
+            pose: vd_core::pose::StampedPose::at_rest(
+                vd_core::pose::FrameRef::SystemSpace { system_seed: 0 },
+                center,
+                vd_core::UniverseTick(1),
+            ),
+            bag: vd_core::look::look_bag(&Boundary::Aabb { half }),
+        }
     }
 
     #[test]
@@ -511,7 +503,7 @@ mod tests {
 
     #[test]
     fn a_degenerate_viewport_frames_to_no_camera() {
-        let scene = RealmScene::from_boundaries(&[shell_b(RealmId::System(1), DVec3::ZERO, 10.0)])
+        let scene = RealmScene::from_scene_rows(&[shell_b(RealmId::System(1), DVec3::ZERO, 10.0)])
             .expect("scene");
         assert_eq!(fit_camera_to_scene(&scene, 0, 48), None);
         assert_eq!(fit_camera_to_scene(&scene, 64, 0), None);
@@ -522,7 +514,7 @@ mod tests {
         // Two well-separated boxes (a sphere and a box); the fitted camera must place BOTH
         // entirely on-screen — every corner of each box's extent projects inside [0,w]×[0,h].
         let (w, h) = (128usize, 96usize);
-        let scene = RealmScene::from_boundaries(&[
+        let scene = RealmScene::from_scene_rows(&[
             shell_b(RealmId::System(1), DVec3::new(-200.0, 0.0, 0.0), 60.0),
             aabb_b(
                 RealmId::Station(2),
@@ -571,7 +563,7 @@ mod tests {
         // `.max(radius + NEAR_PLANE*2)` FLOOR must kick in — exercises that branch. The box
         // center still projects near the viewport center.
         let (w, h) = (64usize, 64usize);
-        let scene = RealmScene::from_boundaries(&[shell_b(
+        let scene = RealmScene::from_scene_rows(&[shell_b(
             RealmId::System(1),
             DVec3::new(5.0, 6.0, 7.0),
             0.0,
@@ -593,7 +585,7 @@ mod tests {
     fn scene_bounds_covers_both_the_sphere_and_box_extent_arms() {
         // Directly exercise box_extent's two arms via a mixed scene: the union AABB must reach
         // the sphere's far edge (r) AND the box's far corner (half).
-        let scene = RealmScene::from_boundaries(&[
+        let scene = RealmScene::from_scene_rows(&[
             shell_b(RealmId::System(1), DVec3::new(-100.0, 0.0, 0.0), 10.0),
             aabb_b(
                 RealmId::Station(2),

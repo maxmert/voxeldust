@@ -199,6 +199,10 @@ pub fn rendezvous_into_planet(
 /// One WalkTo's tick budget inside [`cross_leg`] — bounded so the loop re-reads the label often
 /// (a target is only re-stated while the frame it was stated in still holds).
 const CROSS_LEG_WALK_TICKS: u64 = 400;
+/// The WATCHED variant's walk chunk (`cross_leg_watching_scene`): small enough that the
+/// between-chunk polls bracket the epoch swap tightly (the no-flicker gate compares the LAST
+/// old-epoch state against the FIRST new-epoch state — see the chunking note at the call).
+const WATCHED_WALK_TICKS: u64 = 25;
 /// The PARKED wait after an ARRIVED walk: the aim point sits where the crossing fires on a
 /// stationary avatar, and detector cooldown (~75 ticks) + the saga + the client's delivered flip
 /// all fit well inside this. MEASURED lesson (the first chain run): a 2 s grace expired BEFORE the
@@ -285,6 +289,184 @@ pub fn cross_leg(
     );
     eprintln!("[cross-leg] {leg}: label flipped to {want:?}");
     assert_eq!(loc, want, "leg {leg}: the reached realm label");
+}
+
+/// THE WATCHED CROSSING (Slice C1 — the §2.11 no-flicker gate's substrate): fly [`cross_leg`]'s
+/// exact rendezvous pattern while WATCHING the composed scene through the swap, and hand back the
+/// LAST delivered state of the old scene epoch and the FIRST of the new one — the two samples the
+/// no-flicker verdict compares (a persisting body's delta across the swap, bounded by true
+/// motion). Asserts as it flies: the drawn scene is NEVER ABSENT on any poll (§2.7: the old scene
+/// renders until the new level lands — an empty `realm_boxes` mid-crossing is the flicker), and
+/// the origin epoch advances EXACTLY ONCE across the leg (a double bump is a flapping swap).
+///
+/// # Panics
+/// On a deadline pass, an absent scene, a missing origin marker, or an epoch that moved by
+/// anything but exactly one.
+pub fn cross_leg_watching_scene(
+    devctl_port: u16,
+    leg: &str,
+    aim: impl Fn(u64) -> DVec3,
+    want: &str,
+    deadline: Duration,
+) -> (Option<DevState>, DevState, DevState) {
+    let started = Instant::now();
+    let mut loc = String::new();
+    let mut start_epoch: Option<u64> = None;
+    let mut before_prev: Option<DevState> = None;
+    let mut before: Option<DevState> = None;
+    let mut after: Option<DevState> = None;
+    // PRIME the old-epoch pair BEFORE any walking: a short crossing (a park near the boundary,
+    // a fast saga) can fit entirely inside the first walk chunk, leaving the watcher a single
+    // pre-swap sample — and the no-flicker verdict needs TWO same-epoch samples to MEASURE each
+    // body's own per-tick motion. Two parked polls a few ticks apart give every body in the old
+    // scene a measured rate whatever the leg's timing does.
+    for _ in 0..2 {
+        if let Some(s) = poll_state(devctl_port) {
+            watch_scene_sample(
+                leg,
+                &s,
+                &mut start_epoch,
+                &mut before_prev,
+                &mut before,
+                &mut after,
+            );
+            loc = s.location.clone().unwrap_or_default();
+        }
+        std::thread::sleep(CROSS_LEG_POLL);
+    }
+    loop {
+        if let Some(s) = poll_state(devctl_port) {
+            watch_scene_sample(
+                leg,
+                &s,
+                &mut start_epoch,
+                &mut before_prev,
+                &mut before,
+                &mut after,
+            );
+            loc = s.location.clone().unwrap_or_default();
+            if loc == want {
+                break;
+            }
+            let target = aim(s.universe_tick.unwrap_or(0));
+            let walked = devctl(
+                devctl_port,
+                &DevRequest::WalkTo {
+                    target: target.to_array(),
+                    arrive_epsilon: 2.0,
+                    // SMALL chunks, deliberately (§2.11): a WalkTo BLOCKS until it arrives or
+                    // its tick budget lapses, and one [`CROSS_LEG_WALK_TICKS`]-sized chunk
+                    // swallows the entire crossing — the watcher would then hold NO delivered
+                    // state near the swap, and the no-flicker verdict would compare states
+                    // hundreds of ticks apart (measured: 509 ticks, a 49 m lawful orbital
+                    // sweep misread as a swap teleport). Chunking keeps the samples within
+                    // [`WATCHED_WALK_TICKS`] of the swap on both sides.
+                    max_ticks: WATCHED_WALK_TICKS,
+                    max_step_m: 4.0 * crate::DEV.move_speed * crate::DEV.tick_dt,
+                },
+            );
+            let _ = devctl(
+                devctl_port,
+                &DevRequest::Move {
+                    axes: [0.0, 0.0, 0.0],
+                },
+            );
+            if matches!(walked, Some(DevResponse::State { .. })) {
+                let wait_until = Instant::now() + CROSS_LEG_COMMIT_WAIT;
+                while Instant::now() < wait_until && loc != want {
+                    if let Some(g) = poll_state(devctl_port) {
+                        watch_scene_sample(
+                            leg,
+                            &g,
+                            &mut start_epoch,
+                            &mut before_prev,
+                            &mut before,
+                            &mut after,
+                        );
+                        loc = g.location.clone().unwrap_or_default();
+                    }
+                    std::thread::sleep(CROSS_LEG_POLL);
+                }
+            }
+            if loc == want {
+                break;
+            }
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "leg {leg}: the location label never flipped to {want:?} (last {loc:?})",
+        );
+        std::thread::sleep(CROSS_LEG_POLL);
+    }
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Move {
+            axes: [0.0, 0.0, 0.0],
+        },
+    );
+    // The swap may land after the label flip's poll; wait until the NEW epoch is seen.
+    let swap_deadline = Instant::now() + CROSS_LEG_COMMIT_WAIT;
+    while after.is_none() {
+        if let Some(s) = poll_state(devctl_port) {
+            watch_scene_sample(
+                leg,
+                &s,
+                &mut start_epoch,
+                &mut before_prev,
+                &mut before,
+                &mut after,
+            );
+        }
+        assert!(
+            Instant::now() < swap_deadline,
+            "leg {leg}: the label flipped but the new scene epoch never delivered"
+        );
+        std::thread::sleep(CROSS_LEG_POLL);
+    }
+    eprintln!("[cross-leg] {leg}: label flipped to {want:?}, epoch bumped once");
+    (
+        before_prev,
+        before.unwrap_or_else(|| panic!("leg {leg}: no old-epoch state was ever delivered")),
+        after.expect("the wait above ends only with the new epoch seen"),
+    )
+}
+
+/// One watched sample of the crossing (the §2.11 no-flicker gate's per-poll asserts + the
+/// before/after bookkeeping) — a plain fn so the two poll sites cannot drift.
+fn watch_scene_sample(
+    leg: &str,
+    s: &DevState,
+    start_epoch: &mut Option<u64>,
+    before_prev: &mut Option<DevState>,
+    before: &mut Option<DevState>,
+    after: &mut Option<DevState>,
+) {
+    assert!(
+        !s.realm_boxes.is_empty(),
+        "leg {leg}: the drawn scene went ABSENT mid-crossing — the old scene must render \
+         until the new level lands (§2.7), got {s:?}"
+    );
+    let (_, epoch) = s
+        .origin
+        .clone()
+        .unwrap_or_else(|| panic!("leg {leg}: no origin marker on a delivered state: {s:?}"));
+    let start = *start_epoch.get_or_insert(epoch);
+    if epoch == start {
+        // Keep the last TWO old-epoch samples: the pair measures each body's own per-tick
+        // motion, which is what bounds a MOVING persister across the swap (the no-flicker
+        // gate's derived allowance — an orbiting planet lawfully sweeps between two polls).
+        *before_prev = before.take();
+        *before = Some(s.clone());
+    } else {
+        assert_eq!(
+            epoch,
+            start + 1,
+            "leg {leg}: the origin epoch must bump EXACTLY once across one crossing"
+        );
+        if after.is_none() {
+            *after = Some(s.clone());
+        }
+    }
 }
 
 /// The creep throttle (an axes MAGNITUDE — the axes ride the wire as a throttle): 0.05 of the

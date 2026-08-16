@@ -187,11 +187,44 @@ struct GeneratedBody {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StarPhotometrics {
     /// The star's drawn mass (solar masses) — the ONE u01 draw everything below derives from.
+    /// On a REFLECTOR's datum (a planet, Slice C1) this is the ILLUMINATING star's mass: a
+    /// reflector shines by its star, so its color class and its mass provenance are the star's.
     pub mass_msun: f64,
-    /// Morgan-Keenan class from the drawn mass (the marker's color class).
+    /// Morgan-Keenan class from the drawn mass (the marker's color class). A reflector carries
+    /// its ILLUMINATOR's class — reflected light keeps the star's color.
     pub class: SpectralClass,
-    /// Main-sequence luminosity `L/Lsun` from the drawn mass (the marker's luma scalar).
+    /// Main-sequence luminosity `L/Lsun` from the drawn mass (the marker's luma scalar). A
+    /// reflector carries the star's luminosity geometrically diluted at its own orbit and scaled
+    /// by its cross-section × its seed-drawn albedo (see [`reflected_photometrics`]).
     pub luma_lsun: f64,
+}
+
+/// The canonical GEOMETRIC-ALBEDO table (lo, hi) a reflector's seed-drawn albedo spans — a
+/// physical passable table like [`SpectralClass::MASS_BOUNDS`], not a tuning knob: solar-system
+/// geometric albedos run from ~0.1 (dark rock — the Moon, Mercury) to ~0.7 (full cloud decks —
+/// Venus). Scale-independent; at near-real scale the same bounds hold unchanged.
+pub const GEOMETRIC_ALBEDO_BOUNDS: (f64, f64) = (0.1, 0.7);
+
+/// A sleeping REFLECTOR's marker datum (Slice C1 — `docs/design/window_lane.md` §1.1 item 3b: "a
+/// point-of-light datum per DIRECT child"; the planets' half of the per-system draw, owed since
+/// Slice 0 and landed with the flag day that made it load-bearing): the star's light reflected.
+/// Class = the illuminator's (reflected light keeps the star's color); luma = `L★ · albedo ·
+/// r² / (4d²)` — the closed-form geometric dilution of starlight over the orbit radius `d`,
+/// intercepted by the body's cross-section `r²`, scaled by ONE seed-drawn albedo over the
+/// canonical table. Pure f(seed, config), scale-free, straight-line (HR5).
+fn reflected_photometrics(
+    star: &StarPhotometrics,
+    albedo_u01: f64,
+    radius_m: f64,
+    orbit_m: f64,
+) -> StarPhotometrics {
+    let (lo, hi) = GEOMETRIC_ALBEDO_BOUNDS;
+    let albedo = lo + albedo_u01 * (hi - lo);
+    StarPhotometrics {
+        mass_msun: star.mass_msun,
+        class: star.class,
+        luma_lsun: star.luma_lsun * albedo * (radius_m * radius_m) / (4.0 * orbit_m * orbit_m),
+    }
 }
 
 /// Where a body sits in its parent inertial frame.
@@ -843,12 +876,15 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
             photometrics: None,
         });
         let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED, seed]);
+        let mut planet_orbits: Vec<f64> = Vec::new();
         for n in 0..pl.n_planets {
+            let elements = planet_elements(config, &mut stream, n);
+            planet_orbits.push(elements.sma);
             bodies.push(GeneratedBody {
                 realm: RealmId::Planet(child_seed(seed, PLANET_SALT, u64::from(n))),
                 parent: Some(system),
                 shape: shell(pl.planet_soi_r_m),
-                placement: Placement::Orbital(planet_elements(config, &mut stream, n)),
+                placement: Placement::Orbital(elements),
                 photometrics: None,
             });
         }
@@ -859,6 +895,23 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
         // Appending keeps every existing draw byte-identical (the additive discipline), and the
         // draw stays pure f(seed, config) like every sibling derived value.
         bodies[system_ix].photometrics = Some(draw_star_photometrics(st, &mut stream));
+        // THE PLANET MARKER DRAWS (Slice C1 — §1.1 item 3b's "per direct child", made load-bearing
+        // by the flag day: a sleeping realm appears ONLY as its parent's marker, so a planet
+        // without one would be invisible until spun up). One albedo u01 per planet, APPENDED
+        // after the star draw — the same additive stream discipline: every prior draw of THE
+        // world stays byte-identical, and the reflected datum stays pure f(seed, config).
+        let star = bodies[system_ix]
+            .photometrics
+            .expect("the star draw landed on the line above");
+        for (n, orbit_m) in planet_orbits.iter().enumerate() {
+            let ix = system_ix + 1 + n;
+            bodies[ix].photometrics = Some(reflected_photometrics(
+                &star,
+                stream.next_f64(),
+                pl.planet_soi_r_m,
+                *orbit_m,
+            ));
+        }
     }
     bodies
 }
@@ -3651,7 +3704,14 @@ mod tests {
         // bound; the u01 that would draw a G star is a ~1e-3 sliver). Sub-solar luma is expected:
         // the marker's DERIVED brightness knob (coordinate-scale model) is a later, separate owe.
         let cfg = UniverseConfig::world(VISUAL_OCCUPANT_V_MAX_MPS, AOI_TICK_DT_S);
-        let draws = system_photometrics_for_config(0, &cfg);
+        let all = system_photometrics_for_config(0, &cfg);
+        // The SYSTEM subset carries the pinned stellar goldens; the planets' REFLECTED draws
+        // (Slice C1) are coherence-checked below against the derivation, not re-pinned per body.
+        let draws: Vec<(RealmId, StarPhotometrics)> = all
+            .iter()
+            .copied()
+            .filter(|(realm, _)| matches!(realm, RealmId::System(_)))
+            .collect();
         assert_eq!(
             draws,
             vec![
@@ -3707,6 +3767,60 @@ mod tests {
                 main_sequence_luminosity(p.mass_msun, &cfg.stellar.mlr_segments)
             );
         }
+        // THE PLANET REFLECTOR DRAWS (Slice C1 — §1.1 item 3b "per direct child"): every planet
+        // of THE world carries a marker datum; its class and mass provenance are its STAR's
+        // (reflected light keeps the star's color), and its luma sits inside the closed-form
+        // reflected band `L★ · albedo · r²/(4d²)` over the canonical albedo table at the
+        // planet's own orbit — bounded by construction, MEASURED here (never assumed).
+        let planets: Vec<(RealmId, StarPhotometrics)> = all
+            .iter()
+            .copied()
+            .filter(|(realm, _)| matches!(realm, RealmId::Planet(_)))
+            .collect();
+        assert_eq!(
+            planets.len(),
+            draws.len() * cfg.planet.n_planets as usize,
+            "every planet of every system carries a marker datum"
+        );
+        let world = WorldView::generated(0, &cfg);
+        for (realm, p) in &planets {
+            let region = world
+                .regions()
+                .iter()
+                .find(|r| r.realm == *realm)
+                .expect("a drawn planet is a region of THE world");
+            let star = draws
+                .iter()
+                .find(|(sys, _)| Some(*sys) == region.parent)
+                .map(|(_, s)| *s)
+                .expect("a planet's parent is a pinned system");
+            assert_eq!(
+                p.class, star.class,
+                "reflected light keeps the star's color"
+            );
+            assert_eq!(p.mass_msun, star.mass_msun, "the illuminator's provenance");
+            let (d, r) = (
+                moving_children_for_config(0, &cfg, region.parent.expect("parented"))
+                    .iter()
+                    .find(|(child, _)| *child == *realm)
+                    .map(|(_, el)| el.sma)
+                    .expect("a planet of THE world orbits"),
+                cfg.planet.planet_soi_r_m,
+            );
+            let (lo, hi) = GEOMETRIC_ALBEDO_BOUNDS;
+            let dilution = (r * r) / (4.0 * d * d);
+            // Two asserts, not one `&&` (HR5: a short-circuit's false arm is uncoverable).
+            assert!(
+                p.luma_lsun >= star.luma_lsun * lo * dilution,
+                "{realm:?}: reflected luma {} below the derivation band",
+                p.luma_lsun
+            );
+            assert!(
+                p.luma_lsun <= star.luma_lsun * hi * dilution,
+                "{realm:?}: reflected luma {} above the derivation band",
+                p.luma_lsun
+            );
+        }
     }
 
     #[test]
@@ -3717,7 +3831,11 @@ mod tests {
         // field, or a codec fork fails here, not on a live wire.
         let cfg = UniverseConfig::world(VISUAL_OCCUPANT_V_MAX_MPS, AOI_TICK_DT_S);
         let draws = system_photometrics_for_config(0, &cfg);
-        assert_eq!(draws.len(), 3, "THE world's marker roster is non-vacuous");
+        assert_eq!(
+            draws.len(),
+            3 + 3 * cfg.planet.n_planets as usize,
+            "THE world's marker roster: three stars + every planet's reflector (Slice C1)"
+        );
         for (_, p) in &draws {
             let bag = marker_luma_bag(p);
             assert_eq!(
@@ -3755,7 +3873,7 @@ mod tests {
         let seed1 = system_photometrics_for_config(1, &cfg);
         assert_eq!(
             seed1.len(),
-            3,
+            3 + 3 * cfg.planet.n_planets as usize,
             "the census is config-pinned, not seed-pinned"
         );
         assert_ne!(
@@ -3763,23 +3881,24 @@ mod tests {
             system_photometrics_for_config(0, &cfg)[0].1,
             "system 0's draw must differ under a different universe seed"
         );
-        // The ambient shells and the planets carry NO draw — only systems do (the draw roster is
-        // exactly the star roster; the planets' photometric ladder is a later, separate owe).
+        // The ambient shells carry NO draw. Systems draw their own light; every planet carries
+        // its reflected datum (Slice C1 — a sleeping realm appears only as its parent's marker).
         // ONE equality over the whole forest (HR5: no matches!/count with uncoverable arms): the
-        // bodies carrying a draw are exactly the three systems, in forest order.
+        // bodies carrying a draw are exactly each system followed by its planets, forest order.
         let world = WorldView::generated(0, &cfg);
         let starred: Vec<RealmId> = world
             .bodies
             .iter()
             .filter_map(|b| b.photometrics.map(|_| b.realm))
             .collect();
-        assert_eq!(
-            starred,
-            vec![
-                RealmId::System(system_seed_at(0)),
-                RealmId::System(system_seed_at(1)),
-                RealmId::System(system_seed_at(2)),
-            ]
-        );
+        let mut expected = Vec::new();
+        for i in 0..3 {
+            let s = system_seed_at(i);
+            expected.push(RealmId::System(s));
+            for n in 0..cfg.planet.n_planets {
+                expected.push(RealmId::Planet(child_seed(s, PLANET_SALT, u64::from(n))));
+            }
+        }
+        assert_eq!(starred, expected);
     }
 }

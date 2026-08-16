@@ -534,7 +534,14 @@ fn build_cluster(
             known_shards,
             auth_verifying_key: auth_verifying_key(),
             session_seed: 23,
-            tick_hz: 50,
+            // THE CLUSTER'S OWN TICK RATE (20 Hz — `stub_config().tick_dt_s == 0.05`). It used to
+            // read 50 here, which put the gateway and its shards on two different clocks: the
+            // window keep-alive beat is derived from THIS rate and the shard's window TTL from
+            // the shard's, so a 50 Hz gateway re-asserted every 25 ticks against a TTL sized in
+            // 20 Hz beats — and every window LAPSED between beats. Invisible while the old
+            // scenery lanes ran beside the window lane; a frozen picture once they were deleted
+            // (window lane Slice C2). One cluster, one clock.
+            tick_hz: 20,
             // D-3 INERT: the cluster scenarios do not exercise the session heartbeat (the D-3 cells do).
             lease_renew_interval_ticks: 0,
             // D-3 Slice 5b INERT here (grace 0 vetoes the proactive self-fence; the self-fence cells set

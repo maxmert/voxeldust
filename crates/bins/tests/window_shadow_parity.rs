@@ -1,26 +1,35 @@
-//! THE WINDOW LANE's SHADOW-PARITY GATE (Slice B — `docs/design/window_lane.md` §4 Slice B,
-//! §4.5 Topic 5): the composition engine runs LIVE in real processes beside the old lane, and its
-//! composed picture is MEASURED against the old-lane client feed — per realm, per tick, inside
-//! the gateway that forwards both. Zero UNEXPLAINED mismatches; every explained divergence is a
-//! NAMED CLASS with a count, printed below (classes, not blur — the owner's Topic-5 approval).
+//! THE WINDOW LANE's COMPOSED SELF-CONSISTENCY GATE, in real processes.
 //!
-//! The run is the rlm_demand_login pattern: a REAL demand cluster (orchestrator + gateway, no
-//! shard pre-booked), TWO real dev-control clients logging into the same home star (two sessions
-//! sharing one origin — the §2.14 shared-fold measurement is non-vacuous), a real flight leg
-//! (the shared rendezvous INTO the inner planet — a crossing, so the chain re-derives, the epoch
-//! bumps, and the parent level composes through the lineage-derived Child window while the old
-//! cascade feeds the same rows), and a dwell on the planet (ancestor-row parity under the
-//! cascade). The proof is read from the gateway's `/admin/snapshot`.
+//! WHAT THIS FILE USED TO BE, and why it is not that any more. Through Slice B it was the
+//! SHADOW-PARITY gate (§4 Slice B, §4.5 Topic 5): the composition engine ran LIVE beside the old
+//! inter-realm scenery lanes, and its picture was measured against the old-lane client feed, per
+//! realm per tick. That measurement RAN and is RECORDED (its last green reading is in the
+//! D-WINDOW-1 ledger), and it discharged its whole purpose — "shadow parity before any client
+//! cut" (§4.5 Topic 5) — when Slice C1 cut the client over. Slice C2 then DELETED the lanes it
+//! compared against, so its left-hand side no longer exists: §4's Slice-C2 gate list is
+//! `intershard_closed` pins + a green suite + coverage, with no parity entry.
 //!
-//! The gate also carries three §2.12 pins the design demands land HERE:
-//! - the EXACT-CADENCE boot pin: `window_full_chain_folds > 0` is direct proof two different
-//!   shard processes stamped window levels at IDENTICAL universe ticks (a fold across a ≥2-level
-//!   chain exists only at a shared stamp) — loud failure if per-realm cadence ever diverges;
-//! - the DEDUP f64 agreement, both halves MEASURED: hop-vs-child-row (`window_dedup_disagree`
-//!   == 0, max deviation printed) and shared-vs-per-session fold (`window_fold_divergence` == 0,
-//!   non-vacuous because `window_fold_hits > 0` with the two co-located sessions);
-//! - the shear law live: `window_instant_mismatch == 0` across the whole run (its CAN-fail half
-//!   is the deliberate mixed-tick unit in `vd-connection-plane::window`).
+//! THE SCENARIO IS NOT DELETED, IT IS RE-BASED — because three §2.12 NAMED INVARIANTS have no
+//! other process-tier home and would have died with the comparator:
+//!   * the EXACT-CADENCE pin — `window_full_chain_folds > 0` is direct proof two different shard
+//!     processes stamped window levels at IDENTICAL universe ticks;
+//!   * the DEDUP f64 agreement, both halves — hop-vs-child-row (`window_dedup_disagree == 0`,
+//!     max deviation printed) and shared-vs-per-session fold (`window_fold_divergence == 0`,
+//!     non-vacuous because `window_fold_hits > 0` with two co-located sessions);
+//!   * the SHEAR LAW live — `window_instant_mismatch == 0` across the whole run (its CAN-fail
+//!     half is the deliberate mixed-tick unit in `vd-connection-plane::window`).
+//!
+//! It also now asserts what the deletion promises: the tombstoned lanes are SILENT in a real
+//! cluster (`old_realm_frames_dropped == 0`, `old_scene_deltas_dropped == 0` — a revived producer
+//! shows up here, loudly).
+//!
+//! The run is unchanged, and it is the rlm_demand_login pattern: a REAL demand cluster
+//! (orchestrator + gateway, no shard pre-booked), TWO real dev-control clients logging into the
+//! same home star (two sessions sharing one origin — the §2.14 shared-fold measurement is
+//! non-vacuous), a real flight leg (the shared rendezvous INTO the inner planet — a crossing, so
+//! the chain re-derives, the epoch bumps, and the parent level composes through the
+//! lineage-derived Child window), and a dwell on the planet. The proof is read from the gateway's
+//! `/admin/snapshot`.
 //!
 //! `--test-threads=1` + the RLM demand port band (this file boots the same demand topology).
 #![cfg(feature = "dev-control")]
@@ -46,11 +55,12 @@ const LOGIN_DEADLINE: Duration = Duration::from_secs(60);
 const FLIGHT_DEADLINE: Duration = Duration::from_secs(150);
 /// A healthy client clears this in a second or two of 20 Hz once its home is up.
 const SNAPSHOT_FLOOR: u64 = 5;
-/// The parity anti-vacuity floor: the stationary settle alone produces old-lane realm rows at
-/// the 20 Hz realm-lane rate across several planets — hundreds within a few seconds. Requiring
-/// this many MATCHED rows makes a silently idle comparator (or a composer that never folds) a
-/// loud failure, while staying far under what any healthy run produces.
-const MATCHED_FLOOR: u64 = 200;
+/// The anti-vacuity floor: the stationary settle alone composes rows at the 20 Hz realm-lane rate
+/// across several planets — hundreds within a few seconds. Requiring this many COMPOSED rows makes
+/// a composer that never folds a loud failure, while staying far under what any healthy run
+/// produces. (It replaces the retired comparator's matched-row floor, at the same magnitude and
+/// for the same reason.)
+const COMPOSED_FLOOR: u64 = 200;
 
 fn poll_state(port: u16) -> Option<DevState> {
     match dev_roundtrip(port, &DevRequest::State).ok()? {
@@ -160,34 +170,15 @@ fn await_active(devctl_port: u16, gateway_admin: SocketAddr, deadline: Duration)
     }
 }
 
-/// The gate's whole class report, verbatim — §4.5 Topic 5: CLASSES, each by name, never a blur.
+/// The gate's whole counter report, verbatim — every number by name, never a blur.
 fn print_class_report(tag: &str, gw: &GatewayView) {
     eprintln!(
-        "[parity:{tag}] MEASURED against the live old-lane feed, per realm per tick:\n\
-         [parity:{tag}]   matched (bit-identical position at the row's own tick) = {}\n\
-         [parity:{tag}]   UNEXPLAINED pose_mismatch = {} (max deviation {} nm)\n\
-         [parity:{tag}]   UNEXPLAINED missing_composed = {}\n\
-         [parity:{tag}]   EXCLUDED BY NAME sibling_interior (the recorded Q2-carrier gap, D-WINDOW-1) = {}\n\
-         [parity:{tag}]   explained unwindowed_ancestor (head poll in flight) = {}\n\
-         [parity:{tag}]   explained no_fold_at_tick (boot / ring-aged stamp) = {}\n\
-         [parity:{tag}]   explained offframe_rows (crossing-overlap dual feed) = {}\n\
-         [parity:{tag}]   origin_rows (SL1 self-filter regression signal) = {}\n\
-         [parity:{tag}]   pending_shed = {}  parity_undecodable = {}\n\
-         [parity:{tag}] composer: folds={} fold_hits={} full_chain_folds={} composed_rows={} chains_held={}\n\
-         [parity:{tag}] composer: holds={} dead_hops={} stalled={} cycles={} unresolved_standing={}\n\
-         [parity:{tag}] shear/dedup: instant_mismatch={} fold_divergence={} dedup_disagree={} dedup_max_dev={} nm\n\
-         [parity:{tag}] ingest: rows_ingested={} level_refused={} body_stale={} body_preroster={} head_reads={}",
-        gw.parity_rows_matched,
-        gw.parity_pose_mismatch,
-        gw.parity_max_pos_dev_nm,
-        gw.parity_missing_composed,
-        gw.parity_sibling_interior_excluded,
-        gw.parity_unwindowed_ancestor,
-        gw.parity_no_fold_at_tick,
-        gw.parity_offframe_rows,
-        gw.parity_origin_rows,
-        gw.parity_pending_shed,
-        gw.parity_undecodable,
+        "[window:{tag}] composer: folds={} fold_hits={} full_chain_folds={} composed_rows={} chains_held={}\n\
+         [window:{tag}] composer: holds={} dead_hops={} stalled={} cycles={} unresolved_standing={}\n\
+         [window:{tag}] shear/dedup: instant_mismatch={} fold_divergence={} dedup_disagree={} dedup_max_dev={} nm\n\
+         [window:{tag}] ingest: rows_ingested={} level_refused={} body_stale={} body_preroster={} head_reads={}\n\
+         [window:{tag}] egress: levels={} deltas={} datagrams={} relay_rows_composed={} relay_unplaceable={}\n\
+         [window:{tag}] DEAD LANES (must stay 0): old_realm_frames={} old_scene_deltas={}",
         gw.window_folds,
         gw.window_fold_hits,
         gw.window_full_chain_folds,
@@ -207,22 +198,18 @@ fn print_class_report(tag: &str, gw: &GatewayView) {
         gw.window_body_stale,
         gw.window_body_preroster,
         gw.window_head_reads_sent,
+        gw.scene_levels_sent,
+        gw.scene_deltas_sent,
+        gw.scene_datagrams_sent,
+        gw.window_relay_rows_composed,
+        gw.window_relay_unplaceable,
+        gw.old_realm_frames_dropped,
+        gw.old_scene_deltas_dropped,
     );
 }
 
 /// Every assertion that must hold at EVERY probe point of the run (the gate's invariant half).
 fn assert_no_unexplained(tag: &str, gw: &GatewayView) {
-    assert_eq!(
-        gw.parity_pose_mismatch, 0,
-        "[{tag}] UNEXPLAINED parity class: composed position differed from the old lane at the \
-         same (realm, tick) — max deviation {} nm. The fold is not reproducing the cascade.",
-        gw.parity_max_pos_dev_nm,
-    );
-    assert_eq!(
-        gw.parity_missing_composed, 0,
-        "[{tag}] UNEXPLAINED parity class: a realm a held window STATES was absent from its \
-         tick's fold — the composer lost a row the old lane carried."
-    );
     assert_eq!(
         gw.window_instant_mismatch, 0,
         "[{tag}] the shear law fired on live data: a mixed-tick fold was attempted"
@@ -242,9 +229,15 @@ fn assert_no_unexplained(tag: &str, gw: &GatewayView) {
     );
     assert_eq!(gw.window_sender_mismatch, 0, "[{tag}] a forged window row");
     assert_eq!(gw.window_misauthored_body, 0, "[{tag}] a mis-authored body");
+    // THE DELETION, in a real cluster: the tombstoned lanes have no producer left, so a shard
+    // speaking either of them lands here — the audit trail the C2 ledger promises.
     assert_eq!(
-        gw.parity_undecodable, 0,
-        "[{tag}] an undecodable old-lane body"
+        gw.old_realm_frames_dropped, 0,
+        "[{tag}] a shard still speaks the TOMBSTONED realm datagram (window lane Slice C2)"
+    );
+    assert_eq!(
+        gw.old_scene_deltas_dropped, 0,
+        "[{tag}] a shard still speaks the TOMBSTONED per-observer scene delta (Slice C2)"
     );
     assert_eq!(
         gw.undecodable, 0,
@@ -252,13 +245,13 @@ fn assert_no_unexplained(tag: &str, gw: &GatewayView) {
     );
 }
 
-/// THE GATE. Boot the demand cluster + two clients, settle at the star (stationary parity +
-/// the shared-fold measurement), fly ONE client into the inner planet (the crossing leg), dwell
-/// (ancestor-row parity through the lineage-derived Child window vs the live cascade), then
-/// assert the class ledger: zero unexplained mismatches, the named exclusion printed, the
-/// exact-cadence and dedup pins nonzero/zero as designed.
+/// THE GATE. Boot the demand cluster + two clients, settle at the star (the shared-fold
+/// measurement), fly ONE client into the inner planet (the crossing leg), dwell on the planet
+/// (the ≥2-level fold through the lineage-derived Child window), then assert the §2.12 pins:
+/// the exact-cadence proof nonzero, the dedup and shear pins zero, the composer carrying real
+/// volume — and the four deleted lanes silent in a real cluster.
 #[test]
-fn the_shadow_composed_picture_reproduces_the_old_lane_with_zero_unexplained_mismatches() {
+fn the_composed_picture_folds_one_chain_at_one_tick_with_the_dead_lanes_silent() {
     // FIRST statement: hold the process tier for the whole body (vd_bins::cluster_tier).
     let _tier = vd_bins::cluster_tier();
     let f = fixture("parity");
@@ -323,12 +316,12 @@ fn the_shadow_composed_picture_reproduces_the_old_lane_with_zero_unexplained_mis
     let settle_deadline = Instant::now() + Duration::from_secs(30);
     let settled = loop {
         let gw = gateway_view(gw_admin).expect("gateway admin snapshot");
-        if (gw.parity_rows_matched >= MATCHED_FLOOR) & (gw.window_folds > 0) {
+        if (gw.window_composed_rows >= COMPOSED_FLOOR) & (gw.window_folds > 0) {
             break gw;
         }
         assert!(
             Instant::now() < settle_deadline,
-            "the comparator never reached the matched floor ({MATCHED_FLOOR}): {gw:?}"
+            "the composer never reached the composed-row floor ({COMPOSED_FLOOR}): {gw:?}"
         );
         std::thread::sleep(Duration::from_millis(250));
     };
@@ -345,12 +338,12 @@ fn the_shadow_composed_picture_reproduces_the_old_lane_with_zero_unexplained_mis
     let roster = world_roster(&p);
     let (planet, elements) = (roster.inner, roster.inner_elements);
     rendezvous_into_planet(devctl_a, &DEV, planet, &elements, FLIGHT_DEADLINE);
-    eprintln!("[parity] client A crossed into {planet:?}; dwelling for ancestor-row parity");
+    eprintln!("[window] client A crossed into {planet:?}; dwelling for the ≥2-level fold");
 
-    // ---- Phase 4: the on-planet dwell — the star's cascade feeds the old lane while the
-    // lineage-derived Child window feeds the composer; both must say the same rows. Poll until
-    // the FULL-CHAIN fold count moves (the exact-cadence pin's direct proof: a ≥2-level fold
-    // exists only when two shard processes stamped identical universe ticks). ----
+    // ---- Phase 4: the on-planet dwell — the lineage-derived Child window on the parent joins
+    // the leaf's own window, so the composer folds a ≥2-level chain. Poll until the FULL-CHAIN
+    // fold count moves (the exact-cadence pin's direct proof: a ≥2-level fold exists only when
+    // two shard processes stamped identical universe ticks). ----
     let full_chain_before = settled.window_full_chain_folds;
     let dwell_deadline = Instant::now() + Duration::from_secs(30);
     let dwelled = loop {
@@ -366,13 +359,13 @@ fn the_shadow_composed_picture_reproduces_the_old_lane_with_zero_unexplained_mis
         );
         std::thread::sleep(Duration::from_millis(250));
     };
-    std::thread::sleep(Duration::from_secs(5)); // accumulate on-planet parity volume
+    std::thread::sleep(Duration::from_secs(5)); // accumulate on-planet compose volume
     let final_gw = gateway_view(gw_admin).expect("gateway admin snapshot");
     print_class_report("final", &final_gw);
     assert_no_unexplained("final", &final_gw);
     assert!(
-        final_gw.parity_rows_matched > dwelled.parity_rows_matched,
-        "the comparator kept matching THROUGH the on-planet dwell: {final_gw:?}"
+        final_gw.window_composed_rows > dwelled.window_composed_rows,
+        "the composer kept folding THROUGH the on-planet dwell: {final_gw:?}"
     );
     assert!(
         final_gw.window_full_chain_folds > full_chain_before,
@@ -383,11 +376,11 @@ fn the_shadow_composed_picture_reproduces_the_old_lane_with_zero_unexplained_mis
         "the engine consumed and composed real volume: {final_gw:?}"
     );
     eprintln!(
-        "[parity] GREEN: {} rows matched bit-identically, 0 unexplained mismatches; \
-         sibling-interior exclusion class counted {} (the recorded Q2-carrier gap, D-WINDOW-1); \
-         full-chain folds {} (exact-cadence pin), dedup max dev {} nm, fold divergence 0.",
-        final_gw.parity_rows_matched,
-        final_gw.parity_sibling_interior_excluded,
+        "[window] GREEN: {} rows composed across {} folds; full-chain folds {} (the exact-cadence \
+         pin), dedup max dev {} nm with 0 disagreements, fold divergence 0, shear mismatches 0; \
+         the four deleted scenery lanes stayed silent (old realm frames 0, old scene deltas 0).",
+        final_gw.window_composed_rows,
+        final_gw.window_folds,
         final_gw.window_full_chain_folds,
         final_gw.window_dedup_max_dev_nm,
     );

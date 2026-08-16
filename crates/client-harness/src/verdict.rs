@@ -267,9 +267,10 @@ mod tests {
         BOX_ALPHA, MAX_NEST_DEPTH, RealmBox, SceneError, to_render_prims,
     };
     use vd_core::entity_kind::EntityKind;
-    use vd_core::geometry::{CrossEffect, RealmBoundary};
+    use vd_core::geometry::Boundary;
     use vd_core::pose::{FrameRef, LatticePos, StampedPose};
     use vd_core::{TickId, UniverseTick};
+    use vd_wire::channels::SceneRow;
     use vd_wire::channels::SubId;
     use vd_wire::channels::{EntitySnap, SnapshotDatagram};
 
@@ -277,39 +278,46 @@ mod tests {
         EntityId::pack(EntityKind::Player, 1, seq, seq as u32)
     }
 
-    /// A scene with one Shell realm (System 7, r=1000 at origin) and one Aabb realm
-    /// (Station 9, half=(50,50,50) offset at x=5000).
-    fn two_realm_scene() -> RealmScene {
-        RealmScene::from_boundaries(&[
-            RealmBoundary::shell(
-                RealmId::System(7),
-                LatticePos::local(DVec3::ZERO),
-                1000.0,
-                1.15,
-                1.30,
-                0.0,
-                0.05,
-                0.5,
-                1.0,
-                None,
-                RealmId::System(7),
-                CrossEffect::Authority,
+    /// One composed row with a self-authored look at `center` (post-flag-day fixture: the scene
+    /// is built from SceneRows alone — the boundary/boot types never reach the client any more).
+    fn look_row(
+        realm: RealmId,
+        parent: Option<RealmId>,
+        center: DVec3,
+        outline: Boundary,
+    ) -> SceneRow {
+        SceneRow {
+            realm,
+            parent,
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                center,
+                UniverseTick(1),
             ),
-            RealmBoundary::aabb(
-                RealmId::Station(9),
-                LatticePos::local(DVec3::new(5000.0, 0.0, 0.0)),
-                DVec3::new(50.0, 50.0, 50.0),
-                1.15,
-                1.30,
-                0.0,
-                0.05,
-                0.5,
-                1.0,
+            bag: vd_core::look::look_bag(&outline),
+        }
+    }
+
+    /// A scene with one Shell realm (System 7, r=100 at origin) and one Aabb realm
+    /// (Station 9, half=(50,50,50) offset at x=500) — both inside the renderable ceiling
+    /// (post-flag-day the row's LOOK is skipped past `MAX_RENDERABLE_EXTENT_M`, exactly like the
+    /// live composed level's ambient shells).
+    fn two_realm_scene() -> RealmScene {
+        RealmScene::from_scene_rows(&[
+            look_row(
+                RealmId::System(7),
                 None,
+                DVec3::ZERO,
+                Boundary::Shell { r: 100.0 },
+            ),
+            look_row(
                 RealmId::Station(9),
-                CrossEffect::Authority,
-            )
-            .expect("aabb"),
+                None,
+                DVec3::new(500.0, 0.0, 0.0),
+                Boundary::Aabb {
+                    half: DVec3::new(50.0, 50.0, 50.0),
+                },
+            ),
         ])
         .expect("scene")
     }
@@ -317,38 +325,38 @@ mod tests {
     #[test]
     fn entity_in_box_reuses_core_geometry_for_sphere_and_box() {
         let scene = two_realm_scene();
-        // Inside the sphere (origin, r=1000).
+        // Inside the sphere (origin, r=100).
         assert!(entity_in_box(
             &scene,
-            DVec3::new(500.0, 0.0, 0.0),
+            DVec3::new(50.0, 0.0, 0.0),
             RealmId::System(7)
         ));
         // On the sphere surface (== r) is inside (<= 0).
         assert!(entity_in_box(
             &scene,
-            DVec3::new(1000.0, 0.0, 0.0),
+            DVec3::new(100.0, 0.0, 0.0),
             RealmId::System(7)
         ));
         // Just outside the sphere.
         assert!(!entity_in_box(
             &scene,
-            DVec3::new(1000.1, 0.0, 0.0),
+            DVec3::new(100.1, 0.0, 0.0),
             RealmId::System(7)
         ));
-        // Inside the box (center 5000, half 50).
+        // Inside the box (center 500, half 50).
         assert!(entity_in_box(
             &scene,
-            DVec3::new(5000.0, 0.0, 0.0),
+            DVec3::new(500.0, 0.0, 0.0),
             RealmId::Station(9)
         ));
         assert!(entity_in_box(
             &scene,
-            DVec3::new(5050.0, 0.0, 0.0),
+            DVec3::new(550.0, 0.0, 0.0),
             RealmId::Station(9)
         ));
         assert!(!entity_in_box(
             &scene,
-            DVec3::new(5051.0, 0.0, 0.0),
+            DVec3::new(551.0, 0.0, 0.0),
             RealmId::Station(9)
         ));
         // A realm not in the scene → false (the None arm).
@@ -363,13 +371,13 @@ mod tests {
             expected_box(&scene, DVec3::new(0.0, 0.0, 0.0)),
             Some(RealmId::System(7))
         );
-        // At x=5000 it is in the Station box (the crossing destination).
+        // At x=500 it is in the Station box (the crossing destination).
         assert_eq!(
-            expected_box(&scene, DVec3::new(5000.0, 0.0, 0.0)),
+            expected_box(&scene, DVec3::new(500.0, 0.0, 0.0)),
             Some(RealmId::Station(9))
         );
         // Between the two, inside neither → None.
-        assert_eq!(expected_box(&scene, DVec3::new(3000.0, 0.0, 0.0)), None);
+        assert_eq!(expected_box(&scene, DVec3::new(300.0, 0.0, 0.0)), None);
     }
 
     #[test]
@@ -378,37 +386,23 @@ mod tests {
         // the deeper (child) wins (nesting semantics).
         let parent = RealmId::Station(1);
         let child = RealmId::System(2);
-        let scene = RealmScene::from_boundaries(&[
-            RealmBoundary::aabb(
+        let scene = RealmScene::from_scene_rows(&[
+            look_row(
                 parent,
-                LatticePos::local(DVec3::ZERO),
-                DVec3::splat(100.0),
-                1.15,
-                1.30,
-                0.0,
-                0.05,
-                0.5,
-                1.0,
                 None,
-                parent,
-                CrossEffect::Authority,
-            )
-            .expect("parent"),
-            RealmBoundary::aabb(
+                DVec3::ZERO,
+                Boundary::Aabb {
+                    half: DVec3::splat(100.0),
+                },
+            ),
+            look_row(
                 child,
-                LatticePos::local(DVec3::ZERO),
-                DVec3::splat(10.0),
-                1.15,
-                1.30,
-                0.0,
-                0.05,
-                0.5,
-                1.0,
                 Some(parent),
-                child,
-                CrossEffect::Authority,
-            )
-            .expect("child"),
+                DVec3::ZERO,
+                Boundary::Aabb {
+                    half: DVec3::splat(10.0),
+                },
+            ),
         ])
         .expect("scene");
         // A point inside BOTH resolves to the child (depth 1 > depth 0).
@@ -702,34 +696,16 @@ mod tests {
     #[test]
     fn to_render_prims_and_membership_agree_on_the_same_box() {
         // A sanity bridge: a RealmBox's membership (V1) is consistent with where V0 places it.
-        let rbox = RealmBox {
-            shape: BoxShape::Box {
-                half: DVec3::splat(10.0),
-            },
-            frame: FrameRef::StationLocal { station_seed: 1 },
-            tier: stated_tier(FrameRef::StationLocal { station_seed: 1 }),
-            center: LatticePos::local(DVec3::new(100.0, 0.0, 0.0)),
-            parent: None,
-            depth: 0,
-            color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
-        };
         let scene = {
-            // Reconstruct a one-box scene by hand via a boundary so entity_in_box has a realm key.
-            RealmScene::from_boundaries(&[RealmBoundary::aabb(
+            // Reconstruct a one-box scene from a composed row so entity_in_box has a realm key.
+            RealmScene::from_scene_rows(&[look_row(
                 RealmId::Station(1),
-                rbox.center,
-                DVec3::splat(10.0),
-                1.15,
-                1.30,
-                0.0,
-                0.05,
-                0.5,
-                1.0,
                 None,
-                RealmId::Station(1),
-                CrossEffect::Authority,
-            )
-            .expect("aabb")])
+                DVec3::new(100.0, 0.0, 0.0),
+                Boundary::Aabb {
+                    half: DVec3::splat(10.0),
+                },
+            )])
             .expect("scene")
         };
         assert!(entity_in_box(
@@ -744,31 +720,24 @@ mod tests {
         ));
     }
 
-    /// A unit `Aabb` boundary for `realm` with `parent` — a local helper for the scene-error paths
-    /// below (the client-harness test binary must exercise `from_boundaries`' full branch surface,
-    /// HR5 rule (c): a linked crate's branches must be hit in every binary that instantiates them).
-    fn aabb_b(realm: RealmId, parent: Option<RealmId>) -> RealmBoundary {
-        RealmBoundary::aabb(
+    /// A unit `Aabb` composed row for `realm` with `parent` — a local helper for the scene-error
+    /// paths below (the client-harness test binary exercises `from_scene_rows`' full branch
+    /// surface too, HR5 rule (c)).
+    fn aabb_b(realm: RealmId, parent: Option<RealmId>) -> SceneRow {
+        look_row(
             realm,
-            LatticePos::local(DVec3::ZERO),
-            DVec3::splat(1.0),
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
             parent,
-            realm,
-            CrossEffect::Authority,
+            DVec3::ZERO,
+            Boundary::Aabb {
+                half: DVec3::splat(1.0),
+            },
         )
-        .expect("aabb")
     }
 
     #[test]
-    fn from_boundaries_rejects_a_duplicate_realm_in_this_binary() {
-        // Covers `from_boundaries`' duplicate-reject arm from the client-harness binary too.
-        let err = RealmScene::from_boundaries(&[
+    fn from_scene_rows_rejects_a_duplicate_realm_in_this_binary() {
+        // Covers `from_scene_rows`' duplicate-reject arm from the client-harness binary too.
+        let err = RealmScene::from_scene_rows(&[
             aabb_b(RealmId::Station(3), None),
             aabb_b(RealmId::Station(3), None),
         ])
@@ -777,9 +746,9 @@ mod tests {
     }
 
     #[test]
-    fn from_boundaries_treats_an_out_of_scene_parent_as_a_root_in_this_binary() {
+    fn from_scene_rows_treats_an_out_of_scene_parent_as_a_root_in_this_binary() {
         // Covers `depth_of`'s out-of-scene-parent FALSE arm (parent not in the map) from this binary.
-        let scene = RealmScene::from_boundaries(&[aabb_b(
+        let scene = RealmScene::from_scene_rows(&[aabb_b(
             RealmId::Station(4),
             Some(RealmId::System(99)), // System(99) absent from the set → the chain roots here
         )])
@@ -788,11 +757,11 @@ mod tests {
     }
 
     #[test]
-    fn from_boundaries_bounds_a_parent_cycle_in_this_binary() {
+    fn from_scene_rows_bounds_a_parent_cycle_in_this_binary() {
         // Covers `depth_of`'s depth-ceiling TRUE arm (the cycle guard fires) from this binary.
         let a = RealmId::System(21);
         let b = RealmId::System(22);
-        let err = RealmScene::from_boundaries(&[aabb_b(a, Some(b)), aabb_b(b, Some(a))])
+        let err = RealmScene::from_scene_rows(&[aabb_b(a, Some(b)), aabb_b(b, Some(a))])
             .expect_err("cycle must reject");
         assert_eq!(err, SceneError::CycleOrDepthExceeded);
         // The ceiling const is the documented bound (referenced so the guard's intent is asserted).
@@ -805,7 +774,8 @@ mod tests {
         // client-harness binary — both tessellation paths must execute here, not only in vd-client.
         let sphere = RealmBox {
             shape: BoxShape::Sphere { r: 3.0 },
-            frame: FrameRef::SystemSpace { system_seed: 1 },
+            body: vd_client::realm_scene::BodyKind::Look,
+            luma: None,
             tier: stated_tier(FrameRef::SystemSpace { system_seed: 1 }),
             center: LatticePos::local(DVec3::ZERO),
             parent: None,
@@ -824,7 +794,8 @@ mod tests {
             shape: BoxShape::Box {
                 half: DVec3::splat(2.0),
             },
-            frame: FrameRef::SystemSpace { system_seed: 1 },
+            body: vd_client::realm_scene::BodyKind::Look,
+            luma: None,
             tier: stated_tier(FrameRef::SystemSpace { system_seed: 1 }),
             center: LatticePos::local(DVec3::ZERO),
             parent: None,
@@ -838,35 +809,51 @@ mod tests {
     }
 
     #[test]
-    fn from_boxes_json_loads_and_rejects_in_this_binary() {
-        // Covers `from_boxes_json`'s regions from the client-harness binary too (HR5(c)): in prod it
-        // is CALLED only by the client bin (coverage-exempt `/bin/`), so without this the harness
-        // binary's linked copy stays count=0. Happy: the SAME Vec<RealmBoundary> the shard plants,
-        // serialized, loads the box; error: a malformed string is a LOUD MalformedJson, never a
-        // silent empty. Discriminant equality (not `matches!`) keeps the error arm coverable.
-        let boundaries = [RealmBoundary::aabb(
-            RealmId::Station(3),
-            LatticePos::local(DVec3::ZERO),
-            DVec3::splat(10.0),
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            None,
-            RealmId::Station(3),
-            CrossEffect::Authority,
-        )
-        .expect("valid band")];
-        let json = serde_json::to_string(&boundaries).expect("serialize the plant");
-        let scene = RealmScene::from_boxes_json(&json).expect("loads the plant JSON");
-        assert_eq!(scene.len(), 1);
-        let err = RealmScene::from_boxes_json("not json at all").expect_err("malformed rejects");
+    fn the_row_presence_gate_draws_looks_and_markers_and_skips_bagless_in_this_binary() {
+        // The `from_boxes_json` loader this test used to cover is DELETED with the boot file
+        // (Slice C1, D-LANE-6 🟩) — its rewritten subject is the ONE loader left: the composed
+        // row's presence gate, exercised from the client-harness binary too (HR5(c)): a look row
+        // draws as a body, a luma row as a zero-extent marker point, a bagless row is tracked but
+        // never drawn.
+        let marker_row = SceneRow {
+            realm: RealmId::Planet(9),
+            parent: Some(RealmId::System(7)),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::new(30.0, 0.0, 0.0),
+                UniverseTick(1),
+            ),
+            bag: vd_core::look::luma_bag(3, 0.25),
+        };
+        let bagless_row = SceneRow {
+            realm: RealmId::Planet(10),
+            parent: Some(RealmId::System(7)),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::new(40.0, 0.0, 0.0),
+                UniverseTick(1),
+            ),
+            bag: Vec::new(),
+        };
+        let scene = RealmScene::from_scene_rows(&[
+            look_row(
+                RealmId::System(7),
+                None,
+                DVec3::ZERO,
+                Boundary::Shell { r: 40.0 },
+            ),
+            marker_row,
+            bagless_row,
+        ])
+        .expect("the level projects");
+        assert_eq!(scene.len(), 2, "the bagless row is tracked, never drawn");
+        let marker = scene.get(RealmId::Planet(9)).expect("the marker point");
+        assert_eq!(marker.body, vd_client::realm_scene::BodyKind::Marker);
+        assert_eq!(marker.shape, BoxShape::Sphere { r: 0.0 });
+        assert_eq!(marker.luma, Some((3, 0.25)));
         assert_eq!(
-            std::mem::discriminant(&err),
-            std::mem::discriminant(&SceneError::MalformedJson(String::new())),
-            "malformed JSON is a loud MalformedJson, not a silent empty",
+            scene.get(RealmId::System(7)).expect("the body").body,
+            vd_client::realm_scene::BodyKind::Look,
         );
     }
 }

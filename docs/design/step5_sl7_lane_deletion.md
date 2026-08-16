@@ -1,3 +1,12 @@
+> ★ HISTORICAL RECORD (superseded 2026-08-16 by the WINDOW LANE, `docs/design/window_lane.md`).
+> This document designed the Step-5 lane cure and the lanes it landed — `RealmObservation`,
+> `RealmShapeObservation`, `ChildSceneSet`, and the `RealmCascade` they ran beside. Window lane
+> Slice C2 (mesh minor 19, owner-approved 2026-08-16) DELETED all four: no scenery crosses a realm
+> boundary any more, and the SL1 self-placement filter this document's reflect needed retired WITH
+> its lane by the owner's Q3 ruling (`window_lane.md` §5 RULINGS). What survives from here is the
+> SL7 occupancy bit (`ChildLive`) and the two-level law, both pinned on the window lane's own
+> statements. Read everything below as provenance, never as contract.
+
 # Step 5 — SL7 liveness/interest, and the deletion of both occupant relay lanes
 
 **OWNER-DECIDED 2026-08-12 — §8 answers:** (1) all three wire changes APPROVED (ChildLive,

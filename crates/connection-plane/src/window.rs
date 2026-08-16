@@ -1,8 +1,11 @@
-//! THE WINDOW LANE's composition engine — Slice B, SHADOW mode (`docs/design/window_lane.md`
-//! §2.6; owner-approved 2026-08-15/16, five-topic walk §4.5). The gateway stacks each observer's
-//! chain of attested window statements at ONE universe tick and produces the composed picture.
-//! In this slice the output is MEASURED against the live old-lane feed and never shipped to any
-//! client (§4 Slice B: "Output compared — never shipped").
+//! THE WINDOW LANE's composition engine (`docs/design/window_lane.md` §2.6; owner-approved
+//! 2026-08-15/16, five-topic walk §4.5). The gateway stacks each observer's chain of attested
+//! window statements at ONE universe tick and produces the composed picture.
+//!
+//! It landed in Slice B measured against the old inter-realm lanes and shipped to nobody; the
+//! Slice-C1 flag day made its output the client's scene feed; Slice C2 deleted the lanes it was
+//! measured against, and the shadow-parity comparator retired with them (its measurement ran and
+//! is recorded in D-WINDOW-1). This is now the ONLY place a picture is composed.
 //!
 //! STRUCTURAL GUARDS (§2.6.1), where each lives:
 //! 1. Dependency gate — this crate carries NO normal `vd-physics` edge (pinned by
@@ -28,11 +31,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use vd_core::frame::{FrameError, transfer_frame};
+use vd_core::Fence;
+use vd_core::frame::{FrameError, FramePlacement, transfer_frame};
 use vd_core::ids::UniverseTick;
 use vd_core::placement::PlacementBook;
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
-use vd_wire::channels::RealmSnap;
+use vd_wire::channels::{RealmSnap, SceneRow};
 use vd_wire::session_flow::{BodyStmt, HopRow, WindowId, WindowScope};
 
 /// The ONE config home for every derived bound the composer uses (§2.6.7: "One `WindowTuning`
@@ -49,15 +53,7 @@ pub struct WindowTuning {
     /// How long a held stratum may hold before the dead-hop exit removes it (§2.6.4): the same
     /// 2-beats-+-1 confirmation window after which the shard side would have TTL-expired the fan.
     pub hold_ttl_ticks: u64,
-    /// The parity comparator's pending-row cap (rows waiting for their tick's fold before being
-    /// classified): one ring span of full-MTU levels; beyond it the oldest is shed LOUD
-    /// (`parity_pending_shed`), never silently.
-    pub pending_cap: usize,
 }
-
-/// One datagram's worth of realm rows is bounded by the MTU partitioner; a ring span of such
-/// levels bounds the parity comparator's wait queue. Derived per [`WindowTuning::derive`].
-const PENDING_LEVEL_ROWS: usize = 64;
 
 impl WindowTuning {
     /// Derive every bound from the one keep-alive beat (ticks). `beat` is already itself derived
@@ -68,9 +64,6 @@ impl WindowTuning {
         WindowTuning {
             ring_span_ticks: two_beats_one,
             hold_ttl_ticks: two_beats_one,
-            // A saturating widening (a cast, no fallible branch): the beat is a small tick
-            // count; saturation rather than wrap keeps a hostile config from minting a tiny cap.
-            pending_cap: (two_beats_one as usize).saturating_mul(PENDING_LEVEL_ROWS),
         }
     }
 }
@@ -117,6 +110,16 @@ pub struct WindowIngest {
     /// stored now, read by Slice C1; the composed placement rows are deliberately NOT filtered
     /// by it: markers/placements always ship the full roster, §2.2).
     members: BTreeSet<RealmId>,
+    /// The Q2 relay's per-child holdings on the PARENT's window (mesh minor 17; owner-approved
+    /// 2026-08-16 — owner_decisions_2026-08-15.md addendum + window_lane.md §5 RULINGS): the
+    /// newest relayed interior LEVEL per live child (the child's own authored rows in its OWN
+    /// frame — also the attested roster its relayed markers are vouched against). Stored for the
+    /// Slice-D interior compose; the relayed BODY statements land in `look_of`/`marker_of` like
+    /// every other admitted body (the §2.8 marker⇒look handover needs nothing new downstream).
+    relay_levels: BTreeMap<RealmId, (UniverseTick, Vec<RealmSnap>)>,
+    /// The newest CHILD fence seen per relayed child — the zombie guard (a deposed incarnation's
+    /// relay is refused; carried, never authorizing).
+    relay_fence: BTreeMap<RealmId, Fence>,
 }
 
 impl WindowIngest {
@@ -227,6 +230,60 @@ impl WindowIngest {
     #[must_use]
     pub fn members(&self) -> &BTreeSet<RealmId> {
         &self.members
+    }
+
+    /// Admit one relayed child fence (the Q2 zombie guard): `true` iff `fence` is not stale
+    /// against the newest seen for `child` (records the new high-water on admit). A refusal is
+    /// counted by the caller (`window_relay_stale`), never patched.
+    pub fn admit_relay_fence(&mut self, child: RealmId, fence: Fence) -> bool {
+        if self
+            .relay_fence
+            .get(&child)
+            .is_some_and(|held| fence.is_stale_against(*held))
+        {
+            return false;
+        }
+        self.relay_fence.insert(child, fence);
+        true
+    }
+
+    /// Store one relayed interior level for `child` (newest `at` wins — an older relayed level
+    /// is refused, `false`, counted by the caller like `ingest_body`'s staleness).
+    pub fn ingest_relay_level(
+        &mut self,
+        child: RealmId,
+        at: UniverseTick,
+        rows: Vec<RealmSnap>,
+    ) -> bool {
+        if self
+            .relay_levels
+            .get(&child)
+            .is_some_and(|(held_at, _)| *held_at > at)
+        {
+            return false;
+        }
+        self.relay_levels.insert(child, (at, rows));
+        true
+    }
+
+    /// Every relayed live-child interior this window currently holds — `(child, at, rows)`,
+    /// newest level per child (§2.6.5 step 4's raw material; the compose gates each by the
+    /// membership verdict, never here).
+    pub fn relayed_levels(&self) -> impl Iterator<Item = (RealmId, UniverseTick, &[RealmSnap])> {
+        self.relay_levels
+            .iter()
+            .map(|(child, (at, rows))| (*child, *at, rows.as_slice()))
+    }
+
+    /// The relayed child's own attested roster (from its newest relayed level) — what its
+    /// relayed MARKER statements are vouched against (empty before the first level: fail-closed,
+    /// exactly like [`WindowIngest::roster_set`]).
+    #[must_use]
+    pub fn relay_child_roster(&self, child: RealmId) -> BTreeSet<RealmId> {
+        self.relay_levels
+            .get(&child)
+            .map(|(_, rows)| rows.iter().map(|r| r.realm).collect())
+            .unwrap_or_default()
     }
 
     /// The newest look bag stated about `subject`, if any (presence IS the draw law's gate).
@@ -394,6 +451,13 @@ pub struct Composed {
     /// How many chain levels actually folded fresh (≤ the requested prefix — an invalid hop caps
     /// it). The exact-cadence pin reads folds where this equals the full chain length.
     pub fresh_levels: usize,
+    /// §2.6.5 step 4 (Q2 = PARENT RELAY): relayed live-child interior rows COMPOSED into this
+    /// fold — each mapped through `X_k ∘ placement(c)` at the relay's own stamp.
+    pub relay_rows: u64,
+    /// A relayed interior refused because its stamp fell off the chain rings, its child had no
+    /// placement row at that stamp, or a hop below was invalid there — dropped, counted, healed
+    /// by the child's next relay (§2.6.6: every class its own row).
+    pub relay_unplaceable: u64,
 }
 
 /// The position gap between two composed poses, in nanometres, saturating. The §2.12 agreement
@@ -501,8 +565,132 @@ pub fn compose(
         }
         out.fresh_levels = k + 1;
     }
+    // §2.6.5 STEP 4 (Q1 = YES-generic, Q2 = PARENT RELAY — §5 RULINGS, owner 2026-08-16): each
+    // fresh stratum's RELAYED live-child interiors join the fold. A relayed row is the child's
+    // OWN authored statement in its OWN frame (verbatim, sealed — the parent never re-stated
+    // it); the stratum author's level AT THE RELAY'S OWN STAMP supplies `placement(c)` and the
+    // descent below re-runs at that same stamp, so every conversion still composes exactly-
+    // stamped pairs (§2.6.3's instant law — nothing here mixes two times). The composed row
+    // keeps the relay's stamp, declared per row like a held stratum's (§2.6.4); the one relay
+    // hop of look latency this stamps in is exactly the Q2-budgeted cost. STEP 5 gates the
+    // interior by membership: a child beyond the stratum's shipped SL7 verdict draws nothing
+    // (the flag day closed the beyond-visibility interiors fan for good).
+    for k in 0..out.fresh_levels {
+        // `.get`, not an index: the pure-fold units drive `compose` with bare levels and no
+        // ingest state (relays then simply don't exist); the live caller always aligns the two.
+        let Some(ingest) = ingests.get(k) else {
+            continue;
+        };
+        for (child, at, crows) in ingest.relayed_levels() {
+            if authors.contains(&child) {
+                continue; // a chain member's interior rides its own window, never a relay
+            }
+            if !ingest.members().contains(&child) {
+                continue; // step 5: beyond visibility ⇒ tracked nowhere (lawful, uncounted)
+            }
+            let Some((rframes, rbooks)) = descent_at(origin_frame, authors, ingests, k, at) else {
+                out.relay_unplaceable += 1;
+                continue;
+            };
+            let Some(placement) = ingest
+                .level_at(at)
+                .and_then(|l| l.rows.iter().find(|r| r.realm == child))
+            else {
+                out.relay_unplaceable += 1;
+                continue;
+            };
+            let c_frame = placement.frame;
+            // The parent-authored placement of the relayed child, as the one hop book entry —
+            // orientation/velocity carried from the authored row; angular velocity is not on the
+            // level wire (identity through P3; the rotated-hop composition is the ledgered P10
+            // owe, exactly like `HopRow::inv`'s note).
+            let hop_book = PlacementBook::new(
+                rframes[k],
+                at,
+                vec![(
+                    c_frame,
+                    FramePlacement {
+                        origin_cell: placement.pose.pos.cell(),
+                        origin: placement.pose.pos.offset(),
+                        velocity: placement.pose.vel,
+                        orientation: placement.pose.orient,
+                        angular_velocity: vd_core::glam::DVec3::ZERO,
+                    },
+                )],
+            );
+            for row in crows {
+                if row.realm == origin {
+                    // The origin never ships a row (§2.4) — a relayed statement naming it is
+                    // dropped like the chain's own origin roster row (uncounted, lawful).
+                    continue;
+                }
+                if row.pose.frame != c_frame {
+                    out.alien_rows += 1;
+                    continue;
+                }
+                // ONE fallible pipeline, ONE refusal arm (HR5): the hop transfer feeds the chain
+                // descent through `and_then`, so a refusal at either stage lands on the same
+                // counted arm (the descent stage alone cannot fail until P10's rotated hops —
+                // its books are anchored identities at the relay's own stamp).
+                let mapped = transfer_frame(&row.pose, rframes[k], &hop_book)
+                    .and_then(|p| map_down(&p, &rframes, &rbooks, k));
+                let pose = match mapped {
+                    Ok(pose) => pose,
+                    Err(e) => {
+                        count_refusal(&mut out, e);
+                        continue;
+                    }
+                };
+                let composed = ComposedRow {
+                    realm: row.realm,
+                    frame: row.frame,
+                    pose,
+                    stratum: k,
+                    body: body_tag(row.realm, ingests),
+                };
+                if let Some(existing) = rows.get(&row.realm) {
+                    // A realm the chain already states (its parent's own child row) keeps the
+                    // chain's placement; the relayed copy is the §2.12 agreement measurement.
+                    measure_agreement(&mut out, &existing.pose, &composed.pose);
+                    continue;
+                }
+                out.relay_rows += 1;
+                rows.insert(row.realm, composed);
+            }
+        }
+    }
     out.rows = rows.into_values().collect();
     out
+}
+
+/// The descent frames+books for strata `0..=k`, rebuilt AT `at` (a relayed interior's own
+/// stamp): the identical walk [`compose`]'s main loop runs at T, refusing (`None`) when any
+/// ring no longer retains `at` or a hop is invalid there — the caller counts one
+/// `relay_unplaceable` and the child's next relay self-heals.
+fn descent_at(
+    origin_frame: FrameRef,
+    authors: &[RealmId],
+    ingests: &[&WindowIngest],
+    k: usize,
+    at: UniverseTick,
+) -> Option<(Vec<FrameRef>, Vec<PlacementBook>)> {
+    let mut frames = vec![origin_frame];
+    let mut books = Vec::new();
+    for j in 1..=k {
+        let level = ingests.get(j)?.level_at(at)?;
+        let hop = level.hop.as_ref()?;
+        if hop.child != authors[j - 1] {
+            return None;
+        }
+        let frame = level.rows.first().map(|r| r.pose.frame)?;
+        books.push(PlacementBook::new(
+            frames[j - 1],
+            at,
+            vec![(frame, hop.inv)],
+        ));
+        frames.push(frame);
+    }
+    Some((frames, books))
 }
 
 /// Map one pose from level `k`'s frame down to the origin frame, one `transfer_frame` per hop —
@@ -551,13 +739,65 @@ fn body_tag(realm: RealmId, ingests: &[&WindowIngest]) -> BodyTag {
     BodyTag::Placement
 }
 
-/// One old-lane row waiting for its tick's fold (the parity comparator's queue): the realm, its
-/// head frame and its shipped pose (tail = the frame the old feed states — compared against the
-/// composed level at the row's own stamp).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PendingRow {
-    pub realm: RealmId,
-    pub pose: StampedPose,
+/// THE BAG SELECTION (§2.6.5 steps 5–6, LIVE since Slice C1): the TLV bag a composed row ships
+/// with. A SELF-LOOK attaches iff one was received (only the realm itself can have shipped one —
+/// admission) AND the realm passes the membership gate (`members` ∪ the chain authors — §2.2:
+/// membership gates BODIES; the origin and its ancestors are always drawn). Else the parent's
+/// MARKER (never membership-filtered — stars stay in the sky by construction). Else EMPTY: the
+/// realm is tracked but not drawn (a missing statement means the thing is not drawn — THE DRAW
+/// LAW by absence of data; a third pixel source is unrepresentable in the wire types).
+#[must_use]
+pub fn scene_bag(realm: RealmId, authors: &[RealmId], ingests: &[&WindowIngest]) -> Vec<u8> {
+    let member = authors.contains(&realm) || ingests.iter().any(|i| i.members().contains(&realm));
+    if member && let Some(look) = ingests.iter().find_map(|i| i.look_of(realm)) {
+        return look.to_vec();
+    }
+    if let Some(luma) = ingests.iter().find_map(|i| i.marker_of(realm)) {
+        return luma.to_vec();
+    }
+    Vec::new()
+}
+
+/// The hierarchy parent of one composed row (§2.4 `SceneRow.parent` — identity only, never a
+/// position): a child row's parent is its stratum's author; a chain BODY row (the realm IS its
+/// stratum's author) parents one level up; the root's body has none.
+#[must_use]
+pub fn scene_parent(row: &ComposedRow, authors: &[RealmId]) -> Option<RealmId> {
+    if authors.get(row.stratum) == Some(&row.realm) {
+        authors.get(row.stratum + 1).copied()
+    } else {
+        authors.get(row.stratum).copied()
+    }
+}
+
+/// THE COMPOSED LEVEL'S ROWS (§2.4/§2.6.5 step 8, LIVE since Slice C1): the ORIGIN's own row
+/// first — pose ZERO in its own frame at `t`, its self-look attached (the observer stands inside
+/// it and sees its shell around them; "it draws from its look at the origin marker") — then every
+/// fresh and held composed row, each with its hierarchy parent and its bag. The origin never
+/// rides the per-tick DATAGRAM (a `RealmSnap` whose head equals its tail is banned); it rides the
+/// LEVEL alone, where a [`SceneRow`] states exactly one frame.
+#[must_use]
+pub fn scene_level_rows(
+    origin: RealmId,
+    origin_frame: FrameRef,
+    t: UniverseTick,
+    authors: &[RealmId],
+    ingests: &[&WindowIngest],
+    scene: &ShadowScene,
+) -> Vec<SceneRow> {
+    let mut rows = vec![SceneRow {
+        realm: origin,
+        parent: authors.get(1).copied(),
+        pose: StampedPose::at_rest(origin_frame, vd_core::glam::DVec3::ZERO, t),
+        bag: scene_bag(origin, authors, ingests),
+    }];
+    rows.extend(scene.drawn_rows().map(|row| SceneRow {
+        realm: row.realm,
+        parent: scene_parent(row, authors),
+        pose: row.pose,
+        bag: scene_bag(row.realm, authors, ingests),
+    }));
+    rows
 }
 
 /// One stratum held at its last composed poses (§2.6.4): sky above the fault holds; each row
@@ -598,12 +838,10 @@ pub struct ShadowScene {
     pub last_t: Option<UniverseTick>,
     /// Strata above the fresh boundary, held at their last composed poses (old stamps explicit).
     pub held: Vec<HeldStratum>,
-    /// The fresh folds, ascending by tick, retained one ring span — the parity lookup surface.
+    /// The fresh folds, ascending by tick, retained one ring span.
     pub ring: VecDeque<Composed>,
-    /// Old-lane rows waiting for their tick's fold (bounded by the derived cap).
-    pub pending: VecDeque<PendingRow>,
-    /// Did the chain cover the session's whole lineage when last derived? (The parity
-    /// comparator's `unwindowed ancestor` class hinges on this.)
+    /// Did the chain cover the session's whole lineage when last derived? (Diagnostic: a chain
+    /// that does not yet reach the root is composing a partial sky, and the composer says so.)
     pub chain_covers_lineage: bool,
 }
 
@@ -619,22 +857,21 @@ impl ShadowScene {
     ) -> AdvanceReport {
         let mut report = AdvanceReport::default();
         if self.origin != Some(origin) {
-            // A CROSSING: the picture's frame changed, so nothing previously composed (or
-            // queued for comparison) is expressible any more — reset whole (§2.7: the epoch
-            // bump is the client's atomic-swap signal in Slice C1).
+            // A CROSSING: the picture's frame changed, so nothing previously composed is
+            // expressible any more — reset whole (§2.7: the epoch bump is the client's
+            // atomic-swap signal).
             self.origin = Some(origin);
             self.chain_authors = authors.to_vec();
             self.origin_epoch += 1;
             self.ring.clear();
             self.held.clear();
-            self.pending.clear();
             self.last_t = None;
             report.epoch_bumped = true;
         } else if self.chain_authors != authors {
             // The chain changed under the SAME origin (a hop confirmed, or a dead level left):
             // the epoch still bumps (§2.7 — the composed level's shape changed), but every
-            // already-composed row is still expressed in the SAME origin frame, so the ring and
-            // the comparator's queue stay; only strata of departed authors leave the hold.
+            // already-composed row is still expressed in the SAME origin frame, so the ring
+            // stays; only strata of departed authors leave the hold.
             self.chain_authors = authors.to_vec();
             self.origin_epoch += 1;
             self.held.retain(|h| authors.contains(&h.author));
@@ -704,7 +941,18 @@ impl ShadowScene {
         report
     }
 
-    /// The fresh fold at exactly `t`, if the ring retains it (the parity lookup).
+    /// THE DRAWN SET (LIVE since Slice C1): the newest fresh fold's rows plus every held
+    /// stratum's rows — exactly what the composed level and the per-tick datagram carry (held
+    /// rows keep their OLD stamps explicitly, §2.6.4: stale-by-declaration, never silently mixed).
+    pub fn drawn_rows(&self) -> impl Iterator<Item = &ComposedRow> + '_ {
+        self.ring
+            .back()
+            .into_iter()
+            .flat_map(|c| c.rows.iter())
+            .chain(self.held.iter().flat_map(|h| h.rows.iter()))
+    }
+
+    /// The fresh fold at exactly `t`, if the ring retains it.
     #[must_use]
     pub fn fold_at(&self, t: UniverseTick) -> Option<&Composed> {
         self.ring
@@ -717,83 +965,6 @@ impl ShadowScene {
     #[must_use]
     pub fn newest(&self) -> Option<UniverseTick> {
         self.ring.back().map(|c| c.at)
-    }
-
-    /// Queue one old-lane row for comparison, shedding the oldest LOUD when the derived cap is
-    /// hit (returns how many were shed — `parity_pending_shed`).
-    pub fn push_pending(&mut self, row: PendingRow, tuning: &WindowTuning) -> u64 {
-        let mut shed = 0;
-        while self.pending.len() >= tuning.pending_cap {
-            self.pending.pop_front();
-            shed += 1;
-        }
-        self.pending.push_back(row);
-        shed
-    }
-}
-
-/// How one old-lane row compared against the shadow picture — the parity CLASSES of §4.5 Topic 5
-/// (classes, not counts; the gate prints every class by name).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ParityClass {
-    /// Same realm, same tick, bit-identical position: the row is REPRODUCED.
-    Matched,
-    /// Same realm, same tick, different position — UNEXPLAINED (fails the gate). Carries the
-    /// measured deviation in nanometres.
-    PoseMismatch(u64),
-    /// The row's realm is stated by a held window yet absent from the fold — UNEXPLAINED.
-    MissingComposed,
-    /// The row's realm is stated by NO held window and the chain covers the whole lineage: the
-    /// lifted one-level interior of a live sibling — the recorded Q2-carrier gap (D-WINDOW-1),
-    /// EXCLUDED by name, counted, never silent.
-    SiblingInteriorExcluded,
-    /// The row's realm is stated by no held window while the chain does NOT cover the session's
-    /// lineage (an ancestor level without a resolved window yet): explained, counted.
-    UnwindowedAncestor,
-    /// No fold exists at the row's tick (boot, a skipped common tick, or a ring-aged stamp):
-    /// explained, counted.
-    NoFoldAtTick,
-    /// The row is stated in a frame other than the origin's (the crossing overlap's dual feed —
-    /// the OLD realm's frame): explained, counted.
-    OffFrame,
-    /// The row names the origin realm itself (the old lane's self-placement filter should keep
-    /// these off the wire; counted apart so a filter regression is visible here).
-    OriginRow,
-}
-
-/// Classify one old-lane row against the shadow scene (never mutating — the caller counts).
-/// `windowed(realm)` answers "does any held window's newest roster state this realm";
-/// the boolean answers whether the chain covered the whole lineage at the last derive.
-#[must_use]
-pub fn classify_row(
-    scene: &ShadowScene,
-    row: &PendingRow,
-    origin: RealmId,
-    origin_frame: FrameRef,
-    windowed: impl Fn(RealmId) -> bool,
-) -> ParityClass {
-    if row.realm == origin {
-        return ParityClass::OriginRow;
-    }
-    if row.pose.frame != origin_frame {
-        return ParityClass::OffFrame;
-    }
-    let Some(fold) = scene.fold_at(row.pose.universe_tick) else {
-        return ParityClass::NoFoldAtTick;
-    };
-    let Some(composed) = fold.rows.iter().find(|r| r.realm == row.realm) else {
-        if windowed(row.realm) {
-            return ParityClass::MissingComposed;
-        }
-        if scene.chain_covers_lineage {
-            return ParityClass::SiblingInteriorExcluded;
-        }
-        return ParityClass::UnwindowedAncestor;
-    };
-    if composed.pose.pos == row.pose.pos {
-        ParityClass::Matched
-    } else {
-        ParityClass::PoseMismatch(pos_dev_nm(&composed.pose, &row.pose))
     }
 }
 
@@ -852,7 +1023,6 @@ mod tests {
         let t = WindowTuning::derive(10);
         assert_eq!(t.ring_span_ticks, 21);
         assert_eq!(t.hold_ttl_ticks, 21);
-        assert_eq!(t.pending_cap, 21 * PENDING_LEVEL_ROWS);
     }
 
     #[test]
@@ -1127,6 +1297,335 @@ mod tests {
         // orientations cancel bit-for-bit) — measured, not argued.
         assert_eq!(out.dedup_disagree, 0);
         assert_eq!(out.dedup_max_dev_nm, 0);
+    }
+
+    /// §2.6.5 STEP 4 (Q2 = PARENT RELAY, Slice C1): a live sibling's relayed interior joins the
+    /// fold — mapped through the galaxy's placement of the sibling AT THE RELAY'S OWN STAMP and
+    /// down the chain into the origin frame — while the step-5 membership gate, the placement
+    /// gate and the alien-frame arm each refuse their own class, counted.
+    #[test]
+    fn a_relayed_sibling_interior_composes_through_the_parents_placement_at_its_own_stamp() {
+        let (authors, leaf_level, parent_level) = two_level_fixture();
+        let t = WindowTuning::derive(2);
+        // Stratum 0 (the origin's own window): no relays.
+        let mut leaf = WindowIngest::default();
+        assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
+        // Stratum 1 (the galaxy window): membership admits the live sibling System 9, whose
+        // relayed level states its planet at (40, 0, 0) in ITS OWN frame — self-authored,
+        // verbatim, never re-stated by the galaxy.
+        let sibling = RealmId::System(9);
+        let sibling_frame = FrameRef::SystemSpace { system_seed: 9 };
+        let mut parent = WindowIngest::default();
+        assert_eq!(
+            parent.ingest_frame(parent_level.clone(), &t),
+            Ingested::Applied
+        );
+        parent.ingest_membership(&[sibling], &[]);
+        assert!(parent.ingest_relay_level(
+            sibling,
+            T,
+            vec![
+                row(
+                    RealmId::Planet(9),
+                    FrameRef::PlanetCentered { planet_seed: 9 },
+                    sibling_frame,
+                    DVec3::new(40.0, 0.0, 0.0),
+                    T,
+                ),
+                // An alien row (stated off the sibling's own frame): dropped + counted.
+                row(
+                    RealmId::Planet(10),
+                    FrameRef::PlanetCentered { planet_seed: 10 },
+                    galaxy(),
+                    DVec3::new(1.0, 0.0, 0.0),
+                    T,
+                ),
+            ],
+        ));
+        let ingests: Vec<&WindowIngest> = vec![&leaf, &parent];
+        let out = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &ingests,
+        );
+        // The sibling's planet: (1300 + 40) − 1000 = 340 in the origin frame, stamped at the
+        // relay's own tick, stratum = the galaxy's.
+        let planet9 = out
+            .rows
+            .iter()
+            .find(|r| r.realm == RealmId::Planet(9))
+            .expect("the relayed interior row composes");
+        assert_eq!(planet9.pose.pos.offset(), DVec3::new(340.0, 0.0, 0.0));
+        assert_eq!(planet9.pose.universe_tick, T);
+        assert_eq!(planet9.stratum, 1);
+        assert_eq!(out.relay_rows, 1);
+        assert_eq!(out.alien_rows, 1);
+        assert_eq!(out.relay_unplaceable, 0);
+    }
+
+    /// Every remaining relay-fold arm, driven one by one (HR5 region+branch): the chain-author
+    /// skip, the relayed-origin drop, the already-composed dedup (agreement measured, chain
+    /// wins), and the off-stamp row's `InstantMismatch` refusal.
+    #[test]
+    fn the_relay_folds_edge_arms_each_refuse_their_own_class() {
+        let (authors, leaf_level, parent_level) = two_level_fixture();
+        let t = WindowTuning::derive(2);
+        let mut leaf = WindowIngest::default();
+        assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
+        let sibling = RealmId::System(9);
+        let sibling_frame = FrameRef::SystemSpace { system_seed: 9 };
+        let mut parent = WindowIngest::default();
+        assert_eq!(
+            parent.ingest_frame(parent_level.clone(), &t),
+            Ingested::Applied
+        );
+        parent.ingest_membership(&[sibling, RealmId::System(7)], &[]);
+        // (a) A relay keyed by a CHAIN AUTHOR: skipped whole (its own window composes it).
+        assert!(parent.ingest_relay_level(
+            RealmId::System(7),
+            T,
+            vec![row(
+                RealmId::Planet(7),
+                planet(),
+                sys(),
+                DVec3::new(99.0, 0.0, 0.0),
+                T,
+            )],
+        ));
+        // (b) The member sibling's relay carries FOUR rows: the ORIGIN (dropped uncounted), a
+        // row the chain ALREADY states (Planet 7 — agreement measured, the chain's pose wins),
+        // an OFF-STAMP row (InstantMismatch, counted), and one lawful new interior row.
+        assert!(parent.ingest_relay_level(
+            sibling,
+            T,
+            vec![
+                row(
+                    RealmId::System(7),
+                    sys(),
+                    sibling_frame,
+                    DVec3::new(1.0, 0.0, 0.0),
+                    T,
+                ),
+                row(
+                    RealmId::Planet(7),
+                    planet(),
+                    sibling_frame,
+                    DVec3::new(2.0, 0.0, 0.0),
+                    T,
+                ),
+                row(
+                    RealmId::Planet(11),
+                    FrameRef::PlanetCentered { planet_seed: 11 },
+                    sibling_frame,
+                    DVec3::new(3.0, 0.0, 0.0),
+                    UniverseTick(T.0 + 1),
+                ),
+                row(
+                    RealmId::Planet(9),
+                    FrameRef::PlanetCentered { planet_seed: 9 },
+                    sibling_frame,
+                    DVec3::new(40.0, 0.0, 0.0),
+                    T,
+                ),
+            ],
+        ));
+        let ingests: Vec<&WindowIngest> = vec![&leaf, &parent];
+        let out = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &ingests,
+        );
+        // Only the lawful interior row composed as a RELAY row.
+        assert_eq!(out.relay_rows, 1);
+        assert_eq!(out.instant_refused, 1);
+        // The chain's Planet 7 pose won (its own level's 30 m, not the relay's re-statement) —
+        // and the disagreement was MEASURED, never silently overwritten.
+        let planet7 = out
+            .rows
+            .iter()
+            .find(|r| r.realm == RealmId::Planet(7))
+            .expect("the chain's own planet row");
+        assert_eq!(planet7.pose.pos.offset(), DVec3::new(30.0, 0.0, 0.0));
+        assert!(out.dedup_disagree >= 1);
+        // The chain author's relayed copy composed NOTHING beyond the chain's own statement:
+        // Planet 7 stayed the chain's, and no 99 m ghost row exists anywhere.
+        assert!(
+            !out.rows
+                .iter()
+                .any(|r| r.pose.pos.offset() == DVec3::new(99.0, 0.0, 0.0)),
+            "a chain author's relay must never compose"
+        );
+        // No row for the origin, ever (§2.4).
+        assert!(!out.rows.iter().any(|r| r.realm == RealmId::System(7)));
+    }
+
+    /// [`descent_at`]'s refusal arms, each driven directly (HR5): a chain window missing at the
+    /// stamp, an own-level window where a hop is required, a hop naming the wrong child, and an
+    /// empty roster leaving the frame unstatable.
+    #[test]
+    fn the_relayed_descent_refuses_missing_levels_hops_and_frames() {
+        let (authors, _leaf_level, parent_level) = two_level_fixture();
+        let t = WindowTuning::derive(2);
+        let sysf = sys();
+        // (a) ingests shorter than the walk: refused.
+        assert!(descent_at(sysf, &authors, &[], 1, T).is_none());
+        // (b) a window with NO level at the stamp: refused.
+        let empty = WindowIngest::default();
+        let leaf = WindowIngest::default();
+        assert!(descent_at(sysf, &authors, &[&leaf, &empty], 1, T).is_none());
+        // (c) an own-level window (no hop) where the walk needs one: refused.
+        let mut hopless = WindowIngest::default();
+        assert_eq!(
+            hopless.ingest_frame(level(T, None, parent_level.rows.clone()), &t),
+            Ingested::Applied
+        );
+        assert!(descent_at(sysf, &authors, &[&leaf, &hopless], 1, T).is_none());
+        // (d) a hop naming the WRONG child: refused.
+        let mut wrong_child = WindowIngest::default();
+        assert_eq!(
+            wrong_child.ingest_frame(
+                level(
+                    T,
+                    Some(hop(RealmId::System(9), DVec3::ZERO, DVec3::ZERO)),
+                    parent_level.rows.clone(),
+                ),
+                &t
+            ),
+            Ingested::Applied
+        );
+        assert!(descent_at(sysf, &authors, &[&leaf, &wrong_child], 1, T).is_none());
+        // (e) a valid hop over an EMPTY roster (frame unstatable): refused.
+        let mut bare = WindowIngest::default();
+        assert_eq!(
+            bare.ingest_frame(
+                level(
+                    T,
+                    Some(hop(RealmId::System(7), DVec3::ZERO, DVec3::ZERO)),
+                    vec![],
+                ),
+                &t
+            ),
+            Ingested::Applied
+        );
+        assert!(descent_at(sysf, &authors, &[&leaf, &bare], 1, T).is_none());
+        // (f) the happy walk — the same fixture the compose tests fold — succeeds.
+        let mut parent = WindowIngest::default();
+        assert_eq!(parent.ingest_frame(parent_level, &t), Ingested::Applied);
+        let (frames, books) =
+            descent_at(sysf, &authors, &[&leaf, &parent], 1, T).expect("the happy walk succeeds");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(books.len(), 1);
+    }
+
+    /// The relay fold's refusal arms, each driven separately: a NON-MEMBER sibling draws
+    /// nothing (step 5 — lawful, uncounted), and a member whose placement row is missing at
+    /// the relay's stamp counts `relay_unplaceable` (fail-closed, healed by the next relay).
+    #[test]
+    fn a_relayed_interior_is_membership_gated_and_unplaceable_is_counted() {
+        let (authors, leaf_level, parent_level) = two_level_fixture();
+        let t = WindowTuning::derive(2);
+        let mut leaf = WindowIngest::default();
+        assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
+        let sibling = RealmId::System(9);
+        let sibling_frame = FrameRef::SystemSpace { system_seed: 9 };
+        let interior = vec![row(
+            RealmId::Planet(9),
+            FrameRef::PlanetCentered { planet_seed: 9 },
+            sibling_frame,
+            DVec3::new(40.0, 0.0, 0.0),
+            T,
+        )];
+        // (a) NOT a member: the interior is skipped entirely — no row, no refusal count.
+        let mut parent = WindowIngest::default();
+        assert_eq!(
+            parent.ingest_frame(parent_level.clone(), &t),
+            Ingested::Applied
+        );
+        assert!(parent.ingest_relay_level(sibling, T, interior.clone()));
+        let ingests: Vec<&WindowIngest> = vec![&leaf, &parent];
+        let out = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &ingests,
+        );
+        assert_eq!(out.relay_rows, 0);
+        assert_eq!(out.relay_unplaceable, 0);
+        assert!(!out.rows.iter().any(|r| r.realm == RealmId::Planet(9)));
+        // (b) A member relayed at a stamp the parent's ring does not retain: counted.
+        let mut parent2 = WindowIngest::default();
+        assert_eq!(
+            parent2.ingest_frame(parent_level.clone(), &t),
+            Ingested::Applied
+        );
+        parent2.ingest_membership(&[sibling], &[]);
+        assert!(parent2.ingest_relay_level(sibling, UniverseTick(T.0 + 1), interior.clone()));
+        let ingests2: Vec<&WindowIngest> = vec![&leaf, &parent2];
+        let out2 = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &ingests2,
+        );
+        assert_eq!(out2.relay_rows, 0);
+        assert_eq!(out2.relay_unplaceable, 1);
+        // (c) The descent WALKS at the relay's stamp but the parent's level THERE has no
+        // placement row for the child (a roster race): counted, healed by the next relay.
+        let t_old = UniverseTick(T.0 - 1);
+        let mut parent3 = WindowIngest::default();
+        assert_eq!(
+            parent3.ingest_frame(parent_level.clone(), &t),
+            Ingested::Applied
+        );
+        assert_eq!(
+            parent3.ingest_frame(
+                level(
+                    t_old,
+                    Some(hop(
+                        RealmId::System(7),
+                        DVec3::new(1000.0, 0.0, 0.0),
+                        DVec3::new(0.0, 5.0, 0.0),
+                    )),
+                    vec![row(
+                        RealmId::System(7),
+                        sys(),
+                        galaxy(),
+                        DVec3::new(1000.0, 0.0, 0.0),
+                        t_old,
+                    )],
+                ),
+                &t
+            ),
+            Ingested::Applied
+        );
+        parent3.ingest_membership(&[sibling], &[]);
+        assert!(parent3.ingest_relay_level(sibling, t_old, interior));
+        let ingests3: Vec<&WindowIngest> = vec![&leaf, &parent3];
+        let out3 = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &ingests3,
+        );
+        assert_eq!(out3.relay_rows, 0);
+        assert_eq!(out3.relay_unplaceable, 1);
     }
 
     #[test]
@@ -1570,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ring_retains_one_span_and_the_pending_queue_sheds_loud_at_its_cap() {
+    fn the_ring_retains_one_span() {
         let t = tuning(); // span 5
         let mut scene = ShadowScene::default();
         let authors = vec![RealmId::System(7)];
@@ -1589,140 +2088,6 @@ mod tests {
         );
         assert!(scene.fold_at(UniverseTick(105)).is_some());
         assert!(scene.fold_at(UniverseTick(110)).is_some());
-
-        let mut tiny = WindowTuning::derive(2);
-        tiny.pending_cap = 2;
-        let pend = |n: u64| PendingRow {
-            realm: RealmId::Planet(n),
-            pose: StampedPose::at_rest(sys(), DVec3::X, UniverseTick(n)),
-        };
-        assert_eq!(scene.push_pending(pend(1), &tiny), 0);
-        assert_eq!(scene.push_pending(pend(2), &tiny), 0);
-        assert_eq!(
-            scene.push_pending(pend(3), &tiny),
-            1,
-            "the oldest shed LOUD"
-        );
-        assert_eq!(scene.pending.len(), 2);
-    }
-
-    #[test]
-    fn parity_classes_name_every_row_fate() {
-        let t = tuning();
-        let mut scene = ShadowScene {
-            chain_covers_lineage: true,
-            ..ShadowScene::default()
-        };
-        let authors = vec![RealmId::System(7)];
-        let composed = ComposedRow {
-            realm: RealmId::Planet(7),
-            frame: planet(),
-            pose: StampedPose::at_rest(sys(), DVec3::new(30.0, 0.0, 0.0), T),
-            stratum: 0,
-            body: BodyTag::Placement,
-        };
-        let _ = scene.advance(
-            RealmId::System(7),
-            &authors,
-            Some(folded(T, 1, vec![composed])),
-            &t,
-        );
-        scene.chain_covers_lineage = true; // advance never touches it; the compose step writes it
-
-        let origin = RealmId::System(7);
-        let windowed = |r: RealmId| (r == RealmId::Planet(7)) | (r == RealmId::Planet(9));
-        let at = |realm: RealmId, frame: FrameRef, pos: DVec3, tick: UniverseTick| PendingRow {
-            realm,
-            pose: StampedPose::at_rest(frame, pos, tick),
-        };
-        // Matched: same realm, same tick, bit-identical position.
-        assert_eq!(
-            classify_row(
-                &scene,
-                &at(RealmId::Planet(7), sys(), DVec3::new(30.0, 0.0, 0.0), T),
-                origin,
-                sys(),
-                windowed
-            ),
-            ParityClass::Matched
-        );
-        // PoseMismatch: same row, a different position — UNEXPLAINED, deviation measured.
-        assert_eq!(
-            classify_row(
-                &scene,
-                &at(RealmId::Planet(7), sys(), DVec3::new(31.0, 0.0, 0.0), T),
-                origin,
-                sys(),
-                windowed
-            ),
-            ParityClass::PoseMismatch(1_000_000_000)
-        );
-        // MissingComposed: a windowed realm absent from the fold — UNEXPLAINED.
-        assert_eq!(
-            classify_row(
-                &scene,
-                &at(RealmId::Planet(9), sys(), DVec3::X, T),
-                origin,
-                sys(),
-                windowed
-            ),
-            ParityClass::MissingComposed
-        );
-        // SiblingInteriorExcluded: stated by NO window, chain covers the lineage — the recorded
-        // Q2-carrier gap, excluded BY NAME.
-        assert_eq!(
-            classify_row(
-                &scene,
-                &at(RealmId::Area(1), sys(), DVec3::X, T),
-                origin,
-                sys(),
-                windowed
-            ),
-            ParityClass::SiblingInteriorExcluded
-        );
-        // UnwindowedAncestor: same rowless realm while the chain does NOT cover the lineage.
-        scene.chain_covers_lineage = false;
-        assert_eq!(
-            classify_row(
-                &scene,
-                &at(RealmId::Area(1), sys(), DVec3::X, T),
-                origin,
-                sys(),
-                windowed
-            ),
-            ParityClass::UnwindowedAncestor
-        );
-        // NoFoldAtTick / OffFrame / OriginRow.
-        assert_eq!(
-            classify_row(
-                &scene,
-                &at(RealmId::Planet(7), sys(), DVec3::X, UniverseTick(42)),
-                origin,
-                sys(),
-                windowed
-            ),
-            ParityClass::NoFoldAtTick
-        );
-        assert_eq!(
-            classify_row(
-                &scene,
-                &at(RealmId::Planet(7), planet(), DVec3::X, T),
-                origin,
-                sys(),
-                windowed
-            ),
-            ParityClass::OffFrame
-        );
-        assert_eq!(
-            classify_row(
-                &scene,
-                &at(origin, sys(), DVec3::X, T),
-                origin,
-                sys(),
-                windowed
-            ),
-            ParityClass::OriginRow
-        );
     }
 
     #[test]
@@ -1747,6 +2112,178 @@ mod tests {
         let scene = ShadowScene::default();
         assert_eq!(scene.origin, None);
         assert_eq!(scene.origin_epoch, 0);
-        assert!(scene.ring.is_empty() & scene.held.is_empty() & scene.pending.is_empty());
+        assert!(scene.ring.is_empty() & scene.held.is_empty());
+    }
+
+    // ===== Slice C1 — the LIVE emissions' helpers (§2.4/§2.6.5 steps 5–8) ====================
+
+    /// The bag selection is THE DRAW LAW by data presence + the membership gate: a member's (or a
+    /// chain author's) self-look wins; a non-member's look is WITHHELD and falls to its marker
+    /// (markers are never membership-filtered — stars stay in the sky); neither statement means
+    /// an EMPTY bag (tracked, not drawn).
+    #[test]
+    fn scene_bag_is_the_membership_gated_presence_selection() {
+        let realm = RealmId::Planet(7);
+        let mut ingest = WindowIngest::default();
+        // Neither statement: empty — the realm is tracked, never drawn.
+        assert_eq!(scene_bag(realm, &[], &[&ingest]), Vec::<u8>::new());
+        // A marker alone ships regardless of membership (never filtered).
+        assert!(ingest.ingest_body(realm, &BodyStmt::Marker { luma: vec![2] }, T));
+        assert_eq!(scene_bag(realm, &[], &[&ingest]), vec![2]);
+        // A look exists but the realm is NO member and NO chain author: the look is withheld —
+        // the marker still serves (§2.6.5 step 5: membership gates BODIES).
+        assert!(ingest.ingest_body(realm, &BodyStmt::SelfLook { bag: vec![1] }, T));
+        assert_eq!(scene_bag(realm, &[], &[&ingest]), vec![2]);
+        // Membership admits the look…
+        ingest.ingest_membership(&[realm], &[]);
+        assert_eq!(scene_bag(realm, &[], &[&ingest]), vec![1]);
+        // …and a CHAIN AUTHOR's look is always admitted (the origin and its ancestors are drawn).
+        ingest.ingest_membership(&[], &[realm]);
+        assert_eq!(scene_bag(realm, &[realm], &[&ingest]), vec![1]);
+    }
+
+    /// The hierarchy parent of a composed row: a child row parents on its stratum's author; a
+    /// chain BODY row parents one level up; the root's body has none.
+    #[test]
+    fn scene_parent_is_identity_only_hierarchy() {
+        let authors = [RealmId::System(7), GALAXY];
+        let child_row = ComposedRow {
+            realm: RealmId::Planet(7),
+            frame: planet(),
+            pose: StampedPose::at_rest(sys(), DVec3::X, T),
+            stratum: 0,
+            body: BodyTag::Placement,
+        };
+        assert_eq!(scene_parent(&child_row, &authors), Some(RealmId::System(7)));
+        let galaxy_body = ComposedRow {
+            realm: GALAXY,
+            frame: galaxy(),
+            pose: StampedPose::at_rest(sys(), -DVec3::X, T),
+            stratum: 1,
+            body: BodyTag::Placement,
+        };
+        assert_eq!(
+            scene_parent(&galaxy_body, &authors),
+            None,
+            "the root's body"
+        );
+        let mid_body = ComposedRow {
+            realm: RealmId::System(7),
+            frame: sys(),
+            pose: StampedPose::at_rest(sys(), DVec3::ZERO, T),
+            stratum: 0,
+            body: BodyTag::Placement,
+        };
+        assert_eq!(
+            scene_parent(&mid_body, &authors),
+            Some(GALAXY),
+            "a chain body parents one level up"
+        );
+    }
+
+    /// The composed level's rows: the ORIGIN row FIRST (pose ZERO in its own frame, its bag
+    /// through the same selection), then every fresh and held drawn row with its parent + bag —
+    /// and the drawn set is the newest fold plus the held strata (old stamps kept, §2.6.4).
+    #[test]
+    fn scene_level_rows_lead_with_the_origin_and_carry_the_drawn_set() {
+        let (authors, leaf_level, parent_level) = two_level_fixture();
+        let fold = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &[],
+        );
+        let mut scene = ShadowScene::default();
+        let tuning = tuning();
+        let report = scene.advance(RealmId::System(7), &authors, Some(fold), &tuning);
+        assert!(report.epoch_bumped);
+        // Give the origin a look so the origin row's bag arm is non-empty.
+        let mut ingest = WindowIngest::default();
+        assert!(ingest.ingest_body(RealmId::System(7), &BodyStmt::SelfLook { bag: vec![7] }, T));
+        let rows = scene_level_rows(RealmId::System(7), sys(), T, &authors, &[&ingest], &scene);
+        assert_eq!(rows[0].realm, RealmId::System(7), "the origin row leads");
+        assert_eq!(rows[0].parent, Some(GALAXY));
+        assert_eq!(rows[0].pose.pos.offset(), DVec3::ZERO);
+        assert_eq!(rows[0].bag, vec![7], "the origin's look, membership-free");
+        let drawn: Vec<RealmId> = rows.iter().skip(1).map(|r| r.realm).collect();
+        assert_eq!(
+            drawn,
+            vec![RealmId::Planet(7), GALAXY, RealmId::System(9)],
+            "the newest fold's rows ride behind the origin (BTreeMap fold order — RealmId Ord)"
+        );
+        // drawn_rows unions the newest fold with HELD strata: hold the top stratum and re-read.
+        let empty_leaf = level(UniverseTick(101), None, vec![]);
+        let fold2 = compose(
+            RealmId::System(7),
+            sys(),
+            UniverseTick(101),
+            &authors,
+            &[&empty_leaf],
+            1,
+            &[],
+        );
+        let _ = scene.advance(RealmId::System(7), &authors, Some(fold2), &tuning);
+        let rows = scene_level_rows(
+            RealmId::System(7),
+            sys(),
+            UniverseTick(101),
+            &authors,
+            &[&ingest],
+            &scene,
+        );
+        let held: Vec<(RealmId, UniverseTick)> = rows
+            .iter()
+            .skip(1)
+            .map(|r| (r.realm, r.pose.universe_tick))
+            .collect();
+        assert_eq!(
+            held,
+            vec![(GALAXY, T), (RealmId::System(9), T)],
+            "the held stratum's rows keep their OLD stamp, declared per row (§2.6.4)"
+        );
+    }
+
+    /// The Q2 relay's ingest storage: the fence guard orders incarnations; a relayed level is
+    /// newest-wins per child; the relayed roster vouches the child's OWN markers (empty before
+    /// the first level — fail-closed).
+    #[test]
+    fn relay_storage_orders_fences_and_levels_and_vouches_rosters() {
+        let mut ingest = WindowIngest::default();
+        let child = RealmId::Planet(7);
+        // Fence order: first admit records; an older fence refuses; same-or-newer admits.
+        assert!(ingest.admit_relay_fence(child, vd_core::Fence(3)));
+        assert!(!ingest.admit_relay_fence(child, vd_core::Fence(2)));
+        assert!(ingest.admit_relay_fence(child, vd_core::Fence(3)));
+        assert!(ingest.admit_relay_fence(child, vd_core::Fence(4)));
+        // Roster before any level: EMPTY (fail-closed — a marker about anything refuses).
+        assert_eq!(ingest.relay_child_roster(child), BTreeSet::new());
+        // A level stores; its rows are the child's attested roster.
+        let rows = vec![row(
+            RealmId::Area(3),
+            FrameRef::AreaLocal {
+                planet_seed: 7,
+                area_seed: 3,
+            },
+            planet(),
+            DVec3::X,
+            T,
+        )];
+        assert!(ingest.ingest_relay_level(child, T, rows.clone()));
+        assert_eq!(
+            ingest.relay_child_roster(child),
+            BTreeSet::from([RealmId::Area(3)])
+        );
+        // An OLDER relayed level refuses (newest wins); an equal/newer replaces.
+        assert!(!ingest.ingest_relay_level(child, UniverseTick(99), Vec::new()));
+        assert_eq!(
+            ingest.relay_child_roster(child),
+            BTreeSet::from([RealmId::Area(3)]),
+            "the stale level replaced nothing"
+        );
+        assert!(ingest.ingest_relay_level(child, UniverseTick(101), Vec::new()));
+        assert_eq!(ingest.relay_child_roster(child), BTreeSet::new());
     }
 }

@@ -59,7 +59,7 @@ fn main() -> ExitCode {
             eprintln!("vd-devcluster: {msg}");
             eprintln!(
                 "usage: vd-devcluster <up|down|status|env> --slot <N>  |  gen-trust <dir>  |  \
-                 gen-authkey  |  emit-world-scene <dir>"
+                 gen-authkey"
             );
             ExitCode::FAILURE
         }
@@ -84,19 +84,10 @@ fn run(args: &[String]) -> Result<(), String> {
     if cmd == "gen-authkey" {
         return gen_authkey();
     }
-    // `emit-world-scene <dir>` writes THE world's home-shard neighbourhood (`regions.json`) for the
-    // client's `--realm-boxes` — the ONE scene emitter (SL5): the drawn geometry IS the detector's,
-    // single-sourced through `world_roster`/`boot_regions_and_movers` (which also runs the flight-law
-    // asserts, so a world change fails the emit loudly). No options, no selector; dir arg only.
-    if cmd == "emit-world-scene" {
-        let dir = args.get(1).ok_or("emit-world-scene needs a <dir>")?;
-        let scene = vd_bins::write_world_regions(Path::new(dir), &vd_bins::DEV)?;
-        println!("VD_WORLD_SCENE={scene}");
-        return Ok(());
-    }
-    // (The `emit-crossing-fixtures` / `emit-seed-fixtures` / `emit-visual-fixtures` subcommands are
-    // DELETED — SL5: each emitted a scene of a world that is not THE world. `emit-world-scene` above
-    // is the ONE emitter, with nothing to choose.)
+    // (The `emit-world-scene` subcommand is DELETED — Slice C1, window_lane.md §2.11, D-LANE-6 🟩:
+    // the client draws its world from the COMPOSED STREAM alone, so no scene file exists to emit.
+    // Its `emit-crossing-fixtures` / `emit-seed-fixtures` / `emit-visual-fixtures` siblings died
+    // earlier for the same law — SL5: one world, one source, nothing to choose.)
     let slot = parse_slot(args)?;
     let ports = DevPortScheme::DEFAULT
         .slot_ports(slot)

@@ -171,27 +171,33 @@ pub enum ShardToGateway {
         frame: FrameRef,
         realm_fence: Fence,
     },
-    /// One REALM-placement frame (D-45(a) realm-unification FA-2c): `realm_snapshot_bytes` is an opaque
-    /// postcard [`crate::channels::RealmSnapshotDatagram`] carrying the shard's authored placements for the
-    /// moving REALMS it parents (an orbiting planet/station/ship box). The gateway forwards it to the shard's
-    /// subscribers as a `MsgClass::RealmSnapshot` datagram (the render-plane twin of [`Frame`]); it never
-    /// decodes the payload. A SEPARATE arm from [`Frame`] so a realm datagram is dispatched to the client's
-    /// `RealmScene` consumer, not its entity-snapshot path. APPENDED variant (postcard-safe additive shape —
-    /// a prior arm's discriminant/framing is unchanged). Emitted only when the shard parents >=1 moving child
-    /// (EMPTY at walk/static scale ⇒ never sent).
+    /// ★TOMBSTONE (window lane Slice C2, minor 19; owner-approved 2026-08-16 —
+    /// docs/design/window_lane.md §5 RULINGS) — THE OLD REALM DATAGRAM is DELETED. It carried an
+    /// opaque [`crate::channels::RealmSnapshotDatagram`] of a shard's authored child placements,
+    /// which the gateway fanned to that shard's subscribers untouched. Since the minor-18 flag day
+    /// the client's ONE scene author has been the gateway's composed feed, so this lane's last
+    /// consumer was the Slice-B parity comparator; with the comparator's subject (the inter-realm
+    /// cascade) deleted, the measurement is discharged and the lane is deleted with it — never
+    /// disabled (§4.5 Topic 5). Its successor is [`ShardToGateway::WindowFrame`] on an
+    /// [`WindowScope::Occupants`] window, which `window_lane.md` §2.9 step 3 names as subsuming
+    /// this emit: TYPED rows, one universe stamp, attested per sender. The variant REMAINS because
+    /// postcard discriminants are positional and may never be renumbered; discriminant 4 is
+    /// reserved forever; nothing produces it, and a received frame is counted, never served.
+    /// Do not revive.
     RealmFrame {
         realm_fence: Fence,
         source_tick: TickId,
         realm_snapshot_bytes: Vec<u8>,
     },
-    /// The per-OBSERVER incremental render-scene update (VU AoI, proto_minor 6): the realms among THIS
-    /// shard's own children that ENTERED (`added`) or LEFT (`removed`) `observer`'s AoI this tick, driven by
-    /// the per-observer hysteresis (S0). `observer` is the DURABLE player id (survives re-home) — the gateway
-    /// maps it to the live session and forwards a [`crate::channels::ServerControlMsg::RealmSceneDelta`] to
-    /// that client, gated on its negotiated minor >= 6. UNLIKE [`Frame`]/[`RealmFrame`] (opaque forwarded
-    /// bytes fanned to ALL subscribers), this is a TYPED, per-observer routed message the gateway decodes.
-    /// APPENDED variant (postcard-safe additive shape — a prior arm's discriminant/framing is unchanged).
-    /// Emitted only when a child crosses `observer`'s AoI edge (EMPTY sets are never sent).
+    /// ★TOMBSTONE (window lane Slice C2, minor 19; owner-approved 2026-08-16 —
+    /// docs/design/window_lane.md §5 RULINGS) — THE PER-OBSERVER SHAPE PUSH is DELETED. It shipped
+    /// the OUTLINES entering and leaving one observer's band, which made a parent the author of its
+    /// children's LOOK (SL3's violation, D-LANE-4). `window_lane.md` §2.9 shrinks this emit to the
+    /// ids-only membership verdict: [`ShardToGateway::WindowMembership`] states WHICH children the
+    /// parent's SL7 fold admits, and each realm states its OWN look on
+    /// [`ShardToGateway::WindowBody`]. The variant REMAINS because postcard discriminants are
+    /// positional and may never be renumbered; its discriminant is reserved forever; nothing
+    /// produces it, and a received frame is counted, never served. Do not revive.
     RealmSceneDelta {
         observer: AccountId,
         added: Vec<RealmShape>,
@@ -225,11 +231,11 @@ pub enum ShardToGateway {
     /// Attestation (fail-closed, measured now / refused at cloud mTLS — owner item 11 pattern):
     /// the receiver drops + counts any frame whose sender node is not the `ShardRoster` head for
     /// the stating realm ([`window_sender_is_head`]), and any stale `realm_fence` (zombie guard).
-    /// APPENDED variant (postcard-safe additive shape). The shard-side emitter is LIVE since
-    /// Slice A (one frame per tick per open window, the authored rows serialized once); the
-    /// receiving ENGINE is LIVE since Slice B — the gateway ATTESTS fail-closed (unknown window
-    /// / forged sender dropped + counted) and INGESTS an admitted frame into its shadow
-    /// composer (`window_rows_ingested`), measured against the old lane, served to no one yet.
+    /// APPENDED variant (postcard-safe additive shape). Since window lane Slice C2 this is the
+    /// ONLY per-tick placement statement that leaves a realm at all: the shard emits one frame
+    /// per tick per open window (its authored rows, built once), and the gateway ATTESTS
+    /// fail-closed (unknown window / forged sender dropped + counted) before INGESTING it into
+    /// the composer (`window_rows_ingested`) that serves the client's one scene feed.
     WindowFrame {
         realm_fence: Fence,
         /// The subscription id the receiving side minted at [`GatewayToShard::WindowOpen`].
@@ -290,6 +296,36 @@ pub enum ShardToGateway {
         added: Vec<RealmId>,
         removed: Vec<RealmId>,
     },
+    /// THE Q2 PARENT-RELAY's forward leg (mesh minor 17; owner-approved 2026-08-16 —
+    /// `docs/design/owner_decisions_2026-08-15.md` addendum + `docs/design/window_lane.md` §5
+    /// RULINGS): a live CHILD's VERBATIM self-authored window statements, relayed one hop through
+    /// its parent to a subscriber holding a window ON THE PARENT. The parent's only lawful acts
+    /// are FORWARD or DROP: `statements` is the SEALED byte blob it received on
+    /// [`crate::intershard::InterShardFlow::WindowRelay`], copied here unopened (no store-merge,
+    /// no re-state, no read — the parent-side holder keeps bytes, never values), exactly the
+    /// sealed-payload discipline the realm cascade established. The receiver alone decodes it
+    /// ([`open_relay_statements`]) and admits every inner statement against the CHILD's identity
+    /// with the SAME predicates the direct lanes use: [`window_body_admissible`] with the child
+    /// as the stating realm, the child vouched by the window author's own attested roster, and
+    /// `child_fence` (the child's own fence at authoring, INTACT end-to-end) as the zombie guard.
+    /// This is how a waking realm's self-look reaches an OUTSIDE observer before the observer
+    /// enters it (the §2.8 marker⇒look handover) while "am I observed from outside" stays
+    /// unrepresentable in every realm (Q2's rationale). Classification mirrors
+    /// [`ShardToGateway::WindowBody`]: **ReDriven, reliable** (the child re-drives from live
+    /// state; a lost relay is an invisible realm at exactly the no-flicker moment G-HANDOVER
+    /// measures). APPENDED variant (postcard-safe additive shape).
+    WindowRelayed {
+        /// The FORWARDING parent's realm fence (the window's author — the hop the relay rode);
+        /// the receiver's usual stale-fence zombie guard for the forwarder itself.
+        realm_fence: Fence,
+        window: WindowId,
+        /// The stating CHILD realm, copied from the relay envelope as-received.
+        child: RealmId,
+        /// The CHILD's own realm fence at authoring — forwarded INTACT (never the parent's).
+        child_fence: Fence,
+        /// The sealed statements, byte-for-byte as received (postcard `Vec<RelayedStatement>`).
+        statements: Vec<u8>,
+    },
 }
 
 impl ShardToGateway {
@@ -307,12 +343,15 @@ impl ShardToGateway {
             | ShardToGateway::EntityRemoved { .. }
             | ShardToGateway::WindowFrame { .. }
             | ShardToGateway::WindowBody { .. }
-            | ShardToGateway::WindowMembership { .. } => None,
+            | ShardToGateway::WindowMembership { .. }
+            | ShardToGateway::WindowRelayed { .. } => None,
         }
     }
 
     /// The opaque realm-placement payload, when this is a [`ShardToGateway::RealmFrame`] (the render-plane
-    /// twin of [`into_snapshot_bytes`](Self::into_snapshot_bytes)) — test/tooling sugar.
+    /// twin of [`into_snapshot_bytes`](Self::into_snapshot_bytes)) — test/tooling sugar for a
+    /// ★TOMBSTONED arm (window lane Slice C2, minor 19): nothing produces a `RealmFrame` any more,
+    /// and this exists so the reserved discriminant keeps a readable shape.
     #[must_use]
     pub fn into_realm_snapshot_bytes(self) -> Option<Vec<u8>> {
         match self {
@@ -328,7 +367,8 @@ impl ShardToGateway {
             | ShardToGateway::EntityRemoved { .. }
             | ShardToGateway::WindowFrame { .. }
             | ShardToGateway::WindowBody { .. }
-            | ShardToGateway::WindowMembership { .. } => None,
+            | ShardToGateway::WindowMembership { .. }
+            | ShardToGateway::WindowRelayed { .. } => None,
         }
     }
 }
@@ -432,6 +472,52 @@ pub fn window_body_admissible(
         BodyStmt::SelfLook { .. } => subject == sender_realm,
         BodyStmt::Marker { .. } => sender_children.contains(&subject),
     }
+}
+
+/// ONE statement inside a sealed Q2-relay batch (mesh minor 17; owner-approved 2026-08-16 —
+/// `docs/design/owner_decisions_2026-08-15.md` addendum + `docs/design/window_lane.md` §5
+/// RULINGS): exactly the payloads the child's own direct window lanes carry, minus the
+/// subscription id (subscriber-side state the AUTHOR never holds). Only the AUTHORING child
+/// builds these ([`seal_relay_statements`]) and only the final receiver decodes them
+/// ([`open_relay_statements`]); the relaying parent holds the sealed bytes and structurally
+/// cannot re-state a value it never sees.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RelayedStatement {
+    /// The child's own body statement — the [`ShardToGateway::WindowBody`] payload verbatim.
+    /// Admitted against the CHILD's identity by [`window_body_admissible`]: a `SelfLook` only
+    /// about the child itself, a `Marker` only about the child's own direct children.
+    Body {
+        subject: RealmId,
+        stmt: BodyStmt,
+        authored_at: UniverseTick,
+    },
+    /// The child's own authored interior level — the [`ShardToGateway::WindowFrame`] payload
+    /// with `hop: None` (an own-level statement: the child states its interior in its OWN frame;
+    /// the outside observer's hop TO the child is the parent's placement row, which the receiver
+    /// already holds from the parent's own window). Doubles as the child's attested roster the
+    /// batch's markers are vouched against.
+    Level {
+        at: UniverseTick,
+        rows: Vec<RealmSnap>,
+    },
+}
+
+/// Seal a batch of self-authored statements for the Q2 relay (author-side ONLY — the one lawful
+/// builder). The bytes ride [`crate::intershard::InterShardFlow::WindowRelay`] up and
+/// [`ShardToGateway::WindowRelayed`] out, unopened in between.
+#[must_use]
+pub fn seal_relay_statements(statements: &[RelayedStatement]) -> Vec<u8> {
+    postcard::to_allocvec(statements).expect("closed wire enums serialize infallibly")
+}
+
+/// Open a sealed relay batch (final-receiver-side ONLY). The relaying parent never calls this —
+/// its holder keeps bytes, never values (forward-or-drop, Q2's "no read").
+///
+/// # Errors
+/// The postcard decode error when the blob is not a well-formed statement batch (counted by the
+/// caller as an undecodable relay, dropped — fail-closed).
+pub fn open_relay_statements(bytes: &[u8]) -> Result<Vec<RelayedStatement>, postcard::Error> {
+    postcard::from_bytes(bytes)
 }
 
 /// Errors from the byte-level header operations.
@@ -761,16 +847,14 @@ mod tests {
     #[test]
     fn realm_scene_delta_shard_to_gateway_round_trips() {
         use vd_core::geometry::Boundary;
-        use vd_core::glam::DVec3;
-        use vd_core::pose::LatticePos;
         // VU AoI (proto_minor 6): a per-observer delta — one realm ENTERED the observer's AoI (its shape),
         // one LEFT (its id) — round-trips, and is NOT an opaque forwarded frame (both extractors decline it).
+        // The shape is the flag-day PURE SELF-DESCRIPTION (no position field exists, minor 18).
         let delta = ShardToGateway::RealmSceneDelta {
             observer: AccountId(5),
             added: vec![RealmShape {
                 realm: RealmId::Planet(7),
                 frame: FrameRef::SystemSpace { system_seed: 7 },
-                center: LatticePos::local(DVec3::new(20.0, 0.0, 0.0)),
                 shape: Boundary::Shell { r: 10.0 },
                 parent: Some(RealmId::System(7)),
             }],
@@ -972,6 +1056,18 @@ mod tests {
                 added: vec![RealmId::Planet(7)],
                 removed: vec![RealmId::Planet(8)],
             },
+            // The Q2 relay forward leg (mesh minor 17) — sealed statements ride as-received.
+            ShardToGateway::WindowRelayed {
+                realm_fence: Fence(3),
+                window: WindowId(2),
+                child: RealmId::Planet(7),
+                child_fence: Fence(9),
+                statements: seal_relay_statements(&[RelayedStatement::Body {
+                    subject: RealmId::Planet(7),
+                    stmt: BodyStmt::SelfLook { bag: vec![8, 8] },
+                    authored_at: UniverseTick(101),
+                }]),
+            },
         ]
     }
 
@@ -1032,6 +1128,8 @@ mod tests {
                 ShardToGateway::WindowFrame { .. } => 7,
                 ShardToGateway::WindowBody { .. } => 8,
                 ShardToGateway::WindowMembership { .. } => 9,
+                // The Q2 relay forward leg holds 10 (mesh minor 17) forever.
+                ShardToGateway::WindowRelayed { .. } => 10,
             }
         }
         fn g2s_index(msg: &GatewayToShard) -> u8 {
@@ -1051,9 +1149,9 @@ mod tests {
             assert_eq!(bytes[0], s2g_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 10);
+        assert_eq!(seen.len(), 11);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(9));
+        assert_eq!(seen.last().copied(), Some(10));
         let mut seen = std::collections::BTreeSet::new();
         for msg in every_gateway_to_shard_arm() {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
@@ -1231,6 +1329,65 @@ mod tests {
         assert!(!window_body_admissible(&marker, sender, sender, &children));
         assert!(!window_body_admissible(
             &marker, stranger, sender, &children
+        ));
+    }
+
+    /// The Q2 relay's sealed batch (mesh minor 17): seal → open is the identity for every
+    /// statement kind; the nested discriminants are pinned (Body 0 / Level 1 forever); and a
+    /// malformed blob opens to a typed error, never a guess (the fail-closed drop the receiver
+    /// counts). The admission of an opened Body statement is the SAME predicate the direct lane
+    /// uses, applied with the CHILD as the stating realm — asserted here so the "existing
+    /// attestation predicates against the child's identity" wording stays a measurement.
+    #[test]
+    fn relay_statements_seal_open_verbatim_and_pin_their_nested_discriminants() {
+        let child = RealmId::Planet(7);
+        let grandchild = RealmId::Area(3);
+        let body = RelayedStatement::Body {
+            subject: child,
+            stmt: BodyStmt::SelfLook { bag: vec![1, 2] },
+            authored_at: UniverseTick(100),
+        };
+        let marker = RelayedStatement::Body {
+            subject: grandchild,
+            stmt: BodyStmt::Marker { luma: vec![3] },
+            authored_at: UniverseTick(100),
+        };
+        let level = RelayedStatement::Level {
+            at: UniverseTick(100),
+            rows: vec![window_row()],
+        };
+        // Nested positional pins: a reorder would relabel sealed bytes already in flight.
+        assert_eq!(postcard::to_allocvec(&body).expect("encode")[0], 0);
+        assert_eq!(postcard::to_allocvec(&level).expect("encode")[0], 1);
+        // Seal → open is the identity (the parent forwards these bytes UNOPENED in between).
+        let batch = vec![body.clone(), marker.clone(), level.clone()];
+        let sealed = seal_relay_statements(&batch);
+        assert_eq!(open_relay_statements(&sealed).expect("open"), batch);
+        // A malformed blob refuses loud (the receiver's undecodable-relay drop).
+        assert!(open_relay_statements(&[0xFF, 0xFF, 0xFF]).is_err());
+        // The opened statements admit under the DIRECT lane's predicate with the CHILD as the
+        // stating realm: its self-look about itself, its marker about ITS OWN direct child.
+        let childs_children: BTreeSet<RealmId> = [grandchild].into_iter().collect();
+        // The SAME (stmt, subject) values the batch above carries, restated as data (HR5: a
+        // destructure of a value constructed three lines up has an unreachable refusal arm).
+        assert!(window_body_admissible(
+            &BodyStmt::SelfLook { bag: vec![1, 2] },
+            child,
+            child,
+            &childs_children
+        ));
+        assert!(window_body_admissible(
+            &BodyStmt::Marker { luma: vec![3] },
+            grandchild,
+            child,
+            &childs_children
+        ));
+        // A relayed look about anything but the child itself is refused by the same predicate.
+        assert!(!window_body_admissible(
+            &BodyStmt::SelfLook { bag: vec![1] },
+            grandchild,
+            child,
+            &childs_children
         ));
     }
 

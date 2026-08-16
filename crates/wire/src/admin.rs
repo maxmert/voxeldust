@@ -236,29 +236,30 @@ pub struct GatewayView {
     pub window_head_reads_sent: u64,
     /// Slice B — composed rows produced across all folds.
     pub window_composed_rows: u64,
-    /// SHADOW PARITY — old-lane rows reproduced bit-identically by the composed picture.
-    pub parity_rows_matched: u64,
-    /// SHADOW PARITY — same realm+tick, different position: UNEXPLAINED (fails the gate).
-    pub parity_pose_mismatch: u64,
-    /// SHADOW PARITY — GAUGE (max): largest measured pose deviation, nanometres.
-    pub parity_max_pos_dev_nm: u64,
-    /// SHADOW PARITY — a windowed realm absent from its tick's fold: UNEXPLAINED (fails the gate).
-    pub parity_missing_composed: u64,
-    /// SHADOW PARITY — the NAMED EXCLUSION: live-sibling interior rows (the recorded Q2-carrier
-    /// gap, D-WINDOW-1) — counted + printed by the gate, never silent.
-    pub parity_sibling_interior_excluded: u64,
-    /// SHADOW PARITY — explained: rows above an ancestor level with no resolved window yet.
-    pub parity_unwindowed_ancestor: u64,
-    /// SHADOW PARITY — explained: no fold at the row's tick (boot / skipped / ring-aged).
-    pub parity_no_fold_at_tick: u64,
-    /// SHADOW PARITY — explained: rows stated off the origin frame (crossing overlap dual feed).
-    pub parity_offframe_rows: u64,
-    /// SHADOW PARITY — rows naming the origin realm itself (SL1 self-filter regression signal).
-    pub parity_origin_rows: u64,
-    /// SHADOW PARITY — pending rows shed at the derived cap (loud, never silent).
-    pub parity_pending_shed: u64,
-    /// SHADOW PARITY — old-lane datagrams the shadow decode could not read. 0 healthy.
-    pub parity_undecodable: u64,
+    /// ★TOMBSTONED LANE (Slice C2, minor 19) — old opaque realm datagrams received from a shard
+    /// and dropped. `0` healthy; non-zero means a shard speaks a lane nobody serves.
+    pub old_realm_frames_dropped: u64,
+    /// ★TOMBSTONED LANE (Slice C2, minor 19) — old-lane per-observer scene deltas dropped at the
+    /// gateway. `0` healthy; non-zero means a shard speaks a lane nobody serves.
+    pub old_scene_deltas_dropped: u64,
+    /// Composed-scene egress — full levels shipped (one per epoch bump: login, crossing).
+    pub scene_levels_sent: u64,
+    /// Composed-scene egress — reliable deltas shipped on membership/body change.
+    pub scene_deltas_sent: u64,
+    /// Composed-scene egress — per-tick composed realm datagram chunks shipped.
+    pub scene_datagrams_sent: u64,
+    /// Q2 relay (mesh minor 17) — relayed statements admitted into a window's ingest.
+    pub window_relays_ingested: u64,
+    /// Q2 relay — sealed blobs that did not decode (dropped, fail-closed).
+    pub window_relay_undecodable: u64,
+    /// Q2 relay — relays for a child the author's own attested roster does not vouch.
+    pub window_relay_unvouched: u64,
+    /// Q2 relay — relays refused by the child's fence order / an older relayed level.
+    pub window_relay_stale: u64,
+    /// Q2 relay (§2.6.5 step 4) — relayed live-child interior rows composed into folds.
+    pub window_relay_rows_composed: u64,
+    /// Q2 relay — relayed interiors refused at the fold (stamp/placement/hop unavailable).
+    pub window_relay_unplaceable: u64,
     /// Gauge: sessions currently open on this gateway.
     pub sessions_open: u64,
     /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
@@ -583,7 +584,8 @@ mod tests {
                 window_open_sent: 34,
                 window_close_sent: 35,
                 window_keepalives_sent: 36,
-                // 38..69: the Slice-B composer + shadow-parity counters, declaration order.
+                // 38..69: the Slice-B composer + the composed-egress/tombstone counters, in
+                // declaration order.
                 window_level_refused: 38,
                 window_body_stale: 39,
                 window_body_preroster: 40,
@@ -605,17 +607,17 @@ mod tests {
                 window_dedup_max_dev_nm: 56,
                 window_head_reads_sent: 57,
                 window_composed_rows: 58,
-                parity_rows_matched: 59,
-                parity_pose_mismatch: 60,
-                parity_max_pos_dev_nm: 61,
-                parity_missing_composed: 62,
-                parity_sibling_interior_excluded: 63,
-                parity_unwindowed_ancestor: 64,
-                parity_no_fold_at_tick: 65,
-                parity_offframe_rows: 66,
-                parity_origin_rows: 67,
-                parity_pending_shed: 68,
-                parity_undecodable: 69,
+                old_realm_frames_dropped: 59,
+                old_scene_deltas_dropped: 60,
+                scene_levels_sent: 61,
+                scene_deltas_sent: 62,
+                scene_datagrams_sent: 63,
+                window_relays_ingested: 64,
+                window_relay_undecodable: 65,
+                window_relay_unvouched: 66,
+                window_relay_stale: 67,
+                window_relay_rows_composed: 68,
+                window_relay_unplaceable: 69,
                 sessions_open: 24,
                 dynamic_shards: 25,
                 windows_open: 37,

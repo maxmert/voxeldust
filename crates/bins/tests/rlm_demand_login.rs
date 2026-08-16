@@ -1152,17 +1152,54 @@ fn exiting_the_system_keeps_its_planets_orbiting() {
             .map(|b| (b.realm.clone(), b.center))
             .collect()
     };
-    let base = poll_state(devctl_port).expect("state after exit");
+    // The crossing's epoch swap replaced the scene WHOLESALE (Slice C1, §2.7 — no old box may
+    // outlive its origin's frame), so the vacated system's interior RETURNS via the sibling-
+    // interior relay (§2.6.5 step 4, Q2 = parent relay) within its cadence: poll it back in,
+    // bounded — a scene still planet-empty after the deadline is the frozen-exit defect.
+    let refill_deadline = Instant::now() + Duration::from_secs(20);
+    let base = loop {
+        let st = poll_state(devctl_port).expect("state after exit");
+        if !planets(&st).is_empty() {
+            break st;
+        }
+        assert!(
+            Instant::now() < refill_deadline,
+            "the system's planet boxes never returned to the drawn scene after exit \
+             (the sibling-interior relay is not reaching the galaxy-standing observer): {:?}",
+            st.realm_boxes
+                .iter()
+                .map(|b| b.realm.clone())
+                .collect::<Vec<_>>(),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+    };
     let base_frames = base.realm_frames_applied;
+    // ONE observation window for BOTH halves of the verdict: the feed keeps applying (frames
+    // climb) AND a drawn planet actually MOVES. The motion half needs the window too — the
+    // sibling-interior relay lawfully lags a beat behind the fold (Q2's budgeted hop), so a
+    // sample pair only 20 frames apart can straddle zero relay updates and read 0 m.
     let observe_until = Instant::now() + Duration::from_secs(25);
     let mut latest = base.clone();
     let mut feed_live = false;
+    let mut best_motion = 0.0_f64;
     while Instant::now() < observe_until {
         std::thread::sleep(Duration::from_millis(300));
         if let Some(st) = poll_state(devctl_port) {
             latest = st;
-            if latest.realm_frames_applied >= base_frames + 20 {
-                feed_live = true;
+            feed_live |= latest.realm_frames_applied >= base_frames + 20;
+            let p1 = planets(&latest);
+            best_motion = planets(&base)
+                .iter()
+                .filter_map(|(r, c0)| {
+                    p1.iter().find(|(r1, _)| r1 == r).map(|(_, c1)| {
+                        ((c1[0] - c0[0]).powi(2)
+                            + (c1[1] - c0[1]).powi(2)
+                            + (c1[2] - c0[2]).powi(2))
+                        .sqrt()
+                    })
+                })
+                .fold(best_motion, f64::max);
+            if feed_live && best_motion > 1.0 {
                 break;
             }
         }
@@ -1174,19 +1211,7 @@ fn exiting_the_system_keeps_its_planets_orbiting() {
         base_frames, latest.realm_frames_applied,
     );
     // And the DRAWN boxes moved — folding without drawing would be the stale-box defect reborn.
-    let (p0, p1) = (planets(&base), planets(&latest));
-    assert!(
-        !p0.is_empty(),
-        "the system's planet boxes are still in the drawn scene after exit"
-    );
-    let moved = p0
-        .iter()
-        .filter_map(|(r, c0)| {
-            p1.iter().find(|(r1, _)| r1 == r).map(|(_, c1)| {
-                ((c1[0] - c0[0]).powi(2) + (c1[1] - c0[1]).powi(2) + (c1[2] - c0[2]).powi(2)).sqrt()
-            })
-        })
-        .fold(0.0_f64, f64::max);
+    let moved = best_motion;
     assert!(
         moved > 1.0,
         "no drawn planet moved over the window from OUTSIDE the system — frozen (best {moved:.3} m)"

@@ -186,14 +186,31 @@ mod tests {
     use super::*;
     use glam::DVec3;
     use vd_core::entity_kind::EntityKind;
-    use vd_core::pose::{FrameRef, StampedPose};
+    use vd_core::geometry::Boundary;
+    use vd_core::look::look_bag;
+    use vd_core::pose::{FrameRef, RealmId, StampedPose};
     use vd_core::{TickId, UniverseTick};
-    use vd_wire::channels::{EntitySnap, SnapshotDatagram};
+    use vd_wire::channels::{EntitySnap, SceneRow, SnapshotDatagram};
 
     use crate::tuning::ClientInterpTuning;
 
     fn ent(seq: u64) -> EntityId {
         EntityId::pack(EntityKind::Player, 1, seq, seq as u32)
+    }
+
+    /// ONE COMPOSED SCENE ROW — a realm at `pos` that draws ITSELF as a sphere of radius `r`. The
+    /// look bag is the whole appearance statement; the client applies no transform to it.
+    fn scene_row(realm: RealmId, pos: DVec3, r: f64) -> SceneRow {
+        SceneRow {
+            realm,
+            parent: None,
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 1 },
+                pos,
+                UniverseTick(100),
+            ),
+            bag: look_bag(&Boundary::Shell { r }),
+        }
     }
 
     fn snap(frame_id: u64, tick: u64, entities: Vec<(EntityId, f64)>) -> SnapshotDatagram {
@@ -217,11 +234,10 @@ mod tests {
     }
 
     #[test]
-    fn a_default_snapshot_carries_an_empty_scene_and_with_scene_carries_the_loaded_one() {
+    fn a_default_snapshot_carries_an_empty_scene_and_with_scene_carries_the_streamed_one() {
         use crate::realm_scene::{BoxShape, RealmScene};
         use std::sync::Arc;
-        use vd_core::geometry::{CrossEffect, RealmBoundary};
-        use vd_core::pose::{LatticePos, RealmId};
+        use vd_core::pose::RealmId;
 
         // The pose-only `new` carries an empty scene (every pre-V2 path is unchanged).
         let bare = RenderSnapshot::new(
@@ -231,32 +247,20 @@ mod tests {
         );
         assert!(bare.scene().is_empty(), "new() ⇒ no realm boxes");
 
-        // `with_scene` carries the boot-loaded scene through the render seam.
-        let scene = RealmScene::from_boundaries(&[RealmBoundary::shell(
-            RealmId::System(7),
-            LatticePos::local(DVec3::ZERO),
-            1000.0,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            None,
-            RealmId::System(7),
-            CrossEffect::Authority,
-        )])
-        .expect("scene");
+        // `with_scene` carries the COMPOSED scene (one level of rows) through the render seam.
+        let scene =
+            RealmScene::from_scene_rows(&[scene_row(RealmId::System(7), DVec3::ZERO, 100.0)])
+                .expect("scene");
         let s = RenderSnapshot::with_scene(
             DeliveredView::default(),
             RenderClock::new(ClientInterpTuning::DEFAULT),
             ClientPhase::Active,
             Arc::new(scene),
         );
-        assert_eq!(s.scene().len(), 1, "the loaded box is carried on the seam");
+        assert_eq!(s.scene().len(), 1, "the drawn box is carried on the seam");
         assert_eq!(
             s.scene().get(RealmId::System(7)).expect("box").shape,
-            BoxShape::Sphere { r: 1000.0 }
+            BoxShape::Sphere { r: 100.0 }
         );
     }
 
@@ -391,30 +395,29 @@ mod tests {
 mod slice6_tests {
     use super::*;
     use vd_core::UniverseTick;
-    use vd_core::geometry::{CrossEffect, RealmBoundary};
-    use vd_core::pose::{LatticePos, RealmId, StampedPose};
-    use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
+    use vd_core::geometry::Boundary;
+    use vd_core::look::look_bag;
+    use vd_core::pose::{RealmId, StampedPose};
+    use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram, SceneRow};
 
     use crate::realm_scene::RealmScene;
     use crate::tuning::ClientInterpTuning;
 
     const REALM: RealmId = RealmId::Planet(1);
 
-    fn boot_scene() -> RealmScene {
-        RealmScene::from_boundaries(&[RealmBoundary::shell(
-            REALM,
-            LatticePos::local(DVec3::ZERO),
-            1.0,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            None,
-            REALM,
-            CrossEffect::Authority,
-        )])
+    /// The scene as the composed LEVEL states it: one realm drawing its own outline at the origin.
+    /// The streamed placements below move it; nothing here states where it is.
+    fn level_scene() -> RealmScene {
+        RealmScene::from_scene_rows(&[SceneRow {
+            realm: REALM,
+            parent: None,
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 1 },
+                DVec3::ZERO,
+                UniverseTick(0),
+            ),
+            bag: look_bag(&Boundary::Shell { r: 1.0 }),
+        }])
         .expect("scene")
     }
 
@@ -436,6 +439,7 @@ mod slice6_tests {
                     frame_id: t,
                     source_tick: vd_core::TickId(t),
                     universe_tick: UniverseTick(t),
+                    origin_epoch: 0,
                     realms: vec![RealmSnap {
                         realm: REALM,
                         // The edge HEAD (proto_minor 8): REALM's own frame; `pose.frame` is the TAIL.
@@ -454,7 +458,7 @@ mod slice6_tests {
             DeliveredView::default(),
             RenderClock::new(ClientInterpTuning::DEFAULT),
             ClientPhase::Active,
-            Arc::new(boot_scene()),
+            Arc::new(level_scene()),
             realms,
         );
         // Sweep the cursor across a whole tick in tenths and require the centre to follow it exactly.
@@ -480,20 +484,20 @@ mod slice6_tests {
         }
     }
 
-    /// SLICE 6 S4 — a scene with NO streamed placements is the boot scene, so static/walk-scale rigs
-    /// are unchanged by the whole slice.
+    /// SLICE 6 S4 — a scene with NO streamed placements is the level scene as it arrived, so
+    /// static/walk-scale rigs are unchanged by the whole slice.
     #[test]
-    fn slice6_an_unstreamed_scene_is_the_boot_scene() {
-        let boot = boot_scene();
+    fn slice6_an_unstreamed_scene_is_the_level_scene() {
+        let level = level_scene();
         let snap = RenderSnapshot::with_realms(
             DeliveredView::default(),
             RenderClock::new(ClientInterpTuning::DEFAULT),
             ClientPhase::Active,
-            Arc::new(boot.clone()),
+            Arc::new(level.clone()),
             RealmView::default(),
         );
-        assert_eq!(snap.scene_at(123.0), boot);
-        // And before the clock is anchored there is no cursor at all — still the boot scene.
-        assert_eq!(snap.scene_now(9.0), boot);
+        assert_eq!(snap.scene_at(123.0), level);
+        // And before the clock is anchored there is no cursor at all — still the level scene.
+        assert_eq!(snap.scene_now(9.0), level);
     }
 }

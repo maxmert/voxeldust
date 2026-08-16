@@ -31,6 +31,12 @@ pub enum RealmVerdict {
     Apply,
     /// A strictly-older `frame_id` — a late straggler, dropped + counted.
     DropStale,
+    /// A datagram from a PREVIOUS scene epoch — a straggler from the scene the client already
+    /// swapped away from (§2.7): dropped, its rows counted (`stale_epoch_rows`).
+    DropStaleEpoch,
+    /// A datagram from the NEXT scene epoch that raced its own level on the reliable lane —
+    /// HELD one beat (§2.7) and replayed by [`RealmView::swap_epoch`] when the level lands.
+    HeldNextEpoch,
 }
 
 /// The decoded, delivered realm-placement view.
@@ -38,16 +44,19 @@ pub enum RealmVerdict {
 pub struct RealmView {
     /// ONE track per realm (latest-wins) — the moving box's interpolated pose.
     placements: BTreeMap<RealmId, EntityTrack>,
-    /// The per-REALM staleness high-water for the §6.3 gate — keyed by the single-owner `RealmId`,
-    /// NOT one feed-global scalar. Each `RealmId` is authored by exactly ONE shard (its parent), and
-    /// each shard runs its OWN monotone `RealmFrameCounter` from 0; a feed-global high-water would let a
-    /// higher-counter shard's `frame_id` ratchet past a co-subscribed lower-counter shard's and FREEZE
-    /// that shard's boxes forever (two mover shards in one client's AoI — the node-per-realm Forest case,
-    /// e.g. a System 7 → Galaxy → System 8 warp). Keying per single-owner `RealmId` decouples the
-    /// independent counters (the render is already per-`RealmId` latest-wins). A straggler across an
-    /// authority HANDOFF (a realm re-homing between shards, two transient co-authors) still needs the
-    /// `realm_fence` — an FA-6 concern (D-45 owed), not reachable until a realm reparents.
-    high_water: BTreeMap<RealmId, u64>,
+    /// THE ONE FEED COUNTER (proto_minor 18, §2.4): the composed feed has a SINGLE author — the
+    /// session's own connection plane, stamping one monotone `frame_id` — so the old per-realm
+    /// high-water map (which decoupled many independent shard counters) collapses to one scalar
+    /// plus the epoch. `None` before the first applied datagram of the current epoch; cleared on
+    /// every epoch swap (a new scene is a new stream).
+    high_water: Option<u64>,
+    /// The CURRENT scene epoch (§2.7): datagrams apply only at this epoch; an older one is a
+    /// straggler from the swapped-away scene (dropped + counted), a newer one raced its level on
+    /// the reliable lane (held one beat below).
+    epoch: u64,
+    /// The one-beat hold (§2.7): the newest early next-epoch datagram, replayed by
+    /// [`RealmView::swap_epoch`] the moment its level lands. Newest-wins (latest-wins feed).
+    held: Option<RealmSnapshotDatagram>,
     /// Realm frames ACCEPTED by the gate (the realm liveness signal a `wait-until` predicate polls —
     /// the realm twin of `snapshots_applied`; STAYS 0 at walk scale where no realm frame ships).
     frames_applied: u64,
@@ -62,7 +71,12 @@ pub struct RealmView {
     /// until its sub closes — folding those beside the new home's rows draws two spaces into one
     /// picture (the measured jitter). Not a fault at a crossing; a non-zero steady-state value means
     /// a shard is shipping rows in a space its observer does not stand in (the server-side bug).
+    /// ALIVE through C1 by design (§4.5 Topic 4: a guard dies only in the commit that removes its
+    /// cause — the still-open dual-sub overlap); it retires in C2 with the lanes that feed it.
     foreign_space_rows: u64,
+    /// FAULT/diagnosis count: rows dropped because their datagram's `origin_epoch` predates the
+    /// client's current scene (§2.6.6's `stale_epoch_rows` row). Expected briefly at a crossing.
+    stale_epoch_rows: u64,
 }
 
 impl RealmView {
@@ -86,16 +100,33 @@ impl RealmView {
         standing_in: Option<vd_core::pose::FrameRef>,
         snap: RealmSnapshotDatagram,
     ) -> RealmVerdict {
+        // THE EPOCH GATE (§2.7): older epoch ⇒ a straggler from the swapped-away scene, dropped +
+        // counted per row; newer epoch ⇒ it raced its own level on the reliable lane, HELD one
+        // beat (newest wins) and replayed at the swap.
+        if snap.origin_epoch < self.epoch {
+            self.stale_epoch_rows += snap.realms.len() as u64;
+            return RealmVerdict::DropStaleEpoch;
+        }
+        if snap.origin_epoch > self.epoch {
+            let newer = self
+                .held
+                .as_ref()
+                .is_none_or(|h| (snap.origin_epoch, snap.frame_id) >= (h.origin_epoch, h.frame_id));
+            if newer {
+                self.held = Some(snap);
+            }
+            return RealmVerdict::HeldNextEpoch;
+        }
+        // THE ONE FEED COUNTER (§2.4): a single author stamps one monotone `frame_id`, so one
+        // strictly-older scalar gates the whole feed (an equal id is a sibling chunk — applied).
+        if is_stale(self.high_water, snap.frame_id) {
+            self.stale_frames_dropped += 1;
+            return RealmVerdict::DropStale;
+        }
         let mut any_applied = false;
         for row in snap.realms {
             if standing_in.is_some_and(|own| row.pose.frame != own) {
                 self.foreign_space_rows += 1;
-                continue;
-            }
-            // Per-REALM staleness: a co-subscribed higher-counter shard must never ratchet a
-            // lower-counter shard's realm past `frame_id` (the freeze bug a feed-global scalar caused).
-            if is_stale(self.high_water.get(&row.realm).copied(), snap.frame_id) {
-                self.stale_frames_dropped += 1;
                 continue;
             }
             // Sanitize at the decode-ingress chokepoint (the DeliveredView discipline, view.rs): a
@@ -105,7 +136,7 @@ impl RealmView {
             if pose != raw {
                 self.nonfinite_poses += 1;
             }
-            self.high_water.insert(row.realm, snap.frame_id);
+            self.high_water = Some(snap.frame_id);
             self.placements
                 .entry(row.realm)
                 .and_modify(|track| track.observe(pose))
@@ -121,23 +152,43 @@ impl RealmView {
         }
     }
 
-    /// FORGET every stored placement and high-water (the ONE-SPACE rule's other half, crossing-render
-    /// slice): called at the own-location frame flip — a crossing moved this client into a new realm,
-    /// and every stored track is a position in the OLD realm's space, meaningless in the new one. The
-    /// realm the client now stands in is the sharpest case: its own per-tick row NEVER ships again
-    /// (the realm you occupy draws itself — its outline arrives on the scene lane at your origin), so
-    /// without this its stale pre-crossing track would override that outline FOREVER (the measured
-    /// "I landed on the planet and I am outside it"). The new space refills within one feed period;
-    /// until then each box draws from its streamed scene outline (`RealmScene`), never from a stale
-    /// track. High-waters clear with the tracks: they gate a space that no longer exists, and the
-    /// one-space ingress filter keeps DIFFERENT-space stragglers out. HONEST RESIDUAL (review,
-    /// minor): a fast A→B→A re-entry re-arrives in the SAME frame as before, so one reordered old-A
-    /// straggler can pass the cleared gate and draw one stale placement for at most one feed period
-    /// (the realm's single-author `frame_id` stream is monotone, so the next fresh row overwrites) —
-    /// transient by construction, never a freeze or a permanent poisoning.
-    pub fn forget_space(&mut self) {
+    /// THE EPOCH SWAP (§2.7 — the flag day's replacement of the old `forget_space` INFERENCE):
+    /// called when a composed LEVEL lands with a new `origin_epoch`. Every stored track is a
+    /// position in the OLD origin's frame, meaningless in the new one: forget them all, clear the
+    /// feed counter (a new scene is a new stream), adopt the epoch — and hand back the one-beat
+    /// HELD datagram if it belongs to the scene just adopted, for the caller to replay through
+    /// the normal ingest (the level itself carried every row's pose, so nothing is undrawn while
+    /// the replay lands). A level RE-SENT at the current epoch swaps nothing — the scene it
+    /// describes is the scene the tracks already animate.
+    #[must_use]
+    pub fn swap_epoch(&mut self, epoch: u64) -> Option<RealmSnapshotDatagram> {
+        if epoch == self.epoch {
+            return None;
+        }
         self.placements.clear();
-        self.high_water.clear();
+        self.high_water = None;
+        self.epoch = epoch;
+        match self.held.take() {
+            Some(h) if h.origin_epoch == epoch => Some(h),
+            // A held datagram for a STILL-newer epoch stays held; an older one is dead.
+            Some(h) if h.origin_epoch > epoch => {
+                self.held = Some(h);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// The CURRENT scene epoch (§2.7) — the reliable-lane delta gate reads this.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Rows dropped for carrying a PREVIOUS scene epoch (a fault/diagnosis count, §2.6.6).
+    #[must_use]
+    pub fn stale_epoch_rows(&self) -> u64 {
+        self.stale_epoch_rows
     }
 
     /// Realm rows skipped by the one-space ingress rule — see [`RealmView::on_realm_snapshot`].
@@ -228,11 +279,23 @@ mod tests {
     }
 
     fn frame(frame_id: u64, tick: u64, rows: Vec<(RealmId, StampedPose)>) -> RealmSnapshotDatagram {
+        frame_at_epoch(0, frame_id, tick, rows)
+    }
+
+    /// The epoch-carrying fixture (§2.7): the view boots at epoch 0, so `frame` stays applicable
+    /// without a swap; the epoch tests drive this one directly.
+    fn frame_at_epoch(
+        origin_epoch: u64,
+        frame_id: u64,
+        tick: u64,
+        rows: Vec<(RealmId, StampedPose)>,
+    ) -> RealmSnapshotDatagram {
         RealmSnapshotDatagram {
             sub: SubId(0),
             frame_id,
             source_tick: TickId(1),
             universe_tick: UniverseTick(tick),
+            origin_epoch,
             realms: rows
                 .into_iter()
                 .map(|(realm, pose)| RealmSnap {
@@ -282,31 +345,103 @@ mod tests {
         );
     }
 
-    /// The space flip forgets EVERYTHING (placements + high-waters): every stored value is a
-    /// position in the old space. The new space then refills from zero — a fresh feed's LOWER
-    /// frame_id must be admitted, which is why the high-waters clear with the tracks.
+    /// THE EPOCH SWAP forgets EVERYTHING (placements + the feed counter): every stored value is a
+    /// position in the old origin's frame. The new scene then refills from zero — a fresh feed's
+    /// LOWER frame_id must be admitted, which is why the counter clears with the tracks. A level
+    /// RE-SENT at the current epoch swaps nothing; an old-epoch straggler is dropped + counted;
+    /// an EARLY next-epoch datagram is held one beat and handed back at the swap (newest wins).
     #[test]
-    fn forget_space_clears_tracks_and_high_waters() {
+    fn the_epoch_swap_clears_tracks_holds_early_datagrams_and_drops_stale_epochs() {
         let mut v = RealmView::default();
+        assert_eq!(v.epoch(), 0, "the view boots at epoch 0");
         v.on_realm_snapshot(
             None,
             frame(9, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]),
         );
         assert!(!v.is_empty());
-        v.forget_space();
-        assert!(v.is_empty(), "every stored placement is forgotten");
-        assert_eq!(v.realm_pose(RealmId::Planet(1), 10.0), None);
-        // The new space's feed starts its own counter: a frame_id BELOW the forgotten high-water folds.
-        let verdict = v.on_realm_snapshot(
-            None,
-            frame(1, 12, vec![(RealmId::Planet(1), pose(DVec3::Y, 12))]),
+        // A level RE-SENT at the current epoch swaps nothing (the tracks already animate it).
+        assert_eq!(v.swap_epoch(0), None);
+        assert!(!v.is_empty(), "a same-epoch level forgets nothing");
+        // An EARLY epoch-1 datagram races its level: HELD, not applied, not dropped.
+        assert_eq!(
+            v.on_realm_snapshot(
+                None,
+                frame_at_epoch(1, 1, 12, vec![(RealmId::Planet(2), pose(DVec3::Y, 12))]),
+            ),
+            RealmVerdict::HeldNextEpoch,
         );
+        // A newer early datagram REPLACES the held one (latest-wins feed)...
+        assert_eq!(
+            v.on_realm_snapshot(
+                None,
+                frame_at_epoch(1, 2, 13, vec![(RealmId::Planet(2), pose(DVec3::Z, 13))]),
+            ),
+            RealmVerdict::HeldNextEpoch,
+        );
+        // ...and an OLDER one does not (the is_none_or false arm).
+        assert_eq!(
+            v.on_realm_snapshot(
+                None,
+                frame_at_epoch(1, 1, 12, vec![(RealmId::Planet(2), pose(DVec3::Y, 12))]),
+            ),
+            RealmVerdict::HeldNextEpoch,
+        );
+        assert_eq!(v.realm_pose(RealmId::Planet(2), f64::INFINITY), None);
+        // THE SWAP: tracks + counter forgotten; the held epoch-1 datagram is handed back.
+        let held = v.swap_epoch(1).expect("the held datagram replays");
+        assert_eq!(
+            held.frame_id, 2,
+            "the NEWEST early datagram was the one held"
+        );
+        assert!(v.is_empty(), "every stored placement is forgotten");
+        assert_eq!(v.epoch(), 1);
+        // The new scene's feed starts its own counter: a frame_id BELOW the forgotten one folds.
+        let verdict = v.on_realm_snapshot(None, held);
         assert_eq!(
             verdict,
             RealmVerdict::Apply,
-            "the forgotten high-water no longer gates"
+            "the forgotten counter no longer gates; the replayed datagram folds"
         );
-        assert!(v.realm_pose(RealmId::Planet(1), 12.0).is_some());
+        assert!(v.realm_pose(RealmId::Planet(2), 13.0).is_some());
+        // An OLD-epoch straggler (the swapped-away scene) is dropped, its rows counted.
+        assert_eq!(
+            v.on_realm_snapshot(
+                None,
+                frame_at_epoch(0, 10, 14, vec![(RealmId::Planet(1), pose(DVec3::X, 14))]),
+            ),
+            RealmVerdict::DropStaleEpoch,
+        );
+        assert_eq!(v.stale_epoch_rows(), 1);
+        assert_eq!(v.realm_pose(RealmId::Planet(1), f64::INFINITY), None);
+    }
+
+    /// The swap's held-datagram disposition arms the big test above cannot reach: a held datagram
+    /// for a STILL-newer epoch stays held across an intermediate swap; one for a dead epoch drops.
+    #[test]
+    fn a_held_datagram_outlives_an_intermediate_swap_only_while_its_epoch_is_ahead() {
+        let mut v = RealmView::default();
+        // Held for epoch 2 while the view sits at 0.
+        assert_eq!(
+            v.on_realm_snapshot(
+                None,
+                frame_at_epoch(2, 1, 10, vec![(RealmId::Planet(1), pose(DVec3::X, 10))]),
+            ),
+            RealmVerdict::HeldNextEpoch,
+        );
+        // Swapping to epoch 1 keeps it held (its scene has not arrived yet)...
+        assert_eq!(v.swap_epoch(1), None);
+        // ...and swapping to epoch 2 hands it back.
+        assert!(v.swap_epoch(2).is_some());
+        // A held datagram for an epoch the view has swapped PAST is dead: hold one for 3, then
+        // swap straight to 4 — nothing replays.
+        assert_eq!(
+            v.on_realm_snapshot(
+                None,
+                frame_at_epoch(3, 1, 11, vec![(RealmId::Planet(1), pose(DVec3::X, 11))]),
+            ),
+            RealmVerdict::HeldNextEpoch,
+        );
+        assert_eq!(v.swap_epoch(4), None, "a dead-epoch hold never replays");
     }
 
     #[test]
@@ -324,9 +459,9 @@ mod tests {
             ),
         );
         assert_eq!(verdict, RealmVerdict::Apply);
-        // Per-realm high-water: BOTH streamed realms are stamped at the datagram's frame_id.
-        assert_eq!(v.high_water.get(&RealmId::Planet(1)), Some(&3));
-        assert_eq!(v.high_water.get(&RealmId::Station(2)), Some(&3));
+        // ONE feed counter (§2.4 — the composed feed has a single author): the datagram's
+        // frame_id is the whole feed's high-water.
+        assert_eq!(v.high_water, Some(3));
         assert!(v.realm_pose(RealmId::Planet(1), 10.0).is_some());
         assert!(v.realm_pose(RealmId::Station(2), 10.0).is_some());
         // A realm the feed never streamed has no pose (its box stays boot-static).
@@ -342,14 +477,14 @@ mod tests {
     }
 
     #[test]
-    fn two_mover_shards_with_divergent_frame_ids_both_stay_live_no_cross_shard_freeze() {
-        // The FA-5 multi-emitter case (the holistic /goal audit HIGH, wf_c9444997): two shards each
-        // author their OWN disjoint realms with INDEPENDENT RealmFrameCounters — shard A far ahead
-        // (frame_id 500), shard B fresh (frame_id 30). A feed-GLOBAL high-water would let A(500) ratchet
-        // past B and DROP every B frame as stale forever (B's boxes FREEZE — the node-per-realm Forest
-        // System 7 -> Galaxy -> System 8 warp bug). Per-RealmId keying decouples them: BOTH stay live.
+    fn one_author_one_counter_the_composed_feed_never_regresses() {
+        // THE COLLAPSE (§2.4): the old per-realm high-water existed because many shards each ran
+        // their OWN RealmFrameCounter and a feed-global scalar let one ratchet past another (the
+        // FA-5 two-mover freeze). The composed feed has exactly ONE author — the session's own
+        // connection plane, stamping one monotone frame_id across every realm it composes — so
+        // one scalar is now CORRECT: a lower id after a higher one is a genuine straggler even
+        // when it names a different realm, because the same author stamped both.
         let mut v = RealmView::default();
-        // Shard A (System 7): its planet at a high counter.
         assert_eq!(
             v.on_realm_snapshot(
                 None,
@@ -357,25 +492,27 @@ mod tests {
             ),
             RealmVerdict::Apply,
         );
-        // Shard B (System 8): its planet at a LOW counter — must NOT be rejected as "stale" vs A's 500.
+        // A lower-id datagram — even for a DIFFERENT realm — is a straggler from the one author.
         assert_eq!(
             v.on_realm_snapshot(
                 None,
-                frame(30, 10, vec![(RealmId::Planet(8), pose(DVec3::Y, 10))])
+                frame(30, 9, vec![(RealmId::Planet(8), pose(DVec3::Y, 9))])
             ),
-            RealmVerdict::Apply,
-            "shard B's low-counter frame must apply — no cross-shard high-water conflation",
+            RealmVerdict::DropStale,
         );
-        assert!(v.realm_pose(RealmId::Planet(7), 10.0).is_some());
-        assert!(v.realm_pose(RealmId::Planet(8), 10.0).is_some());
-        // B keeps advancing independently of A's counter — it is not frozen.
+        assert_eq!(v.stale_frames_dropped(), 1);
+        assert_eq!(v.realm_pose(RealmId::Planet(8), 10.0), None);
+        // The author's next fresh id carries BOTH realms forward — nothing freezes.
         assert_eq!(
             v.on_realm_snapshot(
                 None,
                 frame(
-                    31,
+                    501,
                     20,
-                    vec![(RealmId::Planet(8), pose(DVec3::new(0.0, 3.0, 0.0), 20))]
+                    vec![
+                        (RealmId::Planet(7), pose(DVec3::new(2.0, 0.0, 0.0), 20)),
+                        (RealmId::Planet(8), pose(DVec3::new(0.0, 3.0, 0.0), 20)),
+                    ]
                 )
             ),
             RealmVerdict::Apply,
@@ -384,17 +521,8 @@ mod tests {
             v.realm_pose(RealmId::Planet(8), f64::INFINITY)
                 .map(|p| p.pos),
             Some(DVec3::new(0.0, 3.0, 0.0)),
-            "B moved to its frame-31 pose — not frozen",
+            "the fresh composed tick carries every realm — not frozen",
         );
-        // A per-realm stale straggler (B at 30 after B advanced to 31) is STILL dropped.
-        assert_eq!(
-            v.on_realm_snapshot(
-                None,
-                frame(30, 10, vec![(RealmId::Planet(8), pose(DVec3::ZERO, 10))])
-            ),
-            RealmVerdict::DropStale,
-        );
-        assert_eq!(v.stale_frames_dropped(), 1);
     }
 
     #[test]
@@ -416,7 +544,7 @@ mod tests {
             RealmVerdict::DropStale,
         );
         assert_eq!(v.stale_frames_dropped, 1);
-        assert_eq!(v.high_water.get(&RealmId::Planet(1)), Some(&5));
+        assert_eq!(v.high_water, Some(5));
         // frames_applied counts ONLY the accepted frame, not the stale drop.
         assert_eq!(v.frames_applied(), 1);
         // An EQUAL frame_id (a sibling chunk of the partitioned frame 5) is NOT stale and applies —

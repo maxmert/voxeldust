@@ -92,21 +92,21 @@ pub struct ClientState {
     /// The freshest APPLIED universe tick (run-stable + join-independent) — what
     /// `screenshot --at-tick` aligns on; `None` before the first applied snapshot.
     latest_universe_tick: Option<u64>,
-    /// The boot-loaded realm-box scene (Visual Crossing Playground V2), shared onto the render
-    /// seam via `Arc` so the per-step `render_snapshot()` clone is a pointer bump. The BOOT-STATIC
-    /// config (never mutated); a MOVING realm's live pose rides `realm_view` and is OVERLAID at
-    /// publish time (FA-2c-3.3), keeping this the pure config source-of-truth.
+    /// The composed realm scene (proto_minor 18, §2.4): one source — the STREAM. Replaced whole
+    /// on every level (`RealmRegistry`, the atomic epoch swap), patched by same-epoch deltas,
+    /// shared onto the render seam via `Arc` so the per-step `render_snapshot()` clone is a
+    /// pointer bump. Every drawn row's live pose rides `realm_view` and is OVERLAID at publish
+    /// time; the level's own row poses make a row drawable the instant it lands.
     scene: Arc<RealmScene>,
+    /// THE ORIGIN MARKER (§2.7): the realm the current scene is composed in, as the level stated
+    /// it. `None` before the first level. The diagnosis surface (`DevState.origin`) reads it —
+    /// the pixel gates' "origin marker == home realm" assert.
+    origin: Option<vd_core::pose::RealmId>,
     /// The delivered REALM view (FA-2c) — the streamed authoritative placements for the shard's
     /// moving realm boxes (an orbiting planet/station/ship). EMPTY until a `RealmSnapshot` arrives
     /// (walk scale ships none, so the published scene stays the boot `scene` — byte-identical). Read
     /// by `render_snapshot()` to OVERLAY each moving box's live pose onto the boot scene.
     realm_view: RealmView,
-    /// The space the avatar stood in at the LAST applied own-entity frame (the ONE-SPACE rule's
-    /// flip detector, crossing-render slice): when the delivered own frame changes — a committed
-    /// crossing — every stored realm placement is a position in the OLD space and is forgotten
-    /// (`RealmView::forget_space`). `None` until the avatar's first delivered frame.
-    standing_space: Option<vd_core::pose::FrameRef>,
 }
 
 impl ClientState {
@@ -133,17 +133,9 @@ impl ClientState {
             snapshots_applied: 0,
             latest_universe_tick: None,
             scene: Arc::new(RealmScene::default()),
+            origin: None,
             realm_view: RealmView::default(),
-            standing_space: None,
         }
-    }
-
-    /// Boot-load the realm-box render scene (V2). Called ONCE at start-up with the dev-config
-    /// `boxes.json` (single-sourced with the shard's boundary plant); the scene then rides every
-    /// [`ClientState::render_snapshot`] onto the render seam. It is config, not delivered state, so
-    /// this is a non-mutating one-shot set, distinct from the wire ingest path.
-    pub fn load_scene(&mut self, scene: RealmScene) {
-        self.scene = Arc::new(scene);
     }
 
     /// One full client step = [`pump_inbound`](Self::pump_inbound) then
@@ -238,27 +230,44 @@ impl ClientState {
             ServerControlMsg::UniverseRate { tick_hz } => {
                 self.set_tick_hz_from_wire(tick_hz);
             }
-            // THE streamed realm render-scene (VU proto_minor 5): a fully-agnostic client draws its world
-            // from the STREAM ALONE, so REPLACE the boot box scene with the AoI-scoped realm neighbourhood the
-            // gateway shipped. The live per-realm poses keep riding `realm_view` and OVERLAY onto these boxes
-            // at publish time — exactly as they did over the boot-file scene. `root` (the ambient container)
-            // is unused until camera framing (VU-6). A malformed neighbourhood (a duplicate/cyclic realm — a
-            // server bug) is counted on the shared decode counter and the previous scene kept, never a crash.
-            ServerControlMsg::RealmRegistry { regions, .. } => {
-                // Nothing here re-anchors anything. The message used to carry the pin realm's own absolute
-                // position, which the client adopted and subtracted from every pose it drew; positions now
-                // arrive already measured in the pin's space, so the client's only job is to hold the shapes.
-                match RealmScene::from_shapes(&regions) {
-                    Ok(scene) => self.scene = Arc::new(scene),
-                    Err(_) => self.decode_errors += 1,
+            // THE COMPOSED LEVEL (proto_minor 18, §2.4/§2.7): the complete drawable scene at one
+            // tick, in the origin's frame — THE ATOMIC SWAP. The old scene rendered until this
+            // landed; adopting it swaps scene + origin + epoch in one motion, forgets the old
+            // epoch's tracks (the level's own row poses keep every box drawable meanwhile), and
+            // replays the one-beat-held early datagram of the new epoch, if one raced the level.
+            // This REPLACES the old `forget_space` inference off the entity feed. A malformed
+            // level (a duplicate/cyclic realm — a server bug) is counted and the previous scene
+            // kept, never a partial mutation.
+            ServerControlMsg::RealmRegistry {
+                origin,
+                origin_epoch,
+                rows,
+            } => match RealmScene::from_scene_rows(&rows) {
+                Ok(scene) => {
+                    self.scene = Arc::new(scene);
+                    self.origin = Some(origin);
+                    if let Some(held) = self.realm_view.swap_epoch(origin_epoch) {
+                        let standing_in = self.view.own_location_frame();
+                        let _ = self.realm_view.on_realm_snapshot(standing_in, held);
+                    }
                 }
-            }
-            // THE incremental render-scene update (VU AoI, proto_minor 6): apply the realms that ENTERED this
-            // client's view (`added`) and those that LEFT (`removed`) onto the current scene, so the world
-            // follows the view continuously. Atomic — a malformed delta (a cyclic parent chain, a server bug)
-            // is counted and the previous scene kept, never a partial mutation. The live per-realm poses keep
-            // riding `realm_view` and overlay onto whatever boxes are present.
-            ServerControlMsg::RealmSceneDelta { added, removed, .. } => {
+                Err(_) => self.decode_errors += 1,
+            },
+            // THE incremental composed update (§2.4): rows that ENTERED the drawn set and realms
+            // that LEFT it, applied ONLY at the client's current epoch — a delta from a scene the
+            // client no longer (or does not yet) hold is refused, counted benign (the next level
+            // re-states everything). Atomic — a malformed delta is counted and the previous scene
+            // kept, never a partial mutation.
+            ServerControlMsg::RealmSceneDelta {
+                origin_epoch,
+                added,
+                removed,
+                ..
+            } => {
+                if origin_epoch != self.realm_view.epoch() {
+                    self.ignored += 1;
+                    return;
+                }
                 match self.scene.with_delta(&added, &removed) {
                     Ok(scene) => self.scene = Arc::new(scene),
                     Err(_) => self.decode_errors += 1,
@@ -301,27 +310,14 @@ impl ClientState {
             return;
         };
         let tick = snap.universe_tick;
-        // Anchor the render cursor only on an APPLIED frame (a held sub, fresh).
+        // Anchor the render cursor only on an APPLIED frame (a held sub, fresh). The old
+        // space-flip INFERENCE that lived here (forget the realm tracks when the avatar's
+        // delivered frame changes) is GONE (§2.7): the composed level's epoch swap is the one
+        // scene-change signal, stated by the server, never inferred from a feed.
         if self.view.on_snapshot(&self.held_subs, snap) == SnapshotVerdict::Apply {
             self.render_clock.observe(tick, now_s);
             self.snapshots_applied += 1;
             self.latest_universe_tick = Some(tick.0);
-            // THE SPACE FLIP (the ONE-SPACE rule, crossing-render slice): the avatar's delivered
-            // frame changed — a committed crossing moved this client into a new realm. Every stored
-            // realm placement is a position in the OLD space: forget them all. The new space refills
-            // within one feed period; the realm now stood in draws from its streamed scene OUTLINE at
-            // the avatar's origin (its own per-tick row never ships — the realm you occupy draws
-            // itself), which the stale track would otherwise override forever (the measured
-            // "I landed on the planet and I am outside it"). The first delivered frame (None → Some)
-            // is a login, not a crossing — nothing stored yet, and `forget_space` of nothing is a
-            // no-op, so one arm covers both.
-            let now_standing = self.view.own_location_frame();
-            if now_standing != self.standing_space {
-                if self.standing_space.is_some() {
-                    self.realm_view.forget_space();
-                }
-                self.standing_space = now_standing;
-            }
         }
     }
 
@@ -559,6 +555,14 @@ impl ClientState {
             .iter()
             .map(|(realm, b)| DevRealmBox {
                 realm: format!("{realm:?}"),
+                // The STREAMED extent (§2.11): straight off the composed row's look bag — the
+                // camera reconstruction and the harness verdicts read THIS, never a file.
+                extent_m: box_extent_m(b),
+                // THE DRAW LAW's arm, by data presence (owner decision 10) — the gates' assert.
+                body_kind: match b.body {
+                    crate::realm_scene::BodyKind::Look => "look".to_owned(),
+                    crate::realm_scene::BodyKind::Marker => "marker".to_owned(),
+                },
                 // THE SAME reduction the renderer draws with, through the ONE chokepoint — not a
                 // hand-rolled subtraction. This line used to spell `b.center_offset - origin.offset()`,
                 // which dropped the origin's COARSE half while `DevEntityRow.pos` twenty lines above
@@ -600,6 +604,12 @@ impl ClientState {
             ),
             entities,
             realm_boxes,
+            // THE ORIGIN MARKER (§2.7/§2.11): (origin, epoch) as the last composed level stated
+            // them — the pixel gates' "origin == home realm" + "epoch bumps once per crossing".
+            origin: self
+                .origin
+                .map(|o| (format!("{o:?}"), self.realm_view.epoch())),
+            stale_epoch_rows: self.realm_view.stale_epoch_rows(),
             snapshots_applied: self.snapshots_applied,
             realm_frames_applied: self.realm_view.frames_applied(),
             // SUM both feeds' faults — the realm feed computes+exposes its OWN stale/NaN counts, so a
@@ -624,6 +634,15 @@ impl ClientState {
             dev_commands_dropped,
             transfer: DevTransferView::None,
         }
+    }
+}
+
+/// One drawn box's extent in metres — a sphere's radius, a box's half-diagonal length, and 0
+/// exactly for a MARKER point (its drawn footprint IS sub-pixel until Slice D's sprites).
+fn box_extent_m(b: &crate::realm_scene::RealmBox) -> f64 {
+    match b.shape {
+        crate::realm_scene::BoxShape::Sphere { r } => r,
+        crate::realm_scene::BoxShape::Box { half } => half.length(),
     }
 }
 
@@ -744,7 +763,7 @@ mod tests {
     use vd_core::pose::{FrameRef, StampedPose};
     use vd_core::{AccountId, EpochId, Fence, MsgId, TransferId, UniverseTick};
     use vd_sim::io::{Bytes, SendError};
-    use vd_wire::channels::{EntitySnap, RealmShape, SubId};
+    use vd_wire::channels::{EntitySnap, SubId};
 
     const GATEWAY: NodeId = NodeId(2);
     const OTHER: NodeId = NodeId(99);
@@ -848,12 +867,25 @@ mod tests {
 
     /// A `RealmSnapshotDatagram` moving `realm` to frame-local x (FA-2c) — the realm twin of [`snapshot`].
     fn realm_snapshot(frame_id: u64, tick: u64, realm: vd_core::pose::RealmId, x: f64) -> Vec<u8> {
+        realm_snapshot_at_epoch(0, frame_id, tick, realm, x)
+    }
+
+    /// The epoch-carrying twin (§2.7): the client's scene epoch boots at 0, so the plain fixture
+    /// above stays applicable without a level; the epoch tests drive this directly.
+    fn realm_snapshot_at_epoch(
+        origin_epoch: u64,
+        frame_id: u64,
+        tick: u64,
+        realm: vd_core::pose::RealmId,
+        x: f64,
+    ) -> Vec<u8> {
         use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
         postcard::to_allocvec(&RealmSnapshotDatagram {
             sub: SubId(0),
             frame_id,
             source_tick: TickId(1),
             universe_tick: UniverseTick(tick),
+            origin_epoch,
             realms: vec![RealmSnap {
                 realm,
                 // The edge HEAD (proto_minor 8): the CHILD realm's own frame, beside the TAIL
@@ -1065,6 +1097,33 @@ mod tests {
             frame_id,
             source_tick: TickId(1),
             universe_tick: UniverseTick(tick),
+            origin_epoch: 0,
+            realms: vec![RealmSnap {
+                realm,
+                frame: vd_core::pose::frame_for_realm(realm, None)
+                    .expect("a seeded realm resolves"),
+                pose: StampedPose::at_rest(space, DVec3::new(x, 0.0, 0.0), UniverseTick(tick)),
+            }],
+        })
+        .expect("test fixture")
+    }
+
+    /// The epoch-AND-space fixture (the one-space-at-current-epoch arm).
+    fn realm_snapshot_at_epoch_in(
+        origin_epoch: u64,
+        frame_id: u64,
+        tick: u64,
+        realm: vd_core::pose::RealmId,
+        space: FrameRef,
+        x: f64,
+    ) -> Vec<u8> {
+        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
+        postcard::to_allocvec(&RealmSnapshotDatagram {
+            sub: SubId(0),
+            frame_id,
+            source_tick: TickId(1),
+            universe_tick: UniverseTick(tick),
+            origin_epoch,
             realms: vec![RealmSnap {
                 realm,
                 frame: vd_core::pose::frame_for_realm(realm, None)
@@ -1090,29 +1149,22 @@ mod tests {
         .expect("test fixture")
     }
 
-    /// THE ONE-SPACE RULE, end to end at the net layer (crossing-render slice): a committed crossing
-    /// flips the avatar's delivered frame; every stored realm placement is a position in the OLD
-    /// space and is forgotten at the flip; old-space rows still draining keep being skipped, never
-    /// mixed into the new space's picture. The realm the avatar now stands in then draws from its
-    /// streamed scene OUTLINE (its own per-tick row never ships), not from a stale track — the
-    /// measured "I landed on the planet and I am outside it".
+    /// THE EPOCH SWAP, end to end at the net layer (§2.7 — the flag day's replacement of the old
+    /// space-flip inference): the crossing is STATED by the server as a new composed LEVEL with a
+    /// bumped epoch. Adopting it swaps the scene atomically, forgets the old epoch's tracks
+    /// (every stored placement was a position in the OLD origin's frame), drops old-epoch
+    /// stragglers counted, holds an early NEXT-epoch datagram one beat, and replays it the moment
+    /// its level lands — no gap, no double-draw. The one-space row filter stays alive through C1
+    /// (§4.5 Topic 4) and keeps old-SPACE rows out even at the current epoch.
     #[test]
-    fn a_crossing_flips_the_space_and_the_old_spaces_placements_are_forgotten() {
+    fn a_new_epoch_level_swaps_the_scene_and_the_old_epochs_placements_are_forgotten() {
         use vd_core::pose::RealmId;
-        let sys = FrameRef::SystemSpace { system_seed: 1 };
+        let sys = FrameRef::SystemSpace { system_seed: 7 };
         let planet = RealmId::Planet(7);
         let planet_space = FrameRef::PlanetCentered { planet_seed: 7 };
         let mut c = core();
         activate(&mut c);
-        let own =
-            postcard::to_allocvec(&ServerControlMsg::OwnEntity { entity: ent() }).expect("fixture");
-        c.transport.deliver(GATEWAY, MsgClass::Control, own);
-        // Standing in the system: the planet's row (stated in the system's space) folds normally.
-        c.transport.deliver(
-            GATEWAY,
-            MsgClass::Snapshot,
-            own_snapshot_in(1, 10, sys, 0.0),
-        );
+        // Epoch 0 (boot): the planet's row folds normally.
         c.transport.deliver(
             GATEWAY,
             MsgClass::RealmSnapshot,
@@ -1125,51 +1177,95 @@ mod tests {
                 .realm_pose(planet, f64::INFINITY)
                 .map(|p| p.pos.x),
             Some(17.9),
-            "pre-crossing: the planet's placement folds in the standing space"
+            "pre-crossing: the planet's placement folds at the boot epoch"
         );
 
-        // THE CROSSING COMMITS: the avatar's next delivered frame is the PLANET's own space.
+        // An EARLY next-epoch datagram races its level (the unreliable lane outran the reliable
+        // one): HELD one beat, not applied, not dropped.
         c.transport.deliver(
             GATEWAY,
-            MsgClass::Snapshot,
-            own_snapshot_in(2, 12, planet_space, 0.1),
+            MsgClass::RealmSnapshot,
+            realm_snapshot_at_epoch(1, 1, 12, RealmId::Planet(9), -3.0),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state()
+                .realm_view
+                .realm_pose(RealmId::Planet(9), f64::INFINITY),
+            None,
+            "the early new-epoch datagram is held, not applied"
+        );
+
+        // THE CROSSING'S LEVEL lands (epoch 1, new origin): the scene swaps atomically, the old
+        // epoch's tracks are forgotten, and the held datagram REPLAYS into the fresh view.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(
+                planet,
+                1,
+                vec![scene_row(RealmId::Planet(9), Some(planet), 5.0)],
+            ),
         );
         c.step(0.0);
         assert_eq!(
             c.state().realm_view.realm_pose(planet, f64::INFINITY),
             None,
-            "the flip forgot the old space's placements — the stale pre-crossing track is gone"
+            "the swap forgot the old epoch's placements — the stale pre-crossing track is gone"
         );
-
-        // An OLD-space straggler (the source's sub still draining) is skipped + counted, never folded.
-        c.transport.deliver(
-            GATEWAY,
-            MsgClass::RealmSnapshot,
-            realm_snapshot_in(2, 13, planet, sys, 18.4),
-        );
-        c.step(0.0);
-        assert_eq!(
-            c.state().realm_view.realm_pose(planet, f64::INFINITY),
-            None,
-            "an old-space row never re-creates the stale track"
-        );
-        assert_eq!(c.state().realm_view.foreign_space_rows(), 1);
-
-        // A NEW-space row (a sibling restated into the planet's space by the new home) folds.
-        c.transport.deliver(
-            GATEWAY,
-            MsgClass::RealmSnapshot,
-            realm_snapshot_in(1, 14, RealmId::Planet(9), planet_space, -3.0),
-        );
-        c.step(0.0);
         assert_eq!(
             c.state()
                 .realm_view
                 .realm_pose(RealmId::Planet(9), f64::INFINITY)
                 .map(|p| p.pos.x),
             Some(-3.0),
-            "the new space fills from the new home's feed (its own counter admitted from zero)"
+            "the held one-beat datagram replayed the moment its level landed"
         );
+        assert_eq!(
+            c.state().devstate(0.0, 0, 0).origin,
+            Some((format!("{planet:?}"), 1)),
+            "the origin marker + epoch ride the diagnosis surface"
+        );
+
+        // An OLD-epoch straggler (the swapped-away scene's feed still draining) is dropped +
+        // counted — never folded into the new picture.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot_at_epoch(0, 2, 13, planet, 18.4),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().realm_view.realm_pose(planet, f64::INFINITY),
+            None,
+            "an old-epoch row never re-creates the stale track"
+        );
+        assert_eq!(c.state().realm_view.stale_epoch_rows(), 1);
+
+        // The ONE-SPACE row filter is still alive at the current epoch (it dies in C2 with its
+        // cause): give the avatar a delivered frame in the planet's space, then a current-epoch
+        // row stated in another SPACE is skipped + counted.
+        let own =
+            postcard::to_allocvec(&ServerControlMsg::OwnEntity { entity: ent() }).expect("fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, own);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Snapshot,
+            own_snapshot_in(1, 14, planet_space, 0.1),
+        );
+        c.step(0.0);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot_at_epoch_in(1, 2, 15, planet, sys, 19.0),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().realm_view.realm_pose(planet, f64::INFINITY),
+            None,
+            "a current-epoch row in another SPACE is still skipped by the one-space rule"
+        );
+        assert!(c.state().realm_view.foreign_space_rows() >= 1);
     }
 
     #[test]
@@ -1242,33 +1338,22 @@ mod tests {
     }
 
     #[test]
-    fn a_streamed_realm_box_reports_the_tick_it_was_drawn_from_and_a_boot_box_reports_none() {
-        // The per-box half of the same measurement, and the FROZEN-box discriminator: a box the feed
-        // has streamed carries the tick it was last moved at (so a box that stops advancing is
-        // visible as such, and cannot satisfy a smoothness gate by simply not moving); a box that
-        // only ever came from the boot scene reports nothing, because no pose was ever delivered
-        // for it — not tick 0.
-        use vd_core::geometry::{CrossEffect, RealmBoundary};
-        use vd_core::pose::{LatticePos, RealmId};
+    fn a_streamed_realm_box_reports_the_tick_it_was_drawn_from_and_a_level_box_reports_none() {
+        // The per-box half of the same measurement, and the FROZEN-box discriminator: a box the
+        // pose feed has streamed carries the tick it was last moved at (so a box that stops
+        // advancing is visible as such, and cannot satisfy a smoothness gate by simply not
+        // moving); a box that only ever came from the composed LEVEL reports nothing, because no
+        // per-tick pose was ever delivered for it — not tick 0. Epoch-0 delta so the epoch-0
+        // datagram beside it stays applicable.
+        use vd_core::pose::RealmId;
         let mut c = core();
         activate(&mut c);
-        let scene = RealmScene::from_boundaries(&[RealmBoundary::shell(
-            RealmId::System(7),
-            LatticePos::local(DVec3::ZERO),
-            1000.0,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            None,
-            RealmId::System(7),
-            CrossEffect::Authority,
-        )])
-        .expect("scene");
-        c.state_mut().load_scene(scene);
-        // Stream a pose for a DIFFERENT realm than the boot box, so both arms are exercised at once.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            realm_scene_delta(vec![scene_row(RealmId::System(7), None, 40.0)], Vec::new()),
+        );
+        // Stream a pose for a DIFFERENT realm than the level box, so both arms are exercised.
         c.transport.deliver(
             GATEWAY,
             MsgClass::RealmSnapshot,
@@ -1277,12 +1362,20 @@ mod tests {
         c.step(0.0);
 
         let dev = c.state().devstate(0.0, 0, 0);
-        let boot = dev
+        let level_box = dev
             .realm_boxes
             .iter()
             .find(|b| b.realm == format!("{:?}", RealmId::System(7)))
-            .expect("the boot box is drawn");
-        assert_eq!(boot.newest_tick, None);
+            .expect("the level box is drawn");
+        assert_eq!(level_box.newest_tick, None);
+        assert_eq!(
+            level_box.body_kind, "look",
+            "a self-authored outline is a LOOK body on the diagnosis surface"
+        );
+        assert_eq!(
+            level_box.extent_m, 40.0,
+            "the STREAMED extent, never a file's"
+        );
         assert_eq!(dev.realm_feed_newest_tick, Some(55));
     }
 
@@ -1818,91 +1911,136 @@ mod tests {
     }
 
     #[test]
-    fn a_boot_loaded_scene_rides_the_render_snapshot_and_defaults_empty() {
-        use vd_core::geometry::{CrossEffect, RealmBoundary};
-        use vd_core::pose::{LatticePos, RealmId};
+    fn a_streamed_level_rides_the_render_snapshot_and_defaults_empty() {
+        // ONE SOURCE — the stream (D-LANE-6 🟩, owner decision 10): there is no boot file and no
+        // load path any more. Default: no level yet ⇒ the render snapshot carries an empty box
+        // set; the first composed level then rides EVERY render_snapshot() onto the seam.
+        use vd_core::pose::RealmId;
         let mut c = core();
-        // Default: no scene loaded ⇒ the render snapshot carries an empty box set.
         assert!(
             c.state().render_snapshot().scene().is_empty(),
-            "no boxes until a scene is loaded"
+            "no boxes until a level streams"
         );
-        // Boot-load a one-box scene; it then rides EVERY render_snapshot() onto the seam.
-        let scene = RealmScene::from_boundaries(&[RealmBoundary::shell(
-            RealmId::System(7),
-            LatticePos::local(DVec3::ZERO),
-            1000.0,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            None,
-            RealmId::System(7),
-            CrossEffect::Authority,
-        )])
-        .expect("scene");
-        c.state_mut().load_scene(scene);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(
+                RealmId::System(7),
+                1,
+                vec![scene_row(RealmId::System(7), None, 40.0)],
+            ),
+        );
+        c.step(0.0);
         let snap = c.state().render_snapshot();
-        assert_eq!(snap.scene().len(), 1, "the loaded box is on the seam");
+        assert_eq!(snap.scene().len(), 1, "the streamed box is on the seam");
         assert!(snap.scene().get(RealmId::System(7)).is_some());
     }
 
     #[test]
     fn devstate_exposes_the_overlaid_realm_boxes_for_the_agent_harness() {
-        // The `realm_boxes` diagnostic (HR6): `devstate` maps the SAME overlaid scene `render_snapshot`
-        // publishes into one `DevRealmBox` per drawn realm, so a `vdctl` run can assert a realm landed
-        // and its center moves. Load a one-box scene and confirm the row shows up labelled by its realm.
-        use vd_core::geometry::{CrossEffect, RealmBoundary};
-        use vd_core::pose::{LatticePos, RealmId};
+        // The `realm_boxes` diagnostic (HR6): `devstate` maps the SAME overlaid scene
+        // `render_snapshot` publishes into one `DevRealmBox` per drawn realm — with the STREAMED
+        // extent and body kind (§2.11) — so a `vdctl` run can assert a realm landed and its
+        // center moves. A MARKER row surfaces as a zero-extent "marker" box (the draw law's other
+        // arm on the diagnosis surface).
+        use vd_core::pose::RealmId;
         let mut c = core();
-        let scene = RealmScene::from_boundaries(&[RealmBoundary::shell(
-            RealmId::System(7),
-            LatticePos::local(DVec3::ZERO),
-            1000.0,
-            1.15,
-            1.30,
-            0.0,
-            0.05,
-            0.5,
-            1.0,
-            None,
-            RealmId::System(7),
-            CrossEffect::Authority,
-        )])
-        .expect("scene");
-        c.state_mut().load_scene(scene);
+        let marker_row = vd_wire::channels::SceneRow {
+            realm: RealmId::Planet(9),
+            parent: Some(RealmId::System(7)),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::new(30.0, 0.0, 0.0),
+                UniverseTick(100),
+            ),
+            bag: vd_core::look::luma_bag(3, 0.5),
+        };
+        // A BOX-shaped look too, so the extent surface covers both shapes (a box reports its
+        // half-diagonal, a sphere its radius, a marker zero).
+        let box_row = vd_wire::channels::SceneRow {
+            realm: RealmId::Station(4),
+            parent: Some(RealmId::System(7)),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::new(-20.0, 0.0, 0.0),
+                UniverseTick(100),
+            ),
+            bag: vd_core::look::look_bag(&vd_core::geometry::Boundary::Aabb {
+                half: DVec3::new(3.0, 4.0, 0.0),
+            }),
+        };
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(
+                RealmId::System(7),
+                1,
+                vec![
+                    scene_row(RealmId::System(7), None, 40.0),
+                    marker_row,
+                    box_row,
+                ],
+            ),
+        );
+        c.step(0.0);
         let dev = c.state().devstate(0.0, 0, 0);
-        assert_eq!(dev.realm_boxes.len(), 1);
+        assert_eq!(dev.realm_boxes.len(), 3);
+        let station = dev
+            .realm_boxes
+            .iter()
+            .find(|b| b.realm == format!("{:?}", RealmId::Station(4)))
+            .expect("the box body is surfaced");
         assert_eq!(
-            dev.realm_boxes[0].realm,
-            format!("{:?}", RealmId::System(7))
+            station.extent_m, 5.0,
+            "a box reports its half-diagonal (3-4-5)"
+        );
+        assert_eq!(station.body_kind, "look");
+        let marker = dev
+            .realm_boxes
+            .iter()
+            .find(|b| b.realm == format!("{:?}", RealmId::Planet(9)))
+            .expect("the marker row is surfaced");
+        assert_eq!(marker.body_kind, "marker");
+        assert_eq!(
+            marker.extent_m, 0.0,
+            "a marker is a point until Slice D's sprites"
+        );
+        assert_eq!(
+            dev.origin,
+            Some((format!("{:?}", RealmId::System(7)), 1)),
+            "the origin marker rides the surface"
         );
     }
 
-    /// One streamed render shape (VU proto_minor 5): a realm at origin with a `Shell{r}` boundary — `r`
-    /// large ⇒ an ambient (skipped) shell, `r` small ⇒ a finite drawn leaf.
-    fn realm_shape(
+    /// One composed row (proto_minor 18): a realm at the origin frame with a self-authored
+    /// `Shell{r}` look — `r` large ⇒ an ambient (skipped) shell, `r` small ⇒ a finite drawn body.
+    fn scene_row(
         realm: vd_core::pose::RealmId,
         parent: Option<vd_core::pose::RealmId>,
         r: f64,
-    ) -> RealmShape {
-        RealmShape {
+    ) -> vd_wire::channels::SceneRow {
+        vd_wire::channels::SceneRow {
             realm,
-            frame: FrameRef::SystemSpace { system_seed: 0 },
-            center: vd_core::pose::LatticePos::local(DVec3::ZERO),
-            shape: vd_core::geometry::Boundary::Shell { r },
             parent,
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::ZERO,
+                UniverseTick(100),
+            ),
+            bag: vd_core::look::look_bag(&vd_core::geometry::Boundary::Shell { r }),
         }
     }
 
-    /// A `RealmRegistry` control-message fixture carrying `regions` (root = the ambient `System(0)`).
-    fn realm_registry(regions: Vec<RealmShape>) -> Vec<u8> {
+    /// A composed-LEVEL control-message fixture (`RealmRegistry`, §2.4) at `origin`/`epoch`.
+    fn scene_level(
+        origin: vd_core::pose::RealmId,
+        origin_epoch: u64,
+        rows: Vec<vd_wire::channels::SceneRow>,
+    ) -> Vec<u8> {
         postcard::to_allocvec(&ServerControlMsg::RealmRegistry {
-            regions,
-            root: vd_core::pose::RealmId::System(0),
-            pin: vd_core::pose::RealmId::System(0),
+            origin,
+            origin_epoch,
+            rows,
         })
         .expect("test fixture")
     }
@@ -1915,14 +2053,17 @@ mod tests {
             c.state().render_snapshot().scene().is_empty(),
             "no boxes before any stream arrives"
         );
-        // The AoI neighbourhood the gateway ships: a finite renderable planet under an ~unbounded ambient
-        // shell. A fully-agnostic client draws its world from THIS alone — no --realm-boxes file.
-        let regions = vec![
-            realm_shape(RealmId::System(0), None, 1_000_000_000.0), // ambient — felt, not framed
-            realm_shape(RealmId::Planet(7), Some(RealmId::System(0)), 10.0), // finite leaf — drawn
+        // The composed level the connection plane ships: a finite renderable planet under an
+        // ~unbounded ambient shell. A fully-agnostic client draws its world from THIS alone.
+        let rows = vec![
+            scene_row(RealmId::System(0), None, 1_000_000_000.0), // ambient — felt, not framed
+            scene_row(RealmId::Planet(7), Some(RealmId::System(0)), 10.0), // finite body — drawn
         ];
-        c.transport
-            .deliver(GATEWAY, MsgClass::Control, realm_registry(regions));
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(RealmId::System(0), 1, rows),
+        );
         c.step(0.0);
         let snap = c.state().render_snapshot();
         assert_eq!(
@@ -1945,20 +2086,27 @@ mod tests {
     fn a_malformed_streamed_registry_is_counted_and_keeps_the_previous_scene() {
         use vd_core::pose::RealmId;
         let mut c = core();
-        // A valid stream first establishes a scene.
-        let good = vec![realm_shape(RealmId::Planet(7), None, 10.0)];
-        c.transport
-            .deliver(GATEWAY, MsgClass::Control, realm_registry(good));
+        // A valid level first establishes a scene.
+        let good = vec![scene_row(RealmId::Planet(7), None, 10.0)];
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(RealmId::System(0), 1, good),
+        );
         c.step(0.0);
         assert_eq!(c.state().render_snapshot().scene().len(), 1);
-        // A DUPLICATE-realm neighbourhood (a server bug) is rejected LOUD by `from_shapes`: counted on the
-        // shared decode counter, and the previous good scene is KEPT — never a crash, never an empty flash.
+        // A DUPLICATE-realm level (a server bug) is rejected LOUD by `from_scene_rows`: counted on
+        // the shared decode counter, and the previous good scene is KEPT — never a crash, never an
+        // empty flash (and the epoch is NOT adopted from a level the client refused).
         let dup = vec![
-            realm_shape(RealmId::Planet(7), None, 10.0),
-            realm_shape(RealmId::Planet(7), None, 10.0),
+            scene_row(RealmId::Planet(7), None, 10.0),
+            scene_row(RealmId::Planet(7), None, 10.0),
         ];
-        c.transport
-            .deliver(GATEWAY, MsgClass::Control, realm_registry(dup));
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(RealmId::System(0), 2, dup),
+        );
         c.step(0.0);
         assert_eq!(
             c.state().dropped_counts().0,
@@ -1974,15 +2122,29 @@ mod tests {
         assert!(snap.scene().get(RealmId::Planet(7)).is_some());
     }
 
-    /// A `RealmSceneDelta` control-message fixture (VU AoI, minor 6): realms that entered (`added`) + left
-    /// (`removed`).
-    fn realm_scene_delta(added: Vec<RealmShape>, removed: Vec<vd_core::pose::RealmId>) -> Vec<u8> {
+    /// A composed-DELTA control-message fixture (§2.4) at `epoch`: rows that entered (`added`) +
+    /// realms that left (`removed`).
+    fn realm_scene_delta_at(
+        origin_epoch: u64,
+        added: Vec<vd_wire::channels::SceneRow>,
+        removed: Vec<vd_core::pose::RealmId>,
+    ) -> Vec<u8> {
         postcard::to_allocvec(&ServerControlMsg::RealmSceneDelta {
+            origin: vd_core::pose::RealmId::System(0),
+            origin_epoch,
             added,
             removed,
-            pin: vd_core::pose::RealmId::System(0),
         })
         .expect("fixture")
+    }
+
+    /// The common no-level case: the client's scene epoch boots at 0, so an epoch-0 delta applies
+    /// without a preceding level.
+    fn realm_scene_delta(
+        added: Vec<vd_wire::channels::SceneRow>,
+        removed: Vec<vd_core::pose::RealmId>,
+    ) -> Vec<u8> {
+        realm_scene_delta_at(0, added, removed)
     }
 
     #[test]
@@ -1993,10 +2155,7 @@ mod tests {
         c.transport.deliver(
             GATEWAY,
             MsgClass::Control,
-            realm_scene_delta(
-                vec![realm_shape(RealmId::Planet(7), None, 10.0)],
-                Vec::new(),
-            ),
+            realm_scene_delta(vec![scene_row(RealmId::Planet(7), None, 10.0)], Vec::new()),
         );
         c.step(0.0);
         assert!(
@@ -2030,16 +2189,47 @@ mod tests {
     }
 
     #[test]
+    fn an_off_epoch_scene_delta_is_ignored_counted_and_keeps_the_scene() {
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            realm_scene_delta(vec![scene_row(RealmId::Planet(7), None, 10.0)], Vec::new()),
+        );
+        c.step(0.0);
+        let ignored_before = c.state().dropped_counts().1;
+        // A delta stamped for an epoch this client does not stand in (§2.7: a straggler from a
+        // swapped-away scene, or one racing its own level): IGNORED + counted, the scene keeps.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            realm_scene_delta_at(7, Vec::new(), vec![RealmId::Planet(7)]),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().dropped_counts().1,
+            ignored_before + 1,
+            "the off-epoch delta is counted, never applied"
+        );
+        assert!(
+            c.state()
+                .render_snapshot()
+                .scene()
+                .get(RealmId::Planet(7))
+                .is_some(),
+            "the standing scene is untouched by the straggler"
+        );
+    }
+
+    #[test]
     fn a_malformed_scene_delta_is_counted_and_keeps_the_scene() {
         use vd_core::pose::RealmId;
         let mut c = core();
         c.transport.deliver(
             GATEWAY,
             MsgClass::Control,
-            realm_scene_delta(
-                vec![realm_shape(RealmId::Planet(7), None, 10.0)],
-                Vec::new(),
-            ),
+            realm_scene_delta(vec![scene_row(RealmId::Planet(7), None, 10.0)], Vec::new()),
         );
         c.step(0.0);
         assert_eq!(c.state().render_snapshot().scene().len(), 1);
@@ -2049,8 +2239,8 @@ mod tests {
             MsgClass::Control,
             realm_scene_delta(
                 vec![
-                    realm_shape(RealmId::System(7), Some(RealmId::System(8)), 40.0),
-                    realm_shape(RealmId::System(8), Some(RealmId::System(7)), 40.0),
+                    scene_row(RealmId::System(7), Some(RealmId::System(8)), 40.0),
+                    scene_row(RealmId::System(8), Some(RealmId::System(7)), 40.0),
                 ],
                 Vec::new(),
             ),

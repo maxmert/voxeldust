@@ -5,26 +5,24 @@
 //! RETURN leg gets pixel coverage for the first time (the owner's "everything froze on the way
 //! back").
 //!
-//! It stands up the DUAL process cluster (`up --dual`) with NO injected geometry — the old gate
-//! planted an authored two-box playground through a boundary-override hook; THE world's own home
-//! shell IS the crossing boundary now (SL5: one world, nothing to select). A headless
-//! `client --capture --realm-boxes` draws the scene `emit-world-scene` writes (`regions.json`, the
-//! home shard's own boot neighbourhood — the drawn geometry IS the detector's, single-sourced).
+//! It stands up the DUAL process cluster (`up --dual`) with NO injected geometry — THE world's own
+//! home shell IS the crossing boundary (SL5: one world, nothing to select). RE-BASED at the flag
+//! day (Slice C1, `docs/design/window_lane.md` §2.11): the headless `client --capture` draws ONLY
+//! the COMPOSED STREAM (the `--realm-boxes` boot file is DELETED — D-LANE-6 🟩).
 //!
-//! THE CAMERA (judge fix A1): the client's offscreen capture camera is `fit_camera_to_scene` over
-//! the LIVE overlaid scene, refit EVERY frame — and THE world's planets ORBIT, so a camera this
-//! gate fitted over the static boot file would drift from the client's the moment an outer planet
-//! swings wide. Each capture therefore RECONSTRUCTS the client's actual camera from the client's
-//! own reported drawn boxes (`DevState.realm_boxes` centres, zipped with THE world's extents by
-//! realm label → `bounds_union` → `fit_camera_to_bounds`) — the identical per-frame refit, fed the
-//! identical inputs. Residual skew is sub-frame (one tick of orbital motion against a ~260 m scene
-//! radius, ≤ ~0.14 m).
+//! J1 IS THE ORIGIN-MARKER ASSERT NOW: the home body draws at the session origin on BOTH sides of
+//! the crossing (the galaxy authors the home placement at ZERO — `world_roster` asserts it), the
+//! origin marker flips home ↔ galaxy, and the epoch bumps EXACTLY ONCE per crossing. THE
+//! NO-FLICKER GATE rides both legs (`cross_leg_watching_scene`): no delivered state across the
+//! swap shows an ABSENT scene, and every body persisting across the swap moves by no more than
+//! the ONE-TICK true-motion bound (`DEV.move_speed × DEV.tick_dt` — the home body is static at
+//! zero in both frames, so its measured delta is exactly 0).
 //!
-//! J1, ASSERTED IN-TEST: the home system sits at the GALACTIC ORIGIN (`world_roster` asserts the
-//! galaxy authors its placement at ZERO), so a home↔galaxy crossing is numerically an IDENTITY in
-//! the drawn space — which is exactly why this ONE file-based scene stays valid across both
-//! crossings, and why `expected_box == None` at the middle capture is honest: the galaxy's ~12483 m
-//! extent exceeds the renderable ceiling and SL3 says a containment boundary is never drawn.
+//! THE CAMERA (judge fix A1): reconstructed per capture from the client's own reported drawn
+//! boxes — centres + STREAMED `extent_m` (§2.11) — through the identical `bounds_union` →
+//! `fit_camera_to_bounds` refit. Dot detection is DevState-driven: the dot rect comes from the
+//! own row's projected position + the marker-radius floor, and the pixel probes are LOCAL to that
+//! rect — never a full-frame search.
 //!
 //! GPU PRECONDITION (same as the other visual gates): renders through wgpu, REQUIRES a working GPU
 //! adapter, LOCAL-only (no CI, no software-raster fallback). Run via `just render-crossing-smoke`.
@@ -38,21 +36,19 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use vd_bins::flight::cross_leg;
-use vd_bins::scene_camera::{extent_by_label, live_scene_camera};
+use vd_bins::flight::cross_leg_watching_scene;
+use vd_bins::scene_camera::live_scene_camera;
 use vd_bins::{
     ClusterAddrs, ClusterShape, DEV, DevClusterDown, admin_get_body, dev_auth_signing_key_hex,
     dev_roundtrip, devcluster, loopback, realm_shards, record_extra_pid, slot_trust_dir,
-    slot_workdir, world_roster, write_world_regions,
+    slot_workdir, world_roster,
 };
-use vd_client::realm_scene::{BoxShape, RealmScene};
 use vd_client_harness::assert::magenta_pixel_count;
 use vd_client_harness::camera::marker_world_radius;
-use vd_client_harness::camera::{CaptureCamera, ScreenAabb};
+use vd_client_harness::camera::{CaptureCamera, ScreenAabb, ScreenPos};
 use vd_client_harness::manifest::{CaptureKind, MANIFEST_FILENAME, RunManifest};
 use vd_client_harness::verdict::{
-    dot_pixels_distinct_from_surround, dot_pixels_within_box_region, expected_box,
-    projected_point_aabb,
+    dot_pixels_distinct_from_surround, dot_pixels_within_box_region, projected_point_aabb,
 };
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
 use vd_core::glam::DVec3;
@@ -206,18 +202,19 @@ fn drawn_centre(state: &vd_devproto::DevState, realm: RealmId) -> DVec3 {
 }
 
 /// A realm box's projected screen rectangle through the RECONSTRUCTED live camera: the client's
-/// reported drawn centre + the box's bounding-sphere radius from the file scene.
+/// reported drawn centre + its STREAMED extent (§2.11 — no file exists to join against).
 fn drawn_box_screen_aabb(
     state: &vd_devproto::DevState,
-    scene: &RealmScene,
     camera: &CaptureCamera,
     realm: RealmId,
 ) -> ScreenAabb {
-    let radius = match scene.get(realm).expect("box in scene").shape {
-        BoxShape::Box { half } => half.length(),
-        BoxShape::Sphere { r } => r,
-    };
-    projected_point_aabb(camera, drawn_centre(state, realm), radius)
+    let label = format!("{realm:?}");
+    let row = state
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == label)
+        .unwrap_or_else(|| panic!("the client is not drawing {label}"));
+    projected_point_aabb(camera, DVec3::from_array(row.center), row.extent_m)
         .expect("the box center projects in front of the camera")
 }
 
@@ -237,9 +234,95 @@ fn dot_screen_aabb(camera: &CaptureCamera, pos: DVec3) -> ScreenAabb {
         .expect("the dot projects in front of the camera")
 }
 
+/// The union rectangle of two screen AABBs (the straddled-capture drift window).
+fn union_aabb(a: ScreenAabb, b: ScreenAabb) -> ScreenAabb {
+    ScreenAabb {
+        min: ScreenPos {
+            x: a.min.x.min(b.min.x),
+            y: a.min.y.min(b.min.y),
+        },
+        max: ScreenPos {
+            x: a.max.x.max(b.max.x),
+            y: a.max.y.max(b.max.y),
+        },
+    }
+}
+
 /// Two screen rectangles share no pixel.
 fn rects_disjoint(a: ScreenAabb, b: ScreenAabb) -> bool {
     a.max.x < b.min.x || b.max.x < a.min.x || a.max.y < b.min.y || b.max.y < a.min.y
+}
+
+/// THE CROSSING NO-FLICKER VERDICT (§2.11): every body drawn in BOTH the last old-epoch state and
+/// the first new-epoch state — a persisting body — moved by no more than its own DERIVED
+/// allowance across the swap. A static body (the home shell on this crossing) is bounded by the
+/// occupant's one-tick true-motion bound alone. A MOVING persister (an orbiting planet riding the
+/// sibling-interior relay, §2.6.5 step 4) lawfully sweeps its own orbit between the two sampled
+/// states, so its allowance is MEASURED: its per-tick motion (from the last two old-epoch
+/// samples) times the tick gap its own track advanced across the swap, plus the occupant bound as
+/// re-expression slack. Everything in the allowance is measured or derived — a frame
+/// mis-re-expression (the km-scale teleport class) still fails loud. Non-vacuous: at least the
+/// home body persists.
+fn assert_no_flicker_across_swap(
+    before_prev: Option<&vd_devproto::DevState>,
+    before: &vd_devproto::DevState,
+    after: &vd_devproto::DevState,
+    one_tick_bound_m: f64,
+    leg: &str,
+) {
+    let mut persisting = 0usize;
+    for b in &before.realm_boxes {
+        let Some(a) = after.realm_boxes.iter().find(|a| a.realm == b.realm) else {
+            continue; // not a persisting body — the old interior lawfully leaves the new scene
+        };
+        persisting += 1;
+        // The body's own measured motion per tick, off the last two old-epoch samples (0 when
+        // the pair is unavailable or its track did not advance — a static body needs none).
+        let pair = before_prev.and_then(|p| {
+            p.realm_boxes
+                .iter()
+                .find(|x| x.realm == b.realm)
+                .map(|prev| (prev.newest_tick, prev.center))
+        });
+        let per_tick_m = pair
+            .and_then(|(prev_tick, prev_center)| {
+                let dt = b.newest_tick?.checked_sub(prev_tick?)?;
+                if dt == 0 {
+                    return None;
+                }
+                let dpos = (DVec3::from_array(b.center) - DVec3::from_array(prev_center)).length();
+                Some(dpos / dt as f64)
+            })
+            .unwrap_or(0.0);
+        // The ticks this body's own track advanced across the swap (0 when unstated: a held/
+        // same-stamp row moved no time, so it gets no motion allowance).
+        let across_ticks = match (b.newest_tick, a.newest_tick) {
+            (Some(t0), Some(t1)) => t1.saturating_sub(t0),
+            _ => 0,
+        };
+        let allowed = per_tick_m * across_ticks as f64 + one_tick_bound_m;
+        let delta = (DVec3::from_array(a.center) - DVec3::from_array(b.center)).length();
+        assert!(
+            delta <= allowed,
+            "NO-FLICKER ({leg}): persisting body {} moved {delta:.3} m across the swap — over \
+             its derived allowance {allowed:.3} m (= measured {per_tick_m:.3} m/tick x \
+             {across_ticks} ticks + the {one_tick_bound_m:.3} m one-tick occupant bound; the \
+             swap level must be the same-tick re-expression, §2.7). pair={pair:?} \
+             b_tick={:?} a_tick={:?}",
+            b.realm,
+            b.newest_tick,
+            a.newest_tick,
+        );
+    }
+    assert!(
+        persisting > 0,
+        "NO-FLICKER ({leg}): no body persisted across the swap — the verdict measured nothing \
+         (the home body must persist on a home↔galaxy crossing)"
+    );
+    println!(
+        "NO-FLICKER ({leg}): {persisting} persisting bodies within their derived allowances \
+         (occupant one-tick bound {one_tick_bound_m:.3} m)"
+    );
 }
 
 /// Screen px per world metre, transverse, at the fitted camera's target depth — measured off the
@@ -310,21 +393,21 @@ fn clean_home_park(camera: &CaptureCamera, annuli: &[(f64, f64)]) -> DVec3 {
     )
 }
 
-/// Capture-state belt over the phase-independent park: every OTHER drawn box's projected rect at
-/// THIS capture is disjoint from the dot's rectangle — so a pixel in the dot rect unlike its
-/// surround can only be the dot.
-fn assert_dot_rect_clear_of_planets(cap: &Capture, scene: &RealmScene, home: RealmId, label: &str) {
-    for (realm, _) in scene.iter() {
-        if realm == home {
+/// Capture-state belt over the phase-independent park: every OTHER drawn body with a NONZERO
+/// extent (markers are points — Slice D owns their sprites) projects disjoint from the dot's
+/// rectangle — so a pixel in the dot rect unlike its surround can only be the dot.
+fn assert_dot_rect_clear_of_planets(cap: &Capture, home_label: &str, label: &str) {
+    for b in &cap.state.realm_boxes {
+        if b.realm == home_label || b.extent_m <= 0.0 {
             continue;
         }
-        let rect = drawn_box_screen_aabb(&cap.state, scene, &cap.camera, realm);
+        let rect = projected_point_aabb(&cap.camera, DVec3::from_array(b.center), b.extent_m)
+            .expect("a drawn body projects in front of the camera");
         assert!(
             rects_disjoint(cap.dot_rect, rect),
-            "{label}: the dot's rectangle {:?} must be clear of {realm:?}'s drawn disc {rect:?} — \
-             the annulus-clear park guarantees this at every orbital phase, so a collision means \
-             the park search and the world disagree",
+            "{label}: the dot's rectangle {:?} must be clear of {}'s drawn disc {rect:?}",
             cap.dot_rect,
+            b.realm,
         );
     }
 }
@@ -388,9 +471,10 @@ fn screenshot(port: u16, label: &str) -> String {
 }
 
 /// One capture: sample the state, screenshot, reconstruct the client's live camera from THAT state,
-/// and return everything a verdict needs. The J1 drawn identity is asserted at EVERY capture: the
-/// home box draws at the session origin on both sides of the crossing (the galaxy authors the home
-/// placement at ZERO), or the one shared file scene would be lying about one of the frames.
+/// and return everything a verdict needs. J1 — THE ORIGIN-MARKER ASSERT (§2.11) — runs at EVERY
+/// capture: the origin names the expected realm at the expected epoch, and the home body draws at
+/// the session origin on BOTH sides of the crossing (the galaxy authors the home placement at
+/// ZERO — `world_roster` asserts the world half; this asserts the drawn half).
 struct Capture {
     state: vd_devproto::DevState,
     camera: CaptureCamera,
@@ -410,23 +494,92 @@ fn capture(
     devctl: u16,
     cwd: &Path,
     label: &str,
-    scene: &RealmScene,
-    extents: &std::collections::BTreeMap<String, DVec3>,
     home: RealmId,
+    expected_origin: RealmId,
+    expected_epoch: u64,
 ) -> Capture {
-    let state = poll_state(devctl);
-    let shot = screenshot(devctl, label);
-    let camera = live_scene_camera(&state, extents, CAPTURE_W as usize, CAPTURE_H as usize);
-    assert_eq!(
-        drawn_centre(&state, home),
-        DVec3::ZERO,
-        "J1 (drawn identity, capture '{label}'): the home box draws at the session origin on BOTH \
-         sides of the home↔galaxy crossing — the galaxy authors the home placement at ZERO, which \
-         is why the one file scene stays valid across it",
+    // TWO state polls STRADDLE the screenshot: the client refits its camera EVERY frame from the
+    // drawn boxes' union bounds, and since the flag day those boxes move every tick (the composed
+    // per-tick feed; `fit_camera_to_bounds`'s own doc: the two cameras drift the moment a drawn
+    // box moves). The frame lies between the polls in time, so every verdict rectangle below is
+    // the UNION of the two polls' projections — the drift is MEASURED into the rect, never
+    // guessed, and a quiet scene collapses the union to the old single-poll rectangle.
+    // …and RETRY until the straddle is ROSTER-STABLE: right after a crossing the composed scene
+    // is still FILLING (rows arrive over the next beats — the sibling-interior relays), and every
+    // arrival re-fits the client camera by a jump the two-poll union cannot bound. A stable
+    // roster leaves only the per-tick orbital wobble, which the union DOES bound.
+    //
+    // …and RETRY until the straddle is TIGHT (measured 2026-08-16, window lane Slice C2). A stable
+    // roster is NOT sufficient: the camera refits from the moving boxes every frame, so the two
+    // polls can still project the dot to different pixels, and the UNION then spans far more than
+    // the dot's own footprint. That envelope is the right answer for a CONTAINMENT question ("is
+    // the dot inside the shell's disc") and the WRONG one for a LOCALITY question ("is the dot
+    // distinct from what surrounds it"): `dot_pixels_distinct_from_surround` samples its ring just
+    // OUTSIDE the rect it is given, so an inflated rect pushes the ring off the dot's local
+    // background and out over the shell's shading gradient — where some pixel eventually matches
+    // the dot's own colour and the verdict can no longer be satisfied. MEASURED at 2 failures in 5
+    // runs, always the same assert, with a rect 28.8 px tall against a ~13 px dot footprint.
+    //
+    // So the straddle must establish the verdict's precondition, not the verdict be loosened: the
+    // two polls must agree on where the dot is to within THE DOT'S OWN APPARENT RADIUS. That is
+    // the resolution at which "where the dot is" is a meaningful question at all, and it is
+    // DERIVED from `DOT_MIN_APPARENT_RADIUS_PX` — the one constant the renderer scales the marker
+    // by and the gates size their rectangles from — never a fitted pixel count. A drift smaller
+    // than the dot's own radius cannot carry the dot out of its bracketed rectangle, and it keeps
+    // the union inside one footprint, which is exactly what the ring needs.
+    let mut tries = 0;
+    let (pre, shot, state) = loop {
+        let pre = poll_state(devctl);
+        let shot = screenshot(devctl, label);
+        let state = poll_state(devctl);
+        let roster = |s: &vd_devproto::DevState| -> std::collections::BTreeSet<String> {
+            s.realm_boxes.iter().map(|b| b.realm.clone()).collect()
+        };
+        let cam_pre = live_scene_camera(&pre, CAPTURE_W as usize, CAPTURE_H as usize);
+        let cam_post = live_scene_camera(&state, CAPTURE_W as usize, CAPTURE_H as usize);
+        let centre = |r: ScreenAabb| (0.5 * (r.min.x + r.max.x), 0.5 * (r.min.y + r.max.y));
+        let (ax, ay) = centre(dot_screen_aabb(&cam_pre, own_pos(&pre)));
+        let (bx, by) = centre(dot_screen_aabb(&cam_post, own_pos(&state)));
+        let drift_px = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+        let dot_radius_px = vd_client_harness::camera::DOT_MIN_APPARENT_RADIUS_PX;
+        if (roster(&pre) == roster(&state)) & (drift_px <= dot_radius_px) {
+            break (pre, shot, state);
+        }
+        tries += 1;
+        assert!(
+            tries < 40,
+            "capture '{label}': the straddle never settled — roster (pre {:?} vs post {:?}) or \
+             dot drift {drift_px:.2} px over its own apparent radius {dot_radius_px} px",
+            roster(&pre),
+            roster(&state),
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let camera_pre = live_scene_camera(&pre, CAPTURE_W as usize, CAPTURE_H as usize);
+    let camera = live_scene_camera(&state, CAPTURE_W as usize, CAPTURE_H as usize);
+    for s in [&pre, &state] {
+        assert_eq!(
+            s.origin,
+            Some((format!("{expected_origin:?}"), expected_epoch)),
+            "J1 (origin marker, capture '{label}'): the composed scene names its origin + epoch",
+        );
+        assert_eq!(
+            drawn_centre(s, home),
+            DVec3::ZERO,
+            "J1 (drawn identity, capture '{label}'): the home body draws at the session origin \
+             on BOTH sides of the home<->galaxy crossing - the galaxy authors the home placement \
+             at ZERO",
+        );
+    }
+    let home_rect = union_aabb(
+        drawn_box_screen_aabb(&pre, &camera_pre, home),
+        drawn_box_screen_aabb(&state, &camera, home),
     );
-    let home_rect = drawn_box_screen_aabb(&state, scene, &camera, home);
     let pos = own_pos(&state);
-    let dot_rect = dot_screen_aabb(&camera, pos);
+    let dot_rect = union_aabb(
+        dot_screen_aabb(&camera_pre, own_pos(&pre)),
+        dot_screen_aabb(&camera, pos),
+    );
     let (rgba, w, h, clear) = decode_capture(cwd, &shot);
     assert_eq!(
         magenta_pixel_count(&rgba),
@@ -478,26 +631,8 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     let cwd = slot_workdir(RENDER_CROSSING_SLOT).join("capture-cwd");
     std::fs::create_dir_all(&cwd).expect("make client cwd");
 
-    // ONE scene, from THE world (`emit-world-scene`'s body): the home shard's own boot
-    // neighbourhood — the drawn geometry IS the detector's. The same file feeds the client
-    // (`--realm-boxes`), the in-test membership verdict (`expected_box`), and the extent map the
-    // camera reconstruction joins the drawn boxes against.
-    let regions_path = write_world_regions(&cwd, &DEV).expect("emit THE world scene");
-    let regions_json = std::fs::read_to_string(&regions_path).expect("read regions.json");
-    let regions: Vec<vd_core::geometry::RealmRegion> =
-        serde_json::from_str(&regions_json).expect("regions.json parses");
-    let extents = extent_by_label(&regions);
-    let scene = RealmScene::from_regions_json(&regions_json).expect("the world scene projects");
-    // J1, on the file scene: the home box is AT the origin of the emitted scene (the shard's own
-    // frame — SL1), so the drawn-identity assert below compares against a genuine zero.
-    assert_eq!(
-        scene
-            .get(roster.home)
-            .expect("the home box is renderable")
-            .draw_center(),
-        DVec3::ZERO,
-        "J1: the emitted scene draws the home system at its own origin",
-    );
+    // NO scene file exists (Slice C1, §2.11): the client draws only what the composed stream
+    // states, and every projected extent below is read STREAMED off the client's own report.
 
     // Bring up the DUAL cluster — THE world as shipped, NO injected geometry. `up` exits 0 only
     // after every pre-booked realm (home + galaxy) is granted in the ONE directory (C1), so the
@@ -539,8 +674,6 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
             &devctl.to_string(),
             "--allow-dev-control",
             "--capture",
-            "--realm-boxes",
-            &regions_path,
         ]);
     #[cfg(unix)]
     {
@@ -559,6 +692,10 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
             if s.own_entity.is_some()
                 && !s.entities.is_empty()
                 && s.location.as_deref() == Some(home_label.as_str())
+                // The composed scene's own settle signal (§2.11): the level landed and a fold
+                // delivered — the camera reconstruction below frames a non-empty drawn set.
+                && !s.realm_boxes.is_empty()
+                && s.realm_frames_applied >= 1
             {
                 break;
             }
@@ -575,12 +712,7 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     // in-home captures (INSIDE + RETURNED) park here.
     let home_park = {
         let plan_state = poll_state(devctl);
-        let plan_camera = live_scene_camera(
-            &plan_state,
-            &extents,
-            CAPTURE_W as usize,
-            CAPTURE_H as usize,
-        );
+        let plan_camera = live_scene_camera(&plan_state, CAPTURE_W as usize, CAPTURE_H as usize);
         let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
         let annuli: Vec<(f64, f64)> = vd_physics::worldgen::moving_children_for_config(
             DEV.universe_seed,
@@ -593,13 +725,15 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
         clean_home_park(&plan_camera, &annuli)
     };
     park_at(devctl, home_park);
-    let inside = capture(devctl, &cwd, "inside", &scene, &extents, roster.home);
+    // The login scene: origin = the home realm at the login epoch (0→1 at the first fold).
+    let inside = capture(devctl, &cwd, "inside", roster.home, roster.home, 1);
     assert_eq!(
         inside.state.location.as_deref(),
         Some(home_label.as_str()),
         "INSIDE: the session stands in the home system",
     );
-    assert_dot_rect_clear_of_planets(&inside, &scene, roster.home, "INSIDE");
+    let home_box_label = format!("{:?}", roster.home);
+    assert_dot_rect_clear_of_planets(&inside, &home_box_label, "INSIDE");
     assert!(
         dot_pixels_within_box_region(
             &inside.rgba,
@@ -627,23 +761,35 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
             DOT_SURROUND_RING_PX
         ),
         "INSIDE: the dot itself must be pixel-visible against the shell disc (rect {:?}) — an \
-         empty or background-only dot region is a FAIL, never a vacuous pass",
+         empty or background-only dot region is a FAIL, never a vacuous pass (drawn scene: {:?})",
         inside.dot_rect,
+        inside.state.realm_boxes,
     );
 
-    // ---- OUT (flight law leg A): the ±Z polar corridor to the galaxy — the label is the arrival. --
-    cross_leg(
+    // ---- OUT (flight law leg A): the ±Z polar corridor to the galaxy — the label is the
+    // arrival, the crossing WATCHED (§2.11): scene never absent, epoch bumps exactly once, and
+    // every body persisting across the swap moves within the ONE-TICK true-motion bound.
+    let (out_prev, out_before, out_after) = cross_leg_watching_scene(
         devctl,
         "A home->galaxy (polar corridor)",
         |_tick| OUTSIDE_PARK,
         &galaxy_label,
         LEG_DEADLINE,
     );
+    let one_tick_bound_m = DEV.move_speed * DEV.tick_dt;
+    assert_no_flicker_across_swap(
+        out_prev.as_ref(),
+        &out_before,
+        &out_after,
+        one_tick_bound_m,
+        "A home->galaxy",
+    );
     // Park AT the corridor waypoint. The target is numerically the same point in both frames (J1),
     // so restating it after the flip is sound — the one crossing where that is true.
     park_at(devctl, OUTSIDE_PARK);
     let admin = loopback(ports.admin);
-    let outside = capture(devctl, &cwd, "outside", &scene, &extents, roster.home);
+    // The swapped scene: origin = the galaxy realm, epoch = login + 1.
+    let outside = capture(devctl, &cwd, "outside", roster.home, roster.galaxy, 2);
     assert_eq!(
         outside.state.location.as_deref(),
         Some(galaxy_label.as_str()),
@@ -658,13 +804,18 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
         "the galaxy shard ({dest_authority}) must OWN the re-homed dot's Entity row: {rows:?}",
     );
     // HONEST at the middle capture: nothing drawable contains the dot out here — the galaxy's
-    // ~12483 m shell exceeds the renderable ceiling and SL3 never draws a containment boundary.
-    assert_eq!(
-        expected_box(&scene, outside.pos),
-        None,
-        "OUTSIDE: no drawn box contains the parked dot at {}",
-        outside.pos,
-    );
+    // own shell exceeds the renderable ceiling and SL3 never draws a containment boundary
+    // (asserted on the STREAMED scene: no drawn body's extent reaches the parked dot).
+    for b in &outside.state.realm_boxes {
+        let centre = DVec3::from_array(b.center);
+        assert!(
+            (outside.pos - centre).length() > b.extent_m,
+            "OUTSIDE: no drawn box contains the parked dot at {} — {} (extent {} m) does",
+            outside.pos,
+            b.realm,
+            b.extent_m,
+        );
+    }
     assert!(
         !dot_pixels_within_box_region(
             &outside.rgba,
@@ -705,24 +856,32 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     );
 
     // ---- RETURN (flight law leg B): back through the acquire edge — the leg the owner watched
-    // freeze, now under pixels. --
-    cross_leg(
+    // freeze, now under pixels AND under the no-flicker watch. --
+    let (back_prev, back_before, back_after) = cross_leg_watching_scene(
         devctl,
         "B galaxy->home (0,0,-60)",
         |_tick| RETURN_PARK,
         &home_label,
         LEG_DEADLINE,
     );
+    assert_no_flicker_across_swap(
+        back_prev.as_ref(),
+        &back_before,
+        &back_after,
+        one_tick_bound_m,
+        "B galaxy->home",
+    );
     // Re-park at the SAME annulus-clear capture point the INSIDE capture used (the return AIM only
     // committed the crossing; pixels are always taken where the dot's rect is provably planet-free).
     park_at(devctl, home_park);
-    let returned = capture(devctl, &cwd, "returned", &scene, &extents, roster.home);
+    // Back home: origin = the home realm again, the SECOND bump (login 1 → out 2 → return 3).
+    let returned = capture(devctl, &cwd, "returned", roster.home, roster.home, 3);
     assert_eq!(
         returned.state.location.as_deref(),
         Some(home_label.as_str()),
         "RETURNED: the session stands in the home system again",
     );
-    assert_dot_rect_clear_of_planets(&returned, &scene, roster.home, "RETURNED");
+    assert_dot_rect_clear_of_planets(&returned, &home_box_label, "RETURNED");
     assert!(
         dot_pixels_within_box_region(
             &returned.rgba,

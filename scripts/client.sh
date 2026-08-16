@@ -28,7 +28,6 @@ NAME="client"
 WINDOW=0
 CAPTURE=0
 FAST=0
-REALM_BOXES=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --slot) SLOT="${2:?--slot needs a value}"; shift 2 ;;
@@ -39,9 +38,6 @@ while [[ $# -gt 0 ]]; do
         # Link Bevy as ONE shared library instead of statically into the client binary
         # (see the FAST block below). Pure build-speed knob; changes no behaviour.
         --fast) FAST=1; shift ;;
-        # Boot-load a colored-box render scene (the Visual Crossing Playground): a boxes.json =
-        # Vec<RealmBoundary>, drawn as translucent realm boxes the dot walks between.
-        --realm-boxes) REALM_BOXES="${2:?--realm-boxes needs a value}"; shift 2 ;;
         *) echo "client.sh: unexpected argument '$1'" >&2; exit 1 ;;
     esac
 done
@@ -113,7 +109,6 @@ CMD=(
 )
 [[ "$WINDOW" == "1" ]] && CMD+=(--window)
 [[ "$CAPTURE" == "1" ]] && CMD+=(--capture)
-[[ -n "$REALM_BOXES" ]] && CMD+=(--realm-boxes "$REALM_BOXES")
 
 # `--fast` only: hand the dynamic loader the search path it needs. A dylib build leaves the
 # binary asking for `@rpath/libstd-*.dylib` while carrying NO LC_RPATH at all, so running it

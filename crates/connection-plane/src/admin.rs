@@ -76,17 +76,17 @@ pub fn gateway_view(
         window_dedup_max_dev_nm,
         window_head_reads_sent,
         window_composed_rows,
-        parity_rows_matched,
-        parity_pose_mismatch,
-        parity_max_pos_dev_nm,
-        parity_missing_composed,
-        parity_sibling_interior_excluded,
-        parity_unwindowed_ancestor,
-        parity_no_fold_at_tick,
-        parity_offframe_rows,
-        parity_origin_rows,
-        parity_pending_shed,
-        parity_undecodable,
+        old_realm_frames_dropped,
+        old_scene_deltas_dropped,
+        scene_levels_sent,
+        scene_deltas_sent,
+        scene_datagrams_sent,
+        window_relays_ingested,
+        window_relay_undecodable,
+        window_relay_unvouched,
+        window_relay_stale,
+        window_relay_rows_composed,
+        window_relay_unplaceable,
     } = *stats;
     GatewayView {
         logins_rejected,
@@ -144,17 +144,17 @@ pub fn gateway_view(
         window_dedup_max_dev_nm,
         window_head_reads_sent,
         window_composed_rows,
-        parity_rows_matched,
-        parity_pose_mismatch,
-        parity_max_pos_dev_nm,
-        parity_missing_composed,
-        parity_sibling_interior_excluded,
-        parity_unwindowed_ancestor,
-        parity_no_fold_at_tick,
-        parity_offframe_rows,
-        parity_origin_rows,
-        parity_pending_shed,
-        parity_undecodable,
+        old_realm_frames_dropped,
+        old_scene_deltas_dropped,
+        scene_levels_sent,
+        scene_deltas_sent,
+        scene_datagrams_sent,
+        window_relays_ingested,
+        window_relay_undecodable,
+        window_relay_unvouched,
+        window_relay_stale,
+        window_relay_rows_composed,
+        window_relay_unplaceable,
         sessions_open,
         dynamic_shards,
         windows_open,
@@ -238,8 +238,8 @@ mod tests {
             window_open_sent: 34,
             window_close_sent: 35,
             window_keepalives_sent: 36,
-            // 38..69: the Slice-B composer + shadow-parity counters, declaration order (37 is
-            // the windows_open gauge below, minted before this block landed).
+            // 38..58: the Slice-B composer counters, declaration order (37 is the windows_open
+            // gauge below, minted before this block landed).
             window_level_refused: 38,
             window_body_stale: 39,
             window_body_preroster: 40,
@@ -261,17 +261,19 @@ mod tests {
             window_dedup_max_dev_nm: 56,
             window_head_reads_sent: 57,
             window_composed_rows: 58,
-            parity_rows_matched: 59,
-            parity_pose_mismatch: 60,
-            parity_max_pos_dev_nm: 61,
-            parity_missing_composed: 62,
-            parity_sibling_interior_excluded: 63,
-            parity_unwindowed_ancestor: 64,
-            parity_no_fold_at_tick: 65,
-            parity_offframe_rows: 66,
-            parity_origin_rows: 67,
-            parity_pending_shed: 68,
-            parity_undecodable: 69,
+            // 59..69: the tombstoned-lane drop counters + the composed egress + the Q2 relay,
+            // in declaration order.
+            old_realm_frames_dropped: 59,
+            old_scene_deltas_dropped: 60,
+            scene_levels_sent: 61,
+            scene_deltas_sent: 62,
+            scene_datagrams_sent: 63,
+            window_relays_ingested: 64,
+            window_relay_undecodable: 65,
+            window_relay_unvouched: 66,
+            window_relay_stale: 67,
+            window_relay_rows_composed: 68,
+            window_relay_unplaceable: 69,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);
@@ -329,17 +331,17 @@ mod tests {
         assert_eq!(view.window_dedup_max_dev_nm, 56);
         assert_eq!(view.window_head_reads_sent, 57);
         assert_eq!(view.window_composed_rows, 58);
-        assert_eq!(view.parity_rows_matched, 59);
-        assert_eq!(view.parity_pose_mismatch, 60);
-        assert_eq!(view.parity_max_pos_dev_nm, 61);
-        assert_eq!(view.parity_missing_composed, 62);
-        assert_eq!(view.parity_sibling_interior_excluded, 63);
-        assert_eq!(view.parity_unwindowed_ancestor, 64);
-        assert_eq!(view.parity_no_fold_at_tick, 65);
-        assert_eq!(view.parity_offframe_rows, 66);
-        assert_eq!(view.parity_origin_rows, 67);
-        assert_eq!(view.parity_pending_shed, 68);
-        assert_eq!(view.parity_undecodable, 69);
+        assert_eq!(view.old_realm_frames_dropped, 59);
+        assert_eq!(view.old_scene_deltas_dropped, 60);
+        assert_eq!(view.scene_levels_sent, 61);
+        assert_eq!(view.scene_deltas_sent, 62);
+        assert_eq!(view.scene_datagrams_sent, 63);
+        assert_eq!(view.window_relays_ingested, 64);
+        assert_eq!(view.window_relay_undecodable, 65);
+        assert_eq!(view.window_relay_unvouched, 66);
+        assert_eq!(view.window_relay_stale, 67);
+        assert_eq!(view.window_relay_rows_composed, 68);
+        assert_eq!(view.window_relay_unplaceable, 69);
         assert_eq!(view.sessions_open, 24);
         assert_eq!(view.dynamic_shards, 25);
         assert_eq!(view.windows_open, 37);

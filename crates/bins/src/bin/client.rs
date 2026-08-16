@@ -105,29 +105,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None, // R-6d3a: the client has no producer-less durable flows — no outbox needed.
     )?;
-    let mut core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
+    let core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
 
-    // THE DEBUG BOOT SCENE (dev-control builds only — `debug_scene_arg` refuses it otherwise). Local file
-    // geometry drawn while the client has been told nothing yet, so a playground smoke has something on
-    // screen before the first streamed scene message arrives; that message REPLACES this whole scene with
-    // what the shard chain shipped, and from then on the client draws only what it was sent.
-    //
-    // IT IS NOT CONVERTED AND MUST NOT BE. The centres in these files are each realm's placement in its
-    // PARENT's frame, which is not the space this session draws in. Converting them here would mean the
-    // client holding the whole forest and folding a chain of realms — the exact arrangement the server-side
-    // chain replaced. Preferred: a `regions.json` (`Vec<RealmRegion>` = the SEED forest, ambient shells
-    // auto-skipped). Legacy fallback: a `boxes.json` (`Vec<RealmBoundary>`) for the authored playground
-    // OVERRIDE smokes. A file that parses as NEITHER fails LOUD at boot (never a silent empty scene).
-    if let Some(path) = &args.realm_boxes {
-        let json =
-            std::fs::read_to_string(path).map_err(|e| format!("read --realm-boxes {path}: {e}"))?;
-        let scene = vd_client::realm_scene::RealmScene::from_regions_json(&json)
-            .or_else(|_| vd_client::realm_scene::RealmScene::from_boxes_json(&json))
-            .map_err(|e| {
-                format!("parse --realm-boxes {path} as regions.json or boxes.json: {e}")
-            })?;
-        core.state_mut().load_scene(scene);
-    }
+    // THE BOOT FILE IS GONE (Slice C1, window_lane.md §2.11 — D-LANE-6 🟩, owner decision 10 THE
+    // DRAW LAW): one world, one source — the STREAM. The client draws nothing until the composed
+    // level lands, and from then on it draws only what it was sent. A realm that is not running
+    // cannot be drawn, which is WHY visibility is the spin-up trigger.
 
     // The lock-free step ↔ listener bridge: ArcSwap publishes the decoded delivered
     // DevState; the bounded mailbox carries injected InputActions; the atomics carry
@@ -486,20 +469,6 @@ struct ClientArgs {
     /// Headless offscreen render + wgpu readback for `vdctl screenshot` (Slice-3 T5) — the
     /// agent's eyes, no display. Requires `--features dev-control,render` + `--dev-control`.
     capture: bool,
-    /// A DEBUG boot scene read off local disk — a `regions.json` (`Vec<RealmRegion>`, the seed forest)
-    /// or the legacy authored `boxes.json` (`Vec<RealmBoundary>`) — drawn as translucent realm boxes
-    /// while the client has been told nothing (Visual Crossing Playground V2). `None` ⇒ no boxes.
-    ///
-    /// IT IS NOT WORLD TRUTH AND IS NOT ON THE NETWORKED PATH. The centres in those files are each
-    /// realm's placement in its own PARENT's frame, which is not the space this session draws in, and
-    /// nothing converts them — nothing can, because converting them would mean the client holding the
-    /// whole forest and folding a chain of realms, which is precisely what the server-side chain exists
-    /// to stop. It survives only until the first streamed scene message, which REPLACES the whole scene
-    /// with what the shard chain shipped.
-    ///
-    /// It is therefore refused outright unless this is a `dev-control` build, so it cannot become a
-    /// second source of world geometry in anything a player runs.
-    realm_boxes: Option<String>,
 }
 
 fn parse_args() -> Result<ClientArgs, String> {
@@ -514,7 +483,6 @@ fn parse_args() -> Result<ClientArgs, String> {
     let mut step_hz: u32 = DEFAULT_STEP_HZ;
     let mut window = false;
     let mut capture = false;
-    let mut realm_boxes: Option<String> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -530,9 +498,6 @@ fn parse_args() -> Result<ClientArgs, String> {
             "--step-hz" => step_hz = parse_val(&mut it, "--step-hz")?,
             "--window" => window = true,
             "--capture" => capture = true,
-            "--realm-boxes" => {
-                realm_boxes = Some(debug_scene_arg(next_val(&mut it, "--realm-boxes")?)?);
-            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -552,25 +517,7 @@ fn parse_args() -> Result<ClientArgs, String> {
         step_hz,
         window,
         capture,
-        realm_boxes,
     })
-}
-
-/// Accept `--realm-boxes` ONLY in a dev-control build — the flag names a local file of world geometry
-/// nobody streamed, so it is a debugging affordance and is gated like one. See `ClientArgs::realm_boxes`.
-#[cfg(feature = "dev-control")]
-fn debug_scene_arg(path: String) -> Result<String, String> {
-    Ok(path)
-}
-
-/// The non-dev twin: refuse LOUD rather than silently drawing file geometry beside streamed geometry.
-#[cfg(not(feature = "dev-control"))]
-fn debug_scene_arg(_path: String) -> Result<String, String> {
-    Err(
-        "--realm-boxes is a debug-only boot scene (local file geometry, not the streamed world) and \
-         needs a `dev-control` build"
-            .to_owned(),
-    )
 }
 
 fn next_val(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {

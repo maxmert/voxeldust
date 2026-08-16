@@ -1,18 +1,22 @@
-//! G-RENDER-BOXES-SMOKE — the realm-box pixel proof on THE WORLD: bring the local-process QUIC
-//! cluster up, launch a HEADLESS `client --capture` drawing the scene `emit-world-scene` writes
-//! (`regions.json` — the home shard's own boot neighbourhood, the ONE emitter, SL5), drive it to a
-//! real wgpu-readback screenshot, and assert THE world's HOME-system shell is PIXEL-VISIBLE and
-//! correctly placed — its color region holds non-clear pixels INSIDE its projected screen AABB (H2:
-//! "the box drew WHERE it should", not a bare content fraction). Zero magenta. The old gate drew an
-//! authored one-box scene (`Station(4242)` at x=500) that existed in no world; this one draws what
-//! the game draws.
+//! G-RENDER-BOXES-SMOKE — the realm-box pixel proof on THE WORLD, RE-BASED at the flag day
+//! (Slice C1, `docs/design/window_lane.md` §2.11): bring the local-process QUIC cluster up,
+//! launch a HEADLESS `client --capture` drawing ONLY the COMPOSED STREAM (the `--realm-boxes`
+//! boot file is DELETED — D-LANE-6 🟩, one world, one source), wait on the composed feed's OWN
+//! settle signal (`RealmFramesApplied ≥ 1` — the demand loop's first delivered fold, never a
+//! sleep literal), drive it to a real wgpu-readback screenshot, and assert THE world's
+//! HOME-system shell is PIXEL-VISIBLE and correctly placed — its color region holds non-clear
+//! pixels INSIDE its projected screen AABB (H2: "the box drew WHERE it should"). Zero magenta.
+//!
+//! STREAM anti-vacuity: the DRAWN set (the state the manifest's capture records) must equal the
+//! gateway-emitted LEVEL set — on THE world's Single topology the origin's own LOOK body (the
+//! home shell) plus one MARKER point per planet (the parent-authored reflected datum; markers
+//! are points until Slice D's sprites) — and the ORIGIN MARKER must name the home realm. A lost
+//! row, an extra row, or a wrong body kind cannot hide behind the pixel floor.
 //!
 //! THE CAMERA (the A1 discipline, shared with the crossing gate): the client's offscreen capture
-//! camera refits `fit_camera_to_scene` over the LIVE overlaid scene every frame, and THE world's
-//! planets ORBIT — so the projection camera is RECONSTRUCTED from the client's own reported drawn
-//! boxes (`DevState.realm_boxes` centres × THE world's extents by label), never fitted over the
-//! static file. LOAD-PATH anti-vacuity: the drawn realm set must equal the file scene's renderable
-//! set (the home shell + its five planets), so a lost box cannot hide behind the pixel floor.
+//! camera refits `fit_camera_to_scene` over the LIVE overlaid scene every frame — so the
+//! projection camera is RECONSTRUCTED from the client's own reported drawn boxes
+//! (`DevState.realm_boxes` centres × their STREAMED `extent_m`), never from a file.
 //!
 //! GPU PRECONDITION (same as G-RENDER-SMOKE): renders through wgpu, REQUIRES a working GPU adapter,
 //! LOCAL-only (no CI, no software-raster fallback). On a GPU-less host the capture client cannot
@@ -27,12 +31,11 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use vd_bins::scene_camera::{extent_by_label, live_scene_camera};
+use vd_bins::scene_camera::live_scene_camera;
 use vd_bins::{
-    DEV, DevClusterDown, dev_auth_signing_key_hex, dev_roundtrip, devcluster, loopback,
-    record_extra_pid, slot_trust_dir, slot_workdir, world_roster, write_world_regions,
+    DEV, DevClusterDown, boot_world, dev_auth_signing_key_hex, dev_roundtrip, devcluster, loopback,
+    record_extra_pid, slot_trust_dir, slot_workdir, world_roster,
 };
-use vd_client::realm_scene::{BoxShape, RealmScene};
 use vd_client_harness::assert::{MAGENTA, magenta_pixel_count};
 use vd_client_harness::camera::ScreenAabb;
 use vd_client_harness::manifest::{CaptureKind, MANIFEST_FILENAME, RunManifest};
@@ -176,15 +179,18 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
     let cwd = slot_workdir(RENDER_BOXES_SLOT).join("capture-cwd");
     std::fs::create_dir_all(&cwd).expect("make client cwd");
 
-    // THE scene, from THE world (`emit-world-scene`'s body) — the same file the client loads via
-    // --realm-boxes and this test projects against (single-sourced; there is nothing else to emit).
+    // THE expected drawn set, from THE world itself (no file exists to emit): the home system's
+    // own LOOK body + one MARKER point per planet of the home system — exactly what the composed
+    // level states on the Single topology (the chain is the home realm alone; its planets are
+    // dormant, so THE DRAW LAW gives each its parent's reflected marker and nothing else).
     let roster = world_roster(&DEV);
-    let regions_path = write_world_regions(&cwd, &DEV).expect("emit THE world scene");
-    let regions_json = std::fs::read_to_string(&regions_path).expect("read regions.json");
-    let regions: Vec<vd_core::geometry::RealmRegion> =
-        serde_json::from_str(&regions_json).expect("regions.json parses");
-    let extents = extent_by_label(&regions);
-    let scene = RealmScene::from_regions_json(&regions_json).expect("the world scene projects");
+    let world = boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
+    let home_planets: Vec<String> = world
+        .regions()
+        .iter()
+        .filter(|r| r.parent == Some(roster.home))
+        .map(|r| format!("{:?}", r.realm))
+        .collect();
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_client"));
     cmd.current_dir(&cwd)
@@ -204,8 +210,6 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
             &devctl.to_string(),
             "--allow-dev-control",
             "--capture",
-            "--realm-boxes",
-            &regions_path,
         ]);
     #[cfg(unix)]
     {
@@ -217,12 +221,14 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
 
     await_listener(devctl, &mut child.0);
 
-    // Drive to a live, DELIVERED frame, then capture (the scene is boot-config, present from frame 0).
+    // THE SETTLE SIGNAL (§2.11 — never a sleep literal): the composed feed's own first delivered
+    // fold. `RealmFramesApplied ≥ 1` means the level landed (the scene exists), the windows
+    // confirmed, and a composed datagram was applied — the demand loop's own "the picture is on".
     let live = round_trip(
         devctl,
         &DevRequest::WaitUntil {
             predicate: WaitPredicate {
-                field: WaitField::UniverseTick,
+                field: WaitField::RealmFramesApplied,
                 op: WaitOp::Ge,
                 value: 1,
             },
@@ -231,7 +237,7 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
     );
     assert!(
         matches!(live, DevResponse::State { .. }),
-        "client should reach a delivered frame, got {live:?}"
+        "client should reach a delivered composed fold, got {live:?}"
     );
 
     // Sample the drawn scene, then capture — the camera reconstruction reads THIS state (the A1
@@ -253,34 +259,43 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
         other => panic!("screenshot was not captured (GPU precondition unmet?): {other:?}"),
     };
 
-    // LOAD-PATH anti-vacuity: the client draws EXACTLY the file scene's renderable set — the home
-    // shell + its five planets, by label (a lost/extra box cannot hide behind the pixel floor).
-    let mut drawn: Vec<String> = state.realm_boxes.iter().map(|b| b.realm.clone()).collect();
-    drawn.sort();
-    let mut expected: Vec<String> = scene
+    // STREAM anti-vacuity (§2.11): the DRAWN set equals the gateway-emitted level set — the home
+    // LOOK body + one MARKER per planet — and the origin marker names the home realm. Body kinds
+    // asserted per row: a planet that silently gained a mesh (or a home that degraded to a
+    // marker) fails here, not behind the pixel floor.
+    let home_label = format!("{:?}", roster.home);
+    let mut drawn: Vec<(String, String)> = state
+        .realm_boxes
         .iter()
-        .map(|(realm, _)| format!("{realm:?}"))
+        .map(|b| (b.realm.clone(), b.body_kind.clone()))
+        .collect();
+    drawn.sort();
+    let mut expected: Vec<(String, String)> = home_planets
+        .iter()
+        .map(|label| (label.clone(), "marker".to_owned()))
+        .chain(std::iter::once((home_label.clone(), "look".to_owned())))
         .collect();
     expected.sort();
     assert_eq!(
         drawn, expected,
-        "the drawn realm set must equal THE world scene's renderable set",
+        "the drawn (realm, body_kind) set must equal the gateway-emitted level set",
+    );
+    assert_eq!(
+        state.origin,
+        Some((home_label.clone(), 1)),
+        "the origin marker names the HOME realm at the login epoch",
     );
 
-    // The home shell's projected screen rectangle through the RECONSTRUCTED live camera: the drawn
-    // centre the client reports (zero — the shard's own frame) + the shell's radius from the scene.
-    let camera = live_scene_camera(&state, &extents, CAPTURE_W as usize, CAPTURE_H as usize);
-    let home_label = format!("{:?}", roster.home);
-    let home_centre = state
+    // The home shell's projected screen rectangle through the RECONSTRUCTED live camera: the
+    // drawn centre the client reports (zero — the origin row) + the shell's STREAMED extent.
+    let camera = live_scene_camera(&state, CAPTURE_W as usize, CAPTURE_H as usize);
+    let home = state
         .realm_boxes
         .iter()
         .find(|b| b.realm == home_label)
-        .map(|b| DVec3::from_array(b.center))
         .expect("the home shell is drawn");
-    let radius = match scene.get(roster.home).expect("home box in scene").shape {
-        BoxShape::Sphere { r } => r,
-        BoxShape::Box { half } => half.length(),
-    };
+    let home_centre = DVec3::from_array(home.center);
+    let radius = home.extent_m;
     let region = projected_point_aabb(&camera, home_centre, radius)
         .expect("the home shell projects in front of the fitted camera");
 
@@ -342,25 +357,19 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
     let cx = (region.min.x + region.max.x) * 0.5;
     let cy = (region.min.y + region.max.y) * 0.5;
     let rim_r = (region.max.x - region.min.x) * 0.5;
-    let planet_rects: Vec<(String, ScreenAabb)> = scene
+    // The paint-exclusion rects for the rim search: every OTHER drawn body with a nonzero
+    // extent, drift-inflated. On THE world today the planets are zero-extent MARKER points
+    // (Slice D owns their sprites), so this list is empty — kept GENERIC so a planet that gains
+    // a look (a spun-up neighbour in a future topology) is excluded again without an edit.
+    let planet_rects: Vec<(String, ScreenAabb)> = state
+        .realm_boxes
         .iter()
-        .filter(|&(realm, _)| realm != roster.home)
-        .map(|(realm, rbox)| {
-            let label = format!("{realm:?}");
-            let centre = state
-                .realm_boxes
-                .iter()
-                .find(|b| b.realm == label)
-                .map(|b| DVec3::from_array(b.center))
-                .expect("every renderable realm is drawn (assert above)");
-            let radius = match rbox.shape {
-                BoxShape::Sphere { r } => r,
-                BoxShape::Box { half } => half.length(),
-            };
-            let rect = projected_point_aabb(&camera, centre, radius)
-                .expect("a drawn planet projects in front of the fitted camera");
+        .filter(|b| b.realm != home_label && b.extent_m > 0.0)
+        .map(|b| {
+            let rect = projected_point_aabb(&camera, DVec3::from_array(b.center), b.extent_m)
+                .expect("a drawn body projects in front of the fitted camera");
             (
-                label,
+                b.realm.clone(),
                 ScreenAabb {
                     min: vd_client_harness::camera::ScreenPos {
                         x: rect.min.x - RIM_PLANET_DRIFT_PX,

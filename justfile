@@ -187,11 +187,11 @@ chain-latency:
 # INV-SNAPSHOT-SAFETY throughout. RELEASE build (the `#[cfg(not(debug_assertions))]` soak is inert in
 # debug; `just test` still runs the 1024-case fixed-seed proptest + the 6 named witnesses). A sustained
 # ARM-A≠ARM-B divergence here is the concrete trigger to promote the deferred durable snapshot (D-RLM-2).
-# THE WINDOW LANE rides the same soak recipe on the SHADOW configuration (window_lane.md §4.5 Topic 5):
+# THE WINDOW LANE rides the same soak recipe on the composer (window_lane.md §4.5 Topic 5):
 # ~30k ticks of session/window churn + lossy/reordered/forged ingest through the REAL composer pass,
-# asserting memory/counters MONOTONE-BOUNDED every tick (rings ≤ the derived span, pending ≤ the derived
-# cap, realm-heads ≤ the named set) and ZERO composer state after the last session leaves — no leak,
-# asserted, never eyeballed.
+# asserting memory/counters MONOTONE-BOUNDED every tick (rings ≤ the derived span, realm-heads ≤ the
+# named set) and ZERO composer state after the last session leaves — no leak, asserted, never
+# eyeballed.
 rlm-soak:
     cargo test --release -p vd-sim rlm_soak -- --nocapture --test-threads=1
     cargo test --release -p vd-connection-plane window_shadow_soak -- --nocapture --test-threads=1
@@ -205,13 +205,15 @@ rlm-soak:
 window-compose-load:
     cargo test --release -p vd-connection-plane g_compose_load -- --nocapture --test-threads=1
 
-# THE WINDOW LANE's SHADOW-PARITY GATE (window_lane.md §4 Slice B): the composition engine live in
-# real processes beside the old lane — a real demand cluster, TWO real logins, a real crossing leg —
-# measured per realm per tick against the old-lane client feed. Zero UNEXPLAINED mismatches; every
-# explained divergence a NAMED, COUNTED class printed by the gate (the sibling-interior exclusion is
-# the recorded Q2-carrier gap, D-WINDOW-1). Also carries the exact-cadence boot pin
-# (window_full_chain_folds > 0) and both dedup f64 measurements. Same port band + serialization
-# posture as rlm-demand-login.
+# THE WINDOW LANE's COMPOSED SELF-CONSISTENCY GATE (window_lane.md §2.12): the composition engine
+# live in real processes — a real demand cluster, TWO real logins, a real crossing leg, a dwell.
+# It was the SHADOW-PARITY gate through Slice B; that measurement ran, is recorded in D-WINDOW-1,
+# and discharged its purpose at the Slice-C1 client cut, so Slice C2 re-based the scenario onto the
+# three §2.12 pins that had no other process-tier home: the exact-cadence proof
+# (window_full_chain_folds > 0 — two shard processes stamping IDENTICAL universe ticks), both dedup
+# f64 agreements (hop-vs-child-row and shared-vs-per-session, each measured zero), and the shear law
+# live (instant_mismatch == 0). It also asserts the four deleted scenery lanes stay SILENT in a real
+# cluster. Same port band + serialization posture as rlm-demand-login.
 window-parity:
     cargo test -p vd-bins --features dev-control --test window_shadow_parity -- --test-threads=1 --nocapture
 
@@ -231,28 +233,29 @@ fmt-check:
 render-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
 
-# G-RENDER-BOXES-SMOKE (THE world's realm-box pixel proof): bring up the cluster, launch a HEADLESS
-# `client --capture --realm-boxes` drawing the emit-world-scene regions, capture a real
-# wgpu-readback frame, and assert the HOME SHELL ITSELF drew where it should — paint at a rim probe
-# just inside its silhouette (at an angle chosen clear of every planet's drawn disc) and NONE just
-# outside it (H2, isolated to the shell — batch review: the whole-region count was satisfied by a
-# planet disc or the capture scaffold with the shell never rasterized) + zero magenta. Same
-# GPU-required, LOCAL-gate preconditions as render-smoke (no CI, no software fallback; steer with
-# WGPU_BACKENDS).
+# G-RENDER-BOXES-SMOKE (THE world's realm-box pixel proof, re-based Slice C1 §2.11): bring up the
+# cluster, launch a HEADLESS `client --capture` drawing ONLY the COMPOSED STREAM (no --realm-boxes
+# file exists), wait on the demand loop's own settle signal, capture a real wgpu-readback frame,
+# and assert the drawn set EQUALS the gateway-emitted level set (anti-vacuity vs the run manifest),
+# the origin marker == the home realm, and the HOME SHELL ITSELF drew where it should — paint at a
+# rim probe just inside its silhouette and NONE just outside it (H2, isolated to the shell) + zero
+# magenta. Same GPU-required, LOCAL-gate preconditions as render-smoke (no CI, no software
+# fallback; steer with WGPU_BACKENDS).
 render-boxes-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_boxes_smoke -- --nocapture
 
-# G-RENDER-CROSSING-SMOKE (the crossing pixel proof on THE world): bring up the DUAL cluster with NO
-# injected geometry, launch a HEADLESS `client --capture --realm-boxes` drawing the emit-world-scene
-# regions, fly the ±Z polar corridor OUT of the home system's own 150 m shell and BACK, and capture
-# THREE frames — each DOT-SENSITIVE (batch review): the dot marker carries a minimum apparent size,
-# its rectangle is parked provably clear of every planet's orbit annulus, and every capture requires
-# dot pixels DISTINCT from their surround — INSIDE (dot in the home shell's rect), OUTSIDE (label =
-# the galaxy, dot rect disjoint from the home rect AND the dot drew out there; expected_box == None:
-# the between-space is never drawn), RETURNED (inside again — the return leg's pixel coverage). The
-# camera is RECONSTRUCTED per capture from the client's own reported drawn boxes (the planets orbit,
-# so a static-file camera would drift). Zero magenta on all three. Same GPU-required, LOCAL-gate
-# preconditions as render-smoke.
+# G-RENDER-CROSSING-SMOKE (the crossing pixel proof on THE world, re-based Slice C1 §2.11): bring
+# up the DUAL cluster, launch a HEADLESS `client --capture` drawing ONLY the COMPOSED STREAM, fly
+# the ±Z polar corridor OUT of the home system's own shell and BACK, and capture THREE frames —
+# each DOT-SENSITIVE, the dot rect DevState-driven (projected position + body kind, local pixel
+# probes — never a full-frame search): INSIDE (dot in the home shell's rect), OUTSIDE (origin =
+# the galaxy realm; the home body still draws at the session origin — the galaxy authors its
+# placement at ZERO), RETURNED (inside again). J1 is the ORIGIN-MARKER assert: home draws at the
+# origin on BOTH sides and the epoch bumps EXACTLY once per crossing; plus the crossing NO-FLICKER
+# gate — no capture across the swap where a persisting body's screen delta exceeds the one-tick
+# motion bound, and no frame with the scene absent. The camera is RECONSTRUCTED per capture from
+# the client's own reported drawn boxes + STREAMED extents. Zero magenta on all three. Same
+# GPU-required, LOCAL-gate preconditions as render-smoke.
 render-crossing-smoke:
     cargo test -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
 

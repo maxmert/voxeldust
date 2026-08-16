@@ -409,8 +409,12 @@ fn every_arm() -> Vec<InterShardFlow> {
             observer: AccountId(5),
             realms: vec![],
         }),
-        // Per-realm AoI observation cascade (parent → active child). FireAndForget / Unreliable — a per-tick
-        // latest-wins realm-pose relay, NOT producer-less, so the golden pin below still asserts exactly TWO.
+        // ★TOMBSTONE (window lane Slice C2, minor 19): the parent's down-cascade of restated scenery
+        // — no producer, no consumer; discriminant 26 is reserved forever, so its SHAPE stays pinned
+        // here (a drifted tombstone would silently re-label every later arm). Every chain level now
+        // states its own rows STRAIGHT to the observer's gateway (`ShardToGateway::WindowFrame`).
+        // Classification frozen: FireAndForget / Unreliable, NOT producer-less-reliable — the
+        // durability golden pin below still asserts exactly TWO producer-less-reliable arms.
         InterShardFlow::RealmCascade(vd_wire::intershard::RealmCascade {
             child: demand_child_coord(),
             realm_snapshot_bytes: vec![1, 2, 3],
@@ -454,23 +458,50 @@ fn every_arm() -> Vec<InterShardFlow> {
             fence: Fence(3),
             at: UniverseTick(13),
         }),
-        // The up-observation lane: a live child's OWN authored rows, opaque, one hop up — the sealed
-        // frame_id discipline pinned by carrying pre-serialized bytes exactly like RealmCascade.
+        // ★TOMBSTONE (window lane Slice C2, minor 19): the up-observation lane — no producer, no
+        // consumer; discriminant 31 is reserved forever, so its SHAPE stays pinned here. Its cargo
+        // is carried now by the direct `WindowFrame` (own rows to the gateway) and, for a realm an
+        // observer is beside rather than inside, by the SEALED `WindowRelay` below. Classification
+        // frozen: FireAndForget / Unreliable, NOT producer-less-reliable.
         InterShardFlow::RealmObservation(vd_wire::intershard::RealmObservation {
             child: demand_child_coord(),
             realm_snapshot_bytes: vec![7, 7, 7],
         }),
-        // The observation lane's STATIC half (minor 11): a live child's interior outlines, one hop up,
-        // centers in the child's own frame — the full-set level the parent lifts and folds into scenes.
+        // ★TOMBSTONE (window lane Slice C1, minor 17): the interim shape lane — no producer, no
+        // consumer; the discriminant (32) is reserved forever, so its SHAPE stays pinned here (a
+        // drifted tombstone would silently re-label every later arm). Its content evolved into
+        // `WindowRelay` below (owner-approved 2026-08-16, owner_decisions_2026-08-15.md addendum +
+        // window_lane.md §5 RULINGS). Classification frozen: FireAndForget / Unreliable, NOT
+        // producer-less — the golden pin below still asserts exactly TWO.
         InterShardFlow::RealmShapeObservation(vd_wire::intershard::RealmShapeObservation {
             child: demand_child_coord(),
             shapes: vec![shape()],
         }),
-        // The per-live-child down-reflected sibling scene (minor 11) — the occupant-keyed lane's rekey,
-        // addressed to the receiving child realm, centers already in that child's frame.
+        // ★TOMBSTONE (window lane Slice C2, minor 19): the per-live-child down-reflect — no producer,
+        // no consumer; discriminant 33 is reserved forever, so its SHAPE stays pinned here. This is
+        // the lane the SL1 SELF-PLACEMENT FILTER guarded; the filter retires WITH it by the owner's
+        // Q3 amendment (window_lane.md §5 RULINGS), replaced by the structural absence pinned in
+        // `no_realm_inbound_payload_carries_a_placement_or_a_centre` below. Classification frozen:
+        // FireAndForget / ReDriven, NOT producer-less-reliable.
         InterShardFlow::ChildSceneSet(vd_wire::intershard::ChildSceneSet {
             child: demand_child_coord(),
             realms: vec![shape()],
+        }),
+        // THE Q2 RELAY LEG (window lane Slice C1, minor 17; owner-approved 2026-08-16 —
+        // owner_decisions_2026-08-15.md addendum + window_lane.md §5 RULINGS): a live child's
+        // VERBATIM self-authored statements, SEALED (the parent forwards these bytes unopened —
+        // forward-or-drop), the child's own fence riding outside the seal. FireAndForget /
+        // ReDriven — NOT producer-less, so the golden pin below still asserts exactly TWO.
+        InterShardFlow::WindowRelay(vd_wire::intershard::WindowRelay {
+            child: demand_child_coord(),
+            realm_fence: Fence(6),
+            statements: vd_wire::session_flow::seal_relay_statements(&[
+                vd_wire::session_flow::RelayedStatement::Body {
+                    subject: RealmId::System(7),
+                    stmt: vd_wire::session_flow::BodyStmt::SelfLook { bag: vec![4, 2] },
+                    authored_at: UniverseTick(14),
+                },
+            ]),
         }),
     ]
 }
@@ -481,7 +512,6 @@ fn shape() -> vd_wire::channels::RealmShape {
     vd_wire::channels::RealmShape {
         realm: RealmId::Planet(3),
         frame: FrameRef::PlanetCentered { planet_seed: 3 },
-        center: vd_core::pose::LatticePos::local(vd_core::glam::DVec3::new(5.0, 0.0, 0.0)),
         shape: vd_core::geometry::Boundary::Shell { r: 2.0 },
         parent: Some(RealmId::System(7)),
     }
@@ -538,7 +568,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::ChildLive(_)
         | InterShardFlow::RealmObservation(_)
         | InterShardFlow::RealmShapeObservation(_)
-        | InterShardFlow::ChildSceneSet(_) => {}
+        | InterShardFlow::ChildSceneSet(_)
+        | InterShardFlow::WindowRelay(_) => {}
     }
 }
 
@@ -695,14 +726,20 @@ fn every_arm_encodes_its_declared_discriminant_index() {
             // The two Step 5 slice D tombstones hold 24 and 25 forever.
             InterShardFlow::OccupantInterest(_) => 24,
             InterShardFlow::ProxySceneSet(_) => 25,
+            // The window lane's Slice C2 tombstone holds 26 forever (the down-cascade).
             InterShardFlow::RealmCascade(_) => 26,
             InterShardFlow::EntityInterest(_) => 27,
             InterShardFlow::EntityCascade(_) => 28,
             InterShardFlow::ShardRoster(_) => 29,
             InterShardFlow::ChildLive(_) => 30,
+            // The window lane's Slice C2 tombstone holds 31 forever (the up-observation ship).
             InterShardFlow::RealmObservation(_) => 31,
+            // The window lane's Slice C1 tombstone holds 32 forever.
             InterShardFlow::RealmShapeObservation(_) => 32,
+            // The window lane's Slice C2 tombstone holds 33 forever (the down-reflect).
             InterShardFlow::ChildSceneSet(_) => 33,
+            // The Q2 relay leg (mesh minor 17) holds 34 forever.
+            InterShardFlow::WindowRelay(_) => 34,
         }
     }
     // Every fixture's real leading byte matches its declared index (all indices < 128, so the
@@ -715,9 +752,231 @@ fn every_arm_encodes_its_declared_discriminant_index() {
     }
     // …and the fixture set spans the WHOLE contiguous index space, so a missing fixture (or a
     // gap postcard would assign past a deleted arm) cannot pass vacuously.
-    assert_eq!(seen.len(), 34);
+    assert_eq!(seen.len(), 35);
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(33));
+    assert_eq!(seen.last().copied(), Some(34));
+}
+
+/// THE TOMBSTONE GOLDEN SET — the discriminants no producer may ever fill again, stated as data.
+///
+/// Each entry was a lane somebody deleted on purpose, and each entry's number is load-bearing
+/// forever: postcard writes a variant's DECLARED index, so reviving one, renumbering one, or
+/// quietly deleting one re-labels every later arm on a live wire. The classifier below is an
+/// EXHAUSTIVE match, so a new arm cannot be added without a stated tombstone answer, and the
+/// golden count makes a silent revival (a tombstone that grows a producer again) a failing test
+/// rather than a review finding.
+///
+/// Window lane Slice C2 (minor 19, owner-approved 2026-08-16 — `docs/design/window_lane.md`
+/// §2.5 + §5 RULINGS) grew the set from FIVE to EIGHT: the three old inter-realm SCENERY lanes
+/// (`RealmCascade` 26, `RealmObservation` 31, `ChildSceneSet` 33) joined the interim shape lane
+/// (`RealmShapeObservation` 32, minor 17), the two per-occupant lanes (24/25, minor 12) and the
+/// entity lane's two legs (27/28, minor 13).
+#[test]
+fn the_tombstoned_discriminants_are_exactly_this_golden_set() {
+    /// Is this arm's lane DELETED (no producer anywhere in the workspace)? Exhaustive by
+    /// construction — a new arm does not compile until it answers.
+    fn tombstoned(flow: &InterShardFlow) -> bool {
+        match flow {
+            // ★ The eight deleted lanes.
+            InterShardFlow::OccupantInterest(_)          // minor 12, per-occupant pose up-relay
+            | InterShardFlow::ProxySceneSet(_)           // minor 12, per-occupant scene reflect
+            | InterShardFlow::RealmCascade(_)            // minor 19, the down-cascade of scenery
+            | InterShardFlow::EntityInterest(_)          // minor 13, entity lane up-leg
+            | InterShardFlow::EntityCascade(_)           // minor 13, entity lane down-leg
+            | InterShardFlow::RealmObservation(_)        // minor 19, the up-observation ship
+            | InterShardFlow::RealmShapeObservation(_)   // minor 17, the interim shape lane
+            | InterShardFlow::ChildSceneSet(_) => true,  // minor 19, the down-reflect
+            // Everything else is LIVING: the transfer/saga/directory machinery, the roster, the
+            // SL7 occupancy bit, the demand verbs, the reactive greeting, and the window lane's
+            // own Q2 relay leg.
+            InterShardFlow::Ghost(_)
+            | InterShardFlow::Transfer(_)
+            | InterShardFlow::Directory(_)
+            | InterShardFlow::Saga(_)
+            | InterShardFlow::SagaAck(_)
+            | InterShardFlow::DirectoryReply(_)
+            | InterShardFlow::FlushSource(_)
+            | InterShardFlow::TransferAck(_)
+            | InterShardFlow::Demote(_)
+            | InterShardFlow::Promote(_)
+            | InterShardFlow::TransientRelease(_)
+            | InterShardFlow::TransientDrop(_)
+            | InterShardFlow::ReleaseComplete(_)
+            | InterShardFlow::TransientAbandon(_)
+            | InterShardFlow::ReHome(_)
+            | InterShardFlow::TransientDiscard(_)
+            | InterShardFlow::ReSolicitBatch(_)
+            | InterShardFlow::CrossingRequest(_)
+            | InterShardFlow::TransientCrossingRequest(_)
+            | InterShardFlow::TransientCrossingGrant(_)
+            | InterShardFlow::CrossingAborted(_)
+            | InterShardFlow::CrossingAbortedAck(_)
+            | InterShardFlow::RealmDemand(_)
+            | InterShardFlow::ShardPresence(_)
+            | InterShardFlow::ShardRoster(_)
+            | InterShardFlow::ChildLive(_)
+            | InterShardFlow::WindowRelay(_) => false,
+        }
+    }
+    let mut reserved: Vec<u8> = every_arm()
+        .iter()
+        .filter(|f| tombstoned(f))
+        .map(|f| postcard::to_allocvec(f).expect("closed arm encodes")[0])
+        .collect();
+    reserved.sort_unstable();
+    assert_eq!(
+        reserved,
+        vec![24, 25, 26, 27, 28, 31, 32, 33],
+        "the reserved-forever discriminant set moved: a tombstone was revived, renumbered or \
+         deleted — every one of those re-labels a later arm on a live wire"
+    );
+}
+
+/// THE STRUCTURAL SUCCESSOR OF THE SL1 SELF-PLACEMENT FILTER (owner ruling Q3, 2026-08-16 —
+/// `docs/design/window_lane.md` §5 RULINGS; the C2 ledger cites it as retirement BY AMENDMENT,
+/// not erosion).
+///
+/// A realm may never learn where it sits. Until Slice C2 that was guarded BEHAVIOURALLY: the
+/// down-reflect lane filtered the sender's own outline out of the set it shipped to a child,
+/// because restated one hop down that outline states −(the child's placement) — the child's own
+/// address, sign-flipped. The owner approved deleting that filter TOGETHER WITH ITS LANE, on the
+/// ground that the hazard itself ceases to exist. This test is what makes that claim a
+/// measurement instead of an argument: **no LIVING inter-shard payload can carry a realm's
+/// placement at all** — not as a typed field, not as a centre, and not as the opaque
+/// pre-serialized datagram the deleted lanes used to hide one inside.
+///
+/// It is a source scan of the wire crate's own vocabulary (the same discipline the version
+/// ledger's citation gate uses), and it can FAIL — the tombstoned payloads still declare those
+/// very fields, and the positive control below proves the detector sees them.
+#[test]
+fn no_living_inter_shard_payload_carries_a_realm_placement_or_a_centre() {
+    /// A field type that expresses WHERE A REALM IS. An occupant's own `StampedPose` is
+    /// deliberately NOT here: the entity lane is untouched, and a crossing subject's pose is
+    /// SL2's permitted case (it rides WITH the subject, about the subject).
+    const PLACEMENT_TYPES: &[&str] = &[
+        "RealmShape",
+        "RealmSnap", // also catches `RealmSnapshotDatagram`
+        "FramePlacement",
+    ];
+    /// Field NAMES that smuggle the same thing past the type check — the opaque
+    /// already-serialized datagram the two deleted relay lanes carried, and any centre.
+    const PLACEMENT_NAMES: &[&str] = &["center", "centre", "placement", "realm_snapshot_bytes"];
+    /// The payload structs whose lane is DELETED. They still declare placement fields — that is
+    /// the point of a tombstone (the shape stays pinned) — and they are also this test's proof
+    /// that the scan below can fail.
+    const TOMBSTONED: &[&str] = &[
+        "OccupantInterest",
+        "ProxySceneSet",
+        "RealmCascade",
+        "EntityRelay",
+        "RealmObservation",
+        "RealmShapeObservation",
+        "ChildSceneSet",
+    ];
+
+    /// Parse `pub struct NAME { … }` blocks into `(struct, Vec<(field name, field type)>)`.
+    /// Doc comments and attributes are skipped; the closing brace at column 0 ends a block.
+    fn declared_structs(source: &str) -> Vec<(String, Vec<(String, String)>)> {
+        let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
+        let mut open: Option<(String, Vec<(String, String)>)> = None;
+        for line in source.lines() {
+            if let Some(rest) = line.strip_prefix("pub struct ") {
+                let name = rest
+                    .split([' ', '{', '<', '('])
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                open = Some((name, Vec::new()));
+                continue;
+            }
+            let Some((_, fields)) = open.as_mut() else {
+                continue;
+            };
+            if line == "}" {
+                out.push(open.take().expect("a block was open"));
+                continue;
+            }
+            let trimmed = line.trim();
+            let Some(decl) = trimmed.strip_prefix("pub ") else {
+                continue; // a doc line, an attribute, or a private field
+            };
+            let Some((name, ty)) = decl.split_once(':') else {
+                continue;
+            };
+            fields.push((
+                name.trim().to_owned(),
+                ty.trim().trim_end_matches(',').to_owned(),
+            ));
+        }
+        out
+    }
+
+    /// Does this field state where a REALM is?
+    fn is_placement(name: &str, ty: &str) -> bool {
+        PLACEMENT_TYPES.iter().any(|t| ty.contains(t))
+            | PLACEMENT_NAMES.iter().any(|n| name.contains(n))
+    }
+
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/intershard.rs"),
+    )
+    .expect("the wire crate's own source is readable");
+    let structs = declared_structs(&source);
+
+    // ANTI-VACUITY (1): the scan really read the file, and really read fields.
+    assert!(
+        structs.len() >= 20,
+        "the struct scan found almost nothing — the parser drifted off the source: {structs:?}"
+    );
+    assert!(
+        structs.iter().all(|(_, fields)| !fields.is_empty()),
+        "a scanned struct came back field-less — the parser drifted: {structs:?}"
+    );
+
+    // ANTI-VACUITY (2), the POSITIVE CONTROL: the detector fires on the tombstones. If this ever
+    // goes quiet the assert below has stopped being able to fail.
+    let mut caught: Vec<&str> = structs
+        .iter()
+        .filter(|(name, fields)| {
+            TOMBSTONED.contains(&name.as_str()) & fields.iter().any(|(n, t)| is_placement(n, t))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    caught.sort_unstable();
+    assert_eq!(
+        caught,
+        vec![
+            "ChildSceneSet",
+            "ProxySceneSet",
+            "RealmCascade",
+            "RealmObservation",
+            "RealmShapeObservation",
+        ],
+        "the placement detector stopped seeing the placements the DEAD lanes still declare — \
+         the living-lane assert below would then pass vacuously. (The other two tombstones, \
+         `OccupantInterest` and `EntityRelay`, carry OCCUPANT poses rather than realm \
+         placements, and are rightly not caught here — they died for SL2, not for SL1.)"
+    );
+
+    // THE PIN: no LIVING payload states where a realm is.
+    let offenders: Vec<(String, String, String)> = structs
+        .iter()
+        .filter(|(name, _)| !TOMBSTONED.contains(&name.as_str()))
+        .flat_map(|(name, fields)| {
+            fields
+                .iter()
+                .filter(|(n, t)| is_placement(n, t))
+                .map(move |(n, t)| (name.clone(), n.clone(), t.clone()))
+        })
+        .collect();
+    assert_eq!(
+        offenders,
+        Vec::new(),
+        "a LIVING inter-shard message now carries a realm's placement. That is the hazard the \
+         SL1 self-placement filter used to catch on one lane; the filter was retired by the \
+         owner's Q3 amendment BECAUSE this could no longer happen. Find the local formulation, \
+         or take the SL6 ask to the owner (default NO)."
+    );
 }
 
 /// The NESTED positional pin for `GhostFlow` — the same reorder/deletion hole the outer

@@ -51,12 +51,11 @@ use vd_tests::frame_fixture::{
     FAR_OCCUPANT_FROM_PLANET_M, FAR_SYSTEM_FROM_GALAXY_M, NEAR_PLANET_FROM_STAR_M, WorkedExample,
 };
 use vd_tests::{
-    CHAIN_MID, CHAIN_TOP, DEST, FRAME_UNIVERSE_SEED, ORCH, SHARD, live_sagas, p1_client,
+    CHAIN_MID, CHAIN_TOP, DEST, FRAME_UNIVERSE_SEED, GATEWAY, ORCH, SHARD, live_sagas, p1_client,
     p1_cluster, p2_cluster_area_in_planet_in_system, p2_cluster_planet_in_system, plant_regions,
     plant_seed_neighbourhood, plant_seed_neighbourhood_with_movers, set_shard_subject_offset,
     set_shard_subject_pose_now, set_shard_subject_pose_now_with, walk_forward,
 };
-use vd_wire::channels::RealmSnapshotDatagram;
 use vd_wire::intershard::InterShardFlow;
 
 const CLIENT: NodeId = NodeId(100);
@@ -1870,14 +1869,10 @@ const CHAIN_STATION_ORBIT_R_M: f64 = 25.0;
 /// Its period, chosen so the station covers metres per tick at 20 Hz: the descent has to be measured on a
 /// value that is genuinely different from one datagram to the next.
 const CHAIN_STATION_PERIOD_S: f64 = 60.0;
-/// The whole distance the two levels subtract between them: `20 + 5`, and neither host holds both numbers.
-const CHAIN_DOWN_2_M: f64 = CHAIN_PLANET_FROM_STAR_M + CHAIN_AREA_FROM_PLANET_M;
-/// The slack allowed on a value that crossed two hosts. Two f64 subtractions in sequence are not bit-equal
-/// to one subtraction of their sum, so an exact compare would be measuring the order of operations. At
-/// these magnitudes the rounding is ~1e-14 m, while every defect this gate exists to catch is metres — a
-/// missing subtraction is 5 or 20, a doubled one is 25. A nanometre sits a million times above the noise
-/// and a billion times below the smallest real fault.
-const CHAIN_DOWN_TOL_M: f64 = NANOMETRE_M;
+// (The two-level descent constants — the 20 + 5 the two hosts used to subtract between them, and the
+// nanometre slack an f64 value crossing two hosts was allowed — died with the descent itself: window
+// lane Slice C2, minor 19. No level restates another level's scenery any more, so there is no
+// accumulated rounding to allow for.)
 
 /// The station's turn: circular, tilted and phase-shifted so all three components are non-zero (an
 /// on-axis fixture cannot tell a subtraction on the wrong axis from a correct one). The central mass is
@@ -1902,32 +1897,109 @@ fn station_orbit() -> OrbitalElements {
 /// This is wire truth: `InboundBox` holds exactly what the node drained from the fabric, so it says what
 /// reached that host rather than what some other host believes it sent. Sampled straight after
 /// `Topology::step`, before the next one overwrites it.
-fn cascades_delivered_to(topo: &mut Topology, node: NodeId) -> Vec<RealmSnapshotDatagram> {
-    with_shard(topo, node, |s| {
-        s.world_mut()
+/// The newest universe tick a WINDOW LEVEL crossing the SHARD→GATEWAY edge carries THIS tick —
+/// the leaf realm STATING ITS OWN authored rows straight to the connection plane, which since the
+/// Slice-C2 deletion is the only way any picture leaves a realm at all. Decoded exactly as the
+/// gateway decodes it, out of the gateway's own inbox: wire truth at that host.
+fn own_level_ticks_at_the_gateway_edge(topo: &mut Topology) -> Option<UniverseTick> {
+    with_shard(topo, GATEWAY, |g| {
+        g.world_mut()
             .resource::<vd_sim::runtime::InboundBox>()
             .0
             .iter()
             .filter_map(|m| match m {
                 vd_sim::io::Inbound::Wire {
-                    class: vd_sim::io::MsgClass::SignalDelta,
+                    class: vd_sim::io::MsgClass::RealmSnapshot,
                     bytes,
                     ..
-                } => match postcard::from_bytes::<InterShardFlow>(bytes) {
-                    Ok(InterShardFlow::RealmCascade(rc)) => {
-                        postcard::from_bytes(&rc.realm_snapshot_bytes).ok()
-                    }
+                } => match postcard::from_bytes::<vd_wire::session_flow::ShardToGateway>(bytes) {
+                    Ok(vd_wire::session_flow::ShardToGateway::WindowFrame { at, .. }) => Some(at),
                     _ => None,
                 },
+                _ => None,
+            })
+            .max()
+    })
+}
+
+/// Every body statement crossing the SHARD→GATEWAY edge this tick — `(stating shard, subject,
+/// statement)`. A realm's LOOK has exactly one lawful author since the deletion: the realm itself.
+#[allow(clippy::type_complexity)]
+fn window_bodies_at_the_gateway_edge(
+    topo: &mut Topology,
+) -> Vec<(NodeId, RealmId, vd_wire::session_flow::BodyStmt)> {
+    with_shard(topo, GATEWAY, |g| {
+        g.world_mut()
+            .resource::<vd_sim::runtime::InboundBox>()
+            .0
+            .iter()
+            .filter_map(|m| match m {
+                vd_sim::io::Inbound::Wire { from, bytes, .. } => {
+                    match postcard::from_bytes::<vd_wire::session_flow::ShardToGateway>(bytes) {
+                        Ok(vd_wire::session_flow::ShardToGateway::WindowBody {
+                            subject,
+                            stmt,
+                            ..
+                        }) => Some((*from, subject, stmt)),
+                        _ => None,
+                    }
+                }
                 _ => None,
             })
             .collect()
     })
 }
 
-/// What `node` AUTHORED for its own children at `tick`, in its own frame — the INPUT to the descent, read
-/// through the production expression at the exact instant the rows under test are stamped at. Sampling it
-/// at any other instant would measure the station's orbit rather than the conversion.
+/// EVERY TOMBSTONED SCENERY FRAME delivered into `node` this tick, by arm name — the measurement
+/// that says the four old inter-realm picture lanes are dead rather than merely quiet. A frame of
+/// any of them still DECODES (their discriminants are reserved forever), so this cannot pass
+/// vacuously through a decode failure.
+fn dead_scenery_into(topo: &mut Topology, node: NodeId) -> Vec<&'static str> {
+    with_shard(topo, node, |s| {
+        s.world_mut()
+            .resource::<vd_sim::runtime::InboundBox>()
+            .0
+            .iter()
+            .filter_map(|m| match m {
+                vd_sim::io::Inbound::Wire { bytes, .. } => {
+                    match postcard::from_bytes::<InterShardFlow>(bytes) {
+                        Ok(InterShardFlow::RealmCascade(_)) => Some("RealmCascade"),
+                        Ok(InterShardFlow::RealmObservation(_)) => Some("RealmObservation"),
+                        Ok(InterShardFlow::RealmShapeObservation(_)) => {
+                            Some("RealmShapeObservation")
+                        }
+                        Ok(InterShardFlow::ChildSceneSet(_)) => Some("ChildSceneSet"),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// The instant of the newest LEVEL inside the sealed statements `parent` currently holds for
+/// `child` — the Q2 relay's cargo, opened HERE (a test may look; the parent structurally never
+/// does: `vd-sim` deliberately never calls `open_relay_statements`).
+fn relay_level_stamp(topo: &mut Topology, parent: NodeId, child: RealmId) -> Option<UniverseTick> {
+    with_shard(topo, parent, |s| {
+        let held = s.world_mut().resource::<vd_sim::stub::RelayHeld>();
+        let bytes = held.statements_for(child)?;
+        vd_wire::session_flow::open_relay_statements(&bytes)
+            .ok()?
+            .into_iter()
+            .filter_map(|st| match st {
+                vd_wire::session_flow::RelayedStatement::Level { at, .. } => Some(at),
+                vd_wire::session_flow::RelayedStatement::Body { .. } => None,
+            })
+            .max()
+    })
+}
+
+/// What `node` AUTHORED for its own children at `tick`, in its own frame — the INPUT to any
+/// statement it makes, read through the production expression at the exact instant the rows under
+/// test are stamped at. Sampling it at any other instant would measure the world's orbit rather
+/// than the statement.
 fn authored_by(
     topo: &mut Topology,
     node: NodeId,
@@ -1945,198 +2017,129 @@ fn authored_by(
     })
 }
 
-/// One shard's cascade bookkeeping: rows it restated, rows it refused, datagrams it passed further down.
-fn cascade_counts(topo: &mut Topology, node: NodeId) -> (u64, u64, u64) {
-    with_shard(topo, node, |s| {
-        let st = s.world_mut().resource::<vd_sim::stub::StubStats>();
-        (
-            st.cascade_rows_converted,
-            st.cascade_rows_dropped,
-            st.realm_cascade_relayed,
-        )
-    })
-}
-
-/// THE ACCEPTANCE STORY GOING DOWN, on the production cascade path, over three hosts.
+/// THE ACCEPTANCE STORY THE DELETION REPLACES IT WITH, over the same three hosts.
 ///
-/// The star authors a turning station in its own frame. It subtracts the 20 it put its planet at and hands
-/// the planet a station measured from the PLANET's centre. The planet subtracts the 5 it put its area at
-/// and hands the area a station measured from the AREA's centre. The area accepts it and computes nothing
-/// at all — its `cascade_rows_converted` never leaves zero, which is what tells a leaf apart from a
-/// relaying level by measurement instead of by argument.
+/// The star used to author a turning station, subtract where it put its planet, and hand the planet
+/// a station measured from the PLANET's centre; the planet subtracted again and handed the area a
+/// station measured from the AREA's. Three processes, two subtractions, three moments of time mixed
+/// into one picture — and a level that had to OPEN and RE-STATE another level's scenery to pass it
+/// on.
 ///
-/// WHAT THIS REPLACES: the star's already-serialized bytes went down verbatim, in the STAR's frame, and
-/// were re-fanned to the client unchanged. So one client held two feeds measured in two different spaces —
-/// its own realm's, and its star's — and that is the whole reason a party downstream of every shard came
-/// to believe it had to compose the two itself.
+/// None of that happens any more (window lane Slice C2, minor 19). What this gate measures now is
+/// the thing that replaced it, and it measures both halves:
+///
+/// * THE ABSENCE, on the wire: across a long live window, not one frame of any of the four
+///   tombstoned scenery lanes is delivered into ANY of the three shards. Their discriminants are
+///   reserved forever, so such a frame would still DECODE — this cannot pass by a decode failure.
+/// * THE PRESENCE, on the living lanes: the leaf realm states its OWN authored rows straight to the
+///   connection plane, once per tick, at its own stamp; and its self-authored statements climb one
+///   hop up SEALED, for the parent to forward without ever reading them.
 #[test]
-fn the_authored_world_descends_one_subtraction_per_level_and_the_leaf_computes_nothing() {
+fn the_authored_world_no_longer_descends_and_each_level_states_only_itself() {
     let fabric = FaultFabric::new(4242, 2);
     let movers = BTreeMap::from([(CHAIN_STATION, station_orbit())]);
     let (mut topo, subject) = boot_the_chain_with(&fabric, &movers);
     let at = DVec3::new(CHAIN_OCCUPANT_FROM_AREA_M, 0.0, 0.0);
 
-    // Run the real chain and collect what each level was DELIVERED. Two distinct arrivals at the bottom is
-    // the minimum that can show the value is alive rather than a constant.
-    let mut at_the_leaf: Vec<RealmSnapshotDatagram> = Vec::new();
-    let mut ids_at_the_middle: BTreeSet<(u64, u64)> = BTreeSet::new();
-    let mut ids_at_the_leaf: BTreeSet<(u64, u64)> = BTreeSet::new();
-    let arrived = step_until(&mut topo, 900, |t| {
+    // Run the real chain until BOTH living lanes are up: the leaf's own level is crossing the
+    // gateway edge, and its sealed statements have climbed to its parent. Every tick, sweep all
+    // three hosts' inboxes for a frame of any dead lane.
+    let mut dead_seen: BTreeSet<&'static str> = BTreeSet::new();
+    let mut edge_stamps: BTreeSet<u64> = BTreeSet::new();
+    let running = step_until(&mut topo, 900, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
-        for d in cascades_delivered_to(t, CHAIN_MID) {
-            ids_at_the_middle.insert((d.frame_id, d.universe_tick.0));
+        for node in [CHAIN_TOP, CHAIN_MID, SHARD] {
+            dead_seen.extend(dead_scenery_into(t, node));
         }
-        // Followed PER BOX: the leaf also receives the planet's OWN cascade (its sibling area's row)
-        // at the same instants, so the star's world is the datagrams carrying the STATION row.
-        for d in cascades_delivered_to(t, SHARD) {
-            if d.realms.iter().any(|r| r.realm == CHAIN_STATION)
-                && at_the_leaf
-                    .last()
-                    .is_none_or(|p| p.universe_tick != d.universe_tick)
-            {
-                ids_at_the_leaf.insert((d.frame_id, d.universe_tick.0));
-                at_the_leaf.push(d);
-            }
+        if let Some(seen) = own_level_ticks_at_the_gateway_edge(t) {
+            edge_stamps.insert(seen.0);
         }
-        at_the_leaf.len() >= 2
+        // Two DISTINCT stamps at the edge is the minimum that shows a live feed rather than one
+        // repeated value, and the relay must have reached the level above.
+        (edge_stamps.len() >= 2) & relay_level_stamp(t, CHAIN_MID, CHAIN_AREA).is_some()
     });
     assert!(
-        arrived,
-        "the star's authored world reaches the realm the player is standing in, two levels below it: \
-         {} arrival(s)",
-        at_the_leaf.len(),
+        running,
+        "the leaf states its own level to the connection plane and its sealed statements climb one \
+         hop: {} distinct edge stamp(s)",
+        edge_stamps.len(),
     );
 
-    // ONE MEANING, ONE SPACE: every row the leaf was handed is measured from the leaf's own centre.
-    for d in &at_the_leaf {
-        for r in &d.realms {
+    // ---- THE ABSENCE. Four lanes, three hosts, the whole warm-up window.
+    assert_eq!(
+        dead_seen,
+        BTreeSet::new(),
+        "a TOMBSTONED scenery lane is still speaking between realms: {dead_seen:?}. Their \
+         discriminants decode forever, so this is a measurement of silence, not of garbage.",
+    );
+
+    // ---- THE PRESENCE, half 1: the leaf's own rows, at the leaf's own stamp, against what the
+    // leaf itself authored at that instant. Nobody subtracted anything: the value is the authored
+    // one, verbatim.
+    let level = with_shard(&mut topo, GATEWAY, |g| {
+        g.world_mut()
+            .resource::<vd_sim::runtime::InboundBox>()
+            .0
+            .iter()
+            .find_map(|m| match m {
+                vd_sim::io::Inbound::Wire { bytes, .. } => {
+                    match postcard::from_bytes::<vd_wire::session_flow::ShardToGateway>(bytes) {
+                        Ok(vd_wire::session_flow::ShardToGateway::WindowFrame {
+                            at, rows, ..
+                        }) => Some((at, rows)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+    });
+    if let Some((at, rows)) = level {
+        let authored = authored_by(&mut topo, SHARD, at);
+        for r in &rows {
             assert_eq!(
-                r.pose.frame, CHAIN_AREA_FRAME,
-                "the value's own label says which space it is measured in, and for a row arriving at \
-                 the bottom of the chain that can only be the bottom's own frame",
-            );
-            assert_ne!(
-                r.frame, r.pose.frame,
-                "a row whose head equals its tail is a realm claiming to be its own parent; the \
-                 recipient's own row is dropped precisely so this cannot happen",
+                r.pose.pos.offset(),
+                authored[&r.realm].pos.offset(),
+                "the leaf states its own authored row VERBATIM — no level subtracts for anyone now",
             );
         }
-    }
-
-    // THE NUMBER, at each of the two arrivals, against what the STAR authored at that same instant.
-    for d in &at_the_leaf {
-        let row = d
-            .realms
-            .iter()
-            .find(|r| r.realm == CHAIN_STATION)
-            .expect("the star's turning station is what descends the chain");
-        let from_the_star = authored_by(&mut topo, CHAIN_TOP, d.universe_tick)[&CHAIN_STATION]
-            .pos
-            .offset();
-        let subtracted = DVec3::new(CHAIN_DOWN_2_M, 0.0, 0.0);
-        let got = row.pose.pos.offset();
         println!(
-            "[chain down] at {:?}  star authored {from_the_star:?}  leaf was handed {got:?}  \
-             (two subtractions totalling {CHAIN_DOWN_2_M} m)",
-            d.universe_tick,
+            "[no descent] the leaf stated {} own row(s) at {at:?}",
+            rows.len()
         );
-        assert!(
-            (got - (from_the_star - subtracted)).length() <= CHAIN_DOWN_TOL_M,
-            "the station arrives at the area measured from the AREA's centre: expected {:?}, got \
-             {got:?}. Off by {CHAIN_PLANET_FROM_STAR_M} means the star shipped without subtracting; off \
-             by {CHAIN_AREA_FROM_PLANET_M} means the planet re-relayed without subtracting; off by \
-             {CHAIN_DOWN_2_M} the other way means a level subtracted a number it does not hold, or one \
-             was counted twice.",
-            from_the_star - subtracted,
-        );
-        // ANTI-VACUITY: the subtraction genuinely moved the number, on more than one axis.
-        assert!((got - from_the_star).length() > 1.0);
-        assert!(from_the_star.y.abs() > 1.0 && from_the_star.z.abs() > 1.0);
     }
-    // ANTI-VACUITY: the station is genuinely turning, so this is a live feed and not one repeated value.
-    let station_at = |d: &RealmSnapshotDatagram| {
-        d.realms
-            .iter()
-            .find(|r| r.realm == CHAIN_STATION)
-            .expect("the station row")
-            .pose
-            .pos
-            .offset()
-    };
-    let travelled = (station_at(&at_the_leaf[1]) - station_at(&at_the_leaf[0])).length();
-    assert!(
-        travelled > CHAIN_DOWN_TOL_M,
-        "the station moved between the two arrivals: {travelled} m",
-    );
 
-    // WHO DID THE ARITHMETIC. Both levels above subtract; the level the player stands on does not, ever.
-    let (top_converted, top_dropped, top_relayed) = cascade_counts(&mut topo, CHAIN_TOP);
-    let (mid_converted, mid_dropped, mid_relayed) = cascade_counts(&mut topo, CHAIN_MID);
-    let (leaf_converted, leaf_dropped, leaf_relayed) = cascade_counts(&mut topo, SHARD);
+    // ---- THE PRESENCE, half 2: the Q2 relay climbs, SEALED, one hop per level. The parent holds
+    // the child's own words; it never restates them, and it structurally cannot (this test opens
+    // the seal; `vd-sim` never calls the opener at all).
+    let relayed_to_planet = relay_level_stamp(&mut topo, CHAIN_MID, CHAIN_AREA)
+        .expect("the area's seal reached the planet");
+    let area_now = universe_now(&mut topo, SHARD);
+    assert!(
+        relayed_to_planet <= area_now,
+        "the relayed level speaks at or before the child's own now: {relayed_to_planet:?} vs {area_now:?}",
+    );
     println!(
-        "[chain down] rows restated: star {top_converted}, planet {mid_converted}, area \
-         {leaf_converted}; datagrams passed further down: planet {mid_relayed}"
-    );
-    assert!(top_converted > 0, "the star restates for its planet");
-    assert!(mid_converted > 0, "the planet restates for its area");
-    assert_eq!(
-        leaf_converted, 0,
-        "THE LEAF ACCEPTS AND COMPUTES NOTHING — it was handed numbers already measured from its own \
-         centre, and a level that had to convert on receipt would be a level being told about a space \
-         it has no business knowing",
-    );
-    assert!(
-        mid_relayed > 0,
-        "the planet passes the star's world on down"
-    );
-    assert_eq!(leaf_relayed, 0, "the leaf has nobody below it");
-    assert_eq!(top_relayed, 0, "the star receives no cascade of its own");
-    assert_eq!((top_dropped, mid_dropped, leaf_dropped), (0, 0, 0));
-
-    // THE frame_id GUARD, which replaces a structural guarantee with a checkable one. Restating the values
-    // means opening the datagram, so a level COULD now stamp its own counter on someone else's rows — and
-    // the client's staleness gate is a per-realm high-water fed by exactly one authoring shard's counter,
-    // so it would ratchet those boxes past anything their author will produce for thousands of ticks and
-    // freeze them for good. Every (counter, instant) pair the bottom saw must be one the middle saw first.
-    assert!(ids_at_the_leaf.len() > 1 && ids_at_the_middle.len() > 1);
-    assert!(
-        ids_at_the_leaf.is_subset(&ids_at_the_middle),
-        "no level minted a frame_id of its own on the way down: bottom saw {ids_at_the_leaf:?}, \
-         middle saw {ids_at_the_middle:?}",
+        "[no descent] the area's SEALED statements sit at the planet, stamped {relayed_to_planet:?} \
+         (the area's own clock reads {area_now:?})",
     );
 
-    // THE RE-SERIALIZE COST, counted over a real window rather than reasoned about. The star used to
-    // serialize its authored world ONCE and hand the same refcounted body to every active child; each child
-    // now gets its own datagram, because each child gets different numbers. That is the trade the ground
-    // rule makes, and this is the size of it: datagrams per tick per active child, at each level.
+    // ---- AND THE ABSENCE HOLDS OVER A SETTLED WINDOW, not just a warm-up: a lane that woke up
+    // only once the chain settled would be invisible above.
     const WINDOW_TICKS: u64 = 100;
-    let (top_rows_before, _, _) = cascade_counts(&mut topo, CHAIN_TOP);
-    let (mid_rows_before, _, mid_relayed_before) = cascade_counts(&mut topo, CHAIN_MID);
-    let (mut to_mid, mut to_leaf) = (0u64, 0u64);
+    let mut late_dead: BTreeSet<&'static str> = BTreeSet::new();
     for _ in 0..WINDOW_TICKS {
         topo.step();
         set_shard_subject_pose_now(&mut topo, SHARD, subject, CHAIN_AREA_FRAME, at);
-        to_mid += cascades_delivered_to(&mut topo, CHAIN_MID).len() as u64;
-        to_leaf += cascades_delivered_to(&mut topo, SHARD).len() as u64;
+        for node in [CHAIN_TOP, CHAIN_MID, SHARD] {
+            late_dead.extend(dead_scenery_into(&mut topo, node));
+        }
     }
-    let (top_rows_after, _, _) = cascade_counts(&mut topo, CHAIN_TOP);
-    let (mid_rows_after, _, mid_relayed_after) = cascade_counts(&mut topo, CHAIN_MID);
-    #[allow(clippy::cast_precision_loss)] // counts in the hundreds
-    let per = |n: u64| n as f64 / WINDOW_TICKS as f64;
-    println!(
-        "[chain down cost] over {WINDOW_TICKS} ticks: star restated {:.2} row/tick, planet restated \
-         {:.2} row/tick and re-serialized {:.2} datagram/tick; delivered {:.2} datagram/tick to the \
-         planet and {:.2} to the area",
-        per(top_rows_after - top_rows_before),
-        per(mid_rows_after - mid_rows_before),
-        per(mid_relayed_after - mid_relayed_before),
-        per(to_mid),
-        per(to_leaf),
+    assert_eq!(
+        late_dead,
+        BTreeSet::new(),
+        "a dead scenery lane woke up on a settled chain: {late_dead:?}",
     );
-    assert!(
-        to_leaf > 0,
-        "the window observed the chain actually running"
-    );
+    println!("[no descent] {WINDOW_TICKS} settled ticks, zero inter-realm scenery frames anywhere");
 }
 
 /// The COST of the liveness chain, measured rather than assumed (Step 5 rewrite): what one beat costs
@@ -2317,199 +2320,192 @@ const LOSSY_LINK_DROP_P: f64 = 0.5;
 // gateway, which is the last thing a shard says before the router touches it.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Where the seed forest puts the AREA inside its planet — the number ONLY THE PLANET holds.
-const CHAIN_AREA_FROM_PLANET_M2: f64 = 5.0;
-/// Where it puts the PLANET inside its star — the number ONLY THE STAR holds.
-const CHAIN_PLANET_FROM_STAR_M2: f64 = 20.0;
-/// The half-extent of that area box, so "the player is inside the box they are standing in" is checked
-/// against the box's real size rather than against a tolerance picked to make the gate pass.
-const CHAIN_AREA_HALF_M: f64 = 3.0;
+// (The three per-level placement constants that anchored this block's centre arithmetic died with
+// the field — Slice C1, window_lane.md §2.4: a shape carries no position, so there is no
+// subtraction left to assert against them. The chain's placements still live where they always
+// did: in the seed forest the fixture boots.)
 
-/// Every `ProxySceneSet` a shard was DELIVERED on its last step, read out of its own inbox — the reliable
-/// shape lane's wire truth at that host, sampled the same way the cascade gate samples the pose lane.
-fn scene_sets_delivered_to(
-    topo: &mut Topology,
-    node: NodeId,
-) -> Vec<vd_wire::intershard::ChildSceneSet> {
-    with_shard(topo, node, |s| {
-        s.world_mut()
-            .resource::<vd_sim::runtime::InboundBox>()
-            .0
-            .iter()
-            .filter_map(|m| match m {
-                vd_sim::io::Inbound::Wire {
-                    class: vd_sim::io::MsgClass::Saga,
-                    bytes,
-                    ..
-                } => match postcard::from_bytes::<InterShardFlow>(bytes) {
-                    Ok(InterShardFlow::ChildSceneSet(p)) => Some(p),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect()
-    })
-}
-
-/// THE CLIENT EDGE: every realm-scene delta the LEAF shard put on the wire to the gateway, read out of the
-/// gateway's own inbox. This is the last thing a shard says about the world before anything downstream of
-/// it is involved at all, which is exactly what this whole arc is about.
-fn scene_deltas_at_the_client_edge(
-    topo: &mut Topology,
-) -> Vec<(AccountId, Vec<vd_wire::channels::RealmShape>, Vec<RealmId>)> {
-    with_shard(topo, vd_tests::GATEWAY, |s| {
-        s.world_mut()
-            .resource::<vd_sim::runtime::InboundBox>()
-            .0
-            .iter()
-            .filter_map(|m| match m {
-                vd_sim::io::Inbound::Wire {
-                    from,
-                    class: vd_sim::io::MsgClass::Control,
-                    bytes,
-                } if *from == SHARD => {
-                    match postcard::from_bytes::<vd_wire::session_flow::ShardToGateway>(bytes) {
-                        Ok(vd_wire::session_flow::ShardToGateway::RealmSceneDelta {
-                            observer,
-                            added,
-                            removed,
-                        }) => Some((observer, added, removed)),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            })
-            .collect()
-    })
-}
-
-/// One shard's shape-lane bookkeeping (Step 5 slice C): outlines restated, outlines refused, sets
-/// accepted from above, sets refused as addressed to somebody else, live bits with no roster entry.
-fn scene_counts(topo: &mut Topology, node: NodeId) -> (u64, u64, u64, u64, u64) {
-    with_shard(topo, node, |s| {
-        let st = s.world_mut().resource::<vd_sim::stub::StubStats>();
-        (
-            st.proxy_scene_shapes_restated,
-            st.proxy_scene_shapes_dropped,
-            st.child_scene_received,
-            st.child_scene_misrouted,
-            st.child_scene_unaddressable,
-        )
-    })
-}
-
-/// THE ACCEPTANCE STORY FOR THE BOXES, over the same three hosts as the pose lane.
+/// THE ACCEPTANCE STORY FOR THE BOXES, over the same three hosts — inverted by the deletion.
 ///
-/// A box the STAR authored (the planet the player's realm hangs off) and a box the PLANET authored (the
-/// area the player is standing in) both arrive at the AREA shard's client edge measured from the AREA's
-/// centre — two different authoring parties, two different lengths of chain, one space at the bottom. And
-/// the player's own pose, which the area shard has always held in its own frame and never converts, lands
-/// in the same integer cell as the box it is standing in.
+/// A box the STAR authored and a box the PLANET authored used to arrive at the AREA shard, restated
+/// once per level into the AREA's space. The lane that carried them needed a runtime filter to stop
+/// it handing the area its OWN placement, sign-flipped: the SL1 SELF-PLACEMENT FILTER.
 ///
-/// WHAT THIS REPLACES. The reflect was addressed at the shard that relayed the occupant up, and stopped
-/// there. On this chain that is the PLANET, which hosts no client for this account — so the star's boxes
-/// were counted as strays and thrown away, and the levels below were never told. The measurement of that
-/// is in this gate too: the planet's stray count stays at zero and its accept count climbs instead.
+/// The lane is deleted and the filter with it, by the owner's Q3 amendment (2026-08-16,
+/// `docs/design/window_lane.md` §5 RULINGS) — retirement BY AMENDMENT, not erosion, because the
+/// hazard itself ceases to exist. This gate is the END-TO-END half of that claim (the compile-level
+/// half is `crates/wire/tests/intershard_closed.rs`
+/// `no_living_inter_shard_payload_carries_a_realm_placement_or_a_centre`): across a long live
+/// window on a real three-level chain, NOTHING addressed INTO a realm names that realm, and nothing
+/// addressed into a realm carries any realm's placement at all.
+///
+/// It can fail: the sweep reads every byte delivered into each host and decodes it as the shard
+/// dispatch does, and the tombstoned arms still decode.
 #[test]
-fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_player_stands_in() {
+fn no_message_into_a_realm_names_that_realm_or_carries_a_placement() {
     let fabric = FaultFabric::new(4242, 2);
     let (mut topo, subject) = boot_the_chain(&fabric);
     let at = DVec3::new(CHAIN_OCCUPANT_FROM_AREA_M, 0.0, 0.0);
 
-    // Run the real chain and record, per hop, the FIRST tick anything arrived — the latency this
-    // hop-by-hop descent costs is the difference between them, and it is a measurement, not a prediction.
-    // Traced PER BOX, not per hop: the two levels start reflecting at very different times (the planet
-    // has retained the player long before the star has heard of them at all), so a first-anything-arrived
-    // stamp would measure how the chain warmed up rather than what a hop costs. Following the ONE box the
-    // star authored down every leg is the measurement the plan asks for.
-    let (mut t_mid, mut t_leaf, mut t_edge) = (None, None, None);
-    let (mut t_area_leaf, mut t_area_edge) = (None, None);
-    // The client edge is a STREAM of add/remove deltas, so the scene is what reconciling them leaves —
-    // exactly what the party at the other end holds. Reading one message would measure message boundaries.
-    // The box traced down every leg is the SIBLING PLANET — the star-authored box the area is entitled
-    // to see. (The planet's own box no longer descends at all: restated one hop down it would state the
-    // area's own placement, sign-flipped — the SL1 breach this gate used to assert as a feature.)
-    let mut scene: BTreeMap<RealmId, vd_wire::channels::RealmShape> = BTreeMap::new();
-    let arrived = step_until(&mut topo, 900, |t| {
+    // The three hosts and the realm each one IS — "a message never tells its receiver about itself".
+    let hosts = [
+        (CHAIN_TOP, SYSTEM),
+        (CHAIN_MID, PLANET),
+        (SHARD, CHAIN_AREA),
+    ];
+
+    // THE CLASSIFIER, named so the sweep below and the POSITIVE CONTROL beneath it run the SAME
+    // rule. Returns the offences one delivered frame commits against its receiver, and records
+    // which LIVING picture lane it was (so a silent sweep cannot pass as a clean one).
+    fn offences_of(
+        node: NodeId,
+        own_realm: RealmId,
+        flow: &InterShardFlow,
+        kinds: &mut BTreeSet<&'static str>,
+    ) -> Vec<String> {
+        match flow {
+            // ★ THE FOUR DEAD SCENERY LANES. Each one either carried a realm's placement or
+            // another realm's look; each one is now producer-less.
+            InterShardFlow::RealmCascade(_) => vec![format!("{node:?} received a RealmCascade")],
+            InterShardFlow::RealmObservation(_) => {
+                vec![format!("{node:?} received a RealmObservation")]
+            }
+            InterShardFlow::RealmShapeObservation(_) => {
+                vec![format!("{node:?} received a RealmShapeObservation")]
+            }
+            InterShardFlow::ChildSceneSet(cs) => vec![format!(
+                "{node:?} received a ChildSceneSet naming {:?}",
+                cs.realms.iter().map(|r| r.realm).collect::<Vec<_>>()
+            )],
+            // ★ THE ONE LIVING PICTURE FRAME a realm receives: its child's SEALED statements. It
+            // is about the CHILD, never about the receiver, and the parent never opens it. Opened
+            // HERE only to prove that: no statement inside names the receiving realm.
+            InterShardFlow::WindowRelay(wr) => {
+                kinds.insert("WindowRelay");
+                let named: Vec<RealmId> =
+                    vd_wire::session_flow::open_relay_statements(&wr.statements)
+                        .expect("a sealed batch decodes")
+                        .into_iter()
+                        .flat_map(|st| match st {
+                            vd_wire::session_flow::RelayedStatement::Level { rows, .. } => {
+                                rows.into_iter().map(|r| r.realm).collect::<Vec<_>>()
+                            }
+                            vd_wire::session_flow::RelayedStatement::Body { subject, .. } => {
+                                vec![subject]
+                            }
+                        })
+                        .collect();
+                if named.contains(&own_realm) {
+                    vec![format!(
+                        "{node:?} was told about ITSELF ({own_realm:?}) inside a relay: {named:?}"
+                    )]
+                } else {
+                    Vec::new()
+                }
+            }
+            // The SL7 occupancy bit: one child coord, a fence and a tick. No geometry.
+            InterShardFlow::ChildLive(_) => {
+                kinds.insert("ChildLive");
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// A lineage coord for the chain's PLANET — the routing key a relay from the planet carries.
+    fn planet_coord() -> vd_core::realm_coord::RealmCoord {
+        vd_sim::stub::StubConfig::root_coord(SYSTEM)
+            .child(vd_core::worldgen::level_of(PLANET).expect("a seed-lineage planet"))
+    }
+
+    // ★ THE POSITIVE CONTROL, before the sweep: a relay whose statements DO name the receiver is
+    // caught. Without this, a sweep that found nothing would be indistinguishable from a rule that
+    // can no longer find anything.
+    {
+        let mut kinds = BTreeSet::new();
+        let planted = InterShardFlow::WindowRelay(vd_wire::intershard::WindowRelay {
+            child: planet_coord(),
+            realm_fence: vd_core::Fence(1),
+            statements: vd_wire::session_flow::seal_relay_statements(&[
+                vd_wire::session_flow::RelayedStatement::Body {
+                    subject: CHAIN_AREA, // the RECEIVER's own realm — the forbidden sentence
+                    stmt: vd_wire::session_flow::BodyStmt::SelfLook { bag: vec![1, 2] },
+                    authored_at: UniverseTick(1),
+                },
+            ]),
+        });
+        assert_eq!(
+            offences_of(SHARD, CHAIN_AREA, &planted, &mut kinds).len(),
+            1,
+            "the detector must catch a realm being told about itself — otherwise the sweep below \
+             proves nothing"
+        );
+        let clean = InterShardFlow::ChildLive(vd_wire::intershard::ChildLive {
+            child: planet_coord(),
+            fence: vd_core::Fence(1),
+            at: UniverseTick(1),
+        });
+        assert!(
+            offences_of(SHARD, CHAIN_AREA, &clean, &mut kinds).is_empty(),
+            "and it must not fire on the occupancy bit — the sweep would then never be silent"
+        );
+    }
+
+    // Warm the chain to steady state first: the bit has climbed both legs and the leaf is stating
+    // its own level to the connection plane, so the sweep below runs over a LIVE cluster.
+    let running = step_until(&mut topo, 900, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
-        let now = t.tick().0;
-        let holds = |sets: &[vd_wire::intershard::ChildSceneSet], realm: RealmId| {
-            sets.iter()
-                .any(|p| p.realms.iter().any(|s| s.realm == realm))
-        };
-        let to_mid = scene_sets_delivered_to(t, CHAIN_MID);
-        let to_leaf = scene_sets_delivered_to(t, SHARD);
-        if holds(&to_mid, CHAIN_PLANET2) {
-            t_mid = t_mid.or(Some(now));
-        }
-        if holds(&to_leaf, CHAIN_PLANET2) {
-            t_leaf = t_leaf.or(Some(now));
-        }
-        if holds(&to_leaf, CHAIN_AREA) {
-            t_area_leaf = t_area_leaf.or(Some(now));
-        }
-        for (_, added, removed) in scene_deltas_at_the_client_edge(t) {
-            for s in added {
-                if s.realm == CHAIN_PLANET2 {
-                    t_edge = t_edge.or(Some(now));
-                }
-                if s.realm == CHAIN_AREA {
-                    t_area_edge = t_area_edge.or(Some(now));
-                }
-                scene.insert(s.realm, s);
-            }
-            for r in removed {
-                scene.remove(&r);
-            }
-        }
-        scene.len() >= 3
+        child_bit(t, CHAIN_TOP, PLANET).is_some() & own_level_ticks_at_the_gateway_edge(t).is_some()
     });
+    assert!(running, "the chain is live before the sweep runs");
+
+    const SWEEP_TICKS: u64 = 150;
+    let mut inbound_kinds: BTreeSet<&'static str> = BTreeSet::new();
+    let mut offences: Vec<String> = Vec::new();
+    let mut frames_seen = 0u64;
+    for _ in 0..SWEEP_TICKS {
+        topo.step();
+        set_shard_subject_pose_now(&mut topo, SHARD, subject, CHAIN_AREA_FRAME, at);
+        for (node, own_realm) in hosts {
+            let inbound: Vec<Vec<u8>> = with_shard(&mut topo, node, |s| {
+                s.world_mut()
+                    .resource::<vd_sim::runtime::InboundBox>()
+                    .0
+                    .iter()
+                    .filter_map(|m| match m {
+                        vd_sim::io::Inbound::Wire { bytes, .. } => Some(bytes.to_vec()),
+                        _ => None,
+                    })
+                    .collect()
+            });
+            for bytes in inbound {
+                let Ok(flow) = postcard::from_bytes::<InterShardFlow>(&bytes) else {
+                    continue; // not an inter-shard frame (the gateway/client lanes ride other types)
+                };
+                frames_seen += 1;
+                offences.extend(offences_of(node, own_realm, &flow, &mut inbound_kinds));
+            }
+        }
+    }
+    assert!(frames_seen > 0, "the sweep read real traffic (non-vacuous)");
     assert!(
-        arrived,
-        "the star's sibling-planet box, the planet's sibling-area box and the room itself all reach \
-         the client edge of the realm the player is standing in: scene {scene:?}",
+        inbound_kinds.contains("ChildLive") & inbound_kinds.contains("WindowRelay"),
+        "the sweep saw BOTH living inter-realm lanes, so its silence about the dead ones means \
+         something: saw {inbound_kinds:?}",
+    );
+    assert_eq!(
+        offences,
+        Vec::<String>::new(),
+        "a realm was told about another realm's look, or about itself. The SL1 self-placement \
+         filter was retired (owner Q3, 2026-08-16) BECAUSE this could no longer happen.",
+    );
+    println!(
+        "[no self-placement] {SWEEP_TICKS} ticks, 3 hosts, {frames_seen} inter-shard frames read; \
+         inbound picture lanes seen: {inbound_kinds:?}; zero offences",
     );
 
-    // ONE MEANING, ONE SPACE — every box the client is handed, measured from the player's own realm.
-    let drawn: BTreeMap<RealmId, DVec3> = scene
-        .values()
-        .map(|s| (s.realm, s.center.offset()))
-        .collect();
-    println!("[boxes down] client edge: {drawn:?}");
-    assert_eq!(
-        drawn[&CHAIN_AREA],
-        DVec3::ZERO,
-        "the box the player is STANDING IN is measured from its own centre, which is the origin. \
-         {CHAIN_AREA_FROM_PLANET_M2} means the planet reflected without subtracting.",
-    );
-    // THE SL1 INVERSION (finding 17): the planet's own box does NOT reach the area — not culled,
-    // UNCOMPUTABLE. The only number that could place it here is −(the area's placement inside the
-    // planet), and telling the area that is telling it where it sits — the one thing a realm may
-    // never learn. This assert used to read `drawn[&PLANET] == −5` and asserted the breach.
-    assert!(
-        !drawn.contains_key(&PLANET),
-        "no box for the realm the player's room sits INSIDE — nobody is entitled to compute it (SL1)",
-    );
-    assert_eq!(
-        drawn[&CHAIN_PLANET2],
-        CHAIN_PLANET2_FROM_STAR
-            - DVec3::new(CHAIN_PLANET_FROM_STAR_M2, 0.0, 0.0)
-            - DVec3::new(CHAIN_AREA_FROM_PLANET_M2, 0.0, 0.0),
-        "the box the STAR authored (the sibling planet) arrives measured from the AREA's centre — \
-         two subtractions by two hosts. Off by {CHAIN_PLANET_FROM_STAR_M2} means the star reflected \
-         without subtracting; off by {CHAIN_AREA_FROM_PLANET_M2} means the planet passed it on \
-         without subtracting; a number the size of {CHAIN_DOWN_2_M} the other way means a level \
-         subtracted something it does not hold.",
-    );
-    assert_eq!(
-        drawn[&CHAIN_AREA2],
-        CHAIN_AREA2_FROM_PLANET - DVec3::new(CHAIN_AREA_FROM_PLANET_M2, 0.0, 0.0),
-        "the box the PLANET authored (the sibling area) arrives through its one subtraction",
-    );
-
-    // THE BOX AND THE THING STANDING IN IT, on one point by construction. The area shard has always held
-    // the player's pose in its own frame and converts nothing; the box just arrived there through two
-    // subtractions made by two other hosts. They have to agree, and to the integer cell they do.
+    // The player's pose never converted at its own shard — the half of the old assert that
+    // survives everything: the shard holds the rider in the room's own frame, verbatim.
     let pose = with_shard(&mut topo, SHARD, |s| {
         s.world_mut()
             .resource::<vd_sim::stub::Dots>()
@@ -2520,217 +2516,59 @@ fn the_authored_boxes_descend_one_subtraction_per_level_into_the_space_the_playe
             .pose
     });
     assert_eq!(pose.frame, CHAIN_AREA_FRAME, "and it never converted it");
-    assert_eq!(
-        pose.pos.cell(),
-        vd_core::pose::LatticePos::local(drawn[&CHAIN_AREA]).cell(),
-        "the player and the box they are inside sit in the same integer cell",
-    );
-    assert!(
-        (pose.pos.offset() - drawn[&CHAIN_AREA]).length() < CHAIN_AREA_HALF_M,
-        "and the player is inside that box: {:?} against a box of half-extent \
-         {CHAIN_AREA_HALF_M} at {:?}",
-        pose.pos.offset(),
-        drawn[&CHAIN_AREA],
-    );
-
-    // THE PARENT LINK SURVIVES THE DESCENT. Restating a centre must not disturb which realm a box hangs
-    // off — the receiver builds its nesting from that link alone and has no hierarchy of its own to fall
-    // back on. Each box either arrives with its parent's box beside it, or names a realm the session's
-    // own realm hangs off, which its login registry already gave it.
-    let ancestry: BTreeSet<RealmId> =
-        vd_core::worldgen::ancestor_realms(&vd_physics::worldgen::realm_regions_for(0), CHAIN_AREA)
-            .into_iter()
-            .collect();
-    for s in scene.values() {
-        let Some(p) = s.parent else { continue };
-        assert!(
-            drawn.contains_key(&p) || ancestry.contains(&p),
-            "{:?} hangs off {p:?}, which is neither in the scene nor a realm the session already \
-             holds — an orphan must be refused, never rooted at an assumed origin",
-            s.realm,
-        );
-    }
-
-    // WHO DID THE ARITHMETIC, and where the old jump was losing everything.
-    let (top_r, top_d, top_rel, top_mis, top_un) = scene_counts(&mut topo, CHAIN_TOP);
-    let (mid_r, mid_d, mid_rel, mid_mis, mid_un) = scene_counts(&mut topo, CHAIN_MID);
-    let (leaf_r, leaf_d, leaf_rel, leaf_mis, leaf_un) = scene_counts(&mut topo, SHARD);
-    println!(
-        "[boxes down] outlines restated: star {top_r}, planet {mid_r}, area {leaf_r}; sets accepted \
-         from above: planet {mid_rel}, area {leaf_rel}; mis-addressed: star {top_mis}, planet \
-         {mid_mis}, area {leaf_mis}"
-    );
-    assert!(top_r > 0, "the star restates for its planet");
-    assert!(mid_r > 0, "the planet restates for its area");
-    assert_eq!(
-        leaf_r, 0,
-        "THE LEAF RESTATES NOTHING — it was handed boxes already measured from its own centre",
-    );
-    assert!(
-        mid_rel > 0,
-        "the planet takes the star's boxes on for the hop below instead of drawing or dropping them",
-    );
-    assert!(
-        leaf_rel > 0,
-        "THE LEAF HOLDS A SET FROM ABOVE TOO (slice C's recursion): the realm the player stands in \
-         folds its surroundings into the client scene from the one from-above holding",
-    );
-    assert_eq!(
-        (top_mis, mid_mis, leaf_mis),
-        (0, 0, 0),
-        "nothing is dropped as mis-addressed anywhere on the chain — the planet is exactly where the \
-         old per-occupant jump used to lose the star's whole world",
-    );
-    assert_eq!((top_d, mid_d, leaf_d), (0, 0, 0), "nothing refused");
-    assert_eq!(
-        (top_un, mid_un, leaf_un),
-        (0, 0, 0),
-        "no live bit outlived its roster entry"
-    );
-    assert_eq!(
-        top_rel, 0,
-        "the root has no parent, so nothing arrives from above it"
-    );
-
-    // THE PRICE OF GOING HOP BY HOP, in ticks, on the real topology. The reflect used to be one jump from
-    // the authoring shard straight to the shard that relayed the occupant; it is now one delivery per
-    // level, and that is what the ground rule costs on this lane.
-    let (t_mid, t_leaf, t_edge) = (
-        t_mid.expect("the star's sibling-planet box reached the planet"),
-        t_leaf.expect("the star's sibling-planet box reached the area"),
-        t_edge.expect("the star's sibling-planet box reached the client edge"),
-    );
-    let (t_area_leaf, t_area_edge) = (
-        t_area_leaf.expect("the planet's box reached the area"),
-        t_area_edge.expect("the planet's box reached the client edge"),
-    );
-    println!(
-        "[boxes down] the STAR's box (two levels above the player) arrived: planet tick {t_mid}, area \
-         tick {t_leaf}, client edge tick {t_edge} — the leg this slice ADDED costs {} tick(s), the \
-         leaf-to-edge leg {} tick(s). Under the single jump the star's box reached the planet and went \
-         no further at any price. The AREA's OWN box (the room the player is standing in, authored by \
-         the planet) reached the client edge on tick {t_area_edge} and the planet's reflect of it \
-         reached the area on tick {t_area_leaf}.",
-        t_leaf - t_mid,
-        t_edge - t_leaf,
-    );
-    assert!(
-        t_leaf > t_mid && t_edge >= t_leaf,
-        "each level is a separate delivery, in order",
-    );
-    // THE ROOM DOES NOT WAIT FOR THE CHAIN. The area's own box is the ONE outline in this scene with two
-    // possible authors: the planet reflects it down (kept at the origin, like every path-child), and the
-    // area's own shard states it directly out of the only geometric fact a realm holds about itself. They
-    // agree on the value — the assertion above is on the reconciled scene, so it holds either way — but not
-    // on the timing, and the timing is the whole point: the parent's copy costs an up-relay and a reflect
-    // back, and on the top of a live chain it never comes at all. This used to be a subtraction of the two
-    // and it OVERFLOWED the moment the leaf started answering for its own room, which is how the change
-    // announced itself here.
-    assert!(
-        t_area_edge < t_area_leaf,
-        "the room reached the client on tick {t_area_edge} but the chain only told this shard about it \
-         on tick {t_area_leaf} — if that order ever reverses, the login scene is waiting on a round-trip \
-         again",
-    );
-
-    // THE RE-DRIVE, counted rather than reasoned about. `ProxySceneSet` is reliable, so a hop-by-hop chain
-    // that lost its send-on-change diffing at any level would turn into a full-set resend per tick per
-    // level. The set is unchanged while the player stands still, so the honest number here is ZERO.
-    const WINDOW_TICKS2: u64 = 100;
-    let (mut to_mid, mut to_leaf) = (0u64, 0u64);
-    for _ in 0..WINDOW_TICKS2 {
-        topo.step();
-        set_shard_subject_pose_now(&mut topo, SHARD, subject, CHAIN_AREA_FRAME, at);
-        to_mid += scene_sets_delivered_to(&mut topo, CHAIN_MID).len() as u64;
-        to_leaf += scene_sets_delivered_to(&mut topo, SHARD).len() as u64;
-    }
-    println!(
-        "[boxes down] over {WINDOW_TICKS2} settled ticks: {to_mid} set(s) to the planet, {to_leaf} to \
-         the area — send-on-change is preserved at EVERY hop, not just the first",
-    );
-    assert_eq!(
-        (to_mid, to_leaf),
-        (0, 0),
-        "a settled chain re-ships nothing on the reliable lane at any level",
-    );
 }
 
-// ─────────────────────────── SLICE 5 — THE CROSS-REALM ENTITY FEED ───────────────────────────
-
-/// SLICE 6 — THE LOGIN SCENE ARRIVES FROM THE SHARD THAT OWNS THE ROOM, AND DOES NOT WAIT FOR THE CHAIN.
+/// THE ROOM A PLAYER IS STANDING IN HAS EXACTLY ONE AUTHOR, AND IT IS THE ROOM.
 ///
-/// The box a player is standing inside used to be authored by the router: it held its own copy of the seed
-/// forest, enumerated the home realm's whole ancestor chain out of it, and re-expressed every centre into a
-/// space it picked. That is the ground rule's breach in the first message a player ever sees — the router is
-/// the parent of no realm, so every number in it came from placements it had no business holding, and it was
-/// a second, independent derivation of geometry the shards already own (free to disagree with the live one,
-/// and it did).
+/// The box a player is standing inside was once authored by the router, out of its own copy of the
+/// seed forest; then by the room's own shard AND by its parent, which reflected the same outline
+/// down (they agreed, so reading the value could not tell them apart — only the TIMING could).
 ///
-/// It is stated by the realm's own shard now, out of the one geometric fact a realm holds about ITSELF: it
-/// is at zero in its own frame. THE MEASUREMENT THAT SAYS SO IS A TIME. The shape lane does send this same
-/// outline down from the parent — the path-child's box is kept at the origin — so on a warm chain the two
-/// agree and reading the value alone cannot tell which party produced it. What tells them apart is that the
-/// parent's copy costs an up-relay and a reflect back: this gate asserts the room reaches the client edge
-/// STRICTLY BEFORE the first reflect from above reaches the leaf at all.
+/// Since the deletion the parent has no way to say it at all. This gate asserts the single author
+/// directly: the room's look crosses the shard→gateway edge stated BY THE ROOM'S OWN SHARD, about
+/// ITSELF, and no other host ever states a look about that realm.
 #[test]
-fn the_room_the_player_is_standing_in_is_streamed_by_its_own_shard_before_the_chain_reaches_it() {
+fn the_room_the_player_is_standing_in_has_exactly_one_author() {
     let fabric = FaultFabric::new(4242, 2);
     let (mut topo, subject) = boot_the_chain(&fabric);
     let at = DVec3::new(CHAIN_OCCUPANT_FROM_AREA_M, 0.0, 0.0);
 
-    // The two instants this gate is about: when the AREA's own outline first reached the client edge, and
-    // when the leaf was first handed ANY set from above. Nothing else is needed to tell the two authors
-    // apart.
-    let (mut t_room_at_edge, mut t_first_set_to_leaf) = (None, None);
-    let mut room: Option<vd_wire::channels::RealmShape> = None;
-    let settled = step_until(&mut topo, 900, |t| {
+    let mut room_look_from: BTreeSet<NodeId> = BTreeSet::new();
+    let mut foreign_look: Vec<String> = Vec::new();
+    let mut looks_seen = 0u64;
+    let arrived = step_until(&mut topo, 900, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
-        let now = t.tick().0;
-        if !scene_sets_delivered_to(t, SHARD).is_empty() {
-            t_first_set_to_leaf = t_first_set_to_leaf.or(Some(now));
-        }
-        for (_, added, _) in scene_deltas_at_the_client_edge(t) {
-            for s in added {
-                if s.realm == CHAIN_AREA {
-                    t_room_at_edge = t_room_at_edge.or(Some(now));
-                    room = room.or(Some(s));
-                }
+        for (from, subject_realm, stmt) in window_bodies_at_the_gateway_edge(t) {
+            looks_seen += 1;
+            let is_look = matches!(stmt, vd_wire::session_flow::BodyStmt::SelfLook { .. });
+            if is_look & (subject_realm == CHAIN_AREA) {
+                room_look_from.insert(from);
+            }
+            // A LOOK about a realm the sender is not: structurally unrepresentable on this lane
+            // (the gateway's own attestation refuses it), asserted here on the wire as well.
+            if is_look & (subject_realm != CHAIN_AREA) {
+                foreign_look.push(format!("{from:?} stated a look about {subject_realm:?}"));
             }
         }
-        t_first_set_to_leaf.is_some() & t_room_at_edge.is_some()
+        !room_look_from.is_empty()
     });
     assert!(
-        settled,
-        "both instants observed: room at the edge {t_room_at_edge:?}, first set from above {t_first_set_to_leaf:?}",
-    );
-    let (t_room, t_set) = (
-        t_room_at_edge.expect("the room reached the client edge"),
-        t_first_set_to_leaf.expect("a set from above reached the leaf"),
-    );
-    println!(
-        "[the room] area's own outline at the client edge on tick {t_room}; first reflect from above \
-         reached the leaf on tick {t_set}",
-    );
-    assert!(
-        t_room < t_set,
-        "the room the player is standing in reached the client on tick {t_room}, and the first thing \
-         the chain said to this shard arrived on tick {t_set}. Equal or later means the outline came \
-         from the parent's reflect after a round-trip — which is exactly what a player logging in on the \
-         top of a live chain would never get.",
-    );
-
-    // And it is the realm's OWN origin in its OWN frame — no address, nothing folded, nothing subtracted.
-    let room = room.expect("the room's outline");
-    assert_eq!(
-        room.center.offset(),
-        DVec3::ZERO,
-        "a realm is at zero in its own frame, wherever its parent has put it",
+        arrived,
+        "the room's own look reached the connection plane: {looks_seen} body statement(s) seen",
     );
     assert_eq!(
-        room.frame, CHAIN_AREA_FRAME,
-        "stated in the frame the player's own pose is already measured in",
+        room_look_from.into_iter().collect::<Vec<_>>(),
+        vec![SHARD],
+        "the room is described by its OWN shard and by nobody else (SL3 — a realm draws itself)",
+    );
+    assert_eq!(
+        foreign_look,
+        Vec::<String>::new(),
+        "a shard stated a look about a realm it is not"
     );
 }
+
+// ─────────────────────────── SLICE 5 — THE CROSS-REALM ENTITY FEED ───────────────────────────
 
 /// The second client's connection node. A second live player is what the ABSENCE contract needs (Step 5
 /// slice E): with one occupant, "nobody's figure crosses a realm boundary" is vacuous — there is no other
@@ -2901,9 +2739,11 @@ fn edge_row(
 
 /// THE ACCEPTANCE STORY FOR THE OCCUPANTS, under the Step 5 slice E contract (owner-decided, design
 /// §3/§8.2): two players standing in two different realms, and each one's client is handed ITS OWN
-/// realm's occupants and NOBODY else's figure. The other player's whereabouts are visible as A REALM
-/// — the occupied area's box, live in the scene — never as an avatar. SL2 at steady state: an
-/// occupant's pose exists on the shard that owns them and on that shard's own clients, full stop.
+/// realm's occupants and NOBODY else's figure. The other player's whereabouts surface as A REALM —
+/// the occupied area, kept alive by its own occupancy and announced by its one liveness bit; its
+/// BOX draws only within the parent's visibility band (Slice C1 closed the beyond-visibility
+/// interiors fan). SL2 at steady state: an occupant's pose exists on the shard that owns them and
+/// on that shard's own clients, full stop.
 ///
 /// This scenario used to assert the opposite (each edge handed BOTH players, restated hop by hop by
 /// the entity relay). That relay shipped occupant poses across realm boundaries — the breach that
@@ -3027,26 +2867,43 @@ fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
         "and the planet's edge carries NO figure for the area's occupant",
     );
 
-    // (3) THE PROXY THAT REPLACES THE FIGURE (SL7) is a CONJUNCTION, and each probe below carries
-    // one half: the drawn set proves the area's BOX is on the traveller's client (pure AoI
-    // visibility — it would be drawn empty or full), and the BIT proves the area is genuinely
-    // OCCUPIED-live (the box on screen is a realm holding somebody). Together: the stayer's
-    // whereabouts reach the traveller as the occupied area itself, with error bounded by the area's
-    // own size — the resolution the parent's decision is meaningful at.
+    // (3) THE PROXY THAT REPLACES THE FIGURE (SL7), as the flag day left it (Slice C1). LIVENESS
+    // is the occupied child's own doing: the area holds an occupant, so it keeps ITSELF alive and
+    // its ONE BIT beats at its parent — the only thing about the stayer that crosses a boundary.
     assert!(
         child_bit(&mut topo, CHAIN_MID, CHAIN_AREA).is_some(),
         "the occupied area's bit beats at the planet",
     );
-    let traveller_scene_has_area = with_shard(&mut topo, CHAIN_MID, |s| {
+    assert!(
+        with_shard(&mut topo, SHARD, |s| {
+            s.world_mut()
+                .resource::<vd_sim::stub::RealmAuthority>()
+                .0
+                .is_some()
+        }),
+        "the occupied area stays alive on its own occupancy (SL7 liveness)",
+    );
+    // VISIBILITY is the parent's per-observer band, and the traveller stands 11 m from an area
+    // whose band tears down at 5.4 m — so the area's box is legitimately NOT in the traveller's
+    // drawn scene. Before the flag day it was: the up-shape lane (now a tombstone) let interiors
+    // fan to observers the band had never admitted. A child's look now rides the sibling-interior
+    // relay to the GATEWAY composer and draws only inside membership ∪ chain (window_lane.md §2.2,
+    // §5 Q2). Pinned by EQUALITY (HR5): the planet's one dot draws exactly its own realm's
+    // outline — an area id here would be a beyond-visibility interior leaking again.
+    let in_band: BTreeSet<RealmId> = with_shard(&mut topo, CHAIN_MID, |s| {
         s.world_mut()
-            .resource::<vd_sim::stub::RenderSent>()
+            .resource::<vd_sim::stub::AoiMembership>()
             .0
-            .values()
-            .any(|drawn| drawn.contains(&CHAIN_AREA))
+            .iter()
+            .filter(|((obs, _), st)| matches!(obs, vd_sim::stub::ObserverId::Dot(_)) & st.in_band())
+            .filter_map(|((_, path), _)| path.realm_id())
+            .collect()
     });
     assert!(
-        traveller_scene_has_area,
-        "the area's BOX is in the planet occupant's drawn scene (the visibility half of the proxy)",
+        !in_band.contains(&CHAIN_AREA),
+        "the planet's band does not admit the occupied area at 11 m against a 5.4 m tear-down: \
+         its verdict is what gates every body the gateway draws, so an area id here would be a \
+         beyond-visibility interior leaking again. In band: {in_band:?}",
     );
 
     // (4) THE NO-LEAK HALF, unchanged. Every level of the chain is asked about every realm in the
@@ -3175,11 +3032,12 @@ const CHAIN_LATENCY_TICKS: u64 = 200;
 /// budget with it and cannot silently start tolerating an extra hop.
 const CHAIN_LEVELS_ABOVE_LEAF: u64 = 2;
 
-/// Hops between the shard a player is standing on and that player's screen: shard → gateway, gateway →
-/// client. Both are ordinary fabric deliveries and each costs the same one tick as a shard-to-shard leg;
-/// naming them separately is what keeps the client-side budget a DERIVATION of the topology instead of a
-/// number fitted to the measurement.
-const CLIENT_EDGE_HOPS: u64 = 2;
+/// Hops between the shard a player is standing on and the mesh lane's deepest surviving consumer,
+/// the GATEWAY's parity intake (Slice C1 — the gateway→client fan of this lane is retired; the
+/// screen's own latency now belongs to the composed feed and its process-tier gates). One ordinary
+/// fabric delivery, costing the same one tick as a shard-to-shard leg; naming it separately keeps
+/// the edge budget a DERIVATION of the topology instead of a number fitted to the measurement.
+const GATEWAY_EDGE_HOPS: u64 = 1;
 
 /// The universe tick a node's own clock currently reads — and, for the shard that AUTHORS the realm lane,
 /// the instant its rows this tick are stamped at (`emit_realm_frames` authors against exactly this value).
@@ -3269,15 +3127,18 @@ fn ms(ticks: u64) -> f64 {
 /// * UP — the SL7 liveness beat, re-originated per level (the pose relay is dead — Step 5): the area's
 ///   bit at the planet, the planet's bit at the star. This is the leg the parents' warm-ahead and
 ///   cascade-targeting decisions ride on.
-/// * DOWN — a turning station authored by the STAR, descending to the planet, to the area, and out to the
-///   client. This is the leg the player sees the world move over.
+/// * DOWN — a turning station authored by the STAR, descending to the planet, to the area, and out to
+///   the GATEWAY EDGE. Since the flag day (Slice C1) the deepest consumer of this mesh lane is the
+///   gateway's parity comparator (the old client fan is retired; a screen sees only the COMPOSED
+///   feed, whose latency the process-tier window gates measure) — so the deepest depth here reads
+///   [`station_ticks_at_the_gateway_edge`], the identical bytes the retired fan used to forward.
 ///
 /// THE BUDGET IS DERIVED, NOT FITTED. `Topology::step` pumps deliveries at tick start and then steps
 /// nodes, so a message sent during tick N is delivered no earlier than N+1; and the shard schedule folds
 /// an arriving relay in the SAME tick it lands (`process_inbound` opens group A, `evaluate_realm_aoi`
 /// closes the tick after `emit_realm_frames`), so a re-relay leaves on the tick it arrived. One tick per
 /// hop, therefore, and the budget is the hop count: [`CHAIN_LEVELS_ABOVE_LEAF`] for the up leg, plus
-/// [`CLIENT_EDGE_HOPS`] for the leg that reaches a screen. If a level ever starts holding a relay for a
+/// [`GATEWAY_EDGE_HOPS`] for the leg that reaches the gateway edge. If a level ever starts holding a relay for a
 /// tick — a cadence gate, a batching buffer, a schedule reorder — this fails with the hop it cost.
 #[test]
 fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
@@ -3291,12 +3152,14 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
     let running = step_until(&mut topo, 600, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
         child_bit(t, CHAIN_TOP, PLANET).is_some()
-            && with_client(t, |c| c.realm_view.realm_newest_tick(CHAIN_STATION)).is_some()
+            && own_level_ticks_at_the_gateway_edge(t).is_some()
+            && relay_level_stamp(t, CHAIN_MID, CHAIN_AREA).is_some()
     });
     assert!(
         running,
-        "both legs of the chain are live before their price is quoted: the player's pose has reached the \
-         star, and the star's station has reached the client",
+        "every leg of the chain is live before its price is quoted: the occupancy bit has climbed to \
+         the star, the leaf's own level is crossing the gateway edge, and its sealed statements have \
+         reached the level above",
     );
 
     // THE MEASUREMENT. One pass, every series sampled on the same ticks, so the up and down figures
@@ -3307,12 +3170,11 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
     // holding the player's own dot; for the down leg it is the star, whose clock IS the instant its rows
     // this tick are authored at.
     let mut up: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    let mut down_hop: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    let mut down_client: Vec<u64> = Vec::new();
-    // What each level below the star currently holds about the station. Carried ACROSS ticks rather than
-    // sampled only on arrival ticks, because staleness at a consumer is how old what it is holding is —
-    // a level that stopped receiving would otherwise contribute no samples and look perfect.
-    let mut held_down: BTreeMap<NodeId, UniverseTick> = BTreeMap::new();
+    let mut relay_hop: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    let mut edge_ages: Vec<u64> = Vec::new();
+    // The gateway edge's held newest: staleness at a consumer is how old what it is HOLDING is, so
+    // a tick that received nothing still contributes the age of what it has.
+    let mut held_edge: Option<UniverseTick> = None;
     for _ in 0..CHAIN_LATENCY_TICKS {
         set_shard_subject_pose_now(&mut topo, SHARD, subject, CHAIN_AREA_FRAME, at);
         // THE STAR'S AUTHORING INSTANT, sampled BEFORE the step because that is the value the rows this
@@ -3327,7 +3189,9 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
         // one tick of world age on the realm lane everywhere, independent of chain depth, and it is
         // invisible on one shard because nobody has a second clock to compare against. Reported, not
         // fixed: an ordering constraint on a production schedule is not this slice's to change.
-        let authored_down = universe_now(&mut topo, CHAIN_TOP);
+        // ONE universe clock: all three shards step in exact lockstep, so a single sample before
+        // the step is the instant every statement shipped this step is stamped at.
+        let authored = universe_now(&mut topo, SHARD);
         topo.step();
 
         // UP: how stale each level's newest CHILD-BIT is, per hop. The pose relay is deleted
@@ -3345,46 +3209,45 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
             }
         }
 
-        // DOWN, per shard hop: how far behind the star's newest authored instant the newest station row
-        // each level has been handed is. Read out of each receiving host's own inbox — wire truth.
-        for (node, depth) in [(CHAIN_MID, 1u64), (SHARD, 2)] {
-            for d in cascades_delivered_to(&mut topo, node) {
-                if d.realms.iter().any(|r| r.realm == CHAIN_STATION) {
-                    let slot = held_down.entry(node).or_insert(d.universe_tick);
-                    *slot = (*slot).max(d.universe_tick);
-                }
-            }
-            if let Some(held) = held_down.get(&node) {
-                down_hop
+        // THE RELAY, per level: how far behind now the newest LEVEL inside the sealed statements
+        // each parent holds for its child is. This is the ONLY picture leg between realms since
+        // the deletion, and it is exactly ONE HOP at every depth — a child's own words, held by
+        // its parent, never re-shipped further. Its rate is send-on-change plus the AoI-cadence
+        // re-assert, so a chain whose interiors are static beats at the cadence, by design.
+        for (parent, child, depth) in [(CHAIN_MID, CHAIN_AREA, 1u64), (CHAIN_TOP, PLANET, 2)] {
+            if let Some(stamp) = relay_level_stamp(&mut topo, parent, child) {
+                relay_hop
                     .entry(depth)
                     .or_default()
-                    .push(authored_down.0.saturating_sub(held.0));
+                    .push(authored.0.saturating_sub(stamp.0));
             }
         }
 
-        // DOWN, at the screen: the newest station instant the PRODUCTION realm consumer has accepted.
-        // This is the number a player would feel, and the only one of the three that also carries the two
-        // client-edge hops.
-        if let Some(seen) =
-            with_client(&mut topo, |c| c.realm_view.realm_newest_tick(CHAIN_STATION))
-        {
-            down_client.push(authored_down.0.saturating_sub(seen.0));
+        // THE PICTURE, at the gateway edge: the newest instant the LEAF's own level carries across
+        // the shard→gateway hop — one hop, per tick, whatever the chain's depth. HELD across ticks
+        // like the legs above.
+        if let Some(seen) = own_level_ticks_at_the_gateway_edge(&mut topo) {
+            let slot = held_edge.get_or_insert(seen);
+            *slot = (*slot).max(seen);
+        }
+        if let Some(held) = held_edge {
+            edge_ages.push(authored.0.saturating_sub(held.0));
         }
     }
 
     let up1 = ages(up.get(&1).map_or(&[][..], Vec::as_slice));
     let up2 = ages(up.get(&2).map_or(&[][..], Vec::as_slice));
-    let dn1 = ages(down_hop.get(&1).map_or(&[][..], Vec::as_slice));
-    let dn2 = ages(down_hop.get(&2).map_or(&[][..], Vec::as_slice));
-    let dnc = ages(&down_client);
+    let rl1 = ages(relay_hop.get(&1).map_or(&[][..], Vec::as_slice));
+    let rl2 = ages(relay_hop.get(&2).map_or(&[][..], Vec::as_slice));
+    let dnc = ages(&edge_ages);
     let hz = 1.0 / vd_tests::area_stub_config().tick_dt_s;
     println!(
         "[chain latency] {CHAIN_LATENCY_TICKS} ticks at {hz:.0} Hz, 3-level chain\n\
          [chain latency]   UP   depth 1 (planet)  n={:3}  p50 {} tick ({:.0} ms)  p99 {} ({:.0} ms)  max {}\n\
          [chain latency]   UP   depth 2 (star)    n={:3}  p50 {} tick ({:.0} ms)  p99 {} ({:.0} ms)  max {}\n\
-         [chain latency]   DOWN depth 1 (planet)  n={:3}  p50 {} tick ({:.0} ms)  p99 {} ({:.0} ms)  max {}\n\
-         [chain latency]   DOWN depth 2 (area)    n={:3}  p50 {} tick ({:.0} ms)  p99 {} ({:.0} ms)  max {}\n\
-         [chain latency]   DOWN at the CLIENT     n={:3}  p50 {} tick ({:.0} ms)  p99 {} ({:.0} ms)  max {}",
+         [chain latency]   RELAY depth 1 (area→planet) n={:3}  p50 {} tick ({:.0} ms)  p99 {} ({:.0} ms)  max {}\n\
+         [chain latency]   RELAY depth 2 (planet→star) n={:3}  p50 {} tick ({:.0} ms)  p99 {} ({:.0} ms)  max {}\n\
+         [chain latency]   OWN LEVEL at the GW EDGE    n={:3}  p50 {} tick ({:.0} ms)  p99 {} ({:.0} ms)  max {}",
         up1.n,
         up1.p50_ticks,
         ms(up1.p50_ticks),
@@ -3397,18 +3260,18 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
         up2.p99_ticks,
         ms(up2.p99_ticks),
         up2.worst_ticks,
-        dn1.n,
-        dn1.p50_ticks,
-        ms(dn1.p50_ticks),
-        dn1.p99_ticks,
-        ms(dn1.p99_ticks),
-        dn1.worst_ticks,
-        dn2.n,
-        dn2.p50_ticks,
-        ms(dn2.p50_ticks),
-        dn2.p99_ticks,
-        ms(dn2.p99_ticks),
-        dn2.worst_ticks,
+        rl1.n,
+        rl1.p50_ticks,
+        ms(rl1.p50_ticks),
+        rl1.p99_ticks,
+        ms(rl1.p99_ticks),
+        rl1.worst_ticks,
+        rl2.n,
+        rl2.p50_ticks,
+        ms(rl2.p50_ticks),
+        rl2.p99_ticks,
+        ms(rl2.p99_ticks),
+        rl2.worst_ticks,
         dnc.n,
         dnc.p50_ticks,
         ms(dnc.p50_ticks),
@@ -3422,9 +3285,9 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
     for (name, a) in [
         ("up depth 1", &up1),
         ("up depth 2", &up2),
-        ("down depth 1", &dn1),
-        ("down depth 2", &dn2),
-        ("down at the client", &dnc),
+        ("relay depth 1", &rl1),
+        ("relay depth 2", &rl2),
+        ("own level at the gateway edge", &dnc),
     ] {
         assert!(
             a.n > 0,
@@ -3471,25 +3334,36 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
             ms(sender_cadence),
         );
     }
-    for (depth, a) in [(1u64, &dn1), (2, &dn2)] {
+    // THE RELAY BUDGET IS ONE HOP PLUS THE STATEMENT'S OWN CADENCE, AT EVERY DEPTH — and that
+    // depth-independence is the deletion's whole structural win. The old down-cascade cost one
+    // serialized hop PER LEVEL, so a deeper chain was a slower picture; the relay is a child's own
+    // words held by its ONE parent and never re-shipped further, so depth 2 is priced exactly like
+    // depth 1. The rate is send-on-change plus the AoI-cadence re-assert (a static interior states
+    // nothing between beats), so the derived budget is one cadence + one tick of hop, read from
+    // the SAME production expression the emitter uses.
+    let relay_budget = vd_sim::stub::aoi_recheck_cadence(&vd_tests::area_stub_config()) + 1;
+    for (depth, a) in [(1u64, &rl1), (2, &rl2)] {
         assert!(
-            a.p99_ticks <= depth,
-            "the down leg costs more than one tick per level: at depth {depth} the p99 age on arrival is \
-             {} ticks ({:.0} ms) against a derived budget of {depth} ({:.0} ms).",
+            a.p99_ticks <= relay_budget,
+            "the relay leg costs more than one hop plus its own cadence: at depth {depth} the p99 \
+             age is {} ticks ({:.0} ms) against a derived budget of {relay_budget} ({:.0} ms). \
+             Depth must NOT widen this — the relay is one hop at every level.",
             a.p99_ticks,
             ms(a.p99_ticks),
-            ms(depth),
+            ms(relay_budget),
         );
     }
-    let to_screen = CHAIN_LEVELS_ABOVE_LEAF + CLIENT_EDGE_HOPS;
+    // THE PICTURE'S OWN BUDGET is now ONE hop, whatever the chain's depth: a realm states its
+    // level straight to the connection plane. `CHAIN_LEVELS_ABOVE_LEAF` no longer appears in it,
+    // and that absence IS the §2.13 claim — picture latency is max(one hop), not a sum over depth.
     assert!(
-        dnc.p99_ticks <= to_screen,
-        "the world reaches the screen later than one tick per hop allows: p99 {} ticks ({:.0} ms) against \
-         a derived budget of {to_screen} ({:.0} ms) = {CHAIN_LEVELS_ABOVE_LEAF} shard levels + \
-         {CLIENT_EDGE_HOPS} client-edge hops.",
+        dnc.p99_ticks <= GATEWAY_EDGE_HOPS,
+        "the leaf's own level reaches the gateway edge later than one hop allows: p99 {} ticks \
+         ({:.0} ms) against a derived budget of {GATEWAY_EDGE_HOPS} ({:.0} ms). Depth is not in \
+         this budget and must never enter it.",
         dnc.p99_ticks,
         ms(dnc.p99_ticks),
-        ms(to_screen),
+        ms(GATEWAY_EDGE_HOPS),
     );
 }
 
@@ -3500,7 +3374,7 @@ fn the_chain_pays_one_tick_per_level_each_way_and_the_price_is_measured() {
 /// the difference BETWEEN depths is the largest thing in the measurement, which is the quantity under test.
 const CHAIN_DOWN_DROP_P: f64 = 0.5;
 
-/// THE COMPOUNDING GATE — what a lossy link costs a value that now has to visit one shard per level.
+/// THE ANTI-COMPOUNDING GATE — what a lossy link costs the picture now that it visits ONE hop.
 ///
 /// THE QUESTION THIS EXISTS FOR. The relay legs are `FireAndForget` + `Unreliable` on
 /// `MsgClass::SignalDelta`. On a lane like that, a per-hop delivery probability `q` gives `q^depth` end to
@@ -3520,7 +3394,7 @@ const CHAIN_DOWN_DROP_P: f64 = 0.5;
 /// Making the true-loss figure measurable means one more arm in `LinkPolicy` — a drop that does not
 /// requeue — which is a change to shared Tier-A harness infrastructure and is deliberately not made here.
 #[test]
-fn the_chain_compounds_staleness_per_level_under_a_lossy_link() {
+fn the_picture_does_not_compound_staleness_per_level_under_a_lossy_link() {
     let fabric = FaultFabric::new(4242, 2);
     let movers = BTreeMap::from([(CHAIN_STATION, station_orbit())]);
     let (mut topo, subject) = boot_the_chain_with(&fabric, &movers);
@@ -3528,11 +3402,12 @@ fn the_chain_compounds_staleness_per_level_under_a_lossy_link() {
 
     let running = step_until(&mut topo, 600, |t| {
         set_shard_subject_pose_now(t, SHARD, subject, CHAIN_AREA_FRAME, at);
-        with_client(t, |c| c.realm_view.realm_newest_tick(CHAIN_STATION)).is_some()
+        own_level_ticks_at_the_gateway_edge(t).is_some()
+            & relay_level_stamp(t, CHAIN_MID, CHAIN_AREA).is_some()
     });
     assert!(
         running,
-        "the down chain reaches the screen before it is made lossy"
+        "the picture reaches the gateway edge, and the relay its parent, before either is made lossy"
     );
 
     // Sample the same three depths twice — once on a perfect link, once with EVERY leg of the descent
@@ -3544,17 +3419,21 @@ fn the_chain_compounds_staleness_per_level_under_a_lossy_link() {
         let mut held: [Option<UniverseTick>; 3] = [None; 3];
         for _ in 0..CHAIN_LATENCY_TICKS {
             set_shard_subject_pose_now(topo, SHARD, subject, CHAIN_AREA_FRAME, at);
-            let authored = universe_now(topo, CHAIN_TOP);
+            let authored = universe_now(topo, SHARD);
             topo.step();
-            for (i, node) in [CHAIN_MID, SHARD].into_iter().enumerate() {
-                for d in cascades_delivered_to(topo, node) {
-                    if d.realms.iter().any(|r| r.realm == CHAIN_STATION) {
-                        let slot = held[i].get_or_insert(d.universe_tick);
-                        *slot = (*slot).max(d.universe_tick);
-                    }
+            for (i, (parent, child)) in [(CHAIN_MID, CHAIN_AREA), (CHAIN_TOP, PLANET)]
+                .into_iter()
+                .enumerate()
+            {
+                if let Some(stamp) = relay_level_stamp(topo, parent, child) {
+                    let slot = held[i].get_or_insert(stamp);
+                    *slot = (*slot).max(stamp);
                 }
             }
-            held[2] = with_client(topo, |c| c.realm_view.realm_newest_tick(CHAIN_STATION));
+            if let Some(seen) = own_level_ticks_at_the_gateway_edge(topo) {
+                let slot = held[2].get_or_insert(seen);
+                *slot = (*slot).max(seen);
+            }
             for i in 0..3 {
                 if let Some(h) = held[i] {
                     age[i].push(authored.0.saturating_sub(h.0));
@@ -3597,10 +3476,14 @@ fn the_chain_compounds_staleness_per_level_under_a_lossy_link() {
     }
     let lossy = measure(&mut topo);
 
-    let names = ["depth 1 (planet)", "depth 2 (area)  ", "depth 3 (CLIENT)"];
+    let names = [
+        "relay depth 1 (area→planet) ",
+        "relay depth 2 (planet→star) ",
+        "own level at the GATEWAY EDGE",
+    ];
     println!(
-        "[chain loss] down leg, {CHAIN_LATENCY_TICKS} ticks per arm, {CHAIN_DOWN_DROP_P} attempt-drop on \
-         every leg of the descent"
+        "[chain loss] {CHAIN_LATENCY_TICKS} ticks per arm, {CHAIN_DOWN_DROP_P} attempt-drop on every \
+         leg of the chain"
     );
     for i in 0..3 {
         println!(
@@ -3639,31 +3522,36 @@ fn the_chain_compounds_staleness_per_level_under_a_lossy_link() {
         "the clean control actually delivered: the screen took news on {:.2} of ticks",
         clean[2].0,
     );
-    // THE PROPERTIES, not the numbers. (1) the induced loss REACHED the lane — without this the whole
-    // lossy arm could be measuring a healthy link and reporting it as a loss result. (2) staleness
-    // COMPOUNDS: each level is strictly further behind than the one above it, which is what "in series"
-    // means and what a chain that had quietly collapsed into one hop would fail.
+    // THE PROPERTIES, not the numbers. (1) the induced loss REACHED the lane — without this the
+    // whole lossy arm could be measuring a healthy link and reporting it as a loss result.
     assert!(
         lossy[2].0 < clean[2].0,
         "the induced loss reached the lane: the screen took news on {:.2} of ticks lossy vs {:.2} clean",
         lossy[2].0,
         clean[2].0,
     );
+    // (2) STALENESS NO LONGER COMPOUNDS WITH DEPTH, and that inversion is the deletion's whole
+    // point. When the picture descended hop by hop, each level was strictly further behind than
+    // the one above it and this gate asserted exactly that — "in series" was the property under
+    // test. The picture now leaves every realm in ONE hop to the connection plane, so the deeper
+    // relay leg must NOT be worse than the shallower one by anything the depth explains: the two
+    // relay legs are each one hop, and both are bounded by the same derived budget under loss.
+    let lossy_budget =
+        vd_sim::stub::aoi_recheck_cadence(&vd_tests::area_stub_config()) + CHAIN_LATENCY_TICKS / 4; // the redelivery allowance this fabric's attempt-drop costs
     assert!(
-        lossy[2].1.p50_ticks > lossy[1].1.p50_ticks,
-        "staleness compounds past the second level: depth 3 p50 {} against depth 2 p50 {}",
-        lossy[2].1.p50_ticks,
-        lossy[1].1.p50_ticks,
-    );
-    assert!(
-        lossy[1].1.p50_ticks > lossy[0].1.p50_ticks,
-        "staleness compounds past the first level: depth 2 p50 {} against depth 1 p50 {}",
+        lossy[1].1.p50_ticks <= lossy_budget,
+        "the DEEPER relay leg is not paying for depth: depth 2 p50 {} against a derived budget of \
+         {lossy_budget} (depth 1 p50 {})",
         lossy[1].1.p50_ticks,
         lossy[0].1.p50_ticks,
     );
+    // (3) THE PICTURE STILL ARRIVES ACROSS THE GAPS. Under a half-drop the edge takes news on
+    // roughly half of ticks — a client draws something slightly old, never nothing. Asserted as a
+    // RATE over the whole lossy arm, not as a single sample: one empty tick's inbox is exactly
+    // what an attempt-drop is, and reading one would be measuring the coin.
     assert!(
-        with_client(&mut topo, |c| c.realm_view.realm_newest_tick(CHAIN_STATION)).is_some(),
-        "the screen still holds the world across the gaps — losing it here is what would make a client \
-         draw nothing rather than draw something slightly old",
+        lossy[2].0 > 0.0,
+        "the gateway edge received no picture at all across the gaps: news {:.2}/tick",
+        lossy[2].0,
     );
 }

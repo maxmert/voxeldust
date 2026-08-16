@@ -3389,14 +3389,14 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **THE OPTION DECISION — Option C (reply-down) CHOSEN; the earlier "(B, recommended)" prose above was REFUTED.** The vet found the directory has NO `Account→Gateway` resolution (`DirectoryKey = Session|Entity|Realm|Ship`; an `Entity` head → `AuthorityRef::Shard`, never a gateway), so B was NOT "no wire growth": it needed a new shared-directory `Account→Gateway` record that PUBLISHES the client-connection detail cluster-wide — the opposite of the user-decisive "no cross-realm leakage" constraint. Option A leaked `d.gateway` UP a frozen relay + a new parent→gateway edge. Option C — the parent replies down to the relay SENDER (`from`, provably the dot's home shard) — leaks NOTHING (the parent never learns the gateway), adds NO topology edge, and grows NO client-facing wire (one appended intra-cluster `InterShardFlow::ProxySceneSet`, public `RealmShape` geometry only, HR1).
 - **The critical revision the vet forced (all 3 lenses):** an EDGE feed `{added,removed}` addressed to the stored home FAILS on EVERY crossing (the home dies mid-re-home → delivered-then-dropped → permanent ghost). Shipped LEVEL-triggered instead (`ProxySceneSet{observer, realms:full set}`, send-on-change; the home reconciles vs baseline; forward matched by ACCOUNT alone so pre-commit re-home removes land) — a lost/shed reflect or a re-home hand-off self-heals.
 - **Pin:** `scripts/vu_aoi_s2c_plan.md` + the `ProxySceneSet`/`on_proxy_scene_set`/`ForwardedProxyScene`/`ProxySentScene` doc comments. **STILL OWED: the pixel-visible dot-crosses-a-boundary acceptance test** (client tier) is now UNBLOCKED (S2b + S2c both in) but not yet written — a VU visual-arc item. Residuals → [[D-RLM-13]].
-- **SUPERSEDED by Step 5 (2026-08-13, `step5_sl7_lane_deletion.md`):** the per-OCCUPANT reflect this entry landed was an SL2/SL7 breach (occupant identity + interest crossing realm boundaries) and is DELETED — `ProxySceneSet` is a wire TOMBSTONE (slice D, minor 12) and `on_proxy_scene_set`/`ForwardedProxyScene`/`ProxySentScene` no longer exist. The PRODUCT behavior (neighbour drawn on approach, continuous through the crossing) survives on the lawful lanes: `ChildSceneSet` (down, keyed by LIVE CHILD REALM, no account on the wire) + `FromAboveScene` (one whole-realm holding). The historical record above stays as the option-decision provenance.
+- **SUPERSEDED by Step 5 (2026-08-13, `step5_sl7_lane_deletion.md`):** the per-OCCUPANT reflect this entry landed was an SL2/SL7 breach (occupant identity + interest crossing realm boundaries) and is DELETED — `ProxySceneSet` is a wire TOMBSTONE (slice D, minor 12) and `on_proxy_scene_set`/`ForwardedProxyScene`/`ProxySentScene` no longer exist. **SUPERSEDED AGAIN (window lane Slice C2, 2026-08-16):** its replacement `ChildSceneSet` + `FromAboveScene` is ALSO deleted — no parent reflects any scenery down any more. The PRODUCT behavior (neighbour drawn on approach, continuous through the crossing) now rides the window lane: every chain level states its own rows straight to the observer's gateway, which stacks them at ONE universe tick. The historical record above stays as the option-decision provenance.
 
 ### D-RLM-13 🟥 VU-AoI — the crossing scene-reconcile residual (a departed-sibling stale outline across an authority change) → VU-6 (the warp / scene-reset re-stream)
 - **WHAT is deferred:** two bounded stale-render corners at the exact hand-off instant, both the SAME class as the dot render path's shard-crash stale-render (an authoritative re-draw on a scene/authority change, which VU-6 owns):
   - (i) a sibling that DROPS OUT of range in the narrow `[dest-Committed, home-flip-to-B]` sub-window — after the source dropped the dot from `dots.0` but before the parent's last-wins moved `home` to B — is known to neither the old home (dot gone) nor the new home (not told yet). A bounded (≤ one relay cadence) transient ghost, NOT the every-crossing permanent ghost the EDGE feed would have produced.
   - (ii) the OLD home's OWN interior children (the traveller's just-departed realm's sub-boxes) linger after re-home: the render emit loop iterates present dots only, so it sends no `removed` on departure, and `retain_live` silently drops the membership keys. **Pre-existing S1b** (not introduced by S2c); NOT covered by the client `RealmId` union (no `removed` is ever sent). On the S2c side, a `ProxySceneSet` for a departed dot drops the home's forwarded baseline (`on_proxy_scene_set` lazy cleanup, `proxy_scene_orphaned` counter) but does not itself emit a client removal.
 - **WHERE it lands / WHEN:** VU-6 (warp re-stream / scene-swap) — an authoritative scene RE-STREAM on an authority change re-draws the client from truth, discharging both. **Pin:** `scripts/vu_aoi_s2c_plan.md` §C/§E + the `on_proxy_scene_set`/`ForwardedProxyScene` doc comments.
-- **Step 5 slice D note (2026-08-13):** the S2c mechanisms this entry cites (`on_proxy_scene_set` lazy cleanup, `proxy_scene_orphaned`) are DELETED with the per-occupant lane — see the [[D-RLM-11]] supersession. The residual CLASS is unchanged and still owed to VU-6: a stale outline across an authority change now manifests on the `ChildSceneSet`/`FromAboveScene` lane (a departed child's whole-realm holding is replaced on the next send-on-change or TTL-pruned; the exact-instant window remains until the VU-6 authoritative re-stream).
+- **Step 5 slice D note (2026-08-13):** the S2c mechanisms this entry cites (`on_proxy_scene_set` lazy cleanup, `proxy_scene_orphaned`) are DELETED with the per-occupant lane — see the [[D-RLM-11]] supersession. **Window lane Slice C2 note (2026-08-16):** the `ChildSceneSet`/`FromAboveScene` lane this note re-homed the residual onto is deleted too. The residual CLASS is unchanged: a stale outline across an authority change now manifests at the GATEWAY's composer, where a look is held per subject and pruned on the derived TTL / roster loss — the exact-instant window remains until the authoritative re-stream (the origin-epoch swap, §2.7, already closes the CROSSING half of it).
 
 ### D-RLM-12 🟩 OBSOLETE BY DELETION (Step 5 slice D, 2026-08-13) — the machinery this entry guards is gone and its S3 successor can never exist
 - **WHAT is deferred:** freeze-hold (carry-forward the proxy's existing latch keys, or a cached last-good composed position) when a retained proxy's relayed frame momentarily cannot be placed, so a transient un-measurable tick does not hard-evict-then-respin (a blink). In S2b the fold does a straight `transfer_frame` → `Err ⇒ None ⇒ not folded this tick`, and `retain_live` hard-evicts a latch absent for one tick (no grace path for a skipped proxy).
@@ -3406,6 +3406,15 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **CLOSED WITHOUT LANDING (Step 5 slice D):** `proxy_observer`, the retained-proxy fold and its cited proof test (`proxy_observer_safe_degrades…`) are DELETED; `coarsen_level` is a field on a wire TOMBSTONE. The S3 coarsen-ladder this entry deferred TO is structurally impossible now — SL7 recursion (one bit per level, each level treating an occupied DIRECT child as the observer at the placement it authored) is the deep-ancestor keep-alive, and it has no compose step that could `Err` and no per-proxy latch to blink. The risk class died with the machinery; nothing is owed. (Records above kept as history; the entry stays for the trail.)
 
 ### D-RLM-14 🟥 The RETURN-crossing surrounding-realm feed does not re-advance on the client — no authoritative re-stream on a cross → VU-6 / floating-origin S6 (round-trip E2E, 2026-08-01)
+- **★ SCOPE NOTE (window lane Slices C1+C2, 2026-08-16):** every mechanism this row names is GONE.
+  `maybe_announce_realm_registry` was deleted at the Slice-C1 flag day, and the per-tick
+  `MsgClass::RealmSnapshot` placements it describes were the OLD realm datagram, tombstoned in
+  Slice C2. The DESIGNED cure is landed: the composed feed carries an ORIGIN MARKER, the gateway
+  bumps `origin_epoch` at the crossing commit and re-emits a FULL level composed at the same tick
+  as the last old-epoch datagram, and the client swaps atomically on the epoch (`window_lane.md`
+  §2.7 — "the crossing re-stream and the origin marker are one mechanism"). What remains to CLOSE
+  this row is the flip of its own pin: the OBSERVE-not-panic tail of
+  `a_planet_to_system_return_commits_both_rehomes_and_the_player_rides` becomes a hard assert.
 - **WHAT is deferred:** after a Planet→System RETURN crossing COMMITS, the returned client's SURROUNDING realm feed (the per-tick `MsgClass::RealmSnapshot` placements that keep the neighbour realms orbiting) does not reliably re-advance. The dest's read sub re-opens ONLY from the `SubscriptionReady` the dest emits at `on_saga_promote` (`crates/sim/src/stub.rs`), and the realm SCENE graph is streamed ONLY at a home-entry `Active` promote (`maybe_announce_realm_registry`, `crates/connection-plane/src/gateway.rs` — NOT re-emitted on a cross). So a returned player is live on the dest, commits, and RIDES its own realm, but its neighbours can stall until an authoritative re-stream lands. Distinct from [[D-RLM-13]] (bounded stale-outline ghosts at hand-off) — this is the whole per-tick feed, unbounded until re-stream.
 - **WHY it is NOT a regression / safe to defer:** the reported TOTAL freeze (player + world both dead because the return parked on a reaped authority) is FIXED — the return-dest System stays live through the crossing so the return COMMITS (proven by the round-trip E2E reaching `location == "System 7"` and by the deterministic 3c `rlm.rs` twin). *(Mechanism updated 2026-08-14, Step-5 lane cure finding 37: the OUTWARD keep-alive this sentence originally credited is deleted — a shard demands only itself or a direct child (`push_demand`'s structural gate) — and the return-dest is held by arm B of `desired_alive` (the source still speaks for the departing occupant, so it never reports Empty) + `ancestor_close`; the round-trip E2E re-measured green over exactly that path.)* This residual is the NARROWER "neighbours stall after the commit" facet, newly EXPOSED by the new round-trip E2E (`a_planet_to_system_return_commits_both_rehomes_and_the_player_rides`), not caused by the reap fix (which cannot suppress emission) nor by the read-only client render changes (floating-origin S2/S3 `world_pos`).
 - **WHERE it lands / WHEN:** VU-6 (warp re-stream / scene-swap) / floating-origin S6 (`anchor_epoch` re-emit at FORK-0a) — an authoritative scene RE-STREAM on an authority change re-opens the read sub + re-ships the neighbour placements from truth, discharging this together with [[D-RLM-13]]. The likely mechanism: re-emit the realm registry/scene (and re-arm the dest read sub) at the return-crossing promote, idempotently. **Repro / pin:** the OBSERVE-not-panic tail of `a_planet_to_system_return_commits_both_rehomes_and_the_player_rides` (`crates/bins/tests/rlm_demand_login.rs`) — flip its `neighbour_feed_live` observation to a hard `>= base + 20` assert when this lands. Owner: VU-6 / floating-origin S6.
@@ -4099,44 +4108,19 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   `ChildReach`), but the FIELD survives as the static children's stored position and every shard is
   still planted with its own row's centre. The plan's full cure — positions living ONLY in authored
   placement books, statics riding `Motion::Fixed` in the boot roster, the field deleted (E0609) —
-  is owed. Readers at HEAD: `placement_row`'s static arm, `child_shape`, the `--realm-boxes` on-disk
-  contract, client scene tests. (`VD_REALM_BOUNDARIES` was listed here; the symbol was DELETED by the
-  Stage-C batch-1 cluster rework and reads nothing.) **When:** with the motion-roster boot rework
-  (the writer-in-node move below).
+  is owed. Readers at HEAD: `placement_row`'s static arm and the boot roster. (Two readers this row
+  used to name are GONE: `child_shape` died with the parent-authored outline — window lane Slice C2,
+  minor 19 — and the `--realm-boxes` on-disk contract died at the Slice-C1 flag day. `VD_REALM_BOUNDARIES`
+  was listed here too; the symbol was DELETED by the Stage-C batch-1 cluster rework and reads nothing.)
+  **When:** with the motion-roster boot rework (the writer-in-node move below).
 - **Where:** `crates/core/src/geometry.rs` (`RealmRegion.center`), `crates/sim/src/stub.rs`,
   `crates/bins/src/lib.rs`.
 
-### D-PLACE-3 🟥 The shape lane still ships `RealmShape.center` at its tick-0 instant (owner Q2 undischarged)
-- **What's missing:** owner Q2 ("the outline carries no position") is decided but not landed: the
-  outline lane (`SHAPE_LANE_TICK`, `restate_shapes_in_child_frame`, `lift_shapes_from_child_frame`,
-  `shape_hop_to`, `child_shape`'s placement read) still restates outline centres at the pinned epoch
-  instant, and the client still reads `RealmShape.center`. With every direct child now shipping a
-  per-tick row (D-FO-7 above), the row lane carries everything Q2 needs; the wire arm change
-  (`channels.rs` `RealmShape` minus `center`, minor bump) owes an SL6 note even though Q2 decided the
-  semantics. **When:** the next wire minor bump.
-- **THE ACTUAL BLOCKER (the origin problem — recorded 2026-08-14, Step-5 lane audit H2):** every
-  position has a rows-lane twin EXCEPT the realm the scene is measured in. The row lane carries
-  direct children only (`authored_realm_snaps` → `child_rows`), so the client's own realm and every
-  ancestor have NO row, ever — today the own box exists solely because `own_shape` hard-codes a zero
-  `center`. Removing `center` therefore needs an answer to "how does the client learn which realm is
-  the origin of the scene it was handed": (a) repurpose `pin` to name the delta's frame — reverses
-  `channels.rs` "the client IGNORES it" AND needs a new field on `ShardToGateway::RealmSceneDelta`
-  (the shard currently states nothing); (b) a per-message "this is the origin" marker on `RealmShape`
-  (one bool for one `LatticePos` — a smaller shrink); (c) keep a zero `center` for the own outline
-  only (a frame definition, arguably not a position statement — the owner rules whether that honours
-  Q2). None is free; the owner decides.
-- **THE FLAG DAY this row under-recorded:** a field REMOVAL is not postcard-additive and `RealmShape`
-  rides the client-facing `RealmSceneDelta` — so `PROTO_MINOR` bumps AND `PROTO_MINOR_FLOOR` moves to
-  the new minor (the minor-8 precedent, `version.rs` ~139); every client must be rebuilt with the
-  cluster. No discriminant is removed, so no tombstone.
-- **DE-ESCALATED (2026-08-14):** the SL1 breach that made this row urgent is closed independently —
-  the sender's own outline is filtered at the reflect merge (finding 17, `aoi_decide`), so no realm
-  learns its own placement through this lane any more. This row is now a shrink-and-simplify on its
-  own merits (it unlocks deleting `SHAPE_LANE_TICK`, `shape_hop_to`, both restate/lift directions,
-  `child_shape`'s placement read, `own_shape`'s zero centre and the `realm_shape_observation_unplaceable`
-  failure mode), not an SL1 emergency.
-- **Where:** `crates/wire/src/channels.rs:RealmShape`, `crates/sim/src/stub.rs` shape lanes,
-  `crates/client/src/realm_scene.rs`.
+### D-PLACE-3 🟩 RESOLVED (window lane Slices C1+C2, 2026-08-16) — `RealmShape` carries no position, and the lane that restated outline centres is gone
+- **WHAT was deferred:** owner Q2 ("the outline carries no position") was decided but not landed — the outline lane still restated outline centres at a pinned epoch instant, and the client still read `RealmShape.center`.
+- **HOW it resolved:** the Slice-C1 FLAG DAY (client minor 18, floor → 18; owner-approved 2026-08-15/16 items 1/9/10) DELETED the `center` field from `RealmShape` in place — a shape is pure self-description, and there is nothing left to restate. Slice C2 then deleted the whole lane that carried it (`InterShardFlow::ChildSceneSet` tombstoned; `child_shape`, `SHAPE_LANE_TICK`, `restate_shapes_in_child_frame`, `lift_shapes_from_child_frame` and `shape_hop_to` all gone — the last four went in C1 with the up-shape half).
+- **THE ORIGIN PROBLEM this row recorded as its blocker** ("how does the client learn which realm the scene is measured in") was answered by option (b)'s successor: the composed level carries an explicit ORIGIN MARKER `(origin: RealmId, origin_epoch: u64)` on the message itself (`ServerControlMsg::RealmRegistry`/`RealmSceneDelta` + `RealmSnapshotDatagram.origin_epoch`), which is `pin`'s lawful successor and cannot desync from the level it rides on.
+- **Where the cure lives:** `crates/wire/src/channels.rs` (`RealmShape`, `SceneRow`, the origin marker), `crates/wire/src/version.rs` (minors 18/19), `crates/connection-plane/src/gateway.rs::compose_scenes`.
 
 ### D-PLACE-4 🟥 The placement WRITER lives in vd-sim behind the opaque seam; the plan's writer-in-node shape is owed
 - **What's missing:** the plan puts `author_placements` in vd-node reading a `vd_physics::MotionRoster`
@@ -4172,30 +4156,47 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **Where:** `vd_core::placement::PlacementLedger`.
 
 ### D-LANE-1 🟥 Lane trust: the directory head is the ADMISSION authority, the learned frame sender stays the ROUTE — and NodeId itself stays self-asserted until P7 (Step-5 lane cure, findings 0/43, 2026-08-14)
+- **★ SCOPE NOTE (window lane Slice C2, 2026-08-16):** FOUR of the five lanes this row cures are now
+  TOMBSTONED and their receive gates deleted with them — `RealmCascade`, `ChildSceneSet`,
+  `RealmObservation`, `RealmShapeObservation` — along with the counters named below
+  (`cascade_unauthored`, `child_scene_unauthored`, `realm_observation_unattested`). The RULE is
+  unchanged and still enforced on every LIVING realm-boundary lane: the SL7 `ChildLive` bit and the
+  Q2 relay (`WindowRelay`) both admit only the node the directory names for that child, and the
+  window lane attests every row against the `ShardRoster` head at the gateway. The paragraphs below
+  are the rule's provenance; read the lane list as history.
 - **WHAT LANDED:** every realm-boundary lane now attests its sender. Down (parent→child: `RealmCascade`, `ChildSceneSet`): accept iff the sender equals the cadence-resolved `ParentRealmNode`, else drop+count (`cascade_unauthored`/`child_scene_unauthored`), fail closed on an unresolved parent. Up (child→parent: `ChildLive`, `RealmObservation`, `RealmShapeObservation`): accept iff the sender equals the directory head for that child (`ChildRealmNodes`, written by the same realm-Head reply arm as the parent resolve, read eagerly on the same AoI cadence for demanded/held children; an unattested bit arms a lazy re-read — the [[D-RLM-6]] mechanism-C backstop, which is also load-bearing at BOOT: a parent holding nobody self-reports Empty before its demand loop, so the first bit's refusal is what pulls the head). **What this closes completely:** the ZOMBIE window — a deposed child still beating held the `home` route at its old fence until its own next beat; now its bit fails the head compare, the route is never refreshed, and the entry TTLs out deterministically, independent of the child.
 - **THE TRANSPORT CONSTRAINT this row must keep saying (the H3 hole both Step-5 designs missed):** the mesh routes ONLY to statically-booked or CONNECTION-LEARNED peers (`crates/io-prod/src/mesh.rs` `unknown_destinations_are_loud_backpressure`, ~3606: an id absent from the address book is permanent, loud back-pressure). A directory-derived NodeId may therefore be UNROUTABLE — an RLM-spawned shard is in nobody's static book. So `ChildLiveEntry.home` (the learned return address, CA-1 reply-on-connection) is RETAINED as the down-lanes' route and the directory head admits it; the two are deliberately different jobs and folding them would hard-fail the down-lanes at the process/dev tier.
 - **WHAT THIS IS NOT:** a security boundary. NodeId is self-asserted on the current trust model (see [[D-RLM-8]] — unchanged, not flipped); this is a live CORRECTNESS cure with a deterministic bound, not authentication. P7's connection-bound NodeId turns the same compares into a real boundary for free.
 - **Where:** `crates/sim/src/stub.rs` (`ChildRealmNodes`, `update_child_node`, `head_reads_due`, the five receive gates), tests beside each.
 
 ### D-LANE-3 🟥 The observation lanes carry exactly TWO levels — depth 3 is an owner decision, not a default (Step-5 lane cure, finding 39, 2026-08-14)
+- **★ SCOPE NOTE (window lane Slice C2, 2026-08-16):** the observation lanes this row bounds are
+  TOMBSTONED. The two-level law SURVIVES on their successors and is pinned there: a parent's window
+  statements name at most its DIRECT children, and the one level of interior comes from the live
+  realm's OWN statements relayed VERBATIM one hop (`InterShardFlow::WindowRelay`, the Q2 ruling) —
+  `stub::tests::the_live_siblings_interior_is_one_level_out_and_never_deeper_q1` is the pin. The
+  revisit trigger below is unchanged.
 - **WHAT LANDED:** both up-relay recursions are DELETED (`emit_realm_frames`: the rows re-relay inside the observed-interior fan; the lifted-set flatten in the shape ship). The law: every lane carries exactly two levels — what I author about my children, and what my children authored about themselves; a level never relays what it was relayed. Volume before was O(the entire live subtree) per link per tick under a comment claiming visibility culls it (nothing did); the local interior fan is now also bounded by each observer's own AoI band on that child (`AoiMembership` in `emit_realm_frames` — one tick of lag on entry, grace-latched on exit).
 - **WHAT DEPTH 3 WOULD HAVE SHOWN:** a neighbouring system's planets' MOONS, seen from the galaxy, before entering the system (both flown symptoms — "exiting the system freezes its planets", "approaching a system its planets never appear" — survive at depth 2: the level-1 ship is not the relay). **Revisit trigger:** the first world where a grandchild's angular size at the grandparent's typical viewing distance exceeds the eye's resolution (the moment P4 real-scale moons land), or an owner ruling on OD-5 look-ahead depth.
-- **Where:** `crates/sim/src/stub.rs::emit_realm_frames`, `vd-wire::intershard` `RealmObservation`/`RealmShapeObservation` docs.
+- **Where:** `crates/sim/src/stub.rs::emit_realm_frames`, `vd-wire::intershard` `RealmObservation`/`RealmShapeObservation` tombstone docs.
 
-### D-LANE-4 🟥 SL3 outline authorship — a realm authors HOW IT LOOKS; the parent's roster still authors its children's outlines (Step-5 lane cure, finding 23; held on an owner world-design ruling)
-- **WHAT is deferred:** the outline a parent ships for a child (`child_shape` — `shape: region.shape`, the parent's ROSTER's opinion) moving to the realm's OWN self-description: `RealmShapeObservation` carrying the sender's own outline plus its live children's self-descriptions, the parent's per-child message shrinking to a placement and nothing else (SL3's own sentence). The draw then becomes liveness-gated STRUCTURALLY — a realm that is not running ships no self-description, so nothing holds an outline for it and it is not drawn, with no liveness term on the draw path. (The SL7 occupancy bit is NOT a substitute predicate: it means "somebody is inside", not "this is running" — gating the draw on it would hide every unoccupied realm forever.)
-- **THE OWNER RULING IT WAITS ON:** if a non-running realm draws nothing, an empty star system is invisible until something spins it up — so either everything visible is spun up (at galaxy scale, every system you can see), or distant unoccupied bodies belong to an always-on starfield layer rather than the realm scene. A world-design decision, not an implementation one. **A second tension to cost with it:** under authorship every neighbour box waits one shape cadence plus one hop after spin-up (today the parent's roster answers instantly); the own-outline login lead (`stub.rs` "a player must be told the room they are in before that round-trip") documents why that latency is seamless-relevant.
-- **Where:** `crates/sim/src/stub.rs::child_shape` + the shape lanes; `docs/design/step5_sl7_lane_deletion.md` names this row.
+### D-LANE-4 🟩 RESOLVED (window lane Slices C1+C2, 2026-08-16) — SL3 reached: a realm authors HOW IT LOOKS, and no parent can state a child's outline at all
+- **WHAT was deferred:** the outline a parent shipped for a child (`child_shape` — `shape: region.shape`, the parent's ROSTER's opinion) moving to the realm's OWN self-description, and the parent's per-child message shrinking to a placement and nothing else (SL3's own sentence).
+- **HOW it resolved (owner-approved 2026-08-15/16, `docs/design/window_lane.md` §2.10 + §5 RULINGS):** a realm now states its own look on `ShardToGateway::WindowBody::SelfLook`, built from what it knows about ITSELF (its own boot extent via `RealmRegions::own_shape`), straight to the connection plane — and the two lanes a parent used to author outlines on are DELETED with their machinery: `InterShardFlow::ChildSceneSet` and `ShardToGateway::RealmSceneDelta` are tombstoned (minor 19) and `child_shape` no longer exists. What a parent may still say about a child is a PLACEMENT (`WindowFrame` rows) and, for a DORMANT child only, one photometric marker (§1.1 item 3b — the owner-ruled R4 datum, superseded the instant the child speaks for itself). Attestation makes the split structural, not careful: a `SelfLook` is legal only when `subject == the sender's own realm`.
+- **THE OWNER RULING IT WAITED ON — answered by the marker model.** The question was: if a non-running realm draws nothing, is an empty star system invisible? The answer is that a dormant child is its PARENT's point of light, positioned by the parent's placement row before, during and after spin-up; only the LOOK payload upgrades (marker ⇒ self-look) when the child starts speaking, by data presence, never both and never zero. So the draw IS liveness-gated structurally, and nothing goes dark.
+- **MEASURED, not argued:** `tests/tests/frame_conversion_e2e.rs::the_room_the_player_is_standing_in_has_exactly_one_author` (the room's look crosses the shard→gateway edge stated by its OWN shard and by no other host, and no host ever states a look about a realm it is not).
+- **What Slice D still owes (registered there, not here):** the marker point-sprite RENDERING and roster-driven look pruning — the client-side half of the handover. Authorship is done.
+- **Where:** `crates/sim/src/stub.rs` (`emit_window_bodies`, `current_bodies`), `crates/wire/src/session_flow.rs` (`BodyStmt`, `window_body_admissible`), `docs/design/window_lane.md` §2.10.
 
 ### D-LANE-5 🟩 The SL7 bit beats on its contract's cadence; the retain TTL is derived in cadence beats (Step-5 lane cure, finding 41 — landed 2026-08-14)
 - **LANDED:** the `ChildLive` emit is gated on the AoI cadence (`aoi_recheck_cadence` — the same expression the shape ship uses) plus the occupancy EDGE (`WasOccupied`: the transition itself, derived with no hook in any adopt path; going empty re-arms it) — the contract text (`intershard.rs`) and the code now say the same thing, ~25× less traffic at the shipped profile. `retain_ttl_ticks` = max(1 s loiter, 2 cadence beats + 1 tick slack) — the shipped 50 Hz/recheck-25 profile's exactly-two-beats-zero-slack equality was a coincidence, now a derivation. The beat RATE is asserted (no longer print-only) in `the_per_leg_liveness_cost_and_rate_are_measured` against the sender's own production expression; the freshness harness (stale-under-loss, never gone) is the TTL's experiment and stayed green unchanged.
 - **The residual this bought (priced, accepted):** consumers of the bit read up to one cadence of staleness (the chain-latency gate's up budget is now sender-cadence-derived), and noticing a realm went empty takes up to one cadence longer.
 - **Where:** `crates/sim/src/stub.rs` (`aoi_decide` bit emit, `WasOccupied`, `retain_ttl_ticks`), `tests/tests/frame_conversion_e2e.rs`.
 
-### D-LANE-6 🟥 The `--realm-boxes` client boot file draws realms with no running evidence at all (Step-5 lane audit OD-11, 2026-08-14)
-- **WHAT is deferred:** the client's `--realm-boxes` boot path (`crates/bins/tests/render_boxes_smoke.rs` ~170 and the client flag it drives) renders realm outlines straight from an on-disk regions file — no running realm behind any box — and every pixel gate stands on it. Same law as [[D-LANE-4]] (a realm that is not running cannot be drawn), different lane: this one never touches the wire at all.
-- **WHERE it lands / WHEN:** with [[D-LANE-4]]'s authorship model (the boot file then seeds only the starfield/chart layer, never the realm scene), or earlier if the pixel gates migrate to the streamed scene. Ledgered rather than changed in the Step-5 lane arc (surfaced, not smuggled).
-- **Where:** `crates/bins/src/bin/client.rs` (`--realm-boxes`), `crates/bins/tests/render_boxes_smoke.rs`.
+### D-LANE-6 🟩 RESOLVED (Slice C1, 2026-08-16) — the `--realm-boxes` boot file is DELETED; the stream is the one scene source
+- **WHAT was deferred:** the client's `--realm-boxes` boot path rendered realm outlines straight from an on-disk regions file — no running realm behind any box — and every pixel gate stood on it.
+- **HOW it resolved (owner-approved 2026-08-15/16, decisions items 1/9/10 — THE DRAW LAW; docs/design/window_lane.md §2.11):** the flag day deleted the whole path — `--realm-boxes`/`debug_scene_arg` (client bin), `from_regions_json`/`from_boxes_json`/`load_scene` (vd-client), `write_world_regions`/`emit-world-scene` (vd-bins + devcluster), and the emit+pass in `scripts/visual-run.sh`/`client.sh`. The client draws ONLY the composed stream (the `RealmRegistry` level + deltas + composed datagrams); a realm that is not running appears only as its parent's marker datum. The pixel gates were re-based onto the streamed scene in the same cut (drawn set == the gateway-emitted level set; extents read streamed off `DevState.realm_boxes.extent_m`).
+- **Where the cure lives:** `crates/wire/src/channels.rs::SceneRow`, `crates/connection-plane/src/gateway.rs::compose_scenes`, `crates/client/src/realm_scene.rs::from_scene_rows`, `crates/bins/tests/render_boxes_smoke.rs` / `render_crossing_smoke.rs` (re-based).
 
 ### D-WIRE-1 🟥 `to_parent` is a DEAD field on four frozen wire arms — flag-day removal owed (Stage-C audit :685/:812, 2026-08-14)
 - **WHAT is deferred:** removing `to_parent: Option<RealmId>` from `CrossingRequest`, `TransientCrossingRequest`, `TransientCrossingGrant` and `FlushSource` (plus the `SagaCtx.to_parent` / `TransientStatus::Crossing.to_parent` / `LatchedCrossing.to_parent` carriers that mirror them). The field is produced and threaded end to end but READ BY NOTHING: the consumer it was appended for (`rebind_pose_to_dest`, wire minor 3 — the "Area label never flips" fix) was DELETED by the placement arc (D-PLACE-1). The receiver forms an `Area` dest's frame from its own ROSTER (`arrival_frame` → `RealmRegions::hosted_frame`, which carries the enclosing planet's seed losslessly), so the datum never needed to cross a boundary at all (SL6's own test: the receiver computes it from what it legitimately holds).
@@ -4205,11 +4206,11 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 
 ### D-SHIP-1 🟥 Ship realms cannot be named by the lineage coordinate — every coord lane EXCLUDES them, counted, until P8 (Stage-C audit :713, 2026-08-14)
 - **WHAT is deferred:** a lineage-coordinate arm for entity-backed `Ship` realms. `RealmKindTag` carries six seed-keyed tags and no Ship (`RealmLevel.seed` is a `u64`; `RealmId::Ship(EntityId)` keys on a `u128`), so `level_of(Ship) = None`, a Ship own-realm cannot build a `StubConfig` (`root_coord`'s expect), the shard bin refuses `VD_REALM_KIND=ship` at boot, and no Step-5 lane can NAME a ship child (demand/AoI, cascade targeting, scene reflect, interior fan). This is a first-class realm kind (PLAN.md P8: ship = own shard) structurally outside the realm lanes.
-- **WHAT LANDED NOW (the interim):** `region_level` returns `Option` and every coord-needing lane excludes a Ship region GRACEFULLY — counted per lane pass (`StubStats::ship_child_regions_excluded`), never a panic (it was an `expect` that aborted the whole shard on one hosted ship region). A ship still counts where no coord is needed: its `ChildLive` bit is a child OBSERVER, so an occupied ship keeps its parent warm (SL7). Pinned by `stub::tests::a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic` (all four lanes, one tick, counter == 4) and the `None` arm in `region_level_recovers_seed_lineage_kinds`. No producer plants a Ship region through P3, so the counter reads 0 in every shipped world.
+- **WHAT LANDED NOW (the interim):** `region_level` returns `Option` and every coord-needing lane excludes a Ship region GRACEFULLY — counted per lane pass (`StubStats::ship_child_regions_excluded`), never a panic (it was an `expect` that aborted the whole shard on one hosted ship region). A ship still counts where no coord is needed: its `ChildLive` bit is a child OBSERVER, so an occupied ship keeps its parent warm (SL7). Pinned by `stub::tests::a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic` and the `None` arm in `region_level_recovers_seed_lineage_kinds`. **The lane count fell FOUR → TWO at window lane Slice C2 (2026-08-16):** the cascade targeting, the interior fan and the scene reflect died with their messages, leaving the AoI/demand fold and a `Child`-scope window's hop row — the pin asserts `counter == 2` now. No producer plants a Ship region through P3, so the counter reads 0 in every shipped world.
 - **WHEN:** P8 (the ship-realm work) — a new lineage arm PLUS a payload widening (the `u64` seed cannot hold an `EntityId`), i.e. a deliberate wire change on the frozen `RealmPath`, not an append; the counter and the exclusions retire with it.
 - **Where:** `crates/core/src/realm_path.rs` (`RealmKindTag`), `crates/core/src/worldgen.rs::level_of`, `crates/sim/src/stub.rs::region_level` + the four lane guards, `crates/bins/src/lib.rs::realm_from_kind_seed`.
 
-### D-WINDOW-1 🟧 THE WINDOW LANE — the observer chain that replaces the bucket cascade (owner-approved 2026-08-15/16, docs/design/window_lane.md; slices 0/A/B landed, C1 next)
+### D-WINDOW-1 🟧 THE WINDOW LANE — the observer chain that replaces the bucket cascade (owner-approved 2026-08-15/16, docs/design/window_lane.md; slices 0/A/B/C1/C2 landed, D next)
 - **WHAT this is:** the binding slice ladder for the window lane (`docs/design/window_lane.md`; the signed
   five-topic approval + Q1/Q2/Q3 rulings live in `docs/design/owner_decisions_2026-08-15.md`, 2026-08-16
   addendum). Each world level states only what it lawfully owns — placements, one hop row per occupied child,
@@ -4272,7 +4273,16 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
     Slice-A seed-forest parent lookup AND the forest-read marker admission are DELETED, the roster now
     vouches markers). Output compared, never shipped (`shadow_compose` emits zero bytes). Gates landed:
     the process-tier parity MEASUREMENT with named mismatch classes (`window_shadow_parity.rs` /
-    `just window-parity`, in `gate`); G-SHEAR unit half incl. the deliberate mixed-tick FAILURE
+    `just window-parity`, in `gate`) — **RAN GREEN and is RECORDED here; its comparator was RETIRED in
+    Slice C2 with the lanes it measured** (§4.5 Topic 5's rule is "shadow parity BEFORE any client cut",
+    and the client cut landed in C1; §4's Slice-C2 gate list carries no parity entry). The scenario file
+    was NOT deleted: it is re-based onto composed self-consistency, because three §2.12 named invariants
+    had no other process-tier home — the exact-cadence proof (`window_full_chain_folds > 0`), both dedup
+    f64 agreements (`window_dedup_disagree == 0`, `window_fold_divergence == 0` with
+    `window_fold_hits > 0`) and the live shear law (`window_instant_mismatch == 0`) — and it now also
+    asserts the four deleted lanes stay SILENT in a real cluster. Its last parity reading:
+    zero unexplained mismatches over hundreds of matched rows, sibling-interior exclusion class 0.
+    G-SHEAR unit half incl. the deliberate mixed-tick FAILURE
     (`g_shear_the_deliberate_mixed_tick_compose_must_fail`); the exact-cadence boot pin
     (`window_full_chain_folds > 0` asserted in the parity run — a ≥2-level fold exists only at an
     identical cross-shard stamp); BOTH dedup f64 measured bounds (hop-vs-child-row
@@ -4287,23 +4297,92 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
     candidate needs an owner ask — see the Slice-B report's SL6 ask text). The class counts 0 in the
     landed parity run (no live-sibling interior exists in its topology); it goes nonzero — loudly, by
     name — the day one does, and flips to composed rows when the owner rules the carrier.
-  - **Slice C1 — THE FLAG DAY** (client minor, floor moves; owner item 9: no shims, no dual-decode).
-    Client consumes the composed lane; `RealmShape.center` leaves; origin/epoch scene swap replaces
-    `forget_space`; `pin`/`render_pin` deleted; the `--realm-boxes` boot file + emitter + scripts deleted
-    (D-LANE-6 flips 🟩); picture gates re-based. *Owner-visible outcome:* the game runs on the composed
-    picture; boxes come only from the stream.
-  - **Slice C2 — the deletion + tombstones.** FIRST re-walk the §2.9 deletion map against the tree (drift
-    proven); then the four inter-shard scenery arms (`RealmCascade` 26, `RealmObservation` 31,
-    `RealmShapeObservation` 32, `ChildSceneSet` 33) tombstone; the SL1 self-placement filter is deleted
-    WITH its lane (per Q3 — the ruling MUST be cited in the C2 ledger entry); cascade/down-reflect/
-    shape-hop/observed-interior machinery removed. *Owner-visible outcome:* four world-to-world scenery
-    lanes gone forever; nothing changes on screen (the suite stays green).
+  - **Slice C1 — THE FLAG DAY (🟩 landed 2026-08-16;** client minor 18, floor 8 → 18; owner item 9:
+    no shims, no dual-decode). The client consumes the composed lane (`RealmRegistry` = the level
+    `{origin, origin_epoch, rows: Vec<SceneRow>}`; the delta and the composed per-tick datagram beside
+    it); `RealmShape.center` left the wire (a shape is pure self-description); the origin/epoch scene
+    swap replaced `forget_space` (the one-space + echo guards stay ALIVE until C2 removes their cause —
+    §4.5 Topic 4); `pin`/`render_pin` deleted; the `--realm-boxes` boot file + emitter + scripts deleted
+    (D-LANE-6 flipped 🟩); picture gates re-based (§2.11: settle on the composed feed's own signal,
+    streamed extents, DevState-driven dot detection, the origin-marker J1 + the crossing no-flicker
+    gate). **THE SIBLING-INTERIOR CARRIER rode this slice by the owner's carrier ruling
+    (owner-approved 2026-08-16 — docs/design/owner_decisions_2026-08-15.md addendum +
+    docs/design/window_lane.md §5 RULINGS, recommendation 1 of the Slice-B ask):**
+    `InterShardFlow::RealmShapeObservation` (disc 32) is TOMBSTONED — its interim content EVOLVED,
+    exactly as its minor-11 entry promised — and its successor pair landed at mesh minor 17:
+    `InterShardFlow::WindowRelay` (disc 34 — the child's VERBATIM self-authored statements as SEALED
+    bytes + its own fence; the parent holds them UNOPENED and its whole lawful vocabulary is
+    forward-or-drop) and `ShardToGateway::WindowRelayed` (disc 10 — the forward leg, admitted against
+    the CHILD's identity by the existing predicates; admitted looks land in the one body store, so the
+    §2.8 marker⇒look handover runs today; relayed interior LEVELS are held per child for Slice D's
+    interior compose). The planets' REFLECTED marker draw (§1.1 item 3b "per direct child") landed in
+    `vd-physics` (`reflected_photometrics`: L★·albedo·r²/(4d²), albedo seed-drawn over the canonical
+    geometric-albedo table) — the flag day made markers load-bearing, so the owed planet datum could
+    no longer wait. *Owner-visible outcome:* the game runs on the composed picture; boxes come only
+    from the stream; dormant planets are their parent's points of light.
+  - **Slice C2 — THE DELETION (🟩 landed 2026-08-16; mesh minor 19).** The §2.9 deletion map was
+    RE-WALKED against the tree first, as the design orders (drift was proven, and found again: the SL1
+    self-placement filter sat in the down-reflect emit loop, not at the design's quoted `stub.rs:8384`).
+    **TOMBSTONED** (variants + payload structs remain, discriminants reserved forever, both exhaustive
+    classifications frozen, received frames counted `undecodable` on their REAL carrier):
+    `InterShardFlow::RealmCascade` (26), `RealmObservation` (31), `ChildSceneSet` (33) — beside
+    `RealmShapeObservation` (32, minor 17). The golden tombstone set grew FIVE → EIGHT
+    (`crates/wire/tests/intershard_closed.rs::the_tombstoned_discriminants_are_exactly_this_golden_set`
+    pins {24,25,26,27,28,31,32,33} against a compile-forced exhaustive classifier).
+    **TWO shard→gateway carriers went with them, producers deleted in the same commit:**
+    `ShardToGateway::RealmFrame` (the old opaque per-tick realm datagram — the `Occupants`
+    `WindowFrame` subsumes it per §2.9 step 3, and the composed feed has been the client's one scene
+    author since the minor-18 flag day) and `ShardToGateway::RealmSceneDelta` (the per-dot OUTLINE
+    push — §2.9 shrinks it to the ids-only `WindowMembership` verdict). Both are now counted-and-dropped
+    at the gateway (`old_realm_frames_dropped`, `old_scene_deltas_dropped`), so a revived producer is
+    loud rather than silent.
+    **SHARD MACHINERY DELETED** (`crates/sim/src/stub.rs`): the cascade
+    (`restate_rows_in_child_frame`/`restate_rows_in_frame`/`push_cascade`/`on_realm_cascade`, plus
+    `hop_book`/`ActiveChild`/`active_children`/`home_of_active_child`/`any_active_child`/`placement_of`
+    and the now-dead relay-instant selector `book_at_or_head`); the down-reflect block (`FromAboveScene`,
+    `ChildSceneSent`, `on_child_scene_set` and the per-live-child emit loop); the observed-interior fan
+    + TTL machinery (`ObservedInterior`, `ObservedInteriorShapes`, `interior_of`); the up-observation
+    ship + `on_realm_observation`; the direct realm-datagram emit + its chunking and
+    `RealmFrameCounter`; and the per-dot scene fold's shape-pushing (`child_shape`,
+    `diff_scene_into_delta`, `RenderSent`, the own-outline lead) — which shrinks to the ids-only
+    membership emit exactly as §2.9 says. FIFTEEN counters died with them: `cascade_rows_converted`,
+    `cascade_rows_dropped`, `cascade_unauthored`, `misrouted_cascade`, `realm_cascade_received`,
+    `realm_cascade_relayed`, `realm_observation_received`, `realm_observation_misrouted`,
+    `realm_observation_unattested`, `realm_observation_unplaceable`, `child_scene_received`,
+    `child_scene_misrouted`, `child_scene_unauthored`, `child_scene_unaddressable`,
+    `realm_rows_unplaceable_observer`. THE ENTITY LANE IS UNTOUCHED (SL2 unchanged).
+    **★ THE SL1 SELF-PLACEMENT FILTER RETIRED BY AMENDMENT, NOT BY EROSION** — owner ruling Q3,
+    2026-08-16 (`docs/design/window_lane.md` §5 RULINGS; the owner had previously said "the filter
+    stays" and then approved deleting it TOGETHER WITH THE LANE IT GUARDED, on the ground that the
+    hazard ceases to exist). Its replacements are STRUCTURAL and both can fail:
+    (i) COMPILE-LEVEL — `crates/wire/tests/intershard_closed.rs::no_living_inter_shard_payload_carries_a_realm_placement_or_a_centre`
+    scans the wire crate's own vocabulary and asserts no LIVING inter-shard payload declares a realm
+    placement, a centre, or the opaque pre-serialized datagram the dead lanes hid one inside — with the
+    tombstoned payloads as the positive control proving the detector fires;
+    (ii) END-TO-END — `tests/tests/frame_conversion_e2e.rs::no_message_into_a_realm_names_that_realm_or_carries_a_placement`
+    sweeps every byte delivered into all three hosts of a live chain for 150 ticks and asserts no realm
+    is ever told about itself (including inside the SEALED relay, opened by the test only).
+    **SCENARIOS RE-BASED, NEVER DELETED:** the three chain descent scenarios became
+    `the_authored_world_no_longer_descends_and_each_level_states_only_itself`,
+    `no_message_into_a_realm_names_that_realm_or_carries_a_placement` and
+    `the_room_the_player_is_standing_in_has_exactly_one_author`; the chain-latency and lossy-link gates
+    re-based onto the Q2 relay leg + the leaf's own level at the gateway edge — and the picture's budget
+    **no longer contains depth** (§2.13's structural claim, now a gate: one hop, not a sum over levels).
+    **★ A REAL DEFECT THE DELETION EXPOSED, found and fixed:** the in-proc harness gateway ran at
+    `tick_hz: 50` while its shards run 20 Hz, so the window keep-alive beat (25 ticks) was longer than
+    the shard's window TTL (2 beats + 1 = 21) and EVERY WINDOW LAPSED between beats — measured as
+    alive ~10 ticks, dead ~15, forever. The old scenery lanes had been masking it; with them gone it is
+    a frozen picture. `tests/src/lib.rs` now states the cluster's one tick rate, and the leaf's
+    own-level age at the gateway edge fell from p99 16 ticks to p99 1.
+    *Owner-visible outcome:* four world-to-world scenery lanes gone forever; nothing changes on screen
+    (the suite stays green).
   - **Slice D — THE WARP ACCEPTANCE (capstone).** Marker point-sprite rendering, roster-driven look
     pruning, symmetric handover budgets. *Owner-visible outcome:* the warp experience in pixels on THE
     world — fly A → B: B a point of light at departure, grows monotonically, hands over flicker-free; A
     shrinks to a dot behind and tears down. Gates: G-WARP-PIXELS, G-HANDOVER (both directions, incl. the
     Q2 relay hop at the wake moment), G-TWO-SHIPS (owner-ordered, see the addendum), G-SHEAR full.
-    DEFERRED flips: D-LANE-4 🟩, D-LANE-6 🟩, D-PLACE-3 🟩; D-PLACE-2 residual shrinks but stays open;
+    DEFERRED flips: D-LANE-4 🟩, D-LANE-6 🟩 and D-PLACE-3 🟩 all landed EARLY (C1/C2 discharged
+    their substance — see those rows); D-PLACE-2's residual shrank (two readers gone) but stays open;
     new owed rows registered (census-scale photometric derivation; P10 rotated-hop composition).
 - **Where:** `crates/wire/src/session_flow.rs` (the lane's types + attestation predicates),
   `crates/wire/src/version.rs` (minor 16), `crates/physics/src/worldgen.rs` (the photometric draw),

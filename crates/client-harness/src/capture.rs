@@ -150,6 +150,8 @@ mod tests {
             feed_skew_ticks: None,
             entities: Vec::new(),
             realm_boxes: Vec::new(),
+            origin: None,
+            stale_epoch_rows: 0,
             snapshots_applied,
             realm_frames_applied: 0,
             stale_frames_dropped: 0,
