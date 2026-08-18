@@ -302,19 +302,32 @@ impl RealmScene {
 /// One composed row's drawable box, or `None` when the row carries no drawable statement — THE
 /// DRAW LAW's presence gate in one monomorphic place (HR5: every branch here, off the two
 /// straight-line scene builders). `TAG_LOOK` wins (a running realm draws itself); an outline
-/// wider than `MAX_RENDERABLE_EXTENT_M` is an ambient shell (felt, not framed); else `TAG_LUMA`
-/// is the parent's point-of-light datum (a zero-radius point until Slice D's sprites); else —
-/// including unknown future tags, skipped by the TLV codec's own law — the row is not drawn.
+/// wider than `MAX_RENDERABLE_EXTENT_M` is an ambient shell (felt, not framed); else the
+/// point-of-light marker arm (look_horizon.md slice 1, Q2 APPROVED): `TAG_LUMA` (the parent's
+/// photometric datum) and/or `TAG_EXTENT` (the parent's one stated radius — the presence floor:
+/// a non-glowing subject still draws as a correctly-sized point instead of vanishing); the
+/// marker's shape carries the stated extent, so the diagnosis surface and the sprite sizing read
+/// ONE number. Else — including unknown future tags, skipped by the TLV codec's own law — the
+/// row is not drawn.
 fn row_box(r: &SceneRow, depth: u8) -> Option<RealmBox> {
     let (shape, body, luma) = if let Ok(outline) = vd_core::look::look_of(&r.bag) {
         if outline.finite_extent() > MAX_RENDERABLE_EXTENT_M {
             return None; // ambient (non-renderable) shell — felt, not framed
         }
         (shape_of(outline), BodyKind::Look, None)
-    } else if let Ok(datum) = vd_core::look::luma_of(&r.bag) {
-        (BoxShape::Sphere { r: 0.0 }, BodyKind::Marker, Some(datum))
     } else {
-        return None; // no drawable statement — tracked, never drawn
+        let luma = vd_core::look::luma_of(&r.bag).ok();
+        let extent = vd_core::look::extent_of(&r.bag).ok();
+        if luma.is_none() && extent.is_none() {
+            return None; // no drawable statement — tracked, never drawn
+        }
+        (
+            BoxShape::Sphere {
+                r: extent.unwrap_or(0.0),
+            },
+            BodyKind::Marker,
+            luma,
+        )
     };
     Some(RealmBox {
         shape,
@@ -482,6 +495,51 @@ pub fn marker_look(class_code: u8, luma_lsun: f64) -> MarkerLook {
         // `f64::max` returns the non-NaN side, so a malformed datum floors at zero luminosity
         // (a point at the apparent-size floor) rather than producing a NaN transform.
         base_radius_m: POINT_SOURCE_BASE_RADIUS_M * luma_lsun.max(0.0).sqrt(),
+    }
+}
+
+/// One render shape's CIRCUMSCRIBED extent in metres (a sphere's radius; a box's half-diagonal —
+/// the radius of the sphere around it): the ONE number the diagnosis surface (`DevRealmBox
+/// .extent_m`), the camera fitting and the marker sizing all read. A marker box carries its
+/// parent-stated extent as a sphere (`row_box` mints it so), so this returns that stated radius
+/// exactly.
+#[must_use]
+pub fn shape_extent_m(shape: BoxShape) -> f64 {
+    match shape {
+        BoxShape::Sphere { r } => r,
+        BoxShape::Box { half } => half.length(),
+    }
+}
+
+/// THE MARKER'S BASE WORLD RADIUS before the shared apparent-size floor (look_horizon.md
+/// slice 1, Q2 APPROVED): the LARGER of the photometric √L radius and the parent's one stated
+/// circumscribed extent — so a point of light's angular size is never smaller than the thing it
+/// stands for, and the marker→body handover has no size step (the pre-slice ~3.8× pop at the
+/// three-pixel floor). ONE expression, shared by the renderer's sprite scale and the pixel
+/// gates' rectangle (via `vd_client_harness::camera::marker_world_radius`), so the drawn
+/// footprint and the asserted rectangle cannot disagree. A luma-less marker (a non-glowing
+/// subject — the presence floor) sizes by its extent alone; an extent-less marker (an old
+/// luma-only bag) by its √L radius alone, the floor carrying the rest.
+#[must_use]
+pub fn marker_base_radius_m(luma: Option<(u8, f64)>, extent_m: f64) -> f64 {
+    let photometric = luma.map_or(0.0, |(class_code, luma_lsun)| {
+        marker_look(class_code, luma_lsun).base_radius_m
+    });
+    photometric.max(extent_m.max(0.0))
+}
+
+/// THE MARKER'S DRAWN COLOUR: the photometric datum's blackbody class colour when the subject
+/// glows; the box's own pure role colour (at a point of light's OPAQUE alpha) when it does
+/// not — a non-glowing subject's appearance is a CLIENT cosmetic law exactly like a shell's,
+/// because the parent's bag lawfully carries one radius and nothing else (the one-radius law).
+#[must_use]
+pub fn marker_color_rgba(role_rgba: [f32; 4], luma: Option<(u8, f64)>) -> [f32; 4] {
+    match luma {
+        Some((class_code, luma_lsun)) => marker_look(class_code, luma_lsun).color_rgba,
+        None => {
+            let [r, g, b, _] = role_rgba;
+            [r, g, b, 1.0]
+        }
     }
 }
 
@@ -839,6 +897,90 @@ mod tests {
             level.overlaid_at(&RealmView::default(), f64::INFINITY),
             level
         );
+    }
+
+    /// THE STATION-LAPSE GATE's client half (look_horizon.md slice 1 — declared RED before the
+    /// slice; the red was MEASURED at the producer: a non-glowing child stated no marker at all,
+    /// so a station whose own picture lapsed VANISHED from the drawn set). A station's look draws
+    /// while it runs; when its picture lapses the composed row's bag falls to its parent's
+    /// extent-only marker — and the station stays DRAWN: a point of light sized by the ONE
+    /// stated radius (the one-radius law), coloured by the client's own role law, NEVER an empty
+    /// frame.
+    #[test]
+    fn a_lapsed_station_degrades_to_a_correctly_sized_marker_never_to_nothing() {
+        let station = RealmId::Station(7);
+        let pos = DVec3::new(60.0, -4.0, 9.0);
+        // RUNNING: the station's own look draws it (SL3 — a realm draws itself).
+        let running = RealmScene::from_scene_rows(&[row(
+            station,
+            None,
+            pos,
+            look_aabb(DVec3::new(10.0, 20.0, 30.0)),
+        )])
+        .expect("projects");
+        assert_eq!(running.get(station).map(|b| b.body), Some(BodyKind::Look));
+        // LAPSED: the bag is now the parent's extent-only marker — the station is STILL drawn.
+        let extent = 40.0;
+        let lapsed = RealmScene::from_scene_rows(&[row(
+            station,
+            None,
+            pos,
+            vd_core::look::marker_bag(None, extent),
+        )])
+        .expect("projects");
+        let b = lapsed
+            .get(station)
+            .expect("a lapsed station is drawn as a marker, never dropped from the scene");
+        assert_eq!(b.body, BodyKind::Marker);
+        assert_eq!(b.luma, None, "a non-glowing subject states no photometrics");
+        assert_eq!(
+            b.shape,
+            BoxShape::Sphere { r: extent },
+            "the marker carries the parent's ONE stated radius"
+        );
+        // CORRECTLY SIZED: the sprite's base radius is exactly the stated extent (the shared
+        // sizing expression the renderer and the pixel gates both call)…
+        assert_eq!(
+            marker_base_radius_m(b.luma, shape_extent_m(b.shape)),
+            extent
+        );
+        // …and the sizing law: the base is the LARGER of the photometric radius and the extent.
+        assert_eq!(marker_base_radius_m(Some((4, 1.0)), 0.2), 0.5, "√L wins");
+        assert_eq!(
+            marker_base_radius_m(Some((4, 1.0)), 40.0),
+            40.0,
+            "extent wins"
+        );
+        assert_eq!(marker_base_radius_m(None, -3.0), 0.0, "garbage floors at 0");
+        // DRAWN IN THE ROLE COLOUR at a point of light's opaque alpha; a glowing marker keeps
+        // its blackbody class colour.
+        let quiet = marker_color_rgba(b.color_rgba, b.luma);
+        assert_eq!(quiet[3], 1.0);
+        assert_eq!(quiet[..3], b.color_rgba[..3]);
+        assert_eq!(
+            marker_color_rgba(b.color_rgba, Some((4, 1.0))),
+            marker_look(4, 1.0).color_rgba
+        );
+        // The extent accessor's box arm: a box shape's circumscribed radius (its half-diagonal).
+        assert_eq!(
+            shape_extent_m(BoxShape::Box {
+                half: DVec3::new(3.0, 4.0, 12.0)
+            }),
+            13.0
+        );
+        // And a GLOWING marker bag (datum + extent) decodes BOTH halves into one box: the
+        // photometric datum rides `luma`, the one radius rides the shape.
+        let glowing = RealmScene::from_scene_rows(&[row(
+            RealmId::Planet(9),
+            None,
+            pos,
+            vd_core::look::marker_bag(Some((6, 0.25)), 3.954),
+        )])
+        .expect("projects");
+        let g = glowing.get(RealmId::Planet(9)).expect("drawn");
+        assert_eq!(g.body, BodyKind::Marker);
+        assert_eq!(g.luma, Some((6, 0.25)));
+        assert_eq!(g.shape, BoxShape::Sphere { r: 3.954 });
     }
 
     #[test]

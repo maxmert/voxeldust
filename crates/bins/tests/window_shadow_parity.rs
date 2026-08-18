@@ -177,7 +177,8 @@ fn print_class_report(tag: &str, gw: &GatewayView) {
          [window:{tag}] composer: holds={} dead_hops={} stalled={} cycles={} unresolved_standing={}\n\
          [window:{tag}] shear/dedup: instant_mismatch={} fold_divergence={} dedup_disagree={} dedup_max_dev={} nm\n\
          [window:{tag}] ingest: rows_ingested={} level_refused={} body_stale={} body_preroster={} head_reads={}\n\
-         [window:{tag}] egress: levels={} deltas={} datagrams={} relay_rows_composed={} relay_unplaceable={}\n\
+         [window:{tag}] egress: levels={} deltas={} datagrams={} relay_rows_composed={} \
+         relay_descent_refused={} relay_stamp_missing={} relay_unrostered={} relay_skew_max={} relay_depth_max={}\n\
          [window:{tag}] DEAD LANES (must stay 0): old_realm_frames={} old_scene_deltas={}",
         gw.window_folds,
         gw.window_fold_hits,
@@ -202,7 +203,11 @@ fn print_class_report(tag: &str, gw: &GatewayView) {
         gw.scene_deltas_sent,
         gw.scene_datagrams_sent,
         gw.window_relay_rows_composed,
-        gw.window_relay_unplaceable,
+        gw.window_relay_descent_refused,
+        gw.window_relay_stamp_missing,
+        gw.window_relay_unrostered,
+        gw.window_relay_stamp_skew_ticks,
+        gw.window_relay_depth_max,
         gw.old_realm_frames_dropped,
         gw.old_scene_deltas_dropped,
     );

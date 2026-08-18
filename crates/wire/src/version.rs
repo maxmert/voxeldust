@@ -195,7 +195,34 @@ pub const PROTO_MAJOR: u16 = 1;
 /// placement or a centre at all (the structural successor to the deleted filter, pinned in
 /// `crates/wire/tests/intershard_closed.rs`). Mesh-only (one cluster build, ledger-visible): no
 /// client-facing message changed, so the floor does not move.
-pub const PROTO_MINOR: u16 = 19;
+/// **20** — THE SEALED INTERIOR FORWARD (look horizon slice 3, owner-approved 2026-08-17 —
+/// docs/design/look_horizon.md RULINGS + §2 ASK A). A grandchild's OWN sealed picture now
+/// travels TWO hops instead of one, opened by no realm on the way: `InterShardFlow::WindowRelay`
+/// renames `statements` → `own` IN PLACE (same type, same position — postcard-inert) and
+/// APPENDS `interior: Vec<InteriorRelay>` (each entry a held direct child's own sealed batch,
+/// VERBATIM, with that child's own fence outside the seal — the zombie-guard graft);
+/// `ShardToGateway::WindowRelayed` appends the same `interior` field. The depth bound is the
+/// TYPE: `InteriorRelay` has no `interior` field, so a third level is unrepresentable and the
+/// carrier arity stays [`crate::session_flow::LOOK_CARRIER_ARITY`] = 2 (the owner's Q3 ruling).
+/// The forward gate is the sender's own SL7 in-band verdict (§3.4.5 — the membership gate);
+/// the gateway vouches each grandchild against the child's own attested roster, orders its
+/// fence, and admits ONLY the author's own picture. Mesh-only (one cluster build,
+/// ledger-visible): no client-facing message changed, so the floor does not move. Dark until
+/// the slice-4 interest bit wakes the deep realms.
+/// **21** — THE INTEREST BIT (look horizon slice 4; Q1 APPROVED, owner-approved 2026-08-17 Q1 —
+/// docs/design/look_horizon.md §2 ASK B). ONE new arm, `InterShardFlow::RealmInterest`
+/// (disc 35): one byte, two lawful values, parent → ONE direct child, direct to the child's
+/// head node on the route the parent already resolves (`ChildRealmNodes`) — never further,
+/// never sideways, never through the orchestrator. The first realm-inbound arm since the
+/// minor-19 deletion, and it carries NO placement, no centre, no identity, no direction, no
+/// count (the `intershard_closed` absence pin covers it by construction of the type). It ends
+/// the landed Q2 rationale clause ("am I observed from outside stays unrepresentable in every
+/// realm") by the owner's EXPLICIT amendment — a ruling change stated as one, not smuggled.
+/// Fail-closed at the receiver (mis-route / unattested sender / stale fence / unlawful value —
+/// refused + counted, mirroring the SL7 bit's admission), held under the derived retain TTL,
+/// decaying to `0` — "nobody is watching" — on silence. Mesh-only (one cluster build,
+/// ledger-visible): no client-facing message changed, so the floor does not move.
+pub const PROTO_MINOR: u16 = 21;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -347,8 +374,22 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 19,
-            "minor 19 is THE DELETION (window lane Slice C2, owner-approved 2026-08-16 — \
+            PROTO_MINOR, 21,
+            "minor 21 is THE INTEREST BIT (look horizon slice 4; Q1 APPROVED, owner-approved \
+             2026-08-17 Q1 — docs/design/look_horizon.md §2 ASK B): ONE new arm, \
+             InterShardFlow::RealmInterest (disc 35) — one byte, two lawful values, parent → ONE \
+             direct child on the already-resolved head route; ends the Q2 rationale clause \
+             (am-I-observed stays unrepresentable) by the owner's explicit amendment; fail-closed \
+             admission mirroring the SL7 bit; decays to 0 on silence. Mesh-only, floor unmoved; \
+             minor 20 is THE SEALED INTERIOR FORWARD (look horizon slice 3, owner-approved \
+             2026-08-17 — docs/design/look_horizon.md RULINGS + §2 ASK A): \
+             InterShardFlow::WindowRelay renames `statements` → `own` in place (postcard-inert) \
+             and APPENDS interior: Vec<InteriorRelay> (each a held direct child's own sealed \
+             batch VERBATIM, its own fence outside the seal); ShardToGateway::WindowRelayed \
+             appends the same field. The depth bound is the TYPE — InteriorRelay has no interior \
+             field, so a third level is unrepresentable and LOOK_CARRIER_ARITY stays 2 (the Q3 \
+             ruling). Mesh-only, so the floor does not move; \
+             minor 19 is THE DELETION (window lane Slice C2, owner-approved 2026-08-16 — \
              window_lane.md §5 RULINGS, Q3 retiring the SL1 self-placement filter BY AMENDMENT \
              together with the lane it guarded): the old inter-realm scenery lanes are \
              producer-less and TOMBSTONED — InterShardFlow::RealmCascade (26), RealmObservation \
@@ -396,7 +437,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.19");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.21");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

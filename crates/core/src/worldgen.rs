@@ -436,6 +436,7 @@ mod tests {
                 .expect("valid test band"),
             aoi: AoiConfig::inert(),
             parent,
+            interior_band: AoiConfig::inert(),
         };
         let forest = vec![
             region(UNIVERSE, None),

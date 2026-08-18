@@ -889,6 +889,7 @@ fn crossing_region(
         band: crossing_band(),
         aoi: vd_core::geometry::AoiConfig::inert(),
         parent,
+        interior_band: vd_core::geometry::AoiConfig::inert(),
     }
 }
 

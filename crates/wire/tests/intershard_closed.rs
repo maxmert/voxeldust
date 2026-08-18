@@ -492,16 +492,44 @@ fn every_arm() -> Vec<InterShardFlow> {
         // VERBATIM self-authored statements, SEALED (the parent forwards these bytes unopened —
         // forward-or-drop), the child's own fence riding outside the seal. FireAndForget /
         // ReDriven — NOT producer-less, so the golden pin below still asserts exactly TWO.
+        // Mesh minor 20 (look horizon slice 3, owner-approved 2026-08-17 — look_horizon.md
+        // RULINGS + §2 ASK A) renamed `statements` → `own` IN PLACE and APPENDED `interior`:
+        // held grandchild batches forwarded sealed, each fenced outside its seal. The fixture
+        // carries one so the round-trip pins every field; `InteriorRelay` itself has NO
+        // `interior` field — the depth bound is the type.
         InterShardFlow::WindowRelay(vd_wire::intershard::WindowRelay {
             child: demand_child_coord(),
             realm_fence: Fence(6),
-            statements: vd_wire::session_flow::seal_relay_statements(&[
+            own: vd_wire::session_flow::seal_relay_statements(&[
                 vd_wire::session_flow::RelayedStatement::Body {
                     subject: RealmId::System(7),
                     stmt: vd_wire::session_flow::BodyStmt::SelfLook { bag: vec![4, 2] },
                     authored_at: UniverseTick(14),
                 },
             ]),
+            interior: vec![vd_wire::intershard::InteriorRelay {
+                child: RealmId::Planet(3),
+                child_fence: Fence(7),
+                own: vd_wire::session_flow::seal_relay_statements(&[
+                    vd_wire::session_flow::RelayedStatement::Body {
+                        subject: RealmId::Planet(3),
+                        stmt: vd_wire::session_flow::BodyStmt::SelfLook { bag: vec![5, 1] },
+                        authored_at: UniverseTick(15),
+                    },
+                ]),
+            }],
+        }),
+        // THE INTEREST BIT (look horizon slice 4, minor 21; Q1 APPROVED, owner-approved
+        // 2026-08-17 Q1 — look_horizon.md §2 ASK B): one byte, two lawful values, parent → ONE
+        // direct child. By construction of the type there is no field a position, identity,
+        // direction, distance or count could ride in — the absence pin below covers it the day
+        // it lands. FireAndForget / ReDriven — NOT producer-less, so the golden pin still
+        // asserts exactly TWO.
+        InterShardFlow::RealmInterest(vd_wire::intershard::RealmInterest {
+            child: demand_child_coord(),
+            parent_fence: Fence(8),
+            at: UniverseTick(16),
+            look_inside: 1,
         }),
     ]
 }
@@ -569,7 +597,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::RealmObservation(_)
         | InterShardFlow::RealmShapeObservation(_)
         | InterShardFlow::ChildSceneSet(_)
-        | InterShardFlow::WindowRelay(_) => {}
+        | InterShardFlow::WindowRelay(_)
+        | InterShardFlow::RealmInterest(_) => {}
     }
 }
 
@@ -740,6 +769,7 @@ fn every_arm_encodes_its_declared_discriminant_index() {
             InterShardFlow::ChildSceneSet(_) => 33,
             // The Q2 relay leg (mesh minor 17) holds 34 forever.
             InterShardFlow::WindowRelay(_) => 34,
+            InterShardFlow::RealmInterest(_) => 35,
         }
     }
     // Every fixture's real leading byte matches its declared index (all indices < 128, so the
@@ -752,9 +782,9 @@ fn every_arm_encodes_its_declared_discriminant_index() {
     }
     // …and the fixture set spans the WHOLE contiguous index space, so a missing fixture (or a
     // gap postcard would assign past a deleted arm) cannot pass vacuously.
-    assert_eq!(seen.len(), 35);
+    assert_eq!(seen.len(), 36);
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(34));
+    assert_eq!(seen.last().copied(), Some(35));
 }
 
 /// THE TOMBSTONE GOLDEN SET — the discriminants no producer may ever fill again, stated as data.
@@ -815,7 +845,8 @@ fn the_tombstoned_discriminants_are_exactly_this_golden_set() {
             | InterShardFlow::ShardPresence(_)
             | InterShardFlow::ShardRoster(_)
             | InterShardFlow::ChildLive(_)
-            | InterShardFlow::WindowRelay(_) => false,
+            | InterShardFlow::WindowRelay(_)
+            | InterShardFlow::RealmInterest(_) => false,
         }
     }
     let mut reserved: Vec<u8> = every_arm()

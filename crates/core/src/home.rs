@@ -134,6 +134,7 @@ mod tests {
                 .expect("a valid containment band"),
             aoi: AoiConfig::inert(),
             parent,
+            interior_band: AoiConfig::inert(),
         }
     }
 

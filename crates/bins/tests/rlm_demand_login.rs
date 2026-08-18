@@ -1222,6 +1222,236 @@ fn exiting_the_system_keeps_its_planets_orbiting() {
     );
 }
 
+/// THE SLICE-4 WAKE GATE (look_horizon.md §6 slice 4; Q1 APPROVED, owner 2026-08-17 — the
+/// interest bit end-to-end in real processes): a GALAXY-STANDING observer parked at a STATED,
+/// DERIVED distance — outside the home system's 150 m shell, inside its 444.104489631 m
+/// interior band — keeps the VACATED system's planets RUNNING (the interest byte → the
+/// down-proxy → the existing demand fold; before this slice they were reaped within the same
+/// window). The planets kept alive are EXACTLY the ones satisfying the derived interior test,
+/// asserted WITH THE NUMBERS per planet, and G-NO-CASCADE's process half rides the same run:
+/// the running-realm gauge never climbs above the login-settled set (nothing deeper than the
+/// planets ever boots — no area shard exists to boot on THE world, and no shard of any kind
+/// joins). Then the observer steps past the 469.104489631 m tear-down radius: the byte decays,
+/// the planets reap — by exactly their own count — and at the band edge nothing new ever spins.
+#[test]
+fn g_look_wake_a_galaxy_standing_observer_keeps_the_vacated_systems_planets_running() {
+    let _tier = vd_bins::cluster_tier();
+    let f = fixture("lookwake");
+    let gw_admin = reserve_tcp_addr();
+    let a = demand_addrs(gw_admin);
+    let p = DEV;
+    let client_quic = reserve_udp_addr();
+    let devctl_port = reserve_tcp_addr().port();
+    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
+
+    // THE DERIVED NUMBERS FIRST (never a literal): the home system's interior band off THE
+    // world's own boot roster — the same row the galaxy shard reads (§3.4.4, boot-derived).
+    let config = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
+    let world = vd_physics::worldgen::WorldView::generated(p.universe_seed, &config);
+    let home = vd_core::worldgen::default_home_realm(world.regions()).expect("THE world's home");
+    let galaxy_scope = world.neighbourhood(&std::collections::BTreeSet::from([
+        vd_core::worldgen::GALAXY,
+    ]));
+    let home_row = galaxy_scope
+        .iter()
+        .find(|r| r.realm == home)
+        .expect("the galaxy scope rosters the home system");
+    let spin_up = home_row.interior_band.spin_up_r_m();
+    let tear_down = home_row.interior_band.tear_down_r_m();
+    let shell = home_row.shape.circumscribed_extent();
+    assert!(
+        (spin_up - 444.104_489_631).abs() < 1e-9,
+        "G-INTEREST-BAND spin-up on THE world: {spin_up}"
+    );
+    assert!(
+        (tear_down - 469.104_489_631).abs() < 1e-9,
+        "G-INTEREST-BAND tear-down on THE world: {tear_down}"
+    );
+    assert!(
+        (shell < spin_up) & (spin_up < tear_down),
+        "both radii bracket the shell: {shell} < {spin_up} < {tear_down}"
+    );
+    assert_eq!(
+        home_row.center.offset().length(),
+        0.0,
+        "the home system sits at the galaxy origin, so a park at (0,0,-d) stands d metres out"
+    );
+    // The two parks, DERIVED against the band: inside it (well clear of both edges), and past
+    // the tear-down radius (well clear of it), both far outside the shell.
+    let inside_park = 220.0_f64;
+    let outside_park = 600.0_f64;
+    assert!((shell < inside_park) & (inside_park < spin_up));
+    assert!(outside_park > tear_down);
+    // THE PER-PLANET DERIVED INTERIOR TEST, with the numbers: through the down-proxy (one
+    // synthetic observer at the system's centre, reach = its own 150 m extent), planet p is
+    // demanded iff max(0, worst_excursion(p) − reach) enters p's own AoI band. On THE world
+    // EVERY planet satisfies it — each orbits inside the shell, so the proxy stands at zero
+    // effective distance.
+    let movers = vd_physics::worldgen::moving_children_for_config(p.universe_seed, &config, home);
+    assert_eq!(
+        movers.len(),
+        5,
+        "THE home system authors 5 orbiting planets"
+    );
+    let system_scope = world.neighbourhood(&std::collections::BTreeSet::from([home]));
+    let mut satisfying = 0usize;
+    for (planet, elements) in &movers {
+        let row = system_scope
+            .iter()
+            .find(|r| r.realm == *planet)
+            .expect("the home scope rosters its planet");
+        let worst_excursion = elements.sma * (1.0 + elements.ecc);
+        let proxy_dist = (worst_excursion - shell).max(0.0);
+        let in_band = row.aoi.in_range(false, proxy_dist);
+        eprintln!(
+            "[look-wake] {planet}: worst excursion {worst_excursion:.3} m, proxy reach {shell} m \
+             ⇒ effective {proxy_dist:.3} m vs AoI spin-up {:.3} m ⇒ in band: {in_band}",
+            row.aoi.spin_up_r_m(),
+        );
+        assert!(
+            in_band,
+            "{planet}: excursion {worst_excursion} − reach {shell} ⇒ {proxy_dist} must sit \
+             inside its own spin-up {}",
+            row.aoi.spin_up_r_m(),
+        );
+        satisfying += 1;
+    }
+    assert_eq!(
+        satisfying, 5,
+        "the derived interior test admits exactly the 5 planets"
+    );
+    // THE DERIVED RUNNING SETS (never an observed ceiling — a gauge sampled during the port
+    // band's documented spawn-backoff window under-reads and turns the backoff's own retry
+    // into a phantom cascade, measured 2026-08-17): at a settled login the running realms are
+    // the home CHAIN (the home system + its ancestors up to the root) + the home's planets,
+    // and nothing else exists to run; at the band edge the planets alone go down.
+    let chain_len = {
+        let mut n = 1u64; // the home itself
+        let mut cur = home;
+        while let Some(parent) = world
+            .regions()
+            .iter()
+            .find(|r| r.realm == cur)
+            .and_then(|r| r.parent)
+        {
+            n += 1;
+            cur = parent;
+        }
+        n
+    };
+    let expected_login_running = chain_len + movers.len() as u64;
+    let expected_edge_running = chain_len;
+
+    let _reaper = ForkedReaper(f.launch_path.clone());
+    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+    let landed = await_active(devctl_port, gw_admin, Duration::from_secs(150));
+    assert_eq!(landed.location.as_deref(), Some("System 7"), "{landed:?}");
+    // The login reaches the DERIVED running set — waited for, bounded, so a spawn-backoff
+    // retry (the serial suite's port-band TIME_WAIT race, healed by design) can never
+    // under-read the baseline.
+    let boot_deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let r = orch_rlm(a.admin);
+        if r.running_gauge == expected_login_running {
+            break;
+        }
+        assert!(
+            Instant::now() < boot_deadline,
+            "the login never reached the derived running set ({expected_login_running}): {r:?}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let settled_reaps = settle_reaps(a.admin, Duration::from_secs(10));
+    let settled_spins = settle_spins(a.admin, Duration::from_secs(10));
+
+    // PARK 1 — the galaxy-standing observer inside the interior band, outside the shell.
+    cross_leg(
+        devctl_port,
+        "look-wake exit home->galaxy (0,0,-220)",
+        |_tick| DVec3::new(0.0, 0.0, -inside_park),
+        &galaxy_label(&p),
+        Duration::from_secs(90),
+    );
+    // THE HOLD WINDOW: long enough that, without the interest byte, the vacated system's
+    // planets would have been reaped (the pre-slice posture, measured by the fly test's
+    // settle_reaps during its outbound flight). With it: NOTHING reaps, NOTHING extra boots.
+    let hold_until = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < hold_until {
+        std::thread::sleep(Duration::from_millis(1000));
+        let r = orch_rlm(a.admin);
+        assert_eq!(
+            r.teardowns_reaped, settled_reaps,
+            "a planet of the interest-held vacated system was reaped mid-hold: {r:?}"
+        );
+        assert_eq!(
+            r.running_gauge, expected_login_running,
+            "G-NO-CASCADE: the running set must stay EXACTLY the derived login set while only \
+             an interest byte crossed — above it something cascaded, below it a held planet \
+             died: {r:?}"
+        );
+    }
+    let held = orch_rlm(a.admin);
+    eprintln!(
+        "[look-wake] 45 s vacated inside the band: running {} (== derived \
+         {expected_login_running}), reaps {} (settled {settled_reaps}), spins {} (settled \
+         {settled_spins})",
+        held.running_gauge, held.teardowns_reaped, held.spins_requested,
+    );
+
+    // PARK 2 — past the tear-down radius: the byte decays, the wake ends, the planets reap —
+    // by exactly their own count.
+    walk_leg(
+        devctl_port,
+        "look-wake to-band-edge",
+        DVec3::new(0.0, 0.0, -outside_park),
+        3_000,
+    );
+    let started = Instant::now();
+    let reap_deadline = Duration::from_secs(120);
+    loop {
+        let r = orch_rlm(a.admin);
+        if r.teardowns_reaped >= settled_reaps + 5 {
+            break;
+        }
+        assert!(
+            started.elapsed() < reap_deadline,
+            "the un-watched planets were never reaped (reaps {} vs settled {settled_reaps}): {r:?}",
+            r.teardowns_reaped,
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Settle, then hold the band edge: EXACTLY the five planets went down, the system itself
+    // stays (the observer stands well inside its 11.4 km AoI band), and nothing new ever
+    // spins — at the band edge it spins up none.
+    let after_reaps = settle_reaps(a.admin, Duration::from_secs(30));
+    assert_eq!(
+        after_reaps,
+        settled_reaps + 5,
+        "exactly the 5 planets satisfying the interior test were reaped, nothing else"
+    );
+    let running_after = settle_gauge(a.admin, Duration::from_secs(15), |r| r.running_gauge);
+    assert_eq!(
+        running_after, expected_edge_running,
+        "the running set shrank to exactly the derived chain — the 5 planets and nothing \
+         else went down"
+    );
+    let spins_at_edge = orch_rlm(a.admin).spins_requested;
+    let edge_hold = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < edge_hold {
+        std::thread::sleep(Duration::from_millis(1000));
+        let r = orch_rlm(a.admin);
+        assert_eq!(
+            r.spins_requested, spins_at_edge,
+            "at the band edge it spins up none: {r:?}"
+        );
+    }
+    eprintln!(
+        "[look-wake] band edge held: running {running_after} (== derived \
+         {expected_edge_running}, was {expected_login_running}), reaps {after_reaps} (= \
+         settled {settled_reaps} + 5), spins steady at {spins_at_edge}",
+    );
+}
+
 // The bootstrap-TTL fail-safe leg (a demand login whose home never boots must be CLOSED at
 // `bootstrap_ttl_ticks`, not hang) is DEFERRED — see DEFERRED.md D-RLM-9. An empirical spike here found the
 // obvious inductions do NOT reach the TTL: with no orchestrator (or the gateway dropped from its peers) the
@@ -1350,6 +1580,7 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
 
     // The login lands the occupant at the home star; everything already in view spins up and settles
     // — the baseline the approach must climb above for a NON-VACUOUS spin-up-ahead.
+    let flight_started = Instant::now();
     let landed = await_active(devctl_port, gw_admin, deadline);
     assert_eq!(
         landed.location.as_deref(),
@@ -1490,6 +1721,81 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
     assert!(
         best > 1.0,
         "the neighbour's streamed boxes never moved (best {best:.3} m) — outlines without rows",
+    );
+
+    // ---- G-RELAY-STAMP (look_horizon.md slice 0 — DISCHARGES D-WINDOW-6(2)). ----
+    // THIS is the non-leaf topology the ledger row demanded: the relayed child (the neighbour
+    // star system) HAS children, and its planets just streamed in as composed relay rows. Over
+    // a ≥60 s process flight: the relay fold refuses NO stamp (the ring + resolve-at-T with
+    // at-or-before fallback replaced the exact-tick-equality demand that refused 50–87 times
+    // per two-ships run), it COMPOSES real rows, and the fallback's declared skew stays inside
+    // one keep-alive beat. The launcher leaves VD_SESSION_RECHECK unset, so the gateway's beat
+    // is the derived tick_hz/2.
+    let beat_ticks = u64::from(p.tick_hz) / 2;
+    // THE MISS BOUND IS DERIVED FROM WINDOW CHURN, not pinned at an accidental zero (measured
+    // 2026-08-17, battery run 5): at the exit crossing the gateway re-opens its galaxy windows
+    // and the re-served relay (reliable lane) can outrun the level datagrams (lossy BY DESIGN)
+    // by one tick — ONE fold then sees a member child whose FRESH ring holds only a future
+    // stamp, exactly §3.6's "bounded, counted" transient. STRUCTURALLY that is the ONLY
+    // reachable miss class: once a ring has served any stamp, the C6 head-anchored prune never
+    // drops a stamp its own head still retains, so an established ring can never go
+    // future-only again — a first-service transient is bounded by the windows opened, while
+    // the D-WINDOW-6(2) storm this gate discharges was 50-87 refusals per run with ZERO opens
+    // in the window. The skew gauge (≤ one beat) keeps measuring every real lag.
+    while flight_started.elapsed() < Duration::from_secs(60) {
+        let gw = gateway_view(gw_admin).expect("the gateway serves its admin snapshot");
+        assert!(
+            gw.window_relay_stamp_missing <= gw.window_open_sent,
+            "G-RELAY-STAMP: more unresolvable-stamp folds than windows ever opened — that is \
+             the exact-tick refusal storm, not a first-service transient: {gw:?}",
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let gw = gateway_view(gw_admin).expect("the gateway serves its admin snapshot");
+    assert!(
+        gw.window_relay_stamp_missing <= gw.window_open_sent,
+        "G-RELAY-STAMP: stamp misses exceeded the derived first-service bound over the whole \
+         flight: {gw:?}",
+    );
+    assert!(
+        gw.window_relay_rows_composed > 0,
+        "G-RELAY-STAMP is vacuous: no relayed interior rows ever composed: {gw:?}",
+    );
+    assert!(
+        gw.window_relay_stamp_skew_ticks <= beat_ticks,
+        "G-RELAY-STAMP: the at-or-before fallback's declared skew ({} ticks) exceeded one \
+         keep-alive beat ({beat_ticks} ticks): {gw:?}",
+        gw.window_relay_stamp_skew_ticks,
+    );
+    // ---- THE SLICE-3 INTERIOR-FORWARD COUNTERS on a LAWFUL flight (look_horizon.md §6 slice 3:
+    // two different counters, on purpose). The VIOLATION counter is 0 — no lawful producer ever
+    // names an unrostered grandchild. The LAWFUL-FILTER counter is NON-ZERO — the home system's
+    // live planets relayed their own batches up while the player stood inside it, each carrying
+    // a Level the gateway lawfully filters (a depth-3 subject no row can exist for), which is
+    // the measured proof the sealed interior forward actually flowed end-to-end in-process.
+    assert_eq!(
+        gw.window_relay_interior_unvouched, 0,
+        "slice 3: an interior forward named an unrostered grandchild on a lawful flight: {gw:?}",
+    );
+    assert!(
+        gw.window_relay_interior_filtered > 0,
+        "slice 3 is vacuous: no interior batch was ever admitted+filtered — the sealed interior \
+         forward never flowed: {gw:?}",
+    );
+    eprintln!(
+        "[fly] G-RELAY-STAMP over {:.1} s: relay_rows_composed={} stamp_missing={} (≤ opened \
+         windows {}) descent_refused={} unrostered={} skew_max={} ticks (≤ beat {beat_ticks}) \
+         depth_max={}; interior forward (slice 3): unvouched={} filtered={}",
+        flight_started.elapsed().as_secs_f64(),
+        gw.window_relay_rows_composed,
+        gw.window_relay_stamp_missing,
+        gw.window_open_sent,
+        gw.window_relay_descent_refused,
+        gw.window_relay_unrostered,
+        gw.window_relay_stamp_skew_ticks,
+        gw.window_relay_depth_max,
+        gw.window_relay_interior_unvouched,
+        gw.window_relay_interior_filtered,
     );
 
     // ---- LEG 2: fly back out of the band → the vacated neighbour reaps BEHIND. ----

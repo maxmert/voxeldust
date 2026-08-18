@@ -31,6 +31,19 @@ pub const TAG_LOOK: u16 = 1;
 /// brightness and color, exactly the two scalars the owner-ruled marker datum names (§1.1 item 3b).
 pub const TAG_LUMA: u16 = 2;
 
+/// The marker EXTENT tag (look_horizon.md slice 1; owner Q2 APPROVED 2026-08-17): payload = one
+/// postcard `f64` — the child's CIRCUMSCRIBED radius in metres, the number the parent already
+/// holds for containment and already reads for its own proxy logic.
+///
+/// THE ONE-RADIUS LAW (owner's ruling, verbatim): **a bound is a promise about space; a look is a
+/// statement about appearance.** The parent's point-of-light bag may never carry more than this
+/// single radius — no surface, no detail, no mesh, no second number — and the realm's own picture
+/// supersedes it the instant the realm runs (THE DRAW LAW's presence gate: a self-look beats a
+/// marker by data presence, never by a flag). The radius exists so a sleeping or lapsed thing
+/// still draws as a CORRECTLY-SIZED point of light instead of vanishing (a station, a city, a
+/// ship — the non-glowing subjects that had no lawful bag content at all before this tag).
+pub const TAG_EXTENT: u16 = 3;
+
 /// Encode a realm's OWN outline as a `TAG_LOOK` bag. The outline is the realm's one geometric
 /// fact about itself (its boot-config extent) — never its position, which no field here can hold.
 #[must_use]
@@ -48,6 +61,36 @@ pub fn luma_bag(class_code: u8, luma_lsun: f64) -> Vec<u8> {
         .required(TAG_LUMA, &(class_code, luma_lsun))
         .expect("a fresh writer holds no duplicate tag and two scalars are far under the field cap")
         .finish()
+}
+
+/// Encode THE point-of-light bag (look_horizon.md slice 1): the child's circumscribed extent —
+/// always, the presence floor's whole point — plus its photometric datum when the child glows.
+/// One builder for every marker producer, so a glowing and a non-glowing child's bags can never
+/// be framed two ways. Tags ride in ascending order (`TAG_LUMA` then `TAG_EXTENT`), the codec's
+/// canonical shape.
+#[must_use]
+pub fn marker_bag(luma: Option<(u8, f64)>, extent_m: f64) -> Vec<u8> {
+    let writer = TlvWriter::new(WINDOW_BODY_SCHEMA);
+    let writer = match luma {
+        Some(datum) => writer
+            .required(TAG_LUMA, &datum)
+            .expect("a fresh writer holds no duplicate tag and two scalars are under the cap"),
+        None => writer,
+    };
+    writer
+        .required(TAG_EXTENT, &extent_m)
+        .expect("distinct tag, one scalar")
+        .finish()
+}
+
+/// Decode a marker bag's `TAG_EXTENT` back to the circumscribed radius (metres).
+///
+/// # Errors
+/// [`TlvError`] if the blob is not a well-formed window-body bag carrying `TAG_EXTENT` — an
+/// old luma-only bag decodes to `MissingRequiredTag` here, which callers treat as "no stated
+/// extent" (additive-forever: absence of the tag is absence of the datum, never a default).
+pub fn extent_of(bag: &[u8]) -> Result<f64, TlvError> {
+    TlvReader::parse(WINDOW_BODY_SCHEMA, bag)?.required(TAG_EXTENT)
 }
 
 /// Decode a `TAG_LOOK` bag back to its outline.
@@ -97,6 +140,36 @@ mod tests {
             look_of(&bag),
             Err(TlvError::MissingRequiredTag(TAG_LOOK)),
             "a marker can never carry an outline — the third pixel source is unrepresentable"
+        );
+    }
+
+    #[test]
+    fn a_marker_bag_carries_the_extent_always_and_the_datum_only_when_glowing() {
+        // The glowing shape: datum + extent, both decodable, still no look (the third pixel
+        // source stays unrepresentable).
+        let glowing = marker_bag(Some((4, 1.0)), 150.0);
+        assert_eq!(luma_of(&glowing), Ok((4, 1.0)));
+        assert_eq!(extent_of(&glowing), Ok(150.0));
+        assert_eq!(
+            look_of(&glowing),
+            Err(TlvError::MissingRequiredTag(TAG_LOOK))
+        );
+        // The non-glowing shape (the presence floor): ONE radius and nothing else — the
+        // one-radius law is the codec's own shape, not a discipline.
+        let quiet = marker_bag(None, 40.0);
+        assert_eq!(extent_of(&quiet), Ok(40.0));
+        assert_eq!(luma_of(&quiet), Err(TlvError::MissingRequiredTag(TAG_LUMA)));
+        assert_eq!(look_of(&quiet), Err(TlvError::MissingRequiredTag(TAG_LOOK)));
+        // An OLD luma-only bag states no extent (absence of the tag is absence of the datum,
+        // never a default) — additive-forever holds in both directions.
+        assert_eq!(
+            extent_of(&luma_bag(6, 0.25)),
+            Err(TlvError::MissingRequiredTag(TAG_EXTENT))
+        );
+        // And a look bag is not a marker bag.
+        assert_eq!(
+            extent_of(&look_bag(&Boundary::Shell { r: 9.0 })),
+            Err(TlvError::MissingRequiredTag(TAG_EXTENT))
         );
     }
 

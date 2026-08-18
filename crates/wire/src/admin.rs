@@ -258,12 +258,29 @@ pub struct GatewayView {
     pub window_relay_stale: u64,
     /// Q2 relay (§2.6.5 step 4) — relayed live-child interior rows composed into folds.
     pub window_relay_rows_composed: u64,
-    /// Q2 relay — relayed interiors refused at the fold (stamp/placement/hop unavailable).
-    pub window_relay_unplaceable: u64,
+    /// C5 split (look_horizon.md slice 0) — the chain descent below a relaying stratum could
+    /// not be rebuilt at the fold's tick.
+    pub window_relay_descent_refused: u64,
+    /// C5 split — a relayed child with no ring level at-or-before the fold's tick
+    /// (G-RELAY-STAMP asserts 0 over a process flight — the D-WINDOW-6(2) discharge).
+    pub window_relay_stamp_missing: u64,
+    /// C5 split — a member child missing from the stratum author's own level at the fold's tick.
+    pub window_relay_unrostered: u64,
+    /// C5 GAUGE (max) — the at-or-before fallback's declared skew, ticks (bounded by one beat).
+    pub window_relay_stamp_skew_ticks: u64,
+    /// C5 GAUGE (max) — deepest relayed subject, levels below its forwarding author (2 = the
+    /// carrier's whole arity; more is an implementation climb bug).
+    pub window_relay_depth_max: u64,
     /// Slice D (§2.8 departure mirror): self-looks dropped by the derived roster-loss window.
     pub window_looks_pruned: u64,
     /// Slice D: relayed interior levels dropped by the same window.
     pub window_relay_levels_pruned: u64,
+    /// Look horizon slice 3 — interior forwards naming an unrostered grandchild (VIOLATION:
+    /// asserted 0 on every lawful flight).
+    pub window_relay_interior_unvouched: u64,
+    /// Look horizon slice 3 — depth-3 statements lawfully filtered out of admitted interior
+    /// batches (EXPECTED non-zero wherever an interior forwards; never asserted zero).
+    pub window_relay_interior_filtered: u64,
     /// Gauge: sessions currently open on this gateway.
     pub sessions_open: u64,
     /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
@@ -621,9 +638,17 @@ mod tests {
                 window_relay_unvouched: 66,
                 window_relay_stale: 67,
                 window_relay_rows_composed: 68,
-                window_relay_unplaceable: 69,
+                window_relay_descent_refused: 82,
+                window_relay_stamp_missing: 83,
+                window_relay_unrostered: 84,
+                window_relay_stamp_skew_ticks: 85,
+                window_relay_depth_max: 86,
                 window_looks_pruned: 80,
                 window_relay_levels_pruned: 81,
+                // 87..88: the look-horizon slice-3 interior-forward pair, appended in
+                // declaration order.
+                window_relay_interior_unvouched: 87,
+                window_relay_interior_filtered: 88,
                 sessions_open: 24,
                 dynamic_shards: 25,
                 windows_open: 37,

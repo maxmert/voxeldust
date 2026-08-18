@@ -555,6 +555,9 @@ impl ClientState {
             .iter()
             .map(|(realm, b)| DevRealmBox {
                 realm: format!("{realm:?}"),
+                // The delivered hierarchy parent, verbatim off the composed row (G-PARENT-TRUE's
+                // process read — look_horizon.md slice 0). Same rendering as `realm`.
+                parent: b.parent.map(|p| format!("{p:?}")),
                 // The STREAMED extent (§2.11): straight off the composed row's look bag — the
                 // camera reconstruction and the harness verdicts read THIS, never a file.
                 extent_m: box_extent_m(b),
@@ -643,10 +646,7 @@ impl ClientState {
 /// One drawn box's extent in metres — a sphere's radius, a box's half-diagonal length, and 0
 /// exactly for a MARKER point (its drawn footprint IS sub-pixel until Slice D's sprites).
 fn box_extent_m(b: &crate::realm_scene::RealmBox) -> f64 {
-    match b.shape {
-        crate::realm_scene::BoxShape::Sphere { r } => r,
-        crate::realm_scene::BoxShape::Box { half } => half.length(),
-    }
+    crate::realm_scene::shape_extent_m(b.shape)
 }
 
 /// Map the client lifecycle phase to its serde-able twin (the dev surface mirrors the

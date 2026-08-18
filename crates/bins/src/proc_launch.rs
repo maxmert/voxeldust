@@ -46,7 +46,10 @@ const TEARDOWN_POLL: Duration = Duration::from_millis(50);
 /// success. Sized to comfortably cover a bind failure (which surfaces in low single-digit milliseconds — the
 /// child fails before it does any real work) while never gating a healthy boot, which stays alive and simply
 /// runs out the window. Not a boot timeout: a shard that is still coming up after this is a normal launch.
-const EARLY_DEATH_WINDOW: Duration = Duration::from_millis(250);
+/// `pub` because it is a per-launch SERIALIZATION on the reconcile thread: a wake that spins N
+/// children up in one sweep pays (N−1) of these before the last child even forks, so the pixel
+/// gates' derived wake budgets state it as their own term (look_horizon.md slice 5).
+pub const EARLY_DEATH_WINDOW: Duration = Duration::from_millis(250);
 /// Poll cadence inside [`EARLY_DEATH_WINDOW`].
 const EARLY_DEATH_POLL: Duration = Duration::from_millis(10);
 

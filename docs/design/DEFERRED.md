@@ -4481,6 +4481,45 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   `crates/wire/src/version.rs` (minor 16), `crates/physics/src/worldgen.rs` (the photometric draw),
   `docs/design/window_lane.md` (the binding spec), `docs/design/owner_decisions_2026-08-15.md` (the
   2026-08-16 addendum).
+- **THE LOOK-HORIZON EXTENSION (2026-08-17; slices 3 + 4 of `docs/design/look_horizon.md`, both
+  owner-approved by the RULINGS ADDENDUM):** the lane now carries a grandchild's OWN picture two
+  hops (mesh **minor 20** — THE SEALED INTERIOR FORWARD, §2 ASK A: `WindowRelay.statements`
+  renamed `own` in place + `interior: Vec<InteriorRelay>` appended on both relay arms; the depth
+  bound is the TYPE — `InteriorRelay` has no `interior` field; the §3.4.5 forward gate is the
+  sender's own in-band verdict; the gateway vouches/fences and admits ONLY the author's own
+  picture, with the lawful filter and the violation counted APART — G-VERBATIM and
+  G-STRUCTURAL-SEAL pin it), and a parent may now tell ONE direct child that something outside
+  may be looking in (mesh **minor 21** — THE INTEREST BIT, §2 ASK B, Q1 APPROVED:
+  `InterShardFlow::RealmInterest`, disc 35, one byte, two lawful values, fail-closed admission
+  mirroring the SL7 bit, decaying to 0 on silence; the down-proxy observer + the
+  observer-origin flag that caps the cascade structurally — G-NO-CASCADE + G-INTEREST-BAND, the
+  derived radii `444.104489631` / `469.104489631` m bracketing the 150 m shell). The Q2
+  rationale clause ("am I observed from outside stays unrepresentable in every realm") ENDS by
+  the owner's explicit amendment — recorded on the arm, the version ledger, and here.
+- **LOOK-HORIZON SLICES 5 + 6 LANDED (2026-08-17; no wire change):** the FLOWN-SYMPTOM PIXEL
+  GATE (`just look-pixels`, in `just gate` — `crates/bins/tests/look_pixels.rs`): one demand
+  cluster on THE world PLUS the planted player-built station/area pair (the SL5 fixture-forest
+  doctrine's process path — `vd_physics::worldgen::FixturePlant`/`station_area_plant`, ONE
+  derivation every process boots via `vd_bins::process_world_config` + `VD_FIXTURE_PLANT`,
+  measured by the same boot fences: both plants climb 2, admission-accepted at arity 2). At the
+  derived park (outside the 150 m shell, inside the 444.104489631 m interior band, along the
+  outer planet's instantaneous radius vector): every planet's presence is its OWN picture (RED
+  for all five before slice 4), radii equal the camera model exactly (outer 20.48 px at
+  169.5 m against the 3 px floor), all five DISTINCT, every planet row parenting on its star
+  system throughout, marker handovers EXACTLY once each way with no blank frame and no radius
+  step above the readback quantum, and the reverse handover inside a derived budget stating
+  THE EXTRA RELAY HOP as its own term (measured 26–36 ticks against 123 + resolution).
+  G-IDENTICAL (HR4) runs the same assertions on the planted STATION (same scene) and one level
+  deeper on the planted AREA (19–20 ticks against 58 + resolution). G-NOTHING-OWED (THE LAW
+  GATE) enumerates the generated forest OUT-OF-BAND at both parks: every subject above the
+  minimum angle draws its OWN picture; oracle sets non-empty with depth-2 members (park A: 4
+  owed / 3 at depth 2; park B: 7 owed, the area at depth 2). SLICE 6 pins: ROWS PER FOLD on
+  the departure fixture (derived-set equality, 8 rows on THE plain world — the §5.4 promise
+  that the design does not change rows per fold, in `warp_pixels.rs`); RELAY EGRESS measured
+  == `W × C × blob × rate` with the gateway multiplier MEASURED (W=2 doubles exactly; blob
+  PINNED at 1118 B against §5.2's ~1045 B model; `vd-sim
+  slice6_relay_egress_measured_equals_w_times_c_times_blob_times_rate`); the UNION OVER-DRAW
+  measured at interim scale (6 rows per fold per observer — recorded on [[D-LOOK-2]]).
 
 ### D-WINDOW-3 🟥 The marker's photometrics are a RENDERING convention, not an exposure model — and the census-scale roster bound is still owed (window lane Slice D, 2026-08-16)
 - **WHAT is deferred, and stated honestly:** a point of light's DRAWN size today is
@@ -4499,9 +4538,14 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   children. That is an argument, not a measurement: the DERIVATION (rows/tick per author × the lattice's
   own fan-out, against `WindowTuning`'s budgets) is owed, and it is owed as a derivation, never a literal.
 - **WHEN:** with the owner's rendering-decisions pass (exposure) and P10 (the lattice), whichever lands first.
+- **SINCE LOOK-HORIZON SLICE 3 (2026-08-17) the census bound ALSO OWES THE INTERIOR FORWARD:**
+  a relay now carries its held child batches (+63 % on the link per look_horizon.md §5.2, ×W
+  gateways per §5.1), so the owed derivation must price `W × C × blob × rate` with the interior
+  term included — §5 gives today's numbers; the census derivation stays owed.
 - **Where:** `crates/client/src/realm_scene.rs` (`marker_look`, `MARKER_CLASS_SRGB`,
   `POINT_SOURCE_BASE_RADIUS_M`), `crates/physics/src/worldgen.rs` (`StarPhotometrics`,
-  `reflected_photometrics`), `docs/design/window_lane.md` §2.8/§2.10.
+  `reflected_photometrics`), `docs/design/window_lane.md` §2.8/§2.10;
+  `docs/design/look_horizon.md` §5.1-5.2 (the interior term's today-numbers).
 
 ### D-WINDOW-4 🟥 Rotated cross-cell hop composition is REFUSED, counted, and owed with P10's cell math (window lane, re-registered at Slice D)
 - **WHAT is deferred:** folding a hop whose frame is ROTATED across integer lattice cells. Today every
@@ -4525,10 +4569,27 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   from where). Nothing of that is built. Collision and entities never coarsen (standing law, untouched:
   this lane is render-only).
 - **WHEN:** P4+ (with real terrain), or earlier if a realm's drawn footprint outgrows its outline.
+- **BETTER PLACED SINCE LOOK-HORIZON SLICE 3 (2026-08-17):** the sealed interior forward is the
+  tier seam's NATURAL CARRIER — a deep subject's picture already travels as an opaque
+  self-authored bag, so a coarser tier for distant children is more tags in the SAME bag riding
+  the SAME forward, selected by a rare and coarse decision at the gateway (where the owner ruled
+  it belongs — look_horizon.md §5.6). Nothing pre-built; recorded so the seam lands on the
+  carrier instead of beside it.
 - **Where:** `docs/design/window_lane.md` §2.14, `crates/wire/src/session_flow.rs` (`WindowScope`,
-  `BodyStmt`), `crates/core/src/look.rs` (the bag codec the tags would join).
+  `BodyStmt`), `crates/core/src/look.rs` (the bag codec the tags would join);
+  `docs/design/look_horizon.md` §5.6 (the interior forward as the carrier).
 
-### D-WINDOW-6 🟥 Two things Slice D MEASURED and did not assert — recorded so neither becomes a silent claim (2026-08-16)
+### D-WINDOW-6 🟥(1) / 🟩(2) Two things Slice D MEASURED and did not assert — (2) DISCHARGED by look-horizon slice 0 (2026-08-17)
+- **(2) addendum (look-horizon slices 3+4, 2026-08-17):** the slice-4 wake/teardown churn
+  surfaced ONE residual `relay_stamp_missing` class the discharge run never hit: a FIRST-SERVICE
+  transient at a freshly (re)opened window, where the re-served reliable relay outruns one lost
+  level datagram and a single fold sees a future-only ring (§3.6's "bounded, counted"). It is
+  structurally the ONLY reachable class — the C6 head-anchored prune makes an established ring
+  unable to go future-only again — so G-RELAY-STAMP now bounds the counter by the windows opened
+  (derived churn, run-5 measurement: 1 miss, 4 opens) instead of pinning an accidental zero; the
+  storm this row was about (50-87 exact-tick refusals per run, zero opens) stays an order of
+  magnitude outside the bound, and the one-beat skew gauge keeps measuring every real lag. The
+  discharge STANDS.
 - **(1) A RE-HOMED OCCUPANT IS STILL SHOWN ITS PARENT REALM'S OCCUPANTS.** Measured in `two_ships.rs`,
   stable over ten seconds of polling: after ship Y re-homes from the star System down into a Planet, Y's
   client keeps being delivered the avatar of ship X, which is still standing in the System (Y's
@@ -4539,14 +4600,21 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   source subscription after the crossing commits, which is a containment/hand-off matter and outside
   this slice's scope. Printed by the gate every run so a change is visible, never asserted, never
   claimed clean.
-- **(2) RELAYED INTERIOR LEVELS REFUSE AT THE FOLD in the two-ships topology.** The same run reads
-  `window_relay_rows_composed: 0` beside `window_relay_unplaceable: 50–87`. The relayed BODIES land in
-  the one body store (which is how an outside observer sees a live realm's own look at all — assertion
-  (c) is green on it), so nothing user-visible depends on the interior fold there; and the fold DOES
-  compose in the demand-walk topology `rlm_demand_login` proves (a neighbour system's planets stream in
-  ahead of arrival). What is owed is the diagnosis of WHICH `descent_at` refusal class fires in the
-  two-ships shape, and whether the refusal is lawful there.
-- **WHEN:** with the next containment/hand-off pass (1) and the next window-lane pass (2).
+- **(2) 🟩 RESOLVED (look_horizon.md slice 0, 2026-08-17 — G-RELAY-STAMP).** Root cause per
+  look_horizon.md §3.7: the two-ships zero was a TOPOLOGY fact (the relayed child is a leaf — its
+  sealed level carries no rows, and the counter counts rows), and every refusal was ONE arm — the
+  placement lookup demanding EXACT tick equality between stamps authored by two different follower
+  clocks, while the main chain solves the identical problem with a tolerant prefix. The cure: the
+  relayed level store is a per-child RING at the existing span; the fold resolves at the tick the
+  chain composed at with an at-or-before fallback (zero positional error structurally — the relay
+  ship trigger fingerprints row VALUES, so a stale stamp implies byte-identical rows); the middle
+  realm's placement comes from the parent's own level at T, exact. The aggregate counter is SPLIT
+  (`relay_descent_refused` / `relay_stamp_missing` / `relay_unrostered` + skew/depth gauges) so the
+  ledgered question became answerable, and MEASURED in the non-leaf topology (`rlm_demand_login`
+  fly, 60.0 s process flight): `relay_rows_composed=16955`, `stamp_missing=0`,
+  `descent_refused=0`, `unrostered=0`, `skew_max=25 ticks` (= exactly one keep-alive beat, the
+  bound), `depth_max=2` (the carrier arity). The gate stays in the suite.
+- **WHEN:** with the next containment/hand-off pass (1). (2) is done.
 - **Where:** `crates/bins/tests/two_ships.rs` (both measurements, printed), `crates/connection-plane/src/window.rs`
   (`descent_at`, the relay fold), `crates/client/src/net.rs` (`foreign_space_rows`).
 
@@ -4568,3 +4636,67 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   information — default NO stands until then). Never adopted for convenience, never pre-built.
 - **Where:** `docs/design/window_lane.md` §2.3/§2.8/§5-RULINGS; `docs/design/owner_decisions_2026-08-15.md`
   2026-08-16 addendum (Q2); G-HANDOVER lands in Slice D (see [[D-WINDOW-1]]).
+
+### D-LOOK-1 🟥 The candidate build-admission predicate EXISTS; its policy at interim scale is the owner's Q3 ruling — (b)-first-then-measure (look_horizon.md slice 2, LANDED 2026-08-17)
+- **WHAT is deferred, and the RULING verbatim (owner, 2026-08-17):** Q3 RULED = (b)-first-then-
+  measure. The carrier arity STAYS 2 (`vd_wire::session_flow::LOOK_CARRIER_ARITY`); the
+  build-admission predicate (`vd_physics::worldgen::guard_candidate_climb_bounded`) REFUSES at
+  interim scale — the design's default (c): a refusal is a measurement, a wrong pixel is not. The
+  NEAR-REAL-SCALE world re-solve is the scheduled cure, and its FIRST GATE RUN MUST INCLUDE
+  `measure_visibility_climb`; the carrier goes to arity 3 only if that measurement demands it.
+- **THE EVIDENCE, produced by a test rather than an argument**
+  (`q3_a_twenty_metre_structure_at_interim_scale_is_refused_by_the_admission_fence`): a 20 m
+  surface structure planted on a planet of THE world's origin system measures a required climb of
+  **3** (visible from outside its star system; slack at the galaxy stop 10 914.699 m) against the
+  carrier's 2 — the placement is refused, never the boot (THE world itself passes the same fence:
+  max climb 2, worst planet stopping slack 4.000000000000455 m == the containment margin + 4.6e-13
+  of float association, the §3.3.2 one-equation identity, pinned in G-CLIMB).
+- **BLOCKING for P6/P8** (building lands only where the carrier can carry the picture).
+- **Where:** `crates/physics/src/worldgen.rs` (`measure_visibility_climb`,
+  `guard_visibility_climb_bounded`, `guard_candidate_climb_bounded`, `CandidateRegion`);
+  `crates/wire/src/session_flow.rs` (`LOOK_CARRIER_ARITY`); the boot fences in
+  `crates/bins/src/bin/shard.rs` + `crates/bins/src/bin/gateway.rs`;
+  `docs/design/look_horizon.md` §3.3/§7 Q3 + RULINGS ADDENDUM.
+
+### D-LOOK-2 🟥 The union coarsening accepted by shared verdicts is UNMEASURED at near-real scale (look_horizon.md, registered at slice 0, 2026-08-17)
+- **WHAT is deferred:** the realm-side interest verdict is SHARED by every observer under a scope
+  (the owner's 2026-08-16 ruling — one set, slow cadence, nothing per-observer at the gateway), so
+  the drawn set for any one observer is the UNION over observers — rows drawn for you because
+  somebody else is closer. Look-horizon slice 6 measures that over-draw at INTERIM scale and
+  records it; at NEAR-REAL scale it stays unmeasured until the re-solved world exists. Recording
+  it here is what keeps "the union is small" a measurement owed, never a silent claim.
+- **THE INTERIM-SCALE MEASUREMENT LANDED with look-horizon slice 6 (2026-08-17,
+  `vd-sim slice6_the_union_over_draw_is_measured_at_interim_scale`):** two occupants of THE
+  world's galaxy at maximally-separated stations (one 300 m from the home star, one 300 m short
+  of a ring sibling) — each observer's own out-of-band set is a DISJOINT singleton, the fold's
+  published shared verdict is exactly their union (2 children), and each observer over-draws the
+  OTHER's child: **6 drawn realm rows per fold per observer** (the child's own look + its
+  5-planet interior) that its own position never asked for. At interim scale the union
+  over-draw is therefore up to 6 of the fold's ~9 rows for a worst-placed pair — bounded by the
+  carrier arity (a child's subtree contributes 1 + its direct-child count, never deeper). The
+  NEAR-REAL-scale number stays owed with the world re-solve.
+- **WHEN:** ~~slice 6 (interim measurement)~~ landed; the near-real-scale world re-solve (the
+  full one) still owed.
+- **Where:** `docs/design/look_horizon.md` §5.5/§6 slice 6; `crates/connection-plane/src/window.rs`
+  (`scene_bag`'s membership disjunction — the union's mechanical site);
+  `crates/sim/src/stub.rs` (the interim measurement).
+
+### D-LOOK-3 🟥 The live child-to-parent interior reach (Ask D) — owed when player building lands (owner Q4 ruling 2026-08-17: DEFERRED, not asked)
+- **WHAT is deferred (deliberately, by ruling):** a child telling its parent ONE number — "things
+  inside me are visible from this far out" — so player-built interiors wake correctly. For the
+  seed-generated world the interior reach is DERIVED AT BOOT from the forest the generator already
+  holds, so nothing crosses a realm boundary today and no ask is made (SL6 default NO stands).
+  Once player building lands, a realm whose interior GROWS will under-wake until its parent
+  re-boots — that is the moment this becomes a real SL6 ask, with a disagreement counter owed
+  beside it (the dual-source drift surface the design names in H-FP-6).
+- **WHEN:** with player building (P6/P8) — as a fresh SL6 ask, never adopted silently.
+- **THE BOOT-DERIVED HALF LANDED with look-horizon slice 4 (2026-08-17):** every region row now
+  carries its child's interior band stamped by the generator from the FULL forest before scoping
+  (`RealmRegion.interior_band`, built in `vd_physics::worldgen::to_regions` via
+  `interior_reach_m` — the §3.4.4 CLAIM settled by
+  `the_boot_roster_stamps_each_systems_interior_reach_no_message_crossing`: a galaxy shard's
+  roster row for a star system carries `444.104489631` m with no message crossing). What stays
+  owed here is ONLY the LIVE update once interiors can grow.
+- **Where:** `docs/design/look_horizon.md` §2 Ask D / §7 Q4 + RULINGS ADDENDUM (2026-08-17);
+  `crates/core/src/geometry.rs` (`RealmRegion.interior_band`),
+  `crates/physics/src/worldgen.rs` (`interior_reach_m`/`interior_band`).

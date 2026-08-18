@@ -289,6 +289,26 @@ warp-pixels:
 two-ships:
     cargo test -p vd-bins --features dev-control,render --test two_ships -- --nocapture --test-threads=1
 
+# G-FLOWN-SYMPTOM + G-IDENTICAL + G-NOTHING-OWED (look_horizon.md §6 SLICE 5 — THE FLOWN-SYMPTOM
+# PIXEL GATE): one DEMAND cluster booted onto THE world PLUS the planted player-built station/area
+# pair (VD_FIXTURE_PLANT=station-area — the SL5 fixture-forest doctrine's process path; ONE
+# derivation in vd_physics::worldgen::station_area_plant, every process boots it through
+# vd_bins::process_world_config), one headless GPU client. Parks OUTSIDE the 150 m shell and
+# INSIDE the 444.104489631 m interior band, along the outer planet's instantaneous radius vector:
+# every planet's presence is its OWN picture (body kind + composed provenance + painted pixels —
+# RED for all five before slice 4), the outer planet's radius is derived from the camera model far
+# above the three-pixel floor, all five planets draw DISTINCT radii, and every planet row parents
+# on the star system THROUGHOUT. Out across the stop level and back: the marker handover happens
+# EXACTLY once each way, no blank frame, no radius step above the readback quantum, the reverse
+# handover inside a derived budget that states THE EXTRA RELAY HOP as its own term. G-IDENTICAL
+# (HR4) runs the same assertions on the planted station (a player-built KIND in the same scene)
+# and one level deeper on the planted area (park B, inside the system). G-NOTHING-OWED (THE LAW
+# GATE) enumerates the generated forest OUT-OF-BAND at both parks and asserts every subject above
+# the minimum angle draws its OWN picture — non-vacuous (depth-2 subjects in the oracle set).
+# Same GPU-required, LOCAL-gate preconditions as render-smoke.
+look-pixels:
+    cargo test -p vd-bins --features dev-control,render --test look_pixels -- --nocapture --test-threads=1
+
 # NODE-PER-REALM WALK GATE (task #149) — the HEADLESS process-tier chain proof on THE world. Brings up
 # the CHAIN cluster (orchestrator + gateway + FOUR realm-shards derived through world_roster: the home
 # system, the galaxy, the inner planet, the sibling star — NO co-hosting), logs in a REAL headless
@@ -335,7 +355,7 @@ rlm-demand-login:
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels two-ships node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels look-pixels two-ships node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity coverage
 
 # One-time setup helper.
 coverage-setup:

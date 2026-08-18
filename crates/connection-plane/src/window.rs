@@ -124,15 +124,27 @@ pub struct WindowIngest {
     /// by it: markers/placements always ship the full roster, §2.2).
     members: BTreeSet<RealmId>,
     /// The Q2 relay's per-child holdings on the PARENT's window (mesh minor 17; owner-approved
-    /// 2026-08-16 — owner_decisions_2026-08-15.md addendum + window_lane.md §5 RULINGS): the
-    /// newest relayed interior LEVEL per live child (the child's own authored rows in its OWN
-    /// frame — also the attested roster its relayed markers are vouched against). Stored for the
-    /// Slice-D interior compose; the relayed BODY statements land in `look_of`/`marker_of` like
-    /// every other admitted body (the §2.8 marker⇒look handover needs nothing new downstream).
-    relay_levels: BTreeMap<RealmId, (UniverseTick, Vec<RealmSnap>)>,
+    /// 2026-08-16 — owner_decisions_2026-08-15.md addendum + window_lane.md §5 RULINGS): a
+    /// per-child RING of relayed interior LEVELS at the existing span (look_horizon.md §3.5 C4 —
+    /// the child's own authored rows in its OWN frame; the newest is also the attested roster its
+    /// relayed markers are vouched against), ascending by stamp. The ring is what lets the fold
+    /// resolve a relay AT THE TICK THE CHAIN COMPOSED AT instead of demanding exact tick equality
+    /// between two follower clocks (the D-WINDOW-6(2) root cause). The relayed BODY statements
+    /// land in `look_of`/`marker_of` like every other admitted body (the §2.8 marker⇒look
+    /// handover needs nothing new downstream).
+    relay_levels: BTreeMap<RealmId, VecDeque<(UniverseTick, Vec<RealmSnap>)>>,
     /// The newest CHILD fence seen per relayed child — the zombie guard (a deposed incarnation's
-    /// relay is refused; carried, never authorizing).
+    /// relay is refused; carried, never authorizing). Since look horizon slice 3 it also orders
+    /// GRANDCHILD incarnations (the interior forward's fences land in the same per-realm map —
+    /// it generalises unchanged, §3.5 C7).
     relay_fence: BTreeMap<RealmId, Fence>,
+    /// Look horizon slice 3 (§3.4.5) — subjects whose OWN picture arrived through the sealed
+    /// interior forward, stamped with the newest admitting `authored_at`: the third disjunct of
+    /// [`scene_bag`]'s member test. The forward gate at the middle realm WAS the membership
+    /// decision, so arrival is the verdict — no verdict ever crosses upward. Pruned on the same
+    /// head-anchored TTL as the looks ([`WindowIngest::prune_stale`]), so a subject whose
+    /// forwards stop falls back to its parent's marker together with its picture.
+    interior_admitted: BTreeMap<RealmId, (UniverseTick, ())>,
 }
 
 impl WindowIngest {
@@ -191,7 +203,14 @@ impl WindowIngest {
     /// stops relaying, the parent's holder TTL-expires it, and nothing re-serves it on the next
     /// keep-alive re-assert. Two whole beats later (+1 tick) its stored look is dropped here, the
     /// presence gate falls through to its parent's ever-present marker, and the system it drew
-    /// shrinks to a dot. Relayed interior LEVELS age out on the same window for the same reason.
+    /// shrinks to a dot. Relayed interior LEVELS age out on the same window for the same reason
+    /// (a child ring whose NEWEST stamp lapsed is dropped whole).
+    ///
+    /// THE PRUNE CLOCK IS THE RING'S OWN HEAD (look_horizon.md §3.5 C6): staleness is measured
+    /// against the newest stamp this window's level ring holds — the same head the ring trims on —
+    /// never against the gateway's own clock, so a gateway a few ticks adrift can never evict a
+    /// stamp the ring itself would still retain. A window with no level yet prunes nothing
+    /// (nothing has been stated, so nothing can be stale).
     ///
     /// This is what keeps THE DRAW LAW honest across a round trip: without it, a realm's last look
     /// would sit in this store forever and the NEXT approach would draw the realm before its shard
@@ -199,10 +218,20 @@ impl WindowIngest {
     ///
     /// Markers are never pruned (the floor — see [`WindowTuning::look_ttl_ticks`]). Returns
     /// `(looks pruned, relayed levels pruned)` for the two counters.
-    pub fn prune_stale(&mut self, now: UniverseTick, tuning: &WindowTuning) -> (u64, u64) {
-        let cutoff = now.0.saturating_sub(tuning.look_ttl_ticks);
+    pub fn prune_stale(&mut self, tuning: &WindowTuning) -> (u64, u64) {
+        let Some(head) = self.newest() else {
+            return (0, 0);
+        };
+        let cutoff = head.0.saturating_sub(tuning.look_ttl_ticks);
         let looks = prune_older_than(&mut self.look_of, cutoff);
-        let relays = prune_older_than(&mut self.relay_levels, cutoff);
+        // Look horizon slice 3: the interior-admitted set ages out on the SAME window as the
+        // looks — a subject whose forwards stopped loses its member disjunct together with its
+        // picture, and the ever-present parent marker resumes (body → marker, never → nothing).
+        prune_older_than(&mut self.interior_admitted, cutoff);
+        let before = self.relay_levels.len();
+        self.relay_levels
+            .retain(|_, ring| ring.back().is_some_and(|(at, _)| at.0 >= cutoff));
+        let relays = (before - self.relay_levels.len()) as u64;
         (looks, relays)
     }
 
@@ -280,32 +309,64 @@ impl WindowIngest {
         true
     }
 
-    /// Store one relayed interior level for `child` (newest `at` wins — an older relayed level
-    /// is refused, `false`, counted by the caller like `ingest_body`'s staleness).
+    /// Store one relayed interior level for `child` into its RING (look_horizon.md §3.5 C4):
+    /// the same semantics as [`WindowIngest::ingest_frame`] — a re-delivered stamp replaces
+    /// (latest-wins per tick), an out-of-order stamp inside the span is inserted in stamp order
+    /// (the at-or-before resolution wants it), a stamp behind the span is refused (`false`,
+    /// counted by the caller), and the tail trims one span behind the newest.
     pub fn ingest_relay_level(
         &mut self,
         child: RealmId,
         at: UniverseTick,
         rows: Vec<RealmSnap>,
+        tuning: &WindowTuning,
     ) -> bool {
-        if self
-            .relay_levels
-            .get(&child)
-            .is_some_and(|(held_at, _)| *held_at > at)
-        {
+        let ring = self.relay_levels.entry(child).or_default();
+        let Some((head, _)) = ring.back() else {
+            ring.push_back((at, rows));
+            return true;
+        };
+        if at.0 + tuning.ring_span_ticks < head.0 {
             return false;
         }
-        self.relay_levels.insert(child, (at, rows));
+        match ring.binary_search_by_key(&at, |(t, _)| *t) {
+            Ok(i) => ring[i] = (at, rows),
+            Err(i) => ring.insert(i, (at, rows)),
+        }
+        let new_head = ring.back().expect("a level was just stored").0.0;
+        while ring
+            .front()
+            .is_some_and(|(t, _)| t.0 + tuning.ring_span_ticks < new_head)
+        {
+            ring.pop_front();
+        }
         true
     }
 
-    /// Every relayed live-child interior this window currently holds — `(child, at, rows)`,
-    /// newest level per child (§2.6.5 step 4's raw material; the compose gates each by the
-    /// membership verdict, never here).
-    pub fn relayed_levels(&self) -> impl Iterator<Item = (RealmId, UniverseTick, &[RealmSnap])> {
-        self.relay_levels
-            .iter()
-            .map(|(child, (at, rows))| (*child, *at, rows.as_slice()))
+    /// Every relayed live child this window currently holds a ring for (§2.6.5 step 4's raw
+    /// material; the compose gates each by the membership verdict, never here).
+    pub fn relayed_children(&self) -> impl Iterator<Item = RealmId> + '_ {
+        self.relay_levels.keys().copied()
+    }
+
+    /// C4's RESOLUTION: the relayed level for `child` stamped exactly `t`, else the NEWEST one
+    /// stamped at-or-before `t` (`None` when the ring holds only future stamps, or nothing).
+    /// The at-or-before fallback costs ZERO positional error structurally (§3.7): the relay's
+    /// ship trigger fingerprints the row VALUES, so an older stamp resolves only when the rows
+    /// are byte-identical to the newest — different rows would have shipped.
+    #[must_use]
+    pub fn relay_level_at_or_before(
+        &self,
+        child: RealmId,
+        t: UniverseTick,
+    ) -> Option<(UniverseTick, &[RealmSnap])> {
+        let ring = self.relay_levels.get(&child)?;
+        let idx = match ring.binary_search_by_key(&t, |(at, _)| *at) {
+            Ok(i) => i,
+            Err(0) => return None,
+            Err(i) => i - 1,
+        };
+        ring.get(idx).map(|(at, rows)| (*at, rows.as_slice()))
     }
 
     /// The relayed child's own attested roster (from its newest relayed level) — what its
@@ -315,8 +376,27 @@ impl WindowIngest {
     pub fn relay_child_roster(&self, child: RealmId) -> BTreeSet<RealmId> {
         self.relay_levels
             .get(&child)
+            .and_then(|ring| ring.back())
             .map(|(_, rows)| rows.iter().map(|r| r.realm).collect())
             .unwrap_or_default()
+    }
+
+    /// Record one subject admitted through the sealed interior forward (look horizon slice 3,
+    /// §3.4.5): newest `authored_at` wins — the stamp is what the head-anchored prune ages out.
+    pub fn admit_interior(&mut self, subject: RealmId, authored_at: UniverseTick) {
+        let slot = self
+            .interior_admitted
+            .entry(subject)
+            .or_insert((authored_at, ()));
+        slot.0 = slot.0.max(authored_at);
+    }
+
+    /// Is `subject` currently admitted through the interior forward? — the third disjunct of
+    /// [`scene_bag`]'s member test (§3.4.5: arrival through the membership-gated forward IS the
+    /// middle realm's verdict; derived from bytes this gateway already opened, nothing crossed).
+    #[must_use]
+    pub fn interior_admitted(&self, subject: RealmId) -> bool {
+        self.interior_admitted.contains_key(&subject)
     }
 
     /// The newest look bag stated about `subject`, if any (presence IS the draw law's gate).
@@ -454,6 +534,12 @@ pub struct ComposedRow {
     pub pose: StampedPose,
     /// Which chain level authored this row (leaf = 0) — the per-stratum hold's partition key.
     pub stratum: usize,
+    /// The HIERARCHY PARENT, carried explicitly from the fold that knows it (look_horizon.md
+    /// §3.5 C1 — G-PARENT-TRUE): a child row's parent is its stratum's author; a chain BODY
+    /// row's is one level up (`None` at the root); a RELAYED interior row's is the relayed
+    /// child that authored it — which the retired chain-index derivation (`scene_parent`) got
+    /// wrong, shipping the GRANDparent on every relayed row.
+    pub parent: Option<RealmId>,
     pub body: BodyTag,
 }
 
@@ -485,12 +571,33 @@ pub struct Composed {
     /// it). The exact-cadence pin reads folds where this equals the full chain length.
     pub fresh_levels: usize,
     /// §2.6.5 step 4 (Q2 = PARENT RELAY): relayed live-child interior rows COMPOSED into this
-    /// fold — each mapped through `X_k ∘ placement(c)` at the relay's own stamp.
+    /// fold — each mapped through `X_k ∘ placement(c)` at the fold's own tick (C4).
     pub relay_rows: u64,
-    /// A relayed interior refused because its stamp fell off the chain rings, its child had no
-    /// placement row at that stamp, or a hop below was invalid there — dropped, counted, healed
-    /// by the child's next relay (§2.6.6: every class its own row).
-    pub relay_unplaceable: u64,
+    /// C5's split of the old `relay_unplaceable` aggregate (one bucket hid a structurally dead
+    /// arm, which is why the D-WINDOW-6(2) question was unanswerable): the chain DESCENT below a
+    /// relaying stratum could not be rebuilt at the fold's tick (a ring without the stamp / an
+    /// invalid hop there) — dropped, counted, healed by the next fold.
+    pub relay_descent_refused: u64,
+    /// C5: a relayed child whose ring holds NO level at-or-before the fold's tick (only future
+    /// stamps) — the relay cannot be resolved yet; healed by the next fold. Since slice 4's
+    /// churn measured it (2026-08-17): this is structurally a FIRST-SERVICE transient only —
+    /// once a ring has served any stamp, the C6 head-anchored prune never drops a stamp its own
+    /// head still retains, so an established ring cannot go future-only again. The process gate
+    /// bounds it by the windows opened (a re-served reliable relay can outrun one lost level
+    /// datagram at a fresh window — §3.6's bounded, counted transient), never by a bare zero.
+    pub relay_stamp_missing: u64,
+    /// C5: a member child whose relay resolved but whose PLACEMENT row is missing from the
+    /// stratum author's own level at the fold's tick (a roster race) — dropped, counted, healed
+    /// by the author's next level.
+    pub relay_unrostered: u64,
+    /// C5 GAUGE (max): how many ticks behind the fold's tick a resolved relay's stamp sat (the
+    /// at-or-before fallback's declared skew — 0 when every relay resolves at T exactly).
+    /// G-RELAY-STAMP bounds it by one beat.
+    pub relay_stamp_skew_ticks: u64,
+    /// C5 GAUGE (max): the deepest relayed subject composed, in levels below the forwarding
+    /// author (2 = a relayed child's own interior — the carrier's whole arity; anything greater
+    /// is an implementation climb bug, §3.3.4's world-independent tripwire).
+    pub relay_depth_max: u64,
 }
 
 /// The position gap between two composed poses, in nanometres, saturating. The §2.12 agreement
@@ -582,11 +689,20 @@ pub fn compose(
                 continue;
             }
             let stratum = k;
+            // C1: the parent is carried EXPLICITLY from the fold that knows it — a child row
+            // parents on its stratum's author; the author's own body row parents one level up
+            // (a roster row can never name its own author: a realm is never its own child).
+            let parent = if row.realm == authors[k] {
+                authors.get(k + 1).copied()
+            } else {
+                Some(authors[k])
+            };
             let composed = ComposedRow {
                 realm: row.realm,
                 frame: row.frame,
                 pose,
                 stratum,
+                parent,
                 body: body_tag(row.realm, ingests),
             };
             if let Some(existing) = rows.get(&row.realm) {
@@ -601,37 +717,45 @@ pub fn compose(
     // §2.6.5 STEP 4 (Q1 = YES-generic, Q2 = PARENT RELAY — §5 RULINGS, owner 2026-08-16): each
     // fresh stratum's RELAYED live-child interiors join the fold. A relayed row is the child's
     // OWN authored statement in its OWN frame (verbatim, sealed — the parent never re-stated
-    // it); the stratum author's level AT THE RELAY'S OWN STAMP supplies `placement(c)` and the
-    // descent below re-runs at that same stamp, so every conversion still composes exactly-
-    // stamped pairs (§2.6.3's instant law — nothing here mixes two times). The composed row
-    // keeps the relay's stamp, declared per row like a held stratum's (§2.6.4); the one relay
-    // hop of look latency this stamps in is exactly the Q2-budgeted cost. STEP 5 gates the
-    // interior by membership: a child beyond the stratum's shipped SL7 verdict draws nothing
-    // (the flag day closed the beyond-visibility interiors fan for good).
+    // it). THE RESOLUTION IS AT THE FOLD'S OWN TICK (look_horizon.md §3.5 C4 / §3.7 — the
+    // D-WINDOW-6(2) cure): the relay resolves at `t` with an at-or-before fallback (zero
+    // positional error structurally — the ship trigger fingerprints row VALUES, so a stale
+    // stamp implies byte-identical rows; the residual in-flight loss is bounded by the redrive
+    // and DECLARED by the skew gauge), the stratum author's own level AT `t` supplies
+    // `placement(c)` — exact, the level being composed — and the descent below runs at `t`,
+    // where every fresh ring retains a stamp by construction. Rows carrying their level's own
+    // stamp are re-stamped to `t` (that zero-error identity); an intra-level OFF-stamp row is
+    // left as authored and refused by `InstantMismatch` (the shear law still has teeth). STEP 5
+    // gates the interior by membership: a child beyond the stratum's shipped SL7 verdict draws
+    // nothing (the flag day closed the beyond-visibility interiors fan for good).
     for k in 0..out.fresh_levels {
         // `.get`, not an index: the pure-fold units drive `compose` with bare levels and no
         // ingest state (relays then simply don't exist); the live caller always aligns the two.
         let Some(ingest) = ingests.get(k) else {
             continue;
         };
-        for (child, at, crows) in ingest.relayed_levels() {
+        for child in ingest.relayed_children() {
             if authors.contains(&child) {
                 continue; // a chain member's interior rides its own window, never a relay
             }
             if !ingest.members().contains(&child) {
                 continue; // step 5: beyond visibility ⇒ tracked nowhere (lawful, uncounted)
             }
-            let Some((rframes, rbooks)) = descent_at(origin_frame, authors, ingests, k, at) else {
-                out.relay_unplaceable += 1;
+            let Some((r_at, crows)) = ingest.relay_level_at_or_before(child, t) else {
+                out.relay_stamp_missing += 1;
                 continue;
             };
-            let Some(placement) = ingest
-                .level_at(at)
-                .and_then(|l| l.rows.iter().find(|r| r.realm == child))
-            else {
-                out.relay_unplaceable += 1;
+            let Some((rframes, rbooks)) = descent_at(origin_frame, authors, ingests, k, t) else {
+                out.relay_descent_refused += 1;
                 continue;
             };
+            // §3.7: the middle realm's placement comes from the stratum author's own level at
+            // `t` — the very level this fold is composing. Exact, unaffected by the fallback.
+            let Some(placement) = levels[k].rows.iter().find(|r| r.realm == child) else {
+                out.relay_unrostered += 1;
+                continue;
+            };
+            out.relay_stamp_skew_ticks = out.relay_stamp_skew_ticks.max(t.0 - r_at.0);
             let c_frame = placement.frame;
             // The parent-authored placement of the relayed child, as the one hop book entry —
             // orientation/velocity carried from the authored row; angular velocity is not on the
@@ -639,7 +763,7 @@ pub fn compose(
             // owe, exactly like `HopRow::inv`'s note).
             let hop_book = PlacementBook::new(
                 rframes[k],
-                at,
+                t,
                 vec![(
                     c_frame,
                     FramePlacement {
@@ -661,11 +785,22 @@ pub fn compose(
                     out.alien_rows += 1;
                     continue;
                 }
+                // The at-or-before identity: a row stamped AT its level's own stamp is the same
+                // row the child would state at `t` (fingerprint law, §3.7) and folds at `t`; a
+                // row stamped OFF its level keeps its stamp and refuses below (anti-vacuity).
+                let pose_in = if row.pose.universe_tick == r_at {
+                    StampedPose {
+                        universe_tick: t,
+                        ..row.pose
+                    }
+                } else {
+                    row.pose
+                };
                 // ONE fallible pipeline, ONE refusal arm (HR5): the hop transfer feeds the chain
                 // descent through `and_then`, so a refusal at either stage lands on the same
                 // counted arm (the descent stage alone cannot fail until P10's rotated hops —
-                // its books are anchored identities at the relay's own stamp).
-                let mapped = transfer_frame(&row.pose, rframes[k], &hop_book)
+                // its books are anchored identities at the fold's tick).
+                let mapped = transfer_frame(&pose_in, rframes[k], &hop_book)
                     .and_then(|p| map_down(&p, &rframes, &rbooks, k));
                 let pose = match mapped {
                     Ok(pose) => pose,
@@ -679,6 +814,9 @@ pub fn compose(
                     frame: row.frame,
                     pose,
                     stratum: k,
+                    // C1 (G-PARENT-TRUE): a relayed interior row's parent is the relayed CHILD
+                    // that authored it — never the stratum's chain author.
+                    parent: Some(child),
                     body: body_tag(row.realm, ingests),
                 };
                 if let Some(existing) = rows.get(&row.realm) {
@@ -688,6 +826,10 @@ pub fn compose(
                     continue;
                 }
                 out.relay_rows += 1;
+                // Depth below the forwarding author: a relayed child's interior sits at 2 — the
+                // carrier's whole arity, by the type (`InteriorRelay`-shaped data has no deeper
+                // field); the gauge is the world-independent climb tripwire (§3.3.4).
+                out.relay_depth_max = out.relay_depth_max.max(2);
                 rows.insert(row.realm, composed);
             }
         }
@@ -784,14 +926,19 @@ fn body_tag(realm: RealmId, ingests: &[&WindowIngest]) -> BodyTag {
 
 /// THE BAG SELECTION (§2.6.5 steps 5–6, LIVE since Slice C1): the TLV bag a composed row ships
 /// with. A SELF-LOOK attaches iff one was received (only the realm itself can have shipped one —
-/// admission) AND the realm passes the membership gate (`members` ∪ the chain authors — §2.2:
-/// membership gates BODIES; the origin and its ancestors are always drawn). Else the parent's
-/// MARKER (never membership-filtered — stars stay in the sky by construction). Else EMPTY: the
-/// realm is tracked but not drawn (a missing statement means the thing is not drawn — THE DRAW
-/// LAW by absence of data; a third pixel source is unrepresentable in the wire types).
+/// admission) AND the realm passes the membership gate (`members` ∪ the chain authors ∪ the
+/// interior-admitted subjects — §2.2: membership gates BODIES; the origin and its ancestors are
+/// always drawn; look horizon slice 3's third disjunct is §3.4.5: a subject whose own picture
+/// arrived through the membership-gated interior forward carries its middle realm's verdict in
+/// the arrival itself). Else the parent's MARKER (never membership-filtered — stars stay in the
+/// sky by construction). Else EMPTY: the realm is tracked but not drawn (a missing statement
+/// means the thing is not drawn — THE DRAW LAW by absence of data; a third pixel source is
+/// unrepresentable in the wire types).
 #[must_use]
 pub fn scene_bag(realm: RealmId, authors: &[RealmId], ingests: &[&WindowIngest]) -> Vec<u8> {
-    let member = authors.contains(&realm) || ingests.iter().any(|i| i.members().contains(&realm));
+    let member = authors.contains(&realm)
+        || ingests.iter().any(|i| i.members().contains(&realm))
+        || ingests.iter().any(|i| i.interior_admitted(realm));
     if member && let Some(look) = ingests.iter().find_map(|i| i.look_of(realm)) {
         return look.to_vec();
     }
@@ -799,18 +946,6 @@ pub fn scene_bag(realm: RealmId, authors: &[RealmId], ingests: &[&WindowIngest])
         return luma.to_vec();
     }
     Vec::new()
-}
-
-/// The hierarchy parent of one composed row (§2.4 `SceneRow.parent` — identity only, never a
-/// position): a child row's parent is its stratum's author; a chain BODY row (the realm IS its
-/// stratum's author) parents one level up; the root's body has none.
-#[must_use]
-pub fn scene_parent(row: &ComposedRow, authors: &[RealmId]) -> Option<RealmId> {
-    if authors.get(row.stratum) == Some(&row.realm) {
-        authors.get(row.stratum + 1).copied()
-    } else {
-        authors.get(row.stratum).copied()
-    }
 }
 
 /// THE COMPOSED LEVEL'S ROWS (§2.4/§2.6.5 step 8, LIVE since Slice C1): the ORIGIN's own row
@@ -835,8 +970,11 @@ pub fn scene_level_rows(
         bag: scene_bag(origin, authors, ingests),
     }];
     rows.extend(scene.drawn_rows().map(|row| SceneRow {
+        // C1 (G-PARENT-TRUE): the parent rides the composed row explicitly, filled by the fold
+        // that knows it — the chain-index derivation (`scene_parent`) is DELETED; it shipped
+        // the GRANDparent on every relayed interior row.
+        parent: row.parent,
         realm: row.realm,
-        parent: scene_parent(row, authors),
         pose: row.pose,
         bag: scene_bag(row.realm, authors, ingests),
     }));
@@ -1079,6 +1217,8 @@ mod tests {
         let subject = RealmId::System(7);
         let child = RealmId::Planet(7);
         let mut ingest = WindowIngest::default();
+        // A window with NO level yet prunes nothing — there is no head to measure against (C6).
+        assert_eq!(ingest.prune_stale(&t), (0, 0));
         assert!(ingest.ingest_body(
             subject,
             &BodyStmt::SelfLook {
@@ -1091,22 +1231,29 @@ mod tests {
             &BodyStmt::Marker { luma: vec![9] },
             UniverseTick(100)
         ));
-        assert!(ingest.ingest_relay_level(child, UniverseTick(100), Vec::new()));
-        // INSIDE the window (age exactly the TTL): everything survives — a live realm re-asserting
-        // one beat late is not a dead one.
-        assert_eq!(ingest.prune_stale(UniverseTick(105), &t), (0, 0));
+        assert!(ingest.ingest_relay_level(child, UniverseTick(100), Vec::new(), &t));
+        // INSIDE the window (the ring's head at exactly look age + TTL): everything survives — a
+        // live realm re-asserting one beat late is not a dead one. C6: the prune clock IS the
+        // level ring's own head, never the gateway's clock.
+        assert_eq!(
+            ingest.ingest_frame(level(UniverseTick(105), None, vec![]), &t),
+            Ingested::Applied
+        );
+        assert_eq!(ingest.prune_stale(&t), (0, 0));
         assert!(ingest.look_of(subject).is_some());
-        assert_eq!(ingest.relayed_levels().count(), 1);
-        // ONE TICK PAST IT: the look and the relayed level go; the MARKER stays (the floor — the
+        assert_eq!(ingest.relayed_children().count(), 1);
+        // ONE TICK PAST IT: the look and the relayed ring go; the MARKER stays (the floor — the
         // presence law is "never zero", so a departed system becomes a dot, not a hole).
-        assert_eq!(ingest.prune_stale(UniverseTick(106), &t), (1, 1));
+        assert_eq!(
+            ingest.ingest_frame(level(UniverseTick(106), None, vec![]), &t),
+            Ingested::Applied
+        );
+        assert_eq!(ingest.prune_stale(&t), (1, 1));
         assert_eq!(ingest.look_of(subject), None);
-        assert_eq!(ingest.relayed_levels().count(), 0);
+        assert_eq!(ingest.relayed_children().count(), 0);
         assert_eq!(ingest.marker_of(subject), Some(&[9u8][..]));
         // And the presence gate now answers MARKER for the same realm it answered LOOK for.
         assert_eq!(scene_bag(subject, &[subject], &[&ingest]), vec![9u8]);
-        // A gateway whose universe clock has not passed the window yet prunes nothing (saturating).
-        assert_eq!(ingest.prune_stale(UniverseTick(0), &t), (0, 0));
     }
 
     #[test]
@@ -1425,6 +1572,7 @@ mod tests {
                     T,
                 ),
             ],
+            &t,
         ));
         let ingests: Vec<&WindowIngest> = vec![&leaf, &parent];
         let out = compose(
@@ -1437,7 +1585,8 @@ mod tests {
             &ingests,
         );
         // The sibling's planet: (1300 + 40) − 1000 = 340 in the origin frame, stamped at the
-        // relay's own tick, stratum = the galaxy's.
+        // fold's own tick (an exact-stamp resolution — zero declared skew), stratum = the
+        // galaxy's, PARENT = the sibling that authored it (C1/G-PARENT-TRUE).
         let planet9 = out
             .rows
             .iter()
@@ -1446,9 +1595,14 @@ mod tests {
         assert_eq!(planet9.pose.pos.offset(), DVec3::new(340.0, 0.0, 0.0));
         assert_eq!(planet9.pose.universe_tick, T);
         assert_eq!(planet9.stratum, 1);
+        assert_eq!(planet9.parent, Some(sibling));
         assert_eq!(out.relay_rows, 1);
         assert_eq!(out.alien_rows, 1);
-        assert_eq!(out.relay_unplaceable, 0);
+        assert_eq!(out.relay_stamp_skew_ticks, 0);
+        assert_eq!(out.relay_depth_max, 2);
+        assert_eq!(out.relay_descent_refused, 0);
+        assert_eq!(out.relay_stamp_missing, 0);
+        assert_eq!(out.relay_unrostered, 0);
     }
 
     /// Every remaining relay-fold arm, driven one by one (HR5 region+branch): the chain-author
@@ -1479,6 +1633,7 @@ mod tests {
                 DVec3::new(99.0, 0.0, 0.0),
                 T,
             )],
+            &t,
         ));
         // (b) The member sibling's relay carries FOUR rows: the ORIGIN (dropped uncounted), a
         // row the chain ALREADY states (Planet 7 — agreement measured, the chain's pose wins),
@@ -1516,6 +1671,7 @@ mod tests {
                     T,
                 ),
             ],
+            &t,
         ));
         let ingests: Vec<&WindowIngest> = vec![&leaf, &parent];
         let out = compose(
@@ -1609,31 +1765,36 @@ mod tests {
         assert_eq!(books.len(), 1);
     }
 
-    /// The relay fold's refusal arms, each driven separately: a NON-MEMBER sibling draws
-    /// nothing (step 5 — lawful, uncounted), and a member whose placement row is missing at
-    /// the relay's stamp counts `relay_unplaceable` (fail-closed, healed by the next relay).
+    /// The relay fold's refusal arms after the C5 split, each driven separately: a NON-MEMBER
+    /// sibling draws nothing (step 5 — lawful, uncounted); a member whose ring holds only a
+    /// FUTURE stamp counts `relay_stamp_missing`; a member relayed BEHIND the fold's tick
+    /// resolves through the at-or-before fallback (the C4 cure — composed, skew DECLARED, never
+    /// refused); and a member missing from the stratum author's own level at the fold's tick
+    /// counts `relay_unrostered`.
     #[test]
-    fn a_relayed_interior_is_membership_gated_and_unplaceable_is_counted() {
+    fn a_relayed_interior_is_membership_gated_and_each_refusal_class_counts_apart() {
         let (authors, leaf_level, parent_level) = two_level_fixture();
         let t = WindowTuning::derive(2);
         let mut leaf = WindowIngest::default();
         assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
         let sibling = RealmId::System(9);
         let sibling_frame = FrameRef::SystemSpace { system_seed: 9 };
-        let interior = vec![row(
-            RealmId::Planet(9),
-            FrameRef::PlanetCentered { planet_seed: 9 },
-            sibling_frame,
-            DVec3::new(40.0, 0.0, 0.0),
-            T,
-        )];
+        let interior_at = |at: UniverseTick| {
+            vec![row(
+                RealmId::Planet(9),
+                FrameRef::PlanetCentered { planet_seed: 9 },
+                sibling_frame,
+                DVec3::new(40.0, 0.0, 0.0),
+                at,
+            )]
+        };
         // (a) NOT a member: the interior is skipped entirely — no row, no refusal count.
         let mut parent = WindowIngest::default();
         assert_eq!(
             parent.ingest_frame(parent_level.clone(), &t),
             Ingested::Applied
         );
-        assert!(parent.ingest_relay_level(sibling, T, interior.clone()));
+        assert!(parent.ingest_relay_level(sibling, T, interior_at(T), &t));
         let ingests: Vec<&WindowIngest> = vec![&leaf, &parent];
         let out = compose(
             RealmId::System(7),
@@ -1645,16 +1806,22 @@ mod tests {
             &ingests,
         );
         assert_eq!(out.relay_rows, 0);
-        assert_eq!(out.relay_unplaceable, 0);
+        assert_eq!(out.relay_stamp_missing, 0);
         assert!(!out.rows.iter().any(|r| r.realm == RealmId::Planet(9)));
-        // (b) A member relayed at a stamp the parent's ring does not retain: counted.
+        // (b) A member whose ring holds ONLY a stamp NEWER than the fold's tick: nothing is
+        // resolvable at-or-before T — `relay_stamp_missing`, healed by the next fold.
         let mut parent2 = WindowIngest::default();
         assert_eq!(
             parent2.ingest_frame(parent_level.clone(), &t),
             Ingested::Applied
         );
         parent2.ingest_membership(&[sibling], &[]);
-        assert!(parent2.ingest_relay_level(sibling, UniverseTick(T.0 + 1), interior.clone()));
+        assert!(parent2.ingest_relay_level(
+            sibling,
+            UniverseTick(T.0 + 1),
+            interior_at(UniverseTick(T.0 + 1)),
+            &t
+        ));
         let ingests2: Vec<&WindowIngest> = vec![&leaf, &parent2];
         let out2 = compose(
             RealmId::System(7),
@@ -1666,38 +1833,21 @@ mod tests {
             &ingests2,
         );
         assert_eq!(out2.relay_rows, 0);
-        assert_eq!(out2.relay_unplaceable, 1);
-        // (c) The descent WALKS at the relay's stamp but the parent's level THERE has no
-        // placement row for the child (a roster race): counted, healed by the next relay.
+        assert_eq!(out2.relay_stamp_missing, 1);
+        assert_eq!(out2.relay_stamp_skew_ticks, 0, "nothing resolved, no skew");
+        // (c) THE C4 CURE, measured: a member relayed one tick BEHIND the fold's tick RESOLVES
+        // through the at-or-before fallback — the placement comes from the stratum author's own
+        // level at T (exact), the interior rows re-stamp to T (the §3.7 zero-error identity),
+        // and the skew is DECLARED on the gauge instead of a whole beat of refusals. This exact
+        // shape was a `relay_unplaceable` refusal before the ring (D-WINDOW-6(2)).
         let t_old = UniverseTick(T.0 - 1);
         let mut parent3 = WindowIngest::default();
         assert_eq!(
             parent3.ingest_frame(parent_level.clone(), &t),
             Ingested::Applied
         );
-        assert_eq!(
-            parent3.ingest_frame(
-                level(
-                    t_old,
-                    Some(hop(
-                        RealmId::System(7),
-                        DVec3::new(1000.0, 0.0, 0.0),
-                        DVec3::new(0.0, 5.0, 0.0),
-                    )),
-                    vec![row(
-                        RealmId::System(7),
-                        sys(),
-                        galaxy(),
-                        DVec3::new(1000.0, 0.0, 0.0),
-                        t_old,
-                    )],
-                ),
-                &t
-            ),
-            Ingested::Applied
-        );
         parent3.ingest_membership(&[sibling], &[]);
-        assert!(parent3.ingest_relay_level(sibling, t_old, interior));
+        assert!(parent3.ingest_relay_level(sibling, t_old, interior_at(t_old), &t));
         let ingests3: Vec<&WindowIngest> = vec![&leaf, &parent3];
         let out3 = compose(
             RealmId::System(7),
@@ -1708,8 +1858,109 @@ mod tests {
             2,
             &ingests3,
         );
-        assert_eq!(out3.relay_rows, 0);
-        assert_eq!(out3.relay_unplaceable, 1);
+        assert_eq!(out3.relay_rows, 1, "the fallback composes, never refuses");
+        assert_eq!(out3.relay_stamp_missing, 0);
+        assert_eq!(out3.relay_stamp_skew_ticks, 1, "one stamp of DECLARED skew");
+        let planet9 = out3
+            .rows
+            .iter()
+            .find(|r| r.realm == RealmId::Planet(9))
+            .expect("the fallback-resolved interior row composes");
+        assert_eq!(planet9.pose.pos.offset(), DVec3::new(340.0, 0.0, 0.0));
+        assert_eq!(
+            planet9.pose.universe_tick, T,
+            "the re-stamped row folds at the chain's own tick"
+        );
+        // (d) A member the stratum author's OWN level at T does not roster: `relay_unrostered`
+        // (a roster race), healed by the author's next level. The author's level keeps a valid
+        // hop and its own child row, so the stratum is fresh — only the sibling's row is gone.
+        let rosterless = level(
+            T,
+            Some(hop(
+                RealmId::System(7),
+                DVec3::new(1000.0, 0.0, 0.0),
+                DVec3::new(0.0, 5.0, 0.0),
+            )),
+            vec![row(
+                RealmId::System(7),
+                sys(),
+                galaxy(),
+                DVec3::new(1000.0, 0.0, 0.0),
+                T,
+            )],
+        );
+        let mut parent4 = WindowIngest::default();
+        assert_eq!(
+            parent4.ingest_frame(rosterless.clone(), &t),
+            Ingested::Applied
+        );
+        parent4.ingest_membership(&[sibling], &[]);
+        assert!(parent4.ingest_relay_level(sibling, T, interior_at(T), &t));
+        let ingests4: Vec<&WindowIngest> = vec![&leaf, &parent4];
+        let out4 = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &rosterless],
+            2,
+            &ingests4,
+        );
+        assert_eq!(out4.relay_rows, 0);
+        assert_eq!(out4.relay_unrostered, 1);
+        assert_eq!(out4.relay_stamp_missing, 0);
+        assert_eq!(out4.relay_descent_refused, 0);
+    }
+
+    /// G-RELAY-STAMP's named unit for the OTHER split arm, at chain index ≥ 1 (look_horizon.md
+    /// slice 0 — "so neither arm is dead"): the fold composes level 1 from a level the caller
+    /// hands it, but the stratum's INGEST ring does not retain the fold's tick, so the descent
+    /// below the relay cannot be rebuilt there — `relay_descent_refused`, apart from every
+    /// other class.
+    #[test]
+    fn g_relay_stamp_the_descent_refusal_arm_counts_apart_at_chain_index_one() {
+        let (authors, leaf_level, parent_level) = two_level_fixture();
+        let t = WindowTuning::derive(2);
+        let mut leaf = WindowIngest::default();
+        assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
+        let sibling = RealmId::System(9);
+        let sibling_frame = FrameRef::SystemSpace { system_seed: 9 };
+        // The stratum-1 ingest holds its level at T+1 ONLY — the fold at T (driven with the
+        // caller's own T-stamped level) finds no T in the ring when rebuilding the descent.
+        let mut parent = WindowIngest::default();
+        let shifted = level(
+            UniverseTick(T.0 + 1),
+            parent_level.hop,
+            parent_level.rows.clone(),
+        );
+        assert_eq!(parent.ingest_frame(shifted, &t), Ingested::Applied);
+        parent.ingest_membership(&[sibling], &[]);
+        assert!(parent.ingest_relay_level(
+            sibling,
+            T,
+            vec![row(
+                RealmId::Planet(9),
+                FrameRef::PlanetCentered { planet_seed: 9 },
+                sibling_frame,
+                DVec3::new(40.0, 0.0, 0.0),
+                T,
+            )],
+            &t
+        ));
+        let ingests: Vec<&WindowIngest> = vec![&leaf, &parent];
+        let out = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &ingests,
+        );
+        assert_eq!(out.relay_descent_refused, 1, "the descent arm, apart");
+        assert_eq!(out.relay_stamp_missing, 0);
+        assert_eq!(out.relay_unrostered, 0);
+        assert_eq!(out.relay_rows, 0);
     }
 
     #[test]
@@ -1987,6 +2238,12 @@ mod tests {
             mid_row.stratum, 2,
             "the surviving entry is the parent's child row"
         );
+        assert_eq!(
+            mid_row.parent,
+            Some(grand),
+            "a mid chain author parents one level up — stated identically by its body row \
+             (C1 fill) and the grand's child row, so the dedup cannot change it"
+        );
         let grand_row = out
             .rows
             .iter()
@@ -2022,6 +2279,7 @@ mod tests {
 
     fn one_row(realm: RealmId, stratum: usize, t: UniverseTick) -> ComposedRow {
         ComposedRow {
+            parent: None,
             realm,
             frame: sys(),
             pose: StampedPose::at_rest(sys(), DVec3::X, t),
@@ -2224,45 +2482,78 @@ mod tests {
         // …and a CHAIN AUTHOR's look is always admitted (the origin and its ancestors are drawn).
         ingest.ingest_membership(&[], &[realm]);
         assert_eq!(scene_bag(realm, &[realm], &[&ingest]), vec![1]);
+        // THE THIRD DISJUNCT (look horizon slice 3, §3.4.5): a subject admitted through the
+        // sealed interior forward is a member by ARRIVAL — its middle realm's verdict gated the
+        // forward, so no verdict ever needed to cross.
+        assert_eq!(
+            scene_bag(realm, &[], &[&ingest]),
+            vec![2],
+            "no member, no author, no interior admission: the marker"
+        );
+        ingest.admit_interior(realm, T);
+        assert_eq!(
+            scene_bag(realm, &[], &[&ingest]),
+            vec![1],
+            "interior-admitted: the subject's own picture draws"
+        );
     }
 
-    /// The hierarchy parent of a composed row: a child row parents on its stratum's author; a
-    /// chain BODY row parents one level up; the root's body has none.
+    /// Look horizon slice 3 — the interior-admitted set's lifecycle: newest stamp wins (an older
+    /// re-admission never regresses the prune clock), and the head-anchored prune ages it out on
+    /// the SAME window as the looks, so a subject whose forwards stop falls back to its parent's
+    /// marker together with its picture (body → marker, never → nothing).
     #[test]
-    fn scene_parent_is_identity_only_hierarchy() {
-        let authors = [RealmId::System(7), GALAXY];
-        let child_row = ComposedRow {
-            realm: RealmId::Planet(7),
-            frame: planet(),
-            pose: StampedPose::at_rest(sys(), DVec3::X, T),
-            stratum: 0,
-            body: BodyTag::Placement,
-        };
-        assert_eq!(scene_parent(&child_row, &authors), Some(RealmId::System(7)));
-        let galaxy_body = ComposedRow {
-            realm: GALAXY,
-            frame: galaxy(),
-            pose: StampedPose::at_rest(sys(), -DVec3::X, T),
-            stratum: 1,
-            body: BodyTag::Placement,
-        };
+    fn the_interior_admitted_set_keeps_the_newest_stamp_and_prunes_with_the_looks() {
+        let realm = RealmId::Area(5);
+        let tuning = tuning();
+        let mut ingest = WindowIngest::default();
+        assert!(!ingest.interior_admitted(realm));
+        assert!(ingest.ingest_body(realm, &BodyStmt::SelfLook { bag: vec![1] }, T));
+        ingest.admit_interior(realm, T);
+        ingest.admit_interior(realm, UniverseTick(T.0 - 1)); // older: kept at the newest stamp
+        assert!(ingest.interior_admitted(realm));
+        // Anchor the prune clock: a level far ahead makes T stale past the look TTL.
+        let head = UniverseTick(T.0 + tuning.look_ttl_ticks + 1);
         assert_eq!(
-            scene_parent(&galaxy_body, &authors),
-            None,
-            "the root's body"
+            ingest.ingest_frame(level(head, None, Vec::new()), &tuning),
+            Ingested::Applied
         );
-        let mid_body = ComposedRow {
-            realm: RealmId::System(7),
-            frame: sys(),
-            pose: StampedPose::at_rest(sys(), DVec3::ZERO, T),
-            stratum: 0,
-            body: BodyTag::Placement,
-        };
+        let (looks, _) = ingest.prune_stale(&tuning);
+        assert_eq!(looks, 1, "the look aged out");
+        assert!(
+            !ingest.interior_admitted(realm),
+            "…and the member disjunct aged out WITH it — the marker resumes"
+        );
+    }
+
+    /// The hierarchy parent of a composed row, CARRIED EXPLICITLY by the fold (C1 — the
+    /// chain-index derivation is deleted): a child row parents on its stratum's author; a chain
+    /// BODY row parents one level up; the root's body has none. Asserted on the fold's OWN
+    /// output rather than a detached derivation — there is no second parent source left.
+    #[test]
+    fn composed_rows_carry_identity_only_hierarchy_parents() {
+        let (authors, leaf_level, parent_level) = two_level_fixture();
+        let out = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &[],
+        );
+        let by_realm = |r: RealmId| out.rows.iter().find(|row| row.realm == r).expect("row");
         assert_eq!(
-            scene_parent(&mid_body, &authors),
+            by_realm(RealmId::Planet(7)).parent,
+            Some(RealmId::System(7)),
+            "a child row parents on its stratum's author"
+        );
+        assert_eq!(
+            by_realm(RealmId::System(9)).parent,
             Some(GALAXY),
-            "a chain body parents one level up"
+            "the sibling system is the galaxy's child row"
         );
+        assert_eq!(by_realm(GALAXY).parent, None, "the root's body has none");
     }
 
     /// The composed level's rows: the ORIGIN row FIRST (pose ZERO in its own frame, its bag
@@ -2330,11 +2621,77 @@ mod tests {
         );
     }
 
-    /// The Q2 relay's ingest storage: the fence guard orders incarnations; a relayed level is
-    /// newest-wins per child; the relayed roster vouches the child's OWN markers (empty before
-    /// the first level — fail-closed).
+    /// G-PARENT-TRUE (look_horizon.md §3.5 C1, slice 0 — DECLARED RED BEFORE THE SLICE): a
+    /// relayed interior row's hierarchy parent is the RELAYED CHILD that authored the interior
+    /// (the star system), never the stratum's chain author (the galaxy). The departure shape:
+    /// the observer stands in the galaxy, the star system is a live member child relaying its
+    /// planets — every planet row's parent must be the star system.
     #[test]
-    fn relay_storage_orders_fences_and_levels_and_vouches_rosters() {
+    fn g_parent_true_a_relayed_interiors_parent_is_the_relayed_child_not_the_stratum_author() {
+        let t = tuning();
+        let system = RealmId::System(7);
+        let galaxy_level = level(
+            T,
+            None,
+            vec![row(
+                system,
+                sys(),
+                galaxy(),
+                DVec3::new(1000.0, 0.0, 0.0),
+                T,
+            )],
+        );
+        let mut ingest = WindowIngest::default();
+        assert_eq!(
+            ingest.ingest_frame(galaxy_level.clone(), &t),
+            Ingested::Applied
+        );
+        ingest.ingest_membership(&[system], &[]);
+        assert!(ingest.ingest_relay_level(
+            system,
+            T,
+            vec![row(
+                RealmId::Planet(7),
+                planet(),
+                sys(),
+                DVec3::new(30.0, 0.0, 0.0),
+                T,
+            )],
+            &t,
+        ));
+        let authors = vec![GALAXY];
+        let ingests: Vec<&WindowIngest> = vec![&ingest];
+        let fold = compose(GALAXY, galaxy(), T, &authors, &[&galaxy_level], 1, &ingests);
+        assert_eq!(fold.relay_rows, 1, "the planet composed through the relay");
+        let mut scene = ShadowScene::default();
+        let _ = scene.advance(GALAXY, &authors, Some(fold), &t);
+        let rows = scene_level_rows(GALAXY, galaxy(), T, &authors, &ingests, &scene);
+        let planet_row = rows
+            .iter()
+            .find(|r| r.realm == RealmId::Planet(7))
+            .expect("the relayed planet row is in the composed level");
+        assert_eq!(
+            planet_row.parent,
+            Some(system),
+            "G-PARENT-TRUE: a planet row's parent is the star system that authored it, \
+             never the galaxy (the stratum's chain author)",
+        );
+        // And the SYSTEM's own row (the galaxy's direct child) parents on the galaxy.
+        let system_row = rows
+            .iter()
+            .find(|r| r.realm == system)
+            .expect("the system's placement row is in the composed level");
+        assert_eq!(system_row.parent, Some(GALAXY));
+    }
+
+    /// The Q2 relay's ingest storage after C4's ring: the fence guard orders incarnations; a
+    /// relayed level joins its child's RING (an older stamp INSIDE the span is retained apart —
+    /// the at-or-before resolution's raw material; a stamp behind the span refuses; a
+    /// re-delivered stamp replaces); the relayed roster vouches the child's OWN markers off the
+    /// NEWEST level (empty before the first level — fail-closed).
+    #[test]
+    fn relay_storage_orders_fences_and_rings_levels_and_vouches_rosters() {
+        let t = tuning(); // span 5
         let mut ingest = WindowIngest::default();
         let child = RealmId::Planet(7);
         // Fence order: first admit records; an older fence refuses; same-or-newer admits.
@@ -2355,19 +2712,56 @@ mod tests {
             DVec3::X,
             T,
         )];
-        assert!(ingest.ingest_relay_level(child, T, rows.clone()));
+        assert!(ingest.ingest_relay_level(child, T, rows.clone(), &t));
         assert_eq!(
             ingest.relay_child_roster(child),
             BTreeSet::from([RealmId::Area(3)])
         );
-        // An OLDER relayed level refuses (newest wins); an equal/newer replaces.
-        assert!(!ingest.ingest_relay_level(child, UniverseTick(99), Vec::new()));
+        // An OLDER level INSIDE the span (head 100, span 5 ⇒ floor 95) joins the ring APART —
+        // the roster still reads the newest; the at-or-before resolution can now serve both.
+        assert!(ingest.ingest_relay_level(child, UniverseTick(99), Vec::new(), &t));
         assert_eq!(
             ingest.relay_child_roster(child),
             BTreeSet::from([RealmId::Area(3)]),
-            "the stale level replaced nothing"
+            "the roster reads the NEWEST ring level"
         );
-        assert!(ingest.ingest_relay_level(child, UniverseTick(101), Vec::new()));
-        assert_eq!(ingest.relay_child_roster(child), BTreeSet::new());
+        assert_eq!(
+            ingest.relay_level_at_or_before(child, UniverseTick(99)),
+            Some((UniverseTick(99), &[][..])),
+            "the older stamp resolves exactly"
+        );
+        // BEHIND the span (head 100, span 5 ⇒ 94 refuses): fail-closed, counted by the caller.
+        assert!(!ingest.ingest_relay_level(child, UniverseTick(94), Vec::new(), &t));
+        // Before anything is resolvable (a child with only FUTURE stamps): None.
+        assert_eq!(
+            ingest.relay_level_at_or_before(child, UniverseTick(98)),
+            None
+        );
+        assert_eq!(
+            ingest.relay_level_at_or_before(RealmId::Planet(9), T),
+            None,
+            "an unknown child resolves nothing"
+        );
+        // A re-delivered stamp REPLACES (latest-wins per tick), and the ring trims one span
+        // behind an advancing head.
+        assert!(ingest.ingest_relay_level(child, UniverseTick(99), rows.clone(), &t));
+        assert_eq!(
+            ingest
+                .relay_level_at_or_before(child, UniverseTick(99))
+                .map(|(_, r)| r.len()),
+            Some(1),
+            "the re-delivered stamp replaced its slot"
+        );
+        assert!(ingest.ingest_relay_level(child, UniverseTick(106), Vec::new(), &t));
+        assert_eq!(
+            ingest.relay_level_at_or_before(child, UniverseTick(100)),
+            None,
+            "the advancing head trimmed the tail out of the span"
+        );
+        assert_eq!(
+            ingest.relay_child_roster(child),
+            BTreeSet::new(),
+            "the newest level (empty rows) is the roster now"
+        );
     }
 }

@@ -47,6 +47,12 @@ pub struct DevEntityRow {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DevRealmBox {
     pub realm: String,
+    /// The row's HIERARCHY PARENT as delivered on the composed scene row (`SceneRow.parent`,
+    /// identity only — same `{realm:?}` rendering as `realm`; `None` at the root). The
+    /// G-PARENT-TRUE process gate (look_horizon.md slice 0) reads THIS: every planet row's
+    /// parent must be its star system, never the galaxy — the composed row now carries the
+    /// parent explicitly from the fold that knows it.
+    pub parent: Option<String>,
     pub center: [f64; 3],
     /// The drawn EXTENT in metres (a sphere's radius; a box's half-diagonal length; 0 for a
     /// MARKER point) — read STREAMED, straight off the composed row's look bag (window_lane.md
@@ -234,6 +240,7 @@ pub(crate) mod tests {
             }],
             realm_boxes: vec![DevRealmBox {
                 realm: "Planet(7)".to_owned(),
+                parent: Some("System(7)".to_owned()),
                 center: [10.0, 0.0, 0.0],
                 extent_m: 4.0,
                 body_kind: "look".to_owned(),

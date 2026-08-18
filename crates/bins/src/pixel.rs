@@ -27,7 +27,6 @@
 
 use std::time::Duration;
 
-use vd_client::realm_scene::marker_look;
 use vd_client_harness::camera::{
     CaptureCamera, DOT_MIN_APPARENT_RADIUS_PX, ScreenAabb, marker_world_radius,
     pilot_capture_camera,
@@ -161,8 +160,10 @@ pub fn subject(state: &DevState, camera: &CaptureCamera, realm: RealmId) -> Subj
     let (presence, world_radius) = match row.body_kind.as_str() {
         "look" => (Presence::Drawn(Author::SelfLook), row.extent_m),
         "marker" => {
-            let (class_code, luma_lsun) = row.luma.unwrap_or_default();
-            let base = marker_look(class_code, luma_lsun).base_radius_m;
+            // look_horizon.md slice 1: the marker's base is the LARGER of the photometric √L
+            // radius and the parent's one stated extent (`row.extent_m` — the marker box carries
+            // it since the presence floor), through the SAME Tier-A pair the renderer scales by.
+            let base = vd_client::realm_scene::marker_base_radius_m(row.luma, row.extent_m);
             let dist = (centre_m - camera.eye).length();
             (
                 Presence::Drawn(Author::ParentMarker),

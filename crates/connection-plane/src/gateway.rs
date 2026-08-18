@@ -45,7 +45,7 @@ use vd_wire::channels::{
     CONSERVATIVE_DATAGRAM_BUDGET, ClientControlMsg, RealmSnap, RealmSnapshotDatagram, SceneRow,
     ServerControlMsg, SubId, partition_realms,
 };
-use vd_wire::intershard::{DemandVerb, InterShardFlow, RealmDemand, ShardPresence};
+use vd_wire::intershard::{DemandVerb, InterShardFlow, InteriorRelay, RealmDemand, ShardPresence};
 use vd_wire::seams::directory::{
     AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply, OwnerRecord,
 };
@@ -980,8 +980,10 @@ struct GatewayWindow {
     /// ONCE, so a fail-closed drop here would be a permanently invisible body; parking keeps the
     /// drop fail-closed (nothing is served un-attested) without the permanence.
     parked_bodies: BTreeMap<RealmId, (BodyStmt, vd_core::UniverseTick)>,
-    /// The parked Q2 relays, newest child-fence wins — drained exactly like the bodies.
-    parked_relays: BTreeMap<RealmId, (Fence, Vec<u8>)>,
+    /// The parked Q2 relays, newest child-fence wins — drained exactly like the bodies. Since
+    /// look horizon slice 3 the parked tuple carries the sealed interior forward too, so a
+    /// first-roster race never silently drops a grandchild's picture.
+    parked_relays: BTreeMap<RealmId, (Fence, Vec<u8>, Vec<InteriorRelay>)>,
 }
 
 impl GatewaySessions {
@@ -1573,9 +1575,22 @@ pub struct GatewayStats {
     /// §2.6.5 step 4 (Q2 = PARENT RELAY, Slice C1): relayed live-child interior rows composed
     /// into folds — the sibling-interior carrier's rows actually reaching drawn scenes.
     pub window_relay_rows_composed: u64,
-    /// A relayed interior refused at the fold (stamp off the rings / no placement row at that
-    /// stamp / a hop invalid there) — dropped + counted, healed by the child's next relay.
-    pub window_relay_unplaceable: u64,
+    /// C5 split (look_horizon.md §3.5 — the old `window_relay_unplaceable` aggregated three
+    /// classes, one structurally dead): the chain descent below a relaying stratum could not be
+    /// rebuilt at the fold's tick — dropped, healed by the next fold.
+    pub window_relay_descent_refused: u64,
+    /// C5 split: a relayed child with NO ring level at-or-before the fold's tick (G-RELAY-STAMP
+    /// asserts this stays 0 over a process flight — the D-WINDOW-6(2) discharge).
+    pub window_relay_stamp_missing: u64,
+    /// C5 split: a member child missing from the stratum author's own level at the fold's tick
+    /// (a roster race) — healed by the author's next level.
+    pub window_relay_unrostered: u64,
+    /// C5 GAUGE (max): the at-or-before fallback's declared skew, in ticks (G-RELAY-STAMP
+    /// bounds it by one keep-alive beat).
+    pub window_relay_stamp_skew_ticks: u64,
+    /// C5 GAUGE (max): the deepest relayed subject composed, in levels below its forwarding
+    /// author — 2 is the carrier's whole arity; more is an implementation climb bug (§3.3.4).
+    pub window_relay_depth_max: u64,
     /// ★TOMBSTONED LANES, counted so a revived producer is never silent (window lane Slice C2,
     /// minor 19). `old_realm_frames_dropped`: the old opaque per-tick realm datagram
     /// (`ShardToGateway::RealmFrame`), whose producer and whose last consumer (the Slice-B parity
@@ -1614,6 +1629,17 @@ pub struct GatewayStats {
     /// Slice D: relayed interior LEVELS dropped by the same window — a dead live-child's interior
     /// cannot keep composing rows after its statements stop.
     pub window_relay_levels_pruned: u64,
+    /// Look horizon slice 3 (§3.2 admission rule 1) — a forwarded grandchild batch naming a
+    /// child the RELAYING child's own attested roster does not vouch: refused + counted. A
+    /// VIOLATION counter — gates assert it 0 on every lawful flight (a hostile or buggy
+    /// forwarder is the only producer).
+    pub window_relay_interior_unvouched: u64,
+    /// Look horizon slice 3 (§3.2 admission rule 3) — statements inside an admitted grandchild
+    /// batch that are NOT the author's own picture (its `Level`, its markers): depth-3 subjects
+    /// no row can exist for, dropped + counted. The LAWFUL filter — expected NON-zero on any
+    /// flight that forwards an interior, never asserted zero (deliberately a different counter
+    /// from the violation above).
+    pub window_relay_interior_filtered: u64,
 }
 
 pub fn register_gateway(world: &mut World, schedule: &mut Schedule, config: GatewayConfig) {
@@ -2140,9 +2166,11 @@ fn compose_scenes_pass(
     // before anything is composed from these stores: a realm that stopped stating its own look —
     // it tore down, or its parent's relay holder TTL-expired it — loses that look after the
     // derived roster-loss window, and the presence gate falls through to its parent's ever-present
-    // marker. Markers never expire (the floor: never zero drawn).
+    // marker. Markers never expire (the floor: never zero drawn). The prune clock is each
+    // window's OWN ring head (look_horizon.md §3.5 C6) — the same head the ring trims on —
+    // never this gateway's clock, so a gateway a few ticks adrift cannot evict a stamp early.
     for held in sessions.windows.values_mut() {
-        let (looks, relays) = held.ingest.prune_stale(clock.universe_tick, &tuning);
+        let (looks, relays) = held.ingest.prune_stale(&tuning);
         stats.window_looks_pruned += looks;
         stats.window_relay_levels_pruned += relays;
     }
@@ -2244,7 +2272,14 @@ fn compose_scenes_pass(
                     stats.window_folds += 1;
                     stats.window_composed_rows += fold.rows.len() as u64;
                     stats.window_relay_rows_composed += fold.relay_rows;
-                    stats.window_relay_unplaceable += fold.relay_unplaceable;
+                    stats.window_relay_descent_refused += fold.relay_descent_refused;
+                    stats.window_relay_stamp_missing += fold.relay_stamp_missing;
+                    stats.window_relay_unrostered += fold.relay_unrostered;
+                    stats.window_relay_stamp_skew_ticks = stats
+                        .window_relay_stamp_skew_ticks
+                        .max(fold.relay_stamp_skew_ticks);
+                    stats.window_relay_depth_max =
+                        stats.window_relay_depth_max.max(fold.relay_depth_max);
                     stats.window_instant_mismatch += fold.instant_refused;
                     stats.window_rotated_refused += fold.rotated_refused;
                     stats.window_alien_rows += fold.alien_rows;
@@ -3958,6 +3993,7 @@ fn on_shard_control(
             child,
             child_fence,
             statements,
+            interior,
             ..
         } => {
             on_window_relayed(
@@ -3966,6 +4002,8 @@ fn on_shard_control(
                 child,
                 child_fence,
                 &statements,
+                interior,
+                config,
                 sessions,
                 stats,
             );
@@ -3986,12 +4024,15 @@ fn on_shard_control(
 /// downstream (a waking realm's look upgrades its drawn body by data presence); relayed interior
 /// LEVELS are held per child — the Slice-D interior compose's input, stored + counted and
 /// deliberately unconsumed until that slice (the Slice-A discipline).
+#[allow(clippy::too_many_arguments)]
 fn on_window_relayed(
     from: NodeId,
     window_id: WindowId,
     child: RealmId,
     child_fence: Fence,
     statements: &[u8],
+    interior: Vec<InteriorRelay>,
+    config: &GatewayConfig,
     sessions: &mut GatewaySessions,
     stats: &mut GatewayStats,
 ) {
@@ -4012,29 +4053,45 @@ fn on_window_relayed(
     if !held.ingest.rosters(child) {
         // PARKED, not dropped (the same first-roster race as the direct markers — the relay is
         // forwarded send-on-change, once): counted, held newest-fence-wins, re-admitted through
-        // the full admission the moment the author's level vouches the child.
+        // the full admission the moment the author's level vouches the child. The interior
+        // parks WITH its relay (slice 3) — same seal, same race, same drain.
         stats.window_relay_unvouched += 1;
         if held
             .parked_relays
             .get(&child)
-            .is_none_or(|(f, _)| !child_fence.is_stale_against(*f))
+            .is_none_or(|(f, _, _)| !child_fence.is_stale_against(*f))
         {
             held.parked_relays
-                .insert(child, (child_fence, statements.to_vec()));
+                .insert(child, (child_fence, statements.to_vec(), interior));
         }
         return;
     }
-    admit_relay(held, child, child_fence, statements, stats);
+    admit_relay(
+        held,
+        child,
+        child_fence,
+        statements,
+        &interior,
+        &window_tuning(config),
+        stats,
+    );
 }
 
 /// The ONE relay admission (direct + drained-parked), applied AFTER the sender + roster vouches:
 /// the child's fence orders incarnations, the seal opens HERE (the first and only reader), and
-/// every inner statement runs the existing predicates against the CHILD's identity.
+/// every inner statement runs the existing predicates against the CHILD's identity. Since look
+/// horizon slice 3 (owner-approved 2026-08-17 — look_horizon.md RULINGS + §2 ASK A) the relay
+/// also carries the child's held GRANDCHILD batches, sealed the whole way: each is vouched
+/// against the child's own attested roster, fence-ordered by the existing per-realm map, opened
+/// HERE, and admits ONLY the author's own picture — see [`admit_interior_relay`].
+#[allow(clippy::too_many_arguments)]
 fn admit_relay(
     held: &mut GatewayWindow,
     child: RealmId,
     child_fence: Fence,
     statements: &[u8],
+    interior: &[InteriorRelay],
+    tuning: &window::WindowTuning,
     stats: &mut GatewayStats,
 ) {
     if !held.ingest.admit_relay_fence(child, child_fence) {
@@ -4048,7 +4105,7 @@ fn admit_relay(
     for statement in opened {
         match statement {
             RelayedStatement::Level { at, rows } => {
-                if held.ingest.ingest_relay_level(child, at, rows) {
+                if held.ingest.ingest_relay_level(child, at, rows, tuning) {
                     stats.window_relays_ingested += 1;
                 } else {
                     stats.window_relay_stale += 1;
@@ -4074,6 +4131,82 @@ fn admit_relay(
                 } else {
                     stats.window_body_stale += 1;
                 }
+            }
+        }
+    }
+    // THE SEALED INTERIOR FORWARD's admission (look_horizon.md §3.2, AFTER the child's own
+    // batch: its freshly ingested Level IS the roster the grandchildren are vouched against).
+    for entry in interior {
+        admit_interior_relay(held, child, entry, stats);
+    }
+}
+
+/// ONE forwarded grandchild batch's admission (look_horizon.md §3.2's three rules, monomorphic —
+/// every refusal arm its own named unit, HR5):
+/// 1. the named grandchild must appear in the RELAYING child's own attested roster
+///    ([`window::WindowIngest::relay_child_roster`] — the existing vouch); otherwise refuse +
+///    count `window_relay_interior_unvouched` — a VIOLATION counter, gates assert 0;
+/// 2. its fence orders against the existing per-realm fence map
+///    ([`window::WindowIngest::admit_relay_fence`], already keyed by realm id — it generalises
+///    unchanged); a deposed grandchild incarnation counts `window_relay_stale`;
+/// 3. from the opened batch, admit ONLY the author's own picture (a `SelfLook` whose subject IS
+///    the author): its `Level` and its markers describe depth-3 subjects, for which no row can
+///    exist — dropped + counted `window_relay_interior_filtered` (an EXPECTED-nonzero counter,
+///    never asserted zero); a `SelfLook` about anyone else is a mis-authored body
+///    (`window_misauthored_body`), same as every other lane.
+///
+/// An admitted picture lands in the ONE body store (the marker⇒look handover needs nothing new
+/// downstream) and the subject joins the window's interior-admitted set — the third disjunct of
+/// the bag's member test (§3.4.5: the forward gate was the middle realm's membership decision,
+/// so arrival IS the verdict).
+fn admit_interior_relay(
+    held: &mut GatewayWindow,
+    child: RealmId,
+    entry: &InteriorRelay,
+    stats: &mut GatewayStats,
+) {
+    if !held.ingest.relay_child_roster(child).contains(&entry.child) {
+        stats.window_relay_interior_unvouched += 1;
+        tracing::warn!(
+            grandchild = %entry.child,
+            %child,
+            "interior relay naming an unrostered grandchild refused (fail-closed vouch)"
+        );
+        return;
+    }
+    if !held
+        .ingest
+        .admit_relay_fence(entry.child, entry.child_fence)
+    {
+        stats.window_relay_stale += 1;
+        return;
+    }
+    let Ok(opened) = open_relay_statements(&entry.own) else {
+        stats.window_relay_undecodable += 1;
+        return;
+    };
+    for statement in opened {
+        match statement {
+            RelayedStatement::Body {
+                subject,
+                stmt: stmt @ BodyStmt::SelfLook { .. },
+                authored_at,
+            } if subject == entry.child => {
+                if held.ingest.ingest_body(subject, &stmt, authored_at) {
+                    held.ingest.admit_interior(subject, authored_at);
+                    stats.window_relays_ingested += 1;
+                } else {
+                    stats.window_body_stale += 1;
+                }
+            }
+            RelayedStatement::Body {
+                stmt: BodyStmt::SelfLook { .. },
+                ..
+            } => {
+                stats.window_misauthored_body += 1;
+            }
+            RelayedStatement::Level { .. } | RelayedStatement::Body { .. } => {
+                stats.window_relay_interior_filtered += 1;
             }
         }
     }
@@ -4138,7 +4271,7 @@ fn on_window_row(
         WindowRow::Level(level) => match held.ingest.ingest_frame(level, &window_tuning(config)) {
             window::Ingested::Applied => {
                 stats.window_rows_ingested += 1;
-                drain_parked(held, stats);
+                drain_parked(held, &window_tuning(config), stats);
             }
             window::Ingested::BehindRing => stats.window_level_refused += 1,
         },
@@ -4196,7 +4329,7 @@ fn admit_body(
 /// Drain the statements that raced the author's first roster (Slice C1): every parked body and
 /// relay whose subject the NOW-attested roster vouches re-runs the same admission it would have
 /// met in order; the rest stay parked (bounded — one slot per subject/child) for the next level.
-fn drain_parked(held: &mut GatewayWindow, stats: &mut GatewayStats) {
+fn drain_parked(held: &mut GatewayWindow, tuning: &window::WindowTuning, stats: &mut GatewayStats) {
     let roster = held.ingest.roster_set();
     let ready: Vec<RealmId> = held
         .parked_bodies
@@ -4222,11 +4355,19 @@ fn drain_parked(held: &mut GatewayWindow, stats: &mut GatewayStats) {
         .copied()
         .collect();
     for child in ready {
-        let (child_fence, statements) = held
+        let (child_fence, statements, interior) = held
             .parked_relays
             .remove(&child)
             .expect("keyed by the loop above");
-        admit_relay(held, child, child_fence, &statements, stats);
+        admit_relay(
+            held,
+            child,
+            child_fence,
+            &statements,
+            &interior,
+            tuning,
+            stats,
+        );
     }
 }
 
@@ -10395,6 +10536,7 @@ mod tests {
                 child,
                 child_fence,
                 statements,
+                interior: Vec::new(),
             }
         };
         // (1) BEFORE the author's roster: PARKED + counted unvouched; nothing ingested yet.
@@ -10465,9 +10607,10 @@ mod tests {
             &relayed(RealmId::Planet(7), Fence(8), seal.clone()),
         )]);
         assert_eq!(rig.stats().window_relay_stale, 1);
-        // (4) A STALE relayed LEVEL (older `at` than held) refuses apart while a same-fence
-        // redelivery of the bodies stays newest-wins (counted body-stale, not re-ingested).
-        let stale_level =
+        // (4a) An OLDER relayed level INSIDE the ring span joins the child's RING APART
+        // (look_horizon.md §3.5 C4 — the at-or-before resolution's raw material): admitted, not
+        // stale, and the roster still reads the NEWEST level.
+        let in_span_level =
             vd_wire::session_flow::seal_relay_statements(&[RelayedStatement::Level {
                 at: vd_core::UniverseTick(998),
                 rows: Vec::new(),
@@ -10475,12 +10618,37 @@ mod tests {
         let _ = rig.tick(vec![wire(
             SHARD,
             MsgClass::Control,
-            &relayed(RealmId::Planet(7), Fence(9), stale_level),
+            &relayed(RealmId::Planet(7), Fence(9), in_span_level),
+        )]);
+        assert_eq!(
+            rig.stats().window_relay_stale,
+            1,
+            "an in-span older level rings apart — never refused"
+        );
+        {
+            let sessions = rig.world.resource::<GatewaySessions>();
+            let held = &sessions.windows[&w];
+            assert_eq!(
+                held.ingest.relay_child_roster(RealmId::Planet(7)),
+                std::collections::BTreeSet::from([area]),
+                "the roster reads the NEWEST ring level, not the older arrival"
+            );
+        }
+        // (4b) A level BEHIND the ring span (beat 25 ⇒ span 51; 900 + 51 < 999) refuses apart.
+        let behind_ring =
+            vd_wire::session_flow::seal_relay_statements(&[RelayedStatement::Level {
+                at: vd_core::UniverseTick(900),
+                rows: Vec::new(),
+            }]);
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &relayed(RealmId::Planet(7), Fence(9), behind_ring),
         )]);
         assert_eq!(
             rig.stats().window_relay_stale,
             2,
-            "an older relayed level refuses apart (newest wins)"
+            "a behind-ring relayed level refuses apart"
         );
         // (5) FORGED sender: a routable node that is not the window's head.
         let _ = rig.tick(vec![wire(
@@ -10499,6 +10667,7 @@ mod tests {
                 child: RealmId::Planet(7),
                 child_fence: Fence(9),
                 statements: seal.clone(),
+                interior: Vec::new(),
             },
         )]);
         assert_eq!(rig.stats().window_unknown_row, 1);
@@ -10548,6 +10717,232 @@ mod tests {
         );
     }
 
+    /// THE SEALED INTERIOR FORWARD's admission (look horizon slice 3, owner-approved 2026-08-17
+    /// — look_horizon.md RULINGS + §2 ASK A; §3.2's three rules + §6's hostile-batch gate),
+    /// driven through the REAL dispatch, park included: an interior-carrying relay arriving
+    /// BEFORE the author's roster parks WHOLE and drains through the full admission; a lawful
+    /// grandchild batch admits ONLY the author's own picture (its Level + markers are the
+    /// LAWFUL FILTER, counted `window_relay_interior_filtered` — expected NON-zero; a SelfLook
+    /// about anyone else is a mis-authored body); a HOSTILE batch naming an UNROSTERED
+    /// grandchild is refused + counted `window_relay_interior_unvouched` (the VIOLATION counter
+    /// — two different counters, on purpose) with nothing of it ingested; a deposed grandchild
+    /// incarnation refuses by fence order; an undecodable grandchild seal drops fail-closed.
+    #[test]
+    fn the_interior_forward_admits_only_the_authors_own_picture_and_counts_apart() {
+        let mut rig = Rig::new();
+        let (_, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD
+        let w = WindowId(1);
+        let child = RealmId::Planet(7);
+        let area = RealmId::Area(3);
+        let area_frame = FrameRef::AreaLocal {
+            planet_seed: 7,
+            area_seed: 3,
+        };
+        // The relaying child's OWN batch: its level rosters the grandchild `area` — the vouch.
+        let child_own = vd_wire::session_flow::seal_relay_statements(&[RelayedStatement::Level {
+            at: vd_core::UniverseTick(999),
+            rows: vec![vd_wire::channels::RealmSnap {
+                realm: area,
+                frame: area_frame,
+                pose: vd_core::pose::StampedPose::at_rest(
+                    FrameRef::PlanetCentered { planet_seed: 7 },
+                    DVec3::new(1.0, 0.0, 0.0),
+                    vd_core::UniverseTick(999),
+                ),
+            }],
+        }]);
+        // The LAWFUL grandchild batch: its own picture (admitted), its Level and a marker
+        // (depth-3 subjects — filtered), and a SelfLook about somebody else (mis-authored).
+        let area_own = vd_wire::session_flow::seal_relay_statements(&[
+            RelayedStatement::Body {
+                subject: area,
+                stmt: BodyStmt::SelfLook { bag: vec![9] },
+                authored_at: vd_core::UniverseTick(999),
+            },
+            RelayedStatement::Level {
+                at: vd_core::UniverseTick(999),
+                rows: Vec::new(),
+            },
+            RelayedStatement::Body {
+                subject: RealmId::Station(4),
+                stmt: BodyStmt::Marker { luma: vec![2] },
+                authored_at: vd_core::UniverseTick(999),
+            },
+            RelayedStatement::Body {
+                subject: RealmId::Station(4),
+                stmt: BodyStmt::SelfLook { bag: vec![3] },
+                authored_at: vd_core::UniverseTick(999),
+            },
+        ]);
+        // The HOSTILE batch: a grandchild the child's own roster never vouched.
+        let hostile_own = vd_wire::session_flow::seal_relay_statements(&[RelayedStatement::Body {
+            subject: RealmId::Planet(99),
+            stmt: BodyStmt::SelfLook { bag: vec![66] },
+            authored_at: vd_core::UniverseTick(999),
+        }]);
+        let relayed =
+            |child_fence: Fence, interior: Vec<InteriorRelay>| ShardToGateway::WindowRelayed {
+                realm_fence: Fence(1),
+                window: w,
+                child,
+                child_fence,
+                statements: child_own.clone(),
+                interior,
+            };
+        // (1) PRE-ROSTER: the whole relay — interior included — parks, counted unvouched once.
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &relayed(
+                Fence(9),
+                vec![
+                    InteriorRelay {
+                        child: area,
+                        child_fence: Fence(5),
+                        own: area_own.clone(),
+                    },
+                    InteriorRelay {
+                        child: RealmId::Planet(99),
+                        child_fence: Fence(5),
+                        own: hostile_own.clone(),
+                    },
+                ],
+            ),
+        )]);
+        assert_eq!(rig.stats().window_relay_unvouched, 1, "parked whole");
+        assert_eq!(rig.stats().window_relay_interior_unvouched, 0);
+        // (2) The author's level vouches the child → the parked relay DRAINS: the child's level
+        // held; the grandchild's OWN picture admitted; the filter and the violation count APART.
+        let author_frame = ShardToGateway::WindowFrame {
+            realm_fence: Fence(1),
+            window: w,
+            at: vd_core::UniverseTick(6),
+            hop: None,
+            rows: vec![vd_wire::channels::RealmSnap {
+                realm: child,
+                frame: FrameRef::PlanetCentered { planet_seed: 7 },
+                pose: vd_core::pose::StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    DVec3::new(30.0, 0.0, 0.0),
+                    vd_core::UniverseTick(6),
+                ),
+            }],
+        };
+        let _ = rig.tick(vec![wire(SHARD, MsgClass::RealmSnapshot, &author_frame)]);
+        assert_eq!(
+            rig.stats().window_relay_interior_unvouched,
+            1,
+            "the hostile batch naming an unrostered grandchild refused + counted (VIOLATION)"
+        );
+        assert_eq!(
+            rig.stats().window_relay_interior_filtered,
+            2,
+            "the lawful batch's Level + its marker filtered apart (EXPECTED non-zero)"
+        );
+        assert_eq!(
+            rig.stats().window_misauthored_body,
+            1,
+            "a SelfLook about somebody else is a mis-authored body, same as every lane"
+        );
+        {
+            let sessions = rig.world.resource::<GatewaySessions>();
+            let held = &sessions.windows[&w];
+            assert_eq!(
+                held.ingest.look_of(area),
+                Some(&[9u8][..]),
+                "the grandchild's OWN picture landed in the ONE body store"
+            );
+            assert!(
+                held.ingest.interior_admitted(area),
+                "…and joined the interior-admitted set (the bag's third disjunct, §3.4.5)"
+            );
+            assert_eq!(
+                held.ingest.look_of(RealmId::Planet(99)),
+                None,
+                "NOTHING of the hostile batch was ingested"
+            );
+            assert!(!held.ingest.interior_admitted(RealmId::Planet(99)));
+            assert_eq!(
+                held.ingest.look_of(RealmId::Station(4)),
+                None,
+                "no depth-3 subject was ingested"
+            );
+        }
+        // (3) A deposed grandchild incarnation (fence below the admitted one): refused by the
+        // SAME per-realm fence map the child's own zombie guard uses (§3.5 C7).
+        let stale_before = rig.stats().window_relay_stale;
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &relayed(
+                Fence(10),
+                vec![InteriorRelay {
+                    child: area,
+                    child_fence: Fence(4),
+                    own: area_own.clone(),
+                }],
+            ),
+        )]);
+        assert_eq!(
+            rig.stats().window_relay_stale,
+            stale_before + 1,
+            "a deposed grandchild incarnation refuses by fence order"
+        );
+        // (4) An undecodable grandchild seal: counted, dropped, fail-closed.
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &relayed(
+                Fence(11),
+                vec![InteriorRelay {
+                    child: area,
+                    child_fence: Fence(6),
+                    own: vec![0xFF, 0xFF, 0xFF],
+                }],
+            ),
+        )]);
+        assert_eq!(rig.stats().window_relay_undecodable, 1);
+        // (4b) A STALE grandchild picture (fresh fence, OLDER authored_at): admissible, but
+        // newest-wins in the one body store — refused apart, the held picture untouched.
+        let stale_before_body = rig.stats().window_body_stale;
+        let older_look = vd_wire::session_flow::seal_relay_statements(&[RelayedStatement::Body {
+            subject: area,
+            stmt: BodyStmt::SelfLook { bag: vec![4] },
+            authored_at: vd_core::UniverseTick(998),
+        }]);
+        let _ = rig.tick(vec![wire(
+            SHARD,
+            MsgClass::Control,
+            &relayed(
+                Fence(13),
+                vec![InteriorRelay {
+                    child: area,
+                    child_fence: Fence(8),
+                    own: older_look,
+                }],
+            ),
+        )]);
+        assert_eq!(
+            rig.stats().window_body_stale,
+            stale_before_body + 1,
+            "an older interior picture refuses apart — newest wins"
+        );
+        {
+            let sessions = rig.world.resource::<GatewaySessions>();
+            let held = &sessions.windows[&w];
+            assert_eq!(
+                held.ingest.look_of(area),
+                Some(&[9u8][..]),
+                "the held picture is untouched"
+            );
+        }
+        assert_eq!(
+            rig.stats().window_relay_interior_unvouched,
+            1,
+            "still exactly the one violation — the lawful flights added none"
+        );
+    }
+
     #[test]
     fn a_drained_parked_body_older_than_the_held_statement_counts_stale() {
         // The drain's newest-wins refusal, driven directly (the rig cannot reach it: a marker
@@ -10589,7 +10984,7 @@ mod tests {
             (BodyStmt::Marker { luma: vec![1] }, vd_core::UniverseTick(4)),
         );
         let mut stats = GatewayStats::default();
-        drain_parked(&mut held, &mut stats);
+        drain_parked(&mut held, &window::WindowTuning::derive(2), &mut stats);
         assert_eq!(
             stats.window_body_stale, 1,
             "the drained straggler refuses — newest wins"

@@ -46,8 +46,8 @@ use bevy_egui::{
 use crossbeam_channel::{Receiver, Sender};
 use vd_client::net::ClientPhase;
 use vd_client::realm_scene::{
-    BodyKind, MARKER_CLASS_SRGB, MeshPrim, PrimTransform, RealmBox, Vertex, marker_look,
-    point_sprite_vertices, to_render_prims,
+    BodyKind, MARKER_CLASS_SRGB, MeshPrim, PrimTransform, RealmBox, Vertex, point_sprite_vertices,
+    to_render_prims,
 };
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client_harness::camera::FollowCamera;
@@ -932,34 +932,36 @@ fn camera_view(cam: &FollowCamQuery) -> Option<(Vec3, f64, f64)> {
     Some((transform.translation, fov_y, viewport_h))
 }
 
-/// One MARKER body's render primitive: the SHARED unit point sprite at the drawn centre, scaled to
-/// its luma-derived base radius after the ONE apparent-size floor
-/// (`vd_client_harness::camera::marker_world_radius` — the same expression the pixel gates size
-/// their rectangles from, so the drawn footprint and the asserted rectangle cannot disagree).
-///
-/// A marker with no luma datum cannot occur (Tier-A's presence gate only mints a marker body FROM
-/// a `TAG_LUMA` bag); if one ever did, it draws at the bare floor rather than vanishing — the
-/// presence law is "never zero".
+/// One MARKER body's render primitive: the SHARED unit point sprite at the drawn centre, scaled
+/// to its base radius — the LARGER of the luma-derived √L radius and the parent's one stated
+/// extent (look_horizon.md slice 1's presence floor, `marker_base_radius_m`) — after the ONE
+/// apparent-size floor (`vd_client_harness::camera::marker_world_radius` — the same expression
+/// the pixel gates size their rectangles from, so the drawn footprint and the asserted rectangle
+/// cannot disagree). A luma-less marker (a non-glowing subject) draws in the box's own role
+/// colour at its stated extent — never nothing.
 fn marker_prims(
     rbox: &RealmBox,
     draw_center: DVec3,
     view: Option<(Vec3, f64, f64)>,
 ) -> Vec<MeshPrim> {
-    let (class_code, luma_lsun) = rbox.luma.unwrap_or_default();
-    let look = marker_look(class_code, luma_lsun);
+    let base = vd_client::realm_scene::marker_base_radius_m(
+        rbox.luma,
+        vd_client::realm_scene::shape_extent_m(rbox.shape),
+    );
+    let color_rgba = vd_client::realm_scene::marker_color_rgba(rbox.color_rgba, rbox.luma);
     let radius = match view {
         Some((eye, fov_y, viewport_h)) => vd_client_harness::camera::marker_world_radius(
-            look.base_radius_m,
+            base,
             (draw_center - eye.as_dvec3()).length(),
             fov_y,
             viewport_h,
         ),
-        None => look.base_radius_m,
+        None => base,
     };
     let r = radius as f32;
     vec![MeshPrim {
         vertices: point_sprite_vertices(),
-        color_rgba: look.color_rgba,
+        color_rgba,
         transform: PrimTransform {
             translation: [
                 draw_center.x as f32,

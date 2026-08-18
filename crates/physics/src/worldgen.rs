@@ -90,6 +90,11 @@ const PLANET_SALT: u64 = 0x504c_414e_4554; // "PLANET"
 /// for stars, exactly as [`PLANET_SALT`] is for planets. A system's identity is `f(galaxy, index)`, so two
 /// galaxies never mint the same system id and a system's planets never collide with another system's.
 const SYSTEM_SALT: u64 = 0x5359_5354_454d; // "SYSTEM"
+/// `child_seed` salt distinguishing FIXTURE-PLANTED player-built children (look_horizon.md slice 5
+/// G-IDENTICAL — the SL5 fixture-forest doctrine) from every seed-generated kind: a planted
+/// station's id is `f(its host system, this salt, index)` and a planted area's is `f(its host
+/// planet, this salt, index)`, so plants can never collide with generated ids or with each other.
+const FIXTURE_SALT: u64 = 0x0046_4958_5455_5245; // "FIXTURE"
 /// SYSTEM_A's RNG lineage root→leaf `[Universe, Galaxy, System]` — MUST equal
 /// `realm_path::system_path(SYSTEM_A_SEED).lineage_seeds()` so every shard hosting System A draws the
 /// IDENTICAL per-system stream by construction (HR1); consumed once by [`generate_system_forest`].
@@ -306,9 +311,62 @@ fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmReg
                 band,
                 aoi,
                 parent: b.parent,
+                // Look horizon slice 4 (§3.4.4): the interior band is stamped HERE, from the
+                // FULL forest this map runs over — before any scope filter drops the
+                // grandchildren it is derived from. That is what settles the §3.4.4 CLAIM: a
+                // galaxy shard's boot roster row for a star system carries the reach with no
+                // message ever crossing a boundary (Ask D stays deferred).
+                interior_band: interior_band(
+                    interior_reach_m(bodies, b.realm, config.planet.ecc_cap),
+                    &config.interest,
+                    v_child,
+                ),
             }
         })
         .collect()
+}
+
+/// A body's INTERIOR REACH (look_horizon.md §3.4.4): the largest distance from its centre at
+/// which something INSIDE it is still visible — the max over its DIRECT children of (that
+/// child's worst-instant excursion at the eccentricity cap + that child's visibility reach),
+/// the same two terms the climb measurement walks with (§3.3.2's identity: one formula, one
+/// worst-case convention). `0.0` for a childless leaf — nothing inside, nothing to reach.
+/// On THE world a star system's reach is `142.045826247 + 302.058663384 = 444.104489631` m.
+fn interior_reach_m(bodies: &[GeneratedBody], parent: RealmId, ecc_cap: f64) -> f64 {
+    bodies
+        .iter()
+        .filter(|c| c.parent == Some(parent))
+        .map(|c| {
+            worst_hop_excursion_capped_m(&c.placement, ecc_cap)
+                + vd_core::geometry::visibility_reach_m(
+                    c.shape.finite_extent(),
+                    VISIBILITY_THETA_MIN_RAD,
+                )
+        })
+        .fold(0.0, f64::max)
+}
+
+/// The interior band for one child region (look_horizon.md §3.4.4, monomorphic — both arms
+/// driven by named tests): spin-up AT the interior reach, tear-down widened by the SAME derived
+/// velocity lead every AoI band carries (`|v_rel|·dt·(K_SAFETY + extra)` — no new number
+/// anywhere). Inert for a leaf (zero reach) and wherever the whole AoI machinery is inert
+/// (walk/canonical byte-identity: the live ctor's reject arm is never touched there, the same
+/// discipline as [`InterestConfig::build`]).
+fn interior_band(reach_m: f64, interest: &InterestConfig, v_child: f64) -> AoiConfig {
+    if (reach_m <= 0.0) | !interest.is_live() {
+        AoiConfig::inert()
+    } else {
+        AoiConfig::for_velocity_safe(
+            reach_m,
+            1.0,
+            1.0,
+            interest.occupant_v_max_mps + v_child,
+            interest.tick_dt_s,
+            interest.grace_ticks,
+            interest.k_safety_extra,
+        )
+        .expect("a positive reach with a positive closing speed builds a valid band")
+    }
 }
 
 /// The DIRECT MOVING children a shard hosting `hosted_realm` AUTHORS (D-45(a) realm-unification FA-2b):
@@ -386,13 +444,10 @@ pub fn moving_children_for(
 // The SAME generator serves the VISUAL synthetic-mass preset (window-friendly orbiting boxes) AND the
 // canonical real-mass preset (P4 real proportions) with ZERO kind-match — only the config differs.
 
-/// The Area-of-Interest visibility factor `cot(θ/2)` for a minimum angular size `theta_rad`: a realm of
-/// finite extent `e` subtends `≥ theta_rad` (is visible) out to `e · cot(θ/2)`. Straight-line, branchless
-/// (one region, HR5) — ALL AoI branching stays in [`AoiConfig::for_velocity_safe`]. At θ_min = 8° this is
-/// ≈ 14.301.
-fn visibility_factor(theta_rad: f64) -> f64 {
-    1.0 / (theta_rad / 2.0).tan()
-}
+/// THE ONE visibility formula, re-exported from its home (look_horizon.md §3.3.2 — the formula
+/// lives in `vd-core` with three consumers: the world solve, the boot measurement, the runtime
+/// tripwire; this module is two of them and BUILDS the third's config). Never a second copy.
+use vd_core::geometry::visibility_factor;
 
 /// The TWO-LEVEL VISIBILITY CLEARANCE (owner ruling 2026-08-15, items 5/10 + the 2026-08-15
 /// addendum) — how far an ancestor's shell must extend BEYOND a child's placement radius so that no
@@ -719,6 +774,10 @@ pub struct GrandchildVisibleOutside {
 /// One hop's WORST-INSTANT offset magnitude — the same machinery the boot's `ChildReach` roster
 /// states: a static child's authored offset, a mover's closed-form worst-instant excursion
 /// ([`Motion::max_excursion_m`], the apoapsis — never a re-derived `a·(1+e)` beside it).
+/// TEST-ONLY since look_horizon slice 2: the boot fence measures with the CAPPED excursion
+/// ([`worst_hop_excursion_capped_m`] — the solve's own worst case); the drawn-eccentricity walk
+/// below stays as the pinned drawn-margin history.
+#[cfg(test)]
 fn worst_hop_excursion_m(placement: &Placement) -> f64 {
     match placement {
         Placement::StaticOffset(at) => at.length(),
@@ -734,6 +793,7 @@ fn worst_hop_excursion_m(placement: &Placement) -> f64 {
 /// `angular_size(extent, d_min) < θ_min` is exactly `d_min > extent · cot(θ_min/2)`. A pair is an
 /// OFFENCE iff `d_min ≤ required` ([`grandchild_visibility_offences`] filters); a green pair's
 /// margin `d_min − required` is the measured headroom the re-solve pins.
+#[cfg(test)]
 fn grandchild_visibility_pairs(
     bodies: &[GeneratedBody],
     theta_min_rad: f64,
@@ -775,6 +835,7 @@ fn grandchild_visibility_pairs(
 /// Every pair of [`grandchild_visibility_pairs`] that IS an offence — the body would still be
 /// VISIBLE (subtend ≥ `theta_min_rad`) from just outside its ancestor, equality included (the
 /// margin the shell solve reserves is what keeps the worst lawful seed strictly clear).
+#[cfg(test)]
 fn grandchild_visibility_offences(
     bodies: &[GeneratedBody],
     theta_min_rad: f64,
@@ -785,42 +846,198 @@ fn grandchild_visibility_offences(
         .collect()
 }
 
-/// The FAIL-LOUD shape of the offence list — split out so both arms are driven by named examples
-/// (a green world alone would leave the `Err` arm unrun, HR5).
-fn first_offence(offences: Vec<GrandchildVisibleOutside>) -> Result<(), GrandchildVisibleOutside> {
-    match offences.first() {
-        Some(offence) => Err(*offence),
+// ===== THE LOOK HORIZON's boot MEASUREMENT (look_horizon.md §3.3.2 — slice 2) ==================
+// The boolean guard this replaces (`guard_grandchildren_invisible_outside`) gave a yes-or-no
+// answer over the seed forest ONLY — §3.3.1 proves that cannot serve as a termination proof (the
+// generator emits universe/galaxy/systems/planets and nothing else, so player-built content never
+// entered it, and its predicate would refuse the first city). The MEASUREMENT below reports a
+// NUMBER per body — how many levels its picture must travel — and the fence refuses a world whose
+// number exceeds what the look carrier can carry (`vd_wire::session_flow::LOOK_CARRIER_ARITY`).
+
+/// One hop's worst-instant offset at the ECCENTRICITY CAP — the SAME worst-case convention the
+/// shell solve bounds against (`galaxy_shell_r_m`'s `outer_sma · (1 + ecc_cap)`), which is what
+/// makes the measured stopping slack and the solve's reserved margin ONE equation written twice
+/// (§3.3.2's identity; the drawn-eccentricity margin is the LOOSER `FROZEN_TWO_LEVEL_WORST_MARGIN_M`
+/// — the engineering-relevant number is the reserved one). Straight-line per arm (HR5).
+fn worst_hop_excursion_capped_m(placement: &Placement, ecc_cap: f64) -> f64 {
+    match placement {
+        Placement::StaticOffset(at) => at.length(),
+        Placement::Orbital(elements) => elements.sma * (1.0 + ecc_cap),
+    }
+}
+
+/// One body's measured VISIBILITY CLIMB (look_horizon.md §3.3.2): how far its own picture must
+/// travel for every lawful observer to draw it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VisibilityClimb {
+    pub body: RealmId,
+    /// The HIGHEST ancestor from just outside which the body is STILL visible (the body itself
+    /// when not even its parent's outside can see it — the degenerate one-level climb).
+    pub top: RealmId,
+    /// How many levels the body's own picture must travel: `1` (its own batch reaching its
+    /// parent — every child's baseline) plus one per consecutive ancestor, parent upward, from
+    /// outside which it is still visible.
+    pub levels: usize,
+    /// The slack at the level where visibility STOPPED: `d_min − required` at the first ancestor
+    /// that does NOT see the body (POSITIVE — the measured headroom §3.3.2 pins at the world's
+    /// own containment margin), or the ROOT's non-positive figure when the climb never stopped
+    /// inside the forest (a pathological world the arity fence then refuses).
+    pub slack_m: f64,
+}
+
+/// The climb walk over a generated forest — the SAME ancestor walk as
+/// [`grandchild_visibility_pairs`] with the `hops >= 2` filter dropped (§3.3.2's construction)
+/// and the excursions taken at the eccentricity CAP (the solve's own worst case). Bodies without
+/// a parent (the root) have no climb and report nothing.
+fn visibility_climbs(
+    bodies: &[GeneratedBody],
+    theta_min_rad: f64,
+    ecc_cap: f64,
+) -> Vec<VisibilityClimb> {
+    let by_id: std::collections::BTreeMap<RealmId, &GeneratedBody> =
+        bodies.iter().map(|b| (b.realm, b)).collect();
+    let mut climbs = Vec::new();
+    for body in bodies.iter().filter(|b| b.parent.is_some()) {
+        let extent_m = body.shape.finite_extent();
+        let required_m = vd_core::geometry::visibility_reach_m(extent_m, theta_min_rad);
+        let mut worst_dist_m = worst_hop_excursion_capped_m(&body.placement, ecc_cap);
+        let mut levels = 1_usize;
+        let mut top = body.realm;
+        let mut slack_m = f64::INFINITY;
+        let mut cursor = body.parent;
+        while let Some(ancestor_id) = cursor {
+            let ancestor = by_id
+                .get(&ancestor_id)
+                .expect("the generated forests resolve every parent (guarded at boot)");
+            let d_min_m = ancestor.shape.finite_extent() - worst_dist_m - extent_m;
+            slack_m = d_min_m - required_m;
+            if slack_m > 0.0 {
+                break; // NOT visible from outside this ancestor: the climb stops HERE.
+            }
+            // Still visible (equality included — the same convention as the offence filter):
+            // the picture must travel one level further.
+            top = ancestor_id;
+            levels += 1;
+            worst_dist_m += worst_hop_excursion_capped_m(&ancestor.placement, ecc_cap);
+            cursor = ancestor.parent;
+        }
+        climbs.push(VisibilityClimb {
+            body: body.realm,
+            top,
+            levels,
+            slack_m,
+        });
+    }
+    climbs
+}
+
+/// THE BOOT MEASUREMENT (look_horizon.md §3.3.2, replacing the boolean guard): for every body of
+/// the generated world, how many levels its picture must travel — the highest still-visible
+/// ancestor, and the slack at the level where visibility stopped. On THE world today: max climb
+/// 2, planet stopping slack exactly the containment margin (the solve identity, G-CLIMB's pin).
+#[must_use]
+pub fn measure_visibility_climb(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> Vec<VisibilityClimb> {
+    visibility_climbs(
+        &generate_system_forest(seed_universe, config),
+        VISIBILITY_THETA_MIN_RAD,
+        config.planet.ecc_cap,
+    )
+}
+
+/// A world (or a candidate placement) whose measured visibility climb EXCEEDS what the look
+/// carrier can carry — the fail-loud shape the fences print: the body and its numbers.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+#[error(
+    "{body:?} needs its picture carried {levels} levels (visible from outside every ancestor up \
+     to {top:?}; slack at the stop {slack_m} m), but the look carrier serves {arity} — the owner's \
+     Q3 ruling (look_horizon.md RULINGS 2026-08-17): the arity STAYS 2 and this REFUSES at interim \
+     scale; the near-real-scale re-solve is the scheduled cure, and its first gate run must \
+     include measure_visibility_climb"
+)]
+pub struct VisibilityClimbExceeded {
+    pub body: RealmId,
+    pub top: RealmId,
+    pub levels: usize,
+    pub slack_m: f64,
+    pub arity: usize,
+}
+
+/// The one comparison both fences share (monomorphic, both arms driven by named tests — HR5).
+fn first_climb_over(
+    climbs: &[VisibilityClimb],
+    arity: usize,
+) -> Result<(), VisibilityClimbExceeded> {
+    match climbs.iter().find(|c| c.levels > arity) {
+        Some(c) => Err(VisibilityClimbExceeded {
+            body: c.body,
+            top: c.top,
+            levels: c.levels,
+            slack_m: c.slack_m,
+            arity,
+        }),
         None => Ok(()),
     }
 }
 
-/// THE GENERATOR VISIBILITY CHECK (owner ruling 2026-08-15, docs/design/owner_decisions_2026-08-15.md
-/// item 5) — the two-level bound turned into a PROOF over the generated world: no body two or more
-/// levels deep may ever be visible from outside its ancestor. SL7/SL3 make a not-running realm
-/// drawable only as its parent's placement marker, one level down; a grandchild that subtends the
-/// visibility threshold from outside its grandparent would owe pixels nothing is entitled to author.
-/// Worst-instant positions (the same apoapsis machinery the `ChildReach` nest fence consumes), the
-/// viewer at the ancestor's boundary at closest approach, and the ONE visibility threshold the
-/// interest band uses — never a second literal.
-///
-/// RESOLVED (owner ruling 2026-08-15, the addendum to items 5/10): the 2026-08-15 measurement — every
-/// ring-placed system's planets visible from just outside the galaxy shell — was reported, and the
-/// owner ruled the generator SOLVES the margin as a general constraint ([`galaxy_shell_r_m`] /
-/// [`two_level_clearance_m`]), never a hand-tuned number. THE world now passes (the green pin
-/// `the_two_level_bound_re_solved_on_the_world_…` keeps the old failing numbers as history), and
-/// this guard is WIRED into the shard boot fence beside `guard_regions_nest` (the same fail-loud
-/// pattern): a world that violates it refuses to boot.
+/// THE BOOT FENCE (look_horizon.md §3.3.4 instrument 1, wired into EVERY world-deriving
+/// process's boot — the shard AND the gateway): the generated world's required climb must not
+/// exceed the look carrier's arity. A refusal is a measurement; a wrong pixel is not.
 ///
 /// # Errors
-/// [`GrandchildVisibleOutside`] naming the first offending `(body, ancestor)` pair with its numbers.
-pub fn guard_grandchildren_invisible_outside(
+/// [`VisibilityClimbExceeded`] naming the first offending body with its numbers.
+pub fn guard_visibility_climb_bounded(
     seed_universe: u64,
     config: &UniverseConfig,
-) -> Result<(), GrandchildVisibleOutside> {
-    first_offence(grandchild_visibility_offences(
-        &generate_system_forest(seed_universe, config),
-        VISIBILITY_THETA_MIN_RAD,
-    ))
+    arity: usize,
+) -> Result<(), VisibilityClimbExceeded> {
+    first_climb_over(&measure_visibility_climb(seed_universe, config), arity)
+}
+
+/// A candidate player-built region put to the build-admission fence: a STATIC body (SL4 — a
+/// built structure does not orbit) of `shape` at `offset_m` in `parent`'s frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CandidateRegion {
+    pub realm: RealmId,
+    pub parent: RealmId,
+    pub shape: Boundary,
+    pub offset_m: DVec3,
+}
+
+/// THE BUILD-ADMISSION FENCE (look_horizon.md §3.3.4 instrument 2 — D-LOOK-1): a candidate
+/// placement whose required climb exceeds the carrier's arity is REFUSED — the PLACEMENT, never
+/// the boot. The candidate joins the world's own generated forest (SL5: THE world, no variant)
+/// and is measured by the same walk, the same formula, the same worst-case convention. At
+/// today's interim scale a ~20 m surface structure measures a climb of 3 and refuses — the Q3
+/// evidence, produced by a test rather than an argument; the near-real-scale re-solve is the
+/// scheduled cure (owner ruling 2026-08-17).
+///
+/// # Errors
+/// [`VisibilityClimbExceeded`] naming the candidate with its numbers.
+pub fn guard_candidate_climb_bounded(
+    candidate: &CandidateRegion,
+    seed_universe: u64,
+    config: &UniverseConfig,
+    arity: usize,
+) -> Result<(), VisibilityClimbExceeded> {
+    let mut bodies = generate_system_forest(seed_universe, config);
+    bodies.push(GeneratedBody {
+        realm: candidate.realm,
+        parent: Some(candidate.parent),
+        shape: candidate.shape,
+        placement: Placement::StaticOffset(candidate.offset_m),
+        photometrics: None,
+    });
+    let climbs = visibility_climbs(&bodies, VISIBILITY_THETA_MIN_RAD, config.planet.ecc_cap);
+    first_climb_over(
+        &climbs
+            .into_iter()
+            .filter(|c| c.body == candidate.realm)
+            .collect::<Vec<_>>(),
+        arity,
+    )
 }
 
 /// The config-driven star-system forest: Universe → Galaxy → `stellar.n_systems` star systems, each with
@@ -913,6 +1130,9 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
             ));
         }
     }
+    // The fixture plant (look_horizon slice 5 — G-IDENTICAL), appended LAST: with `None` (every
+    // shipped constructor) this is a no-op and the forest is byte-identical to the pre-plant world.
+    append_fixture_plant(&mut bodies, config);
     bodies
 }
 
@@ -933,15 +1153,15 @@ pub fn system_photometrics_for_config(
         .collect()
 }
 
-/// One sleeping child's marker datum as the window lane's `TAG_LUMA` bag (Slice A,
-/// `docs/design/window_lane.md` §2.2/§2.8): the spectral class as its stable code (color) plus the
-/// main-sequence luminosity (brightness) — exactly the two scalars the owner-ruled R4 datum names,
-/// framed by the ONE shared codec (`vd_core::look`) so the parent's emit and every later reader
-/// can never frame the bag two ways. The boot plumbs these bags onto the shard's roster
-/// (`vd-sim` `ChildLuma`) — boot/config path, never a wire-struct change.
+/// One sleeping child's marker DATUM for the window lane (Slice A → look_horizon.md slice 1):
+/// the spectral class as its stable code (color) plus the main-sequence luminosity (brightness)
+/// — exactly the two scalars the owner-ruled R4 datum names. The class→code cast lives HERE and
+/// nowhere else. The boot plumbs these datums onto the shard's roster (`vd-sim` `ChildLuma`);
+/// the BAG is framed per child by the sim through the one `vd_core::look::marker_bag` codec,
+/// which appends the child's circumscribed extent (the presence floor's one radius).
 #[must_use]
-pub fn marker_luma_bag(p: &StarPhotometrics) -> Vec<u8> {
-    vd_core::look::luma_bag(p.class as u8, p.luma_lsun)
+pub fn marker_datum(p: &StarPhotometrics) -> (u8, f64) {
+    (p.class as u8, p.luma_lsun)
 }
 
 /// [`to_regions`] over the config-driven system forest — the config-parameterised twin of
@@ -961,6 +1181,165 @@ pub fn moving_children_for_config(
     hosted: RealmId,
 ) -> Vec<(RealmId, OrbitalElements)> {
     moving_children(&generate_system_forest(seed_universe, config), hosted)
+}
+
+// ===== THE FIXTURE PLANT (look_horizon.md slice 5 — G-IDENTICAL / SL5 fixture-forest doctrine) ==
+// Stations and areas are built by PLAYERS; no seed emits one. The pixel gate that proves the look
+// horizon is kind-blind (HR4) therefore needs player-built content, and SL5's landed ruling is
+// that fixtures may plant player-built regions on THE world. There was no process-tier plant path
+// before this (the walk fixture forest is a SEPARATE hand-placed world, retired from the boots),
+// so this is the MINIMAL LAWFUL one: a named pair appended to the generated forest through the ONE
+// generator/lowering, selected by `UniverseConfig::fixture_plant`, measured by the SAME boot
+// fences (`guard_visibility_climb_bounded` at every process boot) as everything else. It is NOT
+// build admission (the live build feature does not exist yet — D-LOOK-1): a fixture states the
+// content, and the fences judge it exactly as they will judge a player's candidate.
+
+/// WHICH player-built content a config plants beside the generated bodies. `None` (default) is
+/// byte-identical to the pre-plant world; the ONE named plant today is the slice-5 G-IDENTICAL
+/// pair. A NAMED enumeration, deliberately not a geometry parameter: a free-form plant input would
+/// be a second world generator wearing a config field (SL5 forbids it), while a named fixture is
+/// content with one derivation, shared by every process that boots it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FixturePlant {
+    /// Nothing built — THE world exactly as the seed generates it.
+    #[default]
+    None,
+    /// The G-IDENTICAL pair (look_horizon.md slice 5): one player-built STATION under the home
+    /// star system and one player-built AREA on that system's inner planet — see
+    /// [`station_area_plant`] for every derived number.
+    StationArea,
+}
+
+/// The G-IDENTICAL plant's derived spec — public so the pixel gate's ORACLE derives its parks and
+/// expectations from the SAME numbers the boots plant, out-of-band (never by reading the drawn
+/// scene back).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StationAreaPlant {
+    /// The planted station's realm id: `Station(child_seed(home system, FIXTURE_SALT, 0))`.
+    pub station: RealmId,
+    /// The station's parent — the HOME star system (the root's first grandchild, the same lineage
+    /// rule `default_home_realm` applies to the lowered forest).
+    pub station_parent: RealmId,
+    /// The station's static offset in its parent's frame.
+    pub station_offset_m: DVec3,
+    /// The station's shell radius.
+    pub station_extent_m: f64,
+    /// The planted area's realm id: `Area(child_seed(inner planet, FIXTURE_SALT, 0))`.
+    pub area: RealmId,
+    /// The area's parent — the home system's INNER planet (smallest semi-major axis, the same
+    /// rule the world roster's `inner` uses). The frame law (`frame_for_realm`) requires an Area's
+    /// parent to be a PLANET, which is WHY the pair is planted in the walk-forest shape (station
+    /// under the system, area under a planet) and not as parent/child of each other.
+    pub area_parent: RealmId,
+    /// The area's static offset in the PLANET's frame.
+    pub area_offset_m: DVec3,
+    /// The area's shell radius.
+    pub area_extent_m: f64,
+}
+
+/// The G-IDENTICAL plant, derived from a generated forest + its config. Every number is an
+/// expression over THE world's own values, with its constraint stated (and pinned by this crate's
+/// units — a plant that broke one would fail the boot fence loudly, not draw wrongly):
+///
+/// - **station extent** = the planet SOI radius (`planet.planet_soi_r_m`): planet-extent CLASS, so
+///   every visibility bound the world already proves for a planet (reach 302.06 m, climb stops at
+///   the galaxy) holds for the station verbatim, and the home system's interior band stays
+///   PLANET-dominated (444.104489631 m — the station's `75 + 302.06 = 377.06 m` term is smaller).
+/// - **station offset** = half the system shell radius up the `(1, 0, 2)/√5` tilted-polar
+///   direction: `|offset| = 75 m` nests with a whole planet-orbit annulus of margin
+///   (`75 + 3.954 < 150`); the `z = 67.1 m` component stands clear of the orbital plane (worst
+///   planet `|z|` is apoapsis · sin(inclination), measured tiny against it in the units); the
+///   `x = 33.5 m` component stands clear of BOTH ±Z polar flight axes (the licensed exit corridor
+///   and the gate's own park legs) by far more than its extent.
+/// - **area parent** = the INNER planet, forced by the physics, not chosen: under the OUTER planet
+///   the area's worst-instant excursion (142.05 m at the eccentricity cap) leaves less system
+///   slack than its own visibility reach, so its climb would be 3 and every boot would refuse
+///   (the Q3 posture). Under the inner planet (excursion 16.07 m) the climb stops at the system:
+///   levels 2, exactly what the carrier serves.
+/// - **area extent** = a quarter of the planet SOI (`0.9885 m`): visibility reach
+///   `76.39 × 0.9885 = 75.51 m` — the planet's interior band it induces brackets the planet's own
+///   3.954 m shell (the park band exists), while the system-level slack
+///   `150 − (16.07 + 1.977) − 0.99 = 130.97 m` stays far above that reach (the climb stops).
+/// - **area offset** = half the planet SOI up +Z in the planet's frame: nests at `3/4` of the
+///   planet's inscribed extent, a quarter-extent of margin.
+#[must_use]
+pub fn station_area_plant(seed_universe: u64, config: &UniverseConfig) -> StationAreaPlant {
+    let mut base = *config;
+    base.fixture_plant = FixturePlant::None;
+    station_area_plant_spec(&generate_system_forest(seed_universe, &base), &base)
+}
+
+/// The spec over an already-generated (plant-free) forest — the one derivation both
+/// [`station_area_plant`] and the generator's own append share.
+fn station_area_plant_spec(bodies: &[GeneratedBody], config: &UniverseConfig) -> StationAreaPlant {
+    let home = bodies
+        .iter()
+        .find(|b| b.parent == Some(GALAXY))
+        .expect("THE world generates at least one star system")
+        .realm;
+    let inner = bodies
+        .iter()
+        .filter(|b| b.parent == Some(home))
+        .filter_map(|b| orbital_of(b.placement).map(|e| (b.realm, e.sma)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("THE home system generates orbiting planets")
+        .0;
+    let tilt = DVec3::new(1.0, 0.0, 2.0).normalize();
+    let home_seed = plant_seed_of(home).expect("the home system is seed-keyed");
+    let inner_seed = plant_seed_of(inner).expect("a generated planet is seed-keyed");
+    StationAreaPlant {
+        station: RealmId::Station(child_seed(home_seed, FIXTURE_SALT, 0)),
+        station_parent: home,
+        station_offset_m: tilt * (config.stellar.system_soi_r_m * 0.5),
+        station_extent_m: config.planet.planet_soi_r_m,
+        area: RealmId::Area(child_seed(inner_seed, FIXTURE_SALT, 0)),
+        area_parent: inner,
+        area_offset_m: DVec3::new(0.0, 0.0, config.planet.planet_soi_r_m * 0.5),
+        area_extent_m: config.planet.planet_soi_r_m * 0.25,
+    }
+}
+
+/// The u64 seed of a SEED-LINEAGE realm (a system or a planet — the only parents a plant hangs
+/// under), `None` for the entity/plant-keyed kinds. Monomorphic; both arms driven by named units.
+fn plant_seed_of(realm: RealmId) -> Option<u64> {
+    match realm {
+        RealmId::System(s) | RealmId::Planet(s) => Some(s),
+        RealmId::Ship(_) | RealmId::Station(_) | RealmId::Area(_) => None,
+    }
+}
+
+/// Append the named plant's bodies to a generated forest — called at the END of
+/// [`generate_system_forest`], AFTER every generated body and every stream draw, so the additive
+/// discipline holds: with a plant present every generated body, id, orbit and photometric draw is
+/// byte-identical to the plant-free world.
+fn append_fixture_plant(bodies: &mut Vec<GeneratedBody>, config: &UniverseConfig) {
+    match config.fixture_plant {
+        FixturePlant::None => {}
+        FixturePlant::StationArea => {
+            let plant = station_area_plant_spec(bodies, config);
+            bodies.push(GeneratedBody {
+                realm: plant.station,
+                parent: Some(plant.station_parent),
+                shape: Boundary::Shell {
+                    r: plant.station_extent_m,
+                },
+                placement: Placement::StaticOffset(plant.station_offset_m),
+                // A player-built structure has no seed stream and no photometric draw — the
+                // presence floor (look_horizon slice 1) states its point of light from its
+                // extent alone.
+                photometrics: None,
+            });
+            bodies.push(GeneratedBody {
+                realm: plant.area,
+                parent: Some(plant.area_parent),
+                shape: Boundary::Shell {
+                    r: plant.area_extent_m,
+                },
+                placement: Placement::StaticOffset(plant.area_offset_m),
+                photometrics: None,
+            });
+        }
+    }
 }
 
 /// A WORLD, materialised once: the bodies that exist, and the containment regions they lower to.
@@ -1488,6 +1867,14 @@ pub struct UniverseConfig {
     pub band: BandConfig,
     /// Per-realm AoI radii (RLM Step 2). Inert at walk/canonical (byte-identity); live at visual.
     pub interest: InterestConfig,
+    /// PLAYER-BUILT content planted beside the generated bodies (look_horizon.md slice 5
+    /// `G-IDENTICAL` — the SL5 fixture-forest doctrine: "fixtures planting player-built regions on
+    /// THE world" is APPROVED-BY-EXISTING-RULING). NOT a world variant and NOT a scale: the seed
+    /// generates what nature puts there, and this field adds what a player would have built — the
+    /// same one generator, the same lowering, the same fences, plus content. `None` (the default,
+    /// and every shipped constructor's value) is byte-identical to the pre-field world.
+    #[serde(default)]
+    pub fixture_plant: FixturePlant,
 }
 
 impl UniverseConfig {
@@ -1553,7 +1940,18 @@ impl UniverseConfig {
                 k_safety_extra: 0.0,
             },
             interest: InterestConfig::inert(), // walk: AoI OFF ⇒ byte-identity.
+            fixture_plant: FixturePlant::None, // nothing built ⇒ the seed world exactly.
         }
+    }
+
+    /// This config with the [`FixturePlant::StationArea`] pair planted (look_horizon.md slice 5
+    /// `G-IDENTICAL`). A BUILDER, not a preset: the geometry, the census, the bands — everything —
+    /// stays exactly this config's; only player-built content is added. The process boots opt in
+    /// through `VD_FIXTURE_PLANT` (vd-bins), so a cluster is planted whole or not at all.
+    #[must_use]
+    pub fn with_station_area_plant(mut self) -> UniverseConfig {
+        self.fixture_plant = FixturePlant::StationArea;
+        self
     }
 
     /// The COMPRESSED-REAL visual geometry on a `walk_scale()` clone (system SOI 150, 5 Kepler planets,
@@ -2066,7 +2464,13 @@ mod tests {
 
     #[test]
     fn universe_config_presets_serde_round_trip() {
-        for c in [UniverseConfig::walk_scale(), UniverseConfig::visual_scale()] {
+        for c in [
+            UniverseConfig::walk_scale(),
+            UniverseConfig::visual_scale(),
+            // The PLANTED config too (look_horizon slice 5): the plant field is DATA and must
+            // survive the codec like every other field — both enum arms round-trip.
+            UniverseConfig::world(15.0, 0.05).with_station_area_plant(),
+        ] {
             let bytes = postcard::to_allocvec(&c).expect("encode");
             let back: UniverseConfig = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(c, back);
@@ -2729,7 +3133,9 @@ mod tests {
             worst_margin_m >= VISUAL_SYSTEM_MARGIN_M,
             "the measured margin covers at least the reserved solve margin"
         );
-        // …and the check the boot fence runs: no offence anywhere in THE world.
+        // …and the check the boot fence's predecessor ran: no offence anywhere in THE world —
+        // now expressed through the MEASURED climb (look_horizon slice 2): the fence passes at
+        // the landed carrier's arity and refuses one below it (both arms driven).
         assert_eq!(
             grandchild_visibility_offences(
                 &generate_system_forest(0, &config),
@@ -2737,7 +3143,8 @@ mod tests {
             ),
             vec![]
         );
-        assert_eq!(guard_grandchildren_invisible_outside(0, &config), Ok(()));
+        assert_eq!(guard_visibility_climb_bounded(0, &config, 2), Ok(()));
+        assert!(guard_visibility_climb_bounded(0, &config, 1).is_err());
     }
 
     /// The refusal the boot fence makes, measured on the exact PRE-SOLVE geometry: restoring the
@@ -2749,9 +3156,14 @@ mod tests {
         let mut config = UniverseConfig::world(15.0, 0.05);
         config.scale.galaxy_r_m =
             config.stellar.system_ring_r_m + 2.0 * config.stellar.system_soi_r_m;
+        // The 2026-08-15 pre-solve offence, kept live verbatim (history as a measurement).
+        let offences = grandchild_visibility_offences(
+            &generate_system_forest(0, &config),
+            VISIBILITY_THETA_MIN_RAD,
+        );
         assert_eq!(
-            guard_grandchildren_invisible_outside(0, &config),
-            Err(GrandchildVisibleOutside {
+            offences.first().copied(),
+            Some(GrandchildVisibleOutside {
                 body: RealmId::Planet(2790672799213891506),
                 ancestor: GALAXY,
                 worst_dist_m: 12_046.713_265_695_933,
@@ -2760,6 +3172,556 @@ mod tests {
                 required_m: 302.058_663_384_242_95,
             })
         );
+        // …and the BOOT-facing fence (look_horizon slice 2 — the climb measurement): under the
+        // hugging shell a ring planet's picture must travel THREE levels (still visible from
+        // outside the galaxy), which the landed carrier refuses, printing the body's numbers.
+        let refused = guard_visibility_climb_bounded(0, &config, 2)
+            .expect_err("a hugging shell exceeds the landed carrier");
+        eprintln!("[climb] the hugging-shell refusal, verbatim: {refused}");
+        assert_eq!(refused.levels, 3);
+        assert_eq!(refused.top, GALAXY, "visible from outside even the galaxy");
+        assert_eq!(refused.arity, 2);
+        assert!(matches!(refused.body, RealmId::Planet(_)));
+    }
+
+    /// G-CLIMB (look_horizon.md slice 2's gate): THE world's MEASURED visibility climb. Max
+    /// climb == 2 (a planet's picture must reach the galaxy's scope and no further; a system's
+    /// the universe's and no further); the worst PLANET stopping slack is EXACTLY the world's
+    /// containment margin — the §3.3.2 identity: the galaxy shell is solved as
+    /// `ring + two_level_clearance`, and the clearance is the planet's worst-case budget plus
+    /// the margin, so the live measurement and the world's own size calculation are ONE equation
+    /// written twice (the frozen-constant pins beside this test are its other half).
+    #[test]
+    fn g_climb_the_worlds_measured_climb_is_two_and_the_planet_slack_is_the_margin() {
+        let config = UniverseConfig::world(15.0, 0.05);
+        let climbs = measure_visibility_climb(0, &config);
+        // One climb per parented body: the galaxy + 3 systems + 15 planets (the universe is the
+        // root and has no climb).
+        assert_eq!(climbs.len(), 19);
+        let max_levels = climbs.iter().map(|c| c.levels).max();
+        assert_eq!(max_levels, Some(2), "max climb on THE world == 2");
+        // Every planet's picture stops at the GALAXY (its system is the highest ancestor whose
+        // outside still sees it) — climb 2. The RING systems are visible from just outside the
+        // galaxy shell (that is the wake law working) — climb 2, top the galaxy; the ORIGIN
+        // system sits a whole ring further from the shell and stops at 1 (measured slack
+        // 874.982… m — the ring radius less the visibility gap); the galaxy itself climbs
+        // nowhere (the universe dwarfs its reach). 17 twos + 2 ones == the 19 climbs.
+        for c in &climbs {
+            match (c.body, c.levels) {
+                (RealmId::Planet(_), levels) => {
+                    assert_eq!(levels, 2, "{c:?}");
+                    assert!(matches!(c.top, RealmId::System(_)), "{c:?}");
+                }
+                (RealmId::System(_), 2) => {
+                    assert_ne!(c.body, GALAXY, "{c:?}");
+                    assert_eq!(
+                        c.top, GALAXY,
+                        "a ring system, seen from outside the shell: {c:?}"
+                    );
+                }
+                (_, levels) => {
+                    assert_eq!(levels, 1, "{c:?}");
+                    assert_eq!(c.top, c.body, "nobody outside sees it: {c:?}");
+                }
+            }
+        }
+        assert_eq!(climbs.iter().filter(|c| c.levels == 2).count(), 17);
+        assert_eq!(climbs.iter().filter(|c| c.levels == 1).count(), 2);
+        // THE PLANET STOPPING SLACK == the containment margin, EXACTLY (the one-equation proof).
+        let planet_slack_m = climbs
+            .iter()
+            .filter(|c| matches!(c.body, RealmId::Planet(_)))
+            .map(|c| c.slack_m)
+            .fold(f64::INFINITY, f64::min);
+        eprintln!(
+            "[G-CLIMB] max climb {max_levels:?}; worst planet stopping slack {planet_slack_m} m"
+        );
+        // MEASURED 2026-08-17: 4.000000000000455 m — the containment margin plus 4.55e-13 of
+        // float association (the measurement's sum order against the solve's; the identity's two
+        // spellings agree to the last half-nanometre). Pinned EXACTLY as measured so any world
+        // re-solve flips this loudly; asserted equal to the margin at six decimals — the
+        // design's "4.000000 m exactly" — and cross-checked against the margin CONSTANT.
+        assert_eq!(planet_slack_m, 4.000_000_000_000_455_f64);
+        assert_eq!(format!("{planet_slack_m:.6}"), "4.000000");
+        assert!(
+            (planet_slack_m - VISUAL_SYSTEM_MARGIN_M).abs() < 1.0e-9,
+            "the worst planet's stopping slack IS the world's containment margin"
+        );
+        // The other half of the identity: the frozen solve constants still hold (re-asserted
+        // here so G-CLIMB is self-contained; their own pin tests stand beside it).
+        assert_eq!(config.scale.galaxy_r_m, FROZEN_GALAXY_SHELL_R_M);
+        // …and the fence at the landed carrier's arity: passes at 2, refuses at 1 (both arms).
+        assert_eq!(guard_visibility_climb_bounded(0, &config, 2), Ok(()));
+        let refused = guard_visibility_climb_bounded(0, &config, 1)
+            .expect_err("an arity of one cannot carry THE world");
+        assert_eq!(refused.levels, 2);
+        assert_eq!(refused.arity, 1);
+    }
+
+    #[test]
+    fn plant_seed_of_reads_seed_lineage_kinds_and_refuses_the_rest() {
+        // The plant field's resting state IS "nothing built" (the serde default and every
+        // shipped constructor agree).
+        assert_eq!(FixturePlant::default(), FixturePlant::None);
+        assert_eq!(plant_seed_of(RealmId::System(7)), Some(7));
+        assert_eq!(plant_seed_of(RealmId::Planet(9)), Some(9));
+        assert_eq!(plant_seed_of(RealmId::Station(3)), None);
+        assert_eq!(plant_seed_of(RealmId::Area(4)), None);
+        assert_eq!(
+            plant_seed_of(RealmId::Ship(vd_core::ids::EntityId(1))),
+            None
+        );
+    }
+
+    /// look_horizon.md slice 5 — the fixture plant is ADDITIVE: with the plant selected, every
+    /// generated body (id, orbit, photometric draw, order) is byte-identical to the plant-free
+    /// world, and exactly the named pair is appended after them. The plain world carries no
+    /// player-built kind at all.
+    #[test]
+    fn the_fixture_plant_is_appended_last_and_the_plain_world_is_untouched() {
+        let plain_cfg = UniverseConfig::world(15.0, 0.05);
+        let planted_cfg = plain_cfg.with_station_area_plant();
+        let plain = generate_system_forest(0, &plain_cfg);
+        let planted = generate_system_forest(0, &planted_cfg);
+        assert_eq!(planted.len(), plain.len() + 2);
+        assert_eq!(
+            &planted[..plain.len()],
+            &plain[..],
+            "every generated body is byte-identical under the plant"
+        );
+        let spec = station_area_plant(0, &planted_cfg);
+        assert_eq!(planted[plain.len()].realm, spec.station);
+        assert_eq!(planted[plain.len() + 1].realm, spec.area);
+        // The plain world has no player-built kind (every body is seed-lineage keyed).
+        assert_eq!(
+            plain
+                .iter()
+                .filter(|b| plant_seed_of(b.realm).is_none())
+                .count(),
+            0
+        );
+        // The accessor derives the SAME spec from the plain and the planted config (it strips the
+        // plant before deriving, so the spec can never be derived from planted content).
+        assert_eq!(spec, station_area_plant(0, &plain_cfg));
+    }
+
+    /// look_horizon.md slice 5 (G-IDENTICAL) — the planted pair's measured climbs: BOTH stop at
+    /// two levels (the carrier's arity serves the whole planted world), the generated numbers are
+    /// untouched, and the ADMISSION fence would admit both members as candidates — the fixture
+    /// plants only what build admission would accept.
+    #[test]
+    fn g_identical_the_planted_pair_measures_climb_two_and_leaves_the_worlds_numbers_alone() {
+        let plain = UniverseConfig::world(15.0, 0.05);
+        let config = plain.with_station_area_plant();
+        let spec = station_area_plant(0, &config);
+        let climbs = measure_visibility_climb(0, &config);
+        assert_eq!(climbs.len(), 21, "19 generated climbs + the 2 planted");
+        assert_eq!(
+            climbs.iter().map(|c| c.levels).max(),
+            Some(2),
+            "arity 2 still serves the whole planted world"
+        );
+        let station = climbs
+            .iter()
+            .find(|c| c.body == spec.station)
+            .expect("the station is measured");
+        // Planet-extent class: visible from outside its system (like a planet), stopping at the
+        // galaxy — its picture travels station → system → galaxy, exactly the carrier's two hops.
+        assert_eq!(
+            (station.levels, station.top),
+            (2, spec.station_parent),
+            "{station:?}"
+        );
+        let area = climbs
+            .iter()
+            .find(|c| c.body == spec.area)
+            .expect("the area is measured");
+        // Visible from outside its planet, stopping at the SYSTEM (the inner planet's small
+        // excursion leaves 130.97 m of slack against the area's 75.5 m reach).
+        assert_eq!((area.levels, area.top), (2, spec.area_parent), "{area:?}");
+        eprintln!(
+            "[G-IDENTICAL plant] station climb levels {} top {:?} slack {:.3} m; area climb \
+             levels {} top {:?} slack {:.3} m",
+            station.levels, station.top, station.slack_m, area.levels, area.top, area.slack_m,
+        );
+        // The plant changes NO generated number: the worst planet slack is still the margin, to
+        // the same measured bit pattern G-CLIMB pins on the plain world.
+        let planet_slack_m = climbs
+            .iter()
+            .filter(|c| matches!(c.body, RealmId::Planet(_)))
+            .map(|c| c.slack_m)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(planet_slack_m, 4.000_000_000_000_455_f64);
+        // The boot fence on the planted world: passes at the landed arity, refuses at 1.
+        assert_eq!(guard_visibility_climb_bounded(0, &config, 2), Ok(()));
+        let refused = guard_visibility_climb_bounded(0, &config, 1)
+            .expect_err("an arity of one cannot carry the planted world either");
+        assert_eq!(refused.levels, 2);
+        assert_eq!(refused.arity, 1);
+        // THE ADMISSION CROSS-CHECK: both planted members, put to the build-admission fence as
+        // candidates over the PLAIN world, are ACCEPTED at the landed arity — the fixture path
+        // plants nothing the future build path would refuse.
+        for (realm, parent, r, offset_m) in [
+            (
+                spec.station,
+                spec.station_parent,
+                spec.station_extent_m,
+                spec.station_offset_m,
+            ),
+            (
+                spec.area,
+                spec.area_parent,
+                spec.area_extent_m,
+                spec.area_offset_m,
+            ),
+        ] {
+            let candidate = CandidateRegion {
+                realm,
+                parent,
+                shape: Boundary::Shell { r },
+                offset_m,
+            };
+            assert_eq!(
+                guard_candidate_climb_bounded(&candidate, 0, &plain, 2),
+                Ok(()),
+                "{realm:?}"
+            );
+        }
+    }
+
+    /// look_horizon.md slice 5 — the planted pair NESTS (the real boot fence, with the boot's own
+    /// worst-instant reach map) and stands MEASURED-clear of the orbital plane, both ±Z polar
+    /// flight axes, and its own shell wall.
+    #[test]
+    fn the_planted_pair_nests_and_stands_clear_of_the_plane_and_the_polar_axes() {
+        let config = UniverseConfig::world(15.0, 0.05).with_station_area_plant();
+        let spec = station_area_plant(0, &config);
+        let bodies = generate_system_forest(0, &config);
+        let regions = realm_regions_for_config(0, &config);
+        // The boot's own reach map: a mover at its closed-form apoapsis, a static child at its
+        // authored offset — the same shape the bins boot states (`child_reaches`).
+        let reaches: std::collections::BTreeMap<_, _> = bodies
+            .iter()
+            .filter(|b| b.parent.is_some())
+            .map(|b| {
+                let reach = match b.placement {
+                    Placement::Orbital(e) => vd_core::geometry::ChildReach::Excursion(
+                        Motion::Kepler(e).max_excursion_m(),
+                    ),
+                    Placement::StaticOffset(at) => vd_core::geometry::ChildReach::Fixed(at),
+                };
+                (b.realm, reach)
+            })
+            .collect();
+        // 64 = the membership-bitset width every shard boot passes (`vd_sim::stub::MAX_REGIONS`).
+        assert_eq!(
+            vd_core::geometry::guard_regions_nest(&regions, 64, &reaches),
+            Ok(())
+        );
+        // Station: inside the shell with margin; clear of BOTH ±Z polar flight axes (the licensed
+        // exit corridor and the pixel gate's own park legs) by far more than its extent plus one
+        // occupant step; above the orbital plane's MEASURED worst |z| (apoapsis at the
+        // eccentricity cap times sin(inclination), over the home system's actual elements).
+        let off = spec.station_offset_m;
+        let off_len = off.length();
+        let extent = spec.station_extent_m;
+        let shell = config.stellar.system_soi_r_m;
+        let step_m = config.interest.occupant_v_max_mps * config.interest.tick_dt_s;
+        // Precomputed locals + inline captures (HR5 test discipline — a multi-line lazy format
+        // argument is a line only a FAILING assert executes).
+        let off_x = off.x;
+        let off_z = off.z;
+        assert!(
+            off_len + extent < shell,
+            "the station nests: {off_len} + {extent} < {shell}",
+        );
+        assert!(
+            off_x > extent + step_m,
+            "clear of the polar axes: x {off_x} vs extent {extent} + step {step_m}",
+        );
+        let worst_plane_z = bodies
+            .iter()
+            .filter(|b| b.parent == Some(spec.station_parent))
+            .filter_map(|b| orbital_of(b.placement))
+            .map(|e| e.sma * (1.0 + config.planet.ecc_cap) * e.inclination.sin())
+            .fold(0.0, f64::max);
+        assert!(
+            off_z - extent > worst_plane_z,
+            "clear of the orbital plane: z {off_z} − extent {extent} vs measured worst plane \
+             |z| {worst_plane_z}",
+        );
+        eprintln!(
+            "[G-IDENTICAL plant] station at {off:?} (|off| {off_len:.3} m, extent \
+             {extent:.4} m); measured worst orbital-plane |z| {worst_plane_z:.4} m; occupant \
+             step {step_m} m",
+        );
+        // Area: nests at 3/4 of the planet's extent — a quarter-extent of margin, exactly.
+        assert_eq!(
+            spec.area_offset_m.z + spec.area_extent_m,
+            0.75 * config.planet.planet_soi_r_m
+        );
+    }
+
+    /// look_horizon.md slice 5 — the planted interior bands: the home system's stays
+    /// PLANET-dominated (the pinned 444.104489631 m — the station's term is smaller), and the
+    /// inner planet GAINS a live interior band that brackets its own shell (the park band the
+    /// pixel gate stands in exists), stamped from the plant with no message crossing (§3.4.4).
+    #[test]
+    fn the_planted_interior_bands_bracket_their_shells_and_the_systems_stays_planet_dominated() {
+        let config = UniverseConfig::world(15.0, 0.05).with_station_area_plant();
+        let spec = station_area_plant(0, &config);
+        let regions = realm_regions_for_config(0, &config);
+        let home = regions
+            .iter()
+            .find(|r| r.realm == spec.station_parent)
+            .expect("the home system is rostered");
+        // Precomputed locals + inline captures (HR5 test discipline): a multi-line lazy
+        // format argument is a line only a FAILING assert executes — an uncoverable region.
+        let home_spin = home.interior_band.spin_up_r_m();
+        assert!(
+            (home_spin - 444.104_489_631).abs() < 1.0e-9,
+            "planet-dominated: the station's 75 + 302.06 = 377.06 m term is smaller, \
+             measured {home_spin}",
+        );
+        let planet = regions
+            .iter()
+            .find(|r| r.realm == spec.area_parent)
+            .expect("the inner planet is rostered");
+        // The planet's interior reach = the area's offset + its visibility reach (extent times
+        // the one cot(θ/2) factor) — the §3.4.4 stamp, cross-derived here.
+        let expected =
+            spec.area_offset_m.length() + spec.area_extent_m * config.interest.spin_up_factor;
+        let planet_spin = planet.interior_band.spin_up_r_m();
+        let planet_shell = planet.shape.circumscribed_extent();
+        assert!(
+            (planet_spin - expected).abs() < 1.0e-9,
+            "measured {planet_spin} vs derived {expected}",
+        );
+        assert!(
+            planet_spin > planet_shell,
+            "the park band exists outside the planet's shell: spin {planet_spin} vs shell \
+             {planet_shell}",
+        );
+        eprintln!(
+            "[G-IDENTICAL plant] planet interior spin-up {planet_spin:.9} m (shell \
+             {planet_shell:.4} m); system interior spin-up {home_spin:.9} m",
+        );
+        // Frames: the station lowers to its own StationLocal; the area to AreaLocal WITH its
+        // planet's provenance — the one total map, fed the planted parent.
+        let st = regions
+            .iter()
+            .find(|r| r.realm == spec.station)
+            .expect("the station is rostered");
+        assert_eq!(st.frame.realm(), Some(spec.station));
+        assert_eq!(st.parent, Some(spec.station_parent));
+        let ar = regions
+            .iter()
+            .find(|r| r.realm == spec.area)
+            .expect("the area is rostered");
+        assert_eq!(ar.parent, Some(spec.area_parent));
+        assert_eq!(
+            ar.frame,
+            vd_core::pose::frame_for_realm(spec.area, Some(spec.area_parent))
+                .expect("an area under a planet has the lawful AreaLocal frame")
+        );
+    }
+
+    /// The monotone-slack arm on a HAND-BUILT forest with a ZERO-MARGIN level (look_horizon.md
+    /// slice 2's gate): a level whose slack is exactly zero still COUNTS AS VISIBLE (the same
+    /// equality convention as the offence filter — the margin the solve reserves is what keeps a
+    /// lawful world strictly clear), so the climb passes it; one strictly-positive level stops
+    /// it. Numbers chosen to stay exact in f64 (single-binade sums), so the zero is a ZERO.
+    #[test]
+    fn a_zero_margin_level_still_climbs_and_a_positive_one_stops_the_walk() {
+        let factor = visibility_factor(VISIBILITY_THETA_MIN_RAD);
+        let extent = 10.0;
+        let offset = 5.0;
+        let required = extent * factor;
+        let root = RealmId::System(800);
+        let zero_parent = RealmId::Planet(801);
+        let body = RealmId::Station(802);
+        let forest = |parent_r: f64| {
+            vec![
+                GeneratedBody {
+                    realm: root,
+                    parent: None,
+                    shape: Boundary::Shell { r: 1.0e9 },
+                    placement: Placement::StaticOffset(DVec3::ZERO),
+                    photometrics: None,
+                },
+                GeneratedBody {
+                    realm: zero_parent,
+                    parent: Some(root),
+                    shape: Boundary::Shell { r: parent_r },
+                    placement: Placement::StaticOffset(DVec3::ZERO),
+                    photometrics: None,
+                },
+                GeneratedBody {
+                    realm: body,
+                    parent: Some(zero_parent),
+                    shape: Boundary::Shell { r: extent },
+                    placement: Placement::StaticOffset(DVec3::new(offset, 0.0, 0.0)),
+                    photometrics: None,
+                },
+            ]
+        };
+        // (a) THE ZERO-MARGIN LEVEL: the parent's shell sized so `d_min == required` exactly —
+        // equality is VISIBLE, the climb passes it and stops at the (enormous) root.
+        let zero_r = offset + extent + required;
+        let climbs = visibility_climbs(&forest(zero_r), VISIBILITY_THETA_MIN_RAD, 0.0);
+        let c = climbs.iter().find(|c| c.body == body).expect("measured");
+        assert_eq!(
+            c.levels, 2,
+            "a zero-margin level climbs — equality counts as visible: {c:?}"
+        );
+        assert_eq!(c.top, zero_parent);
+        assert!(
+            c.slack_m > 0.0,
+            "the stop happened at the root, with the root's own slack: {c:?}"
+        );
+        // (b) ONE ULP-SCALE POSITIVE MARGIN stops the walk at the parent: levels 1, the body's
+        // own degenerate top, and the slack IS the margin (the monotone arm's other side).
+        let stopped_r = zero_r + 1.0;
+        let climbs = visibility_climbs(&forest(stopped_r), VISIBILITY_THETA_MIN_RAD, 0.0);
+        let c = climbs.iter().find(|c| c.body == body).expect("measured");
+        assert_eq!(c.levels, 1, "a positive margin stops the climb: {c:?}");
+        assert_eq!(c.top, body, "nobody outside sees it");
+        assert_eq!(c.slack_m, 1.0, "the slack IS the stated margin");
+    }
+
+    /// THE Q3 EVIDENCE AS A TEST (look_horizon.md slice 2's gate + the owner's ruling
+    /// 2026-08-17): a ~20 m surface structure planted on a planet of THE world at today's
+    /// compressed scale needs its picture carried THREE levels — the build-admission fence
+    /// REFUSES the placement (never the boot), printing the body and its numbers. The
+    /// near-real-scale re-solve is the scheduled cure; its first gate run must include
+    /// `measure_visibility_climb`; the carrier goes to 3 only if that measurement demands it.
+    /// THE §3.4.4 CLAIM, SETTLED BY MEASUREMENT (look horizon slice 4; Q1 APPROVED, owner
+    /// 2026-08-17 — the design named this exact unit): the generator stamps each region's
+    /// INTERIOR BAND at boot, from the FULL forest, BEFORE scoping — so a GALAXY shard's boot
+    /// roster row for a star system carries the system's interior reach with **no message ever
+    /// crossing a boundary** (Ask D stays deferred). On THE world that reach is
+    /// `444.104489631` m (planet worst excursion at the ecc cap `142.045826247` + planet
+    /// visibility reach `302.058663384`), BIT-IDENTICAL to the same two terms the climb
+    /// measurement walks with (§3.3.2's one-formula identity). A leaf (a planet) carries the
+    /// INERT band — nothing inside, nothing to reach — and so does every walk-scale region
+    /// (the AoI machinery is inert there: the byte-identity arm).
+    #[test]
+    fn the_boot_roster_stamps_each_systems_interior_reach_no_message_crossing() {
+        let config = UniverseConfig::world(15.0, 0.05);
+        let world = WorldView::generated(0, &config);
+        let regions = world.neighbourhood(&std::collections::BTreeSet::from([GALAXY]));
+        let system_rows: Vec<_> = regions
+            .iter()
+            .filter(|r| r.parent == Some(GALAXY))
+            .collect();
+        assert_eq!(system_rows.len(), 3, "THE world's galaxy holds 3 systems");
+        let bodies = generate_system_forest(0, &config);
+        for row in &system_rows {
+            let expected = bodies
+                .iter()
+                .filter(|c| c.parent == Some(row.realm))
+                .map(|c| {
+                    worst_hop_excursion_capped_m(&c.placement, config.planet.ecc_cap)
+                        + vd_core::geometry::visibility_reach_m(
+                            c.shape.finite_extent(),
+                            VISIBILITY_THETA_MIN_RAD,
+                        )
+                })
+                .fold(0.0, f64::max);
+            assert_eq!(
+                row.interior_band.spin_up_r_m(),
+                expected,
+                "the stamped reach is BIT-IDENTICAL to the climb walk's own two terms: {row:?}"
+            );
+            let spin = row.interior_band.spin_up_r_m();
+            let the_number = (spin - 444.104_489_631).abs() < 1e-9;
+            assert!(
+                the_number,
+                "THE number (look_horizon.md §3.4.4): measured {spin}"
+            );
+            assert!(
+                row.interior_band.tear_down_r_m() > spin,
+                "the tear-down adds the derived lead: {row:?}"
+            );
+        }
+        // A LEAF states no interior band — the zero-reach arm.
+        let sys = system_rows[0].realm;
+        let planet_rows = world.neighbourhood(&std::collections::BTreeSet::from([sys]));
+        let planets: Vec<_> = planet_rows
+            .iter()
+            .filter(|r| r.parent == Some(sys))
+            .collect();
+        assert_eq!(planets.len(), 5, "5 planets per system on THE world");
+        for p in planets {
+            assert_eq!(
+                p.interior_band.spin_up_r_m(),
+                0.0,
+                "a childless leaf is inert — no interior, no interest: {p:?}"
+            );
+        }
+        // Walk scale: parents exist, but the AoI machinery is inert ⇒ the band is inert too
+        // (the `!interest.is_live()` arm; byte-identity where nothing demands).
+        let walk = WorldView::generated(0, &UniverseConfig::walk_scale());
+        let walk_regions = walk.neighbourhood(&std::collections::BTreeSet::from([GALAXY]));
+        assert!(
+            walk_regions
+                .iter()
+                .all(|r| r.interior_band.spin_up_r_m() == 0.0),
+            "walk-scale regions carry the inert interior band"
+        );
+    }
+
+    #[test]
+    fn q3_a_twenty_metre_structure_at_interim_scale_is_refused_by_the_admission_fence() {
+        let config = UniverseConfig::world(15.0, 0.05);
+        let bodies = generate_system_forest(0, &config);
+        // A planet of the ORIGIN system (the ring systems' extra 12 km makes their structures
+        // climb even further): the system placed at the galactic origin.
+        let origin_system = bodies
+            .iter()
+            .find(|b| {
+                matches!(b.realm, RealmId::System(_))
+                    && b.parent == Some(GALAXY)
+                    && worst_hop_excursion_m(&b.placement) == 0.0
+            })
+            .expect("THE world's system 0 sits at the galactic origin")
+            .realm;
+        let planet = bodies
+            .iter()
+            .find(|b| b.parent == Some(origin_system))
+            .expect("the origin system holds planets");
+        let candidate = CandidateRegion {
+            realm: RealmId::Station(7777),
+            parent: planet.realm,
+            shape: Boundary::Shell { r: 20.0 },
+            offset_m: DVec3::new(planet.shape.finite_extent(), 0.0, 0.0),
+        };
+        // The PLACEMENT is refused…
+        let refused = guard_candidate_climb_bounded(&candidate, 0, &config, 2)
+            .expect_err("a 20 m structure at interim scale exceeds the landed carrier");
+        eprintln!("[Q3] the admission refusal, verbatim: {refused}");
+        assert_eq!(refused.body, candidate.realm);
+        assert_eq!(refused.levels, 3, "visible from outside its star system");
+        assert_eq!(refused.top, origin_system);
+        assert_eq!(refused.arity, 2);
+        assert!(
+            refused.slack_m > 0.0,
+            "it DOES stop — at the galaxy: {refused:?}"
+        );
+        // …never the boot: THE world itself still passes the same fence, and the same candidate
+        // is admitted by a carrier that could carry it (both arms, named).
+        assert_eq!(guard_visibility_climb_bounded(0, &config, 2), Ok(()));
+        assert_eq!(
+            guard_candidate_climb_bounded(&candidate, 0, &config, 3),
+            Ok(())
+        );
+        // A LAWFUL candidate at today's scale — below the ~5 cm threshold §3.3.1 derives — is
+        // admitted by the landed carrier (the fence refuses placements, not building itself).
+        let tiny = CandidateRegion {
+            shape: Boundary::Shell { r: 0.04 },
+            ..candidate
+        };
+        assert_eq!(guard_candidate_climb_bounded(&tiny, 0, &config, 2), Ok(()));
     }
 
     /// The derivation itself, BINDING regime (the interim scale): the worst descendant's two-level
@@ -2897,9 +3859,31 @@ mod tests {
             required_m: 20.0 * visibility_factor(VISIBILITY_THETA_MIN_RAD),
         };
         assert_eq!(offences, vec![expected]);
-        // The fail-loud shape: the first offence IS the boot refusal; an empty list is a pass.
-        assert_eq!(first_offence(offences), Err(expected));
-        assert_eq!(first_offence(Vec::new()), Ok(()));
+        // The fail-loud shape moved to the MEASURED climb (look_horizon slice 2): the same
+        // guilty forest measures a grandchild climb of 3 (visible past its parent AND its
+        // grandparent — it runs out of ancestors, so the slack is the ROOT's own non-positive
+        // figure), and the fence refuses it at the landed arity while passing an arity that
+        // could carry it (both arms, named).
+        let climbs = visibility_climbs(&bodies, VISIBILITY_THETA_MIN_RAD, 0.0);
+        let grand_climb = climbs
+            .iter()
+            .find(|c| c.body == grand)
+            .expect("the grandchild is measured");
+        assert_eq!(grand_climb.levels, 3);
+        assert_eq!(grand_climb.top, root, "visible from outside even the root");
+        assert!(
+            grand_climb.slack_m <= 0.0,
+            "the climb never stopped inside the forest: {grand_climb:?}"
+        );
+        assert_eq!(
+            first_climb_over(&climbs, 3),
+            Ok(()),
+            "an arity that can carry the climb passes"
+        );
+        let refused = first_climb_over(&climbs, 2).expect_err("the landed arity refuses");
+        assert_eq!(refused.body, grand);
+        assert_eq!(refused.levels, 3);
+        assert_eq!(refused.arity, 2);
     }
 
     #[test]
@@ -3824,11 +4808,12 @@ mod tests {
     }
 
     #[test]
-    fn the_marker_luma_bag_frames_the_pinned_draw_through_the_one_shared_codec() {
-        // Slice A: the parent's marker datum for a sleeping child rides the ONE window-body codec
-        // (`vd_core::look`) — encode every system of THE world, decode through the shared reader,
-        // and get back exactly the pinned (class code, luma) pair. A re-framed bag, a transposed
-        // field, or a codec fork fails here, not on a live wire.
+    fn the_marker_datum_frames_the_pinned_draw_through_the_one_shared_codec() {
+        // Slice A → look_horizon slice 1: the parent's marker datum for a sleeping child rides
+        // the ONE window-body codec (`vd_core::look::marker_bag`, now with the presence floor's
+        // extent beside it) — encode every system of THE world, decode through the shared reader,
+        // and get back exactly the pinned (class code, luma) pair AND the stated radius. A
+        // re-framed bag, a transposed field, or a codec fork fails here, not on a live wire.
         let cfg = UniverseConfig::world(VISUAL_OCCUPANT_V_MAX_MPS, AOI_TICK_DT_S);
         let draws = system_photometrics_for_config(0, &cfg);
         assert_eq!(
@@ -3837,10 +4822,16 @@ mod tests {
             "THE world's marker roster: three stars + every planet's reflector (Slice C1)"
         );
         for (_, p) in &draws {
-            let bag = marker_luma_bag(p);
+            let datum = marker_datum(p);
+            assert_eq!(datum, (p.class as u8, p.luma_lsun));
+            let bag = vd_core::look::marker_bag(Some(datum), cfg.stellar.system_soi_r_m);
             assert_eq!(
                 vd_core::look::luma_of(&bag),
                 Ok((p.class as u8, p.luma_lsun))
+            );
+            assert_eq!(
+                vd_core::look::extent_of(&bag),
+                Ok(cfg.stellar.system_soi_r_m)
             );
             // A marker bag can never answer for a look (the structural exclusivity, decoded side).
             assert_eq!(

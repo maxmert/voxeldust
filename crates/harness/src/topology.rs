@@ -1595,6 +1595,7 @@ mod tests {
                 band,
                 aoi: vd_core::geometry::AoiConfig::inert(),
                 parent,
+                interior_band: vd_core::geometry::AoiConfig::inert(),
             };
             let root = RealmId::System(0);
             *world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![

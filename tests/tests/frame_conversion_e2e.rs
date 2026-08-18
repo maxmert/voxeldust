@@ -641,6 +641,7 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
             shape: Boundary::Shell { r: 1.0e6 },
             band,
             aoi: AoiConfig::inert(),
+            interior_band: AoiConfig::inert(),
             parent: None,
         },
         RealmRegion {
@@ -652,6 +653,7 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
             },
             band,
             aoi: AoiConfig::inert(),
+            interior_band: AoiConfig::inert(),
             parent: Some(root),
         },
         RealmRegion {
@@ -664,6 +666,7 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
             },
             band,
             aoi: AoiConfig::inert(),
+            interior_band: AoiConfig::inert(),
             parent: Some(SYSTEM),
         },
     ]
@@ -1589,6 +1592,9 @@ fn chain_sibling_region(
             .build(shape.finite_extent(), 0.0)
             .expect("aoi band edges are valid by construction"),
         parent: Some(parent),
+        // A planted single region states no children here — no interior, no interest (the
+        // seed-forest rows get theirs stamped by `to_regions` from the full forest).
+        interior_band: vd_core::geometry::AoiConfig::inert(),
     }
 }
 
@@ -2382,19 +2388,24 @@ fn no_message_into_a_realm_names_that_realm_or_carries_a_placement() {
             // HERE only to prove that: no statement inside names the receiving realm.
             InterShardFlow::WindowRelay(wr) => {
                 kinds.insert("WindowRelay");
-                let named: Vec<RealmId> =
-                    vd_wire::session_flow::open_relay_statements(&wr.statements)
-                        .expect("a sealed batch decodes")
-                        .into_iter()
-                        .flat_map(|st| match st {
-                            vd_wire::session_flow::RelayedStatement::Level { rows, .. } => {
-                                rows.into_iter().map(|r| r.realm).collect::<Vec<_>>()
-                            }
-                            vd_wire::session_flow::RelayedStatement::Body { subject, .. } => {
-                                vec![subject]
-                            }
-                        })
-                        .collect();
+                // Slice 3 (look horizon): the sealed INTERIOR batches ride the same relay —
+                // opened here too, because a realm told about itself inside a grandchild's
+                // forwarded batch would be the identical offence one seal deeper.
+                let named: Vec<RealmId> = std::iter::once(&wr.own)
+                    .chain(wr.interior.iter().map(|e| &e.own))
+                    .flat_map(|sealed| {
+                        vd_wire::session_flow::open_relay_statements(sealed)
+                            .expect("a sealed batch decodes")
+                    })
+                    .flat_map(|st| match st {
+                        vd_wire::session_flow::RelayedStatement::Level { rows, .. } => {
+                            rows.into_iter().map(|r| r.realm).collect::<Vec<_>>()
+                        }
+                        vd_wire::session_flow::RelayedStatement::Body { subject, .. } => {
+                            vec![subject]
+                        }
+                    })
+                    .collect();
                 if named.contains(&own_realm) {
                     vec![format!(
                         "{node:?} was told about ITSELF ({own_realm:?}) inside a relay: {named:?}"
@@ -2426,19 +2437,44 @@ fn no_message_into_a_realm_names_that_realm_or_carries_a_placement() {
         let planted = InterShardFlow::WindowRelay(vd_wire::intershard::WindowRelay {
             child: planet_coord(),
             realm_fence: vd_core::Fence(1),
-            statements: vd_wire::session_flow::seal_relay_statements(&[
+            own: vd_wire::session_flow::seal_relay_statements(&[
                 vd_wire::session_flow::RelayedStatement::Body {
                     subject: CHAIN_AREA, // the RECEIVER's own realm — the forbidden sentence
                     stmt: vd_wire::session_flow::BodyStmt::SelfLook { bag: vec![1, 2] },
                     authored_at: UniverseTick(1),
                 },
             ]),
+            interior: Vec::new(),
         });
         assert_eq!(
             offences_of(SHARD, CHAIN_AREA, &planted, &mut kinds).len(),
             1,
             "the detector must catch a realm being told about itself — otherwise the sweep below \
              proves nothing"
+        );
+        // And the SAME offence one seal deeper (slice 3): a grandchild batch naming the
+        // receiver must be caught too, or the interior lane escapes the sweep.
+        let planted_interior = InterShardFlow::WindowRelay(vd_wire::intershard::WindowRelay {
+            child: planet_coord(),
+            realm_fence: vd_core::Fence(1),
+            own: vd_wire::session_flow::seal_relay_statements(&[]),
+            interior: vec![vd_wire::intershard::InteriorRelay {
+                child: PLANET,
+                child_fence: vd_core::Fence(1),
+                own: vd_wire::session_flow::seal_relay_statements(&[
+                    vd_wire::session_flow::RelayedStatement::Body {
+                        subject: CHAIN_AREA, // the receiver again, one hop deeper
+                        stmt: vd_wire::session_flow::BodyStmt::SelfLook { bag: vec![3, 4] },
+                        authored_at: UniverseTick(1),
+                    },
+                ]),
+            }],
+        });
+        assert_eq!(
+            offences_of(SHARD, CHAIN_AREA, &planted_interior, &mut kinds).len(),
+            1,
+            "the detector must catch the identical offence one seal deeper (the slice-3 \
+             interior forward), or that lane escapes the sweep"
         );
         let clean = InterShardFlow::ChildLive(vd_wire::intershard::ChildLive {
             child: planet_coord(),

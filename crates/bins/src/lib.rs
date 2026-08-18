@@ -2028,7 +2028,38 @@ pub fn spawn_anchor_keys() -> &'static [&'static str] {
         // login, and hands the shard a pose already measured in the shard's own frame.
         "VD_BOOT_TICKS_P99",
         "VD_LEASE_RENEW_INTERVAL",
+        // look_horizon.md slice 5 (G-IDENTICAL): the fixture plant must reach every DEMAND-SPAWNED
+        // shard too, or the cluster splits across two worlds — the exact defect the no-choice boot
+        // deleted. Absent ⇒ byte-identical child env ⇒ THE plain world.
+        "VD_FIXTURE_PLANT",
     ]
+}
+
+/// THE world config as THIS PROCESS boots it: [`UniverseConfig::world`] plus the fixture plant
+/// named by `VD_FIXTURE_PLANT` (look_horizon.md slice 5 `G-IDENTICAL` — the SL5 fixture-forest
+/// doctrine's process-tier path). ABSENT or empty ⇒ THE world exactly, byte-identical to the
+/// pre-plant boot. The ONE lawful value today is `"station-area"`
+/// ([`vd_physics::worldgen::FixturePlant::StationArea`]). Every world-deriving call in this crate
+/// and in the bins routes through HERE, and the key rides [`spawn_anchor_keys`], so a cluster is
+/// planted whole or not at all — two processes cannot disagree about content any more than they
+/// can about scale.
+///
+/// # Panics
+/// On any other value: refusing to boot beats booting half a cluster onto a different world.
+#[must_use]
+pub fn process_world_config(
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+) -> vd_physics::worldgen::UniverseConfig {
+    let base = vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps, tick_dt_s);
+    match std::env::var("VD_FIXTURE_PLANT").as_deref() {
+        Err(_) | Ok("") => base,
+        Ok("station-area") => base.with_station_area_plant(),
+        Ok(other) => panic!(
+            "VD_FIXTURE_PLANT={other:?} names no fixture plant (the one lawful value is \
+             \"station-area\") — refusing to boot onto an unstateable world",
+        ),
+    }
 }
 
 /// Build the spawned-child anchor env from the orchestrator's own env — each [`spawn_anchor_keys`] key
@@ -2340,7 +2371,7 @@ pub fn child_reaches(
 ) -> std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::geometry::ChildReach> {
     use vd_core::geometry::ChildReach;
     use vd_physics::motion::Motion;
-    let config = vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps, tick_dt_s);
+    let config = process_world_config(occupant_v_max_mps, tick_dt_s);
     // Every mover of this neighbourhood, keyed by realm: the union of THE world's moving children
     // over every parent a region row names. The regions and this roster derive from the SAME
     // `(seed, config)` forest, so a mover row missing from it is unrepresentable — which is what
@@ -2392,7 +2423,7 @@ pub fn boot_regions_and_movers(
     // simulated by another's. Deleting the parameter is the fix: two processes cannot disagree about a
     // value that does not exist.
     visual_regions_and_movers(
-        vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps, tick_dt_s),
+        process_world_config(occupant_v_max_mps, tick_dt_s),
         universe_seed,
         held_realms,
         hosted,
@@ -2416,34 +2447,37 @@ pub fn boot_world(
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
 ) -> vd_physics::worldgen::WorldView {
-    use vd_physics::worldgen::{UniverseConfig, WorldView};
+    use vd_physics::worldgen::WorldView;
     // THE OTHER HALF OF THE MEASURED DISAGREEMENT. A live cluster was read process by process: the
     // orchestrator held `visual-demand` and its own gateway held `visual`, from one launch of one script.
     // This function is where the gateway's half of that came from — three arms, and nothing to stop the
     // two ends being handed different ones. Now there is one world and no argument to get wrong.
     WorldView::generated(
         universe_seed,
-        &UniverseConfig::world(occupant_v_max_mps, tick_dt_s),
+        &process_world_config(occupant_v_max_mps, tick_dt_s),
     )
 }
 
 /// THE WINDOW LANE's marker roster for one shard boot (Slice A, docs/design/window_lane.md
-/// §2.2/§2.8): per DIRECT child of a held realm, the pre-encoded `TAG_LUMA` bag drawn from that
-/// child's own generation stream (the owner-ruled R4 datum — the parent authors a sleeping
-/// child's point of light). Derived from THE world (`system_photometrics_for_config`, the SAME
-/// `(seed, config)` every other boot seam reads — SL5) and FILTERED to the booted forest's
-/// direct children of the held realms, so a shard holds bags for exactly the children it may
-/// state markers about and nothing else. Empty wherever no child carries a draw (walk
-/// stations/areas; planets — their photometric ladder is an owed later draw).
+/// §2.2/§2.8): per DIRECT child of a held realm, the photometric DATUM `(class_code, luma_lsun)`
+/// drawn from that child's own generation stream (the owner-ruled R4 datum — the parent authors a
+/// sleeping child's point of light). Derived from THE world (`system_photometrics_for_config`,
+/// the SAME `(seed, config)` every other boot seam reads — SL5) and FILTERED to the booted
+/// forest's direct children of the held realms, so a shard holds datums for exactly the children
+/// it may state markers about and nothing else. Empty wherever no child carries a draw (walk
+/// stations/areas). Since look_horizon.md slice 1 the BAG is built per child by the sim's
+/// `current_bodies` through the one `vd_core::look::marker_bag` codec — the datum here plus the
+/// child's own circumscribed extent — so a child with NO draw still states a correctly-sized
+/// point of light (the presence floor).
 #[must_use]
-pub fn child_luma_bags(
+pub fn child_luma_draws(
     universe_seed: u64,
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
     regions: &[vd_core::geometry::RealmRegion],
     held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
-) -> std::collections::BTreeMap<vd_core::pose::RealmId, Vec<u8>> {
-    let config = vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps, tick_dt_s);
+) -> std::collections::BTreeMap<vd_core::pose::RealmId, (u8, f64)> {
+    let config = process_world_config(occupant_v_max_mps, tick_dt_s);
     vd_physics::worldgen::system_photometrics_for_config(universe_seed, &config)
         .into_iter()
         .filter(|(realm, _)| {
@@ -2451,7 +2485,7 @@ pub fn child_luma_bags(
                 r.realm == *realm && r.parent.is_some_and(|parent| held_realms.contains(&parent))
             })
         })
-        .map(|(realm, draw)| (realm, vd_physics::worldgen::marker_luma_bag(&draw)))
+        .map(|(realm, draw)| (realm, vd_physics::worldgen::marker_datum(&draw)))
         .collect()
 }
 
@@ -3364,11 +3398,12 @@ mod world_roster_tests {
     // D-LANE-6 🟩: nothing in this module writes a file any more.)
 
     #[test]
-    fn child_luma_bags_cover_exactly_the_held_realms_direct_system_children() {
-        // THE WINDOW LANE's boot plumbing (Slice A + C1): the marker roster a shard boots with
-        // holds a TAG_LUMA bag for EXACTLY the direct children of its held realms that carry a
-        // draw — on THE world, the galaxy shard gets its three systems (the stellar draws) and a
-        // system shard gets its planets (the Slice-C1 REFLECTED draws).
+    fn child_luma_draws_cover_exactly_the_held_realms_direct_system_children() {
+        // THE WINDOW LANE's boot plumbing (Slice A + C1 → look_horizon slice 1): the marker
+        // roster a shard boots with holds a photometric DATUM for EXACTLY the direct children of
+        // its held realms that carry a draw — on THE world, the galaxy shard gets its three
+        // systems (the stellar draws) and a system shard gets its planets (the Slice-C1
+        // REFLECTED draws). The bag framing moved to the sim's one marker-bag call.
         let world = boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
         let regions = world.regions();
         // Named via the lineage, never a seed literal: a planet's parent IS a star system, and
@@ -3384,22 +3419,23 @@ mod world_roster_tests {
             .find(|r| r.realm == a_system)
             .and_then(|r| r.parent)
             .expect("a system nests under the galaxy");
-        let bags = child_luma_bags(
+        let draws = child_luma_draws(
             DEV.universe_seed,
             DEV.move_speed,
             DEV.tick_dt,
             regions,
             &std::collections::BTreeSet::from([galaxy]),
         );
-        assert_eq!(bags.len(), 3, "one marker bag per system of THE world");
-        for (realm, bag) in &bags {
+        assert_eq!(draws.len(), 3, "one marker datum per system of THE world");
+        for (realm, (class_code, luma_lsun)) in &draws {
             assert!(matches!(realm, vd_core::pose::RealmId::System(_)));
-            vd_core::look::luma_of(bag).expect("a well-formed TAG_LUMA bag");
+            assert!(*class_code <= 6, "a minted Morgan-Keenan class code");
+            assert!(*luma_lsun > 0.0, "a positive main-sequence luminosity");
         }
         // A SYSTEM shard's roster (Slice C1): its planets carry the REFLECTED marker draw
         // (window_lane.md §1.1 item 3b, per direct child — the flag day made it load-bearing:
         // a sleeping realm appears ONLY as its parent's marker).
-        let planets = child_luma_bags(
+        let planets = child_luma_draws(
             DEV.universe_seed,
             DEV.move_speed,
             DEV.tick_dt,
@@ -3413,11 +3449,78 @@ mod world_roster_tests {
         assert_eq!(
             planets.len(),
             expected_planets,
-            "one reflected marker bag per planet of the held system"
+            "one reflected marker datum per planet of the held system"
         );
-        for (realm, bag) in &planets {
+        for (realm, (class_code, luma_lsun)) in &planets {
             assert!(matches!(realm, vd_core::pose::RealmId::Planet(_)));
-            vd_core::look::luma_of(bag).expect("a well-formed TAG_LUMA bag");
+            assert!(
+                *class_code <= 6,
+                "a reflector carries its illuminator's class"
+            );
+            assert!(
+                luma_lsun.is_finite() && *luma_lsun >= 0.0,
+                "a finite reflected luminosity"
+            );
+        }
+    }
+
+    /// The look carrier's arity meets the world fence HERE — the one crate that sees both
+    /// (look_horizon.md slice 2): the wire's structural bound is 2 (the Q3 ruling: it STAYS 2),
+    /// and THE world's measured climb fits it — the exact predicate every world-deriving
+    /// process's boot (the shard's and the gateway's) runs before serving anything.
+    #[test]
+    fn the_look_carrier_arity_is_two_and_the_worlds_measured_climb_fits_it() {
+        assert_eq!(vd_wire::session_flow::LOOK_CARRIER_ARITY, 2);
+        let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+        assert_eq!(
+            vd_physics::worldgen::guard_visibility_climb_bounded(
+                DEV.universe_seed,
+                &config,
+                vd_wire::session_flow::LOOK_CARRIER_ARITY,
+            ),
+            Ok(()),
+        );
+    }
+
+    /// G-INTEREST-BAND (look_horizon.md §6 slice 4; Q1 APPROVED, owner 2026-08-17): on THE
+    /// world, at the SHIPPED cluster dynamics (500 m/s occupant ceiling, 50 Hz), a star
+    /// system's derived interest spin-up radius equals `444.104489631` m (its interior reach:
+    /// planet worst excursion at the ecc cap + planet visibility reach) and its tear-down
+    /// radius `469.104489631` m (the same derived velocity lead every AoI band carries:
+    /// 500 · 0.02 · (K_SAFETY 2 + 0.5) = 25 m) — and BOTH bracket the 150 m system shell, so
+    /// a vacated system's interiors are awake strictly BEFORE any crossing: the latency race
+    /// is a geometric impossibility, not a tuning. Asserted with the numbers, derived from the
+    /// shipped constants — never a literal restated from the design.
+    #[test]
+    fn g_interest_band_the_derived_radii_bracket_the_system_shell() {
+        let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+        let world = vd_physics::worldgen::WorldView::generated(DEV.universe_seed, &config);
+        let galaxy_scope = world.neighbourhood(&std::collections::BTreeSet::from([
+            vd_core::worldgen::GALAXY,
+        ]));
+        let systems: Vec<_> = galaxy_scope
+            .iter()
+            .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
+            .collect();
+        assert_eq!(systems.len(), 3, "THE world's galaxy holds 3 systems");
+        for row in systems {
+            let spin_up = row.interior_band.spin_up_r_m();
+            let tear_down = row.interior_band.tear_down_r_m();
+            assert!(
+                (spin_up - 444.104_489_631).abs() < 1e-9,
+                "G-INTEREST-BAND spin-up: measured {spin_up}"
+            );
+            assert!(
+                (tear_down - 469.104_489_631).abs() < 1e-9,
+                "G-INTEREST-BAND tear-down (spin-up + the 25 m derived lead): measured {tear_down}"
+            );
+            // Both radii BRACKET the 150 m shell: the crossing happens strictly inside the band.
+            let shell = row.shape.circumscribed_extent();
+            assert_eq!(shell, 150.0, "the system shell on THE world");
+            assert!(
+                (shell < spin_up) & (spin_up < tear_down),
+                "the band brackets the shell: {shell} < {spin_up} < {tear_down}"
+            );
         }
     }
 

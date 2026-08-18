@@ -102,6 +102,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cluster placed its logins by the geometry of a different universe than the one it then simulated.
     // THE SAME world the shards build — not "the same function with whatever value each was handed",
     // which is what this was and what a live cluster was measured doing wrong.
+    // THE LOOK HORIZON's boot fence (look_horizon.md §3.3.4 — "in EVERY process's fence, today
+    // only the shard's"): the gateway derives THE world too (the login placement below), so it
+    // runs the SAME measured-climb refusal the shard runs. A world whose pictures cannot be
+    // carried refuses to serve logins rather than serving wrong pixels.
+    vd_physics::worldgen::guard_visibility_climb_bounded(
+        universe_seed,
+        &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
+        vd_wire::session_flow::LOOK_CARRIER_ARITY,
+    )
+    .map_err(|e| {
+        format!(
+            "THE world's measured visibility climb exceeds the look carrier: {e} — refusing to boot"
+        )
+    })?;
     let universe = vd_bins::boot_world(universe_seed, move_speed * time_multiplier, tick_dt);
     // WHERE ACCOUNTS APPEAR, resolved against that same world: a realm NAME plus a pose already measured
     // from that realm's own centre. Nothing here descends anything.

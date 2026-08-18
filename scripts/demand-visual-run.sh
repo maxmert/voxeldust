@@ -5,19 +5,24 @@
 # DEMAND cluster: orchestrator + gateway only, NO pre-booked world. The ONLY way a realm exists is the
 # armed reconciler spinning one up on your login / your AoI demand — the exact cluster the headless
 # rlm_demand_login + demand-walk proofs build in-harness, now with a HUMAN in a window instead of vdctl.
-# The client draws its scene from the SERVER STREAM (RealmRegistry on join + RealmSceneDelta as realms
-# enter/leave your AoI) — NO --realm-boxes file. Scale = visual (window-friendly).
+# The client draws its scene from the SERVER STREAM — the COMPOSED picture the gateway stacks per
+# observer (window lane, 2026-08-16): a scene level on join + deltas as realms enter/leave your AoI,
+# every row already in your own realm's frame. The client composes NOTHING. There is no boot file at
+# all any more (`--realm-boxes` and its whole loading path are deleted), and no scale to select:
+# THE world is the only world.
 #
 # Usage:
 #   scripts/demand-visual-run.sh          # boot the demand cluster, open the client window
 #   scripts/demand-visual-run.sh --fast   # ^ with Bevy linked as a shared library (faster relink)
 #
-# What you SEE (and what's still owed): your HOME system streams in on login (it is demand-spawned the
-# moment you connect — expect a ~1-2s warm-up while the home shard boots). WASD + mouse fly the dot. As
-# you move, realms your AoI reaches stream in and ones you leave evict — the demand loop, live. This is
-# the FIRST VU-arc window on the demand loop; the surrounding STAR FIELD, warp targeting, and the seamless
-# warp fly-by are the following slices (scripts/visual_universe_arc_plan.md, VU-3..VU-7). Closing the
-# window (or Ctrl-C) tears the cluster down.
+# What you SEE: your HOME system streams in on login (it is demand-spawned the moment you connect —
+# expect a ~1-2s warm-up while the home shard boots). WASD + mouse fly the dot. As you move, realms your
+# AoI reaches stream in and ones you leave evict — the demand loop, live. Since the window lane landed
+# you also see: the OTHER systems as points of light placed by the galaxy (no server runs for them),
+# dormant planets shining by reflected starlight, the body of the realm you are INSIDE drawn around you,
+# and — flying at another system — the point of light growing continuously into a live self-drawn system
+# while the one behind shrinks back to a dot. That is the warp, and it is gated in pixels
+# (`just warp-pixels`). Closing the window (or Ctrl-C) tears the cluster down.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

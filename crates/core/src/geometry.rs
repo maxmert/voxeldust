@@ -826,6 +826,29 @@ impl ContainmentBand {
     }
 }
 
+/// THE ONE VISIBILITY FORMULA (look_horizon.md §3.3.2): the factor `cot(θ/2)` for a minimum
+/// angular size `theta_rad` — a body of finite extent `e` subtends `≥ theta_rad` (is VISIBLE)
+/// out to exactly `e · cot(θ/2)`. It lives HERE, in `vd-core`, with three consumers and no
+/// second copy anywhere: the WORLD SOLVE (`vd-physics` sizes the galaxy shell so nothing two
+/// levels down is visible from outside it), the BOOT MEASUREMENT (`measure_visibility_climb` —
+/// how many levels each body's picture must travel, and the fence that refuses a world whose
+/// climb exceeds the look carrier's arity), and the RUNTIME TRIPWIRE (the AoI interest band's
+/// spin-up/tear-down factors — the live wake/sleep test every realm runs). One equation written
+/// once is what makes the live bound and the world's own size calculation provably the same
+/// thing. Straight-line, branchless (HR5).
+#[must_use]
+pub fn visibility_factor(theta_rad: f64) -> f64 {
+    1.0 / (theta_rad / 2.0).tan()
+}
+
+/// The visibility REACH of a body of extent `extent_m` under minimum angle `theta_rad`: the
+/// distance out to which it is still visible — `extent · cot(θ/2)`, the same formula's other
+/// spelling ([`visibility_factor`]).
+#[must_use]
+pub fn visibility_reach_m(extent_m: f64, theta_rad: f64) -> f64 {
+    extent_m * visibility_factor(theta_rad)
+}
+
 /// A per-realm Area-of-Interest hysteresis band (METRES) for demand-driven realm lifecycle (RLM
 /// Step 2). DISTINCT from [`OverlapBand`]/[`ContainmentBand`]: it drives a child SHARD's spin-up/down,
 /// not entity membership. `spin_up_r_m` (a child within this range of an occupant is DEMANDED live)
@@ -959,6 +982,19 @@ pub struct RealmRegion {
     /// The enclosing realm you fall to on LEAVING this region. `None` ONLY for the single ambient root
     /// (the Universe), whose volume contains all reachable space — so an entity is ALWAYS in ≥1 realm.
     pub parent: Option<RealmId>,
+    /// THE INTERIOR BAND (look horizon slice 4; Q1 APPROVED, owner-approved 2026-08-17 —
+    /// docs/design/look_horizon.md §3.4.4): the hysteresis band the PARENT judges the interest
+    /// bit on for THIS child. Spin-up at the child's own INTERIOR REACH — the largest distance
+    /// from the child's centre at which something INSIDE it is still visible (the max over its
+    /// own direct children of worst excursion + visibility reach), derived AT BOOT from the
+    /// forest the generator already holds before scoping, so nothing ever crosses a realm
+    /// boundary for it — tear-down widened by the same derived velocity lead every AoI band
+    /// carries. On THE world a star system's band is `444.104489631` / `469.104489631` m, both
+    /// bracketing its 150 m shell: interiors are awake before any crossing. Inert
+    /// (`spin_up == 0`) for a childless leaf — no interior, no interest. Populated by
+    /// `vd-physics worldgen::to_regions`; APPENDED last + `#[serde(default)]`, mirroring `aoi`.
+    #[serde(default = "AoiConfig::inert")]
+    pub interior_band: AoiConfig,
 }
 
 /// The containment depth-argmax order: depth DESC (the innermost realm wins), then `RealmId` ASC, then
@@ -1371,6 +1407,25 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    // ----- THE ONE visibility formula (look_horizon.md §3.3.2, slice 2) -----
+
+    #[test]
+    fn the_visibility_formula_is_cot_half_theta_and_the_reach_is_its_other_spelling() {
+        // cot(θ/2) with θ = π/2 is cot(π/4) — the measured f64 value of the identity (tan(π/4)
+        // rounds a hair above 1, so the factor lands a hair below — pinned as measured, never
+        // assumed to be exactly 1).
+        let factor = visibility_factor(std::f64::consts::FRAC_PI_2);
+        assert_eq!(factor, 1.0 / (std::f64::consts::FRAC_PI_4).tan());
+        assert!((factor - 1.0).abs() < 1.0e-15);
+        // The reach IS extent × the factor — the same formula's other spelling, bit-for-bit.
+        assert_eq!(
+            visibility_reach_m(150.0, std::f64::consts::FRAC_PI_2),
+            150.0 * factor
+        );
+        // Monotone the right way: a smaller minimum angle sees farther.
+        assert!(visibility_factor(0.026_180) > visibility_factor(0.14));
+    }
+
     // ----- Containment realm-membership (task #135, C-1) -----
 
     #[test]
@@ -1619,6 +1674,7 @@ mod tests {
                 .expect("valid test band"),
             aoi: AoiConfig::inert(),
             parent,
+            interior_band: AoiConfig::inert(),
         }
     }
 

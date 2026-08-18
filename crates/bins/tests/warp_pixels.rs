@@ -1183,6 +1183,90 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         assert_same_tick_composition(&cap.post, "departure"),
     );
 
+    // ---- G-PARENT-TRUE (look_horizon.md slice 0, the process half): in the departure scene —
+    // the observer standing in the GALAXY, the home system's planets arriving as RELAYED
+    // interior rows — every planet row's parent must be its STAR SYSTEM, never the galaxy.
+    // Before slice 0 the composer derived a relayed row's parent from the chain index, which
+    // named the GRANDparent (the galaxy) on every relayed row (measured RED at the unit tier).
+    {
+        // The boxes render realm ids in Debug form ("System(7)"), so the galaxy compares in
+        // that same rendering — never the display label ("System 7").
+        let galaxy_debug = format!("{:?}", roster.galaxy);
+        let planet_parents: Vec<(String, Option<String>)> = cap
+            .post
+            .realm_boxes
+            .iter()
+            .filter(|b| b.realm.starts_with("Planet("))
+            .map(|b| (b.realm.clone(), b.parent.clone()))
+            .collect();
+        assert!(
+            !planet_parents.is_empty(),
+            "G-PARENT-TRUE is vacuous: no planet rows in the departure scene \
+             (drawn: {:?})",
+            cap.post
+                .realm_boxes
+                .iter()
+                .map(|b| b.realm.clone())
+                .collect::<Vec<_>>(),
+        );
+        for (planet, parent) in &planet_parents {
+            let parent = parent
+                .as_deref()
+                .unwrap_or_else(|| panic!("G-PARENT-TRUE: {planet} delivered with NO parent"));
+            assert!(
+                parent.starts_with("System(") && parent != galaxy_debug.as_str(),
+                "G-PARENT-TRUE: {planet}'s delivered parent is {parent:?} — it must be its \
+                 star system, never the galaxy ({galaxy_debug:?})",
+            );
+        }
+        eprintln!(
+            "[warp] G-PARENT-TRUE: planet rows parent on their star system: {planet_parents:?}"
+        );
+    }
+
+    // ---- SLICE 6 (look_horizon.md §5.4/§6): ROWS PER FOLD, pinned on the departure fixture. ----
+    // The per-session clone is the census wall and it is LINEAR in rows per fold; the look
+    // horizon's §5.4 promise is that the design did NOT change rows per fold (relayed interior
+    // rows composed before it — only their tag upgraded from marker to picture). Pinned as the
+    // DERIVED set off THE world, not a count: the origin galaxy's one in-band child (the home
+    // system, drawn by its own look) + that child's whole interior (its 5 planets, drawn by
+    // their own relayed pictures) + one parent-authored marker per out-of-band galaxy child
+    // (the ring siblings). Containing realms draw nothing (a containment boundary is never
+    // drawn as an object). Growth here is the wall moving — this assert is where it gets loud.
+    {
+        let the_world = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
+        let mut expected: std::collections::BTreeSet<String> = the_world
+            .regions()
+            .iter()
+            .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
+            .map(|r| format!("{:?}", r.realm))
+            .collect();
+        expected.extend(
+            vd_physics::worldgen::moving_children_for_config(
+                DEV.universe_seed,
+                &world(),
+                roster.home,
+            )
+            .iter()
+            .map(|(p, _)| format!("{p:?}")),
+        );
+        let actual: std::collections::BTreeSet<String> = cap
+            .post
+            .realm_boxes
+            .iter()
+            .map(|b| b.realm.clone())
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "SLICE-6 ROWS PER FOLD: the departure fixture's composed set must be exactly the \
+             derived one (in-band child + its interior + sibling markers)",
+        );
+        eprintln!(
+            "[warp] SLICE-6 ROWS PER FOLD pinned: {} rows at the departure fixture: {actual:?}",
+            actual.len(),
+        );
+    }
+
     // ---- THE APPROACH: fly the ring, timing the wake handover on the universe clock. ----
     let standoff = arrival_standoff_m();
     let approach = fly_recording(
@@ -1410,14 +1494,37 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         "behind the flight the home system is a point of light again — its parent's marker resumed",
     );
     let painted = assert_painted(&cap, &f.cwd, &home_now, "behind/home");
-    // SHRUNK TO A DOT, in pixels: a system drawn by its parent's marker is drawn at the SHARED
-    // point-of-light floor, and nothing else. Were it still drawing its own 150 m shell at this
-    // range it would cover ~11 px, not the floor's 3 — so this reading is what tells the two apart.
+    // SHRUNK TO A POINT OF LIGHT, in pixels — re-derived for look_horizon.md slice 1 (Q2
+    // APPROVED): the departed system's marker now carries its parent's ONE stated radius, so it
+    // draws at its TRUE angular size — computed here INDEPENDENTLY from THE world's own system
+    // extent and the measured distance, through the same shared floor expression the renderer
+    // scales by. Before the slice this marker sat at the bare 3 px floor (an ~3.8× size pop
+    // against the body it had just been); the marker-vs-own-look distinction is the AUTHOR
+    // assert above (DevState body kind), no longer a size reading.
+    let dist_behind = (home_now.centre_m - cap.camera.eye).length();
+    let expected_world = vd_client_harness::camera::marker_world_radius(
+        extent,
+        dist_behind,
+        cap.camera.fov_y,
+        cap.camera.height as f64,
+    );
+    let expected_px = vd_client_harness::verdict::projected_point_aabb(
+        &cap.camera,
+        home_now.centre_m,
+        expected_world,
+    )
+    .map_or(0.0, |r| (r.max.x - r.min.x) * 0.5);
     assert!(
-        (home_now.radius_px - DOT_MIN_APPARENT_RADIUS_PX).abs() < READBACK_QUANTUM_PX,
-        "the system behind must be drawn as a POINT at the shared apparent floor \
-         ({DOT_MIN_APPARENT_RADIUS_PX:.1} px), not at {:.2} px",
+        (home_now.radius_px - expected_px).abs() < READBACK_QUANTUM_PX,
+        "the system behind must be drawn at its extent's true angular size \
+         ({expected_px:.2} px at {dist_behind:.1} m), not at {:.2} px",
         home_now.radius_px,
+    );
+    assert!(
+        expected_px > DOT_MIN_APPARENT_RADIUS_PX + READBACK_QUANTUM_PX,
+        "NON-VACUOUS: at this range the extent-sized point must sit ABOVE the bare floor \
+         (expected {expected_px:.2} px vs floor {DOT_MIN_APPARENT_RADIUS_PX:.1} px) — the \
+         slice-1 growth, not the old constant dot",
     );
     eprintln!(
         "[warp] BEHIND: the home system is a MARKER at footprint {:.2} px, {painted} pixels \
@@ -1466,6 +1573,356 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     assert_manifest_attests(&f.cwd, &["warp-departure", "warp-arrival", "warp-behind"]);
 
     // The client holds the GPU — tear it down before the cluster's own drop.
+    drop(client);
+}
+
+/// The design's stated close range for G-LOOK-GROWTH (look_horizon.md slice 1's pixel gate:
+/// "as the camera closes from 11 km to 200 m") — checked at runtime against the world's own
+/// geometry so the whole approach provably stays OUTSIDE the system shell (the planet remains a
+/// parent-authored point of light for every sample; waking it is slice 4's work, not this
+/// gate's).
+const GROWTH_END_RANGE_M: f64 = 200.0;
+
+/// G-LOOK-GROWTH — look_horizon.md slice 1's PIXEL GATE (Q2 APPROVED 2026-08-17): a planet's
+/// POINT OF LIGHT grows monotonically — and STRICTLY once above the shared apparent floor — as
+/// the camera closes from ~11.4 km (just inside the home system's wake band) down to 200 m of
+/// the inner planet, and it NEVER pops and NEVER blanks. The whole leg is flown outside the
+/// 150 m shell, so every sample is the parent's marker: the growth measured is the point of
+/// light's OWN — the extent-sized marker that replaced the constant three-pixel dot (before the
+/// slice this curve was FLAT at the floor from 11 km all the way to the wake handover, then
+/// popped ~3.8× into the body's true size).
+///
+/// This is also the STATION-LAPSE law in pixels for the planet's own lapse: the planets' shards
+/// died when the occupant left the system (their looks pruned on the roster-loss window), and
+/// the drawn set NEVER blanked — each degraded to its parent's correctly-sized marker.
+#[test]
+fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
+    let _tier = vd_bins::cluster_tier();
+    let f = fixture("g-growth");
+    let gw_admin = reserve_tcp_addr();
+    let a = demand_addrs(gw_admin);
+    let client_quic = reserve_udp_addr();
+    let devctl = reserve_tcp_addr().port();
+    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
+
+    let _reaper = ForkedReaper(f.launch_path.clone());
+    let _cluster = boot_demand_cluster(&f, &a, &DEV, &client_book);
+    let mut client = ChildGuard(spawn_capture_client(
+        &f,
+        a.gateway,
+        "g-growth",
+        0,
+        client_quic.port(),
+        devctl,
+    ));
+    await_listener(devctl, &mut client.0);
+
+    let roster = world_roster(&DEV);
+    let home_label = label_of(roster.home);
+    let galaxy_label = label_of(roster.galaxy);
+    let landed = await_active(devctl, gw_admin, LOGIN_DEADLINE);
+    assert_eq!(
+        landed.location.as_deref(),
+        Some(home_label.as_str()),
+        "the login lands at the home star: {landed:?}",
+    );
+    // The planet's TRUE circumscribed extent, off the SAME boot the shard runs (SL5 — one world,
+    // one derivation): what the parent's one-radius marker states, and what the growth curve is
+    // judged against.
+    let inner_extent_m = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt)
+        .regions()
+        .iter()
+        .find(|r| r.realm == roster.inner)
+        .expect("THE world rosters the inner planet")
+        .shape
+        .circumscribed_extent();
+    // The approach flies the LICENSED POLAR CORRIDOR (I-AXIS), which makes the close range
+    // PHASE-FREE: coming down the ±Z axis, the range to an in-plane orbiter is
+    // `sqrt(z² + r_orbit²)` — nearly independent of where the planet is on its orbit — so
+    // stopping at 200 m from the planet leaves the observer `sqrt(200² − apoapsis²)` up the
+    // axis, provably outside the shell at EVERY orbital phase (no far-side race exists on the
+    // axis). Asserted against the world's own numbers; an in-flight centre guard backs it.
+    let inner_apoapsis_m = roster.inner_elements.sma * (1.0 + roster.inner_elements.ecc);
+    let polar_close_axis_m =
+        (GROWTH_END_RANGE_M * GROWTH_END_RANGE_M - inner_apoapsis_m * inner_apoapsis_m).sqrt();
+    assert!(
+        polar_close_axis_m > system_extent_m() + 2.0 * metres_per_tick(),
+        "the polar close range must clear the {:.1} m shell at every phase \
+         (axis distance {polar_close_axis_m:.1} m at apoapsis {inner_apoapsis_m:.1} m)",
+        system_extent_m(),
+    );
+    let centre_guard_m = system_extent_m() + 2.0 * metres_per_tick();
+
+    // ---- Leg 0: out of the home system, up the licensed polar corridor. ----
+    cross_leg(
+        devctl,
+        "growth-exit home->galaxy (polar corridor)",
+        |_tick| DVec3::new(0.0, 0.0, polar_exit_z_m()),
+        &galaxy_label,
+        Duration::from_secs(120),
+    );
+
+    // ---- Leg 1: fly polar OUT to the growth start — just inside the wake band, so the home
+    // system stays demanded (its relays keep flowing) while its interior stays asleep. ----
+    let band_m = tear_down_r_m() - spin_up_r_m();
+    let growth_start_m = spin_up_r_m() - 2.0 * band_m;
+    let started = Instant::now();
+    {
+        let st = vd_bins::pixel::poll(devctl);
+        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
+        let home = vd_bins::pixel::subject(&st, &camera, roster.home);
+        // Straight down the licensed −Z polar corridor from the home centre (I-POLE/I-AXIS).
+        look_at(
+            devctl,
+            home.centre_m + DVec3::new(0.0, 0.0, -growth_start_m),
+        );
+    }
+    throttle(devctl, FULL_AHEAD);
+    loop {
+        std::thread::sleep(SAMPLE_POLL);
+        let st = vd_bins::pixel::poll(devctl);
+        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
+        let home = vd_bins::pixel::subject(&st, &camera, roster.home);
+        let (pos, _) = own_pose(&st).expect("a delivered pose on the out-leg");
+        if (home.centre_m - pos).length() >= growth_start_m {
+            throttle(devctl, ALL_STOP);
+            break;
+        }
+        assert!(
+            started.elapsed() < FLIGHT_DEADLINE,
+            "the out-leg never reached the growth start ({growth_start_m:.1} m)",
+        );
+    }
+
+    // ---- THE START: the planet is a POINT OF LIGHT at the shared floor — present, painted,
+    // parent-authored (its own look lapsed when the system emptied), never a blank. ----
+    let watch = [roster.inner, roster.home];
+    {
+        let st = vd_bins::pixel::poll(devctl);
+        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
+        let inner = vd_bins::pixel::subject(&st, &camera, roster.inner);
+        look_at(devctl, inner.centre_m);
+    }
+    let cap0 = vd_bins::pixel::straddle(
+        devctl,
+        "growth-start",
+        CAPTURE_W as usize,
+        CAPTURE_H as usize,
+        &watch,
+        vd_bins::pixel::pilot_camera,
+    );
+    let start = vd_bins::pixel::subject(&cap0.post, &cap0.camera, roster.inner);
+    let (pos0, _) = own_pose(&cap0.post).expect("a delivered pose at the growth start");
+    let dist0 = (start.centre_m - pos0).length();
+    assert_eq!(
+        assert_presence(&start, "growth-start/inner"),
+        Author::ParentMarker,
+        "at the start the planet's shard is down (the system holds nobody) — its lapsed look \
+         degraded to the parent's marker, never to nothing",
+    );
+    assert!(
+        (start.radius_px - DOT_MIN_APPARENT_RADIUS_PX).abs() < READBACK_QUANTUM_PX,
+        "at {dist0:.1} m the planet's point sits at the shared floor \
+         ({DOT_MIN_APPARENT_RADIUS_PX:.1} px), measured {:.2} px",
+        start.radius_px,
+    );
+    let painted0 = assert_painted(&cap0, &f.cwd, &start, "growth-start/inner");
+    eprintln!(
+        "[growth] START: the inner planet at {dist0:.1} m is a MARKER at {:.2} px \
+         ({painted0} pixels painted); extent {inner_extent_m:.4} m; floor-crossing range \
+         {:.1} m",
+        start.radius_px,
+        inner_extent_m * (cap0.camera.height as f64 * 0.5)
+            / ((FIT_FOV_Y * 0.5).tan() * DOT_MIN_APPARENT_RADIUS_PX),
+    );
+
+    // ---- THE APPROACH: close from ~11.4 km to 200 m, recording every sample. The stop is the
+    // planet range; the centre guard is the loud backstop the polar geometry makes unreachable
+    // (a trip into the shell would re-home the observer and void every marker premise). ----
+    let record = fly_recording(
+        devctl,
+        &watch,
+        &[None, None],
+        &[None, None],
+        0,
+        0,
+        Drive::Throttle(FULL_AHEAD),
+        FLIGHT_DEADLINE,
+        |s, _| {
+            assert!(
+                s.distance(1) > centre_guard_m,
+                "the approach GRAZED the shell (centre range {:.1} m ≤ guard {centre_guard_m:.1} \
+                 m) — the polar corridor failed to keep the close range outside containment",
+                s.distance(1),
+            );
+            s.distance(0) <= GROWTH_END_RANGE_M
+        },
+    );
+    // NEVER BLANKS: the planet was drawn at EVERY sample of the approach — no epoch bump
+    // happened (no crossing), so not even the bridging allowance applies.
+    let inner_absences: Vec<_> = record.absences.iter().filter(|(i, ..)| *i == 0).collect();
+    assert!(
+        inner_absences.is_empty(),
+        "the planet's point of light BLANKED mid-approach: {inner_absences:?}",
+    );
+    // MONOTONE, and STRICT — at the measurement's own resolution. The measured footprint carries
+    // a small off-axis projection term (the shared floor expression sizes the world radius by the
+    // EUCLIDEAN eye distance while the projection divides by view depth — ~0.7 % at a few degrees
+    // off-axis, measured 3.0218 px at the floor on the first red run) plus the planet's own
+    // orbital swing, both bounded well inside the readback quantum. So: the footprint may never
+    // fall more than one quantum below its running maximum (never pops, never shrinks), and
+    // between any two samples whose MODEL growth — the extent's pure angular size at the two
+    // measured distances — exceeds one quantum, the measured footprint must STRICTLY rise.
+    let mut curve: Vec<(u64, f64, f64)> = Vec::new(); // (tick, distance, radius_px)
+    for s in &record.samples {
+        if curve.last().is_none_or(|(t, ..)| *t != s.tick) {
+            curve.push((s.tick, s.distance(0), s.subjects[0].radius_px));
+        }
+    }
+    assert!(
+        curve.len() >= 32,
+        "the approach must be a real curve, not a handful of samples: {} points",
+        curve.len()
+    );
+    // The extent's pure on-axis angular radius in pixels at range `d`, FLOORED at the shared
+    // apparent minimum — the model of the DRAWN size the strictness resolution is derived from
+    // (the same camera constants the pilot capture projects with). The floor matters: across the
+    // floor-dominated far segment the drawn size IS the constant floor, so no strict growth can
+    // be owed there however far the camera closes (the second red run demanded strictness
+    // between 11 456.6 m and 2 636.1 m — both floored, model 0.30 px vs 1.30 px — and measured
+    // only the ±0.002 px off-axis wobble: 3.0016 -> 3.0004).
+    let model_px = |d: f64| {
+        (inner_extent_m / d * (CAPTURE_H as f64 * 0.5) / (FIT_FOV_Y * 0.5).tan())
+            .max(DOT_MIN_APPARENT_RADIUS_PX)
+    };
+    let mut running_max = f64::NEG_INFINITY;
+    let mut strict_pairs = 0u64;
+    let (mut anchor_d, mut anchor_f) = (curve[0].1, curve[0].2);
+    for &(tick, d, f) in &curve {
+        running_max = running_max.max(f);
+        assert!(
+            f >= running_max - READBACK_QUANTUM_PX,
+            "the point of light SHRANK on approach: {f:.4} px at tick {tick} ({d:.1} m) \
+             against a running maximum of {running_max:.4} px",
+        );
+        if model_px(d) - model_px(anchor_d) >= READBACK_QUANTUM_PX {
+            assert!(
+                f > anchor_f,
+                "the growth must be STRICT across a quantum of model growth: \
+                 {anchor_f:.4} px ({anchor_d:.1} m) -> {f:.4} px ({d:.1} m)",
+            );
+            strict_pairs += 1;
+            (anchor_d, anchor_f) = (d, f);
+        }
+    }
+    assert!(
+        strict_pairs > 0,
+        "the strict arm never ran — the curve never rose above the floor (still the old \
+         constant dot)",
+    );
+
+    // ---- THE END: 200 m out, the point of light is the planet's TRUE angular size. ----
+    // SLICE 4's WAKE, AWAITED WITHIN ITS OWN DERIVED BUDGET (never a sleep literal): the
+    // approach crossed the system's 444.104489631 m interior spin-up radius in its last second,
+    // so the interest byte has just landed and the vacated system owes its planets' own
+    // pictures within the wake budget at the cluster's measured boot. Poll the diagnosis
+    // surface for the marker⇒look flip, bounded by that budget in wall time — doubled, stated:
+    // the budget counts UNIVERSE ticks and this wait is wall-clock across five processes, so
+    // one factor of two absorbs pacing jitter and the poll's own sampling gap (the same
+    // resolution allowance the in-flight handover measurement adds explicitly).
+    let boot_ticks = orch_rlm(a.admin).boot_ticks_observed_max;
+    let wake_secs = wake_budget_ticks(boot_ticks) as f64 * DEV.tick_dt;
+    let wake_deadline = Instant::now() + Duration::from_secs_f64(2.0 * wake_secs);
+    let inner_name = format!("{:?}", roster.inner);
+    loop {
+        let st = vd_bins::pixel::poll(devctl);
+        if st
+            .realm_boxes
+            .iter()
+            .any(|b| (b.realm == inner_name) & (b.body_kind == "look"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < wake_deadline,
+            "standing inside the vacated system's interior band, the planets' own pictures \
+             never arrived within the derived wake budget ({wake_secs:.1} s at measured boot \
+             {boot_ticks} ticks, doubled for wall-clock jitter) — the slice-4 wake failed",
+        );
+        std::thread::sleep(SAMPLE_POLL);
+    }
+    let cap1 = vd_bins::pixel::straddle(
+        devctl,
+        "growth-end",
+        CAPTURE_W as usize,
+        CAPTURE_H as usize,
+        &watch,
+        vd_bins::pixel::pilot_camera,
+    );
+    let end = vd_bins::pixel::subject(&cap1.post, &cap1.camera, roster.inner);
+    let (pos1, _) = own_pose(&cap1.post).expect("a delivered pose at the growth end");
+    let dist1 = (end.centre_m - pos1).length();
+    // SLICE 4 LANDED (look_horizon.md §6 slice 4; Q1 APPROVED, owner 2026-08-17): this assert
+    // used to pin the OLD posture ("waking it from outside is slice 4's work" — ParentMarker),
+    // and it went RED the run the interest bit landed, exactly as its own message predicted.
+    // Standing here — outside the 150 m shell, INSIDE the system's 444.104489631 m interior
+    // band — the vacated system now holds the interest byte, its down-proxy wakes the planets,
+    // and the planet's OWN picture arrives through the sealed interior forward (slice 3). The
+    // planets are running when you look at them: presence is the planet's OWN statement.
+    assert_eq!(
+        assert_presence(&end, "growth-end/inner"),
+        Author::SelfLook,
+        "standing inside the vacated system's interior band, the planet draws its OWN picture \
+         (the slice-4 wake + the slice-3 sealed interior forward)",
+    );
+    // The delivered one-radius datum IS the world's own extent (the wire's extent against the
+    // out-of-band boot derivation — not the gate reading its own output back).
+    let delivered_extent = cap1
+        .post
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == format!("{:?}", roster.inner))
+        .expect("the inner planet's box is in the diagnosis surface")
+        .extent_m;
+    assert!(
+        (delivered_extent - inner_extent_m).abs() < 1.0e-9,
+        "the delivered marker radius ({delivered_extent}) must be THE world's own circumscribed \
+         extent ({inner_extent_m})",
+    );
+    let expected_end_world = vd_client_harness::camera::marker_world_radius(
+        inner_extent_m,
+        dist1,
+        cap1.camera.fov_y,
+        cap1.camera.height as f64,
+    );
+    let expected_end_px = vd_client_harness::verdict::projected_point_aabb(
+        &cap1.camera,
+        end.centre_m,
+        expected_end_world,
+    )
+    .map_or(0.0, |r| (r.max.x - r.min.x) * 0.5);
+    assert!(
+        (end.radius_px - expected_end_px).abs() < READBACK_QUANTUM_PX,
+        "at {dist1:.1} m the point must draw at its true angular size ({expected_end_px:.2} px), \
+         measured {:.2} px",
+        end.radius_px,
+    );
+    assert!(
+        end.radius_px > start.radius_px + READBACK_QUANTUM_PX,
+        "the point of light must have GROWN over the leg: {:.2} px -> {:.2} px",
+        start.radius_px,
+        end.radius_px,
+    );
+    let painted1 = assert_painted(&cap1, &f.cwd, &end, "growth-end/inner");
+    eprintln!(
+        "[growth] G-LOOK-GROWTH GREEN: {:.2} px at {dist0:.1} m -> {:.2} px at {dist1:.1} m over \
+         {} distinct-tick samples ({strict_pairs} strict pairs above the floor); {painted1} \
+         pixels painted at the close range; no blank sample, no shrink, no pop.",
+        start.radius_px,
+        end.radius_px,
+        curve.len(),
+    );
+    assert_manifest_attests(&f.cwd, &["growth-start", "growth-end"]);
     drop(client);
 }
 

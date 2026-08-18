@@ -689,16 +689,30 @@ fn g_two_ships_two_hulls_two_depths_mutual_visibility_and_one_watched_crossing()
     // arrives before its author's first roster level is dropped and counted, and healed by the next
     // one. They are printed rather than asserted zero, because asserting zero would be asserting
     // that a race never happens rather than that it is handled.
+    // The slice-3 interior-forward VIOLATION counter IS asserted zero: no lawful producer exists
+    // for an unrostered-grandchild batch, so any count is a hostile or buggy forwarder, not a race.
+    assert_eq!(
+        gw.window_relay_interior_unvouched, 0,
+        "(c) an interior forward named an unrostered grandchild on a lawful flight: {gw:?}",
+    );
     eprintln!(
         "[two-ships] (c) the hulls' looks rode the Q2 PARENT RELAY: {} statements ingested, \
          {} undecodable, {} unvouched (pre-roster races, healed), {} stale, {} interior rows \
-         composed, {} interiors refused at the fold",
+         composed; fold refusals split (look_horizon slice 0): descent={} stamp_missing={} \
+         unrostered={}, skew_max={} ticks, depth_max={}; interior forward (slice 3): \
+         unvouched={} filtered={}",
         gw.window_relays_ingested,
         gw.window_relay_undecodable,
         gw.window_relay_unvouched,
         gw.window_relay_stale,
         gw.window_relay_rows_composed,
-        gw.window_relay_unplaceable,
+        gw.window_relay_descent_refused,
+        gw.window_relay_stamp_missing,
+        gw.window_relay_unrostered,
+        gw.window_relay_stamp_skew_ticks,
+        gw.window_relay_depth_max,
+        gw.window_relay_interior_unvouched,
+        gw.window_relay_interior_filtered,
     );
 
     // ---- (d) ONE CROSSING WHILE BOTH WATCH. ----

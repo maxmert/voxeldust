@@ -328,20 +328,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // marker) turned into a boot refusal, the same fail-loud pattern as the nest fence above. THE
     // world satisfies it BY CONSTRUCTION (the shell solve `galaxy_shell_r_m`); a world whose numbers
     // stop satisfying it must never boot a shard that would owe unauthorable pixels.
-    vd_physics::worldgen::guard_grandchildren_invisible_outside(
+    // THE LOOK HORIZON's boot fence (look_horizon.md §3.3.2/§3.3.4, slice 2 — replaces the
+    // boolean two-level guard): MEASURE how many levels each body's picture must travel and
+    // refuse a world whose climb exceeds what the look carrier can carry. A refusal is a
+    // measurement; a wrong pixel is not (the owner's Q3 ruling: the arity stays 2 until the
+    // near-real-scale re-solve measures otherwise).
+    vd_physics::worldgen::guard_visibility_climb_bounded(
         universe_seed,
-        &vd_physics::worldgen::UniverseConfig::world(move_speed * time_multiplier, tick_dt),
+        &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
+        vd_wire::session_flow::LOOK_CARRIER_ARITY,
     )
     .map_err(|e| {
-        format!("THE world violates the two-level visibility bound: {e} — refusing to boot")
+        format!(
+            "THE world's measured visibility climb exceeds the look carrier: {e} — refusing to boot"
+        )
     })?;
     // THE WINDOW LANE's marker roster (Slice A, docs/design/window_lane.md §2.2/§2.8): per DIRECT
     // child this shard parents, the pre-encoded TAG_LUMA bag drawn from the child's own generation
     // stream — plumbed at BOOT the way the region forest and the motion roster are (the boot/config
-    // path; the sim crate receives opaque bags and keeps no vd-physics edge). Computed BEFORE the
-    // forest is moved into the resource below. Empty wherever no direct child carries a draw (walk
-    // stations/areas, planets — their photometric ladder is an owed later draw) ⇒ inert.
-    let child_luma = vd_bins::child_luma_bags(
+    // path; the sim crate receives two plain scalars and keeps no vd-physics edge). Computed
+    // BEFORE the forest is moved into the resource below. Empty wherever no direct child carries
+    // a draw — such a child still states an extent-only point of light (look_horizon.md slice 1,
+    // the presence floor), built by the sim through the one marker-bag codec.
+    let child_luma = vd_bins::child_luma_draws(
         universe_seed,
         move_speed * time_multiplier,
         tick_dt,

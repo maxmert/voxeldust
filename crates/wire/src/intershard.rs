@@ -460,6 +460,39 @@ pub enum InterShardFlow {
     /// `FireAndForget` (carries no authority; the fence gates zombies) + `ReDriven` (the child
     /// re-drives from live state — mirrors `ShardRoster`'s reasoning). APPENDED.
     WindowRelay(WindowRelay),
+    /// PARENT → ONE DIRECT CHILD shard — THE INTEREST BIT (mesh minor 21; Q1 APPROVED,
+    /// owner-approved 2026-08-17 Q1 — docs/design/look_horizon.md §2 ASK B). One byte with two
+    /// lawful values: `1` = "assume somebody may look inside you", `0` = "do not". No account,
+    /// no identity, no position, no direction, no distance, no count — only the routing
+    /// coordinate, the sender's fence and the tick, the same envelope every other lane carries.
+    ///
+    /// **The ruling note this arm must carry** (mandated by the design): the landed Q2 rationale
+    /// said "am I observed from outside stays unrepresentable in every realm". THAT CLAUSE ENDS
+    /// HERE, by the owner's EXPLICIT amendment (2026-08-17, Q1) — a ruling change stated as one,
+    /// not smuggled. One bit, nothing more, decaying to `0` — "nobody is watching" — when the
+    /// lane goes silent (the safe direction).
+    ///
+    /// Why it exists (§3.4.1, the forced-disclosure result): a realm draws itself only while
+    /// running; a realm is demanded only by its own parent; a realm is structurally blind to its
+    /// surroundings (SL1/SL2). A vacated star system therefore cannot wake its planets from
+    /// anything it legitimately holds — so a galaxy-standing observer's planets stayed dots.
+    /// The receiver holds the byte under the derived retain TTL and, while it is live, inserts
+    /// ONE synthetic observer at its own centre with reach equal to its own extent into the
+    /// observer list it already builds (§3.4.3, the down-proxy — SL7 read in the other
+    /// direction) and runs its existing fold unchanged. Only OCCUPANCY-derived observers produce
+    /// interest for the next level down (the structural cascade cap — no depth number, no hop
+    /// count crosses any boundary).
+    ///
+    /// Producer: the realm holding the observer, on the AoI beat, for each direct child inside
+    /// the observer's interior band (the child's own interior reach, boot-derived), direct to
+    /// the child's head node on the route the parent already resolves (`ChildRealmNodes`) —
+    /// never further, never sideways, never through the orchestrator; an explicit `0` ships once
+    /// on the band's falling edge. Consumer: fail-closed admission mirroring the SL7 bit's
+    /// (mis-route, unattested sender, stale fence — refused + counted). Classification:
+    /// `FireAndForget` (latest-wins; carries no authority — the fence gates zombies) +
+    /// `ReDriven` (re-asserted from live state every beat), on the reliable Saga carrier.
+    /// APPENDED (discriminant 35).
+    RealmInterest(RealmInterest),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -697,6 +730,9 @@ impl InterShardFlow {
             // The Q2 relay carries authority for NOTHING (sealed self-statements; the child fence
             // gates zombies at the final receiver) and is latest-wins per child ⇒ FireAndForget.
             InterShardFlow::WindowRelay(_) => EffectClass::FireAndForget,
+            // The interest bit (minor 21, Q1) carries authority for NOTHING — one latest-wins
+            // byte, the parent fence gating zombie senders at the receiver ⇒ FireAndForget.
+            InterShardFlow::RealmInterest(_) => EffectClass::FireAndForget,
         }
     }
 
@@ -817,6 +853,10 @@ impl InterShardFlow {
             // CHILD re-drives it from live state (look-change / parent-resolve / cadence re-assert),
             // so it needs no durable outbox ⇒ ReDriven, never producer-less.
             InterShardFlow::WindowRelay(_) => FlowDurabilityClass::ReDriven,
+            // The interest bit is RE-ASSERTED from live state on every AoI beat while the band
+            // holds (and expires to 0 by TTL on silence) — the producer re-drives it, so the RAM
+            // retry suffices; never producer-less.
+            InterShardFlow::RealmInterest(_) => FlowDurabilityClass::ReDriven,
         }
     }
 }
@@ -971,7 +1011,12 @@ pub struct ChildSceneSet {
 }
 
 /// THE Q2 RELAY payload — see [`InterShardFlow::WindowRelay`]. A live child's verbatim
-/// self-authored window statements, sealed for the one-hop-up-then-forward path.
+/// self-authored window statements, sealed for the one-hop-up-then-forward path. Since mesh
+/// minor 20 (THE SEALED INTERIOR FORWARD — owner-approved 2026-08-17,
+/// docs/design/look_horizon.md RULINGS + §2 ASK A) it additionally carries, APPENDED, the
+/// sender's own held child batches ([`InteriorRelay`]) so a grandchild's OWN picture reaches its
+/// grandparent — two hops, sealed the whole way, and structurally NO further (the carried type
+/// has no deeper field).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowRelay {
     /// The SENDING child's full lineage coord (the routing key; the parent validates the child's
@@ -981,11 +1026,71 @@ pub struct WindowRelay {
     /// The child's OWN realm fence at authoring — carried OUTSIDE the seal so the final receiver's
     /// zombie guard needs no decode, forwarded INTACT (the parent never re-stamps it).
     pub realm_fence: Fence,
-    /// The SEALED statements (postcard `Vec<crate::session_flow::RelayedStatement>`): built only
-    /// by the authoring child (`crate::session_flow::seal_relay_statements`), opened only by the
-    /// final receiver (`crate::session_flow::open_relay_statements`). The parent holds and
-    /// forwards these bytes UNOPENED — forward-or-drop is its whole lawful vocabulary.
-    pub statements: Vec<u8>,
+    /// The sender's OWN sealed statements (postcard `Vec<crate::session_flow::RelayedStatement>`):
+    /// built only by the authoring child (`crate::session_flow::seal_relay_statements`), opened
+    /// only by the final receiver (`crate::session_flow::open_relay_statements`). The parent holds
+    /// and forwards these bytes UNOPENED — forward-or-drop is its whole lawful vocabulary.
+    /// RENAMED IN PLACE from `statements` (same type, same position — postcard-inert; look
+    /// horizon §2 ASK A): "own" because the interior half below is somebody else's.
+    pub own: Vec<u8>,
+    /// THE SEALED INTERIOR FORWARD (mesh minor 20, APPENDED; owner-approved 2026-08-17 —
+    /// docs/design/look_horizon.md RULINGS + §2 ASK A): the sender's currently HELD direct-child
+    /// batches, each the grandchild's OWN sealed `own` bytes VERBATIM, membership-gated by the
+    /// sender's own in-band verdict (§3.4.5 — the forward gate IS the membership gate). The
+    /// sender reads only its held entries' OWN halves to build this — a received `interior` is
+    /// never re-forwarded, and could not be: [`InteriorRelay`] has no `interior` field, so a
+    /// third level is UNREPRESENTABLE (the depth bound is the type; deepening it is an edit to
+    /// this reviewed file, which is HR1's whole point).
+    pub interior: Vec<InteriorRelay>,
+}
+
+/// THE INTEREST BIT's payload — see [`InterShardFlow::RealmInterest`] (mesh minor 21; Q1
+/// APPROVED, owner-approved 2026-08-17 Q1 — docs/design/look_horizon.md §2 ASK B, the struct
+/// verbatim). By construction of the type there is no field a position, an identity, a
+/// direction, a distance or a count could ride in — the `intershard_closed` absence pin covers
+/// this arm the day it lands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealmInterest {
+    /// The receiving DIRECT child's full lineage coord — routing key + misroute guard (the
+    /// receiver validates it lowers to its OWN realm and drops a mis-route, the mirror of every
+    /// up-lane's guard).
+    pub child: RealmCoord,
+    /// The SENDER's authority fence over this child (the parent's realm fence) — the zombie
+    /// guard: a deposed parent incarnation's byte is refused by fence ordering.
+    pub parent_fence: Fence,
+    /// The universe tick the sender asserted at (freshness ordering beside the fence).
+    pub at: UniverseTick,
+    /// `1` = "assume somebody may look inside you"; `0` = "do not". **Nothing else is lawful** —
+    /// any other value is refused + counted at the receiver.
+    pub look_inside: u8,
+}
+
+/// ONE forwarded grandchild batch riding [`WindowRelay::interior`] /
+/// `ShardToGateway::WindowRelayed` (mesh minor 20; owner-approved 2026-08-17 —
+/// docs/design/look_horizon.md RULINGS + §2 ASK A): the FORWARDER's direct child's own sealed
+/// statements, byte-for-byte as that child authored them, with that child's OWN fence riding
+/// OUTSIDE the seal (the zombie guard — a deposed incarnation's picture is refused by fence
+/// ordering at the final receiver, the graft that fixes the fence hole two of the three input
+/// designs had). No realm ever opens `own`; the only opener is the gateway, which is not a
+/// realm.
+///
+/// **The depth bound is this type.** There is deliberately NO `interior` field here — nowhere to
+/// put a third level's bytes. A buggy forwarder, a hostile shard, or a future feature cannot
+/// extend the climb, because the field to put the bytes in does not exist (look_horizon.md
+/// §3.2 "what stops it — the type"; the carrier arity constant is
+/// `crate::session_flow::LOOK_CARRIER_ARITY`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteriorRelay {
+    /// The FORWARDER's direct child — the author of `own` (the vouch key: the final receiver
+    /// admits this only if the forwarder's own attested level rosters it).
+    pub child: RealmId,
+    /// That author's OWN fence, OUTSIDE the seal (the zombie guard, forwarded intact).
+    pub child_fence: Fence,
+    /// That author's sealed batch, VERBATIM (postcard
+    /// `Vec<crate::session_flow::RelayedStatement>`). Never opened by a realm — G-VERBATIM pins
+    /// byte-identity across both hops, G-STRUCTURAL-SEAL pins that `vd-sim` calls no open
+    /// function.
+    pub own: Vec<u8>,
 }
 
 /// ★TOMBSTONED payload (window lane Slice C2, minor 19) — see [`InterShardFlow::RealmCascade`] for

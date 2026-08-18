@@ -323,8 +323,21 @@ pub enum ShardToGateway {
         child: RealmId,
         /// The CHILD's own realm fence at authoring — forwarded INTACT (never the parent's).
         child_fence: Fence,
-        /// The sealed statements, byte-for-byte as received (postcard `Vec<RelayedStatement>`).
+        /// The child's OWN sealed statements, byte-for-byte as received (postcard
+        /// `Vec<RelayedStatement>`).
         statements: Vec<u8>,
+        /// THE SEALED INTERIOR FORWARD (mesh minor 20, APPENDED; owner-approved 2026-08-17 —
+        /// docs/design/look_horizon.md RULINGS + §2 ASK A): the child's own held GRANDCHILD
+        /// batches, forwarded sealed and unopened exactly as the child shipped them
+        /// ([`crate::intershard::InteriorRelay`] — each carries the grandchild's own fence
+        /// outside its seal). The gateway is the first and only opener: it vouches each named
+        /// grandchild against the child's own attested roster, orders its fence, and admits
+        /// ONLY the author's own picture (a `SelfLook` about itself) — the batch's `Level` and
+        /// markers describe depth-3 subjects no row can exist for, dropped + counted as the
+        /// lawful filter (`window_relay_interior_filtered`, expected NON-zero), while an
+        /// unrostered grandchild is a violation (`window_relay_interior_unvouched`, asserted 0
+        /// on a lawful flight).
+        interior: Vec<crate::intershard::InteriorRelay>,
     },
 }
 
@@ -501,6 +514,19 @@ pub enum RelayedStatement {
         rows: Vec<RealmSnap>,
     },
 }
+
+/// THE LOOK CARRIER's ARITY (look_horizon.md §3.2/§3.3.2, owner Q3 ruling 2026-08-17): how many
+/// LEVELS below a window's author the landed carrier can serve a subject's presence — the
+/// author's own statements name its direct children (1), and ONE relayed child batch (the Q2
+/// relay: held sealed, forwarded once) names that child's own children (2). There is no deeper
+/// field on the wire — a third level is UNREPRESENTABLE, which is what makes this a bound and
+/// not a promise; deepening it is an edit to this reviewed file. The boot fence
+/// (`vd_physics::worldgen::guard_visibility_climb_bounded`) refuses any world whose MEASURED
+/// visibility climb exceeds this number, and the build-admission fence refuses any candidate
+/// placement that would need more. Per the Q3 ruling: the arity STAYS 2; the near-real-scale
+/// world re-solve is the scheduled cure (its first gate run must include
+/// `measure_visibility_climb`); 3 only if that measurement demands it.
+pub const LOOK_CARRIER_ARITY: usize = 2;
 
 /// Seal a batch of self-authored statements for the Q2 relay (author-side ONLY — the one lawful
 /// builder). The bytes ride [`crate::intershard::InterShardFlow::WindowRelay`] up and
@@ -1056,7 +1082,9 @@ mod tests {
                 added: vec![RealmId::Planet(7)],
                 removed: vec![RealmId::Planet(8)],
             },
-            // The Q2 relay forward leg (mesh minor 17) — sealed statements ride as-received.
+            // The Q2 relay forward leg (mesh minor 17) — sealed statements ride as-received;
+            // mesh minor 20 appends the sealed interior forward (a grandchild's own batch,
+            // fenced outside its seal, forwarded verbatim).
             ShardToGateway::WindowRelayed {
                 realm_fence: Fence(3),
                 window: WindowId(2),
@@ -1067,6 +1095,15 @@ mod tests {
                     stmt: BodyStmt::SelfLook { bag: vec![8, 8] },
                     authored_at: UniverseTick(101),
                 }]),
+                interior: vec![crate::intershard::InteriorRelay {
+                    child: RealmId::Area(3),
+                    child_fence: Fence(11),
+                    own: seal_relay_statements(&[RelayedStatement::Body {
+                        subject: RealmId::Area(3),
+                        stmt: BodyStmt::SelfLook { bag: vec![7, 7] },
+                        authored_at: UniverseTick(102),
+                    }]),
+                }],
             },
         ]
     }

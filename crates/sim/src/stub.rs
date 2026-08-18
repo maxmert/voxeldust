@@ -461,7 +461,13 @@ pub(crate) struct OpenWindow {
     /// Send-on-change: the (child fence, sealed bytes) last FORWARDED per live child on the Q2
     /// relay leg (`ShardToGateway::WindowRelayed`). Resets with the window — a re-opened window
     /// is re-served everything currently held, exactly what a fresh subscriber needs.
-    sent_relays: BTreeMap<RealmId, (Fence, Vec<u8>)>,
+    /// The per-(window, child) relay send-on-change baseline as an 8-BYTE DIGEST over the held
+    /// entry's (fence, own sealed statements) — look_horizon.md §5.4: the digest re-keys the
+    /// baseline without storing or memcmp'ing the whole blob per tick, and when the slice-3
+    /// interior forward lands, the interior field JOINS the digest input, so a grandchild's
+    /// change with the child's own statements unchanged can never be invisible to
+    /// send-on-change (the silent staleness bug §5.4 names).
+    sent_relays: BTreeMap<RealmId, u64>,
 }
 
 impl OpenWindow {
@@ -486,15 +492,18 @@ impl OpenWindow {
 }
 
 /// THE MARKER ROSTER (Slice A — docs/design/window_lane.md §2.2/§2.8, the owner-ruled R4 datum):
-/// per DIRECT child, the pre-encoded `TAG_LUMA` bag drawn from the child's own generation stream
-/// (`vd-physics` `system_photometrics_for_config` → `marker_luma_bag`), planted by the BOOT the
-/// way the region forest and the motion roster are — the boot/config path, never a wire-struct
-/// change, and never a `vd-physics` edge from this crate (the bags arrive opaque). A child with
-/// no entry (a hand-placed walk body; a Ship until P8) states no marker: absence of data, never
-/// a default. Since Slice C1 planets carry the REFLECTED draw (§1.1 item 3b — per direct child).
+/// per DIRECT child, the photometric datum `(class_code, luma_lsun)` drawn from the child's own
+/// generation stream (`vd-physics` `system_photometrics_for_config` → `marker_datum`), planted by
+/// the BOOT the way the region forest and the motion roster are — the boot/config path, never a
+/// wire-struct change, and never a `vd-physics` edge from this crate (the datum arrives as two
+/// plain scalars). A child with no entry (a hand-placed walk body; a Ship until P8) simply GLOWS
+/// NOT — since look_horizon.md slice 1 (Q2 APPROVED) it still states a point-of-light marker
+/// carrying its circumscribed extent alone (the presence floor: body → marker, never body →
+/// nothing), built by [`current_bodies`] through the ONE `vd_core::look::marker_bag` codec.
+/// Since Slice C1 planets carry the REFLECTED draw (§1.1 item 3b — per direct child).
 /// DEFAULT EMPTY ⇒ byte-identical rigs.
 #[derive(Resource, Debug, Default)]
-pub struct ChildLuma(pub BTreeMap<RealmId, Vec<u8>>);
+pub struct ChildLuma(pub BTreeMap<RealmId, (u8, f64)>);
 
 /// THE Q2 RELAY MEMO (window lane Slice C1, mesh minor 17; owner-approved 2026-08-16 —
 /// docs/design/owner_decisions_2026-08-15.md addendum + docs/design/window_lane.md §5 RULINGS):
@@ -517,25 +526,84 @@ pub struct RelayShip(pub(crate) Option<(NodeId, Vec<u8>)>);
 pub struct RelayHeld(pub(crate) BTreeMap<RealmId, RelayHeldEntry>);
 
 impl RelayHeld {
-    /// The sealed statement blob currently held for `child`, if any — a READ-ONLY view for
+    /// The sealed OWN statement blob currently held for `child`, if any — a READ-ONLY view for
     /// harnesses and gates. The blob stays SEALED: this hands back the bytes, and only
     /// `vd_wire::session_flow::open_relay_statements` can look inside them. Production code in
-    /// this crate deliberately never calls that, which is what makes forward-or-drop structural
-    /// rather than a promise (the Q2 ruling, `docs/design/window_lane.md` §5 RULINGS).
+    /// this crate deliberately never calls that — pinned by the G-STRUCTURAL-SEAL source scan,
+    /// which is what makes forward-or-drop structural rather than a promise (the Q2 ruling,
+    /// `docs/design/window_lane.md` §5 RULINGS; two hops since look_horizon.md §2 ASK A).
     #[must_use]
     pub fn statements_for(&self, child: RealmId) -> Option<Vec<u8>> {
-        self.0.get(&child).map(|e| e.statements.clone())
+        self.0.get(&child).map(|e| e.own.clone())
+    }
+
+    /// The held INTERIOR half for `child` (look horizon slice 3 — the grandchild batches the
+    /// child forwarded sealed), a READ-ONLY view for harnesses and gates. Same seal discipline
+    /// as [`RelayHeld::statements_for`]: bytes out, never values.
+    #[must_use]
+    pub fn interior_for(&self, child: RealmId) -> Option<Vec<vd_wire::intershard::InteriorRelay>> {
+        self.0.get(&child).map(|e| e.interior.clone())
     }
 }
 
-/// One held relay: freshness (the TTL clock), the child's own fence (zombie ordering — a deposed
-/// incarnation's batch is refused), and the sealed bytes exactly as received.
+/// One held relay, SPLIT (look_horizon.md §2 ASK A / §6 slice 3): the child's OWN half and the
+/// interior half (its forwarded grandchild batches), beside freshness (the TTL clock) and the
+/// child's own fence (zombie ordering — a deposed incarnation's batch is refused). THE FORWARD
+/// READS ONLY THE OWN HALF for this realm's own up-relay statement (`build_relay_interior`);
+/// the interior half is forwarded SEALED to the gateway and never rides further up — there is
+/// no field it could ride in (`InteriorRelay` carries no `interior`). `digest` is the §5.4
+/// send-on-change baseline over (fence, own, interior), computed ONCE at receive so a
+/// grandchild's picture change is never invisible to send-on-change even when the child's own
+/// statements are unchanged.
 #[derive(Debug, PartialEq)]
 pub(crate) struct RelayHeldEntry {
     pub(crate) seen: TickId,
     pub(crate) fence: Fence,
-    pub(crate) statements: Vec<u8>,
+    pub(crate) own: Vec<u8>,
+    pub(crate) interior: Vec<vd_wire::intershard::InteriorRelay>,
+    pub(crate) digest: u64,
 }
+
+/// THE REALM-SIDE SHARED IN-BAND VERDICT (look_horizon.md §3.4.5 — the forward gate IS the
+/// membership gate): the union, over every observer this realm's AoI fold ran, of the direct
+/// children inside that observer's band this tick. Written by `aoi_decide` (the ONE existing
+/// fold — never a second AoI derivation, HR3; cleared at the zero-observer return), read by the
+/// up-relay ship: a held child's sealed batch joins the `interior` forward ONLY while that child
+/// is in this verdict, so the arrival of a grandchild's picture at the grandparent's gateway is
+/// already conditioned on the middle realm's own membership decision — one fewer boundary
+/// crossing than shipping any verdict upward. One tick of staleness (the emitter runs before
+/// the fold on the schedule) is absorbed by the band's own hysteresis and grace.
+#[derive(Resource, Debug, Default)]
+pub struct InBandVerdict(pub(crate) BTreeSet<RealmId>);
+
+/// THE INTEREST BYTE's holder (look horizon slice 4; Q1 APPROVED, owner-approved 2026-08-17 —
+/// docs/design/look_horizon.md §2 ASK B): the latest lawfully admitted parent assertion about
+/// whether something outside may be looking in. One byte, two values, nothing else — held under
+/// the derived retain TTL and DECAYING to "nobody is watching" on silence (the safe direction:
+/// the entry is pruned whole, and with it the down-proxy observer it powers). The `0` value is
+/// stored rather than clearing, so the (fence, at) ordering survives an explicit switch-off and
+/// a deposed incarnation's later `1` still refuses. DEFAULT `None` ⇒ byte-identical everywhere
+/// the lane never fires.
+#[derive(Resource, Debug, Default)]
+pub struct InterestHeld(pub(crate) Option<InterestEntry>);
+
+/// One held interest assertion: the sender's fence + tick (zombie/freshness ordering), the
+/// local-tick TTL base, and the byte itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct InterestEntry {
+    pub(crate) fence: Fence,
+    pub(crate) at: UniverseTick,
+    pub(crate) seen: TickId,
+    pub(crate) look_inside: u8,
+}
+
+/// THE INTEREST EMISSION's per-child hysteresis latch (look horizon slice 4, the emitter half):
+/// which direct children this realm currently asserts interest INTO — present = inside the
+/// child's interior band (spin-up at the child's interior reach, release at reach + the derived
+/// lead). The falling edge ships one explicit `0`; silence is the receiver's backstop. Keyed by
+/// `RealmPath` like the AoI membership ledger; pruned to the live child roster each pass.
+#[derive(Resource, Debug, Default)]
+pub struct InterestEmitLatch(pub(crate) BTreeSet<RealmPath>);
 
 /// Step 5 lane cure (finding 41) — HAS THE PARENT BEEN TOLD this realm is occupied, since it last went
 /// empty? The SL7 bit beats on the AoI cadence (its contract's stated rate), and this latch is what
@@ -1009,6 +1077,41 @@ pub enum ObserverId {
     /// verdict (the parent hosts no client for it — gated on `render_routes`); its in-range set is
     /// the verdict a [`WindowScope::Child`] window is served instead.
     Child(RealmId),
+    /// Look horizon slice 4 (§3.4.3, THE DOWN-PROXY — SL7 read in the other direction): the ONE
+    /// synthetic observer a realm holding a live interest byte inserts, at its own centre, with
+    /// reach equal to its own extent — an interested realm is its outside observers' proxy, at
+    /// its own scale, with the error bounded by its own extent (SL7's own bound, same reason).
+    /// Runs the existing fold unchanged; INTEREST-derived at construction, so it never produces
+    /// interest for the next level down (the structural cascade cap) and never counts as
+    /// occupancy (no Empty suppression, no `ChildLive` bit — a byte from outside must never
+    /// manufacture an occupancy fact).
+    Interest,
+}
+
+/// WHERE an AoI observer entry CAME FROM (look horizon §3.4.3 — the flag set at construction
+/// that IS the structural cascade cap): occupancy-derived (a real dot, a held transient, an
+/// occupied-child proxy) or interest-derived (the one synthetic down-proxy). ONLY
+/// occupancy-derived observers produce interest for the next level down, count at the Empty
+/// gate, or beat the `ChildLive` bit — so an observer's realm wakes its children's interiors
+/// and STOPS: live realms below the observer, exactly two, with no depth number and no hop
+/// count crossing any boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObserverOrigin {
+    Occupancy,
+    Interest,
+}
+
+/// One entry of the observer list [`aoi_decide`] folds — the tuple grew a name when the origin
+/// flag landed (look horizon slice 4). `reach` is the observer's own physical extent, a GENERIC
+/// parameter (no observer-type branch): a point occupant reaches 0 m; an occupied child (and
+/// the interest down-proxy) reaches to its own surface, so warming errs early, never late.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AoiObserver {
+    pub(crate) id: ObserverId,
+    pub(crate) pos: LatticePos,
+    pub(crate) vel: DVec3,
+    pub(crate) reach: f64,
+    pub(crate) origin: ObserverOrigin,
 }
 
 /// Per-`(observer, child)` AoI hysteresis + grace (RLM Step 2 → VU S0 per-observer). Keyed by the
@@ -2035,6 +2138,27 @@ pub struct StubStats {
     /// Q2 relay — batches DROPPED as stale by the child's own fence (a deposed incarnation still
     /// shipping). Never normal past a re-home window.
     pub window_relay_stale: u64,
+    /// Look horizon slice 4 — `RealmInterest` bytes SHIPPED to direct children (both values; the
+    /// rising edge + every AoI beat while a child's interior band holds, one explicit `0` on the
+    /// falling edge).
+    pub realm_interest_sent: u64,
+    /// Look horizon slice 4 — interest bytes lawfully ADMITTED (either value; the down-proxy
+    /// reads the held entry, never this counter).
+    pub realm_interest_received: u64,
+    /// Look horizon slice 4 — an interest byte whose routing coord does not lower to THIS realm:
+    /// dropped + counted (fail-closed, the mirror of every up-lane's mis-route guard). 0 in a
+    /// healthy run.
+    pub realm_interest_misrouted: u64,
+    /// Look horizon slice 4 — an interest byte from a sender that is not the resolved PARENT
+    /// head: dropped fail-closed + counted, and a lazy parent head re-read armed (the re-home
+    /// backstop, mirroring `retain_child_live`). 0 in a healthy run.
+    pub realm_interest_unattested: u64,
+    /// Look horizon slice 4 — a deposed parent incarnation's byte (fence/tick below the held
+    /// entry): refused + counted. 0 outside a re-home window.
+    pub realm_interest_stale: u64,
+    /// Look horizon slice 4 — a byte that is neither `0` nor `1` ("nothing else is lawful" —
+    /// §2 ASK B): refused + counted. 0 always; nonzero is a hostile or corrupted sender.
+    pub realm_interest_unlawful: u64,
 }
 
 /// The outcome of journaling one transferred-entity-state step (1d.0).
@@ -2221,6 +2345,14 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(OpenWindows::default());
     world.insert_resource(RelayShip::default());
     world.insert_resource(RelayHeld::default());
+    // Look horizon slice 3 — the §3.4.5 forward gate's store. Defaults EMPTY (no verdict, no
+    // interior forward) until the AoI fold writes one; byte-identical wherever AoI is inert.
+    world.insert_resource(InBandVerdict::default());
+    // Look horizon slice 4 — the interest byte's two stores: the CHILD-side holder (the
+    // down-proxy's power source) and the PARENT-side per-child emission latch. Both default
+    // empty ⇒ byte-identical until the lane fires.
+    world.insert_resource(InterestHeld::default());
+    world.insert_resource(InterestEmitLatch::default());
     world.insert_resource(ChildLuma::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
@@ -2520,6 +2652,8 @@ type VuAoiInbound<'w> = (
     // bit table and the sealed relay holder.
     ResMut<'w, ChildLiveness>,
     ResMut<'w, RelayHeld>,
+    // Look horizon slice 4 — the CHILD-side interest holder the `RealmInterest` receive writes.
+    ResMut<'w, InterestHeld>,
 );
 
 /// Drain and dispatch everything delivered this tick.
@@ -2567,8 +2701,15 @@ fn process_inbound(
     // Bundled tuple `SystemParam` (bevy's 16-param, LAST slot) — see [`VuAoiInbound`].
     vu_aoi: VuAoiInbound,
 ) {
-    let (regions, placements, mut parent_node, mut child_nodes, mut child_liveness, mut relay_held) =
-        vu_aoi;
+    let (
+        regions,
+        placements,
+        mut parent_node,
+        mut child_nodes,
+        mut child_liveness,
+        mut relay_held,
+        mut interest_held,
+    ) = vu_aoi;
     let (mut in_flight, mut progress, mut holds) = crossing;
     let (mut pending, mut pending_slots, mut open_windows) = pending;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
@@ -2629,6 +2770,7 @@ fn process_inbound(
                 &mut parent_node,
                 &mut child_nodes,
                 &mut relay_held,
+                &mut interest_held,
                 &mut holds,
             ),
             // 1d.5b.3b: the SOURCE-side ghost feed consumer — Spawn/Delta/Despawn from the dest owner
@@ -6555,6 +6697,8 @@ fn on_directory_reply(
     child_nodes: &mut ChildRealmNodes,
     // Slice C1 — the Q2 relay holder the `WindowRelay` receive writes (held sealed, unopened).
     relay_held: &mut RelayHeld,
+    // Look horizon slice 4 — the interest byte's holder the `RealmInterest` receive writes.
+    interest_held: &mut InterestHeld,
     holds: &mut HandoffHolds,
 ) {
     // Decode the Saga-class envelope once and dispatch by arm. The orchestrator wraps a directory
@@ -6578,6 +6722,23 @@ fn on_directory_reply(
         // mis-route + attestation admission.
         Ok(InterShardFlow::WindowRelay(wr)) => {
             on_window_relay(wr, from, config, clock, child_nodes, relay_held, stats);
+            return;
+        }
+        // THE INTEREST BYTE (look horizon slice 4, mesh minor 21; Q1 APPROVED, owner-approved
+        // 2026-08-17 — look_horizon.md §2 ASK B): the parent's one-byte "somebody may look
+        // inside you", on the same reliable peer carrier the relay rides, admitted fail-closed
+        // against the resolved PARENT head.
+        Ok(InterShardFlow::RealmInterest(ri)) => {
+            on_realm_interest(
+                ri,
+                from,
+                config,
+                clock,
+                parent_node,
+                interest_held,
+                stats,
+                outbox,
+            );
             return;
         }
         // SOURCE: ship the held subject's pose (1d.1).
@@ -7296,7 +7457,7 @@ fn emit_window_bodies(
     clock: &ClockSample,
     realm_fence: Fence,
     regions: &RealmRegions,
-    child_luma: &BTreeMap<RealmId, Vec<u8>>,
+    child_luma: &BTreeMap<RealmId, (u8, f64)>,
     windows: &mut OpenWindows,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
@@ -7332,14 +7493,19 @@ fn emit_window_bodies(
 }
 
 /// The realm's CURRENT self-authored body set — its OWN look (from its boot extent via
-/// [`RealmRegions::own_shape`], never any parent's row about it — SL3) plus one photometric
-/// marker per DIRECT child the boot roster carries a luma bag for (the owner-ruled R4 datum;
-/// absence of a bag is absence of data, never a default). Shared by [`emit_window_bodies`] and
-/// the Q2 relay ship, so the direct lane and the relayed lane can never state different bodies.
+/// [`RealmRegions::own_shape`], never any parent's row about it — SL3) plus one point-of-light
+/// marker per DIRECT child, GLOWING OR NOT (look_horizon.md slice 1, Q2 APPROVED — the presence
+/// floor): a glowing child's bag carries its photometric datum plus its circumscribed extent, a
+/// non-glowing child's the extent ALONE — one radius, nothing else (the one-radius law: a bound
+/// is a promise about space; a look is a statement about appearance; the child's own picture
+/// supersedes the whole bag the instant it runs). The extent is the SAME
+/// `circumscribed_extent()` the parent's SL7 proxy fold already reads. Shared by
+/// [`emit_window_bodies`] and the Q2 relay ship, so the direct lane and the relayed lane can
+/// never state different bodies.
 fn current_bodies(
     config: &StubConfig,
     regions: &RealmRegions,
-    child_luma: &BTreeMap<RealmId, Vec<u8>>,
+    child_luma: &BTreeMap<RealmId, (u8, f64)>,
 ) -> Vec<(RealmId, BodyStmt)> {
     let mut bodies: Vec<(RealmId, BodyStmt)> = Vec::new();
     if let Some(own) = regions.own_shape(config.realm) {
@@ -7351,9 +7517,15 @@ fn current_bodies(
         ));
     }
     for region in regions.direct_children(config.realm) {
-        if let Some(bag) = child_luma.get(&region.realm) {
-            bodies.push((region.realm, BodyStmt::Marker { luma: bag.clone() }));
-        }
+        bodies.push((
+            region.realm,
+            BodyStmt::Marker {
+                luma: vd_core::look::marker_bag(
+                    child_luma.get(&region.realm).copied(),
+                    region.shape.circumscribed_extent(),
+                ),
+            },
+        ));
     }
     bodies
 }
@@ -7382,10 +7554,7 @@ fn emit_window_relays(
         // re-ships to this window rather than being remembered as already-served.
         w.sent_relays.retain(|c, _| held.0.contains_key(c));
         for (child, entry) in &held.0 {
-            if w.sent_relays
-                .get(child)
-                .is_some_and(|(f, b)| (*f == entry.fence) & (*b == entry.statements))
-            {
+            if w.sent_relays.get(child) == Some(&entry.digest) {
                 continue; // unchanged — send-on-change holds its tongue
             }
             push_session_reply(
@@ -7396,14 +7565,50 @@ fn emit_window_relays(
                     window: *window,
                     child: *child,
                     child_fence: entry.fence,
-                    statements: entry.statements.clone(),
+                    statements: entry.own.clone(),
+                    // The interior half, forwarded SEALED and verbatim (look horizon slice 3
+                    // — G-VERBATIM pins the byte-identity). The gateway is the first opener.
+                    interior: entry.interior.clone(),
                 },
             );
-            w.sent_relays
-                .insert(*child, (entry.fence, entry.statements.clone()));
+            w.sent_relays.insert(*child, entry.digest);
             stats.window_relays_forwarded += 1;
         }
     }
+}
+
+/// The 8-byte send-on-change baseline digest over a held relay's (fence, own sealed statements,
+/// interior batches) — look_horizon.md §5.4's improvement to the per-(window, child) blob
+/// compare, with the slice-3 interior JOINED as the third component: a grandchild's picture
+/// change with the child's own statements unchanged re-keys the baseline, so it can never be
+/// invisible to send-on-change (the silent staleness bug §5.4 names). FNV-1a 64: deterministic,
+/// dependency-free, branchless (one fold expression over the concatenated parts; each interior
+/// entry contributes its child id via the closed postcard codec, its fence bytes and its sealed
+/// bytes). Computed ONCE at receive (stored on [`RelayHeldEntry::digest`]), never per tick. A
+/// (astronomically unlikely) collision costs one deferred re-send healed by the keep-alive
+/// re-assert (`reset_baselines`), never a wrong byte on the wire.
+fn relay_entry_digest(
+    fence: Fence,
+    own: &[u8],
+    interior: &[vd_wire::intershard::InteriorRelay],
+) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let fold = |h: u64, byte: &u8| (h ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+    let h = fence
+        .0
+        .to_le_bytes()
+        .iter()
+        .chain(own)
+        .fold(FNV_OFFSET, fold);
+    interior.iter().fold(h, |h, e| {
+        postcard::to_allocvec(&e.child)
+            .expect("closed wire enums serialize infallibly")
+            .iter()
+            .chain(&e.child_fence.0.to_le_bytes())
+            .chain(&e.own)
+            .fold(h, fold)
+    })
 }
 
 /// THE Q2 RELAY RECEIVE (Slice C1 — the parent's ingress; owner-approved 2026-08-16, cited on
@@ -7441,14 +7646,73 @@ fn on_window_relay(
         return;
     }
     stats.window_relays_received += 1;
+    let digest = relay_entry_digest(wr.realm_fence, &wr.own, &wr.interior);
     held.0.insert(
         child,
         RelayHeldEntry {
             seen: clock.local_tick,
             fence: wr.realm_fence,
-            statements: wr.statements,
+            own: wr.own,
+            interior: wr.interior,
+            digest,
         },
     );
+}
+
+/// THE INTEREST BYTE's receive (look horizon slice 4; Q1 APPROVED, owner-approved 2026-08-17 —
+/// docs/design/look_horizon.md §2 ASK B, fail-closed shape): mis-route, unattested sender and a
+/// deposed incarnation's stale byte are refused + counted, MIRRORING [`retain_child_live`]'s
+/// admission (the unattested arm arms the same lazy head re-read — here for the PARENT, the
+/// re-home backstop); a value outside {0, 1} is refused apart ("nothing else is lawful"). A
+/// lawful byte is held whole — value included — under the derived retain TTL; silence decays it
+/// to "nobody is watching" (the prune in [`aoi_decide`]). Monomorphic: ALL branching here
+/// (HR5).
+#[allow(clippy::too_many_arguments)]
+fn on_realm_interest(
+    ri: vd_wire::intershard::RealmInterest,
+    from: NodeId,
+    config: &StubConfig,
+    clock: &ClockSample,
+    parent_node: &ParentRealmNode,
+    held: &mut InterestHeld,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    if ri.child.lowered() != config.realm {
+        stats.realm_interest_misrouted += 1;
+        return;
+    }
+    if parent_node.0 != Some(from) {
+        stats.realm_interest_unattested += 1;
+        if let Some(parent) = config.own_coord.parent() {
+            outbox.push_flow(
+                config.orchestrator,
+                MsgClass::Saga,
+                &InterShardFlow::Directory(DirectoryOp::HeadRead {
+                    key: DirectoryKey::Realm(parent.lowered()),
+                }),
+            );
+        }
+        return;
+    }
+    if ri.look_inside > 1 {
+        stats.realm_interest_unlawful += 1;
+        return;
+    }
+    let fresh = held
+        .0
+        .is_none_or(|h| (ri.parent_fence, ri.at) >= (h.fence, h.at));
+    if !fresh {
+        stats.realm_interest_stale += 1;
+        return;
+    }
+    stats.realm_interest_received += 1;
+    held.0 = Some(InterestEntry {
+        fence: ri.parent_fence,
+        at: ri.at,
+        seen: clock.local_tick,
+        look_inside: ri.look_inside,
+    });
 }
 
 /// THE WINDOW LANE's per-tick emitter (`docs/design/window_lane.md` §2.9): a realm STATES what it
@@ -7483,14 +7747,9 @@ fn emit_realm_frames(
     // roster, and the Q2 relay's two stores (the child-side ship memo + the parent-side holder),
     // bundled as ONE tuple `SystemParam` (bevy's 16-param ceiling — the established mechanical
     // arity fix). Destructured below.
-    window_lane: (
-        ResMut<OpenWindows>,
-        Res<ChildLuma>,
-        ResMut<RelayShip>,
-        ResMut<RelayHeld>,
-    ),
+    window_lane: WindowLaneStores,
 ) {
-    let (mut windows, child_luma, mut relay_ship, mut relay_held) = window_lane;
+    let (mut windows, child_luma, mut relay_ship, mut relay_held, verdict) = window_lane;
     let Some(realm_fence) = authority.0 else {
         return;
     };
@@ -7566,7 +7825,15 @@ fn emit_realm_frames(
     if let Some(parent) = parent_node.0 {
         let bodies = current_bodies(&config, &regions, &child_luma.0);
         if !bodies.is_empty() {
-            let fingerprint = postcard::to_allocvec(&(&realms, &bodies))
+            // THE SEALED INTERIOR FORWARD (look horizon slice 3, owner-approved 2026-08-17 —
+            // look_horizon.md RULINGS + §2 ASK A): each held child batch's OWN half, verbatim,
+            // membership-gated by this realm's own in-band verdict (§3.4.5). The held INTERIOR
+            // halves never join — `build_relay_interior` reads only `own`, and the carried type
+            // has no field a third level could ride in. The interior joins the ship
+            // fingerprint, so a grandchild's picture change re-ships even when this realm's
+            // own statements are unchanged (§5.4's staleness law, up-leg half).
+            let interior = build_relay_interior(&relay_held, &verdict.0);
+            let fingerprint = postcard::to_allocvec(&(&realms, &bodies, &interior))
                 .expect("closed wire enums serialize infallibly");
             let current = (parent, fingerprint);
             if relay_due || relay_ship.0.as_ref() != Some(&current) {
@@ -7587,7 +7854,8 @@ fn emit_realm_frames(
                     &InterShardFlow::WindowRelay(vd_wire::intershard::WindowRelay {
                         child: config.own_coord.clone(),
                         realm_fence,
-                        statements: vd_wire::session_flow::seal_relay_statements(&statements),
+                        own: vd_wire::session_flow::seal_relay_statements(&statements),
+                        interior,
                     }),
                 );
                 stats.window_relays_sent += 1;
@@ -7595,6 +7863,27 @@ fn emit_realm_frames(
             }
         }
     }
+}
+
+/// THE INTERIOR SELECTION (look horizon slice 3 — §3.2's forward rule + §3.4.5's forward gate,
+/// monomorphic so both filter arms are covered by named tests): each held child's OWN sealed
+/// half, byte-for-byte (G-VERBATIM pins the identity across both hops), for children inside
+/// this realm's own in-band verdict. Reads `own` and NEVER `held[child].interior` — the held
+/// interior halves stop here structurally, because [`vd_wire::intershard::InteriorRelay`] has
+/// no field to put them in.
+fn build_relay_interior(
+    held: &RelayHeld,
+    verdict: &BTreeSet<RealmId>,
+) -> Vec<vd_wire::intershard::InteriorRelay> {
+    held.0
+        .iter()
+        .filter(|(child, _)| verdict.contains(*child))
+        .map(|(child, e)| vd_wire::intershard::InteriorRelay {
+            child: *child,
+            child_fence: e.fence,
+            own: e.own.clone(),
+        })
+        .collect()
 }
 
 /// RLM Step 2 — the run-condition: a fresh shard AUTHORS NOTHING (its celestial poses, boundary crossings,
@@ -7607,11 +7896,35 @@ fn has_synced(clock: Res<ClockSample>) -> bool {
 
 /// The SL7/window stores bundled into ONE tuple `SystemParam` (bevy's 16-param ceiling; a mechanical
 /// arity fix, destructured right back inside [`evaluate_realm_aoi`]): the children's occupancy bits
-/// (pruned + folded as observers) and the window registry whose membership baselines the AoI pass
-/// diffs against. The three scene stores that used to ride here — the per-live-child reflect cache,
-/// the from-above holding and the observed interior outlines — died with their lanes (window lane
-/// Slice C2, minor 19).
-type Sl7Stores<'w> = (ResMut<'w, ChildLiveness>, ResMut<'w, OpenWindows>);
+/// (pruned + folded as observers), the window registry whose membership baselines the AoI pass
+/// diffs against, and (look horizon slice 3) the realm-side shared in-band verdict the up-relay's
+/// interior forward gates on (§3.4.5 — written HERE, by the one fold, never derived twice). The
+/// three scene stores that used to ride here — the per-live-child reflect cache, the from-above
+/// holding and the observed interior outlines — died with their lanes (window lane Slice C2,
+/// minor 19).
+type Sl7Stores<'w> = (
+    ResMut<'w, ChildLiveness>,
+    ResMut<'w, OpenWindows>,
+    ResMut<'w, InBandVerdict>,
+    // Look horizon slice 4 — the interest byte's two ends, both consulted by the ONE fold: the
+    // CHILD-side holder (TTL-pruned here; a live `1` powers the down-proxy observer) and the
+    // PARENT-side per-child emission latch (the interior-band hysteresis).
+    ResMut<'w, InterestHeld>,
+    ResMut<'w, InterestEmitLatch>,
+);
+
+/// THE WINDOW LANE's emitter stores bundled into ONE tuple `SystemParam` (bevy's 16-param
+/// ceiling; a mechanical arity fix, destructured right back inside [`emit_realm_frames`]): the
+/// registry, the boot-planted marker roster, the Q2 relay's two stores (the child-side ship
+/// memo + the parent-side holder), and (look horizon slice 3) the read-only shared in-band
+/// verdict the interior forward gates on (§3.4.5 — written by the AoI fold, read here).
+type WindowLaneStores<'w> = (
+    ResMut<'w, OpenWindows>,
+    Res<'w, ChildLuma>,
+    ResMut<'w, RelayShip>,
+    ResMut<'w, RelayHeld>,
+    Res<'w, InBandVerdict>,
+);
 
 /// RLM Step 2 — the demand-driven realm-lifecycle detector (the SIBLING of [`evaluate_realm_boundaries`]):
 /// per tick, this shard computes which of its DIRECT children an occupant's Area-of-Interest reaches and
@@ -7651,10 +7964,16 @@ fn evaluate_realm_aoi(
     sl7: Sl7Stores,
     // Lane cure (finding 41) — the bit's "parent has been told" latch (the adopt-edge derivation).
     mut was_occupied: ResMut<WasOccupied>,
+    // Look horizon slice 4 — the interest emission's route: the directory-attested child head
+    // map the admission reads already maintain (READ-ONLY here; `process_inbound` owns the
+    // writes). The byte goes direct to the child's head on the route the parent already
+    // resolves — never further, never sideways, never through the orchestrator (§2 ASK B).
+    child_nodes: Res<ChildRealmNodes>,
     // The chain's emit-side observability: read nowhere in the sim — a counter, never a control input.
     mut stats: ResMut<StubStats>,
 ) {
-    let (mut child_liveness, mut open_windows) = sl7;
+    let (mut child_liveness, mut open_windows, mut verdict, mut interest_held, mut interest_latch) =
+        sl7;
     // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
     // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
     let Some(realm_fence) = authority.0 else {
@@ -7688,6 +8007,10 @@ fn evaluate_realm_aoi(
         &mut was_occupied.0,
         &mut child_liveness.0,
         &mut open_windows,
+        &mut verdict.0,
+        &mut interest_held,
+        &mut interest_latch.0,
+        &child_nodes,
         &mut stats,
     );
 }
@@ -7765,6 +8088,18 @@ fn aoi_decide(
     // THE WINDOW LANE (§2.9 step 5): the open windows whose SL7 membership verdicts
     // this SAME fold ships — never a second AoI derivation (HR3).
     windows: &mut OpenWindows,
+    // Look horizon slice 3 (§3.4.5) — the realm-side SHARED in-band verdict: the union over
+    // every observer of its in-band direct children, written by THIS fold (the one AoI
+    // derivation) for the up-relay's interior forward gate to read. Cleared at the
+    // zero-observer return (a vacated realm forwards no interior).
+    shared_verdict: &mut BTreeSet<RealmId>,
+    // Look horizon slice 4 — the interest byte's two ends: the CHILD-side holder (TTL-pruned
+    // here; a live `1` powers the ONE down-proxy observer) and the PARENT-side per-child
+    // emission latch (the interior-band hysteresis); plus the attested child-head routes the
+    // emission sends on.
+    interest: &mut InterestHeld,
+    interest_latch: &mut BTreeSet<RealmPath>,
+    child_nodes: &ChildRealmNodes,
     stats: &mut StubStats,
 ) {
     let own_coord = &config.own_coord;
@@ -7784,6 +8119,15 @@ fn aoi_decide(
     // is empty — no bit is ever received — so the prune is a no-op ⇒ byte-identical).
     let retain_ttl = retain_ttl_ticks(config);
     child_liveness.retain(|_, e| ttl_alive(e.last_seen, clock.local_tick, retain_ttl));
+    // Look horizon slice 4 — the interest byte DECAYS on the same derived TTL: silence means
+    // "nobody is watching" (the safe direction; §3.6 — two lost beats expire it, then the
+    // teardown cooldown and grace still apply downstream).
+    if interest
+        .0
+        .is_some_and(|e| !ttl_alive(e.seen, clock.local_tick, retain_ttl))
+    {
+        interest.0 = None;
+    }
 
     // THE LANE CADENCE, resolved once per pass (lane cure, findings 41 + 0/43): the SL7 bit beats on
     // it (`bit_due`, plus the adopt edge — the same expression the shape ship uses, HR3), and the
@@ -7832,13 +8176,12 @@ fn aoi_decide(
     let child_observers = placements
         .iter()
         .filter(|(region, _)| child_liveness.contains_key(&region.realm))
-        .map(|(region, pose)| {
-            (
-                ObserverId::Child(region.realm),
-                pose.pos,
-                pose.vel,
-                region.shape.circumscribed_extent(),
-            )
+        .map(|(region, pose)| AoiObserver {
+            id: ObserverId::Child(region.realm),
+            pos: pose.pos,
+            vel: pose.vel,
+            reach: region.shape.circumscribed_extent(),
+            origin: ObserverOrigin::Occupancy,
         });
 
     // Observers = durable dots this shard SPEAKS FOR — owned, or mid-hand-off — ∪ held transients (mirror
@@ -7854,24 +8197,64 @@ fn aoi_decide(
     // exactly as it left it instead of re-spinning it. And an OCCUPIED CHILD is counted here too, which
     // is SL7's liveness rule made structural: no occupants AND no live child is exactly
     // `observers.is_empty()`.
-    let observers: Vec<(ObserverId, LatticePos, DVec3, f64)> = dots
+    // Look horizon slice 4 (§3.4.3, THE DOWN-PROXY): a realm holding a live interest byte
+    // inserts ONE synthetic observer at its OWN centre (the origin of its own frame — the one
+    // position a realm lawfully has), with reach equal to its own extent, and runs this very
+    // fold unchanged. INTEREST-derived at construction — the structural cascade cap: it drives
+    // demand and the shared verdict, but never the Empty report, never the bit, and never an
+    // interest emission of its own.
+    let interest_proxy = interest
+        .0
+        .filter(|e| e.look_inside == 1)
+        .and_then(|_| regions.own_shape(config.realm))
+        .map(|own| AoiObserver {
+            id: ObserverId::Interest,
+            pos: LatticePos::local(DVec3::ZERO),
+            vel: DVec3::ZERO,
+            reach: own.shape.circumscribed_extent(),
+            origin: ObserverOrigin::Interest,
+        });
+    let observers: Vec<AoiObserver> = dots
         .0
         .iter()
         .filter(|(_, d)| speaks_for(holds, d, local, hold_ttl))
-        .map(|(s, d)| (ObserverId::Dot(*s), d.pose.pos, d.pose.vel, 0.0))
+        .map(|(s, d)| AoiObserver {
+            id: ObserverId::Dot(*s),
+            pos: d.pose.pos,
+            vel: d.pose.vel,
+            reach: 0.0,
+            origin: ObserverOrigin::Occupancy,
+        })
         .chain(
             owned
                 .0
                 .iter()
                 .filter(|(_, t)| t.status.is_held())
-                .map(|(e, t)| (ObserverId::Transient(*e), t.pose.pos, t.pose.vel, 0.0)),
+                .map(|(e, t)| AoiObserver {
+                    id: ObserverId::Transient(*e),
+                    pos: t.pose.pos,
+                    vel: t.pose.vel,
+                    reach: 0.0,
+                    origin: ObserverOrigin::Occupancy,
+                }),
         )
         .chain(child_observers)
+        .chain(interest_proxy)
         .collect();
 
+    // THE OCCUPANCY TRUTH (look horizon slice 4 splits it from mere list-emptiness): does this
+    // realm hold occupants or a live child — the ONLY facts the Empty self-report and the SL7
+    // bit may ever state? The interest down-proxy deliberately does NOT count: a byte from
+    // outside must never manufacture an occupancy fact (SL7's bit means occupancy, nothing
+    // else), so an interest-held vacated realm keeps reporting Empty — truthfully — while its
+    // parent's own demand (the observer stands well inside the AoI band whenever it stands
+    // inside the interior band) is what keeps it alive to serve pictures.
+    let occupied = observers
+        .iter()
+        .any(|o| o.origin == ObserverOrigin::Occupancy);
     // Zero-occupant self-report: this CHILD shard tells the orchestrator its OWN realm holds nobody
     // (`child == own_coord`). Fence = this shard's own realm authority over its emptiness.
-    if observers.is_empty() {
+    if !occupied {
         // Lane cure (finding 41): going empty re-arms the adopt edge — the NEXT occupant's first tick
         // ships the bit immediately, off-cadence, because that transition is what the bit means.
         *was_occupied = false;
@@ -7885,10 +8268,14 @@ fn aoi_decide(
             tick,
             stats,
         );
+    }
+    if observers.is_empty() {
         // THE WINDOW LANE (Slice A): with zero observers every window's SL7 verdict IS the empty
         // set — the diff below ships the removals once, so a subscriber's drawn-set gate never
         // holds bodies for a realm whose occupants all left (the same emptiness truth the
-        // self-report above states to the orchestrator).
+        // self-report above states to the orchestrator). The shared verdict clears with it
+        // (look horizon slice 3): a vacated realm forwards no interior.
+        shared_verdict.clear();
         emit_window_membership(windows, &BTreeMap::new(), &BTreeMap::new(), outbox, stats);
         return;
     }
@@ -7904,7 +8291,10 @@ fn aoi_decide(
     // backstops liveness centrally. A shard whose parent is unresolved (the root; a lease race at
     // boot) emits nothing and keeps the edge armed — the first resolve ships the bit immediately.
     // Bitwise `|` (both operands pure, HR5).
-    if let Some(parent) = parent_node {
+    // Gated on the OCCUPANCY truth, not list non-emptiness (look horizon slice 4): the interest
+    // down-proxy alone must never beat the bit — that would tell the parent "occupied" about a
+    // realm holding nobody, and the parent's occupied-child proxy would cascade on a fiction.
+    if occupied && let Some(parent) = parent_node {
         let adopt_edge = !*was_occupied;
         if bit_due | adopt_edge {
             let bit = InterShardFlow::ChildLive(vd_wire::intershard::ChildLive {
@@ -7935,8 +8325,14 @@ fn aoi_decide(
     // `RealmSceneDelta` push and the per-live-child `ChildSceneSet` reflect — are deleted with
     // their lanes; a parent has no business authoring what its children look like.
     let mut in_band: BTreeMap<ObserverId, BTreeSet<RealmId>> = BTreeMap::new();
+    // Look horizon slice 3 (§3.4.5) — the SHARED verdict accumulator: the union over EVERY
+    // observer (a dot, a held transient, an occupied child) of its in-band children this tick.
+    // Same transitions, same bands, same grace as the demand — read, never re-derived.
+    let mut fold_verdict: BTreeSet<RealmId> = BTreeSet::new();
 
     let mut live_keys = BTreeSet::<(ObserverId, RealmPath)>::new();
+    // Look horizon slice 4 — the child paths seen this pass (the interest latch's evict set).
+    let mut live_paths = BTreeSet::<RealmPath>::new();
     for (region, pose) in &placements {
         // A Ship child has no lineage coord to demand/draw by until P8 (D-SHIP-1): excluded from
         // the AoI/demand/render fold, counted, never a panic — see `region_level`.
@@ -7946,26 +8342,44 @@ fn aoi_decide(
         };
         let child_coord = own_coord.child(level);
         let path = child_coord.path().clone();
+        live_paths.insert(path.clone());
         let child_pos = pose.pos; // own frame (== the placements' frame), carried WHOLE
 
         // Was the child kept-alive by ANY observer at tick START (its acquire latch held)? — the input to
         // the SpinUp-vs-KeepAlive union split, read BEFORE this tick's latch updates.
-        let was_demanded = observers.iter().any(|(obs, _, _, _)| {
+        let was_demanded = observers.iter().any(|o| {
             membership
-                .get(&(*obs, path.clone()))
+                .get(&(o.id, path.clone()))
                 .is_some_and(|s| s.was_in)
         });
         // Fold each observer's own hysteresis machine; a child is demanded THIS tick iff ANY observer's
         // machine keeps it live (SpinUp | KeepAlive).
         let mut now_demanded = false;
-        for (obs, opos, ovel, reach) in &observers {
-            let key = (*obs, path.clone());
+        // Look horizon slice 4 — the interest emission's input: the LEAST distance from any
+        // OCCUPANCY-derived observer to this child (the cascade cap at the source: the
+        // interest-derived down-proxy never produces interest for the next level down) —
+        // EXCLUDING the child's OWN occupied-child proxy. The byte exists to make "something
+        // OUTSIDE may be looking in" representable (Q1's exact sentence); a child's own proxy
+        // stands FOR its occupants, who are INSIDE — the child already holds them and already
+        // wakes its own interior for them. Without this exclusion the chain is measured
+        // unlawful (flown as the warp gate's red, 2026-08-17): the universe flags its occupied
+        // galaxy, the galaxy's down-proxy reaches its own full 12.5 km extent, and EVERY star
+        // system wakes — the exact "wake every interior" alternative §2 ASK B priced and
+        // rejected. Occupants, transients and OTHER children's proxies still produce interest
+        // (SL7's sibling-warming stays). Bitwise `&` (both operands pure, HR5).
+        let mut interest_min_dist = f64::INFINITY;
+        for o in &observers {
+            let key = (o.id, path.clone());
             live_keys.insert(key.clone());
             // The observer's own extent SHORTENS the distance (never below zero): an occupied child
             // reaches to its own surface, so it warms a sibling as soon as any of its occupants
             // could be that close — the SL7 error bound made operational (warm early, never late).
-            let dist = (occupant_child_dist(*opos, *ovel, child_pos, own_tier, horizon_s) - reach)
+            let dist = (occupant_child_dist(o.pos, o.vel, child_pos, own_tier, horizon_s)
+                - o.reach)
                 .max(0.0);
+            if (o.origin == ObserverOrigin::Occupancy) & (o.id != ObserverId::Child(region.realm)) {
+                interest_min_dist = interest_min_dist.min(dist);
+            }
             let state = membership.get(&key).copied().unwrap_or_default();
             let now_in = region.aoi.in_range(state.was_in, dist);
             let (verb, next) = aoi_transition(state, now_in, region.aoi.grace_ticks());
@@ -7983,16 +8397,21 @@ fn aoi_decide(
             // region HR5 can never cover from the false-LHS side (the discipline
             // `AoiConfig::in_range` and every AoI fold here use).
             let next_in = next.is_some_and(|s| s.was_in);
-            if render_routes.contains_key(obs) & next_in {
-                in_band.entry(*obs).or_default().insert(region.realm);
+            // Look horizon slice 3 (§3.4.5): ANY observer's in-band child joins the shared
+            // verdict — the up-relay's interior forward gate.
+            if next_in {
+                fold_verdict.insert(region.realm);
+            }
+            if render_routes.contains_key(&o.id) & next_in {
+                in_band.entry(o.id).or_default().insert(region.realm);
             }
             // The OCCUPIED CHILD's own in-range set (SL7: the child stands in for its occupants,
             // at the placement this shard authored for it) — the `Child`-scope window's verdict,
             // shared by every observer under that child.
-            if let ObserverId::Child(_) = obs
+            if let ObserverId::Child(_) = o.id
                 && next_in
             {
-                in_band.entry(*obs).or_default().insert(region.realm);
+                in_band.entry(o.id).or_default().insert(region.realm);
             }
             match next {
                 Some(s) => {
@@ -8014,7 +8433,7 @@ fn aoi_decide(
                 outbox,
                 config.orchestrator,
                 own_coord,
-                child_coord,
+                child_coord.clone(),
                 realm_fence,
                 v,
                 tick,
@@ -8037,7 +8456,26 @@ fn aoi_decide(
                 }),
             );
         }
+        // Look horizon slice 4 — THE INTEREST EMISSION (§2 ASK B / §3.4.2 coarse): is this
+        // direct child's interior worth waking, judged from the placement this realm authors
+        // and the child's boot-derived interior band? One byte, to the child's attested head,
+        // on the AoI beat (plus the rising edge), an explicit 0 on the falling edge.
+        emit_realm_interest(
+            &region.interior_band,
+            &path,
+            &child_coord,
+            child_nodes.0.get(&region.realm),
+            interest_min_dist,
+            bit_due,
+            interest_latch,
+            realm_fence,
+            tick,
+            outbox,
+            stats,
+        );
     }
+    // Evict interest latches for children no longer on the roster (mirrors `retain_live`).
+    interest_latch.retain(|p| live_paths.contains(p));
     // THE WINDOW LANE (§2.9 step 5): ship each open window its SL7 membership verdict — the fold
     // above, diffed per window against what THAT window was already told (ids only; the receiver
     // never re-derives AoI). Hysteresis, bands, grace and the demand path are untouched: this
@@ -8051,6 +8489,10 @@ fn aoi_decide(
     // tell a realm about itself, and its SL1 self-placement filter retires WITH it by the owner's
     // Q3 amendment (2026-08-16, docs/design/window_lane.md §5 RULINGS) — no realm-inbound message
     // type carries a placement at all now, which is strictly stronger than filtering one lane.
+    // Look horizon slice 3 (§3.4.5): publish this tick's shared verdict for the up-relay's
+    // interior forward gate (the emitter reads it next tick — one tick of staleness the band's
+    // own hysteresis absorbs).
+    *shared_verdict = fold_verdict;
     emit_window_membership(windows, &render_routes, &in_band, outbox, stats);
     // THE OCCUPANT UP-RELAY IS GONE (Step 5 slice D), and what replaced it is already above: the ONE
     // occupancy bit (SL7 verbatim — emitted at this function's non-empty gate) is everything a parent
@@ -8062,6 +8504,67 @@ fn aoi_decide(
     // Evict any (observer, child-path) pair no longer live (an observer that left OR a child dropped from
     // the roster) — the DRY primitive, keyed by `(ObserverId, RealmPath)`.
     retain_live(membership, &live_keys);
+}
+
+/// THE INTEREST EMISSION for one direct child (look horizon slice 4; Q1 APPROVED, owner
+/// 2026-08-17 — §2 ASK B; monomorphic, ALL branching here, both arms of every predicate driven
+/// by named tests). The COARSE decision of §3.4.2: judged by the realm HOLDING the observer,
+/// from its own authored placement for the child and the child's boot-derived interior band —
+/// spin-up at the child's interior reach (`444.104489631` m for a star system on THE world),
+/// release at reach + the derived lead (`469.104489631` m), both bracketing the child's shell
+/// so interiors wake strictly before any crossing. `min_dist` is the least distance from any
+/// OCCUPANCY-derived observer (the structural cascade cap's source half: a synthetic
+/// interest-derived observer contributes `INFINITY`, so an interest-only realm emits nothing
+/// downward — an observer's realm wakes its children's interiors and STOPS).
+///
+/// Emission shape: `1` on the RISING edge immediately (the transition itself — the same
+/// finding-41 doctrine the occupancy bit's adopt edge rides) and on every AoI beat while the
+/// band holds (the re-assert the receiver's TTL is sized against); ONE explicit `0` on the
+/// falling edge (silence remains the receiver's backstop). Routed direct to the child's
+/// attested head — no route resolved yet ⇒ nothing sent, the latch untouched, the next beat
+/// retries (fail-closed, never through the orchestrator).
+#[allow(clippy::too_many_arguments)]
+fn emit_realm_interest(
+    band: &vd_core::geometry::AoiConfig,
+    path: &RealmPath,
+    child_coord: &RealmCoord,
+    route: Option<&NodeId>,
+    min_dist: f64,
+    bit_due: bool,
+    latch: &mut BTreeSet<RealmPath>,
+    realm_fence: Fence,
+    tick: UniverseTick,
+    outbox: &mut OutboundBox,
+    stats: &mut StubStats,
+) {
+    if band.spin_up_r_m() <= 0.0 {
+        return; // a leaf (or an inert world): no interior, no interest — the byte never exists
+    }
+    let was = latch.contains(path);
+    let now = band.in_range(was, min_dist);
+    let Some(&node) = route else {
+        return; // head not resolved yet — the eager cadence read lands it; the next beat sends
+    };
+    let rising = now & !was;
+    let falling = !now & was;
+    if (now & (bit_due | rising)) | falling {
+        outbox.push_flow(
+            node,
+            MsgClass::Saga,
+            &InterShardFlow::RealmInterest(vd_wire::intershard::RealmInterest {
+                child: child_coord.clone(),
+                parent_fence: realm_fence,
+                at: tick,
+                look_inside: u8::from(now),
+            }),
+        );
+        stats.realm_interest_sent += 1;
+    }
+    if now {
+        latch.insert(path.clone());
+    } else {
+        latch.remove(path);
+    }
 }
 
 /// The effective AoI distance from ONE occupant to `child_pos`: the LESSER of the live distance and the F7
@@ -14608,7 +15111,8 @@ mod tests {
         let relay = InterShardFlow::WindowRelay(vd_wire::intershard::WindowRelay {
             child: child.clone(),
             realm_fence: Fence(1),
-            statements: vd_wire::session_flow::seal_relay_statements(&[]),
+            own: vd_wire::session_flow::seal_relay_statements(&[]),
+            interior: Vec::new(),
         });
         // ★TOMBSTONED (minors 17/19): the up-observation ship, the interim shape lane and the
         // down-cascade all rode SignalDelta; the down-reflect rode the reliable Saga carrier.
@@ -14742,6 +15246,7 @@ mod tests {
             band: band(),
             aoi: vd_core::geometry::AoiConfig::inert(),
             parent,
+            interior_band: vd_core::geometry::AoiConfig::inert(),
         }
     }
 
@@ -14760,6 +15265,7 @@ mod tests {
             band: band(),
             aoi: vd_core::geometry::AoiConfig::inert(),
             parent,
+            interior_band: vd_core::geometry::AoiConfig::inert(),
         }
     }
 
@@ -18379,6 +18885,7 @@ mod tests {
             band: band(),
             aoi: aoi_band(1),
             parent,
+            interior_band: vd_core::geometry::AoiConfig::inert(),
         };
         *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
             armed(ROOT_REALM, None, 1.0e9),
@@ -18814,6 +19321,7 @@ mod tests {
             band: band(),
             aoi: vd_core::geometry::AoiConfig::inert(),
             parent,
+            interior_band: vd_core::geometry::AoiConfig::inert(),
         }
     }
 
@@ -19853,7 +20361,8 @@ mod tests {
             vd_wire::intershard::WindowRelay {
                 child: child_coord.clone(),
                 realm_fence: Fence(3),
-                statements: seal.clone(),
+                own: seal.clone(),
+                interior: Vec::new(),
             },
             NodeId(70),
             &cfg,
@@ -19864,9 +20373,11 @@ mod tests {
         );
         assert_eq!(stats.window_relays_received, 1);
         let entry = &held.0[&story.planet];
+        assert_eq!(entry.own, seal, "held VERBATIM — byte-equal, unopened");
         assert_eq!(
-            entry.statements, seal,
-            "held VERBATIM — byte-equal, unopened"
+            entry.digest,
+            relay_entry_digest(Fence(3), &seal, &[]),
+            "the §5.4 baseline digest is computed once, at receive"
         );
         assert_eq!(entry.fence, Fence(3), "the child's own fence rides intact");
         // LAST-WINS REPLACE: a same-or-newer fence's batch replaces the held one whole.
@@ -19880,7 +20391,8 @@ mod tests {
             vd_wire::intershard::WindowRelay {
                 child: child_coord.clone(),
                 realm_fence: Fence(4),
-                statements: newer.clone(),
+                own: newer.clone(),
+                interior: Vec::new(),
             },
             NodeId(70),
             &cfg,
@@ -19889,16 +20401,14 @@ mod tests {
             &mut held,
             &mut stats,
         );
-        assert_eq!(
-            held.0[&story.planet].statements, newer,
-            "replaced, not merged"
-        );
+        assert_eq!(held.0[&story.planet].own, newer, "replaced, not merged");
         // STALE FENCE: a deposed incarnation (fence below the held one) is refused counted.
         on_window_relay(
             vd_wire::intershard::WindowRelay {
                 child: child_coord.clone(),
                 realm_fence: Fence(3),
-                statements: seal.clone(),
+                own: seal.clone(),
+                interior: Vec::new(),
             },
             NodeId(70),
             &cfg,
@@ -19918,7 +20428,8 @@ mod tests {
             vd_wire::intershard::WindowRelay {
                 child: child_coord,
                 realm_fence: Fence(9),
-                statements: seal.clone(),
+                own: seal.clone(),
+                interior: Vec::new(),
             },
             NodeId(71),
             &cfg,
@@ -19943,7 +20454,8 @@ mod tests {
             vd_wire::intershard::WindowRelay {
                 child: foreign,
                 realm_fence: Fence(1),
-                statements: seal,
+                own: seal,
+                interior: Vec::new(),
             },
             NodeId(70),
             &cfg,
@@ -19988,7 +20500,9 @@ mod tests {
             RelayHeldEntry {
                 seen: clock.local_tick,
                 fence: Fence(3),
-                statements: seal.clone(),
+                own: seal.clone(),
+                interior: Vec::new(),
+                digest: relay_entry_digest(Fence(3), &seal, &[]),
             },
         );
         // ZERO WINDOWS: nothing forwards, nothing panics, the holder survives (still fresh).
@@ -20027,6 +20541,7 @@ mod tests {
             child: OTHER_REALM,
             child_fence: Fence(3),
             statements: seal.clone(),
+            interior: Vec::new(),
         })
         .expect("encodes");
         assert_eq!(outbox.0.len(), 1);
@@ -20071,7 +20586,9 @@ mod tests {
             RelayHeldEntry {
                 seen: later.local_tick,
                 fence: Fence(3),
-                statements: seal,
+                own: seal.clone(),
+                interior: Vec::new(),
+                digest: relay_entry_digest(Fence(3), &seal, &[]),
             },
         );
         emit_window_relays(
@@ -20087,6 +20604,1091 @@ mod tests {
             stats.window_relays_forwarded, 2,
             "a re-held child re-ships — the vanished entry cleared its baseline"
         );
+    }
+
+    /// G-VERBATIM (look_horizon.md §6 slice 3; owner-approved 2026-08-17 — RULINGS + §2 ASK A):
+    /// the bytes a GRANDPARENT forwards are BYTE-IDENTICAL to what the author sealed, across
+    /// both hops — a measurement that could fail. The full path, on the story world's real
+    /// lineage: the planet seals its own batch → the SYSTEM holds it and selects it into its
+    /// up-relay's interior (membership-gated, §3.4.5 — the out-of-verdict arm is driven too) →
+    /// the GALAXY holds the pair and forwards to a window subscriber — where the encoded
+    /// `interior[0].own` must be the planet's sealed bytes exactly, its fence intact. Plus the
+    /// §5.4 third digest component as a measurement: a grandchild-only change (same system own
+    /// batch) re-ships past send-on-change.
+    #[test]
+    fn g_verbatim_a_grandchilds_sealed_bytes_survive_both_hops_byte_identical() {
+        let story = Story::new();
+        let clock = ClockSample {
+            local_tick: vd_core::TickId(4),
+            universe_tick: UniverseTick(0),
+            epoch: vd_core::EpochId(1),
+            synced: true,
+        };
+        // THE AUTHOR: the planet's own sealed batch (its own look about ITSELF — SL3).
+        let sealed_p = vd_wire::session_flow::seal_relay_statements(&[
+            vd_wire::session_flow::RelayedStatement::Body {
+                subject: story.planet,
+                stmt: vd_wire::session_flow::BodyStmt::SelfLook {
+                    bag: vd_core::look::look_bag(&Boundary::Shell { r: 1.0 }),
+                },
+                authored_at: UniverseTick(9),
+            },
+        ]);
+        // HOP 1 — the SYSTEM holds the planet's batch sealed.
+        let cfg_s = story_config(&story, story.system);
+        let p_coord = cfg_s
+            .own_coord
+            .child(level_of(story.planet).expect("planet level"));
+        let mut s_held = RelayHeld::default();
+        let mut stats = StubStats::default();
+        on_window_relay(
+            vd_wire::intershard::WindowRelay {
+                child: p_coord,
+                realm_fence: Fence(3),
+                own: sealed_p.clone(),
+                interior: Vec::new(),
+            },
+            NodeId(70),
+            &cfg_s,
+            &clock,
+            &ChildRealmNodes(BTreeMap::from([(story.planet, NodeId(70))])),
+            &mut s_held,
+            &mut stats,
+        );
+        // The §3.4.5 forward gate, BOTH arms: out of the verdict ⇒ the batch stays home;
+        // in the verdict ⇒ it joins the interior, fence + bytes VERBATIM.
+        assert!(
+            build_relay_interior(&s_held, &BTreeSet::new()).is_empty(),
+            "a child outside the realm's own in-band verdict is not forwarded (§3.4.5)"
+        );
+        let interior = build_relay_interior(&s_held, &BTreeSet::from([story.planet]));
+        assert_eq!(interior.len(), 1);
+        assert_eq!(interior[0].child, story.planet);
+        assert_eq!(
+            interior[0].child_fence,
+            Fence(3),
+            "the author's OWN fence, intact"
+        );
+        assert_eq!(interior[0].own, sealed_p, "hop 1: byte-identical");
+        // HOP 2 — the GALAXY holds the system's (own + interior) pair sealed...
+        let sealed_s = vd_wire::session_flow::seal_relay_statements(&[
+            vd_wire::session_flow::RelayedStatement::Level {
+                at: UniverseTick(9),
+                rows: Vec::new(),
+            },
+        ]);
+        let cfg_g = story_config(&story, story.galaxy);
+        let s_coord = cfg_g
+            .own_coord
+            .child(level_of(story.system).expect("system level"));
+        let mut g_held = RelayHeld::default();
+        let g_attested = ChildRealmNodes(BTreeMap::from([(story.system, NodeId(71))]));
+        on_window_relay(
+            vd_wire::intershard::WindowRelay {
+                child: s_coord.clone(),
+                realm_fence: Fence(5),
+                own: sealed_s.clone(),
+                interior: interior.clone(),
+            },
+            NodeId(71),
+            &cfg_g,
+            &clock,
+            &g_attested,
+            &mut g_held,
+            &mut stats,
+        );
+        // ...and forwards it to a window subscriber. ONE constructed-expected byte equality:
+        // the wire bytes ARE the planet's sealed bytes riding inside, unopened at every hop.
+        let mut windows = OpenWindows::default();
+        windows.0.insert(
+            (GATEWAY, WindowId(1)),
+            OpenWindow::opened(WindowScope::Occupants, clock.local_tick),
+        );
+        let mut outbox = OutboundBox::default();
+        emit_window_relays(
+            &cfg_g,
+            &clock,
+            Fence(6),
+            &mut g_held,
+            &mut windows,
+            &mut stats,
+            &mut outbox,
+        );
+        let expected = postcard::to_allocvec(&ShardToGateway::WindowRelayed {
+            realm_fence: Fence(6),
+            window: WindowId(1),
+            child: story.system,
+            child_fence: Fence(5),
+            statements: sealed_s.clone(),
+            interior: interior.clone(),
+        })
+        .expect("encodes");
+        assert_eq!(outbox.0.len(), 1);
+        let (to, _, bytes, _) = &outbox.0[0];
+        assert_eq!(*to, GATEWAY);
+        assert_eq!(
+            &bytes[..],
+            &expected[..],
+            "G-VERBATIM: what the grandparent forwards is what the author sealed, byte for byte"
+        );
+        // THE §5.4 THIRD COMPONENT, measured: the planet's picture changes while the system's
+        // OWN statements stay identical — send-on-change must re-ship (the re-keyed digest), or
+        // a grandchild's change would be invisible on the load-bearing draw path.
+        let sealed_p2 = vd_wire::session_flow::seal_relay_statements(&[
+            vd_wire::session_flow::RelayedStatement::Body {
+                subject: story.planet,
+                stmt: vd_wire::session_flow::BodyStmt::SelfLook {
+                    bag: vd_core::look::look_bag(&Boundary::Shell { r: 2.0 }),
+                },
+                authored_at: UniverseTick(10),
+            },
+        ]);
+        on_window_relay(
+            vd_wire::intershard::WindowRelay {
+                child: s_coord,
+                realm_fence: Fence(5),
+                own: sealed_s.clone(), // the system's own half UNCHANGED
+                interior: vec![vd_wire::intershard::InteriorRelay {
+                    child: story.planet,
+                    child_fence: Fence(3),
+                    own: sealed_p2.clone(),
+                }],
+            },
+            NodeId(71),
+            &cfg_g,
+            &clock,
+            &g_attested,
+            &mut g_held,
+            &mut stats,
+        );
+        emit_window_relays(
+            &cfg_g,
+            &clock,
+            Fence(6),
+            &mut g_held,
+            &mut windows,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(
+            stats.window_relays_forwarded, 2,
+            "a grandchild-only change re-keys the digest and re-ships (§5.4)"
+        );
+        // The read-only gate views hand back BYTES, never values (the same seal discipline):
+        // the held own half and the held interior half, verbatim.
+        assert_eq!(g_held.statements_for(story.system), Some(sealed_s));
+        assert_eq!(
+            g_held.interior_for(story.system),
+            Some(vec![vd_wire::intershard::InteriorRelay {
+                child: story.planet,
+                child_fence: Fence(3),
+                own: sealed_p2,
+            }])
+        );
+    }
+
+    /// look_horizon.md §6 SLICE 6 — RELAY EGRESS, measured against §5.2's formula
+    /// `W × C × blob × rate`, WITH the gateway multiplier MEASURED rather than assumed: the same
+    /// held children re-ship the same number of times under one open window and under two, and
+    /// the two-window egress must be EXACTLY double; with a second held child the egress must be
+    /// exactly the per-child blob sum times W times the re-ship count. The blob is the
+    /// DEPARTURE-FIXTURE class, built through the REAL codecs at THE world's own numbers (the
+    /// home system's sealed batch: its 5-row level + its own look + 5 markers, plus the 5
+    /// slice-3 interior batches), and its size is PINNED — §5.4's law that this design does not
+    /// change rows per fold has its bytes-per-relay counterpart pinned here.
+    #[test]
+    fn slice6_relay_egress_measured_equals_w_times_c_times_blob_times_rate() {
+        let cfg_w = vd_physics::worldgen::UniverseConfig::world(15.0, 0.05);
+        let world = vd_physics::worldgen::WorldView::generated(0, &cfg_w);
+        let galaxy = vd_core::worldgen::GALAXY;
+        let systems: Vec<RealmId> = world
+            .regions()
+            .iter()
+            .filter(|r| r.parent == Some(galaxy))
+            .map(|r| r.realm)
+            .collect();
+        let home = vd_core::worldgen::default_home_realm(world.regions()).expect("home");
+        let sibling = *systems
+            .iter()
+            .find(|s| **s != home)
+            .expect("a ring sibling");
+        let luma: BTreeMap<RealmId, (u8, f64)> =
+            vd_physics::worldgen::system_photometrics_for_config(0, &cfg_w)
+                .into_iter()
+                .map(|(r, p)| (r, vd_physics::worldgen::marker_datum(&p)))
+                .collect();
+        let shape_of = |realm: RealmId| {
+            world
+                .regions()
+                .iter()
+                .find(|r| r.realm == realm)
+                .expect("rostered")
+                .shape
+        };
+        // ONE system's departure-fixture batch at tick `t`, through the real codecs: the level
+        // rows carry the planets' true closed-form positions, so consecutive ticks genuinely
+        // change the bytes (the re-ship trigger is the fingerprint over row VALUES).
+        let batch_at = |system: RealmId,
+                        t: u64|
+         -> (Vec<u8>, Vec<vd_wire::intershard::InteriorRelay>) {
+            let at = UniverseTick(t);
+            let movers = vd_physics::worldgen::moving_children_for_config(0, &cfg_w, system);
+            assert_eq!(movers.len(), 5, "THE world's systems orbit 5 planets");
+            let sys_frame = vd_core::pose::frame_for_realm(system, Some(galaxy)).expect("frame");
+            let rows: Vec<vd_wire::channels::RealmSnap> = movers
+                .iter()
+                .map(|(p, e)| {
+                    let st = vd_physics::motion::Motion::Kepler(*e)
+                        .state_at(t as f64 * cfg_w.interest.tick_dt_s);
+                    vd_wire::channels::RealmSnap {
+                        realm: *p,
+                        frame: vd_core::pose::frame_for_realm(*p, Some(system)).expect("frame"),
+                        pose: vd_core::pose::StampedPose {
+                            frame: sys_frame,
+                            pos: vd_core::pose::LatticePos::local(st.origin),
+                            vel: st.velocity,
+                            orient: vd_core::glam::DQuat::IDENTITY,
+                            universe_tick: at,
+                        },
+                    }
+                })
+                .collect();
+            let mut stmts = vec![
+                vd_wire::session_flow::RelayedStatement::Level { at, rows },
+                vd_wire::session_flow::RelayedStatement::Body {
+                    subject: system,
+                    stmt: vd_wire::session_flow::BodyStmt::SelfLook {
+                        bag: vd_core::look::look_bag(&shape_of(system)),
+                    },
+                    authored_at: at,
+                },
+            ];
+            for (p, _) in &movers {
+                stmts.push(vd_wire::session_flow::RelayedStatement::Body {
+                    subject: *p,
+                    stmt: vd_wire::session_flow::BodyStmt::Marker {
+                        luma: vd_core::look::marker_bag(
+                            luma.get(p).copied(),
+                            shape_of(*p).circumscribed_extent(),
+                        ),
+                    },
+                    authored_at: at,
+                });
+            }
+            let own = vd_wire::session_flow::seal_relay_statements(&stmts);
+            let interior = movers
+                .iter()
+                .map(|(p, _)| vd_wire::intershard::InteriorRelay {
+                    child: *p,
+                    child_fence: Fence(3),
+                    own: vd_wire::session_flow::seal_relay_statements(&[
+                        vd_wire::session_flow::RelayedStatement::Level {
+                            at,
+                            rows: Vec::new(),
+                        },
+                        vd_wire::session_flow::RelayedStatement::Body {
+                            subject: *p,
+                            stmt: vd_wire::session_flow::BodyStmt::SelfLook {
+                                bag: vd_core::look::look_bag(&shape_of(*p)),
+                            },
+                            authored_at: at,
+                        },
+                    ]),
+                })
+                .collect();
+            (own, interior)
+        };
+        // One measured run: `w` open windows, `children` held, `n` digest-changing re-ships.
+        const N_RESHIPS: u64 = 3;
+        let run = |w: u64, children: &[RealmId]| -> (u64, BTreeMap<RealmId, usize>, u64) {
+            let cfg = config();
+            let clock = ClockSample {
+                local_tick: vd_core::TickId(4),
+                universe_tick: UniverseTick(0),
+                epoch: vd_core::EpochId(1),
+                synced: true,
+            };
+            let mut held = RelayHeld::default();
+            let mut windows = OpenWindows::default();
+            for i in 0..w {
+                windows.0.insert(
+                    (NodeId(400 + i), WindowId(1)),
+                    OpenWindow::opened(WindowScope::Occupants, clock.local_tick),
+                );
+            }
+            let mut stats = StubStats::default();
+            let mut outbox = OutboundBox::default();
+            for t in 0..N_RESHIPS {
+                for c in children {
+                    let (own, interior) = batch_at(*c, t);
+                    let digest = relay_entry_digest(Fence(5), &own, &interior);
+                    held.0.insert(
+                        *c,
+                        RelayHeldEntry {
+                            seen: clock.local_tick,
+                            fence: Fence(5),
+                            own,
+                            interior,
+                            digest,
+                        },
+                    );
+                }
+                emit_window_relays(
+                    &cfg,
+                    &clock,
+                    Fence(6),
+                    &mut held,
+                    &mut windows,
+                    &mut stats,
+                    &mut outbox,
+                );
+            }
+            // THE WIRE, matched byte-for-byte against a CONSTRUCTED expectation (g_verbatim's
+            // move): the emit order is deterministic (BTreeMap: windows by node, then held
+            // children by realm), so every message's full bytes are re-derivable — no decode,
+            // no refutable match, and per-child blob sizes fall out of the zip. One child's
+            // blob size must be constant across re-ships (values change, layout does not).
+            let mut kids: Vec<RealmId> = children.to_vec();
+            kids.sort_unstable();
+            let mut blobs: BTreeMap<RealmId, usize> = BTreeMap::new();
+            let mut total = 0u64;
+            let mut i = 0usize;
+            for t in 0..N_RESHIPS {
+                for wi in 0..w {
+                    for c in &kids {
+                        let (own, interior) = batch_at(*c, t);
+                        let expected = postcard::to_allocvec(&ShardToGateway::WindowRelayed {
+                            realm_fence: Fence(6),
+                            window: WindowId(1),
+                            child: *c,
+                            child_fence: Fence(5),
+                            statements: own,
+                            interior,
+                        })
+                        .expect("encodes");
+                        let (to, _, bytes, _) = &outbox.0[i];
+                        assert_eq!(*to, NodeId(400 + wi), "the emit order is the derived one");
+                        assert_eq!(
+                            &bytes[..],
+                            &expected[..],
+                            "each relay is byte-identical to its constructed expectation"
+                        );
+                        total += bytes.len() as u64;
+                        let prior = blobs.insert(*c, bytes.len());
+                        assert_eq!(
+                            prior.unwrap_or(bytes.len()),
+                            bytes.len(),
+                            "one child's blob size is constant across re-ships"
+                        );
+                        i += 1;
+                    }
+                }
+            }
+            assert_eq!(i, outbox.0.len(), "every emitted message was matched");
+            (total, blobs, stats.window_relays_forwarded)
+        };
+        // W = 1, C = 1 — the base measurement.
+        let (total_w1, blobs_w1, fwd_w1) = run(1, &[home]);
+        let blob = *blobs_w1.get(&home).expect("the home blob was measured");
+        assert_eq!(
+            fwd_w1, N_RESHIPS,
+            "every tick re-ships (the digest changed)"
+        );
+        assert_eq!(
+            total_w1,
+            blob as u64 * N_RESHIPS,
+            "W=1, C=1: egress == blob × rate"
+        );
+        // THE GATEWAY MULTIPLIER, measured: two windows double the egress exactly.
+        let (total_w2, _, fwd_w2) = run(2, &[home]);
+        assert_eq!(fwd_w2, 2 * N_RESHIPS);
+        assert_eq!(
+            total_w2,
+            2 * total_w1,
+            "W=2 doubles the egress: the W term is real, not assumed"
+        );
+        // THE CHILD MULTIPLIER, measured: a second held child (the ring sibling, same 5-planet
+        // class) adds exactly its own per-child blob, per window, per re-ship.
+        let (total_c2, blobs_c2, fwd_c2) = run(2, &[home, sibling]);
+        let blob_sib = *blobs_c2
+            .get(&sibling)
+            .expect("the sibling blob was measured");
+        assert_eq!(fwd_c2, 2 * 2 * N_RESHIPS);
+        assert_eq!(
+            total_c2,
+            2 * N_RESHIPS * (blob as u64 + blob_sib as u64),
+            "W=2, C=2: egress == W × Σ_child blob × rate",
+        );
+        // THE PIN (slice 6): the departure-fixture blob in bytes — §5.2's ~1 045 B estimate,
+        // measured. A wire or codec change that moves this number flips it loudly.
+        assert_eq!(
+            blob, 1118,
+            "the pinned departure-fixture relay blob (bytes)"
+        );
+        eprintln!(
+            "[slice6] RELAY EGRESS measured == formula: blob {blob} B (sibling {blob_sib} B; \
+             §5.2 modelled ~1045 B) · W=1 egress {total_w1} B / {N_RESHIPS} re-ships · W=2 \
+             doubles exactly · W=2,C=2 {total_c2} B == 2 × {N_RESHIPS} × ({blob}+{blob_sib}). \
+             At the §5.1 reference model (W=50, C=3, 50 Hz re-ship): {:.1} MB/s per shard",
+            50.0 * 3.0 * blob as f64 * 50.0 / 1.0e6,
+        );
+    }
+
+    /// look_horizon.md §6 SLICE 6 — THE UNION OVER-DRAW, measured at interim scale (D-LOOK-2):
+    /// the shared per-realm verdict is the UNION over every observer's in-band set (the owner's
+    /// one-verdict-per-realm ruling), so rows are drawn for one observer because ANOTHER
+    /// observer's verdict is more generous. Two occupants of THE world's galaxy — one parked
+    /// near the home star, one 300 m short of a ring sibling — and the measurement: the fold's
+    /// published verdict equals the union of the two out-of-band singleton sets, and each
+    /// observer over-draws exactly the OTHER's child (its own look + its 5-planet interior = 6
+    /// drawn realm rows per fold, at the departure-fixture row model). The number the D-LOOK-2
+    /// ledger row records; UNMEASURED at near-real scale, by design.
+    #[test]
+    fn slice6_the_union_over_draw_is_measured_at_interim_scale() {
+        let cfg_w = vd_physics::worldgen::UniverseConfig::world(15.0, 0.05);
+        let world = vd_physics::worldgen::WorldView::generated(0, &cfg_w);
+        let galaxy = vd_core::worldgen::GALAXY;
+        let scope = world.neighbourhood(&BTreeSet::from([galaxy]));
+        let galaxy_row = scope
+            .iter()
+            .find(|r| r.realm == galaxy)
+            .expect("the galaxy is rostered");
+        let home = vd_core::worldgen::default_home_realm(world.regions()).expect("home");
+        let centre_of = |r: &vd_core::geometry::RealmRegion| {
+            r.center.delta_m(
+                vd_core::pose::LatticePos::local(DVec3::ZERO),
+                r.frame.tier(),
+            )
+        };
+        let systems: Vec<(RealmId, DVec3)> = scope
+            .iter()
+            .filter(|r| r.parent == Some(galaxy))
+            .map(|r| (r.realm, centre_of(r)))
+            .collect();
+        assert_eq!(systems.len(), 3, "THE galaxy holds 3 systems");
+        let (sib, sib_centre) = *systems
+            .iter()
+            .find(|(s, _)| *s != home)
+            .expect("a ring sibling");
+        // Observer A: 300 m from the home star (deep inside its 11 458 m visibility band).
+        // Observer B: 300 m short of the ring sibling, on the line toward the galaxy origin.
+        let pos_a = DVec3::new(0.0, 0.0, -300.0);
+        let pos_b = sib_centre - sib_centre.normalize() * 300.0;
+        // THE OUT-OF-BAND SINGLETON SETS (the oracle): which children each observer's own
+        // position puts in band — the per-observer verdict a per-session fold WOULD have
+        // computed. Asserted disjoint singletons so the union measurement has teeth.
+        let in_band_of = |pos: DVec3| -> BTreeSet<RealmId> {
+            scope
+                .iter()
+                .filter(|r| r.parent == Some(galaxy))
+                .filter(|r| r.aoi.in_range(false, (centre_of(r) - pos).length()))
+                .map(|r| r.realm)
+                .collect()
+        };
+        let set_a = in_band_of(pos_a);
+        let set_b = in_band_of(pos_b);
+        assert_eq!(
+            set_a,
+            BTreeSet::from([home]),
+            "A sees exactly the home star"
+        );
+        assert_eq!(set_b, BTreeSet::from([sib]), "B sees exactly its sibling");
+        // THE REAL FOLD, both observers held: the galaxy shard's own AoI tick publishes the
+        // SHARED verdict.
+        let cfg = StubConfig {
+            realm: galaxy,
+            held_realms: StubConfig::single_realm(galaxy),
+            frame: galaxy_row.frame,
+            own_coord: vd_core::worldgen::coord_of_realm(&scope, galaxy)
+                .expect("the galaxy has a lineage"),
+            ..config()
+        };
+        let mut rig = Rig::with_config(cfg);
+        // The grant, keyed on THE GALAXY (the shared `grant_realm` helper grants the default
+        // rig realm, which this fixture is not).
+        {
+            let reply = DirectoryReply::Head {
+                key: DirectoryKey::Realm(galaxy),
+                record: Some(vd_wire::seams::directory::OwnerRecord {
+                    authority: AuthorityRef::Shard(SHARD),
+                    fence: Fence(1),
+                    lease_expires: UniverseTick(1_000),
+                    in_transfer: None,
+                }),
+            };
+            let bytes = crate::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::DirectoryReply(reply)).expect("encode"),
+            );
+            let _ = rig.tick(vec![Inbound::Wire {
+                from: ORCH,
+                class: MsgClass::Saga,
+                bytes,
+            }]);
+        }
+        plant_aoi(&mut rig, scope.clone());
+        let own_frame = galaxy_row.frame;
+        for (i, pos) in [(1u32, pos_a), (2, pos_b)] {
+            let entity = EntityId::pack(EntityKind::Player, 60, u64::from(i), i);
+            let mut dot = slice6_dot(entity, own_frame, Authority::Owned { fence: Fence(1) });
+            dot.pose = vd_core::pose::StampedPose::at_rest(own_frame, pos, UniverseTick(100));
+            rig.world
+                .resource_mut::<Dots>()
+                .0
+                .insert(SessionId(u128::from(i)), dot);
+        }
+        let _ = rig.tick(vec![]);
+        let verdict = rig.world.resource::<InBandVerdict>().0.clone();
+        let union: BTreeSet<RealmId> = set_a.union(&set_b).copied().collect();
+        assert_eq!(
+            verdict, union,
+            "the shared verdict IS the union of the observers' own sets"
+        );
+        // THE OVER-DRAW, recorded (D-LOOK-2's interim-scale measurement): each observer's fold
+        // carries the OTHER observer's child — its own look plus its interior's 5 planets = 6
+        // drawn realm rows per fold that this observer's own position never asked for.
+        let interior_rows_of =
+            |s: RealmId| 1 + vd_physics::worldgen::moving_children_for_config(0, &cfg_w, s).len();
+        let overdraw_a: usize = union.difference(&set_a).map(|s| interior_rows_of(*s)).sum();
+        let overdraw_b: usize = union.difference(&set_b).map(|s| interior_rows_of(*s)).sum();
+        assert_eq!(
+            (overdraw_a, overdraw_b),
+            (6, 6),
+            "each observer over-draws exactly the other's 1-look + 5-planet subtree"
+        );
+        eprintln!(
+            "[slice6] UNION OVER-DRAW at interim scale (D-LOOK-2): union verdict {} children \
+             (A's own {}, B's own {}); over-draw {} rows per fold per observer (1 own look + 5 \
+             interior rows for the child only the OTHER observer needs) — measured at interim \
+             scale ONLY; the near-real-scale number stays owed on the ledger row",
+            union.len(),
+            set_a.len(),
+            set_b.len(),
+            overdraw_a,
+        );
+    }
+
+    /// G-STRUCTURAL-SEAL (look_horizon.md §6 slice 3): production code in `vd-sim` contains NO
+    /// call to any relay-open function — the HR1 guarantee across two hops as a TEST, not a
+    /// claim. The scan strips line comments and stops at each file's `#[cfg(test)]` boundary
+    /// (tests may lawfully open a seal to assert its content; a realm never does). Two positive
+    /// controls keep it honest: the needle exists in the raw sources (so the scanner hunts a
+    /// real name), and the crate's own files were actually walked.
+    #[test]
+    fn g_structural_seal_vd_sim_production_code_calls_no_open_function() {
+        let needle = ["open_", "relay"].concat(); // split so this file's own scan cannot self-trip
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut pending = vec![src];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("vd-sim src dir reads") {
+                let path = entry.expect("dir entry reads").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    // EVERY file — a stray non-source file reads lossily and scans inert,
+                    // which is cheaper than an uncoverable extension-filter arm (HR5).
+                    files.push(path);
+                }
+            }
+        }
+        assert!(
+            files.iter().any(|p| p.ends_with("stub.rs")),
+            "anti-vacuity: the holder's own file is in the walk"
+        );
+        let mut raw_hits = 0usize;
+        for path in &files {
+            let content =
+                String::from_utf8_lossy(&std::fs::read(path).expect("source reads")).into_owned();
+            raw_hits += content.matches(&needle).count();
+            let production = content
+                .split_once("#[cfg(test)]")
+                .map_or(content.as_str(), |(prod, _)| prod);
+            for (n, line) in production.lines().enumerate() {
+                let code = line.split("//").next().expect("split yields a first part");
+                let clean = !code.contains(&needle);
+                let at = format!("{}:{}", path.display(), n + 1);
+                assert!(
+                    clean,
+                    "G-STRUCTURAL-SEAL: {at} calls a relay-open function in production code — \
+                     a realm may hold and forward sealed bytes, never read them (HR1; the Q2 \
+                     ruling; look_horizon.md §2 ASK A)"
+                );
+            }
+        }
+        assert!(
+            raw_hits > 0,
+            "anti-vacuity: the needle never appears anywhere — the scanner hunts a dead name"
+        );
+    }
+
+    /// Every `RealmInterest` in the outbox (decoded, with its destination — the routing assert).
+    fn interests(
+        sent: &[(NodeId, MsgClass, Vec<u8>)],
+    ) -> Vec<(NodeId, vd_wire::intershard::RealmInterest)> {
+        sent.iter()
+            .filter_map(
+                |(to, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                    Ok(InterShardFlow::RealmInterest(ri)) => Some((*to, ri)),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// THE INTEREST BYTE's admission (look horizon slice 4, §2 ASK B's fail-closed shape),
+    /// every refusal arm driven by name: mis-route, unattested sender (which arms the lazy
+    /// PARENT head re-read — the re-home backstop mirroring `retain_child_live`), an unlawful
+    /// value, a deposed incarnation's stale byte — and the lawful path holding the LATEST value
+    /// whole, `0` included, so the fence ordering survives an explicit switch-off.
+    #[test]
+    fn the_interest_byte_admits_fail_closed_and_holds_the_latest_lawful_value() {
+        let story = Story::new();
+        let cfg = story_config(&story, story.system);
+        let clock = ClockSample {
+            local_tick: vd_core::TickId(4),
+            universe_tick: UniverseTick(0),
+            epoch: vd_core::EpochId(1),
+            synced: true,
+        };
+        let parent = ParentRealmNode(Some(NodeId(40)));
+        let mut held = InterestHeld::default();
+        let mut stats = StubStats::default();
+        let mut outbox = OutboundBox::default();
+        let ri =
+            |child: RealmCoord, fence: u64, at: u64, look: u8| vd_wire::intershard::RealmInterest {
+                child,
+                parent_fence: Fence(fence),
+                at: UniverseTick(at),
+                look_inside: look,
+            };
+        // MIS-ROUTE: a coord lowering to somebody else (the system's own planet) drops counted.
+        let planet_coord = cfg
+            .own_coord
+            .child(level_of(story.planet).expect("planet level"));
+        on_realm_interest(
+            ri(planet_coord, 5, 1, 1),
+            NodeId(40),
+            &cfg,
+            &clock,
+            &parent,
+            &mut held,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.realm_interest_misrouted, 1);
+        assert_eq!(held.0, None, "nothing believed");
+        // UNATTESTED: right coord, wrong sender — refused + the lazy parent head re-read armed.
+        on_realm_interest(
+            ri(cfg.own_coord.clone(), 5, 1, 1),
+            NodeId(41),
+            &cfg,
+            &clock,
+            &parent,
+            &mut held,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.realm_interest_unattested, 1);
+        assert_eq!(held.0, None);
+        let parent_realm = cfg
+            .own_coord
+            .parent()
+            .expect("the story system has a parent")
+            .lowered();
+        assert_eq!(outbox.0.len(), 1, "the unattested arm arms ONE re-read");
+        let (to, _, bytes, _) = &outbox.0[0];
+        assert_eq!(*to, cfg.orchestrator);
+        assert_eq!(
+            postcard::from_bytes::<InterShardFlow>(bytes).expect("the re-read decodes"),
+            InterShardFlow::Directory(DirectoryOp::HeadRead {
+                key: DirectoryKey::Realm(parent_realm),
+            }),
+            "…and it is the PARENT's head read (the re-home backstop)"
+        );
+        // UNATTESTED AT A ROOT: a realm with no parent coord refuses the same way but has no
+        // parent head to re-read — the re-read arm is skipped, nothing armed, nothing believed.
+        let root_cfg = config(); // own_coord = root_coord(System(7)) — parent() is None
+        let outbox_before = outbox.0.len();
+        on_realm_interest(
+            ri(root_cfg.own_coord.clone(), 5, 1, 1),
+            NodeId(41),
+            &root_cfg,
+            &clock,
+            &parent,
+            &mut held,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.realm_interest_unattested, 2);
+        assert_eq!(
+            outbox.0.len(),
+            outbox_before,
+            "a rootward refusal arms no re-read — there is no parent to resolve"
+        );
+        // UNLAWFUL VALUE: 1 or 0, nothing else.
+        on_realm_interest(
+            ri(cfg.own_coord.clone(), 5, 1, 2),
+            NodeId(40),
+            &cfg,
+            &clock,
+            &parent,
+            &mut held,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.realm_interest_unlawful, 1);
+        assert_eq!(held.0, None);
+        // LAWFUL 1: held whole.
+        on_realm_interest(
+            ri(cfg.own_coord.clone(), 5, 2, 1),
+            NodeId(40),
+            &cfg,
+            &clock,
+            &parent,
+            &mut held,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.realm_interest_received, 1);
+        assert_eq!(
+            held.0,
+            Some(InterestEntry {
+                fence: Fence(5),
+                at: UniverseTick(2),
+                seen: clock.local_tick,
+                look_inside: 1,
+            })
+        );
+        // STALE: a deposed incarnation (fence below the held one) never regresses the entry.
+        on_realm_interest(
+            ri(cfg.own_coord.clone(), 4, 9, 0),
+            NodeId(40),
+            &cfg,
+            &clock,
+            &parent,
+            &mut held,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.realm_interest_stale, 1);
+        assert_eq!(
+            held.0.map(|e| e.look_inside),
+            Some(1),
+            "the zombie changed nothing"
+        );
+        // LAWFUL 0 at a fresher stamp: stored WHOLE — the ordering survives the switch-off.
+        on_realm_interest(
+            ri(cfg.own_coord.clone(), 5, 3, 0),
+            NodeId(40),
+            &cfg,
+            &clock,
+            &parent,
+            &mut held,
+            &mut stats,
+            &mut outbox,
+        );
+        assert_eq!(stats.realm_interest_received, 2);
+        assert_eq!(
+            held.0,
+            Some(InterestEntry {
+                fence: Fence(5),
+                at: UniverseTick(3),
+                seen: clock.local_tick,
+                look_inside: 0,
+            }),
+            "an explicit 0 is held, not erased — the fence high-water survives"
+        );
+    }
+
+    /// THE DOWN-PROXY + THE STRUCTURAL CASCADE CAP (look horizon slice 4, §3.4.3; the G-NO-CASCADE
+    /// structural half): a VACATED realm holding a live interest byte inserts ONE synthetic
+    /// observer at its own centre and its existing fold demands its in-band interior — while the
+    /// OCCUPANCY truths stay exactly what they were: it still self-reports Empty, ships NO
+    /// `ChildLive` bit, and — with a live interior band on its child, a resolved route, and the
+    /// synthetic observer standing in band, so the origin flag is the ONLY thing left to stop it
+    /// — emits NO interest of its own downward. The byte then DECAYS on the derived TTL and the
+    /// wake ends: "nobody is watching".
+    #[test]
+    fn a_live_interest_byte_wakes_the_interior_reports_empty_and_never_cascades() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // The child carries a LIVE interior band + a resolved head route: everything an unlawful
+        // cascade would need is present, on purpose.
+        let child = RealmRegion {
+            interior_band: aoi_band(0),
+            ..aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0)
+        };
+        plant_aoi(&mut rig, vec![root_region(), own_region(), child]);
+        rig.world
+            .resource_mut::<ChildRealmNodes>()
+            .0
+            .insert(OTHER_REALM, NodeId(70));
+        rig.world.resource_mut::<ParentRealmNode>().0 = Some(ANCESTOR);
+        // The byte arrives through the REAL dispatch (the reliable peer carrier the relay
+        // rides), from the resolved parent head — the same admission production runs.
+        let byte = InterShardFlow::RealmInterest(vd_wire::intershard::RealmInterest {
+            child: rig.world.resource::<StubConfig>().own_coord.clone(),
+            parent_fence: Fence(5),
+            at: UniverseTick(50),
+            look_inside: 1,
+        });
+        let sent = rig.tick(vec![Inbound::Wire {
+            from: ANCESTOR,
+            class: MsgClass::Saga,
+            bytes: crate::io::bytes(postcard::to_allocvec(&byte).expect("encode")),
+        }]);
+        let d = demands(&sent);
+        let child_coord = child_coord_of(OWN_REALM, OTHER_REALM);
+        assert!(
+            d.iter()
+                .any(|d| (d.child == child_coord) & (d.verb == DemandVerb::SpinUp)),
+            "the down-proxy woke the interior: {d:?}"
+        );
+        assert!(
+            d.iter()
+                .any(|d| (d.child.lowered() == OWN_REALM) & (d.verb == DemandVerb::Empty)),
+            "…while the realm STILL truthfully reports Empty (occupancy is occupancy): {d:?}"
+        );
+        let bits = sent
+            .iter()
+            .filter(|(_, _, b)| {
+                matches!(
+                    postcard::from_bytes::<InterShardFlow>(b),
+                    Ok(InterShardFlow::ChildLive(_))
+                )
+            })
+            .count();
+        assert_eq!(
+            bits, 0,
+            "a byte from outside must never manufacture an occupancy bit"
+        );
+        assert!(
+            interests(&sent).is_empty(),
+            "THE CAP, structurally: route + live band + in-band synthetic observer, and still \
+             no interest goes down — only occupancy-derived observers produce interest"
+        );
+        assert!(
+            rig.world
+                .resource::<InBandVerdict>()
+                .0
+                .contains(&OTHER_REALM),
+            "the shared verdict names the interior (§3.4.5 — the outside watcher's forward gate)"
+        );
+        // AN EXPLICIT 0 (still fresh, held whole): powers NO proxy — the fold runs empty.
+        let off = InterShardFlow::RealmInterest(vd_wire::intershard::RealmInterest {
+            child: rig.world.resource::<StubConfig>().own_coord.clone(),
+            parent_fence: Fence(5),
+            at: UniverseTick(51),
+            look_inside: 0,
+        });
+        rig.set_local_tick(2);
+        let sent = rig.tick(vec![Inbound::Wire {
+            from: ANCESTOR,
+            class: MsgClass::Saga,
+            bytes: crate::io::bytes(postcard::to_allocvec(&off).expect("encode")),
+        }]);
+        assert_eq!(
+            rig.world
+                .resource::<InterestHeld>()
+                .0
+                .map(|e| e.look_inside),
+            Some(0),
+            "the 0 was admitted through the dispatch and held whole"
+        );
+        assert!(
+            demands(&sent)
+                .iter()
+                .all(|d| d.child != child_coord_of(OWN_REALM, OTHER_REALM)),
+            "a held 0 wakes nothing — do-not-assume is as lawful as assume"
+        );
+        // DECAY: the lane goes silent past the derived TTL ⇒ the byte is gone, the wake ends
+        // (the TTL base is the 0-entry's own `seen = 2`).
+        rig.set_local_tick(2 + retain_ttl_ticks(&config()) + 1);
+        let sent = rig.tick(vec![]);
+        assert_eq!(
+            rig.world.resource::<InterestHeld>().0,
+            None,
+            "silence decays to nobody-is-watching"
+        );
+        let d = demands(&sent);
+        assert!(
+            d.iter().all(|d| d.child != child_coord),
+            "the expired byte demands nothing: {d:?}"
+        );
+    }
+
+    /// THE INTEREST EMISSION's edges (look horizon slice 4, §2 ASK B / G-INTEREST-BAND's unit
+    /// half): a `1` fires the tick the band is first entered (the transition itself — the
+    /// finding-41 doctrine), re-asserts on the AoI beat and ONLY the beat while the band holds
+    /// (the hysteresis hold zone included), and ONE explicit `0` fires on the falling edge; the
+    /// dead zone between spin-up and tear-down admits nobody fresh (the band-edge gate: it
+    /// spins up none).
+    #[test]
+    fn the_interest_emission_rises_on_entry_beats_and_falls_to_zero_at_the_band() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        // A hand-derived interior band: spin-up 400 m, tear-down 400 + 2·0.05·2.5 = 400.25 m.
+        let band =
+            vd_core::geometry::AoiConfig::for_velocity_safe(400.0, 1.0, 1.0, 2.0, 0.05, 0, 0.5)
+                .expect("a live interior band");
+        let child = RealmRegion {
+            interior_band: band,
+            ..aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0)
+        };
+        plant_aoi(&mut rig, vec![root_region(), own_region(), child]);
+        rig.world
+            .resource_mut::<ChildRealmNodes>()
+            .0
+            .insert(OTHER_REALM, NodeId(70));
+        let child_coord = child_coord_of(OWN_REALM, OTHER_REALM);
+        // NO ROUTE YET: the occupant stands in band before the child's head is resolved —
+        // nothing is sent, the latch stays untouched, and the NEXT pass (route in hand) still
+        // fires the rising edge (fail-closed, self-healing — never through the orchestrator).
+        rig.world.resource_mut::<ChildRealmNodes>().0.clear();
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(350.0, 0.0, 0.0),
+        );
+        rig.set_local_tick(10);
+        assert!(
+            interests(&rig.tick(vec![])).is_empty(),
+            "an unresolved head sends nothing — and must not consume the edge"
+        );
+        rig.world
+            .resource_mut::<ChildRealmNodes>()
+            .0
+            .insert(OTHER_REALM, NodeId(70));
+        // RISING EDGE, off-beat: an occupant enters the band ⇒ the 1 ships at once, direct to
+        // the child's attested head.
+        rig.set_local_tick(11);
+        let ints = interests(&rig.tick(vec![]));
+        assert_eq!(ints.len(), 1, "the rising edge ships immediately");
+        assert_eq!(
+            ints[0].0,
+            NodeId(70),
+            "direct to the child's head, nowhere else"
+        );
+        assert_eq!(ints[0].1.look_inside, 1);
+        assert_eq!(ints[0].1.child, child_coord);
+        // Between beats: send-on-beat holds its tongue.
+        rig.set_local_tick(12);
+        assert!(
+            interests(&rig.tick(vec![])).is_empty(),
+            "no beat, no edge, no byte"
+        );
+        // On the beat: re-asserted (the receiver's TTL is sized against this).
+        rig.set_local_tick(20);
+        let ints = interests(&rig.tick(vec![]));
+        assert_eq!(ints.len(), 1);
+        assert_eq!(ints[0].1.look_inside, 1);
+        // THE HOLD ZONE: between spin-up and tear-down an acquired child is kept…
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(400.1, 0.0, 0.0),
+        );
+        rig.set_local_tick(30);
+        let ints = interests(&rig.tick(vec![]));
+        assert_eq!(ints.len(), 1, "held inside the dead zone");
+        assert_eq!(ints[0].1.look_inside, 1);
+        // FALLING EDGE, off-beat: past tear-down the explicit 0 ships once.
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(401.0, 0.0, 0.0),
+        );
+        rig.set_local_tick(31);
+        let ints = interests(&rig.tick(vec![]));
+        assert_eq!(
+            ints.len(),
+            1,
+            "the falling edge ships the explicit 0 at once"
+        );
+        assert_eq!(ints[0].1.look_inside, 0);
+        // OUT, on a beat: silent (nothing to re-assert).
+        rig.set_local_tick(40);
+        assert!(interests(&rig.tick(vec![])).is_empty());
+        // THE BAND EDGE from outside: the dead zone admits nobody fresh — it spins up none.
+        insert_owned_dot(
+            &mut rig,
+            TRIG_SESSION,
+            player(7),
+            DVec3::new(400.1, 0.0, 0.0),
+        );
+        rig.set_local_tick(50);
+        assert!(
+            interests(&rig.tick(vec![])).is_empty(),
+            "between spin-up and tear-down, a FRESH approach is not yet interest"
+        );
+    }
+
+    /// THE SELF-PROXY EXCLUSION (the warp gate's red of 2026-08-17, root-caused to this arm):
+    /// a child's OWN occupied-child proxy never produces interest TO that child — the byte
+    /// exists to make "something OUTSIDE may be looking in" representable (Q1's exact
+    /// sentence), and a child's own occupants are inside it, already held, already waking its
+    /// interior. Without the exclusion the universe flags its occupied galaxy, the galaxy's
+    /// down-proxy reaches its own full extent, and EVERY system wakes — §2 ASK B's priced and
+    /// rejected alternative, measured live. The SL7 sibling-warming STAYS: the same proxy
+    /// still produces interest to a SIBLING inside its band.
+    #[test]
+    fn a_childs_own_proxy_never_flags_it_interested_but_still_warms_its_sibling() {
+        let mut rig = Rig::new();
+        rig.grant_realm();
+        let band =
+            vd_core::geometry::AoiConfig::for_velocity_safe(400.0, 1.0, 1.0, 2.0, 0.05, 0, 0.5)
+                .expect("a live interior band");
+        let child = RealmRegion {
+            interior_band: band,
+            ..aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0)
+        };
+        let sibling = RealmId::Planet(43);
+        let sibling_region = RealmRegion {
+            interior_band: band,
+            ..region(sibling, Some(OWN_REALM), DVec3::new(200.0, 0.0, 0.0), 100.0)
+        };
+        plant_aoi(
+            &mut rig,
+            vec![root_region(), own_region(), child, sibling_region],
+        );
+        {
+            let mut nodes = rig.world.resource_mut::<ChildRealmNodes>();
+            nodes.0.insert(OTHER_REALM, NodeId(70));
+            nodes.0.insert(sibling, NodeId(71));
+        }
+        // The child's fresh occupancy bit makes it an OCCUPIED-CHILD observer standing at its
+        // own placement (the origin), reaching its own 100 m extent.
+        rig.world.resource_mut::<ChildLiveness>().0.insert(
+            OTHER_REALM,
+            ChildLiveEntry {
+                home: NodeId(70),
+                fence: Fence(1),
+                at: UniverseTick(1),
+                last_seen: vd_core::TickId(9),
+            },
+        );
+        rig.set_local_tick(10); // a beat
+        let ints = interests(&rig.tick(vec![]));
+        let child_coord = child_coord_of(OWN_REALM, OTHER_REALM);
+        let sibling_coord = child_coord_of(OWN_REALM, sibling);
+        assert!(
+            ints.iter().all(|(_, ri)| ri.child != child_coord),
+            "a child's own proxy must never flag the child itself: {ints:?}"
+        );
+        let to_sibling: Vec<_> = ints
+            .iter()
+            .filter(|(_, ri)| ri.child == sibling_coord)
+            .collect();
+        assert_eq!(
+            to_sibling.len(),
+            1,
+            "…while the SAME proxy still warms the sibling inside its band: {ints:?}"
+        );
+        assert_eq!(to_sibling[0].0, NodeId(71));
+        assert_eq!(to_sibling[0].1.look_inside, 1);
     }
 
     /// A GRANDCHILD's claim on the scanned point (a region whose parent is another child, not the
@@ -20201,7 +21803,7 @@ mod tests {
         // refusal arm a green test can never take): the authored interior level FIRST — built
         // from the same placement head the producer read — then the realm's own look about
         // ITSELF (SL3: the boot extent, nothing else).
-        let opened = vd_wire::session_flow::open_relay_statements(&ships[0].1.statements)
+        let opened = vd_wire::session_flow::open_relay_statements(&ships[0].1.own)
             .expect("the child's own seal opens");
         let (expected_rows, at) = {
             let cfg_realm = rig.world.resource::<StubConfig>().realm;
@@ -20230,8 +21832,18 @@ mod tests {
                     },
                     authored_at: at,
                 },
+                vd_wire::session_flow::RelayedStatement::Body {
+                    subject: OTHER_REALM,
+                    stmt: vd_wire::session_flow::BodyStmt::Marker {
+                        // The presence floor (look_horizon.md slice 1): the non-glowing child's
+                        // point of light — one radius, nothing else.
+                        luma: vd_core::look::marker_bag(None, 100.0),
+                    },
+                    authored_at: at,
+                },
             ],
-            "verbatim: the level leads, the self-look follows, nothing deeper rides"
+            "verbatim: the level leads, the self-look follows, one marker per direct child, \
+             nothing deeper rides"
         );
         // Unchanged + off-cadence: send-on-change holds its tongue.
         rig.set_local_tick(32);
@@ -20280,7 +21892,9 @@ mod tests {
             RelayHeldEntry {
                 seen: vd_core::TickId(1),
                 fence: Fence(2),
-                statements: vec![7, 7, 7],
+                own: vec![7, 7, 7],
+                interior: Vec::new(),
+                digest: relay_entry_digest(Fence(2), &[7, 7, 7], &[]),
             },
         );
         assert_eq!(
@@ -21610,7 +23224,7 @@ mod tests {
         rig.world
             .resource_mut::<ChildLuma>()
             .0
-            .insert(OTHER_REALM, vd_core::look::luma_bag(6, 0.25));
+            .insert(OTHER_REALM, (6, 0.25));
         insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
         rig
     }
@@ -21641,10 +23255,11 @@ mod tests {
         assert_eq!(rows[0].pose.frame, frame_of(OWN_REALM));
         assert_eq!(rows[0].pose.pos.offset(), WINDOW_CHILD_CENTER);
         assert_eq!(rows[1].realm, RealmId::Planet(43));
-        // The bodies: the realm's OWN look (its boot extent, SL3) + the armed child's marker (the
-        // planted bag verbatim); the quiet child carries NO luma ⇒ NO marker (absence of data).
+        // The bodies: the realm's OWN look (its boot extent, SL3) + one point-of-light marker
+        // per direct child, GLOWING OR NOT (look_horizon.md slice 1's presence floor): the armed
+        // child's datum + extent, the quiet child's extent ALONE (the one-radius law).
         let bodies = window_bodies(&sent);
-        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies.len(), 3);
         assert_eq!(bodies[0].2, OWN_REALM);
         assert_eq!(
             bodies[0].3,
@@ -21660,9 +23275,21 @@ mod tests {
                 WindowId(1),
                 OTHER_REALM,
                 BodyStmt::Marker {
-                    luma: vd_core::look::luma_bag(6, 0.25)
+                    luma: vd_core::look::marker_bag(Some((6, 0.25)), 100.0)
                 }
             )
+        );
+        assert_eq!(
+            bodies[2],
+            (
+                GATEWAY,
+                WindowId(1),
+                RealmId::Planet(43),
+                BodyStmt::Marker {
+                    luma: vd_core::look::marker_bag(None, 100.0)
+                }
+            ),
+            "the non-glowing child still states a correctly-sized point of light"
         );
         // The verdict: the armed child is in the dot's band; the quiet child (inert band) is not.
         assert_eq!(
@@ -21678,9 +23305,56 @@ mod tests {
         let stats = rig.world.resource::<StubStats>();
         assert_eq!(stats.window_frames_sent, 2);
         assert_eq!(stats.window_frame_rows_sent, 4);
-        assert_eq!(stats.window_bodies_sent, 2);
+        assert_eq!(stats.window_bodies_sent, 3);
         assert_eq!(stats.window_memberships_sent, 1);
         assert_eq!(stats.windows_open, 1);
+    }
+
+    /// THE PRESENCE FLOOR's producer half (look_horizon.md slice 1, Q2 APPROVED 2026-08-17 — the
+    /// STATION-LAPSE gate's root cause, DECLARED RED BEFORE THE SLICE): EVERY direct child states
+    /// a point-of-light marker — a glowing child's carries its photometric datum plus its
+    /// circumscribed extent, a non-glowing child's the extent alone. Before the floor, a
+    /// non-glowing child (a station, a city, a ship) had NO lawful bag content at all, so the
+    /// moment its own picture lapsed it VANISHED instead of degrading to a correctly-sized point.
+    #[test]
+    fn every_direct_child_states_a_point_of_light_marker_glowing_or_not() {
+        let mut rig = window_rig();
+        let open = GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Occupants,
+        };
+        let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+        let bodies = window_bodies(&sent);
+        assert_eq!(
+            bodies.len(),
+            3,
+            "the realm's own look + a marker for BOTH direct children (the quiet, non-glowing \
+             child included — the presence floor): {bodies:?}",
+        );
+        let marker_of = |realm: RealmId| {
+            bodies
+                .iter()
+                .find(|(_, _, subject, _)| *subject == realm)
+                .map(|(_, _, _, stmt)| stmt.clone())
+                .unwrap_or_else(|| panic!("{realm:?} states no marker — the presence floor hole"))
+        };
+        // The armed (glowing) child: its photometric datum AND its circumscribed extent, in the
+        // ONE marker bag.
+        assert_eq!(
+            marker_of(OTHER_REALM),
+            BodyStmt::Marker {
+                luma: vd_core::look::marker_bag(Some((6, 0.25)), 100.0)
+            },
+        );
+        // The quiet (non-glowing) child: the extent ALONE — one radius, nothing else (the
+        // one-radius law: a bound is a promise about space; a look is a statement about
+        // appearance).
+        assert_eq!(
+            marker_of(RealmId::Planet(43)),
+            BodyStmt::Marker {
+                luma: vd_core::look::marker_bag(None, 100.0)
+            },
+        );
     }
 
     #[test]
@@ -21699,7 +23373,7 @@ mod tests {
         let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
         let first_bodies = window_bodies(&sent);
         let first_membership = window_memberships(&sent);
-        assert_eq!(first_bodies.len(), 2, "the full set on open");
+        assert_eq!(first_bodies.len(), 3, "the full set on open");
         assert_eq!(first_membership.len(), 1);
         // A quiet tick is still quiet — the re-assert is the BEAT, not every tick.
         rig.set_local_tick(2);
@@ -21713,7 +23387,7 @@ mod tests {
         let stats = rig.world.resource::<StubStats>();
         assert_eq!(stats.window_reasserted, 1);
         assert_eq!(stats.windows_opened, 1, "a keep-alive is not a new window");
-        assert_eq!(stats.window_bodies_sent, 4, "two served twice");
+        assert_eq!(stats.window_bodies_sent, 6, "three served twice");
         assert_eq!(stats.window_memberships_sent, 2);
     }
 
@@ -21827,7 +23501,7 @@ mod tests {
         rig.world
             .resource_mut::<ChildLuma>()
             .0
-            .insert(child_realm, vd_core::look::luma_bag(6, 0.25));
+            .insert(child_realm, (6, 0.25));
         insert_owned_dot_framed(
             &mut rig,
             TRIG_SESSION,
@@ -21935,7 +23609,9 @@ mod tests {
         // marker BAGS are the same byte strings in both runs — the same boot extent through the
         // one codec, the same planted datum — and only the subject ids differ per run.
         let look = vd_core::look::look_bag(&Boundary::Shell { r: 100_000.0 });
-        let luma = vd_core::look::luma_bag(6, 0.25);
+        // The presence floor (look_horizon.md slice 1): the planted datum + the child's
+        // circumscribed extent, one bag through the one codec, identical bytes on every profile.
+        let luma = vd_core::look::marker_bag(Some((6, 0.25)), 100.0);
         let expected = |own: RealmId, child: RealmId| {
             vec![
                 (
@@ -22147,7 +23823,8 @@ mod tests {
         // the parent's per-child message stays a placement and nothing else, SL3); the ONE level
         // of interior comes from the live realm's OWN window lane. Chained, an observer's
         // windows reach exactly two levels — inside the two-level visibility guarantee the boot
-        // fence (`guard_grandchildren_invisible_outside`) proves on THE world.
+        // fence (`guard_visibility_climb_bounded`, look_horizon slice 2 — the MEASURED climb
+        // against the look carrier's arity) proves on THE world.
         let near = DVec3::new(500.0, 0.0, 0.0);
         let mut rig = parent_with_two_planet_children(near);
         inject_bit(&mut rig, RealmId::Planet(42));

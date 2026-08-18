@@ -86,9 +86,15 @@ pub fn gateway_view(
         window_relay_unvouched,
         window_relay_stale,
         window_relay_rows_composed,
-        window_relay_unplaceable,
+        window_relay_descent_refused,
+        window_relay_stamp_missing,
+        window_relay_unrostered,
+        window_relay_stamp_skew_ticks,
+        window_relay_depth_max,
         window_looks_pruned,
         window_relay_levels_pruned,
+        window_relay_interior_unvouched,
+        window_relay_interior_filtered,
     } = *stats;
     GatewayView {
         logins_rejected,
@@ -156,9 +162,15 @@ pub fn gateway_view(
         window_relay_unvouched,
         window_relay_stale,
         window_relay_rows_composed,
-        window_relay_unplaceable,
+        window_relay_descent_refused,
+        window_relay_stamp_missing,
+        window_relay_unrostered,
+        window_relay_stamp_skew_ticks,
+        window_relay_depth_max,
         window_looks_pruned,
         window_relay_levels_pruned,
+        window_relay_interior_unvouched,
+        window_relay_interior_filtered,
         sessions_open,
         dynamic_shards,
         windows_open,
@@ -277,9 +289,19 @@ mod tests {
             window_relay_unvouched: 66,
             window_relay_stale: 67,
             window_relay_rows_composed: 68,
-            window_relay_unplaceable: 69,
+            // 82..86: the C5 split of the retired window_relay_unplaceable (69) + its two
+            // gauges (look_horizon.md slice 0), appended in declaration order.
+            window_relay_descent_refused: 82,
+            window_relay_stamp_missing: 83,
+            window_relay_unrostered: 84,
+            window_relay_stamp_skew_ticks: 85,
+            window_relay_depth_max: 86,
             window_looks_pruned: 80,
             window_relay_levels_pruned: 81,
+            // 87..88: the look-horizon slice-3 interior-forward pair, appended in
+            // declaration order.
+            window_relay_interior_unvouched: 87,
+            window_relay_interior_filtered: 88,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);
@@ -347,9 +369,15 @@ mod tests {
         assert_eq!(view.window_relay_unvouched, 66);
         assert_eq!(view.window_relay_stale, 67);
         assert_eq!(view.window_relay_rows_composed, 68);
-        assert_eq!(view.window_relay_unplaceable, 69);
+        assert_eq!(view.window_relay_descent_refused, 82);
+        assert_eq!(view.window_relay_stamp_missing, 83);
+        assert_eq!(view.window_relay_unrostered, 84);
+        assert_eq!(view.window_relay_stamp_skew_ticks, 85);
+        assert_eq!(view.window_relay_depth_max, 86);
         assert_eq!(view.window_looks_pruned, 80);
         assert_eq!(view.window_relay_levels_pruned, 81);
+        assert_eq!(view.window_relay_interior_unvouched, 87);
+        assert_eq!(view.window_relay_interior_filtered, 88);
         assert_eq!(view.sessions_open, 24);
         assert_eq!(view.dynamic_shards, 25);
         assert_eq!(view.windows_open, 37);
