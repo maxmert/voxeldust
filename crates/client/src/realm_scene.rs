@@ -21,7 +21,6 @@ use std::collections::BTreeMap;
 use glam::DVec3;
 use vd_core::geometry::Boundary;
 use vd_core::pose::{LatticePos, RealmId, Tier};
-use vd_core::worldgen::MAX_RENDERABLE_EXTENT_M;
 use vd_wire::channels::SceneRow;
 
 use crate::interp::stated_tier;
@@ -75,8 +74,10 @@ pub struct RealmBox {
     /// (`TAG_LUMA`). A third source is unrepresentable in the wire types. The diagnosis surface
     /// (`DevState.realm_boxes[].body_kind`) reads this.
     pub body: BodyKind,
-    /// The photometric datum `(class_code, luma_lsun)` for a MARKER body — Slice D's point-sprite
-    /// input. `None` on a look body (a marker cannot carry a look, and a look never carries luma).
+    /// The photometric datum `(class_code, luma_lsun)` — Slice D's point-sprite input on a
+    /// MARKER body. On a LOOK body it is usually `None`, but a RUNNING star's OWN look bag
+    /// lawfully carries `TAG_LUMA` beside `TAG_LOOK` (THE STAR-LOOK EXTENSION SEAM, owner
+    /// ruling 2026-08-19), so a look row may state its own light.
     pub luma: Option<(u8, f64)>,
     /// THE UNIT `center`'s integer cell is counted in — the one number `draw_center` multiplies
     /// by. Stated by whoever shipped the value, never picked here: the composed level/delta row
@@ -311,10 +312,16 @@ impl RealmScene {
 /// row is not drawn.
 fn row_box(r: &SceneRow, depth: u8) -> Option<RealmBox> {
     let (shape, body, luma) = if let Ok(outline) = vd_core::look::look_of(&r.bag) {
-        if outline.finite_extent() > MAX_RENDERABLE_EXTENT_M {
-            return None; // ambient (non-renderable) shell — felt, not framed
-        }
-        (shape_of(outline), BodyKind::Look, None)
+        // (The metre cut is DELETED — real-scale design §3.0: "is this drawable" is DATA
+        // PRESENCE. An ambient realm carries `look = None` and ships no self-look at all, so
+        // nothing arrives here to cull; a stated look is a statement of intent to be drawn.)
+        // Ruling C: a running realm's own bag may carry TAG_LUMA — the star keeps its colour
+        // through the wake handover (absent tag = no luma, never a default).
+        (
+            shape_of(outline),
+            BodyKind::Look,
+            vd_core::look::luma_of(&r.bag).ok(),
+        )
     } else {
         let luma = vd_core::look::luma_of(&r.bag).ok();
         let extent = vd_core::look::extent_of(&r.bag).ok();
@@ -563,6 +570,9 @@ fn role_hsv(realm: RealmId) -> (f64, f64, f64) {
         RealmId::Ship(_) => (0.08, 0.80, 0.95),
         RealmId::Station(_) => (0.58, 0.10, 0.85),
         RealmId::Area(_) => (0.33, 0.60, 0.88),
+        // A star's box hue — COSMETIC ONLY (taxonomy arc §6.2 site 8): the drawn photometric
+        // colour rides the look bag's TAG_LUMA (ruling C), never this fallback family.
+        RealmId::Star(_) => (0.10, 0.85, 1.00),
     }
 }
 
@@ -818,7 +828,27 @@ mod tests {
     fn one_world_level() -> Vec<SceneRow> {
         vd_physics::worldgen::realm_regions_for(0)
             .iter()
-            .map(|r| row(r.realm, r.parent, r.center.offset(), look_bag(&r.shape)))
+            .map(|r| {
+                // Flatten the NORMALIZED centre (H-21: reading `.offset()` here would keep this
+                // test green while placing every star at the origin — a green test that stopped
+                // measuring is worse than a red one).
+                //
+                // THE BOUND/LOOK SPLIT: a realm STATES its LOOK — a look-less ambient states
+                // nothing drawable (an empty bag: the row is tracked, never drawn), exactly as
+                // the shard's own emit now behaves. The BOUND is never framed.
+                let bag = match r.look {
+                    Some(look) => look_bag(&look),
+                    None => {
+                        vd_core::tlv::TlvWriter::new(vd_core::look::WINDOW_BODY_SCHEMA).finish()
+                    }
+                };
+                row(
+                    r.realm,
+                    r.parent,
+                    r.center.delta_m(LatticePos::ORIGIN, r.frame.tier()),
+                    bag,
+                )
+            })
             .collect()
     }
 
@@ -1004,7 +1034,10 @@ mod tests {
         assert!(!scene.is_empty());
         let sys = scene.get(RealmId::System(7)).expect("system box");
         assert_eq!(sys.shape, BoxShape::Sphere { r: 100.0 });
-        assert_eq!(sys.center, LatticePos::local(DVec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(
+            sys.center,
+            LatticePos::from_metres(DVec3::new(1.0, 2.0, 3.0), Tier::Fine)
+        );
         // A look body is the realm's OWN statement and carries no photometrics (a look never
         // carries luma — the two statements are structurally exclusive).
         assert_eq!(sys.body, BodyKind::Look);
@@ -1062,7 +1095,10 @@ mod tests {
         assert_eq!(marker.luma, Some((6, 0.000_972_607_424_178_079_9)));
         assert_eq!(marker.shape, BoxShape::Sphere { r: 0.0 });
         // A marker is a full row otherwise: it holds its placement and its nesting like any other.
-        assert_eq!(marker.center, LatticePos::local(DVec3::new(3.0, 0.0, 0.0)));
+        assert_eq!(
+            marker.center,
+            LatticePos::from_metres(DVec3::new(3.0, 0.0, 0.0), Tier::Fine)
+        );
         assert_eq!(marker.depth, 0);
         // The two authors are DISTINGUISHABLE on the box (the diagnosis surface reads exactly this).
         let look = scene.get(RealmId::Planet(7)).expect("look box");
@@ -1163,7 +1199,10 @@ mod tests {
             let b = scene.get(realm).expect("box");
             assert_eq!(b.shape, BoxShape::Sphere { r: 12.0 });
             assert_eq!(b.tier, Tier::Fine);
-            assert_eq!(b.center, LatticePos::local(DVec3::new(1.0, 0.0, 0.0)));
+            assert_eq!(
+                b.center,
+                LatticePos::from_metres(DVec3::new(1.0, 0.0, 0.0), Tier::Fine)
+            );
             assert_eq!(b.depth, 0);
             assert_eq!(b.body, BodyKind::Look);
             assert_eq!(b.parent, None);
@@ -1394,6 +1433,9 @@ mod tests {
             RealmId::Ship(vd_core::ids::EntityId(1)),
             RealmId::Station(7),
             RealmId::Area(7),
+            // T2: a star is a realm, and its fallback family is a role like any other (the
+            // DRAWN photometric colour rides the look bag's TAG_LUMA — ruling C — never this).
+            RealmId::Star(7),
         ];
         for realm in realms {
             let c = color_for_realm(realm);
@@ -1505,7 +1547,7 @@ mod tests {
             body: BodyKind::Look,
             luma: None,
             tier: Tier::Fine,
-            center: LatticePos::local(DVec3::new(1.0, 0.0, 0.0)),
+            center: LatticePos::from_metres(DVec3::new(1.0, 0.0, 0.0), Tier::Fine),
             parent: None,
             depth: 0,
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
@@ -1541,7 +1583,7 @@ mod tests {
             body: BodyKind::Look,
             luma: None,
             tier: Tier::Fine,
-            center: LatticePos::local(DVec3::ZERO),
+            center: LatticePos::ORIGIN,
             parent: None,
             depth: 0,
             color_rgba: [0.4, 0.5, 0.6, BOX_ALPHA],
@@ -1752,7 +1794,7 @@ mod tests {
         let scene = RealmScene::from_scene_rows(&one_world_level()).expect("projects");
         let mut expected: Vec<RealmId> = regions
             .iter()
-            .filter(|r| r.shape.finite_extent() <= MAX_RENDERABLE_EXTENT_M)
+            .filter(|r| r.look.is_some())
             .map(|r| r.realm)
             .collect();
         expected.sort_unstable();
@@ -1791,12 +1833,15 @@ mod tests {
                         DVec3::new(10.0, 0.0, 0.0),
                         look_shell(10.0),
                     ), // finite outline — drawn
+                    // The ambient root STATES NO LOOK (the bound/look split: its shell is a
+                    // containment promise the source never frames) — an empty bag: tracked,
+                    // never drawn.
                     row(
                         RealmId::System(0),
                         None,
                         DVec3::ZERO,
-                        look_shell(1_000_000_000.0),
-                    ), // ambient shell — skipped
+                        vd_core::tlv::TlvWriter::new(vd_core::look::WINDOW_BODY_SCHEMA).finish(),
+                    ),
                 ],
                 &[],
             )

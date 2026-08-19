@@ -220,7 +220,8 @@ pub struct GatewayView {
     pub window_chain_cycle: u64,
     /// Slice B — fold rows refused by `InstantMismatch` (the shear law). 0 healthy — parity-gated.
     pub window_instant_mismatch: u64,
-    /// Slice B — fold rows refused by `RotatedFrameAcrossCells` (pre-P10 cell math).
+    /// Slice B — fold rows refused by `RotationBeyondExactReach` (a rotated frame past the
+    /// millimetre rotation reach — R2, the P10 trigger).
     pub window_rotated_refused: u64,
     /// Slice B — rows whose stated frame was not their level's own: alien, dropped.
     pub window_alien_rows: u64,
@@ -230,8 +231,11 @@ pub struct GatewayView {
     pub window_unresolved_standing: u64,
     /// Slice B — §2.12 hop-vs-child-row agreement: bit-level disagreements. 0 — parity-gated.
     pub window_dedup_disagree: u64,
-    /// Slice B — GAUGE (max): the measured hop-vs-child-row deviation bound, nanometres.
-    pub window_dedup_max_dev_nm: u64,
+    /// Slice B — GAUGE (max): the measured hop-vs-child-row deviation bound, in integer CELLS
+    /// (per-axis Chebyshev; exact at every magnitude — a nanometre gauge saturates u64 at
+    /// star-gap magnitudes and goes vacuous; real-scale addendum §A4.8 row 14). Postcard is
+    /// positional, so the rename moves zero bytes.
+    pub window_dedup_max_dev_cells: u64,
     /// Slice B — lineage-ancestor `HeadRead{Realm}` polls sent on the keep-alive cadence.
     pub window_head_reads_sent: u64,
     /// Slice B — composed rows produced across all folds.
@@ -625,7 +629,7 @@ mod tests {
                 window_hop_invalid: 53,
                 window_unresolved_standing: 54,
                 window_dedup_disagree: 55,
-                window_dedup_max_dev_nm: 56,
+                window_dedup_max_dev_cells: 56,
                 window_head_reads_sent: 57,
                 window_composed_rows: 58,
                 old_realm_frames_dropped: 59,

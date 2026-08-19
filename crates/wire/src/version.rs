@@ -222,7 +222,21 @@ pub const PROTO_MAJOR: u16 = 1;
 /// refused + counted, mirroring the SL7 bit's admission), held under the derived retain TTL,
 /// decaying to `0` — "nobody is watching" — on silence. Mesh-only (one cluster build,
 /// ledger-visible): no client-facing message changed, so the floor does not move.
-pub const PROTO_MINOR: u16 = 21;
+/// **22** — THE STAR REALM (celestial taxonomy arc T2; owner-approved 2026-08-19 — rulings D +
+/// E of the taxonomy design's §2, docs/design/DEFERRED.md D-TAX rows): ONE new lawful
+/// discriminant, `RealmId::Star` (disc 5, APPENDED) with its `FrameRef::StarCentered` (disc 6,
+/// APPENDED) — the star becomes a body-bearing child realm of its system, bounded by the
+/// dust-sublimation radius, drawn at its own photosphere. NO new message, NO new field, NO
+/// `InterShardFlow` arm (the closed-wire goldens are asserted unchanged); the discriminant
+/// rides `SceneRow.realm`/`RealmRegistry`, which already cross. postcard writes variant
+/// indices as varints, so appending at 5/6 leaves every existing encoding byte-identical —
+/// the exact route Station (3) and Area (4) took. THE FLOOR RISES WITH IT (18 → 22, one
+/// signature — ruling D verbatim: "raise the floor, we don't have old clients, no need for
+/// any checks"): postcard is non-self-describing, so a pre-22 peer meeting a `Star`
+/// discriminant fails the whole `RealmRegistry` message, and the two lawful exits were a
+/// silently starless sky (a per-session filter) or a loud refusal — the owner chose the
+/// refusal, with no filter machinery built.
+pub const PROTO_MINOR: u16 = 22;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -236,7 +250,13 @@ pub const PROTO_MINOR: u16 = 21;
 /// naming the floor rather than a stream that decodes into garbage. (The floor's first move was 8 —
 /// the `RealmSnap.frame` field append — for the identical reason.) Raise it only alongside a change of
 /// the same kind, and say in the ledger above which change forced it.
-pub const PROTO_MINOR_FLOOR: u16 = 18;
+///
+/// **22** (the current floor): the minor-22 `RealmId::Star` discriminant — owner-approved
+/// 2026-08-19 (ruling D): a pre-22 peer meeting a `Star` row fails the WHOLE `RealmRegistry`
+/// message (postcard is non-self-describing), and the owner ruled the loud refusal over a
+/// per-session starless filter: "raise the floor, we don't have old clients, no need for any
+/// checks".
+pub const PROTO_MINOR_FLOOR: u16 = 22;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -360,7 +380,7 @@ mod tests {
         // hunting a version generation mismatch when the real answer is "your client is stale".
         assert_eq!(
             ours.refusal_reason(below),
-            "protocol minor below the floor (18): the scene is server-composed from v1.18"
+            "protocol minor below the floor (22): the scene is server-composed from v1.22"
         );
         assert_eq!(
             ours.refusal_reason(ProtoVersion {
@@ -374,8 +394,13 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 21,
-            "minor 21 is THE INTEREST BIT (look horizon slice 4; Q1 APPROVED, owner-approved \
+            PROTO_MINOR, 22,
+            "minor 22 is THE STAR REALM (celestial taxonomy arc T2; owner-approved 2026-08-19 \
+             ruling D): RealmId::Star (disc 5) + FrameRef::StarCentered (disc 6) APPENDED — one \
+             lawful discriminant inside SceneRow.realm, zero new messages, zero InterShardFlow \
+             arms; the floor rises to 22 in the same signature (no old clients, no filter \
+             machinery — a pre-22 peer would mis-frame the whole RealmRegistry); \
+             minor 21 is THE INTEREST BIT (look horizon slice 4; Q1 APPROVED, owner-approved \
              2026-08-17 Q1 — docs/design/look_horizon.md §2 ASK B): ONE new arm, \
              InterShardFlow::RealmInterest (disc 35) — one byte, two lawful values, parent → ONE \
              direct child on the already-resolved head route; ends the Q2 rationale clause \
@@ -426,18 +451,19 @@ mod tests {
              minor 2 OwnEntity, minor 1 UniverseRate"
         );
         assert_eq!(
-            PROTO_MINOR_FLOOR, 18,
-            "the floor tracks the last CLIENT-VISIBLE break, and minor 18 IS one: the flag day \
-             reshaped client-facing payloads in place (owner item 9 — zero deployed clients, no \
-             shims, no dual-decode), so every pre-18 peer would mis-frame the scene stream and \
-             must be refused loudly. Do not raise this again except alongside a change of the \
-             same kind, named in the ledger."
+            PROTO_MINOR_FLOOR, 22,
+            "the floor tracks the last CLIENT-VISIBLE break, and minor 22 IS one (owner-approved \
+             2026-08-19, ruling D): a pre-22 peer meeting a RealmId::Star discriminant \
+             mis-frames the whole RealmRegistry (postcard is non-self-describing), and the owner \
+             ruled the loud refusal over a silently-starless per-session filter — zero deployed \
+             clients, no shims, no checks. Do not raise this again except alongside a change of \
+             the same kind, named in the ledger."
         );
         assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.21");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.22");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

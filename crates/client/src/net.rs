@@ -760,6 +760,12 @@ impl<T: Transport> ClientCore<T> {
 
 #[cfg(test)]
 mod tests {
+    /// Flatten a RenderPose to world metres (normalized lattice since the cell activation).
+    fn rpw(p: &crate::interp::RenderPose) -> DVec3 {
+        vd_core::pose::LatticePos::at(p.cell, p.pos)
+            .delta_m(vd_core::pose::LatticePos::default(), p.tier)
+    }
+
     use super::*;
     use glam::DVec3;
     use vd_core::entity_kind::EntityKind;
@@ -1071,7 +1077,7 @@ mod tests {
             c.state()
                 .realm_view
                 .realm_pose(RealmId::Planet(7), f64::INFINITY)
-                .map(|p| p.pos),
+                .map(|p| rpw(&p)),
             Some(DVec3::new(1.0e9, 0.0, 0.0)),
         );
         // The realm feed ANCHORED the render cursor (must-fix ii — a spectator's moving box never
@@ -1178,7 +1184,7 @@ mod tests {
             c.state()
                 .realm_view
                 .realm_pose(planet, f64::INFINITY)
-                .map(|p| p.pos.x),
+                .map(|p| rpw(&p).x),
             Some(17.9),
             "pre-crossing: the planet's placement folds at the boot epoch"
         );
@@ -1220,7 +1226,7 @@ mod tests {
             c.state()
                 .realm_view
                 .realm_pose(RealmId::Planet(9), f64::INFINITY)
-                .map(|p| p.pos.x),
+                .map(|p| rpw(&p).x),
             Some(-3.0),
             "the held one-beat datagram replayed the moment its level landed"
         );
@@ -1293,7 +1299,7 @@ mod tests {
             c.state()
                 .realm_view
                 .realm_pose(RealmId::Planet(7), f64::INFINITY)
-                .map(|p| p.pos.x),
+                .map(|p| rpw(&p).x),
             Some(1.0),
         );
         // A malformed realm datagram bumps the SHARED decode_errors counter (DRY).
@@ -1442,7 +1448,7 @@ mod tests {
         assert!((cursor - (102.0 - 2.4)).abs() < 1e-9);
         // The entity renders, interpolated within its window.
         let rendered = c.state().view().render(101.0);
-        assert_eq!(rendered[&ent()].pos, DVec3::new(5.0, 0.0, 0.0));
+        assert_eq!(rpw(&rendered[&ent()]), DVec3::new(5.0, 0.0, 0.0));
     }
 
     #[test]
@@ -1727,7 +1733,7 @@ mod tests {
             "a stale frame must not re-anchor the cursor"
         );
         // The dropped frame's pose (x=99) never landed.
-        assert_eq!(c.state().view().render(100.0)[&ent()].pos.x, 0.0);
+        assert_eq!(rpw(&c.state().view().render(100.0)[&ent()]).x, 0.0);
     }
 
     // ---- dev-control glue (Slice 2 T3) --------------------------------------------
@@ -2058,8 +2064,12 @@ mod tests {
         );
         // The composed level the connection plane ships: a finite renderable planet under an
         // ~unbounded ambient shell. A fully-agnostic client draws its world from THIS alone.
+        let mut ambient = scene_row(RealmId::System(0), None, 1.0);
+        // The ambient root STATES NO LOOK (the bound/look split: the source never frames a
+        // containment shell) — an empty bag: the row is tracked, never drawn.
+        ambient.bag = vd_core::tlv::TlvWriter::new(vd_core::look::WINDOW_BODY_SCHEMA).finish();
         let rows = vec![
-            scene_row(RealmId::System(0), None, 1_000_000_000.0), // ambient — felt, not framed
+            ambient,
             scene_row(RealmId::Planet(7), Some(RealmId::System(0)), 10.0), // finite body — drawn
         ];
         c.transport.deliver(

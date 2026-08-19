@@ -13,6 +13,7 @@ use std::sync::Arc;
 use glam::DVec3;
 use vd_core::frame::FramePlacement;
 use vd_core::placement::MotionFn;
+use vd_core::pose::Tier;
 
 use crate::celestial::{OrbitalElements, orbital_state};
 
@@ -52,13 +53,23 @@ impl Motion {
             Motion::Integrated {
                 placement,
                 acceleration,
-            } => FramePlacement {
-                origin: placement.origin
-                    + placement.velocity * secs
-                    + *acceleration * (0.5 * secs * secs),
-                velocity: placement.velocity + *acceleration * secs,
-                ..*placement
-            },
+            } => {
+                // Route the displacement through the ONE in-frame move (real-scale addendum §A4.8
+                // row 8 / H-19): the epoch anchor is a lattice position, and adding an unbounded
+                // metre displacement onto its sub-cell residual without re-bucketing would leave
+                // the row un-normalized — the P5/P8 rapier-checkpoint arm and the HR4 proof arm
+                // both ride this. FINE by fence (no COARSE placement exists — R1).
+                let displaced = placement.anchor().translated(
+                    placement.velocity * secs + *acceleration * (0.5 * secs * secs),
+                    Tier::Fine,
+                );
+                FramePlacement {
+                    origin_cell: displaced.cell(),
+                    origin: displaced.offset(),
+                    velocity: placement.velocity + *acceleration * secs,
+                    ..*placement
+                }
+            }
         }
     }
 
@@ -68,14 +79,27 @@ impl Motion {
     /// the thruster BUDGET bound lands with P8, and until then a fence over an integrated child is
     /// re-judged from its checkpoint, never promised ahead).
     ///
-    /// Cell anchors: every shipped placement is authored at cell ZERO (the tiered-excursion fold is
-    /// D-41's), so the f64 origin IS the offset.
+    /// RE-TIERED at the cell activation (real-scale addendum §A4.8 row 9 / H-16 — the
+    /// highest-consequence miss of the candidate designs): the Fixed/Integrated arms used to read
+    /// `placement.origin.length()` on the explicit premise "every shipped placement is authored at
+    /// cell ZERO, so the f64 origin IS the offset" — a premise the activation deletes. A ring star
+    /// is a `Fixed` child of the galaxy far out in the integer half; reading only the residual
+    /// would return ≈ 0 here, and this value feeds the SHELL SOLVE (`worst_excursion` →
+    /// `containing_shell_r_m`-class fences), which would then pass vacuously. The full metric
+    /// length flattens the whole anchor; `tier` is the PARENT frame's (the frame the placement is
+    /// expressed in — FINE for every live frame).
     #[must_use]
-    pub fn max_excursion_m(&self) -> f64 {
+    pub fn max_excursion_m(&self, tier: vd_core::pose::Tier) -> f64 {
         match self {
-            Motion::Fixed(placement) => placement.origin.length(),
+            Motion::Fixed(placement) => placement
+                .anchor()
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
+                .length(),
             Motion::Kepler(elements) => elements.sma * (1.0 + elements.ecc),
-            Motion::Integrated { placement, .. } => placement.origin.length(),
+            Motion::Integrated { placement, .. } => placement
+                .anchor()
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
+                .length(),
         }
     }
 
@@ -162,8 +186,13 @@ mod tests {
             acceleration: DVec3::new(0.0, 0.0, 4.0),
         };
         let at = integrated.state_at(3.0);
-        // p + v·t + a·t²/2 and v + a·t, exactly.
-        assert_eq!(at.origin, DVec3::new(1.0, 6.0, 18.0));
+        // p + v·t + a·t²/2 and v + a·t, exactly — the row NORMALIZED (the anchor carries the value).
+        assert_eq!(
+            at.anchor()
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, Tier::Fine),
+            DVec3::new(1.0, 6.0, 18.0)
+        );
+        assert_eq!(at.origin, DVec3::ZERO);
         assert_eq!(at.velocity, DVec3::new(0.0, 2.0, 12.0));
         assert_eq!(at.orientation, DQuat::IDENTITY);
     }
@@ -175,11 +204,11 @@ mod tests {
                 DVec3::new(3.0, 4.0, 0.0),
                 DVec3::ZERO
             ))
-            .max_excursion_m(),
+            .max_excursion_m(Tier::Fine),
             5.0
         );
         assert_eq!(
-            Motion::Kepler(elements()).max_excursion_m(),
+            Motion::Kepler(elements()).max_excursion_m(Tier::Fine),
             1.2e7 * 1.3,
             "a Kepler child's worst instant is its apoapsis"
         );
@@ -188,8 +217,16 @@ mod tests {
                 placement: FramePlacement::moving(DVec3::new(0.0, 3.0, 4.0), DVec3::X),
                 acceleration: DVec3::ZERO,
             }
-            .max_excursion_m(),
+            .max_excursion_m(Tier::Fine),
             5.0
+        );
+        // H-16 DRIVEN: a fixed child whose anchor rides the INTEGER half (a ring star's shape) —
+        // the residual is zero, and the excursion is still the full flattened magnitude, not ≈ 0.
+        let far = FramePlacement::moving(DVec3::new(976_562_500.0, 0.0, 0.0), DVec3::ZERO);
+        assert_eq!(far.origin, DVec3::ZERO, "the magnitude rides the anchor");
+        assert_eq!(
+            Motion::Fixed(far).max_excursion_m(Tier::Fine),
+            976_562_500.0
         );
     }
 

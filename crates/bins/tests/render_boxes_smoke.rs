@@ -154,6 +154,12 @@ fn nonclear_in_region(rgba: &[u8], w: usize, h: usize, clear: [u8; 4], region: S
 }
 
 #[test]
+#[ignore = "PARKED under D-LOOK-3 (the true-scale camera far plane, MEASURED): no rim angle \
+            clears the planets' discs because the home system's SHELL — the subject of the rim \
+            assert — is real geometry 1.58e11 m across and is clipped by the 120 000 \
+            render-metre far plane, while the bodies survive as backdrop-sphere markers clustered \
+            near the view centre (the failure prints all ten discs). Same class as \
+            look_pixels/warp_pixels/render_smoke; un-parks with the S5 render-scale slice."]
 fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_region() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.

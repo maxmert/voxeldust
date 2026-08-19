@@ -168,18 +168,24 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
     };
 
     // ---- WalkTo: converge to a nearby world target purely via injected Move --------
-    // A 2 m offset is reachable within the budget at any sane move speed; arrive_epsilon 0.5
-    // sits above one sim step (so the fixed-magnitude Move never oscillates) AND above the
-    // ~100-150 ms delivered-pose lag.
-    let arrive_epsilon = 0.5;
-    let walk_target = origin + DVec3::new(2.0, 0.0, 0.0);
+    // EVERY NUMBER IS ONE SIM STEP, DERIVED (the true-scale restatement): the smallest move a
+    // commanded step can make is the FOOT speed for one tick (`move_speed · dt` = 10 m at the
+    // DEV cluster) — the geometric throttle map's floor — so a 2 m target with a 0.5 m arrival
+    // band is not merely tight, it is UNREACHABLE: every tick overshoots it by 5×, and under
+    // the speed law the carried velocity then ramps, widening the oscillation instead of
+    // settling. The hop is stated in steps: 40 steps out, an arrival band of 2 steps (above one
+    // step so a fixed-magnitude Move cannot oscillate, and above the ~100-150 ms delivered-pose
+    // lag), and the standard 4-step brake so the last stretch tapers to the foot speed.
+    let step_m = DEV.move_speed * DEV.tick_dt;
+    let arrive_epsilon = 2.0 * step_m;
+    let walk_target = origin + DVec3::new(40.0 * step_m, 0.0, 0.0);
     let walked = devctl(
         devctl_port,
         &DevRequest::WalkTo {
             target: walk_target.to_array(),
             arrive_epsilon,
             max_ticks: 600,
-            max_step_m: 0.0,
+            max_step_m: 4.0 * step_m,
         },
     )
     .expect("walk response");

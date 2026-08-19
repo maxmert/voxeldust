@@ -33,6 +33,12 @@ pub enum RealmId {
     /// A sub-planet AREA (city district / spaceport / crowd zone) split to its own shard,
     /// keyed by its deterministic seed. APPENDED (discriminant 4).
     Area(u64),
+    /// A STAR as its own realm inside its star system (the celestial taxonomy arc T2, owner
+    /// ruling 2026-08-19): the near-star volume whose crossing turns on near-star physics —
+    /// bounded by the dust-sublimation radius, drawn at the star's own photosphere. Keyed by
+    /// its deterministic seed (`child_seed(system_seed, STAR_SALT, 0)`). APPENDED
+    /// (discriminant 5) so the wire stays additive (`PROTO_MINOR` 22).
+    Star(u64),
 }
 
 impl core::fmt::Display for RealmId {
@@ -43,6 +49,7 @@ impl core::fmt::Display for RealmId {
             RealmId::Ship(id) => write!(f, "ship-{id}"),
             RealmId::Station(seed) => write!(f, "station-{seed:016x}"),
             RealmId::Area(seed) => write!(f, "area-{seed:016x}"),
+            RealmId::Star(seed) => write!(f, "star-{seed:016x}"),
         }
     }
 }
@@ -65,6 +72,9 @@ pub enum FrameRef {
     /// A sub-planet AREA frame: a zone WITHIN a planet, carrying the parent planet's seed
     /// (the fixed parent, no lookup) plus the area's own seed. APPENDED (discriminant 5).
     AreaLocal { planet_seed: u64, area_seed: u64 },
+    /// The near-star frame: star centre at origin (the taxonomy arc T2). APPENDED
+    /// (discriminant 6) so the wire stays additive.
+    StarCentered { star_seed: u64 },
 }
 
 impl FrameRef {
@@ -79,6 +89,7 @@ impl FrameRef {
             FrameRef::GalaxySpace => None,
             FrameRef::StationLocal { station_seed } => Some(RealmId::Station(station_seed)),
             FrameRef::AreaLocal { area_seed, .. } => Some(RealmId::Area(area_seed)),
+            FrameRef::StarCentered { star_seed } => Some(RealmId::Star(star_seed)),
         }
     }
 
@@ -100,6 +111,7 @@ impl FrameRef {
                 planet_seed,
                 area_seed,
             } => format!("Area {area_seed} on Planet {planet_seed}"),
+            FrameRef::StarCentered { star_seed } => format!("Star {star_seed}"),
         }
     }
 
@@ -117,7 +129,8 @@ impl FrameRef {
             | FrameRef::ShipLocal { .. }
             | FrameRef::SystemSpace { .. }
             | FrameRef::StationLocal { .. }
-            | FrameRef::AreaLocal { .. } => Tier::Fine,
+            | FrameRef::AreaLocal { .. }
+            | FrameRef::StarCentered { .. } => Tier::Fine,
         }
     }
 }
@@ -137,6 +150,7 @@ pub fn frame_for_realm(realm: RealmId, parent: Option<RealmId>) -> Option<FrameR
         RealmId::Planet(planet_seed) => Some(FrameRef::PlanetCentered { planet_seed }),
         RealmId::Ship(ship) => Some(FrameRef::ShipLocal { ship }),
         RealmId::Station(station_seed) => Some(FrameRef::StationLocal { station_seed }),
+        RealmId::Star(star_seed) => Some(FrameRef::StarCentered { star_seed }),
         RealmId::Area(area_seed) => match parent {
             Some(RealmId::Planet(planet_seed)) => Some(FrameRef::AreaLocal {
                 planet_seed,
@@ -218,14 +232,13 @@ impl Tier {
 /// integer cell arithmetic (zero drift, bit-deterministic) — the cure for f64-absolute drift
 /// (~131 km/ULP at galaxy scale).
 ///
-/// **Planted now; math owed (D-41).** Through P3 every pose is `cell == ZERO` and `offset` carries
-/// the full frame-local f64 position — BEHAVIOUR-IDENTICAL to the pre-lattice `pos: DVec3`. The wire
-/// SHAPE is planted now (this rides the frozen [`StampedPose`]) so the future realization — non-zero
-/// cells, the normalize/cell-crossing math, the per-`FrameRef`-tier unit, and the exact inter-tier
-/// (mm↔AU) conversion at the SOI/warp transfer — is PURE-ADDITIVE (no wire change) when its first
-/// consumer lands (P4/P5 re-centering; P10 galaxy). It is not built yet (smallest-correct: no
-/// production caller exists until then). Fields are private so all construction flows through one
-/// point ([`LatticePos::local`] today) and the bounded-offset invariant has a single future home.
+/// **LIVE since the cell activation (real-scale addendum §A4).** Every producer fills the integer
+/// half: the world generator, every placement, every spawn/home pose and the per-tick integrator
+/// all NORMALIZE, and the one subtraction ([`LatticePos::separation`] → [`Separation`]) consumes
+/// it exactly. Fields are private so all construction flows through the normalizing constructors
+/// ([`LatticePos::from_metres`] publicly; `local` is crate-private) and the bounded-offset
+/// invariant has a single home. The COARSE tier stays dormant (P10; its cross-tier conversion is
+/// the reserved plant).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatticePos {
     cell: I64Vec3,
@@ -233,24 +246,45 @@ pub struct LatticePos {
 }
 
 impl LatticePos {
+    /// The frame origin — cell `ZERO`, offset `ZERO`. THE one named origin every separation and
+    /// flatten measures against (`==` [`LatticePos::default()`], named so call sites say what they
+    /// mean instead of spelling a zero construction).
+    pub const ORIGIN: LatticePos = LatticePos {
+        cell: I64Vec3::ZERO,
+        offset: DVec3::ZERO,
+    };
+
     /// A position expressed purely as a frame-local offset, at the cell origin (`cell == ZERO`).
-    /// THE constructor used everywhere through P3 — behaviour-identical to the old `pos: DVec3`.
+    ///
+    /// **`pub(crate)` deliberately — the activation's structural cure (real-scale addendum §A4.5).**
+    /// This constructor pins the integer half EMPTY, which was the load-bearing producer hole: the
+    /// world generator, every placement and every spawn pose left the exact half unfilled and the
+    /// f64 offset carrying the whole magnitude. Outside `vd-core` the only way to build a position
+    /// from metres is [`LatticePos::from_metres`], which normalizes — so the mistake is unwritable,
+    /// not discouraged. In-crate callers that genuinely mean "raw halves" (serde plumbing, tests)
+    /// still reach it.
     #[must_use]
-    pub fn local(offset: DVec3) -> LatticePos {
+    pub(crate) fn local(offset: DVec3) -> LatticePos {
         LatticePos {
             cell: I64Vec3::ZERO,
             offset,
         }
     }
 
-    /// A position at an EXPLICIT integer cell anchor + a frame-local offset — the cell-aware sibling of
-    /// [`LatticePos::local`] (which pins the cell to `ZERO`). This is the single construction point for a
-    /// NON-ZERO cell: the P4/P5 cross-cell re-centering and the cell-aware membership rebase in the
-    /// spatial transfer trigger produce lattice positions at a real cell here, rather than reaching into
-    /// the private field. Through P3 there is no production caller (every pose is cell-`ZERO` via
-    /// [`LatticePos::local`]); it exists so the cell anchor can be planted and its CARRY-through
-    /// verified now (the D-41 SHAPE half — the in/out DECISION flip across a cell boundary is the P4/P5
-    /// rebase MATH, still owed). The bounded-offset invariant has its future home in the same one place.
+    /// THE public metre constructor: a frame-local position built from metres, NORMALIZED — the
+    /// integer cell carries the whole-quantum part and the offset holds the sub-cell residual.
+    /// Value-preserving to f64 (`cell·edge + offset` reproduces `v` exactly for every in-range
+    /// input: the 2⁻¹⁰ edge makes the carry a bit-shift-clean division). There is no public way to
+    /// build a position from metres that leaves the integer half empty (§A4.5's cure #1).
+    #[must_use]
+    pub fn from_metres(v: DVec3, tier: Tier) -> LatticePos {
+        LatticePos::local(v).normalize(tier)
+    }
+
+    /// A position at an EXPLICIT integer cell anchor + a frame-local offset — the raw-halves
+    /// constructor (serde plumbing, placement anchors, tests). It does NOT normalize: callers that
+    /// hold metres use [`LatticePos::from_metres`]; callers that hold both halves (a wire decode, a
+    /// placement row) are restating an already-normalized value.
     #[must_use]
     pub fn at(cell: I64Vec3, offset: DVec3) -> LatticePos {
         LatticePos { cell, offset }
@@ -264,30 +298,30 @@ impl LatticePos {
         self.offset
     }
 
-    /// The integer CELL anchor — the authoritative, bit-deterministic coarse coordinate. Through P3
-    /// this is always `ZERO` ([`LatticePos::local`] is the only public constructor and pins it), but
-    /// the read accessor exists now for the (P4/P5) cell-aware membership rebase in the spatial
-    /// transfer trigger: cross-cell membership is exact integer cell arithmetic, so the trigger reads
-    /// the cell here rather than reaching into the private field. Mirrors [`LatticePos::offset`] — reads
-    /// go through one accessor so a future integer-offset migration stays one-type-local.
+    /// The integer CELL anchor — the authoritative, bit-deterministic coarse coordinate, LIVE on
+    /// every producer since the cell activation. Mirrors [`LatticePos::offset`] — reads go through
+    /// one accessor so a future integer-offset migration stays one-type-local. ⚠ This is a HALF of
+    /// a position, never a position: subtract positions with [`LatticePos::separation`], flatten
+    /// with [`LatticePos::delta_m`].
     #[must_use]
     pub fn cell(self) -> I64Vec3 {
         self.cell
     }
 
-    /// Map the frame-local offset while PRESERVING the integer cell anchor — the cell-stable in-frame
-    /// move (the per-tick integrator and any local displacement). [`LatticePos::local`] resets the cell
-    /// to `ZERO`; this is the cell-preserving sibling, so a mutation site OUTSIDE vd-core keeps the
-    /// anchor (closing the forced-cell-zeroing footgun). Through P3 the cell is `ZERO`, so this equals
-    /// the old `pos = pos + delta`; once P4/P5 re-centering lands, re-bucketing a drifted offset back
-    /// into the cell is a PURE ADDITION here (a `.normalize()` on the result) — the cell is already
-    /// carried, so the re-centering is genuinely additive at this site, not a clobber-and-replace.
+    /// This position displaced by `delta` metres, NORMALIZED — the one in-frame move. Replaces the
+    /// deleted `map_offset` (real-scale addendum §A4.5 cure #2): `map_offset` preserved the cell but
+    /// let the offset grow unboundedly, so every caller had to REMEMBER a trailing `.normalize()`.
+    /// Here the normalize is internal, so the bounded-offset invariant cannot be forgotten. The one
+    /// production mover (the per-tick integrator) used `map_offset(|o| o + step).normalize(tier)` —
+    /// the identical two operations in the identical order, so this is byte-identical there by
+    /// construction.
     #[must_use]
-    pub fn map_offset(self, f: impl FnOnce(DVec3) -> DVec3) -> LatticePos {
+    pub fn translated(self, delta: DVec3, tier: Tier) -> LatticePos {
         LatticePos {
             cell: self.cell,
-            offset: f(self.offset),
+            offset: self.offset + delta,
         }
+        .normalize(tier)
     }
 
     /// Re-bucket so the f64 `offset` lands back in `[0, cell_edge)` per axis, carrying the integer
@@ -320,48 +354,6 @@ impl LatticePos {
         }
     }
 
-    /// Express this position RELATIVE TO `origin` (both in the same frame + tier) — exact integer cell
-    /// subtraction plus the f64 offset residual, then re-normalized. This is the zero-drift rebase at the
-    /// heart of the floating-origin model: the client subtracts its pinned star-system absolute here, and
-    /// the integer-cell part cancels EXACTLY (no ~131 km/ULP galaxy-scale f64 loss). Through P3 every cell
-    /// is `ZERO`, so this reduces to `offset - origin.offset` — behaviour-identical to a plain vector
-    /// subtraction; the exactness matters once S5 lights up non-zero cells.
-    #[must_use]
-    pub fn rebase_to(self, origin: LatticePos, _tier: Tier) -> LatticePos {
-        // PURE exact rebase — integer cell subtraction + f64 offset residual, NO trailing normalize.
-        // Re-bucketing here is WRONG: `normalize` forces the residual into `[0, edge)`, but a rebased
-        // position (a client subtracting its pinned origin) wants the SIGNED residual AROUND the origin,
-        // and re-quantizing it (a) is a pure no-op on the value it would then re-add and (b) broke
-        // idempotence at the old non-power-of-two edge. Exactness needs no normalize here: the integer
-        // cell difference is exact and the offset is one f64 subtract. The `_tier` is retained to mark
-        // this a same-tier op (callers pass it); re-quantize explicitly via `re_anchor` at an activation
-        // seam. Inverse of `compose`: `a.compose(b).rebase_to(a) == b` bit-for-bit (no normalize rounding).
-        LatticePos {
-            cell: self.cell - origin.cell,
-            offset: self.offset - origin.offset,
-        }
-    }
-
-    /// Compose `self` (a frame ORIGIN's absolute position) with a `local` position expressed IN that
-    /// frame → the local's absolute position, same tier. Exact cell addition + offset sum, re-normalized.
-    /// This is the once-per-tick `self_abs ∘ occupant_local` the containing realm's shard runs to author
-    /// every occupant's absolute pose (author-once-ship-all). Inverse of [`LatticePos::rebase_to`]:
-    /// `a.compose(b).rebase_to(a) == b` (to f64). Through P3 (`cell == ZERO`) this is `self.offset +
-    /// local.offset` — a plain vector add.
-    #[must_use]
-    pub fn compose(self, local: LatticePos, _tier: Tier) -> LatticePos {
-        // PURE exact compose — integer cell add + f64 offset sum, NO trailing normalize. `normalize`
-        // here would break byte-identity at the walk floor: `identity.compose({cell 0, offset 20 m})`
-        // would carry 20 m INTO the cell (`{cell 20480, offset 0}`) — different postcard bytes on every
-        // walk `EntitySnap` than the `{cell 0, offset 20 m}` the wire ships today. Exactness is preserved
-        // without it: the cell add is integer-exact and the offset sum is one f64 add. The `_tier` marks
-        // this a same-tier op; re-quantize explicitly via `re_anchor` only at a real activation seam.
-        LatticePos {
-            cell: self.cell + local.cell,
-            offset: self.offset + local.offset,
-        }
-    }
-
     /// Re-express this position from one tier's cell UNIT into another (e.g. a FINE mm-lattice position
     /// re-quantized into COARSE ly-cells at a SOI/warp tier crossing). Same tier ⇒ identity — the ONLY
     /// live path through P3 (all frames FINE). Cross-tier folds to total metres, then re-buckets at the
@@ -378,48 +370,174 @@ impl LatticePos {
         LatticePos::local(metres).normalize(to)
     }
 
-    /// This position MINUS `origin` (both same frame + tier) expressed in **metres** — the render-plane
-    /// rebase the client runs at the ONE `world_pos` chokepoint (subtract the pinned origin), and the
-    /// server's distance measure (containment, ghost band, demand). The integer cell difference cancels
-    /// the huge galaxy-scale magnitude EXACTLY; only the small residual difference touches f64.
-    ///
-    /// **The honest bound.** Exact iff `|self.cell − origin.cell| ≤ 2⁵³` per axis (≈ 8.8×10¹² m ≈ 59 AU at
-    /// FINE) — beyond that the `.as_dvec3()` of the integer difference loses low bits and this degrades to a
-    /// plain f64 of the difference. That bound is never approached under the pin discipline (the pin is the
-    /// occupant's own star system, always within one FINE cell-span of it), so in-system rebases are exact;
-    /// cross-cell distances stay well inside it. `cell − origin.cell` is exact integer subtraction for every
-    /// in-domain cell (sanitized to a bounded domain at wire ingress, so no overflow reaches here).
+    /// THE subtraction (real-scale addendum §A4.3). Every position difference in the program is
+    /// this call: an exact `i64` cell delta plus one f64 residual delta, as a [`Separation`].
+    /// TOTAL over every sanitized-domain pair (`CELL_DOMAIN_MAX = i64::MAX/2` exists precisely so
+    /// this difference cannot overflow), EXACT in the integer half, and branchless.
     #[must_use]
-    pub fn delta_m(self, origin: LatticePos, tier: Tier) -> DVec3 {
-        (self.cell - origin.cell).as_dvec3() * tier.cell_edge_m() + (self.offset - origin.offset)
+    pub fn separation(self, origin: LatticePos, tier: Tier) -> Separation {
+        Separation {
+            cells: self.cell - origin.cell,
+            residual: self.offset - origin.offset,
+            tier,
+        }
     }
 
-    /// THE single quantization decision point — re-bucket the offset into the cell, or don't, per a
-    /// statically-configured [`CellAnchor`]. `Inert` returns `self` BIT-FOR-BIT (the byte-floor: every
-    /// existing forest rides here, cell unchanged, wire identical); `Cell(tier)` runs [`normalize`] to carry
-    /// an accumulated offset into the cell. This is the ONLY place a pose is re-quantized — the integrator,
-    /// frame entry, and the generator call it, all `Inert` through P3/P4 and flipped to `Cell` only in the
-    /// gated galaxy-scale fixture (A8). Idempotent on an already-anchored pose (guaranteed by the 2⁻¹⁰ edge),
-    /// so a re-anchor on load is a no-op on the anchored form — the migration is a no-op, not a flag day.
+    /// This position MINUS `origin` (both same frame + tier) expressed in **metres** — the one-line
+    /// spelling of `self.separation(origin, tier).metres()` kept for the ~40 sites that legitimately
+    /// want metres (render, rapier contact, thrust, gauges), so their diff is zero. The honest
+    /// exactness bound lives on [`Separation::metres`], where it belongs.
     #[must_use]
-    pub fn re_anchor(self, anchor: CellAnchor) -> LatticePos {
-        match anchor {
-            CellAnchor::Inert => self,
-            CellAnchor::Cell(tier) => self.normalize(tier),
-        }
+    pub fn delta_m(self, origin: LatticePos, tier: Tier) -> DVec3 {
+        self.separation(origin, tier).metres()
     }
 }
 
-/// The quantization mode for [`LatticePos::re_anchor`] — a coordinate-unit config, NOT a realm/shard-kind
-/// match (HR3). `Inert` keeps a pose at its shipped cell (the byte-floor, every forest through P4);
-/// `Cell(tier)` re-buckets accumulated offset into the integer cell at that tier (the gated galaxy-scale
-/// activation, A8). Planted here; flipped only by the `VD_UNIVERSE_SCALE` fixture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CellAnchor {
-    /// No re-quantization — the pose passes through bit-for-bit (byte-floor, prod through P4).
-    Inert,
-    /// Re-bucket the offset into the cell at this tier (galaxy-scale activation).
-    Cell(Tier),
+/// **THE ONE OPERATION** (real-scale addendum §A4.3): the exact difference of two positions in ONE
+/// frame at ONE tier. This is not a position — a position says WHERE; a separation says HOW FAR
+/// APART. The type distinction IS the foot-gun cure: a separation can be rotated, squared, compared
+/// and flattened; a position can only be separated from another position or translated. Nothing
+/// else is offered, so `.offset()` can no longer be mistaken for a position difference.
+///
+/// Never serialized — a local computation type only (nothing new crosses any boundary, SL6 = NONE).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Separation {
+    cells: I64Vec3,
+    residual: DVec3,
+    tier: Tier,
+}
+
+/// The largest per-axis |cell delta| whose 3-axis square fits `i128` with headroom: squaring is safe
+/// iff every axis is within ±`CELL_DOMAIN_MAX` (`3 · (i64::MAX/2)² ≈ 6.38e37 < i128::MAX ≈ 1.70e38`).
+/// A hostile-but-in-domain pair at OPPOSITE domain ends measures `|Δ| = 2·CELL_DOMAIN_MAX` per axis,
+/// whose square-sum OVERFLOWS `i128` (`≈ 2.55e38`) — the H-01 hole. [`Separation::cells_sq`] refuses
+/// that case (`None`) instead of panicking; the containment verdict's Chebyshev pre-test makes the
+/// refusal unreachable for every lawful shell (all shell thresholds are far inside this bound).
+const SEPARATION_SQUARE_SAFE_MAX: i64 = CELL_DOMAIN_MAX;
+
+impl Separation {
+    /// The exact integer cell delta — the authoritative half of the answer.
+    #[must_use]
+    pub fn cells(self) -> I64Vec3 {
+        self.cells
+    }
+
+    /// The sub-cell f64 residual delta (each operand `< 1` cell for normalized inputs, so its error
+    /// is at most `ulp(0.98 mm) ≈ 2.2e-19 m`). The integer comparator DISCARDS it (§A5.3).
+    #[must_use]
+    pub fn residual(self) -> DVec3 {
+        self.residual
+    }
+
+    /// The tier this separation's cells are counted in.
+    #[must_use]
+    pub fn tier(self) -> Tier {
+        self.tier
+    }
+
+    /// (i) THE AUTHORITY COMPARATOR — the exact squared cell length as `i128`. No float, no square
+    /// root: bit-identical on every host at every magnitude. GUARDED (§A4.4): `None` when any axis
+    /// exceeds [`SEPARATION_SQUARE_SAFE_MAX`] — the hostile-but-in-domain overflow case (H-01) made
+    /// a refusal instead of a debug panic on the containment hot path. Callers pre-test with
+    /// [`Separation::cells_chebyshev`] against their threshold, which makes `None` unreachable for
+    /// every lawful shell; a `None` that does surface reads as "outside" (a separation too large to
+    /// square is out of every shippable region).
+    #[must_use]
+    pub fn cells_sq(self) -> Option<i128> {
+        let safe = self.cells_chebyshev() <= SEPARATION_SQUARE_SAFE_MAX;
+        let sq = |v: i64| i128::from(v) * i128::from(v);
+        // The multiply only runs on the safe arm — the unsafe arm returns before any square.
+        if safe {
+            Some(sq(self.cells.x) + sq(self.cells.y) + sq(self.cells.z))
+        } else {
+            None
+        }
+    }
+
+    /// (i′) Chebyshev on integers — the per-axis max |cell delta|, for box shapes and for the
+    /// overflow pre-test. Total: `|Δ| ≤ 2·CELL_DOMAIN_MAX = i64::MAX − 1` for every sanitized pair,
+    /// and `abs` of that range cannot overflow.
+    #[must_use]
+    pub fn cells_chebyshev(self) -> i64 {
+        self.cells
+            .x
+            .abs()
+            .max(self.cells.y.abs())
+            .max(self.cells.z.abs())
+    }
+
+    /// (ii) THE FLATTEN — metres, for what consumes metres: render, rapier, thrust, gauges. THE
+    /// ERROR IS RELATIVE TO THE ANSWER, NEVER TO THE WORLD (§A5.2): exact iff `|Δcell| ≤ 2⁵³` per
+    /// axis (≈ 8.8×10¹² m ≈ 59 AU at FINE); beyond that the `as_dvec3` cast rounds and the error is
+    /// ≤ 1 ulp of the answer (0.5 m per axis at the full 2.25e15 m star gap — nine orders inside
+    /// any band it could be compared to, and no authority commit compares metres there: those sites
+    /// are integer).
+    #[must_use]
+    pub fn metres(self) -> DVec3 {
+        self.cells.as_dvec3() * self.tier.cell_edge_m() + self.residual
+    }
+
+    /// (iii) THE RE-ANCHOR — this difference re-expressed as a position relative to a new `origin`.
+    /// Exact integer add + one f64 add, no normalize (the exact-rebase theorem §A5.1:
+    /// `a.separation(b, t).from_origin(b) == a` bit-for-bit; a proptest pins it over the domain).
+    #[must_use]
+    pub fn from_origin(self, origin: LatticePos) -> LatticePos {
+        LatticePos {
+            cell: origin.cell + self.cells,
+            offset: origin.offset + self.residual,
+        }
+    }
+
+    /// The ONE operation that is not unconditional — rotation (§A4.6, THE RESTATED ROTATION LAW).
+    ///
+    /// A cell count is measured along one frame's axes; no rotation of an integer lattice vector is
+    /// generally an integer lattice vector, so a rotated separation must FOLD through f64 metres —
+    /// and rotating a lever of magnitude `L` costs `L · f64::EPSILON`. The rule, derived from that
+    /// cost rather than restated from habit:
+    ///
+    /// - **identity quaternion ⇒ bit-exact passthrough** — no fold, no cost (EXACT equality, never
+    ///   an epsilon: "nearly unrotated" is rotated, and a tolerance would silently resume folding
+    ///   for every slowly-spinning realm);
+    /// - **non-identity within [`rotation_exact_reach_m`] ⇒ fold, rotate, renormalize** — the fold
+    ///   cost is at most one cell, so the millimetre grid survives;
+    /// - **beyond the reach ⇒ refused LOUD** ([`crate::frame::FrameError::RotationBeyondExactReach`])
+    ///   — a galaxy-scale spinning realm is precisely a COARSE-tier object, and the refusal is
+    ///   P10's named trigger (R2).
+    ///
+    /// This replaces the pre-activation predicate ("rotated AND `cell != ZERO` ⇒ refuse"), which
+    /// the activation made active-hostile: after cells go live essentially every hop is cross-cell,
+    /// so the old rule would have refused every rotating realm the moment one existed (H-11). ONE
+    /// rule, ONE call site — the `FrameXform` twin is deleted with that type.
+    ///
+    /// # Errors
+    /// [`crate::frame::FrameError::RotationBeyondExactReach`] when `q` is not the identity and this
+    /// separation's magnitude exceeds the tier's exact rotation reach.
+    pub fn rotated(self, q: DQuat) -> Result<Separation, FrameError> {
+        if q == DQuat::IDENTITY {
+            return Ok(self);
+        }
+        let reach = rotation_exact_reach_m(self.tier);
+        let metres = self.metres();
+        if metres.length() > reach {
+            return Err(FrameError::RotationBeyondExactReach);
+        }
+        let folded = LatticePos::from_metres(q * metres, self.tier);
+        Ok(Separation {
+            cells: folded.cell,
+            residual: folded.offset,
+            tier: self.tier,
+        })
+    }
+}
+
+/// The largest lever a rotation may fold through f64 metres while costing at most ONE cell
+/// (§A4.6): `cell_edge / f64::EPSILON`. DERIVED from the tier — no literal, and it re-derives
+/// itself the day the COARSE tier lights up. FINE: `2⁻¹⁰ / 2⁻⁵² = 2⁴² m ≈ 29.399 AU` (= 2⁵²
+/// cells). A threshold of 2⁵³ cells would be one octave loose — the fold there costs two cells,
+/// admitting a case that violates the millimetre grid this activation exists to restore (H-06).
+#[must_use]
+pub fn rotation_exact_reach_m(tier: Tier) -> f64 {
+    tier.cell_edge_m() / f64::EPSILON
 }
 
 /// A pose + motion state bound to one frame at one analytic-clock instant.
@@ -433,42 +551,21 @@ pub struct StampedPose {
 }
 
 impl StampedPose {
-    /// A rest pose at a position — the common spawn/test constructor.
+    /// A rest pose at a position — the common spawn/home/test constructor, and PRODUCER #4 of the
+    /// cell activation (real-scale addendum §A4.5/H-17): it sits on the live login/home path
+    /// (`StoredHome::in_realm` → every account's spawn), so it NORMALIZES — the integer half is
+    /// filled at birth exactly as the integrator fills it on the first step. Making `local`
+    /// crate-private does not reach this constructor (same crate), which is why the normalize is
+    /// stated here rather than inherited. Spawn-pose wire BYTES change with this (a declared golden
+    /// refresh, addendum §A6.1 S1a); the VALUE is identical to f64.
     #[must_use]
     pub fn at_rest(frame: FrameRef, pos: DVec3, universe_tick: UniverseTick) -> StampedPose {
         StampedPose {
             frame,
-            pos: LatticePos::local(pos),
+            pos: LatticePos::from_metres(pos, frame.tier()),
             vel: DVec3::ZERO,
             orient: DQuat::IDENTITY,
             universe_tick,
-        }
-    }
-
-    /// Compose `self` (a frame ORIGIN's absolute pose) with `local` (a pose expressed IN that frame) →
-    /// the local's absolute pose. This is the FULL rigid compose the server runs once per tick to author
-    /// every occupant's absolute (`self_abs ∘ occupant_local`): the position rides through
-    /// [`LatticePos::compose`] with the lever ROTATED by the origin's orientation, the velocity carries
-    /// the rotated local velocity, and the orientation composes. A position-only compose would be a
-    /// DEFECT — `place_child`'s mover arm authors a real orbital velocity, so shipping an absolute
-    /// position with a realm-local velocity yields a mixed-frame pose that contradicts this type's own
-    /// contract (the client's no-prediction firewall drops `vel` today, but every closed-form re-advance
-    /// and future consumer relies on it). The **native frame label is preserved** (`local.frame`): only
-    /// the VALUE becomes absolute, so the boundary detector, the saga, and the client re-pin trigger keep
-    /// reading the label they expect. Stamped at the local's tick (same-tick compose — box and rider agree
-    /// in time). The `cell` rides from `local.pos` (ZERO through P4); the rotation applies to the offset
-    /// residual (occupants live at offset scale, so this is exact wherever the cell is ZERO).
-    #[must_use]
-    pub fn compose(self, local: StampedPose, tier: Tier) -> StampedPose {
-        StampedPose {
-            frame: local.frame,
-            pos: self.pos.compose(
-                LatticePos::at(local.pos.cell(), self.orient * local.pos.offset()),
-                tier,
-            ),
-            vel: self.vel + self.orient * local.vel,
-            orient: self.orient * local.orient,
-            universe_tick: local.universe_tick,
         }
     }
 
@@ -527,158 +624,6 @@ impl StampedPose {
             vel: self.vel + accel * dt_s,
             orient: self.orient,
             universe_tick: new_tick,
-        }
-    }
-}
-
-/// ONE PLACEMENT AS A TRANSFORM — where a CHILD frame's origin sits, and how it moves, inside its
-/// PARENT's frame. It is the same content as a [`crate::frame::FramePlacement`] with the two pieces
-/// nothing composes (the integer anchor and the f64 remainder) already fused into a [`LatticePos`], so a
-/// CHAIN of placements can be folded into one transform and then applied to many poses.
-///
-/// WHY THIS TYPE EXISTS, and it is the whole point of the render-composition work. A pose arrives measured
-/// from the realm it lives in; the client draws everything measured from ONE pinned realm. Turning the
-/// first into the second is a walk UP from the pose's realm to the nearest common ancestor and back DOWN
-/// to the pin, and every step of that walk is one of these. Folding the walk ONCE per (frame, pin) and then
-/// applying the fold per entity is what keeps the per-entity cost a single vector add instead of a chain
-/// re-walk; the table it lives in is bounded by realms in view, never by entities.
-///
-/// It is a PLACEMENT, never an absolute. Nothing here can express "where this realm is in the universe" —
-/// there is no universe frame in the type at all — which is the structural half of the ground rule: only a
-/// parent knows where its children are, so a placement is the only shape a position relation can take.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FrameXform {
-    /// The child frame's origin, in the PARENT's frame (integer cell + f64 remainder).
-    pub pos: LatticePos,
-    /// The child frame's origin velocity, in the parent's frame (m/s).
-    pub vel: DVec3,
-    /// The rotation taking the CHILD's axes into the PARENT's axes.
-    pub orient: DQuat,
-}
-
-impl FrameXform {
-    /// The child frame IS the parent: no offset, no motion, no rotation. The value every walk-scale and
-    /// static forest is built entirely out of, which is what makes [`FrameXform::is_identity`] a usable
-    /// whole-table short-circuit.
-    pub const IDENTITY: FrameXform = FrameXform {
-        pos: LatticePos {
-            cell: I64Vec3::ZERO,
-            offset: DVec3::ZERO,
-        },
-        vel: DVec3::ZERO,
-        orient: DQuat::IDENTITY,
-    };
-
-    /// Is this EXACTLY the identity? Bit equality on every component, never an epsilon, and that is
-    /// deliberate: this predicate gates a whole-table "skip the composition entirely" short-circuit, so a
-    /// tolerance here would mean a realm rotating slowly enough to fall inside it silently STOPS ROTATING
-    /// for every client. A placement that is nearly the identity is not the identity.
-    #[must_use]
-    pub fn is_identity(self) -> bool {
-        self == FrameXform::IDENTITY
-    }
-
-    /// This placement expressed one level FURTHER OUT: `self` places a child inside its parent, `outer`
-    /// places that parent inside ITS parent, and the result places the child inside the grandparent. The
-    /// fold step of the up-walk.
-    ///
-    /// Delegates to [`StampedPose::compose`] — there is exactly ONE composition implementation in the
-    /// workspace and this is not a second one. The two feeds that draw a realm box and the thing standing
-    /// in it parted company once before precisely because two sites did the same arithmetic separately.
-    ///
-    /// # Errors
-    /// [`FrameError::RotatedFrameAcrossCells`] when `outer` is rotated and `self`'s origin sits a whole
-    /// number of integer cells out — see `FrameXform::rotatable` (a private helper, so plain backticks).
-    pub fn then(self, outer: FrameXform, tier: Tier) -> Result<FrameXform, FrameError> {
-        FrameXform::rotatable(outer.orient, self.pos.cell())?;
-        let composed = outer.as_origin_pose().compose(self.as_origin_pose(), tier);
-        Ok(FrameXform {
-            pos: composed.pos,
-            vel: composed.vel,
-            orient: composed.orient,
-        })
-    }
-
-    /// The placement read the other way round: `self` maps CHILD→PARENT, this maps PARENT→CHILD. The
-    /// down-walk half of a pin conversion (getting from the common ancestor down to the pinned realm).
-    ///
-    /// Exact for every unrotated placement: the integer cell is NEGATED as an integer, so the anchor
-    /// survives the round trip bit-for-bit. `_tier` marks this a same-tier operation, matching
-    /// [`LatticePos::compose`] and [`LatticePos::rebase_to`]; no re-quantization happens here.
-    ///
-    /// # Errors
-    /// [`FrameError::RotatedFrameAcrossCells`] when this placement is rotated AND its origin sits a whole
-    /// number of integer cells out — see `FrameXform::rotatable` (a private helper, so plain backticks).
-    pub fn inverse(self, _tier: Tier) -> Result<FrameXform, FrameError> {
-        FrameXform::rotatable(self.orient, self.pos.cell())?;
-        let inv = self.orient.inverse();
-        Ok(FrameXform {
-            // The cell negates as an INTEGER (the orientation is the identity on this arm, guarded above),
-            // so `x.inverse().then(x)` returns the anchor untouched rather than through f64 metres.
-            pos: LatticePos::at(-self.pos.cell(), -(inv * self.pos.offset())),
-            vel: -(inv * self.vel),
-            orient: inv,
-        })
-    }
-
-    /// Re-express `pose` — measured in the CHILD frame this placement describes — in the PARENT frame, and
-    /// RELABEL it `label`.
-    ///
-    /// The relabel is mandatory, not cosmetic. After composition the numbers are measured from a different
-    /// realm's centre; leaving the pose's native label on them produces a value wearing the wrong frame's
-    /// name, which is exactly the lie this whole arc exists to remove — a shipped absolute that still
-    /// claimed to be realm-local looked correct at walk scale, where every realm sits at the origin and the
-    /// two agree, and drew the player at the star everywhere else.
-    ///
-    /// # Errors
-    /// [`FrameError::RotatedFrameAcrossCells`] when this placement is rotated and the pose's own origin
-    /// sits a whole number of integer cells out — see `FrameXform::rotatable` (private, so plain backticks).
-    pub fn apply(
-        self,
-        pose: StampedPose,
-        tier: Tier,
-        label: FrameRef,
-    ) -> Result<StampedPose, FrameError> {
-        FrameXform::rotatable(self.orient, pose.pos.cell())?;
-        let mut out = self.as_origin_pose().compose(pose, tier);
-        out.frame = label;
-        Ok(out)
-    }
-
-    /// May a position whose integer anchor is `cell` be rotated by `orient`?
-    ///
-    /// A cell COUNT is measured along one frame's axes. Rotating a non-zero count into another frame's axes
-    /// does not yield a count — no rotation of an integer lattice vector is generally an integer lattice
-    /// vector — so the only ways to proceed are to fold the anchor into f64 metres, which is precisely the
-    /// precision loss this coordinate exists to prevent, or to refuse. It refuses. EXACT quaternion
-    /// equality for the same reason [`FrameXform::is_identity`] uses it: "nearly unrotated" is rotated, and
-    /// a tolerance would quietly resume the folding for every slowly-spinning realm.
-    ///
-    /// Unreachable in production today (every placement in the tree is identity-oriented and every anchor
-    /// is `ZERO`); it becomes live the first time a spinning realm is authored more than one cell-block
-    /// from its parent's origin. Mirrors the identical guard in [`crate::frame::transfer_frame`] — one
-    /// rule, one error, two call sites.
-    ///
-    /// # Errors
-    /// [`FrameError::RotatedFrameAcrossCells`] on the refused combination.
-    fn rotatable(orient: DQuat, cell: I64Vec3) -> Result<(), FrameError> {
-        if orient != DQuat::IDENTITY && cell != I64Vec3::ZERO {
-            return Err(FrameError::RotatedFrameAcrossCells);
-        }
-        Ok(())
-    }
-
-    /// This placement as the ORIGIN pose [`StampedPose::compose`] expects on its left-hand side. The frame
-    /// label and tick are never read by `compose` (it takes both from the local operand), so they are
-    /// placeholders; keeping them here rather than at each call site is what lets `then`/`apply` share the
-    /// ONE compose.
-    fn as_origin_pose(self) -> StampedPose {
-        StampedPose {
-            frame: FrameRef::GalaxySpace,
-            pos: self.pos,
-            vel: self.vel,
-            orient: self.orient,
-            universe_tick: UniverseTick(0),
         }
     }
 }
@@ -960,18 +905,28 @@ mod tests {
     }
 
     #[test]
-    fn lattice_map_offset_preserves_the_cell_while_mapping_the_offset() {
-        // The cell-PRESERVING in-frame move (the integrator uses this). Through P3 the cell is ZERO
-        // so movement tests cannot distinguish it from `local`; this guards the cell-preservation
-        // BEHAVIOUR directly with a non-zero cell, so a future refactor cannot silently re-introduce
-        // the cell-zeroing foot-gun (audit wf_fd6a4b9d).
+    fn lattice_translated_moves_in_frame_and_keeps_the_offset_bounded() {
+        // The one in-frame move: displace, then re-bucket. The cell carries the whole-quantum part
+        // of the move (the deleted `map_offset` left the offset growing unboundedly and every
+        // caller remembering a `.normalize()` — the cure is internal now, §A4.5).
         let lp = LatticePos {
             cell: I64Vec3::new(5, -7, 11),
-            offset: DVec3::new(1.0, 2.0, 3.0),
+            offset: DVec3::new(0.25e-3, 0.5e-3, 0.75e-3),
         };
-        let moved = lp.map_offset(|o| o + DVec3::new(0.25, -0.5, 0.75));
-        assert_eq!(moved.cell, I64Vec3::new(5, -7, 11));
-        assert_eq!(moved.offset(), DVec3::new(1.25, 1.5, 3.75));
+        let moved = lp.translated(DVec3::new(2.0, 0.0, 0.0), Tier::Fine);
+        // 2 m = 2048 fine cells, carried into the integer half; the residual stays sub-cell and the
+        // VALUE is preserved to f64 (the add `0.25e-3 + 2.0` rounds in its last ulp, so the residual
+        // is compared by value, not bit).
+        assert_eq!(moved.cell(), I64Vec3::new(5 + 2048, -7, 11));
+        assert!((moved.offset() - DVec3::new(0.25e-3, 0.5e-3, 0.75e-3)).length() < 1e-12);
+        // Byte-identity with the integrator's former spelling (map_offset + normalize): the same
+        // two operations in the same order.
+        let former = LatticePos {
+            cell: lp.cell(),
+            offset: lp.offset() + DVec3::new(2.0, 0.0, 0.0),
+        }
+        .normalize(Tier::Fine);
+        assert_eq!(moved, former);
     }
 
     #[test]
@@ -1056,52 +1011,6 @@ mod tests {
         let n = lp.normalize(Tier::Fine);
         assert_eq!(n.cell(), lp.cell());
         assert_eq!(n.offset(), lp.offset());
-    }
-
-    #[test]
-    fn rebase_to_is_exact_integer_cell_subtraction() {
-        // Expressing one fine pose relative to another cancels the integer cell part EXACTLY (the
-        // zero-drift client origin-subtraction). Offsets ZERO so the equality is bit-exact.
-        let a = LatticePos::at(I64Vec3::new(1000, 2000, -3000), DVec3::ZERO);
-        let origin = LatticePos::at(I64Vec3::new(1, 2, 3), DVec3::ZERO);
-        let r = a.rebase_to(origin, Tier::Fine);
-        assert_eq!(r.cell(), I64Vec3::new(999, 1998, -3003));
-        assert_eq!(r.offset(), DVec3::ZERO);
-    }
-
-    #[test]
-    fn compose_adds_cells_exactly() {
-        // origin ∘ local sums the integer cells — NO normalize (offsets ZERO ⇒ exact).
-        let origin = LatticePos::at(I64Vec3::new(10, 20, 30), DVec3::ZERO);
-        let local = LatticePos::at(I64Vec3::new(1, 2, 3), DVec3::ZERO);
-        let c = origin.compose(local, Tier::Fine);
-        assert_eq!(c.cell(), I64Vec3::new(11, 22, 33));
-        assert_eq!(c.offset(), DVec3::ZERO);
-    }
-
-    #[test]
-    fn compose_and_rebase_at_cell_zero_are_plain_vector_add_and_subtract() {
-        // THE byte-floor: the P3 shipping form is cell 0 with the offset carrying full metres. As long
-        // as the result stays within one cell (sub-mm test values ⇒ no carry), compose/rebase reduce to
-        // a plain add/subtract on the offset — identical to the pre-lattice DVec3 algebra, cell stays 0.
-        let origin = LatticePos::local(DVec3::new(0.0004, 0.0, 0.0));
-        let local = LatticePos::local(DVec3::new(0.0003, 0.0, 0.0));
-        let c = origin.compose(local, Tier::Fine);
-        assert_eq!(c.cell(), I64Vec3::ZERO);
-        assert!((c.offset() - DVec3::new(0.0007, 0.0, 0.0)).length() < 1e-12);
-        let r = c.rebase_to(origin, Tier::Fine);
-        assert_eq!(r.cell(), I64Vec3::ZERO);
-        assert!((r.offset() - local.offset()).length() < 1e-12);
-    }
-
-    #[test]
-    fn compose_at_identity_is_bit_exact() {
-        // identity ∘ x == x, BIT-for-bit. Fails on the pre-A1 normalizing compose (which would carry x's
-        // whole offset into the cell). The one-line proof that compose no longer re-quantizes.
-        let x = LatticePos::at(I64Vec3::new(7, -3, 11), DVec3::new(1.5, -2.25, 0.125));
-        let id = LatticePos::at(I64Vec3::ZERO, DVec3::ZERO);
-        assert_eq!(id.compose(x, Tier::Fine), x);
-        assert_eq!(x.compose(id, Tier::Fine), x);
     }
 
     #[test]
@@ -1203,60 +1112,6 @@ mod tests {
     }
 
     #[test]
-    fn stamped_compose_rotates_the_lever_carries_velocity_and_preserves_the_native_frame() {
-        use std::f64::consts::FRAC_PI_2;
-        // origin: a frame at (10,0,0), rotated 90° about +Z, moving +Y at 2 m/s.
-        let origin = StampedPose {
-            frame: FrameRef::SystemSpace { system_seed: 7 },
-            pos: LatticePos::local(DVec3::new(10.0, 0.0, 0.0)),
-            vel: DVec3::new(0.0, 2.0, 0.0),
-            orient: DQuat::from_rotation_z(FRAC_PI_2),
-            universe_tick: UniverseTick(5),
-        };
-        // local: an occupant 1 m along +X in the origin's frame, at rest, in a PLANET frame, at tick 9.
-        let local = StampedPose {
-            frame: FrameRef::PlanetCentered { planet_seed: 3 },
-            pos: LatticePos::local(DVec3::new(1.0, 0.0, 0.0)),
-            vel: DVec3::ZERO,
-            orient: DQuat::IDENTITY,
-            universe_tick: UniverseTick(9),
-        };
-        let c = origin.compose(local, Tier::Fine);
-        // lever (1,0,0) rotated 90° about Z → (0,1,0), added to the origin (10,0,0) → (10,1,0).
-        assert!((c.pos.offset() - DVec3::new(10.0, 1.0, 0.0)).length() < 1e-9);
-        // velocity carries the origin's (the local is at rest).
-        assert!((c.vel - DVec3::new(0.0, 2.0, 0.0)).length() < 1e-9);
-        // the NATIVE frame label is preserved (the VALUE is absolute, the label is the local's) and the
-        // stamp is the local's tick (same-tick compose).
-        assert_eq!(c.frame, FrameRef::PlanetCentered { planet_seed: 3 });
-        assert_eq!(c.universe_tick, UniverseTick(9));
-    }
-
-    #[test]
-    fn re_anchor_inert_passes_through_and_cell_re_buckets() {
-        // The byte-floor gate: Inert returns the pose BIT-FOR-BIT (every forest through P4); Cell re-buckets
-        // the offset into the cell (the gated galaxy-scale activation). Both CellAnchor arms + idempotence.
-        let x = LatticePos::local(DVec3::new(1.5, -2.0, 3.0));
-        assert_eq!(x.re_anchor(CellAnchor::Inert), x);
-        assert_eq!(
-            x.re_anchor(CellAnchor::Cell(Tier::Fine)),
-            x.normalize(Tier::Fine)
-        );
-        let anchored = x.re_anchor(CellAnchor::Cell(Tier::Fine));
-        assert_eq!(anchored.re_anchor(CellAnchor::Cell(Tier::Fine)), anchored);
-    }
-
-    #[test]
-    fn cell_anchor_derives_are_exercised() {
-        // Cover CellAnchor's derived Debug + PartialEq (it becomes a config value at A8; the derives must
-        // not sit as uncovered regions in the meantime — HR5).
-        assert_eq!(CellAnchor::Inert, CellAnchor::Inert);
-        assert_ne!(CellAnchor::Inert, CellAnchor::Cell(Tier::Fine));
-        assert_eq!(CellAnchor::Cell(Tier::Fine), CellAnchor::Cell(Tier::Fine));
-        assert!(format!("{:?}", CellAnchor::Cell(Tier::Coarse)).contains("Coarse"));
-    }
-
-    #[test]
     fn fine_cells_per_ly_is_the_exact_integer_ratio() {
         // FINE↔COARSE is exact integer arithmetic: one light-year is exactly FINE_CELLS_PER_LY fine quanta,
         // an integer that exceeds i64 (hence i128) — retiring the float remainder-carry.
@@ -1295,234 +1150,181 @@ mod tests {
         let cell = I64Vec3::new(1_000_000_000_000, 0, 0); // 1e12 mm = 1e9 m out
         let a = LatticePos::at(cell, DVec3::new(0.25e-3, 0.0, 0.0));
         let b = LatticePos::at(cell, DVec3::new(0.75e-3, 0.0, 0.0)); // 0.5 mm further along x
-        let rel = b.rebase_to(a, Tier::Fine);
-        assert_eq!(rel.cell(), I64Vec3::ZERO); // the 1e9 m cell cancels EXACTLY — zero drift
-        assert!((rel.offset().x - 0.5e-3).abs() < 1e-15); // the 0.5 mm survives to full f64 precision
+        let rel = b.separation(a, Tier::Fine);
+        assert_eq!(rel.cells(), I64Vec3::ZERO); // the 1e9 m cell cancels EXACTLY — zero drift
+        assert!((rel.residual().x - 0.5e-3).abs() < 1e-15); // the 0.5 mm survives to full f64 precision
     }
 
     #[test]
-    fn an_occupant_composed_into_a_moving_realm_rides_it_and_a_pinned_client_sees_the_motion() {
-        // The floating-origin LAW that S2 (server compose) + S3 (client subtract) will wire live, proven here
-        // at the lattice level: a realm at absolute A authors its occupant's absolute = A ∘ local; when A
-        // MOVES between ticks the occupant's absolute moves WITH it (rides the realm). A client pinned to a
-        // DIFFERENT realm (the star at the universe origin) subtracts its pin, so it renders the occupant AT
-        // the moving absolute — the occupant visibly travels with its realm instead of hanging static (the
-        // reported bug). Exercised with non-zero integer cells (the floating-point regime).
+    fn an_occupant_riding_a_moving_realm_is_seen_moving_by_a_pinned_client() {
+        // The floating-origin LAW at the lattice level, spelled in the ONE subtraction: a realm at
+        // absolute A carries its occupant at A + local; when A moves between ticks the occupant's
+        // absolute moves WITH it, and a client pinned elsewhere (separation from its pin) sees
+        // exactly the realm's own motion. Non-zero integer cells throughout (the floating-point
+        // regime the pre-lattice f64 algebra drifted in).
         let tier = Tier::Fine;
-        let star_pin = LatticePos::at(I64Vec3::ZERO, DVec3::ZERO); // client's pin: the star at the origin
-        let local = LatticePos::local(DVec3::new(3.0, 0.0, 0.0)); // the occupant, 3 m from its realm centre
-        // Tick 0: the realm (planet) sits at absolute A0, ~1e6 m out.
+        let star_pin = LatticePos::ORIGIN;
+        let local = DVec3::new(3.0, 0.0, 0.0);
         let a0 = LatticePos::at(
             I64Vec3::new(1_000_000_000, 0, 0),
             DVec3::new(0.4e-3, 0.0, 0.0),
         );
-        let seen0 = a0.compose(local, tier).rebase_to(star_pin, tier);
-        // Tick 1: the realm has moved (+2 m along x, plus a sub-mm step).
         let a1 = LatticePos::at(
             I64Vec3::new(1_000_002_000, 0, 0),
             DVec3::new(0.9e-3, 0.0, 0.0),
         );
-        let seen1 = a1.compose(local, tier).rebase_to(star_pin, tier);
-        // The occupant RODE the realm: its rendered position advanced by exactly the realm's own motion.
-        let world = |p: LatticePos| p.cell().as_dvec3() * tier.cell_edge_m() + p.offset();
-        let occupant_moved = world(seen1) - world(seen0);
-        let realm_moved =
-            (a1.cell() - a0.cell()).as_dvec3() * tier.cell_edge_m() + (a1.offset() - a0.offset());
+        let seen0 = a0
+            .translated(local, tier)
+            .separation(star_pin, tier)
+            .metres();
+        let seen1 = a1
+            .translated(local, tier)
+            .separation(star_pin, tier)
+            .metres();
+        let occupant_moved = seen1 - seen0;
+        let realm_moved = a1.separation(a0, tier).metres();
         assert!((occupant_moved - realm_moved).length() < 1e-6);
-        // And it is NOT static — the regression guard against the "occupant hangs in place" bug.
         assert!(occupant_moved.length() > 1.0);
     }
 
-    // ===== FrameXform — one placement, folded and applied =====================================
-
-    /// A placement 145 m out along +x with no motion and no rotation — the worked example's planet
-    /// inside its star system.
-    fn placed(x_m: f64) -> FrameXform {
-        FrameXform {
-            pos: LatticePos::local(DVec3::new(x_m, 0.0, 0.0)),
-            vel: DVec3::ZERO,
-            orient: DQuat::IDENTITY,
-        }
-    }
-
-    fn planet_frame() -> FrameRef {
-        FrameRef::PlanetCentered { planet_seed: 7 }
-    }
-
-    fn system_frame() -> FrameRef {
-        FrameRef::SystemSpace { system_seed: 1 }
-    }
-
     #[test]
-    fn is_identity_is_exact_and_a_nearly_unrotated_frame_does_not_collapse() {
-        assert!(FrameXform::IDENTITY.is_identity());
-        // A quaternion one ulp off the identity is ROTATED. If a tolerance crept in here, a realm
-        // spinning slowly enough to fall inside it would silently stop spinning for every client.
-        let nearly = FrameXform {
-            orient: DQuat::from_xyzw(0.0, 0.0, f64::EPSILON, 1.0),
-            ..FrameXform::IDENTITY
-        };
-        assert!(!nearly.is_identity());
-        assert!(!placed(1.0).is_identity());
-        assert!(
-            !FrameXform {
-                vel: DVec3::new(0.0, 0.0, 1.0),
-                ..FrameXform::IDENTITY
-            }
-            .is_identity()
+    fn at_rest_normalizes_the_spawn_pose_at_birth() {
+        // PRODUCER #4 (real-scale addendum §A4.5/H-17): the spawn/home constructor fills the
+        // integer half exactly as the integrator does on the first step. Value identical.
+        let p = StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 1 },
+            DVec3::new(20.0, -1.5, 0.25),
+            UniverseTick(3),
         );
-    }
-
-    #[test]
-    fn apply_adds_the_placement_and_relabels_to_the_parent() {
-        // The worked example's middle hop: the star system holds an occupant reported 3 m from its
-        // planet's centre and adds the 145 m it placed that planet at. The LABEL must move with the
-        // value — a composed value still wearing the child's frame name is the exact lie this work
-        // removes.
-        let pose = StampedPose::at_rest(planet_frame(), DVec3::new(3.0, 0.0, 0.0), UniverseTick(9));
-        let out = placed(145.0)
-            .apply(pose, Tier::Fine, system_frame())
-            .expect("an unrotated placement always applies");
-        assert_eq!(out.pos.offset(), DVec3::new(148.0, 0.0, 0.0));
-        assert_eq!(out.frame, system_frame());
-        assert_eq!(out.universe_tick, UniverseTick(9));
-    }
-
-    #[test]
-    fn then_folds_two_levels_into_one_add() {
-        // 3 inside the planet, the planet 145 inside the system, the system 12031 inside the galaxy.
-        // Folding the two placements first and applying once must equal applying them in turn.
-        let folded = placed(145.0)
-            .then(placed(12031.0), Tier::Fine)
-            .expect("unrotated placements always fold");
-        assert_eq!(folded.pos.offset(), DVec3::new(12176.0, 0.0, 0.0));
-        let pose = StampedPose::at_rest(planet_frame(), DVec3::new(3.0, 0.0, 0.0), UniverseTick(0));
-        let one_shot = folded
-            .apply(pose, Tier::Fine, FrameRef::GalaxySpace)
-            .expect("applies");
-        let step_by_step = placed(12031.0)
-            .apply(
-                placed(145.0)
-                    .apply(pose, Tier::Fine, system_frame())
-                    .expect("applies"),
-                Tier::Fine,
-                FrameRef::GalaxySpace,
-            )
-            .expect("applies");
-        assert_eq!(one_shot.pos.offset(), DVec3::new(12179.0, 0.0, 0.0));
-        assert_eq!(one_shot.pos.offset(), step_by_step.pos.offset());
-    }
-
-    #[test]
-    fn inverse_undoes_a_placement_exactly_including_the_integer_anchor() {
-        // A placement one whole anchor-block out, with motion. The round trip must return the pose
-        // BIT-for-bit — the cell negates as an integer, so the anchor never passes through f64.
-        let x = FrameXform {
-            pos: LatticePos::at(
-                I64Vec3::new(1_000_000_000_000, 0, 0),
-                DVec3::new(0.25, 0.0, 0.0),
-            ),
-            vel: DVec3::new(0.0, 7.5, 0.0),
-            orient: DQuat::IDENTITY,
-        };
-        let pose = StampedPose {
-            frame: planet_frame(),
-            pos: LatticePos::at(I64Vec3::new(4096, 0, 0), DVec3::new(0.5, -0.25, 0.75)),
-            vel: DVec3::new(1.0, 0.0, -2.0),
-            orient: DQuat::IDENTITY,
-            universe_tick: UniverseTick(11),
-        };
-        let up = x.apply(pose, Tier::Fine, system_frame()).expect("applies");
-        assert_eq!(up.pos.cell(), I64Vec3::new(1_000_000_004_096, 0, 0));
-        let back = x
-            .inverse(Tier::Fine)
-            .expect("an unrotated placement always inverts")
-            .apply(up, Tier::Fine, planet_frame())
-            .expect("applies");
-        assert_eq!(back.pos.cell(), pose.pos.cell());
-        assert_eq!(back.pos.offset(), pose.pos.offset());
-        assert_eq!(back.vel, pose.vel);
-        assert_eq!(back.frame, planet_frame());
-    }
-
-    #[test]
-    fn a_rotated_placement_inverts_and_applies_while_every_anchor_is_zero() {
-        // The cell guard is about the INTEGER anchor, not about rotation as such: a rotated placement
-        // whose origin sits inside one cell is perfectly representable and must keep working.
-        let quarter = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
-        let x = FrameXform {
-            pos: LatticePos::local(DVec3::new(10.0, 0.0, 0.0)),
-            vel: DVec3::ZERO,
-            orient: quarter,
-        };
-        let pose = StampedPose::at_rest(planet_frame(), DVec3::new(2.0, 0.0, 0.0), UniverseTick(1));
-        let up = x.apply(pose, Tier::Fine, system_frame()).expect("applies");
-        // +x in the child's axes points along +y in the parent's after a quarter turn about z.
-        assert!((up.pos.offset() - DVec3::new(10.0, 2.0, 0.0)).length() < 1e-12);
-        let back = x
-            .inverse(Tier::Fine)
-            .expect("inverts")
-            .apply(up, Tier::Fine, planet_frame())
-            .expect("applies");
-        assert!((back.pos.offset() - DVec3::new(2.0, 0.0, 0.0)).length() < 1e-12);
-    }
-
-    #[test]
-    fn a_rotated_placement_across_integer_cells_is_refused_on_every_operation() {
-        // A cell COUNT is measured along one frame's axes; rotating a non-zero count does not give a
-        // count. The only alternatives are to fold the anchor into f64 metres — the precision loss this
-        // coordinate exists to prevent — or to refuse. All three entry points refuse.
-        let quarter = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
-        let far = LatticePos::at(I64Vec3::new(1_000_000_000_000, 0, 0), DVec3::ZERO);
-        let rotated_far = FrameXform {
-            pos: far,
-            vel: DVec3::ZERO,
-            orient: quarter,
-        };
+        assert_eq!(p.pos.cell(), I64Vec3::new(20 * 1024, -1536, 256));
+        assert_eq!(p.pos.offset(), DVec3::ZERO);
         assert_eq!(
-            rotated_far.inverse(Tier::Fine).expect_err("refused"),
-            FrameError::RotatedFrameAcrossCells
+            p.pos.delta_m(LatticePos::ORIGIN, Tier::Fine),
+            DVec3::new(20.0, -1.5, 0.25)
         );
-        let pose_far = StampedPose {
-            frame: planet_frame(),
-            pos: far,
-            vel: DVec3::ZERO,
-            orient: DQuat::IDENTITY,
-            universe_tick: UniverseTick(0),
-        };
-        let rotated_here = FrameXform {
-            pos: LatticePos::local(DVec3::ZERO),
-            vel: DVec3::ZERO,
-            orient: quarter,
-        };
+    }
+
+    #[test]
+    fn from_metres_is_the_normalized_public_constructor() {
+        let lp = LatticePos::from_metres(DVec3::new(2.5, 0.0, -1.0), Tier::Fine);
+        assert_eq!(lp.cell(), I64Vec3::new(2560, 0, -1024));
+        assert_eq!(lp.offset(), DVec3::ZERO);
+        // Value-preserving for non-dyadic inputs too.
+        let v = DVec3::new(0.3, -7.77, 123.456);
+        let n = LatticePos::from_metres(v, Tier::Fine);
+        assert!((n.delta_m(LatticePos::ORIGIN, Tier::Fine) - v).length() < 1e-12);
+        assert!(n.offset().max_element() < FINE_CELL_EDGE_M + 1e-12);
+    }
+
+    #[test]
+    fn separation_metres_is_exact_inside_two_pow_53_cells_and_relative_beyond() {
+        // The §A5.2 flatten bound as a measurement: at 2^53 cells the flatten is still exact; at
+        // 2^61 cells (the largest shell magnitude) the error is bounded by one ulp of the ANSWER
+        // (≤ 0.5 m per axis at ~2.25e15 m), never of the world.
+        let exact = LatticePos::at(I64Vec3::new(1 << 53, 0, 0), DVec3::ZERO)
+            .separation(LatticePos::ORIGIN, Tier::Fine)
+            .metres();
+        assert_eq!(exact.x, (1u64 << 53) as f64 * FINE_CELL_EDGE_M);
+        let big = LatticePos::at(I64Vec3::new((1 << 61) + 1, 0, 0), DVec3::ZERO)
+            .separation(LatticePos::ORIGIN, Tier::Fine)
+            .metres();
+        let true_m = ((1i128 << 61) + 1) as f64 * FINE_CELL_EDGE_M;
+        assert!((big.x - true_m).abs() <= 1.0);
+    }
+
+    #[test]
+    fn separation_chebyshev_is_the_per_axis_max_and_total_at_the_domain_ends() {
+        let a = LatticePos::at(I64Vec3::new(CELL_DOMAIN_MAX, 3, -9), DVec3::ZERO);
+        let b = LatticePos::at(I64Vec3::new(-CELL_DOMAIN_MAX, 0, 0), DVec3::ZERO);
+        let sep = a.separation(b, Tier::Fine);
+        // 2·CELL_DOMAIN_MAX = i64::MAX − 1: the difference of two in-domain cells cannot overflow.
+        assert_eq!(sep.cells_chebyshev(), i64::MAX - 1);
+        // H-01 driven: the square of that separation would overflow i128 — refused, not panicked.
+        assert_eq!(sep.cells_sq(), None);
+        // In the guarded domain the square is the exact i128 sum.
+        let small = LatticePos::at(I64Vec3::new(3, -4, 12), DVec3::ZERO)
+            .separation(LatticePos::ORIGIN, Tier::Fine);
+        assert_eq!(small.cells_chebyshev(), 12);
+        assert_eq!(small.cells_sq(), Some(9 + 16 + 144));
+    }
+
+    #[test]
+    fn separation_rotated_identity_is_a_bit_exact_passthrough() {
+        let sep = LatticePos::at(I64Vec3::new(1 << 61, 5, -3), DVec3::new(0.1e-3, 0.0, 0.0))
+            .separation(LatticePos::ORIGIN, Tier::Fine);
+        // Identity ⇒ passthrough even far beyond the rotation reach: no fold, no cost.
+        let out = sep.rotated(DQuat::IDENTITY).expect("identity passthrough");
+        assert_eq!(out, sep);
+    }
+
+    #[test]
+    fn separation_rotated_folds_exactly_in_reach_and_refuses_beyond_it() {
+        use std::f64::consts::FRAC_PI_2;
+        let q = DQuat::from_rotation_z(FRAC_PI_2);
+        // In reach (1000 m ≪ 2⁴² m): fold-rotate-renormalize, cost ≤ one cell (here exact: the
+        // rotation of (1000,0,0) about z is (0,1000,0), a dyadic value).
+        let sep = LatticePos::from_metres(DVec3::new(1000.0, 0.0, 0.0), Tier::Fine)
+            .separation(LatticePos::ORIGIN, Tier::Fine);
+        let out = sep.rotated(q).expect("in reach");
+        assert_eq!(out.cells(), I64Vec3::new(0, 1_024_000, 0));
+        assert!((out.metres() - DVec3::new(0.0, 1000.0, 0.0)).length() < 1e-9);
+        // Beyond the reach (2⁵³ cells = 2× the 2⁵² cell reach): refused LOUD — R2, the P10 trigger.
+        let far = LatticePos::at(I64Vec3::new(1 << 53, 0, 0), DVec3::ZERO)
+            .separation(LatticePos::ORIGIN, Tier::Fine);
+        assert_eq!(far.rotated(q), Err(FrameError::RotationBeyondExactReach));
+        // P6 non-vacuity, both sides of the fence: AT the reach the fold costs ≤ 1 cell; at 2× the
+        // reach it is refused (the fence is not a no-op).
+        let at_reach = LatticePos::at(I64Vec3::new(1 << 52, 0, 0), DVec3::ZERO)
+            .separation(LatticePos::ORIGIN, Tier::Fine);
+        let folded = at_reach
+            .rotated(q)
+            .expect("exactly at the reach is admitted");
+        assert!(folded.cells().y.abs_diff(1 << 52) <= 1);
+    }
+
+    #[test]
+    fn rotation_exact_reach_is_tier_derived() {
+        // cell_edge / ε: FINE = 2⁻¹⁰/2⁻⁵² = 2⁴² m; COARSE re-derives itself from its own edge.
+        assert_eq!(rotation_exact_reach_m(Tier::Fine), (1u64 << 42) as f64);
         assert_eq!(
-            rotated_here
-                .apply(pose_far, Tier::Fine, system_frame())
-                .expect_err("refused"),
-            FrameError::RotatedFrameAcrossCells
+            rotation_exact_reach_m(Tier::Coarse),
+            COARSE_CELL_EDGE_M / f64::EPSILON
         );
-        // `then` refuses on the OUTER placement's rotation against the INNER's anchor.
-        let inner_far = FrameXform {
-            pos: far,
-            vel: DVec3::ZERO,
-            orient: DQuat::IDENTITY,
-        };
-        assert_eq!(
-            inner_far
-                .then(rotated_here, Tier::Fine)
-                .expect_err("refused"),
-            FrameError::RotatedFrameAcrossCells
+    }
+
+    #[test]
+    fn separation_accessors_expose_the_halves_and_the_tier() {
+        let sep = LatticePos::at(I64Vec3::new(7, 0, 0), DVec3::new(0.25e-3, 0.0, 0.0)).separation(
+            LatticePos::at(I64Vec3::new(3, 0, 0), DVec3::ZERO),
+            Tier::Fine,
         );
-        // …and permits it once the anchor is zero (the other side of the same guard).
-        let inner_here = FrameXform {
-            pos: LatticePos::local(DVec3::new(1.0, 0.0, 0.0)),
-            vel: DVec3::ZERO,
-            orient: DQuat::IDENTITY,
-        };
-        assert!(inner_here.then(rotated_here, Tier::Fine).is_ok());
+        assert_eq!(sep.cells(), I64Vec3::new(4, 0, 0));
+        assert_eq!(sep.residual(), DVec3::new(0.25e-3, 0.0, 0.0));
+        assert_eq!(sep.tier(), Tier::Fine);
+        assert!(format!("{sep:?}").contains("Separation"));
     }
 
     use proptest::prelude::*;
+
+    /// The §A6.3 boundary-WEIGHTED cell domain: zero, ±1, the exact-flatten edge (±2⁵²/±2⁵³), the
+    /// largest shell magnitude (±2⁶¹), the sanitize clamp (±CELL_DOMAIN_MAX) — plus a uniform fill
+    /// of the interior, so both the named cliffs and the bulk are driven.
+    fn domain_cell() -> impl Strategy<Value = i64> {
+        prop_oneof![
+            Just(0i64),
+            Just(1i64),
+            Just(-1i64),
+            Just(1i64 << 52),
+            Just(-(1i64 << 52)),
+            Just(1i64 << 53),
+            Just(-(1i64 << 53)),
+            Just(1i64 << 61),
+            Just(-(1i64 << 61)),
+            Just(CELL_DOMAIN_MAX),
+            Just(-CELL_DOMAIN_MAX),
+            -CELL_DOMAIN_MAX..=CELL_DOMAIN_MAX,
+        ]
+    }
 
     proptest! {
         #[test]
@@ -1543,18 +1345,69 @@ mod tests {
         }
 
         #[test]
-        fn compose_then_rebase_recovers_the_local_position(
-            ax in -100_000i64..100_000, ay in -100_000i64..100_000, az in -100_000i64..100_000,
-            lx in -100_000i64..100_000, ly in -100_000i64..100_000, lz in -100_000i64..100_000,
+        fn separation_is_the_exact_cell_delta_and_from_origin_inverts_it_bit_for_bit(
+            ax in domain_cell(), ay in domain_cell(), az in domain_cell(),
+            bx in domain_cell(), by in domain_cell(), bz in domain_cell(),
+            oax in -0.9e-3f64..0.9e-3, obx in -0.9e-3f64..0.9e-3,
         ) {
-            // origin ∘ local, then rebase back to origin, recovers `local` EXACTLY (integer cells cancel;
-            // offsets ZERO ⇒ no float error): compose and rebase_to are inverses.
-            let origin = LatticePos::at(I64Vec3::new(ax, ay, az), DVec3::ZERO);
-            let local = LatticePos::at(I64Vec3::new(lx, ly, lz), DVec3::ZERO);
-            let composed = origin.compose(local, Tier::Fine);
-            let back = composed.rebase_to(origin, Tier::Fine);
-            prop_assert_eq!(back.cell(), local.cell());
-            prop_assert_eq!(back.offset(), local.offset());
+            // P1 + P2 (addendum §A6.3), boundary-WEIGHTED over the sanitized domain: the cell half
+            // of a separation is the exact i64 subtraction (it cannot overflow — CELL_DOMAIN_MAX is
+            // i64::MAX/2 exactly so the difference fits), and re-adding the origin recovers the
+            // position BIT-FOR-BIT (the §A5.1 exact-rebase theorem).
+            let a = LatticePos::at(I64Vec3::new(ax, ay, az), DVec3::new(oax, 0.0, 0.0));
+            let b = LatticePos::at(I64Vec3::new(bx, by, bz), DVec3::new(obx, 0.0, 0.0));
+            let sep = a.separation(b, Tier::Fine);
+            prop_assert_eq!(sep.cells().x, ax - bx);
+            prop_assert_eq!(sep.cells().y, ay - by);
+            prop_assert_eq!(sep.cells().z, az - bz);
+            let back = sep.from_origin(b);
+            // The integer half round-trips BIT-FOR-BIT at every magnitude; the f64 residual
+            // round-trips within ulp(one cell edge) ≈ 1.1e-19 m (H-32: the ulp bound, not a loose
+            // Sterbenz appeal, is what carries the theorem for opposite-sign residuals).
+            prop_assert_eq!(back.cell(), a.cell());
+            prop_assert!((back.offset() - a.offset()).length() <= 2.5e-19);
+            // And where the residual arithmetic is exact (dyadic offsets — every normalized
+            // production pose is within one cell of one), the round trip IS bit-for-bit.
+            let ad = LatticePos::at(a.cell(), DVec3::new(0.25e-3, 0.0, 0.0));
+            let bd = LatticePos::at(b.cell(), DVec3::new(0.5e-3, 0.0, 0.0));
+            prop_assert_eq!(ad.separation(bd, Tier::Fine).from_origin(bd), ad);
         }
+
+        #[test]
+        fn cells_sq_never_panics_or_wraps_over_the_whole_sanitized_domain(
+            ax in domain_cell(), bx in domain_cell(),
+            ay in domain_cell(), by in domain_cell(),
+            az in domain_cell(), bz in domain_cell(),
+        ) {
+            // P8 (addendum §A4.4 driven): the comparator over ANY sanitized pair — the opposite
+            // ±CELL_DOMAIN_MAX ends included — neither panics nor wraps. Where it answers, the
+            // answer equals the i128 reference computed axis-by-axis.
+            let a = LatticePos::at(I64Vec3::new(ax, ay, az), DVec3::ZERO);
+            let b = LatticePos::at(I64Vec3::new(bx, by, bz), DVec3::ZERO);
+            let sep = a.separation(b, Tier::Fine);
+            let reference: Option<i128> = if sep.cells_chebyshev() <= CELL_DOMAIN_MAX {
+                let sq = |v: i64| i128::from(v) * i128::from(v);
+                Some(sq(ax - bx) + sq(ay - by) + sq(az - bz))
+            } else {
+                None
+            };
+            prop_assert_eq!(sep.cells_sq(), reference);
+        }
+    }
+
+    /// T2's STAR realm through every naming seam at once: how it prints, which realm its own
+    /// frame names, and how a player is told where they stand. One test, three arms — each was
+    /// added by the taxonomy arc and each is a place a missing arm would silently mis-name a
+    /// star (the `Display` feeds directory keys and logs, `realm` feeds containment, `label`
+    /// feeds the player's own location line).
+    #[test]
+    fn a_star_realm_names_itself_everywhere_a_realm_is_named() {
+        let star = RealmId::Star(0x1234_5678_9abc_def0);
+        assert_eq!(star.to_string(), "star-123456789abcdef0");
+        let frame = FrameRef::StarCentered {
+            star_seed: 0x1234_5678_9abc_def0,
+        };
+        assert_eq!(frame.realm(), Some(star));
+        assert_eq!(frame.label(), "Star 1311768467463790320");
     }
 }

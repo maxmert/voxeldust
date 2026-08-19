@@ -84,7 +84,7 @@ fn set_dest_subject_offset(topo: &mut Topology, subject: EntityId, off: DVec3) -
         let dots = s.world_mut().resource_mut::<vd_sim::stub::Dots>();
         for dot in dots.into_inner().0.values_mut() {
             if dot.entity == subject {
-                dot.pose.pos = LatticePos::local(off);
+                dot.pose.pos = LatticePos::from_metres(off, vd_core::pose::Tier::Fine);
                 return true;
             }
         }
@@ -113,9 +113,10 @@ fn dest_region(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
     .expect("valid dest containment band");
     RealmRegion {
         realm,
-        center: LatticePos::local(DVec3::ZERO),
+        center: LatticePos::ORIGIN,
         frame: frame_for_realm(realm, None).expect("System realm always resolves a frame"),
         shape: Boundary::Shell { r },
+        look: Some(Boundary::Shell { r }),
         band,
         aoi: vd_core::geometry::AoiConfig::inert(),
         interior_band: vd_core::geometry::AoiConfig::inert(),

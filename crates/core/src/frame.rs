@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::UniverseTick;
 use crate::placement::PlacementBook;
-use crate::pose::{FrameRef, LatticePos, StampedPose};
+use crate::pose::{FrameRef, LatticePos, StampedPose, Tier};
 
 /// Where a frame's origin sits — and how it moves — relative to the COMMON PARENT at a
 /// universe tick. A rigid placement: position, velocity, orientation, angular velocity.
@@ -36,9 +36,9 @@ use crate::pose::{FrameRef, LatticePos, StampedPose};
 pub struct FramePlacement {
     /// Integer CELL anchor of this frame's origin in the parent frame (parent tier units) — the
     /// exact-integer coarse part of the origin position, companion to `origin` (its sub-cell f64
-    /// residual). Through P3 every placement is at `ZERO` (the authored rows carry small system-local
-    /// origins that ride entirely in `origin`), so the two anchors cancel and the dest pose is exactly
-    /// `LatticePos::local(new_pos)` as it was — the byte-floor.
+    /// residual). NORMALIZED on every producer since the cell activation ([`FramePlacement::moving`],
+    /// the motion arms, the generator's region centres): the whole-quantum part of an origin rides
+    /// here and `origin` holds the sub-cell remainder.
     ///
     /// [`transfer_frame`] SUBTRACTS the two anchors as integers and carries the difference into the
     /// dest pose. It used to read neither field and write cell `0` unconditionally, which quietly
@@ -73,15 +73,30 @@ impl FramePlacement {
 
     /// A non-rotating translated/moving frame (the common celestial case: a planet
     /// orbiting a star carries no spin in SystemSpace until surface frames are added).
+    ///
+    /// NORMALIZED since the cell activation (real-scale addendum §A4.8 row 5): the integer anchor
+    /// carries the whole-quantum part of the origin and `origin` holds the sub-cell residual —
+    /// this constructor used to hard-write `origin_cell: ZERO`, which left every mover's and every
+    /// static child's placement bypassing the lattice. FINE tier by fence: no COARSE placement can
+    /// exist (the COARSE tier is dormant and its conversion refused — R1); the tier parameter
+    /// arrives with P10's COARSE activation.
     #[must_use]
     pub fn moving(origin: DVec3, velocity: DVec3) -> FramePlacement {
+        let pos = LatticePos::from_metres(origin, Tier::Fine);
         FramePlacement {
-            origin_cell: I64Vec3::ZERO,
-            origin,
+            origin_cell: pos.cell(),
+            origin: pos.offset(),
             velocity,
             orientation: DQuat::IDENTITY,
             angular_velocity: DVec3::ZERO,
         }
+    }
+
+    /// The placement anchor as the one lattice position it is — the raw halves fused back for
+    /// separation arithmetic ([`transfer_frame`]'s two anchor reads spell this).
+    #[must_use]
+    pub fn anchor(&self) -> LatticePos {
+        LatticePos::at(self.origin_cell, self.origin)
     }
 }
 
@@ -104,15 +119,18 @@ pub enum FrameError {
         book_at: UniverseTick,
         pose_at: UniverseTick,
     },
-    /// The two frames' origins sit in DIFFERENT integer cells and the destination frame is rotated
-    /// relative to the common parent. The cell difference is a count of parent-axis cells; turning it
-    /// into the destination's axes is a rotation, and a rotated cell COUNT is not a cell count. Folding
-    /// it into f64 metres instead would be the exact loss this whole conversion exists to remove, so it
-    /// is refused LOUD rather than silently degraded. Unreachable in production (every placement in the
-    /// tree is identity-oriented, and every anchor is `ZERO`); it becomes live only when a spinning
-    /// realm is authored more than one cell-block from its parent's origin.
-    #[error("the destination frame is rotated and its origin sits in a different integer cell")]
-    RotatedFrameAcrossCells,
+    /// A rotation was asked of a separation whose magnitude exceeds the tier's EXACT rotation
+    /// reach ([`crate::pose::rotation_exact_reach_m`] = `cell_edge / f64::EPSILON` ≈ 29.399 AU at
+    /// FINE). Rotating a lever of magnitude `L` through f64 costs `L·ε`; inside the reach that cost
+    /// is at most ONE cell, so the fold is admitted; beyond it the fold would break the millimetre
+    /// grid, so it is refused LOUD (R2 — a spinning realm at galaxy magnitudes is a COARSE-tier
+    /// object, and this refusal is a named P10 trigger). Replaces the pre-activation
+    /// `RotatedFrameAcrossCells` predicate ("rotated AND `cell != ZERO`"), which the activation
+    /// made active-hostile: with live cells essentially every hop is cross-cell, so the old rule
+    /// would have refused every rotating realm outright (real-scale addendum §A4.6, H-11).
+    /// Unreachable in production today (every placement in the tree is identity-oriented).
+    #[error("the frame is rotated and the separation exceeds the tier's exact rotation reach")]
+    RotationBeyondExactReach,
 }
 
 /// Re-express `pose` (in its current frame) into `to` using the authored placement `book`. The
@@ -154,62 +172,56 @@ pub fn transfer_frame(
     }
     let from = book.of(pose.frame).ok_or(FrameError::UnknownSourceFrame)?;
     let dest = book.of(to).ok_or(FrameError::UnknownDestFrame)?;
+    let tier = pose.frame.tier();
 
-    // 1. THE LEVER — where the pose sits inside its OWN realm, reconstructing the FULL source-frame
-    // position (source-tier cell metres + the f64 offset) so a non-zero source cell is not silently
-    // dropped (S0 of the floating-origin plan). Through P3 `cell == ZERO`, so this is exactly
-    // `offset()` — byte-identical. This vector is bounded by the SOURCE realm's own extent, so rotating
-    // it in f64 metres is exact to far under a micron. The huge magnitudes are NOT here: they are the
-    // two origins' integer anchors, and step 3 keeps those integral.
-    let local = pose.pos.offset() + pose.pos.cell().as_dvec3() * pose.frame.tier().cell_edge_m();
-    let lever = from.orientation * local;
-    let world_pos = from.origin + lever;
+    // 1. LIFT (real-scale addendum §A4.7). The pose's own position is a SEPARATION from its frame
+    // origin, so it rotates through the ONE rotation rule (`Separation::rotated`) and never through
+    // a bare f64 fold. The SOURCE orientation is applied HERE — a sketch that subtracts anchors
+    // only would silently regress the `from.orientation * local` term the shipped code computes
+    // (H-07). Identity orientation — every placement THE world generates — is a bit-exact
+    // passthrough, so the integer half of the pose survives untouched.
+    let own = pose
+        .pos
+        .separation(LatticePos::ORIGIN, tier)
+        .rotated(from.orientation)?;
+    // The metre lever, for the Coriolis term (`ω × r`): needed EXACTLY when the frame spins, and
+    // exactly then the rotation reach has already bounded it, so this flatten is exact.
+    let lever = own.metres();
+    let from_anchor = from.anchor();
+    // The pose in the common-parent frame: exact integer add onto the source anchor, unnormalized
+    // (a working value — the output normalize below is the one re-bucketing).
+    let world = own.from_origin(from_anchor);
     let world_vel =
         from.velocity + from.orientation * pose.vel + from.angular_velocity.cross(lever);
     let world_orient = from.orientation * pose.orient;
 
-    // 2. Express the parent-frame pose in the destination frame. Every term here is a small residual:
-    // the two origins' sub-cell remainders and the lever, never a universe-scale magnitude.
+    // 2. DESCEND — THE EXACT INTEGER SUBTRACTION. This one `separation` replaces BOTH the f64
+    // `world_pos − dest.origin` (catastrophic cancellation at scale) and the separate saturating
+    // anchor subtract ("THE INTEGER HALF") — one operation, not two halves. The big part of a
+    // position never passes through f64: with identity orientations the whole conversion touches
+    // f64 only on two sub-cell residuals (the identity theorem, §A4.7) — no magnitude, however
+    // large, can degrade it.
+    let dest_anchor = dest.anchor();
+    let rel_parent = world.separation(dest_anchor, tier);
+    // The parent-axes relative vector in metres, for the destination's Coriolis/velocity terms —
+    // bounded by the destination realm's own extent on every lawful conversion.
+    let rel_parent_m = rel_parent.metres();
     let inv = dest.orientation.inverse();
-    let rel = world_pos - dest.origin;
-    let new_pos = inv * rel;
-    let new_vel = inv * (world_vel - dest.velocity - dest.angular_velocity.cross(rel));
+    let rel = rel_parent.rotated(inv)?;
+    let new_vel = inv * (world_vel - dest.velocity - dest.angular_velocity.cross(rel_parent_m));
     let new_orient = inv * world_orient;
-
-    // 3. THE INTEGER HALF — subtract the two origins' cell anchors AS INTEGERS. This line used to not
-    // exist: the dest pose was written with `LatticePos::local`, which pins the cell to ZERO, so every
-    // hop threw the anchor away and left the f64 offset carrying the whole distance. Measured on the
-    // pre-change code: a pose one anchor-block (10¹² cells ≈ 9.77×10⁸ m) out came back as cell 0 with
-    // offset 976_562_645.5 m — the integer truth gone and f64 left holding a nine-digit number, which
-    // is precisely the precision cliff the tiered coordinate exists to avoid. Saturating per component
-    // for the same reason `LatticePos::normalize` saturates: a hostile or diverged anchor must not
-    // PANIC the shard in debug (i.e. across the whole test + coverage suite), and every in-domain
-    // anchor is far inside the range so the clamp never fires on a real pose.
-    let cell_out = I64Vec3::new(
-        from.origin_cell.x.saturating_sub(dest.origin_cell.x),
-        from.origin_cell.y.saturating_sub(dest.origin_cell.y),
-        from.origin_cell.z.saturating_sub(dest.origin_cell.z),
-    );
-    // A cell COUNT is measured along the PARENT's axes. If the destination is rotated relative to the
-    // parent, expressing that count in the destination's axes is a rotation, and no rotation of a
-    // non-zero integer cell count is itself an integer cell count. Refuse it — the alternative is to
-    // fold the anchor into f64 metres, which is the loss this function was just fixed to stop doing.
-    // EXACT quaternion equality, never an epsilon: a frame that is "nearly" unrotated is rotated, and a
-    // tolerance here would silently resume the folding for every slowly-spinning realm.
-    if dest.orientation != DQuat::IDENTITY && cell_out != I64Vec3::ZERO {
-        return Err(FrameError::RotatedFrameAcrossCells);
-    }
 
     Ok(StampedPose {
         frame: to,
-        // A tier change (FINE millimetre cells ↔ COARSE light-year cells at P10) routes through the ONE
-        // existing re-quantizer rather than a second copy of that arithmetic. Same tier — every live
-        // frame pair today, since only `GalaxySpace` is COARSE and no COARSE pose exists yet — returns
-        // `self` bit-for-bit, so this is the exact identity on the shipped path. When the galaxy tier
-        // lights up at P10, the unit `origin_cell` is counted in (the PARENT's, which this signature
-        // cannot name) has to be settled in the same change that settles `convert_tier`'s own
-        // P10-deferred FINE↔COARSE remainder carry; the two are the same open question.
-        pos: LatticePos::at(cell_out, new_pos).convert_tier(pose.frame.tier(), to.tier()),
+        // NORMALIZED output (§A4.7): the integer half carries the whole-quantum part into the
+        // destination frame, the residual stays sub-cell — the invariant every downstream consumer
+        // (the integrator, the verdict, the wire) now relies on. A tier change (FINE ↔ COARSE at
+        // P10) still routes through the ONE existing re-quantizer; same tier — every live frame
+        // pair today — is the exact identity there.
+        pos: rel
+            .from_origin(LatticePos::ORIGIN)
+            .normalize(tier)
+            .convert_tier(tier, to.tier()),
         vel: new_vel,
         orient: new_orient.normalize(),
         universe_tick: pose.universe_tick,
@@ -290,24 +302,29 @@ mod tests {
         let b = book(vec![(planet(), FramePlacement::identity())]);
         let out = transfer_frame(&pose, planet(), &b).expect("identity transfer");
         let want = DVec3::new(1000.5, -0.25, 0.75);
-        assert!((out.pos.offset() - want).length() < 1e-9);
-        // The dest write stays cell-0 (byte-floor: re-quantizing new_pos into dest cells is P4/P5).
-        assert_eq!(out.pos.cell(), I64Vec3::ZERO);
+        assert!((out.pos.delta_m(LatticePos::ORIGIN, planet().tier()) - want).length() < 1e-9);
+        // The dest write is NORMALIZED (the activation): the whole-quantum part rides the integer
+        // half — 1000.5 m = 1_024_512 cells exactly (the FINE edge is a power of two).
+        assert_eq!(out.pos.cell(), I64Vec3::new(1_024_512, -256, 768));
     }
 
     #[test]
-    fn transfer_at_cell_zero_is_byte_identical_to_the_pre_lattice_lift() {
-        // THE byte-floor: with a cell-0 source (the P3 shipping form) the lift is exactly `offset()`, so
-        // the dest pose is unchanged from the pre-S0 behaviour — cell 0, offset = the transformed pos.
+    fn transfer_output_is_normalized_and_value_identical_to_the_pre_lattice_lift() {
+        // The activation's output invariant: the dest pose is NORMALIZED (integer half full, sub-cell
+        // residual) and its VALUE is exactly the pre-lattice f64 answer — dyadic inputs, so the
+        // equality is bit-exact on the flattened metres.
         let b = book(vec![(
             planet(),
             FramePlacement::moving(DVec3::new(10.0, 0.0, 0.0), DVec3::ZERO),
         )]);
         let p = pose_in(sys(), DVec3::new(3.0, 4.0, 5.0), DVec3::ZERO);
         let out = transfer_frame(&p, planet(), &b).expect("transfer");
-        assert_eq!(out.pos.cell(), I64Vec3::ZERO);
-        // planet origin at +10x ⇒ dest offset = (3-10, 4, 5).
-        assert!((out.pos.offset() - DVec3::new(-7.0, 4.0, 5.0)).length() < 1e-9);
+        // planet origin at +10x ⇒ value (3-10, 4, 5); normalized ⇒ cells (-7168, 4096, 5120), offset 0.
+        assert_eq!(out.pos.cell(), I64Vec3::new(-7168, 4096, 5120));
+        assert_eq!(
+            out.pos.delta_m(LatticePos::ORIGIN, planet().tier()),
+            DVec3::new(-7.0, 4.0, 5.0)
+        );
     }
 
     #[test]
@@ -335,7 +352,11 @@ mod tests {
         let p = pose_in(sys(), DVec3::new(47.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0));
         let got = transfer_frame(&p, planet(), &b).expect("identity reframe");
         assert_eq!(got.frame, planet());
-        assert_eq!(got.pos.offset(), p.pos.offset());
+        // Value-identical (the output is normalized; 47.0 is dyadic so the flatten is bit-exact).
+        assert_eq!(
+            got.pos.delta_m(LatticePos::ORIGIN, planet().tier()),
+            p.pos.delta_m(LatticePos::ORIGIN, sys().tier())
+        );
         assert_eq!(got.vel, p.vel);
         assert_eq!(got.orient, p.orient);
         assert_eq!(got.universe_tick, p.universe_tick);
@@ -388,7 +409,10 @@ mod tests {
         let in_planet = transfer_frame(&original, planet(), &b).expect("to planet");
         let back = transfer_frame(&in_planet, sys(), &b).expect("back to system");
         assert!(
-            (back.pos.offset() - original.pos.offset()).length() < 1e-9,
+            (back.pos.delta_m(LatticePos::ORIGIN, sys().tier())
+                - original.pos.delta_m(LatticePos::ORIGIN, sys().tier()))
+            .length()
+                < 1e-9,
             "pos round-trips: {:?} vs {:?}",
             back.pos,
             original.pos
@@ -418,7 +442,9 @@ mod tests {
         let p = pose_in(sys(), DVec3::new(1.0, 0.0, 0.0), DVec3::ZERO);
         let got = transfer_frame(&p, planet(), &b).expect("rotated");
         assert!(
-            (got.pos.offset() - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-9,
+            (got.pos.delta_m(LatticePos::ORIGIN, planet().tier()) - DVec3::new(0.0, -1.0, 0.0))
+                .length()
+                < 1e-9,
             "rotated into frame axes: {:?}",
             got.pos
         );
@@ -432,7 +458,12 @@ mod tests {
             FramePlacement::moving(DVec3::X, DVec3::Y).velocity,
             DVec3::Y
         );
-        assert_eq!(FramePlacement::moving(DVec3::X, DVec3::Y).origin, DVec3::X);
+        // `moving` NORMALIZES: 1 m rides the integer anchor (1024 fine cells), residual zero,
+        // value preserved.
+        let m = FramePlacement::moving(DVec3::X, DVec3::Y);
+        assert_eq!(m.origin_cell, I64Vec3::new(1024, 0, 0));
+        assert_eq!(m.origin, DVec3::ZERO);
+        assert_eq!(m.anchor().delta_m(LatticePos::ORIGIN, Tier::Fine), DVec3::X);
     }
 
     #[test]
@@ -454,8 +485,8 @@ mod tests {
             "the placement book speaks at tick 7 but the pose is stamped at tick 5"
         );
         assert_eq!(
-            FrameError::RotatedFrameAcrossCells.to_string(),
-            "the destination frame is rotated and its origin sits in a different integer cell"
+            FrameError::RotationBeyondExactReach.to_string(),
+            "the frame is rotated and the separation exceeds the tier's exact rotation reach"
         );
     }
 
@@ -493,18 +524,16 @@ mod tests {
             universe_tick: UniverseTick(100),
         };
         let got = transfer_frame(&pose, sys(), &b).expect("planet -> system");
+        // THE ACTIVATION: the pose's OWN cell now rides INTEGRALLY too — the identity theorem
+        // (§A4.7): with identity orientations the whole conversion touches f64 only on sub-cell
+        // residuals. The output is normalized: pose anchor + placement anchor + 145.5 m of residual
+        // metres, all in the integer half (145.5 m = 148_992 cells exactly).
         assert_eq!(
             got.pos.cell(),
-            anchor,
-            "the placement's integer anchor SURVIVES the hop (it used to be written as ZERO)"
+            I64Vec3::new(2 * ANCHOR_CELLS + 148_992, 0, 0),
+            "both integer anchors AND the pose's own magnitude ride the integer half"
         );
-        // The pose's OWN cell still rides the f64 lever, by design: a lever is bounded by the source
-        // realm's own extent, and the conversion is only exact-integer in the two ORIGINS. So the
-        // offset is unchanged from the pre-change measurement — that number is the byte floor, not a
-        // regression. If poses ever start shipping normalized (all magnitude in the cell) this is the
-        // line that has to change, and this assertion is what will say so.
-        assert_eq!(got.pos.offset().x, ANCHOR_M + 145.0 + 0.5);
-        assert_eq!(got.pos.offset().x, 976_562_645.5);
+        assert_eq!(got.pos.offset(), DVec3::ZERO);
         assert_eq!(got.frame, sys());
 
         // GOING BACK DOWN, the anchors subtract the other way and the round trip is EXACT — the same
@@ -512,23 +541,29 @@ mod tests {
         // differs on the way back only because the pose's own cell was folded into the lever on the way
         // out; the total is identical, which is what a position means.)
         let back = transfer_frame(&got, planet(), &b).expect("system -> planet");
-        assert_eq!(back.pos.cell(), I64Vec3::new(-ANCHOR_CELLS, 0, 0));
+        // Normalized both ways: the round trip returns the identical physical point with the whole
+        // magnitude in the integer half (ANCHOR_M + 0.5 m = ANCHOR_CELLS + 512 cells exactly).
+        assert_eq!(back.pos.cell(), I64Vec3::new(ANCHOR_CELLS + 512, 0, 0));
+        assert_eq!(back.pos.offset(), DVec3::ZERO);
         let total_out = |p: LatticePos| p.offset().x + p.cell().as_dvec3().x * FINE_CELL_EDGE_M;
         assert_eq!(total_out(back.pos), total_out(pose.pos));
         assert_eq!(total_out(back.pos), ANCHOR_M + 0.5);
     }
 
     #[test]
-    fn a_rotated_destination_refuses_a_cross_cell_transfer_but_allows_a_same_cell_one() {
-        // A cell count is measured along the PARENT's axes. Rotating a non-zero count into the
-        // destination's axes does not yield a count, so it is refused LOUD rather than folded into f64
-        // metres — folding is exactly the loss the slice removes. Unreachable in production today
-        // (every placement is identity-oriented and anchored at ZERO); covered here because HR5 wants
-        // both sides of the guard, and because a spinning realm authored a block out is a real P8 shape.
+    fn a_rotated_dest_folds_exactly_in_reach_and_refuses_beyond_the_rotation_reach() {
+        // THE RESTATED ROTATION LAW (real-scale addendum §A4.6). The old predicate ("rotated AND
+        // anchors in different cells" => refuse) became active-hostile the moment cells went live:
+        // essentially every hop is cross-cell, so it would have refused every rotating realm. The
+        // restated rule derives from the actual cost: rotating a lever of magnitude L costs L*eps,
+        // so inside `rotation_exact_reach_m` (2^42 m at FINE) the fold costs at most one cell and
+        // is ADMITTED; beyond it, refused LOUD (R2 -- the P10 trigger).
         let spun = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
         let p = pose_in(sys(), DVec3::new(1.0, 0.0, 0.0), DVec3::ZERO);
 
-        // Rotated dest, anchors in DIFFERENT cells -> typed refusal.
+        // Rotated dest, anchors a whole block apart but WELL INSIDE the reach -> ADMITTED, and the
+        // fold is exact: the pose lands `-anchor` along the rotated axes (a 90-degree turn about z
+        // maps the parent -x separation onto +y).
         let b = book(vec![(
             planet(),
             FramePlacement {
@@ -539,12 +574,29 @@ mod tests {
                 angular_velocity: DVec3::ZERO,
             },
         )]);
+        let got = transfer_frame(&p, planet(), &b).expect("in-reach rotated cross-cell dest folds");
+        let flat = got.pos.delta_m(LatticePos::ORIGIN, sys().tier());
+        // Parent-frame separation: (1 - ANCHOR_M, 0, 0); rotated by spun.inverse() -> (0, ANCHOR_M - 1, 0).
+        assert!((flat - DVec3::new(0.0, ANCHOR_M - 1.0, 0.0)).length() < 1e-3);
+
+        // Rotated dest BEYOND the exact rotation reach (2^42 m at FINE = 2^52 cells) -> typed refusal.
+        let far = 1_i64 << 53; // 2^53 cells = 2 x the reach
+        let b = book(vec![(
+            planet(),
+            FramePlacement {
+                origin_cell: I64Vec3::new(far, 0, 0),
+                origin: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                orientation: spun,
+                angular_velocity: DVec3::ZERO,
+            },
+        )]);
         assert_eq!(
             transfer_frame(&p, planet(), &b),
-            Err(FrameError::RotatedFrameAcrossCells)
+            Err(FrameError::RotationBeyondExactReach)
         );
 
-        // Rotated dest, anchors in the SAME cell -> the count is zero, nothing needs rotating, allowed.
+        // Rotated dest at the SAME anchor: nothing large needs rotating -> allowed, exact.
         let b = book(vec![(
             planet(),
             FramePlacement {
@@ -556,8 +608,8 @@ mod tests {
             },
         )]);
         let got = transfer_frame(&p, planet(), &b).expect("same-cell rotated dest");
-        assert_eq!(got.pos.cell(), I64Vec3::ZERO);
-        assert!((got.pos.offset() - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-9);
+        let flat = got.pos.delta_m(LatticePos::ORIGIN, sys().tier());
+        assert!((flat - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-9);
     }
 
     // ---- rehome COORDINATE correctness (successful rehomes + expected coords, incl. floating-point) ----
@@ -579,12 +631,20 @@ mod tests {
         let at_centre = StampedPose::at_rest(sys(), planet_at, UniverseTick(100));
         let landed = transfer_frame(&at_centre, planet(), &b).expect("placed");
         assert_eq!(landed.frame, planet());
-        assert!(landed.pos.offset().length() < 1e-6);
+        assert!(
+            landed
+                .pos
+                .delta_m(LatticePos::ORIGIN, planet().tier())
+                .length()
+                < 1e-6
+        );
         // Offset by delta ⇒ planet-local delta.
         let delta = DVec3::new(10.0, -5.0, 2.0);
         let off = StampedPose::at_rest(sys(), planet_at + delta, UniverseTick(100));
         let landed_off = transfer_frame(&off, planet(), &b).expect("placed");
-        assert!((landed_off.pos.offset() - delta).length() < 1e-6);
+        assert!(
+            (landed_off.pos.delta_m(LatticePos::ORIGIN, planet().tier()) - delta).length() < 1e-6
+        );
     }
 
     #[test]
@@ -618,16 +678,18 @@ mod tests {
             FramePlacement::moving(planet_at, DVec3::ZERO),
         )]);
         let world = planet_at + DVec3::new(7.0, -3.0, 11.0);
-        // Rep 1: cell-0 full offset (the P3 shipping form).
-        let flat = StampedPose::at_rest(sys(), world, UniverseTick(100));
-        // Rep 2: normalized into integer-mm cells + residual (the S5 form) — the SAME physical position.
-        let mut split = flat;
-        split.pos = LatticePos::local(world).normalize(sys().tier());
+        // Rep 1: raw cell-0 full offset (the pre-activation shipping form — constructible in-crate
+        // only, exactly so nothing outside can ship one).
+        let mut flat = StampedPose::at_rest(sys(), world, UniverseTick(100));
+        flat.pos = LatticePos::local(world);
+        // Rep 2: normalized (the shipping form since the activation) — the SAME physical position.
+        let split = StampedPose::at_rest(sys(), world, UniverseTick(100));
         let a = transfer_frame(&flat, planet(), &b).expect("flat");
         let c = transfer_frame(&split, planet(), &b).expect("split");
         // Both land at the SAME planet-local coordinate (≈ the 7,-3,11 offset from the centre).
-        assert!((a.pos.offset() - c.pos.offset()).length() < 1e-6);
-        assert!((a.pos.offset() - DVec3::new(7.0, -3.0, 11.0)).length() < 1e-6);
+        let flat_m = |p: &StampedPose| p.pos.delta_m(LatticePos::ORIGIN, planet().tier());
+        assert!((flat_m(&a) - flat_m(&c)).length() < 1e-6);
+        assert!((flat_m(&a) - DVec3::new(7.0, -3.0, 11.0)).length() < 1e-6);
     }
 
     #[test]

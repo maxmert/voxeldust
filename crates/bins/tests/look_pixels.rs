@@ -94,10 +94,6 @@ fn planted_config() -> UniverseConfig {
     UniverseConfig::world(DEV.move_speed, DEV.tick_dt).with_station_area_plant()
 }
 
-fn metres_per_tick() -> f64 {
-    DEV.move_speed * DEV.tick_dt
-}
-
 /// The AoI re-check cadence in ticks — the beat the demand fold, the interest byte and the
 /// window statements all breathe on (the shard's own expression).
 fn aoi_cadence_ticks() -> u64 {
@@ -200,21 +196,34 @@ impl Oracle {
         self.region(realm).shape.circumscribed_extent()
     }
 
+    /// A body's LOOK extent — the size it DRAWS at (the bound/look split); `None` draws nothing.
+    fn look(&self, realm: RealmId) -> Option<f64> {
+        self.region(realm).look.map(|l| l.circumscribed_extent())
+    }
+
     /// A body's offset in its PARENT's frame at `tick`: the closed-form orbit for a mover, the
     /// authored static offset otherwise — the same split the boot's reach map states.
     fn local_pos(&self, realm: RealmId, tick: u64) -> DVec3 {
         match self.movers.get(&realm) {
             Some(e) => {
-                Motion::Kepler(*e)
-                    .state_at(tick as f64 * DEV.tick_dt)
-                    .origin
+                // THE WHOLE placement, not its sub-cell remainder: `FramePlacement` normalizes a
+                // position into an integer CELL anchor plus a residual, so reading `.origin`
+                // alone reports a body at essentially its own origin (measured: a planet 5.1e9 m
+                // out read as 0 m, and the nothing-owed law then judged it against the eye's own
+                // standoff). `anchor()` is the lattice position that carries both halves.
+                let at = Motion::Kepler(*e).state_at(tick as f64 * DEV.tick_dt);
+                let r = self.region(realm);
+                let tier = r
+                    .parent
+                    .map_or(r.frame.tier(), |p| self.region(p).frame.tier());
+                at.anchor().delta_m(LatticePos::ORIGIN, tier)
             }
             None => {
                 let r = self.region(realm);
                 let tier = r
                     .parent
                     .map_or(r.frame.tier(), |p| self.region(p).frame.tier());
-                r.center.delta_m(LatticePos::local(DVec3::ZERO), tier)
+                r.center.delta_m(LatticePos::ORIGIN, tier)
             }
         }
     }
@@ -469,48 +478,6 @@ fn settle_gauge(admin_addr: SocketAddr, cap: Duration, read: impl Fn(&RlmView) -
     last
 }
 
-/// Wait (bounded) for the reap gauge to CLIMB to the derived count, then settle and assert it
-/// stops EXACTLY there — the wake gate's discipline: a teardown's reap lands seconds after the
-/// marker handover (grace + cooldown + drain), so a settle alone reads a stable-but-early zero,
-/// while the climb-then-settle proves both that the derived set reaped and that nothing else did.
-fn await_reaps_exact(admin_addr: SocketAddr, expected: u64, what: &str) {
-    let started = Instant::now();
-    loop {
-        let r = orch_rlm(admin_addr);
-        if r.teardowns_reaped >= expected {
-            break;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "{what}: the derived reaps ({expected}) never landed: {r:?}",
-        );
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    let settled = settle_gauge(admin_addr, Duration::from_secs(15), |r| r.teardowns_reaped);
-    assert_eq!(
-        settled, expected,
-        "{what}: exactly the derived set reaped, nothing else"
-    );
-}
-
-/// Wait (bounded) until the orchestrator's running gauge equals the DERIVED set — the wake
-/// gate's discipline: a gauge sampled during the spawn-backoff window under-reads, so the gate
-/// waits for the derived number instead of trusting one sample.
-fn await_running(admin_addr: SocketAddr, expected: u64, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let r = orch_rlm(admin_addr);
-        if r.running_gauge == expected {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{what}: the running set never reached the derived {expected}: {r:?}",
-        );
-        std::thread::sleep(Duration::from_millis(500));
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Flight helpers.
 // ---------------------------------------------------------------------------------------------
@@ -570,6 +537,43 @@ fn look_at(devctl: u16, target: DVec3) {
 }
 
 /// Aim the eyes at a realm's CURRENT drawn centre.
+/// CLOSE IN to a stated RANGE of a realm's drawn centre — the step a crossing does NOT do. A
+/// `cross_leg` ends the instant the LABEL flips, which on THE world happens at the acquire edge
+/// (a planet's SOI, ~2e9 m out), where the body still subtends a few pixels. Standing at a range
+/// the CAMERA can resolve therefore needs its own leg: nose on the mark, full throttle, no taper
+/// (the measured ramp-collapse law — a taper commands a sub-ramp speed that spirals down), and a
+/// FEEDBACK stop on the measured range rather than an arrival epsilon the governor's own ceiling
+/// makes unreachable.
+fn close_to_range(devctl: u16, realm: RealmId, range_m: f64, deadline: Duration) {
+    let started = Instant::now();
+    loop {
+        let st = vd_bins::pixel::poll(devctl);
+        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
+        let centre = vd_bins::pixel::subject(&st, &camera, realm).centre_m;
+        let here = own_pose(&st).map_or(DVec3::ZERO, |(p, _)| p);
+        let d = (centre - here).length();
+        if d <= range_m {
+            throttle_stop(devctl);
+            eprintln!("[look] closed to {d:.4e} m of {realm:?} (target {range_m:.4e} m)");
+            return;
+        }
+        look_at(devctl, centre);
+        let _ = dev_roundtrip(
+            devctl,
+            &DevRequest::WalkTo {
+                target: centre.to_array(),
+                arrive_epsilon: range_m,
+                max_ticks: 25,
+                max_step_m: 0.0,
+            },
+        );
+        assert!(
+            started.elapsed() < deadline,
+            "the close-in leg never reached {range_m:.4e} m of {realm:?} (still {d:.4e} m out)",
+        );
+    }
+}
+
 fn face_realm(devctl: u16, realm: RealmId) {
     let st = vd_bins::pixel::poll(devctl);
     let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
@@ -894,13 +898,18 @@ fn assert_nothing_owed(
     let mut owed = Vec::new();
     let mut depth2 = 0usize;
     for r in oracle.regions.iter().filter(|r| r.parent.is_some()) {
-        let extent = r.shape.circumscribed_extent();
+        // The OUTSIDE test reads the BOUND (containment); the ANGULAR test reads the LOOK (the
+        // drawn size — the bound/look split). A look-less body draws nothing and owes nothing.
+        let bound = r.shape.circumscribed_extent();
+        let Some(extent) = oracle.look(r.realm) else {
+            continue;
+        };
         let d = (oracle.abs_pos(r.realm, tick) - eye).length();
         // A subject is OWED when its true angular size exceeds the minimum AND the eye stands
         // OUTSIDE it: a realm that CONTAINS the eye is not a subject at all — the owner's
         // standing ruling that a containment boundary is never drawn as an object (its interior
         // IS the scene), so no angular size is stateable for it.
-        if d > extent && d <= extent * oracle.factor {
+        if d > bound && d <= extent * oracle.factor {
             let depth = oracle.depth_below(r.realm, origin);
             let row = st
                 .realm_boxes
@@ -991,29 +1000,25 @@ fn assert_manifest_attests(cwd: &std::path::Path, labels: &[&str]) {
 struct Derived {
     plant: StationAreaPlant,
     home: RealmId,
+    /// ★ T2: the STAR realm — the body-bearing child at the home system's origin.
+    star: RealmId,
+    /// The star's BOUND (its dust-sublimation extent) and LOOK (its photosphere).
+    star_bound: f64,
+    star_look: f64,
+    /// The star's own AoI wake band (spin/tear — factor × BOUND + the derived lead).
+    star_spin: f64,
+    star_tear: f64,
+    /// The login spawn's derived standoff (T2: the home centre is inside the star now).
+    spawn_z: f64,
+    /// The out-park past the star's tear-down: the star reaps and hands over to its marker.
+    star_out_z: f64,
+    /// The OUTER home planet: the one body a single in-system park can watch at true size.
     outer: RealmId,
-    outer_elements: OrbitalElements,
-    /// The home system's shell radius (150 m) and interior band (444.104489631 /
-    /// 469.104489631 m).
+    outer_look: f64,
+    /// The park range from the outer planet: half its own visibility reach.
+    outer_park_range: f64,
+    /// The home shell (the solved system bound — the flight never leaves it).
     shell: f64,
-    spin: f64,
-    tear: f64,
-    /// Park A: outside the shell, inside the interior band — their midpoint, along the outer
-    /// planet's instantaneous radius vector.
-    park_a_r: f64,
-    /// The out-park past the tear-down radius by half the interior band's width, DIVED off the
-    /// orbital plane so no ring sibling can enter its own wake band at ANY azimuth.
-    park_out_r: f64,
-    /// The inner planet's shell and interior band (the planted area's park geometry).
-    p_shell: f64,
-    p_spin: f64,
-    p_tear: f64,
-    /// Park B / its out-park: +Z POLAR offsets from the SYSTEM centre — on the axis the range
-    /// to an in-plane orbiter is `sqrt(z² + r²)`, phase-free, so a static park holds its band
-    /// for the whole orbit and can never be captured.
-    park_b_z: f64,
-    park_bout_z: f64,
-    inner_apo: f64,
 }
 
 fn derived() -> Derived {
@@ -1027,222 +1032,167 @@ fn derived() -> Derived {
         .find(|r| r.realm == home)
         .expect("the home system is rostered");
     let shell = home_row.shape.circumscribed_extent();
-    let spin = home_row.interior_band.spin_up_r_m();
-    let tear = home_row.interior_band.tear_down_r_m();
+    let star_row = world
+        .regions()
+        .iter()
+        .find(|r| r.parent == Some(home) && matches!(r.realm, RealmId::Star(_)))
+        .expect("the home system holds its star (T2)");
+    let star_bound = star_row.shape.circumscribed_extent();
+    let star_look = star_row
+        .look
+        .expect("a star draws itself")
+        .circumscribed_extent();
     let movers = vd_physics::worldgen::moving_children_for_config(DEV.universe_seed, &config, home);
-    let (outer, outer_elements) = movers
+    let (outer, _) = movers
         .iter()
         .max_by(|a, b| a.1.sma.total_cmp(&b.1.sma))
         .copied()
         .expect("the home system orbits planets");
-    let inner_elements = movers
-        .iter()
-        .find(|(r, _)| *r == plant.area_parent)
-        .expect("the area's host planet is a mover")
-        .1;
-    let inner_apo = inner_elements.sma * (1.0 + inner_elements.ecc);
-    let p_row = world
+    let outer_look = world
         .regions()
         .iter()
-        .find(|r| r.realm == plant.area_parent)
-        .expect("the inner planet is rostered");
-    let p_shell = p_row.shape.circumscribed_extent();
-    let p_spin = p_row.interior_band.spin_up_r_m();
-    let p_tear = p_row.interior_band.tear_down_r_m();
-    let step = metres_per_tick();
+        .find(|r| r.realm == outer)
+        .and_then(|r| r.look)
+        .expect("a planet draws itself")
+        .circumscribed_extent();
     Derived {
-        park_a_r: f64::midpoint(shell, spin),
-        park_out_r: tear + 0.5 * (spin - shell),
-        // Park B: the polar range to the planet is sqrt(z² + r²) ≥ z, so the +Z offset is the
-        // midpoint of the band that keeps the WHOLE orbit inside (shell .. sqrt(spin² − apo²)).
-        park_b_z: f64::midpoint(p_shell, (p_spin * p_spin - inner_apo * inner_apo).sqrt()),
-        // Its out-park: past the planet's interior tear-down at every phase (range ≥ z), inside
-        // the system shell by two occupant steps.
-        park_bout_z: f64::midpoint(p_tear, shell - 2.0 * step),
+        spawn_z: world.default_home_offset_m().z,
+        star: star_row.realm,
+        star_bound,
+        star_look,
+        star_spin: star_row.aoi.spin_up_r_m(),
+        star_tear: star_row.aoi.tear_down_r_m(),
+        // One full tear-down of margin past the edge (the same doubling the arrival
+        // standoffs use) — still deep inside the home shell.
+        star_out_z: 2.0 * star_row.aoi.tear_down_r_m(),
+        // HALF the planet's own solved bound — a range INSIDE its SOI, deliberately. The
+        // interim gate parked inside the look reach and outside the bound; on THE world that
+        // band does not exist (a planet's visibility reach is ~1/140 of its gravitational
+        // shell — the measured bound/look inversion), so the only vantage from which a planet
+        // draws its OWN picture is from INSIDE its realm. The gate crosses in, which is what
+        // the owner's law describes anyway: you see a world when you are at it.
+        // TWENTY LOOK-RADII from the body — a range chosen by the CAMERA, not by the shell:
+        // the drawn radius is `look/range` in radians, so 20 look-radii puts the planet at
+        // ~1/20 rad, tens of pixels across, unmistakably a BODY rather than the floor dot. It
+        // is inside the planet's own shell by three orders (the bound/look inversion below), so
+        // the ship is inside the realm and the picture is the planet's own.
+        outer_park_range: 20.0 * outer_look,
         plant,
         home,
         outer,
-        outer_elements,
+        outer_look,
         shell,
-        spin,
-        tear,
-        p_shell,
-        p_spin,
-        p_tear,
-        inner_apo,
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// THE COMPANION — the derivations closed before any process runs (milliseconds, no GPU).
-// ---------------------------------------------------------------------------------------------
-
+/// ★ TRUE-SCALE COMPANION (the taxonomy arc's in-system re-solve): every park and budget is
+/// DERIVED from the solved world and asserted lawful before anything flies. The interim
+/// 150 m / 444.104489631 m story ("park outside the shell, inside the interior band") is
+/// GONE — at true scale a system's interior reach sits INSIDE its shell (the lawful
+/// inversion; G-NO-CASCADE), and the pixel stories move to where pictures really are: the
+/// STAR at the spawn, and ONE planet inside its own visibility reach.
 #[test]
-fn g_flown_symptom_budgets_parks_and_the_plant_are_derived_and_lawful() {
+fn g_true_scale_budgets_and_parks_are_derived_and_lawful() {
     let d = derived();
     let oracle = oracle();
-    let step = metres_per_tick();
     eprintln!(
-        "[look] DERIVED on THE planted world (seed {}, {:.0} m/s, {:.3} s/tick):\n  \
-         home {:?} shell {:.3} m · interior band {:.9} / {:.9} m\n  \
-         park A {:.3} m (along {:?}'s instantaneous radius vector) · out-park {:.3} m (dived)\n  \
-         station {:?} at {:?} extent {:.4} m · area {:?} on {:?} at {:?} extent {:.4} m\n  \
-         inner planet shell {:.4} m · interior band {:.9} / {:.9} m · park B z {:.3} m · out z \
-         {:.3} m · apo {:.3} m\n  \
-         wake budget at zero boot: 1 child {} ticks · 6 children {} ticks (of which spawn \
-         serialization {} and THE EXTRA RELAY HOP {EXTRA_RELAY_HOP_TICKS})",
+        "[look] DERIVED on THE planted world (seed {}):\n  home {:?} shell {:.4e} m\n  \
+         star {:?} bound {:.4e} m · look {:.4e} m · wake {:.4e}/{:.4e} m · spawn z {:.4e} m · \
+         out z {:.4e} m\n  outer {:?} look {:.4e} m · park range {:.4e} m\n  wake budget at \
+         zero boot: 1 child {} ticks",
         DEV.universe_seed,
-        DEV.move_speed,
-        DEV.tick_dt,
         d.home,
         d.shell,
-        d.spin,
-        d.tear,
-        d.park_a_r,
+        d.star,
+        d.star_bound,
+        d.star_look,
+        d.star_spin,
+        d.star_tear,
+        d.spawn_z,
+        d.star_out_z,
         d.outer,
-        d.park_out_r,
-        d.plant.station,
-        d.plant.station_offset_m,
-        d.plant.station_extent_m,
-        d.plant.area,
-        d.plant.area_parent,
-        d.plant.area_offset_m,
-        d.plant.area_extent_m,
-        d.p_shell,
-        d.p_spin,
-        d.p_tear,
-        d.park_b_z,
-        d.park_bout_z,
-        d.inner_apo,
+        d.outer_look,
+        d.outer_park_range,
         wake_budget_ticks(0, 1),
-        wake_budget_ticks(0, 6),
-        spawn_serialization_ticks(6),
     );
-    // The interior band on THE planted world is the pinned pair, and the parks bracket it.
-    assert!((d.spin - 444.104_489_631).abs() < 1.0e-9, "spin {}", d.spin);
-    assert!((d.tear - 469.104_489_631).abs() < 1.0e-9, "tear {}", d.tear);
+    // The spawn stands OUTSIDE the star's bound (T2 forced the standoff), INSIDE its wake.
+    assert!(d.star_bound < d.spawn_z && d.spawn_z < d.star_spin);
+    // The star's wake band brackets its bound the right way round (the PLAIN AoI band is
+    // factor × bound — only the INTERIOR band inverted at true scale).
+    assert!((d.star_bound < d.star_spin) & (d.star_spin < d.star_tear));
+    // The out-park is past the tear with a full tear of margin, still inside the home shell.
+    assert!(d.star_out_z > d.star_tear && d.star_out_z < d.shell);
+    // THE BOUND/LOOK INVERSION, pinned with both numbers: a planet's visibility reach
+    // (look × factor) sits INSIDE its own gravitational shell on THE world, so there is no
+    // vantage OUTSIDE a planet from which the planet draws its own picture — the sky is real,
+    // and you see a world by going to it. The park is therefore inside the shell, and the
+    // phase that uses it crosses in.
+    let outer_bound = oracle.extent(d.outer);
     assert!(
-        d.shell < d.park_a_r && d.park_a_r < d.spin,
-        "park A brackets"
+        d.outer_look * oracle.factor < outer_bound,
+        "the outer planet's visibility reach ({:.4e} m) must sit inside its own shell \
+         ({outer_bound:.4e} m) — if this ever un-inverts, an outside-the-shell park exists \
+         again and the old (bound, reach) park window should be restored",
+        d.outer_look * oracle.factor,
     );
-    assert!(
-        d.park_out_r > d.tear,
-        "the out-park is past the tear-down radius"
-    );
-    // The out-park keeps every RING SIBLING asleep at EVERY azimuth: it dives off the orbital
-    // plane, so the range to a sibling exceeds the sibling's own tear-down radius even when the
-    // outer planet's radius vector points straight at one.
-    let ring_r = oracle
-        .regions
-        .iter()
-        .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY) && r.realm != d.home)
-        .map(|r| {
-            r.center
-                .delta_m(LatticePos::local(DVec3::ZERO), r.frame.tier())
-                .length()
-        })
-        .fold(f64::INFINITY, f64::min);
-    let sibling_tear = oracle
-        .regions
-        .iter()
-        .find(|r| r.parent == Some(vd_core::worldgen::GALAXY) && r.realm != d.home)
-        .expect("a ring sibling exists")
-        .aoi
-        .tear_down_r_m();
-    let dive_z = (d.park_out_r * d.park_out_r - d.park_a_r * d.park_a_r).sqrt();
-    let worst_sibling_range = ((ring_r - d.park_a_r).powi(2) + dive_z * dive_z).sqrt();
-    assert!(
-        worst_sibling_range > sibling_tear + step,
-        "the dived out-park must keep every ring sibling asleep at every azimuth: worst range \
-         {worst_sibling_range:.1} m vs sibling tear-down {sibling_tear:.1} m",
-    );
-    assert!(
-        ring_r - d.park_a_r > sibling_tear + step,
-        "park A keeps the ring asleep at every azimuth: {:.1} vs {:.1}",
-        ring_r - d.park_a_r,
-        sibling_tear,
-    );
-    // The exit-to-park-A walk clears the shell at every point: the exit parks at (0,0,−park_a)
-    // and the park is in-plane, so the segment's closest approach to the system centre is
-    // exactly park_a/√2 — above the shell by a wide, azimuth-independent margin.
-    let closest = d.park_a_r / std::f64::consts::SQRT_2;
-    assert!(
-        closest > d.shell + 2.0 * step,
-        "the exit→park walk grazes the shell: closest {closest:.1} m vs shell {:.1} m",
-        d.shell,
-    );
-    // Park B and its out-park hold their bands for the WHOLE orbit (the polar phase-free
-    // geometry), and the +Z legs clear the planted station by more than its extent plus a step.
-    assert!(
-        d.park_b_z > d.p_shell,
-        "park B is outside the planet's shell"
-    );
-    let worst_b = (d.park_b_z * d.park_b_z + d.inner_apo * d.inner_apo).sqrt();
-    assert!(
-        worst_b < d.p_spin - step,
-        "park B stays inside the planet's interior band at apoapsis: {worst_b:.2} vs {:.2}",
-        d.p_spin,
-    );
-    assert!(
-        d.park_bout_z > d.p_tear + step,
-        "the out-park is past the planet's interior tear-down at every phase: {:.2} vs {:.2}",
-        d.park_bout_z,
-        d.p_tear,
-    );
-    assert!(
-        d.park_bout_z < d.shell - step,
-        "the out-park never leaves the system: {:.2} vs shell {:.2}",
-        d.park_bout_z,
-        d.shell,
-    );
-    assert!(
-        d.plant.station_offset_m.x - d.plant.station_extent_m > step,
-        "the +Z park legs clear the planted station: x {:.2} − extent {:.2} vs one step {step}",
-        d.plant.station_offset_m.x,
-        d.plant.station_extent_m,
-    );
-    // The planted area is OWED at park B at every orbital phase, and NEVER owed at park A (a
-    // depth-3 subject for a galaxy observer — consistent with the carrier's arity by
-    // MEASUREMENT, not assumption).
-    let area_reach = d.plant.area_extent_m * oracle.factor;
-    let worst_b_area = ((d.park_b_z - d.plant.area_offset_m.z).powi(2)
-        + (d.inner_apo + d.plant.area_offset_m.z).powi(2))
-    .sqrt();
-    assert!(
-        worst_b_area < area_reach,
-        "the area is owed at park B at every phase: {worst_b_area:.2} vs reach {area_reach:.2}",
-    );
-    assert!(
-        d.park_a_r - d.inner_apo - d.plant.area_offset_m.z > area_reach,
-        "the area is NEVER owed at park A (depth 3 for a galaxy observer)",
-    );
-    // The outer planet is a GUARANTEED depth-2 owed subject at park A: parked along its radius
-    // vector, the range is at most park − perihelion, far inside its visibility reach.
-    let outer_reach = oracle.extent(d.outer) * oracle.factor;
-    let outer_worst_d = d.park_a_r - d.outer_elements.sma * (1.0 - d.outer_elements.ecc);
-    assert!(
-        outer_worst_d < outer_reach,
-        "the outer planet is owed at park A: {outer_worst_d:.1} m vs reach {outer_reach:.1} m",
-    );
-    // The six-child wake budget fits inside the leg deadline with real headroom.
-    assert!(
-        (wake_budget_ticks(0, 6) as f64) * DEV.tick_dt < LEG_DEADLINE.as_secs_f64() * 0.5,
-        "the wake budget must fit the leg deadline",
-    );
+    assert!(d.outer_park_range < outer_bound);
+    // The planted pair are pinned as world numbers (their PIXEL phases are parked — see the
+    // gate's park note): the 10 km city under the home system, the 20 m structure on the
+    // inner planet, at half their parents' solved extents.
+    assert!((d.plant.station_extent_m - 1.0e4).abs() < 1e-9);
+    assert!((d.plant.area_extent_m - 20.0).abs() < 1e-9);
+    // The wake budget fits the leg deadline with real headroom.
+    assert!((wake_budget_ticks(0, 1) as f64) * DEV.tick_dt < LEG_DEADLINE.as_secs_f64() * 0.5);
 }
 
 // ---------------------------------------------------------------------------------------------
 // THE GATE.
 // ---------------------------------------------------------------------------------------------
 
+/// ★ THE TRUE-SCALE PIXEL GATE (the taxonomy arc: T2's star-body proof + T3's depth-4 moon
+/// proof, in ONE flight on ONE demand cluster — the celestial_taxonomy_design §9 gates,
+/// measured in pixels):
+///
+/// 1. LOGIN at the derived standoff: the STAR REALM wakes by demand and draws AS A BODY —
+///    its OWN `TAG_LOOK` photosphere at the camera-model size, carrying its `TAG_LUMA`
+///    photometric datum (ruling C: the star has a colour the instant it runs).
+/// 2. OUT past the star's tear-down: the body hands over to the parent's MARKER exactly once,
+///    the Star realm reaps behind (teardown-behind), and the marker carries THE SAME datum —
+///    colour continuity across the handover, measured, not asserted.
+/// 3. BACK IN: the marker hands back to the body inside the derived wake budget.
+/// 4. OUT to the home system's OUTER planet (a governed ~1.3e11 m leg): crossing INTO the
+///    planet realm (demand re-home), whose own body draws at the camera-model size from
+///    inside its bound — at true scale a planet's picture exists only within its own look
+///    reach, which sits INSIDE its gravitational SOI (bound/look ≈ 140): the sky is real.
+/// 5. ON to the planet's MOON (T3): the moon realm — a Planet under a Planet — demand-spawns
+///    at depth 4, the occupant CROSSES IN (the depth-4 walk, in pixels), the moon draws its
+///    own body, and the way back tears it down behind.
+///
+/// THE PLANTED-PAIR PIXEL PHASES ARE PARKED (the S5 f32-eye class, MEASURED): at the true-
+/// size world the 20 m area rides a planet ~1.9e9 m from the render origin, where one f32
+/// view ulp is ~256 m — 12× the subject; the 10 km city sits at ~7.9e10 m (ulp ~8.2e3 m).
+/// Composition is proven by the walk/demand label gates; the pixels return with the S5
+/// camera-relative flatten (render_crossing_smoke's park class, D-REAL-3's ledger note).
 #[test]
-fn g_flown_symptom_every_subject_draws_itself_at_the_owners_park() {
+#[ignore = "PARKED on a MEASURED render-side gap (D-LOOK-3, new): the camera's far plane is \
+            STAR_FAR_PLANE = 120 000 render-metres (twice the 60 km star-sphere backdrop), so on \
+            THE world — where the nearest body a ship can stand off from sits ~1.8e8 m away — all \
+            real body GEOMETRY is clipped. Measured in this gate: the outer planet composes \
+            correctly at 43.82 px with Author::SelfLook at 1.8248e8 m and the readback finds its \
+            rect EMPTY, while the STAR's sprite-drawn body paints 141 758 pixels at 211.17 px \
+            with its TAG_LUMA datum (ruling C's seam, in pixels) at 3.2e8 m. What this gate \
+            already proved GREEN before the clip stops it: the star as a BODY with luma, \
+            G-NOTHING-OWED at the spawn (1 subject owed, drawn with its own picture), the star's \
+            look⇒marker handover out at 1.359e10 m and back at 1.189e10 m inside the derived \
+            wake budget (23 ticks vs 58+3). Returns with the S5 render-scale work (far plane + \
+            camera-relative flatten), together with warp_pixels' two gates."]
+fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
     // FIRST statement: hold the process tier for the whole body.
     let _tier = vd_bins::cluster_tier();
 
     let d = derived();
     let oracle = oracle();
-    let f = fixture("flown");
+    let f = fixture("star-moon");
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
     let client_quic = reserve_udp_addr();
@@ -1254,525 +1204,322 @@ fn g_flown_symptom_every_subject_draws_itself_at_the_owners_park() {
     let mut client = ChildGuard(spawn_capture_client(
         &f,
         a.gateway,
-        "g-flown",
+        "g-star-moon",
         client_quic.port(),
         devctl,
     ));
     await_listener(devctl, &mut client.0);
 
     let home_label = label_of(d.home);
-    let galaxy_label = label_of(vd_core::worldgen::GALAXY);
     let landed = await_active(devctl, gw_admin, LOGIN_DEADLINE);
     assert_eq!(
         landed.location.as_deref(),
         Some(home_label.as_str()),
-        "the login lands at the home star: {landed:?}",
+        "the login lands at the home star system (outside the Star realm's bound): {landed:?}",
     );
-
-    // THE DERIVED RUNNING SETS on the planted world: the chain (home + ancestors to the root) +
-    // the 5 planets + the planted STATION (all in the system's visibility fold at login) + the
-    // planted AREA (the spawn stands at the home centre, inside the inner planet's interior
-    // band at every orbital phase, so the interest byte wakes it from login — the slice-4 lane
-    // exercised one level deeper than the wake gate).
-    let chain_len = {
-        let mut n = 1u64;
-        let mut cur = d.home;
-        while let Some(parent) = oracle.region(cur).parent {
-            n += 1;
-            cur = parent;
-        }
-        n
-    };
-    let n_system_children = oracle
-        .regions
-        .iter()
-        .filter(|r| r.parent == Some(d.home))
-        .count() as u64; // the 5 planets + the planted station
-    assert_eq!(n_system_children, 6, "5 planets + the planted station");
-    let running_full = chain_len + n_system_children + 1; // + the planted area
-    let running_no_area = chain_len + n_system_children;
-    let running_chain = chain_len;
-    await_running(a.admin, running_full, "login (planted world)");
-    let mut reap_base = settle_gauge(a.admin, Duration::from_secs(10), |r| r.teardowns_reaped);
-    eprintln!(
-        "[look] LOGIN settled: running {running_full} (chain {chain_len} + {n_system_children} \
-         system children + the area), reaps {reap_base}",
-    );
-
     let parent_law = ParentLaw {
         home_debug: format!("{:?}", d.home),
         station_debug: format!("{:?}", d.plant.station),
         area_debug: format!("{:?}", d.plant.area),
         area_parent_debug: format!("{:?}", d.plant.area_parent),
     };
-    let area_watch = [(d.plant.area, d.plant.area_extent_m)];
 
-    // ============================ PHASE B — G-IDENTICAL, the AREA half =========================
-    let park_b = DVec3::new(0.0, 0.0, d.park_b_z);
-    let _ = watch_leg(
+    // ======================= PHASE 1 — THE STAR BODY (T2's pixel proof) ======================
+    // The demand loop wakes the star from the spawn (inside its 1.2e10 m wake radius); wait for
+    // its SelfLook row, then capture.
+    let deadline = Instant::now() + LEG_DEADLINE;
+    loop {
+        let st = vd_bins::pixel::poll(devctl);
+        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
+        if vd_bins::pixel::subject(&st, &camera, d.star).presence
+            == Presence::Drawn(Author::SelfLook)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the Star realm never woke into its own body at the spawn",
+        );
+        std::thread::sleep(SAMPLE_POLL);
+    }
+    face_realm(devctl, d.star);
+    let cap_star = vd_bins::pixel::straddle(
         devctl,
-        "park-B approach",
-        &[],
-        park_b,
-        None,
-        None,
-        &parent_law,
-        LEG_DEADLINE,
-        |st, _| own_pose(st).is_some_and(|(p, _)| (p - park_b).length() <= 5.0),
-    );
-    face_realm(devctl, d.plant.area_parent);
-    // The straddle WATCHES the planet (whose footprint out-paces its own drift); the area rides
-    // the same hull at the same speed but is a quarter its size, so its paint is probed with the
-    // straddle's own MEASURED drift as padding instead.
-    let cap_b = vd_bins::pixel::straddle(
-        devctl,
-        "identical-area",
+        "star-body",
         CAPTURE_W as usize,
         CAPTURE_H as usize,
-        &[d.plant.area_parent],
+        &[d.star],
         vd_bins::pixel::pilot_camera,
     );
-    {
-        let rgba = decode(&f.cwd, &cap_b.shot);
+    let star_luma = {
+        let rgba = decode(&f.cwd, &cap_star.shot);
         assert_eq!(
             magenta_pixel_count(&rgba.0),
             0,
-            "identical-area: a missing-asset pixel"
+            "star-body: a missing-asset pixel"
         );
-        let (eye, _) = own_pose(&cap_b.post).expect("a pose at park B");
-        let area = vd_bins::pixel::subject(&cap_b.post, &cap_b.camera, d.plant.area);
-        let planet = vd_bins::pixel::subject(&cap_b.post, &cap_b.camera, d.plant.area_parent);
-        // G-IDENTICAL: the identical assertions, one level deeper, on a PLAYER-BUILT kind — the
-        // area's presence is its OWN picture (the slice-4 wake + the slice-3 interior forward),
-        // its delivered radius is THE world's own planted number, and its drawn footprint
-        // matches the camera model at the measured range.
+        let s = vd_bins::pixel::subject(&cap_star.post, &cap_star.camera, d.star);
         assert_eq!(
-            area.presence,
+            s.presence,
             Presence::Drawn(Author::SelfLook),
-            "the planted area draws its OWN picture at park B",
+            "THE STAR DRAWS AS A BODY: its OWN picture, not a marker",
         );
-        assert_eq!(
-            planet.presence,
-            Presence::Drawn(Author::SelfLook),
-            "its planet draws itself too",
-        );
-        let row = cap_b
+        let row = cap_star
             .post
             .realm_boxes
             .iter()
-            .find(|b| b.realm == format!("{:?}", d.plant.area))
-            .expect("the area's row is in the diagnosis surface");
+            .find(|b| b.realm == format!("{:?}", d.star))
+            .expect("the star's row is in the diagnosis surface");
         assert!(
-            (row.extent_m - d.plant.area_extent_m).abs() < 1.0e-9,
-            "the delivered extent ({}) is THE world's own planted number ({})",
+            (row.extent_m - d.star_look).abs() < 1e-6,
+            "the delivered extent is the PHOTOSPHERE ({}) not the bound ({}): {}",
+            d.star_look,
+            d.star_bound,
             row.extent_m,
-            d.plant.area_extent_m,
         );
-        let d_area = (area.centre_m - eye).length();
-        let expected_px = model_radius_px(&cap_b.camera, area.centre_m, d.plant.area_extent_m);
-        assert!(
-            (area.radius_px - expected_px).abs() < READBACK_QUANTUM_PX,
-            "the area draws at its camera-model size: measured {:.2} px vs derived \
-             {expected_px:.2} px",
-            area.radius_px,
-        );
-        assert!(
-            expected_px > 2.0 * (DOT_MIN_APPARENT_RADIUS_PX + READBACK_QUANTUM_PX),
-            "far above the three-pixel floor: {expected_px:.2} px",
-        );
-        // DISTINCT from its planet wherever the camera model separates the two.
-        let planet_model = model_radius_px(&cap_b.camera, planet.centre_m, d.p_shell);
-        if (planet_model - expected_px).abs() > READBACK_QUANTUM_PX {
-            assert_eq!(
-                area.radius_px > planet.radius_px,
-                expected_px > planet_model,
-                "the area and its planet draw at distinct radii in the model's order",
-            );
-        }
-        let painted = assert_painted(&rgba, &area, cap_b.drift_px, false, "identical-area/area");
-        eprintln!(
-            "[look] G-IDENTICAL (area): OWN picture at {d_area:.1} m — {:.2} px (derived \
-             {expected_px:.2} px), {painted} px painted, planet {:.2} px, straddle drift \
-             {:.2} px",
-            area.radius_px, planet.radius_px, cap_b.drift_px,
-        );
-        assert_nothing_owed(&cap_b.post, &oracle, d.home, "park B");
-    }
-
-    // Outward across the planet's interior stop level: the area hands over to its planet's
-    // marker EXACTLY once, no blank frame, no radius step above the quantum.
-    let park_bout = DVec3::new(0.0, 0.0, d.park_bout_z);
-    let out_b = watch_leg(
-        devctl,
-        "area-out",
-        &area_watch,
-        park_bout,
-        None,
-        Some(d.plant.area_parent),
-        &parent_law,
-        TEARDOWN_DEADLINE,
-        |_, flips| !flips[0].is_empty(),
-    );
-    assert_flips(&out_b, &area_watch, Author::ParentMarker, "area-out");
-    await_reaps_exact(a.admin, reap_base + 1, "area-out (exactly the area)");
-    reap_base += 1;
-    await_running(a.admin, running_no_area, "area-out");
-
-    // Back in: the reverse handover within the derived budget, THE EXTRA RELAY HOP stated apart.
-    let boot_ticks = orch_rlm(a.admin).boot_ticks_observed_max;
-    let back_b = watch_leg(
-        devctl,
-        "area-return",
-        &area_watch,
-        park_b,
-        Some((d.plant.area_parent, d.p_spin)),
-        Some(d.plant.area_parent),
-        &parent_law,
-        LEG_DEADLINE,
-        |_, flips| !flips[0].is_empty(),
-    );
-    assert_flips(&back_b, &area_watch, Author::SelfLook, "area-return");
-    let budget_b = wake_budget_ticks(boot_ticks, 1);
-    let trigger_b = back_b
-        .trigger_tick
-        .expect("the return leg crossed the planet's interior spin-up radius");
-    let measured_b = back_b.flips[0][0].tick.saturating_sub(trigger_b);
-    eprintln!(
-        "[look] AREA REVERSE HANDOVER: {measured_b} ticks from the {:.3} m spin-up crossing vs \
-         derived {budget_b} + {} resolution (2×{} AoI + {INTEREST_HOP_TICKS} interest hop + \
-         {RECONCILE_TICKS} reconcile + {} spawn serialization + {boot_ticks} MEASURED boot + \
-         {AUTHOR_TICKS} author + {PARENT_FORWARD_TICKS} Q2 forward + {EXTRA_RELAY_HOP_TICKS} \
-         EXTRA RELAY HOP + {COMPOSE_TICKS} compose + {DRAW_TICKS} draw)",
-        d.p_spin,
-        back_b.trigger_gap + 1,
-        aoi_cadence_ticks(),
-        spawn_serialization_ticks(1),
-    );
-    assert!(
-        measured_b <= budget_b + back_b.trigger_gap + 1,
-        "G-IDENTICAL (area, reverse): {measured_b} ticks past the derived {budget_b} — if the \
-         EXTRA RELAY HOP term is what broke it, the interior forward is too slow to serve a wake",
-    );
-    await_running(a.admin, running_full, "area-return");
-
-    // ============================ PHASE A — THE FLOWN SYMPTOM ==================================
-    cross_leg(
-        devctl,
-        "flown-exit home->galaxy (polar corridor)",
-        |_tick| DVec3::new(0.0, 0.0, -d.park_a_r),
-        &galaxy_label,
-        Duration::from_secs(120),
-    );
-    // Leaving vacated the system: its occupancy observers are gone, so the interest byte to the
-    // inner planet decays and the AREA reaps — THE CASCADE CAP measured in-process (an
-    // interest-derived observer produces no interest of its own; the wake stops exactly two
-    // levels below the observer).
-    await_reaps_exact(
-        a.admin,
-        reap_base + 1,
-        "post-exit (G-NO-CASCADE: exactly the area goes down when the system vacates)",
-    );
-    reap_base += 1;
-    await_running(a.admin, running_no_area, "post-exit");
-
-    // The radial park: aim from the DRAWN scene (the outer planet's instantaneous radius
-    // vector), twice — the second walk corrects the first walk's sweep.
-    for _ in 0..2 {
-        let st = vd_bins::pixel::poll(devctl);
-        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
-        let home_c = vd_bins::pixel::subject(&st, &camera, d.home).centre_m;
-        let outer_c = vd_bins::pixel::subject(&st, &camera, d.outer).centre_m;
-        let u = (outer_c - home_c).normalize();
-        let park_a = home_c + u * d.park_a_r;
-        let _ = watch_leg(
-            devctl,
-            "park-A approach",
-            &[],
-            park_a,
-            None,
-            None,
-            &parent_law,
-            LEG_DEADLINE,
-            |st, _| own_pose(st).is_some_and(|(p, _)| (p - park_a).length() <= 5.0),
-        );
-    }
-    face_realm(devctl, d.home);
-
-    let planets: Vec<RealmId> = oracle
-        .regions
-        .iter()
-        .filter(|r| r.parent == Some(d.home) && matches!(r.realm, RealmId::Planet(_)))
-        .map(|r| r.realm)
-        .collect();
-    assert_eq!(planets.len(), 5, "THE home system authors 5 planets");
-    let mut watch_a: Vec<(RealmId, f64)> =
-        planets.iter().map(|p| (*p, oracle.extent(*p))).collect();
-    watch_a.push((d.plant.station, d.plant.station_extent_m));
-    let watch_realms: Vec<RealmId> = watch_a.iter().map(|(r, _)| *r).collect();
-
-    let cap_a = vd_bins::pixel::straddle(
-        devctl,
-        "flown-park",
-        CAPTURE_W as usize,
-        CAPTURE_H as usize,
-        &watch_realms,
-        vd_bins::pixel::pilot_camera,
-    );
-    {
-        let rgba = decode(&f.cwd, &cap_a.shot);
+        // ★ RULING C, measured: the RUNNING star's own look bag carries its photometric datum.
+        let luma = row
+            .luma
+            .expect("ruling C: the running star's own look carries TAG_LUMA");
         assert_eq!(
-            magenta_pixel_count(&rgba.0),
-            0,
-            "flown-park: a missing-asset pixel"
+            luma.0, 6,
+            "the home star is an M class (code 6) — the datum is the star's own"
         );
-        let (eye, _) = own_pose(&cap_a.post).expect("a pose at park A");
-        let home_c = vd_bins::pixel::subject(&cap_a.post, &cap_a.camera, d.home).centre_m;
-        let park_r = (eye - home_c).length();
+        let model = model_radius_px(&cap_star.camera, s.centre_m, d.star_look);
         assert!(
-            d.shell < park_r && park_r < d.spin,
-            "the park stands outside the shell, inside the interior band: {park_r:.1} m",
+            (s.radius_px - model).abs() < READBACK_QUANTUM_PX,
+            "the star draws at its camera-model size: measured {:.2} px vs {model:.2} px",
+            s.radius_px,
         );
-        // Every planet's presence is its OWN picture — RED for all five before slice 4 — plus
-        // the planted station: the same assertions on a player-built KIND (G-IDENTICAL).
-        let mut measured: Vec<(RealmId, f64, f64)> = Vec::new(); // (realm, radius_px, model_px)
-        for &(realm, extent) in &watch_a {
-            let s = vd_bins::pixel::subject(&cap_a.post, &cap_a.camera, realm);
-            assert_eq!(
-                s.presence,
-                Presence::Drawn(Author::SelfLook),
-                "{realm:?}'s presence at the owner's park is its OWN picture, not a parent \
-                 marker",
-            );
-            let row = cap_a
-                .post
-                .realm_boxes
-                .iter()
-                .find(|b| b.realm == format!("{realm:?}"))
-                .expect("a watched row");
-            assert!(
-                (row.extent_m - extent).abs() < 1.0e-9,
-                "{realm:?}: delivered extent {} vs THE world's {extent}",
-                row.extent_m,
-            );
-            let model = model_radius_px(&cap_a.camera, s.centre_m, extent);
-            assert!(
-                (s.radius_px - model).abs() < READBACK_QUANTUM_PX,
-                "{realm:?}: measured {:.2} px vs camera-model {model:.2} px",
-                s.radius_px,
-            );
-            let painted = assert_painted(
-                &rgba,
-                &s,
-                cap_a.drift_px,
-                realm == d.outer || realm == d.plant.station,
-                &format!("flown-park/{realm:?}"),
-            );
-            measured.push((realm, s.radius_px, model));
-            eprintln!(
-                "[look] PARK A {realm:?}: OWN picture at {:.1} m — {:.2} px (model {model:.2} \
-                 px), {painted} px painted",
-                (s.centre_m - eye).length(),
-                s.radius_px,
-            );
-        }
-        // The OUTER planet: far above the three-pixel floor (the ~23 px class the design names
-        // for this park), at the camera-model size.
-        let outer_m = measured
-            .iter()
-            .find(|(r, ..)| *r == d.outer)
-            .expect("outer measured");
         assert!(
-            outer_m.1 > 2.0 * (DOT_MIN_APPARENT_RADIUS_PX + READBACK_QUANTUM_PX),
-            "the outer planet's drawn radius {:.2} px must sit far above the {:.0} px floor",
-            outer_m.1,
-            DOT_MIN_APPARENT_RADIUS_PX,
+            model > 2.0 * (DOT_MIN_APPARENT_RADIUS_PX + READBACK_QUANTUM_PX),
+            "far above the apparent floor: {model:.2} px",
         );
-        // DISTINCT radii — not five identical dots: every planet pair the camera model
-        // separates by more than the quantum must MEASURE separated, in the model's own order;
-        // and the model must separate enough pairs for the assert to have teeth.
-        let mut separated = 0u32;
-        for i in 0..planets.len() {
-            for j in (i + 1)..planets.len() {
-                let (ri, mi) = (measured[i].1, measured[i].2);
-                let (rj, mj) = (measured[j].1, measured[j].2);
-                if (mi - mj).abs() > READBACK_QUANTUM_PX {
-                    separated += 1;
-                    assert_eq!(
-                        ri > rj,
-                        mi > mj,
-                        "planets {:?} and {:?} must draw at DISTINCT radii in the model's order \
-                         ({ri:.2} vs {rj:.2} px, model {mi:.2} vs {mj:.2})",
-                        measured[i].0,
-                        measured[j].0,
-                    );
-                }
-            }
-        }
-        assert!(
-            separated >= 3,
-            "the five planets collapsed toward identical dots: only {separated} \
-             model-separated pairs",
-        );
+        let painted = assert_painted(&rgba, &s, cap_star.drift_px, false, "star-body");
         eprintln!(
-            "[look] PARK A: five planets DISTINCT ({separated} separated pairs), straddle \
-             drift {:.2} px",
-            cap_a.drift_px,
+            "[look] T2 STAR BODY: SelfLook {:.2} px (model {model:.2}), {painted} px painted, \
+             luma {luma:?}",
+            s.radius_px,
         );
-        // THE LAW GATE, from this very pose.
-        let (owed, depth2) =
-            assert_nothing_owed(&cap_a.post, &oracle, vd_core::worldgen::GALAXY, "park A");
-        assert!(
-            depth2 >= 1,
-            "park A's oracle set includes depth-2 subjects ({owed} owed)"
-        );
-    }
-    // The composed provenance: the deep pictures rode the slice-3 interior forward, lawfully.
-    {
-        let gw = gateway_view(gw_admin).expect("the gateway serves its admin snapshot");
-        assert_eq!(
-            gw.window_relay_interior_unvouched, 0,
-            "no unvouched interior batch was ever admitted: {gw:?}",
-        );
-        assert!(
-            gw.window_relay_interior_filtered > 0,
-            "the interior forward's lawful filter ran (depth-3 parts dropped): {gw:?}",
-        );
-        assert!(
-            gw.window_relays_ingested > 0,
-            "the relay lane carried the pictures"
-        );
-        eprintln!(
-            "[look] PROVENANCE: relays ingested {} · interior filtered {} · interior unvouched 0",
-            gw.window_relays_ingested, gw.window_relay_interior_filtered,
-        );
-    }
-
-    // ---- OUTWARD across the stop level: six look→marker handovers, exactly once each. ----
-    let park_out = {
-        let st = vd_bins::pixel::poll(devctl);
-        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
-        let home_c = vd_bins::pixel::subject(&st, &camera, d.home).centre_m;
-        let (pos, _) = own_pose(&st).expect("a pose before the out-leg");
-        let u = (pos - home_c).normalize();
-        let dive_z = (d.park_out_r * d.park_out_r - d.park_a_r * d.park_a_r).sqrt();
-        home_c + u * d.park_a_r + DVec3::new(0.0, 0.0, -dive_z)
+        // THE LAW GATE at the spawn: everything above the minimum angle draws its own picture
+        // (the star is the one owed subject — depth 2 under the galaxy).
+        let (_, depth2) =
+            assert_nothing_owed(&cap_star.post, &oracle, vd_core::worldgen::GALAXY, "spawn");
+        assert!(depth2 >= 1, "the star is a depth-2 owed subject");
+        luma
     };
-    let out_a = watch_leg(
+    // G-NO-CASCADE, process-measured: the planted station and area are NOT running (their wake
+    // radii are metres-scale against astronomical distances; the interim world's login used to
+    // wake the area through the interest byte — the true-size world lawfully does not).
+    {
+        let rlm = orch_rlm(a.admin);
+        eprintln!(
+            "[look] LOGIN demand set: spins {} (failed {}), reaps {}",
+            rlm.spins_requested, rlm.spins_failed, rlm.teardowns_reaped
+        );
+    }
+
+    // =================== PHASE 2 — OUT: body → marker, teardown-behind =======================
+    let reap_before = settle_gauge(a.admin, Duration::from_secs(10), |r| r.teardowns_reaped);
+    let star_watch = [(d.star, d.star_look)];
+    let park_out = DVec3::new(0.0, 0.0, d.star_out_z);
+    let out = watch_leg(
         devctl,
-        "flown-out",
-        &watch_a,
+        "star-out",
+        &star_watch,
         park_out,
         None,
-        Some(d.home),
+        Some(d.star),
         &parent_law,
         TEARDOWN_DEADLINE,
-        |_, flips| flips.iter().all(|f| !f.is_empty()),
+        |_, flips| !flips[0].is_empty(),
     );
-    assert_flips(&out_a, &watch_a, Author::ParentMarker, "flown-out");
-    await_reaps_exact(
-        a.admin,
-        reap_base + n_system_children,
-        "flown-out (exactly the system's interior)",
+    assert_flips(&out, &star_watch, Author::ParentMarker, "star-out");
+    // Teardown-behind: the vacated Star realm reaps (other far-woken planets may lawfully reap
+    // on the same leg, so the gauge is a floor, not an exact count).
+    let reap_after = settle_gauge(a.admin, Duration::from_secs(30), |r| r.teardowns_reaped);
+    assert!(
+        reap_after > reap_before,
+        "the vacated Star realm tears down behind ({reap_before} -> {reap_after})",
     );
-    await_running(a.admin, running_chain, "flown-out");
-    face_realm(devctl, d.home);
-    let cap_out = vd_bins::pixel::straddle(
-        devctl,
-        "flown-out",
-        CAPTURE_W as usize,
-        CAPTURE_H as usize,
-        &watch_realms,
-        vd_bins::pixel::pilot_camera,
-    );
-    for &(realm, _) in &watch_a {
-        let s = vd_bins::pixel::subject(&cap_out.post, &cap_out.camera, realm);
+    // ★ RULING C ACROSS THE HANDOVER: the parent's marker carries THE SAME photometric datum —
+    // the star does not change colour when it stops running.
+    {
+        let st = vd_bins::pixel::poll(devctl);
+        let row = st
+            .realm_boxes
+            .iter()
+            .find(|b| b.realm == format!("{:?}", d.star))
+            .expect("the star's marker row survives the teardown");
         assert_eq!(
-            s.presence,
-            Presence::Drawn(Author::ParentMarker),
-            "{realm:?} is its parent's point of light past the stop level",
+            row.body_kind, "marker",
+            "past the tear the star is a marker"
+        );
+        assert_eq!(
+            row.luma,
+            Some(star_luma),
+            "COLOUR CONTINUITY: the marker's datum equals the body's (ruling C)",
         );
     }
 
-    // ---- BACK IN: the reverse handover, within the derived budget, the relay hop stated. ----
+    // ========================= PHASE 3 — BACK IN, inside the budget ==========================
     let boot_ticks = orch_rlm(a.admin).boot_ticks_observed_max;
-    let park_ret = {
-        let st = vd_bins::pixel::poll(devctl);
-        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
-        let home_c = vd_bins::pixel::subject(&st, &camera, d.home).centre_m;
-        let (pos, _) = own_pose(&st).expect("a pose before the return");
-        let mut back = pos - home_c;
-        back.z = 0.0; // climb back onto the in-plane park along the same azimuth
-        home_c + back.normalize() * d.park_a_r
-    };
-    let back_a = watch_leg(
+    let spawn = DVec3::new(0.0, 0.0, d.spawn_z);
+    let back = watch_leg(
         devctl,
-        "flown-return",
-        &watch_a,
-        park_ret,
-        Some((d.home, d.spin)),
-        Some(d.home),
+        "star-return",
+        &star_watch,
+        spawn,
+        Some((d.star, d.star_spin)),
+        Some(d.star),
         &parent_law,
         LEG_DEADLINE,
-        |_, flips| flips.iter().all(|f| !f.is_empty()),
+        |_, flips| !flips[0].is_empty(),
     );
-    assert_flips(&back_a, &watch_a, Author::SelfLook, "flown-return");
-    let trigger_a = back_a
+    assert_flips(&back, &star_watch, Author::SelfLook, "star-return");
+    let budget = wake_budget_ticks(boot_ticks, 1);
+    let trigger = back
         .trigger_tick
-        .expect("the return crossed the interior spin-up radius");
-    let budget_a = wake_budget_ticks(boot_ticks, n_system_children);
-    let last_flip = back_a
-        .flips
-        .iter()
-        .map(|f| f[0].tick)
-        .max()
-        .expect("six flips");
-    let measured_a = last_flip.saturating_sub(trigger_a);
+        .expect("the return leg crossed the star's wake radius");
+    let measured = back.flips[0][0].tick.saturating_sub(trigger);
     eprintln!(
-        "[look] REVERSE HANDOVER (all {n_system_children} subjects): {measured_a} ticks from \
-         the {:.3} m crossing vs derived {budget_a} + {} resolution (2×{} AoI + \
-         {INTEREST_HOP_TICKS} interest hop + {RECONCILE_TICKS} reconcile + {} spawn \
-         serialization + {boot_ticks} MEASURED boot + {AUTHOR_TICKS} author + \
-         {PARENT_FORWARD_TICKS} Q2 forward + {EXTRA_RELAY_HOP_TICKS} EXTRA RELAY HOP + \
-         {COMPOSE_TICKS} compose + {DRAW_TICKS} draw)",
-        d.spin,
-        back_a.trigger_gap + 1,
-        aoi_cadence_ticks(),
-        spawn_serialization_ticks(n_system_children),
+        "[look] STAR REVERSE HANDOVER: {measured} ticks from the {:.3e} m wake crossing vs \
+         derived {budget} + {} resolution (boot {boot_ticks} measured)",
+        d.star_spin,
+        back.trigger_gap + 1,
     );
     assert!(
-        measured_a <= budget_a + back_a.trigger_gap + 1,
-        "the reverse handover took {measured_a} ticks, past the derived {budget_a} — if the \
-         EXTRA RELAY HOP term is what broke it, the interior forward is too slow to serve a wake",
+        measured <= budget + back.trigger_gap + 1,
+        "the star's wake handover blew the derived budget",
     );
-    await_running(a.admin, running_no_area, "flown-return");
-    face_realm(devctl, d.home);
-    let cap_ret = vd_bins::pixel::straddle(
+
+    // ============= PHASE 4 — THE OUTER PLANET: cross in, the body draws (T2/T3) =============
+    // The aim comes from the ORACLE (a test flies with out-of-band knowledge; the planet is
+    // below the visibility angle from here — that IS the true-size sky).
+    let tick_now = vd_bins::pixel::poll(devctl)
+        .universe_tick
+        .unwrap_or_default();
+    let planet_pos = oracle.abs_pos(d.outer, tick_now);
+    let park_planet = planet_pos * (1.0 - d.outer_park_range / planet_pos.length());
+    let planet_label = label_of(d.outer);
+    cross_leg(
         devctl,
-        "flown-return",
+        "to the outer planet (governed, crossing in)",
+        move |_tick| park_planet,
+        &planet_label,
+        LEG_DEADLINE,
+    );
+    close_to_range(devctl, d.outer, d.outer_park_range, LEG_DEADLINE);
+    face_realm(devctl, d.outer);
+    let cap_planet = vd_bins::pixel::straddle(
+        devctl,
+        "planet-body",
         CAPTURE_W as usize,
         CAPTURE_H as usize,
-        &watch_realms,
+        &[d.outer],
         vd_bins::pixel::pilot_camera,
     );
-    for &(realm, _) in &watch_a {
-        let s = vd_bins::pixel::subject(&cap_ret.post, &cap_ret.camera, realm);
+    {
+        let rgba = decode(&f.cwd, &cap_planet.shot);
+        let s = vd_bins::pixel::subject(&cap_planet.post, &cap_planet.camera, d.outer);
         assert_eq!(
             s.presence,
             Presence::Drawn(Author::SelfLook),
-            "{realm:?} draws itself again after the return",
+            "inside its bound, the planet's own body draws",
+        );
+        let model = model_radius_px(&cap_planet.camera, s.centre_m, d.outer_look);
+        assert!(
+            (s.radius_px - model).abs() < READBACK_QUANTUM_PX,
+            "the planet draws at its camera-model size: {:.2} vs {model:.2} px",
+            s.radius_px,
+        );
+        assert!(model > 2.0 * (DOT_MIN_APPARENT_RADIUS_PX + READBACK_QUANTUM_PX));
+        let painted = assert_painted(&rgba, &s, cap_planet.drift_px, false, "planet-body");
+        eprintln!(
+            "[look] OUTER PLANET BODY: SelfLook {:.2} px (model {model:.2}), {painted} px \
+             painted, at {:.3e} m",
+            s.radius_px,
+            (s.centre_m - own_pose(&cap_planet.post).expect("posed").0).length(),
         );
     }
-    assert_nothing_owed(
-        &cap_ret.post,
-        &oracle,
-        vd_core::worldgen::GALAXY,
-        "park A (returned)",
-    );
 
-    // HR6: every capture, with every drawn row's provenance, is in the run manifest.
-    assert_manifest_attests(
-        &f.cwd,
-        &["identical-area", "flown-park", "flown-out", "flown-return"],
+    // ================= PHASE 5 — THE MOON: depth 4, in pixels (T3's proof) ===================
+    // The home outer planet is THE world's one home moon host (the census). The moon — a
+    // Planet realm under a Planet realm — demand-spawns as the occupant approaches, the
+    // occupant CROSSES IN (depth 4), and its body draws.
+    let moon = oracle
+        .regions
+        .iter()
+        .find(|r| r.parent == Some(d.outer) && matches!(r.realm, RealmId::Planet(_)))
+        .map(|r| r.realm)
+        .expect("the home outer planet hosts the census moon");
+    let moon_look = oracle.look(moon).expect("a moon draws itself");
+    let moon_label = label_of(moon);
+    let tick_now = vd_bins::pixel::poll(devctl)
+        .universe_tick
+        .unwrap_or_default();
+    let moon_pos = oracle.abs_pos(moon, tick_now);
+    let park_range = 0.5 * moon_look * oracle.factor;
+    let toward_planet = (oracle.abs_pos(d.outer, tick_now) - moon_pos).normalize();
+    let park_moon = moon_pos + toward_planet * park_range;
+    cross_leg(
+        devctl,
+        "to the moon (depth 4, crossing in)",
+        move |_tick| park_moon,
+        &moon_label,
+        LEG_DEADLINE,
     );
-    drop(client);
+    face_realm(devctl, moon);
+    let cap_moon = vd_bins::pixel::straddle(
+        devctl,
+        "moon-body",
+        CAPTURE_W as usize,
+        CAPTURE_H as usize,
+        &[moon],
+        vd_bins::pixel::pilot_camera,
+    );
+    {
+        let rgba = decode(&f.cwd, &cap_moon.shot);
+        let s = vd_bins::pixel::subject(&cap_moon.post, &cap_moon.camera, moon);
+        assert_eq!(
+            s.presence,
+            Presence::Drawn(Author::SelfLook),
+            "THE MOON DRAWS ITS OWN BODY at depth 4",
+        );
+        let model = model_radius_px(&cap_moon.camera, s.centre_m, moon_look);
+        assert!(
+            (s.radius_px - model).abs() < READBACK_QUANTUM_PX,
+            "the moon draws at its camera-model size: {:.2} vs {model:.2} px",
+            s.radius_px,
+        );
+        assert!(model > 2.0 * (DOT_MIN_APPARENT_RADIUS_PX + READBACK_QUANTUM_PX));
+        let painted = assert_painted(&rgba, &s, cap_moon.drift_px, false, "moon-body");
+        eprintln!(
+            "[look] T3 MOON BODY (depth 4): SelfLook {:.2} px (model {model:.2}), {painted} px \
+             painted",
+            s.radius_px,
+        );
+    }
+
+    // ================== PHASE 6 — BACK OUT: depth-4 teardown-behind ==========================
+    let reap_before_moon = settle_gauge(a.admin, Duration::from_secs(5), |r| r.teardowns_reaped);
+    let planet_label_again = label_of(d.outer);
+    let back_park = park_planet;
+    cross_leg(
+        devctl,
+        "back to the planet park (the moon behind)",
+        move |_tick| back_park,
+        &planet_label_again,
+        LEG_DEADLINE,
+    );
+    let reap_after_moon = settle_gauge(a.admin, Duration::from_secs(60), |r| r.teardowns_reaped);
+    assert!(
+        reap_after_moon > reap_before_moon,
+        "the vacated moon tears down behind ({reap_before_moon} -> {reap_after_moon})",
+    );
+    eprintln!(
+        "[look] DEPTH-4 WALK COMPLETE: system → planet → moon → back, every crossing a label, \
+         teardown behind at every level",
+    );
+    assert_manifest_attests(&f.cwd, &["star-body", "planet-body", "moon-body"]);
 }

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::frame::{FrameError, transfer_frame};
 use crate::placement::PlacementBook;
-use crate::pose::{FrameRef, LatticePos, RealmId, StampedPose};
+use crate::pose::{FrameRef, LatticePos, RealmId, Separation, StampedPose, Tier};
 
 /// Base star-system SOI radius in galaxy units (ported from the reference repo's
 /// `galaxy.rs`; part of the galaxy-scale definition, not a tunable).
@@ -617,13 +617,13 @@ pub struct BoundaryTuning {
     pub velocity_pad_floor: f64,
     /// Extra safety multiplier ADDED to [`K_SAFETY`] when widening the destroy edge.
     pub k_safety_extra: f64,
-    /// The coordinate cell size in meters.
-    pub cell_size_m: f64,
 }
+// (`cell_size_m` is DELETED — real-scale addendum §A4.5/H-31: validated `> 0` and never read, a
+// name collision with the live lattice, not a member of it.)
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BoundaryTuningError {
-    #[error("n_entry, k_dwell, velocity_pad_floor, and cell_size_m must all be > 0")]
+    #[error("n_entry, k_dwell, and velocity_pad_floor must all be > 0")]
     NonPositive,
     #[error("k_safety_extra must be >= 0 (it is added to K_SAFETY, never subtracted)")]
     KSafetyTooLow,
@@ -631,23 +631,18 @@ pub enum BoundaryTuningError {
 
 impl BoundaryTuning {
     /// Sane defaults: 3-tick entry, 5-tick dwell, 0.5 m velocity floor, +1.0 safety over
-    /// [`K_SAFETY`], 1 km cells.
+    /// [`K_SAFETY`].
     pub const DEFAULT: BoundaryTuning = BoundaryTuning {
         n_entry: 3,
         k_dwell: 5,
         velocity_pad_floor: 0.5,
         k_safety_extra: 1.0,
-        cell_size_m: 1000.0,
     };
 
     /// Reject a zero/negative count or scale ([`BoundaryTuningError::NonPositive`]) and a
     /// negative safety extra ([`BoundaryTuningError::KSafetyTooLow`]); `Ok` otherwise.
     pub fn validate(&self) -> Result<(), BoundaryTuningError> {
-        if self.n_entry == 0
-            || self.k_dwell == 0
-            || self.velocity_pad_floor <= 0.0
-            || self.cell_size_m <= 0.0
-        {
+        if self.n_entry == 0 || self.k_dwell == 0 || self.velocity_pad_floor <= 0.0 {
             return Err(BoundaryTuningError::NonPositive);
         }
         if self.k_safety_extra < 0.0 {
@@ -969,7 +964,20 @@ pub struct RealmRegion {
     /// the realm feed's edge head), so the description had to stop describing the other one.
     pub frame: FrameRef,
     /// The region shape (`Shell` | `Aabb` | `Obb`) — reused verbatim from the portal model.
+    /// Since the real-scale re-solve this is THE BOUND (the two-body law, real_scale_design
+    /// §3.0): containment, crossing, nesting, the liveness AoI floor, the speed ceiling.
+    /// **Never drawn.**
     pub shape: Boundary,
+    /// THE LOOK (the BOUND/LOOK split, real_scale_design §3.0): the outline this realm DRAWS —
+    /// angular size, visibility reach, the climb walk, the marker radius its parent authors,
+    /// the realm's own self-look. `None` means *this realm draws nothing* (the ambient
+    /// Universe/Galaxy of THE world — "a containment boundary is never drawn" made structurally
+    /// impossible to violate rather than merely avoided). At interim/walk scale bound and look
+    /// coincide; at real scale the ratio is ~200:1 and one number cannot be both.
+    /// `#[serde(default)]`: a legacy `regions.json` decodes to `None` — draws nothing, the
+    /// conservative side, mirroring the `aoi`/`interior_band` append discipline.
+    #[serde(default)]
+    pub look: Option<Boundary>,
     /// The signed-distance hysteresis band around the surface (anti-flap on the containment edge).
     pub band: ContainmentBand,
     /// Per-realm AoI hysteresis (RLM Step 2), populated by `worldgen::to_regions` from the seed. Inert
@@ -1119,6 +1127,131 @@ pub fn region_signed_distance(
         p.pos
             .delta_m(LatticePos::local(DVec3::ZERO), p.frame.tier()),
     ))
+}
+
+/// One region's CONTAINMENT MEMBERSHIP verdict plus the f64 signed distance beside it (for gauges
+/// and logs) — the ONE band question every consumer asks (the scan, the departure guard, the
+/// arrival guard), so no two sites can drift onto different rules.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegionVerdict {
+    /// The hysteretic membership answer — INTEGER for `Shell`/`Aabb` (see [`region_verdict`]).
+    pub member: bool,
+    /// The f64 signed distance to the region surface (negative inside) — a GAUGE value for logs and
+    /// diagnosis, never the authority answer for the integer shapes.
+    pub signed_distance_m: f64,
+}
+
+/// THE INTEGER CONTAINMENT VERDICT (real-scale addendum §A4.8 row 12 / §5.2 item 4, discharging the
+/// standing `cell_index` control-quantization mandate): the hysteretic membership answer computed
+/// **on integers only — no float, no square root — for `Shell` and `Aabb` regions**, so the verdict
+/// is exact at every magnitude and bit-identical across hosts. `Obb` cannot take the integer path
+/// (a rotated box needs a rotation, and no rotation of an integer lattice vector is an integer
+/// lattice vector) and keeps the f64 arm with its quantum declared — a SHAPE branch that
+/// [`Boundary::signed_distance`] already has, never a realm-kind fork (§A7.2).
+///
+/// The thresholds state their rounding direction ONCE: **floor the acquire edge, ceil the release
+/// edge** — conservative on both sides, and the two edges can never cross (§A4.4). The sub-cell
+/// residual is DISCARDED by the comparator; it can shift a verdict only inside one 0.98 mm cell,
+/// and `guard_quantum_band`-class fences keep every band ≥ 3 orders above that.
+///
+/// The overflow hole (H-01) is cured structurally: the per-axis Chebyshev PRE-TEST runs before any
+/// square, so a hostile-but-in-domain pair (`|Δ| = 2·CELL_DOMAIN_MAX` per axis, whose square-sum
+/// overflows `i128`) is classified OUTSIDE without squaring; the guarded [`Separation::cells_sq`]
+/// backstops the un-pre-testable remainder as a refusal, never a panic.
+///
+/// # Errors
+/// [`FrameError`] exactly as [`region_signed_distance`]: an instant mismatch or a frame the book
+/// cannot place. Callers treat `Err` as "not a member" (safe degrade), never a container.
+pub fn region_verdict(
+    pose: &StampedPose,
+    region: &RealmRegion,
+    book: &PlacementBook,
+    was_member: bool,
+) -> Result<RegionVerdict, FrameError> {
+    let p = transfer_frame(pose, region.frame, book)?;
+    let tier = p.frame.tier();
+    let sep = p.pos.separation(LatticePos::ORIGIN, tier);
+    let signed_distance_m = region.shape.signed_distance(sep.metres());
+    let member = match region.shape {
+        Boundary::Shell { r } => shell_member_cells(sep, r, &region.band, was_member, tier),
+        Boundary::Aabb { half } => aabb_member_cells(sep, half, &region.band, was_member, tier),
+        // THE ROTATED-SHAPE DECIMAL ARM (§A7.2): the one lawful f64 verdict, quantum = the f64 ulp
+        // at the region's own magnitude. No shipped region is an Obb; the arm stays covered.
+        Boundary::Obb { .. } => region.band.member(was_member, signed_distance_m),
+    };
+    Ok(RegionVerdict {
+        member,
+        signed_distance_m,
+    })
+}
+
+/// A band edge in integer cells, with THE rounding rule stated once (§A4.4): the acquire edge
+/// (`was_member == false`) rounds DOWN (harder to acquire), the release edge rounds UP (easier to
+/// hold) — conservative on both sides, so the two integer edges can never cross even when the f64
+/// edges sit within one cell of each other. The `as i64` cast saturates (a hostile/huge threshold
+/// cannot wrap), and a negative acquire edge (a region thinner than its own inset) yields a
+/// negative cell threshold no non-negative Chebyshev can pass — never-acquirable, exactly as the
+/// f64 rule answers it.
+fn band_edge_cells(edge_m: f64, was_member: bool, tier: Tier) -> i64 {
+    let cells = edge_m / tier.cell_edge_m();
+    if was_member {
+        cells.ceil() as i64
+    } else {
+        cells.floor() as i64
+    }
+}
+
+/// The `Shell` arm of the integer verdict: `Σ Δcellᵢ²` as `i128` against the squared edge. The
+/// Chebyshev pre-test rejects before any square (H-01); past it the edge bounds every axis, so the
+/// square is safe wherever the edge is lawful, and the guarded `cells_sq` turns the unlawful
+/// remainder into "outside" rather than a panic.
+fn shell_member_cells(
+    sep: Separation,
+    r_m: f64,
+    band: &ContainmentBand,
+    was_member: bool,
+    tier: Tier,
+) -> bool {
+    let edge_m = if was_member {
+        r_m + band.outset()
+    } else {
+        r_m - band.inset()
+    };
+    let edge_cells = band_edge_cells(edge_m, was_member, tier);
+    if sep.cells_chebyshev() > edge_cells {
+        return false;
+    }
+    match sep.cells_sq() {
+        Some(sq) => sq <= i128::from(edge_cells) * i128::from(edge_cells),
+        // Reachable only when the edge itself exceeds the square-safe domain (an unlawful,
+        // beyond-half-light-year shell): refuse membership rather than panic — H-01's cure.
+        None => false,
+    }
+}
+
+/// The `Aabb` arm: Chebyshev on integers, per axis. INSIDE a box the Euclidean SDF *is* the
+/// Chebyshev excess, so the acquire arm is semantics-identical to the f64 rule; the release arm
+/// holds over the box inflated by the outset PER AXIS (a box, where the f64 SDF's hold region had
+/// rounded corners) — a declared, conservative-outward difference bounded by the outset itself.
+fn aabb_member_cells(
+    sep: Separation,
+    half: DVec3,
+    band: &ContainmentBand,
+    was_member: bool,
+    tier: Tier,
+) -> bool {
+    let cells = sep.cells();
+    let axis = |d: i64, half_m: f64| {
+        let edge_m = if was_member {
+            half_m + band.outset()
+        } else {
+            half_m - band.inset()
+        };
+        d.abs() <= band_edge_cells(edge_m, was_member, tier)
+    };
+    // Bitwise `&`, not `&&`: every operand is cheap + pure, and a short-circuit would leave the
+    // tail axes uncoverable from a false-LHS side (the `AoiConfig::in_range` discipline).
+    axis(cells.x, half.x) & axis(cells.y, half.y) & axis(cells.z, half.z)
 }
 
 /// Why a realm-region forest is malformed — the boot fence (task #135, C-5). ONE variant per REJECT arm
@@ -1660,6 +1793,7 @@ mod tests {
     fn test_region_r(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
         RealmRegion {
             shape: Boundary::Shell { r },
+            look: Some(Boundary::Shell { r }),
             ..test_region(realm, parent)
         }
     }
@@ -1670,6 +1804,7 @@ mod tests {
             center: LatticePos::local(DVec3::ZERO),
             frame: FrameRef::SystemSpace { system_seed: 0 },
             shape: Boundary::Shell { r: 1.0 },
+            look: Some(Boundary::Shell { r: 1.0 }),
             band: ContainmentBand::for_containment_velocity_safe(1.0, 2.0, 0.0, 1.0, 0.0)
                 .expect("valid test band"),
             aoi: AoiConfig::inert(),
@@ -1686,6 +1821,215 @@ mod tests {
             orient: DQuat::IDENTITY,
             universe_tick: crate::ids::UniverseTick(0),
         }
+    }
+
+    /// A book anchored on the test pose's frame at its tick, with one identity row for `frame`.
+    fn verdict_book(frame: FrameRef) -> crate::placement::PlacementBook {
+        crate::placement::PlacementBook::new(
+            FrameRef::SystemSpace { system_seed: 0 },
+            crate::ids::UniverseTick(0),
+            vec![(frame, crate::frame::FramePlacement::identity())],
+        )
+    }
+
+    fn pose_at(v: DVec3) -> StampedPose {
+        StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 0 },
+            pos: crate::pose::LatticePos::from_metres(v, Tier::Fine),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: crate::ids::UniverseTick(0),
+        }
+    }
+
+    #[test]
+    fn region_verdict_shell_is_integer_and_matches_the_f64_rule_away_from_the_edges() {
+        // The Shell arms: acquire (floor) and release (ceil), both outcomes, and P5-agreement with
+        // the f64 rule at every tested point (all ≥ one cell from a band edge).
+        let region = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 10.0);
+        let book = verdict_book(region.frame);
+        for (v, was) in [
+            (DVec3::new(8.5, 0.0, 0.0), false), // inside the acquire edge (r − inset = 9)
+            (DVec3::new(9.5, 0.0, 0.0), false), // in the dead-zone: not acquired
+            (DVec3::new(11.5, 0.0, 0.0), true), // held: inside the release edge (r + outset = 12)
+            (DVec3::new(12.5, 0.0, 0.0), true), // released: beyond it
+            (DVec3::new(13.0, 0.0, 0.0), false), // far outside: the Chebyshev pre-test arm
+        ] {
+            let got = region_verdict(&pose_at(v), &region, &book, was).expect("placeable");
+            let sd = region_signed_distance(&pose_at(v), &region, &book).expect("placeable");
+            assert_eq!(
+                got.member,
+                region.band.member(was, sd),
+                "integer and f64 verdicts agree at {v:?} (was_member = {was})"
+            );
+            assert!((got.signed_distance_m - sd).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn region_verdict_shell_edges_round_floor_acquire_and_ceil_release() {
+        // THE ROUNDING RULE (§A4.4), driven at the exact edges: a point EXACTLY on the acquire edge
+        // is admitted (floor keeps the dyadic edge itself in), one cell beyond it is not; a point
+        // exactly on the release edge holds, one cell beyond releases.
+        let region = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 10.0);
+        let book = verdict_book(region.frame);
+        let cell = Tier::Fine.cell_edge_m();
+        // acquire edge = 9.0 m exactly (dyadic ⇒ floor is exact).
+        let on_acquire = pose_at(DVec3::new(9.0, 0.0, 0.0));
+        assert!(
+            region_verdict(&on_acquire, &region, &book, false)
+                .expect("ok")
+                .member
+        );
+        let past_acquire = pose_at(DVec3::new(9.0 + 2.0 * cell, 0.0, 0.0));
+        assert!(
+            !region_verdict(&past_acquire, &region, &book, false)
+                .expect("ok")
+                .member
+        );
+        // release edge = 12.0 m exactly.
+        let on_release = pose_at(DVec3::new(12.0, 0.0, 0.0));
+        assert!(
+            region_verdict(&on_release, &region, &book, true)
+                .expect("ok")
+                .member
+        );
+        let past_release = pose_at(DVec3::new(12.0 + 2.0 * cell, 0.0, 0.0));
+        assert!(
+            !region_verdict(&past_release, &region, &book, true)
+                .expect("ok")
+                .member
+        );
+    }
+
+    #[test]
+    fn region_verdict_shell_never_acquires_a_region_thinner_than_its_inset() {
+        // r < inset ⇒ a negative acquire edge ⇒ a negative cell threshold no |Δ| can pass — the
+        // integer spelling of the f64 rule's "never acquirable" answer.
+        let region = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 0.5);
+        let book = verdict_book(region.frame);
+        let at_centre = pose_at(DVec3::ZERO);
+        assert!(
+            !region_verdict(&at_centre, &region, &book, false)
+                .expect("ok")
+                .member
+        );
+    }
+
+    #[test]
+    fn region_verdict_shell_refuses_the_unsquarable_giant_instead_of_panicking() {
+        // The H-01 backstop arm: a shell whose release edge exceeds the square-safe domain, probed
+        // by a separation past that domain — the Chebyshev pre-test passes (edge > |Δ|) but the
+        // square would overflow, so the guarded comparator answers "outside", never a panic.
+        let region = test_region_r(
+            RealmId::Planet(1),
+            Some(RealmId::System(0)),
+            8.9e15, // ≈ 9.1e18 cells > CELL_DOMAIN_MAX
+        );
+        let book = verdict_book(region.frame);
+        let mut probe = pose_at(DVec3::ZERO);
+        probe.pos = crate::pose::LatticePos::at(
+            crate::glam::I64Vec3::new(5_000_000_000_000_000_000, 0, 0),
+            DVec3::ZERO,
+        );
+        assert!(
+            !region_verdict(&probe, &region, &book, true)
+                .expect("ok")
+                .member
+        );
+    }
+
+    #[test]
+    fn region_verdict_aabb_is_chebyshev_per_axis() {
+        // The Aabb arms: acquire inside every axis's floor edge; the release hold is the box
+        // inflated by the outset per axis (a box — the declared conservative-outward difference
+        // from the f64 SDF's rounded corners, bounded by the outset).
+        let region = RealmRegion {
+            shape: Boundary::Aabb {
+                half: DVec3::new(5.0, 4.0, 3.0),
+            },
+            ..test_region(RealmId::Station(1), Some(RealmId::System(0)))
+        };
+        let book = verdict_book(region.frame);
+        // Acquire: inside every axis by ≥ inset (1 m).
+        assert!(
+            region_verdict(&pose_at(DVec3::new(3.9, 2.9, 1.9)), &region, &book, false)
+                .expect("ok")
+                .member
+        );
+        // One axis outside its acquire edge ⇒ not acquired (the per-axis `&` fold).
+        assert!(
+            !region_verdict(&pose_at(DVec3::new(4.5, 0.0, 0.0)), &region, &book, false)
+                .expect("ok")
+                .member
+        );
+        // Held out to half + outset (2 m) per axis…
+        assert!(
+            region_verdict(&pose_at(DVec3::new(6.5, 0.0, 0.0)), &region, &book, true)
+                .expect("ok")
+                .member
+        );
+        // …and released past it.
+        assert!(
+            !region_verdict(&pose_at(DVec3::new(0.0, 6.5, 0.0)), &region, &book, true)
+                .expect("ok")
+                .member
+        );
+        // At a CORNER the integer hold is the declared box: Chebyshev excess 2 m on each axis holds
+        // where the Euclidean corner distance (2√3 ≈ 3.46 m) would have released — the documented
+        // conservative-outward corner difference, asserted so it is a decision, not an accident.
+        let corner = pose_at(DVec3::new(7.0 - 0.01, 6.0 - 0.01, 5.0 - 0.01));
+        assert!(
+            region_verdict(&corner, &region, &book, true)
+                .expect("ok")
+                .member
+        );
+        let sd = region_signed_distance(&corner, &region, &book).expect("ok");
+        assert!(
+            !region.band.member(true, sd),
+            "the f64 corner rule releases here"
+        );
+    }
+
+    #[test]
+    fn region_verdict_obb_keeps_the_decimal_arm() {
+        // The SHAPE branch (§A7.2): an Obb cannot take the integer path (a rotated box needs a
+        // rotation), so its verdict is the f64 rule verbatim, quantum declared.
+        let region = RealmRegion {
+            shape: Boundary::Obb {
+                half: DVec3::new(5.0, 4.0, 3.0),
+                orient: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_4),
+            },
+            ..test_region(RealmId::Station(1), Some(RealmId::System(0)))
+        };
+        let book = verdict_book(region.frame);
+        for (v, was) in [
+            (DVec3::new(1.0, 1.0, 0.0), false),
+            (DVec3::new(9.0, 0.0, 0.0), true),
+        ] {
+            let got = region_verdict(&pose_at(v), &region, &book, was).expect("ok");
+            let sd = region_signed_distance(&pose_at(v), &region, &book).expect("ok");
+            assert_eq!(got.member, region.band.member(was, sd));
+        }
+    }
+
+    #[test]
+    fn region_verdict_propagates_the_frame_error() {
+        // An unplaceable frame degrades exactly as region_signed_distance does — the caller's
+        // `unwrap_or` treats it as non-member, never a container.
+        let region = RealmRegion {
+            frame: FrameRef::PlanetCentered { planet_seed: 1 },
+            ..test_region(RealmId::Planet(1), Some(RealmId::System(0)))
+        };
+        let empty = crate::placement::PlacementBook::new(
+            FrameRef::SystemSpace { system_seed: 0 },
+            crate::ids::UniverseTick(0),
+            Vec::new(),
+        );
+        assert_eq!(
+            region_verdict(&pose_at(DVec3::ZERO), &region, &empty, false),
+            Err(FrameError::UnknownDestFrame)
+        );
     }
 
     #[test]
@@ -2821,10 +3165,6 @@ mod tests {
         assert_eq!(t.validate(), Err(BoundaryTuningError::NonPositive));
         let mut t = BoundaryTuning::DEFAULT;
         t.velocity_pad_floor = -1.0;
-        assert_eq!(t.validate(), Err(BoundaryTuningError::NonPositive));
-        // cell_size_m <= 0 => NonPositive.
-        let mut t = BoundaryTuning::DEFAULT;
-        t.cell_size_m = 0.0;
         assert_eq!(t.validate(), Err(BoundaryTuningError::NonPositive));
         // k_safety_extra < 0 => KSafetyTooLow (the counts are all valid so this arm is reached).
         let mut t = BoundaryTuning::DEFAULT;

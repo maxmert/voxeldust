@@ -43,18 +43,23 @@ pub enum RealmKindTag {
     Planet = 3,
     Station = 4,
     Area = 5,
+    /// A star inside its system (taxonomy arc T2). APPENDED at 6 — inserting it before
+    /// `Planet` for lineage aesthetics would RENUMBER the wire and is forbidden (the frozen
+    /// APPEND-only order).
+    Star = 6,
 }
 
 impl RealmKindTag {
     /// Every kind in declaration order = the frozen postcard discriminant order (APPEND-only).
     /// Mirrors [`crate::taxonomy::ProfileKind::ALL`]; the drift tripwire test loops it.
-    pub const ALL: [RealmKindTag; 6] = [
+    pub const ALL: [RealmKindTag; 7] = [
         RealmKindTag::Universe,
         RealmKindTag::Galaxy,
         RealmKindTag::System,
         RealmKindTag::Planet,
         RealmKindTag::Station,
         RealmKindTag::Area,
+        RealmKindTag::Star,
     ];
 }
 
@@ -85,6 +90,7 @@ impl RealmLevel {
             RealmKindTag::Planet => RealmId::Planet(self.seed),
             RealmKindTag::Station => RealmId::Station(self.seed),
             RealmKindTag::Area => RealmId::Area(self.seed),
+            RealmKindTag::Star => RealmId::Star(self.seed),
         }
     }
 }
@@ -446,7 +452,7 @@ mod tests {
 
     #[test]
     fn realm_kind_tag_all_is_exhaustive() {
-        // Drift tripwire: a 7th kind must be added to ALL (this match then fails to compile).
+        // Drift tripwire: an 8th kind must be added to ALL (this match then fails to compile).
         for k in RealmKindTag::ALL {
             match k {
                 RealmKindTag::Universe
@@ -454,10 +460,11 @@ mod tests {
                 | RealmKindTag::System
                 | RealmKindTag::Planet
                 | RealmKindTag::Station
-                | RealmKindTag::Area => {}
+                | RealmKindTag::Area
+                | RealmKindTag::Star => {}
             }
         }
-        assert_eq!(RealmKindTag::ALL.len(), 6);
+        assert_eq!(RealmKindTag::ALL.len(), 7);
     }
 
     #[test]
@@ -501,5 +508,16 @@ mod tests {
         set.insert(sys7.clone());
         let ordered: Vec<RealmPath> = set.into_iter().collect();
         assert_eq!(ordered, vec![galaxy_path(), sys7, sys8]);
+    }
+
+    /// The STAR tag's own `to_realm_id` arm (T2): a path level tagged `Star` names a
+    /// `RealmId::Star` of the same seed — the coord↔id round trip a demand for a star rides.
+    #[test]
+    fn a_star_level_names_a_star_realm() {
+        let level = RealmLevel {
+            kind: RealmKindTag::Star,
+            seed: 77,
+        };
+        assert_eq!(level.to_realm_id(), RealmId::Star(77));
     }
 }

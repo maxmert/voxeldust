@@ -553,7 +553,8 @@ pub struct Composed {
     /// Rows refused by `FrameError::InstantMismatch` — the shear law firing (asserted 0 in the
     /// parity gate; deliberately driven nonzero by the G-SHEAR anti-vacuity unit).
     pub instant_refused: u64,
-    /// Rows refused by `FrameError::RotatedFrameAcrossCells` (pre-P10 cell math, §2.6.6).
+    /// Rows refused by `FrameError::RotationBeyondExactReach` (a rotated frame past the
+    /// millimetre rotation reach — R2, the P10 trigger; real-scale addendum §A4.6).
     pub rotated_refused: u64,
     /// Rows whose stated tail frame is not their level's frame (or an unknown-frame refusal from
     /// the fold) — alien, dropped, counted.
@@ -566,7 +567,7 @@ pub struct Composed {
     pub dedup_disagree: u64,
     /// The measured bound of that agreement, in nanometres (max over the fold) — printed by the
     /// parity gate as the §2.12 "measured bound", never argued.
-    pub dedup_max_dev_nm: u64,
+    pub dedup_max_dev_cells: u64,
     /// How many chain levels actually folded fresh (≤ the requested prefix — an invalid hop caps
     /// it). The exact-cadence pin reads folds where this equals the full chain length.
     pub fresh_levels: usize,
@@ -600,19 +601,17 @@ pub struct Composed {
     pub relay_depth_max: u64,
 }
 
-/// The position gap between two composed poses, in nanometres, saturating. The §2.12 agreement
-/// metric: exact zero today (identity orientations — the subtraction cancels bit-for-bit), a
-/// measured bound the day a rotated hop lands.
-fn pos_dev_nm(a: &StampedPose, b: &StampedPose) -> u64 {
-    let cell_edge = a.frame.tier().cell_edge_m();
-    let pa = a.pos.offset() + a.pos.cell().as_dvec3() * cell_edge;
-    let pb = b.pos.offset() + b.pos.cell().as_dvec3() * cell_edge;
-    let metres = (pa - pb).length();
-    if metres.is_finite() {
-        (metres * 1.0e9).min(u64::MAX as f64) as u64
-    } else {
-        u64::MAX
-    }
+/// The position gap between two composed poses, in integer CELLS (per-axis Chebyshev max),
+/// EXACT AT EVERY MAGNITUDE — re-expressed from nanometres at the cell activation (real-scale
+/// addendum §A4.8 row 14): at a 2.25e15 m star-gap magnitude a nanometre count is ~2.25e24 and
+/// SATURATES `u64`, so the old gauge would have read a constant and the parity assertion on it
+/// would have gone vacuous. The integer subtraction cannot saturate for sanitized poses; a
+/// sub-cell (residual-only) disagreement reads 0 here and is caught bit-level by
+/// `dedup_disagree` beside it — the pair of counters together keep "agreement is exactly zero"
+/// a real measurement.
+fn pos_dev_cells(a: &StampedPose, b: &StampedPose) -> u64 {
+    let sep = a.pos.separation(b.pos, a.frame.tier());
+    sep.cells_chebyshev().unsigned_abs()
 }
 
 /// THE FOLD (§2.6.5): compose the fresh prefix of one chain at exactly `t`, walking leaf→root
@@ -898,15 +897,15 @@ fn prune_older_than<T>(store: &mut BTreeMap<RealmId, (UniverseTick, T)>, cutoff:
 fn count_refusal(out: &mut Composed, e: FrameError) {
     match e {
         FrameError::InstantMismatch { .. } => out.instant_refused += 1,
-        FrameError::RotatedFrameAcrossCells => out.rotated_refused += 1,
+        FrameError::RotationBeyondExactReach => out.rotated_refused += 1,
         FrameError::UnknownSourceFrame | FrameError::UnknownDestFrame => out.alien_rows += 1,
     }
 }
 
 /// Fold one agreement measurement (bit-level position) into the fold's counters.
 fn measure_agreement(out: &mut Composed, a: &StampedPose, b: &StampedPose) {
-    let dev = pos_dev_nm(a, b);
-    out.dedup_max_dev_nm = out.dedup_max_dev_nm.max(dev);
+    let dev = pos_dev_cells(a, b);
+    out.dedup_max_dev_cells = out.dedup_max_dev_cells.max(dev);
     if a.pos != b.pos {
         out.dedup_disagree += 1;
     }
@@ -1151,6 +1150,13 @@ impl ShadowScene {
 
 #[cfg(test)]
 mod tests {
+    /// Flatten a composed pose to world metres (normalized lattice since the cell activation:
+    /// `.offset()` raw is a sub-cell residual, never a position).
+    fn pm(p: &StampedPose) -> DVec3 {
+        p.pos
+            .delta_m(vd_core::pose::LatticePos::default(), p.frame.tier())
+    }
+
     use super::*;
     use vd_core::glam::{DQuat, DVec3};
 
@@ -1513,21 +1519,21 @@ mod tests {
         assert_eq!(out.rows.len(), 3);
         let by_realm = |r: RealmId| out.rows.iter().find(|row| row.realm == r).expect("row");
         let planet_row = by_realm(RealmId::Planet(7));
-        assert_eq!(planet_row.pose.pos.offset(), DVec3::new(30.0, 0.0, 0.0));
+        assert_eq!(pm(&planet_row.pose), DVec3::new(30.0, 0.0, 0.0));
         assert_eq!(planet_row.stratum, 0);
         assert_eq!(planet_row.pose.universe_tick, T);
         // The sibling system: (1300 − 1000) in the origin frame, moving −Y 5 relative.
         let sibling = by_realm(RealmId::System(9));
-        assert_eq!(sibling.pose.pos.offset(), DVec3::new(300.0, 0.0, 0.0));
+        assert_eq!(pm(&sibling.pose), DVec3::new(300.0, 0.0, 0.0));
         assert_eq!(sibling.pose.vel, DVec3::new(0.0, -5.0, 0.0));
         assert_eq!(sibling.stratum, 1);
         // The galaxy's own body: at −(system placement) — the hop origin (INV-BODY-AT-ORIGIN).
         let galaxy_body = by_realm(GALAXY);
-        assert_eq!(galaxy_body.pose.pos.offset(), DVec3::new(-1000.0, 0.0, 0.0));
+        assert_eq!(pm(&galaxy_body.pose), DVec3::new(-1000.0, 0.0, 0.0));
         // The §2.12 agreement: the origin's own roster row folded to EXACT zero (identity
         // orientations cancel bit-for-bit) — measured, not argued.
         assert_eq!(out.dedup_disagree, 0);
-        assert_eq!(out.dedup_max_dev_nm, 0);
+        assert_eq!(out.dedup_max_dev_cells, 0);
     }
 
     /// §2.6.5 STEP 4 (Q2 = PARENT RELAY, Slice C1): a live sibling's relayed interior joins the
@@ -1592,7 +1598,7 @@ mod tests {
             .iter()
             .find(|r| r.realm == RealmId::Planet(9))
             .expect("the relayed interior row composes");
-        assert_eq!(planet9.pose.pos.offset(), DVec3::new(340.0, 0.0, 0.0));
+        assert_eq!(pm(&planet9.pose), DVec3::new(340.0, 0.0, 0.0));
         assert_eq!(planet9.pose.universe_tick, T);
         assert_eq!(planet9.stratum, 1);
         assert_eq!(planet9.parent, Some(sibling));
@@ -1693,14 +1699,14 @@ mod tests {
             .iter()
             .find(|r| r.realm == RealmId::Planet(7))
             .expect("the chain's own planet row");
-        assert_eq!(planet7.pose.pos.offset(), DVec3::new(30.0, 0.0, 0.0));
+        assert_eq!(pm(&planet7.pose), DVec3::new(30.0, 0.0, 0.0));
         assert!(out.dedup_disagree >= 1);
         // The chain author's relayed copy composed NOTHING beyond the chain's own statement:
         // Planet 7 stayed the chain's, and no 99 m ghost row exists anywhere.
         assert!(
             !out.rows
                 .iter()
-                .any(|r| r.pose.pos.offset() == DVec3::new(99.0, 0.0, 0.0)),
+                .any(|r| pm(&r.pose) == DVec3::new(99.0, 0.0, 0.0)),
             "a chain author's relay must never compose"
         );
         // No row for the origin, ever (§2.4).
@@ -1866,7 +1872,7 @@ mod tests {
             .iter()
             .find(|r| r.realm == RealmId::Planet(9))
             .expect("the fallback-resolved interior row composes");
-        assert_eq!(planet9.pose.pos.offset(), DVec3::new(340.0, 0.0, 0.0));
+        assert_eq!(pm(&planet9.pose), DVec3::new(340.0, 0.0, 0.0));
         assert_eq!(
             planet9.pose.universe_tick, T,
             "the re-stamped row folds at the chain's own tick"
@@ -2024,7 +2030,7 @@ mod tests {
     #[test]
     fn a_rotated_cross_cell_hop_still_folds_because_the_down_maps_dest_is_the_identity_anchor() {
         // MEASURED, not assumed (the never-assume law): the gateway's down-map can NEVER hit
-        // `RotatedFrameAcrossCells` itself — every step book's DESTINATION is its anchor (the
+        // the rotation refusal itself — every step book's DESTINATION is its anchor (the
         // child frame at the identity), and the refusal fires only for a ROTATED DESTINATION
         // across cells. The rotated-inversion refusal therefore lives AT THE AUTHOR
         // (`vd-sim`'s hop inversion, `window_hop_refused`, per §2.2), and a hop that the author
@@ -2071,10 +2077,17 @@ mod tests {
             .iter()
             .find(|r| r.realm == RealmId::System(9))
             .expect("sibling row");
+        // The hop's integer anchor rides through the fold in the INTEGER half, and the rotated
+        // 1 m lever folds exactly into it (1024 fine cells on +y) — the normalized output form.
         assert_eq!(
             sibling.pose.pos.cell(),
-            vd_core::glam::I64Vec3::new(1_000_000_000_000, 0, 0),
-            "the hop's integer anchor rides through the fold un-flattened"
+            vd_core::glam::I64Vec3::new(1_000_000_000_000, 1024, 0),
+            "the hop's integer anchor rides through the fold, lever folded exactly"
+        );
+        assert_eq!(
+            pm(&sibling.pose),
+            DVec3::new(976_562_500.0, 1.0, 0.0),
+            "anchor block + the rotated X→Y lever, exact"
         );
 
         // The gateway-side counter arms stay real code with a pinned contract regardless:
@@ -2087,7 +2100,7 @@ mod tests {
                 pose_at: UniverseTick(1),
             },
         );
-        count_refusal(&mut out, FrameError::RotatedFrameAcrossCells);
+        count_refusal(&mut out, FrameError::RotationBeyondExactReach);
         count_refusal(&mut out, FrameError::UnknownSourceFrame);
         count_refusal(&mut out, FrameError::UnknownDestFrame);
         assert_eq!(
@@ -2233,7 +2246,7 @@ mod tests {
         // grandparent's own body. Both at −100 / −1100 in the leaf frame.
         assert_eq!(out.rows.len(), 2);
         let mid_row = out.rows.iter().find(|r| r.realm == mid).expect("mid row");
-        assert_eq!(mid_row.pose.pos.offset(), DVec3::new(-100.0, 0.0, 0.0));
+        assert_eq!(pm(&mid_row.pose), DVec3::new(-100.0, 0.0, 0.0));
         assert_eq!(
             mid_row.stratum, 2,
             "the surviving entry is the parent's child row"
@@ -2249,10 +2262,10 @@ mod tests {
             .iter()
             .find(|r| r.realm == grand)
             .expect("grand body");
-        assert_eq!(grand_row.pose.pos.offset(), DVec3::new(-1100.0, 0.0, 0.0));
+        assert_eq!(pm(&grand_row.pose), DVec3::new(-1100.0, 0.0, 0.0));
         // The agreement was measured on BOTH overlaps (origin row + mid dedup): exact.
         assert_eq!(out.dedup_disagree, 0);
-        assert_eq!(out.dedup_max_dev_nm, 0);
+        assert_eq!(out.dedup_max_dev_cells, 0);
         // An empty ingest rosters nothing (the pre-first-level shape the admission refuses on).
         assert!(WindowIngest::default().roster_set().is_empty());
     }
@@ -2433,13 +2446,30 @@ mod tests {
     }
 
     #[test]
-    fn the_deviation_metric_is_exact_at_zero_and_saturates_on_garbage() {
+    fn the_deviation_metric_is_exact_at_zero_and_at_any_magnitude() {
         let a = StampedPose::at_rest(sys(), DVec3::new(1.0, 2.0, 3.0), T);
-        assert_eq!(pos_dev_nm(&a, &a), 0);
+        assert_eq!(pos_dev_cells(&a, &a), 0);
+        // 0.5 m = 512 fine cells, exactly.
         let b = StampedPose::at_rest(sys(), DVec3::new(1.0, 2.0, 3.5), T);
-        assert_eq!(pos_dev_nm(&a, &b), 500_000_000);
-        let nan = StampedPose::at_rest(sys(), DVec3::new(f64::NAN, 0.0, 0.0), T);
-        assert_eq!(pos_dev_nm(&a, &nan), u64::MAX);
+        assert_eq!(pos_dev_cells(&a, &b), 512);
+        // The re-expression's whole point: at a star-gap magnitude (2.25e15 m ≈ 2.3e18 cells) the
+        // nanometre gauge saturated u64 and read a constant; the cell gauge is exact.
+        let far = StampedPose {
+            pos: vd_core::pose::LatticePos::at(
+                vd_core::glam::I64Vec3::new(2_302_454_276_514_729_984, 0, 0),
+                DVec3::ZERO,
+            ),
+            ..a
+        };
+        assert_eq!(pos_dev_cells(&a, &far), 2_302_454_276_514_729_984 - 1024);
+        // A NaN residual cannot poison the integer gauge (0 cells); the bit-level
+        // `dedup_disagree` counter beside it is what catches residual-only garbage.
+        let nan = StampedPose {
+            pos: vd_core::pose::LatticePos::at(a.pos.cell(), DVec3::new(f64::NAN, 0.0, 0.0)),
+            ..a
+        };
+        assert_eq!(pos_dev_cells(&a, &nan), 0);
+        assert_ne!(a.pos, nan.pos, "dedup_disagree still fires on the residual");
     }
 
     #[test]
@@ -2581,7 +2611,7 @@ mod tests {
         let rows = scene_level_rows(RealmId::System(7), sys(), T, &authors, &[&ingest], &scene);
         assert_eq!(rows[0].realm, RealmId::System(7), "the origin row leads");
         assert_eq!(rows[0].parent, Some(GALAXY));
-        assert_eq!(rows[0].pose.pos.offset(), DVec3::ZERO);
+        assert_eq!(pm(&rows[0].pose), DVec3::ZERO);
         assert_eq!(rows[0].bag, vec![7], "the origin's look, membership-free");
         let drawn: Vec<RealmId> = rows.iter().skip(1).map(|r| r.realm).collect();
         assert_eq!(

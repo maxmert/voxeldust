@@ -9,8 +9,6 @@
 //! crate (`tests/tests/crate_isolation.rs` holds the law), so the crossing/containment path that
 //! lives beside this module reads authored placement rows and nothing else (SL4).
 
-use glam::DVec3;
-
 use crate::geometry::RealmRegion;
 use crate::pose::RealmId;
 use crate::realm_coord::RealmCoord;
@@ -35,37 +33,15 @@ pub const STATION_A: RealmId = RealmId::Station(7);
 /// Area A — a first-class sub-planet Area realm nested under Planet A (task #133).
 pub const AREA_A: RealmId = RealmId::Area(7);
 
-/// The largest region extent the CLIENT renders as a box: the Galaxy ([`GALAXY_R_M`] = 180) IS drawn — as
-/// the CONTAINING box around the star systems so an entity in the between-space is visibly still inside a
-/// realm (never orphaned) — but the ~unbounded Universe ([`UNIVERSE_R_M`] = 1e9) is NOT (it is the ambient
-/// fold identity, not a frame). Set between the galaxy (180) and the universe (1e9).
-pub const MAX_RENDERABLE_EXTENT_M: f64 = 200.0;
+// (`MAX_RENDERABLE_EXTENT_M` is DELETED — real-scale design §3.0 consequence 1, landed with the
+// in-system re-solve: "is this drawable" is LOOK PRESENCE plus the angular rule, never a
+// magnitude threshold that silently skips. A realm with `RealmRegion.look = None` ships no
+// self-look and no marker outline — the ambient Universe/Galaxy are undrawable structurally.)
 
-/// Direct children of `parent` within `radius` of `occupant_pos`, as `(child RealmCoord, distance)`
-/// (RLM Step 2, the C1 spatial-index SEAM). Today a LINEAR fold over the caller's ALREADY-BOUNDED
-/// direct-child slice (correct under sparse occupancy — `MAX_REGIONS` caps live direct children); the
-/// P6/D-9 spatial index replaces the linear body WITHOUT changing this signature (this is NOT the
-/// O(all realms) [`realm_neighbourhood_for`] scan). Positions are FRAME-LOCAL `DVec3` in the parent's
-/// OWN frame — occupant and child MUST share a cell through P3 (every pose is cell-ZERO; the cross-cell
-/// fold is P4/P5-owed). Yields `RealmCoord` via `parent.child(level)` so a not-yet-spawned child is
-/// nameable — NOT the lossy `RealmId`.
-pub fn children_within<'a>(
-    parent: &'a RealmCoord,
-    occupant_pos: DVec3,
-    radius: f64,
-    direct_children: &'a [(RealmLevel, DVec3)],
-) -> impl Iterator<Item = (RealmCoord, f64)> + 'a {
-    direct_children.iter().filter_map(move |(level, pos)| {
-        aoi_within(*pos, occupant_pos, radius).map(|d| (parent.child(*level), d))
-    })
-}
-
-/// The monomorphic distance predicate (HR5: the compare lives here; `children_within`'s closure is a
-/// branchless map). `Some(d)` iff `d <= radius`.
-fn aoi_within(child_pos: DVec3, occupant_pos: DVec3, radius: f64) -> Option<f64> {
-    let d = (child_pos - occupant_pos).length();
-    (d <= radius).then_some(d)
-}
+// (`children_within` + its `aoi_within` predicate are DELETED — real-scale addendum §A4.5: the
+// one explicit same-cell assumption in the tree, "occupant and child MUST share a cell through P3".
+// The cell activation made that premise false; its future consumer (the P6/D-9 spatial index) is
+// built on `Separation`, not on a bare offset subtraction.)
 
 /// A SEED-LINEAGE `RealmId` → its `RealmLevel` (kind + seed), un-lossily: the `System(0)`/`System(1)`
 /// stand-ins recover as `Universe`/`Galaxy` (the reverse of `to_realm_id`'s forward map), the keyed
@@ -84,6 +60,7 @@ pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
         RealmId::Planet(s) => Some(RealmLevel::new(RealmKindTag::Planet, s)),
         RealmId::Station(s) => Some(RealmLevel::new(RealmKindTag::Station, s)),
         RealmId::Area(s) => Some(RealmLevel::new(RealmKindTag::Area, s)),
+        RealmId::Star(s) => Some(RealmLevel::new(RealmKindTag::Star, s)),
         RealmId::Ship(_) => None,
     }
 }
@@ -303,6 +280,7 @@ pub fn grace_ticks_from_seconds(secs: f64, dt_s: f64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::DVec3;
 
     #[test]
     fn grace_ticks_from_seconds_converts_saturates_and_floors() {
@@ -342,45 +320,6 @@ mod tests {
             grace_ticks_from_seconds(1e20, 0.02),
             u32::MAX,
             "absurd quotient ⇒ saturate"
-        );
-    }
-
-    #[test]
-    fn aoi_within_boundary() {
-        let occ = DVec3::ZERO;
-        assert_eq!(aoi_within(DVec3::ZERO, occ, 10.0), Some(0.0));
-        assert_eq!(
-            aoi_within(DVec3::new(10.0, 0.0, 0.0), occ, 10.0),
-            Some(10.0)
-        );
-        assert_eq!(aoi_within(DVec3::new(11.0, 0.0, 0.0), occ, 10.0), None);
-    }
-
-    #[test]
-    fn children_within_filters_by_radius() {
-        let parent = RealmCoord::from_path(crate::realm_path::RealmPath::from_levels(vec![
-            RealmLevel::new(RealmKindTag::Universe, 0),
-            RealmLevel::new(RealmKindTag::Galaxy, 1),
-            RealmLevel::new(RealmKindTag::System, 7),
-        ]))
-        .expect("parent coord");
-        let children = [
-            (
-                RealmLevel::new(RealmKindTag::Planet, 10),
-                DVec3::new(5.0, 0.0, 0.0),
-            ),
-            (
-                RealmLevel::new(RealmKindTag::Planet, 20),
-                DVec3::new(50.0, 0.0, 0.0),
-            ),
-        ];
-        let got: Vec<RealmCoord> = children_within(&parent, DVec3::ZERO, 10.0, &children)
-            .map(|(c, _)| c)
-            .collect();
-        assert_eq!(got.len(), 1);
-        assert_eq!(
-            got[0],
-            parent.child(RealmLevel::new(RealmKindTag::Planet, 10))
         );
     }
 
@@ -432,6 +371,7 @@ mod tests {
             center: LatticePos::local(DVec3::ZERO),
             frame: FrameRef::SystemSpace { system_seed: 0 },
             shape: Boundary::Shell { r: 1.0 },
+            look: Some(Boundary::Shell { r: 1.0 }),
             band: ContainmentBand::for_containment_velocity_safe(1.0, 2.0, 0.0, 1.0, 0.0)
                 .expect("valid test band"),
             aoi: AoiConfig::inert(),

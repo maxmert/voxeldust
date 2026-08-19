@@ -343,6 +343,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "THE world's measured visibility climb exceeds the look carrier: {e} — refusing to boot"
         )
     })?;
+    // THE T2 STAR FENCE (celestial taxonomy arc, owner ruling E): every generated star's
+    // dust-sublimation bound strictly exceeds its own photosphere — a Star realm drawn wider
+    // than its authority is a world no process may serve.
+    vd_physics::worldgen::guard_star_bound_exceeds_photosphere(
+        universe_seed,
+        &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
+    )
+    .map_err(|e| format!("THE world's star bound fence refused: {e} — refusing to boot"))?;
+    // THE STORAGE FENCE (real-scale addendum §A2.1 F1 / R3): the root must fit the FINE lattice's
+    // sanitized domain with its headroom octave — the refusal is THE NAMED P10 TRIGGER (the day
+    // the world outgrows the millimetre tier, the galaxy cell lattice is the cure). Prints the
+    // measured occupancy/headroom so every boot log carries the budget.
+    let budget = vd_physics::worldgen::guard_root_representable(&vd_bins::process_world_config(
+        move_speed * time_multiplier,
+        tick_dt,
+    ))
+    .map_err(|e| format!("{e} — refusing to boot"))?;
+    tracing::info!(
+        occupancy_pct = 100.0 * budget.occupancy,
+        headroom = budget.headroom,
+        "root storage budget: the FINE lattice holds THE world",
+    );
+    // THE 3-D SEPARATION FENCE (owner ruling Q-B — the ring's closed-form fence re-derived for
+    // the seeded point set): every pair of seeded systems disjoint, judged at boot.
+    vd_physics::worldgen::guard_seeded_systems_disjoint(
+        universe_seed,
+        &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
+    )
+    .map_err(|e| format!("two seeded systems overlap: {e:?} — refusing to boot"))?;
     // THE WINDOW LANE's marker roster (Slice A, docs/design/window_lane.md §2.2/§2.8): per DIRECT
     // child this shard parents, the pre-encoded TAG_LUMA bag drawn from the child's own generation
     // stream — plumbed at BOOT the way the region forest and the motion roster are (the boot/config

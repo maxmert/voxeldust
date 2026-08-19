@@ -130,6 +130,7 @@ mod tests {
             center: LatticePos::local(DVec3::ZERO),
             frame,
             shape: Boundary::Shell { r: 100.0 },
+            look: Some(Boundary::Shell { r: 100.0 }),
             band: ContainmentBand::for_containment_velocity_safe(1.0, 1.0, 100.0, 0.02, 0.0)
                 .expect("a valid containment band"),
             aoi: AoiConfig::inert(),
@@ -159,7 +160,14 @@ mod tests {
             .expect("the forest names this realm");
         assert_eq!(home.realm.lowered(), RealmId::System(7));
         assert_eq!(home.pose.frame, FrameRef::SystemSpace { system_seed: 7 });
-        assert_eq!(home.pose.pos.offset(), DVec3::new(25.0, 0.0, 0.0));
+        // The spawn pose is NORMALIZED at birth (producer #4 of the cell activation): the value is
+        // 25 m exactly, carried in the integer half.
+        assert_eq!(
+            home.pose
+                .pos
+                .delta_m(crate::pose::LatticePos::ORIGIN, home.pose.frame.tier()),
+            DVec3::new(25.0, 0.0, 0.0)
+        );
     }
 
     #[test]

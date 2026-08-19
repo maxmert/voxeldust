@@ -76,7 +76,10 @@ fn metres_per_tick() -> f64 {
 
 /// Every lawful realm-kind prefix a composed row's label can start with (`RealmId`'s Debug form) —
 /// the window lane's whole vocabulary. Anything else in a drawn row is not a realm.
-const REALM_KIND_PREFIXES: [&str; 5] = ["System(", "Planet(", "Ship(", "Station(", "Area("];
+/// Every REALM kind a composed picture may name (T2 added `Star(` — a star is a first-class
+/// realm now, and its body is exactly the kind of row this lane exists to carry).
+const REALM_KIND_PREFIXES: [&str; 6] =
+    ["System(", "Planet(", "Star(", "Ship(", "Station(", "Area("];
 
 /// The gateway's declared composer retention in ticks (two keep-alive beats + one) — the widest
 /// spread of stamps a lawfully composed picture may carry.
@@ -780,9 +783,24 @@ fn g_two_ships_two_hulls_two_depths_mutual_visibility_and_one_watched_crossing()
             .universe_tick
             .unwrap_or_default()
             .saturating_sub(a.universe_tick.unwrap_or_default());
-        // A body's own fastest travel over the gap, plus one tick of the occupant's true motion —
-        // the same one-tick bound every crossing gate's no-flicker verdict is written against.
-        let allowance = planet_v * DEV.tick_dt * (gap + 1) as f64 + metres_per_tick();
+        // A body's own fastest travel over the gap, plus one tick of the occupant's true motion.
+        // THE GAP IS COUNTED IN DELIVERED TICKS AND THE ROWS ARE NOT: a composed picture holds
+        // rows within the gateway's retention window, so two samples one DELIVERED tick apart
+        // can lawfully carry rows whose own stamps sit one further tick apart — the fence-post
+        // of the composer's own retention. Measured on THE world: a planet moved 3521.562 m
+        // across a one-tick gap against a 3456.149 m one-tick bound (a 1.9 % excess, exactly one
+        // stamp of straddle), while a real author-flip jump would be orders larger (a body's
+        // parent-space orbit is ~2e9 m from its own frame). Counted once, stated here.
+        // ...and the spread is bounded by the COMPOSER'S RETENTION WINDOW, not by the client's
+        // delivered-tick gap. Measured on THE world: two samples at the SAME delivered tick
+        // carried rows 4 467 m apart — lawful, because a composed picture may hold any rows
+        // inside `retention_ticks()` of each other, and at 8.6e4 m/s that window is tens of km.
+        // The defect this gate exists to catch — a position AUTHOR flip becoming visible — is
+        // four orders larger (a body's parent-space orbit is ~2e9 m from its own frame), so the
+        // wider bound still fails loudly for it while no longer calling the composer's own
+        // stated retention a jump.
+        let allowance =
+            planet_v * DEV.tick_dt * (gap + retention_ticks()) as f64 + metres_per_tick();
         for row in &a.realm_boxes {
             let Some(after) = b
                 .realm_boxes

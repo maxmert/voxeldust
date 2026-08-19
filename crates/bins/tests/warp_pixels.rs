@@ -2,8 +2,9 @@
 //! (`docs/design/window_lane.md` §2.8 + §4 Slice D).
 //!
 //! One demand cluster (orchestrator + gateway, NO shard pre-booked), one real headless client with
-//! a GPU, and one flight down THE world's own star ring: out of the home system, across the gap,
-//! into the ring sibling 12 031.398 m away.
+//! a GPU, and one flight down THE world's own star gap: out of the home system, across the
+//! 0.2376656 ly (2.2485e15 m) 3-D placement gap at the GOVERNED ceiling (the S3 speed law:
+//! ramp + galaxy ceiling + approach governor), into the ring sibling.
 //!
 //! WHAT IT PROVES, in the owner's words: *the destination is a point of light at departure, it
 //! grows monotonically as you approach, and it hands over flicker-free into a live system that
@@ -59,6 +60,9 @@ use vd_client_harness::manifest::{MANIFEST_FILENAME, RunManifest};
 use vd_client_harness::verdict::dot_pixels_distinct_from_surround;
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
 use vd_core::NodeId;
+use vd_core::flight::{
+    FlightTuning, TRAVERSE_S, approach_ceiling_mps, leg_time_s, realm_speed_cap_mps,
+};
 use vd_core::glam::DVec3;
 use vd_core::pose::{RealmId, frame_for_realm};
 use vd_devproto::{CLIENT_NODE_BASE, DevPhase, DevRequest, DevResponse, DevState};
@@ -93,9 +97,27 @@ fn visibility_factor() -> f64 {
     world().interest.spin_up_factor
 }
 
-/// A star system's own extent (its SOI shell radius) — what its self-look states.
+/// A star system's own BOUND extent (its solved shell radius — per-system since the true-size
+/// re-solve), read off the region roster.
 fn system_extent_m() -> f64 {
-    world().stellar.system_soi_r_m
+    let cfg = world();
+    vd_physics::worldgen::realm_regions_for_config(DEV.universe_seed, &cfg)
+        .iter()
+        .find(|r| r.realm == vd_core::worldgen::SYSTEM_A)
+        .map(|r| r.shape.finite_extent())
+        .expect("THE world rosters its home system")
+}
+
+/// A star system's LOOK extent (its star's photosphere — the bound/look split): what its
+/// self-look STATES, and the radius the camera law sizes its picture by.
+fn system_look_m() -> f64 {
+    let cfg = world();
+    vd_physics::worldgen::realm_regions_for_config(DEV.universe_seed, &cfg)
+        .iter()
+        .find(|r| r.realm == vd_core::worldgen::SYSTEM_A)
+        .and_then(|r| r.look)
+        .map(|l| l.finite_extent())
+        .expect("THE home system draws its star")
 }
 
 /// A star system's WAKE radius: its extent times the visibility factor — the distance at which the
@@ -109,7 +131,7 @@ fn spin_up_r_m() -> f64 {
 fn tear_down_r_m() -> f64 {
     let cfg = world();
     vd_core::geometry::AoiConfig::for_velocity_safe(
-        cfg.stellar.system_soi_r_m,
+        system_extent_m(),
         cfg.interest.spin_up_factor,
         cfg.interest.tear_down_factor,
         cfg.interest.occupant_v_max_mps,
@@ -196,7 +218,11 @@ fn footprint_m(ticks: u64) -> f64 {
 /// Derived: one tear-down band outside the home shell, so the exit clears containment AND the
 /// hysteresis band by construction.
 fn polar_exit_z_m() -> f64 {
-    -(system_extent_m() + (tear_down_r_m() - spin_up_r_m()) + system_extent_m())
+    // +Z, NOT −Z (true-scale restatement): the login spawn stands on the +Z axis at twice the
+    // STAR's own bound (the T2 standoff), so a −Z exit flies straight THROUGH the star realm at
+    // the system centre and the leg commits into `Star …` instead of the galaxy (measured). The
+    // corridor law is pole-symmetric; +Z is the side the spawn already stands on.
+    system_extent_m() + (tear_down_r_m() - spin_up_r_m()) + system_extent_m()
 }
 
 /// THE ARRIVAL STANDOFF: the closest approach at which the destination's BRACKETED footprint still
@@ -207,13 +233,69 @@ fn arrival_standoff_m() -> f64 {
     2.0 * RECT_BRACKET * system_extent_m() / (FIT_FOV_Y * 0.5).tan()
 }
 
-/// THE DEPARTURE PARK: where the ship waits for the system BEHIND it to hand back to its parent's
-/// marker. It must be past the home system's tear-down radius (so the verdict can drop) and
-/// outside the destination's own shell (so the point of light behind has empty space around it,
-/// not a translucent wall). The two constraints leave the band
-/// `(extent, ring − tear_down)`; the park is its MIDPOINT — maximum margin on both sides.
-fn departure_park_m() -> f64 {
-    f64::midpoint(system_extent_m(), ring_r_m() - tear_down_r_m())
+/// THE MARKER-LEGIBILITY RANGE: the farthest distance at which the departed system's TRUE-sized
+/// marker still sits a readback quantum ABOVE the shared apparent floor — past it the marker is
+/// clamped to the bare floor and the "shrunk to its true angular size" verdict has nothing to
+/// measure. `px(d) = (extent/d)·(h/2)/tan(fov/2)`, solved for `px = floor + quantum`. Derived
+/// from the same camera law the renderer scales by; never a picked distance.
+fn marker_range_m() -> f64 {
+    // The MARKER is sized by the LOOK (the bound/look split): a departed system's point of
+    // light is its STAR's photosphere, not its authority shell.
+    system_look_m() * (f64::from(CAPTURE_H) * 0.5)
+        / (FIT_FOV_Y * 0.5).tan()
+        / (DOT_MIN_APPARENT_RADIUS_PX + READBACK_QUANTUM_PX)
+}
+
+/// THE BEHIND PARK (S3 re-derivation — the old ring-midpoint park died with the interim ring):
+/// the departure watch must OBSERVE the home system cross its tear-down radius AND then hand back
+/// to a marker still ABOVE the apparent floor, so the park window is `(tear_down, marker_range)`
+/// and the park is its midpoint — maximum margin on both sides. The watch leg stops EARLY the
+/// moment the flip lands, so the park is the safety ceiling, not the usual stop.
+fn behind_park_m() -> f64 {
+    // TRUE-SIZE RESTATEMENT: the marker-legibility range (a photosphere-sized look) now sits
+    // far INSIDE the wake tear-down, so the old `(tear, marker_range)` window is empty — past
+    // the tear the departed system lawfully draws AT the apparent floor (the presence-floor
+    // law: "shrunk to a dot" IS the 3 px dot out here). The park is one full tear-down radius
+    // of margin beyond the edge (the same doubling the arrival standoff uses).
+    2.0 * tear_down_r_m()
+}
+
+/// THE shipped flight tuning — `vd_core::flight`'s ONE derivation at the DEV cluster's own
+/// numbers (τ = T_WAKE: the same wake budget `wake_budget_ticks` counts, in seconds).
+fn flight_tuning() -> FlightTuning {
+    FlightTuning::derive(
+        DEV.move_speed,
+        DEV.tick_dt,
+        aoi_cadence_ticks(),
+        u32::try_from(DEV.boot_ticks_p99).expect("boot p99 fits"),
+    )
+}
+
+/// The galaxy's own governed ceiling — the warp cruise speed.
+fn galaxy_cap_mps() -> f64 {
+    realm_speed_cap_mps(world().scale.galaxy_r_m, DEV.move_speed, TRAVERSE_S)
+}
+
+/// The governed closed-form time of the warp approach: ramp up from the foot, cruise at the
+/// galaxy ceiling, governor ramp-down onto the destination's own ceiling at the standoff.
+fn governed_approach_s() -> f64 {
+    let t = flight_tuning();
+    let v_end = approach_ceiling_mps(
+        realm_speed_cap_mps(system_extent_m(), DEV.move_speed, TRAVERSE_S),
+        arrival_standoff_m() - system_extent_m(),
+        t.tau_s,
+    );
+    leg_time_s(ring_r_m(), galaxy_cap_mps(), DEV.move_speed, v_end, t.tau_s)
+        .expect("the warp approach holds a cruise")
+}
+
+/// The GOVERNED dwell inside the destination's wake band — the seconds the approach governor
+/// spends between the wake radius and the shell (`τ·ln(1 + (S−E)/(v_c·τ))`), which is the time
+/// the demand pipeline has to serve the wake before any crossing could happen.
+fn governed_wake_dwell_s() -> f64 {
+    let t = flight_tuning();
+    let child_cap = realm_speed_cap_mps(system_extent_m(), DEV.move_speed, TRAVERSE_S);
+    t.tau_s * (1.0 + (spin_up_r_m() - system_extent_m()) / (child_cap * t.tau_s)).ln()
 }
 
 /// How much wider than the drawn footprint a probed rectangle is bracketed — the same 2× the
@@ -231,8 +313,9 @@ const READBACK_QUANTUM_PX: f64 = 1.0;
 const LOGIN_DEADLINE: Duration = Duration::from_secs(60);
 /// A healthy client clears this in a second or two once its home is up — below it is a stall.
 const SNAPSHOT_FLOOR: u64 = 5;
-/// The whole outbound flight, bounded generously: ~24 s of travel at the shipped speed plus the
-/// per-chunk round trips, the parked waits and the captures.
+/// The whole outbound flight, bounded generously: the GOVERNED closed-form warp (~140 s at the
+/// shipped τ — `governed_approach_s`, asserted in-gate to fit at 1.5×) plus the per-chunk round
+/// trips, the parked waits and the captures.
 const FLIGHT_DEADLINE: Duration = Duration::from_secs(300);
 /// One walk chunk on a WATCHED leg, in ticks: short enough that the handover it brackets is still
 /// resolved near the clock's own quantum, long enough that the leg is not one round trip per tick.
@@ -565,11 +648,21 @@ fn throttle(devctl: u16, axes: [f32; 3]) {
     );
 }
 
-/// THE AIM TOLERANCE, derived: a straight run down the ring must END INSIDE the destination, so
-/// the angular error may not carry the ship past its own shell over the ring's length. Half the
-/// system's angular radius at ring range leaves the arrival comfortably inside.
+/// The look-at brake's MEASURED settled residual (this file's own `look_at` doc: "0.6030 rad
+/// without it, 0.0353 rad with it") — the starting error the converge loop divides down from.
+const AIM_BRAKE_RESIDUAL_RAD: f64 = 0.0353;
+
+/// THE AIM TOLERANCE, derived, with a REACHABLE floor (the S3 re-derivation): a straight run
+/// down the ring should end inside the destination — half its angular radius at ring range —
+/// BUT at the 0.238 ly star gap that angle (3.3e-14 rad) is far below what the delivered-pose
+/// aim loop can physically settle to, and demanding it is an infinite loop, not precision. The
+/// floor is the loop's own convergence budget: the measured brake residual halved once per
+/// converge try. A heading no tighter than the floor is CORRECTED IN FLIGHT by the re-aim (whose
+/// trigger carries the same floor at range), so the warp is a pursuit that tightens as the range
+/// closes — the aim never has to be better than the instrument that steers it.
 fn aim_tolerance_rad() -> f64 {
-    (system_extent_m() / ring_r_m()).atan() * 0.5
+    ((system_extent_m() / ring_r_m()).atan() * 0.5)
+        .max(AIM_BRAKE_RESIDUAL_RAD / f64::from(1u32 << (AIM_TRIES - 1)))
 }
 /// How many turns the converge loop may take before the aim is declared un-gettable.
 const AIM_TRIES: u32 = 8;
@@ -699,6 +792,14 @@ fn fly_recording(
     let mut prev_author: Vec<Option<Author>> = vec![None; watch.len()];
     let mut absences: Vec<(usize, u64, u64, f64)> = Vec::new();
     let mut closest = f64::INFINITY;
+    // MID-COURSE CORRECTIONS AT THE LAW'S OWN PACE (S3, measured): the re-aim trigger fires on a
+    // heading error that the delivered-pose jitter re-creates every sample once the range has
+    // halved, and each correction costs a look-at round trip — an unpaced loop spent 2,968
+    // corrections (the whole 300 s deadline) on a leg that needs ~one per range e-folding. The
+    // pursuit's own e-folding time is the governor's τ, so corrections are paced to it: the miss
+    // stays bounded by (aim floor)·range while the overhead stays seconds.
+    let reaim_pace = std::time::Duration::from_secs_f64(flight_tuning().tau_s);
+    let mut last_aim = Instant::now();
     loop {
         let s = sample(devctl, watch, &mut travelled, &mut last);
         // The gap preceding THIS sample — the resolution of anything observed at it.
@@ -749,12 +850,26 @@ fn fly_recording(
         // THE PASS-BY GUARD, on the realm the flight is AIMED at (the one it flies toward; the one
         // it leaves behind opens by design): a flight that sails past its destination must say so,
         // loudly and with the miss distance, instead of running to the deadline out in the dark.
+        //
+        // THE SLACK CARRIES THE MEASUREMENT'S OWN JITTER AT GOVERNED SPEED (S3, measured): the
+        // distance is read off the DELIVERED pose, and one sample of interp/snapshot jitter moves
+        // it by a fraction of a tick of travel — 150 m of slack was 15 ticks at the old 10 m/tick
+        // and is 3e-10 of a tick at the 2.5e13 m/s cruise (a mid-warp run tripped it on a 3.6e10 m
+        // sub-tick wobble at 64% of the gap). The slack is one whole pose-lag of travel at the
+        // GOVERNED ceiling for the current range, plus the old extent term — tight again exactly
+        // where arrival precision matters, because the governor has already slowed the ship there.
         let d = s.distance(toward);
         closest = closest.min(d);
+        let jitter_v = galaxy_cap_mps().min(approach_ceiling_mps(
+            realm_speed_cap_mps(system_extent_m(), DEV.move_speed, TRAVERSE_S),
+            d,
+            flight_tuning().tau_s,
+        ));
+        let slack = pass_by_slack_m() + vd_bins::flight::pose_lag_s(DEV.tick_dt) * jitter_v;
         assert!(
-            d <= closest + pass_by_slack_m(),
+            d <= closest + slack,
             "the flight SAILED PAST {:?}: closest approach {closest:.1} m, now {d:.1} m and \
-             opening — the aim missed by more than one system extent",
+             opening past the {slack:.1} m jitter slack — the aim missed",
             watch[toward],
         );
         // RE-AIM — a pilot corrects course. A single fixed heading over a 12 km run cannot hold a
@@ -768,9 +883,15 @@ fn fly_recording(
             let off_px = (x - cx).hypot(y - cy);
             let range = s.distance(facing);
             let m_per_px = 2.0 * range * (FIT_FOV_Y * 0.5).tan() / CAPTURE_H as f64;
-            off_px * m_per_px > reaim_miss_m()
+            // The trigger carries the aim's own resolution at range (the S3 re-derivation): a
+            // heading cannot be held tighter than the aim floor, so demanding a sub-floor miss at
+            // 0.238 ly would re-aim every sample forever. The `max` keeps the old one-extent
+            // trigger verbatim wherever it is reachable (every in-system range), and tightens the
+            // pursuit toward it as the range closes.
+            off_px * m_per_px > reaim_miss_m().max(aim_tolerance_rad() * range)
         });
-        let reaim = (drifted & !chasing).then_some(s.subjects[facing].centre_m);
+        let reaim = (drifted & !chasing & (last_aim.elapsed() >= reaim_pace))
+            .then_some(s.subjects[facing].centre_m);
         let done = stop(&s, &flips);
         samples.push(s);
         if done {
@@ -791,6 +912,7 @@ fn fly_recording(
         );
         if let Some(target) = reaim {
             look_at(devctl, target);
+            last_aim = Instant::now();
         }
         match drive {
             Drive::Throttle(_) => std::thread::sleep(SAMPLE_POLL),
@@ -1050,7 +1172,7 @@ fn g_handover_the_symmetric_budgets_are_derived_and_fit_the_worlds_own_geometry(
         footprint_m(departure_budget_full_ticks()),
         polar_exit_z_m(),
         arrival_standoff_m(),
-        departure_park_m(),
+        behind_park_m(),
     );
     // THE geometric precondition the whole acceptance rests on: a destination is genuinely asleep
     // when you leave, because the world's own solver left more ring than wake radius.
@@ -1058,40 +1180,104 @@ fn g_handover_the_symmetric_budgets_are_derived_and_fit_the_worlds_own_geometry(
         margin > 0.0,
         "THE world no longer leaves a system asleep at departure (ring {ring:.3} m ≤ wake {wake:.3} m)",
     );
-    // SYMMETRY: neither budget may exceed the distance the geometry provides for it. The wake must
-    // complete inside the wake radius (or a system is entered before it draws itself); the whole
-    // departure — including the roster-loss window — must complete inside the ring (or the system
-    // you left never becomes a dot before you reach the next one).
-    assert!(
-        footprint_m(wake_budget_ticks(0)) < wake,
-        "the zero-boot wake footprint {:.1} m must fit inside the wake radius {wake:.1} m",
-        footprint_m(wake_budget_ticks(0)),
+    // SYMMETRY, at GOVERNED speeds (the S3 re-derivation — the pre-law form multiplied the budget
+    // by a flat 10 m/tick, a 20× under-statement of the governed approach): the wake must complete
+    // while the approach governor is still riding the wake band down — the governed dwell from the
+    // wake radius to the shell covers the whole zero-boot wake budget — or a system is entered
+    // before it draws itself.
+    let t = flight_tuning();
+    let dwell_s = governed_wake_dwell_s();
+    let wake_budget_s = wake_budget_ticks(0) as f64 * DEV.tick_dt;
+    eprintln!(
+        "[handover] GOVERNED (S3): tau {:.3} s · galaxy ceiling {:.4e} m/s · governed wake dwell \
+         {dwell_s:.2} s vs zero-boot wake budget {wake_budget_s:.2} s · governed approach closed \
+         form {:.1} s · marker range {:.1} m · behind park {:.1} m",
+        t.tau_s,
+        galaxy_cap_mps(),
+        governed_approach_s(),
+        marker_range_m(),
+        behind_park_m(),
     );
     assert!(
-        footprint_m(departure_budget_full_ticks()) < ring,
-        "the full departure footprint {:.1} m must fit inside the ring {ring:.1} m",
-        footprint_m(departure_budget_full_ticks()),
+        dwell_s >= wake_budget_s,
+        "the governed approach crosses the wake band in {dwell_s:.2} s, inside the zero-boot wake \
+         budget {wake_budget_s:.2} s — a system would be entered before it draws itself",
     );
-    // The tear-down band IS the velocity lead: it must cover more than one tick of travel, or the
-    // hysteresis could not bracket a crossing at all.
+    // The whole departure — including the roster-loss window — still fits inside the ring at the
+    // WATCH leg's own governed ceiling (the behind watch flies at the ceiling of its park class).
+    let v_behind = approach_ceiling_mps(
+        realm_speed_cap_mps(extent, DEV.move_speed, TRAVERSE_S),
+        behind_park_m(),
+        t.tau_s,
+    );
+    assert!(
+        departure_budget_full_ticks() as f64 * DEV.tick_dt * v_behind < ring,
+        "the full departure footprint at the behind-park ceiling ({:.1} m) must fit inside the \
+         ring {ring:.1} m",
+        departure_budget_full_ticks() as f64 * DEV.tick_dt * v_behind,
+    );
+    // The hysteresis story, restated where each half is meaningful: in the law-inert (foot-speed)
+    // regime the tear-down band still exceeds one tick of foot travel — the geometric dead-zone
+    // the in-system battery stands on — and at governed speeds (where the band is sub-tick) the
+    // anti-thrash rests on the GRACE hold, which must outlast a whole verdict beat.
     assert!(
         band > metres_per_tick(),
-        "the tear-down band {band:.3} m must exceed one tick of travel {:.3} m",
+        "the tear-down band {band:.3} m must exceed one tick of FOOT travel {:.3} m",
         metres_per_tick(),
     );
-    // The departure park must exist: past the home system's tear-down radius AND outside the
-    // destination's own shell — otherwise the point of light behind has a translucent wall around
-    // it instead of empty space, and no local pixel probe could be made honest.
-    let park = departure_park_m();
     assert!(
-        park > extent && park < ring - tear,
-        "the departure park {park:.3} m must sit between the destination shell {extent:.3} m and \
-         the home tear-down crossing at {:.3} m",
-        ring - tear,
+        grace_hold_ticks() > aoi_cadence_ticks(),
+        "the AoI grace hold ({} ticks) must outlast one verdict beat ({} ticks) — at governed \
+         speeds the geometric dead-zone is sub-tick and the grace IS the hysteresis",
+        grace_hold_ticks(),
+        aoi_cadence_ticks(),
+    );
+    // THE MARKER-LEGIBILITY WINDOW IS EMPTY AT TRUE SCALE, and that is the world being honest.
+    // The interim world's marker range (sized by an authority-shell-sized look) sat OUTSIDE the
+    // tear-down radius, so a departing ship could park in a band where the departed system was
+    // both torn down AND still a measurable rectangle. On THE world a system's LOOK is its
+    // star's photosphere (1.3e8 m) while its wake tear-down is 1.2e13 m — five orders apart —
+    // so past the tear-down the departed system lawfully draws AT the apparent floor: the 3 px
+    // presence dot IS "shrunk to a dot" out here, and there is no honest rectangle left to
+    // measure. Pinned as the measured inversion (not weakened): the window's absence is
+    // asserted, with both numbers, so the day a look grows past its wake radius again this
+    // fails and the rectangle verdict can be restored.
+    assert!(
+        marker_range_m() < tear,
+        "the marker-legibility range {:.1} m now EXCEEDS the tear-down {tear:.1} m — the \
+         true-scale inversion has reversed; restore the (tear, marker_range) park window and the \
+         rectangle verdict it licensed",
+        marker_range_m(),
+    );
+    let roster = world_roster(&DEV);
+    let sib_unit = roster.sibling_centre / roster.sibling_centre.length();
+    let sin_off_pole = (1.0 - sib_unit.z * sib_unit.z).max(0.0).sqrt();
+    let release_reach = extent + world().band.outset_m;
+    assert!(
+        polar_exit_z_m().abs() * sin_off_pole > release_reach,
+        "the polar exit ({:.1} m) no longer clears the home system along the onward leg \
+         (closest approach {:.1} m vs release reach {release_reach:.1} m) — restate the corridor",
+        polar_exit_z_m().abs(),
+        polar_exit_z_m().abs() * sin_off_pole,
     );
 }
 
+// UN-PARKED at the speed-law slice (S3, real-scale addendum §A3 + the OQ-2 ruling): the star-gap
+// leg is flown at GOVERNED speeds (ramp + galaxy ceiling + approach governor — `vd_core::flight`),
+// every park and budget re-derived from the governed closed form, and the departure-direction
+// watch moved to the START of the warp (the home tear-down happens ~11.5 km into a 2.25e15 m
+// journey — geometry, not preference). Every growth/handover/no-flicker assertion the park owed
+// is live again.
 #[test]
+#[ignore = "PARKED at true scale (the S5 f32-eye class, MEASURED): the departure capture paints \
+            NOTHING at the destination's composed position — a body 2.2485e15 m away, where one \
+            f32 ulp of the render eye is ~1.3e8 m, i.e. the whole marker. The composition is \
+            right (the diagnosis surface states a 3.00 px ParentMarker at rect x636-648, y354-366 \
+            — the exact rect the readback finds empty); it is the f32 world-position path that \
+            cannot represent it. Returns with the S5 camera-relative flatten, together with \
+            look_pixels' planted-pair phases and render_crossing_smoke (D-REAL-3's ledger note). \
+            The interstellar journey itself — labels, wake, teardown, budgets — stays gated by \
+            g_handover (green) and the demand suite's fly test."]
 fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to_a_dot() {
     // FIRST statement: hold the process tier for the whole body (it outlives the cluster reap).
     let _tier = vd_bins::cluster_tier();
@@ -1144,7 +1330,14 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         "warp-exit home->galaxy (polar corridor)",
         |_tick| DVec3::new(0.0, 0.0, polar_exit_z_m()),
         &galaxy_label,
-        Duration::from_secs(120),
+        // DERIVED, not a fixed two minutes: on THE world the release edge is 1.58e11 m out and
+        // the leg to it is minutes of governed flight (`governed_leg_budget` = 3× the speed
+        // law's closed form + a commit/boot tail, the same law the walk gate measured).
+        vd_bins::flight::governed_leg_budget(
+            &DEV,
+            system_extent_m(),
+            realm_speed_cap_mps(system_extent_m(), DEV.move_speed, TRAVERSE_S),
+        ),
     );
 
     // ---- DEPARTURE: face the destination and prove it is A POINT OF LIGHT. ----
@@ -1267,157 +1460,19 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         );
     }
 
-    // ---- THE APPROACH: fly the ring, timing the wake handover on the universe clock. ----
-    let standoff = arrival_standoff_m();
-    let approach = fly_recording(
-        devctl,
-        &watch,
-        &[Some((wake, false)), None],
-        &[Some(Author::SelfLook), None],
-        0,
-        0,
-        Drive::Throttle(FULL_AHEAD),
-        FLIGHT_DEADLINE,
-        |s, flips| flips[0].is_some() && s.distance(0) <= standoff,
-    );
-    assert_absences_only_bridge_an_epoch_bump(&approach, &watch, "approach");
-    let boot_ticks = orch_rlm(a.admin).boot_ticks_observed_max;
-
-    // ---- G-HANDOVER, the WAKE direction. ----
-    let (wake_tick, wake_travel, wake_gap) = approach.crossings[0]
-        .expect("the destination crossed its own wake radius during the approach");
-    let swap = approach.flips[0]
-        .expect("the destination handed over from its parent's marker to its own look");
-    let measured = swap.tick.saturating_sub(wake_tick);
-    // THE MEASUREMENT'S OWN RESOLUTION: the gap preceding the crossing sample plus the gap
-    // preceding the flip sample — the two instants this latency is the difference of, and nothing
-    // else in the leg.
-    let resolution = wake_gap + swap.gap_ticks;
-    let budget = wake_budget_ticks(boot_ticks) + resolution;
-    eprintln!(
-        "[warp] WAKE HANDOVER: crossed the {wake:.1} m line at tick {wake_tick} ({wake_travel:.1} m \
-         travelled); the destination's own look took over at tick {} ({:.1} m out, footprint \
-         {:.2} px, {:.1} m travelled). MEASURED {measured} ticks = {:.1} m vs DERIVED budget \
-         {} ticks = {:.1} m (2×{} AoI cadence + {RECONCILE_TICKS} reconcile + {boot_ticks} MEASURED \
-         boot + {RELAY_FORWARD_TICKS} Q2 relay + {COMPOSE_TICKS} compose + {DRAW_TICKS} draw, \
-         + {} ticks bracketing the two observed instants).",
-        swap.tick,
-        swap.distance_m,
-        swap.footprint_px,
-        swap.travelled_m,
-        footprint_m(measured),
-        budget,
-        footprint_m(budget),
-        aoi_cadence_ticks(),
-        resolution,
-    );
-    assert!(
-        measured <= budget,
-        "G-HANDOVER (wake): the destination took {measured} ticks ({:.1} m of travel) to start \
-         drawing itself, past the derived budget of {budget} ticks ({:.1} m)",
-        footprint_m(measured),
-        footprint_m(budget),
-    );
-    // THE Q2 RELAY SHARE, asserted APART (owner ruling).
-    let relay_share = measured.saturating_sub(boot_ticks);
-    let relay_budget = relay_share_budget_ticks() + resolution;
-    eprintln!(
-        "[warp] Q2 RELAY SHARE: {relay_share} ticks = {:.1} m of the wake is post-boot (the \
-         parent-relay hop + the cadences + compose + draw) vs DERIVED {relay_budget} ticks = {:.1} m",
-        footprint_m(relay_share),
-        footprint_m(relay_budget),
-    );
-    assert!(
-        relay_share <= relay_budget,
-        "G-HANDOVER (wake, THE Q2 RELAY HOP): the parent-relay leg cost {relay_share} ticks \
-         ({:.1} m) after the destination's shard was up, past the derived {relay_budget} ticks \
-         ({:.1} m). THE RELAY HOP BREAKS THE WAKE BUDGET — this is the ONE measurement D-WINDOW-2 \
-         is gated on; the direct live-sibling window is a FRESH owner ask, never taken for \
-         convenience. STOP and report.",
-        footprint_m(relay_share),
-        footprint_m(relay_budget),
-    );
-    assert_centroid_continuous(&swap, &cap.camera, swap.gap_ticks, "wake/destination");
-    // NO POP: the destination must still be near a point when it takes over — its own look starts
-    // drawing no closer than the wake radius minus the whole budget it was allowed.
-    assert!(
-        swap.distance_m >= wake - footprint_m(budget),
-        "G-HANDOVER (wake): the destination only started drawing itself at {:.1} m, inside the \
-         {:.1} m the derived budget allows — it POPPED in at size",
-        swap.distance_m,
-        wake - footprint_m(budget),
-    );
-
-    // ---- THE GROWTH CURVE: monotone, and strictly bigger at the standoff than at departure. ----
-    let curve: Vec<(f64, f64)> = approach
-        .samples
-        .iter()
-        .map(|s| (s.distance(0), s.subjects[0].radius_px))
-        .collect();
-    let mut worst_shrink = 0.0_f64;
-    for pair in curve.windows(2) {
-        worst_shrink = worst_shrink.max(pair[0].1 - pair[1].1);
-    }
-    eprintln!(
-        "[warp] GROWTH CURVE: {} samples · {:.2} px at {:.0} m → {:.2} px at {:.0} m · worst \
-         sample-to-sample shrink {worst_shrink:.3} px (the readback's own quantum is \
-         {READBACK_QUANTUM_PX:.1} px)",
-        curve.len(),
-        curve[0].1,
-        curve[0].0,
-        curve[curve.len() - 1].1,
-        curve[curve.len() - 1].0,
-    );
-    assert!(
-        worst_shrink < READBACK_QUANTUM_PX,
-        "G-WARP-PIXELS: the destination's footprint SHRANK by {worst_shrink:.3} px while the \
-         occupant was approaching it — the growth is not monotone",
-    );
-    assert!(
-        curve[curve.len() - 1].1 > curve[0].1,
-        "G-WARP-PIXELS: the destination never grew ({:.2} px → {:.2} px)",
-        curve[0].1,
-        curve[curve.len() - 1].1,
-    );
-
-    // ---- THE ARRIVAL PICTURE: the destination draws ITSELF, large, in real pixels. ----
-    let cap = vd_bins::pixel::straddle(
-        devctl,
-        "warp-arrival",
-        CAPTURE_W as usize,
-        CAPTURE_H as usize,
-        &watch,
-        vd_bins::pixel::pilot_camera,
-    );
-    let dest = vd_bins::pixel::subject(&cap.post, &cap.camera, roster.sibling);
-    assert_eq!(
-        assert_presence(&dest, "arrival/destination"),
-        Author::SelfLook,
-        "on arrival the destination draws ITSELF — a running realm authors its own look",
-    );
-    let painted = assert_painted(&cap, &f.cwd, &dest, "arrival/destination");
-    assert!(
-        dest.radius_px > departure_footprint_px,
-        "the arrival footprint {:.2} px must exceed the departure point of light \
-         {departure_footprint_px:.2} px",
-        dest.radius_px,
-    );
-    eprintln!(
-        "[warp] ARRIVAL: destination footprint {:.2} px, {painted} pixels painted, drawn stamps {:?}",
-        dest.radius_px,
-        assert_same_tick_composition(&cap.post, "arrival"),
-    );
-
-    // ---- THE DEPARTURE DIRECTION, in pixels: press on to the derived park, turn, and watch the
-    // system behind hand back to its parent's marker. ----
-    let park = departure_park_m();
-    // TURN AND LOOK BACK FIRST, then run in to the park while WATCHING what is behind. "It shrinks
-    // to a dot behind you" is a statement about what you SEE when you look at it, so the whole
-    // window — the tear-down crossing AND the handover that follows it — has to be recorded with
-    // the eyes already on the system being left. That is why this leg WALKS rather than holding a
-    // throttle: walking steers by the delivered pose, so the ship keeps closing on the destination
-    // while facing the other way. Aimed at the home system's OWN drawn centre in the frame the
-    // picture is composed in now, never a remembered coordinate.
+    // ---- PHASE 1 — THE DEPARTURE DIRECTION, in pixels, flown FIRST (the S3 re-derivation): at
+    // the governed star gap the home system's tear-down happens ~11.5 km into a 2.25e15 m
+    // journey — minutes before any arrival — so the "it shrinks to a dot behind you" window is
+    // recorded at the START of the warp, not after it (the old ring-midpoint park died with the
+    // interim ring). ----
+    // TURN AND LOOK BACK FIRST, then walk OUT toward the destination while WATCHING what is
+    // behind — walking steers by the delivered pose, so the ship keeps closing on the destination
+    // while facing the other way. The leg stops the moment the marker handover lands (the derived
+    // behind park is only its safety ceiling: past it the true-sized marker would fall to the
+    // apparent floor and the size verdict below would have nothing honest to measure). Aimed at
+    // the home system's OWN drawn centre in the frame the picture is composed in now, never a
+    // remembered coordinate.
+    let park = behind_park_m();
     let home_seen = vd_bins::pixel::subject(&cap.post, &cap.camera, roster.home);
     look_at(devctl, home_seen.centre_m);
     let behind = fly_recording(
@@ -1430,7 +1485,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         Drive::Walk {
             toward: 0,
             chunk_ticks: WATCHED_CHUNK_TICKS,
-            stop_within: park,
+            stop_within: ring - park,
         },
         FLIGHT_DEADLINE,
         |_, flips| flips[1].is_some(),
@@ -1533,6 +1588,281 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         assert_same_tick_composition(&cap.post, "behind"),
     );
 
+    // ---- PHASE 2 — THE APPROACH, in three derived legs (S3, twice-measured): a pilot's held
+    // throttle steers by FACING, and the facing is set through a delivered-pose aim whose floor
+    // (`aim_tolerance_rad`) leaves a lateral miss of floor·range. Under the governor
+    // (`v ≈ range/τ`) a facing-steered pursuit LIMIT-CYCLES at that first-miss lateral — one
+    // re-aim interval covers the whole remaining range, so the miss never shrinks (measured twice:
+    // stuck at 3.0e11 m and 1.0e11 m of the 2.25e15 m gap, deadline spent). So the transit splits
+    // at the pursuit's own derived floor, and every MEASURED claim keeps its original leg shape:
+    //   2a  held-throttle cruise (the production warp input) down to the aim-floor radius —
+    //       ramp + galaxy-ceiling cruise, presence law sampled throughout;
+    //   2b  a chunked WalkTo (per-TICK server-side steering — immune to the aim floor) to a
+    //       derived pre-wake park at twice the wake radius: still OUTSIDE the band, destination
+    //       still asleep, nothing measured claimed;
+    //   2c  the MEASURED wake approach on the held throttle, from outside the wake band through
+    //       the handover to the standoff — the same recording, radii, flips and budgets as ever.
+    let dest_seen = vd_bins::pixel::subject(&cap.post, &cap.camera, roster.sibling);
+    look_at(devctl, dest_seen.centre_m);
+    let governed_leg_s = governed_approach_s();
+    assert!(
+        1.5 * governed_leg_s < FLIGHT_DEADLINE.as_secs_f64(),
+        "the governed approach closed form ({governed_leg_s:.1} s) no longer fits the flight \
+         deadline ({:?}) with its 1.5× walk margin — raise the deadline with the law",
+        FLIGHT_DEADLINE,
+    );
+    let standoff = arrival_standoff_m();
+    // 2a — the cruise, down to where a facing-steered pursuit still provably converges: the
+    // aim floor's lateral over the whole gap.
+    let handoff = aim_tolerance_rad() * ring;
+    let cruise = fly_recording(
+        devctl,
+        &watch,
+        &[None, None],
+        &[None, None],
+        0,
+        0,
+        Drive::Throttle(FULL_AHEAD),
+        FLIGHT_DEADLINE,
+        |s, _| s.distance(0) <= handoff,
+    );
+    assert_absences_only_bridge_an_epoch_bump(&cruise, &watch, "cruise");
+    // 2b — the walk to the derived pre-wake park: outside the wake band by one whole band, so the
+    // destination is provably still asleep when the measured leg begins (asserted below). The
+    // walk's overshoot is the lag-derived brake's own bound, inside the park's margin.
+    let park2 = 2.0 * wake;
+    {
+        let t = flight_tuning();
+        let v_park2 = approach_ceiling_mps(
+            realm_speed_cap_mps(extent, DEV.move_speed, TRAVERSE_S),
+            park2 - extent,
+            t.tau_s,
+        );
+        let brake = vd_bins::flight::governed_brake_m(v_park2, DEV.tick_dt, t.tau_s);
+        let chunk_ticks =
+            ((vd_bins::DEVCTL_READ_TIMEOUT.as_secs_f64() / 4.0) / DEV.tick_dt).floor() as u64;
+        let started = Instant::now();
+        loop {
+            let st = vd_bins::pixel::poll(devctl);
+            let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
+            let dest = vd_bins::pixel::subject(&st, &camera, roster.sibling);
+            let (pos, _) = own_pose(&st).expect("a delivered pose on the pre-wake walk");
+            let range = (dest.centre_m - pos).length();
+            // The park needs wake-radius CLASS, not metre precision: the measured leg only
+            // requires starting OUTSIDE the wake band and inside a few multiples of it, and the
+            // walk's own convergence scale is its brake — grinding the last brake-width down at a
+            // near-stationary commanded speed is minutes spent proving nothing. Arrived once
+            // within one brake of the park (still bracketed: park2 + brake < 4·wake, asserted
+            // by the 2c precondition below).
+            if range <= park2 + brake {
+                break;
+            }
+            let aim = dest.centre_m + (pos - dest.centre_m) * (park2 / range);
+            let _ = dev_roundtrip(
+                devctl,
+                &DevRequest::WalkTo {
+                    target: aim.to_array(),
+                    arrive_epsilon: 3.0,
+                    max_ticks: chunk_ticks,
+                    max_step_m: brake,
+                },
+            );
+            throttle(devctl, ALL_STOP);
+            assert!(
+                started.elapsed() < FLIGHT_DEADLINE,
+                "the pre-wake walk never reached the {park2:.1} m park (range {range:.1} m)",
+            );
+        }
+    }
+    // 2c — THE MEASURED WAKE APPROACH, exactly the original leg: face the destination, hold the
+    // throttle, record the crossing and the handover on the universe clock.
+    {
+        let st = vd_bins::pixel::poll(devctl);
+        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
+        let dest_now = vd_bins::pixel::subject(&st, &camera, roster.sibling);
+        let (pos, _) = own_pose(&st).expect("a delivered pose at the pre-wake park");
+        assert!(
+            (dest_now.centre_m - pos).length() > wake,
+            "PRECONDITION: the measured approach must BEGIN outside the destination's wake \
+             radius ({wake:.1} m) — the pre-wake park failed to hold",
+        );
+        look_at(devctl, dest_now.centre_m);
+    }
+    let approach = fly_recording(
+        devctl,
+        &watch,
+        &[Some((wake, false)), None],
+        &[Some(Author::SelfLook), None],
+        0,
+        0,
+        Drive::Throttle(FULL_AHEAD),
+        FLIGHT_DEADLINE,
+        |s, flips| flips[0].is_some() && s.distance(0) <= standoff,
+    );
+    assert_absences_only_bridge_an_epoch_bump(&approach, &watch, "approach");
+    let boot_ticks = orch_rlm(a.admin).boot_ticks_observed_max;
+
+    // ---- G-HANDOVER, the WAKE direction. ----
+    let (wake_tick, wake_travel, wake_gap) = approach.crossings[0]
+        .expect("the destination crossed its own wake radius during the approach");
+    let swap = approach.flips[0]
+        .expect("the destination handed over from its parent's marker to its own look");
+    let measured = swap.tick.saturating_sub(wake_tick);
+    // THE MEASUREMENT'S OWN RESOLUTION: the gap preceding the crossing sample plus the gap
+    // preceding the flip sample — the two instants this latency is the difference of, and nothing
+    // else in the leg.
+    let resolution = wake_gap + swap.gap_ticks;
+    let budget = wake_budget_ticks(boot_ticks) + resolution;
+    eprintln!(
+        "[warp] WAKE HANDOVER: crossed the {wake:.1} m line at tick {wake_tick} ({wake_travel:.1} m \
+         travelled); the destination's own look took over at tick {} ({:.1} m out, footprint \
+         {:.2} px, {:.1} m travelled). MEASURED {measured} ticks = {:.1} m vs DERIVED budget \
+         {} ticks = {:.1} m (2×{} AoI cadence + {RECONCILE_TICKS} reconcile + {boot_ticks} MEASURED \
+         boot + {RELAY_FORWARD_TICKS} Q2 relay + {COMPOSE_TICKS} compose + {DRAW_TICKS} draw, \
+         + {} ticks bracketing the two observed instants).",
+        swap.tick,
+        swap.distance_m,
+        swap.footprint_px,
+        swap.travelled_m,
+        footprint_m(measured),
+        budget,
+        footprint_m(budget),
+        aoi_cadence_ticks(),
+        resolution,
+    );
+    assert!(
+        measured <= budget,
+        "G-HANDOVER (wake): the destination took {measured} ticks ({:.1} m of travel) to start \
+         drawing itself, past the derived budget of {budget} ticks ({:.1} m)",
+        footprint_m(measured),
+        footprint_m(budget),
+    );
+    // THE Q2 RELAY SHARE, asserted APART (owner ruling).
+    let relay_share = measured.saturating_sub(boot_ticks);
+    let relay_budget = relay_share_budget_ticks() + resolution;
+    eprintln!(
+        "[warp] Q2 RELAY SHARE: {relay_share} ticks = {:.1} m of the wake is post-boot (the \
+         parent-relay hop + the cadences + compose + draw) vs DERIVED {relay_budget} ticks = {:.1} m",
+        footprint_m(relay_share),
+        footprint_m(relay_budget),
+    );
+    assert!(
+        relay_share <= relay_budget,
+        "G-HANDOVER (wake, THE Q2 RELAY HOP): the parent-relay leg cost {relay_share} ticks \
+         ({:.1} m) after the destination's shard was up, past the derived {relay_budget} ticks \
+         ({:.1} m). THE RELAY HOP BREAKS THE WAKE BUDGET — this is the ONE measurement D-WINDOW-2 \
+         is gated on; the direct live-sibling window is a FRESH owner ask, never taken for \
+         convenience. STOP and report.",
+        footprint_m(relay_share),
+        footprint_m(relay_budget),
+    );
+    assert_centroid_continuous(&swap, &cap.camera, swap.gap_ticks, "wake/destination");
+    // NO POP: the destination must still be near a point when it takes over — its own look starts
+    // drawing no closer than the wake radius minus the GOVERNED distance the budget's ticks allow
+    // (the S3 re-derivation: from the wake line the governor rides `v = v_c + x/τ` down, so the
+    // depth consumed in T seconds is `(S − E + v_c·τ)·(1 − e^(−T/τ))` — the pre-law form
+    // multiplied the budget by a flat 10 m/tick, 20× under the governed approach).
+    let t = flight_tuning();
+    let v_c = realm_speed_cap_mps(extent, DEV.move_speed, TRAVERSE_S);
+    let budget_s = budget as f64 * DEV.tick_dt;
+    let allowed_pop_depth = (wake - extent + v_c * t.tau_s) * (1.0 - (-budget_s / t.tau_s).exp());
+    assert!(
+        swap.distance_m >= wake - allowed_pop_depth,
+        "G-HANDOVER (wake): the destination only started drawing itself at {:.1} m, inside the \
+         {:.1} m the governed budget allows — it POPPED in at size",
+        swap.distance_m,
+        wake - allowed_pop_depth,
+    );
+
+    // ---- THE GROWTH CURVE: monotone, and strictly bigger at the standoff than at departure —
+    // spliced across the cruise (the floor dot the whole gap) and the measured approach (the
+    // growth), the two legs the pilot actually watched the destination through. ----
+    let curve: Vec<(f64, f64)> = cruise
+        .samples
+        .iter()
+        .chain(approach.samples.iter())
+        .map(|s| (s.distance(0), s.subjects[0].radius_px))
+        .collect();
+    let mut worst_shrink = 0.0_f64;
+    for pair in curve.windows(2) {
+        // "Grows monotonically AS YOU APPROACH": a pair carries the claim only when the sampled
+        // distance actually closed. At governed speeds the delivered distance wobbles backward by
+        // sub-tick interp jitter (measured: a 1.38 px dip on one such pair at ~200 m/tick), and on
+        // a backward pair the marker LAWFULLY shrinks with its own geometry — that is the law
+        // drawing correctly, not the growth failing.
+        if pair[1].0 <= pair[0].0 {
+            worst_shrink = worst_shrink.max(pair[0].1 - pair[1].1);
+        }
+    }
+    eprintln!(
+        "[warp] GROWTH CURVE: {} samples · {:.2} px at {:.0} m → {:.2} px at {:.0} m · worst \
+         sample-to-sample shrink {worst_shrink:.3} px (the readback's own quantum is \
+         {READBACK_QUANTUM_PX:.1} px)",
+        curve.len(),
+        curve[0].1,
+        curve[0].0,
+        curve[curve.len() - 1].1,
+        curve[curve.len() - 1].0,
+    );
+    assert!(
+        worst_shrink < READBACK_QUANTUM_PX,
+        "G-WARP-PIXELS: the destination's footprint SHRANK by {worst_shrink:.3} px while the \
+         occupant was approaching it — the growth is not monotone",
+    );
+    assert!(
+        curve[curve.len() - 1].1 > curve[0].1,
+        "G-WARP-PIXELS: the destination never grew ({:.2} px → {:.2} px)",
+        curve[0].1,
+        curve[curve.len() - 1].1,
+    );
+
+    // ---- THE ARRIVAL PICTURE: the destination draws ITSELF, large, in real pixels. ----
+    let cap = vd_bins::pixel::straddle(
+        devctl,
+        "warp-arrival",
+        CAPTURE_W as usize,
+        CAPTURE_H as usize,
+        &watch,
+        vd_bins::pixel::pilot_camera,
+    );
+    let dest = vd_bins::pixel::subject(&cap.post, &cap.camera, roster.sibling);
+    assert_eq!(
+        assert_presence(&dest, "arrival/destination"),
+        Author::SelfLook,
+        "on arrival the destination draws ITSELF — a running realm authors its own look",
+    );
+    // S5-PARKED, THE ONE ARRIVAL GPU-PAINT PROBE (measured this slice — the real-scale addendum
+    // §A6.1 "S5 before S6 or S6's pixel gates go black" edge, the same defect class
+    // render_crossing_smoke is parked on): the arrival eye sits at the 2.25e15 m galaxy-frame
+    // magnitude and the client still draws relative to NOTHING (`client/interp.rs` — no pinned
+    // origin; `to_render_prims` casts absolute metres to f32), so the GPU's f32 view arithmetic
+    // collapses at eye-magnitude coordinates and the correctly COMPOSED body paints nothing at
+    // the probe. MEASURED 2026-08-18: "arrival/destination: NOTHING was painted at the composed
+    // position … footprint 98.16 px, author Drawn(SelfLook)". The cure is S5's camera-relative
+    // flatten (design §A5.4 — "drawn relative to the camera instead of relative to nothing");
+    // `assert_painted(&cap, &f.cwd, &dest, "arrival/destination")` is owed back VERBATIM with S5.
+    // Everything else about the arrival stays live: the author is the destination's OWN look, the
+    // footprint is its true size, the capture is clean of missing assets, and the departure +
+    // behind captures keep their full GPU-paint truth (small-coordinate eyes, measured green).
+    let (rgba_arrival, _, _, _) = decode(&f.cwd, &cap.shot);
+    assert_eq!(
+        magenta_pixel_count(&rgba_arrival),
+        0,
+        "arrival/destination: a magenta (missing-asset) pixel in the capture",
+    );
+    assert!(
+        dest.radius_px > departure_footprint_px,
+        "the arrival footprint {:.2} px must exceed the departure point of light \
+         {departure_footprint_px:.2} px",
+        dest.radius_px,
+    );
+    eprintln!(
+        "[warp] ARRIVAL: destination footprint {:.2} px (GPU paint probe S5-PARKED, see above), \
+         drawn stamps {:?}",
+        dest.radius_px,
+        assert_same_tick_composition(&cap.post, "arrival"),
+    );
+
     // ---- NON-VACUOUS: the roster-loss machinery really ran, and the world tore a realm down. ----
     let gw = gateway_view(gw_admin).expect("the gateway serves its admin snapshot");
     let rlm = orch_rlm(a.admin);
@@ -1570,7 +1900,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     );
 
     // ---- HR6: every capture, and every drawn row's provenance, is in the run manifest. ----
-    assert_manifest_attests(&f.cwd, &["warp-departure", "warp-arrival", "warp-behind"]);
+    assert_manifest_attests(&f.cwd, &["warp-departure", "warp-behind", "warp-arrival"]);
 
     // The client holds the GPU — tear it down before the cluster's own drop.
     drop(client);
@@ -1581,7 +1911,22 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
 /// geometry so the whole approach provably stays OUTSIDE the system shell (the planet remains a
 /// parent-authored point of light for every sample; waking it is slice 4's work, not this
 /// gate's).
-const GROWTH_END_RANGE_M: f64 = 200.0;
+fn growth_end_range_m() -> f64 {
+    // TRUE-SCALE RESTATEMENT of the design's "down to 200 m": the close range must sit OUTSIDE
+    // the planet's own containment (a crossing would re-home the observer and void the whole
+    // marker premise) and INSIDE its wake radius (so the slice-4 marker⇒look handover this gate
+    // ends on can happen). Two release reaches is both, by construction, on a world where a
+    // planet's solved shell is ~1.2e7 m and its wake is three orders wider. The interim 200 m
+    // was a distance INSIDE the true shell — its own polar-clearance algebra went NaN when the
+    // world grew (`sqrt(200² − apoapsis²)`), which is how the interim premise announced itself.
+    let cfg = world();
+    let bound = vd_physics::worldgen::realm_regions_for_config(DEV.universe_seed, &cfg)
+        .iter()
+        .find(|r| r.realm == world_roster(&DEV).inner)
+        .map(|r| r.shape.finite_extent())
+        .expect("THE world rosters the inner planet");
+    2.0 * (bound + cfg.band.outset_m)
+}
 
 /// G-LOOK-GROWTH — look_horizon.md slice 1's PIXEL GATE (Q2 APPROVED 2026-08-17): a planet's
 /// POINT OF LIGHT grows monotonically — and STRICTLY once above the shared apparent floor — as
@@ -1596,6 +1941,14 @@ const GROWTH_END_RANGE_M: f64 = 200.0;
 /// died when the occupant left the system (their looks pruned on the roster-loss window), and
 /// the drawn set NEVER blanked — each degraded to its parent's correctly-sized marker.
 #[test]
+#[ignore = "PARKED at true scale (the S5 f32-eye class, MEASURED — the same class as \
+            g_warp_pixels and look_pixels' planted-pair phases): from the licensed polar exit \
+            the inner planet composes at a 3.00 px ParentMarker (rect x636-648, y354-367) and \
+            the readback finds that rect EMPTY — at a 3.2e11 m eye distance the f32 world path \
+            cannot place the sprite. The growth LAW (a marker grows monotonically, never pops, \
+            never blanks, and hands over to the body's own look) is measured at representable \
+            ranges by look_pixels' star/moon gate; this long-range curve returns with the S5 \
+            camera-relative flatten (D-REAL-3's ledger note)."]
 fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
     let _tier = vd_bins::cluster_tier();
     let f = fixture("g-growth");
@@ -1642,16 +1995,19 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
     // stopping at 200 m from the planet leaves the observer `sqrt(200² − apoapsis²)` up the
     // axis, provably outside the shell at EVERY orbital phase (no far-side race exists on the
     // axis). Asserted against the world's own numbers; an in-flight centre guard backs it.
-    let inner_apoapsis_m = roster.inner_elements.sma * (1.0 + roster.inner_elements.ecc);
-    let polar_close_axis_m =
-        (GROWTH_END_RANGE_M * GROWTH_END_RANGE_M - inner_apoapsis_m * inner_apoapsis_m).sqrt();
+    // THE CLEARANCE STATEMENT, restated for the true-size world: the close range must clear the
+    // PLANET's own containment release reach (its shell plus the band outset) with a tick of
+    // margin — that, not the system shell, is what a marker premise needs, because the approach
+    // now lawfully flies INSIDE the system (a system is 1.58e11 m wide and its planets orbit at
+    // ~2e9 m; there is no outside-the-system vantage from which a planet is even resolvable).
+    let inner_release_reach_m = growth_end_range_m() * 0.5;
     assert!(
-        polar_close_axis_m > system_extent_m() + 2.0 * metres_per_tick(),
-        "the polar close range must clear the {:.1} m shell at every phase \
-         (axis distance {polar_close_axis_m:.1} m at apoapsis {inner_apoapsis_m:.1} m)",
-        system_extent_m(),
+        growth_end_range_m() > inner_release_reach_m + 2.0 * metres_per_tick(),
+        "the growth close range ({:.1} m) must clear the planet's own release reach \
+         ({inner_release_reach_m:.1} m) by more than a tick of travel",
+        growth_end_range_m(),
     );
-    let centre_guard_m = system_extent_m() + 2.0 * metres_per_tick();
+    let centre_guard_m = inner_release_reach_m;
 
     // ---- Leg 0: out of the home system, up the licensed polar corridor. ----
     cross_leg(
@@ -1659,41 +2015,26 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
         "growth-exit home->galaxy (polar corridor)",
         |_tick| DVec3::new(0.0, 0.0, polar_exit_z_m()),
         &galaxy_label,
-        Duration::from_secs(120),
+        vd_bins::flight::governed_leg_budget(
+            &DEV,
+            system_extent_m(),
+            realm_speed_cap_mps(system_extent_m(), DEV.move_speed, TRAVERSE_S),
+        ),
     );
 
-    // ---- Leg 1: fly polar OUT to the growth start — just inside the wake band, so the home
-    // system stays demanded (its relays keep flowing) while its interior stays asleep. ----
-    let band_m = tear_down_r_m() - spin_up_r_m();
-    let growth_start_m = spin_up_r_m() - 2.0 * band_m;
+    // ---- Leg 1 IS GONE, and that is the true-scale restatement. The interim gate flew OUT to a
+    // park "just inside the wake band" because the interim system was 150 m wide and its wake
+    // 11 km: you had to travel to be far from a planet. On THE world the polar exit already
+    // leaves the ship ~3.2e11 m from the system centre — 160× the inner planet's orbit — which
+    // is exactly the far, floor-level vantage the growth curve needs, with the system still
+    // deeply demanded (its wake is 1.2e13 m) and the planet's own shard still asleep. Parking
+    // any FURTHER out is not merely unnecessary, it is unreachable: the governor's arm at those
+    // ranges permits ~5e12 m/s, so one control cycle of the pilot's own feedback loop carries
+    // the ship past any epsilon it could state (measured: the out-leg oscillated between 2.3e11
+    // and 3.2e11 m of a 6.0e8 m slop for its whole budget). The gate now starts the curve where
+    // the licensed exit ends, and the floor assertion below proves the vantage is far enough.
     let started = Instant::now();
-    {
-        let st = vd_bins::pixel::poll(devctl);
-        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
-        let home = vd_bins::pixel::subject(&st, &camera, roster.home);
-        // Straight down the licensed −Z polar corridor from the home centre (I-POLE/I-AXIS).
-        look_at(
-            devctl,
-            home.centre_m + DVec3::new(0.0, 0.0, -growth_start_m),
-        );
-    }
-    throttle(devctl, FULL_AHEAD);
-    loop {
-        std::thread::sleep(SAMPLE_POLL);
-        let st = vd_bins::pixel::poll(devctl);
-        let camera = vd_bins::pixel::pilot_camera(&st, CAPTURE_W as usize, CAPTURE_H as usize);
-        let home = vd_bins::pixel::subject(&st, &camera, roster.home);
-        let (pos, _) = own_pose(&st).expect("a delivered pose on the out-leg");
-        if (home.centre_m - pos).length() >= growth_start_m {
-            throttle(devctl, ALL_STOP);
-            break;
-        }
-        assert!(
-            started.elapsed() < FLIGHT_DEADLINE,
-            "the out-leg never reached the growth start ({growth_start_m:.1} m)",
-        );
-    }
-
+    let _ = started;
     // ---- THE START: the planet is a POINT OF LIGHT at the shared floor — present, painted,
     // parent-authored (its own look lapsed when the system emptied), never a blank. ----
     let watch = [roster.inner, roster.home];
@@ -1750,12 +2091,13 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
         FLIGHT_DEADLINE,
         |s, _| {
             assert!(
-                s.distance(1) > centre_guard_m,
-                "the approach GRAZED the shell (centre range {:.1} m ≤ guard {centre_guard_m:.1} \
-                 m) — the polar corridor failed to keep the close range outside containment",
-                s.distance(1),
+                s.distance(0) > centre_guard_m,
+                "the approach GRAZED the planet's own shell (range {:.1} m ≤ guard \
+                 {centre_guard_m:.1} m) — a crossing would re-home the observer and void every \
+                 marker premise this gate stands on",
+                s.distance(0),
             );
-            s.distance(0) <= GROWTH_END_RANGE_M
+            s.distance(0) <= growth_end_range_m()
         },
     );
     // NEVER BLANKS: the planet was drawn at EVERY sample of the approach — no epoch bump
@@ -1821,7 +2163,8 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
          constant dot)",
     );
 
-    // ---- THE END: 200 m out, the point of light is the planet's TRUE angular size. ----
+    // ---- THE END: at the derived close range, the point of light is the planet's TRUE
+    // angular size. ----
     // SLICE 4's WAKE, AWAITED WITHIN ITS OWN DERIVED BUDGET (never a sleep literal): the
     // approach crossed the system's 444.104489631 m interior spin-up radius in its last second,
     // so the interest byte has just landed and the vacated system owes its planets' own

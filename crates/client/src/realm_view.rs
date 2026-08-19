@@ -266,6 +266,12 @@ impl RealmView {
 
 #[cfg(test)]
 mod tests {
+    /// Flatten a RenderPose to world metres (normalized lattice since the cell activation).
+    fn rpw(p: &crate::interp::RenderPose) -> DVec3 {
+        vd_core::pose::LatticePos::at(p.cell, p.pos)
+            .delta_m(vd_core::pose::LatticePos::default(), p.tier)
+    }
+
     use super::*;
     use vd_core::glam::DVec3;
     use vd_core::pose::{FrameRef, StampedPose};
@@ -469,7 +475,7 @@ mod tests {
         // realm_latest (the cursor-free overlay reader) mirrors: Some for a streamed realm, None else.
         assert_eq!(
             v.realm_pose(RealmId::Planet(1), f64::INFINITY)
-                .map(|p| p.pos),
+                .map(|p| rpw(&p)),
             Some(DVec3::new(1.0e9, 0.0, 0.0)),
         );
         assert_eq!(v.realm_pose(RealmId::Planet(99), f64::INFINITY), None);
@@ -519,7 +525,7 @@ mod tests {
         );
         assert_eq!(
             v.realm_pose(RealmId::Planet(8), f64::INFINITY)
-                .map(|p| p.pos),
+                .map(|p| rpw(&p)),
             Some(DVec3::new(0.0, 3.0, 0.0)),
             "the fresh composed tick carries every realm — not frozen",
         );
@@ -702,7 +708,7 @@ mod tests {
         );
         // Past the freshest tick the box FREEZES at the latest delivered pose (no extrapolation).
         let rp = v.realm_pose(RealmId::Planet(1), 1_000.0).expect("a track");
-        assert_eq!(rp.pos, DVec3::new(2.0, 0.0, 0.0));
+        assert_eq!(rpw(&rp), DVec3::new(2.0, 0.0, 0.0));
         assert_eq!(rp.frame, SYS);
     }
 }

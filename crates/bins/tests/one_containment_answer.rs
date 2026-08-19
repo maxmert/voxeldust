@@ -60,6 +60,13 @@ const SAMPLED_TICKS: [UniverseTick; 3] =
 
 /// The occupant speed the AoI band is sized against — the dev cluster's flight speed, undilated
 /// (`VD_TIME_MULTIPLIER` defaults to 1.0, so `move_speed · multiplier` is `move_speed`).
+/// Flatten a placement anchor to metres (rows ride the lattice NORMALIZED since the cell
+/// activation — `.origin` raw is a sub-cell residual, never a position). Bit-exact at these
+/// magnitudes, which is what keeps the golden vector's f64 bits UNCHANGED across the activation.
+fn placement_m(at: &vd_core::frame::FramePlacement, tier: vd_core::pose::Tier) -> DVec3 {
+    at.anchor().delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
+}
+
 fn occupant_v_max_mps() -> f64 {
     vd_bins::DEV.move_speed
 }
@@ -164,12 +171,19 @@ fn no_child_of_a_star_is_wider_than_its_own_distance_from_that_star() {
             let at = ctx
                 .of(child.frame)
                 .expect("a star places every direct child of its own");
-            let distance = at.origin.length();
+            let distance = placement_m(&at, child.frame.tier()).length();
             let radius = child.shape.circumscribed_extent();
             eprintln!(
                 "[geometry] tick {} {:?} radius {radius} m at distance {distance} m",
                 tick.0, child.realm,
             );
+            // THE ONE LAWFUL EXCEPTION (T2): the STAR child sits AT its system's origin and
+            // holds the centre BY DESIGN — that is what a Star realm is. Every other child
+            // must stand clear of the centre by more than its own reach.
+            if matches!(child.realm, vd_core::pose::RealmId::Star(_)) {
+                assert_eq!(distance, 0.0, "the star child sits at its system's origin");
+                continue;
+            }
             if radius >= distance {
                 swallowing.push(format!(
                     "  tick {}: {:?} reaches {radius} m and sits only {distance} m from its star",
@@ -210,6 +224,17 @@ fn no_child_of_a_star_claims_to_hold_the_stars_own_centre() {
         let star_centre = StampedPose::at_rest(star_frame, DVec3::ZERO, tick);
         for child in child_regions(&regions, star) {
             let own = own_frame_answer(&star_centre, &child, &ctx);
+            // THE ONE LAWFUL CLAIMANT (T2): the STAR child holds its system's centre by
+            // design — standing at the star's location IS being in the Star realm. It must
+            // answer INSIDE; every other child must answer OUTSIDE.
+            if matches!(child.realm, vd_core::pose::RealmId::Star(_)) {
+                assert!(
+                    own <= SURFACE_M,
+                    "tick {}: the Star realm holds its own system's centre: {own}",
+                    tick.0,
+                );
+                continue;
+            }
             if own <= SURFACE_M {
                 claims.push(format!(
                     "  tick {}: {:?} reads the star's own centre as {own} m from its surface",
@@ -250,13 +275,13 @@ fn the_per_tick_feed_and_the_conversion_context_place_a_child_identically() {
             let converted = ctx
                 .of(child.frame)
                 .expect("a star holds a placement for every direct child of its own");
-            if feed_pose.pos.offset() != converted.origin {
+            if feed_pose.pos != converted.anchor() {
                 splits.push(format!(
                     "  tick {}: {:?} — the feed ships {:?}, the conversion uses {:?}",
                     tick.0,
                     child.realm,
-                    feed_pose.pos.offset(),
-                    converted.origin,
+                    feed_pose.pos,
+                    converted.anchor(),
                 ));
             }
         }
@@ -301,11 +326,20 @@ fn every_anchors_child_rows_match_the_golden_vector() {
             .to_owned(),
     );
     lines.push(format!(
-        "# world: seed={SEED} au_to_render_m={} planet_soi_r_m={} ecc_cap={} central_mass_kg={}",
-        config.scale.au_to_render_m,
-        config.planet.planet_soi_r_m,
+        "# world: seed={SEED} true-size in-system (taxonomy flag day) ecc_cap={} n_planets={} \
+         mass_draw_mearth=[{}, min({}, disc {}*M_star/N)]",
         config.planet.ecc_cap,
-        config.stellar.central_mass_kg,
+        config.planet.n_planets,
+        config.planet.mass_lo_mearth,
+        config.planet.mass_cap_mearth,
+        config.planet.disc_mass_fraction,
+    ));
+    // The OUTER geometry identity (real-scale re-solve, owner rulings 2026-08-18: the four changed
+    // numbers + the 3-D seeded placement law) — the stated world-numbers change this golden was
+    // last regenerated for.
+    lines.push(format!(
+        "# outer: universe_r_m={} galaxy_r_m={} placement_r_m={} (3-D seeded placements, Q-B)",
+        config.scale.universe_r_m, config.scale.galaxy_r_m, config.stellar.system_ring_r_m,
     ));
     lines.push(
         "# Regenerate ONLY with a stated world-numbers change (VD_UPDATE_GOLDEN=1); the slice says so."
@@ -319,14 +353,18 @@ fn every_anchors_child_rows_match_the_golden_vector() {
                 let at = ctx
                     .of(child.frame)
                     .expect("an anchor places every direct child of its own");
+                // The FLATTENED value (bit-exact ≤ 2⁵³ cells): the golden's f64 bits survive the
+                // activation untouched — the value moved INTO the integer half, and the flatten
+                // reproduces it exactly, which is precisely the inertness this golden measures.
+                let pos_m = placement_m(&at, child.frame.tier());
                 lines.push(format!(
                     "{:?} {:?} tick={} pos={:016x},{:016x},{:016x} vel={:016x},{:016x},{:016x}",
                     anchor,
                     child.realm,
                     tick.0,
-                    at.origin.x.to_bits(),
-                    at.origin.y.to_bits(),
-                    at.origin.z.to_bits(),
+                    pos_m.x.to_bits(),
+                    pos_m.y.to_bits(),
+                    pos_m.z.to_bits(),
                     at.velocity.x.to_bits(),
                     at.velocity.y.to_bits(),
                     at.velocity.z.to_bits(),
@@ -503,7 +541,8 @@ fn an_occupant_where_the_star_puts_a_child_is_inside_that_child() {
         let placement = ctx
             .of(child.frame)
             .expect("a star holds a placement for every direct child of its own");
-        let at_the_child = StampedPose::at_rest(star_frame, placement.origin, tick);
+        let at_the_child =
+            StampedPose::at_rest(star_frame, placement_m(&placement, star_frame.tier()), tick);
         let own = own_frame_answer(&at_the_child, &child, &ctx);
         if own >= SURFACE_M {
             misses.push(format!(

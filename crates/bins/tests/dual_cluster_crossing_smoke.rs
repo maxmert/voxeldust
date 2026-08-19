@@ -53,7 +53,9 @@ use vd_wire::version::ProtoVersion;
 /// A generous deadline: `up --dual` boots 4 processes + the C1 all-realms grant, then the client logs
 /// in, flies the ~1 s bounded −Z exit leg, and the crossing + saga self-drive to the directory CAS.
 /// Real QUIC handshakes over loopback.
-const DEADLINE: Duration = Duration::from_secs(45);
+/// The gate deadline FLOOR, seconds — extended at run time by the derived governed leg (the
+/// true-size exit is a ~minutes flight, not a 460 m walk).
+const DEADLINE_FLOOR_S: u64 = 45;
 
 /// Run one `vd-devcluster up --dual` against the crossing slot (the launcher path from `CARGO_BIN_EXE`).
 fn up_dual(launcher: &str, slot: u16) -> std::process::ExitStatus {
@@ -140,7 +142,12 @@ impl LoginClient {
             self.emit_marker_next = false;
             let movement = if self.move_ticks_left > 0 {
                 self.move_ticks_left -= 1;
-                [1.0, 0.0, 0.0] // forward = world −Z: the licensed polar corridor
+                // +Z, the licensed polar corridor on the side the spawn stands: movement
+                // [1,0,0] is world −Z, and a −Z exit from the T2 spawn standoff (which sits at
+                // twice the STAR's bound on +Z) flies straight through the star realm at the
+                // system centre — measured: the dot never reached the galaxy, its Entity head
+                // stayed on the home shard.
+                [-1.0, 0.0, 0.0]
             } else {
                 [0.0, 0.0, 0.0] // PARKED — the flight is bounded by construction
             };
@@ -203,37 +210,83 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     // margin so a corridor regression names its number in THIS gate's failure, not a distant panic.
     let roster = world_roster(&DEV);
     let config = UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
-    let axis_floor = 2.0 * config.planet.planet_soi_r_m;
-    assert!(
-        roster.axis_clearance_m > axis_floor,
-        "I-AXIS: the −Z corridor is licensed only while every orbit clears the polar axis by more \
-         than {axis_floor:.2} m (2× planet SOI); THE world measures {:.2} m",
+    // I-AXIS is asserted PER-PLANET inside `world_roster` (each orbit clears the polar axis by
+    // 2× its OWN shell — the true-size restatement); the gross clearance is printed here so a
+    // corridor regression names its number in THIS gate's failure too.
+    eprintln!(
+        "DUAL-CROSSING: I-AXIS gross polar clearance {:.3e} m (per-planet net margins asserted \
+         at derivation)",
         roster.axis_clearance_m,
     );
 
-    // ---- THE BOUNDED FLIGHT, computed from THE world (J3: exit bounds are computed, never inherited) --
-    // One tick integrates `move_speed · tick_dt` = 10 m. The release edge is the home shell plus the
-    // containment band's outset; flying 3 release-edges (~46 ticks, ~460 m) is provably OUT of the home
-    // shell and provably INSIDE the galaxy's own shell, so the parked dot can never reach the ring
-    // sibling (~12 km away) or any realm this cluster does not host.
-    let release_edge_m = config.stellar.system_soi_r_m + config.band.outset_m;
-    let step_m = DEV.move_speed * DEV.tick_dt;
-    let exit_ticks = (3.0 * release_edge_m / step_m).ceil() as u64;
-    let park_m = exit_ticks as f64 * step_m;
+    // ---- THE BOUNDED FLIGHT, computed from THE world (J3: exit bounds are computed, never
+    // inherited) — TRUE-SIZE RESTATEMENT (the taxonomy arc's in-system re-solve): the home
+    // shell is ~1.58e11 m now, and the dot flies it GOVERNED (the speed law's ceiling, not a
+    // 10 m foot step). The input holds full −Z for the CLOSED-FORM governed leg time to the
+    // release edge (the flight-table gate proves the integrator matches it to ±1 s) plus one
+    // wake budget of pad; the overshoot past the shell in that pad — even ramping toward the
+    // galaxy ceiling — is bounded by `v_cap(home)·pad·e` and must stay far inside the galaxy
+    // and far short of the ring sibling's wake radius, ASSERTED below, derived throughout.
     let world = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
+    let home_shell_m = world
+        .regions()
+        .iter()
+        .find(|r| r.realm == roster.home)
+        .map(|r| r.shape.finite_extent())
+        .expect("THE world contains the home region");
+    let release_edge_m = home_shell_m + config.band.outset_m;
+    let tau_s = {
+        let cadence = (((1.0 / DEV.tick_dt).round() as u64) / 2).max(1);
+        vd_core::flight::FlightTuning::derive(
+            DEV.move_speed,
+            DEV.tick_dt,
+            cadence,
+            u32::try_from(DEV.boot_ticks_p99).expect("boot p99 fits"),
+        )
+        .tau_s
+    };
+    let cap_home = vd_core::flight::realm_speed_cap_mps(
+        home_shell_m,
+        DEV.move_speed,
+        vd_core::flight::TRAVERSE_S,
+    );
+    let leg_s =
+        vd_core::flight::leg_time_s(release_edge_m, cap_home, DEV.move_speed, cap_home, tau_s)
+            .expect("the exit leg holds a cruise segment at the home ceiling");
+    // The input holds for up to TWICE the closed-form leg (the safety ceiling — the approach
+    // governor's per-child arms near the star and the orbital plane drag the early cruise a
+    // little under the bare ceiling, so a bare closed-form cut-off can park the dot short);
+    // the drive LOOP below stops on the DIRECTORY FLIP itself, so the input is cut within a
+    // poll of the crossing and the worst pre-flip position is one governed step past the
+    // release edge.
+    let exit_ticks = 2 * (leg_s / DEV.tick_dt).ceil() as u64;
+    let overshoot_bound_m = cap_home * tau_s * std::f64::consts::E;
     let galaxy_shell_m = world
         .regions()
         .iter()
         .find(|r| r.realm == roster.galaxy)
-        .map(|r| match r.shape {
-            vd_core::geometry::Boundary::Shell { r } => r,
-            other => panic!("the galaxy region is a shell, got {other:?}"),
-        })
+        .map(|r| r.shape.finite_extent())
         .expect("THE world contains the galaxy region");
+    let sibling_wake_clear_m = roster.sibling_centre.length()
+        - world
+            .regions()
+            .iter()
+            .find(|r| r.realm == roster.sibling)
+            .map(|r| r.aoi.spin_up_r_m())
+            .expect("the sibling region is rostered");
     assert!(
-        park_m > release_edge_m && park_m < galaxy_shell_m,
-        "the bounded flight must park OUT of the home shell ({release_edge_m:.1} m) and INSIDE the \
-         galaxy shell ({galaxy_shell_m:.1} m); computed park {park_m:.1} m over {exit_ticks} ticks",
+        release_edge_m + overshoot_bound_m < galaxy_shell_m,
+        "the bounded flight stays INSIDE the galaxy shell ({galaxy_shell_m:.3e} m): worst park \
+         {:.3e} m over {exit_ticks} ticks",
+        release_edge_m + overshoot_bound_m,
+    );
+    assert!(
+        release_edge_m + overshoot_bound_m < sibling_wake_clear_m,
+        "…and far SHORT of the ring sibling's wake radius ({sibling_wake_clear_m:.3e} m clear)",
+    );
+    eprintln!(
+        "DUAL-CROSSING: governed exit leg {leg_s:.1} s => input ceiling {exit_ticks} ticks \
+         (feedback-stopped on the flip), overshoot bound {overshoot_bound_m:.3e} m",
     );
 
     let launcher = env!("CARGO_BIN_EXE_vd-devcluster");
@@ -303,6 +356,7 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     std::mem::forget(control); // keep the endpoint alive for the test's duration
     let mut client = LoginClient::new(transport, exit_ticks);
 
+    let deadline = Duration::from_secs(DEADLINE_FLOOR_S + (2.5 * leg_s).ceil() as u64);
     let started = Instant::now();
     let mut pacer = TickPacer::new(DEV.tick_hz);
     let mut hello_retry = Instant::now();
@@ -324,7 +378,7 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
             break key;
         }
         assert!(
-            started.elapsed() < DEADLINE,
+            started.elapsed() < deadline,
             "the HOME shard never owned the admitted dot's Entity row (session={}) — the source \
              side was never established, so a crossing could prove nothing. directory={:?}",
             client.session,
@@ -342,7 +396,7 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
             break;
         }
         assert!(
-            started.elapsed() < DEADLINE,
+            started.elapsed() < deadline,
             "the dot never re-homed to the galaxy (session={}): the world's-own-shell crossing did \
              not flip an Entity head to {dest_authority}. directory={:?}",
             client.session,

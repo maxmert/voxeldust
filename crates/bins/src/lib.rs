@@ -1434,6 +1434,7 @@ pub fn realm_kind_token(realm: vd_core::pose::RealmId) -> &'static str {
         RealmId::Planet(_) => "planet",
         RealmId::Station(_) => "station",
         RealmId::Area(_) => "area",
+        RealmId::Star(_) => "star",
         RealmId::Ship(_) => "ship",
     }
 }
@@ -1453,9 +1454,10 @@ pub fn realm_from_kind_seed(kind: &str, seed: u64) -> Result<vd_core::pose::Real
         "planet" => Ok(RealmId::Planet(seed)),
         "station" => Ok(RealmId::Station(seed)),
         "area" => Ok(RealmId::Area(seed)),
+        "star" => Ok(RealmId::Star(seed)),
         other => Err(format!(
-            "VD_REALM_KIND {other:?} is not one of system|planet|station|area (a realm-shard hosts one \
-             seed-keyed realm; Ship realms key on an entity id and are never booted as a realm-shard)"
+            "VD_REALM_KIND {other:?} is not one of system|planet|station|area|star (a realm-shard hosts \
+             one seed-keyed realm; Ship realms key on an entity id and are never booted as a realm-shard)"
         )),
     }
 }
@@ -1524,7 +1526,11 @@ pub fn realm_shard_env(
 fn realm_seed_of(realm: vd_core::pose::RealmId) -> u64 {
     use vd_core::pose::RealmId;
     match realm {
-        RealmId::System(s) | RealmId::Planet(s) | RealmId::Station(s) | RealmId::Area(s) => s,
+        RealmId::System(s)
+        | RealmId::Planet(s)
+        | RealmId::Station(s)
+        | RealmId::Area(s)
+        | RealmId::Star(s) => s,
         RealmId::Ship(_) => 0,
     }
 }
@@ -2221,7 +2227,10 @@ fn homes_from_offsets(
     };
     let realm = vd_core::worldgen::default_home_realm(world.regions()).ok_or_else(degenerate)?;
     let at = |offset| StoredHome::in_realm(world.regions(), realm, offset).ok_or_else(degenerate);
-    let mut homes = HomeRegistry::new(at(vd_core::glam::DVec3::ZERO)?);
+    // The FALLBACK home stands off the centre by the derived clearing (T2: the star realm sits
+    // AT the centre now; zero on the walk fixture — byte-identical there). Explicit per-account
+    // offsets stay verbatim: an operator states where an account spawns.
+    let mut homes = HomeRegistry::new(at(world.default_home_offset_m())?);
     for (account, pose) in offsets {
         homes = homes.with_account(*account, at(pose.pos.offset())?);
     }
@@ -2390,7 +2399,9 @@ pub fn child_reaches(
         .filter(|r| r.parent.is_some())
         .map(|r| {
             let reach = match movers.get(&r.realm) {
-                Some(e) => ChildReach::Excursion(Motion::Kepler(*e).max_excursion_m()),
+                Some(e) => {
+                    ChildReach::Excursion(Motion::Kepler(*e).max_excursion_m(r.frame.tier()))
+                }
                 None => {
                     // The stored offset is measured in the PARENT's frame, so the parent's tier
                     // scales its cell anchor into metres.
@@ -2398,10 +2409,7 @@ pub fn child_reaches(
                         .iter()
                         .find(|p| Some(p.realm) == r.parent)
                         .map_or(r.frame.tier(), |p| p.frame.tier());
-                    ChildReach::Fixed(r.center.delta_m(
-                        vd_core::pose::LatticePos::local(vd_core::glam::DVec3::ZERO),
-                        tier,
-                    ))
+                    ChildReach::Fixed(r.center.delta_m(vd_core::pose::LatticePos::ORIGIN, tier))
                 }
             };
             (r.realm, reach)
@@ -2481,9 +2489,13 @@ pub fn child_luma_draws(
     vd_physics::worldgen::system_photometrics_for_config(universe_seed, &config)
         .into_iter()
         .filter(|(realm, _)| {
-            regions.iter().any(|r| {
-                r.realm == *realm && r.parent.is_some_and(|parent| held_realms.contains(&parent))
-            })
+            // A held realm's DIRECT children (their markers) — and the held realm's OWN datum
+            // (ruling C: its running self-look carries its colour through the wake handover).
+            held_realms.contains(realm)
+                || regions.iter().any(|r| {
+                    r.realm == *realm
+                        && r.parent.is_some_and(|parent| held_realms.contains(&parent))
+                })
         })
         .map(|(realm, draw)| (realm, vd_physics::worldgen::marker_datum(&draw)))
         .collect()
@@ -2550,6 +2562,8 @@ pub struct WorldRoster {
 /// the same polar corridor into both).
 struct CorridorMargins {
     axis_clearance_m: f64,
+    /// The I-AXIS margin NET of each orbit's own 2× shell (the per-planet law's slack).
+    axis_net_m: f64,
     pole_altitude_m: f64,
     radial_gap_m: f64,
 }
@@ -2559,27 +2573,57 @@ fn corridor_margins(
         vd_core::pose::RealmId,
         vd_physics::celestial::OrbitalElements,
     >,
-    release_reach: f64,
+    shells: &std::collections::BTreeMap<vd_core::pose::RealmId, f64>,
+    outset_m: f64,
 ) -> CorridorMargins {
     use vd_physics::motion::Motion;
-    // The apoapsis terms read THE one worst-instant accessor (`Motion::max_excursion_m`) — never a
-    // re-derived `a·(1+e)` beside it (the batch-review DRY finding).
+    // THE TRUE-SIZE RESTATEMENT (the taxonomy arc's in-system re-solve; the asserts' own
+    // standing instruction — "restate the corridor, never this assert"): planet shells are
+    // PER-PLANET gravitational SOIs now, so every law reads each mover's OWN shell rather than
+    // one config radius. The apoapsis terms read THE one worst-instant accessor
+    // (`Motion::max_excursion_m`) — never a re-derived `a·(1+e)` beside it.
+    let shell_of = |realm: &vd_core::pose::RealmId| -> f64 {
+        shells
+            .get(realm)
+            .copied()
+            .expect("every mover the boot authors has a rostered region shell")
+    };
     let axis_clearance_m = movers
         .values()
         .map(|e| e.sma * (1.0 - e.ecc) * e.inclination.cos())
         .fold(f64::INFINITY, f64::min);
+    // NET I-AXIS margin: each orbit's polar-axis clearance beyond 2× ITS OWN shell.
+    let axis_net_m = movers
+        .iter()
+        .map(|(r, e)| e.sma * (1.0 - e.ecc) * e.inclination.cos() - 2.0 * shell_of(r))
+        .fold(f64::INFINITY, f64::min);
     let pole_altitude_m = movers
-        .values()
-        .map(|e| Motion::Kepler(*e).max_excursion_m() * e.inclination.sin().abs() + release_reach)
+        .iter()
+        .map(|(r, e)| {
+            Motion::Kepler(*e).max_excursion_m(vd_core::pose::Tier::Fine)
+                * e.inclination.sin().abs()
+                + shell_of(r)
+                + outset_m
+        })
         .fold(0.0_f64, f64::max);
-    let mut by_sma: Vec<&vd_physics::celestial::OrbitalElements> = movers.values().collect();
-    by_sma.sort_by(|a, b| a.sma.total_cmp(&b.sma));
+    let mut by_sma: Vec<(
+        &vd_core::pose::RealmId,
+        &vd_physics::celestial::OrbitalElements,
+    )> = movers.iter().collect();
+    by_sma.sort_by(|a, b| a.1.sma.total_cmp(&b.1.sma));
+    // NET I-RADIAL gap: adjacent worst-instant annuli separated beyond BOTH planets' own shells.
     let radial_gap_m = by_sma
         .windows(2)
-        .map(|w| w[1].sma * (1.0 - w[1].ecc) - Motion::Kepler(*w[0]).max_excursion_m())
+        .map(|w| {
+            w[1].1.sma * (1.0 - w[1].1.ecc)
+                - Motion::Kepler(*w[0].1).max_excursion_m(vd_core::pose::Tier::Fine)
+                - shell_of(w[0].0)
+                - shell_of(w[1].0)
+        })
         .fold(f64::INFINITY, f64::min);
     CorridorMargins {
         axis_clearance_m,
+        axis_net_m,
         pole_altitude_m,
         radial_gap_m,
     }
@@ -2587,40 +2631,34 @@ fn corridor_margins(
 
 /// Assert the I-AXIS / I-POLE / I-RADIAL flight-law preconditions for ONE system's margins — run for
 /// the home system AND the ring sibling, naming the system so a violated corridor names its world.
-fn assert_corridor_margins(
-    system: &str,
-    m: &CorridorMargins,
-    planet_soi: f64,
-    release_reach: f64,
-    system_soi_r_m: f64,
-) {
-    // I-AXIS: no orbit may come within 2× the planet SOI of the polar (±Z) axis, or a ±Z corridor leg
-    // could thread a planet's shell and strand the dot on an unhosted realm (J-0).
+fn assert_corridor_margins(system: &str, m: &CorridorMargins, outset_m: f64, shell_m: f64) {
+    // I-AXIS: no orbit may come within 2× ITS OWN shell of the polar (±Z) axis, or a ±Z corridor
+    // leg could thread a planet's shell and strand the dot on an unhosted realm (J-0).
     assert!(
-        m.axis_clearance_m > 2.0 * planet_soi,
-        "I-AXIS violated ({system}): an orbit approaches the polar (±Z) axis to {:.2} m, inside \
-         2× the planet SOI ({:.2} m) — a ±Z corridor leg could thread a planet shell; the world \
-         changed under the static flight law, so restate the corridor, never this assert",
-        m.axis_clearance_m,
-        2.0 * planet_soi,
+        m.axis_net_m > 0.0,
+        "I-AXIS violated ({system}): an orbit approaches the polar (±Z) axis to within 2× its \
+         own shell (net margin {:.2} m) — a ±Z corridor leg could thread a planet shell; the \
+         world changed under the static flight law, so restate the corridor, never this assert",
+        m.axis_net_m,
     );
     // I-POLE: the polar park height (2 × pole_altitude) must itself stay INSIDE the system shell, or a
     // "lift off the planet" polar waypoint would exit the system and fire an unintended crossing.
     assert!(
-        2.0 * m.pole_altitude_m + release_reach < system_soi_r_m,
-        "I-POLE violated ({system}): the polar park height 2×{:.2} m (+ the planet release reach \
-         {release_reach:.2} m) does not fit inside the system shell ({system_soi_r_m:.2} m) — an \
-         in-system polar waypoint would exit the system; restate the corridor, never this assert",
+        2.0 * m.pole_altitude_m + outset_m < shell_m,
+        "I-POLE violated ({system}): the polar park height 2×{:.2} m (+ the release outset \
+         {outset_m:.2} m) does not fit inside the system shell ({shell_m:.2} m) — an in-system \
+         polar waypoint would exit the system; restate the corridor, never this assert",
         m.pole_altitude_m,
     );
-    // I-RADIAL: adjacent orbits must be separated by more than one planet's release reach, so a ship
-    // parked at one orbit's rendezvous is provably clear of both neighbours (and the lift off the
-    // inner planet never grazes the next orbit out).
+    // I-RADIAL: adjacent worst-instant annuli must be separated beyond BOTH planets' own shells
+    // plus the release outset, so a ship parked at one orbit's rendezvous is provably clear of
+    // both neighbours (and the lift off the inner planet never grazes the next orbit out).
     assert!(
-        m.radial_gap_m > release_reach,
-        "I-RADIAL violated ({system}): adjacent orbits leave only {:.2} m of clear gap, within one \
-         planet's containment release reach ({release_reach:.2} m) — the rendezvous/park and the \
-         inner-planet lift-off are no longer licensed; restate the corridor, never this assert",
+        m.radial_gap_m > outset_m,
+        "I-RADIAL violated ({system}): adjacent orbits leave only {:.2} m of clear gap beyond \
+         the two shells, within the release outset ({outset_m:.2} m) — the rendezvous/park and \
+         the inner-planet lift-off are no longer licensed; restate the corridor, never this \
+         assert",
         m.radial_gap_m,
     );
 }
@@ -2660,20 +2698,37 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
         .map(|(realm, elements)| (*realm, *elements))
         .expect("non-empty movers");
 
-    // ONE planet's containment reach: its SOI plus the band's release outset — past this a dot is
-    // clear of the planet's authority. From the SAME config the boot builds THE world with.
+    // Per-planet containment reach: each planet's OWN shell (its gravitational SOI at its
+    // drawn mass) plus the band's release outset — read off the SAME regions the boot holds.
     let config = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
-    let planet_soi = config.planet.planet_soi_r_m;
-    let release_reach = planet_soi + config.band.outset_m;
+    let (home_regions, _) =
+        boot_regions_and_movers(p.universe_seed, &held_home, home, p.move_speed, p.tick_dt);
+    let shells_of = |regions: &[vd_core::geometry::RealmRegion], parent: vd_core::pose::RealmId| {
+        regions
+            .iter()
+            .filter(|r| r.parent == Some(parent))
+            .map(|r| (r.realm, r.shape.finite_extent()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let shell_of_realm = |regions: &[vd_core::geometry::RealmRegion],
+                          realm: vd_core::pose::RealmId| {
+        regions
+            .iter()
+            .find(|r| r.realm == realm)
+            .expect("the booted neighbourhood rosters its own realm")
+            .shape
+            .finite_extent()
+    };
+    let home_shells = shells_of(&home_regions, home);
+    let home_shell_m = shell_of_realm(&home_regions, home);
 
     // I-AXIS / I-POLE / I-RADIAL over the HOME system's movers.
-    let home_margins = corridor_margins(&movers, release_reach);
+    let home_margins = corridor_margins(&movers, &home_shells, config.band.outset_m);
     assert_corridor_margins(
         "the home system",
         &home_margins,
-        planet_soi,
-        release_reach,
-        config.stellar.system_soi_r_m,
+        config.band.outset_m,
+        home_shell_m,
     );
 
     // The GALAXY-hosted boot: the ring placements the galaxy authors for its systems — read from the
@@ -2710,12 +2765,18 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
         .min_by_key(|(seed, _)| *seed)
         .map(|(seed, r)| (vd_core::pose::RealmId::System(seed), r))
         .expect("the multi-star galaxy has a ring sibling of the home system");
-    assert_eq!(
+    // INVERTED at the cell activation (real-scale addendum §A4.8 row 11): the generator now emits
+    // NORMALIZED centres, so a sibling placement carries its magnitude in the INTEGER half — the
+    // pre-activation assert ("fits inside one lattice cell") measured the hole this arc closes.
+    assert_ne!(
         sibling_region.center.cell(),
         vd_core::glam::I64Vec3::ZERO,
-        "a ring placement fits inside one lattice cell",
+        "the sibling's authored placement rides the integer lattice (normalized centre)",
     );
-    let sibling_centre = sibling_region.center.offset();
+    let sibling_tier = sibling_region.frame.tier();
+    let sibling_centre = sibling_region
+        .center
+        .delta_m(vd_core::pose::LatticePos::ORIGIN, sibling_tier);
     assert_ne!(
         sibling_centre,
         vd_core::glam::DVec3::ZERO,
@@ -2737,13 +2798,16 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
         "THE world's ring sibling authors orbiting movers — a moverless sibling has no corridor \
          margins to check",
     );
-    let sib_margins = corridor_margins(&sib_movers, release_reach);
+    let (sib_regions, _) =
+        boot_regions_and_movers(p.universe_seed, &held_sib, sibling, p.move_speed, p.tick_dt);
+    let sib_shells = shells_of(&sib_regions, sibling);
+    let sib_shell_m = shell_of_realm(&sib_regions, sibling);
+    let sib_margins = corridor_margins(&sib_movers, &sib_shells, config.band.outset_m);
     assert_corridor_margins(
         "the ring sibling",
         &sib_margins,
-        planet_soi,
-        release_reach,
-        config.stellar.system_soi_r_m,
+        config.band.outset_m,
+        sib_shell_m,
     );
 
     WorldRoster {
@@ -2789,6 +2853,7 @@ fn realm_token(realm: vd_core::pose::RealmId) -> String {
         RealmId::Planet(s) => format!("planet:{s}"),
         RealmId::Station(s) => format!("station:{s}"),
         RealmId::Area(s) => format!("area:{s}"),
+        RealmId::Star(s) => format!("star:{s}"),
         RealmId::Ship(id) => format!("ship:{}", id.0),
     }
 }
@@ -2833,6 +2898,7 @@ fn parse_realm_token(token: &str) -> Result<vd_core::pose::RealmId, String> {
         "planet" => Ok(RealmId::Planet(seed)),
         "station" => Ok(RealmId::Station(seed)),
         "area" => Ok(RealmId::Area(seed)),
+        "star" => Ok(RealmId::Star(seed)),
         other => Err(format!(
             "VD_HELD_REALMS token {token:?} has unknown kind {other:?}"
         )),
@@ -3282,12 +3348,13 @@ mod cluster_tier_tests {
             // `#[test]` (or `#[tokio::test]`) within the attributes just above the fn. Step back by
             // CHARS, not bytes — these sources contain multi-byte punctuation and a byte offset can
             // land mid-character.
-            let start = src[..idx]
-                .char_indices()
-                .rev()
-                .nth(200)
-                .map_or(0, |(i, _)| i);
-            let is_test = src[start..idx].contains("test]");
+            // THE ATTRIBUTE BLOCK, not a fixed character window: an item's attributes run from
+            // the last blank line before it, and a long `#[ignore = "…"]` citation can be far
+            // more than a couple of hundred characters (the true-scale pixel parks are), which
+            // used to push `#[test]` out of a 200-char look-back and make the scanner declare a
+            // whole file silent — the anti-vacuity arm firing on its own parser.
+            let block_start = src[..idx].rfind("\n\n").map_or(0, |i| i + 2);
+            let is_test = src[block_start..idx].contains("test]");
             out.push((name, is_test, src[open..=end].to_owned()));
         }
         out
@@ -3442,17 +3509,27 @@ mod world_roster_tests {
             regions,
             &std::collections::BTreeSet::from([a_system]),
         );
-        let expected_planets = regions
+        let expected_children = regions
             .iter()
             .filter(|r| r.parent == Some(a_system))
             .count();
+        // One datum per direct child (9 reflected planets + the T2 star child) PLUS the held
+        // system's OWN datum (ruling C: its running self-look carries its colour).
         assert_eq!(
             planets.len(),
-            expected_planets,
-            "one reflected marker datum per planet of the held system"
+            expected_children + 1,
+            "each child's marker datum + the held realm's own"
         );
         for (realm, (class_code, luma_lsun)) in &planets {
-            assert!(matches!(realm, vd_core::pose::RealmId::Planet(_)));
+            assert!(
+                matches!(
+                    realm,
+                    vd_core::pose::RealmId::Planet(_)
+                        | vd_core::pose::RealmId::Star(_)
+                        | vd_core::pose::RealmId::System(_)
+                ),
+                "{realm:?}"
+            );
             assert!(
                 *class_code <= 6,
                 "a reflector carries its illuminator's class"
@@ -3462,6 +3539,18 @@ mod world_roster_tests {
                 "a finite reflected luminosity"
             );
         }
+        assert!(
+            planets.contains_key(&a_system),
+            "the own datum rides the map"
+        );
+        assert_eq!(
+            planets
+                .keys()
+                .filter(|r| matches!(r, vd_core::pose::RealmId::Star(_)))
+                .count(),
+            1,
+            "the star child's marker datum"
+        );
     }
 
     /// The look carrier's arity meets the world fence HERE — the one crate that sees both
@@ -3503,23 +3592,55 @@ mod world_roster_tests {
             .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
             .collect();
         assert_eq!(systems.len(), 3, "THE world's galaxy holds 3 systems");
+        // TRUE-SCALE RE-DERIVE (the taxonomy arc's in-system re-solve; the interim
+        // 444.104489631 / 469.104489631 / 150 m literals retired with the interim world): the
+        // spin-up IS the system's interior reach — max over its planets of (worst excursion at
+        // the ecc cap + the LOOK's visibility reach) — and the tear-down adds the derived
+        // velocity lead. At true scale the reach sits INSIDE the shell (the lawful inversion:
+        // an occupant crosses in long before the interior is visible, so the realm itself wakes
+        // its children by the direct-child AoI rule and the interest cascade stays inert —
+        // G-NO-CASCADE; celestial_taxonomy_design §4.5.2).
+        let bodies_cfg = config;
         for row in systems {
             let spin_up = row.interior_band.spin_up_r_m();
             let tear_down = row.interior_band.tear_down_r_m();
+            // Recomputed from the FULL forest (the interior band is stamped before scoping —
+            // that is the §3.4.4 no-message-crossing point; the galaxy scope itself holds no
+            // grandchild rows).
+            let expected: f64 = world
+                .regions()
+                .iter()
+                .filter(|r| r.parent == Some(row.realm))
+                .map(|r| {
+                    let excursion = vd_physics::worldgen::moving_children_for_config(
+                        DEV.universe_seed,
+                        &bodies_cfg,
+                        row.realm,
+                    )
+                    .iter()
+                    .find(|(realm, _)| *realm == r.realm)
+                    .map(|(_, e)| e.sma * (1.0 + bodies_cfg.planet.ecc_cap))
+                    .unwrap_or(0.0);
+                    // reach = look · cot(θ/2) — and the shipped spin_up_factor IS that same
+                    // cot(θ/2) (the ONE visibility factor), so no second θ literal exists here.
+                    excursion
+                        + r.look.map_or(0.0, |look| {
+                            look.finite_extent() * bodies_cfg.interest.spin_up_factor
+                        })
+                })
+                .fold(0.0, f64::max);
             assert!(
-                (spin_up - 444.104_489_631).abs() < 1e-9,
-                "G-INTEREST-BAND spin-up: measured {spin_up}"
+                (spin_up - expected).abs() < 1.0e-3,
+                "G-INTEREST-BAND spin-up: measured {spin_up} vs derived {expected}"
             );
             assert!(
-                (tear_down - 469.104_489_631).abs() < 1e-9,
-                "G-INTEREST-BAND tear-down (spin-up + the 25 m derived lead): measured {tear_down}"
+                tear_down > spin_up,
+                "the tear-down adds the derived velocity lead: {tear_down} vs {spin_up}"
             );
-            // Both radii BRACKET the 150 m shell: the crossing happens strictly inside the band.
             let shell = row.shape.circumscribed_extent();
-            assert_eq!(shell, 150.0, "the system shell on THE world");
             assert!(
-                (shell < spin_up) & (spin_up < tear_down),
-                "the band brackets the shell: {shell} < {spin_up} < {tear_down}"
+                spin_up < shell,
+                "true scale: the interior reach sits inside the shell ({spin_up} < {shell})"
             );
         }
     }

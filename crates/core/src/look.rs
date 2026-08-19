@@ -54,6 +54,28 @@ pub fn look_bag(outline: &Boundary) -> Vec<u8> {
         .finish()
 }
 
+/// ★ THE STAR-LOOK EXTENSION SEAM (celestial taxonomy arc T2; owner ruling C, 2026-08-19): a
+/// RUNNING realm's OWN look bag may carry `TAG_LUMA` beside its outline — colour and brightness
+/// — so a star KEEPS its colour through the marker→body wake handover instead of turning grey
+/// the instant it runs. The owner explicitly opens FUTURE star parameters (radiation, flare
+/// state, corona…) as FUTURE TAGS on this same bag: the TLV codec's skip-unknown law makes
+/// every such append free — no `PROTO_MINOR`, no client change, ever. ONE builder so a
+/// luma-bearing and a plain self-look can never be framed two ways (tags ride ascending:
+/// `TAG_LOOK` then `TAG_LUMA`).
+#[must_use]
+pub fn self_look_bag(outline: &Boundary, luma: Option<(u8, f64)>) -> Vec<u8> {
+    let writer = TlvWriter::new(WINDOW_BODY_SCHEMA)
+        .required(TAG_LOOK, outline)
+        .expect("a fresh writer holds no duplicate tag and a Boundary is far under the field cap");
+    let writer = match luma {
+        Some(datum) => writer
+            .required(TAG_LUMA, &datum)
+            .expect("distinct tag, two scalars"),
+        None => writer,
+    };
+    writer.finish()
+}
+
 /// Encode a sleeping child's photometric marker datum as a `TAG_LUMA` bag.
 #[must_use]
 pub fn luma_bag(class_code: u8, luma_lsun: f64) -> Vec<u8> {
@@ -207,5 +229,22 @@ mod tests {
             .expect("distinct tag")
             .finish();
         assert_eq!(look_of(&grown), Ok(Boundary::Shell { r: 9.0 }));
+    }
+
+    /// THE STAR-LOOK EXTENSION SEAM (owner ruling C, 2026-08-19): a RUNNING realm's own look bag
+    /// may carry `TAG_LUMA` beside its outline, and a reader that only knows `TAG_LOOK` still
+    /// reads the outline — skip-unknown, so future star parameters are future tags and no
+    /// version moves. Both arms of the one builder are measured here.
+    #[test]
+    fn a_self_look_bag_carries_its_own_luma_when_the_realm_states_one() {
+        let outline = Boundary::Shell { r: 7.0 };
+        let plain = self_look_bag(&outline, None);
+        assert_eq!(plain, look_bag(&outline));
+        assert_eq!(look_of(&plain), Ok(outline));
+        let lit = self_look_bag(&outline, Some((6, 0.5)));
+        assert_eq!(look_of(&lit), Ok(outline));
+        assert_eq!(luma_of(&lit), Ok((6, 0.5)));
+        assert_eq!(luma_of(&plain), Err(TlvError::MissingRequiredTag(TAG_LUMA)));
+        assert_ne!(lit, plain);
     }
 }

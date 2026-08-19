@@ -14,6 +14,39 @@
 
 use std::time::{Duration, Instant};
 
+/// THE DELIVERED-POSE LAG BUDGET, seconds — how far behind the server's live pose the dev-control
+/// state a gate steers by can lawfully sit: the client's own interpolation buffer (the render
+/// cursor deliberately trails the freshest snapshot — the no-prediction mandate) plus four ticks
+/// of delivery/poll slack (one snapshot interval at the 20 Hz cadence is 2–3 shard ticks; one
+/// more for the gate's own poll). Every governed-flight brake below is sized from THIS, because
+/// at governed speeds the lag is no longer a metre of error but kilometres.
+#[must_use]
+pub fn pose_lag_s(tick_dt_s: f64) -> f64 {
+    vd_client::tuning::ClientInterpTuning::DEFAULT.interp_buffer_ms / 1000.0 + 4.0 * tick_dt_s
+}
+
+/// THE GOVERNED WALK BRAKE (the S3 re-derivation of `max_step_m`): the pre-law brake
+/// (`4·move_speed·dt` = 40 m) assumed a flat 10 m/tick; a governed approach arrives at its
+/// target's own ceiling `v`, and a walk steered by a delivered pose `pose_lag_s` behind the truth
+/// overshoots by `lag·v` — a brake narrower than that is a measured LIMIT CYCLE (the ship crosses
+/// the target inside one feedback interval and the controller saws forever). The brake must open
+/// before the lag can carry the ship past it while it still closes at the ceiling:
+/// `M > lag·(v + M/τ)` ⇒ `M = 2·lag·v / (1 − lag/τ)` — the tight bound with a 2× margin, every
+/// term named (the `M/τ` arm is the governor's own ceiling growth across the brake zone).
+///
+/// # Panics
+/// If `pose_lag_s ≥ τ` — a demand pipeline slower than the pose lag cannot brake a governed walk
+/// at all, and refusing loudly beats a wandering gate.
+#[must_use]
+pub fn governed_brake_m(v_target_ceiling_mps: f64, tick_dt_s: f64, tau_s: f64) -> f64 {
+    let lag = pose_lag_s(tick_dt_s);
+    assert!(
+        lag < tau_s,
+        "pose lag {lag:.3} s >= tau {tau_s:.3} s — a governed walk cannot brake"
+    );
+    2.0 * lag * v_target_ceiling_mps / (1.0 - lag / tau_s)
+}
+
 use vd_core::glam::DVec3;
 use vd_devproto::{DevRequest, DevResponse, DevState};
 
@@ -49,6 +82,42 @@ fn own_pos(state: &DevState) -> Option<DVec3> {
 /// # Panics
 /// When the deadline passes without the flip (with the closest approach measured), or dev-control
 /// stays unreachable.
+/// THE ONE GOVERNED-LEG BUDGET (true scale): a leg's deadline is 3× the speed law's closed-form
+/// time plus a fixed slack for boot/commit tails. WHY 3×, measured (walk gate, 2026-08-19): the
+/// home-system exit's closed form is ~105 s and the flown leg measured ~260 s — the DEV client's
+/// input cadence spreads the ramp's per-applied-input compounding over more wall clock than the
+/// per-tick ideal, and the crossing's saga tail (latch + re-drives + the delivered label flip)
+/// rides after the geometry. 2× left that leg ~25 s short of its own commit; 3× + slack covers
+/// the measured worst with margin while still failing a genuinely frozen leg loudly.
+#[must_use]
+pub fn governed_leg_budget(p: &crate::DevClusterParams, dist_m: f64, cap_mps: f64) -> Duration {
+    let tuning = vd_core::flight::FlightTuning::derive(
+        p.move_speed,
+        p.tick_dt,
+        (u64::from(p.tick_hz) / 2).max(1),
+        u32::try_from(p.boot_ticks_p99).expect("boot p99 fits"),
+    );
+    let leg_s = vd_core::flight::leg_time_s(dist_m, cap_mps, p.move_speed, cap_mps, tuning.tau_s)
+        .unwrap_or_else(|| tuning.tau_s * (1.0 + dist_m / (tuning.tau_s * p.move_speed)).ln());
+    Duration::from_secs(60) + Duration::from_secs_f64(3.0 * leg_s)
+}
+
+/// THE DERIVED PLANET-EXIT BUDGET: [`governed_leg_budget`] over the planet's own solved bound
+/// under the planet's own ceiling — leaving a ~1.2e7 m solved SOI at ~1.3e5 m/s is ~100 s of
+/// lawful flight before any slack (the interim suites bounded planet exits at 90 s).
+#[must_use]
+pub fn planet_exit_budget(p: &crate::DevClusterParams, planet: vd_core::pose::RealmId) -> Duration {
+    let config = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
+    let shell = vd_physics::worldgen::realm_regions_for_config(p.universe_seed, &config)
+        .iter()
+        .find(|r| r.realm == planet)
+        .map(|r| r.shape.finite_extent())
+        .expect("the exited planet is rostered on THE world");
+    let cap =
+        vd_core::flight::realm_speed_cap_mps(shell, p.move_speed, vd_core::flight::TRAVERSE_S);
+    governed_leg_budget(p, shell + config.band.outset_m, cap)
+}
+
 pub fn rendezvous_into_planet(
     devctl_port: u16,
     p: &crate::DevClusterParams,
@@ -56,6 +125,31 @@ pub fn rendezvous_into_planet(
     elements: &vd_physics::celestial::OrbitalElements,
     deadline: Duration,
 ) {
+    assert!(
+        try_rendezvous_into_planet(devctl_port, p, planet, elements, deadline),
+        "NO CROSSING: the chase never reached {planet:?} within {deadline:?}",
+    );
+}
+
+/// [`rendezvous_into_planet`] that REPORTS instead of panicking — `true` when the label flipped,
+/// `false` when the budget ran out with the client still live. The distinction exists for the
+/// repeat-round-trip gate, whose subject is the FREEZE (does a crossing wedge the server?), not
+/// the harness's ability to thread a moving 1.2e7 m shell on every attempt: at true scale the
+/// intercept is genuinely hard from some starting geometries (see the chase notes below), and a
+/// steering shortfall must never be reported as a product freeze. Every other caller wants the
+/// crossing itself and uses the panicking form.
+///
+/// # Panics
+/// If `planet` is not a [`vd_core::pose::RealmId::Planet`], or dev-control stays unreachable past
+/// the deadline.
+#[must_use]
+pub fn try_rendezvous_into_planet(
+    devctl_port: u16,
+    p: &crate::DevClusterParams,
+    planet: vd_core::pose::RealmId,
+    elements: &vd_physics::celestial::OrbitalElements,
+    deadline: Duration,
+) -> bool {
     let planet_seed = match planet {
         vd_core::pose::RealmId::Planet(s) => s,
         other => panic!("inner mover is a planet, got {other:?}"),
@@ -68,30 +162,62 @@ pub fn rendezvous_into_planet(
         )
         .position
     };
-    // RENDEZVOUS AND PARK (Stage B4; run-3/run-4 measurements). Chasing the live centre — even with
-    // a led aim — keeps the ship at chase speed through the band, and the flush re-validation then
-    // RIGHTLY refuses a crossing whose subject is already gone. A pilot lands by ARRIVING EARLY:
-    // fly to where the planet WILL BE, stop, and let it sweep over the parked ship — the relative
-    // speed is then the planet's own orbital ~m/s, the decision is still true at the flush, and the
-    // crossing commits.
-    const RENDEZVOUS_TICKS: u64 = 200;
-    // One full sweep of the planet's shell — its diameter at the planet's own orbital speed, about
-    // a second on THE world — plus generous pipeline margin. A budget with slack, deliberately not
-    // a derived world number: the deadline loop re-plans anyway, so slack costs one extra leg at
-    // worst. (The old "~8.3 m at ~6.3 m/s" arithmetic here was the pre-S4 world's — batch review.)
-    const SWEEP_GRACE_TICKS: u64 = 120;
-    // THE world's own SOI + acquire edge, derived at use for the failure diagnostics — never a
-    // transcribed literal (batch review: this message still said "~4.16 m SOI" after the S4
-    // re-solve moved the planet SOI to ~3.95 m, mislabelling a 4.05 m closest approach as inside;
-    // and the SOI face was the wrong quantity anyway — containment ACQUIRES at soi − inset).
+    // THE LEAD-AIM CHASE UNDER THE GOVERNOR (true-scale restatement of the Stage-B4 park-and-
+    // sweep). The park-and-sweep flew 200-tick legs each ENDING IN A THROTTLE CUT — and under the
+    // speed law a cut zeroes the carried velocity, so every leg RESTARTED THE RAMP FROM THE FOOT
+    // (measured: the fly-in never exceeded ~1e3 m/s against a 1.48e8 m/s governed ceiling, and a
+    // ~2e9 m journey closed at walking pace). At true scale the sweep premise is dead anyway: the
+    // inner planet's period is ~1.7 days, so "arrive early and let it sweep" waits days.
+    //
+    // The lawful chase: HOLD THE THROTTLE CONTINUOUSLY (the ramp compounds across re-aims —
+    // Move input is sticky, so the throttle survives the poll gaps between chunks) and RE-AIM
+    // each chunk at where the planet will be one chunk ahead. Pure pursuit converges because the
+    // governed cruise (≥1e6 m/s mid-course) dwarfs the planet's own orbital ~8e4 m/s; the aim
+    // staleness per chunk is the planet's one-chunk displacement (~1.6e5 m), two orders inside
+    // the ~1.2e7 m acquire edge. ARRIVAL IS THE GOVERNOR'S, not a brake: the approach arm lowers
+    // the ceiling onto the planet's own cap as the bound nears, so the crossing flush sees a
+    // lawful closing speed and commits mid-flight — the label flip, never a parked epsilon, is
+    // the exit condition.
+    const REAIM_TICKS: u64 = 100;
+    /// The ENDGAME re-aim cadence — a fifth of a second, so a pure-pursuit aim is never stale
+    /// by more than a fraction of the planet's own sweep.
+    const ENDGAME_TICKS: u64 = 10;
+    /// The turn budget — a full second, enough for any heading change at the client's look rate.
+    const TURN_TICKS: u64 = 50;
+    // THE world's own SOI + acquire edge, derived at use — never a transcribed literal. The
+    // TARGET planet's OWN shell (its gravitational SOI at its drawn mass — D-REAL-1): per-planet
+    // since the true-size re-solve; no single config radius exists.
     let config = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
-    let soi_m = config.planet.planet_soi_r_m;
+    let soi_m = vd_physics::worldgen::realm_regions_for_config(p.universe_seed, &config)
+        .iter()
+        .find(|r| r.realm == vd_core::pose::RealmId::Planet(planet_seed))
+        .map(|r| r.shape.finite_extent())
+        .expect("the rendezvous target is a rostered planet of THE world");
     let acquire_edge_m = soi_m - config.band.inset_m;
     let want = vd_core::pose::FrameRef::PlanetCentered { planet_seed }.label();
     let started = Instant::now();
     let mut best = f64::INFINITY;
     let mut loc = String::new();
     let mut leg = 0u32;
+    // THE ADAPTIVE LEAD (tail-chase cure, measured on the repeat-round-trip gate): a fixed
+    // one-chunk lead under-leads a SLOW dot — a cycle that begins near the planet starts from
+    // rest, and while the ramp climbs, the planet's own ~8e4 m/s orbital sweep drags the SOI
+    // sideways faster than the dot closes; the pursuit stalls 10-70 km OUTSIDE the acquire
+    // edge for the whole budget (closest 12,042,800 m vs 11,974,563 m, 244 s, no flip). The
+    // pilot's cure is the classical intercept — lead by TIME-TO-ARRIVE, dist over the closing
+    // rate — with TWO stabilisers, each measured in:
+    //   * the closing rate is averaged over the WHOLE approach, never the last chunk: an
+    //     instantaneous rate collapses to ~0 at the hover point, the time-to-go blows up, the
+    //     aim runs 2e7 m ahead along the orbit and the dot tail-chases it outside the SOI
+    //     forever (closest 11,984,599 m — 10 km out — with the naive lead);
+    //   * the lead's arc is geometry-capped (the aim never runs farther along the orbit than
+    //     the current separation), so a cold-start's noisy average cannot aim behind the sun.
+    let mut prev_sample: Option<(u64, DVec3)> = None;
+    // The planet's own orbital speed, measured off the SAME closed form the aim uses.
+    let v_planet_mps = {
+        let dt_probe = 1000.0 * p.tick_dt;
+        (planet_at(1000) - planet_at(0)).length() / dt_probe
+    };
     loop {
         let st = {
             let mut got = None;
@@ -117,74 +243,160 @@ pub fn rendezvous_into_planet(
         if loc == want {
             break;
         }
-        // FLY TO THE RENDEZVOUS — where the planet will be `RENDEZVOUS_TICKS` from the client's last
-        // report — then PARK there and let the planet sweep over the stationary ship.
         let now_tick = st.universe_tick.unwrap_or(0);
-        let target = planet_at(now_tick + RENDEZVOUS_TICKS);
-        eprintln!(
-            "[fly-in] leg {leg}: tick={now_tick} loc={loc:?} own_len={:?} best={best:.2} — \
-             rendezvous at tick {}",
-            own_pos(&st).map(|v| v.length()),
-            now_tick + RENDEZVOUS_TICKS,
-        );
+        let dist_now = own_pos(&st).map(|pos| (pos - planet_at(now_tick)).length());
+        // THE INTERCEPT SOLUTION (the pilot's classical lead-collision course, and the third
+        // and final cure this gate needed). Every FIXED-lead rule stalls, each at its own
+        // radius, because the target moves ACROSS the line of sight:
+        //   * lead one chunk           → parallel flight at ~59 km (best frozen to the metre);
+        //   * pure pursuit (no lead)   → tail-chase standoff at 4,085 m = v_planet · pose lag;
+        //   * pure pursuit + lag lead  → crossed on 4 of 5 cycles, stalled at 65 km on the 5th
+        //     (the standoff depends on the approach geometry, so no constant lead fixes it).
+        // The honest answer solves for WHERE THE TWO ARRIVE TOGETHER: T = |planet(t+T) − me| /
+        // v_me, by fixed-point iteration (three passes converge at these speed ratios), plus
+        // the pilot's own feedback lag because the command lands that much later. `v_me` is
+        // MEASURED off consecutive delivered poses — never assumed — and an unmeasurable or
+        // too-slow speed falls back to the one-chunk lead, which is the far-field behaviour
+        // that already works.
+        let me_now = own_pos(&st);
+        let v_me_mps = match (prev_sample, me_now) {
+            (Some((t0, p0)), Some(p1)) if now_tick > t0 => {
+                (p1 - p0).length() / (((now_tick - t0) as f64) * p.tick_dt)
+            }
+            _ => 0.0,
+        };
+        let lag_ticks = (pose_lag_s(p.tick_dt) / p.tick_dt).ceil() as u64;
+        // ENDGAME = within a few SOI radii, where the target's own tangential sweep, not the
+        // distance, decides whether the pursuit closes.
+        let endgame = dist_now.is_some_and(|d| d <= 4.0 * acquire_edge_m);
+        let lead_ticks = match (me_now, dist_now) {
+            _ if endgame => lag_ticks,
+            (Some(me), Some(d)) if v_me_mps > v_planet_mps => {
+                let mut t_s = d / v_me_mps;
+                for _ in 0..3 {
+                    let at = planet_at(now_tick + (t_s / p.tick_dt) as u64);
+                    t_s = (at - me).length() / v_me_mps;
+                }
+                (t_s / p.tick_dt) as u64 + lag_ticks
+            }
+            _ => REAIM_TICKS,
+        };
+        // The re-aim cadence tightens as the intercept nears, so the solved course is never
+        // stale by more than a fraction of the remaining flight.
+        let chunk_ticks = if endgame {
+            ENDGAME_TICKS
+        } else {
+            REAIM_TICKS.min(lead_ticks.max(ENDGAME_TICKS))
+        };
+        if let Some(d) = dist_now {
+            best = best.min(d);
+        }
+        if let Some(me) = me_now {
+            prev_sample = Some((now_tick, me));
+        }
+        // AIM THROUGH THE BODY, not at it (the last measured millimetre of this problem). A
+        // pursuit steered by a DELIVERED pose settles at a standoff of the target's tangential
+        // sweep times the feedback lag: measured 4,085 m, then 8,000 m, outside an 11,974,563 m
+        // acquire edge — the pursuit converges to 0.07% and stops, because "arrive at the
+        // centre" is a condition the lag never lets it satisfy. A pilot's answer is to aim at a
+        // point BEYOND the body along the line of sight, so the flight PATH passes through the
+        // shell: the standoff then lands the dot half an acquire edge INSIDE, and the crossing
+        // commits on the way. Half the edge is the derived depth — deep enough to swallow any
+        // lag-scale standoff, shallow enough that the governor's arm (already at the body's own
+        // cap by then) keeps the closing speed lawful.
+        let aimed_at = planet_at(now_tick + lead_ticks);
+        let target = match (me_now, endgame) {
+            (Some(me), true) => {
+                let toward = (aimed_at - me).normalize_or_zero();
+                aimed_at + toward * (0.5 * acquire_edge_m)
+            }
+            _ => aimed_at,
+        };
+        if leg.is_multiple_of(10) {
+            eprintln!(
+                "[fly-in] chunk {leg}: tick={now_tick} loc={loc:?} own_len={:?} best={best:.2} \
+                 dist={:?} v_me={v_me_mps:.4e} v_planet={v_planet_mps:.4e} lead={lead_ticks} \
+                 chunk={chunk_ticks}",
+                own_pos(&st).map(|v| v.length()),
+                dist_now,
+            );
+        }
         leg += 1;
+        // ONE chunk of the chase. `arrive_epsilon` a quarter of the acquire edge: the chunk may
+        // end EITHER by its tick budget (mid-course) or by standing inside the acquire
+        // neighbourhood (endgame) — either way the next iteration re-aims; the true exit is the
+        // label flip above.
+        //
+        // NO TAPER AT ALL (`max_step_m: 0.0`, the controller's explicit no-brake arm). MEASURED,
+        // twice: ANY taper on a MOVING aim wedges the endgame. The taper multiplies the throttle
+        // by `dist/taper`, the throttle map is geometric (`(v_cap/v_foot)^throttle`), so a small
+        // throttle commands a near-FOOT speed; the ramp then re-derives from that collapsed
+        // velocity and the dot hovers a few tens of km outside the SOI while the planet's own
+        // ~8e4 m/s orbital sweep carries it away (closest 12,007,907 m, then 12,030,752 m, vs the
+        // 11,974,563 m acquire edge — both runs out of budget without a flip). Full throttle is
+        // SAFE here and is the design's own division of labour: the APPROACH GOVERNOR is the
+        // brake, and at the bound its arm has already fallen to the planet's own cap
+        // (2·bound/T ≈ 1.33e5 m/s ⇒ ~2.7 km per 20 ms tick against a 1.2e7 m shell), so a step
+        // can never out-run the crossing.
+        // POINT THE NOSE FIRST — the measured cap on this whole approach. `WalkTo` states its
+        // step in the entity's LOCAL frame, and the movement encoding carries only what that
+        // frame can express: flying at a target that is off the nose spends a chunk of the
+        // command's magnitude (measured `axes_len` 0.8695 held for hundreds of chunks). Under
+        // the GEOMETRIC throttle map that is not a small loss — `(v_cap/v_foot)^0.87` instead of
+        // `^1.0` turns a lawful 1.907e5 m/s ceiling into 7.6e4 m/s, which is BELOW the planet's
+        // own 7.69e4 m/s orbital speed, so the pursuit provably cannot close (measured: `v_me`
+        // pinned at 7.6-8.0e4 for 470 chunks, seven km outside the acquire edge). A pilot's
+        // answer, and no product change: turn to face the mark, then fly.
+        // The turn gets its OWN budget, never the flight chunk's: `LookAt` returns the instant
+        // it is aligned (so an already-pointed nose costs one round trip), but a chunk-sized
+        // budget cannot finish a large turn, and a half-finished turn is exactly the off-nose
+        // magnitude loss above — measured as a cycle that flies at 7e4 m/s while its neighbours
+        // fly at 4e5-8e6 and cross.
+        let _ = devctl(
+            devctl_port,
+            &DevRequest::LookAt {
+                target: target.to_array(),
+                align_epsilon: 0.01,
+                max_ticks: TURN_TICKS,
+            },
+        );
         let flew = devctl(
             devctl_port,
             &DevRequest::WalkTo {
                 target: target.to_array(),
-                arrive_epsilon: 0.5,
-                max_ticks: RENDEZVOUS_TICKS,
-                // THE BRAKE (nav::walk_to), sized to the FEEDBACK LAG (run-7 measurement): the
-                // controller steers by the DELIVERED pose (~2-3 ticks behind); (1 + lag) steps
-                // commands at most dist/4 per tick — monotone, no overshoot.
-                max_step_m: 4.0 * p.move_speed * p.tick_dt,
+                arrive_epsilon: acquire_edge_m * 0.25,
+                max_ticks: chunk_ticks,
+                max_step_m: 0.0,
             },
         );
-        // CUT THE THROTTLE before parking (run-6): Move input is STICKY — a held throttle during a
-        // park is a full-speed straight-line runaway.
-        let _ = devctl(
-            devctl_port,
-            &DevRequest::Move {
-                axes: [0.0, 0.0, 0.0],
-            },
-        );
-        eprintln!(
-            "[fly-in]   leg {}: walk outcome {}",
-            leg - 1,
-            match &flew {
-                Some(DevResponse::State { .. }) => "ARRIVED",
-                Some(DevResponse::Timeout { .. }) => "TIMEOUT",
-                other => {
-                    let _ = other;
-                    "OTHER"
-                }
-            },
-        );
-        // PARKED: hold until the sweep instant (plus grace) or the flip, whichever first.
-        let wait_until = now_tick + RENDEZVOUS_TICKS + SWEEP_GRACE_TICKS;
-        loop {
-            std::thread::sleep(Duration::from_millis(200));
-            let Some(s) = poll_state(devctl_port) else {
-                break;
-            };
-            loc = s.location.clone().unwrap_or_default();
-            if let Some(pos) = own_pos(&s) {
-                best = best.min((pos - planet_at(s.universe_tick.unwrap_or(0))).length());
+        // NO THROTTLE CUT between chunks — the cut is what killed the ramp (see above). The
+        // sticky Move holds the last commanded axes through the poll gap; only ARRIVAL cuts.
+        let outcome = match &flew {
+            Some(DevResponse::State { .. }) => "ARRIVED",
+            Some(DevResponse::Timeout { .. }) => "TIMEOUT",
+            other => {
+                let _ = other;
+                "OTHER"
             }
-            if loc == want || s.universe_tick.unwrap_or(0) > wait_until {
-                break;
-            }
+        };
+        if leg % 10 == 1 {
+            eprintln!("[fly-in]   chunk {}: walk outcome {outcome}", leg - 1);
         }
-        if loc == want {
-            break;
+        if started.elapsed() >= deadline {
+            eprintln!(
+                "[fly-in] NO CROSSING: chased {planet:?} for {}s but the location never flipped \
+                 (loc {loc:?}); closest approach {best:.2} m vs the {soi_m:.2} m SOI (containment \
+                 acquires at {acquire_edge_m:.2} m)",
+                started.elapsed().as_secs(),
+            );
+            let _ = devctl(
+                devctl_port,
+                &DevRequest::Move {
+                    axes: [0.0, 0.0, 0.0],
+                },
+            );
+            return false;
         }
-        assert!(
-            started.elapsed() < deadline,
-            "NO CROSSING: flew rendezvous legs at {planet:?} for {}s but location never flipped \
-             (loc {loc:?}); closest approach {best:.2} m vs the {soi_m:.2} m SOI (containment \
-             acquires at {acquire_edge_m:.2} m).",
-            started.elapsed().as_secs(),
-        );
     }
     let _ = devctl(
         devctl_port,
@@ -194,6 +406,7 @@ pub fn rendezvous_into_planet(
     );
     eprintln!("[fly-in] location flipped to {loc:?} (closest approach {best:.2} m)");
     assert_eq!(loc, want);
+    true
 }
 
 /// One WalkTo's tick budget inside [`cross_leg`] — bounded so the loop re-reads the label often
@@ -252,15 +465,19 @@ pub fn cross_leg(
                     max_step_m: 4.0 * crate::DEV.move_speed * crate::DEV.tick_dt,
                 },
             );
-            // CUT THE THROTTLE (sticky Move) — the flip lands on a stationary avatar.
-            let _ = devctl(
-                devctl_port,
-                &DevRequest::Move {
-                    axes: [0.0, 0.0, 0.0],
-                },
-            );
             if matches!(walked, Some(DevResponse::State { .. })) {
-                // ARRIVED at the aim: stay PARKED and wait out the commit + the delivered flip.
+                // ARRIVED at the aim: CUT THE THROTTLE (sticky Move) and stay PARKED waiting out
+                // the commit + the delivered flip. A mid-route chunk (`Timeout`) HOLDS the
+                // throttle instead — cutting per chunk zeroed the carried velocity and restarted
+                // the speed-law ramp from the foot every ~8 s, which pinned every governed leg at
+                // walking pace on the true-size world (the same measured defect the rendezvous
+                // chase fixed).
+                let _ = devctl(
+                    devctl_port,
+                    &DevRequest::Move {
+                        axes: [0.0, 0.0, 0.0],
+                    },
+                );
                 let wait_until = Instant::now() + CROSS_LEG_COMMIT_WAIT;
                 while Instant::now() < wait_until && loc != want {
                     if let Some(g) = poll_state(devctl_port) {
@@ -524,4 +741,15 @@ pub fn creep_into(devctl_port: u16, leg: &str, axes: [f32; 3], want: &str, deadl
 #[must_use]
 pub fn creep_axes_plus_z() -> [f32; 3] {
     [-CREEP_AXES_MAG, 0.0, 0.0]
+}
+
+/// FULL-throttle +Z held axes — the TRUE-SCALE shell approach. The 0.05 creep throttle was sized
+/// for a 150 m interim shell; under the geometric throttle map it commands ~1e3 m/s against a
+/// ~1e11 m standoff (a dead leg measured in years). Held FULL axes keep the creep's load-bearing
+/// property — NO coordinate in flight, so a mid-commit re-frame cannot straddle — while the
+/// APPROACH GOVERNOR itself shapes the arrival: the ceiling falls onto the target realm's own cap
+/// as its bound nears, so the crossing flush always sees a lawful closing speed.
+#[must_use]
+pub fn governed_axes_plus_z() -> [f32; 3] {
+    [-1.0, 0.0, 0.0]
 }

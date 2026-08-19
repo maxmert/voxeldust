@@ -3216,6 +3216,14 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   band-exit to a cell-aware difference at the SAME time it converts the interp + `transfer_frame` (named here so the
   re-centering implementer does not miss this second offset-only site, the cross-region-collision band geometry).
   Items (2)-(5) remain owed.
+- **✅ THE CELL MATH WENT LIVE (real-scale cell activation, 2026-08-18/19 — supersedes the stale
+  "cell is always ZERO" notes above):** the ONE subtraction is `vd_core::pose::Separation`; every
+  producer normalizes (`from_metres` public, `local` crate-private, `map_offset`→`translated`,
+  `at_rest` normalized, generator centres + placements + Motion arms normalized); `transfer_frame`
+  is integer-first with normalized output; the containment verdict is INTEGER (`region_verdict`);
+  the interp/`RenderPose`/`GhostNeighbor` items previously listed as owed were verified already
+  cell-correct. STILL DORMANT: `Tier::Coarse` + `convert_tier`'s cross-tier arm (P10; refused —
+  `guard_root_representable` is the named trigger).
 - **DEFER (additive once the shapes exist):** galaxy/quadrant/universe `FrameRef` levels + ly-cells (P10); the
   multi-anchor `FrameSpace` MACHINERY (P4/P5); N>1 live sim + the density rebalancer + region-store redb sharding + the
   cross-region GhostFlow runtime consumer (gated on the single-orchestrator soak below + a benched per-shard
@@ -4700,3 +4708,211 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **Where:** `docs/design/look_horizon.md` §2 Ask D / §7 Q4 + RULINGS ADDENDUM (2026-08-17);
   `crates/core/src/geometry.rs` (`RealmRegion.interior_band`),
   `crates/physics/src/worldgen.rs` (`interior_reach_m`/`interior_band`).
+
+### D-REAL-1 🟩 REALM EXTENT = GRAVITY SOI (planets) — owner-ruled 2026-08-18; LANDED by the taxonomy arc's in-system true-size re-solve
+- **THE RULING (owner, 2026-08-18, final):** verify the realm shell the generator emits EQUALS the
+  derived gravitational SOI per planet and pin it by name on THE world. (Sun/Moon realms arrive with
+  the taxonomy slice.)
+- **WHY IT CANNOT LAND ON THE INTERIM IN-SYSTEM WORLD — a measurement, not an argument** (pinned by
+  `realm_shell_equals_the_interim_soi_law_and_the_gravity_soi_blocker_is_measured`,
+  `crates/physics/src/worldgen.rs`): the interim world has NO planet mass, and its synthetic central
+  mass (`13 407 950 220 013.18 kg`, Kepler-3-tuned for a 300 s outer period) sits ~12 orders below one
+  Mercury — the real-scale design §3.3.4 mass draw's own bounds INVERT on it
+  (`0.01·M★/N_p = 2.7e10 kg < Mercury 3.301e23 kg`), so any "gravitational SOI" computed today would
+  be a dressed-up literal (forbidden). Additionally the FULL in-system re-solve cannot land before the
+  bound/look split: measured on the addendum's numbers, a real-scale planet SOI (8.6e9 m) climbing with
+  its BOUND as its picture measures climb 3 and every boot refuses at the landed arity 2.
+- **★LANDED (the taxonomy arc):** the in-system re-solve replaced the interim compressed world —
+  real star mass as every planet's `central_mass`, the appended per-planet mass draw (log-uniform
+  Mercury..min(Jupiter, disc budget)), `celestial::planet_soi` LIVE at the drawn mass, clamped by
+  half the worst-instant inter-orbit gap (MEASURED never to bind: the equality pin prints the
+  soi/shell ratio == 1.0 exactly), together with the bound/look split (`RealmRegion.look`). The
+  blocker pin was REWRITTEN into the equality pin
+  `realm_shell_equals_the_gravitational_soi_at_the_drawn_mass_d_real_1` — every one of THE world's
+  27 planets' region shells `==` its gravitational SOI, bit-for-bit. The first gate run's ordered
+  climb measurement reported **max climb 1 over all 30 bodies** (32 with the plant), the design's
+  prediction measured true.
+- **Where:** `crates/physics/src/worldgen.rs` (the pin + `visual_planet_soi_r_m`, the interim law);
+  `crates/physics/src/celestial.rs` (`planet_soi`, still dead); the real-scale design §3.3.4 + addendum.
+
+### D-REAL-2 🟩 The outer re-solve (Option C geometry + Q-B 3-D placements) — LANDED with the cell activation (2026-08-18/19)
+- **THE RULINGS (owner, 2026-08-18, final):** Q-A = OPTION C — (b)-scale gaps (star gap 0.2376656 ly,
+  compression 16.378×, universe radius 2⁵¹ m = 50 % of the position store, headroom 2.0×) WITH the FINE
+  cross-cell math LIVE and GENERIC (ONE `Separation` subtraction type in vd-core on every authority-path
+  distance; no realm-kind forks; the COARSE tier stays refused — that refusal, `guard_root_representable`,
+  is THE NAMED P10 TRIGGER). Q-B = REAL 3-D SEEDED STAR PLACEMENTS — the collinear ring DELETED; seeded
+  uniform-sphere directions at the derived placement radius, appended per-system draws 32–33; the
+  separation fence re-derived closed-form over the point set (`guard_seeded_systems_disjoint`); star
+  count stays the existing config parameter. ★DISCOVERY-PERMANENCE (standing): the generator is
+  APPEND-ONLY in its draw stream — the law is written into `crates/physics/src/worldgen.rs`'s module doc
+  and pinned per draw.
+- **WHAT LANDED:** vd-core `Separation` (cells/residual/tier; guarded `cells_sq` with the Chebyshev
+  pre-test + floor-acquire/ceil-release rounding — H-01 cured; `rotated` with the restated reach law
+  `rotation_exact_reach_m = cell_edge/ε` — H-11 cured); the integer containment verdict
+  (`region_verdict`, Shell/Aabb integer, Obb the declared decimal shape arm); every producer normalized
+  (generator centres, placements, both Motion arms, `at_rest` — H-16/H-17/H-19 cured; `advanced_ballistic`
+  NOT deleted, H-18); `transfer_frame` integer-first with normalized output; the four outer numbers
+  (2⁵¹ / R_uni−outset / R_gal−clearance / χ 16.378) with in-code derivations + bit-exact pins.
+- **CLIMB at this slice (measured, recorded):** max climb == 2 (the interim in-system content keeps the
+  planet regime at D-LOOK-1's record; the ambient galaxy measures a named levels-2 root artifact —
+  no look yet). The addendum's climb-1 prediction is conditioned on the bound/look split + the
+  in-system re-solve, LATER slices; the world was NOT adjusted toward the prediction.
+- **Where:** `crates/core/src/pose.rs` / `frame.rs` / `geometry.rs`; `crates/physics/src/worldgen.rs`;
+  the boot fences in `crates/bins/src/bin/shard.rs` + `gateway.rs`; the real-scale design + addendum
+  (scratchpad `real_scale_design.md`, to be moved under `docs/design/` with the arc's closure).
+
+### D-REAL-3 🟩 THE SPEED LAW (S3) — the governed warp mechanism, LANDED (2026-08-18)
+- **THE MECHANISM (real-scale design §4 as corrected by addendum §A3; the owner's warp definition —
+  "the CONTAINING REALM controls occupant speed" — implemented literally, no mode, no new machinery):
+  four closed-form parts in `crates/core/src/flight.rs`, consumed at the sim's ONE integrator seam
+  (`crates/sim/src/stub.rs::integrate`) and at the transient re-advance:
+  (1) the realm ceiling `max(v_foot, 2·bound/T_TRAVERSE)`; (2) the GEOMETRIC throttle
+  (`throttle·v_foot·(v_cap/v_foot)^throttle` — half stick is the geometric middle, the owner clause
+  that keeps slow deep-space flight commandable); (3) the proportional ramp `dv/dt = v/τ`
+  (state = the pose's own carried velocity — nothing new crosses); (4) the approach governor
+  `min over children (child_cap + dist_to_bound/τ)` — you always arrive slowly and can never fly
+  through anything. Deceleration is the governor's falling ceiling; stick-release stop stays instant.**
+- **THE ONE POLICY NUMBER:** `vd_core::flight::TRAVERSE_S = 180.0 s` — the owner's "journeys in
+  MINUTES" bar written once; `vd-physics`' geometry solve now reads the SAME constant (its τ-free
+  outset), so shells and law cannot drift. τ is NOT a number: `τ = T_WAKE =
+  (2·aoi_cadence + boot_ticks_p99 + WAKE_PIPELINE_TICKS)·tick_dt` (`FlightTuning::derive` — the same
+  wake budget the process gates count; DEV posture: 1.10 s at the reactive `boot_ticks_p99 = 0`).
+  Every flight number moves WITH a measured boot p99; nothing is pinned to today's τ.
+- **★OQ-2 RULED (owner 2026-08-19, verbatim):** *"the realm's ceiling governs everything the realm
+  contains, piloted or not"* — the governor binds on the crossing path for EVERY subject kind. Landed
+  as the `readvance_transients` speed clamp (debris/projectiles governed by the identical arithmetic;
+  HR2 one machinery), closing addendum §A3.5's measured hole (an ungoverned transient crossed a
+  system's band in 0.297 of a tick). The one measured human-scale behaviour change: an over-unit
+  diagonal stick is normalized to the ceiling (the pre-law √2·v_foot diagonal exceeded the realm's
+  stated ceiling — a cure, pinned in `strafe_and_vertical_axes_integrate`).
+- **INERTNESS, MEASURED (not argued):** every sub-45 km realm's ceiling clamps to the 500 m/s floor
+  (`v_foot·T/2` break-even) and the clamped-scale step is BIT-identical by construction
+  (`x/x == 1.0`, `1^t == 1.0`, `1.0·k == k` — pinned by
+  `the_speed_law_is_bit_inert_wherever_the_ceiling_clamps`, a bare-vs-planted bit-equality); the
+  landed battery stays green (vd-sim 490; the process battery per the S3 run report). A shard with
+  no region forest / no authored book states NO ceiling (`None`) — each consumer maps that to its
+  own pre-law behaviour (throttle → foot speed; transient clamp → no clamp), byte-identical.
+- **LAWFULNESS (SL6 answer = NONE):** the governor reads ONLY the realm's own region bound and the
+  placement book the realm itself authored this tick (`Placements.head` + the ONE `child_rows` join —
+  H2: no second position path; SL4: a book row cannot say how a child moves). No wire change, no new
+  arm, nothing crosses.
+- **THE FLIGHT TABLE:** `crates/bins/tests/flight_table.rs` — the three addendum legs simulated
+  tick-by-tick with the shipped functions against the closed form (derived band), printed verbatim;
+  plus `g_governed_bands_bracket` (every ambient boundary: governed wake dwell ≥ T_WAKE, governed
+  band-edge latch ≥ n_entry). The addendum's 117.2/248.7/130.2 s were computed at the PLACEHOLDER
+  τ = 2.44 s and are printed beside the shipped-τ measurements.
+- **OWED ONWARD (unchanged owners):** the A3.4 two-arm containment-band law rides the in-system
+  re-solve slice (S4 folds into S6 — it binds only at target in-system scale); the §4.5 AoI
+  `v_cap(parent)·T_lead` spin-up term + arming `boot_ticks_p99` from a measured p99 ride the same
+  arc (the reactive posture is measured sufficient at this world's numbers by
+  `g_governed_bands_bracket` + the fly-ahead gate). ★S5 OWES ONE PROBE BACK: `warp_pixels`'
+  ARRIVAL GPU-paint probe is parked in-gate with citation (measured 2026-08-18: the composed body
+  is correct — author SelfLook, 98.16 px — but the client draws relative to NOTHING and the f32
+  view collapses at the 2.25e15 m arrival eye; the render_crossing_smoke class, cured by S5's
+  camera-relative flatten, §A5.4). `assert_painted(.. "arrival/destination")` returns verbatim
+  with S5; the departure/behind captures keep full GPU truth today.
+- **Where:** `crates/core/src/flight.rs`; `crates/sim/src/stub.rs` (`flight_tuning`,
+  `governed_ceiling_for_frame`/`_in_book`, `integrate`, `readvance_transients`);
+  `crates/physics/src/worldgen.rs` (the T alias + the cited `TARGET_*` leg targets);
+  `crates/bins/tests/flight_table.rs`; the re-derived gates in `crates/bins/tests/`
+  (`warp_pixels.rs`, `node_per_realm_walk.rs`, `rlm_demand_login.rs`).
+### D-TAX-1 🟥 `p_surf` — a stripped retainer's surface pressure/density draw (taxonomy arc T1, deferred BY the consumer filter)
+- **WHAT is deferred:** the per-planet surface-pressure draw (per-PLANET stream position 2). Surface
+  pressure has NO derivation (Earth 1 bar, Venus 92 bar, Mars 6 mbar at comparable escape speeds) and
+  currently NO reader: its only consumer is the drag model the physics charter's arc builds. A
+  shoreline-surviving SECONDARY atmosphere therefore carries `reference_density_kgm3: None`
+  (`vd_physics::taxonomy::Atmosphere`) — stated honestly, never a dressed-up literal.
+- **WHEN:** the slice that READS it (the physics charter's drag model) appends the draw at per-planet
+  stream position 2 — append-only, so nothing moves.
+- **Where:** `crates/physics/src/taxonomy.rs` (`Atmosphere.reference_density_kgm3`,
+  `derive_atmosphere`'s secondary arm); celestial_taxonomy_design §3.1/§3.6.
+
+### D-TAX-2 🟥 The SL3 residual: a System states a look equal to its star child's (taxonomy arc T2, ledgered not cured)
+- **WHAT:** the System realm's `look` = `star_radius_m(drawn mass)` — the SAME value its Star child's
+  own look states (one function, two call sites, mutually exclusive by "a realm containing the eye is
+  not a subject", so nothing ever draws twice). A container stating a look is an SL3 impurity; curing
+  it needs a parent-authored per-child marker extent DISTINCT from the child's own look, whose
+  introduction is itself an SL6 ask (celestial_taxonomy_design §5.2/§12 X-3) — not made here,
+  default NO stands.
+- **WHEN:** if/when the marker-vs-look split becomes a real SL6 ask (P4+ naming/refinement work).
+- **Where:** `crates/physics/src/worldgen.rs` (`generate_system_forest`, the system look
+  assignment); celestial_taxonomy_design §5.2.
+
+### D-TAX-3 🟥 The Dyson-standoff half of the Star realm's extent — STOPPED per ruling E's own instruction (owner ruling 2026-08-19; options measured)
+- **THE RULING (owner, 2026-08-19, ruling E):** extent = max(dust-sublimation radius, an HONEST
+  buildable-shell standoff) — "if no honest derivation closes, STOP that sub-item and report options —
+  never hand-pick." The dust radius LANDED; the standoff sub-item STOPPED, with the option set
+  MEASURED:
+  - (a) the material bound (structures survive where solids do — `DUST_SUBLIMATION_K`, the one
+    non-habitability thermal constant the tree holds) applied to built structures DEGENERATES to the
+    dust radius exactly — closes, but the max() is vacuous and construction just OUTSIDE the bound
+    stays outside the Star realm (the owner's stated intent unmet);
+  - (b) the habitable-shell bound (the same equilibrium law at the ruling-B Kopparapu inner flux
+    limit, `flux_radius_m(L, S=1.10)`) is UNIMPLEMENTABLE at any seed: the standoff/orbit identity is
+    scale-free — `standoff/a_n = √(1/1.10)/(0.4·1.7ⁿ)` = 2.38 / 1.40 / 0.83 for rungs 0/1/2 — so the
+    boundary would CONTAIN the two inner planets' whole orbits on every world the generator can
+    produce, breaking sibling single-answer containment (the one question the authority model rests
+    on) and requiring a hierarchy re-ruling no ruling covers;
+  - (c) any intermediate radius is a hand-pick, forbidden by the ruling itself.
+- **WHAT SHIPPED:** extent = the dust-sublimation radius alone (ruling E's confirmed physical inner
+  meaning), with `guard_star_bound_exceeds_photosphere` boot-wired and the swept minimum printed.
+- **WHEN:** re-opens when a cited material/thermal constant for BUILT structures (habitat/equipment
+  thermal limits) enters the tree with the megastructure/building arc (P6/P8) — or when the owner
+  re-rules the inner-planet hierarchy question (b) poses.
+- **Where:** `crates/physics/src/worldgen.rs` (`star_bound_m`); celestial_taxonomy_design §5.3 +
+  ruling E.
+
+### D-REAL-4 🟥 The A3.4 two-arm per-child containment band — DEFERRED at the in-system re-solve, basis MEASURED (taxonomy arc, 2026-08-18)
+- **WHAT is deferred:** the corrected per-child containment-band law (real-scale addendum §A3.4:
+  `max(v_cap(parent)·dt·K_SAFETY, v_cap(child)·dt·N/(1−dt·N/τ), 1024·quantum).min(child_inscribed ·
+  BAND_EXTENT_CLAMP)`, inset:outset 1:2) — the speed-law slice's ledger routed it onto the
+  in-system re-solve ("S4 folds into S6"). The re-solve LANDED with the static 1.0/2.0 m band kept.
+- **WHY (measured, not argued):** (a) the S3 battery already crossed system boundaries AT WARP on
+  the full-scale outer world with the static band and latched green (node_per_realm_walk,
+  rlm_demand_login 11/11, warp_pixels 3/3 — the crossing latch is verdict persistence, not band
+  dwell); (b) the owner's OQ-2 ruling ("the realm's ceiling governs everything the realm contains,
+  piloted or not") landed as the universal transient clamp, closing the fly-through hole §A3.5
+  sized arm 1 against; (c) the remaining exposure is boundary-loiter re-home thrash at governed
+  speeds (damped by `k_dwell`, UNMEASURED — the honest open half); (d) folding A3.4 in moves EVERY
+  walk-world band (the 0.5-extent clamp binds on every walk realm), re-baselining landed behaviour
+  where geometry did not change; and (e) a τ-bearing band would make `RealmRegion` a function of a
+  per-cluster measured latency, forking the one containment answer between processes — the lawful
+  form is the τ-free `guard_band_solvable` upper bound (`·BAND_TAU_HEADROOM`), which is how the
+  outer geometry already consumed it (§A2.2).
+- **WHEN:** with the boundary-loiter thrash measurement (the named falsifier: a governed occupant
+  loitering at a system shell measuring re-home saga rate vs `k_dwell`) — or the first world where
+  a crossing latch is measured to fail. D-WORLD-4b (the shipped `3.0 ≥ v·dt·K` invariant is false
+  at 500 m/s) stays open under this row.
+- **Where:** `crates/physics/src/worldgen.rs` (`BandConfig::build`, the static band);
+  `crates/core/src/geometry.rs` (`ContainmentBand`); real_scale_design §4.5/§A3.4;
+  the speed-law ledger (scratchpad `speedlaw_state.md` item 10).
+
+### D-LOOK-3 🟥 THE TRUE-SCALE CAMERA: real body geometry is clipped by a 120 km far plane
+
+**WHAT is missing.** `vd-client-render`'s camera uses `STAR_FAR_PLANE = 2 × STAR_SPHERE_RADIUS =
+120 000 render-metres`, sized (correctly, for its time) off the ambient star-sphere backdrop. On
+THE world every drawable body is millions of kilometres away, so all real geometry falls beyond
+the far plane and is clipped. Sprite/marker-drawn bodies survive (they ride the backdrop sphere),
+which is why the picture looks alive while bodies do not.
+
+**MEASURED (2026-08-19, `look_pixels::g_true_scale_star_body_and_depth_four_moon_draw_themselves`):**
+the outer planet composes at 43.82 px with `Author::SelfLook` at 1.8248e8 m and its readback rect
+is EMPTY; the star's body paints 141 758 pixels at 211.17 px (with its `TAG_LUMA` datum) at
+3.2126e8 m. `warp_pixels` shows the same class at longer range: a 3.00 px `ParentMarker` composed
+at rect x636-648 / y354-366, readback empty, eye distance 2.2485e15 m (one f32 ulp ≈ 1.3e8 m).
+
+**WHERE it lives.** `crates/client-render/src/lib.rs` (`STAR_SPHERE_RADIUS`, `STAR_FAR_PLANE`,
+the perspective projection at ~line 381).
+
+**WHEN it lands.** With the S5 render-scale slice: a camera-relative flatten (draw everything in
+eye-relative coordinates, so f32 precision follows the viewer) plus a depth scheme that spans the
+true dynamic range (logarithmic or reversed-Z far-plane-free). The three parked pixel gates —
+`look_pixels::g_true_scale_star_body_and_depth_four_moon_draw_themselves`,
+`warp_pixels::g_warp_pixels_*`, `warp_pixels::g_look_growth_*` — carry `#[ignore]` citations that
+name exactly what they measured, and un-parking them is the slice's acceptance.
+
+**Until then**, the composition half of the law is gated without pixels: the demand suite's fly
+test (relayed interior boxes streaming in and MOVING while the ship is still in the between-space),
+`g_look_wake`, the walk gate's five label-asserted crossings, and `look_pixels`'s own
+`g_true_scale_budgets_and_parks_are_derived_and_lawful` (green) which pins every derived range,
+park and budget this world states.

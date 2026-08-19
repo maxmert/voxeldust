@@ -183,6 +183,12 @@ impl RenderSnapshot {
 
 #[cfg(test)]
 mod tests {
+    /// Flatten a RenderPose to world metres (poses ride the lattice normalized since the cell
+    /// activation — `.pos` raw is a sub-cell residual).
+    fn rp_world(p: &crate::interp::RenderPose) -> vd_core::glam::DVec3 {
+        vd_core::pose::LatticePos::at(p.cell, p.pos)
+            .delta_m(vd_core::pose::LatticePos::default(), p.tier)
+    }
     use super::*;
     use glam::DVec3;
     use vd_core::entity_kind::EntityKind;
@@ -324,10 +330,11 @@ mod tests {
         assert_eq!(s.freshest_tick(), Some(10), "the anchored tick");
         let rendered = s.rendered(100.0);
         assert_eq!(rendered.len(), 1);
-        // world_pos is a passthrough — the shard chain already measured this from the centre of the
-        // realm the session stands in, and the pose carries the unit its cell is counted in.
+        // world_pos flattens the tiered pose — the shard chain already measured this from the
+        // centre of the realm the session stands in, and the pose carries the unit its cell is
+        // counted in; since the cell activation the value rides the integer half.
         let pose = rendered[0].2;
-        assert_eq!(s.world_pos(&pose), pose.pos);
+        assert_eq!(s.world_pos(&pose), rp_world(&pose));
     }
 
     #[test]
@@ -381,13 +388,13 @@ mod tests {
         let early = snap.rendered(100.0);
         assert_eq!(early.len(), 1);
         assert_eq!(early[0].0, ent(1));
-        assert_eq!(early[0].2.pos, DVec3::new(0.0, 0.0, 0.0));
+        assert_eq!(rp_world(&early[0].2), DVec3::new(0.0, 0.0, 0.0));
 
         // 0.13 s later the display cursor advances into the window (9.6 + 0.13*20 =
         // 12.2 → clamps to current x=10): a DIFFERENT sample from the same snapshot,
         // proving display-rate interpolation off one published frame.
         let later = snap.rendered(100.13);
-        assert_eq!(later[0].2.pos, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(rp_world(&later[0].2), DVec3::new(10.0, 0.0, 0.0));
     }
 }
 
@@ -465,12 +472,13 @@ mod slice6_tests {
         let mut prev = f64::NEG_INFINITY;
         for step in 0..=10 {
             let cursor = 20.0 + f64::from(step) / 10.0;
-            let centre = snap
-                .scene_at(cursor)
-                .get(REALM)
-                .expect("box")
+            let rbox = snap.scene_at(cursor);
+            let rbox = rbox.get(REALM).expect("box");
+            // Flatten the tiered centre (H-21): the streamed pose rides the lattice, so `.offset()`
+            // alone would read only the sub-cell residual.
+            let centre = rbox
                 .center
-                .offset()
+                .delta_m(vd_core::pose::LatticePos::default(), rbox.tier)
                 .x;
             assert!(
                 (centre - cursor).abs() < 1e-9,

@@ -73,7 +73,7 @@ pub fn gateway_view(
         window_hop_invalid,
         window_unresolved_standing,
         window_dedup_disagree,
-        window_dedup_max_dev_nm,
+        window_dedup_max_dev_cells,
         window_head_reads_sent,
         window_composed_rows,
         old_realm_frames_dropped,
@@ -149,7 +149,7 @@ pub fn gateway_view(
         window_hop_invalid,
         window_unresolved_standing,
         window_dedup_disagree,
-        window_dedup_max_dev_nm,
+        window_dedup_max_dev_cells,
         window_head_reads_sent,
         window_composed_rows,
         old_realm_frames_dropped,
@@ -274,7 +274,7 @@ mod tests {
             window_hop_invalid: 53,
             window_unresolved_standing: 54,
             window_dedup_disagree: 55,
-            window_dedup_max_dev_nm: 56,
+            window_dedup_max_dev_cells: 56,
             window_head_reads_sent: 57,
             window_composed_rows: 58,
             // 59..69: the tombstoned-lane drop counters + the composed egress + the Q2 relay,
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(view.window_hop_invalid, 53);
         assert_eq!(view.window_unresolved_standing, 54);
         assert_eq!(view.window_dedup_disagree, 55);
-        assert_eq!(view.window_dedup_max_dev_nm, 56);
+        assert_eq!(view.window_dedup_max_dev_cells, 56);
         assert_eq!(view.window_head_reads_sent, 57);
         assert_eq!(view.window_composed_rows, 58);
         assert_eq!(view.old_realm_frames_dropped, 59);

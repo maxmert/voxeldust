@@ -91,8 +91,11 @@ impl RealmCoord {
 }
 
 /// The ONE `RealmKindTag → ProfileKind` bridge (the monomorphic-helper split, so `profile_kind()`
-/// is a branchless one-line delegate — mirrors `RealmLevel::to_realm_id`). Total over the 6 tags
+/// is a branchless one-line delegate — mirrors `RealmLevel::to_realm_id`). Total over the 7 tags
 /// only; consistent with `vd_sim::capability::profile_for`'s Universe/Galaxy→`Galaxy` collapse.
+/// A STAR is a body with an extent and eventually a surface, so `ProfileKind::Planet` is the
+/// right capability set (taxonomy arc §6.2: "new shard types are new values here — zero new
+/// feature code"; `ProfileKind` has no inter-shard producer, so this is revisable without wire).
 #[must_use]
 fn profile_kind_of(kind: RealmKindTag) -> ProfileKind {
     match kind {
@@ -102,6 +105,7 @@ fn profile_kind_of(kind: RealmKindTag) -> ProfileKind {
         RealmKindTag::Planet => ProfileKind::Planet,
         RealmKindTag::Station => ProfileKind::Station,
         RealmKindTag::Area => ProfileKind::Area,
+        RealmKindTag::Star => ProfileKind::Planet,
     }
 }
 

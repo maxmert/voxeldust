@@ -21,6 +21,7 @@
 pub mod collections;
 pub mod entity_kind;
 pub mod fence;
+pub mod flight;
 pub mod frame;
 pub mod geometry;
 pub mod home;

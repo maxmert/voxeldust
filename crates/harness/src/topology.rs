@@ -1276,7 +1276,7 @@ mod tests {
                     status: vd_sim::stub::TransientStatus::Held { outbound: None },
                     // Slice 3d: the geometric-trigger prev-offset seed (no boundaries planted here, so
                     // it is never read — seed to the pose offset for the degenerate first segment).
-                    prev_offset: pose.pos.offset(),
+                    prev_offset: pose.pos,
                 },
             );
             owned.insert(
@@ -1287,7 +1287,7 @@ mod tests {
                     status: vd_sim::stub::TransientStatus::Arriving {
                         batch: vd_core::TransferId(1),
                     },
-                    prev_offset: pose.pos.offset(),
+                    prev_offset: pose.pos,
                 },
             );
         }
@@ -1589,9 +1589,10 @@ mod tests {
                 .expect("valid containment band");
             let make = |realm: RealmId, parent: Option<RealmId>, r: f64| RealmRegion {
                 realm,
-                center: LatticePos::local(DVec3::ZERO),
+                center: LatticePos::ORIGIN,
                 frame: frame_for_realm(realm, None).expect("System/Planet realm resolves a frame"),
                 shape: Boundary::Shell { r },
+                look: Some(Boundary::Shell { r }),
                 band,
                 aoi: vd_core::geometry::AoiConfig::inert(),
                 parent,
@@ -1614,7 +1615,7 @@ mod tests {
                     pose,
                     anchor_fence: Fence(1),
                     status: TransientStatus::Held { outbound: None },
-                    prev_offset: pose.pos.offset(),
+                    prev_offset: pose.pos,
                 },
             );
         }

@@ -313,6 +313,14 @@ impl WorkedExample {
         elements.raan = 0.0;
         elements.arg_periapsis = 0.0;
         elements.mean_anomaly_epoch = 0.0;
+        // THE WORKED-DISTANCE OVERRIDE (see `story_config`): the fixture's registered elements
+        // carry ITS exact semi-major axis and the Kepler-tuned central mass for the story
+        // period — fixture DATA over generated topology, exactly like the phase pinning above.
+        elements.sma = planet_from_star_m;
+        elements.central_mass =
+            4.0 * core::f64::consts::PI * core::f64::consts::PI * planet_from_star_m.powi(3)
+                / (STORY_ORBIT_PERIOD_S * STORY_ORBIT_PERIOD_S)
+                / G;
 
         WorkedExample {
             name,
@@ -434,26 +442,17 @@ fn story_config(system_from_galaxy_m: f64, planet_from_star_m: f64) -> UniverseC
     config.stellar.system_ring_r_m = system_from_galaxy_m;
     // Two planets per star: the second one is the SIBLING the negative gate demands a refusal for.
     config.planet.n_planets = 2;
-    // `orbital_axis_au(0, a0, ratio) == a0`, so with `a0 == 1 AU` the inner planet's semi-major axis is
-    // exactly the AU-to-metres factor — i.e. exactly the story's distance, with no product to round.
-    config.planet.orbital_a0_au = 1.0;
-    config.scale.au_to_render_m = planet_from_star_m;
     // A circular, in-plane orbit: the planet's distance from its star is its semi-major axis at EVERY
     // tick, so the story's "145" is true of the moving variant too and not only of the epoch.
     config.planet.ecc_sigma = 0.0;
     config.planet.incl_sigma = 0.0;
-    // The star's mass, chosen through the period the story planet should take to go round — the same
-    // move `visual_scale` makes (a synthetic mass so the demo is watchable), stated as the thing that is
-    // actually being chosen rather than as a mass constant nobody can check.
-    // `T = 2π√(a³/μ)` ⇒ `μ = 4π²a³/T²`, and `μ = G·M`.
-    let mu = 4.0 * core::f64::consts::PI * core::f64::consts::PI * planet_from_star_m.powi(3)
-        / (STORY_ORBIT_PERIOD_S * STORY_ORBIT_PERIOD_S);
-    config.stellar.central_mass_kg = mu / G;
-    // Every shell derived from what it has to hold, outermost last.
-    config.planet.planet_soi_r_m = planet_from_star_m / SHELL_HEADROOM;
-    config.stellar.system_soi_r_m = (planet_from_star_m * config.planet.orbital_ratio
-        + config.planet.planet_soi_r_m)
-        * SHELL_HEADROOM;
+    // (Since the in-system true-size re-solve the generator DERIVES orbits, shells and the
+    // central mass from the drawn star — the old compression/synthetic-mass knobs are gone.
+    // The fixture keeps its exact worked distances by REGISTERING its own elements over the
+    // generated topology — see `build`'s override, the same pattern as its phase pinning; the
+    // generated forest supplies realms, frames and parents, which is all these conversion
+    // stories read from it.)
+    let _ = planet_from_star_m;
     config.scale.galaxy_r_m =
         (system_from_galaxy_m + config.stellar.system_soi_r_m) * SHELL_HEADROOM;
     config.scale.universe_r_m = config.scale.galaxy_r_m * SHELL_HEADROOM;
@@ -499,20 +498,19 @@ fn frame_of(world: &WorldView, realm: RealmId) -> FrameRef {
         .frame
 }
 
-/// The centre the PARENT authored for `realm`, as the region carries it. Zero for an orbiting body (its
-/// position is authored live through its frame); the static offset otherwise.
+/// The centre the PARENT authored for `realm`, flattened to metres. Zero for an orbiting body (its
+/// position is authored live through its frame); the static offset otherwise. NORMALIZED since the
+/// cell activation — the value rides the integer half, so this flattens through `delta_m` (reading
+/// `.offset()` raw would place every static body at the origin).
 fn centre_of(world: &WorldView, realm: RealmId) -> DVec3 {
     let region = world
         .regions()
         .iter()
         .find(|r| r.realm == realm)
         .expect("the fixture only names realms the generator produced");
-    debug_assert_eq!(
-        region.center.cell(),
-        vd_core::glam::I64Vec3::ZERO,
-        "every region in the P3 forest is at cell zero",
-    );
-    region.center.offset()
+    region
+        .center
+        .delta_m(vd_core::pose::LatticePos::ORIGIN, region.frame.tier())
 }
 
 /// The lattice position of a pose, for tests that want the whole anchored value rather than the offset.
@@ -538,10 +536,20 @@ mod tests {
             WorkedExample::far_moving(),
             WorkedExample::moving(),
         ] {
-            assert_eq!(
-                centre_of(&fx.world, fx.system),
-                DVec3::new(fx.system_from_galaxy_m, 0.0, 0.0),
-                "{}: the galaxy authors the neighbour system on +x at the story distance",
+            // Since the 3-D seeded placement law (owner Q-B) the neighbour's direction is the
+            // seed's; the STORY fact is its RADIUS — asserted at the story distance (sqrt-of-sum
+            // rounding bounded well under a micron at these magnitudes) — and that the direction
+            // is genuinely three-dimensional (off the retired ring's y = 0 plane).
+            let neighbour = centre_of(&fx.world, fx.system);
+            assert!(
+                (neighbour.length() - fx.system_from_galaxy_m).abs() < 1.0e-6,
+                "{}: the galaxy authors the neighbour system at the story distance (got {})",
+                fx.name,
+                neighbour.length(),
+            );
+            assert!(
+                neighbour.y.abs() > 0.0,
+                "{}: the seeded placement is 3-D, not the retired collinear ring",
                 fx.name,
             );
             assert_eq!(
@@ -573,8 +581,11 @@ mod tests {
         let placement = book
             .of(fx.planet_frame)
             .expect("the star authors its own planet");
+        // NORMALIZED placement (the cell activation): the 145 m rides the integer anchor exactly.
         assert_eq!(
-            placement.origin,
+            placement
+                .anchor()
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, fx.planet_frame.tier()),
             DVec3::new(fx.planet_from_star_m, 0.0, 0.0),
             "the star authors the planet exactly on +x at tick 0",
         );
@@ -607,17 +618,35 @@ mod tests {
         )
         .expect("the star can place its own planet");
         assert_eq!(at_system.frame, fx.system_frame);
-        assert_eq!(at_system.pos.offset(), DVec3::new(fx.up_1_m, 0.0, 0.0));
+        assert_eq!(
+            at_system
+                .pos
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, at_system.frame.tier()),
+            DVec3::new(fx.up_1_m, 0.0, 0.0)
+        );
 
         let at_galaxy = transfer_frame(&at_system, fx.galaxy_frame, &fx.placement_book(fx.galaxy))
             .expect("the galaxy can place its own system");
         assert_eq!(at_galaxy.frame, fx.galaxy_frame);
-        assert_eq!(at_galaxy.pos.offset(), DVec3::new(fx.up_2_m, 0.0, 0.0));
+        // The galaxy's addition on the seeded 3-D placement: the authored vector + 148 along x
+        // (the collinear story's `up_2` on one axis, generalized).
+        assert_eq!(
+            at_galaxy
+                .pos
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, at_galaxy.frame.tier()),
+            centre_of(&fx.world, fx.system) + DVec3::new(fx.up_1_m, 0.0, 0.0)
+        );
 
         let back_to_system =
             transfer_frame(&at_galaxy, fx.system_frame, &fx.placement_book(fx.galaxy))
                 .expect("the galaxy can place its own system");
-        assert_eq!(back_to_system.pos.offset(), DVec3::new(fx.up_1_m, 0.0, 0.0));
+        assert_eq!(
+            back_to_system.pos.delta_m(
+                vd_core::pose::LatticePos::ORIGIN,
+                back_to_system.frame.tier()
+            ),
+            DVec3::new(fx.up_1_m, 0.0, 0.0)
+        );
 
         let back_to_planet = transfer_frame(
             &back_to_system,
@@ -626,7 +655,10 @@ mod tests {
         )
         .expect("the star can place its own planet");
         assert_eq!(
-            back_to_planet.pos.offset(),
+            back_to_planet.pos.delta_m(
+                vd_core::pose::LatticePos::ORIGIN,
+                back_to_planet.frame.tier()
+            ),
             DVec3::new(fx.occupant_from_planet_m, 0.0, 0.0),
         );
     }

@@ -356,10 +356,7 @@ fn p1_parity_real_binaries_over_quic() {
                     // sub-millimetre remainder and never reaches this threshold however far the
                     // walker walks: this loop would spin until its deadline.
                     p.pos
-                        .delta_m(
-                            vd_core::pose::LatticePos::local(DVec3::ZERO),
-                            vd_core::pose::Tier::Fine,
-                        )
+                        .delta_m(vd_core::pose::LatticePos::ORIGIN, vd_core::pose::Tier::Fine)
                         .distance(DVec3::ZERO)
                         > 0.5
                 })

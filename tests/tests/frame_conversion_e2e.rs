@@ -98,6 +98,13 @@ const PLANET_ORBIT_PERIOD_S: f64 = 10.0;
 ///
 /// The central mass is chosen THROUGH the period (`T = 2π√(a³/μ)`, `μ = G·M`) rather than written down,
 /// because the period is the thing being chosen and a mass constant is a number nobody can check.
+/// Flatten a pose's lattice position to metres in its own frame (poses ride NORMALIZED since the
+/// cell activation — `.offset()` raw is a sub-cell residual, never a position).
+fn pose_m(p: &vd_core::pose::StampedPose) -> vd_core::glam::DVec3 {
+    p.pos
+        .delta_m(vd_core::pose::LatticePos::ORIGIN, p.frame.tier())
+}
+
 fn planet_orbit() -> OrbitalElements {
     let a = PLANET_FROM_STAR_M;
     let mu = 4.0 * std::f64::consts::PI * std::f64::consts::PI * a.powi(3)
@@ -267,7 +274,7 @@ fn an_occupant_leaving_a_realm_arrives_at_its_parent_in_the_parents_frame() {
     // Exact: every quantity in this fixture is exact in binary at this scale, so a tolerance here would
     // be hiding something.
     assert_eq!(
-        arrived.pos.offset(),
+        pose_m(&arrived),
         DVec3::new(OCCUPANT_FROM_STAR_M, 0.0, 0.0),
         "the star adds its child's placement: {PLANET_FROM_STAR_M} + {OCCUPANT_FROM_PLANET_M}. \
          Reporting {OCCUPANT_FROM_PLANET_M} here is the relabel bug: the frame changed, the number \
@@ -368,7 +375,7 @@ fn an_occupant_entering_a_realm_lands_inside_it_measured_from_its_centre() {
     // Exact: every quantity in this fixture is exact in binary at this scale, so a tolerance here would be
     // hiding something.
     assert_eq!(
-        arrived.pos.offset(),
+        pose_m(&arrived),
         DVec3::new(OCCUPANT_INSIDE_PLANET_M, 0.0, 0.0),
         "the star subtracts its child's placement: {OCCUPANT_ENTERS_FROM_STAR_M} − {PLANET_FROM_STAR_M}. \
          Reporting {OCCUPANT_ENTERS_FROM_STAR_M} here is the relabel bug in the inward direction: the \
@@ -454,7 +461,7 @@ fn an_occupant_entering_a_realm_that_moves_lands_inside_it_and_stays() {
         "the planet sweeps over the waiting occupant and takes it",
     );
     let arrived = arrival.expect("just captured");
-    let from_centre = arrived.pos.offset().length();
+    let from_centre = pose_m(&arrived).length();
     println!(
         "[moving arrival] frame {:?}, {from_centre:.6} m from the planet's centre (boundary \
          {PLANET_BOUNDARY_R_M} m)",
@@ -578,16 +585,34 @@ fn demand_config() -> UniverseConfig {
     UniverseConfig::world(15.0, 0.05)
 }
 
-/// The star system's own boundary in the shipped demand world — read off the generator.
+/// The star system's own boundary in the shipped demand world — read off the generator's SOLVED
+/// region roster (the in-system re-solve: no config radius exists; the shell is the clearance
+/// solve's, ~1.58e11 m for the home system).
 fn demand_system_soi_m() -> f64 {
-    demand_config().stellar.system_soi_r_m
+    let cfg = demand_config();
+    vd_physics::worldgen::realm_regions_for_config(0, &cfg)
+        .iter()
+        .find(|r| r.realm == SYSTEM)
+        .expect("THE world rosters its home system")
+        .shape
+        .finite_extent()
 }
 
-/// A planet's WHOLE authority sphere there — a fraction of the walk world's, against the SAME
-/// one-metre entry margin. This is the number that turns a tolerable arrival error into a trap, and
-/// the one the S4 re-solve moved (4.1607 → 3.954 m) while the transcribed copy sat still.
+/// The INNER planet's WHOLE authority sphere there — its gravitational SOI at its drawn mass
+/// (D-REAL-1), read off the same roster, against the SAME one-metre entry margin.
 fn demand_planet_soi_m() -> f64 {
-    demand_config().planet.planet_soi_r_m
+    let cfg = demand_config();
+    let inner = moving_children_for_config(0, &cfg, SYSTEM)
+        .into_iter()
+        .min_by(|a, b| a.1.sma.total_cmp(&b.1.sma))
+        .map(|(r, _)| r)
+        .expect("THE world's home system authors movers");
+    vd_physics::worldgen::realm_regions_for_config(0, &cfg)
+        .iter()
+        .find(|r| r.realm == inner)
+        .expect("the inner planet is rostered")
+        .shape
+        .finite_extent()
 }
 
 /// THE world's own INNER mover (smallest semi-major axis), from the same generator call the shipped
@@ -636,9 +661,10 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
     vec![
         RealmRegion {
             realm: root,
-            center: vd_core::pose::LatticePos::local(DVec3::ZERO),
+            center: vd_core::pose::LatticePos::ORIGIN,
             frame: FrameRef::SystemSpace { system_seed: 1 },
             shape: Boundary::Shell { r: 1.0e6 },
+            look: Some(Boundary::Shell { r: 1.0e6 }),
             band,
             aoi: AoiConfig::inert(),
             interior_band: AoiConfig::inert(),
@@ -646,11 +672,14 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
         },
         RealmRegion {
             realm: SYSTEM,
-            center: vd_core::pose::LatticePos::local(DVec3::ZERO),
+            center: vd_core::pose::LatticePos::ORIGIN,
             frame: FrameRef::SystemSpace { system_seed: 7 },
             shape: Boundary::Shell {
                 r: demand_system_soi_m(),
             },
+            look: Some(Boundary::Shell {
+                r: demand_system_soi_m(),
+            }),
             band,
             aoi: AoiConfig::inert(),
             interior_band: AoiConfig::inert(),
@@ -659,11 +688,14 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
         RealmRegion {
             realm: PLANET,
             // ZERO: an orbiting body is placed LIVE by its parent, never from a stored centre.
-            center: vd_core::pose::LatticePos::local(DVec3::ZERO),
+            center: vd_core::pose::LatticePos::ORIGIN,
             frame: FrameRef::PlanetCentered { planet_seed: 7 },
             shape: Boundary::Shell {
                 r: demand_planet_soi_m(),
             },
+            look: Some(Boundary::Shell {
+                r: demand_planet_soi_m(),
+            }),
             band,
             aoi: AoiConfig::inert(),
             interior_band: AoiConfig::inert(),
@@ -724,7 +756,7 @@ fn entering_a_real_sized_planet_lands_inside_it_and_does_not_trade_the_player_ba
         "the planet sweeps over the waiting occupant and takes it"
     );
     let arrived = arrival.expect("just captured");
-    let from_centre = arrived.pos.offset().length();
+    let from_centre = pose_m(&arrived).length();
     let planet_soi_m = demand_planet_soi_m();
     println!(
         "[real-sized arrival] {from_centre:.6} m from the planet's centre, boundary \
@@ -1174,8 +1206,8 @@ fn a_round_trip_returns_the_occupant_to_the_metre_it_left() {
     let back_planet = transfer_frame(&back_system, fx.planet_frame, &fx.placement_book(fx.system))
         .expect("the star places its own planet");
 
-    let departed = start.pos.offset().x;
-    let returned = back_planet.pos.offset().x;
+    let departed = pose_m(&start).x;
+    let returned = pose_m(&back_planet).x;
     let err = (returned - departed).abs();
     println!(
         "[far round trip] departed {departed:.9} m  returned {returned:.9} m  error {err:.9} m"
@@ -1183,7 +1215,7 @@ fn a_round_trip_returns_the_occupant_to_the_metre_it_left() {
     println!(
         "[far round trip] at the galaxy the occupant is legitimately {:.3} m out; one double step there is \
          {:.9} m",
-        at_galaxy.pos.offset().x,
+        pose_m(&at_galaxy).x,
         (FAR_SYSTEM_FROM_GALAXY_M + ONE_MM_M) - FAR_SYSTEM_FROM_GALAXY_M,
     );
     assert_eq!(back_planet.frame, fx.planet_frame);
@@ -1579,10 +1611,11 @@ fn chain_sibling_region(
     let cfg = UniverseConfig::walk_demand(v_max, dt);
     vd_core::geometry::RealmRegion {
         realm,
-        center: vd_core::pose::LatticePos::local(center),
+        center: vd_core::pose::LatticePos::from_metres(center, vd_core::pose::Tier::Fine),
         frame: vd_core::pose::frame_for_realm(realm, Some(parent))
             .expect("a planet/area sibling has a canonical frame"),
         shape,
+        look: Some(shape),
         band: cfg
             .band
             .build()
@@ -2103,8 +2136,8 @@ fn the_authored_world_no_longer_descends_and_each_level_states_only_itself() {
         let authored = authored_by(&mut topo, SHARD, at);
         for r in &rows {
             assert_eq!(
-                r.pose.pos.offset(),
-                authored[&r.realm].pos.offset(),
+                pose_m(&r.pose),
+                pose_m(&authored[&r.realm]),
                 "the leaf states its own authored row VERBATIM — no level subtracts for anyone now",
             );
         }
@@ -2885,11 +2918,11 @@ fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
     // must keep working exactly as before.
     let stayer_here = edge_row(&area_feed, stayer).expect("the area draws its own player");
     assert_eq!(stayer_here.frame, CHAIN_AREA_FRAME);
-    assert_eq!(stayer_here.pos.offset(), staying);
+    assert_eq!(pose_m(&stayer_here), staying);
     let traveller_there =
         edge_row(&planet_feed, traveller).expect("the planet draws its own player");
     assert_eq!(traveller_there.frame, planet_frame);
-    assert_eq!(traveller_there.pos.offset(), held);
+    assert_eq!(pose_m(&traveller_there), held);
 
     // (2) AND NEITHER EDGE CARRIES THE OTHER'S FIGURE — the accepted loss, stated as the
     // measurement it is. A row for the other realm's occupant here would mean a pose crossed a

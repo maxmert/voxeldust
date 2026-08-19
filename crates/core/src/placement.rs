@@ -372,7 +372,12 @@ mod tests {
         let f = MotionFn(std::sync::Arc::new(|secs| {
             FramePlacement::moving(DVec3::new(secs, 0.0, 0.0), DVec3::ZERO)
         }));
-        assert_eq!((f.0)(3.0).origin, DVec3::new(3.0, 0.0, 0.0));
+        assert_eq!(
+            (f.0)(3.0)
+                .anchor()
+                .delta_m(crate::pose::LatticePos::ORIGIN, crate::pose::Tier::Fine),
+            DVec3::new(3.0, 0.0, 0.0)
+        );
         assert_eq!(format!("{f:?}"), "MotionFn");
         assert_eq!(format!("{:?}", f.clone()), "MotionFn");
     }

@@ -384,6 +384,14 @@ impl EntityTrack {
 mod tests {
     use super::*;
 
+    /// Flatten a [`RenderPose`] to world metres — the same reduction `world_pos` performs. The
+    /// tests read THIS, never `.pos` raw: since the cell activation every streamed pose is
+    /// NORMALIZED, so `.pos` alone is a sub-cell residual, not a position.
+    fn wp(p: &RenderPose) -> DVec3 {
+        vd_core::pose::LatticePos::at(p.cell, p.pos)
+            .delta_m(vd_core::pose::LatticePos::default(), p.tier)
+    }
+
     fn lerp_vec(a: DVec3, b: DVec3, t: f64) -> DVec3 {
         a.lerp(b, t)
     }
@@ -421,7 +429,7 @@ mod tests {
             planet,
             "an equal-tick old-frame row never flips the frame back"
         );
-        assert_eq!(track.sample(11.0).pos, DVec3::new(2.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(11.0)), DVec3::new(2.0, 0.0, 0.0));
         // OLDER tick, old frame — ignored too (the frozen retained-ghost row).
         track.observe(pose_at(10, 9.0));
         assert_eq!(track.current_frame(), planet);
@@ -431,7 +439,7 @@ mod tests {
             DVec3::new(3.0, 0.0, 0.0),
             UniverseTick(11),
         ));
-        assert_eq!(track.sample(11.0).pos, DVec3::new(3.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(11.0)), DVec3::new(3.0, 0.0, 0.0));
     }
 
     // ---- SLICE 6 (THE SHAKE): the buffer and the history contradict each other ----
@@ -449,7 +457,7 @@ mod tests {
             track.observe(pose_at(t, t as f64));
         }
         let cursor = 100.0 - buffer; // 97.6
-        let drawn = track.sample(cursor).pos;
+        let drawn = wp(&track.sample(cursor));
         assert_eq!(cursor, 97.6);
         // STRICTLY between the poses at 97 and 98 — a real blend, not a clamp to either endpoint.
         assert!(drawn.x > 97.0, "blended past the older endpoint: {drawn}");
@@ -491,8 +499,8 @@ mod tests {
     fn slice6_a_cursor_past_the_newest_pose_freezes_and_never_coasts() {
         let mut track = EntityTrack::new(pose_at(10, 10.0));
         track.observe(pose_at(11, 11.0));
-        assert_eq!(track.sample(11.0).pos, DVec3::new(11.0, 0.0, 0.0));
-        assert_eq!(track.sample(50.0).pos, DVec3::new(11.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(11.0)), DVec3::new(11.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(50.0)), DVec3::new(11.0, 0.0, 0.0));
     }
 
     /// SLICE 6 S2 — before the whole ring the sample CLAMPS to the oldest retained pose. The history
@@ -501,7 +509,7 @@ mod tests {
     fn slice6_a_cursor_before_the_whole_ring_clamps_to_the_oldest() {
         let mut track = EntityTrack::new(pose_at(10, 10.0));
         track.observe(pose_at(11, 11.0));
-        assert_eq!(track.sample(1.0).pos, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(1.0)), DVec3::new(10.0, 0.0, 0.0));
     }
 
     /// SLICE 6 S2 — the ring WRAPS: after more than `TRACK_POSES` observations the oldest are evicted
@@ -516,10 +524,10 @@ mod tests {
         assert_eq!(track.newest_tick(), UniverseTick(newest));
         // The oldest surviving pose is `TRACK_POSES - 1` ticks back; anything older clamps to it.
         let oldest = newest - (TRACK_POSES as u64 - 1);
-        assert_eq!(track.sample(0.0).pos, DVec3::new(oldest as f64, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(0.0)), DVec3::new(oldest as f64, 0.0, 0.0));
         // A blend ACROSS the wrap point still interpolates correctly.
         let mid = oldest as f64 + 0.5;
-        assert!((track.sample(mid).pos.x - mid).abs() < 1e-9);
+        assert!((wp(&track.sample(mid)).x - mid).abs() < 1e-9);
     }
 
     /// SLICE 6 S2 — a sibling chunk of the SAME tick replaces the newest pose IN PLACE and does NOT
@@ -531,18 +539,18 @@ mod tests {
         track.observe(pose_at(11, 11.0));
         track.observe(pose_at(11, 99.0)); // same tick, corrected value
         assert_eq!(track.newest_tick(), UniverseTick(11));
-        assert_eq!(track.sample(11.0).pos, DVec3::new(99.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(11.0)), DVec3::new(99.0, 0.0, 0.0));
         // The tick-10 pose is still there — the window did not collapse.
-        assert_eq!(track.sample(10.0).pos, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(10.0)), DVec3::new(10.0, 0.0, 0.0));
     }
 
     /// SLICE 6 S2 — a single-sample track is degenerate: every cursor returns that one pose.
     #[test]
     fn slice6_a_single_sample_track_returns_that_pose_at_any_cursor() {
         let track = EntityTrack::new(pose_at(10, 10.0));
-        assert_eq!(track.sample(0.0).pos, DVec3::new(10.0, 0.0, 0.0));
-        assert_eq!(track.sample(10.0).pos, DVec3::new(10.0, 0.0, 0.0));
-        assert_eq!(track.sample(99.0).pos, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(0.0)), DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(10.0)), DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(99.0)), DVec3::new(10.0, 0.0, 0.0));
     }
 
     /// SLICE 6 S2 — WHY DEPTH IS THE FIX, not the ring mechanism. This is the original RED
@@ -559,7 +567,7 @@ mod tests {
         let cursor = 100.0 - buffer;
         assert_eq!(cursor, 97.6);
         assert_eq!(
-            track.sample(cursor).pos,
+            wp(&track.sample(cursor)),
             DVec3::new(0.0, 0.0, 0.0),
             "two poses span ONE tick, so a {buffer}-tick cursor is still behind them both",
         );
@@ -578,16 +586,16 @@ mod tests {
         // (Two asserts, not one `&&` — a short-circuit inside an assert is an uncoverable
         // branch arm, HR5.)
         assert_eq!(track.window_at(12.5), SampleWindow::Blended);
-        let drawn = track.sample(12.5).pos.x;
+        let drawn = wp(&track.sample(12.5)).x;
         assert!(drawn > 12.0);
         assert!(drawn < 13.0);
         // Clamped old: before the ring, drawn == the oldest.
         assert_eq!(track.window_at(1.0), SampleWindow::ClampedOld);
-        assert_eq!(track.sample(1.0).pos.x, 10.0);
+        assert_eq!(wp(&track.sample(1.0)).x, 10.0);
         // Clamped new: at/past the newest, drawn == the newest (frozen).
         assert_eq!(track.window_at(14.0), SampleWindow::ClampedNew);
         assert_eq!(track.window_at(99.0), SampleWindow::ClampedNew);
-        assert_eq!(track.sample(99.0).pos.x, 14.0);
+        assert_eq!(wp(&track.sample(99.0)).x, 14.0);
     }
 
     /// SLICE 6 S5 — the census tallies the three classes.
@@ -679,8 +687,8 @@ mod tests {
     fn a_fresh_track_freezes_at_its_only_pose() {
         let track = EntityTrack::new(pose_at(10, 5.0));
         // Degenerate window: any cursor returns the pose unchanged.
-        assert_eq!(track.sample(10.0).pos, DVec3::new(5.0, 0.0, 0.0));
-        assert_eq!(track.sample(7.0).pos, DVec3::new(5.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(10.0)), DVec3::new(5.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(7.0)), DVec3::new(5.0, 0.0, 0.0));
         assert_eq!(track.newest_tick(), UniverseTick(10));
     }
 
@@ -690,10 +698,10 @@ mod tests {
         track.observe(pose_at(12, 10.0)); // shift: prev=tick10/x0, current=tick12/x10
         assert_eq!(track.newest_tick(), UniverseTick(12));
         // Cursor at the window midpoint (tick 11) → halfway.
-        assert_eq!(track.sample(11.0).pos, DVec3::new(5.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(11.0)), DVec3::new(5.0, 0.0, 0.0));
         // Before the window → prev; at/after → current.
-        assert_eq!(track.sample(10.0).pos, DVec3::new(0.0, 0.0, 0.0));
-        assert_eq!(track.sample(12.0).pos, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(10.0)), DVec3::new(0.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(12.0)), DVec3::new(10.0, 0.0, 0.0));
     }
 
     #[test]
@@ -706,20 +714,25 @@ mod tests {
         assert_eq!(track.newest_tick(), UniverseTick(12));
         // The window is still [10,12]; tick-11 cursor still lerps (toward the
         // updated current x=9).
-        assert_eq!(track.sample(11.0).pos, DVec3::new(4.5, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(11.0)), DVec3::new(4.5, 0.0, 0.0));
     }
 
     #[test]
     fn a_tier_change_collapses_the_window_instead_of_blending_across_lattices() {
         let mut track = EntityTrack::new(pose_at(10, 0.0)); // SystemSpace — Fine
         track.observe(pose_at(12, 10.0)); // same frame → window [10, 12]
-        // A pose on the COARSE lattice arrives (galaxy scale, P10 warp).
-        let mut other = pose_at(14, 99.0);
-        other.frame = FrameRef::GalaxySpace;
+        // A pose on the COARSE lattice arrives (galaxy scale, P10 warp) — built IN the coarse
+        // frame so its lattice is normalized in the frame's own unit (relabelling a FINE-normalized
+        // pose would wear the wrong unit on a live integer cell).
+        let other = StampedPose::at_rest(
+            FrameRef::GalaxySpace,
+            DVec3::new(99.0, 0.0, 0.0),
+            UniverseTick(14),
+        );
         track.observe(other);
         // Collapsed: sampling freezes at the new pose (x=99), never a blend between two lattices
         // whose integer cells count in different units.
-        assert_eq!(track.sample(13.0).pos, DVec3::new(99.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(13.0)), DVec3::new(99.0, 0.0, 0.0));
         assert_eq!(track.sample(14.0).frame, FrameRef::GalaxySpace);
         // …and the sample carries the NEW unit, so whatever draws it scales the cell in light-years and
         // not in millimetres. Before the unit rode the pose, this was re-derived at the drawing site.
@@ -767,10 +780,10 @@ mod tests {
         // NO blend across the cut: a cursor BEHIND the crossing row clamps to the new space's pose —
         // never to the old space's numbers, and never to a lerp of the two.
         assert!(
-            (track.sample(10.5).pos.x - 0.4).abs() < 1e-9,
+            (wp(&track.sample(10.5)).x - 0.4).abs() < 1e-9,
             "the old space's history is gone; the sample clamps to the new space"
         );
-        assert!((track.sample(12.0).pos.x - 0.4).abs() < 1e-9);
+        assert!((wp(&track.sample(12.0)).x - 0.4).abs() < 1e-9);
         // The label tracks the leading edge, so the player's location readout flips with the cut.
         assert_eq!(
             track.current_frame(),
@@ -781,7 +794,7 @@ mod tests {
         next.frame = FrameRef::PlanetCentered { planet_seed: 5 };
         track.observe(next);
         assert!(
-            (track.sample(12.5).pos.x - 0.9).abs() < 1e-9,
+            (wp(&track.sample(12.5)).x - 0.9).abs() < 1e-9,
             "blending resumes inside the new space"
         );
     }
@@ -808,8 +821,8 @@ mod tests {
         track.observe(pose_at(12, 10.0));
         // The stream stalls; the cursor runs WELL past the newest tick. The entity
         // must FREEZE at current (x=10), never project past it on velocity.
-        assert_eq!(track.sample(50.0).pos, DVec3::new(10.0, 0.0, 0.0));
-        assert_eq!(track.sample(1000.0).pos, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(50.0)), DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(wp(&track.sample(1000.0)), DVec3::new(10.0, 0.0, 0.0));
     }
 
     #[test]
@@ -847,21 +860,22 @@ mod tests {
         a.observe(pose_at(14, 40.0)); // window [10,14], span 4
         b.observe(pose_at(14, 200.0));
         // Cursor at tick 11 → alpha 0.25 for BOTH.
-        assert_eq!(a.sample(11.0).pos, DVec3::new(10.0, 0.0, 0.0)); // 0 + 0.25*40
-        assert_eq!(b.sample(11.0).pos, DVec3::new(125.0, 0.0, 0.0)); // 100 + 0.25*100
+        assert_eq!(wp(&a.sample(11.0)), DVec3::new(10.0, 0.0, 0.0)); // 0 + 0.25*40
+        assert_eq!(wp(&b.sample(11.0)), DVec3::new(125.0, 0.0, 0.0)); // 100 + 0.25*100
     }
 
     // ---- S1 floating-origin: the cell rides the render pose (project_floating_origin_plan.md) ----
 
     #[test]
-    fn sample_at_cell_zero_carries_a_zero_cell_and_the_plain_offset_blend() {
-        // Byte-floor: both poses at cell 0 (the P3 shipping form) ⇒ the rebase is a no-op and the result
-        // is the plain offset lerp with cell 0 — unchanged from the pre-S1 bare-DVec3 behaviour.
+    fn sample_carries_the_normalized_cell_and_blends_to_the_midpoint_value() {
+        // Since the cell activation every shipped pose is NORMALIZED, so the blend rebases the
+        // previous pose into the CURRENT pose's cell and the sampled value is the metre midpoint —
+        // the cell carries the newest pose's integer half (10 m = 10_240 fine cells).
         let mut track = EntityTrack::new(pose_at(10, 0.0));
         track.observe(pose_at(11, 10.0));
         let mid = track.sample(10.5);
-        assert_eq!(mid.cell, I64Vec3::ZERO);
-        assert!((mid.pos.x - 5.0).abs() < 1e-9);
+        assert_eq!(mid.cell, I64Vec3::new(10_240, 0, 0));
+        assert!((wp(&mid).x - 5.0).abs() < 1e-9);
     }
 
     #[test]

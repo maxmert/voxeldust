@@ -403,6 +403,12 @@ impl DeliveredView {
 
 #[cfg(test)]
 mod tests {
+    /// Flatten a RenderPose to world metres (normalized lattice since the cell activation).
+    fn rpw(p: &crate::interp::RenderPose) -> DVec3 {
+        vd_core::pose::LatticePos::at(p.cell, p.pos)
+            .delta_m(vd_core::pose::LatticePos::default(), p.tier)
+    }
+
     use super::*;
     use std::collections::BTreeSet;
     use vd_core::entity_kind::EntityKind;
@@ -458,8 +464,8 @@ mod tests {
         );
         let rendered = view.render(11.0); // tick-11 cursor → window midpoint
         assert_eq!(rendered.len(), 2);
-        assert_eq!(rendered[&ent(1)].pos, DVec3::new(5.0, 0.0, 0.0));
-        assert_eq!(rendered[&ent(2)].pos, DVec3::new(105.0, 0.0, 0.0));
+        assert_eq!(rpw(&rendered[&ent(1)]), DVec3::new(5.0, 0.0, 0.0));
+        assert_eq!(rpw(&rendered[&ent(2)]), DVec3::new(105.0, 0.0, 0.0));
         assert_eq!(view.stale_frames_dropped(), 0);
         // world_pos is a passthrough: the pose ships already measured from the realm this session is in.
         assert_eq!(
@@ -599,7 +605,7 @@ mod tests {
         view.on_snapshot(&held, snap(SubId(0), 4, 9, vec![(ent(1), 9.0)]));
         assert_eq!(view.stale_frames_dropped(), 2);
         // Only the first frame applied: one track, frozen at its sole pose.
-        assert_eq!(view.render(10.0)[&ent(1)].pos, DVec3::new(1.0, 0.0, 0.0));
+        assert_eq!(rpw(&view.render(10.0)[&ent(1)]), DVec3::new(1.0, 0.0, 0.0));
     }
 
     #[test]
@@ -607,11 +613,19 @@ mod tests {
         // A corrupt sender ships NaN/Inf coordinates; the view must sanitize them at
         // ingress so the renderer never gets a poisoned transform.
         let mut view = DeliveredView::default();
-        let pose = StampedPose::at_rest(
-            FrameRef::SystemSpace { system_seed: 1 },
-            DVec3::new(f64::NAN, 1.0, f64::INFINITY),
-            UniverseTick(10),
-        );
+        // Built RAW (LatticePos::at), never through the normalizing constructors: a hostile wire
+        // pose carries whatever halves the sender wrote — normalizing an Inf here would saturate
+        // the carry into a huge-but-finite cell and test the wrong thing.
+        let pose = StampedPose {
+            frame: FrameRef::SystemSpace { system_seed: 1 },
+            pos: vd_core::pose::LatticePos::at(
+                vd_core::glam::I64Vec3::new(0, 1024, 0),
+                DVec3::new(f64::NAN, 0.0, f64::INFINITY),
+            ),
+            vel: DVec3::ZERO,
+            orient: vd_core::glam::DQuat::IDENTITY,
+            universe_tick: UniverseTick(10),
+        };
         view.on_snapshot(
             &s(SubId(0)),
             SnapshotDatagram {
@@ -626,7 +640,7 @@ mod tests {
             },
         );
         let rendered = view.render(10.0);
-        let pos = rendered[&ent(1)].pos;
+        let pos = rpw(&rendered[&ent(1)]);
         assert!(pos.is_finite(), "ingress sanitized the pose, got {pos:?}");
         assert_eq!(pos, DVec3::new(0.0, 1.0, 0.0));
         // The corruption is COUNTED, not silently fixed (the "never silent" rule).
@@ -693,7 +707,7 @@ mod tests {
             "the foreign-space row is counted"
         );
         assert_eq!(
-            view.render(12.0)[&ent(2)].pos,
+            rpw(&view.render(12.0)[&ent(2)]),
             DVec3::new(6.0, 0.0, 0.0),
             "the foreign-space row never folded"
         );
@@ -755,7 +769,7 @@ mod tests {
         assert_eq!(view.echo_rows_dropped(), 1, "the echo is dropped");
         assert_eq!(view.own_location_frame(), Some(planet), "no backward flip");
         assert_eq!(
-            view.render(12.0)[&ent(1)].pos,
+            rpw(&view.render(12.0)[&ent(1)]),
             DVec3::new(0.4, 0.0, 0.0),
             "the drawn pose stays in the new space"
         );
@@ -849,7 +863,7 @@ mod tests {
         let r = view.render(10.0);
         assert_eq!(r.len(), 1, "rendered exactly once (one track per entity)");
         assert_eq!(
-            r[&ent(1)].pos,
+            rpw(&r[&ent(1)]),
             DVec3::new(50.0, 0.0, 0.0),
             "latest-wins: the dest-sub pose replaced the source copy"
         );
@@ -896,7 +910,7 @@ mod tests {
             "the re-home flipped the location to realm B — no node info needed"
         );
         assert_eq!(
-            view.render(11.0)[&ent(1)].pos,
+            rpw(&view.render(11.0)[&ent(1)]),
             DVec3::new(9.0, 0.0, 0.0),
             "renders the dest pose"
         );

@@ -63,8 +63,11 @@ pub struct DevRealmBox {
     /// realm's own self-authored outline; `"marker"` — its parent's photometric point-of-light
     /// datum. The pixel gates' body-kind assert (§2.11) reads this.
     pub body_kind: String,
-    /// THE MARKER'S PHOTOMETRIC DATUM `(class_code, luma_lsun)` as the parent stated it —
-    /// `None` on a LOOK body (a marker cannot carry a look, and a look never carries luma).
+    /// THE PHOTOMETRIC DATUM `(class_code, luma_lsun)`. On a MARKER body: the parent's stated
+    /// point-of-light datum. On a LOOK body: usually `None` — but a RUNNING star's OWN look bag
+    /// lawfully carries `TAG_LUMA` beside `TAG_LOOK` (THE STAR-LOOK EXTENSION SEAM, owner ruling
+    /// 2026-08-19: future star params are future tags, skip-unknown free), so a look row may
+    /// state its own light.
     /// The pixel gates size a point sprite's projected rectangle from exactly this, through the
     /// SAME Tier-A `marker_look` + `marker_world_radius` pair the renderer scales the sprite by
     /// (window lane Slice D), so the drawn footprint and the asserted rectangle cannot disagree.

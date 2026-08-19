@@ -1545,7 +1545,7 @@ pub struct GatewayStats {
     /// firing (§2.6.3). MUST stay 0 in a healthy run (asserted by the parity gate); driven
     /// nonzero on purpose by the G-SHEAR anti-vacuity unit.
     pub window_instant_mismatch: u64,
-    /// Slice B — rows refused by `RotatedFrameAcrossCells` inside a fold (pre-P10 cell math;
+    /// Slice B — rows refused by `RotationBeyondExactReach` inside a fold (pre-P10 cell math;
     /// today reachable only at the author's inversion — pinned by the composer unit).
     pub window_rotated_refused: u64,
     /// Slice B — rows dropped because their stated tail frame was not their level's own frame
@@ -1563,7 +1563,7 @@ pub struct GatewayStats {
     pub window_dedup_disagree: u64,
     /// Slice B — GAUGE (max): the largest measured hop-vs-child-row deviation, in nanometres —
     /// the §2.12 "measured bound", printed by the parity gate.
-    pub window_dedup_max_dev_nm: u64,
+    pub window_dedup_max_dev_cells: u64,
     /// Slice B — `HeadRead{Realm(ancestor)}` polls sent on the window keep-alive cadence to
     /// resolve lineage ancestors the session never subscribed to (the EXISTING directory pair —
     /// no new wire arm). THROUGHPUT.
@@ -2285,8 +2285,9 @@ fn compose_scenes_pass(
                     stats.window_alien_rows += fold.alien_rows;
                     stats.window_hop_invalid += fold.hop_invalid;
                     stats.window_dedup_disagree += fold.dedup_disagree;
-                    stats.window_dedup_max_dev_nm =
-                        stats.window_dedup_max_dev_nm.max(fold.dedup_max_dev_nm);
+                    stats.window_dedup_max_dev_cells = stats
+                        .window_dedup_max_dev_cells
+                        .max(fold.dedup_max_dev_cells);
                     stats.window_full_chain_folds +=
                         u64::from((fold.fresh_levels == authors.len()) & (authors.len() >= 2));
                     memo.insert((origin, t.0), (fold.clone(), false));
@@ -4833,12 +4834,15 @@ fn on_directory_reply(
             stats.logins_held_pre_sync += 1;
             return;
         }
+        // The ONE forest descend per login (5f-3d: every later re-drive reuses this coord). It
+        // yields BOTH halves of the answer — which realm, and where inside it. The POSE half is
+        // recorded in EVERY mode (T2's forced re-derivation: since the star became a body at
+        // the home centre, an attach with no pose would drop the account inside the Star realm
+        // — the static chain measured exactly that as a frozen unresolvable crossing); the
+        // COORD half still gates the dynamic demand alone.
+        let (coord, spawn) = home_placement(&config.seed_injector, session.account);
+        session.spawn = Some(spawn);
         let home = if config.dynamic_home_mode(clock.synced) {
-            // The ONE forest descend per login (5f-3d: every later re-drive reuses this coord). It now
-            // yields BOTH halves of the answer — which realm, and where inside it — because they come from
-            // the same walk down and separating them is what let the two disagree.
-            let (coord, spawn) = home_placement(&config.seed_injector, session.account);
-            session.spawn = Some(spawn);
             // THE WINDOW LANE (Slice B, §2.6.2): the login descent's coord IS the session's
             // lineage — recorded root→leaf ON the session, so the chain derivation reads
             // session history and never a forest.
@@ -5315,7 +5319,7 @@ mod tests {
             decode_controls(&sent, CLIENT),
             vec![ServerControlMsg::Close {
                 reason:
-                    "protocol minor below the floor (18): the scene is server-composed from v1.18"
+                    "protocol minor below the floor (22): the scene is server-composed from v1.22"
                         .to_owned()
             }]
         );
@@ -6785,7 +6789,8 @@ mod tests {
                 session: session_id,
                 fence: Fence(1),
                 account: AccountId(5),
-                spawn: None,
+                // Every attach carries the registry's pose now (the T2 spawn-standoff fix).
+                spawn: attach_spawn(&rig),
             }
         );
     }
@@ -10370,7 +10375,10 @@ mod tests {
         assert_eq!(rows[0].realm, RealmId::System(7));
         assert_eq!(rows[0].parent, None);
         assert_eq!(
-            rows[0].pose.pos.offset(),
+            rows[0].pose.pos.delta_m(
+                vd_core::pose::LatticePos::default(),
+                rows[0].pose.frame.tier()
+            ),
             DVec3::ZERO,
             "the origin draws from its look AT the origin"
         );
@@ -10384,7 +10392,13 @@ mod tests {
             Some(RealmId::System(7)),
             "hierarchy identity only"
         );
-        assert_eq!(rows[1].pose.pos.offset(), DVec3::new(30.0, 0.0, 0.0));
+        assert_eq!(
+            rows[1].pose.pos.delta_m(
+                vd_core::pose::LatticePos::default(),
+                rows[1].pose.frame.tier()
+            ),
+            DVec3::new(30.0, 0.0, 0.0)
+        );
         assert_eq!(
             rows[1].bag,
             Vec::<u8>::new(),
@@ -11936,13 +11950,12 @@ mod tests {
     }
 
     /// The spawn pose THIS rig's gateway derives for the test account — computed through the very
-    /// `home_placement` production uses, so an attach assertion can never drift from the derivation. `None`
-    /// on an unarmed rig, which is what a static attach carries.
+    /// `home_placement` production uses, so an attach assertion can never drift from the
+    /// derivation. Since the T2 spawn-standoff fix EVERY attach carries the registry's pose
+    /// (static included — an attach with no pose dropped the account inside the Star realm).
     fn attach_spawn(rig: &Rig) -> Option<StampedPose> {
         let injector = &rig.world.resource::<GatewayConfig>().seed_injector;
-        injector
-            .armed
-            .then(|| home_placement(injector, AccountId(5)).1)
+        Some(home_placement(injector, AccountId(5)).1)
     }
 
     /// Did the gateway send THIS session's `AttachSession` to `node`? Compares the EXACT expected bytes
@@ -14263,7 +14276,7 @@ mod tests {
         );
         assert_eq!(rig.stats().window_dedup_disagree, 0);
         assert_eq!(
-            rig.stats().window_dedup_max_dev_nm,
+            rig.stats().window_dedup_max_dev_cells,
             0,
             "§2.12: exact today, measured"
         );

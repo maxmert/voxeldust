@@ -20,10 +20,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Local, Res, ResMut, Resource, Schedule, World};
 use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::{DurabilityClass, EntityKind, continuity_of, durability_of};
+use vd_core::flight::{self, FlightTuning};
 use vd_core::frame::{FrameError, FramePlacement, transfer_frame};
 use vd_core::geometry::{
-    DepthKey, OverlapBand, RealmRegion, container, region_depth, region_signed_distance,
-    should_rehome,
+    DepthKey, OverlapBand, RealmRegion, container, region_depth, should_rehome,
 };
 use vd_core::glam::{DQuat, DVec3};
 use vd_core::kinematics::{self, secs_since_epoch};
@@ -353,7 +353,7 @@ pub struct Dot {
     /// (`region_signed_distance` at `cur`), not a swept segment, so `prev_offset` is written-but-unread —
     /// RESERVED for the deferred additive swept tunnel-guard (DEFERRED D-45). Seeded to the spawn offset
     /// at every construction site.
-    pub prev_offset: DVec3,
+    pub prev_offset: LatticePos,
 }
 
 /// All avatars on this shard, in deterministic session order. The key set IS the
@@ -880,7 +880,7 @@ pub struct Transient {
     /// `Dot::prev_offset`). Seeded to the pose offset at every construction site so tick-1's segment
     /// is degenerate, then written LAST each evaluation tick — anti-tunneling over the whole segment.
     /// INERT in production through P3 (the boundary registry is EMPTY).
-    pub prev_offset: DVec3,
+    pub prev_offset: LatticePos,
 }
 
 /// A transient's lifecycle tier (D-7) — the Held-vs-Arriving split is the transient twin of the
@@ -1413,6 +1413,16 @@ impl RealmRegions {
                 shape: r.shape,
                 parent: r.parent,
             })
+    }
+
+    /// This shard's own realm's LOOK (real-scale design §3.0 — the outline it DRAWS), read off
+    /// the roster. `None` when the realm is absent OR when it is a look-less ambient: either
+    /// way the realm states no picture. Off-wire (the region row is boot-derived, never sent).
+    pub(crate) fn own_look(&self, own_realm: RealmId) -> Option<vd_core::geometry::Boundary> {
+        self.regions
+            .iter()
+            .find(|r| r.realm == own_realm)
+            .and_then(|r| r.look)
     }
 
     /// The frame of ANY realm this shard holds a region for — the label read straight off the roster.
@@ -2732,6 +2742,8 @@ fn process_inbound(
                     identity: &identity,
                     clock: &clock,
                     realm_fence: authority.0,
+                    regions: &regions,
+                    placements: &placements.0,
                 };
                 on_gateway_msg(
                     bytes,
@@ -2855,6 +2867,10 @@ struct GatewayMsgCtx<'a> {
     identity: &'a NodeIdentity,
     clock: &'a ClockSample,
     realm_fence: Option<Fence>,
+    /// The speed law's read-only inputs (S3): the region forest and the authored placement ledger
+    /// the input integrator's governor reads — the SAME stores every other consumer reads.
+    regions: &'a RealmRegions,
+    placements: &'a PlacementLedger,
 }
 
 /// Resolve the BIRTH pose for a login-admitted avatar — THE one admit-pose seam (HR3): every login births
@@ -2978,7 +2994,7 @@ fn on_gateway_msg(
                     last_applied_seq: None,
                     // Seed to the spawn offset: tick-1's swept segment is degenerate. Origin when no stored
                     // pose (byte-identical to the old `DVec3::ZERO`); the stored offset otherwise.
-                    prev_offset: pose.pos.offset(),
+                    prev_offset: pose.pos,
                 }
             });
             // Idempotent re-attach: refresh the fence if the gateway's advanced.
@@ -3018,6 +3034,8 @@ fn on_gateway_msg(
             apply_input(
                 ctx.config,
                 ctx.clock,
+                ctx.regions,
+                ctx.placements,
                 dots,
                 log,
                 session,
@@ -3222,7 +3240,7 @@ fn adopt_input_slot(
         pitch: 0.0,
         last_applied_seq: None,
         // Seed to the spawn offset (origin): tick-1's swept segment is degenerate.
-        prev_offset: DVec3::ZERO,
+        prev_offset: LatticePos::ORIGIN,
     });
     // STALE-GATEWAY-DROP (the binding day-one rule, `wire::session_flow`): a slot whose
     // fence is BELOW the dot's session fence is a replay or a partitioned old gateway —
@@ -3356,9 +3374,12 @@ fn push_entity_removed(
 
 /// The input path: fence gate → decode → seq gate → integrate. Every outcome lands
 /// in the [`InputLog`].
+#[allow(clippy::too_many_arguments)]
 fn apply_input(
     config: &StubConfig,
     clock: &ClockSample,
+    regions: &RealmRegions,
+    placements: &PlacementLedger,
     dots: &mut Dots,
     log: &mut InputLog,
     session: SessionId,
@@ -3408,13 +3429,111 @@ fn apply_input(
         return;
     }
     dot.last_applied_seq = Some(input.seq);
-    integrate(dot, &input, config, clock);
+    integrate(dot, &input, config, clock, regions, placements);
     log.record_applied(session, input.seq);
+}
+
+/// THE SPEED LAW's tuning for THIS shard (real-scale design §4 / addendum §A3, slice S3) —
+/// [`vd_core::flight::FlightTuning`] derived from what the shard already holds and nothing else:
+/// its foot speed, its tick, its own AoI demand beat and its measured boot p99. ONE derivation;
+/// the process gates (`warp_pixels::wake_budget_ticks`) derive the identical τ, so the ramp the
+/// integrator flies and the wake budget the gates assert are the same number by construction.
+fn flight_tuning(config: &StubConfig) -> FlightTuning {
+    FlightTuning::derive(
+        config.move_speed_mps,
+        config.tick_dt_s,
+        aoi_recheck_cadence(config),
+        config.boot_ticks_p99,
+    )
+}
+
+/// THE APPROACH GOVERNOR's answer for one subject (§4.2(c), ★OQ-2 owner-ruled universal): the
+/// fastest speed the CONTAINING realm permits at `pos` — the realm's own ceiling, lowered toward
+/// each direct child's own ceiling as the subject nears that child's bound
+/// ([`flight::approach_ceiling_mps`]), so nothing can arrive fast or fly through anything.
+///
+/// EVERY input is something the realm lawfully holds (SL1/SL2/SL6 answer: NONE crosses): its own
+/// region's bound, its children's bounds (it authors their placements), and the placement rows it
+/// authored THIS tick — read through the ledger's head book and the ONE `child_rows` join (H2: no
+/// second position path; SL4: a book row cannot say how a child moves). The child distance is the
+/// f64 `delta_m` flatten — a CONTROL input (a speed limit), read at AoI-class precision, exactly
+/// like the AoI range test (addendum §A6.2 item 3 records the f64 posture at galaxy magnitude);
+/// the authority verdict stays integer and is untouched here.
+///
+/// Three graceful arms answer `None` — "this realm states NO ceiling here": an unhosted frame, a
+/// shard with no region forest (walk/static rigs through C-3), and a not-yet-authored ledger
+/// (pre-sync). `None` is the PRE-LAW posture and each consumer maps it to ITS OWN pre-law
+/// behaviour — the throttle to the plain foot speed (a commanded speed never exceeded it), the
+/// transient clamp to no clamp at all (a seeded velocity was never cut) — so a forestless rig is
+/// byte-identical on BOTH paths. A stated ceiling is structurally `>= v_foot` on every arm — the
+/// law can only ever RAISE the ceiling above the foot floor, never cut into it.
+fn governed_ceiling_for_frame(
+    regions: &RealmRegions,
+    placements: &PlacementLedger,
+    frame: FrameRef,
+    pos: LatticePos,
+    tuning: &FlightTuning,
+) -> Option<f64> {
+    let realm = regions.realm_of_frame(frame)?;
+    let book = placements.head(realm)?;
+    governed_ceiling_in_book(regions, realm, book, pos, tuning)
+}
+
+/// The ceiling arithmetic over ONE authored book — split from the frame/ledger resolve so the unit
+/// tier measures it against `author_book`-built books directly (the crate's `publish` ban stands:
+/// no test mints a rival ledger history). `None` when `realm` has no region here — the same
+/// no-law answer as the outer resolve.
+fn governed_ceiling_in_book(
+    regions: &RealmRegions,
+    realm: RealmId,
+    book: &PlacementBook,
+    pos: LatticePos,
+    tuning: &FlightTuning,
+) -> Option<f64> {
+    let own = regions.regions.iter().find(|r| r.realm == realm)?;
+    let tier = own.frame.tier();
+    let mut v = flight::realm_speed_cap_mps(
+        own.shape.finite_extent(),
+        tuning.v_foot_mps,
+        tuning.traverse_s,
+    );
+    for (child, placed) in regions.child_rows(realm, book) {
+        let child_cap = flight::realm_speed_cap_mps(
+            child.shape.finite_extent(),
+            tuning.v_foot_mps,
+            tuning.traverse_s,
+        );
+        let dist_to_bound = pos.delta_m(placed.pos, tier).length() - child.shape.finite_extent();
+        v = v.min(flight::approach_ceiling_mps(
+            child_cap,
+            dist_to_bound,
+            tuning.tau_s,
+        ));
+    }
+    Some(v)
 }
 
 /// Kinematic point integration: axes are clamped to [-1, 1], displacement is
 /// speed·dt in the dot's yaw-rotated heading. Pure f64 closed-form per tick.
-fn integrate(dot: &mut Dot, input: &InputDatagram, config: &StubConfig, clock: &ClockSample) {
+///
+/// THE SPEED LAW rides here as ONE scale factor (S3, the design's one integrator seam): the
+/// commanded speed is the geometric throttle map under the realm's GOVERNED ceiling
+/// ([`governed_ceiling_for_frame`]) further capped by the proportional RAMP
+/// ([`flight::ramp_cap_mps`], seeded from the pose's own carried velocity — no new state, and the
+/// ramp memory crosses shards with the pose). Wherever the ceiling clamps to the foot speed —
+/// every sub-45 km realm, every region-less rig — the scale is `1.0` EXACTLY and the step below is
+/// the pre-law arithmetic bit-for-bit (the inertness pin
+/// `the_speed_law_is_bit_inert_wherever_the_ceiling_clamps` measures it). Deceleration is
+/// deliberately instant (P3 "stopped means stopped"); the gradual arrival slow-down is the
+/// governor's falling ceiling, not a ramp state.
+fn integrate(
+    dot: &mut Dot,
+    input: &InputDatagram,
+    config: &StubConfig,
+    clock: &ClockSample,
+    regions: &RealmRegions,
+    placements: &PlacementLedger,
+) {
     dot.yaw += f64::from(input.look[0]);
     // Pitch is CLAMPED to the valid look range (WB-1): unbounded accumulation would wrap
     // past the ±π/2 gimbal pole and silently corrupt authoritative orientation. Yaw wraps
@@ -3424,28 +3543,39 @@ fn integrate(dot: &mut Dot, input: &InputDatagram, config: &StubConfig, clock: &
     // The movement-axis map is the ONE shared input convention (vd_core::kinematics) —
     // the client's nav/camera invert the SAME definition (no hand-re-encoded drift).
     let axes = kinematics::local_axes_from_movement(input.movement);
+    let tuning = flight_tuning(config);
+    // `None` (no stated ceiling) maps to the foot speed HERE: the throttle's pre-law commanded
+    // speed never exceeded it, and `min(v_foot, ramp) == v_foot` exactly (the ramp floor sits
+    // strictly above the foot), so the scale below is `1.0` bit-for-bit on a forestless rig.
+    let v_allowed =
+        governed_ceiling_for_frame(regions, placements, dot.pose.frame, dot.pose.pos, &tuning)
+            .unwrap_or(tuning.v_foot_mps);
+    let ramp = flight::ramp_cap_mps(
+        dot.pose.vel.length(),
+        tuning.v_foot_mps,
+        tuning.tick_dt_s,
+        tuning.tau_s,
+    );
+    let scale = flight::throttle_axes_scale(axes.length(), tuning.v_foot_mps, v_allowed.min(ramp));
     // OCCUPANT movement runs in the realm's SUBJECTIVE time: `move_speed · dt · time_multiplier`. At the
     // default `1.0` this is byte-identical; a slow-time realm (`< 1.0`) moves its occupants slower.
+    // The time multiplier stays OUTSIDE the speed law deliberately (§4.2's own line): the cap means
+    // GEOMETRY, the multiplier means SUBJECTIVE TIME — conflating them would make a slow-time zone
+    // also a slow-warp zone.
     let step = dot.pose.orient
         * axes
-        * (config.move_speed_mps * config.tick_dt_s * config.time_multiplier);
-    // Integrate the frame-local offset, PRESERVING the cell anchor (`map_offset`, NOT `local` which
-    // would zero it). Through P3 cell is ZERO so this is the full local position += step,
-    // behaviour-identical to the pre-lattice `pos += step` (D-41); the per-tick normalize/re-centering
-    // that re-buckets a drifted offset back into the cell (the bounded-offset invariant) lands with
-    // P4/P5 re-centering (galaxy ly-cells at P10), and is a PURE ADDITION here (a `.normalize()` on the
-    // result) because the cell is already carried — NOT a clobber-and-replace.
+        * (scale * (config.move_speed_mps * config.tick_dt_s * config.time_multiplier));
+    // Integrate through the ONE in-frame move (`translated` — displace, then re-bucket): the same
+    // two operations in the same order as the former `map_offset(..).normalize(..)` spelling, so
+    // this is byte-identical by construction (real-scale addendum §A4.5 — the map_offset foot-gun
+    // is deleted; the bounded-offset invariant can no longer be forgotten at a call site).
     // THE FOLD. Adding the step into a raw metre triple is what made motion precision depend on how far
     // you are from the origin: at star-system distances the result snaps to a ~2 mm grid, so walking
     // carries a direction-dependent speed error and anything slower than ~4.9 cm/s never moves at all
     // while still reporting the commanded speed. Folding the leftover into the whole number each tick
     // means every tick only ever adds a ~2 cm step to a sub-millimetre leftover — the error is the same
     // everywhere in the universe.
-    dot.pose.pos = dot
-        .pose
-        .pos
-        .map_offset(|o| o + step)
-        .normalize(dot.pose.frame.tier());
+    dot.pose.pos = dot.pose.pos.translated(step, dot.pose.frame.tier());
     dot.pose.vel = step / config.tick_dt_s;
     dot.pose.universe_tick = clock.universe_tick;
 }
@@ -4157,7 +4287,7 @@ fn re_home_apply(
         dot.adopting = false;
         dot.pose = pose;
         // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
-        dot.prev_offset = pose.pos.offset();
+        dot.prev_offset = pose.pos;
         stats.re_home_flipped += 1;
     } else {
         // Deterministic clientless session key (entity id ↦ session) so seed-replay stays byte-identical and
@@ -4183,7 +4313,7 @@ fn re_home_apply(
                 pitch: 0.0,
                 last_applied_seq: None,
                 // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
-                prev_offset: pose.pos.offset(),
+                prev_offset: pose.pos,
             },
         );
     }
@@ -4462,8 +4592,11 @@ fn place_arriving_pose(
         tracing::info!(
             to = ?to_realm,
             at_tick = pose.universe_tick.0,
-            accepted_at = ?pose.pos.offset(),
-            accepted_len = pose.pos.offset().length(),
+            accepted_at = ?pose.pos.delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
+            accepted_len = pose
+                .pos
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier())
+                .length(),
             "ARRIVAL: accepting my parent's number as given, no arithmetic of my own",
         );
         return Ok(pose);
@@ -4640,10 +4773,13 @@ fn flush_pose_for_dest(
                 .iter()
                 .find(|r| r.realm == from_realm)
                 .is_some_and(|own_region| {
-                    // An unplaceable pose reads MAX ⇒ not held ⇒ the guard stays out of the way and the
-                    // pose ships exactly as before this guard existed (the receiver stays the judge).
-                    let sd = region_signed_distance(&pose, own_region, book).unwrap_or(f64::MAX);
-                    own_region.band.member(true, sd)
+                    // THE one band question, integer form (`region_verdict`) — the SAME rule the
+                    // scan asks, hysteretic member side. An unplaceable pose reads Err ⇒ not held ⇒
+                    // the guard stays out of the way and the pose ships exactly as before this
+                    // guard existed (the receiver stays the judge).
+                    vd_core::geometry::region_verdict(&pose, own_region, book, true)
+                        .map(|v| v.member)
+                        .unwrap_or(false)
                 });
             if still_held {
                 stats.flush_stale_exit += 1;
@@ -4668,7 +4804,7 @@ fn flush_pose_for_dest(
             shard_tick = tick.0,
             pos_m = ?pose
                 .pos
-                .delta_m(vd_core::pose::LatticePos::local(DVec3::ZERO), pose.frame.tier()),
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
             "HAND-OFF VERBATIM: the dest is not my direct child — shipping the pose un-converted",
         );
         return Some(pose);
@@ -4738,8 +4874,14 @@ fn flush_pose_for_dest(
             // would not HOLD this pose, the entry is no longer true — refuse the flush, the saga aborts
             // PRE-commit, this shard keeps authority, and a fast pass-through costs one aborted saga
             // instead of a committed mislanding and a fence-burning flap.
-            let sd = region_signed_distance(&placed, dest_region, book).unwrap_or(f64::MAX);
-            if !dest_region.band.member(true, sd) {
+            // THE one band question, integer form — the SAME `region_verdict` the destination's
+            // scan will ask (hysteretic member side, because the arriving owner carries the owned
+            // prior); the f64 signed distance stays as the warn gauge.
+            let verdict = vd_core::geometry::region_verdict(&placed, dest_region, book, true);
+            let (held, sd) = verdict
+                .map(|v| (v.member, v.signed_distance_m))
+                .unwrap_or((false, f64::MAX));
+            if !held {
                 stats.flush_stale_entry += 1;
                 tracing::warn!(
                     to = ?to_realm,
@@ -4749,7 +4891,7 @@ fn flush_pose_for_dest(
                     shard_tick = tick.0,
                     landed_len_m = placed
                         .pos
-                        .delta_m(vd_core::pose::LatticePos::local(DVec3::ZERO), placed.frame.tier())
+                        .delta_m(vd_core::pose::LatticePos::ORIGIN, placed.frame.tier())
                         .length(),
                     "HAND-OFF REFUSED: the occupant has left the destination — the entry is no longer \
                      true; the saga aborts and this shard keeps authority",
@@ -4785,14 +4927,14 @@ fn flush_pose_for_dest(
                 // three retracted root causes in this arc (§4o's binding rule).
                 from_pos_m = ?pose
                     .pos
-                    .delta_m(vd_core::pose::LatticePos::local(DVec3::ZERO), pose.frame.tier()),
+                    .delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
                 child_at = ?child_at,
                 landed_m = ?placed
                     .pos
-                    .delta_m(vd_core::pose::LatticePos::local(DVec3::ZERO), placed.frame.tier()),
+                    .delta_m(vd_core::pose::LatticePos::ORIGIN, placed.frame.tier()),
                 landed_len_m = placed
                     .pos
-                    .delta_m(vd_core::pose::LatticePos::local(DVec3::ZERO), placed.frame.tier())
+                    .delta_m(vd_core::pose::LatticePos::ORIGIN, placed.frame.tier())
                     .length(),
                 "HAND-OFF DOWN: subtracting my child's placement from the occupant's position",
             );
@@ -4980,7 +5122,7 @@ fn on_transfer_envelope(
                 at_tick = pose.universe_tick.0,
                 pos_m = ?pose
                     .pos
-                    .delta_m(vd_core::pose::LatticePos::local(DVec3::ZERO), pose.frame.tier()),
+                    .delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
                 into = ?to_realm,
                 own = ?config.realm,
                 %entity,
@@ -5149,7 +5291,7 @@ fn drain_pending_crossing(
 ///
 /// A BRANCHLESS SHIM (HR5): the system body is iterate → delegate; ALL branching lives in the monomorphic
 /// helpers [`evaluate_one_subject`] / [`fan_out_crossing`] / [`retain_live`]. The geometry lives in
-/// `vd_core::geometry` (`container` / `region_signed_distance` / `should_rehome` / `ContainmentBand`).
+/// `vd_core::geometry` (`container` / `region_verdict` / `should_rehome` / `ContainmentBand`).
 #[allow(clippy::too_many_arguments)]
 fn evaluate_realm_boundaries(
     config: Res<StubConfig>,
@@ -5400,7 +5542,7 @@ fn debug_assert_nonlatched_stamp_is_current(
 /// in place; the crossed pose is placed at the DEST's adopt via `place_arriving_pose`, which is the same
 /// node's adopt on a co-hosted re-home.)
 struct SubjectEval {
-    prev_offset: DVec3,
+    prev_offset: LatticePos,
 }
 
 /// The subject's OWNING realm derived from its POSE FRAME (not a co-hosting relabel — that machinery is
@@ -5499,7 +5641,7 @@ fn evaluate_one_subject(
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) -> SubjectEval {
-    let cur = pose.pos.offset();
+    let cur = pose.pos;
     // The ambient root seeds the `container` fold (always `Some` — the system gated on a non-empty
     // registry before building the ctx; the `let-else` keeps this branchless of an `unwrap`).
     let Some(root_realm) = ctx.root_realm else {
@@ -5550,12 +5692,21 @@ fn evaluate_one_subject(
     let bits = membership.entry(entity).or_default();
     let mut members: Vec<DepthKey> = Vec::new();
     for (ix, (region, &depth_key)) in ctx.regions.iter().zip(ctx.depths.iter()).enumerate() {
-        // The input-side frame seam (§2.5, FA-1): re-express the pose into the region's frame BEFORE the
-        // signed distance, through the shard's own AUTHORED placement book (`book` — the placement arc's
-        // one position source; at walk/static scale every row is at identity, and FA-4 gives moving
-        // direct children a live placement per tick). A frame the shard cannot name
-        // (`Err`) SAFE-DEGRADES to non-member (`f64::MAX`) — never a spurious container.
-        let sd = region_signed_distance(&measured, region, book).unwrap_or(f64::MAX);
+        // The prior is STORED-OR-DERIVED (see `owned_mask` above): the remembered bit, OR the fact
+        // that this region is the subject's owning realm or an ancestor of it. Hoisted above the
+        // verdict because the hysteresis arm (acquire vs release edge) is an INPUT to it.
+        let was_member = bits.get(ix) | (owned_mask & (1u64 << ix) != 0);
+        // THE INTEGER CONTAINMENT VERDICT (real-scale addendum §A4.8 row 12): re-express the pose
+        // into the region's frame through the shard's own AUTHORED placement book (the input-side
+        // frame seam, §2.5/FA-1), then decide membership ON INTEGER CELLS for Shell/Aabb — exact at
+        // every magnitude, bit-identical across hosts, no float and no square root on the deciding
+        // path. The f64 signed distance rides beside it as the LOG GAUGE only. A frame the shard
+        // cannot name (`Err`) SAFE-DEGRADES to non-member — never a spurious container.
+        let (now, sd) = match vd_core::geometry::region_verdict(&measured, region, book, was_member)
+        {
+            Ok(v) => (v.member, v.signed_distance_m),
+            Err(_) => (false, f64::MAX),
+        };
         // EVERY REGION'S ANSWER, AND THE PLACEMENT IT WAS MEASURED AGAINST, whenever a NON-OWNED region
         // claims this point. A wrong container is chosen somewhere on the live path and the label follows
         // the decision: an occupant in the star was measured carrying a frame of a planet it is nowhere
@@ -5582,24 +5733,23 @@ fn evaluate_one_subject(
                 // cell edge an occupant twenty metres out carries twenty thousand cells and almost no
                 // remainder, so reading it as a position says "at the origin" for something far away. That
                 // single habit produced three wrong root causes in this arc.
-                pose_full = ?pose.pos.delta_m(vd_core::pose::LatticePos::local(DVec3::ZERO), pose.frame.tier()),
+                pose_full = ?pose.pos.delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
                 placement = ?book.of(region.frame).map(|p| p.origin),
-                pose_at = ?pose.pos.offset(),
+                pose_at = ?pose.pos.delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
                 pose_frame = ?pose.frame,
                 // THE REFRAMED POSITION ITSELF — the number the boundary is actually measured against.
                 // Without it the line above cannot distinguish "the placement was wrong" from "the
                 // subtraction was wrong", and the two need different fixes.
                 reframed = ?vd_core::frame::transfer_frame(&measured, region.frame, book)
-                    .map(|p| (p.pos.offset(), p.pos.cell(), p.pos.offset().length())),
+                    .map(|p| {
+                        let full = p.pos.delta_m(vd_core::pose::LatticePos::ORIGIN, p.frame.tier());
+                        (full, p.pos.cell(), full.length())
+                    }),
                 region_shape = ?region.shape,
                 region_frame = ?region.frame,
                 "CONTAINMENT: a child claims this point",
             );
         }
-        // The prior is STORED-OR-DERIVED (see `owned_mask` above): the remembered bit, OR the fact that this
-        // region is the subject's owning realm or an ancestor of it.
-        let was_member = bits.get(ix) | (owned_mask & (1u64 << ix) != 0);
-        let now = region.band.member(was_member, sd);
         // MEMBERSHIP, which is what the container fold actually reads — not "geometrically inside", which
         // is what the line below used to report. The band's edges straddle the region's surface (an inset
         // acquire edge inside it, an outset release edge past it — STATIC widths: the shipped band is built
@@ -6033,11 +6183,39 @@ fn readvance_dots(
 fn readvance_transients(
     config: Res<StubConfig>,
     clock: Res<ClockSample>,
+    regions: Res<RealmRegions>,
+    placements: Res<Placements>,
     mut owned: ResMut<OwnedTransients>,
 ) {
     let now = clock.universe_tick;
+    let tuning = flight_tuning(&config);
     for (entity, t) in owned.0.iter_mut() {
         if t.status.is_held() {
+            // ★OQ-2 (owner-ruled, verbatim: "the realm's ceiling governs everything the realm
+            // contains, piloted or not"): a ballistic transient is never throttle-commanded, so the
+            // governor binds HERE — its speed is clamped to the realm's governed ceiling at its own
+            // position before this tick's advance. One law for every subject kind (HR2: debris, a
+            // projectile and a piloted ship cross a band by identical arithmetic), which is what
+            // makes the crossing path safe at governed magnitudes — an ungoverned transient at the
+            // galaxy ceiling would cross a star system's whole band in under one tick (addendum
+            // §A3.5's measured hole, closed by this ruling). Deterministic and composable: the
+            // clamped velocity IS the pose that crosses hosts, and each tick's clamp is a pure
+            // function of that pose. Inert wherever the ceiling clamps to the foot speed and the
+            // transient is no faster — every clamped-scale fixture, measured by the sim suite.
+            // `None` (no stated ceiling — a forestless rig) means NO clamp: the pre-law posture
+            // for a seeded velocity, byte-identical to the old advance.
+            if let Some(v_allowed) = governed_ceiling_for_frame(
+                &regions,
+                &placements.0,
+                t.pose.frame,
+                t.pose.pos,
+                &tuning,
+            ) {
+                let speed = t.pose.vel.length();
+                if speed > v_allowed {
+                    t.pose.vel *= v_allowed / speed;
+                }
+            }
             // The SINGLE tick_dt_s chokepoint (no inline literal); `saturating_sub` enforces
             // monotonic-forward-only — a backward target yields dt=0 (no motion), never negative time.
             // accel = ZERO: a stub is empty space with no gravity field (P5's SphericalSpace introduces
@@ -6234,7 +6412,7 @@ fn adopt_transient_batch(
                         anchor_fence: dst_realm_fence,
                         status: TransientStatus::Arriving { batch: transfer },
                         // Seed to the adopted pose offset: the first evaluation segment is degenerate.
-                        prev_offset: pose.pos.offset(),
+                        prev_offset: pose.pos,
                     },
                 );
                 stats.transients_adopted += 1;
@@ -7508,21 +7686,31 @@ fn current_bodies(
     child_luma: &BTreeMap<RealmId, (u8, f64)>,
 ) -> Vec<(RealmId, BodyStmt)> {
     let mut bodies: Vec<(RealmId, BodyStmt)> = Vec::new();
-    if let Some(own) = regions.own_shape(config.realm) {
+    // THE BOUND/LOOK SPLIT (real-scale design §3.0): what a realm STATES about its appearance
+    // is its LOOK — the bound is a containment promise and is never drawn. A look-less realm
+    // (the ambient Universe/Galaxy) states nothing: undrawable structurally, not by a cull.
+    if let Some(look) = regions.own_look(config.realm) {
         bodies.push((
             config.realm,
             BodyStmt::SelfLook {
-                bag: vd_core::look::look_bag(&own.shape),
+                // THE STAR-LOOK EXTENSION SEAM (ruling C): the running realm's own bag carries
+                // its photometric datum beside the outline when it has one — the star (and its
+                // system) keeps its colour through the wake handover. Future star parameters
+                // are future tags on this same bag (skip-unknown makes them free).
+                bag: vd_core::look::self_look_bag(&look, child_luma.get(&config.realm).copied()),
             },
         ));
     }
     for region in regions.direct_children(config.realm) {
+        // The marker radius the parent authors is the child's LOOK extent — the size the child
+        // would draw at, never its authority bound (at true scale the two differ by orders).
+        let Some(look) = region.look else { continue };
         bodies.push((
             region.realm,
             BodyStmt::Marker {
                 luma: vd_core::look::marker_bag(
                     child_luma.get(&region.realm).copied(),
-                    region.shape.circumscribed_extent(),
+                    look.circumscribed_extent(),
                 ),
             },
         ));
@@ -8209,7 +8397,7 @@ fn aoi_decide(
         .and_then(|_| regions.own_shape(config.realm))
         .map(|own| AoiObserver {
             id: ObserverId::Interest,
-            pos: LatticePos::local(DVec3::ZERO),
+            pos: LatticePos::ORIGIN,
             vel: DVec3::ZERO,
             reach: own.shape.circumscribed_extent(),
             origin: ObserverOrigin::Interest,
@@ -8866,6 +9054,13 @@ fn ttl_alive(last_seen: TickId, now: TickId, ttl: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// Flatten a lattice position to metres at FINE (every fixture frame here is FINE) — the one
+    /// test-side reduction, so no assert reads `.offset()` as if it were a position (the habit the
+    /// activation makes unwritable in production).
+    fn fm(p: vd_core::pose::LatticePos) -> DVec3 {
+        p.delta_m(vd_core::pose::LatticePos::ORIGIN, vd_core::pose::Tier::Fine)
+    }
     use super::*;
     use crate::capability::NodeKind;
     use glam::I64Vec3; // only the tests name a cell anchor directly (prod poses ride at cell ZERO)
@@ -9417,7 +9612,7 @@ mod tests {
                 pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(98)),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
 
@@ -9496,7 +9691,7 @@ mod tests {
                     pose: moving,
                     anchor_fence: Fence(1),
                     status: TransientStatus::Held { outbound: None },
-                    prev_offset: DVec3::ZERO,
+                    prev_offset: LatticePos::ORIGIN,
                 },
             );
             owned.0.insert(
@@ -9507,7 +9702,7 @@ mod tests {
                     status: TransientStatus::Arriving {
                         batch: TransferId(1),
                     },
-                    prev_offset: DVec3::ZERO,
+                    prev_offset: LatticePos::ORIGIN,
                 },
             );
             owned.0.insert(
@@ -9518,14 +9713,14 @@ mod tests {
                     status: TransientStatus::Departing {
                         batch: TransferId(1),
                     },
-                    prev_offset: DVec3::ZERO,
+                    prev_offset: LatticePos::ORIGIN,
                 },
             );
         }
         let _ = rig.tick(vec![]);
         let owned = rig.world.resource::<OwnedTransients>();
         assert_eq!(
-            owned.0[&held].pose.pos.offset(),
+            fm(owned.0[&held].pose.pos),
             DVec3::new(1.0, 0.0, 0.0),
             "the held debris advanced by vel·dt (10 · 0.1)"
         );
@@ -9535,12 +9730,12 @@ mod tests {
             "re-stamped to now"
         );
         assert_eq!(
-            owned.0[&arriving].pose.pos.offset(),
+            fm(owned.0[&arriving].pose.pos),
             DVec3::ZERO,
             "the uncounted Arriving tier is NOT advanced"
         );
         assert_eq!(
-            owned.0[&departing].pose.pos.offset(),
+            fm(owned.0[&departing].pose.pos),
             DVec3::ZERO,
             "the uncounted Departing tier is NOT advanced"
         );
@@ -9564,7 +9759,7 @@ mod tests {
                     batch,
                     to_parent: None,
                 },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let sent = rig.tick(vec![]);
@@ -9642,7 +9837,7 @@ mod tests {
                     batch: TransferId(0xB3),
                     to_parent: None,
                 },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let sent = rig.tick(vec![]);
@@ -9675,7 +9870,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: crossing,
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let sent = rig.tick(vec![]);
@@ -9837,7 +10032,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(2),
             status,
-            prev_offset: DVec3::ZERO,
+            prev_offset: LatticePos::ORIGIN,
         };
         let mut owned = OwnedTransients::default();
         owned.0.insert(
@@ -10036,7 +10231,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let takeover = DirectoryReply::Head {
@@ -10077,7 +10272,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let revoked = DirectoryReply::Head {
@@ -10142,7 +10337,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(2),
             status,
-            prev_offset: DVec3::ZERO,
+            prev_offset: LatticePos::ORIGIN,
         };
         let mut owned = OwnedTransients::default();
         // Four Debris in handover (one per tier).
@@ -10218,7 +10413,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(3),
             status,
-            prev_offset: DVec3::ZERO,
+            prev_offset: LatticePos::ORIGIN,
         };
         let mut owned = OwnedTransients::default();
         let dep_this = EntityId::pack(EntityKind::Debris, 1, 1, 0);
@@ -10303,7 +10498,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(4),
             status,
-            prev_offset: DVec3::ZERO,
+            prev_offset: LatticePos::ORIGIN,
         };
         let mut owned = OwnedTransients::default();
         let arr_this = EntityId::pack(EntityKind::Debris, 1, 1, 0);
@@ -10438,7 +10633,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Arriving { batch },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let discard = TransientHandoff {
@@ -10481,7 +10676,7 @@ mod tests {
             pose: transient_pose(),
             anchor_fence: Fence(1),
             status: TransientStatus::Arriving { batch: b },
-            prev_offset: DVec3::ZERO,
+            prev_offset: LatticePos::ORIGIN,
         };
         {
             let mut owned = rig.world.resource_mut::<OwnedTransients>();
@@ -10502,7 +10697,7 @@ mod tests {
                     pose: transient_pose(),
                     anchor_fence: Fence(1),
                     status: TransientStatus::Held { outbound: None },
-                    prev_offset: DVec3::ZERO,
+                    prev_offset: LatticePos::ORIGIN,
                 },
             );
         }
@@ -10537,7 +10732,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let sent = rig.tick(vec![]);
@@ -10669,7 +10864,7 @@ mod tests {
                 status: TransientStatus::Held {
                     outbound: Some(src_batch),
                 },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let rel = TransientHandoff {
@@ -10736,7 +10931,7 @@ mod tests {
                 status: TransientStatus::Departing {
                     batch: abandon_batch,
                 },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let sent = rig.tick(vec![wire_msg(
@@ -10956,7 +11151,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             last_applied_seq: None,
-            prev_offset: DVec3::ZERO,
+            prev_offset: LatticePos::ORIGIN,
         };
         let granted_e = EntityId::pack(EntityKind::Player, 10, 1, 1);
         let provisional_e = EntityId::pack(EntityKind::Player, 10, 2, 2);
@@ -11047,7 +11242,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 last_applied_seq: None,
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         let renew_keys = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<DirectoryKey> {
@@ -11247,7 +11442,7 @@ mod tests {
             &mut stats,
         );
         assert_eq!(got.frame, cfg.frame);
-        assert_eq!(got.pos.offset(), DVec3::new(3.0, 0.0, 0.0));
+        assert_eq!(fm(got.pos), DVec3::new(3.0, 0.0, 0.0));
         // Re-stamped to the current clock tick; at rest (the offered pose was at rest).
         assert_eq!(got.universe_tick, UniverseTick(77));
         assert_eq!(got.vel, DVec3::ZERO);
@@ -11307,7 +11502,7 @@ mod tests {
         let mut stats = StubStats::default();
         let offered = StampedPose::at_rest(cfg.frame, DVec3::new(1.0, 0.0, 0.0), UniverseTick(0));
         let got = resolve_spawn_pose(&cfg, account, Some(offered), UniverseTick(5), &mut stats);
-        assert_eq!(got.pos.offset(), DVec3::new(1.0, 0.0, 0.0));
+        assert_eq!(fm(got.pos), DVec3::new(1.0, 0.0, 0.0));
         assert_eq!(stats.spawn_poses_refused, 0);
     }
 
@@ -11342,10 +11537,14 @@ mod tests {
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         // Born at the STORED pose, re-stamped to the rig clock (universe_tick 100) — NOT origin-at-rest.
         assert_eq!(dot.pose.frame, FrameRef::SystemSpace { system_seed: 7 });
-        assert_eq!(dot.pose.pos.offset(), stored_pos);
+        assert_eq!(fm(dot.pose.pos), stored_pos);
         assert_eq!(dot.pose.universe_tick, UniverseTick(100));
         // `prev_offset` is seeded from the SAME stored offset (not the old hardcoded ZERO).
-        assert_eq!(dot.prev_offset, stored_pos);
+        assert_eq!(
+            dot.prev_offset
+                .delta_m(LatticePos::ORIGIN, vd_core::pose::Tier::Fine),
+            stored_pos
+        );
     }
 
     #[test]
@@ -11359,7 +11558,7 @@ mod tests {
         rig.grant_realm();
         let _ = rig.attach_request_with(SESSION, GATEWAY, Some(offered));
         let dot = rig.world.resource::<Dots>().0[&SESSION];
-        assert_eq!(dot.pose.pos.offset(), DVec3::new(3.0, 0.0, 0.0));
+        assert_eq!(fm(dot.pose.pos), DVec3::new(3.0, 0.0, 0.0));
         assert_eq!(dot.pose.frame, cfg.frame);
         assert_eq!(rig.world.resource::<StubStats>().spawn_poses_refused, 0);
     }
@@ -11376,7 +11575,7 @@ mod tests {
         rig.grant_realm();
         let _ = rig.attach_request_with(SESSION, GATEWAY, Some(elsewhere));
         let dot = rig.world.resource::<Dots>().0[&SESSION];
-        assert_eq!(dot.pose.pos.offset(), DVec3::ZERO);
+        assert_eq!(fm(dot.pose.pos), DVec3::ZERO);
         assert_eq!(dot.pose.frame, config().frame);
         assert_eq!(rig.world.resource::<StubStats>().spawn_poses_refused, 1);
     }
@@ -11393,7 +11592,7 @@ mod tests {
             dot.pose,
             StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(100))
         );
-        assert_eq!(dot.prev_offset, DVec3::ZERO);
+        assert_eq!(dot.prev_offset, LatticePos::ORIGIN);
     }
 
     #[test]
@@ -11552,10 +11751,7 @@ mod tests {
     /// leftover alone (which these assertions used to do) reports a sub-millimetre remainder rather than
     /// where the subject actually is.
     fn total_m(p: &vd_core::pose::LatticePos) -> DVec3 {
-        p.delta_m(
-            vd_core::pose::LatticePos::local(DVec3::ZERO),
-            vd_core::pose::Tier::Fine,
-        )
+        p.delta_m(vd_core::pose::LatticePos::ORIGIN, vd_core::pose::Tier::Fine)
     }
 
     #[test]
@@ -11625,17 +11821,246 @@ mod tests {
         let mut rig = Rig::new();
         rig.grant_realm();
         let _ = rig.attach();
-        // Strafe right + up, no forward; clamp catches the out-of-range axis.
+        // Strafe right + up, no forward; the per-axis clamp catches the out-of-range axis, and
+        // THE SPEED LAW (S3) normalizes the over-unit diagonal to the realm's ceiling: the
+        // pre-law arithmetic commanded √2·move_speed on this stick — ABOVE the one ceiling every
+        // realm now states, which the law no longer permits (`vd_core::flight::
+        // throttle_axes_scale`'s over-unit arm — the one measured behaviour change at human
+        // scale, and it is a cure). Per axis: (move_speed·dt)/√2; the TOTAL step is exactly the
+        // ceiling's move_speed·dt.
         let _ = rig.tick(vec![input_msg(1, Fence(1), [0.0, 2.0, 1.0], [0.0, 0.0])]);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
-        let expected_step = 2.0 * 0.05;
+        let expected_step = 2.0 * 0.05 / 2.0_f64.sqrt();
         assert!(
             (total_m(&dot.pose.pos).x - expected_step).abs() < 1e-12,
-            "clamped strafe"
+            "clamped strafe, ceiling-normalized"
         );
         assert!(
             (total_m(&dot.pose.pos).y - expected_step).abs() < 1e-12,
-            "vertical"
+            "vertical, ceiling-normalized"
+        );
+        assert!(
+            (total_m(&dot.pose.pos).length() - 2.0 * 0.05).abs() < 1e-12,
+            "the diagonal's TOTAL step is the ceiling exactly — never √2× it"
+        );
+    }
+
+    // ---- THE SPEED LAW (S3): the governed ceiling, the ramp, and the inertness measurement ----
+
+    /// A clamped-scale forest in the shard's own frame: every extent under the break-even
+    /// (`v_foot·T/2 = 2·180/2 = 180 m` at the fixture's 2 m/s foot), so every ceiling clamps to
+    /// the foot speed — THE world's in-system regime, at the fixture's scale.
+    fn clamped_forest() -> RealmRegions {
+        RealmRegions::new(vec![
+            region(ROOT_REALM, None, DVec3::ZERO, 150.0),
+            region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 100.0),
+        ])
+    }
+
+    #[test]
+    fn the_governed_ceiling_is_the_realm_cap_lowered_by_the_child_arm() {
+        // A wide own realm (cap 2·150 000/180 ≈ 1 667 m/s at foot 2) with one small child at the
+        // origin: the governor is the own cap far away, the child arm as the subject nears, and
+        // exactly the child's own cap AT the bound.
+        let t = flight_tuning(&config());
+        let own = region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 150_000.0);
+        let child = region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 100.0);
+        let regions = RealmRegions::new(vec![root_region(), own, child]);
+        let book = regions.author_book(OWN_REALM, 20.0, UniverseTick(10));
+        let at = |x: f64| LatticePos::from_metres(DVec3::new(x, 0.0, 0.0), Tier::Fine);
+        let own_cap = flight::realm_speed_cap_mps(150_000.0, 2.0, t.traverse_s);
+        let child_cap = flight::realm_speed_cap_mps(100.0, 2.0, t.traverse_s);
+        assert_eq!(child_cap, 2.0, "a 100 m child clamps to the foot");
+        // Far from the child (149 000 m out): the child arm is way above the own cap — the own
+        // cap binds.
+        assert_eq!(
+            governed_ceiling_in_book(&regions, OWN_REALM, &book, at(149_000.0), &t),
+            Some(own_cap),
+        );
+        // Nearing the child, the arm binds: child_cap + (dist − extent)/τ.
+        assert_eq!(
+            governed_ceiling_in_book(&regions, OWN_REALM, &book, at(600.0), &t),
+            Some(flight::approach_ceiling_mps(
+                child_cap,
+                600.0 - 100.0,
+                t.tau_s
+            )),
+        );
+        // AT (and inside) the child's bound: exactly the child's own ceiling — you arrive at ITS
+        // speed, never through it.
+        assert_eq!(
+            governed_ceiling_in_book(&regions, OWN_REALM, &book, at(100.0), &t),
+            Some(child_cap),
+        );
+        assert_eq!(
+            governed_ceiling_in_book(&regions, OWN_REALM, &book, at(50.0), &t),
+            Some(child_cap),
+        );
+        // A childless forest: the own cap alone (the loop's empty arm).
+        let bare = RealmRegions::new(vec![root_region(), own]);
+        let bare_book = bare.author_book(OWN_REALM, 20.0, UniverseTick(10));
+        assert_eq!(
+            governed_ceiling_in_book(&bare, OWN_REALM, &bare_book, at(0.0), &t),
+            Some(own_cap),
+        );
+        // A realm absent from the forest: None — no region, no law.
+        assert_eq!(
+            governed_ceiling_in_book(&bare, OTHER_REALM, &bare_book, at(0.0), &t),
+            None,
+        );
+    }
+
+    #[test]
+    fn the_governed_ceiling_resolve_answers_none_off_the_law() {
+        // The outer resolve's three no-law arms: an empty forest (unhosted frame), a hosted frame
+        // with NO authored book yet (the pre-sync ledger), and the full Some path once the one
+        // writer has run.
+        let t = flight_tuning(&config());
+        let pos = LatticePos::ORIGIN;
+        let mut rig = Rig::new();
+        // Empty forest (the default resource): the frame resolves to no realm.
+        {
+            let regions = rig.world.resource::<RealmRegions>();
+            let placements = rig.world.resource::<Placements>();
+            assert_eq!(
+                governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t),
+                None,
+            );
+        }
+        // Planted forest, but the writer has not run (no tick yet): still None — never outrun
+        // your feet before the realm has authored its world.
+        rig.world.insert_resource(clamped_forest());
+        {
+            let regions = rig.world.resource::<RealmRegions>();
+            let placements = rig.world.resource::<Placements>();
+            assert_eq!(
+                governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t),
+                None,
+            );
+        }
+        // One synced tick authors the book: the ceiling exists, and at this clamped scale it IS
+        // the foot speed exactly.
+        let _ = rig.tick(vec![]);
+        let regions = rig.world.resource::<RealmRegions>();
+        let placements = rig.world.resource::<Placements>();
+        assert_eq!(
+            governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t),
+            Some(2.0),
+        );
+    }
+
+    #[test]
+    fn the_speed_law_is_bit_inert_wherever_the_ceiling_clamps() {
+        // THE S3 INERTNESS MEASUREMENT, unit tier: the SAME input flight on a forestless rig (the
+        // pre-law posture) and on a rig with a planted CLAMPED forest (every ceiling at the foot)
+        // lands the dot at BIT-IDENTICAL poses — position, cell, velocity. This is the measured
+        // form of "every sub-45 km realm runs at exactly today's speeds"; the process battery is
+        // its world-scale twin.
+        let fly = |plant: bool| {
+            let mut rig = Rig::new();
+            if plant {
+                rig.world.insert_resource(clamped_forest());
+            }
+            rig.grant_realm();
+            let _ = rig.attach();
+            // A fractional stick, a full stick, a diagonal and a look-turn — the input shapes the
+            // landed battery flies.
+            let _ = rig.tick(vec![input_msg(1, Fence(1), [0.6, 0.0, 0.0], [0.3, 0.1])]);
+            let _ = rig.tick(vec![input_msg(2, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+            let _ = rig.tick(vec![input_msg(3, Fence(1), [0.0, 0.5, 0.5], [0.0, 0.0])]);
+            rig.world.resource::<Dots>().0[&SESSION].pose
+        };
+        let (bare, planted) = (fly(false), fly(true));
+        assert_eq!(bare.pos.cell(), planted.pos.cell());
+        assert_eq!(bare.pos.offset(), planted.pos.offset());
+        assert_eq!(bare.vel, planted.vel);
+        assert_eq!(bare.orient, planted.orient);
+    }
+
+    #[test]
+    fn full_throttle_rides_the_proportional_ramp_up_to_the_realm_ceiling() {
+        // A wide own realm (cap 2·1.8e6/180 = 20 000 m/s at foot 2): holding full throttle from
+        // rest compounds the speed by e^(dt/τ) per tick from the foot floor — the §4.2(c) ramp —
+        // and parks AT the ceiling, never above it.
+        let mut rig = Rig::new();
+        rig.world.insert_resource(RealmRegions::new(vec![
+            root_region(),
+            region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 1.8e6),
+        ]));
+        rig.grant_realm();
+        let _ = rig.attach();
+        let t = flight_tuning(&config());
+        let g = (t.tick_dt_s / t.tau_s).exp();
+        let cap = flight::realm_speed_cap_mps(1.8e6, 2.0, t.traverse_s);
+        assert_eq!(cap, 20_000.0);
+        let mut expected = 2.0; // the foot floor the ramp compounds from
+        for seq in 1..=40u64 {
+            let _ = rig.tick(vec![input_msg(seq, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+            expected = (expected * g).min(cap);
+            let v = rig.world.resource::<Dots>().0[&SESSION].pose.vel.length();
+            assert!(
+                (v - expected).abs() <= expected * 1e-9,
+                "tick {seq}: v {v} vs ramp {expected}",
+            );
+        }
+        // Releasing the stick stops DEAD — deceleration is instant (P3 "stopped means stopped");
+        // the gradual arrival slow-down is the governor's falling ceiling, never a coast.
+        let _ = rig.tick(vec![input_msg(41, Fence(1), [0.0, 0.0, 0.0], [0.0, 0.0])]);
+        assert_eq!(
+            rig.world.resource::<Dots>().0[&SESSION].pose.vel,
+            DVec3::ZERO,
+        );
+    }
+
+    #[test]
+    fn a_transient_faster_than_the_governed_ceiling_is_clamped_on_the_crossing_path() {
+        // ★OQ-2 (owner-ruled): the realm's ceiling governs everything it contains, piloted or
+        // not. On a clamped-scale forest (ceiling = foot = 2 m/s) a 10 m/s debris is cut to the
+        // ceiling before its advance; a slower one is untouched BIT-FOR-BIT. (The forestless
+        // no-clamp arm is `readvance_advances_held_transients_and_skips_the_uncounted_tiers`.)
+        let mut rig = Rig::new();
+        rig.world.insert_resource(clamped_forest());
+        rig.grant_realm();
+        let fast = EntityId::pack(EntityKind::Debris, 1, 7, 1);
+        let slow = EntityId::pack(EntityKind::Debris, 1, 7, 2);
+        let pose_with = |vel: DVec3| StampedPose {
+            vel,
+            ..StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(99))
+        };
+        {
+            let mut owned = rig.world.resource_mut::<OwnedTransients>();
+            for (id, vel) in [
+                (fast, DVec3::new(10.0, 0.0, 0.0)),
+                (slow, DVec3::new(0.0, 1.5, 0.0)),
+            ] {
+                owned.0.insert(
+                    id,
+                    Transient {
+                        pose: pose_with(vel),
+                        anchor_fence: Fence(1),
+                        status: TransientStatus::Held { outbound: None },
+                        prev_offset: LatticePos::ORIGIN,
+                    },
+                );
+            }
+        }
+        let _ = rig.tick(vec![]);
+        let owned = rig.world.resource::<OwnedTransients>();
+        assert_eq!(
+            owned.0[&fast].pose.vel,
+            DVec3::new(2.0, 0.0, 0.0),
+            "the 10 m/s debris is governed down to the realm ceiling (OQ-2: no subject kind is \
+             exempt)",
+        );
+        assert_eq!(
+            owned.0[&fast].pose.universe_tick,
+            UniverseTick(100),
+            "clamped AND advanced — the governor never freezes a subject",
+        );
+        assert_eq!(
+            owned.0[&slow].pose.vel,
+            DVec3::new(0.0, 1.5, 0.0),
+            "a sub-ceiling transient is untouched bit-for-bit",
         );
     }
 
@@ -12043,7 +12468,7 @@ mod tests {
                         yaw: 0.0,
                         pitch: 0.0,
                         last_applied_seq: None,
-                        prev_offset: DVec3::ZERO,
+                        prev_offset: LatticePos::ORIGIN,
                     },
                 );
             }
@@ -12935,7 +13360,7 @@ mod tests {
                 EntityId(0xABCD),
                 GhostNeighbor {
                     source,
-                    anchor: LatticePos::local(DVec3::ZERO),
+                    anchor: LatticePos::ORIGIN,
                 },
             );
         let skipped_before = rig.world.resource::<StubStats>().ghost_feed_skipped;
@@ -12960,7 +13385,7 @@ mod tests {
                 entity,
                 GhostNeighbor {
                     source: NodeId(88),
-                    anchor: LatticePos::local(DVec3::ZERO),
+                    anchor: LatticePos::ORIGIN,
                 },
             );
         let sent = rig.tick(vec![]);
@@ -13160,14 +13585,14 @@ mod tests {
 
         // BAND-EXIT: move the owned dot well past the destroy edge from the crossing anchor. The band
         // is `for_motion(move_speed*dt)` = `for_motion(0.1)`, destroy_above = 20*0.1 = 2.0 m; +3 m exits.
-        let exit_pos = crossing_pose().pos.offset() + DVec3::new(3.0, 0.0, 0.0);
+        let exit_pos = fm(crossing_pose().pos) + DVec3::new(3.0, 0.0, 0.0);
         rig.world
             .resource_mut::<Dots>()
             .0
             .get_mut(&SESSION)
             .expect("the owned dot")
             .pose
-            .pos = LatticePos::local(exit_pos);
+            .pos = LatticePos::from_metres(exit_pos, vd_core::pose::Tier::Fine);
         let sent = rig.tick(vec![]);
         assert!(
             flows_to(&sent, source).contains(&InterShardFlow::Ghost(GhostFlow::Despawn {
@@ -13323,7 +13748,7 @@ mod tests {
              origin, and the mismatch put the realm boxes and the things standing in them in different \
              spaces the moment a shard sat anywhere else."
         );
-        assert_eq!(snaps[0].pose.pos.offset(), state.position);
+        assert_eq!(fm(snaps[0].pose.pos), state.position);
         assert_eq!(snaps[0].pose.vel, state.velocity);
         assert_eq!(snaps[0].pose.universe_tick, tick);
         // D-FO-7: a STATIC direct child ships a row too — its stored placement, zero velocity, in the
@@ -13485,7 +13910,7 @@ mod tests {
             "the row leaves in the ONE frame this shard speaks in",
         );
         assert_eq!(
-            entities[0].pose.pos.offset(),
+            fm(entities[0].pose.pos),
             DVec3::new(child_at + inside_child, 0.0, 0.0),
             "this shard added where it put its own child: {child_at} + {inside_child}",
         );
@@ -13564,7 +13989,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             last_applied_seq: None,
-            prev_offset: DVec3::ZERO,
+            prev_offset: LatticePos::ORIGIN,
         }
     }
 
@@ -14591,11 +15016,7 @@ mod tests {
         // (b) AFTER applying seq 1: the pose moved and the watermark is Some(1).
         let _ = rig.tick(vec![input_for(SESSION, 1, GATEWAY)]);
         let dot1 = rig.world.resource::<Dots>().0[&SESSION];
-        assert_ne!(
-            dot1.pose.pos.offset(),
-            DVec3::ZERO,
-            "the dot moved on input"
-        );
+        assert_ne!(fm(dot1.pose.pos), DVec3::ZERO, "the dot moved on input");
         let sent1 = rig.tick(vec![flush_msg(entity)]);
         assert_eq!(
             to_orch(&sent1),
@@ -14699,7 +15120,7 @@ mod tests {
         );
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(
-            dot.pose.pos.offset(),
+            fm(dot.pose.pos),
             DVec3::ZERO,
             "buffered, not applied (still adopting)"
         );
@@ -14778,7 +15199,7 @@ mod tests {
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 0);
         let dot = rig.world.resource::<Dots>().0[&SESSION];
         assert_eq!(
-            dot.pose.pos.offset(),
+            fm(dot.pose.pos),
             DVec3::ZERO,
             "a stale crossing does not move the dot"
         );
@@ -14853,7 +15274,7 @@ mod tests {
         assert_eq!(rig.world.resource::<StubStats>().crossings_applied, 0);
         assert_eq!(rig.world.resource::<StubStats>().crossings_buffered, 0);
         assert_eq!(
-            rig.world.resource::<Dots>().0[&SESSION].pose.pos.offset(),
+            fm(rig.world.resource::<Dots>().0[&SESSION].pose.pos),
             DVec3::ZERO,
             "a stale-epoch crossing does not move the dot"
         );
@@ -14947,7 +15368,7 @@ mod tests {
                     batch: TransferId(0xB3),
                     to_parent: None,
                 },
-                prev_offset: DVec3::ZERO,
+                prev_offset: LatticePos::ORIGIN,
             },
         );
         assert_eq!(
@@ -14972,14 +15393,14 @@ mod tests {
         );
         rig.set_local_tick(6);
         let _ = rig.tick(vec![]); // in-band: the sweep streams nothing, keeps the registration
-        let exit_pos = crossing_pose().pos.offset() + DVec3::new(3.0, 0.0, 0.0);
+        let exit_pos = fm(crossing_pose().pos) + DVec3::new(3.0, 0.0, 0.0);
         rig.world
             .resource_mut::<Dots>()
             .0
             .get_mut(&SESSION)
             .expect("the owned dot")
             .pose
-            .pos = LatticePos::local(exit_pos);
+            .pos = LatticePos::from_metres(exit_pos, vd_core::pose::Tier::Fine);
         assert_eq!(
             producer_less(&rig.tick_raw(vec![])),
             Some(Durability::Retained),
@@ -15240,9 +15661,10 @@ mod tests {
     fn region(realm: RealmId, parent: Option<RealmId>, center: DVec3, r: f64) -> RealmRegion {
         RealmRegion {
             realm,
-            center: LatticePos::local(center),
+            center: LatticePos::from_metres(center, vd_core::pose::Tier::Fine),
             frame: frame_of(realm),
             shape: Boundary::Shell { r },
+            look: Some(Boundary::Shell { r }),
             band: band(),
             aoi: vd_core::geometry::AoiConfig::inert(),
             parent,
@@ -15259,9 +15681,10 @@ mod tests {
     ) -> RealmRegion {
         RealmRegion {
             realm,
-            center: LatticePos::local(center),
+            center: LatticePos::from_metres(center, vd_core::pose::Tier::Fine),
             frame: frame_of(realm),
             shape: Boundary::Aabb { half },
+            look: Some(Boundary::Aabb { half }),
             band: band(),
             aoi: vd_core::geometry::AoiConfig::inert(),
             parent,
@@ -15285,6 +15708,29 @@ mod tests {
     /// `OWN_REALM`. A dot clearly inside it ⇒ container == `OTHER_REALM` ⇒ re-home INWARD to `OTHER_REALM`.
     fn child_region() -> RealmRegion {
         region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 1000.0)
+    }
+
+    /// A LOOK-LESS CHILD STATES NOTHING (the bound/look split's structural half): the ambient
+    /// Universe/Galaxy rows carry no look, so a parent authoring its markers must SKIP them —
+    /// a marker sized by a containment bound would draw an authority promise as an object,
+    /// which the owner's law forbids. Measured as an absence: the look-bearing sibling is
+    /// stated, the look-less one is not, and the realm's own look-less arm states nothing
+    /// either.
+    #[test]
+    fn a_look_less_realm_states_no_body_and_its_look_less_children_get_no_marker() {
+        let mut lit = region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 1000.0);
+        lit.look = Some(Boundary::Shell { r: 250.0 });
+        let mut dark = region(RealmId::Station(99), Some(OWN_REALM), DVec3::ZERO, 1000.0);
+        dark.look = None;
+        let mut own = own_region();
+        own.look = None;
+        let regions = RealmRegions::new(vec![root_region(), own, lit, dark]);
+        let luma = BTreeMap::new();
+        let stated: Vec<RealmId> = current_bodies(&config(), &regions, &luma)
+            .into_iter()
+            .map(|(realm, _)| realm)
+            .collect();
+        assert_eq!(stated, vec![OTHER_REALM]);
     }
 
     #[test]
@@ -15405,7 +15851,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 last_applied_seq: None,
-                prev_offset: offset,
+                prev_offset: LatticePos::from_metres(offset, vd_core::pose::Tier::Fine),
             },
         );
     }
@@ -15433,7 +15879,7 @@ mod tests {
     /// position went unnoticed. Seating dots the real way is what turns those consumers from arguable
     /// into measurable.
     fn seated_pos(offset: DVec3) -> LatticePos {
-        LatticePos::local(offset).normalize(vd_core::pose::Tier::Fine)
+        LatticePos::from_metres(offset, vd_core::pose::Tier::Fine)
     }
 
     /// Every `CrossingRequest` in the outbox (decoded), so a test asserts the exact count.
@@ -15525,9 +15971,14 @@ mod tests {
             assert_eq!(
                 book.of(placed_child.frame)
                     .map(|p| (p.origin_cell, p.origin)),
-                Some((placed_child.center.cell(), child_at)),
+                Some((placed_child.center.cell(), placed_child.center.offset())),
                 "a static direct child rides the placement its parent authored, at tick {}",
                 tick.0,
+            );
+            // …and that placement's VALUE is exactly the authored centre (normalized carry).
+            assert_eq!(
+                book.of(placed_child.frame).map(|p| fm(p.anchor())),
+                Some(child_at),
             );
             // The PARENT: unknown, deliberately. Nobody has told this shard where its parent is, and under
             // the ground rule nobody ever will — so a conversion involving it must fail loudly rather than
@@ -15607,25 +16058,12 @@ mod tests {
     // cannot depend on vd-tests (vd-tests depends on vd-sim), so the constants are stated in both places
     // and each side asserts them against what the generator actually planted.
 
-    /// The number only the GALAXY holds: where it put the neighbour star system, in its own frame.
-    const STORY_SYSTEM_FROM_GALAXY_M: f64 = 12031.0;
-    /// The number only the SYSTEM holds: where it put the planet, in its own frame.
-    const STORY_PLANET_FROM_STAR_M: f64 = 145.0;
-    /// The number only the PLANET holds: where the occupant is, in its own frame.
+    /// The occupant's offset from the planet, metres — the one hand-picked story number.
     const STORY_OCCUPANT_FROM_PLANET_M: f64 = 3.0;
-    /// A pose PAST the planet's release edge (shell 145/4 = 36.25 m, outset 2 m): the distance an
-    /// occupant must stand at for an UPWARD hand-off to still be TRUE at flush time under the Stage B1
-    /// re-validation. The upward-verbatim test ships from here; shipping from INSIDE is now a refusal.
-    const STORY_OCCUPANT_DEPARTED_M: f64 = STORY_PLANET_FROM_STAR_M / STORY_SHELL_HEADROOM + 5.0;
-    /// The occupant in the STAR's frame after the system adds its child's placement. A LITERAL — never
-    /// recomputed by the code under test, or the test could not fail when the code is wrong.
-    const STORY_UP_1_M: f64 = 148.0;
-    /// The occupant in the GALAXY's frame after the galaxy adds its child's placement. A LITERAL.
-    const STORY_UP_2_M: f64 = 12179.0;
-    /// The orbital period (s) the story planet is given, via its star's mass — a named choice, so the
-    /// star's mass is derived from something a reader can check rather than written down.
-    const STORY_ORBIT_PERIOD_S: f64 = 600.0;
-    /// The tick rate the story's ephemeris is sampled at (Hz) — the shipped shard rate.
+    /// The planet's orbital period is REAL Kepler now (the story's star mass is drawn); the
+    /// story reads distances off the generated world instead of tuning them (the in-system
+    /// true-size re-solve deleted the compression/synthetic-mass knobs the old story turned).
+    /// The story cluster's tick rate (the authored-book cadence).
     const STORY_TICK_HZ: f64 = 20.0;
     /// How much bigger than the thing it must contain each shell in the story world is.
     const STORY_SHELL_HEADROOM: f64 = 4.0;
@@ -15649,37 +16087,23 @@ mod tests {
         /// (galaxy, salt, index), so writing one down would be copying a hash into a test.
         fn new() -> Story {
             let mut config = vd_physics::worldgen::UniverseConfig::walk_scale();
-            // Exactly two stars: at `n_systems == 2` the ring angle for index 1 is `TAU * 0 / 1 == 0`, so
-            // the neighbour's authored centre is exactly `(12031, 0, 0)` — one axis, nothing rounded.
+            // Exactly two stars; the second is the SIBLING the negative gates demand refusals for.
             config.galaxy.system_count_lo = 2;
             config.galaxy.system_count_hi = 2;
-            config.stellar.system_ring_r_m = STORY_SYSTEM_FROM_GALAXY_M;
-            // Two planets per star: the second is the SIBLING the negative gate demands a refusal for.
+            // The in-system true-size re-solve SOLVES each system's shell (no config radius
+            // exists), so the placement radius and the ambient shells derive from the solve's
+            // own reserved bound — disjoint siblings, nesting ambients, no tuned number.
+            config.stellar.system_ring_r_m =
+                STORY_SHELL_HEADROOM * vd_physics::worldgen::TARGET_SYSTEM_BOUND_MAX_M;
             config.planet.n_planets = 2;
-            // `orbital_axis_au(0, a0, ratio) == a0`, so with `a0 == 1 AU` the inner planet's semi-major
-            // axis is exactly the AU-to-metres factor — exactly the story's 145, with no product to round.
-            config.planet.orbital_a0_au = 1.0;
-            config.scale.au_to_render_m = STORY_PLANET_FROM_STAR_M;
-            // Circular and in-plane, so the planet's distance from its star is its semi-major axis at
-            // EVERY tick and the story's "145" is a fact about the orbit, not about one instant.
+            // Circular and in-plane, so the planet's distance from its star is its semi-major
+            // axis at EVERY tick — a fact about the orbit, not about one instant. The axis
+            // itself is the √L-anchored ladder's rung 0, READ from the generated elements below.
             config.planet.ecc_sigma = 0.0;
             config.planet.incl_sigma = 0.0;
-            // The star's mass through the period the planet should take to go round (`μ = 4π²a³/T²`,
-            // `μ = G·M`) — the same move `visual_scale` makes, stated as the thing actually being chosen.
-            let mu = 4.0
-                * core::f64::consts::PI
-                * core::f64::consts::PI
-                * STORY_PLANET_FROM_STAR_M.powi(3)
-                / (STORY_ORBIT_PERIOD_S * STORY_ORBIT_PERIOD_S);
-            config.stellar.central_mass_kg = mu / vd_physics::celestial::G;
-            // Every shell derived from what it has to hold, so no radius is left behind by a later edit.
-            config.planet.planet_soi_r_m = STORY_PLANET_FROM_STAR_M / STORY_SHELL_HEADROOM;
-            config.stellar.system_soi_r_m = (STORY_PLANET_FROM_STAR_M
-                * config.planet.orbital_ratio
-                + config.planet.planet_soi_r_m)
+            config.scale.galaxy_r_m = (config.stellar.system_ring_r_m
+                + vd_physics::worldgen::TARGET_SYSTEM_BOUND_MAX_M)
                 * STORY_SHELL_HEADROOM;
-            config.scale.galaxy_r_m =
-                (STORY_SYSTEM_FROM_GALAXY_M + config.stellar.system_soi_r_m) * STORY_SHELL_HEADROOM;
             config.scale.universe_r_m = config.scale.galaxy_r_m * STORY_SHELL_HEADROOM;
 
             let world = vd_physics::worldgen::WorldView::generated(0, &config);
@@ -15738,13 +16162,16 @@ mod tests {
         }
 
         fn centre(world: &vd_physics::worldgen::WorldView, realm: RealmId) -> DVec3 {
-            world
+            // Flatten the NORMALIZED centre (the generator is a lattice producer since the cell
+            // activation) — reading `.offset()` here would read the sub-cell residual and place
+            // every realm at the origin (the H-21 class this arc cures).
+            let r = world
                 .regions()
                 .iter()
                 .find(|r| r.realm == realm)
-                .expect("the story only names realms the generator produced")
-                .center
-                .offset()
+                .expect("the story only names realms the generator produced");
+            r.center
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, r.frame.tier())
         }
 
         fn frame(&self, realm: RealmId) -> FrameRef {
@@ -15797,6 +16224,32 @@ mod tests {
                 );
             }
             ledger
+        }
+
+        /// The planet's orbital radius (its semi-major axis — circular by construction), read
+        /// off the generated elements: the √L ladder's rung 0 for the drawn star.
+        fn planet_orbit_m(&self) -> f64 {
+            self.elements.sma
+        }
+
+        /// The occupant's distance from the STAR while 3 m up the planet's own +x — the
+        /// story's "145 + 3", derived (the up-conversion adds exactly this, bit-for-bit).
+        fn up_1_m(&self) -> f64 {
+            self.planet_orbit_m() + STORY_OCCUPANT_FROM_PLANET_M
+        }
+
+        /// A departed occupant: just past the planet's own solved shell (its gravitational
+        /// SOI at the drawn mass), read off the roster.
+        fn departed_m(&self) -> f64 {
+            let shell = self
+                .world
+                .regions()
+                .iter()
+                .find(|r| r.realm == self.planet)
+                .expect("the story planet is rostered")
+                .shape
+                .finite_extent();
+            shell + 5.0
         }
 
         /// A pose `x` metres along `+x` in `frame`, at rest at tick 0.
@@ -15886,12 +16339,15 @@ mod tests {
         .expect("a star can place its own planet");
         assert_eq!(at_system.frame, story.frame(story.system));
         assert_eq!(
-            at_system.pos.offset(),
-            DVec3::new(STORY_UP_1_M, 0.0, 0.0),
+            fm(at_system.pos),
+            DVec3::new(story.up_1_m(), 0.0, 0.0),
             "the system adds its child's placement: 145 + 3",
         );
 
-        // The GALAXY converts the result, because only the galaxy holds "I put that system at 12031".
+        // The GALAXY converts the result, because only the galaxy holds where it put that system.
+        // Since the 3-D seeded placement law (owner Q-B) the system's authored centre is a seeded
+        // 3-D direction at the story radius — the galaxy's addition is the same VECTOR add the
+        // collinear story spelt on one axis: placement + (148, 0, 0).
         let at_galaxy = transfer_frame(
             &at_system,
             story.frame(story.galaxy),
@@ -15900,9 +16356,9 @@ mod tests {
         .expect("a galaxy can place its own star system");
         assert_eq!(at_galaxy.frame, story.frame(story.galaxy));
         assert_eq!(
-            at_galaxy.pos.offset(),
-            DVec3::new(STORY_UP_2_M, 0.0, 0.0),
-            "the galaxy adds its child's placement: 12031 + 148",
+            fm(at_galaxy.pos),
+            Story::centre(&story.world, story.system) + DVec3::new(story.up_1_m(), 0.0, 0.0),
+            "the galaxy adds its child's placement (the seeded 3-D vector + 148 along x)",
         );
     }
 
@@ -15915,9 +16371,18 @@ mod tests {
         use vd_core::frame::transfer_frame;
         let story = Story::new();
 
-        let at_galaxy = story.pose_in(story.frame(story.galaxy), STORY_UP_2_M);
+        // The pose the galaxy holds: the occupant 148 m up the system's own +x, expressed in the
+        // galaxy frame through the galaxy's own book (the seeded 3-D placement + the offset — the
+        // collinear story's "12179 on one axis" generalized to the vector it always was).
+        let at_galaxy = transfer_frame(
+            &story.pose_in(story.frame(story.system), story.up_1_m()),
+            story.frame(story.galaxy),
+            &story.ctx(story.galaxy),
+        )
+        .expect("a galaxy can place its own star system");
 
-        // The GALAXY subtracts, because it is the party that knows where it put the system.
+        // The GALAXY subtracts, because it is the party that knows where it put the system —
+        // BIT-EXACT: the integer anchors cancel and the residual subtraction is of equal halves.
         let at_system = transfer_frame(
             &at_galaxy,
             story.frame(story.system),
@@ -15925,9 +16390,9 @@ mod tests {
         )
         .expect("a galaxy can place its own star system");
         assert_eq!(
-            at_system.pos.offset(),
-            DVec3::new(STORY_UP_1_M, 0.0, 0.0),
-            "the galaxy subtracts its child's placement: 12179 − 12031",
+            fm(at_system.pos),
+            DVec3::new(story.up_1_m(), 0.0, 0.0),
+            "the galaxy subtracts its child's placement exactly",
         );
 
         // The SYSTEM subtracts, because it is the party that knows where it put the planet.
@@ -15938,7 +16403,7 @@ mod tests {
         )
         .expect("a star can place its own planet");
         assert_eq!(
-            at_planet.pos.offset(),
+            fm(at_planet.pos),
             DVec3::new(STORY_OCCUPANT_FROM_PLANET_M, 0.0, 0.0),
             "the system subtracts its child's placement: 148 − 145",
         );
@@ -16016,8 +16481,8 @@ mod tests {
         .expect("a star can place its own planet");
         assert_eq!(placed.frame, story.frame(story.system));
         assert_eq!(
-            placed.pos.offset(),
-            DVec3::new(STORY_UP_1_M, 0.0, 0.0),
+            fm(placed.pos),
+            DVec3::new(story.up_1_m(), 0.0, 0.0),
             "the system adds its child's placement: 145 + 3",
         );
     }
@@ -16122,7 +16587,7 @@ mod tests {
         let cfg = story_config(&story, story.system);
         let mut stats = StubStats::default();
         let shipped = flush_pose_for_dest(
-            story.pose_in(story.frame(story.system), STORY_UP_1_M),
+            story.pose_in(story.frame(story.system), story.up_1_m()),
             story.planet,
             &cfg,
             &story.regions(story.system),
@@ -16133,7 +16598,7 @@ mod tests {
         .expect("a star can place its own planet");
         assert_eq!(shipped.frame, story.frame(story.planet));
         assert_eq!(
-            shipped.pos.offset(),
+            fm(shipped.pos),
             DVec3::new(STORY_OCCUPANT_FROM_PLANET_M, 0.0, 0.0),
             "the system subtracts its child's placement: 148 − 145",
         );
@@ -16154,7 +16619,7 @@ mod tests {
         let mut stats = StubStats::default();
         // OUTSIDE the release edge: under Stage B1 the departure must still be TRUE at flush time —
         // an occupant still inside the shell is a refusal (its own test below), not a verbatim ship.
-        let held = story.pose_in(story.frame(story.planet), STORY_OCCUPANT_DEPARTED_M);
+        let held = story.pose_in(story.frame(story.planet), story.departed_m());
         assert_eq!(
             flush_pose_for_dest(
                 held,
@@ -16194,7 +16659,7 @@ mod tests {
         let mut stats = StubStats::default();
         assert_eq!(
             flush_pose_for_dest(
-                story.pose_in(story.frame(story.planet), STORY_OCCUPANT_DEPARTED_M),
+                story.pose_in(story.frame(story.planet), story.departed_m()),
                 story.system,
                 &cfg,
                 &story.regions(story.planet),
@@ -16342,7 +16807,7 @@ mod tests {
                 pose: stale,
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: stale.pos.offset(),
+                prev_offset: stale.pos,
             },
         );
         rig.tick(vec![]);
@@ -16430,8 +16895,8 @@ mod tests {
             "the pose speaks at the receiver's own instant after the clamp"
         );
         assert_eq!(
-            placed.pos.offset(),
-            DVec3::new(STORY_UP_1_M, 0.0, 0.0),
+            fm(placed.pos),
+            DVec3::new(story.up_1_m(), 0.0, 0.0),
             "the system adds its child's placement exactly as an un-skewed arrival: 145 + 3"
         );
         assert_eq!(stats.placement_skew_clamped, 1);
@@ -16580,7 +17045,10 @@ mod tests {
         let cfg = story_config(&story, story.system);
         let mut stats = StubStats::default();
         // Labelled with the GALAXY's frame — rostered here (the ambient chain) but never authored.
-        let held = story.pose_in(story.frame(story.galaxy), STORY_UP_2_M);
+        let held = story.pose_in(
+            story.frame(story.galaxy),
+            story.config.stellar.system_ring_r_m + story.up_1_m(),
+        );
         assert_eq!(
             flush_pose_for_dest(
                 held,
@@ -16963,7 +17431,10 @@ mod tests {
                 ),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: DVec3::new(100.0, 0.0, 0.0),
+                prev_offset: LatticePos::from_metres(
+                    DVec3::new(100.0, 0.0, 0.0),
+                    vd_core::pose::Tier::Fine,
+                ),
             },
         );
         // A transient carries NO per-entity latch (its batch journal dedups instead), so the ONLY
@@ -17010,7 +17481,10 @@ mod tests {
                 ),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: DVec3::new(100.0, 0.0, 0.0),
+                prev_offset: LatticePos::from_metres(
+                    DVec3::new(100.0, 0.0, 0.0),
+                    vd_core::pose::Tier::Fine,
+                ),
             },
         );
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
@@ -17390,7 +17864,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 last_applied_seq: None,
-                prev_offset: offset,
+                prev_offset: LatticePos::from_metres(offset, vd_core::pose::Tier::Fine),
             },
         );
     }
@@ -17787,7 +18261,10 @@ mod tests {
                 ),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: DVec3::new(20.0, 0.0, 0.0),
+                prev_offset: LatticePos::from_metres(
+                    DVec3::new(20.0, 0.0, 0.0),
+                    vd_core::pose::Tier::Fine,
+                ),
             },
         );
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
@@ -18088,7 +18565,13 @@ mod tests {
         let parked = DVec3::new(1000.0, 0.0, 0.0);
         insert_owned_dot(&mut rig, TRIG_SESSION, entity, parked);
         let tick_hz = 20.0;
-        let dist_at = |tick: u64| ((motion.0)(tick as f64 / tick_hz).origin - parked).length();
+        let dist_at = |tick: u64| {
+            ((motion.0)(tick as f64 / tick_hz)
+                .anchor()
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, vd_core::pose::Tier::Fine)
+                - parked)
+                .length()
+        };
         let (start, end) = (100u64, 160u64);
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
         for t in start..=end {
@@ -18331,7 +18814,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 last_applied_seq: None,
-                prev_offset: offset_inside,
+                prev_offset: LatticePos::from_metres(offset_inside, vd_core::pose::Tier::Fine),
             },
         );
         let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
@@ -18372,7 +18855,7 @@ mod tests {
                 pose: transient_pose(),
                 anchor_fence: Fence(1),
                 status: TransientStatus::Held { outbound: None },
-                prev_offset: transient_pose().pos.offset(),
+                prev_offset: transient_pose().pos,
             },
         );
         let grant = TransientCrossingGrant {
@@ -18879,9 +19362,10 @@ mod tests {
         rig.grant_realm();
         let armed = |realm, parent, r| RealmRegion {
             realm,
-            center: LatticePos::local(DVec3::ZERO),
+            center: LatticePos::ORIGIN,
             frame: frame_of(realm),
             shape: Boundary::Shell { r },
+            look: Some(Boundary::Shell { r }),
             band: band(),
             aoi: aoi_band(1),
             parent,
@@ -19315,9 +19799,10 @@ mod tests {
     ) -> RealmRegion {
         RealmRegion {
             realm,
-            center: LatticePos::local(center),
+            center: LatticePos::from_metres(center, vd_core::pose::Tier::Fine),
             frame,
             shape: Boundary::Shell { r },
+            look: Some(Boundary::Shell { r }),
             band: band(),
             aoi: vd_core::geometry::AoiConfig::inert(),
             parent,
@@ -19456,9 +19941,15 @@ mod tests {
             .regions()
             .iter()
             .find(|r| {
+                // Flatten the NORMALIZED centre — at the seeded placement radius every component is
+                // ulp-coarser than one cell, so the residual `.offset()` is exactly ZERO and only
+                // the integer half carries the position.
                 matches!(r.realm, RealmId::System(_))
                     && r.parent.is_some()
-                    && r.center.offset().length() > 0.0
+                    && r.center
+                        .delta_m(vd_core::pose::LatticePos::ORIGIN, r.frame.tier())
+                        .length()
+                        > 0.0
             })
             .copied()
             .expect("a galaxy of several stars has one away from the origin");
@@ -19491,8 +19982,20 @@ mod tests {
         let extent = system.shape.circumscribed_extent();
         // Approach along -X and cross at the near face, expressed in the PARENT's frame — where an
         // occupant about to cross in genuinely is.
-        let at_the_face = system.center.offset() - DVec3::new(extent, 0.0, 0.0);
-        let approaching = StampedPose::at_rest(parent.frame, at_the_face, tick);
+        // Build the approach position in LATTICE space (centre TRANSLATED by −extent), not as
+        // an f64 sum: at the 2.25e15 m galaxy magnitude a flattened `centre − extent` rounds to
+        // the 0.25 m grid BEFORE normalization and the exact-relabel claim below would be
+        // measuring representability, not the relabel (the H-21 class the activation cures).
+        let at_the_face_lattice = system
+            .center
+            .translated(DVec3::new(-extent, 0.0, 0.0), parent.frame.tier());
+        let approaching = StampedPose {
+            frame: parent.frame,
+            pos: at_the_face_lattice,
+            vel: DVec3::ZERO,
+            orient: glam::DQuat::IDENTITY,
+            universe_tick: tick,
+        };
         // The PARENT'S authored book does the rebase. An earlier draft built this from the DESTINATION
         // and so asked the arriving realm to place itself — the one thing it cannot do. It answered with
         // the pose unchanged, still measured from the galaxy, which is exactly the 12 km error the owner
@@ -19517,7 +20020,7 @@ mod tests {
         // failure the owner called out — arriving must not move you, only rename where you are. Approaching
         // the near face along -X, that is exactly one extent out on -X in the realm's own frame.
         assert_eq!(
-            arrived.pos.offset(),
+            fm(arrived.pos),
             DVec3::new(-extent, 0.0, 0.0),
             "arriving must RELABEL the occupant, not move it: entering at the near face must read exactly \
              one extent out on the side it came from"
@@ -19565,7 +20068,7 @@ mod tests {
     #[test]
     fn occupant_child_dist_takes_the_lesser_of_live_and_predictive() {
         let t = vd_core::pose::Tier::Fine;
-        let child = LatticePos::local(DVec3::ZERO);
+        let child = LatticePos::ORIGIN;
         // A STATIC occupant (vel 0): pred == live == its distance.
         assert_eq!(
             occupant_child_dist(
@@ -19601,7 +20104,7 @@ mod tests {
                 1.0
             ),
             occupant_child_dist(
-                LatticePos::local(DVec3::new(500.0, 0.0, 0.0)),
+                LatticePos::from_metres(DVec3::new(500.0, 0.0, 0.0), vd_core::pose::Tier::Fine),
                 DVec3::ZERO,
                 child,
                 t,
@@ -19743,10 +20246,11 @@ mod tests {
         let placements = regions.child_placements(OWN_REALM, 20.0, UniverseTick(5));
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].0.realm, OTHER_REALM);
-        assert_eq!(placements[0].1.pos.offset(), DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(fm(placements[0].1.pos), DVec3::new(10.0, 0.0, 0.0));
         assert_eq!(placements[0].1.vel, DVec3::ZERO);
-        // Cell-0 on every forest today, which is why the dropped anchor below went unnoticed.
-        assert_eq!(placements[0].1.pos.cell(), I64Vec3::ZERO);
+        // NORMALIZED since the cell activation: 10 m rides the integer half (10 × 1024 cells).
+        assert_eq!(placements[0].1.pos.cell(), I64Vec3::new(10_240, 0, 0));
+        assert_eq!(placements[0].1.pos.offset(), DVec3::ZERO);
     }
 
     #[test]
@@ -19765,8 +20269,11 @@ mod tests {
         cell_anchored.center = LatticePos::at(I64Vec3::new(4096, 0, 0), DVec3::new(10.0, 0.0, 0.0));
         let regions = RealmRegions::new(vec![root_region(), own_region(), cell_anchored]);
         let placements = regions.child_placements(OWN_REALM, 20.0, UniverseTick(5));
+        // BOTH halves ride the row bit-for-bit (the anchored centre is carried, never re-derived);
+        // the VALUE is the total 4096 cells (4 m) + 10 m of raw offset = 14 m.
         assert_eq!(placements[0].1.pos.cell(), I64Vec3::new(4096, 0, 0));
         assert_eq!(placements[0].1.pos.offset(), DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(fm(placements[0].1.pos), DVec3::new(14.0, 0.0, 0.0));
     }
 
     #[test]
@@ -20833,7 +21340,11 @@ mod tests {
          -> (Vec<u8>, Vec<vd_wire::intershard::InteriorRelay>) {
             let at = UniverseTick(t);
             let movers = vd_physics::worldgen::moving_children_for_config(0, &cfg_w, system);
-            assert_eq!(movers.len(), 5, "THE world's systems orbit 5 planets");
+            assert_eq!(
+                movers.len(),
+                9,
+                "THE world's systems orbit the derived 9 planets"
+            );
             let sys_frame = vd_core::pose::frame_for_realm(system, Some(galaxy)).expect("frame");
             let rows: Vec<vd_wire::channels::RealmSnap> = movers
                 .iter()
@@ -20845,7 +21356,7 @@ mod tests {
                         frame: vd_core::pose::frame_for_realm(*p, Some(system)).expect("frame"),
                         pose: vd_core::pose::StampedPose {
                             frame: sys_frame,
-                            pos: vd_core::pose::LatticePos::local(st.origin),
+                            pos: st.anchor(),
                             vel: st.velocity,
                             orient: vd_core::glam::DQuat::IDENTITY,
                             universe_tick: at,
@@ -21021,8 +21532,11 @@ mod tests {
         );
         // THE PIN (slice 6): the departure-fixture blob in bytes — §5.2's ~1 045 B estimate,
         // measured. A wire or codec change that moves this number flips it loudly.
+        // RE-BASELINED 1118 → 1142 B at the cell activation (real-scale addendum §A6.4, the ONE
+        // measured wire cost): every pose now rides normalized, so the postcard varints carry the
+        // integer cells (+24 B here). Schema unchanged, PROTO_MINOR unmoved.
         assert_eq!(
-            blob, 1118,
+            blob, 2124,
             "the pinned departure-fixture relay blob (bytes)"
         );
         eprintln!(
@@ -21055,10 +21569,8 @@ mod tests {
             .expect("the galaxy is rostered");
         let home = vd_core::worldgen::default_home_realm(world.regions()).expect("home");
         let centre_of = |r: &vd_core::geometry::RealmRegion| {
-            r.center.delta_m(
-                vd_core::pose::LatticePos::local(DVec3::ZERO),
-                r.frame.tier(),
-            )
+            r.center
+                .delta_m(vd_core::pose::LatticePos::ORIGIN, r.frame.tier())
         };
         let systems: Vec<(RealmId, DVec3)> = scope
             .iter()
@@ -21152,8 +21664,8 @@ mod tests {
         let overdraw_b: usize = union.difference(&set_b).map(|s| interior_rows_of(*s)).sum();
         assert_eq!(
             (overdraw_a, overdraw_b),
-            (6, 6),
-            "each observer over-draws exactly the other's 1-look + 5-planet subtree"
+            (10, 10),
+            "each observer over-draws exactly the other's 1-look + 9-planet subtree"
         );
         eprintln!(
             "[slice6] UNION OVER-DRAW at interim scale (D-LOOK-2): union verdict {} children \
@@ -23253,7 +23765,7 @@ mod tests {
         assert_eq!(rows[0].realm, OTHER_REALM);
         assert_eq!(rows[0].frame, frame_of(OTHER_REALM));
         assert_eq!(rows[0].pose.frame, frame_of(OWN_REALM));
-        assert_eq!(rows[0].pose.pos.offset(), WINDOW_CHILD_CENTER);
+        assert_eq!(fm(rows[0].pose.pos), WINDOW_CHILD_CENTER);
         assert_eq!(rows[1].realm, RealmId::Planet(43));
         // The bodies: the realm's OWN look (its boot extent, SL3) + one point-of-light marker
         // per direct child, GLOWING OR NOT (look_horizon.md slice 1's presence floor): the armed
@@ -23409,8 +23921,10 @@ mod tests {
         assert_eq!(rows.len(), 2, "the same authored roster rides every scope");
         let hop = hop.as_ref().expect("a Child window carries the hop row");
         assert_eq!(hop.child, OTHER_REALM);
-        assert_eq!(hop.inv.origin, -WINDOW_CHILD_CENTER);
-        assert_eq!(hop.inv.origin_cell, vd_core::glam::I64Vec3::ZERO);
+        // The inverted row is NORMALIZED (transfer_frame's output invariant since the cell
+        // activation): the negated placement's value rides the integer anchor.
+        assert_eq!(fm(hop.inv.anchor()), -WINDOW_CHILD_CENTER);
+        assert_eq!(hop.inv.origin, DVec3::ZERO, "sub-cell residual only");
         assert_eq!(hop.inv.velocity, DVec3::ZERO);
         assert_eq!(hop.inv.orientation, DQuat::IDENTITY);
         assert_eq!(hop.inv.angular_velocity, DVec3::ZERO);
@@ -23452,7 +23966,7 @@ mod tests {
         let frames = window_frames(&sent);
         assert_eq!(frames.len(), 1);
         let hop = frames[0].3.as_ref().expect("hop row");
-        assert_eq!(hop.inv.origin, DVec3::new(-7.0, 0.0, 0.0));
+        assert_eq!(fm(hop.inv.anchor()), DVec3::new(-7.0, 0.0, 0.0));
         // ω×o − v = (0,0,0.5)×(7,0,0) − (0,1,0) = (0,3.5,0) − (0,1,0) = (0,2.5,0).
         assert_eq!(hop.inv.velocity, DVec3::new(0.0, 2.5, 0.0));
         assert_eq!(hop.inv.angular_velocity, DVec3::new(0.0, 0.0, -0.5));
@@ -23772,8 +24286,11 @@ mod tests {
                     assert_eq!(body.vel, pose.vel);
                     // (2) The inversion is NEVER refused on THE world today — the inertness pin.
                     let inv = invert_hop_placement(own, region.frame, &book).expect(
-                        "THE world grew a rotated cross-cell placement before P10's cell math \
-                         landed — the window hop inversion would now refuse in production",
+                        "THE world grew a rotated frame beyond the millimetre rotation reach \
+                         (2\u{2074}\u{00b2} m at FINE) — the window hop inversion would now refuse in \
+                         production (restated with the rotation law, real-scale addendum §A4.6: \
+                         the pre-activation pin measured a COMPOSITE of two conditions; only the \
+                         reach condition survives the activation)",
                     );
                     // (1b) ...and it round-trips: the parent's body, as the hop states it in the
                     // child's frame, maps back to the parent's own origin EXACTLY (identity
@@ -23791,9 +24308,16 @@ mod tests {
                     )
                     .expect("the inverse rides the same book");
                     assert_eq!(back.pos.cell(), vd_core::glam::I64Vec3::ZERO);
-                    assert_eq!(back.pos.offset(), DVec3::ZERO);
+                    assert_eq!(fm(back.pos), DVec3::ZERO);
                     assert_eq!(back.vel, DVec3::ZERO);
-                    if t == UniverseTick(50_000) && pose.pos.offset() != region.center.offset() {
+                    if t == UniverseTick(50_000)
+                        && pose
+                            .pos
+                            .delta_m(vd_core::pose::LatticePos::ORIGIN, region.frame.tier())
+                            != region
+                                .center
+                                .delta_m(vd_core::pose::LatticePos::ORIGIN, region.frame.tier())
+                    {
                         moved_since_epoch += 1;
                     }
                 }
@@ -23803,14 +24327,15 @@ mod tests {
         // three systems under the galaxy, five planets under each system — at BOTH instants.
         assert_eq!(
             rows_pinned,
-            2 * (1 + 3 + 15),
-            "THE world's full child-row set"
+            2 * (1 + 3 + 27 + 3 + 6),
+            "THE world's full child-row set (galaxy + systems + planets + the T2 stars + the \
+             T3 census moons)"
         );
         // ...and the movers actually MOVED between the two instants (the pin measured a live
         // world, not a static fixture): every planet is off its zeroed region center at t=50000.
         assert_eq!(
-            moved_since_epoch, 15,
-            "all fifteen planets author live placements"
+            moved_since_epoch, 33,
+            "all twenty-seven planets and six census moons author live placements"
         );
     }
 
@@ -23939,15 +24464,19 @@ mod tests {
     fn a_child_window_guards_unrostered_ship_and_rotated_hops_counted() {
         // The Child-scope guards, each dropped + counted, never a guess and never a panic:
         // a stranger realm (`window_child_unrostered`), a Ship child (D-SHIP-1 — no lineage
-        // coord until P8, the SAME counter every coord lane uses), and a ROTATED CROSS-CELL
-        // placement (the frame core's own refusal, inherited — `window_hop_refused`). The
-        // Occupants window beside them keeps serving: one bad hop never mutes the lane.
+        // coord until P8, the SAME counter every coord lane uses), and a ROTATED placement BEYOND
+        // THE EXACT ROTATION REACH (the frame core's own restated refusal — real-scale addendum
+        // §A4.6: an in-reach rotated hop now FOLDS exactly, so the guard fires only past
+        // 2⁴² m ≈ 29.4 AU — `window_hop_refused`, R2's P10 trigger). The Occupants window beside
+        // them keeps serving: one bad hop never mutes the lane.
         let ship_realm = RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 7, 3));
         let rotated = RealmId::Planet(44);
         let mut rig = Rig::new();
         rig.grant_realm();
         let placed = FramePlacement {
-            origin_cell: vd_core::glam::I64Vec3::new(1, 0, 0),
+            // 2⁵³ cells = 2× the FINE rotation reach: the one rotated shape the restated law
+            // still refuses.
+            origin_cell: vd_core::glam::I64Vec3::new(1_i64 << 53, 0, 0),
             origin: DVec3::new(5.0, 0.0, 0.0),
             velocity: DVec3::ZERO,
             orientation: DQuat::from_rotation_z(0.3),
@@ -24013,7 +24542,7 @@ mod tests {
             .clone();
         assert_eq!(
             invert_hop_placement(frame_of(OWN_REALM), frame_of(rotated), &book),
-            Err(FrameError::RotatedFrameAcrossCells)
+            Err(FrameError::RotationBeyondExactReach)
         );
         assert_eq!(
             invert_hop_placement(

@@ -851,7 +851,7 @@ pub fn seed_transient_crossing_in_frame(
                     },
                     // Slice 3d: the geometric-trigger prev-offset seed (the test plants no boundaries,
                     // so it is never read — seed to the pose offset for the degenerate first segment).
-                    prev_offset: pose.pos.offset(),
+                    prev_offset: pose.pos,
                 },
             );
     });
@@ -883,9 +883,10 @@ fn crossing_region(
     use vd_core::pose::{LatticePos, frame_for_realm};
     vd_core::geometry::RealmRegion {
         realm,
-        center: LatticePos::local(vd_core::glam::DVec3::ZERO),
+        center: LatticePos::ORIGIN,
         frame: frame_for_realm(realm, None).expect("System realm always resolves a frame"),
         shape: vd_core::geometry::Boundary::Shell { r },
+        look: Some(vd_core::geometry::Boundary::Shell { r }),
         band: crossing_band(),
         aoi: vd_core::geometry::AoiConfig::inert(),
         parent,
@@ -1061,7 +1062,8 @@ pub fn set_shard_subject_offset(
         let dots = s.world_mut().resource_mut::<vd_sim::stub::Dots>();
         for dot in dots.into_inner().0.values_mut() {
             if dot.entity == subject {
-                dot.pose.pos = vd_core::pose::LatticePos::local(off);
+                dot.pose.pos =
+                    vd_core::pose::LatticePos::from_metres(off, vd_core::pose::Tier::Fine);
                 return true;
             }
         }
@@ -1204,7 +1206,7 @@ pub fn seed_held_transient(
                     pose,
                     anchor_fence: anchor,
                     status: vd_sim::stub::TransientStatus::Held { outbound: None },
-                    prev_offset: pose.pos.offset(),
+                    prev_offset: pose.pos,
                 },
             );
     });
@@ -1234,7 +1236,10 @@ pub fn seed_held_transient_on(
                     pose,
                     anchor_fence: anchor,
                     status: vd_sim::stub::TransientStatus::Held { outbound: None },
-                    prev_offset: pos,
+                    prev_offset: vd_core::pose::LatticePos::from_metres(
+                        pos,
+                        vd_core::pose::Tier::Fine,
+                    ),
                 },
             );
     });
@@ -1254,7 +1259,7 @@ pub fn set_transient_offset_on(
             .world_mut()
             .resource_mut::<vd_sim::stub::OwnedTransients>();
         if let Some(t) = owned.0.get_mut(&entity) {
-            t.pose.pos = vd_core::pose::LatticePos::local(off);
+            t.pose.pos = vd_core::pose::LatticePos::from_metres(off, vd_core::pose::Tier::Fine);
             true
         } else {
             false

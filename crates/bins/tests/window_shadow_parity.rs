@@ -175,7 +175,7 @@ fn print_class_report(tag: &str, gw: &GatewayView) {
     eprintln!(
         "[window:{tag}] composer: folds={} fold_hits={} full_chain_folds={} composed_rows={} chains_held={}\n\
          [window:{tag}] composer: holds={} dead_hops={} stalled={} cycles={} unresolved_standing={}\n\
-         [window:{tag}] shear/dedup: instant_mismatch={} fold_divergence={} dedup_disagree={} dedup_max_dev={} nm\n\
+         [window:{tag}] shear/dedup: instant_mismatch={} fold_divergence={} dedup_disagree={} dedup_max_dev={} cells\n\
          [window:{tag}] ingest: rows_ingested={} level_refused={} body_stale={} body_preroster={} head_reads={}\n\
          [window:{tag}] egress: levels={} deltas={} datagrams={} relay_rows_composed={} \
          relay_descent_refused={} relay_stamp_missing={} relay_unrostered={} relay_skew_max={} relay_depth_max={}\n\
@@ -193,7 +193,7 @@ fn print_class_report(tag: &str, gw: &GatewayView) {
         gw.window_instant_mismatch,
         gw.window_fold_divergence,
         gw.window_dedup_disagree,
-        gw.window_dedup_max_dev_nm,
+        gw.window_dedup_max_dev_cells,
         gw.window_rows_ingested,
         gw.window_level_refused,
         gw.window_body_stale,
@@ -226,7 +226,7 @@ fn assert_no_unexplained(tag: &str, gw: &GatewayView) {
     assert_eq!(
         gw.window_dedup_disagree, 0,
         "[{tag}] §2.12 broken: hop-derived and child-row-derived positions disagreed (max {} nm)",
-        gw.window_dedup_max_dev_nm,
+        gw.window_dedup_max_dev_cells,
     );
     assert_eq!(
         gw.window_chain_cycle, 0,
@@ -387,6 +387,6 @@ fn the_composed_picture_folds_one_chain_at_one_tick_with_the_dead_lanes_silent()
         final_gw.window_composed_rows,
         final_gw.window_folds,
         final_gw.window_full_chain_folds,
-        final_gw.window_dedup_max_dev_nm,
+        final_gw.window_dedup_max_dev_cells,
     );
 }
