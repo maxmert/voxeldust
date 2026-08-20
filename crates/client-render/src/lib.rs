@@ -105,11 +105,10 @@ const STARFIELD_SEED: u64 = 0x5644_5354_4152_5300; // "VDSTARS\0"
 /// would have painted over them. Revisited at the real-astronomy switch (a floating-origin / skybox
 /// pass supersedes this follow-sphere).
 const STAR_SPHERE_RADIUS: f32 = 60_000.0;
-/// Windowed camera far plane — must exceed [`STAR_SPHERE_RADIUS`], which in turn exceeds the farthest
-/// reachable content. THE FAILURE THIS PREVENTS: a realm the server has spun up and is streaming, drawn
-/// nowhere because the camera clipped it — indistinguishable, from the pilot's seat, from a realm that
-/// never woke. It cost real debugging time once; the far plane is now sized off the backdrop, not guessed.
-const STAR_FAR_PLANE: f32 = STAR_SPHERE_RADIUS * 2.0;
+// (The camera's near/far planes are DERIVED every frame from what is actually drawn — see
+// `derive_camera_planes` and `vd_client_harness::camera::depth_planes`. The old `STAR_FAR_PLANE`
+// backdrop-sized constant is GONE with the S5 render-scale slice: on THE world the drawn picture
+// spans 1e8 m to 2e15 m and no declared length can stand for it.)
 /// Uniform all-sky star count + the extra Milky-Way band over-density.
 const STAR_COUNT_UNIFORM: usize = 1600;
 const STAR_COUNT_BAND: usize = 1200;
@@ -294,6 +293,25 @@ struct Dot;
 #[derive(Component)]
 struct FollowCam;
 
+/// ★ THE RENDER FRAME (S5 — D-LOOK-3): the eye's position in the composed picture's own frame,
+/// decided ONCE per frame by [`place_camera`] and read by everything that places geometry.
+///
+/// The camera itself sits at the RENDER ORIGIN (`Transform.translation == Vec3::ZERO`) carrying
+/// only a rotation; every drawn thing is placed at `world - eye`, subtracted in `f64` and narrowed
+/// to `f32` only at the end. That is the whole cure for D-LOOK-3: on THE world an absolute render
+/// position is quantized to 16 m at a planet and 1.3e8 m at the star gap, and — worse — Bevy's
+/// `Transform::looking_at` subtracts in `f32`, so a target one metre ahead of a `1e11` m eye
+/// rounded to the eye itself and the camera silently fell back to facing world `-Z`.
+///
+/// `Default` (a zero eye) is the honest pre-login state: nothing is drawn yet.
+#[derive(Resource, Default)]
+struct RenderEye {
+    eye: DVec3,
+    /// The camera's vertical FOV (rad) and viewport rows, sampled from the live camera — the two
+    /// facts every apparent-size and near-plane derivation needs, read once per frame.
+    view: Option<(f64, f64)>,
+}
+
 /// Run the client renderer. BLOCKS until exit; the bin MUST call this on the MAIN thread
 /// (winit/the runner need it) with the core loop on a separate thread. Dispatches on the
 /// mode: a real window (human) or headless offscreen capture (the agent's eyes).
@@ -329,6 +347,7 @@ fn run_windowed(handles: RenderHandles) {
         .insert_resource(CaptureView { pilot: false })
         .init_resource::<DotEntities>()
         .init_resource::<RealmBoxEntities>()
+        .init_resource::<RenderEye>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Voxeldust — dev client".into(),
@@ -352,17 +371,25 @@ fn run_windowed(handles: RenderHandles) {
         .add_systems(
             Update,
             (
-                input_system,
-                sync_world,
-                // Sync the realm spheres, then despawn the stub-world scaffolding once they exist (chained
-                // so the despawn sees the just-spawned boxes the same frame — no scaffold flash in space).
-                (sync_realm_boxes, despawn_reference_scaffold).chain(),
-                // Keep the ambient starfield centered on the camera (an inertial sky at infinity).
-                follow_starfield,
-                cursor_grab,
-                exit_when_core_stops,
-            ),
+                // ★ S5 — THE RENDER FRAME IS DECIDED FIRST, then everything is placed relative to
+                // it, then the depth planes are read off what was drawn. The chain IS the law: a
+                // body placed against last frame's eye is a body drawn in the wrong place.
+                place_camera,
+                (
+                    sync_world,
+                    // Sync the realm spheres, then despawn the stub-world scaffolding once they exist
+                    // (chained so the despawn sees the just-spawned boxes the same frame — no scaffold
+                    // flash in space).
+                    (sync_realm_boxes, despawn_reference_scaffold).chain(),
+                    place_reference_scaffold,
+                    // Keep the ambient starfield centered on the camera (an inertial sky at infinity).
+                    follow_starfield,
+                ),
+                derive_camera_planes,
+            )
+                .chain(),
         )
+        .add_systems(Update, (input_system, cursor_grab, exit_when_core_stops))
         // The HUD draws in the egui pass (NOT Update — the 0.39 multipass idiom).
         .add_systems(EguiPrimaryContextPass, hud_primary)
         .run();
@@ -374,15 +401,14 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // First-person follow camera (positioned each frame by `sync_world`). Far plane bumped so the
-    // ambient star sphere (at `STAR_SPHERE_RADIUS`) is not clipped by Bevy's default 1000 m far.
+    // First-person follow camera — ORIENTED each frame by `place_camera` and always AT THE RENDER
+    // ORIGIN (S5's camera-relative flatten). Its near/far are rewritten every frame by
+    // `derive_camera_planes` from what is actually drawn; the spawned pair is only the first
+    // frame's placeholder, never a declared reach.
     commands.spawn((
         Camera3d::default(),
-        Projection::Perspective(PerspectiveProjection {
-            far: STAR_FAR_PLANE,
-            ..default()
-        }),
-        Transform::from_xyz(0.0, 1.6, 0.0).looking_at(Vec3::NEG_Z, Vec3::Y),
+        Projection::Perspective(PerspectiveProjection::default()),
+        Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
         FollowCam,
     ));
     setup_world(&mut commands, &mut meshes, &mut materials);
@@ -394,8 +420,10 @@ fn setup_scene(
 
 /// Marker for the empty-stub-world reference scaffolding (the ground plate + the landmark pillars) — a
 /// P1.5 MOTION reference, despawned by [`despawn_reference_scaffold`] the moment real realm content loads.
+/// Carries its WORLD ANCHOR so [`place_reference_scaffold`] can re-express it in the render frame each
+/// frame (S5): the camera is the origin now, so a fixture pinned at the composed origin has to move.
 #[derive(Component)]
-struct ReferenceScaffold;
+struct ReferenceScaffold(DVec3);
 
 /// Despawn the reference scaffolding ONCE real realm content (any [`RealmBox`]) is present. The visual
 /// universe — and the eventual game — ALWAYS has realm spheres, so the ground/pillars belong ONLY to the
@@ -405,6 +433,66 @@ struct ReferenceScaffold;
 /// at the origin of every realm-scene capture, inside every projected rectangle the pixel gates counted, so
 /// the gates could pass with no realm box drawn at all (batch review). `render_smoke`'s empty-world content
 /// floor is untouched: with no realm content this is a no-op.
+fn place_reference_scaffold(
+    render_eye: Res<RenderEye>,
+    mut scaffold: Query<(&ReferenceScaffold, &mut Transform)>,
+) {
+    for (anchor, mut transform) in &mut scaffold {
+        transform.translation =
+            vd_client_harness::camera::eye_relative(anchor.0, render_eye.eye).as_vec3();
+    }
+}
+
+/// Everything the picture actually draws, in the render frame — the dots, the realm bodies and the
+/// stub scaffolding. Named once so the system signature and the reader agree on it.
+type DrawnQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static Transform,
+    Or<(With<Dot>, With<RealmBoxMarker>, With<ReferenceScaffold>)>,
+>;
+
+/// ★ S5 — THE DERIVED DEPTH PLANES (D-LOOK-3). Read the near/far pair off WHAT WAS JUST DRAWN and
+/// write it onto the camera, every frame. Runs last: every drawn transform is already in the render
+/// frame, so a translation's own LENGTH is the view distance and its scale is the world radius (all
+/// drawn meshes are UNIT geometry placed by scale — `to_render_prims`, the point sprite, the dot).
+///
+/// The law and its derivation live in `vd_client_harness::camera::depth_planes`; this is glue.
+fn derive_camera_planes(
+    render_eye: Res<RenderEye>,
+    drawn: DrawnQuery,
+    starfield: Query<(), With<StarfieldRoot>>,
+    mut cam: Query<&mut Projection, With<FollowCam>>,
+) {
+    let Some((fov_y, viewport_h)) = render_eye.view else {
+        return;
+    };
+    let mut subjects: Vec<(f64, f64)> = drawn
+        .iter()
+        .map(|t| {
+            (
+                f64::from(t.translation.length()),
+                f64::from(t.scale.max_element()),
+            )
+        })
+        .collect();
+    // The ambient starfield is an always-drawn shell at a fixed radius around the eye (windowed
+    // only — the capture path has no backdrop), so it is a subject like any other.
+    if starfield.iter().next().is_some() {
+        subjects.push((
+            f64::from(STAR_SPHERE_RADIUS),
+            f64::from(STAR_SIZE_MAX.max(STAR_SIZE_MIN)),
+        ));
+    }
+    let planes = vd_client_harness::camera::depth_planes(&subjects, fov_y, viewport_h);
+    if let Some(mut projection) = cam.iter_mut().next()
+        && let Projection::Perspective(p) = &mut *projection
+    {
+        p.near = planes.near as f32;
+        p.far = planes.far as f32;
+    }
+}
+
 fn despawn_reference_scaffold(
     boxes: Res<RealmBoxEntities>,
     scaffold: Query<Entity, With<ReferenceScaffold>>,
@@ -444,7 +532,7 @@ fn setup_world(
             ..default()
         })),
         Transform::from_xyz(0.0, -0.1, 0.0),
-        ReferenceScaffold,
+        ReferenceScaffold(DVec3::new(0.0, -0.1, 0.0)),
     ));
     // Landmark pillars in a ring — distinct colors give parallax as the player walks (stub-world only).
     let pillar = meshes.add(Cuboid::new(1.0, LANDMARK_HEIGHT, 1.0));
@@ -461,13 +549,21 @@ fn setup_world(
                 LANDMARK_HEIGHT * 0.5,
                 LANDMARK_RING_RADIUS * angle.sin(),
             ),
-            ReferenceScaffold,
+            ReferenceScaffold(DVec3::new(
+                f64::from(LANDMARK_RING_RADIUS * angle.cos()),
+                f64::from(LANDMARK_HEIGHT * 0.5),
+                f64::from(LANDMARK_RING_RADIUS * angle.sin()),
+            )),
         ));
     }
 
     // Shared dot assets (built once, reused per spawned dot).
     commands.insert_resource(DotAssets {
-        mesh: meshes.add(Sphere::new(DOT_RADIUS)),
+        // A UNIT sphere, scaled to the dot's WORLD RADIUS by `sync_world` — the same shape every
+        // other drawn mesh has (`to_render_prims`, the point sprite). One convention: a drawn
+        // entity's transform SCALE is its world radius, which is what lets `derive_camera_planes`
+        // read the picture's own extents straight off the transforms it just wrote.
+        mesh: meshes.add(Sphere::new(1.0)),
         own: materials.add(StandardMaterial {
             base_color: Color::srgb(0.2, 0.9, 1.0),
             emissive: LinearRgba::rgb(0.0, 0.6, 0.8),
@@ -673,19 +769,92 @@ fn cursor_grab(
     }
 }
 
-/// Sync the dot entities to the delivered+interpolated snapshot (spawn/move/despawn) and
-/// place the first-person camera at the own entity's eye.
-#[allow(clippy::too_many_arguments)]
-fn sync_world(
+/// ★ S5 — THE ONE CAMERA DECISION (D-LOOK-3), taken BEFORE anything is placed.
+///
+/// Places the follow camera and publishes the frame's [`RenderEye`]. Two things changed here and
+/// both were measured defects:
+///
+/// 1. The camera now sits at the RENDER ORIGIN carrying only a rotation, and that rotation is
+///    built in `f64` by `vd_client_harness::camera::look_rotation`. Bevy's `looking_at` subtracts
+///    `target - translation` in `f32`; at a `1e8`–`1e15` m eye a one-metre-ahead target rounds to
+///    the eye itself, the direction comes out ZERO and `look_to` falls back to `Dir3::NEG_Z` — the
+///    camera faced world `-Z` regardless of the pilot, which is exactly why correctly-composed
+///    subjects came back as EMPTY readback rectangles.
+/// 2. The eye is decided BEFORE the dots and bodies are placed, so the apparent-size floor and the
+///    eye-relative flatten both read THIS frame's eye instead of last frame's (the old O(0.1%)
+///    scale skew is gone with the ordering, not absorbed by a tolerance).
+fn place_camera(
     net: Res<Net>,
     camera: Res<CameraState>,
     view: Res<CaptureView>,
+    mut eye: ResMut<RenderEye>,
+    mut cam: Query<(&mut Transform, &Camera, &Projection), With<FollowCam>>,
+) {
+    let Some((mut transform, cam_props, projection)) = cam.iter_mut().next() else {
+        return; // no camera yet (the first frame)
+    };
+    eye.view = Some(camera_view(cam_props, projection));
+
+    let now_s = net.started_at.elapsed().as_secs_f64();
+    let snap = net.snapshot.load();
+    let own = snap.own_entity();
+    let rendered = snap.rendered(now_s);
+    let Some((_, _, own_pose)) = rendered.iter().find(|(id, _, _)| Some(*id) == own) else {
+        return; // no delivered avatar yet — nothing to stand at
+    };
+    let own_world = snap.world_pos(own_pose);
+    // PILOT VIEW (the headless acceptance): the avatar's eye along its SERVER-DELIVERED facing,
+    // through the ONE Tier-A expression the pixel gates reconstruct the camera from — so an
+    // injected `LookAt` turns the avatar and the agent's eyes together. Otherwise: the LOCAL
+    // first-person basis, so mouse-look turns the view immediately.
+    let (eye_pos, direction, up) = if view.pilot {
+        let cam = vd_client_harness::camera::pilot_capture_camera(
+            own_world,
+            own_pose.orient,
+            CAPTURE_W as usize,
+            CAPTURE_H as usize,
+        );
+        (cam.eye, cam.target - cam.eye, cam.up)
+    } else {
+        let e = camera.cam.eye(own_world);
+        (e, camera.cam.forward(), camera.cam.up)
+    };
+    eye.eye = eye_pos;
+    *transform = camera_transform(direction, up);
+}
+
+/// The camera's Bevy transform in the RENDER FRAME: at the origin, carrying the `f64`-built
+/// rotation. The one place the S5 flatten's camera half is expressed.
+fn camera_transform(direction: DVec3, up: DVec3) -> Transform {
+    Transform::from_translation(Vec3::ZERO)
+        .with_rotation(vd_client_harness::camera::look_rotation(direction, up).as_quat())
+}
+
+/// The camera facts every apparent-size and near-plane derivation needs: `(vertical fov, viewport
+/// rows)`. Read once per frame by [`place_camera`] into [`RenderEye`].
+fn camera_view(camera: &Camera, projection: &Projection) -> (f64, f64) {
+    let fov_y = match projection {
+        Projection::Perspective(p) => f64::from(p.fov),
+        // Non-perspective projections do not occur here (both cameras declare Perspective);
+        // fall back to the declared default rather than a magic number.
+        _ => f64::from(PerspectiveProjection::default().fov),
+    };
+    let viewport_h = camera
+        .physical_viewport_size()
+        .map_or(f64::from(CAPTURE_H), |s| f64::from(s.y));
+    (fov_y, viewport_h)
+}
+
+/// Sync the dot entities to the delivered+interpolated snapshot (spawn/move/despawn), placed in the
+/// RENDER FRAME (eye-relative — see [`RenderEye`]).
+#[allow(clippy::too_many_arguments)]
+fn sync_world(
+    net: Res<Net>,
+    render_eye: Res<RenderEye>,
     assets: Res<DotAssets>,
     mut dots: ResMut<DotEntities>,
     mut commands: Commands,
     mut dot_tf: Query<&mut Transform, With<Dot>>,
-    mut cam_tf: Query<&mut Transform, (With<FollowCam>, Without<Dot>)>,
-    cam_props: Query<(&Camera, &Projection), With<FollowCam>>,
 ) {
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
@@ -697,58 +866,35 @@ fn sync_world(
     // luck — no pixel gate could be dot-sensitive, and a distant player was invisible in the window
     // too. Each dot is scaled so its apparent radius never falls below the shared
     // `DOT_MIN_APPARENT_RADIUS_PX` floor (`marker_world_radius` — the SAME derivation the gates
-    // size their rectangles from). The camera pose read here is LAST frame's (the capture refit
-    // runs after this system); the fitted camera moves sub-frame per tick, so the scale error is
-    // O(0.1%), far inside the gates' 2× rect bracketing. First-person (windowed) the own dot sits
-    // at the eye ⇒ the base radius stands, byte-identical to the unscaled marker.
-    let marker_eye = cam_tf.iter().next().map(|t| t.translation);
-    let marker_view = cam_props.iter().next().map(|(cam, projection)| {
-        let fov_y = match projection {
-            Projection::Perspective(p) => f64::from(p.fov),
-            // Non-perspective projections do not occur here (both cameras declare Perspective);
-            // fall back to the declared default rather than a magic number.
-            _ => f64::from(PerspectiveProjection::default().fov),
+    // size their rectangles from). S5: the eye is THIS frame's (`place_camera` ran first), so the
+    // old last-frame scale skew is gone. First-person (windowed) the own dot sits at the eye ⇒ the
+    // base radius stands, byte-identical to the unscaled marker.
+    let marker_scale = |rel: DVec3| -> Vec3 {
+        let radius_m = match render_eye.view {
+            Some((fov_y, viewport_h)) => vd_client_harness::camera::marker_world_radius(
+                f64::from(DOT_RADIUS),
+                rel.length(),
+                fov_y,
+                viewport_h,
+            ),
+            // No camera yet (the first frame): the base radius.
+            None => f64::from(DOT_RADIUS),
         };
-        let viewport_h = cam
-            .physical_viewport_size()
-            .map_or(f64::from(CAPTURE_H), |s| f64::from(s.y));
-        (fov_y, viewport_h)
-    });
-    let marker_scale = |world: DVec3| -> Vec3 {
-        let scaled = match (marker_eye, marker_view) {
-            (Some(eye), Some((fov_y, viewport_h))) => {
-                let dist_m = (world - eye.as_dvec3()).length();
-                vd_client_harness::camera::marker_world_radius(
-                    f64::from(DOT_RADIUS),
-                    dist_m,
-                    fov_y,
-                    viewport_h,
-                ) / f64::from(DOT_RADIUS)
-            }
-            // No camera yet (the first frame): the unscaled marker.
-            _ => 1.0,
-        };
-        Vec3::splat(scaled as f32)
+        Vec3::splat(radius_m as f32)
     };
 
     let mut seen: BTreeSet<EntityId> = BTreeSet::new();
-    let mut own_world: Option<DVec3> = None;
-    // The own entity's SERVER-DELIVERED facing — the pilot capture camera's basis (never a local
-    // view state: a headless run has no mouse, so the delivered orientation is the honest facing).
-    let mut own_orient = vd_core::glam::DQuat::IDENTITY;
     for (id, _sub, pose) in &rendered {
         seen.insert(*id);
         let world = snap.world_pos(pose); // a passthrough: the server ships pin-space positions
-        if Some(*id) == own {
-            own_world = Some(world);
-            own_orient = pose.orient;
-        }
+        // ★ THE CAMERA-RELATIVE FLATTEN: subtract the eye in f64, narrow to f32 once.
+        let rel = vd_client_harness::camera::eye_relative(world, render_eye.eye);
         match dots.0.get(id) {
             // Existing dot: move it (available from the frame after it was spawned).
             Some(&entity) => {
                 if let Ok(mut transform) = dot_tf.get_mut(entity) {
-                    transform.translation = world.as_vec3();
-                    transform.scale = marker_scale(world);
+                    transform.translation = rel.as_vec3();
+                    transform.scale = marker_scale(rel);
                 }
             }
             // New dot: spawn it with the right material (own highlighted).
@@ -762,8 +908,7 @@ fn sync_world(
                     .spawn((
                         Mesh3d(assets.mesh.clone()),
                         MeshMaterial3d(material),
-                        Transform::from_translation(world.as_vec3())
-                            .with_scale(marker_scale(world)),
+                        Transform::from_translation(rel.as_vec3()).with_scale(marker_scale(rel)),
                         Dot,
                     ))
                     .id();
@@ -780,30 +925,6 @@ fn sync_world(
             false
         }
     });
-
-    // First-person camera at the own entity's eye. WINDOWED (and the default capture framing):
-    // along the LOCAL camera basis, so mouse-look turns the view immediately. PILOT VIEW (the
-    // headless warp acceptance): along the entity's DELIVERED facing, through the ONE Tier-A
-    // expression the pixel gates reconstruct the camera from — so an injected `LookAt` turns the
-    // avatar and the agent's eyes together, with no local view state to drift.
-    if let Some(mut transform) = cam_tf.iter_mut().next()
-        && let Some(own_pos) = own_world
-    {
-        let (eye, target, up) = if view.pilot {
-            let cam = vd_client_harness::camera::pilot_capture_camera(
-                own_pos,
-                own_orient,
-                CAPTURE_W as usize,
-                CAPTURE_H as usize,
-            );
-            (cam.eye, cam.target, cam.up)
-        } else {
-            let eye = camera.cam.eye(own_pos);
-            (eye, eye + camera.cam.forward(), camera.cam.up)
-        };
-        *transform =
-            Transform::from_translation(eye.as_vec3()).looking_at(target.as_vec3(), up.as_vec3());
-    }
 }
 
 /// Sync the translucent realm-box meshes to the boot-loaded [`RenderSnapshot`] scene (Visual
@@ -817,13 +938,13 @@ fn sync_world(
 #[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
 fn sync_realm_boxes(
     net: Res<Net>,
+    render_eye: Res<RenderEye>,
     mut boxes: ResMut<RealmBoxEntities>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     markers: Res<MarkerAssets>,
     mut commands: Commands,
     mut box_tf: Query<&mut Transform, (With<RealmBoxMarker>, Without<FollowCam>)>,
-    cam: FollowCamQuery,
 ) {
     // SLICE 6 S4 — ONE MOMENT. Resolve the realm boxes at the SAME display cursor `sync_world` samples
     // the entities at, so the ground and the player standing on it are drawn from one instant. This
@@ -832,11 +953,9 @@ fn sync_realm_boxes(
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
     let scene = snap.scene_now(now_s);
-    // The camera facts the apparent-size floor needs, read the SAME way `sync_world` reads them
-    // for the avatar dot (LAST frame's pose — the capture refit runs after this system; the fitted
-    // camera moves sub-frame per tick, so the scale error is O(0.1%), far inside the gates' 2×
-    // rect bracketing).
-    let view = camera_view(&cam);
+    // The camera facts the apparent-size floor needs — THIS frame's (`place_camera` ran first),
+    // the same pair `sync_world` scales the avatar dot by.
+    let view = render_eye.view;
     let mut seen: BTreeSet<RealmId> = BTreeSet::new();
     for (realm, rbox) in scene.iter() {
         seen.insert(realm);
@@ -846,7 +965,14 @@ fn sync_realm_boxes(
         // server-authoritative seam in order to do arithmetic it should not be doing. The box carries
         // its full position now, already measured from the realm this session stands in, and in the unit
         // the shipper stated for it — so there is nothing to subtract and no unit to pick.
-        let draw_center = rbox.draw_center();
+        //
+        // ★ S5 — THE CAMERA-RELATIVE FLATTEN: the composed centre is expressed in the RENDER FRAME
+        // (eye at the origin) by an f64 subtraction, and only the RESULT is narrowed to f32. This
+        // is what lets a body 2.2e15 m away be drawn at all: as an absolute f32 its position was
+        // quantized to 1.3e8 m — the whole marker — and every f32 view matrix built from it lost
+        // the camera's own facing (see `place_camera`).
+        let draw_center =
+            vd_client_harness::camera::eye_relative(rbox.draw_center(), render_eye.eye);
         // Lower to render primitives (VERTICES) at that drawn centre — no shape branch here. THE
         // DRAW LAW's two arms are the two lawful AUTHORS, decided by the row's bag upstream in
         // Tier-A: a self-authored outline lowers through the shape tessellation; a parent-authored
@@ -909,29 +1035,6 @@ fn sync_realm_boxes(
     });
 }
 
-/// The follow camera's own query, named once so the system signature and the reader agree on it.
-type FollowCamQuery<'w, 's> =
-    Query<'w, 's, (&'static Transform, &'static Camera, &'static Projection), FollowCamOnly>;
-/// The filter that keeps the follow camera's `Transform` disjoint from the realm bodies' — Bevy
-/// needs the two queries provably non-overlapping to run them in one system.
-type FollowCamOnly = (With<FollowCam>, Without<RealmBoxMarker>);
-
-/// The camera facts the shared apparent-size floor needs: `(eye, vertical fov, viewport rows)`.
-/// `None` before the first frame has a camera — the caller then draws at the base radius.
-fn camera_view(cam: &FollowCamQuery) -> Option<(Vec3, f64, f64)> {
-    let (transform, camera, projection) = cam.iter().next()?;
-    let fov_y = match projection {
-        Projection::Perspective(p) => f64::from(p.fov),
-        // Non-perspective projections do not occur here (both cameras declare Perspective);
-        // fall back to the declared default rather than a magic number.
-        _ => f64::from(PerspectiveProjection::default().fov),
-    };
-    let viewport_h = camera
-        .physical_viewport_size()
-        .map_or(f64::from(CAPTURE_H), |s| f64::from(s.y));
-    Some((transform.translation, fov_y, viewport_h))
-}
-
 /// One MARKER body's render primitive: the SHARED unit point sprite at the drawn centre, scaled
 /// to its base radius — the LARGER of the luma-derived √L radius and the parent's one stated
 /// extent (look_horizon.md slice 1's presence floor, `marker_base_radius_m`) — after the ONE
@@ -939,20 +1042,18 @@ fn camera_view(cam: &FollowCamQuery) -> Option<(Vec3, f64, f64)> {
 /// the pixel gates size their rectangles from, so the drawn footprint and the asserted rectangle
 /// cannot disagree). A luma-less marker (a non-glowing subject) draws in the box's own role
 /// colour at its stated extent — never nothing.
-fn marker_prims(
-    rbox: &RealmBox,
-    draw_center: DVec3,
-    view: Option<(Vec3, f64, f64)>,
-) -> Vec<MeshPrim> {
+fn marker_prims(rbox: &RealmBox, draw_center: DVec3, view: Option<(f64, f64)>) -> Vec<MeshPrim> {
     let base = vd_client::realm_scene::marker_base_radius_m(
         rbox.luma,
         vd_client::realm_scene::shape_extent_m(rbox.shape),
     );
     let color_rgba = vd_client::realm_scene::marker_color_rgba(rbox.color_rgba, rbox.luma);
+    // `draw_center` is ALREADY in the render frame (eye at the origin), so its own length IS the
+    // view distance the apparent-size floor needs — no second eye subtraction, no second unit.
     let radius = match view {
-        Some((eye, fov_y, viewport_h)) => vd_client_harness::camera::marker_world_radius(
+        Some((fov_y, viewport_h)) => vd_client_harness::camera::marker_world_radius(
             base,
-            (draw_center - eye.as_dvec3()).length(),
+            draw_center.length(),
             fov_y,
             viewport_h,
         ),
@@ -1032,11 +1133,12 @@ fn spawn_marker(
 fn frame_scene_camera(
     net: Res<Net>,
     view: Res<CaptureView>,
+    mut eye: ResMut<RenderEye>,
     mut cam_tf: Query<&mut Transform, With<FollowCam>>,
 ) {
-    // PILOT VIEW: the scene-fitting framing is DECLINED whole — `sync_world` already placed the
+    // PILOT VIEW: the scene-fitting framing is DECLINED whole — `place_camera` already placed the
     // camera at the avatar's eye along its delivered facing, and this system is the only thing
-    // that would override it (it is registered `.after(sync_world)` precisely to be the last word).
+    // that would override it (it is registered `.after(place_camera)` precisely to be the last word).
     if view.pilot {
         return;
     }
@@ -1055,9 +1157,12 @@ fn frame_scene_camera(
     ) else {
         return; // empty scene (or degenerate viewport) → keep the follow camera
     };
+    // ★ S5: the fitted eye is published as the RENDER FRAME's origin and the rotation is built in
+    // f64 — a fitted standoff can be 1e11 m out, where `looking_at`'s f32 subtraction of two
+    // like-sized coordinates loses whole kilometres of the view direction.
     if let Some(mut transform) = cam_tf.iter_mut().next() {
-        *transform = Transform::from_translation(cam.eye.as_vec3())
-            .looking_at(cam.target.as_vec3(), cam.up.as_vec3());
+        eye.eye = cam.eye;
+        *transform = camera_transform(cam.target - cam.eye, cam.up);
     }
 }
 
@@ -1253,6 +1358,7 @@ fn run_capture(handles: RenderHandles) {
         })
         .init_resource::<DotEntities>()
         .init_resource::<RealmBoxEntities>()
+        .init_resource::<RenderEye>()
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -1275,21 +1381,27 @@ fn run_capture(handles: RenderHandles) {
         .add_systems(
             Update,
             (
-                sync_world,
-                // Sync the realm boxes, then despawn the stub-world scaffolding once they exist —
-                // the SAME pair the windowed schedule runs. The capture path used to keep the
-                // ground plate + pillars forever, which parked a 500 m slab at the origin of every
-                // realm-scene capture and let the pixel gates pass on scaffold paint alone (batch
-                // review: the H2 confound). render_smoke (NO --realm-boxes) still keeps them: with
-                // no realm content the despawn is a no-op, so its content floor stands.
-                (sync_realm_boxes, despawn_reference_scaffold).chain(),
-                // AFTER sync_world so, with a scene loaded, the box-framing view overrides the
-                // follow-the-dot camera (chain: the box camera is the last word on the transform).
-                frame_scene_camera.after(sync_world),
-                serve_captures,
-                exit_when_core_stops,
-            ),
+                // ★ S5 — the render frame first (`place_camera`), then the box-framing view gets the
+                // last word on it (`frame_scene_camera`), then everything is placed relative to the
+                // decided eye, then the depth planes are read off what was drawn.
+                place_camera,
+                frame_scene_camera,
+                (
+                    sync_world,
+                    // Sync the realm boxes, then despawn the stub-world scaffolding once they exist —
+                    // the SAME pair the windowed schedule runs. The capture path used to keep the
+                    // ground plate + pillars forever, which parked a 500 m slab at the origin of every
+                    // realm-scene capture and let the pixel gates pass on scaffold paint alone (batch
+                    // review: the H2 confound). render_smoke (NO --realm-boxes) still keeps them: with
+                    // no realm content the despawn is a no-op, so its content floor stands.
+                    (sync_realm_boxes, despawn_reference_scaffold).chain(),
+                    place_reference_scaffold,
+                ),
+                derive_camera_planes,
+            )
+                .chain(),
         )
+        .add_systems(Update, (serve_captures, exit_when_core_stops))
         .run();
 }
 
@@ -1321,16 +1433,13 @@ fn setup_capture(
     commands.spawn(ImageCopier::new(handle.clone(), size, &render_device));
     commands.spawn((
         Camera3d::default(),
-        // The SAME projection the windowed camera declares (far bumped past the star sphere) —
-        // parity, so the two cameras cannot diverge on a projection field (batch review: the
-        // capture camera silently kept the 1000 m default `far` while the windowed one overrode it;
-        // Bevy's perspective is infinite-reverse so `far` clips nothing, but an asymmetric
-        // declaration is a drift seed either way).
-        Projection::Perspective(PerspectiveProjection {
-            far: STAR_FAR_PLANE,
-            ..default()
-        }),
-        Transform::from_xyz(0.0, 1.6, 0.0).looking_at(Vec3::NEG_Z, Vec3::Y),
+        // The SAME projection the windowed camera declares — parity, so the two cameras cannot
+        // diverge on a projection field. Both are rewritten every frame by `derive_camera_planes`
+        // (S5): Bevy builds a reverse-Z INFINITE perspective, whose depth code is `near/z` and whose
+        // relative resolution is therefore constant at every range, so the planes are a statement
+        // about the picture rather than a clip distance anyone has to guess.
+        Projection::Perspective(PerspectiveProjection::default()),
+        Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
         // In Bevy 0.18 RenderTarget is a SEPARATE component (not a Camera field).
         RenderTarget::Image(handle.into()),
         // bevy_egui creates+manages a (non-primary) EguiContext on this entity and renders

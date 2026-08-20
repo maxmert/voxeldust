@@ -153,13 +153,12 @@ fn nonclear_in_region(rgba: &[u8], w: usize, h: usize, clear: [u8; 4], region: S
     count
 }
 
+// UN-PARKED by the S5 render-scale slice (D-LOOK-3 discharged). What it had measured: no rim
+// angle cleared the planets' discs, because the home system's own shell drew nothing. Two cures
+// landed: the camera-relative flatten with an f64-built rotation (a fitted eye 1e11 m out lost its
+// facing to an f32 subtraction), and the framing rule — a diagnostic fit unions the SELF-AUTHORED
+// OUTLINES only, since a point of light states no outline and there is nothing of it to frame.
 #[test]
-#[ignore = "PARKED under D-LOOK-3 (the true-scale camera far plane, MEASURED): no rim angle \
-            clears the planets' discs because the home system's SHELL — the subject of the rim \
-            assert — is real geometry 1.58e11 m across and is clipped by the 120 000 \
-            render-metre far plane, while the bodies survive as backdrop-sphere markers clustered \
-            near the view centre (the failure prints all ten discs). Same class as \
-            look_pixels/warp_pixels/render_smoke; un-parks with the S5 render-scale slice."]
 fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_region() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
@@ -367,14 +366,32 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
     // extent, drift-inflated. On THE world today the planets are zero-extent MARKER points
     // (Slice D owns their sprites), so this list is empty — kept GENERIC so a planet that gains
     // a look (a spun-up neighbour in a future topology) is excluded again without an edit.
+    let home_centre = state
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == home_label)
+        .map(|b| DVec3::from_array(b.center))
+        .expect("the home system is in the drawn scene");
     let planet_rects: Vec<(String, ScreenAabb)> = state
         .realm_boxes
         .iter()
         .filter(|b| b.realm != home_label && b.extent_m > 0.0)
-        .map(|b| {
-            let rect = projected_point_aabb(&camera, DVec3::from_array(b.center), b.extent_m)
-                .expect("a drawn body projects in front of the fitted camera");
-            (
+        // A body CONCENTRIC with the home system's own picture is not a different body's paint to
+        // route around — it is THE SAME CIRCLE by law. Since the taxonomy slice, a star system's
+        // own look IS its star's photosphere and the Star realm draws that same photosphere, so
+        // the two rows state one disc at one centre with one radius. Excluding it made the rim
+        // search unsatisfiable by construction (MEASURED: the star's drift-inflated rect
+        // [463,181]-[821,539] covers the home rect [475,193]-[809,527] at every angle). The rim
+        // assert still isolates that ONE drawn circle from every other body, which is its content.
+        .filter(|b| (DVec3::from_array(b.center) - home_centre).length() > b.extent_m)
+        // A body BEHIND the eye paints nothing, so it can occlude nothing and needs no exclusion
+        // rect. TRUE-SCALE RESTATEMENT (S5): the diagnostic fit frames the self-authored outlines,
+        // which stands the camera at the home system — from there the galaxy's other star systems
+        // are routinely behind you. `expect`ing a projection here asserted a property of the old
+        // union fit (everything drawn was in front of it), not a property of the picture.
+        .filter_map(|b| {
+            let rect = projected_point_aabb(&camera, DVec3::from_array(b.center), b.extent_m)?;
+            Some((
                 b.realm.clone(),
                 ScreenAabb {
                     min: vd_client_harness::camera::ScreenPos {
@@ -386,7 +403,7 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
                         y: rect.max.y + RIM_PLANET_DRIFT_PX,
                     },
                 },
-            )
+            ))
         })
         .collect();
     // The probe angle: swept from the disc's BOTTOM (far from the top-left HUD; the rim's topmost

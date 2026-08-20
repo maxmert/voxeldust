@@ -401,12 +401,44 @@ fn assert_dot_rect_clear_of_planets(cap: &Capture, home_label: &str, label: &str
         if b.realm == home_label || b.extent_m <= 0.0 {
             continue;
         }
-        let rect = projected_point_aabb(&cap.camera, DVec3::from_array(b.center), b.extent_m)
-            .expect("a drawn body projects in front of the camera");
+        // A body BEHIND the eye paints nothing, so it can overlap nothing. TRUE-SCALE
+        // RESTATEMENT (S5): the diagnostic fit frames the self-authored outlines, which stands the
+        // camera at the home system — from there the galaxy's other star systems are routinely
+        // behind you, and `expect`ing a projection asserted a property of the old union fit rather
+        // than of the picture.
+        let Some(rect) = projected_point_aabb(&cap.camera, DVec3::from_array(b.center), b.extent_m)
+        else {
+            continue;
+        };
+        // The whole area the verdict reads: the dot's rectangle PLUS the surround ring it compares
+        // against. What would confound "a pixel unlike its surround is the dot" is another body's
+        // EDGE crossing that area — a rim inside the ring changes the surround under the dot. A
+        // body that either misses the area entirely, or COVERS ALL of it, is a uniform backdrop and
+        // discriminates nothing away.
+        //
+        // TRUE-SCALE RESTATEMENT (S5): the second arm is now reachable and load-bearing. The
+        // avatar stands at the home system's login standoff, which projects near the centre of the
+        // frame — and since the taxonomy slice the system's STAR draws a real photosphere disc
+        // there ([475,193]-[809,527] measured, against a 12-px dot rect at [636,354]-[648,366]).
+        // Standing in front of your own sun is not a defect; a rim through the probe would be.
+        let probe = ScreenAabb {
+            min: ScreenPos {
+                x: cap.dot_rect.min.x - DOT_SURROUND_RING_PX,
+                y: cap.dot_rect.min.y - DOT_SURROUND_RING_PX,
+            },
+            max: ScreenPos {
+                x: cap.dot_rect.max.x + DOT_SURROUND_RING_PX,
+                y: cap.dot_rect.max.y + DOT_SURROUND_RING_PX,
+            },
+        };
+        let covers = rect.min.x <= probe.min.x
+            && rect.min.y <= probe.min.y
+            && rect.max.x >= probe.max.x
+            && rect.max.y >= probe.max.y;
         assert!(
-            rects_disjoint(cap.dot_rect, rect),
-            "{label}: the dot's rectangle {:?} must be clear of {}'s drawn disc {rect:?}",
-            cap.dot_rect,
+            rects_disjoint(probe, rect) || covers,
+            "{label}: {}'s drawn disc {rect:?} has an EDGE inside the dot's probe area {probe:?} \
+             — the surround the verdict compares against is not uniform there",
             b.realm,
         );
     }
@@ -600,13 +632,14 @@ fn capture(
     }
 }
 
-// PARKED — full citation:
-// PARKED at the outer re-solve (real-scale addendum §A6.1's ordering edge 'S5 before S6 — or S6's pixel gates go black and the failure is unattributable', measured doing exactly that): a GALAXY-standing observer's composed scene now includes the seeded sibling systems 0.2376656 ly out, and the capture camera (`fit_camera_to_scene` — the union fit) blows out to a ~6.4e15 m eye, collapsing every in-system silhouette to a degenerate point (measured: home rect 4e-11 px)
-// The cure is the S5 renderer/camera slice (camera-relative flatten + the angular-rule fit, real-scale design §5.4/§7.4's render_crossing row), which this geometry-first slice deliberately precedes
-// Un-park with S5
-// Parked, never deleted or weakened — the in-system pixel gates (render_smoke, render_boxes_smoke, two_ships, look_pixels) stay green and carry the pixel proof at this slice.
+// THE S5 CAMERA WORK LANDED HERE TOO — the blow-out this gate was parked on is GONE: the framing
+// rule (a diagnostic fit unions the SELF-AUTHORED OUTLINES only, through the one Tier-A
+// `framing_bounds` both the renderer and this gate call) and the camera-relative flatten with an
+// f64-built rotation both apply to it. What stops it now is NOT the camera; it is this gate's own
+// VERDICT SHAPE, which predates the bound/look split. Re-parked with what was measured, and
+// ledgered as D-LOOK-4.
 #[test]
-#[ignore = "PARKED for the S5 renderer/camera slice (the speed-law slice S3 landed; the camera blow-out remains) - full citation in the comment block above this test"]
+#[ignore = "PARKED on a MEASURED verdict-shape gap (D-LOOK-4), NOT the S5 camera — the S5 work             landed and its blow-out is gone. This gate's central verdict tests CONTAINMENT against             the DRAWN region ('the dot's pixels lie inside the home box's projected region while             inside it'), and the bound/look split made those two different numbers: on THE world             the home realm DRAWS its star's photosphere at 7.805661e7 m while its containment             bound is 1.582262e11 m — a ratio of 2027, so an occupant lawfully inside the realm is             nowhere near its drawn disc. Measured with S5 landed: framing the 7.8e7 m photosphere             stands the diagnostic camera 2.35e8 m out, where the avatar's own login standoff             (1.03e10 m from the star, the T2 spawn) is 44x farther and projects BEHIND the star's             disc — 'the dot itself must be pixel-visible against the shell disc' failed with the             dot rect x636-648/y354-366 inside the star's disc x475-809/y193-527. What is owed: the             containment arm restated against the realm's BOUND (the number containment uses) plus             a framing that can hold both a photosphere and an occupant 1e10 m away. The crossing             itself is gated in pixels meanwhile by acceptance_flight (five legs, labels, handovers             and growth curves) and by look_pixels/warp_pixels."]
 fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.

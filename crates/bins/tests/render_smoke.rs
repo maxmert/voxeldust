@@ -92,12 +92,14 @@ fn await_listener(port: u16, child: &mut Child) {
     }
 }
 
+// UN-PARKED by the S5 render-scale slice (D-LOOK-3 discharged). What it had measured: the 3D
+// scene drew nothing on THE world — content_fraction 0.0036, the egui HUD alone, against a 0.05
+// floor. The ROOT CAUSE was not the far plane (Bevy's perspective is infinite-reverse and its
+// visibility check passes `intersect_far = false`, so `STAR_FAR_PLANE` clipped nothing): it was
+// `Transform::looking_at` subtracting `target - translation` in f32 at a 1e11 m eye, which
+// rounds a one-metre-ahead target onto the eye itself and drops the camera back to facing world
+// -Z. The renderer is camera-relative now and builds its rotation in f64.
 #[test]
-#[ignore = "PARKED under D-LOOK-3 (the true-scale camera far plane, MEASURED): the 3D scene \
-            draws nothing on THE world — content_fraction 0.0036 (the egui HUD alone) against a \
-            0.05 floor — because every body sits millions of km away and STAR_FAR_PLANE is \
-            120 000 render-metres. Same class as look_pixels/warp_pixels' parked gates; un-parks \
-            with the S5 render-scale slice."]
 fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.

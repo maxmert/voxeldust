@@ -70,8 +70,6 @@ impl FollowCamera {
 // divide + a viewport map. Tier-A, fully coverable on synthetic cameras.
 // ---------------------------------------------------------------------------
 
-use glam::DMat4;
-
 /// A pixel position in the readback image (origin top-left, `+y` DOWN — image-buffer
 /// convention, matching `assert.rs`'s `(ry * width + rx)` indexing).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,25 +111,42 @@ pub struct CaptureCamera {
 }
 
 impl CaptureCamera {
+    /// The camera's ORTHONORMAL BASIS `(right, up, back)` — the same basis
+    /// `glam::DMat4::look_at_rh` builds and the same one [`look_rotation`] hands the renderer, so
+    /// the pixel model and the drawn frame cannot be built from two conventions.
+    #[must_use]
+    pub fn basis(&self) -> (DVec3, DVec3, DVec3) {
+        look_basis(self.target - self.eye, self.up)
+    }
+
     /// Project a world point to a pixel position, or `None` if it is behind the camera or the
-    /// viewport is degenerate (zero-size). Right-handed look-at + symmetric perspective divide +
-    /// a top-left-origin viewport map (NDC `+y` up flips to image `+y` down).
+    /// viewport is degenerate (zero-size).
+    ///
+    /// ★ S5 — CAMERA-RELATIVE (`docs/design/DEFERRED.md` D-LOOK-3). The point is expressed
+    /// RELATIVE TO THE EYE first and only then rotated into view axes, which is exactly what the
+    /// renderer now does, so the model and the pixels share one arithmetic shape. It also removes
+    /// the near/far pair from the pixel map entirely: a symmetric perspective's `x`, `y` and `w`
+    /// rows do not contain `near` or `far` at all (only the unused `z` row does), so the old
+    /// `perspective_rh(NEAR_PLANE, FAR_PLANE)` was two literals that could never change a pixel —
+    /// and a far plane of `1e12` m was a visible lie on a world whose star gap is `2.2e15` m.
     #[must_use]
     pub fn project_point(&self, world_p: DVec3) -> Option<ScreenPos> {
         if self.width == 0 || self.height == 0 {
             return None;
         }
         let aspect = self.width as f64 / self.height as f64;
-        let view = DMat4::look_at_rh(self.eye, self.target, self.up);
-        // A far/near pair wide enough for any capture; the divide only needs a positive w (= -z_view).
-        let proj = DMat4::perspective_rh(self.fov_y, aspect, NEAR_PLANE, FAR_PLANE);
-        let clip = proj * view * world_p.extend(1.0);
-        // w = -z_view; a point on or behind the eye plane has w <= 0 and cannot be projected.
-        if clip.w <= 0.0 {
+        let (right, up, back) = self.basis();
+        let rel = world_p - self.eye;
+        // View-space coordinates of the eye-relative point; depth `w = -z_view` (a right-handed
+        // view looks down -Z), which is what the perspective divide needs.
+        let w = -back.dot(rel);
+        // A point on or behind the eye plane cannot be projected.
+        if w <= 0.0 {
             return None;
         }
-        let ndc_x = clip.x / clip.w; // [-1, 1] left→right
-        let ndc_y = clip.y / clip.w; // [-1, 1] bottom→top
+        let focal = 1.0 / (self.fov_y * 0.5).tan();
+        let ndc_x = (focal / aspect) * right.dot(rel) / w; // [-1, 1] left→right
+        let ndc_y = focal * up.dot(rel) / w; // [-1, 1] bottom→top
         // Viewport map: NDC→pixels, flipping y so +ndc_y (up) → smaller pixel row (top).
         let px = (ndc_x * 0.5 + 0.5) * self.width as f64;
         let py = (1.0 - (ndc_y * 0.5 + 0.5)) * self.height as f64;
@@ -139,11 +154,54 @@ impl CaptureCamera {
     }
 }
 
-/// The perspective near plane (m) — small; only the `w`-sign gate and the divide matter for a
-/// pixel map, so the exact value is not load-bearing (a named const, not a magic number).
+/// The framing floor's near-plane reference (m) — the scene-fit standoff is never allowed closer
+/// than the bounding radius plus this, so a zero-radius (single point) scene is still viewed from a
+/// sane range. NOT a projection parameter: [`CaptureCamera::project_point`] contains no near plane
+/// (see its note), and the RENDERER derives its own planes per frame from what is drawn
+/// ([`depth_planes`]).
 pub const NEAR_PLANE: f64 = 0.1;
-/// The perspective far plane (m) — generous so any capture-scale point projects.
-pub const FAR_PLANE: f64 = 1.0e12;
+
+/// The camera basis `(right, up, back)` for a look `direction` and an `up` reference — the ONE
+/// expression both the pixel model ([`CaptureCamera::basis`]) and the renderer
+/// ([`look_rotation`]) build their frame from. Matches `glam::DMat4::look_at_rh` exactly:
+/// `back = -normalize(direction)`, `right = normalize(up × back)`, `up' = back × right`.
+///
+/// Branchless (HR5): the caller guarantees a non-degenerate direction and a non-parallel `up` —
+/// every caller in the tree builds `direction` from a normalized quaternion or a fitted standoff.
+#[must_use]
+pub fn look_basis(direction: DVec3, up: DVec3) -> (DVec3, DVec3, DVec3) {
+    let back = -direction.normalize();
+    let right = up.cross(back).normalize();
+    (right, back.cross(right), back)
+}
+
+/// ★ THE RENDER FRAME'S ROTATION (S5, D-LOOK-3). The camera orientation as a QUATERNION, built in
+/// `f64` from the look direction and the up reference.
+///
+/// WHY IT EXISTS — a MEASURED defect, not a preference. The renderer used to orient its camera with
+/// Bevy's `Transform::looking_at(target, up)`, which subtracts `translation` from `target` in `f32`.
+/// On THE world the eye stands `1e8`–`1e15` m from the composed origin, where one `f32` ulp is
+/// `16` m to `1.3e8` m — so a target one metre ahead of the eye rounds to the eye ITSELF, the
+/// direction comes out ZERO, and Bevy's `look_to` silently falls back to `Dir3::NEG_Z`. The camera
+/// then looked down world `-Z` no matter where the pilot was facing, which is precisely why every
+/// parked pixel gate found a correctly-composed subject's rectangle EMPTY in the readback.
+/// Building the rotation here, in `f64`, from the direction the caller already holds, makes that
+/// cancellation unrepresentable.
+#[must_use]
+pub fn look_rotation(direction: DVec3, up: DVec3) -> glam::DQuat {
+    let (right, up_o, back) = look_basis(direction, up);
+    glam::DQuat::from_mat3(&glam::DMat3::from_cols(right, up_o, back))
+}
+
+/// ★ THE CAMERA-RELATIVE FLATTEN (S5, D-LOOK-3): a world position expressed in the RENDER FRAME,
+/// whose origin is the eye. The subtraction happens in `f64` and only the RESULT is ever narrowed
+/// to `f32`, so the drawn error is relative to the DISTANCE to the thing (≈ `6e-8` of it — far
+/// under a pixel at any range) instead of relative to the absolute coordinate (which is what put a
+/// `1.3e8` m quantum on a `2.2e15` m warp destination).
+#[must_use]
+pub fn eye_relative(world_p: DVec3, eye: DVec3) -> DVec3 {
+    world_p - eye
+}
 
 /// The minimum apparent radius, in pixels, a DOT MARKER may shrink to under perspective — the VU
 /// marker-phase visibility floor (a dot is the avatar's marker until meshes land, and a marker that
@@ -163,8 +221,69 @@ pub const DOT_MIN_APPARENT_RADIUS_PX: f64 = 3.0;
 /// depth off-axis, absorbed by the callers' bracketing factor).
 #[must_use]
 pub fn marker_world_radius(base_radius_m: f64, dist_m: f64, fov_y: f64, viewport_h_px: f64) -> f64 {
-    let m_per_px = 2.0 * dist_m.max(0.0) * (fov_y * 0.5).tan() / viewport_h_px;
-    base_radius_m.max(DOT_MIN_APPARENT_RADIUS_PX * m_per_px)
+    base_radius_m.max(DOT_MIN_APPARENT_RADIUS_PX * one_pixel_world_m(dist_m, fov_y, viewport_h_px))
+}
+
+/// The WORLD SIZE OF ONE PIXEL at view distance `dist_m` under a symmetric vertical `fov_y` over
+/// `viewport_h_px` rows — the camera model's own resolution limit, and THE one derivation both the
+/// apparent-size floor ([`marker_world_radius`]) and the near plane ([`depth_planes`]) are built
+/// from. Negative distances clamp to zero (a subject at or behind the eye has no forward extent).
+#[must_use]
+pub fn one_pixel_world_m(dist_m: f64, fov_y: f64, viewport_h_px: f64) -> f64 {
+    2.0 * dist_m.max(0.0) * (fov_y * 0.5).tan() / viewport_h_px
+}
+
+/// The perspective near/far pair the drawn picture needs, in metres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DepthPlanes {
+    /// The near plane: nothing the picture can RESOLVE is closer, so nothing resolvable is clipped.
+    pub near: f64,
+    /// The far plane: the farthest drawn SURFACE. Under the reverse-Z infinite projection the
+    /// renderer uses, this clips nothing — it is the honest declaration of the picture's own reach
+    /// (and what the CPU-side frustum reports), never a guessed backstop.
+    pub far: f64,
+}
+
+/// ★ THE DERIVED DEPTH PLANES (S5, D-LOOK-3) — near/far read off WHAT IS ACTUALLY DRAWN, never
+/// declared as lengths.
+///
+/// `subjects` is one `(distance from the eye to the thing's centre, its drawn world radius)` pair
+/// per drawn thing — the renderer feeds it straight from the transforms it just wrote, so the
+/// planes describe this frame's picture and no other.
+///
+/// THE DERIVATION.
+/// * `near` = the world size of ONE PIXEL at the NEAREST DRAWN SURFACE. Anything thinner than a
+///   pixel at that range cannot be resolved by this camera at all, so a near plane there cannot
+///   clip anything the picture could have shown. The reference distance never falls below
+///   [`DEFAULT_EYE_OFFSET`] (arm's length — the avatar's own marker is always drawn there, and a
+///   realm shell the eye is passing THROUGH drives the nearest surface to zero every crossing).
+/// * `far` = the FARTHEST DRAWN SURFACE, floored at that same reference so `near < far` holds for
+///   an empty picture too (`near` is one pixel's worth of the reference distance, and a viewport
+///   with more rows than `2·tan(fov/2)` — every viewport — makes that strictly smaller than the
+///   reference itself).
+///
+/// WHY NO LOGARITHMIC DEPTH. Measured (`crates/bins/tests/render_scale.rs`): under the reverse-Z
+/// infinite projection Bevy builds for a `PerspectiveProjection`, the depth code is `near/z`, so
+/// ONE `f32` code ulp is a CONSTANT `1.1920929e-7` of the range at every distance — 21.8 m at
+/// 1.82e8 m and 2.68e8 m at 2.25e15 m, both orders under the thinnest thing the world draws there.
+/// Reverse-Z already spans the world's full dynamic range; a second depth scheme would buy nothing.
+#[must_use]
+pub fn depth_planes(subjects: &[(f64, f64)], fov_y: f64, viewport_h_px: f64) -> DepthPlanes {
+    let mut nearest_surface = f64::INFINITY;
+    let mut farthest_surface = 0.0_f64;
+    for &(dist_m, radius_m) in subjects {
+        nearest_surface = nearest_surface.min((dist_m - radius_m).max(0.0));
+        farthest_surface = farthest_surface.max(dist_m + radius_m);
+    }
+    // An EMPTY picture has no nearest surface at all — arm's length is then the whole reference.
+    if !nearest_surface.is_finite() {
+        nearest_surface = DEFAULT_EYE_OFFSET;
+    }
+    let reference = nearest_surface.max(DEFAULT_EYE_OFFSET);
+    DepthPlanes {
+        near: one_pixel_world_m(reference, fov_y, viewport_h_px),
+        far: farthest_surface.max(reference),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,16 +418,47 @@ pub fn bounds_union(items: impl Iterator<Item = (DVec3, DVec3)>) -> Option<(DVec
     Some((center, radius))
 }
 
-/// The union bounding sphere of every box in the scene — [`bounds_union`] over the boxes' DRAWN
-/// centres ± extents. A straight-line delegate: the renderer draws in reduced space, so bounding
-/// raw absolutes would aim the capture camera somewhere nothing is; the per-box extent branch is
-/// [`box_extent`]'s.
-fn scene_bounds(scene: &RealmScene) -> Option<(DVec3, f64)> {
+/// ★ THE FRAMING BOUNDS (S5, D-LOOK-3) — WHAT A DIAGNOSTIC CAPTURE MAY FRAME.
+///
+/// `items` is one `(drawn centre, per-axis half-extent, states its own outline)` triple per drawn
+/// thing. The union is taken over the SELF-AUTHORED OUTLINES only; if the picture holds no outline
+/// at all, it falls back to the union of every drawn centre — the pre-S5 behaviour, which is
+/// exactly right for a sky made of nothing but points of light.
+///
+/// WHY THE FILTER EXISTS — a MEASURED failure. A point of light states no outline, so there is
+/// nothing OF IT to frame: it is drawn at a floored apparent size wherever it happens to be. Once
+/// the world grew to true scale, a galaxy-standing observer's picture held sibling stars
+/// `2.25e15` m out; unioning their bare CENTRES pushed the fitted eye to `~6.4e15` m and collapsed
+/// every in-system silhouette to a degenerate point (`render_crossing_smoke` measured the home
+/// shell at `4e-11` px). Framing what actually has an extent is the whole cure, and it needs no
+/// realm kind, no subject list and no literal: the author of the pixels decides.
+#[must_use]
+pub fn framing_bounds(items: &[(DVec3, DVec3, bool)]) -> Option<(DVec3, f64)> {
     bounds_union(
-        scene
+        items
             .iter()
-            .map(|(_realm, rbox)| (rbox.draw_center(), box_extent(rbox.shape))),
+            .filter(|(_, _, outlined)| *outlined)
+            .map(|&(c, e, _)| (c, e)),
     )
+    .or_else(|| bounds_union(items.iter().map(|&(c, e, _)| (c, e))))
+}
+
+/// The union bounding sphere of the scene's framable content — [`framing_bounds`] over the boxes'
+/// DRAWN centres ± extents, tagged by whether the box states its own outline. A straight-line
+/// delegate: the renderer draws in reduced space, so bounding raw absolutes would aim the capture
+/// camera somewhere nothing is; the per-box extent branch is [`box_extent`]'s.
+fn scene_bounds(scene: &RealmScene) -> Option<(DVec3, f64)> {
+    let items: Vec<(DVec3, DVec3, bool)> = scene
+        .iter()
+        .map(|(_realm, rbox)| {
+            (
+                rbox.draw_center(),
+                box_extent(rbox.shape),
+                rbox.body == vd_client::realm_scene::BodyKind::Look,
+            )
+        })
+        .collect();
+    framing_bounds(&items)
 }
 
 /// A box's per-axis half-extent: a sphere is `r` on every axis; a box is its `half`. A monomorphic
@@ -323,6 +473,9 @@ fn box_extent(shape: BoxShape) -> DVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The third-party reference the camera basis is measured against (the projection itself no
+    // longer builds a matrix — see `project_point`).
+    use glam::DMat4;
 
     fn close(a: DVec3, b: DVec3) -> bool {
         (a - b).length() < 1e-9
@@ -722,5 +875,151 @@ mod tests {
         );
         // The MOVED empty guard (it lives here now, not in the scene walk).
         assert_eq!(bounds_union(Vec::new().into_iter()), None);
+    }
+
+    // ---------------------------------------------------------------------------
+    // ★ S5 — THE RENDER FRAME (D-LOOK-3). The three laws the camera-relative flatten
+    // rests on, each measured rather than argued.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn look_rotation_reproduces_the_look_at_basis_exactly() {
+        // The renderer builds its camera rotation with `look_rotation`; the pixel model builds its
+        // basis with the same `look_basis`; `glam::DMat4::look_at_rh` is the third-party reference
+        // both must agree with, or a projected rectangle and its pixels describe two frames.
+        let eye = DVec3::new(3.0, -4.0, 11.0);
+        let target = DVec3::new(-7.0, 2.0, -1.0);
+        let up = DVec3::new(0.1, 1.0, 0.2).normalize();
+        let (right, up_o, back) = look_basis(target - eye, up);
+        let view = DMat4::look_at_rh(eye, target, up);
+        // look_at_rh's rows ARE the basis vectors (it maps world → view).
+        let row0 = DVec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
+        let row1 = DVec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
+        let row2 = DVec3::new(view.x_axis.z, view.y_axis.z, view.z_axis.z);
+        assert!(close(right, row0), "right {right} vs {row0}");
+        assert!(close(up_o, row1), "up {up_o} vs {row1}");
+        assert!(close(back, row2), "back {back} vs {row2}");
+        // And the quaternion carries the same basis in its columns.
+        let q = look_rotation(target - eye, up);
+        assert!(close(q * DVec3::X, right), "quat right");
+        assert!(close(q * DVec3::Y, up_o), "quat up");
+        assert!(close(q * DVec3::Z, back), "quat back");
+    }
+
+    #[test]
+    fn the_render_frame_survives_the_world_scale_that_kills_an_f32_camera() {
+        // ★ THE MEASURED DEFECT (D-LOOK-3), pinned so it cannot come back. Bevy's
+        // `Transform::looking_at` subtracts `target - translation` in f32 and falls back to facing
+        // world -Z when that comes out zero. At THE world's eye magnitudes a unit-ahead target IS
+        // the eye in f32 — so the camera silently stopped facing where the pilot faced.
+        for magnitude in [1.8248e8_f64, 3.2e11, 2.2485e15] {
+            let axis = DVec3::splat(magnitude / 3.0_f64.sqrt());
+            let forward = DVec3::new(0.5, 0.5, -0.5).normalize();
+            let f32_direction = (axis + forward).as_vec3() - axis.as_vec3();
+            assert_eq!(
+                f32_direction,
+                glam::Vec3::ZERO,
+                "at |eye| = {magnitude:e} m an f32 look-at direction must be measured as LOST \
+                 (this is the defect the render frame removes)",
+            );
+            // The f64 basis is unharmed at the same magnitude...
+            let q = look_rotation(forward, DVec3::Y);
+            assert!(
+                close(q * DVec3::Z, -forward),
+                "the f64 basis still faces the mark"
+            );
+            // ...and the eye-relative flatten places a subject one metre ahead of the eye at one
+            // metre ahead of the RENDER ORIGIN, to within the f64 quantum of the absolute
+            // coordinate — which is MILLIONTHS of the world size of one pixel at that same range,
+            // i.e. unobservable in the readback. (The f32 path's quantum, measured above, is the
+            // whole marker.)
+            let placed = eye_relative(axis + forward, axis);
+            let residual = (placed - forward).length();
+            let pixel = one_pixel_world_m(magnitude, FIT_FOV_Y, 720.0);
+            assert!(
+                residual * 1.0e6 < pixel,
+                "at |eye| = {magnitude:e} m the flatten residual {residual:e} m must be under a \
+                 millionth of one pixel's {pixel:e} m of world",
+            );
+        }
+    }
+
+    #[test]
+    fn the_depth_planes_are_read_off_the_drawn_picture_and_never_clip_it() {
+        let fov = FIT_FOV_Y;
+        let rows = 720.0;
+        // THE WORLD'S OWN RANGE PAIR: the avatar's own marker at arm's length and a body 2.2485e15 m
+        // out with a 7.8e12 m drawn radius (the warp destination's floored point of light).
+        let subjects = [
+            (DEFAULT_EYE_OFFSET, f64::from(0.5_f32)),
+            (2.2485e15, 7.76e12),
+        ];
+        let planes = depth_planes(&subjects, fov, rows);
+        // NEAR: one pixel's worth of world at the nearest surface (arm's length wins here), so
+        // nothing the camera can resolve is clipped — and strictly closer than that surface.
+        let nearest_surface = DEFAULT_EYE_OFFSET - 0.5;
+        assert!(
+            planes.near < nearest_surface,
+            "near {} must sit inside the nearest surface {nearest_surface}",
+            planes.near
+        );
+        assert_eq!(
+            planes.near,
+            one_pixel_world_m(DEFAULT_EYE_OFFSET, fov, rows)
+        );
+        // FAR: the farthest drawn SURFACE, exactly — no margin, no guess.
+        assert_eq!(planes.far, 2.2485e15 + 7.76e12);
+        // A FAR-ONLY picture moves the near plane out with it (the reference is the scene's own
+        // nearest surface, not a constant): one pixel at 1.0e11 m is 1.15e8 m of world.
+        let far_only = depth_planes(&[(1.0e11, 0.0)], fov, rows);
+        assert_eq!(far_only.near, one_pixel_world_m(1.0e11, fov, rows));
+        assert_eq!(far_only.far, 1.0e11);
+        // AN EMPTY PICTURE still yields a usable, ordered pair (arm's length is the whole
+        // reference) — the branch a capture takes before the first row arrives.
+        let empty = depth_planes(&[], fov, rows);
+        assert_eq!(empty.near, one_pixel_world_m(DEFAULT_EYE_OFFSET, fov, rows));
+        assert_eq!(empty.far, DEFAULT_EYE_OFFSET);
+        assert!(
+            empty.near < empty.far,
+            "near {} far {}",
+            empty.near,
+            empty.far
+        );
+        // A subject the eye is INSIDE drives the nearest surface to zero (a realm shell you are
+        // crossing) — the reference floor is what keeps the plane positive.
+        let inside = depth_planes(&[(1.0e6, 2.0e6)], fov, rows);
+        assert_eq!(
+            inside.near,
+            one_pixel_world_m(DEFAULT_EYE_OFFSET, fov, rows)
+        );
+        assert_eq!(inside.far, 3.0e6);
+        // ONE PIXEL AT OR BEHIND THE EYE has no forward extent (the clamp arm).
+        assert_eq!(one_pixel_world_m(-5.0, fov, rows), 0.0);
+    }
+
+    #[test]
+    fn the_framing_bounds_frame_outlines_and_fall_back_to_points_when_there_are_none() {
+        // ★ THE MEASURED FAILURE (D-LOOK-3): unioning a sibling star's bare CENTRE 2.25e15 m out
+        // with the home shell pushed the fitted eye past 6e15 m and collapsed the home silhouette.
+        // A point of light states no outline, so there is nothing of it to frame.
+        let home = (DVec3::ZERO, DVec3::splat(1.58e11), true);
+        let sibling = (DVec3::new(2.2485e15, 0.0, 0.0), DVec3::ZERO, false);
+        let (center, radius) = framing_bounds(&[home, sibling]).expect("bounds");
+        assert_eq!(center, DVec3::ZERO);
+        assert_eq!(radius, DVec3::splat(2.0 * 1.58e11).length() * 0.5);
+        // WITHOUT the filter the same picture frames a 1.1e15 m sphere — the collapse, measured.
+        let (_, unfiltered) =
+            bounds_union([(home.0, home.1), (sibling.0, sibling.1)].into_iter()).expect("bounds");
+        assert!(
+            unfiltered > radius * 1000.0,
+            "the unfiltered union {unfiltered:e} must dwarf the framed {radius:e}"
+        );
+        // A SKY OF PURE POINTS still frames (the fallback arm) — the pre-S5 behaviour, which is
+        // exactly right when nothing states an outline.
+        let (c, r) = framing_bounds(&[sibling]).expect("point fallback");
+        assert_eq!(c, sibling.0);
+        assert_eq!(r, 0.0);
+        // NOTHING DRAWN AT ALL is still None (the empty guard, through both arms).
+        assert_eq!(framing_bounds(&[]), None);
     }
 }

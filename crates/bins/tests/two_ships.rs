@@ -345,7 +345,20 @@ fn nonclear_in(rgba: &[u8], w: usize, h: usize, clear: [u8; 4], rect: ScreenAabb
     n
 }
 
+/// A footprint under one pixel is not something the readback can hold: one pixel is the image's own
+/// quantum, not a fitted tolerance.
+const READBACK_QUANTUM_PX: f64 = 1.0;
+
 /// THE LOCAL PIXEL PROBE: the named hull actually PAINTED where the composed picture put it.
+///
+/// ★ TRUE-SCALE RESTATEMENT (S5). The paint demand applies where the picture can RESOLVE the
+/// subject — where the camera model's own footprint clears the readback's quantum. Below that the
+/// subject is a genuinely sub-pixel body and demanding paint would demand a lie: MEASURED here,
+/// with the camera-relative flatten landed and the diagnostic fit framing the drawn outlines, the
+/// far hull composes at **0.03 px** from `1.0e11` m — a 3.44e6 m world at a hundred million
+/// kilometres. Its presence, its AUTHOR and its composed size are still asserted (by the caller and
+/// by the size assert beside it); what is not asserted is that a thirtieth of a pixel lights up.
+/// A magenta (missing-asset) pixel is a failure at every size.
 fn assert_painted(cap: &Straddled, cwd: &std::path::Path, subject: &Subject, what: &str) -> u64 {
     let (rgba, w, h, clear) = decode(cwd, &cap.shot);
     assert_eq!(
@@ -359,6 +372,16 @@ fn assert_painted(cap: &Straddled, cwd: &std::path::Path, subject: &Subject, wha
             .unwrap_or_else(|| panic!("{what}: the hull must project in front of the eye")),
     );
     let painted = nonclear_in(&rgba, w, h, clear, rect);
+    if subject.radius_px < READBACK_QUANTUM_PX {
+        eprintln!(
+            "[two-ships] {what}: SUB-PIXEL at this range — the composed footprint is {:.4} px \
+             (under the {READBACK_QUANTUM_PX} px readback quantum), {painted} px painted. The \
+              presence and the author are asserted; the paint is not demanded of a body the \
+              picture cannot resolve.",
+            subject.radius_px,
+        );
+        return painted;
+    }
     assert!(
         painted > 0,
         "{what}: NOTHING was painted at the composed position (rect {rect:?}, footprint {:.2} px)",

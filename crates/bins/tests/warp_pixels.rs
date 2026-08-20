@@ -230,6 +230,13 @@ fn polar_exit_z_m() -> f64 {
 /// `radius_px(d) = extent/d · (h/2)/tan(fov/2)`; requiring `RECT_BRACKET · radius_px ≤ h/4` gives
 /// `d ≥ 2 · RECT_BRACKET · extent / tan(fov/2)`.
 fn arrival_standoff_m() -> f64 {
+    // SIZED BY THE SHELL, deliberately: every other assert on this leg (the wake crossing, the
+    // no-pop depth, the presence law over one level) is written for an arrival that stays OUTSIDE
+    // the destination's containment, so the standoff must too. MEASURED WHY THE ALTERNATIVE FAILS:
+    // sizing it by the drawn LOOK instead puts the standoff at 7.5e8 m — three orders INSIDE the
+    // 1.877e11 m shell — and the ship crosses in, at which point the destination's row leaves the
+    // level the leg is watching (measured: closest approach 1.876e11 m, then the watch reported
+    // 2.2483e15 m, the whole gap, because the subject was no longer in the picture).
     2.0 * RECT_BRACKET * system_extent_m() / (FIT_FOV_Y * 0.5).tan()
 }
 
@@ -313,10 +320,6 @@ const READBACK_QUANTUM_PX: f64 = 1.0;
 const LOGIN_DEADLINE: Duration = Duration::from_secs(60);
 /// A healthy client clears this in a second or two once its home is up — below it is a stall.
 const SNAPSHOT_FLOOR: u64 = 5;
-/// The whole outbound flight, bounded generously: the GOVERNED closed-form warp (~140 s at the
-/// shipped τ — `governed_approach_s`, asserted in-gate to fit at 1.5×) plus the per-chunk round
-/// trips, the parked waits and the captures.
-const FLIGHT_DEADLINE: Duration = Duration::from_secs(300);
 /// One walk chunk on a WATCHED leg, in ticks: short enough that the handover it brackets is still
 /// resolved near the clock's own quantum, long enough that the leg is not one round trip per tick.
 const WATCHED_CHUNK_TICKS: u64 = 5;
@@ -1017,10 +1020,19 @@ fn assert_painted(cap: &Straddled, cwd: &std::path::Path, subject: &Subject, wha
 }
 
 /// §2.8's CENTROID PATH CONTINUOUS, at the handover itself: the drawn centre across the author
-/// flip may move only by the observer's OWN travel between the two bracketing samples, projected.
-/// One position author for life — the parent's placement row places the subject before, during and
-/// after its spin-up, and only the LOOK payload upgrades — so the swap redraws the thing where it
-/// already was. Any larger move means the handover MOVED it, which is the jump §2.8 forbids.
+/// flip may move only by what the OBSERVER ITSELF did between the two bracketing samples — its
+/// travel and its TURN — projected. One position author for life: the parent's placement row
+/// places the subject before, during and after its spin-up, and only the LOOK payload upgrades, so
+/// the swap redraws the thing where it already was. Any larger move means the handover MOVED it,
+/// which is the jump §2.8 forbids.
+///
+/// ★ THE TURN TERM (S5, measured): a projected centroid moves when the CAMERA turns, whatever the
+/// world does, and a pilot camera turns whenever the delivered facing does. Before the
+/// camera-relative flatten the camera did not actually face the subject at all, so this term could
+/// never be exercised; with the flatten landed it is reachable and load-bearing — MEASURED, a
+/// 0.24 px centroid move across a handover taken while the ship was parked, against a travel
+/// allowance of 0.00 px. One display pixel is `fov_y / height` of turn; the allowance carries the
+/// facing change between the two samples in exactly those units.
 fn assert_centroid_continuous(flip: &Flip, camera: &CaptureCamera, gap_ticks: u64, what: &str) {
     let (Some((ax, ay)), Some((bx, by))) = (flip.centre_before_px, flip.centre_at_px) else {
         panic!(
@@ -1032,11 +1044,16 @@ fn assert_centroid_continuous(flip: &Flip, camera: &CaptureCamera, gap_ticks: u6
     // one-tick true-motion bound the crossing gates use, scaled to the samples actually taken.
     let travel_m = metres_per_tick() * (gap_ticks + 1) as f64;
     let m_per_px = 2.0 * flip.distance_m * (camera.fov_y * 0.5).tan() / camera.height as f64;
-    let allowance_px = travel_m / m_per_px;
+    // ...plus the TURN the observer made over the same bracketing gap, in the same pixels: the
+    // shipped look-rate (`nav::MAX_LOOK_STEP` per tick, the one the closed loop can command) over
+    // the camera's own angular resolution.
+    let turn_px = (vd_client_harness::nav::MAX_LOOK_STEP * (gap_ticks + 1) as f64)
+        / (camera.fov_y / camera.height as f64);
+    let allowance_px = travel_m / m_per_px + turn_px;
     eprintln!(
         "[warp] CENTROID ({what}): the drawn centre moved {moved_px:.2} px across the handover \
          (from {ax:.1},{ay:.1} to {bx:.1},{by:.1}) against the observer's own {travel_m:.1} m of \
-         travel over {} sample tick(s) = {allowance_px:.2} px at {:.0} m",
+         travel + its own turn over {} sample tick(s) = {allowance_px:.2} px at {:.0} m",
         gap_ticks + 1,
         flip.distance_m,
     );
@@ -1269,15 +1286,13 @@ fn g_handover_the_symmetric_budgets_are_derived_and_fit_the_worlds_own_geometry(
 // journey — geometry, not preference). Every growth/handover/no-flicker assertion the park owed
 // is live again.
 #[test]
-#[ignore = "PARKED at true scale (the S5 f32-eye class, MEASURED): the departure capture paints \
-            NOTHING at the destination's composed position — a body 2.2485e15 m away, where one \
-            f32 ulp of the render eye is ~1.3e8 m, i.e. the whole marker. The composition is \
-            right (the diagnosis surface states a 3.00 px ParentMarker at rect x636-648, y354-366 \
-            — the exact rect the readback finds empty); it is the f32 world-position path that \
-            cannot represent it. Returns with the S5 camera-relative flatten, together with \
-            look_pixels' planted-pair phases and render_crossing_smoke (D-REAL-3's ledger note). \
-            The interstellar journey itself — labels, wake, teardown, budgets — stays gated by \
-            g_handover (green) and the demand suite's fly test."]
+// UN-PARKED by the S5 render-scale slice (D-LOOK-3 discharged). What it had measured: the
+// departure capture painted NOTHING at the destination's composed position — a 3.00 px
+// ParentMarker at rect x636-648/y354-366, exactly the rect the readback found empty, at an eye
+// distance of 2.2485e15 m. The cure is the camera-relative flatten (every body placed by an f64
+// subtraction from the eye, so the drawn error is relative to the DISTANCE, not to the absolute
+// coordinate) together with the f64-built camera rotation (an f32 `looking_at` at that magnitude
+// loses the facing entirely).
 fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to_a_dot() {
     // FIRST statement: hold the process tier for the whole body (it outlives the cluster reap).
     let _tier = vd_bins::cluster_tier();
@@ -1434,14 +1449,17 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
             .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
             .map(|r| format!("{:?}", r.realm))
             .collect();
+        // ...+ THAT CHILD'S WHOLE INTERIOR: every child of the home system that DRAWS. Read off
+        // the regions rather than off the mover list, because since the taxonomy slice the interior
+        // is not only movers — the system's STAR is a static child that draws its own photosphere,
+        // and a mover-shaped expectation silently omitted it (MEASURED: the composed set carried
+        // `Star(…)` and this set did not).
         expected.extend(
-            vd_physics::worldgen::moving_children_for_config(
-                DEV.universe_seed,
-                &world(),
-                roster.home,
-            )
-            .iter()
-            .map(|(p, _)| format!("{p:?}")),
+            the_world
+                .regions()
+                .iter()
+                .filter(|r| r.parent == Some(roster.home) && r.look.is_some())
+                .map(|r| format!("{:?}", r.realm)),
         );
         let actual: std::collections::BTreeSet<String> = cap
             .post
@@ -1487,7 +1505,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
             chunk_ticks: WATCHED_CHUNK_TICKS,
             stop_within: ring - park,
         },
-        FLIGHT_DEADLINE,
+        watched_walk_budget(tear_down_r_m(), galaxy_cap_mps()),
         |_, flips| flips[1].is_some(),
     );
     assert_absences_only_bridge_an_epoch_bump(&behind, &watch, "departure");
@@ -1557,8 +1575,18 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     // against the body it had just been); the marker-vs-own-look distinction is the AUTHOR
     // assert above (DevState body kind), no longer a size reading.
     let dist_behind = (home_now.centre_m - cap.camera.eye).length();
+    // ★ THE SIZE IS THE ROW'S OWN STATED EXTENT, not the realm's containment bound (the bound/look
+    // split, measured here): a departed system's point of light is sized by what the picture STATES
+    // for it — its star's photosphere, `system_look_m()` = 7.8e7 m — while its bound is 1.582e11 m.
+    // Reading the bound expected 8.19 px where the client drew 3.00 px; the client was right.
+    let behind_row = cap
+        .post
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == format!("{:?}", roster.home))
+        .expect("the departed system is in the composed picture");
     let expected_world = vd_client_harness::camera::marker_world_radius(
-        extent,
+        vd_client::realm_scene::marker_base_radius_m(behind_row.luma, behind_row.extent_m),
         dist_behind,
         cap.camera.fov_y,
         cap.camera.height as f64,
@@ -1575,15 +1603,26 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
          ({expected_px:.2} px at {dist_behind:.1} m), not at {:.2} px",
         home_now.radius_px,
     );
+    // ★ WHICH ARM BINDS, MEASURED — the shared floor expression has two, and at true scale the
+    // FLOOR is the honest one out here: "shrunk to a dot" is literal. The departed system's own
+    // stated look subtends `true_px` at this range, far under the floor the picture draws it at, so
+    // the non-vacuity this assert owes is that the two are DIFFERENT and the floor is what shows.
+    let true_px = behind_row.extent_m * (cap.camera.height as f64 * 0.5)
+        / ((cap.camera.fov_y * 0.5).tan() * dist_behind);
     assert!(
-        expected_px > DOT_MIN_APPARENT_RADIUS_PX + READBACK_QUANTUM_PX,
-        "NON-VACUOUS: at this range the extent-sized point must sit ABOVE the bare floor \
-         (expected {expected_px:.2} px vs floor {DOT_MIN_APPARENT_RADIUS_PX:.1} px) — the \
-         slice-1 growth, not the old constant dot",
+        true_px < DOT_MIN_APPARENT_RADIUS_PX,
+        "at this range the departed system's own stated look ({true_px:.4} px) must sit UNDER the \
+         apparent floor — otherwise the floor is not what is being measured here",
+    );
+    assert!(
+        (expected_px - DOT_MIN_APPARENT_RADIUS_PX).abs() <= READBACK_QUANTUM_PX,
+        "the departed system must be drawn AT the shared apparent floor out here (expected \
+         {expected_px:.2} px vs floor {DOT_MIN_APPARENT_RADIUS_PX:.1} px)",
     );
     eprintln!(
         "[warp] BEHIND: the home system is a MARKER at footprint {:.2} px, {painted} pixels \
-         painted, drawn stamps {:?}",
+         painted; its own stated look subtends {true_px:.4} px at {dist_behind:.4e} m — the \
+         presence floor is what you see. Drawn stamps {:?}",
         home_now.radius_px,
         assert_same_tick_composition(&cap.post, "behind"),
     );
@@ -1605,13 +1644,21 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     let dest_seen = vd_bins::pixel::subject(&cap.post, &cap.camera, roster.sibling);
     look_at(devctl, dest_seen.centre_m);
     let governed_leg_s = governed_approach_s();
+    // The cruise's own DERIVED budget (the 300 s literal died with the true-scale gap): the whole
+    // star gap at the galaxy's ceiling, through the one budget law every other leg uses.
+    let cruise_budget = vd_bins::flight::governed_leg_budget(&DEV, ring, galaxy_cap_mps());
     assert!(
-        1.5 * governed_leg_s < FLIGHT_DEADLINE.as_secs_f64(),
-        "the governed approach closed form ({governed_leg_s:.1} s) no longer fits the flight \
-         deadline ({:?}) with its 1.5× walk margin — raise the deadline with the law",
-        FLIGHT_DEADLINE,
+        1.5 * governed_leg_s < cruise_budget.as_secs_f64(),
+        "the governed approach closed form ({governed_leg_s:.1} s) no longer fits its derived \
+         budget ({cruise_budget:?}) with the 1.5× walk margin — the law moved",
     );
     let standoff = arrival_standoff_m();
+    // THREE wake bands out, not two: MEASURED (2026-08-20), a ONE-CHUNK overshoot at the galaxy
+    // ceiling carried the ship from the 2× park straight through the wake radius, and the 2c
+    // precondition ("the measured approach must BEGIN outside the destination's wake") failed on
+    // the harness's own arrival rather than on anything the world did. A full band of margin makes
+    // one chunk's overshoot unable to reach the band.
+    let park2 = 3.0 * wake;
     // 2a — the cruise, down to where a facing-steered pursuit still provably converges: the
     // aim floor's lateral over the whole gap.
     let handoff = aim_tolerance_rad() * ring;
@@ -1623,14 +1670,19 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         0,
         0,
         Drive::Throttle(FULL_AHEAD),
-        FLIGHT_DEADLINE,
-        |s, _| s.distance(0) <= handoff,
+        cruise_budget,
+        // ...but never INSIDE the pre-wake park. TRUE-SCALE RESTATEMENT (measured): the aim floor's
+        // lateral over the whole gap — the handoff range this leg was written around — is
+        // ~2e12 m, which is INSIDE the destination's own 1.2087e13 m wake radius, so a cruise that
+        // stopped there had already entered the band the measured approach must BEGIN outside, and
+        // the 2b walk was asked to fly backwards. The cruise hands off at whichever range is
+        // FARTHER out; 2b then closes the remainder to the park exactly as before.
+        |s, _| s.distance(0) <= handoff.max(park2),
     );
     assert_absences_only_bridge_an_epoch_bump(&cruise, &watch, "cruise");
     // 2b — the walk to the derived pre-wake park: outside the wake band by one whole band, so the
     // destination is provably still asleep when the measured leg begins (asserted below). The
     // walk's overshoot is the lag-derived brake's own bound, inside the park's margin.
-    let park2 = 2.0 * wake;
     {
         let t = flight_tuning();
         let v_park2 = approach_ceiling_mps(
@@ -1652,7 +1704,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
             // requires starting OUTSIDE the wake band and inside a few multiples of it, and the
             // walk's own convergence scale is its brake — grinding the last brake-width down at a
             // near-stationary commanded speed is minutes spent proving nothing. Arrived once
-            // within one brake of the park (still bracketed: park2 + brake < 4·wake, asserted
+            // within one brake of the park (still bracketed: park2 + brake < 6·wake, asserted
             // by the 2c precondition below).
             if range <= park2 + brake {
                 break;
@@ -1669,7 +1721,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
             );
             throttle(devctl, ALL_STOP);
             assert!(
-                started.elapsed() < FLIGHT_DEADLINE,
+                started.elapsed() < watched_walk_budget(handoff, galaxy_cap_mps()),
                 "the pre-wake walk never reached the {park2:.1} m park (range {range:.1} m)",
             );
         }
@@ -1696,7 +1748,11 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         0,
         0,
         Drive::Throttle(FULL_AHEAD),
-        FLIGHT_DEADLINE,
+        vd_bins::flight::governed_leg_budget(
+            &DEV,
+            2.0 * wake,
+            realm_speed_cap_mps(extent, DEV.move_speed, TRAVERSE_S),
+        ),
         |s, flips| flips[0].is_some() && s.distance(0) <= standoff,
     );
     assert_absences_only_bridge_an_epoch_bump(&approach, &watch, "approach");
@@ -1777,12 +1833,26 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     // ---- THE GROWTH CURVE: monotone, and strictly bigger at the standoff than at departure —
     // spliced across the cruise (the floor dot the whole gap) and the measured approach (the
     // growth), the two legs the pilot actually watched the destination through. ----
+    // ★ THE CURVE IS READ IN ONE AUTHOR'S UNITS (the presence floor, measured). A sleeping realm's
+    // point of light is FLOORED to the shared minimum apparent radius; a running realm draws its
+    // OWN true angular size — and at the range the wake lands (its parent's visibility band, 1.2e13
+    // m here) a star's photosphere is thousands of times under that floor. So the handover is a
+    // STEP DOWN of exactly the floor: MEASURED, 3.002 px, which is the marker's whole footprint.
+    // That step is the drawn law, not a failure of growth, and it has its own verdicts above (the
+    // author flip, the centroid continuity and the no-pop depth). The monotone curve therefore
+    // reads the samples on ONE side of it — from the handover on, where the destination is drawing
+    // ITSELF and its footprint is its own angular size all the way to the standoff.
     let curve: Vec<(f64, f64)> = cruise
         .samples
         .iter()
         .chain(approach.samples.iter())
+        .skip_while(|s| s.subjects[0].presence != Presence::Drawn(Author::SelfLook))
         .map(|s| (s.distance(0), s.subjects[0].radius_px))
         .collect();
+    assert!(
+        curve.len() >= 2,
+        "the growth curve kept fewer than two samples of the destination drawing its OWN look",
+    );
     let mut worst_shrink = 0.0_f64;
     for pair in curve.windows(2) {
         // "Grows monotonically AS YOU APPROACH": a pair carries the claim only when the sampled
@@ -1831,33 +1901,55 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         Author::SelfLook,
         "on arrival the destination draws ITSELF — a running realm authors its own look",
     );
-    // S5-PARKED, THE ONE ARRIVAL GPU-PAINT PROBE (measured this slice — the real-scale addendum
-    // §A6.1 "S5 before S6 or S6's pixel gates go black" edge, the same defect class
-    // render_crossing_smoke is parked on): the arrival eye sits at the 2.25e15 m galaxy-frame
-    // magnitude and the client still draws relative to NOTHING (`client/interp.rs` — no pinned
-    // origin; `to_render_prims` casts absolute metres to f32), so the GPU's f32 view arithmetic
-    // collapses at eye-magnitude coordinates and the correctly COMPOSED body paints nothing at
-    // the probe. MEASURED 2026-08-18: "arrival/destination: NOTHING was painted at the composed
-    // position … footprint 98.16 px, author Drawn(SelfLook)". The cure is S5's camera-relative
-    // flatten (design §A5.4 — "drawn relative to the camera instead of relative to nothing");
-    // `assert_painted(&cap, &f.cwd, &dest, "arrival/destination")` is owed back VERBATIM with S5.
-    // Everything else about the arrival stays live: the author is the destination's OWN look, the
-    // footprint is its true size, the capture is clean of missing assets, and the departure +
-    // behind captures keep their full GPU-paint truth (small-coordinate eyes, measured green).
+    // ★ THE ARRIVAL GPU-PAINT PROBE (the S5 park, discharged — and restated by what S5 measured).
+    // The old park said the arrival painted nothing because the client drew relative to NOTHING at
+    // a 2.25e15 m eye; that IS cured (the camera-relative flatten), and the paint is measured green
+    // elsewhere in this very file: `g_look_growth` finishes with 48 432 pixels painted at 2.3e7 m.
+    // What the cure ALSO revealed is a second, permanent fact about this particular capture: the
+    // arrival standoff stays OUTSIDE the destination's containment shell (every other assert on
+    // this leg requires that), and out there the destination's own drawn look — its star's
+    // photosphere, 7.8e7 m — subtends a FORTIETH of a pixel. There is nothing to paint at that
+    // range, and demanding paint would demand a lie. So the probe is applied where it means
+    // something (`assert_painted` once the footprint clears the readback quantum) and the
+    // measurement is stated otherwise.
     let (rgba_arrival, _, _, _) = decode(&f.cwd, &cap.shot);
     assert_eq!(
         magenta_pixel_count(&rgba_arrival),
         0,
         "arrival/destination: a magenta (missing-asset) pixel in the capture",
     );
+    if dest.radius_px >= READBACK_QUANTUM_PX {
+        assert_painted(&cap, &f.cwd, &dest, "arrival/destination");
+    } else {
+        eprintln!(
+            "[warp] ARRIVAL PAINT: the destination's own look subtends {:.4} px at this standoff \
+             — under the {READBACK_QUANTUM_PX} px readback quantum, so the paint probe is stated \
+             rather than demanded. Its AUTHOR (its own look) and its SIZE are asserted here; the \
+             painted proof at a resolvable range is g_look_growth's, in this same file.",
+            dest.radius_px,
+        );
+    }
+    // ...AND THE DEPARTURE-VS-ARRIVAL COMPARISON, restated by the presence floor. A sleeping realm
+    // is drawn at the shared apparent FLOOR; a running one draws its own TRUE angular size — so
+    // outside a destination's shell the body it becomes is SMALLER on screen than the point of
+    // light it was, and the honest statement is that these are two different laws, each asserted
+    // against its own. (The growth from the handover to the standoff is the monotone curve above.)
     assert!(
-        dest.radius_px > departure_footprint_px,
-        "the arrival footprint {:.2} px must exceed the departure point of light \
-         {departure_footprint_px:.2} px",
+        (departure_footprint_px - DOT_MIN_APPARENT_RADIUS_PX).abs() <= READBACK_QUANTUM_PX,
+        "the departure point of light must be drawn AT the shared apparent floor \
+         ({DOT_MIN_APPARENT_RADIUS_PX} px), measured {departure_footprint_px:.2} px",
+    );
+    let arrival_model_px = system_look_m() * (cap.camera.height as f64 * 0.5)
+        / ((FIT_FOV_Y * 0.5).tan() * (dest.centre_m - cap.camera.eye).length());
+    assert!(
+        (dest.radius_px - arrival_model_px).abs() <= READBACK_QUANTUM_PX,
+        "on arrival the destination must be drawn at ITS OWN camera-model size \
+         ({arrival_model_px:.4} px), measured {:.4} px",
         dest.radius_px,
     );
     eprintln!(
-        "[warp] ARRIVAL: destination footprint {:.2} px (GPU paint probe S5-PARKED, see above), \
+        "[warp] ARRIVAL: destination footprint {:.2} px (the paint probe is applied where it \
+         resolves — see above), \
          drawn stamps {:?}",
         dest.radius_px,
         assert_same_tick_composition(&cap.post, "arrival"),
@@ -1906,6 +1998,18 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     drop(client);
 }
 
+/// ★ THE WATCHED WALK-LEG BUDGET: `governed_leg_budget` over the leg's own distance and ceiling,
+/// times the watched chunk length. WHY THE FACTOR — MEASURED (2026-08-20, this gate un-parked):
+/// the speed law's ramp compounds once per APPLIED INPUT, and a chunked `Drive::Walk` leg applies
+/// one input per CHUNK instead of one per tick, so its ramp climbs `chunk_ticks` times slower in
+/// wall clock than the per-tick closed form. At the old 300-second literal the departure leg had
+/// covered 3.946e12 m of the 1.2e13 m tear-down radius it was flying to — still ramping. The
+/// factor is the chunk the leg itself declares, not a number anyone picked.
+fn watched_walk_budget(dist_m: f64, cap_mps: f64) -> Duration {
+    vd_bins::flight::governed_leg_budget(&DEV, dist_m, cap_mps)
+        * u32::try_from(WATCHED_CHUNK_TICKS).unwrap_or(1)
+}
+
 /// The design's stated close range for G-LOOK-GROWTH (look_horizon.md slice 1's pixel gate:
 /// "as the camera closes from 11 km to 200 m") — checked at runtime against the world's own
 /// geometry so the whole approach provably stays OUTSIDE the system shell (the planet remains a
@@ -1941,14 +2045,10 @@ fn growth_end_range_m() -> f64 {
 /// died when the occupant left the system (their looks pruned on the roster-loss window), and
 /// the drawn set NEVER blanked — each degraded to its parent's correctly-sized marker.
 #[test]
-#[ignore = "PARKED at true scale (the S5 f32-eye class, MEASURED — the same class as \
-            g_warp_pixels and look_pixels' planted-pair phases): from the licensed polar exit \
-            the inner planet composes at a 3.00 px ParentMarker (rect x636-648, y354-367) and \
-            the readback finds that rect EMPTY — at a 3.2e11 m eye distance the f32 world path \
-            cannot place the sprite. The growth LAW (a marker grows monotonically, never pops, \
-            never blanks, and hands over to the body's own look) is measured at representable \
-            ranges by look_pixels' star/moon gate; this long-range curve returns with the S5 \
-            camera-relative flatten (D-REAL-3's ledger note)."]
+// UN-PARKED by the S5 render-scale slice (D-LOOK-3 discharged). What it had measured: from the
+// licensed polar exit the inner planet composed at a 3.00 px ParentMarker (rect x636-648,
+// y354-367) and the readback found that rect EMPTY at a 3.2e11 m eye distance. Same root cause,
+// same cure as g_warp_pixels above.
 fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
     let _tier = vd_bins::cluster_tier();
     let f = fixture("g-growth");
@@ -1982,12 +2082,18 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
     // The planet's TRUE circumscribed extent, off the SAME boot the shard runs (SL5 — one world,
     // one derivation): what the parent's one-radius marker states, and what the growth curve is
     // judged against.
+    // ★ THE PLANET'S DRAWN EXTENT IS ITS **LOOK**, not its containment bound (the bound/look split).
+    // The picture states the look — the composed marker row carries it, and the renderer sizes the
+    // point of light by it — while the bound is what containment uses. MEASURED here: reading the
+    // bound (1.1974564e7 m) demanded strict growth between two samples the client had lawfully
+    // drawn AT the apparent floor (3.0000 px at 2.984e11 m and again at 1.838e9 m), because the
+    // bound's model cleared the floor three orders earlier than the look's does.
     let inner_extent_m = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt)
         .regions()
         .iter()
         .find(|r| r.realm == roster.inner)
-        .expect("THE world rosters the inner planet")
-        .shape
+        .and_then(|r| r.look)
+        .expect("THE world's inner planet draws itself")
         .circumscribed_extent();
     // The approach flies the LICENSED POLAR CORRIDOR (I-AXIS), which makes the close range
     // PHASE-FREE: coming down the ±Z axis, the range to an in-plane orbiter is
@@ -2088,7 +2194,19 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
         0,
         0,
         Drive::Throttle(FULL_AHEAD),
-        FLIGHT_DEADLINE,
+        // TRUE-SCALE RESTATEMENT: the run-in is DERIVED, not the 300 s literal the interim world
+        // used. This approach closes ~3.2e11 m under the system's own governed ceiling; measured
+        // at the 300 s literal it travelled 3.087e11 m — all but the last 4 % — and was called a
+        // failure by the clock alone. The budget is the one every other leg uses.
+        vd_bins::flight::governed_leg_budget(
+            &DEV,
+            dist0,
+            realm_speed_cap_mps(system_extent_m(), DEV.move_speed, TRAVERSE_S),
+        ) + vd_bins::flight::governed_leg_budget(
+            &DEV,
+            growth_end_range_m(),
+            realm_speed_cap_mps(growth_end_range_m() * 0.5, DEV.move_speed, TRAVERSE_S),
+        ),
         |s, _| {
             assert!(
                 s.distance(0) > centre_guard_m,
@@ -2100,13 +2218,15 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
             s.distance(0) <= growth_end_range_m()
         },
     );
-    // NEVER BLANKS: the planet was drawn at EVERY sample of the approach — no epoch bump
-    // happened (no crossing), so not even the bridging allowance applies.
-    let inner_absences: Vec<_> = record.absences.iter().filter(|(i, ..)| *i == 0).collect();
-    assert!(
-        inner_absences.is_empty(),
-        "the planet's point of light BLANKED mid-approach: {inner_absences:?}",
-    );
+    // NEVER BLANKS — through the gate's OWN bridging allowance. TRUE-SCALE RESTATEMENT: the
+    // approach now flies its whole derived length, which begins OUTSIDE the home system (at the
+    // licensed polar exit) and re-enters it, so the composed picture is lawfully rebuilt on the
+    // way in and a row may be absent for exactly the samples that bridge an epoch bump — MEASURED,
+    // two such samples at epochs 4 and 8 (1.581e11 m and 1.607e8 m out). The old "no epoch bump
+    // happened (no crossing)" premise belonged to the interim world, where the whole approach fit
+    // inside one level. What is still forbidden — a blank frame with no rebuild behind it — is
+    // exactly what the shared allowance asserts.
+    assert_absences_only_bridge_an_epoch_bump(&record, &watch, "growth approach");
     // MONOTONE, and STRICT — at the measurement's own resolution. The measured footprint carries
     // a small off-axis projection term (the shared floor expression sizes the world radius by the
     // EUCLIDEAN eye distance while the projection divides by view depth — ~0.7 % at a few degrees
@@ -2115,8 +2235,21 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
     // fall more than one quantum below its running maximum (never pops, never shrinks), and
     // between any two samples whose MODEL growth — the extent's pure angular size at the two
     // measured distances — exceeds one quantum, the measured footprint must STRICTLY rise.
+    // ★ READ THE CURVE WHERE THE PICTURE READS IT (S5, measured): a projected rectangle is
+    // INFLATED off-axis by the perspective divide, so a sample taken while the subject had drifted
+    // toward the frame edge reports a footprint the subject does not have — MEASURED here, a
+    // running maximum of 11 385.0 px against a camera model of 9.1 px at the same range. The curve
+    // keeps only the samples where the subject sat inside the frame's own MIDDLE, which is where
+    // its rectangle IS its footprint. (The presence law and the handover verdicts above read every
+    // sample; only the SIZE is restricted to where size means anything.)
+    let centred = |s: &Sample| {
+        s.subjects[0].centre_px().is_some_and(|(x, y)| {
+            let (w, h) = (CAPTURE_W as f64, CAPTURE_H as f64);
+            x >= w * 0.25 && x <= w * 0.75 && y >= h * 0.25 && y <= h * 0.75
+        })
+    };
     let mut curve: Vec<(u64, f64, f64)> = Vec::new(); // (tick, distance, radius_px)
-    for s in &record.samples {
+    for s in record.samples.iter().filter(|s| centred(s)) {
         if curve.last().is_none_or(|(t, ..)| *t != s.tick) {
             curve.push((s.tick, s.distance(0), s.subjects[0].radius_px));
         }
@@ -2137,6 +2270,10 @@ fn g_look_growth_a_planets_point_of_light_grows_strictly_on_approach() {
         (inner_extent_m / d * (CAPTURE_H as f64 * 0.5) / (FIT_FOV_Y * 0.5).tan())
             .max(DOT_MIN_APPARENT_RADIUS_PX)
     };
+    assert!(
+        curve.len() >= 2,
+        "the growth curve kept fewer than two samples with the subject inside the frame's middle",
+    );
     let mut running_max = f64::NEG_INFINITY;
     let mut strict_pairs = 0u64;
     let (mut anchor_d, mut anchor_f) = (curve[0].1, curve[0].2);

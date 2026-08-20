@@ -2121,6 +2121,32 @@ pub struct EarthLikeCandidate {
     pub radius_m: f64,
     pub insolation_rel: f64,
     pub t_eq_k: f64,
+    // ---- T4b: the rest of the picture an owner needs in order to CHOOSE a home. Every field is
+    // read off the same two rows the predicate reads (`StarPhotometrics`, `BodyTaxon`) or counted
+    // off the forest already in hand — the tool still builds no world of its own (SL5).
+    /// The star's Morgan-Keenan class (the predicate admits G only; carried so the report states
+    /// what it measured rather than what it assumed).
+    pub star_class: SpectralClass,
+    /// The star's main-sequence luminosity, `L/L☉` — how bright the sky over this world is.
+    pub star_luma_lsun: f64,
+    /// The planet's derived composition class.
+    pub planet_class: crate::taxonomy::PlanetType,
+    /// Its Bond albedo (the class+atmosphere table's value — the input its `t_eq_k` came from).
+    pub bond_albedo: f64,
+    /// Whether the cosmic-shoreline + Jeans verdicts left it AIR.
+    pub has_atmosphere: bool,
+    /// How many PLANETS the candidate's system holds (its star is not counted).
+    pub system_planets: u32,
+    /// How many MOONS that system holds in total.
+    pub system_moons: u32,
+    /// How many moons THIS body holds.
+    pub own_moons: u32,
+    /// How many OTHER star systems this galaxy holds (the reachable neighbours).
+    pub sibling_count: u32,
+    /// The 3-D distance to the NEAREST sibling system (m) — the first warp's length.
+    pub nearest_sibling_m: f64,
+    /// The 3-D distance to the FARTHEST sibling system (m) — the galaxy's far corner from here.
+    pub farthest_sibling_m: f64,
 }
 
 /// The owner's Earth-radius band (Earth radii) — the search's stated size criterion.
@@ -2205,6 +2231,9 @@ fn earth_like_in_forest(bodies: &[GeneratedBody]) -> Vec<EarthLikeCandidate> {
             continue;
         };
         if earth_like(&star, &taxon) {
+            let (nearest_sibling_m, farthest_sibling_m, sibling_count) =
+                sibling_star_gaps(bodies, system);
+            let (system_planets, system_moons) = system_census(bodies, system);
             out.push(EarthLikeCandidate {
                 system,
                 body: b.realm,
@@ -2213,10 +2242,95 @@ fn earth_like_in_forest(bodies: &[GeneratedBody]) -> Vec<EarthLikeCandidate> {
                 radius_m: taxon.radius_m,
                 insolation_rel: taxon.insolation_rel,
                 t_eq_k: taxon.t_eq_k,
+                star_class: star.class,
+                star_luma_lsun: star.luma_lsun,
+                planet_class: taxon.class,
+                bond_albedo: taxon.bond_albedo,
+                has_atmosphere: taxon.atmosphere.is_some(),
+                system_planets,
+                system_moons,
+                own_moons: children_of(bodies, b.realm),
+                sibling_count,
+                nearest_sibling_m,
+                farthest_sibling_m,
             });
         }
     }
     out
+}
+
+/// How many bodies name `parent` as their parent — the ONE counting expression the census reads
+/// (a monomorphic helper: the report needs it for a system's planets and for a planet's moons).
+fn children_of(bodies: &[GeneratedBody], parent: RealmId) -> u32 {
+    let n = bodies.iter().filter(|b| b.parent == Some(parent)).count();
+    // Branchless (HR5): the clamp is a `min`, never a fallible conversion with an unreachable arm.
+    n.min(u32::MAX as usize) as u32
+}
+
+/// `(planets, moons)` of one system: its direct children that are NOT its star, and their own
+/// children. Counted off the forest already generated — no second world, no second walk law.
+fn system_census(bodies: &[GeneratedBody], system: RealmId) -> (u32, u32) {
+    let mut planets = 0u32;
+    let mut moons = 0u32;
+    for b in bodies
+        .iter()
+        .filter(|b| b.parent == Some(system) && !matches!(b.realm, RealmId::Star(_)))
+    {
+        planets = planets.saturating_add(1);
+        moons = moons.saturating_add(children_of(bodies, b.realm));
+    }
+    (planets, moons)
+}
+
+/// `(nearest, farthest, count)` 3-D distances from `system` to the galaxy's OTHER star systems —
+/// what the owner's first warp will actually feel like. Both systems' placements are static
+/// offsets in the one galaxy frame the generator authored them in (Q-B's seeded 3-D placements),
+/// so this is a plain subtraction, never a fold from the root. An only child reports zeros with a
+/// zero count — the honest answer, not a sentinel.
+fn sibling_star_gaps(bodies: &[GeneratedBody], system: RealmId) -> (f64, f64, u32) {
+    let offset_of = |realm: RealmId| {
+        bodies
+            .iter()
+            .find(|b| b.realm == realm)
+            .and_then(|b| match b.placement {
+                Placement::StaticOffset(at) => Some(at),
+                Placement::Orbital(_) => None,
+            })
+    };
+    let Some(here) = offset_of(system) else {
+        return (0.0, 0.0, 0);
+    };
+    // SL1: a placement is stated in the PARENT's frame, so only bodies sharing this system's
+    // parent are comparable at all. Two id-shaped filters were MEASURED wrong before this one: the
+    // ambient Universe/Galaxy shells wear the same `RealmId::System` spelling and sit at the
+    // origin, and every system's own STAR sits at ZERO in ITS OWN frame — both reported a nearest
+    // gap of 0 m on a home system that (by J1) sits at the galaxy origin itself.
+    let Some(parent) = bodies
+        .iter()
+        .find(|b| b.realm == system)
+        .and_then(|b| b.parent)
+    else {
+        return (0.0, 0.0, 0);
+    };
+    let mut nearest = f64::INFINITY;
+    let mut farthest = 0.0_f64;
+    let mut count = 0u32;
+    for other in bodies
+        .iter()
+        .filter(|b| b.parent == Some(parent) && b.photometrics.is_some() && b.realm != system)
+    {
+        let Some(there) = offset_of(other.realm) else {
+            continue;
+        };
+        let gap = (there - here).length();
+        nearest = nearest.min(gap);
+        farthest = farthest.max(gap);
+        count = count.saturating_add(1);
+    }
+    if !nearest.is_finite() {
+        nearest = 0.0;
+    }
+    (nearest, farthest, count)
 }
 
 /// A WORLD, materialised once: the bodies that exist, and the containment regions they lower to.
@@ -6865,6 +6979,18 @@ mod tests {
                 radius_m: 6_515_459.435_746_093,
                 insolation_rel: 0.748_314_795_081_476_6,
                 t_eq_k: 236.785_700_196_447_92,
+                // T4b — the rest of the picture the owner chooses on, PINNED AS MEASURED.
+                star_class: crate::taxonomy::SpectralClass::G,
+                star_luma_lsun: 1.131_117_179_620_865_2,
+                planet_class: crate::taxonomy::PlanetType::Rocky,
+                bond_albedo: 0.3,
+                has_atmosphere: true,
+                system_planets: 9,
+                system_moons: 22,
+                own_moons: 1,
+                sibling_count: 2,
+                nearest_sibling_m: 2_248_490_503_621_178.3,
+                farthest_sibling_m: 2_248_490_503_621_178.5,
             },
         );
         // A seed with no Earth-like body answers with an EMPTY sweep — the same read path, the
@@ -6949,6 +7075,72 @@ mod tests {
         let via_grandparent = earth_like_in_forest(&[system_row, host, moonised]);
         assert_eq!(via_grandparent.len(), 1);
         assert_eq!(via_grandparent[0].system, earthlike[0].system);
+        // (c') and the SIBLING-GAP reader's own two refusals ride the same hand-built forest.
+        // A system with NO SIBLINGS in the forest reports zeros with a zero count — the honest
+        // answer, never a sentinel (this is also what (c) above measured).
+        assert_eq!(via_grandparent[0].sibling_count, 0);
+        assert_eq!(via_grandparent[0].nearest_sibling_m, 0.0);
+        // (d) A system whose placement is an ORBIT has no static offset to subtract from, and
+        // (e) a system with no parent has no frame to compare siblings in. THE world emits
+        // neither (a star system is a static child of its galaxy), so both are stated here.
+        let mut orbiting_system = system_row;
+        orbiting_system.placement = Placement::Orbital(crate::celestial::OrbitalElements {
+            sma: 1.0,
+            ecc: 0.0,
+            inclination: 0.0,
+            raan: 0.0,
+            arg_periapsis: 0.0,
+            mean_anomaly_epoch: 0.0,
+            central_mass: 1.0,
+        });
+        let orbiting = earth_like_in_forest(&[orbiting_system, host, moonised]);
+        assert_eq!(orbiting.len(), 1);
+        assert_eq!(orbiting[0].sibling_count, 0);
+        assert_eq!(orbiting[0].farthest_sibling_m, 0.0);
+        let mut parentless_system = system_row;
+        parentless_system.parent = None;
+        let parentless = earth_like_in_forest(&[parentless_system, host, moonised]);
+        assert_eq!(parentless.len(), 1);
+        assert_eq!(parentless[0].sibling_count, 0);
+        assert_eq!(parentless[0].nearest_sibling_m, 0.0);
+        // (f) A SIBLING STAR WITH NO STATIC OFFSET — an ORBITING star system — has no placement to
+        // subtract, so it is skipped rather than counted at a fabricated distance. THE world never
+        // emits one (a star system is a static child of its galaxy), so it is stated here.
+        let mut orbiting_sibling = system_row;
+        orbiting_sibling.realm = RealmId::System(0x5151_5151_5151_5151);
+        orbiting_sibling.placement = Placement::Orbital(crate::celestial::OrbitalElements {
+            sma: 1.0,
+            ecc: 0.0,
+            inclination: 0.0,
+            raan: 0.0,
+            arg_periapsis: 0.0,
+            mean_anomaly_epoch: 0.0,
+            central_mass: 1.0,
+        });
+        let with_orbiting_sibling =
+            earth_like_in_forest(&[system_row, orbiting_sibling, host, moonised]);
+        assert_eq!(with_orbiting_sibling.len(), 1);
+        assert_eq!(with_orbiting_sibling[0].sibling_count, 0);
+        assert_eq!(with_orbiting_sibling[0].nearest_sibling_m, 0.0);
+        assert_eq!(with_orbiting_sibling[0].farthest_sibling_m, 0.0);
+        // ...and a sibling that DOES carry a static offset is counted, at that offset — the same
+        // loop, the other verdict, so the skip above is not the only arm this test ever sees.
+        let mut placed_sibling = system_row;
+        placed_sibling.realm = RealmId::System(0x6262_6262_6262_6262);
+        placed_sibling.placement = Placement::StaticOffset(DVec3::new(3.0, 4.0, 0.0));
+        // ...beside a sibling-parented body that carries NO photometrics — an ambient shell rather
+        // than a star system. It shares the parent and is not the system itself, so only the
+        // photometric test can reject it: the arm that names WHAT a star system is.
+        let mut ambient_sibling = system_row;
+        ambient_sibling.realm = RealmId::System(0x7373_7373_7373_7373);
+        ambient_sibling.photometrics = None;
+        ambient_sibling.placement = Placement::StaticOffset(DVec3::new(9.0, 0.0, 0.0));
+        let with_placed_sibling =
+            earth_like_in_forest(&[system_row, placed_sibling, ambient_sibling, host, moonised]);
+        assert_eq!(with_placed_sibling.len(), 1);
+        assert_eq!(with_placed_sibling[0].sibling_count, 1);
+        assert_eq!(with_placed_sibling[0].nearest_sibling_m, 5.0);
+        assert_eq!(with_placed_sibling[0].farthest_sibling_m, 5.0);
     }
 
     /// The moon ladder's SOI-CLEARANCE clamp — the third `child_clearance_m` arm, measured

@@ -4887,32 +4887,91 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   `crates/core/src/geometry.rs` (`ContainmentBand`); real_scale_design §4.5/§A3.4;
   the speed-law ledger (scratchpad `speedlaw_state.md` item 10).
 
-### D-LOOK-3 🟥 THE TRUE-SCALE CAMERA: real body geometry is clipped by a 120 km far plane
+### D-LOOK-3 🟩 THE TRUE-SCALE CAMERA — LANDED with the S5 render-scale slice (2026-08-19)
 
-**WHAT is missing.** `vd-client-render`'s camera uses `STAR_FAR_PLANE = 2 × STAR_SPHERE_RADIUS =
-120 000 render-metres`, sized (correctly, for its time) off the ambient star-sphere backdrop. On
-THE world every drawable body is millions of kilometres away, so all real geometry falls beyond
-the far plane and is clipped. Sprite/marker-drawn bodies survive (they ride the backdrop sphere),
-which is why the picture looks alive while bodies do not.
+**WHAT WAS BROKEN, and what it actually was.** On THE world every drawable body is millions of
+kilometres away, and the readback came back EMPTY at rectangles the composer had placed correctly.
+The row's original diagnosis named `vd-client-render`'s `STAR_FAR_PLANE = 2 × STAR_SPHERE_RADIUS =
+120 000 render-metres`. **That diagnosis was wrong, and the correction is itself a measurement:**
+Bevy 0.18 builds a *reverse-Z INFINITE* perspective for a `PerspectiveProjection`
+(`bevy_camera::projection` — `Mat4::perspective_infinite_reverse_rh(fov, aspect, near)`; `far` never
+reaches the GPU) and its CPU visibility check passes `intersect_far = false`
+(`bevy_camera::visibility` — `frustum.intersects_obb(aabb, &world_from_local, true, false)`). The
+far plane clipped nothing at all.
 
-**MEASURED (2026-08-19, `look_pixels::g_true_scale_star_body_and_depth_four_moon_draw_themselves`):**
-the outer planet composes at 43.82 px with `Author::SelfLook` at 1.8248e8 m and its readback rect
-is EMPTY; the star's body paints 141 758 pixels at 211.17 px (with its `TAG_LUMA` datum) at
-3.2126e8 m. `warp_pixels` shows the same class at longer range: a 3.00 px `ParentMarker` composed
-at rect x636-648 / y354-366, readback empty, eye distance 2.2485e15 m (one f32 ulp ≈ 1.3e8 m).
+**★ THE ROOT CAUSE, MEASURED.** `Transform::looking_at(target, up)` computes `target - translation`
+in **f32**. A unit offset is lost the moment a coordinate passes `2^24 = 1.678e7` m, and THE world's
+eye stands at `1.8e8`–`2.2e15` m from the composed origin — one f32 ulp there is 16 m to 1.34e8 m.
+So a target one metre ahead of the eye **rounded onto the eye itself**, the direction came out ZERO,
+and Bevy's `look_to` fell back to `Dir3::NEG_Z` (`bevy_transform::components::transform` —
+`-direction.try_into().unwrap_or(Dir3::NEG_Z)`). The camera faced world −Z regardless of where the
+pilot was facing, which is exactly why correctly-composed subjects came back as empty rectangles
+while the pixel model — computed in f64 — said they were on screen. Pinned by
+`vd_client_harness::camera::tests::the_render_frame_survives_the_world_scale_that_kills_an_f32_camera`,
+which asserts the f32 direction IS zero at each measured eye magnitude.
 
-**WHERE it lives.** `crates/client-render/src/lib.rs` (`STAR_SPHERE_RADIUS`, `STAR_FAR_PLANE`,
-the perspective projection at ~line 381).
+**WHAT LANDED (renderer-side only — nothing about composition changed).**
+- **THE CAMERA-RELATIVE FLATTEN.** The follow camera sits at the RENDER ORIGIN
+  (`Transform.translation == Vec3::ZERO`) carrying only a rotation, and every drawn thing is placed
+  at `world − eye`, subtracted in f64 and narrowed to f32 only at the end
+  (`vd_client_harness::camera::eye_relative`; `RenderEye` + `place_camera` + `sync_world` +
+  `sync_realm_boxes` + `place_reference_scaffold` in `vd-client-render`). The drawn error is now
+  relative to the DISTANCE to the thing (~6e-8 of it) instead of to the absolute coordinate.
+- **THE f64 CAMERA ROTATION.** `vd_client_harness::camera::look_rotation` builds the orientation
+  from the direction the caller already holds, in f64, off the SAME `look_basis` the pixel model
+  projects through (pinned against `glam::DMat4::look_at_rh`). `looking_at` is never called on a
+  world-scale coordinate again.
+- **DERIVED NEAR/FAR.** `vd_client_harness::camera::depth_planes` reads the pair off WHAT IS DRAWN,
+  every frame (`derive_camera_planes`): `near` = the world size of ONE PIXEL at the nearest drawn
+  surface (never closer than arm's length), so nothing the camera can RESOLVE is clipped; `far` =
+  the farthest drawn surface. `STAR_FAR_PLANE` is DELETED, and so are `project_point`'s
+  `NEAR_PLANE`/`FAR_PLANE` literals (a symmetric perspective's x/y/w rows contain neither).
+- **THE FRAMING RULE.** A diagnostic scene fit unions the SELF-AUTHORED OUTLINES only
+  (`framing_bounds`, called by BOTH the renderer's per-frame refit and `live_scene_camera`'s
+  reconstruction): a point of light states no outline, so there is nothing OF IT to frame. Measured
+  failure it cures: unioning a sibling star's bare centre 2.2485e15 m out pushed the fitted eye past
+  6e15 m and collapsed the home shell to 4e-11 px.
 
-**WHEN it lands.** With the S5 render-scale slice: a camera-relative flatten (draw everything in
-eye-relative coordinates, so f32 precision follows the viewer) plus a depth scheme that spans the
-true dynamic range (logarithmic or reversed-Z far-plane-free). The three parked pixel gates —
-`look_pixels::g_true_scale_star_body_and_depth_four_moon_draw_themselves`,
-`warp_pixels::g_warp_pixels_*`, `warp_pixels::g_look_growth_*` — carry `#[ignore]` citations that
-name exactly what they measured, and un-parking them is the slice's acceptance.
+**★ THE DEPTH BUDGET, MEASURED (why no logarithmic depth).** Under the reverse-Z infinite
+projection the depth code is `near/z`, so ONE f32 code ulp is a CONSTANT **1.1920929e-7 of the
+range at every distance**: 21.75 m at 1.8248e8 m, 3.81e4 m at 3.2e11 m, 2.68e8 m at 2.2485e15 m —
+each orders under the thinnest thing THE world draws there. Reverse-Z already spans the world's full
+dynamic range; a second depth scheme would buy nothing. Gated by name in
+`crates/bins/tests/render_scale.rs`.
 
-**Until then**, the composition half of the law is gated without pixels: the demand suite's fly
-test (relayed interior boxes streaming in and MOVING while the ship is still in the between-space),
-`g_look_wake`, the walk gate's five label-asserted crossings, and `look_pixels`'s own
-`g_true_scale_budgets_and_parks_are_derived_and_lawful` (green) which pins every derived range,
-park and budget this world states.
+**THE ACCEPTANCE — the parked gates un-parked.** `render_smoke` (content_fraction 0.0036 → 0.0983
+against a 0.05 floor), `render_boxes_smoke`,
+`look_pixels::g_true_scale_star_body_and_depth_four_moon_draw_themselves` (the very measurement this
+row was opened on — the outer planet at 43.75 px, camera model 43.75 px, **5 770 pixels painted** at
+1.816e8 m, where the park had recorded the identical composition with an EMPTY readback rect) and
+`warp_pixels`' two gates. `render_crossing_smoke` is the one exception: the S5 camera work landed
+for it too and its blow-out is gone, but its own verdict shape predates the bound/look split — it is
+re-parked as **D-LOOK-4** below, with the measurement. A NEW gate,
+`crates/bins/tests/render_scale.rs` (`just render-scale`), measures the depth and position budgets
+directly with no cluster and no GPU, and `crates/bins/tests/acceptance_flight.rs`
+(`just acceptance-flight`) flies the whole arc in pixels.
+
+### D-LOOK-4 🟥 `render_crossing_smoke`'s verdict tests CONTAINMENT against the DRAWN outline
+
+**WHAT is wrong.** The gate's central verdict is *"the dot's pixels lie INSIDE the home box's
+projected region while the occupant is inside that realm, and outside it after the crossing"*. That
+was ONE statement when a realm's drawn outline WAS its containment boundary. The bound/look split
+(real_scale_design §3.0) made them two numbers, and on THE world they differ by 2027×: the home
+realm DRAWS its star's photosphere at `7.805661e7` m and is CONTAINED by `1.582262e11` m. An
+occupant lawfully inside the realm is therefore nowhere near its drawn disc, and the verdict cannot
+be true.
+
+**MEASURED (2026-08-20, with the S5 camera work landed).** Framing that `7.8e7` m photosphere puts
+the diagnostic camera `2.35e8` m out. The avatar's own login standoff — the T2 spawn, `1.03e10` m
+from the star — is 44× farther and projects BEHIND the star's disc, so the gate fails one assert
+earlier than the containment arm: *"the dot itself must be pixel-visible against the shell disc"*,
+with the dot rect `x636-648 / y354-366` inside the star's disc `x475-809 / y193-527`.
+
+**WHAT IS OWED.** Restate the containment arm against the realm's BOUND — the number containment
+actually uses, read from the booted regions exactly as every other true-scale gate reads it — and
+give the gate a framing that can hold both a photosphere and an occupant `1e10` m away (a
+subject-named fit, or the pilot camera with a companion dot).
+
+**Until then**, the crossing is gated in pixels by `acceptance_flight` (five legs, label-asserted
+crossings, handover counts and growth curves), by `look_pixels`' star/moon gate and by
+`warp_pixels`. **Where:** `crates/bins/tests/render_crossing_smoke.rs` (the `#[ignore]` citation).

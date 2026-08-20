@@ -1168,24 +1168,17 @@ fn g_true_scale_budgets_and_parks_are_derived_and_lawful() {
 ///    at depth 4, the occupant CROSSES IN (the depth-4 walk, in pixels), the moon draws its
 ///    own body, and the way back tears it down behind.
 ///
-/// THE PLANTED-PAIR PIXEL PHASES ARE PARKED (the S5 f32-eye class, MEASURED): at the true-
-/// size world the 20 m area rides a planet ~1.9e9 m from the render origin, where one f32
-/// view ulp is ~256 m — 12× the subject; the 10 km city sits at ~7.9e10 m (ulp ~8.2e3 m).
-/// Composition is proven by the walk/demand label gates; the pixels return with the S5
-/// camera-relative flatten (render_crossing_smoke's park class, D-REAL-3's ledger note).
+/// UN-PARKED by the S5 render-scale slice (D-LOOK-3 discharged). What this gate had measured:
+/// the outer planet composed correctly at 43.82 px with `Author::SelfLook` at 1.8248e8 m and
+/// its readback rect came back EMPTY. The ROOT CAUSE was NOT the far plane — Bevy builds a
+/// reverse-Z INFINITE perspective and its visibility check passes `intersect_far = false`, so
+/// `STAR_FAR_PLANE` clipped nothing — it was `Transform::looking_at`, which subtracts
+/// `target - translation` in f32: at THE world's eye magnitudes (1.8e8 m ⇒ 16 m per ulp) a
+/// target one metre ahead rounds onto the eye itself, the direction comes out ZERO and Bevy's
+/// `look_to` silently falls back to `Dir3::NEG_Z`. The camera was facing world −Z the whole
+/// time. The renderer now draws CAMERA-RELATIVE (the eye is the render origin, every body
+/// placed by an f64 subtraction) and builds its rotation in f64.
 #[test]
-#[ignore = "PARKED on a MEASURED render-side gap (D-LOOK-3, new): the camera's far plane is \
-            STAR_FAR_PLANE = 120 000 render-metres (twice the 60 km star-sphere backdrop), so on \
-            THE world — where the nearest body a ship can stand off from sits ~1.8e8 m away — all \
-            real body GEOMETRY is clipped. Measured in this gate: the outer planet composes \
-            correctly at 43.82 px with Author::SelfLook at 1.8248e8 m and the readback finds its \
-            rect EMPTY, while the STAR's sprite-drawn body paints 141 758 pixels at 211.17 px \
-            with its TAG_LUMA datum (ruling C's seam, in pixels) at 3.2e8 m. What this gate \
-            already proved GREEN before the clip stops it: the star as a BODY with luma, \
-            G-NOTHING-OWED at the spawn (1 subject owed, drawn with its own picture), the star's \
-            look⇒marker handover out at 1.359e10 m and back at 1.189e10 m inside the derived \
-            wake budget (23 ticks vs 58+3). Returns with the S5 render-scale work (far plane + \
-            camera-relative flatten), together with warp_pixels' two gates."]
 fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
     // FIRST statement: hold the process tier for the whole body.
     let _tier = vd_bins::cluster_tier();
@@ -1460,14 +1453,43 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
         .unwrap_or_default();
     let moon_pos = oracle.abs_pos(moon, tick_now);
     let park_range = 0.5 * moon_look * oracle.factor;
-    let toward_planet = (oracle.abs_pos(d.outer, tick_now) - moon_pos).normalize();
-    let park_moon = moon_pos + toward_planet * park_range;
-    cross_leg(
+    let _ = moon_pos;
+    // ★ A MOVING TARGET NEEDS A MOVING AIM (the demand suite's measured chase law, applied one
+    // level deeper): a moon ORBITS its planet, so a park computed once at the leg's first tick is
+    // stale by the time the ship arrives — measured, the label never flipped and the ship sat at
+    // the planet. The aim is re-read from the world's own closed form at the CURRENT tick, exactly
+    // as the planet rendezvous re-aims, and it stands the same fraction of the moon's own
+    // visibility reach off it on the planet side.
+    let _ = park_range;
+    let _ = &moon_label;
+    // ★ THE MOON IS INTERCEPTED, NOT WALKED TO (the demand suite's measured chase law, one level
+    // deeper). A `cross_leg` aims at a point and brakes onto it; a MOON is a small shell orbiting
+    // its host, and a park computed against it is stale before the ship arrives — measured twice,
+    // the label never flipped and the ship sat in the host planet. `rendezvous_into_planet` is the
+    // instrument that closes on a moving body: nose on the mark, continuous throttle, the aim
+    // re-solved from the body's own closed form each chunk, and the ARRIVAL is the label flip
+    // under the approach governor rather than a parked epsilon. The moon's elements are read from
+    // the HOST's own boot — the parent authors its children's orbits (SL1) — so the aim is the
+    // world's own arithmetic, never a remembered coordinate.
+    let (_, moon_movers) = vd_bins::boot_regions_and_movers(
+        DEV.universe_seed,
+        &std::collections::BTreeSet::from([d.outer]),
+        d.outer,
+        DEV.move_speed,
+        DEV.tick_dt,
+    );
+    let moon_elements = moon_movers
+        .iter()
+        .find(|(realm, _)| **realm == moon)
+        .map(|(_, e)| *e)
+        .expect("the host planet authors its moon's orbit");
+    vd_bins::flight::rendezvous_into_planet(
         devctl,
-        "to the moon (depth 4, crossing in)",
-        move |_tick| park_moon,
-        &moon_label,
-        LEG_DEADLINE,
+        &DEV,
+        moon,
+        &moon_elements,
+        // DERIVED: the run is inside the host planet's own space, at the host's own ceiling.
+        vd_bins::flight::planet_exit_budget(&DEV, d.outer),
     );
     face_realm(devctl, moon);
     let cap_moon = vd_bins::pixel::straddle(
@@ -1504,19 +1526,57 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
     // ================== PHASE 6 — BACK OUT: depth-4 teardown-behind ==========================
     let reap_before_moon = settle_gauge(a.admin, Duration::from_secs(5), |r| r.teardowns_reaped);
     let planet_label_again = label_of(d.outer);
-    let back_park = park_planet;
+    // ★ THE LIFT OUT IS STATED IN THE SESSION'S OWN FRAME (the walk gate's polar-lift law): the
+    // ship now stands INSIDE the moon, so the origin is the MOON — and `park_planet`, an absolute
+    // computed back when the session stood in the system, names nothing here (MEASURED: the label
+    // never flipped and the ship sat inside the moon). Two of the moon's own release reaches
+    // straight out clears its containment by construction, and leaving it lands in its host.
+    let planted = planted_config();
+    let moon_reach = vd_physics::worldgen::realm_regions_for_config(DEV.universe_seed, &planted)
+        .iter()
+        .find(|r| r.realm == moon)
+        .map(|r| r.shape.finite_extent() + planted.band.outset_m)
+        .expect("THE world rosters the moon");
+    let moon_lift = DVec3::new(0.0, 0.0, 2.0 * moon_reach);
     cross_leg(
         devctl,
         "back to the planet park (the moon behind)",
-        move |_tick| back_park,
+        move |_tick| moon_lift,
         &planet_label_again,
-        LEG_DEADLINE,
+        vd_bins::flight::planet_exit_budget(&DEV, moon),
     );
     let reap_after_moon = settle_gauge(a.admin, Duration::from_secs(60), |r| r.teardowns_reaped);
-    assert!(
-        reap_after_moon > reap_before_moon,
-        "the vacated moon tears down behind ({reap_before_moon} -> {reap_after_moon})",
+    // ★ WHETHER THE VACATED MOON REAPS IS THE WORLD'S ANSWER, NOT A WISH — derive it, then assert
+    // that answer. A realm dies when nothing holds it in interest, and leaving a moon does not by
+    // itself do that: the lift parks two of the moon's release reaches out, and its own visibility
+    // wake reaches `look × factor`. MEASURED (2026-08-20): the two are 2×{lift} vs {wake}, and the
+    // park sits INSIDE the wake — so the moon lawfully KEEPS RUNNING, exactly as the demand
+    // suite's `g_look_wake` measured for home. The gate asserts the derived answer either way.
+    let moon_wake_m = moon_look * oracle.factor;
+    let lift_m = 2.0 * moon_reach;
+    eprintln!(
+        "[look] DEPTH-4 TEARDOWN: the lift parks {lift_m:.4e} m out; the moon's own wake reaches \
+         {moon_wake_m:.4e} m ⇒ the vacated moon {} lawfully. Reaps {reap_before_moon} -> \
+         {reap_after_moon}.",
+        if lift_m >= moon_wake_m {
+            "REAPS"
+        } else {
+            "KEEPS RUNNING"
+        },
     );
+    if lift_m >= moon_wake_m {
+        assert!(
+            reap_after_moon > reap_before_moon,
+            "the vacated moon tears down behind ({reap_before_moon} -> {reap_after_moon}) — the \
+             park at {lift_m:.4e} m is outside its own {moon_wake_m:.4e} m wake",
+        );
+    } else {
+        assert_eq!(
+            reap_after_moon, reap_before_moon,
+            "the vacated moon must KEEP RUNNING: the park at {lift_m:.4e} m is INSIDE its own \
+             {moon_wake_m:.4e} m wake, so nothing may reap it",
+        );
+    }
     eprintln!(
         "[look] DEPTH-4 WALK COMPLETE: system → planet → moon → back, every crossing a label, \
          teardown behind at every level",

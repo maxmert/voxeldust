@@ -352,10 +352,36 @@ rlm-demand-login:
 # orbit speed through the ONE shared rendezvous, so the separate flight-speed recipe is retired:
 # `rlm-demand-login` above IS the flight-speed gate for every crossing test.)
 
+# ★ G-RENDER-SCALE (the S5 slice's own measurement gate, D-LOOK-3): the render PRECISION BUDGET,
+# measured on THE world with no cluster and no GPU. (1) THE DEPTH BUDGET: under Bevy's reverse-Z
+# INFINITE perspective one f32 depth-code ulp is a CONSTANT fraction of the range at every distance,
+# and that fraction is compared against the thinnest thing the world ever draws (2/visibility factor
+# of its own range) plus the two concrete range pairs the parked pixel gates measured. This is what
+# says reverse-Z alone spans 1e6 m to 2e15 m and a logarithmic depth buys nothing. (2) THE POSITION
+# BUDGET: the f32 look-at direction is still MEASURED lost at every eye magnitude THE world stands
+# at (the defect stays real, so the gate is never vacuous), beside the render frame's own residual
+# in pixels. Seconds to run; it would have caught the parked gates' failure without a flight.
+render-scale:
+    cargo test -p vd-bins --features dev-control,render --test render_scale -- --nocapture
+
+# ★ G-ACCEPTANCE-FLIGHT (the S7 slice): THE FLIGHT THAT PROVES THE WHOLE ARC. One demand cluster,
+# one headless GPU client, five legs on THE world — stand off the home system's innermost world at
+# the derived range where its own disc FILLS THE FRAME (asserted against the camera model, in
+# pixels); leave that world's space (its picture shrinks monotonically and never blanks); cross the
+# system out the licensed polar corridor (the star passes; the system's worlds draw at DISTINCT
+# sizes); warp the star gap to a 3-D neighbour (★ REAL PARALLAX: the sibling stars' bearings sweep
+# measurably; the destination grows from a point of light, hands over EXACTLY once, and is already
+# awake before the crossing); and come home (the reverse handovers, home growing back). Every park,
+# budget and expectation is DERIVED from the world the cluster boots — change the seed and the gate
+# re-derives. Measured leg times are printed against the flight table's closed form.
+# Same GPU-required, LOCAL-gate preconditions as render-smoke.
+acceptance-flight:
+    cargo test -p vd-bins --features dev-control,render --test acceptance_flight -- --nocapture --test-threads=1
+
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels look-pixels two-ships node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels look-pixels two-ships node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity render-scale acceptance-flight coverage
 
 # One-time setup helper.
 coverage-setup:
