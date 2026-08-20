@@ -70,6 +70,16 @@ cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --feature
 
 # Boot the demand cluster on THE world (the demand-spawned shards boot `UniverseConfig::world`;
 # `resolve_universe_scale` / `VD_UNIVERSE_SCALE` were deleted with the scale knob, Stage-C batch 1).
+# ★THROWAWAY (test instrument, owner-ordered 2026-08-20): cross the world faster than the
+# three-minute traverse policy allows. It multiplies the CRUISE ceiling of whatever realm you are
+# inside — and NOTHING else. The approach governor keeps its lawful values, so boundary crossings
+# behave exactly as they will in the real game: you still arrive slowly and cannot fly through
+# anything. Override it per run, e.g. `VD_TEST_OVERDRIVE=200 scripts/demand-visual-run.sh`.
+# 1.0 is the law; this whole knob retires with the keyboard throttle when the ship realm lands.
+# spawn_node inherits this environment, so every demand-spawned shard reads the same number.
+export VD_TEST_OVERDRIVE="${VD_TEST_OVERDRIVE:-64}"
+echo "cruise overdrive: ${VD_TEST_OVERDRIVE}x (1 = the lawful three-minute traverse)"
+
 # THE WORLD IS NO LONGER SELECTED, so there is nothing to export here. This block used to set a scale,
 # and a live cluster was read process by process with the orchestrator on one world and its own gateway on
 # another — from THIS script, in one launch. A knob that exists can be set twice; the fix was to delete it.
@@ -85,29 +95,40 @@ cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --feature
 # ║                                                                                                  ║
 # ║ Fly along X and watch the position readout in the corner.                                        ║
 # ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
-cat <<'NAV'
+cat <<NAV
 
-  ── flying this test world ─────────────────────────────────────────────
+  ── flying THE world (seed 2298 — your chosen home) ────────────────────
     controls
-      W A S D        move            mouse   look
-      SPACE / CTRL   up / down       SHIFT   hold for WARP speed
+      W A S D        move             mouse   look
+      SPACE / CTRL   up / down
+      [  and  ]      throttle tier DOWN / UP   (10 tiers; you start at 10)
 
-    two speeds, because there are two scales
-      cruise (no shift)   15 m/s   — crossing a star system takes ~20 s
-      warp   (hold shift) 500 m/s  — crossing to the next star ~24 s
+    the throttle
+      Full throttle crosses whatever realm you are INSIDE in three minutes
+      — at every level, from a planet's own space to the whole galaxy. The
+      tiers are spaced by RATIO, so the top two are your travel speeds and
+      the lower ones are for close work. The ship gathers way and loses it
+      instead of starting and stopping dead.
 
-    where the stars are
-      you start at   x = 0
-      a star sits at x = +12031
-      another at     x = -12031
-      a star wakes when you are within ~11460 m of it, so a neighbour
-      lights up shortly after you set off and grows as you close.
+      This run also carries a test overdrive of ${VD_TEST_OVERDRIVE}x on the CRUISE
+      ceiling, so you can get places quickly. It does NOT touch the approach
+      governor: near anything you are still slowed to the lawful speed, so
+      you still arrive gently and cannot fly through a world.
+
+    where you are
+      A yellow sun, 1.03 solar masses. Your home planet is 6,516 km across
+      with 10.2 m/s^2 of gravity, and it holds its air. Nine planets share
+      the system; 22 moons among them. Both neighbour stars sit 0.238 light
+      years away — a lawful warp of ~142 s, faster with the overdrive.
 
     what to watch for
-      planets are visible from ANYWHERE inside their system now (~318 m
-      reach against a 150 m system), so arriving at a star should show
-      you a populated system, not an empty box. they should fade in as
-      small dots and grow, not pop in at full size.
+      · the sun draws as a BODY with its own colour, not a dot
+      · planets keep their own picture as you leave, shrinking smoothly
+      · moons draw too — they are realms like everything else
+      · aim at a neighbour star and hold forward: the OTHER star should
+        sweep sideways across your view as you travel. That is real
+        parallax from real 3-D placement, ~23 degrees of it.
+      · nothing should pop, blink, or vanish at any handover
   ───────────────────────────────────────────────────────────────────────
 
 NAV

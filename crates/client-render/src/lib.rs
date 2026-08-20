@@ -52,7 +52,7 @@ use vd_client::realm_scene::{
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client_harness::camera::FollowCamera;
 use vd_client_harness::capture::capture_rel_path;
-use vd_client_harness::input_map::{MovementKeys, mouse_look};
+use vd_client_harness::input_map::{self, MovementKeys, mouse_look};
 use vd_client_harness::manifest::CaptureKind;
 use vd_core::EntityId;
 use vd_core::glam::DVec3;
@@ -65,7 +65,8 @@ const WINDOW_H: u32 = 720;
 /// The scene clear color (sRGB) — the cleared-background of BOTH the windowed and the
 /// headless-capture cameras (single-sourced so the two can never drift, and so the
 /// G-RENDER-SMOKE content check measures content against the one true background). Deep-space
-/// BLACK: the starfield is the only sky, so the gaps between stars must read as empty space.
+/// BLACK: every point of light is a REAL streamed realm, so the gaps between them are empty space
+/// and must read as such (owner ruling 2026-08-20 — "No unreachable star sky spheres please!").
 const CLEAR_SRGB: [f32; 3] = [0.0, 0.0, 0.0];
 /// The dot marker's BASE world radius (m). `pub` so the pixel gates size the dot's projected
 /// rectangle from the SAME base the renderer draws — through the one shared
@@ -91,50 +92,6 @@ const LANDMARK_COLORS: [Color; 8] = [
     Color::srgb(0.6, 0.3, 0.9),
     Color::srgb(0.9, 0.3, 0.7),
 ];
-// ---- starfield (VU-0: the always-visible night sky) ------------------------------------
-/// Fixed galaxy seed for the ambient background starfield. The far, UNREACHABLE stars are a
-/// permanent night-sky backdrop (a legitimate distant-point-of-light representation — NOT a
-/// mesh proxy). SEAM: at the real-astronomy / galaxy-catalog slice (warp) this seed becomes
-/// SERVER-provided (the agnostic client discovers it), the NEAR reachable systems promote to
-/// real realm content you fly to, and the far field stays a backdrop. Deterministic (the same
-/// sky every session, on every machine) via `SplitMix64`.
-const STARFIELD_SEED: u64 = 0x5644_5354_4152_5300; // "VDSTARS\0"
-/// Star-sphere radius (render-m) — the backdrop must sit BEYOND everything you can fly to, or the
-/// night sky would cut through real content. Raised from 2 000 when the inter-system spacing grew
-/// past it: the stars you can actually reach now sit ~12 km apart, and a backdrop closer than that
-/// would have painted over them. Revisited at the real-astronomy switch (a floating-origin / skybox
-/// pass supersedes this follow-sphere).
-const STAR_SPHERE_RADIUS: f32 = 60_000.0;
-// (The camera's near/far planes are DERIVED every frame from what is actually drawn — see
-// `derive_camera_planes` and `vd_client_harness::camera::depth_planes`. The old `STAR_FAR_PLANE`
-// backdrop-sized constant is GONE with the S5 render-scale slice: on THE world the drawn picture
-// spans 1e8 m to 2e15 m and no declared length can stand for it.)
-/// Uniform all-sky star count + the extra Milky-Way band over-density.
-const STAR_COUNT_UNIFORM: usize = 1600;
-const STAR_COUNT_BAND: usize = 1200;
-/// Milky-Way band half-thickness (rad) — band stars cluster within this of the galactic plane.
-const STAR_BAND_HALF_ANGLE: f32 = 0.32;
-/// Apparent star size as a FRACTION of [`STAR_SPHERE_RADIUS`] — MIN≈1px, MAX≈3px in the 1280-wide view.
-/// A fraction, not a length: what a star looks like is its ANGULAR size, so moving the backdrop must not
-/// change how big the sky looks. Pinned as lengths once, they silently shrank to nothing the first time
-/// the sphere moved out.
-const STAR_ANGULAR_MIN: f32 = 0.000_35;
-const STAR_ANGULAR_MAX: f32 = 0.001_2;
-const STAR_SIZE_MIN: f32 = STAR_ANGULAR_MIN * STAR_SPHERE_RADIUS;
-const STAR_SIZE_MAX: f32 = STAR_ANGULAR_MAX * STAR_SPHERE_RADIUS;
-/// Tilted galactic-plane normal (unnormalised; normalised at build) so the band is not axis-aligned.
-const GALACTIC_NORMAL: Vec3 = Vec3::new(0.30, 1.0, -0.20);
-/// Spectral-class palette `(base_color, emissive)` O/B..M — real-ish star colors. A star's tier
-/// indexes this; shared as N materials so the whole field batches by material.
-const STAR_TIERS: [([f32; 3], [f32; 3]); 5] = [
-    ([0.75, 0.83, 1.00], [0.55, 0.62, 0.90]), // O/B blue-white
-    ([0.95, 0.97, 1.00], [0.75, 0.77, 0.82]), // A  white
-    ([1.00, 0.97, 0.86], [0.85, 0.80, 0.62]), // G  yellow-white
-    ([1.00, 0.86, 0.62], [0.90, 0.60, 0.35]), // K  orange
-    ([1.00, 0.72, 0.55], [0.85, 0.42, 0.28]), // M  red
-];
-/// Cumulative spectral weights (M/K dwarfs dominate the real sky) — a uniform draw picks a tier.
-const STAR_TIER_CUM: [f32; 5] = [0.07, 0.20, 0.40, 0.65, 1.00]; // O/B, A, G, K, M
 /// Offscreen capture resolution. Width chosen so `width*4` is NOT a multiple of 256
 /// (1280*4 = 5120 IS a multiple → no padding; use 1284 to force the 256-byte row-pad
 /// strip path that the readback must handle). Height even. PUBLIC so a capture-gate test
@@ -245,6 +202,12 @@ struct Net {
 struct CameraState {
     cam: FollowCamera,
     last_movement: MovementKeys,
+    /// THROWAWAY (test instrument): the selected throttle tier, `0..=THROTTLE_TIERS`. `]` raises it,
+    /// `[` lowers it. It starts at the top because full throttle is the DESIGNED travel speed — the
+    /// realm's own width in three minutes — and the tiers below it exist for close manoeuvring.
+    throttle_tier: u8,
+    /// THROWAWAY: the eased commanded magnitude the wire actually carries (see `THROTTLE_EASE_TAU_S`).
+    throttle_now: f32,
 }
 
 /// The map from a delivered entity to its spawned Bevy dot entity.
@@ -341,6 +304,8 @@ fn run_windowed(handles: RenderHandles) {
         .insert_resource(CameraState {
             cam: FollowCamera::new(DVec3::Y),
             last_movement: MovementKeys::default(),
+            throttle_tier: input_map::THROTTLE_TIERS,
+            throttle_now: 0.0,
         })
         // A window is always the human's own first-person view; the pilot-view switch exists only
         // for the HEADLESS capture path (there is no scene-fitting framing here to decline).
@@ -382,8 +347,6 @@ fn run_windowed(handles: RenderHandles) {
                     // flash in space).
                     (sync_realm_boxes, despawn_reference_scaffold).chain(),
                     place_reference_scaffold,
-                    // Keep the ambient starfield centered on the camera (an inertial sky at infinity).
-                    follow_starfield,
                 ),
                 derive_camera_planes,
             )
@@ -412,7 +375,6 @@ fn setup_scene(
         FollowCam,
     ));
     setup_world(&mut commands, &mut meshes, &mut materials);
-    setup_starfield(&mut commands, &mut meshes, &mut materials);
 }
 
 // (the windowed camera above; the shared world below — capture's offscreen camera lives
@@ -461,13 +423,12 @@ type DrawnQuery<'w, 's> = Query<
 fn derive_camera_planes(
     render_eye: Res<RenderEye>,
     drawn: DrawnQuery,
-    starfield: Query<(), With<StarfieldRoot>>,
     mut cam: Query<&mut Projection, With<FollowCam>>,
 ) {
     let Some((fov_y, viewport_h)) = render_eye.view else {
         return;
     };
-    let mut subjects: Vec<(f64, f64)> = drawn
+    let subjects: Vec<(f64, f64)> = drawn
         .iter()
         .map(|t| {
             (
@@ -476,14 +437,6 @@ fn derive_camera_planes(
             )
         })
         .collect();
-    // The ambient starfield is an always-drawn shell at a fixed radius around the eye (windowed
-    // only — the capture path has no backdrop), so it is a subject like any other.
-    if starfield.iter().next().is_some() {
-        subjects.push((
-            f64::from(STAR_SPHERE_RADIUS),
-            f64::from(STAR_SIZE_MAX.max(STAR_SIZE_MIN)),
-        ));
-    }
     let planes = vd_client_harness::camera::depth_planes(&subjects, fov_y, viewport_h);
     if let Some(mut projection) = cam.iter_mut().next()
         && let Projection::Perspective(p) = &mut *projection
@@ -596,137 +549,57 @@ fn setup_world(
     // The stats HUD is drawn each frame by `hud_primary` via egui (no entity to spawn).
 }
 
-/// Marker: the root of the ambient starfield. It follows the camera POSITION each frame (so the
-/// sky is at infinity — parallax-free) but keeps identity ROTATION (an inertial night sky: turn
-/// or fly and the stars hold their world directions). Windowed-only; not `ReferenceScaffold`, so
-/// it survives when the realm content loads (the sky is always there).
-#[derive(Component)]
-struct StarfieldRoot;
-
-/// One background star: a world DIRECTION on the celestial sphere, an apparent SIZE, and a
-/// spectral TIER (index into [`STAR_TIERS`]).
-struct Star {
-    dir: Vec3,
-    size: f32,
-    tier: usize,
-}
-
-/// Seed-stable ambient starfield: a uniform all-sky population plus a denser, tilted Milky-Way
-/// band. Pure (`SplitMix64`) so the sky is byte-identical every session and on every machine.
-fn generate_starfield(seed: u64) -> Vec<Star> {
-    let mut rng = vd_core::rng::SplitMix64::new(seed);
-    let mut stars = Vec::with_capacity(STAR_COUNT_UNIFORM + STAR_COUNT_BAND);
-
-    // Uniform all-sky field (z uniform in [-1,1], azimuth uniform → uniform on the sphere).
-    for _ in 0..STAR_COUNT_UNIFORM {
-        let y = 2.0 * rng.next_f64() as f32 - 1.0;
-        let phi = std::f32::consts::TAU * rng.next_f64() as f32;
-        let r = (1.0 - y * y).max(0.0).sqrt();
-        let dir = Vec3::new(r * phi.cos(), y, r * phi.sin());
-        stars.push(make_star(dir, &mut rng, 1.0));
-    }
-
-    // Denser, tilted Milky-Way band: longitude uniform around a tilted plane, latitude a cubic
-    // draw (concentrates near 0 → a thin band). Band stars run a touch larger/brighter.
-    let n = GALACTIC_NORMAL.normalize();
-    let u_axis = n.any_orthonormal_vector();
-    let v_axis = n.cross(u_axis);
-    for _ in 0..STAR_COUNT_BAND {
-        let lon = std::f32::consts::TAU * rng.next_f64() as f32;
-        let t = 2.0 * rng.next_f64() as f32 - 1.0;
-        let lat = STAR_BAND_HALF_ANGLE * t * t * t;
-        let in_plane = lon.cos() * u_axis + lon.sin() * v_axis;
-        let dir = (lat.cos() * in_plane + lat.sin() * n).normalize();
-        stars.push(make_star(dir, &mut rng, 1.15));
-    }
-    stars
-}
-
-/// Assign a star its spectral tier (one weighted draw) and apparent size (a squared draw → most
-/// stars faint, a few bright), scaled by `size_boost` (the band population runs slightly brighter).
-fn make_star(dir: Vec3, rng: &mut vd_core::rng::SplitMix64, size_boost: f32) -> Star {
-    let x = rng.next_f64() as f32;
-    let tier = STAR_TIER_CUM
-        .iter()
-        .position(|&c| x <= c)
-        .unwrap_or(STAR_TIERS.len() - 1);
-    let m = rng.next_f64() as f32;
-    let size = (STAR_SIZE_MIN + (STAR_SIZE_MAX - STAR_SIZE_MIN) * m * m) * size_boost;
-    Star { dir, size, tier }
-}
-
-/// Spawn the ambient starfield: one shared unit sphere (scaled per star), one shared unlit
-/// emissive material per spectral tier, all parented to a [`StarfieldRoot`] so the whole sky
-/// follows the camera as one entity. Windowed-only (the capture path keeps its deterministic
-/// box-framing scene untouched).
-fn setup_starfield(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-) {
-    let unit = meshes.add(Sphere::new(1.0));
-    let tier_mats: Vec<Handle<StandardMaterial>> = STAR_TIERS
-        .iter()
-        .map(|(base, emis)| {
-            materials.add(StandardMaterial {
-                base_color: Color::srgb(base[0], base[1], base[2]),
-                emissive: LinearRgba::rgb(emis[0], emis[1], emis[2]),
-                unlit: true,
-                ..default()
-            })
-        })
-        .collect();
-
-    let stars = generate_starfield(STARFIELD_SEED);
-    commands
-        .spawn((StarfieldRoot, Transform::default(), Visibility::default()))
-        .with_children(|parent| {
-            for star in &stars {
-                parent.spawn((
-                    Mesh3d(unit.clone()),
-                    MeshMaterial3d(tier_mats[star.tier].clone()),
-                    Transform::from_translation(star.dir * STAR_SPHERE_RADIUS)
-                        .with_scale(Vec3::splat(star.size)),
-                ));
-            }
-        });
-}
-
-/// Keep the starfield centered on the camera (position only; identity rotation) so it reads as an
-/// inertial sky at infinity. A one-frame lag is invisible at the star radius, so no ordering is
-/// needed against the camera update.
-fn follow_starfield(
-    cam: Query<&Transform, (With<FollowCam>, Without<StarfieldRoot>)>,
-    mut field: Query<&mut Transform, (With<StarfieldRoot>, Without<FollowCam>)>,
-) {
-    let Some(cam_tf) = cam.iter().next() else {
-        return;
-    };
-    let pos = cam_tf.translation;
-    for mut tf in &mut field {
-        tf.translation = pos;
-    }
-}
-
 /// Keyboard → held movement (resent only on change; latest-wins on the wire); mouse →
 /// the LOCAL camera turn (immediate) AND a `Look` delta to the server. Both ride the
 /// shared mailbox — byte-identical to a `vdctl` injection.
 fn input_system(
     keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
     mouse: Res<AccumulatedMouseMotion>,
     net: Res<Net>,
     mut camera: ResMut<CameraState>,
 ) {
-    let movement = MovementKeys {
+    // THROWAWAY (test instrument): `]` raises the throttle tier, `[` lowers it. The tier is announced
+    // in the log because there is no HUD yet to show it.
+    let raised = u8::from(keys.just_pressed(KeyCode::BracketRight));
+    let lowered = u8::from(keys.just_pressed(KeyCode::BracketLeft));
+    let tier = (camera.throttle_tier + raised)
+        .min(input_map::THROTTLE_TIERS)
+        .saturating_sub(lowered);
+    if tier != camera.throttle_tier {
+        camera.throttle_tier = tier;
+        tracing::info!(tier, of = input_map::THROTTLE_TIERS, "throttle");
+    }
+
+    let mut movement = MovementKeys {
         forward: keys.pressed(KeyCode::KeyW),
         back: keys.pressed(KeyCode::KeyS),
         left: keys.pressed(KeyCode::KeyA),
         right: keys.pressed(KeyCode::KeyD),
         up: keys.pressed(KeyCode::Space),
-        // Descend moved to Ctrl so Shift can be the THROWAWAY boost (see CRUISE_FRACTION).
         down: keys.pressed(KeyCode::ControlLeft),
-        boost: keys.pressed(KeyCode::ShiftLeft),
+        throttle: 0.0,
     };
+    // Ease the COMMANDED magnitude toward the tier while a key is held, and toward zero when none is —
+    // so the ship gathers way and loses it instead of starting and stopping dead. `held` is derived from
+    // the keys we just read, so the ramp cannot disagree with what is pressed.
+    let held = movement.axes().iter().any(|a| *a != 0.0)
+        || movement.forward
+        || movement.back
+        || movement.left
+        || movement.right
+        || movement.up
+        || movement.down;
+    let target =
+        f32::from(held) * f32::from(camera.throttle_tier) / f32::from(input_map::THROTTLE_TIERS);
+    let alpha = 1.0 - (-time.delta_secs() / input_map::THROTTLE_EASE_TAU_S).exp();
+    camera.throttle_now += (target - camera.throttle_now) * alpha;
+    // Snap the last sliver so a release reaches a true standstill rather than creeping forever.
+    let settled = camera.throttle_now < 1.0e-3 && target == 0.0;
+    camera.throttle_now *= f32::from(!settled);
+    movement.throttle = camera.throttle_now;
+
+    // The eased magnitude changes every frame, so resend whenever the wire value moved at all.
     if movement != camera.last_movement {
         if net.input.try_send(movement.move_action()).is_err() {
             net.dropped.fetch_add(1, Ordering::Relaxed);
@@ -1172,7 +1045,7 @@ fn frame_scene_camera(
 /// legible regardless of lighting). Double-sided is the seamless mandate ("the moon does NOT
 /// disappear when you enter the building"): the CONTAINER realm you are inside (e.g. the System, the
 /// Galaxy) stays visible as the faint shell AROUND you, never culled to black — you see its far wall
-/// through the near wall (honest translucency) plus every child box + the starfield beyond. An
+/// through the near wall (honest translucency) plus every child box beyond it. An
 /// earlier build back-face-culled these so a container you entered vanished from inside; that culling
 /// was the bug the user hit, not a feature. Returns `None` if the box lowered to no prim (defensive).
 fn spawn_realm_box(
@@ -1346,6 +1219,8 @@ fn run_capture(handles: RenderHandles) {
         .insert_resource(CameraState {
             cam: FollowCamera::new(DVec3::Y),
             last_movement: MovementKeys::default(),
+            throttle_tier: input_map::THROTTLE_TIERS,
+            throttle_now: 0.0,
         })
         .insert_resource(CaptureView {
             pilot: handles.pilot_view,

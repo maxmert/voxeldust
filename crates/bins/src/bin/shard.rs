@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vd_bins::parse_held_realms(&env.string("VD_HELD_REALMS").unwrap_or_default(), own_realm)?;
     // `VD_UNIVERSE_SEED` (default 0) is the ONE seed every shard shares — read ONCE here (reused for the
     // frame lookup below AND the seed-neighbourhood plant further down).
-    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
+    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", vd_physics::worldgen::HOME_SEED)?;
     // The containment forest + the moving-child roster, from the ONE world (SL5). There is no scale to
     // resolve: this shard and its gateway build the same universe because there is only one, and the
     // interest band is measured against the speed this cluster actually flies at and the tick it
@@ -392,6 +392,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .world_mut()
         .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)
         .with_moving_children(vd_physics::motion::kepler_motion_fns(moving));
+    // ★THROWAWAY (test instrument, owner-ordered 2026-08-20): `VD_TEST_OVERDRIVE` multiplies the
+    // CRUISE ceiling only, so a tester crosses the world quickly. It touches neither the world, the
+    // geometry solve, nor the approach governor that keeps boundary crossings safe — see
+    // `RealmRegions::set_cruise_overdrive`. Default 1.0 IS the law, so an unset variable is inert.
+    let overdrive = node
+        .world_mut()
+        .resource_mut::<vd_sim::stub::RealmRegions>()
+        .set_cruise_overdrive(env.parse_or("VD_TEST_OVERDRIVE", 1.0_f64)?);
+    tracing::info!(overdrive, "cruise overdrive (1 = the law)");
     let mut pacer = TickPacer::new(tick_hz);
     // Cloud-ready k3d Slice 3: the k8s probe surface. A lock-free health cell the tick loop publishes (its
     // heartbeat + THIS shard's readiness) and the /healthz+/readyz HTTP task reads. Slice 1: the SIGTERM flag

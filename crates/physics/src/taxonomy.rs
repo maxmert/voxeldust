@@ -1064,6 +1064,19 @@ pub fn sample_imf_mass(u01: f64, slope: f64, m_lo: f64, m_hi: f64) -> f64 {
     }
 }
 
+/// The FRACTION of a bounded power-law IMF above `m` — the exact tail of the very CDF
+/// [`sample_imf_mass`] inverts: `1 - CDF(m) = (m_hi^b - m^b)/(m_hi^b - m_lo^b)`, `b = 1 - slope`.
+///
+/// Straight-line, one arm: the sampler's log-uniform limit has no consumer here, and inventing one
+/// would plant a branch nothing can drive. Its caller (the nest sweep's derived size) asks the
+/// question the Salpeter slope answers — "how rare is a star this heavy?" — and a slope of exactly
+/// 1 is not a world this generator draws.
+#[must_use]
+pub fn imf_tail_fraction(m: f64, slope: f64, m_lo: f64, m_hi: f64) -> f64 {
+    let b = 1.0 - slope;
+    (m_hi.powf(b) - m.powf(b)) / (m_hi.powf(b) - m_lo.powf(b))
+}
+
 /// The `slope != 1` inverse-CDF: invert `CDF(M) = (M^b - m_lo^b)/(m_hi^b - m_lo^b)`, `b = 1-slope`.
 fn imf_power(u01: f64, slope: f64, m_lo: f64, m_hi: f64) -> f64 {
     let b = 1.0 - slope;
@@ -1734,6 +1747,32 @@ mod tests {
         // The slope==1 log-uniform false arm: 0.4 * 10^0.5.
         let log_limit = sample_imf_mass(0.5, 1.0, 0.4, 4.0);
         assert!((log_limit - 0.4 * 10.0_f64.sqrt()).abs() < 1e-9);
+    }
+
+    /// The tail fraction IS the complement of the sampler's own CDF — measured against
+    /// `sample_imf_mass` rather than restated, so the two can never drift: the mass the sampler
+    /// draws at `u01` has exactly `1 - u01` of the population above it.
+    #[test]
+    fn imf_tail_fraction_is_the_complement_of_the_samplers_cdf() {
+        let (slope, lo, hi) = (2.35, 0.08, 16.360034882257757);
+        // The endpoints are exact: nothing is above the top, everything is above the bottom.
+        assert_eq!(imf_tail_fraction(hi, slope, lo, hi), 0.0);
+        assert_eq!(imf_tail_fraction(lo, slope, lo, hi), 1.0);
+        for step in 1..10 {
+            let u01 = f64::from(step) / 10.0;
+            let m = sample_imf_mass(u01, slope, lo, hi);
+            let tail = imf_tail_fraction(m, slope, lo, hi);
+            assert!(
+                (tail - (1.0 - u01)).abs() < 1e-12,
+                "u01 {u01}: mass {m} has tail {tail}"
+            );
+        }
+        // The number the nest sweep is sized from, pinned as measured: a star within one octave
+        // of the cap is a ~1.2-in-a-thousand draw under Salpeter.
+        assert_eq!(
+            imf_tail_fraction(0.5 * hi, slope, lo, hi),
+            0.001_177_546_835_105_709_6
+        );
     }
 
     #[test]

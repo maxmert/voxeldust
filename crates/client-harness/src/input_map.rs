@@ -11,20 +11,33 @@ use vd_devproto::InputAction;
 /// Mouse-look sensitivity — radians of look per pixel of motion.
 pub const LOOK_SENSITIVITY: f32 = 0.0025;
 
-/// THROWAWAY (tiny world): the fraction of full speed an un-boosted move commands.
+/// THROWAWAY (test instrument, owner-ordered 2026-08-20): the number of THROTTLE TIERS between a
+/// standstill and the containing realm's own speed ceiling.
 ///
-/// Two scales cannot share one speed. Neighbouring stars sit kilometres apart while a star system is
-/// ~150 m across, so a speed that crosses interstellar space in seconds crosses a whole system in two —
-/// you arrive somewhere and blast out the far side before it resolves around you. Holding the boost key
-/// gives full speed for the crossing; releasing it gives this fraction for manoeuvring once there.
+/// The server's throttle is GEOMETRIC — a commanded axis magnitude `t` in `[0, 1]` asks for
+/// `v_foot · (v_cap/v_foot)^t`. So EVENLY spaced tiers give evenly spaced *ratios*, which is the only
+/// spacing that can span walking pace and interstellar cruise on one control. Tier `n` commands a
+/// magnitude of `n / TIERS`; tier 0 is a standstill and tier `TIERS` is the realm's ceiling — which is
+/// its own width in three minutes, so full throttle always crosses whatever you are inside in the same
+/// time, at every level.
 ///
-/// It is a stand-in for the real thing, which is a THROTTLE the player controls continuously and a warp
-/// that DECELERATES on approach. Nothing here belongs in the final game; the real lesson it encodes is
-/// that arrival needs its own phase, not that a magic key exists.
-const CRUISE_FRACTION: f32 = 0.03;
+/// This is a STAND-IN and it is scheduled for deletion: when the ship realm becomes the thing you fly,
+/// the throttle stops being a keyboard tier and becomes a commanded force from a functional block. The
+/// lesson it encodes is that ONE control must span both scales, not that a tier key exists.
+pub const THROTTLE_TIERS: u8 = 10;
+
+/// THROWAWAY (same instrument): how quickly the commanded magnitude eases toward the tier — the time
+/// constant of the client-side ramp, in seconds.
+///
+/// The keyboard is a switch; a stick is not. Without this, a key press commands the ceiling instantly
+/// and a release commands a standstill instantly, so the ship starts and stops dead. Easing the
+/// COMMANDED magnitude turns the switch into a stick: the server sees a smoothly varying throttle and
+/// needs no change at all. It is input shaping in the input device, never a fake in the world — and
+/// the server's own ramp still bounds the acceleration underneath it.
+pub const THROTTLE_EASE_TAU_S: f32 = 1.2;
 
 /// The set of held movement keys this frame (idempotent — latest-wins on the wire).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MovementKeys {
     pub forward: bool,
     pub back: bool,
@@ -32,10 +45,11 @@ pub struct MovementKeys {
     pub right: bool,
     pub up: bool,
     pub down: bool,
-    /// THROWAWAY: full speed while held, [`CRUISE_FRACTION`] otherwise. The axes already ride the wire
-    /// as a magnitude in `[-1, 1]` and the server integrates `axes · speed`, so throttling needs no new
-    /// message and no server change — a smaller number simply moves you slower.
-    pub boost: bool,
+    /// THROWAWAY: the eased commanded magnitude in `[0, 1]` — the selected tier, ramped by the render
+    /// glue so a keypress reads like a stick rather than a switch. The axes already ride the wire as a
+    /// magnitude and the server integrates `axes · speed` through its GEOMETRIC throttle, so this needs
+    /// no new message and no server change: a smaller number simply asks for a slower ratio.
+    pub throttle: f32,
 }
 
 impl MovementKeys {
@@ -43,8 +57,9 @@ impl MovementKeys {
     /// normalization; matches the server's per-axis clamp).
     #[must_use]
     pub fn axes(self) -> [f32; 3] {
-        // Branchless scale: `f32::from(bool)` picks the multiplier with no arm to leave uncovered.
-        let scale = CRUISE_FRACTION + (1.0 - CRUISE_FRACTION) * f32::from(self.boost);
+        // The eased tier IS the magnitude the geometric throttle reads. Clamped here, once, so a
+        // render-glue slip can never command more than the realm already allows.
+        let scale = self.throttle.clamp(0.0, 1.0);
         [
             axis(self.forward, self.back) * scale,
             axis(self.right, self.left) * scale,
@@ -87,11 +102,11 @@ mod tests {
 
     #[test]
     fn axes_map_each_held_direction_per_axis() {
-        // Boosted throughout, so DIRECTION is asserted without the throttle scaling every number; the
-        // un-boosted magnitude is pinned separately below.
+        // Full throttle throughout, so DIRECTION is asserted without the tier scaling every number; the
+        // tier magnitude is pinned separately below.
         let held = |f: fn(&mut MovementKeys)| {
             let mut k = MovementKeys {
-                boost: true,
+                throttle: 1.0,
                 ..Default::default()
             };
             f(&mut k);
@@ -110,32 +125,38 @@ mod tests {
             up: true,
             down: true,
             left: false,
-            boost: true,
+            throttle: 1.0,
         };
         assert_eq!(mixed.axes(), [0.0, 1.0, 0.0]);
     }
 
     #[test]
-    fn cruise_is_a_fraction_of_boosted_speed_on_every_axis() {
-        // THE TWO SCALES. The axes ride the wire as a MAGNITUDE and the server integrates `axes · speed`,
-        // so releasing boost slows you without a new message, a new field, or a server change. Pinned on
-        // every axis because a throttle that only applied to forward would be a trap when manoeuvring.
-        let all = |boost: bool| {
+    fn the_tier_scales_every_axis_and_clamps_out_of_range() {
+        // THE ONE MAGNITUDE. The axes ride the wire as a magnitude and the server integrates
+        // `axes · speed` through its GEOMETRIC throttle, so a tier slows you without a new message, a
+        // new field, or a server change. Pinned on every axis because a throttle that only applied to
+        // forward would be a trap when manoeuvring.
+        let all = |throttle: f32| {
             MovementKeys {
                 forward: true,
                 right: true,
                 up: true,
-                boost,
+                throttle,
                 ..Default::default()
             }
             .axes()
         };
-        assert_eq!(all(true), [1.0, 1.0, 1.0]);
-        assert_eq!(all(false), [CRUISE_FRACTION; 3]);
-        // …and stationary is stationary at either throttle — cruise scales movement, never invents it.
+        assert_eq!(all(1.0), [1.0, 1.0, 1.0]);
+        assert_eq!(all(0.5), [0.5, 0.5, 0.5]);
+        assert_eq!(all(0.0), [0.0, 0.0, 0.0]);
+        // Out of range is CLAMPED here, once, so a render-glue slip can never command more than the
+        // realm allows — nor invert a direction with a negative.
+        assert_eq!(all(4.0), [1.0, 1.0, 1.0]);
+        assert_eq!(all(-1.0), [0.0, 0.0, 0.0]);
+        // …and stationary is stationary at any tier — the throttle scales movement, never invents it.
         assert_eq!(
             MovementKeys {
-                boost: true,
+                throttle: 1.0,
                 ..Default::default()
             }
             .axes(),
@@ -150,13 +171,14 @@ mod tests {
             right: true,
             ..Default::default()
         };
-        // Un-boosted is CRUISE speed; the axes carry the throttle as their magnitude.
-        assert_eq!(
-            keys.move_action(),
-            InputAction::Move([CRUISE_FRACTION, CRUISE_FRACTION, 0.0])
-        );
+        // A half tier is half the magnitude; the axes carry the throttle as their magnitude.
+        let half = MovementKeys {
+            throttle: 0.5,
+            ..keys
+        };
+        assert_eq!(half.move_action(), InputAction::Move([0.5, 0.5, 0.0]));
         let fast = MovementKeys {
-            boost: true,
+            throttle: 1.0,
             ..keys
         };
         assert_eq!(fast.move_action(), InputAction::Move([1.0, 1.0, 0.0]));

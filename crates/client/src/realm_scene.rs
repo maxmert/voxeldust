@@ -480,8 +480,9 @@ pub struct MarkerLook {
     pub color_rgba: [f32; 4],
     /// The sprite's base world radius BEFORE the shared apparent-size floor. `√L · `
     /// [`POINT_SOURCE_BASE_RADIUS_M`] — the equal-surface-brightness radius (a sphere whose
-    /// radius goes as √L has flux ∝ L), i.e. the classic "size encodes magnitude" convention,
-    /// which is also what the ambient backdrop starfield already draws.
+    /// radius goes as √L has flux ∝ L), i.e. the classic "size encodes magnitude" convention.
+    /// It is the ONLY star convention the client has: the decorative backdrop field is DELETED
+    /// (owner ruling 2026-08-20), so every point of light on screen is a real streamed realm.
     pub base_radius_m: f64,
 }
 

@@ -1229,6 +1229,19 @@ pub const MAX_REGIONS: usize = 64;
 /// land C-5/C-6). Replaces the directional `RealmBoundaries` portal registry.
 #[derive(Resource, Debug, Default)]
 pub struct RealmRegions {
+    /// ★THROWAWAY (test instrument, owner-ordered 2026-08-20): a multiplier on the CRUISE ceiling
+    /// only — see [`vd_core::flight::FlightTuning::cruise_overdrive`]. `1.0` is the law and is what
+    /// [`RealmRegions::new`] plants on every rig; a shard only ever carries more because its bin read
+    /// `VD_TEST_OVERDRIVE` and called [`RealmRegions::set_cruise_overdrive`].
+    ///
+    /// It lifts the realm's OWN ceiling and NOTHING else. The approach governor's arms keep their
+    /// lawful values deliberately: the containment bands are sized against the LAWFUL child ceilings,
+    /// so lifting those too would let a subject cross a boundary band in under one tick and fly
+    /// straight through a realm — the exact hole the OQ-2 ruling closed. Cruise fast, arrive lawfully.
+    ///
+    /// Scheduled for deletion with the keyboard-throttle instrument, when the ship realm becomes the
+    /// thing you fly and a throttle becomes a commanded force from a functional block.
+    cruise_overdrive: f64,
     regions: Vec<RealmRegion>,
     depths: Vec<DepthKey>,
     root_realm: Option<RealmId>,
@@ -1288,6 +1301,13 @@ impl RealmRegions {
     /// ONCE (regions are static at P3). The per-tick detector reads the cache; it never re-walks parents.
     /// The moving-child roster starts EMPTY — [`with_moving_children`](Self::with_moving_children) adds it.
     #[must_use]
+    /// ★THROWAWAY (test instrument): plant the cruise-only overdrive read from `VD_TEST_OVERDRIVE`.
+    /// Values below the lawful `1.0` are refused back to it — the instrument may only ever go faster.
+    pub fn set_cruise_overdrive(&mut self, factor: f64) -> f64 {
+        self.cruise_overdrive = factor.max(1.0);
+        self.cruise_overdrive
+    }
+
     pub fn new(regions: Vec<RealmRegion>) -> RealmRegions {
         let depths = regions
             .iter()
@@ -1305,6 +1325,9 @@ impl RealmRegions {
             .map(|r| ancestry_bits(&regions, &ix_of, r.realm))
             .collect();
         RealmRegions {
+            // ★THROWAWAY: the lawful 1.0 on every rig — only a bin that read `VD_TEST_OVERDRIVE`
+            // raises it, through `set_cruise_overdrive`.
+            cruise_overdrive: 1.0,
             regions,
             depths,
             root_realm,
@@ -2989,8 +3012,12 @@ fn on_gateway_msg(
                     departing: false,
                     entity_fence: Fence::GENESIS,
                     pose,
-                    yaw: 0.0,
-                    pitch: 0.0,
+                    // The angles come FROM the pose, never from zero: the integrator rebuilds the
+                    // orientation from them every tick, so a birth that zeroed them would face the
+                    // dot at the frame's default no matter what pose it was handed
+                    // (`kinematics::yaw_pitch_from_orient` — the two stores of one truth).
+                    yaw: kinematics::yaw_pitch_from_orient(pose.orient).0,
+                    pitch: kinematics::yaw_pitch_from_orient(pose.orient).1,
                     last_applied_seq: None,
                     // Seed to the spawn offset: tick-1's swept segment is degenerate. Origin when no stored
                     // pose (byte-identical to the old `DVec3::ZERO`); the stored offset otherwise.
@@ -3492,11 +3519,37 @@ fn governed_ceiling_in_book(
 ) -> Option<f64> {
     let own = regions.regions.iter().find(|r| r.realm == realm)?;
     let tier = own.frame.tier();
-    let mut v = flight::realm_speed_cap_mps(
+    // THE CRUISE CEILING — the only term the throwaway overdrive touches (see `cruise_overdrive`).
+    let lawful = flight::realm_speed_cap_mps(
         own.shape.finite_extent(),
         tuning.v_foot_mps,
         tuning.traverse_s,
     );
+    let mut v = lawful * regions.cruise_overdrive;
+    // ★THE OUTWARD ARM (test-instrument safety, measured 2026-08-20 from a flight that left the world).
+    //
+    // The child arms below slow you INWARD. Nothing slowed you toward your OWN realm's exit, because
+    // the lawful ceiling never needed it: the bands that catch an outward crossing are sized against
+    // that same lawful ceiling. An overdriven cruise breaks exactly that assumption — a subject crosses
+    // its own exit band in a fraction of a tick, the crossing never latches, and it keeps going with
+    // nothing outside to catch it. Measured: a pilot at 64x left the universe and stuck at the domain
+    // edge.
+    //
+    // So the exit is governed like everything else, by the SAME falling-ceiling law and the SAME lawful
+    // target: your ceiling decays to the realm's own lawful cap as you near your own shell. Deep inside
+    // you cruise overdriven; at the boundary you are lawful, so the band is crossed at the speed it was
+    // sized for. A realm is centred on itself, so the distance to its own shell is its extent less your
+    // own distance from its centre — no parent, no ancestor, nothing it does not already hold (SL1).
+    //
+    // At the lawful `1.0` this arm is INERT by construction: `v` is already `lawful`, and the arm can
+    // only ever return `lawful + something non-negative`, so the `min` cannot bite.
+    let dist_to_own_shell =
+        own.shape.finite_extent() - pos.delta_m(LatticePos::ORIGIN, tier).length();
+    v = v.min(flight::approach_ceiling_mps(
+        lawful,
+        dist_to_own_shell,
+        tuning.tau_s,
+    ));
     for (child, placed) in regions.child_rows(realm, book) {
         let child_cap = flight::realm_speed_cap_mps(
             child.shape.finite_extent(),
@@ -4309,8 +4362,20 @@ fn re_home_apply(
                 departing: false,
                 entity_fence: cmd.new_fence,
                 pose,
-                yaw: 0.0,
-                pitch: 0.0,
+                // ★THE RE-HOME FACING (measured by the owner flying, 2026-08-21: "when I'm re-homed
+                // the direction I look and the direction W moves me are not aligned").
+                //
+                // A crossing CONVERTS the pose's orientation into the destination frame — correctly.
+                // But the input integrator does not read that orientation; it REBUILDS it each tick
+                // from the yaw/pitch pair. Handing the arriving dot a converted pose and a zeroed
+                // pair therefore threw the player's facing away on the first input tick after every
+                // re-home: the body snapped to the new frame's default heading while the client's
+                // own camera kept the heading it had, so looking and moving came apart.
+                //
+                // The angles are now DERIVED from the converted orientation, so the rebuild
+                // reproduces exactly the facing the crossing computed.
+                yaw: kinematics::yaw_pitch_from_orient(pose.orient).0,
+                pitch: kinematics::yaw_pitch_from_orient(pose.orient).1,
                 last_applied_seq: None,
                 // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
                 prev_offset: pose.pos,
@@ -16094,7 +16159,7 @@ mod tests {
             // exists), so the placement radius and the ambient shells derive from the solve's
             // own reserved bound — disjoint siblings, nesting ambients, no tuned number.
             config.stellar.system_ring_r_m =
-                STORY_SHELL_HEADROOM * vd_physics::worldgen::TARGET_SYSTEM_BOUND_MAX_M;
+                STORY_SHELL_HEADROOM * vd_physics::worldgen::target_system_bound_max_m();
             config.planet.n_planets = 2;
             // Circular and in-plane, so the planet's distance from its star is its semi-major
             // axis at EVERY tick — a fact about the orbit, not about one instant. The axis
@@ -16102,7 +16167,7 @@ mod tests {
             config.planet.ecc_sigma = 0.0;
             config.planet.incl_sigma = 0.0;
             config.scale.galaxy_r_m = (config.stellar.system_ring_r_m
-                + vd_physics::worldgen::TARGET_SYSTEM_BOUND_MAX_M)
+                + vd_physics::worldgen::target_system_bound_max_m())
                 * STORY_SHELL_HEADROOM;
             config.scale.universe_r_m = config.scale.galaxy_r_m * STORY_SHELL_HEADROOM;
 

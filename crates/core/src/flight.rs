@@ -83,6 +83,12 @@ impl FlightTuning {
 /// structurally). The `max` is the collision floor: below the 45 km break-even extent
 /// (`v_foot·T/2`) the ceiling IS the foot speed, exactly — `max` returns its first argument
 /// bit-for-bit, so an interim-scale realm's behaviour is byte-identical by construction.
+/// ★THROWAWAY NOTE (test instrument, owner-ordered 2026-08-20): a tester may multiply the value this
+/// returns for the subject's OWN realm — and only that — through `RealmRegions::set_cruise_overdrive`
+/// (`VD_TEST_OVERDRIVE`). The approach governor's arms below deliberately keep their lawful values:
+/// the containment bands are sized against the LAWFUL child ceilings, so lifting those too would let a
+/// subject cross a boundary band in under one tick and fly straight through a realm — the hole the
+/// OQ-2 ruling closed. Cruise fast, arrive lawfully. It retires with the keyboard-throttle instrument.
 #[must_use]
 pub fn realm_speed_cap_mps(bound_extent_m: f64, v_foot_mps: f64, traverse_s: f64) -> f64 {
     v_foot_mps.max(2.0 * bound_extent_m / traverse_s)

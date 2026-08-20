@@ -448,7 +448,10 @@ pub const DEV: DevClusterParams = DevClusterParams {
     realm_recheck: 0,
     snapshot_budget: 1100,
     boot_ticks_p99: 0, // reactive-only in dev (the login is the demand trigger); a visual walk-in bumps it.
-    universe_seed: 0, // the default Walk-scale forest (matches the shard bin's VD_UNIVERSE_SEED default).
+    // ★ THE HOME SEED (owner ruling 2026-08-20): the one world every player starts in, chosen from
+    // the measured candidate table — see `vd_physics::worldgen::HOME_SEED` for its provenance and the
+    // discovery-permanence law. Matches the shard/gateway bins' own VD_UNIVERSE_SEED default.
+    universe_seed: vd_physics::worldgen::HOME_SEED,
 };
 
 /// SCALE-MAXSESSIONS-VS-K (compile-time): the gateway must admit at least K =
@@ -2378,43 +2381,14 @@ pub fn child_reaches(
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
 ) -> std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::geometry::ChildReach> {
-    use vd_core::geometry::ChildReach;
-    use vd_physics::motion::Motion;
-    let config = process_world_config(occupant_v_max_mps, tick_dt_s);
-    // Every mover of this neighbourhood, keyed by realm: the union of THE world's moving children
-    // over every parent a region row names. The regions and this roster derive from the SAME
-    // `(seed, config)` forest, so a mover row missing from it is unrepresentable — which is what
-    // makes the static `None` arm honest rather than a defaulted zero wearing a `Fixed` label.
-    let parents: std::collections::BTreeSet<vd_core::pose::RealmId> =
-        regions.iter().filter_map(|r| r.parent).collect();
-    let movers: std::collections::BTreeMap<
-        vd_core::pose::RealmId,
-        vd_physics::celestial::OrbitalElements,
-    > = parents
-        .iter()
-        .flat_map(|p| vd_physics::worldgen::moving_children_for_config(universe_seed, &config, *p))
-        .collect();
-    regions
-        .iter()
-        .filter(|r| r.parent.is_some())
-        .map(|r| {
-            let reach = match movers.get(&r.realm) {
-                Some(e) => {
-                    ChildReach::Excursion(Motion::Kepler(*e).max_excursion_m(r.frame.tier()))
-                }
-                None => {
-                    // The stored offset is measured in the PARENT's frame, so the parent's tier
-                    // scales its cell anchor into metres.
-                    let tier = regions
-                        .iter()
-                        .find(|p| Some(p.realm) == r.parent)
-                        .map_or(r.frame.tier(), |p| p.frame.tier());
-                    ChildReach::Fixed(r.center.delta_m(vd_core::pose::LatticePos::ORIGIN, tier))
-                }
-            };
-            (r.realm, reach)
-        })
-        .collect()
+    // THE ONE IMPLEMENTATION lives in the motion crate beside the generator whose forest it reads
+    // (HR3/SL4 — the reach law must consult the same `(seed, config)` world the regions came from,
+    // and only that crate may name HOW anything moves). This is the process's config threaded in.
+    vd_physics::worldgen::child_reaches_for_config(
+        universe_seed,
+        regions,
+        &process_world_config(occupant_v_max_mps, tick_dt_s),
+    )
 }
 
 #[must_use]

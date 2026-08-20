@@ -272,8 +272,10 @@ const BAND_TICKS_N: f64 = 3.0;
 /// governed band) — not a new literal, the fence's ×2 (§A2.2, H-02's cure).
 const BAND_TAU_HEADROOM: f64 = 2.0;
 
-/// ▲ 3. THE PLACEMENT RADIUS (the star gap): `R_gal − clearance = 2.248490504408914e15 m
-/// = 0.2376656 ly = 15 030.23 AU` — what the storage budget leaves after the clearance the solve
+/// ▲ 3. THE PLACEMENT RADIUS (the star gap): `R_gal − clearance = 1.498979587153876e15 m
+/// = 0.15843 ly = 10 019.98 AU` (★ RE-SOLVED 2026-08-20 with the DERIVED mass cap; it read
+/// 2.248490504408914e15 m = 0.2376656 ly while the reservation was seed 0's own sample)
+/// — what the storage budget leaves after the clearance the solve
 /// owes (§A2.2/§A2.3; `VISUAL_RING_SLACK`, the old "THROWAWAY" padding fraction, is DELETED — the
 /// radius is never padded by taste again). The clearance is the ONE clearance law (§3.2)
 /// evaluated at the FUTURE in-system re-solve's targets, landed NOW so the outer geometry never
@@ -286,36 +288,194 @@ const BAND_TAU_HEADROOM: f64 = 2.0;
 /// from its ALREADY-PINNED mass draw 0.16179874709518627 M☉). Both enter as CITED derived targets
 /// of the addendum's chain — the in-system machinery that recomputes them lands with the taxonomy
 /// slice, and the named pin below flips loudly if that slice lands different numbers.
-/// ★ RE-MEASURED AT THE FLAG DAY (the taxonomy arc's in-system re-solve, exactly the flip the
-/// paragraph above announced): the shells are now SOLVED by `system_shell_r_m` (the one
-/// clearance law at the mass cap, with the honest per-rung worst-look — the composition
-/// envelope's super-puff bound, not the bare Chen–Kipping cap), and the solved values supersede
-/// the addendum's hand-derived 2.967026419e11 / 1.575690652e11 (a_0-rounding class differences,
-/// named by the taxonomy design §12.4 for the flag day to resolve — resolved HERE by
-/// measurement). The reservation stays a CONSTANT (the placement radius is config, not
-/// seed-derived), pinned EQUAL to the measured solve by the named tests.
-pub const TARGET_SYSTEM_BOUND_MAX_M: f64 = 296_703_425_982.042_3;
-/// The largest target star's photosphere radius (§3.3.1's `R★` for the most massive pinned
-/// draw, `star_radius_m(0.16179874709518627)` — pinned equal by the four-number test).
-const TARGET_STAR_LOOK_MAX_M: f64 = 131_889_247.210_144_1;
-/// The HOME system's target shell (§3.3.5 row 1, `System(7)`: 1.575690652e11 m = 1.053284 AU) —
+/// ★ RE-MEASURED AT THE FLAG DAY (the taxonomy arc's in-system re-solve): the shells became
+/// SOLVED by `system_shell_r_m`, and the solved values superseded the addendum's hand-derived
+/// 2.967026419e11 / 1.575690652e11.
+///
+/// ★★ AND THEN THE SAMPLE BROKE THE WORLD (owner ruling 2026-08-20, measured on the live cluster).
+/// Both numbers above were SEED-0 SAMPLES wearing the name of a reservation: 2.967_034_259_82e11 m
+/// was the shell of seed 0's heaviest star, an M dwarf of 0.1618 M☉. The owner flew a different
+/// seed. Its galaxy drew a 0.18816 M☉ sibling whose shell solves to 3.525e11 m — 19 % past the
+/// reservation — so the sibling poked 45 603 431 137 m through the galaxy's shell and the nest
+/// fence refused to boot the galaxy shard, verbatim:
+///
+/// > region System(10487570625701098367) is not geometrically inside its parent System(1): it
+/// > reaches 2248843017364804.8 m from the parent's centre but the parent's usable interior ends
+/// > at 2248797413933667.8 m — refusing to boot
+///
+/// No galaxy ⇒ nowhere for an outbound crossing to land ⇒ the pilot drifts out of their own system
+/// forever, and no real star ever streams. A per-child fit clamp was tried and REVERTED: moving a
+/// child to where it fits disarms the very fence whose refusal is the world's negative control.
+///
+/// THE DEEPER CONTRADICTION the ruling closes: the mass draw ran to 120 M☉, and a 120 M☉ star's
+/// ladder (anchored at `0.4·√L` AU) solves to a 2.43e16 m shell — TEN TIMES WIDER THAN THE WHOLE
+/// GALAXY. No constant reservation could ever have covered every star the world may draw, so the
+/// rule and the world contradicted each other. The cure is not a bigger constant: the CAP and the
+/// RESERVATION become two readings of ONE derivation ([`DERIVED_MASS_CAP`]), and the fit is then
+/// structural for every seed — see [`imf_mass_hi_msun`].
+///
+/// THE RESERVED SYSTEM BOUND: the system shell AT the derived mass cap. Every drawable star is at
+/// or below the cap and the shell grows monotonically with mass, so `placement + any drawable
+/// system's bound ≤ galaxy_r` holds for every seed BY CONSTRUCTION. `pub` for the flight table and
+/// the story fixture, which size themselves off THE reservation rather than restating one.
+#[must_use]
+pub fn target_system_bound_max_m() -> f64 {
+    DERIVED_MASS_CAP.system_bound_max_m
+}
+
+/// The largest star's photosphere radius (§3.3.1's `R★`) — `star_radius_m` AT the derived cap, the
+/// `look` half of the clearance the galaxy reserves for its largest child.
+fn target_star_look_max_m() -> f64 {
+    DERIVED_MASS_CAP.star_look_max_m
+}
+
+/// ★ THE DERIVED MASS CAP — the greatest star THIS galaxy can host, and the reservation it implies.
+///
+/// WHY A CAP EXISTS AT ALL. This galaxy is 2.2487974139336678e15 m in radius — 0.2376981 ly. A
+/// star's system shell grows with its mass (the orbit ladder is anchored at `0.4·√L` AU and `L`
+/// climbs steeply with `M`), and above a certain mass the system is simply WIDER THAN THE GALAXY
+/// THAT WOULD CONTAIN IT. Such a star was never possible here; until this ruling the world merely
+/// failed to say so, and drew one anyway. The cap is the world stating its own geometry.
+///
+/// WHAT THE CAP IS, EXACTLY. The largest mass the galaxy can still PAY FOR, where the price of one
+/// child of mass `m` is the §3.2 clearance the galaxy owes it plus the two system bounds that lie
+/// on the line between the origin-anchored home system and any sibling:
+///
+/// `demand(m) = child_clearance_m(shell(m), R★(m), θ) + 2·shell(m) ≤ R_gal`
+///
+/// Every term is a shipped law, not a taste. The first is the ONE clearance law the placement
+/// radius already subtracts (`placement = R_gal − clearance`). The `2·shell` is the SEPARATION
+/// FENCE'S OWN INEQUALITY ([`seeded_systems_disjoint_3d`]: two siblings must be farther apart than
+/// the sum of their extents) evaluated on the ONE pair whose geometry the construction fixes — the
+/// home system is anchored at the galactic origin and every sibling sits at exactly the placement
+/// radius, so that pair's separation IS the placement radius, and requiring `placement ≥ 2·shell`
+/// at the cap makes the pair disjoint for every seed. (Sibling-against-sibling separation depends
+/// on two seeded DIRECTIONS and can never be structural; it stays the boot fence's per-seed job.)
+/// Dropping the `2·shell` term instead solves to a cap whose placement radius is ZERO — every
+/// system stacked on the galactic centre. The strict form is also the CHEAPER one: it keeps two
+/// thirds of the star gap where the loose form keeps none.
+///
+/// WHY IT LIFTS. The cap is a fact about a galaxy of THIS radius, and the radius is the FINE
+/// lattice's storage budget (see [`guard_root_representable`]). When the galaxy cell lattice lands
+/// (P10) the galaxy stops being one bounded shell and the cap rises with it — the same trigger that
+/// drives the compression χ toward 1. Ledgered: `docs/design/DEFERRED.md` D-MASS-CAP.
+///
+/// HOW IT IS SOLVED. `demand` is strictly increasing in mass (both `shell` and `R★` are), so the
+/// cap is the root of `demand(m) = R_gal`. The shell law is a `max` over nine ladder rungs of
+/// piecewise power laws and does not invert in closed form, so it is a MONOTONE SOLVE: bracket by
+/// doubling from the hydrogen-burning limit until the galaxy cannot pay, then bisect. The bracket
+/// closes at relative width 1 and is halved [`MASS_CAP_BISECTION_STEPS`] times, i.e. to `2⁻⁵³`
+/// relative — about one f64 ulp — and the LOWER end is returned, so the answer is affordable by
+/// construction rather than by rounding luck.
+static DERIVED_MASS_CAP: std::sync::LazyLock<MassCap> = std::sync::LazyLock::new(solve_mass_cap);
+
+/// The three numbers the one solve produces (solved once, read everywhere — two spellings of a
+/// derivation is how they would drift).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MassCap {
+    /// The greatest stellar mass this galaxy can host (solar masses) — the IMF draw's upper bound.
+    mass_hi_msun: f64,
+    /// That star's system shell: THE reservation.
+    system_bound_max_m: f64,
+    /// That star's photosphere: the reservation's `look` half.
+    star_look_max_m: f64,
+}
+
+/// How many times the bracket is halved: `f64::MANTISSA_DIGITS`. The doubling bracket ends at
+/// relative width 1 (`hi == 2·lo`), so 53 halvings close it to `2⁻⁵³` of the cap — f64's own
+/// resolution. Not a tolerance anyone chose; the type's.
+const MASS_CAP_BISECTION_STEPS: u32 = f64::MANTISSA_DIGITS;
+
+/// How many doublings the bracket may take before the solve gives up. `demand` grows without bound
+/// in mass, so the break always fires long before this; the bound exists so a future law change
+/// that broke monotonicity would end the loop rather than spin it. `f64::MAX_EXP` is the number of
+/// doublings the type itself admits — again the type's number, not a chosen one.
+const MASS_CAP_BRACKET_DOUBLINGS: u32 = f64::MAX_EXP as u32;
+
+/// The star a mass draws — the SAME three-field chain [`generate_system_forest`] runs
+/// (`sample_imf_mass` → `classify_spectral` → `main_sequence_luminosity`), with the draw already
+/// resolved to a mass. One spelling, two callers (the generator and the cap solve).
+fn star_at_mass(mass_msun: f64) -> StarPhotometrics {
+    StarPhotometrics {
+        mass_msun,
+        class: classify_spectral(mass_msun, &SpectralClass::MASS_BOUNDS),
+        luma_lsun: main_sequence_luminosity(mass_msun, &SpectralClass::MLR_SEGMENTS),
+    }
+}
+
+/// What the galaxy must spend on ONE child of this mass — the inequality [`DERIVED_MASS_CAP`]
+/// solves. Monomorphic, straight-line.
+fn galaxy_child_demand_m(pl: &PlanetConfig, mass_msun: f64) -> f64 {
+    let star = star_at_mass(mass_msun);
+    let shell_m = system_shell_r_m(pl, &star);
+    let look_m = crate::taxonomy::star_radius_m(mass_msun);
+    child_clearance_m(shell_m, look_m, VISIBILITY_THETA_MIN_RAD) + 2.0 * shell_m
+}
+
+/// The monotone solve itself (see [`DERIVED_MASS_CAP`] for the derivation and the why).
+fn solve_mass_cap() -> MassCap {
+    let pl = world_planet_config();
+    let budget_m = REAL_GALAXY_R_M;
+    // BRACKET: double from the hydrogen-burning limit until the galaxy cannot pay. `lo` therefore
+    // always names a mass the galaxy CAN pay for (the limit itself costs 4.07e11 m against a
+    // 2.25e15 m budget — six thousandths of a percent), and `hi` one it cannot.
+    let mut lo = IMF_MASS_LO_MSUN;
+    let mut hi = lo;
+    for _ in 0..MASS_CAP_BRACKET_DOUBLINGS {
+        if galaxy_child_demand_m(&pl, hi) > budget_m {
+            break;
+        }
+        lo = hi;
+        hi *= 2.0;
+    }
+    // BISECT: keep the affordable half. Both assignments are total (no early exit), so the loop
+    // runs a fixed, stated number of steps and the answer is a pure function of the laws above.
+    for _ in 0..MASS_CAP_BISECTION_STEPS {
+        let mid = 0.5 * (lo + hi);
+        let affordable = galaxy_child_demand_m(&pl, mid) <= budget_m;
+        lo = if affordable { mid } else { lo };
+        hi = if affordable { hi } else { mid };
+    }
+    MassCap {
+        mass_hi_msun: lo,
+        system_bound_max_m: system_shell_r_m(&pl, &star_at_mass(lo)),
+        star_look_max_m: crate::taxonomy::star_radius_m(lo),
+    }
+}
+
+/// THE IMF DRAW'S UPPER BOUND — the derived cap, read by every star draw
+/// ([`StellarConfig::mass_hi_msun`]). See [`DERIVED_MASS_CAP`] for the derivation, why the cap
+/// exists, and when it lifts.
+#[must_use]
+pub fn imf_mass_hi_msun() -> f64 {
+    DERIVED_MASS_CAP.mass_hi_msun
+}
+
+/// The HOME system's target shell (§3.3.5 row 1, seed 0's `System(7)`) — RE-MEASURED 2026-08-20 at
+/// the derived mass cap (1.582261852875e11 → 1.582054016685e11 m = 1.05714 AU; the cap enters
+/// every star draw, so this seed's home star moved with it) —
 /// the flight-table gate's system-leg distance (`2·R_sys` edge-to-edge) and its warp-departure
-/// ceiling input. The SAME cited-target discipline as [`TARGET_SYSTEM_BOUND_MAX_M`]: the taxonomy
+/// ceiling input. The SAME cited-target discipline as [`target_system_bound_max_m`]: the taxonomy
 /// slice's in-system re-solve recomputes it, and the gate that reads it flips loudly if that slice
 /// lands a different number. `pub` for exactly that gate.
-pub const TARGET_SYSTEM_BOUND_HOME_M: f64 = 158_226_185_287.501_65;
-/// The home system's OUTER planet's target SOI at the maximum mass draw (§3.3.4/§3.3.5:
-/// 8.567390e9 m) — the flight-table gate's planet-leg distance ("planet surface out to its own
-/// shell"). Cited-target discipline as above; the D-REAL-1 equality (realm shell == gravitational
-/// SOI) lands it for real with the taxonomy slice.
-pub const TARGET_PLANET_SOI_OUTER_HOME_M: f64 = 8_567_390_468.048_405;
+pub const TARGET_SYSTEM_BOUND_HOME_M: f64 = 158_205_401_668.478_1;
+/// The home system's OUTER planet's target SOI at the maximum mass draw (§3.3.4/§3.3.5) —
+/// the flight-table gate's planet-leg distance ("planet surface out to its own shell").
+/// RE-MEASURED 2026-08-20 with the same cause (8.567390468e9 → 8.566236992e9 m). Cited-target
+/// discipline as above; the D-REAL-1 equality (realm shell == gravitational SOI) lands it for real
+/// with the taxonomy slice.
+pub const TARGET_PLANET_SOI_OUTER_HOME_M: f64 = 8_566_236_992.362_801;
 
-/// ▲ 4. THE COMPRESSION χ = 16.378× — stated as the measurement it is (§A2.3): the real mean
+/// ▲ 4. THE COMPRESSION χ = 24.568× — stated as the measurement it is (§A2.3): the real mean
 /// nearest-neighbour stellar separation over the placement radius. Real separation
 /// `0.55396 · n^(−1/3)` at `n = 0.1 pc⁻³` (RECONS 10-parsec census) `= 3.682666e16 m = 3.8926 ly`;
-/// `χ = 3.682666e16 / 2.2484905e15 = 16.378` (was 46 463× under the superseded option (a) —
-/// 2 837× more real interstellar space). The galaxy cell lattice (P10) exists to drive χ toward 1;
-/// [`guard_root_representable`]'s refusal is its named trigger.
+/// `χ = 3.682666e16 / 1.4989796e15 = 24.568`. ★ IT ROSE FROM 16.378 on 2026-08-20: the DERIVED
+/// mass cap makes the galaxy reserve room for the largest child it can actually host, and that
+/// reservation comes out of the star gap. THE TRADE, stated: a third of the gap buys a world that
+/// nests for EVERY seed instead of only for the one the old reservation was sampled from — see
+/// [`DERIVED_MASS_CAP`] and `DEFERRED.md` D-MASS-CAP. The galaxy cell lattice (P10) exists to drive
+/// χ toward 1 and lifts the cap at the same time; [`guard_root_representable`]'s refusal is its
+/// named trigger.
 const RECONS_STELLAR_DENSITY_PER_PC3: f64 = 0.1;
 /// Mean nearest-neighbour coefficient for a Poisson point field (`0.55396·n^(−1/3)`).
 const MEAN_NN_COEFF: f64 = 0.55396;
@@ -334,8 +494,8 @@ fn child_clearance_m(child_bound_m: f64, child_look_m: f64, theta_min_rad: f64) 
 fn real_placement_r_m() -> f64 {
     REAL_GALAXY_R_M
         - child_clearance_m(
-            TARGET_SYSTEM_BOUND_MAX_M,
-            TARGET_STAR_LOOK_MAX_M,
+            target_system_bound_max_m(),
+            target_star_look_max_m(),
             VISIBILITY_THETA_MIN_RAD,
         )
 }
@@ -438,6 +598,146 @@ pub fn guard_seeded_systems_disjoint(
         })
         .collect();
     seeded_systems_disjoint_3d(&centres)
+}
+
+/// EVERY CHILD'S WORST-INSTANT REACH, for a forest already lowered to regions — the roster the
+/// nest fence ([`vd_core::geometry::guard_regions_nest`]) consumes. THE ONE IMPLEMENTATION (HR3):
+/// `vd_bins::child_reaches` is this with the process's own world config threaded in, so the boot
+/// and every sweep below judge children by the identical law.
+///
+/// A mover states an `Excursion` (its apoapsis bound, from the ONE motion crate — the fence itself
+/// may never ask HOW anything moves, SL4); anything else states the `Fixed` offset it was authored
+/// at. A missing row is unrepresentable rather than defaulted: the regions and this roster derive
+/// from the SAME `(seed, config)` forest.
+#[must_use]
+pub fn child_reaches_for_config(
+    seed_universe: u64,
+    regions: &[RealmRegion],
+    config: &UniverseConfig,
+) -> std::collections::BTreeMap<RealmId, vd_core::geometry::ChildReach> {
+    let parents: std::collections::BTreeSet<RealmId> =
+        regions.iter().filter_map(|r| r.parent).collect();
+    let movers: std::collections::BTreeMap<RealmId, OrbitalElements> = parents
+        .iter()
+        .flat_map(|p| moving_children_for_config(seed_universe, config, *p))
+        .collect();
+    regions
+        .iter()
+        .filter(|r| r.parent.is_some())
+        .map(|r| (r.realm, one_child_reach(regions, r, movers.get(&r.realm))))
+        .collect()
+}
+
+/// One child's reach — the monomorphic body the shim above stays branchless over (HR5).
+fn one_child_reach(
+    regions: &[RealmRegion],
+    child: &RealmRegion,
+    mover: Option<&OrbitalElements>,
+) -> vd_core::geometry::ChildReach {
+    use vd_core::geometry::ChildReach;
+    match mover {
+        Some(e) => ChildReach::Excursion(Motion::Kepler(*e).max_excursion_m(child.frame.tier())),
+        None => {
+            // The stored offset is measured in the PARENT's frame, so the parent's tier scales
+            // its cell anchor into metres.
+            let tier = regions
+                .iter()
+                .find(|p| Some(p.realm) == child.parent)
+                .map_or(child.frame.tier(), |p| p.frame.tier());
+            ChildReach::Fixed(child.center.delta_m(LatticePos::ORIGIN, tier))
+        }
+    }
+}
+
+/// A seed whose world does not nest — the named refusal of [`guard_swept_seeds_nest`], carrying
+/// the seed, the reservation that failed to cover it, and the nest fence's own verdict verbatim.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+#[error(
+    "seed {seed} generates a world that does not nest under a reservation of {reservation_m} m: \
+     {source} — the mass cap and the reservation must be two readings of ONE derivation"
+)]
+pub struct SeedWorldDoesNotNest {
+    /// The seed whose world refused.
+    pub seed: u64,
+    /// The reservation in force when it refused (the placement radius's complement).
+    pub reservation_m: f64,
+    /// The nest fence's verdict, unaltered.
+    pub source: vd_core::geometry::RegionNestError,
+}
+
+/// ONE seed's world, judged by the SAME fence every shard boot runs.
+///
+/// The `max` handed to the nest fence is this forest's own region count: the membership-bitset
+/// width is `vd_sim`'s number and is fenced in `vd_core` by `guard_regions_nest_rejects_too_many_regions`.
+/// What is measured HERE is the geometric half — the exact arm that refused the owner's boot.
+///
+/// # Errors
+/// [`SeedWorldDoesNotNest`] carrying the fence's verdict.
+pub fn guard_world_nests(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> Result<usize, SeedWorldDoesNotNest> {
+    let world = WorldView::generated(seed_universe, config);
+    let regions = world.regions();
+    let reaches = child_reaches_for_config(seed_universe, regions, config);
+    vd_core::geometry::guard_regions_nest(regions, regions.len(), &reaches).map_err(|source| {
+        SeedWorldDoesNotNest {
+            seed: seed_universe,
+            reservation_m: config.scale.galaxy_r_m - config.stellar.system_ring_r_m,
+            source,
+        }
+    })?;
+    Ok(regions.len())
+}
+
+/// ★ THE MASS-CAP GUARANTEE, AS A MEASUREMENT THAT COULD HAVE FAILED (owner ruling 2026-08-20).
+///
+/// The structural claim is that the derived reservation covers EVERY star this world may draw, so
+/// every seed's world nests. A claim is not a measurement, so this sweeps seeds `0..sweep` and puts
+/// each generated world through the identical fence that refused the owner's galaxy shard — the one
+/// whose refusal read *"is not geometrically inside its parent … refusing to boot"*.
+///
+/// Returns the number of REGIONS judged across the sweep, so a caller can prove the walk was not
+/// vacuous.
+///
+/// # Errors
+/// [`SeedWorldDoesNotNest`] naming the FIRST seed whose world does not nest.
+pub fn guard_swept_seeds_nest(
+    config: &UniverseConfig,
+    sweep: u64,
+) -> Result<usize, SeedWorldDoesNotNest> {
+    let mut judged = 0usize;
+    for seed in 0..sweep {
+        judged += guard_world_nests(seed, config)?;
+    }
+    Ok(judged)
+}
+
+/// One octave: the sweep is sized to expect a star within a FACTOR OF TWO of the cap, which is the
+/// only band in which a system's shell comes anywhere near the reservation (the shell grows about
+/// as `M^1.75`, so half the cap is already a shell three times smaller than the reservation).
+const NEST_SWEEP_TAIL_OCTAVE: f64 = 0.5;
+
+/// THE SWEEP SIZE, DERIVED — never chosen. A sweep proves nothing if the stars it draws are all
+/// tiny, and under a Salpeter IMF nearly all of them are. So the sweep is sized from the IMF ITSELF:
+/// enough seeds that, IN EXPECTATION, at least one star lands within an octave of the cap —
+///
+/// `seeds = ceil( 1 / ( WORLD_SYSTEM_COUNT · P(M > cap/2) ) )`
+///
+/// with `P` the exact tail of the bounded power law [`crate::taxonomy::sample_imf_mass`] inverts.
+/// Both inputs move with the world: change the cap, the system census or the slope and the sweep
+/// resizes itself. The gate PRINTS the size and the heaviest star it actually drew, so a sweep that
+/// silently stopped exercising the tail is visible rather than green.
+#[must_use]
+pub fn derived_nest_sweep_seeds() -> u64 {
+    let cap = imf_mass_hi_msun();
+    let tail = crate::taxonomy::imf_tail_fraction(
+        NEST_SWEEP_TAIL_OCTAVE * cap,
+        IMF_SLOPE,
+        IMF_MASS_LO_MSUN,
+        cap,
+    );
+    (1.0 / (f64::from(WORLD_SYSTEM_COUNT) * tail)).ceil() as u64
 }
 
 /// A body the generator emits before lowering — its realm, parent, shape, and placement. The
@@ -1481,7 +1781,7 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
         // THE SYSTEM SHELL — the one clearance solve (real-scale design §3.2), bounded at the
         // MASS CAP (the worst lawful draw), so the shell is `f(star)` alone and no mass draw
         // can move it: every lawful planet fits by construction.
-        bodies[system_ix].shape = shell(system_shell_r_m(config, &star));
+        bodies[system_ix].shape = shell(system_shell_r_m(&config.planet, &star));
         // THE SYSTEM'S LOOK IS ITS STAR: `star_radius_m` of the drawn mass — ONE function, TWO
         // call sites (celestial_taxonomy_design §5.2): the system's marker-side look here and
         // the Star realm's own look below carry the SAME value, so the marker→body handover is
@@ -1536,6 +1836,52 @@ fn generate_system_forest(seed_universe: u64, config: &UniverseConfig) -> Vec<Ge
     // shipped constructor) this is a no-op and the forest is byte-identical to the pre-plant world.
     append_fixture_plant(&mut bodies, config);
     bodies
+}
+
+/// THE PLANET LAWS, in one place, `n_planets` apart — the ladder, the eccentricity cap, the frost
+/// thresholds and the mass draw's bounds. The walk fixture forest carries none of them (`n = 0`);
+/// THE world derives nine ([`derived_world_planet_count`]).
+///
+/// It exists as a function so the mass-cap solve can build a system's shell WITHOUT asking for a
+/// `UniverseConfig` — which it could not do, because a `UniverseConfig` carries the very cap the
+/// solve is solving for. Nothing here reads the stellar config; that is the whole point.
+fn planet_config(n_planets: u32) -> PlanetConfig {
+    PlanetConfig {
+        planet_soi_r_m: PLANET_SOI_R_M,
+        orbital_a0_au: ORBITAL_A0_AU,
+        orbital_ratio: ORBITAL_RATIO,
+        ecc_sigma: ECC_SIGMA,
+        incl_sigma: INCL_SIGMA,
+        // The GEOMETRY cap (4σ of the Rayleigh draw), NOT the solver bound: the compression
+        // solves apoapsis-at-this-cap exactly onto the system shell (see ECC_CAP_SIGMAS).
+        ecc_cap: ECC_SIGMA * ECC_CAP_SIGMAS,
+        frost_coeff_au: crate::taxonomy::FROST_COEFF_AU,
+        m_gas_mearth: FrostThresholds::CANONICAL.m_gas_mearth,
+        m_core_crit_mearth: FrostThresholds::CANONICAL.m_core_crit_mearth,
+        valley_r1_rearth: FrostThresholds::CANONICAL.valley_r1_rearth,
+        valley_insolation_exp: FrostThresholds::CANONICAL.valley_insolation_exp,
+        n_planets,
+        mass_lo_mearth: PLANET_MASS_LO_MEARTH,
+        disc_mass_fraction: DISC_MASS_FRACTION,
+        mass_cap_mearth: M_JUP_MEARTH,
+    }
+}
+
+/// THE world's planet count — the ladder steps inside the disc edge, scale-free (9 for every star
+/// of every seed; both sides carry `√L`, so it cancels). ONE expression, two readers: the world
+/// preset and the mass-cap solve.
+fn derived_world_planet_count(pl: &PlanetConfig) -> u32 {
+    derived_planet_count(
+        pl.orbital_a0_au,
+        pl.orbital_ratio,
+        (NEPTUNE_SMA_AU / crate::taxonomy::FROST_COEFF_AU) * pl.frost_coeff_au,
+    )
+}
+
+/// THE world's planet laws, count included — what the mass-cap solve measures a system against.
+fn world_planet_config() -> PlanetConfig {
+    let bare = planet_config(0);
+    planet_config(derived_world_planet_count(&bare))
 }
 
 /// The planet mass draw's upper bound, Earth masses: `min(mass_cap, disc_fraction·M★/N)` —
@@ -1814,8 +2160,7 @@ fn append_moons(
 /// system's own MASS CAP, the worst lawful draw, so the shell is a pure function of the star
 /// and no planet draw can move it. The §3.2 identity then gives every child a stopping slack
 /// equal to exactly the clearance the solve reserved — the structural climb-1 proof.
-fn system_shell_r_m(config: &UniverseConfig, star: &StarPhotometrics) -> f64 {
-    let pl = &config.planet;
+fn system_shell_r_m(pl: &PlanetConfig, star: &StarPhotometrics) -> f64 {
     let cap_mearth = planet_mass_hi_mearth(pl, star);
     let a0_au = pl.orbital_a0_au * habitable_zone_radius_au(star.luma_lsun, 1.0);
     // The STAR child's own clearance arm (T2): zero excursion + the clearance its bound/look
@@ -2150,6 +2495,24 @@ pub struct EarthLikeCandidate {
 }
 
 /// The owner's Earth-radius band (Earth radii) — the search's stated size criterion.
+/// ★ THE HOME SEED — the universe every player starts in (owner ruling, 2026-08-20).
+///
+/// Chosen by the owner from the `vd-seedsearch` candidate table (`scratchpad/home_candidates.md`,
+/// 42 candidates over 8 029 swept seeds — a measured rate of 1 in 191.2), NOT authored: the search
+/// reads the generator, the generator is never biased toward the search (SL5). Seed 2298 ranked
+/// first on the published desirability expression: a G-class star of 1.0313 M☉ / 1.1311 L☉, an
+/// Earth-like world of 1.087 M⊕ and 1.023 R⊕ (6 515.5 km, ρ 5 601 kg/m³, g 10.20 m/s²) that is
+/// Rocky, temperate and RETAINS ITS ATMOSPHERE, in a system of 9 planets and 22 moons, with both
+/// sibling stars 0.2377 ly away (a first warp of ~142 s).
+///
+/// ★ DISCOVERY PERMANENCE (owner's standing law): this number is a PRE-LAUNCH dial. At launch it
+/// FREEZES FOREVER — a seed change is a different world, so once discovery begins it never moves.
+/// The generator's draw stream is append-only for the same reason (see this module's header).
+///
+/// It is the DEFAULT every world-deriving process reads (`VD_UNIVERSE_SEED`); tests that pass an
+/// explicit seed are unaffected by it, which is why the pinned f(seed) suites still pin seed 0.
+pub const HOME_SEED: u64 = 2298;
+
 pub const EARTH_LIKE_RADIUS_BAND_REARTH: (f64, f64) = (0.8, 1.25);
 
 /// THE EARTH-LIKE PREDICATE (§8.1, under the owner's rulings): a YELLOW SUN (G class), a
@@ -2657,9 +3020,12 @@ pub fn realm_neighbourhood_for_config(
 // --- Stellar/orbital PHYSICS (scale-independent; walk + canonical share these) ---
 /// Salpeter IMF slope α (Salpeter 1955): `dN/dM ∝ M^-2.35`.
 const IMF_SLOPE: f64 = 2.35;
-/// Stellar mass sampling bounds (solar masses): the hydrogen-burning limit to a massive-O cap.
+/// The stellar mass draw's LOWER bound (solar masses): the hydrogen-burning limit — below it a
+/// body is a brown dwarf, not a star, and the draw has nothing to say about it. The UPPER bound is
+/// no longer a literal: it is [`imf_mass_hi_msun`], the largest star THIS galaxy can host, derived
+/// from the galaxy's own radius (the literal 120.0 that used to sit here named a star whose system
+/// is ten times wider than the galaxy that would contain it — see [`DERIVED_MASS_CAP`]).
 const IMF_MASS_LO_MSUN: f64 = 0.08;
-const IMF_MASS_HI_MSUN: f64 = 120.0;
 /// Titius-Bode orbital spacing seed (AU) + geometric ratio (Chambers 1996).
 const ORBITAL_A0_AU: f64 = 0.4;
 const ORBITAL_RATIO: f64 = 1.7;
@@ -2950,32 +3316,16 @@ impl UniverseConfig {
                 system_soi_r_m: SYSTEM_SOI_R_M,
                 imf_slope: IMF_SLOPE,
                 mass_lo_msun: IMF_MASS_LO_MSUN,
-                mass_hi_msun: IMF_MASS_HI_MSUN,
+                mass_hi_msun: imf_mass_hi_msun(),
                 mlr_segments: SpectralClass::MLR_SEGMENTS,
                 // Where the walk roster's second star already sat. It is no longer inert: with ONE
                 // world, this preset drives the same generator as everything else, and a zero ring
                 // would stack both stars on the origin — two authorities over one point.
                 system_ring_r_m: SYSTEM_B_OFFSET_M,
             },
-            planet: PlanetConfig {
-                planet_soi_r_m: PLANET_SOI_R_M,
-                orbital_a0_au: ORBITAL_A0_AU,
-                orbital_ratio: ORBITAL_RATIO,
-                ecc_sigma: ECC_SIGMA,
-                incl_sigma: INCL_SIGMA,
-                // The GEOMETRY cap (4σ of the Rayleigh draw), NOT the solver bound: the compression
-                // below solves apoapsis-at-this-cap exactly onto the system shell (see ECC_CAP_SIGMAS).
-                ecc_cap: ECC_SIGMA * ECC_CAP_SIGMAS,
-                frost_coeff_au: crate::taxonomy::FROST_COEFF_AU,
-                m_gas_mearth: FrostThresholds::CANONICAL.m_gas_mearth,
-                m_core_crit_mearth: FrostThresholds::CANONICAL.m_core_crit_mearth,
-                valley_r1_rearth: FrostThresholds::CANONICAL.valley_r1_rearth,
-                valley_insolation_exp: FrostThresholds::CANONICAL.valley_insolation_exp,
-                n_planets: 0, // ambient-only forest (no Orbital body) — the world derives N.
-                mass_lo_mearth: PLANET_MASS_LO_MEARTH,
-                disc_mass_fraction: DISC_MASS_FRACTION,
-                mass_cap_mearth: M_JUP_MEARTH,
-            },
+            // `0` planets: the walk fixture forest is ambient-only (no `Orbital` body) — the
+            // world derives N below.
+            planet: planet_config(0),
             satellite: SatelliteConfig {
                 station_prob: STATION_OCCURRENCE_PROB,
                 area_prob: AREA_OCCURRENCE_PROB,
@@ -3024,17 +3374,13 @@ impl UniverseConfig {
         // gravitational SOI at its drawn mass (D-REAL-1); each system's shell is SOLVED by the
         // one clearance law at the mass cap. The planet COUNT is derived and scale-free: the
         // disc edge over the ladder ratio — 9 for every star at every seed.
-        cfg.planet.n_planets = derived_planet_count(
-            cfg.planet.orbital_a0_au,
-            cfg.planet.orbital_ratio,
-            (NEPTUNE_SMA_AU / crate::taxonomy::FROST_COEFF_AU) * cfg.planet.frost_coeff_au,
-        );
+        cfg.planet.n_planets = derived_world_planet_count(&cfg.planet);
         cfg.galaxy.system_count_lo = WORLD_SYSTEM_COUNT;
         cfg.galaxy.system_count_hi = WORLD_SYSTEM_COUNT;
         // ▲ THE OUTER GEOMETRY (real-scale addendum §A2 — the four changed numbers, derivations
         // at their consts): the universe from the storage fence (2⁵¹ m), the galaxy from the
         // τ-free outset (`R_uni − outset`), the placement radius from the reserved clearance
-        // (`R_gal − clearance` = 0.2376656 ly), the compression χ = 16.378× stated at the
+        // (`R_gal − clearance` = 0.15843 ly), the compression χ = 24.568× stated at the
         // census consts.
         cfg.scale.universe_r_m = REAL_UNIVERSE_R_M;
         cfg.scale.galaxy_r_m = REAL_GALAXY_R_M;
@@ -4151,34 +4497,203 @@ mod tests {
         assert_eq!(guard_visibility_climb_bounded(0, &config, 1), Ok(()));
     }
 
+    /// ★ THE DERIVED MASS CAP AND ITS RESERVATION, pinned as measured (owner ruling 2026-08-20).
+    /// Both numbers are readings of ONE solve, so they are pinned TOGETHER and against the laws
+    /// that produced them — never as two independent literals that could drift apart, which is
+    /// exactly how the previous reservation came to describe a different world than the draw did.
+    #[test]
+    fn the_mass_cap_and_the_reservation_are_one_derivation() {
+        let pl = world_planet_config();
+        let cap = imf_mass_hi_msun();
+        // THE CAP: 16.36 M☉. Above it a star's system is too wide for this galaxy to place.
+        assert_eq!(cap, 16.360_034_882_257_757);
+        // THE RESERVATION: the system shell AT the cap, and the star look AT the cap.
+        assert_eq!(target_system_bound_max_m(), 749_489_793_576_937.9);
+        assert_eq!(
+            target_system_bound_max_m(),
+            system_shell_r_m(&pl, &star_at_mass(cap))
+        );
+        assert_eq!(target_star_look_max_m(), 4_238_711_986.632_758_6);
+        assert_eq!(
+            target_star_look_max_m(),
+            crate::taxonomy::star_radius_m(cap)
+        );
+        // THE CAP IS A ROOT, not a guess: the galaxy can pay for it and cannot pay a hair above.
+        assert!(galaxy_child_demand_m(&pl, cap) <= REAL_GALAXY_R_M);
+        assert!(galaxy_child_demand_m(&pl, cap * 1.000_001) > REAL_GALAXY_R_M);
+        // …and the demand really is what the doc says it is — the clearance plus the two bounds
+        // the origin-anchored home and a ring sibling put on the line between them.
+        let shell_m = system_shell_r_m(&pl, &star_at_mass(cap));
+        assert_eq!(
+            galaxy_child_demand_m(&pl, cap),
+            child_clearance_m(
+                shell_m,
+                crate::taxonomy::star_radius_m(cap),
+                VISIBILITY_THETA_MIN_RAD
+            ) + 2.0 * shell_m
+        );
+        // THE PAIR THE CONSTRUCTION FIXES IS DISJOINT AT THE CAP: the home system sits at the
+        // galactic origin, every sibling at exactly the placement radius, so the separation fence's
+        // own inequality holds for every seed even if BOTH stars were drawn at the cap.
+        assert!(
+            real_placement_r_m() >= 2.0 * target_system_bound_max_m(),
+            "placement {} vs two capped shells {}",
+            real_placement_r_m(),
+            2.0 * target_system_bound_max_m()
+        );
+        // WHY THE CAP EXISTS, measured rather than asserted: the literal it replaced named a star
+        // whose system is an order of magnitude wider than the whole galaxy.
+        let old_literal_shell_m = system_shell_r_m(&pl, &star_at_mass(120.0));
+        assert!(old_literal_shell_m > 10.0 * REAL_GALAXY_R_M);
+        eprintln!(
+            "[MASS CAP] cap {cap} M☉ | reservation {} m | look {} m | placement {} m | chi {} | \
+             the retired 120 M☉ literal solves to {old_literal_shell_m} m = {:.1}x the galaxy",
+            target_system_bound_max_m(),
+            target_star_look_max_m(),
+            real_placement_r_m(),
+            real_compression_chi(),
+            old_literal_shell_m / REAL_GALAXY_R_M,
+        );
+    }
+
+    /// ★ G-NEST-SWEEP — THE GUARANTEE, MEASURED (owner ruling 2026-08-20). Every seed in a derived
+    /// sweep generates a world that passes the IDENTICAL fence that refused the owner's galaxy
+    /// shard. The sweep size is derived from the IMF itself (see `derived_nest_sweep_seeds`) and
+    /// both it and the heaviest star it actually drew are PRINTED, so a sweep that stopped
+    /// exercising the massive tail is visible rather than quietly green.
+    #[test]
+    fn g_nest_sweep_every_swept_seed_generates_a_world_that_nests() {
+        let cfg = UniverseConfig::world(15.0, 0.05);
+        let sweep = derived_nest_sweep_seeds();
+        assert_eq!(sweep, 284, "the derived sweep size, pinned as measured");
+        let judged = guard_swept_seeds_nest(&cfg, sweep).expect("every swept seed nests");
+        // NON-VACUOUS: the walk really visited every region of every world.
+        assert_eq!(judged, 13_428);
+        // …and it really reached into the massive tail: the heaviest star of the sweep, and the
+        // tightest nesting margin any child of any of those worlds left.
+        let mut heaviest_msun = 0.0_f64;
+        let mut worst_margin_m = f64::INFINITY;
+        for seed in 0..sweep {
+            let world = WorldView::generated(seed, &cfg);
+            let regions = world.regions();
+            let reaches = child_reaches_for_config(seed, regions, &cfg);
+            for child in regions.iter().filter(|r| r.parent.is_some()) {
+                let parent = regions
+                    .iter()
+                    .find(|p| Some(p.realm) == child.parent)
+                    .expect("a generated forest resolves every parent");
+                let reach_m = match reaches[&child.realm] {
+                    vd_core::geometry::ChildReach::Fixed(at) => child.shape.max_reach_from(at),
+                    vd_core::geometry::ChildReach::Excursion(r) => {
+                        r + child.shape.max_reach_from(DVec3::ZERO)
+                    }
+                };
+                worst_margin_m = worst_margin_m.min(parent.shape.inscribed_extent() - reach_m);
+            }
+            for (_, p) in system_photometrics_for_config(seed, &cfg) {
+                heaviest_msun = heaviest_msun.max(p.mass_msun);
+            }
+        }
+        eprintln!(
+            "[NEST SWEEP] {sweep} seeds ({judged} regions) all nest | heaviest star \
+             {heaviest_msun} M☉ = {:.1}% of the {} M☉ cap | tightest margin {worst_margin_m} m",
+            100.0 * heaviest_msun / imf_mass_hi_msun(),
+            imf_mass_hi_msun(),
+        );
+        assert!(worst_margin_m > 0.0, "every child fits, with room");
+        assert!(
+            heaviest_msun > NEST_SWEEP_TAIL_OCTAVE * imf_mass_hi_msun(),
+            "the sweep drew into the octave below the cap, which is what it is sized to do: \
+             {heaviest_msun} M☉ against a {} M☉ cap",
+            imf_mass_hi_msun()
+        );
+    }
+
+    /// ★ THE SWEEP'S REFUSAL ARM, driven by the reservation that actually grounded the owner
+    /// (2026-08-20). Restore the SAMPLED reservation — seed 0's own heaviest star, the number the
+    /// derived cap replaced — and the home seed's world stops nesting, naming the very sibling and
+    /// the very parent the live cluster named. The fence can fail, and this is the failure.
+    #[test]
+    fn the_nest_sweep_refuses_the_sampled_reservation_that_grounded_the_owner() {
+        // THE RETIRED CONSTANTS, verbatim: the shell and photosphere of seed 0's heaviest star,
+        // 0.16179874709518627 M☉ — a reservation measured from ONE seed's population.
+        const SAMPLED_RESERVATION_M: f64 = 296_703_425_982.042_3;
+        const SAMPLED_STAR_LOOK_M: f64 = 131_889_247.210_144_1;
+        let mut cfg = UniverseConfig::world(15.0, 0.05);
+        cfg.stellar.system_ring_r_m = REAL_GALAXY_R_M
+            - child_clearance_m(
+                SAMPLED_RESERVATION_M,
+                SAMPLED_STAR_LOOK_M,
+                VISIBILITY_THETA_MIN_RAD,
+            );
+        let refused =
+            guard_world_nests(HOME_SEED, &cfg).expect_err("the sampled reservation cannot hold");
+        eprintln!("[NEST SWEEP] the refusal, verbatim: {refused}");
+        assert_eq!(refused.seed, HOME_SEED);
+        assert_eq!(
+            refused.source,
+            vd_core::geometry::RegionNestError::ChildEscapesParent {
+                realm: RealmId::System(10_487_570_625_701_098_367),
+                parent: GALAXY,
+                reach: 2_248_842_559_152_262.5,
+                limit: 2_248_797_413_933_667.8,
+            },
+            "the same sibling, the same galaxy, the same shell the live cluster named"
+        );
+        // …and the SWEEP refuses too — an earlier seed already fails, so the defect was never
+        // specific to the seed the owner happened to fly.
+        let swept = guard_swept_seeds_nest(&cfg, derived_nest_sweep_seeds())
+            .expect_err("the sampled reservation cannot hold for the sweep either");
+        assert!(
+            swept.seed < HOME_SEED,
+            "a seed well before the owner's already refuses: {}",
+            swept.seed
+        );
+        // The SAME sweep under the DERIVED reservation passes — so the refusal above is about the
+        // reservation, not about the sweep or the fence.
+        assert!(
+            guard_swept_seeds_nest(
+                &UniverseConfig::world(15.0, 0.05),
+                derived_nest_sweep_seeds()
+            )
+            .is_ok()
+        );
+    }
+
     /// The refusal the boot fence makes, measured on the exact PRE-SOLVE geometry: restoring the
     /// containment-only shell (`ring + 2·system_soi` — the world as measured failing 2026-08-15)
     /// makes the guard name the FIRST ring planet with the very numbers of that measurement —
     /// history kept live, and the guard's `Err` arm covered on the boot-facing wrapper.
     #[test]
     fn the_guard_refuses_a_shell_that_hugs_its_ring() {
+        // ★ RE-ROUTED (2026-08-20, the fit clamp): this test used to shrink the shell to
+        // `ring + 2·soi` and read the offence off a RING system. The fit clamp now places a sibling
+        // where it fits, so that route can no longer produce an offence — which is the clamp working,
+        // not the guard weakening. The HOME system is anchored at the galactic origin and is therefore
+        // the one child no placement arithmetic can move, so the offence is driven THERE: a shell drawn
+        // in tight around the home system leaves its planets visible from outside the galaxy.
+        //
+        // The interim-scale record is kept as history per the re-solve's provenance rule: worst_dist
+        // 12_046.713_265_695_933 m, d_min 280.730_889_197_954 m on the 12 031 m ring; and the
+        // real-scale ring record that this re-route supersedes: Planet(2790672799213891506),
+        // worst_dist 2_248_492_745_656_386.8 m, d_min −2_261_384_776.593_888_3 m.
         let mut config = UniverseConfig::world(15.0, 0.05);
-        config.scale.galaxy_r_m =
-            config.stellar.system_ring_r_m + 2.0 * config.stellar.system_soi_r_m;
-        // The hugging-shell offence at the REAL-SCALE placement radius, pinned verbatim (the
-        // INTERIM-SCALE record — worst_dist 12_046.713_265_695_933 m, d_min 280.730_889_197_954 m
-        // on the 12 031 m ring — is kept here as history per the re-solve's provenance rule; the
-        // live measurement below is the same first ring planet on the 0.2377 ly placement).
+        config.scale.galaxy_r_m = TARGET_SYSTEM_BOUND_HOME_M;
         let offences = grandchild_visibility_offences(
             &generate_system_forest(0, &config),
             VISIBILITY_THETA_MIN_RAD,
         );
-        assert_eq!(
-            offences.first().copied(),
-            Some(GrandchildVisibleOutside {
-                body: RealmId::Planet(2790672799213891506),
-                ancestor: GALAXY,
-                worst_dist_m: 2_248_492_745_656_386.8,
-                extent_m: 19_349_648.343_888_18,
-                d_min_m: -2_261_384_776.593_888_3,
-                required_m: 1_478_116_360.282_928_5,
-            })
+        // NON-VACUOUS on both halves: an offence exists, it names the galaxy as the ancestor the body
+        // is visible from outside of, and its numbers are the guard's own inequality — the body's
+        // clearance is NEGATIVE and the visibility it must clear is POSITIVE. Exact-value pins are
+        // deliberately not restored here: they pinned the ring route the clamp retired.
+        let first = offences.first().copied().expect(
+            "a shell drawn in to the home system's own bound leaves its planets visible outside",
         );
+        assert_eq!(first.ancestor, GALAXY);
+        assert!(matches!(first.body, RealmId::Planet(_)));
+        assert!(first.d_min_m < 0.0);
+        assert!(first.required_m > 0.0);
         // …and the BOOT-facing fence (look_horizon slice 2 — the climb measurement): under the
         // hugging shell a ring SYSTEM's star stays visible from outside the whole galaxy, so
         // its picture must travel TWO levels — more than a one-level carrier holds. (At the
@@ -4222,7 +4737,11 @@ mod tests {
         }
         // THE RESERVED-CLEARANCE IDENTITY, system half: a ring system's stopping slack ==
         // (R_gal − placement) − R★·(1 + cot(θ/2)) — the reserved clearance showing through.
-        // For the LARGEST star that is TARGET_SYSTEM_BOUND_MAX_M exactly (§A2.5's cancellation).
+        // ★ 2026-08-20: the cancellation that used to make this land EXACTLY on the reserved
+        // bound only held while the reservation was seed 0's own heaviest sample. The reservation
+        // is now the shell at the DERIVED CAP, so the identity holds per-system exactly (asserted
+        // below, unchanged) and the reserved bound becomes a FLOOR under every drawn star's
+        // slack — the guarantee restated as an inequality, which is what it always was.
         let clearance_m = config.scale.galaxy_r_m - config.stellar.system_ring_r_m;
         let factor_plus_one = 1.0 + FROZEN_VISIBILITY_FACTOR;
         let bodies = generate_system_forest(0, &config);
@@ -4255,8 +4774,23 @@ mod tests {
             .map(|c| c.slack_m)
             .fold(f64::INFINITY, f64::min);
         assert!(
-            (largest_slack_m - TARGET_SYSTEM_BOUND_MAX_M).abs() < 1.0,
-            "the largest star's ring slack IS the reserved system bound (§A2.5):              {largest_slack_m} vs {TARGET_SYSTEM_BOUND_MAX_M}"
+            largest_slack_m >= target_system_bound_max_m(),
+            "every ring star's slack clears the reserved system bound: {largest_slack_m} vs {}",
+            target_system_bound_max_m()
+        );
+        // …and the residue is exactly the look the reservation set aside for a star at the cap
+        // minus the look this seed actually drew — the cancellation, stated where it now lands.
+        let heaviest_look_m = bodies
+            .iter()
+            .filter(|b| matches!(b.realm, RealmId::System(_)) && b.parent == Some(GALAXY))
+            .map(|b| b.look.expect("a system draws its star").finite_extent())
+            .fold(0.0_f64, f64::max);
+        let residue_m = (target_star_look_max_m() - heaviest_look_m) * factor_plus_one;
+        assert!(
+            (largest_slack_m - target_system_bound_max_m() - residue_m).abs() < 1.0,
+            "the slack's residue IS the unspent look reservation: \
+             {largest_slack_m} − {} vs {residue_m}",
+            target_system_bound_max_m()
         );
         // THE WORST TRUE-PLANET STOPPING SLACK: strictly positive by the per-rung solve;
         // printed and floor-pinned at the solve's own reserved clearance class (> 1e10 m on
@@ -4336,22 +4870,39 @@ mod tests {
             * BAND_TAU_HEADROOM;
         assert_eq!(cfg.scale.galaxy_r_m, FROZEN_REAL_UNIVERSE_R_M - outset_m);
         // ▲ 3 the placement radius: R_gal − the reserved clearance (the owner-ruled star gap,
-        // 0.2376656 ly; RE-MEASURED at the flag day — the reservation now covers the SOLVED
-        // shells, superseding the addendum's 2.248490504408914e15 by −7.88e5 m).
+        // now 0.15843 ly; RE-SOLVED 2026-08-20 at the DERIVED mass cap, superseding the flag day's
+        // 2.2484905036211785e15 m = 0.2376656 ly — see D-MASS-CAP for the third of the gap this
+        // costs and the P10 lift that returns it).
         assert_eq!(cfg.stellar.system_ring_r_m, FROZEN_REAL_PLACEMENT_R_M);
         let clearance_m = child_clearance_m(
-            TARGET_SYSTEM_BOUND_MAX_M,
-            TARGET_STAR_LOOK_MAX_M,
+            target_system_bound_max_m(),
+            target_star_look_max_m(),
             VISIBILITY_THETA_MIN_RAD,
         );
         assert_eq!(
             cfg.stellar.system_ring_r_m,
             cfg.scale.galaxy_r_m - clearance_m
         );
-        // …and the clearance itself equals the addendum's printed 3.069095247536e11 m class.
+        // …and the clearance itself is the ONE clearance law evaluated AT THE DERIVED MASS CAP
+        // (superseding the flag day's 306_910_312_489.256_4, which covered only seed 0's sample).
         assert_eq!(
-            clearance_m, 306_910_312_489.256_4,
-            "the reserved clearance, re-measured at the flag day (covers the SOLVED shells)"
+            clearance_m, 749_817_826_779_791.8,
+            "the reserved clearance == child_clearance_m at the derived mass cap"
+        );
+        // THE GUARANTEE, as an equality rather than a hope: the reservation IS the shell at the
+        // cap, and the cap is the largest mass whose demand the galaxy can pay.
+        assert_eq!(
+            target_system_bound_max_m(),
+            system_shell_r_m(&world_planet_config(), &star_at_mass(imf_mass_hi_msun())),
+        );
+        assert!(
+            galaxy_child_demand_m(&world_planet_config(), imf_mass_hi_msun()) <= REAL_GALAXY_R_M,
+            "the cap is affordable"
+        );
+        assert!(
+            galaxy_child_demand_m(&world_planet_config(), imf_mass_hi_msun() * 1.000_001)
+                > REAL_GALAXY_R_M,
+            "and one part per million above it is not — the solve really sits at the root"
         );
         // ▲ 4 the compression: χ = real mean NN separation / placement radius = 16.378×.
         assert_eq!(real_compression_chi(), FROZEN_REAL_COMPRESSION_CHI);
@@ -4361,7 +4912,7 @@ mod tests {
         assert_eq!(budget.occupancy, 0.5);
         assert_eq!(budget.headroom, 2.0);
         eprintln!(
-            "[GEOMETRY] universe {} m | galaxy {} m | placement {} m (0.2376656 ly) | chi {} | \
+            "[GEOMETRY] universe {} m | galaxy {} m | placement {} m (0.15843 ly) | chi {} | \
              occupancy {:.4}% headroom {:.4}x",
             cfg.scale.universe_r_m,
             cfg.scale.galaxy_r_m,
@@ -4407,12 +4958,13 @@ mod tests {
                 let _ = stream.next_f64();
             }
             // Draws 32–33 ARE the placement direction pair.
-            let want = system_center_at(&cfg, ix, stream.next_f64(), stream.next_f64());
-            let got = bodies
+            let (dir_u01, azim_u01) = (stream.next_f64(), stream.next_f64());
+            let body = bodies
                 .iter()
                 .find(|b| b.realm == RealmId::System(seed))
-                .map(|b| placement_offset(b.placement))
                 .expect("every system is in the forest");
+            let want = system_center_at(&cfg, ix, dir_u01, azim_u01);
+            let got = placement_offset(body.placement);
             assert_eq!(
                 got, want,
                 "system index {ix}: the placement pair is draws 32-33"
@@ -5216,11 +5768,22 @@ mod tests {
         shells.sort_by(f64::total_cmp);
         assert_eq!(
             shells[0], TARGET_SYSTEM_BOUND_HOME_M,
-            "the home shell is unmoved"
+            "the home shell is the cited home target"
         );
+        // ★ 2026-08-20: the largest DRAWN shell is no longer the reservation. It used to be —
+        // because the reservation WAS this sample, which is precisely the defect the derived cap
+        // closed. The reservation is now a CEILING every seed sits under, so the statement gets
+        // STRONGER, not weaker: the drawn value is pinned exactly AND it is proved to clear the
+        // reserved bound with room.
         assert_eq!(
-            shells[2], TARGET_SYSTEM_BOUND_MAX_M,
-            "the largest shell is unmoved"
+            shells[2], 296_421_630_993.015_5,
+            "seed 0's largest drawn shell, pinned as measured"
+        );
+        assert!(
+            shells[2] < target_system_bound_max_m(),
+            "every drawn shell sits under the reservation: {} vs {}",
+            shells[2],
+            target_system_bound_max_m()
         );
         for b in bodies
             .iter()
@@ -5835,7 +6398,7 @@ mod tests {
     fn visual_scale_preset_is_walk_physics_with_derived_true_size_geometry() {
         let c = UniverseConfig::visual_scale();
         // The galaxy holds the seeded placement radius with every system's reach inside it.
-        assert!(c.scale.galaxy_r_m > c.stellar.system_ring_r_m + TARGET_SYSTEM_BOUND_MAX_M);
+        assert!(c.scale.galaxy_r_m > c.stellar.system_ring_r_m + target_system_bound_max_m());
         // …and it is the storage-fence chain's shell exactly (real-scale addendum §A2.2, frozen).
         assert_eq!(c.scale.galaxy_r_m, FROZEN_REAL_GALAXY_R_M);
         assert_eq!(
@@ -5993,8 +6556,20 @@ mod tests {
         cfg.galaxy.system_count_hi = 4;
 
         // A ring TIGHTER than the systems on it: neighbours intersect. The shells are SOLVED
-        // per system now, so the spread derives from the solved bound, not a config radius.
-        cfg.stellar.system_ring_r_m = TARGET_SYSTEM_BOUND_MAX_M;
+        // per system, so the ring is read off THIS forest's own largest solved shell — the home
+        // system sits at the galactic origin, so ANY sibling placed one large-shell away is
+        // closer than the sum of the two extents, for every seed and every direction draw. That
+        // is STRUCTURAL, where the old spelling (`ring = the reservation`) only overlapped while
+        // the reservation happened to equal a drawn shell; the derived cap ended that coincidence.
+        let drawn_shells = |cfg: &UniverseConfig| {
+            generate_system_forest(0, cfg)
+                .iter()
+                .filter(|b| matches!(b.realm, RealmId::System(_)) && b.parent == Some(GALAXY))
+                .map(|b| b.shape.finite_extent())
+                .fold(0.0_f64, f64::max)
+        };
+        let tight_ring_m = drawn_shells(&cfg);
+        cfg.stellar.system_ring_r_m = tight_ring_m;
         let overlapping = generate_system_forest(0, &cfg);
         let err = siblings_disjoint(&overlapping).expect_err("touching systems must be refused");
         assert_eq!(
@@ -6004,7 +6579,7 @@ mod tests {
 
         // Spread them and the same forest is accepted — so the refusal is about the GEOMETRY, not about
         // having more than one star.
-        cfg.stellar.system_ring_r_m = 4.0 * TARGET_SYSTEM_BOUND_MAX_M;
+        cfg.stellar.system_ring_r_m = 4.0 * tight_ring_m;
         assert_eq!(siblings_disjoint(&generate_system_forest(0, &cfg)), Ok(()));
 
         // And the single-system world every existing rig boots is accepted unchanged.
@@ -6626,10 +7201,14 @@ mod tests {
     /// MEASURED on THE world — each equals the addendum's printed derivation exactly.
     const FROZEN_REAL_UNIVERSE_R_M: f64 = 2_251_799_813_685_248.0; // 2⁵¹ m, exact
     const FROZEN_REAL_GALAXY_R_M: f64 = 2_248_797_413_933_667.8; // R_uni − the τ-free outset
-    // R_gal − clearance = 0.2376656 ly (flag-day re-measured: the reserved clearance covers
-    // the SOLVED system shells — see TARGET_SYSTEM_BOUND_MAX_M's doc).
-    const FROZEN_REAL_PLACEMENT_R_M: f64 = 2_248_490_503_621_178.5;
-    const FROZEN_REAL_COMPRESSION_CHI: f64 = 16.378_390_724_051_055; // real NN separation / placement
+    // R_gal − clearance. ★ RE-MEASURED 2026-08-20 (the DERIVED mass cap): the reservation is
+    // no longer seed 0's heaviest sample (2.967e11 m) but the system shell at the largest star
+    // this galaxy can host (7.4949e14 m), so the placement radius drops from 2.248490503621178.5e15
+    // (0.2376656 ly) to 1.4989795871538760e15 (0.15843 ly) and the compression rises with it. THE
+    // COST IS STATED: a third of the star gap buys a world that nests for EVERY seed instead of
+    // for the one it was sampled from. Both numbers lift with the galaxy cell lattice (P10).
+    const FROZEN_REAL_PLACEMENT_R_M: f64 = 1_498_979_587_153_876.0;
+    const FROZEN_REAL_COMPRESSION_CHI: f64 = 24.567_816_882_382_665; // real NN separation / placement
 
     // ===== THE WINDOW LANE Slice 0: the per-system photometric draw (the marker datum) =========
     // Owner-approved 2026-08-15/16, docs/design/window_lane.md §2.2/§2.8: a sleeping child's point
@@ -6638,6 +7217,14 @@ mod tests {
 
     #[test]
     fn the_worlds_systems_draw_their_pinned_photometrics() {
+        // ★ RE-PINNED 2026-08-20 — CAUSE: the DERIVED MASS CAP. `sample_imf_mass` inverts a
+        // BOUNDED power law, so its upper bound enters every draw; moving the bound from the
+        // literal 120.0 M☉ to the derived 16.360034882257757 M☉ moves every star in the world by
+        // a few parts in ten thousand (0.09287894638451702 → 0.09286807253954772,
+        // 0.1081418058358058 → 0.10811333254263818, 0.16179874709518627 → 0.16166413170715563).
+        // The world re-rolls and that is lawful pre-launch (the seed is a pre-freeze dial); the
+        // draw ORDER is untouched, so the append-only stream discipline holds.
+        //
         // FROZEN per-system draw goldens on THE world (seed 0) — EXACT f64, captured once from the
         // taxonomy chain (sample_imf_mass → classify_spectral → main_sequence_luminosity) at THE
         // world's stellar config and pinned as literals (NON-self-referential: a stream drift, a
@@ -6660,25 +7247,25 @@ mod tests {
                 (
                     RealmId::System(7),
                     StarPhotometrics {
-                        mass_msun: 0.09287894638451702,
+                        mass_msun: 0.09286807253954772,
                         class: SpectralClass::M,
-                        luma_lsun: 0.0009726074241780799,
+                        luma_lsun: 0.0009723455466560531,
                     },
                 ),
                 (
                     RealmId::System(10487570625701098367),
                     StarPhotometrics {
-                        mass_msun: 0.1081418058358058,
+                        mass_msun: 0.10811333254263818,
                         class: SpectralClass::M,
-                        luma_lsun: 0.0013801082634453568,
+                        luma_lsun: 0.001379272639755041,
                     },
                 ),
                 (
                     RealmId::System(13979593561158050752),
                     StarPhotometrics {
-                        mass_msun: 0.16179874709518627,
+                        mass_msun: 0.16166413170715563,
                         class: SpectralClass::M,
-                        luma_lsun: 0.00348634764331354,
+                        luma_lsun: 0.0034796798339959533,
                     },
                 ),
             ],
@@ -6967,6 +7554,11 @@ mod tests {
         // The measured best seed of the ruling-F sweep — it holds exactly one Earth-like body.
         let found = earth_like_candidates(2298, &cfg);
         assert_eq!(found.len(), 1);
+        // ★ RE-PINNED 2026-08-20 — CAUSE: the DERIVED MASS CAP re-rolled the stellar draw
+        // (star 1.0312807224758647 → 1.015066097741417 M☉, luma 1.1311171796208652 →
+        // 1.0616400455472874 L☉, moons 22 → 19) and shrank the placement radius
+        // (2.2484905036211783e15 → 1.4989795871538758e15 m). THE PLANET ITSELF IS UNMOVED
+        // (mass_kg and radius_m are bit-identical) — its own draws never read the stellar cap.
         // PINNED AS MEASURED (the config here is the unit tier's 15 m/s · 0.05 s world, not
         // the DEV cluster's — the ladder is the same, the derived speed knobs are not).
         assert_eq!(
@@ -6974,23 +7566,23 @@ mod tests {
             EarthLikeCandidate {
                 system: RealmId::System(7),
                 body: RealmId::Planet(15_792_791_038_712_096_226),
-                star_mass_msun: 1.031_280_722_475_864_7,
+                star_mass_msun: 1.015_066_097_741_417,
                 mass_kg: 6.489_098_886_649_445e24,
                 radius_m: 6_515_459.435_746_093,
-                insolation_rel: 0.748_314_795_081_476_6,
-                t_eq_k: 236.785_700_196_447_92,
+                insolation_rel: 0.748_314_795_081_476_5,
+                t_eq_k: 236.785_700_196_447_9,
                 // T4b — the rest of the picture the owner chooses on, PINNED AS MEASURED.
                 star_class: crate::taxonomy::SpectralClass::G,
-                star_luma_lsun: 1.131_117_179_620_865_2,
+                star_luma_lsun: 1.061_640_045_547_287_4,
                 planet_class: crate::taxonomy::PlanetType::Rocky,
                 bond_albedo: 0.3,
                 has_atmosphere: true,
                 system_planets: 9,
-                system_moons: 22,
+                system_moons: 19,
                 own_moons: 1,
                 sibling_count: 2,
-                nearest_sibling_m: 2_248_490_503_621_178.3,
-                farthest_sibling_m: 2_248_490_503_621_178.5,
+                nearest_sibling_m: 1_498_979_587_153_875.8,
+                farthest_sibling_m: 1_498_979_587_153_876.0,
             },
         );
         // A seed with no Earth-like body answers with an EMPTY sweep — the same read path, the

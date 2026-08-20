@@ -28,8 +28,8 @@ use vd_core::flight::{
 };
 use vd_core::geometry::BoundaryTuning;
 use vd_physics::worldgen::{
-    TARGET_PLANET_SOI_OUTER_HOME_M, TARGET_SYSTEM_BOUND_HOME_M, TARGET_SYSTEM_BOUND_MAX_M,
-    UniverseConfig,
+    TARGET_PLANET_SOI_OUTER_HOME_M, TARGET_SYSTEM_BOUND_HOME_M, UniverseConfig,
+    target_system_bound_max_m,
 };
 
 /// THE world, exactly as every shard boots it (SL5: one world, no preset, no test variant).
@@ -110,7 +110,7 @@ fn g_flight_table_the_governed_legs_match_the_closed_form_and_are_printed_verbat
     // The ceilings, each from the ONE cap expression over a derived extent.
     let cap_planet = realm_speed_cap_mps(TARGET_PLANET_SOI_OUTER_HOME_M, v_foot, TRAVERSE_S);
     let cap_home = realm_speed_cap_mps(TARGET_SYSTEM_BOUND_HOME_M, v_foot, TRAVERSE_S);
-    let cap_max = realm_speed_cap_mps(TARGET_SYSTEM_BOUND_MAX_M, v_foot, TRAVERSE_S);
+    let cap_max = realm_speed_cap_mps(target_system_bound_max_m(), v_foot, TRAVERSE_S);
     let cap_galaxy = realm_speed_cap_mps(cfg.scale.galaxy_r_m, v_foot, TRAVERSE_S);
 
     let legs = [
@@ -187,17 +187,26 @@ fn g_flight_table_the_governed_legs_match_the_closed_form_and_are_printed_verbat
             leg.name,
         );
     }
-    // The narrowed §A3.2 identity that IS true: the warp leg's CRUISE term alone is T_TRAVERSE/2
-    // to four figures (ring/R_gal = 99.986 %), asserted against the closed form's own parts.
+    // The §A3.2 cruise identity, STATED GENERALLY (2026-08-20 — a proof rewrite, never a
+    // weakening). The galaxy's ceiling is derived from the galaxy's own radius, so the cruise term
+    // of the star-to-star leg is `(gap / R_gal) · T/2` for ANY gap; it used to be quoted as plain
+    // `T/2` only because the placement radius happened to be 99.986 % of the galaxy radius. The
+    // DERIVED mass cap reserved a real share of the galaxy for its largest possible child, so the
+    // gap is now 66.66 % of R_gal and the coincidence is gone — the identity is not.
     let warp = &legs[2];
     let cruise = (warp.distance_m
         - t.tau_s * (warp.v_cap - warp.v_start)
         - t.tau_s * (warp.v_cap - warp.v_end))
         / warp.v_cap;
+    let gap_share = warp.distance_m / cfg.scale.galaxy_r_m;
+    let expected_s = gap_share * TRAVERSE_S / 2.0;
+    eprintln!(
+        "[flight-table] the cruise identity: gap/R_gal = {:.4} % => cruise {cruise:.2} s against          (gap/R_gal)·T/2 = {expected_s:.2} s",
+        100.0 * gap_share,
+    );
     assert!(
-        (cruise - TRAVERSE_S / 2.0).abs() < 0.1 * TRAVERSE_S / 2.0,
-        "the warp cruise term {cruise:.2} s strayed from T/2 = {} s",
-        TRAVERSE_S / 2.0,
+        (cruise - expected_s).abs() < 0.1 * expected_s,
+        "the warp cruise term {cruise:.2} s strayed from (gap/R_gal)·T/2 = {expected_s:.2} s",
     );
 }
 
@@ -279,9 +288,15 @@ fn g_governed_bands_bracket_every_ambient_boundary_on_the_world() {
         );
     }
     // Non-vacuity: THE world has governed boundaries — since the true-size re-solve EVERY
-    // parented row is one (the galaxy + 3 systems + 27 planets + 3 stars + the 6 census moons).
+    // parented row is one (the galaxy + 3 systems + 27 planets + 3 stars + the census moons).
+    // ★ RE-PINNED 40 → 56 (2026-08-20). CAUSE: `DEV.universe_seed` became the HOME SEED, so this
+    // gate now reads the world the cluster actually boots instead of seed 0. That world's home
+    // star is a G star, whose wider ladder carries a richer moon census — 22 moons against seed
+    // 0's 6, and `34 + 22 = 56`. (The derived mass cap did NOT move this number: seed 0 still
+    // holds 6 census moons under it, as `g_climb_the_worlds_measured_climb_at_the_true_size_resolve`
+    // measures.)
     assert_eq!(
-        governed_rows, 40,
+        governed_rows, 56,
         "THE world's governed-boundary roster changed — restate this gate against the new world",
     );
 }

@@ -134,7 +134,7 @@ fn main() {
     );
     println!("[seedsearch] THE TOP {SHORTLIST} (the full table is in {out_path}):");
     for (i, (rank, seed, c)) in hits.iter().take(SHORTLIST as usize).enumerate() {
-        println!("{}", verbose_row(i + 1, *rank, *seed, c));
+        println!("{}", verbose_row(i + 1, *rank, *seed, c, &config));
     }
 
     let mut md = String::new();
@@ -153,12 +153,26 @@ fn main() {
         "Earth's reference equilibrium temperature under this world's one law: **{t_earth_k:.4} K** \
          (`earth_like_t_bound_k(1.0)`). Nothing here changes the world seed; this is a report.\n\n",
     ));
+    md.push_str(&format!(
+        "**Provenance — the world this table reads.** The stellar mass draw's upper bound is \
+         DERIVED (owner ruling 2026-08-20): **{:.15} M☉**, the largest star this galaxy can host, \
+         with a reserved system bound of **{:.1} m** and a placement radius of **{:.1} m**. That \
+         bound enters the bounded power law `sample_imf_mass` inverts, so EVERY star in the world \
+         moved when it landed and this table supersedes any earlier one. The `boots` column exists \
+         for the same reason: the reservation used to be a sample of seed 0's own population, and \
+         a seed drawing a heavier star than seed 0 did could not start its galaxy at all.\n\n",
+        vd_physics::worldgen::imf_mass_hi_msun(),
+        vd_physics::worldgen::target_system_bound_max_m(),
+        config.stellar.system_ring_r_m,
+    ));
     md.push_str(
-        "| # | rank | seed | star class | M★ (M☉) | L★ (L☉) | planet | M (M⊕) | R (R⊕) | \
-         R (km) | ρ (kg/m³) | g (m/s²) | class | T_eq (K) | S (S⊕) | air | planets | moons | \
-         own moons | siblings | nearest (ly) | farthest (ly) | first warp (s) |\n",
+        "| # | rank | seed | boots | star class | M★ (M☉) | L★ (L☉) | planet | M (M⊕) | \
+         R (R⊕) | R (km) | ρ (kg/m³) | g (m/s²) | class | T_eq (K) | S (S⊕) | air | planets | \
+         moons | own moons | siblings | nearest (ly) | farthest (ly) | first warp (s) |\n",
     );
-    md.push_str("|--:|--:|--:|:--|--:|--:|:--|--:|--:|--:|--:|--:|:--|--:|--:|:-:|--:|--:|--:|--:|--:|--:|--:|\n");
+    md.push_str(
+        "|--:|--:|--:|:-:|:--|--:|--:|:--|--:|--:|--:|--:|--:|:--|--:|--:|:-:|--:|--:|--:|--:|--:|--:|--:|\n",
+    );
     for (i, (rank, seed, c)) in hits.iter().enumerate() {
         md.push_str(&md_row(i + 1, *rank, *seed, c, &config));
     }
@@ -175,6 +189,13 @@ fn main() {
          **own moons** is how many that planet keeps.\n\
          * **siblings / nearest / farthest** — the other star systems of this galaxy and the 3-D \
          distance to the closest and farthest of them: the first journey out, and the far corner.\n\
+         * **boots** — whether that seed's galaxy actually STARTS: the four world-deriving boot \
+         fences every process runs, in the same order (the nesting fence, the measured visibility \
+         climb against the shipped look carrier, the FINE-lattice storage budget, and the 3-D \
+         seeded-system separation). `yes` means the galaxy shard comes up; anything else names the \
+         fence that refused. This column exists because a home seed that cannot boot its own \
+         galaxy leaves the pilot drifting outside their star system with no star map at all — the \
+         defect measured on 2026-08-20.\n\
          * **first warp** — the GOVERNED closed-form time (`vd_core::flight::leg_time_s`) to fly \
          the nearest gap at the galaxy's own speed ceiling, starting and ending at foot speed. It \
          is what the trip costs in seconds, printed so the geometry means something.\n",
@@ -193,6 +214,30 @@ fn rank_of(c: &EarthLikeCandidate, t_earth_k: f64) -> f64 {
         + W_STAR_LUMA * c.star_luma_lsun.ln().abs()
         + W_TEMP * (c.t_eq_k / t_earth_k).ln().abs()
         - W_RICHNESS * (1.0 + f64::from(c.system_planets + c.system_moons)).ln()
+}
+
+/// ★ DOES THAT SEED'S GALAXY ACTUALLY START? (owner ruling 2026-08-20 — the whole reason this
+/// tool now has a `boots` column.) The FOUR world-deriving boot fences every process runs, in the
+/// order the gateway and the shard run them, against the SAME world config. `yes`, or the name of
+/// the fence that refused with its own words — never a bare `no`.
+fn boot_verdict(seed: u64, config: &vd_physics::worldgen::UniverseConfig) -> String {
+    if let Err(e) = vd_physics::worldgen::guard_world_nests(seed, config) {
+        return format!("NO — nest: {e}");
+    }
+    if let Err(e) = vd_physics::worldgen::guard_visibility_climb_bounded(
+        seed,
+        config,
+        vd_wire::session_flow::LOOK_CARRIER_ARITY,
+    ) {
+        return format!("NO — climb: {e}");
+    }
+    if let Err(e) = vd_physics::worldgen::guard_root_representable(config) {
+        return format!("NO — storage: {e}");
+    }
+    if let Err(e) = vd_physics::worldgen::guard_seeded_systems_disjoint(seed, config) {
+        return format!("NO — separation: {e:?}");
+    }
+    "yes".to_owned()
 }
 
 /// The candidate's density, from the two drawn numbers it already carries.
@@ -230,12 +275,20 @@ fn first_warp_s(
 }
 
 /// One stdout row — the whole picture on two lines, for the owner to read without opening a file.
-fn verbose_row(n: usize, rank: f64, seed: u64, c: &EarthLikeCandidate) -> String {
+fn verbose_row(
+    n: usize,
+    rank: f64,
+    seed: u64,
+    c: &EarthLikeCandidate,
+    config: &vd_physics::worldgen::UniverseConfig,
+) -> String {
+    let boots = boot_verdict(seed, config);
     format!(
         "  {n:>2}. seed={seed} rank={rank:.4}\n      star {:?} {:.4} M☉, {:.4} L☉  |  world {:?} \
          {:.3} M⊕, {:.3} R⊕ ({:.1} km), ρ {:.0} kg/m³, g {:.2} m/s², {:?}, T_eq {:.2} K, \
          S {:.6} S⊕, air {}\n      system: {} planets, {} moons (this world keeps {})  |  \
-         neighbours: {} sibling stars, nearest {:.4} ly, farthest {:.4} ly  |  in {:?}",
+         neighbours: {} sibling stars, nearest {:.4} ly, farthest {:.4} ly  |  in {:?}  |  \
+         galaxy boots: {}",
         c.star_class,
         c.star_mass_msun,
         c.star_luma_lsun,
@@ -256,6 +309,7 @@ fn verbose_row(n: usize, rank: f64, seed: u64, c: &EarthLikeCandidate) -> String
         c.nearest_sibling_m / LIGHT_YEAR_M,
         c.farthest_sibling_m / LIGHT_YEAR_M,
         c.system,
+        boots,
     )
 }
 
@@ -268,9 +322,11 @@ fn md_row(
     config: &vd_physics::worldgen::UniverseConfig,
 ) -> String {
     let warp = first_warp_s(c, config).map_or_else(|| "—".to_owned(), |s| format!("{s:.1}"));
+    let boots = boot_verdict(seed, config);
     format!(
-        "| {n} | {rank:.4} | {seed} | {:?} | {:.4} | {:.4} | `{:?}` | {:.3} | {:.3} | {:.1} | \
-         {:.0} | {:.2} | {:?} | {:.2} | {:.6} | {} | {} | {} | {} | {} | {:.4} | {:.4} | {warp} |\n",
+        "| {n} | {rank:.4} | {seed} | {boots} | {:?} | {:.4} | {:.4} | `{:?}` | {:.3} | {:.3} | \
+         {:.1} | {:.0} | {:.2} | {:?} | {:.2} | {:.6} | {} | {} | {} | {} | {} | {:.4} | {:.4} | \
+         {warp} |\n",
         c.star_class,
         c.star_mass_msun,
         c.star_luma_lsun,

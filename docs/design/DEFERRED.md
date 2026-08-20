@@ -4951,6 +4951,78 @@ re-parked as **D-LOOK-4** below, with the measurement. A NEW gate,
 directly with no cluster and no GPU, and `crates/bins/tests/acceptance_flight.rs`
 (`just acceptance-flight`) flies the whole arc in pixels.
 
+### D-MASS-CAP 🟧 The stellar mass cap is DERIVED FROM THE GALAXY'S RADIUS — it lifts when the galaxy cell lattice (P10) makes the galaxy unbounded
+
+- **WHAT SHIPPED (owner ruling 2026-08-20).** `IMF_MASS_HI_MSUN` was the literal `120.0` and
+  `TARGET_SYSTEM_BOUND_MAX_M` was `296_703_425_982.0423` — a SAMPLE of seed 0's own heaviest star
+  (an M dwarf of 0.1618 M☉) wearing the name of a reservation. Both are now readings of ONE
+  derivation (`DERIVED_MASS_CAP`, `crates/physics/src/worldgen.rs`): the cap is the greatest mass
+  whose demand on the galaxy — the §3.2 clearance it is owed plus the two system bounds on the line
+  between the origin-anchored home system and any sibling — fits inside `REAL_GALAXY_R_M`, and the
+  reservation is the system shell at that cap. **Cap = 16.360034882257757 M☉; reservation =
+  749 489 793 576 937.9 m; star look = 4 238 711 986.6327586 m; placement radius =
+  1 498 979 587 153 876 m; compression χ = 24.5678.**
+- **WHY IT EXISTS AT ALL.** This galaxy is 2.2487974139336678e15 m in radius — 0.2376981 ly. A
+  system's shell grows with its star's mass (the orbit ladder is anchored at `0.4·√L` AU), and the
+  retired literal named a star whose system solves to 2.43e16 m — **ten times wider than the whole
+  galaxy**. No constant reservation could ever have covered every star the world may draw, so the
+  rule and the world contradicted each other; a star heavier than the cap was never possible here
+  and the world now says so.
+- **THE DEFECT THAT FORCED IT (measured on the live cluster, 2026-08-20).** The galaxy shard refused
+  to boot on the owner's home seed: *"region System(10487570625701098367) is not geometrically
+  inside its parent System(1): it reaches 2248843017364804.8 m … but the parent's usable interior
+  ends at 2248797413933667.8 m — refusing to boot"*. No galaxy ⇒ an outbound crossing had nowhere to
+  land ⇒ the pilot drifted outside their own system forever, and no real star ever streamed. A
+  per-child FIT CLAMP was tried and REVERTED: placing a child where it fits disarms the very fence
+  whose refusal is the world's negative control.
+- **WHAT IS STILL INTERIM (why 🟧 and not 🟩).** The cap is a fact about a galaxy of THIS radius,
+  and that radius is the FINE lattice's storage budget (`guard_root_representable`). It is a
+  restriction on the world's star population that physics does not impose — real galaxies host
+  O stars — and it costs a third of the star gap (the placement radius fell from
+  2 248 490 503 621 178.5 m and χ rose from 16.3784).
+- **WHEN IT LIFTS:** the **galaxy cell lattice (P10)** — the same named trigger as
+  `guard_root_representable`'s refusal and the compression χ → 1 work
+  (`scripts/galaxy_cell_lattice_design.md`). When the galaxy stops being one bounded shell, the
+  demand inequality is evaluated against the lattice's reach instead of one shell's radius and the
+  cap rises with it. Nothing else changes: the derivation is already written against
+  `REAL_GALAXY_R_M`, so P10 replaces one input, not the law.
+- **THE GUARANTEE, MEASURED:** `g_nest_sweep_every_swept_seed_generates_a_world_that_nests` sweeps
+  284 seeds (a size DERIVED from the IMF — enough seeds to expect a star within one octave of the
+  cap) through the identical fence that refused the owner's boot: 13 428 regions judged, heaviest
+  star drawn 8.540365549779963 M☉ (52.2 % of the cap), tightest margin 416 779 130.87 m. Its
+  refusal arm (`the_nest_sweep_refuses_the_sampled_reservation_that_grounded_the_owner`) restores
+  the SAMPLED reservation and reproduces the live cluster's verdict.
+- **Where:** `crates/physics/src/worldgen.rs` (`DERIVED_MASS_CAP`, `solve_mass_cap`,
+  `galaxy_child_demand_m`, `imf_mass_hi_msun`, `target_system_bound_max_m`,
+  `derived_nest_sweep_seeds`, `guard_swept_seeds_nest`); `crates/physics/src/taxonomy.rs`
+  (`imf_tail_fraction`).
+
+### D-SKY-1 🟩 THE DECORATIVE STARFIELD IS DELETED — every point of light is a real streamed realm (owner ruling 2026-08-20)
+
+- **THE RULING, VERBATIM:** *"No unreachable star sky spheres please!"*
+- **WHAT WAS THERE.** `crates/client-render/src/lib.rs` carried an ambient backdrop sky the CLIENT
+  invented: a fixed seed (`STARFIELD_SEED = 0x5644535441525300`), 1 600 uniform + 1 200 Milky-Way-band
+  unlit emissive spheres on a 60 km follow-shell (`STAR_SPHERE_RADIUS`), re-centred on the camera
+  every frame (`follow_starfield`), with its own spectral palette, angular-size ladder, galactic-plane
+  tilt and depth-plane subject. It was visually indistinguishable from the real streamed star markers.
+- **WHY IT HAD TO GO.** With the galaxy shard refusing to boot (see D-MASS-CAP) no real star streamed
+  at all, and the owner flew at painted, unreachable stars for a whole session with nothing to say the
+  sky was a lie. A backdrop that cannot be flown to breaks the seamless mandate at its root: what you
+  see must be where you can go.
+- **WHAT WAS DELETED:** `STARFIELD_SEED`, `STAR_SPHERE_RADIUS`, `STAR_COUNT_UNIFORM`,
+  `STAR_COUNT_BAND`, `STAR_BAND_HALF_ANGLE`, `STAR_ANGULAR_MIN/MAX`, `STAR_SIZE_MIN/MAX`,
+  `GALACTIC_NORMAL`, `STAR_TIERS`, `STAR_TIER_CUM`, `struct Star`, `struct StarfieldRoot`,
+  `generate_starfield`, `make_star`, `setup_starfield`, `follow_starfield`, the `Update`-schedule
+  entry, the `setup_scene` spawn and the backdrop's `derive_camera_planes` subject — about 8.5 KB.
+  NO GATE asserted on it (grep: the headless capture path never had one), so nothing was re-based and
+  nothing was weakened.
+- **WHAT THE SKY IS NOW:** the streamed marker lane alone — `vd_client::realm_scene`'s point-source
+  ladder, whose `base_radius_m` is `√L ·`
+  `POINT_SOURCE_BASE_RADIUS_M`. **If the sky is empty, that is the truth**: an empty sky now means
+  no realm is streaming, which is a defect to fix rather than a picture to paint over.
+- **Where:** `crates/client-render/src/lib.rs`; `crates/client/src/realm_scene.rs` (`MarkerLook`).
+
+
 ### D-LOOK-4 🟥 `render_crossing_smoke`'s verdict tests CONTAINMENT against the DRAWN outline
 
 **WHAT is wrong.** The gate's central verdict is *"the dot's pixels lie INSIDE the home box's

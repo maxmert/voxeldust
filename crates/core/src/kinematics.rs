@@ -49,6 +49,22 @@ pub fn forward_to_yaw_pitch(forward: DVec3) -> (f64, f64) {
     (yaw, pitch)
 }
 
+/// Recover `(yaw, pitch)` from an ORIENTATION — the inverse of [`orient_from_yaw_pitch`],
+/// via the forward direction the two share.
+///
+/// THE TWO STORES OF ONE TRUTH. A dot's facing lives twice: as the quaternion inside its pose,
+/// which is what a realm crossing converts, and as the yaw/pitch pair, which is what the input
+/// integrator REBUILDS the quaternion from every tick. Whoever hands a dot a pose whose
+/// orientation is meaningful must therefore hand it the matching angles as well, or the next
+/// input tick silently overwrites the converted facing with the angles it still holds.
+///
+/// Roll is not representable in a yaw/pitch pair and is not recovered; the input model has no
+/// roll, so this is exact for every orientation the integrator can produce.
+#[must_use]
+pub fn yaw_pitch_from_orient(orient: DQuat) -> (f64, f64) {
+    forward_to_yaw_pitch(orient * DVec3::NEG_Z)
+}
+
 /// The minimal rotation taking the canonical up (`+Y`) to `up` (normalized) — the ONE
 /// definition of an `up`-relative frame (world-Y for P1.5, planet-radial / ship-local
 /// later), shared by the camera (now) and surface-relative motion (P5) so the
@@ -317,5 +333,44 @@ mod tests {
         assert_eq!(secs_since_epoch(0, 50.0), 0.0);
         assert_eq!(secs_since_epoch(50, 50.0), 1.0);
         assert_eq!(secs_since_epoch(10, 10.0), 1.0);
+    }
+}
+#[cfg(test)]
+mod facing_round_trip {
+    use super::*;
+
+    /// THE RE-HOME FACING PROOF (owner-measured 2026-08-21): the angles a dot is rebuilt from must
+    /// reproduce the orientation a crossing handed it, or looking and moving come apart after every
+    /// re-home. Driven over the whole representable range, including the pitch limit and the yaw
+    /// wrap, because a crossing can arrive at any facing.
+    #[test]
+    fn the_angles_reproduce_the_orientation_they_came_from() {
+        let limit = PITCH_LIMIT;
+        for yaw_step in -8..=8 {
+            for pitch_step in -4..=4 {
+                let yaw = f64::from(yaw_step) * core::f64::consts::PI / 8.0;
+                let pitch = f64::from(pitch_step) * limit / 4.0;
+                let orient = orient_from_yaw_pitch(yaw, pitch);
+                let (got_yaw, got_pitch) = yaw_pitch_from_orient(orient);
+                // The recovered angles must rebuild the SAME orientation. Compared through the
+                // orientation rather than the angles, because yaw is only defined up to a turn at
+                // the poles and the rebuild is what the integrator actually does.
+                let rebuilt = orient_from_yaw_pitch(got_yaw, got_pitch);
+                let forward = orient * DVec3::NEG_Z;
+                let rebuilt_forward = rebuilt * DVec3::NEG_Z;
+                // THE TOLERANCE IS DERIVED, not picked. Recovering a heading uses `asin`, whose
+                // error is amplified by `1/cos(pitch)` — and at the pitch limit you are looking very
+                // nearly straight down, where "which way is forward" is genuinely ill-conditioned.
+                // So the bound is one double-precision step amplified by exactly that conditioning,
+                // with a factor of two of headroom. Away from the pole the measured error is ~1e-16;
+                // AT the pole it is ~1.4e-12, which this bound admits and a fixed 1e-12 did not.
+                let bound = 2.0 * f64::EPSILON / limit.cos();
+                let err = (forward - rebuilt_forward).length();
+                assert!(
+                    err < bound,
+                    "facing lost by {err} (bound {bound}): yaw {yaw} pitch {pitch} rebuilt as {got_yaw} {got_pitch}"
+                );
+            }
+        }
     }
 }

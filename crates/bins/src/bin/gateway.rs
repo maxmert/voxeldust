@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // realm's own centre, so the gateway hands the shard a number the shard can accept without converting
     // anything, and nobody has to know where any realm sits.
     let demand_armed = vd_bins::parse_bool_env(&env, "VD_DEMAND")?;
-    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", 0)?;
+    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", vd_physics::worldgen::HOME_SEED)?;
     // The SAME three inputs the shard threads into its own world build, read from the SAME env keys, so the
     // AoI bands the gateway hands a client match the ones the shard evaluates it against.
     let tick_dt: f64 = env.parse("VD_TICK_DT")?;
