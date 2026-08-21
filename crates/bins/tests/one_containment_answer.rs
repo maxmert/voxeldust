@@ -49,8 +49,49 @@ use vd_sim::stub::RealmRegions;
 /// realm holds a player, and which realm holds a player is the whole subject.
 const SURFACE_M: f64 = 0.0;
 
-/// The universe seed every process in the dev cluster shares (`VD_UNIVERSE_SEED`, absent ⇒ 0).
+/// THE PINNED SEED of this whole file — deliberately **0**, and deliberately NOT the shipped
+/// default. Since 2026-08-20 a process with no `VD_UNIVERSE_SEED` boots
+/// [`vd_physics::worldgen::HOME_SEED`] (2298, the owner's chosen home world), so this const is a
+/// PIN, not an echo of the default it used to be. That is HOME_SEED's own stated doctrine — *"tests
+/// that pass an explicit seed are unaffected by it, which is why the pinned `f(seed)` suites still
+/// pin seed 0"* — and it is what keeps the golden vector below a stable ruler: a home-seed change is
+/// a world change, and a ruler that moved with it would measure nothing.
 const SEED: u64 = 0;
+
+/// ★ THE GOLDEN'S REGENERATION RECORD — emitted verbatim into the golden's header so the audit
+/// trail rides in the file the bits live in, never only in a commit message.
+///
+/// STATIC ON PURPOSE. Every other header line is a reading of the live config, so it re-derives
+/// silently; this one cannot. The next regenerator has to rewrite it, and the diff shows they did.
+/// It names BOTH world changes that landed together, including the one that measurably did NOT move
+/// these bits — *"it did not move"* is a claim this file must state, not a silence to read into.
+const WHY_THESE_BITS_LAST_MOVED: &[&str] = &[
+    "# ★ WHY THESE BITS LAST MOVED — regenerated 2026-08-21 (the gate-pass arc) against the world",
+    "#   commit e28c8f2 left behind. TWO world changes landed in it; exactly ONE moved these rows.",
+    "#",
+    "#   CAUSE 1 — THE DERIVED STELLAR MASS CAP AND THE GALAXY'S RESERVATION. ★ THE MOVER.",
+    "#     The IMF draw's upper bound and the clearance the galaxy reserves for its largest child",
+    "#     stopped being two independent constants and became two readings of ONE solve, so that",
+    "#     every seed nests by construction instead of only the seed the old reservation was",
+    "#     sampled from. Before -> after: cap 120 -> 16.360034882257757 M_sun; reservation",
+    "#     296703425982.0423 -> 749489793576937.9 m; star placement radius",
+    "#     2248490503621178.5 -> 1498979587153876 m (compression chi 16.378 -> 24.568 — a third of",
+    "#     the star gap is the stated price). The cap is the DRAW's own bound, so seed 0's stars",
+    "#     were RE-DRAWN as well as re-placed, and the regeneration diff measures exactly that:",
+    "#     99 of 99 Planet rows moved; 6 of 12 System rows moved (the two siblings at all three",
+    "#     sampled ticks — the root, the galaxy and the home system sit at zero and cannot); 0 of",
+    "#     9 Star rows moved (a star holds its own system's origin by design, so its row IS zero).",
+    "#     A placement-radius change alone would have moved the six sibling rows and nothing else;",
+    "#     the 99 planet rows are the re-drawn masses, with every orbit and SOI solved from them.",
+    "#     See DEFERRED.md D-MASS-CAP; the cap lifts with the galaxy cell lattice at P10.",
+    "#",
+    "#   CAUSE 2 — THE HOME SEED DEFAULT, 0 -> 2298 (vd_physics::worldgen::HOME_SEED). NOT a mover",
+    "#     of these rows, MEASURED, not argued: this vector pins seed 0 explicitly (the `SEED`",
+    "#     const, byte-unchanged across every commit since this file was last captured) and the",
+    "#     boot it drives is a pure f(seed, config) — the new default only reaches processes that",
+    "#     read VD_UNIVERSE_SEED. What the change DID move here is the `SEED` const's doc, which",
+    "#     called 0 'the default' and no longer could.",
+];
 
 /// The ticks the property is sampled at. Tick 0 is the orbital epoch — every body sits on its authored
 /// phase, so a defect that only appears once things have MOVED can hide there. The other two are far
@@ -341,10 +382,27 @@ fn every_anchors_child_rows_match_the_golden_vector() {
         "# outer: universe_r_m={} galaxy_r_m={} placement_r_m={} (3-D seeded placements, Q-B)",
         config.scale.universe_r_m, config.scale.galaxy_r_m, config.stellar.system_ring_r_m,
     ));
+    // THE DERIVED STELLAR CAP AND THE GALAXY'S RESERVATION — the two readings of the ONE solve that
+    // moved these bits on 2026-08-21. Read off the SAME config the boot uses (the cap enters every
+    // star draw as `stellar.mass_hi_msun`), so a future cap move lands in this header's own hunk
+    // instead of only in 57 indistinguishable data lines.
+    lines.push(format!(
+        "# cap: imf_mass_hi_msun={} system_bound_max_m={} (DERIVED — the galaxy reserves its \
+         largest possible child)",
+        config.stellar.mass_hi_msun,
+        vd_physics::worldgen::target_system_bound_max_m(),
+    ));
     lines.push(
         "# Regenerate ONLY with a stated world-numbers change (VD_UPDATE_GOLDEN=1); the slice says so."
             .to_owned(),
     );
+    // ★ WHY THESE BITS LAST MOVED — the audit trail the regeneration owes. Static text on purpose:
+    // the NEXT regenerator must rewrite it, and the diff shows they did. Both world changes that
+    // landed in commit e28c8f2 are named, INCLUDING the one that is measurably NOT a mover here —
+    // "it did not move" is a claim this file has to state, not a silence to read into.
+    for line in WHY_THESE_BITS_LAST_MOVED {
+        lines.push((*line).to_owned());
+    }
     for anchor in anchors {
         let (regions, planted) = star_shard(anchor);
         for tick in SAMPLED_TICKS {

@@ -246,11 +246,13 @@ fn a_demand_login_spins_up_a_fresh_home_and_lands_with_no_prebooked_shard() {
         state.own_entity.is_some(),
         "no authority after login: {state:?}"
     );
-    // RLM realistic-demo Slice 3: the login lands at the star home realm (System 7) of the compressed-real
-    // visual-demand geometry — the inner planets already in visibility spin up, the outer 2 are culled.
+    // RLM realistic-demo Slice 3: the login lands at THE world's home star realm — named through
+    // `home_label`, a lineage position, never a transcribed seed. Whatever children of home stand
+    // inside their own AoI at the spawn standoff spin up with it; the rest stay culled (the
+    // look-wake gate below derives that exact set from the world's own numbers).
     assert_eq!(
         state.location.as_deref(),
-        Some("System 7"),
+        Some(home_label(&DEV).as_str()),
         "the demand login lands at the star home realm: {state:?}",
     );
     assert_eq!(state.decode_errors, 0, "decode faults: {state:?}");
@@ -360,7 +362,7 @@ fn a_demand_login_applies_live_realm_frames_so_the_planets_are_not_frozen() {
     let state = await_active(devctl_port, gw_admin, DEADLINE);
     assert_eq!(
         state.location.as_deref(),
-        Some("System 7"),
+        Some(home_label(&DEV).as_str()),
         "the demand login lands at the star home realm: {state:?}",
     );
     eprintln!(
@@ -437,7 +439,7 @@ fn a_demand_login_draws_moving_planets_not_a_frozen_scene() {
     let state = await_active(devctl_port, gw_admin, DEADLINE);
     assert_eq!(
         state.location.as_deref(),
-        Some("System 7"),
+        Some(home_label(&DEV).as_str()),
         "login at the star: {state:?}"
     );
 
@@ -504,11 +506,11 @@ fn a_demand_login_draws_moving_planets_not_a_frozen_scene() {
 
 /// FULL-SPEED PARKED PROOF (the containment-flap fix): a stationary ship at the star must keep the planets
 /// ORBITING indefinitely at full orbit speed (NO slowdown), PAST the planet spin-up. With the OLD buggy
-/// containment a moving planet's phantom capture-center (`live_pos + epoch`) swept the star origin every
-/// half-orbit (~7 s for the inner planet at full speed), wrongly re-homing the parked ship INTO the planet ⇒
-/// the sibling feed froze. With a mover's `region.center = 0` the capture-zone is always ON the planet, so a
-/// parked ship stays ~13.7 m outside forever. Asserts, over a window past spin-up: the ship never leaves
-/// "System 7", the realm feed keeps climbing, and a drawn planet keeps moving. FLAPS + FREEZES on the pre-fix
+/// containment a moving planet's phantom capture-center (`live_pos + epoch`) swept the star origin once
+/// per half orbit of the inner planet, wrongly re-homing the parked ship INTO the planet ⇒ the sibling
+/// feed froze. With a mover's `region.center = 0` the capture-zone is always ON the planet, so a parked
+/// ship at the spawn standoff stays outside every planet's own bound forever. Asserts, over a window past spin-up: the ship never leaves
+/// its home realm, the realm feed keeps climbing, and a drawn planet keeps moving. FLAPS + FREEZES on the pre-fix
 /// shard (the speed-dependent freeze the human saw at full speed but not under the orbit-slowdown flag).
 #[test]
 fn a_parked_ship_keeps_the_planets_orbiting_at_full_speed() {
@@ -524,10 +526,13 @@ fn a_parked_ship_keeps_the_planets_orbiting_at_full_speed() {
 
     let _reaper = ForkedReaper(f.launch_path.clone());
     let _cluster = boot_demand_login(&f, &a, &DEV, &client_book, client_quic, devctl_port);
+    // Bound ONCE: the home realm's own label, derived from THE world (see `home_label`) — the poll
+    // loop below compares against this binding rather than re-deriving per poll.
+    let home = home_label(&DEV);
     let start = await_active(devctl_port, gw_admin, DEADLINE);
     assert_eq!(
         start.location.as_deref(),
-        Some("System 7"),
+        Some(home.as_str()),
         "login at the star: {start:?}"
     );
 
@@ -546,8 +551,8 @@ fn a_parked_ship_keeps_the_planets_orbiting_at_full_speed() {
         if let Some(st) = poll_state(devctl_port) {
             assert_eq!(
                 st.location.as_deref(),
-                Some("System 7"),
-                "the PARKED ship was wrongly re-homed out of System 7 (the flap) at {}s: loc={:?}",
+                Some(home.as_str()),
+                "the PARKED ship was wrongly re-homed out of {home} (the flap) at {}s: loc={:?}",
                 started.elapsed().as_secs(),
                 st.location,
             );
@@ -579,7 +584,7 @@ fn a_parked_ship_keeps_the_planets_orbiting_at_full_speed() {
         "no drawn planet moved over the window — frozen (best {moved:.3} m)"
     );
     eprintln!(
-        "[parked] stayed in System 7; feed {} -> {}; a planet moved {moved:.2} m — LIVE at full speed",
+        "[parked] stayed in {home}; feed {} -> {}; a planet moved {moved:.2} m — LIVE at full speed",
         first.realm_frames_applied, last.realm_frames_applied,
     );
 }
@@ -593,18 +598,30 @@ fn a_parked_ship_keeps_the_planets_orbiting_at_full_speed() {
 // production boot.
 
 /// The GALAXY's own realm label — what an exit from the home system must READ ON ARRIVAL. The old
-/// exit loops broke on ANY label != "System 7", so an in-plane planet capture passed them — a FALSE
-/// GREEN, not a flake (D-WORLD-9); asserting the destination closes it.
+/// exit loops broke on ANY label != the home system's, so an in-plane planet capture passed them —
+/// a FALSE GREEN, not a flake (D-WORLD-9); asserting the destination closes it.
 fn galaxy_label(p: &DevClusterParams) -> String {
     frame_for_realm(world_roster(p).galaxy, None)
         .expect("the galaxy realm has a frame")
         .label()
 }
 
+/// The HOME system's own realm label — what a login must READ ON ARRIVAL, and the label every
+/// in-system assertion below names. The twin of [`galaxy_label`], and for the same reason: the home
+/// realm is a LINEAGE POSITION on THE world (`world_roster`), never a transcribed "System 7". The
+/// seed that draws it is the shipped default, so the name moves with the world the day the default
+/// moves; every call site here binds this ONCE per test and compares against the binding, so the
+/// derivation costs one world boot, not one per poll.
+fn home_label(p: &DevClusterParams) -> String {
+    frame_for_realm(world_roster(p).home, None)
+        .expect("the home realm has a frame")
+        .label()
+}
+
 /// THE CROSSING PROOF (moving-frame crossing fix): flying an occupant INTO a demand-spawned orbiting planet
 /// RE-HOMES cleanly — `location` flips to the planet realm, no flap. At FULL orbit speed (the slowdown
-/// knob is deleted — SL5): the fixture flies the shared rendezvous at the INNER planet, which sits well
-/// inside System 7's 150 m SOI (no System-boundary confound).
+/// knob is deleted — SL5): the fixture flies the shared rendezvous at the INNER planet, whose whole orbit
+/// sits well inside the home system's own solved shell (no System-boundary confound — I-RADIAL asserts it).
 ///
 /// WHY IT NOW WORKS (was the flap): (1) a mover's `region.center` is ZERO, so the planet's SOI is centered
 /// on the planet itself (not shifted ~one orbit off) — the source + the planet shard compute the SAME
@@ -637,7 +654,7 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
     let landed = await_active(devctl_port, gw_admin, deadline);
     assert_eq!(
         landed.location.as_deref(),
-        Some("System 7"),
+        Some(home_label(&p).as_str()),
         "login at the star: {landed:?}"
     );
 
@@ -719,9 +736,9 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
 /// keep-alive the return-dest System is reaped mid-crossing → the re-driven `CrossingRequest` parks
 /// unresolved → the player lands on no live authority and EVERYTHING (player + world) freezes. WITH the fix
 /// the SOURCE shard keep-alive-demands System (+ its whole chain) for the crossing's duration — re-spinning
-/// it if the dwell already reaped it — so the return COMMITS: `location` returns to "System 7", the player is
-/// on a live authority, and its own pose keeps advancing. That commit is the acceptance gate here (the
-/// fly-out loop only breaks when `location == "System 7"`, which is unreachable if the return parked).
+/// it if the dwell already reaped it — so the return COMMITS: `location` returns to the home system's own
+/// label, the player is on a live authority, and its own pose keeps advancing. That commit is the acceptance
+/// gate here (the fly-out loop only breaks on that label, which is unreachable if the return parked).
 ///
 /// RESIDUAL (owed, NOT asserted — see DEFERRED.md D-RLM-14 / floating-origin S6 / VU-6): after the return
 /// commits, the SURROUNDING realm feed (per-tick `RealmSnapshot`) does not yet re-advance on the cross. The
@@ -732,8 +749,9 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
 /// owed status) rather than panicking, so the landed fixes gate green; flip it to a hard assert when D-RLM-14
 /// lands. This is a ROUND-TRIP: two rehomes, proving the crossing machinery survives repeated System↔Planet
 /// moves — at FULL orbit speed (the slowdown knob is DELETED, SL5): the fly-in is the shared rendezvous
-/// and the fly-out steers at a fixed far waypoint whose exact heading is immaterial (any sustained
-/// displacement exits the ~4 m planet SOI into open System space).
+/// and the fly-out steers at a fixed far waypoint whose exact heading is immaterial (its magnitude is
+/// the planet's own tick-0 orbit radius, which dwarfs the planet's solved SOI, so any sustained
+/// displacement exits into open System space).
 #[test]
 fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
@@ -751,10 +769,12 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     let _reaper = ForkedReaper(f.launch_path.clone());
     let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
 
+    // Bound ONCE (the return loops below compare against this binding, never re-derive per poll).
+    let home = home_label(&p);
     let landed = await_active(devctl_port, gw_admin, deadline);
     assert_eq!(
         landed.location.as_deref(),
-        Some("System 7"),
+        Some(home.as_str()),
         "login at the star: {landed:?}"
     );
 
@@ -791,7 +811,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     // box are BOTH planet-local, so they coincide near the origin, and "riding the orbit" is true by
     // construction (the world moves around you; you do not chase your own ground). The assertion that
     // still catches the ORIGINAL teleport bug is the GAP: a player rendered at raw frame-local against
-    // a box still drawn at its parent-space orbit reads a gap of the whole orbit (~17 m), and a stale
+    // a box still drawn at its parent-space orbit reads a gap of the whole orbit radius, and a stale
     // pre-crossing box (the measured "I landed on the planet and I am outside it") reads metres. The
     // OLD precondition here (`center.length() > 12`) asserted the pre-slice model — the box drawn in
     // the PARENT's space while its rider drew in the planet's — which is exactly the two-space split
@@ -804,8 +824,11 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     const PLANET_RIDE_TOL_M: f64 = 8.0;
     // The GAP tolerance is the planet's own solved bound (+ slack): the occupant crosses in AT
     // the acquire edge (~its SOI), so "own beside the box" means INSIDE the planet's own bound —
-    // the two-space split this guards read the whole parent-space orbit (~1e9 m) instead. The
-    // interim 8 m gap was the ~4 m-SOI world's; the box-at-own-origin half keeps the tight 8 m.
+    // the two-space split this guards read the whole parent-space orbit instead, orders wider.
+    // PLANET_RIDE_TOL_M is NOT a world size and never re-derives with one: it measures "is the
+    // box drawn AT MY OWN ORIGIN", whose correct value is zero, with metres of room for the
+    // settle transient — the failure it catches (a box still drawn at its parent-space orbit) is
+    // the whole orbit radius away, so no world re-solve can make 8 m the wrong epsilon.
     let cfgw = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
     let ride_gap_tol_m = vd_physics::worldgen::realm_regions_for_config(p.universe_seed, &cfgw)
         .iter()
@@ -862,18 +885,19 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     std::thread::sleep(Duration::from_secs(3));
 
     // ── FLY OUT at a fixed far waypoint (−1.5× the planet's tick-0 epoch position, planet frame) until
-    // `location` returns to System 7. At FULL orbit speed that direction is "toward the star" only at
-    // tick 0 — which is fine, and stated honestly (batch review: the old comment kept the epoch-fixed
-    // rationale after the slowdown knob died): the waypoint's ~23 m magnitude dwarfs the planet's ~4 m
-    // SOI, so ANY sustained displacement exits into open System space, and the loop re-issues the walk
-    // until the label flips. This is the RETURN crossing whose dest is the OLD, reap-eligible System.
-    // The exit budget is DERIVED (true scale): leaving a ~1.2e7 m planet under its own governed
-    // ceiling is ~100 s by the closed form — 2× + slack. The chunked WalkTo holds the throttle
-    // across chunks (no cut — a cut restarts the speed-law ramp from the foot).
+    // `location` returns to the home label. At FULL orbit speed that direction is "toward the star" only
+    // at tick 0 — which is fine, and stated honestly (batch review: the old comment kept the epoch-fixed
+    // rationale after the slowdown knob died): the waypoint's magnitude is one-and-a-half orbit radii and
+    // dwarfs the planet's own solved SOI, so ANY sustained displacement exits into open System space, and
+    // the loop re-issues the walk until the label flips. This is the RETURN crossing whose dest is the
+    // OLD, reap-eligible System. The exit budget is DERIVED off the planet's own solved shell and its own
+    // governed ceiling (`planet_exit_budget` → the shared `governed_leg_budget`), so a re-solved planet
+    // moves it. The chunked WalkTo holds the throttle across chunks (no cut — a cut restarts the
+    // speed-law ramp from the foot).
     let out_budget = vd_bins::flight::planet_exit_budget(&p, planet);
     let out_deadline = Instant::now() + out_budget;
     loop {
-        if poll(out_deadline).location.as_deref() == Some("System 7") {
+        if poll(out_deadline).location.as_deref() == Some(home.as_str()) {
             break;
         }
         let _ = devctl(
@@ -887,7 +911,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         );
         assert!(
             Instant::now() < out_deadline,
-            "RETURN FROZE: flew inward toward the star but location never returned to \"System 7\" \
+            "RETURN FROZE: flew inward toward the star but location never returned to {home:?} \
              within the derived {out_budget:?} — the return-dest System was reaped mid-crossing and \
              the re-driven crossing parked unresolved.",
         );
@@ -899,7 +923,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         },
     );
     eprintln!(
-        "[repro] RETURN committed — back on System 7 (reap survived; player on a live authority)"
+        "[repro] RETURN committed — back on {home} (reap survived; player on a live authority)"
     );
 
     // ── THE WORLD KEEPS MOVING AFTER YOU CROSS BACK — now a GATE, not an observation. ──
@@ -925,7 +949,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         std::thread::sleep(Duration::from_millis(300));
         let s = poll(observe_until);
         last_seen = s.realm_frames_applied;
-        if s.location.as_deref() == Some("System 7") && s.realm_frames_applied >= base + 20 {
+        if s.location.as_deref() == Some(home.as_str()) && s.realm_frames_applied >= base + 20 {
             neighbour_feed_live = true;
             break;
         }
@@ -938,13 +962,13 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         poll(Instant::now() + Duration::from_secs(5))
             .location
             .as_deref(),
-        Some("System 7"),
-        "RETURN REGRESSED: the player did not stay homed on System 7 after the return commit — the reap \
+        Some(home.as_str()),
+        "RETURN REGRESSED: the player did not stay homed on {home} after the return commit — the reap \
          keep-alive did not hold the return-dest live.",
     );
     assert!(
         neighbour_feed_live,
-        "POST-RETURN FREEZE: the player crossed back to System 7 and is live there, but the SURROUNDING \
+        "POST-RETURN FREEZE: the player crossed back to {home} and is live there, but the SURROUNDING \
          realms stopped advancing — the per-tick placement feed did not resume. Applied frames went from \
          {base} to {last_seen} in 15s (needed {} more). The planets are frozen on screen while the player \
          moves among them. Look first at whatever now gates the gateway's per-tick placement forward: it \
@@ -952,7 +976,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
         20,
     );
     eprintln!(
-        "[repro] post-return neighbour feed LIVE on System 7 ({base} -> {last_seen} applied frames) — the \
+        "[repro] post-return neighbour feed LIVE on {home} ({base} -> {last_seen} applied frames) — the \
          surrounding realms keep advancing across the cross"
     );
 }
@@ -980,10 +1004,12 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
     let _reaper = ForkedReaper(f.launch_path.clone());
     let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
 
+    // Bound ONCE: the home realm's own label (see `home_label`), used by every cycle's fly-out.
+    let home = home_label(&p);
     let landed = await_active(devctl_port, gw_admin, deadline);
     assert_eq!(
         landed.location.as_deref(),
-        Some("System 7"),
+        Some(home.as_str()),
         "login at the star: {landed:?}"
     );
 
@@ -1066,9 +1092,10 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
     /// still live) a run must prove before a chase that runs out of budget may be reported as a
     /// steering shortfall rather than a failure. The subject here is the FREEZE — the user's
     /// "after several rehomes everything stopped" — and each completed cycle is one full test of
-    /// it; the harness's ability to intercept a moving 1.2e7 m shell from every starting
-    /// geometry at true scale is a separate (fixture) problem the test must not silently absorb
-    /// NOR mis-report as a product defect. Measured on THE world: cycles 0-3 cross reliably; the
+    /// it; the harness's ability to intercept a planet's own solved shell — small, moving fast,
+    /// and re-solved with the world — from every starting geometry at true scale is a separate
+    /// (fixture) problem the test must not silently absorb NOR mis-report as a product defect.
+    /// Measured on THE world: cycles 0-3 cross reliably; the
     /// 5th starts from wherever the 4th's fly-out left the dot and sometimes cannot close inside
     /// the budget (`[fly-in] NO CROSSING` states the closest approach every time it happens).
     const MIN_ROUND_TRIPS: usize = 3;
@@ -1105,7 +1132,7 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
         }
         eprintln!("[repro] cycle {cycle}: crossed IN to {want_planet}");
         std::thread::sleep(Duration::from_secs(3)); // reap window — System's retained proxy ages out
-        cross_to("System 7", -epoch * 1.5, "fly-out", cycle);
+        cross_to(home.as_str(), -epoch * 1.5, "fly-out", cycle);
         // DIAGNOSE which feed dies after the return: snapshots_applied = the ENTITY feed (the own pose — its
         // stall is the real WASD-dead freeze); realm_frames_applied = the REALM feed (the D-RLM-14 silence);
         // own pose moving under injected input proves input still lands. The steer target is the planet's
@@ -1157,10 +1184,10 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
         assert!(
             t1 > t0,
             "FREEZE at cycle {cycle} (post-return): the own shard's universe_tick STALLED ({t0} -> {t1}) — the \
-             player's authority stopped feeding the client (WASD dead), even though location is System 7.",
+             player's authority stopped feeding the client (WASD dead), even though location is {home}.",
         );
         completed += 1;
-        eprintln!("[repro] cycle {cycle}: returned to System 7 — tick live ({t0} -> {t1})");
+        eprintln!("[repro] cycle {cycle}: returned to {home} — tick live ({t0} -> {t1})");
     }
     assert!(
         completed >= MIN_ROUND_TRIPS,
@@ -1172,8 +1199,9 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
 }
 
 /// THE EXIT-THE-SYSTEM GATE (owner report 2026-08-13: "when I exit the system planets are frozen").
-/// A logged-in occupant flies OUT of System 7's 150 m shell, re-homes UP to the galaxy, parks — and
-/// the system's planets MUST keep orbiting on its screen. The lane under test is the up-observation
+/// A logged-in occupant flies OUT of the home system's own solved shell, re-homes UP to the galaxy
+/// and parks — and the system's planets MUST keep orbiting on its screen. The lane under test is
+/// the up-observation
 /// relay (owner-approved, PROTO_MINOR 10): the SYSTEM ships the rows it authors one hop up in its own
 /// frame; the GALAXY adds the one placement it authors and re-fans to its observers, so the rows the
 /// client folds are stated in the space it stands in (the one-space rule passes them). Runs at FULL
@@ -1181,8 +1209,8 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
 /// frozen feed cannot hide.
 #[test]
 fn exiting_the_system_reaps_its_interior_and_the_stream_stays_live() {
-    // TRUE-SCALE RESTATEMENT (the taxonomy arc's in-system re-solve): from OUTSIDE a
-    // ~1.58e11 m system its planets are BELOW the visibility angle — that IS the real sky, so
+    // TRUE-SCALE RESTATEMENT (the taxonomy arc's in-system re-solve): from OUTSIDE its own
+    // solved shell a system's planets are BELOW the visibility angle — that IS the real sky, so
     // "the planets keep arriving outside" (the interim world's claim) lawfully inverts: the
     // vacated interior REAPS behind the departing occupant (teardown-behind), the planets
     // leave the drawn set, and the freeze-detection ESSENCE survives as: the stream keeps
@@ -1201,7 +1229,7 @@ fn exiting_the_system_reaps_its_interior_and_the_stream_stays_live() {
     let start = await_active(devctl_port, gw_admin, Duration::from_secs(150));
     assert_eq!(
         start.location.as_deref(),
-        Some("System 7"),
+        Some(home_label(&p).as_str()),
         "login at the star: {start:?}"
     );
 
@@ -1286,8 +1314,9 @@ fn exiting_the_system_reaps_its_interior_and_the_stream_stays_live() {
 /// The interim gate parked a galaxy-standing observer outside the home system's 150 m shell but
 /// inside its 444.104489631 m interior band, and measured the interest byte holding the vacated
 /// planets awake. On the TRUE-SIZE world that park DOES NOT EXIST: the interior band is derived
-/// from the system's LOOK reach and the solved shell is ~2000× wider than the look, so the whole
-/// band sits INSIDE the shell (the lawful inversion G-INTEREST-BAND pins in `vd_bins` — the
+/// from the system's LOOK reach and the solved shell is orders wider than that look (the run
+/// prints both, and step (1) below ASSERTS the ordering), so the whole band sits INSIDE the shell
+/// (the lawful inversion G-INTEREST-BAND pins in `vd_bins` — the
 /// interest-byte machinery is structurally inert for any exterior observer on THE world; it
 /// re-arms the day a body's look reach exceeds its bound again, e.g. a hand-built beacon).
 ///
@@ -1364,16 +1393,41 @@ fn g_look_wake_the_interior_band_sits_inside_the_shell_and_a_vacated_system_reap
         )
     };
     // The set may not FLAP over the test: every child must clear its spin-up boundary by more
-    // than the fastest mover can close in ~10 minutes (worst orbital speed on the home roster is
-    // ~8e4 m/s; 600 s of it bounds the drift).
-    let flap_margin_m = 8.0e4 * 600.0;
+    // than the fastest mover can close inside the window below. The SPEED is DERIVED from the
+    // home roster's own elements this gate already holds — `v_peri`, the shipped periapsis-speed
+    // accessor (a Kepler orbit's worst instant by the vis-viva law, and the very number the AoI
+    // band widens itself by) — maxed over the movers. A transcribed metres-per-second was a
+    // measurement of a DIFFERENT star: every star re-draws when the mass law moves, and the
+    // orbital speeds go with it. Read from the elements, it cannot go stale again.
+    // The WINDOW is the test's own wall-clock envelope, not a world number.
+    const FLAP_WINDOW_S: f64 = 600.0;
+    let worst_orbital_mps = movers
+        .values()
+        .map(vd_physics::celestial::OrbitalElements::v_peri)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        worst_orbital_mps > 0.0,
+        "the home roster's movers must state a real orbital speed — a zero worst speed would \
+         leave the flap margin below vacuous: {movers:?}",
+    );
+    let flap_margin_m = worst_orbital_mps * FLAP_WINDOW_S;
     let children: Vec<_> = system_scope
         .iter()
         .filter(|r| r.parent == Some(home))
         .collect();
+    // THE CHILD COUNT IS THE WORLD'S OWN: its derived planet count (`PlanetConfig::n_planets`,
+    // which `UniverseConfig::world` fills from `derived_planet_count` — a scale-free derivation,
+    // not a knob) plus ONE for the Star realm the system also parents. The old bare 10 was a
+    // transcription of exactly this sum and could not follow it. Moons are children of their
+    // planets, never of the system, so they are correctly outside this count; `>=` leaves room
+    // for anything planted beside the generated bodies.
+    let expected_children =
+        usize::try_from(config.planet.n_planets).expect("the planet count fits usize") + 1;
     assert!(
-        children.len() >= 10,
-        "THE home system parents its star + its derived planets: {}",
+        children.len() >= expected_children,
+        "THE home system parents its star + its {} derived planets ({expected_children} rows): \
+         {}",
+        config.planet.n_planets,
         children.len()
     );
     let mut in_aoi = 0u64;
@@ -1414,10 +1468,11 @@ fn g_look_wake_the_interior_band_sits_inside_the_shell_and_a_vacated_system_reap
     };
     let expected_login_running = chain_len + in_aoi;
     // HOME'S OWN FATE AT THE PARK is derived from ITS OWN AoI row, exactly like its children's
-    // (measured, first run: the park at 2× the solved shell (~3.2e11 m) sits WELL INSIDE the
-    // system's own look-derived AoI (~1.2e13 m) — a whole star system is visible from across
-    // the galaxy — so home lawfully KEEPS RUNNING while its vacated interior reaps; the old
-    // "home reaps too" guess undercounted the running set by one and overcounted reaps by one).
+    // (measured, first run: the park at 2× the solved shell sits WELL INSIDE the system's own
+    // look-derived AoI — a whole star system is visible from across the galaxy — so home
+    // lawfully KEEPS RUNNING while its vacated interior reaps. BOTH numbers are printed with the
+    // derived sets just below, so neither is transcribed here; the old "home reaps too" guess
+    // undercounted the running set by one and overcounted reaps by one).
     let park_dist = 2.0 * shell;
     let park_keeps_home = park_dist < home_row.aoi.tear_down_r_m();
     let expected_park_running = chain_len - u64::from(!park_keeps_home);
@@ -1433,7 +1488,11 @@ fn g_look_wake_the_interior_band_sits_inside_the_shell_and_a_vacated_system_reap
     let _reaper = ForkedReaper(f.launch_path.clone());
     let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
     let landed = await_active(devctl_port, gw_admin, Duration::from_secs(150));
-    assert_eq!(landed.location.as_deref(), Some("System 7"), "{landed:?}");
+    assert_eq!(
+        landed.location.as_deref(),
+        Some(home_label(&p).as_str()),
+        "{landed:?}"
+    );
     let boot_deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let r = orch_rlm(a.admin);
@@ -1634,11 +1693,12 @@ fn walk_leg(
 }
 
 // UN-PARKED at the speed-law slice (S3, real-scale addendum §A3 + the OQ-2 ruling): the inter-system
-// leg is now flown at GOVERNED speeds — the galaxy's own ceiling (2·R_gal/T_TRAVERSE ≈ 2.5e13 m/s)
-// with the approach governor decelerating onto the sibling — so the 0.2376656 ly gap is minutes of
-// wall clock, exactly as the owner's warp mechanism states. Every leg budget below is re-derived
-// from the governed closed form (`vd_core::flight::leg_time_s`); every in-system assertion the park
-// owed is back verbatim.
+// leg is now flown at GOVERNED speeds — the galaxy's own ceiling (2·R_gal/T_TRAVERSE ≈ 2.5e13 m/s;
+// the galaxy radius did not move under the mass re-solve) with the approach governor decelerating
+// onto the sibling — so the star gap (the ring radius the galaxy itself authors, printed with the
+// approach derivation) is minutes of wall clock, exactly as the owner's warp mechanism states.
+// Every leg budget below rides the ONE shared law, `vd_bins::flight::governed_leg_budget` over the
+// governed closed form; every in-system assertion the park owed is back verbatim.
 #[test]
 fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_is_reaped() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
@@ -1646,9 +1706,9 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
     let _tier = vd_bins::cluster_tier();
     // THE demand-FLY, rewritten against the multi-star ring (the D-RLM-16 rewrite): since the
     // wider-visibility world (32fcc5c) every planet of the HOME system is already visible at login,
-    // so the genuinely culled realm is the NEIGHBOUR STAR ~12 km down the ring — asleep, because the
-    // ring is deliberately 1.05× the wake radius. The occupant exits the home system, flies toward
-    // the neighbour, and parks INSIDE its wake band while still ~10 km outside its 150 m shell:
+    // so the genuinely culled realm is the NEIGHBOUR STAR one ring radius away — asleep, because the
+    // ring is wider than its wake radius. The occupant exits the home system, flies toward the
+    // neighbour, and parks INSIDE its wake band while still outside its own solved shell:
     //   1. the neighbour's shard spins up AHEAD (the demand loop — spins climb above the settled
     //      login baseline, warp as a consequence of movement);
     //   2. its planets' BOXES stream into the drawn scene (slice C's shape mirror: the live system
@@ -1679,36 +1739,18 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
     let landed = await_active(devctl_port, gw_admin, deadline);
     assert_eq!(
         landed.location.as_deref(),
-        Some("System 7"),
+        Some(home_label(&p).as_str()),
         "the login lands at the star home realm: {landed:?}",
     );
     let settled_spins = settle_spins(a.admin, Duration::from_secs(30));
 
     // The aim, through the production boot: the neighbour star's authored ring placement, off THE
     // world's roster (the one derivation point — `world_roster` reads it from the galaxy-hosted
-    // boot, the parent that authors it). The precondition ties the flight to the multi-star
-    // geometry — the neighbour is far beyond the home shell, so it CANNOT be in the settled
-    // baseline (the ring is wider than the wake radius).
+    // boot, the parent that authors it). THE world's own solved numbers are read FIRST, because
+    // the precondition below is only meaningful stated against them.
     let roster = world_roster(&p);
     let (neighbour, centre) = (roster.sibling, roster.sibling_centre);
     let ring_r = centre.length();
-    assert!(
-        ring_r > 1_000.0,
-        "the ring neighbour {neighbour} is far outside the home shell: {ring_r} m",
-    );
-
-    // ---- LEG 0: exit the home system (re-home UP into the galaxy) — the ±Z POLAR corridor, and
-    // the GALAXY's own label asserted on arrival. The old +X exit at [220,0,0] flew through the
-    // orbital plane and broke on ANY label != "System 7", so an in-plane planet capture passed it —
-    // a FALSE GREEN (D-WORLD-9); the polar leg is what I-AXIS licenses, and the label is the proof.
-    //
-    // THE EXIT HEIGHT IS DERIVED FOR THE 3-D SIBLING (the S3 re-derivation): the onward leg flies a
-    // STRAIGHT line from the polar exit toward the sibling's seeded direction, and that line's
-    // closest approach to the home system is `exit_z·sin(θ)` (θ = the sibling's angle off the
-    // pole). At the old 220 m exit the seed-0 sibling (u_z ≈ +0.748) leaves a 146 m closest
-    // approach — INSIDE the 150 m shell: the warp leg would clip back into home mid-flight and the
-    // in-flight walk target would straddle the re-home (the exact ping-pong `creep_into` documents).
-    // The exit height clears the home's whole containment reach with a 2× margin, by construction.
     let cfg = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
     let the_world = vd_physics::worldgen::WorldView::generated(p.universe_seed, &cfg);
     let home_reach = the_world
@@ -1719,9 +1761,40 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
         .shape
         .finite_extent()
         + cfg.band.outset_m;
+    // THE PRECONDITION that ties this flight to the multi-star geometry, RE-DERIVED. It used to
+    // read `ring_r > 1_000.0` — a metre count from a world whose ring was kilometres; against a
+    // ring the galaxy now authors orders of magnitude further out it asserted nothing at all. The
+    // meaningful statement is the one the flight depends on: the neighbour sits beyond the home
+    // system's WHOLE CONTAINMENT REACH (its solved shell plus the release outset), so the leg is a
+    // real inter-system crossing and the neighbour cannot already be awake in the settled login
+    // baseline. Both sides are solved from THE world, so this cannot go vacuous again.
+    assert!(
+        ring_r > home_reach,
+        "the ring neighbour {neighbour} must sit beyond the home system's whole containment \
+         reach ({ring_r:.4e} m vs {home_reach:.4e} m) — otherwise there is no second system to \
+         fly to and the spin-up-ahead verdict is vacuous",
+    );
+
+    // ---- LEG 0: exit the home system (re-home UP into the galaxy) — the ±Z POLAR corridor, and
+    // the GALAXY's own label asserted on arrival. The old +X exit flew through the orbital plane
+    // and broke on ANY label != the home system's, so an in-plane planet capture passed it —
+    // a FALSE GREEN (D-WORLD-9); the polar leg is what I-AXIS licenses, and the label is the proof.
+    //
+    // THE EXIT HEIGHT IS DERIVED FOR THE 3-D SIBLING (the S3 re-derivation): the onward leg flies a
+    // STRAIGHT line from the polar exit toward the sibling's seeded direction — read off
+    // `roster.sibling_centre`, the placement the galaxy itself authors — and that line's closest
+    // approach to the home system is `exit_z·sin(θ)` (θ = the sibling's angle off the pole). A
+    // FIXED exit height cannot clear that at every seed: the interim world measured a 220 m exit
+    // leaving a 146 m closest approach against a 150 m shell — INSIDE it, so the warp leg would
+    // clip back into home mid-flight and the in-flight walk target would straddle the re-home (the
+    // exact ping-pong `creep_into` documents). The exit height clears the home's whole containment
+    // reach with a 2× margin, by construction, at whatever lean the sibling is drawn with.
     let sib_unit = centre / ring_r;
     let sin_off_pole = (1.0 - sib_unit.z * sib_unit.z).max(0.0).sqrt();
-    let exit_z = (2.0 * home_reach / sin_off_pole).max(220.0);
+    // The FLOOR is that same 2× reach, never a metre count (the walk gate's identical line): two
+    // release-reaches straight down the pole clear home whatever the sibling's off-pole angle,
+    // and it re-solves with the world instead of pinning the interim world's 220 m.
+    let exit_z = (2.0 * home_reach / sin_off_pole).max(2.0 * home_reach);
     // +Z, NOT −Z: the spawn stands on the +Z axis at twice the STAR's bound (T2), so a −Z exit
     // flies straight through the Star realm at the system centre (measured: the exit leg
     // committed INTO "Star …" and spent its whole budget crawling that interior at the star's
@@ -1762,10 +1835,11 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
 
     // ---- LEG 1: the governed approach — the observations RIDE THE FLIGHT (true-scale restatement).
     // The interim gate parked INSIDE the sibling's wake band while OUTSIDE its shell; on the
-    // true-size world that band (spin-up, look-derived, ~1e10 m) sits INSIDE the solved shell
-    // (~1e11 m) — the same lawful inversion the look-wake gate pins — so no exterior park can
-    // hold the neighbour awake: a parked observer's demand lawfully DECAYS (that IS the real
-    // sky: a whole system 1e11 m away subtends below the visibility angle). What wakes the
+    // true-size world the INTERIOR band (the look-derived interest band) sits INSIDE the solved
+    // shell — the same lawful inversion the look-wake gate pins and prints — so no exterior park
+    // can hold the neighbour awake through it: a parked observer's demand lawfully DECAYS (that
+    // IS the real sky: a whole system a shell-width away subtends below the visibility angle,
+    // and the approach derivation below prints the two radii it is judged on). What wakes the
     // neighbour is the VELOCITY LEAD: the demand verdict samples at pos + v·τ_wake, and at
     // governed closing speeds the lead covers the remaining gap (the just-in-time wake that
     // `guard_wake_covers_visibility` fences at every boot). So the three observations —
@@ -1780,10 +1854,11 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
     let (shell, spin_up) = (sib_row.shape.finite_extent(), sib_row.aoi.spin_up_r_m());
     let release_reach = shell + cfg.band.outset_m;
     // The wake band still reaches FAR past containment at true scale — a system's AoI is
-    // look-derived (~1.4e13 m; a star is visible from across the galaxy) while its solved
-    // shell is ~1.9e11 m, so the 2×shell polar standoff below parks DEEP inside the wake band
-    // and lawfully HOLDS the woken neighbour (the same physics look-wake measures on the home
-    // row). Distinct from the INTERIOR interest-byte band, which does invert inside the shell.
+    // look-derived (a star is visible from across the galaxy) while its solved shell is orders
+    // smaller, which the assert below MEASURES and the derivation print states in metres — so
+    // the 2×shell polar standoff below parks DEEP inside the wake band and lawfully HOLDS the
+    // woken neighbour (the same physics look-wake measures on the home row). Distinct from the
+    // INTERIOR interest-byte band, which does invert inside the shell.
     assert!(
         release_reach < spin_up,
         "the sibling's wake band reaches past its containment ({release_reach} vs {spin_up})",
@@ -1804,21 +1879,25 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
         waypoint.length() - shell,
         tuning.tau_s,
     );
-    let leg_s = leg_time_s(
-        (waypoint - DVec3::new(0.0, 0.0, exit_z)).length(),
-        cap_galaxy,
-        p.move_speed,
-        v_park,
-        tuning.tau_s,
-    )
-    .expect("the star-gap leg holds a cruise");
-    let leg_ticks = (2.0 * leg_s / p.tick_dt) as u64;
+    // The gap this leg actually flies: from the derived polar exit height across to the
+    // sibling's standoff — stated once, and used by BOTH the printed closed form and the budget.
+    let leg_dist_m = (waypoint - DVec3::new(0.0, 0.0, exit_z)).length();
+    let leg_s = leg_time_s(leg_dist_m, cap_galaxy, p.move_speed, v_park, tuning.tau_s)
+        .expect("the star-gap leg holds a cruise");
+    // THE BUDGET IS THE SHARED LAW, never a local multiple of the closed form: this was the one
+    // leg in the file still doubling `leg_s` by hand, and `governed_leg_budget`'s own doc records
+    // that a 2× budget measured ~25 s SHORT of a real leg's commit. Routed through the shared
+    // function (as the exit and descend legs above already are), a re-measurement of the flight
+    // law moves this leg with every other one. `leg_s` stays as the printed yardstick.
+    let leg_ticks = (vd_bins::flight::governed_leg_budget(&p, leg_dist_m, cap_galaxy).as_secs_f64()
+        / p.tick_dt) as u64;
     let brake_m = vd_bins::flight::governed_brake_m(v_park, p.tick_dt, tuning.tau_s);
     eprintln!(
-        "[fly] GOVERNED APPROACH DERIVATION: waypoint 2×{shell:.4e} m below the sibling pole \
-         (release {release_reach:.4e}, wake {spin_up:.4e} — INSIDE the shell), galaxy ceiling \
-         {cap_galaxy:.4e} m/s, waypoint ceiling {v_park:.4e} m/s, closed-form leg {leg_s:.1} s \
-         => budget {leg_ticks} ticks, brake {brake_m:.1} m",
+        "[fly] GOVERNED APPROACH DERIVATION: ring gap {ring_r:.4e} m, flown leg {leg_dist_m:.4e} \
+         m, waypoint 2×{shell:.4e} m below the sibling pole (release {release_reach:.4e}, wake \
+         {spin_up:.4e} — INSIDE the shell), galaxy ceiling {cap_galaxy:.4e} m/s, waypoint \
+         ceiling {v_park:.4e} m/s, closed-form leg {leg_s:.1} s => budget {leg_ticks} ticks, \
+         brake {brake_m:.1} m",
     );
     // DESCEND TO THE DERIVED EXIT HEIGHT FIRST: the exit cross_leg ends at the release edge
     // (~1 home shell down the pole), and the S3 clearance (closest approach = exit_z·sinθ ≥

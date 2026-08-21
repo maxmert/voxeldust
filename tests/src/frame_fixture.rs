@@ -8,19 +8,25 @@
 //!
 //! THE STORY, which is what every test in the arc re-tells with different machinery:
 //!
-//! > A galaxy holds two star systems; the neighbour sits 12031 m out. Inside that neighbour a planet is
-//! > authored 145 m from its star. A player flies 3 m above that planet.
+//! > A galaxy holds two star systems; the neighbour sits 12031 m out, in a direction the seed chose.
+//! > Inside that neighbour a planet is authored 145 m from its star. A player flies 3 m above that planet.
 //! >
 //! > - the planet knows only "an occupant at 3 from my centre";
 //! > - the system knows only "I put that planet at 145";
-//! > - the galaxy knows only "I put that system at 12031".
+//! > - the galaxy knows only "I put that system at 12031, THAT way".
 //! >
 //! > GOING UP the planet ships "3, in my frame"; the SYSTEM adds 145 → 148; the system ships "148, in my
-//! > frame"; the GALAXY adds 12031 → 12179. Three separate additions, each by the one party that holds
-//! > that number, and nobody ever learns its own address.
+//! > frame"; the GALAXY adds its own authored vector for that system → 148 along x off a point 12031 m
+//! > out. Three separate additions, each by the one party that holds that number, and nobody ever learns
+//! > its own address.
 //! >
-//! > GOING DOWN the galaxy computes 12179 − 12031 = 148 and hands it to the system; the system computes
-//! > 148 − 145 = 3 and hands it to the planet; the planet ACCEPTS 3 and does no arithmetic at all.
+//! > GOING DOWN the galaxy subtracts the same authored vector and hands the system 148; the system
+//! > computes 148 − 145 = 3 and hands it to the planet; the planet ACCEPTS 3 and does no arithmetic.
+//!
+//! Only the galaxy's hop reads as a vector rather than a scalar, and that is the 3-D seeded placement law
+//! (owner ruling Q-B): the galaxy's number for its child is a RADIUS in a seeded DIRECTION, not a distance
+//! along one axis. The two lower hops really are one-axis, which is why the story keeps its literals there
+//! and states the top one as "12031 in some direction".
 //!
 //! The expected results are LITERALS here ([`WorkedExample::up_1_m`] / [`up_2_m`](WorkedExample::up_2_m)),
 //! never recomputed by the code under test. A fixture that computes its own expectation with the same
@@ -35,13 +41,19 @@
 //! label, every parent link and every region centre in this fixture is whatever production would produce
 //! for that config, and the fixture cannot drift away from what a shard actually boots:
 //!
-//! - `stellar.system_ring_r_m` puts the NEIGHBOUR system on the galaxy's star ring. With a two-star
-//!   galaxy the ring angle for index 1 is exactly zero, so its authored centre is exactly
-//!   `(system_from_galaxy_m, 0, 0)` — an exact-integer-friendly number on one axis, not a rounded one.
-//! - `scale.au_to_render_m` with `planet.orbital_a0_au == 1` makes the inner planet's semi-major axis
-//!   EXACTLY `planet_from_star_m` (`orbital_axis_au(0, a0, ratio) == a0`, so the product is `1.0 * a0_m`).
-//! - `planet.ecc_sigma == 0` and `planet.incl_sigma == 0` make that orbit exactly circular and exactly
-//!   in-plane, so the planet's distance from its star is its semi-major axis at every tick.
+//! - `stellar.system_ring_r_m` sets the RADIUS at which the galaxy places its non-home systems, and only
+//!   the radius. The DIRECTION is the seed's — a uniform direction on the sphere from the system's own two
+//!   stream draws, since the 3-D seeded placement law (owner ruling Q-B) deleted the collinear ring this
+//!   bullet used to describe. So the neighbour's authored centre is `system_from_galaxy_m` in a seeded
+//!   direction, not `(system_from_galaxy_m, 0, 0)`. Both halves of that are pinned by
+//!   `the_generator_plants_exactly_the_stories_distances` below, which asserts the RADIUS at the story
+//!   distance and then asserts the direction is genuinely three-dimensional (`neighbour.y.abs() > 0.0`).
+//! - `planet.ecc_sigma == 0` and `planet.incl_sigma == 0` make the story planet's orbit exactly circular
+//!   and exactly in-plane, so its distance from its star is its semi-major axis at every tick. That axis
+//!   is not a config product any more — the in-system true-size re-solve deleted `scale.au_to_render_m`
+//!   and made the generator DERIVE every orbit from the drawn star — so the fixture registers its own
+//!   worked distance over the generated topology instead (`build`'s WORKED-DISTANCE OVERRIDE, the same
+//!   pattern as the phase pinning below).
 //!
 //! ONE thing is not left to the seed: the three PHASE angles of the story planet's orbit
 //! (`raan`, `arg_periapsis`, `mean_anomaly_epoch`) are pinned to zero — see [`WorkedExample::elements`].
@@ -76,13 +88,20 @@ use vd_wire::channels::RealmSnap;
 pub const NEAR_OCCUPANT_FROM_PLANET_M: f64 = 3.0;
 /// The planet's distance from its star (m) — the number only the SYSTEM holds.
 pub const NEAR_PLANET_FROM_STAR_M: f64 = 145.0;
-/// The neighbour system's distance from the galaxy centre (m) — the number only the GALAXY holds.
+/// The neighbour system's DISTANCE from the galaxy centre (m) — the radius half of the number only the
+/// GALAXY holds. The other half is a DIRECTION the seed chose (the 3-D seeded placement law), which is
+/// why this is a distance and not a coordinate.
 pub const NEAR_SYSTEM_FROM_GALAXY_M: f64 = 12031.0;
 /// The occupant re-measured in the STAR's frame after the SYSTEM adds its child's placement.
 /// A LITERAL: `145 + 3`, written out, never computed by the code under test.
 pub const WORKED_UP_1: f64 = 148.0;
-/// The occupant re-measured in the GALAXY's frame after the GALAXY adds its child's placement.
-/// A LITERAL: `12031 + 148`, written out.
+/// The occupant's DISTANCE from the galaxy centre if the galaxy's authored vector for the neighbour
+/// pointed along `+x`. A LITERAL: `12031 + 148`, written out.
+///
+/// It is kept as the story's readable scalar and is deliberately NOT what the upward gate asserts. Since
+/// the seeded placement law the galaxy's addition is a VECTOR sum, so the gate adds `up_1_m` along `+x`
+/// to the centre the generator actually authored — see the walk-up-and-back-down test below. This value
+/// is what that sum reduces to on the collinear story the prose tells.
 pub const WORKED_UP_2: f64 = 12179.0;
 
 /// The FAR variant's system distance. Chosen so the story's millimetre is BELOW the representable step:
@@ -435,8 +454,10 @@ impl WorkedExample {
 /// inside a shell that no longer contains what it should.
 fn story_config(system_from_galaxy_m: f64, planet_from_star_m: f64) -> UniverseConfig {
     let mut config = UniverseConfig::walk_scale();
-    // Exactly two stars: with `n_systems == 2` the ring angle for index 1 is `TAU * 0 / 1 == 0`, so the
-    // neighbour's authored centre is exactly `(system_from_galaxy_m, 0, 0)` — one axis, no rounding.
+    // Exactly two stars: index 0 anchors at the galactic origin and index 1 is the story's neighbour, so
+    // there is exactly one hop to talk about and exactly one sibling to refuse. The placement radius below
+    // is the story's distance; the DIRECTION is the seed's since the 3-D seeded placement law (owner
+    // ruling Q-B) retired the collinear ring — this used to claim the neighbour sat on `+x` exactly.
     config.galaxy.system_count_lo = 2;
     config.galaxy.system_count_hi = 2;
     config.stellar.system_ring_r_m = system_from_galaxy_m;

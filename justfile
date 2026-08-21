@@ -261,12 +261,14 @@ render-crossing-smoke:
 
 # G-WARP-PIXELS + G-HANDOVER (window_lane.md §2.8/§4 Slice D — THE WARP ACCEPTANCE): one DEMAND
 # cluster (no shard pre-booked), one headless capture client in the PILOT VIEW (`--capture-pilot`),
-# and one flight down THE world's own star ring — out of the home system, across the 12 031.398 m
-# gap, into the ring sibling. Asserts, in real pixels: the destination is its PARENT'S point of
-# light at departure (it is asleep because the ring is wider than the 11 458.475 m wake radius, by
-# the world's own 572.924 m margin); its footprint never shrinks while you approach; its own look
-# takes over flicker-free; the system behind hands back to its parent's marker and shrinks to a dot;
-# and every drawn row's provenance is in the run manifest (HR6). G-HANDOVER measures BOTH
+# and one flight down THE world's own star ring — out of the home system, across the STAR GAP the
+# galaxy's own solver produced, into the ring sibling. Asserts, in real pixels: the destination is
+# its PARENT'S point of light at departure (it is asleep because the ring is wider than the
+# destination's visibility WAKE RADIUS, by a margin the world's own solver produced — the companion
+# test computes it, prints it and asserts it positive); its footprint never shrinks while you
+# approach; its own look takes over flicker-free; the system behind hands back to its parent's
+# marker and shrinks to a dot; and every drawn row's provenance is in the run manifest (HR6).
+# G-HANDOVER measures BOTH
 # directions against budgets DERIVED in ticks from the landed cadences and the cluster's own boot
 # latency, with the Q2 RELAY HOP asserted APART (the owner's ruling: if the relay breaks the wake
 # budget, that is the one measurement D-WINDOW-2 is gated on). The companion test closes the
@@ -289,22 +291,27 @@ warp-pixels:
 two-ships:
     cargo test -p vd-bins --features dev-control,render --test two_ships -- --nocapture --test-threads=1
 
-# G-FLOWN-SYMPTOM + G-IDENTICAL + G-NOTHING-OWED (look_horizon.md §6 SLICE 5 — THE FLOWN-SYMPTOM
-# PIXEL GATE): one DEMAND cluster booted onto THE world PLUS the planted player-built station/area
-# pair (VD_FIXTURE_PLANT=station-area — the SL5 fixture-forest doctrine's process path; ONE
-# derivation in vd_physics::worldgen::station_area_plant, every process boots it through
-# vd_bins::process_world_config), one headless GPU client. Parks OUTSIDE the 150 m shell and
-# INSIDE the 444.104489631 m interior band, along the outer planet's instantaneous radius vector:
-# every planet's presence is its OWN picture (body kind + composed provenance + painted pixels —
-# RED for all five before slice 4), the outer planet's radius is derived from the camera model far
-# above the three-pixel floor, all five planets draw DISTINCT radii, and every planet row parents
-# on the star system THROUGHOUT. Out across the stop level and back: the marker handover happens
-# EXACTLY once each way, no blank frame, no radius step above the readback quantum, the reverse
-# handover inside a derived budget that states THE EXTRA RELAY HOP as its own term. G-IDENTICAL
-# (HR4) runs the same assertions on the planted station (a player-built KIND in the same scene)
-# and one level deeper on the planted area (park B, inside the system). G-NOTHING-OWED (THE LAW
-# GATE) enumerates the generated forest OUT-OF-BAND at both parks and asserts every subject above
-# the minimum angle draws its OWN picture — non-vacuous (depth-2 subjects in the oracle set).
+# THE TRUE-SCALE LOOK GATE (celestial_taxonomy_design §9 T2/T3, carrying look_horizon.md §6 slice
+# 5's G-NOTHING-OWED + G-IDENTICAL forward): one DEMAND cluster booted onto THE world PLUS the
+# planted player-built station/area pair (VD_FIXTURE_PLANT=station-area — the SL5 fixture-forest
+# doctrine's process path; ONE derivation in vd_physics::worldgen::station_area_plant, every
+# process boots it through
+# vd_bins::process_world_config), one headless GPU client. THE STAR wakes by demand at the derived
+# login standoff and draws AS A BODY carrying its own photometric datum (class code + luminosity,
+# asserted against the generator's own draw, never a transcribed code); flying OUT past its
+# tear-down the body hands over to the parent's MARKER exactly once, the vacated Star realm reaps
+# behind, and the marker carries THE SAME datum; flying BACK IN it hands back inside a derived wake
+# budget that states THE EXTRA RELAY HOP as its own term. Then OUT to a home planet that HOSTS A
+# MOON (chosen by derivation, not by which one orbits furthest): crossing INTO its realm, its own
+# body draws at the camera-model size far above the three-pixel floor. Then ON to that planet's
+# MOON — a Planet under a Planet, demand-spawned at DEPTH 4 and intercepted on its own orbit — and
+# back out, where whether the vacated moon reaps is DERIVED from its own wake and then asserted
+# either way. THE PARENT LAW rides every sample (every planet row parents on the star system, the
+# planted station on the star system, the planted area on its own planet — G-IDENTICAL, HR4, on a
+# player-built KIND in the same scene). G-NOTHING-OWED (THE LAW GATE) enumerates the generated
+# forest OUT-OF-BAND at the spawn and asserts every subject above the minimum angle draws its OWN
+# picture — non-vacuous (depth-2 subjects in the oracle set). A companion test closes every park
+# and budget derivation before any process runs.
 # Same GPU-required, LOCAL-gate preconditions as render-smoke.
 look-pixels:
     cargo test -p vd-bins --features dev-control,render --test look_pixels -- --nocapture --test-threads=1
@@ -313,9 +320,10 @@ look-pixels:
 # the CHAIN cluster (orchestrator + gateway + FOUR realm-shards derived through world_roster: the home
 # system, the galaxy, the inner planet, the sibling star — NO co-hosting), logs in a REAL headless
 # durable player over localhost QUIC, and flies the ±Z polar-corridor legs C,D,A,E,F (rendezvous into
-# the inner planet, polar lift home, out to the galaxy, the 12.8 km boost to the sibling, and back).
-# EVERY leg asserts the realm LABEL reached — never a coordinate — and the subject Entity's directory
-# fence stays SMALL, with the observed maximum PRINTED per run (the thrash guard; the bound is
+# the inner planet, polar lift home, out to the galaxy, the governed boost across the star gap to
+# the sibling, and back). EVERY leg asserts the realm LABEL reached — never a coordinate — and the
+# subject Entity's directory fence stays SMALL, with the observed maximum PRINTED per run (the
+# thrash guard; the bound is
 # unmeasured for this chain until a green history accumulates). In-test deadline 300 s (real flight
 # distances; was 120 s for the retired inert walk). No GPU: this is the CI walk gate.
 node-per-realm-walk:

@@ -4879,13 +4879,30 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   per-cluster measured latency, forking the one containment answer between processes — the lawful
   form is the τ-free `guard_band_solvable` upper bound (`·BAND_TAU_HEADROOM`), which is how the
   outer geometry already consumed it (§A2.2).
-- **WHEN:** with the boundary-loiter thrash measurement (the named falsifier: a governed occupant
-  loitering at a system shell measuring re-home saga rate vs `k_dwell`) — or the first world where
-  a crossing latch is measured to fail. D-WORLD-4b (the shipped `3.0 ≥ v·dt·K` invariant is false
-  at 500 m/s) stays open under this row.
-- **Where:** `crates/physics/src/worldgen.rs` (`BandConfig::build`, the static band);
-  `crates/core/src/geometry.rs` (`ContainmentBand`); real_scale_design §4.5/§A3.4;
-  the speed-law ledger (scratchpad `speedlaw_state.md` item 10).
+- **★ THE NAMED FALSIFIER HAS FIRED (measured 2026-08-21, the gate-pass arc — `node_per_realm_walk`
+  on THE world at the home seed).** Exposure (c) above is no longer UNMEASURED. A governed occupant
+  flying leg F out of the ring sibling produced **eighteen crossing sagas across ONE boundary in
+  eighteen seconds** — nine `System(1) → sibling` and nine `sibling → System(1)`, strictly
+  alternating, at subject fences 4 through 21, **every one of them `attempt = 0`**: eighteen FRESH
+  containment decisions, not one decision re-driven. The other three boundaries of the same flight
+  (C, D, A) each crossed exactly once, so the thrash is that boundary's and not the chain's. The
+  arithmetic the numbers point at is this row's own: the shipped band is the static 1 m inset /
+  2 m outset — three metres of hysteresis — while the speed law licenses that sibling's own ceiling
+  of ≈ 3.9e9 m/s, i.e. ≈ 7.8e7 m of travel in one 0.02 s tick. Three metres of band against
+  seventy-eight thousand kilometres of per-tick travel is no hysteresis at all, which is
+  D-WORLD-4b's statement one boundary further out. The gate is PARKED on this row, not weakened:
+  `MAX_ENTITY_FENCE` stays 12 and both arms of the thrash guard are untouched, so un-ignoring
+  `a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thrash` is the proof
+  that A3.4 landed.
+- **WHEN:** NOW ARMED by the measurement above — the trigger this row named has occurred. (It was:
+  the boundary-loiter thrash measurement, a governed occupant loitering at a system shell measuring
+  re-home saga rate vs `k_dwell` — or the first world where a crossing latch is measured to fail.)
+  D-WORLD-4b (the shipped `3.0 ≥ v·dt·K` invariant is false at 500 m/s) stays open under this row.
+- **Where:** `crates/physics/src/worldgen/config.rs` (`BandConfig::build`, the static band — the
+  file split of 40b5ce2 turned `worldgen.rs` into a module tree); `crates/core/src/geometry.rs`
+  (`ContainmentBand`); real_scale_design §4.5/§A3.4; the speed-law ledger (scratchpad
+  `speedlaw_state.md` item 10); and the parked gate
+  `crates/bins/tests/node_per_realm_walk.rs`, whose `#[ignore]` carries the full measurement.
 
 ### D-LOOK-3 🟩 THE TRUE-SCALE CAMERA — LANDED with the S5 render-scale slice (2026-08-19)
 
@@ -4992,10 +5009,11 @@ directly with no cluster and no GPU, and `crates/bins/tests/acceptance_flight.rs
   star drawn 8.540365549779963 M☉ (52.2 % of the cap), tightest margin 416 779 130.87 m. Its
   refusal arm (`the_nest_sweep_refuses_the_sampled_reservation_that_grounded_the_owner`) restores
   the SAMPLED reservation and reproduces the live cluster's verdict.
-- **Where:** `crates/physics/src/worldgen.rs` (`DERIVED_MASS_CAP`, `solve_mass_cap`,
-  `galaxy_child_demand_m`, `imf_mass_hi_msun`, `target_system_bound_max_m`,
-  `derived_nest_sweep_seeds`, `guard_swept_seeds_nest`); `crates/physics/src/taxonomy.rs`
-  (`imf_tail_fraction`).
+- **Where:** `crates/physics/src/worldgen/scale.rs` (`DERIVED_MASS_CAP`, `solve_mass_cap`,
+  `galaxy_child_demand_m`, `imf_mass_hi_msun`, `target_system_bound_max_m`) and
+  `crates/physics/src/worldgen/guards.rs` (`derived_nest_sweep_seeds`, `guard_swept_seeds_nest`);
+  `crates/physics/src/taxonomy.rs` (`imf_tail_fraction`). (The file split of commit 40b5ce2 turned
+  `worldgen.rs` into a module tree; every public path still re-exports.)
 
 ### D-SKY-1 🟩 THE DECORATIVE STARFIELD IS DELETED — every point of light is a real streamed realm (owner ruling 2026-08-20)
 
@@ -5044,6 +5062,221 @@ actually uses, read from the booted regions exactly as every other true-scale ga
 give the gate a framing that can hold both a photosphere and an occupant `1e10` m away (a
 subject-named fit, or the pilot camera with a companion dot).
 
+**⚠ EVERY NUMBER ABOVE IS PRE-MASS-CAP AND MUST BE RE-MEASURED (2026-08-21, the gate-pass arc).**
+`7.805661e7`, `1.582262e11`, the ratio 2027, `2.35e8`, `1.03e10` and both pixel rects are all
+`f(home star mass)`, and the derived mass cap re-drew every star while `HOME_SEED = 2298` became the
+default seed the gate boots. The SHAPE of the finding is untouched — a system is CONTAINED at its
+solved clearance shell and DRAWN at its star's photosphere, a far smaller sphere about the same
+centre, so an occupant lawfully inside the realm is nowhere near its drawn disc — and that is what
+the `#[ignore]` citation now states, without digits. Re-take the measurement before scoping the
+verdict-shape work from it. The gate's parks, aims and deadlines were re-derived in the same pass
+(they were interim-world literals: a 2 km "outside" park inside a 1e11 m system, a 10 m walk-fixture
+SOI used for every planet annulus, a flat 60 s deadline for a minutes-long governed leg), so the
+test can be un-parked on its merits rather than dying on arithmetic.
+
 **Until then**, the crossing is gated in pixels by `acceptance_flight` (five legs, label-asserted
 crossings, handover counts and growth curves), by `look_pixels`' star/moon gate and by
 `warp_pixels`. **Where:** `crates/bins/tests/render_crossing_smoke.rs` (the `#[ignore]` citation).
+
+
+### D-GATEPASS-1 🟩 THE GATE PASS ON THE WORLD AS IT NOW IS — the golden regenerated, every suite re-derived (2026-08-21)
+
+**WHY IT EXISTS.** Two world changes landed in commit `e28c8f2` by the owner's explicit choice while
+iterating, with the heavy suites deliberately NOT re-run: `HOME_SEED = 2298` became the default
+universe seed for every world-deriving process, and the stellar mass cap plus the galaxy's reserved
+clearance became DERIVED (D-MASS-CAP). Commit `40b5ce2` then split four large files into module
+trees. The commit message said it plainly: *"The process-tier suites and coverage are NOT re-run —
+they still describe the previous world's numbers and are owed a pass."* This row is that pass.
+
+**THE GOLDEN, REGENERATED WITH ITS CAUSES.** `crates/bins/tests/goldens/placement_rows.golden` was
+red. It is regenerated, and its header now carries the audit trail rather than a commit message:
+- The header gained a derived `# cap:` line (`config.stellar.mass_hi_msun` +
+  `target_system_bound_max_m()`), so a future cap move lands in the header's own diff hunk.
+- A static `WHY THESE BITS LAST MOVED` block names BOTH world changes, including the one that
+  measurably did NOT move these rows. **Cause 1, the mover:** cap `120 → 16.360034882257757` M☉,
+  reservation `296703425982.0423 → 749489793576937.9` m, star placement radius
+  `2248490503621178.5 → 1498979587153876` m (χ `16.378 → 24.568`). **Cause 2, not a mover:** the
+  home-seed default — this vector pins seed 0 explicitly and `boot_world` is a pure `f(seed, config)`.
+- MEASURED, not argued: the golden was last captured at `2ddeba0`; `6e442bc` added 192 lines to the
+  generator and deleted none (the draw stream untouched); the `SEED` const is byte-unchanged across
+  every commit since. The regeneration diff moved **99 of 99 Planet rows, 6 of 12 System rows** (the
+  two siblings at all three ticks) **and 0 of 9 Star rows** (a star holds its own system's origin, so
+  its row is zero) — a placement-radius change alone would have moved the six sibling rows and
+  nothing else, so the 99 planet rows are the re-drawn masses.
+
+**THE TWO CITED CONSTANTS — the decision.** `TARGET_SYSTEM_BOUND_HOME_M` and
+`TARGET_PLANET_SOI_OUTER_HOME_M` STAY as seed-0 provenance markers, and their docs now say so
+outright. Reasoning, from how they are consumed: the first is pinned EQUAL to seed 0's generated home
+shell by `g_star_shell_unmoved_the_stars_clearance_arm_never_binds` — a fixed ruler doing real work;
+the second has NO pin and no generated counterpart at all (it is a hand-derived §3.3 figure for a
+planet at the maximum mass draw), and its doc now states that plainly instead of implying it is a
+fact about the world. What changed is the CONSUMER: `flight_table` used to fly both as leg distances
+while its warp leg flew the live world — one table, three legs, two different worlds. MEASURED cost:
+the shipped default seed's home shell is `5.089e12` m against the cited `1.582e11` m, a factor of 32,
+so the gate flew a home system nobody lives in and departed the warp leg at a ceiling 32× too low.
+Both in-system legs are now read off `boot_world(DEV.universe_seed, …)`; the cited targets are
+PRINTED beside them, the same discipline the file already applies to the addendum's placeholder-τ
+seconds. The reason to cite was discharged when the taxonomy flag day made the generator solve those
+shells itself.
+
+**WHAT WAS RE-DERIVED** (never a pasted literal; each replaced a number with a name):
+`flight_table` in-system legs + a derived `governed_rows == parented_rows` non-vacuity beside the
+census pin · `render_scale`'s close-in eye magnitude (now `outer_look · spin_up_factor`, the law's own
+worst case) · `process_parity`'s two movement checks (see D-HOME-SPAWN-1) · `boot_guard`'s planet
+(seed 0 → `DEV.universe_seed`) · `rlm_kill9_spawn`'s spawned coord (`planet(2,7,7)` = the retired walk
+fixture's `PLANET_A`, which THE world does not contain → `world_roster`, the D-WORLD-8 fix
+`rlm_proc_spawn_smoke` already had) · `window_shadow_parity`'s flight budget · `rlm_demand_login`'s
+flap margin, ring precondition, exit floor, leg budget, child count and 14 hard-coded realm labels ·
+`node_per_realm_walk`'s rendezvous budget · `look_pixels`' star-class datum (a literal `code 6` = M
+class, now false — the home star is G — replaced by `marker_datum` over the world's own photometrics)
+and its leg budgets · `warp_pixels`' last leg and pre-wake park · `two_ships`' rendezvous budget ·
+`render_boxes_smoke`'s expected body kinds · `render_crossing_smoke`'s parks/aims/deadlines and its
+walk-fixture SOI · `frame_conversion_e2e`'s demand seed and its `1.0e6` ambient root above a `1.58e11`
+child · `crossing_e2e`'s "7.68 m/s fastest planet" message.
+
+**STALE CLAIMS CORRECTED IN PRODUCTION DOCS** (not tests): `HOME_SEED`'s own census paragraph (its
+star mass, luminosity, moon count and sibling distance all moved with the cap, hours after the seed
+was chosen — the planet itself is bit-unmoved, which is why the choice stands) · `interior_reach_m`
+and `RealmRegion::interior_band`'s `444.104489631 m` · `flush_stamp_gap_ticks_max` and the flush
+conversion's `7.68 m/s` · `LatticePos`' "star gap" label and two window-lane magnitude labels ·
+`camera.rs`'s "THE WORLD'S OWN RANGE PAIR" (a fixed ruler, deliberately, and now said so).
+
+**Where:** the gate list is `justfile`'s `gate` recipe; the classification table rides the arc's
+report.
+
+
+### D-HOME-SPAWN-1 🟩 A STATIC LOGIN LANDED IN TWO DIFFERENT PLACES — the gateway's two attach producers disagreed (found + fixed 2026-08-21)
+
+**THE SYMPTOM.** `process_parity` failed on *"the idle dot never moved"*, and re-running it flipped
+between two outcomes with no code change in between.
+
+**THE MEASUREMENT (nine runs).** The login's FIRST delivered own-pose was the realm ORIGIN on six
+runs and the T2 spawn standoff (`z = 1.0614053982415949e10` m) on three. A bystander reading was
+added to the gate to tell *"the dot is at the origin"* apart from *"one session's fan is stale"*:
+both sessions AGREED within every run, so it was the server's placement, not a fan.
+
+**THE ROOT CAUSE.** `gateway/directory.rs`'s STATIC arm sent `AttachSession { spawn: None }` — *"the
+shard births at its own origin"* — while the per-tick retry in `gateway/liveness.rs` sent
+`session.spawn`, i.e. `Some(standoff)`, under a comment promising *"a re-attach must not be able to
+place the avatar anywhere else than the attempt it repeats."* TWO producers of ONE value, disagreeing,
+with whichever the shard saw first deciding where the player stood. Twelve lines above the `None`, the
+same function's own comment explains why the pose is descended in EVERY mode: *"since the star became
+a body at the home centre, an attach with no pose would drop the account inside the Star realm — the
+static chain measured exactly that as a frozen unresolvable crossing"* (T2). And the unit suite's
+`attach_spawn` helper has claimed since T2 that *"EVERY attach carries the registry's pose (static
+included)"* while a second test pinned the first static attach at `None`.
+
+**WHY IT HID.** On the hand-placed walk fixture `default_home_offset_m()` is ZERO, so `None` and
+`Some(origin)` are the same place. It only became observable when the world became real.
+
+**THE FIX.** The static arm sends `spawn: Some(spawn)`. Blast radius was exactly one unit test:
+`a_static_login_is_byte_identical_with_no_home_phase_and_no_extra_head_read` now asserts
+`attach_spawn(&rig)` and its "byte-identical" claim is restated as FLOW-identity (the flow is what it
+pins; the attach's bytes did change, deliberately). `vd-connection-plane` 221 pass.
+
+**Where:** `crates/connection-plane/src/gateway/directory.rs` (the static `AttachSession`),
+`crates/connection-plane/src/gateway/liveness.rs` (the retry it now matches),
+`crates/bins/tests/process_parity.rs` (which additionally waits for the login to SETTLE, so it can no
+longer be sampled mid-login, and records a `first_own_pose` so a login that lands somewhere
+unexpected names itself).
+
+
+### D-LOOK-5 🟥 THE PRESENCE FLOOR AND A REALM'S OWN LOOK ARE DISCONTINUOUS — the marker⇒look hand-over POPS at true scale (measured 2026-08-21)
+
+**THE SYMPTOM.** `warp_pixels`' `g_look_growth_a_planets_point_of_light_grows_strictly_on_approach`
+— *"a planet's point of light grows monotonically as the camera closes, and it NEVER pops and NEVER
+blanks"* — failed on its monotone arm, and the arm is right to fail. The point of light did not
+merely stop growing; it collapsed.
+
+**THE MEASUREMENT.** The inner planet's drawn footprint fell from a running maximum of **3.2105 px
+to 0.2724 px in one sample step**, at tick 29500, at a range of **1.4188e10 m**. That is an 11.8×
+step DOWN, between two consecutive samples, on an approach that was closing the whole time.
+
+**THE MECHANISM, identified arithmetically from the two numbers themselves — no second run needed.**
+
+* **3.2105 px is the PRESENCE FLOOR.** `DOT_MIN_APPARENT_RADIUS_PX` is 3.0 px, and
+  `vd_client_harness::camera::marker_world_radius` applies it to *every* parent-authored MARKER:
+  `base_radius_m.max(3 px worth of world at this range)`. The remaining 0.7 % is the off-axis
+  projection term the gate's own curve comment already records and bounds.
+* **0.2724 px is the body's TRUE angular size, unfloored.** `extent / range · (h/2) / tan(fov/2)` at
+  the planet's own stated look (`4447120.8351` m) and that range is 0.2724 px to four figures — and
+  the gate prints the floor-crossing range this is derived from (`1.288e9` m) on the same line.
+  `vd_bins::pixel::subject` has exactly two arms: a `"marker"` row goes through
+  `marker_world_radius` (floored); a `"look"` row is drawn at the literal `row.extent_m` (**no
+  floor at all**). The renderer takes the same two paths through the same shared expression
+  (`crates/client/src/realm_scene.rs` — `marker_base_radius_m` + the one apparent-size floor).
+* **So the step IS the hand-over.** The planet's own shard woke mid-leg — the run log shows its
+  realm demand and its shard announcing itself in the seconds before the sample — and the picture
+  switched authors between two frames. A REALM THAT STARTS DRAWING ITSELF GETS SMALLER, by exactly
+  the amount the floor was holding it up by.
+
+**WHY IT IS A DEFECT AND NOT THE LAW BEING HONEST.** At true scale a body's real angular size at its
+own wake radius is orders BELOW the floor (`warp_pixels` measures the same step in the other
+direction on the star-gap flight and records it in its own comment as *"a STEP DOWN of exactly the
+floor: MEASURED, 3.002 px"* — the marker's whole footprint). So this is not an edge case; it is what
+every wake looks like from outside. The owner's standing seamless law is *no toggles, no loading, no
+teleport — the same picture the whole way*, and an 11.8× jump in a point of light the instant a
+server boots behind it is a visible pop with a server event as its cause. It is the last place in
+the drawn picture where the machinery is visible from the pilot's seat.
+
+**WHAT IS OWED.** A CONTINUOUS hand-off between the two authors. Either the floor fades out as the
+look grows into it (the floored and unfloored radii blended over a band the camera model itself
+derives), or a realm's own look takes over the drawing only once its true angular size already
+exceeds the floor — the marker keeps the picture until then, which is what the floor is *for*.
+Whichever is chosen, the invariant to gate on is the one the parked test already asserts: across the
+author flip the drawn footprint may not fall by more than the readback's own quantum.
+
+**WHAT IS PARKED ON IT.** `g_look_growth_a_planets_point_of_light_grows_strictly_on_approach` is
+`#[ignore]`d with the full measurement above in its citation. **Not weakened and not deleted** —
+every assert stands exactly as written, including the strict-growth arm; un-ignoring it is the proof
+the hand-off landed. Its sibling `g_warp_pixels_…` in the same file stays live because its growth
+curve deliberately reads only the samples on ONE side of the flip, which is itself a workaround for
+this row and should be removed with it.
+
+**Where:** `crates/client-harness/src/camera.rs` (`DOT_MIN_APPARENT_RADIUS_PX`,
+`marker_world_radius` — the floor), `crates/client/src/realm_scene.rs` (`marker_base_radius_m` and
+the renderer's two paths), `crates/bins/src/pixel.rs` (`subject` — the two arms the gates read),
+`crates/bins/tests/warp_pixels.rs` (the `#[ignore]` citation and the one-sided growth curve).
+
+
+### D-FLIGHT-BUDGET-1 🟥 A LEG'S DEADLINE IS A MULTIPLE OF THE PHYSICS TIME AND CARRIES NO INSTRUMENT TERM — it lost its margin when the star gap shrank (measured 2026-08-21)
+
+**WHAT IS WRONG.** `vd_bins::flight::governed_leg_budget` is `60 s + 3 × leg_time_s(...)` — a fixed
+slack plus a multiple of the speed law's own closed form. The `3×` is a MEASUREMENT, and its doc says
+so: the walk gate on 2026-08-19 flew a home-system exit whose closed form was ~105 s in ~260 s (2.5×),
+and 3× was chosen to cover that with margin. But the multiplier scales only the PHYSICS half of a
+leg. A dev-control flight is flown in CHUNKS — a `WalkTo` round trip plus a `DevState` sample per
+chunk — and that cost is a property of the instrument, not of the distance. It does not shrink when
+the leg does.
+
+**HOW IT SURFACED.** The derived mass cap (D-MASS-CAP) cut the star gap from 2 248 490 503 621 178.5 m
+to 1 498 979 587 153 876.0 m. That cut the warp leg's closed form without cutting a single tick of the
+instrument's cadence — so the budget, being a pure multiple of the closed form, lost precisely the
+margin the 2.5×→3× choice had bought.
+
+**THE MEASUREMENT (`acceptance_flight` leg 4, 2026-08-21, with the per-chunk trace added in the same
+pass).** The leg's budget is `governed_leg_budget(gap, galaxy ceiling) + governed_leg_budget(run-in,
+system ceiling)` = 663 s. The gap's closed form is 111.99 s ⇒ its term is 396 s; the gap portion
+**actually took 490 s, a ratio of 4.4×**. The flight itself is correct: the range to the destination
+fell monotonically 1.5016e15 m → 6.6022e10 m over 80 samples with no stall and no recede, the crossing
+into the sibling landed at tick 66189, and the destination's drawn radius climbed 0.739 px → 2.037 px
+against a 3.000 px stop condition — **68 % of the bar, still closing at ~0.33 px per sample** when the
+clock ran out, i.e. roughly 15–40 s short of a 663 s leg. The same run measures the other legs at 2.3×
+(leg 2: closed 102.17 s, flown 235.5 s) and 1.3× (leg 3: closed 218.60 s, flown 291.6 s), which is why
+they still fit — the shorter the physics time, the worse the instrument term hurts.
+
+**WHAT IS OWED.** A budget law with an INSTRUMENT term: the per-chunk cost (one `WalkTo` round trip
+plus one sample) times the number of chunks the leg will take, added to the physics time — rather than
+a bare multiple of the physics time. That form is scale-honest: it grows when the cadence grows and
+does not silently evaporate when a world change shortens a leg. Until it lands, every chunked flight
+gate is one world re-solve away from the same failure, and padding a deadline hides it.
+
+**NOT DONE INSTEAD:** widening the deadline. The number would have gone green and the property would
+have stayed broken.
+
+**Where:** `crates/bins/src/flight.rs` (`governed_leg_budget`, and `planet_exit_budget` /
+`watched_leg_budget` which are written over it); the parked gate
+`crates/bins/tests/acceptance_flight.rs` (its `#[ignore]` carries the full trace); every other
+chunked-flight consumer — `node_per_realm_walk`, `rlm_demand_login`, `window_shadow_parity`,
+`two_ships`, `look_pixels`, `warp_pixels` — all of which pass today with margin and are the reason
+this is 🟥 rather than urgent.

@@ -43,10 +43,33 @@ use vd_tests::{
     set_shard_subject_offset, stub_config, walk_forward,
 };
 
-/// The universe seed the whole cluster shares (matches `worldgen::realm_regions_for`'s default forest).
+/// The universe seed the whole cluster shares.
+///
+/// This gate deliberately rides the HAND-PLACED WALK FIXTURE forest — the topology small enough that a
+/// person can walk across every boundary in it. `worldgen::realm_regions_for` returns that forest for
+/// ANY seed: it takes the seed only to keep the frozen `f(seed)` signature and then discards it (see
+/// `worldgen::walk`), because nothing in the walk forest is drawn from a seed stream. That is exactly
+/// why the home-seed flip every world-deriving process now defaults to cannot reach this file, and why
+/// pinning a seed here still says something rather than nothing.
 const UNIVERSE_SEED: u64 = 0;
 /// The client node id (mirrors `crossing_e2e`'s CLIENT).
 const CLIENT: NodeId = NodeId(100);
+
+/// The walk galaxy's OWN extent in metres, read straight off the forest the shards are planted with
+/// (`worldgen::realm_regions_for` → the Galaxy region's `finite_extent`).
+///
+/// WHY IT IS READ AND NOT WRITTEN DOWN. The comments below used to describe this realm as "the r=1000
+/// between-space", a radius the walk forest has never produced: `worldgen::walk` sizes the galaxy to
+/// contain System B's far face and nothing else. A quoted extent cannot notice the forest changing
+/// shape — this one is the forest's own answer, recomputed on the run that reads it.
+fn walk_galaxy_extent_m() -> f64 {
+    vd_physics::worldgen::realm_regions_for(UNIVERSE_SEED)
+        .iter()
+        .find(|r| r.realm == galaxy_stub_config().realm)
+        .expect("the walk forest rosters the Galaxy the middle shard hosts")
+        .shape
+        .finite_extent()
+}
 
 fn report(reports: &[(NodeId, InspectReport)], id: NodeId) -> &InspectReport {
     &reports
@@ -68,8 +91,11 @@ fn step_until(topo: &mut Topology, max: u64, mut cond: impl FnMut(&mut Topology)
 
 /// One round-trip WAYPOINT: the shard that OWNS the durable dot at the start of this hop, the position
 /// it is driven to, and the shard the directory head must flip TO once this hop's re-home commits.
-/// Outbound 7→Galaxy→8, return 8→Galaxy→7. Geometry matches the seed forest (System 7 & 8 own r=40
-/// shells centered at their own origin; the Galaxy owns the r=1000 between-space at x≈50).
+/// Outbound 7→Galaxy→8, return 8→Galaxy→7. The geometry is the walk fixture forest's: each system owns
+/// the shell that forest gives it, centred on its own origin; the Galaxy owns the between-space the two
+/// systems sit in, and IT is centred on the galactic origin — 50 is a probe point out in the gap, not
+/// where the galaxy is. The extent every waypoint must fall inside is read off the forest at use
+/// ([`walk_galaxy_extent_m`]), never quoted here.
 struct Hop {
     owner: NodeId,
     offset: f64,
@@ -188,8 +214,11 @@ fn three_shard_round_trip_durable_flips_the_head_through_the_full_chain_both_way
 
     // THE FULL BOTH-WAYS CHAIN, driven on the SAME durable subject. Outbound: 7 → Galaxy → 8.
     // Return: 8 → Galaxy → 7 (the reverse-cross). Each hop moves the dot to a waypoint clearly inside
-    // the target container: System 7 & 8 own r=40 shells (origin-relative), the Galaxy owns the
-    // r=1000 between-space (x≈50, in the gap).
+    // the target container: each system owns the shell the walk forest gives it, centred on its own
+    // origin; the Galaxy owns the between-space the two systems sit in, and is itself centred on the
+    // galactic origin — 50 is a point out in the gap, not where the galaxy is. The waypoints 0/50/100
+    // are `worldgen::walk`'s own, blessed by its doc; the extent they have to fall inside is asserted
+    // below rather than quoted.
     let hops = [
         Hop {
             owner: SHARD,
@@ -216,6 +245,18 @@ fn three_shard_round_trip_durable_flips_the_head_through_the_full_chain_both_way
             label: "Galaxy→7 (home, reverse-cross)",
         },
     ];
+
+    // ANTI-DRIFT, and the reason the prose above states no radius: every waypoint has to lie inside the
+    // walk galaxy, or the "gap" hop is happening in a realm no shard here hosts and the chain proves
+    // nothing. The extent is read off the SAME forest the three shards were planted with, so a change to
+    // the walk geometry shows up here as a failure instead of as a comment that quietly stops being true.
+    let galaxy_extent_m = walk_galaxy_extent_m();
+    assert!(
+        hops.iter().all(|h| h.offset.abs() < galaxy_extent_m),
+        "every round-trip waypoint must lie inside the walk galaxy's own extent ({galaxy_extent_m} \
+         m) — the between-space hops are only meaningful while the Galaxy still contains them: {:?}",
+        hops.iter().map(|h| h.offset).collect::<Vec<_>>(),
+    );
 
     let mut observed = vec![SHARD]; // the origin: System 7 owns the durable head at the start of hop 1
     for hop in &hops {

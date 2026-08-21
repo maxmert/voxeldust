@@ -1,8 +1,11 @@
 //! **G-RENDER-SCALE** — THE RENDER PRECISION BUDGET, MEASURED ON THE WORLD (the S5 slice's own
 //! measurement gate; `docs/design/DEFERRED.md` D-LOOK-3).
 //!
-//! Two numbers decide whether a picture spanning `1e6` m to `2e15` m can be drawn at all, and both
-//! are measured here against THE world's own geometry rather than argued:
+//! Two numbers decide whether a picture spanning an avatar's own marker out to THE world's derived
+//! star gap can be drawn at all, and both are measured here against the world's own geometry rather
+//! than argued. (The span used to be quoted as `1e6` m to `2e15` m; the far end is
+//! `cfg.stellar.system_ring_r_m`, which the derived mass cap moved on 2026-08-20 — which is exactly
+//! why the range ladder below is read and never written down.)
 //!
 //! 1. **THE DEPTH BUDGET.** Bevy builds a reverse-Z INFINITE perspective for a
 //!    `PerspectiveProjection`, so the depth code is `near/z` and one `f32` code ulp is a CONSTANT
@@ -79,9 +82,15 @@ fn g_depth_budget_the_thinnest_thing_the_world_draws_out_resolves_the_reverse_z_
          {DEPTH_CODE_ULP:e} — a second depth scheme (logarithmic depth) would be owed",
     );
 
-    // AND THE CONCRETE WORST RANGE PAIR THE PARKED GATES MEASURED: the outer planet's own body at
-    // 1.8248e8 m, and the warp destination at 2.2485e15 m. Both are resolved with the DERIVED near
-    // plane the renderer actually installs, and the one-ulp depth step is printed in metres.
+    // AND THE CONCRETE WORST RANGE PAIR ON THE WORLD, both DERIVED: the outer world's own body at
+    // the FARTHEST range it is ever drawn as a body (its own `look · spin_up_factor` — the law
+    // stated above, so the pair is the law's own worst case rather than a range someone once
+    // stood at), and the warp destination across THE world's own star gap. Both are resolved with
+    // the DERIVED near plane the renderer installs, and the one-ulp depth step is printed in metres.
+    // ★ RE-DERIVED 2026-08-21 (the gate-pass arc): the close-in range was the literal `1.8248e8` m,
+    // an eye magnitude transcribed from a parked pixel gate's seed-0 run. Its thickness on the very
+    // next line was already read live off the world, so the pair described two different worlds —
+    // and the derived mass cap re-drew every star, moving the range again.
     let rs = regions();
     let home = vd_core::worldgen::default_home_realm(&rs).expect("THE world names a home realm");
     let outer_look = rs
@@ -94,8 +103,8 @@ fn g_depth_budget_the_thinnest_thing_the_world_draws_out_resolves_the_reverse_z_
     let rows = f64::from(CAPTURE_H);
     for (name, range_m, thickness_m) in [
         (
-            "the outer world's own body, close in",
-            1.8248e8,
+            "the outer world's own body, at the farthest range it is still drawn as a body",
+            outer_look * factor,
             2.0 * outer_look,
         ),
         (

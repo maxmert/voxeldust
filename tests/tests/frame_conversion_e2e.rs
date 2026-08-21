@@ -565,18 +565,37 @@ fn the_client_is_told_the_realm_it_is_standing_in_after_a_crossing() {
 // ---- THE REAL WORLD'S PROPORTIONS ---------------------------------------------------------------
 //
 // Every gate above runs on the walk world, whose planet is a TEN-METRE body sitting still twenty metres
-// from its star. The world the game actually boots is not that: a 150 m star system holding planets whose
-// whole authority sphere is about FOUR metres, orbiting some fifteen metres out at metres a second. The
-// numbers below are that world's — DERIVED from its generator AT USE, never transcribed: the transcribed
-// copies this section used to carry stayed at the pre-S4 values when the S4 apoapsis re-solve moved the
-// world (planet SOI 4.1607 → 3.954 m), so the fixture quietly proved an EASIER arrival than the game
-// ships (batch review, MAJOR — the exact drift class the walk gates were indicted for).
+// from its star. The world the game actually boots is nothing like that shape — and this section
+// deliberately refuses to say what shape it IS. Every quantity below is read out of the shipped
+// generator AT USE, at the seed the shipped boot defaults to, and the run PRINTS the two that decide the
+// outcome. Transcription is precisely what went wrong here, repeatedly: the copies this section used to
+// carry stayed at the pre-S4 values when the apoapsis re-solve moved the world, and then the in-system
+// true-size re-solve deleted the compressed geometry underneath them and the derived stellar mass cap
+// re-drew every star on top of that. Each time the prose went on describing a world that no longer
+// existed while the fixture quietly proved an EASIER arrival than the game ships (batch review, MAJOR —
+// the exact drift class the walk gates were indicted for).
 //
 // WHY IT MATTERS, and it is the reason a green suite sat beside an unplayable game all day: the entry
-// margin is a FIXED one metre. On a ten-metre planet that is a tenth of the body and an arrival can be a
-// metre or two out and still land comfortably inside. On a four-metre planet it is a quarter, and the same
-// arithmetic error puts the occupant OUTSIDE the realm that just accepted it — whereupon that realm hands
-// it straight back, the parent hands it down again, and the player is trapped in the loop the owner flew.
+// margin is FIXED. It is one number — the shipped containment inset — and it is the same number whatever
+// the body it is applied to. So what decides whether an arrival lands INSIDE is the RATIO of that margin
+// to the planet's own authority sphere, and nothing else. On the walk world's planet the margin is a
+// small fraction of the body, and an arrival can be a metre or two out and still land comfortably inside.
+// Where the ratio is large, the same arithmetic error puts the occupant OUTSIDE the realm that just
+// accepted it — whereupon that realm hands it straight back, the parent hands it down again, and the
+// player is trapped in the loop the owner flew. The RATIO is the whole point; what it currently equals is
+// a measurement the gate below prints, never a claim written up here.
+
+/// The universe seed THE world is generated from: the shipped DEFAULT every world-deriving process
+/// reads (`vd_physics::worldgen::HOME_SEED`, the seed a player logs into), not a pinned ruler.
+///
+/// WHY IT IS NOT A LITERAL HERE, when literals elsewhere in this file are right. A test that pins a seed
+/// is measuring the GENERATOR — it wants the same draw every run and does not care which world that is.
+/// This section is measuring the DESTINATION: the proportions of the realm players actually arrive at.
+/// Those two want different things from a seed, and this one has to follow the default the boot reads, or
+/// it gates a world nobody logs into. These call sites passed a bare `0` while the section's own prose
+/// claimed to describe "the world the shipped boot builds", which is the same sentence disagreeing with
+/// itself.
+const DEMAND_SEED: u64 = vd_physics::worldgen::HOME_SEED;
 
 /// THE world's config, exactly as the shipped boot builds it. The two arguments feed the AoI band
 /// only — inert in these fixtures (`AoiConfig::inert()`); the geometry (shells, orbits, mass) is the
@@ -585,12 +604,28 @@ fn demand_config() -> UniverseConfig {
     UniverseConfig::world(15.0, 0.05)
 }
 
+/// THE SHIPPED CONTAINMENT BAND, built by the shipped builder from the shipped config's own edges —
+/// the acquire inset and the release outset a real boot arms every region with.
+///
+/// Built, not written down. The inset IS the entry margin this whole section is about, and a hand-copied
+/// pair of edges here would be the identical defect the section exists to catch: prose and fixture
+/// agreeing with each other while both drift away from what boots.
+fn demand_band() -> vd_core::geometry::ContainmentBand {
+    demand_config()
+        .band
+        .build()
+        .expect("the shipped containment band is valid")
+}
+
 /// The star system's own boundary in the shipped demand world — read off the generator's SOLVED
-/// region roster (the in-system re-solve: no config radius exists; the shell is the clearance
-/// solve's, ~1.58e11 m for the home system).
+/// region roster. Since the in-system re-solve there IS no config radius to quote: the shell is
+/// whatever the ONE clearance law solves for THAT system's own drawn star, so it is stated here only
+/// by where it comes from. (`worldgen::TARGET_SYSTEM_BOUND_HOME_M` looks like the number to write
+/// down and is not: its own doc calls itself a SEED-0 provenance marker, and says the default seed's
+/// home system solves to some thirty-two times it.)
 fn demand_system_soi_m() -> f64 {
     let cfg = demand_config();
-    vd_physics::worldgen::realm_regions_for_config(0, &cfg)
+    vd_physics::worldgen::realm_regions_for_config(DEMAND_SEED, &cfg)
         .iter()
         .find(|r| r.realm == SYSTEM)
         .expect("THE world rosters its home system")
@@ -599,15 +634,15 @@ fn demand_system_soi_m() -> f64 {
 }
 
 /// The INNER planet's WHOLE authority sphere there — its gravitational SOI at its drawn mass
-/// (D-REAL-1), read off the same roster, against the SAME one-metre entry margin.
+/// (D-REAL-1), read off the same roster, against the SAME entry margin ([`demand_band`]'s inset).
 fn demand_planet_soi_m() -> f64 {
     let cfg = demand_config();
-    let inner = moving_children_for_config(0, &cfg, SYSTEM)
+    let inner = moving_children_for_config(DEMAND_SEED, &cfg, SYSTEM)
         .into_iter()
         .min_by(|a, b| a.1.sma.total_cmp(&b.1.sma))
         .map(|(r, _)| r)
         .expect("THE world's home system authors movers");
-    vd_physics::worldgen::realm_regions_for_config(0, &cfg)
+    vd_physics::worldgen::realm_regions_for_config(DEMAND_SEED, &cfg)
         .iter()
         .find(|r| r.realm == inner)
         .expect("the inner planet is rostered")
@@ -618,7 +653,7 @@ fn demand_planet_soi_m() -> f64 {
 /// THE world's own INNER mover (smallest semi-major axis), from the same generator call the shipped
 /// boot makes — its orbit radius and its real central mass (so the sweep speed is the world's own).
 fn demand_inner_elements() -> OrbitalElements {
-    moving_children_for_config(0, &demand_config(), SYSTEM)
+    moving_children_for_config(DEMAND_SEED, &demand_config(), SYSTEM)
         .into_iter()
         .min_by(|a, b| a.1.sma.total_cmp(&b.1.sma))
         .map(|(_, e)| e)
@@ -653,18 +688,25 @@ fn demand_orbit() -> OrbitalElements {
 /// every tick, and a stored centre beside a live placement would be counted twice. That is the shipped
 /// generator's own rule for an orbiting body, reproduced here rather than invented.
 fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
-    use vd_core::geometry::{AoiConfig, Boundary, ContainmentBand, RealmRegion};
-    // The SHIPPED band: one metre in to acquire, two metres out to release.
-    let band = ContainmentBand::for_containment_velocity_safe(1.0, 2.0, 0.0, 1.0, 0.0)
-        .expect("the shipped containment band is valid");
+    use vd_core::geometry::{AoiConfig, Boundary, RealmRegion};
+    // The SHIPPED band, built by the shipped builder off the shipped config's own edges — the pair of
+    // literals that used to sit here was a hand copy of exactly that.
+    let band = demand_band();
     let root = RealmId::System(1); // the ambient root, as the live cluster names it
+    // `System(1)` IS THE GALAXY, so its shell is the galaxy's own, read off the shipped config. It was a
+    // flat 1.0e6 m — an ambient parent orders of magnitude SMALLER than the one star system nested
+    // inside it. Nothing here ever asked the root to contain its child, which is the only reason a world
+    // that inverted could sit in a passing gate; deriving it means the two levels cannot disagree again.
+    let root_shell = Boundary::Shell {
+        r: demand_config().scale.galaxy_r_m,
+    };
     vec![
         RealmRegion {
             realm: root,
             center: vd_core::pose::LatticePos::ORIGIN,
             frame: FrameRef::SystemSpace { system_seed: 1 },
-            shape: Boundary::Shell { r: 1.0e6 },
-            look: Some(Boundary::Shell { r: 1.0e6 }),
+            shape: root_shell,
+            look: Some(root_shell),
             band,
             aoi: AoiConfig::inert(),
             interior_band: AoiConfig::inert(),
@@ -707,8 +749,11 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
 /// THE OWNER'S LOOP, at the proportions it actually happens at.
 ///
 /// He flew into a planet and the planet and its star traded him back and forth until he could not get
-/// out. Every gate in this file said the crossing was fine, because every gate in this file uses a planet
-/// two and a half times larger than the real one against the same fixed entry margin.
+/// out. Every gate in this file said the crossing was fine, because every gate in this file runs on the
+/// WALK world's planet, whose size makes the fixed entry margin a small fraction of the body — while the
+/// shipped world applies that same fixed margin to a body of an entirely different size. The two ratios
+/// are MEASURED and printed side by side by this gate, never asserted about in prose: the ratio is the
+/// thing that matters, and every prose copy of what it equals has already gone stale once.
 ///
 /// This asks the same question the moving gate above asks, at the real world's proportions, and it asks
 /// it about the ONE property the loop violates: an occupant a realm has ACCEPTED is INSIDE that realm. A
@@ -758,9 +803,21 @@ fn entering_a_real_sized_planet_lands_inside_it_and_does_not_trade_the_player_ba
     let arrived = arrival.expect("just captured");
     let from_centre = pose_m(&arrived).length();
     let planet_soi_m = demand_planet_soi_m();
+    // THE RATIO THE SECTION HEADER IS ABOUT, measured instead of described: the shipped entry margin
+    // against the body it is applied to — here, and on the walk world every gate above runs on. Both
+    // sides are read at use (the margin off the shipped band, the walk radius off the walk preset), so
+    // neither can go stale the way every transcribed copy in this section already has.
+    let margin_m = demand_band().inset();
+    let walk_planet_soi_m = UniverseConfig::walk_scale().planet.planet_soi_r_m;
     println!(
         "[real-sized arrival] {from_centre:.6} m from the planet's centre, boundary \
-         {planet_soi_m} m, entry margin 1 m"
+         {planet_soi_m} m, entry margin {margin_m} m"
+    );
+    println!(
+        "[real-sized entry margin] {margin_m} m of margin is {:.6} of this {planet_soi_m} m planet, \
+         against {:.6} of the walk gates' {walk_planet_soi_m} m one",
+        margin_m / planet_soi_m,
+        margin_m / walk_planet_soi_m,
     );
 
     assert!(
@@ -768,8 +825,11 @@ fn entering_a_real_sized_planet_lands_inside_it_and_does_not_trade_the_player_ba
         "the occupant landed {from_centre} m from the centre of a {planet_soi_m} m planet — \
          OUTSIDE the realm that just accepted it. The planet sees that on its next tick and hands them \
          back; the star sees them inside its planet and hands them down; and the player cannot leave. \
-         This is the owner's loop, and the walk-scale gates cannot see it because their planet is two \
-         and a half times larger against the same one-metre margin.",
+         This is the owner's loop, and the walk-scale gates cannot see it: their planet is \
+         {walk_planet_soi_m} m against the same {margin_m} m margin, so that margin is {:.6} of their \
+         body and {:.6} of this one.",
+        margin_m / walk_planet_soi_m,
+        margin_m / planet_soi_m,
     );
     assert!(
         step_until(&mut topo, 600, |t| live_sagas(t) == 0),
@@ -1289,6 +1349,12 @@ fn admissible_skew_ticks(e: &OrbitalElements, tick_hz: u32) -> u64 {
 }
 
 /// Every orbiting body the shipped presets generate across the seed sweep.
+///
+/// HONEST SCOPE, because the name reads bigger than the measurement is: only the VISUAL preset
+/// contributes anything. `walk_scale` sets `n_planets = 0` — the walk fixture forest is ambient-only and
+/// authors no orbital child at any seed — so it is swept and returns nothing. It is swept anyway so that
+/// the day the walk preset grows a mover, this measurement already covers it rather than needing to be
+/// remembered.
 fn shipped_movers() -> Vec<(String, RealmId, OrbitalElements)> {
     let mut movers = Vec::new();
     for seed in 0..SKEW_SEED_SWEEP {
@@ -1329,8 +1395,9 @@ fn shipped_movers() -> Vec<(String, RealmId, OrbitalElements)> {
 /// [`admissible_skew_ticks`] searches for.
 ///
 /// Everything here is measured against the closed-form `orbital_state`, over every mover the shipped
-/// presets generate across sixteen seeds, at both shipped tick rates. The test RE-MEASURES on every run, so
-/// the constant cannot creep back past the bound without this going red.
+/// presets generate across sixteen seeds — which in practice means the VISUAL preset's, since walk-scale
+/// authors no orbital child at all (see [`shipped_movers`]) — at both shipped tick rates. The test
+/// RE-MEASURES on every run, so the constant cannot creep back past the bound without this going red.
 #[test]
 fn the_linear_carry_chord_error_sizes_the_placement_skew_cap() {
     let movers = shipped_movers();

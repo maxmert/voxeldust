@@ -2831,6 +2831,30 @@ fn clamped_forest() -> RealmRegions {
     ])
 }
 
+/// ★THE THROWAWAY OVERDRIVE INSTRUMENT, both arms. `set_cruise_overdrive` is the only way the
+/// `VD_TEST_OVERDRIVE` knob reaches the sim, and its whole contract is one clamp: the instrument may
+/// make a cruise FASTER and may never make it slower, so anything under the lawful `1.0` is refused
+/// back to it and the caller is TOLD what was planted (the returned value, not the argument).
+///
+/// Covered here because it is reachable production code with no other caller inside this crate — the
+/// shard binary is its only consumer, and a binary is outside the coverage domain. Without this the
+/// clamp could invert and every gate would still be green while a test instrument silently GOVERNED
+/// a flight it was only ever allowed to speed up.
+#[test]
+fn the_cruise_overdrive_instrument_may_only_ever_go_faster() {
+    let mut regions = clamped_forest();
+    // The default IS the law — an unset knob is inert.
+    assert_eq!(regions.cruise_overdrive, 1.0);
+    // The lawful arm: a factor above one is planted verbatim and reported back.
+    assert_eq!(regions.set_cruise_overdrive(4.0), 4.0);
+    assert_eq!(regions.cruise_overdrive, 4.0);
+    // The refused arm: below the law it is clamped back to the law, not to the argument.
+    assert_eq!(regions.set_cruise_overdrive(0.25), 1.0);
+    assert_eq!(regions.cruise_overdrive, 1.0);
+    // And the boundary itself is lawful rather than refused.
+    assert_eq!(regions.set_cruise_overdrive(1.0), 1.0);
+}
+
 #[test]
 fn the_governed_ceiling_is_the_realm_cap_lowered_by_the_child_arm() {
     // A wide own realm (cap 2·150 000/180 ≈ 1 667 m/s at foot 2) with one small child at the

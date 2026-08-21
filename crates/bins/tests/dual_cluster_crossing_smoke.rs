@@ -1,14 +1,19 @@
 //! THE dual-shard PROCESS-cluster crossing proof — a real-protocol client on the production mesh,
-//! with ZERO navigation, crosses THE WORLD'S OWN 150 m home shell and the directory CAS re-homes its
-//! `Entity` onto the pre-booked galaxy shard.
+//! with ZERO navigation, crosses THE WORLD'S OWN home shell (`home_shell_m`, read off
+//! `boot_world(DEV.universe_seed, …)` below — this headline used to say "150 m", the retired
+//! walk-scale radius, three orders under anything the world has drawn since the true-size re-solve)
+//! and the directory CAS re-homes its `Entity` onto the pre-booked galaxy shard.
 //!
 //! Stands up `vd-devcluster up --dual` as REAL BINARIES over localhost QUIC under mTLS: orchestrator +
 //! gateway + the HOME shard + the GALAXY shard (the home region's parent), every realm derived through
 //! `world_roster` — NOTHING is injected. The old smoke planted an authored born-inside boundary
 //! file whose geometry existed nowhere in THE world; this one flies the world as
-//! shipped: the login spawns at the home star's centre, the client holds `movement: [1,0,0]` (world
-//! −Z at identity orientation — the ±Z polar corridor, licensed by the I-AXIS assert below) for
-//! EXACTLY `exit_ticks`, then holds zero. Leaving the shell, the home shard's containment detector
+//! shipped: the login spawns at the home system's T2 standoff, and the client holds
+//! `movement: [-1,0,0]` (world +Z at identity orientation — the polar corridor on the side the spawn
+//! stands, licensed by the I-AXIS assert below) for EXACTLY `exit_ticks`, then holds zero. (The
+//! header used to say `[1,0,0]` and −Z in four places while the body flew the opposite way; −Z from
+//! the standoff goes straight through the star realm at the system centre, which was MEASURED to
+//! leave the dot's Entity head on the home shard.) Leaving the shell, the home shard's containment detector
 //! fires the `CrossingRequest` AUTONOMOUSLY, the orchestrator resolves the directory heads, THE
 //! transfer saga runs (the client stamps the in-band CUT_MARKER on request), and the CAS re-homes the
 //! dot's `Entity` authority onto the galaxy shard.
@@ -21,8 +26,10 @@
 //! guarantees every pre-booked head resolves before the flight, so the crossing can never count
 //! `crossing_unresolved` — which since J-0 was a PERMANENT STRAND (now a bounded ttl-redrive +
 //! local-abort self-heal, D-WORLD-2 — still a crossing this smoke must never need).
-//! The flight is BOUNDED: `exit_ticks` parks the dot ~3 release-edges out, provably still inside the
-//! galaxy's own shell (asserted from THE world, never a literal), so no leg can reach a realm this
+//! The flight is BOUNDED: `exit_ticks` parks the dot beyond the release edge and provably still
+//! inside the galaxy's own shell — asserted from THE world, never a literal, and the park is PRINTED
+//! by the derivation below rather than described here (it used to say "~3 release-edges", a figure
+//! measured on a world that has since been re-solved twice), so no leg can reach a realm this
 //! cluster does not host.
 //!
 //! SCOPE (M-2): the LOCAL process playground. The N-shard k3d roster generalization is ledgered to
@@ -51,10 +58,11 @@ use vd_wire::channels::{ClientControlMsg, InputDatagram, ServerControlMsg};
 use vd_wire::version::ProtoVersion;
 
 /// A generous deadline: `up --dual` boots 4 processes + the C1 all-realms grant, then the client logs
-/// in, flies the ~1 s bounded −Z exit leg, and the crossing + saga self-drive to the directory CAS.
-/// Real QUIC handshakes over loopback.
-/// The gate deadline FLOOR, seconds — extended at run time by the derived governed leg (the
-/// true-size exit is a ~minutes flight, not a 460 m walk).
+/// in, flies the bounded +Z exit leg, and the crossing + saga self-drive to the directory CAS. Real
+/// QUIC handshakes over loopback.
+/// The gate deadline FLOOR, seconds — extended at run time by the derived governed leg, which is
+/// where the leg's actual duration comes from. (This doc used to call it a "~1 s" leg two lines
+/// above calling it "a ~minutes flight"; the true-size exit is the latter, and `leg_s` prints it.)
 const DEADLINE_FLOOR_S: u64 = 45;
 
 /// Run one `vd-devcluster up --dual` against the crossing slot (the launcher path from `CARGO_BIN_EXE`).
@@ -65,7 +73,7 @@ fn up_dual(launcher: &str, slot: u16) -> std::process::ExitStatus {
         .expect("run vd-devcluster up --dual")
 }
 
-/// A minimal real-protocol client that logs in, flies the BOUNDED −Z exit leg, then parks — enough to
+/// A minimal real-protocol client that logs in, flies the BOUNDED +Z exit leg, then parks — enough to
 /// make the home shard grant its avatar and integrate it out of the home shell with zero navigation.
 struct LoginClient {
     transport: MeshTransport,
@@ -113,8 +121,8 @@ impl LoginClient {
     }
 
     /// Drain inbound (noting the welcome + the first subscription), then FLY: once subscribed, send a
-    /// forward input datagram every tick — `[1, 0, 0]` is world −Z at identity orientation, the polar
-    /// corridor — for `exit_ticks` ticks, then hold `[0, 0, 0]`. The bounded leg takes the dot out of
+    /// forward input datagram every tick — `[-1, 0, 0]` is world +Z at identity orientation, the
+    /// polar corridor on the side the spawn stands — for `exit_ticks` ticks, then hold `[0, 0, 0]`. The bounded leg takes the dot out of
     /// the home shell (the detector fires the crossing purely geometrically, nothing hand-fed) and
     /// parks it; every later tick still carries an input so the cut marker has a carrier.
     fn step(&mut self) {
@@ -143,7 +151,7 @@ impl LoginClient {
             let movement = if self.move_ticks_left > 0 {
                 self.move_ticks_left -= 1;
                 // +Z, the licensed polar corridor on the side the spawn stands: movement
-                // [1,0,0] is world −Z, and a −Z exit from the T2 spawn standoff (which sits at
+                // [1,0,0] is world −Z, so a −Z exit from the T2 spawn standoff (which sits at
                 // twice the STAR's bound on +Z) flies straight through the star realm at the
                 // system centre — measured: the dot never reached the galaxy, its Entity head
                 // stayed on the home shard.
@@ -205,7 +213,7 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
 
-    // ---- I-AXIS FIRST (the flight law's licence for the −Z leg) --------------------------------------
+    // ---- I-AXIS FIRST (the flight law's licence for the polar +Z leg) --------------------------------
     // `world_roster` asserts I-AXIS/I-POLE/I-RADIAL/J1 internally; re-stated here with the measured
     // margin so a corridor regression names its number in THIS gate's failure, not a distant panic.
     let roster = world_roster(&DEV);
@@ -220,11 +228,13 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     );
 
     // ---- THE BOUNDED FLIGHT, computed from THE world (J3: exit bounds are computed, never
-    // inherited) — TRUE-SIZE RESTATEMENT (the taxonomy arc's in-system re-solve): the home
-    // shell is ~1.58e11 m now, and the dot flies it GOVERNED (the speed law's ceiling, not a
-    // 10 m foot step). The input holds full −Z for the CLOSED-FORM governed leg time to the
-    // release edge (the flight-table gate proves the integrator matches it to ±1 s) plus one
-    // wake budget of pad; the overshoot past the shell in that pad — even ramping toward the
+    // inherited) — TRUE-SIZE RESTATEMENT (the taxonomy arc's in-system re-solve): the home shell is
+    // `home_shell_m`, printed with the leg below, and the dot flies it GOVERNED (the speed law's
+    // ceiling, not a 10 m foot step). This comment used to quote "~1.58e11 m", which is seed 0's
+    // `TARGET_SYSTEM_BOUND_HOME_M` and not the shell of the world this cluster boots — the code four
+    // lines down has always read the live one. The input holds full +Z for the CLOSED-FORM governed
+    // leg time to the release edge (the flight-table gate measures the integrator against that same
+    // closed form inside its own derived band) plus one wake budget of pad; the overshoot past the shell in that pad — even ramping toward the
     // galaxy ceiling — is bounded by `v_cap(home)·pad·e` and must stay far inside the galaxy
     // and far short of the ring sibling's wake radius, ASSERTED below, derived throughout.
     let world = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
@@ -332,7 +342,7 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
         directory_rows(admin),
     );
 
-    // ---- THE CROSSING: a real client logs in; the bounded −Z leg fires the re-home AUTONOMOUSLY ------
+    // ---- THE CROSSING: a real client logs in; the bounded +Z leg fires the re-home AUTONOMOUSLY ------
     // Load the launcher's mTLS trust bundle + bind at the client-0 QUIC port the gateway pre-booked
     // (`CLIENT_NODE_BASE` → client_quic(0)), then log in on the home shard. The avatar spawns at the
     // home star's centre; the bounded forward flight takes it out of the shell.

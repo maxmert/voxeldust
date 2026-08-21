@@ -469,7 +469,8 @@ impl Separation {
     /// (ii) THE FLATTEN — metres, for what consumes metres: render, rapier, thrust, gauges. THE
     /// ERROR IS RELATIVE TO THE ANSWER, NEVER TO THE WORLD (§A5.2): exact iff `|Δcell| ≤ 2⁵³` per
     /// axis (≈ 8.8×10¹² m ≈ 59 AU at FINE); beyond that the `as_dvec3` cast rounds and the error is
-    /// ≤ 1 ulp of the answer (0.5 m per axis at the full 2.25e15 m star gap — nine orders inside
+    /// ≤ 1 ulp of the answer (0.5 m per axis at the full 2.25e15 m GALAXY radius, the widest span
+    /// the lattice ever holds — nine orders inside
     /// any band it could be compared to, and no authority commit compares metres there: those sites
     /// are integer).
     #[must_use]

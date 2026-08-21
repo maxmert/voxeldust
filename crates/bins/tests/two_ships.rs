@@ -60,8 +60,6 @@ use vd_wire::admin::{AdminSnapshot, GatewayView};
 const LOGIN_DEADLINE: Duration = Duration::from_secs(90);
 /// A healthy client clears this in a second or two once its home is up.
 const SNAPSHOT_FLOOR: u64 = 5;
-/// The rendezvous flies a real approach and waits out a real spin-up.
-const RENDEZVOUS_DEADLINE: Duration = Duration::from_secs(150);
 /// How much wider than the drawn footprint a probed rectangle is bracketed — the same 2× the other
 /// pixel gates use, absorbing the sub-frame skew between the sampled state and the readback frame.
 const RECT_BRACKET: f64 = 2.0;
@@ -72,6 +70,26 @@ const PROBE_RING_PX: f64 = DOT_MIN_APPARENT_RADIUS_PX;
 /// crossing gates' one-tick true-motion bound.
 fn metres_per_tick() -> f64 {
     DEV.move_speed * DEV.tick_dt
+}
+
+/// THE RENDEZVOUS BUDGET, derived: a rendezvous flies a REAL approach across the star system and
+/// then waits out a REAL spin-up, and both of those scale with the system the flight happens in.
+/// So the deadline is [`vd_bins::flight::governed_leg_budget`] over the home system's own solved
+/// bound, under the home system's own governed ceiling — the identical call the acceptance flight
+/// bounds its own intercept by. A flat number could only ever have been right for one world: the
+/// system's shell is solved from its star's drawn mass, so it moves whenever the star does.
+fn rendezvous_budget(system: RealmId) -> Duration {
+    let cfg = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+    let bound = vd_physics::worldgen::realm_regions_for_config(DEV.universe_seed, &cfg)
+        .iter()
+        .find(|r| r.realm == system)
+        .map(|r| r.shape.finite_extent())
+        .expect("THE world rosters the system the rendezvous is flown inside");
+    vd_bins::flight::governed_leg_budget(
+        &DEV,
+        bound,
+        vd_core::flight::realm_speed_cap_mps(bound, DEV.move_speed, vd_core::flight::TRAVERSE_S),
+    )
 }
 
 /// Every lawful realm-kind prefix a composed row's label can start with (`RealmId`'s Debug form) —
@@ -355,10 +373,12 @@ const READBACK_QUANTUM_PX: f64 = 1.0;
 /// subject — where the camera model's own footprint clears the readback's quantum. Below that the
 /// subject is a genuinely sub-pixel body and demanding paint would demand a lie: MEASURED here,
 /// with the camera-relative flatten landed and the diagnostic fit framing the drawn outlines, the
-/// far hull composes at **0.03 px** from `1.0e11` m — a 3.44e6 m world at a hundred million
-/// kilometres. Its presence, its AUTHOR and its composed size are still asserted (by the caller and
-/// by the size assert beside it); what is not asserted is that a thirtieth of a pixel lights up.
-/// A magenta (missing-asset) pixel is a failure at every size.
+/// far hull composes at a small FRACTION of one pixel — a planet-sized world seen from across the
+/// star system it orbits in — and the exact footprint is printed on the run rather than written
+/// down here, because both the body's own drawn radius and the range are the world's numbers and
+/// both move with it. Its presence, its AUTHOR and its composed size are still asserted (by the
+/// caller and by the size assert beside it); what is not asserted is that a fraction of a pixel
+/// lights up. A magenta (missing-asset) pixel is a failure at every size.
 fn assert_painted(cap: &Straddled, cwd: &std::path::Path, subject: &Subject, what: &str) -> u64 {
     let (rgba, w, h, clear) = decode(cwd, &cap.shot);
     assert_eq!(
@@ -507,8 +527,12 @@ fn g_two_ships_two_hulls_two_depths_mutual_visibility_and_one_watched_crossing()
         &DEV,
         planet,
         &roster.inner_elements,
-        RENDEZVOUS_DEADLINE,
+        rendezvous_budget(system),
     );
+    // A CADENCE BOUND, NOT A DISTANCE ONE: the flight is already over — the label flipped at the
+    // crossing commit — and this only waits for the delivered `location` to carry that flip
+    // through the snapshot lane. It is generous on purpose and it is measured in beats of the
+    // pipeline, not in metres, so no world number can make it stale.
     let y_state = await_location(devctl_y, &planet_label, "ship Y", Duration::from_secs(60));
     let x_state = vd_bins::pixel::poll(devctl_x);
     assert_eq!(
@@ -766,8 +790,10 @@ fn g_two_ships_two_hulls_two_depths_mutual_visibility_and_one_watched_crossing()
         &DEV,
         planet,
         &roster.inner_elements,
-        RENDEZVOUS_DEADLINE,
+        rendezvous_budget(system),
     );
+    // A CADENCE BOUND, NOT A DISTANCE ONE (see ship Y's, above): the crossing has already
+    // committed; this waits only for the delivered label to catch up.
     let x_after = await_location(devctl_x, &planet_label, "ship X", Duration::from_secs(60));
     watching.store(false, std::sync::atomic::Ordering::Relaxed);
     let watched = watcher.join().expect("the watcher thread finished");
@@ -810,18 +836,20 @@ fn g_two_ships_two_hulls_two_depths_mutual_visibility_and_one_watched_crossing()
         // THE GAP IS COUNTED IN DELIVERED TICKS AND THE ROWS ARE NOT: a composed picture holds
         // rows within the gateway's retention window, so two samples one DELIVERED tick apart
         // can lawfully carry rows whose own stamps sit one further tick apart — the fence-post
-        // of the composer's own retention. Measured on THE world: a planet moved 3521.562 m
-        // across a one-tick gap against a 3456.149 m one-tick bound (a 1.9 % excess, exactly one
-        // stamp of straddle), while a real author-flip jump would be orders larger (a body's
-        // parent-space orbit is ~2e9 m from its own frame). Counted once, stated here.
+        // of the composer's own retention. Measured on THE world: a planet moved a couple of
+        // percent FURTHER across a one-tick gap than a strict one-tick bound allowed — exactly
+        // one stamp of straddle — while a real author-flip jump would be ORDERS larger, because a
+        // body's parent-space orbit radius is what such a flip would move it by. Counted once,
+        // stated here; the measured worst case and its own allowance are printed every run.
         // ...and the spread is bounded by the COMPOSER'S RETENTION WINDOW, not by the client's
         // delivered-tick gap. Measured on THE world: two samples at the SAME delivered tick
-        // carried rows 4 467 m apart — lawful, because a composed picture may hold any rows
-        // inside `retention_ticks()` of each other, and at 8.6e4 m/s that window is tens of km.
-        // The defect this gate exists to catch — a position AUTHOR flip becoming visible — is
-        // four orders larger (a body's parent-space orbit is ~2e9 m from its own frame), so the
-        // wider bound still fails loudly for it while no longer calling the composer's own
-        // stated retention a jump.
+        // carried rows kilometres apart — lawful, because a composed picture may hold any rows
+        // inside `retention_ticks()` of each other, and at the planet's own orbital speed that
+        // window is a long way. The defect this gate exists to catch — a position AUTHOR flip
+        // becoming visible — is ORDERS larger (it would move a body by its whole parent-space
+        // orbit radius), so the wider bound still fails loudly for it while no longer calling the
+        // composer's own stated retention a jump. The allowance is built from the planet's OWN
+        // periapsis speed and the retention window, so both halves follow the world.
         let allowance =
             planet_v * DEV.tick_dt * (gap + retention_ticks()) as f64 + metres_per_tick();
         for row in &a.realm_boxes {

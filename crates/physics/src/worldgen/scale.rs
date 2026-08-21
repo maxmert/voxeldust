@@ -283,19 +283,39 @@ pub fn imf_mass_hi_msun() -> f64 {
     DERIVED_MASS_CAP.mass_hi_msun
 }
 
-/// The HOME system's target shell (§3.3.5 row 1, seed 0's `System(7)`) — RE-MEASURED 2026-08-20 at
-/// the derived mass cap (1.582261852875e11 → 1.582054016685e11 m = 1.05714 AU; the cap enters
-/// every star draw, so this seed's home star moved with it) —
-/// the flight-table gate's system-leg distance (`2·R_sys` edge-to-edge) and its warp-departure
-/// ceiling input. The SAME cited-target discipline as [`target_system_bound_max_m`]: the taxonomy
-/// slice's in-system re-solve recomputes it, and the gate that reads it flips loudly if that slice
-/// lands a different number. `pub` for exactly that gate.
+/// ★ A SEED-0 PROVENANCE MARKER, AND ONLY THAT (restated 2026-08-21, the gate-pass arc).
+///
+/// The HOME system's target shell of §3.3.5 row 1 — **seed 0's `System(7)`**, not the shipped
+/// default world's. Since 2026-08-20 a process with no `VD_UNIVERSE_SEED` boots
+/// [`HOME_SEED`](crate::worldgen::HOME_SEED) (2298), whose home system solves to a shell some
+/// THIRTY-TWO TIMES this one — its star is a G star where seed 0's is an M dwarf, and the orbit
+/// ladder is anchored at `0.4·√L` AU. So this number describes ONE seed's world and is useful for
+/// exactly one thing: being a fixed ruler that a generator change moves.
+///
+/// That is its job, and the job is checked. `g_star_shell_unmoved_the_stars_clearance_arm_never_binds`
+/// asserts it EQUALS seed 0's generated home shell, so the constant cannot quietly drift away from
+/// the solve it cites — it flips loudly instead. RE-MEASURED 2026-08-20 at the derived mass cap
+/// (1.582261852875e11 → 1.582054016685e11 m = 1.05714 AU; the cap enters every star draw, so this
+/// seed's home star moved with it).
+///
+/// ★ IT IS NO LONGER A FLIGHT-TABLE LEG. It used to be the `flight_table` gate's system-leg
+/// distance and warp-departure ceiling; that gate now DERIVES both from the home realm of the world
+/// it boots, because a table whose two in-system legs came from seed 0 while its warp leg came from
+/// the live world described no single world (SL5). The gate still PRINTS this target beside the
+/// derived distance, which is what keeps the citation live. `pub` for that print and for the story
+/// fixture.
 pub const TARGET_SYSTEM_BOUND_HOME_M: f64 = 158_205_401_668.478_1;
-/// The home system's OUTER planet's target SOI at the maximum mass draw (§3.3.4/§3.3.5) —
-/// the flight-table gate's planet-leg distance ("planet surface out to its own shell").
-/// RE-MEASURED 2026-08-20 with the same cause (8.567390468e9 → 8.566236992e9 m). Cited-target
-/// discipline as above; the D-REAL-1 equality (realm shell == gravitational SOI) lands it for real
-/// with the taxonomy slice.
+/// The same seed-0 provenance marker, one level down: seed 0's home system's OUTER planet's target
+/// SOI at the maximum mass draw (§3.3.4/§3.3.5). RE-MEASURED 2026-08-20 with the same cause
+/// (8.567390468e9 → 8.566236992e9 m).
+///
+/// ★ UNLIKE ITS SIBLING ABOVE, NOTHING PINS THIS ONE. It is a hand-derived figure off the
+/// addendum's §3.3 chain — a planet at the MAXIMUM mass draw on the outer rung — not a value the
+/// shipped generator produces for any body, so there is no generated quantity to assert it equal
+/// to. It is therefore documentation with a number attached, and it is `pub` only so the
+/// `flight_table` gate can PRINT it beside the world's own outer-planet SOI. The D-REAL-1 equality
+/// (realm shell == gravitational SOI) is what would finally give it a live pin; until then, read it
+/// as a citation of the design, never as a fact about the world any player boots.
 pub const TARGET_PLANET_SOI_OUTER_HOME_M: f64 = 8_566_236_992.362_801;
 
 /// ▲ 4. THE COMPRESSION χ = 24.568× — stated as the measurement it is (§A2.3): the real mean

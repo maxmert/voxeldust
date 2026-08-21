@@ -997,8 +997,9 @@ pub struct RealmRegion {
     /// own direct children of worst excursion + visibility reach), derived AT BOOT from the
     /// forest the generator already holds before scoping, so nothing ever crosses a realm
     /// boundary for it — tear-down widened by the same derived velocity lead every AoI band
-    /// carries. On THE world a star system's band is `444.104489631` / `469.104489631` m, both
-    /// bracketing its 150 m shell: interiors are awake before any crossing. Inert
+    /// carries. Interiors are awake before any crossing. (This used to quote a star system's band as
+    /// `444.104489631` / `469.104489631` m bracketing a `150 m` shell — the retired compressed
+    /// geometry; on THE world both are orders larger and per-seed, so the gates read them.) Inert
     /// (`spin_up == 0`) for a childless leaf — no interior, no interest. Populated by
     /// `vd-physics worldgen::to_regions`; APPENDED last + `#[serde(default)]`, mirroring `aoi`.
     #[serde(default = "AoiConfig::inert")]

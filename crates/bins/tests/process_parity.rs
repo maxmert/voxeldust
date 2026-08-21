@@ -16,7 +16,6 @@ use vd_bins::{
     dev_auth_pubkey_hex, gateway_env, orchestrator_env, reserve_tcp_addr, reserve_udp_addr,
     shard_env, spawn_node,
 };
-use vd_core::glam::DVec3;
 use vd_core::pose::StampedPose;
 use vd_core::{AccountId, EntityId, EpochId, NodeId, SessionId, TickId};
 use vd_devproto::CLIENT_NODE_BASE;
@@ -46,7 +45,9 @@ struct ProcessClient {
     /// transport fault). Asserted `> 0` at the end: the lane is ON by construction here. See `step`.
     realm_frames: u64,
     /// Total realm ROWS delivered across those datagrams — asserted `> 0` for the walker (the home
-    /// system's five planets are movers, so the lane carries real placements, not empty headers).
+    /// system's own movers carry per-tick placements, so the lane carries real rows, not empty
+    /// headers). It used to say "five planets"; THE world's home system holds NINE, and the count
+    /// is a `derived_world_planet_count` fact, not something to write down here.
     realm_rows: u64,
     /// `EntityRemoved` evictions applied (mirroring the production client's rule). Asserted `== 0`
     /// at the end: NOBODY leaves in this static two-avatar scenario, so any eviction is a defect —
@@ -58,6 +59,11 @@ struct ProcessClient {
     /// The origin epoch carried by the newest level — pinned to `Some(1)` at the end, and every
     /// scene delta must match it on arrival (see `on_control`).
     scene_epoch: Option<u64>,
+    /// THE FIRST pose this client was ever told about its OWN avatar — where the login PUT it,
+    /// before any input of its own could move it. Recorded because "did it move" and "where does a
+    /// login land" are different questions and this gate asks both; printed on a stalled
+    /// convergence so a login that lands somewhere unexpected names itself.
+    first_own_pose: Option<vd_core::pose::LatticePos>,
 }
 
 impl ProcessClient {
@@ -76,6 +82,7 @@ impl ProcessClient {
             evictions: 0,
             scene_levels: 0,
             scene_epoch: None,
+            first_own_pose: None,
         }
     }
 
@@ -108,12 +115,14 @@ impl ProcessClient {
                         // THE REALM LANE — where a star system's children are, this tick. The
                         // mechanism is ESTABLISHED (audit :774 — this arm used to tolerate the lane
                         // with a comment admitting it was unmeasured): the Single-shape shard hosts
-                        // THE world's home System (`DEV.realm_seed`), whose FIVE planets are movers,
-                        // so `emit_realm_frames` authors per-tick placement rows the moment it holds
-                        // authority + a present observer, and the gateway fans the realm lane to
-                        // every subscribed session. MEASURED here: every datagram must DECODE (a
-                        // failure IS a transport fault) and the lane + its rows are asserted `> 0`
-                        // at the end — a measured comparison, not a tolerance.
+                        // THE world's home System (`DEV.realm_seed`), whose planets are ALL movers
+                        // (this used to say FIVE — the retired compressed geometry's count; the
+                        // shipped world derives NINE, and the number belongs in the generator, not
+                        // here), so `emit_realm_frames` authors per-tick placement rows the moment
+                        // it holds authority + a present observer, and the gateway fans the realm
+                        // lane to every subscribed session. MEASURED here: every datagram must
+                        // DECODE (a failure IS a transport fault) and the lane + its rows are
+                        // asserted `> 0` at the end — a measured comparison, not a tolerance.
                         MsgClass::RealmSnapshot => {
                             let snap: RealmSnapshotDatagram =
                                 postcard::from_bytes(&bytes).expect("decode realm snapshot");
@@ -216,6 +225,9 @@ impl ProcessClient {
             SnapshotVerdict::Apply => {
                 self.last_frame = Some(snap.frame_id);
                 for entity in snap.entities {
+                    if self.own_entity == Some(entity.entity) && self.first_own_pose.is_none() {
+                        self.first_own_pose = Some(entity.pose.pos);
+                    }
                     self.poses.insert(entity.entity, entity.pose);
                 }
             }
@@ -328,6 +340,31 @@ fn p1_parity_real_binaries_over_quic() {
     let mut walker = ProcessClient::new(mesh(NodeId(CLIENT_NODE_BASE), client_a_addr));
     let mut idle = ProcessClient::new(mesh(NodeId(CLIENT_NODE_BASE + 1), client_b_addr));
 
+    // ---- WHERE A LOGIN LANDS, read off THE world -----------------------------
+    // ★ RE-DERIVED 2026-08-21 (the gate-pass arc), and the re-derivation EXPOSED A RACE this gate
+    // had been winning by accident. Both movement checks below used to measure distance from the
+    // REALM ORIGIN, which was the same thing as distance walked only while a login landed exactly
+    // on that origin. It does not any more: `resolve_homes` falls back to
+    // `WorldView::default_home_offset_m`, the T2 SPAWN STANDOFF — `+Z` by twice the bound of the
+    // largest STATIC child that holds the system's centre, i.e. twice the star's own reach, which
+    // on THE world is ten million kilometres rather than the walk fixture's zero.
+    //
+    // WHAT WAS MEASURED (four runs, 2026-08-21). A dot's FIRST delivered pose is the realm origin;
+    // its home is applied a few ticks later and the pose settles onto the standoff. The old loop
+    // broke on "the walker is more than half a metre from the ORIGIN", which the standoff satisfies
+    // before the walker has taken a step — so WHICH pose the assertions saw depended on how long
+    // the loop happened to spin. It saw the settled standoff (offset residual
+    // `0.0009098052978515625` m, the remainder of the standoff inside one Fine cell) on one run and
+    // the un-settled origin on the next four. Neither reading is a flake: they are two real states
+    // of a login, and the gate never said which one it wanted.
+    //
+    // It says so now. The loop waits for the IDLE dot to reach the home THE world states for it,
+    // and the walker's displacement is measured FROM THAT HOME — so the scenario cannot be
+    // sampled mid-login, and neither check can be satisfied by the standoff's own magnitude.
+    let spawn_m =
+        vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt).default_home_offset_m();
+    let spawn_pos = vd_core::pose::LatticePos::from_metres(spawn_m, vd_core::pose::Tier::Fine);
+
     // ---- drive the scenario at real tick rate --------------------------------
     let started = Instant::now();
     let mut pacer = TickPacer::new(DEV.tick_hz);
@@ -347,27 +384,43 @@ fn p1_parity_real_binaries_over_quic() {
                 idle.send_hello(AccountId(1001));
             }
         }
+        // THE LOGIN HAS SETTLED when the dot that never moves is standing where THE world says it
+        // spawns. Without this the loop can break mid-login and read a pre-home origin pose.
+        let idle_settled = idle
+            .own_entity
+            .and_then(|own| idle.poses.get(&own))
+            .is_some_and(|p| p.pos == spawn_pos);
         let done = walker.poses.len() == 2
             && idle.poses.len() == 2
+            && idle_settled
             && walker.own_entity.is_some_and(|own| {
                 walker.poses.get(&own).is_some_and(|p| {
-                    // TOTAL displacement — whole-number part plus leftover. The integrator folds the
-                    // leftover into the whole number every tick, so the leftover alone is a
-                    // sub-millimetre remainder and never reaches this threshold however far the
-                    // walker walks: this loop would spin until its deadline.
-                    p.pos
-                        .delta_m(vd_core::pose::LatticePos::ORIGIN, vd_core::pose::Tier::Fine)
-                        .distance(DVec3::ZERO)
-                        > 0.5
+                    // TOTAL displacement FROM THE SPAWN — whole-number part plus leftover. The
+                    // integrator folds the leftover into the whole number every tick, so the
+                    // leftover alone is a sub-millimetre remainder and never reaches this threshold
+                    // however far the walker walks: measuring it alone would spin until the
+                    // deadline. Measuring from the realm ORIGIN instead is the opposite failure —
+                    // the spawn standoff clears half a metre before the walker takes one step, so
+                    // the condition would be true immediately and prove nothing.
+                    p.pos.delta_m(spawn_pos, vd_core::pose::Tier::Fine).length() > 0.5
                 })
             });
         if done {
             break;
         }
+        // The BYSTANDER READING: where the WALKER's session says the idle dot is. Printed beside
+        // the idle dot's own reading so a stalled convergence names WHICH of the two it is — the
+        // dot genuinely sitting at the realm origin (both readings agree), or one session's fan
+        // carrying a stale row (they disagree). Without it the two are indistinguishable here.
+        let idle_seen_by_walker = idle
+            .own_entity
+            .and_then(|e| walker.poses.get(&e))
+            .map(|p| p.pos);
         assert!(
             started.elapsed() < DEADLINE,
             "parity scenario did not converge: walker(session={:?} subs={:?} poses={} moved={:?}) \
-             idle(session={:?} poses={})",
+             idle(session={:?} poses={} settled={idle_settled} at={:?} as-seen-by-walker={:?}) — \
+             THE world's spawn is {spawn_pos:?}; FIRST poses walker={:?} idle={:?}",
             walker.session,
             walker.held_subs,
             walker.poses.len(),
@@ -377,6 +430,12 @@ fn p1_parity_real_binaries_over_quic() {
                 .map(|p| p.pos),
             idle.session,
             idle.poses.len(),
+            idle.own_entity
+                .and_then(|e| idle.poses.get(&e))
+                .map(|p| p.pos),
+            idle_seen_by_walker,
+            walker.first_own_pose,
+            idle.first_own_pose,
         );
         let _ = pacer.wait();
     }
@@ -393,13 +452,16 @@ fn p1_parity_real_binaries_over_quic() {
     let idle_own = idle
         .own_entity
         .expect("authority announced to the idle dot");
+    // THE IDLE DOT NEVER MOVED — stated as the whole pose against the world's own spawn, not as a
+    // sub-cell residual against zero. STRONGER than the form it replaces: this pins all three
+    // components of where the world put it, where `offset() == ZERO` only ever pinned the remainder.
     assert_eq!(
-        idle.poses[&idle_own].pos.offset(),
-        DVec3::ZERO,
-        "the idle dot never moved"
+        idle.poses[&idle_own].pos, spawn_pos,
+        "the idle dot never moved: it must still sit exactly where THE world's own login standoff \
+         put it ({spawn_m:?} m, the T2 spawn clearing)",
     );
-    // THE REALM LANE, measured (audit :774): the home System shard authors per-tick rows for its
-    // five moving planets and the gateway fans them to every subscribed session — so by convergence
+    // THE REALM LANE, measured (audit :774): the home System shard authors per-tick rows for every
+    // one of its movers and the gateway fans them to every subscribed session — so by convergence
     // BOTH clients have decoded realm datagrams, and the walker's carried real placement rows.
     assert!(
         walker.realm_frames > 0 && idle.realm_frames > 0,

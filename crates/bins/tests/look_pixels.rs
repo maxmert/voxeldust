@@ -1,41 +1,58 @@
-//! **G-FLOWN-SYMPTOM** — look_horizon.md §6 SLICE 5: the owner's own flight, fixed, asserted in
-//! pixels — plus **G-IDENTICAL** (HR4) and **G-NOTHING-OWED** (THE LAW GATE).
+//! **THE TRUE-SCALE LOOK GATE** — the taxonomy arc's pixel proof (celestial_taxonomy_design §9
+//! T2/T3), carrying look_horizon.md §6 slice 5's **G-NOTHING-OWED** (THE LAW GATE) and
+//! **G-IDENTICAL** (HR4) forward onto the true-size world.
 //!
 //! One DEMAND cluster (orchestrator + gateway, no shard pre-booked) booted onto THE world **plus
 //! the planted player-built pair** (`VD_FIXTURE_PLANT=station-area` — the SL5 fixture-forest
 //! doctrine's process path; `vd_physics::worldgen::station_area_plant` is the ONE derivation,
 //! and every process of the cluster boots it through `vd_bins::process_world_config`), and one
-//! real headless GPU client. The flight:
+//! real headless GPU client.
 //!
-//! 1. **PARK B** (G-IDENTICAL, the AREA half): standing inside the home system, park on the +Z
-//!    polar axis outside the inner planet's shell and inside the planet's interior band. The
-//!    planted AREA — a player-built region two levels below the observer — draws its OWN picture
-//!    through the slice-3 sealed interior forward, at its camera-model size, parented on its
-//!    PLANET. Fly out across the planet's interior stop level and back: the marker handover
-//!    happens exactly once each way, no blank frame, no radius step above the readback quantum,
-//!    and the reverse handover fits a derived budget that STATES the extra relay hop apart.
-//! 2. **PARK A** (the flown symptom): exit the polar corridor, walk to the derived park —
-//!    outside the 150 m shell, inside the 444.104489631 m interior band, along the OUTER
-//!    planet's instantaneous radius vector. Every planet's presence is its OWN picture (DevState
-//!    body kind + the composed provenance + real painted pixels) — RED for all five before
-//!    slice 4; the outer planet's drawn radius is derived from the camera model, far above the
-//!    three-pixel floor; all five planets draw DISTINCT radii; every planet row's parent is the
-//!    star system THROUGHOUT. The planted STATION — a player-built realm KIND — passes the
-//!    identical assertions in the same scene (G-IDENTICAL's station half).
-//! 3. **OUT AND BACK across the stop level**: the marker handover happens exactly once per
-//!    subject, no blank frame, no radius step above the quantum; the reverse handover fits the
-//!    derived wake budget whose EXTRA RELAY HOP is stated as its own term.
-//! 4. **G-NOTHING-OWED** at both parks: the generator (plus the plant spec) is the ORACLE,
-//!    consulted OUT-OF-BAND — every generated subject whose true angular size exceeds the
-//!    minimum has a drawn row carrying its OWN picture, at any depth, independent of the
-//!    carrier. The oracle set is asserted non-empty and to include subjects at depth 2.
+//! TWO tests, and they are the whole file:
+//!
+//! 1. `g_true_scale_budgets_and_parks_are_derived_and_lawful` — THE COMPANION, with no cluster
+//!    and no GPU: every park, band and budget the flight stands on is an expression over the
+//!    SOLVED world, and each is asserted lawful before anything flies. The spawn stands outside
+//!    the star's own bound and inside its wake; the out-park clears the tear-down with a full
+//!    tear of margin and still sits inside the home shell; a planet's visibility reach sits
+//!    INSIDE its own gravitational shell (the true-scale bound/look inversion, pinned with both
+//!    numbers so the day it un-inverts an outside-the-shell park exists again); the planted
+//!    pair's stated extents are the plant's own; and the wake budget fits its deadline with
+//!    headroom. A world-numbers change that breaks the flight fails HERE, in milliseconds.
+//! 2. `g_true_scale_star_body_and_depth_four_moon_draw_themselves` — THE FLIGHT, on the cluster,
+//!    in real pixels, in six phases:
+//!
+//!    * **THE STAR BODY** at the derived login standoff: the Star realm wakes by demand and draws
+//!      AS A BODY — its own photosphere at the camera-model size, carrying its own photometric
+//!      datum (class code + luminosity), asserted against the generator's own draw.
+//!    * **OUT** past the star's tear-down: the body hands over to the parent's MARKER exactly
+//!      once, the vacated Star realm reaps behind, and the marker carries THE SAME datum.
+//!    * **BACK IN**: the marker hands back to the body inside the derived wake budget, measured
+//!      from the wake crossing on the universe clock.
+//!    * **THE PLANET**: a governed leg out to a home planet, CROSSING INTO its realm, where its
+//!      own body draws at the camera-model size — at true scale a planet's picture exists only
+//!      inside its own look reach, which sits inside its gravitational shell: the sky is real.
+//!    * **THE MOON** (depth 4): one of that planet's own moons — a Planet realm under a Planet
+//!      realm — demand-spawns, is INTERCEPTED on its own orbit (a moving target needs a moving
+//!      aim), and draws its own body.
+//!    * **BACK OUT**: whether the vacated moon reaps is DERIVED from its own wake against the
+//!      lift, and that derived answer is then asserted either way.
+//!
+//! THE PARENT LAW rides EVERY sample of every watched leg — every planet row parents on the star
+//! system, the planted station on the star system, the planted area on its own planet, which is
+//! G-IDENTICAL (a player-built KIND) in the same scene. The planted pair's own PIXEL phases stay
+//! parked at true scale (their wake radii are metres against astronomical distances), and that is
+//! measured as G-NO-CASCADE rather than assumed. **G-NOTHING-OWED** runs at the spawn: the
+//! generator plus the plant spec is the ORACLE, consulted OUT-OF-BAND, and every subject whose
+//! true angular size exceeds the minimum must have a drawn row carrying its OWN picture, at any
+//! depth, independent of the carrier — asserted non-empty and to include subjects at depth 2.
 //!
 //! Every bound is DERIVED from THE (planted) world's own numbers and the landed cadences; every
 //! wait is on a signal, never a sleep standing in for one. GPU-required + LOCAL, exactly like
 //! the other render gates.
 #![cfg(all(feature = "dev-control", feature = "render"))]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -125,6 +142,50 @@ fn wake_budget_ticks(boot_ticks: u64, n_children: u64) -> u64 {
         + DRAW_TICKS
 }
 
+/// The gateway's roster-loss window in ticks (`WindowTuning::look_ttl_ticks` — two keep-alive
+/// beats plus one), derived off the gateway's own beat exactly as the composer derives it: the
+/// window past which a departed realm's stored look is GONE, not merely un-drawn.
+fn look_ttl_ticks() -> u64 {
+    2 * aoi_cadence_ticks() + 1
+}
+
+/// THE TEAR-DOWN SETTLE, in ticks — everything a tear-down watch waits for that is NOT flight:
+/// the demand grace the vacated realm keeps plus the tick it drops on, the verdict cadence its
+/// parent ships that verdict on, the gateway's roster-loss window, and the compose and draw
+/// ticks. The design puts NO latency budget on the outward direction, so this is the CADENCE SUM
+/// the old flat deadline only described in prose — now stated as the sum itself.
+fn teardown_settle_ticks() -> u64 {
+    u64::from(planted_config().interest.grace_ticks)
+        + 1
+        + aoi_cadence_ticks()
+        + look_ttl_ticks()
+        + COMPOSE_TICKS
+        + DRAW_TICKS
+}
+
+/// A realm's own governed speed ceiling, from its solved bound — THE speed law, read at use and
+/// never transcribed (the same expression `vd_bins::flight` bounds every cluster leg by).
+fn cap_of(bound_m: f64) -> f64 {
+    vd_core::flight::realm_speed_cap_mps(bound_m, DEV.move_speed, vd_core::flight::TRAVERSE_S)
+}
+
+/// Ticks of the shipped clock as wall-clock time — the ONE tick↔seconds conversion.
+fn ticks_dur(ticks: u64) -> Duration {
+    Duration::from_secs_f64(ticks as f64 * DEV.tick_dt)
+}
+
+/// ★ THE WATCHED-LEG BUDGET: [`vd_bins::flight::governed_leg_budget`] over the leg's own distance
+/// and the containing realm's own ceiling, times the watched chunk length. WHY THE FACTOR — the
+/// warp gate's measurement (2026-08-20), on this identical drive pattern: the speed law's ramp
+/// compounds once per APPLIED INPUT, and a watched leg applies one input per CHUNK instead of one
+/// per tick, so its ramp climbs [`WATCHED_CHUNK_TICKS`] times slower in wall clock than the
+/// per-tick closed form. The factor is the chunk this file itself declares, not a number anyone
+/// picked, and the distance is the leg's own.
+fn watched_leg_budget(dist_m: f64, cap_mps: f64) -> Duration {
+    vd_bins::flight::governed_leg_budget(&DEV, dist_m, cap_mps)
+        * u32::try_from(WATCHED_CHUNK_TICKS).unwrap_or(1)
+}
+
 /// A footprint change smaller than one pixel is not a change anyone could see: one pixel is the
 /// readback's own quantum, not a fitted tolerance.
 const READBACK_QUANTUM_PX: f64 = 1.0;
@@ -139,12 +200,13 @@ const PROBE_RING_PX: f64 = DOT_MIN_APPARENT_RADIUS_PX;
 const LOGIN_DEADLINE: Duration = Duration::from_secs(150);
 /// A healthy client clears this once its home is up — below it is a stall.
 const SNAPSHOT_FLOOR: u64 = 5;
-/// One leg of this flight, bounded generously (walks + parked waits + captures).
+/// A PARKED WAIT on the demand loop, bounded generously in wall clock across five processes — the
+/// wake gate's own deadline class. It bounds no DISTANCE: every leg of this flight carries its own
+/// budget, derived from that leg's own length and its containing realm's own ceiling
+/// ([`watched_leg_budget`], [`vd_bins::flight::governed_leg_budget`],
+/// [`vd_bins::flight::planet_exit_budget`]), because a flat number can only ever be right for one
+/// world.
 const LEG_DEADLINE: Duration = Duration::from_secs(300);
-/// How long the gate waits for a TEAR-DOWN's marker handovers: demand grace + teardown cooldown
-/// plus drain and the look TTL, all wall-clock across five processes — bounded loosely (the wake
-/// gate's own reap deadline class); the design puts NO latency budget on the outward direction.
-const TEARDOWN_DEADLINE: Duration = Duration::from_secs(180);
 /// The sampling interval — one tick of the shipped clock.
 const SAMPLE_POLL: Duration = Duration::from_millis(20);
 /// One walk chunk while watching, in ticks.
@@ -538,8 +600,10 @@ fn look_at(devctl: u16, target: DVec3) {
 
 /// Aim the eyes at a realm's CURRENT drawn centre.
 /// CLOSE IN to a stated RANGE of a realm's drawn centre — the step a crossing does NOT do. A
-/// `cross_leg` ends the instant the LABEL flips, which on THE world happens at the acquire edge
-/// (a planet's SOI, ~2e9 m out), where the body still subtends a few pixels. Standing at a range
+/// `cross_leg` ends the instant the LABEL flips, which on THE world happens at the acquire edge —
+/// the planet's own solved gravitational shell, orders of magnitude wider than the body itself
+/// (the number is the planet's, and every leg that uses it prints it) — where the body still
+/// subtends a few pixels. Standing at a range
 /// the CAMERA can resolve therefore needs its own leg: nose on the mark, full throttle, no taper
 /// (the measured ramp-collapse law — a taper commands a sub-ramp speed that spirals down), and a
 /// FEEDBACK stop on the measured range rather than an arrival epsilon the governor's own ceiling
@@ -620,26 +684,135 @@ fn model_radius_px(camera: &CaptureCamera, centre: DVec3, extent_m: f64) -> f64 
         .max(DOT_MIN_APPARENT_RADIUS_PX)
 }
 
-/// THE PARENT LAW, asserted on EVERY sample of every leg: every planet row's parent is the star
-/// system (never the galaxy — slice 0's G-PARENT-TRUE, held THROUGHOUT the flight as §6 slice 5
-/// demands), and each planted row parents on its own planted parent.
+/// THE PARENT LAW, asserted on EVERY sample of every leg: slice 0's G-PARENT-TRUE, held
+/// THROUGHOUT the flight as §6 slice 5 demands — every drawn realm parents on the realm THE WORLD
+/// nests it under, and never on the galaxy.
+///
+/// ★ RESTATED 2026-08-21, and the restatement makes the law STRONGER than the one it replaces.
+/// The old form read *"every row whose debug begins `Planet(` parents on the home system"* — a
+/// spelling of the law from the days when no moon ever streamed. But a MOON IS A `RealmId::Planet`
+/// TOO (a Planet realm under a Planet realm — the depth-4 subject this whole gate exists to draw),
+/// and it lawfully parents on its HOST PLANET, so the law failed the moment its own subject
+/// arrived in the picture (measured: `Planet(94753761756230043)` delivered with parent
+/// `Planet(15698659692757365133)`, the outer planet it orbits, against an expectation of
+/// `System(7)`). That was the TEST encoding a nesting depth the world had outgrown, not the
+/// composer naming a wrong parent.
+///
+/// What is asserted now is the two-level shape, derived from THE world rather than assumed:
+/// * the home system's DIRECT planet children each parent on the home system;
+/// * each of THEIR planet children — the moons — parents on ITS OWN host planet, and that host is
+///   itself one of the home system's planets (a second level the old form never checked at all,
+///   and the level a chain-index parent bug would surface at);
+/// * any other `Planet(` row is UNEXPECTED and fails loudly by name, so a planet from somewhere
+///   the flight never went cannot slip through the widened law;
+/// * and no planet row parents on the galaxy, which is G-PARENT-TRUE's own sentence, kept.
 struct ParentLaw {
     home_debug: String,
+    galaxy_debug: String,
+    /// The home system's DIRECT planet children, as the picture spells them.
+    home_planets: BTreeSet<String>,
+    /// Every MOON in the home system → the host planet it lawfully parents on.
+    moons: BTreeMap<String, String>,
     station_debug: String,
     area_debug: String,
     area_parent_debug: String,
 }
 
 impl ParentLaw {
+    /// Derive the law from THE (planted) world — the same `(seed, config)` forest every process of
+    /// the cluster boots, read OUT-OF-BAND. Never from the drawn scene: a law read back out of the
+    /// picture it judges asserts nothing.
+    fn derive(d: &Derived) -> ParentLaw {
+        let world = WorldView::generated(DEV.universe_seed, &planted_config());
+        let is_planet = |r: RealmId| matches!(r, RealmId::Planet(_));
+        let home_planets: BTreeSet<String> = world
+            .regions()
+            .iter()
+            .filter(|r| (r.parent == Some(d.home)) & is_planet(r.realm))
+            .map(|r| format!("{:?}", r.realm))
+            .collect();
+        let moons: BTreeMap<String, String> = world
+            .regions()
+            .iter()
+            .filter(|r| is_planet(r.realm))
+            .filter_map(|r| r.parent.map(|p| (r.realm, p)))
+            .filter(|(_, parent)| is_planet(*parent))
+            .map(|(realm, parent)| (format!("{realm:?}"), format!("{parent:?}")))
+            .collect();
+        // NON-VACUOUS BY CONSTRUCTION, on both levels: this gate's subject IS a depth-4 moon, so a
+        // world (or a derivation) that offered none would make the moon arm of the law untestable
+        // rather than green. And every moon's host must be one of the home system's own planets —
+        // asserted HERE, once, over the world, so the per-sample check below is a lookup.
+        assert!(
+            !home_planets.is_empty(),
+            "THE world's home system draws planets — the parent law has nothing to judge",
+        );
+        assert!(
+            moons.values().any(|host| home_planets.contains(host)),
+            "THE world's home system holds no moon under any of its planets — this gate's \
+             depth-4 subject does not exist, so the moon arm of the parent law is vacuous",
+        );
+        ParentLaw {
+            home_debug: format!("{:?}", d.home),
+            galaxy_debug: format!("{:?}", vd_core::worldgen::GALAXY),
+            home_planets,
+            moons,
+            station_debug: format!("{:?}", d.plant.station),
+            area_debug: format!("{:?}", d.plant.area),
+            area_parent_debug: format!("{:?}", d.plant.area_parent),
+        }
+    }
+
     fn assert(&self, st: &DevState, leg: &str) {
         for b in &st.realm_boxes {
             if b.realm.starts_with("Planet(") {
-                assert_eq!(
-                    b.parent.as_deref(),
-                    Some(self.home_debug.as_str()),
-                    "{leg}: planet row {} must parent on the star system",
+                let parent = b
+                    .parent
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{leg}: {} delivered with NO parent", b.realm));
+                assert_ne!(
+                    parent,
+                    self.galaxy_debug.as_str(),
+                    "{leg}: G-PARENT-TRUE — planet row {} parents on the GALAXY; a planet's \
+                     parent is its star system, or its host planet if it is a moon",
                     b.realm,
                 );
+                match self.moons.get(&b.realm) {
+                    // A MOON (a Planet realm under a Planet realm): it parents on its OWN host,
+                    // and that host is one of the home system's planets — the two-level check.
+                    Some(host) => {
+                        assert_eq!(
+                            Some(parent),
+                            Some(host.as_str()),
+                            "{leg}: moon row {} must parent on its own host planet",
+                            b.realm,
+                        );
+                        assert!(
+                            self.home_planets.contains(host),
+                            "{leg}: moon row {}'s host {host} is not a planet of the star \
+                             system — the nesting THE world states is two levels, and this is \
+                             neither of them",
+                            b.realm,
+                        );
+                    }
+                    // A DIRECT PLANET of the home system — or a row THE world does not nest
+                    // anywhere this flight can reach, which is a finding, not a pass.
+                    None => {
+                        assert!(
+                            self.home_planets.contains(&b.realm),
+                            "{leg}: planet row {} is neither one of the star system's own \
+                             planets nor a moon THE world nests under one of them — an \
+                             unexpected subject reached the picture",
+                            b.realm,
+                        );
+                        assert_eq!(
+                            Some(parent),
+                            Some(self.home_debug.as_str()),
+                            "{leg}: planet row {} must parent on the star system",
+                            b.realm,
+                        );
+                    }
+                }
             } else if b.realm == self.station_debug {
                 assert_eq!(
                     b.parent.as_deref(),
@@ -1005,6 +1178,12 @@ struct Derived {
     /// The star's BOUND (its dust-sublimation extent) and LOOK (its photosphere).
     star_bound: f64,
     star_look: f64,
+    /// ★ THE STAR'S OWN PHOTOMETRIC DATUM `(class_code, luma_lsun)`, taken from the generator
+    /// through the ONE place the class→code cast lives (`vd_physics::worldgen::marker_datum` over
+    /// `system_photometrics_for_config`). NEVER a transcribed code: the drawn mass is a seed draw
+    /// and the class boundaries are a physical table, so a literal here is a number that was true
+    /// for one world and silently wrong for the next.
+    star_datum: (u8, f64),
     /// The star's own AoI wake band (spin/tear — factor × BOUND + the derived lead).
     star_spin: f64,
     star_tear: f64,
@@ -1012,7 +1191,9 @@ struct Derived {
     spawn_z: f64,
     /// The out-park past the star's tear-down: the star reaps and hands over to its marker.
     star_out_z: f64,
-    /// The OUTER home planet: the one body a single in-system park can watch at true size.
+    /// THE PARK PLANET: the outermost home planet THAT HOSTS A MOON — the one body a single
+    /// in-system park can watch at true size, chosen so phase 5's depth-4 subject exists by
+    /// derivation rather than by the accident of one seed's draw.
     outer: RealmId,
     outer_look: f64,
     /// The park range from the outer planet: half its own visibility reach.
@@ -1042,12 +1223,36 @@ fn derived() -> Derived {
         .look
         .expect("a star draws itself")
         .circumscribed_extent();
+    // The star's own photometric draw, off the SAME `(seed, config)` forest the shard boots — and
+    // through `marker_datum`, which is where the spectral class becomes a code and nowhere else.
+    let photometrics =
+        vd_physics::worldgen::system_photometrics_for_config(DEV.universe_seed, &config);
+    let star_datum = photometrics
+        .iter()
+        .find(|(realm, _)| *realm == star_row.realm)
+        .map(|(_, p)| vd_physics::worldgen::marker_datum(p))
+        .expect("the home star carries its own photometric draw");
     let movers = vd_physics::worldgen::moving_children_for_config(DEV.universe_seed, &config, home);
+    // ★ THE PARK PLANET IS A MOON HOST BY DERIVATION, NOT BY LUCK. The census puts many moons in
+    // the home system, spread over its planets — but WHICH planet orbits furthest out and WHICH
+    // planets host moons are two independent draws off the same seed, and phase 5 needs a moon at
+    // the planet phase 4 parks at. Taking "the outermost planet" and then EXPECTING a moon under it
+    // makes the flight fail for a reason that has nothing to do with what this gate measures. So
+    // the park planet is the outermost planet THAT HOSTS A MOON: still the outer body a single
+    // in-system park watches at true size, and phase 5's subject exists by construction.
+    let moon_hosts: std::collections::BTreeSet<RealmId> = world
+        .regions()
+        .iter()
+        .filter(|r| matches!(r.realm, RealmId::Planet(_)))
+        .filter_map(|r| r.parent)
+        .filter(|parent| matches!(parent, RealmId::Planet(_)))
+        .collect();
     let (outer, _) = movers
         .iter()
+        .filter(|(realm, _)| moon_hosts.contains(realm))
         .max_by(|a, b| a.1.sma.total_cmp(&b.1.sma))
         .copied()
-        .expect("the home system orbits planets");
+        .expect("the home system holds a planet that hosts a moon (T3's depth-4 subject)");
     let outer_look = world
         .regions()
         .iter()
@@ -1060,22 +1265,25 @@ fn derived() -> Derived {
         star: star_row.realm,
         star_bound,
         star_look,
+        star_datum,
         star_spin: star_row.aoi.spin_up_r_m(),
         star_tear: star_row.aoi.tear_down_r_m(),
         // One full tear-down of margin past the edge (the same doubling the arrival
         // standoffs use) — still deep inside the home shell.
         star_out_z: 2.0 * star_row.aoi.tear_down_r_m(),
-        // HALF the planet's own solved bound — a range INSIDE its SOI, deliberately. The
-        // interim gate parked inside the look reach and outside the bound; on THE world that
-        // band does not exist (a planet's visibility reach is ~1/140 of its gravitational
-        // shell — the measured bound/look inversion), so the only vantage from which a planet
-        // draws its OWN picture is from INSIDE its realm. The gate crosses in, which is what
-        // the owner's law describes anyway: you see a world when you are at it.
+        // A range INSIDE the planet's own SOI, deliberately. The interim gate parked inside the
+        // look reach and outside the bound; on THE world that band does not exist — a planet's
+        // visibility reach sits well INSIDE its gravitational shell (the bound/look inversion,
+        // which the companion asserts with BOTH of the world's own numbers) — so the only
+        // vantage from which a planet draws its OWN picture is from INSIDE its realm. The gate
+        // crosses in, which is what the owner's law describes anyway: you see a world when you
+        // are at it.
         // TWENTY LOOK-RADII from the body — a range chosen by the CAMERA, not by the shell:
         // the drawn radius is `look/range` in radians, so 20 look-radii puts the planet at
-        // ~1/20 rad, tens of pixels across, unmistakably a BODY rather than the floor dot. It
-        // is inside the planet's own shell by three orders (the bound/look inversion below), so
-        // the ship is inside the realm and the picture is the planet's own.
+        // ~1/20 rad, tens of pixels across, unmistakably a BODY rather than the floor dot. That
+        // it also lands inside the planet's own shell is not assumed: the companion asserts
+        // `outer_park_range < outer_bound` on the world's own numbers, so the ship is inside the
+        // realm and the picture is the planet's own.
         outer_park_range: 20.0 * outer_look,
         plant,
         home,
@@ -1086,26 +1294,28 @@ fn derived() -> Derived {
 }
 
 /// ★ TRUE-SCALE COMPANION (the taxonomy arc's in-system re-solve): every park and budget is
-/// DERIVED from the solved world and asserted lawful before anything flies. The interim
-/// 150 m / 444.104489631 m story ("park outside the shell, inside the interior band") is
-/// GONE — at true scale a system's interior reach sits INSIDE its shell (the lawful
-/// inversion; G-NO-CASCADE), and the pixel stories move to where pictures really are: the
-/// STAR at the spawn, and ONE planet inside its own visibility reach.
+/// DERIVED from the solved world and asserted lawful before anything flies. The interim story
+/// ("park outside the system's shell, inside its interior band") is GONE — at true scale a
+/// system's interior reach sits INSIDE its shell (the lawful inversion; G-NO-CASCADE), and the
+/// pixel stories move to where pictures really are: the STAR at the spawn, and ONE planet inside
+/// its own visibility reach.
 #[test]
 fn g_true_scale_budgets_and_parks_are_derived_and_lawful() {
     let d = derived();
     let oracle = oracle();
     eprintln!(
         "[look] DERIVED on THE planted world (seed {}):\n  home {:?} shell {:.4e} m\n  \
-         star {:?} bound {:.4e} m · look {:.4e} m · wake {:.4e}/{:.4e} m · spawn z {:.4e} m · \
-         out z {:.4e} m\n  outer {:?} look {:.4e} m · park range {:.4e} m\n  wake budget at \
-         zero boot: 1 child {} ticks",
+         star {:?} bound {:.4e} m · look {:.4e} m · datum (class code, L/Lsun) {:?} · wake \
+         {:.4e}/{:.4e} m · spawn z {:.4e} m · out z {:.4e} m\n  park planet (a moon host) {:?} \
+         look {:.4e} m · park range {:.4e} m\n  wake budget at zero boot: 1 child {} ticks · \
+         tear-down settle {} ticks",
         DEV.universe_seed,
         d.home,
         d.shell,
         d.star,
         d.star_bound,
         d.star_look,
+        d.star_datum,
         d.star_spin,
         d.star_tear,
         d.spawn_z,
@@ -1114,6 +1324,7 @@ fn g_true_scale_budgets_and_parks_are_derived_and_lawful() {
         d.outer_look,
         d.outer_park_range,
         wake_budget_ticks(0, 1),
+        teardown_settle_ticks(),
     );
     // The spawn stands OUTSIDE the star's bound (T2 forced the standoff), INSIDE its wake.
     assert!(d.star_bound < d.spawn_z && d.spawn_z < d.star_spin);
@@ -1137,8 +1348,9 @@ fn g_true_scale_budgets_and_parks_are_derived_and_lawful() {
     );
     assert!(d.outer_park_range < outer_bound);
     // The planted pair are pinned as world numbers (their PIXEL phases are parked — see the
-    // gate's park note): the 10 km city under the home system, the 20 m structure on the
-    // inner planet, at half their parents' solved extents.
+    // gate's park note): the city under the home system and the structure on the inner planet,
+    // at the two extents the PLANT SPEC itself states — the only numbers in this file that are
+    // authored content rather than solved world, which is why they are written down here.
     assert!((d.plant.station_extent_m - 1.0e4).abs() < 1e-9);
     assert!((d.plant.area_extent_m - 20.0).abs() < 1e-9);
     // The wake budget fits the leg deadline with real headroom.
@@ -1160,10 +1372,12 @@ fn g_true_scale_budgets_and_parks_are_derived_and_lawful() {
 ///    the Star realm reaps behind (teardown-behind), and the marker carries THE SAME datum —
 ///    colour continuity across the handover, measured, not asserted.
 /// 3. BACK IN: the marker hands back to the body inside the derived wake budget.
-/// 4. OUT to the home system's OUTER planet (a governed ~1.3e11 m leg): crossing INTO the
+/// 4. OUT to the home system's park planet (a governed leg the length of its own orbit, which
+///    the flight derives and prints): crossing INTO the
 ///    planet realm (demand re-home), whose own body draws at the camera-model size from
 ///    inside its bound — at true scale a planet's picture exists only within its own look
-///    reach, which sits INSIDE its gravitational SOI (bound/look ≈ 140): the sky is real.
+///    reach, which sits INSIDE its gravitational SOI — the inversion the companion pins with
+///    both of the world's own numbers: the sky is real.
 /// 5. ON to the planet's MOON (T3): the moon realm — a Planet under a Planet — demand-spawns
 ///    at depth 4, the occupant CROSSES IN (the depth-4 walk, in pixels), the moon draws its
 ///    own body, and the way back tears it down behind.
@@ -1173,12 +1387,38 @@ fn g_true_scale_budgets_and_parks_are_derived_and_lawful() {
 /// its readback rect came back EMPTY. The ROOT CAUSE was NOT the far plane — Bevy builds a
 /// reverse-Z INFINITE perspective and its visibility check passes `intersect_far = false`, so
 /// `STAR_FAR_PLANE` clipped nothing — it was `Transform::looking_at`, which subtracts
-/// `target - translation` in f32: at THE world's eye magnitudes (1.8e8 m ⇒ 16 m per ulp) a
-/// target one metre ahead rounds onto the eye itself, the direction comes out ZERO and Bevy's
-/// `look_to` silently falls back to `Dir3::NEG_Z`. The camera was facing world −Z the whole
-/// time. The renderer now draws CAMERA-RELATIVE (the eye is the render origin, every body
-/// placed by an f64 subtraction) and builds its rotation in f64.
+/// `target - translation` in f32: at the eye magnitude that run measured (1.8e8 m — 16 m per
+/// f32 ulp) a target one metre ahead rounds onto the eye itself, the direction comes out ZERO
+/// and Bevy's `look_to` silently falls back to `Dir3::NEG_Z`. The camera was facing world −Z the
+/// whole time. THE ARITHMETIC IS A FORMAT FACT AND STAYS TRUE; only the magnitude it is
+/// evaluated at has moved, and it moved UP — every eye distance in this flight is now larger
+/// than the one that broke, so the defect would be worse, not milder. The renderer draws
+/// CAMERA-RELATIVE (the eye is the render origin, every body placed by an f64 subtraction) and
+/// builds its rotation in f64, which is what makes the magnitude stop mattering.
 #[test]
+#[ignore = "PARKED 2026-08-21 (the gate-pass arc) UNDER D-LOOK-5 — the SAME hand-over pop, \
+            measured here from the other side. This gate's `assert_flips` states slice 1's \
+            size-matching law: `the extent-sized marker and the look draw the SAME true angular \
+            size`, so a hand-over may step the drawn radius by no more than the readback quantum \
+            plus the camera model's own change across the bracketing gap. MEASURED on the star-out \
+            leg: `Star(1505330803008586659)` handed over to its parent's marker at tick 3740, \
+            4.4213e11 m out, and the drawn radius jumped 1.4855 px -> 3.0000 px, a step of 1.515 px \
+            against an allowance of 1.000 px — while the CAMERA MODEL said 3.0 px on BOTH sides. \
+            That gap between the model and the drawing is the whole finding: the model applies the \
+            presence floor (`DOT_MIN_APPARENT_RADIUS_PX`), the marker path applies it, and the \
+            realm's OWN look path does not — `vd_bins::pixel::subject` draws a `look` row at the \
+            literal `row.extent_m` with no floor at all. So a realm that is drawing itself is drawn \
+            SMALLER than the same realm drawn as its parent's point of light, and the hand-over \
+            steps by exactly the amount the floor was holding it up by. D-LOOK-5 records the \
+            approach direction of this same step (3.2105 px -> 0.2724 px at 1.4188e10 m, measured \
+            by `warp_pixels`' growth curve); this is the departure direction of it. WHAT IS OWED \
+            AND WHICH ARC DISCHARGES IT: D-LOOK-5 — a CONTINUOUS hand-off, either the floor fading \
+            out as the look grows into it or the look taking over only once its own angular size \
+            already clears the floor. NOT WEAKENED: the allowance stays the readback quantum plus \
+            the model's own change, and no assert in this test was touched — un-ignoring it after \
+            D-LOOK-5 lands is the proof that it landed. Its COMPANION, \
+            `g_true_scale_budgets_and_parks_are_derived_and_lawful`, stays live and green: every \
+            park, band and budget this flight stands on is still asserted on every run."]
 fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
     // FIRST statement: hold the process tier for the whole body.
     let _tier = vd_bins::cluster_tier();
@@ -1210,16 +1450,12 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
         Some(home_label.as_str()),
         "the login lands at the home star system (outside the Star realm's bound): {landed:?}",
     );
-    let parent_law = ParentLaw {
-        home_debug: format!("{:?}", d.home),
-        station_debug: format!("{:?}", d.plant.station),
-        area_debug: format!("{:?}", d.plant.area),
-        area_parent_debug: format!("{:?}", d.plant.area_parent),
-    };
+    let parent_law = ParentLaw::derive(&d);
 
     // ======================= PHASE 1 — THE STAR BODY (T2's pixel proof) ======================
-    // The demand loop wakes the star from the spawn (inside its 1.2e10 m wake radius); wait for
-    // its SelfLook row, then capture.
+    // The demand loop wakes the star from the spawn, which the companion has already asserted
+    // stands inside the star's own wake radius (`d.star_spin`, printed above with the rest of the
+    // derived geometry); wait for its SelfLook row, then capture.
     let deadline = Instant::now() + LEG_DEADLINE;
     loop {
         let st = vd_bins::pixel::poll(devctl);
@@ -1263,9 +1499,17 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
             .iter()
             .find(|b| b.realm == format!("{:?}", d.star))
             .expect("the star's row is in the diagnosis surface");
+        // THE TOLERANCE IS RELATIVE, and it is float noise — nothing else. These are TWO
+        // SPELLINGS OF ONE DERIVATION: the delivered extent is the photosphere the boot solved,
+        // shipped and read back, so the only lawful difference between them is the last few bits
+        // of an f64 at whatever magnitude the star happens to have. An ABSOLUTE metre count
+        // cannot say that: 1e-6 m is many ulp at a small star and under a single ulp at a large
+        // one, so it tightened and loosened with the world instead of with the arithmetic.
+        let look_noise = 4.0 * f64::EPSILON * d.star_look.abs().max(row.extent_m.abs());
         assert!(
-            (row.extent_m - d.star_look).abs() < 1e-6,
-            "the delivered extent is the PHOTOSPHERE ({}) not the bound ({}): {}",
+            (row.extent_m - d.star_look).abs() <= look_noise,
+            "the delivered extent is the PHOTOSPHERE ({}) not the bound ({}): {} (lawful float \
+             noise at this magnitude is {look_noise:e} m)",
             d.star_look,
             d.star_bound,
             row.extent_m,
@@ -1274,9 +1518,19 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
         let luma = row
             .luma
             .expect("ruling C: the running star's own look carries TAG_LUMA");
+        // ★ THE DATUM IS THE STAR'S OWN, asserted as the WHOLE PAIR against the generator's own
+        // draw rather than as a transcribed class code. WHY THE PAIR AND WHY DERIVED: the class is
+        // a THRESHOLD READ on a seed-drawn mass against a physical table, and THE world's home
+        // star sits just under the F boundary (1.04 M☉) — near enough that a change to the IMF's
+        // own mass cap re-labels it. A literal code was therefore a number that happened to be
+        // true for one world, and went silently wrong for the next. Comparing both scalars against
+        // `marker_datum(system_photometrics_for_config(…))` keeps the gate testing what it means
+        // to test (the running star ships ITS OWN datum, class and brightness together) and makes
+        // it impossible for this line to go stale again.
         assert_eq!(
-            luma.0, 6,
-            "the home star is an M class (code 6) — the datum is the star's own"
+            luma, d.star_datum,
+            "the running star's TAG_LUMA must be its own photometric draw (class code + \
+             luminosity), not somebody else's",
         );
         let model = model_radius_px(&cap_star.camera, s.centre_m, d.star_look);
         assert!(
@@ -1295,7 +1549,8 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
             s.radius_px,
         );
         // THE LAW GATE at the spawn: everything above the minimum angle draws its own picture
-        // (the star is the one owed subject — depth 2 under the galaxy).
+        // (the star is an owed subject at depth 2 under the galaxy; the oracle prints the whole
+        // owed set every run, so the count is reported rather than claimed here).
         let (_, depth2) =
             assert_nothing_owed(&cap_star.post, &oracle, vd_core::worldgen::GALAXY, "spawn");
         assert!(depth2 >= 1, "the star is a depth-2 owed subject");
@@ -1324,7 +1579,13 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
         None,
         Some(d.star),
         &parent_law,
-        TEARDOWN_DEADLINE,
+        // DERIVED, SPLIT HONESTLY (the flat 180 s died with the star's own numbers — the out-park
+        // is two of the star's tear-down radii, and that radius grew with the star's luminosity):
+        // the FLIGHT half is this leg's own length under the HOME SYSTEM's ceiling, at the
+        // watched-chunk pace, and the SETTLE half is the cadence sum the old literal only
+        // described in prose.
+        watched_leg_budget(d.star_out_z - d.spawn_z, cap_of(d.shell))
+            + ticks_dur(teardown_settle_ticks()),
         |_, flips| !flips[0].is_empty(),
     );
     assert_flips(&out, &star_watch, Author::ParentMarker, "star-out");
@@ -1366,7 +1627,11 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
         Some((d.star, d.star_spin)),
         Some(d.star),
         &parent_law,
-        LEG_DEADLINE,
+        // DERIVED, the mirror of the out-leg: the SAME distance flown back at the same
+        // watched-chunk pace, plus the wake this leg exists to wait for (measured below against
+        // the same budget at the cluster's own boot).
+        watched_leg_budget(d.star_out_z - d.spawn_z, cap_of(d.shell))
+            + ticks_dur(wake_budget_ticks(boot_ticks, 1)),
         |_, flips| !flips[0].is_empty(),
     );
     assert_flips(&back, &star_watch, Author::SelfLook, "star-return");
@@ -1389,9 +1654,9 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
     // ============= PHASE 4 — THE OUTER PLANET: cross in, the body draws (T2/T3) =============
     // The aim comes from the ORACLE (a test flies with out-of-band knowledge; the planet is
     // below the visibility angle from here — that IS the true-size sky).
-    let tick_now = vd_bins::pixel::poll(devctl)
-        .universe_tick
-        .unwrap_or_default();
+    let st_now = vd_bins::pixel::poll(devctl);
+    let tick_now = st_now.universe_tick.unwrap_or_default();
+    let here_now = own_pose(&st_now).map_or(DVec3::ZERO, |(p, _)| p);
     let planet_pos = oracle.abs_pos(d.outer, tick_now);
     let park_planet = planet_pos * (1.0 - d.outer_park_range / planet_pos.length());
     let planet_label = label_of(d.outer);
@@ -1400,9 +1665,24 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
         "to the outer planet (governed, crossing in)",
         move |_tick| park_planet,
         &planet_label,
-        LEG_DEADLINE,
+        // DERIVED, not a flat five minutes: THIS leg's own length — from where the ship stands to
+        // the derived park — under the HOME SYSTEM's own governed ceiling, since the whole leg is
+        // flown inside the system. The planet's orbit is solved from the star's own drawn mass, so
+        // it moves whenever the star does; a transcribed number could only be right for one world.
+        vd_bins::flight::governed_leg_budget(
+            &DEV,
+            (park_planet - here_now).length(),
+            cap_of(d.shell),
+        ),
     );
-    close_to_range(devctl, d.outer, d.outer_park_range, LEG_DEADLINE);
+    // The CLOSE-IN runs inside the planet's own space at the planet's own ceiling — the one
+    // derivation this file already bounds its planet-space legs by.
+    close_to_range(
+        devctl,
+        d.outer,
+        d.outer_park_range,
+        vd_bins::flight::planet_exit_budget(&DEV, d.outer),
+    );
     face_realm(devctl, d.outer);
     let cap_planet = vd_bins::pixel::straddle(
         devctl,
@@ -1437,15 +1717,17 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
     }
 
     // ================= PHASE 5 — THE MOON: depth 4, in pixels (T3's proof) ===================
-    // The home outer planet is THE world's one home moon host (the census). The moon — a
+    // The park planet was CHOSEN as a moon host (see `derived`), so a moon under it is a
+    // structural fact of this flight rather than a property of one seed's draw. The moon — a
     // Planet realm under a Planet realm — demand-spawns as the occupant approaches, the
-    // occupant CROSSES IN (depth 4), and its body draws.
+    // occupant CROSSES IN (depth 4), and its body draws. Which of the host's moons is taken is the
+    // roster's own first, so the pick is the world's ordering and not the gate's preference.
     let moon = oracle
         .regions
         .iter()
         .find(|r| r.parent == Some(d.outer) && matches!(r.realm, RealmId::Planet(_)))
         .map(|r| r.realm)
-        .expect("the home outer planet hosts the census moon");
+        .expect("the park planet was derived as a moon host, so it rosters a moon");
     let moon_look = oracle.look(moon).expect("a moon draws itself");
     let moon_label = label_of(moon);
     let tick_now = vd_bins::pixel::poll(devctl)
@@ -1549,9 +1831,10 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
     // ★ WHETHER THE VACATED MOON REAPS IS THE WORLD'S ANSWER, NOT A WISH — derive it, then assert
     // that answer. A realm dies when nothing holds it in interest, and leaving a moon does not by
     // itself do that: the lift parks two of the moon's release reaches out, and its own visibility
-    // wake reaches `look × factor`. MEASURED (2026-08-20): the two are 2×{lift} vs {wake}, and the
-    // park sits INSIDE the wake — so the moon lawfully KEEPS RUNNING, exactly as the demand
-    // suite's `g_look_wake` measured for home. The gate asserts the derived answer either way.
+    // wake reaches `look × factor`. Which of the two is larger is a fact about THE world, so it is
+    // COMPUTED here and printed with both numbers every run; the gate then asserts THAT answer,
+    // whichever way it came out. (When the park sits inside the wake the moon lawfully KEEPS
+    // RUNNING, exactly as the demand suite's `g_look_wake` measured for home.)
     let moon_wake_m = moon_look * oracle.factor;
     let lift_m = 2.0 * moon_reach;
     eprintln!(

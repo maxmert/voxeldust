@@ -8,10 +8,12 @@
 //! pixels INSIDE its projected screen AABB (H2: "the box drew WHERE it should"). Zero magenta.
 //!
 //! STREAM anti-vacuity: the DRAWN set (the state the manifest's capture records) must equal the
-//! gateway-emitted LEVEL set — on THE world's Single topology the origin's own LOOK body (the
-//! home shell) plus one MARKER point per planet (the parent-authored reflected datum; markers
-//! are points until Slice D's sprites) — and the ORIGIN MARKER must name the home realm. A lost
-//! row, an extra row, or a wrong body kind cannot hide behind the pixel floor.
+//! gateway-emitted LEVEL set — on THE world's Single topology the one RUNNING realm's own LOOK
+//! body plus one parent-authored MARKER per look-stating direct child it holds — and the ORIGIN
+//! MARKER must name the home realm. BOTH sides of that equality are derived: the running set from
+//! the cluster shape's own pre-booking, the marker set from the world's own region rows, so a
+//! re-seeded or re-drawn world moves the expectation with it instead of rotting into a literal. A
+//! lost row, an extra row, or a wrong body kind cannot hide behind the pixel floor.
 //!
 //! THE CAMERA (the A1 discipline, shared with the crossing gate): the client's offscreen capture
 //! camera refits `fit_camera_to_scene` over the LIVE overlaid scene every frame — so the
@@ -33,8 +35,9 @@ use std::time::{Duration, Instant};
 
 use vd_bins::scene_camera::live_scene_camera;
 use vd_bins::{
-    DEV, DevClusterDown, boot_world, dev_auth_signing_key_hex, dev_roundtrip, devcluster, loopback,
-    record_extra_pid, slot_trust_dir, slot_workdir, world_roster,
+    ClusterShape, DEV, DevClusterDown, boot_world, dev_auth_signing_key_hex, dev_roundtrip,
+    devcluster, loopback, record_extra_pid, roster_realms, slot_trust_dir, slot_workdir,
+    world_roster,
 };
 use vd_client_harness::assert::{MAGENTA, magenta_pixel_count};
 use vd_client_harness::camera::ScreenAabb;
@@ -100,8 +103,16 @@ const RIM_PROBE_HALF_PX: f64 = 3.0;
 /// The inner probe's centre inset from the projected rect radius — deep enough that pixelization
 /// cannot push it outside the disc (the silhouette only ever EXCEEDS the projected chord).
 const RIM_INNER_INSET_PX: f64 = 7.0;
-/// The outer probe's centre outset — past the silhouette bulge (≤ 2 % of the ~167 px radius
-/// ≈ 3.3 px) plus MSAA edge blending, so the probe sits in provably-empty space.
+/// The outer probe's centre outset — past the silhouette bulge (a sphere's silhouette exceeds its
+/// projected chord by ≤ 2 % at this fit's depth ratio) plus MSAA edge blending, so the probe sits
+/// in provably-empty space.
+///
+/// WHY BOTH PROBE OFFSETS ARE PIXEL CONSTANTS AND NOT WORLD NUMBERS: they are fractions of the
+/// FITTED radius, and that radius is a property of the FIT rather than a fact about the world.
+/// `fit_camera_to_bounds` backs the eye off until the framing sphere subtends `FIT_FOV_Y` divided
+/// by `FIT_MARGIN`, so the drawn disc covers the same share of the frame whether the realm it
+/// frames measures metres or terametres. A re-rolled star, a re-seeded home, a shell that grows by
+/// orders — none of them move these two numbers; only a change to the fit itself would.
 const RIM_OUTER_OUTSET_PX: f64 = 9.0;
 /// How much each planet's drawn rect is inflated in the probe-angle search — covers the planets'
 /// orbital drift between the state sample and the screenshot's own frame.
@@ -184,18 +195,33 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
     let cwd = slot_workdir(RENDER_BOXES_SLOT).join("capture-cwd");
     std::fs::create_dir_all(&cwd).expect("make client cwd");
 
-    // THE expected drawn set, from THE world itself (no file exists to emit): the home system's
-    // own LOOK body + one MARKER point per planet of the home system — exactly what the composed
-    // level states on the Single topology (the chain is the home realm alone; its planets are
-    // dormant, so THE DRAW LAW gives each its parent's reflected marker and nothing else).
+    // THE expected drawn set, from THE world itself (no file exists to emit) — built PER ROW
+    // through THE DRAW LAW's own rule, never a blanket kind. Two derived facts decide every row:
+    //
+    //  1. WHICH REALMS RUN. `roster_realms` is the shape's own pre-booking — the very list `up`
+    //     gates its readiness on. The base `up` (Single) books the home realm and NOTHING else,
+    //     and arms no demand reconciler, so no child can spin up under the capture.
+    //  2. WHAT EACH REALM STATES. A running realm states its OWN look, if it has one — that is
+    //     the `"look"` row. The same emitter then authors one point-of-light MARKER per DIRECT
+    //     CHILD it holds, gated on the child's own look (`let Some(look) = region.look else
+    //     { continue }`): a child that STATES a look draws as a marker carrying that look's
+    //     extent, a look-less child gets NO row at all (structurally undrawable — SL3), and a
+    //     child that is itself running supersedes its parent's marker with its own picture.
+    //
+    // So the expectation reads the `look` field off THE world's own regions — the same datum the
+    // shard's emitter reads — and can never disagree with it about a kind. On THE world today the
+    // one running realm is the home system, whose own look IS its star's photosphere, and every
+    // direct child it holds states a look: its planets at their own derived radii, plus the Star
+    // realm the taxonomy arc made a body-bearing child of its system.
     let roster = world_roster(&DEV);
     let world = boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
-    let home_planets: Vec<String> = world
-        .regions()
-        .iter()
-        .filter(|r| r.parent == Some(roster.home))
-        .map(|r| format!("{:?}", r.realm))
-        .collect();
+    let running = roster_realms(ClusterShape::Single, &DEV);
+    let states_a_look = |realm: vd_core::pose::RealmId| {
+        world
+            .regions()
+            .iter()
+            .any(|r| r.realm == realm && r.look.is_some())
+    };
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_client"));
     cmd.current_dir(&cwd)
@@ -264,10 +290,11 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
         other => panic!("screenshot was not captured (GPU precondition unmet?): {other:?}"),
     };
 
-    // STREAM anti-vacuity (§2.11): the DRAWN set equals the gateway-emitted level set — the home
-    // LOOK body + one MARKER per planet — and the origin marker names the home realm. Body kinds
-    // asserted per row: a planet that silently gained a mesh (or a home that degraded to a
-    // marker) fails here, not behind the pixel floor.
+    // STREAM anti-vacuity (§2.11): the DRAWN set equals the gateway-emitted level set — the
+    // running realm's own LOOK body + one MARKER per look-stating child it holds — and the origin
+    // marker names the home realm. Body kinds asserted per row: a child that silently gained its
+    // own picture (or a running realm that degraded to a marker) fails here, not behind the pixel
+    // floor.
     let home_label = format!("{:?}", roster.home);
     let mut drawn: Vec<(String, String)> = state
         .realm_boxes
@@ -275,10 +302,20 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
         .map(|b| (b.realm.clone(), b.body_kind.clone()))
         .collect();
     drawn.sort();
-    let mut expected: Vec<(String, String)> = home_planets
+    let mut expected: Vec<(String, String)> = running
         .iter()
-        .map(|label| (label.clone(), "marker".to_owned()))
-        .chain(std::iter::once((home_label.clone(), "look".to_owned())))
+        .copied()
+        .filter(|realm| states_a_look(*realm))
+        .map(|realm| (format!("{realm:?}"), "look".to_owned()))
+        .chain(
+            world
+                .regions()
+                .iter()
+                .filter(|r| r.look.is_some())
+                .filter(|r| !running.contains(&r.realm))
+                .filter(|r| r.parent.is_some_and(|p| running.contains(&p)))
+                .map(|r| (format!("{:?}", r.realm), "marker".to_owned())),
+        )
         .collect();
     expected.sort();
     assert_eq!(
@@ -363,9 +400,11 @@ fn g_render_boxes_smoke_shows_the_home_system_shell_pixel_visible_in_its_screen_
     let cy = (region.min.y + region.max.y) * 0.5;
     let rim_r = (region.max.x - region.min.x) * 0.5;
     // The paint-exclusion rects for the rim search: every OTHER drawn body with a nonzero
-    // extent, drift-inflated. On THE world today the planets are zero-extent MARKER points
-    // (Slice D owns their sprites), so this list is empty — kept GENERIC so a planet that gains
-    // a look (a spun-up neighbour in a future topology) is excluded again without an edit.
+    // extent, drift-inflated. A marker is NOT a zero-extent point any more — since the presence
+    // floor landed, the parent's marker bag carries the child's own stated look radius
+    // (`marker_bag(luma, look.circumscribed_extent())`), so each dormant child contributes a real
+    // rect here. Kept KIND-BLIND: it reads the STREAMED extent alone, so a child that starts
+    // drawing its own look (a spun-up neighbour in a future topology) is excluded without an edit.
     let home_centre = state
         .realm_boxes
         .iter()

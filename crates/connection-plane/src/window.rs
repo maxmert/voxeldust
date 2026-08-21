@@ -603,7 +603,7 @@ pub struct Composed {
 
 /// The position gap between two composed poses, in integer CELLS (per-axis Chebyshev max),
 /// EXACT AT EVERY MAGNITUDE — re-expressed from nanometres at the cell activation (real-scale
-/// addendum §A4.8 row 14): at a 2.25e15 m star-gap magnitude a nanometre count is ~2.25e24 and
+/// addendum §A4.8 row 14): at a 2.25e15 m galaxy-radius magnitude a nanometre count is ~2.25e24 and
 /// SATURATES `u64`, so the old gauge would have read a constant and the parity assertion on it
 /// would have gone vacuous. The integer subtraction cannot saturate for sanitized poses; a
 /// sub-cell (residual-only) disagreement reads 0 here and is caught bit-level by
@@ -2452,7 +2452,7 @@ mod tests {
         // 0.5 m = 512 fine cells, exactly.
         let b = StampedPose::at_rest(sys(), DVec3::new(1.0, 2.0, 3.5), T);
         assert_eq!(pos_dev_cells(&a, &b), 512);
-        // The re-expression's whole point: at a star-gap magnitude (2.25e15 m ≈ 2.3e18 cells) the
+        // The re-expression's whole point: at a galaxy-radius magnitude (2.25e15 m ≈ 2.3e18 cells) the
         // nanometre gauge saturated u64 and read a constant; the cell gauge is exact.
         let far = StampedPose {
             pos: vd_core::pose::LatticePos::at(

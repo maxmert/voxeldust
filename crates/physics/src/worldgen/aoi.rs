@@ -19,7 +19,10 @@ use vd_core::pose::RealmId;
 /// child's worst-instant excursion at the eccentricity cap + that child's visibility reach),
 /// the same two terms the climb measurement walks with (§3.3.2's identity: one formula, one
 /// worst-case convention). `0.0` for a childless leaf — nothing inside, nothing to reach.
-/// On THE world a star system's reach is `142.045826247 + 302.058663384 = 444.104489631` m.
+/// (THE world's star-system reach used to be quoted here as `142.045826247 + 302.058663384 =
+/// 444.104489631` m. That was the retired compressed geometry; since the true-size in-system
+/// re-solve — and again since the derived mass cap re-drew every star — it is orders larger and
+/// per-seed. The gates that need it read it; a doc is the wrong place to pin an `f(seed)` number.)
 pub(crate) fn interior_reach_m(bodies: &[GeneratedBody], parent: RealmId, ecc_cap: f64) -> f64 {
     bodies
         .iter()

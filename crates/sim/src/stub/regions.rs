@@ -104,17 +104,23 @@ fn ancestry_bits(regions: &[RealmRegion], ix_of: &BTreeMap<RealmId, usize>, real
 }
 
 impl RealmRegions {
-    /// Build the resource from a region forest, computing the depth-key cache + the ambient-root realm
-    /// ONCE (regions are static at P3). The per-tick detector reads the cache; it never re-walks parents.
-    /// The moving-child roster starts EMPTY — [`with_moving_children`](Self::with_moving_children) adds it.
-    #[must_use]
     /// ★THROWAWAY (test instrument): plant the cruise-only overdrive read from `VD_TEST_OVERDRIVE`.
-    /// Values below the lawful `1.0` are refused back to it — the instrument may only ever go faster.
+    /// Values below the lawful `1.0` are refused back to it — the instrument may only ever go faster,
+    /// and the RETURNED value is what was planted, not what was asked for. Both arms are pinned by
+    /// `the_cruise_overdrive_instrument_may_only_ever_go_faster`; the shard binary is its only other
+    /// caller, and a binary is outside the coverage domain.
     pub fn set_cruise_overdrive(&mut self, factor: f64) -> f64 {
         self.cruise_overdrive = factor.max(1.0);
         self.cruise_overdrive
     }
 
+    /// Build the resource from a region forest, computing the depth-key cache + the ambient-root realm
+    /// ONCE (regions are static at P3). The per-tick detector reads the cache; it never re-walks parents.
+    /// The moving-child roster starts EMPTY — [`with_moving_children`](Self::with_moving_children) adds it.
+    //
+    // (The instrument above was inserted between this doc and its own function, so `new` had lost
+    // both its documentation and its `#[must_use]` to a setter that wants neither.)
+    #[must_use]
     pub fn new(regions: Vec<RealmRegion>) -> RealmRegions {
         let depths = regions
             .iter()

@@ -186,7 +186,8 @@ pub(crate) fn flush_pose_for_dest(
     // made ticks ago and a latched dot's stamp FROZE there, while every moving placement swept on: at
     // the measured latch→flush gap the world moved gap × v(mover) under the very departure/entry
     // decisions this function re-validates (measured 1 tick in the in-process cluster — 0.15 m at the
-    // 50 Hz production rate (7.68 m/s inner planet) against a 1.0 m containment inset, per flushed hand-off). So the pose is
+    // production tick rate against the containment inset, per flushed hand-off — the 7.68 m/s inner
+    // planet that figure was computed from is the retired compressed geometry's). So the pose is
     // RE-STAMPED to the head book's instant — "the pose ships as re-read NOW" made true rather than
     // claimed — and every link below converts through head books of that same instant.
     let Some(head) = placements.head(config.realm) else {

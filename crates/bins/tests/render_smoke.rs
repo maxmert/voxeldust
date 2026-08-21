@@ -41,11 +41,20 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(200);
 /// Step-tick budget for the "delivered frame arrived" wait (≈30 s at the 20 Hz client step).
 const CAPTURE_WAIT_TICKS: u64 = 600;
-/// GATE-level scene floor, far stricter than the Tier-A [`MIN_CONTENT_FRACTION`] contract:
-/// the egui HUD alone (a few text lines) is well under 1% of the frame, while the reference
-/// SCENE (the ground plate fills roughly the lower half) measures ~50% live — so a 5% floor
-/// cleanly separates "the 3D scene drew" from "only the HUD drew" with ~10x margin BOTH
-/// ways. A regression that loses the whole scene but keeps egui can NOT pass this gate.
+/// GATE-level scene floor, far stricter than the Tier-A [`MIN_CONTENT_FRACTION`] contract.
+///
+/// WHAT IT SEPARATES, restated for THE world. The P1.5 ground plate is no longer the reference
+/// scene: the renderer despawns the reference scaffold the moment any realm box arrives, and on
+/// THE world one always does. What draws instead is the COMPOSED scene — the home system's own
+/// self-authored look, plus the avatar's marker — and the offscreen capture camera REFITS itself
+/// around that scene every frame. That refit is exactly what keeps this floor scale-free: the fit
+/// stands the eye back until the framing sphere subtends the whole vertical `FIT_FOV_Y` divided by
+/// `FIT_MARGIN`, so the framed silhouette's share of the frame is a constant of the FIT, identical
+/// whether the home realm's own look measures metres or terametres. The egui HUD, by contrast, is a
+/// few text lines anchored LEFT_TOP — well under 1% of the frame at any world scale. So the floor
+/// still cleanly separates "the 3D scene drew" from "only the HUD drew", and a regression that
+/// loses the whole scene but keeps egui can NOT pass this gate. The live margin is never argued
+/// here: the gate PRINTS `content_fraction` on every run, which is the measurement.
 const MIN_SCENE_FRACTION: f64 = 0.05;
 
 /// Kill the capture client on drop — the 4th process beyond the cluster's 3 nodes. Covers
@@ -199,12 +208,15 @@ fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
     let (w, h) = img.dimensions();
     let buf = img.into_raw();
 
-    // Self-calibrate the clear color from the top-right corner — guaranteed sky in the
-    // reference scene (the camera at eye height looks at the horizon; the scene's tallest
-    // content subtends ~10° of elevation vs the ≥22.5° corner ray at the 45° vFOV, and the
-    // HUD anchors LEFT_TOP) — so the gate is immune to the platform/pipeline sRGB encoding
-    // of the cleared target. A blank or uniform-garbage frame still FAILS: every pixel
-    // equals the corner → content fraction 0.
+    // Self-calibrate the clear color from the top-right corner — guaranteed BACKGROUND under the
+    // fitted capture camera. NOT because of a horizon (there is no ground plate and no eye-height
+    // camera on THE world any more): because the fit backs the eye off until the whole framing
+    // sphere fits INSIDE the vertical FOV with `FIT_MARGIN` to spare and AIMS at that sphere's
+    // centre, so the framed silhouette lands around the middle of the frame and the corner — the
+    // farthest pixel from the view axis there is — lies outside it. The HUD anchors LEFT_TOP, so it
+    // cannot reach this corner either. That is what makes the gate immune to the platform/pipeline
+    // sRGB encoding of the cleared target. A blank or uniform-garbage frame still FAILS: every
+    // pixel equals the corner → content fraction 0.
     let corner = (w as usize - 1) * 4;
     let clear = [
         buf[corner],
@@ -231,11 +243,13 @@ fn g_render_smoke_captures_a_real_frame_with_content_and_no_magenta() {
     assert!(
         verdict.content_fraction >= MIN_SCENE_FRACTION,
         "the 3D SCENE did not draw: content_fraction {:.4} < {MIN_SCENE_FRACTION} \
-         (the egui HUD alone is under 1% — this floor proves the ground plate rendered)",
+         (the egui HUD alone is under 1% — this floor proves the COMPOSED scene rendered)",
         verdict.content_fraction,
     );
-    // The center of the frame (away from the LEFT_TOP HUD anchor) must hold content — the
-    // ground plate spans the lower half and the landmark pillar sits center-screen.
+    // The center of the frame (away from the LEFT_TOP HUD anchor) must hold content. The reason is
+    // the fit, not a landmark: the capture camera AIMS at the framing sphere's centre, so whatever
+    // the fit framed projects around the middle of the frame by construction — at every world
+    // scale, and wherever in the universe the session happens to stand.
     let center = Rect {
         x: w as usize / 3,
         y: h as usize / 3,

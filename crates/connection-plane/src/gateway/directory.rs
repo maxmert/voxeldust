@@ -176,10 +176,25 @@ pub(crate) fn on_directory_reply(
                         session: session_id,
                         fence: session.fence,
                         account: session.account,
-                        // STATIC: nothing was descended, so there is no realm this pose belongs to and
-                        // nothing honest to send. `None` ⇒ the shard births at its own origin, which is
-                        // byte-identical to every static rig today.
-                        spawn: None,
+                        // ★ THE SAME POSE THE RETRY CARRIES (fixed 2026-08-21, the gate-pass arc).
+                        // This used to send `None`, on the reasoning that a static login descends no
+                        // realm so there is "nothing honest to send" — but the descent twelve lines
+                        // above happens in EVERY mode precisely because T2 measured that an attach
+                        // with no pose drops the account at the home centre, i.e. INSIDE the Star
+                        // realm, as a frozen unresolvable crossing. And the per-tick retry in
+                        // `liveness.rs` has always sent `session.spawn`, under a comment promising
+                        // that "a re-attach must not be able to place the avatar anywhere else than
+                        // the attempt it repeats".
+                        //
+                        // So the two producers of ONE value disagreed, and WHICH ONE the shard saw
+                        // first decided where a static login landed. MEASURED on the process parity
+                        // gate (2026-08-21, nine runs): the same two-account login landed both dots
+                        // at the realm origin on six runs and at the T2 standoff (z =
+                        // 1.0614053982415949e10 m) on three, with no input and no code change
+                        // between them. It was invisible until the world became real — on the walk
+                        // fixture the standoff is ZERO, so `None` and `Some(origin)` are the same
+                        // place. The static process gates already fly from the standoff.
+                        spawn: Some(spawn),
                     },
                 );
                 None

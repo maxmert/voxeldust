@@ -16,10 +16,27 @@
 //! When a measured boot p99 arms `VD_BOOT_TICKS_P99`, τ grows and this gate's derived band moves
 //! WITH it — nothing here is pinned to today's τ as a number.
 //!
-//! THE LEG DEFINITIONS are the addendum's own (§A3.2): the two in-system legs fly the CITED
-//! target distances (`TARGET_*` — the in-system re-solve lands with the taxonomy slice; the pins
-//! flip loudly if it lands different numbers), the warp leg flies THE world's LIVE derived star
-//! gap (`system_ring_r_m` = the 3-D placement radius) between the two target system ceilings.
+//! THE LEG DEFINITIONS are the addendum's own (§A3.2), flown on THE WORLD THIS CLUSTER BOOTS —
+//! all three legs, one world (SL5).
+//!
+//! ★ THE TWO IN-SYSTEM LEGS WERE RE-DERIVED 2026-08-21 (the gate-pass arc), and this is the one
+//! change in this file worth reading. They used to fly the addendum's CITED target distances
+//! (`TARGET_PLANET_SOI_OUTER_HOME_M` / `TARGET_SYSTEM_BOUND_HOME_M`), which are *seed 0's*
+//! `System(7)` numbers, while the warp leg flew THE world's LIVE star gap and the second test
+//! below booted `DEV.universe_seed`. One table, three legs, TWO DIFFERENT WORLDS. That was
+//! defensible while the in-system re-solve was still owed — the citation stood in for a generator
+//! that did not yet solve those shells — but the taxonomy flag day landed it: the generator now
+//! SOLVES every system shell (`system_shell_r_m`), and `TARGET_SYSTEM_BOUND_HOME_M` is pinned
+//! EQUAL to seed 0's solved home shell by `g_star_shell_unmoved_the_stars_clearance_arm_never_binds`.
+//! The reason to cite is discharged, and the cost of citing had become MEASURABLE: at the shipped
+//! default seed the home system's own shell is `5.089e12 m` against the cited `1.582e11 m` — a
+//! factor of THIRTY-TWO. The gate was flying a home system nobody lives in, and departing the warp
+//! leg at a ceiling 32× under the real one.
+//!
+//! So both in-system legs now read the home realm and its outermost world off
+//! `vd_bins::boot_world(DEV.universe_seed, …)`. The CITED targets are still PRINTED beside the
+//! derived distances — the same discipline this file already applies to the addendum's placeholder-τ
+//! seconds — so the design citation stays visible and stays live without deciding what is flown.
 
 use vd_bins::DEV;
 use vd_core::flight::{
@@ -35,6 +52,49 @@ use vd_physics::worldgen::{
 /// THE world, exactly as every shard boots it (SL5: one world, no preset, no test variant).
 fn world() -> UniverseConfig {
     UniverseConfig::world(DEV.move_speed, DEV.tick_dt)
+}
+
+/// The two IN-SYSTEM leg distances, read off THE world the dev cluster boots — never stated.
+struct HomeLegs {
+    /// The home system's own solved shell: half the "edge to edge" leg.
+    system_shell_m: f64,
+    /// The OUTER world of that system — the direct child with the widest orbit — and its own
+    /// containment reach, which is the "planet surface out to its own shell" leg.
+    outer_planet_soi_m: f64,
+}
+
+/// Read [`HomeLegs`] off the booted world. The home realm is a LINEAGE POSITION
+/// (`default_home_realm`, the same call `world_roster` makes), never a stated seed; the outer world
+/// is chosen by the WIDEST ORBIT the system itself authored, never by whichever child happens to
+/// carry the biggest shell — "outer" is a fact about the orbit, so it is read off the orbit.
+fn home_legs() -> HomeLegs {
+    let world = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
+    let home = vd_core::worldgen::default_home_realm(world.regions())
+        .expect("THE world names a home realm (root → galaxy → system)");
+    let held = std::collections::BTreeSet::from([home]);
+    let (regions, movers) = vd_bins::boot_regions_and_movers(
+        DEV.universe_seed,
+        &held,
+        home,
+        DEV.move_speed,
+        DEV.tick_dt,
+    );
+    let extent_of = |realm| {
+        regions
+            .iter()
+            .find(|r| r.realm == realm)
+            .expect("a shard's own realm and its children are in the neighbourhood it boots with")
+            .shape
+            .finite_extent()
+    };
+    let (outer, _) = movers
+        .iter()
+        .max_by(|a, b| a.1.sma.total_cmp(&b.1.sma))
+        .expect("THE world's home system authors movers");
+    HomeLegs {
+        system_shell_m: extent_of(home),
+        outer_planet_soi_m: extent_of(*outer),
+    }
 }
 
 /// The AoI demand beat in ticks — the shard's own expression (`aoi_recheck_cadence` at the DEV
@@ -64,8 +124,15 @@ struct Leg {
     v_start: f64,
     v_end: f64,
     /// The addendum's §A0.6/§A3.2 prediction at ITS placeholder τ = 2.44 s — printed beside the
-    /// measurement, never asserted (every §A3 number was stamped ⟨UNMEASURED — τ⟩).
+    /// measurement, never asserted (every §A3 number was stamped ⟨UNMEASURED — τ⟩). The WARP row's
+    /// figure was additionally computed over the pre-mass-cap star gap, so it now sits beside a leg
+    /// two thirds its length; both columns are history, and the print says so.
     addendum_s: f64,
+    /// The addendum's CITED design target for this leg's distance, where it has one — printed
+    /// beside the derived distance, never asserted. Same discipline as `addendum_s`: the citation
+    /// stays visible and stays live without deciding what is flown. `None` for the warp leg, whose
+    /// distance was always THE world's own.
+    cited_distance_m: Option<f64>,
 }
 
 /// FLY one leg tick-by-tick with the integrator's own law: full throttle under
@@ -107,9 +174,12 @@ fn g_flight_table_the_governed_legs_match_the_closed_form_and_are_printed_verbat
     let cfg = world();
     let v_foot = DEV.move_speed;
 
+    // THE world's own home system and its outermost world — the two in-system legs, DERIVED.
+    let home = home_legs();
+
     // The ceilings, each from the ONE cap expression over a derived extent.
-    let cap_planet = realm_speed_cap_mps(TARGET_PLANET_SOI_OUTER_HOME_M, v_foot, TRAVERSE_S);
-    let cap_home = realm_speed_cap_mps(TARGET_SYSTEM_BOUND_HOME_M, v_foot, TRAVERSE_S);
+    let cap_planet = realm_speed_cap_mps(home.outer_planet_soi_m, v_foot, TRAVERSE_S);
+    let cap_home = realm_speed_cap_mps(home.system_shell_m, v_foot, TRAVERSE_S);
     let cap_max = realm_speed_cap_mps(target_system_bound_max_m(), v_foot, TRAVERSE_S);
     let cap_galaxy = realm_speed_cap_mps(cfg.scale.galaxy_r_m, v_foot, TRAVERSE_S);
 
@@ -119,21 +189,23 @@ fn g_flight_table_the_governed_legs_match_the_closed_form_and_are_printed_verbat
         // (an outward leg — no arrival ramp; v_end == v_cap makes the governor arm inert).
         Leg {
             name: "planet surface -> its own shell",
-            distance_m: TARGET_PLANET_SOI_OUTER_HOME_M,
+            distance_m: home.outer_planet_soi_m,
             v_cap: cap_planet,
             v_start: v_foot,
             v_end: cap_planet,
             addendum_s: 117.2,
+            cited_distance_m: Some(TARGET_PLANET_SOI_OUTER_HOME_M),
         },
         // §A3.2 row 2: the home system, edge to edge — foot speed both ends (each edge is a
         // surface-class departure/arrival in the addendum's own integration).
         Leg {
             name: "home system, edge to edge",
-            distance_m: 2.0 * TARGET_SYSTEM_BOUND_HOME_M,
+            distance_m: 2.0 * home.system_shell_m,
             v_cap: cap_home,
             v_start: v_foot,
             v_end: v_foot,
             addendum_s: 248.7,
+            cited_distance_m: Some(2.0 * TARGET_SYSTEM_BOUND_HOME_M),
         },
         // §A3.2 row 3: THE WARP LEG — star to star down THE world's LIVE 3-D placement radius,
         // departing at the home system's ceiling, arriving onto the largest system's ceiling.
@@ -144,6 +216,7 @@ fn g_flight_table_the_governed_legs_match_the_closed_form_and_are_printed_verbat
             v_start: cap_home,
             v_end: cap_max,
             addendum_s: 130.2,
+            cited_distance_m: None,
         },
     ];
 
@@ -167,10 +240,19 @@ fn g_flight_table_the_governed_legs_match_the_closed_form_and_are_printed_verbat
         let ramp_s =
             t.tau_s * (leg.v_cap / leg.v_start).ln() + t.tau_s * (leg.v_cap / leg.v_end).ln();
         let band = 3.0 * t.tick_dt_s + ramp_s * (t.tick_dt_s / t.tau_s);
+        // The CITED column: the addendum's design target for this leg's distance beside the world's
+        // own, so the citation is readable in the owner's table without deciding anything.
+        let cited = match leg.cited_distance_m {
+            Some(m) => format!(
+                " | addendum's cited seed-0 target {m:.6e} m ({:.2}x the world's)",
+                leg.distance_m / m,
+            ),
+            None => String::new(),
+        };
         eprintln!(
             "[flight-table] {}: D = {:.6e} m, v_cap = {:.6e} m/s, v_start = {:.6e}, v_end = {:.6e} \
              => MEASURED {measured:.2} s | closed form {closed:.2} s | band ±{band:.2} s | \
-             addendum (tau 2.44 s placeholder) {:.1} s",
+             addendum (tau 2.44 s placeholder) {:.1} s{cited}",
             leg.name, leg.distance_m, leg.v_cap, leg.v_start, leg.v_end, leg.addendum_s,
         );
         assert!(
@@ -287,14 +369,29 @@ fn g_governed_bands_bracket_every_ambient_boundary_on_the_world() {
             r.realm,
         );
     }
-    // Non-vacuity: THE world has governed boundaries — since the true-size re-solve EVERY
-    // parented row is one (the galaxy + 3 systems + 27 planets + 3 stars + the census moons).
-    // ★ RE-PINNED 40 → 56 (2026-08-20). CAUSE: `DEV.universe_seed` became the HOME SEED, so this
-    // gate now reads the world the cluster actually boots instead of seed 0. That world's home
-    // star is a G star, whose wider ladder carries a richer moon census — 22 moons against seed
-    // 0's 6, and `34 + 22 = 56`. (The derived mass cap did NOT move this number: seed 0 still
-    // holds 6 census moons under it, as `g_climb_the_worlds_measured_climb_at_the_true_size_resolve`
-    // measures.)
+    // NON-VACUITY, in two statements that fail for different reasons.
+    //
+    // (a) THE SHAPE, derived: since the true-size re-solve EVERY parented row is a governed one —
+    //     no boundary of THE world is left to the collision-floor clamp. This is what the `continue`
+    //     arm above would silently swallow, so it is stated rather than counted, and it cannot go
+    //     stale when the census moves.
+    let parented_rows =
+        u32::try_from(regions.iter().filter(|r| r.parent.is_some()).count()).expect("fits u32");
+    assert_eq!(
+        governed_rows, parented_rows,
+        "a parented row of THE world is NOT governed — its parent's ceiling clamped to the foot \
+         speed, and the collision-floor arm above skipped it without saying so",
+    );
+    // (b) THE CENSUS, pinned: a deliberate tripwire on the world's own roster, not a magic number.
+    //     ★ RE-PINNED 40 → 56 (2026-08-20) when `DEV.universe_seed` became the HOME SEED, so this
+    //     gate reads the world the cluster actually boots instead of seed 0.
+    //     ★ DECOMPOSITION CORRECTED 2026-08-21 (the gate-pass arc) — MEASURED off this gate's own
+    //     roster print, because the old comment attributed all 22 moons to the home star:
+    //     4 System rows (the galaxy + 3 star systems) + 3 Star rows + 27 planets (9 per system) +
+    //     22 moons = 56. Of those 22 moons, 19 are the home system's and 3 belong to one sibling;
+    //     the other sibling holds none. (The derived mass cap did NOT move the total: seed 0 still
+    //     holds 6 census moons under it, as
+    //     `g_climb_the_worlds_measured_climb_at_the_true_size_resolve` measures.)
     assert_eq!(
         governed_rows, 56,
         "THE world's governed-boundary roster changed — restate this gate against the new world",

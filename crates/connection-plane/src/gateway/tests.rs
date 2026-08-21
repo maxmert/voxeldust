@@ -7808,9 +7808,17 @@ fn byes_while_awaiting_the_home_prune_the_wait_index_incrementally() {
 
 #[test]
 fn a_static_login_is_byte_identical_with_no_home_phase_and_no_extra_head_read() {
-    // BYTE-IDENTITY (CRITIQUE-2): with the injector UNARMED (the default) a login follows the EXACT
+    // FLOW-IDENTITY (CRITIQUE-2): with the injector UNARMED (the default) a login follows the EXACT
     // pre-5f-3d flow — `AwaitingDirectory → AwaitingAttach → config.shard` — with NO `AwaitingHomeRealm`,
     // NO extra head-read, NO RealmDemand, and no reordering of Welcome/UniverseRate/AttachSession.
+    //
+    // ★ IT IS NO LONGER BYTE-identity, and the name is kept only because the FLOW is what this pins.
+    // The static `AttachSession` used to carry `spawn: None` while the per-tick retry carried
+    // `session.spawn`, so a static login landed at the shard's own origin or at the T2 standoff
+    // depending on which attach the shard saw first — measured as a live coin flip on the process
+    // parity gate, 2026-08-21. Both producers now send the registry's pose, which is what
+    // `attach_spawn`'s own doc has claimed since the T2 fix and what the retry assertion above
+    // already pinned.
     let mut rig = Rig::new(); // config() ⇒ the inert injector (unarmed)
     let (sid, sends) = rig.login();
     assert_eq!(
@@ -7834,8 +7842,9 @@ fn a_static_login_is_byte_identical_with_no_home_phase_and_no_extra_head_read() 
         "Welcome then UniverseRate, unchanged"
     );
     assert!(
-        saw_attach(&sends[1], SHARD, sid, None),
-        "the attach goes to the static config.shard at the SAME tick as the Welcome"
+        saw_attach(&sends[1], SHARD, sid, attach_spawn(&rig)),
+        "the attach goes to the static config.shard at the SAME tick as the Welcome, carrying the \
+         SAME registry pose its own retry carries"
     );
     // The EXACT send fingerprint of the static grant tick: Welcome + UniverseRate client-ward, then the
     // grant arm's `AttachSession` and the per-tick retry driver's duplicate — both to `config.shard`.

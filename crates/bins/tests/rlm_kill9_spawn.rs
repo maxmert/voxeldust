@@ -45,8 +45,7 @@ const DEADLINE: Duration = Duration::from_secs(30);
 /// flushed — only v1 is). Generous vs the ms an idle writer actually needs, well under `DEADLINE`.
 const V2_FSYNC_SETTLE: Duration = Duration::from_secs(2);
 
-/// A Planet lineage `[Universe, Galaxy(g), System(s), Planet(p)]`. Planet(2,7,7) EXISTS in the default
-/// (Walk-scale) seed forest — an arbitrary seed has an empty containment forest and the shard refuses to boot.
+/// A Planet lineage `[Universe, Galaxy(g), System(s), Planet(p)]`.
 fn planet(g: u64, s: u64, p: u64) -> RealmCoord {
     RealmCoord::from_path(RealmPath::from_levels(vec![
         RealmLevel::new(RealmKindTag::Universe, 0),
@@ -55,6 +54,34 @@ fn planet(g: u64, s: u64, p: u64) -> RealmCoord {
         RealmLevel::new(RealmKindTag::Planet, p),
     ]))
     .expect("planet path has a leaf")
+}
+
+/// ★ THE SPAWNED COORD — THE world's OWN inner planet, derived through `world_roster` and never a
+/// stated seed (re-derived 2026-08-21, the gate-pass arc).
+///
+/// It used to be the literal `planet(2, 7, 7)`, justified as *"Planet(2,7,7) EXISTS in the default
+/// (Walk-scale) seed forest"*. That default is gone: there is ONE world and it is generated, its
+/// planet ids are `child_seed(system, PLANET_SALT, n)` avalanches, and `Planet(7)` is `PLANET_A` —
+/// a realm of the retired hand-placed fixture, which `vd_core::worldgen` asserts THE world does not
+/// contain. A shard forked onto a realm the world has no forest for boots into an EMPTY
+/// neighbourhood and its nest fence refuses it ("0 ambient roots"), so the adopt and D6 arms could
+/// only ever have timed out on "the forked shard never served /whoami". That is D-WORLD-8, and
+/// `rlm_proc_spawn_smoke` was fixed for it; this file was not. Same derivation as that file's.
+fn the_worlds_inner_planet() -> RealmCoord {
+    let roster = vd_bins::world_roster(&DEV);
+    let vd_core::pose::RealmId::System(galaxy_seed) = roster.galaxy else {
+        panic!(
+            "the galaxy realm is the System(1) stand-in, got {}",
+            roster.galaxy
+        );
+    };
+    let vd_core::pose::RealmId::System(home_seed) = roster.home else {
+        panic!("the home realm is a System, got {}", roster.home);
+    };
+    let vd_core::pose::RealmId::Planet(inner_seed) = roster.inner else {
+        panic!("the inner mover is a Planet, got {}", roster.inner);
+    };
+    planet(galaxy_seed, home_seed, inner_seed)
 }
 
 /// SIGKILL + REAP on drop — panic-safety so a failed assertion before the explicit kill never leaks the
@@ -169,7 +196,7 @@ fn d1_sigkill_mid_fsync_forks_no_child_and_rehydrates_clean() {
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
     let f = fixture("d1");
-    let hex = planet(2, 7, 7).path().to_env_string();
+    let hex = the_worlds_inner_planet().path().to_env_string();
     let child_probe: SocketAddr = (Ipv4Addr::LOCALHOST, 42_001).into(); // FIRST_PORT 42000 ⇒ probe 42001
 
     // ---- boot-1: spawn-coord + PAUSE + first-port. The boot-spawn parks in flush() before the fork. ----
@@ -249,7 +276,7 @@ fn d1_sigkill_mid_fsync_forks_no_child_and_rehydrates_clean() {
     );
     assert_eq!(
         rows[0].1,
-        planet(2, 7, 7),
+        the_worlds_inner_planet(),
         "the re-drive spawned the requested coord"
     );
     assert!(rows[0].2.is_some(), "the completed spawn recorded its pid");
@@ -262,7 +289,7 @@ fn adopt_a_survivor_is_recovered_without_relaunch() {
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
     let f = fixture("adopt");
-    let hex = planet(2, 7, 7).path().to_env_string();
+    let hex = the_worlds_inner_planet().path().to_env_string();
     let child_probe: SocketAddr = (Ipv4Addr::LOCALHOST, 43_001).into(); // FIRST_PORT 43000 ⇒ probe 43001
 
     // ---- boot-1: NORMAL. The boot-spawn forks a survivor that boots + serves /whoami. ----
@@ -320,7 +347,7 @@ fn adopt_a_survivor_is_recovered_without_relaunch() {
         NodeId(1_000),
         "same node id — adopted, not re-minted"
     );
-    assert_eq!(rows[0].1, planet(2, 7, 7));
+    assert_eq!(rows[0].1, the_worlds_inner_planet());
     // The survivor is still the same live incarnation (its /whoami still answers).
     assert!(
         admin_get_body(child_probe, "/whoami", Some(Duration::from_millis(300))).is_some(),
@@ -335,7 +362,7 @@ fn d6_control_an_unseeded_rebuild_double_spawns_a_survivor() {
     // that frees the ports. See `vd_bins::cluster_tier`.
     let _tier = vd_bins::cluster_tier();
     let f = fixture("d6");
-    let hex = planet(2, 7, 7).path().to_env_string();
+    let hex = the_worlds_inner_planet().path().to_env_string();
     let child_probe: SocketAddr = (Ipv4Addr::LOCALHOST, 44_001).into(); // FIRST_PORT 44000 ⇒ probe 44001
 
     // ---- boot-1: NORMAL — a survivor boots (same as the ADOPT arm). ----
@@ -395,7 +422,7 @@ fn d6_control_an_unseeded_rebuild_double_spawns_a_survivor() {
         "the two spawns took DISTINCT F2 ids (no id-reuse): {rows:?}"
     );
     assert!(
-        rows.iter().all(|r| r.1 == planet(2, 7, 7)),
+        rows.iter().all(|r| r.1 == the_worlds_inner_planet()),
         "both rows serve the same coord: {rows:?}"
     );
     reap_forked(&rows);

@@ -362,8 +362,10 @@ pub struct StubStats {
     /// between this shard's clock and the flushed pose's stamp. A latched dot's stamp is FROZEN at the
     /// latch (`readvance_dots` deliberately skips it), so this gap is exactly how far the world's moving
     /// placements have swept under the departure/entry decisions the flush re-validates — the error is
-    /// `gap × tick_dt × v(fastest mover)` (7.68 m/s for THE world's inner planet, post the S4 re-solve) against a 1.0 m
-    /// containment inset. The S0 measurement of the frozen-flush-instant defect; the crossing e2e pins
+    /// `gap × tick_dt × v(fastest mover)` against the containment inset. (The mover speed was quoted
+    /// here as 7.68 m/s, an inner-planet figure from the retired compressed geometry; THE world's
+    /// planets now orbit at true Keplerian speeds, four orders larger, and the speed is `f(seed)`
+    /// besides — `crossing_e2e` derives it at the point of failure instead.) The S0 measurement of the frozen-flush-instant defect; the crossing e2e pins
     /// it to 0 once the flush re-reads the world at the CURRENT placement book (the S2 fix).
     pub flush_stamp_gap_ticks_max: u64,
     /// A row in this shard's OWN client-edge emit whose pose label could not be restated into this

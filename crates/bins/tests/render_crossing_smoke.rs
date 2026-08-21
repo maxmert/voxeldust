@@ -1,9 +1,10 @@
 //! G-RENDER-CROSSING-SMOKE — the crossing pixel proof on THE WORLD ITSELF: a real dot flies the ±Z
-//! polar corridor OUT of THE world's own 150 m home shell, the directory CAS re-homes its authority
-//! onto the pre-booked galaxy shard, and the round trip is captured in actual pixels — INSIDE the
-//! home system's drawn shell, OUTSIDE it in the between-space, and back INSIDE on the return. The
-//! RETURN leg gets pixel coverage for the first time (the owner's "everything froze on the way
-//! back").
+//! polar corridor OUT of THE world's own home shell (whose size is READ off the booted regions and
+//! never stated here — every park, aim, search bound and deadline below is derived from it), the
+//! directory CAS re-homes its authority onto the pre-booked galaxy shard, and the round trip is
+//! captured in actual pixels — INSIDE the home system's drawn shell, OUTSIDE it in the
+//! between-space, and back INSIDE on the return. The RETURN leg gets pixel coverage for the first
+//! time (the owner's "everything froze on the way back").
 //!
 //! It stands up the DUAL process cluster (`up --dual`) with NO injected geometry — THE world's own
 //! home shell IS the crossing boundary (SL5: one world, nothing to select). RE-BASED at the flag
@@ -71,32 +72,46 @@ const DOT_SURROUND_RING_PX: f64 = 4.0;
 /// Extra clearance (px) beyond the dot's rectangle when choosing an in-home capture park clear of
 /// every planet's whole projected orbit annulus (phase-independent — see `clean_home_park`).
 const PARK_RECT_CLEARANCE_PX: f64 = 2.0;
-/// The park plane's world |z| (m): planets hug the XY plane (inclination σ 0.02 rad) and their
-/// containment reach is soi + outset ≈ 6 m, so 20 m of z clears every planet's SOI in WORLD space —
-/// the park can never fire a planet crossing, whatever its (x, y).
-const PARK_PLANE_Z_M: f64 = 20.0;
-/// The park search range/step along +Y (the most screen-transverse world axis under the fitted
-/// view), bounded well inside the home shell's ~149 m acquire edge.
-const PARK_MAX_OFFSET_M: f64 = 135.0;
-const PARK_SEARCH_STEP_M: f64 = 1.0;
+/// THE PARK PLANE, in units of the roster's own I-POLE margin. `WorldRoster::pole_altitude_m` is
+/// the farthest any mover in either flown system reaches out of the orbital plane PLUS its whole
+/// containment reach (its own solved shell + the release outset), taken over every mover — so
+/// standing the park at TWICE it clears every planet's SOI in WORLD space, whatever the park's
+/// (x, y) and whatever the orbital phase. That is the same `|z| >= 2 · pole_altitude_m` rule every
+/// polar waypoint in the flight law states, and `world_roster` asserts I-POLE (the doubled altitude
+/// plus the outset still fits inside the system shell) before this gate spawns a process.
+const PARK_PLANE_POLE_ALTITUDES: f64 = 2.0;
+/// The park search's +Y reach (the most screen-transverse world axis under the fitted view), as a
+/// FRACTION of the acquire sphere's own half-chord AT the park plane — so the whole search stays
+/// provably inside the home realm's acquire edge and can never fire an unintended crossing.
+/// Dimensionless by construction: it rides THE world's solved shell wherever that goes.
+const PARK_OFFSET_CHORD_FRAC: f64 = 0.9;
+/// How many steps that reach is searched in. Stated as a COUNT, not a metre step, so the step size
+/// scales with the reach: a fixed metre step against a terametre shell is ~1e11 iterations, which
+/// is a hang rather than a search. The two move together by construction.
+const PARK_SEARCH_STEPS: u32 = 135;
 /// A sphere's SILHOUETTE slightly exceeds its projected chord under perspective (≤ 2 % at this
-/// scene's depth ratios) — the factor the annulus bounds inflate an SOI disc by.
+/// scene's depth ratios) — the factor the annulus bounds inflate a planet's own shell disc by.
 const SILHOUETTE_BULGE: f64 = 1.02;
-/// The OUTSIDE park (flight law leg A, continued down the corridor): stated in the space the
-/// session stands in — home-frame on the way out, and numerically the SAME point in the galaxy
-/// frame (J1). The crossing itself fires at the ~152 m release edge; the park is 2 km down the pole
-/// because of the CAMERA's geometry (measured): the fitted view direction is mostly −Z — nearly
-/// parallel to the corridor — so a dot parked just past the shell projects INSIDE the shell's
-/// silhouette by foreshortening (at 220 m: a 91 px offset against a 167 px rect). Past ~1.2 km the
-/// projection clears the rect; 2 km gives ~50 px of margin per axis. Still deep inside the galaxy's
-/// own ~12483 m shell, still on the polar corridor (the sibling stars sit on the ±X ring).
-const OUTSIDE_PARK: DVec3 = DVec3::new(0.0, 0.0, -2000.0);
-/// The RETURN leg's AIM (flight law leg B): inside the ~149 m acquire edge so the label flips. The
-/// capture itself then re-parks at the annulus-clear point (`clean_home_park`) — the aim only has to
-/// commit the crossing, never to host pixels.
-const RETURN_PARK: DVec3 = DVec3::new(0.0, 0.0, -60.0);
-/// A generous LOCAL deadline per crossing leg: the ~2 km corridor flight + the re-home propagation.
-const LEG_DEADLINE: Duration = Duration::from_secs(60);
+/// THE OUTSIDE PARK, in whole CONTAINMENT REACHES down the pole (a reach = the home realm's own
+/// solved shell + the band's release outset — the same expression `node_per_realm_walk`'s leg A and
+/// `rlm_demand_login`'s exit both fly). Stated in the space the session stands in: home-frame on
+/// the way out, and numerically the SAME point in the galaxy frame (J1 — the galaxy authors the
+/// home placement at zero), which is what makes restating it after the flip sound.
+///
+/// WHY IT IS NOT PARKED JUST PAST THE RELEASE EDGE (the measured reason, restated scale-free): the
+/// fitted view direction is mostly −Z, nearly PARALLEL to the corridor, so a dot parked a hair past
+/// the edge projects INSIDE the drawn silhouette by foreshortening — the corridor's transverse
+/// component is only `sin` of the small angle between the view direction and the pole. Two whole
+/// reaches down the pole put the transverse offset on the order of a reach itself. The margin is
+/// never argued from digits here: the OUTSIDE capture asserts `rects_disjoint` on the dot's rect
+/// against the home's, which is the measurement.
+const OUTSIDE_PARK_REACHES: f64 = 2.0;
+/// The RETURN leg's AIM (flight law leg B), as a fraction of the home realm's ACQUIRE edge (its
+/// solved shell less the band's inset): half the edge is unambiguously inside it at any world
+/// scale, so the label flips. The capture itself then re-parks at the annulus-clear point
+/// (`clean_home_park`) — the aim only has to commit the crossing, never to host pixels. Down the
+/// pole, which I-AXIS licenses (no orbit comes within twice its own shell of the ±Z axis).
+const RETURN_AIM_ACQUIRE_FRAC: f64 = 0.5;
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(200);
 const DELIVERY_DEADLINE: Duration = Duration::from_secs(90);
@@ -218,20 +233,31 @@ fn drawn_box_screen_aabb(
         .expect("the box center projects in front of the camera")
 }
 
-/// The dot's projected rectangle at `pos`: [`DOT_RECT_BRACKET`] × the marker's floored world radius
-/// (the SAME `marker_world_radius` derivation the renderer scales the marker by — batch review: the
-/// pixel verdicts are dot-sensitive only because the marker has a floor AND the rectangle brackets
-/// exactly that floor).
-fn dot_screen_aabb(camera: &CaptureCamera, pos: DVec3) -> ScreenAabb {
+/// The dot's DRAWN world radius at `pos` — the marker's base size or the world size of its minimum
+/// APPARENT radius at this view distance, whichever is larger, through the SAME
+/// `marker_world_radius` derivation the renderer scales the marker mesh by. ONE derivation, two
+/// consumers: the asserted rectangle ([`dot_screen_aabb`]) and the park arrival demand
+/// ([`park_at`]) — so neither can drift from the footprint the pixels actually carry.
+fn dot_world_radius(camera: &CaptureCamera, pos: DVec3) -> f64 {
     let dist_m = (pos - camera.eye).length();
-    let marker_r = marker_world_radius(
+    marker_world_radius(
         f64::from(vd_client_render::DOT_RADIUS),
         dist_m,
         camera.fov_y,
         camera.height as f64,
-    );
-    projected_point_aabb(camera, pos, DOT_RECT_BRACKET * marker_r)
-        .expect("the dot projects in front of the camera")
+    )
+}
+
+/// The dot's projected rectangle at `pos`: [`DOT_RECT_BRACKET`] × the marker's floored world radius
+/// (batch review: the pixel verdicts are dot-sensitive only because the marker has a floor AND the
+/// rectangle brackets exactly that floor).
+fn dot_screen_aabb(camera: &CaptureCamera, pos: DVec3) -> ScreenAabb {
+    projected_point_aabb(
+        camera,
+        pos,
+        DOT_RECT_BRACKET * dot_world_radius(camera, pos),
+    )
+    .expect("the dot projects in front of the camera")
 }
 
 /// The union rectangle of two screen AABBs (the straddled-capture drift window).
@@ -342,18 +368,24 @@ fn px_per_metre(camera: &CaptureCamera) -> f64 {
 /// One planet's whole projected ORBIT ANNULUS `[min, max]`, in px of radial distance from the drawn
 /// home centre: every screen position the planet's drawn disc can EVER occupy, over all orbital
 /// phases. The min folds the worst XY-plane foreshortening (`|forward·ẑ|` — orbits hug the XY
-/// plane); both edges inflate the SOI disc by [`SILHOUETTE_BULGE`]. Phase-independent, which is what
-/// makes a park chosen outside every annulus immune to capture timing.
+/// plane); both edges inflate the planet's disc by [`SILHOUETTE_BULGE`]. Phase-independent, which
+/// is what makes a park chosen outside every annulus immune to capture timing.
+///
+/// `shell_m` is THIS planet's OWN solved shell — its gravitational SOI at its drawn mass, read off
+/// the caller's booted regions. It used to be `PlanetConfig::planet_soi_r_m`, which is the WALK
+/// fixture forest's hand-placed radius (its own doc says so) and is read by nothing on THE world:
+/// every annulus was computed against a fixture number instead of the planet, so the clean-park
+/// search cleared nothing it thought it was clearing.
 fn planet_annulus_px(
     camera: &CaptureCamera,
     elements: &vd_physics::celestial::OrbitalElements,
-    soi_m: f64,
+    shell_m: f64,
 ) -> (f64, f64) {
     let pxm = px_per_metre(camera);
     let fore = ((camera.target - camera.eye).normalize().z).abs();
-    let soi_px = soi_m * SILHOUETTE_BULGE;
-    let min = (elements.sma * (1.0 - elements.ecc) * fore - soi_px) * pxm;
-    let max = (elements.sma * (1.0 + elements.ecc) + soi_px) * pxm;
+    let disc_m = shell_m * SILHOUETTE_BULGE;
+    let min = (elements.sma * (1.0 - elements.ecc) * fore - disc_m) * pxm;
+    let max = (elements.sma * (1.0 + elements.ecc) + disc_m) * pxm;
     (min.max(0.0), max)
 }
 
@@ -362,18 +394,26 @@ fn planet_annulus_px(
 /// orbital phase, however long the flight to the park takes. The surround ring may still graze a
 /// planet (it only ADDS colors to the background set; the pure-shell color always remains on the
 /// ring's far side), so only the rectangle needs the clearance. Searched along +Y (the most
-/// screen-transverse world axis under the fitted view) on the |z| = [`PARK_PLANE_Z_M`] plane (clear
-/// of every planet's SOI in world space). Panics — loudly, naming the annuli — if THE world's
-/// orbit layout ever tiles the whole disc.
-fn clean_home_park(camera: &CaptureCamera, annuli: &[(f64, f64)]) -> DVec3 {
+/// screen-transverse world axis under the fitted view) on the `|z| = plane_z_m` plane (twice the
+/// roster's I-POLE margin — clear of every planet's SOI in world space), out to `max_offset_m` in
+/// steps of `step_m`; the caller derives all three off THE world so the reach and the resolution
+/// move together. Panics — loudly, naming the annuli — if THE world's orbit layout ever tiles the
+/// whole disc.
+fn clean_home_park(
+    camera: &CaptureCamera,
+    annuli: &[(f64, f64)],
+    plane_z_m: f64,
+    max_offset_m: f64,
+    step_m: f64,
+) -> DVec3 {
     let marker_px = vd_client_harness::camera::DOT_MIN_APPARENT_RADIUS_PX;
     let clearance = DOT_RECT_BRACKET * marker_px + PARK_RECT_CLEARANCE_PX;
     let centre = camera
         .project_point(DVec3::ZERO)
         .expect("the home centre projects");
     let mut offset_m = 0.0_f64;
-    while offset_m <= PARK_MAX_OFFSET_M {
-        let world = DVec3::new(0.0, offset_m, -PARK_PLANE_Z_M);
+    while offset_m <= max_offset_m {
+        let world = DVec3::new(0.0, offset_m, -plane_z_m);
         let p = camera
             .project_point(world)
             .expect("an in-shell park projects");
@@ -384,12 +424,13 @@ fn clean_home_park(camera: &CaptureCamera, annuli: &[(f64, f64)]) -> DVec3 {
         {
             return world;
         }
-        offset_m += PARK_SEARCH_STEP_M;
+        offset_m += step_m;
     }
     panic!(
         "no capture park inside the home shell clears every planet's projected orbit annulus \
-         (annuli {annuli:?} px, clearance {clearance:.1} px) — THE world's orbit layout changed; \
-         restate the park search, never the pixel asserts"
+         (annuli {annuli:?} px, clearance {clearance:.1} px, searched +Y to {max_offset_m:.4e} m \
+         on the |z| = {plane_z_m:.4e} m plane) — THE world's orbit layout changed; restate the \
+         park search, never the pixel asserts"
     )
 }
 
@@ -419,8 +460,11 @@ fn assert_dot_rect_clear_of_planets(cap: &Capture, home_label: &str, label: &str
         // TRUE-SCALE RESTATEMENT (S5): the second arm is now reachable and load-bearing. The
         // avatar stands at the home system's login standoff, which projects near the centre of the
         // frame — and since the taxonomy slice the system's STAR draws a real photosphere disc
-        // there ([475,193]-[809,527] measured, against a 12-px dot rect at [636,354]-[648,366]).
-        // Standing in front of your own sun is not a defect; a rim through the probe would be.
+        // there, wholly covering the dot's small probe area. Standing in front of your own sun is
+        // not a defect; a rim through the probe would be. (The rects that were transcribed here
+        // were measured on the pre-mass-cap world and every one of them is f(the home star's
+        // mass), so they are stated as a SHAPE now and re-measured by the run itself — the
+        // failure message prints both rects.)
         let probe = ScreenAabb {
             min: ScreenPos {
                 x: cap.dot_rect.min.x - DOT_SURROUND_RING_PX,
@@ -444,13 +488,24 @@ fn assert_dot_rect_clear_of_planets(cap: &Capture, home_label: &str, label: &str
     }
 }
 
-/// Park the dot at `target` (stated in the space the session currently stands in), throttle cut.
-fn park_at(devctl: u16, target: DVec3) {
+/// Park the dot at `target` (stated in the space the session currently stands in) to within
+/// `arrive_within_m`, then throttle cut.
+///
+/// THE ARRIVAL DEMAND IS DERIVED, never a metre count. `node_per_realm_walk` MEASURED why: under
+/// the geometric throttle taper the last stretch of a governed brake closes at FOOT speed, so a 3 m
+/// arrival demand at true scale is an unbounded crawl (its A.2 leg never arrived inside its whole
+/// budget), and its cure is the rule `fly_waypoint` states — the slop is the clearance geometry the
+/// park protects, expressed in that geometry's own units. Here the geometry is PIXELS, so the
+/// caller passes the DOT'S OWN DRAWN RADIUS at the park ([`dot_world_radius`]): the resolution at
+/// which "where the dot is" is a meaningful question at all — the same argument the straddle
+/// tightness loop in [`capture`] already stands on — and comfortably inside the clearance
+/// [`clean_home_park`] leaves around the dot's rectangle.
+fn park_at(devctl: u16, target: DVec3, arrive_within_m: f64) {
     let walk = round_trip(
         devctl,
         &DevRequest::WalkTo {
             target: target.to_array(),
-            arrive_epsilon: 3.0,
+            arrive_epsilon: arrive_within_m,
             max_ticks: 3000,
             max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
         },
@@ -637,9 +692,33 @@ fn capture(
 // `framing_bounds` both the renderer and this gate call) and the camera-relative flatten with an
 // f64-built rotation both apply to it. What stops it now is NOT the camera; it is this gate's own
 // VERDICT SHAPE, which predates the bound/look split. Re-parked with what was measured, and
-// ledgered as D-LOOK-4.
+// ledgered as D-LOOK-4 — whose recorded figures were taken BEFORE the derived stellar mass cap
+// re-drew every star and before HOME_SEED became the default seed, so they must be re-measured on
+// THE world as shipped before any of that work is scoped from them (the citation below says so).
 #[test]
-#[ignore = "PARKED on a MEASURED verdict-shape gap (D-LOOK-4), NOT the S5 camera — the S5 work             landed and its blow-out is gone. This gate's central verdict tests CONTAINMENT against             the DRAWN region ('the dot's pixels lie inside the home box's projected region while             inside it'), and the bound/look split made those two different numbers: on THE world             the home realm DRAWS its star's photosphere at 7.805661e7 m while its containment             bound is 1.582262e11 m — a ratio of 2027, so an occupant lawfully inside the realm is             nowhere near its drawn disc. Measured with S5 landed: framing the 7.8e7 m photosphere             stands the diagnostic camera 2.35e8 m out, where the avatar's own login standoff             (1.03e10 m from the star, the T2 spawn) is 44x farther and projects BEHIND the star's             disc — 'the dot itself must be pixel-visible against the shell disc' failed with the             dot rect x636-648/y354-366 inside the star's disc x475-809/y193-527. What is owed: the             containment arm restated against the realm's BOUND (the number containment uses) plus             a framing that can hold both a photosphere and an occupant 1e10 m away. The crossing             itself is gated in pixels meanwhile by acceptance_flight (five legs, labels, handovers             and growth curves) and by look_pixels/warp_pixels."]
+#[ignore = "PARKED on a MEASURED verdict-shape gap (D-LOOK-4), NOT the S5 camera — the S5 work \
+landed and its blow-out is gone. THE GAP: this gate's central verdict tests CONTAINMENT \
+against the DRAWN region ('the dot's pixels lie inside the home box's projected region while \
+the occupant is inside that realm'). That was ONE statement while a realm's drawn outline WAS \
+its containment boundary; the bound/look split (real_scale_design §3.0) made them two numbers, \
+and on THE world they differ by ORDERS: a star system is CONTAINED at its solved clearance \
+shell and DRAWN at its star's photosphere — a far smaller sphere about the same centre. An \
+occupant lawfully inside the realm is therefore nowhere near its drawn disc, and the verdict \
+cannot be true as written. The same ratio breaks the framing: fitting the photosphere stands \
+the diagnostic camera close in, while the avatar's own login standoff (the T2 spawn, a \
+multiple of the STAR's bound) is far outside that fit and projects onto the star's own disc — \
+so the gate fails one assert EARLIER than the containment arm, at 'the dot itself must be \
+pixel-visible against the shell disc'. WHAT IS OWED (the work D-LOOK-4 tracks): restate the \
+containment arm against the realm's BOUND — the number containment actually uses, read off \
+the booted regions exactly as every other true-scale gate reads it — and give the gate a \
+framing that can hold BOTH a photosphere and an occupant orders farther out (a subject-named \
+fit, or the pilot camera with a companion dot). ⚠ THE RECORDED MEASUREMENT IS STALE AND ITS \
+DIGITS ARE DELIBERATELY NOT REPEATED HERE: it was taken 2026-08-20 on the PRE-MASS-CAP world, \
+before the derived stellar cap re-drew every star at every seed and before HOME_SEED became \
+the default universe seed. Every figure in it is f(the home star's mass). RE-MEASURE on THE \
+world as shipped before scoping the verdict-shape work from it — never carry the old numbers \
+forward. Meanwhile the crossing itself is gated in pixels by acceptance_flight (five legs, \
+labels, handovers and growth curves) and by look_pixels/warp_pixels."]
 fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
@@ -658,6 +737,66 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     let galaxy_label = frame_for_realm(roster.galaxy, None)
         .expect("the galaxy realm has a frame")
         .label();
+
+    // ---- THE DERIVED CORRIDOR. Every park, aim, search bound and deadline below is READ off THE
+    // world; none of them is stated here. The basis is the home realm's own SOLVED shell plus the
+    // band's two edges: the release OUTSET is where the label flips on the way out, the acquire
+    // INSET where it flips coming back, and the speed law turns a distance into a lawful deadline.
+    // (Every literal this replaced was the interim 150 m world's: a 2 km park is now DEEP INSIDE
+    // the home system rather than out in the between-space, and a fixed 60 s leg is a fraction of
+    // one governed crossing.)
+    let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+    let world_regions = vd_physics::worldgen::realm_regions_for_config(DEV.universe_seed, &config);
+    let shell_of = |realm: RealmId| {
+        world_regions
+            .iter()
+            .find(|r| r.realm == realm)
+            .map(|r| r.shape.finite_extent())
+            .expect("a flown realm is rostered on THE world")
+    };
+    let home_shell_m = shell_of(roster.home);
+    // The whole containment REACH: past this the home realm has released you (leg A's label flip).
+    let home_reach_m = home_shell_m + config.band.outset_m;
+    // The ACQUIRE edge: inside this the home realm has taken you back (leg B's label flip).
+    let home_acquire_m = home_shell_m - config.band.inset_m;
+    let outside_park_z_m = OUTSIDE_PARK_REACHES * home_reach_m;
+    let return_aim_z_m = RETURN_AIM_ACQUIRE_FRAC * home_acquire_m;
+    let outside_park = DVec3::new(0.0, 0.0, -outside_park_z_m);
+    let return_park = DVec3::new(0.0, 0.0, -return_aim_z_m);
+    // THE LEG DEADLINE, from the speed law rather than a stopwatch: `governed_leg_budget` over the
+    // whole corridor under the HOME realm's own ceiling — the slower of the two ceilings these legs
+    // ride, so one budget covers either direction, and a generous ceiling only ever bounds a
+    // genuinely frozen leg (the walk gate's own note).
+    let cap_home = vd_core::flight::realm_speed_cap_mps(
+        home_shell_m,
+        DEV.move_speed,
+        vd_core::flight::TRAVERSE_S,
+    );
+    let leg_deadline = vd_bins::flight::governed_leg_budget(&DEV, outside_park_z_m, cap_home);
+    // THE PARK PLANE + the +Y search reach. `|z|` at twice the roster's I-POLE margin clears every
+    // planet's SOI in world space at every orbital phase; the reach is a fraction of the acquire
+    // sphere's own half-chord AT that plane, so the whole search is provably inside the acquire
+    // edge; and the step is that reach divided into a fixed number of steps, so the two can never
+    // drift apart into a 1e11-iteration hang.
+    let park_plane_z_m = PARK_PLANE_POLE_ALTITUDES * roster.pole_altitude_m;
+    let park_chord_m = (home_acquire_m * home_acquire_m - park_plane_z_m * park_plane_z_m)
+        .max(0.0)
+        .sqrt();
+    let park_max_offset_m = PARK_OFFSET_CHORD_FRAC * park_chord_m;
+    assert!(
+        park_max_offset_m > 0.0,
+        "the park plane (|z| = {park_plane_z_m:.4e} m, twice the roster's I-POLE margin) no longer \
+         fits inside the home realm's acquire edge ({home_acquire_m:.4e} m) — THE world changed \
+         under the park geometry; restate the park, never the pixel asserts",
+    );
+    let park_search_step_m = park_max_offset_m / f64::from(PARK_SEARCH_STEPS);
+    eprintln!(
+        "CROSSING derivation: home shell {home_shell_m:.4e} m, reach {home_reach_m:.4e} m, \
+         acquire edge {home_acquire_m:.4e} m, outside park {outside_park_z_m:.4e} m down the \
+         pole, return aim {return_aim_z_m:.4e} m, park plane |z| {park_plane_z_m:.4e} m, +Y \
+         reach {park_max_offset_m:.4e} m in {PARK_SEARCH_STEPS} steps of \
+         {park_search_step_m:.4e} m, leg deadline {leg_deadline:?}",
+    );
 
     let ports = DevPortScheme::DEFAULT
         .slot_ports(RENDER_CROSSING_SLOT)
@@ -749,21 +888,30 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     // rectangle may never share a pixel with a planet's disc, and that is guaranteed against every
     // ORBITAL PHASE, so no flight-time or capture-latency race can slide a planet under it). Both
     // in-home captures (INSIDE + RETURNED) park here.
-    let home_park = {
+    let (home_park, home_park_slop_m) = {
         let plan_state = poll_state(devctl);
         let plan_camera = live_scene_camera(&plan_state, CAPTURE_W as usize, CAPTURE_H as usize);
-        let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+        // Each annulus reads the mover's OWN solved shell off THE world's regions — the same
+        // `shell_of` every derived leg above uses. (It used to pass `planet_soi_r_m`, the WALK
+        // fixture forest's radius, for every planet alike.)
         let annuli: Vec<(f64, f64)> = vd_physics::worldgen::moving_children_for_config(
             DEV.universe_seed,
             &config,
             roster.home,
         )
         .iter()
-        .map(|(_, e)| planet_annulus_px(&plan_camera, e, config.planet.planet_soi_r_m))
+        .map(|(realm, e)| planet_annulus_px(&plan_camera, e, shell_of(*realm)))
         .collect();
-        clean_home_park(&plan_camera, &annuli)
+        let park = clean_home_park(
+            &plan_camera,
+            &annuli,
+            park_plane_z_m,
+            park_max_offset_m,
+            park_search_step_m,
+        );
+        (park, dot_world_radius(&plan_camera, park))
     };
-    park_at(devctl, home_park);
+    park_at(devctl, home_park, home_park_slop_m);
     // The login scene: origin = the home realm at the login epoch (0→1 at the first fold).
     let inside = capture(devctl, &cwd, "inside", roster.home, roster.home, 1);
     assert_eq!(
@@ -811,9 +959,9 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     let (out_prev, out_before, out_after) = cross_leg_watching_scene(
         devctl,
         "A home->galaxy (polar corridor)",
-        |_tick| OUTSIDE_PARK,
+        |_tick| outside_park,
         &galaxy_label,
-        LEG_DEADLINE,
+        leg_deadline,
     );
     let one_tick_bound_m = DEV.move_speed * DEV.tick_dt;
     assert_no_flicker_across_swap(
@@ -824,8 +972,14 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
         "A home->galaxy",
     );
     // Park AT the corridor waypoint. The target is numerically the same point in both frames (J1),
-    // so restating it after the flip is sound — the one crossing where that is true.
-    park_at(devctl, OUTSIDE_PARK);
+    // so restating it after the flip is sound — the one crossing where that is true. The arrival
+    // slop is the dot's own drawn radius AT that park, read off the camera the moment the crossing
+    // committed (the between-space fit differs from the in-home one, so it cannot be reused).
+    let outside_park_slop_m = dot_world_radius(
+        &live_scene_camera(&poll_state(devctl), CAPTURE_W as usize, CAPTURE_H as usize),
+        outside_park,
+    );
+    park_at(devctl, outside_park, outside_park_slop_m);
     let admin = loopback(ports.admin);
     // The swapped scene: origin = the galaxy realm, epoch = login + 1.
     let outside = capture(devctl, &cwd, "outside", roster.home, roster.galaxy, 2);
@@ -874,8 +1028,9 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     // geometry as its own assert…
     assert!(
         rects_disjoint(outside.dot_rect, outside.home_rect),
-        "OUTSIDE: the 2 km park exists exactly so the dot's rect {:?} clears the home silhouette \
-         {:?} — a collision means the park or the camera geometry changed",
+        "OUTSIDE: the park sits two whole containment reaches down the pole exactly so the dot's \
+         rect {:?} clears the home silhouette {:?} — a collision means the park or the camera \
+         geometry changed",
         outside.dot_rect,
         outside.home_rect,
     );
@@ -898,10 +1053,10 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     // freeze, now under pixels AND under the no-flicker watch. --
     let (back_prev, back_before, back_after) = cross_leg_watching_scene(
         devctl,
-        "B galaxy->home (0,0,-60)",
-        |_tick| RETURN_PARK,
+        "B galaxy->home (down the pole, inside the derived acquire edge)",
+        |_tick| return_park,
         &home_label,
-        LEG_DEADLINE,
+        leg_deadline,
     );
     assert_no_flicker_across_swap(
         back_prev.as_ref(),
@@ -912,7 +1067,7 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     );
     // Re-park at the SAME annulus-clear capture point the INSIDE capture used (the return AIM only
     // committed the crossing; pixels are always taken where the dot's rect is provably planet-free).
-    park_at(devctl, home_park);
+    park_at(devctl, home_park, home_park_slop_m);
     // Back home: origin = the home realm again, the SECOND bump (login 1 → out 2 → return 3).
     let returned = capture(devctl, &cwd, "returned", roster.home, roster.home, 3);
     assert_eq!(

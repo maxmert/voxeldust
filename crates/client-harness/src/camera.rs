@@ -912,6 +912,11 @@ mod tests {
         // `Transform::looking_at` subtracts `target - translation` in f32 and falls back to facing
         // world -Z when that comes out zero. At THE world's eye magnitudes a unit-ahead target IS
         // the eye in f32 — so the camera silently stopped facing where the pilot faced.
+        // A FIXED LADDER, deliberately: these are not readings of today's world (the derived mass
+        // cap moved the star gap to 1.4989795871538758e15 m on 2026-08-20 and re-drew every star),
+        // they are three magnitudes spanning the range this crate must survive. Pinning them keeps
+        // the f32 defect measured at the SAME points across every world re-solve; the gates that
+        // must read the live world do so (`render_scale`).
         for magnitude in [1.8248e8_f64, 3.2e11, 2.2485e15] {
             let axis = DVec3::splat(magnitude / 3.0_f64.sqrt());
             let forward = DVec3::new(0.5, 0.5, -0.5).normalize();
@@ -948,8 +953,11 @@ mod tests {
     fn the_depth_planes_are_read_off_the_drawn_picture_and_never_clip_it() {
         let fov = FIT_FOV_Y;
         let rows = 720.0;
-        // THE WORLD'S OWN RANGE PAIR: the avatar's own marker at arm's length and a body 2.2485e15 m
-        // out with a 7.8e12 m drawn radius (the warp destination's floored point of light).
+        // A WORLD-SCALE RANGE PAIR: the avatar's own marker at arm's length and a body 2.2485e15 m
+        // out with a 7.8e12 m drawn radius (a warp destination's floored point of light). The far
+        // magnitude is a FIXED ruler, not a reading — THE world's star gap became
+        // 1.4989795871538758e15 m with the derived mass cap, and this test would say nothing new if
+        // it tracked it.
         let subjects = [
             (DEFAULT_EYE_OFFSET, f64::from(0.5_f32)),
             (2.2485e15, 7.76e12),

@@ -57,10 +57,18 @@ pub struct EarthLikeCandidate {
 /// Chosen by the owner from the `vd-seedsearch` candidate table (`scratchpad/home_candidates.md`,
 /// 42 candidates over 8 029 swept seeds — a measured rate of 1 in 191.2), NOT authored: the search
 /// reads the generator, the generator is never biased toward the search (SL5). Seed 2298 ranked
-/// first on the published desirability expression: a G-class star of 1.0313 M☉ / 1.1311 L☉, an
-/// Earth-like world of 1.087 M⊕ and 1.023 R⊕ (6 515.5 km, ρ 5 601 kg/m³, g 10.20 m/s²) that is
-/// Rocky, temperate and RETAINS ITS ATMOSPHERE, in a system of 9 planets and 22 moons, with both
-/// sibling stars 0.2377 ly away (a first warp of ~142 s).
+/// first on the published desirability expression: a G-class star, an Earth-like world of 1.087 M⊕
+/// and 1.023 R⊕ (6 515.5 km, ρ 5 601 kg/m³, g 10.20 m/s²) that is Rocky, temperate and RETAINS ITS
+/// ATMOSPHERE, in a system of 9 planets, with two sibling stars to warp to.
+///
+/// ★ THE NUMBERS THIS PARAGRAPH USED TO NAME MOVED THE SAME DAY THE SEED LANDED, and are no longer
+/// written down here. The DERIVED MASS CAP re-rolled the stellar draw hours after the choice: the
+/// star went 1.0313 → 1.0151 M☉ and 1.1311 → 1.0616 L☉, the system's moon census 22 → 19, and the
+/// sibling stars moved from 0.2377 ly to 0.1584 ly with the placement radius. The PLANET itself is
+/// bit-unmoved — its own draws never read the stellar cap — which is why the choice still stands.
+/// `earth_like_candidates_at_the_home_seed…` pins every one of those values as a MEASUREMENT, and
+/// that is where to read them; the flight table measures what the warp actually costs. A prose
+/// restatement here would only go stale again at the next re-solve.
 ///
 /// ★ DISCOVERY PERMANENCE (owner's standing law): this number is a PRE-LAUNCH dial. At launch it
 /// FREEZES FOREVER — a seed change is a different world, so once discovery begins it never moves.

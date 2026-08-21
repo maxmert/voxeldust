@@ -19,8 +19,19 @@ use vd_io_prod::trust::ClusterTrust;
 /// now and it is generated, so its planets carry hash seeds and `7` names nothing — a shard booted on it
 /// gets an EMPTY neighbourhood and fails the fence for the wrong reason ("0 ambient roots"), which is what
 /// this test then mistook for the lineage fence firing.
+///
+/// ★ RE-DERIVED 2026-08-21 (the gate-pass arc). The seed was the LITERAL `0`, and on 2026-08-20 the
+/// no-`VD_UNIVERSE_SEED` default became [`vd_physics::worldgen::HOME_SEED`] — which is what the
+/// `vd-shard` this test spawns actually boots, because neither `shard_env` nor `common_env` names the
+/// key. So the test picked a planet out of ONE world and asserted a fence in ANOTHER: the same
+/// two-worlds-in-one-launch class the paragraph above was written about, re-opened by a default
+/// moving underneath it. `DEV.universe_seed` IS that default, so the two ends cannot disagree again.
 fn a_planet_of_the_world() -> u64 {
-    let world = vd_bins::boot_world(0, vd_bins::DEV.move_speed, vd_bins::DEV.tick_dt);
+    let world = vd_bins::boot_world(
+        vd_bins::DEV.universe_seed,
+        vd_bins::DEV.move_speed,
+        vd_bins::DEV.tick_dt,
+    );
     world
         .regions()
         .iter()

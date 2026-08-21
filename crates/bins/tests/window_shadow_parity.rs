@@ -49,17 +49,19 @@ use vd_devproto::{CLIENT_NODE_BASE, DevPhase, DevRequest, DevResponse, DevState}
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::{AdminSnapshot, GatewayView};
 
-/// Demand: the login must SPAWN real shard processes THEN converge (same budget as the
-/// demand-login gate); the crossing leg gets the walk budget.
+/// Demand: the login must SPAWN real shard processes THEN converge. A PROCESS budget — boot,
+/// handshake and grant, no distance in it — so a wall-clock constant is the honest shape here.
 const LOGIN_DEADLINE: Duration = Duration::from_secs(60);
-const FLIGHT_DEADLINE: Duration = Duration::from_secs(150);
-/// A healthy client clears this in a second or two of 20 Hz once its home is up.
+/// A healthy client clears this within a second or two of the cluster's own tick rate
+/// (`DEV.tick_hz`) once its home is up. It used to say "20 Hz"; the DEV posture has been 50 Hz for
+/// a long time, and the rate belongs to the config, not to this comment.
 const SNAPSHOT_FLOOR: u64 = 5;
-/// The anti-vacuity floor: the stationary settle alone composes rows at the 20 Hz realm-lane rate
-/// across several planets — hundreds within a few seconds. Requiring this many COMPOSED rows makes
-/// a composer that never folds a loud failure, while staying far under what any healthy run
-/// produces. (It replaces the retired comparator's matched-row floor, at the same magnitude and
-/// for the same reason.)
+/// The anti-vacuity floor: the stationary settle alone composes rows at the realm-lane rate across
+/// every planet of the home system — hundreds within a few seconds. Requiring this many COMPOSED
+/// rows makes a composer that never folds a loud failure, while staying far under what any healthy
+/// run produces. (It replaces the retired comparator's matched-row floor, at the same magnitude and
+/// for the same reason.) It also only gets EASIER as the world grows: the count used to be argued
+/// over five planets and the shipped world derives nine.
 const COMPOSED_FLOOR: u64 = 200;
 
 fn poll_state(port: u16) -> Option<DevState> {
@@ -342,7 +344,33 @@ fn the_composed_picture_folds_one_chain_at_one_tick_with_the_dead_lanes_silent()
     // the ONE shared rendezvous), while client B keeps watching from the star. ----
     let roster = world_roster(&p);
     let (planet, elements) = (roster.inner, roster.inner_elements);
-    rendezvous_into_planet(devctl_a, &DEV, planet, &elements, FLIGHT_DEADLINE);
+    // ★ THE FLIGHT BUDGET, DERIVED (2026-08-21, the gate-pass arc). This was a flat 150 s, which
+    // bounded a chase whose whole length is world-derived — the inner planet's own orbit around a
+    // star that the derived mass cap re-drew, inside a home system whose solved shell moved with
+    // it. `governed_leg_budget` is the ONE budget every other flight gate uses: the speed law's own
+    // closed form over the distance, at the containing realm's ceiling, so it re-solves with the
+    // world instead of being re-guessed each time it goes red.
+    let home_shell_m = vd_bins::boot_world(p.universe_seed, p.move_speed, p.tick_dt)
+        .regions()
+        .iter()
+        .find(|r| r.realm == roster.home)
+        .expect("the home realm is a region of the world it came from")
+        .shape
+        .finite_extent();
+    let flight_deadline = vd_bins::flight::governed_leg_budget(
+        &p,
+        home_shell_m,
+        vd_core::flight::realm_speed_cap_mps(
+            home_shell_m,
+            p.move_speed,
+            vd_core::flight::TRAVERSE_S,
+        ),
+    );
+    eprintln!(
+        "[window] the rendezvous budget: home shell {home_shell_m:.6e} m => {:.1} s",
+        flight_deadline.as_secs_f64(),
+    );
+    rendezvous_into_planet(devctl_a, &DEV, planet, &elements, flight_deadline);
     eprintln!("[window] client A crossed into {planet:?}; dwelling for the ≥2-level fold");
 
     // ---- Phase 4: the on-planet dwell — the lineage-derived Child window on the parent joins

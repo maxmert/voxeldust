@@ -35,6 +35,7 @@ use vd_harness::client::ScriptedClient;
 use vd_harness::fabric::{FaultFabric, LinkPolicy};
 use vd_harness::oracle::{RenderSample, verify_authority_settled, verify_authority_unique};
 use vd_harness::topology::{InspectReport, Topology};
+use vd_physics::worldgen::{HOME_SEED, UniverseConfig, WorldView, moving_children_for_config};
 use vd_sim::io::mem::MemStore;
 use vd_tests::{
     DEST, ORCH, SHARD, arm_gateway_reject, clear_crossing_boundaries, dest_stub_config, live_sagas,
@@ -51,6 +52,45 @@ const CLIENT: NodeId = NodeId(100);
 /// A large finite render cursor so the client's `rendered` clamps to the FRESHEST delivered pose every
 /// tick — the actual last-delivered crossing pose, sampled deterministically (mirrors p2_transfer_gates).
 const TRACE_CURSOR: f64 = 1.0e9;
+
+/// What a flush-stamp gap of `gap_ticks` is WORTH, stated in the world's own terms: the tick the
+/// shard fixture runs at, the speed of the fastest thing THE world contains, the metres of
+/// unmeasured sweep those two multiply out to, and the containment inset that sweep eats into.
+///
+/// Every factor is read AT USE — the tick off the shard fixture's own config, the speed and the
+/// inset off the shipped world config and the shipped generator at the seed every world-deriving
+/// process defaults to. The speed is the largest PERIAPSIS speed (`OrbitalElements::v_peri`, the
+/// vis-viva maximum) over every orbiting child every realm in that world authors: planets and moons
+/// alike, because the sweep this bounds does not care which kind of body did the sweeping.
+///
+/// WHAT MOVED, AND WHY IT CANNOT GO STALE AGAIN. The message used to carry the tick and the speed as
+/// literals (0.05 s and 7.68 m/s), transcribed from the compressed in-system geometry that the
+/// true-size re-solve deleted; the derived stellar mass cap then re-drew every star on top of that.
+/// Both events changed the answer by orders of magnitude and neither could reach a literal. Asking
+/// the generator on the run that prints the message means the bound is always the bound of the world
+/// that run actually built. Called only from the failing arm of the assertion below, so the world is
+/// generated only when there is a failure to describe.
+fn unmeasured_sweep(gap_ticks: u64) -> String {
+    let shard = stub_config();
+    let world = UniverseConfig::world(
+        shard.move_speed_mps * shard.time_multiplier,
+        shard.tick_dt_s,
+    );
+    let fastest_mps = WorldView::generated(HOME_SEED, &world)
+        .regions()
+        .iter()
+        .flat_map(|r| moving_children_for_config(HOME_SEED, &world, r.realm))
+        .map(|(_, e)| e.v_peri())
+        .fold(0.0_f64, f64::max);
+    let tick_dt_s = shard.tick_dt_s;
+    let inset_m = world.band.inset_m;
+    #[allow(clippy::cast_precision_loss)] // a tick count, never near 2^53
+    let sweep_m = gap_ticks as f64 * tick_dt_s * fastest_mps;
+    format!(
+        "{sweep_m:.3} m of unmeasured sweep (THE world's fastest mover runs at {fastest_mps:.3} \
+         m/s over ticks of {tick_dt_s} s) against a {inset_m} m containment inset"
+    )
+}
 
 /// One captured tick of the subject's composited render: its sample (`None` ⇒ rendered nowhere) and the
 /// subs holding a track for it. Built from DELIVERED BYTES only — never node internals.
@@ -285,15 +325,15 @@ fn crossing_e2e_durable_dot_crosses_a_planted_boundary() {
     // (`readvance_dots` skips it), and the flush's departure/entry re-validations measure the world
     // at the POSE's instant — so the world every moving placement lives in has swept on for exactly
     // this many ticks under decisions the flush claims to re-read "NOW". This pins the gap at ZERO;
-    // its failure message IS the measured bound (gap × tick_dt × 7.68 m/s, THE world's fastest
-    // planet, against a 1.0 m containment inset).
+    // its failure message IS the measured bound — the gap, times a tick, times the speed of the
+    // fastest thing in THE world, against the containment inset — every factor read off the shipped
+    // config and the shipped generator at print time (see `unmeasured_sweep`), never transcribed.
     assert_eq!(
         src.flush_stamp_gap_ticks_max,
         0,
-        "the flush measured a world {} ticks older than its own clock — at THE world's fastest \
-         planet speed that is {:.3} m of unmeasured sweep against a 1.0 m containment inset",
+        "the flush measured a world {} ticks older than its own clock — that is {}",
         src.flush_stamp_gap_ticks_max,
-        src.flush_stamp_gap_ticks_max as f64 * 0.05 * 7.68,
+        unmeasured_sweep(src.flush_stamp_gap_ticks_max),
     );
 
     // (7) PLACEMENT-ARC S2 GATE: no ledger selection missed its instant anywhere in the run — every
