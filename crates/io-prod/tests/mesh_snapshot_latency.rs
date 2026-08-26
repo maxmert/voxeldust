@@ -149,7 +149,7 @@ fn spawn_node(
     book: &BTreeMap<NodeId, SocketAddr>,
     inbound_capacity: usize,
 ) -> (MeshTransport, MeshControl) {
-    let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, 1);
+    let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, 1, 0);
     cfg.inbound_capacity = inbound_capacity;
     spawn_mesh(handle, trust, &cfg, None).expect("mesh node")
 }

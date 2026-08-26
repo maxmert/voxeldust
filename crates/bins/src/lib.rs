@@ -879,10 +879,66 @@ pub fn open_node_outbox(
         .map(std::path::PathBuf::from);
     let ephemeral_ok = parse_bool_env(env, "VD_OUTBOX_EPHEMERAL_OK")?;
     vd_io_prod::boot::check_durable_path(&path, durable_root.as_deref(), ephemeral_ok)?;
-    Ok(Some(vd_io_prod::outbox::NodeOutbox::open(
+    // THE LABEL. The epoch is zero here because a node's outbox is opened BEFORE the universe clock has
+    // spoken — it carries frames, not world state, so the world's own epoch is not yet knowable and
+    // stating a guess would refuse every restart. What it DOES carry is the seed and both generations,
+    // which is what stops one world's undelivered frames being replayed into another.
+    let stamp = durable_stamp(
+        env,
+        vd_core::store_stamp::StoreRole::Outbox,
+        vd_core::EpochId(0),
+    )?;
+    let allow_genesis = parse_bool_env(env, "VD_STORE_ALLOW_GENESIS")?;
+    Ok(Some(vd_io_prod::store::open_allowing_genesis(
         &path,
-        vd_io_prod::store::StoreTuning::default(),
+        allow_genesis,
+        |p| {
+            vd_io_prod::outbox::NodeOutbox::open(
+                p,
+                vd_io_prod::store::StoreTuning::default(),
+                stamp,
+            )
+        },
     )?))
+}
+
+/// THE ONE PLACE A DURABLE FILE'S LABEL IS BUILT (owner ruling 2026-08-24 Q1 condition 1; D-48).
+///
+/// Every opener in every binary calls this, so two files written by one cluster can never disagree about
+/// which world they belong to. The two generations inside are DERIVED — from the coordinate tier table
+/// and from the world's own shaping constants — so no caller can state one, which is the whole point: a
+/// number a caller could state is a number a caller could state wrongly.
+///
+/// The seed is read the same way every world-deriving process reads it, so a mismatch between a store's
+/// label and the world a process actually booted is impossible rather than merely unlikely.
+///
+/// # Errors
+/// Whatever the environment reader returns for a malformed seed — a world nobody can name is not a world
+/// to open a store against.
+/// ★ THE WORLD THIS PROCESS SERVES, as one number — the SAME fold the saved-file label uses.
+///
+/// One source, two readers: the label a store is written with, and the tag this node offers on every
+/// transport handshake. Computing it twice from two places is how they would eventually disagree, and a
+/// disagreement here is a player standing in the wrong place with nothing logged.
+#[must_use]
+pub fn world_generation() -> u64 {
+    vd_core::store_stamp::world_generation(&vd_physics::worldgen::world_shape_constants())
+}
+
+pub fn durable_stamp(
+    env: &EnvConfig,
+    role: vd_core::store_stamp::StoreRole,
+    epoch: vd_core::EpochId,
+) -> Result<vd_core::store_stamp::StoreStamp, Box<dyn std::error::Error>> {
+    // Read EXACTLY as every world-deriving process reads it, default included — a store labelled with a
+    // seed the process did not actually boot would refuse the right file for the wrong reason.
+    let seed: u64 = env.parse_or("VD_UNIVERSE_SEED", vd_physics::worldgen::HOME_SEED)?;
+    Ok(vd_core::store_stamp::StoreStamp::new(
+        role,
+        seed,
+        epoch,
+        &vd_physics::worldgen::world_shape_constants(),
+    ))
 }
 
 /// R-6d3b-2b: THE one node boot sequence shared by `shard.rs` + `gateway.rs` (HR3 — no per-kind fork). It
@@ -1000,6 +1056,7 @@ pub fn boot_mesh_and_replay(
             peers.clone(),
             env.parse("VD_OUTBOUND_CAP")?,
             new_incarnation,
+            world_generation(),
         ),
         shared.clone(),
     )?;
@@ -1439,6 +1496,10 @@ pub fn realm_kind_token(realm: vd_core::pose::RealmId) -> &'static str {
         RealmId::Area(_) => "area",
         RealmId::Star(_) => "star",
         RealmId::Ship(_) => "ship",
+        // A galaxy and the universe become hostable realms at S9 — a galaxy owns its star systems and the
+        // universe owns its galaxies — so each needs its own word here, not a borrowed one.
+        RealmId::Galaxy(_) => "galaxy",
+        RealmId::Universe => "universe",
     }
 }
 
@@ -1458,9 +1519,15 @@ pub fn realm_from_kind_seed(kind: &str, seed: u64) -> Result<vd_core::pose::Real
         "station" => Ok(RealmId::Station(seed)),
         "area" => Ok(RealmId::Area(seed)),
         "star" => Ok(RealmId::Star(seed)),
+        // ★ THE TWO THAT BECAME HOSTABLE AT S9. A galaxy owns its star systems and the universe owns its
+        // galaxies, so each can be a realm-shard's own realm. The universe ignores the seed because there
+        // is exactly one — the token still carries a value so every kind reads as `kind:value`.
+        "galaxy" => Ok(RealmId::Galaxy(seed)),
+        "universe" => Ok(RealmId::Universe),
         other => Err(format!(
-            "VD_REALM_KIND {other:?} is not one of system|planet|station|area|star (a realm-shard hosts \
-             one seed-keyed realm; Ship realms key on an entity id and are never booted as a realm-shard)"
+            "VD_REALM_KIND {other:?} is not one of system|planet|station|area|star|galaxy|universe (a \
+             realm-shard hosts one seed-keyed realm; Ship realms key on an entity id and are never booted \
+             as a realm-shard)"
         )),
     }
 }
@@ -1533,8 +1600,12 @@ fn realm_seed_of(realm: vd_core::pose::RealmId) -> u64 {
         | RealmId::Planet(s)
         | RealmId::Station(s)
         | RealmId::Area(s)
-        | RealmId::Star(s) => s,
-        RealmId::Ship(_) => 0,
+        | RealmId::Star(s)
+        | RealmId::Galaxy(s) => s,
+        // Neither of these keys on a seed of its own. A ship keys on an entity id; the universe is one
+        // thing and has no seed to key on. Both map to 0 for totality, and neither is a seed-keyed
+        // realm-shard boot.
+        RealmId::Ship(_) | RealmId::Universe => 0,
     }
 }
 
@@ -1870,9 +1941,20 @@ pub fn launch_rows(
     path: &std::path::Path,
 ) -> Vec<(NodeId, vd_core::realm_coord::RealmCoord, Option<u32>)> {
     use vd_sim::io::Store as _;
-    let (store, _durability) =
-        vd_io_prod::store::RedbStore::open(path, vd_io_prod::store::StoreTuning::default())
-            .expect("reopen launch.redb");
+    let (store, _durability) = vd_io_prod::store::RedbStore::open(
+        path,
+        vd_io_prod::store::StoreTuning::default(),
+        // A TEST HELPER reopening a ledger the orchestrator wrote, so it must present the SAME label
+        // the orchestrator built — read from this process's own environment, exactly as the
+        // orchestrator read it. A hand-written label here would pass while production failed.
+        durable_stamp(
+            &EnvConfig::from_process_env(),
+            vd_core::store_stamp::StoreRole::LaunchLedger,
+            vd_core::EpochId(0),
+        )
+        .expect("the launch ledger's label"),
+    )
+    .expect("reopen launch.redb");
     let rows: Vec<(NodeId, vd_core::realm_coord::RealmCoord, Option<u32>)> = store
         .scan(&vd_node::saga_runtime::rlm_launch_prefix())
         .into_iter()
@@ -2829,6 +2911,10 @@ fn realm_token(realm: vd_core::pose::RealmId) -> String {
         RealmId::Area(s) => format!("area:{s}"),
         RealmId::Star(s) => format!("star:{s}"),
         RealmId::Ship(id) => format!("ship:{}", id.0),
+        RealmId::Galaxy(s) => format!("galaxy:{s}"),
+        // Seedless, and written with a seed of 0 so the token shape stays `kind:value` for every kind —
+        // a parser that had to special-case one word is a parser that will one day forget to.
+        RealmId::Universe => "universe:0".to_owned(),
     }
 }
 

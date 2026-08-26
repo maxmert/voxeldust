@@ -382,9 +382,12 @@ pub fn p2_cluster_cohost(fabric: &FaultFabric, max_sessions: usize) -> Topology 
 /// shard that OWNS the between-space + System 7/System 8 as its children, so a SIBLING crossing routes
 /// THROUGH it (leave System 7 → land in the Galaxy → the Galaxy shard sees the entry into System 8). This
 /// is the shard the 3-shard round-trip needs so `head(Realm(Galaxy))` resolves and authority can REST in
-/// the between-space. Matches `vd_core::worldgen`'s `GALAXY = System(1)`.
+/// the between-space. Matches `vd_core::worldgen`'s `GALAXY`.
 pub const GALAXY: NodeId = NodeId(5);
-/// The Galaxy realm seed — must match `vd_core::worldgen`'s Galaxy (`System(1)`), the between-systems space.
+/// The Galaxy realm seed — must match `vd_core::worldgen`'s `GALAXY`, the between-systems space.
+///
+/// ★ S9: that realm is `RealmId::Galaxy(1)`, not the `System(1)` stand-in it used to borrow. The SEED
+/// is unchanged, so this shard hosts the identical realm and no fixture distance moved.
 pub const GALAXY_SEED: u64 = 1;
 
 /// The GALAXY stub's params: hosts `System(GALAXY_SEED)` (the between-space), a distinct mint seed so its
@@ -392,13 +395,13 @@ pub const GALAXY_SEED: u64 = 1;
 #[must_use]
 pub fn galaxy_stub_config() -> StubConfig {
     StubConfig {
-        realm: RealmId::System(GALAXY_SEED),
+        realm: RealmId::Galaxy(GALAXY_SEED),
         // Override the inherited `{System(7)}` — this shard hosts the Galaxy (single-realm; its System
         // 7/8 children are hosted by OTHER shards, so no co-hosting is needed on the Galaxy).
-        own_coord: StubConfig::root_coord(RealmId::System(GALAXY_SEED)),
-        held_realms: StubConfig::single_realm(RealmId::System(GALAXY_SEED)),
-        frame: FrameRef::SystemSpace {
-            system_seed: GALAXY_SEED,
+        own_coord: StubConfig::root_coord(RealmId::Galaxy(GALAXY_SEED)),
+        held_realms: StubConfig::single_realm(RealmId::Galaxy(GALAXY_SEED)),
+        frame: FrameRef::GalaxySpace {
+            galaxy_seed: GALAXY_SEED,
         },
         mint_seed: 23,
         ..stub_config()
@@ -1062,8 +1065,12 @@ pub fn set_shard_subject_offset(
         let dots = s.world_mut().resource_mut::<vd_sim::stub::Dots>();
         for dot in dots.into_inner().0.values_mut() {
             if dot.entity == subject {
-                dot.pose.pos =
-                    vd_core::pose::LatticePos::from_metres(off, vd_core::pose::Tier::Fine);
+                // ★ IN THE DOT'S OWN FRAME'S STEP (slice S9), not always millimetres. A pose is
+                // counted in the unit of the realm it is standing in, and a galaxy counts in two
+                // metres. Writing 100 m as millimetre cells and letting the galaxy read them as its
+                // own put the subject 2048× further out than the fixture asked for — far outside the
+                // realm, so the hop under test never fired.
+                dot.pose.pos = vd_core::pose::LatticePos::from_metres(off, dot.pose.frame.tier());
                 return true;
             }
         }
@@ -1236,10 +1243,10 @@ pub fn seed_held_transient_on(
                     pose,
                     anchor_fence: anchor,
                     status: vd_sim::stub::TransientStatus::Held { outbound: None },
-                    prev_offset: vd_core::pose::LatticePos::from_metres(
-                        pos,
-                        vd_core::pose::Tier::Fine,
-                    ),
+                    // ★ THE SEEDED FRAME'S OWN STEP (slice S9), matching the pose beside it: a
+                    // prior counted in a different unit than the position it is compared against is
+                    // a swept-membership test over a segment that never happened.
+                    prev_offset: vd_core::pose::LatticePos::from_metres(pos, frame.tier()),
                 },
             );
     });
@@ -1259,7 +1266,8 @@ pub fn set_transient_offset_on(
             .world_mut()
             .resource_mut::<vd_sim::stub::OwnedTransients>();
         if let Some(t) = owned.0.get_mut(&entity) {
-            t.pose.pos = vd_core::pose::LatticePos::from_metres(off, vd_core::pose::Tier::Fine);
+            // ★ IN THE TRANSIENT'S OWN FRAME'S STEP (slice S9) — see `set_shard_subject_offset`.
+            t.pose.pos = vd_core::pose::LatticePos::from_metres(off, t.pose.frame.tier());
             true
         } else {
             false

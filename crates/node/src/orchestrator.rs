@@ -405,10 +405,16 @@ fn apply_directory_op(
 /// the bin publishes this through `vd-io-prod`'s admin shell after each tick, so a
 /// 2am `curl` (and the process-tier parity test) sees the real directory.
 #[must_use]
-pub fn admin_snapshot(world: &mut bevy_ecs::prelude::World) -> vd_wire::admin::AdminSnapshot {
+pub fn admin_snapshot(
+    world: &mut bevy_ecs::prelude::World,
+    world_generation: u64,
+) -> vd_wire::admin::AdminSnapshot {
     let clock = *world.resource::<ClockSample>();
-    let mut snapshot =
-        vd_wire::admin::AdminSnapshot::shaped_empty(clock.universe_tick, clock.epoch);
+    let mut snapshot = vd_wire::admin::AdminSnapshot::shaped_empty(
+        clock.universe_tick,
+        clock.epoch,
+        world_generation,
+    );
     if let Some(dir) = world.get_resource::<DirectoryRes>() {
         snapshot.directory = dir
             .0
@@ -915,7 +921,7 @@ mod tests {
         );
         // Empty-but-shaped before any state exists (the P0 demo promise).
         let _ = orch.step_tick();
-        let snap = admin_snapshot(orch.world_mut());
+        let snap = admin_snapshot(orch.world_mut(), 0);
         assert_eq!(snap.universe_tick, 1);
         assert_eq!(snap.epoch, 7);
         assert_eq!(snap.directory, vec![]);
@@ -943,7 +949,7 @@ mod tests {
             .expect("sent");
         hub.pump();
         let _ = orch.step_tick();
-        let snap = admin_snapshot(orch.world_mut());
+        let snap = admin_snapshot(orch.world_mut(), 0);
         assert_eq!(snap.directory.len(), 1);
         assert_eq!(snap.directory[0].authority, "shard:node-2");
         assert_eq!(snap.directory[0].fence, Fence(1));
@@ -959,11 +965,11 @@ mod tests {
         // A world without a directory (non-orchestrator) stays shaped-empty.
         let mut bare = bevy_ecs::prelude::World::new();
         bare.insert_resource(ClockSample::default());
-        assert_eq!(admin_snapshot(&mut bare).directory, vec![]);
-        assert_eq!(admin_snapshot(&mut bare).leases, vec![]);
+        assert_eq!(admin_snapshot(&mut bare, 0).directory, vec![]);
+        assert_eq!(admin_snapshot(&mut bare, 0).leases, vec![]);
         // RLM 5f-4: no reconciler resource ⇒ the zero RLM view (the get_resource None arm).
         assert_eq!(
-            admin_snapshot(&mut bare).rlm,
+            admin_snapshot(&mut bare, 0).rlm,
             vd_wire::admin::RlmView::default(),
             "a world without a reconciler renders the zero RLM view"
         );
@@ -987,7 +993,7 @@ mod tests {
         rlm.running_gauge = 3;
         rlm.demand_sender_mismatch = 5;
         world.insert_resource(rlm);
-        let snap = admin_snapshot(&mut world);
+        let snap = admin_snapshot(&mut world, 0);
         assert_eq!(snap.rlm.spins_requested, 4);
         assert_eq!(snap.rlm.spins_failed, 1);
         assert_eq!(snap.rlm.teardowns_reaped, 2);

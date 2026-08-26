@@ -116,10 +116,10 @@ pub(crate) fn on_shard_control(
                 // THE WINDOW LANE (Slice B): a STATIC login's lineage starts at the attach
                 // frame's realm (a dynamic login already carries its descent's full lineage —
                 // never overwritten here).
-                if session.lineage.is_empty()
-                    && let Some(realm) = frame.realm()
-                {
-                    session.lineage = vec![realm];
+                // A frame always names its realm since S9, so the only condition left is whether the
+                // lineage is empty — the `Some` arm this used to also test could not fail.
+                if session.lineage.is_empty() {
+                    session.lineage = vec![frame.realm()];
                 }
                 // RLM 5f-3d: the pre-Active bootstrap window CLOSES here — the session is LIVE, so the
                 // bounded TTL no longer applies to it. Already `None` for a static session (byte-identical).
@@ -187,7 +187,8 @@ pub(crate) fn on_shard_control(
             // neither of which says which realm that is). The composer derives the new chain from
             // this lineage next pass, bumps the origin epoch, and emits the swap level — ordered
             // AFTER the `AuthorityChanged` below on the same reliable stream (§2.7).
-            if let Some(realm) = frame.realm() {
+            {
+                let realm = frame.realm();
                 // The session is a stated invariant, not a lookup that can fail: `open_sub` above
                 // just resolved it (this is the borrow-split re-fetch, nothing else).
                 let session = sessions

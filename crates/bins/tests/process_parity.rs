@@ -330,7 +330,14 @@ fn p1_parity_real_binaries_over_quic() {
         let (t, _c) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(id, bind, client_book.clone(), 64, 0),
+            &MeshConfig::new(
+                id,
+                bind,
+                client_book.clone(),
+                64,
+                0,
+                vd_bins::world_generation(),
+            ),
             None,
         )
         .expect("client mesh");

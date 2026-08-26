@@ -102,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // live, a crashed client reconnecting at incarnation 0 collides with its prior session's
             // buffered frames at the gateway — R-6's durable boot-counter / R-3' session reset close it.
             0,
+            vd_bins::world_generation(),
         ),
         None, // R-6d3a: the client has no producer-less durable flows — no outbox needed.
     )?;

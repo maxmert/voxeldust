@@ -338,6 +338,17 @@ pub struct StubStats {
     /// a skipped subject, a refused arrival, a dropped relay batch — never a silently substituted
     /// nearby instant. 0 in any healthy run (the placement arc's S2 gate).
     pub placement_book_miss: u64,
+    /// Containment questions refused because the two frames do not count in the same unit — the ladder's
+    /// own refusal, arriving at the scan (slice S8).
+    ///
+    /// ★ WHY THIS EXISTS AT ALL. The scan safe-degrades EVERY frame refusal to "not a member", which is
+    /// right for the refusals it was written for: a frame the book cannot place is genuinely not a
+    /// container. A CROSS-UNIT refusal is a different thing — it means "I cannot say" — and degrading it
+    /// to a definite "no" would hand an occupant to the wrong realm silently, which is the one failure
+    /// this whole coordinate mechanism exists to prevent. The degrade is UNCHANGED, because a wrong
+    /// answer is not improved by a panic; what changes is that the reason is now countable instead of
+    /// invisible. 0 on every path today, and it stays 0 until the galaxy and universe frames light up.
+    pub cross_tier_refused: u64,
     /// Cross-shard clock skew CLAMPED to the head: a message-carried instant fell outside this shard's
     /// retained window — AHEAD (two followers observe the same ClockSync broadcasts at different
     /// arrival phases) on any lane, or EITHER direction on the ARRIVING hand-off lane (a retained,

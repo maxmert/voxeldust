@@ -15,6 +15,15 @@
 fn fm(p: vd_core::pose::LatticePos) -> DVec3 {
     p.delta_m(vd_core::pose::LatticePos::ORIGIN, vd_core::pose::Tier::Fine)
 }
+
+/// The same flatten, in a STATED unit — for a position that is not counted in millimetres.
+///
+/// ★ WHY THIS EXISTS (slice S9). `fm` reads every position at the FINE rung, which was every position
+/// there was. A pose handed UP into the galaxy's frame is counted in two-metre steps, and reading it in
+/// millimetres is not a small error — it is a factor of 2048, and it looks like a plausible number.
+fn fm_at(p: vd_core::pose::LatticePos, tier: vd_core::pose::Tier) -> DVec3 {
+    p.delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
+}
 use super::*;
 use crate::authority::Authority;
 use crate::capability::NodeKind;
@@ -6047,6 +6056,37 @@ fn flush_source_for_an_unheld_or_non_entity_subject_ships_nothing() {
 }
 
 #[test]
+fn an_arriving_crossing_reseeds_the_swept_prior_at_the_arrival_point() {
+    // THE STALE PRIOR AFTER A HAND-OFF. A Ghost is minted with its prior at the realm ORIGIN, because
+    // a fresh dot has no history. Once membership tests the tick's whole motion segment, leaving it
+    // there makes the first scan after arrival sweep a realm-wide line from the destination's centre
+    // to wherever the subject actually landed — through every region on that line, none of which it
+    // visited — and feed the result straight into a re-home decision. An arrival is a discontinuity,
+    // not a movement.
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+    let _ = rig.tick(vec![adopted_head(Fence(2))]);
+    let pose = crossing_pose();
+    // The Ghost starts with the prior at the origin, and the arrival pose is somewhere else — so the
+    // fixture can distinguish "reseeded" from "happened to already be right".
+    let before = rig.world.resource::<Dots>().0[&SESSION].prev_offset;
+    assert_eq!(before, LatticePos::ORIGIN);
+    assert_ne!(
+        pose.sanitized().pos.cell(),
+        LatticePos::ORIGIN.cell(),
+        "the arrival must be somewhere other than the origin, or this proves nothing"
+    );
+
+    let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
+    let dot = rig.world.resource::<Dots>().0[&SESSION];
+    assert_eq!(
+        dot.prev_offset, dot.pose.pos,
+        "the arriving dot's swept prior must BE the arrival point"
+    );
+}
+
+#[test]
 fn a_crossing_to_an_adopted_dot_stores_the_pose_stays_ghost_then_promote_flips_owned() {
     let mut rig = Rig::new();
     rig.grant_realm();
@@ -6716,14 +6756,16 @@ fn a_look_less_realm_states_no_body_and_its_look_less_children_get_no_marker() {
 }
 
 #[test]
-fn ancestor_mask_marks_self_and_every_ancestor_and_nothing_else() {
+fn ancestor_chain_names_self_and_every_ancestor_and_nothing_else() {
     // THE DERIVED HYSTERESIS PRIOR (task #177): being authoritatively in a realm makes you a member of
     // that realm AND of every realm containing it — and of NOTHING else. A sibling must never be
     // implied, or a subject would arrive already "inside" a realm it has never been in.
     //
-    // AND THE 64-BIT CEILING DROPS, never wraps: a region indexed past `MAX_REGIONS` contributes
-    // no bit (aliasing bit 64 onto bit 0 would hand a subject membership in an unrelated realm).
-    // A forest that large is boot-rejected; the drop is what "rejected" degrades to here.
+    // AND THE CEILING IS GONE (SL9, 2026-08-24). This half used to assert the OPPOSITE: with 70
+    // children the 70th was indexed past the `u64`'s 64 bits and its own bit was DROPPED, so its chain
+    // came back as the root alone. That silent truncation is what capped a parent's child count. The
+    // chain names REALMS now, so the seventieth child names itself exactly like the first — and a
+    // galaxy's hundred-and-fifty-thousandth star system does too.
     let mut wide: Vec<RealmRegion> = vec![root_region()];
     for i in 0..70u64 {
         wide.push(region(
@@ -6735,50 +6777,65 @@ fn ancestor_mask_marks_self_and_every_ancestor_and_nothing_else() {
     }
     let wide_rr = RealmRegions::new(wide);
     assert_eq!(
-        wide_rr.ancestor_mask_for(RealmId::Station(1069)) & !((1u64 << 63) | 1),
-        0,
-        "a realm indexed past the ceiling contributes no bit beyond the root's"
+        *wide_rr.ancestor_chain_for(RealmId::Station(1069)),
+        BTreeSet::from([ROOT_REALM, RealmId::Station(1069)]),
+        "the seventieth child names ITSELF and its root — no index, so no width to fall off"
     );
     let regions = vec![root_region(), own_region(), child_region()];
     let rr = RealmRegions::new(regions);
-    let bit = |ix: usize| 1u64 << ix;
 
-    // root=0, own=1, child=2 (construction order).
-    assert_eq!(rr.ancestor_mask_for(ROOT_REALM), bit(0));
-    assert_eq!(rr.ancestor_mask_for(OWN_REALM), bit(0) | bit(1));
-    assert_eq!(rr.ancestor_mask_for(OTHER_REALM), bit(0) | bit(1) | bit(2));
-}
-
-#[test]
-fn ancestor_mask_excludes_a_sibling_branch() {
-    // The anti-vacuity twin of the test above: with TWO children under one parent, each child's mask
-    // must contain itself + the chain up, and must NOT contain the other child. A mask built by "every
-    // region at or below my depth" (a plausible wrong implementation) would fail exactly here.
-    let sibling = region(RealmId::Planet(43), Some(OWN_REALM), DVec3::ZERO, 1000.0);
-    let rr = RealmRegions::new(vec![root_region(), own_region(), child_region(), sibling]);
-    let bit = |ix: usize| 1u64 << ix;
-
-    assert_eq!(rr.ancestor_mask_for(OTHER_REALM), bit(0) | bit(1) | bit(2));
     assert_eq!(
-        rr.ancestor_mask_for(RealmId::Planet(43)),
-        bit(0) | bit(1) | bit(3)
+        *rr.ancestor_chain_for(ROOT_REALM),
+        BTreeSet::from([ROOT_REALM])
+    );
+    assert_eq!(
+        *rr.ancestor_chain_for(OWN_REALM),
+        BTreeSet::from([ROOT_REALM, OWN_REALM])
+    );
+    assert_eq!(
+        *rr.ancestor_chain_for(OTHER_REALM),
+        BTreeSet::from([ROOT_REALM, OWN_REALM, OTHER_REALM])
     );
 }
 
 #[test]
-fn ancestor_mask_is_zero_for_a_realm_this_shard_does_not_host() {
-    // The safe-degrade arm: a pose naming an unhosted realm resolves to NO bits, which reduces to
-    // today's blank-prior behaviour rather than inventing membership. Callers treat this as a loud
-    // condition, not a normal one — an unhosted realm in a pose means a rebind degraded upstream.
-    let rr = RealmRegions::new(vec![root_region(), own_region()]);
-    assert_eq!(rr.ancestor_mask_for(RealmId::Planet(9999)), 0);
-    // And on a forest with no regions at all (the inert default), every lookup is zero.
-    assert_eq!(RealmRegions::new(vec![]).ancestor_mask_for(OWN_REALM), 0);
+fn ancestor_chain_excludes_a_sibling_branch() {
+    // The anti-vacuity twin of the test above: with TWO children under one parent, each child's chain
+    // must contain itself + the chain up, and must NOT contain the other child. A chain built by "every
+    // region at or below my depth" (a plausible wrong implementation) would fail exactly here.
+    let sibling = region(RealmId::Planet(43), Some(OWN_REALM), DVec3::ZERO, 1000.0);
+    let rr = RealmRegions::new(vec![root_region(), own_region(), child_region(), sibling]);
+
+    assert_eq!(
+        *rr.ancestor_chain_for(OTHER_REALM),
+        BTreeSet::from([ROOT_REALM, OWN_REALM, OTHER_REALM])
+    );
+    assert_eq!(
+        *rr.ancestor_chain_for(RealmId::Planet(43)),
+        BTreeSet::from([ROOT_REALM, OWN_REALM, RealmId::Planet(43)])
+    );
 }
 
 #[test]
-fn ancestor_mask_terminates_on_a_dangling_parent() {
-    // `region_depth` stops at a dangling parent rather than hanging; the mask walk mirrors it exactly,
+fn ancestor_chain_is_empty_for_a_realm_this_shard_does_not_host() {
+    // The safe-degrade arm: a pose naming an unhosted realm resolves to NO realms, which reduces to
+    // today's blank-prior behaviour rather than inventing membership. Callers treat this as a loud
+    // condition, not a normal one — an unhosted realm in a pose means a rebind degraded upstream.
+    let rr = RealmRegions::new(vec![root_region(), own_region()]);
+    assert_eq!(
+        *rr.ancestor_chain_for(RealmId::Planet(9999)),
+        BTreeSet::new()
+    );
+    // And on a forest with no regions at all (the inert default), every lookup is empty.
+    assert_eq!(
+        *RealmRegions::new(vec![]).ancestor_chain_for(OWN_REALM),
+        BTreeSet::new()
+    );
+}
+
+#[test]
+fn ancestor_chain_terminates_on_a_dangling_parent() {
+    // `region_depth` stops at a dangling parent rather than hanging; the chain walk mirrors it exactly,
     // so the two caches can never disagree about the forest's shape. The boot guard rejects such a
     // forest — this only proves the walk is safe if one ever slips through.
     let orphan = region(
@@ -6788,7 +6845,266 @@ fn ancestor_mask_terminates_on_a_dangling_parent() {
         10.0,
     );
     let rr = RealmRegions::new(vec![root_region(), orphan]);
-    assert_eq!(rr.ancestor_mask_for(RealmId::Planet(77)), 1u64 << 1);
+    assert_eq!(
+        *rr.ancestor_chain_for(RealmId::Planet(77)),
+        BTreeSet::from([RealmId::Planet(77)]),
+        "the walk stops at the dangling parent, naming only what it reached"
+    );
+}
+
+#[test]
+fn the_child_index_decides_exactly_what_the_full_scan_decides() {
+    // THE DIFFERENTIAL PROOF for SL9's second half. The fold now asks a LOOKUP which children are worth
+    // evaluating instead of walking all of them, and the only thing that makes that safe is that the
+    // two decide identically. This drives a spread of subject positions through the SAME shard, once
+    // with the index built (the shipped path) and once with it empty (the full scan it replaced), and
+    // requires the emitted crossing destinations to match position for position.
+    //
+    // Anti-vacuity: the scan half is not a re-run of the same code. An EMPTY index answers for nothing,
+    // so `worth_asking` returns true for every region and every child is evaluated — which is exactly
+    // the pre-slice behaviour, reached through the shipped code.
+    let forest = || {
+        let sibling = region(
+            RealmId::Planet(43),
+            Some(OWN_REALM),
+            DVec3::new(4000.0, 0.0, 0.0),
+            500.0,
+        );
+        vec![root_region(), own_region(), child_region(), sibling]
+    };
+    // The subject positions: inside the child, inside the sibling, in the gap between them, well
+    // outside everything, and exactly on each boundary — the places a verdict can differ.
+    let probes = [
+        DVec3::ZERO,
+        DVec3::new(999.0, 0.0, 0.0),
+        DVec3::new(1001.0, 0.0, 0.0),
+        DVec3::new(2500.0, 0.0, 0.0),
+        DVec3::new(3600.0, 0.0, 0.0),
+        DVec3::new(4000.0, 0.0, 0.0),
+        DVec3::new(4499.0, 0.0, 0.0),
+        DVec3::new(4501.0, 0.0, 0.0),
+        DVec3::new(50_000.0, 0.0, 0.0),
+        DVec3::new(0.0, 900.0, 0.0),
+        DVec3::new(0.0, 0.0, 1100.0),
+    ];
+    let run = |indexed: bool, at: DVec3| -> Vec<RealmId> {
+        let mut rig = Rig::new();
+        // WITHOUT THIS THE FOLD NEVER RUNS. `evaluate_realm_boundaries` gates on the realm lease, so an
+        // ungranted rig returns before the scan and BOTH halves below come back empty — a comparison
+        // that could not have failed. Caught by the coverage gate reporting the skip arm as never
+        // taken, which is exactly what a vacuous differential looks like from the outside.
+        rig.grant_realm();
+        let regions = RealmRegions::new(forest());
+        *rig.world.resource_mut::<RealmRegions>() = if indexed {
+            regions.with_own_realm(OWN_REALM)
+        } else {
+            regions
+        };
+        let entity = EntityId(0x5100_0001);
+        insert_owned_dot_framed(&mut rig, TRIG_SESSION, entity, frame_of(OWN_REALM), at);
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..6 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        crossing_requests(&all).iter().map(|r| r.to_realm).collect()
+    };
+    let mut crossings_seen = 0usize;
+    for at in probes {
+        let indexed = run(true, at);
+        crossings_seen += indexed.len();
+        assert_eq!(
+            indexed,
+            run(false, at),
+            "the lookup and the full scan disagreed for a subject at {at:?}"
+        );
+    }
+    // NOT VACUOUS: at least one probe must actually have produced a crossing, or the loop above is
+    // comparing empty against empty. This assert is here because it already caught exactly that — the
+    // rig's realm lease was ungranted, the fold returned before the scan, and every comparison passed
+    // while proving nothing.
+    assert!(
+        crossings_seen > 0,
+        "no probe produced a crossing — the differential proved nothing"
+    );
+    // AND THE INDEX IS NOT VACUOUS: it must actually hold the two static children, or the loop above
+    // would be comparing the scan with itself.
+    let built = RealmRegions::new(forest()).with_own_realm(OWN_REALM);
+    assert_eq!(built.child_index().indexed_len(), 2);
+    assert!(built.child_index().answers_for(OTHER_REALM));
+    assert!(!built.child_index().answers_for(ROOT_REALM));
+    // AND THE SKIP ACTUALLY FIRES — the measurement that stops the loop above from proving nothing. At
+    // the far probe the lookup names NEITHER child while answering for both, which is precisely the
+    // state in which the fold declines to evaluate them. If the lookup ever answered with everything,
+    // the differential loop would still pass and would mean nothing; this line fails instead.
+    assert_eq!(
+        built.child_index().candidates(
+            LatticePos::from_metres(DVec3::new(50_000.0, 0.0, 0.0), vd_core::pose::Tier::Fine),
+            vd_core::pose::Tier::Fine,
+        ),
+        &[] as &[RealmId],
+        "a subject far outside every child must be told about none of them"
+    );
+    // And the near probe NEVER OMITS the child that actually holds the point. It may name more — this
+    // forest's two children are comparable in size to the derived cell, so they share one, and the
+    // answer here is both. That is the stated degradation, not a defect: the lookup is a SUPERSET and
+    // its only hard duty is to never drop the holder. Asserting a singleton here would be asserting a
+    // grid-tuning detail, and it would fail the day the band widens for a reason unrelated to this.
+    assert!(
+        built
+            .child_index()
+            .candidates(
+                LatticePos::from_metres(DVec3::new(4000.0, 0.0, 0.0), vd_core::pose::Tier::Fine),
+                vd_core::pose::Tier::Fine,
+            )
+            .contains(&RealmId::Planet(43)),
+        "the lookup dropped the child that holds the point"
+    );
+}
+
+#[test]
+fn a_subject_this_shard_cannot_place_in_its_own_frame_still_gets_the_full_scan() {
+    // THE SAFE-DEGRADE ARM of the candidate lookup. The index lives in this shard's own frame, so a
+    // subject whose pose names a frame the shard's placement book cannot reach — an ancestor's frame,
+    // here the ambient root's — yields NO candidates. That must NOT be read as "near nothing": the
+    // fold's skip only ever drops a realm the index positively answers for, and with an unplaceable
+    // point every child falls back to being evaluated. Proven the only honest way — by comparing with
+    // the same subject on a shard whose index was never built.
+    let forest = || vec![root_region(), own_region(), child_region()];
+    let run = |indexed: bool| -> Vec<RealmId> {
+        let mut rig = Rig::new();
+        rig.grant_realm(); // the fold is lease-gated — see the sibling test's note
+        let regions = RealmRegions::new(forest());
+        *rig.world.resource_mut::<RealmRegions>() = if indexed {
+            regions.with_own_realm(OWN_REALM)
+        } else {
+            regions
+        };
+        let entity = EntityId(0x5100_0002);
+        insert_owned_dot_framed(
+            &mut rig,
+            TRIG_SESSION,
+            entity,
+            frame_of(ROOT_REALM),
+            DVec3::ZERO,
+        );
+        let mut all: Vec<(NodeId, MsgClass, Vec<u8>)> = Vec::new();
+        for t in 2..6 {
+            rig.set_local_tick(t);
+            all.extend(rig.tick(vec![]));
+        }
+        crossing_requests(&all).iter().map(|r| r.to_realm).collect()
+    };
+    assert_eq!(
+        run(true),
+        run(false),
+        "an unplaceable subject must be decided exactly as the full scan decides it"
+    );
+}
+
+#[test]
+fn worth_asking_evaluates_everything_the_lookup_cannot_speak_for() {
+    // THE FOUR ARMS OF THE SKIP DECISION, each on its own (HR5), because this is the one function that
+    // can silently lose a crossing: every arm that returns TRUE is a region the fold still evaluates,
+    // and the single FALSE at the end is the only place work is ever dropped.
+    use super::worth_asking;
+    use vd_core::child_index::{ChildIndex, IndexedChild};
+
+    let indexed = RealmId::Planet(1);
+    let unindexed = RealmId::Planet(2);
+    let ix = ChildIndex::build(
+        &[IndexedChild {
+            realm: indexed,
+            centre: LatticePos::from_metres(DVec3::ZERO, vd_core::pose::Tier::Fine),
+            radius_m: 10.0,
+        }],
+        vd_core::pose::Tier::Fine,
+    );
+    let empty_chain = BTreeSet::new();
+    let no_memory = RegionMembership::default();
+
+    // ARM 0 — THE LOOKUP ABSTAINED (slice S5). A segment wider than the index can enumerate answers
+    // nothing at all, and that is IGNORANCE, not a miss. Evaluate everything, which is conservative
+    // and therefore always correct. Without this term the swept verdict would silently stop being
+    // asked for exactly the fast subjects it exists for.
+    assert!(worth_asking(
+        false,
+        &ix,
+        &[],
+        &no_memory,
+        &empty_chain,
+        indexed
+    ));
+
+    // ARM 1 — NOT INDEXED. An ancestor, this realm itself, or anything that moves. The index has no
+    // opinion, so the fold must ask. This is the arm that keeps the whole thing conservative.
+    assert!(worth_asking(
+        true,
+        &ix,
+        &[],
+        &no_memory,
+        &empty_chain,
+        unindexed
+    ));
+
+    // ARM 2 — THE LOOKUP NAMED IT.
+    assert!(worth_asking(
+        true,
+        &ix,
+        &[indexed],
+        &no_memory,
+        &empty_chain,
+        indexed
+    ));
+
+    // ARM 3 — ALREADY A MEMBER. Hysteresis: a subject inside a region must be re-asked every tick to
+    // decide RELEASE, however far the lookup now thinks it is. Skipping here would strand it inside.
+    let mut remembered = RegionMembership::default();
+    remembered.set(indexed, true);
+    assert!(worth_asking(
+        true,
+        &ix,
+        &[],
+        &remembered,
+        &empty_chain,
+        indexed
+    ));
+
+    // ARM 4 — ON THE DERIVED CHAIN. Same reason, for the membership nobody stored.
+    let chain = BTreeSet::from([indexed]);
+    assert!(worth_asking(true, &ix, &[], &no_memory, &chain, indexed));
+
+    // THE ONLY SKIP: indexed, not named, not remembered, not on the chain.
+    assert!(!worth_asking(
+        true,
+        &ix,
+        &[],
+        &no_memory,
+        &empty_chain,
+        indexed
+    ));
+}
+
+#[test]
+fn a_moving_child_is_left_out_of_the_index_and_stays_a_candidate() {
+    // SL4's clause, made structural: a child that MOVES has no fixed centre to index, so it is omitted
+    // and evaluated unconditionally — conservative, and the index never learns that anything moves. The
+    // order of the two builders must not matter either, which is why both are asserted.
+    // An opaque motion closure — its CONTENTS are irrelevant here and unreadable by design (SL4). The
+    // index reads only the KEYS of the moving roster: whether to recompute, never what anyone reads.
+    let motion = MotionFn(std::sync::Arc::new(|_| FramePlacement::identity()));
+    let moving: BTreeMap<RealmId, MotionFn> = BTreeMap::from([(OTHER_REALM, motion)]);
+    let forest = vec![root_region(), own_region(), child_region()];
+    let a = RealmRegions::new(forest.clone())
+        .with_own_realm(OWN_REALM)
+        .with_moving_children(moving.clone());
+    let b = RealmRegions::new(forest)
+        .with_moving_children(moving)
+        .with_own_realm(OWN_REALM);
+    for rr in [&a, &b] {
+        assert_eq!(rr.child_index().indexed_len(), 0);
+        assert!(!rr.child_index().answers_for(OTHER_REALM));
+    }
 }
 
 /// Plant the STANDARD 3-level dock forest (root ⊃ own ⊃ child) into the world's `RealmRegions`. A dot
@@ -6915,16 +7231,23 @@ fn transient_crossing_requests(
 
 #[test]
 fn author_book_places_the_anchor_a_child_and_refuses_a_parent() {
-    // (a) EMPTY forest → the anchor defaults to `GalaxySpace` (the detector short-circuits on
-    // `is_empty` before ever authoring, but the default must still be well-formed): `GalaxySpace`
+    // (a) EMPTY forest → the anchor defaults to the AMBIENT ROOT (the detector short-circuits on
+    // `is_empty` before ever authoring, but the default must still be well-formed): the root frame
     // resolves to the identity via the anchor arm, and NO other frame has a row.
+    //
+    // ★ RE-BASED IN S9: that default is `UniverseSpace`, not `GalaxySpace`. It was a galaxy frame
+    // because that was the nearest thing to "outermost" available while the universe had no frame of
+    // its own — a stand-in whose meaning had to be remembered. It names the thing it always meant now.
     let empty = RealmRegions::new(vec![]);
     let ebook = empty.author_book(OWN_REALM, 20.0, UniverseTick(0));
     assert_eq!(
-        ebook.of(FrameRef::GalaxySpace),
+        ebook.of(FrameRef::UniverseSpace),
         Some(FramePlacement::identity()),
-        "empty-forest anchor defaults to GalaxySpace ⇒ identity",
+        "empty-forest anchor defaults to the ambient root ⇒ identity",
     );
+    // …and the frame it used to default to is now just another unplaced frame, which is what makes
+    // the line above a statement about the root rather than about `GalaxySpace` in particular.
+    assert_eq!(ebook.of(FrameRef::GalaxySpace { galaxy_seed: 0 }), None);
     assert_eq!(
         ebook.of(frame_of(OWN_REALM)),
         None,
@@ -7147,13 +7470,21 @@ impl Story {
         // Flatten the NORMALIZED centre (the generator is a lattice producer since the cell
         // activation) — reading `.offset()` here would read the sub-cell residual and place
         // every realm at the origin (the H-21 class this arc cures).
-        let r = world
-            .regions()
+        //
+        // ★ AT THE PARENT'S RUNG (slice S9). A region's `center` is its position in its PARENT's
+        // frame, while `frame` is its own — two different units since the ladder landed, so reading
+        // the parent's number with the child's ruler is wrong by the ratio between them. This read
+        // the CHILD's, which put a star system 2048× further out than the galaxy had placed it.
+        let regions = world.regions();
+        let r = regions
             .iter()
             .find(|r| r.realm == realm)
             .expect("the story only names realms the generator produced");
-        r.center
-            .delta_m(vd_core::pose::LatticePos::ORIGIN, r.frame.tier())
+        let tier = r
+            .parent
+            .and_then(|p| regions.iter().find(|q| q.realm == p))
+            .map_or_else(|| r.frame.tier(), |p| p.frame.tier());
+        r.center.delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
     }
 
     fn frame(&self, realm: RealmId) -> FrameRef {
@@ -7220,18 +7551,25 @@ impl Story {
         self.planet_orbit_m() + STORY_OCCUPANT_FROM_PLANET_M
     }
 
-    /// A departed occupant: just past the planet's own solved shell (its gravitational
-    /// SOI at the drawn mass), read off the roster.
+    /// A departed occupant: just past the planet's own RELEASE EDGE, read off the roster.
+    ///
+    /// ★ THE MARGIN IS DERIVED FROM THE BAND, not a literal. It used to be "the shell plus five
+    /// metres", which was outside the release edge only while every band in the universe was the same
+    /// three metres wide. Once bands are sized from the bodies they wrap, a planet's release edge sits
+    /// kilometres out and five metres past the shell is still firmly INSIDE it — so the fixture stopped
+    /// describing a departure while still calling itself one.
     fn departed_m(&self) -> f64 {
-        let shell = self
+        let region = self
             .world
             .regions()
             .iter()
             .find(|r| r.realm == self.planet)
-            .expect("the story planet is rostered")
-            .shape
-            .finite_extent();
-        shell + 5.0
+            .expect("the story planet is rostered");
+        // One extra band's width past the release edge, so the fixture is unambiguously outside at
+        // every size rather than by a margin that shrinks as the band grows.
+        region.shape.finite_extent()
+            + region.band.outset()
+            + (region.band.inset() + region.band.outset())
     }
 
     /// A pose `x` metres along `+x` in `frame`, at rest at tick 0.
@@ -7293,7 +7631,7 @@ fn no_shard_can_place_its_own_parent_or_a_sibling() {
     assert_eq!(
         transfer_frame(
             &story.pose_in(story.frame(story.planet), STORY_OCCUPANT_FROM_PLANET_M),
-            FrameRef::GalaxySpace,
+            FrameRef::GalaxySpace { galaxy_seed: 0 },
             &story.ctx(story.planet),
         )
         .expect_err("an unheard-of frame is a refusal, never a guess"),
@@ -7337,8 +7675,11 @@ fn the_parent_adds_its_childs_placement_going_up() {
     )
     .expect("a galaxy can place its own star system");
     assert_eq!(at_galaxy.frame, story.frame(story.galaxy));
+    // ★ READ IN THE GALAXY'S OWN UNIT (slice S9). This pose is now counted in two-metre steps, because
+    // that is what the frame it was handed into counts in — reading it in millimetres would be out by
+    // 2048× and would still look like a plausible distance.
     assert_eq!(
-        fm(at_galaxy.pos),
+        fm_at(at_galaxy.pos, story.frame(story.galaxy).tier()),
         Story::centre(&story.world, story.system) + DVec3::new(story.up_1_m(), 0.0, 0.0),
         "the galaxy adds its child's placement (the seeded 3-D vector + 148 along x)",
     );
@@ -7519,11 +7860,16 @@ fn an_arrival_at_a_shard_with_no_forest_is_refused_on_whichever_side_is_missing(
         UnplaceableArrival::ForeignFrame(FrameError::UnknownSourceFrame),
     );
     // An empty forest has no region to read a frame from, so the context anchors its identity on the
-    // ambient-root fallback (`GalaxySpace`) — which is NOT the frame this shard's realm is named in.
-    // So the source resolves and the DESTINATION does not.
+    // ambient-root fallback — which is NOT the frame this shard's realm is named in. So the source
+    // resolves and the DESTINATION does not.
+    //
+    // ★ RE-BASED IN S9: that fallback is `UniverseSpace`. It was `GalaxySpace` only because the
+    // universe had no frame to fall back to, and a pose arriving in a galaxy frame no longer lands on
+    // the anchor — it is simply a frame this bare shard has never been told about, which fails on the
+    // SOURCE side and would have tested nothing new.
     assert_eq!(
         place_arriving_pose(
-            story.pose_in(FrameRef::GalaxySpace, STORY_OCCUPANT_FROM_PLANET_M),
+            story.pose_in(FrameRef::UniverseSpace, STORY_OCCUPANT_FROM_PLANET_M),
             story.system,
             &cfg,
             &RealmRegions::default(),
@@ -7678,10 +8024,28 @@ fn every_ledger_miss_arm_refuses_loudly() {
     };
 
     // (b) A PER-LINK MISS: descending galaxy → system → planet with the SYSTEM's book absent ⇒
-    // the second link refuses the flush. (The pose starts far outside the galaxy so the departure
-    // re-validation lets it leave.)
+    // the second link refuses the flush.
+    //
+    // ★ WHERE THE POSE STARTS, RE-DERIVED IN S9 — and the comment it replaces was wrong before S9
+    // ever touched it. It read "far outside the galaxy so the departure re-validation lets it leave",
+    // and 1.0e6 m was never outside a galaxy whose own extent is 4.5e16 m. It was a thousand
+    // kilometres from the galaxy's CENTRE, which is a different thing entirely.
+    //
+    // What the climb exposed is that the real constraint runs the other way. This descent ends in a
+    // PLANET's frame, which counts in millimetres, and a millimetre lattice reaches 2.25e15 m — about
+    // a quarter of a light year. The galaxy's centre is 0.7 light years from this star system, so a
+    // pose parked there has NO millimetre count relative to anything inside the system, and the flush
+    // is refused (`BeyondReach`) before any book is consulted. That is the coordinate system telling
+    // the truth, not a fault.
+    //
+    // So the pose starts AT THE SYSTEM — read from the galaxy's own authored placement for it, never
+    // typed — which is where an occupant descending into that system would actually be.
     let mut stats = StubStats::default();
-    let outside = story.pose_in(story.frame(story.galaxy), 1.0e6);
+    let outside = StampedPose::at_rest(
+        story.frame(story.galaxy),
+        Story::centre(&story.world, story.system),
+        UniverseTick(0),
+    );
     assert_eq!(
         flush_pose_for_dest(
             outside,
@@ -8220,9 +8584,11 @@ fn the_crossing_decision_does_not_depend_on_whether_this_shard_remembers_the_sub
         if seed_membership {
             // The SOURCE shard's state: it already remembers this subject inside the child.
             let mut bits = RegionMembership::default();
-            bits.set(0, true); // root
-            bits.set(1, true); // own
-            bits.set(2, true); // child — the bit an arriving shard does NOT have
+            bits.set(ROOT_REALM, true);
+            bits.set(OWN_REALM, true);
+            // The child — the membership an arriving shard does NOT have. Named by REALM now, not by a
+            // position in a bitset, so this seeding says what it means and cannot drift with an index.
+            bits.set(OTHER_REALM, true);
             rig.world
                 .resource_mut::<ContainmentProgress>()
                 .0
@@ -8249,45 +8615,46 @@ fn the_crossing_decision_does_not_depend_on_whether_this_shard_remembers_the_sub
 
 #[test]
 fn owning_realm_reads_the_pose_frame_when_nameable() {
-    // The `Some` arm (the LIVE path — every real shard frame is nameable): the owning realm is the
-    // pose FRAME's realm, IGNORING the `config_realm` fallback. Covers a System, Planet, and Area frame.
+    // The owning realm is the pose FRAME's realm. There is no longer a fallback to ignore — every frame
+    // names one — so what this covers is that each KIND of frame names the right thing.
     assert_eq!(
-        super::owning_realm(
-            FrameRef::SystemSpace { system_seed: 7 },
-            RealmId::System(99)
-        ),
+        super::owning_realm(FrameRef::SystemSpace { system_seed: 7 }),
         RealmId::System(7),
         "a System frame owns System(system_seed), not the config fallback",
     );
     assert_eq!(
-        super::owning_realm(
-            FrameRef::PlanetCentered { planet_seed: 3 },
-            RealmId::System(99)
-        ),
+        super::owning_realm(FrameRef::PlanetCentered { planet_seed: 3 }),
         RealmId::Planet(3),
         "a Planet frame owns Planet(planet_seed)",
     );
     assert_eq!(
-        super::owning_realm(
-            FrameRef::AreaLocal {
-                planet_seed: 3,
-                area_seed: 8,
-            },
-            RealmId::System(99),
-        ),
+        super::owning_realm(FrameRef::AreaLocal {
+            planet_seed: 3,
+            area_seed: 8,
+        }),
         RealmId::Area(8),
         "an Area frame owns Area(area_seed) — the very frame the to_parent fix makes form",
     );
 }
 
 #[test]
-fn owning_realm_falls_back_to_config_realm_for_an_unnameable_frame() {
-    // The `None` fallback arm (otherwise UNCOVERABLE — no live shard uses GalaxySpace): a frame whose
-    // `FrameRef::realm()` is None (`GalaxySpace`) falls back to the shard's `config_realm`.
+fn owning_realm_names_the_galaxy_and_the_universe_too() {
+    // ★ REPLACES `owning_realm_falls_back_to_config_realm_for_an_unnameable_frame` (slice S9). That test
+    // drove a fallback whose ONLY reachable input was galaxy space, and its own comment said so:
+    // "otherwise UNCOVERABLE — no live shard uses GalaxySpace". The fallback is gone because the reason
+    // for it is: a galaxy names its realm now, so there is nothing left to fall back FROM.
+    //
+    // What is asserted instead is the property that replaced it — the two frames that used to have no
+    // answer now give one, and it is their own.
     assert_eq!(
-        super::owning_realm(FrameRef::GalaxySpace, RealmId::System(42)),
-        RealmId::System(42),
-        "GalaxySpace has no realm → the config_realm fallback",
+        super::owning_realm(FrameRef::GalaxySpace { galaxy_seed: 5 }),
+        RealmId::Galaxy(5),
+        "a galaxy frame owns the galaxy it names",
+    );
+    assert_eq!(
+        super::owning_realm(FrameRef::UniverseSpace),
+        RealmId::Universe,
+        "the universe frame owns the universe — there is exactly one",
     );
 }
 
@@ -9508,6 +9875,86 @@ fn drive_inward_crossing_feature(
         .filter(|r| r.to_realm == to_realm)
         .collect();
     (reqs, start_sd, end_sd, shape)
+}
+
+/// ★ SLICE S5's ACCEPTANCE LINE, AT THE SCAN. A subject that clears a child's WHOLE DIAMETER inside
+/// one tick still acquires it and still re-homes into it. Before the verdict tested the tick's motion
+/// this was impossible in principle, not merely unlikely: acquisition needed a SAMPLE landing at least
+/// one inset INSIDE the surface, so no widening of any band could ever buy it.
+///
+/// The anti-vacuity guarantee is stated as a measurement rather than assumed: BOTH endpoint poses are
+/// asserted to sit outside the child, so the point rule cannot have decided this.
+#[test]
+fn a_subject_that_clears_a_whole_child_in_one_tick_still_re_homes_into_it() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let child = child_region(); // a 1000 m shell at the origin
+    let to_realm = child.realm;
+    *rig.world.resource_mut::<RealmRegions>() =
+        RealmRegions::new(vec![root_region(), own_region(), child]);
+    let entity = EntityId::pack(EntityKind::Player, 11, 1, 0x4B);
+
+    // Tick 1 — well outside on one side. This is the tick that RECORDS the prior.
+    let before = DVec3::new(-9_000.0, 0.0, 0.0);
+    insert_owned_dot(&mut rig, TRIG_SESSION, entity, before);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+
+    // Tick 2 — well outside on the OTHER side, 18 km later: nine child diameters in one tick.
+    let after = DVec3::new(9_000.0, 0.0, 0.0);
+    rig.set_local_tick(3);
+    move_dot(&mut rig, TRIG_SESSION, after);
+    let sent = rig.tick(vec![]);
+
+    // ANTI-VACUITY: neither sample is inside the child, so a point rule decides "never a member".
+    assert!(
+        child_signed_distance(&child, before) > 0.0,
+        "the prior sample must be outside the child"
+    );
+    assert!(
+        child_signed_distance(&child, after) > 0.0,
+        "the current sample must be outside the child"
+    );
+
+    let reqs: Vec<CrossingRequest> = crossing_requests(&sent)
+        .into_iter()
+        .filter(|r| r.to_realm == to_realm)
+        .collect();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "the tick's motion crossed the child, so exactly one re-home into it is owed"
+    );
+}
+
+/// AND IT IS NOT A BLANKET YES. The same jump, offset so the path misses the child, must produce
+/// nothing — otherwise the arm above would pass for a verdict that simply said "member" at speed.
+#[test]
+fn the_same_jump_one_child_radius_off_the_path_re_homes_nowhere() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let child = child_region();
+    let to_realm = child.realm;
+    *rig.world.resource_mut::<RealmRegions>() =
+        RealmRegions::new(vec![root_region(), own_region(), child]);
+    let entity = EntityId::pack(EntityKind::Player, 12, 1, 0x4C);
+    // Same 18 km jump, displaced 2 km off-axis — outside the 1000 m child at every point.
+    let before = DVec3::new(-9_000.0, 2_000.0, 0.0);
+    let after = DVec3::new(9_000.0, 2_000.0, 0.0);
+    insert_owned_dot(&mut rig, TRIG_SESSION, entity, before);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    rig.set_local_tick(3);
+    move_dot(&mut rig, TRIG_SESSION, after);
+    let sent = rig.tick(vec![]);
+    let reqs: Vec<CrossingRequest> = crossing_requests(&sent)
+        .into_iter()
+        .filter(|r| r.to_realm == to_realm)
+        .collect();
+    assert!(
+        reqs.is_empty(),
+        "a path that misses the child must acquire nothing: {reqs:?}"
+    );
 }
 
 /// The signed distance from a frame-local `offset` to a region's surface (the exact scalar the
@@ -12540,9 +12987,16 @@ fn slice6_the_union_over_draw_is_measured_at_interim_scale() {
         .find(|r| r.realm == galaxy)
         .expect("the galaxy is rostered");
     let home = vd_core::worldgen::default_home_realm(world.regions()).expect("home");
+    // ★ AT THE GALAXY'S RUNG, NOT THE CHILD'S (slice S9). Every region read here is a direct child of
+    // the galaxy, so its `center` is stated in the GALAXY's frame — and reading it with the child's
+    // own ruler was out by 2048×. What made this one instructive is that the ORACLE and the fixture's
+    // observer positions both used the wrong ruler, so they agreed with each other perfectly; only
+    // the REAL fold, which reads the centre correctly, disagreed. Two wrongs that agree look exactly
+    // like a right answer until something honest shows up.
+    let galaxy_tier = galaxy_row.frame.tier();
     let centre_of = |r: &vd_core::geometry::RealmRegion| {
         r.center
-            .delta_m(vd_core::pose::LatticePos::ORIGIN, r.frame.tier())
+            .delta_m(vd_core::pose::LatticePos::ORIGIN, galaxy_tier)
     };
     let systems: Vec<(RealmId, DVec3)> = scope
         .iter()
@@ -14242,11 +14696,21 @@ fn admission_head_reads_ride_the_aoi_cadence_for_demanded_children() {
 #[should_panic(expected = "self-fence")]
 fn register_stub_shard_rejects_a_parent_that_aliases_its_own_realm_id() {
     use vd_core::realm_path::RealmKindTag;
-    // Galaxy → System(1) is the LOSSY `lowered()` collapse: a System(1) hosted DIRECTLY under a Galaxy
-    // has `parent().lowered() == System(1) == realm` — the unrepresentable self-alias the boot guard
-    // forbids (else the shard's own parent-Head reply drives the PRIMARY-FOREIGN self-fence branch).
+    // A realm whose PARENT lowers to its own id is unrepresentable, and the boot guard refuses it —
+    // otherwise the shard's own parent-Head reply drives the PRIMARY-FOREIGN self-fence branch.
+    //
+    // ★ RE-BASED IN S9, AND THE WAY IN CHANGED. This used to build `Galaxy(5) → System(1)`, because
+    // a galaxy LOWERED to `System(1)` whatever its seed: a perfectly ordinary system, seed 1, hosted
+    // under a perfectly ordinary galaxy, collided with its own parent. That was the realistic way to
+    // hit this, and S9 closed it — a galaxy keeps its seed now, so `Galaxy(5)` lowers to `Galaxy(5)`
+    // and nothing collides.
+    //
+    // The guard is NOT dead, so it is still driven: with lossless lowering a self-alias needs the
+    // same KIND and the same SEED on both levels, which is a nonsense lineage rather than an
+    // accident of naming. That is the improvement — the failure went from something a real world
+    // could produce to something only a malformed path can.
     let own_coord = RealmCoord::from_path(RealmPath::from_levels(vec![
-        RealmLevel::new(RealmKindTag::Galaxy, 5),
+        RealmLevel::new(RealmKindTag::System, 1),
         RealmLevel::new(RealmKindTag::System, 1),
     ]))
     .expect("a two-level path has a leaf");
@@ -15232,6 +15696,7 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
     let tick_hz = 1.0 / vd_physics::worldgen::AOI_TICK_DT_S;
     let mut rows_pinned = 0usize;
     let mut moved_since_epoch = 0usize;
+    let mut cross_rung_hops = 0usize;
     for &t in &[UniverseTick(0), UniverseTick(50_000)] {
         for &anchor in &anchors {
             let own = regions.own_frame(anchor);
@@ -15252,14 +15717,46 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
                     region.realm
                 );
                 assert_eq!(body.vel, pose.vel);
-                // (2) The inversion is NEVER refused on THE world today — the inertness pin.
-                let inv = invert_hop_placement(own, region.frame, &book).expect(
-                    "THE world grew a rotated frame beyond the millimetre rotation reach \
-                     (2\u{2074}\u{00b2} m at FINE) — the window hop inversion would now refuse in \
-                     production (restated with the rotation law, real-scale addendum §A4.6: \
-                     the pre-activation pin measured a COMPOSITE of two conditions; only the \
-                     reach condition survives the activation)",
-                );
+                // (2) THE INVERSION, AND THE LIMIT IT HAS NOW REACHED (slice S9).
+                //
+                // ★ THIS PIN WAS BUILT TO FAIL ONE DAY, AND THAT DAY IS TODAY — which is the test
+                // working, not breaking. It asserted the hop inversion is NEVER refused on THE world.
+                // The inversion states the PARENT's body in the CHILD's frame, so it must count the
+                // parent's origin in the child's unit. A star system counts in millimetres and its
+                // galaxy's centre is now 0.7 LIGHT YEARS away, against a millimetre lattice that
+                // reaches a quarter of one. There is no such count, and there never will be: this is
+                // not a bug to fix but a fact about units, and the honest thing is to state it.
+                //
+                // So the pin splits by whether the two frames count in the SAME unit, and both arms
+                // are asserted — the working one exactly, the refused one by name and with its
+                // numbers, so it stays a measurement rather than becoming a silence.
+                let inv = match invert_hop_placement(own, region.frame, &book) {
+                    Ok(inv) => inv,
+                    Err(refused) => {
+                        // ★ THE LIMIT, NAMED. It is about REACH and not about the units differing:
+                        // a galaxy sitting at the universe's origin inverts perfectly well across two
+                        // rungs, because zero has a count in every unit. What has no count is a
+                        // DISTANCE too large for the finer one. Asserted, so a rotation failure or an
+                        // unknown frame arriving here would not be quietly absorbed as "expected".
+                        assert!(
+                            matches!(
+                                refused,
+                                vd_core::frame::FrameError::CrossTierCrossing(
+                                    vd_core::pose::TierConversionError::BeyondReach { .. }
+                                )
+                            ),
+                            "{anchor} -> {}: the only lawful refusal here is reach: {refused:?}",
+                            region.realm
+                        );
+                        // …and it is only ever the coarse-to-fine direction that can run out.
+                        assert!(
+                            own.tier().step_exponent() > region.frame.tier().step_exponent(),
+                            "a hop into a COARSER unit can always be counted"
+                        );
+                        cross_rung_hops += 1;
+                        continue;
+                    }
+                };
                 // (1b) ...and it round-trips: the parent's body, as the hop states it in the
                 // child's frame, maps back to the parent's own origin EXACTLY (identity
                 // orientations everywhere today ⇒ bit-exact, no epsilon).
@@ -15276,7 +15773,7 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
                 )
                 .expect("the inverse rides the same book");
                 assert_eq!(back.pos.cell(), vd_core::glam::I64Vec3::ZERO);
-                assert_eq!(fm(back.pos), DVec3::ZERO);
+                assert_eq!(fm_at(back.pos, own.tier()), DVec3::ZERO);
                 assert_eq!(back.vel, DVec3::ZERO);
                 if t == UniverseTick(50_000)
                     && pose
@@ -15304,6 +15801,24 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
     assert_eq!(
         moved_since_epoch, 33,
         "all twenty-seven planets and six census moons author live placements"
+    );
+    // ★ AND THE REFUSAL ARM IS NOT VACUOUS (slice S9). Pinned as a count, because "some hops are out
+    // of reach" is worthless without knowing how many: if this silently went to zero the arm above
+    // would stop being exercised and the pin would quietly narrow to the easy cases.
+    //
+    // FOUR: the two RING star systems, at both instants. Not six — the HOME system is anchored at
+    // the galaxy's own origin, and zero has a count in every unit, so its hop inverts perfectly well
+    // across the two rungs. The ring siblings sit roughly 0.7 light years out, and a system counts in
+    // millimetres, which reach a quarter of a light year.
+    //
+    // That the home system is the exception is worth more than the number: it means the galaxy's
+    // ORIGIN is the only place in it a millimetre-counting realm can name its parent from.
+    //
+    // Every other row in THE world — planets, stars, moons under their own parents, and the galaxy
+    // under the universe — either shares its parent's unit or sits close enough to count.
+    assert_eq!(
+        cross_rung_hops, 4,
+        "the two RING systems, at both instants, cannot count their galaxy's centre in millimetres"
     );
 }
 

@@ -22,6 +22,14 @@ use crate::ids::UniverseTick;
 use crate::placement::PlacementBook;
 use crate::pose::{FrameRef, LatticePos, StampedPose, Tier};
 
+/// THE RUNG A PLACEMENT BOOK'S ROWS ARE AUTHORED IN.
+///
+/// Two places must agree about this and now agree by construction: [`FramePlacement::moving`], which
+/// builds an anchor, and [`transfer_frame`]'s guard, which refuses any conversion whose frames do not both
+/// count in it. Before S8 the constructor hard-coded the rung and the guard did not exist, so the agreement
+/// was a sentence in a doc comment rather than a fact about the program.
+pub(crate) const PLACEMENT_TIER: Tier = Tier::Fine;
+
 /// Where a frame's origin sits — and how it moves — relative to the COMMON PARENT at a
 /// universe tick. A rigid placement: position, velocity, orientation, angular velocity.
 /// All four are authored by the parent's physics writer; P1 uses the identity.
@@ -82,7 +90,7 @@ impl FramePlacement {
     /// arrives with P10's COARSE activation.
     #[must_use]
     pub fn moving(origin: DVec3, velocity: DVec3) -> FramePlacement {
-        let pos = LatticePos::from_metres(origin, Tier::Fine);
+        let pos = LatticePos::from_metres(origin, PLACEMENT_TIER);
         FramePlacement {
             origin_cell: pos.cell(),
             origin: pos.offset(),
@@ -106,6 +114,31 @@ impl FramePlacement {
 pub enum FrameError {
     #[error("no authored placement for the source frame in this book")]
     UnknownSourceFrame,
+    /// A conversion was asked between frames that do not both count in the PLACEMENT rung.
+    ///
+    /// ★ WHY THIS IS A REFUSAL AND NOT A CONVERSION (slice S8). This function does its ENTIRE arithmetic
+    /// at the SOURCE frame's rung: it adds the pose onto the source anchor and subtracts the destination
+    /// anchor, both as integer cells. The anchors come out of the placement book, whose rows are authored
+    /// in [`PLACEMENT_TIER`]. The moment those rungs differ, a distance counted in one unit is added onto
+    /// an anchor counted in another — and re-stating the FINISHED result in the destination's unit cannot
+    /// repair arithmetic that has already happened.
+    ///
+    /// The comment that used to sit on that final re-statement said a rung change *"still routes through
+    /// the ONE existing re-quantizer"*. It routes the OUTPUT, not the arithmetic, and it was the
+    /// load-bearing false claim in this file.
+    ///
+    /// S8 BUILDS THE LADDER; S9 CLIMBS IT. Until the arithmetic is done at the book's own rung, a
+    /// cross-rung conversion is refused loudly rather than answered wrongly.
+    /// A cross-rung crossing could not re-state a distance in the rung it had to move to.
+    ///
+    /// ★ THIS REPLACES A BLANKET REFUSAL (slice S9). It used to be `CrossTierCrossingNotBuilt`, which
+    /// refused EVERY crossing between two different rungs — correct while the arithmetic ran at one
+    /// fixed rung, and wrong the moment the world actually had rungs to cross. S9 does the arithmetic
+    /// at the book's own rung, so the general case works and only the genuinely impossible one refuses:
+    /// a distance too wide to count in the finer unit it is being asked for. A galaxy-wide separation
+    /// has no millimetre count, and saying so is the honest answer.
+    #[error("a cross-rung crossing could not be re-stated: {0}")]
+    CrossTierCrossing(#[from] crate::pose::TierConversionError),
     #[error("no authored placement for the destination frame in this book")]
     UnknownDestFrame,
     /// The book speaks at one instant and the pose is stamped at another. A book's rows are true at
@@ -172,7 +205,24 @@ pub fn transfer_frame(
     }
     let from = book.of(pose.frame).ok_or(FrameError::UnknownSourceFrame)?;
     let dest = book.of(to).ok_or(FrameError::UnknownDestFrame)?;
-    let tier = pose.frame.tier();
+    // ★ THE ARITHMETIC HAPPENS AT THE BOOK'S OWN RUNG (slice S9 — the climb S8 named and deferred).
+    //
+    // S8 refused a cross-rung crossing outright, because the whole conversion used to run at the SOURCE
+    // frame's rung while both anchors come out of the book: the moment those differ, a distance counted
+    // in one unit is added onto an anchor counted in another, and re-stating the FINISHED result cannot
+    // repair arithmetic that has already happened. That refusal was correct and it is now unnecessary.
+    //
+    // The book knows what unit it speaks: its rows are placements its ANCHOR authored, in the anchor's
+    // own frame. So the anchor's rung is THE rung of this arithmetic — not a constant, and not the
+    // source's. The pose is converted INTO it before anything is added, and the answer is converted OUT
+    // of it into the destination's rung at the end. Between those two points every quantity counts in
+    // one unit, which is the property the S8 guard was standing in for.
+    //
+    // SAME RUNG — every crossing in the world today — makes both conversions the exact identity, so the
+    // shipped path is unchanged. That is measured, not argued — see
+    // `pose::tests::a_same_rung_conversion_is_the_identity_bit_for_bit`, which pins both conversions
+    // as the bit-for-bit identity at every rung, including residuals a tidier would have "fixed".
+    let tier = book.anchor().tier();
 
     // 1. LIFT (real-scale addendum §A4.7). The pose's own position is a SEPARATION from its frame
     // origin, so it rotates through the ONE rotation rule (`Separation::rotated`) and never through
@@ -180,9 +230,15 @@ pub fn transfer_frame(
     // only would silently regress the `from.orientation * local` term the shipped code computes
     // (H-07). Identity orientation — every placement THE world generates — is a bit-exact
     // passthrough, so the integer half of the pose survives untouched.
+    // IN: the pose's own position is a separation from its frame origin, counted in ITS frame's rung.
+    // Converted to the book's rung FIRST, so the rotation, the add and the subtract below all happen in
+    // one unit. Converting before rotating (rather than after) is deliberate: going to a coarser rung
+    // shrinks the cell count, and the rotation's exact-reach bound is kinder to the smaller number.
     let own = pose
         .pos
-        .separation(LatticePos::ORIGIN, tier)
+        .separation(LatticePos::ORIGIN, pose.frame.tier())
+        .convert_tier(tier)
+        .map_err(FrameError::CrossTierCrossing)?
         .rotated(from.orientation)?;
     // The metre lever, for the Coriolis term (`ω × r`): needed EXACTLY when the frame spins, and
     // exactly then the rotation reach has already bounded it, so this flatten is exact.
@@ -207,7 +263,13 @@ pub fn transfer_frame(
     // bounded by the destination realm's own extent on every lawful conversion.
     let rel_parent_m = rel_parent.metres();
     let inv = dest.orientation.inverse();
-    let rel = rel_parent.rotated(inv)?;
+    // OUT: back into the DESTINATION frame's own rung, which is the last thing that happens to the
+    // integer half. Refining can leave the finer rung's domain and is refused by name rather than
+    // wrapped — a galaxy-wide distance genuinely has no millimetre count.
+    let rel = rel_parent
+        .rotated(inv)?
+        .convert_tier(to.tier())
+        .map_err(FrameError::CrossTierCrossing)?;
     let new_vel = inv * (world_vel - dest.velocity - dest.angular_velocity.cross(rel_parent_m));
     let new_orient = inv * world_orient;
 
@@ -218,10 +280,12 @@ pub fn transfer_frame(
         // (the integrator, the verdict, the wire) now relies on. A tier change (FINE ↔ COARSE at
         // P10) still routes through the ONE existing re-quantizer; same tier — every live frame
         // pair today — is the exact identity there.
-        pos: rel
-            .from_origin(LatticePos::ORIGIN)
-            .normalize(tier)
-            .convert_tier(tier, to.tier()),
+        // ★ NO RE-STATEMENT HERE ANY MORE (slice S8). The guard above establishes that the source rung,
+        // the destination rung and the book's rung are the same, so the call that used to sit here was
+        // provably the identity — removing it is byte-identical by proof rather than by measurement. When
+        // S9 makes the arithmetic itself rung-aware, the conversion belongs where the arithmetic is, not
+        // stapled onto its output.
+        pos: rel.from_origin(LatticePos::ORIGIN).normalize(to.tier()),
         vel: new_vel,
         orient: new_orient.normalize(),
         universe_tick: pose.universe_tick,
@@ -244,6 +308,91 @@ mod tests {
     /// one row per given child placement.
     fn book(rows: Vec<(FrameRef, FramePlacement)>) -> PlacementBook {
         PlacementBook::new(sys(), UniverseTick(100), rows)
+    }
+
+    /// ★ A CONVERSION BETWEEN LEVELS THAT COUNT DIFFERENTLY NOW WORKS, BOTH WAYS (slice S9).
+    ///
+    /// This test used to assert the opposite. S8 refused every cross-rung crossing, because the whole
+    /// arithmetic ran at the SOURCE level's step while the book's anchors are authored in the ANCHOR's
+    /// step: where those differ, a distance counted in one unit was being added onto an anchor counted
+    /// in another. The refusal was right, and the cure was never a better guard — it was to do the
+    /// arithmetic in the book's own unit.
+    ///
+    /// **The world needs this, and needs it now.** A star system counts in millimetres and the galaxy
+    /// that holds it counts in two-metre steps, so "the galaxy places its own star system" — a dot
+    /// leaving home, the most ordinary journey in the game — IS a cross-rung crossing. While it was
+    /// refused, nothing could enter or leave the galaxy at all.
+    ///
+    /// What is asserted is the METRES, in both directions, because that is what a crossing must
+    /// preserve. The cells are deliberately NOT asserted: the same point has a different whole-number
+    /// count in each unit, which is the entire purpose of having units.
+    #[test]
+    fn a_conversion_between_levels_that_count_differently_works_both_ways() {
+        let galaxy = FrameRef::GalaxySpace { galaxy_seed: 0 };
+        let b = book(vec![
+            (planet(), FramePlacement::identity()),
+            (galaxy, FramePlacement::identity()),
+        ]);
+        let at = DVec3::new(1.5, -2.5, 0.25);
+        // THE SOURCE counts in two-metre steps, the destination in millimetres.
+        let down = transfer_frame(&pose_in(galaxy, at, DVec3::ZERO), planet(), &b)
+            .expect("a galaxy can place its own star system");
+        assert_eq!(down.frame, planet());
+        assert_eq!(down.pos.delta_m(LatticePos::ORIGIN, Tier::Fine), at);
+        // THE DESTINATION counts in two-metre steps, the source in millimetres — the other direction.
+        let up = transfer_frame(&pose_in(planet(), at, DVec3::ZERO), galaxy, &b)
+            .expect("a star system can hand its own occupant upward");
+        assert_eq!(up.frame, galaxy);
+        assert_eq!(up.pos.delta_m(LatticePos::ORIGIN, Tier::Galaxy), at);
+        // …and the two are INVERSES, exactly. A crossing that loses a millimetre each way is a seam,
+        // and a seam is a defect (SL8) — so this is asserted as bit equality, never a tolerance.
+        let round = transfer_frame(&down, galaxy, &b).expect("and back again");
+        assert_eq!(round.pos.delta_m(LatticePos::ORIGIN, Tier::Galaxy), at);
+        // A same-rung conversion is unaffected, so the two above are about the units and not about
+        // this function having become permissive.
+        assert!(transfer_frame(&pose_in(planet(), DVec3::X, DVec3::ZERO), sys(), &b).is_ok());
+    }
+
+    /// ★ THE ONE CROSS-RUNG CROSSING THAT STILL REFUSES, and it refuses for a real reason: a distance
+    /// too wide to count in the finer unit being asked for.
+    ///
+    /// The galaxy's own lattice reaches 2⁶² cells of two metres. Asked for that in millimetres, the
+    /// count would need 2⁷³ — past what the number can hold. There is no right answer, so it is named
+    /// rather than wrapped. This is P10's trigger, stated as something that fails.
+    #[test]
+    fn a_distance_too_wide_for_the_finer_unit_is_refused_by_name() {
+        let galaxy = FrameRef::GalaxySpace { galaxy_seed: 0 };
+        let b = book(vec![
+            (planet(), FramePlacement::identity()),
+            (galaxy, FramePlacement::identity()),
+        ]);
+        // The bound, DERIVED from the two steps rather than typed: refining multiplies the cell count
+        // by the ratio between them, so the widest that still fits is the domain over that ratio.
+        let ratio = 1_i64 << (Tier::Galaxy.step_exponent() - Tier::Fine.step_exponent());
+        let max_cells = crate::pose::CELL_DOMAIN_MAX / ratio;
+        let far = StampedPose {
+            frame: galaxy,
+            pos: LatticePos::at(I64Vec3::new(max_cells + 1, 0, 0), DVec3::ZERO),
+            vel: DVec3::ZERO,
+            orient: DQuat::IDENTITY,
+            universe_tick: UniverseTick(100),
+        };
+        let refused = transfer_frame(&far, planet(), &b).expect_err("no millimetre count exists");
+        assert_eq!(
+            refused,
+            FrameError::CrossTierCrossing(crate::pose::TierConversionError::BeyondReach {
+                from: Tier::Galaxy,
+                to: Tier::Fine,
+                widest_cells: (max_cells + 1).unsigned_abs(),
+                max_cells: max_cells.unsigned_abs(),
+            })
+        );
+        // …and ONE cell narrower is answered, so the refusal is a bound and not a blanket.
+        let near = StampedPose {
+            pos: LatticePos::at(I64Vec3::new(max_cells, 0, 0), DVec3::ZERO),
+            ..far
+        };
+        assert!(transfer_frame(&near, planet(), &b).is_ok());
     }
 
     fn pose_in(frame: FrameRef, pos: DVec3, vel: DVec3) -> StampedPose {

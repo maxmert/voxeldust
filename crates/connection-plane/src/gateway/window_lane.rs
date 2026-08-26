@@ -65,9 +65,8 @@ fn desired_windows(sessions: &GatewaySessions) -> Vec<DesiredWindow> {
             if record.state != SubState::Active {
                 continue; // a draining sub is on its way out — never a fresh window
             }
-            let Some(realm) = record.frame.realm() else {
-                continue;
-            };
+            // A frame always names its realm since S9 — the skip this used to need could not fire.
+            let realm = record.frame.realm();
             push_unique_window(
                 &mut out,
                 DesiredWindow {
@@ -137,9 +136,8 @@ pub(crate) fn drive_windows(
             if record.state != SubState::Active {
                 continue;
             }
-            let Some(realm) = record.frame.realm() else {
-                continue;
-            };
+            // A frame always names its realm since S9 — the skip this used to need could not fire.
+            let realm = record.frame.realm();
             named.insert(realm);
             resolves.push((realm, *node));
         }
@@ -322,8 +320,7 @@ pub(crate) fn compose_scenes_pass(
             .get(&target)
             .filter(|r| r.state == SubState::Active)
             .map(|r| r.frame);
-        let (Some(origin_frame), Some(origin)) =
-            (origin_frame, origin_frame.and_then(FrameRef::realm))
+        let (Some(origin_frame), Some(origin)) = (origin_frame, origin_frame.map(FrameRef::realm))
         else {
             // The login race (§2.6.6): no standing realm yet — the composed feed is WITHHELD,
             // counted, never guessed.

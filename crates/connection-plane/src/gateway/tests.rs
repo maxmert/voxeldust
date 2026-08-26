@@ -238,10 +238,7 @@ fn hello_msg() -> ClientControlMsg {
 
 fn hello_msg_below_floor() -> ClientControlMsg {
     ClientControlMsg::Hello {
-        version: ProtoVersion {
-            major: PROTO_MAJOR,
-            minor: PROTO_MINOR_FLOOR - 1,
-        },
+        version: ProtoVersion::speaking(PROTO_MAJOR, PROTO_MINOR_FLOOR - 1),
         login: tickets::mint_login(&SIGNING_KEY, AccountId(5), EpochId(9), 1),
     }
 }
@@ -262,7 +259,7 @@ fn a_peer_below_the_protocol_floor_is_closed_with_the_floor_named() {
     assert_eq!(
         decode_controls(&sent, CLIENT),
         vec![ServerControlMsg::Close {
-            reason: "protocol minor below the floor (22): the scene is server-composed from v1.22"
+            reason: "protocol minor below the floor (23): the scene is server-composed from v1.23"
                 .to_owned()
         }]
     );
@@ -406,7 +403,7 @@ fn the_gateway_admin_snapshot_reflects_the_live_world() {
     // does not own one — reporting a directory from a gateway would mislead an operator).
     let mut rig = Rig::new();
     let _ = rig.login();
-    let snap = crate::admin::gateway_admin_snapshot(&mut rig.world);
+    let snap = crate::admin::gateway_admin_snapshot(&mut rig.world, 0);
     let gw = snap
         .gateway
         .expect("a gateway snapshot carries the gateway view");
@@ -931,10 +928,7 @@ fn entity_of_tracks_the_session_lifecycle() {
 fn version_mismatch_and_bad_tickets_close_with_reasons() {
     let mut rig = Rig::new();
     let wrong_version = ClientControlMsg::Hello {
-        version: ProtoVersion {
-            major: ProtoVersion::CURRENT.major + 1,
-            minor: 0,
-        },
+        version: ProtoVersion::speaking(ProtoVersion::CURRENT.major + 1, 0),
         login: tickets::mint_login(&SIGNING_KEY, AccountId(5), EpochId(9), 1),
     };
     let sent = rig.tick(vec![wire(CLIENT, MsgClass::Control, &wrong_version)]);
@@ -946,6 +940,47 @@ fn version_mismatch_and_bad_tickets_close_with_reasons() {
             reason: "incompatible protocol major version".to_owned()
         }
     );
+    // ★ AND THE SAME REFUSAL FOR A DIFFERENT COORDINATE UNIT (slice S3), driven at the REAL
+    // negotiation site rather than against the version type. This is the only place in the product
+    // where a client is negotiated with, so it is the only place that can prove the refusal exists.
+    //
+    // Same protocol, same minor, healthy peer — and every position it exchanged would be wrong by the
+    // ratio between its unit and ours. That is invisible from the outside, which is why the refusal
+    // has to happen here, before the first position.
+    let other_unit = ClientControlMsg::Hello {
+        version: ProtoVersion {
+            coordinate_generation: ProtoVersion::CURRENT.coordinate_generation ^ 1,
+            ..ProtoVersion::CURRENT
+        },
+        login: tickets::mint_login(&SIGNING_KEY, AccountId(5), EpochId(9), 1),
+    };
+    let sent = rig.tick(vec![wire(CLIENT, MsgClass::Control, &other_unit)]);
+    let controls = decode_controls(&sent, CLIENT);
+    // Search for the close rather than indexing: this rig's outbox carries the earlier refusal too, and
+    // an index would make the assertion depend on how many refusals ran before it.
+    let unit_close = controls
+        .iter()
+        .filter_map(|c| match c {
+            ServerControlMsg::Close { reason } => Some(reason),
+            _ => None,
+        })
+        .find(|r| r.contains("coordinate units differ"));
+    let reason = unit_close.unwrap_or_else(|| {
+        panic!("a peer counting positions in another unit must be closed: {controls:?}")
+    });
+    // AND THE CAUSE, which is the half an operator cannot see for themselves: both peers are healthy
+    // and the same version.
+    assert!(
+        reason.contains(&ProtoVersion::CURRENT.coordinate_generation.to_string()),
+        "the close must carry this build's own unit: {reason}"
+    );
+    assert!(
+        !controls
+            .iter()
+            .any(|c| matches!(c, ServerControlMsg::Welcome { .. })),
+        "and it must not ALSO be served: {controls:?}"
+    );
+
     // A foreign signer's ticket is rejected by the SOLE validator.
     let forged = ClientControlMsg::Hello {
         version: ProtoVersion::CURRENT,
@@ -959,7 +994,10 @@ fn version_mismatch_and_bad_tickets_close_with_reasons() {
             reason: "login ticket rejected".to_owned()
         }
     );
-    assert_eq!(rig.stats().version_rejected, 1);
+    // TWO refusals now, and they share ONE counter deliberately: a major mismatch and a coordinate-unit
+    // mismatch are both "this peer cannot be served", and the CAUSE lives in the sentence rather than
+    // in a second statistic (the same choice the floor refusal already made).
+    assert_eq!(rig.stats().version_rejected, 2);
     assert_eq!(rig.stats().logins_rejected, 1);
     assert!(rig.world.resource::<GatewaySessions>().is_empty());
 }
@@ -4281,9 +4319,15 @@ fn a_subscription_ready_naming_a_realm_moves_the_lineage() {
 }
 
 #[test]
-fn a_subscription_ready_into_galaxy_space_leaves_the_lineage() {
-    // Galaxy space names no realm, so there is nothing to apply and the lineage stays where
-    // the avatar last stood — the between-space is felt, not re-anchored.
+fn a_subscription_ready_into_galaxy_space_now_records_the_galaxy_in_the_lineage() {
+    // ★ RE-BASED AT S9, AND THE RE-BASE IS THE POINT. This test used to assert the opposite — "no realm
+    // named, no lineage moved" — because galaxy space named NO realm: a galaxy was not a realm and had
+    // nothing to own, so a player standing in the between-space kept the lineage of wherever they last
+    // stood. That was true and is no longer.
+    //
+    // A galaxy owns its star systems now. A player in galaxy space IS somewhere, and the somewhere has a
+    // name — so the lineage records it, exactly as it records a system or a planet. The old behaviour
+    // would leave a player in a galaxy still labelled by the system they left.
     let mut rig = Rig::new();
     let (sid, _) = rig.login();
     let before = rig.world.resource::<GatewaySessions>().by_session[&sid]
@@ -4295,12 +4339,20 @@ fn a_subscription_ready_into_galaxy_space_leaves_the_lineage() {
         &ShardToGateway::SubscriptionReady {
             session: sid,
             entity: EntityId(77),
-            frame: FrameRef::GalaxySpace,
+            frame: FrameRef::GalaxySpace { galaxy_seed: 0 },
             realm_fence: Fence(5),
         },
     )]);
     let after = &rig.world.resource::<GatewaySessions>().by_session[&sid].lineage;
-    assert_eq!(&before, after, "no realm named, no lineage moved");
+    assert_ne!(
+        &before, after,
+        "the galaxy is a realm now and must be recorded"
+    );
+    assert_eq!(
+        after.last(),
+        Some(&RealmId::Galaxy(0)),
+        "the lineage's deepest entry is the galaxy the subscription named"
+    );
 }
 
 #[test]
@@ -9431,8 +9483,13 @@ fn an_attach_never_overwrites_a_lineage_the_descent_already_recorded() {
         vec![RealmId::System(0), RealmId::System(7)],
         "the recorded descent survives the attach"
     );
-    // And the OTHER unseedable shape: an attach whose frame names no realm (galaxy space)
-    // seeds nothing — an empty lineage stays empty, fail-closed, never guessed.
+    // ★ THE SECOND HALF IS RE-BASED AT S9, because its subject stopped existing. It used to assert "the
+    // OTHER unseedable shape: an attach whose frame names no realm (galaxy space) seeds nothing" —
+    // fail-closed, never guessed. There is no realm-less frame any more: a galaxy names its own realm, so
+    // an attach into galaxy space seeds the lineage exactly as an attach into a system does.
+    //
+    // The test's real subject — an attach never OVERWRITES a lineage the descent already recorded — is
+    // the half above and is untouched.
     let mut rig = Rig::new();
     let _ = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
     let sid = session_of(&rig, CLIENT);
@@ -9443,14 +9500,14 @@ fn an_attach_never_overwrites_a_lineage_the_descent_already_recorded() {
         &ShardToGateway::SessionAttached {
             session: sid,
             entity: EntityId(77),
-            frame: FrameRef::GalaxySpace,
+            frame: FrameRef::GalaxySpace { galaxy_seed: 0 },
             realm_fence: Fence(1),
         },
     )]);
     assert_eq!(
         rig.world.resource::<GatewaySessions>().by_session[&sid].lineage,
-        Vec::<RealmId>::new(),
-        "a realm-less attach frame seeds no lineage"
+        vec![RealmId::Galaxy(0)],
+        "an attach into galaxy space seeds the galaxy, like any other frame"
     );
 }
 
@@ -9520,7 +9577,7 @@ fn the_composer_withholds_sessions_with_no_standing_realm_or_window() {
             SHARD,
             SubRecord {
                 sub: SubId(0),
-                frame: FrameRef::GalaxySpace,
+                frame: FrameRef::GalaxySpace { galaxy_seed: 0 },
                 accepted: Fence(1),
                 state: SubState::Active,
             },

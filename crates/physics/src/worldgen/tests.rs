@@ -443,11 +443,20 @@ fn realm_regions_for_matches_the_frozen_pre_generator_golden() {
     assert_eq!(rs.len(), 7);
     for (r, (realm, offset, shape, parent)) in rs.iter().zip(expected) {
         assert_eq!(r.realm, realm);
-        // The centre is NORMALIZED since the cell activation (the generator is a producer):
-        // the VALUE is the golden's literal, exactly — every walk offset is dyadic, so both the
-        // normalized form and the flatten are bit-exact.
-        assert_eq!(r.center, LatticePos::from_metres(offset, Tier::Fine));
-        assert_eq!(r.center.delta_m(LatticePos::ORIGIN, Tier::Fine), offset);
+        // ★ READ AT THE PARENT'S RUNG SINCE S9. `center` is this realm's position in its PARENT's
+        // frame, so the ruler that turns it into metres is the PARENT's, and the ladder made those
+        // rulers differ: a system under the galaxy counts in 2 m cells, the galaxy under the universe
+        // in 32_768 m cells. The golden read every one of them in millimetres, which put System B —
+        // 130 m along the galaxy's x axis, 65 galaxy cells — at cell 133_120.
+        //
+        // The METRES in the golden below are unchanged, and that is the point: the world did not
+        // move, only the counting did.
+        let ptier = rs
+            .iter()
+            .find(|p| Some(p.realm) == parent)
+            .map_or_else(|| r.frame.tier(), |p| p.frame.tier());
+        assert_eq!(r.center, LatticePos::from_metres(offset, ptier));
+        assert_eq!(r.center.delta_m(LatticePos::ORIGIN, ptier), offset);
         assert_eq!(r.shape, shape);
         assert_eq!(r.parent, parent);
         assert_eq!(
@@ -455,13 +464,18 @@ fn realm_regions_for_matches_the_frozen_pre_generator_golden() {
             frame_for_realm(realm, parent).expect("canonical frame")
         );
     }
-    // The whole forest shares the one static walk band.
-    let band = UniverseConfig::walk_scale()
-        .band
-        .build()
-        .expect("walk band");
+    // ★ RE-BASED AT S6. The forest used to share ONE static band; every band is now sized from the
+    // body it wraps, so the golden asserts the DERIVATION rather than a single literal. This still
+    // fails if a coordinate, a shape or a parent drifts — it simply no longer claims all bands are
+    // equal, which stopped being true when they started being sized.
+    let cfg = UniverseConfig::walk_scale();
     for r in &rs {
-        assert_eq!(r.band, band);
+        assert_eq!(
+            r.band,
+            cfg.band.build_for_shape(&r.shape).expect("walk band"),
+            "{:?}'s band is not what the one band solve gives for its own extent",
+            r.realm
+        );
     }
 }
 
@@ -1043,22 +1057,40 @@ fn the_two_level_bound_re_solved_on_the_world_no_body_is_visible_past_any_two_le
 fn the_mass_cap_and_the_reservation_are_one_derivation() {
     let pl = world_planet_config();
     let cap = imf_mass_hi_msun();
-    // THE CAP: 16.36 M☉. Above it a star's system is too wide for this galaxy to place.
-    assert_eq!(cap, 16.360_034_882_257_757);
+    // ★ RE-BASED IN S9: 16.36 → 30.745 M☉, and the SENTENCE changed with the number. It used to read
+    // "above it a star's system is too wide for this galaxy to PLACE"; the galaxy grew 2_051× and
+    // stopped being the limit. It now reads: above it a star's system is too wide to STATE ITS OWN
+    // POSITIONS on the millimetre lattice it counts in.
+    assert_eq!(cap, 30.745_283_003_771_995);
     // THE RESERVATION: the system shell AT the cap, and the star look AT the cap.
-    assert_eq!(target_system_bound_max_m(), 749_489_793_576_937.9);
+    // ★ RE-BASED, ×3.004, and it lands exactly on the fine rung's own fence — which is the whole
+    // content of the change: the cap is no longer a number the galaxy happened to afford, it is the
+    // largest system that fits its own lattice, to the last bit.
+    assert_eq!(target_system_bound_max_m(), 2_251_799_813_685_248.0);
+    assert_eq!(target_system_bound_max_m(), SYSTEM_LATTICE_R_M);
     assert_eq!(
         target_system_bound_max_m(),
         system_shell_r_m(&pl, &star_at_mass(cap))
     );
-    assert_eq!(target_star_look_max_m(), 4_238_711_986.632_758_6);
+    // ★ RE-BASED, ×1.419 — the star's own photosphere at the heavier cap. It grows far slower than
+    // the shell does (a star's radius goes roughly as the square root of its mass, a system's reach
+    // with the star's luminosity), which is why the reservation is set by the shell and not by this.
+    assert_eq!(target_star_look_max_m(), 6_015_901_650.068_202);
     assert_eq!(
         target_star_look_max_m(),
         crate::taxonomy::star_radius_m(cap)
     );
-    // THE CAP IS A ROOT, not a guess: the galaxy can pay for it and cannot pay a hair above.
-    assert!(galaxy_child_demand_m(&pl, cap) <= REAL_GALAXY_R_M);
-    assert!(galaxy_child_demand_m(&pl, cap * 1.000_001) > REAL_GALAXY_R_M);
+    // THE CAP IS A ROOT, not a guess: the world can host it and cannot host a hair above.
+    // ★ RE-BASED to ask `binding_limit` — since S9 the binding constraint is the system lattice, so
+    // a purse-only pair of arms would say "affordable" for a mass the solve refuses.
+    assert_eq!(
+        binding_limit(&pl, cap, REAL_GALAXY_R_M, SYSTEM_LATTICE_R_M),
+        None
+    );
+    assert_eq!(
+        binding_limit(&pl, cap * 1.000_001, REAL_GALAXY_R_M, SYSTEM_LATTICE_R_M),
+        Some(StarLimit::SystemLattice)
+    );
     // …and the demand really is what the doc says it is — the clearance plus the two bounds
     // the origin-anchored home and a ring sibling put on the line between them.
     let shell_m = system_shell_r_m(&pl, &star_at_mass(cap));
@@ -1079,18 +1111,29 @@ fn the_mass_cap_and_the_reservation_are_one_derivation() {
         real_placement_r_m(),
         2.0 * target_system_bound_max_m()
     );
-    // WHY THE CAP EXISTS, measured rather than asserted: the literal it replaced named a star
-    // whose system is an order of magnitude wider than the whole galaxy.
+    // WHY THE CAP EXISTS, measured rather than asserted. ★ RE-BASED IN S9, AND THE COMPARISON HAD
+    // TO CHANGE: this measured the retired 120 M☉ literal against THE GALAXY, and after the climb it
+    // fits the galaxy comfortably (0.0053× of it). Measured against the thing that actually limits
+    // it — the lattice a system counts its own positions on — it still overruns, by 10.77×.
     let old_literal_shell_m = system_shell_r_m(&pl, &star_at_mass(120.0));
-    assert!(old_literal_shell_m > 10.0 * REAL_GALAXY_R_M);
+    assert!(
+        old_literal_shell_m < REAL_GALAXY_R_M,
+        "the galaxy now has the room"
+    );
+    assert!(
+        old_literal_shell_m > 10.0 * SYSTEM_LATTICE_R_M,
+        "its own lattice does not"
+    );
     eprintln!(
         "[MASS CAP] cap {cap} M☉ | reservation {} m | look {} m | placement {} m | chi {} | \
-         the retired 120 M☉ literal solves to {old_literal_shell_m} m = {:.1}x the galaxy",
+         the retired 120 M☉ literal solves to {old_literal_shell_m} m = {:.4}x the galaxy but \
+         {:.2}x the system lattice",
         target_system_bound_max_m(),
         target_star_look_max_m(),
         real_placement_r_m(),
         real_compression_chi(),
         old_literal_shell_m / REAL_GALAXY_R_M,
+        old_literal_shell_m / SYSTEM_LATTICE_R_M,
     );
 }
 
@@ -1103,10 +1146,16 @@ fn the_mass_cap_and_the_reservation_are_one_derivation() {
 fn g_nest_sweep_every_swept_seed_generates_a_world_that_nests() {
     let cfg = UniverseConfig::world(15.0, 0.05);
     let sweep = derived_nest_sweep_seeds();
-    assert_eq!(sweep, 284, "the derived sweep size, pinned as measured");
+    // ★ 284 -> 664 AT S9. The sweep size is DERIVED from the world, so it moves when the world does —
+    // the galaxy went from 0.475 light years to 487, and a sweep sized to reach the heavy tail of a
+    // bigger world needs more seeds. Pinned as measured, so a size that drifts again is loud.
+    assert_eq!(sweep, 664, "the derived sweep size, pinned as measured");
     let judged = guard_swept_seeds_nest(&cfg, sweep).expect("every swept seed nests");
     // NON-VACUOUS: the walk really visited every region of every world.
-    assert_eq!(judged, 13_428);
+    //
+    // 13,428 -> 31,317 at S9, which is the SWEEP growing and not the world: 31,317/664 = 47.2 regions per
+    // world against 13,428/284 = 47.3 before. Same worlds, more of them.
+    assert_eq!(judged, 31_317);
     // …and it really reached into the massive tail: the heaviest star of the sweep, and the
     // tightest nesting margin any child of any of those worlds left.
     let mut heaviest_msun = 0.0_f64;
@@ -1173,8 +1222,13 @@ fn the_nest_sweep_refuses_the_sampled_reservation_that_grounded_the_owner() {
         vd_core::geometry::RegionNestError::ChildEscapesParent {
             realm: RealmId::System(10_487_570_625_701_098_367),
             parent: GALAXY,
-            reach: 2_248_842_559_152_262.5,
-            limit: 2_248_797_413_933_667.8,
+            // ★ RE-BASED IN S9 to the climbed galaxy. Both numbers moved by the same 2_051×,
+            // because both ARE the galaxy: the limit IS its radius, and the reach is a sibling
+            // placed just outside it. The GAP between them — 45_426_893_824 m — is what the sampled
+            // reservation gets wrong, and the refusal is unchanged in kind. A world that nests only
+            // for the seed its reservation was sampled from still does not nest.
+            reach: 4.611_686_063_854_282e18,
+            limit: 4.611_686_018_427_388e18,
         },
         "the same sibling, the same galaxy, the same shell the live cluster named"
     );
@@ -1282,6 +1336,16 @@ fn g_climb_the_worlds_measured_climb_at_the_true_size_resolve() {
     // slack — the guarantee restated as an inequality, which is what it always was.
     let clearance_m = config.scale.galaxy_r_m - config.stellar.system_ring_r_m;
     let factor_plus_one = 1.0 + FROZEN_VISIBILITY_FACTOR;
+    // ★ THE ASSOCIATION TOLERANCE, DERIVED IN S9, shared by both identities below. It replaces two
+    // hand-typed 1 m literals chosen as "a few ulp at 2.25e15 magnitudes". The climb moved the
+    // magnitudes: these identities cancel two GALAXY-scale numbers (4.61e18, whose spacing is 1024 m)
+    // to leave a system-scale result, so the result carries galaxy-scale rounding — the clearance
+    // identity misses by 512 m and the residue identity by 286 m, both exactly what half an ulp of
+    // the largest term buys, and neither a fault.
+    //
+    // A literal cannot follow a change of scale; it can only be re-typed after each one breaks it.
+    // This reads off the largest magnitude in the chain, which is the thing that actually sets it.
+    let tol_m = 2.0 * config.scale.galaxy_r_m * f64::EPSILON;
     let bodies = generate_system_forest(0, &config);
     let mut ring_systems = 0u32;
     for c in climbs
@@ -1299,10 +1363,9 @@ fn g_climb_the_worlds_measured_climb_at_the_true_size_resolve() {
         }
         ring_systems += 1;
         let identity_m = clearance_m - look_m * factor_plus_one;
-        // 1 m association tolerance at 2.25e15 magnitudes (a few ulp per f64 association).
         assert!(
-            (c.slack_m - identity_m).abs() < 1.0,
-            "the reserved-clearance identity: {c:?} vs {identity_m}"
+            (c.slack_m - identity_m).abs() < tol_m,
+            "the reserved-clearance identity: {c:?} vs {identity_m} (tolerance {tol_m} m)"
         );
     }
     assert_eq!(ring_systems, 2, "both seeded siblings were judged");
@@ -1325,7 +1388,7 @@ fn g_climb_the_worlds_measured_climb_at_the_true_size_resolve() {
         .fold(0.0_f64, f64::max);
     let residue_m = (target_star_look_max_m() - heaviest_look_m) * factor_plus_one;
     assert!(
-        (largest_slack_m - target_system_bound_max_m() - residue_m).abs() < 1.0,
+        (largest_slack_m - target_system_bound_max_m() - residue_m).abs() < tol_m,
         "the slack's residue IS the unspent look reservation: \
          {largest_slack_m} − {} vs {residue_m}",
         target_system_bound_max_m()
@@ -1396,21 +1459,31 @@ fn measure_visibility_climb_the_ordered_first_measurement() {
 #[test]
 fn the_four_outer_geometry_numbers_are_the_addendums_derivations() {
     let cfg = UniverseConfig::world(15.0, 0.05);
-    // ▲ 1 the universe: 2⁵¹ m exactly (the storage fence's solve).
+    // ▲ 1 THE UNIVERSE: 2⁷⁶ m exactly — its OWN rung's fence solved at equality.
+    // ★ MOVED IN S9, ×33_554_432 (2²⁵), CAUSE: the three-rung ladder. It was 2⁵¹ m because every
+    // realm in the world counted in ONE lattice whose step was a millimetre. The root now counts in
+    // 32_768 m steps, and 2⁶¹ of them either side is 2⁷⁶ m ≈ 7.99 million light years. Same fence,
+    // same construction, a coarser ruler.
     assert_eq!(cfg.scale.universe_r_m, FROZEN_REAL_UNIVERSE_R_M);
-    assert_eq!(cfg.scale.universe_r_m, (1u64 << 51) as f64);
-    // ▲ 2 the galaxy: R_uni − the τ-free outset (the CORRECTED formula, addendum §A2.2 —
-    // measured equal to the addendum's printed 2.2487974139336678e15 m).
+    assert_eq!(cfg.scale.universe_r_m, root_radius_at(Tier::Universe));
+    // ▲ 2 THE GALAXY: 2⁶² m exactly — likewise its own fence, NOT a subtraction from the root's.
+    // ★ MOVED IN S9, ×2_051, CAUSE: the galaxy got a lattice. The old value was `R_uni − outset`,
+    // a τ-free band carved out of the ROOT's storage budget because the galaxy had no budget of its
+    // own; S7 recorded that as a single-lattice artefact due to die here, and it has. 487.46 light
+    // years against 0.475 — which is what makes 150_000 star systems geometrically possible.
     assert_eq!(cfg.scale.galaxy_r_m, FROZEN_REAL_GALAXY_R_M);
+    assert_eq!(cfg.scale.galaxy_r_m, root_radius_at(Tier::Galaxy));
+    // The retired formula, kept as a DRIVEN control so the claim "the subtraction is gone" is a
+    // measurement and not a comment: the outset still computes, and the galaxy is no longer it.
     let outset_m = (2.0 * FROZEN_REAL_UNIVERSE_R_M / T_TRAVERSE_S)
         * GEOMETRY_TICK_DT_S
         * BAND_TICKS_N
         * BAND_TAU_HEADROOM;
-    assert_eq!(cfg.scale.galaxy_r_m, FROZEN_REAL_UNIVERSE_R_M - outset_m);
-    // ▲ 3 the placement radius: R_gal − the reserved clearance (the owner-ruled star gap,
-    // now 0.15843 ly; RE-SOLVED 2026-08-20 at the DERIVED mass cap, superseding the flag day's
-    // 2.2484905036211785e15 m = 0.2376656 ly — see D-MASS-CAP for the third of the gap this
-    // costs and the P10 lift that returns it).
+    assert!(cfg.scale.galaxy_r_m < FROZEN_REAL_UNIVERSE_R_M - outset_m);
+    // ▲ 3 THE PLACEMENT RADIUS: R_gal − the reserved clearance, unchanged as a LAW.
+    // ★ MOVED IN S9 with its two inputs; the FORM did not move. Both the galaxy and the reservation
+    // grew, and the reservation grew FASTER in absolute metres — but it fell from 0.13 % of the
+    // galaxy to 0.0488 %, so the world gained placement room in every sense that matters.
     assert_eq!(cfg.stellar.system_ring_r_m, FROZEN_REAL_PLACEMENT_R_M);
     let clearance_m = child_clearance_m(
         target_system_bound_max_m(),
@@ -1421,10 +1494,11 @@ fn the_four_outer_geometry_numbers_are_the_addendums_derivations() {
         cfg.stellar.system_ring_r_m,
         cfg.scale.galaxy_r_m - clearance_m
     );
-    // …and the clearance itself is the ONE clearance law evaluated AT THE DERIVED MASS CAP
-    // (superseding the flag day's 306_910_312_489.256_4, which covered only seed 0's sample).
+    // …and the clearance itself is the ONE clearance law evaluated AT THE DERIVED MASS CAP.
+    // ★ MOVED IN S9, ×3.004, CAUSE: the cap rose from 16.36 M☉ to 30.745 M☉ (▲ 5 below), and a
+    // heavier star means a wider system shell to reserve room for. Supersedes 749_817_826_779_791.8.
     assert_eq!(
-        clearance_m, 749_817_826_779_791.8,
+        clearance_m, 2_252_265_383_295_202.5,
         "the reserved clearance == child_clearance_m at the derived mass cap"
     );
     // THE GUARANTEE, as an equality rather than a hope: the reservation IS the shell at the
@@ -1433,32 +1507,109 @@ fn the_four_outer_geometry_numbers_are_the_addendums_derivations() {
         target_system_bound_max_m(),
         system_shell_r_m(&world_planet_config(), &star_at_mass(imf_mass_hi_msun())),
     );
+    // ▲ 5 THE MASS CAP, and WHICH of its two constraints now binds — the S9 change that matters
+    // most, because it is the one that stopped the cap being an accident of a single lattice.
+    // Before S9 the solve asked ONE question: can the galaxy afford this star's demand? The galaxy
+    // then grew by 2_051×, so that question stopped biting, and the cap would have run away to a
+    // mass no star has. `affordable_at` therefore asks BOTH: the galaxy's purse AND whether the
+    // resulting system still fits its OWN rung. The second binds now — the cap sits exactly on the
+    // fine root, to the last bit.
+    assert_eq!(imf_mass_hi_msun(), 30.745_283_003_771_995);
+    assert_eq!(target_system_bound_max_m(), FINE_ROOT_R_M);
+    // The galaxy's purse, measured, so "it stopped biting" is a number and not a story: the cap's
+    // demand is under two ten-thousandths of what the galaxy can now pay.
+    let demand_m = galaxy_child_demand_m(&world_planet_config(), imf_mass_hi_msun());
+    assert!(demand_m <= REAL_GALAXY_R_M, "the cap is affordable");
     assert!(
-        galaxy_child_demand_m(&world_planet_config(), imf_mass_hi_msun()) <= REAL_GALAXY_R_M,
-        "the cap is affordable"
+        demand_m / REAL_GALAXY_R_M < 0.002, // MEASURED 0.001464944704316511
+        "and the purse is no longer what binds it — the fine rung is"
     );
+    // Both arms driven: one part per million above the cap, the SYSTEM no longer fits its rung.
     assert!(
-        galaxy_child_demand_m(&world_planet_config(), imf_mass_hi_msun() * 1.000_001)
-            > REAL_GALAXY_R_M,
-        "and one part per million above it is not — the solve really sits at the root"
+        system_shell_r_m(
+            &world_planet_config(),
+            &star_at_mass(imf_mass_hi_msun() * 1.000_001)
+        ) > FINE_ROOT_R_M,
+        "one part per million above the cap overflows the fine rung — the solve sits at the bound"
     );
-    // ▲ 4 the compression: χ = real mean NN separation / placement radius = 16.378×.
+    // ▲ 4 the compression χ. ★ MOVED IN S9 from 24.5678 to 0.00799 — and this one is NOT just a
+    // moved number, so it is not re-pinned as if it were. χ divides the real mean stellar separation
+    // by the PLACEMENT RADIUS, which measures compression only while every system sits on ONE ring
+    // at that radius. It does now, because the census is three. The galaxy grew 2_051× and the ring
+    // did not gain systems, so χ crossed 1 and the world reads as STRETCHED 125× — which is true of
+    // the ring and says nothing about the world S12 builds.
+    //
+    // Its successor is `the_target_census_lands_near_true_stellar_density` below: real separation
+    // against the MEAN SPACING at the census. Retire χ when the shaped placement lands (S12).
     assert_eq!(real_compression_chi(), FROZEN_REAL_COMPRESSION_CHI);
+    assert!(
+        real_compression_chi() < 1.0,
+        "χ now reads as stretch, not compression — see the successor measurement"
+    );
     // The storage budget, EXACT: occupancy 50.0000 %, headroom 2.0000× — the equality is the
     // construction (2 × 2⁶¹ == CELL_DOMAIN_MAX + 1), never slack.
     let budget = guard_root_representable(&cfg).expect("THE world is representable");
     assert_eq!(budget.occupancy, 0.5);
     assert_eq!(budget.headroom, 2.0);
     eprintln!(
-        "[GEOMETRY] universe {} m | galaxy {} m | placement {} m (0.15843 ly) | chi {} | \
-         occupancy {:.4}% headroom {:.4}x",
+        "[GEOMETRY] universe {} m ({:.3} Mly) | galaxy {} m ({:.2} ly) | placement {} m ({:.2} ly) \
+         | reservation {:.4}% of R_gal | cap {} Msun | chi {} | occupancy {:.4}% headroom {:.4}x",
         cfg.scale.universe_r_m,
+        cfg.scale.universe_r_m / (1.0e6 * vd_core::units::LIGHT_YEAR_M),
         cfg.scale.galaxy_r_m,
+        cfg.scale.galaxy_r_m / vd_core::units::LIGHT_YEAR_M,
         cfg.stellar.system_ring_r_m,
+        cfg.stellar.system_ring_r_m / vd_core::units::LIGHT_YEAR_M,
+        100.0 * clearance_m / cfg.scale.galaxy_r_m,
+        imf_mass_hi_msun(),
         real_compression_chi(),
         100.0 * budget.occupancy,
         budget.headroom,
     );
+}
+
+/// ★ THE SUCCESSOR TO χ, and the measurement that says whether the S9 climb actually bought the
+/// world it was supposed to buy.
+///
+/// χ compares the real mean stellar separation against the PLACEMENT RADIUS. That was the right
+/// comparison while three systems sat on one ring at that radius, and it is the wrong one for a
+/// galaxy with a census. The honest question is: **when the census reaches the target, how far apart
+/// are neighbouring systems, against how far apart real stars are?**
+///
+/// This is a GEOMETRY measurement, not a placement one — it asks what spacing the galaxy's size
+/// affords at the target count, independent of the shape S12 chooses. It therefore cannot be
+/// invalidated by that choice; it BOUNDS it. If this ever fails, S12 has no shape that works and the
+/// galaxy's radius is what must move.
+#[test]
+fn the_target_census_lands_near_true_stellar_density() {
+    const CENSUS: f64 = 150_000.0;
+    let real_sep_m = real_compression_chi() * real_placement_r_m();
+    // Systems distributed over a shell at the placement radius: each owns 4πR²/N of it, so the
+    // centre-to-centre spacing is R·√(4π/N).
+    let shell_spacing_m = real_placement_r_m() * (4.0 * core::f64::consts::PI / CENSUS).sqrt();
+    let ratio = real_sep_m / shell_spacing_m;
+    eprintln!(
+        "[s9-density] real mean separation {:.4} ly | shell spacing at {CENSUS:.0} systems \
+         {:.4} ly | ratio {ratio:.4}",
+        real_sep_m / vd_core::units::LIGHT_YEAR_M,
+        shell_spacing_m / vd_core::units::LIGHT_YEAR_M,
+    );
+    // ▲ THE RESULT: 3.8926 ly real against 4.4595 ly afforded — the world sits at 0.8729× true
+    // stellar density, i.e. a shade sparser than real space, with NO compression factor at all.
+    // Before the climb the same census would not have fitted by four orders of magnitude.
+    assert_eq!(ratio, 0.872_881_733_000_605_9);
+    assert!(
+        (0.5..2.0).contains(&ratio),
+        "the galaxy affords the target census at within a factor of two of true stellar density"
+    );
+    // …and the spacing clears the owner's one-light-year floor with room to spare, which is the
+    // constraint S12's shape must actually respect.
+    assert!(shell_spacing_m > vd_core::units::LIGHT_YEAR_M);
+    // THE CONTROL that makes the claim falsifiable: the PRE-CLIMB galaxy could not do this. Its
+    // placement radius affords 0.00145 ly at the same census — 690× inside the floor.
+    let pre_climb_spacing_m =
+        1_498_979_587_153_876.0 * (4.0 * core::f64::consts::PI / CENSUS).sqrt();
+    assert!(pre_climb_spacing_m < vd_core::units::LIGHT_YEAR_M / 100.0);
 }
 
 /// The storage fence's REFUSAL ARM, driven (addendum §A6.3's `g_root_representable`: "without
@@ -1678,21 +1829,29 @@ fn the_fixture_plant_is_appended_last_and_the_plain_world_is_untouched() {
     let spec = station_area_plant(0, &planted_cfg);
     assert_eq!(planted[plain.len()].realm, spec.station);
     assert_eq!(planted[plain.len() + 1].realm, spec.area);
-    // The plain world has no player-built kind: its only non-plantable bodies are the
-    // three STAR realms (nothing is built inside the dust-sublimation radius — T2), which
-    // are seed-lineage keyed all the same.
-    assert!(
-        plain
-            .iter()
-            .filter(|b| plant_seed_of(b.realm).is_none())
-            .all(|b| matches!(b.realm, RealmId::Star(_))),
-    );
+    // The plain world has no player-built kind. ★ RE-BASED IN S9: the non-plantable set was the
+    // three STAR realms (nothing is built inside the dust-sublimation radius — T2). S9 gives the
+    // world a real GALAXY and a real UNIVERSE, and neither takes a seed lineage either — there is no
+    // "inside the galaxy" to build in; you build inside one of its children.
+    //
+    // Asserted as an EQUALITY on the actual list rather than `all(matches!(…))`. A matches! arm that
+    // never sees a false case is an uncoverable region (HR5), and the equality says strictly more:
+    // it names WHICH realms, so a fourth kind quietly joining the set is a failure rather than a
+    // pass. Both changes are why this test caught the new arms at all.
+    let non_plantable: Vec<RealmId> = plain
+        .iter()
+        .filter(|b| plant_seed_of(b.realm).is_none())
+        .map(|b| b.realm)
+        .collect();
     assert_eq!(
-        plain
-            .iter()
-            .filter(|b| plant_seed_of(b.realm).is_none())
-            .count(),
-        3
+        non_plantable,
+        vec![
+            RealmId::Universe,
+            GALAXY,
+            RealmId::Star(1_505_330_803_008_586_659),
+            RealmId::Star(17_323_468_219_451_770_439),
+            RealmId::Star(9_809_870_530_919_149_042),
+        ]
     );
     // The accessor derives the SAME spec from the plain and the planted config (it strips the
     // plant before deriving, so the spec can never be derived from planted content).
@@ -1814,7 +1973,7 @@ fn the_planted_pair_nests_and_stands_clear_of_the_plane_and_the_polar_axes() {
         .collect();
     // 64 = the membership-bitset width every shard boot passes (`vd_sim::stub::MAX_REGIONS`).
     assert_eq!(
-        vd_core::geometry::guard_regions_nest(&regions, 64, &reaches),
+        vd_core::geometry::guard_regions_nest(&regions, &reaches),
         Ok(())
     );
     // Station: inside the shell with margin; clear of BOTH ±Z polar flight axes (the licensed
@@ -1950,7 +2109,7 @@ fn the_planted_interior_bands_bracket_their_shells_and_the_systems_stays_planet_
         .iter()
         .find(|r| r.realm == spec.station)
         .expect("the station is rostered");
-    assert_eq!(st.frame.realm(), Some(spec.station));
+    assert_eq!(st.frame.realm(), spec.station);
     assert_eq!(st.parent, Some(spec.station_parent));
     let ar = regions
         .iter()
@@ -2313,8 +2472,11 @@ fn g_star_shell_unmoved_the_stars_clearance_arm_never_binds() {
     // closed. The reservation is now a CEILING every seed sits under, so the statement gets
     // STRONGER, not weaker: the drawn value is pinned exactly AND it is proved to clear the
     // reserved bound with room.
+    // ★ RE-PINNED IN S9, same cause as the home shell above and the photometrics golden: the mass
+    // cap is the bound of the IMF draw, so moving it moves every star and every shell solved from
+    // one. 296_421_630_993.015_5 → 296_594_883_194.501_3, a rise of 0.058 %.
     assert_eq!(
-        shells[2], 296_421_630_993.015_5,
+        shells[2], 296_594_883_194.501_3,
         "seed 0's largest drawn shell, pinned as measured"
     );
     assert!(
@@ -2586,7 +2748,7 @@ fn earth_like_every_clause_is_driven_both_ways() {
         mass_kg: crate::taxonomy::M_EARTH_KG,
         radius_m: R_EARTH_M,
         insolation_rel: 0.748_314_795,
-        t_eq_k: 236.785_700_196_447_92,
+        t_eq_k: 236.785_700_196_447_95,
         bond_albedo: 0.30,
         atmosphere: Some(Atmosphere {
             mean_molecular_weight: MU_N2,
@@ -3301,10 +3463,20 @@ fn a_moving_planet_soi_is_centered_on_its_live_position_not_double_counted() {
         .iter()
         .find(|r| r.realm == realm)
         .expect("the mover realm has a region");
+    // ★ RE-BASED IN S9. This used to take the frame of the forest's PARENTLESS ROOT, which was the
+    // star system while the system was the top of the tree. It is the universe now, and a universe
+    // counts in 32_768 m cells while a planet's SOI counts in millimetres — so the measurement asked
+    // for a crossing between two rungs, which is refused by name (`CrossTierCrossingNotBuilt`) and
+    // is P10's work, not this test's subject.
+    //
+    // The frame this measurement was always about is the planet's OWN PARENT — the star system that
+    // authors its orbit. Naming it directly is both correct and no longer sensitive to what sits
+    // above the system in the tree.
+    let parent_realm = region.parent.expect("a moving planet has a parent");
     let root = regions
         .iter()
-        .find(|r| r.parent.is_none())
-        .expect("the forest has a root")
+        .find(|r| r.realm == parent_realm)
+        .expect("the planet's parent has a region")
         .frame;
     let tick_hz = 20.0;
     let tick = vd_core::UniverseTick(200);
@@ -3642,9 +3814,16 @@ fn walk_demand_band_is_crossable_for_every_separated_child() {
             .expect("a region's parent is in the forest");
         // Flatten the NORMALIZED centre (the walk offsets are dyadic, so the residual
         // `.offset()` is exactly ZERO — reading it here silenced the separated arm).
+        //
+        // ★ RE-BASED IN S9: measured at the PARENT's tier, not the child's. A region's `center` is
+        // its position in its PARENT's frame, and its `frame` is its OWN — two different rungs since
+        // the ladder landed. Reading the parent's number with the child's ruler made a system sitting
+        // exactly ON the galaxy origin read as 0.0635 m away from it, which then failed the
+        // "separated child must be out of range" arm. The same confusion cost a 2048× error in the
+        // body generator's centres; this is the second place it hid.
         let d = r
             .center
-            .delta_m(LatticePos::ORIGIN, r.frame.tier())
+            .delta_m(LatticePos::ORIGIN, parent.frame.tier())
             .length();
         let td = r.aoi.tear_down_r_m();
         // (c) Releasable: a point inside the parent exists from which the child is out of tear-down
@@ -3732,16 +3911,24 @@ const FROZEN_VISIBILITY_FACTOR: f64 = 76.38983065807547;
 // record. Their successors are the ▲ four-number pins below.)
 /// ▲ THE FOUR OUTER GEOMETRY NUMBERS (real-scale addendum §A2.3), pinned bit-for-bit as
 /// MEASURED on THE world — each equals the addendum's printed derivation exactly.
-const FROZEN_REAL_UNIVERSE_R_M: f64 = 2_251_799_813_685_248.0; // 2⁵¹ m, exact
-const FROZEN_REAL_GALAXY_R_M: f64 = 2_248_797_413_933_667.8; // R_uni − the τ-free outset
-// R_gal − clearance. ★ RE-MEASURED 2026-08-20 (the DERIVED mass cap): the reservation is
-// no longer seed 0's heaviest sample (2.967e11 m) but the system shell at the largest star
-// this galaxy can host (7.4949e14 m), so the placement radius drops from 2.248490503621178.5e15
-// (0.2376656 ly) to 1.4989795871538760e15 (0.15843 ly) and the compression rises with it. THE
-// COST IS STATED: a third of the star gap buys a world that nests for EVERY seed instead of
-// for the one it was sampled from. Both numbers lift with the galaxy cell lattice (P10).
-const FROZEN_REAL_PLACEMENT_R_M: f64 = 1_498_979_587_153_876.0;
-const FROZEN_REAL_COMPRESSION_CHI: f64 = 24.567_816_882_382_665; // real NN separation / placement
+const FROZEN_REAL_UNIVERSE_R_M: f64 = 75_557_863_725_914_323_419_136.0; // 2⁷⁶ m, exact
+const FROZEN_REAL_GALAXY_R_M: f64 = 4_611_686_018_427_387_904.0; // 2⁶² m, exact
+// R_gal − clearance. The FORM is unchanged since 2026-08-20 (the reservation is the system shell at
+// the largest star the world can host, not seed 0's heaviest sample); ★ RE-MEASURED IN S9, when both
+// of its inputs climbed. 1.4989795871538760e15 m (0.15843 ly) → 4.609433753044092928e18 m
+// (487.22 ly), a factor of 3_075. The reservation grew too, but it fell from 0.13 % of the galaxy to
+// 0.0488 %, so the world gained placement room in every sense. The P10 lift named here is now the
+// FINE rung, not the galaxy's — see `the_star_limit_moved_from_the_galaxys_room_to_the_systems_own_numbers`.
+const FROZEN_REAL_PLACEMENT_R_M: f64 = 4_609_433_753_044_092_928.0;
+/// The FINE rung's own root radius, `2⁵¹ m` — the number that used to BE the universe while every
+/// realm counted in one lattice. It did not disappear when the ladder landed; it became the bound on
+/// how big ONE star system may be, and slice S9 made the mass-cap solve ask it directly. The cap now
+/// sits exactly on it (`target_system_bound_max_m() == FINE_ROOT_R_M`), which is why it is pinned.
+const FINE_ROOT_R_M: f64 = 2_251_799_813_685_248.0;
+// ★ RE-PINNED IN S9. Was 24.567_816_882_382_665 while the galaxy was 0.475 ly across. See the ▲ 4
+// note in `the_four_outer_geometry_numbers_are_the_addendums_derivations` for why this ratio's
+// MEANING changed with the climb and what measurement replaces it.
+const FROZEN_REAL_COMPRESSION_CHI: f64 = 0.007_989_409_975_423_876; // real NN separation / placement
 
 // ===== THE WINDOW LANE Slice 0: the per-system photometric draw (the marker datum) =========
 // Owner-approved 2026-08-15/16, docs/design/window_lane.md §2.2/§2.8: a sleeping child's point
@@ -3750,13 +3937,22 @@ const FROZEN_REAL_COMPRESSION_CHI: f64 = 24.567_816_882_382_665; // real NN sepa
 
 #[test]
 fn the_worlds_systems_draw_their_pinned_photometrics() {
-    // ★ RE-PINNED 2026-08-20 — CAUSE: the DERIVED MASS CAP. `sample_imf_mass` inverts a
-    // BOUNDED power law, so its upper bound enters every draw; moving the bound from the
-    // literal 120.0 M☉ to the derived 16.360034882257757 M☉ moves every star in the world by
-    // a few parts in ten thousand (0.09287894638451702 → 0.09286807253954772,
-    // 0.1081418058358058 → 0.10811333254263818, 0.16179874709518627 → 0.16166413170715563).
+    // ★ RE-PINNED IN S9 — SAME CAUSE AS 2026-08-20, THIRD TIME: the mass cap. `sample_imf_mass`
+    // inverts a BOUNDED power law, so its upper bound enters EVERY draw in the world, and the cap
+    // is that bound. It has now moved twice: the literal 120.0 M☉ → the galaxy-derived
+    // 16.360034882257757 → the lattice-derived 30.745283003771995. Each move re-rolls every star by
+    // a few parts in ten thousand, upward this time because the bound rose:
+    //   0.09286807253954772 → 0.09287476027864262
+    //   0.10811333254263818 → 0.10813084330897464
+    //   0.16166413170715563 → 0.16174689739789090
     // The world re-rolls and that is lawful pre-launch (the seed is a pre-freeze dial); the
-    // draw ORDER is untouched, so the append-only stream discipline holds.
+    // draw ORDER is untouched, so the append-only stream discipline holds. All three stay M-class,
+    // so nothing downstream of the class changes.
+    //
+    // ★ AND THIS IS THE LAST TIME IT MAY HAPPEN QUIETLY. Three re-rolls of the whole world traced to
+    // one bound says the cap is a launch-blocking input, not a tuning knob: after the seed freezes,
+    // moving it re-draws every star every player has seen. The P10 lattice lift moves it again, and
+    // that lift must land BEFORE the freeze.
     //
     // FROZEN per-system draw goldens on THE world (seed 0) — EXACT f64, captured once from the
     // taxonomy chain (sample_imf_mass → classify_spectral → main_sequence_luminosity) at THE
@@ -3780,25 +3976,25 @@ fn the_worlds_systems_draw_their_pinned_photometrics() {
             (
                 RealmId::System(7),
                 StarPhotometrics {
-                    mass_msun: 0.09286807253954772,
+                    mass_msun: 0.09287476027864262,
                     class: SpectralClass::M,
-                    luma_lsun: 0.0009723455466560531,
+                    luma_lsun: 0.0009725066044268927,
                 },
             ),
             (
                 RealmId::System(10487570625701098367),
                 StarPhotometrics {
-                    mass_msun: 0.10811333254263818,
+                    mass_msun: 0.10813084330897464,
                     class: SpectralClass::M,
-                    luma_lsun: 0.001379272639755041,
+                    luma_lsun: 0.0013797865053910446,
                 },
             ),
             (
                 RealmId::System(13979593561158050752),
                 StarPhotometrics {
-                    mass_msun: 0.16166413170715563,
+                    mass_msun: 0.1617468973978909,
                     class: SpectralClass::M,
-                    luma_lsun: 0.0034796798339959533,
+                    luma_lsun: 0.0034837785544366263,
                 },
             ),
         ],
@@ -4087,11 +4283,23 @@ fn earth_like_candidates_reads_the_world_and_answers_with_its_numbers() {
     // The measured best seed of the ruling-F sweep — it holds exactly one Earth-like body.
     let found = earth_like_candidates(2298, &cfg);
     assert_eq!(found.len(), 1);
-    // ★ RE-PINNED 2026-08-20 — CAUSE: the DERIVED MASS CAP re-rolled the stellar draw
-    // (star 1.0312807224758647 → 1.015066097741417 M☉, luma 1.1311171796208652 →
-    // 1.0616400455472874 L☉, moons 22 → 19) and shrank the placement radius
-    // (2.2484905036211783e15 → 1.4989795871538758e15 m). THE PLANET ITSELF IS UNMOVED
-    // (mass_kg and radius_m are bit-identical) — its own draws never read the stellar cap.
+    // ★ RE-PINNED IN S9 — SAME TWO CAUSES AS 2026-08-20, both moving again because both descend
+    // from the mass cap:
+    //   • THE CAP re-rolled the stellar draw a second time (star 1.015066097741417 →
+    //     1.0249674589959064 M☉, luma 1.0616400455472874 → 1.1036727248910603 L☉). The IMF is a
+    //     BOUNDED power law and the cap is its bound, so every star in every world moves when it does.
+    //   • THE PLACEMENT RADIUS climbed with the galaxy (1.4989795871538758e15 →
+    //     4.609433753044093e18 m), which is what both sibling distances read.
+    //
+    // ★ AND THE PLANET ITSELF IS STILL UNMOVED — `mass_kg` and `radius_m` are bit-identical across
+    // BOTH re-pins, because a planet's own draws never read the stellar cap. That invariance is the
+    // reason this golden is worth keeping: it separates "the star re-rolled" from "the planet
+    // generator changed", and only the first has happened.
+    //
+    // The two derived readings that depend on the star — insolation and equilibrium temperature —
+    // move only in the last two digits (0.7483147950814765 → 0.7483147950814767), because a G star
+    // 1 % heavier is also placed on a slightly wider orbit ladder and the two nearly cancel.
+    //
     // PINNED AS MEASURED (the config here is the unit tier's 15 m/s · 0.05 s world, not
     // the DEV cluster's — the ladder is the same, the derived speed knobs are not).
     assert_eq!(
@@ -4099,14 +4307,14 @@ fn earth_like_candidates_reads_the_world_and_answers_with_its_numbers() {
         EarthLikeCandidate {
             system: RealmId::System(7),
             body: RealmId::Planet(15_792_791_038_712_096_226),
-            star_mass_msun: 1.015_066_097_741_417,
+            star_mass_msun: 1.024_967_458_995_906_4,
             mass_kg: 6.489_098_886_649_445e24,
             radius_m: 6_515_459.435_746_093,
-            insolation_rel: 0.748_314_795_081_476_5,
-            t_eq_k: 236.785_700_196_447_9,
+            insolation_rel: 0.748_314_795_081_476_7,
+            t_eq_k: 236.785_700_196_447_95,
             // T4b — the rest of the picture the owner chooses on, PINNED AS MEASURED.
             star_class: crate::taxonomy::SpectralClass::G,
-            star_luma_lsun: 1.061_640_045_547_287_4,
+            star_luma_lsun: 1.103_672_724_891_060_3,
             planet_class: crate::taxonomy::PlanetType::Rocky,
             bond_albedo: 0.3,
             has_atmosphere: true,
@@ -4114,8 +4322,8 @@ fn earth_like_candidates_reads_the_world_and_answers_with_its_numbers() {
             system_moons: 19,
             own_moons: 1,
             sibling_count: 2,
-            nearest_sibling_m: 1_498_979_587_153_875.8,
-            farthest_sibling_m: 1_498_979_587_153_876.0,
+            nearest_sibling_m: 4.609_433_753_044_092_4e18,
+            farthest_sibling_m: 4.609_433_753_044_093e18,
         },
     );
     // A seed with no Earth-like body answers with an EMPTY sweep — the same read path, the
@@ -4322,4 +4530,1299 @@ fn the_moon_ladder_mints_nothing_when_the_first_rung_would_breach_the_soi() {
     );
     assert_eq!(minted, 0);
     assert_eq!(bodies.len(), 1);
+}
+
+#[test]
+fn the_world_shape_constants_are_what_a_stores_label_folds_and_every_one_of_them_moves_it() {
+    // WHAT THIS LIST IS FOR (owner ruling 2026-08-24 Q1 condition 1). A durable file folds these into
+    // its label, so a store written for one world's geometry is REFUSED by a build that would place
+    // those bodies somewhere else. The whole mechanism rests on one property, asserted here rather than
+    // assumed: EVERY entry must move the label. An entry that did not would be a number this list
+    // pretends to protect and does not.
+    let base = world_shape_constants();
+    assert!(
+        !base.is_empty(),
+        "a label folded over nothing protects nothing"
+    );
+    let label = vd_core::store_stamp::world_generation(&base);
+
+    for ix in 0..base.len() {
+        let mut moved = base.clone();
+        // ONE BIT — far below anything printable. A constant that changed by less than this is still a
+        // different world, and the label must say so.
+        moved[ix] = f64::from_bits(moved[ix].to_bits() ^ 1);
+        assert_ne!(
+            vd_core::store_stamp::world_generation(&moved),
+            label,
+            "constant {ix} does not move the label, so nothing would refuse a store written before it \
+             changed"
+        );
+    }
+
+    // And the fold is order-sensitive, which is why this is a LIST: re-ordering it is a world change.
+    let mut swapped = base.clone();
+    swapped.swap(0, 1);
+    assert_ne!(vd_core::store_stamp::world_generation(&swapped), label);
+}
+
+#[test]
+fn every_boundary_owns_its_band_and_a_bigger_body_gets_a_bigger_band() {
+    // ★ RE-BASED AT SLICE S6, WHICH IS WHAT THIS TEST WAS BUILT TO CATCH. Slice S2 moved the band from
+    // ONE value copied onto every region into a per-region question, and asserted here that no value
+    // had actually moved — a byte-identity measurement, because "structural change only" is worth
+    // nothing as a claim. S6 makes the values move on purpose, so the identity assertion is replaced by
+    // the property that replaces it, not deleted.
+    //
+    // THE NEW PROPERTY: a band is a function of the body it wraps, and a bigger body gets a strictly
+    // bigger band — because the ceiling lawfully holdable at a surface grows with the body's own size.
+    // That is the whole of S6 stated as something that can fail.
+    let cfg = UniverseConfig::world(15.0, 0.05);
+    let regions = realm_regions_for(HOME_SEED);
+    assert!(!regions.is_empty(), "THE world has a forest to judge");
+
+    let mut parented = 0usize;
+    let mut by_extent: Vec<(f64, f64, RealmId)> = Vec::new();
+    for r in &regions {
+        let width = r.band.inset() + r.band.outset();
+        // THE SHAPE IS PRESERVED AT EVERY SIZE: one third of the band inside the surface, two thirds
+        // outside, so acquiring stays strictly harder than holding however large the body is.
+        assert!(
+            (r.band.outset() - 2.0 * r.band.inset()).abs() <= width * f64::EPSILON * 8.0,
+            "region {:?} lost the 1:2 band shape: {:?}",
+            r.realm,
+            r.band
+        );
+        // AND IT IS THE VALUE THE CONFIG WOULD DERIVE FOR THIS BODY — one home for the law, so a
+        // region's band cannot drift away from the solve that is supposed to author it.
+        assert_eq!(
+            r.band,
+            cfg.band
+                .build_for_shape(&r.shape)
+                .expect("the derived band is valid"),
+            "region {:?}'s band is not what the one band solve gives for its own extent",
+            r.realm
+        );
+        by_extent.push((r.shape.circumscribed_extent(), width, r.realm));
+        parented += usize::from(r.parent.is_some());
+    }
+
+    // MONOTONE: sort by body size and the bands must not decrease. A band that shrank as its body grew
+    // would mean the law read something other than the body.
+    by_extent.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for pair in by_extent.windows(2) {
+        assert!(
+            pair[1].1 >= pair[0].1,
+            "{:?} ({} m) has a SMALLER band than {:?} ({} m)",
+            pair[1].2,
+            pair[1].0,
+            pair[0].2,
+            pair[0].0
+        );
+    }
+    // NON-VACUITY, twice over and for two different reasons: a forest with no parented region has no
+    // boundary at all, and a forest whose bands are all equal would satisfy the monotone loop while
+    // proving nothing about the law that is supposed to vary them.
+    assert!(
+        parented > 0,
+        "a forest with no parented region has no boundary to own a band"
+    );
+    assert!(
+        by_extent.first().map(|f| f.1) < by_extent.last().map(|l| l.1),
+        "every band in the forest is the same width, so this test proves nothing about a law that is \
+         supposed to size them from their bodies"
+    );
+}
+
+#[test]
+fn the_worlds_own_ceiling_and_its_thinnest_band_are_two_readings_of_one_solve() {
+    // THE MEASUREMENT S6 AND S7 BOTH READ, taken on THE world rather than on a fixture, and stated as
+    // an assertion so it cannot quietly stop being true.
+    //
+    // The owner's ruling (2026-08-24): a realm's maximum speed is the speed at which ONE TICK of travel
+    // still fits inside the thinnest band in that realm. Here is what THE world's shipped band affords,
+    // against what its shipped ceiling actually asks for. The gap between the two numbers IS the work
+    // S6 does; recording it now is what makes that work measurable rather than argued.
+    use vd_core::geometry::{band_for_speed, speed_for_band};
+
+    // The SHIPPED posture, read the same way every other world pin in this file reads it.
+    let cfg = UniverseConfig::world(15.0, 0.05);
+    let band = cfg.band.build().expect("the world's band is valid");
+    let width_m = band.inset() + band.outset();
+    assert!(width_m > 0.0, "a band with no width contains nothing");
+
+    // The shipped geometry solve's own tick and in-band count — NOT the cluster's live tick, which is
+    // deliberate: two clusters at different tick rates must boot the identical world.
+    let dt = GEOMETRY_TICK_DT_S;
+    let ticks = BAND_TICKS_N;
+
+    let afforded = speed_for_band(width_m, dt, ticks);
+    assert!(
+        afforded > 0.0,
+        "the world's own band must afford SOME speed, or nothing may move inside it"
+    );
+    // And the inverse holds on the world's own numbers, which is the property S6 will size against.
+    let needed = band_for_speed(afforded, dt, ticks);
+    assert!(
+        (needed - width_m).abs() <= width_m * f64::EPSILON * 4.0,
+        "the world's band and the speed it affords must be one solve read two ways"
+    );
+
+    eprintln!(
+        "[s2-band] THE world's shared band: width {width_m} m at dt {dt} s over {ticks} ticks \
+         affords {afforded} m/s"
+    );
+}
+
+#[test]
+fn every_boundary_reports_what_its_band_needs_and_what_it_can_afford() {
+    // THE SWEEP (slice S2's evidence half). For every boundary in THE world it computes five numbers,
+    // and the gap between two of them is the whole reason S6 exists:
+    //
+    //   1. the ceiling the PARENT states for what is inside it;
+    //   2. how many ticks a subject at that ceiling actually spends inside this boundary's band;
+    //   3. the band this boundary would NEED at that ceiling;
+    //   4. the band it could afford against its own extent;
+    //   5. the band it could afford against its nearest sibling's clear gap.
+    //
+    // A PRINT CANNOT FAIL, so this is not a print. The assertions below fail for two DIFFERENT reasons:
+    // every parented boundary must produce all five numbers, and the row count must equal the parented
+    // count derived from the forest itself. Either one alone would pass on an empty sweep.
+    use vd_core::flight::{FlightTuning, TRAVERSE_S, realm_speed_cap_mps};
+    use vd_core::geometry::BoundaryTuning;
+    use vd_core::geometry::{band_for_speed, speed_for_band};
+
+    let cfg = UniverseConfig::world(15.0, 0.05);
+    let regions = realm_regions_for(HOME_SEED);
+    let dt = GEOMETRY_TICK_DT_S;
+    let ticks = BAND_TICKS_N;
+    let v_foot = cfg.interest.occupant_v_max_mps;
+
+    let parented_expected = regions.iter().filter(|r| r.parent.is_some()).count();
+    let mut rows = 0usize;
+    let mut thinnest_ticks = f64::MAX;
+    let mut worst: Option<RealmId> = None;
+
+    for r in &regions {
+        let Some(parent_id) = r.parent else {
+            continue; // the ambient root has nothing outside it to be entered from
+        };
+        let Some(parent) = regions.iter().find(|p| p.realm == parent_id) else {
+            continue; // a dangling parent is the boot fence's business, not this sweep's
+        };
+
+        // 1. What the parent lets a thing inside it do.
+        let parent_ceiling =
+            realm_speed_cap_mps(parent.shape.circumscribed_extent(), v_foot, TRAVERSE_S);
+        // 2. How long a subject at that ceiling is actually inside this band.
+        let width_m = r.band.inset() + r.band.outset();
+        let in_band_ticks = width_m / (parent_ceiling * dt);
+        // 3. What this boundary would need to be, to see such a subject at all.
+        let needed_m = band_for_speed(parent_ceiling, dt, ticks);
+        // 4. What it can afford against its own size — a band wider than the thing it surrounds is not
+        //    a band, it is a second body.
+        let afford_own_m = r.shape.circumscribed_extent();
+        // 5. What it can afford before it touches its nearest sibling.
+        let gap_m = nearest_sibling_gap_m(&regions, r, parent_id);
+
+        assert!(
+            parent_ceiling.is_finite() && parent_ceiling > 0.0,
+            "{:?}: its parent states no usable ceiling",
+            r.realm
+        );
+        assert!(
+            in_band_ticks.is_finite() && needed_m.is_finite() && afford_own_m.is_finite(),
+            "{:?}: a boundary that cannot state its own numbers cannot be sized",
+            r.realm
+        );
+
+        if in_band_ticks < thinnest_ticks {
+            thinnest_ticks = in_band_ticks;
+            worst = Some(r.realm);
+        }
+        rows += 1;
+
+        eprintln!(
+            "[s2-sweep] {:?}: parent ceiling {parent_ceiling:.6e} m/s | in-band {in_band_ticks:.6e} \
+             ticks | needs {needed_m:.6e} m | affords(own) {afford_own_m:.6e} m | affords(gap) \
+             {gap_m:.6e} m | has {width_m} m",
+            r.realm
+        );
+    }
+
+    assert_eq!(
+        rows, parented_expected,
+        "every boundary in the forest must be swept — a sweep that skipped one would be evidence \
+         about a world we do not ship"
+    );
+    assert!(
+        rows > 0,
+        "a forest with no boundary proves nothing about bands"
+    );
+
+    // ★ THE PINNED CENSUS, and it fails for a DIFFERENT REASON than the equality above.
+    //
+    // `rows == parented_expected` only proves the sweep visited what the forest offered it. If the
+    // forest itself changed shape — a body added, a body lost — that equality would stay true while the
+    // evidence quietly became evidence about a different world. A literal cannot follow the forest, so
+    // it is the one assertion here that a world change must come and re-base by hand.
+    assert_eq!(
+        rows, 6,
+        "the number of boundaries in THE world moved. That is not necessarily wrong, but this sweep's \
+         numbers now describe a different world — re-read them before re-basing this count"
+    );
+
+    // THE HEADLINE, recorded as a number rather than an adjective. Below one tick, a subject at the
+    // parent's ceiling is never observed inside the band at all — it is on one side, then the other.
+    eprintln!(
+        "[s2-sweep] THINNEST: {:?} at {thinnest_ticks:.6e} ticks in band (one tick is the floor at \
+         which a crossing can be seen at all); the world's band affords {:.6} m/s",
+        worst.expect("a swept row"),
+        speed_for_band(
+            cfg.band.build().expect("valid band").inset()
+                + cfg.band.build().expect("valid band").outset(),
+            dt,
+            ticks
+        )
+    );
+
+    // ★ AND THE SAME QUESTION ACROSS EVERY SEED THE WORLD SWEEPS, not only the one this cluster boots.
+    //
+    // A boundary is sized from the bodies the seed drew, and a different seed draws different bodies.
+    // Measuring one world would tell us about one world. The sweep size is the world's OWN derived
+    // figure — the same one the nesting fence uses — so this asks the question over the range the
+    // project already agreed reaches the heavy tail.
+    //
+    // What is asserted is the PROPERTY, not the values: every boundary of every swept world must be
+    // able to state its five numbers. A world that cannot is a world we could not size a band in.
+    let sweep = derived_nest_sweep_seeds();
+    // ★ 284 -> 664 AT S9. The sweep size is DERIVED from the world, so it moves when the world does —
+    // the galaxy went from 0.475 light years to 487, and a sweep sized to reach the heavy tail of a
+    // bigger world needs more seeds. Pinned as measured, so a size that drifts again is loud.
+    assert_eq!(sweep, 664, "the derived sweep size, pinned as measured");
+    let mut swept_rows = 0usize;
+    let mut swept_thinnest = f64::MAX;
+    for seed in 0..sweep {
+        let forest = WorldView::generated(seed, &cfg).regions().to_vec();
+        for r in &forest {
+            let Some(parent_id) = r.parent else { continue };
+            let Some(parent) = forest.iter().find(|p| p.realm == parent_id) else {
+                continue;
+            };
+            let ceiling =
+                realm_speed_cap_mps(parent.shape.circumscribed_extent(), v_foot, TRAVERSE_S);
+            let width_m = r.band.inset() + r.band.outset();
+            let in_band = width_m / (ceiling * dt);
+            let needed = band_for_speed(ceiling, dt, ticks);
+            assert!(
+                ceiling.is_finite() && ceiling > 0.0 && in_band.is_finite() && needed.is_finite(),
+                "seed {seed}, boundary {:?}: a boundary that cannot state its numbers cannot be sized",
+                r.realm
+            );
+            swept_thinnest = swept_thinnest.min(in_band);
+            swept_rows += 1;
+        }
+    }
+    assert!(
+        swept_rows > rows,
+        "the swept range must judge more boundaries than the single booted world, or it adds nothing"
+    );
+    eprintln!(
+        "[s2-sweep] ACROSS {sweep} SEEDS: {swept_rows} boundaries judged; thinnest \
+         {swept_thinnest:.6e} ticks in band"
+    );
+    // ★ THE MEASUREMENT S6 MUST MOVE, pinned as a COUNT so it can actually fail.
+    //
+    // My first version of this assertion was backwards and could never have failed: it required the
+    // swept worst case to be at or below the booted world's, and a minimum over a larger set always is.
+    // It would have passed on any world, however bad.
+    //
+    // What is worth pinning is the thing the sweep discovered: how many boundaries in the whole swept
+    // range are UNOBSERVABLE — a subject at the parent's ceiling spends under one tick inside them, so
+    // it is on one side and then on the other and nothing ever sees it in between. That number is the
+    // size of the problem S6 exists to solve. When S6 sizes the bands it goes to zero and this test goes
+    // RED, which is exactly when somebody should come back and read it.
+    // ★ THE METRIC CHANGED AT S6, DELIBERATELY AND VISIBLY, AND BOTH READINGS ARE KEPT.
+    //
+    // Slice S2 measured this against the PARENT'S ceiling, because at that point nothing bounded how
+    // fast a subject could be travelling when it reached a child's surface, so the parent's ceiling was
+    // the honest upper bound. It is no longer the right question, and this is why: the approach governor
+    // lowers a subject's ceiling onto the body it is nearing, and it is ENFORCED at both arms of
+    // `governed_ceiling_in_book` — approaching a child (`v <= child_cap + distance/tau`) and leaving your
+    // own realm (`v <= own_cap + distance_to_your_own_shell/tau`). At either surface the distance term is
+    // zero, so THE FASTEST A SUBJECT MAY LAWFULLY BE MOVING AT A BOUNDARY IS THAT BOUNDARY'S OWN CAP.
+    // Measuring against the parent's ceiling now measures a speed no lawful subject can hold there.
+    //
+    // Both numbers are computed and both are asserted, so the change is a re-pointing and not a
+    // weakening: the ungoverned count is still reported and still pinned, and the GOVERNED count — the
+    // one that describes what can actually happen — must be zero.
+    let (ungoverned, governed, (worst_governed_ticks, worst_at_tau_floor), galaxies, gal_un) = {
+        let (mut un, mut gov) = (0usize, 0usize);
+        // ★ S9 adds these two so the re-base below is a MEASUREMENT and not an explanation. The 284
+        // rows that used to escape the ungoverned reading were said to be the galaxies; nothing
+        // checked it. These count them.
+        let (mut galaxies, mut gal_un) = (0usize, 0usize);
+        let mut worst = f64::MAX;
+        let mut worst_floor_tau = f64::MAX;
+        for seed in 0..sweep {
+            let forest = WorldView::generated(seed, &cfg).regions().to_vec();
+            for r in &forest {
+                let Some(parent_id) = r.parent else { continue };
+                let Some(parent) = forest.iter().find(|p| p.realm == parent_id) else {
+                    continue;
+                };
+                let width_m = r.band.inset() + r.band.outset();
+                let parent_ceiling =
+                    realm_speed_cap_mps(parent.shape.circumscribed_extent(), v_foot, TRAVERSE_S);
+                let this_un = usize::from(width_m / (parent_ceiling * dt) < 1.0);
+                un += this_un;
+                let is_galaxy = usize::from(matches!(r.realm, RealmId::Galaxy(_)));
+                galaxies += is_galaxy;
+                gal_un += is_galaxy * this_un;
+                // The governed speed AT THE BAND'S OUTER EDGE — the fastest point of the crossing,
+                // because the ceiling falls as the surface nears. Its own cap plus the approach term
+                // over the band's own release edge.
+                let own_cap =
+                    realm_speed_cap_mps(r.shape.circumscribed_extent(), v_foot, TRAVERSE_S);
+                // ★ TWO TAUS, BECAUSE ONE OF THEM IS NOT A WORLD WE RUN. The approach constant is
+                // derived as `(2·demand_cadence + boot_p99 + pipeline)·dt`. With no cadence and no boot
+                // latency it bottoms out at 0.1 s, and my first version of this measurement used that —
+                // reporting a crossing time no shipped cluster experiences. The dev cluster's cadence is
+                // half a second of ticks, giving the 1.1 s the flight tuning's own doc states. Both are
+                // computed; the SHIPPED one is what the cooldown is judged against.
+                let cadence = ((1.0 / dt).round() as u64) / 2;
+                let tau_shipped = FlightTuning::derive(v_foot, dt, cadence, 0).tau_s;
+                let tau_floor = FlightTuning::derive(v_foot, dt, 0, 0).tau_s;
+                let ticks_at = |tau: f64| {
+                    width_m
+                        / (vd_core::flight::approach_ceiling_mps(own_cap, r.band.outset(), tau)
+                            * dt)
+                };
+                let ticks_in = ticks_at(tau_shipped);
+                worst = worst.min(ticks_in);
+                worst_floor_tau = worst_floor_tau.min(ticks_at(tau_floor));
+                gov += usize::from(ticks_in < 1.0);
+            }
+        }
+        (un, gov, (worst, worst_floor_tau), galaxies, gal_un)
+    };
+    eprintln!(
+        "[s2-sweep] UNGOVERNED (the S2 reading, kept): {ungoverned} of {swept_rows} boundaries give a \
+         subject at their PARENT's ceiling under ONE tick inside the band\n\
+         [s2-sweep] GOVERNED (the S6 reading): {governed} of {swept_rows} unobservable at the fastest \
+         speed the governor permits at that surface; thinnest crossing {worst_governed_ticks:.6e} \
+         ticks at the shipped approach constant, {worst_at_tau_floor:.6e} at its floor"
+    );
+    // ★ RE-BASED IN S9, AND THE ROW COUNT MOVED FOR A REASON WORTH READING: the sweep itself grew.
+    // `derived_nest_sweep_seeds` sizes the sweep from the IMF tail above the mass cap, so when the
+    // cap climbed from 16.36 to 30.745 M☉ the sweep went 284 → 664 worlds and the rows with it,
+    // 13,144 → 30,653. Nothing about any single boundary changed to make that number move.
+    assert_eq!(swept_rows, 30_653);
+    assert_eq!(
+        sweep, 664,
+        "the sweep is derived from the cap, and the cap climbed"
+    );
+    // ★ AND THE 284 EXCEPTIONS ARE GONE — every boundary is now ungoverned, where 284 were not.
+    // The old message asserted in prose that those 284 were the galaxies, "whose own ceiling nearly
+    // equals its parent's". S9 gives the galaxy a real parent — the universe — whose ceiling is six
+    // orders of magnitude higher, so a galaxy's band is no longer a tick wide against it.
+    //
+    // That explanation is now COUNTED rather than written: there is one galaxy per swept world and
+    // every one of them is ungoverned. Had the flip come from somewhere else, these two would differ.
+    assert_eq!(galaxies, sweep as usize);
+    assert_eq!(
+        gal_un, galaxies,
+        "every galaxy is now ungoverned against the universe"
+    );
+    assert_eq!(
+        ungoverned, 30_653,
+        "the ungoverned count moved. Read the sweep before re-basing this: it is 664 worlds since \
+         the mass cap climbed, and the galaxies stopped being exceptions when they gained a parent"
+    );
+    assert_eq!(
+        governed, 0,
+        "a boundary can still be crossed unseen at a speed the governor actually permits — that is \
+         the defect S6 exists to remove, and it is not removed"
+    );
+    // S6'S OWN GATE: every crossing is SEEN. Below one tick a subject is on one side and then the
+    // other and nothing observes it in between.
+    assert!(
+        worst_governed_ticks >= 1.0,
+        "the thinnest governed crossing is {worst_governed_ticks} ticks — under one tick a crossing \
+         cannot be seen at all, which is the defect this slice exists to remove"
+    );
+
+    // ★ AND THE ANTI-THRASH HALF, WHICH IS THE ONE THE PARKED PROCESS TEST IS ABOUT.
+    //
+    // A subject that re-homes may not re-home again for `k_dwell` ticks. A band it can leave INSIDE
+    // that window flips back the moment the window ends — nine crossings in, nine out, which is the
+    // measurement that parked that test. So the crossing must outlast the cooldown, which is a stronger
+    // requirement than merely being seen.
+    assert!(
+        worst_governed_ticks >= f64::from(BoundaryTuning::DEFAULT.k_dwell),
+        "the thinnest governed crossing is {worst_governed_ticks} ticks against a {} tick cooldown — \
+         a subject can leave the band before it is allowed to re-home again, which is the thrash",
+        BoundaryTuning::DEFAULT.k_dwell
+    );
+
+    // ★ AND THE CONFIGURATION WHERE IT DOES NOT HOLD, STATED RATHER THAN LEFT OUT.
+    //
+    // At the FLOOR of the approach constant — no demand cadence, no boot latency, which no shipped
+    // cluster runs — the same band gives 10/3 ticks and the cooldown is NOT cleared. The reason is a
+    // feedback the band cannot escape on its own: widening a band moves its outer edge further out,
+    // where the governor permits a higher speed, so crossing time rises less than width does and
+    // saturates. Reaching the cooldown at that floor needs a band factor of 15 rather than 6 — still
+    // only a third of a percent of each body, but that factor also sets the galaxy's own radius, so
+    // moving it is the next slice's subject and not this one's.
+    //
+    // Pinned, so a cluster configured into that corner turns this red instead of thrashing quietly.
+    assert!(
+        (worst_at_tau_floor - 10.0 / 3.0).abs() < 1e-9,
+        "the crossing at the approach constant's floor moved to {worst_at_tau_floor} ticks (was 10/3). \
+         If the band factor was raised on purpose, re-base this — and if it now clears the {} tick \
+         cooldown, the ledger row that owes it can be closed",
+        BoundaryTuning::DEFAULT.k_dwell
+    );
+}
+
+/// ★ THE INDEX-QUALITY GATE, INSIDE THIS SLICE RATHER THAN FIVE SLICES LATER.
+///
+/// The child lookup's grid edge follows the WIDEST child's radius, and that radius is the child's own
+/// reach PLUS its release edge. So sizing bands from bodies inflates every radius, and an inflated
+/// radius can coarsen the grid — which would degrade the O(1)-ish lookup back toward the scan it was
+/// built to replace. That is an unbounded-child-count defect introduced by a lawful band change, which
+/// is exactly the kind of thing that is invisible until a realm has many children.
+///
+/// So the cost is measured here, against the same forest with the band it used to have.
+#[test]
+fn sizing_the_bands_does_not_coarsen_the_child_lookup() {
+    use std::collections::BTreeSet;
+    use vd_core::child_index::{ChildIndex, IndexedChild};
+
+    let cfg = UniverseConfig::world(15.0, 0.05);
+    let old_band = cfg.band.build().expect("the old shared band is valid");
+    let sweep = derived_nest_sweep_seeds();
+
+    let mut parents_judged = 0usize;
+    let mut worst_octaves = 0.0_f64;
+    let mut worst_candidates = 0usize;
+    let mut total_candidates = 0usize;
+    let mut worst_before = 0usize;
+    let mut total_before = 0usize;
+    let mut queries = 0usize;
+
+    for seed in 0..sweep {
+        let forest = WorldView::generated(seed, &cfg).regions().to_vec();
+        // One index per parent, which is how a shard builds it: its own direct children only.
+        let parents: BTreeSet<RealmId> = forest.iter().filter_map(|r| r.parent).collect();
+        for parent in parents {
+            let kids: Vec<&RealmRegion> =
+                forest.iter().filter(|r| r.parent == Some(parent)).collect();
+            // ★ THE INDEX IS BUILT AT THE PARENT'S RUNG, not at `Tier::Fine` (S9). A child's `center`
+            // is its position in its PARENT's frame, and since the ladder landed those frames are not
+            // all the same rung — a system sits in galaxy cells of 2 m, a galaxy in universe cells of
+            // 32_768 m. Reading either with the millimetre ruler is off by 2048× or by 33_554_432×,
+            // and the index would be measuring a world that does not exist. This is the third place
+            // that confusion hid (after the body generator's centres and the walk band test).
+            let ptier = forest
+                .iter()
+                .find(|p| p.realm == parent)
+                .map_or(Tier::Fine, |p| p.frame.tier());
+            let build = |band_outset: &dyn Fn(&RealmRegion) -> f64| -> ChildIndex {
+                let children: Vec<IndexedChild> = kids
+                    .iter()
+                    .map(|r| IndexedChild {
+                        realm: r.realm,
+                        centre: r.center,
+                        radius_m: r.shape.circumscribed_extent() + band_outset(r),
+                    })
+                    .collect();
+                ChildIndex::build(&children, ptier)
+            };
+            let now = build(&|r: &RealmRegion| r.band.outset());
+            let before = build(&|_: &RealmRegion| old_band.outset());
+            // HOW MUCH COARSER, in octaves. The edge is a power of two, so the honest unit is doublings
+            // rather than a percentage: an edge that grew by 1 % and an edge that grew by 99 % both cost
+            // nothing until one of them crosses a power of two.
+            if before.edge_m() > 0.0 && now.edge_m() > 0.0 {
+                worst_octaves = worst_octaves.max((now.edge_m() / before.edge_m()).log2());
+            }
+            // AND WHAT THE LOOKUP ACTUALLY ANSWERS, which is the number that matters: a coarser grid is
+            // only a problem if it starts naming more children per query.
+            for k in &kids {
+                let named = now.candidates(k.center, ptier).len();
+                worst_candidates = worst_candidates.max(named);
+                total_candidates += named;
+                // THE CONTROL: the same query on the same forest with the band it used to have. Without
+                // it, a number that was always this large would read as a regression this slice caused.
+                let named_before = before.candidates(k.center, ptier).len();
+                worst_before = worst_before.max(named_before);
+                total_before += named_before;
+                queries += 1;
+            }
+            parents_judged += 1;
+        }
+    }
+
+    let mean = total_candidates as f64 / queries as f64;
+    let mean_before = total_before as f64 / queries as f64;
+    eprintln!(
+        "[s6-index] {parents_judged} parents over {sweep} seeds, {queries} queries | grid edge grew by \
+         at most {worst_octaves:.4} octaves\n\
+         [s6-index]   candidates per query BEFORE: max {worst_before}, mean {mean_before:.4}\n\
+         [s6-index]   candidates per query AFTER:  max {worst_candidates}, mean {mean:.4}"
+    );
+    assert!(queries > 0, "an index gate with no query measures nothing");
+
+    // ★ THE GATE, AND IT IS THE COMPARISON RATHER THAN THE ABSOLUTE NUMBER.
+    //
+    // What this slice could break is the lookup, and the way it would break it is by naming MORE
+    // children per query than before. It does not name one more. That is the assertion, and it could
+    // have come out otherwise — the grid genuinely did coarsen (below), so "the answer is unchanged" is
+    // a result, not a restatement of the change being small.
+    assert_eq!(
+        (worst_candidates, total_candidates),
+        (worst_before, total_before),
+        "sizing the bands changed what the child lookup answers: max {worst_before} -> \
+         {worst_candidates}, total {total_before} -> {total_candidates}. That is the unbounded-child \
+         defect this gate exists to catch"
+    );
+
+    // THE GRID DID COARSEN, BY EXACTLY ONE DOUBLING, AND IT COST NOTHING MEASURABLE. The edge follows
+    // the widest child's radius, which now carries a release edge; a fraction of a percent was enough to
+    // cross a power of two. It changed no answer because the children that share a cell were already
+    // sharing it — a star system's planets sit close to their star relative to the system's own size,
+    // which is this index's own documented degradation and not a new one.
+    //
+    // Pinned, because a SECOND octave would not be free.
+    assert!(
+        (worst_octaves - 1.0).abs() < 1e-9,
+        "the grid edge grew by {worst_octaves} octaves rather than exactly one — a further doubling \
+         puts more children in each cell, and this is where that is decided"
+    );
+
+    // AND THE ABSOLUTE NUMBER, PINNED WITH ITS CAUSE STATED so nobody reads it as this slice's doing.
+    // It is what a system's planets plus its star and shells come to when they share a cell — what the
+    // lookup answered before the band was sized and what it answers after.
+    //
+    // ★ RE-BASED IN S9, 12 → 13, and NOT because anything about the index or the band changed. The
+    // sweep is sized from the IMF tail above the mass cap, the cap climbed, and the sweep went 284 →
+    // 664 worlds. A wider sweep reaches a system whose children cluster slightly more tightly than
+    // any of the first 284 did. The claim this test actually makes is the BEFORE/AFTER equality above,
+    // and that is untouched: max 13 both ways, mean 7.3797 both ways, to the last digit.
+    assert_eq!(
+        worst_candidates, 13,
+        "the widest lookup answer moved. It is set by how tightly a system's children cluster relative \
+         to its own size, NOT by the band — the equality above is what proves that"
+    );
+}
+
+// ===================== SLICE S8 — THE LADDER, BUILT BUT NOT YET CLIMBED =====================
+
+/// ★ WHAT DOES IT ACTUALLY COST TO JUST HOLD ALL 150,000 SYSTEMS? (owner ruling 2026-08-26:
+/// "Just list all of them at once, don't do lazy smart.")
+///
+/// The design run proposed a position-addressed lazy generator to avoid ever enumerating the galaxy. That
+/// is a large machine. Before building it, this measures whether the thing it avoids is expensive at all.
+#[test]
+fn holding_every_system_at_once_costs_what_it_costs() {
+    use std::mem::size_of;
+    const CENSUS: usize = 150_000;
+    let region = size_of::<RealmRegion>();
+    let body = size_of::<GeneratedBody>();
+    eprintln!("[s9-hold] one RealmRegion = {region} bytes | one GeneratedBody = {body} bytes");
+    eprintln!(
+        "[s9-hold] 150,000 SYSTEMS ONLY : regions {:.1} MB | bodies {:.1} MB",
+        (region * CENSUS) as f64 / 1.0e6,
+        (body * CENSUS) as f64 / 1.0e6
+    );
+    // The whole forest, if planets were materialised too: 1 system + its planets + its star.
+    let per_system = 1 + world_planet_config().n_planets as usize + 1;
+    let full = CENSUS * per_system;
+    eprintln!(
+        "[s9-hold] EVERY REGION ({per_system} per system, {full} total) : {:.1} MB",
+        (region * full) as f64 / 1.0e6
+    );
+    // ★ THE ALL-PAIRS FENCE, which is the cost the lazy design was really avoiding.
+    let pairs = CENSUS * (CENSUS - 1) / 2;
+    eprintln!(
+        "[s9-hold] the shipped all-pairs separation fence at the census = {pairs} pair tests",
+    );
+    // A flat list of systems must be affordable, or the owner's ruling cannot stand. State it as a bound
+    // that could fail rather than as a print.
+    assert!(
+        (region * CENSUS) as f64 / 1.0e6 < 200.0,
+        "a flat list of 150,000 systems must fit in a couple of hundred megabytes"
+    );
+    assert!(
+        pairs > 1.0e10 as usize,
+        "the all-pairs fence is the real cost, and it is enormous"
+    );
+}
+
+/// ★ THE STAR CAP AFTER S9, SOLVED — not estimated, and not fitted.
+///
+/// Today the heaviest star is limited by THE GALAXY'S SIZE: a heavy star needs a wide system around it and
+/// the galaxy must have room. After S9 the galaxy is 2⁶² m and that limit stops binding, so a different
+/// one takes over: **a star system counts its own positions in millimetres, and its shell must fit its own
+/// lattice.** The fence's own equality gives that budget as 2⁵¹ m.
+///
+/// The design run ESTIMATED ~30.68 solar masses and a second spine ~28.36, both by propagating a fitted
+/// exponent. The owner's Q9 ruling 2 says never to build against a number from a neighbouring design. This
+/// runs OUR solver, on THE world, against the real shell law.
+#[test]
+fn the_star_cap_after_the_climb_solved_with_our_own_solver() {
+    let pl = world_planet_config();
+    // THE BUDGET: a star system's shell must fit the lattice it counts in, at the fence's own equality.
+    let budget_m = root_radius_at(vd_core::pose::Tier::Fine);
+    assert_eq!(
+        budget_m, 2_251_799_813_685_248.0,
+        "2^51 — the millimetre lattice's own reach"
+    );
+
+    let shell_of = |m: f64| system_shell_r_m(&pl, &star_at_mass(m));
+    // MONOTONE, asserted rather than assumed — the bisection below is only valid if it is.
+    let mut prev = 0.0;
+    for m in [0.08, 0.5, 1.0, 2.0, 8.0, 16.0, 30.0, 60.0, 120.0] {
+        let s = shell_of(m);
+        assert!(
+            s > prev,
+            "the shell must grow with mass: {m} M_sun gave {s}"
+        );
+        prev = s;
+    }
+
+    // THE SOLVE: bracket by doubling, then bisect — the same shape the shipped mass-cap solve uses.
+    let mut lo = 0.08_f64;
+    let mut hi = lo;
+    for _ in 0..64 {
+        if shell_of(hi) > budget_m {
+            break;
+        }
+        lo = hi;
+        hi *= 2.0;
+    }
+    for _ in 0..f64::MANTISSA_DIGITS {
+        let mid = 0.5 * (lo + hi);
+        let ok = shell_of(mid) <= budget_m;
+        lo = if ok { mid } else { lo };
+        hi = if ok { hi } else { mid };
+    }
+    let cap = lo;
+
+    // WHICH STAR CLASSES SURVIVE. The class boundaries are the shipped table.
+    let classes = [
+        ("O", 16.0),
+        ("B", 2.1),
+        ("A", 1.4),
+        ("F", 1.04),
+        ("G (our sun is 1.0)", 0.8),
+        ("K", 0.45),
+        ("M", 0.08),
+    ];
+    eprintln!("[s9-cap] budget (a system's own lattice) = {budget_m:.6e} m");
+    eprintln!(
+        "[s9-cap] SOLVED CAP = {cap:.4} solar masses   (its shell {:.6e} m)",
+        shell_of(cap)
+    );
+    eprintln!(
+        "[s9-cap] the SHIPPED cap, after the climb = {:.4} solar masses",
+        imf_mass_hi_msun()
+    );
+    for (name, lo_bound) in classes {
+        eprintln!(
+            "[s9-cap]   class {name:<20} from {lo_bound:>6} M_sun : {}",
+            if lo_bound <= cap {
+                "KEPT"
+            } else {
+                "LOST ENTIRELY"
+            }
+        );
+    }
+
+    // THE ANSWER IS AFFORDABLE AND IT IS THE LARGEST ONE — both arms, or a solve that returned anything
+    // affordable (zero, say) would satisfy the first.
+    assert!(
+        shell_of(cap) <= budget_m,
+        "the cap must fit its own lattice"
+    );
+    assert!(
+        shell_of(cap * 1.000_001) > budget_m,
+        "and one part per million more must not"
+    );
+    // ★ AND THE PREDICTION CAME TRUE, WHICH IS THE STRONGER STATEMENT. This test was written BEFORE
+    // the climb to work out what the cap would become, and asserted `cap > imf_mass_hi_msun()` — the
+    // climb must raise the limit. The climb has now landed, so that arm can no longer hold and must
+    // not be re-based into something weaker. It becomes an equality: the independent solve WRITTEN
+    // HERE, in this test, from the shell law and the lattice budget alone, reproduces the shipped
+    // cap to the last bit. Two solvers, written apart, agreeing exactly.
+    assert_eq!(cap, imf_mass_hi_msun());
+    assert_eq!(cap, 30.745_283_003_771_995);
+    // …and it IS a rise: 16.36 before the climb, pinned so the gain cannot quietly evaporate.
+    assert!(cap > 16.360_034_882_257_757);
+}
+
+/// ★ THE ROOT RADIUS IS ITS OWN DERIVATION, AND IT REPRODUCES THE LITERAL IT REPLACED.
+///
+/// It used to be the typed-in number `2 251 799 813 685 248`, with a comment explaining that it came
+/// from the step. A comment cannot follow a change: re-value the step and the literal stays where it
+/// was, the two disagree, and only one pin at one level would notice.
+///
+/// Calling the derivation HERE also drives it. It is a `const fn`, so the shipped call is folded at
+/// compile time and nothing executes it at run time — a function that only ever runs in the compiler is
+/// invisible to a coverage gate, which is not the same as being covered.
+#[test]
+fn the_root_radius_is_the_fence_solved_at_equality_and_matches_the_literal_it_replaced() {
+    use vd_core::pose::Tier;
+    // THE HAND-TYPED NUMBER the expression must reproduce — the whole point of the change is that this
+    // equality now holds by construction rather than by two places agreeing to stay in step.
+    // ★ RE-BASED IN S9. The root moved from the FINE rung to the UNIVERSE rung, so the literal it
+    // reproduces moved with it — 2⁷⁶ m in 32_768 m cells instead of 2⁵¹ m in millimetres. The old
+    // literal did not become wrong; it became the FINE rung's radius, and it is still asserted, one
+    // line down. That is the test earning its keep: had the root silently kept the fine radius the
+    // second equality would have passed and the first would not.
+    assert_eq!(REAL_UNIVERSE_R_M, 75_557_863_725_914_323_419_136.0);
+    assert_eq!(REAL_UNIVERSE_R_M, root_radius_at(ROOT_TIER));
+    assert_eq!(ROOT_TIER, Tier::Universe);
+    assert_eq!(root_radius_at(Tier::Fine), 2_251_799_813_685_248.0);
+    // …and at every other rung it is that rung's own equality: 2⁶¹ cells, whatever a cell is.
+    for tier in Tier::ALL {
+        let r = root_radius_at(tier);
+        assert_eq!(r / tier.cell_edge_m(), 2.0_f64.powi(61), "{tier:?}");
+        // The fence agrees, which is what makes the radius and the fence one statement instead of two.
+        let b = guard_shell_representable(r, tier).expect("its own equality must pass");
+        assert_eq!(b.occupancy, 0.5, "{tier:?}");
+    }
+}
+
+/// ★ THE STORAGE FENCE AT EVERY RUNG OF THE LADDER.
+///
+/// The fence used to divide by the millimetre step unconditionally. That was right while every level
+/// counted in millimetres, and becomes badly wrong the moment they do not: applied to the universe's own
+/// `2⁷⁶ m` shell it would refuse by a factor of `2²⁵` — thirty-three million — a world that fits its own
+/// lattice EXACTLY. A fence that refuses a lawful world is worse than no fence, because its refusal looks
+/// authoritative.
+///
+/// THE RADII HERE ARE HAND-TYPED, and that is the point. Feeding the expression that defines the radius
+/// back into the fence that defines the expression is not a measurement — it is a construction asserting
+/// itself. These three numbers are `2⁵¹`, `2⁶²` and `2⁷⁶` written out.
+#[test]
+fn the_storage_fence_sits_at_exact_equality_on_every_rung() {
+    use vd_core::pose::Tier;
+    for (tier, r_m) in [
+        (Tier::Fine, 2_251_799_813_685_248.0_f64),
+        (Tier::Galaxy, 4_611_686_018_427_387_904.0_f64),
+        (Tier::Universe, 75_557_863_725_914_323_419_136.0_f64),
+    ] {
+        let b = guard_shell_representable(r_m, tier).expect("the fence's own equality must pass");
+        // RUNG-INVARIANT BY CONSTRUCTION, not by three coincidences: the radius is the fence solved at
+        // equality, so the cell count is 2⁶¹ whatever the step is.
+        assert_eq!(b.root_cells, 2.0_f64.powi(61), "{tier:?}");
+        assert_eq!(
+            b.occupancy, 0.5,
+            "{tier:?} occupancy must be exactly one half"
+        );
+        assert_eq!(
+            b.headroom, 2.0,
+            "{tier:?} headroom must be exactly one octave"
+        );
+        assert_eq!(b.tier, tier);
+        assert_eq!(b.cell_edge_m, tier.cell_edge_m());
+        // …AND ONE OCTAVE UP REFUSES, at every rung. Without this the equality above would be satisfied
+        // by a fence that accepted everything.
+        let refused = guard_shell_representable(2.0 * r_m, tier)
+            .expect_err("one octave above the equality must refuse");
+        assert_eq!(refused.tier, tier);
+        assert_eq!(refused.occupancy_pct, 100.0, "{tier:?}");
+    }
+}
+
+/// ★ THE RUNG AND THE RADIUS ARE TWO ARGUMENTS, AND A WRONG PAIRING IS A VALUE ERROR NOTHING ELSE CATCHES.
+///
+/// Each of these radii is lawful, and each rung is lawful. Only the PAIRING is wrong — which is exactly
+/// the mistake a ladder invites, and exactly the mistake no type can prevent.
+#[test]
+fn a_radius_judged_at_the_wrong_rung_is_refused() {
+    use vd_core::pose::Tier;
+    // The galaxy's radius counted in millimetres: 2⁷² cells, budget 2⁷³ against a threshold of 2⁶².
+    guard_shell_representable(4_611_686_018_427_387_904.0, Tier::Fine)
+        .expect_err("the galaxy radius does not fit the millimetre lattice");
+    // The universe's radius counted in the galaxy's step: over by 2¹⁴.
+    guard_shell_representable(75_557_863_725_914_323_419_136.0, Tier::Galaxy)
+        .expect_err("the universe radius does not fit the galaxy lattice");
+    // And the pairing that IS right passes, so the two refusals above are about the pairing and not
+    // about the fence refusing everything.
+    guard_shell_representable(2_251_799_813_685_248.0, Tier::Fine).expect("the shipped pairing");
+}
+
+/// ★ A SHELL THAT IS NOT A LENGTH IS REFUSED, both arms.
+///
+/// `NaN > x` is false and so is `NaN <= x`, so a non-finite radius used to sail straight through the
+/// fence's one comparison and be reported as a representable world with a `NaN` occupancy. A negative
+/// radius did the same. A fence that answers "fine" to a question that makes no sense is worse than no
+/// fence at all.
+#[test]
+fn the_storage_fence_fails_closed_on_a_shell_that_is_not_a_length() {
+    use vd_core::pose::Tier;
+    guard_shell_representable(f64::NAN, Tier::Fine).expect_err("a shell of NaN is not a shell");
+    guard_shell_representable(f64::INFINITY, Tier::Fine)
+        .expect_err("an unbounded shell is not one");
+    guard_shell_representable(-1.0, Tier::Fine).expect_err("a negative shell is not one");
+    guard_shell_representable(0.0, Tier::Fine).expect_err("a shell of no size is not one");
+}
+
+// ===================== SLICE S7 — THE CAP, ASKED AT A DIFFERENT GALAXY SIZE =====================
+
+/// ★ THE ARM THAT MAKES THE REFACTOR TRUSTWORTHY, and the only reason it is safe to ask the solve
+/// anything new. Turning a module constant into a parameter must move NOTHING.
+///
+/// This is not a formality. The cap is the IMF draw's upper bound, so every star in the world is drawn
+/// through it — the last time it moved, 99 of 99 planet rows and 6 of 12 system rows moved with it. A
+/// refactor that shifted it by one bit would silently re-draw the universe.
+#[test]
+fn the_cap_solved_at_todays_budget_is_bit_for_bit_the_shipped_one() {
+    let solved = solve_mass_cap(REAL_GALAXY_R_M, SYSTEM_LATTICE_R_M);
+    // All three fields, by exact equality — the mass, the reservation it implies, and the star's own
+    // photosphere. Comparing only the mass would let the two derived fields drift.
+    assert_eq!(solved.mass_hi_msun, imf_mass_hi_msun());
+    assert_eq!(solved.system_bound_max_m, target_system_bound_max_m());
+    assert_eq!(solved.star_look_max_m, target_star_look_max_m());
+    // AND THE SOLVE IS DETERMINISTIC IN ITS ARGUMENT: the same budget twice is the same answer, so the
+    // equality above is a property of the function and not of one lazily-initialised value.
+    assert_eq!(solve_mass_cap(REAL_GALAXY_R_M, SYSTEM_LATTICE_R_M), solved);
+}
+
+/// ★ THE SOLVE'S OWN SHAPE, asked at the shipped budget so the harness below can be trusted at budgets
+/// nobody has run yet. Both of these could fail, and each fails for a different reason.
+#[test]
+fn the_cap_is_the_largest_affordable_mass_and_one_part_per_million_more_is_not() {
+    let pl = world_planet_config();
+    for budget in [
+        REAL_GALAXY_R_M,
+        REAL_GALAXY_R_M * 0.5,
+        REAL_GALAXY_R_M * 2.0,
+        REAL_GALAXY_R_M * 1_000.0,
+    ] {
+        let cap = solve_mass_cap(budget, SYSTEM_LATTICE_R_M);
+        // ★ RE-BASED IN S9: both arms now ask `binding_limit`, the same question the solve asks,
+        // instead of testing the galaxy's purse directly. They had to. Since the climb the purse is
+        // not what binds at these budgets — the system's own lattice is — so a purse-only arm reads
+        // "affordable" for a mass the solve refuses, and the test would pass while measuring the
+        // wrong thing. A test must ask the question its subject answers.
+        assert_eq!(
+            binding_limit(&pl, cap.mass_hi_msun, budget, SYSTEM_LATTICE_R_M),
+            None,
+            "the cap must be affordable at budget {budget}"
+        );
+        // …and it must be the LARGEST affordable one. A solve that returned something merely
+        // affordable — zero, say — would satisfy the arm above and nothing else.
+        assert!(
+            binding_limit(
+                &pl,
+                cap.mass_hi_msun * 1.000_001,
+                budget,
+                SYSTEM_LATTICE_R_M
+            )
+            .is_some(),
+            "one part per million above the cap must be unaffordable at budget {budget}"
+        );
+    }
+}
+
+/// ★ THE HARNESS THE SLICE EXISTS TO RUN. What the heaviest star becomes at each candidate coordinate
+/// step, on THE world, with our own solver rather than a fitted exponent.
+///
+/// The design estimated about 1,048 solar masses at the ruled two-metre step, by propagating a
+/// two-point fit. That is arithmetic through a fitted exponent, NOT a measurement, and the plan says so
+/// in as many words. The bisection is the authority. This runs it.
+///
+/// ★ RE-BASED IN S9, AND WHAT IT MEASURES CHANGED. It asserted the cap rises STRICTLY with the galaxy
+/// step, which was true while the galaxy's room was the only limit. It is not any more: past a point
+/// the system's own lattice takes over and a wider galaxy buys nothing. That is not a fault in the
+/// solve — it is the S9 result, and pinning WHERE it saturates is worth more than the old assertion,
+/// because that point is what P10 has to lift.
+#[test]
+fn what_the_heaviest_star_becomes_at_each_candidate_coordinate_step() {
+    let pl = world_planet_config();
+    // The galaxy's radius is its lattice's storage budget: half the signed cell domain, in metres of
+    // whatever step that lattice uses. Today's step is the fine millimetre grid; the candidates are the
+    // coarser steps a second tier could take. Derived from the domain, never quoted.
+    let cells = f64::from(2_i32).powi(61);
+    eprintln!(
+        "[s7-cap] step (m)      | galaxy radius (m) | heaviest star (Msun) | its shell (m)      | \
+         demand at cap (m)"
+    );
+    let mut previous_cap = 0.0_f64;
+    let mut rows = 0usize;
+    let mut saturated = 0usize;
+    for step_m in [vd_core::pose::FINE_CELL_EDGE_M, 1.0, 2.0, 16.0, 1_024.0] {
+        // The same expression the shipped radius uses, at this step: the storage fence's own equality,
+        // less the band the geometry solve reserves.
+        let r_uni = cells * step_m;
+        let r_gal = r_uni
+            - (2.0 * r_uni / T_TRAVERSE_S) * GEOMETRY_TICK_DT_S * BAND_TICKS_N * BAND_TAU_HEADROOM;
+        let cap = solve_mass_cap(r_gal, SYSTEM_LATTICE_R_M);
+        let demand = galaxy_child_demand_m(&pl, cap.mass_hi_msun);
+        eprintln!(
+            "[s7-cap] {step_m:<13} | {r_gal:.6e} | {:<20.6} | {:.6e} | {demand:.6e}",
+            cap.mass_hi_msun, cap.system_bound_max_m
+        );
+        // MONOTONE IN THE BUDGET, which is the property the whole solve rests on: a bigger galaxy can
+        // never afford a SMALLER star. If this failed, every number printed above would be noise.
+        // NON-STRICT since S9 — equal is lawful and means the other limit has taken over.
+        assert!(
+            cap.mass_hi_msun >= previous_cap,
+            "a larger galaxy afforded a SMALLER star at step {step_m} — the solve is not monotone"
+        );
+        saturated += usize::from(cap.mass_hi_msun == previous_cap);
+        previous_cap = cap.mass_hi_msun;
+        rows += 1;
+    }
+    assert_eq!(rows, 5, "every candidate step must be solved");
+    // ★ WHERE THE GALAXY STOPS BEING THE LIMIT, measured. The last three candidate steps all return
+    // the same cap, because at each of them the system lattice binds first. Both behaviours are
+    // therefore driven in one run: the rising arm and the saturated one.
+    assert_eq!(
+        saturated, 3,
+        "the cap saturates once the system lattice takes over"
+    );
+    assert_eq!(previous_cap, imf_mass_hi_msun());
+    // …and the saturation value IS the shipped cap, which is the statement that the world we ship
+    // sits ON the lattice bound rather than near it.
+    assert_eq!(
+        binding_limit(&pl, previous_cap, REAL_GALAXY_R_M, SYSTEM_LATTICE_R_M),
+        None
+    );
+}
+
+/// ★ THE AFFORDABILITY FENCE, BOTH ARMS, BOTH LIMITS, AND THE MEASUREMENT OF WHERE EACH FLIPS.
+///
+/// ★ RE-BASED IN S9, AND THE FINDING INVERTED. This test used to assert that the fence REFUSES because
+/// the galaxy is too small to place a 120 M☉ star's system — refused by a factor of about seven — and
+/// that refusal was the stated argument for changing the coordinate step.
+///
+/// The step changed. The galaxy grew 2_051×, its purse now affords 1288 solar masses, and that arm has
+/// stopped binding. **The fence still refuses, for a different reason, and that is the S9 result worth
+/// keeping**: a star system counts its own positions in millimetres, and at 120 M☉ the system is wider
+/// than that lattice can state. The limit moved from the galaxy's room to the system's numbers.
+///
+/// So the cure the fence asks for has changed too — the fine rung, not the galaxy radius. That is P10.
+#[test]
+fn the_star_limit_moved_from_the_galaxys_room_to_the_systems_own_numbers() {
+    let pl = world_planet_config();
+    // ▲ THE ARM THAT USED TO BIND, MEASURED AS NO LONGER BINDING. On the world we ship, the galaxy
+    // can pay for the physical top several hundred times over.
+    let demand_m = galaxy_child_demand_m(&pl, 120.0);
+    assert!(
+        demand_m < REAL_GALAXY_R_M,
+        "the galaxy's purse no longer binds — it was 7x short before the climb"
+    );
+    let purse_headroom = REAL_GALAXY_R_M / demand_m;
+    assert!(purse_headroom > 50.0, "MEASURED 63.355x"); // was 0.143x — a 7x shortfall
+
+    // ▲ THE ARM THAT BINDS NOW, on the world we actually ship.
+    let refused = guard_galaxy_affords_its_stars(REAL_GALAXY_R_M, SYSTEM_LATTICE_R_M)
+        .expect_err("a 120 solar-mass system still does not fit its own lattice");
+    assert_eq!(refused.stated_top_msun, 120.0);
+    assert_eq!(refused.budget_m, REAL_GALAXY_R_M);
+    assert_eq!(refused.lattice_m, SYSTEM_LATTICE_R_M);
+    assert_eq!(refused.bound_by, StarLimit::SystemLattice);
+    // Refused by a wide margin, not a rounding — stated as a ratio so it reads the same whatever the
+    // units become. MEASURED 10.7746x.
+    let over_by = refused.shell_m / refused.lattice_m;
+    assert!(
+        over_by > 2.0,
+        "the overrun is only {over_by}x — if it were marginal this would be a tuning question \
+         rather than a coordinate one"
+    );
+    assert!(
+        refused.affordable_msun < refused.stated_top_msun,
+        "a refusal must mean the world affords LESS than physics states"
+    );
+
+    // ▲ THE OTHER LIMIT, STILL DRIVEN. A galaxy small enough still refuses for the OLD reason, so
+    // both arms of `binding_limit` stay exercised and the enum cannot rot into one value.
+    let small = guard_galaxy_affords_its_stars(REAL_GALAXY_R_M / 1.0e6, SYSTEM_LATTICE_R_M)
+        .expect_err("a galaxy a millionth the size cannot place the system either");
+    assert_eq!(small.bound_by, StarLimit::GalaxyPurse);
+    // BOTH REFUSALS SAY THEIR OWN NAME. A refusal a person cannot read is a refusal that gets
+    // silenced, so the wording is asserted rather than left to be discovered in a log — and driving
+    // both arms is also what keeps `StarLimit`'s Display fully covered (HR5).
+    assert!(
+        refused
+            .to_string()
+            .contains("its system could not state its own positions"),
+        "{refused}"
+    );
+    assert!(
+        small
+            .to_string()
+            .contains("the galaxy has no room to place its system"),
+        "{small}"
+    );
+    // The purse is reported first when BOTH break, which is what this case is.
+    assert!(small.shell_m > small.lattice_m);
+
+    // ▲ THE PASSING ARM, which is now a question about the RUNG and not about the galaxy — and this
+    // is precisely why the lattice became an argument. With the budget alone it could not be driven
+    // at all: no galaxy radius makes a 120 M☉ system fit a millimetre lattice, so the fence's Ok
+    // branch would have been unreachable code wearing a green light.
+    assert_eq!(
+        guard_galaxy_affords_its_stars(REAL_GALAXY_R_M, SYSTEM_LATTICE_R_M * 16.0),
+        Ok(())
+    );
+
+    // ★ AND WHERE IT FLIPS, found rather than assumed: the coarsest system step, in whole binary
+    // octaves above the millimetre, at which the world can host the stars physics states. Reported so
+    // the P10 decision reads off a number instead of an argument.
+    let flips_at = (0..32)
+        .find(|&oct| {
+            guard_galaxy_affords_its_stars(REAL_GALAXY_R_M, SYSTEM_LATTICE_R_M * 2.0_f64.powi(oct))
+                .is_ok()
+        })
+        .expect("some octave of the system lattice must afford the physical top");
+    eprintln!(
+        "[s9-fence] galaxy purse: {purse_headroom:.1}x headroom (was 7x SHORT) | system lattice: \
+         over by {over_by:.4}x | affords {:.6} Msun against a stated {:.1} | the fence passes from \
+         {flips_at} octave(s) of fine-lattice lift",
+        refused.affordable_msun, refused.stated_top_msun
+    );
+    // FOUR octaves of the fine rung would do it — the system step going from a millimetre to 16 mm.
+    // Pinned, because P10's size is this number and an argument is not a size.
+    assert_eq!(flips_at, 4);
+}
+
+/// ★ THE S6 MEASUREMENT, TAKEN BEFORE ANYTHING IS CHANGED. What would every band in THE world become
+/// if it were sized from the ceiling in force at its own surface, and can the world afford it?
+///
+/// The number that matters is the RATIO of the band to the body it wraps. A band wider than the thing
+/// it surrounds is not a band, it is a second body — so if the answer is a large fraction, the law is
+/// unaffordable and S6 needs a different shape. This test states the answer as an assertion rather than
+/// a print, so it cannot quietly stop being true.
+#[test]
+fn what_a_self_sized_band_would_cost_every_boundary_in_the_world() {
+    use vd_core::flight::{TRAVERSE_S, realm_speed_cap_mps};
+
+    let cfg = UniverseConfig::world(15.0, 0.05);
+    let dt = GEOMETRY_TICK_DT_S;
+    let ticks = BAND_TICKS_N;
+    let headroom = BAND_TAU_HEADROOM;
+    // ★ THE FOOT SPEED IS A CONSTANT OF THE SOLVE, NOT THE CLUSTER'S. The band a world ships may not
+    // depend on how fast one deployment lets a person walk, for exactly the reason the tick does not:
+    // two clusters must boot the identical world. The shipped default (500 m/s) is used here so the
+    // measurement judges the widest lawful case rather than the narrowest.
+    let v_foot = 500.0_f64;
+    let mut foot_bound = 0usize;
+
+    // WHY THE BOUNDARY'S OWN CEILING AND NOT ITS PARENT'S. The approach governor lowers a subject's
+    // ceiling onto the body it is approaching, so a thing arrives at THE CHILD'S speed and never at the
+    // parent's. Sizing against the parent's ceiling would size every band for a speed no lawful subject
+    // can hold at that surface.
+    let sweep = derived_nest_sweep_seeds();
+    let mut rows = 0usize;
+    let mut worst_ratio = 0.0_f64;
+    let mut worst: Option<(RealmId, f64, f64)> = None;
+    let mut thinnest_ticks = f64::MAX;
+    let mut floor_bound = 0usize;
+
+    for seed in 0..sweep {
+        let forest = WorldView::generated(seed, &cfg).regions().to_vec();
+        for r in &forest {
+            if r.parent.is_none() {
+                continue;
+            }
+            let extent = r.shape.circumscribed_extent();
+            let own_ceiling = realm_speed_cap_mps(extent, v_foot, TRAVERSE_S);
+            // Does the foot speed BIND here, i.e. is this realm small enough that a person on foot is
+            // the fastest lawful thing at its surface? That is the only regime where the band could be
+            // asked to be larger than the body it wraps.
+            foot_bound += usize::from(own_ceiling == v_foot);
+            // The band this surface needs so that one crossing at its own ceiling is SEEN.
+            let need_m = own_ceiling * dt * ticks * headroom;
+            // The floor every band keeps regardless — today's shipped width.
+            let floor_m = CONTAINMENT_INSET_M + CONTAINMENT_OUTSET_M;
+            let band_m = need_m.max(floor_m);
+            if band_m == floor_m {
+                floor_bound += 1;
+            }
+            let ratio = band_m / extent;
+            if ratio > worst_ratio {
+                worst_ratio = ratio;
+                worst = Some((r.realm, band_m, extent));
+            }
+            thinnest_ticks = thinnest_ticks.min(band_m / (own_ceiling * dt));
+            assert!(
+                band_m.is_finite() && band_m > 0.0,
+                "seed {seed}, {:?}: a boundary must be able to state its own band",
+                r.realm
+            );
+            rows += 1;
+        }
+    }
+
+    assert!(rows > 0, "a sweep with no boundary measures nothing");
+    let (worst_realm, worst_band, worst_extent) = worst.expect("a swept row");
+    eprintln!(
+        "[s6-cost] {rows} boundaries over {sweep} seeds | widest band-to-body ratio {worst_ratio:.6e}          at {worst_realm:?} ({worst_band:.6e} m band around a {worst_extent:.6e} m body) |          {floor_bound} boundaries stay at today's {:.1} m floor | {foot_bound} where the foot \
+         speed binds | thinnest crossing now {thinnest_ticks:.6e} ticks",
+        CONTAINMENT_INSET_M + CONTAINMENT_OUTSET_M
+    );
+
+    // ★ THE AFFORDABILITY ANSWER, as an assertion. If a band ever needed to be a large fraction of the
+    // body it wraps, this law would be the wrong shape and S6 would need re-designing rather than
+    // implementing. Half is the line: past it a band would reach the body's own centre.
+    assert!(
+        worst_ratio < 0.5,
+        "a self-sized band would reach {worst_ratio} of its own body at {worst_realm:?} — that is not          a band, and this law would need re-designing rather than implementing"
+    );
+
+    // ★ AND IT ACTUALLY FIXES THE THING IT EXISTS FOR: every crossing becomes observable. Today every
+    // one of these boundaries is crossed in under one tick.
+    assert!(
+        thinnest_ticks >= 1.0,
+        "the thinnest crossing is still {thinnest_ticks} ticks — the band did not do its job"
+    );
+}
+
+/// ★ THE NAMED RISK, MEASURED BEFORE IT IS TAKEN. Widening every band widens what each body OCCUPIES,
+/// and the world's two placement fences both compare occupied volumes: a child must fit inside its
+/// parent, and two siblings must not overlap. Either could refuse THE world.
+///
+/// The plan's own instruction is to record a refusal as the measurement it is rather than to relax the
+/// fence. So this test takes the reading first, and it fails if the world cannot afford the law.
+#[test]
+fn a_self_sized_band_still_fits_inside_its_parent_and_clear_of_its_siblings() {
+    use vd_core::flight::{TRAVERSE_S, realm_speed_cap_mps};
+
+    let cfg = UniverseConfig::world(15.0, 0.05);
+    let dt = GEOMETRY_TICK_DT_S;
+    let v_foot = cfg.interest.occupant_v_max_mps;
+    let band_of = |extent: f64| -> f64 {
+        (realm_speed_cap_mps(extent, v_foot, TRAVERSE_S) * dt * BAND_TICKS_N * BAND_TAU_HEADROOM)
+            .max(CONTAINMENT_INSET_M + CONTAINMENT_OUTSET_M)
+    };
+
+    let sweep = derived_nest_sweep_seeds();
+    let mut nest_checked = 0usize;
+    let mut sib_checked = 0usize;
+    let mut worst_nest_margin = f64::MAX;
+    let mut worst_sib_margin = f64::MAX;
+    let mut worst_nest_today = f64::MAX;
+    let mut worst_sib_today = f64::MAX;
+    let mut moving_pairs = 0usize;
+    let mut nest_refused: Option<RealmId> = None;
+    let mut sib_refused: Option<(RealmId, RealmId)> = None;
+
+    for seed in 0..sweep {
+        let forest = WorldView::generated(seed, &cfg).regions().to_vec();
+        for r in &forest {
+            let Some(parent_id) = r.parent else { continue };
+            let Some(parent) = forest.iter().find(|p| p.realm == parent_id) else {
+                continue;
+            };
+            // NESTING, ASKED THE WAY THE SHIPPED FENCE ASKS IT. `center` is the child's placement in
+            // its PARENT'S frame, so the reach is measured from that offset — never as a delta against
+            // the parent's own centre, which lives in the GRANDPARENT'S frame and would subtract two
+            // different frames' numbers. (My first version of this test did exactly that and refused
+            // the world by 1.5e15 m, which is why the control below exists.)
+            let tier = r.frame.tier();
+            let at = r.center.delta_m(LatticePos::ORIGIN, tier);
+            let limit = parent.shape.inscribed_extent();
+            let base_reach = r.shape.max_reach_from(at);
+            let reach = base_reach + band_of(r.shape.circumscribed_extent());
+            let margin = limit - reach;
+            // THE CONTROL: the same fence with TODAY'S band. If this is also refused, the fault is in
+            // this measurement and not in the law it is judging.
+            let today = limit - (base_reach + CONTAINMENT_INSET_M + CONTAINMENT_OUTSET_M);
+            worst_nest_today = worst_nest_today.min(today);
+            if margin < worst_nest_margin {
+                worst_nest_margin = margin;
+                if margin < 0.0 {
+                    nest_refused = Some(r.realm);
+                }
+            }
+            nest_checked += 1;
+
+            // SIBLINGS: two bands must not overlap, or a point could be a hysteretic member of two
+            // siblings at once and the tie would break on the lower realm id rather than the nearer body.
+            for s in forest
+                .iter()
+                .filter(|s| s.parent == Some(parent_id) && s.realm != r.realm)
+            {
+                let gap = s.center.delta_m(r.center, tier).length()
+                    - r.shape.circumscribed_extent()
+                    - s.shape.circumscribed_extent();
+                let need = band_of(r.shape.circumscribed_extent())
+                    + band_of(s.shape.circumscribed_extent());
+                // ★ A MOVING SIBLING CANNOT BE JUDGED FROM THIS FIELD, and mistaking that for an
+                // overlap is the trap this branch exists to avoid. A moving child's `center` is ZERO by
+                // design — its real placement is authored into the parent's book every tick — so two
+                // orbiting planets both read as sitting exactly on their star. My first version of this
+                // measurement compared those two zeros and reported 83,542 "overlapping" sibling pairs
+                // in THE world. There are none: it was comparing a field that does not hold a position.
+                //
+                // So the pairs judged below are the STATICALLY placed ones, which is precisely the set
+                // the shipped separation fence judges. Judging moving siblings needs their authored
+                // placements at an instant, which is a different measurement.
+                let both_static = (at.length() > 0.0)
+                    | (s.center.delta_m(LatticePos::ORIGIN, tier).length() > 0.0);
+                if !both_static {
+                    moving_pairs += 1;
+                    continue;
+                }
+                let today_gap = gap - 2.0 * (CONTAINMENT_INSET_M + CONTAINMENT_OUTSET_M);
+                worst_sib_today = worst_sib_today.min(today_gap);
+                let m = gap - need;
+                if m < worst_sib_margin {
+                    worst_sib_margin = m;
+                    if m < 0.0 {
+                        sib_refused = Some((r.realm, s.realm));
+                    }
+                }
+                sib_checked += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "[s6-fence] {nest_checked} nestings, {sib_checked} sibling pairs over {sweep} seeds\n\
+         [s6-fence]   nesting: today {worst_nest_today:.6e} m -> self-sized {worst_nest_margin:.6e} m\n\
+         [s6-fence]   sibling: today {worst_sib_today:.6e} m -> self-sized {worst_sib_margin:.6e} m\n\
+         [s6-fence]   sibling pairs skipped as MOVING (no position in the static field): {moving_pairs}"
+    );
+    // THE CONTROL FIRST. A measurement that refuses the world under TODAY'S shipped band is measuring
+    // itself, not the law it is judging.
+    assert!(
+        worst_nest_today >= 0.0 && worst_sib_today >= 0.0,
+        "this measurement refuses the SHIPPED world, so it is wrong about how the fences ask their \
+         question — fix the measurement before drawing any conclusion about the law"
+    );
+    assert!(
+        nest_checked > 0 && sib_checked > 0,
+        "a fence with nothing to judge proves nothing"
+    );
+    assert!(
+        nest_refused.is_none(),
+        "a self-sized band pushes {:?} outside its own parent — record this, do not relax the fence",
+        nest_refused
+    );
+    assert!(
+        sib_refused.is_none(),
+        "a self-sized band makes {:?} overlap — record this, do not relax the fence",
+        sib_refused
+    );
+}
+
+/// The clear distance from `r` to its nearest sibling under `parent` — how much room a boundary has
+/// before widening it would touch the thing next door. `f64::INFINITY` for an only child, which is the
+/// honest answer: nothing constrains it.
+fn nearest_sibling_gap_m(regions: &[RealmRegion], r: &RealmRegion, parent: RealmId) -> f64 {
+    let tier = r.frame.tier();
+    regions
+        .iter()
+        .filter(|s| s.parent == Some(parent) && s.realm != r.realm)
+        .map(|s| {
+            let d = s.center.delta_m(r.center, tier).length();
+            (d - r.shape.circumscribed_extent() - s.shape.circumscribed_extent()).max(0.0)
+        })
+        .fold(f64::INFINITY, f64::min)
 }

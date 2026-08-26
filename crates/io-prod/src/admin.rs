@@ -234,6 +234,7 @@ mod tests {
             let source = Arc::new(FixedSnapshot(AdminSnapshot::shaped_empty(
                 UniverseTick(7),
                 EpochId(3),
+                0,
             )));
             let metrics = Arc::new(FixedMetrics(seeded_metrics()));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -268,7 +269,7 @@ mod tests {
         let snapshot: AdminSnapshot = serde_json::from_str(&body).expect("contract JSON");
         assert_eq!(
             snapshot,
-            AdminSnapshot::shaped_empty(UniverseTick(7), EpochId(3))
+            AdminSnapshot::shaped_empty(UniverseTick(7), EpochId(3), 0)
         );
     }
 
@@ -279,19 +280,21 @@ mod tests {
         let cell = Arc::new(ArcSwap::from_pointee(AdminSnapshot::shaped_empty(
             UniverseTick(1),
             EpochId(2),
+            0,
         )));
         let source = PublishedSnapshot(Arc::clone(&cell));
         assert_eq!(
             source.snapshot(),
-            AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(2))
+            AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(2), 0)
         );
         cell.store(Arc::new(AdminSnapshot::shaped_empty(
             UniverseTick(9),
             EpochId(2),
+            0,
         )));
         assert_eq!(
             source.snapshot(),
-            AdminSnapshot::shaped_empty(UniverseTick(9), EpochId(2)),
+            AdminSnapshot::shaped_empty(UniverseTick(9), EpochId(2), 0),
             "the read reflects the republished cell, not the boot snapshot"
         );
     }

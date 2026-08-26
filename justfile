@@ -499,6 +499,21 @@ k3d-validate:
         kubectl apply --dry-run=client -f deploy/k3d/ -f deploy/k3d/agent/ >/dev/null && echo "client dry-run OK"
     fi
     sh -n docker/entrypoint.sh && echo "entrypoint.sh: sh -n OK"
+    # ★ NO ROLLING UPDATES (owner ruling 2026-08-24, slice S1). A durable file now carries a label naming
+    # the world, the coordinate units and the epoch that wrote it, and a process whose label disagrees
+    # REFUSES TO START. A rolling update therefore does not degrade a release — it partitions the cluster
+    # into the pods that restarted and the ones that have not, each refusing the other's files. Every
+    # workload that keeps durable state must replace stop-first, so this fails the deploy rather than
+    # letting the manifests drift back to the default.
+    missing=""
+    for f in deploy/k3d/30-orch.yaml deploy/k3d/40-gateway.yaml deploy/k3d/50-shard.yaml; do
+        grep -Eq '^[[:space:]]*updateStrategy:[[:space:]]*\{[[:space:]]*type:[[:space:]]*OnDelete[[:space:]]*\}' "$f" || missing="$missing $f"
+    done
+    if [ -n "$missing" ]; then
+        echo "REFUSING: these workloads would roll one pod at a time, which partitions a label-checking cluster:$missing" >&2
+        exit 1
+    fi
+    echo "update strategy: stop-and-replace on every durable workload OK"
 
 k3d-up:
     #!/usr/bin/env bash

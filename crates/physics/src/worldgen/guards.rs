@@ -41,50 +41,102 @@ pub struct RootNotRepresentable {
     pub k_span: f64,
     pub domain_max: i64,
     pub occupancy_pct: f64,
+    /// The rung the shell was judged at — see [`RootBudget::tier`].
+    pub tier: vd_core::pose::Tier,
 }
 
 /// The measured storage budget a representable root prints (occupancy + headroom, §A2.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RootBudget {
-    /// The root radius in FINE cells.
+    /// The shell radius in the cells of the rung it was judged at.
     pub root_cells: f64,
-    /// Domain occupancy: root_cells / CELL_DOMAIN_MAX (0.5 exactly on THE world).
+    /// Domain occupancy: root_cells / CELL_DOMAIN_MAX (0.5 exactly at the fence's own equality).
     pub occupancy: f64,
-    /// Headroom against the clamp: CELL_DOMAIN_MAX / root_cells (2.0 exactly on THE world).
+    /// Headroom against the clamp: CELL_DOMAIN_MAX / root_cells (2.0 exactly at that equality).
     pub headroom: f64,
+    /// WHICH RUNG THIS VERDICT IS ABOUT. Carried because the same radius passes at one step and is
+    /// refused at another, so a budget without its unit is a number nobody can check.
+    pub tier: vd_core::pose::Tier,
+    /// That rung's step, so a printed verdict needs no lookup.
+    pub cell_edge_m: f64,
 }
 
 /// THE STORAGE FENCE (real-scale addendum §A2.1 F1 / §A4.9 R3 — a boot fence beside
-/// `guard_visibility_climb_bounded` in every world-deriving process): the root shell, with its
-/// `K_SPAN` headroom octave, must fit the FINE lattice's sanitized domain, so the wire-ingress
-/// clamp is unreachable from any lawful position. Refusing is THE NAMED P10 TRIGGER. Measured on
-/// THE world: occupancy exactly 50.0000 %, headroom exactly 2.0000× (`2⁵¹ m = 2⁶¹ cells;
-/// 2 × 2⁶¹ = CELL_DOMAIN_MAX + 1` — the equality is the construction).
+/// `guard_visibility_climb_bounded` in every world-deriving process): a shell, with its `K_SPAN`
+/// headroom octave, must fit its own lattice's sanitized domain, so the wire-ingress clamp is
+/// unreachable from any lawful position. Refusing is THE NAMED P10 TRIGGER. Measured on THE world:
+/// occupancy exactly 50.0000 %, headroom exactly 2.0000× (`2⁵¹ m = 2⁶¹ cells; 2 × 2⁶¹ =
+/// CELL_DOMAIN_MAX + 1` — the equality is the construction).
+///
+/// ★ IT ASKS EACH LEVEL IN THAT LEVEL'S OWN STEP (slice S8). It used to divide by the millimetre step
+/// unconditionally, which was right while every level counted in millimetres and becomes badly wrong the
+/// moment they do not. Applied to the universe's own `2⁷⁶ m` shell it would have refused by a factor of
+/// `2²⁵` — thirty-three million — for a world that fits its own lattice EXACTLY. A fence that refuses a
+/// lawful world is worse than no fence, because the refusal looks authoritative.
 ///
 /// # Errors
 /// [`RootNotRepresentable`] with every number of the verdict, naming P10 as the cure.
 pub fn guard_root_representable(
     config: &UniverseConfig,
 ) -> Result<RootBudget, RootNotRepresentable> {
-    let edge = vd_core::pose::FINE_CELL_EDGE_M;
+    // ★ EVERY LEVEL IN ITS OWN STEP (slice S9). S8 judged the galaxy at the ROOT's step, which was
+    // honest while the galaxy was not a realm and its shell was genuinely measured in root cells. It has
+    // its own frame and its own step now, so it is judged in its own — which is what "runs per level"
+    // was always supposed to mean.
+    //
+    // The root's verdict is the one returned, because the root is what a boot log reports and what the
+    // named refusal is about. A galaxy that does not fit refuses the boot just the same.
+    guard_shell_representable(config.scale.galaxy_r_m, vd_core::pose::Tier::Galaxy)?;
+    guard_shell_representable(config.scale.universe_r_m, ROOT_TIER)
+}
+
+/// THE RUNG THE ROOT SHELL IS COUNTED IN TODAY. Named here rather than passed, because the root's own
+/// step is a fact about the ladder and not a choice a caller makes — a caller that could pass the wrong
+/// one would be a caller that could disable the fence.
+///
+/// ★ THE LADDER IS CLIMBED (slice S9). S8 built the rungs and left the root counting in millimetres,
+/// because no frame produced a universe position yet. The universe has its own frame now, so it counts in
+/// its own step — and its radius moves with it in the same change, which was the whole condition: the
+/// fence's content is the EQUALITY between a step and a radius, and moving one without the other would
+/// turn a 50 % occupancy into 0.0015 % and the fence would stop saying anything.
+pub(crate) const ROOT_TIER: vd_core::pose::Tier = vd_core::pose::Tier::Universe;
+
+/// The fence itself, for ANY shell at ANY rung — the shape [`guard_root_representable`] is one call of.
+///
+/// # Errors
+/// [`RootNotRepresentable`] when the shell plus its headroom octave outgrows that rung's domain.
+pub fn guard_shell_representable(
+    shell_r_m: f64,
+    tier: vd_core::pose::Tier,
+) -> Result<RootBudget, RootNotRepresentable> {
+    let edge = tier.cell_edge_m();
     let domain_max = vd_core::pose::CELL_DOMAIN_MAX;
-    let root_cells = config.scale.universe_r_m / edge;
+    let root_cells = shell_r_m / edge;
     let budget = K_SPAN * root_cells;
     // `+ 1.0` exactly as the ▲ 1 derivation states: 2·2⁶¹ equals CELL_DOMAIN_MAX + 1, so THE
     // world passes with exact equality — the headroom octave is the construction, not slack.
-    if budget > domain_max as f64 + 1.0 {
+    //
+    // ★ FAIL CLOSED ON A SHELL THAT IS NOT A LENGTH. `NaN > x` is false and so is `NaN <= x`, so a
+    // non-finite radius used to sail through this comparison and be reported as a representable world
+    // with a NaN occupancy. A negative radius did the same. Neither is a shell, and a fence that answers
+    // "fine" to a question that makes no sense is worse than no fence. Bitwise `|`: one branch, both
+    // regions driven.
+    if !(shell_r_m.is_finite() & (shell_r_m > 0.0)) | (budget > domain_max as f64 + 1.0) {
         return Err(RootNotRepresentable {
-            root_r_m: config.scale.universe_r_m,
+            root_r_m: shell_r_m,
             root_cells,
             k_span: K_SPAN,
             domain_max,
             occupancy_pct: 100.0 * root_cells / domain_max as f64,
+            tier,
         });
     }
     Ok(RootBudget {
         root_cells,
         occupancy: root_cells / domain_max as f64,
         headroom: domain_max as f64 / root_cells,
+        tier,
+        cell_edge_m: edge,
     })
 }
 
@@ -192,7 +244,7 @@ pub fn guard_world_nests(
     let world = WorldView::generated(seed_universe, config);
     let regions = world.regions();
     let reaches = child_reaches_for_config(seed_universe, regions, config);
-    vd_core::geometry::guard_regions_nest(regions, regions.len(), &reaches).map_err(|source| {
+    vd_core::geometry::guard_regions_nest(regions, &reaches).map_err(|source| {
         SeedWorldDoesNotNest {
             seed: seed_universe,
             reservation_m: config.scale.galaxy_r_m - config.stellar.system_ring_r_m,

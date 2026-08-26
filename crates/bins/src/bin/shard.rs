@@ -148,7 +148,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ancestor chain to the ambient root + owned children — NEVER siblings, HR1 replicated-by-construction,
     // no inter-shard bytes) and plants it, so the containment detector is LIVE from boot (no longer inert).
     // `universe_seed` was read once above; a per-shard forest that fails `guard_regions_nest` (two roots, a
-    // dangling parent, a cycle, count > MAX_REGIONS) is a CODE bug in the generator — fail LOUD at boot
+    // dangling parent, a cycle, a child that escapes its parent) is a CODE bug in the generator — fail LOUD
+    // at boot. There is NO count clause: a parent's child count is unbounded (SL9), so a galaxy naming a
+    // hundred and fifty thousand star systems boots exactly like a planet naming one moon
     // (Display carries the actionable guidance for `kubectl logs`), never a silent detector no-op.
     // There is NO boundary-file override any more (SL5): the authored playground forest a shard could once
     // load in place of THE world let a cluster simulate geometry the world does not contain, and the gates
@@ -163,6 +165,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         count = regions.len(),
         realm = %hosted_realm,
         seed = universe_seed,
+        // ★ THE UNIT THIS PROCESS COUNTS POSITIONS IN, stated at boot (slice S3, Q1 condition 3).
+        // A node refused for a unit mismatch is refused by the TRANSPORT, which reports a bare
+        // "no application protocol" — no field, no value, no unit. This line and the admin view
+        // are the only places an operator can read the two numbers and see which side is behind.
+        coordinate_unit = %vd_wire::admin::coordinate_unit_tag(vd_bins::world_generation()),
         "planting the containment forest for THE world — the re-home detector is LIVE",
     );
     // THE SHARD'S LINEAGE, and where it comes from. `VD_OWN_COORD` when the launcher set one (the demand
@@ -307,7 +314,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (the placement arc S4: the fence used to read a mover's zeroed centre and go size-only).
     vd_core::geometry::guard_regions_nest(
         &regions,
-        vd_sim::stub::MAX_REGIONS,
         // The reach roster derives from THE world for EVERY parent this neighbourhood names —
         // never from this shard's own `moving` subset, whose gaps judged a non-hosted mover at
         // its zeroed centre (the batch-review zero-reach hole; one forest, one verdict, on
@@ -391,7 +397,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     *node
         .world_mut()
         .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)
-        .with_moving_children(vd_physics::motion::kepler_motion_fns(moving));
+        .with_moving_children(vd_physics::motion::kepler_motion_fns(moving))
+        // THE CHILD INDEX (SL9). Naming the hosted realm is what lets the forest be split into "my own
+        // direct children" (which a lookup can answer for) and "everything else" (always evaluated), so
+        // the containment fold stops walking every child for every occupant on every tick. Without this
+        // line the index is empty and the fold is the full scan — correct, and O(occupants × children),
+        // which a galaxy naming a hundred and fifty thousand star systems cannot pay.
+        .with_own_realm(own_realm);
     // ★THROWAWAY (test instrument, owner-ordered 2026-08-20): `VD_TEST_OVERDRIVE` multiplies the
     // CRUISE ceiling only, so a tester crosses the world quickly. It touches neither the world, the
     // geometry solve, nor the approach governor that keeps boundary crossings safe — see

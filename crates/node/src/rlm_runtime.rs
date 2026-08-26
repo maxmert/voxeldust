@@ -329,7 +329,19 @@ impl RlmReconcilerRes {
                     .entry(path.clone())
                     .or_default()
                     .insert(node, now);
-                self.launches.fail_streak.remove(&path);
+                // ★ THE STREAK IS NOT CLEARED HERE, AND THAT IS THE FIX (owner ruling 2026-08-24 —
+                // slice S1's third part).
+                //
+                // It used to be. A successful fork+exec was treated as a successful LAUNCH — but all a
+                // successful fork proves is that a process started, not that a realm came up. A child
+                // that starts and then exits at once (it refuses its durable store, its port is taken,
+                // its config is wrong) therefore never engaged the backoff, and the reconciler respawned
+                // it at the base cooldown FOREVER. That failure mode arrives the moment a store can
+                // refuse — which is exactly what the rest of this slice built.
+                //
+                // A launch is proven by the realm's HEAD appearing in the directory, so the streak is
+                // cleared THERE (see `reconcile_launches`), and a child that dies without ever getting
+                // a head is counted as the failure it is.
             }
             Err(e) => {
                 self.spins_failed += 1;
@@ -397,12 +409,23 @@ impl RlmReconcilerRes {
         let live = self.spawner.live_nodes();
         let ttl = self.tuning.launch_ttl_ticks;
         let mut observed_boot = self.boot_ticks_observed_max;
-        for (path, nodes) in &mut self.launches.minted {
+        // Split the borrow so the streak can be written while the minted set is walked — the two live in
+        // one struct and this loop must now touch both.
+        let LaunchLedger {
+            minted,
+            fail_streak,
+            ..
+        } = &mut self.launches;
+        for (path, nodes) in &mut *minted {
             let rid = path
                 .realm_id()
                 .expect("a lifecycle realm path is non-empty");
             let head_up = dir.head(DirectoryKey::Realm(rid)).is_some();
             if head_up {
+                // THE ONLY PROOF A LAUNCH WORKED: the realm registered. Clearing the streak here rather
+                // than at the fork is what stops a child that starts and dies from looking like a
+                // success (see `exec_spinup`).
+                fail_streak.remove(path);
                 // RLM 5f-4: the head appeared — the launch→head-up latency (now - mint tick) is the MEASURED
                 // pod boot. Fold the max over the draining minted nodes into the monotone gauge so 5f-4j can
                 // tune the launch-TTL from real cluster boots. (These nodes drain in the retain below.)
@@ -412,11 +435,20 @@ impl RlmReconcilerRes {
             }
             nodes.retain(|node, minted_at| {
                 let within_ttl = now.0.saturating_sub(minted_at.0) < ttl;
-                !head_up & (live.contains(node) | within_ttl)
+                let alive = live.contains(node);
+                // A CHILD THAT DIED WITHOUT EVER REGISTERING IS A FAILED LAUNCH, and it must be counted
+                // as one or nothing ever backs off. Distinguished from the two innocent cases by the
+                // three facts already in hand: no head appeared, the process is gone, and it has had
+                // longer than the launch window to get there.
+                let died_before_registering = !head_up & !alive & !within_ttl;
+                if died_before_registering {
+                    *fail_streak.entry(path.clone()).or_default() += 1;
+                }
+                !head_up & (alive | within_ttl)
             });
         }
         self.boot_ticks_observed_max = observed_boot;
-        self.launches.minted.retain(|_, nodes| !nodes.is_empty());
+        minted.retain(|_, nodes| !nodes.is_empty());
     }
 
     /// Refresh the observability gauges (desired + running realm counts among tracked cells) using the
@@ -586,6 +618,96 @@ mod tests {
             state: "Promoting".to_owned(),
             age_ticks: 999,
         }
+    }
+
+    #[test]
+    fn a_child_that_starts_and_dies_without_registering_is_counted_as_a_failed_launch() {
+        // THE RESPAWN LOOP, CLOSED (owner ruling 2026-08-24, slice S1).
+        //
+        // A successful fork used to count as a successful LAUNCH and clear the failure streak. But a
+        // fork only proves a process started — not that a realm came up. A child that starts and exits
+        // at once (it refuses its durable store, its port is taken, its config is wrong) therefore never
+        // engaged the backoff, and the reconciler respawned it at the base cooldown forever.
+        //
+        // That failure mode is not hypothetical: the rest of this slice built a store that REFUSES, and
+        // a refusing shard is exactly a child that starts and dies.
+        //
+        // RED BEFORE THE FIX: with the streak cleared at the fork, the assertion below reads zero.
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::default(), spawner());
+        let dir = DirectoryCore::new(DirectoryTuning::default());
+        let coord = sys(41);
+        let path = coord.path().clone();
+
+        // A launch that forks fine…
+        rlm.exec_spinup(&coord, UniverseTick(1));
+        let child = *rlm
+            .launches
+            .minted
+            .get(&path)
+            .and_then(|n| n.keys().next())
+            .expect("the fork minted a child");
+        assert_eq!(
+            rlm.launches.fail_streak.get(&path).copied(),
+            None,
+            "a fork that succeeded is not yet a failure — nothing is known about it yet"
+        );
+        assert!(
+            !rlm.launches.minted.is_empty(),
+            "the child is being watched"
+        );
+
+        // …and then the child DIES, and no realm head ever appeared. This is the shape of a shard that
+        // starts and immediately refuses its durable store — which is precisely what the rest of this
+        // slice built, and why this loop had to be closed before that refusal shipped.
+        rlm.spawner.kill_realm(child).expect("the child dies");
+        let past_ttl = UniverseTick(1 + rlm.tuning.launch_ttl_ticks + 1);
+        rlm.reconcile_launches(&dir, past_ttl);
+
+        assert_eq!(
+            rlm.launches.fail_streak.get(&path).copied(),
+            Some(1),
+            "a child that died without ever registering must count as a failed launch, or nothing ever \
+             backs off and the reconciler respawns it forever"
+        );
+        assert!(
+            rlm.launches.minted.is_empty(),
+            "and it stops being watched — it is gone"
+        );
+    }
+
+    #[test]
+    fn a_launch_is_proven_by_the_realm_registering_and_that_is_what_clears_the_streak() {
+        // THE OTHER HALF, and the reason the streak moved: a launch is successful when the REALM comes
+        // up, not when the process does. Without this the streak would only ever grow and a realm that
+        // recovered would stay in backoff forever — which would be a different bug of the same family.
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::default(), spawner());
+        let mut dir = DirectoryCore::new(DirectoryTuning::default());
+        let coord = sys(42);
+        let path = coord.path().clone();
+
+        // Start from a realm that has already failed twice.
+        rlm.launches.fail_streak.insert(path.clone(), 2);
+        rlm.exec_spinup(&coord, UniverseTick(1));
+        assert_eq!(
+            rlm.launches.fail_streak.get(&path).copied(),
+            Some(2),
+            "forking does not clear the streak"
+        );
+
+        // Now the realm registers — the only thing that proves the launch worked.
+        dir.grant(
+            DirectoryKey::Realm(coord.lowered()),
+            AuthorityRef::Shard(NodeId(1000)),
+            Fence(1),
+            UniverseTick(2),
+        );
+        rlm.reconcile_launches(&dir, UniverseTick(2));
+
+        assert_eq!(
+            rlm.launches.fail_streak.get(&path).copied(),
+            None,
+            "the head appearing is what clears the streak"
+        );
     }
 
     #[test]

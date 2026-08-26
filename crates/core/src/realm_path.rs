@@ -21,10 +21,14 @@
 use crate::pose::RealmId;
 use serde::{Deserialize, Serialize};
 
-/// The interim `RealmId` stand-in for the Universe root (no dedicated wire arm until Slice 4).
-const UNIVERSE_STANDIN: RealmId = RealmId::System(0);
-/// The interim `RealmId` stand-in for a Galaxy realm (no dedicated wire arm until Slice 4).
-const GALAXY_STANDIN: RealmId = RealmId::System(1);
+// ★ THE STAND-INS ARE GONE (slice S9). `UNIVERSE_STANDIN = System(0)` and `GALAXY_STANDIN =
+// System(1)` lived here because the two ambient levels had no `RealmId` arm of their own and had to
+// borrow a system's. S9 gave them real arms, and this is the lowering that had to follow.
+//
+// It was the last reader still handing out the stand-ins, and it did so on the LIVE crossing path:
+// a dot leaving its home system asked where it was going, this answered `System(1)`, and no shard
+// held `System(1)` — the galaxy shard had granted `Galaxy(1)`. The dual-cluster crossing looped
+// `CROSSING UNRESOLVED ... to_realm=System(1) dest_head_missing=true` until it timed out.
 
 /// The KIND of a realm in a lineage. `Universe`/`Galaxy` have no `RealmId` arm yet (Slice 4);
 /// they resolve to the stand-ins. Now serde-derived + `#[repr(u8)]` with explicit discriminants
@@ -79,13 +83,14 @@ impl RealmLevel {
         RealmLevel { kind, seed }
     }
 
-    /// The `RealmId` this level resolves to. Total over the 6 kinds; `Universe`/`Galaxy` use
-    /// the interim stand-ins (Slice 4 flips them to dedicated arms).
+    /// The `RealmId` this level resolves to. Total over the 7 kinds, and — since S9 — LOSSLESS:
+    /// every kind has an arm of its own, so a galaxy keeps its seed instead of collapsing onto
+    /// `System(1)`. The universe is fieldless because there is exactly one.
     #[must_use]
     pub fn to_realm_id(self) -> RealmId {
         match self.kind {
-            RealmKindTag::Universe => UNIVERSE_STANDIN,
-            RealmKindTag::Galaxy => GALAXY_STANDIN,
+            RealmKindTag::Universe => RealmId::Universe,
+            RealmKindTag::Galaxy => RealmId::Galaxy(self.seed),
             RealmKindTag::System => RealmId::System(self.seed),
             RealmKindTag::Planet => RealmId::Planet(self.seed),
             RealmKindTag::Station => RealmId::Station(self.seed),
@@ -275,8 +280,11 @@ fn area_path() -> RealmPath {
 #[must_use]
 pub fn path_for_realm(realm: RealmId) -> Option<RealmPath> {
     match realm {
-        RealmId::System(UNIVERSE_SEED) => Some(universe_path()),
-        RealmId::System(GALAXY_SEED) => Some(galaxy_path()),
+        // ★ S9: keyed by the real arms. These were `System(0)` / `System(1)` — the stand-ins —
+        // which meant a `Galaxy(1)` handed to this inversion answered `None` and its lineage was
+        // simply unknown. The two directions have to flip together or the book stops inverting.
+        RealmId::Universe => Some(universe_path()),
+        RealmId::Galaxy(GALAXY_SEED) => Some(galaxy_path()),
         RealmId::System(SYSTEM_A_SEED) => Some(system_path(SYSTEM_A_SEED)),
         RealmId::System(SYSTEM_B_SEED) => Some(system_path(SYSTEM_B_SEED)),
         RealmId::Planet(PLANET_A_SEED) => Some(planet_path()),
@@ -290,8 +298,8 @@ pub fn path_for_realm(realm: RealmId) -> Option<RealmPath> {
 /// Galaxy → System A / System B → Planet A / Station A → Area A). The generator iterates this
 /// to build the walk-scale forest.
 pub const ROSTER: [RealmId; 7] = [
-    UNIVERSE_STANDIN,
-    GALAXY_STANDIN,
+    RealmId::Universe,
+    RealmId::Galaxy(GALAXY_SEED),
     RealmId::System(SYSTEM_A_SEED),
     RealmId::System(SYSTEM_B_SEED),
     RealmId::Planet(PLANET_A_SEED),
@@ -306,14 +314,16 @@ mod tests {
 
     #[test]
     fn to_realm_id_covers_every_kind() {
-        // Every RealmKindTag resolves to the right RealmId (Universe/Galaxy -> stand-ins).
+        // Every RealmKindTag resolves to the right RealmId. ★ S9: Universe and Galaxy resolve to
+        // their OWN arms, not to the `System(0)`/`System(1)` stand-ins. The seed 99 is the tell —
+        // a galaxy carries it now, where the stand-in discarded it.
         assert_eq!(
             RealmLevel::new(RealmKindTag::Universe, 99).to_realm_id(),
-            RealmId::System(0)
+            RealmId::Universe
         );
         assert_eq!(
             RealmLevel::new(RealmKindTag::Galaxy, 99).to_realm_id(),
-            RealmId::System(1)
+            RealmId::Galaxy(99)
         );
         assert_eq!(
             RealmLevel::new(RealmKindTag::System, 7).to_realm_id(),
@@ -402,10 +412,13 @@ mod tests {
     #[test]
     fn parent_realm_is_pinned_for_every_roster_realm() {
         // The full parent topology — a re-parent anywhere fails loud here.
+        // ★ S9: the two ambient parents are their own arms. `system_path(7).parent_realm()` is the
+        // line that mattered on the live path — it is how a dot leaving its home system learns where
+        // it is going, and while it answered `System(1)` no shard held the answer.
         assert_eq!(universe_path().parent_realm(), None); // root
-        assert_eq!(galaxy_path().parent_realm(), Some(RealmId::System(0))); // -> Universe standin
-        assert_eq!(system_path(7).parent_realm(), Some(RealmId::System(1))); // -> Galaxy standin
-        assert_eq!(system_path(8).parent_realm(), Some(RealmId::System(1))); // sibling of System 7
+        assert_eq!(galaxy_path().parent_realm(), Some(RealmId::Universe));
+        assert_eq!(system_path(7).parent_realm(), Some(RealmId::Galaxy(1)));
+        assert_eq!(system_path(8).parent_realm(), Some(RealmId::Galaxy(1))); // sibling of System 7
         assert_eq!(planet_path().parent_realm(), Some(RealmId::System(7)));
         assert_eq!(station_path().parent_realm(), Some(RealmId::System(7)));
         assert_eq!(area_path().parent_realm(), Some(RealmId::Planet(7)));

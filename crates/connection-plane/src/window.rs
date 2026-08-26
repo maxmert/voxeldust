@@ -556,6 +556,17 @@ pub struct Composed {
     /// Rows refused by `FrameError::RotationBeyondExactReach` (a rotated frame past the
     /// millimetre rotation reach — R2, the P10 trigger; real-scale addendum §A4.6).
     pub rotated_refused: u64,
+    /// Rows refused by `FrameError::CrossTierCrossing` — a fold that could not re-state a distance in
+    /// the unit it had to move to.
+    ///
+    /// ★ WHAT THIS COUNTS CHANGED AT S9, and it now counts something much rarer. It used to count
+    /// EVERY fold between two frames that counted differently, because none of them worked. S9 makes
+    /// them work, so what is left is the one case that cannot: a distance too wide to have a count in
+    /// the finer unit at all — a galaxy-width separation asked for in millimetres. That is P10's
+    /// trigger, and this is the row that would say it had arrived.
+    ///
+    /// ITS OWN ROW, not a share of another, under this file's own rule. Still 0 on every shipped path.
+    pub cross_tier_refused: u64,
     /// Rows whose stated tail frame is not their level's frame (or an unknown-frame refusal from
     /// the fold) — alien, dropped, counted.
     pub alien_rows: u64,
@@ -898,6 +909,7 @@ fn count_refusal(out: &mut Composed, e: FrameError) {
     match e {
         FrameError::InstantMismatch { .. } => out.instant_refused += 1,
         FrameError::RotationBeyondExactReach => out.rotated_refused += 1,
+        FrameError::CrossTierCrossing(_) => out.cross_tier_refused += 1,
         FrameError::UnknownSourceFrame | FrameError::UnknownDestFrame => out.alien_rows += 1,
     }
 }
@@ -2103,9 +2115,27 @@ mod tests {
         count_refusal(&mut out, FrameError::RotationBeyondExactReach);
         count_refusal(&mut out, FrameError::UnknownSourceFrame);
         count_refusal(&mut out, FrameError::UnknownDestFrame);
+        // The ladder's own refusal, on its own row. ★ S9: this is no longer "these two levels count
+        // differently" — that works now — but "this distance has no count in the finer unit". It shares
+        // no counter with the others, because that and "I do not know that frame" are different
+        // failures and a shared bucket would hide which.
+        count_refusal(
+            &mut out,
+            FrameError::CrossTierCrossing(vd_core::pose::TierConversionError::BeyondReach {
+                from: vd_core::pose::Tier::Galaxy,
+                to: vd_core::pose::Tier::Fine,
+                widest_cells: 1,
+                max_cells: 0,
+            }),
+        );
         assert_eq!(
-            (out.instant_refused, out.rotated_refused, out.alien_rows),
-            (1, 1, 2)
+            (
+                out.instant_refused,
+                out.rotated_refused,
+                out.alien_rows,
+                out.cross_tier_refused
+            ),
+            (1, 1, 2, 1)
         );
     }
 

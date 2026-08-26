@@ -239,31 +239,29 @@ fn fly_waypoint(
 // approach governor decelerating onto the sibling, re-derived from the governed closed form in
 // the body. Every in-system assertion the park owed is back verbatim.
 #[test]
-#[ignore = "PARKED 2026-08-21 (the gate-pass arc) ON A MEASURED DEFECT, NOT ON ARITHMETIC. The five \
-            legs all fly and every label flip lands — C, D, A, E and F each reached the realm they \
-            name. What fails is the thrash guard: the subject Entity's directory fence reaches 22 \
-            against a bound of 12, and the fence is RIGHT to say so. MEASURED: 21 crossing sagas \
-            ran, of which C, D and A account for one each — and the GALAXY <-> RING SIBLING \
-            boundary accounts for EIGHTEEN, nine in and nine out, strictly alternating \
-            (System(1)->sibling at fences 4,6,8,10,12,14,16,18,20 and sibling->System(1) at \
-            5,7,9,11,13,15,17,19,21), every one of them `attempt=0`, i.e. eighteen FRESH \
-            containment decisions rather than one decision re-driven. They all fall inside the \
-            eighteen seconds of leg F, at roughly one round trip per second, and then leg F's \
-            label flip lands and the cycle stops. THIS IS D-REAL-4'S OWN NAMED FALSIFIER, FIRED: \
-            that row defers the A3.4 two-arm per-child containment band, records `boundary-loiter \
-            re-home thrash at governed speeds (damped by k_dwell, UNMEASURED - the honest open \
-            half)' as its remaining exposure, and names its trigger as `a governed occupant \
-            loitering at a system shell measuring re-home saga rate vs k_dwell'. That is exactly \
-            this run. THE MECHANISM the numbers point at: the shipped containment band is the \
-            STATIC 1 m inset / 2 m outset, three metres of hysteresis in total, while the speed \
-            law licenses the ring sibling's own ceiling of about 3.9e9 m/s - some 7.8e7 m of \
-            travel in one 0.02 s tick. The band is sized in metres for a 500 m/s walk and buys \
-            no hysteresis at all at a governed crossing, which is the same statement D-WORLD-4b \
-            makes (`the shipped 3.0 >= v.dt.K invariant is false at 500 m/s'), one boundary \
-            further out. WHICH ARC DISCHARGES IT: D-REAL-4 - the A3.4 band, whose WHEN clause this \
-            measurement arms. NOT WEAKENED AND NOT DELETED: MAX_ENTITY_FENCE stays at 12 and both \
-            arms of the guard stay exactly as they are, so un-ignoring this test after the band \
-            lands is the proof that it landed. Run it with `--ignored` to re-take the measurement."]
+#[ignore = "STILL PARKED after the band slice (S6), but on a DIFFERENT and much smaller cause, \
+            RE-MEASURED 2026-08-25. THE BAND LANDED AND IT WORKED: the fence fell from 22 to 14 \
+            against the bound of 12, and legs C, D, A and E now cross EXACTLY ONCE EACH — four of \
+            the five boundaries are clean, where before only three were. The whole residual is leg \
+            F, which alone commits nine crossings of the galaxy/ring-sibling boundary (it was \
+            eighteen). ★ THE BAND IS NOT WHAT IS LEFT, and the measurement says so rather than an \
+            argument: the occupant traverses the WHOLE band each way - released just outside the \
+            release edge, re-taken just inside the acquire edge, 6.6e8 m apart against a 4.7e8 m \
+            band - which is what a real crossing looks like. THE ACTUAL CAUSE is this test's own \
+            aim: leg F names a FIXED vector, two solved shells down the SIBLING's pole, and the \
+            instant the occupant re-homes the server reads those same three numbers in the GALAXY's \
+            frame, where that point is essentially the galactic origin one and a half petametres \
+            away. So it turns round, flies back into the sibling, and is handed down again. PROVED: \
+            its distance from the galactic centre falls monotonically at every hand-down \
+            (1.499035431e15 -> 1.499031347e15 -> 1.499026399e15 -> 1.499021151e15 m). AN ATTEMPTED \
+            CURE WAS MEASURED AND REVERTED: aiming relative to the occupant's own delivered position \
+            made it WORSE (nine crossings became eleven), because the delivered pose changes frame at \
+            the DELIVERY LAG while the WalkTo target changes at the SERVER's re-home - any aim mixing \
+            them is wrong in exactly the window the defect lives in. WHAT IS OWED: dev-control must \
+            state WHICH realm frame a delivered pose is in, so a leg can express an aim that is \
+            unambiguous rather than usually right. NOT WEAKENED AND NOT DELETED: MAX_ENTITY_FENCE \
+            stays 12, CROSSINGS stays 5, both arms of the guard are untouched. The per-leg fence \
+            print added in S6 is what turned `the fence ballooned' into `leg F does all of it'."]
 fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thrash() {
     // FIRST statement: hold the process tier for the whole body, so it outlives the cluster reap
     // that frees the ports. See `vd_bins::cluster_tier`.
@@ -445,6 +443,18 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
     // C — home → inner planet: the shared rendezvous-and-park at full orbit speed. The slowest,
     // least deterministic leg (the plan's stated fallback if it flakes: drop C/D from the walk — a
     // decision, not a quiet descope).
+    // ★ THE FENCE, READ AFTER EVERY LEG (slice S6). The guard at the end of this test reports one
+    // number for the whole flight, which says a re-home is re-firing somewhere but not WHERE. The
+    // parked measurement that this test carries had to be reconstructed by hand from shard logs; this
+    // makes the same thing fall out of the run. A leg that adds one is a clean crossing; a leg that
+    // adds several is the boundary that is thrashing.
+    let leg_fence = |label: &str| {
+        eprintln!(
+            "[fence] after leg {label}: entity directory fence = {}",
+            max_entity_fence(admin_addr)
+        );
+    };
+
     rendezvous_into_planet(
         devctl_port,
         &DEV,
@@ -457,6 +467,7 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
         // with the world, so this budget cannot go stale again.
         budget(shell_of(roster.home), cap_home),
     );
+    leg_fence("C");
     eprintln!("NODE-PER-REALM leg C: crossed into the inner planet");
 
     // D — inner planet → home: the polar lift, stated in the PLANET's frame (the space the session
@@ -472,6 +483,7 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
         &home_label,
         budget(shell_of(roster.inner) + world_cfg.band.outset_m, cap_planet),
     );
+    leg_fence("D");
 
     // A — home → galaxy: out the pole past the release edge (flight law leg A). THE EXIT
     // HEIGHT IS DERIVED FOR THE 3-D SIBLING (S3 re-derivation): leg E.1 then flies a STRAIGHT
@@ -496,6 +508,7 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
         // The label flips at the home release edge; the whole path to it rides the home ceiling.
         budget(home_reach, cap_home),
     );
+    leg_fence("A");
     // A.2 — DESCEND TO THE DERIVED EXIT HEIGHT before turning toward the sibling. `cross_leg`
     // ends the moment the LABEL flips — at the release edge (~1 home shell down the pole), NOT
     // at the aim — and the S3 clearance derivation (closest approach = exit_z·sinθ ≥ 2×reach)
@@ -599,6 +612,7 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
         &sibling_label,
         budget(sib_standoff_z, cap_galaxy),
     );
+    leg_fence("E");
 
     // F — sibling → galaxy: back out the pole, stated in the SIBLING's frame (the session's
     // space). The interim world aimed (0,0,−300) — outside its 150 m shell; on the true-size
@@ -606,6 +620,28 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
     // 2× solved shell down the pole, and the label flips at the release edge on the way.
     let cap_sibling = realm_speed_cap_mps(shell_of(roster.sibling), DEV.move_speed, TRAVERSE_S);
     let sib_exit = DVec3::new(0.0, 0.0, -2.0 * shell_of(roster.sibling));
+    // ★ THIS LEG'S AIM IS FRAME-RELATIVE, AND THAT IS WHY IT THRASHES. MEASURED, twice.
+    //
+    // `sib_exit` is two solved shells down the SIBLING's pole — right while the sibling owns the
+    // occupant. The instant it re-homes, the server reads the same three numbers in the GALAXY's frame,
+    // where that point is essentially the galactic origin, one and a half petametres away. So the
+    // occupant turns round, flies back into the sibling it just left, and is handed straight back down:
+    // nine crossings of one boundary in this leg, strictly alternating, with its distance from the
+    // galactic centre falling monotonically at every hand-down. The other four legs cross once each.
+    //
+    // ★ THE BAND IS NOT THE CAUSE, and this is the measurement that says so: the occupant traverses the
+    // WHOLE band each way — released just outside the release edge, re-taken just inside the acquire
+    // edge, 6.6e8 m apart against a 4.7e8 m band. That is what a real crossing looks like. A wider band
+    // would slow this and hide it.
+    //
+    // ★ AN ATTEMPTED CURE WAS MEASURED AND REVERTED. Aiming relative to the occupant's own delivered
+    // position ("keep moving away from the centre of whatever frame you are in") made it WORSE — nine
+    // crossings became eleven. The reason is that the two halves flip frames at DIFFERENT MOMENTS: the
+    // delivered pose changes frame at the delivery lag, the `WalkTo` target at the server's re-home. Any
+    // aim that mixes them is wrong during exactly the window the defect lives in.
+    //
+    // THE REAL CURE, owed: dev-control must say WHICH realm frame a delivered pose is in, so a leg can
+    // state an aim that is unambiguous instead of one that is merely usually right.
     cross_leg(
         devctl_port,
         "F sibling->galaxy (polar, derived height)",
@@ -616,6 +652,7 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
             cap_sibling,
         ),
     );
+    leg_fence("F");
 
     // ---- the THRASH GUARD: the subject Entity's directory fence stays SMALL -----------------------
     // One clean re-home per crossing commits at a small fence; a ballooning fence means a re-home is

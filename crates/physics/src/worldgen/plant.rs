@@ -154,8 +154,14 @@ pub(crate) fn plant_seed_of(realm: RealmId) -> Option<u64> {
     match realm {
         RealmId::System(s) | RealmId::Planet(s) => Some(s),
         // No fixture plants on a star (taxonomy arc §6.2 site 4): nothing is built inside the
-        // dust-sublimation radius.
-        RealmId::Ship(_) | RealmId::Station(_) | RealmId::Area(_) | RealmId::Star(_) => None,
+        // dust-sublimation radius. And none directly in a galaxy or the universe: a plant hangs under a
+        // seed-lineage parent that holds surfaces, and those two hold only other realms.
+        RealmId::Ship(_)
+        | RealmId::Station(_)
+        | RealmId::Area(_)
+        | RealmId::Star(_)
+        | RealmId::Galaxy(_)
+        | RealmId::Universe => None,
     }
 }
 

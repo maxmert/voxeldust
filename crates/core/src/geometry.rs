@@ -8,23 +8,118 @@
 //! - **Velocity scaling**: band width must exceed `v_rel · dt · K_SAFETY` so a fast
 //!   body cannot skip the band between ticks.
 //! - **Swept-segment crossing**: membership evaluation tests the tick's whole motion
-//!   segment against the shell, so a 5.5 km/tick body cannot tunnel undetected.
+//!   segment against the shell, so a fast body cannot tunnel undetected. TRUE FOR `Shell` AND
+//!   `Aabb` since S5, on exact integers ([`region_verdict`]). What it does NOT yet cover, named
+//!   here so the sentence above is not read wider than it is:
+//!   - **`Obb` is not swept.** A rotated box needs a rotation, and no rotation of an integer
+//!     lattice vector is an integer lattice vector, so its swept form would decide on a
+//!     square-cornered box while its point form decides on a rounded-corner distance field — a
+//!     metre-scale disagreement between the two halves of one verdict. No shipped region is an
+//!     `Obb`. Ledgered.
+//!   - **A MOVING REGION sweeping over a PARKED subject is not covered.** Both endpoints are
+//!     reframed through THIS tick's placement book, so the segment tested is the subject's own
+//!     displacement, not the relative one. Closing it needs the prior endpoint folded through the
+//!     PREVIOUS tick's book. Ledgered.
+//!   - **One-tick fly-through is detected but not damped.** Acquiring a child and leaving it
+//!     within one tick now issues a re-home the next tick reverses. That needs bands sized from
+//!     real closing speed, which is the next slice; the condition under which it becomes
+//!     reachable is pinned by a test rather than argued.
 //!
 //! Also home of [`system_soi`] — the LUMINOSITY-based, GALAXY-UNIT star-system SOI,
 //! deliberately distinct from the mass-ratio, METERS [`crate::celestial::planet_soi`].
 
-use glam::{DQuat, DVec3};
+use glam::{DQuat, DVec3, I64Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::{FrameError, transfer_frame};
 use crate::placement::PlacementBook;
-use crate::pose::{FrameRef, LatticePos, RealmId, Separation, StampedPose, Tier};
+use crate::pose::{CELL_DOMAIN_MAX, FrameRef, LatticePos, RealmId, Separation, StampedPose, Tier};
 
 /// Base star-system SOI radius in galaxy units (ported from the reference repo's
 /// `galaxy.rs`; part of the galaxy-scale definition, not a tunable).
 pub const BASE_SOI_RADIUS: f64 = 100.0;
 /// SOI growth per unit of stellar luminosity, galaxy units.
 pub const SOI_LUMINOSITY_SCALE: f64 = 200.0;
+
+/// THE BAND A BOUNDARY NEEDS so that one step of travel at `v_mps` cannot carry a subject across it
+/// unseen: `v · dt · ticks`.
+///
+/// Half of ONE solve, and the owner's own words for it (2026-08-24): *band width and top speed are two
+/// readings of one solve*. A faster warp must be paid for with wider bands, and this is where that price
+/// is stated rather than argued.
+///
+/// `ticks` is how many steps the subject must be observed INSIDE the band — one step is not enough,
+/// because a subject sampled exactly on the boundary is a subject whose crossing nobody saw.
+///
+/// Branchless and monomorphic (HR5).
+#[must_use]
+pub fn band_for_speed(v_mps: f64, dt_s: f64, ticks: f64) -> f64 {
+    v_mps.abs() * dt_s * ticks
+}
+
+/// THE FASTEST SPEED A BAND CAN CONTAIN — the inverse of [`band_for_speed`], and the shape the owner's
+/// ruling takes on the movement side: *a realm's maximum speed is the speed at which one tick of travel
+/// still fits inside the thinnest band in that realm*.
+///
+/// FAILS CLOSED. A window of zero time (`dt·ticks <= 0`) is a nonsense configuration, and the two
+/// answers available are "any speed is safe" and "no speed is safe". It returns the second, because a
+/// safety number that reads as infinity on a misconfiguration is how a misconfiguration becomes a ship
+/// passing through a moon.
+#[must_use]
+pub fn speed_for_band(width_m: f64, dt_s: f64, ticks: f64) -> f64 {
+    let window_s = dt_s * ticks;
+    if window_s <= 0.0 {
+        return 0.0;
+    }
+    width_m / window_s
+}
+
+/// HOW MANY COORDINATE CELLS THE THINNEST BAND MUST BE, so that the sub-cell residual the integer
+/// verdict discards can never decide a membership. Three orders of magnitude, stated as the power of
+/// two the lattice is actually built on rather than as a round decimal.
+///
+/// This is the fence [`region_verdict`] has always cited by name and which never existed: its doc says
+/// *"`guard_quantum_band`-class fences keep every band ≥ 3 orders above"* the cell quantum. The claim
+/// was true by 3.49 orders at the millimetre tier and NOTHING enforced it, so it would have gone
+/// silently false the day a coarser tier lit up. [`guard_quantum_band`] now enforces it.
+pub const QUANTUM_BAND_CELLS: f64 = 1024.0;
+
+/// A band that is too thin for the grid it is measured on — the fence's refusal, carrying both sides
+/// so the failure names itself rather than needing a debugger.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+#[error(
+    "a band of {width_m} m is {cells} cells at this tier; every band must be at least \
+     {QUANTUM_BAND_CELLS} cells wide, or the sub-cell residual the integer verdict discards could \
+     decide a membership"
+)]
+pub struct BandTooThin {
+    /// The offending band's total width, metres.
+    pub width_m: f64,
+    /// That width in whole coordinate cells at the tier it is measured on.
+    pub cells: f64,
+}
+
+/// THE QUANTUM FENCE, finally written. Refuse a band thinner than [`QUANTUM_BAND_CELLS`] cells at its
+/// own tier.
+///
+/// WHY IT MATTERS AND WHY IT IS NOT DECORATION. The containment verdict decides on whole cells and
+/// DISCARDS the sub-cell remainder. That is safe only while a band is enormous compared to one cell —
+/// otherwise the discarded remainder is a meaningful fraction of the band, and which side of a boundary
+/// a subject is on becomes a question about rounding. Today a 3 m band is 3,072 cells, so the claim
+/// holds with room to spare; at a coarser tier the same 3 m would be a fraction of one cell and the
+/// claim would be false with nothing to say so.
+///
+/// # Errors
+/// [`BandTooThin`] when the width is under the required cell count, including a zero or negative width
+/// (which is thinner than anything and must never read as acceptable).
+pub fn guard_quantum_band(width_m: f64, tier: Tier) -> Result<(), BandTooThin> {
+    let cells = width_m / tier.cell_edge_m();
+    if cells >= QUANTUM_BAND_CELLS {
+        Ok(())
+    } else {
+        Err(BandTooThin { width_m, cells })
+    }
+}
 
 /// Minimum band-width safety factor: `(outer - inner) >= v_rel · dt · K_SAFETY`
 /// (design value K ≥ 2; a per-deployment band-tuning config — owed with the D-2 band
@@ -169,6 +264,19 @@ pub enum ShellCrossing {
 }
 
 /// Classify the swept segment `p0 -> p1` against the shell `|p| = r`.
+///
+/// ★ NOT THE CONTAINMENT ANSWER, AND IT MUST NOT BECOME ONE. Membership is decided on INTEGER CELLS
+/// inside [`region_verdict`], so that it is exact at every magnitude and identical on every host.
+/// This decimal form survives as an ORACLE and as a classifier for consumers that already work in
+/// metres. It has **zero production callers**, deliberately.
+///
+/// **ITS VALIDITY WINDOW, because comparing the two is the obvious thing to try and it has a trap.**
+/// Metres are exact only while a separation stays within `2⁵³` cells — about 8.8e12 m, roughly 59 AU.
+/// Beyond that the flatten rounds: one f64 ulp equals one whole Fine cell at 4.4e12 m, which is
+/// INSIDE the home system, and the loss reaches half a metre at the full coordinate domain. So an
+/// equality between this and the integer verdict PASSES on small fixtures and starts failing exactly
+/// when a test first runs at real scale — with the ORACLE at fault, not the implementation. Compare
+/// them only inside the window, and say which window in the test.
 #[must_use]
 pub fn segment_shell_crossing(p0: DVec3, p1: DVec3, r: f64) -> ShellCrossing {
     let start_inside = p0.length() <= r;
@@ -1160,30 +1268,105 @@ pub struct RegionVerdict {
 /// overflows `i128`) is classified OUTSIDE without squaring; the guarded [`Separation::cells_sq`]
 /// backstops the un-pre-testable remainder as a refusal, never a panic.
 ///
+/// # The verdict tests the tick's MOTION, not the instant (slice S5)
+///
+/// `prev_pos` is where this subject was at the previous evaluation, in the same frame as `pose`. The
+/// question asked is about the SEGMENT between them, which adds **exactly one thing** to the shipped
+/// answer: the case where the path dipped inside while BOTH samples were outside. Inside now, inside
+/// then, and LEAVING all keep the shipped verdict bit for bit, and the shipped point answer is asked
+/// FIRST — so the upgrade can only turn `false` into `true`, and no subject that is a member today
+/// can stop being one.
+///
+/// **"No prior" is spelled as a degenerate segment** (`prev_pos == pose.pos`), which is what every
+/// caller holding a single instant passes and what the first tick after a spawn, an adopt or an
+/// arrival carries. That is not a second rule: it takes the same path and short-circuits before any
+/// new arithmetic runs. It is also LOSSLESS rather than merely cheap — the guard compares CELLS, and
+/// a segment spanning at most one cell per axis provably cannot disagree with the point rule (a
+/// disagreement needs `|d|² ≥ 4` on a shell and two cells on some axis for a box).
+///
+/// The segment arithmetic is EXACT AT EVERY MAGNITUDE and needs **256 bits** to be so: the squared
+/// step length alone reaches 2.552e38 and overflows a signed 128-bit integer, and the deciding
+/// product peaks at 254 bits. Every refusal along that path — a negative edge, an out-of-domain
+/// endpoint, a prior the book cannot place — returns the shipped point verdict rather than a guess.
+///
+/// What it does NOT cover (a moving region over a parked subject, `Obb`, one-tick fly-through
+/// damping) is named in this module's own header.
+///
 /// # Errors
 /// [`FrameError`] exactly as [`region_signed_distance`]: an instant mismatch or a frame the book
 /// cannot place. Callers treat `Err` as "not a member" (safe degrade), never a container.
 pub fn region_verdict(
     pose: &StampedPose,
+    prev_pos: LatticePos,
     region: &RealmRegion,
     book: &PlacementBook,
     was_member: bool,
 ) -> Result<RegionVerdict, FrameError> {
+    // STEPS 1-4 ARE THE SHIPPED BODY, IN THE SHIPPED ORDER, WITH NOTHING MOVED ABOVE THEM — including
+    // `signed_distance_m` computed UNCONDITIONALLY before the shape fork, so every gauge, log line and
+    // sibling-claim diagnostic downstream is byte-identical.
     let p = transfer_frame(pose, region.frame, book)?;
     let tier = p.frame.tier();
     let sep = p.pos.separation(LatticePos::ORIGIN, tier);
     let signed_distance_m = region.shape.signed_distance(sep.metres());
+    // STEP 5: the prior endpoint. An `Option`, never an `Err` — see `prior_separation`.
+    let sep_prev = prior_separation(pose, prev_pos, region.frame, book, tier);
+    // STEP 6: ONE shape fork. The swept logic lives INSIDE each shape's own arm, so no two shape
+    // matches can drift onto different rules (the rule this type's own doc states).
     let member = match region.shape {
-        Boundary::Shell { r } => shell_member_cells(sep, r, &region.band, was_member, tier),
-        Boundary::Aabb { half } => aabb_member_cells(sep, half, &region.band, was_member, tier),
+        Boundary::Shell { r } => {
+            shell_member_swept(sep, sep_prev, r, &region.band, was_member, tier)
+        }
+        Boundary::Aabb { half } => {
+            aabb_member_swept(sep, sep_prev, half, &region.band, was_member, tier)
+        }
         // THE ROTATED-SHAPE DECIMAL ARM (§A7.2): the one lawful f64 verdict, quantum = the f64 ulp
         // at the region's own magnitude. No shipped region is an Obb; the arm stays covered.
+        // NOT SWEPT — see the module header's exclusion list.
         Boundary::Obb { .. } => region.band.member(was_member, signed_distance_m),
     };
     Ok(RegionVerdict {
         member,
         signed_distance_m,
     })
+}
+
+/// The prior endpoint re-expressed in the region's frame, or `None` for "no usable prior".
+///
+/// NEVER an `Err`. The current pose's verdict is the shipped answer and may not be lost to a failure
+/// about the prior, so an unplaceable prior degrades to the point verdict rather than propagating.
+fn prior_separation(
+    pose: &StampedPose,
+    prev_pos: LatticePos,
+    to: FrameRef,
+    book: &PlacementBook,
+    tier: Tier,
+) -> Option<Separation> {
+    // DEGENERACY IS DECIDED ON CELLS, NOT ON THE WHOLE POSITION. `LatticePos` compares an f64
+    // `offset`, so `prev_pos == pose.pos` would be a FLOAT equality and a NaN offset would make an
+    // identical pose compare UNEQUAL — the stationary-identity guarantee would have a hole in exactly
+    // the case it exists for. Cells are integers: this guard is TOTAL.
+    //
+    // It is also PROVABLY LOSSLESS. Two NORMALIZED positions with equal cells differ by under one cell
+    // per axis, so the reframed segment spans at most one cell per axis, i.e. `|d|² ≤ 3`; and a
+    // disagreement between the segment and the point rule needs `|d|² ≥ 4` on the shell (a both-outside
+    // pair forces `m² ≥ E²+1`, while `4(m² − E²) ≤ |d|²`) and `|d_i| ≥ 2` on some axis for the box.
+    // The bound is ATTAINED at `a = (−1,0,0) → b = (1,0,0)`, `E = 0`, so it is tight, not padded.
+    if prev_pos.cell() == pose.pos.cell() {
+        return None;
+    }
+    // SANITIZE THE SYNTHESIZED PRIOR. `prev_offset` is a bare field no sanitizer touches, and
+    // `transfer_frame` carries unchecked i64 cell arithmetic. `sanitized` passes every in-domain pose
+    // through bit-for-bit, so this constrains only the new input and changes no shipped behaviour.
+    let prev = StampedPose {
+        pos: prev_pos,
+        ..*pose
+    }
+    .sanitized();
+    // An unplaceable prior degrades to the point answer. Reachable: `RotationBeyondExactReach` depends
+    // on the separation MAGNITUDE, so it can refuse the prior while accepting the current pose.
+    let q = transfer_frame(&prev, to, book).ok()?;
+    Some(q.pos.separation(LatticePos::ORIGIN, tier))
 }
 
 /// A band edge in integer cells, with THE rounding rule stated once (§A4.4): the acquire edge
@@ -1202,23 +1385,22 @@ fn band_edge_cells(edge_m: f64, was_member: bool, tier: Tier) -> i64 {
     }
 }
 
-/// The `Shell` arm of the integer verdict: `Σ Δcellᵢ²` as `i128` against the squared edge. The
-/// Chebyshev pre-test rejects before any square (H-01); past it the edge bounds every axis, so the
-/// square is safe wherever the edge is lawful, and the guarded `cells_sq` turns the unlawful
-/// remainder into "outside" rather than a panic.
-fn shell_member_cells(
-    sep: Separation,
-    r_m: f64,
-    band: &ContainmentBand,
-    was_member: bool,
-    tier: Tier,
-) -> bool {
+/// THE SHELL BAND EDGE, derived ONCE and threaded. The shipped expression, hoisted: `band_edge_cells`
+/// is pure in unchanged arguments, so hoisting changes call sites, never values.
+fn shell_edge_cells(r_m: f64, band: &ContainmentBand, was_member: bool, tier: Tier) -> i64 {
     let edge_m = if was_member {
         r_m + band.outset()
     } else {
         r_m - band.inset()
     };
-    let edge_cells = band_edge_cells(edge_m, was_member, tier);
+    band_edge_cells(edge_m, was_member, tier)
+}
+
+/// The `Shell` arm of the integer verdict: `Σ Δcellᵢ²` as `i128` against the squared edge. The
+/// Chebyshev pre-test rejects before any square (H-01); past it the edge bounds every axis, so the
+/// square is safe wherever the edge is lawful, and the guarded `cells_sq` turns the unlawful
+/// remainder into "outside" rather than a panic.
+fn shell_point_member(sep: Separation, edge_cells: i64) -> bool {
     if sep.cells_chebyshev() > edge_cells {
         return false;
     }
@@ -1230,29 +1412,252 @@ fn shell_member_cells(
     }
 }
 
+/// THE SHELL ARM, SWEPT. Adds EXACTLY ONE THING to the shipped answer: the case where the tick's
+/// motion segment dipped inside while BOTH of its endpoints were outside. Every other case — inside
+/// now, inside then, leaving — keeps the shipped verdict bit for bit.
+///
+/// The order matters and is the whole equivalence argument: the shipped point answer is asked FIRST
+/// and returns immediately, so the upgrade can only ever turn `false` into `true`. No subject that is
+/// a member today can stop being one.
+fn shell_member_swept(
+    cur: Separation,
+    prev: Option<Separation>,
+    r_m: f64,
+    band: &ContainmentBand,
+    was_member: bool,
+    tier: Tier,
+) -> bool {
+    let edge = shell_edge_cells(r_m, band, was_member, tier);
+    if shell_point_member(cur, edge) {
+        return true;
+    }
+    // Degenerate segment, or a prior this book cannot place: the shipped answer stands.
+    let Some(prev) = prev else {
+        return false;
+    };
+    // LEAVING. The prior was inside and the current sample is not — the shipped answer is "released",
+    // and holding the subject for one more tick would invert membership at exactly the speeds this
+    // machinery exists for (at a galaxy ceiling the subject is already thousands of shell radii out).
+    if shell_point_member(prev, edge) {
+        return false;
+    }
+    shell_segment_dips(prev.cells(), cur.cells(), edge)
+}
+
+/// Does the closed segment `a → b` reach within `edge_cells` of the origin? EXACT, on integers, at
+/// every magnitude — no float, no square root, no division.
+///
+/// PRECONDITION, established by the only caller: both endpoints are already known OUTSIDE under the
+/// shipped point rule at this same `edge_cells`. Every violation of it FAILS CLOSED, and every refusal
+/// below returns the shipped point verdict rather than a guess.
+fn shell_segment_dips(a: I64Vec3, b: I64Vec3, edge_cells: i64) -> bool {
+    // B1 A region thinner than its own inset. A negative edge must never be squared into a positive
+    //    one: that would manufacture membership for a region the shipped rule calls never-acquirable.
+    if edge_cells < 0 {
+        return false;
+    }
+    // B2 DOMAIN GUARD. `unsigned_abs`, never `abs` (`i64::MIN.abs()` panics in debug). Refuses an
+    //    out-of-domain endpoint exactly as `cells_sq` refuses an unsquarable separation: no upgrade.
+    let reach =
+        a.x.unsigned_abs()
+            .max(a.y.unsigned_abs())
+            .max(a.z.unsigned_abs())
+            .max(b.x.unsigned_abs())
+            .max(b.y.unsigned_abs())
+            .max(b.z.unsigned_abs());
+    if reach > CELL_DOMAIN_MAX.unsigned_abs() {
+        return false;
+    }
+
+    let (ax, ay, az) = (i128::from(a.x), i128::from(a.y), i128::from(a.z));
+    let (dx, dy, dz) = (
+        i128::from(b.x) - ax,
+        i128::from(b.y) - ay,
+        i128::from(b.z) - az,
+    );
+
+    // B3 The nearest point of the segment is `a`, which is already known outside. This arm also
+    //    swallows a zero-length segment (`P == 0 ≥ 0`), so there is no separate degenerate branch.
+    //    Worst magnitude 3·CDM·2·CDM = 1.276e38, against i128::MAX = 1.701e38.
+    let p = ax * dx + ay * dy + az * dz;
+    if p >= 0 {
+        return false;
+    }
+
+    // B4 The nearest point is `b`, also known outside. Compared UNSIGNED so that `d·d` — which reaches
+    //    2.552e38 and does NOT fit a signed 128-bit integer — never has to.
+    let pn = p.unsigned_abs();
+    let s = dx.unsigned_abs() * dx.unsigned_abs()
+        + dy.unsigned_abs() * dy.unsigned_abs()
+        + dz.unsigned_abs() * dz.unsigned_abs();
+    if pn >= s {
+        return false;
+    }
+
+    // B5 INTERIOR MINIMUM. `|F|² = |a|² − (a·d)²/(d·d)`, so `|F|² ≤ E² ⟺ (|a|² − E²)·(d·d) ≤ (a·d)²`.
+    //    `checked_sub` is a TOTALITY guard, and it is documented as one: the precondition makes the
+    //    `None` arm unreachable from `region_verdict` (both-outside with `edge ≥ 0` forces `|a|² > E²`
+    //    either through the Chebyshev arm or the square arm), and it fails CLOSED.
+    //
+    //    WHAT THE UNIT TEST BELOW CAN AND CANNOT CATCH, measured rather than assumed. Replacing this
+    //    with a BARE subtraction panics in debug and the test goes red. Replacing it with a WRAPPING
+    //    subtraction is INDISTINGUISHABLE, and that is a proof rather than a gap: a wrapped `g` is
+    //    about `2¹²⁸`, while `g·s ≤ (a·d)²` requires `g ≤ |a|²`, so the wrapped form answers `false`
+    //    on every input the checked form answers `false` on. The guard is kept for the panic it
+    //    prevents and for saying out loud that the arm is reachable only from a violated contract.
+    let a2 = ax.unsigned_abs() * ax.unsigned_abs()
+        + ay.unsigned_abs() * ay.unsigned_abs()
+        + az.unsigned_abs() * az.unsigned_abs();
+    let e2 = u128::from(edge_cells.unsigned_abs()) * u128::from(edge_cells.unsigned_abs());
+    let Some(g) = a2.checked_sub(e2) else {
+        return false;
+    };
+
+    // B6 THE ONE 256-BIT COMPARISON. Both sides peak at 254 bits (`3·CDM²·3·(2·CDM)²` = 1.628e76
+    //    against `2²⁵⁶−1` = 1.158e77), so 256 is the minimum sufficient width AND it is sufficient.
+    le256(wide_mul(g, s), wide_mul(pn, pn))
+}
+
+/// 256-bit `<=` on `(hi, lo)` pairs, branchless, written out here rather than leaning on the derived
+/// tuple ordering of a foreign type — this is the comparison the containment answer turns on.
+#[inline]
+fn le256(l: (u128, u128), r: (u128, u128)) -> bool {
+    (l.0 < r.0) | ((l.0 == r.0) & (l.1 <= r.1))
+}
+
+/// `u128 × u128 → (hi, lo)`, exact, from four 64-bit limb products. ZERO branches — one region — which
+/// is the point of the limb form: nothing here can be left undriven.
+fn wide_mul(x: u128, y: u128) -> (u128, u128) {
+    const M: u128 = u64::MAX as u128;
+    let (x1, x0) = (x >> 64, x & M);
+    let (y1, y0) = (y >> 64, y & M);
+    let p00 = x0 * y0;
+    let p01 = x0 * y1;
+    let p10 = x1 * y0;
+    let p11 = x1 * y1;
+    let mid = (p00 >> 64) + (p01 & M) + (p10 & M);
+    // The mask is EXPLICIT. `mid << 64` alone is correct only through the silent discard of the bits
+    // shifted out, which is a fact about the language rather than a statement of the intent.
+    let lo = (p00 & M) | ((mid & M) << 64);
+    let hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
+    (hi, lo)
+}
+
 /// The `Aabb` arm: Chebyshev on integers, per axis. INSIDE a box the Euclidean SDF *is* the
 /// Chebyshev excess, so the acquire arm is semantics-identical to the f64 rule; the release arm
 /// holds over the box inflated by the outset PER AXIS (a box, where the f64 SDF's hold region had
 /// rounded corners) — a declared, conservative-outward difference bounded by the outset itself.
-fn aabb_member_cells(
-    sep: Separation,
+fn aabb_edge_cells(half_m: f64, band: &ContainmentBand, was_member: bool, tier: Tier) -> i64 {
+    let edge_m = if was_member {
+        half_m + band.outset()
+    } else {
+        half_m - band.inset()
+    };
+    band_edge_cells(edge_m, was_member, tier)
+}
+
+/// The shipped per-axis rule, made TOTAL. `i64::abs` panics in debug on `i64::MIN`; `unsigned_abs`
+/// cannot. The `edge_cells >= 0` term is REQUIRED, not decoration: an unsigned comparison against a
+/// negative edge would compare against its magnitude and admit a region the shipped rule calls
+/// never-acquirable. Bitwise `&`: one region, no branch.
+#[inline]
+fn axis_member(d: i64, edge_cells: i64) -> bool {
+    (edge_cells >= 0) & (d.unsigned_abs() <= edge_cells.unsigned_abs())
+}
+
+fn aabb_point_member(sep: Separation, e: [i64; 3]) -> bool {
+    let c = sep.cells();
+    // Bitwise `&`, not `&&`: every operand is cheap + pure, and a short-circuit would leave the
+    // tail axes uncoverable from a false-LHS side (the `AoiConfig::in_range` discipline).
+    axis_member(c.x, e[0]) & axis_member(c.y, e[1]) & axis_member(c.z, e[2])
+}
+
+/// THE BOX ARM, SWEPT. Same shape as the shell arm, same one addition, same ordering guarantee.
+fn aabb_member_swept(
+    cur: Separation,
+    prev: Option<Separation>,
     half: DVec3,
     band: &ContainmentBand,
     was_member: bool,
     tier: Tier,
 ) -> bool {
-    let cells = sep.cells();
-    let axis = |d: i64, half_m: f64| {
-        let edge_m = if was_member {
-            half_m + band.outset()
-        } else {
-            half_m - band.inset()
-        };
-        d.abs() <= band_edge_cells(edge_m, was_member, tier)
+    // ONE derivation per axis, x then y then z — the shipped evaluation order.
+    let e = [
+        aabb_edge_cells(half.x, band, was_member, tier),
+        aabb_edge_cells(half.y, band, was_member, tier),
+        aabb_edge_cells(half.z, band, was_member, tier),
+    ];
+    if aabb_point_member(cur, e) {
+        return true;
+    }
+    let Some(prev) = prev else {
+        return false;
     };
-    // Bitwise `&`, not `&&`: every operand is cheap + pure, and a short-circuit would leave the
-    // tail axes uncoverable from a false-LHS side (the `AoiConfig::in_range` discipline).
-    axis(cells.x, half.x) & axis(cells.y, half.y) & axis(cells.z, half.z)
+    if aabb_point_member(prev, e) {
+        return false;
+    }
+    box_segment_dips(prev.cells(), cur.cells(), e)
+}
+
+/// Segment versus axis-aligned box by the separating-axis test: three box FACE axes plus three CROSS
+/// axes. Exact; no division, no rational parameter, no interval bookkeeping to keep consistent.
+fn box_segment_dips(a: I64Vec3, b: I64Vec3, e: [i64; 3]) -> bool {
+    // C1 An axis thinner than its own inset — the box is empty, exactly as the shipped rule says.
+    if (e[0] < 0) | (e[1] < 0) | (e[2] < 0) {
+        return false;
+    }
+    // C2 DOMAIN GUARD — the same rule and the same refusal as the shell arm.
+    let reach =
+        a.x.unsigned_abs()
+            .max(a.y.unsigned_abs())
+            .max(a.z.unsigned_abs())
+            .max(b.x.unsigned_abs())
+            .max(b.y.unsigned_abs())
+            .max(b.z.unsigned_abs());
+    if reach > CELL_DOMAIN_MAX.unsigned_abs() {
+        return false;
+    }
+
+    // AN ANSWER-PRESERVING CLAMP, not an overflow cure. Past C2 every segment coordinate is within
+    // ±CDM, so a half-edge wider than CDM already contains every reachable point and clamping leaves
+    // the intersection SET identical. What it buys is margin: the unclamped radius term lands within
+    // 5.5e19 of the signed 128-bit ceiling — a fit with a relative headroom of 3e-19 — and the clamp
+    // restores a factor of two.
+    let h = [
+        i128::from(e[0].min(CELL_DOMAIN_MAX)),
+        i128::from(e[1].min(CELL_DOMAIN_MAX)),
+        i128::from(e[2].min(CELL_DOMAIN_MAX)),
+    ];
+    let a = [i128::from(a.x), i128::from(a.y), i128::from(a.z)];
+    let b = [i128::from(b.x), i128::from(b.y), i128::from(b.z)];
+
+    // C3 THE FACE AXES: both endpoints beyond the same face. Comparisons only, no products. This is
+    //    the exact generalisation of the shipped Chebyshev pre-test — for `a == b` it IS it. ONE
+    //    bitwise expression, so the six comparisons cost one branch rather than six.
+    let miss = ((a[0].min(b[0]) > h[0]) | (a[0].max(b[0]) < -h[0]))
+        | ((a[1].min(b[1]) > h[1]) | (a[1].max(b[1]) < -h[1]))
+        | ((a[2].min(b[2]) > h[2]) | (a[2].max(b[2]) < -h[2]));
+    if miss {
+        return false;
+    }
+
+    // C4 THE CROSS AXES. The segment's own half-length vector is parallel to `d`, so its radius on
+    //    every cross axis is ZERO and the midpoint's projection equals the START point's:
+    //    `m × d = (a + d/2) × d = a × d`. The endpoint form is EXACT, not an approximation.
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let c = [
+        a[1] * d[2] - a[2] * d[1],
+        a[2] * d[0] - a[0] * d[2],
+        a[0] * d[1] - a[1] * d[0],
+    ];
+    // `abs` on an i128 whose magnitude is at most 2·CDM — total. Never `i64::abs`.
+    let r = [
+        h[1] * d[2].abs() + h[2] * d[1].abs(),
+        h[2] * d[0].abs() + h[0] * d[2].abs(),
+        h[0] * d[1].abs() + h[1] * d[0].abs(),
+    ];
+    let separated = (c[0].abs() > r[0]) | (c[1].abs() > r[1]) | (c[2].abs() > r[2]);
+    !separated
 }
 
 /// Why a realm-region forest is malformed — the boot fence (task #135, C-5). ONE variant per REJECT arm
@@ -1263,6 +1668,17 @@ fn aabb_member_cells(
 pub enum RegionNestError {
     #[error("the forest has {found} ambient roots (parent: None); exactly one is required")]
     RootCount { found: usize },
+    /// A band too thin for the grid it is measured on — see [`guard_quantum_band`].
+    #[error(
+        "realm {realm:?} has a band of {width_m} m, which is only {cells} cells at its own tier; a \
+         band must be at least {QUANTUM_BAND_CELLS} cells wide or the sub-cell residual the integer \
+         verdict discards could decide a membership"
+    )]
+    BandTooThin {
+        realm: RealmId,
+        width_m: f64,
+        cells: f64,
+    },
     #[error(
         "two regions share realm {realm:?}; each realm must be unique (region_depth determinism)"
     )]
@@ -1271,8 +1687,6 @@ pub enum RegionNestError {
     DanglingParent { realm: RealmId, parent: RealmId },
     #[error("region {realm:?}'s parent chain cycles or never reaches the single root")]
     CycleOrOrphan { realm: RealmId },
-    #[error("the forest has {found} regions; the membership bitset holds at most {max}")]
-    TooManyRegions { found: usize, max: usize },
     #[error(
         "region {realm:?} is not geometrically inside its parent {parent:?}: it reaches {reach} m from \
          the parent's centre but the parent's usable interior ends at {limit} m"
@@ -1416,17 +1830,45 @@ fn lineage_verdict(
     }
 }
 
+/// The boot fence over a shard's region forest: exactly one root, unique realms, every parent
+/// resolvable, every chain reaching the root, and every child geometrically inside its parent at its
+/// worst instant.
+///
+/// **There is NO cap on how many regions a forest may hold (SL9).** One used to exist, because
+/// membership was a fixed-width bitset with one bit per region; it is gone with that bitset. A galaxy
+/// states a hundred and fifty thousand star systems and this fence judges every one of them.
+///
+/// # Errors
+/// [`RegionNestError`] naming the first violated clause.
 pub fn guard_regions_nest(
     regions: &[RealmRegion],
-    max: usize,
     reaches: &std::collections::BTreeMap<RealmId, ChildReach>,
 ) -> Result<(), RegionNestError> {
-    guard_region_count(regions, max)?;
     guard_single_root(regions)?;
     guard_unique_realms(regions)?;
     guard_parents_resolve(regions)?;
     guard_chains_reach_root(regions)?;
     guard_children_fit_parents(regions, reaches)?;
+    guard_bands_clear_the_quantum(regions)?;
+    Ok(())
+}
+
+/// Every band must be thick enough that the sub-cell residual the integer verdict DISCARDS cannot
+/// decide a membership — [`guard_quantum_band`], applied to the forest that is about to boot.
+///
+/// This is the fence [`region_verdict`] has cited by name since it was written and which did not
+/// exist. Its claim held by three and a half orders at the millimetre grid and nothing enforced it, so
+/// it would have gone silently false the day a coarser grid lit up, or the day a band was sized down
+/// to fit a small body.
+fn guard_bands_clear_the_quantum(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+    for r in regions {
+        let width_m = r.band.inset() + r.band.outset();
+        guard_quantum_band(width_m, r.frame.tier()).map_err(|e| RegionNestError::BandTooThin {
+            realm: r.realm,
+            width_m: e.width_m,
+            cells: e.cells,
+        })?;
+    }
     Ok(())
 }
 
@@ -1463,16 +1905,6 @@ fn guard_children_fit_parents(
                 limit,
             });
         }
-    }
-    Ok(())
-}
-
-fn guard_region_count(regions: &[RealmRegion], max: usize) -> Result<(), RegionNestError> {
-    if regions.len() > max {
-        return Err(RegionNestError::TooManyRegions {
-            found: regions.len(),
-            max,
-        });
     }
     Ok(())
 }
@@ -1540,6 +1972,725 @@ fn chain_reaches_root(regions: &[RealmRegion], start: RealmId) -> bool {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// The verdict asked about ONE INSTANT — a degenerate segment, which is what every caller that
+    /// holds a single pose passes. Every pre-existing membership test below reaches the rule through
+    /// this alias, carrying the literal expected values it was written with, so the whole suite is a
+    /// regression gate on the claim that a subject which has not moved gets exactly the shipped answer.
+    fn point_verdict(
+        pose: &StampedPose,
+        region: &RealmRegion,
+        book: &PlacementBook,
+        was_member: bool,
+    ) -> Result<RegionVerdict, FrameError> {
+        region_verdict(pose, pose.pos, region, book, was_member)
+    }
+
+    // ======================= SLICE 5 — THE SWEPT MEMBERSHIP GATE =======================
+    //
+    // THE PLAN'S GATE AS WRITTEN IS FALSE, AND THAT IS RECORDED HERE RATHER THAN QUIETLY DROPPED.
+    // It asked that "for every subject whose per-tick travel is below the band, the swept verdict
+    // equals the point verdict, bit for bit". Two cells of travel — 1.95 mm, three orders below the
+    // shipped 3 m band — genuinely clips a region at every size: `a = (E,−1,0) → b = (E,+1,0)` has
+    // both endpoints outside and its midpoint exactly on the surface. Written as an equality that
+    // gate would be RED for a correct implementation, and the cheapest way to make it green would be
+    // to weaken the implementation. It is replaced below by four arms that can still fail:
+    //   ARM 1  a subject that has not moved gets the shipped answer, bit for bit;
+    //   ARM 2  one cell of travel per axis can never disagree — proved, then checked exhaustively;
+    //   ARM 3  every disagreement obeys an exactly-tight integer envelope;
+    //   ARM 4  an independent oracle carrying no floats at all.
+
+    /// The point rule written from the SPECIFICATION rather than copied from the shipped body: edge
+    /// is `r + outset` when held and `r − inset` when not, floored to acquire and ceiled to release,
+    /// compared as squared cell lengths. A second transcription, so a typo in one is not a typo in
+    /// both.
+    fn frozen_point_member(
+        sep: Separation,
+        region: &RealmRegion,
+        was_member: bool,
+        tier: Tier,
+    ) -> bool {
+        let edge_of = |m: f64| -> i64 {
+            let c = m / tier.cell_edge_m();
+            if was_member {
+                c.ceil() as i64
+            } else {
+                c.floor() as i64
+            }
+        };
+        let widen = |m: f64| {
+            if was_member {
+                m + region.band.outset()
+            } else {
+                m - region.band.inset()
+            }
+        };
+        let c = sep.cells();
+        match region.shape {
+            Boundary::Shell { r } => {
+                let e = edge_of(widen(r));
+                if e < 0 {
+                    return false;
+                }
+                let sq = i128::from(c.x) * i128::from(c.x)
+                    + i128::from(c.y) * i128::from(c.y)
+                    + i128::from(c.z) * i128::from(c.z);
+                sq <= i128::from(e) * i128::from(e)
+            }
+            Boundary::Aabb { half } => {
+                // Bitwise, never `&&`: a short-circuit leaves the tail axes uncoverable from a
+                // false left-hand side — this crate's own written discipline, which the first draft
+                // of this very helper broke and the coverage gate caught.
+                let ax = |d: i64, h: f64| {
+                    let e = edge_of(widen(h));
+                    (e >= 0) & (i128::from(d).abs() <= i128::from(e))
+                };
+                ax(c.x, half.x) & ax(c.y, half.y) & ax(c.z, half.z)
+            }
+            // THE ROTATED ARM IS UNTOUCHED BY THIS SLICE, and the fixture proves it by including one:
+            // the reference states the decimal rule directly, and the identity gate then asserts that
+            // a degenerate segment reaches exactly that and nothing new.
+            Boundary::Obb { .. } => region
+                .band
+                .member(was_member, region.shape.signed_distance(sep.metres())),
+        }
+    }
+
+    fn sep_of(pose: &StampedPose) -> Separation {
+        pose.pos.separation(LatticePos::ORIGIN, Tier::Fine)
+    }
+
+    // ---------- ARM 1: a subject that has not moved gets the shipped answer ----------
+
+    // ---------- SLICE S6: THE QUANTUM FENCE, WHICH WAS CITED BY NAME FOR MONTHS AND DID NOT EXIST ----
+
+    #[test]
+    fn a_band_thinner_than_the_grid_it_is_measured_on_is_refused() {
+        // Both arms, and the boundary between them exactly. One cell under the requirement refuses;
+        // exactly at it passes — an inclusive edge, stated by driving it rather than by a comment.
+        let edge = Tier::Fine.cell_edge_m();
+        let exactly = QUANTUM_BAND_CELLS * edge;
+        assert_eq!(guard_quantum_band(exactly, Tier::Fine), Ok(()));
+        assert_eq!(
+            guard_quantum_band(exactly - edge, Tier::Fine).expect_err("one cell short is refused"),
+            BandTooThin {
+                width_m: exactly - edge,
+                cells: QUANTUM_BAND_CELLS - 1.0,
+            }
+        );
+        // The shipped floor clears it with room to spare, which is the claim the verdict's own doc
+        // makes and which nothing checked until now.
+        assert_eq!(guard_quantum_band(3.0, Tier::Fine), Ok(()));
+        // A zero or negative width is thinner than anything and must never read as acceptable.
+        assert!(guard_quantum_band(0.0, Tier::Fine).is_err());
+        assert!(guard_quantum_band(-1.0, Tier::Fine).is_err());
+    }
+
+    #[test]
+    fn the_boot_fence_refuses_a_forest_whose_band_is_too_thin_for_its_grid() {
+        // The fence reaches the forest, not just the helper. A lawful forest passes; the same forest
+        // with one band thinned below the grid is refused BY NAME.
+        let root = test_region_r(RealmId::System(0), None, 1_000.0);
+        let mut child = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 10.0);
+        let reaches = std::collections::BTreeMap::from([
+            (RealmId::System(0), ChildReach::Fixed(DVec3::ZERO)),
+            (RealmId::Planet(1), ChildReach::Fixed(DVec3::ZERO)),
+        ]);
+        assert_eq!(guard_regions_nest(&[root, child], &reaches), Ok(()));
+
+        // A band of one millimetre is about one cell at this grid — far under the requirement.
+        child.band = ContainmentBand::for_containment_velocity_safe(0.0004, 0.0006, 0.0, 1.0, 0.0)
+            .expect("a thin band is still a valid band");
+        let err = guard_regions_nest(&[root, child], &reaches).expect_err("a thin band is refused");
+        assert_eq!(
+            err,
+            RegionNestError::BandTooThin {
+                realm: RealmId::Planet(1),
+                width_m: 0.001,
+                cells: 0.001 / Tier::Fine.cell_edge_m(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_subject_that_has_not_moved_gets_the_shipped_point_answer_on_every_fixture() {
+        let shell = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 10.0);
+        let boxed = RealmRegion {
+            shape: Boundary::Aabb {
+                half: DVec3::new(4.0, 6.0, 8.0),
+            },
+            look: Some(Boundary::Aabb {
+                half: DVec3::new(4.0, 6.0, 8.0),
+            }),
+            ..test_region(RealmId::Station(2), Some(RealmId::System(0)))
+        };
+        // A region THINNER THAN ITS OWN INSET, whose acquire edge is negative. It is never
+        // acquirable, at any distance, by either rule — and it is the fixture that drives the
+        // negative-edge arm of both this reference and the shipped verdict.
+        let thin = test_region_r(RealmId::Station(3), Some(RealmId::System(0)), 0.5);
+        // THE ROTATED SHAPE, which this slice deliberately leaves on the decimal point rule. It is in
+        // the fixture so that "the swept change does not touch it" is a measurement, not an omission.
+        let turned = RealmRegion {
+            shape: Boundary::Obb {
+                half: DVec3::new(4.0, 6.0, 8.0),
+                orient: DQuat::from_rotation_z(0.7),
+            },
+            look: None,
+            ..test_region(RealmId::Station(4), Some(RealmId::System(0)))
+        };
+        let mut checked = 0u32;
+        for region in [&shell, &boxed, &thin, &turned] {
+            let book = verdict_book(region.frame);
+            for m in [
+                0.0, 1.0, 3.9, 4.0, 4.1, 8.5, 9.0, 9.5, 10.0, 11.5, 12.0, 12.5, 13.0, 1.0e3, 1.0e6,
+                1.0e12,
+            ] {
+                for v in [
+                    DVec3::new(m, 0.0, 0.0),
+                    DVec3::new(0.0, m, 0.0),
+                    DVec3::new(0.0, 0.0, m),
+                    DVec3::new(m, m, m),
+                ] {
+                    for was in [false, true] {
+                        let pose = pose_at(v);
+                        let got =
+                            region_verdict(&pose, pose.pos, region, &book, was).expect("placeable");
+                        assert_eq!(
+                            got.member,
+                            frozen_point_member(sep_of(&pose), region, was, Tier::Fine),
+                            "degenerate segment at {v:?} (was_member = {was}) must be the point answer"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        // The gate must have run. A fixture matrix that silently produced nothing would assert
+        // nothing, and would look exactly like a pass.
+        assert_eq!(checked, 4 * 16 * 4 * 2);
+    }
+
+    // ---------- ARM 2: one cell of travel can never disagree ----------
+
+    #[test]
+    fn one_cell_of_travel_per_axis_can_never_disagree_with_the_point_rule() {
+        // This is what makes the "no prior" short-circuit LOSSLESS rather than merely cheap: two
+        // normalized positions whose cells are equal differ by under one cell per axis, so the
+        // reframed segment spans at most one cell per axis. A shell disagreement needs |d|² ≥ 4
+        // (both endpoints outside forces m² ≥ E²+1, while 4(m² − E²) ≤ |d|²) and a box disagreement
+        // needs |d_i| ≥ 2 on some axis. At one cell per axis |d|² ≤ 3, so neither is reachable.
+        let mut shell_pairs = 0u64;
+        let mut box_pairs = 0u64;
+        for e in 0..=5i64 {
+            let span = e + 2;
+            for ax in -span..=span {
+                for ay in -span..=span {
+                    for az in -span..=span {
+                        let a = I64Vec3::new(ax, ay, az);
+                        for dx in -1..=1i64 {
+                            for dy in -1..=1i64 {
+                                for dz in -1..=1i64 {
+                                    let b = a + I64Vec3::new(dx, dy, dz);
+                                    let out_sphere =
+                                        |p: I64Vec3| p.x * p.x + p.y * p.y + p.z * p.z > e * e;
+                                    let out_box =
+                                        |p: I64Vec3| p.x.abs().max(p.y.abs()).max(p.z.abs()) > e;
+                                    if out_sphere(a) && out_sphere(b) {
+                                        shell_pairs += 1;
+                                        assert!(
+                                            !shell_segment_dips(a, b, e),
+                                            "shell: {a:?} -> {b:?} at edge {e} must not dip"
+                                        );
+                                    }
+                                    if out_box(a) && out_box(b) {
+                                        box_pairs += 1;
+                                        assert!(
+                                            !box_segment_dips(a, b, [e, e, e]),
+                                            "box: {a:?} -> {b:?} at edge {e} must not dip"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Pinned counts, so a loop that stopped enumerating would be caught rather than read as a
+        // pass. These are the number of both-outside pairs the sweep actually saw.
+        assert_eq!(shell_pairs, 187_008);
+        assert_eq!(box_pairs, 135_492);
+    }
+
+    #[test]
+    fn the_one_cell_bound_is_attained_so_it_is_tight_and_not_padded() {
+        // Exactly two cells of travel DOES disagree — the minimum divergent step. If this ever went
+        // quiet, the arm above would be proving a vacuous bound.
+        assert!(shell_segment_dips(
+            I64Vec3::new(-1, 0, 0),
+            I64Vec3::new(1, 0, 0),
+            0
+        ));
+        assert!(box_segment_dips(
+            I64Vec3::new(-1, 0, 0),
+            I64Vec3::new(1, 0, 0),
+            [0, 0, 0]
+        ));
+        // And one cell either side of it does not.
+        assert!(!shell_segment_dips(
+            I64Vec3::new(-1, 0, 0),
+            I64Vec3::new(0, 0, 0),
+            0
+        ));
+    }
+
+    // ---------- ARM 3: the divergence envelope ----------
+
+    #[test]
+    fn every_disagreement_obeys_the_exactly_tight_integer_envelope() {
+        // Whenever the sweep adds a member the point rule refused, the segment can only have reached
+        // inside by at most the sagitta of a chord of its own length. In integers, with no square
+        // root and no float: 4·(min(|a|²,|b|²) − E²) ≤ |d|².
+        let mut dips = 0u64;
+        let mut attained = false;
+        for e in [0i64, 1, 7, 64, 1_000, 5_120, 12_288] {
+            for k in 1..=40i64 {
+                for off in -2..=2i64 {
+                    let a = I64Vec3::new(e + off, -k, 0);
+                    let b = I64Vec3::new(e + off, k, 0);
+                    let sq = |p: I64Vec3| {
+                        i128::from(p.x) * i128::from(p.x)
+                            + i128::from(p.y) * i128::from(p.y)
+                            + i128::from(p.z) * i128::from(p.z)
+                    };
+                    let e2 = i128::from(e) * i128::from(e);
+                    if (sq(a) <= e2) | (sq(b) <= e2) {
+                        continue;
+                    }
+                    if !shell_segment_dips(a, b, e) {
+                        continue;
+                    }
+                    dips += 1;
+                    let d = b - a;
+                    let dd = sq(I64Vec3::new(d.x, d.y, d.z));
+                    let m2 = sq(a).min(sq(b));
+                    assert!(
+                        4 * (m2 - e2) <= dd,
+                        "envelope violated at {a:?} -> {b:?}, edge {e}"
+                    );
+                    if 4 * (m2 - e2) == dd {
+                        attained = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            dips > 100,
+            "the envelope arm must have seen real dips: {dips}"
+        );
+        // EXACTLY TIGHT. If the bound were padded this would never fire, and the arm would be
+        // asserting something weaker than it claims.
+        assert!(
+            attained,
+            "the envelope bound must be attained, not merely respected"
+        );
+    }
+
+    // ---------- ARM 4: an independent oracle, with no floats ----------
+
+    #[test]
+    fn an_independent_lattice_oracle_agrees_at_every_magnitude_up_to_the_domain() {
+        // Built on the lattice so it cannot degrade the way a decimal oracle does. For Q = (ρ,0,0)
+        // and the perpendicular integer direction (0,1,0), the segment Q−k·u → Q+k·u has its nearest
+        // point exactly at Q for every k ≥ 1, so the exact answer is (ρ ≤ E) — no arithmetic, no
+        // rounding, nothing shared with the implementation.
+        let mut cases = 0u32;
+        for e in [
+            1i64,
+            7,
+            5_120,
+            12_288,
+            6_523_904_000,
+            360_960_000_000_000,
+            2_302_768_551_868_075_776,
+        ] {
+            for rho in [e - 2, e - 1, e, e + 1, e + 2] {
+                for k in [
+                    1i64,
+                    2,
+                    3,
+                    1_000,
+                    1_000_000,
+                    1_000_000_000,
+                    1_000_000_000_000,
+                    1_049_400_000_000_000_000,
+                ] {
+                    // Every construction here is IN DOMAIN by inspection: the widest edge is
+                    // 0.4993 of the domain bound and the longest step 0.2276 of it. There is
+                    // deliberately no guard, because a guard nothing can drive is a branch nothing
+                    // can cover.
+                    let a = I64Vec3::new(rho, -k, 0);
+                    let b = I64Vec3::new(rho, k, 0);
+                    // THE HELPER'S STATED PRECONDITION: both endpoints already point-outside. A few
+                    // of these constructions put an endpoint inside, where the documented contract is
+                    // a total `false` rather than the geometric answer. They belong to the totality
+                    // test, not to the oracle.
+                    let outside = i128::from(rho) * i128::from(rho) + i128::from(k) * i128::from(k)
+                        > i128::from(e) * i128::from(e);
+                    if !outside {
+                        continue;
+                    }
+                    assert_eq!(
+                        shell_segment_dips(a, b, e),
+                        rho <= e,
+                        "oracle disagrees: rho = {rho}, edge = {e}, k = {k}"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+        // PINNED, not a threshold: 280 constructions, 49 of which put an endpoint inside the edge
+        // and belong to the totality arm instead. A loop that quietly stopped enumerating would be
+        // caught here rather than read as a pass.
+        assert_eq!(cases, 231);
+    }
+
+    #[test]
+    fn the_wide_multiply_is_exact_against_a_different_limb_split() {
+        // The oracle uses 32-bit limbs, so it is not the implementation restated. Plus the cheap
+        // invariant that the low half is the wrapping product.
+        let oracle = |x: u128, y: u128| -> (u128, u128) {
+            const M: u128 = u32::MAX as u128;
+            let xs = [x & M, (x >> 32) & M, (x >> 64) & M, (x >> 96) & M];
+            let ys = [y & M, (y >> 32) & M, (y >> 64) & M, (y >> 96) & M];
+            let mut acc = [0u128; 8];
+            for (i, &xi) in xs.iter().enumerate() {
+                for (j, &yj) in ys.iter().enumerate() {
+                    acc[i + j] += xi * yj;
+                }
+            }
+            // Normalize the 32-bit limb carries, then reassemble.
+            let mut carry = 0u128;
+            let mut limbs = [0u128; 8];
+            for (n, slot) in limbs.iter_mut().enumerate() {
+                let v = acc[n] + carry;
+                *slot = v & M;
+                carry = v >> 32;
+            }
+            let lo = limbs[0] | (limbs[1] << 32) | (limbs[2] << 64) | (limbs[3] << 96);
+            let hi = limbs[4] | (limbs[5] << 32) | (limbs[6] << 64) | (limbs[7] << 96);
+            (hi, lo)
+        };
+        for (x, y) in [
+            (0u128, 0u128),
+            (1, 1),
+            (u128::MAX, u128::MAX),
+            (1 << 127, 1 << 127),
+            (u64::MAX as u128, u64::MAX as u128),
+            (
+                3 * 4_611_686_018_427_387_903u128 * 4_611_686_018_427_387_903u128,
+                1,
+            ),
+            (
+                63_802_943_624_105_984_887_243_264_331_513_856_000,
+                255_211_774_496_423_939_548_973_057_326_055_424_012,
+            ),
+        ] {
+            assert_eq!(wide_mul(x, y), oracle(x, y), "wide multiply at {x} × {y}");
+            assert_eq!(wide_mul(x, y).1, x.wrapping_mul(y));
+        }
+        // The 256-bit comparator, both directions and the tie.
+        assert!(le256((1, 0), (1, 0)));
+        assert!(le256((0, u128::MAX), (1, 0)));
+        assert!(!le256((1, 0), (0, u128::MAX)));
+        assert!(le256((1, 5), (1, 6)));
+        assert!(!le256((1, 7), (1, 6)));
+    }
+
+    // ---------- THE HEADLINE: what the slice exists for ----------
+
+    #[test]
+    fn a_subject_travelling_past_a_whole_child_in_one_tick_still_acquires_it() {
+        // The plan's headline: "a subject travelling one tick further than a child's whole diameter
+        // still acquires that child". Before this slice acquisition needed a SAMPLE landing at least
+        // one inset inside the surface, so no widening of any band could ever buy it.
+        let region = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 10.0);
+        let book = verdict_book(region.frame);
+        let before = pose_at(DVec3::new(-1_000.0, 0.0, 0.0));
+        let after = pose_at(DVec3::new(1_000.0, 0.0, 0.0));
+        // 2 km of travel across a 20 m child — a hundred diameters in one tick.
+        assert!(
+            !region_verdict(&after, after.pos, &region, &book, false)
+                .expect("placeable")
+                .member,
+            "the point rule cannot see this crossing — that is the defect"
+        );
+        assert!(
+            region_verdict(&after, before.pos, &region, &book, false)
+                .expect("placeable")
+                .member,
+            "the swept rule must see it"
+        );
+        // AND IT IS NOT A BLANKET YES: a parallel pass that misses by a metre stays outside.
+        let miss_a = pose_at(DVec3::new(-1_000.0, 11.0, 0.0));
+        let miss_b = pose_at(DVec3::new(1_000.0, 11.0, 0.0));
+        assert!(
+            !region_verdict(&miss_b, miss_a.pos, &region, &book, false)
+                .expect("placeable")
+                .member,
+            "a pass outside the acquire edge must stay outside"
+        );
+    }
+
+    #[test]
+    fn leaving_a_region_still_releases_on_the_tick_it_leaves() {
+        // The one thing a swept rule must NOT do: hold a subject that has gone. At real speeds a
+        // held subject can be thousands of radii outside, so a one-tick lag here would invert
+        // membership at exactly the speeds this machinery exists for.
+        let region = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 10.0);
+        let book = verdict_book(region.frame);
+        let inside = pose_at(DVec3::new(0.0, 0.0, 0.0));
+        let gone = pose_at(DVec3::new(1_000.0, 0.0, 0.0));
+        assert!(
+            !region_verdict(&gone, inside.pos, &region, &book, true)
+                .expect("placeable")
+                .member,
+            "a subject whose prior was inside and whose sample is outside must release"
+        );
+    }
+
+    // ---------- THE FLAP CONDITION, MEASURED RATHER THAN ARGUED ----------
+
+    #[test]
+    fn a_swept_acquire_holds_below_the_band_and_flaps_above_it() {
+        // Acquiring a child and leaving it within one tick issues a re-home the next tick reverses.
+        // That is not cured here — it is cured by bands sized from real closing speed, which is the
+        // next slice. What IS established here is the exact condition, as a measurement that could
+        // have come out either way: the hysteresis damps the flap while one step of travel stays
+        // inside the band, and stops damping it above.
+        let region = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 10.0);
+        let book = verdict_book(region.frame);
+        let band_m = region.band.inset() + region.band.outset(); // 3 m on this fixture
+        assert_eq!(band_m, 3.0);
+
+        // A step INSIDE the band: graze the surface, acquire on the sweep, and still be held next
+        // tick because the release edge sits a whole outset further out.
+        let step = 2.0_f64;
+        let graze_a = pose_at(DVec3::new(9.0, -step / 2.0, 0.0));
+        let graze_b = pose_at(DVec3::new(9.0, step / 2.0, 0.0));
+        let acquired = region_verdict(&graze_b, graze_a.pos, &region, &book, false)
+            .expect("placeable")
+            .member;
+        assert!(acquired, "a graze inside the acquire edge must acquire");
+        let next = pose_at(DVec3::new(9.0, step / 2.0 + step, 0.0));
+        assert!(
+            region_verdict(&next, graze_b.pos, &region, &book, true)
+                .expect("placeable")
+                .member,
+            "below the band, one more step must NOT release — this is what stops the flap today"
+        );
+
+        // A step FAR ABOVE the band: acquire on the sweep, gone on the very next tick. The flap.
+        let fast_a = pose_at(DVec3::new(-1_000.0, 0.0, 0.0));
+        let fast_b = pose_at(DVec3::new(1_000.0, 0.0, 0.0));
+        assert!(
+            region_verdict(&fast_b, fast_a.pos, &region, &book, false)
+                .expect("placeable")
+                .member,
+            "the fast crossing acquires"
+        );
+        let fast_c = pose_at(DVec3::new(3_000.0, 0.0, 0.0));
+        assert!(
+            !region_verdict(&fast_c, fast_b.pos, &region, &book, true)
+                .expect("placeable")
+                .member,
+            "and releases the next tick — the one-tick fly-through, which the band slice cures"
+        );
+    }
+
+    // ---------- EVERY REFUSAL RETURNS THE SHIPPED ANSWER ----------
+
+    #[test]
+    fn a_region_thinner_than_its_own_inset_stays_never_acquirable_even_swept() {
+        // A negative edge must never be squared into a positive one.
+        assert!(!shell_segment_dips(
+            I64Vec3::new(1, 0, 0),
+            I64Vec3::new(-1, 0, 0),
+            -5
+        ));
+        assert!(!box_segment_dips(
+            I64Vec3::new(1, 0, 0),
+            I64Vec3::new(-1, 0, 0),
+            [-5, 1, 1]
+        ));
+    }
+
+    #[test]
+    fn an_out_of_domain_endpoint_refuses_the_upgrade_rather_than_squaring_it() {
+        // The same convention a separation too large to square already uses: refuse, never panic,
+        // and never upgrade. Reachable from a lawful subject and region whose frames sit far apart.
+        let far = I64Vec3::new(CELL_DOMAIN_MAX, 0, 0);
+        let beyond = I64Vec3::new(CELL_DOMAIN_MAX / 2, 0, 0) + far;
+        assert!(!shell_segment_dips(beyond, -far, 1_000));
+        assert!(!box_segment_dips(beyond, -far, [1_000, 1_000, 1_000]));
+        // And exactly AT the domain edge it still answers, so the guard is a boundary and not a wall.
+        assert!(shell_segment_dips(far, -far, 1_000));
+    }
+
+    #[test]
+    fn the_dip_predicate_is_total_when_its_precondition_is_violated() {
+        // The interior-minimum step subtracts the squared edge from the squared distance. Reaching
+        // it with an endpoint INSIDE the edge violates the caller's precondition, and the contract
+        // is that the helper answers `false` rather than panicking. VERIFIED BY PLANTING IT: with a
+        // bare subtraction this test goes red on a debug overflow. A WRAPPING subtraction is not
+        // caught, and cannot be by any input — see the proof beside the guard itself.
+        assert!(!shell_segment_dips(
+            I64Vec3::new(1, 0, 0),
+            I64Vec3::new(-1, 0, 0),
+            5
+        ));
+    }
+
+    #[test]
+    fn a_receding_segment_and_a_zero_length_one_take_the_same_early_exit() {
+        // The nearest point is the start, which the caller already knows is outside. A zero-length
+        // segment lands in the same arm, so there is no separate degenerate branch to leave undriven.
+        assert!(!shell_segment_dips(
+            I64Vec3::new(10, 0, 0),
+            I64Vec3::new(20, 0, 0),
+            5
+        ));
+        assert!(!shell_segment_dips(
+            I64Vec3::new(10, 0, 0),
+            I64Vec3::new(10, 0, 0),
+            5
+        ));
+        // The nearest point is the END, also known outside.
+        assert!(!shell_segment_dips(
+            I64Vec3::new(20, 0, 0),
+            I64Vec3::new(10, 0, 0),
+            5
+        ));
+    }
+
+    #[test]
+    fn the_box_sweep_separates_on_each_cross_axis_and_clips_a_true_corner() {
+        // Each of the three cross axes must be the DECIDING one in at least one case, or an axis
+        // could be transposed and nothing would notice.
+        let h = [10i64, 10, 10];
+        // A diagonal near-miss past a corner in each of the three coordinate planes.
+        // Each cuts a plane at distance 21.2 from the centre, past the corner at (10,10) whose own
+        // reach on that axis is 14.1 — a true miss, and one the FACE test cannot decide, because
+        // every axis range straddles the box.
+        for (name, a, b) in [
+            ("z decides", I64Vec3::new(30, 0, 0), I64Vec3::new(0, 30, 0)),
+            ("x decides", I64Vec3::new(0, 30, 0), I64Vec3::new(0, 0, 30)),
+            ("y decides", I64Vec3::new(30, 0, 0), I64Vec3::new(0, 0, 30)),
+        ] {
+            assert!(
+                !box_segment_dips(a, b, h),
+                "{name}: {a:?} -> {b:?} must miss"
+            );
+        }
+        // And a true clip through the middle, on each axis.
+        assert!(box_segment_dips(
+            I64Vec3::new(-30, 0, 0),
+            I64Vec3::new(30, 0, 0),
+            h
+        ));
+        assert!(box_segment_dips(
+            I64Vec3::new(0, -30, 0),
+            I64Vec3::new(0, 30, 0),
+            h
+        ));
+        assert!(box_segment_dips(
+            I64Vec3::new(0, 0, -30),
+            I64Vec3::new(0, 0, 30),
+            h
+        ));
+        // A face miss: both endpoints beyond the same face, on each axis.
+        assert!(!box_segment_dips(
+            I64Vec3::new(30, -30, 0),
+            I64Vec3::new(30, 30, 0),
+            h
+        ));
+        assert!(!box_segment_dips(
+            I64Vec3::new(-30, 30, 0),
+            I64Vec3::new(30, 30, 0),
+            h
+        ));
+        assert!(!box_segment_dips(
+            I64Vec3::new(0, -30, 30),
+            I64Vec3::new(0, 30, 30),
+            h
+        ));
+    }
+
+    #[test]
+    fn a_box_half_edge_wider_than_the_domain_is_clamped_without_changing_the_answer() {
+        // Past the domain guard every coordinate is inside ±CDM, so a half-edge wider than CDM
+        // already contains every reachable point: clamping leaves the intersection identical and
+        // restores a factor of two of headroom in the radius term.
+        for (a, b) in [
+            (
+                I64Vec3::new(CELL_DOMAIN_MAX, 1, 0),
+                I64Vec3::new(-CELL_DOMAIN_MAX, -1, 0),
+            ),
+            (
+                I64Vec3::new(CELL_DOMAIN_MAX, CELL_DOMAIN_MAX, 0),
+                I64Vec3::new(-CELL_DOMAIN_MAX, CELL_DOMAIN_MAX, 0),
+            ),
+            (I64Vec3::new(7, 9, 11), I64Vec3::new(-7, -9, -11)),
+        ] {
+            let at_domain = box_segment_dips(a, b, [CELL_DOMAIN_MAX; 3]);
+            for wider in [CELL_DOMAIN_MAX + 1, 2 * CELL_DOMAIN_MAX, i64::MAX] {
+                assert_eq!(
+                    box_segment_dips(a, b, [wider; 3]),
+                    at_domain,
+                    "clamping a half-edge of {wider} must not change the answer for {a:?} -> {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_per_axis_box_rule_is_total_at_the_integer_floor() {
+        // `i64::MIN.abs()` panics in debug — which is the whole test and coverage suite.
+        assert!(!axis_member(i64::MIN, 10));
+        assert!(!axis_member(0, -1));
+        assert!(axis_member(10, 10));
+        assert!(!axis_member(11, 10));
+        assert!(axis_member(-10, 10));
+    }
+
+    #[test]
+    fn a_prior_the_book_cannot_place_degrades_to_the_point_answer() {
+        // A rotated destination placement refuses beyond the exact rotation reach, and that refusal
+        // depends on the separation MAGNITUDE — so it can refuse the prior while accepting the
+        // current pose. The verdict must then be the point answer, never an error.
+        let region = RealmRegion {
+            shape: Boundary::Shell { r: 10.0 },
+            look: Some(Boundary::Shell { r: 10.0 }),
+            ..test_region(RealmId::Planet(1), Some(RealmId::System(0)))
+        };
+        let rotated = crate::frame::FramePlacement {
+            orientation: DQuat::from_rotation_z(0.5),
+            ..crate::frame::FramePlacement::identity()
+        };
+        let book = crate::placement::PlacementBook::new(
+            FrameRef::SystemSpace { system_seed: 0 },
+            crate::ids::UniverseTick(0),
+            vec![(region.frame, rotated)],
+        );
+        let near = pose_at(DVec3::new(1.0, 0.0, 0.0));
+        // A prior far beyond the exact rotation reach for the Fine tier (2^42 m).
+        let far_prior = LatticePos::from_metres(DVec3::new(1.0e14, 0.0, 0.0), Tier::Fine);
+        let got = region_verdict(&near, far_prior, &region, &book, false).expect("placeable");
+        assert!(
+            got.member,
+            "the current pose is inside; an unplaceable prior must not take that away"
+        );
+    }
 
     // ----- THE ONE visibility formula (look_horizon.md §3.3.2, slice 2) -----
 
@@ -1856,7 +3007,7 @@ mod tests {
             (DVec3::new(12.5, 0.0, 0.0), true), // released: beyond it
             (DVec3::new(13.0, 0.0, 0.0), false), // far outside: the Chebyshev pre-test arm
         ] {
-            let got = region_verdict(&pose_at(v), &region, &book, was).expect("placeable");
+            let got = point_verdict(&pose_at(v), &region, &book, was).expect("placeable");
             let sd = region_signed_distance(&pose_at(v), &region, &book).expect("placeable");
             assert_eq!(
                 got.member,
@@ -1878,26 +3029,26 @@ mod tests {
         // acquire edge = 9.0 m exactly (dyadic ⇒ floor is exact).
         let on_acquire = pose_at(DVec3::new(9.0, 0.0, 0.0));
         assert!(
-            region_verdict(&on_acquire, &region, &book, false)
+            point_verdict(&on_acquire, &region, &book, false)
                 .expect("ok")
                 .member
         );
         let past_acquire = pose_at(DVec3::new(9.0 + 2.0 * cell, 0.0, 0.0));
         assert!(
-            !region_verdict(&past_acquire, &region, &book, false)
+            !point_verdict(&past_acquire, &region, &book, false)
                 .expect("ok")
                 .member
         );
         // release edge = 12.0 m exactly.
         let on_release = pose_at(DVec3::new(12.0, 0.0, 0.0));
         assert!(
-            region_verdict(&on_release, &region, &book, true)
+            point_verdict(&on_release, &region, &book, true)
                 .expect("ok")
                 .member
         );
         let past_release = pose_at(DVec3::new(12.0 + 2.0 * cell, 0.0, 0.0));
         assert!(
-            !region_verdict(&past_release, &region, &book, true)
+            !point_verdict(&past_release, &region, &book, true)
                 .expect("ok")
                 .member
         );
@@ -1911,7 +3062,7 @@ mod tests {
         let book = verdict_book(region.frame);
         let at_centre = pose_at(DVec3::ZERO);
         assert!(
-            !region_verdict(&at_centre, &region, &book, false)
+            !point_verdict(&at_centre, &region, &book, false)
                 .expect("ok")
                 .member
         );
@@ -1934,7 +3085,7 @@ mod tests {
             DVec3::ZERO,
         );
         assert!(
-            !region_verdict(&probe, &region, &book, true)
+            !point_verdict(&probe, &region, &book, true)
                 .expect("ok")
                 .member
         );
@@ -1954,25 +3105,25 @@ mod tests {
         let book = verdict_book(region.frame);
         // Acquire: inside every axis by ≥ inset (1 m).
         assert!(
-            region_verdict(&pose_at(DVec3::new(3.9, 2.9, 1.9)), &region, &book, false)
+            point_verdict(&pose_at(DVec3::new(3.9, 2.9, 1.9)), &region, &book, false)
                 .expect("ok")
                 .member
         );
         // One axis outside its acquire edge ⇒ not acquired (the per-axis `&` fold).
         assert!(
-            !region_verdict(&pose_at(DVec3::new(4.5, 0.0, 0.0)), &region, &book, false)
+            !point_verdict(&pose_at(DVec3::new(4.5, 0.0, 0.0)), &region, &book, false)
                 .expect("ok")
                 .member
         );
         // Held out to half + outset (2 m) per axis…
         assert!(
-            region_verdict(&pose_at(DVec3::new(6.5, 0.0, 0.0)), &region, &book, true)
+            point_verdict(&pose_at(DVec3::new(6.5, 0.0, 0.0)), &region, &book, true)
                 .expect("ok")
                 .member
         );
         // …and released past it.
         assert!(
-            !region_verdict(&pose_at(DVec3::new(0.0, 6.5, 0.0)), &region, &book, true)
+            !point_verdict(&pose_at(DVec3::new(0.0, 6.5, 0.0)), &region, &book, true)
                 .expect("ok")
                 .member
         );
@@ -1981,7 +3132,7 @@ mod tests {
         // conservative-outward corner difference, asserted so it is a decision, not an accident.
         let corner = pose_at(DVec3::new(7.0 - 0.01, 6.0 - 0.01, 5.0 - 0.01));
         assert!(
-            region_verdict(&corner, &region, &book, true)
+            point_verdict(&corner, &region, &book, true)
                 .expect("ok")
                 .member
         );
@@ -2008,7 +3159,7 @@ mod tests {
             (DVec3::new(1.0, 1.0, 0.0), false),
             (DVec3::new(9.0, 0.0, 0.0), true),
         ] {
-            let got = region_verdict(&pose_at(v), &region, &book, was).expect("ok");
+            let got = point_verdict(&pose_at(v), &region, &book, was).expect("ok");
             let sd = region_signed_distance(&pose_at(v), &region, &book).expect("ok");
             assert_eq!(got.member, region.band.member(was, sd));
         }
@@ -2028,7 +3179,7 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(
-            region_verdict(&pose_at(DVec3::ZERO), &region, &empty, false),
+            point_verdict(&pose_at(DVec3::ZERO), &region, &empty, false),
             Err(FrameError::UnknownDestFrame)
         );
     }
@@ -2160,12 +3311,45 @@ mod tests {
     }
 
     #[test]
+    fn the_band_and_the_speed_are_two_readings_of_one_solve() {
+        // THE OWNER'S RULING, 2026-08-24, as an assertion: band width and top speed are the same
+        // statement read in two directions. If these two ever stopped being inverses, a realm could
+        // state a ceiling its own boundaries could not contain — and a ship would pass through a moon
+        // without anything noticing.
+        let dt = 0.02;
+        let ticks = 3.0;
+        for v in [0.5_f64, 1.0, 500.0, 1.0e6, 1.0e13] {
+            let w = band_for_speed(v, dt, ticks);
+            assert!(
+                (speed_for_band(w, dt, ticks) - v).abs() <= v * f64::EPSILON * 4.0,
+                "the round trip must return the same speed at {v} m/s"
+            );
+        }
+        // A wider band affords a faster ceiling, monotonically — the trade the owner priced.
+        assert!(speed_for_band(20.0, dt, ticks) > speed_for_band(10.0, dt, ticks));
+        // And speed is signed-blind: approaching and receding need the same room.
+        assert_eq!(
+            band_for_speed(-7.0, dt, ticks),
+            band_for_speed(7.0, dt, ticks)
+        );
+    }
+
+    #[test]
+    fn a_window_of_no_time_affords_no_speed_at_all() {
+        // FAILS CLOSED, both arms driven. The arithmetic answer to "how fast may I go if I am never
+        // observed" is infinity; the safe answer is zero. A ceiling that read as infinity on a
+        // misconfigured band is how a misconfiguration becomes a ship inside a planet.
+        assert_eq!(speed_for_band(10.0, 0.0, 3.0), 0.0);
+        assert_eq!(speed_for_band(10.0, 0.02, 0.0), 0.0);
+        assert_eq!(speed_for_band(10.0, -0.02, 3.0), 0.0);
+        // And the ordinary arm still answers.
+        assert_eq!(speed_for_band(6.0, 0.5, 4.0), 3.0);
+    }
+
+    #[test]
     fn guard_regions_nest_accepts_a_valid_forest() {
         let forest = valid_forest();
-        assert_eq!(
-            guard_regions_nest(&forest, 64, &fixed_reaches(&forest)),
-            Ok(())
-        );
+        assert_eq!(guard_regions_nest(&forest, &fixed_reaches(&forest)), Ok(()));
     }
 
     #[test]
@@ -2181,7 +3365,7 @@ mod tests {
             .realm;
         holes.remove(&removed);
         assert_eq!(
-            guard_regions_nest(&forest, 64, &holes),
+            guard_regions_nest(&forest, &holes),
             Err(RegionNestError::NoReachForChild { realm: removed })
         );
     }
@@ -2199,11 +3383,11 @@ mod tests {
         ];
         let mut reaches = fixed_reaches(&forest);
         reaches.insert(RealmId::Planet(1), ChildReach::Excursion(80.0));
-        assert_eq!(guard_regions_nest(&forest, 64, &reaches), Ok(()));
+        assert_eq!(guard_regions_nest(&forest, &reaches), Ok(()));
         // The SAME child with an excursion of 98: reaches 103 > 100. Refused, with both numbers.
         reaches.insert(RealmId::Planet(1), ChildReach::Excursion(98.0));
         assert_eq!(
-            guard_regions_nest(&forest, 64, &reaches),
+            guard_regions_nest(&forest, &reaches),
             Err(RegionNestError::ChildEscapesParent {
                 realm: RealmId::Planet(1),
                 parent: RealmId::System(0),
@@ -2225,7 +3409,7 @@ mod tests {
             // A "child" of the r=10 region that is itself r=50 — it engulfs its own parent.
             test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 50.0),
         ];
-        let err = guard_regions_nest(&escaping, 64, &fixed_reaches(&escaping))
+        let err = guard_regions_nest(&escaping, &fixed_reaches(&escaping))
             .expect_err("an escaping child must be rejected");
         assert_eq!(
             err,
@@ -2342,19 +3526,23 @@ mod tests {
             test_region_r(RealmId::System(1), Some(RealmId::System(0)), 10.0),
             offset_child, // reaches 5 + 3 = 8, inside the parent's 10
         ];
-        assert_eq!(
-            guard_regions_nest(&forest, 64, &fixed_reaches(&forest)),
-            Ok(())
-        );
+        assert_eq!(guard_regions_nest(&forest, &fixed_reaches(&forest)), Ok(()));
     }
 
     #[test]
-    fn guard_regions_nest_rejects_too_many_regions() {
-        // 3 regions with `max = 2` ⇒ the count fence trips FIRST (before any topology walk).
-        assert_eq!(
-            guard_regions_nest(&valid_forest(), 2, &fixed_reaches(&valid_forest())),
-            Err(RegionNestError::TooManyRegions { found: 3, max: 2 })
+    fn guard_regions_nest_accepts_a_forest_far_wider_than_the_retired_bitset() {
+        // SL9 — A PARENT'S CHILD COUNT IS UNBOUNDED. This forest gives ONE root 1024 direct children:
+        // sixteen times the width of the `u64` membership bitset that used to cap the fence, and the
+        // exact SHAPE a galaxy states (one root, every star system a direct child of it). The retired
+        // count fence answered `TooManyRegions { found: 1025, max: 64 }` here; there is no width left
+        // to exceed. Asserted rather than argued — this test is the slice's own proof.
+        const WIDE: u64 = 1024;
+        let mut forest = vec![test_region_r(RealmId::System(0), None, 100.0)];
+        forest.extend(
+            (1..=WIDE).map(|n| test_region_r(RealmId::Planet(n), Some(RealmId::System(0)), 1.0)),
         );
+        assert_eq!(forest.len(), WIDE as usize + 1);
+        assert_eq!(guard_regions_nest(&forest, &fixed_reaches(&forest)), Ok(()));
     }
 
     #[test]
@@ -2365,7 +3553,7 @@ mod tests {
             test_region(RealmId::System(1), None),
         ];
         assert_eq!(
-            guard_regions_nest(&two_roots, 64, &fixed_reaches(&two_roots)),
+            guard_regions_nest(&two_roots, &fixed_reaches(&two_roots)),
             Err(RegionNestError::RootCount { found: 2 })
         );
         // ZERO roots (a pure cycle — caught by the root count BEFORE the chain walk).
@@ -2374,7 +3562,7 @@ mod tests {
             test_region(RealmId::System(2), Some(RealmId::System(1))),
         ];
         assert_eq!(
-            guard_regions_nest(&no_root, 64, &fixed_reaches(&no_root)),
+            guard_regions_nest(&no_root, &fixed_reaches(&no_root)),
             Err(RegionNestError::RootCount { found: 0 })
         );
     }
@@ -2387,7 +3575,7 @@ mod tests {
             test_region(RealmId::System(1), Some(RealmId::System(0))),
         ];
         assert_eq!(
-            guard_regions_nest(&dup, 64, &fixed_reaches(&dup)),
+            guard_regions_nest(&dup, &fixed_reaches(&dup)),
             Err(RegionNestError::DuplicateRealm {
                 realm: RealmId::System(1)
             })
@@ -2401,7 +3589,7 @@ mod tests {
             test_region(RealmId::System(1), Some(RealmId::System(9))), // System(9) is not a region
         ];
         assert_eq!(
-            guard_regions_nest(&dangling, 64, &fixed_reaches(&dangling)),
+            guard_regions_nest(&dangling, &fixed_reaches(&dangling)),
             Err(RegionNestError::DanglingParent {
                 realm: RealmId::System(1),
                 parent: RealmId::System(9),
@@ -2423,7 +3611,7 @@ mod tests {
         let mut child = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 1.0);
         child.frame = FrameRef::PlanetCentered { planet_seed: 1 };
         assert_eq!(
-            guard_regions_nest(&[parent, child], 64, &fixed_reaches(&[parent, child])),
+            guard_regions_nest(&[parent, child], &fixed_reaches(&[parent, child])),
             Ok(()),
             "a differently-framed child is not judged here, so the forest is accepted"
         );
@@ -2433,12 +3621,7 @@ mod tests {
         let mut oversized = test_region_r(RealmId::Planet(1), Some(RealmId::System(0)), 5_000.0);
         oversized.frame = parent.frame;
         assert!(
-            guard_regions_nest(
-                &[parent, oversized],
-                64,
-                &fixed_reaches(&[parent, oversized])
-            )
-            .is_err(),
+            guard_regions_nest(&[parent, oversized], &fixed_reaches(&[parent, oversized])).is_err(),
             "same-frame IS judged: a child larger than its parent's interior is refused"
         );
     }
@@ -2453,7 +3636,7 @@ mod tests {
             test_region(RealmId::System(2), Some(RealmId::System(1))),
         ];
         assert_eq!(
-            guard_regions_nest(&cyclic, 64, &fixed_reaches(&cyclic)),
+            guard_regions_nest(&cyclic, &fixed_reaches(&cyclic)),
             Err(RegionNestError::CycleOrOrphan {
                 realm: RealmId::System(1)
             })

@@ -108,7 +108,7 @@ fn spawn_node(
     book: &BTreeMap<NodeId, SocketAddr>,
     inbound_capacity: Option<usize>,
 ) -> (MeshTransport, MeshControl) {
-    let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, 1);
+    let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, 1, 0);
     if let Some(cap) = inbound_capacity {
         cfg.inbound_capacity = cap;
     }

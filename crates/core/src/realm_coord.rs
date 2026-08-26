@@ -131,13 +131,15 @@ mod tests {
 
     #[test]
     fn lowered_covers_every_kind() {
+        // ★ S9: the two ambient kinds lower to their OWN arms. Note the seed 99 — a galaxy now
+        // CARRIES it, where the stand-in threw it away and answered `System(1)` whatever it was.
         assert_eq!(
             coord1(RealmKindTag::Universe, 99).lowered(),
-            RealmId::System(0)
+            RealmId::Universe
         );
         assert_eq!(
             coord1(RealmKindTag::Galaxy, 99).lowered(),
-            RealmId::System(1)
+            RealmId::Galaxy(99)
         );
         assert_eq!(
             coord1(RealmKindTag::System, 7).lowered(),
@@ -233,15 +235,34 @@ mod tests {
     #[test]
     fn lowered_aliases_across_levels() {
         // The KNOWN lossy collisions — pinned so no future author keys a directory/saga on lowered().
+        //
+        // ★ TWO OF THEM ARE GONE (S9). A universe and a galaxy used to lower onto `System(0)` and
+        // `System(1)`, borrowing a system's identity because they had none of their own. They have
+        // their own arms now, so a galaxy KEEPS ITS SEED and a universe is fieldless — neither can
+        // collide with a system any more. Asserted as the non-collisions they now are, because
+        // "these used to alias" is exactly the kind of claim that rots into a comment.
         assert_eq!(
             coord1(RealmKindTag::Universe, 0).lowered(),
-            RealmId::System(0)
+            RealmId::Universe
         );
         assert_eq!(
             coord1(RealmKindTag::Galaxy, 1).lowered(),
-            RealmId::System(1)
+            RealmId::Galaxy(1)
         );
-        // Same system seed in two different galaxies lowers identically but is a DISTINCT coord.
+        assert_ne!(
+            coord1(RealmKindTag::Galaxy, 1).lowered(),
+            coord1(RealmKindTag::System, 1).lowered(),
+            "a galaxy and a system of the same seed are no longer the same id"
+        );
+        assert_ne!(
+            coord1(RealmKindTag::Galaxy, 2).lowered(),
+            coord1(RealmKindTag::Galaxy, 3).lowered(),
+            "and two galaxies are no longer the same id either"
+        );
+        // ★ THE ONE THAT REMAINS, and the reason this test keeps its name: the same system seed in
+        // two different galaxies still lowers identically. That is the collision that makes
+        // `lowered()` unsafe as a directory/saga key at multi-galaxy scale, and S9 did not close it —
+        // `RealmCoord::path` is still the collision-free key.
         let a = system_in_galaxy(2, 7);
         let b = system_in_galaxy(3, 7);
         assert_eq!(a.lowered(), b.lowered());

@@ -71,6 +71,24 @@ fn walk_galaxy_extent_m() -> f64 {
         .finite_extent()
 }
 
+/// How far out of its OWN system a subject must stand to have genuinely left it — the system's own
+/// shell plus its release edge, plus one more band's width so the waypoint is unambiguously outside
+/// rather than outside by a margin that shrinks when the band changes.
+///
+/// ★ THIS USED TO BE THE LITERAL 50. That number was outside the release edge only while every band in
+/// the universe was the same three metres wide. Once bands are sized from the bodies they wrap, this
+/// system's release edge sits at 53 m and the subject standing at 50 had never left — so the head never
+/// flipped and the round trip stalled on its first hop. The waypoint is now read off the same forest
+/// the detector reads.
+fn walk_escape_offset_m(realm: RealmId) -> f64 {
+    let r = vd_physics::worldgen::realm_regions_for(UNIVERSE_SEED)
+        .iter()
+        .find(|r| r.realm == realm)
+        .copied()
+        .expect("the walk forest rosters the realm this shard hosts");
+    r.shape.finite_extent() + r.band.outset() + (r.band.inset() + r.band.outset())
+}
+
 fn report(reports: &[(NodeId, InspectReport)], id: NodeId) -> &InspectReport {
     &reports
         .iter()
@@ -195,11 +213,12 @@ fn three_shard_round_trip_durable_flips_the_head_through_the_full_chain_both_way
     plant_seed_neighbourhood(&mut topo, GALAXY, UNIVERSE_SEED, galaxy_stub_config().realm);
     plant_seed_neighbourhood(&mut topo, DEST, UNIVERSE_SEED, dest_stub_config().realm);
 
-    // The Galaxy realm IS the seed forest's between-space (`System(1)`).
+    // The Galaxy realm IS the seed forest's between-space. ★ S9: named `Galaxy(1)`, not the
+    // `System(1)` stand-in — same seed, same realm, an identity of its own.
     assert_eq!(
         galaxy_stub_config().realm,
-        RealmId::System(GALAXY_SEED),
-        "the Galaxy realm is the seed forest's between-space (System(1))",
+        RealmId::Galaxy(GALAXY_SEED),
+        "the Galaxy realm is the seed forest's between-space",
     );
 
     // Pause the client's input drive — the round-trip's positions are SCRIPTED via
@@ -222,7 +241,7 @@ fn three_shard_round_trip_durable_flips_the_head_through_the_full_chain_both_way
     let hops = [
         Hop {
             owner: SHARD,
-            offset: 50.0,
+            offset: walk_escape_offset_m(stub_config().realm),
             expect_head: GALAXY,
             label: "7→Galaxy (escape SOI)",
         },
@@ -234,7 +253,7 @@ fn three_shard_round_trip_durable_flips_the_head_through_the_full_chain_both_way
         },
         Hop {
             owner: DEST,
-            offset: 50.0,
+            offset: walk_escape_offset_m(dest_stub_config().realm),
             expect_head: GALAXY,
             label: "8→Galaxy (return, reverse-cross)",
         },

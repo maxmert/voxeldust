@@ -12,8 +12,9 @@
 
 use super::{placement_row, pose_of_row};
 use bevy_ecs::prelude::Resource;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use vd_core::UniverseTick;
+use vd_core::child_index::{ChildIndex, IndexedChild};
 use vd_core::geometry::{DepthKey, RealmRegion, region_depth};
 use vd_core::kinematics::secs_since_epoch;
 use vd_core::placement::{MotionFn, PlacementBook};
@@ -23,10 +24,13 @@ use vd_core::realm_path::RealmLevel;
 use vd_core::worldgen::level_of;
 use vd_wire::channels::{RealmShape, RealmSnap};
 
-/// The bitset width bound: a shard's region set exceeding this fails LOUD at boot (`guard_regions_nest`,
-/// C-5). The scale answer is NOT a wider bitset — it is the own-realm + ~4-ancestor scoping (children via
-/// the directory, §2.3), so 64 is generous headroom, not a ceiling on how crowded a realm can be.
-pub const MAX_REGIONS: usize = 64;
+// THE RETIRED WIDTH BOUND (SL9, 2026-08-24). `MAX_REGIONS = 64` lived here: a shard whose region set
+// exceeded one machine word failed LOUD at boot, because membership was a bitset with ONE BIT PER
+// WATCHED REGION. It is DELETED with that bitset. A parent's child count is unbounded — a galaxy states
+// a hundred and fifty thousand star systems as direct children — so no width may be reserved anywhere,
+// and the boot fence (`vd_core::geometry::guard_regions_nest`) no longer takes a maximum. Membership is
+// now a SHORT LIST of the realms an occupant is inside (its own chain, plus the edge of a crossing);
+// see `RegionMembership` in `containment.rs`.
 
 /// The seed-derived realm REGIONS this shard evaluates CONTAINMENT against (task #135): the shard's own
 /// realm + its ancestor chain (+ a bounded child set). Holds the regions, their BOOT-COMPUTED depth keys
@@ -61,8 +65,9 @@ pub struct RealmRegions {
     moving: BTreeMap<RealmId, MotionFn>,
     /// Region index of each realm — the inverse of `regions`, so a realm resolves to its bit without a scan.
     pub(crate) ix_of: BTreeMap<RealmId, usize>,
-    /// SELF ∪ ANCESTORS as a region bitmask, per region index (task #177). Computed ONCE at boot by the same
-    /// parent walk the depth cache already does, bounded by [`MAX_REGIONS`] ⇒ at most 64×64 steps.
+    /// SELF ∪ ANCESTORS as a SET OF REALMS, per region index (task #177). Computed ONCE at boot by the same
+    /// parent walk the depth cache already does. Its size is the forest's DEPTH (about six), never its
+    /// breadth — which is why removing the old one-bit-per-region form removed the child-count cap (SL9).
     ///
     /// WHY THIS EXISTS. Containment hysteresis needs to know whether you were ALREADY inside a region. That
     /// used to be REMEMBERED per entity — and a hand-off leaves the two shards with OPPOSITE memories, so
@@ -73,34 +78,51 @@ pub struct RealmRegions {
     /// The prior is instead DERIVED: you are always a hysteretic member of the realm you are AUTHORITATIVELY
     /// in, and of every ancestor of it. That is a total function of committed state, so it survives a crash,
     /// a replay, a re-drive and a lease change identically — there is nothing to get out of sync.
-    pub(crate) ancestor_mask: Vec<u64>,
+    pub(crate) ancestor_chain: Vec<BTreeSet<RealmId>>,
+    /// THE CHILD INDEX (SL9) — "which of my direct children could hold this point", so the containment
+    /// fold never walks all of them. Built over the STATIC direct children only; a moving child is
+    /// omitted and stays an unconditional candidate, which is conservative (see
+    /// [`vd_core::child_index::ChildIndex::build`]).
+    ///
+    /// EMPTY until [`RealmRegions::with_own_realm`] names the realm whose children these are — a shard
+    /// cannot tell which regions are its own children from the forest alone. An empty index indexes
+    /// nothing, so nothing is skipped and the fold behaves exactly as it did before this existed. That
+    /// is the SAFE default on purpose: forgetting to build it costs speed, never correctness.
+    pub(crate) child_index: ChildIndex,
+    /// The realm this shard hosts, once stated. `None` on a rig that never named one.
+    own_realm: Option<RealmId>,
 }
 
-/// SELF ∪ ANCESTORS of `realm` as a region bitmask. Mirrors [`region_depth`]'s parent walk exactly —
-/// same hop cap, same dangling-parent and cycle stops — so the two caches can never disagree about the
-/// shape of the forest. A realm not present in `ix_of` contributes no bit (it is not a region here).
+/// SELF ∪ ANCESTORS of `realm`, as the SET OF REALMS ITSELF. Mirrors [`region_depth`]'s parent walk
+/// exactly — same hop cap, same dangling-parent and cycle stops — so the two caches can never disagree
+/// about the shape of the forest. A realm not present in `ix_of` contributes nothing (it is not a region
+/// here).
 ///
-/// Bits beyond [`MAX_REGIONS`] are unrepresentable and are DROPPED rather than wrapped: a forest that
-/// large is already rejected by the boot guard, and silently aliasing bit 64 onto bit 0 would hand a
-/// subject membership in an unrelated region.
-fn ancestry_bits(regions: &[RealmRegion], ix_of: &BTreeMap<RealmId, usize>, realm: RealmId) -> u64 {
-    let mut bits = 0u64;
+/// **This used to be a `u64` bitmask, one bit per region index, and that is what capped a parent at 64
+/// children (SL9).** The chain is a property of DEPTH, never of breadth: it holds the realm and its
+/// ancestors, about six entries in the deepest world we generate, whether the parent has one sibling or
+/// a hundred and fifty thousand. Naming the realms directly is the same information with no width to
+/// exceed — and it is the SAME key the membership set uses, so the two can be compared without an index.
+fn ancestry_chain(
+    regions: &[RealmRegion],
+    ix_of: &BTreeMap<RealmId, usize>,
+    realm: RealmId,
+) -> BTreeSet<RealmId> {
+    let mut chain = BTreeSet::new();
     let mut cur = realm;
     for _ in 0..regions.len() {
-        if let Some(ix) = ix_of.get(&cur)
-            && *ix < MAX_REGIONS
-        {
-            bits |= 1u64 << ix;
+        if ix_of.contains_key(&cur) {
+            chain.insert(cur);
         }
         let Some(region) = regions.iter().find(|r| r.realm == cur) else {
-            return bits; // dangling parent — stop where region_depth stops
+            return chain; // dangling parent — stop where region_depth stops
         };
         let Some(parent) = region.parent else {
-            return bits; // reached the ambient root
+            return chain; // reached the ambient root
         };
         cur = parent;
     }
-    bits // hop cap hit — a cycle (boot-guard-rejected); a safe stop, never a hang
+    chain // hop cap hit — a cycle (boot-guard-rejected); a safe stop, never a hang
 }
 
 impl RealmRegions {
@@ -133,9 +155,9 @@ impl RealmRegions {
             .enumerate()
             .map(|(ix, r)| (r.realm, ix))
             .collect();
-        let ancestor_mask = regions
+        let ancestor_chain = regions
             .iter()
-            .map(|r| ancestry_bits(&regions, &ix_of, r.realm))
+            .map(|r| ancestry_chain(&regions, &ix_of, r.realm))
             .collect();
         RealmRegions {
             // ★THROWAWAY: the lawful 1.0 on every rig — only a bin that read `VD_TEST_OVERDRIVE`
@@ -146,21 +168,23 @@ impl RealmRegions {
             root_realm,
             moving: BTreeMap::new(),
             ix_of,
-            ancestor_mask,
+            ancestor_chain,
+            child_index: ChildIndex::default(),
+            own_realm: None,
         }
     }
 
-    /// SELF ∪ ANCESTORS as a region bitmask for the realm a subject is authoritatively in — the DERIVED
-    /// hysteresis prior. Zero for a realm this shard does not host, which degrades to the old blank-prior
+    /// SELF ∪ ANCESTORS as a set of realms, for the realm a subject is authoritatively in — the DERIVED
+    /// hysteresis prior. EMPTY for a realm this shard does not host, which degrades to the old blank-prior
     /// behaviour rather than inventing membership; callers warn on that path rather than passing it off as
     /// normal (a pose naming an unhosted realm means a rebind safe-degrade happened upstream).
     #[must_use]
-    pub fn ancestor_mask_for(&self, realm: RealmId) -> u64 {
+    pub fn ancestor_chain_for(&self, realm: RealmId) -> &BTreeSet<RealmId> {
+        const EMPTY: &BTreeSet<RealmId> = &BTreeSet::new();
         self.ix_of
             .get(&realm)
-            .and_then(|ix| self.ancestor_mask.get(*ix))
-            .copied()
-            .unwrap_or(0)
+            .and_then(|ix| self.ancestor_chain.get(*ix))
+            .unwrap_or(EMPTY)
     }
 
     /// Register the shard's DIRECT MOVING children (FA-2b): the `(realm, motion)` roster the BOOT
@@ -171,7 +195,52 @@ impl RealmRegions {
     #[must_use]
     pub fn with_moving_children(mut self, moving: BTreeMap<RealmId, MotionFn>) -> RealmRegions {
         self.moving = moving;
+        self.rebuild_child_index();
         self
+    }
+
+    /// Name the realm this shard hosts, which is what lets the forest be split into "my direct children"
+    /// (indexable) and "everything else" (always evaluated). Builds the child index (SL9).
+    ///
+    /// A builder rather than a `new` argument so the many existing `RealmRegions::new` call sites stay
+    /// unchanged and byte-identical: without it the index is empty, nothing is skipped, and the fold
+    /// walks the forest exactly as it always did.
+    #[must_use]
+    pub fn with_own_realm(mut self, own_realm: RealmId) -> RealmRegions {
+        self.own_realm = Some(own_realm);
+        self.rebuild_child_index();
+        self
+    }
+
+    /// Rebuild the child index from the current own-realm and moving-child statements. Called by both
+    /// builders so their ORDER cannot matter — a caller that names the realm first and the movers second
+    /// gets the same index as one that does it the other way round, which is the kind of ordering trap
+    /// that is invisible until a mover is wrongly indexed.
+    fn rebuild_child_index(&mut self) {
+        let Some(own) = self.own_realm else {
+            return; // no realm named ⇒ nothing is known to be a child ⇒ index nothing
+        };
+        let tier = self.own_frame(own).tier();
+        let children: Vec<IndexedChild> = self
+            .regions
+            .iter()
+            .filter(|r| r.parent == Some(own) && !self.moving.contains_key(&r.realm))
+            .map(|r| IndexedChild {
+                realm: r.realm,
+                centre: r.center,
+                // THE CONSERVATIVE RADIUS: the shape's own circumscribed reach PLUS the band's release
+                // edge, because membership extends past the surface by the outset. A point outside this
+                // cannot be a member by any edge, so dropping the child for it cannot change a verdict.
+                radius_m: r.shape.circumscribed_extent() + r.band.outset(),
+            })
+            .collect();
+        self.child_index = ChildIndex::build(&children, tier);
+    }
+
+    /// The child index this shard queries — see the field.
+    #[must_use]
+    pub fn child_index(&self) -> &ChildIndex {
+        &self.child_index
     }
 
     /// The detector short-circuits (inert) when no regions are planted — production through C-3.
@@ -203,7 +272,11 @@ impl RealmRegions {
         self.regions
             .iter()
             .find(|r| r.parent.is_none())
-            .map_or(FrameRef::GalaxySpace, |r| r.frame)
+            // ★ THE AMBIENT ROOT, AND IT CAN NOW SAY SO (slice S9). This used to fall back to a GALAXY
+            // frame, which was the nearest thing to "outermost" available while the universe had no frame
+            // of its own — a stand-in whose meaning had to be remembered. The universe has one now, so the
+            // fallback names the thing it always meant.
+            .map_or(FrameRef::UniverseSpace, |r| r.frame)
     }
 
     /// THE frame this shard measures everything in: its OWN realm's frame. It is the identity anchor of

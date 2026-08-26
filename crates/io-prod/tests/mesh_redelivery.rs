@@ -47,7 +47,7 @@ fn node(
     ack_flush: Duration,
     incarnation: u64,
 ) -> (MeshTransport, MeshControl) {
-    let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, incarnation);
+    let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, incarnation, 0);
     cfg.reliability.ack_idle_flush_interval = ack_flush;
     spawn_mesh(handle, trust, &cfg, None).expect("mesh node")
 }
@@ -454,7 +454,7 @@ fn a_full_retry_buffer_sheds_send_shed_retry_buffer_full_never_confirming_the_pe
     // frame fills the buffer and the NEXT — dequeued before the first's cross-loopback ack can round
     // trip — physically cannot be retained. The overflow is deterministic, not a timing race.
     let min_buffer = vd_wire::framing::MAX_STREAM_FRAME_BYTES as usize + std::mem::size_of::<u32>();
-    let mut cfg_a = MeshConfig::new(A, addr_a, book.clone(), 256, 1);
+    let mut cfg_a = MeshConfig::new(A, addr_a, book.clone(), 256, 1, 0);
     cfg_a.reliability.retry_buffer_max_bytes = min_buffer;
     let (mut a, ctl_a) = spawn_mesh(rt.handle(), &trust, &cfg_a, None).expect("mesh A");
     let (mut b, ctl_b) = node(

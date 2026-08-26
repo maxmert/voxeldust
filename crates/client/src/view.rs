@@ -524,7 +524,10 @@ mod tests {
                 FrameRef::SystemSpace { system_seed: 7 },
                 DVec3::new(7.0, 0.0, 0.0),
             ),
-            (FrameRef::GalaxySpace, DVec3::new(1.0, 2.0, 3.0)),
+            (
+                FrameRef::GalaxySpace { galaxy_seed: 0 },
+                DVec3::new(1.0, 2.0, 3.0),
+            ),
             (
                 FrameRef::PlanetCentered { planet_seed: 1 },
                 DVec3::new(4.0, 0.0, 0.0),
@@ -574,7 +577,7 @@ mod tests {
     #[test]
     fn world_pos_multiplies_by_the_unit_it_was_told_not_by_one_it_picks() {
         use glam::DQuat;
-        use vd_core::pose::{COARSE_CELL_EDGE_M, FINE_CELL_EDGE_M, Tier};
+        use vd_core::pose::{FINE_CELL_EDGE_M, Tier};
         let view = DeliveredView::default();
         let at = |tier| RenderPose {
             // The SAME label on both — so nothing about the label can explain the difference below.
@@ -589,8 +592,8 @@ mod tests {
             DVec3::new(FINE_CELL_EDGE_M, 0.0, 0.0)
         );
         assert_eq!(
-            view.world_pos(&at(Tier::Coarse)),
-            DVec3::new(COARSE_CELL_EDGE_M, 0.0, 0.0)
+            view.world_pos(&at(Tier::Galaxy)),
+            DVec3::new(Tier::Galaxy.cell_edge_m(), 0.0, 0.0)
         );
     }
 

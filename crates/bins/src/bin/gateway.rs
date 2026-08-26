@@ -239,7 +239,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sim thread. Metrics ride the SAME retained MeshControl the peer-resolver holds.
     let admin_cell = if let Some(admin_addr) = vd_bins::resolve_admin(&env)? {
         let cell = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-            vd_connection_plane::admin::gateway_admin_snapshot(node.world_mut()),
+            vd_connection_plane::admin::gateway_admin_snapshot(
+                node.world_mut(),
+                vd_bins::world_generation(),
+            ),
         ));
         vd_bins::spawn_admin_server(
             runtime.handle(),
@@ -283,7 +286,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // presence_announces, dynamic_shards, sessions_open). No-op when no admin bind was booked.
         if let Some(cell) = &admin_cell {
             cell.store(std::sync::Arc::new(
-                vd_connection_plane::admin::gateway_admin_snapshot(node.world_mut()),
+                vd_connection_plane::admin::gateway_admin_snapshot(
+                    node.world_mut(),
+                    vd_bins::world_generation(),
+                ),
             ));
         }
         let _ = pacer.wait();

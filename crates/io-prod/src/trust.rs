@@ -14,8 +14,37 @@ use std::sync::Arc;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
 
-/// ALPN tag pinning the inter-shard protocol on every cluster connection.
-pub const INTERSHARD_ALPN: &[u8] = b"vd-intershard/1";
+/// The fixed part of the tag that pins the inter-shard protocol on every cluster connection.
+///
+/// Not used on its own — see [`intershard_alpn`], which appends the two things that must match before a
+/// position means the same to both ends: the coordinate UNIT and the world's own SHAPE.
+pub const INTERSHARD_ALPN_PREFIX: &str = "vd-intershard/1";
+
+/// ★ THE TAG TWO NODES MUST AGREE ON, INCLUDING THE UNIT THEY COUNT POSITIONS IN (slice S3;
+/// owner-approved 2026-08-24, Q1 condition 2).
+///
+/// # Why the unit is in the tag rather than in a message
+///
+/// Between nodes there is no greeting to put a field in — the transport handshake is the whole
+/// negotiation. Folding the unit into the tag makes a mismatched node refused **by the transport
+/// itself**, with no new message and no new wire arm. That keeps the fleet half of this ruling out of
+/// the ask-before-new-data rule entirely, and costs one string.
+///
+/// # What it CANNOT do, stated because both plans claimed otherwise
+///
+/// A tag mismatch produces a `no_application_protocol` alert: a connection error with **no field, no
+/// value and no unit**. So this route buys the REFUSAL and cannot buy the DIAGNOSIS. That is why the
+/// tag is built to be READ — the unit appears in it as text — and why every node states the same tag in
+/// its start-up log and on its admin view. Gate on those, never on a message this route can never
+/// carry.
+#[must_use]
+pub fn intershard_alpn(world_generation: u64) -> Vec<u8> {
+    format!(
+        "{INTERSHARD_ALPN_PREFIX}+unit-{:016x}+world-{world_generation:016x}",
+        vd_core::store_stamp::coordinate_generation()
+    )
+    .into_bytes()
+}
 
 /// Trust setup failures (operator/config errors — loud and typed).
 #[derive(Debug, thiserror::Error)]
@@ -165,7 +194,10 @@ impl ClusterTrust {
     ///
     /// # Errors
     /// [`TrustError::Tls`] on TLS-config assembly failure.
-    pub fn quinn_server_config(&self) -> Result<quinn::ServerConfig, TrustError> {
+    pub fn quinn_server_config(
+        &self,
+        world_generation: u64,
+    ) -> Result<quinn::ServerConfig, TrustError> {
         let tls_err = |e: rustls::Error| TrustError::Tls(e.to_string());
         let verifier = WebPkiClientVerifier::builder(Arc::new(self.roots()?))
             .build()
@@ -174,7 +206,7 @@ impl ClusterTrust {
             .with_client_cert_verifier(verifier)
             .with_single_cert(self.chain(), self.key())
             .map_err(tls_err)?;
-        tls.alpn_protocols = vec![INTERSHARD_ALPN.to_vec()];
+        tls.alpn_protocols = vec![intershard_alpn(world_generation)];
         let quic = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
             .map_err(|e| TrustError::Tls(e.to_string()))?;
         Ok(quinn::ServerConfig::with_crypto(Arc::new(quic)))
@@ -185,13 +217,16 @@ impl ClusterTrust {
     ///
     /// # Errors
     /// [`TrustError::Tls`] on TLS-config assembly failure.
-    pub fn quinn_client_config(&self) -> Result<quinn::ClientConfig, TrustError> {
+    pub fn quinn_client_config(
+        &self,
+        world_generation: u64,
+    ) -> Result<quinn::ClientConfig, TrustError> {
         let tls_err = |e: rustls::Error| TrustError::Tls(e.to_string());
         let mut tls = rustls::ClientConfig::builder()
             .with_root_certificates(self.roots()?)
             .with_client_auth_cert(self.chain(), self.key())
             .map_err(tls_err)?;
-        tls.alpn_protocols = vec![INTERSHARD_ALPN.to_vec()];
+        tls.alpn_protocols = vec![intershard_alpn(world_generation)];
         let quic = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
             .map_err(|e| TrustError::Tls(e.to_string()))?;
         Ok(quinn::ClientConfig::new(Arc::new(quic)))
@@ -245,8 +280,8 @@ mod tests {
     /// under `client_trust`. Returns whether BOTH sides completed.
     fn handshake(server_trust: &ClusterTrust, client_trust: &ClusterTrust) -> bool {
         let rt = runtime();
-        let server_config = server_trust.quinn_server_config().expect("server config");
-        let client_config = client_trust.quinn_client_config().expect("client config");
+        let server_config = server_trust.quinn_server_config(0).expect("server config");
+        let client_config = client_trust.quinn_client_config(0).expect("client config");
         rt.block_on(async move {
             let bind: SocketAddr = "127.0.0.1:0".parse().expect("addr");
             let server = quinn::Endpoint::server(server_config, bind).expect("server endpoint");
@@ -354,5 +389,52 @@ mod tests {
         assert!(rendered.contains("<redacted>"));
         // No raw key byte rendering sneaks in.
         assert!(!rendered.contains("node_key_pkcs8: ["));
+    }
+}
+
+#[cfg(test)]
+mod alpn_carries_the_unit {
+    //! The fleet half of slice S3, proven where the tag is actually built.
+    use super::*;
+
+    #[test]
+    fn the_tag_the_transport_offers_carries_this_builds_unit_and_world_and_can_be_read() {
+        // An arbitrary world generation, so the two halves cannot be confused for each other: if the tag
+        // ever printed the unit twice, this value would be missing and the assertion below would fail.
+        const WORLD: u64 = 0x0123_4567_89ab_cdef;
+        let tag = String::from_utf8(intershard_alpn(WORLD)).expect("the tag is text on purpose");
+        assert!(
+            tag.starts_with(INTERSHARD_ALPN_PREFIX),
+            "the protocol pin must survive: {tag}"
+        );
+        // READABLE, because a tag mismatch is refused by the transport with no field, no value and no
+        // unit. An operator comparing two nodes has this string and nothing else.
+        assert!(
+            tag.contains(&format!(
+                "{:016x}",
+                vd_core::store_stamp::coordinate_generation()
+            )),
+            "the unit must be readable in the tag: {tag}"
+        );
+        // ★ AND THE WORLD'S OWN SHAPE, which the unit alone does not cover: two builds can count in the
+        // same millimetres and still disagree about how big the galaxy is.
+        assert!(
+            tag.contains(&format!("{WORLD:016x}")),
+            "the world generation must be readable in the tag: {tag}"
+        );
+        // And it is EXACTLY what the admin view states, so comparing two nodes' views compares what the
+        // handshake compared — not a second rendering that could differ.
+        assert_eq!(tag, vd_wire::admin::coordinate_unit_tag(WORLD));
+    }
+
+    #[test]
+    fn both_ends_of_a_connection_offer_the_same_tag_and_a_different_world_is_a_different_tag() {
+        // NON-VACUITY: a tag built differently on the two sides would refuse every connection, which is
+        // the failure this whole mechanism would be blamed for.
+        assert_eq!(intershard_alpn(7), intershard_alpn(7));
+        // ★ AND THE ARM THAT MAKES IT A CHECK RATHER THAN A DECORATION: two builds that serve DIFFERENT
+        // worlds must offer different tags, or the transport has nothing to refuse on. Without this the
+        // test above passes for a tag that ignores its argument entirely.
+        assert_ne!(intershard_alpn(7), intershard_alpn(8));
     }
 }

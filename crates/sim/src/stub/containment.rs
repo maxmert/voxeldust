@@ -19,6 +19,7 @@ use crate::io::MsgClass;
 use crate::runtime::{ClockSample, OutboundBox};
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use std::collections::{BTreeMap, BTreeSet};
+use vd_core::child_index::ChildIndex;
 use vd_core::entity_kind::{DurabilityClass, durability_of};
 use vd_core::geometry::{DepthKey, RealmRegion, container, should_rehome};
 use vd_core::placement::PlacementBook;
@@ -90,30 +91,40 @@ pub struct CrossingState {
 #[derive(Resource, Debug, Default)]
 pub struct CrossingProgress(pub BTreeMap<EntityId, CrossingState>);
 
-/// Per-entity HYSTERETIC containment membership: bit `ix` = "hysteretic member of `RealmRegions[ix]`"
-/// (task #135 §2.3). A fixed-width `u64` (`MAX_REGIONS` = 64: the shard's own realm + its ~4 ancestors +
-/// a bounded child set; the HUNDREDS of sibling child realms resolve via the directory, NOT a local bit —
-/// the scale answer). `Copy`, ONE word per entity → zero cross-entity contention (the `par_iter`
-/// precondition). Each region's bit advances INDEPENDENTLY by its own [`vd_core::geometry::ContainmentBand`]
-/// — there is no single-winner slot to corrupt (the old `winner_ix` reset was actively wrong here).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// Per-entity HYSTERETIC containment membership: THE SET OF REALMS this occupant is currently a member
+/// of (task #135 §2.3).
+///
+/// **This was a fixed-width `u64` — one bit per watched region — and that single word is what capped a
+/// parent at 64 children (SL9, retired 2026-08-24).** It is now the short list it always described. The
+/// set holds only TRUE members, so its size is the occupant's own chain (about six: the realm it stands
+/// in and its ancestors) plus, briefly, the sibling whose release edge it has not yet left during a
+/// crossing. It does NOT grow with the parent's breadth: a galaxy watching a hundred and fifty thousand
+/// star systems stores the same handful per occupant as a planet watching one moon, because an occupant
+/// can only be inside the ones that actually contain it.
+///
+/// PER-ENTITY, so there is still zero cross-entity contention (the `par_iter` precondition the `Copy`
+/// word was chosen for is preserved — only the "one word" part is gone). An EMPTY set allocates nothing,
+/// which is the state of every occupant this shard does not host. Each realm's membership advances
+/// INDEPENDENTLY by its own [`vd_core::geometry::ContainmentBand`] — there is no single-winner slot to
+/// corrupt (the old `winner_ix` reset was actively wrong here).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RegionMembership {
-    bits: u64,
+    realms: BTreeSet<RealmId>,
 }
 
 impl RegionMembership {
-    /// Is the entity a hysteretic member of region `ix`? (Precondition `ix < MAX_REGIONS`.)
-    fn get(self, ix: usize) -> bool {
-        self.bits & (1u64 << ix) != 0
+    /// Is the entity a hysteretic member of `realm`?
+    fn get(&self, realm: RealmId) -> bool {
+        self.realms.contains(&realm)
     }
 
-    /// Set the membership bit for region `ix` (precondition `ix < MAX_REGIONS`).
-    pub(crate) fn set(&mut self, ix: usize, member: bool) {
-        let mask = 1u64 << ix;
+    /// Record (or clear) membership of `realm`. Clearing REMOVES, so the set only ever holds true
+    /// members and stays the size of the occupant's own chain however wide the parent is.
+    pub(crate) fn set(&mut self, realm: RealmId, member: bool) {
         if member {
-            self.bits |= mask;
+            self.realms.insert(realm);
         } else {
-            self.bits &= !mask;
+            self.realms.remove(&realm);
         }
     }
 }
@@ -264,7 +275,9 @@ pub(crate) fn evaluate_realm_boundaries(
         clock: &clock,
         regions: &regions.regions,
         depths: &regions.depths,
-        ancestor_mask: &regions.ancestor_mask,
+        ancestor_chain: &regions.ancestor_chain,
+        child_index: regions.child_index(),
+        own_frame: regions.own_frame(config.realm),
         ix_of: &regions.ix_of,
         root_realm: regions.root_realm,
         realm_fence,
@@ -285,11 +298,7 @@ pub(crate) fn evaluate_realm_boundaries(
         // the old per-stamp solve; a LATCHED dot's frozen position is measured against the current
         // world, the same one-instant rule the flush follows (its scan outputs are suppressed by the
         // standing latch either way).
-        let anchor = book_anchor(
-            &regions.ix_of,
-            config.realm,
-            owning_realm(pose.frame, config.realm),
-        );
+        let anchor = book_anchor(&regions.ix_of, config.realm, owning_realm(pose.frame));
         let Some(book) = placements.0.head(anchor) else {
             // No book for a subject's anchor is a writer gap, never a silent skip: counted, and the
             // subject is simply not evaluated this tick (the next authored tick picks it up).
@@ -301,6 +310,7 @@ pub(crate) fn evaluate_realm_boundaries(
             book,
             dot.entity,
             &pose,
+            dot.prev_offset,
             dot.authority.fence(),
             Some(*session),
             &mut progress.0,
@@ -324,11 +334,7 @@ pub(crate) fn evaluate_realm_boundaries(
         // re-advances AFTER this scan, so its stamp is the previously authored instant — inside the
         // window by construction (the `+1` in `placement_window_ticks`). Bit-identical to the old
         // per-stamp solve. Do NOT reorder the re-advance ahead of this scan in this arc.
-        let anchor = book_anchor(
-            &regions.ix_of,
-            config.realm,
-            owning_realm(pose.frame, config.realm),
-        );
+        let anchor = book_anchor(&regions.ix_of, config.realm, owning_realm(pose.frame));
         let book = match placements.0.at(anchor, pose.universe_tick) {
             Ok(b) => b,
             Err(_) => {
@@ -341,6 +347,7 @@ pub(crate) fn evaluate_realm_boundaries(
             book,
             *entity,
             &pose,
+            t.prev_offset,
             realm_fence,
             // A transient carries no session (its batch handoff emits no session-bearing command); it
             // dispatches to the Transient arm, which never reads this. Slice 3f.
@@ -371,22 +378,94 @@ struct CrossingCtx<'a> {
     /// `src_realm_fence`.
     realm_fence: Fence,
 
-    /// The boot-computed SELF ∪ ANCESTORS bitmask per region index, and the realm→index map to address it
-    /// (task #177). Together they give the DERIVED hysteresis prior: a subject is always a member of the
-    /// realm it is authoritatively in and of every ancestor of it, so an arriving shard never starts from a
-    /// blank memory that contradicts the one the source held.
-    ancestor_mask: &'a [u64],
+    /// The boot-computed SELF ∪ ANCESTORS realm SET per region index, and the realm→index map to address
+    /// it (task #177). Together they give the DERIVED hysteresis prior: a subject is always a member of
+    /// the realm it is authoritatively in and of every ancestor of it, so an arriving shard never starts
+    /// from a blank memory that contradicts the one the source held. Sized by DEPTH, never by the
+    /// parent's breadth (SL9).
+    ancestor_chain: &'a [BTreeSet<RealmId>],
     ix_of: &'a BTreeMap<RealmId, usize>,
+    /// THE CHILD INDEX (SL9): which of this shard's static direct children could hold a given point, so
+    /// the fold below asks a handful instead of the whole forest. EMPTY on a rig that never named its
+    /// own realm, in which case nothing is indexed, nothing is skipped, and the fold is the full scan it
+    /// has always been.
+    child_index: &'a ChildIndex,
+    /// THIS SHARD'S OWN frame — the one the child index is built in, so a subject is expressed there
+    /// once per tick instead of once per child.
+    own_frame: FrameRef,
 }
 
-/// The DERIVED hysteresis prior for a subject authoritatively in `owning` — SELF ∪ ANCESTORS as a region
-/// bitmask, or zero for a realm this shard does not host. Monomorphic so its branches are covered once.
-fn owned_prior_mask(ix_of: &BTreeMap<RealmId, usize>, mask: &[u64], owning: RealmId) -> u64 {
+/// Is this region worth evaluating for a subject whose candidate set is `candidates`?
+///
+/// YES unless ALL of these hold: the lookup produced an answer at all, the index actually answers for
+/// this realm (so a miss is INFORMATION,
+/// not ignorance), the lookup did not name it, the subject is not already a remembered member of it, and
+/// it is not on the subject's own derived chain. The last two matter because membership is HYSTERETIC —
+/// a region the subject is inside must be re-asked every tick to decide RELEASE, however far the
+/// geometry says it now is.
+///
+/// Monomorphic and written as five named terms rather than one chained `&&`, so every arm is coverable
+/// on its own (HR5) and so the reason a region survived the filter can be read off the code.
+pub(crate) fn worth_asking(
+    answered: bool,
+    index: &ChildIndex,
+    candidates: &[RealmId],
+    remembered: &RegionMembership,
+    chain: &BTreeSet<RealmId>,
+    realm: RealmId,
+) -> bool {
+    if !answered {
+        return true; // the index ABSTAINED for this subject-tick — ignorance, so evaluate everything
+    }
+    if !index.answers_for(realm) {
+        return true; // not indexed (an ancestor, this realm itself, a mover) — always evaluated
+    }
+    if candidates.contains(&realm) {
+        return true; // the lookup named it
+    }
+    if remembered.get(realm) {
+        return true; // already a member — must be re-asked to decide release
+    }
+    chain.contains(&realm) // on the derived prior's chain — likewise
+}
+
+/// The prior endpoint expressed in THIS SHARD'S OWN frame, for the candidate lookup. `None` for "no
+/// usable prior" — the same two cases the verdict's own prior recognises, decided the same way.
+///
+/// The degeneracy test is on CELLS, not on the whole position: `LatticePos` compares an f64 offset, so
+/// a whole-position equality would be a float comparison, and a subject that has not moved would then
+/// depend on a float comparing equal to itself.
+fn prior_in_own_frame(
+    pose: &StampedPose,
+    prev_pos: LatticePos,
+    own_frame: FrameRef,
+    book: &PlacementBook,
+) -> Option<LatticePos> {
+    if prev_pos.cell() == pose.pos.cell() {
+        return None;
+    }
+    let prev = StampedPose {
+        pos: prev_pos,
+        ..*pose
+    }
+    .sanitized();
+    vd_core::frame::transfer_frame(&prev, own_frame, book)
+        .ok()
+        .map(|p| p.pos)
+}
+
+/// The DERIVED hysteresis prior for a subject authoritatively in `owning` — SELF ∪ ANCESTORS as a set of
+/// realms, or EMPTY for a realm this shard does not host. Monomorphic so its branches are covered once.
+fn owned_prior_chain<'a>(
+    ix_of: &BTreeMap<RealmId, usize>,
+    chains: &'a [BTreeSet<RealmId>],
+    owning: RealmId,
+) -> &'a BTreeSet<RealmId> {
+    const EMPTY: &BTreeSet<RealmId> = &BTreeSet::new();
     ix_of
         .get(&owning)
-        .and_then(|ix| mask.get(*ix))
-        .copied()
-        .unwrap_or(0)
+        .and_then(|ix| chains.get(*ix))
+        .unwrap_or(EMPTY)
 }
 
 /// Retain only the entries whose key is a LIVE subject (the DRY eviction primitive, Slice 3e; RLM Step 2
@@ -424,15 +503,20 @@ struct SubjectEval {
     prev_offset: LatticePos,
 }
 
-/// The subject's OWNING realm derived from its POSE FRAME (not a co-hosting relabel — that machinery is
-/// deleted; every re-home is now the uniform orchestrator saga). `FrameRef::realm()` is `Some` for every
-/// LIVE frame (System/Planet/Area/…), so the fallback to `config_realm` is reached ONLY by a frame with no
-/// nameable realm (`FrameRef::GalaxySpace`, which no live shard hosts). Extracted as a MONOMORPHIC helper so
-/// BOTH arms — the `Some` (a System/Planet/Area frame) and the `None` fallback — are covered by direct unit
-/// tests (HR5: the fallback is otherwise uncoverable, no live shard uses `GalaxySpace`).
+/// The subject's OWNING realm, derived from its POSE FRAME (not a co-hosting relabel — that machinery is
+/// deleted; every re-home is now the uniform orchestrator saga).
+///
+/// ★ IT NO LONGER TAKES A FALLBACK, AND THE FALLBACK IS WHY IT EXISTED. This used to be
+/// `frame.realm().unwrap_or(config_realm)`, wrapped in its own function precisely so the `None` arm could
+/// be driven by a direct unit test — its own doc said the fallback was *"otherwise uncoverable, no live
+/// shard uses GalaxySpace"*. That was the whole justification, and it rested on galaxy space naming no
+/// realm.
+///
+/// A galaxy names one now, so every frame does, and there is nothing left to fall back FROM. Keeping the
+/// shim would mean keeping a second realm-of-a-frame answer that could disagree with the first.
 #[must_use]
-pub(crate) fn owning_realm(frame: FrameRef, config_realm: RealmId) -> RealmId {
-    frame.realm().unwrap_or(config_realm)
+pub(crate) fn owning_realm(frame: FrameRef) -> RealmId {
+    frame.realm()
 }
 
 /// WHO is outside this shard — a fact of the shard's OWN LINEAGE, never a search of the world. An occupant
@@ -509,6 +593,12 @@ fn evaluate_one_subject(
     book: &PlacementBook,
     entity: EntityId,
     pose: &StampedPose,
+    // WHERE THIS SUBJECT WAS AT THE PREVIOUS EVALUATION, in the same frame as `pose`. Every membership
+    // question below is asked about the SEGMENT from here to `pose.pos`, not about the endpoint alone,
+    // so a subject that travels through a child within one tick is still seen. Equal to `pose.pos`
+    // means "no prior", which is what every construction site seeds and what the first tick after a
+    // spawn, an adopt or an arrival carries; the verdict then collapses to the point answer exactly.
+    prev_pos: LatticePos,
     subject_fence: Fence,
     // The subject's session — `Some` for a durable dot (the durable `CrossingRequest` carries it so the
     // orchestrator's saga can `PrepareSubscribe` to the client's gateway), `None` for a transient (whose
@@ -532,7 +622,7 @@ fn evaluate_one_subject(
     // The subject's OWNING realm from its POSE FRAME, hoisted ABOVE the scan because the derived prior
     // below needs it. (`owning_realm` is unit-tested on both arms; on a single-realm shard the pose frame
     // IS `config.frame`.)
-    let owning = owning_realm(pose.frame, ctx.config.realm);
+    let owning = owning_realm(pose.frame);
     // THE DERIVED HYSTERESIS PRIOR (task #177). A subject is ALWAYS a hysteretic member of the realm it is
     // authoritatively in and of every ancestor of it — regardless of what this shard happens to remember.
     //
@@ -546,8 +636,8 @@ fn evaluate_one_subject(
     //
     // It is an OR, never a replacement: the stored bit still carries genuine hysteresis for regions BELOW the
     // owning realm (a child you have entered but not yet re-homed into), which ancestry cannot express.
-    let owned_mask = owned_prior_mask(ctx.ix_of, ctx.ancestor_mask, owning);
-    if owned_mask == 0 {
+    let owned_chain = owned_prior_chain(ctx.ix_of, ctx.ancestor_chain, owning);
+    if owned_chain.is_empty() {
         // The realm named by the pose frame is not one this shard hosts, so there is no ancestry to derive
         // and we fall back to today's stored-only prior. That is a SAFE degrade, not a normal path — it means
         // a rebind upstream handed us a pose in a frame we cannot place — so it is counted and said out loud
@@ -569,22 +659,92 @@ fn evaluate_one_subject(
         ..*pose
     };
     let bits = membership.entry(entity).or_default();
+    // THE CANDIDATE LOOKUP (SL9), ONCE per subject rather than once per child. The index is built in
+    // this shard's OWN frame, so the subject is expressed there once and asked once. A subject this
+    // shard cannot place in its own frame yields NO candidates — and because `worth_asking` only ever
+    // skips a realm the index positively answers for, an empty answer for an indexed child is a real
+    // "not here", while an unbuildable point simply leaves every child unindexed-and-evaluated below.
+    // ★ THE POSITION STAYS ON THE LATTICE (slice S4). It used to be flattened from the frame origin
+    // before the lookup, and at galaxy magnitudes that flatten rounds by a quarter of a metre — over a
+    // hundred times the whole containment band. A key built from a rounded position can name a cell the
+    // child was never registered in, and this index's answer is trusted as a positive "not here", so
+    // the caller would then SKIP the one child that actually holds the point.
+    // ★ THE LOOKUP ASKS ABOUT THE SEGMENT, NOT THE POINT (slice S5). A child the subject travels
+    // THROUGH within one tick holds neither endpoint, so a point lookup would skip it before the swept
+    // verdict could ever be asked — the arithmetic would be correct and unreachable. When the subject
+    // has not moved out of its grid cell the segment answer IS the point answer, so a stationary
+    // subject pays exactly today's lookup.
+    //
+    // `answered == false` means the index ABSTAINED — enumerating the span would have cost more than
+    // handing the whole field back. That is ignorance, not a miss, so every region must be evaluated;
+    // `worth_asking` reads the flag first, before it consults the answer at all.
+    let own_point = vd_core::frame::transfer_frame(&measured, ctx.own_frame, book).map(|p| p.pos);
+    let own_prev = prior_in_own_frame(&measured, prev_pos, ctx.own_frame, book);
+    let mut seg_candidates: Vec<RealmId> = Vec::new();
+    let mut answered = true;
+    let candidates: &[RealmId] = match (&own_point, &own_prev) {
+        (Ok(p), Some(q)) => {
+            answered = ctx.child_index.candidates_segment(
+                *q,
+                *p,
+                ctx.own_frame.tier(),
+                &mut seg_candidates,
+            );
+            &seg_candidates
+        }
+        // No usable prior: the point lookup, unchanged.
+        (Ok(p), None) => ctx.child_index.candidates(*p, ctx.own_frame.tier()),
+        // A subject this shard cannot place in its own frame: no candidates, and every indexed child
+        // therefore falls through to the unconditional evaluation below.
+        // A cross-unit refusal lands here too, and it is COUNTED rather than swallowed: the answer
+        // (no candidates, so every indexed child is evaluated unconditionally) is conservative and
+        // stays exactly as it was, but the reason is no longer invisible.
+        (Err(e), _) => {
+            stats.cross_tier_refused += u64::from(matches!(
+                e,
+                vd_core::frame::FrameError::CrossTierCrossing(_)
+            ));
+            &[]
+        }
+    };
     let mut members: Vec<DepthKey> = Vec::new();
-    for (ix, (region, &depth_key)) in ctx.regions.iter().zip(ctx.depths.iter()).enumerate() {
+    for (region, &depth_key) in ctx.regions.iter().zip(ctx.depths.iter()) {
+        if !worth_asking(
+            answered,
+            ctx.child_index,
+            candidates,
+            bits,
+            owned_chain,
+            region.realm,
+        ) {
+            // NOT a member, and not remembered as one, so there is nothing to advance: `set(realm, false)`
+            // on an absent realm is a no-op and `members` gains nothing. Skipping is therefore identical
+            // to evaluating, which is what `the_index_decides_exactly_what_the_full_scan_decides` proves.
+            continue;
+        }
         // The prior is STORED-OR-DERIVED (see `owned_mask` above): the remembered bit, OR the fact
         // that this region is the subject's owning realm or an ancestor of it. Hoisted above the
         // verdict because the hysteresis arm (acquire vs release edge) is an INPUT to it.
-        let was_member = bits.get(ix) | (owned_mask & (1u64 << ix) != 0);
+        let was_member = bits.get(region.realm) | owned_chain.contains(&region.realm);
         // THE INTEGER CONTAINMENT VERDICT (real-scale addendum §A4.8 row 12): re-express the pose
         // into the region's frame through the shard's own AUTHORED placement book (the input-side
         // frame seam, §2.5/FA-1), then decide membership ON INTEGER CELLS for Shell/Aabb — exact at
         // every magnitude, bit-identical across hosts, no float and no square root on the deciding
         // path. The f64 signed distance rides beside it as the LOG GAUGE only. A frame the shard
         // cannot name (`Err`) SAFE-DEGRADES to non-member — never a spurious container.
-        let (now, sd) = match vd_core::geometry::region_verdict(&measured, region, book, was_member)
-        {
+        let (now, sd) = match vd_core::geometry::region_verdict(
+            &measured, prev_pos, region, book, was_member,
+        ) {
             Ok(v) => (v.member, v.signed_distance_m),
-            Err(_) => (false, f64::MAX),
+            // SAFE-DEGRADE, UNCHANGED — but a cross-unit refusal is counted, because "I cannot say" and
+            // "definitely not a member" are different answers and only one of them is true here.
+            Err(e) => {
+                stats.cross_tier_refused += u64::from(matches!(
+                    e,
+                    vd_core::frame::FrameError::CrossTierCrossing(_)
+                ));
+                (false, f64::MAX)
+            }
         };
         // EVERY REGION'S ANSWER, AND THE PLACEMENT IT WAS MEASURED AGAINST, whenever a NON-OWNED region
         // claims this point. A wrong container is chosen somewhere on the live path and the label follows
@@ -612,9 +772,9 @@ fn evaluate_one_subject(
                 // cell edge an occupant twenty metres out carries twenty thousand cells and almost no
                 // remainder, so reading it as a position says "at the origin" for something far away. That
                 // single habit produced three wrong root causes in this arc.
-                pose_full = ?pose.pos.delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
+                pose_full = %vd_core::pose::describe(pose.pos, pose.frame),
                 placement = ?book.of(region.frame).map(|p| p.origin),
-                pose_at = ?pose.pos.delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
+                pose_at = %vd_core::pose::describe(pose.pos, pose.frame),
                 pose_frame = ?pose.frame,
                 // THE REFRAMED POSITION ITSELF — the number the boundary is actually measured against.
                 // Without it the line above cannot distinguish "the placement was wrong" from "the
@@ -649,7 +809,7 @@ fn evaluate_one_subject(
                 "CONTAINMENT: a child holds MEMBERSHIP of this occupant",
             );
         }
-        bits.set(ix, now);
+        bits.set(region.realm, now);
         if now {
             members.push(depth_key);
         }

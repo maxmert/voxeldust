@@ -236,7 +236,27 @@ pub const PROTO_MAJOR: u16 = 1;
 /// discriminant fails the whole `RealmRegistry` message, and the two lawful exits were a
 /// silently starless sky (a per-session filter) or a loud refusal — the owner chose the
 /// refusal, with no filter machinery built.
-pub const PROTO_MINOR: u16 = 22;
+/// **23** — THE COORDINATE UNIT ENTERS THE HANDSHAKE (slice S3; owner-approved 2026-08-24, Q1
+/// condition 2 — `docs/design/owner_decisions_2026-08-24.md`). `ProtoVersion` gains
+/// `coordinate_generation`, folded at compile time over the coordinate tier table
+/// ([`vd_core::store_stamp::coordinate_generation`]).
+///
+/// WHY IT IS A FLAG DAY AND NOT AN APPEND. The version rides INSIDE `Hello`, and postcard is
+/// positional: a field added to a struct both ends decode is not additive, it re-labels every
+/// byte after it. THE FLOOR RISES WITH IT (22 → 23) for that reason alone — there is no
+/// serving a pre-23 peer, because its `Hello` does not have the field and would be read as
+/// though it did.
+///
+/// WHY IT EXISTS AT ALL. Slice S8 re-values the galaxy's coordinate step. Two builds that
+/// disagree about how many metres one integer step is exchange positions that decode
+/// perfectly and are wrong by the ratio between the units — a factor of about a thousand.
+/// Nothing crashes, nothing is logged, and a player is simply somewhere else. The refusal has
+/// to happen at the handshake, because the first thing a session does is exchange a position.
+///
+/// The value is DERIVED, never typed, so it moves on exactly the change it exists for and
+/// cannot be forgotten. The same fold stamps every durable file (slice S1), so a store and a
+/// peer can never disagree about which world they are in.
+pub const PROTO_MINOR: u16 = 23;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -256,19 +276,52 @@ pub const PROTO_MINOR: u16 = 22;
 /// message (postcard is non-self-describing), and the owner ruled the loud refusal over a
 /// per-session starless filter: "raise the floor, we don't have old clients, no need for any
 /// checks".
-pub const PROTO_MINOR_FLOOR: u16 = 22;
+/// **23** (the current floor): the minor-23 coordinate-unit field inside `Hello` — see the
+/// ledger entry above. A pre-23 peer's `Hello` lacks the field, and a positional encoding
+/// reads the bytes after it as though it were there, so the peer cannot be served at all. The
+/// owner's standing posture on this class (ruling D, 2026-08-19) is the loud refusal rather
+/// than a filter: there are no deployed clients to protect.
+pub const PROTO_MINOR_FLOOR: u16 = 23;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
     pub major: u16,
     pub minor: u16,
+    /// ★ THE UNIT THIS PEER COUNTS POSITIONS IN (slice S3; owner ruling 2026-08-24 Q1 condition 2).
+    ///
+    /// Folded over the coordinate tier table, so it moves when — and only when — a unit moves. Two
+    /// builds that disagree about how many metres one integer step is would exchange positions that
+    /// LOOK valid and are wrong by the ratio between them. Nothing crashes. Nobody is told. A player is
+    /// simply somewhere else.
+    ///
+    /// This is why it is negotiated rather than logged: the refusal must happen BEFORE a position is
+    /// exchanged, and a position is exchanged immediately.
+    pub coordinate_generation: u64,
 }
 
 impl ProtoVersion {
     pub const CURRENT: ProtoVersion = ProtoVersion {
         major: PROTO_MAJOR,
         minor: PROTO_MINOR,
+        // Folded at COMPILE TIME from the same table the durable label folds, so the two can never
+        // disagree about what this build believes — and so no caller can state it.
+        coordinate_generation: vd_core::store_stamp::coordinate_generation(),
     };
+
+    /// A peer speaking THIS build's coordinate unit at a stated major and minor.
+    ///
+    /// The unit is not a parameter, and that is the point: a caller that could state it could state it
+    /// wrongly, and the one value this negotiation exists to protect would become the one value a test
+    /// could fake. To drive a MISMATCH, build the struct literally — which reads as the deliberate act
+    /// it is.
+    #[must_use]
+    pub const fn speaking(major: u16, minor: u16) -> ProtoVersion {
+        ProtoVersion {
+            major,
+            minor,
+            coordinate_generation: vd_core::store_stamp::coordinate_generation(),
+        }
+    }
 
     /// Can we talk to a peer at `theirs`? Major must match; the conversation is then conducted at the
     /// LOWER minor (the sender-gates-new-variants rule) — but never below [`PROTO_MINOR_FLOOR`].
@@ -286,9 +339,17 @@ impl ProtoVersion {
         if minor < PROTO_MINOR_FLOOR {
             return None;
         }
+        // ★ THE UNIT IS NOT NEGOTIABLE (slice S3). Major and minor may differ and still talk — that is
+        // what a floor and a minimum are for. A UNIT cannot: there is no lower unit two peers can agree
+        // to speak, because every position either means metres or it does not. So this is an equality,
+        // and it refuses.
+        if self.coordinate_generation != theirs.coordinate_generation {
+            return None;
+        }
         Some(ProtoVersion {
             major: self.major,
             minor,
+            coordinate_generation: self.coordinate_generation,
         })
     }
 
@@ -303,6 +364,17 @@ impl ProtoVersion {
     pub fn refusal_reason(self, theirs: ProtoVersion) -> String {
         if self.major != theirs.major {
             "incompatible protocol major version".to_owned()
+        } else if self.coordinate_generation != theirs.coordinate_generation {
+            // NAMES THE FIELD AND BOTH VALUES (Q1 condition 3). A refusal an operator cannot act on is
+            // how a cluster gets deleted instead of diagnosed, and this is the one refusal whose cause
+            // is invisible from the outside: both peers are healthy, both are the same version, and
+            // every position either of them sends is wrong.
+            format!(
+                "coordinate units differ: this build counts positions under generation {} and yours \
+                 under {}. A position exchanged between them would be silently wrong by the ratio \
+                 between the two units, so the connection is refused instead.",
+                self.coordinate_generation, theirs.coordinate_generation
+            )
         } else {
             format!(
                 "protocol minor below the floor ({PROTO_MINOR_FLOOR}): the scene is server-composed from v{PROTO_MAJOR}.{PROTO_MINOR_FLOOR}"
@@ -325,34 +397,22 @@ mod tests {
     fn same_major_negotiates_to_lower_minor() {
         // The min still wins — but only ABOVE the floor, so this reads at floor+3 / floor+5 rather
         // than the old 3 / 5 (both of which are now refused outright).
-        let a = ProtoVersion {
-            major: 1,
-            minor: PROTO_MINOR_FLOOR + 3,
-        };
-        let b = ProtoVersion {
-            major: 1,
-            minor: PROTO_MINOR_FLOOR + 5,
-        };
+        let a = ProtoVersion::speaking(1, PROTO_MINOR_FLOOR + 3);
+        let b = ProtoVersion::speaking(1, PROTO_MINOR_FLOOR + 5);
         assert_eq!(
             a.negotiate(b),
-            Some(ProtoVersion {
-                major: 1,
-                minor: PROTO_MINOR_FLOOR + 3
-            })
+            Some(ProtoVersion::speaking(1, PROTO_MINOR_FLOOR + 3))
         );
         assert_eq!(
             b.negotiate(a),
-            Some(ProtoVersion {
-                major: 1,
-                minor: PROTO_MINOR_FLOOR + 3
-            })
+            Some(ProtoVersion::speaking(1, PROTO_MINOR_FLOOR + 3))
         );
     }
 
     #[test]
     fn major_mismatch_refuses() {
-        let a = ProtoVersion { major: 1, minor: 0 };
-        let b = ProtoVersion { major: 2, minor: 0 };
+        let a = ProtoVersion::speaking(1, 0);
+        let b = ProtoVersion::speaking(2, 0);
         assert_eq!(a.negotiate(b), None);
     }
 
@@ -362,10 +422,7 @@ mod tests {
         // out, so a pre-8 peer is not served at a lower minor — it is refused. Before the floor existed
         // this negotiated down happily and the peer went on to mis-frame every realm datagram it decoded.
         let ours = ProtoVersion::CURRENT;
-        let below = ProtoVersion {
-            major: PROTO_MAJOR,
-            minor: PROTO_MINOR_FLOOR - 1,
-        };
+        let below = ProtoVersion::speaking(PROTO_MAJOR, PROTO_MINOR_FLOOR - 1);
         assert_eq!(
             ours.negotiate(below),
             None,
@@ -380,22 +437,95 @@ mod tests {
         // hunting a version generation mismatch when the real answer is "your client is stale".
         assert_eq!(
             ours.refusal_reason(below),
-            "protocol minor below the floor (22): the scene is server-composed from v1.22"
+            "protocol minor below the floor (23): the scene is server-composed from v1.23"
         );
         assert_eq!(
-            ours.refusal_reason(ProtoVersion {
-                major: PROTO_MAJOR + 1,
-                minor: PROTO_MINOR,
-            }),
+            ours.refusal_reason(ProtoVersion::speaking(PROTO_MAJOR + 1, PROTO_MINOR)),
             "incompatible protocol major version"
+        );
+    }
+
+    #[test]
+    fn a_peer_counting_positions_in_another_unit_is_refused_and_told_which_unit() {
+        // ★ SLICE S3's WHOLE PRODUCT. Slice S8 re-values the galaxy's coordinate step. From that day,
+        // two builds can be the same version, both healthy, both talking — and every position between
+        // them wrong by about a thousand. Nothing crashes. Nothing is logged. A player is somewhere
+        // else.
+        //
+        // RED BEFORE THIS SLICE: nothing in the handshake compared a unit at all, and a step change
+        // moves ZERO bytes — no golden reddens, no decode fails, nothing goes red by itself. Every
+        // safeguard here had to be built deliberately, so it is asserted deliberately.
+        let ours = ProtoVersion::CURRENT;
+        let theirs = ProtoVersion {
+            // The SAME protocol, the SAME minor. Only the unit differs — which is exactly the state
+            // that is invisible from the outside and is why this must be a refusal.
+            coordinate_generation: ours.coordinate_generation ^ 1,
+            ..ours
+        };
+
+        assert_eq!(
+            ours.negotiate(theirs),
+            None,
+            "a peer counting positions in another unit must be refused — there is no lower unit two \
+             builds can agree to speak"
+        );
+        assert_eq!(
+            theirs.negotiate(ours),
+            None,
+            "and refused from the other side too"
+        );
+
+        // AND IT MUST SAY WHICH FIELD, WITH BOTH VALUES (Q1 condition 3). This is the one refusal
+        // whose cause is invisible without being told: both peers are healthy and the same version.
+        let reason = ours.refusal_reason(theirs);
+        assert!(
+            reason.contains("coordinate units differ"),
+            "the refusal must name the cause: {reason}"
+        );
+        // SPLIT, not joined with `&&`: a short-circuit hides one side's false branch from the coverage
+        // gate, which is a rule this project learned the hard way and writes down.
+        assert!(
+            reason.contains(&ours.coordinate_generation.to_string()),
+            "the refusal must carry OUR unit, or an operator cannot act on it: {reason}"
+        );
+        assert!(
+            reason.contains(&theirs.coordinate_generation.to_string()),
+            "and THEIRS, or they cannot tell which side is behind: {reason}"
+        );
+        // NOT the floor sentence — that would send somebody hunting a version split that is not there.
+        assert!(
+            !reason.contains("below the floor"),
+            "wrong cause reported: {reason}"
+        );
+    }
+
+    #[test]
+    fn the_unit_in_the_handshake_is_the_same_one_that_stamps_a_durable_file() {
+        // ONE FOLD, TWO USERS. A store and a peer must never disagree about which world they are in —
+        // so the protocol's unit and the saved-data label's unit are the same value, not two values
+        // that happen to match today.
+        assert_eq!(
+            ProtoVersion::CURRENT.coordinate_generation,
+            vd_core::store_stamp::coordinate_generation(),
+            "the handshake and the durable label must fold the SAME coordinate table"
         );
     }
 
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 22,
-            "minor 22 is THE STAR REALM (celestial taxonomy arc T2; owner-approved 2026-08-19 \
+            PROTO_MINOR, 23,
+            "minor 23 is THE COORDINATE UNIT IN THE HANDSHAKE (slice S3; owner-approved 2026-08-24, \
+             Q1 condition 2): ProtoVersion gains coordinate_generation, folded at COMPILE TIME over \
+             the coordinate tier table — the same fold that stamps every durable file (slice S1), so \
+             a store and a peer can never disagree about which world they are in. A FLAG DAY, not an \
+             append: the version rides inside Hello and postcard is positional, so the field re-labels \
+             every byte after it and THE FLOOR RISES WITH IT (22 → 23). It exists because slice S8 \
+             re-values the galaxy's coordinate step, and two builds that disagree about how many \
+             metres one integer step is exchange positions that decode perfectly and are wrong by the \
+             ratio between the units — nothing crashes, nothing is logged, and a player is simply \
+             somewhere else; \
+             minor 22 is THE STAR REALM (celestial taxonomy arc T2; owner-approved 2026-08-19 \
              ruling D): RealmId::Star (disc 5) + FrameRef::StarCentered (disc 6) APPENDED — one \
              lawful discriminant inside SceneRow.realm, zero new messages, zero InterShardFlow \
              arms; the floor rises to 22 in the same signature (no old clients, no filter \
@@ -451,11 +581,12 @@ mod tests {
              minor 2 OwnEntity, minor 1 UniverseRate"
         );
         assert_eq!(
-            PROTO_MINOR_FLOOR, 22,
-            "the floor tracks the last CLIENT-VISIBLE break, and minor 22 IS one (owner-approved \
-             2026-08-19, ruling D): a pre-22 peer meeting a RealmId::Star discriminant \
-             mis-frames the whole RealmRegistry (postcard is non-self-describing), and the owner \
-             ruled the loud refusal over a silently-starless per-session filter — zero deployed \
+            PROTO_MINOR_FLOOR, 23,
+            "the floor tracks the last CLIENT-VISIBLE break, and minor 23 IS one (owner-approved \
+             2026-08-24, Q1 condition 2): the coordinate unit moved INSIDE Hello, and postcard is \
+             positional — a pre-23 peer's Hello carries no such field, so every byte after it is \
+             read as though it did. There is no serving such a peer at all, and the standing \
+             posture on this class is the loud refusal rather than a filter: zero deployed \
              clients, no shims, no checks. Do not raise this again except alongside a change of \
              the same kind, named in the ledger."
         );
@@ -463,17 +594,14 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.22");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.23");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is
         // what would ship a stale client a scene stream it decodes into garbage.
         for stale in [17u16, 16, 8, 0] {
             assert_eq!(
-                ProtoVersion::CURRENT.negotiate(ProtoVersion {
-                    major: 1,
-                    minor: stale
-                }),
+                ProtoVersion::CURRENT.negotiate(ProtoVersion::speaking(1, stale)),
                 None,
                 "a minor-{stale} peer is below the floor"
             );

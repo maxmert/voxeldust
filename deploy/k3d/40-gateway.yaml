@@ -26,6 +26,18 @@ spec:
   serviceName: vd-gateway
   replicas: 1
   podManagementPolicy: Parallel
+  # ★ NOT A ROLLING UPDATE (owner ruling 2026-08-24, slice S1 — the saved-data label).
+  #
+  # The default here is RollingUpdate, which replaces pods one at a time and therefore produces a
+  # MIXED-VERSION FLEET on every release, by design. That was survivable while nothing compared
+  # versions. It is not survivable now: a durable file carries a label naming the world, the coordinate
+  # units and the epoch that wrote it, and a process whose label disagrees REFUSES TO START. A rolling
+  # update of a label-changing image therefore does not degrade — it partitions the cluster into the
+  # pods that already restarted and the ones that have not, each refusing the other's files.
+  #
+  # `OnDelete` makes the replacement an explicit act: apply the manifest, then stop the pods yourself.
+  # For a release that moves the label, that means stop-all-then-start, never one-at-a-time.
+  updateStrategy: { type: OnDelete }
   selector:
     matchLabels: { app: vd, role: gateway }
   template:

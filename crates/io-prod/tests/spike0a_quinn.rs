@@ -49,6 +49,7 @@ fn identical_logical_output_mem_vs_quinn() {
         B,
         64,
         false,
+        0,
     )
     .expect("loopback pair");
     let quinn_pinger = TracerNode::new(pair.a, B, TracerRole::Pinger { total: N });
@@ -94,6 +95,7 @@ fn backpressure_parity_mem_vs_quinn() {
         B,
         CAPACITY,
         true,
+        0,
     )
     .expect("loopback pair");
     let quinn_results = flood(&mut pair.a);
@@ -155,6 +157,7 @@ fn unreachable_parity_mem_vs_quinn() {
         B,
         8,
         false,
+        0,
     )
     .expect("loopback pair");
     pair.b_ctl.kill();

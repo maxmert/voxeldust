@@ -148,6 +148,16 @@ pub struct MeshConfig {
     /// Bins pass `VD_PROCESS_INCARNATION` (default 0 in dev/tests); R-6 (P6/P7) makes it a durable
     /// monotone boot-counter that survives a clock rewind.
     pub process_incarnation: u64,
+    /// ★ THE WORLD THIS PROCESS SERVES, as the generation folded over its shape constants.
+    ///
+    /// It rides on the transport handshake beside the coordinate unit, and two nodes that disagree about
+    /// EITHER cannot connect at all. The unit alone was not enough: two builds can count in the same
+    /// millimetres and still disagree about how big the galaxy is, and then they shake hands, decode every
+    /// message cleanly, and put the same player in two different places. Nothing crashes. Nothing logs.
+    ///
+    /// Supplied by the boot, because the world's shape lives in the world generator and this crate cannot
+    /// reach it — which is the same reason the saved-data label takes it as an argument.
+    pub world_generation: u64,
     /// The at-least-once redelivery tuning (R-2b). `validate`d loud at `spawn_mesh` boot.
     pub reliability: MeshReliabilityTuning,
     /// CA-1 — the cap on the LEARNED-peer table (reply-on-connection): how many distinct UNBOOKED dial-in peers
@@ -321,6 +331,7 @@ impl MeshConfig {
         peers: BTreeMap<NodeId, SocketAddr>,
         outbound_capacity: usize,
         process_incarnation: u64,
+        world_generation: u64,
     ) -> MeshConfig {
         MeshConfig {
             local,
@@ -332,6 +343,7 @@ impl MeshConfig {
             redial_backoff_min: DEFAULT_REDIAL_BACKOFF_MIN,
             redial_backoff_max: DEFAULT_REDIAL_BACKOFF_MAX,
             process_incarnation,
+            world_generation,
             reliability: MeshReliabilityTuning::default(),
             learned_peers_max: DEFAULT_LEARNED_PEERS_MAX,
         }
@@ -346,6 +358,28 @@ type SharedInbox = Arc<Mutex<BoundedInbox>>;
 /// (audit GW-1: the design's never-silent rule). Surfaced via [`MeshControl::stats`].
 #[derive(Debug, Default)]
 pub struct MeshStats {
+    /// ★ WHY THE LAST DIAL TO EACH PEER FAILED, and the tag we offered it (slice S3's fleet half).
+    ///
+    /// A failed dial used to discard its reason twice (`map_err(|_| ())`) and retry forever. So two
+    /// nodes that count positions in different units produced an ENDLESS RETRY WITH NO LOG LINE
+    /// ANYWHERE: the cluster never formed and nothing said why. The refusal is correct — the transport
+    /// reports `no_application_protocol`, which carries no field, no value and no unit — but a refusal
+    /// nobody can read is indistinguishable from a network that is simply down.
+    ///
+    /// Held per peer so the alarm fires ONCE per distinct reason and re-arms when the reason changes or
+    /// the peer connects. An error line per retry is not an alarm; it is how a real alarm gets muted by
+    /// the people who most need to see it — the lesson the wedged-hand-off alarm already learned.
+    pub dial_failure: Mutex<BTreeMap<NodeId, String>>,
+    /// ★ THE TAG THIS NODE OFFERS ON EVERY HANDSHAKE — the coordinate unit AND the world's own shape.
+    ///
+    /// Computed once at spawn and carried here rather than threaded through the dial path, because it is
+    /// a fact about this node and every function on that path already holds these stats.
+    ///
+    /// The unit alone was not enough. Two builds can count in the same millimetres and still disagree
+    /// about how big the galaxy is — and then they connect, decode every message cleanly, and put the
+    /// same player in two different places. Nothing crashes and nothing is logged. Both halves ride the
+    /// handshake now, so a disagreement about either refuses the connection instead.
+    pub offered_tag: String,
     /// Unreliable datagrams dropped because the encoded payload exceeded the path
     /// datagram MTU — should be ZERO once snapshots are content-partitioned upstream;
     /// a nonzero value is a partitioner-budget misconfiguration ALERT.
@@ -1037,9 +1071,9 @@ pub fn spawn_mesh(
         t.max_concurrent_uni_streams(quinn::VarInt::from_u32(256));
         Arc::new(t)
     };
-    let mut server_config = trust.quinn_server_config()?;
+    let mut server_config = trust.quinn_server_config(cfg.world_generation)?;
     server_config.transport_config(Arc::clone(&transport));
-    let mut client_config = trust.quinn_client_config()?;
+    let mut client_config = trust.quinn_client_config(cfg.world_generation)?;
     client_config.transport_config(Arc::clone(&transport));
 
     let endpoint = {
@@ -1050,7 +1084,13 @@ pub fn spawn_mesh(
     };
 
     let inbox: SharedInbox = Arc::new(Mutex::new(BoundedInbox::new(cfg.inbound_capacity)));
-    let stats = Arc::new(MeshStats::default());
+    let stats = Arc::new(MeshStats {
+        // COMPUTED ONCE, here, from what this node actually offers — so the line a failed dial prints is
+        // the tag that was really on the wire and not a second spelling of it.
+        offered_tag: String::from_utf8_lossy(&crate::trust::intershard_alpn(cfg.world_generation))
+            .into_owned(),
+        ..MeshStats::default()
+    });
     // The node-wide receiver ledger (SURVIVES connection teardown — the cross-stream cure) and the dialed-
     // connection registry (the drop_connections blip lever), created ONCE and shared by every task.
     let ledger: RecvLedger = Arc::new(RwLock::new(BTreeMap::new()));
@@ -1918,6 +1958,45 @@ fn confirm_and_maybe_bounce(
     }
 }
 
+/// Say why a dial failed — ONCE per distinct reason, per peer.
+///
+/// Two things go in the line that nothing else can supply. The REASON, because it used to be thrown
+/// away. And THE TAG WE OFFERED, because the failures this catches — two nodes counting positions in
+/// different units, or serving worlds of different SIZES — are both refused by the transport with
+/// `no_application_protocol`, which carries no field, no value and no unit. An operator reading that
+/// alone has nothing to compare; reading it beside our tag, they compare it with the other node's boot
+/// line or admin view and are done.
+///
+/// ★ THE TAG HAS TWO SEGMENTS AND THE LINE SAYS SO. `unit-` differing means the two builds count
+/// positions in different steps. `world-` differing means they count the same way but disagree about how
+/// big the world is. They are different problems with different cures, and an operator should not have
+/// to diff two long hexadecimal strings by eye to find out which one they have.
+///
+/// Once per distinct reason, because this is called on every retry and a line per retry is not an alarm.
+fn report_dial_failure(stats: &Arc<MeshStats>, dest: NodeId, addr: SocketAddr, reason: &str) {
+    let mut seen = stats
+        .dial_failure
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.get(&dest).is_some_and(|last| last == reason) {
+        return; // same peer, same reason, already said
+    }
+    seen.insert(dest, reason.to_owned());
+    drop(seen);
+    tracing::error!(
+        peer = dest.0,
+        %addr,
+        reason,
+        offered_tag = %stats.offered_tag,
+        "DIAL FAILED. If the reason mentions the application protocol, this peer does not serve the same \
+         world we do, and the two builds cannot exchange positions at all. Compare the tag above with \
+         the other node's boot line or its admin view, and look at WHICH SEGMENT differs: a different \
+         `unit-` means the two builds count positions in different steps; a different `world-` means \
+         they count the same way but disagree about how big the world is. Retrying; this line repeats \
+         only if the reason changes."
+    );
+}
+
 /// R-4a: dial the peer on demand (the ONE dial home, shared by `write_frame` + `replay_lanes` so the
 /// ack-reader teardown/respawn + the lane-stream reset can never drift). On a fresh dial: register the
 /// connection (drop_connections), abort any prior ack-reader + spawn a new one on THIS connection, reset
@@ -1956,11 +2035,30 @@ async fn ensure_connection(
             let Some(addr) = topology.load().get(&dest).copied() else {
                 return Err(());
             };
-            let conn = endpoint
-                .connect(addr, "localhost")
-                .map_err(|_| ())?
-                .await
-                .map_err(|_| ())?;
+            // THE REASON IS KEPT, not discarded. Both arms used to be `map_err(|_| ())`, which is how a
+            // coordinate-unit mismatch became an endless silent retry.
+            let conn = match endpoint.connect(addr, "localhost") {
+                Ok(connecting) => match connecting.await {
+                    Ok(conn) => {
+                        // Connected: forget the last failure so a LATER one alarms again rather than
+                        // being suppressed by a reason that is no longer true.
+                        stats
+                            .dial_failure
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&dest);
+                        conn
+                    }
+                    Err(e) => {
+                        report_dial_failure(stats, dest, addr, &e.to_string());
+                        return Err(());
+                    }
+                },
+                Err(e) => {
+                    report_dial_failure(stats, dest, addr, &e.to_string());
+                    return Err(());
+                }
+            };
             connections
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2628,6 +2726,18 @@ async fn peer_resolver_loop(
             apply_resolved(&control, &mut last, *id, resolved);
         }
     }
+}
+
+/// The label a test opens a store under. One place, so a test never states a generation by hand — the
+/// whole point of the mechanism is that those two numbers are derived and un-stateable.
+#[cfg(test)]
+fn test_stamp() -> vd_core::store_stamp::StoreStamp {
+    vd_core::store_stamp::StoreStamp::new(
+        vd_core::store_stamp::StoreRole::Directory,
+        0,
+        vd_core::EpochId(0),
+        &[],
+    )
 }
 
 #[cfg(test)]
@@ -3425,7 +3535,7 @@ mod tests {
             let (t, c) = spawn_mesh(
                 handle,
                 trust,
-                &MeshConfig::new(id, addr, book.clone(), capacity, 0),
+                &MeshConfig::new(id, addr, book.clone(), capacity, 0, 0),
                 None,
             )
             .expect("mesh node");
@@ -3641,7 +3751,7 @@ mod tests {
         let (mut ta, ctl_a) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0),
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0),
             None,
         )
         .expect("spawn A");
@@ -3649,7 +3759,7 @@ mod tests {
         let (mut tb, _ctl_b) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(b, addr_b, book_b, 64, 0),
+            &MeshConfig::new(b, addr_b, book_b, 64, 0, 0),
             None,
         )
         .expect("spawn B");
@@ -3728,7 +3838,7 @@ mod tests {
         let (mut ta, ctl_a) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0),
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0),
             None,
         )
         .expect("spawn A");
@@ -3736,7 +3846,7 @@ mod tests {
         let (mut tb, _ctl_b) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(b, addr_b, book_b, 64, 0),
+            &MeshConfig::new(b, addr_b, book_b, 64, 0, 0),
             None,
         )
         .expect("spawn B");
@@ -3802,7 +3912,7 @@ mod tests {
         let (mut ta, _ctl_a) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0),
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0),
             None,
         )
         .expect("spawn A");
@@ -3810,7 +3920,7 @@ mod tests {
         let (mut tb, ctl_b) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(b, addr_b, book_b, 64, 0),
+            &MeshConfig::new(b, addr_b, book_b, 64, 0, 0),
             None,
         )
         .expect("spawn B");
@@ -3857,21 +3967,21 @@ mod tests {
         drop(sa);
         drop(sb);
         drop(sc);
-        let mut cfg_a = MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0);
+        let mut cfg_a = MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0);
         cfg_a.learned_peers_max = 1;
         let (mut ta, ctl_a) = spawn_mesh(rt.handle(), &trust, &cfg_a, None).expect("spawn A");
         let book: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
         let (mut tb, _cb) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(b, addr_b, book.clone(), 64, 0),
+            &MeshConfig::new(b, addr_b, book.clone(), 64, 0, 0),
             None,
         )
         .expect("spawn B");
         let (mut tc, _cc) = spawn_mesh(
             rt.handle(),
             &trust,
-            &MeshConfig::new(c, addr_c, book, 64, 0),
+            &MeshConfig::new(c, addr_c, book, 64, 0, 0),
             None,
         )
         .expect("spawn C");
@@ -4232,6 +4342,7 @@ mod tests {
             BTreeMap::new(),
             8,
             0,
+            0,
         );
         cfg.reliability.retry_buffer_max_bytes = 0; // below one max frame ⇒ invalid
         // `match` (not `expect_err`): the Ok type `(MeshTransport, MeshControl)` is not `Debug`. The Ok
@@ -4256,7 +4367,7 @@ mod tests {
         for i in 1..=(crate::outbox::OUTBOX_WRITER_CHANNEL_DEPTH as u64 + 1) {
             book.insert(NodeId(i), addr);
         }
-        let cfg = MeshConfig::new(NodeId(1), addr, book, 8, 0);
+        let cfg = MeshConfig::new(NodeId(1), addr, book, 8, 0, 0);
         let sink: SharedOutbox = Arc::new(Mutex::new(
             Box::new(MockOutboxSink::default()) as Box<dyn OutboxSink + Send>
         ));
@@ -4461,8 +4572,12 @@ mod tests {
     fn r6d2c_t8_real_node_outbox_stores_a_replay_decodable_frame() {
         let path = temp_outbox_path("glue");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = crate::outbox::NodeOutbox::open(&path, crate::store::StoreTuning::default())
-            .expect("open");
+        let mut ob = crate::outbox::NodeOutbox::open(
+            &path,
+            crate::store::StoreTuning::default(),
+            test_stamp(),
+        )
+        .expect("open");
         let mut lane = ReliableLaneSender::new(PEER, 3, BIG_CAP);
         lane.assign_and_retain(FROM, MsgClass::Saga, b"payload", true, Some(&mut ob))
             .expect("assign");
@@ -4564,8 +4679,12 @@ mod tests {
         // simulating rows left durable by a crashed prior process.
         let path = temp_outbox_path("replay");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = crate::outbox::NodeOutbox::open(&path, crate::store::StoreTuning::default())
-            .expect("open");
+        let mut ob = crate::outbox::NodeOutbox::open(
+            &path,
+            crate::store::StoreTuning::default(),
+            test_stamp(),
+        )
+        .expect("open");
         for seq in 0..2u64 {
             let framed = expected_encoded(NodeId(1), MsgClass::Saga, 1, seq, &[50 + seq as u8]);
             ob.retain(
@@ -4602,7 +4721,7 @@ mod tests {
         let mut b = None;
         for (id, addr, socket) in reserved {
             drop(socket); // release the port for quinn
-            let cfg = MeshConfig::new(id, addr, book.clone(), 64, 2); // incarnation 2 == new_incarnation
+            let cfg = MeshConfig::new(id, addr, book.clone(), 64, 2, 0); // incarnation 2 == new_incarnation
             let outbox = (id == NodeId(1)).then(|| shared.clone());
             let (t, _c) = spawn_mesh(rt.handle(), &trust, &cfg, outbox).expect("mesh");
             if id == NodeId(1) {
@@ -4677,5 +4796,83 @@ mod tests {
             "the QUARANTINED roster-gone peer-9 row is RETAINED (F1 no-loss); remaining {remaining:?}"
         );
         let _ = &mut a;
+    }
+}
+
+#[cfg(test)]
+mod dial_failure_is_never_silent {
+    //! A REFUSAL NOBODY CAN READ IS A NETWORK OUTAGE (slice S3's fleet half).
+    //!
+    //! Two nodes counting positions in different units are refused by the transport, which reports
+    //! `no_application_protocol` — no field, no value, no unit. The dial used to discard that reason
+    //! twice and retry forever, so the whole event was an endless silent loop.
+    use super::*;
+
+    #[test]
+    fn the_same_reason_alarms_once_and_a_new_reason_alarms_again() {
+        // ONCE PER DISTINCT REASON. This is called on every retry, and a line per retry is not an
+        // alarm — it is how a real alarm gets muted by the people who most need to see it.
+        let stats = Arc::new(MeshStats::default());
+        let dest = NodeId(7);
+        let addr: SocketAddr = "127.0.0.1:9".parse().expect("a test address");
+
+        let seen = |s: &Arc<MeshStats>| {
+            s.dial_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&dest)
+                .cloned()
+        };
+
+        report_dial_failure(&stats, dest, addr, "no application protocol");
+        assert_eq!(seen(&stats).as_deref(), Some("no application protocol"));
+
+        // The same reason again changes nothing — the alarm does not repeat.
+        report_dial_failure(&stats, dest, addr, "no application protocol");
+        assert_eq!(seen(&stats).as_deref(), Some("no application protocol"));
+
+        // A DIFFERENT reason is a different fault and must be heard.
+        report_dial_failure(&stats, dest, addr, "connection refused");
+        assert_eq!(seen(&stats).as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn a_peer_that_connects_re_arms_its_alarm() {
+        // Without this, a peer that failed once and recovered would stay silent through its NEXT
+        // failure — the alarm would be a one-shot latch rather than a report of the current state.
+        let stats = Arc::new(MeshStats::default());
+        let dest = NodeId(7);
+        let addr: SocketAddr = "127.0.0.1:9".parse().expect("a test address");
+
+        report_dial_failure(&stats, dest, addr, "no application protocol");
+        // What the dial does on success:
+        stats
+            .dial_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&dest);
+        assert!(
+            stats
+                .dial_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&dest)
+                .is_none(),
+            "a connected peer forgets its last failure"
+        );
+    }
+
+    #[test]
+    fn peers_alarm_independently() {
+        // A shared latch would let one noisy peer silence a second, genuinely different fault.
+        let stats = Arc::new(MeshStats::default());
+        let addr: SocketAddr = "127.0.0.1:9".parse().expect("a test address");
+        report_dial_failure(&stats, NodeId(1), addr, "no application protocol");
+        report_dial_failure(&stats, NodeId(2), addr, "no application protocol");
+        let seen = stats
+            .dial_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(seen.len(), 2, "each peer keeps its own reason");
     }
 }

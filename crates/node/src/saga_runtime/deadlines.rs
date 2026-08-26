@@ -119,7 +119,7 @@ pub(crate) fn scan_deadlines(
             // accepts that frame. Resolved from the SAME fenced directory as every authority answer.
             let pose_realm_owner = live
                 .flushed_pose
-                .and_then(|p| p.frame.realm())
+                .map(|p| p.frame.realm())
                 .and_then(|realm| dir.head(DirectoryKey::Realm(realm)))
                 .map(|r| r.authority.node());
             // The dead-aware deadline event: a re-drive toward a CONFIRMED-DEAD participant becomes a

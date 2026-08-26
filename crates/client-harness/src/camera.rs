@@ -6,6 +6,7 @@
 
 use glam::DVec3;
 use vd_core::kinematics;
+use vd_core::pose::{LatticePos, Tier};
 
 /// Max pitch (radians, ~89°) — just under straight-up to avoid the gimbal flip.
 pub const PITCH_LIMIT: f64 = 1.553_343;
@@ -201,6 +202,29 @@ pub fn look_rotation(direction: DVec3, up: DVec3) -> glam::DQuat {
 #[must_use]
 pub fn eye_relative(world_p: DVec3, eye: DVec3) -> DVec3 {
     world_p - eye
+}
+
+/// ★ THE SAME SUBTRACTION, DONE BEFORE ANYTHING IS FLATTENED (slice S4).
+///
+/// [`eye_relative`] above is correct about the SUBTRACTION and wrong about the ORDER: by the time it
+/// runs, both halves have already been flattened from the frame origin, and each of those flattens
+/// rounded independently.
+///
+/// At the star placement radius a position is about 1.53e18 lattice cells, whose f64 spacing is 256
+/// cells — a quarter of a metre. So two ships flying in convoy each round to a quarter of a metre,
+/// separately, TODAY. Their drawn separation is wrong by up to half a metre and it flickers as they
+/// move, because the two roundings are independent.
+///
+/// ★ AND THE OBVIOUS TEST DOES NOT CATCH IT. A hundred metres is exactly 102,400 cells, and 102,400 is
+/// a whole multiple of 256 — so both endpoints round by the SAME amount, the errors cancel, and the
+/// drawn distance is exactly 100.000 m. Every whole-metre separation is exact here. The defect only
+/// shows on separations that are not multiples of the rounding step
+/// (`vd_core::pose::tests::subtracting_before_flattening_is_exact_where_flattening_first_is_not`).
+///
+/// Subtracting on the integers first removes it entirely — not reduces it, removes it.
+#[must_use]
+pub fn eye_relative_lattice(world_p: LatticePos, eye: LatticePos, tier: Tier) -> DVec3 {
+    world_p.delta_m(eye, tier)
 }
 
 /// The minimum apparent radius, in pixels, a DOT MARKER may shrink to under perspective — the VU
@@ -1029,5 +1053,79 @@ mod tests {
         assert_eq!(r, 0.0);
         // NOTHING DRAWN AT ALL is still None (the empty guard, through both arms).
         assert_eq!(framing_bounds(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod eye_relative_on_the_lattice {
+    //! SLICE S4: reduce against the eye BEFORE flattening, so two things drawn near each other are
+    //! drawn at the distance they actually are apart.
+    use super::*;
+    use glam::I64Vec3;
+
+    /// The star placement radius, in fine lattice cells — where one f64 step is 256 cells, a quarter
+    /// of a metre.
+    const R_CELLS: i64 = 1_534_955_097_245_569_024;
+
+    #[test]
+    fn a_convoy_at_the_placement_radius_draws_the_distance_it_actually_is_apart() {
+        // TWO SHIPS FLYING TOGETHER, today, on the world as it stands. Each position is flattened from
+        // the frame origin before the eye is subtracted, so each rounds independently by up to a
+        // quarter of a metre — and the drawn gap between them is wrong, and flickers as they move.
+        //
+        // The separation swept here is NOT a multiple of the rounding step, deliberately: a whole
+        // metre is exactly 102,400 cells and 102,400 is a multiple of 256, so both endpoints round the
+        // SAME way and the errors cancel. A gate built on a round number could never have failed.
+        let tier = Tier::Fine;
+        let eye = LatticePos::at(I64Vec3::new(R_CELLS, 0, 0), DVec3::ZERO);
+
+        let mut worst_old = 0.0_f64;
+        let mut worst_new = 0.0_f64;
+        for sep_cells in [102_401_i64, 102_501, 102_655, 103_000] {
+            let ship = LatticePos::at(I64Vec3::new(R_CELLS + sep_cells, 0, 0), DVec3::ZERO);
+            let truth = sep_cells as f64 * tier.cell_edge_m();
+
+            // THE OLD PATH: flatten both from the frame origin, then subtract.
+            let old = eye_relative(
+                ship.delta_m(LatticePos::ORIGIN, tier),
+                eye.delta_m(LatticePos::ORIGIN, tier),
+            )
+            .x;
+            // THE NEW PATH: subtract on the integers, flatten the small result.
+            let new = eye_relative_lattice(ship, eye, tier).x;
+
+            worst_old = worst_old.max((old - truth).abs());
+            worst_new = worst_new.max((new - truth).abs());
+        }
+
+        assert!(
+            worst_old > 0.0,
+            "the old path must be measurably wrong here, or this gate proves nothing"
+        );
+        assert!(
+            worst_old <= 0.25,
+            "bounded by one step of the absolute coordinate: {worst_old} m"
+        );
+        assert_eq!(
+            worst_new, 0.0,
+            "reducing on the lattice must be EXACT, not merely closer"
+        );
+    }
+
+    #[test]
+    fn the_two_paths_agree_where_the_old_one_was_already_exact() {
+        // Not a regression test — a statement of scope. Near the frame origin, and on separations that
+        // are multiples of the rounding step, the old path was already right, and the new one must not
+        // move those answers.
+        let tier = Tier::Fine;
+        let eye = LatticePos::from_metres(DVec3::new(10.0, 0.0, 0.0), tier);
+        let ship = LatticePos::from_metres(DVec3::new(110.0, 0.0, 0.0), tier);
+        assert_eq!(
+            eye_relative_lattice(ship, eye, tier),
+            eye_relative(
+                ship.delta_m(LatticePos::ORIGIN, tier),
+                eye.delta_m(LatticePos::ORIGIN, tier)
+            )
+        );
     }
 }

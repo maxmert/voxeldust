@@ -95,9 +95,9 @@ impl PlacementBook {
     /// use vd_core::ids::UniverseTick;
     /// use vd_core::placement::PlacementBook;
     /// use vd_core::pose::FrameRef;
-    /// let book = PlacementBook::new(FrameRef::GalaxySpace, UniverseTick(0), Vec::new());
+    /// let book = PlacementBook::new(FrameRef::GalaxySpace { galaxy_seed: 0 }, UniverseTick(0), Vec::new());
     /// // E0061: `of` takes ONE argument — there is no tick parameter to hand a solver.
-    /// let _ = book.of(FrameRef::GalaxySpace, UniverseTick(0));
+    /// let _ = book.of(FrameRef::GalaxySpace { galaxy_seed: 0 }, UniverseTick(0));
     /// ```
     #[must_use]
     pub fn of(&self, frame: FrameRef) -> Option<FramePlacement> {

@@ -1295,7 +1295,7 @@ mod tests {
     /// direct children.
     #[test]
     fn the_client_draws_a_cell_in_the_unit_the_sender_stated_for_it() {
-        use vd_core::pose::{COARSE_CELL_EDGE_M, FINE_CELL_EDGE_M};
+        use vd_core::pose::{FINE_CELL_EDGE_M, Tier};
         let (fabric, mut gw, mut client) = rig(|_| None);
         // Two realms, ONE integer cell each, identical value — but authored on the two different
         // lattices the coordinate base supports.
@@ -1323,7 +1323,7 @@ mod tests {
             origin_epoch: 0,
             realms: vec![
                 row(fine, FrameRef::SystemSpace { system_seed: 7 }),
-                row(coarse, FrameRef::GalaxySpace),
+                row(coarse, FrameRef::GalaxySpace { galaxy_seed: 0 }),
             ],
         };
         let bytes = postcard::to_allocvec(&dg).expect("encode");
@@ -1340,7 +1340,10 @@ mod tests {
             client.delivered_view.world_pos(&p)
         };
         assert_eq!(drawn(fine), DVec3::new(FINE_CELL_EDGE_M, 0.0, 0.0));
-        assert_eq!(drawn(coarse), DVec3::new(COARSE_CELL_EDGE_M, 0.0, 0.0));
+        assert_eq!(
+            drawn(coarse),
+            DVec3::new(Tier::Galaxy.cell_edge_m(), 0.0, 0.0)
+        );
     }
 
     #[test]

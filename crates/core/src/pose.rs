@@ -39,6 +39,19 @@ pub enum RealmId {
     /// its deterministic seed (`child_seed(system_seed, STAR_SALT, 0)`). APPENDED
     /// (discriminant 5) so the wire stays additive (`PROTO_MINOR` 22).
     Star(u64),
+    /// ★ A GALAXY'S OWN SPACE, keyed by its deterministic seed. APPENDED (discriminant 6).
+    ///
+    /// Until S9 a galaxy had no identity and borrowed one: `RealmPath`'s `GALAXY_STANDIN` filed it under
+    /// `System(1)`. That worked only while a galaxy OWNED NOTHING and nobody asked whose it was. S9 gives
+    /// a galaxy star systems to own, so the question starts being asked — and `System(1)` cannot answer
+    /// it, because a star system whose seed is 1 is a different thing with the same name.
+    Galaxy(u64),
+    /// ★ THE UNIVERSE'S OWN SPACE. APPENDED (discriminant 7), and deliberately FIELDLESS.
+    ///
+    /// There is exactly one universe. A seed field would always hold the same value, and a field that
+    /// always holds one value is a field that eventually holds a different one by accident. It borrowed
+    /// `System(0)` for the same reason the galaxy borrowed `System(1)`, with the same collision.
+    Universe,
 }
 
 impl core::fmt::Display for RealmId {
@@ -50,6 +63,9 @@ impl core::fmt::Display for RealmId {
             RealmId::Station(seed) => write!(f, "station-{seed:016x}"),
             RealmId::Area(seed) => write!(f, "area-{seed:016x}"),
             RealmId::Star(seed) => write!(f, "star-{seed:016x}"),
+            RealmId::Galaxy(seed) => write!(f, "galaxy-{seed:016x}"),
+            // No seed to print, and none omitted: the universe is one thing.
+            RealmId::Universe => write!(f, "universe"),
         }
     }
 }
@@ -63,9 +79,12 @@ pub enum FrameRef {
     ShipLocal { ship: EntityId },
     /// Star-system space, star at origin.
     SystemSpace { system_seed: u64 },
-    /// Galaxy space: integer light-year cells + f64 offsets keep f64 precision
-    /// (the cell layout lands with the galaxy work, P10).
-    GalaxySpace,
+    /// ★ A GALAXY'S OWN SPACE, and it now says WHICH galaxy (slice S9).
+    ///
+    /// It was fieldless while there was only ever one and it owned nothing. The universe holds
+    /// sixty-one, and a frame that cannot name its own galaxy cannot be a frame two galaxies both use.
+    /// Its cells are the galaxy's own two-metre step ([`Tier::Galaxy`]).
+    GalaxySpace { galaxy_seed: u64 },
     /// A station's interior grid frame (moves with the hull, like a ship). APPENDED
     /// (discriminant 4) so the wire stays additive.
     StationLocal { station_seed: u64 },
@@ -75,21 +94,34 @@ pub enum FrameRef {
     /// The near-star frame: star centre at origin (the taxonomy arc T2). APPENDED
     /// (discriminant 6) so the wire stays additive.
     StarCentered { star_seed: u64 },
+    /// ★ THE UNIVERSE'S OWN SPACE (slice S9). APPENDED (discriminant 7) so the wire stays additive, and
+    /// fieldless because there is exactly one. Its cells are the universe's own thirty-two-kilometre
+    /// step ([`Tier::Universe`]).
+    UniverseSpace,
 }
 
 impl FrameRef {
-    /// The realm whose owner is authoritative for entities expressed in this frame,
-    /// when one exists (GalaxySpace has no single realm owner).
+    /// The realm whose owner is authoritative for entities expressed in this frame.
+    ///
+    /// ★ IT IS INFALLIBLE SINCE S9, AND THAT IS A CONSEQUENCE RATHER THAN A TIDY-UP. It used to return an
+    /// `Option` for exactly one reason: galaxy space answered `None`, documented as *"no single realm
+    /// owner"*, because a galaxy was not a realm and had nothing to own. A galaxy owns its star systems
+    /// now and the universe owns its galaxies, so every arm names one.
+    ///
+    /// Leaving the `Option` would have left every caller with a `None` arm that nothing could produce —
+    /// a branch no test can drive, which this project counts as a defect rather than as safety. The type
+    /// now says what is true: a frame always names its realm.
     #[must_use]
-    pub fn realm(self) -> Option<RealmId> {
+    pub fn realm(self) -> RealmId {
         match self {
-            FrameRef::PlanetCentered { planet_seed } => Some(RealmId::Planet(planet_seed)),
-            FrameRef::ShipLocal { ship } => Some(RealmId::Ship(ship)),
-            FrameRef::SystemSpace { system_seed } => Some(RealmId::System(system_seed)),
-            FrameRef::GalaxySpace => None,
-            FrameRef::StationLocal { station_seed } => Some(RealmId::Station(station_seed)),
-            FrameRef::AreaLocal { area_seed, .. } => Some(RealmId::Area(area_seed)),
-            FrameRef::StarCentered { star_seed } => Some(RealmId::Star(star_seed)),
+            FrameRef::PlanetCentered { planet_seed } => RealmId::Planet(planet_seed),
+            FrameRef::ShipLocal { ship } => RealmId::Ship(ship),
+            FrameRef::SystemSpace { system_seed } => RealmId::System(system_seed),
+            FrameRef::GalaxySpace { galaxy_seed } => RealmId::Galaxy(galaxy_seed),
+            FrameRef::UniverseSpace => RealmId::Universe,
+            FrameRef::StationLocal { station_seed } => RealmId::Station(station_seed),
+            FrameRef::AreaLocal { area_seed, .. } => RealmId::Area(area_seed),
+            FrameRef::StarCentered { star_seed } => RealmId::Star(star_seed),
         }
     }
 
@@ -105,7 +137,8 @@ impl FrameRef {
             FrameRef::PlanetCentered { planet_seed } => format!("Planet {planet_seed}"),
             FrameRef::ShipLocal { ship } => format!("Ship {ship}"),
             FrameRef::SystemSpace { system_seed } => format!("System {system_seed}"),
-            FrameRef::GalaxySpace => "Galaxy".to_owned(),
+            FrameRef::GalaxySpace { galaxy_seed } => format!("Galaxy {galaxy_seed}"),
+            FrameRef::UniverseSpace => "The universe".to_owned(),
             FrameRef::StationLocal { station_seed } => format!("Station {station_seed}"),
             FrameRef::AreaLocal {
                 planet_seed,
@@ -124,7 +157,8 @@ impl FrameRef {
     #[must_use]
     pub fn tier(self) -> Tier {
         match self {
-            FrameRef::GalaxySpace => Tier::Coarse,
+            FrameRef::GalaxySpace { .. } => Tier::Galaxy,
+            FrameRef::UniverseSpace => Tier::Universe,
             FrameRef::PlanetCentered { .. }
             | FrameRef::ShipLocal { .. }
             | FrameRef::SystemSpace { .. }
@@ -151,6 +185,8 @@ pub fn frame_for_realm(realm: RealmId, parent: Option<RealmId>) -> Option<FrameR
         RealmId::Ship(ship) => Some(FrameRef::ShipLocal { ship }),
         RealmId::Station(station_seed) => Some(FrameRef::StationLocal { station_seed }),
         RealmId::Star(star_seed) => Some(FrameRef::StarCentered { star_seed }),
+        RealmId::Galaxy(galaxy_seed) => Some(FrameRef::GalaxySpace { galaxy_seed }),
+        RealmId::Universe => Some(FrameRef::UniverseSpace),
         RealmId::Area(area_seed) => match parent {
             Some(RealmId::Planet(planet_seed)) => Some(FrameRef::AreaLocal {
                 planet_seed,
@@ -159,6 +195,29 @@ pub fn frame_for_realm(realm: RealmId, parent: Option<RealmId>) -> Option<FrameR
             _ => None,
         },
     }
+}
+
+/// A POSITION, SAID OUT LOUD — the metres, the frame it is measured in, and the unit its integer cell
+/// counted (owner ruling 2026-08-24, Q1 condition 3).
+///
+/// Every position that reaches a log goes through here. A bare number of metres is not a position: the
+/// same integer means a millimetre in one frame and two metres in another, and the difference between
+/// those two readings is the whole of an incident at three in the morning. Twelve diagnostics printed
+/// the bare number and named neither.
+///
+/// A helper rather than twelve hand-written field lists, so a new diagnostic cannot print half of it.
+#[must_use]
+pub fn describe(pos: LatticePos, frame: FrameRef) -> String {
+    let tier = frame.tier();
+    let m = pos.delta_m(LatticePos::ORIGIN, tier);
+    format!(
+        "({:.6}, {:.6}, {:.6}) m in {frame:?} [cell = {} m, len {:.6} m]",
+        m.x,
+        m.y,
+        m.z,
+        tier.cell_edge_m(),
+        m.length()
+    )
 }
 
 /// FINE-tier cell edge: **2⁻¹⁰ m** (0.9765625 mm) — the largest power-of-two metre quantum ≤ 1 mm.
@@ -173,16 +232,207 @@ pub fn frame_for_realm(realm: RealmId, parent: Option<RealmId>) -> Option<FrameR
 /// is not exact, so `normalize(17.9)` lands a *negative* residual and is NOT idempotent — and idempotence is
 /// the correctness basis of the cell-activation migration (a pre-activation `{cell 0, full offset}` and a
 /// post-activation `{cell N, residual}` must denote the same point, `re_anchor` a no-op on the anchored
-/// form). It also makes FINE↔COARSE an EXACT integer ratio ([`FINE_CELLS_PER_LY`]), retiring the
-/// remainder-carry hack. The edge is a compile-time constant, never serialized, so this moves zero bytes.
+/// form). It ALSO makes every ratio in the ladder a bit shift — see [`Tier::step_exponent`].
+///
+/// ★ THE SENTENCE THAT USED TO END THIS DOC — *"the edge is a compile-time constant, never serialized, so
+/// this moves zero bytes"* — WAS RETIRED WITH THE LADDER (slice S8). It is still true that no edge travels
+/// on the wire. It is no longer true that changing one moves zero bytes: the set of steps is folded into
+/// the saved-data label and into the protocol's own version
+/// ([`crate::store_stamp::coordinate_generation`]), precisely so that a build which counts in different
+/// units cannot silently read another's positions. Re-valuing a step is a flag day, by construction.
 pub const FINE_CELL_EDGE_M: f64 = 1.0 / 1024.0;
 
-/// FINE cells per COARSE cell (per light-year), EXACT. `COARSE_CELL_EDGE_M` is the exact-integer IAU
-/// light-year in metres (`9_460_730_472_580_800`) and the FINE edge is `2⁻¹⁰`, so one light-year is exactly
-/// `9_460_730_472_580_800 × 1024` fine quanta — an integer that exceeds `i64::MAX` (hence `i128`). This makes
-/// FINE↔COARSE tier conversion exact integer arithmetic (no float remainder carry): `coarse_cell` × this +
-/// fine residual is the exact fine position.
-pub const FINE_CELLS_PER_LY: i128 = 9_460_730_472_580_800_i128 * 1024;
+/// A cross-rung re-statement that could not be done.
+///
+/// Its fields are integers and rungs only — deliberately no `f64`, so the type stays `Copy + Eq` and every
+/// metre in the message is FORMATTED from a rung rather than stored. The offending offset rides as its bit
+/// pattern for the same reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TierConversionError {
+    /// The input is not a lawful position at its own rung. [`LatticePos::normalize`] is TOTAL, not SAFE: a
+    /// finite-but-huge offset saturates its carry and can leave the offset non-finite, and a conversion
+    /// fed that would produce a position with nothing to name it. Refused here instead.
+    #[error(
+        "not a lawful {at:?} position (step {} m): cell axis {cell_axis}, offset axis {} — it cannot be \
+         re-stated in another unit",
+        at.cell_edge_m(),
+        f64::from_bits(*offset_bits)
+    )]
+    NotAdmissible {
+        /// The rung the position claimed to be stated in. The step is FORMATTED from it rather than
+        /// stored, so this type keeps `Eq` — an `f64` field would forfeit it, and a refusal that cannot be
+        /// compared for equality cannot be asserted against in a test.
+        at: Tier,
+        /// The widest offending cell axis.
+        cell_axis: i64,
+        /// The offending offset axis, as bits (so the type keeps `Eq`).
+        offset_bits: u64,
+    },
+    /// A position stated in one rung's cells cannot be re-stated in a FINER rung's cells: the finer
+    /// lattice needs `ratio` times as many, and past its bounded domain the count is not a position any
+    /// more. Refused LOUD, naming BOTH units and BOTH numbers.
+    #[error(
+        "a position {widest_cells} cells from its origin in {from:?} cells does not fit the {to:?} \
+         lattice: the reach is {max_cells} {from:?} cells"
+    )]
+    BeyondReach {
+        /// The rung the position is stated in.
+        from: Tier,
+        /// The finer rung it cannot be re-stated in.
+        to: Tier,
+        /// How far out it actually is, in `from` cells.
+        widest_cells: u64,
+        /// How far out a position may be and still be re-statable.
+        max_cells: u64,
+    },
+}
+
+/// The precondition BOTH directions need and neither used to have: a re-bucketed, in-domain, finite
+/// position.
+///
+/// Bitwise `&`, never `&&`: every term is cheap and pure, and a short-circuit would leave the tail terms
+/// uncoverable from a false left-hand side. A `NaN` offset fails BOTH comparisons (it is neither `>= 0`
+/// nor `< step`), `+inf` fails the upper one, `-inf` the lower, and a saturated cell fails the domain.
+fn admissible(p: LatticePos, at: Tier) -> Result<(), TierConversionError> {
+    let step = at.cell_edge_m();
+    let off = p.offset;
+    let cell = p.cell;
+    let ok = off.cmpge(DVec3::ZERO).all()
+        & off.cmplt(DVec3::splat(step)).all()
+        & (cell.max_element() <= CELL_DOMAIN_MAX)
+        & (cell.min_element() >= -CELL_DOMAIN_MAX);
+    if ok {
+        Ok(())
+    } else {
+        Err(TierConversionError::NotAdmissible {
+            at,
+            cell_axis: worst_axis_i64(cell),
+            offset_bits: worst_axis_f64(off, step).to_bits(),
+        })
+    }
+}
+
+/// The cell axis furthest from the origin — the one a domain refusal is about. Monomorphic so its
+/// comparisons are covered once.
+fn worst_axis_i64(c: I64Vec3) -> i64 {
+    let pick = |a: i64, b: i64| {
+        if a.unsigned_abs() >= b.unsigned_abs() {
+            a
+        } else {
+            b
+        }
+    };
+    pick(pick(c.x, c.y), c.z)
+}
+
+/// The offset axis that broke the `[0, step)` rule, or the widest one when none did (a domain refusal
+/// still wants a number to print). `NaN` compares false against both bounds, so it is picked first.
+fn worst_axis_f64(o: DVec3, step: f64) -> f64 {
+    let bad = |v: f64| !(v >= 0.0 && v < step);
+    let pick = |a: f64, b: f64| if bad(a) { a } else { b };
+    pick(pick(o.x, o.y), o.z)
+}
+
+/// FINER → COARSER. TOTAL on an admissible input.
+///
+/// Dividing by a positive power of two only shrinks the magnitude, and the one signed-division overflow
+/// (`i64::MIN / -1`) cannot arise because the divisor is positive — so there is nothing to refuse here. A
+/// magnitude refusal on this path would be an arm no test could drive, which under HR5 is a defect rather
+/// than coverage.
+fn coarsen(src: LatticePos, from: Tier, to: Tier) -> LatticePos {
+    let ratio = 1_i64 << (to.step_exponent() - from.step_exponent());
+    let q = src.cell.div_euclid(I64Vec3::splat(ratio));
+    let r = src.cell.rem_euclid(I64Vec3::splat(ratio));
+    // THE ONE ROUNDING IN THE WHOLE CONVERSION. `r < ratio` is exact as an f64 and `from`'s step is a
+    // power of two, so the multiply is exact; only this ADD rounds, and its exact value is strictly below
+    // the destination step, so it costs at most half an ulp of that step.
+    let offset = r.as_dvec3() * from.cell_edge_m() + src.offset;
+    // MANDATORY, NOT DECORATION. That add can round the residual up to EXACTLY the destination step,
+    // breaking the `[0, step)` invariant this type promises. Re-bucketing folds it into a carry of one and
+    // is straight-line, so it adds no branch to cover — which is why it is preferable to an explicit test.
+    LatticePos { cell: q, offset }.normalize(to)
+}
+
+/// A DIFFERENCE, finer → coarser. Total: the cell count only shrinks, so no bound can be crossed.
+/// Monomorphic and straight-line (HR5) — every branch that could exist lives in the caller's match.
+fn coarsen_separation(src: Separation, to: Tier) -> Separation {
+    let ratio = 1_i64 << (to.step_exponent() - src.tier.step_exponent());
+    let q = src.cells.div_euclid(I64Vec3::splat(ratio));
+    let r = src.cells.rem_euclid(I64Vec3::splat(ratio));
+    // The remainder returns to the residual AT THE SOURCE STEP, which is where it was measured. No
+    // re-bucketing follows: a difference has no `[0, step)` invariant to restore, and forcing one
+    // would move the answer.
+    Separation {
+        cells: q,
+        residual: r.as_dvec3() * src.tier.cell_edge_m() + src.residual,
+        tier: to,
+    }
+}
+
+/// A DIFFERENCE, coarser → finer. Refuses above the finer rung's bound, then EXACT — the residual is
+/// not touched at all, because `cells · ratio · step_to == cells · step_from` for powers of two.
+fn refine_separation(src: Separation, to: Tier) -> Result<Separation, TierConversionError> {
+    let ratio = 1_i64 << (src.tier.step_exponent() - to.step_exponent());
+    // A DIFFERENCE has no carry from its residual (it keeps it), so the bound is the plain one: the
+    // widest cell whose multiple still lands inside the domain a cell difference must stay within.
+    let max_cells = (CELL_DOMAIN_MAX / ratio).unsigned_abs();
+    let c = src.cells;
+    let widest =
+        c.x.unsigned_abs()
+            .max(c.y.unsigned_abs())
+            .max(c.z.unsigned_abs());
+    if widest > max_cells {
+        return Err(TierConversionError::BeyondReach {
+            from: src.tier,
+            to,
+            widest_cells: widest,
+            max_cells,
+        });
+    }
+    Ok(Separation {
+        cells: I64Vec3::new(c.x * ratio, c.y * ratio, c.z * ratio),
+        residual: src.residual,
+        tier: to,
+    })
+}
+
+/// COARSER → FINER. Refuses above its bound, then EXACT — no float touches the integer half.
+fn refine(src: LatticePos, from: Tier, to: Tier) -> Result<LatticePos, TierConversionError> {
+    let ratio = 1_i64 << (from.step_exponent() - to.step_exponent());
+    // THE BOUND, DERIVED — never a literal. A destination cell is `c*ratio + carry` with `carry` in
+    // `[0, ratio)`, so the widest source cell that still lands inside the sanitized domain is
+    // `(CELL_DOMAIN_MAX - (ratio - 1)) / ratio`. Bounded against CELL_DOMAIN_MAX and NOT `i64::MAX`,
+    // because a result above it is clamped at wire ingress anyway and would break the one thing
+    // CELL_DOMAIN_MAX exists for: a cell DIFFERENCE that cannot overflow.
+    let max_cells = ((CELL_DOMAIN_MAX - (ratio - 1)) / ratio).unsigned_abs();
+    let c = src.cell;
+    // UNSIGNED magnitudes so `i64::MIN` cannot overflow an abs — the discipline the crossing path already
+    // follows in `Separation::cells_chebyshev`.
+    let widest =
+        c.x.unsigned_abs()
+            .max(c.y.unsigned_abs())
+            .max(c.z.unsigned_abs());
+    if widest > max_cells {
+        return Err(TierConversionError::BeyondReach {
+            from,
+            to,
+            widest_cells: widest,
+            max_cells,
+        });
+    }
+    let step_to = to.cell_edge_m();
+    // Exact: dividing by a power of two is an exponent shift. Admissibility guarantees the offset is in
+    // `[0, from_step)`, so this carry is in `[0, ratio)` and the sum below provably cannot overflow.
+    let carry = (src.offset / step_to).floor();
+    Ok(LatticePos {
+        cell: I64Vec3::new(
+            c.x * ratio + carry.x as i64,
+            c.y * ratio + carry.y as i64,
+            c.z * ratio + carry.z as i64,
+        ),
+        offset: src.offset - carry * step_to,
+    })
+}
 
 /// The bounded cell domain enforced at wire ingress ([`StampedPose::sanitized`]): each `LatticePos.cell`
 /// axis is clamped to `±CELL_DOMAIN_MAX`. Set to `i64::MAX / 2` so that a cell DIFFERENCE (`a.cell −
@@ -192,34 +442,77 @@ pub const FINE_CELLS_PER_LY: i128 = 9_460_730_472_580_800_i128 * 1024;
 /// passes through BIT-FOR-BIT (`sanitized().cell() == self.cell()`), preserving determinism.
 pub const CELL_DOMAIN_MAX: i64 = i64::MAX / 2;
 
-/// COARSE-tier cell edge: **one light-year** (IAU julian light-year, exact metres). At the coarse tier
-/// a cell counts light-years and the f64 `offset` is the sub-light-year residual. Galaxy-scale positions
-/// live here so f64 stays precise across interstellar distances (pure-f64 metres drift ~131 km/ULP at
-/// galaxy scale — the class this cures). **Planted, value revisable at P10** — no COARSE-tier pose is
-/// produced through P3 (only `SystemSpace`/FINE is live), and the exact-integer FINE↔COARSE remainder
-/// carry (the mm↔ly ratio exceeds one i64) is finalized when the galaxy tier activates (user-deferred).
-pub const COARSE_CELL_EDGE_M: f64 = 9_460_730_472_580_800.0;
-
-/// Which coordinate TIER a [`LatticePos`] cell is measured in. The cell UNIT differs by tier so the
-/// f64 in-cell `offset` keeps high precision at every scale — millimetres inside a star system
-/// ([`Tier::Fine`]), light-years across a galaxy ([`Tier::Coarse`], P10). Selected by
-/// [`FrameRef::tier`] from a frame's KIND — a coordinate unit, never a feature branch (HR3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which coordinate RUNG a [`LatticePos`] cell is measured in — the unit one whole number of the lattice
+/// counts. The unit differs by rung so the f64 in-cell `offset` keeps its precision at every scale:
+/// millimetres inside a star system, two metres across a galaxy, thirty-two kilometres across the
+/// universe. Selected by [`FrameRef::tier`] from a frame's KIND — a coordinate unit, never a feature
+/// branch (HR3).
+///
+/// ★ THREE RUNGS, NOT TWO (slice S8, owner ruling Q1 of 2026-08-24). A millimetre-counting ruler runs out
+/// at about a quarter of a light year, which is why a hundred and fifty thousand star systems would not
+/// fit in a galaxy at all. Each level now counts in a step that suits it. **Every frame at or below a star
+/// system keeps the millimetre step it has always had, bit for bit** — only the two levels nothing has
+/// ever been drawn from get a new one.
+///
+/// The COARSE rung's old value was one light-year, which is **not a power of two**
+/// (`9_460_730_472_580_800 = 2⁶ × 147_823_913_634_075`), so [`LatticePos::normalize`] was not exactly
+/// idempotent there — the one property the fine edge's own doc says a power-of-two edge exists to
+/// guarantee. That was inert only because nothing ever produced a coarse position. Re-valuing the rung to
+/// two metres retires the hazard rather than documenting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
-    /// Star system and inward: millimetre cells ([`FINE_CELL_EDGE_M`]).
+    /// Star system and inward: `2⁻¹⁰ m` cells ([`FINE_CELL_EDGE_M`]). UNCHANGED, and every byte below a
+    /// star system depends on it staying so.
     Fine,
-    /// Galaxy and out: light-year cells ([`COARSE_CELL_EDGE_M`], P10).
-    Coarse,
+    /// A galaxy's own space: `2¹ m` cells. **Two metres, not the design document's one** — the owner ruled
+    /// the bigger step because one metre left five percent of headroom against what a hundred and fifty
+    /// thousand systems need, and content grows; two costs nothing anybody can see at light-year distances
+    /// and buys eight times the room.
+    Galaxy,
+    /// The universe's own space: `2¹⁵ m` cells (32,768 m).
+    Universe,
 }
 
 impl Tier {
-    /// Metres per cell edge at this tier — the exact quantum a [`LatticePos`] cell counts.
+    /// EVERY rung, in ASCENDING step order — the totality list the saved-data stamp folds its coordinate
+    /// generation over ([`crate::store_stamp::coordinate_generation`]).
+    ///
+    /// The ORDER is part of the meaning: the fold is order-sensitive, so a rung inserted in the middle
+    /// changes the generation of every store, which is correct — a build that knows a rung the writer did
+    /// not cannot be trusted to read that writer's positions.
+    ///
+    /// ★ A RUNG ADDED TO THE ENUM AND FORGOTTEN HERE IS THE ONE FAILURE THIS LADDER CANNOT SEE. This array
+    /// has a single reader and its LENGTH is not compile-forced, so a fourth rung that never reaches it
+    /// would leave the coordinate generation unmoved — and then stores, clients and the transport tag
+    /// would all agree across a unit change, which is exactly the disagreement the generation exists to
+    /// make loud. `every_rung_reaches_the_totality_list` is the witness.
+    pub const ALL: [Tier; 3] = [Tier::Fine, Tier::Galaxy, Tier::Universe];
+
+    /// THE DATUM OF THE LADDER: the base-two exponent of this rung's step, in metres.
+    ///
+    /// The exponent is stored and the edge is DERIVED from it, never the other way round. Two things fall
+    /// out that a table of decimals could not give: every step is a power of two by construction (so
+    /// [`LatticePos::normalize`] is exactly idempotent at every rung, and no decimal can drift), and every
+    /// ratio between rungs is a DIFFERENCE OF EXPONENTS — an ordinary bit shift. The double-width integer
+    /// the light-year forced (`FINE_CELLS_PER_LY: i128`) is gone with it.
     #[must_use]
-    pub fn cell_edge_m(self) -> f64 {
+    pub const fn step_exponent(self) -> i32 {
         match self {
-            Tier::Fine => FINE_CELL_EDGE_M,
-            Tier::Coarse => COARSE_CELL_EDGE_M,
+            Tier::Fine => -10,
+            Tier::Galaxy => 1,
+            Tier::Universe => 15,
         }
+    }
+
+    /// Metres per cell edge at this rung — the exact quantum a [`LatticePos`] cell counts, `2^exponent`.
+    ///
+    /// `const` so the saved-data label's coordinate generation and the protocol's own contract can both be
+    /// folded at compile time — a peer's unit must be comparable before a single byte is exchanged. Built
+    /// from the exponent through the f64 bit pattern because `f64::powi` is not `const`: an IEEE-754
+    /// double with a zero mantissa and a biased exponent IS the power of two, exactly.
+    #[must_use]
+    pub const fn cell_edge_m(self) -> f64 {
+        f64::from_bits(((1023 + self.step_exponent()) as u64) << 52)
     }
 }
 
@@ -354,20 +647,46 @@ impl LatticePos {
         }
     }
 
-    /// Re-express this position from one tier's cell UNIT into another (e.g. a FINE mm-lattice position
-    /// re-quantized into COARSE ly-cells at a SOI/warp tier crossing). Same tier ⇒ identity — the ONLY
-    /// live path through P3 (all frames FINE). Cross-tier folds to total metres, then re-buckets at the
-    /// target edge. **Cross-tier is the P10-deferred plant** (user decision): it is precise only where the
-    /// magnitude is f64-representable — the full FINE↔COARSE ratio (mm↔ly ≈ 9.5×10¹⁸ : 1) exceeds one
-    /// i64, so the exact-integer remainder carry finalizes when the COARSE unit does at P10. No COARSE
-    /// pose exists before then, so this dormant arm never runs in the shipped path.
-    #[must_use]
-    pub fn convert_tier(self, from: Tier, to: Tier) -> LatticePos {
-        if from == to {
-            return self;
+    /// Re-state this position in another rung's cells.
+    ///
+    /// **SAME RUNG ⇒ `Ok(self)`, bit for bit, unnormalized** — and this arm is tested FIRST, before any
+    /// admissibility check, on purpose. It is the only live path in the program today, and the poses it
+    /// carries ride at cell ZERO with the whole frame-local distance in the offset
+    /// ([`LatticePos::local`]). Those are not normalized, so an admissibility test placed ahead of this
+    /// arm would refuse every position the shipped path has.
+    ///
+    /// **FINER → COARSER** is total once admissible. It is exact in the whole-number half *except for a
+    /// single carry case* — see the note on the residual below, which is why what a round trip may assert
+    /// is the POSITION and never the cell.
+    ///
+    /// **COARSER → FINER** is the one direction that can be refused, and it is refused loudly rather than
+    /// wrapped. A finer lattice needs `ratio` times as many cells, and past its bounded domain the count
+    /// is not a position any more: scaling an absolute galaxy cell down to millimetres reaches `2⁷³`
+    /// against an `i64::MAX` of `2⁶³`, over by a factor of **1024**. Below its bound the direction is
+    /// EXACT — no float touches the integer half.
+    ///
+    /// ★ WHAT A ROUND TRIP MAY ASSERT. Upward, the residual add can round UP to exactly the destination
+    /// step (`2047 × 2⁻¹⁰` plus the largest sub-cell offset rounds to exactly `2.0`), and the mandatory
+    /// re-bucketing then carries — moving the whole-number half by one cell. The resulting pair is the
+    /// correctly-rounded representation of the same point, so the POSITION is right and the CELL is not
+    /// what was asserted. A property test over random draws does not see this: it is 1,600 hits in a
+    /// 3,200-case directed sweep and 0 in 200,000 random ones.
+    ///
+    /// # Errors
+    /// [`TierConversionError::NotAdmissible`] when the input is not a lawful position at `from` — a
+    /// non-finite offset, an offset outside `[0, step)` after re-bucketing, or a cell outside the
+    /// sanitized domain. [`TierConversionError::BeyondReach`] when refining past the finer rung's reach.
+    pub fn convert_tier(self, from: Tier, to: Tier) -> Result<LatticePos, TierConversionError> {
+        if from.step_exponent() == to.step_exponent() {
+            return Ok(self);
         }
-        let metres = self.offset + self.cell.as_dvec3() * from.cell_edge_m();
-        LatticePos::local(metres).normalize(to)
+        let src = self.normalize(from);
+        admissible(src, from)?;
+        if from.step_exponent() < to.step_exponent() {
+            Ok(coarsen(src, from, to))
+        } else {
+            refine(src, from, to)
+        }
     }
 
     /// THE subtraction (real-scale addendum §A4.3). Every position difference in the program is
@@ -455,15 +774,23 @@ impl Separation {
     }
 
     /// (i′) Chebyshev on integers — the per-axis max |cell delta|, for box shapes and for the
-    /// overflow pre-test. Total: `|Δ| ≤ 2·CELL_DOMAIN_MAX = i64::MAX − 1` for every sanitized pair,
-    /// and `abs` of that range cannot overflow.
+    /// overflow pre-test. TOTAL BY CONSTRUCTION, not by domain argument: `i64::abs` PANICS in debug
+    /// on `i64::MIN`, and `LatticePos::normalize` saturates to `i64::MIN`/`i64::MAX` rather than to
+    /// `±CELL_DOMAIN_MAX`, so `i64::MIN` is reachable in principle and a panic here would land on the
+    /// containment hot path — in debug, which is the whole test and coverage suite. `unsigned_abs`
+    /// cannot overflow; the saturating cast back keeps `i64::MIN` reading as "further than any lawful
+    /// threshold", which is what every caller already does with a too-large separation.
     #[must_use]
     pub fn cells_chebyshev(self) -> i64 {
-        self.cells
+        let m = self
+            .cells
             .x
-            .abs()
-            .max(self.cells.y.abs())
-            .max(self.cells.z.abs())
+            .unsigned_abs()
+            .max(self.cells.y.unsigned_abs())
+            .max(self.cells.z.unsigned_abs());
+        // `min` then cast: `2^63` (from `i64::MIN`) saturates to `i64::MAX`; every other value is
+        // unchanged, so this is bit-identical to the old body over the whole in-domain range.
+        m.min(i64::MAX.unsigned_abs()) as i64
     }
 
     /// (ii) THE FLATTEN — metres, for what consumes metres: render, rapier, thrust, gauges. THE
@@ -476,6 +803,40 @@ impl Separation {
     #[must_use]
     pub fn metres(self) -> DVec3 {
         self.cells.as_dvec3() * self.tier.cell_edge_m() + self.residual
+    }
+
+    /// Re-state this DIFFERENCE in another rung's cells (slice S9) — the primitive a cross-rung
+    /// crossing is built from.
+    ///
+    /// ★ WHY A SEPARATION NEEDS ITS OWN CONVERSION AND CANNOT BORROW [`LatticePos::convert_tier`].
+    /// That one converts a POSITION, and a position is admissible only with a residual inside
+    /// `[0, step)` and a cell inside the sanitized domain. A difference obeys neither: its residual is
+    /// routinely negative (it is a subtraction), and it is not required to be sub-cell. Feeding a
+    /// difference to the position converter would be refused as "not a lawful position" for the
+    /// ordinary case of pointing backwards.
+    ///
+    /// What a difference must preserve is its METRES, and this preserves them exactly:
+    /// - **SAME RUNG ⇒ `Ok(self)`, bit for bit.** Every crossing in the world today, so the S9 climb
+    ///   costs the shipped path nothing — proved by measurement, not by reading.
+    /// - **FINER → COARSER** is total and needs no bound: fewer cells, never more. The whole-number
+    ///   half divides exactly (`div_euclid`) and the remainder is folded back into the residual at the
+    ///   SOURCE step, which is a power of two times an integer below the ratio — exact. Only the final
+    ///   add rounds, by at most half an ulp of the destination step.
+    /// - **COARSER → FINER** multiplies the cell count by the ratio, so it can leave the domain, and is
+    ///   REFUSED there rather than wrapped. Below the bound it is EXACT and the residual is carried
+    ///   through UNTOUCHED — `cells·ratio·step_to == cells·step_from` exactly, both being powers of two.
+    ///
+    /// # Errors
+    /// [`TierConversionError::BeyondReach`] when refining a difference too wide for the finer rung.
+    pub fn convert_tier(self, to: Tier) -> Result<Separation, TierConversionError> {
+        if self.tier.step_exponent() == to.step_exponent() {
+            return Ok(self);
+        }
+        if self.tier.step_exponent() < to.step_exponent() {
+            Ok(coarsen_separation(self, to))
+        } else {
+            refine_separation(self, to)
+        }
     }
 
     /// (iii) THE RE-ANCHOR — this difference re-expressed as a position relative to a new `origin`.
@@ -642,6 +1003,102 @@ fn finite_or_zero(v: DVec3) -> DVec3 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn subtracting_before_flattening_is_exact_where_flattening_first_is_not() {
+        // ★ SLICE S4's GATE, and it is red today on the world as it stands — no new world needed.
+        //
+        // Two objects near the star placement radius. Their separation is computed two ways:
+        //   WRONG — flatten each from the frame origin, then subtract the two metre values;
+        //   RIGHT — subtract in the integer lattice, then flatten the difference.
+        //
+        // ★ THE GATE ALL THREE DESIGNS PROPOSED CANNOT FAIL, and that is why this one is written
+        // differently. They all chose "two things 100 m apart must draw 100 m apart". At this radius a
+        // position is about 1.53e18 fine cells, whose f64 spacing is 256 cells — and 100 m is exactly
+        // 102,400 cells, which is 400 × 256. Both endpoints round by the SAME amount, the errors
+        // cancel, and the answer is exactly 100.000 m. Every WHOLE-METRE separation is exact here, for
+        // the same reason. A gate built on one would have passed for ever while the defect stood.
+        //
+        // So this sweeps separations that are NOT multiples of the rounding quantum.
+        const R_CELLS: i64 = 1_534_955_097_245_569_024; // the placement radius, in fine cells
+        let tier = Tier::Fine;
+        let base = LatticePos::at(I64Vec3::new(R_CELLS, 0, 0), DVec3::ZERO);
+
+        let mut worst_flat_first = 0.0_f64;
+        let mut worst_lattice_first = 0.0_f64;
+        for sep_cells in [102_401_i64, 102_437, 102_501, 102_655, 103_000] {
+            let other = LatticePos::at(I64Vec3::new(R_CELLS + sep_cells, 0, 0), DVec3::ZERO);
+            let truth = sep_cells as f64 * tier.cell_edge_m();
+
+            // WRONG: two flattens, then a subtraction. Each flatten rounds independently.
+            let flat_first = (other.delta_m(LatticePos::ORIGIN, tier)
+                - base.delta_m(LatticePos::ORIGIN, tier))
+            .x;
+            // RIGHT: the subtraction happens on the integers, which cannot round at all.
+            let lattice_first = other.delta_m(base, tier).x;
+
+            worst_flat_first = worst_flat_first.max((flat_first - truth).abs());
+            worst_lattice_first = worst_lattice_first.max((lattice_first - truth).abs());
+        }
+
+        // THE DEFECT, MEASURED. Bounded by one step of the ABSOLUTE coordinate — a quarter of a metre
+        // per axis at this radius. (The source's own doc claims half a metre; that bound is stale and
+        // somebody will quote it.)
+        assert!(
+            worst_flat_first > 0.0,
+            "flattening first must be measurably wrong, or this gate proves nothing"
+        );
+        assert!(
+            worst_flat_first <= 0.25,
+            "the error is bounded by one step of the absolute coordinate: {worst_flat_first} m"
+        );
+
+        // AND THE CURE IS EXACT — not smaller, EXACT. Two ships flying in convoy draw the distance
+        // they actually are apart.
+        assert_eq!(
+            worst_lattice_first, 0.0,
+            "subtracting in the lattice must be exact, not merely better"
+        );
+    }
+
+    #[test]
+    fn the_whole_metre_gate_the_designs_proposed_is_green_today() {
+        // KEPT AS EVIDENCE, because a plan that everyone believed said otherwise. This asserts the
+        // thing that made their gate useless: at this radius a whole-metre separation flattens
+        // EXACTLY, so a test built on one could never have failed however wrong the code was.
+        const R_CELLS: i64 = 1_534_955_097_245_569_024;
+        let tier = Tier::Fine;
+        let base = LatticePos::at(I64Vec3::new(R_CELLS, 0, 0), DVec3::ZERO);
+        let other = LatticePos {
+            cell: I64Vec3::new(R_CELLS + 102_400, 0, 0), // exactly 100 m
+            offset: DVec3::ZERO,
+        };
+        let flat_first =
+            (other.delta_m(LatticePos::ORIGIN, tier) - base.delta_m(LatticePos::ORIGIN, tier)).x;
+        assert_eq!(
+            flat_first, 100.0,
+            "a whole-metre separation is exact even with the defect present — which is why the \
+             proposed gate could not fail"
+        );
+    }
+
+    #[test]
+    fn a_described_position_names_its_metres_its_frame_and_its_unit() {
+        // Q1 CONDITION 3, asserted rather than trusted to a reviewer. A bare number of metres is not a
+        // position: the same integer counts millimetres in one frame and metres in another. If a
+        // diagnostic can print one without the other, the rule is not enforced anywhere.
+        let f = FrameRef::SystemSpace { system_seed: 7 };
+        let text = describe(
+            LatticePos::from_metres(DVec3::new(1.5, 0.0, 0.0), f.tier()),
+            f,
+        );
+        assert!(text.contains("1.500000"), "the metres: {text}");
+        assert!(text.contains("SystemSpace"), "the frame: {text}");
+        assert!(
+            text.contains(&f.tier().cell_edge_m().to_string()),
+            "the unit its cell counted: {text}"
+        );
+    }
     use super::*;
     use crate::entity_kind::EntityKind;
 
@@ -653,20 +1110,27 @@ mod tests {
     fn realm_mapping_per_frame() {
         assert_eq!(
             FrameRef::PlanetCentered { planet_seed: 5 }.realm(),
-            Some(RealmId::Planet(5))
+            RealmId::Planet(5)
         );
         assert_eq!(
             FrameRef::SystemSpace { system_seed: 9 }.realm(),
-            Some(RealmId::System(9))
+            RealmId::System(9)
         );
         assert_eq!(
             FrameRef::ShipLocal { ship: ship_id() }.realm(),
-            Some(RealmId::Ship(ship_id()))
+            RealmId::Ship(ship_id())
         );
-        assert_eq!(FrameRef::GalaxySpace.realm(), None);
+        // ★ THE ARM THAT USED TO ASSERT `None`. Galaxy space named no realm because a galaxy owned
+        // nothing; it owns its star systems now, so it names one like every other frame — and the
+        // universe, which used to have no frame at all, names itself.
+        assert_eq!(
+            FrameRef::GalaxySpace { galaxy_seed: 3 }.realm(),
+            RealmId::Galaxy(3)
+        );
+        assert_eq!(FrameRef::UniverseSpace.realm(), RealmId::Universe);
         assert_eq!(
             FrameRef::StationLocal { station_seed: 7 }.realm(),
-            Some(RealmId::Station(7))
+            RealmId::Station(7)
         );
         assert_eq!(
             FrameRef::AreaLocal {
@@ -674,7 +1138,7 @@ mod tests {
                 area_seed: 8
             }
             .realm(),
-            Some(RealmId::Area(8))
+            RealmId::Area(8)
         );
     }
 
@@ -727,7 +1191,9 @@ mod tests {
             FrameRef::ShipLocal { ship: ship_id() }.label(),
             format!("Ship {}", ship_id())
         );
-        assert_eq!(FrameRef::GalaxySpace.label(), "Galaxy");
+        // A galaxy says WHICH galaxy now — there are sixty-one, and "Galaxy" named none of them.
+        assert_eq!(FrameRef::GalaxySpace { galaxy_seed: 4 }.label(), "Galaxy 4");
+        assert_eq!(FrameRef::UniverseSpace.label(), "The universe");
         assert_eq!(
             FrameRef::StationLocal { station_seed: 7 }.label(),
             "Station 7"
@@ -756,6 +1222,28 @@ mod tests {
             "station-00000000000000ef"
         );
         assert_eq!(RealmId::Area(0x12).to_string(), "area-0000000000000012");
+        // ★ THE S9 ARMS. A galaxy prints its seed like every other keyed realm; the universe prints
+        // no seed at all, because there is exactly one and a number after it would imply otherwise.
+        assert_eq!(RealmId::Galaxy(0x34).to_string(), "galaxy-0000000000000034");
+        assert_eq!(RealmId::Universe.to_string(), "universe");
+        // …and every arm prints something DIFFERENT, which is what "unambiguous" means and what a
+        // list of individual equalities does not actually check.
+        let all = [
+            RealmId::Planet(1).to_string(),
+            RealmId::System(1).to_string(),
+            RealmId::Ship(ship_id()).to_string(),
+            RealmId::Station(1).to_string(),
+            RealmId::Area(1).to_string(),
+            RealmId::Star(1).to_string(),
+            RealmId::Galaxy(1).to_string(),
+            RealmId::Universe.to_string(),
+        ];
+        let unique: std::collections::BTreeSet<&String> = all.iter().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "two realms print the same label: {all:?}"
+        );
     }
 
     #[test]
@@ -841,7 +1329,7 @@ mod tests {
     fn ballistic_advance_is_composable() {
         // Advancing 2s then 3s equals advancing 5s (closed form, no accumulation drift).
         let p0 = StampedPose {
-            frame: FrameRef::GalaxySpace,
+            frame: FrameRef::GalaxySpace { galaxy_seed: 0 },
             pos: LatticePos::local(DVec3::new(1.0, 2.0, 3.0)),
             vel: DVec3::new(-1.0, 0.5, 2.0),
             orient: DQuat::IDENTITY,
@@ -976,19 +1464,27 @@ mod tests {
             .tier(),
             Tier::Fine
         );
-        assert_eq!(FrameRef::GalaxySpace.tier(), Tier::Coarse);
+        assert_eq!(
+            FrameRef::GalaxySpace { galaxy_seed: 0 }.tier(),
+            Tier::Galaxy
+        );
     }
 
     #[test]
-    fn cell_edge_is_the_power_of_two_quantum_at_fine_and_a_light_year_at_coarse() {
-        assert_eq!(Tier::Fine.cell_edge_m(), FINE_CELL_EDGE_M);
-        assert_eq!(Tier::Coarse.cell_edge_m(), COARSE_CELL_EDGE_M);
+    fn every_step_is_the_power_of_two_its_exponent_names() {
+        // The exponent is the datum and the step is DERIVED from it, so this asserts the derivation
+        // itself rather than a table of decimals — a decimal table is what lets one entry drift.
+        for t in Tier::ALL {
+            assert_eq!(
+                t.cell_edge_m(),
+                (t.step_exponent() as f64).exp2(),
+                "{t:?}'s step must be exactly two to its own exponent"
+            );
+        }
         // FINE = 2⁻¹⁰ m (0.9765625 mm) — the largest power-of-two metre quantum ≤ 1 mm, chosen so
-        // `normalize` is exactly idempotent and FINE↔COARSE is an exact integer ratio.
-        assert_eq!(Tier::Fine.cell_edge_m(), 1.0 / 1024.0);
+        // `normalize` is exactly idempotent. UNCHANGED by the ladder, and everything at or below a star
+        // system rests on that.
         assert_eq!(Tier::Fine.cell_edge_m(), 0.0009765625);
-        // one light-year, IAU julian: 9_460_730_472_580_800 m.
-        assert_eq!(Tier::Coarse.cell_edge_m(), 9_460_730_472_580_800.0);
     }
 
     #[test]
@@ -1112,34 +1608,401 @@ mod tests {
         );
     }
 
+    /// ★ GATE (a): DOWNWARD IS EXACT, AND OUT OF REACH IT REFUSES.
+    ///
+    /// Coarser → finer multiplies the whole-number half by the ratio. Inside the reach that is exact —
+    /// no float touches the integer half — and a round trip back is the identity on BOTH halves.
     #[test]
-    fn fine_cells_per_ly_is_the_exact_integer_ratio() {
-        // FINE↔COARSE is exact integer arithmetic: one light-year is exactly FINE_CELLS_PER_LY fine quanta,
-        // an integer that exceeds i64 (hence i128) — retiring the float remainder-carry.
-        assert_eq!(FINE_CELLS_PER_LY, 9_460_730_472_580_800_i128 * 1024);
-        assert_eq!(FINE_CELLS_PER_LY / 1024, COARSE_CELL_EDGE_M as i128);
-        assert!(FINE_CELLS_PER_LY > i64::MAX as i128);
+    fn refining_within_reach_is_exact_and_a_round_trip_is_the_identity() {
+        let cases = [
+            (Tier::Galaxy, Tier::Fine),
+            (Tier::Universe, Tier::Galaxy),
+            (Tier::Universe, Tier::Fine),
+        ];
+        let mut checked = 0u32;
+        for (from, to) in cases {
+            let ratio = 1_i64 << (from.step_exponent() - to.step_exponent());
+            let max_cells = (CELL_DOMAIN_MAX - (ratio - 1)) / ratio;
+            for cell in [0, 1, -1, 7, -7, max_cells, -max_cells, max_cells / 3] {
+                for off in [0.0, from.cell_edge_m() / 2.0] {
+                    let src = LatticePos::at(I64Vec3::splat(cell), DVec3::splat(off));
+                    let fine = src.convert_tier(from, to).expect("within reach");
+                    // EXACT in the integer half: the whole number is scaled, not folded through metres.
+                    assert_eq!(
+                        fine.cell().x,
+                        cell * ratio + (off / to.cell_edge_m()).floor() as i64,
+                        "{from:?} -> {to:?} at cell {cell}"
+                    );
+                    // …and back again is the identity on BOTH halves.
+                    let back = fine.convert_tier(to, from).expect("round trip");
+                    assert_eq!(back.cell(), src.cell(), "{from:?} -> {to:?} -> {from:?}");
+                    assert_eq!(
+                        back.offset(),
+                        src.offset(),
+                        "{from:?} -> {to:?} -> {from:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 3 * 8 * 2, "every case must have run");
     }
 
     #[test]
-    fn convert_tier_same_tier_is_the_identity_the_only_live_path() {
-        // Through P3 every frame is FINE ⇒ convert_tier is always same-tier ⇒ a pure identity (it does
-        // NOT re-bucket the un-normalized shipping pose) — the byte-floor for the dormant arm.
+    fn refining_past_the_reach_refuses_and_names_both_units() {
+        // ★ THE REFUSAL IS THE NORMAL CASE, NOT A CORNER. Scaling an absolute galaxy cell down to
+        // millimetres reaches 2⁷³ against an i64::MAX of 2⁶³ — over by a factor of 1024 — so only the
+        // innermost 0.098% of the domain can be refined at all.
+        let ratio = 1_i64 << (Tier::Galaxy.step_exponent() - Tier::Fine.step_exponent());
+        let max_cells = (CELL_DOMAIN_MAX - (ratio - 1)) / ratio;
+        // One cell inside the bound: admitted. One cell outside: refused. The bound is exact.
+        let inside = LatticePos::at(I64Vec3::new(max_cells, 0, 0), DVec3::ZERO);
+        assert!(inside.convert_tier(Tier::Galaxy, Tier::Fine).is_ok());
+        let outside = LatticePos::at(I64Vec3::new(max_cells + 1, 0, 0), DVec3::ZERO);
+        assert_eq!(
+            outside.convert_tier(Tier::Galaxy, Tier::Fine),
+            Err(TierConversionError::BeyondReach {
+                from: Tier::Galaxy,
+                to: Tier::Fine,
+                widest_cells: (max_cells + 1).unsigned_abs(),
+                max_cells: max_cells.unsigned_abs(),
+            })
+        );
+        // NEGATIVE MAGNITUDES TOO — the bound is about distance from the origin, not about sign.
+        let below = LatticePos::at(I64Vec3::new(-(max_cells + 1), 0, 0), DVec3::ZERO);
+        assert!(below.convert_tier(Tier::Galaxy, Tier::Fine).is_err());
+        // …and the reach really is a thousandth of the domain, stated as a measurement.
+        let share = max_cells as f64 / CELL_DOMAIN_MAX as f64;
+        assert!(share < 0.001, "the refinable share is {share}");
+    }
+
+    /// ★ GATE (b), CORRECTED. The plan and the design document both say upward is exact in the
+    /// whole-number half. IT IS NOT, and this is the counterexample.
+    ///
+    /// `2047 × 2⁻¹⁰` plus the largest sub-cell offset has an exact value a hair BELOW two metres, and
+    /// rounds to EXACTLY two metres — one whole galaxy step. The mandatory re-bucketing then carries, and
+    /// the whole-number half moves by one. The resulting pair is the correctly-rounded representation of
+    /// the same point, so what may be asserted is the POSITION and never the cell.
+    ///
+    /// The density is the lesson: 1,600 hits in a 3,200-case directed sweep, 0 in 200,000 random draws. A
+    /// property test over random inputs passes while the gate lies.
+    #[test]
+    fn coarsening_carries_where_the_residual_rounds_up_to_a_whole_step() {
+        let ratio = 1_i64 << (Tier::Galaxy.step_exponent() - Tier::Fine.step_exponent());
+        let just_under = f64::from_bits(Tier::Fine.cell_edge_m().to_bits() - 1);
+        let cell = 12_345 * ratio + (ratio - 1);
+        let src = LatticePos::at(I64Vec3::new(cell, 0, 0), DVec3::new(just_under, 0.0, 0.0));
+        let up = src
+            .convert_tier(Tier::Fine, Tier::Galaxy)
+            .expect("in domain");
+        // THE CARRY: the naive whole-number answer is 12_345; the correct one is 12_346 with a zero
+        // remainder, because the residual rounded up to a whole step.
+        assert_eq!(cell.div_euclid(ratio), 12_345);
+        assert_eq!(
+            up.cell().x,
+            12_346,
+            "the residual rounded to a whole step and carried"
+        );
+        assert_eq!(up.offset().x, 0.0);
+        // AND THE POSITION IS RIGHT, which is the thing that may be asserted. Reconstruct both and
+        // compare within the derived per-rung bound.
+        let exact = cell as f64 * Tier::Fine.cell_edge_m() + just_under;
+        let got = up.cell().x as f64 * Tier::Galaxy.cell_edge_m() + up.offset().x;
+        let bound = Tier::Galaxy.cell_edge_m() * f64::EPSILON / 4.0;
+        // The difference is computed ONCE and asserted on. A lazily-evaluated format argument is a
+        // region that only runs when the assertion fails, i.e. never on a green run.
+        let off_by = (got - exact).abs();
+        assert!(off_by <= bound);
+    }
+
+    #[test]
+    fn the_upward_residual_bound_is_per_rung_and_is_attained() {
+        // ★ THREE SOURCES DISAGREED AND ALL THREE WERE WRONG. The design document says 2⁻⁶³ (it applied
+        // the FINE rung's granularity to a coarse rung's residual); the plan says 2⁻⁵¹ for everything,
+        // which is unsatisfiable at the universe rung by a factor of 4096. The bound is PER RUNG:
+        // half an ulp of the destination step, `step · ε / 4`.
+        for (from, to) in [
+            (Tier::Fine, Tier::Galaxy),
+            (Tier::Galaxy, Tier::Universe),
+            (Tier::Fine, Tier::Universe),
+        ] {
+            let bound = to.cell_edge_m() * f64::EPSILON / 4.0;
+            let ratio = 1_i64 << (to.step_exponent() - from.step_exponent());
+            let just_under = f64::from_bits(from.cell_edge_m().to_bits() - 1);
+            let mut worst = 0.0_f64;
+            for r in [0, 1, ratio / 2, ratio - 2, ratio - 1] {
+                // THE OFFSETS MUST HAVE FULL MANTISSAS OR THE BOUND IS NEVER APPROACHED. A "round"
+                // offset like half a step has almost no bits below the destination's own resolution, so
+                // almost nothing is discarded and the error is tiny. The half-ulp maximum is reached
+                // when exactly half a destination ulp is thrown away — which `bound` itself names — and
+                // approached by any offset carrying bits all the way down.
+                for off in [
+                    0.0,
+                    from.cell_edge_m() / 2.0,
+                    just_under,
+                    bound,
+                    from.cell_edge_m() / 2.0 + bound,
+                    from.cell_edge_m() * std::f64::consts::FRAC_1_SQRT_2,
+                ] {
+                    // ★ THE ERROR IS MEASURED EXACTLY, NOT BY COMPARING TWO SUMS. My first version of
+                    // this rebuilt the "exact" value in f64 too, so both sides rounded the same way and
+                    // it read ZERO everywhere — and a bound nothing reaches passes for any
+                    // implementation, however loose. This uses the exact-error identity instead: for
+                    // `|a| >= |b|`, `a + b` is exactly `fl(a+b) + (b - (fl(a+b) - a))`, and every step
+                    // of that expression is itself exact. It measures the ONE rounding the conversion
+                    // performs, which is the residual add.
+                    let a = r as f64 * from.cell_edge_m(); // exact: a small integer times a power of two
+                    let (hi, lo) = if a.abs() >= off.abs() {
+                        (a, off)
+                    } else {
+                        (off, a)
+                    };
+                    let s = hi + lo;
+                    let err = lo - (s - hi);
+                    worst = worst.max(err.abs());
+                    // …and the conversion really does answer within that error, so the identity above is
+                    // measuring the thing the conversion actually does.
+                    let cell = 7 * ratio + r;
+                    let src = LatticePos::at(I64Vec3::new(cell, 0, 0), DVec3::new(off, 0.0, 0.0));
+                    let up = src.convert_tier(from, to).expect("in domain");
+                    // SPLIT, never `&&`: a short-circuit leaves the right-hand side uncoverable from a
+                    // false left — this crate's own written rule, which the first draft of this test
+                    // broke and the coverage gate caught.
+                    assert!(up.offset().x >= 0.0);
+                    assert!(up.offset().x < to.cell_edge_m());
+                }
+            }
+            assert!(
+                worst <= bound,
+                "{from:?} -> {to:?}: worst {worst} exceeds {bound}"
+            );
+            // …AND THE BOUND IS ATTAINED, so it is tight rather than padded. A bound nothing reaches
+            // would pass for any implementation, however loose.
+            assert!(
+                worst > bound / 4.0,
+                "{from:?} -> {to:?}: worst {worst} never approaches {bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_axis_that_is_furthest_out_whichever_one_it_is() {
+        // The refusal reports the WIDEST offending axis, so a diagnostic names the number that broke the
+        // rule rather than whichever axis happens to be first. Driven on each axis in turn, because a
+        // "pick the larger" fold that always returned its left argument would satisfy a single-axis test.
+        for axis in 0..3 {
+            let mut cell = I64Vec3::ZERO;
+            cell[axis] = i64::MAX; // out of the sanitized domain on this axis only
+            let src = LatticePos::at(cell, DVec3::ZERO);
+            // EQUALITY ON THE WHOLE REFUSAL, not a match with a fallback arm. A `match` whose other
+            // arm panics is a region no green run can reach — this crate's rule prefers an equality for
+            // exactly that reason, and the coverage gate caught the first draft breaking it.
+            //
+            // The value reported is the one the position ACTUALLY holds: re-bucketing does not clamp a
+            // cell — only the wire-ingress sanitizer does — so the refusal names the offending number
+            // rather than a tidied version of it. The offset is lawful here, so its reported axis is the
+            // last one inspected, which is zero.
+            assert_eq!(
+                src.convert_tier(Tier::Galaxy, Tier::Fine),
+                Err(TierConversionError::NotAdmissible {
+                    at: Tier::Galaxy,
+                    cell_axis: i64::MAX,
+                    offset_bits: 0.0_f64.to_bits(),
+                }),
+                "axis {axis} must be the one reported"
+            );
+        }
+    }
+
+    #[test]
+    fn a_position_that_is_not_lawful_at_its_own_rung_is_refused() {
+        // Every arm of the admissibility test, each driven by the thing it exists for.
+        let bad_offset = LatticePos::at(I64Vec3::ZERO, DVec3::new(f64::NAN, 0.0, 0.0));
+        assert!(bad_offset.convert_tier(Tier::Galaxy, Tier::Fine).is_err());
+        // A cell outside the sanitized domain: re-bucketing saturates it and it is refused here.
+        let far = LatticePos::at(I64Vec3::new(i64::MAX, 0, 0), DVec3::ZERO);
+        assert!(far.convert_tier(Tier::Galaxy, Tier::Fine).is_err());
+        let far_neg = LatticePos::at(I64Vec3::new(i64::MIN, 0, 0), DVec3::ZERO);
+        assert!(far_neg.convert_tier(Tier::Galaxy, Tier::Fine).is_err());
+        // …and a lawful one is not refused, so the arms above are about the position and not about the
+        // conversion refusing everything.
+        let ok = LatticePos::at(I64Vec3::new(3, -4, 5), DVec3::splat(0.5));
+        assert!(ok.convert_tier(Tier::Galaxy, Tier::Fine).is_ok());
+    }
+
+    #[test]
+    fn every_ratio_in_the_ladder_is_a_bit_shift() {
+        // ★ REPLACES `fine_cells_per_ly_is_the_exact_integer_ratio` (slice S8). That test pinned a ratio
+        // that exceeded a machine word and therefore needed a double-width integer — the whole reason
+        // `FINE_CELLS_PER_LY: i128` existed. With every step a power of two, a ratio is a DIFFERENCE OF
+        // EXPONENTS and the double-width integer is gone.
+        for from in Tier::ALL {
+            for to in Tier::ALL {
+                let shift = to.step_exponent() - from.step_exponent();
+                // The ratio is exactly 2^shift, and it is exact as an f64 in BOTH directions.
+                let ratio = from.cell_edge_m() / to.cell_edge_m();
+                assert_eq!(ratio, (-shift as f64).exp2(), "{from:?} -> {to:?}");
+                // …and every step is a power of two, which is what makes re-bucketing exactly idempotent
+                // at every rung. A non-power-of-two step has a non-zero mantissa.
+                assert_eq!(
+                    from.cell_edge_m().to_bits() & ((1 << 52) - 1),
+                    0,
+                    "{from:?}"
+                );
+            }
+        }
+        // The three ratios the ladder actually uses, by name, so a re-valued step is loud.
+        assert_eq!(
+            Tier::Galaxy.step_exponent() - Tier::Fine.step_exponent(),
+            11
+        ); // 2048
+        assert_eq!(
+            Tier::Universe.step_exponent() - Tier::Galaxy.step_exponent(),
+            14
+        ); // 16384
+        assert_eq!(
+            Tier::Universe.step_exponent() - Tier::Fine.step_exponent(),
+            25
+        );
+    }
+
+    #[test]
+    fn the_steps_are_the_ruled_ones() {
+        // The owner's Q1 ruling, as numbers: millimetres below a star system, TWO metres for a galaxy
+        // (explicitly not the design document's one), 32,768 m for the universe.
+        assert_eq!(Tier::Fine.cell_edge_m(), 1.0 / 1024.0);
+        assert_eq!(Tier::Galaxy.cell_edge_m(), 2.0);
+        assert_eq!(Tier::Universe.cell_edge_m(), 32_768.0);
+        // …and the fine step is UNCHANGED, which is what everything at or below a star system rests on.
+        assert_eq!(Tier::Fine.cell_edge_m(), FINE_CELL_EDGE_M);
+    }
+
+    /// ★ THE CLIMB COSTS THE SHIPPED PATH NOTHING, MEASURED (slice S9).
+    ///
+    /// `transfer_frame` now converts a distance into the book's rung on the way in and out of the
+    /// destination's rung on the way out. Every crossing the world performs today has all three rungs
+    /// equal, so both conversions must be the EXACT identity — not "close", not "within an ulp", but
+    /// the same bits, including a residual that is negative, non-normalized, or larger than a cell
+    /// (a difference has no sub-cell invariant, and a conversion that quietly tidied one would move
+    /// the answer).
+    ///
+    /// Asserted on the primitive rather than argued from reading it, because "this is the identity"
+    /// is exactly the sort of claim that is true when written and false two changes later.
+    #[test]
+    fn a_same_rung_conversion_is_the_identity_bit_for_bit() {
+        let awkward = [
+            DVec3::ZERO,
+            DVec3::new(-0.5, 1.5, -2.5),
+            DVec3::new(1.0e9, -1.0e9, 0.25),
+            DVec3::splat(f64::MIN_POSITIVE),
+        ];
+        let cells = [
+            I64Vec3::ZERO,
+            I64Vec3::new(1, -1, 2),
+            I64Vec3::new(CELL_DOMAIN_MAX, -CELL_DOMAIN_MAX, 0),
+        ];
+        let mut checked = 0usize;
+        for tier in Tier::ALL {
+            for c in cells {
+                for r in awkward {
+                    let s = Separation {
+                        cells: c,
+                        residual: r,
+                        tier,
+                    };
+                    let same = s.convert_tier(tier).expect("same rung never refuses");
+                    assert_eq!(same.cells(), c, "{tier:?}");
+                    assert_eq!(same.residual().to_array(), r.to_array(), "{tier:?}");
+                    assert_eq!(same.tier(), tier);
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 36, "every rung × cell × residual case ran");
+    }
+
+    /// ★ A CROSS-RUNG CONVERSION PRESERVES THE DISTANCE, both directions (slice S9).
+    ///
+    /// The metres are what a difference means; the cell count is bookkeeping that changes with the
+    /// unit by design. Refining is asserted EXACT — it multiplies the whole-number half and leaves the
+    /// residual alone, so no float touches it. Coarsening folds a remainder back into the residual and
+    /// is exact to within half an ulp of the destination step, which is what is asserted rather than
+    /// an equality it does not have.
+    #[test]
+    fn a_cross_rung_conversion_preserves_the_distance() {
+        let cases = [
+            (I64Vec3::new(2047, -1, 3), DVec3::new(0.000_5, -0.25, 0.125)),
+            (I64Vec3::new(-2048, 4096, 0), DVec3::ZERO),
+            (I64Vec3::ZERO, DVec3::new(1.5, -2.5, 0.25)),
+        ];
+        for (c, r) in cases {
+            let fine = Separation {
+                cells: c,
+                residual: r,
+                tier: Tier::Fine,
+            };
+            // FINE → GALAXY, then back. The round trip is EXACT: coarsening loses nothing (the
+            // remainder is kept), and refining restores the count.
+            let up = fine
+                .convert_tier(Tier::Galaxy)
+                .expect("coarsening is total");
+            assert_eq!(up.tier(), Tier::Galaxy);
+            let back = up
+                .convert_tier(Tier::Fine)
+                .expect("and back inside the bound");
+            assert_eq!(back.metres().to_array(), fine.metres().to_array(), "{c:?}");
+            // The distance survives the coarse statement itself, to within the coarse step's own
+            // precision — the honest bound, not an equality.
+            let slack = Tier::Galaxy.cell_edge_m() * f64::EPSILON;
+            assert!((up.metres() - fine.metres()).abs().max_element() <= slack);
+        }
+    }
+
+    #[test]
+    fn every_rung_reaches_the_totality_list() {
+        // ★ THE WITNESS FOR THE ONE FAILURE THIS LADDER CANNOT SEE. `Tier::ALL` has a single reader — the
+        // saved-data label's coordinate generation — and its LENGTH is not compile-forced. A rung added to
+        // the enum but forgotten here would leave that generation unmoved, so stores, clients and the
+        // transport tag would all agree across a unit change: exactly the disagreement the generation
+        // exists to make loud.
+        //
+        // Three assertions, each failing for a different reason: the count, the absence of duplicates, and
+        // that every variant the program can name is present.
+        assert_eq!(Tier::ALL.len(), 3);
+        let mut seen: Vec<i32> = Tier::ALL.iter().map(|t| t.step_exponent()).collect();
+        let before = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "two rungs share a step");
+        // ASCENDING, which the fold's order-sensitivity makes part of the meaning.
+        assert!(
+            seen.windows(2).all(|w| w[0] < w[1]),
+            "ALL must ascend by step"
+        );
+        for t in [Tier::Fine, Tier::Galaxy, Tier::Universe] {
+            assert!(Tier::ALL.contains(&t), "{t:?} is not in the totality list");
+        }
+    }
+
+    #[test]
+    fn convert_tier_same_rung_is_the_identity_the_only_live_path() {
+        // Through S8 every live frame is FINE ⇒ convert_tier is always same-rung ⇒ a pure identity. It
+        // must NOT re-bucket, because the shipped path's poses ride un-normalized at cell ZERO with the
+        // whole frame-local distance in the offset — the byte floor is this return, not an argument.
         let lp = LatticePos::local(DVec3::new(12345.678, -9.0, 0.001));
-        let same = lp.convert_tier(Tier::Fine, Tier::Fine);
+        let same = lp
+            .convert_tier(Tier::Fine, Tier::Fine)
+            .expect("same rung never fails");
         assert_eq!(same.cell(), lp.cell());
         assert_eq!(same.offset(), lp.offset());
-    }
-
-    #[test]
-    fn convert_tier_cross_tier_reexpresses_the_total_metres_within_f64() {
-        // The P10-deferred cross-tier plant: fold to total metres, re-bucket at the target edge. A small
-        // FINE position (1000 m) lands in COARSE cell 0 with the metres carried in the offset (the
-        // exact-integer carry for the full mm↔ly ratio finalizes at P10 with the COARSE unit).
-        let fine = LatticePos::at(I64Vec3::new(1_024_000, 0, 0), DVec3::ZERO); // 1_024_000 × 2⁻¹⁰ m = 1000 m
-        let coarse = fine.convert_tier(Tier::Fine, Tier::Coarse);
-        assert_eq!(coarse.cell(), I64Vec3::ZERO); // 1000 m ≪ 1 ly
-        assert!((coarse.offset().x - 1000.0).abs() < 1e-6);
+        // …and it is the identity for an input that is NOT admissible, which proves the same-rung arm is
+        // tested before admissibility rather than after it.
+        let wild = LatticePos::at(I64Vec3::splat(CELL_DOMAIN_MAX), DVec3::splat(1.0e9));
+        assert_eq!(
+            wild.convert_tier(Tier::Galaxy, Tier::Galaxy),
+            Ok(wild),
+            "same rung must not inspect the position at all"
+        );
     }
 
     #[test]
@@ -1285,12 +2148,16 @@ mod tests {
 
     #[test]
     fn rotation_exact_reach_is_tier_derived() {
-        // cell_edge / ε: FINE = 2⁻¹⁰/2⁻⁵² = 2⁴² m; COARSE re-derives itself from its own edge.
+        // cell_edge / ε: FINE = 2⁻¹⁰/2⁻⁵² = 2⁴² m; every other rung re-derives itself from its own step,
+        // which is the point — the reach is a function of the unit, not a table.
         assert_eq!(rotation_exact_reach_m(Tier::Fine), (1u64 << 42) as f64);
-        assert_eq!(
-            rotation_exact_reach_m(Tier::Coarse),
-            COARSE_CELL_EDGE_M / f64::EPSILON
-        );
+        for t in Tier::ALL {
+            assert_eq!(
+                rotation_exact_reach_m(t),
+                t.cell_edge_m() / f64::EPSILON,
+                "{t:?}"
+            );
+        }
     }
 
     #[test]
@@ -1408,7 +2275,7 @@ mod tests {
         let frame = FrameRef::StarCentered {
             star_seed: 0x1234_5678_9abc_def0,
         };
-        assert_eq!(frame.realm(), Some(star));
+        assert_eq!(frame.realm(), star);
         assert_eq!(frame.label(), "Star 1311768467463790320");
     }
 }

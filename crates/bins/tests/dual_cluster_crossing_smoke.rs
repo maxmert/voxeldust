@@ -359,7 +359,14 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     let (transport, control) = spawn_mesh(
         rt.handle(),
         &trust,
-        &MeshConfig::new(NodeId(CLIENT_NODE_BASE), client_bind, client_book, 64, 0),
+        &MeshConfig::new(
+            NodeId(CLIENT_NODE_BASE),
+            client_bind,
+            client_book,
+            64,
+            0,
+            vd_bins::world_generation(),
+        ),
         None,
     )
     .expect("client mesh");

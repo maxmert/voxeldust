@@ -28,8 +28,15 @@ use crate::tick_to_f64;
 /// pick it. `StampedPose::frame` is the sender's statement of the space its `pos` is measured in: the
 /// emitting shard labels its own rows with its own frame, and every relay hop that restates a value
 /// re-labels it in the same operation (`vd_core::frame::transfer_frame` writes `frame: to` and routes
-/// the cell through `LatticePos::convert_tier`). So the tier read here is a value that was SHIPPED,
-/// not one the renderer inferred from context.
+/// the cell through `LatticePos::convert_tier`).
+///
+/// ★ BE PRECISE ABOUT WHAT IS SHIPPED, because this doc used to overstate it and the next reader would
+/// have concluded the unit was already safe. **The FRAME NAME ships. The UNIT does not.** It is a
+/// compile-time table on the RECEIVER (`FrameRef::tier`, one line below). Two builds whose tables
+/// disagree would read one another's rows under different units and be wrong by the ratio between
+/// them, with nothing to notice it — which is exactly why slice S3 put the unit into the HANDSHAKE and
+/// refuses a peer whose table differs (`vd_wire::version::ProtoVersion::coordinate_generation`). The
+/// safety here comes from that refusal, not from this lookup.
 ///
 /// It is called at exactly three ingress points — [`EntityTrack::observe`] (are two delivered poses
 /// even commensurable?), [`EntityTrack::sample`] and [`EntityTrack::current_render_pose`] (stamp the
@@ -725,7 +732,7 @@ mod tests {
         // frame so its lattice is normalized in the frame's own unit (relabelling a FINE-normalized
         // pose would wear the wrong unit on a live integer cell).
         let other = StampedPose::at_rest(
-            FrameRef::GalaxySpace,
+            FrameRef::GalaxySpace { galaxy_seed: 0 },
             DVec3::new(99.0, 0.0, 0.0),
             UniverseTick(14),
         );
@@ -733,10 +740,13 @@ mod tests {
         // Collapsed: sampling freezes at the new pose (x=99), never a blend between two lattices
         // whose integer cells count in different units.
         assert_eq!(wp(&track.sample(13.0)), DVec3::new(99.0, 0.0, 0.0));
-        assert_eq!(track.sample(14.0).frame, FrameRef::GalaxySpace);
-        // …and the sample carries the NEW unit, so whatever draws it scales the cell in light-years and
-        // not in millimetres. Before the unit rode the pose, this was re-derived at the drawing site.
-        assert_eq!(track.sample(14.0).tier, Tier::Coarse);
+        assert_eq!(
+            track.sample(14.0).frame,
+            FrameRef::GalaxySpace { galaxy_seed: 0 }
+        );
+        // …and the sample carries the NEW unit, so whatever draws it scales the cell in the galaxy's two-metre step
+        // and not in millimetres. Before the unit rode the pose, this was re-derived at the drawing site.
+        assert_eq!(track.sample(14.0).tier, Tier::Galaxy);
         assert_eq!(track.newest_tick(), UniverseTick(14));
     }
 
@@ -751,10 +761,10 @@ mod tests {
         assert_eq!(track.current_render_pose().tier, Tier::Fine);
         // A COARSE-lattice feed stamps Coarse on both.
         let mut coarse = pose_at(12, 5.0);
-        coarse.frame = FrameRef::GalaxySpace;
+        coarse.frame = FrameRef::GalaxySpace { galaxy_seed: 0 };
         let coarse_track = EntityTrack::new(coarse);
-        assert_eq!(coarse_track.sample(12.0).tier, Tier::Coarse);
-        assert_eq!(coarse_track.current_render_pose().tier, Tier::Coarse);
+        assert_eq!(coarse_track.sample(12.0).tier, Tier::Galaxy);
+        assert_eq!(coarse_track.current_render_pose().tier, Tier::Galaxy);
     }
 
     /// A frame change on a track is a SPACE CHANGE and COLLAPSES the window (the crossing-render

@@ -57,7 +57,7 @@ fn node(
     ack_flush: Duration,
     outbox: Option<SharedOutbox>,
 ) -> (MeshTransport, MeshControl) {
-    let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, 1);
+    let mut cfg = MeshConfig::new(id, addr, book.clone(), 256, 1, 0);
     cfg.reliability.ack_idle_flush_interval = ack_flush;
     spawn_mesh(handle, trust, &cfg, outbox).expect("mesh node")
 }
@@ -207,7 +207,18 @@ fn shared_outbox(tag: &str) -> (SharedOutbox, std::path::PathBuf) {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
-    let ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open outbox");
+    let ob = NodeOutbox::open(
+        &path,
+        StoreTuning::default(),
+        // The label this outbox is opened under — one derived value, never a hand-stated generation.
+        vd_core::store_stamp::StoreStamp::new(
+            vd_core::store_stamp::StoreRole::Outbox,
+            0,
+            vd_core::EpochId(0),
+            &[],
+        ),
+    )
+    .expect("open outbox");
     let sink: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
     (sink, path)
 }

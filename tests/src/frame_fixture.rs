@@ -524,14 +524,22 @@ fn frame_of(world: &WorldView, realm: RealmId) -> FrameRef {
 /// cell activation — the value rides the integer half, so this flattens through `delta_m` (reading
 /// `.offset()` raw would place every static body at the origin).
 fn centre_of(world: &WorldView, realm: RealmId) -> DVec3 {
-    let region = world
-        .regions()
+    let regions = world.regions();
+    let region = regions
         .iter()
         .find(|r| r.realm == realm)
         .expect("the fixture only names realms the generator produced");
+    // ★ AT THE PARENT'S STEP (slice S9). A region's `center` is its position in its PARENT's frame,
+    // while `frame` is its own — the same step until the galaxy got a coarser one, and out by 2048×
+    // after. Read with the child's step, this fixture's neighbour system sat 8.67 m from its galaxy
+    // instead of the story's distance, and every conversion built on it inherited that.
+    let tier = regions
+        .iter()
+        .find(|p| Some(p.realm) == region.parent)
+        .map_or_else(|| region.frame.tier(), |p| p.frame.tier());
     region
         .center
-        .delta_m(vd_core::pose::LatticePos::ORIGIN, region.frame.tier())
+        .delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
 }
 
 /// The lattice position of a pose, for tests that want the whole anchored value rather than the offset.

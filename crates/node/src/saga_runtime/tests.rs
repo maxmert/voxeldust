@@ -1084,7 +1084,7 @@ fn durable_saga_parked_in_committing_is_curl_visible() {
     let _ = (rig.drain_gateway(), rig.drain_source());
     assert_eq!(rig.live(), 1);
 
-    let snap = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
+    let snap = crate::orchestrator::admin_snapshot(rig.orch.world_mut(), 0);
     assert_eq!(snap.sagas.len(), 1);
     assert_eq!(snap.sagas[0].transfer, XFER.to_string());
     // The operator sees the REAL parked phase with its fields (the post-CAS authority fence),
@@ -1124,7 +1124,7 @@ fn orchestrator_rehydrates_an_in_flight_durable_saga_across_a_kill_9() {
     rig.ack(TransferControlAck::Committed { transfer: XFER }); // → Demoting (durable at the barrier)
     let _ = (rig.drain_gateway(), rig.drain_source());
     assert_eq!(rig.live(), 1, "the saga is live in Demoting pre-crash");
-    let before = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
+    let before = crate::orchestrator::admin_snapshot(rig.orch.world_mut(), 0);
     // Static message (no `{}` format arg — a lazily-evaluated arg is an uncoverable region when the
     // assert passes, HR5); the `starts_with` IS the always-evaluated condition.
     assert!(
@@ -1140,7 +1140,7 @@ fn orchestrator_rehydrates_an_in_flight_durable_saga_across_a_kill_9() {
         1,
         "the in-flight saga SURVIVED the orchestrator kill-9 (re-hydrated from the WAL, not vanished)"
     );
-    let after = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
+    let after = crate::orchestrator::admin_snapshot(rig.orch.world_mut(), 0);
     assert!(
         after.sagas[0].state.starts_with("Demoting"),
         "re-hydrated at the SAME quiescent phase (Demoting)"
@@ -2114,7 +2114,7 @@ fn a_stray_ack_to_a_parked_saga_preserves_its_staleness_anchor() {
     rig.flush(); // both gate conditions → the DIRECT CAS wins → Swapping
     rig.ack(TransferControlAck::Committed { transfer: XFER }); // → Demoting (parked, awaiting DemoteAck)
     let _ = (rig.drain_gateway(), rig.drain_source());
-    let since_parked = crate::orchestrator::admin_snapshot(rig.orch.world_mut()).sagas[0].since;
+    let since_parked = crate::orchestrator::admin_snapshot(rig.orch.world_mut(), 0).sagas[0].since;
 
     // Two duplicate Committed acks (at-least-once redelivery of the route-swap ack). The FSM
     // absorbs each as same-state in Demoting (RouteSwapped is not handled there); the clock
@@ -2122,7 +2122,7 @@ fn a_stray_ack_to_a_parked_saga_preserves_its_staleness_anchor() {
     rig.ack(TransferControlAck::Committed { transfer: XFER });
     rig.ack(TransferControlAck::Committed { transfer: XFER });
 
-    let snap = crate::orchestrator::admin_snapshot(rig.orch.world_mut());
+    let snap = crate::orchestrator::admin_snapshot(rig.orch.world_mut(), 0);
     assert_eq!(
         snap.sagas.len(),
         1,

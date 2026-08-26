@@ -18,6 +18,7 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
+pub mod child_index;
 pub mod collections;
 pub mod entity_kind;
 pub mod fence;
@@ -34,8 +35,10 @@ pub mod pose;
 pub mod realm_coord;
 pub mod realm_path;
 pub mod rng;
+pub mod store_stamp;
 pub mod taxonomy;
 pub mod tlv;
+pub mod units;
 pub mod worldgen;
 
 /// Re-exported so consumers use ONE glam version (pose types expose its vectors).

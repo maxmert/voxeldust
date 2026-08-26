@@ -295,6 +295,28 @@ pub struct GatewayView {
     pub windows_open: u64,
 }
 
+/// THE TAG THIS BUILD OFFERS ON EVERY INTER-NODE CONNECTION, as text (slice S3; the world half added at
+/// S9).
+///
+/// The same string the transport puts on the wire, so an operator comparing two nodes' admin views is
+/// comparing exactly what the handshake compared — not a second rendering of it that could differ.
+///
+/// ★ IT CARRIES TWO THINGS, AND THE SECOND WAS MISSING. The unit says how a position is COUNTED. The
+/// world generation says how big the world IS. Two builds can agree on the first and disagree on the
+/// second — and then they connect, decode every message cleanly, and place the same player somewhere
+/// else. Nothing crashes and nothing is logged, which is why it had to move into the handshake rather
+/// than into a check somebody remembers to run.
+///
+/// The world half is an ARGUMENT because the world's shape lives in the generator and this crate cannot
+/// reach it — the same reason the saved-data label takes it as one.
+#[must_use]
+pub fn coordinate_unit_tag(world_generation: u64) -> String {
+    format!(
+        "vd-intershard/1+unit-{:016x}+world-{world_generation:016x}",
+        vd_core::store_stamp::coordinate_generation()
+    )
+}
+
 /// The whole read-only snapshot one `GET /admin/snapshot` returns. Empty-but-shaped
 /// from day one (the P0 demo); the orchestrator fills it as subsystems land.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,13 +336,28 @@ pub struct AdminSnapshot {
     /// on this same-build internal admin surface — the [`RlmView`] precedent (which also avoids `serde_json`).
     /// JSON-only, never the frozen postcard wire.
     pub gateway: Option<GatewayView>,
+    /// ★ THE UNIT THIS NODE COUNTS POSITIONS IN, and the exact transport tag it offers (slice S3;
+    /// owner-approved 2026-08-24, Q1 condition 3).
+    ///
+    /// THIS IS THE ONLY DIAGNOSIS CHANNEL FOR A FLEET REFUSAL, and it exists because the refusal
+    /// itself cannot carry one. Two nodes that count positions in different units are refused by the
+    /// transport handshake, which reports `no_application_protocol` — a connection error with no field,
+    /// no value and no unit. An operator facing that has nothing to compare.
+    ///
+    /// So each node states its own tag here and in its start-up log, and comparing two nodes is then a
+    /// matter of reading two lines. JSON-only, never the frozen wire.
+    pub coordinate_unit_tag: String,
 }
 
 impl AdminSnapshot {
     /// The shaped-but-empty snapshot (clock fields only) — what a fresh orchestrator
     /// serves before any state exists.
     #[must_use]
-    pub fn shaped_empty(universe_tick: UniverseTick, epoch: EpochId) -> AdminSnapshot {
+    pub fn shaped_empty(
+        universe_tick: UniverseTick,
+        epoch: EpochId,
+        world_generation: u64,
+    ) -> AdminSnapshot {
         AdminSnapshot {
             universe_tick: universe_tick.0,
             epoch: epoch.0,
@@ -329,6 +366,9 @@ impl AdminSnapshot {
             leases: Vec::new(),
             rlm: RlmView::default(),
             gateway: None,
+            // Stated by every snapshot, including the empty one — a node that has done nothing yet is
+            // exactly the node an operator is comparing against a node that refused it.
+            coordinate_unit_tag: coordinate_unit_tag(world_generation),
         }
     }
 
@@ -465,6 +505,62 @@ pub mod metric_names {
 }
 
 #[cfg(test)]
+mod unit_tag {
+    //! THE ONLY DIAGNOSIS CHANNEL A FLEET REFUSAL HAS (slice S3).
+    use super::*;
+
+    #[test]
+    fn the_admin_tag_and_the_transport_tag_are_the_same_string() {
+        // TWO RENDERINGS OF ONE FACT is how an operator gets sent to the wrong cause. The transport
+        // compares one string; the admin view shows another. If they could differ, an operator could
+        // read two nodes whose views MATCH and still be refused — the worst possible state, because it
+        // rules out the true cause.
+        //
+        // Kept honest by comparing the bytes the transport actually offers.
+        // A world generation with no relationship to the unit, so the two halves cannot pass for each
+        // other: a tag that printed the unit twice would fail this.
+        const WORLD: u64 = 0xfeed_face_dead_beef;
+        assert_eq!(
+            coordinate_unit_tag(WORLD).into_bytes(),
+            vd_io_prod_tag(WORLD),
+            "the tag an operator reads must be the tag the handshake compares"
+        );
+        // AND IT MOVES WITH THE WORLD, not only with the unit — the half that was missing.
+        assert_ne!(coordinate_unit_tag(WORLD), coordinate_unit_tag(WORLD + 1));
+    }
+
+    /// The transport's own tag, reproduced here from its own inputs rather than imported: `vd-wire`
+    /// sits BELOW `vd-io-prod` and may not depend on it. Reproducing the format is exactly the drift
+    /// this test exists to catch, so the test above is the thing that keeps the two in step.
+    fn vd_io_prod_tag(world_generation: u64) -> Vec<u8> {
+        format!(
+            "vd-intershard/1+unit-{:016x}+world-{world_generation:016x}",
+            vd_core::store_stamp::coordinate_generation()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_different_unit_produces_a_different_tag() {
+        // NON-VACUITY: a tag that ignored the unit would satisfy the test above and refuse nobody.
+        let ours = coordinate_unit_tag(0);
+        let theirs = format!(
+            "vd-intershard/1+unit-{:016x}",
+            vd_core::store_stamp::coordinate_generation() ^ 1
+        );
+        assert_ne!(ours, theirs);
+        // And the unit is READABLE in it — the whole point, since the refusal carries no message.
+        assert!(
+            ours.contains(&format!(
+                "{:016x}",
+                vd_core::store_stamp::coordinate_generation()
+            )),
+            "the unit must be readable in the tag: {ours}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use vd_core::pose::RealmId;
@@ -518,7 +614,7 @@ mod tests {
 
     #[test]
     fn shaped_empty_snapshot_roundtrips() {
-        let snap = AdminSnapshot::shaped_empty(UniverseTick(42), EpochId(2));
+        let snap = AdminSnapshot::shaped_empty(UniverseTick(42), EpochId(2), 0);
         assert_eq!(snap.universe_tick, 42);
         assert_eq!(snap.epoch, 2);
         assert_eq!(snap.directory, Vec::new());
@@ -538,6 +634,7 @@ mod tests {
     #[test]
     fn populated_snapshot_roundtrips() {
         let snap = AdminSnapshot {
+            coordinate_unit_tag: coordinate_unit_tag(0),
             universe_tick: 100,
             epoch: 1,
             directory: vec![directory_entry_view(
@@ -669,7 +766,7 @@ mod tests {
     #[test]
     fn cluster_bootstrapped_iff_a_shard_holds_a_realm() {
         // Empty directory: not bootstrapped.
-        let empty = AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(1));
+        let empty = AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(1), 0);
         assert!(!empty.cluster_bootstrapped());
 
         // A realm granted to a SHARD: bootstrapped.
@@ -704,7 +801,7 @@ mod tests {
     #[test]
     fn realms_present_is_the_strict_both_realms_gate() {
         // C1 (Track R / 1d.2): the dual-cluster readiness gate must wait for BOTH realms, never an "OR".
-        let empty = AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(1));
+        let empty = AdminSnapshot::shaped_empty(UniverseTick(1), EpochId(1), 0);
 
         // 0 realms owed: vacuously true (the single-shard path passes this way; no realm is required).
         assert!(empty.realms_present(&[]));

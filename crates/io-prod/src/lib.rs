@@ -254,6 +254,7 @@ pub fn loopback_pair(
     b_id: NodeId,
     outbound_capacity: usize,
     paused_writers: bool,
+    world_generation: u64,
 ) -> Result<LoopbackPair, ProdIoError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -261,8 +262,8 @@ pub fn loopback_pair(
         .build()?;
     let handle = runtime.handle().clone();
 
-    let server_config = trust.quinn_server_config()?;
-    let client_config = trust.quinn_client_config()?;
+    let server_config = trust.quinn_server_config(world_generation)?;
+    let client_config = trust.quinn_client_config(world_generation)?;
 
     let bind: SocketAddr = "127.0.0.1:0"
         .parse()

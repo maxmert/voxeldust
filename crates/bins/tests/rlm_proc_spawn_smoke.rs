@@ -101,6 +101,7 @@ fn harness() -> Harness {
             std::collections::BTreeMap::new(),
             64,
             0,
+            vd_bins::world_generation(),
         ),
         None,
     )
@@ -164,11 +165,10 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
     // refuses to boot (0 ambient roots), which is exactly the death the retired walk-forest coords
     // hid (D-WORLD-8).
     let roster = vd_bins::world_roster(&DEV);
-    let vd_core::pose::RealmId::System(galaxy_seed) = roster.galaxy else {
-        panic!(
-            "the galaxy realm is the System(1) stand-in, got {}",
-            roster.galaxy
-        );
+    // ★ S9: the galaxy is a GALAXY, not the `System(1)` stand-in it used to borrow. The seed it
+    // carries is unchanged, so the shard boots the identical realm — only its name is honest now.
+    let vd_core::pose::RealmId::Galaxy(galaxy_seed) = roster.galaxy else {
+        panic!("the galaxy realm is a Galaxy, got {}", roster.galaxy);
     };
     let vd_core::pose::RealmId::System(home_seed) = roster.home else {
         panic!("the home realm is a System, got {}", roster.home);
@@ -197,12 +197,16 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
     let galaxy_pid = backend
         .launch(&LaunchSpec {
             node: galaxy_node,
-            // A Galaxy LEVEL lowers to the `System(1)` stand-in whatever its level seed says
-            // (`RealmLevel::to_realm_id`), so this shard hosts THE world's own galaxy realm and boots
-            // its real neighbourhood — the seed `2` exercises exactly that collapse. What this leg
-            // pins is the PROFILE: `profile_for(Galaxy)` must not refuse (the un-collapsed
-            // `VD_OWN_COORD` carries `signal_relay`).
-            coord: galaxy(2),
+            // ★ THE COLLAPSE THIS LEG USED TO EXERCISE IS GONE (slice S9), and its removal is why
+            // the seed here changed from `2` to the world's own. A Galaxy LEVEL used to lower to the
+            // `System(1)` stand-in WHATEVER its level seed said, so `galaxy(2)` silently became THE
+            // world's galaxy and booted its neighbourhood. That was the lossy behaviour, not a
+            // feature: a galaxy keeps its seed now, `Galaxy(2)` is a galaxy this world does not
+            // contain, and a shard asked to host it finds an empty forest and refuses — correctly.
+            //
+            // What this leg pins is unchanged: the PROFILE. `profile_for(Galaxy)` must not refuse
+            // (`VD_OWN_COORD` carries `signal_relay`).
+            coord: galaxy(galaxy_seed),
             addr: reserve_udp_addr(),
             probe: galaxy_probe,
             cookie: galaxy_cookie,

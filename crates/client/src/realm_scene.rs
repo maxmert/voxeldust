@@ -562,8 +562,9 @@ pub fn point_sprite_vertices() -> Vec<Vertex> {
 
 /// The base `(hue, sat, val)` for a realm ROLE — the ONE place a realm KIND maps to a look (a cosmetic
 /// table, not a feature branch — HR3-safe because it drives only rendering, never behaviour). Planet =
-/// blue; System (also the Galaxy/Universe `System` stand-ins) = warm star; Ship = amber; Station = steel;
-/// Area = green. Monomorphic (the kind match is covered here, off the pure [`color_for_realm`]).
+/// blue; System = warm star; Ship = amber; Station = steel; Area = green. The galaxy and the universe
+/// have their own identities since S9 (they used to arrive here as `System` stand-ins) and are listed for
+/// totality — a containment boundary is undrawable under the two-body law, so nothing renders them. Monomorphic (the kind match is covered here, off the pure [`color_for_realm`]).
 fn role_hsv(realm: RealmId) -> (f64, f64, f64) {
     match realm {
         RealmId::Planet(_) => (0.60, 0.75, 0.95),
@@ -574,6 +575,11 @@ fn role_hsv(realm: RealmId) -> (f64, f64, f64) {
         // A star's box hue — COSMETIC ONLY (taxonomy arc §6.2 site 8): the drawn photometric
         // colour rides the look bag's TAG_LUMA (ruling C), never this fallback family.
         RealmId::Star(_) => (0.10, 0.85, 1.00),
+        // The two containers, which a player never sees as a box: a galaxy and the universe are
+        // BOUNDARIES, and this project's two-body law makes a containment boundary undrawable. They get a
+        // colour because this table is total, not because anything renders it.
+        RealmId::Galaxy(_) => (0.75, 0.35, 0.70),
+        RealmId::Universe => (0.00, 0.00, 0.20),
     }
 }
 
@@ -1254,7 +1260,7 @@ mod tests {
         let galaxy = RealmScene::from_scene_rows(&[row_framed(
             RealmId::System(1),
             None,
-            FrameRef::GalaxySpace,
+            FrameRef::GalaxySpace { galaxy_seed: 0 },
             DVec3::ZERO,
             look_shell(100.0),
         )])
@@ -1268,12 +1274,15 @@ mod tests {
         .expect("projects");
         let coarse = galaxy.get(RealmId::System(1)).expect("galaxy-framed box");
         let fine = system.get(RealmId::System(1)).expect("system-framed box");
-        assert_eq!(coarse.tier, Tier::Coarse);
+        assert_eq!(coarse.tier, Tier::Galaxy);
         assert_eq!(fine.tier, Tier::Fine);
         assert_ne!(coarse.tier, fine.tier);
         // The box reads exactly what `stated_tier` reads off the row's own frame — one statement,
         // one reader, no context.
-        assert_eq!(coarse.tier, stated_tier(FrameRef::GalaxySpace));
+        assert_eq!(
+            coarse.tier,
+            stated_tier(FrameRef::GalaxySpace { galaxy_seed: 0 })
+        );
         assert_eq!(
             fine.tier,
             stated_tier(FrameRef::SystemSpace { system_seed: 7 })
@@ -1437,6 +1446,12 @@ mod tests {
             // T2: a star is a realm, and its fallback family is a role like any other (the
             // DRAWN photometric colour rides the look bag's TAG_LUMA — ruling C — never this).
             RealmId::Star(7),
+            // ★ THE TWO CONTAINERS (slice S9). A player never sees either as a box — a galaxy and
+            // the universe are BOUNDARIES, and this project's two-body law makes a containment
+            // boundary undrawable. They are exercised anyway, because the table is TOTAL and an arm
+            // nothing drives is an arm nobody has checked stays in gamut.
+            RealmId::Galaxy(1),
+            RealmId::Universe,
         ];
         for realm in realms {
             let c = color_for_realm(realm);
@@ -1512,7 +1527,7 @@ mod tests {
     /// return the same point for both.
     #[test]
     fn draw_center_multiplies_by_the_unit_it_was_told_not_by_one_it_picks() {
-        use vd_core::pose::{COARSE_CELL_EDGE_M, FINE_CELL_EDGE_M};
+        use vd_core::pose::{FINE_CELL_EDGE_M, Tier};
         let at = |tier| RealmBox {
             shape: BoxShape::Sphere { r: 1.0 },
             body: BodyKind::Look,
@@ -1528,8 +1543,8 @@ mod tests {
             DVec3::new(FINE_CELL_EDGE_M, 0.0, 0.0)
         );
         assert_eq!(
-            at(Tier::Coarse).draw_center(),
-            DVec3::new(COARSE_CELL_EDGE_M, 0.0, 0.0)
+            at(Tier::Galaxy).draw_center(),
+            DVec3::new(Tier::Galaxy.cell_edge_m(), 0.0, 0.0)
         );
     }
 
@@ -1727,13 +1742,14 @@ mod tests {
             "Station 7 renders"
         );
         assert!(scene.get(RealmId::Area(7)).is_some(), "Area 7 renders");
+        // ★ S9: the Galaxy is named as a Galaxy, not as the `System(1)` stand-in it used to borrow.
         let galaxy = scene
-            .get(RealmId::System(1))
+            .get(RealmId::Galaxy(1))
             .expect("the Galaxy renders as the containing box");
         assert_eq!(galaxy.shape, BoxShape::Sphere { r: 180.0 });
         assert_eq!(galaxy.depth, 1, "the Galaxy is depth 1 (Universe ⊃ Galaxy)");
         assert_eq!(
-            scene.get(RealmId::System(0)),
+            scene.get(RealmId::Universe),
             None,
             "the Universe ambient root is NOT rendered"
         );

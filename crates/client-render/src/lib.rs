@@ -270,6 +270,20 @@ struct FollowCam;
 #[derive(Resource, Default)]
 struct RenderEye {
     eye: DVec3,
+    /// ★ THE EYE ON THE LATTICE, WITH ITS UNIT (slice S4), so a drawn position is reduced against it
+    /// BEFORE anything is flattened.
+    ///
+    /// The flattened `eye` above is kept for the paths that legitimately need a metre value (the camera
+    /// transform itself), but every position drawn RELATIVE to the eye now reduces against this one.
+    /// The difference is not cosmetic: at the star placement radius each independent flatten rounds by
+    /// a quarter of a metre, so two ships flying in convoy drew a separation that was wrong and that
+    /// flickered as they moved.
+    ///
+    /// `None` until the first frame that has a delivered avatar to stand at. Deliberately an option
+    /// rather than a default: there is no default unit, and a position reduced against a guessed one is
+    /// wrong by the ratio between the guess and the truth — which is the whole defect this slice exists
+    /// to remove.
+    eye_lattice: Option<(vd_core::pose::LatticePos, vd_core::pose::Tier)>,
     /// The camera's vertical FOV (rad) and viewport rows, sampled from the live camera — the two
     /// facts every apparent-size and near-plane derivation needs, read once per frame.
     view: Option<(f64, f64)>,
@@ -693,6 +707,14 @@ fn place_camera(
         (e, camera.cam.forward(), camera.cam.up)
     };
     eye.eye = eye_pos;
+    // ★ THE EYE ON THE LATTICE (slice S4). The camera's own offset from the avatar is a SMALL local
+    // displacement — a few metres — so carrying it as a lattice step is exact at any magnitude, unlike
+    // the flattened `eye` above, which is a distance from the frame origin and rounds with it.
+    eye.eye_lattice = Some((
+        vd_core::pose::LatticePos::at(own_pose.cell, own_pose.pos)
+            .translated(eye_pos - own_world, own_pose.tier),
+        own_pose.tier,
+    ));
     *transform = camera_transform(direction, up);
 }
 
@@ -760,8 +782,20 @@ fn sync_world(
     for (id, _sub, pose) in &rendered {
         seen.insert(*id);
         let world = snap.world_pos(pose); // a passthrough: the server ships pin-space positions
+        // ★ SLICE S4 — REDUCE AGAINST THE EYE ON THE LATTICE, then flatten once. Flattening both
+        // halves first made each round independently, and at the star placement radius that is a
+        // quarter of a metre EACH — so two ships flying in convoy drew a wrong separation that
+        // flickered as they moved. `None` only before the first delivered avatar, where the flattened
+        // path is all there is and nothing is being compared to anything yet.
         // ★ THE CAMERA-RELATIVE FLATTEN: subtract the eye in f64, narrow to f32 once.
-        let rel = vd_client_harness::camera::eye_relative(world, render_eye.eye);
+        let rel = match render_eye.eye_lattice {
+            Some((eye, tier)) => vd_client_harness::camera::eye_relative_lattice(
+                vd_core::pose::LatticePos::at(pose.cell, pose.pos),
+                eye,
+                tier,
+            ),
+            None => vd_client_harness::camera::eye_relative(world, render_eye.eye),
+        };
         match dots.0.get(id) {
             // Existing dot: move it (available from the frame after it was spawned).
             Some(&entity) => {
@@ -844,8 +878,15 @@ fn sync_realm_boxes(
         // is what lets a body 2.2e15 m away be drawn at all: as an absolute f32 its position was
         // quantized to 1.3e8 m — the whole marker — and every f32 view matrix built from it lost
         // the camera's own facing (see `place_camera`).
-        let draw_center =
-            vd_client_harness::camera::eye_relative(rbox.draw_center(), render_eye.eye);
+        // ★ SLICE S4 — the box reduces against the eye ON THE LATTICE too, for the same reason: a
+        // realm's drawn centre and the eye are both distances from the frame origin, and flattening
+        // each before subtracting rounds them independently.
+        let draw_center = match render_eye.eye_lattice {
+            Some((eye, tier)) => {
+                vd_client_harness::camera::eye_relative_lattice(rbox.center, eye, tier)
+            }
+            None => vd_client_harness::camera::eye_relative(rbox.draw_center(), render_eye.eye),
+        };
         // Lower to render primitives (VERTICES) at that drawn centre — no shape branch here. THE
         // DRAW LAW's two arms are the two lawful AUTHORS, decided by the row's bag upstream in
         // Tier-A: a self-authored outline lowers through the shape tessellation; a parent-authored

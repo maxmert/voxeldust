@@ -130,7 +130,7 @@ fn spin_up_b(
         .expect("rt");
     let book_map: BTreeMap<NodeId, SocketAddr> =
         [(SOURCE, addr_src), (B, addr_b)].into_iter().collect();
-    let cfg_b = MeshConfig::new(B, addr_b, book_map, 256, 1);
+    let cfg_b = MeshConfig::new(B, addr_b, book_map, 256, 1, vd_bins::world_generation());
     let (b, ctl_b) = spawn_mesh(rt.handle(), &trust, &cfg_b, None).expect("spawn B");
     let book_str = book(&[(SOURCE, addr_src), (B, addr_b)]);
     (rt, b, ctl_b, book_str)

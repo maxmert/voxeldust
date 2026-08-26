@@ -15,16 +15,23 @@ use crate::realm_coord::RealmCoord;
 use crate::realm_path::{RealmKindTag, RealmLevel, RealmPath};
 
 /// The `RealmId` seed PAYLOADS of the ambient lineage above System A + System A itself — declared as
-/// `u64` (the RNG lineage the per-system stream seeds from) and reused as the `RealmId::System(_)`
-/// payloads below, so the two never drift. Mirror `realm_path`'s roster (Universe/Galaxy stand-ins 0/1).
+/// `u64` (the RNG lineage the per-system stream seeds from). Since S9 the universe and the galaxy carry
+/// their own `RealmId` arms, so these are the SEEDS only — the identities no longer borrow a `System`.
 pub const UNIVERSE_SEED: u64 = 0;
 pub const GALAXY_SEED: u64 = 1;
 pub const SYSTEM_A_SEED: u64 = 7;
 
-/// P3 placeholder realm ids for the hierarchy levels that lack a dedicated `RealmId` arm (Universe,
-/// Galaxy get one at P4+). The star systems + planet use their real seeds.
-pub const UNIVERSE: RealmId = RealmId::System(UNIVERSE_SEED);
-pub const GALAXY: RealmId = RealmId::System(GALAXY_SEED);
+/// ★ THE AMBIENT REALMS, NAMING THEMSELVES SINCE S9. These were the placeholders — `System(0)` and
+/// `System(1)` — for the two levels that had no `RealmId` arm of their own. Every forest in the program is
+/// built from them, so the whole world inherited the borrowed names, and a lineage came out reading
+/// "system 0 contains system 1 contains system 7" when it meant "the universe contains a galaxy contains
+/// a star system".
+///
+/// The seeds above are kept: [`UNIVERSE_SEED`] and [`GALAXY_SEED`] still key the RNG lineage the per-system
+/// streams draw from, so no draw moves. What changes is only what the level is CALLED — and a star system
+/// whose seed happens to be 0 is now a star system rather than the universe.
+pub const UNIVERSE: RealmId = RealmId::Universe;
+pub const GALAXY: RealmId = RealmId::Galaxy(GALAXY_SEED);
 pub const SYSTEM_A: RealmId = RealmId::System(SYSTEM_A_SEED);
 pub const SYSTEM_B: RealmId = RealmId::System(8);
 pub const PLANET_A: RealmId = RealmId::Planet(7);
@@ -43,19 +50,26 @@ pub const AREA_A: RealmId = RealmId::Area(7);
 // The cell activation made that premise false; its future consumer (the P6/D-9 spatial index) is
 // built on `Separation`, not on a bare offset subtraction.)
 
-/// A SEED-LINEAGE `RealmId` → its `RealmLevel` (kind + seed), un-lossily: the `System(0)`/`System(1)`
-/// stand-ins recover as `Universe`/`Galaxy` (the reverse of `to_realm_id`'s forward map), the keyed
-/// kinds pass through. `None` for [`RealmId::Ship`] — a ship is ENTITY-backed (P8, an `EntityId`
+/// A SEED-LINEAGE `RealmId` → its `RealmLevel` (kind + seed), un-lossily: every kind now carries its own
+/// identity, so this reads a level rather than recognising a borrowed seed. `None` for [`RealmId::Ship`] — a ship is ENTITY-backed (P8, an `EntityId`
 /// payload), NOT a seed-lineage realm, so it has no seed `RealmLevel` (and never appears in a seed
-/// forest / P3 region). Monomorphic (HR5: the kind match covered once here). A P3 stand-in like
-/// `path_for_realm` — a real system with seed 0/1 would alias, but the walk/visual forest uses 7/8.
+/// forest / P3 region). Monomorphic (HR5: the kind match covered once here).
+///
+/// ★ IT NO LONGER ALIASES. It used to recover the universe and the galaxy from `System(0)` and
+/// `System(1)`, and said so: "a real system with seed 0/1 would alias, but the walk/visual forest uses
+/// 7/8." That was a naming convention standing in for a type, and it held only while no seeded world drew
+/// a 0 or a 1.
 #[must_use]
 pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
     match realm {
-        RealmId::System(UNIVERSE_SEED) => {
-            Some(RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED))
-        }
-        RealmId::System(GALAXY_SEED) => Some(RealmLevel::new(RealmKindTag::Galaxy, GALAXY_SEED)),
+        // ★ EXACT SINCE S9, WHERE IT USED TO ALIAS. The universe and the galaxy have their own
+        // identities now, so recovering their level is reading it rather than recognising a borrowed
+        // seed. The two arms below used to be `System(0)` and `System(1)`, and this function's own doc
+        // admitted the hole in as many words: "a real system with seed 0/1 would alias, but the
+        // walk/visual forest uses 7/8." It aliased on a naming convention, and the convention held only
+        // because no seeded world had yet drawn a 0 or a 1.
+        RealmId::Universe => Some(RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED)),
+        RealmId::Galaxy(s) => Some(RealmLevel::new(RealmKindTag::Galaxy, s)),
         RealmId::System(s) => Some(RealmLevel::new(RealmKindTag::System, s)),
         RealmId::Planet(s) => Some(RealmLevel::new(RealmKindTag::Planet, s)),
         RealmId::Station(s) => Some(RealmLevel::new(RealmKindTag::Station, s)),
@@ -325,13 +339,28 @@ mod tests {
 
     #[test]
     fn level_of_covers_every_kind() {
+        // ★ THE ALIAS IS GONE, AND THESE TWO ASSERTIONS ARE THE PROOF (slice S9). They used to say that
+        // `System(0)` WAS the universe and `System(1)` WAS a galaxy — borrowed names this function
+        // recognised by their seed. Its own doc admitted the hole: "a real system with seed 0/1 would
+        // alias, but the walk/visual forest uses 7/8". A convention standing in for a type.
+        //
+        // A star system whose seed is 0 is now a star system whose seed is 0. Nothing else.
         assert_eq!(
             level_of(RealmId::System(0)),
-            Some(RealmLevel::new(RealmKindTag::Universe, 0))
+            Some(RealmLevel::new(RealmKindTag::System, 0))
         );
         assert_eq!(
             level_of(RealmId::System(1)),
-            Some(RealmLevel::new(RealmKindTag::Galaxy, 1))
+            Some(RealmLevel::new(RealmKindTag::System, 1))
+        );
+        // …and the two that DO mean the universe and a galaxy say so themselves.
+        assert_eq!(
+            level_of(RealmId::Universe),
+            Some(RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED))
+        );
+        assert_eq!(
+            level_of(RealmId::Galaxy(4)),
+            Some(RealmLevel::new(RealmKindTag::Galaxy, 4))
         );
         assert_eq!(
             level_of(RealmId::System(7)),

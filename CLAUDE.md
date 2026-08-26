@@ -11,6 +11,9 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 - `docs/design/*.md` — the hardened subsystem designs (connection_plane, transfer_protocol,
   test_harness, identity_persistence, generic_transfer, sealed_shards, coverage_e2e).
 - `docs/design/integration.json` — 19 binding cross-design conflict resolutions + glossary.
+- `docs/design/owner_decisions_2026-08-24.md` — ★ the LATEST binding rulings: the SL1 rewrite, the SL2
+  clarification, SL9, the movement law (a parent never sets a speed), and the nine Universe/Galaxy/sky
+  answers. Later than every design doc; where they disagree, it wins.
 - `docs/design/DEFERRED.md` — the binding registry of every interim/stub: WHAT proper solution is missing,
   WHERE it lives, WHEN (which slice/phase) it lands. A phase isn't done until its entries flip to 🟩.
 - `docs/audit/` — evidence for why the old architecture was unfixable (root causes R1–R10).
@@ -46,16 +49,51 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 
 Each of these was stated by the owner after a live defect. They are not preferences.
 
-7. **SL1 — ONLY THE PARENT KNOWS POSITIONS.** Every realm is centred on itself. A realm never
-   knows, stores, derives or is told its own position, velocity, orientation or spin — not even as
-   a zero field, because a field's PRESENCE is the leak. A parent authors its direct children's
-   placements in its own frame. Conversions ALWAYS happen in the parent: going down it subtracts
-   before shipping; going up the child ships its own-frame pose and the parent adds. Never fold a
-   realm's absolute from the root.
+7. **SL1 — A REALM IS TOLD WHERE IT IS; IT NEVER DECIDES WHERE IT IS.** (Rewritten by the owner
+   2026-08-24, deliberately reversing the 2026-08-05 ruling that a realm may never be told its own
+   placement — see the REVERSAL note below. The earlier text read "ONLY THE PARENT KNOWS POSITIONS"
+   and forbade the datum outright, on the reasoning that a field's PRESENCE is the leak.)
+   1. A parent authors its direct children's placements in its own frame. **The parent is the ONLY
+      writer, always.** Conversions happen in the parent: going down it subtracts before shipping;
+      going up the child ships its own-frame pose and the parent adds.
+   2. A parent MAY state to a child the placement it authored for that child. The child holds it as
+      a **stamped, read-only reading** — an instrument, never a fact it owns.
+   3. A child NEVER derives, adjusts, computes or states its own placement — not to its parent, not
+      to its children, not on any lane. A placement a child asserts about itself is refused.
+   4. **ONE HOP ONLY.** What you are told about yourself, you NEVER pass on; and you are never told
+      your parent's placement. **Never fold a realm's absolute from the root** — the chain does not
+      exist anywhere a realm can reach it, which is what makes the iron rule structural rather than
+      remembered.
+   5. The PLACEMENT, CONTAINMENT and CROSSING machinery may not NAME a realm's own position.
+      Enforced by a crate/module dependency rule with an observed-failing control — the same shape
+      that fences motion off the crossing path (SL4), never by care.
+   6. A STALE reading is REFUSED, never used. Every statement carries its instant; past its derived
+      bound a consumer degrades and says so. Absent data stops an autopilot; stale data flies it
+      into something.
+
+   **WHY THE REVERSAL (owner, 2026-08-24).** The old law forced TWO mechanisms for one job: a screen
+   was sent "the contents plus your own eye", a realm was sent "a view composed for you". Same job,
+   two paths, two cost models — a fork decided by what KIND of thing receives, which is what these
+   rules exist to prevent. Worse, the composed-per-observer form costs contacts × observers, and the
+   sky proved that product fatal (150,000 rows per player per tick). Telling a thing where it is
+   turns the product into a SUM for everyone. The clause given up — "a field's presence is the leak"
+   — was never about correctness; it was about people. Clauses 4 and 5 replace that taboo with a
+   fence the compiler and a test enforce, which is strictly stronger.
 8. **SL2 — NO OCCUPANT POSE CROSSES A REALM BOUNDARY.** Not up, not down, not for culling, warming,
    or rendering. The realm you are INSIDE warms what comes next, from occupants it already holds;
    travel is always out into the shared parent and in again, never sibling-to-sibling. Liveness
    needs one bit per level: a live child keeps its parent alive.
+
+   **CLARIFIED 2026-08-24 (owner) — this law governs REALM-TO-REALM, and the connection plane is not
+   a realm.** A shard handing its OWN occupants to the gateway was never a crossing: it is how any
+   player has ever seen anything. So SEEING another realm's people is lawful and needs no ruling —
+   each shard streams its own occupants to its own subscribed clients, and the GATEWAY composes one
+   ready-to-draw picture per observer (it alone holds both sides, and it is not a realm). What stays
+   forbidden is unchanged: no occupant pose may enter another REALM's simulation. Hence the line:
+   **CONTACTS ARE REALMS, PEOPLE ARE SEEN** — a ship's systems track ships, stations and bodies
+   (placements the parent authors and may state), never individual people. You SEE someone in a
+   spacesuit because the composer draws them; your targeting computer does not hold their position.
+   Acting on them is a projectile CROSSING a boundary, which is the transfer machinery, not a leak.
 9. **SL3 — A REALM DRAWS ITSELF.** The parent authors WHERE a realm is; the realm itself authors
    HOW IT LOOKS (extent, surface, detail, eventually meshes at a detail level it chooses). A
    parent's per-child message carries a PLACEMENT and nothing else, and must shrink toward that,
@@ -93,6 +131,21 @@ Each of these was stated by the owner after a live defect. They are not preferen
     NO. Find the local formulation first; there usually is one. State what data, from which realm
     to which, why the receiver cannot compute it from what it legitimately holds, and what doing
     without costs.
+14. **SL9 — A PARENT'S CHILD COUNT IS UNBOUNDED.** Owner-stated 2026-08-24. A realm may hold ANY
+    number of direct children: six moons, six hundred ships and stations, or a galaxy's hundred and
+    fifty thousand star systems. There is no cap, no reserved width and no "bounded child set"
+    anywhere. EVERY mechanism that touches children must therefore be written for an unbounded
+    count: never a fixed-width bitset over children, never a per-tick walk of all of them, never a
+    per-child row on a per-tick lane. Membership is a SHORT LIST of the realms an occupant is
+    inside (its own chain, plus the edge of a crossing) — never one bit per watched realm. Finding
+    which child holds a point is a LOOKUP, never a scan; sibling realms may not overlap, so at most
+    one child can hold a point and the answer is O(1)-ish, not O(children). A cost that grows with
+    the number of children is a defect, and it must be measured on a realm with many, not argued.
+    (This law does NOT relax SL7: the parent still decides area of interest for its direct children
+    — it must simply do so without touching all of them.)
+
+    *Note: this file has no SL8. The seamless law (SL8) was written in the `new-system` worktree and
+    is not committed there yet; that number is reserved for it so the two trees do not disagree.*
 
 ## Workspace
 

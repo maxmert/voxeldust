@@ -98,6 +98,25 @@ struct Leg {
     label: &'static str,
 }
 
+/// The waypoint out in the gap between the two systems — far enough that a subject standing there has
+/// genuinely LEFT the system it came from, read off the same forest the detector reads.
+///
+/// ★ THIS USED TO BE THE LITERAL 50. It was outside the release edge only while every band in the
+/// universe was the same three metres wide. Once bands are sized from the bodies they wrap, a
+/// forty-metre system's release edge sits at fifty-three metres and a subject at fifty had never left,
+/// so the holder never flipped and the chain stalled on its first leg. Both systems in the walk forest
+/// have the same extent, so one value serves every leg.
+fn walk_gap_offset_m() -> f64 {
+    let r = vd_physics::worldgen::realm_regions_for(UNIVERSE_SEED)
+        .iter()
+        .find(|r| r.realm == stub_config().realm)
+        .copied()
+        .expect("the walk forest rosters the system the first shard hosts");
+    // One whole band past the release edge, so the waypoint stays unambiguously outside rather than
+    // outside by a margin that shrinks whenever the band changes.
+    r.shape.finite_extent() + r.band.outset() + (r.band.inset() + r.band.outset())
+}
+
 fn report(reports: &[(NodeId, InspectReport)], id: NodeId) -> &InspectReport {
     &reports
         .iter()
@@ -119,14 +138,23 @@ fn step_until(topo: &mut Topology, max: u64, mut cond: impl FnMut(&mut Topology)
 /// The frame a subject at rest carries on shard `node` (its realm's `SystemSpace` frame). Under
 /// `IdentityFrames` (P3) the frame is a render no-op, so positions are frame-invariant — but the transient's
 /// pose still carries the owning realm's frame for correctness.
+/// ★ EACH SHARD'S OWN FRAME, TAKEN FROM ITS OWN CONFIG (slice S9).
+///
+/// This used to build `SystemSpace { system_seed }` for every node from a hand-written seed table,
+/// which was right while every realm in the fixture was a star system wearing a system frame. The
+/// galaxy is a GALAXY now — its frame is `GalaxySpace`, and it counts in two-metre steps rather than
+/// millimetres. Handing it a system frame seeded with its own number produced a frame no shard in the
+/// cluster answers for, and the transient seeded in it was never inside anything.
+///
+/// Reading it off the shard's own config is also what stops the table drifting again: there is one
+/// place a shard's frame is stated, and this is not a second one.
 fn frame_of(node: NodeId) -> FrameRef {
-    let seed = match node {
-        n if n == SHARD => 7,
-        n if n == GALAXY => GALAXY_SEED,
-        n if n == DEST => 8,
-        _ => 0,
-    };
-    FrameRef::SystemSpace { system_seed: seed }
+    match node {
+        n if n == SHARD => stub_config().frame,
+        n if n == GALAXY => galaxy_stub_config().frame,
+        n if n == DEST => dest_stub_config().frame,
+        _ => FrameRef::UniverseSpace,
+    }
 }
 
 /// Drive ONE round-trip leg with a FRESH transient `subject` (see the module note on the batch-id
@@ -237,8 +265,8 @@ fn three_shard_round_trip_flips_the_holder_through_the_full_chain_both_ways() {
     // `head(Realm(Galaxy))` resolves and authority can REST in the between-space).
     assert_eq!(
         galaxy_stub_config().realm,
-        RealmId::System(GALAXY_SEED),
-        "the Galaxy realm is the seed forest's between-space (System(1))",
+        RealmId::Galaxy(GALAXY_SEED),
+        "the Galaxy realm is the seed forest's between-space",
     );
 
     // THE FULL BOTH-WAYS CHAIN. Each leg seeds a FRESH transient on its owner (inside the owner's own
@@ -252,13 +280,13 @@ fn three_shard_round_trip_flips_the_holder_through_the_full_chain_both_ways() {
     let legs = [
         Leg {
             home: 0.0,
-            offset: 50.0,
+            offset: walk_gap_offset_m(),
             owner: SHARD,
             expect_holder: GALAXY,
             label: "7→Galaxy (escape SOI)",
         },
         Leg {
-            home: 50.0,
+            home: walk_gap_offset_m(),
             offset: 100.0,
             owner: GALAXY,
             expect_holder: DEST,
@@ -266,13 +294,13 @@ fn three_shard_round_trip_flips_the_holder_through_the_full_chain_both_ways() {
         },
         Leg {
             home: 100.0,
-            offset: 50.0,
+            offset: walk_gap_offset_m(),
             owner: DEST,
             expect_holder: GALAXY,
             label: "8→Galaxy (return, reverse-cross)",
         },
         Leg {
-            home: 50.0,
+            home: walk_gap_offset_m(),
             offset: 0.0,
             owner: GALAXY,
             expect_holder: SHARD,

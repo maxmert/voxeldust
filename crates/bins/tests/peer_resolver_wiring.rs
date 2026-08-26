@@ -41,7 +41,7 @@ fn node() -> (tokio::runtime::Runtime, Arc<MeshControl>) {
     let (_tx, ctl) = spawn_mesh(
         rt.handle(),
         &trust,
-        &MeshConfig::new(NodeId(1), addr, book, 64, 0),
+        &MeshConfig::new(NodeId(1), addr, book, 64, 0, vd_bins::world_generation()),
         None,
     )
     .expect("mesh");

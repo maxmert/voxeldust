@@ -66,31 +66,35 @@ const SEED: u64 = 0;
 /// It names BOTH world changes that landed together, including the one that measurably did NOT move
 /// these bits — *"it did not move"* is a claim this file must state, not a silence to read into.
 const WHY_THESE_BITS_LAST_MOVED: &[&str] = &[
-    "# ★ WHY THESE BITS LAST MOVED — regenerated 2026-08-21 (the gate-pass arc) against the world",
-    "#   commit e28c8f2 left behind. TWO world changes landed in it; exactly ONE moved these rows.",
+    "# \u{2605} WHY THESE BITS LAST MOVED — regenerated 2026-08-26 (slice S9, THE CLIMB). THREE changes",
+    "#   landed together; all three moved rows, and they moved DIFFERENT rows, which is how they are",
+    "#   told apart. The previous record (2026-08-21, the derived mass cap) is superseded.",
     "#",
-    "#   CAUSE 1 — THE DERIVED STELLAR MASS CAP AND THE GALAXY'S RESERVATION. ★ THE MOVER.",
-    "#     The IMF draw's upper bound and the clearance the galaxy reserves for its largest child",
-    "#     stopped being two independent constants and became two readings of ONE solve, so that",
-    "#     every seed nests by construction instead of only the seed the old reservation was",
-    "#     sampled from. Before -> after: cap 120 -> 16.360034882257757 M_sun; reservation",
-    "#     296703425982.0423 -> 749489793576937.9 m; star placement radius",
-    "#     2248490503621178.5 -> 1498979587153876 m (compression chi 16.378 -> 24.568 — a third of",
-    "#     the star gap is the stated price). The cap is the DRAW's own bound, so seed 0's stars",
-    "#     were RE-DRAWN as well as re-placed, and the regeneration diff measures exactly that:",
-    "#     99 of 99 Planet rows moved; 6 of 12 System rows moved (the two siblings at all three",
-    "#     sampled ticks — the root, the galaxy and the home system sit at zero and cannot); 0 of",
-    "#     9 Star rows moved (a star holds its own system's origin by design, so its row IS zero).",
-    "#     A placement-radius change alone would have moved the six sibling rows and nothing else;",
-    "#     the 99 planet rows are the re-drawn masses, with every orbit and SOI solved from them.",
-    "#     See DEFERRED.md D-MASS-CAP; the cap lifts with the galaxy cell lattice at P10.",
+    "#   CAUSE 1 — THE REALMS ARE NAMED. Every row's first two columns changed shape: the ambient",
+    "#     levels used to borrow a star system's identity (`System(0)` for the universe, `System(1)`",
+    "#     for the galaxy) because they had no identity of their own. They have one now, so the rows",
+    "#     read `Universe` and `Galaxy(1)`. NO NUMBER MOVED FOR THIS — it is a renaming, and the",
+    "#     position and velocity bits on those rows are byte-identical across it.",
     "#",
-    "#   CAUSE 2 — THE HOME SEED DEFAULT, 0 -> 2298 (vd_physics::worldgen::HOME_SEED). NOT a mover",
-    "#     of these rows, MEASURED, not argued: this vector pins seed 0 explicitly (the `SEED`",
-    "#     const, byte-unchanged across every commit since this file was last captured) and the",
-    "#     boot it drives is a pure f(seed, config) — the new default only reaches processes that",
-    "#     read VD_UNIVERSE_SEED. What the change DID move here is the `SEED` const's doc, which",
-    "#     called 0 'the default' and no longer could.",
+    "#   CAUSE 2 — THE CLIMB ITSELF. The universe moved from 2^51 m to 2^76 m and the galaxy from",
+    "#     `R_universe - a band` to its own lattice's 2^62 m = 487.46 light years. The star placement",
+    "#     radius rides on the galaxy, 1498979587153876 -> 4609433753044093000 m, so every SIBLING",
+    "#     system row moved by that factor. The home system sits at the galaxy's origin and cannot",
+    "#     move; the universe's single child sits at ITS origin and cannot either.",
+    "#",
+    "#   CAUSE 3 — THE MASS CAP, AGAIN, AND FOR A NEW REASON. The cap is the IMF draw's upper bound,",
+    "#     so it re-draws every star in the world whenever it moves, and it moved: 16.360034882257757",
+    "#     -> 30.745283003771995 M_sun. What changed is WHICH constraint sets it. It used to be the",
+    "#     galaxy's room; the climb gave the galaxy 63x the room it needs, and the binding limit is",
+    "#     now that a star system must fit its OWN millimetre lattice (2^51 m). The cap sits exactly",
+    "#     on that bound. Every Planet row moved as a consequence — the masses are re-drawn and the",
+    "#     orbits and SOIs are solved from them.",
+    "#",
+    "#   \u{2605} AND ONE FIX THAT WOULD HAVE CORRUPTED THIS FILE. The writer flattened each placement",
+    "#     using the CHILD's coordinate step, when a placement is authored in the frame of the realm",
+    "#     that wrote it — the book's ANCHOR. Those were the same step while every realm counted in",
+    "#     millimetres. They are not now, and the galaxy's rows would have been blessed into this",
+    "#     golden 2048x wrong, as the world's own pinned bits. Read at the anchor's step since S9.",
 ];
 
 /// The ticks the property is sampled at. Tick 0 is the orbital epoch — every body sits on its authored
@@ -104,8 +108,16 @@ const SAMPLED_TICKS: [UniverseTick; 3] =
 /// Flatten a placement anchor to metres (rows ride the lattice NORMALIZED since the cell
 /// activation — `.origin` raw is a sub-cell residual, never a position). Bit-exact at these
 /// magnitudes, which is what keeps the golden vector's f64 bits UNCHANGED across the activation.
-fn placement_m(at: &vd_core::frame::FramePlacement, tier: vd_core::pose::Tier) -> DVec3 {
-    at.anchor().delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
+/// A placement, flattened to metres.
+///
+/// ★ THE `tier` HERE IS THE ANCHOR'S, NEVER THE CHILD'S (slice S9). A `FramePlacement` from a book is
+/// stated in the frame of the realm that AUTHORED it — the book's anchor — so that is the unit it
+/// counts in. Two callers passed `child.frame.tier()`, which was the same thing while every realm
+/// counted in millimetres and is out by 2048× now that a galaxy does not. One of them writes the
+/// golden vector, so the wrong ruler would have been blessed into the file as the world's own bits.
+fn placement_m(at: &vd_core::frame::FramePlacement, anchor_tier: vd_core::pose::Tier) -> DVec3 {
+    at.anchor()
+        .delta_m(vd_core::pose::LatticePos::ORIGIN, anchor_tier)
 }
 
 fn occupant_v_max_mps() -> f64 {
@@ -212,7 +224,7 @@ fn no_child_of_a_star_is_wider_than_its_own_distance_from_that_star() {
             let at = ctx
                 .of(child.frame)
                 .expect("a star places every direct child of its own");
-            let distance = placement_m(&at, child.frame.tier()).length();
+            let distance = placement_m(&at, ctx.anchor().tier()).length();
             let radius = child.shape.circumscribed_extent();
             eprintln!(
                 "[geometry] tick {} {:?} radius {radius} m at distance {distance} m",
@@ -414,7 +426,7 @@ fn every_anchors_child_rows_match_the_golden_vector() {
                 // The FLATTENED value (bit-exact ≤ 2⁵³ cells): the golden's f64 bits survive the
                 // activation untouched — the value moved INTO the integer half, and the flatten
                 // reproduces it exactly, which is precisely the inertness this golden measures.
-                let pos_m = placement_m(&at, child.frame.tier());
+                let pos_m = placement_m(&at, ctx.anchor().tier());
                 lines.push(format!(
                     "{:?} {:?} tick={} pos={:016x},{:016x},{:016x} vel={:016x},{:016x},{:016x}",
                     anchor,
@@ -574,7 +586,7 @@ fn a_shard_that_does_not_host_a_movers_parent_still_judges_it_at_apoapsis() {
     );
     // And the whole fence reaches the SAME verdict this forest gets on the parent's shard: one
     // forest, one answer, on every shard.
-    vd_core::geometry::guard_regions_nest(&regions, vd_sim::stub::MAX_REGIONS, &reaches)
+    vd_core::geometry::guard_regions_nest(&regions, &reaches)
         .expect("the planet shard's boot fence passes with the mover judged at apoapsis");
 }
 

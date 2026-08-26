@@ -27,6 +27,34 @@ use vd_wire::admin::AdminSnapshot;
 #[cfg(feature = "store-test-hooks")]
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey};
 
+/// Stop the children recorded in a launch ledger we have REFUSED to open.
+///
+/// Reads the refused file through the narrow read-only door and signals each recorded process group.
+/// Returns how many were signalled — zero means the rows could not be decoded, which is a real answer
+/// and is reported as such rather than as success.
+///
+/// Nothing here adopts anything: no store is opened, nothing is written, and the refusal that brought us
+/// here still stands.
+fn reap_refused_children(ledger: &std::path::Path) -> usize {
+    let Ok(rows) = vd_io_prod::store::scan_refused_for_reaping(
+        ledger,
+        &vd_node::saga_runtime::rlm_launch_prefix(),
+    ) else {
+        return 0;
+    };
+    let mut reaped = 0usize;
+    for (_k, v) in rows {
+        let Ok(intent) = postcard::from_bytes::<vd_node::rlm_spawn::LaunchIntent>(&v) else {
+            continue; // a row we cannot read cannot name a child — counted by its absence
+        };
+        if let Some(pid) = intent.pid {
+            vd_bins::signal_group(pid, "KILL");
+            reaped += 1;
+        }
+    }
+    reaped
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     vd_bins::init_tracing();
     let env = EnvConfig::from_process_env();
@@ -55,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // R-6a: the DURABLE MONOTONE process incarnation (VD_PROCESS_INCARNATION explicit wins for dev/test;
         // else the VD_BOOT_STATE_DIR boot-counter that survives a CrashLoop / clock rewind).
         vd_bins::resolve_process_incarnation(&env)?,
+        vd_bins::world_generation(),
     );
     // R-4d M4: RETAIN the MeshControl (was discarded) so the admin `/metrics` endpoint can read
     // the live mesh reliability counters (`MeshControl::stats()` — a pure atomic load off the hot path).
@@ -180,7 +209,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "store-test-hooks")]
         wait_poll_override: None,
     };
-    let (store, durability) = RedbStore::open(&store_path, store_tuning)?;
+    // THE LABEL (owner ruling 2026-08-24 Q1 condition 1). Verified BEFORE any family is scanned, so a
+    // store from another world, another coordinate unit or another epoch is refused rather than read as
+    // records — our encoding is positional, so the wrong shape decodes without an error.
+    let store_stamp = vd_bins::durable_stamp(
+        &env,
+        vd_core::store_stamp::StoreRole::Directory,
+        vd_core::EpochId(0),
+    )?;
+    // THE EXPLICIT WAY FORWARD from a refusal — and the ONLY one. `VD_STORE_ALLOW_GENESIS` deletes the
+    // file and starts a new world here; unset (the default) the refusal simply stands. It is named in
+    // the refusal's own message, so an operator reading a log has the next step in front of them.
+    let allow_genesis = vd_bins::parse_bool_env(&env, "VD_STORE_ALLOW_GENESIS")?;
+    let (store, durability) =
+        vd_io_prod::store::open_allowing_genesis(&store_path, allow_genesis, |p| {
+            RedbStore::open(p, store_tuning, store_stamp)
+        })?;
     // The Store is now durable. REMAINING transport production precondition (DEFERRED.md D-6): the
     // redelivering mesh transport is at-least-once for a source that STAYS UP (R-1..R-5 + M3 durable
     // incarnation, both proven), but a SOURCE that CRASHES inside the producer-less `AwaitAdopt` recovery
@@ -223,7 +267,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     #[cfg(not(feature = "store-test-hooks"))]
     let launch_tuning = StoreTuning::default();
-    let (launch_store, _launch_durability) = RedbStore::open(&launch_store_path, launch_tuning)?;
+    // ★ THE LAUNCH LEDGER'S REFUSAL IS NOT LIKE THE OTHERS, and this is the whole reason it is called
+    // out here rather than sharing the line above.
+    //
+    // Children are started into their OWN process group and are NOT killed when this process drops them.
+    // This ledger is the only record of which ones exist. So an orchestrator that refuses to open it and
+    // exits ORPHANS every shard it ever started — they keep running, keep holding their ports, and
+    // nothing left alive knows they are there.
+    //
+    // Refusing is still right; exiting silently is not. The refusal is therefore reported with what an
+    // operator must do about the children, and the reaping half is owed with the supervisor work in this
+    // same slice — it is NOT done by this line, and saying so here is cheaper than discovering it during
+    // an incident.
+    let launch_stamp = vd_bins::durable_stamp(
+        &env,
+        vd_core::store_stamp::StoreRole::LaunchLedger,
+        vd_core::EpochId(0),
+    )?;
+    let (launch_store, _launch_durability) = match vd_io_prod::store::open_allowing_genesis(
+        &launch_store_path,
+        allow_genesis,
+        |p| RedbStore::open(p, launch_tuning, launch_stamp),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            // THE REFUSAL STANDS — nothing is adopted and this process still exits. But it does NOT
+            // exit leaving orphans behind: children run in their own process group and are not killed
+            // when this process drops them, and this ledger is the only record of which ones exist. So
+            // they are reaped on the way out, from a narrow read-only look at the very file we refuse.
+            //
+            // Best effort, and honest about it: if the rows cannot be decoded either, the count is zero
+            // and the operator is told to stop them by hand. A file whose shape is genuinely unknown
+            // cannot name its children, and pretending otherwise would be worse than saying so.
+            let reaped = reap_refused_children(&launch_store_path);
+            tracing::error!(
+                error = %e,
+                ledger = %launch_store_path.display(),
+                reaped,
+                "REFUSING the launch ledger. Any shard recorded in it has been stopped on the way out. \
+                 If `reaped` is zero and shards are still running, the ledger could not be decoded \
+                 either — stop them by hand, or the next boot will collide with their ports."
+            );
+            return Err(e.into());
+        }
+    };
     // RLM 5f — ARM the reconciler when `--demand` (VD_DEMAND) is set; otherwise the fully-INERT default
     // (byte-identical boot). ONE value selection on `OrchestratorConfig.rlm` (HR3 — not a per-kind fork).
     // `VD_DEMAND` XOR `VD_STATIC_FOREST` fail-loud: an armed sweep would reap the pre-spawned static-forest
@@ -490,7 +577,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Advance: run this tick's schedule (commit() submits this tick's batch); park its seq for next tick.
         let prologue = node.run_schedule();
         parked = Some((prologue, durability.last_submitted()));
-        cell.store(Arc::new(admin_snapshot(node.world_mut())));
+        cell.store(Arc::new(admin_snapshot(
+            node.world_mut(),
+            vd_bins::world_generation(),
+        )));
         // S3: publish the liveness heartbeat + readiness (orchestrator = own-serving, always ready once
         // ticking). `publish_tick` preserves `draining` so a post-SIGTERM tick cannot re-route.
         vd_io_prod::probe::publish_tick(&health, node.tick().0, vd_node::health::orch_ready(true));

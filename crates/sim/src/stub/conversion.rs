@@ -83,11 +83,16 @@ pub(crate) fn place_arriving_pose(
         tracing::info!(
             to = ?to_realm,
             at_tick = pose.universe_tick.0,
-            accepted_at = ?pose.pos.delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
+            accepted_at = %vd_core::pose::describe(pose.pos, pose.frame),
             accepted_len = pose
                 .pos
                 .delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier())
                 .length(),
+            // Q1 CONDITION 3: a position in a log names its FRAME and its UNIT. A number of
+            // metres is meaningless without the unit its integer cell counted, and at three in
+            // the morning the difference between two units is the whole incident.
+            frame = ?pose.frame,
+            unit_m_per_cell = pose.frame.tier().cell_edge_m(),
             "ARRIVAL: accepting my parent's number as given, no arithmetic of my own",
         );
         return Ok(pose);
@@ -269,7 +274,15 @@ pub(crate) fn flush_pose_for_dest(
                     // scan asks, hysteretic member side. An unplaceable pose reads Err ⇒ not held ⇒
                     // the guard stays out of the way and the pose ships exactly as before this
                     // guard existed (the receiver stays the judge).
-                    vd_core::geometry::region_verdict(&pose, own_region, book, true)
+                    //
+                    // A DEGENERATE SEGMENT (`pose.pos` as its own prior), so this asks the POINT half
+                    // of the rule. That is not a shortcut: the only prior reachable here is
+                    // bit-identical to the pose being validated, because a subject latched in
+                    // `RequestInFlight` is skipped by the re-advance while the scan keeps rewriting
+                    // its stored prior every tick. Passing that value would ship a number equal to the
+                    // pose while LOOKING like it carried motion. One function, one rule, one set of
+                    // arms — the fork this type's own doc forbids never appears.
+                    vd_core::geometry::region_verdict(&pose, pose.pos, own_region, book, true)
                         .map(|v| v.member)
                         .unwrap_or(false)
                 });
@@ -294,9 +307,7 @@ pub(crate) fn flush_pose_for_dest(
             pose_frame = ?pose.frame,
             at_tick = pose.universe_tick.0,
             shard_tick = tick.0,
-            pos_m = ?pose
-                .pos
-                .delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
+            pos_m = %vd_core::pose::describe(pose.pos, pose.frame),
             "HAND-OFF VERBATIM: the dest is not my direct child — shipping the pose un-converted",
         );
         return Some(pose);
@@ -366,10 +377,22 @@ pub(crate) fn flush_pose_for_dest(
             // would not HOLD this pose, the entry is no longer true — refuse the flush, the saga aborts
             // PRE-commit, this shard keeps authority, and a fast pass-through costs one aborted saga
             // instead of a committed mislanding and a fence-burning flap.
-            // THE one band question, integer form — the SAME `region_verdict` the destination's
-            // scan will ask (hysteretic member side, because the arriving owner carries the owned
-            // prior); the f64 signed distance stays as the warn gauge.
-            let verdict = vd_core::geometry::region_verdict(&placed, dest_region, book, true);
+            // THE one band question, integer form — the SAME `region_verdict` function the
+            // destination's scan will ask (hysteretic member side, because the arriving owner carries
+            // the owned prior); the f64 signed distance stays as the warn gauge.
+            //
+            // ★ WHAT THIS GUARANTEES, EXACTLY, SINCE THE VERDICT BECAME SWEPT. The guard holds ONE
+            // instant and passes a degenerate segment, so it asks the POINT half of the rule. The
+            // destination's scan holds two and may sweep. So the guard is no longer the whole of what
+            // the destination will decide: it still catches every mislanding where the arriving pose
+            // ITSELF sits outside the band, which is the class it was built for and the class that was
+            // measured — but an arrival fast enough to pass THROUGH the destination region within one
+            // tick would be refused here and accepted there. There is no prior to fix that with: the
+            // arriving pose is produced by walking a multi-link conversion chain, and the stored prior
+            // carries neither a stamp to convert it through that chain nor a frame tag to say what it
+            // was ever relative to. Ledgered rather than papered over.
+            let verdict =
+                vd_core::geometry::region_verdict(&placed, placed.pos, dest_region, book, true);
             let (held, sd) = verdict
                 .map(|v| (v.member, v.signed_distance_m))
                 .unwrap_or((false, f64::MAX));
@@ -417,13 +440,9 @@ pub(crate) fn flush_pose_for_dest(
                 own_frame = ?regions.own_frame(config.realm),
                 // FULL positions, never `offset()` — the sub-cell remainder read as a position produced
                 // three retracted root causes in this arc (§4o's binding rule).
-                from_pos_m = ?pose
-                    .pos
-                    .delta_m(vd_core::pose::LatticePos::ORIGIN, pose.frame.tier()),
+                from_pos_m = %vd_core::pose::describe(pose.pos, pose.frame),
                 child_at = ?child_at,
-                landed_m = ?placed
-                    .pos
-                    .delta_m(vd_core::pose::LatticePos::ORIGIN, placed.frame.tier()),
+                landed_m = %vd_core::pose::describe(placed.pos, placed.frame),
                 landed_len_m = placed
                     .pos
                     .delta_m(vd_core::pose::LatticePos::ORIGIN, placed.frame.tier())

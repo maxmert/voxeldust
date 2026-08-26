@@ -3427,6 +3427,703 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **WHY it is NOT a regression / safe to defer:** the reported TOTAL freeze (player + world both dead because the return parked on a reaped authority) is FIXED — the return-dest System stays live through the crossing so the return COMMITS (proven by the round-trip E2E reaching `location == "System 7"` and by the deterministic 3c `rlm.rs` twin). *(Mechanism updated 2026-08-14, Step-5 lane cure finding 37: the OUTWARD keep-alive this sentence originally credited is deleted — a shard demands only itself or a direct child (`push_demand`'s structural gate) — and the return-dest is held by arm B of `desired_alive` (the source still speaks for the departing occupant, so it never reports Empty) + `ancestor_close`; the round-trip E2E re-measured green over exactly that path.)* This residual is the NARROWER "neighbours stall after the commit" facet, newly EXPOSED by the new round-trip E2E (`a_planet_to_system_return_commits_both_rehomes_and_the_player_rides`), not caused by the reap fix (which cannot suppress emission) nor by the read-only client render changes (floating-origin S2/S3 `world_pos`).
 - **WHERE it lands / WHEN:** VU-6 (warp re-stream / scene-swap) / floating-origin S6 (`anchor_epoch` re-emit at FORK-0a) — an authoritative scene RE-STREAM on an authority change re-opens the read sub + re-ships the neighbour placements from truth, discharging this together with [[D-RLM-13]]. The likely mechanism: re-emit the realm registry/scene (and re-arm the dest read sub) at the return-crossing promote, idempotently. **Repro / pin:** the OBSERVE-not-panic tail of `a_planet_to_system_return_commits_both_rehomes_and_the_player_rides` (`crates/bins/tests/rlm_demand_login.rs`) — flip its `neighbour_feed_live` observation to a hard `>= base + 20` assert when this lands. Owner: VU-6 / floating-origin S6.
 
+### D-48-S1 🟩 THE SAVED-DATA LABEL — LANDED (slice S1, owner ruling 2026-08-24 Q1 condition 1)
+
+- **WHAT LANDED.** Every durable file carries a label naming the world that wrote it, verified BEFORE any
+  family is scanned (positional encoding: a wrong-shaped file decodes into RECORDS, not into an error).
+  The label holds only fields COMPARED FOR EQUALITY — layout, role, world seed, epoch, and two DERIVED
+  generations (`crates/core/src/store_stamp.rs`). The coordinate generation folds over `Tier::ALL`'s
+  metres-per-cell, so it CANNOT fail to move when a unit moves — which is the whole reason it exists,
+  since S8 re-values the coarse step and a position read under the wrong unit is silently wrong by the
+  ratio between them. The world generation folds `vd_physics::worldgen::world_shape_constants()`.
+- **THE DECISION IS IN THE PURE CRATE** so the 100 % gate holds every branch; `vd-io-prod` only reads
+  bytes and calls it. There is NO unstamped door: `RedbStore::open` REQUIRES the label (a label written
+  and never read is worse than none — this tree already held one of those, cured below).
+- **THE FOUR OUTCOMES**, each driven separately: absent+empty ⇒ write and proceed; absent+non-empty ⇒
+  REFUSE (owner: refuse, do not convert); present+equal ⇒ proceed; present+different ⇒ refuse naming the
+  field and BOTH values.
+- **THE WAY FORWARD** — `VD_STORE_ALLOW_GENESIS` deletes the file and starts a new world, named in the
+  refusal's own message. Deliberately NOT a fallback inside the opener (a wipe that could happen on its
+  own eventually would), and reachable ONLY from a label refusal — proven: another error class against an
+  existing file leaves it untouched.
+- **THREE THINGS FOUND BY MEASUREMENT, not reasoning:**
+  1. **We touched a file before refusing it.** The table-ensure is a WRITE and ran first, so a refused
+     file had already been modified — the operator is sent to look at something we changed. Order is now
+     read, refuse, then write; pinned by a byte-for-byte assertion over the whole file.
+  2. **Writing the label broke four durability assertions** that a fresh store is empty. Fixed in
+     `is_empty` (a label is not a record), NEVER by weakening them — they are the durability contract's
+     own control.
+  3. **THE DEPLOY CHECK I WROTE FIRST WAS VACUOUS**: it grepped for the word `OnDelete`, which my own
+     explanatory comment contained, so it would have reported success on a rolling update forever. Found
+     by planting a rolling update and watching it pass. It now matches the SETTING and is proven to fail.
+- **THE RESPAWN LOOP IS CLOSED** (`crates/node/src/rlm_runtime.rs`). A successful fork used to count as a
+  successful LAUNCH and clear the failure streak — but a fork only proves a PROCESS started, not that a
+  REALM came up. A child that starts and dies at once therefore never engaged the backoff and was
+  respawned at the base cooldown forever. **A launch is now proven by the realm's HEAD appearing**, and a
+  child that dies without ever registering is counted as the failure it is. This became load-bearing the
+  moment a store could refuse: a refusing shard IS a child that starts and dies.
+- **A REFUSAL NO LONGER ORPHANS A CLUSTER.** Children run in their own process group and are not killed
+  when the orchestrator drops them, and the launch ledger is the only record of them. The orchestrator
+  now reaps the recorded process groups through a narrow read-only door
+  (`store::scan_refused_for_reaping` — read-only, no writer, opaque bytes, adopts nothing) before exiting,
+  and reports the count. Zero means the rows could not be decoded either, and says so.
+- **ROLLING UPDATES ARE REFUSED.** All three StatefulSets defaulted to replacing pods one at a time, which
+  with the label armed is not a degraded release but a cluster that PARTITIONS ITSELF, each half refusing
+  the other's files. All three are `OnDelete`; `just k3d-validate` fails if one drifts back.
+- **THE SILENT VERSION DROP IS CURED** (`crates/io-prod/src/outbox.rs`). The one format version this tree
+  already had failed on exactly its own event: `scan_all` dropped version-mismatched rows with no count
+  and no log, and the replay then reported the same thing it reports for an empty store — so a node came
+  back believing it owed nobody anything. Unreadable rows are now counted and reported at error level,
+  the two kinds (bad key, bad value) separated, and the rows are SKIPPED, never deleted.
+- **STILL OWED (named, not hidden):** cluster identity and orchestrator identity are NOT in the label —
+  neither exists as a value anywhere in the tree, and inventing one is a design decision, not a line of
+  code (D-47 wants both). Per-family record migration stays deferred under the owner's refuse-don't-convert
+  ruling. The byte-golden over the seven durable value shapes is NOT written.
+- **GATES:** workspace 2201 passed / 0 failed; Tier-A coverage 100 % of lines and branch sides; fmt and
+  clippy clean; `just k3d-validate` green AND proven to fail with a rolling update planted.
+
+### D-S3 🟩 THE COORDINATE UNIT IS REFUSED AT THE HANDSHAKE — LANDED (slice S3, owner-approved 2026-08-24 Q1 conditions 2+3)
+
+- **WHY.** Slice S8 re-values the galaxy's coordinate step. From that day two builds can be the SAME
+  version, both healthy, both talking — and every position between them wrong by the ratio between the
+  units. Nothing crashes, nothing is logged, a player is simply somewhere else. And **a step change moves
+  ZERO bytes**: the edges are compile-time constants, so no golden reddens and no decode fails. Every
+  safeguard here had to be built deliberately.
+- **CLIENT SIDE — `ProtoVersion` gained `coordinate_generation`**, folded at COMPILE TIME over the
+  coordinate tier table (`vd_core::store_stamp::coordinate_generation`, now a `const fn`). **The unit is
+  NOT negotiable**: major and minor may differ and still talk (that is what a floor and a minimum are
+  for), but there is no lower UNIT two builds can agree to speak — so it is an equality and it refuses.
+  The refusal names the field and BOTH values, because it is the one refusal whose cause is invisible
+  from outside. Driven at the REAL negotiation site (the gateway's one `negotiate` call), not against the
+  type.
+- **FLAG DAY, minor 22 → 23, floor with it.** The version rides inside `Hello` and postcard is positional,
+  so the field re-labels every byte after it. The tree's own completeness check demanded three things
+  before accepting it: a ledger entry per minor, an owner citation with an accepted marker, and a written
+  reason for the floor. All three are in `crates/wire/src/version.rs`.
+- **FLEET SIDE — the unit is folded into the transport tag** (`intershard_alpn`), so a mismatched node is
+  refused **by the transport itself**: no new message, no new wire arm, and the fleet half stays out of
+  SL6's ask entirely. **A CORRECTION TO BOTH PLANS, which claimed a diagnosis this route cannot deliver:**
+  a tag mismatch produces `no_application_protocol` — a connection error with no field, no value and no
+  unit. So the tag buys the REFUSAL only. The DIAGNOSIS is carried elsewhere and deliberately: the tag is
+  built to be READ (the unit appears as hex text), every node states it on its admin view
+  (`AdminSnapshot.coordinate_unit_tag`, present even on the empty snapshot) and in its boot log. A test
+  asserts the admin string and the transport bytes are IDENTICAL — two renderings of one fact is how an
+  operator gets sent to the wrong cause.
+- **Q1 CONDITION 3 — every position diagnostic names its frame AND its unit.** Not twelve hand-written
+  field lists: ONE helper (`vd_core::pose::describe`) that states metres, frame and unit together, so a
+  new diagnostic cannot print half of it. A bare number of metres is not a position — the same integer
+  counts millimetres in one frame and metres in another.
+- **A MISLEADING COMMENT CORRECTED**, and it would have pointed the next reader the wrong way:
+  `crates/client/src/interp.rs` claimed the unit "was SHIPPED, not inferred". It is not. **The frame NAME
+  ships; the UNIT is a compile-time table on the receiver.** The safety comes from this slice's refusal,
+  and the doc now says so.
+- **ONE FOLD, THREE USERS** — the durable label (S1), the client handshake and the fleet tag all fold the
+  same table. Asserted, so a store and a peer can never disagree about which world they are in.
+- **STILL OWED:** the dialling side does not yet log the tag it offered when a connection fails (the plan
+  asks for it; the boot log and admin view carry the same string, so an operator can compare two nodes,
+  but the failure itself is still silent on the dialling end).
+- **GATES:** workspace 2213 passed / 0 failed; Tier-A coverage 100 %; fmt and clippy clean. One
+  self-caught defect: the first refusal test joined two conditions with `&&`, which hides one side's false
+  branch from the coverage gate — the project's own written rule, and it was split.
+
+### D-S4 🟩 SUBTRACT BEFORE YOU FLATTEN — LANDED (slice S4). A defect that was LIVE on the world as it stands
+
+- **THE DEFECT, not a future one.** A drawn position and the eye were each flattened from the frame
+  origin and THEN subtracted. At the star placement radius a position is ~1.53e18 fine cells, whose f64
+  spacing is 256 cells = **0.25 m**. So two ships flying in convoy each rounded to a quarter of a metre
+  INDEPENDENTLY, and their drawn separation was wrong by up to half a metre and FLICKERED as they moved.
+- **★ THE GATE ALL THREE DESIGNS PROPOSED IS GREEN TODAY AND CANNOT FAIL.** Every one of them led with
+  *"two things 100 m apart must draw 100.000 m apart — RED BEFORE"*. Re-derived and confirmed by
+  measurement: 100 m is exactly 102,400 cells, 102,400 mod 256 == 0, so BOTH endpoints round by the same
+  amount, the errors cancel, and the answer is exactly 100.000 m. **Every whole-metre separation is exact
+  here for the same reason.** A gate built on one would have passed for ever with the defect standing.
+  Kept as a test (`the_whole_metre_gate_the_designs_proposed_is_green_today`) so nobody re-proposes it.
+- **THE GATE THAT CAN FAIL** sweeps separations that are NOT multiples of the rounding quantum (e.g.
+  102,501 cells = 100.0986 m). Measured: the old path is wrong by up to 0.25 m per axis; the lattice path
+  is **exactly zero**, not merely smaller. Both in one test body, in `vd-core` (the property) and in
+  `vd-client-harness` (the convoy).
+- **TWO DEFECTS, TWO PLACES, DIFFERENT FAILURES — said apart so a gate is not written against the wrong one:**
+  - **CLIENT:** cancellation error in a DRAWN SEPARATION. `RenderEye` now carries the eye as a lattice
+    position with its unit, and the entity and realm-box draw sites reduce against it before flattening
+    (`eye_relative_lattice`). The eye is an `Option` and NOT a defaulted `Tier`: there is no default
+    unit, and a position reduced against a guessed one is wrong by the ratio between guess and truth —
+    the very defect being removed.
+  - **SERVER:** a KEY FLIP near a grid boundary in the child index (written the same day). The division
+    was already exact (a power-of-two edge), so the error entered ONLY through the flatten. And this
+    index's empty answer is TRUSTED as a positive "not here", so a lost key does not blur a boundary —
+    **it makes a realm unenterable**. `cell_key` now keys on the integer cell plus a small local
+    displacement, never on a distance from the frame origin. Proven at the placement radius.
+- **TWO BUGS IN MY OWN REWRITE, both caught by the tests, both real:** the new key ignored a position's
+  sub-cell offset (so every child built with a pure local offset keyed to cell zero), and an index with
+  no extent divided by a zero grid edge. Fixed by folding the offset into the local displacement and by
+  taking the same early exit `candidates` already takes.
+- **STILL OWED:** the plan's measured touch list names thirteen production sites; the three load-bearing
+  ones (both draw sites and the index) are converted. The remainder —
+  `client-harness/src/camera.rs:455,756`, `verdict.rs:55,70`, `FollowCamera::eye`,
+  `pilot_capture_camera` — still build or compare from already-flattened values. They are camera and
+  verdict paths, so the error is relative to the DISTANCE to the thing rather than between two drawn
+  things; the convoy defect is closed. Convert them with S9, when the magnitudes actually move.
+- **GATES:** workspace 2221 passed / 0 failed; Tier-A coverage 100 %; fmt and clippy clean.
+
+### D-S5 🟩 MEMBERSHIP TESTS THE WHOLE TICK'S MOTION — LANDED (slice S5). The module header was a claim; it is now a measurement
+
+- **WHAT THE HEADER SAID, AND WHAT WAS TRUE.** `crates/core/src/geometry.rs` has stated since it was
+  written that *"membership evaluation tests the tick's whole motion segment against the shell, so a fast
+  body cannot tunnel undetected."* It did not: the verdict sampled the pose and nothing else. Acquisition
+  needed a SAMPLE landing at least one inset INSIDE the surface, so **no widening of any band could ever
+  buy acquisition** — the property A4 at P8 depends on, and the one that decouples enterability from a
+  child's size.
+- **BOTH EARLIER PLANS MIS-SIZED THIS, FOR THE SAME REASON.** Each assumed the swept primitives were
+  built and merely needed wiring. They ARE built and had zero callers — but their signatures are f64
+  METRES, while the shipped verdict decides on **integer cell squares**, on purpose, so the answer is
+  exact at every magnitude and identical on every host. Wiring the decimal pair in would have abandoned
+  integer exactness on the one path where it matters most. This slice is **new integer swept
+  mathematics**, and the decimal pair stays what it now is: a zero-caller oracle with a stated validity
+  window (bit-comparable only while `|cell delta| ≤ 2⁵³`, about 59 AU — one f64 ulp equals one Fine cell
+  at 4.4e12 m, which is INSIDE the home system, so an equality against it would pass on small fixtures
+  and start failing exactly when a test finally ran at real scale, with the ORACLE at fault).
+- **THE OVERFLOW, WHICH IS THE HARD PART, VERIFIED INDEPENDENTLY OF THE DESIGN THAT PROPOSED IT.** The
+  textbook interior test cannot be computed directly at the distances this world allows:
+
+  | Term | Worst value | Fits signed 128-bit? |
+  |---|---|---|
+  | `a · d` | 1.276e38 | yes, margin 1.333× |
+  | `d · d` | 2.552e38 | **NO** — must be unsigned |
+  | the deciding product | 1.628e76 (**254 bits**) | **NO** — needs 256 |
+
+  So 256 bits is the MINIMUM sufficient width and it IS sufficient, with the maximum attained rather
+  than estimated. There is no cleverer 128-bit identity: granting a free clip, the largest region an
+  i128-only form could cover is 1,895 km — an Earth-sized realm misses by 128×, a star system by 1.2e21×,
+  the galaxy by 2.0e36×. **One path, 256-bit, always.** The wide multiply is four 64-bit limb products
+  with **zero branches**, checked against an oracle built from a DIFFERENT (32-bit) limb split so the
+  test is not the implementation restated.
+- **WHAT THE VERDICT NOW ADDS — EXACTLY ONE THING.** "The path dipped inside while BOTH samples were
+  outside." Inside-now, inside-then and LEAVING all keep the shipped answer bit for bit. The rejected
+  alternative also held a subject for one tick after it left; at a galaxy ceiling that subject is
+  thousands of shell radii outside, so it inverts membership at precisely the speeds the machinery
+  exists for. The shipped point answer is asked FIRST and returns immediately, so **the upgrade can only
+  turn `false` into `true`: no subject that is a member today can stop being one.**
+- **★ THE PLAN'S OWN GATE WAS FALSE, AND IT IS REPLACED, NOT WEAKENED.** The plan required *"for every
+  subject whose per-tick travel is below the band, the swept verdict must equal the point verdict, bit
+  for bit."* **Two cells of travel — 1.95 mm, three orders below the shipped 3 m band — genuinely clips a
+  region at every size**, verified at seven real radii from a 5 m station to the galaxy bound: for
+  `a = (E,−1,0) → b = (E,+1,0)` both endpoints are outside and the midpoint sits exactly on the surface.
+  Written as an equality that gate would be **RED for a correct implementation**, and the cheapest way to
+  turn it green would be to weaken the code. Replaced by four arms that can still fail: stationary
+  identity; **one-cell equality** (proved from the both-outside inequality, then checked exhaustively
+  over 187,008 shell and 135,492 box pairs, with the bound shown ATTAINED at `|d|² = 4` so it is tight
+  rather than padded); an exactly-tight integer divergence envelope; and a float-free lattice oracle.
+- **EVERY GATE WAS PROVEN FALSIFIABLE BY PLANTING THE DEFECT.** Removing the sweep, dropping the
+  nearest-point-is-the-end exit, narrowing the 256-bit compare to 128, replacing the checked subtraction
+  with a bare one, enumerating only the endpoint cells, un-seeding the arrival prior, and reverting the
+  scan to the instant — each turned a named test red, and each was restored. **One planted defect was
+  NOT caught, and that is recorded rather than hidden:** replacing the checked subtraction with a
+  WRAPPING one is indistinguishable, and provably so — a wrapped `g` is about 2¹²⁸ while `g·s ≤ (a·d)²`
+  requires `g ≤ |a|²`, so the wrapped form answers `false` wherever the checked form does. The guard is
+  kept for the debug panic it prevents, and the code now says so instead of claiming more.
+- **THREE COMPANION CHANGES LANDED IN THE SAME COMMIT, because without them the slice is inert or unsafe.**
+  1. **The arrival prior.** A Ghost is minted with its prior at the realm ORIGIN. Nothing read the field,
+     so it was harmless; once membership tests a segment, the first scan after a cross-node arrival would
+     sweep a realm-wide line from the destination's centre to the arrival point — through regions the
+     subject never visited — straight into a re-home decision. **This is the same defect class as the
+     re-home freeze that cost a week and produced a turn-back tag.** Re-seeded at `apply_crossing`.
+  2. **The lookup asks about the segment.** `ChildIndex::candidates` reads exactly one cell keyed on one
+     point, and its answer is trusted as positive information. A child the subject tunnels through holds
+     NEITHER endpoint, so it was skipped before the verdict could be asked — the arithmetic would have
+     been correct and unreachable. `candidates_segment` enumerates the endpoint key-box WHOLE (a subset
+     would look exactly like a positive "not here") and **abstains** when doing so would touch more grid
+     cells than the index has occupied — a cost argument against the index's own size, not a threshold
+     someone picked. `worth_asking` reads the abstain flag FIRST: abstaining is ignorance, not a miss.
+  3. **Two bare `i64::abs()` cured.** `i64::MIN.abs()` panics in debug — which is the entire test and
+     coverage suite — and `normalize` saturates to `i64::MIN`, not to the sanitize domain. S5 did not
+     create the hazard; it doubles the traffic through it (two endpoints per region instead of one).
+- **GATES:** workspace **2246 passed / 0 failed** (baseline 2221 → +25); Tier-A coverage **100 % region and
+  branch**; fmt and clippy clean at `-D warnings`. The coverage gate failed TWICE first, and both times the
+  misses were in the NEW TEST CODE, not in the arithmetic — one of them a `&&` short-circuit inside the
+  reference implementation, which is the very pattern this project's written rule forbids. Neither was
+  exempted: a guard that could never fire was DELETED (a branch nothing can drive is not coverage), and the
+  two remaining arms got real fixtures — a region thinner than its own inset (never acquirable at any
+  distance) and a ROTATED region (so "the swept change does not touch the decimal arm" is a measurement
+  rather than an omission). Both fixes made the gate stronger, not merely green.
+- **WHAT THIS DELIBERATELY DOES NOT DO — named in the module header so the next reader inherits the
+  limits, not the old false sentence.**
+  - **A MOVING REGION sweeping over a PARKED subject is not covered.** Both endpoints are reframed
+    through THIS tick's book, so the segment tested is the subject's own displacement, not the relative
+    one. The tree's own G-IDENTICAL fixture `drive_swept_crossing_feature` parks the occupant and moves
+    the child — **that fixture passes while proving nothing about this slice, and must not be read as its
+    acceptance line.** The cure is the prior folded through the PREVIOUS tick's book (one extra ledger
+    lookup and one extra frame conversion per region per subject per tick); it is out of S5 because the
+    one-book form is what keeps the stationary answer structurally identical. **WHEN:** with the relative-
+    motion work at P8.
+  - **`Obb` is not swept.** A rotated box needs a rotation, and no rotation of an integer lattice vector
+    is an integer lattice vector, so a swept `Obb` would decide on a square-cornered box while its point
+    form decides on a rounded-corner distance field — a **1.46 m** disagreement at the shipped 2 m outset
+    between the two halves of one verdict. No shipped region is an `Obb`. **WHEN:** with the first
+    rotated region.
+  - **One-tick fly-through is detected but not damped.** Acquiring a child and leaving it within one tick
+    issues a re-home the next tick reverses. **Measured, not argued:** the band's own hysteresis damps it
+    while one step of travel stays inside the band (the acquire edge sits an inset in, the release edge an
+    outset out), and stops damping it above — both halves are pinned by a test that would have come out
+    either way. This is the same class as the eighteen alternating crossings in eighteen seconds parked
+    red at `crates/bins/tests/node_per_realm_walk.rs:241`. **WHEN:** S6's speed-sized bands, which is that
+    test's own un-ignore condition.
+  - **`guard_quantum_band` still does not exist.** The verdict's doc justifies discarding the sub-cell
+    residual by naming a fence with no definition anywhere in the tree. The claim is true today by 3.5
+    orders and nothing enforces it; S5 relies on the same discarded residual over a strictly larger
+    surface. **S5 borrows an unenforced premise; S6 owes the fence.**
+  - **The abstain rate on THE world's booted forest is UNMEASURED.** It could reintroduce the O(n) scan S4
+    just removed, for exactly the fast subjects S9 creates. It is a measurement S5 owes, not a claim.
+    **WHEN:** S6's index-quality gate, which already exists to measure this.
+  - **The prior is re-judged against the edge in force for the CURRENT hysteresis side**, not the edge in
+    force when the prior was sampled. True by accident of uniformity today (both band constants are
+    global). **S6 makes every band tick-varying and breaks the premise.**
+  - **The arrival flush guard's guarantee shrank, and its comment was rewritten to say so.** It holds ONE
+    instant, so it asks the point half. It still catches every mislanding where the arriving pose ITSELF
+    sits outside the band — the measured 12.15 / 23.00 / 20.72 m class it was built for — but an arrival
+    fast enough to pass THROUGH the destination region within one tick would be refused there and
+    accepted by the destination's scan. There is no prior to fix it with: the arriving pose is walked
+    through a multi-link conversion chain, and the stored prior carries neither a stamp to convert it
+    through that chain nor a frame tag to say what it was relative to.
+  - **It is exact only while every placement is identity-oriented.** The day a rotating placement ships,
+    each endpoint's fold costs up to one cell per axis, so the segment gains up to two cells per axis of
+    purely spurious displacement — enough to manufacture a false dip in exactly the 1.95 mm regime where
+    the real minimum divergence lives, and enough to break the one-cell equality proof.
+
+### D-S6 🟩 BANDS SIZED FROM REAL CLOSING SPEED — LANDED (slice S6). The law the world's own radii were already solved against
+
+- **THE LAW WAS NOT INVENTED HERE.** The galaxy's radius has always been `R_universe − outset(v_cap)`, an
+  expression whose `outset` term is a containment band that did not exist. Every band shipped as the same
+  three metres — one value built once and copied onto every region in the universe, from a five-metre
+  station to a two-and-a-quarter-petametre shell. This slice applies the formula the geometry already
+  assumed, so the shells and the bands can no longer disagree about what a band costs.
+- **EACH BOUNDARY IS SIZED FROM ITS OWN CEILING, and the reason is measured rather than argued.** The
+  approach governor lowers a subject's ceiling onto the body it is nearing, and it is enforced on BOTH
+  arms — approaching a child, and leaving your own realm. At either surface the distance term is zero, so
+  **the fastest a subject may lawfully be moving at a boundary is that boundary's own cap.** Sizing
+  against the PARENT's ceiling — which is what the S2 sweep did, correctly, before anything bounded the
+  arrival speed — would size every band for a speed no lawful subject can hold there, and measured, would
+  ask for bands thousands of times larger than the bodies they wrap.
+- **BOTH INPUTS ARE CONSTANTS OF THE SOLVE, NEVER THE CLUSTER'S.** The tick already was
+  (`GEOMETRY_TICK_DT_S`); the foot speed now is too (`GEOMETRY_V_FOOT_MPS`). A band is part of the world's
+  geometry, and two clusters must boot the identical world however fast they tick and however fast they
+  let a person walk. MEASURED: the foot speed binds on **0 of 13,144** boundaries of THE world — every
+  generated realm is large enough that its own geometric ceiling dominates — so that constant does not
+  size a single band that ships; it exists so the small-realm arm has a lawful value instead of a
+  deployment's.
+- **WHAT IT COSTS, over the derived 284-seed sweep:**
+
+  | Reading | Result |
+  |---|---|
+  | Band as a share of its own body | **0.133 %** (the affordability line was 50 %) |
+  | Nesting margin consumed | ~600 m of a **4.3285e8 m** margin |
+  | Sibling-separation margin consumed | ~4.8e9 m of a **1.2072e14 m** margin |
+  | Boundaries crossed unseen, before | **13,144 of 13,144** |
+  | Boundaries crossed unseen, after | **0** |
+  | Thinnest crossing | **5.59 ticks** at the shipped approach constant |
+
+- **★ THE METRIC WAS RE-POINTED, VISIBLY, AND BOTH READINGS ARE STILL ASSERTED.** The S2 sweep counted
+  boundaries unobservable at the PARENT's ceiling. That was the honest upper bound when nothing bounded
+  arrival speed; it is now a speed the governor forbids. The ungoverned count is still computed and still
+  pinned (12,860, down from 13,144 — S6 makes one boundary per world observable even against a speed that
+  cannot happen), and the GOVERNED count is asserted at zero. A re-pointing, not a weakening: the old
+  number did not quietly disappear.
+- **THE QUANTUM FENCE IS WRITTEN.** `region_verdict` has cited `guard_quantum_band` by name since it was
+  written, to justify discarding the sub-cell residual, and a grep of the tree returned that one comment
+  and no definition. The claim held by three and a half orders at the millimetre grid and NOTHING enforced
+  it, so it would have gone silently false the day a coarser grid lit up — or, as it turns out, the day a
+  band was CLAMPED DOWN to fit a small body, which this slice does. It is now an arm of the boot fence,
+  both sides driven, with the inclusive edge driven exactly.
+
+- **★★ THE ARM I LEFT OUT, AND WHAT IT COST — the entry worth reading.** The design's band law has a clamp
+  (`band ≤ inscribed extent × BAND_EXTENT_CLAMP`) and I implemented everything except it. **Seven re-home
+  tests went from one crossing to none.** The acquire edge sits one third of the band INSIDE the surface,
+  so a five-metre station handed a sixty-metre band has its acquire edge past its own centre and becomes
+  impossible to enter AT ANY SPEED — the exact property this slice exists to guarantee, destroyed by the
+  slice that guarantees it. The clamp is bound on the INSCRIBED extent, because that is the shape's
+  narrowest direction and a band that fits the widest can still swallow the narrowest.
+- **THREE FIXTURES CARRIED A DISTANCE THAT ONLY WORKED AT THREE METRES**, and all three now derive it:
+  a departure staged "five metres past the shell", and two round-trip waypoints at "x = 50" whose system's
+  release edge moved from 42 m to 53 m. Each looked like a physical fact and was really a band constant.
+
+- **THREE OF MY OWN MEASUREMENTS WERE WRONG BEFORE THEY WERE RIGHT, and each was caught by a control
+  rather than by luck. They are recorded because the discipline is the point.**
+  1. **The fence check refused THE world by 1.5e15 m** — the size of the universe, from a band worth
+     600 m. It subtracted a child's centre (in its parent's frame) from its parent's centre (in the
+     GRANDPARENT's frame). Caught only because the test asks the same question with TODAY'S band first: a
+     measurement that refuses the shipped world is measuring itself.
+  2. **It reported 83,542 overlapping sibling pairs in THE world. There are none.** A moving planet's
+     region carries a ZERO centre by design — its real placement is authored into the parent's book every
+     tick — so every orbiting pair read as sitting exactly on its star. The test now skips moving pairs
+     and says why, so the scare is not re-derived.
+  3. **It reported a 3.33-tick crossing using an approach constant no cluster runs** (no demand cadence,
+     no boot latency — the floor of the derivation). The shipped cadence gives **5.59 ticks**, which
+     clears the cooldown. Both are now computed and both asserted, so neither can quietly become the
+     convenient one.
+- **WHAT IS STILL OWED, named rather than implied.**
+  - **The ceiling fence is a measured gate, not a boot refusal.** On THE world it CANNOT fail, because the
+    band is defined from the ceiling — the ratio is one sixth by construction, so a boot fence there would
+    be decoration. It can only fail where the band is floored or clamped, i.e. on small hand-placed
+    fixtures, where it would refuse our own test forest. Promoting it to a boot refusal belongs with A4 at
+    P8, where a realm's ceiling is derived from its band rather than compared to it.
+  - **At the approach constant's FLOOR the cooldown is not cleared** (10/3 ticks against 5). Reaching it
+    needs a band factor of 15 rather than 6 — still a third of a percent of each body — but that factor
+    also sets the galaxy's own radius, so moving it is S7's subject. Pinned, so a cluster configured into
+    that corner turns a test red instead of thrashing quietly.
+  - **★ THE PARKED PROCESS TEST WAS RE-RUN, AND IT MOVED THE STORY.** Fence **22 → 14** against a bound
+    of 12, and **legs C, D, A and E now cross exactly once each** — four of five boundaries clean, where
+    before only three were. The whole residual is leg F: nine crossings of the galaxy/ring-sibling
+    boundary, down from eighteen.
+    - **THE BAND IS NOT WHAT IS LEFT, and that is a measurement rather than a hope.** The occupant
+      traverses the WHOLE band each way — released just outside the release edge, re-taken just inside
+      the acquire edge, **6.6e8 m apart against a 4.7e8 m band**. That is what a real crossing looks
+      like. My first reading of those two numbers was that the two shards DISAGREED about the position
+      by 6.6e8 m; they do not, and the check that killed it was noticing I had compared a *release*
+      event against a *re-acquire* event, which must lie on opposite band edges.
+    - **THE CAUSE IS THE TEST'S OWN AIM.** Leg F names a FIXED vector — two solved shells down the
+      SIBLING's pole — and the instant the occupant re-homes the server reads the same three numbers in
+      the GALAXY's frame, where that point is essentially the galactic origin 1.5e15 m away. So it turns
+      round, flies back into the sibling, and is handed down again. **Proved** by its distance from the
+      galactic centre falling monotonically at every hand-down (1.499035431e15 → 1.499031347e15 →
+      1.499026399e15 → 1.499021151e15 m).
+    - **AN ATTEMPTED CURE WAS MEASURED AND REVERTED.** Aiming relative to the occupant's own delivered
+      position made it **worse** (9 crossings → 11). The delivered pose changes frame at the DELIVERY
+      LAG while the `WalkTo` target changes at the SERVER's re-home, so any aim mixing them is wrong in
+      exactly the window the defect lives in. Reverted whole; the finding is kept, the speculation is
+      not. **Owed:** dev-control must state WHICH realm frame a delivered pose is in.
+    - **A PER-LEG FENCE PRINT LANDED** and is what turned "the fence ballooned" into "leg F does all of
+      it". The original measurement had to be reconstructed by hand from shard logs that do not survive
+      the run; this one falls out of it.
+    - **The band factor question is therefore NOT what this test is waiting on.** Raising it would slow
+      the oscillation and hide the cause. It stays an open S7 question on its own merits (the approach
+      constant's floor), not as this test's cure.
+  - **The index-quality gate is not yet taken.** The index radius is `extent + outset`, so the band
+    inflates it by 0.089 % and can cost at most one octave of grid edge. Bounded, but UNMEASURED.
+
+### D-S7 🟩 THE HEAVIEST STAR STOPS DEPENDING ON THE GALAXY'S SIZE — LANDED (slice S7), and the fence it lands REFUSES THE WORLD ON PURPOSE
+
+- **THE INVERSION, which is the whole slice.** The heaviest star used to be *whatever this galaxy could
+  afford*: `solve_mass_cap` read the galaxy's radius out of its own module and handed the answer to the
+  star draw as the initial mass function's upper bound. So the biggest star in the universe was a
+  consequence of a COORDINATE CHOICE, and every star in every system was drawn through it — the last time
+  that number moved, **99 of 99 planet rows and 6 of 12 system rows moved with it**. Physics now states
+  the top and the galaxy has to be big enough for it, which is the owner's Q9 ruling in its own words. A
+  coordinate step is then JUDGED rather than obeyed.
+- **THE ENABLING CHANGE IS ONE ARGUMENT, and its whole risk is that it must move nothing.** The budget is
+  a parameter instead of a module read, so the one question the solve exists to answer — *what would the
+  cap be if the galaxy were a different size?* — can finally be asked of it. Gated by re-solving at the
+  shipped budget and comparing **all three** derived fields by exact equality (the mass, the reservation
+  it implies, and the star's own photosphere; comparing only the mass would let the other two drift), plus
+  a determinism arm so the equality is a property of the function and not of one lazily-cached value.
+- **★ WHAT THE SOLVER SAYS, ON THE WORLD, AT EACH CANDIDATE STEP.** The design estimated ~1,048 solar
+  masses at the ruled two-metre step by propagating a two-point fit and said in as many words that this
+  was *"arithmetic through a FITTED exponent, not a measurement"*. It was **23 % low**:
+
+  | Coordinate step | Galaxy radius (m) | Heaviest star (M☉) | Its shell (m) |
+  |---|---|---|---|
+  | 0.0009765625 (today) | 2.248797e15 | **16.360035** | 7.494898e14 |
+  | 1 | 2.302769e18 | 866.013 | 7.675885e17 |
+  | **2 (ruled)** | 4.605537e18 | **1287.288** | 1.535178e18 |
+  | 16 | 3.684430e19 | 4226.907 | 1.228143e19 |
+  | 1024 | 2.358035e21 | 45543.212 | 7.860117e20 |
+
+  Today's row reproduces the shipped golden exactly, which is what makes the other four trustworthy. The
+  harness also asserts the solve is MONOTONE in its budget — a larger galaxy can never afford a smaller
+  star — because without that property every number in the table would be noise.
+- **THE FENCE, AND IT IS RED ON THE WORLD WE SHIP.** `guard_galaxy_affords_its_stars` asks whether a
+  galaxy can pay for a star at the stated physical top. **Today it cannot: that star costs 32.37× the
+  whole galaxy**, which affords 16.36 M☉ against a stated 120. The fence **passes from a ONE-METRE step
+  upward**, found by search rather than assumed, so the ruled two-metre step clears it with margin.
+  - **THAT REFUSAL IS THE ARGUMENT FOR THE STEP CHANGE**, written as something that fails instead of as a
+    paragraph. It is the reason the slice exists before the one-way door.
+  - **IT IS NOT ARMED AT BOOT**, and the reason is the same shape as S6's ceiling fence: arming it today
+    would refuse the world we ship, and the cure is the step, not a weaker fence. Both arms are driven by
+    tests — the refusal on today's world, the pass at the ruled step — so neither is a green light nothing
+    could turn red.
+- **THE PHYSICAL TOP IS A NAMED FACT AGAIN.** `IMF_MASS_HI_PHYSICAL_MSUN = 120.0` is the literal that was
+  deleted when the derived cap replaced it. Deleting it was right at the time and for the stated reason,
+  but it lost something real: **how big a star the universe actually makes stopped being written down
+  anywhere**, and "the heaviest star" silently came to mean "whatever this radius affords". The two are
+  different KINDS of fact — one is physics, one is a fact about a coordinate step — and they now sit side
+  by side, so which of them BINDS is a question that can be asked and answered.
+- **THE EDGE THE PLAN FEARED WOULD BE DROPPED AS SOFT, DISCHARGED PRECISELY.** The plan warned that
+  *"reconciling S2's two tick counts moves that radius and therefore the cap"*. It does not, and this is
+  by inspection rather than by hope: the galaxy radius and the containment band both read
+  `GEOMETRY_TICK_DT_S` (0.02) — a constant of the solve, deliberately not the cluster's tick — while
+  `AOI_TICK_DT_S` (0.05) has separate readers in `InterestConfig` and never enters a radius. **Reconciling
+  the area-of-interest tick cannot move the cap.** The two-home owe on the AoI tick stands on its own.
+- **A STRUCTURAL FINDING, RECORDED NOT ACTED ON.** The shipped galaxy radius is derived as `R_universe`
+  MINUS a band. That is a **single-lattice artefact**: it exists only because the galaxy and everything
+  inside it share one coordinate grid, so the galaxy has to leave room inside the root's budget. Once the
+  galaxy has its own lattice its radius becomes its own fence equality (2⁶¹ cells × its own step) and this
+  subtraction dies. Do not harden anything against the subtraction's exact form.
+- **WHAT IS STILL OWED.** Choosing the step is S9's, not this slice's — S7 exists to make that choice
+  readable off a number. The fence's boot arming waits on the step. And the table above is the authority
+  for that decision: **do not build against 1,287 any more than against the design's 1,048** — re-run the
+  harness at whatever step is actually ruled.
+- **GATES:** workspace suite green; Tier-A coverage 100 % region and branch; fmt and clippy clean at
+  `-D warnings` (verified by exit code — an earlier report of "clippy ok" in this slice was a shell line
+  that printed unconditionally, and clippy had in fact failed on a doc comment my own insertion orphaned).
+
+### D-S8 🟩 THE LADDER, BUILT BUT NOT YET CLIMBED — LANDED (slice S8). Three rungs, every ratio a bit shift, and three false claims retired
+
+- **WHY A LADDER AT ALL.** Every position in the universe counted in millimetres. A millimetre-counting
+  ruler runs out at about a quarter of a light year, which is why a hundred and fifty thousand star systems
+  would not fit in a galaxy — not by a little, by **974×**. Each level now counts in a step that suits it:
+  **2⁻¹⁰ m** below a star system (UNCHANGED, bit for bit), **2 m** for a galaxy, **2¹⁵ m = 32,768 m** for
+  the universe. Only the two levels nothing has ever been drawn from get a new one.
+  - **TWO METRES, NOT THE DESIGN'S ONE** (owner ruling Q1, 2026-08-24, explicitly overriding the document):
+    one metre left five percent of headroom against what 150,000 systems need and content grows; two costs
+    nothing visible at light-year distances and buys eight times the room.
+- **THE EXPONENT IS THE DATUM AND THE STEP IS DERIVED.** `Tier::step_exponent()` is stored; the edge is
+  built from it through the IEEE bit pattern (`f64::powi` is not `const`). Two things fall out that a table
+  of decimals could not give: every step is a power of two BY CONSTRUCTION — so re-bucketing is exactly
+  idempotent at every rung and no decimal can drift — and every ratio is a DIFFERENCE OF EXPONENTS, i.e. a
+  bit shift. `FINE_CELLS_PER_LY: i128`, the double-width integer the light-year forced, is deleted.
+- **THE LIGHT-YEAR WAS DOING TWO JOBS UNDER ONE NAME** and now has its own module. It WAS the coarse step,
+  so one constant meant both "how far apart stars are" (a physical fact) and "how a galaxy counts" (which
+  must be a power of two, and a light-year is not: `9_460_730_472_580_800 = 2⁶ × 147_823_913_634_075`).
+  That non-idempotence was inert only because nothing produced a coarse position. Re-valuing the rung
+  retires the hazard rather than documenting it. `vd_core::units::LIGHT_YEAR_M` is stated as its IAU
+  derivation, not its digits, and kills a duplicate in `vd-seedsearch.rs`.
+
+- **★ THREE FALSE CLAIMS FOUND IN THE TREE, each load-bearing where it sat.**
+  1. **`pose.rs`: *"the edge is a compile-time constant, never serialized, so this moves zero bytes."***
+     False the moment a step moves: the set of steps is folded into the saved-data label AND the protocol
+     version, precisely so a build counting in different units cannot silently read another's positions.
+     Re-valuing a step is a flag day BY CONSTRUCTION. Retired with the reason written out.
+  2. **`frame.rs`: *"a tier change still routes through the ONE existing re-quantizer."*** It routes the
+     OUTPUT, not the arithmetic. `transfer_frame` does its ENTIRE add-and-subtract at the SOURCE rung while
+     the placement book's anchors are authored at a fixed rung (`FramePlacement::moving` hard-codes it), so
+     the moment those differ a distance counted in one unit is added onto an anchor counted in another —
+     and re-stating the finished result cannot repair arithmetic that already happened. Now a LOUD refusal
+     (`FrameError::CrossTierCrossingNotBuilt`), and the final re-statement is DELETED as provably the
+     identity. `PLACEMENT_TIER` makes the constructor and the guard agree by construction instead of by a
+     doc comment.
+  3. **The plan AND `galaxy_sky.md`: *"crossing up is exact in the whole-number part."*** **IT IS NOT**, and
+     the counterexample is reproduced in the test: `2047 × 2⁻¹⁰` plus the largest sub-cell offset has an
+     exact value a hair BELOW two metres and rounds to EXACTLY two metres — one whole galaxy step — so the
+     mandatory re-bucketing carries and the whole number moves by one. **Density: 1,600 hits in a
+     3,200-case directed sweep, 0 in 200,000 random draws.** A property test passes while the gate lies.
+     The corrected gate asserts the POSITION, never the cell.
+- **THE RESIDUAL BOUND: FOUR SOURCES, THREE WRONG — INCLUDING MINE.** `galaxy_sky.md` says 2⁻⁶³ (it applied
+  the fine rung's granularity to a coarse rung's residual). The plan says 2⁻⁵¹ for everything, which is
+  unsatisfiable at the universe rung by 4096×. **I told the owner 2⁻⁵¹ as "verified" — I had used the
+  binade above the value instead of the one containing it.** The bound is PER RUNG: half an ulp of the
+  destination step, `step · ε / 4`. MEASURED tight and attained: Fine→Galaxy 1.110223e-16 = 2⁻⁵³,
+  Galaxy→Universe 1.818989e-12 = 2⁻³⁹.
+- **THE OVERFLOW, AND WHY THE REFUSAL IS THE NORMAL CASE.** Scaling an absolute galaxy cell down to
+  millimetres reaches `2⁷³` against an `i64::MAX` of `2⁶³` — over by **1024×**. Only the innermost
+  **0.098%** of the domain is refinable at all, so `BeyondReach` is not a corner case, and the bound is
+  DERIVED (`(CELL_DOMAIN_MAX − (ratio − 1)) / ratio`) and driven one cell either side.
+- **THE FENCE ASKS EACH LEVEL IN ITS OWN STEP**, and judges the galaxy's shell as well as the root's
+  (1.00134× of slack — thin enough to be a real question). Applied to the universe's own `2⁷⁶ m` shell with
+  the old fixed step it would have refused by **2²⁵ = 33 million times** a world that fits its own lattice
+  EXACTLY; a fence that refuses a lawful world is worse than none, because the refusal looks authoritative.
+  It also **failed OPEN on a shell that is not a length** — `NaN` is neither greater than nor less than
+  anything, so it sailed through the one comparison and was reported as a representable world with a `NaN`
+  occupancy. Both arms now refuse.
+- **THE ROOT RADIUS IS ITS OWN DERIVATION**, not the literal `2_251_799_813_685_248` with a comment
+  explaining where it came from. A comment cannot follow a change. It is the fence solved at equality —
+  `2⁶¹` cells at whatever the step is — so occupancy is exactly one half and headroom exactly one octave at
+  EVERY rung by construction rather than by three coincidences. It reproduces the old literal TO THE BIT.
+- **TWO PLACES WOULD HAVE TURNED "I CANNOT SAY" INTO "DEFINITELY NOT."** The containment scan safe-degrades
+  every frame refusal to "not a member", which is right for the refusals it was written for. A CROSS-UNIT
+  refusal is a different thing, and degrading it to a definite no would hand an occupant to the wrong realm
+  silently — the one failure this whole mechanism exists to prevent. The degrade is UNCHANGED (a wrong
+  answer is not improved by a panic); the reason is now COUNTED (`cross_tier_refused`) instead of invisible.
+
+- **★ THE FLAG DAY PROVED ITSELF MID-SLICE, on the first real unit change.** A leftover store refused to
+  open: *"this file's positions are counted in different units than this build uses (coordinate generation
+  2786608213895069291 against 16303737421466688120)."* Built in S1 for exactly this moment; it fired
+  correctly, before a single position was read. **It said no without saying how to proceed** — now it names
+  both options (delete, or allow genesis) and states that everything held is discarded either way, matching
+  the owner's "refuse, don't convert" ruling.
+  - My first three theories for that failure were all wrong (the machine, my own guard, the transport tag).
+    It failed at load 1.50 on a quiet box, and the process output named the cause in one line. **Read the
+    output before reasoning from the symptom.**
+- **WHAT THE COVERAGE GATE CAUGHT IN MY OWN TESTS, all five fixed rather than exempted:** an
+  `assert!(a && b)` short-circuit; a failure message computed lazily so its region never ran on a green
+  test; a `match` with an unreachable `panic!` arm; a `const fn` that only ever executes in the compiler
+  (invisible to coverage is not the same as covered); and an "exact" comparison built in floating point on
+  BOTH sides, so it measured **zero error everywhere and passed** — a bound nothing reaches passes for any
+  implementation, however loose.
+- **DELIBERATELY NOT DONE — S9's, each for a reason.** The galaxy and universe cannot own anything yet: no
+  new realm-id arms, no galaxy seed on the frame, no `UniverseSpace` frame. `convert_tier` therefore has
+  **zero production callers** after S8, which is correct — the ladder is built, not climbed. The radii do
+  not move (moving `ROOT_TIER` and moving the radius are the SAME change and must land together, or a 50%
+  occupancy silently becomes 0.0015% and the fence stops saying anything).
+- **GATES:** workspace **2265 passed / 0 failed**; Tier-A coverage **100 % region and branch, 0 real
+  misses**; fmt and clippy clean at `-D warnings` (verified by exit code).
+
+### D-S9 🟩 THE CLIMB — LANDED (slice S9). The galaxy and the universe become real places, and the limit on a star moves house
+
+- **WHAT S8 BUILT AND S9 USED.** S8 landed a three-rung ladder and deliberately did not climb it: every
+  realm still sat at the fine rung, so the world was the same size it had always been. S9 moves the two
+  ambient levels onto their own rungs. **Nothing below a star system moved, bit for bit.**
+  - The **UNIVERSE**: 2⁵¹ m → **2⁷⁶ m ≈ 7.99 million light years** (×33,554,432). Same fence, same
+    construction — 2⁶¹ cells either side of the origin — read with a 32,768 m ruler instead of a millimetre one.
+  - The **GALAXY**: `R_universe − a band` → **2⁶² m = 487.46 light years** (×2,051). The subtraction is gone.
+    It existed only because the galaxy had no lattice of its own and had to leave room inside the ROOT's
+    storage budget; S7 recorded it as a single-lattice artefact due to die here, and it has. The galaxy's
+    radius is now its OWN fence solved at equality, exactly as the root's is.
+
+- **★ THE RESULT WORTH QUOTING, AND IT IS A MEASUREMENT.** At the target census of 150,000 systems the
+  galaxy affords a mean spacing of **4.4595 light years** against a real mean stellar separation of
+  **3.8926** — the world sits at **0.8729× true stellar density, with no compression factor at all.**
+  Before the climb the same census afforded 0.00145 ly, 690× inside the owner's one-light-year floor.
+  Pinned in `the_target_census_lands_near_true_stellar_density`, with the pre-climb radius kept as a
+  driven control so the claim can fail.
+
+- **★ THE LIMIT ON A STAR'S MASS MOVED HOUSE, and this is the finding, not a number.** Two things can stop
+  a star existing: the galaxy may have no room to place the system around it, or that system may be too
+  wide to state its own positions on the millimetre lattice it counts in. Until S9 only the first could
+  ever bind, so only the first was ever asked. The climb reverses it:
+  - the galaxy's purse went from **7× SHORT** of a 120 M☉ star to **63.4× headroom**;
+  - the system's own lattice is **10.775× over** at that mass, and now binds;
+  - the derived cap therefore rises **16.360 → 30.745 M☉** and sits EXACTLY on the fine rung's fence
+    (`target_system_bound_max_m() == root_radius_at(Tier::Fine)`, to the last bit).
+  - **EVERY star class is kept** (O from 16 M☉ down to M) — solved with our own bisection, not the design
+    run's fitted exponent, and cross-checked by a SECOND solver written independently inside
+    `the_star_cap_after_the_climb_solved_with_our_own_solver`. The two agree bit for bit.
+
+- **THE FENCE AND THE SOLVE HAD DRIFTED APART, and the climb exposed it.** `affordable_at` learned the
+  lattice constraint; `guard_galaxy_affords_its_stars` did not. After the climb the fence would have PASSED
+  a 120 M☉ star the solve refuses at 30.745 — a fence guarding a door the world no longer uses, whose
+  silence reads as approval. Both now read ONE definition (`binding_limit`), which also names WHICH limit
+  bound (`StarLimit::GalaxyPurse` / `SystemLattice`); both arms are driven.
+  - **AND THE LATTICE BECAME AN ARGUMENT, for the same reason the budget did in S7.** With the budget
+    alone the fence's Ok branch was unreachable — no galaxy radius makes a 120 M☉ system fit a millimetre
+    lattice — so it would have been dead code wearing a green light (HR5). Parameterised, the question
+    "what would it take?" can be asked, and the answer is pinned: **four octaves of the fine rung**
+    (a millimetre step becoming 16 mm). That number is P10's size.
+
+- **★ THE 2048× CONFUSION HID IN A DOZEN PLACES.** A region's `center` is its position in its PARENT's
+  frame; its `frame` is its OWN. While every realm shared one rung the two were interchangeable, and a
+  dozen readers had quietly assumed so. The body generator's centres were fixed first (a 3.07e18 m vs
+  2.25e15 m nesting refusal named it); the rest surfaced one at a time as each suite was brought up:
+  the walk band-crossing measurement, the child-index lookup measurement, the pre-generator golden,
+  the sim story's `centre` and its metre helper, the union-over-draw oracle, the window-hop round trip,
+  the cross-crate frame fixture, and three test writers that stamped every pose in millimetres whatever
+  realm it stood in.
+  - **★ ONE OF THEM WRITES THE GOLDEN VECTOR.** `one_containment_answer` flattened each placement with
+    the CHILD's step. Left alone, this slice would have blessed the galaxy's rows into the world's own
+    pinned bits 2048× wrong — not a failing test, a wrong fact recorded as the reference.
+  - **THE LESSON:** a test that reads the wrong ruler does not fail. It measures a world that does not
+    exist and stays green — and when the ORACLE and the FIXTURE use the same wrong ruler they agree
+    with each other perfectly, which is what the union-over-draw case looked like right up until the
+    real fold disagreed. Every one of these was invisible until the rungs actually differed.
+  - **The two shipped call sites** (`geometry.rs` reach map, `guards.rs` `one_child_reach`) already look
+    the parent up. **The trap is a naming problem** and the durable cure is a type that carries its rung,
+    which S9 did not build — ledgered here as the open follow-up.
+
+- **★ THE MASS CAP IS A LAUNCH-BLOCKING INPUT, NOT A TUNING KNOB — stated here because S9 is the third
+  time it has re-rolled the whole world.** `sample_imf_mass` inverts a BOUNDED power law and the cap is
+  its bound, so moving it moves EVERY star in EVERY world: 120.0 (literal) → 16.360 (galaxy-derived) →
+  30.745 (lattice-derived). Each move re-pins the photometrics golden, the earth-like candidate, seed 0's
+  home shell, and — because the nest sweep is sized from the IMF tail above the cap — the sweep itself
+  (284 → 664 worlds), and with it every count derived from it. **The P10 lattice lift moves it a fourth
+  time, and that lift must land BEFORE the seed freezes.** After the freeze, moving it re-draws every star
+  every player has seen.
+
+- **WHAT S9 DELIBERATELY DID NOT DO.**
+  - **THE SHAPED PLACEMENT IS S12's** (owner agreed 2026-08-26). The census is still three systems on a
+    ring. The owner's shape rulings — a real galaxy shape drawn from the seed, never evenly spaced,
+    seed-permanent placement — are recorded in `owner_decisions_2026-08-24.md` and bind when it lands.
+    ⚠ The S9 design run's headline numbers ("the world caps at 12.57 systems", "28× inside the floor")
+    are DISPROVED; the cap is ~674,000 and the spacing was never the problem.
+  - **χ (the compression ratio) IS RETIRED IN MEANING, not just re-pinned.** It divides the real stellar
+    separation by the PLACEMENT RADIUS, which measures compression only while every system sits on one
+    ring at that radius. It reads 0.00799 now, i.e. "stretched 125×", which is true of the ring and says
+    nothing about the world. Its successor is the density measurement above. Delete χ at S12.
+- **★ THE CROSS-RUNG CROSSING HAD TO BE BUILT, AND WAS — the largest single piece of S9, and it was not
+  on the plan.** S8 refused every crossing between two rungs and named S9 as the slice that would make the
+  arithmetic rung-aware. I first ledgered that as P10 work on the reasoning that "nothing in the game does
+  that yet". **That was wrong, and the dual-cluster crossing test proved it in one line**: a dot leaving
+  its home system for the galaxy IS a cross-rung crossing, and it is the most ordinary journey in the
+  game. While it was refused, nothing could enter or leave the galaxy at all.
+  - **THE FIX IS ONE SENTENCE:** the arithmetic happens at the BOOK's own rung. A placement book's rows
+    are placements its ANCHOR authored in the anchor's frame, so the anchor's rung is the unit they count
+    in — not a constant, and not the source pose's. The pose converts INTO it on the way in and OUT of it
+    into the destination's rung at the end; between those points every quantity is in one unit, which is
+    the property S8's blanket guard was standing in for.
+  - **`Separation::convert_tier` is the new primitive**, and a difference needed its own rather than
+    borrowing the position converter: a difference is routinely negative and is not sub-cell, so the
+    position converter would have refused it as "not a lawful position" for the ordinary case of pointing
+    backwards. Coarsening is total (the remainder folds back into the residual); refining is exact and
+    refuses past the finer rung's reach.
+  - **SAME-RUNG IS THE BIT-FOR-BIT IDENTITY**, measured over every rung × cell × residual case including
+    negative, non-normalized and larger-than-a-cell residuals — so the shipped path pays nothing.
+  - **WHAT STILL REFUSES, AND SHOULD:** a distance too wide to count in the finer unit. A star system
+    counts in millimetres, which reach a quarter of a light year, and its galaxy's centre is 0.7 away.
+    So a system CANNOT state its parent's position in its own unit — measured, and pinned as a count:
+    four of THE world's window-hop inversions refuse, and they are exactly the two RING systems at both
+    sampled instants. The HOME system is the exception, because it sits at the galaxy's origin and zero
+    has a count in every unit. **The galaxy's origin is the only place in it a millimetre-counting realm
+    can name its parent from.** That is P10's trigger, and it is now a number rather than an argument.
+
+- **★ THE STAND-INS ARE GONE, AND THE LAST ONE WAS ON THE LIVE PATH.** `RealmLevel::to_realm_id` still
+  lowered a Universe to `System(0)` and a Galaxy to `System(1)` — its own doc said "Slice 4 flips them to
+  dedicated arms", and S9 is that slice. It was the last reader handing them out, and it did so where a
+  dot leaving home asks where it is going: the answer was `System(1)`, no shard held `System(1)`, and the
+  dual-cluster crossing looped `CROSSING UNRESOLVED … dest_head_missing=true` until it timed out.
+  - **THE LOWERING IS NOW LOSSLESS FOR THOSE TWO:** a galaxy keeps its seed, a universe is fieldless.
+    Two collisions that used to be pinned as known-lossy are pinned as impossible instead.
+  - **AND IT REMOVED A REAL FOOT-GUN:** a shard asked to host `Galaxy(2)` used to silently boot THE
+    world's galaxy, because every galaxy lowered to the same id whatever its seed. It now finds an empty
+    forest and refuses.
+  - **ONE COLLISION REMAINS AND IS UNCHANGED:** the same system seed in two different galaxies still
+    lowers identically. `RealmCoord::path` is still the collision-free key at multi-galaxy scale.
+
+- **HOW A HAND-TYPED TOLERANCE FAILS.** Two identity checks carried a literal `1.0` m chosen as "a few ulp
+  at 2.25e15 magnitudes". Those identities cancel two GALAXY-scale numbers (spacing 1024 m) to leave a
+  system-scale result, so after the climb they missed by 512 m and 286 m — exactly half an ulp of the
+  largest term, and not faults. Both now derive the bound from the largest magnitude in the chain. A
+  literal cannot follow a change of scale; it can only be re-typed after each one breaks it.
+
+### D-SL1-2 🟥 SL1 REWRITTEN — a realm MAY be told where it is (owner reversal 2026-08-24), and the three fences that make it safe are UNBUILT
+
+- **WHAT CHANGED, and it is a law change, not a feature.** SL1 read "ONLY THE PARENT KNOWS POSITIONS —
+  a realm never knows, stores, derives or is told its own position … not even as a zero field, because a
+  field's PRESENCE is the leak" (and this row's own parent clause records the 2026-08-05 deletion that
+  text caused). The owner rewrote it on 2026-08-24: **a realm is TOLD where it is; it never DECIDES where
+  it is.** The parent stays the ONLY writer; the child holds a stamped, read-only reading; the child never
+  derives, adjusts or states its own placement; ONE HOP ONLY (what you are told about yourself you never
+  pass on, and you are never told your parent's placement, so no realm can chain hops into an absolute).
+  The full text is in `CLAUDE.md` SL1 with the owner's stated reasoning.
+- **WHY (the owner's reasoning, recorded so it is not re-litigated).** The old law forced TWO mechanisms
+  for one job — "contents plus your own eye" to a renderer, "a view composed for you" to a realm — a fork
+  by RECIPIENT KIND. Worse, the composed-per-observer form costs contacts × observers, and the sky arc
+  measured that product fatal (150,000 rows per player per tick, an un-split datagram the gateway simply
+  never receives). Being told where you are turns the product into a SUM for every consumer.
+- **WHAT IS OWED — three fences, ALL UNBUILT. The law is a promise until they exist:**
+  1. **The outbound vocabulary fence.** Nothing a realm sends may carry its own placement. A wire-vocabulary
+     pin of exactly this shape already exists (the Slice-C2 deletion planted one to replace the retired SL1
+     self-placement filter); it must be re-pointed at the new clause 3 and given an observed-failing control.
+  2. **The dependency fence.** The placement, containment and crossing machinery may not NAME a realm's own
+     position — a crate/module rule with a control that fails if it is re-opened, the same shape as
+     `sl4_the_crossing_path_cannot_name_a_motion` (`tests/tests/crate_isolation.rs`), which is the ONLY
+     enforcement in this codebase that has actually held.
+  3. **The staleness rule.** Every self-placement reading carries its instant and is REFUSED past a DERIVED
+     bound. Absent data stops a consumer; stale data makes it act confidently on a wrong number — the worse
+     failure, and the likeliest one to reach production.
+- **DO NOT BUILD THE READING BEFORE THE FENCES.** Landing the datum first and the fences later is precisely
+  how the 2026-08-05 defect happened the first time.
+- **WHEN:** with the first consumer that needs it (the ship's sensor/contact view, the autopilot, and the
+  client eye row of the sky slice). Its own slice, with the three fences in the SAME slice.
+- **THE SL2 QUESTION — RAISED AND ANSWERED (owner, 2026-08-24), recorded so it is not re-opened.** I first
+  flagged this as unresolved and was WRONG about why. SL2 governs REALM-TO-REALM; the gateway is not a realm,
+  and a shard handing its own occupants to it was never a crossing (it is how any player has ever seen
+  anything). So SEEING another realm's people is lawful with no ruling: each shard streams its OWN occupants
+  to its OWN subscribed clients and the GATEWAY composes one ready-to-draw picture per observer. That is the
+  lane [[D-RLM-18]] already specifies and owes. The owner's line for the SIMULATION side: **CONTACTS ARE
+  REALMS, PEOPLE ARE SEEN** — a ship's systems track ships, stations and bodies (placements the parent
+  authors), never individual people; acting on a person is a projectile CROSSING, i.e. the transfer
+  machinery. SL2 is clarified in `CLAUDE.md`, not amended. **What this makes urgent rather than optional:**
+  [[D-9]] (snapshot emit is a whole-realm broadcast with NO per-entity interest filter, double-encoded) is
+  the enabling defect for a crowded scene, and the read-sub lifecycle, the range/line-of-sight bound on
+  streaming a hull's INTERIOR to outsiders (an exploit surface, not a rendering detail) and the mixed-tick
+  join are all owed with [[D-RLM-18]].
+
 ### D-SCALE-1 🟥 THE COORDINATE-SCALE MODEL — owner's rulings 2026-08-05 (supersede the universe-wide-absolute assumption)
 - **THE MODEL (owner, binding).** Every realm has its OWN coordinate frame; nothing anywhere holds a universe-wide absolute (that follows from the "a realm is never told where it is" reversal, realm-unification entry above). **Compression is applied BETWEEN realms only — a star system keeps its TRUE size and true internal distances; the GAPS between systems are shortened.** The galaxy frame is therefore a CHART, deliberately not a scale model. Rationale: a uniform compression would make crossing a system boundary a jump in apparent scale (outside, the system is drawn compressed; inside, full size — the camera sees a zoom at the seam), which is the opposite of seamless.
 - **WHY THIS DISSOLVES THE "REAL INTERSTELLAR DISTANCE" SLICE (arc slice 13) AS ORIGINALLY SCOPED.** The precision problem was never about distance, it was about MAGNITUDE. Per-realm frames keep every number small. Worked numbers (f64 relative precision ≈ 2.2e-16, so the representable spacing at magnitude M is M × 2.2e-16): out to ~1e13 m (past Pluto — a whole planetary system) spacing is ~2 mm, fine; at 1e14 m ~2 cm, marginal; at 1e15 m ~0.2 m, walking becomes a staircase. So REAL coordinates inside a star system are sound out to roughly the Kuiper belt, which is exactly what the owner requires. An Oort cloud would need the same treatment as the galaxy.
@@ -3483,7 +4180,7 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   - **FA-2a 🟩 LANDED (RealmSnap carrier PLANT, this commit):** `vd_wire::channels::{RealmSnap{realm: RealmId, pose}, RealmSnapshotDatagram{sub, frame_id, source_tick, universe_tick, realms}}` — the `RealmId`-keyed observer carrier (a realm is NOT an entity: `RealmScene` is `RealmId`-keyed, `FrameRef::realm()` is LOSSY, so a moving realm box is unrecoverable from an `EntitySnap`). Behaviour-identical PLANT (the OwnEntity/D-41 discipline): a shard emits it ONLY when it parents ≥1 moving/renderable child, so at walk/static scale (no moving child) NOTHING is sent — zero bytes, `node_per_realm_walk`/`process_parity` unmoved; 100% region+branch. FA-2c wires the emit (+ the shared MTU `partition_realms`).
   - **FA-2b 🟩 LANDED (moving-child data source, this commit):** the vet's "add `with_authored_child`" was a MISREAD — `with_placed` already takes an arbitrary `FramePlacement`, so a per-tick signal-computed ship pose rides it as-is (no redundant method). The REAL gap was the DATA: `to_regions` bakes an `Orbital` body's tick-0 anchor into `center` and DISCARDS its `OrbitalElements`. Added `worldgen::moving_children_for(seed, hosted_realm)` (the shard's DIRECT `Orbital` children as `(realm, elements)`; branchless-shim `orbital_of`; EMPTY at walk scale) + `RealmRegions.moving` (a builder `with_moving_children`, `new` call sites unchanged) + `frame_context` now registers a roster realm `with_moving_child` (authored live from its ephemeris) else `with_placed(identity)`. EMPTY at walk scale ⇒ every region takes the identity arm ⇒ byte-identical (`node_per_realm_walk` 142.9s + `process_parity` + workspace unmoved; 100% region+branch). The two placement sources the arc needs — orbital (`with_moving_child`) + authored/supplied (`with_placed`) — BOTH exist.
   - **FA-5 PRE-MOVER HARDENING 🟩 LANDED (holistic /goal audit `wf_c9444997`, HEAD `8437c89`→this commit — fixes the audit's ONE HIGH + its MEDIUM before movers turn on):** the realm-observer gate now matches the entity feed's per-source discipline. **(1) Per-`RealmId` high-water (the HIGH):** `RealmView.high_water` was ONE feed-global `Option<u64>`; because each shard runs an INDEPENDENT `RealmFrameCounter` from 0 and authors only its DISJOINT direct children, the moment two mover shards share one client's AoI (the node-per-realm Forest, e.g. a durable player's System 7→Galaxy→System 8 warp) the higher-counter shard ratcheted the scalar past the lower and FROZE its boxes forever (`is_stale(Some(500),30)` for every one of B's frames). Re-keyed to `BTreeMap<RealmId, u64>` gated PER-ROW (a realm is single-owner ⇒ its `frame_id` stream is monotone ⇒ per-realm keying decouples the independent counters; the render was ALREADY per-`RealmId` latest-wins, so the key matches the render). Regression `realm_view::tests::two_mover_shards_with_divergent_frame_ids_both_stay_live_no_cross_shard_freeze`. **(2) DevState realm fault counters (the MEDIUM):** `net.rs::devstate()` surfaced only the ENTITY view's `stale_frames_dropped`/`nonfinite_poses`; the realm feed's own (computed + exposed) faults were invisible on the HR6 surface — now SUMMED across both feeds (`net::tests::devstate_surfaces_the_realm_feeds_own_fault_counters...`). BYTE-IDENTICAL at walk scale (empty roster ⇒ no realm frame ⇒ both counters 0, per-realm map empty; `process_parity` unmoved, 100% region+branch). **STILL OWED (ledgered, NOT fixed — each needs the `realm_fence`/FA-6, INERT until a realm reparents):** (i) **FA-6 realm re-home split-brain** — when a realm RE-HOMES across shards (SAME `RealmId`, old owner's counter high, new owner fresh) per-`RealmId` keying rejects the NEW authority's fresh-but-lower `frame_id`, AND the gateway `on_shard_realm_frame` still drops `realm_fence` via `..` — so the client would render the DEMOTED owner's stale placement. FIX AT FA-6 (with the region-vs-region reparent detector): the gateway forwards `realm_fence`; the client gates on `(realm_fence, frame_id)` — a higher fence supersedes and RESETS that realm's high-water. NOT planted now: an inert fence-gate branch would be HR5-uncoverable (production-unreachable until P8 ships / P10 warp physically move a container — the 4b-STATUS(c) HIGH-2 rule). (ii) **`EventMsg::RealmRemoved` eviction** — `RealmView.placements`+`high_water` grow monotonically (no removal path); correct through P3 (boot-fixed renderable roster), owed when a realm leaves a live observer's AoI. (iii) **Realm AoI (the D-9 twin)** — the gateway fan-out of `RealmFrame`s is O(observers×movers) unfiltered; ledger WITH the entity AoI (D-9) before ships become movers at scale. (iv) **HR6 live-QUIC loop at FA-5** — the 2-capture render smoke + a process-tier/vdctl `wait-until RealmFramesApplied >= 1` over the REAL binaries (the server-emit→gateway-forward→client-fold path is unit-proven only, never composed over live QUIC — the D-18/D-36 class on the Unreliable `RealmSnapshot` datagram).
-  - **FA-2c server→gateway pipeline 🟩 LANDED (byte-identical):** **FA-2c-1** appended `MsgClass::RealmSnapshot` (WIRE-FROZEN, byte 7, Unreliable; the client routes a realm datagram to its own consumer — postcard is non-self-describing) + updated the 3 golden pins. **FA-2c-2a** added `ShardToGateway::RealmFrame` + a DRY `partition_realms` (both partitioners refactored to branchless shims over a monomorphic `chunk_boundaries`). **FA-2c-2b** the sim producer: `RealmRegions::authored_realm_snaps` (moving children as `RealmSnap` rows, orbital pose in the OWN frame) + the `emit_realm_frames` system (ships a `RealmSnapshotDatagram` to observers, gated on authority + a moving child + a present observer). **FA-2c-2c** the gateway `on_shard_realm_frame` forward (FireAndForget, no authority gating per the vetted observer design). **FA-2c-3 (client consumer — PIPELINE COMPLETE, vetted `wf_894145a5-ac2`):** 3.0+3.1 a shared `wire::channels::is_stale` scalar (DRY between the entity + realm gates) + `client::realm_view::RealmView` (the `RealmId`-keyed twin of `DeliveredView`, reusing `EntityTrack` VERBATIM); 3.2+3.3 the net.rs `MsgClass::RealmSnapshot => on_realm_snapshot` route (converts the former silent `ignored`) + `RealmScene::overlaid(&RealmView)` streamable-scene overlay at `render_snapshot()` publish (empty ⇒ boot `Arc` pointer-bump; non-empty ⇒ fresh immutable overlaid `Arc`). ZERO client-render change (`sync_realm_boxes` re-reads the scene each frame). Vet must-fixes folded: the overlay writes BOTH `box.frame` (the authored PARENT frame) AND `center_offset`; `on_realm_snapshot` ALSO anchors `render_clock` (no spectator freeze). ALL byte-identical: at walk/static scale the moving roster is empty ⇒ nothing authored/emitted/forwarded/consumed (`process_parity` + all vd-tests + the render-boxes GPU smoke unmoved; 100% region+branch each). **Still owed:** ~~FA-4b child-shard receive-own-position (EffectFree Coupling)~~ **DELETED 2026-08-05 by the owner's reversal above — a realm is never told where it is; the parent expresses a child's surroundings in the CHILD's frame instead, and that successor design is owed;** FA-5 turn on moving placements + make `view.rs::world_pos` RECURSE for N-level nesting + the moving-container straddler guard (=D-45(e)); FA-6 the REGION-vs-REGION reparent DETECTOR (genuinely NEW — the occupant detector emits `DirectoryKey::Entity` subjects only) + the populated-ship atomic N+1-key directory CAS (=D-33). LEDGER-NOW owed on the containment side: (i) a voxel-built ship/station realm keeps an ANALYTIC bounding `Boundary` (Aabb/Obb) the blocks INSCRIBE for containment membership (blocks drive only render+rapier), keeping `region_signed_distance` cheap + HR3-clean; (ii) a RUNTIME register-a-realm-region path (`RealmRegions` is boot-only `::new(Vec)`, no mutator) for emergent hulls (the dynamic-registry half of (e)); (iii) D-35 `parent_version` on the snapshot to version-match a hull against its `ShipLocal` interior under datagram loss. **FA-2c-3 deferrals (→ FA-5):** the real-proportions CANONICAL generation that PRODUCES `Orbital` movers + populates `RealmRegions.moving` at boot (the visible orbiting pixels; needs D-41 non-zero cells); the 2-capture pixel-displacement render smoke (needs a mover); DevState realm counters + a `WaitField` arm for the vdctl HR6 closed-loop e2e (S0 🟩 LANDED `8437c89`: `realm_frames_applied` + the `RealmFramesApplied` `WaitField`; realm decode errors DRY-fold into `decode_errors`); `EventMsg::RealmRemoved` (a realm leaving a live observer's AoI — persist-last is correct through P3 since the renderable roster is boot-fixed); render-side cursor interpolation for a moving box (`current_render_pose` gives the latest per-step; smoothness for a FAST mover is P6+).
+  - **FA-2c server→gateway pipeline 🟩 LANDED (byte-identical):** **FA-2c-1** appended `MsgClass::RealmSnapshot` (WIRE-FROZEN, byte 7, Unreliable; the client routes a realm datagram to its own consumer — postcard is non-self-describing) + updated the 3 golden pins. **FA-2c-2a** added `ShardToGateway::RealmFrame` + a DRY `partition_realms` (both partitioners refactored to branchless shims over a monomorphic `chunk_boundaries`). **FA-2c-2b** the sim producer: `RealmRegions::authored_realm_snaps` (moving children as `RealmSnap` rows, orbital pose in the OWN frame) + the `emit_realm_frames` system (ships a `RealmSnapshotDatagram` to observers, gated on authority + a moving child + a present observer). **FA-2c-2c** the gateway `on_shard_realm_frame` forward (FireAndForget, no authority gating per the vetted observer design). **FA-2c-3 (client consumer — PIPELINE COMPLETE, vetted `wf_894145a5-ac2`):** 3.0+3.1 a shared `wire::channels::is_stale` scalar (DRY between the entity + realm gates) + `client::realm_view::RealmView` (the `RealmId`-keyed twin of `DeliveredView`, reusing `EntityTrack` VERBATIM); 3.2+3.3 the net.rs `MsgClass::RealmSnapshot => on_realm_snapshot` route (converts the former silent `ignored`) + `RealmScene::overlaid(&RealmView)` streamable-scene overlay at `render_snapshot()` publish (empty ⇒ boot `Arc` pointer-bump; non-empty ⇒ fresh immutable overlaid `Arc`). ZERO client-render change (`sync_realm_boxes` re-reads the scene each frame). Vet must-fixes folded: the overlay writes BOTH `box.frame` (the authored PARENT frame) AND `center_offset`; `on_realm_snapshot` ALSO anchors `render_clock` (no spectator freeze). ALL byte-identical: at walk/static scale the moving roster is empty ⇒ nothing authored/emitted/forwarded/consumed (`process_parity` + all vd-tests + the render-boxes GPU smoke unmoved; 100% region+branch each). **Still owed:** ~~FA-4b child-shard receive-own-position (EffectFree Coupling)~~ **DELETED 2026-08-05 by the owner's reversal above — a realm is never told where it is; the parent expresses a child's surroundings in the CHILD's frame instead, and that successor design is owed;** ★★ **RE-OPENED 2026-08-24 BY THE OWNER'S SECOND REVERSAL — SEE [[D-SL1-2]] BELOW.** The 2026-08-05 deletion no longer stands: SL1 was rewritten so that a parent MAY state to a child the placement it authored for it, read-only and one hop. Do NOT read this struck clause as current; it is kept because the ledger keeps its history, not because it is true. FA-5 turn on moving placements + make `view.rs::world_pos` RECURSE for N-level nesting + the moving-container straddler guard (=D-45(e)); FA-6 the REGION-vs-REGION reparent DETECTOR (genuinely NEW — the occupant detector emits `DirectoryKey::Entity` subjects only) + the populated-ship atomic N+1-key directory CAS (=D-33). LEDGER-NOW owed on the containment side: (i) a voxel-built ship/station realm keeps an ANALYTIC bounding `Boundary` (Aabb/Obb) the blocks INSCRIBE for containment membership (blocks drive only render+rapier), keeping `region_signed_distance` cheap + HR3-clean; (ii) a RUNTIME register-a-realm-region path (`RealmRegions` is boot-only `::new(Vec)`, no mutator) for emergent hulls (the dynamic-registry half of (e)); (iii) D-35 `parent_version` on the snapshot to version-match a hull against its `ShipLocal` interior under datagram loss. **FA-2c-3 deferrals (→ FA-5):** the real-proportions CANONICAL generation that PRODUCES `Orbital` movers + populates `RealmRegions.moving` at boot (the visible orbiting pixels; needs D-41 non-zero cells); the 2-capture pixel-displacement render smoke (needs a mover); DevState realm counters + a `WaitField` arm for the vdctl HR6 closed-loop e2e (S0 🟩 LANDED `8437c89`: `realm_frames_applied` + the `RealmFramesApplied` `WaitField`; realm decode errors DRY-fold into `decode_errors`); `EventMsg::RealmRemoved` (a realm leaving a live observer's AoI — persist-last is correct through P3 since the renderable roster is boot-fixed); render-side cursor interpolation for a moving box (`current_render_pose` gives the latest per-step; smoothness for a FAST mover is P6+).
 - **RAYON (task #133 decision 4, later):** the per-entity loop is `par_iter`-ready (the `RegionMembership` bitset is contention-free); only the shared `outbox`/`stats`/`in_flight` sinks block it (map-reduce into thread-locals when it lands).
 
 ### D-46 🟥 Gateway input-cut partition atomicity — REQUIRED before the "(future) threaded 20 Hz forwarder" (S3 server-timed cut, verify `wf a9946a1c`)

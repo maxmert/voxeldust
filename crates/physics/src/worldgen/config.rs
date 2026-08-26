@@ -9,6 +9,10 @@
 //! game and by every test (SL5) — a config exists so THE world's numbers can be stated in one place,
 //! never so a second, smaller world can be made.
 
+use super::scale::{
+    BAND_EXTENT_CLAMP, BAND_TAU_HEADROOM, BAND_TICKS_N, GEOMETRY_TICK_DT_S, GEOMETRY_V_FOOT_MPS,
+    T_TRAVERSE_S,
+};
 use super::{
     AREA_HALF_M, AREA_OFFSET_M, CONTAINMENT_INSET_M, CONTAINMENT_OUTSET_M, FixturePlant,
     GALAXY_R_M, PLANET_A_OFFSET_M, REAL_GALAXY_R_M, REAL_UNIVERSE_R_M, STATION_A_OFFSET_M,
@@ -18,8 +22,9 @@ use super::{
 };
 use crate::taxonomy::{FrostThresholds, GalaxyType, SpectralClass};
 use serde::{Deserialize, Serialize};
+use vd_core::flight::realm_speed_cap_mps;
 use vd_core::geometry::visibility_factor;
-use vd_core::geometry::{AoiConfig, BandError, ContainmentBand};
+use vd_core::geometry::{AoiConfig, BandError, Boundary, ContainmentBand, band_for_speed};
 use vd_core::worldgen::{WALK_DEMAND_AOI_GRACE_S, grace_ticks_from_seconds};
 
 // --- Stellar/orbital PHYSICS (scale-independent; walk + canonical share these) ---
@@ -31,6 +36,25 @@ pub(crate) const IMF_SLOPE: f64 = 2.35;
 /// from the galaxy's own radius (the literal 120.0 that used to sit here named a star whose system
 /// is ten times wider than the galaxy that would contain it — see [`DERIVED_MASS_CAP`]).
 pub(crate) const IMF_MASS_LO_MSUN: f64 = 0.08;
+/// ★ THE STELLAR MASS DRAW'S PHYSICAL UPPER BOUND (solar masses) — the initial mass function's own
+/// top, restored as a NAMED PHYSICAL FACT (slice S7).
+///
+/// This is the literal that used to sit on [`IMF_MASS_LO_MSUN`]'s doc as the draw's upper bound before
+/// the derived cap replaced it. Replacing it was right at the time and for the stated reason: a star of
+/// this mass wants a system ten times wider than the galaxy that would contain it, so the galaxy could
+/// not pay for one. But deleting the number lost something real — **how big a star the universe
+/// actually makes** stopped being written down anywhere, and "the heaviest star" silently came to mean
+/// "whatever this galaxy's radius happens to afford".
+///
+/// The two are different kinds of fact and they belong side by side: this one is physics, and the
+/// derived cap is a fact about a coordinate step. Which of them BINDS is then a question that can be
+/// asked and answered — see [`guard_galaxy_affords_its_stars`](crate::worldgen::scale::guard_galaxy_affords_its_stars).
+///
+/// MEASURED (slice S7, this world, our own solver): at today's millimetre step the galaxy affords
+/// 16.36, so the coordinate step binds and this physical bound does not. At a one-metre step it affords
+/// 866, and at the ruled two-metre step 1,287 — so from one metre upward THIS number is the binding one
+/// and the coordinate step has stopped mattering, which is exactly what the step change is for.
+pub(crate) const IMF_MASS_HI_PHYSICAL_MSUN: f64 = 120.0;
 /// Titius-Bode orbital spacing seed (AU) + geometric ratio (Chambers 1996).
 pub(crate) const ORBITAL_A0_AU: f64 = 0.4;
 pub(crate) const ORBITAL_RATIO: f64 = 1.7;
@@ -186,6 +210,65 @@ impl BandConfig {
         ContainmentBand::for_containment_velocity_safe(
             self.inset_m,
             self.outset_m,
+            0.0,
+            1.0,
+            self.k_safety_extra,
+        )
+    }
+
+    /// ★ THE BAND SIZED FROM THE CEILING IN FORCE AT THIS BOUNDARY'S OWN SURFACE (slice S6).
+    ///
+    /// **Why the surface's OWN ceiling and not its parent's.** The approach governor lowers a subject's
+    /// ceiling onto the body it is approaching, so a thing arrives at THIS body's speed and never at the
+    /// speed the space around it allows. Sizing against the parent's ceiling would size every band for a
+    /// speed no lawful subject can hold there — and, measured, would ask for bands thousands of times
+    /// larger than the bodies they wrap.
+    ///
+    /// **Why a fixed tick and a fixed foot speed.** Both are constants of the solve. A band is part of
+    /// the world's geometry, and two clusters must boot the identical world however fast they tick and
+    /// however fast they let a person walk.
+    ///
+    /// **The floor.** A band never goes below the shipped edges, so a small realm keeps exactly the band
+    /// it has today. Measured on THE world: 0 of 13,144 boundaries take the floor, and 0 have the foot
+    /// speed bind — every band that ships is set by the body's own size.
+    ///
+    /// The 1:2 inset-to-outset shape is preserved at every size: the acquire edge sits one third of the
+    /// band inside the surface and the release edge two thirds outside, which is what makes acquiring
+    /// strictly harder than holding at every scale rather than only at the shipped one.
+    ///
+    /// # Errors
+    /// [`BandError::InvalidEdges`] if the resolved edges are degenerate — impossible while the floor is
+    /// positive, and kept fallible so the ctor stays the only way to build a band.
+    pub fn build_for_shape(&self, shape: &Boundary) -> Result<ContainmentBand, BandError> {
+        let extent_m = shape.circumscribed_extent();
+        let ceiling = realm_speed_cap_mps(extent_m, GEOMETRY_V_FOOT_MPS, T_TRAVERSE_S);
+        // The τ-FREE form. The true band carries τ = T_WAKE, a MEASURED boot latency, and a world's
+        // geometry may never be a function of how fast a shard happens to boot — that would fork the one
+        // containment answer between processes. The band-solvability fence bounds the τ term at a
+        // doubling, so the headroom factor is its lawful upper bound. This is the SAME expression the
+        // outer geometry already consumed to place the galaxy, so the shells and the bands cannot
+        // disagree about what a band costs.
+        let need_m = band_for_speed(ceiling, GEOMETRY_TICK_DT_S, BAND_TICKS_N) * BAND_TAU_HEADROOM;
+        let floor_m = self.inset_m + self.outset_m;
+        // ★ THE CLAMP, AND WHY IT IS NOT OPTIONAL. The acquire edge sits one third of the band INSIDE
+        // the surface, so a band larger than the body puts that edge past the body's own centre and the
+        // realm becomes impossible to enter at any speed. That is not a theoretical worry: without this
+        // clamp seven re-home tests went from one crossing to none, because a station five metres across
+        // was given a sixty-metre band.
+        //
+        // The bound is the INSCRIBED extent — the largest sphere the shape fully contains — because that
+        // is the smallest direction, and a band that fits the widest direction can still swallow the
+        // narrowest. Half of it, so the acquire edge stays at five sixths of the body.
+        //
+        // A boundary the clamp binds on is one whose own ceiling is too fast for its own size. That is a
+        // real condition and the clamp does not hide it: the band stops growing and the ceiling fence is
+        // what says so.
+        let cap_m = shape.inscribed_extent() * BAND_EXTENT_CLAMP;
+        let width_m = need_m.max(floor_m).min(cap_m);
+        let scale = width_m / floor_m;
+        ContainmentBand::for_containment_velocity_safe(
+            self.inset_m * scale,
+            self.outset_m * scale,
             0.0,
             1.0,
             self.k_safety_extra,

@@ -27,6 +27,7 @@ use vd_sim::io::{Bytes, Durability, MsgClass, SendError, Store, bytes};
 
 use crate::mesh::ReplayTransport;
 use crate::store::{DurabilityHandle, RedbStore, StoreError, StoreTuning};
+use vd_core::store_stamp::StoreStamp;
 
 /// R-6d3b: the ONE durable outbox sink per node, shared (cloned `Arc`) by every mesh per-peer writer task AND
 /// by the boot-replay path. The `Mutex` is held ONLY across brief `await`-free/fsync-free store ops (a stage
@@ -234,9 +235,19 @@ impl NodeOutbox {
     /// the caller's tuning — the multi-producer non-blocking submit needs slack well above the peer count so
     /// `submit_nonblocking` never blocks under the shared sink lock. Test-only tuning fields (the SIGKILL
     /// pause hooks) pass through unchanged.
-    pub fn open(path: impl AsRef<Path>, mut tuning: StoreTuning) -> Result<NodeOutbox, StoreError> {
+    /// `stamp` states which world this outbox belongs to — see [`vd_core::store_stamp`]. Its role must
+    /// be [`vd_core::store_stamp::StoreRole::Outbox`], which is what stops an outbox from being opened
+    /// as a saga log: a positional encoding would read one as the other without an error.
+    ///
+    /// # Errors
+    /// [`StoreError::Stamp`] if the file belongs to a different world, unit, epoch or job.
+    pub fn open(
+        path: impl AsRef<Path>,
+        mut tuning: StoreTuning,
+        stamp: StoreStamp,
+    ) -> Result<NodeOutbox, StoreError> {
         tuning.writer_channel_depth = OUTBOX_WRITER_CHANNEL_DEPTH;
-        let (store, durability) = RedbStore::open(path, tuning)?;
+        let (store, durability) = RedbStore::open(path, tuning, stamp)?;
         Ok(NodeOutbox { store, durability })
     }
 
@@ -316,12 +327,41 @@ impl OutboxSink for NodeOutbox {
 
     fn scan_all(&self) -> Vec<(OutboxKey, Vec<u8>)> {
         let mut out = Vec::new();
+        // ★ A ROW WE CANNOT READ IS COUNTED AND SAID OUT LOUD (owner ruling 2026-08-24, slice S1).
+        //
+        // This loop used to drop an unreadable row silently. That is the failure mode the whole
+        // saved-data label exists to prevent, living in the one place the tree already had a format
+        // version — and it failed on exactly its own event: after a format change, every retained frame
+        // vanished here, and the replay that followed reported "genesis / already-drained". A node came
+        // back believing it owed nobody anything, and nothing anywhere said otherwise.
+        //
+        // Landing a new refusal beside a working example of the silent version drop is how the new one
+        // ends up copying it, so the example is cured in the same slice.
+        let mut unreadable_key = 0usize;
+        let mut unreadable_value = 0usize;
         for (k, v) in self.store.scan(&[OUTBOX_TAG]) {
-            if let Some(key) = OutboxKey::from_bytes(&k)
-                && let Some(framed) = decode_value(&v)
-            {
-                out.push((key, framed));
-            }
+            let Some(key) = OutboxKey::from_bytes(&k) else {
+                unreadable_key += 1;
+                continue;
+            };
+            let Some(framed) = decode_value(&v) else {
+                unreadable_value += 1;
+                continue;
+            };
+            out.push((key, framed));
+        }
+        if unreadable_key | unreadable_value != 0 {
+            tracing::error!(
+                unreadable_key,
+                unreadable_value,
+                readable = out.len(),
+                expected_version = OUTBOX_FORMAT_VERSION,
+                "DURABLE OUTBOX ROWS COULD NOT BE READ and were skipped. These are frames this node \
+                 retained because they were not acknowledged, so each one is a message somebody is \
+                 still waiting for. A value that will not decode was written under a different outbox \
+                 format; a key that will not parse is corruption. Replay is proceeding WITHOUT them, \
+                 and this line is the only record that they existed."
+            );
         }
         out
     }
@@ -550,7 +590,14 @@ fn replay_outbox_with_limits(
         (g.scan_all(), dh, base)
     };
     if rows.is_empty() {
-        return Ok(ReplayCounts::default()); // genesis / already-drained: nothing to replay, nothing to gc
+        // NOTHING TO REPLAY — and the two ways to arrive here are NOT the same thing, which is why the
+        // difference is now spoken rather than implied by this comment.
+        //
+        // "Genesis or already-drained" is the ordinary case. But a file whose rows could not be READ
+        // also arrives here empty, and it means the opposite: this node owes messages it can no longer
+        // see. `scan_all` reports that at error level as it happens, so the two cases are separable in a
+        // log — which they were not, and that is how a node came back believing it owed nobody anything.
+        return Ok(ReplayCounts::default());
     }
 
     // (2) NO LOCK: decode payload + pre-send route-membership check + send each. The peer-writers acquire the
@@ -627,6 +674,106 @@ fn replay_outbox_with_limits(
         g.commit();
     }
     Ok(counts)
+}
+
+#[cfg(test)]
+mod unreadable_rows {
+    //! A RETAINED FRAME THAT CANNOT BE READ IS A MESSAGE SOMEBODY IS WAITING FOR, and the one thing it
+    //! must never be is invisible (owner ruling 2026-08-24, slice S1).
+    use super::*;
+    use vd_core::EpochId;
+    use vd_core::store_stamp::{StoreRole, StoreStamp};
+
+    fn path(tag: &str) -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("vd-outbox-{tag}-{}-{n}.redb", std::process::id()))
+    }
+
+    fn stamp() -> StoreStamp {
+        StoreStamp::new(StoreRole::Outbox, 0, EpochId(0), &[])
+    }
+
+    #[test]
+    fn a_row_written_under_another_outbox_format_is_skipped_and_the_readable_ones_survive() {
+        // THE FAILURE THIS CURES, driven directly: a value whose leading format byte is not ours cannot
+        // be decoded. It used to vanish with no count and no line, and the replay that followed reported
+        // the same thing it reports for an empty store — so a node came back believing it owed nobody
+        // anything.
+        //
+        // What is asserted is the SEPARABLE part: the unreadable row does not silently become a
+        // readable one, and it does not take the readable rows with it.
+        let p = path("mixed");
+        let mut ob = NodeOutbox::open(&p, StoreTuning::default(), stamp()).expect("open");
+        let key = OutboxKey {
+            peer: NodeId(2),
+            class: MsgClass::Control,
+            incarnation: 1,
+            seq: 7,
+        };
+        ob.retain(&key, b"a readable frame");
+        ob.commit();
+
+        // Plant a row under the SAME key family whose value carries a different format byte — which is
+        // exactly what a store written by an older build holds.
+        let foreign_key = OutboxKey {
+            peer: NodeId(2),
+            class: MsgClass::Control,
+            incarnation: 1,
+            seq: 8,
+        };
+        let mut foreign = vec![OUTBOX_FORMAT_VERSION.wrapping_add(1)];
+        foreign.extend_from_slice(b"a frame from another format");
+        ob.store.put(&foreign_key.to_bytes(), &bytes(foreign));
+        ob.store.commit();
+        ob.store.flush_blocking();
+
+        let rows = ob.scan_all();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the unreadable row is skipped and the readable one survives"
+        );
+        assert_eq!(rows[0].0.seq, 7);
+    }
+
+    #[test]
+    fn an_unparsable_key_is_skipped_too_and_neither_kind_is_mistaken_for_an_empty_store() {
+        // The other unreadable kind — a key that will not parse, which is corruption rather than an old
+        // format. Both must be skipped, and neither may leave the store looking simply empty.
+        let p = path("corrupt");
+        let mut ob = NodeOutbox::open(&p, StoreTuning::default(), stamp()).expect("open");
+        let mut key = vec![OUTBOX_TAG];
+        key.extend_from_slice(b"not a key");
+        ob.store
+            .put(&key, &bytes(vec![OUTBOX_FORMAT_VERSION, 1, 2, 3]));
+        ob.store.commit();
+        ob.store.flush_blocking();
+
+        assert!(
+            ob.scan_all().is_empty(),
+            "nothing readable — which is the case that must not look like genesis"
+        );
+        // AND THE STORE IS NOT EMPTY, which is the whole distinction: the row is still on disk, still
+        // owed to somebody, and only the log says so.
+        assert_eq!(
+            ob.store.scan(&[OUTBOX_TAG]).len(),
+            1,
+            "the unreadable row is still there — it was skipped, not deleted"
+        );
+    }
+}
+
+/// The label a test opens a store under. One place, so a test never states a generation by hand — the
+/// whole point of the mechanism is that those two numbers are derived and un-stateable.
+#[cfg(test)]
+fn test_stamp() -> vd_core::store_stamp::StoreStamp {
+    vd_core::store_stamp::StoreStamp::new(
+        vd_core::store_stamp::StoreRole::Directory,
+        0,
+        vd_core::EpochId(0),
+        &[],
+    )
 }
 
 #[cfg(test)]
@@ -753,7 +900,7 @@ mod tests {
     fn retain_scan_release_round_trip() {
         let path = temp_path("rt");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
 
         let k1 = key(1, MsgClass::Saga, 10, 0);
         let k2 = key(1, MsgClass::Saga, 10, 1);
@@ -786,7 +933,7 @@ mod tests {
         // path — the channel is forced to `OUTBOX_WRITER_CHANNEL_DEPTH` by `open`, so it never blocks.
         let path = temp_path("barrier");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
 
         let k1 = key(1, MsgClass::Saga, 7, 0);
         ob.retain(&k1, b"f0");
@@ -942,7 +1089,7 @@ mod tests {
         // wedge). With only this row, `replayed == 0` ⇒ no fence, no gc ⇒ the row SURVIVES on disk.
         let path = temp_path("unroutable");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
         ob.retain(&key(9, MsgClass::Saga, 1, 0), b"any-value"); // peer 9 (not in peers)
         ob.commit();
         let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
@@ -978,7 +1125,7 @@ mod tests {
         // mis-decoded nor swept.
         let path = temp_path("undecodable");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
         ob.retain(&key(2, MsgClass::Saga, 1, 0), b"not-a-valid-frame"); // garbage value, peer 2 (routable)
         ob.commit();
         let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
@@ -1016,7 +1163,7 @@ mod tests {
         // `?` bails BEFORE the fence/gc, so the row SURVIVES for the next boot (never swept). Fast (no spin).
         let path = temp_path("deadlane");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
         ob.retain(&key(2, MsgClass::Saga, 1, 0), &framed_row(b"x")); // routable + decodable
         ob.commit();
         let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
@@ -1042,7 +1189,7 @@ mod tests {
     fn scan_all_is_ascending_across_peers_and_classes() {
         let path = temp_path("order");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
         // Insert out of order; scan must come back ascending by (peer, class, incarnation, seq).
         let keys = [
             key(2, MsgClass::Saga, 1, 0),
@@ -1065,7 +1212,7 @@ mod tests {
     fn gc_below_sweeps_only_strictly_lower_incarnations() {
         let path = temp_path("gc");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
         ob.retain(&key(1, MsgClass::Saga, 5, 0), b"old");
         ob.retain(&key(1, MsgClass::Saga, 5, 1), b"old");
         ob.retain(&key(1, MsgClass::Saga, 6, 0), b"fresh");
@@ -1089,11 +1236,12 @@ mod tests {
         let _g = TempOutbox { path: path.clone() };
         let k = key(7, MsgClass::GhostReliable, 3, 0);
         {
-            let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+            let mut ob =
+                NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
             ob.retain(&k, b"despawn-envelope");
             ob.commit();
         } // dropped ⇒ writer flushed + joined
-        let ob2 = NodeOutbox::open(&path, StoreTuning::default()).expect("reopen");
+        let ob2 = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("reopen");
         assert_eq!(
             ob2.scan_all(),
             vec![(k, b"despawn-envelope".to_vec())],
@@ -1110,7 +1258,7 @@ mod tests {
         // io-prod's own coverage gate never compiles — "REAL not theater": cover the seam where it is defined).
         let path = temp_path("seed");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
         let seq = ob.seed_reliable_row(NodeId(1), NodeId(2), MsgClass::Saga, 5, 0, b"hello");
         assert!(
             ob.durability().is_durable_through(seq),
@@ -1222,7 +1370,7 @@ mod tests {
         // loud). The `?` bails BEFORE the fence/gc ⇒ the row SURVIVES for the next boot (no silent sweep).
         let path = temp_path("lanestuck");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
         ob.retain(&key(2, MsgClass::Saga, 1, 0), &framed_row(b"x")); // routable + decodable
         ob.commit();
         let shared: SharedOutbox = Arc::new(Mutex::new(Box::new(ob) as Box<dyn OutboxSink + Send>));
@@ -1251,7 +1399,7 @@ mod tests {
         // SURVIVES. This is the count-fence deadline arm no other test reaches (the real-QUIC test passes it).
         let path = temp_path("fencetimeout");
         let _g = TempOutbox { path: path.clone() };
-        let mut ob = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+        let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
         ob.retain(&key(2, MsgClass::Saga, 1, 0), &framed_row(b"x"));
         ob.commit();
         let base = {
@@ -1305,7 +1453,8 @@ mod tests {
             pause_marker_path: Some(marker.clone()),
             ..StoreTuning::default()
         };
-        let mut ob = NodeOutbox::open(&path, tuning).expect("open with the pause hook");
+        let mut ob =
+            NodeOutbox::open(&path, tuning, test_stamp()).expect("open with the pause hook");
         ob.retain(&k, &framed_row(b"x"));
         let (seq, h) = ob.submit_barrier().expect("a staged retain ⇒ submitted");
 
@@ -2052,7 +2201,8 @@ mod tests {
         fn model_sink_matches_a_real_node_outbox() {
             let path = super::temp_path("model-diff");
             let _g = super::TempOutbox { path: path.clone() };
-            let mut real = NodeOutbox::open(&path, StoreTuning::default()).expect("open");
+            let mut real =
+                NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
             let mut model = ModelOutboxSink {
                 committed: BTreeMap::new(),
                 staged: BTreeMap::new(),

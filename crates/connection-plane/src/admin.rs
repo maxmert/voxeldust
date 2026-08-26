@@ -183,7 +183,7 @@ pub fn gateway_view(
 /// directory/sagas/leases stay EMPTY — a gateway does not own them (the orchestrator does), so a gateway
 /// snapshot's `cluster_bootstrapped` is always false and never misleads an operator.
 #[must_use]
-pub fn gateway_admin_snapshot(world: &mut World) -> AdminSnapshot {
+pub fn gateway_admin_snapshot(world: &mut World, world_generation: u64) -> AdminSnapshot {
     let (universe_tick, epoch) = {
         let clock = world.resource::<ClockSample>();
         (clock.universe_tick, clock.epoch)
@@ -197,7 +197,7 @@ pub fn gateway_admin_snapshot(world: &mut World) -> AdminSnapshot {
         )
     };
     let stats = *world.resource::<GatewayStats>();
-    let mut snapshot = AdminSnapshot::shaped_empty(universe_tick, epoch);
+    let mut snapshot = AdminSnapshot::shaped_empty(universe_tick, epoch, world_generation);
     snapshot.gateway = Some(gateway_view(
         &stats,
         sessions_open,
