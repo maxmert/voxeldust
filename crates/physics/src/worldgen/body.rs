@@ -230,7 +230,11 @@ pub(crate) fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> V
             );
             RealmRegion {
                 realm: b.realm,
-                center: region_center_of(b.placement, parent_tier),
+                // THE PARENT AUTHORS IT, in the parent's own step — which is what the type says.
+                center: vd_core::geometry::ParentCentre::authored(region_center_of(
+                    b.placement,
+                    parent_tier,
+                )),
                 frame: frame_for_realm(b.realm, b.parent)
                     .expect("roster realms have a canonical frame"),
                 shape: b.shape,

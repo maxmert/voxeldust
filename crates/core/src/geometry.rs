@@ -558,6 +558,201 @@ pub enum CrossEffect {
     Interest,
 }
 
+#[cfg(test)]
+mod parent_centre_tests {
+    use super::*;
+    use crate::pose::{FrameRef, LatticePos, Tier};
+
+    fn test_band() -> ContainmentBand {
+        ContainmentBand::for_containment_velocity_safe(1.0, 2.0, 0.0, 1.0, 0.0)
+            .expect("valid test band")
+    }
+
+    /// ★ THE TYPE COSTS THE WIRE NOTHING — MEASURED, not asserted from `#[serde(transparent)]`.
+    ///
+    /// A `regions.json` written before this type must still parse, and one written after must be
+    /// byte-identical to what the bare `LatticePos` produced. `serde(transparent)` is what makes that
+    /// true; this is what makes it CHECKED, because an attribute quietly removed is a silent on-disk
+    /// format break, and the client and the dev cluster both read that file.
+    #[test]
+    fn a_parent_centre_is_wire_transparent() {
+        for raw in [
+            LatticePos::ORIGIN,
+            LatticePos::local(DVec3::new(1.5, -2.5, 0.25)),
+            LatticePos::at(I64Vec3::new(4096, -7, 0), DVec3::new(0.5, 0.0, 0.0)),
+        ] {
+            let bare = postcard::to_allocvec(&raw).expect("encode the bare position");
+            let wrapped =
+                postcard::to_allocvec(&ParentCentre::authored(raw)).expect("encode the centre");
+            assert_eq!(bare, wrapped, "the wrapper must add no bytes");
+            // …and it decodes from what the bare form wrote, which is the direction that matters for
+            // a file already on disk.
+            let back: ParentCentre =
+                postcard::from_bytes(&bare).expect("decode from the bare bytes");
+            assert_eq!(back, ParentCentre::authored(raw));
+        }
+    }
+
+    /// ★ THE FENCE ITSELF: the step comes off the PARENT, so the child's cannot be substituted.
+    ///
+    /// This is the whole point of the type, so it is measured on the exact shape that went wrong
+    /// sixteen times — a child on the FINE rung inside a parent on the GALAXY rung. Read correctly the
+    /// answer is 100 m; read with the child's step it would be 100/2048 m, a plausible number for a
+    /// world that does not exist.
+    #[test]
+    fn a_centre_is_read_in_its_parents_step_and_the_childs_cannot_be_passed() {
+        let parent = RealmRegion {
+            realm: RealmId::Galaxy(1),
+            center: ParentCentre::ORIGIN,
+            frame: FrameRef::GalaxySpace { galaxy_seed: 1 },
+            shape: Boundary::Shell { r: 1.0e6 },
+            look: None,
+            band: test_band(),
+            aoi: AoiConfig::inert(),
+            parent: None,
+            interior_band: AoiConfig::inert(),
+        };
+        assert_eq!(parent.frame.tier(), Tier::Galaxy);
+        let centre = ParentCentre::authored(LatticePos::from_metres(
+            DVec3::new(100.0, 0.0, 0.0),
+            Tier::Galaxy,
+        ));
+        assert_eq!(centre.metres_in(&parent), DVec3::new(100.0, 0.0, 0.0));
+        // THE CONTROL, so "the fence works" is a measurement and not a claim about the compiler: the
+        // same bits read at the CHILD's step give the wrong world, and the ratio is exactly the one
+        // that hid in sixteen places.
+        let wrong = centre
+            .in_parents_frame()
+            .delta_m(LatticePos::ORIGIN, Tier::Fine);
+        assert_eq!(wrong, DVec3::new(100.0 / 2048.0, 0.0, 0.0));
+        assert_eq!(
+            centre.metres_in(&parent).x / wrong.x,
+            2048.0,
+            "the defect this type prevents is a factor of 2048"
+        );
+    }
+
+    /// The forest lookup's three answers, each driven: the ambient root, a child whose parent is
+    /// present, and a child whose parent is NOT — which refuses rather than guessing a step.
+    #[test]
+    fn the_forest_lookup_refuses_when_the_parent_is_absent() {
+        let galaxy = RealmRegion {
+            realm: RealmId::Galaxy(1),
+            center: ParentCentre::ORIGIN,
+            frame: FrameRef::GalaxySpace { galaxy_seed: 1 },
+            shape: Boundary::Shell { r: 1.0e6 },
+            look: None,
+            band: test_band(),
+            aoi: AoiConfig::inert(),
+            parent: None,
+            interior_band: AoiConfig::inert(),
+        };
+        let system = RealmRegion {
+            realm: RealmId::System(7),
+            center: ParentCentre::authored(LatticePos::from_metres(
+                DVec3::new(100.0, 0.0, 0.0),
+                Tier::Galaxy,
+            )),
+            frame: FrameRef::SystemSpace { system_seed: 7 },
+            parent: Some(RealmId::Galaxy(1)),
+            ..galaxy
+        };
+        // (a) the ambient root: the origin by definition, and no lookup is needed to say so.
+        assert_eq!(galaxy.centre_m(&[]), Some(DVec3::ZERO));
+        // (b) the parent is present ⇒ its step is used.
+        assert_eq!(
+            system.centre_m(&[galaxy, system]),
+            Some(DVec3::new(100.0, 0.0, 0.0))
+        );
+        // (c) the parent is ABSENT ⇒ refused. The step is unknowable, and the fallback this replaces
+        // (the child's own) is exactly how the defect was written down in shipped code.
+        assert_eq!(system.centre_m(&[system]), None);
+    }
+}
+
+impl RealmRegion {
+    /// WHERE THIS REALM SITS INSIDE ITS PARENT, in metres — the one-line spelling for a caller holding
+    /// the forest. See [`ParentCentre::metres_in_forest`] for what `None` means.
+    #[must_use]
+    pub fn centre_m(&self, forest: &[RealmRegion]) -> Option<DVec3> {
+        self.center.metres_in_forest(self.parent, forest)
+    }
+}
+
+/// WHERE A REALM SITS INSIDE ITS PARENT — a position whose unit is the PARENT's, and a type that will
+/// not let you forget it.
+///
+/// ★ WHY THIS IS A TYPE AND NOT A `LatticePos` (slice S9). A lattice position is a cell count plus a
+/// sub-cell residual; it means nothing without the STEP those cells are counted in. A realm's centre is
+/// counted in its PARENT's step, while the realm's own `frame` names its OWN — and those were the same
+/// step for the whole life of the project, right up until the galaxy got a coarser one.
+///
+/// When they stopped being the same, THIRTEEN readers were found flattening a centre with the child's
+/// step. Every one of them was wrong by exactly 2048× (or 33,554,432× at the rung above), and NOT ONE OF
+/// THEM FAILED: a wrong step does not produce an error, it produces a plausible number for a world that
+/// does not exist. One was an ORACLE whose fixture used the same wrong step, so the two agreed with each
+/// other perfectly. One WROTE A GOLDEN VECTOR, and would have recorded the galaxy's rows 2048× wrong as
+/// the world's own reference bits.
+///
+/// Fixing thirteen sites by hand does not stop a fourteenth. So the bare `delta_m` is gone from this
+/// path: the only way to metres is [`ParentCentre::metres_in`], which takes the PARENT REGION and reads
+/// the step off it, so the child's step cannot be passed. `#[serde(transparent)]` — the on-disk bytes of
+/// a `regions.json` are unchanged, which is measured rather than assumed
+/// (`a_parent_centre_is_wire_transparent`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ParentCentre(LatticePos);
+
+impl ParentCentre {
+    /// The origin — where a realm sits when its parent placed it at its own centre, and the only
+    /// lawful centre for the ambient root.
+    pub const ORIGIN: ParentCentre = ParentCentre(LatticePos::ORIGIN);
+
+    /// State a centre THE PARENT AUTHORED. Named for the act, because under SL1 the parent is the only
+    /// writer: a child that constructs its own centre is the defect this whole area exists to prevent.
+    #[must_use]
+    pub const fn authored(at: LatticePos) -> ParentCentre {
+        ParentCentre(at)
+    }
+
+    /// This centre in METRES, in the parent's frame — the step read off the PARENT, never passed in.
+    #[must_use]
+    pub fn metres_in(self, parent: &RealmRegion) -> DVec3 {
+        self.0.delta_m(LatticePos::ORIGIN, parent.frame.tier())
+    }
+
+    /// This centre in metres, found through a FOREST rather than a parent row already in hand.
+    ///
+    /// `None` when the parent is not in `forest` — the step is then unknowable, and the whole point of
+    /// this type is that guessing it is the defect. A `None`-parented row is the ambient root, whose
+    /// centre is the origin by definition, so it answers `Some(ZERO)`.
+    #[must_use]
+    pub fn metres_in_forest(
+        self,
+        parent: Option<RealmId>,
+        forest: &[RealmRegion],
+    ) -> Option<DVec3> {
+        match parent {
+            None => Some(DVec3::ZERO),
+            Some(p) => forest
+                .iter()
+                .find(|r| r.realm == p)
+                .map(|r| self.metres_in(r)),
+        }
+    }
+
+    /// The raw lattice value, still counted in THE PARENT'S STEP.
+    ///
+    /// For the arithmetic that already holds the parent's rung — the crossing path subtracts this from a
+    /// pose measured in the same frame — and for equality and storage. It is deliberately verbose: the
+    /// moment you hold the number you are holding a count whose unit is not written down beside it, and
+    /// pairing it with any other realm's step is the error this type exists to make hard.
+    #[must_use]
+    pub const fn in_parents_frame(self) -> LatticePos {
+        self.0
+    }
+}
+
 /// One realm boundary: its shape, its center in the coordinate lattice, the hysteresis band
 /// around it, the realm it belongs to, the realm entered on an inward crossing, and whether a
 /// crossing moves authority or only interest. Every field is `Copy`, so the whole descriptor is.
@@ -1061,7 +1256,10 @@ pub struct RealmRegion {
     /// WHERE THIS REALM SITS INSIDE ITS PARENT, measured in the PARENT's frame. `None`-parented (the
     /// ambient root) means the origin. Callers subtract it before the shape methods — that subtraction IS
     /// the parent doing the downward conversion for its child.
-    pub center: LatticePos,
+    ///
+    /// ★ ITS TYPE IS THE FENCE (slice S9). See [`ParentCentre`]: this used to be a bare [`LatticePos`],
+    /// which any reader could flatten with any rung — and a dozen of them flattened it with the CHILD's.
+    pub center: ParentCentre,
     /// THIS REALM'S OWN frame — the space its `shape` is drawn in and the label anything standing inside
     /// it wears. NOT the frame `center` is in: `center` is the parent's number, in the parent's frame.
     ///
@@ -2953,7 +3151,7 @@ mod tests {
     fn test_region(realm: RealmId, parent: Option<RealmId>) -> RealmRegion {
         RealmRegion {
             realm,
-            center: LatticePos::local(DVec3::ZERO),
+            center: ParentCentre::authored(LatticePos::local(DVec3::ZERO)),
             frame: FrameRef::SystemSpace { system_seed: 0 },
             shape: Boundary::Shell { r: 1.0 },
             look: Some(Boundary::Shell { r: 1.0 }),
@@ -3297,15 +3495,13 @@ mod tests {
         regions
             .iter()
             .filter(|r| r.parent.is_some())
-            .map(|r| {
-                let tier = regions
-                    .iter()
-                    .find(|p| Some(p.realm) == r.parent)
-                    .map_or(r.frame.tier(), |p| p.frame.tier());
-                (
-                    r.realm,
-                    ChildReach::Fixed(r.center.delta_m(LatticePos::local(DVec3::ZERO), tier)),
-                )
+            .filter_map(|r| {
+                // A child whose parent is NOT in the forest is skipped rather than guessed at: its
+                // centre has no step, and inventing one is the defect `ParentCentre` exists to stop.
+                // The dangling parent is the nesting guard's OWN refusal to make — this map simply
+                // does not pretend to a reach it cannot state.
+                r.centre_m(regions)
+                    .map(|at| (r.realm, ChildReach::Fixed(at)))
             })
             .collect()
     }
@@ -3435,7 +3631,7 @@ mod tests {
         };
         let escaping = RealmRegion {
             frame: FrameRef::PlanetCentered { planet_seed: 1 },
-            center: LatticePos::local(DVec3::new(8.0, 0.0, 0.0)),
+            center: ParentCentre::authored(LatticePos::local(DVec3::new(8.0, 0.0, 0.0))),
             ..test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 5.0)
         };
         assert_eq!(
@@ -3450,7 +3646,7 @@ mod tests {
         // …and the accept twin across the same frame boundary, so a fence that simply always rejects
         // would fail here.
         let fitting = RealmRegion {
-            center: LatticePos::local(DVec3::new(4.0, 0.0, 0.0)),
+            center: ParentCentre::authored(LatticePos::local(DVec3::new(4.0, 0.0, 0.0))),
             ..escaping
         };
         assert_eq!(
@@ -3470,7 +3666,7 @@ mod tests {
         // (5 + |(3,3,3)| = 10.20) called it an escape, which is why the exact corner is the measure.
         let parent = test_region_r(RealmId::Planet(7), Some(RealmId::System(7)), 10.0);
         let area = RealmRegion {
-            center: LatticePos::local(DVec3::new(5.0, 0.0, 0.0)),
+            center: ParentCentre::authored(LatticePos::local(DVec3::new(5.0, 0.0, 0.0))),
             shape: Boundary::Aabb {
                 half: DVec3::splat(3.0),
             },
@@ -3518,7 +3714,7 @@ mod tests {
         // The ACCEPT twin, and the reason the check measures REACH (offset + extent) rather than size
         // alone: a small child placed off-centre is fine as long as its far side stays inside.
         let offset_child = RealmRegion {
-            center: LatticePos::local(DVec3::new(5.0, 0.0, 0.0)),
+            center: ParentCentre::authored(LatticePos::local(DVec3::new(5.0, 0.0, 0.0))),
             ..test_region_r(RealmId::Planet(1), Some(RealmId::System(1)), 3.0)
         };
         let forest = vec![

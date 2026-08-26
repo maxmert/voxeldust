@@ -127,7 +127,7 @@ mod tests {
     fn region(realm: RealmId, parent: Option<RealmId>, frame: FrameRef) -> RealmRegion {
         RealmRegion {
             realm,
-            center: LatticePos::local(DVec3::ZERO),
+            center: crate::geometry::ParentCentre::authored(LatticePos::local(DVec3::ZERO)),
             frame,
             shape: Boundary::Shell { r: 100.0 },
             look: Some(Boundary::Shell { r: 100.0 }),

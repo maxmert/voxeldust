@@ -703,7 +703,7 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
     vec![
         RealmRegion {
             realm: root,
-            center: vd_core::pose::LatticePos::ORIGIN,
+            center: vd_core::geometry::ParentCentre::authored(vd_core::pose::LatticePos::ORIGIN),
             frame: FrameRef::SystemSpace { system_seed: 1 },
             shape: root_shell,
             look: Some(root_shell),
@@ -714,7 +714,7 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
         },
         RealmRegion {
             realm: SYSTEM,
-            center: vd_core::pose::LatticePos::ORIGIN,
+            center: vd_core::geometry::ParentCentre::authored(vd_core::pose::LatticePos::ORIGIN),
             frame: FrameRef::SystemSpace { system_seed: 7 },
             shape: Boundary::Shell {
                 r: demand_system_soi_m(),
@@ -730,7 +730,7 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
         RealmRegion {
             realm: PLANET,
             // ZERO: an orbiting body is placed LIVE by its parent, never from a stored centre.
-            center: vd_core::pose::LatticePos::ORIGIN,
+            center: vd_core::geometry::ParentCentre::authored(vd_core::pose::LatticePos::ORIGIN),
             frame: FrameRef::PlanetCentered { planet_seed: 7 },
             shape: Boundary::Shell {
                 r: demand_planet_soi_m(),
@@ -1678,7 +1678,10 @@ fn chain_sibling_region(
     let cfg = UniverseConfig::walk_demand(v_max, dt);
     vd_core::geometry::RealmRegion {
         realm,
-        center: vd_core::pose::LatticePos::from_metres(center, vd_core::pose::Tier::Fine),
+        center: vd_core::geometry::ParentCentre::authored(vd_core::pose::LatticePos::from_metres(
+            center,
+            vd_core::pose::Tier::Fine,
+        )),
         frame: vd_core::pose::frame_for_realm(realm, Some(parent))
             .expect("a planet/area sibling has a canonical frame"),
         shape,

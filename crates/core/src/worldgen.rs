@@ -397,7 +397,7 @@ mod tests {
         use crate::pose::{FrameRef, LatticePos};
         let region = |realm: RealmId, parent: Option<RealmId>| RealmRegion {
             realm,
-            center: LatticePos::local(DVec3::ZERO),
+            center: crate::geometry::ParentCentre::authored(LatticePos::local(DVec3::ZERO)),
             frame: FrameRef::SystemSpace { system_seed: 0 },
             shape: Boundary::Shell { r: 1.0 },
             look: Some(Boundary::Shell { r: 1.0 }),

@@ -113,7 +113,7 @@ fn dest_region(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
     .expect("valid dest containment band");
     RealmRegion {
         realm,
-        center: LatticePos::ORIGIN,
+        center: vd_core::geometry::ParentCentre::authored(LatticePos::ORIGIN),
         frame: frame_for_realm(realm, None).expect("System realm always resolves a frame"),
         shape: Boundary::Shell { r },
         look: Some(Boundary::Shell { r }),

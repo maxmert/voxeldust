@@ -6688,7 +6688,10 @@ fn frame_of(realm: RealmId) -> FrameRef {
 fn region(realm: RealmId, parent: Option<RealmId>, center: DVec3, r: f64) -> RealmRegion {
     RealmRegion {
         realm,
-        center: LatticePos::from_metres(center, vd_core::pose::Tier::Fine),
+        center: vd_core::geometry::ParentCentre::authored(LatticePos::from_metres(
+            center,
+            vd_core::pose::Tier::Fine,
+        )),
         frame: frame_of(realm),
         shape: Boundary::Shell { r },
         look: Some(Boundary::Shell { r }),
@@ -6703,7 +6706,10 @@ fn region(realm: RealmId, parent: Option<RealmId>, center: DVec3, r: f64) -> Rea
 fn region_box(realm: RealmId, parent: Option<RealmId>, center: DVec3, half: DVec3) -> RealmRegion {
     RealmRegion {
         realm,
-        center: LatticePos::from_metres(center, vd_core::pose::Tier::Fine),
+        center: vd_core::geometry::ParentCentre::authored(LatticePos::from_metres(
+            center,
+            vd_core::pose::Tier::Fine,
+        )),
         frame: frame_of(realm),
         shape: Boundary::Aabb { half },
         look: Some(Boundary::Aabb { half }),
@@ -7276,7 +7282,10 @@ fn author_book_places_the_anchor_a_child_and_refuses_a_parent() {
         assert_eq!(
             book.of(placed_child.frame)
                 .map(|p| (p.origin_cell, p.origin)),
-            Some((placed_child.center.cell(), placed_child.center.offset())),
+            Some((
+                placed_child.center.in_parents_frame().cell(),
+                placed_child.center.in_parents_frame().offset()
+            )),
             "a static direct child rides the placement its parent authored, at tick {}",
             tick.0,
         );
@@ -7480,11 +7489,11 @@ impl Story {
             .iter()
             .find(|r| r.realm == realm)
             .expect("the story only names realms the generator produced");
-        let tier = r
-            .parent
-            .and_then(|p| regions.iter().find(|q| q.realm == p))
-            .map_or_else(|| r.frame.tier(), |p| p.frame.tier());
-        r.center.delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
+        // The lookup, and the refusal when the parent is absent, are `ParentCentre`'s own now — the
+        // `map_or_else(child's own tier)` fallback this replaces WAS the 2048× defect, written as a
+        // default.
+        r.centre_m(regions)
+            .expect("the story's forest holds every named realm's parent")
     }
 
     fn frame(&self, realm: RealmId) -> FrameRef {
@@ -10790,7 +10799,7 @@ fn an_outward_crossing_emits_no_demand_and_counts_the_refusal() {
     rig.grant_realm();
     let armed = |realm, parent, r| RealmRegion {
         realm,
-        center: LatticePos::ORIGIN,
+        center: vd_core::geometry::ParentCentre::authored(LatticePos::ORIGIN),
         frame: frame_of(realm),
         shape: Boundary::Shell { r },
         look: Some(Boundary::Shell { r }),
@@ -11227,7 +11236,10 @@ fn region_framed(
 ) -> RealmRegion {
     RealmRegion {
         realm,
-        center: LatticePos::from_metres(center, vd_core::pose::Tier::Fine),
+        center: vd_core::geometry::ParentCentre::authored(LatticePos::from_metres(
+            center,
+            vd_core::pose::Tier::Fine,
+        )),
         frame,
         shape: Boundary::Shell { r },
         look: Some(Boundary::Shell { r }),
@@ -11372,12 +11384,13 @@ fn arriving_at_a_star_system_lands_on_its_edge_and_shows_its_planets() {
             // Flatten the NORMALIZED centre — at the seeded placement radius every component is
             // ulp-coarser than one cell, so the residual `.offset()` is exactly ZERO and only
             // the integer half carries the position.
+            // ★ THE FIFTEENTH SITE (slice S9): this read the SYSTEM's own step to flatten a centre
+            // the GALAXY authored. It picks "a system away from the origin", and every candidate
+            // looked 2048× further out than it is — which happened not to change WHICH system it
+            // picked, so nothing ever failed.
             matches!(r.realm, RealmId::System(_))
-                && r.parent.is_some()
-                && r.center
-                    .delta_m(vd_core::pose::LatticePos::ORIGIN, r.frame.tier())
-                    .length()
-                    > 0.0
+                && r.centre_m(world.regions())
+                    .is_some_and(|c| c.length() > 0.0)
         })
         .copied()
         .expect("a galaxy of several stars has one away from the origin");
@@ -11415,6 +11428,7 @@ fn arriving_at_a_star_system_lands_on_its_edge_and_shows_its_planets() {
     // measuring representability, not the relabel (the H-21 class the activation cures).
     let at_the_face_lattice = system
         .center
+        .in_parents_frame()
         .translated(DVec3::new(-extent, 0.0, 0.0), parent.frame.tier());
     let approaching = StampedPose {
         frame: parent.frame,
@@ -11677,7 +11691,7 @@ fn child_placements_unifies_movers_and_static() {
 
 #[test]
 fn a_static_child_placement_carries_its_whole_cell_anchored_center() {
-    // place_child's static arm used to ship `r.center.offset()` — the f64 remainder only — so a child
+    // place_child's static arm used to ship `r.center.in_parents_frame().offset()` — the f64 remainder only — so a child
     // authored at a real integer cell anchor was placed as if the anchor were zero. Every region in
     // the forest today sits at cell ZERO, so nothing caught it; the row this produces is the realm
     // lane the gateway keys its placement table on, and one dropped anchor there becomes every
@@ -11688,7 +11702,10 @@ fn a_static_child_placement_carries_its_whole_cell_anchored_center() {
         DVec3::new(10.0, 0.0, 0.0),
         100.0,
     );
-    cell_anchored.center = LatticePos::at(I64Vec3::new(4096, 0, 0), DVec3::new(10.0, 0.0, 0.0));
+    cell_anchored.center = vd_core::geometry::ParentCentre::authored(LatticePos::at(
+        I64Vec3::new(4096, 0, 0),
+        DVec3::new(10.0, 0.0, 0.0),
+    ));
     let regions = RealmRegions::new(vec![root_region(), own_region(), cell_anchored]);
     let placements = regions.child_placements(OWN_REALM, 20.0, UniverseTick(5));
     // BOTH halves ride the row bit-for-bit (the anchored centre is carried, never re-derived);
@@ -12993,11 +13010,9 @@ fn slice6_the_union_over_draw_is_measured_at_interim_scale() {
     // observer positions both used the wrong ruler, so they agreed with each other perfectly; only
     // the REAL fold, which reads the centre correctly, disagreed. Two wrongs that agree look exactly
     // like a right answer until something honest shows up.
-    let galaxy_tier = galaxy_row.frame.tier();
-    let centre_of = |r: &vd_core::geometry::RealmRegion| {
-        r.center
-            .delta_m(vd_core::pose::LatticePos::ORIGIN, galaxy_tier)
-    };
+    // The step is read off the galaxy ROW, which is the parent of every region this closure sees —
+    // `metres_in` takes the parent itself, so a child's step cannot be substituted for it.
+    let centre_of = |r: &vd_core::geometry::RealmRegion| r.center.metres_in(galaxy_row);
     let systems: Vec<(RealmId, DVec3)> = scope
         .iter()
         .filter(|r| r.parent == Some(galaxy))
@@ -15775,13 +15790,21 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
                 assert_eq!(back.pos.cell(), vd_core::glam::I64Vec3::ZERO);
                 assert_eq!(fm_at(back.pos, own.tier()), DVec3::ZERO);
                 assert_eq!(back.vel, DVec3::ZERO);
+                // ★ THE SIXTEENTH SITE, AND THE MOST INSTRUCTIVE (slice S9). Both sides of this
+                // comparison were read at the CHILD's step, when both quantities are stated in the
+                // ANCHOR's: the authored pose comes out of the anchor's own book, and the centre is
+                // a position in the anchor's frame. Two wrongs of the same size cancel, so the
+                // comparison gave the right answer for the wrong reason and nothing ever failed.
+                //
+                // Both now read `own`, the anchor's frame, which is the one unit they share.
                 if t == UniverseTick(50_000)
                     && pose
                         .pos
-                        .delta_m(vd_core::pose::LatticePos::ORIGIN, region.frame.tier())
+                        .delta_m(vd_core::pose::LatticePos::ORIGIN, own.tier())
                         != region
                             .center
-                            .delta_m(vd_core::pose::LatticePos::ORIGIN, region.frame.tier())
+                            .in_parents_frame()
+                            .delta_m(vd_core::pose::LatticePos::ORIGIN, own.tier())
                 {
                     moved_since_epoch += 1;
                 }

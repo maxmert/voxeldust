@@ -20,7 +20,7 @@ use crate::celestial::OrbitalElements;
 use crate::motion::Motion;
 use glam::DVec3;
 use vd_core::geometry::RealmRegion;
-use vd_core::pose::{LatticePos, RealmId};
+use vd_core::pose::RealmId;
 use vd_core::worldgen::GALAXY;
 
 /// A world whose root outgrows the FINE lattice's representable budget — [`guard_root_representable`]'s
@@ -185,31 +185,39 @@ pub fn child_reaches_for_config(
         .iter()
         .flat_map(|p| moving_children_for_config(seed_universe, config, *p))
         .collect();
+    // The parent ROW for every realm that is one, looked up once instead of re-scanned per child.
+    let by_realm: std::collections::BTreeMap<RealmId, &RealmRegion> =
+        regions.iter().map(|r| (r.realm, r)).collect();
     regions
         .iter()
-        .filter(|r| r.parent.is_some())
-        .map(|r| (r.realm, one_child_reach(regions, r, movers.get(&r.realm))))
+        .filter_map(|r| r.parent.map(|p| (r, p)))
+        .map(|(r, p)| {
+            let parent = by_realm
+                .get(&p)
+                .expect("a child's parent is a row of the SAME (seed, config) forest");
+            (r.realm, one_child_reach(parent, r, movers.get(&r.realm)))
+        })
         .collect()
 }
 
 /// One child's reach — the monomorphic body the shim above stays branchless over (HR5).
 fn one_child_reach(
-    regions: &[RealmRegion],
+    parent: &RealmRegion,
     child: &RealmRegion,
     mover: Option<&OrbitalElements>,
 ) -> vd_core::geometry::ChildReach {
     use vd_core::geometry::ChildReach;
     match mover {
         Some(e) => ChildReach::Excursion(Motion::Kepler(*e).max_excursion_m(child.frame.tier())),
-        None => {
-            // The stored offset is measured in the PARENT's frame, so the parent's tier scales
-            // its cell anchor into metres.
-            let tier = regions
-                .iter()
-                .find(|p| Some(p.realm) == child.parent)
-                .map_or(child.frame.tier(), |p| p.frame.tier());
-            ChildReach::Fixed(child.center.delta_m(LatticePos::ORIGIN, tier))
-        }
+        // The stored offset is measured in the PARENT's frame, and `metres_in` reads the step off
+        // the parent itself.
+        //
+        // ★ THE PARENT IS AN ARGUMENT NOW (slice S9). This used to scan `regions` for the parent and
+        // FALL BACK TO THE CHILD'S OWN STEP when it was not found — the 2048× defect written down as
+        // a `map_or` default. The caller's own contract says a missing row is unrepresentable, so the
+        // honest shape is to demand the parent rather than to invent a unit for it. The scan is gone
+        // with it, which also stops this being linear in the sibling count (SL9).
+        None => ChildReach::Fixed(child.center.metres_in(parent)),
     }
 }
 

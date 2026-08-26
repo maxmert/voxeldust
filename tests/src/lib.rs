@@ -886,7 +886,7 @@ fn crossing_region(
     use vd_core::pose::{LatticePos, frame_for_realm};
     vd_core::geometry::RealmRegion {
         realm,
-        center: LatticePos::ORIGIN,
+        center: vd_core::geometry::ParentCentre::authored(LatticePos::ORIGIN),
         frame: frame_for_realm(realm, None).expect("System realm always resolves a frame"),
         shape: vd_core::geometry::Boundary::Shell { r },
         look: Some(vd_core::geometry::Boundary::Shell { r }),

@@ -455,8 +455,16 @@ fn realm_regions_for_matches_the_frozen_pre_generator_golden() {
             .iter()
             .find(|p| Some(p.realm) == parent)
             .map_or_else(|| r.frame.tier(), |p| p.frame.tier());
-        assert_eq!(r.center, LatticePos::from_metres(offset, ptier));
-        assert_eq!(r.center.delta_m(LatticePos::ORIGIN, ptier), offset);
+        assert_eq!(
+            r.center,
+            vd_core::geometry::ParentCentre::authored(LatticePos::from_metres(offset, ptier))
+        );
+        assert_eq!(
+            r.center
+                .in_parents_frame()
+                .delta_m(LatticePos::ORIGIN, ptier),
+            offset
+        );
         assert_eq!(r.shape, shape);
         assert_eq!(r.parent, parent);
         assert_eq!(
@@ -503,8 +511,11 @@ fn to_regions_gives_an_orbital_body_a_zero_center_position_authored_by_the_frame
     };
     let regions = to_regions(&[body], &UniverseConfig::visual_scale());
     assert_eq!(regions.len(), 1);
-    assert_eq!(regions[0].center.cell(), glam::I64Vec3::ZERO);
-    assert_eq!(regions[0].center.offset(), DVec3::ZERO);
+    assert_eq!(
+        regions[0].center.in_parents_frame().cell(),
+        glam::I64Vec3::ZERO
+    );
+    assert_eq!(regions[0].center.in_parents_frame().offset(), DVec3::ZERO);
 }
 
 #[test]
@@ -3428,8 +3439,8 @@ fn realm_regions_for_config_gives_each_moving_planet_a_zero_center() {
         .filter(|(b, _)| matches!(b.realm, RealmId::Planet(_)))
     {
         assert!(orbital_of(body.placement).is_some(), "a planet is Orbital");
-        assert_eq!(region.center.cell(), glam::I64Vec3::ZERO);
-        assert_eq!(region.center.offset(), DVec3::ZERO);
+        assert_eq!(region.center.in_parents_frame().cell(), glam::I64Vec3::ZERO);
+        assert_eq!(region.center.in_parents_frame().offset(), DVec3::ZERO);
     }
 }
 
@@ -3482,7 +3493,7 @@ fn a_moving_planet_soi_is_centered_on_its_live_position_not_double_counted() {
     let tick = vd_core::UniverseTick(200);
     // A moving realm carries NO baked position — its center is the origin of its own frame.
     assert_eq!(
-        region.center.offset(),
+        region.center.in_parents_frame().offset(),
         DVec3::ZERO,
         "a moving planet's region.center must be ZERO (position authored via the frame)",
     );
@@ -3821,10 +3832,7 @@ fn walk_demand_band_is_crossable_for_every_separated_child() {
         // exactly ON the galaxy origin read as 0.0635 m away from it, which then failed the
         // "separated child must be out of range" arm. The same confusion cost a 2048× error in the
         // body generator's centres; this is the second place it hid.
-        let d = r
-            .center
-            .delta_m(LatticePos::ORIGIN, parent.frame.tier())
-            .length();
+        let d = r.center.metres_in(parent).length();
         let td = r.aoi.tear_down_r_m();
         // (c) Releasable: a point inside the parent exists from which the child is out of tear-down
         // range (tear_down < the farthest-in-parent distance = separation + the parent's own extent).
@@ -3858,8 +3866,8 @@ fn planet_a_is_releasable_at_its_parents_origin() {
         .find(|r| matches!(r.realm, RealmId::Planet(_)))
         .expect("planet A in the walk forest");
     let d = planet
-        .center
-        .delta_m(LatticePos::ORIGIN, Tier::Fine)
+        .centre_m(&regions)
+        .expect("the walk forest holds the planet's parent")
         .length();
     assert!(
         planet.aoi.tear_down_r_m() < d,
@@ -5032,7 +5040,7 @@ fn sizing_the_bands_does_not_coarsen_the_child_lookup() {
                     .iter()
                     .map(|r| IndexedChild {
                         realm: r.realm,
-                        centre: r.center,
+                        centre: r.center.in_parents_frame(),
                         radius_m: r.shape.circumscribed_extent() + band_outset(r),
                     })
                     .collect();
@@ -5049,12 +5057,12 @@ fn sizing_the_bands_does_not_coarsen_the_child_lookup() {
             // AND WHAT THE LOOKUP ACTUALLY ANSWERS, which is the number that matters: a coarser grid is
             // only a problem if it starts naming more children per query.
             for k in &kids {
-                let named = now.candidates(k.center, ptier).len();
+                let named = now.candidates(k.center.in_parents_frame(), ptier).len();
                 worst_candidates = worst_candidates.max(named);
                 total_candidates += named;
                 // THE CONTROL: the same query on the same forest with the band it used to have. Without
                 // it, a number that was always this large would read as a regression this slice caused.
-                let named_before = before.candidates(k.center, ptier).len();
+                let named_before = before.candidates(k.center.in_parents_frame(), ptier).len();
                 worst_before = worst_before.max(named_before);
                 total_before += named_before;
                 queries += 1;
@@ -5725,7 +5733,10 @@ fn a_self_sized_band_still_fits_inside_its_parent_and_clear_of_its_siblings() {
             // different frames' numbers. (My first version of this test did exactly that and refused
             // the world by 1.5e15 m, which is why the control below exists.)
             let tier = r.frame.tier();
-            let at = r.center.delta_m(LatticePos::ORIGIN, tier);
+            let at = r
+                .center
+                .in_parents_frame()
+                .delta_m(LatticePos::ORIGIN, tier);
             let limit = parent.shape.inscribed_extent();
             let base_reach = r.shape.max_reach_from(at);
             let reach = base_reach + band_of(r.shape.circumscribed_extent());
@@ -5748,7 +5759,11 @@ fn a_self_sized_band_still_fits_inside_its_parent_and_clear_of_its_siblings() {
                 .iter()
                 .filter(|s| s.parent == Some(parent_id) && s.realm != r.realm)
             {
-                let gap = s.center.delta_m(r.center, tier).length()
+                let gap = s
+                    .center
+                    .in_parents_frame()
+                    .delta_m(r.center.in_parents_frame(), tier)
+                    .length()
                     - r.shape.circumscribed_extent()
                     - s.shape.circumscribed_extent();
                 let need = band_of(r.shape.circumscribed_extent())
@@ -5764,7 +5779,11 @@ fn a_self_sized_band_still_fits_inside_its_parent_and_clear_of_its_siblings() {
                 // the shipped separation fence judges. Judging moving siblings needs their authored
                 // placements at an instant, which is a different measurement.
                 let both_static = (at.length() > 0.0)
-                    | (s.center.delta_m(LatticePos::ORIGIN, tier).length() > 0.0);
+                    | (s.center
+                        .in_parents_frame()
+                        .delta_m(LatticePos::ORIGIN, tier)
+                        .length()
+                        > 0.0);
                 if !both_static {
                     moving_pairs += 1;
                     continue;
@@ -5821,7 +5840,11 @@ fn nearest_sibling_gap_m(regions: &[RealmRegion], r: &RealmRegion, parent: Realm
         .iter()
         .filter(|s| s.parent == Some(parent) && s.realm != r.realm)
         .map(|s| {
-            let d = s.center.delta_m(r.center, tier).length();
+            let d = s
+                .center
+                .in_parents_frame()
+                .delta_m(r.center.in_parents_frame(), tier)
+                .length();
             (d - r.shape.circumscribed_extent() - s.shape.circumscribed_extent()).max(0.0)
         })
         .fold(f64::INFINITY, f64::min)

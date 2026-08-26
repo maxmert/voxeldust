@@ -533,13 +533,11 @@ fn centre_of(world: &WorldView, realm: RealmId) -> DVec3 {
     // while `frame` is its own — the same step until the galaxy got a coarser one, and out by 2048×
     // after. Read with the child's step, this fixture's neighbour system sat 8.67 m from its galaxy
     // instead of the story's distance, and every conversion built on it inherited that.
-    let tier = regions
-        .iter()
-        .find(|p| Some(p.realm) == region.parent)
-        .map_or_else(|| region.frame.tier(), |p| p.frame.tier());
+    //
+    // The lookup is `ParentCentre`'s own now, so the wrong step cannot be handed in here at all.
     region
-        .center
-        .delta_m(vd_core::pose::LatticePos::ORIGIN, tier)
+        .centre_m(regions)
+        .expect("the fixture's forest holds every named realm's parent")
 }
 
 /// The lattice position of a pose, for tests that want the whole anchored value rather than the offset.

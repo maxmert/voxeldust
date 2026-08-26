@@ -227,7 +227,10 @@ impl RealmRegions {
             .filter(|r| r.parent == Some(own) && !self.moving.contains_key(&r.realm))
             .map(|r| IndexedChild {
                 realm: r.realm,
-                centre: r.center,
+                // The index is BUILT AT THE PARENT'S STEP (`tier`, above, is the anchor's own), and
+                // these centres are counted in that same step — which is the pairing this type exists
+                // to keep honest.
+                centre: r.center.in_parents_frame(),
                 // THE CONSERVATIVE RADIUS: the shape's own circumscribed reach PLUS the band's release
                 // edge, because membership extends past the surface by the outset. A point outside this
                 // cannot be a member by any edge, so dropping the child for it cannot change a verdict.

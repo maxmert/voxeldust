@@ -2800,13 +2800,15 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
     // J1: the home system sits at the GALACTIC ORIGIN — a home↔galaxy crossing is numerically an
     // identity in the drawn space (the downward conversion subtracts zero), which is exactly why a
     // file-based scene stays valid across that one crossing. ASSERTED, not assumed.
+    // ★ ZERO IS THE ONE VALUE THAT NEEDS NO UNIT (slice S9), which is why this assertion can read the
+    // parent-frame number directly: every step counts the origin the same way.
     assert_eq!(
-        home_centre.cell(),
+        home_centre.in_parents_frame().cell(),
         vd_core::glam::I64Vec3::ZERO,
         "J1: the home system's authored placement fits one lattice cell",
     );
     assert_eq!(
-        home_centre.offset(),
+        home_centre.in_parents_frame().offset(),
         vd_core::glam::DVec3::ZERO,
         "J1: the home system sits at the galactic origin (ring index 0) — the identity the scene \
          emitter and the render gate stand on",
@@ -2825,14 +2827,17 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
     // NORMALIZED centres, so a sibling placement carries its magnitude in the INTEGER half — the
     // pre-activation assert ("fits inside one lattice cell") measured the hole this arc closes.
     assert_ne!(
-        sibling_region.center.cell(),
+        sibling_region.center.in_parents_frame().cell(),
         vd_core::glam::I64Vec3::ZERO,
         "the sibling's authored placement rides the integer lattice (normalized centre)",
     );
-    let sibling_tier = sibling_region.frame.tier();
+    // ★ THE FOURTEENTH SITE, AND THE TYPE FOUND IT (slice S9). This read the SIBLING's own step to
+    // flatten a centre the GALAXY authored — 2048× wrong the moment those two steps differed, in
+    // shipped code rather than a test. It is exactly the defect `ParentCentre` exists to make
+    // unwriteable, and the compiler refused it the first time the field carried the type.
     let sibling_centre = sibling_region
-        .center
-        .delta_m(vd_core::pose::LatticePos::ORIGIN, sibling_tier);
+        .centre_m(&gal_regions)
+        .expect("the galaxy authors its own ring sibling's placement");
     assert_ne!(
         sibling_centre,
         vd_core::glam::DVec3::ZERO,

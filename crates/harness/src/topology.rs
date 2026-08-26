@@ -1589,7 +1589,7 @@ mod tests {
                 .expect("valid containment band");
             let make = |realm: RealmId, parent: Option<RealmId>, r: f64| RealmRegion {
                 realm,
-                center: LatticePos::ORIGIN,
+                center: vd_core::geometry::ParentCentre::authored(LatticePos::ORIGIN),
                 frame: frame_for_realm(realm, None).expect("System/Planet realm resolves a frame"),
                 shape: Boundary::Shell { r },
                 look: Some(Boundary::Shell { r }),

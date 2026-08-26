@@ -4012,9 +4012,28 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
     exist and stays green — and when the ORACLE and the FIXTURE use the same wrong ruler they agree
     with each other perfectly, which is what the union-over-draw case looked like right up until the
     real fold disagreed. Every one of these was invisible until the rungs actually differed.
-  - **The two shipped call sites** (`geometry.rs` reach map, `guards.rs` `one_child_reach`) already look
-    the parent up. **The trap is a naming problem** and the durable cure is a type that carries its rung,
-    which S9 did not build — ledgered here as the open follow-up.
+  - **★ THE DURABLE CURE IS BUILT: `ParentCentre` (S9, after the pins).** Fixing sites by hand does not
+    stop the next one, so `RealmRegion.center` is no longer a bare `LatticePos`. The bare `delta_m` is
+    gone from that path; the only way to metres is `metres_in(parent)`, which takes the PARENT REGION and
+    reads the step off it, so the child's cannot be passed. `metres_in_forest` /
+    `RealmRegion::centre_m` do the lookup and answer `None` when the parent is absent — **the step is
+    then unknowable, and the `map_or(child's own tier)` fallback that used to stand there was the defect
+    written down as a default.**
+  - **★ THE TYPE FOUND THREE MORE THE MOMENT IT COMPILED — 14, 15 and 16.** One was in SHIPPED code
+    (`vd_bins::world_roster`, flattening a galaxy-authored centre with the sibling's own step). The
+    sixteenth is the most instructive: it compared a pose against a centre with BOTH sides read at the
+    wrong step, so two errors of the same size cancelled and the comparison gave the right answer for the
+    wrong reason. **Sixteen sites, and only one of them ever failed a test.**
+  - **THE WIRE COSTS NOTHING, AND IT IS MEASURED:** `#[serde(transparent)]`, with a test that encodes
+    both forms and asserts equal bytes AND that the wrapper decodes from what the bare form wrote — the
+    direction that matters for a `regions.json` already on disk. An attribute quietly removed is a silent
+    on-disk break, so it is checked rather than trusted.
+  - **THE FENCE ITSELF IS MEASURED, not claimed from the compiler:** a FINE child inside a GALAXY parent
+    reads 100 m through `metres_in`, and the same bits read at the child's step give 100/2048 — the exact
+    ratio that hid in sixteen places, asserted as a control.
+  - **What it does NOT cover:** a pose written in the wrong step (three test writers did that this
+    slice). A pose carries its frame, so the honest cure there is to stamp from the frame, which those
+    writers now do — but nothing yet stops a fourth.
 
 - **★ THE MASS CAP IS A LAUNCH-BLOCKING INPUT, NOT A TUNING KNOB — stated here because S9 is the third
   time it has re-rolled the whole world.** `sample_imf_mass` inverts a BOUNDED power law and the cap is

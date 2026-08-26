@@ -849,10 +849,16 @@ mod tests {
                         vd_core::tlv::TlvWriter::new(vd_core::look::WINDOW_BODY_SCHEMA).finish()
                     }
                 };
+                // ★ THE THIRTEENTH SITE (slice S9). This flattened the centre with the CHILD's own
+                // step, so the galaxy row in this fixture was 2048× out — and nothing failed,
+                // because the assertions that read it are about shapes and depths. `centre_m` reads
+                // the step off the parent, and the wrong one can no longer be passed.
+                let regions = vd_physics::worldgen::realm_regions_for(0);
                 row(
                     r.realm,
                     r.parent,
-                    r.center.delta_m(LatticePos::ORIGIN, r.frame.tier()),
+                    r.centre_m(&regions)
+                        .expect("THE world's forest holds every child's parent"),
                     bag,
                 )
             })

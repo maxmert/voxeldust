@@ -1382,7 +1382,7 @@ fn g_look_wake_the_interior_band_sits_inside_the_shell_and_a_vacated_system_reap
     // offsets).
     let placement_at = |row: &vd_core::geometry::RealmRegion, tick: u64| -> DVec3 {
         movers.get(&row.realm).map_or_else(
-            || row.center.offset(),
+            || row.center.in_parents_frame().offset(),
             |elements| {
                 vd_physics::celestial::orbital_state(
                     elements,

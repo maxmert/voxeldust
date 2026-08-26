@@ -92,8 +92,10 @@ pub(crate) fn placement_row(
     match moving.get(&r.realm) {
         Some(motion) => (motion.0)(secs),
         None => FramePlacement {
-            origin_cell: r.center.cell(),
-            origin: r.center.offset(),
+            // The centre AS THE PARENT AUTHORED IT — this row is a placement in the parent's own
+            // frame, so it carries the parent's own numbers verbatim, unit and all.
+            origin_cell: r.center.in_parents_frame().cell(),
+            origin: r.center.in_parents_frame().offset(),
             velocity: DVec3::ZERO,
             orientation: DQuat::IDENTITY,
             angular_velocity: DVec3::ZERO,
