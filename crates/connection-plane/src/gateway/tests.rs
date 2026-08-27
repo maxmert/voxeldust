@@ -1346,6 +1346,15 @@ fn a_window_row_before_its_engine_is_dropped_fail_closed_and_counted_apart() {
         added: vec![RealmId::Planet(7)],
         removed: Vec::new(),
     };
+    // ★ S10: the STATIC roster arrives on its own reliable arm. A realm whose children do not move
+    // states its roster here and nowhere else, so this arm has to reach the same ingest the frame does
+    // — otherwise every static child's marker is refused as unvouched, silently and only at scale.
+    let statics_for = |window: WindowId| ShardToGateway::WindowStaticRows {
+        realm_fence: Fence(1),
+        window,
+        authored_at: vd_core::UniverseTick(5),
+        rows: vec![roster_row],
+    };
     // PREROSTER: a marker arriving before the author's FIRST level finds no attested roster
     // to vouch for its subject — refused apart, fail-closed, not "misauthored".
     let _ = rig.tick(vec![wire(
@@ -1360,6 +1369,8 @@ fn a_window_row_before_its_engine_is_dropped_fail_closed_and_counted_apart() {
         // admissible marker about a child the author's OWN roster rows vouch for.
         wire(SHARD, MsgClass::Control, &frame_for(WindowId(1))),
         wire(SHARD, MsgClass::RealmSnapshot, &frame_for(WindowId(1))),
+        // ★ S10: the static roster on its own arm, through the SAME admission every window row runs.
+        wire(SHARD, MsgClass::Control, &statics_for(WindowId(1))),
         wire(SHARD, MsgClass::Control, &membership),
         wire(
             SHARD,
@@ -1440,9 +1451,10 @@ fn a_window_row_before_its_engine_is_dropped_fail_closed_and_counted_apart() {
     }
     assert_eq!(
         rig.stats().window_rows_ingested,
-        6,
-        "each admitted row ingested (two frames, membership, look, marker) PLUS the parked \
-         preroster marker drained by the first level (Slice C1: parked, never lost — the \
+        // ★ 6 → 7 AT S10: the static roster is its own admitted row, on its own reliable arm.
+        7,
+        "each admitted row ingested (two frames, THE STATIC ROSTER, membership, look, marker) PLUS \
+         the parked preroster marker drained by the first level (Slice C1: parked, never lost — the \
          send-once lane cannot re-send it)"
     );
     assert_eq!(rig.stats().window_body_stale, 1, "the older look refused");

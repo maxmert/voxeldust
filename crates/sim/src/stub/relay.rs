@@ -20,7 +20,6 @@ use bevy_ecs::prelude::Resource;
 use std::collections::{BTreeMap, BTreeSet};
 use vd_core::pose::RealmId;
 use vd_core::realm_coord::RealmCoord;
-use vd_core::realm_path::RealmPath;
 use vd_core::{Fence, NodeId, TickId, UniverseTick};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{DirectoryKey, DirectoryOp};
@@ -115,16 +114,22 @@ pub(crate) struct InterestEntry {
     pub(crate) fence: Fence,
     pub(crate) at: UniverseTick,
     pub(crate) seen: TickId,
-    pub(crate) look_inside: u8,
+    /// How far away the nearest outside looker is, or `None` for nobody. See the wire field for why
+    /// this is a distance and deliberately not a direction.
+    pub(crate) from_m: Option<f64>,
 }
 
 /// THE INTEREST EMISSION's per-child hysteresis latch (look horizon slice 4, the emitter half):
 /// which direct children this realm currently asserts interest INTO — present = inside the
 /// child's interior band (spin-up at the child's interior reach, release at reach + the derived
-/// lead). The falling edge ships one explicit `0`; silence is the receiver's backstop. Keyed by
-/// `RealmPath` like the AoI membership ledger; pruned to the live child roster each pass.
+/// lead). The falling edge ships one explicit `0`; silence is the receiver's backstop.
+///
+/// ★ KEYED BY THE CHILD'S OWN `RealmId` (slice S10), like the AoI membership ledger it mirrors — both
+/// were keyed by the full lineage path, which allocated a list per lookup for a question about identity.
+/// This latch only ever holds one shard's own direct children, so an id cannot collide. Pruned to the
+/// live child roster each pass.
 #[derive(Resource, Debug, Default)]
-pub struct InterestEmitLatch(pub(crate) BTreeSet<RealmPath>);
+pub struct InterestEmitLatch(pub(crate) BTreeSet<RealmId>);
 
 /// THE Q2 RELAY FORWARD (Slice C1 — the parent half; owner-approved 2026-08-16, cited on
 /// [`RelayHeld`]): prune the holder on the derived retain TTL, then forward every held sealed
@@ -188,23 +193,43 @@ pub(crate) fn relay_entry_digest(
     own: &[u8],
     interior: &[vd_wire::intershard::InteriorRelay],
 ) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let fold = |h: u64, byte: &u8| (h ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
-    let h = fence
-        .0
-        .to_le_bytes()
-        .iter()
-        .chain(own)
-        .fold(FNV_OFFSET, fold);
+    let h = fnv1a_from(FNV_OFFSET, &fence.0.to_le_bytes());
+    let h = fnv1a_from(h, own);
     interior.iter().fold(h, |h, e| {
-        postcard::to_allocvec(&e.child)
-            .expect("closed wire enums serialize infallibly")
-            .iter()
-            .chain(&e.child_fence.0.to_le_bytes())
-            .chain(&e.own)
-            .fold(h, fold)
+        let h = fnv1a_from(
+            h,
+            &postcard::to_allocvec(&e.child).expect("closed wire enums serialize infallibly"),
+        );
+        let h = fnv1a_from(h, &e.child_fence.0.to_le_bytes());
+        fnv1a_from(h, &e.own)
     })
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// THE ONE DIGEST FOLD in this crate — FNV-1a 64, continued from `h` so a digest over several parts
+/// is a chain of these rather than a second definition of the same arithmetic.
+fn fnv1a_from(h: u64, bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(h, |h, b| (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME))
+}
+
+/// A send-on-change baseline for ONE statement's bytes (slice S10).
+///
+/// ★ WHY THE BODY BASELINE IS A DIGEST NOW. It used to keep the WHOLE BAG per subject — one heap
+/// vector per direct child, held for the life of the window, compared byte-by-byte every tick and
+/// cloned again on every change. At the target census that is 150,000 vectors held per subscriber,
+/// 150,000 comparisons per tick, and 150,000 frees plus 150,000 allocations on every keep-alive beat,
+/// because the beat clears the baselines by design.
+///
+/// The relay lane one field below already solved this exact problem this exact way, and its own note
+/// carries the safety argument verbatim: a collision "costs one deferred re-send healed by the
+/// keep-alive re-assert, never a wrong byte on the wire". The keep-alive that made the old form
+/// expensive is the same beat that heals the new form's one failure mode.
+pub(crate) fn statement_digest(bytes: &[u8]) -> u64 {
+    fnv1a_from(FNV_OFFSET, bytes)
 }
 
 /// THE Q2 RELAY RECEIVE (Slice C1 — the parent's ingress; owner-approved 2026-08-16, cited on
@@ -291,7 +316,12 @@ pub(crate) fn on_realm_interest(
         }
         return;
     }
-    if ri.look_inside > 1 {
+    // ★ THE LAWFUL-VALUE GUARD, unchanged in spirit (S10): it refused a byte above 1; it now refuses a
+    // distance that is not a distance. `is_some_and` so the `None` case — nobody looking — is lawful.
+    if ri
+        .look_inside_from_m
+        .is_some_and(|d| !d.is_finite() | (d < 0.0))
+    {
         stats.realm_interest_unlawful += 1;
         return;
     }
@@ -307,7 +337,7 @@ pub(crate) fn on_realm_interest(
         fence: ri.parent_fence,
         at: ri.at,
         seen: clock.local_tick,
-        look_inside: ri.look_inside,
+        from_m: ri.look_inside_from_m,
     });
 }
 
@@ -352,12 +382,12 @@ pub(crate) fn build_relay_interior(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_realm_interest(
     band: &vd_core::geometry::AoiConfig,
-    path: &RealmPath,
+    realm: RealmId,
     child_coord: &RealmCoord,
     route: Option<&NodeId>,
     min_dist: f64,
     bit_due: bool,
-    latch: &mut BTreeSet<RealmPath>,
+    latch: &mut BTreeSet<RealmId>,
     realm_fence: Fence,
     tick: UniverseTick,
     outbox: &mut OutboundBox,
@@ -366,7 +396,7 @@ pub(crate) fn emit_realm_interest(
     if band.spin_up_r_m() <= 0.0 {
         return; // a leaf (or an inert world): no interior, no interest — the byte never exists
     }
-    let was = latch.contains(path);
+    let was = latch.contains(&realm);
     let now = band.in_range(was, min_dist);
     let Some(&node) = route else {
         return; // head not resolved yet — the eager cadence read lands it; the next beat sends
@@ -381,14 +411,18 @@ pub(crate) fn emit_realm_interest(
                 child: child_coord.clone(),
                 parent_fence: realm_fence,
                 at: tick,
-                look_inside: u8::from(now),
+                // ★ THE DISTANCE ITSELF (S10). `min_dist` is the least distance from any occupancy
+                // observer to this child — the number this function ALREADY computed the band test
+                // from and then threw away. Sending it costs nothing new to derive and is what lets
+                // the child wake a few of its own children instead of all of them.
+                look_inside_from_m: now.then_some(min_dist),
             }),
         );
         stats.realm_interest_sent += 1;
     }
     if now {
-        latch.insert(path.clone());
+        latch.insert(realm);
     } else {
-        latch.remove(path);
+        latch.remove(&realm);
     }
 }

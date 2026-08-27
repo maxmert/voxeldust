@@ -263,6 +263,16 @@ pub(crate) fn on_shard_control(
                 stats,
             );
         }
+        ShardToGateway::WindowStaticRows { window, rows, .. } => {
+            on_window_row(
+                from,
+                window,
+                WindowRow::StaticRows(rows),
+                config,
+                sessions,
+                stats,
+            );
+        }
         ShardToGateway::WindowBody {
             window,
             subject,

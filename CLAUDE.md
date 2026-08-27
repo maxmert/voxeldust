@@ -11,9 +11,27 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 - `docs/design/*.md` — the hardened subsystem designs (connection_plane, transfer_protocol,
   test_harness, identity_persistence, generic_transfer, sealed_shards, coverage_e2e).
 - `docs/design/integration.json` — 19 binding cross-design conflict resolutions + glossary.
-- `docs/design/owner_decisions_2026-08-24.md` — ★ the LATEST binding rulings: the SL1 rewrite, the SL2
-  clarification, SL9, the movement law (a parent never sets a speed), and the nine Universe/Galaxy/sky
-  answers. Later than every design doc; where they disagree, it wins.
+- `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
+  newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
+  agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-08-27_seed_and_secrecy.md` — ★ WHAT A SEED MAY DECIDE. Anything a fixed seed
+    alone determines must be SAFE TO PUBLISH; anything VALUABLE must depend on world state that CHANGES.
+    Binds the block system BEFORE it starts: a block's substance may not be a pure function of
+    (position, seed). Secrecy is not the cure — one world + many players makes any static map public by
+    wiki, and a shipped generator inverts to its seed. ⚠ Does NOT authorise client-side derivation;
+    that collides with the client-only-renders law and is OPEN.
+  - `owner_decisions_2026-08-26_movement.md` — ★ THE MOVEMENT CONTRACT. Two lanes upward: **acceleration
+    and torque ONLY, per tick, in the child's own frame** (what I am DOING), and **mass + cross-section +
+    drag coefficient ON CHANGE ONLY** (what I AM). **Velocity NEVER crosses upward** — it is half a
+    placement, and only the parent writes those. Downward: the authored placement, stamped, read-only,
+    one hop. The width-over-three-minutes speed rule is RETIRED for band-width ÷ tick. Gravity never
+    needed a child's mass (it cancels); drag and collisions do. Still open: the ungoverned rock, the
+    wake-up radius. **WARP IS A DECLARED STATE** with a FIVE-TEST GATE and a CLOSED, reviewed set —
+    a declared state says what a ship IS, never what it wants; it must survive an empty ship; and it must
+    not move you by itself. An autopilot is software pressing the stick and gets NO special path.
+  - `owner_decisions_2026-08-26_s9.md` — the S9 walk (hold/derive/send, identity naming, the star cap).
+  - `owner_decisions_2026-08-24.md` — the SL1 rewrite, the SL2 clarification, SL9, the movement law
+    (a parent never sets a speed), and the nine Universe/Galaxy/sky answers.
 - `docs/design/DEFERRED.md` — the binding registry of every interim/stub: WHAT proper solution is missing,
   WHERE it lives, WHEN (which slice/phase) it lands. A phase isn't done until its entries flip to 🟩.
 - `docs/audit/` — evidence for why the old architecture was unfixable (root causes R1–R10).

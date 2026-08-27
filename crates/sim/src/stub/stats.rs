@@ -409,6 +409,10 @@ pub struct StubStats {
     /// EGRESS — `WindowBody` statements shipped (send-on-change + on-open, NEVER per-tick; a
     /// steady non-zero rate here means a look/marker source is flapping).
     pub window_bodies_sent: u64,
+    /// THE STATIC ROSTER's sends (slice S10). Expected to reach a small number and STOP: a realm whose
+    /// children do not move states them once per subscriber, then only on a keep-alive re-assert. A
+    /// counter that keeps climbing on a static world means the send-on-change baseline is not holding.
+    pub window_static_rows_sent: u64,
     /// EGRESS — `WindowMembership` verdicts shipped (diffs of the parent's SL7 fold, on the
     /// fold's own change rhythm).
     pub window_memberships_sent: u64,

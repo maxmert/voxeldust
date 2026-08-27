@@ -774,6 +774,9 @@ pub(crate) enum WindowRow {
         added: Vec<RealmId>,
         removed: Vec<RealmId>,
     },
+    /// The author's STATIC roster (slice S10) — its direct children that do not move, stated once on
+    /// the reliable lane instead of riding every tick's frame.
+    StaticRows(Vec<vd_wire::channels::RealmSnap>),
 }
 
 /// THE WINDOW LANE's ingest rule (docs/design/window_lane.md §2.2/§2.6.6), ONE rule for every row
@@ -842,6 +845,13 @@ pub(crate) fn on_window_row(
         WindowRow::Membership { added, removed } => {
             held.ingest.ingest_membership(&added, &removed);
             stats.window_rows_ingested += 1;
+        }
+        WindowRow::StaticRows(rows) => {
+            held.ingest.ingest_static_rows(rows);
+            stats.window_rows_ingested += 1;
+            // A roster landing can un-park a marker that was waiting for one: the static lane is the
+            // only roster a realm with no moving children ever states.
+            drain_parked(held, &window_tuning(config), stats);
         }
     }
 }

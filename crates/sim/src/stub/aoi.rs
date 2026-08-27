@@ -24,7 +24,6 @@ use vd_core::glam::DVec3;
 use vd_core::placement::PlacementBook;
 use vd_core::pose::{LatticePos, RealmId, Tier};
 use vd_core::realm_coord::RealmCoord;
-use vd_core::realm_path::RealmPath;
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, TickId, UniverseTick};
 use vd_wire::intershard::{DemandVerb, InterShardFlow, RealmDemand};
 use vd_wire::seams::directory::{DirectoryKey, DirectoryOp};
@@ -113,17 +112,30 @@ pub(crate) struct AoiObserver {
     pub(crate) pos: LatticePos,
     pub(crate) vel: DVec3,
     pub(crate) reach: f64,
+    /// SET ONLY FOR THE INTEREST PROXY (S10): how far the outside looker is from THIS realm's centre.
+    /// `Some` flips the distance rule below from "how far is the child from me" to "how near could the
+    /// looker be to that child" — see the proxy's construction for why the direction is absent by law.
+    pub(crate) outside_from_m: Option<f64>,
     pub(crate) origin: ObserverOrigin,
 }
 
 /// Per-`(observer, child)` AoI hysteresis + grace (RLM Step 2 → VU S0 per-observer). Keyed by the
-/// OBSERVER plus the child `RealmPath` (globally unique — Step 3 dedups on `child.path()`), so each
+/// OBSERVER plus the child's own `RealmId`, so each
 /// occupant carries its own acquire/grace latch and the child-level demand is the UNION over observers
 /// ([`union_verb`]). Twin of [`ContainmentProgress`]. `BTreeMap` (no default-hasher HashMap in sim —
 /// determinism). Default empty; lazily evicted each tick to the current (observer × direct-child) roster
 /// (`retain_live`).
 #[derive(Resource, Debug, Default)]
-pub struct AoiMembership(pub BTreeMap<(ObserverId, RealmPath), AoiState>);
+/// ★ KEYED BY IDENTITY, NOT BY LINEAGE (slice S10). This was keyed by the child's full `RealmPath` — a
+/// heap-allocated list of levels, CLONED TWICE PER (observer, child) PAIR every tick and compared level by
+/// level on every lookup. At the target census of 150,000 children that is 300,000 list allocations per
+/// tick for a question about identity. A direct child's `RealmId` answers the same question: this map is
+/// SHARD-LOCAL and only ever holds one shard's own direct children, so no two keys can collide, and the
+/// path is a pure function of the id for the one or two children that actually get a message.
+///
+/// It also makes the map contiguous per observer, which is the primitive the S12 fold inversion needs
+/// (D-MOVE-1 / M8): "which children does THIS observer hold a latch for" becomes a range read.
+pub struct AoiMembership(pub BTreeMap<(ObserverId, RealmId), AoiState>);
 
 /// One direct child's AoI state: `was_in` (acquired — for the hysteresis) + `grace_remaining` (ticks a
 /// would-be release is held after the last in-range observation).
@@ -271,7 +283,7 @@ fn aoi_decide(
     // budget ⇒ every filter below reduces to the old ownership test.
     holds: &HandoffHolds,
     realm_fence: Fence,
-    membership: &mut BTreeMap<(ObserverId, RealmPath), AoiState>,
+    membership: &mut BTreeMap<(ObserverId, RealmId), AoiState>,
     outbox: &mut OutboundBox,
     parent_node: Option<NodeId>,
     // Lane cure (finding 41) — the "parent has been told" latch that derives the bit's adopt edge;
@@ -293,7 +305,7 @@ fn aoi_decide(
     // emission latch (the interior-band hysteresis); plus the attested child-head routes the
     // emission sends on.
     interest: &mut InterestHeld,
-    interest_latch: &mut BTreeSet<RealmPath>,
+    interest_latch: &mut BTreeSet<RealmId>,
     child_nodes: &ChildRealmNodes,
     stats: &mut StubStats,
 ) {
@@ -376,6 +388,7 @@ fn aoi_decide(
             pos: pose.pos,
             vel: pose.vel,
             reach: region.shape.circumscribed_extent(),
+            outside_from_m: None,
             origin: ObserverOrigin::Occupancy,
         });
 
@@ -392,21 +405,38 @@ fn aoi_decide(
     // exactly as it left it instead of re-spinning it. And an OCCUPIED CHILD is counted here too, which
     // is SL7's liveness rule made structural: no occupants AND no live child is exactly
     // `observers.is_empty()`.
-    // Look horizon slice 4 (§3.4.3, THE DOWN-PROXY): a realm holding a live interest byte
-    // inserts ONE synthetic observer at its OWN centre (the origin of its own frame — the one
-    // position a realm lawfully has), with reach equal to its own extent, and runs this very
-    // fold unchanged. INTEREST-derived at construction — the structural cascade cap: it drives
-    // demand and the shared verdict, but never the Empty report, never the bit, and never an
-    // interest emission of its own.
+    // Look horizon slice 4 (§3.4.3, THE DOWN-PROXY): a realm holding a live interest signal inserts
+    // ONE synthetic observer at its OWN centre (the origin of its own frame — the one position a realm
+    // lawfully has) and runs this very fold unchanged. INTEREST-derived at construction — the
+    // structural cascade cap: it drives demand and the shared verdict, but never the Empty report,
+    // never the bit, and never an interest emission of its own.
+    //
+    // ★ IT NO LONGER WAKES EVERY CHILD (slice S10, owner-approved under SL6 2026-08-26). It used to
+    // carry `reach = my own extent`, so every child's distance clamped to ZERO and every band admitted
+    // it — 150,000 realms woken every tick at the target census, by construction rather than by
+    // accident, and unfixable by any change of loop shape.
+    //
+    // The signal now carries HOW FAR the looker is (`from_m`). The looker's DIRECTION is unknown by
+    // law (SL2 forbids a pose crossing), so the honest distance to one of my children is the NEAREST
+    // the looker could possibly be: its distance to me, less the child's distance from my centre. That
+    // is computed in the pair loop below.
+    //
+    // The visibility test itself is the child's OWN existing band — which worldgen already derives
+    // from angular size — so nothing new decides what is worth waking, and no threshold constant had
+    // to cross into this crate.
+    // The `own_shape` precondition is KEPT (S10) even though the reach no longer comes from it: a realm
+    // that cannot state its own boundary has no business reasoning about what is inside it, and dropping
+    // the guard with the reach would have been a silent behaviour change in the degenerate boot.
     let interest_proxy = interest
         .0
-        .filter(|e| e.look_inside == 1)
-        .and_then(|_| regions.own_shape(config.realm))
-        .map(|own| AoiObserver {
+        .and_then(|e| e.from_m)
+        .filter(|_| regions.own_shape(config.realm).is_some())
+        .map(|from_m| AoiObserver {
             id: ObserverId::Interest,
             pos: LatticePos::ORIGIN,
             vel: DVec3::ZERO,
-            reach: own.shape.circumscribed_extent(),
+            reach: 0.0,
+            outside_from_m: Some(from_m),
             origin: ObserverOrigin::Interest,
         });
     let observers: Vec<AoiObserver> = dots
@@ -418,6 +448,7 @@ fn aoi_decide(
             pos: d.pose.pos,
             vel: d.pose.vel,
             reach: 0.0,
+            outside_from_m: None,
             origin: ObserverOrigin::Occupancy,
         })
         .chain(
@@ -430,6 +461,7 @@ fn aoi_decide(
                     pos: t.pose.pos,
                     vel: t.pose.vel,
                     reach: 0.0,
+                    outside_from_m: None,
                     origin: ObserverOrigin::Occupancy,
                 }),
         )
@@ -525,9 +557,9 @@ fn aoi_decide(
     // Same transitions, same bands, same grace as the demand — read, never re-derived.
     let mut fold_verdict: BTreeSet<RealmId> = BTreeSet::new();
 
-    let mut live_keys = BTreeSet::<(ObserverId, RealmPath)>::new();
-    // Look horizon slice 4 — the child paths seen this pass (the interest latch's evict set).
-    let mut live_paths = BTreeSet::<RealmPath>::new();
+    let mut live_keys = BTreeSet::<(ObserverId, RealmId)>::new();
+    // Look horizon slice 4 — the children seen this pass (the interest latch's evict set).
+    let mut live_realms = BTreeSet::<RealmId>::new();
     for (region, pose) in &placements {
         // A Ship child has no lineage coord to demand/draw by until P8 (D-SHIP-1): excluded from
         // the AoI/demand/render fold, counted, never a panic — see `region_level`.
@@ -536,15 +568,14 @@ fn aoi_decide(
             continue;
         };
         let child_coord = own_coord.child(level);
-        let path = child_coord.path().clone();
-        live_paths.insert(path.clone());
+        live_realms.insert(region.realm);
         let child_pos = pose.pos; // own frame (== the placements' frame), carried WHOLE
 
         // Was the child kept-alive by ANY observer at tick START (its acquire latch held)? — the input to
         // the SpinUp-vs-KeepAlive union split, read BEFORE this tick's latch updates.
         let was_demanded = observers.iter().any(|o| {
             membership
-                .get(&(o.id, path.clone()))
+                .get(&(o.id, region.realm))
                 .is_some_and(|s| s.was_in)
         });
         // Fold each observer's own hysteresis machine; a child is demanded THIS tick iff ANY observer's
@@ -564,14 +595,20 @@ fn aoi_decide(
         // (SL7's sibling-warming stays). Bitwise `&` (both operands pure, HR5).
         let mut interest_min_dist = f64::INFINITY;
         for o in &observers {
-            let key = (o.id, path.clone());
-            live_keys.insert(key.clone());
+            let key = (o.id, region.realm);
+            live_keys.insert(key);
             // The observer's own extent SHORTENS the distance (never below zero): an occupied child
             // reaches to its own surface, so it warms a sibling as soon as any of its occupants
             // could be that close — the SL7 error bound made operational (warm early, never late).
-            let dist = (occupant_child_dist(o.pos, o.vel, child_pos, own_tier, horizon_s)
-                - o.reach)
-                .max(0.0);
+            let raw = occupant_child_dist(o.pos, o.vel, child_pos, own_tier, horizon_s);
+            let dist = match o.outside_from_m {
+                // THE LOOKER IS OUTSIDE THIS REALM, and its direction is unknown by law. `raw` is how
+                // far this child sits from my centre; `d_out` is how far the looker sits from my
+                // centre. The nearest the two could be is the difference — the conservative reading,
+                // which over-wakes and never under-wakes.
+                Some(d_out) => (d_out - raw).max(0.0),
+                None => (raw - o.reach).max(0.0),
+            };
             if (o.origin == ObserverOrigin::Occupancy) & (o.id != ObserverId::Child(region.realm)) {
                 interest_min_dist = interest_min_dist.min(dist);
             }
@@ -657,7 +694,7 @@ fn aoi_decide(
         // on the AoI beat (plus the rising edge), an explicit 0 on the falling edge.
         emit_realm_interest(
             &region.interior_band,
-            &path,
+            region.realm,
             &child_coord,
             child_nodes.0.get(&region.realm),
             interest_min_dist,
@@ -670,7 +707,7 @@ fn aoi_decide(
         );
     }
     // Evict interest latches for children no longer on the roster (mirrors `retain_live`).
-    interest_latch.retain(|p| live_paths.contains(p));
+    interest_latch.retain(|r| live_realms.contains(r));
     // THE WINDOW LANE (§2.9 step 5): ship each open window its SL7 membership verdict — the fold
     // above, diffed per window against what THAT window was already told (ids only; the receiver
     // never re-derives AoI). Hysteresis, bands, grace and the demand path are untouched: this
@@ -696,8 +733,8 @@ fn aoi_decide(
     // restored on this lane). A dot mid-hand-off keeps its parent's interest through `speaks_for` —
     // it counts at the Empty gate, so the bit keeps beating while somebody is still leaving.
     //
-    // Evict any (observer, child-path) pair no longer live (an observer that left OR a child dropped from
-    // the roster) — the DRY primitive, keyed by `(ObserverId, RealmPath)`.
+    // Evict any (observer, child) pair no longer live (an observer that left OR a child dropped from
+    // the roster) — the DRY primitive, keyed by `(ObserverId, RealmId)`.
     retain_live(membership, &live_keys);
 }
 

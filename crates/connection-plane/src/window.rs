@@ -95,6 +95,16 @@ pub struct WindowLevel {
     pub rows: Vec<RealmSnap>,
 }
 
+/// Fold the static roster into a level's rows. A realm the level already states WINS: a live row from
+/// the per-tick lane must never be shadowed by a stale static one.
+fn merge_static(rows: &mut Vec<RealmSnap>, statics: &[RealmSnap]) {
+    for s in statics {
+        if !rows.iter().any(|r| r.realm == s.realm) {
+            rows.push(*s);
+        }
+    }
+}
+
 /// Why an ingested statement was refused (returned to the caller so every refusal is COUNTED,
 /// never silent — the failure-mode table of §2.6.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,13 +155,29 @@ pub struct WindowIngest {
     /// head-anchored TTL as the looks ([`WindowIngest::prune_stale`]), so a subject whose
     /// forwards stop falls back to its parent's marker together with its picture.
     interior_admitted: BTreeMap<RealmId, (UniverseTick, ())>,
+    /// THE STATIC ROSTER (slice S10) — the author's direct children that DO NOT MOVE, stated ONCE on
+    /// the reliable lane instead of riding every tick's frame (285 MB/s per subscriber at the target
+    /// census, for bytes that never change).
+    ///
+    /// ★ IT IS MERGED BACK INTO EVERY LEVEL AT INGEST, on purpose. Everything downstream — the compose
+    /// fold, the marker admission's roster vouch, the confirmed gate — reads a level's `rows` and
+    /// expects the FULL roster there. Teaching each of them about a second source would be three
+    /// chances to get it wrong; re-uniting the two here means the saving is on the WIRE, where the
+    /// problem was, and nothing downstream can tell the difference.
+    ///
+    /// ⚠ The ring therefore still holds one merged copy per retained tick. That is MEMORY, not
+    /// bandwidth, and it is a separate owed item — see D-FO-7.
+    static_rows: Vec<RealmSnap>,
 }
 
 impl WindowIngest {
     /// Ingest one attested `WindowFrame` level. Latest-wins per tick (a re-delivered stamp
     /// replaces); an out-of-order tick still inside the ring is inserted in stamp order (the
     /// common-tick fold wants it); a tick behind the ring is refused.
-    pub fn ingest_frame(&mut self, level: WindowLevel, tuning: &WindowTuning) -> Ingested {
+    pub fn ingest_frame(&mut self, mut level: WindowLevel, tuning: &WindowTuning) -> Ingested {
+        // S10: re-unite the two lanes. A realm the frame already states WINS — a mover's live row must
+        // never be shadowed by a stale static one, which is the only way the two sets can overlap.
+        merge_static(&mut level.rows, &self.static_rows);
         let head = self.levels.back().map(|l| l.at);
         let Some(head) = head else {
             self.levels.push_back(level);
@@ -173,6 +199,16 @@ impl WindowIngest {
             self.levels.pop_front();
         }
         Ingested::Applied
+    }
+
+    /// Ingest the author's STATIC roster (slice S10) — stated once on the reliable lane. Stored for
+    /// every level still to come, and merged into the levels already retained, so a roster that arrives
+    /// after a frame is not invisible until the next one.
+    pub fn ingest_static_rows(&mut self, rows: Vec<RealmSnap>) {
+        self.static_rows = rows;
+        for level in &mut self.levels {
+            merge_static(&mut level.rows, &self.static_rows);
+        }
     }
 
     /// Ingest one attested `WindowBody`. Newest `authored_at` wins; an older statement is
@@ -265,7 +301,10 @@ impl WindowIngest {
     /// confirmed hops, §2.6.2.)
     #[must_use]
     pub fn confirmed(&self) -> bool {
-        !self.levels.is_empty()
+        // S10: a static world states its roster on the reliable lane and may carry NO rows on any
+        // frame. Without this arm a marker about a static child would park forever waiting for a
+        // roster that already arrived by another door.
+        !self.levels.is_empty() | !self.static_rows.is_empty()
     }
 
     /// Does the author's newest roster name `realm` as a direct child? THE stream-only child-set
@@ -273,9 +312,13 @@ impl WindowIngest {
     /// author's own attested full-roster rows, nothing else.
     #[must_use]
     pub fn rosters(&self, realm: RealmId) -> bool {
+        // S10: the roster has two doors. A static child is vouched by the reliable roster even before
+        // any level lands; a mover by the newest level, as always. Consulting only the level would
+        // refuse every static child's marker as unvouched — silently, and only at real scale.
         self.levels
             .back()
             .is_some_and(|l| l.rows.iter().any(|r| r.realm == realm))
+            | self.static_rows.iter().any(|r| r.realm == realm)
     }
 
     /// The author's newest attested direct-child roster as a set — THE stream-only child list
@@ -1206,6 +1249,114 @@ mod tests {
 
     fn level(at: UniverseTick, hop: Option<HopRow>, rows: Vec<RealmSnap>) -> WindowLevel {
         WindowLevel { at, hop, rows }
+    }
+
+    /// ★ THE TWO LANES RE-UNITE AT THE GATEWAY (slice S10; owner-approved 2026-08-27).
+    ///
+    /// The shard stopped putting a static child's row on the per-tick frame — at the target census that
+    /// repetition costs 285 MB/s per subscriber for bytes that never change, and the 14.2 MB message
+    /// does not fit a datagram at all. The roster now arrives ONCE on the reliable lane.
+    ///
+    /// Everything downstream — the compose fold, the marker admission's roster vouch, the confirmed
+    /// gate — reads a level's rows and expects the FULL roster there. So the two are re-united HERE, and
+    /// this pins all three consequences, each of which fails differently:
+    #[test]
+    fn a_static_roster_re_unites_with_every_level_and_a_mover_wins() {
+        let mut ing = WindowIngest::default();
+        let stat = row(
+            RealmId::Planet(43),
+            planet(),
+            sys(),
+            DVec3::new(9.0, 0.0, 0.0),
+            T,
+        );
+
+        // (1) THE ROSTER VOUCH WORKS BEFORE ANY LEVEL LANDS. Without this a realm whose children are
+        // all static would refuse every one of their markers as unvouched — silently, and only at real
+        // scale, because today's fixtures have a mover in them.
+        assert!(!ing.confirmed(), "nothing stated yet");
+        assert!(!ing.rosters(RealmId::Planet(43)));
+        ing.ingest_static_rows(vec![stat]);
+        assert!(ing.confirmed(), "a static roster confirms the author");
+        assert!(
+            ing.rosters(RealmId::Planet(43)),
+            "vouched by the static lane"
+        );
+
+        // (2) A LEVEL ARRIVING AFTERWARDS CARRIES BOTH. The frame states only the mover; the composed
+        // level must still hold the full roster, or a static child vanishes from the picture.
+        let mover = row(
+            RealmId::Planet(42),
+            planet(),
+            sys(),
+            DVec3::new(1.0, 0.0, 0.0),
+            T,
+        );
+        assert_eq!(
+            ing.ingest_frame(level(T, None, vec![mover]), &tuning()),
+            Ingested::Applied
+        );
+        let names: Vec<RealmId> = ing
+            .level_at(T)
+            .expect("stored")
+            .rows
+            .iter()
+            .map(|r| r.realm)
+            .collect();
+        assert_eq!(names, vec![RealmId::Planet(42), RealmId::Planet(43)]);
+
+        // (3) A MOVER WINS OVER A STALE STATIC ROW OF THE SAME REALM — the only way the two sets can
+        // overlap, and the one that would freeze a moving child at an old position if it went the other
+        // way. Drives the merge's "already stated" branch.
+        let mut ing2 = WindowIngest::default();
+        let stale = row(
+            RealmId::Planet(42),
+            planet(),
+            sys(),
+            DVec3::new(999.0, 0.0, 0.0),
+            T,
+        );
+        ing2.ingest_static_rows(vec![stale]);
+        let live = row(
+            RealmId::Planet(42),
+            planet(),
+            sys(),
+            DVec3::new(1.0, 0.0, 0.0),
+            T,
+        );
+        assert_eq!(
+            ing2.ingest_frame(level(T, None, vec![live]), &tuning()),
+            Ingested::Applied
+        );
+        let stored = ing2.level_at(T).expect("stored");
+        assert_eq!(stored.rows.len(), 1, "no duplicate row for one realm");
+        assert_eq!(
+            pm(&stored.rows[0].pose),
+            DVec3::new(1.0, 0.0, 0.0),
+            "the LIVE row won"
+        );
+
+        // (4) A ROSTER ARRIVING AFTER A LEVEL reaches the levels already retained — otherwise a static
+        // child would be invisible until the next frame, which on a static world is every frame.
+        let mut ing3 = WindowIngest::default();
+        let live = row(
+            RealmId::Planet(42),
+            planet(),
+            sys(),
+            DVec3::new(1.0, 0.0, 0.0),
+            T,
+        );
+        assert_eq!(
+            ing3.ingest_frame(level(T, None, vec![live]), &tuning()),
+            Ingested::Applied
+        );
+        assert_eq!(ing3.level_at(T).expect("stored").rows.len(), 1);
+        ing3.ingest_static_rows(vec![stat]);
+        assert_eq!(
+            ing3.level_at(T).expect("stored").rows.len(),
+            2,
+            "a late roster back-fills the levels already held"
+        );
     }
 
     /// The identity-orientation pre-inverted hop for a child sitting at `child_pos` in the

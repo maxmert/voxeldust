@@ -807,6 +807,30 @@ files. This is the second flag day.
 
 ### S10 — A PARENT'S COST STOPS GROWING WITH ITS CHILDREN
 
+> ⚠️ **SUPERSEDED IN PART — READ `owner_decisions_2026-08-26_movement.md` AND `owner_decisions_2026-08-24.md`
+> BEFORE BUILDING OR RELAYING THIS SECTION.**
+>
+> The governed-ceiling passage below plans to KEEP the approach governor and make its per-child walk cheap.
+> **The owner's movement law removes that governor** — its own words: *"this law removes that guarantee"*
+> about not being able to fly through a moon. A parent never sets a speed; a child hands up acceleration and
+> torque and the parent integrates.
+>
+> ⚠️ **BUT DO NOT DELETE IT IN THIS SLICE EITHER.** The governor is load-bearing TODAY: the realm ceiling is
+> not a cap above a speed, it IS the speed (D-MOVE-1), so removing it now pins every occupant at foot pace,
+> and S6 sized every band in the world from its guarantee. **In S10 the governor is simply NOT TOUCHED** —
+> optimising it is wasted work on something that is going away, and deleting it belongs to the force phase
+> (P5), together with the band re-solve. S10 therefore has FIVE mechanisms, not six.
+>
+> ⚠️ **AND S6's BAND NUMBERS ARE NOT SAFE ACROSS THAT CHANGE.** Slice 6 sized every band in the world FROM
+> the governor's guarantee, and measured the alternative as *"bands thousands of times larger than the
+> bodies they wrap"*. Removing the governor re-opens that solve.
+>
+> The other five mechanisms in this slice — the interest fold, the relay fingerprint, the keep-alive, the
+> level message, the client's per-delta clone — are unaffected and stand as written.
+>
+> *(This banner exists because the section was relayed to the owner as current on 2026-08-26, after the
+> ruling that overtook it. A plan agreeing with itself proves nothing.)*
+
 **Serves:** SL9, whose own text says this *"must be measured on a realm with many, not argued"*.
 
 **Delivers.** The interest fold inverted so it walks observers, which are bounded, rather than children,

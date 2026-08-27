@@ -3035,7 +3035,8 @@ fn two_players_in_two_realms_are_each_drawn_only_by_their_own_realm() {
             .0
             .iter()
             .filter(|((obs, _), st)| matches!(obs, vd_sim::stub::ObserverId::Dot(_)) & st.in_band())
-            .filter_map(|((_, path), _)| path.realm_id())
+            // ★ S10: the latch is keyed by the child's own id, so no lineage lookup is needed here.
+            .map(|((_, realm), _)| *realm)
             .collect()
     });
     assert!(

@@ -529,7 +529,7 @@ fn every_arm() -> Vec<InterShardFlow> {
             child: demand_child_coord(),
             parent_fence: Fence(8),
             at: UniverseTick(16),
-            look_inside: 1,
+            look_inside_from_m: Some(400.1),
         }),
     ]
 }

@@ -339,6 +339,48 @@ pub enum ShardToGateway {
         /// on a lawful flight).
         interior: Vec<crate::intershard::InteriorRelay>,
     },
+    /// THE WINDOW LANE's STATIC ROSTER (shard → gateway; owner-approved 2026-08-27 —
+    /// `owner_decisions_2026-08-27_seed_and_secrecy.md`, *"we're passing the Galaxy just once over
+    /// reliable lane"*): the author's direct children **that do not move**, stated ONCE instead of
+    /// twenty times a second.
+    ///
+    /// ★ WHY THIS ARM EXISTS — MEASURED, not argued. [`ShardToGateway::WindowFrame`] carries the
+    /// author's FULL direct-child roster on every tick, on the latest-wins UNRELIABLE lane, where
+    /// level-triggered repetition IS the loss story. At tens of rows that is a good trade. At the
+    /// target census of 150,000 star systems it is not a trade:
+    ///
+    /// | | |
+    /// |---|---|
+    /// | one `RealmSnap`, postcard-encoded | 95 bytes |
+    /// | the full roster | **14.2 MB** |
+    /// | at 20 Hz | **285 MB/s**, per subscriber |
+    ///
+    /// **and not one byte of it changed** — a galaxy's star systems do not move, and the world's own
+    /// `placement_rows.golden` pins a static child's row as byte-identical at ticks 0, 1,000 and
+    /// 50,000. 14.2 MB does not fit a datagram: that lane does not get slow at the census, it STOPS.
+    ///
+    /// **THE SPLIT IS BY WHETHER THE THING MOVES, not by what kind of thing it is.** A mover's row is
+    /// worth repeating cheaply and never worth retrying — next tick's value beats a resend of last
+    /// tick's. A static row is worth sending once and never worth repeating. So movers stay on the
+    /// frame and these ride here.
+    ///
+    /// Cadence: send-on-change + on-open, NEVER per-tick — which for a realm whose children do not
+    /// move means exactly ONCE, plus the keep-alive re-assert as the repair.
+    /// Classification: **ReDriven, reliable** (the session-reply lane), for the reason send-on-change
+    /// was refused on the frame: over an unreliable lane a dropped row would lose a star forever, and
+    /// a late joiner would never be served. Reliability is what makes send-on-change lawful here.
+    /// Attestation (fail-closed): the sender must be the roster head for the stating realm, the same
+    /// predicate every other window arm runs.
+    /// APPENDED variant (postcard-safe additive shape).
+    WindowStaticRows {
+        realm_fence: Fence,
+        window: WindowId,
+        /// When the author stated it (send-on-change: NOT a per-tick stamp; the newest wins).
+        authored_at: UniverseTick,
+        /// The author's direct children that DO NOT MOVE, in the author's own frame. A moving child
+        /// is deliberately absent — it rides the per-tick frame, where repetition is its loss story.
+        rows: Vec<RealmSnap>,
+    },
 }
 
 impl ShardToGateway {
@@ -357,7 +399,8 @@ impl ShardToGateway {
             | ShardToGateway::WindowFrame { .. }
             | ShardToGateway::WindowBody { .. }
             | ShardToGateway::WindowMembership { .. }
-            | ShardToGateway::WindowRelayed { .. } => None,
+            | ShardToGateway::WindowRelayed { .. }
+            | ShardToGateway::WindowStaticRows { .. } => None,
         }
     }
 
@@ -381,7 +424,8 @@ impl ShardToGateway {
             | ShardToGateway::WindowFrame { .. }
             | ShardToGateway::WindowBody { .. }
             | ShardToGateway::WindowMembership { .. }
-            | ShardToGateway::WindowRelayed { .. } => None,
+            | ShardToGateway::WindowRelayed { .. }
+            | ShardToGateway::WindowStaticRows { .. } => None,
         }
     }
 }
@@ -1105,6 +1149,20 @@ mod tests {
                     }]),
                 }],
             },
+            ShardToGateway::WindowStaticRows {
+                realm_fence: Fence(3),
+                window: WindowId(2),
+                authored_at: UniverseTick(103),
+                rows: vec![RealmSnap {
+                    realm: RealmId::System(8),
+                    frame: FrameRef::SystemSpace { system_seed: 8 },
+                    pose: StampedPose::at_rest(
+                        FrameRef::SystemSpace { system_seed: 7 },
+                        vd_core::glam::DVec3::new(130.0, 0.0, 0.0),
+                        UniverseTick(103),
+                    ),
+                }],
+            },
         ]
     }
 
@@ -1167,6 +1225,8 @@ mod tests {
                 ShardToGateway::WindowMembership { .. } => 9,
                 // The Q2 relay forward leg holds 10 (mesh minor 17) forever.
                 ShardToGateway::WindowRelayed { .. } => 10,
+                // The static-roster split holds 11 (owner ruling 2026-08-27) forever.
+                ShardToGateway::WindowStaticRows { .. } => 11,
             }
         }
         fn g2s_index(msg: &GatewayToShard) -> u8 {
@@ -1186,9 +1246,9 @@ mod tests {
             assert_eq!(bytes[0], s2g_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 11);
+        assert_eq!(seen.len(), 12);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(10));
+        assert_eq!(seen.last().copied(), Some(11));
         let mut seen = std::collections::BTreeSet::new();
         for msg in every_gateway_to_shard_arm() {
             let bytes = postcard::to_allocvec(&msg).expect("encode");

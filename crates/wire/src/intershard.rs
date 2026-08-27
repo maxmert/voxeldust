@@ -1049,7 +1049,9 @@ pub struct WindowRelay {
 /// verbatim). By construction of the type there is no field a position, an identity, a
 /// direction, a distance or a count could ride in — the `intershard_closed` absence pin covers
 /// this arm the day it lands.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// ★ `Eq` DROPPED IN S10: the interest signal carries a distance now, and a float has no total
+// equality. `PartialEq` is what every consumer actually uses (the tests compare decoded messages).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RealmInterest {
     /// The receiving DIRECT child's full lineage coord — routing key + misroute guard (the
     /// receiver validates it lowers to its OWN realm and drops a mis-route, the mirror of every
@@ -1060,9 +1062,23 @@ pub struct RealmInterest {
     pub parent_fence: Fence,
     /// The universe tick the sender asserted at (freshness ordering beside the fence).
     pub at: UniverseTick,
-    /// `1` = "assume somebody may look inside you"; `0` = "do not". **Nothing else is lawful** —
-    /// any other value is refused + counted at the receiver.
-    pub look_inside: u8,
+    /// HOW FAR AWAY the nearest outside looker is, in metres — or `None` for "nobody is looking".
+    ///
+    /// ★ THIS CARRIED A YES/NO UNTIL S10 (owner-approved under SL6, 2026-08-26). A realm told only
+    /// "somebody may look inside you" has no choice but to wake EVERY child: the proxy it inserts sits
+    /// at its own centre with reach equal to its own extent, so every child's distance clamps to zero
+    /// and every band admits it. At the target census that is 150,000 realms woken every tick, and no
+    /// change of loop shape can help, because every child really is in range.
+    ///
+    /// **A DISTANCE, AND DELIBERATELY NOT A DIRECTION.** Proximity needs a direction to be useful, and a
+    /// direction plus a distance IS the looker's position — which SL2 forbids from entering another
+    /// realm. But SIZE needs only distance: how big a thing looks depends on how far away it is and
+    /// nothing else. So the child culls by its own children's visibility bands, which are already
+    /// derived from angular size, and no pose crosses. A scalar cannot be inverted into a position.
+    ///
+    /// **Lawful values:** `None`, or `Some(d)` with `d` finite and non-negative. Anything else is
+    /// refused and counted at the receiver, exactly as the byte's `> 1` was.
+    pub look_inside_from_m: Option<f64>,
 }
 
 /// ONE forwarded grandchild batch riding [`WindowRelay::interior`] /

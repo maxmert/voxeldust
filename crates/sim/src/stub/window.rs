@@ -50,9 +50,12 @@ pub(crate) struct OpenWindow {
     pub(crate) scope: WindowScope,
     /// The holder's LOCAL tick of the last `WindowOpen` (open or keep-alive re-assert).
     pub(crate) last_refresh: TickId,
-    /// Send-on-change: the last [`ShardToGateway::WindowBody`] bag shipped per subject
+    /// Send-on-change: a DIGEST of the last [`ShardToGateway::WindowBody`] bag shipped per subject
     /// (the own look under this realm's id, one marker per direct child — disjoint keys).
-    sent_bodies: BTreeMap<RealmId, Vec<u8>>,
+    ///
+    /// ★ A DIGEST SINCE S10, not the whole bag — see [`statement_digest`] for the cost this removes
+    /// and for the collision argument, which the relay baseline below already relies on.
+    sent_bodies: BTreeMap<RealmId, u64>,
     /// Send-on-change: the last SL7 membership verdict shipped (ids only).
     membership_sent: BTreeSet<RealmId>,
     /// Send-on-change: the (child fence, sealed bytes) last FORWARDED per live child on the Q2
@@ -65,6 +68,10 @@ pub(crate) struct OpenWindow {
     /// change with the child's own statements unchanged can never be invisible to
     /// send-on-change (the silent staleness bug §5.4 names).
     pub(crate) sent_relays: BTreeMap<RealmId, u64>,
+    /// Send-on-change: a DIGEST of the STATIC roster last shipped (slice S10). `None` before the first
+    /// send and after every keep-alive re-assert. One `u64` for the whole set, because the set is sent
+    /// whole or not at all — there is no per-row diff to keep.
+    sent_static: Option<u64>,
 }
 
 impl OpenWindow {
@@ -75,6 +82,7 @@ impl OpenWindow {
             sent_bodies: BTreeMap::new(),
             membership_sent: BTreeSet::new(),
             sent_relays: BTreeMap::new(),
+            sent_static: None,
         }
     }
 
@@ -85,6 +93,7 @@ impl OpenWindow {
         self.sent_bodies.clear();
         self.membership_sent.clear();
         self.sent_relays.clear();
+        self.sent_static = None;
     }
 }
 
@@ -295,6 +304,52 @@ fn emit_window_frames(
 /// roster-loss window is derived from that beat, so silence past it means the realm behind a
 /// statement stopped speaking, not that nothing changed). ReDriven/reliable —
 /// the session-reply lane (a lost look is an invisible realm at exactly the no-flicker moment).
+/// THE WINDOW LANE's STATIC ROSTER (slice S10; owner-approved 2026-08-27): the author's direct
+/// children that DO NOT MOVE, shipped on the RELIABLE session lane, send-on-change — which for a realm
+/// whose children are static means exactly ONCE, plus the keep-alive re-assert as the repair.
+///
+/// ★ WHY THIS IS NOT ON THE PER-TICK FRAME. The frame is latest-wins and UNRELIABLE, and that is right
+/// for a mover: a dropped row heals next tick and a resend of a stale position would be worse than the
+/// loss. It is exactly wrong for a star, which never moves — repeating it costs 285 MB/s per subscriber
+/// at the target census (150,000 rows × 95 bytes × 20 Hz) for bytes that are identical every time, and
+/// the 14.2 MB message does not fit a datagram at all.
+///
+/// Send-on-change was REFUSED on the frame for a good reason — over an unreliable lane a dropped row
+/// loses a star forever and a late joiner is never served. **Reliability is what makes send-on-change
+/// lawful here**, which is why this lane and this cadence had to arrive together.
+///
+/// The baseline is a DIGEST of the whole set, so an unchanged roster costs one hash and no bytes; see
+/// [`crate::stub::relay::statement_digest`] for the collision argument (a miss defers one re-send to the
+/// keep-alive beat, never a wrong byte).
+fn emit_window_static_rows(
+    clock: &ClockSample,
+    realm_fence: Fence,
+    statics: &[RealmSnap],
+    windows: &mut OpenWindows,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    let encoded = postcard::to_allocvec(statics).expect("closed wire enums serialize infallibly");
+    let digest = crate::stub::relay::statement_digest(&encoded);
+    for ((gateway, window), held) in &mut windows.0 {
+        if held.sent_static == Some(digest) {
+            continue; // unchanged — a static roster says nothing twice
+        }
+        push_session_reply(
+            outbox,
+            *gateway,
+            &ShardToGateway::WindowStaticRows {
+                realm_fence,
+                window: *window,
+                authored_at: clock.universe_tick,
+                rows: statics.to_vec(),
+            },
+        );
+        held.sent_static = Some(digest);
+        stats.window_static_rows_sent += 1;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_window_bodies(
     config: &StubConfig,
@@ -316,7 +371,8 @@ fn emit_window_bodies(
                 BodyStmt::SelfLook { bag } => bag,
                 BodyStmt::Marker { luma } => luma,
             };
-            if held.sent_bodies.get(subject) == Some(bag) {
+            let digest = crate::stub::relay::statement_digest(bag);
+            if held.sent_bodies.get(subject) == Some(&digest) {
                 continue; // unchanged — send-on-change holds its tongue
             }
             push_session_reply(
@@ -330,7 +386,7 @@ fn emit_window_bodies(
                     authored_at: clock.universe_tick,
                 },
             );
-            held.sent_bodies.insert(*subject, bag.clone());
+            held.sent_bodies.insert(*subject, digest);
             stats.window_bodies_sent += 1;
         }
     }
@@ -435,6 +491,18 @@ pub(crate) fn emit_realm_frames(
         .head(config.realm)
         .expect("the writer authors every held anchor before the feed runs");
     let realms = regions.authored_realm_snaps(config.realm, head);
+    // ★ THE TWO LANES, SPLIT BY WHETHER THE CHILD MOVES (slice S10; owner ruling 2026-08-27).
+    // A mover's row belongs on the per-tick frame, where repetition IS the loss story and a resend of
+    // last tick's value would be worse than useless. A STATIC child's row belongs on the reliable lane
+    // exactly once — MEASURED, repeating it costs 285 MB/s per subscriber at the target census for data
+    // that never changes, and 14.2 MB does not fit a datagram at all.
+    //
+    // `realms` (the whole roster) is kept for the PARENT-ward relay below, which is a different lane to
+    // a different consumer and is not split here.
+    let (movers, statics): (Vec<RealmSnap>, Vec<RealmSnap>) = realms
+        .iter()
+        .cloned()
+        .partition(|r| regions.child_moves(r.realm));
 
     // ===== THE WINDOW LANE (docs/design/window_lane.md §2.9): per tick, per open window, ONE
     // code path for every realm kind (HR3/HR4; ships excluded + counted per the D-SHIP-1
@@ -451,7 +519,7 @@ pub(crate) fn emit_realm_frames(
             realm_fence,
             &regions,
             head,
-            &realms,
+            &movers,
             &windows,
             &mut stats,
             &mut outbox,
@@ -462,6 +530,14 @@ pub(crate) fn emit_realm_frames(
             realm_fence,
             &regions,
             &child_luma.0,
+            &mut windows,
+            &mut stats,
+            &mut outbox,
+        );
+        emit_window_static_rows(
+            &clock,
+            realm_fence,
+            &statics,
             &mut windows,
             &mut stats,
             &mut outbox,

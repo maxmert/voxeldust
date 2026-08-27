@@ -3096,7 +3096,7 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   reaching the Area frame) exactly like a network re-home; the client can't tell them apart. In the `--triple`
   demo the System-7 shard co-hosts `{System 7, Planet 7, Station 7, Area 7}` (`VD_HELD_REALMS`, set by the
   launcher via `held_realms_env`); the Galaxy/System 8 shards stay single-realm.
-  **Anti-vacuity tests:** sim-tier `stub::tests::{a_dot_re_homing_into_a_cohosted_child_emits_a_crossing_request_with_its_parent, a_dot_re_homing_into_a_non_cohosted_child_emits_a_crossing_request, a_held_transient_re_homing_into_a_cohosted_child_emits_a_transient_request_with_its_parent, a_cohosting_shard_affirms_the_child_realm_head_into_its_own_authority_map, a_same_node_re_home_registers_no_self_ghost_and_spawns_none, owning_realm_reads_the_pose_frame_when_nameable, owning_realm_falls_back_to_config_realm_for_an_unnameable_frame}`; the end-to-end source==dest saga (Planet 7 ↔ Area 7 on one co-hosting node, the frame flips to `AreaLocal{7,7}`, the head stays on-node, and a committed re-home does not re-fire) is `tests/tests/crossing_same_node_e2e.rs`.
+  **Anti-vacuity tests:** sim-tier `stub::tests::containment::a_dot_re_homing_into_a_cohosted_child_emits_a_crossing_request_with_its_parent, stub::tests::containment::a_dot_re_homing_into_a_non_cohosted_child_emits_a_crossing_request, stub::tests::containment::a_held_transient_re_homing_into_a_cohosted_child_emits_a_transient_request_with_its_parent, stub::tests::containment::a_cohosting_shard_affirms_the_child_realm_head_into_its_own_authority_map, stub::tests::handoff::a_same_node_re_home_registers_no_self_ghost_and_spawns_none, stub::tests::crossing::owning_realm_reads_the_pose_frame_when_nameable, stub::tests::crossing::owning_realm_names_the_galaxy_and_the_universe_too`; the end-to-end source==dest saga (Planet 7 ↔ Area 7 on one co-hosting node, the frame flips to `AreaLocal{7,7}`, the head stays on-node, and a committed re-home does not re-fire) is `tests/tests/crossing_same_node_e2e.rs`.
   **STILL DEFERRED (P4+):** dedicated hosting SHARDS for planets/stations/areas (co-hosting keeps them on the
   parent-system shard; a busy planet split to its OWN shard is the P4+ spatial-index/roster item, D-44/D-9) —
   but now a ZERO-mechanism-change move (co-hosting is pure placement; the saga is already uniform).
@@ -3691,6 +3691,13 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 
 ### D-S6 🟩 BANDS SIZED FROM REAL CLOSING SPEED — LANDED (slice S6). The law the world's own radii were already solved against
 
+> ⚠️ **THESE NUMBERS ARE NOT SAFE ACROSS THE MOVEMENT LAW (D-MOVE-1).** Every band below is sized FROM the
+> approach governor's guarantee — *"the fastest a subject may lawfully be moving at a boundary is that
+> boundary's own cap"*. The owner's movement law REMOVES that governor. This row's own measurement of the
+> alternative is the warning: sizing against the parent's ceiling instead would ask for **bands thousands
+> of times larger than the bodies they wrap**. The band solve must be re-opened with the movement law, not
+> after it.
+
 - **THE LAW WAS NOT INVENTED HERE.** The galaxy's radius has always been `R_universe − outset(v_cap)`, an
   expression whose `outset` term is a containment band that did not exist. Every band shipped as the same
   three metres — one value built once and copied onto every region in the universe, from a five-metre
@@ -4099,6 +4106,210 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   largest term, and not faults. Both now derive the bound from the largest magnitude in the chain. A
   literal cannot follow a change of scale; it can only be re-typed after each one breaks it.
 
+### D-S10 🟩 A PARENT'S COST STOPS GROWING WITH ITS CHILDREN — LANDED in part (slice S10)
+
+**Five mechanisms were named. Three landed, one is deferred by owner ruling, one is recommended closed as
+not-a-defect. Plus the file split the slice named as its first task, and one deliverable that turned out to
+belong to S11.**
+
+- **THE TEST FILE SPLIT (the slice's stated first task).** One 16,139-line module became a 2,388-line
+  fixture file plus TEN subject modules. **Only the test FUNCTIONS moved** — the mapping found 89 helpers
+  that would have had to stay behind, and caught one a reader had confidently called local that a
+  whole-file search showed used in three other subjects. Moving no helper means no judgement about which
+  fixture belongs where, and that error class cannot arise. The cut was proved LOSSLESS by reassembling
+  the original file from the pieces before anything was written; the 296 test NAMES are diff-identical.
+- **THE LINEAGE LIST LEFT THE HOT PATH.** Both AoI latches were keyed by a child's full `RealmPath` — a
+  heap list CLONED TWICE PER (observer, child) PAIR every tick, 300,000 allocations per tick at the target
+  census, to answer a question about identity. Keyed by `RealmId` now. The proof it changed nothing: 499
+  tests untouched, and `RealmPath` became an UNUSED IMPORT in both files.
+- **A DISTANT LOOKER WAKES NOTHING (M7).** The interest signal carried a yes/no, so a realm receiving it
+  woke EVERY child — 150,000 realms and 150,000 messages per tick, by construction, unfixable by any loop
+  shape. It carries the looker's DISTANCE now (no direction: SL2 forbids a pose crossing, and proximity
+  needs a direction while SIZE needs only distance). Each child's own visibility band decides. Gate proved
+  RED under the old rule.
+- **THE KEEP-ALIVE BASELINE IS A DIGEST.** The body baseline kept the WHOLE bag per child — a heap vector
+  per direct child per subscriber, compared byte-by-byte every tick, all freed and re-allocated on every
+  keep-alive beat by design. The relay baseline one field below already solved this exact problem this
+  exact way; there is now ONE digest definition in the crate. ⚠ This trades EXACT comparison for
+  probabilistic: a 64-bit collision defers one re-send to the next keep-alive beat, which is the same
+  argument the relay lane already relies on. The half nothing pinned — that a genuine change still ships —
+  is now gated and proved red.
+- **★ THE PER-TICK SKY IS GONE — and this deliverable belongs to S11, not S10.** See below.
+- **THE FOLD INVERSION IS DEFERRED TO S12** (owner ruling; see D-MOVE-1 / M8). MEASURED: only 8 of 499 sim
+  tests catch a fold that silently skips a child, and the widest AoI fixture has TWO children.
+- **THE CLIENT'S PER-DELTA CLONE: recommended CLOSED as not-a-defect.** It is bounded by the DRAWN set,
+  not the roster — the update feeding it already carries only realms entering and leaving. And the copy is
+  load-bearing: the scene is shared behind a reference count, so copy-then-swap is what makes a concurrent
+  read safe and a malformed delta non-destructive. Removing it needs a persistent map — a new dependency,
+  not adopted unilaterally. **Owner has not ruled; do not "fix" it without one.**
+
+---
+
+### D-S11-SKY 🟧 THE SKY IS STATED ONCE — the split LANDED early (in S10); the rest of S11 is owed
+
+**LANDED (2026-08-27, owner-approved under SL6):** the author's direct children are split by **whether they
+move**. Static rows ride a new reliable arm (`ShardToGateway::WindowStaticRows`, wire index 11) send-on-
+change — which for a realm whose children do not move is exactly ONCE plus the keep-alive repair. Movers
+keep riding the per-tick frame, where level-triggered repetition is still the right loss story. The frame
+still arrives every tick because its STAMP is what the composer aligns chains on; the saving is the rows,
+never the beat.
+
+**MEASURED, on the wire (an earlier 31.2 MB figure was `size_of`, not the encoded size — retired):**
+
+| | |
+|---|---|
+| one `RealmSnap`, postcard-encoded | 95 bytes |
+| the full roster at the census | **14.2 MB** |
+| at 20 Hz | **285 MB/s per subscriber** |
+| a star system's 9 planets | 855 bytes/tick = **17.1 KB/s** |
+
+**The star system was never the problem. The galaxy was, and only because it repeated something that never
+moves** — pinned by the world's own `placement_rows.golden` across ticks 0, 1,000 and 50,000.
+
+**THE TWO LANES RE-UNITE AT THE GATEWAY INGEST, deliberately.** Three consumers read a level's rows and
+expect the FULL roster (the compose fold, the marker admission's roster vouch, the confirmed gate). Teaching
+each about a second source would be three chances to get it wrong — and ONE OF THEM FAILS SILENTLY: the
+marker vouch would refuse every static child's marker as unvouched, only at real scale, because every
+current fixture contains a mover. Re-uniting at ingest keeps the saving on the WIRE, where the problem was.
+
+- **★ THE GATE AS WRITTEN IS THE ONE S11 WARNS ABOUT.** S11's own text: *"Both gate on 'per-tick sky bytes
+  are ZERO after the first tick' — which is also exactly what a dropped oversize datagram produces. The gate
+  as written passes on the failure it exists to prevent."* **That is precisely the shape of
+  `a_static_roster_is_stated_once_and_the_frame_keeps_only_its_stamp`.** It is sound TODAY (two rows cannot
+  be oversized) and it becomes a false green the moment the census makes the message droppable. **The
+  replacement S11 names: gate on the RECEIVED catalogue — the client's rendered star count equals the
+  census — never on the absence of bytes.**
+- **STILL OWED FROM S11:** the compact catalogue to the CLIENT (nothing sent to realms — a ship holds the
+  same generator and asks it); encoded-vs-seed-folded byte identity, one truth from two producers; the
+  generation derived from content, never hand-incremented; the client's on-disk cache with a content digest
+  and a bounded decode (a byte-flipped cache must produce a counted refusal and a re-request, never a drawn
+  frame); the login level CHUNKED under the frame cap — **the paging deliberately not built in S10, because
+  at today's 189-byte roster there is nothing to page and transport machinery that cannot be exercised must
+  not be written**; the liveness digest as an assertion; and the catalogue NOT re-sent when a crossing bumps
+  the scene epoch (a warp leg is two crossings — getting it wrong re-transmits the whole sky twice a
+  journey).
+- **AND ONE MEMORY HALF THIS DID NOT FIX:** the gateway still holds one MERGED copy of the roster per
+  retained tick in its level ring. That is memory, not bandwidth; the wire was the stated problem.
+
+### D-SL9-WALKS 🟥 FOUR PER-TICK WALKS OVER EVERY CHILD — two removed, two owed to S12
+
+**SL9 says a cost that grows with the child count is a defect, and must be MEASURED on a realm with many.**
+Four jobs walk every direct child on every tick. Named here with what each costs at the target census of
+150,000 children at the 20 Hz cadence, so none of them can look handled when it is not.
+
+| # | The job | Touches | Per second at census |
+|---|---|---|---|
+| 1 | Which children are worth waking | every child **×** every observer | 3,000,000 |
+| 2 | Where each child is (the placement book) | every child | 3,000,000 |
+| 3 | What each child looks like (the picture rows) | every child | 3,000,000 |
+| 4 | How fast an occupant may fly (the governor) | every child **×** every occupant | 3,000,000 |
+
+**JOB 4 IS NOT A DEFECT TO FIX — it is deleted by the movement law (D-MOVE-1).** Do not optimise it. Do
+not delete it in S10 either: the realm ceiling IS the speed today, so removing it now pins every occupant
+at foot pace. It goes with the force phase, together with the band re-solve.
+
+**JOB 1's WALK is deferred to S12** (M8 of the 2026-08-26 movement file): the owner refused a hand-planted
+wide field, and MEASURED, only 8 of 499 sim tests catch a fold that silently skips a child. What S10 did
+land on job 1 is two costs that are NOT the walk: the per-pair lineage clones (300,000 heap lists per tick
+at census, now keyed by realm id) and the wake-everything interest proxy (M7).
+
+---
+
+#### ★ JOBS 2 AND 3: THE ANALYSIS, DONE, SO S12 INHERITS IT RATHER THAN A HUNCH
+
+**THE OBSERVATION.** A STATIC child's placement is the same at every tick. THE WORLD'S OWN GOLDEN PROVES
+IT: `crates/bins/tests/goldens/placement_rows.golden` carries each static child's row at tick 0, tick 1,000
+and tick 50,000, and the bytes are identical. Rebuilding 150,000 identical rows 20 times a second is not
+an algorithm that needs improving — it is arithmetic whose inputs did not change.
+
+**WHY "JUST CACHE IT" DOES NOT WORK, and this is the part worth inheriting.** The placement book is not one
+table that gets overwritten. **It is a TIME SERIES.** `PlacementLedger` retains a deque of books spanning
+`span_back` ticks, because a message can arrive late carrying its own instant and must be measured against
+the book that was true THEN — reading the newest one instead would move the subject by however far the
+world swept in between. So a book cannot be advanced in place, and each tick genuinely creates a new one
+that the old ones must survive alongside.
+
+**THE SHAPE THE FIX HAS TO TAKE:** each tick's book SHARES its unchanged rows with the previous tick
+instead of copying them, and holds only its own movers. That is a change to the internal representation of
+a core type (`PlacementBook`) that nearly every lane reads.
+
+**THE ASYMMETRY THAT MAKES IT WORTH DOING — and worth doing ONLY for one case:**
+
+| Parent | Children | Movers | Rows written per tick today | With sharing |
+|---|---|---|---|---|
+| A galaxy | 150,000 systems | **none** | 150,000 | **0** |
+| A star system | 9 planets | **all** | 9 | 9 |
+
+A galaxy's children do not move; a star system's all do. So the change buys everything at the level where
+the count is large and nothing where it is small — which is the right shape, and also means a measurement
+taken inside a star system will show no gain and must not be read as the change failing.
+
+**JOB 3 IS HALF-COVERED ALREADY.** The picture walk feeds two consumers: the window frames, and the relay
+FINGERPRINT — which serialises the WHOLE picture every tick purely to compare it with last tick's and
+decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fills it is not.
+
+**WHY NEITHER LANDS IN S10 (recommended by the assistant, owner agreed 2026-08-26):**
+1. The gain is UNMEASURABLE until the census rises — the galaxy holds three systems today.
+2. It changes a core type's representation, under every lane in the tree.
+3. Neither is on S10's list, and together they are larger than everything on it.
+4. ★ The blindness measured this same day — 8 of 499 — came from building what could not be measured.
+   Repeating that pattern in the placement path would be worse, not better.
+
+**WHEN:** S12, with the real wide world, where the change can be proved rather than argued.
+
+### D-MOVE-1 🟥 THE MOVEMENT CONTRACT — ruled 2026-08-26, and NEITHER HALF EXISTS IN THE TREE
+
+- **THE RULING** (`owner_decisions_2026-08-26_movement.md`, extending A4 of 2026-08-24). A parent NEVER
+  sets an occupant's speed. Two lanes upward from a child:
+  - **PER TICK: acceleration + torque ONLY, in the CHILD'S OWN frame** — *what I am doing*. The child
+    divides by its own mass before it speaks, because it knows its own mass best. Six numbers, and the
+    same six whatever the child is: a ship, a person, a rock.
+  - **ON CHANGE ONLY: mass, cross-section, drag coefficient** — *what I am*. A declared property, like
+    extent. Never per tick.
+  - **DOWNWARD:** the placement the parent authored, stamped, read-only, ONE HOP (SL1 clause 2/4).
+  - **VELOCITY NEVER CROSSES UPWARD.** It is half a placement and only the parent writes those (SL1
+    clause 3). Velocity is the answer, never the question.
+- **WHY MASS CROSSES AT ALL, since gravity does not need it.** The child's mass CANCELS out of gravity
+  (`G·M·m/r²` divided by `m`), so a 50,000 kg ship and a 1 kg drone fall identically. It does NOT cancel
+  out of drag, which is an outside push: identical hulls at identical speed slow at 0.6 vs 6.0 m/s² for a
+  ten-to-one mass difference. Collisions cannot be done in accelerations at all. The rejected alternative
+  — the parent states its medium downward and the child computes its own drag — was refused because the
+  child would use a velocity one tick old, and lagged velocity under strong drag oscillates.
+- **WHAT IS MISSING — BOTH HALVES, measured by reading the tree, nothing executed:**
+  - No physics engine. 708 dependencies, no rigid-body solver.
+  - Nothing that moves carries a mass, an engine, a thrust figure or a hull size. The only masses describe
+    stars and feed closed-form orbit sums.
+  - The PARENT side is missing too: every occupant advance passes zero acceleration explicitly.
+  - The lane a child's numbers would ride is sealed with no port in it.
+  - **The traverse constant is not a ceiling above a speed — it IS the speed.** A stick position is a
+    fraction of the realm's own number, and velocity is read back OUT of the step just taken; it never
+    accumulates. Remove it with nothing in its place and every occupant falls to foot speed. MEASURED:
+    crossing the galaxy (9.2234e18 m) at 15 m/s takes 1.95e10 years — longer than the universe has existed.
+- **THEREFORE THIS IS A PHASE, NOT A SLICE.** Hulls, engines, mass, the up-lane, and integration on the
+  parent side. An interim was discussed and is NOT ruled: a ship states its own rated cruise speed and
+  acceleration and the parent applies them — lawful (an engine rating is not a placement), stops the
+  parent choosing immediately, and is not a second mechanism because the parent's side is the same shape
+  either way.
+- **WARP IS A DECLARED STATE (M6), NOT AN ENGINE.** Reaching a galaxy-crossing speed by acceleration takes
+  1.66 million years at 10 g; doing it in 60 s needs 8.71e12 g AND travels 16.2 light years during the ramp.
+  So warp changes the MEDIUM's relationship to the ship and rides the same slow lane as mass. **The set of
+  declared states is CLOSED and reviewed like a wire arm**, behind a five-test gate whose two sharp edges
+  are: it must survive an EMPTY SHIP (kills autopilot destinations), and it must NOT MOVE YOU BY ITSELF
+  (kills a velocity in disguise). An autopilot is software pressing the stick — it computes an acceleration
+  and uses the ordinary per-tick lane.
+- **WHEN:** P5 (physics) at the earliest. It cannot land before the band solve is settled — see the
+  warning on D-S6 and D-WORLD-4b.
+- **★ STILL OPEN, the owner has NOT ruled:**
+  1. **THE ROCK.** The 2026-08-19 ruling — *"the realm's ceiling governs everything the realm contains,
+     piloted or not"* — is recorded as landed. The movement law neither names ungoverned things nor
+     carries a reversal note, and the SAME file writes an explicit reversal for the placement law, so the
+     silence is meaningful. Rocks and shells have no engines to compute an acceleration from and no
+     autopilot to arrive them.
+  2. **WAKING UP IN TIME.** The safety solve names one test (one tick fits inside the thinnest band).
+     A realm also needs time to START, and one that is not running cannot be drawn (SL3) — so at high
+     closing speed you arrive at a dark realm, which is a seam (SL8). Either the top speed is the stricter
+     of the two, or the interest radius grows with the observer's measured closing speed.
+
 ### D-SL1-2 🟥 SL1 REWRITTEN — a realm MAY be told where it is (owner reversal 2026-08-24), and the three fences that make it safe are UNBUILT
 
 - **WHAT CHANGED, and it is a law change, not a feature.** SL1 read "ONLY THE PARENT KNOWS POSITIONS —
@@ -4181,11 +4392,11 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **C-5 🟩 LANDED:** `vd_core::geometry::guard_regions_nest(regions, max)` boot validator (exactly one `parent:None` root, unique `.realm`, parents resolve, no cycles, count ≤ `MAX_REGIONS`=64), each reject arm `expect_err`-tested. The detector's defensive rootless no-op stays covered by `a_rootless_region_forest_is_a_safe_no_op`.
 - **C-6 🟩 LANDED (worldgen forest):** `vd_core::worldgen::{realm_regions_for(seed), realm_neighbourhood_for(seed, hosted_realm), MAX_RENDERABLE_EXTENT_M}` — the WALK-scale Universe⊃Galaxy⊃{System 7⊃Planet 7, System 8} forest; `realm_neighbourhood_for` returns own+ancestors+owned-children, **NEVER siblings** (System 7 shard → {Universe,Galaxy,System 7,Planet 7}; Galaxy shard → {Universe,Galaxy,System 7,System 8}; System 8 shard → {Universe,Galaxy,System 8}). The CORRECTED sibling-routing model: a sibling crossing routes THROUGH the shared Galaxy parent (leave System 7 → land in the Galaxy ancestor; the Galaxy shard, owning both systems as children, sees the entry into System 8), so no shard needs a sibling in its scan.
 - **C-6b 🟩 LANDED (bins BOOT LIVE + client render single-source):** `shard.rs` now computes the seed neighbourhood from `VD_UNIVERSE_SEED` (default 0) via `realm_neighbourhood_for`, fences it with `guard_regions_nest` (fail-LOUD at boot), and plants it — **the containment detector is LIVE in prod** (no longer inert). ~~The INTERIM `regions_for_source_plant` adapter is REMOVED (renamed `override_regions_for_boundaries` — see the RETAINED-OVERRIDE note); `resolve_realm_boundaries`/`VD_REALM_BOUNDARIES` are RETAINED as an OPTIONAL OVERRIDE that plants an authored born-inside CHILD crossing shell, so the process-tier `dual_cluster_crossing_smoke` / `render_crossing_smoke` still prove a DIRECT source→dest re-home over real binaries WITHOUT standing up a Galaxy shard.~~ **⚠ AMENDED (2026-08-14, SL5 sweep — D-WORLD-4):** the RETAINED-OVERRIDE decision is REVERSED and the whole override family is DELETED — the boundary-file env substitution in `shard.rs`, `resolve_realm_boundaries`/`RealmBoundariesError`/`parse_realm_boundaries`/`guard_boundaries_in_realm`, `override_regions_for_boundaries`/`override_containment_band`, `source_crossing_boundaries`/`write_source_boundaries`/`resolve_source_boundaries` + the launcher injection, the `crossing_playground` module (box consts/trigger/scene/`write_fixtures`) + `emit-crossing-fixtures`, `write_seed_regions` + `emit-seed-fixtures`, and `write_visual_regions` + `emit-visual-fixtures`. Its "single-sourced with the client's `--realm-boxes`" claim was the exact mechanism by which a Dual cluster simulated a 150 m star system while drawing an authored 40 m one. The crossing smokes now fly THE world's own home shell (Dual, zero injection), and the ONE emitter is `write_world_regions` (`emit-world-scene`). Client render: `RealmScene::from_regions(&[RealmRegion])` + `from_regions_json` project the FINITE renderable regions (`Boundary::finite_extent() <= MAX_RENDERABLE_EXTENT_M` — SKIP the ambient Galaxy/Universe shells), single-sourced with the shard via `vd_bins::write_world_regions`; the client `--realm-boxes` tries `from_regions_json` first, falls back to the legacy `from_boxes_json` reader (still exercised by unit fixtures).
-- **C-6c 🟩 LANDED (3-shard round-trip gate):** `tests/tests/three_shard_round_trip_e2e.rs` — a REAL 3-shard harness cluster (orchestrator + gateway + System 7 + **Galaxy** (`System(1)`, granted so `head(Realm(Galaxy))` resolves) + System 8), each shard planted with its seed neighbourhood, drives a subject origin→50→100→50→origin and asserts the AUTHORITATIVE HOLDER flips through the FULL chain **BOTH WAYS**: System 7 → Galaxy → System 8 → Galaxy → System 7 (the RETURN legs 8→Galaxy→7 are the reverse-cross proof). Each leg is a REAL autonomous saga-driven re-home (zero `trigger_transfer`). Plus the unit tier that ACTUALLY pins the container behaviour at HEAD — corrected 2026-08-14 (Stage-C audit :161: this clause used to name `stub::tests::{symmetric_recross_resolves_the_full_container_sequence_both_ways, escape_soi_lands_in_the_immediate_parent_not_a_skipped_ancestor}`, two tests DELETED with their `seed_container_at` descent oracle in the rehome arc (rehome_one_mechanism §4b) while this 🟩 clause stood stale): the `container()` fold itself is pinned in vd-core (`geometry::tests::container_folds_the_deepest_member_from_the_root_identity`), and the sim tier pins the RESOLVED DESTINATIONS via the emitted `to_realm` — the observable the crossing actually ships — in `stub::tests::slice4b_an_undock_re_homes_outward_to_the_parent_realm` (an escape lands in the IMMEDIATE parent; the escape forest plants the root as a skippable ancestor) and `stub::tests::slice4b_a_dock_and_undock_resolve_contrasting_destinations` (the symmetric dock/undock contrast). **TIER + SUBJECT honesty:** the gate runs at the HARNESS tier (the process cluster machinery is fixed source/dest → N-shard process roster is D-44) with a TRANSIENT subject asserting `owned_transients` (the HR2 ownership head — a transient has no directory `OwnerRecord`). A DURABLE dot's DIRECTORY Entity-head multi-hop was BLOCKED at the harness tier (a `Cutting`→`CutTimeout` on the 2nd hop) — **RETIRED by S3 (server-timed cut, see below)**; NO session-route migration was needed (the gateway `store_commit` already re-routes on the current authority per hop — the only stall was the saga's dependency on a CLIENT `CUT_MARKER`). A FRESH transient per leg avoids the static-`Fence(1)` batch-id collision (`crossing_transfer_id(entity, src_realm_fence, 0)` re-mints a colliding id when the SAME entity re-visits a shard; production fences ADVANCE per re-home). **OWED at the process tier (D-44):** the 3-shard PROCESS cluster (roster generalization).
+- **C-6c 🟩 LANDED (3-shard round-trip gate):** `tests/tests/three_shard_round_trip_e2e.rs` — a REAL 3-shard harness cluster (orchestrator + gateway + System 7 + **Galaxy** (`System(1)`, granted so `head(Realm(Galaxy))` resolves) + System 8), each shard planted with its seed neighbourhood, drives a subject origin→50→100→50→origin and asserts the AUTHORITATIVE HOLDER flips through the FULL chain **BOTH WAYS**: System 7 → Galaxy → System 8 → Galaxy → System 7 (the RETURN legs 8→Galaxy→7 are the reverse-cross proof). Each leg is a REAL autonomous saga-driven re-home (zero `trigger_transfer`). Plus the unit tier that ACTUALLY pins the container behaviour at HEAD — corrected 2026-08-14 (Stage-C audit :161: this clause used to name `stub::tests::{symmetric_recross_resolves_the_full_container_sequence_both_ways, escape_soi_lands_in_the_immediate_parent_not_a_skipped_ancestor}`, two tests DELETED with their `seed_container_at` descent oracle in the rehome arc (rehome_one_mechanism §4b) while this 🟩 clause stood stale): the `container()` fold itself is pinned in vd-core (`geometry::tests::container_folds_the_deepest_member_from_the_root_identity`), and the sim tier pins the RESOLVED DESTINATIONS via the emitted `to_realm` — the observable the crossing actually ships — in `stub::tests::containment::slice4b_an_undock_re_homes_outward_to_the_parent_realm` (an escape lands in the IMMEDIATE parent; the escape forest plants the root as a skippable ancestor) and `stub::tests::containment::slice4b_a_dock_and_undock_resolve_contrasting_destinations` (the symmetric dock/undock contrast). **TIER + SUBJECT honesty:** the gate runs at the HARNESS tier (the process cluster machinery is fixed source/dest → N-shard process roster is D-44) with a TRANSIENT subject asserting `owned_transients` (the HR2 ownership head — a transient has no directory `OwnerRecord`). A DURABLE dot's DIRECTORY Entity-head multi-hop was BLOCKED at the harness tier (a `Cutting`→`CutTimeout` on the 2nd hop) — **RETIRED by S3 (server-timed cut, see below)**; NO session-route migration was needed (the gateway `store_commit` already re-routes on the current authority per hop — the only stall was the saga's dependency on a CLIENT `CUT_MARKER`). A FRESH transient per leg avoids the static-`Fence(1)` batch-id collision (`crossing_transfer_id(entity, src_realm_fence, 0)` re-mints a colliding id when the SAME entity re-visits a shard; production fences ADVANCE per re-home). **OWED at the process tier (D-44):** the 3-shard PROCESS cluster (roster generalization).
 - **S3 🟩 LANDED (server-timed cut — durable MULTI-HOP round-trip):** the transfer cut is now driven ENTIRELY server-side — the gateway `apply_request_cut` SELF-ACKS `CutConfirmed` (no client wait) and `apply_freeze` derives the input-cut seq from its OWN `last_input_seq` high-water at cut-INSTALL time (the leak-free partition point; the client `CUT_MARKER` / `on_cut_marker` observer is DELETED as inert). This retires the durable-multi-hop `CutTimeout`: on hop 2+ the client's session stays bound to the FIRST shard's port, so its marker never reached the current authority's saga — the old marker-driven `Cutting` starved into abort. GATE: `tests/tests/three_shard_round_trip_durable_e2e.rs` — a REAL DURABLE player (a logged-in avatar whose directory `Entity` head + fence ADVANCE per commit, NOT a transient) driven origin→50→100→50→origin, asserting `head(Entity(subject))` flips System 7 → Galaxy → System 8 → Galaxy → System 7 (both ways) with ZERO CutTimeouts / aborts and the fence advancing across four commits. Anti-vacuity PROVEN: reverting the self-ack fails the gate (the saga parks pre-`Freezing`, head stuck on System 7). Input-conservation preserved: D-28 (`p2_transfer_gates`) now checks the SERVER-derived cut = the source's actual last-applied seq (no leak, no double-apply), for ANY client behaviour (no client pause relied on).
 - **S2+S4+S6 🟩 LANDED (2026-07-18) — PURE-RENDERER, NODE-AGNOSTIC CLIENT:** the client no longer learns which node owns any entity. **S2 (wire, minor 1→2):** appended `ServerControlMsg::OwnEntity{entity}` (the own-avatar cue by `EntityId` ALONE — no sub/node) + the reliable `EventMsg::EntityRemoved{entity}` de-owned-copy eviction arm; additive roundtrip tests, `PROTO_MINOR=2`. **S4 (gateway):** `announce_own_entity` emits `OwnEntity` on `negotiated_minor >= 2` ALONGSIDE `AuthorityChanged` (kept for old minor<2 clients) at session-attach + the dest re-point; a minor-2 client reads `OwnEntity` and IGNORES `AuthorityChanged`/`RequestCut`. **S6 (client collapse):** `DeliveredView.tracks` re-keyed `(SubId,EntityId)`→`EntityId` (ONE track per entity, latest-wins via `EntityTrack::observe`'s frame-collapse — a cross-realm re-home flips the frame node-agnostically); DELETED `authoritative_sub`/`set_authority`/`chosen_subs` + the client `cut_marker_armed` stamp + the `RequestCut`/`AuthorityChanged` handlers; ADDED `set_own_entity`/`remove_entity` + the `OwnEntity` handler. `held_subs` STAYS a SET (multi-realm AoI). Three consumers migrated in lockstep (real client `net.rs`, harness `ScriptedClient`, `bins/tests/process_parity.rs`); `devproto DevEntityRow.authoritative_sub` kept as an INERT constant (`vd_client::view::RENDERED_SUB`=0) for decode compat. `p2_transfer_gates` crossing gate re-proves the crossing as the rendered REALM-FRAME flip (System 7→8), the old two-holder sub-overlap anti-vacuity deleted (the client folds both subs into one EntityId track); `client-harness::crossing_was_real` repurposed to "a delivered track exists".
   - **🟩 SUPERSEDED / LANDED (status corrected 2026-08-14 — Stage-C audit :626 found this bullet still 🟥 after Step 5 slice F + D-4 minor 14 landed both halves; no "S0" arc exists or is owed):** (1) ~~the `stub.rs::emit_frames` SEND-ONCE filter to `simulates()` only~~ — SUPERSEDED by slice F's hold-gated emit: `emits()` = `simulates() | (is_retained_ghost & Source-hold-open)`, so the leaver stops emitting AT HOLD CLOSURE (the pose-free `SpawnV2` take-over proof + the remove message — it vanishes from bystanders then, never at a later send-once pass), and the fed-ghost emit died with slice F (`refresh_source_ghost`/`SourceGhostMirror`/`GhostFlow::Spawn|Delta` deleted/tombstoned). The stated blocker — "the sim has NO server-timed no-vanish hold" — is dead: `HandoffHolds` + `prune_holds`/`handing_over` ARE that hold, TTL server-derived (`derive_arrival_shield_ticks`). (2) the `EntityRemoved` transfer-subject emit LANDED shard-side: `push_entity_removed` fans at hold closure + TTL expiry (the band-exit re-emit is idempotent on clients that already evicted), `fan_entity_removed` fans it to clients — see D-4 (consumer (a) LANDED, minor 14). (3) NO dedicated reliable `MsgClass::Event` was added and none is owed — the landed decision went the other way: `EventMsg` rides `ServerControlMsg::Event` over the EXISTING reliable Control class (D-4(a)); `grep MsgClass::Event crates/` is empty by design.
-- **#133 STATION/AREA FIRST-CLASS 🟩 LANDED (2026-07-17):** `worldgen::realm_regions_for` now plants `RealmId::Station(7)` (an `Aabb` box at (-25,0,0) half 5 under System 7, depth 3) and `RealmId::Area(7)` (an `Aabb` box at (25,0,0) half 3 inside Planet 7, depth 4 — the DEEPEST region) as FIRST-CLASS realms in the seed forest, so the SAME kind-agnostic containment detector re-homes into/out of them with ZERO station/area-specific code (HR3 upheld — no realm-kind fork in any live path). Client render is FREE (`from_regions` → `BoxShape::Box`, scene now 5 finite realms). GATE: `stub::tests::{a_dot_moving_into_the_station_box_re_homes_into_the_first_class_station_realm, a_station_owning_shard_re_homes_a_dot_that_leaves_the_station_back_to_system_7, a_dot_moving_into_the_area_box_re_homes_into_the_first_class_area_realm}` prove Station IN + Station OUT (from the Station's OWN authority — the reverse leg) + Area IN, each a REAL decoded `CrossingRequest` asserting `to_realm`/`from_realm`/`subject` (non-vacuous: the `==1` count and the `to_realm` both require the box to win the container fold). **DECISION (user, 2026-07-17): Area is FIRST-CLASS / authority-bearing, SUPERSEDING the original #133 "Tier-1 EffectFree interest-only, no directory record" locked decision** — the containment model has no interest-only tier; the AoI/interest READER stays deferred to P6 (below). This closes the pre-P4 half of task #133; the moving-container Station semantics (a station is a MOVING container) ride P4/P5 (a/b below), dynamic reparent P8 (e), transient batch-coalescing D-43 #9-SCALE. Adversarially reviewed SOUND (wf a6d8d2dd: gate non-vacuous, geometry Station⊆System7 / Area⊆Planet7 by-hand, collision-safe, HR3 clean).
+- **#133 STATION/AREA FIRST-CLASS 🟩 LANDED (2026-07-17):** `worldgen::realm_regions_for` now plants `RealmId::Station(7)` (an `Aabb` box at (-25,0,0) half 5 under System 7, depth 3) and `RealmId::Area(7)` (an `Aabb` box at (25,0,0) half 3 inside Planet 7, depth 4 — the DEEPEST region) as FIRST-CLASS realms in the seed forest, so the SAME kind-agnostic containment detector re-homes into/out of them with ZERO station/area-specific code (HR3 upheld — no realm-kind fork in any live path). Client render is FREE (`from_regions` → `BoxShape::Box`, scene now 5 finite realms). GATE: `stub::tests::containment::{a_dot_moving_into_the_station_box_re_homes_into_the_first_class_station_realm, a_station_owning_shard_re_homes_a_dot_that_leaves_the_station_back_to_system_7, a_dot_moving_into_the_area_box_re_homes_into_the_first_class_area_realm}` prove Station IN + Station OUT (from the Station's OWN authority — the reverse leg) + Area IN, each a REAL decoded `CrossingRequest` asserting `to_realm`/`from_realm`/`subject` (non-vacuous: the `==1` count and the `to_realm` both require the box to win the container fold). **DECISION (user, 2026-07-17): Area is FIRST-CLASS / authority-bearing, SUPERSEDING the original #133 "Tier-1 EffectFree interest-only, no directory record" locked decision** — the containment model has no interest-only tier; the AoI/interest READER stays deferred to P6 (below). This closes the pre-P4 half of task #133; the moving-container Station semantics (a station is a MOVING container) ride P4/P5 (a/b below), dynamic reparent P8 (e), transient batch-coalescing D-43 #9-SCALE. Adversarially reviewed SOUND (wf a6d8d2dd: gate non-vacuous, geometry Station⊆System7 / Area⊆Planet7 by-hand, collision-safe, HR3 clean).
 - **INTEREST / AoI path DEFERRED (write-only, no reader):** the old `InterestZones` was WRITE-ONLY with no reader; multi-mesh client rendering uses the ghost-collider feed (`feed_source_ghosts`/`GhostFlow`), architecturally DISJOINT from containment — removing the interest stub breaks nothing. Re-add the interest/AoI subscription path (which neighbour meshes a client subscribes to) as a dedicated slice WITH its reader, layered on the containment machinery (its per-region hysteretic membership was entangled with the deleted `CrossingState` dwell — re-add cleanly). **KEPT-UNUSED pending this slice:** `RealmBoundary` + its `shell`/`aabb`/`boxed` constructors + `CrossEffect` + `Direction` stay in `geometry.rs` (covered only by their own shape/band tests + the bins adapter's input type) — scaffolding for the Interest path + the client `--realm-boxes`, NOT live containment machinery; delete them if the AoI slice does not need them.
 - **SWEPT tunnel-guard DEFERRED:** C-3 relies on the velocity-safe `ContainmentBand` (`inset+outset ≥ v_rel·dt·K_SAFETY`) so a region cannot be tunneled at expected speeds; the additive swept-segment DEBUG tripwire is owed as a diagnostic, not correctness-load-bearing.
 - **P4/P5/P8/P10:** (a) moving regions `f(seed,tick)` + seed→celestial-parameter generator + SPIKE determinism gate — P4/P5; (b) non-identity input-side `transfer_frame` — **FA-1 (D-45(a), visual-universe arc) SWAPPED the detector's input seam `IdentityFrames`→`LocalFrames`**: `evaluate_realm_boundaries` now re-expresses each pose through the shard's OWN per-shard ephemeris `FrameContext` (`RealmRegions::frame_context` → `vd_core::frame::LocalFrames`), byte-IDENTICAL at static walk scale (every region registered at the identity placement; `node_per_realm_walk` + `process_parity` unchanged) with an `Err`→`f64::MAX` SAFE-DEGRADE so a frame the shard cannot name folds to non-member, never a spurious container. **Still owed:** the NON-IDENTITY MOVING direct-child placements `f(seed,tick)` (which make a cross-realm rebind actually MOVE the pose) ride FA-2/FA-4 on this same frozen seam — P4/P5; (c) D-41 non-zero-cell arithmetic in the containment subtract — P4/P5; (d) geometric child⊆parent subset check in `guard_regions_nest` — LANDED EARLY (Stage-C batch 1, 2026-08-14): the boot hands `guard_regions_nest` every child's WORST-INSTANT reach (`ChildReach`, movers judged at apoapsis — D-PLACE-1) and refuses a child that can leave its parent, at every boot; (e) moving-container reparent straddler guard + dynamic-registry O(N·M²) re-arm — P8; (f) the coarse-tier warp-map (galaxy/universe ly-cells) + warp-as-position-driver + exit-warp-void — P10 (§1.4 coordinate regimes).
@@ -4620,6 +4831,47 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   rows, a cliff at a planet with 1000 stations. At **P4** take the decision: a realm-lane AoI cull /
   send-on-change over a RELIABLE repair path, **vs** the child shard authoring its own box row (the
   DRY, SCALE-safe option). Send-on-change bandwidth at true scale is UNMEASURED.
+- **★ THE DIRECTION IS RULED (owner, 2026-08-27):** *"Agree that some data (like this) should be sent
+  through reliable lane."* The owner's own framing of the problem is the shape of the answer — *"why do
+  you need to send it every tick? This should happen just once, when you load the game, you download the
+  galaxy."* The lane splits by whether the thing CHANGES, not by what kind of thing it is:
+
+  | | What | Lane | When |
+  |---|---|---|---|
+  | A galaxy's systems | never move | **RELIABLE**, retried until it lands | once on arrival |
+  | A star system's planets | move every tick | ephemeral, repetition IS the loss story | every tick, as now |
+
+  This is not a compromise between two options — it is the honest split. Repeating a thing that never
+  changes is waste; retrying a thing that changes every tick is worse than useless, because next tick's
+  value beats a resend of last tick's. **THE WORLD'S OWN GOLDEN DECIDES WHICH IS WHICH:** a static
+  child's row is byte-identical at tick 0, 1,000 and 50,000 (`placement_rows.golden`).
+- **★ MEASURED, so the cliff is a number and not a word:** one `RealmSnap` is **208 bytes**, so the
+  per-tick frame at the target census is **31.2 MB — per subscriber, per tick**. That is not a slow
+  message, it is an unsendable one: this lane STOPS WORKING at the census, it does not degrade.
+- **★ RULED 2026-08-27: THE GALAXY CROSSES ONCE, OVER THE RELIABLE LANE.** Owner: *"we're passing the
+  Galaxy just once over reliable lane, the rest in your proposal makes sense."* **Client-side derivation
+  is REFUSED** — the client-only-renders law stands, and the saving comes from not repeating a thing that
+  never changes. See `owner_decisions_2026-08-27_seed_and_secrecy.md` §S6.
+- **★ THE NUMBERS, CORRECTED AND MEASURED ON THE WIRE** (an earlier figure of 31.2 MB was the IN-MEMORY
+  `size_of`, not the encoded size — retired):
+
+  | | |
+  |---|---|
+  | one `RealmSnap`, postcard-encoded | **95 bytes** |
+  | 150,000 rows | **14.2 MB** |
+  | per second at 20 Hz | **285 MB/s** |
+  | ten subscribers | **2.85 GB/s** |
+  | a star system's 9 planets | **855 bytes/tick = 17.1 KB/s** |
+
+  **The star system is not the problem — 17 KB/s is nothing. The galaxy is,** and only because it repeats
+  something that never moves. 14.2 MB does not fit a datagram: this lane does not degrade at the census,
+  it STOPS.
+- **THE SHAPE TO BUILD:** static rows ship on the RELIABLE session lane with the send-on-change baseline
+  the body lane already uses (for a static child that means ONCE, plus the keep-alive re-assert as the
+  heal); moving rows keep repeating on the ephemeral frame, where level-triggered repetition is still the
+  right loss story. ⚠ **PAGING IS NOT IN THIS STEP:** at 14.2 MB the one-time transfer needs parts,
+  acknowledgement and resumption, and none of that can be exercised until the census rises at S12. At
+  today's world the whole static set is 189 bytes.
 - **Where:** `authored_realm_snaps`, `crates/sim/src/stub.rs`; the moving-parent tripwire
   `d_fo_7_no_static_region_sits_under_a_varying_ancestor_chain` lives with the generator in
   `crates/physics/src/worldgen.rs`.
@@ -4902,7 +5154,7 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
   TOMBSTONED. The two-level law SURVIVES on their successors and is pinned there: a parent's window
   statements name at most its DIRECT children, and the one level of interior comes from the live
   realm's OWN statements relayed VERBATIM one hop (`InterShardFlow::WindowRelay`, the Q2 ruling) —
-  `stub::tests::the_live_siblings_interior_is_one_level_out_and_never_deeper_q1` is the pin. The
+  `stub::tests::window_lane::the_live_siblings_interior_is_one_level_out_and_never_deeper_q1` is the pin. The
   revisit trigger below is unchanged.
 - **WHAT LANDED:** both up-relay recursions are DELETED (`emit_realm_frames`: the rows re-relay inside the observed-interior fan; the lifted-set flatten in the shape ship). The law: every lane carries exactly two levels — what I author about my children, and what my children authored about themselves; a level never relays what it was relayed. Volume before was O(the entire live subtree) per link per tick under a comment claiming visibility culls it (nothing did); the local interior fan is now also bounded by each observer's own AoI band on that child (`AoiMembership` in `emit_realm_frames` — one tick of lag on entry, grace-latched on exit).
 - **WHAT DEPTH 3 WOULD HAVE SHOWN:** a neighbouring system's planets' MOONS, seen from the galaxy, before entering the system (both flown symptoms — "exiting the system freezes its planets", "approaching a system its planets never appear" — survive at depth 2: the level-1 ship is not the relay). **Revisit trigger:** the first world where a grandchild's angular size at the grandparent's typical viewing distance exceeds the eye's resolution (the moment P4 real-scale moons land), or an owner ruling on OD-5 look-ahead depth.
@@ -4934,7 +5186,7 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 
 ### D-SHIP-1 🟥 Ship realms cannot be named by the lineage coordinate — every coord lane EXCLUDES them, counted, until P8 (Stage-C audit :713, 2026-08-14)
 - **WHAT is deferred:** a lineage-coordinate arm for entity-backed `Ship` realms. `RealmKindTag` carries six seed-keyed tags and no Ship (`RealmLevel.seed` is a `u64`; `RealmId::Ship(EntityId)` keys on a `u128`), so `level_of(Ship) = None`, a Ship own-realm cannot build a `StubConfig` (`root_coord`'s expect), the shard bin refuses `VD_REALM_KIND=ship` at boot, and no Step-5 lane can NAME a ship child (demand/AoI, cascade targeting, scene reflect, interior fan). This is a first-class realm kind (PLAN.md P8: ship = own shard) structurally outside the realm lanes.
-- **WHAT LANDED NOW (the interim):** `region_level` returns `Option` and every coord-needing lane excludes a Ship region GRACEFULLY — counted per lane pass (`StubStats::ship_child_regions_excluded`), never a panic (it was an `expect` that aborted the whole shard on one hosted ship region). A ship still counts where no coord is needed: its `ChildLive` bit is a child OBSERVER, so an occupied ship keeps its parent warm (SL7). Pinned by `stub::tests::a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic` and the `None` arm in `region_level_recovers_seed_lineage_kinds`. **The lane count fell FOUR → TWO at window lane Slice C2 (2026-08-16):** the cascade targeting, the interior fan and the scene reflect died with their messages, leaving the AoI/demand fold and a `Child`-scope window's hop row — the pin asserts `counter == 2` now. No producer plants a Ship region through P3, so the counter reads 0 in every shipped world.
+- **WHAT LANDED NOW (the interim):** `region_level` returns `Option` and every coord-needing lane excludes a Ship region GRACEFULLY — counted per lane pass (`StubStats::ship_child_regions_excluded`), never a panic (it was an `expect` that aborted the whole shard on one hosted ship region). A ship still counts where no coord is needed: its `ChildLive` bit is a child OBSERVER, so an occupied ship keeps its parent warm (SL7). Pinned by `stub::tests::aoi_demand::a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic` and the `None` arm in `region_level_recovers_seed_lineage_kinds`. **The lane count fell FOUR → TWO at window lane Slice C2 (2026-08-16):** the cascade targeting, the interior fan and the scene reflect died with their messages, leaving the AoI/demand fold and a `Child`-scope window's hop row — the pin asserts `counter == 2` now. No producer plants a Ship region through P3, so the counter reads 0 in every shipped world.
 - **WHEN:** P8 (the ship-realm work) — a new lineage arm PLUS a payload widening (the `u64` seed cannot hold an `EntityId`), i.e. a deliberate wire change on the frozen `RealmPath`, not an append; the counter and the exclusions retire with it.
 - **Where:** `crates/core/src/realm_path.rs` (`RealmKindTag`), `crates/core/src/worldgen.rs::level_of`, `crates/sim/src/stub.rs::region_level` + the four lane guards, `crates/bins/src/lib.rs::realm_from_kind_seed`.
 

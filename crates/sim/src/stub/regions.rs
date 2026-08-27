@@ -413,6 +413,15 @@ impl RealmRegions {
     /// was, which is precisely the thing a realm may never know. The conversion into whatever space a
     /// particular viewer draws in happens once, at the gateway, which is the only party holding both
     /// ends of it.
+    /// Does this child MOVE? The split the window lane's two lanes are chosen by (owner ruling
+    /// 2026-08-27): a mover's row is worth repeating cheaply on the lossy per-tick frame and never
+    /// worth retrying, because next tick's value beats a resend of last tick's; a static child's row is
+    /// worth sending once on the reliable lane and never worth repeating.
+    #[must_use]
+    pub fn child_moves(&self, realm: RealmId) -> bool {
+        self.moving.contains_key(&realm)
+    }
+
     #[must_use]
     pub fn authored_realm_snaps(&self, own_realm: RealmId, book: &PlacementBook) -> Vec<RealmSnap> {
         self.child_rows(own_realm, book)
