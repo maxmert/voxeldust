@@ -1075,6 +1075,30 @@ fn frame_scene_camera(
     // f64 — a fitted standoff can be 1e11 m out, where `looking_at`'s f32 subtraction of two
     // like-sized coordinates loses whole kilometres of the view direction.
     if let Some(mut transform) = cam_tf.iter_mut().next() {
+        // ★ MOVE BOTH HALVES OF THE EYE, OR THE PICTURE IS DRAWN FROM TWO PLACES AT ONCE.
+        //
+        // This used to write `eye.eye` alone. `place_camera` had already published the AVATAR's eye on
+        // the lattice (`eye_lattice`), and BOTH placement systems — `sync_world` for dots and
+        // `sync_realm_boxes` for bodies — read the lattice eye FIRST. So the camera turned to the
+        // fitted three-quarter view while every body stayed placed relative to the avatar's standoff:
+        // rotation and placement disagreed, and the scene swung off the edge of the frame.
+        //
+        // MEASURED: G-RENDER-SMOKE captured content_fraction 0.0177 against its 0.05 floor — five
+        // times the HUD-only 0.0036 (so the scene WAS drawing) and five times below the 0.0983 this
+        // exact scene recorded when the gate last passed. The reconstructed geometry put the home star
+        // 33 degrees off axis, 40 px of it past the top edge.
+        //
+        // ★ AND THE FIX IS NOT TO LOWER THE FLOOR. 0.05 is calibrated and 0.0983 is the recorded pass;
+        // moving it would bless a broken camera and retire the gate's ability to catch this ever again.
+        //
+        // The lattice eye is TRANSLATED rather than cleared. Clearing it would drop both readers onto
+        // the flattened fallback, which is the exact path S4 replaced: two positions flattened
+        // independently before subtraction round apart, which is what made a convoy's separation
+        // flicker. Both eyes live in the same render frame, so this displacement is exact.
+        let delta = cam.eye - eye.eye;
+        if let Some((pos, tier)) = eye.eye_lattice {
+            eye.eye_lattice = Some((pos.translated(delta, tier), tier));
+        }
         eye.eye = cam.eye;
         *transform = camera_transform(cam.target - cam.eye, cam.up);
     }
