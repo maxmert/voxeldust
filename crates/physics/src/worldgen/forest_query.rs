@@ -112,6 +112,53 @@ pub fn marker_datum(p: &StarPhotometrics) -> (u8, f64) {
     (p.class as u8, p.luma_lsun)
 }
 
+/// ★ THE STAR CATALOGUE (S11) — every star system in the galaxy, as the client draws it.
+///
+/// ONE FOLD, and the reason there is exactly one is the owner's second condition on this message:
+/// *"a test asserts the encoded catalogue and the folded one are IDENTICAL — one truth, two producers,
+/// which will otherwise drift at the first patch and nobody will notice."* Two producers exist because
+/// a shard emits from the forest it actually BOOTED while the test folds from the seed; if those ever
+/// disagree the shard is serving a different galaxy than the seed describes, and a player would fly to
+/// a star that is not there. This function is the single expression both go through, so the only way
+/// they can differ is if the boot itself differs — which is exactly what the test is for.
+///
+/// A row carries no frame: a catalogue is stated in the GALAXY's frame and nowhere else. It carries no
+/// sub-cell residual either — measured, every generated system's centre is exactly cell-aligned.
+///
+/// ORDERED BY REALM so two folds of the same world are byte-identical whatever order the forest was
+/// walked in. Determinism here is not a nicety: the generation is derived from these bytes.
+#[must_use]
+pub fn star_catalogue(
+    regions: &[RealmRegion],
+    photometrics: &[(RealmId, StarPhotometrics)],
+) -> Vec<vd_core::look::StarRow> {
+    let galaxy = regions
+        .iter()
+        .find(|r| matches!(r.realm, RealmId::Galaxy(_)))
+        .map(|r| r.realm);
+    let mut rows: Vec<vd_core::look::StarRow> = regions
+        .iter()
+        .filter(|r| matches!(r.realm, RealmId::System(_)) && r.parent == galaxy)
+        .map(|r| {
+            // A star with no photometric draw still belongs in the sky — it is a place you can fly to.
+            // It glows NOT, which the presence floor already says elsewhere: absence of a datum is
+            // absence of data, never a default.
+            let (class_code, luma_lsun) = photometrics
+                .iter()
+                .find(|(realm, _)| *realm == r.realm)
+                .map_or((0, 0.0), |(_, p)| marker_datum(p));
+            vd_core::look::StarRow {
+                realm: r.realm,
+                cell: r.center.in_parents_frame().cell(),
+                class_code,
+                luma_lsun,
+            }
+        })
+        .collect();
+    rows.sort_by_key(|r| r.realm);
+    rows
+}
+
 /// [`to_regions`] over the config-driven system forest — the config-parameterised twin of
 /// [`realm_regions_for`] (S2 wraps it with [`UniverseConfig::visual_scale`]). Reuses `to_regions` verbatim.
 #[must_use]

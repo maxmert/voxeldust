@@ -16,7 +16,10 @@
 
 use crate::entity_kind::SchemaId;
 use crate::geometry::Boundary;
+use crate::pose::RealmId;
 use crate::tlv::{TlvError, TlvReader, TlvWriter};
+use glam::I64Vec3;
+use serde::{Deserialize, Serialize};
 
 /// The window-body bag schema (one schema for both statement kinds — the KIND rides the wire
 /// enum [`BodyStmt`](https://docs.rs/vd-wire) discriminant, never a bag field). Allocated OUTSIDE
@@ -247,4 +250,60 @@ mod tests {
         assert_eq!(luma_of(&plain), Err(TlvError::MissingRequiredTag(TAG_LUMA)));
         assert_ne!(lit, plain);
     }
+}
+
+/// ONE STAR IN THE CATALOGUE (S11; owner-approved 2026-08-24 Q4, the compact-message reversal).
+///
+/// ★ WHY THIS IS NOT A a picture row. The owner's own argument, and it overturned the design's
+/// reuse-the-existing-shape recommendation: the picture row is composed PER OBSERVER, PER INSTANT,
+/// ready to draw. A catalogue is neither — it is the same for every player and true until the world
+/// is regenerated. Reusing the picture row would mean BENDING it, which is more work and more risk
+/// than a small purpose-built one.
+///
+/// **MEASURED before it was written:** ~47 bytes against a `RealmSnap`'s 95 — 7.0 MB against 14.2 MB
+/// at the target census of 150,000 systems.
+///
+/// **NO SUB-CELL PART, and that is a measurement not an assumption:** every generated system's centre
+/// carries `offset = (0,0,0)` at the galaxy's own two-metre step, so the integer cell IS the position.
+/// A row that carried a residual would be carrying three zeroes 150,000 times.
+///
+/// **THE IDENTITY IS CARRIED BECAUSE OF A SEAM (SL8), not for tidiness.** Fly toward a star and it
+/// wakes: the client then holds a catalogue POINT and a LIVE REALM for the same star. Unable to tell
+/// they are one thing it either draws both — a double image — or swaps them, which is a POP at exactly
+/// the moment of arrival. The identity is what lets the point be suppressed as the real thing arrives.
+///
+/// ★ WHY IT LIVES IN THE CORE AND NOT THE WIRE. The generator builds it and the generator crate may
+/// not see the wire crate (the dependency rule runs one way: physics → core, sim → wire → core).
+/// Putting it here is what lets ONE fold produce it and the wire carry it without a second shape —
+/// exactly how the marker datum already crosses that boundary, as plain scalars.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StarRow {
+    /// Which star system this is — the key that lets a live realm replace its own point silently.
+    pub realm: RealmId,
+    /// Its centre in the GALAXY's frame, as whole cells of that frame's own step. The galaxy is the
+    /// only frame a catalogue is ever stated in, so the frame is not repeated 150,000 times.
+    pub cell: I64Vec3,
+    /// The spectral class as its stable code — the colour to draw it (`marker_datum`'s first scalar).
+    pub class_code: u8,
+    /// Main-sequence luminosity in solar units — the brightness (`marker_datum`'s second scalar).
+    pub luma_lsun: f64,
+}
+
+/// THE CATALOGUE'S GENERATION — **derived from the content, never hand-incremented** (S11; the owner's
+/// THIRD condition on this message, 2026-08-24 Q4).
+///
+/// ★ WHY A PERSON MAY NOT TYPE THIS NUMBER. The client caches the sky on disk and asks for it by
+/// version: *"I hold generation X"*. If a person increments it, a person eventually forgets to — and a
+/// stale cache then looks current forever. The player draws last week's galaxy, flies at a star that has
+/// moved, and NOTHING reports a fault, because every part believes it is in agreement. Deriving it from
+/// the bytes makes "the content changed but the version did not" unrepresentable rather than unlikely.
+///
+/// Folded over the ENCODED rows, not the values: the encoding is what the client stores and compares, so
+/// a field added or reordered must move this number even when every value still compares equal.
+///
+/// A collision would let a stale cache pass as current. That is a content digest's known cost, and it is
+/// stated here rather than assumed away; see [`crate::digest`].
+#[must_use]
+pub fn catalogue_generation(encoded: &[u8]) -> u64 {
+    crate::digest::fnv1a(crate::digest::FNV_OFFSET, encoded)
 }

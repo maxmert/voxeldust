@@ -266,12 +266,12 @@ pub fn verify(
 /// discovering the disagreement in a position somebody has already acted on.
 #[must_use]
 pub const fn coordinate_generation() -> u64 {
-    let mut acc = FNV_OFFSET;
+    let mut acc = crate::digest::FNV_OFFSET;
     // An index loop rather than a `for`, because a `for` is not permitted in a `const fn`. Same fold,
     // same order, same value.
     let mut i = 0;
     while i < Tier::ALL.len() {
-        acc = fnv_u64(acc, Tier::ALL[i].cell_edge_m().to_bits());
+        acc = crate::digest::fnv1a_u64(acc, Tier::ALL[i].cell_edge_m().to_bits());
         i += 1;
     }
     acc
@@ -283,28 +283,9 @@ pub const fn coordinate_generation() -> u64 {
 /// constants, this folds them, and nothing here can ask what they mean.
 #[must_use]
 pub fn world_generation(constants: &[f64]) -> u64 {
-    let mut acc = FNV_OFFSET;
+    let mut acc = crate::digest::FNV_OFFSET;
     for c in constants {
-        acc = fnv_u64(acc, c.to_bits());
-    }
-    acc
-}
-
-/// FNV-1a's 64-bit offset basis.
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a's 64-bit prime.
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-/// One 64-bit value folded into an FNV-1a accumulator, byte by byte. Dependency-free and stable across
-/// builds and machines — a generation that changed with the compiler would refuse every store after an
-/// upgrade. The same reasoning the boot counter's checksum already follows.
-const fn fnv_u64(mut acc: u64, v: u64) -> u64 {
-    let bytes = v.to_le_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        acc ^= bytes[i] as u64;
-        acc = acc.wrapping_mul(FNV_PRIME);
-        i += 1;
+        acc = crate::digest::fnv1a_u64(acc, c.to_bits());
     }
     acc
 }
@@ -472,7 +453,7 @@ mod tests {
 
     #[test]
     fn the_world_generation_folds_what_it_is_given_and_nothing_else() {
-        assert_eq!(world_generation(&[]), FNV_OFFSET);
+        assert_eq!(world_generation(&[]), crate::digest::FNV_OFFSET);
         assert_ne!(world_generation(&[0.0]), world_generation(&[]));
         // Positive and negative zero are the same number and DIFFERENT bits. The fold reads bits, so it
         // separates them — stated because it is surprising, and because a world constant that flipped

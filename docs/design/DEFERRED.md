@@ -4205,6 +4205,14 @@ current fixture contains a mover. Re-uniting at ingest keeps the saving on the W
     star that is not there and fly you to empty space: a lie told to that player's own screen, not an
     exploit. **Whether any destination is stated at all is not settled here — settle it before building
     the validation half.**
+- **★ THE CATALOGUE ROW'S SHAPE, measured 2026-08-27 before building:**
+  - **A star's position is EXACTLY CELL-ALIGNED** — every generated system's centre carries `offset =
+    (0,0,0)` at the galaxy's own 2 m step. So a row needs the integer cell and NO sub-cell part.
+  - Costed against the current row: **~47 bytes vs 95**, i.e. **7.0 MB vs 14.2 MB** at the census.
+  - **THE ROW MUST CARRY WHICH SYSTEM IT IS, and the reason is a SEAM (SL8), not tidiness.** Fly toward a
+    star and it wakes: the client then holds a catalogue POINT and a LIVE REALM for the same star. Unable
+    to tell they are one thing, it either draws both (a double image) or swaps them (a POP at arrival).
+    Both are seams. The identity is what lets the point be suppressed the instant the real thing arrives.
 - **STILL OWED FROM S11:** the compact catalogue to the CLIENT (nothing sent to realms — a ship holds the
   same generator and asks it); encoded-vs-seed-folded byte identity, one truth from two producers; the
   generation derived from content, never hand-incremented; the client's on-disk cache with a content digest

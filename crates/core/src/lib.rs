@@ -20,6 +20,7 @@
 
 pub mod child_index;
 pub mod collections;
+pub mod digest;
 pub mod entity_kind;
 pub mod fence;
 pub mod flight;

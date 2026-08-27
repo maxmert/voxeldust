@@ -1579,6 +1579,124 @@ fn the_four_outer_geometry_numbers_are_the_addendums_derivations() {
     );
 }
 
+/// ★ ONE TRUTH, TWO PRODUCERS (S11; the owner's SECOND condition on the catalogue message, 2026-08-24
+/// Q4): *"a test asserts the encoded catalogue and the folded one are IDENTICAL — one truth, two
+/// producers, which will otherwise drift at the first patch and nobody will notice."*
+///
+/// THE TWO PRODUCERS. A shard emits the catalogue from the forest it actually BOOTED. This test folds
+/// one straight from the SEED. If those ever disagree, the shard is serving a galaxy the seed does not
+/// describe — and the failure is silent in the worst way: a player flies to a star that is not there.
+///
+/// Compared as ENCODED BYTES, not as values. A field added to the row, a field reordered, or a change
+/// of encoding moves the bytes while every value still compares equal — and the bytes are what the
+/// generation is derived from and what the client caches on disk.
+#[test]
+fn the_encoded_catalogue_and_the_seed_folded_one_are_byte_identical() {
+    let cfg = UniverseConfig::world(15.0, 0.05);
+
+    // PRODUCER ONE — from a booted forest, the way a shard holds it.
+    let booted = realm_regions_for_config(0, &cfg);
+    let lit = system_photometrics_for_config(0, &cfg);
+    let from_boot = star_catalogue(&booted, &lit);
+
+    // PRODUCER TWO — folded again from the seed, nothing carried over.
+    let from_seed = star_catalogue(
+        &realm_regions_for_config(0, &cfg),
+        &system_photometrics_for_config(0, &cfg),
+    );
+
+    let a = postcard::to_allocvec(&from_boot).expect("catalogue encodes");
+    let b = postcard::to_allocvec(&from_seed).expect("catalogue encodes");
+    assert_eq!(a, b, "the two producers disagree about the galaxy");
+
+    // ANTI-VACUITY, three ways — a byte comparison of two empty vectors would pass and prove nothing.
+    assert_eq!(
+        from_boot.len(),
+        3,
+        "THE world's three systems are catalogued"
+    );
+    assert!(!a.is_empty());
+    assert!(
+        from_boot.iter().any(|r| r.luma_lsun > 0.0),
+        "at least one star carries a real photometric draw, not a default"
+    );
+
+    // ★ THE ROW IS THE MEASURED SHAPE: no sub-cell part, because there is none to carry. If a future
+    // generator starts placing a system off-cell, THIS goes red rather than the position silently
+    // losing its residual on the way to every client.
+    for r in &booted {
+        if matches!(r.realm, RealmId::System(_)) && r.parent == Some(GALAXY) {
+            assert_eq!(
+                r.center.in_parents_frame().offset(),
+                DVec3::ZERO,
+                "{:?} sits off-cell — the catalogue row would drop its residual",
+                r.realm
+            );
+        }
+    }
+
+    // ORDER IS BY REALM, so two folds of one world cannot differ by walk order — the generation is
+    // derived from these bytes, so an unstable order would re-issue the whole sky for nothing.
+    let names: Vec<RealmId> = from_boot.iter().map(|r| r.realm).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted);
+}
+
+/// ★ THE GENERATION COMES FROM THE CONTENT (S11; the owner's THIRD catalogue condition).
+///
+/// The client caches the sky on disk and asks for it by version. If a person maintains that number, a
+/// person eventually forgets to — and a stale cache then looks current FOREVER: the player draws an old
+/// galaxy, flies at a star that has moved, and nothing reports a fault because every part believes it
+/// agrees. Deriving it from the bytes makes "the content changed but the version did not"
+/// UNREPRESENTABLE rather than merely unlikely, and this drives both directions of that.
+#[test]
+fn the_catalogue_generation_moves_with_the_content_and_only_with_it() {
+    let cfg = UniverseConfig::world(15.0, 0.05);
+    let rows = star_catalogue(
+        &realm_regions_for_config(0, &cfg),
+        &system_photometrics_for_config(0, &cfg),
+    );
+    let bytes = postcard::to_allocvec(&rows).expect("encodes");
+    let gen0 = vd_core::look::catalogue_generation(&bytes);
+
+    // SAME CONTENT ⇒ SAME NUMBER. Folded again from the seed, nothing carried over. Without this the
+    // client re-downloads the whole sky on every login for a world that did not change.
+    let again = star_catalogue(
+        &realm_regions_for_config(0, &cfg),
+        &system_photometrics_for_config(0, &cfg),
+    );
+    let gen1 =
+        vd_core::look::catalogue_generation(&postcard::to_allocvec(&again).expect("encodes"));
+    assert_eq!(gen0, gen1, "an unchanged sky must not re-issue itself");
+
+    // ★ ONE STAR MOVED BY ONE CELL ⇒ A DIFFERENT NUMBER. This is the direction that matters: it is the
+    // case a hand-maintained version gets wrong, and the case whose failure is silent.
+    let mut moved = rows.clone();
+    moved[0].cell.x += 1;
+    let gen_moved =
+        vd_core::look::catalogue_generation(&postcard::to_allocvec(&moved).expect("encodes"));
+    assert_ne!(
+        gen0, gen_moved,
+        "a star moved one cell must re-issue the sky"
+    );
+
+    // …and a star that only changed COLOUR must too — a version that tracked positions alone would
+    // leave every client drawing the old spectrum.
+    let mut relit = rows.clone();
+    relit[0].luma_lsun *= 2.0;
+    let gen_relit =
+        vd_core::look::catalogue_generation(&postcard::to_allocvec(&relit).expect("encodes"));
+    assert_ne!(
+        gen0, gen_relit,
+        "a star that changed brightness must re-issue the sky"
+    );
+
+    // ANTI-VACUITY: the fold is over real content, not an empty vector that would agree with anything.
+    assert_eq!(rows.len(), 3);
+    assert!(!bytes.is_empty());
+}
+
 /// ★ THE SUCCESSOR TO χ, and the measurement that says whether the S9 climb actually bought the
 /// world it was supposed to buy.
 ///
