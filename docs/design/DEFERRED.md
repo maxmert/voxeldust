@@ -4137,11 +4137,25 @@ belong to S11.**
 - **★ THE PER-TICK SKY IS GONE — and this deliverable belongs to S11, not S10.** See below.
 - **THE FOLD INVERSION IS DEFERRED TO S12** (owner ruling; see D-MOVE-1 / M8). MEASURED: only 8 of 499 sim
   tests catch a fold that silently skips a child, and the widest AoI fixture has TWO children.
-- **THE CLIENT'S PER-DELTA CLONE: recommended CLOSED as not-a-defect.** It is bounded by the DRAWN set,
-  not the roster — the update feeding it already carries only realms entering and leaving. And the copy is
-  load-bearing: the scene is shared behind a reference count, so copy-then-swap is what makes a concurrent
-  read safe and a malformed delta non-destructive. Removing it needs a persistent map — a new dependency,
-  not adopted unilaterally. **Owner has not ruled; do not "fix" it without one.**
+- **THE CLIENT'S PER-DELTA CLONE: ★ CLOSED AS NOT-A-DEFECT (owner, 2026-08-27)** — *"we can close it for
+  now, we can re-review when the real game will be tested if we see problems."*
+  - **WHY IT IS NOT AN SL9 DEFECT:** it is bounded by the DRAWN set, not the roster. The update feeding it
+    already carries only the realms entering and leaving the view, so the cost grows with the SKY, never
+    with the galaxy's child count.
+  - **THE COPY IS LOAD-BEARING, TWICE OVER, and this is why it must not be "tidied away" later.** (1) The
+    renderer may be reading the scene at the instant an update arrives — the scene is shared behind a
+    reference count, so copy-then-swap is what makes a concurrent read safe. (2) A malformed delta (a
+    cycle in the parent links, say) must leave the LIVE picture untouched rather than half-applied; the
+    new copy is simply discarded. Mutating in place forfeits both.
+  - **★ THE REOPEN TRIGGER, owner-stated:** live play of the real game showing a problem. **What to measure
+    when that happens — and measure it BEFORE changing anything:** how large the DRAWN box map actually
+    gets with a full sky, and the per-update copy cost against it. If that number is genuinely large the
+    answer is a persistent map with structural sharing (two changed entries cost two, and the previous
+    version stays valid for whoever is mid-read) — which is a NEW DEPENDENCY and therefore an owner
+    decision, never adopted alone.
+  - **Until then: do not remove the copy.** Removing it without the sharing map silently forfeits both jobs
+    above, and neither failure shows up in a test — one needs a concurrent read, the other a malformed
+    delta.
 
 ---
 
@@ -4179,6 +4193,18 @@ current fixture contains a mover. Re-uniting at ingest keeps the saving on the W
   be oversized) and it becomes a false green the moment the census makes the message droppable. **The
   replacement S11 names: gate on the RECEIVED catalogue — the client's rendered star count equals the
   census — never on the absence of bytes.**
+- **★ THERE IS NO STAR-MAP MODE — corrected by the owner 2026-08-27:** *"we don't have any mode, we should
+  just point our ship to the star and engage warp."* SL8 forbids a map screen, a toggle or a separate view.
+  The stars are drawn IN THE SKY, always, and aiming is a PHYSICAL act — you rotate the hull. **The
+  catalogue exists to DRAW the sky, and for nothing else.** Any S11 work that grows a selection UI, a
+  destination list or a map view is building the seam the law exists to prevent.
+  - ⚠ **AND THIS MAY MOOT PART OF Q4's CONDITION 4.** That condition guards against an edited cache
+    becoming *"warp anywhere"*, which assumes a STATED destination the server could be tricked into
+    accepting. Under physical flight there is no stated destination — you point, you burn, and the demand
+    loop warms whatever you actually approach from your own velocity. An edited cache would then draw a
+    star that is not there and fly you to empty space: a lie told to that player's own screen, not an
+    exploit. **Whether any destination is stated at all is not settled here — settle it before building
+    the validation half.**
 - **STILL OWED FROM S11:** the compact catalogue to the CLIENT (nothing sent to realms — a ship holds the
   same generator and asks it); encoded-vs-seed-folded byte identity, one truth from two producers; the
   generation derived from content, never hand-incremented; the client's on-disk cache with a content digest
