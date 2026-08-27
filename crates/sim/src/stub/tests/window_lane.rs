@@ -2560,3 +2560,100 @@ fn the_beat_is_stated_once_per_gateway_however_many_windows_it_holds() {
     );
     assert!(per_tick.contains(&0), "and it is a CADENCE, not every tick");
 }
+
+/// ★ HR4 G-IDENTICAL FOR THE SKY LANE (S11; owner-confirmed 2026-08-27).
+///
+/// The identical sky feature — answering a request, the parts, the generation, and the liveness beat —
+/// on a GALAXY shard and on a SYSTEM shard, under their REAL capability profiles.
+///
+/// ★ WHY THIS GATE EXISTS AT ALL. There is ONE shard binary; a "shard kind" is a configuration of it.
+/// So a feature can quietly depend on something only one configuration happens to have, and nobody
+/// notices, because the test always runs on that configuration. The failure this catches, concretely:
+///
+/// ```text
+///   Test the catalogue on the GALAXY shard only.  ->  it passes.
+///   But the code reads a star list that only a galaxy fills.
+///   Later a SYSTEM shard must state a sky. It has no list.
+///   The sky is silently EMPTY. Nothing fails. Nothing logs. The stars are just gone.
+/// ```
+///
+/// One run proves the feature works somewhere. TWO runs prove it does not depend on where.
+///
+/// ★ AND THIS GATE HAS BEEN GAMED HERE BEFORE. The 2026-08-14 audit found G-IDENTICAL green on a
+/// fixture that ran the SAME kind twice and varied one constant (DEFERRED.md D-38). So this test
+/// asserts the profiles are actually DIFFERENT before it compares anything — a gate that cannot fail
+/// is worse than no gate, because it reads as proof.
+///
+/// ★ AND THE HONEST LIMIT OF THIS GATE TODAY. Nothing in the sim READS a capability yet: the profile
+/// is carried and never consulted (see `register_stub_shard`'s own note that it is "capability-inert
+/// at P1–P3"). So today this gate cannot go red. It is a TRIPWIRE, not a proof — armed for the day a
+/// capability starts gating behaviour, which is exactly the day the sky could quietly acquire a
+/// dependency on one. Three profiles are driven rather than two, spanning the widest contrast the
+/// profile set affords: a galaxy (relay, no voxel realm), a system (hull host, no voxel realm), and a
+/// planet (a SPHERICAL voxel realm, functional blocks, block edit, surfaces and seats). If the sky
+/// ever reaches for a voxel capability, the planet run is what will notice.
+#[test]
+fn assert_sky_feature_anywhere() {
+    let galaxy = crate::capability::profiles::galaxy().expect("galaxy profile");
+    let system = crate::capability::profiles::system().expect("system profile");
+    let planet = crate::capability::profiles::planet().expect("planet profile");
+    // ANTI-VACUITY FIRST. If these were equal the comparison below would prove nothing at all, which
+    // is exactly how the previous G-IDENTICAL gate passed while measuring nothing.
+    assert_ne!(galaxy, system, "galaxy and system must differ");
+    assert_ne!(galaxy, planet, "galaxy and planet must differ");
+    assert_ne!(system, planet, "system and planet must differ");
+    // ...and the planet run really is the wide contrast this gate claims: it hosts a voxel realm and
+    // the other two do not.
+    assert!(
+        planet.voxel().is_some(),
+        "the planet run hosts a voxel realm"
+    );
+    assert!(galaxy.voxel().is_none(), "the galaxy run hosts none");
+
+    let runs = [
+        (NodeKind::Shard(galaxy), RealmId::System(7)),
+        (NodeKind::Shard(system), RealmId::Planet(42)),
+        // A Planet child, not an Area: an Area needs a planet parent, and the child a run HOSTS is
+        // beside the point here — the sky is the galaxy's stars, never this realm's children.
+        (NodeKind::Shard(planet), RealmId::Planet(43)),
+    ];
+    // ...and each run hosts a DIFFERENT child realm, so an equality below is the feature being
+    // kind-blind rather than three copies of one run.
+    assert_eq!(
+        runs.iter()
+            .map(|(_, child)| *child)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+
+    let observed: Vec<_> = runs
+        .into_iter()
+        .map(|(kind, child)| drive_sky_lane(kind, OWN_REALM, child))
+        .collect();
+
+    // THE SKY ARRIVED ON EVERY RUN. A silently empty sky is the failure in the header, so an empty
+    // run would pass a naive equality check while proving the exact opposite.
+    for (i, (parts, beats, _)) in observed.iter().enumerate() {
+        assert!(!parts.is_empty(), "run {i} stated its sky");
+        assert!(!beats.is_empty(), "run {i} beat");
+    }
+
+    // ★ THE COMPARISON. The sky is the same galaxy whatever realm you stand in, so unlike the window
+    // lane's rows there is not even a realm NAME free to differ here. Every value is byte-equal.
+    let first = &observed[0];
+    for (i, run) in observed.iter().enumerate().skip(1) {
+        assert_eq!(
+            run.0, first.0,
+            "run {i}: the same sky, the same parts, the same generation"
+        );
+        assert_eq!(
+            run.1, first.1,
+            "run {i}: the same beat, naming the same sky"
+        );
+        assert_eq!(
+            run.2, first.2,
+            "run {i}: the same counts — parts sent, beats sent, requests taken"
+        );
+    }
+}

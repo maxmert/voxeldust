@@ -58,6 +58,9 @@ struct ProcessClient {
     scene_levels: u64,
     /// Parts of the star catalogue this client received (S11).
     sky_parts: u64,
+    /// STARS actually held, not messages seen (S11). The gate counts these, because a message count
+    /// turns red for the wrong reason the moment the census makes the catalogue span many parts.
+    sky_stars: u64,
     /// The generation of the catalogue that actually arrived (S11).
     sky_generation: Option<u64>,
     /// Liveness beats seen over the real transport (S11).
@@ -90,6 +93,7 @@ impl ProcessClient {
             evictions: 0,
             scene_levels: 0,
             sky_parts: 0,
+            sky_stars: 0,
             sky_generation: None,
             sky_beats: 0,
             sky_beat_generation: None,
@@ -247,6 +251,7 @@ impl ProcessClient {
                     "the generation is folded from content and is never a default"
                 );
                 self.sky_parts += 1;
+                self.sky_stars += rows.len() as u64;
                 self.sky_generation = Some(generation);
             }
             // ★ THE SKY'S LIVENESS BEAT (S11), over the real transport. Its arrival here proves the
@@ -417,8 +422,39 @@ fn p1_parity_real_binaries_over_quic() {
     // It says so now. The loop waits for the IDLE dot to reach the home THE world states for it,
     // and the walker's displacement is measured FROM THAT HOME — so the scenario cannot be
     // sampled mid-login, and neither check can be satisfied by the standoff's own magnitude.
-    let spawn_m =
-        vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt).default_home_offset_m();
+    let world = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
+    let spawn_m = world.default_home_offset_m();
+    // ★ THE CENSUS, DERIVED THE WAY THE SHARD DERIVES IT (S11), never written as a literal — so the
+    // gate keeps its meaning when the census rises in S12 instead of turning red for the wrong reason.
+    //
+    // ★ AND IT IS THE SHARD'S FOREST, NOT THE WORLD'S. A shard folds its sky from the realms IT booted
+    // (`boot_regions_and_movers` in the shard binary), so a single-shard cluster hosting one star
+    // system states THAT system's stars and no others. Writing the WORLD's census here instead made
+    // this gate red on its first run — 1 star held against 3 in the world — which is not a defect in
+    // the lane but a real property of it, and one that matters: **a client subscribed to a system
+    // shard does not receive the whole galaxy.** Seeing every star from inside a star system is an S12
+    // question, and it is ledgered as one.
+    let own = vd_core::pose::RealmId::System(DEV.realm_seed);
+    let held: std::collections::BTreeSet<vd_core::pose::RealmId> = [own].into_iter().collect();
+    let (shard_regions, _) = vd_bins::boot_regions_and_movers(
+        DEV.universe_seed,
+        &held,
+        own,
+        DEV.move_speed,
+        DEV.tick_dt,
+    );
+    let (census_rows, _) = vd_bins::star_catalogue_for_boot(
+        DEV.universe_seed,
+        DEV.move_speed,
+        DEV.tick_dt,
+        &shard_regions,
+    );
+    let world_census = census_rows.len() as u64;
+    let expected_parts = vd_wire::channels::partition_stars(&census_rows, 8 * 1024).len();
+    assert!(
+        world_census > 0,
+        "this shard states stars, or the gate is vacuous"
+    );
     let spawn_pos = vd_core::pose::LatticePos::from_metres(spawn_m, vd_core::pose::Tier::Fine);
 
     // ---- drive the scenario at real tick rate --------------------------------
@@ -544,11 +580,20 @@ fn p1_parity_real_binaries_over_quic() {
     // level (the one epoch bump this scenario lawfully has), stamped epoch 1 and led by the home
     // origin (asserted on arrival). A second level here would mean a spurious re-origin.
     for (name, client) in [("walker", &walker), ("idle", &idle)] {
+        // ★ THE GATE COUNTS STARS, NOT MESSAGES (S11). It used to assert `sky_parts == 1`. That is a
+        // claim about the CARRIER, and it turns red for the wrong reason the moment the census makes
+        // the catalogue span many parts — at which point the natural repair is to loosen it, and the
+        // gate stops protecting anything. What matters is that the client HOLDS the whole galaxy.
         assert_eq!(
-            client.sky_parts, 1,
-            "★ THE SKY ARRIVED OVER THE REAL TRANSPORT, in one part at this world's three stars — and \
-             it is stated ONCE, so a second part here would mean the generation stopped holding and \
-             every client is re-downloading the galaxy on a cadence"
+            client.sky_stars, world_census,
+            "★ THE SKY ARRIVED OVER THE REAL TRANSPORT: the client holds every star this world has"
+        );
+        // ...and it was stated ONCE. Counted in PARTS, which is the right unit for this claim: a
+        // second copy of the sky would double the parts whatever the census is.
+        assert_eq!(
+            client.sky_parts as usize, expected_parts,
+            "the sky is stated once — a second statement means the generation stopped holding and \
+             every client re-downloads the galaxy on a cadence"
         );
         // ★ THE BEAT NAMES THE SKY THAT ACTUALLY ARRIVED (S11). This is the end-to-end claim: over
         // real binaries and a real transport, the number the server keeps restating is the number of

@@ -293,6 +293,7 @@ pub(crate) struct Session {
     /// that never resolved a dynamic home and never crossed stays `None` forever. D-34's COMPOSITED-SUBS
     /// clause remains OWED: this field names ONE node, whereas the source keeps its own read sub (and its
     /// ghost) until `ReleaseSubscribe` — see `TransferProgress::demoting_home`.
+    pub(crate) home_shard: Option<NodeId>,
     /// THE SKY THIS SESSION HOLDS (S11) — the generation the client last stated, whether it read the
     /// catalogue from its own disk cache or assembled it from the wire. `None` means it holds nothing,
     /// which is the safe default: an unknown client is SERVED the sky rather than denied it.
@@ -303,7 +304,6 @@ pub(crate) struct Session {
     /// NEW client nothing at all. One row per session has neither failure, because a session is exactly
     /// one holder of exactly one sky.
     pub(crate) sky_held: Option<u64>,
-    pub(crate) home_shard: Option<NodeId>,
     /// RLM 5f-3d — the STANDING home-realm identity of a dynamic session: set once at the committed lease
     /// and NEVER cleared, so it outlives the `AwaitingHomeRealm` phase payload. Two live readers: the
     /// bounded-TTL Close diagnostic (which can fire in `AwaitingAttach`, where the phase payload is gone —
