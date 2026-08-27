@@ -4213,6 +4213,59 @@ current fixture contains a mover. Re-uniting at ingest keeps the saving on the W
     star and it wakes: the client then holds a catalogue POINT and a LIVE REALM for the same star. Unable
     to tell they are one thing, it either draws both (a double image) or swaps them (a POP at arrival).
     Both are seams. The identity is what lets the point be suppressed the instant the real thing arrives.
+- **★ THE LIVENESS BEAT — a new wire arm, APPROVED under SL6 and LANDED (owner, 2026-08-27).**
+  `ShardToGateway::StarSkyAlive` (wire index 13) and `ServerControlMsg::SkyAlive`, carrying one number:
+  the generation the server believes is current, restated on the AoI cadence whether or not it changed.
+
+  **THE PROBLEM IT REMOVES.** Every other statement on this lane is send-on-change, and a galaxy does
+  not change — so a perfectly healthy server is SILENT there essentially forever. Silence therefore
+  carried no information at all, because it was the signature of two opposite states at once:
+
+  ```text
+    the sky did not change   ──┐
+                               ├──► ...both look EXACTLY like this: nothing arrives.
+    the emitter is broken    ──┘
+  ```
+
+  The per-tick frame did not settle it: a frame proves the SHARD is running, never WHICH SKY it holds,
+  so a shard whose catalogue emitter died would go on framing forever. The beat makes the healthy case
+  audible, and the three readings separate:
+
+  ```text
+    beat arrives, generation == mine   ──►  Current   "nothing changed"   (healthy, and PROVEN)
+    beat arrives, generation != mine   ──►  Stale     "I hold the wrong sky"
+    no beat at all                     ──►            "nobody is working"
+  ```
+
+  Eight bytes on a cadence against a 7.0 MB catalogue — the cheapest possible statement that the
+  expensive one is still true. **UNCONDITIONAL**, alone on this lane: it is the one statement that must
+  NOT be suppressed when it repeats, because the repetition IS the message. Gated only by the same
+  emptiness guard as the catalogue (a shard parenting no stars has no sky to vouch for). Per GATEWAY,
+  never per window — the sky is not window-scoped.
+
+  **STILL OWED (with the renderer):** the third arm is an ABSENCE, and absence is not an event. The
+  client counts `beats_current`, and a caller holding a clock reads "stopped climbing" as *"nobody is
+  working"* — but the watchdog POLICY (what the player is shown when the sky lane goes quiet) is a
+  renderer decision and is not built. Deliberately, the beat also does NOT act on `Stale`: knowing the
+  held sky is wrong is a different job from replacing it, and replacing it is the
+  receiver-states-its-generation exchange below, not this.
+- **★ THE SENDER'S MEMORY CANNOT BE MADE CORRECT — MEASURED 2026-08-27, and it is why S11 specifies
+  the other design.** The emitter remembers which sky it last stated to each gateway. That memory is
+  wrong in BOTH directions and the sender cannot tell the two cases apart:
+  - **FORGET TOO EAGERLY** ⇒ a client returning from a crossing is re-sent a sky it already holds. A
+    warp leg is TWO crossings, so one journey re-transmits the whole galaxy twice — 14 MB at the census.
+  - **REMEMBER TOO LONG** ⇒ a NEW subscriber behind the same gateway is told nothing and has NO SKY AT
+    ALL, because some previous session once held one.
+
+  Both arms are driven by `a_closed_and_re_opened_window_re_states_the_sky_today`, which also records
+  that today's behaviour is right only by accident: the emit runs only while some window is open, so a
+  shard whose LAST window closed never reaches the line that forgets the gateway — **but with a second
+  gateway present it does, and the return leg re-states the whole sky.** Measured, not argued.
+
+  **No length of memory fixes this, because the sender is not the party that knows.** S11's own wording
+  is the cure: *"the receiver stating its generation and the sender answering from that rather than from
+  its own memory of what it sent."* It needs the client's on-disk cache to exist first. **Do not patch
+  the retain — it would trade one wrong direction for the other.**
 - **STILL OWED FROM S11:** the compact catalogue to the CLIENT (nothing sent to realms — a ship holds the
   same generator and asks it); encoded-vs-seed-folded byte identity, one truth from two producers; the
   generation derived from content, never hand-incremented; the client's on-disk cache with a content digest

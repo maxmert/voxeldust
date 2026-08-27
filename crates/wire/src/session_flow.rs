@@ -412,6 +412,23 @@ pub enum ShardToGateway {
         /// The stars in THIS part. Never empty — an empty catalogue sends no parts at all.
         rows: Vec<vd_core::look::StarRow>,
     },
+    /// THE SKY'S LIVENESS BEAT (S11; a new arm, owner-approved under SL6 on 2026-08-27): one number,
+    /// on the shared cadence — which sky this shard believes is current.
+    ///
+    /// ★ WHY THE PER-TICK FRAME IS NOT ENOUGH. The frame already proves the SHARD is alive. It does not
+    /// prove WHICH SKY the shard thinks is current. A shard whose catalogue emitter silently broke would
+    /// go on sending frames forever and never state a new sky — and that is INDISTINGUISHABLE from a sky
+    /// that simply did not change, which is the state this whole lane is designed to produce.
+    ///
+    /// With the beat, the two separate: a beating generation alongside silence on the catalogue lane
+    /// means *"nothing changed"*; no beat at all means *"nobody is working"*. That is the entire job.
+    ///
+    /// EIGHT BYTES on a cadence, against a 7.0 MB catalogue — the cheapest possible statement that the
+    /// expensive one is still true. Appended arm.
+    StarSkyAlive {
+        /// The generation this shard's catalogue currently folds to.
+        generation: u64,
+    },
 }
 
 impl ShardToGateway {
@@ -432,7 +449,8 @@ impl ShardToGateway {
             | ShardToGateway::WindowMembership { .. }
             | ShardToGateway::WindowRelayed { .. }
             | ShardToGateway::WindowStaticRows { .. }
-            | ShardToGateway::StarCatalogue { .. } => None,
+            | ShardToGateway::StarCatalogue { .. }
+            | ShardToGateway::StarSkyAlive { .. } => None,
         }
     }
 
@@ -458,7 +476,8 @@ impl ShardToGateway {
             | ShardToGateway::WindowMembership { .. }
             | ShardToGateway::WindowRelayed { .. }
             | ShardToGateway::WindowStaticRows { .. }
-            | ShardToGateway::StarCatalogue { .. } => None,
+            | ShardToGateway::StarCatalogue { .. }
+            | ShardToGateway::StarSkyAlive { .. } => None,
         }
     }
 }
@@ -1207,6 +1226,9 @@ mod tests {
                     luma_lsun: 0.25,
                 }],
             },
+            ShardToGateway::StarSkyAlive {
+                generation: 0xcbf2_9ce4_8422_2325,
+            },
         ]
     }
 
@@ -1273,6 +1295,8 @@ mod tests {
                 ShardToGateway::WindowStaticRows { .. } => 11,
                 // The star catalogue holds 12 (S11) forever.
                 ShardToGateway::StarCatalogue { .. } => 12,
+                // The sky's liveness beat holds 13 (S11) forever.
+                ShardToGateway::StarSkyAlive { .. } => 13,
             }
         }
         fn g2s_index(msg: &GatewayToShard) -> u8 {
@@ -1292,9 +1316,9 @@ mod tests {
             assert_eq!(bytes[0], s2g_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 13);
+        assert_eq!(seen.len(), 14);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(12));
+        assert_eq!(seen.last().copied(), Some(13));
         let mut seen = std::collections::BTreeSet::new();
         for msg in every_gateway_to_shard_arm() {
             let bytes = postcard::to_allocvec(&msg).expect("encode");

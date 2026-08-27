@@ -195,6 +195,35 @@ pub enum ServerControlMsg {
         parts: u32,
         rows: Vec<vd_core::look::StarRow>,
     },
+    /// THE SKY'S LIVENESS BEAT (S11; approved under SL6 on 2026-08-27) — which sky the server believes
+    /// is current, restated on a cadence whether or not it changed.
+    ///
+    /// ★ WHY A HEALTHY LANE MUST SAY SOMETHING. The catalogue above is send-on-change, and a galaxy does
+    /// not change, so a correct server is SILENT on that lane essentially forever. Silence therefore
+    /// carries no information — it is the signature of the healthy case AND of a dead emitter, and the
+    /// client cannot tell which it is looking at:
+    ///
+    /// ```text
+    ///   the sky did not change   ──┐
+    ///                              ├──► ...both look EXACTLY like this: nothing arrives.
+    ///   the emitter is broken    ──┘
+    /// ```
+    ///
+    /// The client's own frames do not settle it either: frames prove the SERVER is running, not which
+    /// sky it holds. This beat makes the healthy case audible, and the three outcomes separate:
+    ///
+    /// ```text
+    ///   beat arrives, generation == mine   ──►  "nothing changed"      (healthy, and PROVEN so)
+    ///   beat arrives, generation != mine   ──►  "I hold the wrong sky"
+    ///   no beat at all                     ──►  "nobody is working"
+    /// ```
+    ///
+    /// Eight bytes on a cadence against a 7.0 MB catalogue — the cheapest possible statement that the
+    /// expensive one is still true. Appended trailing variant (postcard additive rule).
+    SkyAlive {
+        /// The generation the server's catalogue currently folds to.
+        generation: u64,
+    },
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).

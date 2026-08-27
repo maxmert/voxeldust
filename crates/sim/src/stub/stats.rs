@@ -413,6 +413,10 @@ pub struct StubStats {
     /// STOP: a sky that does not change is stated once. A counter that keeps climbing on a static world
     /// means the generation is not holding, and the client is re-downloading the galaxy for nothing.
     pub star_catalogue_parts_sent: u64,
+    /// THE SKY'S LIVENESS BEATS stated (S11). Unlike every counter around it, this one is EXPECTED to
+    /// climb forever on a perfectly static world — a beat that stops climbing is the failure it exists
+    /// to expose. Reads as gateways-with-a-window per cadence period.
+    pub sky_alive_beats_sent: u64,
     /// THE STATIC ROSTER's sends (slice S10). Expected to reach a small number and STOP: a realm whose
     /// children do not move states them once per subscriber, then only on a keep-alive re-assert. A
     /// counter that keeps climbing on a static world means the send-on-change baseline is not holding.

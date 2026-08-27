@@ -115,6 +115,9 @@ pub struct GatewayStats {
     /// session and STOP: a sky that does not change is stated once. A counter that keeps climbing on a
     /// static world means the catalogue is being re-issued for nothing — the exact cost S11 removes.
     pub star_catalogue_parts_sent: u64,
+    /// THE SKY'S LIVENESS BEATS forwarded to clients (S11). EXPECTED to climb forever on a static
+    /// world — this is the one counter here whose flat line is the defect, not its growth.
+    pub sky_alive_beats_sent: u64,
     /// THE WINDOW LANE's admitted rows (mesh minor 16): a `WindowFrame`/`WindowBody`/
     /// `WindowMembership` row that PASSED attestation (a known window, the roster-head sender,
     /// an admissible body) and was INGESTED into the window's composer state (Slice B retired

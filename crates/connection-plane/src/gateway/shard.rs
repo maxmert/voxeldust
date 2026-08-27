@@ -9,8 +9,8 @@
 
 use super::{
     GatewayConfig, GatewaySessions, GatewayStats, SessionPhase, WindowRow, announce_own_entity,
-    fan_entity_removed, fan_star_catalogue, lineage_apply, on_window_relayed, on_window_row,
-    session_target, store_route,
+    fan_entity_removed, fan_sky_alive, fan_star_catalogue, lineage_apply, on_window_relayed,
+    on_window_row, session_target, store_route,
 };
 use crate::window;
 use vd_core::NodeId;
@@ -270,6 +270,9 @@ pub(crate) fn on_shard_control(
             rows,
         } => {
             fan_star_catalogue(from, generation, part, parts, rows, sessions, stats, outbox);
+        }
+        ShardToGateway::StarSkyAlive { generation } => {
+            fan_sky_alive(from, generation, sessions, stats, outbox);
         }
         ShardToGateway::WindowStaticRows { window, rows, .. } => {
             on_window_row(

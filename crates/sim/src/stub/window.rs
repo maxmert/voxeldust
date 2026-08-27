@@ -388,6 +388,66 @@ fn emit_star_catalogue(
     }
 }
 
+/// THE SKY'S LIVENESS BEAT (S11; the new wire arm approved under SL6 on 2026-08-27).
+///
+/// ★ WHAT IT IS FOR. Every other statement on this lane is send-on-change, so SILENCE is the normal,
+/// healthy, overwhelmingly common case — a galaxy does not move. That makes silence carry no
+/// information at all, and it is doing two jobs at once that a reader cannot separate:
+///
+/// ```text
+///   the sky did not change   ──┐
+///                              ├──► ...both look EXACTLY like this: nothing arrives.
+///   the emitter is broken    ──┘
+/// ```
+///
+/// The per-tick frame does not settle it. A frame proves the SHARD is running; it says nothing about
+/// which sky that shard believes is current, so a shard whose catalogue emitter silently died would go
+/// on framing forever and never state a sky again.
+///
+/// The beat splits the two by making the healthy case SAY something:
+///
+/// ```text
+///   beat arrives, generation matches mine  ──►  "nothing changed"    (healthy, and PROVEN so)
+///   beat arrives, generation differs       ──►  "I hold the wrong sky"
+///   no beat at all                         ──►  "nobody is working"
+/// ```
+///
+/// EIGHT BYTES on a cadence, against a 7.0 MB catalogue — the cheapest possible statement that the
+/// expensive one is still true.
+///
+/// UNCONDITIONAL, unlike the catalogue beside it: this is the one statement on the lane that must NOT
+/// be suppressed when nothing changed, because "nothing changed" is precisely what it exists to say.
+/// It is gated only by the SAME emptiness guard as the catalogue — a shard that parents no stars has no
+/// sky to speak for, and a client holds no sky from it to doubt.
+fn emit_sky_alive(
+    config: &StubConfig,
+    clock: &ClockSample,
+    catalogue: &StarCatalogue,
+    windows: &OpenWindows,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    if catalogue.rows.is_empty() {
+        return; // no sky to speak for
+    }
+    if !crate::directory::due_this_tick(aoi_recheck_cadence(config), clock.local_tick.0) {
+        return;
+    }
+    // ONE PER GATEWAY, matching the catalogue's own fan-out — the sky is not window-scoped.
+    let gateways: std::collections::BTreeSet<NodeId> =
+        windows.0.keys().map(|(gateway, _)| *gateway).collect();
+    for gateway in gateways {
+        push_session_reply(
+            outbox,
+            gateway,
+            &ShardToGateway::StarSkyAlive {
+                generation: catalogue.generation,
+            },
+        );
+        stats.sky_alive_beats_sent += 1;
+    }
+}
+
 /// How large one part of the catalogue may be. Not the carrier's real limit and not trying to be — it
 /// is the number the chunker is given, and it is stated ONCE here so a test can reason about it rather
 /// than discovering it. The real carrier budget arrives with the transport work at S12/S14, when a sky
@@ -639,6 +699,14 @@ pub(crate) fn emit_realm_frames(
             &catalogue,
             &windows,
             &mut sky_stated,
+            &mut stats,
+            &mut outbox,
+        );
+        emit_sky_alive(
+            &config,
+            &clock,
+            &catalogue,
+            &windows,
             &mut stats,
             &mut outbox,
         );

@@ -920,7 +920,15 @@ the failure it exists to prevent. So:
 - The catalogue is **not** re-sent when a crossing bumps the scene epoch — a warp leg is two crossings, so
   getting this wrong re-transmits the whole sky twice per journey.
 - The encoded and the seed-folded catalogues byte-identical.
-- The **liveness digest is the subject of an assertion**, not a listed deliverable.
+- The **liveness digest is the subject of an assertion**, not a listed deliverable. **LANDED
+  2026-08-27** as `ShardToGateway::StarSkyAlive` / `ServerControlMsg::SkyAlive` — a new wire arm, so it
+  went through the SL6 gate and the owner approved it. Carries one number, the generation the server
+  believes is current, restated on the AoI cadence **whether or not it changed**: it is the one
+  statement on this lane that must not be suppressed when it repeats, because the repetition is the
+  message. Three readings replace one ambiguous silence — generation matches ⇒ *"nothing changed"*,
+  differs ⇒ *"I hold the wrong sky"*, no beat ⇒ *"nobody is working"*. The third arm is an ABSENCE and
+  so is left to a caller holding a clock (the client counts confirmations); the watchdog policy is owed
+  with the renderer. See D-S11-SKY.
 - The client's cache carries S1's stamp **and a content digest**; a mismatch **discards and re-requests**
   rather than drawing, and the decode is bounded (row-count cap, magnitude cap) with a counter. A
   byte-flipped cache produces a counted refusal and a re-request, never a drawn frame. (postcard is

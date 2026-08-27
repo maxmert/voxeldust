@@ -1949,6 +1949,18 @@ fn window_frames(
 
 /// Every `ShardToGateway::WindowBody` in the outbox, decoded — `(to, window, subject, stmt)`.
 /// Every `StarCatalogue` part in the outbox (S11) — `(generation, part, parts, rows)`.
+/// Every sky-liveness beat in a tick's egress, by the gateway told and the generation named.
+fn sky_alive_beats(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<(NodeId, u64)> {
+    sent.iter()
+        .filter_map(
+            |(to, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
+                Ok(ShardToGateway::StarSkyAlive { generation }) => Some((*to, generation)),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
 fn star_catalogue_parts(
     sent: &[(NodeId, MsgClass, Vec<u8>)],
 ) -> Vec<(u64, u32, u32, Vec<vd_core::look::StarRow>)> {

@@ -50,6 +50,7 @@ pub fn gateway_view(
         sub_close_refused_authority,
         window_rows_ingested,
         star_catalogue_parts_sent: _,
+        sky_alive_beats_sent: _,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -304,6 +305,7 @@ mod tests {
             window_relay_interior_unvouched: 87,
             window_relay_interior_filtered: 88,
             star_catalogue_parts_sent: 0,
+            sky_alive_beats_sent: 0,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);

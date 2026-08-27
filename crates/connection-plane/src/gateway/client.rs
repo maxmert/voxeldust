@@ -416,6 +416,34 @@ pub(crate) fn fan_star_catalogue(
     }
 }
 
+/// FAN THE SKY'S LIVENESS BEAT to every client subscribed to the stating shard (S11).
+///
+/// Forwarded verbatim, exactly like the catalogue it speaks for, and for the same reason: it is one
+/// number folded from content that is the same sky for everybody. There is nothing here to compose per
+/// observer, and composing it would be the drift the byte-identity gate exists to catch.
+///
+/// NOT SUPPRESSED when the generation is unchanged — unchanged is the message.
+pub(crate) fn fan_sky_alive(
+    from: NodeId,
+    generation: u64,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    for session_id in sessions.subscribers_of(from) {
+        let Some(session) = sessions.by_session.get(&session_id) else {
+            stats.frame_sub_desync += 1;
+            continue;
+        };
+        push_control(
+            outbox,
+            session.client,
+            &ServerControlMsg::SkyAlive { generation },
+        );
+        stats.sky_alive_beats_sent += 1;
+    }
+}
+
 /// Fan one shard frame (from shard `from`) out to that shard's subscribers, each at ITS sub
 /// id and ITS per-shard accepted fence. The READ-plane heart (1d.2a): iterate ONLY
 /// subscribers-of-`from` (H2 reverse index, O(subscribers) not O(all sessions)) and resolve

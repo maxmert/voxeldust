@@ -296,6 +296,12 @@ impl ClientState {
             } => {
                 let _ = self.sky.accept(generation, part, parts, rows);
             }
+            // THE SKY'S LIVENESS BEAT (S11): the server naming the sky it believes is current, on a
+            // cadence, whether or not it changed. Counted inside the assembler, because "nothing
+            // changed" and "the emitter died" are the same silence and only a beat separates them.
+            ServerControlMsg::SkyAlive { generation } => {
+                let _ = self.sky.beat(generation);
+            }
             // Node-AWARE legacy control a pure-renderer client no longer acts on: `AuthorityChanged`
             // (the sub re-point — superseded by `OwnEntity` + EntityId-keyed latest-wins render) and
             // `RequestCut` (the cut is server-timed now, S3 — the client stamps nothing). Both are
@@ -1028,6 +1034,68 @@ mod tests {
     ///
     /// So this counts the stars the client actually HOLDS, never the absence of bytes. A sky that
     /// never arrived reads zero here and cannot be mistaken for a sky that did not need re-sending.
+    /// ★ THE SKY'S LIVENESS BEAT, END TO END OVER THE WIRE (S11).
+    ///
+    /// Proves the arm decodes and reaches the assembler on the real ingest path — not just that the
+    /// assembler's own method works. The beat is the client's only defence against a silence that
+    /// means two things, so a beat that decoded but never landed would restore the ambiguity while
+    /// every unit test still passed.
+    #[test]
+    fn a_wire_delivered_liveness_beat_reaches_the_sky_and_is_counted() {
+        let mut c = core();
+        activate(&mut c);
+        let beat = |generation: u64| {
+            postcard::to_allocvec(&ServerControlMsg::SkyAlive { generation }).expect("fixture")
+        };
+        let ignored_before = c.state().ignored;
+
+        // No sky held yet: the beat proves the lane is alive and confirms nothing more.
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, beat(0x1234));
+        c.step(10.0);
+        assert_eq!(c.state().sky.beats_unheld, 1);
+        assert_eq!(
+            c.state().ignored,
+            ignored_before,
+            "a known arm is acted on, never counted as an ignored legacy message"
+        );
+
+        // Serve the whole sky, then beat again — now it CONFIRMS, which silence could never do.
+        let star = vd_core::look::StarRow {
+            realm: vd_core::pose::RealmId::System(1),
+            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304, 7, -3),
+            class_code: 6,
+            luma_lsun: 0.25,
+        };
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::StarCatalogue {
+                generation: 0x1234,
+                part: 0,
+                parts: 1,
+                rows: vec![star],
+            })
+            .expect("fixture"),
+        );
+        c.step(10.0);
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, beat(0x1234));
+        c.step(10.0);
+        assert_eq!(c.state().sky.beats_current, 1);
+
+        // A beat naming a different sky says the held one is out of date.
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, beat(0x9999));
+        c.step(10.0);
+        assert_eq!(c.state().sky.beats_stale, 1);
+        assert_eq!(
+            c.state().sky.generation(),
+            Some(0x1234),
+            "and it changed nothing — the beat reads, the exchange that replaces a sky is owed"
+        );
+    }
+
     #[test]
     fn a_wire_delivered_star_catalogue_assembles_and_the_client_holds_the_sky() {
         let mut c = core();

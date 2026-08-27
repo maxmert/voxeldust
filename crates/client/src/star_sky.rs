@@ -61,6 +61,23 @@ pub enum SkyIngest {
     Refused(SkyRefusal),
 }
 
+/// What a liveness beat proved.
+///
+/// The three arms are exactly the three readings the beat exists to separate; see
+/// [`StarSky::beat`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkyBeat {
+    /// The server names the sky this client already holds whole. **Nothing changed, and that is now
+    /// PROVEN rather than assumed from silence.** The overwhelmingly common answer on a static galaxy.
+    Current,
+    /// The server names a DIFFERENT sky from the one held. The catalogue in hand is out of date and the
+    /// stars on screen are not the stars the server will fly the player to.
+    Stale,
+    /// No whole sky is held yet — the client is still assembling, or has never been served. The beat
+    /// proves the lane is alive, which is itself worth knowing while parts are still arriving.
+    Unheld,
+}
+
 /// The client's assembling star catalogue.
 #[derive(Debug, Default)]
 pub struct StarSky {
@@ -73,9 +90,61 @@ pub struct StarSky {
     pub refused: u64,
     /// Skies abandoned because a newer generation arrived mid-assembly.
     pub superseded: u64,
+    /// Liveness beats that CONFIRMED the held sky. Expected to climb forever on a static galaxy — this
+    /// is the counter whose flat line is the defect, not its growth. A caller holding a clock turns
+    /// "stopped climbing" into the third reading, *"nobody is working"*.
+    pub beats_current: u64,
+    /// Liveness beats naming a sky this client does not hold.
+    pub beats_stale: u64,
+    /// Liveness beats that arrived while no whole sky was held.
+    pub beats_unheld: u64,
 }
 
 impl StarSky {
+    /// Take one liveness beat and say what it proved.
+    ///
+    /// ★ WHY THIS EXISTS AT ALL. The catalogue is send-on-change and a galaxy does not change, so the
+    /// server is correctly SILENT on that lane essentially forever. Silence is therefore the signature
+    /// of the healthy case AND of a dead emitter, and nothing in the bytes tells them apart:
+    ///
+    /// ```text
+    ///   the sky did not change   ──┐
+    ///                              ├──► ...both look EXACTLY like this: nothing arrives.
+    ///   the emitter is broken    ──┘
+    /// ```
+    ///
+    /// The beat makes the healthy case SAY something, which splits the two:
+    ///
+    /// ```text
+    ///   Current  ──►  "nothing changed"       (healthy, and proven)
+    ///   Stale    ──►  "I hold the wrong sky"
+    ///   (silence) ─►  "nobody is working"     — absence, so the CALLER's clock decides it
+    /// ```
+    ///
+    /// The third reading is deliberately not answered here: absence is not an event, and this type
+    /// holds no clock. A caller that holds one reads [`Self::beats_current`] and treats a counter that
+    /// stopped climbing as the third arm. The watchdog POLICY — what the client shows when the sky lane
+    /// goes quiet — is owed with the renderer (D-S11-SKY).
+    ///
+    /// Deliberately does NOT act on `Stale`. Knowing the held sky is wrong is a different job from
+    /// replacing it, and replacing it is the receiver-states-its-generation exchange this beat is a
+    /// companion to, not a substitute for.
+    pub fn beat(&mut self, generation: u64) -> SkyBeat {
+        // `complete` is what makes a generation HELD — a half-assembled sky of the named generation is
+        // not a sky the client can draw, so it answers `Unheld` and not `Current`.
+        if self.complete().is_none() {
+            self.beats_unheld += 1;
+            return SkyBeat::Unheld;
+        }
+        if self.generation == Some(generation) {
+            self.beats_current += 1;
+            SkyBeat::Current
+        } else {
+            self.beats_stale += 1;
+            SkyBeat::Stale
+        }
+    }
+
     /// Take one part of a catalogue.
     pub fn accept(
         &mut self,
@@ -299,5 +368,51 @@ mod tests {
             SkyIngest::Refused(SkyRefusal::TooManyStars)
         );
         assert_eq!(sky2.refused, 1);
+    }
+
+    /// ★ THE THREE READINGS A BEAT GIVES (S11; the SL6-approved arm, owner 2026-08-27).
+    ///
+    /// The catalogue lane is send-on-change and a galaxy does not change, so a HEALTHY server is silent
+    /// there essentially forever. Silence therefore means two different things at once and the client
+    /// cannot tell which it is looking at. The beat splits them by making the healthy case speak.
+    #[test]
+    fn a_beat_separates_nothing_changed_from_i_hold_the_wrong_sky() {
+        let mut sky = StarSky::default();
+
+        // UNHELD — a beat arriving before any sky is whole. It still proves the lane is alive, which is
+        // worth knowing while parts are in flight, but it confirms nothing about a sky not yet drawn.
+        assert_eq!(sky.beat(7), SkyBeat::Unheld);
+
+        // ...and a HALF-assembled sky of the very generation named is STILL Unheld. A sky is drawn only
+        // when whole, so a beat must not promote half a galaxy to "current" — the holes in it look
+        // exactly like stars that do not exist.
+        assert_eq!(sky.accept(7, 0, 2, vec![star(1)]), SkyIngest::Applied);
+        assert_eq!(
+            sky.beat(7),
+            SkyBeat::Unheld,
+            "half a sky is not a held sky, however confidently the server names it"
+        );
+
+        // CURRENT — the sky completes, and now the same beat proves it. This is the overwhelmingly
+        // common answer in a running game, and the one that silence could never give.
+        assert_eq!(sky.accept(7, 1, 2, vec![star(2)]), SkyIngest::Completed);
+        assert_eq!(sky.beat(7), SkyBeat::Current);
+
+        // STALE — the server names a different sky. The stars on screen are not the stars it will fly
+        // the player to.
+        assert_eq!(sky.beat(8), SkyBeat::Stale);
+
+        // The beat does NOT act on that: knowing the held sky is wrong is a different job from
+        // replacing it, and replacing it is the receiver-states-its-generation exchange (D-S11-SKY).
+        assert_eq!(sky.generation(), Some(7), "the beat reads, it never writes");
+        assert_eq!(sky.complete().map(|r| r.len()), Some(2));
+
+        assert_eq!(sky.beats_unheld, 2);
+        assert_eq!(sky.beats_current, 1);
+        assert_eq!(sky.beats_stale, 1);
+        // The counters are the whole liveness story: a caller holding a clock reads a `beats_current`
+        // that STOPPED CLIMBING as the third reading — "nobody is working" — which absence alone,
+        // having no event to fire, can never announce here.
+        assert_eq!(sky.refused, 0, "and a beat is never a refusal");
     }
 }

@@ -4068,6 +4068,17 @@ fn a_forced_index_table_desync_hits_the_counter_never_a_silent_drop() {
         "a desync sends no sky, silently or otherwise"
     );
 
+    // ★ AND THE SKY'S LIVENESS BEAT walks the same index, so it runs the same arm (S11). A beat lost to
+    // a silent desync is the worst of the three: the client would read the absence as "nobody is
+    // working" and distrust a sky that is in fact perfectly current.
+    crate::gateway::client::fan_sky_alive(SHARD, 7, &mut sessions, &mut stats, &mut outbox);
+    assert_eq!(stats.frame_sub_desync, 3, "the beat counts it too");
+    assert_eq!(
+        stats.sky_alive_beats_sent, 0,
+        "and none is recorded as sent"
+    );
+    assert!(outbox.0.is_empty());
+
     // (b) a present session indexed under SHARD but with an EMPTY hot SubTable.
     let (mut sessions, sid, _) = one_active_session();
     sessions.by_session[&sid]
@@ -10162,4 +10173,49 @@ fn window_shadow_soak_state_stays_bounded_and_zeroes_at_the_end() {
     assert!(sessions.is_empty());
     assert_eq!(sessions.windows_open_count(), 0);
     assert!(sessions.realm_heads.is_empty());
+}
+
+/// ★ THE SKY'S LIVENESS BEAT REACHES THE CLIENT, UNSUPPRESSED (S11).
+///
+/// The gateway forwards it exactly as it forwards the catalogue: verbatim, no composing. The beat is
+/// one number folded from content that is the same sky for every player, so composing it per observer
+/// would be work with no product — and would give two players two answers about one truth.
+///
+/// The sharp part is that a REPEATED beat must still go out. Every other send-on-change statement on
+/// this lane is suppressed when it repeats; this one carries its meaning IN the repetition, because
+/// the thing it disproves is silence.
+#[test]
+fn the_sky_liveness_beat_forwards_to_the_client_and_repeats_are_not_suppressed() {
+    let mut rig = Rig::new();
+    let (_sid, _login) = rig.login(); // Active session at CLIENT, subscribed to SHARD
+    let beat = |generation: u64| ShardToGateway::StarSkyAlive { generation };
+
+    // THE SAME GENERATION, THREE TIMES. A suppressing gateway would forward one and eat two, and the
+    // client would be back to reading silence — the exact ambiguity this arm removes.
+    let mut forwarded = 0usize;
+    for _ in 0..3 {
+        let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &beat(0x0f0f_0f0f))]);
+        forwarded += decode_controls(&sent, CLIENT)
+            .iter()
+            .filter(|m| {
+                **m == ServerControlMsg::SkyAlive {
+                    generation: 0x0f0f_0f0f,
+                }
+            })
+            .count();
+    }
+    assert_eq!(
+        forwarded, 3,
+        "an unchanged beat is still a beat — suppressing it restores the silence it exists to break"
+    );
+    assert_eq!(rig.world.resource::<GatewayStats>().sky_alive_beats_sent, 3);
+
+    // A DIFFERENT generation forwards too, and says so — this is what tells a client its held sky is
+    // out of date rather than merely unconfirmed.
+    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &beat(0xdead_beef))]);
+    assert!(
+        decode_controls(&sent, CLIENT).contains(&ServerControlMsg::SkyAlive {
+            generation: 0xdead_beef
+        })
+    );
 }
