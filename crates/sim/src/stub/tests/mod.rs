@@ -1948,6 +1948,25 @@ fn window_frames(
 }
 
 /// Every `ShardToGateway::WindowBody` in the outbox, decoded — `(to, window, subject, stmt)`.
+/// Every `StarCatalogue` part in the outbox (S11) — `(generation, part, parts, rows)`.
+fn star_catalogue_parts(
+    sent: &[(NodeId, MsgClass, Vec<u8>)],
+) -> Vec<(u64, u32, u32, Vec<vd_core::look::StarRow>)> {
+    sent.iter()
+        .filter_map(
+            |(_, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
+                Ok(ShardToGateway::StarCatalogue {
+                    generation,
+                    part,
+                    parts,
+                    rows,
+                }) => Some((generation, part, parts, rows)),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
 /// Every `WindowStaticRows` in the outbox (slice S10) — the reliable lane's static roster.
 fn window_static_rows(
     sent: &[(NodeId, MsgClass, Vec<u8>)],

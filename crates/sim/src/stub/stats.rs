@@ -409,6 +409,10 @@ pub struct StubStats {
     /// EGRESS — `WindowBody` statements shipped (send-on-change + on-open, NEVER per-tick; a
     /// steady non-zero rate here means a look/marker source is flapping).
     pub window_bodies_sent: u64,
+    /// THE STAR CATALOGUE's parts stated (S11). Expected to reach a small number per subscriber and
+    /// STOP: a sky that does not change is stated once. A counter that keeps climbing on a static world
+    /// means the generation is not holding, and the client is re-downloading the galaxy for nothing.
+    pub star_catalogue_parts_sent: u64,
     /// THE STATIC ROSTER's sends (slice S10). Expected to reach a small number and STOP: a realm whose
     /// children do not move states them once per subscriber, then only on a keep-alive re-assert. A
     /// counter that keeps climbing on a static world means the send-on-change baseline is not holding.

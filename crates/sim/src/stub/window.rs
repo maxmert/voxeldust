@@ -304,6 +304,96 @@ fn emit_window_frames(
 /// roster-loss window is derived from that beat, so silence past it means the realm behind a
 /// statement stopped speaking, not that nothing changed). ReDriven/reliable —
 /// the session-reply lane (a lost look is an invisible realm at exactly the no-flicker moment).
+/// THE STAR CATALOGUE this shard states (S11) — the galaxy's stars, with the generation folded from
+/// their own bytes.
+///
+/// ★ PLANTED BY THE BOOT, exactly as the marker roster is, and for the same structural reason: the
+/// generator crate and the simulation crate cannot see each other. The boot folds the catalogue once
+/// and hands it over; this crate ships it and never derives it.
+///
+/// DEFAULT EMPTY, so every rig that plants no catalogue is byte-identical — a shard that parents no
+/// star systems states no sky, which is most of them.
+/// WHICH SKY EACH GATEWAY HAS BEEN TOLD (S11) — the catalogue's send-on-change baseline.
+///
+/// ★ KEYED BY GATEWAY, NOT BY WINDOW, and the difference is a real defect rather than a preference. A
+/// catalogue is not window-scoped: it carries no window id, because the sky is the same whatever you
+/// have a window onto. Keyed per window, a client with two windows open would be sent the WHOLE SKY
+/// TWICE — 14 MB at the census for a galaxy it already holds.
+///
+/// The generation IS the content, so this is the whole of the comparison: a gateway holding that number
+/// holds that sky and needs nothing further.
+#[derive(Resource, Debug, Default)]
+pub struct SkyStatedTo(pub(crate) BTreeMap<NodeId, u64>);
+
+#[derive(Resource, Debug, Default)]
+pub struct StarCatalogue {
+    /// The stars, in the catalogue's own order — the order the generation was folded over.
+    pub rows: Vec<vd_core::look::StarRow>,
+    /// Folded from the encoded rows ([`vd_core::look::catalogue_generation`]), never hand-set.
+    pub generation: u64,
+}
+
+/// EMIT THE STAR CATALOGUE, in parts, once per subscriber (S11).
+///
+/// ★ SEND-ON-CHANGE, WHERE "CHANGE" IS THE GENERATION — and the generation IS the content, folded from
+/// the catalogue's own bytes. So there is nothing to diff: the number either matches what this
+/// subscriber holds or the sky is different. A hand-maintained version would need a comparison it could
+/// get wrong; this one cannot.
+///
+/// ★ CHUNKED, because this is the only message whose size grows with the world — 7.0 MB at the target
+/// census, which no carrier takes whole. Unchunked it does not arrive slowly; it does not arrive, and an
+/// empty sky with nothing in any log is the failure S11 exists to prevent.
+///
+/// ⚠ **ENCODED PER SUBSCRIBER, NOT PER GATEWAY.** S11 asks for the login level encoded ONCE per
+/// gateway, and this does not do that: with a thousand sessions it encodes one sky a thousand times for
+/// identical bytes. That arm of the gate belongs to S14, where a thousand sessions exist to measure it
+/// on — building it now would be an untestable optimisation, which is the pattern this slice keeps
+/// refusing. Ledgered, not forgotten.
+fn emit_star_catalogue(
+    catalogue: &StarCatalogue,
+    windows: &OpenWindows,
+    stated: &mut SkyStatedTo,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    if catalogue.rows.is_empty() {
+        return; // a shard that parents no star systems states no sky
+    }
+    // ONE ENTRY PER GATEWAY, whatever number of windows it holds — the sky is not window-scoped.
+    let gateways: std::collections::BTreeSet<NodeId> =
+        windows.0.keys().map(|(gateway, _)| *gateway).collect();
+    // A gateway with no window here is forgotten, so a re-subscription is served the sky again rather
+    // than being told nothing because a previous session once held it.
+    stated.0.retain(|node, _| gateways.contains(node));
+    let parts = vd_wire::channels::partition_stars(&catalogue.rows, CATALOGUE_PART_BUDGET_BYTES);
+    let total = parts.len() as u32;
+    for gateway in gateways {
+        if stated.0.get(&gateway) == Some(&catalogue.generation) {
+            continue; // this gateway already holds this sky
+        }
+        for (i, rows) in parts.iter().enumerate() {
+            push_session_reply(
+                outbox,
+                gateway,
+                &ShardToGateway::StarCatalogue {
+                    generation: catalogue.generation,
+                    part: i as u32,
+                    parts: total,
+                    rows: rows.clone(),
+                },
+            );
+            stats.star_catalogue_parts_sent += 1;
+        }
+        stated.0.insert(gateway, catalogue.generation);
+    }
+}
+
+/// How large one part of the catalogue may be. Not the carrier's real limit and not trying to be — it
+/// is the number the chunker is given, and it is stated ONCE here so a test can reason about it rather
+/// than discovering it. The real carrier budget arrives with the transport work at S12/S14, when a sky
+/// large enough to test it exists.
+const CATALOGUE_PART_BUDGET_BYTES: usize = 8 * 1024;
+
 /// THE WINDOW LANE's STATIC ROSTER (slice S10; owner-approved 2026-08-27): the author's direct
 /// children that DO NOT MOVE, shipped on the RELIABLE session lane, send-on-change — which for a realm
 /// whose children are static means exactly ONCE, plus the keep-alive re-assert as the repair.
@@ -463,6 +553,9 @@ pub(crate) fn emit_realm_frames(
     authority: Res<RealmAuthority>,
     regions: Res<RealmRegions>,
     placements: Res<Placements>,
+    // THE STAR CATALOGUE this shard states (S11) — planted by the boot, shipped here, never derived.
+    catalogue: Res<StarCatalogue>,
+    mut sky_stated: ResMut<SkyStatedTo>,
     // The resolved parent the Q2 relay ships to (`None` at a root shard / before the first parent
     // Head reply ⇒ nothing goes up this tick).
     parent_node: Res<ParentRealmNode>,
@@ -539,6 +632,13 @@ pub(crate) fn emit_realm_frames(
             realm_fence,
             &statics,
             &mut windows,
+            &mut stats,
+            &mut outbox,
+        );
+        emit_star_catalogue(
+            &catalogue,
+            &windows,
+            &mut sky_stated,
             &mut stats,
             &mut outbox,
         );

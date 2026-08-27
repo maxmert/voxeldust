@@ -1226,6 +1226,87 @@ fn a_static_roster_is_stated_once_and_the_frame_keeps_only_its_stamp() {
     );
 }
 
+/// ★ THE SKY IS STATED ONCE PER SUBSCRIBER, IN PARTS (S11).
+///
+/// The catalogue is the only message whose size grows with the world — 7.0 MB at the target census,
+/// which no carrier takes whole — and none of it changes, because stars do not move. So it is chunked,
+/// and it is stated once: the generation IS the content, so a subscriber holding that number holds that
+/// sky and needs nothing further.
+///
+/// Driven over many ticks, so a per-tick regression cannot hide inside a two-tick window.
+#[test]
+fn the_star_catalogue_is_stated_once_per_subscriber_in_parts() {
+    let mut rig = window_rig();
+    let star = |n: u64| vd_core::look::StarRow {
+        realm: RealmId::System(n),
+        cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
+        class_code: 6,
+        luma_lsun: 0.25,
+    };
+    let rows: Vec<vd_core::look::StarRow> = (1u64..=3).map(star).collect();
+    let generation =
+        vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
+    *rig.world.resource_mut::<crate::stub::StarCatalogue>() = crate::stub::StarCatalogue {
+        rows: rows.clone(),
+        generation,
+    };
+
+    let open = GatewayToShard::WindowOpen {
+        window: WindowId(1),
+        scope: WindowScope::Occupants,
+    };
+    let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+    let parts = star_catalogue_parts(&sent);
+    assert!(!parts.is_empty(), "the sky is stated on open");
+    // Every part carries the SAME generation — parts of two skies can never be spliced into a galaxy
+    // that never existed.
+    assert!(parts.iter().all(|p| p.0 == generation));
+    // The parts reassemble to exactly the catalogue, in order.
+    let seen: Vec<vd_core::look::StarRow> = parts.iter().flat_map(|p| p.3.clone()).collect();
+    assert_eq!(seen, rows, "the parts are the sky, unaltered and in order");
+    // …and they agree about how many there are, or a receiver can never know it is whole.
+    let total = parts[0].2;
+    assert!(parts.iter().all(|p| p.2 == total));
+    assert_eq!(parts.len() as u32, total);
+
+    // ★ TWENTY MORE TICKS, AND NOT ONE MORE PART. Under a per-tick lane this would be 7.0 MB × 20 at
+    // the census; here the generation already matches what the subscriber holds.
+    let mut later = 0usize;
+    for t in 2..=21 {
+        rig.set_local_tick(t);
+        later += star_catalogue_parts(&rig.tick(vec![])).len();
+    }
+    assert_eq!(
+        later, 0,
+        "a sky that did not change says nothing for a second"
+    );
+    assert_eq!(
+        rig.world.resource::<StubStats>().star_catalogue_parts_sent as usize,
+        parts.len(),
+        "stated once, across 21 ticks"
+    );
+}
+
+/// ★ A SHARD THAT PARENTS NO STARS STATES NO SKY (S11) — most shards, and the arm that would otherwise
+/// ship an empty catalogue to every subscriber of every planet in the galaxy.
+#[test]
+fn a_shard_with_no_stars_states_no_catalogue() {
+    let mut rig = window_rig(); // its StarCatalogue resource is default: empty
+    let sent = rig.tick(vec![wire_msg(
+        GATEWAY,
+        MsgClass::Control,
+        &GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Occupants,
+        },
+    )]);
+    assert!(star_catalogue_parts(&sent).is_empty());
+    assert_eq!(
+        rig.world.resource::<StubStats>().star_catalogue_parts_sent,
+        0
+    );
+}
+
 /// ★ A CHANGED BODY STILL SHIPS (slice S10) — the half a DIGEST could break.
 ///
 /// The send-on-change baseline used to keep each subject's WHOLE bag and compare it byte by byte. It

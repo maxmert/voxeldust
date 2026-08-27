@@ -14,12 +14,12 @@ use super::{
     GhostColliderRegistration, HandoffHolds, HoldRole, InBandVerdict, InputLog, InterestEmitLatch,
     InterestHeld, OpenWindows, OwnedTransients, ParentRealmNode, PendingCrossings,
     PendingInputSlots, Placements, RealmAuthority, RealmConfirmedAt, RealmRegions, RelayHeld,
-    RelayShip, RequestInFlight, StubConfig, StubStats, WasOccupied, announce_presence,
-    author_placements, emit_frames, emit_realm_frames, emit_transient_batch, evaluate_realm_aoi,
-    evaluate_realm_boundaries, feed_source_ghosts, is_retained_ghost, on_directory_reply,
-    on_gateway_msg, on_ghost_flow, placement_window_ticks, prune_holds, push_entity_removed,
-    readvance_dots, readvance_transients, redrive_pending_adoptions, redrive_stranded_crossings,
-    request_pending_grants, retain_child_live, self_fence_lapsed_realm,
+    RelayShip, RequestInFlight, SkyStatedTo, StarCatalogue, StubConfig, StubStats, WasOccupied,
+    announce_presence, author_placements, emit_frames, emit_realm_frames, emit_transient_batch,
+    evaluate_realm_aoi, evaluate_realm_boundaries, feed_source_ghosts, is_retained_ghost,
+    on_directory_reply, on_gateway_msg, on_ghost_flow, placement_window_ticks, prune_holds,
+    push_entity_removed, readvance_dots, readvance_transients, redrive_pending_adoptions,
+    redrive_stranded_crossings, request_pending_grants, retain_child_live, self_fence_lapsed_realm,
 };
 use crate::io::{Inbound, MsgClass};
 use crate::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
@@ -123,6 +123,8 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(InterestHeld::default());
     world.insert_resource(InterestEmitLatch::default());
     world.insert_resource(ChildLuma::default());
+    world.insert_resource(StarCatalogue::default());
+    world.insert_resource(SkyStatedTo::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).

@@ -2533,6 +2533,33 @@ pub fn boot_world(
 /// `current_bodies` through the one `vd_core::look::marker_bag` codec — the datum here plus the
 /// child's own circumscribed extent — so a child with NO draw still states a correctly-sized
 /// point of light (the presence floor).
+/// THE STAR CATALOGUE this shard states, folded once at boot (S11) — the galaxy's stars and the
+/// generation folded from their own bytes.
+///
+/// ★ THE BOOT IS THE ONLY PARTY THAT CAN DO THIS, and that is structural rather than convenient: the
+/// generator crate and the simulation crate cannot see each other (physics → core, sim → wire → core,
+/// and no path between). The marker roster crosses that same boundary the same way.
+///
+/// Returns an EMPTY catalogue on every shard that parents no star systems — which is most of them. A
+/// planet states no sky, and an empty catalogue is stated to nobody.
+#[must_use]
+pub fn star_catalogue_for_boot(
+    universe_seed: u64,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+    regions: &[vd_core::geometry::RealmRegion],
+) -> (Vec<vd_core::look::StarRow>, u64) {
+    let config = process_world_config(occupant_v_max_mps, tick_dt_s);
+    let rows = vd_physics::worldgen::star_catalogue(
+        regions,
+        &vd_physics::worldgen::system_photometrics_for_config(universe_seed, &config),
+    );
+    let generation = vd_core::look::catalogue_generation(
+        &postcard::to_allocvec(&rows).expect("closed wire types serialize infallibly"),
+    );
+    (rows, generation)
+}
+
 #[must_use]
 pub fn child_luma_draws(
     universe_seed: u64,

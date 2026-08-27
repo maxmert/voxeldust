@@ -56,6 +56,8 @@ struct ProcessClient {
     /// Composed scene LEVELs received (minor 18). Asserted `== 1` at the end: login bumps the
     /// origin epoch exactly once here, and nothing else may (no crossing in this scenario).
     scene_levels: u64,
+    /// Parts of the star catalogue this client received (S11).
+    sky_parts: u64,
     /// The origin epoch carried by the newest level — pinned to `Some(1)` at the end, and every
     /// scene delta must match it on arrival (see `on_control`).
     scene_epoch: Option<u64>,
@@ -81,6 +83,7 @@ impl ProcessClient {
             realm_rows: 0,
             evictions: 0,
             scene_levels: 0,
+            sky_parts: 0,
             scene_epoch: None,
             first_own_pose: None,
         }
@@ -210,6 +213,31 @@ impl ProcessClient {
                     Some(origin_epoch),
                     "a scene delta rides the epoch of the level that preceded it"
                 );
+            }
+            // ★ THE STAR CATALOGUE (S11) — and its arrival HERE is the end-to-end proof that the lane
+            // works: real binaries, over QUIC, carrying the real seed's stars. Counted rather than
+            // ignored, and its self-consistency asserted, because a catalogue that arrived malformed
+            // over the real transport is exactly what the unit tiers cannot see.
+            ServerControlMsg::StarCatalogue {
+                generation,
+                part,
+                parts,
+                rows,
+            } => {
+                assert!(parts > 0, "a catalogue with no parts can never complete");
+                assert!(
+                    part < parts,
+                    "a part outside the set it claims to belong to"
+                );
+                assert!(
+                    !rows.is_empty(),
+                    "an empty part is a part that says nothing"
+                );
+                assert!(
+                    generation != 0,
+                    "the generation is folded from content and is never a default"
+                );
+                self.sky_parts += 1;
             }
             ServerControlMsg::Event(other) => panic!("unexpected event in P1: {other:?}"),
             other => panic!("unexpected control message in P1: {other:?}"),
@@ -397,7 +425,13 @@ fn p1_parity_real_binaries_over_quic() {
             .own_entity
             .and_then(|own| idle.poses.get(&own))
             .is_some_and(|p| p.pos == spawn_pos);
-        let done = walker.poses.len() == 2
+        // ★ THE SKY IS PART OF "SETTLED" (S11), not something to hope has arrived by the time the
+        // loop happens to break. Asserting it after the fact made this test pass alone and fail under
+        // full-suite load — a flake, and this project's own rule is that a gate going red for the
+        // wrong reason gets weakened until it protects nothing. Waiting for it makes arrival a
+        // PRECONDITION, with the existing deadline as the honest failure.
+        let done = walker.sky_parts > 0
+            && walker.poses.len() == 2
             && idle.poses.len() == 2
             && idle_settled
             && walker.own_entity.is_some_and(|own| {
@@ -423,10 +457,12 @@ fn p1_parity_real_binaries_over_quic() {
             .own_entity
             .and_then(|e| walker.poses.get(&e))
             .map(|p| p.pos);
+        let sky_parts = walker.sky_parts;
         assert!(
             started.elapsed() < DEADLINE,
             "parity scenario did not converge: walker(session={:?} subs={:?} poses={} moved={:?}) \
-             idle(session={:?} poses={} settled={idle_settled} at={:?} as-seen-by-walker={:?}) — \
+             idle(session={:?} poses={} settled={idle_settled} at={:?} as-seen-by-walker={:?}) \
+             sky_parts={sky_parts} — \
              THE world's spawn is {spawn_pos:?}; FIRST poses walker={:?} idle={:?}",
             walker.session,
             walker.held_subs,
@@ -484,6 +520,12 @@ fn p1_parity_real_binaries_over_quic() {
     // level (the one epoch bump this scenario lawfully has), stamped epoch 1 and led by the home
     // origin (asserted on arrival). A second level here would mean a spurious re-origin.
     for (name, client) in [("walker", &walker), ("idle", &idle)] {
+        assert_eq!(
+            client.sky_parts, 1,
+            "★ THE SKY ARRIVED OVER THE REAL TRANSPORT, in one part at this world's three stars — and \
+             it is stated ONCE, so a second part here would mean the generation stopped holding and \
+             every client is re-downloading the galaxy on a cadence"
+        );
         assert_eq!(
             client.scene_levels, 1,
             "{name}: one login level, no re-origin in a single-shard scenario"
