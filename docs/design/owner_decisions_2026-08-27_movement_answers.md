@@ -283,6 +283,28 @@ removes it named.
 
 ---
 
+## M-E — THE ORDER OF WORK: fly a ship in a window BEFORE the engine upgrade
+
+Owner-stated 2026-08-27, after being offered the Bevy upgrade and shown its blast radius.
+
+**THE ORDER.** Finish S11. Then S12. Then reach the milestone where the game is **window-tested with a
+ship realm actually flown** — which is what M-C's temporary control seam exists to make possible. Only
+then upgrade Bevy 0.18 → 0.19.
+
+**WHY.** `bevy_ecs` is the ECS of every shard: sim, node, connection-plane and harness all depend on
+it, and the renderer adds `bevy` plus `bevy_egui` (pinned at 0.39 for Bevy 0.18). So the upgrade
+rewrites system signatures across the whole server, not just the renderer.
+
+Mixed into feature work, a red suite cannot say which change broke it. The suite is about 2,300 tests,
+and it is only useful while a failure points somewhere.
+
+**THE ONE THING THAT REVERSES THIS.** If Bevy 0.19 ships something that makes the starfield materially
+better or simpler — a real instancing API, a sprite pipeline — then building the star sprite layout on
+0.18 means building it twice. That must be checked BEFORE the vertex layout is written, and said aloud
+if true.
+
+---
+
 ## STILL OPEN after this file
 
 - **The band re-solve.** Every band in the world was sized on the deleted governor. When does the

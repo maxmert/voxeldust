@@ -147,6 +147,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // WHERE ACCOUNTS APPEAR, resolved against that same world: a realm NAME plus a pose already measured
     // from that realm's own centre. Nothing here descends anything.
     let homes = vd_bins::resolve_homes(&env, &universe)?;
+    // ★ THE GALAXY, FOLDED ONCE AT BOOT (S11; owner ruling 2026-08-27 — "we're passing the Galaxy just
+    // once over reliable lane"). The boot is the only party that sees BOTH the generator and the
+    // routing plane, which is the same structural reason the shard's marker roster is plumbed here.
+    //
+    // Folded over the WHOLE world, not one realm's forest: this is the galaxy, and every player gets
+    // the same one. SL4 holds — the gateway library receives finished ROWS and can name no body.
+    let (sky, sky_generation) = vd_bins::star_catalogue_for_boot(
+        universe_seed,
+        move_speed * time_multiplier,
+        tick_dt,
+        universe.regions(),
+    );
+    tracing::info!(
+        stars = sky.len(),
+        generation = format!("{sky_generation:#x}"),
+        "the gateway folded the galaxy's sky"
+    );
     let seed_injector = SeedInjectorConfig {
         armed: demand_armed,
         // LOWERED (SL4): the gateway library receives the region forest alone — the bodies (and
@@ -168,6 +185,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         GatewayConfig {
             orchestrator: env.node_id("VD_ORCH")?,
             shard,
+            // THE GALAXY, folded above from the whole world (S11).
+            sky,
+            sky_generation,
             // Track R / 1d.2: the STABLE routable-shard roster — the login shard PLUS every shard in
             // VD_KNOWN_SHARDS (parsed by the EXISTING `EnvConfig::node_list`), so a (render-ready) DEST's
             // frames are node-class dispatchable (`is_known_shard` ⇒ they reach `on_shard_frame` instead

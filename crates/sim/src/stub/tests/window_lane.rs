@@ -1230,225 +1230,6 @@ fn a_static_roster_is_stated_once_and_the_frame_keeps_only_its_stamp() {
     );
 }
 
-/// ★ THE SKY IS STATED WHEN IT IS ASKED FOR, AND ONLY THEN (S11).
-///
-/// The shard no longer decides who needs the sky. It cannot: a gateway serves many clients, and the
-/// shard sees only gateways. It answers a request, and keeps no record that it did.
-#[test]
-fn the_star_catalogue_is_stated_once_per_request_in_parts() {
-    let mut rig = window_rig();
-    let star = |n: u64| vd_core::look::StarRow {
-        realm: RealmId::System(n),
-        cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
-        class_code: 6,
-        luma_lsun: 0.25,
-    };
-    let rows: Vec<vd_core::look::StarRow> = (1u64..=3).map(star).collect();
-    let generation =
-        vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
-    *rig.world.resource_mut::<crate::stub::StarCatalogue>() = crate::stub::StarCatalogue {
-        rows: rows.clone(),
-        generation,
-    };
-
-    // OPENING A WINDOW STATES NO SKY. That coupling is gone: a window is a view onto THIS realm, and
-    // the galaxy is not this realm's to volunteer.
-    let open = GatewayToShard::WindowOpen {
-        window: WindowId(1),
-        scope: WindowScope::Occupants,
-        static_held: None,
-    };
-    let on_open = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
-    assert!(
-        star_catalogue_parts(&on_open).is_empty(),
-        "an open is not a request"
-    );
-
-    // ASKING STATES IT, whole and in order.
-    rig.set_local_tick(2);
-    let sent = rig.tick(vec![wire_msg(
-        GATEWAY,
-        MsgClass::Control,
-        &GatewayToShard::SkyRequest,
-    )]);
-    let parts = star_catalogue_parts(&sent);
-    assert!(!parts.is_empty(), "the sky is stated to whoever asked");
-    // Every part carries the SAME generation — parts of two skies can never be spliced into a galaxy
-    // that never existed.
-    assert!(parts.iter().all(|p| p.0 == generation));
-    let seen: Vec<vd_core::look::StarRow> = parts.iter().flat_map(|p| p.3.clone()).collect();
-    assert_eq!(seen, rows, "the parts are the sky, unaltered and in order");
-    let total = parts[0].2;
-    assert!(parts.iter().all(|p| p.2 == total));
-    assert_eq!(parts.len() as u32, total);
-
-    // ★ TWENTY MORE TICKS, AND NOT ONE MORE PART. Nobody asked again, so nothing is sent — and the
-    // shard holds no list of who it thinks might want one.
-    let mut later = 0usize;
-    for t in 3..=22 {
-        rig.set_local_tick(t);
-        later += star_catalogue_parts(&rig.tick(vec![])).len();
-    }
-    assert_eq!(later, 0, "a sky nobody asked for is not sent");
-    assert_eq!(
-        rig.world.resource::<StubStats>().star_catalogue_parts_sent as usize,
-        parts.len(),
-        "stated once, across 22 ticks"
-    );
-}
-
-/// ★ A KEEP-ALIVE RE-ASSERT DOES NOT RE-SEND THE SKY (S11).
-///
-/// **A WARP LEG IS TWO CROSSINGS** — out of your star system and into the next — and each one shakes
-/// the subscription. If any of that re-issues the catalogue, a single journey re-transmits the whole
-/// sky TWICE: 14 MB at the census, for a galaxy that did not move.
-///
-/// The keep-alive re-assert is the sharp case, because it deliberately CLEARS the other send-on-change
-/// baselines so the subscriber is re-served its bodies and its verdict. The sky must not ride that
-/// beat — and now it structurally cannot, because the sky is not a send-on-change lane at all. It is
-/// answered when asked, and a re-assert is not an ask.
-#[test]
-fn a_keep_alive_re_assert_does_not_re_send_the_sky() {
-    let mut rig = window_rig();
-    let rows: Vec<vd_core::look::StarRow> = (1u64..=3)
-        .map(|n| vd_core::look::StarRow {
-            realm: RealmId::System(n),
-            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
-            class_code: 6,
-            luma_lsun: 0.25,
-        })
-        .collect();
-    let generation =
-        vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
-    *rig.world.resource_mut::<crate::stub::StarCatalogue>() =
-        crate::stub::StarCatalogue { rows, generation };
-
-    let open = GatewayToShard::WindowOpen {
-        window: WindowId(1),
-        scope: WindowScope::Occupants,
-        static_held: None,
-    };
-    let _ = rig.tick(vec![
-        wire_msg(GATEWAY, MsgClass::Control, &open),
-        wire_msg(GATEWAY, MsgClass::Control, &GatewayToShard::SkyRequest),
-    ]);
-    let before = rig.world.resource::<StubStats>().star_catalogue_parts_sent;
-    assert!(
-        before > 0,
-        "the sky was served once, or this proves nothing"
-    );
-
-    // THE RE-ASSERT. It clears the other baselines by design.
-    rig.set_local_tick(2);
-    let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
-    assert!(
-        star_catalogue_parts(&sent).is_empty(),
-        "a warp leg must not re-transmit the galaxy"
-    );
-    assert_eq!(
-        rig.world.resource::<StubStats>().star_catalogue_parts_sent,
-        before
-    );
-    // ANTI-VACUITY: the re-assert really did re-serve the lanes that SHOULD repeat, so the assertion
-    // above is the sky being excluded and not the re-assert doing nothing at all.
-    assert!(
-        !window_bodies(&sent).is_empty(),
-        "the re-assert re-served its bodies, so the sky's silence is a decision"
-    );
-}
-
-/// ★ THE CASE THE PLAN WARNS ABOUT: a window CLOSED and re-opened (S11) — NOW FIXED.
-///
-/// A warp leg is two crossings. Crossing INTO the galaxy opens a window on the galaxy shard; crossing
-/// OUT closes it; the return leg opens it again. Under the sender's memory this re-transmitted the
-/// whole sky on the return leg, and no length of memory could fix it — the shard was not the party
-/// that knew.
-///
-/// It cannot happen now, for a structural reason rather than a remembered one: **the shard keeps no
-/// record at all.** There is nothing to forget, so nothing can be forgotten too early. A SECOND
-/// GATEWAY — the exact case that broke the old memory — changes nothing here, and is present for that
-/// reason.
-#[test]
-fn a_closed_and_re_opened_window_does_not_re_state_the_sky() {
-    const OTHER_GATEWAY: NodeId = NodeId(4242);
-    let mut rig = window_rig();
-    let rows: Vec<vd_core::look::StarRow> = (1u64..=3)
-        .map(|n| vd_core::look::StarRow {
-            realm: RealmId::System(n),
-            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
-            class_code: 6,
-            luma_lsun: 0.25,
-        })
-        .collect();
-    let generation =
-        vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
-    *rig.world.resource_mut::<crate::stub::StarCatalogue>() =
-        crate::stub::StarCatalogue { rows, generation };
-
-    let open = GatewayToShard::WindowOpen {
-        window: WindowId(1),
-        scope: WindowScope::Occupants,
-        static_held: None,
-    };
-    let other_open = GatewayToShard::WindowOpen {
-        window: WindowId(9),
-        scope: WindowScope::Occupants,
-        static_held: None,
-    };
-    let _ = rig.tick(vec![
-        wire_msg(GATEWAY, MsgClass::Control, &open),
-        wire_msg(OTHER_GATEWAY, MsgClass::Control, &other_open),
-        wire_msg(GATEWAY, MsgClass::Control, &GatewayToShard::SkyRequest),
-    ]);
-    let after_first = rig.world.resource::<StubStats>().star_catalogue_parts_sent;
-    assert!(after_first > 0, "the sky was served once");
-
-    // THE OUTWARD LEG: the window closes.
-    rig.set_local_tick(2);
-    let _ = rig.tick(vec![wire_msg(
-        GATEWAY,
-        MsgClass::Control,
-        &GatewayToShard::WindowClose {
-            window: WindowId(1),
-        },
-    )]);
-
-    // THE RETURN LEG: it opens again. Nothing is re-stated, because an open is not an ask and there
-    // was never a memory to lose.
-    rig.set_local_tick(3);
-    let back = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
-    assert!(
-        star_catalogue_parts(&back).is_empty(),
-        "the return leg must not re-transmit a galaxy that did not move"
-    );
-    assert_eq!(
-        rig.world.resource::<StubStats>().star_catalogue_parts_sent,
-        after_first,
-        "one journey, one sky"
-    );
-}
-
-/// ★ A SHARD THAT PARENTS NO STARS STATES NO SKY (S11) — most shards, and the arm that would otherwise
-/// ship an empty catalogue to every subscriber of every planet in the galaxy.
-#[test]
-fn a_shard_with_no_stars_states_no_catalogue() {
-    let mut rig = window_rig(); // its StarCatalogue resource is default: empty
-    let sent = rig.tick(vec![wire_msg(
-        GATEWAY,
-        MsgClass::Control,
-        &GatewayToShard::WindowOpen {
-            window: WindowId(1),
-            scope: WindowScope::Occupants,
-            static_held: None,
-        },
-    )]);
-    assert!(star_catalogue_parts(&sent).is_empty());
-    assert_eq!(
-        rig.world.resource::<StubStats>().star_catalogue_parts_sent,
-        0
-    );
-}
-
 /// ★ A CHANGED BODY STILL SHIPS (slice S10) — the half a DIGEST could break.
 ///
 /// The send-on-change baseline used to keep each subject's WHOLE bag and compare it byte by byte. It
@@ -2446,249 +2227,6 @@ fn window_membership_rides_the_one_fold_and_clears_with_the_last_observer() {
     );
 }
 
-/// ★ THE SKY BEATS EVEN THOUGH NOTHING CHANGED (S11; the SL6-approved arm, owner 2026-08-27).
-///
-/// This is the one statement on this lane that must NOT be suppressed by send-on-change, and the test
-/// is the mirror image of the one above it: there, twenty ticks and not one more part; here, twenty
-/// ticks and the beat KEEPS COMING.
-///
-/// The reason is that silence on the catalogue lane is doing two jobs at once. A galaxy does not
-/// change, so a perfectly healthy server says nothing there essentially forever — which is
-/// indistinguishable from an emitter that died:
-///
-/// ```text
-///   the sky did not change   ──┐
-///                              ├──► ...both look EXACTLY like this: nothing arrives.
-///   the emitter is broken    ──┘
-/// ```
-///
-/// The beat makes the healthy case audible. It also names the generation, so a client learns not only
-/// that somebody is working but WHICH sky that somebody believes is current.
-#[test]
-fn the_sky_beats_on_a_cadence_even_when_it_did_not_change() {
-    let mut rig = window_rig();
-    let rows: Vec<vd_core::look::StarRow> = (1u64..=3)
-        .map(|n| vd_core::look::StarRow {
-            realm: RealmId::System(n),
-            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
-            class_code: 6,
-            luma_lsun: 0.25,
-        })
-        .collect();
-    let generation =
-        vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
-    *rig.world.resource_mut::<crate::stub::StarCatalogue>() =
-        crate::stub::StarCatalogue { rows, generation };
-
-    let open = GatewayToShard::WindowOpen {
-        window: WindowId(1),
-        scope: WindowScope::Occupants,
-        static_held: None,
-    };
-    let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
-
-    // Twenty ticks with an unchanging sky. The catalogue stays silent; the beat does not.
-    let mut parts_later = 0usize;
-    let mut beats = Vec::new();
-    for t in 2..=21 {
-        rig.set_local_tick(t);
-        let sent = rig.tick(vec![]);
-        parts_later += star_catalogue_parts(&sent).len();
-        beats.extend(sky_alive_beats(&sent));
-    }
-    assert_eq!(parts_later, 0, "the catalogue is still send-on-change");
-    assert!(
-        !beats.is_empty(),
-        "an unchanged sky must still SAY it is unchanged — silence is the failure this arm removes"
-    );
-    // It names the sky it is speaking for, so the client can tell "unchanged" from "changed, and you
-    // missed it" — the second reading the beat exists to give.
-    assert!(beats.iter().all(|(_, g)| *g == generation));
-    assert!(beats.iter().all(|(to, _)| *to == GATEWAY));
-    assert_eq!(
-        rig.world.resource::<StubStats>().sky_alive_beats_sent as usize,
-        beats.len()
-    );
-}
-
-/// ★ A SHARD THAT PARENTS NO STARS DOES NOT BEAT (S11).
-///
-/// The beat vouches for a sky. A shard with no sky has nothing to vouch for, and no client holds a
-/// catalogue from it to doubt — so the beat would be a statement with no subject. Same emptiness guard
-/// as the catalogue it speaks for, deliberately: two guards that could drift apart would be a shard
-/// that beats for a sky it never states.
-#[test]
-fn a_shard_with_no_sky_states_no_beat() {
-    let mut rig = window_rig(); // its StarCatalogue resource is default: empty
-    let open = GatewayToShard::WindowOpen {
-        window: WindowId(1),
-        scope: WindowScope::Occupants,
-        static_held: None,
-    };
-    let mut beats = Vec::new();
-    for t in 1..=21 {
-        rig.set_local_tick(t);
-        let msgs = if t == 1 {
-            vec![wire_msg(GATEWAY, MsgClass::Control, &open)]
-        } else {
-            vec![]
-        };
-        beats.extend(sky_alive_beats(&rig.tick(msgs)));
-    }
-    assert!(beats.is_empty(), "no sky, nothing to vouch for");
-    assert_eq!(rig.world.resource::<StubStats>().sky_alive_beats_sent, 0);
-}
-
-/// ★ THE BEAT IS PER GATEWAY, NOT PER WINDOW (S11).
-///
-/// The sky is not window-scoped — it is the same galaxy however many views a gateway holds open. A
-/// beat per window would make the cheapest statement on the lane scale with a number it has nothing to
-/// do with, which is the shape this whole slice exists to remove.
-#[test]
-fn the_beat_is_stated_once_per_gateway_however_many_windows_it_holds() {
-    let mut rig = window_rig();
-    let rows: Vec<vd_core::look::StarRow> = vec![vd_core::look::StarRow {
-        realm: RealmId::System(1),
-        cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304, 7, -3),
-        class_code: 6,
-        luma_lsun: 0.25,
-    }];
-    let generation =
-        vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
-    *rig.world.resource_mut::<crate::stub::StarCatalogue>() =
-        crate::stub::StarCatalogue { rows, generation };
-
-    let open = |w: u64| GatewayToShard::WindowOpen {
-        window: WindowId(w),
-        scope: WindowScope::Occupants,
-        static_held: None,
-    };
-    let _ = rig.tick(vec![
-        wire_msg(GATEWAY, MsgClass::Control, &open(1)),
-        wire_msg(GATEWAY, MsgClass::Control, &open(2)),
-    ]);
-    assert_eq!(
-        rig.world.resource::<crate::stub::OpenWindows>().0.len(),
-        2,
-        "the fixture really does hold two windows — else this proves nothing"
-    );
-
-    // Counted PER TICK: the claim is that a tick which beats beats ONCE, however many views are open.
-    // Counting the total instead would pass even if every tick beat twice.
-    let mut per_tick = Vec::new();
-    for t in 2..=21 {
-        rig.set_local_tick(t);
-        per_tick.push(sky_alive_beats(&rig.tick(vec![])).len());
-    }
-    assert!(
-        per_tick.contains(&1),
-        "some tick must beat, or the test proves nothing"
-    );
-    assert_eq!(
-        per_tick.iter().copied().max(),
-        Some(1),
-        "two windows, one sky, one beat — never one per view"
-    );
-    assert!(per_tick.contains(&0), "and it is a CADENCE, not every tick");
-}
-
-/// ★ HR4 G-IDENTICAL FOR THE SKY LANE (S11; owner-confirmed 2026-08-27).
-///
-/// The identical sky feature — answering a request, the parts, the generation, and the liveness beat —
-/// on a GALAXY shard and on a SYSTEM shard, under their REAL capability profiles.
-///
-/// ★ WHY THIS GATE EXISTS AT ALL. There is ONE shard binary; a "shard kind" is a configuration of it.
-/// So a feature can quietly depend on something only one configuration happens to have, and nobody
-/// notices, because the test always runs on that configuration. The failure this catches, concretely:
-///
-/// ```text
-///   Test the catalogue on the GALAXY shard only.  ->  it passes.
-///   But the code reads a star list that only a galaxy fills.
-///   Later a SYSTEM shard must state a sky. It has no list.
-///   The sky is silently EMPTY. Nothing fails. Nothing logs. The stars are just gone.
-/// ```
-///
-/// One run proves the feature works somewhere. TWO runs prove it does not depend on where.
-///
-/// ★ AND THIS GATE HAS BEEN GAMED HERE BEFORE. The 2026-08-14 audit found G-IDENTICAL green on a
-/// fixture that ran the SAME kind twice and varied one constant (DEFERRED.md D-38). So this test
-/// asserts the profiles are actually DIFFERENT before it compares anything — a gate that cannot fail
-/// is worse than no gate, because it reads as proof.
-///
-/// ★ AND THE HONEST LIMIT OF THIS GATE TODAY. Nothing in the sim READS a capability yet: the profile
-/// is carried and never consulted (see `register_stub_shard`'s own note that it is "capability-inert
-/// at P1–P3"). So today this gate cannot go red. It is a TRIPWIRE, not a proof — armed for the day a
-/// capability starts gating behaviour, which is exactly the day the sky could quietly acquire a
-/// dependency on one. Three profiles are driven rather than two, spanning the widest contrast the
-/// profile set affords: a galaxy (relay, no voxel realm), a system (hull host, no voxel realm), and a
-/// planet (a SPHERICAL voxel realm, functional blocks, block edit, surfaces and seats). If the sky
-/// ever reaches for a voxel capability, the planet run is what will notice.
-#[test]
-fn assert_sky_feature_anywhere() {
-    let galaxy = crate::capability::profiles::galaxy().expect("galaxy profile");
-    let system = crate::capability::profiles::system().expect("system profile");
-    let planet = crate::capability::profiles::planet().expect("planet profile");
-    // ANTI-VACUITY FIRST. If these were equal the comparison below would prove nothing at all, which
-    // is exactly how the previous G-IDENTICAL gate passed while measuring nothing.
-    assert_ne!(galaxy, system, "galaxy and system must differ");
-    assert_ne!(galaxy, planet, "galaxy and planet must differ");
-    assert_ne!(system, planet, "system and planet must differ");
-    // ...and the planet run really is the wide contrast this gate claims: it hosts a voxel realm and
-    // the other two do not.
-    assert!(
-        planet.voxel().is_some(),
-        "the planet run hosts a voxel realm"
-    );
-    assert!(galaxy.voxel().is_none(), "the galaxy run hosts none");
-
-    let runs = [
-        (NodeKind::Shard(galaxy), RealmId::System(7)),
-        (NodeKind::Shard(system), RealmId::Planet(42)),
-        // A Planet child, not an Area: an Area needs a planet parent, and the child a run HOSTS is
-        // beside the point here — the sky is the galaxy's stars, never this realm's children.
-        (NodeKind::Shard(planet), RealmId::Planet(43)),
-    ];
-    // ...and each run hosts a DIFFERENT child realm, so an equality below is the feature being
-    // kind-blind rather than three copies of one run.
-    assert_eq!(
-        runs.iter()
-            .map(|(_, child)| *child)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        3
-    );
-
-    let observed: Vec<_> = runs
-        .into_iter()
-        .map(|(kind, child)| drive_sky_lane(kind, OWN_REALM, child))
-        .collect();
-
-    // THE SKY ARRIVED ON EVERY RUN. A silently empty sky is the failure in the header, so an empty
-    // run would pass a naive equality check while proving the exact opposite.
-    for (i, (parts, beats, _)) in observed.iter().enumerate() {
-        assert!(!parts.is_empty(), "run {i} stated its sky");
-        assert!(!beats.is_empty(), "run {i} beat");
-    }
-
-    // ★ THE COMPARISON. The sky is the same galaxy whatever realm you stand in, so unlike the window
-    // lane's rows there is not even a realm NAME free to differ here. Every value is byte-equal.
-    let first = &observed[0];
-    for (i, run) in observed.iter().enumerate().skip(1) {
-        assert_eq!(
-            run.0, first.0,
-            "run {i}: the same sky, the same parts, the same generation"
-        );
-        assert_eq!(
-            run.1, first.1,
-            "run {i}: the same beat, naming the same sky"
-        );
-        assert_eq!(
-            run.2, first.2,
-            "run {i}: the same counts — parts sent, beats sent, requests taken"
-        );
-    }
-}
-
 /// ★ THE KEEP-ALIVE COMPARES A COUNTER; IT DOES NOT RE-SHIP THE ROSTER (S11).
 ///
 /// The owner ruled this on 2026-08-24: *"The keep-alive compares a counter instead of clearing the
@@ -2775,5 +2313,41 @@ fn the_keep_alive_compares_a_counter_and_does_not_re_ship_the_static_roster() {
     assert!(
         !window_static_rows(&restarted).is_empty(),
         "a restarted gateway states None and is served everything"
+    );
+}
+
+/// ★ A GATEWAY THAT STILL ASKS FOR THE SKY IS COUNTED, AND ANSWERED WITH NOTHING (S11).
+///
+/// The shard states no sky since the galaxy moved to the gateway (owner ruling 2026-08-27). The
+/// `SkyRequest` arm stays on the wire, because deleting a variant renumbers every later one and a
+/// positional test guards that — so a gateway from before the move can still ask.
+///
+/// It is COUNTED rather than ignored. A mixed-version cluster that looks healthy while one half asks
+/// a question the other half no longer answers is exactly the kind of silence this lane has already
+/// been bitten by once.
+#[test]
+fn a_gateway_that_still_asks_for_the_sky_is_counted_and_gets_nothing() {
+    let mut rig = window_rig();
+    let sent = rig.tick(vec![wire_msg(
+        GATEWAY,
+        MsgClass::Control,
+        &GatewayToShard::SkyRequest,
+    )]);
+    assert_eq!(
+        rig.world.resource::<StubStats>().sky_requests_taken,
+        1,
+        "the stale ask is visible"
+    );
+    // ...and the shard says nothing about a sky, because it holds none. Checked on the DECODED egress
+    // rather than by counting messages: the shard has no catalogue type left to send, so this asserts
+    // the absence of the whole subject.
+    assert!(
+        !sent.iter().any(|(_, _, b)| {
+            postcard::from_bytes::<ShardToGateway>(b).is_ok_and(|m| {
+                format!("{m:?}").contains("StarCatalogue")
+                    || format!("{m:?}").contains("StarSkyAlive")
+            })
+        }),
+        "a shard must state no sky at all"
     );
 }

@@ -10,8 +10,8 @@
 //! directory round-trip that makes a grant real (`realm_head`).
 
 use super::{
-    DiscardReason, Dot, Dots, EntityMint, InputLog, OpenWindows, RealmRegions, SkyRequests,
-    StubConfig, StubStats, apply_input, mint_entity, on_window_close, on_window_open,
+    DiscardReason, Dot, Dots, EntityMint, InputLog, OpenWindows, RealmRegions, StubConfig,
+    StubStats, apply_input, mint_entity, on_window_close, on_window_open,
 };
 use crate::authority::{Authority, AuthorityCmd};
 use crate::io::{Durability, MsgClass};
@@ -130,7 +130,6 @@ pub(crate) fn on_gateway_msg(
     log: &mut InputLog,
     pending_slots: &mut PendingInputSlots,
     windows: &mut OpenWindows,
-    sky_requests: &mut SkyRequests,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
@@ -333,10 +332,11 @@ pub(crate) fn on_gateway_msg(
         GatewayToShard::WindowClose { window } => {
             on_window_close(windows, from, window, stats);
         }
-        // ASK FOR THE SKY (S11). Recorded, not answered here: the emitter answers once per tick, so a
-        // gateway that asked twice in one tick is served once. The shard keeps no other record of it.
+        // ASK FOR THE SKY — RETIRED (S11, owner ruling 2026-08-27). A shard states no sky at all now:
+        // the GATEWAY holds the galaxy and states it ONCE. The arm stays on the wire because deleting a
+        // variant renumbers every later one, and a positional test guards that. Still COUNTED, so a
+        // gateway that has not caught up is visible rather than silently ignored.
         GatewayToShard::SkyRequest => {
-            sky_requests.0.insert(from);
             stats.sky_requests_taken += 1;
         }
     }

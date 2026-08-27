@@ -674,6 +674,8 @@ impl ClientState {
         )
         // A pointer bump, whatever the census (S11).
         .with_sky(self.sky_draw.clone())
+        // The standing realm, so the renderer can find the observer's anchor in the catalogue.
+        .with_origin(self.origin)
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
@@ -776,6 +778,11 @@ impl ClientState {
             origin: self
                 .origin
                 .map(|o| (format!("{o:?}"), self.realm_view.epoch())),
+            // THE SKY (S11) — the whole catalogue this client holds, or nothing while it is partial.
+            sky: self
+                .sky_draw
+                .as_ref()
+                .map(|s| (s.generation, s.rows.len() as u64)),
             stale_epoch_rows: self.realm_view.stale_epoch_rows(),
             snapshots_applied: self.snapshots_applied,
             realm_frames_applied: self.realm_view.frames_applied(),

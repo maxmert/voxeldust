@@ -54,6 +54,7 @@ pub fn gateway_view(
         sky_requests_sent,
         sky_held_stated,
         sky_parts_skipped,
+        sky_from_shard_refused: _,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -320,6 +321,7 @@ mod tests {
             sky_requests_sent: 91,
             sky_held_stated: 92,
             sky_parts_skipped: 93,
+            sky_from_shard_refused: 94,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);

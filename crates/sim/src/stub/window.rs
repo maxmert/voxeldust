@@ -317,172 +317,10 @@ fn emit_window_frames(
     }
 }
 
-/// THE WINDOW LANE's look/marker statements (`docs/design/window_lane.md` §2.9 step 4):
-/// send-on-change + on-open, NEVER per-tick. The realm's CURRENT body set is its OWN look —
-/// derived from what it knows about ITSELF (its boot-config extent via [`RealmRegions::own_shape`],
-/// never any parent's row about it — SL3) — plus one photometric marker per DIRECT child the
-/// boot roster carries a luma bag for (the owner-ruled R4 datum; absence of a bag is absence of
-/// data, never a default). Each window diffs the set against what IT was already sent, so a fresh
-/// window is served everything once and a static world then ships nothing UNTIL its next keep-alive
-/// re-assert, which clears the baseline on the SUBSCRIBER's own beat (Slice D — the gateway's
-/// roster-loss window is derived from that beat, so silence past it means the realm behind a
-/// statement stopped speaking, not that nothing changed). ReDriven/reliable —
-/// the session-reply lane (a lost look is an invisible realm at exactly the no-flicker moment).
-/// THE STAR CATALOGUE this shard states (S11) — the galaxy's stars, with the generation folded from
-/// their own bytes.
-///
-/// ★ PLANTED BY THE BOOT, exactly as the marker roster is, and for the same structural reason: the
-/// generator crate and the simulation crate cannot see each other. The boot folds the catalogue once
-/// and hands it over; this crate ships it and never derives it.
-///
-/// DEFAULT EMPTY, so every rig that plants no catalogue is byte-identical — a shard that parents no
-/// star systems states no sky, which is most of them.
-/// WHICH SKY EACH GATEWAY HAS BEEN TOLD (S11) — the catalogue's send-on-change baseline.
-///
-/// THE GATEWAYS THAT ASKED FOR THE SKY THIS TICK (S11).
-///
-/// ★ THIS REPLACES A MEMORY THAT COULD NOT BE MADE CORRECT. The shard used to record which sky it had
-/// stated to each gateway, and decide from that record. It was wrong in BOTH directions, and the shard
-/// could not tell the two cases apart:
-///
-/// ```text
-///   forget too early   -> a client returning from a crossing is re-sent a sky it holds (7.0 MB)
-///   remember too long  -> a NEW client behind that gateway is sent NO SKY AT ALL
-/// ```
-///
-/// No retention policy fixes that. **The sender is not the party that knows.** A gateway is not a thing
-/// that holds a sky — the clients behind it are, and there may be any number of them, arriving and
-/// leaving independently of each other and of the gateway.
-///
-/// So the shard now remembers NOTHING about who has what. It answers what it was asked, this tick, and
-/// then forgets that too. The gateway decides who needs the sky, because the gateway is the party that
-/// knows.
-#[derive(Resource, Debug, Default)]
-pub struct SkyRequests(pub(crate) std::collections::BTreeSet<NodeId>);
-
-#[derive(Resource, Debug, Default)]
-pub struct StarCatalogue {
-    /// The stars, in the catalogue's own order — the order the generation was folded over.
-    pub rows: Vec<vd_core::look::StarRow>,
-    /// Folded from the encoded rows ([`vd_core::look::catalogue_generation`]), never hand-set.
-    pub generation: u64,
-}
-
-/// EMIT THE STAR CATALOGUE, in parts, once per subscriber (S11).
-///
-/// ★ SEND-ON-CHANGE, WHERE "CHANGE" IS THE GENERATION — and the generation IS the content, folded from
-/// the catalogue's own bytes. So there is nothing to diff: the number either matches what this
-/// subscriber holds or the sky is different. A hand-maintained version would need a comparison it could
-/// get wrong; this one cannot.
-///
-/// ★ CHUNKED, because this is the only message whose size grows with the world — 7.0 MB at the target
-/// census, which no carrier takes whole. Unchunked it does not arrive slowly; it does not arrive, and an
-/// empty sky with nothing in any log is the failure S11 exists to prevent.
-///
-/// ⚠ **ENCODED PER SUBSCRIBER, NOT PER GATEWAY.** S11 asks for the login level encoded ONCE per
-/// gateway, and this does not do that: with a thousand sessions it encodes one sky a thousand times for
-/// identical bytes. That arm of the gate belongs to S14, where a thousand sessions exist to measure it
-/// on — building it now would be an untestable optimisation, which is the pattern this slice keeps
-/// refusing. Ledgered, not forgotten.
-fn emit_star_catalogue(
-    catalogue: &StarCatalogue,
-    requests: &mut SkyRequests,
-    stats: &mut StubStats,
-    outbox: &mut OutboundBox,
-) {
-    // TAKEN, not read: a request is answered exactly once. Cleared even when there is no sky to send,
-    // so a shard that parents no stars cannot accumulate askers it will never answer.
-    let asked = std::mem::take(&mut requests.0);
-    if catalogue.rows.is_empty() {
-        return; // a shard that parents no star systems states no sky
-    }
-    if asked.is_empty() {
-        return; // nobody needs it, and the shard is not keeping a list of who might
-    }
-    let parts = vd_wire::channels::partition_stars(&catalogue.rows, CATALOGUE_PART_BUDGET_BYTES);
-    let total = parts.len() as u32;
-    for gateway in asked {
-        for (i, rows) in parts.iter().enumerate() {
-            push_session_reply(
-                outbox,
-                gateway,
-                &ShardToGateway::StarCatalogue {
-                    generation: catalogue.generation,
-                    part: i as u32,
-                    parts: total,
-                    rows: rows.clone(),
-                },
-            );
-            stats.star_catalogue_parts_sent += 1;
-        }
-    }
-}
-
-/// THE SKY'S LIVENESS BEAT (S11; the new wire arm approved under SL6 on 2026-08-27).
-///
-/// ★ WHAT IT IS FOR. Every other statement on this lane is send-on-change, so SILENCE is the normal,
-/// healthy, overwhelmingly common case — a galaxy does not move. That makes silence carry no
-/// information at all, and it is doing two jobs at once that a reader cannot separate:
-///
-/// ```text
-///   the sky did not change   ──┐
-///                              ├──► ...both look EXACTLY like this: nothing arrives.
-///   the emitter is broken    ──┘
-/// ```
-///
-/// The per-tick frame does not settle it. A frame proves the SHARD is running; it says nothing about
-/// which sky that shard believes is current, so a shard whose catalogue emitter silently died would go
-/// on framing forever and never state a sky again.
-///
-/// The beat splits the two by making the healthy case SAY something:
-///
-/// ```text
-///   beat arrives, generation matches mine  ──►  "nothing changed"    (healthy, and PROVEN so)
-///   beat arrives, generation differs       ──►  "I hold the wrong sky"
-///   no beat at all                         ──►  "nobody is working"
-/// ```
-///
-/// EIGHT BYTES on a cadence, against a 7.0 MB catalogue — the cheapest possible statement that the
-/// expensive one is still true.
-///
-/// UNCONDITIONAL, unlike the catalogue beside it: this is the one statement on the lane that must NOT
-/// be suppressed when nothing changed, because "nothing changed" is precisely what it exists to say.
-/// It is gated only by the SAME emptiness guard as the catalogue — a shard that parents no stars has no
-/// sky to speak for, and a client holds no sky from it to doubt.
-fn emit_sky_alive(
-    config: &StubConfig,
-    clock: &ClockSample,
-    catalogue: &StarCatalogue,
-    windows: &OpenWindows,
-    stats: &mut StubStats,
-    outbox: &mut OutboundBox,
-) {
-    if catalogue.rows.is_empty() {
-        return; // no sky to speak for
-    }
-    if !crate::directory::due_this_tick(aoi_recheck_cadence(config), clock.local_tick.0) {
-        return;
-    }
-    // ONE PER GATEWAY, matching the catalogue's own fan-out — the sky is not window-scoped.
-    let gateways: std::collections::BTreeSet<NodeId> =
-        windows.0.keys().map(|(gateway, _)| *gateway).collect();
-    for gateway in gateways {
-        push_session_reply(
-            outbox,
-            gateway,
-            &ShardToGateway::StarSkyAlive {
-                generation: catalogue.generation,
-            },
-        );
-        stats.sky_alive_beats_sent += 1;
-    }
-}
-
-/// How large one part of the catalogue may be. Not the carrier's real limit and not trying to be — it
-/// is the number the chunker is given, and it is stated ONCE here so a test can reason about it rather
-/// than discovering it. The real carrier budget arrives with the transport work at S12/S14, when a sky
-/// large enough to test it exists.
-const CATALOGUE_PART_BUDGET_BYTES: usize = 8 * 1024;
+// THE SHARD STATES NO SKY (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just once over
+// reliable lane"). `StarCatalogue` and `SkyRequests` lived here. A shard folded its sky from the
+// realms IT booted, so the sky a player received depended on which shard they were subscribed to.
+// The GATEWAY holds the galaxy now: see `gateway::window_lane::emit_sky`.
 
 /// THE WINDOW LANE's STATIC ROSTER (slice S10; owner-approved 2026-08-27): the author's direct
 /// children that DO NOT MOVE, shipped on the RELIABLE session lane, send-on-change — which for a realm
@@ -644,8 +482,6 @@ pub(crate) fn emit_realm_frames(
     regions: Res<RealmRegions>,
     placements: Res<Placements>,
     // THE STAR CATALOGUE this shard states (S11) — planted by the boot, shipped here, never derived.
-    catalogue: Res<StarCatalogue>,
-    mut sky_requests: ResMut<SkyRequests>,
     // The resolved parent the Q2 relay ships to (`None` at a root shard / before the first parent
     // Head reply ⇒ nothing goes up this tick).
     parent_node: Res<ParentRealmNode>,
@@ -725,22 +561,15 @@ pub(crate) fn emit_realm_frames(
             &mut stats,
             &mut outbox,
         );
-        emit_sky_alive(
-            &config,
-            &clock,
-            &catalogue,
-            &windows,
-            &mut stats,
-            &mut outbox,
-        );
     }
-    // ★ ANSWERING FOR THE SKY RUNS OUTSIDE THE WINDOW GUARD, deliberately (S11). The request IS the
-    // recipient list, so a window adds nothing to it. Under the old memory this emitter ran only while
-    // some window was open, and that coupling was load-bearing by accident: a shard whose LAST window
-    // closed never reached the line that forgot the gateway, which is the only reason the crossing rule
-    // held at all. With a second gateway keeping the shard busy it broke, and re-stated the whole sky
-    // on the return leg of every warp. A request answered on its own merits cannot fail that way.
-    emit_star_catalogue(&catalogue, &mut sky_requests, &mut stats, &mut outbox);
+    // ★ NO SKY IS STATED HERE ANY MORE (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just
+    // once over reliable lane"). A shard folded its sky from the realms IT booted, so the sky a player
+    // received depended on which shard they were subscribed to: a home star system states ONE star, its
+    // own, and a player never draws their own star because they are standing inside it. MEASURED on a
+    // dual cluster — the galaxy shard held 3, the client held 1, and drew 0.
+    //
+    // "ONCE" means one sky, the same for everybody. The GATEWAY holds it now: it is the one party that
+    // sees every session and the whole forest. See `gateway::window_lane::emit_sky`.
     // THE Q2 RELAY FORWARD (Slice C1 — the parent half; prunes the holder even with zero windows
     // so a reaped child's stale seal cannot linger past the derived TTL).
     emit_window_relays(

@@ -58,6 +58,14 @@ use vd_core::EntityId;
 use vd_core::glam::DVec3;
 use vd_core::pose::RealmId;
 use vd_devproto::InputAction;
+// S11's star sprite: the custom material's surface. Spelled out rather than glob-imported so a reader
+// can see which crate each name comes from — these span four of Bevy's sub-crates.
+use bevy::mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexFormat};
+use bevy::pbr::{MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+};
+use bevy::shader::ShaderRef;
 
 // ---- render tuning (named consts; no inline magic numbers) ----------------------
 const WINDOW_W: u32 = 1280;
@@ -229,6 +237,94 @@ struct RealmBoxEntities(BTreeMap<RealmId, (Entity, BodyKind)>);
 #[derive(Component)]
 struct RealmBoxMarker;
 
+/// How far inside the far plane the sky sits. A star ON the plane would flicker as the local scene's
+/// own extent moves the plane frame by frame.
+const SKY_DEPTH_MARGIN: f64 = 0.9;
+/// The sky depth used when the camera is not perspective — a defensive value, never the live path.
+const DEFAULT_SKY_FAR_M: f32 = 1.0e9;
+
+/// Marker: THE star cloud (S11) — one entity for the whole galaxy.
+#[derive(Component)]
+struct StarPointMarker;
+
+/// The custom vertex attributes the star sprite needs, beside `Mesh::ATTRIBUTE_POSITION`.
+///
+/// The position holds the star's CENTRE, repeated for all four corners, so Bevy still computes a
+/// correct bounding box for the cloud. The corner sign is what the vertex shader expands.
+const ATTRIBUTE_STAR_CORNER: MeshVertexAttribute =
+    MeshVertexAttribute::new("StarCorner", 0x5741_0001, VertexFormat::Float32x2);
+const ATTRIBUTE_STAR_COLOR: MeshVertexAttribute =
+    MeshVertexAttribute::new("StarColor", 0x5741_0002, VertexFormat::Float32x4);
+const ATTRIBUTE_STAR_BASE_R: MeshVertexAttribute =
+    MeshVertexAttribute::new("StarBaseRadius", 0x5741_0003, VertexFormat::Float32);
+
+/// THE STAR SPRITE MATERIAL (S11): the apparent-size floor's constants, and nothing else.
+///
+/// ★ EVERY VALUE IS READ FROM TIER-A AT BIND TIME. The floor is `marker_world_radius`, which the pixel
+/// gates also derive their asserted rectangle from. A copy of those numbers typed into the WGSL would
+/// let the GPU draw one size while the gate asserts another — and each would look correct alone.
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+struct StarSkyMaterial {
+    #[uniform(0)]
+    params: StarSkyParams,
+}
+
+#[derive(ShaderType, Debug, Clone)]
+struct StarSkyParams {
+    min_apparent_radius_px: f32,
+    tan_half_fov: f32,
+    viewport_h_px: f32,
+    /// Where the sky sits in depth (m) — just inside the camera's own far plane. The star's true
+    /// direction is kept; only this depth slot is fixed. See `star_sky.wgsl`.
+    sky_radius_m: f32,
+}
+
+impl Material for StarSkyMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://vd_client_render/star_sky.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "embedded://vd_client_render/star_sky.wgsl".into()
+    }
+    /// BLENDED, because the sprite's edge fades over one pixel. An opaque pass would leave the disc's
+    /// antialiasing as a hard square.
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<StarSkyMaterial>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let vertex_layout = layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            ATTRIBUTE_STAR_CORNER.at_shader_location(1),
+            ATTRIBUTE_STAR_COLOR.at_shader_location(2),
+            ATTRIBUTE_STAR_BASE_R.at_shader_location(3),
+        ])?;
+        descriptor.vertex.buffers = vec![vertex_layout];
+        Ok(())
+    }
+}
+
+/// THE DRAWN SKY's identity (S11) — which catalogue, around which observer, is on screen.
+///
+/// ★ THIS IS WHY THE SKY IS NOT REBUILT EVERY FRAME. Stars do not move. The only things that change
+/// where they are drawn are the catalogue itself (almost never) and the realm the observer stands in
+/// (a crossing). So the point cloud is spawned when this pair changes, and left alone otherwise —
+/// which at the target census is the difference between 150,000 spawns per frame and none.
+#[derive(Resource, Default)]
+struct DrawnSky {
+    /// `(generation, origin realm)` currently on screen, or `None` while nothing is drawn.
+    shown: Option<(u64, vd_core::pose::RealmId)>,
+    /// THE one cloud entity, held so a re-anchor can replace it.
+    cloud: Option<Entity>,
+    /// The material handle, held so the per-frame camera uniforms can be refreshed without touching
+    /// the star data.
+    material: Option<Handle<StarSkyMaterial>>,
+}
+
 /// The SHARED marker point-sprite assets: ONE unit vertex buffer for every point of light plus one
 /// unlit emissive material per Morgan-Keenan spectral class (`vd_client::realm_scene::
 /// MARKER_CLASS_SRGB`), built once at setup. This is what "a dot never costs a mesh" means in the
@@ -292,6 +388,19 @@ struct RenderEye {
 /// Run the client renderer. BLOCKS until exit; the bin MUST call this on the MAIN thread
 /// (winit/the runner need it) with the core loop on a separate thread. Dispatches on the
 /// mode: a real window (human) or headless offscreen capture (the agent's eyes).
+/// EMBED THE STAR SHADER IN THE BINARY (S11).
+///
+/// This repo has no `assets/` directory and no asset path of any kind. Loading the WGSL from disk
+/// would make a headless capture — and a deployed client — depend on finding a file beside the
+/// binary. Embedding it removes that failure mode entirely: the shader ships inside the executable.
+struct StarSkyShaderPlugin;
+
+impl Plugin for StarSkyShaderPlugin {
+    fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "star_sky.wgsl");
+    }
+}
+
 pub fn run(handles: RenderHandles) {
     match handles.mode {
         RenderMode::Windowed => run_windowed(handles),
@@ -326,6 +435,7 @@ fn run_windowed(handles: RenderHandles) {
         .insert_resource(CaptureView { pilot: false })
         .init_resource::<DotEntities>()
         .init_resource::<RealmBoxEntities>()
+        .init_resource::<DrawnSky>() // S11: which sky is on screen, and around which system
         .init_resource::<RenderEye>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -346,6 +456,14 @@ fn run_windowed(handles: RenderHandles) {
         // egui (multipass primary context — the default; auto-creates the window's
         // PrimaryEguiContext + its EguiPrimaryContextPass schedule).
         .add_plugins(EguiPlugin::default())
+        // ★ AFTER `DefaultPlugins`, and that ORDER IS LOAD-BEARING (S11). `embedded_asset!` writes into
+        // `EmbeddedAssetRegistry`, which `AssetPlugin` creates — registering earlier panics at startup
+        // with "resource does not exist", which is a runtime failure no compile can catch. Measured:
+        // the capture client exited 101 before its listener came up.
+        .add_plugins((
+            StarSkyShaderPlugin,
+            MaterialPlugin::<StarSkyMaterial>::default(),
+        ))
         .add_systems(Startup, setup_scene)
         .add_systems(
             Update,
@@ -360,6 +478,9 @@ fn run_windowed(handles: RenderHandles) {
                     // (chained so the despawn sees the just-spawned boxes the same frame — no scaffold
                     // flash in space).
                     (sync_realm_boxes, despawn_reference_scaffold).chain(),
+                    // S11: the galaxy. Independent of the box/dot lanes — it re-spawns only on a
+                    // crossing or a new catalogue, so it is not chained into their per-frame work.
+                    sync_star_sky,
                     place_reference_scaffold,
                 ),
                 derive_camera_planes,
@@ -842,6 +963,116 @@ fn sync_world(
 /// NEVER a shape variant), and spawn a translucent [`StandardMaterial`] volume. Straight-line glue:
 /// every geometry/color/placement decision is a Tier-A call (`to_render_prims`, `world_pos`); this
 /// only builds Bevy `Mesh`/`Transform`/material handles and spawns/despawns to match the scene.
+/// DRAW THE GALAXY (S11): one point of light per star the client holds, placed around the observer's
+/// own star system.
+///
+/// ★ ONE INSTANCED DRAW, NOT AN ENTITY'S WORTH OF WORK PER STAR. Every point shares ONE mesh and one
+/// material per spectral class ([`MarkerAssets`]), which is what the plan means by "one instanced
+/// point cloud rather than an entity per star": Bevy batches entities that share a mesh and material
+/// into a single draw call, so the draw cost is a handful of calls whatever the census.
+///
+/// ★ AND IT RUNS ON A CROSSING, NOT ON A FRAME. The positions change only when the catalogue changes
+/// or the observer's own system changes. Rebuilding per frame would cost 150,000 spawns sixty times a
+/// second to produce an identical picture.
+///
+/// The observer's own system is not drawn — you are inside it, and a point of light at zero distance
+/// would sit on the camera. An observer whose system is not in the catalogue draws NOTHING rather than
+/// an unanchored sky, because an unanchored sky puts every star at the wrong distance and looks
+/// entirely plausible while doing it.
+fn sync_star_sky(
+    net: Res<Net>,
+    mut drawn: ResMut<DrawnSky>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StarSkyMaterial>>,
+    camera: Single<(&Camera, &Projection)>,
+    mut commands: Commands,
+) {
+    // THE UNIFORMS ARE REFRESHED EVERY FRAME, because the size floor is measured in PIXELS and the
+    // camera can change: a window resize moves `viewport_h_px`, and the projection owns the field of
+    // view. The star DATA is not touched here — only these four numbers.
+    let (cam, projection) = *camera;
+    let (fov_y, viewport_h_px) = camera_view(cam, projection);
+    // ★ THE SKY'S DEPTH COMES FROM THE CAMERA'S OWN FAR PLANE, never a constant. `derive_camera_planes`
+    // sets that plane from the LOCAL scene every frame, so a literal here would be beyond it on one
+    // scene and inside it on another — and a star beyond the far plane is silently clipped, which is
+    // exactly the defect this placement fixes. Backed off by a margin so a star never lands ON the
+    // plane, where it would flicker as the scene's own extent moves.
+    let far_m = match projection {
+        Projection::Perspective(p) => f64::from(p.far),
+        _ => f64::from(DEFAULT_SKY_FAR_M),
+    };
+    let params = StarSkyParams {
+        min_apparent_radius_px: vd_client_harness::camera::DOT_MIN_APPARENT_RADIUS_PX as f32,
+        tan_half_fov: (fov_y * 0.5).tan() as f32,
+        viewport_h_px: viewport_h_px as f32,
+        sky_radius_m: (far_m * SKY_DEPTH_MARGIN) as f32,
+    };
+    if let Some(material) = drawn
+        .material
+        .as_ref()
+        .and_then(|handle| materials.get_mut(handle))
+    {
+        material.params = params.clone();
+    }
+
+    let snap = net.snapshot.load();
+    let wanted = snap
+        .sky()
+        .and_then(|sky| snap.origin().map(|origin| (sky.generation, origin)));
+    if wanted == drawn.shown {
+        return; // the same sky, around the same system — the cloud already on screen is correct
+    }
+    // A RE-ANCHOR REPLACES THE CLOUD. Leaving the old one would draw two galaxies at once, one of them
+    // measured from a system the player has left.
+    if let Some(entity) = drawn.cloud.take() {
+        commands.entity(entity).despawn();
+    }
+    drawn.shown = wanted;
+    let Some((_, origin)) = wanted else {
+        return; // no sky held, or no standing realm stated yet
+    };
+    let Some(points) = snap.sky().and_then(|sky| sky.points_around(origin)) else {
+        return; // the catalogue does not describe where we stand — draw nothing, never a wrong sky
+    };
+    let cloud = vd_client::render_snapshot::StarCloud::build(&points);
+    if cloud.is_empty() {
+        return;
+    }
+    // ★ ONE MESH, ONE ENTITY, WHATEVER THE CENSUS. At 150,000 stars this is 14.4 MB of vertices plus
+    // 3.6 MB of U32 indices, uploaded ONCE — against 150,000 `MeshUniform` records rebuilt every frame
+    // if each star were its own entity. `U32` is forced: 600,000 vertices overflow a `u16`.
+    let mut mesh = Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, cloud.positions.clone());
+    mesh.insert_attribute(ATTRIBUTE_STAR_CORNER, cloud.corners.clone());
+    mesh.insert_attribute(ATTRIBUTE_STAR_COLOR, cloud.colors.clone());
+    mesh.insert_attribute(ATTRIBUTE_STAR_BASE_R, cloud.base_radius_m.clone());
+    mesh.insert_indices(bevy::mesh::Indices::U32(cloud.indices.clone()));
+
+    let material = materials.add(StarSkyMaterial { params });
+    drawn.cloud = Some(
+        commands
+            .spawn((
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(material.clone()),
+                // IDENTITY TRANSFORM, deliberately: the vertex positions are already metres from the
+                // observer's own star system, which is where the camera stands. A model transform here
+                // would be a second place the sky could be moved from.
+                Transform::IDENTITY,
+                // ★ NO FRUSTUM CULLING (S11). The cloud's bounding box spans the whole galaxy —
+                // half-extents of about 4.6e18 m — and Bevy's visibility test against a box that large,
+                // in f32, is not a test worth trusting. The camera stands INSIDE it always, so culling
+                // could only ever remove the sky by mistake, never save work.
+                bevy::camera::visibility::NoFrustumCulling,
+                StarPointMarker,
+            ))
+            .id(),
+    );
+    drawn.material = Some(material);
+}
+
 #[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
 fn sync_realm_boxes(
     net: Res<Net>,
@@ -1298,6 +1529,7 @@ fn run_capture(handles: RenderHandles) {
         })
         .init_resource::<DotEntities>()
         .init_resource::<RealmBoxEntities>()
+        .init_resource::<DrawnSky>() // S11: which sky is on screen, and around which system
         .init_resource::<RenderEye>()
         .add_plugins(
             DefaultPlugins
@@ -1310,6 +1542,14 @@ fn run_capture(handles: RenderHandles) {
                 .disable::<WinitPlugin>(),
         )
         .add_plugins(EguiPlugin::default())
+        // ★ AFTER `DefaultPlugins`, and that ORDER IS LOAD-BEARING (S11). `embedded_asset!` writes into
+        // `EmbeddedAssetRegistry`, which `AssetPlugin` creates — registering earlier panics at startup
+        // with "resource does not exist", which is a runtime failure no compile can catch. Measured:
+        // the capture client exited 101 before its listener came up.
+        .add_plugins((
+            StarSkyShaderPlugin,
+            MaterialPlugin::<StarSkyMaterial>::default(),
+        ))
         .add_plugins(ImageCopyPlugin)
         .add_plugins(ScheduleRunnerPlugin::run_loop(
             std::time::Duration::from_secs_f64(1.0 / 60.0),
@@ -1335,6 +1575,9 @@ fn run_capture(handles: RenderHandles) {
                     // review: the H2 confound). render_smoke (NO --realm-boxes) still keeps them: with
                     // no realm content the despawn is a no-op, so its content floor stands.
                     (sync_realm_boxes, despawn_reference_scaffold).chain(),
+                    // S11: the galaxy. Independent of the box/dot lanes — it re-spawns only on a
+                    // crossing or a new catalogue, so it is not chained into their per-frame work.
+                    sync_star_sky,
                     place_reference_scaffold,
                 ),
                 derive_camera_planes,

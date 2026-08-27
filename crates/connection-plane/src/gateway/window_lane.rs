@@ -112,6 +112,61 @@ fn push_unique_window(out: &mut Vec<DesiredWindow>, wanted: DesiredWindow) {
 /// cadence. Zero sessions ⇒ zero desired ⇒ every window closed and the map empty — the teardown
 /// gate's structural half. The composer is Slice B: nothing here reads a row, and no client sees
 /// anything.
+/// STATE THE GALAXY to every client that does not hold it (S11).
+///
+/// ★ ONE SKY, ONE AUTHOR. The gateway folded this at boot from the whole world; no shard states a sky
+/// any more. A shard's sky was its OWN realms', so the sky a player received depended on which shard
+/// they were subscribed to — a home system shard states one star, its own, and a player never draws
+/// their own star because they are standing inside it. Measured on a dual cluster: the galaxy shard
+/// held 3, the client held 1, and drew 0.
+///
+/// ★ AND IT ALSO BEATS. The liveness beat says "this sky is still current", so it must come from the
+/// party that authors the sky. It is unconditional, because on a galaxy that never changes SILENCE is
+/// the healthy case and is indistinguishable from a dead emitter without it.
+fn emit_sky(
+    config: &GatewayConfig,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    if config.sky.is_empty() {
+        return; // a gateway booted without a world states no sky, rather than a wrong one
+    }
+    let parts = vd_wire::channels::partition_stars(&config.sky, SKY_PART_BUDGET_BYTES);
+    let total = parts.len() as u32;
+    for session in sessions.by_session.values() {
+        // THE BEAT goes to everyone, held sky or not: it is the statement that nothing changed.
+        push_control(
+            outbox,
+            session.client,
+            &ServerControlMsg::SkyAlive {
+                generation: config.sky_generation,
+            },
+        );
+        stats.sky_alive_beats_sent += 1;
+        if session.sky_held == Some(config.sky_generation) {
+            stats.sky_parts_skipped += total as u64;
+            continue; // this client holds this sky — the whole point of the exchange
+        }
+        for (i, rows) in parts.iter().enumerate() {
+            push_control(
+                outbox,
+                session.client,
+                &ServerControlMsg::StarCatalogue {
+                    generation: config.sky_generation,
+                    part: i as u32,
+                    parts: total,
+                    rows: rows.clone(),
+                },
+            );
+            stats.star_catalogue_parts_sent += 1;
+        }
+    }
+}
+
+/// How large one part of the catalogue may be. Stated once, here, so a test can reason about it.
+const SKY_PART_BUDGET_BYTES: usize = 8 * 1024;
+
 pub(crate) fn drive_windows(
     config: Res<GatewayConfig>,
     clock: Res<ClockSample>,
@@ -209,6 +264,16 @@ pub(crate) fn drive_windows(
             },
         );
         stats.window_open_sent += 1;
+    }
+    // ★ THE GALAXY CROSSES ONCE (S11; owner ruling 2026-08-27). The gateway holds the whole sky and
+    // states it to a client that does not hold it — on the same beat the keep-alive uses, so it needs
+    // no timer of its own and repairs itself if a part is lost.
+    //
+    // "ONCE" is enforced by the client's own statement, not by a memory here: a session that has
+    // confirmed this generation is skipped, and a session that crosses to another star system is still
+    // holding the same sky, so nothing crosses again. That is the whole saving.
+    if vd_sim::directory::due_this_tick(window_keepalive_cadence(&config), clock.local_tick.0) {
+        emit_sky(&config, &mut sessions, &mut stats, &mut outbox);
     }
     if vd_sim::directory::due_this_tick(window_keepalive_cadence(&config), clock.local_tick.0) {
         for (id, held) in &sessions.windows {

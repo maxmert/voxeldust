@@ -166,6 +166,15 @@ pub struct DevState {
     /// stated them. `None` before the first level. The pixel gates read this: origin == home
     /// realm at login; the epoch bumps EXACTLY once per crossing.
     pub origin: Option<(String, u64)>,
+    /// THE SKY THE CLIENT HOLDS (S11): `(generation, stars)` of the whole catalogue it has assembled
+    /// and proved, or `None` while it holds no whole sky.
+    ///
+    /// ★ THE COUNT IS THE CATALOGUE'S, NOT THE DRAWN CLOUD'S, and the difference matters to a gate:
+    /// the observer's OWN system is in the catalogue but is never drawn (you are inside it), so a
+    /// gate expecting pixels must expect `stars - 1` points of light. Reporting the held number keeps
+    /// the client honest about what it RECEIVED; the gate derives what should be DRAWN itself, from
+    /// the world seed, rather than trusting a number the client also drew from.
+    pub sky: Option<(u64, u64)>,
     /// FAULT/diagnosis: composed datagram rows dropped for carrying a PREVIOUS scene epoch
     /// (§2.6.6 `stale_epoch_rows`). Brief at a crossing; steady growth means the feed and the
     /// reliable lane disagree about the current scene.
@@ -251,6 +260,7 @@ pub(crate) mod tests {
                 newest_tick: Some(100),
             }],
             origin: Some(("System(7)".to_owned(), 1)),
+            sky: None,
             stale_epoch_rows: 8,
             snapshots_applied: 4,
             realm_frames_applied: 3,

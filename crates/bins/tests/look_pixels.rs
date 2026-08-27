@@ -285,7 +285,11 @@ impl Oracle {
                 let tier = r
                     .parent
                     .map_or(r.frame.tier(), |p| self.region(p).frame.tier());
-                r.center.delta_m(LatticePos::ORIGIN, tier)
+                // COMPILE-RESTORED against `ParentCentre` (S9). This site already picks the PARENT's
+                // tier above, which is the correct ruler for a parent-stated centre.
+                r.center
+                    .in_parents_frame()
+                    .delta_m(LatticePos::ORIGIN, tier)
             }
         }
     }

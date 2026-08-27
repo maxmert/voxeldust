@@ -533,6 +533,9 @@ fn build_cluster(
         schedule,
         GatewayConfig {
             orchestrator: ORCH,
+            // No world booted in a fixture, so the gateway states no sky (S11).
+            sky: Vec::new(),
+            sky_generation: 0,
             shard: SHARD,
             known_shards,
             auth_verifying_key: auth_verifying_key(),

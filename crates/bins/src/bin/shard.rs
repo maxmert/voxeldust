@@ -394,24 +394,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     *node.world_mut().resource_mut::<vd_sim::stub::ChildLuma>() =
         vd_sim::stub::ChildLuma(child_luma);
-    // THE STAR CATALOGUE (S11): the galaxy's stars, folded ONCE at boot from the forest this shard
-    // actually booted, with the generation folded from the catalogue's own bytes. Plumbed here for the
-    // same structural reason the marker roster is — the generator crate and the simulation crate cannot
-    // see each other, so the boot is the only party that can hold both.
+    // THE SHARD FOLDS NO SKY (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just once over
+    // reliable lane"). This boot used to fold a catalogue from THIS shard's own forest and hand it to
+    // the simulation. That made the sky a property of which shard you were subscribed to: a home star
+    // system states ONE star, its own, and a player never draws their own star because they are inside
+    // it. MEASURED on a dual cluster — the galaxy shard held 3, the client held 1, and drew 0.
     //
-    // Empty on every shard that parents no star systems, which is most of them: a planet states no sky.
-    let (sky_rows, sky_generation) = vd_bins::star_catalogue_for_boot(
-        universe_seed,
-        move_speed * time_multiplier,
-        tick_dt,
-        &regions,
-    );
-    *node
-        .world_mut()
-        .resource_mut::<vd_sim::stub::StarCatalogue>() = vd_sim::stub::StarCatalogue {
-        rows: sky_rows,
-        generation: sky_generation,
-    };
+    // The GATEWAY folds it now, over the WHOLE world, and states it once. See the gateway boot.
     *node
         .world_mut()
         .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)

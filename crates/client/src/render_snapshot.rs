@@ -56,6 +56,12 @@ pub struct RenderSnapshot {
     /// smaller galaxy, it is a galaxy with holes, and the holes look exactly like stars that are not
     /// there.
     sky: Option<Arc<SkyDraw>>,
+    /// THE REALM THE SESSION IS STANDING IN (S11) — the composed scene's own origin.
+    ///
+    /// Carried so the renderer can find the observer's ANCHOR in the star catalogue. It adds no wire
+    /// data: the gateway already states it on `ServerControlMsg::RealmRegistry.origin`, and the client
+    /// already stores it. It was simply private, with no way to reach the render path.
+    origin: Option<vd_core::pose::RealmId>,
 }
 
 /// The sky, as the renderer receives it (S11): the rows, and the generation that identifies them.
@@ -68,6 +74,142 @@ pub struct SkyDraw {
     pub rows: Vec<vd_core::look::StarRow>,
     /// The generation these rows fold to.
     pub generation: u64,
+}
+
+/// ONE STAR, READY TO DRAW (S11): where it is relative to the observer, and what colour and size it
+/// should be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StarPoint {
+    /// Metres from the observer's own star system, in the galaxy's frame.
+    pub pos_m: vd_core::glam::DVec3,
+    /// The Morgan-Keenan spectral class code, which picks the colour.
+    pub class_code: u8,
+    /// Brightness in solar luminosities, which sizes the point.
+    pub luma_lsun: f64,
+}
+
+impl SkyDraw {
+    /// THE OBSERVER'S OWN ANCHOR: the galaxy-frame cell of the star system named by `own`.
+    ///
+    /// ★ NO WIRE DATA IS NEEDED FOR THIS. The catalogue applies no observer filter — every star system
+    /// whose parent is the galaxy is in it, INCLUDING the one the observer is standing in. So the
+    /// number to subtract is already in a row the client received and proved.
+    #[must_use]
+    pub fn anchor_of(&self, own: vd_core::pose::RealmId) -> Option<vd_core::glam::I64Vec3> {
+        self.rows.iter().find(|r| r.realm == own).map(|r| r.cell)
+    }
+
+    /// THE DRAWABLE SKY, relative to the observer's own star system.
+    ///
+    /// ★ THE SUBTRACTION IS EXACT, AND THAT IS WHY THE CLIENT MAY DO IT. Both values are whole cells
+    /// at ONE tier — the galaxy's two-metre step — and the generator holds every system exactly
+    /// cell-aligned. There is no float, no re-derivation and no moving target, so the drift that made
+    /// client-side composition a defect for ENTITIES cannot occur here. Stars do not move.
+    ///
+    /// It is also why this runs ONCE PER CROSSING and not once per frame: the answer changes only when
+    /// the observer's own system changes.
+    ///
+    /// `None` when the catalogue holds no row for `own` — an observer standing somewhere the sky does
+    /// not describe. Drawing an unanchored sky would place every star at the wrong distance, which
+    /// looks plausible and is wrong, so nothing is drawn instead.
+    #[must_use]
+    pub fn points_around(&self, own: vd_core::pose::RealmId) -> Option<Vec<StarPoint>> {
+        let anchor = self.anchor_of(own)?;
+        let edge_m = vd_core::pose::Tier::Galaxy.cell_edge_m();
+        Some(
+            self.rows
+                .iter()
+                .filter(|r| r.realm != own)
+                .map(|r| StarPoint {
+                    // i128 for the difference: two cells near opposite edges of the galaxy would
+                    // overflow an i64 subtraction, and an overflow here is a star drawn behind you.
+                    pos_m: vd_core::glam::DVec3::new(
+                        (i128::from(r.cell.x) - i128::from(anchor.x)) as f64 * edge_m,
+                        (i128::from(r.cell.y) - i128::from(anchor.y)) as f64 * edge_m,
+                        (i128::from(r.cell.z) - i128::from(anchor.z)) as f64 * edge_m,
+                    ),
+                    class_code: r.class_code,
+                    luma_lsun: r.luma_lsun,
+                })
+                .collect(),
+        )
+    }
+}
+
+/// THE STAR CLOUD's vertex data, ready for one mesh upload (S11).
+///
+/// ★ ONE ENTITY, NOT ONE PER STAR. Four vertices per star, all four carrying the same centre; the
+/// vertex shader expands them into a camera-facing sprite. At the target census that is 14.4 MB of
+/// vertices plus 3.6 MB of indices — 18.0 MB, written ONCE PER CROSSING.
+///
+/// The alternative, an entity per star, makes Bevy maintain 150,000 `MeshUniform` records of 176
+/// bytes EVERY FRAME — about 26 MB per frame to draw a picture that never changes. This makes it one.
+///
+/// `U32` indices are mandatory, not a choice: 600,000 vertices overflow a `u16`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StarCloud {
+    /// The star centre, repeated for each of its four corners. Metres from the observer's own system.
+    pub positions: Vec<[f32; 3]>,
+    /// Which corner of the sprite this vertex is: (-1,-1), (1,-1), (1,1), (-1,1).
+    pub corners: Vec<[f32; 2]>,
+    /// The class colour, from [`crate::realm_scene::MARKER_CLASS_SRGB`].
+    pub colors: Vec<[f32; 4]>,
+    /// The star's own world radius before the apparent-size floor is applied — from
+    /// [`crate::realm_scene::marker_look`], so the √L convention is stated in ONE place.
+    pub base_radius_m: Vec<f32>,
+    /// Two triangles per star.
+    pub indices: Vec<u32>,
+}
+
+impl StarCloud {
+    /// The corner signs, in the order the two triangles below index them.
+    const CORNERS: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+
+    /// How many stars this cloud holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.base_radius_m.len() / 4
+    }
+
+    /// Whether the cloud holds no stars.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.base_radius_m.is_empty()
+    }
+
+    /// Build the cloud from placed stars.
+    ///
+    /// ★ THE COLOUR AND THE RADIUS COME FROM [`crate::realm_scene::marker_look`], never from a second
+    /// rule written here. That function owns the √L convention (a sphere whose radius goes as the
+    /// square root of luminosity has flux proportional to luminosity) and the class palette. Two
+    /// spellings of one convention is how a starfield and its own pixel gate come to disagree.
+    #[must_use]
+    pub fn build(points: &[StarPoint]) -> StarCloud {
+        let n = points.len();
+        let mut cloud = StarCloud {
+            positions: Vec::with_capacity(n * 4),
+            corners: Vec::with_capacity(n * 4),
+            colors: Vec::with_capacity(n * 4),
+            base_radius_m: Vec::with_capacity(n * 4),
+            indices: Vec::with_capacity(n * 6),
+        };
+        for (i, p) in points.iter().enumerate() {
+            let look = crate::realm_scene::marker_look(p.class_code, p.luma_lsun);
+            let pos = p.pos_m.as_vec3().to_array();
+            let base = look.base_radius_m as f32;
+            for corner in StarCloud::CORNERS {
+                cloud.positions.push(pos);
+                cloud.corners.push(corner);
+                cloud.colors.push(look.color_rgba);
+                cloud.base_radius_m.push(base);
+            }
+            let v = (i * 4) as u32;
+            cloud
+                .indices
+                .extend_from_slice(&[v, v + 1, v + 2, v, v + 2, v + 3]);
+        }
+        cloud
+    }
 }
 
 impl RenderSnapshot {
@@ -108,6 +250,7 @@ impl RenderSnapshot {
             scene,
             realm_view,
             sky: None,
+            origin: None,
         }
     }
 
@@ -126,6 +269,19 @@ impl RenderSnapshot {
     #[must_use]
     pub fn sky(&self) -> Option<&Arc<SkyDraw>> {
         self.sky.as_ref()
+    }
+
+    /// The realm the session is standing in — the composed scene's origin.
+    #[must_use]
+    pub fn origin(&self) -> Option<vd_core::pose::RealmId> {
+        self.origin
+    }
+
+    /// The same snapshot, carrying the origin realm (S11).
+    #[must_use]
+    pub fn with_origin(mut self, origin: Option<vd_core::pose::RealmId>) -> RenderSnapshot {
+        self.origin = origin;
+        self
     }
 
     /// The scene to DRAW at `cursor`: the boot geometry with every streamed realm's placement
@@ -550,6 +706,165 @@ mod slice6_tests {
         assert_eq!(snap.scene_now(9.0), level);
     }
 
+    /// ★ THE SKY IS PLACED RELATIVE TO THE OBSERVER, EXACTLY (S11).
+    ///
+    /// This is the whole reason the catalogue may ship RAW — one sky for every player in the galaxy,
+    /// sent once and never again. The observer's own anchor is already IN it, because the catalogue
+    /// applies no observer filter. So a crossing costs a lookup and nothing on the wire.
+    #[test]
+    fn the_sky_is_placed_around_the_observers_own_system_by_exact_integer_subtraction() {
+        use vd_core::glam::{DVec3, I64Vec3};
+        use vd_core::pose::RealmId;
+        let star = |n: u64, cell: I64Vec3| vd_core::look::StarRow {
+            realm: RealmId::System(n),
+            cell,
+            class_code: 6,
+            luma_lsun: 0.25,
+        };
+        // Three systems on the galaxy's two-metre lattice. System(2) is where the observer stands.
+        let sky = SkyDraw {
+            rows: vec![
+                star(1, I64Vec3::new(100, 0, 0)),
+                star(2, I64Vec3::new(400, -50, 7)),
+                star(3, I64Vec3::new(400, -50, 107)),
+            ],
+            generation: 1,
+        };
+
+        let anchor = sky
+            .anchor_of(RealmId::System(2))
+            .expect("own system is IN the catalogue");
+        assert_eq!(
+            anchor,
+            I64Vec3::new(400, -50, 7),
+            "the anchor is a row the client already holds — no wire data buys it"
+        );
+
+        let pts = sky.points_around(RealmId::System(2)).expect("anchored");
+        // THE OBSERVER'S OWN SYSTEM IS NOT DRAWN. You are inside it; a point of light at zero distance
+        // would sit on the camera.
+        assert_eq!(pts.len(), 2, "two other systems, and not oneself");
+
+        let edge = vd_core::pose::Tier::Galaxy.cell_edge_m();
+        // System(3) sits exactly 100 cells along +z from the observer.
+        let up = pts.iter().find(|p| p.pos_m.z > 0.0).expect("the +z one");
+        assert_eq!(up.pos_m, DVec3::new(0.0, 0.0, 100.0 * edge));
+        // System(1) is 300 cells back in x, 50 up in y, 7 down in z.
+        let back = pts.iter().find(|p| p.pos_m.x < 0.0).expect("the -x one");
+        assert_eq!(
+            back.pos_m,
+            DVec3::new(-300.0 * edge, 50.0 * edge, -7.0 * edge)
+        );
+        // ...and the photometrics ride along, because they colour and size the point. Compared as
+        // VALUES rather than through an `all` predicate: the predicate's false arm is a region no
+        // passing test can reach, and an unreachable region is an uncoverable one (HR5).
+        assert_eq!(
+            pts.iter().map(|p| p.class_code).collect::<Vec<_>>(),
+            vec![6, 6]
+        );
+        assert_eq!(
+            pts.iter().map(|p| p.luma_lsun).collect::<Vec<_>>(),
+            vec![0.25, 0.25]
+        );
+
+        // ★ STANDING SOMEWHERE THE SKY DOES NOT DESCRIBE DRAWS NOTHING. An unanchored sky would put
+        // every star at the wrong distance — plausible, and wrong.
+        assert!(sky.points_around(RealmId::System(99)).is_none());
+        assert!(sky.anchor_of(RealmId::System(99)).is_none());
+    }
+
+    /// ★ THE CLOUD IS FOUR VERTICES AND TWO TRIANGLES PER STAR, AND ITS SIZE IS A NUMBER (S11).
+    #[test]
+    fn the_star_cloud_is_one_upload_and_reuses_the_one_marker_convention() {
+        use vd_core::glam::DVec3;
+        let pt = |luma, class| StarPoint {
+            pos_m: DVec3::new(1.0, 2.0, 3.0),
+            class_code: class,
+            luma_lsun: luma,
+        };
+        let cloud = StarCloud::build(&[pt(4.0, 0), pt(1.0, 6)]);
+
+        assert_eq!(cloud.len(), 2);
+        assert!(!cloud.is_empty());
+        assert_eq!(cloud.positions.len(), 8, "four vertices per star");
+        assert_eq!(cloud.indices.len(), 12, "two triangles per star");
+        // The second star's quad indexes ITS OWN four vertices, never the first star's.
+        assert_eq!(&cloud.indices[6..], &[4, 5, 6, 4, 6, 7]);
+        // All four corners of one star share its centre; the shader moves them apart.
+        assert!(cloud.positions[..4].iter().all(|p| *p == [1.0, 2.0, 3.0]));
+        assert_eq!(cloud.corners[..4], StarCloud::CORNERS);
+
+        // ★ THE RADIUS AND COLOUR COME FROM `marker_look`, not from a rule restated here. A second
+        // spelling is how a starfield and its own pixel gate come to disagree.
+        let bright = crate::realm_scene::marker_look(0, 4.0);
+        assert_eq!(cloud.base_radius_m[0], bright.base_radius_m as f32);
+        assert_eq!(cloud.colors[0], bright.color_rgba);
+        // √L: four times the luminosity is twice the radius, so the two stars differ by exactly 2.
+        let dim = crate::realm_scene::marker_look(6, 1.0);
+        assert_eq!(cloud.base_radius_m[4], dim.base_radius_m as f32);
+        assert_eq!(
+            cloud.base_radius_m[0],
+            2.0 * cloud.base_radius_m[4],
+            "the square-root-of-luminosity convention, carried through unchanged"
+        );
+        // ...and the two classes really do differ, so the colour is per star and not a constant.
+        assert_ne!(cloud.colors[0], cloud.colors[4]);
+
+        // AN EMPTY SKY BUILDS AN EMPTY CLOUD, and does not panic on the index arithmetic.
+        let none = StarCloud::build(&[]);
+        assert!(none.is_empty());
+        assert_eq!(none.len(), 0);
+        assert!(none.indices.is_empty());
+    }
+
+    /// ★ THE CENSUS FITS, AND `u16` INDICES WOULD NOT (S11).
+    ///
+    /// Not a style note: 150,000 stars need 600,000 vertices, and a `u16` index tops out at 65,535.
+    /// Choosing `u16` would silently draw the first 16,383 stars and nothing else.
+    #[test]
+    fn the_index_width_is_forced_by_the_census() {
+        const CENSUS: usize = 150_000;
+        let verts = CENSUS * 4;
+        assert!(
+            verts > usize::from(u16::MAX),
+            "600,000 vertices overflow a u16 index — U32 is mandatory, not a preference"
+        );
+        // The buffer sizes this design was chosen on, stated so a later change has to face them.
+        assert_eq!(
+            verts * 24,
+            14_400_000,
+            "14.4 MB of vertices at 24 bytes each"
+        );
+        assert_eq!(CENSUS * 6 * 4, 3_600_000, "3.6 MB of u32 indices");
+    }
+
+    /// ★ CELLS AT OPPOSITE EDGES OF THE LATTICE DO NOT WRAP (S11).
+    ///
+    /// The subtraction runs in `i128` for exactly this case. In `i64` it would overflow, and a wrapped
+    /// difference draws a star BEHIND the observer instead of in front — a picture that looks fine and
+    /// is precisely inverted.
+    #[test]
+    fn two_stars_at_opposite_edges_of_the_lattice_do_not_wrap() {
+        use vd_core::glam::I64Vec3;
+        use vd_core::pose::RealmId;
+        let far = i64::MAX / 2;
+        let row = |n: u64, x: i64| vd_core::look::StarRow {
+            realm: RealmId::System(n),
+            cell: I64Vec3::new(x, 0, 0),
+            class_code: 6,
+            luma_lsun: 1.0,
+        };
+        let sky = SkyDraw {
+            rows: vec![row(1, -far), row(2, far)],
+            generation: 2,
+        };
+        let pts = sky.points_around(RealmId::System(2)).expect("anchored");
+        assert_eq!(pts.len(), 1);
+        let expect = -(2.0 * far as f64) * vd_core::pose::Tier::Galaxy.cell_edge_m();
+        assert_eq!(pts[0].pos_m.x, expect);
+        assert!(pts[0].pos_m.x < 0.0, "behind us, not in front");
+    }
+
     /// ★ THE SKY RIDES THE RENDER SEAM BY POINTER, AND ONLY WHEN IT IS WHOLE (S11).
     ///
     /// A snapshot is cloned every step. At the target census the sky is 150,000 rows, so carrying it
@@ -593,5 +908,22 @@ mod slice6_tests {
 
         // And it can be taken away again — the generation exchange may replace a sky.
         assert!(carried.with_sky(None).sky().is_none());
+
+        // ★ THE ORIGIN RIDES THE SAME SEAM (S11), and it is what makes the sky drawable at all: the
+        // renderer finds the observer's ANCHOR by looking up this realm in the catalogue. Carried
+        // here rather than only read by the renderer, which is coverage-exempt — a datum only the
+        // exempt tier reads is a datum nothing proves.
+        let bare2 = RenderSnapshot::new(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Connecting,
+        );
+        assert_eq!(bare2.origin(), None, "no standing realm stated yet");
+        let placed = bare2.with_origin(Some(vd_core::pose::RealmId::System(7)));
+        assert_eq!(placed.origin(), Some(vd_core::pose::RealmId::System(7)));
+        assert!(
+            placed.with_origin(None).origin().is_none(),
+            "and it can be cleared — a session between realms states none"
+        );
     }
 }

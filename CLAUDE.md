@@ -14,6 +14,18 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-08-27_galaxy_shape.md` — ★ THE GALAXY'S SHAPE, ITS DENSITY, AND HOW GALAXIES
+    DIFFER. Written before S12 starts. **EVERY number the placement reads is SEED-DERIVED** — a density
+    knob is not a tuning parameter, it is a lever that moves every star a player has ever seen (owner:
+    *"otherwise any tiny change might change positions"*). The shape is BELIEVABLE and consumes the
+    taxonomy's own galaxy-kind draw; a shell, a ring, a plain filled ball and a lattice-AS-POSITION are
+    each refused by name (a lattice stays lawful as a LOOKUP). Placement is stable forever: grow the
+    world and nothing already placed moves. ★ GALAXIES DIFFER in what you SEE and how you TRAVEL —
+    shape, density, size, stellar population — and NEVER in how much they PAY, because a seed-derived
+    rich galaxy is a treasure map and the seed ruling forbids it. **An expensive gate buys ROOM, not
+    treasure:** a new galaxy is worth reaching because nobody has taken it yet, which is live state.
+    S12 builds ONE galaxy properly; the between-galaxy differences are designed now and built when a
+    second galaxy is reachable.
   - `owner_decisions_2026-08-27_movement_answers.md` — ★ THE ANSWERS TO THE MOVEMENT QUESTIONS. Three
     items closed. (1) THE UNGOVERNED ROCK: the containing realm owns the speed of a thing that governs
     nothing itself, **but a transfer NEVER changes that speed** — a destination realm's ceiling limits

@@ -4254,15 +4254,27 @@ current fixture contains a mover. Re-uniting at ingest keeps the saving on the W
   cluster hosting one star system states that system's stars and no others. The real-process gate went
   red on its first run with the WORLD's census written into it: **1 star held against 3 in the world.**
 
-  That is the property, not a bug — but it decides something S12 must answer: **a player standing in a
-  star system must see the whole galaxy, and the shard they are subscribed to does not hold it.** The
-  three candidate answers, none chosen: the client subscribes to the galaxy shard as well; the gateway
-  composes the sky from more than one shard; or the sky is stated once at login from a party that holds
-  the whole forest. Each has a different cost and a different owner. **Do not pick one by accident
-  while raising the census.**
+  ★ **CORRECTED, AND CLOSED, 2026-08-27.** The entry above said three answers were possible and NONE
+  was chosen. That was wrong: one had already been ruled the same day — *"we're passing the Galaxy just
+  once over reliable lane"*. The assistant re-opened a settled question because it reasoned from the
+  code in front of it and found a gap, instead of reading the ruling. That is the second time in one
+  session; see the movement law for the first.
 
-  The gate now derives its expectation the way the SHARD derives it, so it measures the lane rather
-  than this open question.
+  **THE RULING RULES OUT TWO OF THE THREE.** A client also subscribing to the galaxy shard is the galaxy
+  crossing PER SUBSCRIPTION, not once. A gateway composing the sky per observer is the per-observer
+  product the lane exists to remove. The third — stated once by a party holding the whole galaxy — is
+  the one that matches, and is what LANDED.
+
+  **WHAT LANDED.** The GATEWAY folds the galaxy at boot, over the whole world, and states it to a client
+  that has not confirmed that generation. No shard states a sky. The shard's catalogue, request set and
+  two emitters are deleted, and so is the gateway's forwarding of them — dead code that tests keep
+  exercising is a false green. `ShardToGateway::StarCatalogue`/`StarSkyAlive` and
+  `GatewayToShard::SkyRequest` stay on the wire (deleting a variant renumbers every later one) and are
+  COUNTED, so a binary that has not caught up is visible.
+
+  **HR4:** the sky is no longer a shard feature, so there is no shard kind to vary and the rule is
+  satisfied by construction. Owner-confirmed 2026-08-27. The three-profile gate went with the shard
+  lane; the behaviours it protected are re-tested at the gateway.
 
 - **★ HR4 G-IDENTICAL FOR THE SKY — LANDED 2026-08-27 (owner-confirmed).**
   `assert_sky_feature_anywhere` drives the identical sky lane on THREE profiles — galaxy (relay, no

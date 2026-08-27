@@ -1947,38 +1947,6 @@ fn window_frames(
         .collect()
 }
 
-/// Every `ShardToGateway::WindowBody` in the outbox, decoded — `(to, window, subject, stmt)`.
-/// Every `StarCatalogue` part in the outbox (S11) — `(generation, part, parts, rows)`.
-/// Every sky-liveness beat in a tick's egress, by the gateway told and the generation named.
-fn sky_alive_beats(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<(NodeId, u64)> {
-    sent.iter()
-        .filter_map(
-            |(to, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
-                Ok(ShardToGateway::StarSkyAlive { generation }) => Some((*to, generation)),
-                _ => None,
-            },
-        )
-        .collect()
-}
-
-fn star_catalogue_parts(
-    sent: &[(NodeId, MsgClass, Vec<u8>)],
-) -> Vec<(u64, u32, u32, Vec<vd_core::look::StarRow>)> {
-    sent.iter()
-        .filter_map(
-            |(_, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
-                Ok(ShardToGateway::StarCatalogue {
-                    generation,
-                    part,
-                    parts,
-                    rows,
-                }) => Some((generation, part, parts, rows)),
-                _ => None,
-            },
-        )
-        .collect()
-}
-
 /// Every `WindowStaticRows` in the outbox (slice S10) — the reliable lane's static roster.
 fn window_static_rows(
     sent: &[(NodeId, MsgClass, Vec<u8>)],
@@ -2038,80 +2006,6 @@ const WINDOW_CHILD_CENTER: DVec3 = DVec3::new(500.0, -20.0, 3.0);
 /// One System(7) shard with an ARMED direct child at [`WINDOW_CHILD_CENTER`], a second STATIC
 /// child (no luma, inert band — the marker-absent / verdict-absent arms), a marker bag for the
 /// armed child, and one in-band occupant. The window fixtures' shared base.
-/// Drive THE sky lane once, on a rig of a GIVEN shard kind, and return everything it stated (S11).
-///
-/// The one body behind [`assert_sky_feature_anywhere`]. It plants the identical catalogue, opens a
-/// window, asks for the sky, and then runs a cadence's worth of ticks so the beat has to speak.
-///
-/// Returns `(catalogue parts, beats, the stats triple)`.
-#[expect(
-    clippy::type_complexity,
-    reason = "a fixture's return, read once by its own assertions"
-)]
-fn drive_sky_lane(
-    kind: NodeKind,
-    own: RealmId,
-    child: RealmId,
-) -> (
-    Vec<(u64, u32, u32, Vec<vd_core::look::StarRow>)>,
-    Vec<(NodeId, u64)>,
-    (u64, u64, u64),
-) {
-    let mut rig = Rig::with_config_and_kind(config(), kind);
-    rig.grant_realm();
-    let armed = RealmRegion {
-        aoi: aoi_band(3),
-        ..region(child, Some(own), WINDOW_CHILD_CENTER, 100.0)
-    };
-    plant_aoi(&mut rig, vec![root_region(), own_region(), armed]);
-
-    // THE IDENTICAL SKY on both runs. The rows name no realm the shard hosts, because a catalogue is
-    // the galaxy's stars and not this realm's children — which is exactly why it must not vary.
-    let rows: Vec<vd_core::look::StarRow> = (1u64..=3)
-        .map(|n| vd_core::look::StarRow {
-            realm: RealmId::System(n),
-            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
-            class_code: 6,
-            luma_lsun: 0.25,
-        })
-        .collect();
-    let generation =
-        vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
-    *rig.world.resource_mut::<crate::stub::StarCatalogue>() =
-        crate::stub::StarCatalogue { rows, generation };
-
-    let open = GatewayToShard::WindowOpen {
-        window: WindowId(1),
-        scope: WindowScope::Occupants,
-        static_held: None,
-    };
-    let mut parts = Vec::new();
-    let mut beats = Vec::new();
-    let first = rig.tick(vec![
-        wire_msg(GATEWAY, MsgClass::Control, &open),
-        wire_msg(GATEWAY, MsgClass::Control, &GatewayToShard::SkyRequest),
-    ]);
-    parts.extend(star_catalogue_parts(&first));
-    beats.extend(sky_alive_beats(&first));
-    // A full cadence, so the beat is forced to speak and the catalogue is forced to stay silent.
-    for t in 2..=21 {
-        rig.set_local_tick(t);
-        let sent = rig.tick(vec![]);
-        parts.extend(star_catalogue_parts(&sent));
-        beats.extend(sky_alive_beats(&sent));
-    }
-    let stats = rig.world.resource::<StubStats>();
-    (
-        parts,
-        beats,
-        (
-            stats.star_catalogue_parts_sent,
-            stats.sky_alive_beats_sent,
-            stats.sky_requests_taken,
-        ),
-    )
-}
-
 fn window_rig() -> Rig {
     let mut rig = Rig::new();
     rig.grant_realm();

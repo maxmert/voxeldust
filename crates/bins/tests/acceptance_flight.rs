@@ -641,6 +641,7 @@ fn region_offset(rs: &[RealmRegion], realm: RealmId) -> DVec3 {
         .find(|r| r.realm == realm)
         .map(|r| {
             r.center
+                .in_parents_frame()
                 .delta_m(vd_core::pose::LatticePos::ORIGIN, r.frame.tier())
         })
         .expect("the realm is rostered")

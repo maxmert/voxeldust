@@ -127,6 +127,10 @@ pub struct GatewayStats {
     /// CATALOGUE PARTS NOT SENT because the client already held that sky (S11). This is the saving,
     /// counted: every skipped part is bytes that did not cross for a galaxy that did not move.
     pub sky_parts_skipped: u64,
+    /// SKY STATEMENTS REFUSED FROM A SHARD (S11). Expected ZERO for ever: no shard states a sky since
+    /// the galaxy moved to the gateway. A non-zero value means a shard binary has not caught up — which
+    /// is worth seeing rather than dropping in silence.
+    pub sky_from_shard_refused: u64,
     /// THE WINDOW LANE's admitted rows (mesh minor 16): a `WindowFrame`/`WindowBody`/
     /// `WindowMembership` row that PASSED attestation (a known window, the roster-head sender,
     /// an admissible body) and was INGESTED into the window's composer state (Slice B retired

@@ -214,7 +214,15 @@ fn sibling_gap_m(rs: &[RealmRegion], home: RealmId) -> f64 {
         rs.iter()
             .find(|r| r.realm == realm)
             .map(|r| {
+                // COMPILE-RESTORED against `ParentCentre` (S9), with the arithmetic UNCHANGED.
+                //
+                // ⚠ SUSPECT: `center` is stated in the PARENT's frame, while `r.frame.tier()` is this
+                // region's OWN tier. Reading one with the other's ruler is the 2048x parent-frame trap
+                // this tree has hit before. It is left exactly as it was rather than "corrected" here,
+                // because changing a measurement inside a scale test is a decision that needs its own
+                // analysis, not a drive-by while restoring the build. See the note in DEFERRED.md.
                 r.center
+                    .in_parents_frame()
                     .delta_m(vd_core::pose::LatticePos::ORIGIN, r.frame.tier())
             })
             .expect("the realm is rostered")

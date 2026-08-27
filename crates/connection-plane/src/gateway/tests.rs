@@ -78,6 +78,9 @@ fn test_clock() -> ClockSample {
 fn config() -> GatewayConfig {
     GatewayConfig {
         orchestrator: ORCH,
+        // No world booted in a fixture, so the gateway states no sky (S11).
+        sky: Vec::new(),
+        sky_generation: 0,
         shard: SHARD,
         // The STABLE routable-shard roster (FORK 5): the login shard AND the transfer
         // dest, so a render-ready dest's frames are node-class-dispatchable (1d.2c). DEST
@@ -4045,46 +4048,9 @@ fn a_forced_index_table_desync_hits_the_counter_never_a_silent_drop() {
     assert_eq!(stats.frame_sub_desync, 1, "(a) missing session is counted");
     assert!(outbox.0.is_empty());
 
-    // ★ THE STAR CATALOGUE's fan runs the SAME desync arm (S11), and is driven here rather than in a
-    // second forced-desync fixture: the breach is one invariant, so it is proved once and every lane
-    // that walks the reverse index is checked against it. A catalogue silently dropped on a desync
-    // would leave that player with no sky at all and nothing in any log — the exact failure S11 exists
-    // to prevent, arriving by a different door.
-    crate::gateway::client::fan_star_catalogue(
-        SHARD,
-        7,
-        0,
-        1,
-        vec![vd_core::look::StarRow {
-            realm: RealmId::System(1),
-            cell: vd_core::glam::I64Vec3::ZERO,
-            class_code: 6,
-            luma_lsun: 0.25,
-        }],
-        &mut sessions,
-        &mut stats,
-        &mut outbox,
-    );
-    assert_eq!(stats.frame_sub_desync, 2, "the catalogue counts it too");
-    assert_eq!(
-        stats.star_catalogue_parts_sent, 0,
-        "and nothing is recorded as sent"
-    );
-    assert!(
-        outbox.0.is_empty(),
-        "a desync sends no sky, silently or otherwise"
-    );
-
-    // ★ AND THE SKY'S LIVENESS BEAT walks the same index, so it runs the same arm (S11). A beat lost to
-    // a silent desync is the worst of the three: the client would read the absence as "nobody is
-    // working" and distrust a sky that is in fact perfectly current.
-    crate::gateway::client::fan_sky_alive(SHARD, 7, &mut sessions, &mut stats, &mut outbox);
-    assert_eq!(stats.frame_sub_desync, 3, "the beat counts it too");
-    assert_eq!(
-        stats.sky_alive_beats_sent, 0,
-        "and none is recorded as sent"
-    );
-    assert!(outbox.0.is_empty());
+    // THE SKY'S FANS ARE GONE (S11): the gateway no longer FORWARDS a shard's sky — it states its own,
+    // to sessions, not through the shard reverse index. So there is no sky lane left to drive against
+    // this invariant. The index-walking lanes that remain are covered above.
 
     // (b) a present session indexed under SHARD but with an EMPTY hot SubTable.
     let (mut sessions, sid, _) = one_active_session();
@@ -6406,90 +6372,6 @@ fn a_crossing_swap_falls_back_when_the_new_chain_is_not_fully_fresh() {
         sessions.by_session[&sid].shadow.last_t,
         Some(UniverseTick(102)),
         "a short-prefix chain folds fresh — the preference never blocks the swap"
-    );
-}
-
-/// ★ THE STAR CATALOGUE REACHES THE CLIENT, IN PARTS AND UNCHANGED (S11).
-///
-/// The gateway FORWARDS this lane; it does not compose it. Every other picture lane is composed per
-/// observer and per instant — a catalogue is neither. It is the same sky for everybody, so re-composing
-/// per session would be work with no product, and would give two players two skies folded from one
-/// truth: the exact drift the byte-identity gate one level up exists to catch.
-#[test]
-fn the_star_catalogue_forwards_to_the_client_in_parts_and_unaltered() {
-    let mut rig = Rig::new();
-    let (_sid, _login) = rig.login(); // Active session at CLIENT, subscribed to SHARD
-    let star = |n: u64| vd_core::look::StarRow {
-        realm: RealmId::System(n),
-        cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
-        class_code: 6,
-        luma_lsun: 0.25,
-    };
-    let part =
-        |part: u32, parts: u32, rows: Vec<vd_core::look::StarRow>| ShardToGateway::StarCatalogue {
-            generation: 0x1234_5678_9abc_def0,
-            part,
-            parts,
-            rows,
-        };
-
-    // TWO PARTS OF ONE SKY, forwarded whole. The rows must arrive EXACTLY as stated — a gateway that
-    // re-ordered or re-encoded them would break the byte-identity the client's cache digest rests on.
-    let sent = rig.tick(vec![
-        wire(
-            SHARD,
-            MsgClass::Control,
-            &part(0, 2, vec![star(1), star(2)]),
-        ),
-        wire(SHARD, MsgClass::Control, &part(1, 2, vec![star(3)])),
-    ]);
-    let got = decode_controls(&sent, CLIENT);
-    assert!(
-        got.contains(&ServerControlMsg::StarCatalogue {
-            generation: 0x1234_5678_9abc_def0,
-            part: 0,
-            parts: 2,
-            rows: vec![star(1), star(2)],
-        }),
-        "part 0 reaches the client unaltered: {got:?}"
-    );
-    assert!(
-        got.contains(&ServerControlMsg::StarCatalogue {
-            generation: 0x1234_5678_9abc_def0,
-            part: 1,
-            parts: 2,
-            rows: vec![star(3)],
-        }),
-        "part 1 too — a sky is drawn only when whole, so a lost part is a missing sky"
-    );
-    assert_eq!(
-        rig.world
-            .resource::<GatewayStats>()
-            .star_catalogue_parts_sent,
-        2
-    );
-
-    // ★ AND A PART FROM A SHARD NOBODY IS SUBSCRIBED TO REACHES NOBODY — counted, never guessed at.
-    // Without this arm the fan would look correct while quietly serving every client every galaxy.
-    let before = rig
-        .world
-        .resource::<GatewayStats>()
-        .star_catalogue_parts_sent;
-    let sent = rig.tick(vec![wire(
-        DEST,
-        MsgClass::Control,
-        &part(0, 1, vec![star(9)]),
-    )]);
-    assert!(
-        decode_controls(&sent, CLIENT).is_empty(),
-        "a catalogue from an unsubscribed shard reaches no client"
-    );
-    assert_eq!(
-        rig.world
-            .resource::<GatewayStats>()
-            .star_catalogue_parts_sent,
-        before,
-        "and nothing is counted as sent"
     );
 }
 
@@ -10185,123 +10067,113 @@ fn window_shadow_soak_state_stays_bounded_and_zeroes_at_the_end() {
     assert!(sessions.realm_heads.is_empty());
 }
 
-/// ★ THE SKY'S LIVENESS BEAT REACHES THE CLIENT, UNSUPPRESSED (S11).
+/// ★ THE GALAXY CROSSES ONCE (S11; owner ruling 2026-08-27).
 ///
-/// The gateway forwards it exactly as it forwards the catalogue: verbatim, no composing. The beat is
-/// one number folded from content that is the same sky for every player, so composing it per observer
-/// would be work with no product — and would give two players two answers about one truth.
+/// This replaces the shard-side tests deleted when the sky moved here. The behaviours they protected
+/// are the same; the author changed. A shard folded its sky from the realms IT booted, so the sky a
+/// player received depended on which shard they were subscribed to — MEASURED on a dual cluster: the
+/// galaxy shard held 3 stars, the client held 1, and drew 0, because a player never draws their own
+/// star.
 ///
-/// The sharp part is that a REPEATED beat must still go out. Every other send-on-change statement on
-/// this lane is suppressed when it repeats; this one carries its meaning IN the repetition, because
-/// the thing it disproves is silence.
+/// "ONCE" means: one sky, the same for everybody, sent one time. It is enforced by the CLIENT's own
+/// statement, never by a memory here — a sender's memory of what it sent was proved unfixable this
+/// same day and deleted for it.
 #[test]
-fn the_sky_liveness_beat_forwards_to_the_client_and_repeats_are_not_suppressed() {
-    let mut rig = Rig::new();
-    let (_sid, _login) = rig.login(); // Active session at CLIENT, subscribed to SHARD
-    let beat = |generation: u64| ShardToGateway::StarSkyAlive { generation };
-
-    // THE SAME GENERATION, THREE TIMES. A suppressing gateway would forward one and eat two, and the
-    // client would be back to reading silence — the exact ambiguity this arm removes.
-    let mut forwarded = 0usize;
-    for _ in 0..3 {
-        let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &beat(0x0f0f_0f0f))]);
-        forwarded += decode_controls(&sent, CLIENT)
-            .iter()
-            .filter(|m| {
-                **m == ServerControlMsg::SkyAlive {
-                    generation: 0x0f0f_0f0f,
-                }
-            })
-            .count();
-    }
-    assert_eq!(
-        forwarded, 3,
-        "an unchanged beat is still a beat — suppressing it restores the silence it exists to break"
-    );
-    assert_eq!(rig.world.resource::<GatewayStats>().sky_alive_beats_sent, 3);
-
-    // A DIFFERENT generation forwards too, and says so — this is what tells a client its held sky is
-    // out of date rather than merely unconfirmed.
-    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &beat(0xdead_beef))]);
-    assert!(
-        decode_controls(&sent, CLIENT).contains(&ServerControlMsg::SkyAlive {
-            generation: 0xdead_beef
-        })
-    );
-}
-
-/// Every shard-ward message the gateway sent to `to` this tick, decoded (S11 helper).
-fn decode_shard_msgs(sent: &[(NodeId, MsgClass, Vec<u8>)], to: NodeId) -> Vec<GatewayToShard> {
-    sent.iter()
-        .filter(|(node, _, _)| *node == to)
-        .filter_map(|(_, _, b)| postcard::from_bytes::<GatewayToShard>(b).ok())
-        .collect()
-}
-
-/// ★ THE RECEIVER STATES WHAT IT HOLDS, AND THE GATEWAY STOPS ASKING (S11).
-///
-/// This is the exchange that replaces a memory which could not be made correct. The shard kept a
-/// record of which sky it had stated to each gateway, and it was wrong in BOTH directions — forget too
-/// early and a returning client is re-sent 7.0 MB it holds; remember too long and a NEW client behind
-/// that gateway is sent nothing at all. The sender was never the party that knew.
-///
-/// Now the client says what it has, and the gateway asks only while somebody needs one.
-#[test]
-fn a_client_stating_its_sky_stops_the_gateway_asking_and_stops_the_fan() {
-    let mut rig = Rig::new();
-    let (_sid, _login) = rig.login(); // Active session at CLIENT, subscribed to SHARD
-    const GENERATION: u64 = 0x51CE_0F5C_1E5A_1234;
-    let beat = ShardToGateway::StarSkyAlive {
-        generation: GENERATION,
+fn the_gateway_states_the_galaxy_once_and_beats_for_it_afterwards() {
+    let star = |n: u64| vd_core::look::StarRow {
+        realm: RealmId::System(n),
+        cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
+        class_code: 6,
+        luma_lsun: 0.25,
     };
+    let sky: Vec<vd_core::look::StarRow> = (1u64..=3).map(star).collect();
+    let generation =
+        vd_core::look::catalogue_generation(&postcard::to_allocvec(&sky).expect("encodes"));
 
-    // A CLIENT HOLDING NOTHING: the beat drives an ask, because somebody needs the sky.
-    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &beat)]);
-    assert!(
-        decode_shard_msgs(&sent, SHARD).contains(&GatewayToShard::SkyRequest),
-        "a client that holds no sky must cause exactly one ask: {sent:?}"
-    );
-    assert_eq!(rig.world.resource::<GatewayStats>().sky_requests_sent, 1);
+    let mut rig = Rig::new();
+    {
+        let mut config = rig.world.resource_mut::<GatewayConfig>();
+        config.sky = sky.clone();
+        config.sky_generation = generation;
+    }
+    let (_sid, _login) = rig.login();
+
+    // ★ THE WHOLE GALAXY REACHES THE CLIENT — every star, not the one system it is standing in. This
+    // is the assertion the old shard-side lane could never have passed.
+    let mut parts = Vec::new();
+    for t in 1..=40u64 {
+        rig.world.resource_mut::<ClockSample>().local_tick = TickId(t);
+        let sent = rig.tick(vec![]);
+        for m in decode_controls(&sent, CLIENT) {
+            if let ServerControlMsg::StarCatalogue {
+                generation: g,
+                rows,
+                ..
+            } = m
+            {
+                assert_eq!(g, generation, "one sky, one generation");
+                parts.push(rows);
+            }
+        }
+    }
+    let received: Vec<vd_core::look::StarRow> = parts.iter().flatten().copied().collect();
+    assert_eq!(received, sky, "the galaxy arrived whole, and in order");
+
+    // ...and it kept arriving until the client said it held it. That is not a defect — the gateway has
+    // no memory of what it sent, deliberately. The client's statement is what stops it.
+    let sent_before = rig
+        .world
+        .resource::<GatewayStats>()
+        .star_catalogue_parts_sent;
+    assert!(sent_before > 0);
 
     // THE CLIENT STATES WHAT IT HOLDS.
     let _ = rig.tick(vec![wire(
         CLIENT,
         MsgClass::Control,
-        &ClientControlMsg::SkyHeld {
-            generation: GENERATION,
-        },
+        &ClientControlMsg::SkyHeld { generation },
     )]);
-    assert_eq!(rig.world.resource::<GatewayStats>().sky_held_stated, 1);
 
-    // ...AND THE ASKING STOPS. Nobody needs anything, so the beat is forwarded and nothing else.
-    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &beat)]);
-    assert!(
-        !decode_shard_msgs(&sent, SHARD).contains(&GatewayToShard::SkyRequest),
-        "a served client must not keep the gateway asking for ever: {sent:?}"
+    // ★ AND THE GALAXY STOPS CROSSING. This is "once": a client that holds the sky is sent none of it,
+    // for ever, including when it crosses to another star system — because the sky did not change.
+    let mut after = 0usize;
+    let mut beats = 0usize;
+    for t in 41..=80u64 {
+        rig.world.resource_mut::<ClockSample>().local_tick = TickId(t);
+        let sent = rig.tick(vec![]);
+        for m in decode_controls(&sent, CLIENT) {
+            match m {
+                ServerControlMsg::StarCatalogue { .. } => after += 1,
+                ServerControlMsg::SkyAlive { generation: g } => {
+                    assert_eq!(g, generation);
+                    beats += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        after, 0,
+        "a client that holds the galaxy is never sent it again"
     );
     assert_eq!(
-        rig.world.resource::<GatewayStats>().sky_requests_sent,
-        1,
-        "still one — the ask settled"
-    );
-    // The beat itself never stops. Unchanged IS its message.
-    assert!(
-        decode_controls(&sent, CLIENT).contains(&ServerControlMsg::SkyAlive {
-            generation: GENERATION
-        })
+        rig.world
+            .resource::<GatewayStats>()
+            .star_catalogue_parts_sent,
+        sent_before,
+        "and the counter agrees"
     );
 
-    // A STATEMENT FROM A CLIENT WITH NO SESSION IS DROPPED, not recorded against somebody else. A
-    // stranger cannot silence the sky for a real player, which is what writing this against the wrong
-    // session would do.
+    // ★ A STATEMENT FROM A CLIENT WITH NO SESSION IS DROPPED, not recorded against somebody else. A
+    // stranger must not be able to silence the sky for a real player, which is what writing this
+    // against the wrong session would do. (This assertion outlived the forwarding tests it used to
+    // live in — the arm is still reachable, so it still needs driving.)
     const STRANGER: NodeId = NodeId(31337);
     let held_before = rig.world.resource::<GatewayStats>().sky_held_stated;
     let _ = rig.tick(vec![wire(
         STRANGER,
         MsgClass::Control,
-        &ClientControlMsg::SkyHeld {
-            generation: GENERATION,
-        },
+        &ClientControlMsg::SkyHeld { generation },
     )]);
     assert_eq!(
         rig.world.resource::<GatewayStats>().sky_held_stated,
@@ -10309,98 +10181,100 @@ fn a_client_stating_its_sky_stops_the_gateway_asking_and_stops_the_fan() {
         "a client with no session states nothing"
     );
 
-    // A DIFFERENT SKY re-opens the need, so the exchange is not a one-shot latch.
-    let sent = rig.tick(vec![wire(
-        SHARD,
-        MsgClass::Control,
-        &ShardToGateway::StarSkyAlive {
-            generation: GENERATION + 1,
-        },
-    )]);
+    // ★ BUT THE BEAT KEEPS COMING, and that is the point of it. On a galaxy that never changes, silence
+    // is the healthy case AND the signature of a dead emitter. The beat is what tells them apart.
     assert!(
-        decode_shard_msgs(&sent, SHARD).contains(&GatewayToShard::SkyRequest),
-        "a sky that MOVED must be asked for again"
+        beats > 0,
+        "the sky must keep saying it is unchanged — silence would mean two different things"
+    );
+    assert!(
+        rig.world.resource::<GatewayStats>().sky_parts_skipped > 0,
+        "the saving is counted: parts NOT sent because the client already held them"
     );
 }
 
-/// ★ THE CATALOGUE GOES ONLY TO THE CLIENTS THAT NEED IT (S11).
+/// ★ A GATEWAY WITH NO WORLD STATES NO SKY (S11) — never a wrong one.
 ///
-/// The shard answers one request with one catalogue. Many clients sit behind this gateway, and they
-/// may hold many different skies — including this one. Fanning to all of them would re-send 7.0 MB to
-/// every client that already had it, which is the cost the whole exchange exists to remove.
+/// A fixture, or a gateway booted without a world, holds an empty catalogue. It must stay silent
+/// rather than state an empty galaxy, which a client would hold as a real sky and draw as nothing.
 #[test]
-fn a_catalogue_skips_the_clients_that_already_hold_that_sky() {
+fn a_gateway_with_no_world_states_no_sky_and_no_beat() {
+    let mut rig = Rig::new(); // its GatewayConfig carries an empty sky
+    assert!(
+        rig.world.resource::<GatewayConfig>().sky.is_empty(),
+        "the fixture really does boot no world"
+    );
+    let (_sid, _login) = rig.login();
+    for t in 1..=40u64 {
+        rig.world.resource_mut::<ClockSample>().local_tick = TickId(t);
+        let sent = rig.tick(vec![]);
+        for m in decode_controls(&sent, CLIENT) {
+            assert!(
+                !matches!(
+                    m,
+                    ServerControlMsg::StarCatalogue { .. } | ServerControlMsg::SkyAlive { .. }
+                ),
+                "a gateway with no world said something about the sky: {m:?}"
+            );
+        }
+    }
+    assert_eq!(
+        rig.world
+            .resource::<GatewayStats>()
+            .star_catalogue_parts_sent,
+        0
+    );
+    assert_eq!(rig.world.resource::<GatewayStats>().sky_alive_beats_sent, 0);
+}
+
+/// ★ A SHARD THAT HAS NOT CAUGHT UP IS COUNTED, NEVER SILENTLY DROPPED (S11).
+///
+/// No shard states a sky since the galaxy moved to the gateway (owner ruling 2026-08-27). The wire arms
+/// remain — deleting a variant renumbers every later one, and a positional test guards that — so a
+/// shard binary from before the move can still send one.
+///
+/// It must be VISIBLE. Silence is what made the sky lane's original defect invisible for so long; a
+/// counter is the cheapest thing that stops a mixed-version cluster from looking healthy.
+#[test]
+fn a_sky_from_a_shard_that_has_not_caught_up_is_refused_and_counted() {
     let mut rig = Rig::new();
     let (_sid, _login) = rig.login();
-    const GENERATION: u64 = 0xABCD_0001;
     let star = vd_core::look::StarRow {
         realm: RealmId::System(1),
         cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304, 7, -3),
         class_code: 6,
         luma_lsun: 0.25,
     };
-    let part = ShardToGateway::StarCatalogue {
-        generation: GENERATION,
-        part: 0,
-        parts: 1,
-        rows: vec![star],
-    };
-
-    // BEFORE STATING: the client is served, because a client that has said nothing is treated as
-    // holding nothing. That default is the safe one — it costs bytes, never a missing galaxy.
-    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &part)]);
+    // BOTH retired arms, from a shard that still believes it owns the sky.
+    let sent = rig.tick(vec![
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::StarCatalogue {
+                generation: 7,
+                part: 0,
+                parts: 1,
+                rows: vec![star],
+            },
+        ),
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::StarSkyAlive { generation: 7 },
+        ),
+    ]);
     assert_eq!(
-        decode_controls(&sent, CLIENT)
-            .iter()
-            .filter(|m| matches!(m, ServerControlMsg::StarCatalogue { .. }))
-            .count(),
-        1
+        rig.world.resource::<GatewayStats>().sky_from_shard_refused,
+        2,
+        "both retired arms are counted"
     );
-    assert_eq!(
-        rig.world.resource::<GatewayStats>().sky_parts_skipped,
-        0,
-        "nothing was skipped yet, or the test below proves nothing"
-    );
-
-    // AFTER STATING: the same part is dropped at the gateway rather than crossing to a client that
-    // holds it.
-    let _ = rig.tick(vec![wire(
-        CLIENT,
-        MsgClass::Control,
-        &ClientControlMsg::SkyHeld {
-            generation: GENERATION,
-        },
-    )]);
-    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &part)]);
+    // ...and NOTHING reached the client. A stale shard must not be able to state a sky at all — two
+    // authors is the defect the move removed.
     assert!(
-        !decode_controls(&sent, CLIENT)
-            .iter()
-            .any(|m| matches!(m, ServerControlMsg::StarCatalogue { .. })),
-        "a client holding this sky must not be sent it again"
-    );
-    assert_eq!(
-        rig.world.resource::<GatewayStats>().sky_parts_skipped,
-        1,
-        "and the saving is counted"
-    );
-
-    // A DIFFERENT generation is still delivered — the skip is about THIS sky, not about the client.
-    let sent = rig.tick(vec![wire(
-        SHARD,
-        MsgClass::Control,
-        &ShardToGateway::StarCatalogue {
-            generation: GENERATION + 1,
-            part: 0,
-            parts: 1,
-            rows: vec![star],
-        },
-    )]);
-    assert_eq!(
-        decode_controls(&sent, CLIENT)
-            .iter()
-            .filter(|m| matches!(m, ServerControlMsg::StarCatalogue { .. }))
-            .count(),
-        1,
-        "a NEW sky still reaches a client that held the old one"
+        !decode_controls(&sent, CLIENT).iter().any(|m| matches!(
+            m,
+            ServerControlMsg::StarCatalogue { .. } | ServerControlMsg::SkyAlive { .. }
+        )),
+        "a stale shard's sky must not reach a client: {sent:?}"
     );
 }

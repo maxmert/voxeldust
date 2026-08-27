@@ -232,6 +232,27 @@ pub enum SeedInjectorError {
 #[derive(Resource, Clone, Debug)]
 pub struct GatewayConfig {
     pub orchestrator: NodeId,
+    /// THE GALAXY'S STARS (S11) — folded ONCE at boot, and stated to each client once.
+    ///
+    /// ★ THE OWNER RULED THIS ON 2026-08-27: *"we're passing the Galaxy just once over reliable lane."*
+    /// ONCE means one sky, the same for every player, sent one time — not once per shard, not once per
+    /// realm, and not again when a player crosses.
+    ///
+    /// ★ WHY THE GATEWAY AND NOT A SHARD. A shard folds its sky from the realms IT booted, so the sky
+    /// you received depended on which shard you were subscribed to: a home system shard states ONE star
+    /// — its own — and your own star is never drawn, because you are standing inside it. MEASURED
+    /// 2026-08-27 on a dual cluster: the galaxy shard held 3 stars, the client held 1, and drew 0. The
+    /// gateway is the one party that holds every session and the whole forest, so it is where a thing
+    /// that crosses ONCE belongs.
+    ///
+    /// ★ ROWS, NEVER A WORLD (SL4). The boot folds these because only the boot sees both the generator
+    /// and the simulation. The routing plane receives a finished list of stars and cannot name a body,
+    /// an orbit or a motion.
+    ///
+    /// Empty on a gateway booted without a world — it then states no sky, rather than a wrong one.
+    pub sky: Vec<vd_core::look::StarRow>,
+    /// The generation [`Self::sky`] folds to — the identity the client compares against what it holds.
+    pub sky_generation: u64,
     /// P1: the single stub shard every session lands on (the login shard).
     pub shard: NodeId,
     /// The STABLE set of routable shard `NodeId`s (node-class dispatch — FORK 5). Seeded

@@ -30,6 +30,13 @@ use vd_wire::channels::{
 use vd_wire::version::ProtoVersion;
 
 const DEADLINE: Duration = Duration::from_secs(30);
+/// How many times the gateway may restate the whole sky before the client's confirmation stops it.
+///
+/// NOT a tolerance to be widened. The gateway holds no memory of what it sent — that memory could not
+/// be made correct and was deleted — so it re-states each beat until the client confirms, and the
+/// confirmation costs one round trip. Measured at TWO on a fast local cluster. The bound catches the
+/// failure that matters: a confirmation that never lands, and a galaxy re-downloaded for ever.
+const MAX_SKY_RESTATEMENTS: usize = 4;
 
 /// A minimal real-protocol client over the production mesh transport.
 struct ProcessClient {
@@ -58,9 +65,14 @@ struct ProcessClient {
     scene_levels: u64,
     /// Parts of the star catalogue this client received (S11).
     sky_parts: u64,
-    /// STARS actually held, not messages seen (S11). The gate counts these, because a message count
-    /// turns red for the wrong reason the moment the census makes the catalogue span many parts.
-    sky_stars: u64,
+    /// THE DISTINCT STARS HELD (S11) — a SET, not a running total.
+    ///
+    /// ★ WHY A SET. The gateway keeps no memory of what it sent; it re-states the sky each beat until
+    /// the client confirms, and confirming costs a round trip. So the catalogue legitimately arrives
+    /// more than once. MEASURED: 6 rows for a 3-star world. A running total then reads "6 stars" for a
+    /// galaxy of 3, which is a statement about the CARRIER, not about what the client holds — the same
+    /// trap the old message-count gate fell into.
+    sky_stars: std::collections::BTreeSet<vd_core::pose::RealmId>,
     /// The generation of the catalogue that actually arrived (S11).
     sky_generation: Option<u64>,
     /// Liveness beats seen over the real transport (S11).
@@ -93,7 +105,7 @@ impl ProcessClient {
             evictions: 0,
             scene_levels: 0,
             sky_parts: 0,
-            sky_stars: 0,
+            sky_stars: std::collections::BTreeSet::new(),
             sky_generation: None,
             sky_beats: 0,
             sky_beat_generation: None,
@@ -251,7 +263,7 @@ impl ProcessClient {
                     "the generation is folded from content and is never a default"
                 );
                 self.sky_parts += 1;
-                self.sky_stars += rows.len() as u64;
+                self.sky_stars.extend(rows.iter().map(|r| r.realm));
                 self.sky_generation = Some(generation);
             }
             // ★ THE SKY'S LIVENESS BEAT (S11), over the real transport. Its arrival here proves the
@@ -424,30 +436,18 @@ fn p1_parity_real_binaries_over_quic() {
     // sampled mid-login, and neither check can be satisfied by the standoff's own magnitude.
     let world = vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
     let spawn_m = world.default_home_offset_m();
-    // ★ THE CENSUS, DERIVED THE WAY THE SHARD DERIVES IT (S11), never written as a literal — so the
-    // gate keeps its meaning when the census rises in S12 instead of turning red for the wrong reason.
+    // ★ THE CENSUS IS THE WHOLE GALAXY'S (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just
+    // once over reliable lane"). Derived here the way the GATEWAY derives it, over the whole world.
     //
-    // ★ AND IT IS THE SHARD'S FOREST, NOT THE WORLD'S. A shard folds its sky from the realms IT booted
-    // (`boot_regions_and_movers` in the shard binary), so a single-shard cluster hosting one star
-    // system states THAT system's stars and no others. Writing the WORLD's census here instead made
-    // this gate red on its first run — 1 star held against 3 in the world — which is not a defect in
-    // the lane but a real property of it, and one that matters: **a client subscribed to a system
-    // shard does not receive the whole galaxy.** Seeing every star from inside a star system is an S12
-    // question, and it is ledgered as one.
-    let own = vd_core::pose::RealmId::System(DEV.realm_seed);
-    let held: std::collections::BTreeSet<vd_core::pose::RealmId> = [own].into_iter().collect();
-    let (shard_regions, _) = vd_bins::boot_regions_and_movers(
-        DEV.universe_seed,
-        &held,
-        own,
-        DEV.move_speed,
-        DEV.tick_dt,
-    );
+    // This assertion used to be written against the SHARD's own forest, and that was the defect rather
+    // than the fixture: a shard folded its sky from the realms IT booted, so a single-shard cluster
+    // stated ONE star — its own — and a player never draws their own star. MEASURED at the time: 1
+    // held against 3 in the world, and 0 drawable. The sky now has one author and one census.
     let (census_rows, _) = vd_bins::star_catalogue_for_boot(
         DEV.universe_seed,
         DEV.move_speed,
         DEV.tick_dt,
-        &shard_regions,
+        world.regions(),
     );
     let world_census = census_rows.len() as u64;
     let expected_parts = vd_wire::channels::partition_stars(&census_rows, 8 * 1024).len();
@@ -585,15 +585,24 @@ fn p1_parity_real_binaries_over_quic() {
         // the catalogue span many parts — at which point the natural repair is to loosen it, and the
         // gate stops protecting anything. What matters is that the client HOLDS the whole galaxy.
         assert_eq!(
-            client.sky_stars, world_census,
+            client.sky_stars.len() as u64,
+            world_census,
             "★ THE SKY ARRIVED OVER THE REAL TRANSPORT: the client holds every star this world has"
         );
-        // ...and it was stated ONCE. Counted in PARTS, which is the right unit for this claim: a
-        // second copy of the sky would double the parts whatever the census is.
-        assert_eq!(
-            client.sky_parts as usize, expected_parts,
-            "the sky is stated once — a second statement means the generation stopped holding and \
-             every client re-downloads the galaxy on a cadence"
+        // ★ AND IT IS BOUNDED, not "exactly once" (S11). The gateway keeps NO memory of what it sent —
+        // that memory was proved unfixable and deleted — so it re-states the sky each beat until the
+        // client CONFIRMS, and confirming costs a round trip. MEASURED: the catalogue arrives twice on
+        // a fast local cluster.
+        //
+        // The claim that matters is that it STOPS. A bound of a few beats' worth of parts catches the
+        // real failure — a client whose confirmation never lands, re-downloading the galaxy for ever —
+        // while allowing the round trip the exchange honestly needs.
+        assert!(
+            (client.sky_parts as usize) <= expected_parts * MAX_SKY_RESTATEMENTS,
+            "{name}: the sky was stated {} times over ({} parts against {expected_parts} per \
+             statement) — the client's confirmation is not stopping it",
+            client.sky_parts as usize / expected_parts.max(1),
+            client.sky_parts,
         );
         // ★ THE BEAT NAMES THE SKY THAT ACTUALLY ARRIVED (S11). This is the end-to-end claim: over
         // real binaries and a real transport, the number the server keeps restating is the number of

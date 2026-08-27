@@ -9,8 +9,8 @@
 
 use super::{
     GatewayConfig, GatewaySessions, GatewayStats, SessionPhase, WindowRow, announce_own_entity,
-    fan_entity_removed, fan_sky_alive, fan_star_catalogue, lineage_apply, on_window_relayed,
-    on_window_row, session_target, store_route,
+    fan_entity_removed, lineage_apply, on_window_relayed, on_window_row, session_target,
+    store_route,
 };
 use crate::window;
 use vd_core::NodeId;
@@ -263,16 +263,17 @@ pub(crate) fn on_shard_control(
                 stats,
             );
         }
-        ShardToGateway::StarCatalogue {
-            generation,
-            part,
-            parts,
-            rows,
-        } => {
-            fan_star_catalogue(from, generation, part, parts, rows, sessions, stats, outbox);
-        }
-        ShardToGateway::StarSkyAlive { generation } => {
-            fan_sky_alive(from, generation, sessions, stats, outbox);
+        // ★ RETIRED (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just once over reliable
+        // lane"). No shard states a sky any more: the GATEWAY folds the galaxy at boot and states it
+        // once (`window_lane::emit_sky`). A shard folded its sky from the realms IT booted, which made
+        // the sky a property of which shard you were subscribed to.
+        //
+        // The FORWARDING is deleted rather than left dormant. Dead code that tests keep exercising is a
+        // false green — the tests pass over a path production never uses, and this session already
+        // found two gates that certified nothing. Counted here so a shard that has not caught up is
+        // VISIBLE rather than silently dropped.
+        ShardToGateway::StarCatalogue { .. } | ShardToGateway::StarSkyAlive { .. } => {
+            stats.sky_from_shard_refused += 1;
         }
         ShardToGateway::WindowStaticRows { window, rows, .. } => {
             on_window_row(

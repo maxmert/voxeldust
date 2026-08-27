@@ -151,6 +151,7 @@ mod tests {
             entities: Vec::new(),
             realm_boxes: Vec::new(),
             origin: None,
+            sky: None,
             stale_epoch_rows: 0,
             snapshots_applied,
             realm_frames_applied: 0,
