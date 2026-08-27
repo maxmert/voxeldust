@@ -98,6 +98,9 @@ pub struct ClientState {
     /// pointer bump. Every drawn row's live pose rides `realm_view` and is OVERLAID at publish
     /// time; the level's own row poses make a row drawable the instant it lands.
     scene: Arc<RealmScene>,
+    /// THE STAR CATALOGUE, assembling (S11). Public so the harness and the renderer can ask what the
+    /// client actually holds — the S11 gate counts the stars that ARRIVED, never the absence of bytes.
+    pub sky: crate::star_sky::StarSky,
     /// THE ORIGIN MARKER (§2.7): the realm the current scene is composed in, as the level stated
     /// it. `None` before the first level. The diagnosis surface (`DevState.origin`) reads it —
     /// the pixel gates' "origin marker == home realm" assert.
@@ -133,6 +136,7 @@ impl ClientState {
             snapshots_applied: 0,
             latest_universe_tick: None,
             scene: Arc::new(RealmScene::default()),
+            sky: crate::star_sky::StarSky::default(),
             origin: None,
             realm_view: RealmView::default(),
         }
@@ -278,6 +282,19 @@ impl ClientState {
             // and the unit tests all drive the ONE handler.
             ServerControlMsg::Event(event) => {
                 self.apply_event(event);
+            }
+            // THE STAR CATALOGUE (S11): the galaxy's stars, in parts. Held unseen until the sky is
+            // whole — half a catalogue is a galaxy with holes, and a hole looks exactly like a star
+            // that does not exist. Every refusal is counted inside the assembler, so "the client shows
+            // no stars" is explainable from the counters rather than being a report with nowhere to
+            // start.
+            ServerControlMsg::StarCatalogue {
+                generation,
+                part,
+                parts,
+                rows,
+            } => {
+                let _ = self.sky.accept(generation, part, parts, rows);
             }
             // Node-AWARE legacy control a pure-renderer client no longer acts on: `AuthorityChanged`
             // (the sub re-point — superseded by `OwnEntity` + EntityId-keyed latest-wins render) and
@@ -1001,6 +1018,71 @@ mod tests {
     }
 
     /// THE REMOVE MESSAGE arrives ON THE WIRE (proto_minor 14): a Control frame carrying
+    /// ★ THE STAR CATALOGUE ARRIVES, AND THE GATE COUNTS WHAT ARRIVED (S11).
+    ///
+    /// **THIS TEST EXISTS BECAUSE THE OBVIOUS GATE IS A TRAP, and S11 says so in its own text.** Both
+    /// earlier plans proposed to gate on *"per-tick sky bytes are ZERO after the first tick"* — and
+    /// that is ALSO exactly what a dropped oversize message produces. The gate would pass on the
+    /// failure it exists to prevent, and it would pass most convincingly at the census, where the
+    /// message becomes big enough to be dropped.
+    ///
+    /// So this counts the stars the client actually HOLDS, never the absence of bytes. A sky that
+    /// never arrived reads zero here and cannot be mistaken for a sky that did not need re-sending.
+    #[test]
+    fn a_wire_delivered_star_catalogue_assembles_and_the_client_holds_the_sky() {
+        let mut c = core();
+        activate(&mut c);
+        let star = |n: u64| vd_core::look::StarRow {
+            realm: vd_core::pose::RealmId::System(n),
+            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
+            class_code: 6,
+            luma_lsun: 0.25,
+        };
+        let part = |part: u32, parts: u32, rows: Vec<vd_core::look::StarRow>| {
+            postcard::to_allocvec(&ServerControlMsg::StarCatalogue {
+                generation: 0x1234,
+                part,
+                parts,
+                rows,
+            })
+            .expect("fixture")
+        };
+
+        // ONE PART OF TWO: nothing is drawable. A galaxy with a hole in it looks exactly like a
+        // galaxy whose missing star does not exist, so half a sky must be invisible, not partial.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            part(0, 2, vec![star(1), star(2)]),
+        );
+        c.step(10.0);
+        assert!(
+            c.state().sky.complete().is_none(),
+            "half a catalogue draws nothing"
+        );
+
+        // THE LAST PART: the whole sky becomes drawable in one step.
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, part(1, 2, vec![star(3)]));
+        c.step(10.0);
+        let sky = c.state().sky.complete().expect("the sky is whole");
+
+        // ★ THE GATE ITSELF: the count of stars the client HOLDS. At the census this reads 150,000 or
+        // the sky did not arrive — and a dropped message can no longer look like a quiet one.
+        assert_eq!(sky.len(), 3, "every star in the galaxy arrived");
+        assert_eq!(
+            sky,
+            vec![star(1), star(2), star(3)],
+            "and unaltered, in order"
+        );
+        assert_eq!(c.state().sky.generation(), Some(0x1234));
+        assert_eq!(
+            c.state().sky.refused,
+            0,
+            "nothing was refused on a clean sky"
+        );
+    }
+
     /// `ServerControlMsg::Event` routes through `on_control` to the ONE `apply_event` handler and
     /// the track is evicted — the routing arm itself, not just the handler.
     #[test]

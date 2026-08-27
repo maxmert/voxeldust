@@ -21,6 +21,7 @@ pub mod realm_scene;
 pub mod realm_view;
 pub mod render_clock;
 pub mod render_snapshot;
+pub mod star_sky;
 pub mod tuning;
 pub mod view;
 
