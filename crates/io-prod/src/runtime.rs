@@ -426,10 +426,12 @@ mod tests {
     #[test]
     fn pacer_holds_the_rate_and_reports_overruns() {
         // 200 Hz: 10 ticks should take ~50ms (generous bounds; property not speed).
+        const TICKS: u32 = 10;
         let mut pacer = TickPacer::new(200);
+        let period = pacer.period;
         let started = Instant::now();
         let mut overruns = 0;
-        for _ in 0..10 {
+        for _ in 0..TICKS {
             overruns += pacer.wait();
         }
         let elapsed = started.elapsed();
@@ -438,10 +440,46 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "not stuck: {elapsed:?}"
         );
-        assert_eq!(overruns, 0, "no overruns on an idle loop");
-        // A deliberately slow tick is reported as overrun, then recovered.
-        std::thread::sleep(Duration::from_millis(30));
+        // ★ THIS WAS `assert_eq!(overruns, 0, "no overruns on an idle loop")`, and that asserted the
+        // MACHINE was idle, not that the pacer was right. The loop is only idle if nothing else on the
+        // host is running — which a test suite cannot promise, and a full-workspace run does not: at
+        // 200 Hz a tick is 5 ms, and the scheduler alone can push a thread past that. OBSERVED going
+        // red in a full-workspace run on 2026-08-27 while passing 5/5 in isolation, for a pacer that
+        // had done exactly the right thing. A gate that fails on load rather than on defect teaches
+        // people to re-run it, which is worse than not having it.
+        //
+        // The property that IS the pacer's own, and holds on any machine at any load: **every overrun
+        // it reports must be backed by real time actually spent.** It may not invent one, and (the
+        // stall arm below) it may not absorb one silently. One period of slack because the clock is
+        // read just after the pacer is built, so the test's own baseline starts fractionally late.
+        assert!(
+            elapsed + period >= period * (TICKS + overruns),
+            "an overrun must be real time, not a miscount: {overruns} reported over {elapsed:?}"
+        );
+        // A deliberately slow tick is reported as overrun, then recovered. This arm is where the
+        // consistency rule above earns its keep: on an idle machine that rule collapses into the
+        // pacing bound, so the count must also be driven where an overrun REALLY exists.
+        const STALL: Duration = Duration::from_millis(30);
+        let stalled_at = pacer.next_deadline;
+        std::thread::sleep(STALL);
         let reported = pacer.wait();
         assert!(reported >= 1, "the stall was counted: {reported}");
+        // ...and NOT over-counted. A stall of 30 ms at a 5 ms period is six periods; the pacer may
+        // report the periods it actually skipped and not one more, or "overruns" becomes a number
+        // nobody can act on. The +1 absorbs the period boundary the stall started inside.
+        let skipped = (STALL.as_nanos() / period.as_nanos()) as u32;
+        assert!(
+            reported <= skipped + 1,
+            "the stall was counted ONCE over, not inflated: {reported} for {skipped} periods"
+        );
+        // NO "and the next tick reports 0" ASSERTION HERE, deliberately. That is the same wall-clock
+        // claim about an idle machine that this test was just repaired for — it would pass alone and
+        // go red in a loaded suite, for a pacer doing the right thing. Recovery is instead read from
+        // the deadline itself, which is arithmetic and owes the scheduler nothing: after a stall the
+        // pacer must be scheduled AHEAD, never carrying the lost periods forward as a standing debt.
+        assert!(
+            pacer.next_deadline > stalled_at,
+            "the stall did not become a permanent deficit"
+        );
     }
 }
