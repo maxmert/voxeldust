@@ -190,6 +190,8 @@ pub(crate) fn drive_windows(
             &GatewayToShard::WindowOpen {
                 window: id,
                 scope: wanted.scope,
+                // A FRESH WINDOW HOLDS NOTHING, so it is served the whole roster (S11).
+                static_held: None,
             },
         );
         // (No runtime-roster claim: an open window is ITSELF a dispatch source — see the window
@@ -217,6 +219,10 @@ pub(crate) fn drive_windows(
                 &GatewayToShard::WindowOpen {
                     window: *id,
                     scope: held.scope,
+                    // ★ THE COUNTER THE KEEP-ALIVE COMPARES (S11). Stating what we hold is what stops
+                    // the shard re-sending the whole static roster twice a second, for ever — 28.4 MB/s
+                    // per window at the S12 census, on the reliable lane.
+                    static_held: held.ingest.static_digest(),
                 },
             );
             stats.window_keepalives_sent += 1;

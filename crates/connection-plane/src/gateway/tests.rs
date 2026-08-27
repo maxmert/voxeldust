@@ -1507,6 +1507,7 @@ fn windows_derive_open_keepalive_and_close_with_the_sessions() {
             GatewayToShard::WindowOpen {
                 window: WindowId(1),
                 scope: WindowScope::Occupants,
+                static_held: None,
             }
         )],
         "the Active promote opens the own-realm Occupants window, id minted from 1"
@@ -1533,6 +1534,7 @@ fn windows_derive_open_keepalive_and_close_with_the_sessions() {
         GatewayToShard::WindowOpen {
             window: WindowId(1),
             scope: WindowScope::Occupants,
+            static_held: None,
         }
     );
     assert_eq!(rig.stats().window_keepalives_sent, 1);
@@ -1607,6 +1609,7 @@ fn a_crossing_overlap_holds_both_chains_and_derives_the_child_window_on_the_pare
                 GatewayToShard::WindowOpen {
                     window: WindowId(2),
                     scope: WindowScope::Occupants,
+                    static_held: None,
                 }
             ),
             (
@@ -1614,6 +1617,7 @@ fn a_crossing_overlap_holds_both_chains_and_derives_the_child_window_on_the_pare
                 GatewayToShard::WindowOpen {
                     window: WindowId(3),
                     scope: WindowScope::Child(RealmId::Planet(7)),
+                    static_held: None,
                 }
             ),
         ],
@@ -9554,6 +9558,7 @@ fn an_unresolved_lineage_ancestor_resolves_via_the_directory_head_poll() {
         vec![GatewayToShard::WindowOpen {
             window: WindowId(2),
             scope: WindowScope::Child(RealmId::System(7)),
+            static_held: None,
         }],
         "the resolved head opened the lineage hop window on the ancestor's node"
     );

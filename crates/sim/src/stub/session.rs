@@ -315,8 +315,20 @@ pub(crate) fn on_gateway_msg(
                 stats,
             );
         }
-        GatewayToShard::WindowOpen { window, scope } => {
-            on_window_open(windows, from, window, scope, ctx.clock.local_tick, stats);
+        GatewayToShard::WindowOpen {
+            window,
+            scope,
+            static_held,
+        } => {
+            on_window_open(
+                windows,
+                from,
+                window,
+                scope,
+                static_held,
+                ctx.clock.local_tick,
+                stats,
+            );
         }
         GatewayToShard::WindowClose { window } => {
             on_window_close(windows, from, window, stats);

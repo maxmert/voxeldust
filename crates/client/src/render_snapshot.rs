@@ -45,6 +45,29 @@ pub struct RenderSnapshot {
     /// overlaid scene once per 20 Hz step from whatever had most recently arrived, with no cursor, so
     /// the ground was on a different time axis from the player standing on it.
     realm_view: RealmView,
+    /// THE STAR CATALOGUE THE CLIENT HOLDS (S11) — the galaxy, ready to draw.
+    ///
+    /// ★ BEHIND AN `Arc`, AND THAT IS THE WHOLE DESIGN. A snapshot is cloned every step. At the target
+    /// census this holds 150,000 rows, so a by-value field would deep-copy 7.0 MB twenty times a
+    /// second for a galaxy that never moves. The pointer bump costs nothing, and the sky is replaced
+    /// only when its generation changes — which is almost never.
+    ///
+    /// `None` until the sky is whole. A partial sky is never carried here: half a galaxy is not a
+    /// smaller galaxy, it is a galaxy with holes, and the holes look exactly like stars that are not
+    /// there.
+    sky: Option<Arc<SkyDraw>>,
+}
+
+/// The sky, as the renderer receives it (S11): the rows, and the generation that identifies them.
+///
+/// The generation is carried so the renderer can tell "the same sky again" from "a different sky" with
+/// one integer compare, instead of walking 150,000 rows to find out that nothing changed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkyDraw {
+    /// The stars, in the catalogue's own order.
+    pub rows: Vec<vd_core::look::StarRow>,
+    /// The generation these rows fold to.
+    pub generation: u64,
 }
 
 impl RenderSnapshot {
@@ -84,7 +107,25 @@ impl RenderSnapshot {
             phase,
             scene,
             realm_view,
+            sky: None,
         }
+    }
+
+    /// The same snapshot, carrying the sky the client holds (S11).
+    ///
+    /// Separate from the constructors above rather than a seventh parameter on each: every existing
+    /// construction site means "no sky", and threading `None` through all of them would say nothing
+    /// while touching everything.
+    #[must_use]
+    pub fn with_sky(mut self, sky: Option<Arc<SkyDraw>>) -> RenderSnapshot {
+        self.sky = sky;
+        self
+    }
+
+    /// The sky to draw, or `None` while the client holds no whole one.
+    #[must_use]
+    pub fn sky(&self) -> Option<&Arc<SkyDraw>> {
+        self.sky.as_ref()
     }
 
     /// The scene to DRAW at `cursor`: the boot geometry with every streamed realm's placement
@@ -507,5 +548,50 @@ mod slice6_tests {
         assert_eq!(snap.scene_at(123.0), level);
         // And before the clock is anchored there is no cursor at all — still the level scene.
         assert_eq!(snap.scene_now(9.0), level);
+    }
+
+    /// ★ THE SKY RIDES THE RENDER SEAM BY POINTER, AND ONLY WHEN IT IS WHOLE (S11).
+    ///
+    /// A snapshot is cloned every step. At the target census the sky is 150,000 rows, so carrying it
+    /// by value would deep-copy 7.0 MB twenty times a second for a galaxy that never moves. The clone
+    /// must be a refcount bump, and this proves it is.
+    #[test]
+    fn the_sky_rides_the_seam_by_pointer_and_only_when_whole() {
+        use std::sync::Arc;
+        let bare = RenderSnapshot::new(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Connecting,
+        );
+        // NO SKY until one is given. Half a galaxy is never carried here, so a renderer that sees
+        // `None` knows there is nothing to draw rather than drawing holes.
+        assert!(bare.sky().is_none());
+
+        let sky = Arc::new(SkyDraw {
+            rows: vec![vd_core::look::StarRow {
+                realm: vd_core::pose::RealmId::System(1),
+                cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304, 7, -3),
+                class_code: 6,
+                luma_lsun: 0.25,
+            }],
+            generation: 0xABCD,
+        });
+        let carried = bare.with_sky(Some(Arc::clone(&sky)));
+        let held = carried.sky().expect("the sky is carried");
+        assert_eq!(held.generation, 0xABCD);
+        assert_eq!(held.rows.len(), 1);
+
+        // ★ THE POINTER TEST. Cloning the snapshot must not copy the rows — it must share them.
+        let before = Arc::strong_count(&sky);
+        let cloned = carried.clone();
+        assert_eq!(
+            Arc::strong_count(&sky),
+            before + 1,
+            "a snapshot clone bumps the refcount; it does not copy the galaxy"
+        );
+        assert!(Arc::ptr_eq(cloned.sky().expect("carried"), &sky));
+
+        // And it can be taken away again — the generation exchange may replace a sky.
+        assert!(carried.with_sky(None).sky().is_none());
     }
 }

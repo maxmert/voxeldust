@@ -204,6 +204,21 @@ impl WindowIngest {
     /// Ingest the author's STATIC roster (slice S10) — stated once on the reliable lane. Stored for
     /// every level still to come, and merged into the levels already retained, so a roster that arrives
     /// after a frame is not invisible until the next one.
+    /// THE DIGEST OF THE ROSTER THIS SUBSCRIBER HOLDS (S11), or `None` while it holds none.
+    ///
+    /// Stated back to the shard on every `WindowOpen`, so the shard compares a counter instead of
+    /// guessing what was lost. **Folded by the SAME function the shard folds with**
+    /// ([`vd_sim::stub::relay::statement_digest`]) over the SAME bytes — two spellings of one digest
+    /// would make every keep-alive re-send the whole roster, which is the exact cost this removes.
+    #[must_use]
+    pub fn static_digest(&self) -> Option<u64> {
+        if self.static_rows.is_empty() {
+            return None; // nothing held is not the same as a digest over nothing
+        }
+        let encoded = postcard::to_allocvec(&self.static_rows).ok()?;
+        Some(vd_sim::stub::relay::statement_digest(&encoded))
+    }
+
     pub fn ingest_static_rows(&mut self, rows: Vec<RealmSnap>) {
         self.static_rows = rows;
         for level in &mut self.levels {
@@ -1276,7 +1291,26 @@ mod tests {
         // scale, because today's fixtures have a mover in them.
         assert!(!ing.confirmed(), "nothing stated yet");
         assert!(!ing.rosters(RealmId::Planet(43)));
+        // ★ AN EMPTY INGEST STATES NOTHING HELD (S11). "I hold no roster" and "I hold a roster that
+        // happens to be empty" must not be the same answer: the first has to be served, and a digest
+        // over nothing would tell the shard this subscriber is already up to date, starving it for
+        // ever.
+        assert_eq!(
+            ing.static_digest(),
+            None,
+            "nothing held is not a digest over nothing"
+        );
         ing.ingest_static_rows(vec![stat]);
+        // ...and once a roster is held, the digest is Some, so the two cases really are distinct.
+        let held = ing.static_digest().expect("a held roster has a digest");
+        // It is the SAME fold the shard uses, over the SAME bytes. Two spellings of one digest would
+        // make every keep-alive re-send the whole roster, which is the cost this removes.
+        assert_eq!(
+            held,
+            vd_sim::stub::relay::statement_digest(
+                &postcard::to_allocvec(&vec![stat]).expect("encodes")
+            ),
+        );
         assert!(ing.confirmed(), "a static roster confirms the author");
         assert!(
             ing.rosters(RealmId::Planet(43)),

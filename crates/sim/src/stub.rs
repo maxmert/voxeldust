@@ -42,7 +42,7 @@ mod placement;
 mod realm_head;
 mod regions;
 mod register;
-mod relay;
+pub mod relay;
 mod saga_arms;
 mod session;
 mod stats;

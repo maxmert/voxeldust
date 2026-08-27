@@ -49,11 +49,11 @@ pub fn gateway_view(
         presence_announces,
         sub_close_refused_authority,
         window_rows_ingested,
-        star_catalogue_parts_sent: _,
-        sky_alive_beats_sent: _,
-        sky_requests_sent: _,
-        sky_held_stated: _,
-        sky_parts_skipped: _,
+        star_catalogue_parts_sent,
+        sky_alive_beats_sent,
+        sky_requests_sent,
+        sky_held_stated,
+        sky_parts_skipped,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -176,6 +176,12 @@ pub fn gateway_view(
         window_relay_levels_pruned,
         window_relay_interior_unvouched,
         window_relay_interior_filtered,
+        // S11's sky lane, appended at the end of the counter block like every block before it.
+        star_catalogue_parts_sent,
+        sky_alive_beats_sent,
+        sky_requests_sent,
+        sky_held_stated,
+        sky_parts_skipped,
         sessions_open,
         dynamic_shards,
         windows_open,
@@ -307,11 +313,13 @@ mod tests {
             // declaration order.
             window_relay_interior_unvouched: 87,
             window_relay_interior_filtered: 88,
-            star_catalogue_parts_sent: 0,
-            sky_alive_beats_sent: 0,
-            sky_requests_sent: 0,
-            sky_held_stated: 0,
-            sky_parts_skipped: 0,
+            // 89..93: S11's sky lane, appended in declaration order. DISTINCT values, so a field
+            // wired to the wrong source shows up as the wrong number rather than as a lucky match.
+            star_catalogue_parts_sent: 89,
+            sky_alive_beats_sent: 90,
+            sky_requests_sent: 91,
+            sky_held_stated: 92,
+            sky_parts_skipped: 93,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);
@@ -386,6 +394,13 @@ mod tests {
         assert_eq!(view.window_relay_depth_max, 86);
         assert_eq!(view.window_looks_pruned, 80);
         assert_eq!(view.window_relay_levels_pruned, 81);
+        // S11's sky lane reaches the operator. These were DROPPED with an underscore while their own
+        // documentation presented them as alarms — an alarm nobody can read is not an alarm.
+        assert_eq!(view.star_catalogue_parts_sent, 89);
+        assert_eq!(view.sky_alive_beats_sent, 90);
+        assert_eq!(view.sky_requests_sent, 91);
+        assert_eq!(view.sky_held_stated, 92);
+        assert_eq!(view.sky_parts_skipped, 93);
         assert_eq!(view.window_relay_interior_unvouched, 87);
         assert_eq!(view.window_relay_interior_filtered, 88);
         assert_eq!(view.sessions_open, 24);

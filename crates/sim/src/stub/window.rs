@@ -86,14 +86,25 @@ impl OpenWindow {
         }
     }
 
-    /// Forget every send-on-change baseline, so this subscriber is served the full body set, the
-    /// full membership verdict and every held relay batch again. Called on the derived keep-alive
-    /// re-assert (window lane Slice D) — the beat that makes a gateway-side roster-loss TTL sound.
+    /// Forget every send-on-change baseline that the gateway can LOSE, so this subscriber is served
+    /// the full body set, the full membership verdict and every held relay batch again. Called on the
+    /// derived keep-alive re-assert (window lane Slice D) — the beat that makes a gateway-side
+    /// roster-loss TTL sound.
+    ///
+    /// ★ THE STATIC ROSTER IS NOT CLEARED HERE, and the difference is measured, not stylistic. The
+    /// three lanes above expire at the gateway (`WindowIngest::prune_stale` walks `look_of`,
+    /// `interior_admitted` and `relay_levels`), so re-serving them on the beat is what makes silence
+    /// mean "the realm stopped speaking". **`static_rows` never expires** — it is whole-set
+    /// replacement with no TTL — so clearing it bought nothing and cost the whole roster, twice a
+    /// second, for ever. At the S12 census that is 28.4 MB/s per window on the reliable lane.
+    ///
+    /// The roster is instead compared against the digest the SUBSCRIBER states on its open
+    /// (`GatewayToShard::WindowOpen::static_held`), because the subscriber is the only party that
+    /// knows what it holds — the same lesson that deleted `SkyStatedTo` from the sky lane.
     fn reset_baselines(&mut self) {
         self.sent_bodies.clear();
         self.membership_sent.clear();
         self.sent_relays.clear();
-        self.sent_static = None;
     }
 }
 
@@ -124,6 +135,7 @@ pub(crate) fn on_window_open(
     from: NodeId,
     window: WindowId,
     scope: WindowScope,
+    static_held: Option<u64>,
     now: TickId,
     stats: &mut StubStats,
 ) {
@@ -141,10 +153,22 @@ pub(crate) fn on_window_open(
             // static realm would state its look once, forever, and a torn-down realm's last look
             // would be indistinguishable from a live one's silence.
             w.reset_baselines();
+            // ★ THE COUNTER COMPARISON (S11, owner-approved 2026-08-27). The subscriber states the
+            // roster digest it holds; the shard adopts that as its baseline and re-sends only if the
+            // roster has actually changed. `None` — a fresh or restarted gateway — is served
+            // everything, which is what makes a re-open safe.
+            //
+            // ★ MEASURED, not argued. With this assignment removed, the test fails on the FIRST
+            // keep-alive ("tick 2: a keep-alive must not re-ship an unchanged roster"). Note that
+            // restoring the old `sent_static = None` inside `reset_baselines` does NOT reproduce the
+            // defect on its own, because this line runs after it and overwrites it — which is exactly
+            // why the first attempt at that proof passed and proved nothing.
+            w.sent_static = static_held;
             stats.window_reasserted += 1;
         }
         std::collections::btree_map::Entry::Occupied(mut held) => {
             *held.get_mut() = OpenWindow::opened(scope, now);
+            held.get_mut().sent_static = static_held;
             stats.windows_opened += 1;
         }
         std::collections::btree_map::Entry::Vacant(fresh) => {

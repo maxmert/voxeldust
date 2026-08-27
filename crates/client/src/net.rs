@@ -19,6 +19,8 @@ use vd_core::{EntityId, NodeId, SessionId, TickId};
 use vd_devproto::{
     DevEntityRow, DevPhase, DevRealmBox, DevState, DevTransferView, DevWindowCensus, InputAction,
 };
+#[cfg(test)]
+use vd_sim::io::Store as _;
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
     ClientControlMsg, EventMsg, InputDatagram, RealmSnapshotDatagram, ServerControlMsg,
@@ -101,6 +103,16 @@ pub struct ClientState {
     /// THE STAR CATALOGUE, assembling (S11). Public so the harness and the renderer can ask what the
     /// client actually holds — the S11 gate counts the stars that ARRIVED, never the absence of bytes.
     pub sky: crate::star_sky::StarSky,
+    /// THE SKY, READY TO DRAW (S11) — built ONCE when the sky becomes whole, and then handed to every
+    /// render snapshot by pointer.
+    ///
+    /// ★ WHY IT IS CACHED HERE. `StarSky::complete` allocates a fresh `Vec` of every star it holds. At
+    /// the target census that is 150,000 rows, and the snapshot is published twenty times a second, so
+    /// calling it per step would rebuild 7.0 MB twenty times a second for a galaxy that never moves.
+    /// Built at the one moment the sky changes instead, and shared by `Arc` from then on.
+    sky_draw: Option<std::sync::Arc<crate::render_snapshot::SkyDraw>>,
+    /// THE GENERATION ALREADY ON DISK (S11), so a caller may ask to save every step and pay once.
+    sky_cached: Option<u64>,
     /// THE STATEMENT WAITING TO GO OUT (S11) — the generation this client holds, queued because the
     /// control handler has no transport. Drained on the next send. Latest-wins: only the newest sky is
     /// worth stating, and stating an older one would ask for work nobody needs.
@@ -142,6 +154,8 @@ impl ClientState {
             scene: Arc::new(RealmScene::default()),
             sky: crate::star_sky::StarSky::default(),
             pending_sky_held: None,
+            sky_draw: None,
+            sky_cached: None,
             origin: None,
             realm_view: RealmView::default(),
         }
@@ -395,6 +409,72 @@ impl ClientState {
     /// does not have would be denied one, which is why this is called only where a whole sky is proven.
     fn state_sky_held(&mut self, generation: u64) {
         self.pending_sky_held = Some(generation);
+        // THE ONE PLACE THE DRAWABLE SKY IS BUILT. This runs exactly where a whole sky is proven — on
+        // the last part, on a confirming beat, and on a cache adoption — so the renderer's copy and the
+        // statement to the server can never disagree about which sky is held.
+        self.sky_draw = self
+            .sky
+            .complete()
+            .map(|rows| std::sync::Arc::new(crate::render_snapshot::SkyDraw { rows, generation }));
+    }
+
+    /// THE KEY THE SKY'S CACHE LIVES UNDER (S11). One row: a client holds one galaxy.
+    ///
+    /// A prefix rather than a bare key so the read is a `scan`, which is the trait's own listing
+    /// operation — a `get` does not exist on [`Store`], and inventing one for a single row would be a
+    /// second way to read a store.
+    pub const SKY_CACHE_KEY: &'static [u8] = b"sky/catalogue";
+
+    /// READ the sky from the store and adopt it, if a good one is there (S11).
+    ///
+    /// Every proof is the one [`Self::adopt_sky_cache`] already runs — the stamp, the claimed count,
+    /// the rows, and the fold. A store is not more trusted than a file: it IS the file.
+    ///
+    /// # Errors
+    /// [`crate::star_sky::CacheRefusal`] if nothing is stored, or if what is stored failed a proof.
+    /// The held sky is unchanged either way, so a bad cache costs bytes and never correctness.
+    pub fn load_sky_cache(
+        &mut self,
+        store: &dyn vd_sim::io::Store,
+        expected: &vd_core::store_stamp::StoreStamp,
+    ) -> Result<u64, crate::star_sky::CacheRefusal> {
+        let rows = store.scan(Self::SKY_CACHE_KEY);
+        let Some((_, bytes)) = rows.first() else {
+            // NOTHING STORED is a refusal like any other, and counted like any other. A first run and
+            // a wiped disk are the same case, and both simply mean the server will serve a sky.
+            self.sky.cache_refused += 1;
+            return Err(crate::star_sky::CacheRefusal::Undecodable);
+        };
+        self.adopt_sky_cache(bytes, expected)
+    }
+
+    /// WRITE the sky to the store, at most once per generation (S11).
+    ///
+    /// ★ THE GUARD IS WHY THE BIN MAY CALL THIS EVERY STEP. Without it, a caller with no way to know
+    /// when the sky changed would re-encode and re-commit 7.0 MB twenty times a second for a galaxy
+    /// that never moves — the same shape of waste this whole slice removes from the wire, moved onto
+    /// the disk instead.
+    ///
+    /// Returns whether anything was written.
+    pub fn save_sky_cache(
+        &mut self,
+        store: &mut dyn vd_sim::io::Store,
+        stamp: vd_core::store_stamp::StoreStamp,
+    ) -> bool {
+        let Some(generation) = self.sky.generation() else {
+            return false; // no sky
+        };
+        if self.sky_cached == Some(generation) {
+            return false; // this sky is already on disk
+        }
+        let Some(rows) = self.sky.complete() else {
+            return false; // never write half a galaxy: the holes look like missing stars
+        };
+        let bytes = crate::star_sky::encode_cache(stamp, generation, &rows);
+        store.put(Self::SKY_CACHE_KEY, &vd_sim::io::bytes(bytes));
+        store.commit();
+        self.sky_cached = Some(generation);
+        true
     }
 
     /// Adopt a sky from the on-disk cache, and state it (S11).
@@ -592,6 +672,8 @@ impl ClientState {
             Arc::clone(&self.scene),
             self.realm_view.clone(),
         )
+        // A pointer bump, whatever the census (S11).
+        .with_sky(self.sky_draw.clone())
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
@@ -1188,6 +1270,139 @@ mod tests {
                     == Ok(ClientControlMsg::SkyHeld { generation })
             }),
             "and the server is told, so it never serves what we already read from disk"
+        );
+    }
+
+    /// ★ THE SKY SURVIVES A RESTART, AND COSTS THE WIRE NOTHING THE SECOND TIME (S11).
+    ///
+    /// The whole point of the cache: a returning player draws the galaxy from their own disk, states
+    /// the generation, and the server sends none of it.
+    #[test]
+    fn a_saved_sky_is_read_back_after_a_restart_and_written_only_once() {
+        let mut store = vd_sim::io::mem::MemStore::default();
+        let stamp = vd_core::store_stamp::StoreStamp::new(
+            vd_core::store_stamp::StoreRole::ClientCatalogue,
+            0x5EED,
+            vd_core::ids::EpochId(1),
+            &[1.0, 2.0],
+        );
+        let star = |n: u64| vd_core::look::StarRow {
+            realm: vd_core::pose::RealmId::System(n),
+            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
+            class_code: 6,
+            luma_lsun: 0.25,
+        };
+        let rows = vec![star(1), star(2), star(3)];
+        let generation =
+            vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
+
+        // THE FIRST SESSION: the sky arrives over the wire, and is written to disk.
+        let mut a = core();
+        activate(&mut a);
+        a.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::StarCatalogue {
+                generation,
+                part: 0,
+                parts: 1,
+                rows: rows.clone(),
+            })
+            .expect("fixture"),
+        );
+        a.step(10.0);
+        assert!(
+            a.state_mut().save_sky_cache(&mut store, stamp),
+            "the first save writes"
+        );
+        // ...and asking again writes NOTHING. A caller with no way to know when the sky changed may
+        // call this every step; without the guard it would re-encode 7.0 MB twenty times a second.
+        assert!(
+            !a.state_mut().save_sky_cache(&mut store, stamp),
+            "the same sky is not written twice"
+        );
+
+        // THE SECOND SESSION — a restart. Nothing has crossed the wire.
+        let mut b = core();
+        activate(&mut b);
+        assert_eq!(b.state().sky.complete(), None, "it starts with no sky");
+        assert_eq!(b.state_mut().load_sky_cache(&store, &stamp), Ok(generation));
+        assert_eq!(
+            b.state().sky.complete(),
+            Some(rows),
+            "the galaxy came back from disk, and not one byte of it crossed the wire"
+        );
+        assert_eq!(b.state().sky.cache_adopted, 1);
+        assert_eq!(b.state().sky.cache_refused, 0);
+
+        // ★ SAVING WITH NO SKY WRITES NOTHING, and is not an error. A client that has not been served
+        // yet has nothing to persist, and a caller that saves every step must not be made to check.
+        let mut empty_client = core();
+        activate(&mut empty_client);
+        let mut untouched = vd_sim::io::mem::MemStore::default();
+        assert!(
+            !empty_client
+                .state_mut()
+                .save_sky_cache(&mut untouched, stamp),
+            "no sky, nothing written"
+        );
+        assert!(
+            untouched
+                .scan(crate::net::ClientState::SKY_CACHE_KEY)
+                .is_empty(),
+            "and the store really is untouched"
+        );
+
+        // ★ HALF A SKY IS NEVER WRITTEN. A partial catalogue has a generation, so the guard above it
+        // passes; only this arm stops a galaxy with holes reaching the disk, where it would be adopted
+        // on the next run as if it were whole.
+        let mut partial = core();
+        activate(&mut partial);
+        partial.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::StarCatalogue {
+                generation,
+                part: 0,
+                parts: 2,
+                rows: vec![star(1)],
+            })
+            .expect("fixture"),
+        );
+        partial.step(10.0);
+        assert_eq!(
+            partial.state().sky.generation(),
+            Some(generation),
+            "the partial sky DOES have a generation — so the guard above cannot be what stops it"
+        );
+        let mut half = vd_sim::io::mem::MemStore::default();
+        assert!(
+            !partial.state_mut().save_sky_cache(&mut half, stamp),
+            "half a galaxy is not written"
+        );
+        assert!(half.scan(crate::net::ClientState::SKY_CACHE_KEY).is_empty());
+
+        // AN EMPTY STORE IS A COUNTED REFUSAL, not a crash and not a silent empty sky. A first run and
+        // a wiped disk are the same case: the server simply serves one.
+        let empty = vd_sim::io::mem::MemStore::default();
+        let mut c = core();
+        activate(&mut c);
+        assert!(c.state_mut().load_sky_cache(&empty, &stamp).is_err());
+        assert_eq!(c.state().sky.cache_refused, 1, "counted, never silent");
+        assert_eq!(c.state().sky.complete(), None);
+
+        // A SKY FROM ANOTHER WORLD is refused by the stamp, and leaves this client holding nothing.
+        let other = vd_core::store_stamp::StoreStamp::new(
+            vd_core::store_stamp::StoreRole::ClientCatalogue,
+            0x5EED + 1,
+            vd_core::ids::EpochId(1),
+            &[1.0, 2.0],
+        );
+        let mut d = core();
+        activate(&mut d);
+        assert_eq!(
+            d.state_mut().load_sky_cache(&store, &other),
+            Err(crate::star_sky::CacheRefusal::ForeignWorld)
         );
     }
 

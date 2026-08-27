@@ -2083,6 +2083,7 @@ fn drive_sky_lane(
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let mut parts = Vec::new();
     let mut beats = Vec::new();
@@ -2193,6 +2194,7 @@ fn drive_window_emit(
             &GatewayToShard::WindowOpen {
                 window: WindowId(1),
                 scope: WindowScope::Occupants,
+                static_held: None,
             },
         ),
         wire_msg(
@@ -2201,6 +2203,7 @@ fn drive_window_emit(
             &GatewayToShard::WindowOpen {
                 window: WindowId(2),
                 scope: WindowScope::Child(child_realm),
+                static_held: None,
             },
         ),
     ]);

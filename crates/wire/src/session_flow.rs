@@ -123,6 +123,28 @@ pub enum GatewayToShard {
     WindowOpen {
         window: WindowId,
         scope: WindowScope,
+        /// ★ THE RECEIVER STATES WHAT IT HOLDS (S11; SL6 ask APPROVED by the owner 2026-08-27) — the
+        /// digest of the STATIC ROSTER this subscriber already has, or `None` for "I hold nothing".
+        ///
+        /// WHY THIS FIELD EXISTS. The keep-alive is also the re-assert, and it used to CLEAR the
+        /// shard's send-on-change memory. It beats twice a second. So the whole static roster
+        /// re-shipped twice a second, for ever — and the owner's own ruling of 2026-08-24 said it must
+        /// not: *"The keep-alive compares a counter instead of clearing the send-on-change memory —
+        /// otherwise the whole catalogue re-ships twice a second, forever, and the optimisation
+        /// cancels itself."*
+        ///
+        /// Today's roster is 189 bytes, so nothing shows. At the S12 census it is 14.2 MB, which is
+        /// **28.4 MB/s per window** on the RELIABLE lane. This field is what lets the census rise.
+        ///
+        /// ★ WHY THE SHARD CANNOT WORK IT OUT ITSELF. It cannot know what a gateway holds. That is the
+        /// same lesson the sky lane learned when `SkyStatedTo` was deleted: **the sender is not the
+        /// party that knows.** Clearing the memory guesses "nothing"; keeping it guesses "everything".
+        /// Both are wrong, and only the holder can say.
+        ///
+        /// It also closes a hole a bare deletion would open: a gateway that restarts and re-opens the
+        /// same window inside the shard's timeout looks exactly like a keep-alive, and would never be
+        /// served the roster. A fresh ingest states `None` and is served everything.
+        static_held: Option<u64>,
     },
     /// THE WINDOW LANE's subscription close (gateway → shard, mesh minor 16; same SL6 approval as
     /// [`GatewayToShard::WindowOpen`]). RELIABLE control, idempotent (closing an unknown window is
@@ -1282,6 +1304,7 @@ mod tests {
             GatewayToShard::WindowOpen {
                 window: WindowId(2),
                 scope: WindowScope::Child(RealmId::Planet(7)),
+                static_held: None,
             },
             GatewayToShard::WindowClose {
                 window: WindowId(2),
@@ -1374,10 +1397,12 @@ mod tests {
         let open_occ = GatewayToShard::WindowOpen {
             window: WindowId(1),
             scope: WindowScope::Occupants,
+            static_held: None,
         };
         let open_child = GatewayToShard::WindowOpen {
             window: WindowId(1),
             scope: WindowScope::Child(RealmId::Planet(7)),
+            static_held: None,
         };
         assert_eq!(
             postcard::to_allocvec(&open_occ).expect("encode")[..3],
@@ -1431,6 +1456,7 @@ mod tests {
         let open_occupants = GatewayToShard::WindowOpen {
             window: WindowId(2),
             scope: WindowScope::Occupants,
+            static_held: None,
         };
         for msg in [own_level, marker, empty_membership] {
             let bytes = postcard::to_allocvec(&msg).expect("encode");

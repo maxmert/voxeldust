@@ -216,6 +216,7 @@ fn a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic()
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Child(ship_realm),
+        static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     assert_eq!(
@@ -560,6 +561,7 @@ fn evaluate_realm_aoi_ships_a_membership_verdict_on_acquire_and_release() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     // Tick 1: ACQUIRE ⇒ exactly one verdict ADDING the entered child, to the window's opener.
     let v = window_memberships(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
@@ -1487,6 +1489,7 @@ fn a_child_observer_never_lands_in_an_occupants_verdict_but_a_dot_does() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     // A live bit in range of itself ⇒ the Occupants verdict stays EMPTY (never a render route).
     inject_bit(&mut rig, RealmId::Planet(42));

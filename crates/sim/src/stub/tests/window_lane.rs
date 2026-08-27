@@ -1075,6 +1075,7 @@ fn a_realm_states_its_own_look_with_no_child_and_no_parent() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let bodies = window_bodies(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
     assert_eq!(bodies.len(), 1, "exactly one body: this realm's own look");
@@ -1123,6 +1124,7 @@ fn a_shard_whose_own_realm_is_absent_from_its_forest_states_no_look() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     assert!(
         window_bodies(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)])).is_empty(),
@@ -1156,6 +1158,7 @@ fn the_membership_verdict_holds_a_passed_realm_across_grace() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     // Tick 1: acquire ⇒ the realm is ADDED.
     let v = window_memberships(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
@@ -1193,6 +1196,7 @@ fn a_static_roster_is_stated_once_and_the_frame_keeps_only_its_stamp() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     assert_eq!(window_static_rows(&sent).len(), 1, "stated on open");
@@ -1252,6 +1256,7 @@ fn the_star_catalogue_is_stated_once_per_request_in_parts() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let on_open = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     assert!(
@@ -1321,6 +1326,7 @@ fn a_keep_alive_re_assert_does_not_re_send_the_sky() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let _ = rig.tick(vec![
         wire_msg(GATEWAY, MsgClass::Control, &open),
@@ -1382,10 +1388,12 @@ fn a_closed_and_re_opened_window_does_not_re_state_the_sky() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let other_open = GatewayToShard::WindowOpen {
         window: WindowId(9),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let _ = rig.tick(vec![
         wire_msg(GATEWAY, MsgClass::Control, &open),
@@ -1431,6 +1439,7 @@ fn a_shard_with_no_stars_states_no_catalogue() {
         &GatewayToShard::WindowOpen {
             window: WindowId(1),
             scope: WindowScope::Occupants,
+            static_held: None,
         },
     )]);
     assert!(star_catalogue_parts(&sent).is_empty());
@@ -1457,6 +1466,7 @@ fn a_changed_body_re_ships_past_the_digest_baseline() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     let first = window_bodies(&sent);
@@ -1494,6 +1504,7 @@ fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     let frames = window_frames(&sent);
@@ -1598,6 +1609,7 @@ fn every_direct_child_states_a_point_of_light_marker_glowing_or_not() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     let bodies = window_bodies(&sent);
@@ -1645,6 +1657,7 @@ fn the_keep_alive_re_assert_re_serves_the_whole_set_so_silence_means_a_dead_real
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     let first_bodies = window_bodies(&sent);
@@ -1676,6 +1689,7 @@ fn a_child_window_ships_the_hop_row_pre_inverted_at_the_author() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(2),
         scope: WindowScope::Child(OTHER_REALM),
+        static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     let frames = window_frames(&sent);
@@ -1733,6 +1747,7 @@ fn the_hop_inversion_carries_velocity_and_spin_through_the_frame_core() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(3),
         scope: WindowScope::Child(mover),
+        static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     let frames = window_frames(&sent);
@@ -1898,6 +1913,7 @@ fn a_dead_gateways_windows_die_by_the_derived_ttl_with_zero_leaked_emissions() {
             &GatewayToShard::WindowOpen {
                 window: WindowId(1),
                 scope: WindowScope::Occupants,
+                static_held: None,
             },
         ),
         wire_msg(
@@ -1906,6 +1922,7 @@ fn a_dead_gateways_windows_die_by_the_derived_ttl_with_zero_leaked_emissions() {
             &GatewayToShard::WindowOpen {
                 window: WindowId(2),
                 scope: WindowScope::Child(OTHER_REALM),
+                static_held: None,
             },
         ),
     ]);
@@ -1941,6 +1958,7 @@ fn a_dead_gateways_windows_die_by_the_derived_ttl_with_zero_leaked_emissions() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(9),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     rig.set_local_tick(100);
     let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
@@ -2141,6 +2159,7 @@ fn the_live_siblings_interior_is_one_level_out_and_never_deeper_q1() {
             &GatewayToShard::WindowOpen {
                 window: WindowId(1),
                 scope: WindowScope::Occupants,
+                static_held: None,
             },
         ),
         wire_msg(
@@ -2149,6 +2168,7 @@ fn the_live_siblings_interior_is_one_level_out_and_never_deeper_q1() {
             &GatewayToShard::WindowOpen {
                 window: WindowId(2),
                 scope: WindowScope::Child(RealmId::Planet(42)),
+                static_held: None,
             },
         ),
     ]);
@@ -2230,6 +2250,7 @@ fn the_live_siblings_interior_is_one_level_out_and_never_deeper_q1() {
         &GatewayToShard::WindowOpen {
             window: WindowId(1),
             scope: WindowScope::Occupants,
+            static_held: None,
         },
     )]);
     let frames = window_frames(&sent);
@@ -2297,7 +2318,11 @@ fn a_child_window_guards_unrostered_ship_and_rotated_hops_counted() {
         wire_msg(
             GATEWAY,
             MsgClass::Control,
-            &GatewayToShard::WindowOpen { window, scope },
+            &GatewayToShard::WindowOpen {
+                window,
+                scope,
+                static_held: None,
+            },
         )
     })
     .collect();
@@ -2358,6 +2383,7 @@ fn window_membership_rides_the_one_fold_and_clears_with_the_last_observer() {
             &GatewayToShard::WindowOpen {
                 window: WindowId(1),
                 scope: WindowScope::Occupants,
+                static_held: None,
             },
         ),
         // A SECOND subscriber (another gateway) with no dots here: its per-dot verdict is
@@ -2368,6 +2394,7 @@ fn window_membership_rides_the_one_fold_and_clears_with_the_last_observer() {
             &GatewayToShard::WindowOpen {
                 window: WindowId(1),
                 scope: WindowScope::Occupants,
+                static_held: None,
             },
         ),
         wire_msg(
@@ -2383,6 +2410,7 @@ fn window_membership_rides_the_one_fold_and_clears_with_the_last_observer() {
             &GatewayToShard::WindowOpen {
                 window: WindowId(2),
                 scope: WindowScope::Child(RealmId::Planet(42)),
+                static_held: None,
             },
         ),
     ]);
@@ -2455,6 +2483,7 @@ fn the_sky_beats_on_a_cadence_even_when_it_did_not_change() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
 
@@ -2494,6 +2523,7 @@ fn a_shard_with_no_sky_states_no_beat() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let mut beats = Vec::new();
     for t in 1..=21 {
@@ -2531,6 +2561,7 @@ fn the_beat_is_stated_once_per_gateway_however_many_windows_it_holds() {
     let open = |w: u64| GatewayToShard::WindowOpen {
         window: WindowId(w),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let _ = rig.tick(vec![
         wire_msg(GATEWAY, MsgClass::Control, &open(1)),
@@ -2656,4 +2687,93 @@ fn assert_sky_feature_anywhere() {
             "run {i}: the same counts — parts sent, beats sent, requests taken"
         );
     }
+}
+
+/// ★ THE KEEP-ALIVE COMPARES A COUNTER; IT DOES NOT RE-SHIP THE ROSTER (S11).
+///
+/// The owner ruled this on 2026-08-24: *"The keep-alive compares a counter instead of clearing the
+/// send-on-change memory — otherwise the whole catalogue re-ships twice a second, forever, and the
+/// optimisation cancels itself."* The wire field it needs was approved on 2026-08-27.
+///
+/// ★ WHY IT WAS INVISIBLE. Today's static roster is 189 bytes, so the twice-a-second re-send costs
+/// almost nothing and no gate noticed. At the S12 census the roster is 14.2 MB, which is
+/// **28.4 MB/s per window on the RELIABLE lane**. The defect only bites when the census rises, which
+/// is exactly when it would be blamed on the census.
+///
+/// ★ AND WHY THE ROSTER, ALONE OF THE FOUR LANES, MUST NOT BE CLEARED. The other three expire at the
+/// gateway, so re-serving them on the beat is what makes silence mean "the realm stopped speaking".
+/// `static_rows` never expires — it is whole-set replacement with no TTL — so clearing it bought
+/// nothing at all.
+#[test]
+fn the_keep_alive_compares_a_counter_and_does_not_re_ship_the_static_roster() {
+    let mut rig = window_rig();
+    let open = |static_held| GatewayToShard::WindowOpen {
+        window: WindowId(1),
+        scope: WindowScope::Occupants,
+        static_held,
+    };
+
+    // THE FIRST OPEN holds nothing, so it is served the whole roster.
+    let first = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open(None))]);
+    let rows = window_static_rows(&first);
+    assert!(!rows.is_empty(), "a fresh window is served the roster");
+    let served = rig.world.resource::<StubStats>().window_static_rows_sent;
+    assert_eq!(served, 1);
+
+    // THE DIGEST THE SUBSCRIBER NOW HOLDS, folded the way the gateway folds it — the SAME function
+    // the shard uses, because two spellings of one digest would make every keep-alive re-send.
+    let held =
+        crate::stub::relay::statement_digest(&postcard::to_allocvec(&rows[0].2).expect("encodes"));
+
+    // ★ TWENTY KEEP-ALIVES, AND NOT ONE ROSTER. This is the assertion that did not exist: the old
+    // test drove the keep-alive but only ever read the BODY and MEMBERSHIP counters, so the roster
+    // re-shipping twice a second passed every gate in the tree.
+    for t in 2..=21 {
+        rig.set_local_tick(t);
+        let sent = rig.tick(vec![wire_msg(
+            GATEWAY,
+            MsgClass::Control,
+            &open(Some(held)),
+        )]);
+        assert!(
+            window_static_rows(&sent).is_empty(),
+            "tick {t}: a keep-alive must not re-ship an unchanged roster"
+        );
+    }
+    assert_eq!(
+        rig.world.resource::<StubStats>().window_static_rows_sent,
+        served,
+        "still one, across twenty keep-alives"
+    );
+
+    // ★ ANTI-VACUITY: the keep-alive really did run, and really did re-serve the lanes that SHOULD
+    // repeat. Without this the silence above could simply mean nothing happened at all.
+    assert_eq!(
+        rig.world.resource::<StubStats>().window_reasserted,
+        20,
+        "the keep-alive beat twenty times"
+    );
+
+    // A STALE DIGEST BRINGS THE ROSTER BACK. This is the repair the keep-alive exists for, and it is
+    // what makes the comparison safe rather than merely cheap.
+    rig.set_local_tick(22);
+    let stale = rig.tick(vec![wire_msg(
+        GATEWAY,
+        MsgClass::Control,
+        &open(Some(held ^ 1)),
+    )]);
+    assert!(
+        !window_static_rows(&stale).is_empty(),
+        "a subscriber holding the WRONG roster is served the right one"
+    );
+
+    // ...and so does a gateway that holds NOTHING — a restart re-opening the same window inside the
+    // shard's timeout. A bare deletion of the clear would have left this case served nothing, for
+    // ever, because it looks exactly like a keep-alive.
+    rig.set_local_tick(23);
+    let restarted = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open(None))]);
+    assert!(
+        !window_static_rows(&restarted).is_empty(),
+        "a restarted gateway states None and is served everything"
+    );
 }

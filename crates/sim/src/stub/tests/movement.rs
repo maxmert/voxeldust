@@ -603,6 +603,7 @@ fn window_control_registers_refreshes_and_closes_the_registry_idempotently() {
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let sent = rig.tick(vec![
         wire_msg(GATEWAY, MsgClass::Control, &open),
@@ -639,6 +640,7 @@ fn window_control_registers_refreshes_and_closes_the_registry_idempotently() {
     let rescope = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Child(RealmId::Planet(9)),
+        static_held: None,
     };
     let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &rescope)]);
     assert_eq!(rig.world.resource::<StubStats>().windows_opened, 2);

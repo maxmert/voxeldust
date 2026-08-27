@@ -339,6 +339,7 @@ fn emit_realm_frames_states_its_children_only_to_an_open_window_with_authority()
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
+        static_held: None,
     };
     let realms = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<RealmId> {
         window_frames(sent)

@@ -222,7 +222,7 @@ use vd_core::digest::{FNV_OFFSET, fnv1a as fnv1a_from};
 /// carries the safety argument verbatim: a collision "costs one deferred re-send healed by the
 /// keep-alive re-assert, never a wrong byte on the wire". The keep-alive that made the old form
 /// expensive is the same beat that heals the new form's one failure mode.
-pub(crate) fn statement_digest(bytes: &[u8]) -> u64 {
+pub fn statement_digest(bytes: &[u8]) -> u64 {
     fnv1a_from(FNV_OFFSET, bytes)
 }
 

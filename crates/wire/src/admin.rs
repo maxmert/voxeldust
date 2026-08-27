@@ -285,6 +285,23 @@ pub struct GatewayView {
     /// Look horizon slice 3 — depth-3 statements lawfully filtered out of admitted interior
     /// batches (EXPECTED non-zero wherever an interior forwards; never asserted zero).
     pub window_relay_interior_filtered: u64,
+    /// S11 sky lane — star-catalogue parts forwarded to clients. On a static world this reaches a
+    /// small number and STOPS. A counter that keeps climbing means the catalogue is re-issued for
+    /// nothing, which is the 7.0 MB-per-client cost S11 exists to remove.
+    pub star_catalogue_parts_sent: u64,
+    /// S11 sky lane — liveness beats forwarded to clients. ★ THE ONE COUNTER HERE WHOSE FLAT LINE IS
+    /// THE DEFECT, not its growth: it is EXPECTED to climb for ever on a perfectly static world,
+    /// because "the sky did not change" is exactly what it exists to keep saying.
+    pub sky_alive_beats_sent: u64,
+    /// S11 sky lane — requests for the sky sent to shards. Settles once every client is served. A
+    /// counter that keeps climbing means a client is never confirming what it holds.
+    pub sky_requests_sent: u64,
+    /// S11 sky lane — clients stating the sky they hold. Each statement is what lets the gateway skip
+    /// sending a catalogue to a client that already has it.
+    pub sky_held_stated: u64,
+    /// S11 sky lane — catalogue parts NOT sent because the client already held that sky. This is the
+    /// saving, counted: every skipped part is bytes that did not cross for a galaxy that did not move.
+    pub sky_parts_skipped: u64,
     /// Gauge: sessions currently open on this gateway.
     pub sessions_open: u64,
     /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
@@ -750,6 +767,11 @@ mod tests {
                 // declaration order.
                 window_relay_interior_unvouched: 87,
                 window_relay_interior_filtered: 88,
+                star_catalogue_parts_sent: 89,
+                sky_alive_beats_sent: 90,
+                sky_requests_sent: 91,
+                sky_held_stated: 92,
+                sky_parts_skipped: 93,
                 sessions_open: 24,
                 dynamic_shards: 25,
                 windows_open: 37,
