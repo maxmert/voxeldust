@@ -14,6 +14,27 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-08-27_movement_answers.md` — ★ THE ANSWERS TO THE MOVEMENT QUESTIONS. Three
+    items closed. (1) THE UNGOVERNED ROCK: the containing realm owns the speed of a thing that governs
+    nothing itself, **but a transfer NEVER changes that speed** — a destination realm's ceiling limits
+    what it may ADD, never what a thing arrives with (a re-clamp is a jump, and a jump is a seam).
+    (2) WAKING UP IN TIME: **grow the interest radius with the closing speed; never cap the speed** —
+    a cap makes the game unfair, because the player would pay for a server's start-up cost.
+    ★ (4) THE CEILING LEAVES THE FLIGHT PATH COMPLETELY — no clamp, no refusal, no stop; a player never
+    STATES a speed (a throttle makes a force), so nothing there can be refused. A fence may stand ONLY
+    where CODE states a speed (a spawn, a fixture, a tool), where a bad number is a defect and a test
+    goes red. CONTAINMENT BECOMES SWEPT: the test reads the LINE from last tick to this tick, so nothing
+    must be slowed to be caught. The band never protected the player — it protected a SNAPSHOT, which is
+    why deleting the governor broke the bands. Slowing down is GAMEPLAY: a ship's own safety block slows
+    it (and a player may switch that off), and air slows a rock. MEASURED: the galaxy's ceiling is
+    ~170 million times the speed of light, so it never binds in open space and binds only near SMALL
+    bodies — exactly where it felt wrong. ⇒ THE BAND RE-SOLVE DOES NOT RUN YET: fix the test first, and
+    the bands shrink on their own.
+    (3) THE INTERIM ENGINE RATING: yes, a ship may state its rated cruise speed and acceleration as
+    facts about what it IS. ★ Plus THE TEMPORARY CONTROL SEAM: attach the controls to the ship realm,
+    make forces directly in the ship's shard (no signals, no functional blocks, no hull), and send them
+    up the lane the movement contract already defines — so the whole path is testable NOW. Still open:
+    the band re-solve, the HR4 second shard kind, the wake-up constant.
   - `owner_decisions_2026-08-27_seed_and_secrecy.md` — ★ WHAT A SEED MAY DECIDE. Anything a fixed seed
     alone determines must be SAFE TO PUBLISH; anything VALUABLE must depend on world state that CHANGES.
     Binds the block system BEFORE it starts: a block's substance may not be a pure function of

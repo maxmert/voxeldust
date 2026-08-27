@@ -4249,6 +4249,34 @@ current fixture contains a mover. Re-uniting at ingest keeps the saving on the W
   renderer decision and is not built. Deliberately, the beat also does NOT act on `Stale`: knowing the
   held sky is wrong is a different job from replacing it, and replacing it is the
   receiver-states-its-generation exchange below, not this.
+- **★ A CLIENT DOES NOT RECEIVE THE WHOLE GALAXY FROM A SYSTEM SHARD — MEASURED 2026-08-27, and it is
+  an S12 question, not a defect in this lane.** A shard folds its sky from the realms IT booted, so a
+  cluster hosting one star system states that system's stars and no others. The real-process gate went
+  red on its first run with the WORLD's census written into it: **1 star held against 3 in the world.**
+
+  That is the property, not a bug — but it decides something S12 must answer: **a player standing in a
+  star system must see the whole galaxy, and the shard they are subscribed to does not hold it.** The
+  three candidate answers, none chosen: the client subscribes to the galaxy shard as well; the gateway
+  composes the sky from more than one shard; or the sky is stated once at login from a party that holds
+  the whole forest. Each has a different cost and a different owner. **Do not pick one by accident
+  while raising the census.**
+
+  The gate now derives its expectation the way the SHARD derives it, so it measures the lane rather
+  than this open question.
+
+- **★ HR4 G-IDENTICAL FOR THE SKY — LANDED 2026-08-27 (owner-confirmed).**
+  `assert_sky_feature_anywhere` drives the identical sky lane on THREE profiles — galaxy (relay, no
+  voxel realm), system (hull host, no voxel realm) and planet (a SPHERICAL voxel realm with functional
+  blocks, block edit, surfaces and seats) — and asserts the parts, the generation, the beat and all
+  three counters are byte-equal.
+
+  **THE HONEST LIMIT, stated in the test itself:** nothing in the sim READS a capability yet, so this
+  gate cannot go red today. It is a TRIPWIRE armed for the day capabilities start gating behaviour —
+  which is the day the sky could quietly acquire a dependency on one. The 2026-08-14 audit found the
+  previous G-IDENTICAL gate green on a fixture that ran the SAME kind twice (D-38), so this one asserts
+  the three profiles differ, and that the planet run really does host a voxel realm, before it compares
+  anything.
+
 - **★ THE CLIENT'S CACHE AND THE GENERATION EXCHANGE — LANDED 2026-08-27.** The two arrived together
   because they are one design: the cache is what gives the client something to state.
 
@@ -4300,10 +4328,12 @@ current fixture contains a mover. Re-uniting at ingest keeps the saving on the W
   - **REMEMBER TOO LONG** ⇒ a NEW subscriber behind the same gateway is told nothing and has NO SKY AT
     ALL, because some previous session once held one.
 
-  Both arms are driven by `a_closed_and_re_opened_window_re_states_the_sky_today`, which also records
-  that today's behaviour is right only by accident: the emit runs only while some window is open, so a
-  shard whose LAST window closed never reaches the line that forgets the gateway — **but with a second
-  gateway present it does, and the return leg re-states the whole sky.** Measured, not argued.
+  Both arms were driven by a test that RECORDED the broken behaviour: the emit ran only while some
+  window was open, so a shard whose LAST window closed never reached the line that forgot the gateway —
+  **but with a second gateway present it did, and the return leg re-stated the whole sky.** Measured,
+  not argued. That test was written to flip when the cure landed, and it did: it is now
+  `a_closed_and_re_opened_window_does_not_re_state_the_sky`, and it keeps the second gateway precisely
+  because that is the case which broke the memory.
 
   **No length of memory fixes this, because the sender is not the party that knows.** S11's own wording
   is the cure: *"the receiver stating its generation and the sender answering from that rather than from
