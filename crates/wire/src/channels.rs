@@ -172,6 +172,29 @@ pub enum ServerControlMsg {
     /// carrier, two consumers, built once). Emitted only to a peer that negotiated minor >= 14.
     /// Appended trailing variant (postcard additive rule).
     Event(EventMsg),
+    /// ONE PART OF THE STAR CATALOGUE, client-bound (S11; owner-approved 2026-08-24 Q4).
+    ///
+    /// The gateway forwards what the galaxy shard stated. **The client is the only recipient** — a ship
+    /// is a shard and holds the same generator, so it asks that and zero bytes cross. The client cannot
+    /// derive (it renders; the server does the arithmetic), and putting the generator in the client
+    /// hands every player the galaxy offline — a door that does not close again.
+    ///
+    /// **A DRAWING AID AND NOTHING ELSE.** The client caches it on disk; the server validates every
+    /// destination itself. A player can edit their own cache and recompute any digest we choose, so the
+    /// protection was never the digest — a forged cache draws a star nobody else can see and flies its
+    /// owner to empty space.
+    ///
+    /// **CHUNKED**: 7.0 MB at the target census, which no carrier takes whole. `generation` is folded
+    /// from the content and is identical across every part of one sky, so parts of two different skies
+    /// cannot be spliced. A catalogue is drawn only once complete — never half a sky.
+    ///
+    /// Appended trailing variant (postcard additive rule).
+    StarCatalogue {
+        generation: u64,
+        part: u32,
+        parts: u32,
+        rows: Vec<vd_core::look::StarRow>,
+    },
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).
@@ -441,6 +464,27 @@ pub fn partition_entities(entities: &[EntitySnap], budget_bytes: usize) -> Vec<V
 #[must_use]
 pub fn partition_realms(realms: &[RealmSnap], budget_bytes: usize) -> Vec<Vec<RealmSnap>> {
     partition_rows(realms, budget_bytes)
+}
+
+/// THE STAR CATALOGUE, chunked under the carrier's budget (S11) — the THIRD user of the one
+/// partitioner, and it adds no bin-packing code at all.
+///
+/// ★ WHY THE CATALOGUE MUST BE CHUNKED AT ALL. It is the only message in the tree whose size grows
+/// with the world: 150,000 systems at ~47 bytes is 7.0 MB in one piece, and no carrier takes that.
+/// Unchunked it does not arrive slowly — it does not arrive, and an empty sky with nothing in any log
+/// is the failure mode S11 exists to prevent.
+///
+/// **THE BUDGET IS AN ARGUMENT, NOT A CONSTANT**, and that is what makes this testable today. THE world
+/// holds three stars, so the real budget can never split it — but a test may pass a budget of one row and
+/// exercise the split, the reassembly and a missing part at the world we actually have. That is a
+/// function's input, never a second world (SL5). What genuinely waits for the census is whether 7.0 MB
+/// specifically behaves, which is a different claim from whether chunking works.
+#[must_use]
+pub fn partition_stars(
+    rows: &[vd_core::look::StarRow],
+    budget_bytes: usize,
+) -> Vec<Vec<vd_core::look::StarRow>> {
+    partition_rows(rows, budget_bytes)
 }
 
 /// The shared greedy MTU partitioner for a snapshot row type (`EntitySnap` / `RealmSnap`, DRY). A
@@ -1091,6 +1135,61 @@ mod tests {
                 UniverseTick(10),
             ),
         }
+    }
+
+    /// ★ THE CATALOGUE CHUNKS, AND IT IS DRIVEN AT THE WORLD WE HAVE (S11).
+    ///
+    /// The catalogue is the only message whose size grows with the world — 7.0 MB at the target census,
+    /// which no carrier takes in one piece. Unchunked it does not arrive slowly; it does not arrive, and
+    /// an empty sky with nothing in any log is the exact failure S11 exists to prevent.
+    ///
+    /// **THE BUDGET IS AN ARGUMENT**, so the split is exercised on THE world's three stars rather than
+    /// waiting for the census. That is a function's input, never a second world (SL5). What genuinely
+    /// waits is whether 7.0 MB specifically behaves — a different claim from whether chunking works.
+    #[test]
+    fn the_star_catalogue_chunks_under_budget_and_loses_no_star() {
+        let star = |n: u64| vd_core::look::StarRow {
+            realm: RealmId::System(n),
+            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
+            class_code: 6,
+            luma_lsun: 0.25,
+        };
+        // EMPTY IN, EMPTY OUT: a galaxy with no stars sends no parts at all, never one empty part.
+        assert_eq!(
+            partition_stars(&[], 1000),
+            Vec::<Vec<vd_core::look::StarRow>>::new()
+        );
+
+        let stars: Vec<vd_core::look::StarRow> = (0u64..40).map(star).collect();
+        let budget = 300;
+        let chunks = partition_stars(&stars, budget);
+        assert!(
+            chunks.len() > 1,
+            "a 40-star galaxy must split at this budget"
+        );
+
+        // EVERY PART FITS, and NO STAR IS LOST OR DUPLICATED — the two ways a chunker fails silently.
+        let mut seen: Vec<vd_core::look::StarRow> = Vec::new();
+        for chunk in &chunks {
+            assert!(!chunk.is_empty(), "no empty part");
+            let encoded = postcard::to_allocvec(chunk).expect("encode").len();
+            assert!(
+                encoded <= budget,
+                "part of {encoded} B over a {budget} B budget"
+            );
+            seen.extend(chunk.iter().copied());
+        }
+        assert_eq!(seen, stars, "the parts reassemble to exactly the galaxy");
+
+        // A ROOMY BUDGET KEEPS ONE PART — so the split above is the budget's doing, not the chunker
+        // always splitting.
+        assert_eq!(partition_stars(&stars, 100_000).len(), 1);
+
+        // ★ ONE STAR STILL SHIPS EVEN IF IT ALONE EXCEEDS THE BUDGET. The alternative is a star that can
+        // never be sent — a hole in the sky that no retry ever fills.
+        let one = partition_stars(&stars[..1], 1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].len(), 1);
     }
 
     #[test]

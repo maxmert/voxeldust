@@ -49,6 +49,7 @@ pub fn gateway_view(
         presence_announces,
         sub_close_refused_authority,
         window_rows_ingested,
+        star_catalogue_parts_sent: _,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -302,6 +303,7 @@ mod tests {
             // declaration order.
             window_relay_interior_unvouched: 87,
             window_relay_interior_filtered: 88,
+            star_catalogue_parts_sent: 0,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);

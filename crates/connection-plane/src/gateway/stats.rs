@@ -111,6 +111,10 @@ pub struct GatewayStats {
     /// lifetime, and the roster is authority-refcounted). `0` on a static gateway (no shard ever greets). Its
     /// existence keeps a greeting from being miscounted `undecodable` (the honesty floor).
     pub presence_announces: u64,
+    /// THE STAR CATALOGUE's parts forwarded to clients (S11). Expected to reach a small number per
+    /// session and STOP: a sky that does not change is stated once. A counter that keeps climbing on a
+    /// static world means the catalogue is being re-issued for nothing — the exact cost S11 removes.
+    pub star_catalogue_parts_sent: u64,
     /// THE WINDOW LANE's admitted rows (mesh minor 16): a `WindowFrame`/`WindowBody`/
     /// `WindowMembership` row that PASSED attestation (a known window, the roster-head sender,
     /// an admissible body) and was INGESTED into the window's composer state (Slice B retired

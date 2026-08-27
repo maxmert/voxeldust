@@ -381,6 +381,37 @@ pub enum ShardToGateway {
         /// is deliberately absent — it rides the per-tick frame, where repetition is its loss story.
         rows: Vec<RealmSnap>,
     },
+    /// ONE PART OF THE STAR CATALOGUE (S11; owner-approved 2026-08-24 Q4, the compact-message
+    /// reversal): the galaxy's stars, as the client draws them.
+    ///
+    /// ★ THE CLIENT IS ITS ONLY RECIPIENT — the owner's FIRST condition. **Nothing is sent to realms.**
+    /// Every shard already folds the world from the seed itself, and a ship IS a shard: a star-map block
+    /// on a bridge asks the generator and zero bytes cross. The client genuinely needs it, because the
+    /// client may not derive — the server does the arithmetic and the client renders — and putting the
+    /// generator in the client hands every player the ability to enumerate the galaxy offline, a door
+    /// that does not close again.
+    ///
+    /// **IT IS A DRAWING AID AND NOTHING ELSE** (the owner's FOURTH condition). The client caches it on
+    /// disk, and the server validates every destination itself. A player can edit their own cache and
+    /// recompute any digest we choose — so the protection was never the digest. A forged cache draws a
+    /// star nobody else can see and flies its owner to empty space.
+    ///
+    /// **CHUNKED**, because this is the only message whose size grows with the world: 7.0 MB at the
+    /// target census, which no carrier takes in one piece. `part`/`parts` let the receiver know when it
+    /// holds the whole sky; a catalogue is drawn only when complete, never half-drawn.
+    ///
+    /// `generation` is DERIVED FROM THE CONTENT ([`vd_core::look::catalogue_generation`]), never
+    /// hand-incremented — the owner's THIRD condition. It is the same on every part of one catalogue, so
+    /// a receiver can tell parts of two different skies apart rather than splicing them.
+    StarCatalogue {
+        /// Which sky this is, folded from its own bytes. Identical across every part.
+        generation: u64,
+        /// This part's index, and how many parts the whole sky is. `part < parts` always.
+        part: u32,
+        parts: u32,
+        /// The stars in THIS part. Never empty — an empty catalogue sends no parts at all.
+        rows: Vec<vd_core::look::StarRow>,
+    },
 }
 
 impl ShardToGateway {
@@ -400,7 +431,8 @@ impl ShardToGateway {
             | ShardToGateway::WindowBody { .. }
             | ShardToGateway::WindowMembership { .. }
             | ShardToGateway::WindowRelayed { .. }
-            | ShardToGateway::WindowStaticRows { .. } => None,
+            | ShardToGateway::WindowStaticRows { .. }
+            | ShardToGateway::StarCatalogue { .. } => None,
         }
     }
 
@@ -425,7 +457,8 @@ impl ShardToGateway {
             | ShardToGateway::WindowBody { .. }
             | ShardToGateway::WindowMembership { .. }
             | ShardToGateway::WindowRelayed { .. }
-            | ShardToGateway::WindowStaticRows { .. } => None,
+            | ShardToGateway::WindowStaticRows { .. }
+            | ShardToGateway::StarCatalogue { .. } => None,
         }
     }
 }
@@ -1163,6 +1196,17 @@ mod tests {
                     ),
                 }],
             },
+            ShardToGateway::StarCatalogue {
+                generation: 0xcbf2_9ce4_8422_2325,
+                part: 0,
+                parts: 1,
+                rows: vec![vd_core::look::StarRow {
+                    realm: RealmId::System(8),
+                    cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304, 0, 0),
+                    class_code: 6,
+                    luma_lsun: 0.25,
+                }],
+            },
         ]
     }
 
@@ -1227,6 +1271,8 @@ mod tests {
                 ShardToGateway::WindowRelayed { .. } => 10,
                 // The static-roster split holds 11 (owner ruling 2026-08-27) forever.
                 ShardToGateway::WindowStaticRows { .. } => 11,
+                // The star catalogue holds 12 (S11) forever.
+                ShardToGateway::StarCatalogue { .. } => 12,
             }
         }
         fn g2s_index(msg: &GatewayToShard) -> u8 {
@@ -1246,9 +1292,9 @@ mod tests {
             assert_eq!(bytes[0], s2g_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 12);
+        assert_eq!(seen.len(), 13);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(11));
+        assert_eq!(seen.last().copied(), Some(12));
         let mut seen = std::collections::BTreeSet::new();
         for msg in every_gateway_to_shard_arm() {
             let bytes = postcard::to_allocvec(&msg).expect("encode");

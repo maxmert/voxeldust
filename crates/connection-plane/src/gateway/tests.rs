@@ -4038,6 +4038,36 @@ fn a_forced_index_table_desync_hits_the_counter_never_a_silent_drop() {
     assert_eq!(stats.frame_sub_desync, 1, "(a) missing session is counted");
     assert!(outbox.0.is_empty());
 
+    // ★ THE STAR CATALOGUE's fan runs the SAME desync arm (S11), and is driven here rather than in a
+    // second forced-desync fixture: the breach is one invariant, so it is proved once and every lane
+    // that walks the reverse index is checked against it. A catalogue silently dropped on a desync
+    // would leave that player with no sky at all and nothing in any log — the exact failure S11 exists
+    // to prevent, arriving by a different door.
+    crate::gateway::client::fan_star_catalogue(
+        SHARD,
+        7,
+        0,
+        1,
+        vec![vd_core::look::StarRow {
+            realm: RealmId::System(1),
+            cell: vd_core::glam::I64Vec3::ZERO,
+            class_code: 6,
+            luma_lsun: 0.25,
+        }],
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.frame_sub_desync, 2, "the catalogue counts it too");
+    assert_eq!(
+        stats.star_catalogue_parts_sent, 0,
+        "and nothing is recorded as sent"
+    );
+    assert!(
+        outbox.0.is_empty(),
+        "a desync sends no sky, silently or otherwise"
+    );
+
     // (b) a present session indexed under SHARD but with an EMPTY hot SubTable.
     let (mut sessions, sid, _) = one_active_session();
     sessions.by_session[&sid]
@@ -6357,6 +6387,90 @@ fn a_crossing_swap_falls_back_when_the_new_chain_is_not_fully_fresh() {
         sessions.by_session[&sid].shadow.last_t,
         Some(UniverseTick(102)),
         "a short-prefix chain folds fresh — the preference never blocks the swap"
+    );
+}
+
+/// ★ THE STAR CATALOGUE REACHES THE CLIENT, IN PARTS AND UNCHANGED (S11).
+///
+/// The gateway FORWARDS this lane; it does not compose it. Every other picture lane is composed per
+/// observer and per instant — a catalogue is neither. It is the same sky for everybody, so re-composing
+/// per session would be work with no product, and would give two players two skies folded from one
+/// truth: the exact drift the byte-identity gate one level up exists to catch.
+#[test]
+fn the_star_catalogue_forwards_to_the_client_in_parts_and_unaltered() {
+    let mut rig = Rig::new();
+    let (_sid, _login) = rig.login(); // Active session at CLIENT, subscribed to SHARD
+    let star = |n: u64| vd_core::look::StarRow {
+        realm: RealmId::System(n),
+        cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
+        class_code: 6,
+        luma_lsun: 0.25,
+    };
+    let part =
+        |part: u32, parts: u32, rows: Vec<vd_core::look::StarRow>| ShardToGateway::StarCatalogue {
+            generation: 0x1234_5678_9abc_def0,
+            part,
+            parts,
+            rows,
+        };
+
+    // TWO PARTS OF ONE SKY, forwarded whole. The rows must arrive EXACTLY as stated — a gateway that
+    // re-ordered or re-encoded them would break the byte-identity the client's cache digest rests on.
+    let sent = rig.tick(vec![
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &part(0, 2, vec![star(1), star(2)]),
+        ),
+        wire(SHARD, MsgClass::Control, &part(1, 2, vec![star(3)])),
+    ]);
+    let got = decode_controls(&sent, CLIENT);
+    assert!(
+        got.contains(&ServerControlMsg::StarCatalogue {
+            generation: 0x1234_5678_9abc_def0,
+            part: 0,
+            parts: 2,
+            rows: vec![star(1), star(2)],
+        }),
+        "part 0 reaches the client unaltered: {got:?}"
+    );
+    assert!(
+        got.contains(&ServerControlMsg::StarCatalogue {
+            generation: 0x1234_5678_9abc_def0,
+            part: 1,
+            parts: 2,
+            rows: vec![star(3)],
+        }),
+        "part 1 too — a sky is drawn only when whole, so a lost part is a missing sky"
+    );
+    assert_eq!(
+        rig.world
+            .resource::<GatewayStats>()
+            .star_catalogue_parts_sent,
+        2
+    );
+
+    // ★ AND A PART FROM A SHARD NOBODY IS SUBSCRIBED TO REACHES NOBODY — counted, never guessed at.
+    // Without this arm the fan would look correct while quietly serving every client every galaxy.
+    let before = rig
+        .world
+        .resource::<GatewayStats>()
+        .star_catalogue_parts_sent;
+    let sent = rig.tick(vec![wire(
+        DEST,
+        MsgClass::Control,
+        &part(0, 1, vec![star(9)]),
+    )]);
+    assert!(
+        decode_controls(&sent, CLIENT).is_empty(),
+        "a catalogue from an unsubscribed shard reaches no client"
+    );
+    assert_eq!(
+        rig.world
+            .resource::<GatewayStats>()
+            .star_catalogue_parts_sent,
+        before,
+        "and nothing is counted as sent"
     );
 }
 

@@ -372,6 +372,50 @@ pub(crate) fn fan_entity_removed(
     }
 }
 
+/// FAN ONE PART OF THE STAR CATALOGUE to every client subscribed to the stating shard (S11).
+///
+/// ★ THE GATEWAY FORWARDS, IT DOES NOT COMPOSE. Every other picture lane is composed per observer and
+/// per instant; a catalogue is neither. It is the same sky for everybody and true until the world is
+/// regenerated, so re-composing it per session would be work with no product — and would give two
+/// players two skies folded from one truth, which is the drift the byte-identity gate exists to catch
+/// one level up.
+///
+/// No fence test and no staleness test, deliberately: the `generation` IS the ordering, folded from the
+/// content. A part of an older sky is not "stale" in the fence sense — it belongs to a different
+/// catalogue, and the receiver tells them apart by that number rather than by arrival order.
+// Eight arguments, like the window emitters beside it: the catalogue's three identifying numbers
+// travel together and folding them into a struct here would be a second shape for the wire arm's own
+// fields — the thing this lane already avoids by forwarding rather than re-composing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fan_star_catalogue(
+    from: NodeId,
+    generation: u64,
+    part: u32,
+    parts: u32,
+    rows: Vec<vd_core::look::StarRow>,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    for session_id in sessions.subscribers_of(from) {
+        let Some(session) = sessions.by_session.get(&session_id) else {
+            stats.frame_sub_desync += 1;
+            continue;
+        };
+        push_control(
+            outbox,
+            session.client,
+            &ServerControlMsg::StarCatalogue {
+                generation,
+                part,
+                parts,
+                rows: rows.clone(),
+            },
+        );
+        stats.star_catalogue_parts_sent += 1;
+    }
+}
+
 /// Fan one shard frame (from shard `from`) out to that shard's subscribers, each at ITS sub
 /// id and ITS per-shard accepted fence. The READ-plane heart (1d.2a): iterate ONLY
 /// subscribers-of-`from` (H2 reverse index, O(subscribers) not O(all sessions)) and resolve
