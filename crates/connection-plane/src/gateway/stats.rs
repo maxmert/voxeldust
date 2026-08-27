@@ -118,6 +118,15 @@ pub struct GatewayStats {
     /// THE SKY'S LIVENESS BEATS forwarded to clients (S11). EXPECTED to climb forever on a static
     /// world — this is the one counter here whose flat line is the defect, not its growth.
     pub sky_alive_beats_sent: u64,
+    /// REQUESTS FOR THE SKY sent to shards (S11). The gateway asks at most once per beat, and only
+    /// while some client behind it lacks the sky the beat named. Settles once every client is served.
+    pub sky_requests_sent: u64,
+    /// CLIENTS STATING THE SKY THEY HOLD (S11). Each statement is what lets the gateway skip sending a
+    /// 7.0 MB catalogue to a client that already has it.
+    pub sky_held_stated: u64,
+    /// CATALOGUE PARTS NOT SENT because the client already held that sky (S11). This is the saving,
+    /// counted: every skipped part is bytes that did not cross for a galaxy that did not move.
+    pub sky_parts_skipped: u64,
     /// THE WINDOW LANE's admitted rows (mesh minor 16): a `WindowFrame`/`WindowBody`/
     /// `WindowMembership` row that PASSED attestation (a known window, the roster-head sender,
     /// an admissible body) and was INGESTED into the window's composer state (Slice B retired

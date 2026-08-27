@@ -59,6 +59,27 @@ pub enum ClientControlMsg {
     Pong {
         nonce: u64,
     },
+    /// THE RECEIVER STATES WHAT IT HOLDS (S11) — the client naming the sky it already has, whether it
+    /// read it from its own disk cache or assembled it from the wire.
+    ///
+    /// ★ WHY THE RECEIVER AND NOT THE SENDER. The sender used to remember which sky it had stated to
+    /// each gateway. That memory was wrong in BOTH directions and the sender could not tell the cases
+    /// apart:
+    ///
+    /// ```text
+    ///   forget too early   -> a client returning from a crossing is re-sent a sky it holds (7.0 MB)
+    ///   remember too long  -> a NEW client behind that gateway is sent NO SKY AT ALL
+    /// ```
+    ///
+    /// No length of memory cures that, because **the sender is not the party that knows.** A gateway
+    /// serves many clients and holds one memory; the thing actually holding a sky is a client. So the
+    /// client says what it has, and the server answers from that.
+    ///
+    /// Appended trailing variant (postcard additive rule).
+    SkyHeld {
+        /// The generation of the catalogue this client holds, whole and drawable.
+        generation: u64,
+    },
     Bye,
 }
 

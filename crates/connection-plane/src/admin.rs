@@ -51,6 +51,9 @@ pub fn gateway_view(
         window_rows_ingested,
         star_catalogue_parts_sent: _,
         sky_alive_beats_sent: _,
+        sky_requests_sent: _,
+        sky_held_stated: _,
+        sky_parts_skipped: _,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -306,6 +309,9 @@ mod tests {
             window_relay_interior_filtered: 88,
             star_catalogue_parts_sent: 0,
             sky_alive_beats_sent: 0,
+            sky_requests_sent: 0,
+            sky_held_stated: 0,
+            sky_parts_skipped: 0,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);

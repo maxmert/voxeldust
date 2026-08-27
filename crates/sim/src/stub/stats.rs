@@ -417,6 +417,10 @@ pub struct StubStats {
     /// climb forever on a perfectly static world — a beat that stops climbing is the failure it exists
     /// to expose. Reads as gateways-with-a-window per cadence period.
     pub sky_alive_beats_sent: u64,
+    /// REQUESTS FOR THE SKY taken from gateways (S11). A gateway asks at most once per beat, and only
+    /// while some client behind it lacks the sky, so this settles once every client is served. A
+    /// counter that keeps climbing means a client is never confirming what it holds.
+    pub sky_requests_taken: u64,
     /// THE STATIC ROSTER's sends (slice S10). Expected to reach a small number and STOP: a realm whose
     /// children do not move states them once per subscriber, then only on a keep-alive re-assert. A
     /// counter that keeps climbing on a static world means the send-on-change baseline is not holding.

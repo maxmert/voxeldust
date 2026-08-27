@@ -3558,6 +3558,7 @@ fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
     // A bare session in a given phase with a given confirmed_at tick (uses the module test consts).
     fn sess(phase: SessionPhase, confirmed: u64) -> Session {
         Session {
+            sky_held: None,
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -3641,6 +3642,7 @@ fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
     sessions.by_session.insert(
         sid,
         Session {
+            sky_held: None,
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -3895,6 +3897,7 @@ fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
     sessions.by_session.insert(
         sid_b,
         Session {
+            sky_held: None,
             client: NodeId(101),
             account: AccountId(6),
             fence: Fence(1),
@@ -5010,6 +5013,7 @@ use vd_wire::seams::transfer_control::SpatialReject;
 /// always Active with a fresh empty transfer). `transfer: None` so `apply_prepare` opens fresh progress.
 fn active_session() -> Session {
     Session {
+        sky_held: None,
         client: CLIENT,
         account: AccountId(5),
         fence: Fence(1),
@@ -9892,6 +9896,7 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
         let o = (i as u64) % ORIGINS;
         let sid = SessionId(0xB000 + i as u128);
         let mut session = Session {
+            sky_held: None,
             client: CLIENT,
             account: AccountId(i as u128),
             fence: Fence(1),
@@ -10217,5 +10222,180 @@ fn the_sky_liveness_beat_forwards_to_the_client_and_repeats_are_not_suppressed()
         decode_controls(&sent, CLIENT).contains(&ServerControlMsg::SkyAlive {
             generation: 0xdead_beef
         })
+    );
+}
+
+/// Every shard-ward message the gateway sent to `to` this tick, decoded (S11 helper).
+fn decode_shard_msgs(sent: &[(NodeId, MsgClass, Vec<u8>)], to: NodeId) -> Vec<GatewayToShard> {
+    sent.iter()
+        .filter(|(node, _, _)| *node == to)
+        .filter_map(|(_, _, b)| postcard::from_bytes::<GatewayToShard>(b).ok())
+        .collect()
+}
+
+/// ★ THE RECEIVER STATES WHAT IT HOLDS, AND THE GATEWAY STOPS ASKING (S11).
+///
+/// This is the exchange that replaces a memory which could not be made correct. The shard kept a
+/// record of which sky it had stated to each gateway, and it was wrong in BOTH directions — forget too
+/// early and a returning client is re-sent 7.0 MB it holds; remember too long and a NEW client behind
+/// that gateway is sent nothing at all. The sender was never the party that knew.
+///
+/// Now the client says what it has, and the gateway asks only while somebody needs one.
+#[test]
+fn a_client_stating_its_sky_stops_the_gateway_asking_and_stops_the_fan() {
+    let mut rig = Rig::new();
+    let (_sid, _login) = rig.login(); // Active session at CLIENT, subscribed to SHARD
+    const GENERATION: u64 = 0x51CE_0F5C_1E5A_1234;
+    let beat = ShardToGateway::StarSkyAlive {
+        generation: GENERATION,
+    };
+
+    // A CLIENT HOLDING NOTHING: the beat drives an ask, because somebody needs the sky.
+    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &beat)]);
+    assert!(
+        decode_shard_msgs(&sent, SHARD).contains(&GatewayToShard::SkyRequest),
+        "a client that holds no sky must cause exactly one ask: {sent:?}"
+    );
+    assert_eq!(rig.world.resource::<GatewayStats>().sky_requests_sent, 1);
+
+    // THE CLIENT STATES WHAT IT HOLDS.
+    let _ = rig.tick(vec![wire(
+        CLIENT,
+        MsgClass::Control,
+        &ClientControlMsg::SkyHeld {
+            generation: GENERATION,
+        },
+    )]);
+    assert_eq!(rig.world.resource::<GatewayStats>().sky_held_stated, 1);
+
+    // ...AND THE ASKING STOPS. Nobody needs anything, so the beat is forwarded and nothing else.
+    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &beat)]);
+    assert!(
+        !decode_shard_msgs(&sent, SHARD).contains(&GatewayToShard::SkyRequest),
+        "a served client must not keep the gateway asking for ever: {sent:?}"
+    );
+    assert_eq!(
+        rig.world.resource::<GatewayStats>().sky_requests_sent,
+        1,
+        "still one — the ask settled"
+    );
+    // The beat itself never stops. Unchanged IS its message.
+    assert!(
+        decode_controls(&sent, CLIENT).contains(&ServerControlMsg::SkyAlive {
+            generation: GENERATION
+        })
+    );
+
+    // A STATEMENT FROM A CLIENT WITH NO SESSION IS DROPPED, not recorded against somebody else. A
+    // stranger cannot silence the sky for a real player, which is what writing this against the wrong
+    // session would do.
+    const STRANGER: NodeId = NodeId(31337);
+    let held_before = rig.world.resource::<GatewayStats>().sky_held_stated;
+    let _ = rig.tick(vec![wire(
+        STRANGER,
+        MsgClass::Control,
+        &ClientControlMsg::SkyHeld {
+            generation: GENERATION,
+        },
+    )]);
+    assert_eq!(
+        rig.world.resource::<GatewayStats>().sky_held_stated,
+        held_before,
+        "a client with no session states nothing"
+    );
+
+    // A DIFFERENT SKY re-opens the need, so the exchange is not a one-shot latch.
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Control,
+        &ShardToGateway::StarSkyAlive {
+            generation: GENERATION + 1,
+        },
+    )]);
+    assert!(
+        decode_shard_msgs(&sent, SHARD).contains(&GatewayToShard::SkyRequest),
+        "a sky that MOVED must be asked for again"
+    );
+}
+
+/// ★ THE CATALOGUE GOES ONLY TO THE CLIENTS THAT NEED IT (S11).
+///
+/// The shard answers one request with one catalogue. Many clients sit behind this gateway, and they
+/// may hold many different skies — including this one. Fanning to all of them would re-send 7.0 MB to
+/// every client that already had it, which is the cost the whole exchange exists to remove.
+#[test]
+fn a_catalogue_skips_the_clients_that_already_hold_that_sky() {
+    let mut rig = Rig::new();
+    let (_sid, _login) = rig.login();
+    const GENERATION: u64 = 0xABCD_0001;
+    let star = vd_core::look::StarRow {
+        realm: RealmId::System(1),
+        cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304, 7, -3),
+        class_code: 6,
+        luma_lsun: 0.25,
+    };
+    let part = ShardToGateway::StarCatalogue {
+        generation: GENERATION,
+        part: 0,
+        parts: 1,
+        rows: vec![star],
+    };
+
+    // BEFORE STATING: the client is served, because a client that has said nothing is treated as
+    // holding nothing. That default is the safe one — it costs bytes, never a missing galaxy.
+    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &part)]);
+    assert_eq!(
+        decode_controls(&sent, CLIENT)
+            .iter()
+            .filter(|m| matches!(m, ServerControlMsg::StarCatalogue { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        rig.world.resource::<GatewayStats>().sky_parts_skipped,
+        0,
+        "nothing was skipped yet, or the test below proves nothing"
+    );
+
+    // AFTER STATING: the same part is dropped at the gateway rather than crossing to a client that
+    // holds it.
+    let _ = rig.tick(vec![wire(
+        CLIENT,
+        MsgClass::Control,
+        &ClientControlMsg::SkyHeld {
+            generation: GENERATION,
+        },
+    )]);
+    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &part)]);
+    assert!(
+        !decode_controls(&sent, CLIENT)
+            .iter()
+            .any(|m| matches!(m, ServerControlMsg::StarCatalogue { .. })),
+        "a client holding this sky must not be sent it again"
+    );
+    assert_eq!(
+        rig.world.resource::<GatewayStats>().sky_parts_skipped,
+        1,
+        "and the saving is counted"
+    );
+
+    // A DIFFERENT generation is still delivered — the skip is about THIS sky, not about the client.
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Control,
+        &ShardToGateway::StarCatalogue {
+            generation: GENERATION + 1,
+            part: 0,
+            parts: 1,
+            rows: vec![star],
+        },
+    )]);
+    assert_eq!(
+        decode_controls(&sent, CLIENT)
+            .iter()
+            .filter(|m| matches!(m, ServerControlMsg::StarCatalogue { .. }))
+            .count(),
+        1,
+        "a NEW sky still reaches a client that held the old one"
     );
 }

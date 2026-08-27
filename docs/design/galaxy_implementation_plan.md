@@ -929,6 +929,13 @@ the failure it exists to prevent. So:
   differs ⇒ *"I hold the wrong sky"*, no beat ⇒ *"nobody is working"*. The third arm is an ABSENCE and
   so is left to a caller holding a clock (the client counts confirmations); the watchdog policy is owed
   with the renderer. See D-S11-SKY.
+- **LANDED 2026-08-27 — the cache and the generation exchange.** The client holds the galaxy on its own
+  disk under `StoreRole::ClientCatalogue`'s stamp plus the catalogue generation, and states what it
+  holds; the gateway asks the shard only while some client behind it needs one; the shard answers and
+  remembers nothing. `SkyStatedTo` — the memory that could not be made correct — is deleted. MEASURED:
+  every byte flip in a cache's row payload reaches the fold, and none is caught by an earlier test, so
+  the digest is doing the work rather than the fixture. Owed: the file I/O (no client persistence seam
+  exists yet), the quiet-lane watchdog policy, and the instanced point cloud.
 - The client's cache carries S1's stamp **and a content digest**; a mismatch **discards and re-requests**
   rather than drawing, and the decode is bounded (row-count cap, magnitude cap) with a counter. A
   byte-flipped cache produces a counted refusal and a re-request, never a drawn frame. (postcard is

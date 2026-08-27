@@ -101,6 +101,10 @@ pub struct ClientState {
     /// THE STAR CATALOGUE, assembling (S11). Public so the harness and the renderer can ask what the
     /// client actually holds — the S11 gate counts the stars that ARRIVED, never the absence of bytes.
     pub sky: crate::star_sky::StarSky,
+    /// THE STATEMENT WAITING TO GO OUT (S11) — the generation this client holds, queued because the
+    /// control handler has no transport. Drained on the next send. Latest-wins: only the newest sky is
+    /// worth stating, and stating an older one would ask for work nobody needs.
+    pending_sky_held: Option<u64>,
     /// THE ORIGIN MARKER (§2.7): the realm the current scene is composed in, as the level stated
     /// it. `None` before the first level. The diagnosis surface (`DevState.origin`) reads it —
     /// the pixel gates' "origin marker == home realm" assert.
@@ -137,6 +141,7 @@ impl ClientState {
             latest_universe_tick: None,
             scene: Arc::new(RealmScene::default()),
             sky: crate::star_sky::StarSky::default(),
+            pending_sky_held: None,
             origin: None,
             realm_view: RealmView::default(),
         }
@@ -294,13 +299,26 @@ impl ClientState {
                 parts,
                 rows,
             } => {
-                let _ = self.sky.accept(generation, part, parts, rows);
+                // STATE WHAT WE NOW HOLD, the moment the sky becomes whole (S11). Until the client
+                // says this, the server has no way to know it has been served, and the beat keeps
+                // driving a fresh request every cadence — the exchange only settles because the
+                // receiver answers.
+                if self.sky.accept(generation, part, parts, rows)
+                    == crate::star_sky::SkyIngest::Completed
+                {
+                    self.state_sky_held(generation);
+                }
             }
             // THE SKY'S LIVENESS BEAT (S11): the server naming the sky it believes is current, on a
             // cadence, whether or not it changed. Counted inside the assembler, because "nothing
             // changed" and "the emitter died" are the same silence and only a beat separates them.
             ServerControlMsg::SkyAlive { generation } => {
-                let _ = self.sky.beat(generation);
+                // A beat that CONFIRMS what we hold is also the moment to re-state it, because a
+                // gateway that lost our statement (a reconnect, a session that moved) would otherwise
+                // go on asking for a sky we already have, for ever.
+                if self.sky.beat(generation) == crate::star_sky::SkyBeat::Current {
+                    self.state_sky_held(generation);
+                }
             }
             // Node-AWARE legacy control a pure-renderer client no longer acts on: `AuthorityChanged`
             // (the sub re-point — superseded by `OwnEntity` + EntityId-keyed latest-wins render) and
@@ -367,6 +385,37 @@ impl ClientState {
         }
     }
 
+    /// Queue "I hold this sky" for the next send (S11).
+    ///
+    /// ★ WHY THE CLIENT MUST SAY THIS AT ALL. The server no longer remembers who it has served — that
+    /// memory was wrong in both directions and could not be fixed, because a gateway serves many
+    /// clients and a shard sees none of them. The client is the only party that knows what it holds,
+    /// so the exchange settles only when the client answers. A client that never states this is served
+    /// the catalogue again on every beat, which is safe but wasteful; a client that states a sky it
+    /// does not have would be denied one, which is why this is called only where a whole sky is proven.
+    fn state_sky_held(&mut self, generation: u64) {
+        self.pending_sky_held = Some(generation);
+    }
+
+    /// Adopt a sky from the on-disk cache, and state it (S11).
+    ///
+    /// This is the whole point of having a cache: a returning player draws the galaxy from their own
+    /// disk, states the generation, and the server sends none of it. The statement is what closes the
+    /// loop — without it the server would serve a catalogue the client already had.
+    ///
+    /// # Errors
+    /// [`crate::star_sky::CacheRefusal`] if the file failed any of its proofs. The held sky is
+    /// unchanged, and the server simply serves one, so a bad cache costs bytes and never correctness.
+    pub fn adopt_sky_cache(
+        &mut self,
+        bytes: &[u8],
+        expected: &vd_core::store_stamp::StoreStamp,
+    ) -> Result<u64, crate::star_sky::CacheRefusal> {
+        let generation = self.sky.adopt_cache(bytes, expected)?;
+        self.state_sky_held(generation);
+        Ok(generation)
+    }
+
     fn send_outbound(&mut self, transport: &mut dyn Transport) -> usize {
         if self.closing && self.phase != ClientPhase::Closed {
             let buf =
@@ -374,6 +423,13 @@ impl ClientState {
             let _ = self.send_bytes(transport, MsgClass::Control, buf);
             self.phase = ClientPhase::Closed;
             return 1;
+        }
+        // THE HELD-SKY STATEMENT (S11), ahead of the phase machine: it is not part of the login
+        // handshake and must not wait on one. Taken, so a statement is sent once.
+        if let Some(generation) = self.pending_sky_held.take() {
+            let buf = postcard::to_allocvec(&ClientControlMsg::SkyHeld { generation })
+                .expect("closed wire enums serialize");
+            let _ = self.send_bytes(transport, MsgClass::Control, buf);
         }
         match self.phase {
             ClientPhase::Connecting => {
@@ -1034,6 +1090,107 @@ mod tests {
     ///
     /// So this counts the stars the client actually HOLDS, never the absence of bytes. A sky that
     /// never arrived reads zero here and cannot be mistaken for a sky that did not need re-sending.
+    /// ★ THE CLIENT STATES THE SKY IT HOLDS, OR THE EXCHANGE NEVER SETTLES (S11).
+    ///
+    /// The server keeps no memory of who it has served — that memory was wrong in both directions and
+    /// could not be repaired, because a gateway serves many clients and a shard sees none of them. The
+    /// client is the only party that knows what it holds. So if the client never answers, the server
+    /// goes on serving the catalogue for ever, and the saving this whole slice exists for is lost.
+    #[test]
+    fn the_client_states_the_sky_it_holds_when_the_sky_becomes_whole() {
+        let mut c = core();
+        activate(&mut c);
+        let star = |n: u64| vd_core::look::StarRow {
+            realm: vd_core::pose::RealmId::System(n),
+            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304 + n as i64, 7, -3),
+            class_code: 6,
+            luma_lsun: 0.25,
+        };
+        let part = |part: u32, parts: u32, rows: Vec<vd_core::look::StarRow>| {
+            postcard::to_allocvec(&ServerControlMsg::StarCatalogue {
+                generation: 0x1234,
+                part,
+                parts,
+                rows,
+            })
+            .expect("fixture")
+        };
+        let stated = |c: &ClientCore<MockTransport>| {
+            c.transport
+                .sent
+                .iter()
+                .filter(|(_, b)| {
+                    postcard::from_bytes::<ClientControlMsg>(b)
+                        == Ok(ClientControlMsg::SkyHeld { generation: 0x1234 })
+                })
+                .count()
+        };
+
+        // HALF A SKY SAYS NOTHING. Stating a sky the client cannot draw would tell the server to stop
+        // sending the rest of it.
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, part(0, 2, vec![star(1)]));
+        c.step(10.0);
+        assert_eq!(stated(&c), 0, "a partial sky is not a held sky");
+
+        // THE LAST PART: the sky is whole, and the client says so.
+        c.transport
+            .deliver(GATEWAY, MsgClass::Control, part(1, 2, vec![star(2)]));
+        c.step(10.0);
+        assert_eq!(stated(&c), 1, "the client answered, so the server can stop");
+
+        // A CONFIRMING BEAT RE-STATES IT. A gateway that lost the statement — a reconnect, a session
+        // that moved — would otherwise ask for a sky this client already has, for ever.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::SkyAlive { generation: 0x1234 })
+                .expect("fixture"),
+        );
+        c.step(10.0);
+        assert_eq!(stated(&c), 2, "a confirming beat re-states what we hold");
+    }
+
+    /// ★ A SKY READ FROM DISK IS STATED TOO, AND CROSSES NOTHING (S11).
+    ///
+    /// This is the whole point of the cache: a returning player draws the galaxy from their own disk,
+    /// says which one it is, and the server sends none of it.
+    #[test]
+    fn a_sky_adopted_from_the_cache_is_stated_without_the_catalogue_crossing() {
+        let mut c = core();
+        activate(&mut c);
+        let rows = vec![vd_core::look::StarRow {
+            realm: vd_core::pose::RealmId::System(1),
+            cell: vd_core::glam::I64Vec3::new(1_313_684_865_644_610_304, 7, -3),
+            class_code: 6,
+            luma_lsun: 0.25,
+        }];
+        let generation =
+            vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
+        let stamp = vd_core::store_stamp::StoreStamp::new(
+            vd_core::store_stamp::StoreRole::ClientCatalogue,
+            0x5EED,
+            vd_core::ids::EpochId(1),
+            &[1.0, 2.0],
+        );
+        let file = crate::star_sky::encode_cache(stamp, generation, &rows);
+
+        assert_eq!(c.state_mut().adopt_sky_cache(&file, &stamp), Ok(generation));
+        c.step(10.0);
+        assert_eq!(
+            c.state().sky.complete(),
+            Some(rows),
+            "the galaxy is drawable, and not one byte of it crossed the wire"
+        );
+        assert!(
+            c.transport.sent.iter().any(|(_, b)| {
+                postcard::from_bytes::<ClientControlMsg>(b)
+                    == Ok(ClientControlMsg::SkyHeld { generation })
+            }),
+            "and the server is told, so it never serves what we already read from disk"
+        );
+    }
+
     /// ★ THE SKY'S LIVENESS BEAT, END TO END OVER THE WIRE (S11).
     ///
     /// Proves the arm decodes and reaches the assembler on the real ingest path — not just that the

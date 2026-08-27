@@ -127,6 +127,8 @@ pub(crate) fn on_client_control(
             sessions.by_session.insert(
                 proposed,
                 Session {
+                    // A fresh session holds no sky until it says otherwise (S11).
+                    sky_held: None,
                     client,
                     account: login.account,
                     fence,
@@ -247,6 +249,22 @@ pub(crate) fn on_client_control(
         }
         // No transfers in P1: a cut confirmation has nothing to bind to.
         // Pongs are liveness echoes; the P1 gateway sends no pings.
+        // THE RECEIVER STATES WHAT IT HOLDS (S11). Recorded against the session, because the session
+        // is the thing that holds a sky — the gateway does not, and the shard must not try to.
+        //
+        // A session that never says this is treated as holding nothing, which is the safe default: it
+        // is served the sky it may already have, rather than being denied one it does not.
+        ClientControlMsg::SkyHeld { generation } => {
+            if let Some(entry) = sessions
+                .by_client
+                .get(&client)
+                .copied()
+                .and_then(|session| sessions.by_session.get_mut(&session))
+            {
+                entry.sky_held = Some(generation);
+                stats.sky_held_stated += 1;
+            }
+        }
         ClientControlMsg::CutEmitted { .. } | ClientControlMsg::Pong { .. } => {}
     }
 }
@@ -402,6 +420,14 @@ pub(crate) fn fan_star_catalogue(
             stats.frame_sub_desync += 1;
             continue;
         };
+        // ★ ONLY TO THE CLIENTS THAT NEED IT (S11). The shard answers one request with one catalogue,
+        // and there may be many clients behind this gateway holding many different skies — including
+        // this one. Fanning to all of them would re-send 7.0 MB to every client that already had it,
+        // which is the cost this whole exchange exists to remove.
+        if session.sky_held == Some(generation) {
+            stats.sky_parts_skipped += 1;
+            continue;
+        }
         push_control(
             outbox,
             session.client,
@@ -423,6 +449,14 @@ pub(crate) fn fan_star_catalogue(
 /// observer, and composing it would be the drift the byte-identity gate exists to catch.
 ///
 /// NOT SUPPRESSED when the generation is unchanged — unchanged is the message.
+///
+/// ★ THE BEAT ALSO DRIVES THE ASK (S11). The beat is what tells the gateway which sky is current, so
+/// it is the only moment at which the gateway can know that a client behind it holds the wrong one —
+/// or none at all. If any subscriber needs it, the gateway asks the shard, once.
+///
+/// That rate-limits the ask to the beat's own cadence, which needs no timer and no acknowledgement: a
+/// catalogue lost on the way is simply asked for again at the next beat, so the exchange repairs
+/// itself. It also stops the moment every client confirms, because then nobody needs anything.
 pub(crate) fn fan_sky_alive(
     from: NodeId,
     generation: u64,
@@ -430,17 +464,23 @@ pub(crate) fn fan_sky_alive(
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
 ) {
+    let mut anyone_needs_it = false;
     for session_id in sessions.subscribers_of(from) {
         let Some(session) = sessions.by_session.get(&session_id) else {
             stats.frame_sub_desync += 1;
             continue;
         };
+        anyone_needs_it |= session.sky_held != Some(generation);
         push_control(
             outbox,
             session.client,
             &ServerControlMsg::SkyAlive { generation },
         );
         stats.sky_alive_beats_sent += 1;
+    }
+    if anyone_needs_it {
+        push_to_shard(outbox, from, MsgClass::Control, &GatewayToShard::SkyRequest);
+        stats.sky_requests_sent += 1;
     }
 }
 

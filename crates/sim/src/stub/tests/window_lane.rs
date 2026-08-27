@@ -1226,16 +1226,12 @@ fn a_static_roster_is_stated_once_and_the_frame_keeps_only_its_stamp() {
     );
 }
 
-/// ★ THE SKY IS STATED ONCE PER SUBSCRIBER, IN PARTS (S11).
+/// ★ THE SKY IS STATED WHEN IT IS ASKED FOR, AND ONLY THEN (S11).
 ///
-/// The catalogue is the only message whose size grows with the world — 7.0 MB at the target census,
-/// which no carrier takes whole — and none of it changes, because stars do not move. So it is chunked,
-/// and it is stated once: the generation IS the content, so a subscriber holding that number holds that
-/// sky and needs nothing further.
-///
-/// Driven over many ticks, so a per-tick regression cannot hide inside a two-tick window.
+/// The shard no longer decides who needs the sky. It cannot: a gateway serves many clients, and the
+/// shard sees only gateways. It answers a request, and keeps no record that it did.
 #[test]
-fn the_star_catalogue_is_stated_once_per_subscriber_in_parts() {
+fn the_star_catalogue_is_stated_once_per_request_in_parts() {
     let mut rig = window_rig();
     let star = |n: u64| vd_core::look::StarRow {
         realm: RealmId::System(n),
@@ -1251,53 +1247,61 @@ fn the_star_catalogue_is_stated_once_per_subscriber_in_parts() {
         generation,
     };
 
+    // OPENING A WINDOW STATES NO SKY. That coupling is gone: a window is a view onto THIS realm, and
+    // the galaxy is not this realm's to volunteer.
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
     };
-    let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+    let on_open = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+    assert!(
+        star_catalogue_parts(&on_open).is_empty(),
+        "an open is not a request"
+    );
+
+    // ASKING STATES IT, whole and in order.
+    rig.set_local_tick(2);
+    let sent = rig.tick(vec![wire_msg(
+        GATEWAY,
+        MsgClass::Control,
+        &GatewayToShard::SkyRequest,
+    )]);
     let parts = star_catalogue_parts(&sent);
-    assert!(!parts.is_empty(), "the sky is stated on open");
+    assert!(!parts.is_empty(), "the sky is stated to whoever asked");
     // Every part carries the SAME generation — parts of two skies can never be spliced into a galaxy
     // that never existed.
     assert!(parts.iter().all(|p| p.0 == generation));
-    // The parts reassemble to exactly the catalogue, in order.
     let seen: Vec<vd_core::look::StarRow> = parts.iter().flat_map(|p| p.3.clone()).collect();
     assert_eq!(seen, rows, "the parts are the sky, unaltered and in order");
-    // …and they agree about how many there are, or a receiver can never know it is whole.
     let total = parts[0].2;
     assert!(parts.iter().all(|p| p.2 == total));
     assert_eq!(parts.len() as u32, total);
 
-    // ★ TWENTY MORE TICKS, AND NOT ONE MORE PART. Under a per-tick lane this would be 7.0 MB × 20 at
-    // the census; here the generation already matches what the subscriber holds.
+    // ★ TWENTY MORE TICKS, AND NOT ONE MORE PART. Nobody asked again, so nothing is sent — and the
+    // shard holds no list of who it thinks might want one.
     let mut later = 0usize;
-    for t in 2..=21 {
+    for t in 3..=22 {
         rig.set_local_tick(t);
         later += star_catalogue_parts(&rig.tick(vec![])).len();
     }
-    assert_eq!(
-        later, 0,
-        "a sky that did not change says nothing for a second"
-    );
+    assert_eq!(later, 0, "a sky nobody asked for is not sent");
     assert_eq!(
         rig.world.resource::<StubStats>().star_catalogue_parts_sent as usize,
         parts.len(),
-        "stated once, across 21 ticks"
+        "stated once, across 22 ticks"
     );
 }
 
-/// ★ THE SKY IS NOT RE-SENT WHEN A SUBSCRIBER RE-ASSERTS (S11).
+/// ★ A KEEP-ALIVE RE-ASSERT DOES NOT RE-SEND THE SKY (S11).
 ///
 /// **A WARP LEG IS TWO CROSSINGS** — out of your star system and into the next — and each one shakes
 /// the subscription. If any of that re-issues the catalogue, a single journey re-transmits the whole
-/// sky TWICE: 14 MB at the census, for a galaxy that did not move. Getting this wrong is worse than
-/// never having split the lane at all.
+/// sky TWICE: 14 MB at the census, for a galaxy that did not move.
 ///
 /// The keep-alive re-assert is the sharp case, because it deliberately CLEARS the other send-on-change
 /// baselines so the subscriber is re-served its bodies and its verdict. The sky must not ride that
-/// beat: its baseline is keyed by GATEWAY and by the generation, so a re-assert says nothing about
-/// whether the sky changed — and the sky did not change.
+/// beat — and now it structurally cannot, because the sky is not a send-on-change lane at all. It is
+/// answered when asked, and a re-assert is not an ask.
 #[test]
 fn a_keep_alive_re_assert_does_not_re_send_the_sky() {
     let mut rig = window_rig();
@@ -1313,58 +1317,54 @@ fn a_keep_alive_re_assert_does_not_re_send_the_sky() {
         vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
     *rig.world.resource_mut::<crate::stub::StarCatalogue>() =
         crate::stub::StarCatalogue { rows, generation };
+
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
     };
-    let first = star_catalogue_parts(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
-    assert!(!first.is_empty(), "the sky is stated on open");
+    let _ = rig.tick(vec![
+        wire_msg(GATEWAY, MsgClass::Control, &open),
+        wire_msg(GATEWAY, MsgClass::Control, &GatewayToShard::SkyRequest),
+    ]);
+    let before = rig.world.resource::<StubStats>().star_catalogue_parts_sent;
+    assert!(
+        before > 0,
+        "the sky was served once, or this proves nothing"
+    );
 
-    // THE KEEP-ALIVE RE-ASSERT: the same open again, which is the derived keep-alive. It CLEARS the
-    // body and membership baselines by design — and must leave the sky alone.
-    rig.set_local_tick(5);
+    // THE RE-ASSERT. It clears the other baselines by design.
+    rig.set_local_tick(2);
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     assert!(
-        !window_bodies(&sent).is_empty(),
-        "the re-assert really did re-serve the bodies — without this the sky's silence proves nothing"
-    );
-    assert!(
         star_catalogue_parts(&sent).is_empty(),
-        "★ and the sky rode none of it: a warp leg is two crossings, so a sky on this beat is the \
-         whole galaxy twice per journey"
-    );
-
-    // A SECOND WINDOW on the same gateway is not a second sky either — the catalogue is not
-    // window-scoped, and the client already holds it.
-    rig.set_local_tick(6);
-    let sent = rig.tick(vec![wire_msg(
-        GATEWAY,
-        MsgClass::Control,
-        &GatewayToShard::WindowOpen {
-            window: WindowId(2),
-            scope: WindowScope::Occupants,
-        },
-    )]);
-    assert!(
-        star_catalogue_parts(&sent).is_empty(),
-        "a second window onto the same sky is not a second sky"
+        "a warp leg must not re-transmit the galaxy"
     );
     assert_eq!(
-        rig.world.resource::<StubStats>().star_catalogue_parts_sent as usize,
-        first.len(),
-        "stated exactly once across every re-assert and every window"
+        rig.world.resource::<StubStats>().star_catalogue_parts_sent,
+        before
+    );
+    // ANTI-VACUITY: the re-assert really did re-serve the lanes that SHOULD repeat, so the assertion
+    // above is the sky being excluded and not the re-assert doing nothing at all.
+    assert!(
+        !window_bodies(&sent).is_empty(),
+        "the re-assert re-served its bodies, so the sky's silence is a decision"
     );
 }
 
-/// ★ THE CASE THE PLAN ACTUALLY WARNS ABOUT: a window CLOSED and re-opened (S11).
+/// ★ THE CASE THE PLAN WARNS ABOUT: a window CLOSED and re-opened (S11) — NOW FIXED.
 ///
-/// A warp leg is two crossings — out of your star system and into the next. Crossing INTO the galaxy
-/// opens a window on the galaxy shard; crossing OUT closes it; the return leg opens it again. If each
-/// open re-issues the catalogue, one journey re-transmits the whole sky TWICE.
+/// A warp leg is two crossings. Crossing INTO the galaxy opens a window on the galaxy shard; crossing
+/// OUT closes it; the return leg opens it again. Under the sender's memory this re-transmitted the
+/// whole sky on the return leg, and no length of memory could fix it — the shard was not the party
+/// that knew.
 ///
-/// This drives it, and RECORDS WHAT TODAY ACTUALLY DOES rather than what it should do.
+/// It cannot happen now, for a structural reason rather than a remembered one: **the shard keeps no
+/// record at all.** There is nothing to forget, so nothing can be forgotten too early. A SECOND
+/// GATEWAY — the exact case that broke the old memory — changes nothing here, and is present for that
+/// reason.
 #[test]
-fn a_closed_and_re_opened_window_re_states_the_sky_today() {
+fn a_closed_and_re_opened_window_does_not_re_state_the_sky() {
+    const OTHER_GATEWAY: NodeId = NodeId(4242);
     let mut rig = window_rig();
     let rows: Vec<vd_core::look::StarRow> = (1u64..=3)
         .map(|n| vd_core::look::StarRow {
@@ -1378,15 +1378,25 @@ fn a_closed_and_re_opened_window_re_states_the_sky_today() {
         vd_core::look::catalogue_generation(&postcard::to_allocvec(&rows).expect("encodes"));
     *rig.world.resource_mut::<crate::stub::StarCatalogue>() =
         crate::stub::StarCatalogue { rows, generation };
+
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
     };
-    let first = star_catalogue_parts(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
-    assert!(!first.is_empty());
+    let other_open = GatewayToShard::WindowOpen {
+        window: WindowId(9),
+        scope: WindowScope::Occupants,
+    };
+    let _ = rig.tick(vec![
+        wire_msg(GATEWAY, MsgClass::Control, &open),
+        wire_msg(OTHER_GATEWAY, MsgClass::Control, &other_open),
+        wire_msg(GATEWAY, MsgClass::Control, &GatewayToShard::SkyRequest),
+    ]);
+    let after_first = rig.world.resource::<StubStats>().star_catalogue_parts_sent;
+    assert!(after_first > 0, "the sky was served once");
 
-    // LEAVE: the window closes, exactly as it does when an occupant crosses out of this realm.
-    rig.set_local_tick(5);
+    // THE OUTWARD LEG: the window closes.
+    rig.set_local_tick(2);
     let _ = rig.tick(vec![wire_msg(
         GATEWAY,
         MsgClass::Control,
@@ -1395,70 +1405,19 @@ fn a_closed_and_re_opened_window_re_states_the_sky_today() {
         },
     )]);
 
-    // RETURN: the second crossing of the journey re-opens it.
-    rig.set_local_tick(6);
-    let again = star_catalogue_parts(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
-
-    // ★ THE MEASUREMENT, and it is the plan's warning made concrete. The sender remembers what IT
-    // sent, and it forgets a gateway that holds no window — so the return leg re-states the whole sky
-    // even though the client still holds it. At the census that is 7.0 MB per crossing, 14 MB per
-    // round trip, for a galaxy that did not move.
-    //
-    // **THE CURE IS NOT A LONGER MEMORY ON THE SENDER.** S11 names it: the RECEIVER states the
-    // generation it holds and the sender answers from THAT. A sender's memory is wrong across a
-    // reconnect, a restart, or a second gateway — the client is the only party that knows what it has.
-    // That needs the client's on-disk cache to exist, so it is the next piece and this test flips with
-    // it (D-S11-SKY).
-    // ★ MEASURED: the return leg states NOTHING — the right answer, reached for a fragile reason.
-    // The emit runs only while some window is open, so a shard whose LAST window closed never reaches
-    // the line that forgets the gateway. With a SECOND gateway keeping the shard busy, that line does
-    // run and the closed gateway IS forgotten — proved below.
+    // THE RETURN LEG: it opens again. Nothing is re-stated, because an open is not an ask and there
+    // was never a memory to lose.
+    rig.set_local_tick(3);
+    let back = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     assert!(
-        again.is_empty(),
-        "the return leg re-states nothing while this is the only gateway"
+        star_catalogue_parts(&back).is_empty(),
+        "the return leg must not re-transmit a galaxy that did not move"
     );
-
-    // THE FRAGILITY, MEASURED. A second gateway keeps a window open, so the emit runs every tick and
-    // the first gateway's entry is dropped the moment its window closes. Its return leg then re-states
-    // the whole sky — 7.0 MB at the census, per crossing, for a galaxy that did not move.
-    let other = NodeId(77);
-    let _ = rig.tick(vec![wire_msg(
-        other,
-        MsgClass::Control,
-        &GatewayToShard::WindowOpen {
-            window: WindowId(9),
-            scope: WindowScope::Occupants,
-        },
-    )]);
-    rig.set_local_tick(7);
-    let _ = rig.tick(vec![wire_msg(
-        GATEWAY,
-        MsgClass::Control,
-        &GatewayToShard::WindowClose {
-            window: WindowId(1),
-        },
-    )]);
-    rig.set_local_tick(8);
-    let re_crossed =
-        star_catalogue_parts(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
     assert_eq!(
-        re_crossed.len(),
-        first.len(),
-        "★ WITH ANOTHER GATEWAY PRESENT, the return leg DOES re-state the whole sky"
+        rig.world.resource::<StubStats>().star_catalogue_parts_sent,
+        after_first,
+        "one journey, one sky"
     );
-
-    // ★ AND THIS IS NOT A BUG TO PATCH — IT IS WHY S11 SPECIFIES THE OTHER DESIGN.
-    //
-    // The sender is remembering what IT sent. That memory is wrong in BOTH directions and it cannot
-    // tell the two apart:
-    //   FORGET TOO EAGERLY -> a returning client is re-sent a sky it already holds (measured above).
-    //   REMEMBER TOO LONG  -> a NEW subscriber behind the same gateway is told nothing, and has no sky
-    //                          at all, because a previous session once held one.
-    //
-    // No length of memory fixes that, because the sender is not the party that knows. **THE RECEIVER
-    // STATES THE GENERATION IT HOLDS AND THE SENDER ANSWERS FROM THAT** — S11's own wording. It needs
-    // the client's on-disk cache to exist, so it is the next piece, and this test flips with it.
-    // Ledgered at D-S11-SKY.
 }
 
 /// ★ A SHARD THAT PARENTS NO STARS STATES NO SKY (S11) — most shards, and the arm that would otherwise

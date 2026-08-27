@@ -4249,8 +4249,51 @@ current fixture contains a mover. Re-uniting at ingest keeps the saving on the W
   renderer decision and is not built. Deliberately, the beat also does NOT act on `Stale`: knowing the
   held sky is wrong is a different job from replacing it, and replacing it is the
   receiver-states-its-generation exchange below, not this.
-- **★ THE SENDER'S MEMORY CANNOT BE MADE CORRECT — MEASURED 2026-08-27, and it is why S11 specifies
-  the other design.** The emitter remembers which sky it last stated to each gateway. That memory is
+- **★ THE CLIENT'S CACHE AND THE GENERATION EXCHANGE — LANDED 2026-08-27.** The two arrived together
+  because they are one design: the cache is what gives the client something to state.
+
+  **THE CACHE** is a postcard file split into a header and the rows. A header that reads alone can be
+  DISBELIEVED alone, so the claimed star count is tested against the cap before one row is decoded —
+  decoding is exactly what a hostile file wants to buy. It carries `StoreRole::ClientCatalogue`'s stamp
+  (seed, epoch, coordinate generation, world generation, all reused from `store_stamp::verify` rather
+  than re-stated) and the catalogue generation. Refusals are named and COUNTED: `TooLarge`,
+  `Undecodable`, `ForeignWorld`, `TooManyStars`, `CountMismatch`, `Unrepresentable`, `DigestMismatch`.
+
+  ★ **THE FOLD IS THE ONLY TEST THAT CATCHES AN EDIT**, and this is MEASURED rather than argued: every
+  single byte flip in the row payload reaches the fold, and NOT ONE is turned away by a test above it.
+  postcard is positional, so a flipped byte does not fail to decode — it decodes into a different,
+  perfectly well-formed sky, with the stamp intact, the count unchanged and every row drawable. A
+  refused cache is counted and leaves a good sky alone: a player already flying does not lose the
+  galaxy because a stale file on disk was bad.
+
+  **THE EXCHANGE** deletes the sender's memory at both hops rather than patching it:
+
+  ```text
+    client  --SkyHeld{generation}-->  gateway     "this is the sky I have"
+    gateway --SkyRequest---------->  shard        "somebody here needs one"
+    shard   --StarCatalogue-------->  gateway     answered, and NOT remembered
+    gateway --StarCatalogue-------->  only the clients whose held generation differs
+  ```
+
+  The shard now keeps NO record of who holds what — `SkyStatedTo` is gone, replaced by `SkyRequests`,
+  a set that is answered and cleared in the same tick. The holder's identity lives on the SESSION,
+  which is the only place it is ever one-to-one: one session holds exactly one sky.
+
+  **THE BEAT DRIVES THE ASK**, which is why the two slices had to land in this order. The beat is what
+  tells the gateway which generation is current, so it is the only moment the gateway can know a client
+  holds the wrong one. That rate-limits asking to the beat's cadence with no timer and no
+  acknowledgement: a lost catalogue is re-asked at the next beat, and the exchange repairs itself. It
+  stops the moment every client confirms.
+
+  Answering also moved OUT of the window guard. Under the old memory the emitter ran only while a
+  window was open, and that coupling was load-bearing by accident — see the finding below.
+
+  **STILL OWED:** the file I/O itself. The codec is pure and the decision is fully driven, but nothing
+  reads or writes the file yet, because the client has no persistence seam. Also owed: the watchdog
+  policy for a sky lane that goes quiet, and one instanced point cloud instead of 150,000 objects.
+
+- **★ THE SENDER'S MEMORY CANNOT BE MADE CORRECT — MEASURED 2026-08-27. FIXED the same day by the
+  exchange above; kept because the REASON is what binds future work.** The emitter remembers which sky it last stated to each gateway. That memory is
   wrong in BOTH directions and the sender cannot tell the two cases apart:
   - **FORGET TOO EAGERLY** ⇒ a client returning from a crossing is re-sent a sky it already holds. A
     warp leg is TWO crossings, so one journey re-transmits the whole galaxy twice — 14 MB at the census.

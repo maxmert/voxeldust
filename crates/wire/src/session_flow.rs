@@ -131,6 +131,27 @@ pub enum GatewayToShard {
     /// Slice A (the gateway closes windows that stop being derivable — structurally, zero
     /// sessions ⇒ zero windows; the shard registry consumes it).
     WindowClose { window: WindowId },
+    /// ASK FOR THE SKY (S11) — the gateway saying that some client behind it does not hold the
+    /// catalogue the shard just named in its liveness beat.
+    ///
+    /// ★ THIS ARM IS WHAT DELETES THE SENDER'S MEMORY. The shard used to record which sky it had
+    /// stated to each gateway, and decide from that record. The record was wrong in both directions
+    /// and no retention policy could fix it, because a gateway is not the thing that holds a sky — the
+    /// clients behind it are, and there may be any number of them, arriving and leaving independently.
+    ///
+    /// So the shard now remembers NOTHING about who has what. It answers this request and no more. The
+    /// gateway decides who needs the sky, because the gateway is the party that knows.
+    ///
+    /// CARRIES NO GENERATION, deliberately. A gateway aggregates many clients, which may hold many
+    /// different skies or none; "what do you have" has no single answer at this hop. The question this
+    /// arm asks is the only one with an answer: *somebody here needs it — send it.*
+    ///
+    /// RATE-LIMITED BY THE BEAT. The gateway asks at most once per beat, because the beat is what tells
+    /// it the current generation in the first place. A lost catalogue is simply re-asked at the next
+    /// beat, so the exchange repairs itself and needs no acknowledgement of its own.
+    ///
+    /// APPENDED variant (postcard-safe additive shape).
+    SkyRequest,
 }
 
 /// Shard → gateway session replies and world frames.
@@ -1265,6 +1286,7 @@ mod tests {
             GatewayToShard::WindowClose {
                 window: WindowId(2),
             },
+            GatewayToShard::SkyRequest,
         ]
     }
 
@@ -1308,6 +1330,8 @@ mod tests {
                 // The window control lane holds 4/5 (mesh minor 16) forever.
                 GatewayToShard::WindowOpen { .. } => 4,
                 GatewayToShard::WindowClose { .. } => 5,
+                // Asking for the sky holds 6 (S11) forever.
+                GatewayToShard::SkyRequest => 6,
             }
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -1325,9 +1349,9 @@ mod tests {
             assert_eq!(bytes[0], g2s_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 6);
+        assert_eq!(seen.len(), 7);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(5));
+        assert_eq!(seen.last().copied(), Some(6));
     }
 
     /// The NESTED positional pins for the window lane's two payload enums — the same

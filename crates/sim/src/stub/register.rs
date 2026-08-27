@@ -14,7 +14,7 @@ use super::{
     GhostColliderRegistration, HandoffHolds, HoldRole, InBandVerdict, InputLog, InterestEmitLatch,
     InterestHeld, OpenWindows, OwnedTransients, ParentRealmNode, PendingCrossings,
     PendingInputSlots, Placements, RealmAuthority, RealmConfirmedAt, RealmRegions, RelayHeld,
-    RelayShip, RequestInFlight, SkyStatedTo, StarCatalogue, StubConfig, StubStats, WasOccupied,
+    RelayShip, RequestInFlight, SkyRequests, StarCatalogue, StubConfig, StubStats, WasOccupied,
     announce_presence, author_placements, emit_frames, emit_realm_frames, emit_transient_batch,
     evaluate_realm_aoi, evaluate_realm_boundaries, feed_source_ghosts, is_retained_ghost,
     on_directory_reply, on_gateway_msg, on_ghost_flow, placement_window_ticks, prune_holds,
@@ -124,7 +124,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(InterestEmitLatch::default());
     world.insert_resource(ChildLuma::default());
     world.insert_resource(StarCatalogue::default());
-    world.insert_resource(SkyStatedTo::default());
+    world.insert_resource(SkyRequests::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
     // neighbor + the dest dot is Owned) and BEFORE `emit_frames` (the source consumes the Delta it
     // received this tick before emitting) — the dest→source ghost collider feed (1d.5b.3b).
@@ -265,6 +265,10 @@ fn process_inbound(
         ResMut<PendingCrossings>,
         ResMut<PendingInputSlots>,
         ResMut<OpenWindows>,
+        // S11: the gateways that asked for the sky this tick. Bundled here rather than taking its own
+        // slot because bevy caps a system at 16 params and this tuple already carries the window lane's
+        // inbound state, which is where the request arrives.
+        ResMut<SkyRequests>,
     ),
     // The ghost-path store (slice F shrank the pair to one: the source-side feed mirror died with
     // the pose feed).
@@ -292,7 +296,7 @@ fn process_inbound(
         mut interest_held,
     ) = vu_aoi;
     let (mut in_flight, mut progress, mut holds) = crossing;
-    let (mut pending, mut pending_slots, mut open_windows) = pending;
+    let (mut pending, mut pending_slots, mut open_windows, mut sky_requests) = pending;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
     // UNGATED, and first: an expired hold must be reclaimed even on a shard that has lost its lease and
     // is doing nothing else, or the ledger would outlive the thing it describes. Inert at a zero budget.
@@ -325,6 +329,7 @@ fn process_inbound(
                     &mut log,
                     &mut pending_slots,
                     &mut open_windows,
+                    &mut sky_requests,
                     &mut stats,
                     &mut outbox,
                 );

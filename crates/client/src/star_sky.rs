@@ -31,6 +31,149 @@ pub const MAX_PARTS: u32 = 100_000;
 /// grow without leaving room for a damaged length to allocate the machine out of memory.
 pub const MAX_STARS: usize = 4_000_000;
 
+/// The largest one encoded [`StarRow`] can be. Derived, never guessed: a realm id is an enum tag plus
+/// a u64 varint (11 bytes at most), three cell axes are zigzag varints (10 bytes each), the class is
+/// one byte, and the brightness is a fixed eight. That totals 50. The value here rounds up and leaves
+/// the rest as slack, because this number's only job is to refuse an absurd file unread.
+const MAX_ROW_BYTES: usize = 64;
+
+/// The most bytes a cache file may hold. A larger file is refused BEFORE it is decoded.
+///
+/// Decoding is the work an attacker gets for free from a file nobody validated, so the size test comes
+/// first and reads no further than the length. postcard does not pre-allocate from a claimed length —
+/// serde caps a sequence's reserved capacity — so the cost a damaged file can impose is the work of
+/// decoding, and that work is bounded by this number.
+pub const MAX_CACHE_BYTES: usize = MAX_STARS * MAX_ROW_BYTES;
+
+/// Why a cache file was refused. Each reason is its own arm. A refusal names itself, so "the stars did
+/// not come back" is a report with somewhere to start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheRefusal {
+    /// Larger than [`MAX_CACHE_BYTES`]. Refused unread.
+    TooLarge,
+    /// postcard could not read the bytes at all.
+    Undecodable,
+    /// The stamp disagrees with this build or this world. See [`vd_core::store_stamp::verify`].
+    ForeignWorld,
+    /// More stars than [`MAX_STARS`].
+    TooManyStars,
+    /// A row holds a position outside the lawful cell domain, or a brightness that is not a number.
+    Unrepresentable,
+    /// The file held a different number of stars than its header claimed.
+    CountMismatch,
+    /// The rows do not fold to the generation the file states.
+    ///
+    /// ★ THIS IS THE ARM THAT CATCHES AN EDIT. postcard is positional. A player who flips a byte in
+    /// their own cache does not produce a file that fails to decode — they produce a file that decodes
+    /// into a DIFFERENT, perfectly well-formed sky. Nothing above this test would notice. The fold is
+    /// what notices, because the generation is derived from the content and the content moved.
+    DigestMismatch,
+}
+
+/// A cache file's HEADER. The rows follow it, encoded separately.
+///
+/// ★ WHY THE FILE IS SPLIT. A header that can be read on its own is a header that can be DISBELIEVED
+/// on its own. The claimed star count is tested against the cap before a single row is decoded, so a
+/// damaged length is refused with the work of reading about forty bytes rather than the work of
+/// materialising fifty million rows. Decoding is exactly what a hostile file wants to buy.
+///
+/// It also lets the fold run over the rows' OWN BYTES, as they lie in the file, rather than over a
+/// re-encoding of them. That is the same comparison the server made when it folded the generation.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CacheHeader {
+    stamp: vd_core::store_stamp::StoreStamp,
+    generation: u64,
+    /// What the file CLAIMS it holds. Checked against the cap first, then against the truth.
+    stars: u64,
+}
+
+/// Write a sky to bytes, under the stamp of the world that produced it.
+#[must_use]
+pub fn encode_cache(
+    stamp: vd_core::store_stamp::StoreStamp,
+    generation: u64,
+    rows: &[StarRow],
+) -> Vec<u8> {
+    let mut out = postcard::to_allocvec(&CacheHeader {
+        stamp,
+        generation,
+        stars: rows.len() as u64,
+    })
+    .unwrap_or_default();
+    out.extend_from_slice(&postcard::to_allocvec(rows).unwrap_or_default());
+    out
+}
+
+/// Read a sky back, and prove it before any star is drawn from it.
+///
+/// ★ WHY A CACHE NEEDS PROVING AT ALL. The file sits on the player's own disk. The player may edit it.
+/// The owner's condition is exact: a byte-flipped cache must produce a counted refusal and a fresh
+/// request, and must NEVER produce a drawn frame. That condition cannot be met by decoding alone,
+/// because postcard is positional — damaged bytes decode into nonsense rather than failing. A star at
+/// 10^300 metres is a well-formed row.
+///
+/// The catalogue is a DRAWING AID and nothing more. The server validates every warp destination
+/// itself. So a forged cache draws a star that nobody else can see, and flies its owner into empty
+/// space. That is the whole of the harm, and it lands on the forger.
+///
+/// The tests run in order, cheapest first, and each one names its own refusal:
+///
+/// ```text
+///   size    -> TooLarge          refused UNREAD; decoding is the work a bad file wants
+///   header  -> Undecodable       postcard could not read even the header
+///   stamp   -> ForeignWorld      another world, another epoch, or another build's units
+///   claim   -> TooManyStars      the CLAIMED count, before one row is decoded
+///   rows    -> Undecodable       the rows do not read, or the file holds more than it claimed
+///   truth   -> CountMismatch     the file held a different number than it claimed
+///   rows    -> Unrepresentable   a position or a brightness that cannot be drawn
+///   fold    -> DigestMismatch    the rows are not the sky the file claims
+/// ```
+///
+/// # Errors
+/// [`CacheRefusal`] naming the first test that failed.
+pub fn decode_cache(
+    bytes: &[u8],
+    expected: &vd_core::store_stamp::StoreStamp,
+) -> Result<(u64, Vec<StarRow>), CacheRefusal> {
+    if bytes.len() > MAX_CACHE_BYTES {
+        return Err(CacheRefusal::TooLarge);
+    }
+    let (header, rest) = take_cache_header(bytes)?;
+    // The stamp decides whether this file belongs to this world at all. Reused rather than re-stated:
+    // a second set of comparisons here could drift from the one every other store uses.
+    if vd_core::store_stamp::verify(Some(header.stamp), expected, false).is_err() {
+        return Err(CacheRefusal::ForeignWorld);
+    }
+    // THE CLAIM, tested before the rows are read. This is the whole point of splitting the file.
+    if header.stars > MAX_STARS as u64 {
+        return Err(CacheRefusal::TooManyStars);
+    }
+    // Trailing bytes are a decode error in postcard, so a file holding MORE than it encoded is refused
+    // here rather than being silently truncated to the part that parsed.
+    let rows = decode_cache_rows(rest)?;
+    if rows.len() as u64 != header.stars {
+        return Err(CacheRefusal::CountMismatch);
+    }
+    if !rows.iter().all(row_representable) {
+        return Err(CacheRefusal::Unrepresentable);
+    }
+    // THE FOLD, over the rows' OWN BYTES as they lie in the file — the same comparison the server made.
+    if vd_core::look::catalogue_generation(rest) != header.generation {
+        return Err(CacheRefusal::DigestMismatch);
+    }
+    Ok((header.generation, rows))
+}
+
+/// Hoisted so the generic decode stays a straight-line expression (HR5's monomorphization rule).
+fn take_cache_header(bytes: &[u8]) -> Result<(CacheHeader, &[u8]), CacheRefusal> {
+    postcard::take_from_bytes::<CacheHeader>(bytes).map_err(|_| CacheRefusal::Undecodable)
+}
+
+/// Hoisted for the same reason as [`take_cache_header`].
+fn decode_cache_rows(bytes: &[u8]) -> Result<Vec<StarRow>, CacheRefusal> {
+    postcard::from_bytes::<Vec<StarRow>>(bytes).map_err(|_| CacheRefusal::Undecodable)
+}
+
 /// Why a part was refused — each its own reason, so a refusal names itself rather than arriving as a
 /// single "bad catalogue" that could mean anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,9 +241,60 @@ pub struct StarSky {
     pub beats_stale: u64,
     /// Liveness beats that arrived while no whole sky was held.
     pub beats_unheld: u64,
+    /// Cache files refused, by any of the reasons in [`CacheRefusal`]. The owner's condition is that a
+    /// damaged cache produces a COUNTED refusal and never a drawn frame, so this is the half that makes
+    /// the refusal visible — a player reporting "my stars are gone" is otherwise a report with nowhere
+    /// to start.
+    pub cache_refused: u64,
+    /// Skies adopted from a cache rather than from the wire. Each one is 7.0 MB that did not cross.
+    pub cache_adopted: u64,
 }
 
 impl StarSky {
+    /// Take a cache file from disk, prove it, and adopt the sky it holds.
+    ///
+    /// This is the saving the cache exists for: a returning player draws the galaxy from their own disk
+    /// instead of pulling 7.0 MB across the wire again.
+    ///
+    /// Every refusal is COUNTED here rather than only returned, because the owner's condition is that a
+    /// damaged cache produces a counted refusal and never a drawn frame. A returned error that nobody
+    /// records is a refusal that cannot be reported.
+    ///
+    /// A refused cache leaves the sky exactly as it was. It does not clear a good sky already held, and
+    /// it does not half-adopt: the client either holds the whole cached galaxy or holds what it held
+    /// before. What follows a refusal is a fresh request, which is the receiver-states-its-generation
+    /// exchange and is still owed (D-S11-SKY).
+    ///
+    /// # Errors
+    /// [`CacheRefusal`] naming the first test the file failed.
+    pub fn adopt_cache(
+        &mut self,
+        bytes: &[u8],
+        expected: &vd_core::store_stamp::StoreStamp,
+    ) -> Result<u64, CacheRefusal> {
+        let (generation, rows) = self.count_cache_refusal(decode_cache(bytes, expected))?;
+        // Adopted as a ONE-PART sky, which is what a cache is: it was whole when it was written, so it
+        // arrives whole. `complete` answers immediately and the galaxy draws in one step.
+        self.generation = Some(generation);
+        self.parts_expected = 1;
+        self.held.clear();
+        self.held.insert(0, rows);
+        self.cache_adopted += 1;
+        Ok(generation)
+    }
+
+    /// Hoisted so [`Self::adopt_cache`] stays a straight-line expression, and so the counter cannot be
+    /// forgotten on a path that returns early.
+    fn count_cache_refusal(
+        &mut self,
+        got: Result<(u64, Vec<StarRow>), CacheRefusal>,
+    ) -> Result<(u64, Vec<StarRow>), CacheRefusal> {
+        if got.is_err() {
+            self.cache_refused += 1;
+        }
+        got
+    }
+
     /// Take one liveness beat and say what it proved.
     ///
     /// ★ WHY THIS EXISTS AT ALL. The catalogue is send-on-change and a galaxy does not change, so the
@@ -414,5 +608,220 @@ mod tests {
         // that STOPPED CLIMBING as the third reading — "nobody is working" — which absence alone,
         // having no event to fire, can never announce here.
         assert_eq!(sky.refused, 0, "and a beat is never a refusal");
+    }
+
+    use vd_core::store_stamp::{StoreRole, StoreStamp};
+
+    const SEED: u64 = 0x5EED;
+    const CONSTANTS: [f64; 2] = [1.0, 2.0];
+
+    fn stamp() -> StoreStamp {
+        StoreStamp::new(
+            StoreRole::ClientCatalogue,
+            SEED,
+            vd_core::ids::EpochId(1),
+            &CONSTANTS,
+        )
+    }
+
+    /// Fold the generation the way the SERVER does, so a cache written here is a cache the server
+    /// would have accepted. A test that folded it differently would prove only its own arithmetic.
+    fn fold(rows: &[StarRow]) -> u64 {
+        vd_core::look::catalogue_generation(&postcard::to_allocvec(rows).expect("encodes"))
+    }
+
+    /// ★ A CLEAN CACHE ROUND-TRIPS, AND THE SKY COMES BACK EXACTLY (S11).
+    ///
+    /// This is the saving the whole cache exists for: a returning player draws the galaxy from disk
+    /// instead of pulling 7.0 MB across the wire again.
+    #[test]
+    fn a_clean_cache_returns_the_same_sky_it_stored() {
+        let rows = vec![star(1), star(2), star(3)];
+        let generation = fold(&rows);
+        let bytes = encode_cache(stamp(), generation, &rows);
+        let (got_gen, got_rows) =
+            decode_cache(&bytes, &stamp()).expect("a clean cache is accepted");
+        assert_eq!(got_gen, generation);
+        assert_eq!(got_rows, rows, "unaltered, and in order");
+    }
+
+    /// ★ ADOPTING A CACHE IS 7.0 MB THAT DOES NOT CROSS (S11), AND A REFUSED ONE CHANGES NOTHING.
+    #[test]
+    fn a_cache_is_adopted_whole_and_a_refused_one_leaves_the_held_sky_alone() {
+        let rows = vec![star(1), star(2), star(3)];
+        let generation = fold(&rows);
+        let mut sky = StarSky::default();
+
+        assert_eq!(
+            sky.adopt_cache(&encode_cache(stamp(), generation, &rows), &stamp()),
+            Ok(generation)
+        );
+        // Whole in ONE step — a cache was whole when it was written, so it arrives whole.
+        assert_eq!(sky.complete(), Some(rows.clone()));
+        assert_eq!(sky.generation(), Some(generation));
+        assert_eq!(sky.cache_adopted, 1);
+        assert_eq!(sky.cache_refused, 0);
+
+        // ...and the beat now CONFIRMS a sky that never crossed the wire. This is the whole point:
+        // the client holds the galaxy, and the server agrees, having sent none of it.
+        assert_eq!(sky.beat(generation), SkyBeat::Current);
+
+        // A DAMAGED CACHE IS COUNTED AND CHANGES NOTHING. It must not clear a good sky — a player who
+        // is already flying should not lose the stars because a stale file on disk was bad.
+        assert_eq!(
+            sky.adopt_cache(&[0xff, 0xff, 0xff], &stamp()),
+            Err(CacheRefusal::Undecodable)
+        );
+        assert_eq!(sky.cache_refused, 1, "the refusal is counted, never silent");
+        assert_eq!(sky.cache_adopted, 1, "and not counted as an adoption");
+        assert_eq!(
+            sky.complete(),
+            Some(rows),
+            "the sky already held survives a bad file"
+        );
+        assert_eq!(sky.generation(), Some(generation));
+    }
+
+    /// ★ THE EDIT THAT ONLY THE FOLD CATCHES (S11; the owner's condition, Q4).
+    ///
+    /// postcard is positional, so a flipped byte does not break the decode — it produces a DIFFERENT
+    /// well-formed sky. Every test above the fold is satisfied by it: the stamp is untouched, the count
+    /// is unchanged, and the rows are perfectly representable. Only the generation notices, because the
+    /// generation is folded from the content and the content moved.
+    #[test]
+    fn a_byte_flipped_cache_is_refused_by_the_fold_and_never_drawn() {
+        let rows = vec![star(1), star(2), star(3)];
+        let bytes = encode_cache(stamp(), fold(&rows), &rows);
+
+        // Flip ONE bit somewhere in the row payload, and hunt for a flip that still decodes — the
+        // point is a file that survives every other test, not one that falls over early.
+        let mut caught = 0usize;
+        let mut checked = 0usize;
+        for i in (bytes.len() / 2)..bytes.len() {
+            let mut edited = bytes.clone();
+            edited[i] ^= 0x01;
+            let got = decode_cache(&edited, &stamp());
+            assert!(got.is_err(), "a byte-flipped cache was drawn at byte {i}");
+            caught += usize::from(got == Err(CacheRefusal::DigestMismatch));
+            checked += 1;
+        }
+        assert!(checked > 0, "the loop must actually run");
+        // ★ MEASURED, not assumed: EVERY flip in the row payload reaches the fold. Not one is turned
+        // away by an earlier test. That is the point of having the fold at all — the tests above it
+        // catch a file that is obviously broken, and a deliberate edit is not obviously broken.
+        assert_eq!(
+            caught, checked,
+            "every edit reached the fold; an earlier test catching one would mean the fixture, not the \
+             code, was doing the work"
+        );
+    }
+
+    /// ★ EVERY REFUSAL ARM, DRIVEN AND NAMED (S11).
+    ///
+    /// A refusal that cannot be told from another refusal is a report with nowhere to start, so each
+    /// arm is reached on its own and by its own cause.
+    #[test]
+    fn each_cache_refusal_is_reached_by_its_own_cause() {
+        let rows = vec![star(1), star(2)];
+        let good = encode_cache(stamp(), fold(&rows), &rows);
+
+        // TOO LARGE — refused unread, before any decoding work is done for it.
+        assert_eq!(
+            decode_cache(&vec![0u8; MAX_CACHE_BYTES + 1], &stamp()),
+            Err(CacheRefusal::TooLarge)
+        );
+
+        // UNDECODABLE — bytes postcard cannot read at all.
+        assert_eq!(
+            decode_cache(&[0xff, 0xff, 0xff], &stamp()),
+            Err(CacheRefusal::Undecodable)
+        );
+
+        // FOREIGN WORLD — a cache from another seed. The stars in it name bodies this build does not
+        // have, so drawing it would put a player's destination where nothing is.
+        let other = StoreStamp::new(
+            StoreRole::ClientCatalogue,
+            SEED + 1,
+            vd_core::ids::EpochId(1),
+            &CONSTANTS,
+        );
+        assert_eq!(
+            decode_cache(&encode_cache(other, fold(&rows), &rows), &stamp()),
+            Err(CacheRefusal::ForeignWorld)
+        );
+        // ...and the clean file is accepted against its own stamp, so the arm above is the stamp
+        // disagreeing and not the fixture being broken.
+        assert!(decode_cache(&good, &stamp()).is_ok());
+
+        // UNREPRESENTABLE — a row that cannot be drawn. Written with a CORRECT fold, so it reaches the
+        // representability test rather than being turned away by the digest first.
+        let bad_rows = vec![StarRow {
+            realm: vd_core::pose::RealmId::System(1),
+            cell: vd_core::glam::I64Vec3::new(i64::MAX, 0, 0),
+            class_code: 6,
+            luma_lsun: 0.25,
+        }];
+        assert_eq!(
+            decode_cache(&encode_cache(stamp(), fold(&bad_rows), &bad_rows), &stamp()),
+            Err(CacheRefusal::Unrepresentable)
+        );
+
+        // UNDECODABLE, THE SECOND DOOR — a header that reads perfectly, with rows behind it that do
+        // not. Driven separately because the header and the rows are decoded apart, so one arm
+        // reaching this refusal says nothing about the other.
+        let mut bad_rows_file = postcard::to_allocvec(&CacheHeader {
+            stamp: stamp(),
+            generation: 0,
+            stars: 2,
+        })
+        .expect("encodes");
+        bad_rows_file.extend_from_slice(&[0xff, 0xff, 0xff]);
+        assert_eq!(
+            decode_cache(&bad_rows_file, &stamp()),
+            Err(CacheRefusal::Undecodable)
+        );
+
+        // DIGEST MISMATCH — every other test satisfied, and the stated generation simply wrong.
+        assert_eq!(
+            decode_cache(&encode_cache(stamp(), fold(&rows) ^ 1, &rows), &stamp()),
+            Err(CacheRefusal::DigestMismatch)
+        );
+    }
+
+    /// ★ TOO MANY STARS IS REFUSED WITHOUT WALKING THEM (S11).
+    ///
+    /// Separated from the arms above because building the file is the expensive part. The cap stands
+    /// between a damaged length and an unbounded draw.
+    #[test]
+    fn more_cached_stars_than_the_cap_are_refused() {
+        // A header CLAIMING one star past the cap, and no rows behind it at all. That is the point of
+        // the split: the claim is disbelieved for the price of reading the header, so proving the cap
+        // costs nothing. Materialising four million rows to prove it would make the gate pay, on every
+        // run, exactly the cost this test exists to show the code never pays.
+        let bytes = postcard::to_allocvec(&CacheHeader {
+            stamp: stamp(),
+            generation: 0,
+            stars: MAX_STARS as u64 + 1,
+        })
+        .expect("encodes");
+        assert_eq!(
+            decode_cache(&bytes, &stamp()),
+            Err(CacheRefusal::TooManyStars)
+        );
+
+        // And a header that LIES the other way — claiming fewer than it holds — is caught too, so the
+        // cheap check above cannot be walked past by simply understating the count.
+        let rows = vec![star(1), star(2)];
+        let mut lying = postcard::to_allocvec(&CacheHeader {
+            stamp: stamp(),
+            generation: 0,
+            stars: 1,
+        })
+        .expect("encodes");
+        lying.extend_from_slice(&postcard::to_allocvec(&rows).expect("encodes"));
+        assert_eq!(
+            decode_cache(&lying, &stamp()),
+            Err(CacheRefusal::CountMismatch)
+        );
     }
 }

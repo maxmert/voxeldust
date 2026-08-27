@@ -315,15 +315,26 @@ fn emit_window_frames(
 /// star systems states no sky, which is most of them.
 /// WHICH SKY EACH GATEWAY HAS BEEN TOLD (S11) — the catalogue's send-on-change baseline.
 ///
-/// ★ KEYED BY GATEWAY, NOT BY WINDOW, and the difference is a real defect rather than a preference. A
-/// catalogue is not window-scoped: it carries no window id, because the sky is the same whatever you
-/// have a window onto. Keyed per window, a client with two windows open would be sent the WHOLE SKY
-/// TWICE — 14 MB at the census for a galaxy it already holds.
+/// THE GATEWAYS THAT ASKED FOR THE SKY THIS TICK (S11).
 ///
-/// The generation IS the content, so this is the whole of the comparison: a gateway holding that number
-/// holds that sky and needs nothing further.
+/// ★ THIS REPLACES A MEMORY THAT COULD NOT BE MADE CORRECT. The shard used to record which sky it had
+/// stated to each gateway, and decide from that record. It was wrong in BOTH directions, and the shard
+/// could not tell the two cases apart:
+///
+/// ```text
+///   forget too early   -> a client returning from a crossing is re-sent a sky it holds (7.0 MB)
+///   remember too long  -> a NEW client behind that gateway is sent NO SKY AT ALL
+/// ```
+///
+/// No retention policy fixes that. **The sender is not the party that knows.** A gateway is not a thing
+/// that holds a sky — the clients behind it are, and there may be any number of them, arriving and
+/// leaving independently of each other and of the gateway.
+///
+/// So the shard now remembers NOTHING about who has what. It answers what it was asked, this tick, and
+/// then forgets that too. The gateway decides who needs the sky, because the gateway is the party that
+/// knows.
 #[derive(Resource, Debug, Default)]
-pub struct SkyStatedTo(pub(crate) BTreeMap<NodeId, u64>);
+pub struct SkyRequests(pub(crate) std::collections::BTreeSet<NodeId>);
 
 #[derive(Resource, Debug, Default)]
 pub struct StarCatalogue {
@@ -351,26 +362,22 @@ pub struct StarCatalogue {
 /// refusing. Ledgered, not forgotten.
 fn emit_star_catalogue(
     catalogue: &StarCatalogue,
-    windows: &OpenWindows,
-    stated: &mut SkyStatedTo,
+    requests: &mut SkyRequests,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
+    // TAKEN, not read: a request is answered exactly once. Cleared even when there is no sky to send,
+    // so a shard that parents no stars cannot accumulate askers it will never answer.
+    let asked = std::mem::take(&mut requests.0);
     if catalogue.rows.is_empty() {
         return; // a shard that parents no star systems states no sky
     }
-    // ONE ENTRY PER GATEWAY, whatever number of windows it holds — the sky is not window-scoped.
-    let gateways: std::collections::BTreeSet<NodeId> =
-        windows.0.keys().map(|(gateway, _)| *gateway).collect();
-    // A gateway with no window here is forgotten, so a re-subscription is served the sky again rather
-    // than being told nothing because a previous session once held it.
-    stated.0.retain(|node, _| gateways.contains(node));
+    if asked.is_empty() {
+        return; // nobody needs it, and the shard is not keeping a list of who might
+    }
     let parts = vd_wire::channels::partition_stars(&catalogue.rows, CATALOGUE_PART_BUDGET_BYTES);
     let total = parts.len() as u32;
-    for gateway in gateways {
-        if stated.0.get(&gateway) == Some(&catalogue.generation) {
-            continue; // this gateway already holds this sky
-        }
+    for gateway in asked {
         for (i, rows) in parts.iter().enumerate() {
             push_session_reply(
                 outbox,
@@ -384,7 +391,6 @@ fn emit_star_catalogue(
             );
             stats.star_catalogue_parts_sent += 1;
         }
-        stated.0.insert(gateway, catalogue.generation);
     }
 }
 
@@ -615,7 +621,7 @@ pub(crate) fn emit_realm_frames(
     placements: Res<Placements>,
     // THE STAR CATALOGUE this shard states (S11) — planted by the boot, shipped here, never derived.
     catalogue: Res<StarCatalogue>,
-    mut sky_stated: ResMut<SkyStatedTo>,
+    mut sky_requests: ResMut<SkyRequests>,
     // The resolved parent the Q2 relay ships to (`None` at a root shard / before the first parent
     // Head reply ⇒ nothing goes up this tick).
     parent_node: Res<ParentRealmNode>,
@@ -695,13 +701,6 @@ pub(crate) fn emit_realm_frames(
             &mut stats,
             &mut outbox,
         );
-        emit_star_catalogue(
-            &catalogue,
-            &windows,
-            &mut sky_stated,
-            &mut stats,
-            &mut outbox,
-        );
         emit_sky_alive(
             &config,
             &clock,
@@ -711,6 +710,13 @@ pub(crate) fn emit_realm_frames(
             &mut outbox,
         );
     }
+    // ★ ANSWERING FOR THE SKY RUNS OUTSIDE THE WINDOW GUARD, deliberately (S11). The request IS the
+    // recipient list, so a window adds nothing to it. Under the old memory this emitter ran only while
+    // some window was open, and that coupling was load-bearing by accident: a shard whose LAST window
+    // closed never reached the line that forgot the gateway, which is the only reason the crossing rule
+    // held at all. With a second gateway keeping the shard busy it broke, and re-stated the whole sky
+    // on the return leg of every warp. A request answered on its own merits cannot fail that way.
+    emit_star_catalogue(&catalogue, &mut sky_requests, &mut stats, &mut outbox);
     // THE Q2 RELAY FORWARD (Slice C1 — the parent half; prunes the holder even with zero windows
     // so a reaped child's stale seal cannot linger past the derived TTL).
     emit_window_relays(

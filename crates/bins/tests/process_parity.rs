@@ -58,6 +58,12 @@ struct ProcessClient {
     scene_levels: u64,
     /// Parts of the star catalogue this client received (S11).
     sky_parts: u64,
+    /// The generation of the catalogue that actually arrived (S11).
+    sky_generation: Option<u64>,
+    /// Liveness beats seen over the real transport (S11).
+    sky_beats: u64,
+    /// The generation those beats named (S11).
+    sky_beat_generation: Option<u64>,
     /// The origin epoch carried by the newest level — pinned to `Some(1)` at the end, and every
     /// scene delta must match it on arrival (see `on_control`).
     scene_epoch: Option<u64>,
@@ -84,6 +90,9 @@ impl ProcessClient {
             evictions: 0,
             scene_levels: 0,
             sky_parts: 0,
+            sky_generation: None,
+            sky_beats: 0,
+            sky_beat_generation: None,
             scene_epoch: None,
             first_own_pose: None,
         }
@@ -238,6 +247,18 @@ impl ProcessClient {
                     "the generation is folded from content and is never a default"
                 );
                 self.sky_parts += 1;
+                self.sky_generation = Some(generation);
+            }
+            // ★ THE SKY'S LIVENESS BEAT (S11), over the real transport. Its arrival here proves the
+            // thing the unit tiers cannot: that a real client, over QUIC, is TOLD the sky is still
+            // current rather than being left to read silence and guess.
+            ServerControlMsg::SkyAlive { generation } => {
+                assert!(
+                    generation != 0,
+                    "the generation is folded from content and is never a default"
+                );
+                self.sky_beats += 1;
+                self.sky_beat_generation = Some(generation);
             }
             ServerControlMsg::Event(other) => panic!("unexpected event in P1: {other:?}"),
             other => panic!("unexpected control message in P1: {other:?}"),
@@ -431,6 +452,9 @@ fn p1_parity_real_binaries_over_quic() {
         // wrong reason gets weakened until it protects nothing. Waiting for it makes arrival a
         // PRECONDITION, with the existing deadline as the honest failure.
         let done = walker.sky_parts > 0
+            // ...and so is the BEAT, for the same reason: asserting it after the loop happened to
+            // break is the flake this comment describes, one lane over.
+            && walker.sky_beats > 0
             && walker.poses.len() == 2
             && idle.poses.len() == 2
             && idle_settled
@@ -525,6 +549,19 @@ fn p1_parity_real_binaries_over_quic() {
             "★ THE SKY ARRIVED OVER THE REAL TRANSPORT, in one part at this world's three stars — and \
              it is stated ONCE, so a second part here would mean the generation stopped holding and \
              every client is re-downloading the galaxy on a cadence"
+        );
+        // ★ THE BEAT NAMES THE SKY THAT ACTUALLY ARRIVED (S11). This is the end-to-end claim: over
+        // real binaries and a real transport, the number the server keeps restating is the number of
+        // the catalogue this client is holding. If those two ever differed, the client would sit
+        // there believing it held the wrong galaxy while holding the right one.
+        assert!(
+            client.sky_beats > 0,
+            "{name}: the sky beat over the real transport — silence would mean the client cannot \
+             tell 'nothing changed' from 'nobody is working'"
+        );
+        assert_eq!(
+            client.sky_beat_generation, client.sky_generation,
+            "{name}: the beat names the sky that arrived"
         );
         assert_eq!(
             client.scene_levels, 1,
